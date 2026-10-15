@@ -319,9 +319,10 @@ export interface IncomingHttpHeaders {
     'user-agent'?: string;
 }
 
+// Node's readStart: readStop's pause is undone here, so only the server's
+// own pipelining pause (`_paused`) holds the socket back.
 function readStart(socket: net.Socket): void {
-    if (socket.readableFlowing === false || httpOf(socket).paused) return;
-    if (socket.readableFlowing === null || !socket.destroyed) socket.resume();
+    if (!httpOf(socket).paused && socket.readable) socket.resume();
 }
 
 function readStop(socket: net.Socket): void {

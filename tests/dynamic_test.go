@@ -254,9 +254,10 @@ console.log(x)
 func TestE2EUnionWithoutInitializerReadsUndefined(t *testing.T) {
 	// ADR-00475: an uninitialized union-typed binding is a boxed
 	// `undefined` (JS: `let x; console.log(x)` prints undefined), replacing
-	// the old requires-an-initializer rejection.
+	// the old requires-an-initializer rejection. Its type includes undefined:
+	// TypeScript rejects reading a `string | number` before it is assigned.
 	assertOutput(t, `
-let x: string | number
+let x: string | number | undefined
 console.log(x)
 x = 5
 console.log(x)

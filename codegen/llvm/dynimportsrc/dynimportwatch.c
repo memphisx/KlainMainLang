@@ -89,3 +89,13 @@ i64 __kml_dynimport_next_deadline_ns(void) {
     i64 soon = __kml_monotonic_ns() + 10000000;
     return (best != 0 && best < soon) ? best : soon;
 }
+
+/* The loop reaches these through hooks.c (TDD-00251). */
+extern _Bool (*__kml_hook_dynimport_keepalive)(void);
+extern void (*__kml_hook_dynimport_dispatch)(void);
+extern i64 (*__kml_hook_dynimport_next_deadline_ns)(void);
+__attribute__((constructor)) static void kml_dynimport_register(void) {
+    __kml_hook_dynimport_keepalive = __kml_dynimport_keepalive;
+    __kml_hook_dynimport_dispatch = __kml_dynimport_dispatch;
+    __kml_hook_dynimport_next_deadline_ns = __kml_dynimport_next_deadline_ns;
+}

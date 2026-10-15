@@ -22,6 +22,16 @@ import { EventEmitter } from 'events';
 import { structuredCloneAny } from './internal_structured_clone';
 import { NodeError, NodeTypeError } from './internal_errors';
 
+// url.fileURLToPath for a file: URL (url.ts would close an import cycle):
+// on Windows file:///C:/x is C:\x and file://host/s/x is \\host\s\x.
+function fileUrlPath(u: URL): string {
+    const p = decodeURIComponent(u.pathname);
+    if (process.platform !== 'win32') return p;
+    if (u.hostname !== '') return '\\\\' + u.hostname + p.split('/').join('\\');
+    const local = /^\/[A-Za-z]:/.test(p) ? p.slice(1) : p;
+    return local.split('/').join('\\');
+}
+
 function dataCloneError(message: string): Error {
     return new DOMException(message, 'DataCloneError');
 }
@@ -438,7 +448,8 @@ export class Worker extends EventEmitter {
             if ((filename as URL).protocol !== 'file:') {
                 throw new NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
             }
-            path = decodeURIComponent((filename as URL).pathname);
+            // Node's fileURLToPath: on Windows file:///C:/x is C:\x, not /C:/x.
+            path = fileUrlPath(filename as URL);
         } else if (typeof filename === 'string') {
             path = filename as string;
         } else {

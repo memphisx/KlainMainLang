@@ -107,11 +107,9 @@ func DeadStripFlags(exportsRuntime bool) []string {
 	} else {
 		f = append(f, "-fvisibility=hidden")
 	}
-	switch runtime.GOOS {
-	case "darwin":
+	// Windows links through mingw's GNU ld, which takes --gc-sections for PE.
+	if runtime.GOOS == "darwin" {
 		return append(f, "-Wl,-dead_strip")
-	case "windows":
-		return append(f, "-Wl,/OPT:REF")
 	}
 	return append(f, "-Wl,--gc-sections")
 }
@@ -121,6 +119,12 @@ func DeadStripFlags(exportsRuntime bool) []string {
 func UnreachableRefFlags() []string {
 	if runtime.GOOS == "darwin" {
 		return []string{"-Wl,-undefined,dynamic_lookup"}
+	}
+	// lld's MinGW driver has no such switch, and the Windows runtime leaves
+	// no unreachable reference to ignore: a COFF link resolves every object's
+	// references, so each runtime file links what it calls (TDD-00251).
+	if runtime.GOOS == "windows" && windowsUsesLLD() {
+		return nil
 	}
 	return []string{"-Wl,--unresolved-symbols=ignore-in-object-files"}
 }

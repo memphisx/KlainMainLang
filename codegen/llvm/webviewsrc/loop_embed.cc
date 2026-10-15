@@ -1,6 +1,6 @@
-// The runtime's loop inside the GUI's main loop (TDD-00244 Stage 7): the
-// webview's main loop owns the thread, so it watches libuv's backend
-// descriptor and a timer for the loop's next deadline, and runs one
+// The runtime's loop inside the GUI's main loop (TDD-00244 Stage 7, TDD-00252
+// on Windows): the webview's main loop owns the thread, so it watches
+// libuv's backend and a timer for the loop's next deadline, and runs one
 // non-blocking pass (loop.c's __kml_loop_run_once) on either. A bound
 // callback's return kicks a pass, so the work it started runs promptly.
 extern "C" {
@@ -51,6 +51,66 @@ extern "C" void __kml_wv_loop_embed(void) {
 
 extern "C" void __kml_wv_loop_kick(void) {
   if (kml_loop_timer) CFRunLoopTimerSetNextFireDate(kml_loop_timer, CFAbsoluteTimeGetCurrent());
+}
+
+#elif defined(_WIN32)
+#include <windows.h>
+extern "C" void *__kml_loop_backend_port(void);
+
+// libuv's backend on Windows is its completion port, which has no
+// descriptor a message loop could watch. A thread waits on the port for the
+// next completion or the loop's next deadline, puts back what it took, and
+// posts the GUI thread a message that runs one pass; the end of that pass
+// lets the thread wait again, with the deadline the pass left. (Electron
+// embeds Node's loop the same way.) A kick is an empty completion, which
+// ends the thread's wait and which libuv ignores.
+static HWND kml_loop_hwnd;
+static HANDLE kml_loop_port;
+static HANDLE kml_loop_resume;           // auto-reset: a pass ran, wait again
+static volatile long long kml_loop_wait; // its deadline, ms (-1: none)
+static const UINT KML_WM_PASS = WM_APP + 0x4b4d;
+
+static LRESULT CALLBACK kml_loop_wndproc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  if (m != KML_WM_PASS) return DefWindowProcW(h, m, w, l);
+  __kml_loop_run_once();
+  kml_loop_wait = __kml_loop_next_ms();
+  SetEvent(kml_loop_resume);
+  return 0;
+}
+
+static DWORD WINAPI kml_loop_watch(LPVOID) {
+  for (;;) {
+    WaitForSingleObject(kml_loop_resume, INFINITE);
+    long long ms = kml_loop_wait;
+    DWORD bytes = 0;
+    ULONG_PTR key = 0;
+    OVERLAPPED *ov = nullptr;
+    BOOL got = GetQueuedCompletionStatus(kml_loop_port, &bytes, &key, &ov,
+                                         ms < 0 ? INFINITE : (DWORD)ms);
+    if (got || ov) PostQueuedCompletionStatus(kml_loop_port, bytes, key, ov);
+    PostMessageW(kml_loop_hwnd, KML_WM_PASS, 0, 0);
+  }
+}
+
+extern "C" void __kml_wv_loop_embed(void) {
+  if (kml_loop_hwnd) return;
+  WNDCLASSW wc = {};
+  wc.lpfnWndProc = kml_loop_wndproc;
+  wc.hInstance = GetModuleHandleW(nullptr);
+  wc.lpszClassName = L"KmlLoopEmbed";
+  RegisterClassW(&wc);
+  kml_loop_hwnd = CreateWindowExW(0, wc.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
+                                  wc.hInstance, nullptr);
+  kml_loop_port = (HANDLE)__kml_loop_backend_port();
+  kml_loop_resume = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+  // The first pass runs as soon as the GUI loop does.
+  PostMessageW(kml_loop_hwnd, KML_WM_PASS, 0, 0);
+  HANDLE t = CreateThread(nullptr, 64 * 1024, kml_loop_watch, nullptr, 0, nullptr);
+  if (t) CloseHandle(t);
+}
+
+extern "C" void __kml_wv_loop_kick(void) {
+  if (kml_loop_port) PostQueuedCompletionStatus(kml_loop_port, 0, 0, nullptr);
 }
 
 #elif defined(__linux__)

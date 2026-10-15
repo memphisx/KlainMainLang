@@ -25,9 +25,9 @@ func DynImportWatchSource() string { return dynImportWatchSource }
 // UsesDynImportWatch reports whether the program links the watcher.
 func (e *Emitter) UsesDynImportWatch() bool { return e.usedDynImportWatch }
 
-// ensureDynImportWatch declares the watcher and the three event-loop hooks
-// (dynimportsrc/dynimportwatch.c). A program without import() gets no-op
-// stubs for the hooks (emitLoopTaskStubs).
+// ensureDynImportWatch declares the watcher (dynimportsrc/dynimportwatch.c),
+// which registers the event loop's three hooks in hooks.c; a program without
+// import() keeps hooks.c's no-op defaults.
 //
 //   - @__kml_dynimport_watch settles the import() promise at once when the
 //     island's state export says its module promise is already settled (no
@@ -37,7 +37,7 @@ func (e *Emitter) UsesDynImportWatch() bool { return e.usedDynImportWatch }
 //   - @__kml_dynimport_keepalive holds the loop while a pending island still
 //     has something that can wake it (its last poll did not report idle).
 //   - @__kml_dynimport_next_deadline_ns folds the islands' earliest timer into
-//     the loop's select() wait; while a pending, non-idle island reports no
+//     the loop's wait; while a pending, non-idle island reports no
 //     timer, the wait is capped at 10 ms — its sockets are invisible to this
 //     loop's fd sets, the V1 blind spot the TDD records.
 func (e *Emitter) ensureDynImportWatch() {
@@ -48,10 +48,7 @@ func (e *Emitter) ensureDynImportWatch() {
 	e.ensurePromiseRuntime()
 	e.ensurePromiseSettle()
 	e.ensureTimerRuntime() // @__kml_monotonic_ns
-	e.emitGlobal(`declare void @__kml_dynimport_watch(ptr, ptr, ptr, ptr, ptr, ptr, ptr)
-declare void @__kml_dynimport_dispatch()
-declare zeroext i1 @__kml_dynimport_keepalive()
-declare i64 @__kml_dynimport_next_deadline_ns()`)
+	e.emitGlobal(`declare void @__kml_dynimport_watch(ptr, ptr, ptr, ptr, ptr, ptr, ptr)`)
 }
 
 // emitImportSettleFn emits the per-call-site function that fulfils an import()

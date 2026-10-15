@@ -190,7 +190,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8977, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
-}, { workers: 3 })
+}, { host: '127.0.0.1', workers: 3 })
 `
 	np := freePort(t)
 	binFile := buildBinaryImports(t, subPort(src, 8977, np))
@@ -261,7 +261,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(201, { "Content-Type": "text/plain" })
   res.write("part1;")
   res.end("part2")
-}).listen(8955)
+}).listen(8955, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8955)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -296,7 +296,7 @@ http.createServer(
   (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200, { "Content-Type": "text/plain" })
     res.end("ok")
-  }).listen(8971)
+  }).listen(8971, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8971)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -323,7 +323,7 @@ func TestE2EHTTPCreateServerOptionRejections(t *testing.T) {
 	for _, tc := range cases {
 		src := fmt.Sprintf(`
 import http from 'http'
-http.createServer({ %s }, (req: http.IncomingMessage, res: http.ServerResponse) => { res.end("x") }).listen(0)
+http.createServer({ %s }, (req: http.IncomingMessage, res: http.ServerResponse) => { res.end("x") }).listen(0, '127.0.0.1')
 `, tc.opt)
 		_, err := resolveAndCompile(t, src)
 		if err == nil {
@@ -347,7 +347,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.setHeader("Content-Type", "text/plain")
   const code = res.statusCode
   res.end("code=" + code)
-}).listen(8957)
+}).listen(8957, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8957)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -376,7 +376,7 @@ let phase = "before"
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.end(phase)
-}).listen(8959)
+}).listen(8959, '127.0.0.1')
 phase = "after"
 `
 	port := startHTTPServer(t, src, 8959)
@@ -402,7 +402,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   const ok = res.write("a;")
   res.uncork()
   res.end(ok ? "wrote" : "full")
-}).listen(8961)
+}).listen(8961, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8961)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -428,7 +428,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.write("one;")
   res.write("two;")
   res.end("three")
-}).listen(8993)
+}).listen(8993, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8993)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -465,7 +465,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   const b = new Uint8Array(2)
   b[0] = 1; b[1] = 255
   res.end(b)
-}).listen(8994)
+}).listen(8994, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8994)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -491,7 +491,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   const b = new Uint8Array(4)
   b[0] = 7; b[1] = 0; b[2] = 9; b[3] = 250
   res.end(b)
-}).listen(8998)
+}).listen(8998, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8998)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -534,7 +534,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200)
     res.end("quick")
   }
-}).listen(8999)
+}).listen(8999, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8999)
 
@@ -592,7 +592,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
     i = i + 1
   }
   res.end()
-}).listen(9001)
+}).listen(9001, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 9001)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -636,7 +636,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
     res.once('drain', pump)   // resume only when the buffer drains
   }
   pump()
-}).listen(8129)
+}).listen(8129, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8129)
 
@@ -722,7 +722,7 @@ http.createServer({ highWaterMark: 256 }, (req: http.IncomingMessage, res: http.
     res.once('drain', pump)
   }
   pump()
-}).listen(8130)
+}).listen(8130, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8130)
 
@@ -789,7 +789,7 @@ http.createServer(
   (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.writeHead(200)
     res.end("ok")
-  }).listen(8131)
+  }).listen(8131, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8131)
 
@@ -893,7 +893,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
     i = i + 1
   }
   res.end()
-}).listen(8128)
+}).listen(8128, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8128)
 
@@ -935,7 +935,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.write("chunk-")
   res.end("end")
-}).listen(8995)
+}).listen(8995, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8995)
 	client := &http.Client{} // default transport reuses keep-alive connections
@@ -960,7 +960,7 @@ import http from 'http'
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" })
   req.pipe(res)
-}).listen(8996)
+}).listen(8996, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8996)
 	payload := "the quick brown fox jumps over the lazy dog"
@@ -988,7 +988,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "application/octet-stream" })
   res.write("PREFIX:")
   req.pipe(res)
-}).listen(8994)
+}).listen(8994, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8994)
 	payload := "the quick brown fox"
@@ -1014,7 +1014,7 @@ const server = http.createServer((req: http.IncomingMessage, res: http.ServerRes
   res.writeHead(200)
   res.end("pong:" + req.url)
 })
-server.listen(8973)
+server.listen(8973, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8973)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/x", port))
@@ -1039,7 +1039,7 @@ server.on('request', (req, res) => {
   res.writeHead(200)
   res.end("on:" + req.url)
 })
-server.listen(8972)
+server.listen(8972, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8972)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/y", port))
@@ -1063,7 +1063,7 @@ import type { AddressInfo } from 'net'
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("unused")
 })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const port: number = (server.address() as AddressInfo).port
   if (port > 0) { console.log("got ephemeral port") }
   setTimeout(() => { server.close() }, 20)
@@ -1137,7 +1137,7 @@ const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse
 const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end("B:" + req.url)
 })
-a.listen(19301, () => { b.listen(19302, () => { console.log("ready") }) })
+a.listen(19301, '127.0.0.1', () => { b.listen(19302, '127.0.0.1', () => { console.log("ready") }) })
 `
 	src = strings.ReplaceAll(src, "19301", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19302", fmt.Sprintf("%d", pb))
@@ -1184,8 +1184,8 @@ func TestE2EHTTPMultipleServersCloseExits(t *testing.T) {
 import http from 'http'
 const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => { res.end("a") })
 const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => { res.end("b") })
-a.listen(0, () => {
-  b.listen(0, () => {
+a.listen(0, '127.0.0.1', () => {
+  b.listen(0, '127.0.0.1', () => {
     console.log("up")
     a.close()
     b.close()
@@ -1222,10 +1222,10 @@ const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse
   res.writeHead(200); res.end("B:" + req.url)
 })
 const a = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
-  if (req.url === "/move") { b.close(); b.listen(19402, () => {}) }
+  if (req.url === "/move") { b.close(); b.listen(19402, '127.0.0.1', () => {}) }
   res.writeHead(200); res.end("A:" + req.url)
 })
-a.listen(19400, () => { b.listen(19401, () => { console.log("ready") }) })
+a.listen(19400, '127.0.0.1', () => { b.listen(19401, '127.0.0.1', () => { console.log("ready") }) })
 `
 	src = strings.ReplaceAll(src, "19400", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19401", fmt.Sprintf("%d", pb1))
@@ -1281,7 +1281,7 @@ a.on('upgrade', (req, socket, head) => {
 const b = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200); res.end('B:' + req.url)
 })
-a.listen(19501, () => { b.listen(19502, () => { console.log('ready') }) })
+a.listen(19501, '127.0.0.1', () => { b.listen(19502, '127.0.0.1', () => { console.log('ready') }) })
 `
 	src = strings.ReplaceAll(src, "19501", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19502", fmt.Sprintf("%d", pb))
@@ -1349,7 +1349,7 @@ b.on('upgrade', (req, socket, head) => {
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n')
   socket.on('data', (chunk) => { socket.write('bECHO:' + chunk.toString()) })
 })
-a.listen(19601, () => { b.listen(19602, () => { console.log('ready') }) })
+a.listen(19601, '127.0.0.1', () => { b.listen(19602, '127.0.0.1', () => { console.log('ready') }) })
 `
 	src = strings.ReplaceAll(src, "19601", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19602", fmt.Sprintf("%d", pb))
@@ -1415,7 +1415,7 @@ http.listen(8199, (req: HttpRequest) => {
     }
   })
   return { status: 200, body: body }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8199)
 
@@ -1464,7 +1464,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string | ReadableStream<string> }
 http.listen(8204, (req: HttpRequest): Res => {
   return { status: 200, body: 'path=' + req.path }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8204)
 
@@ -1511,7 +1511,7 @@ import http from 'http'
 let count = 0
 const server = http.createServer((req, res) => { res.end('count=' + count) })
 server.on('connection', (socket) => { count = count + 1 })
-server.listen(8306, () => { console.log('listening') })
+server.listen(8306, '127.0.0.1', () => { console.log('listening') })
 `
 	port := startHTTPServer(t, src, 8306)
 
@@ -1568,7 +1568,7 @@ func TestE2EHTTPServerCloseEvent(t *testing.T) {
 import http from 'http'
 const server = http.createServer((req, res) => { res.end('ok') })
 server.on('close', () => { console.log('close event') })
-server.listen(8302, () => {
+server.listen(8302, '127.0.0.1', () => {
   console.log('listening')
   server.close(() => { console.log('close cb') })
 })
@@ -1586,7 +1586,7 @@ const server = http.createServer((req, res) => {
   res.end('bye')
 })
 server.on('close', () => { console.log('close event') })
-server.listen(8303, () => { console.log('listening') })
+server.listen(8303, '127.0.0.1', () => { console.log('listening') })
 `
 	port := startHTTPServer(t, src, 8303)
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
@@ -1628,7 +1628,7 @@ server.on('clientError', (err: NodeJS.ErrnoException, socket) => {
   count = count + 1
   lastCode = err.code ?? "none"
 })
-server.listen(8310)
+server.listen(8310, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8310)
 	// Truncate a request: partial request, no terminator, then close.
@@ -1666,7 +1666,7 @@ func TestE2EHTTPClientErrorDefault431(t *testing.T) {
 	// connection was closed silently).
 	src := `
 import http from 'http'
-http.createServer((req, res) => { res.end("ok") }).listen(8311)
+http.createServer((req, res) => { res.end("ok") }).listen(8311, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8311)
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
@@ -1707,7 +1707,7 @@ server.on('clientError', (err: Error, socket) => {
   socket.write("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 7\r\n\r\ncustom!")
   socket.end()
 })
-server.listen(8312)
+server.listen(8312, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8312)
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
@@ -1744,13 +1744,13 @@ func TestE2EHTTPServerErrorEventEADDRINUSE(t *testing.T) {
 	src := `
 import http from 'http'
 const s1 = http.createServer((req, res) => { res.end("a") })
-s1.listen(8317)
+s1.listen(8317, '127.0.0.1')
 const s2 = http.createServer((req, res) => { res.end("b") })
 s2.on('error', (err: NodeJS.ErrnoException) => {
   console.log("error code=" + err.code)
   process.exit(0)
 })
-s2.listen(8317)
+s2.listen(8317, '127.0.0.1')
 console.log("after listen")
 `
 	out := compileAndRunImports(t, src)
@@ -1766,9 +1766,9 @@ func TestE2EHTTPServerErrorEventNoListenerThrows(t *testing.T) {
 	src := `
 import http from 'http'
 const s1 = http.createServer((req, res) => { res.end("a") })
-s1.listen(8318)
+s1.listen(8318, '127.0.0.1')
 const s2 = http.createServer((req, res) => { res.end("b") })
-s2.listen(8318)
+s2.listen(8318, '127.0.0.1')
 console.log("after listen")
 `
 	out, code := compileAndRunExpectExitImports(t, src)
@@ -1853,7 +1853,7 @@ func TestE2EHTTPExpressionBodiedHandler(t *testing.T) {
 import http from 'http'
 import type { AddressInfo } from 'net'
 const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => res.end("hi"))
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   console.log("bound:" + ((server.address() as AddressInfo).port > 0))
   server.close()
 })
@@ -1870,7 +1870,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8941, (req: HttpRequest): Res => {
   return { status: 200, body: "hello from KML" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8941)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -1893,7 +1893,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8942, (req: HttpRequest): Res => {
   return { status: 200, body: req.method + " " + req.path }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8942)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/some/path", port))
@@ -1915,7 +1915,7 @@ let count = 0
 http.listen(8943, (req: HttpRequest): Res => {
   count = count + 1
   return { status: 200, body: "req " + count }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8943)
 	for i := 1; i <= 3; i++ {
@@ -1941,7 +1941,7 @@ http.listen(8944, (req: HttpRequest): Res => {
     return { status: 404, body: "not found" }
   }
   return { status: 200, body: "ok" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8944)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/missing", port))
@@ -1968,7 +1968,7 @@ setInterval(() => {
 }, 50)
 http.listen(8945, (req: HttpRequest): Res => {
   return { status: 200, body: "n=" + n }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8945)
 	time.Sleep(200 * time.Millisecond)
@@ -1990,7 +1990,7 @@ interface Res { status: number; body: string }
 try {
   http.listen(8946, (req: HttpRequest): Res => {
     return { status: 200, body: "ok" }
-  })
+  }, { host: '127.0.0.1' })
 } catch (e) {
   console.log("caught: " + (e as Error).message)
 }
@@ -2011,7 +2011,7 @@ func TestE2EKlainHTTPNamespaceResolves(t *testing.T) {
 	_, err := parseAndCompileImports(t, `
 import http from 'klain:http'
 interface Res { status: number; body: string }
-http.listen(8951, (req: HttpRequest): Res => { return { status: 200, body: "ok" } })
+http.listen(8951, (req: HttpRequest): Res => { return { status: 200, body: "ok" } }, { host: '127.0.0.1' })
 `)
 	if err != nil {
 		t.Fatalf("klain:http import should compile the bespoke server: %v", err)
@@ -2028,7 +2028,7 @@ http.listen(8947)`)
 
 func TestE2EHTTPListenNonObjectReturnTypeRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `import http from 'klain:http'
-http.listen(8948, (req: HttpRequest): number => 200)`)
+http.listen(8948, (req: HttpRequest): number => 200, { host: '127.0.0.1' })`)
 	if err == nil {
 		t.Fatal("expected a compile error for a handler not returning an object type, got none")
 	}
@@ -2038,7 +2038,7 @@ func TestE2EHTTPListenMissingBodyFieldRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `
 import http from 'klain:http'
 interface Res { status: number }
-http.listen(8949, (req: HttpRequest): Res => { return { status: 200 } })
+http.listen(8949, (req: HttpRequest): Res => { return { status: 200 } }, { host: '127.0.0.1' })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a handler return type missing a body field, got none")
@@ -2059,7 +2059,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8950, (req: HttpRequest): Res => {
   return { status: 200, body: req.path }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8950)
 
@@ -2116,7 +2116,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8951, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8951)
 
@@ -2162,7 +2162,7 @@ interface Res { status: number; body: string }
 http.listen(8951, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
   return { status: 200, body: await r.text() }
-})
+}, { host: '127.0.0.1' })
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8951)
 
@@ -2194,7 +2194,7 @@ interface Res { status: number; body: string }
 http.listen(8952, async (req: HttpRequest): Promise<Res> => {
   const r: Response = await fetch("%s" + req.path)
   return { status: 200, body: await r.text() }
-})
+}, { host: '127.0.0.1' })
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8952)
 
@@ -2262,7 +2262,7 @@ const server = http.createServer(async (req: http.IncomingMessage, res: http.Ser
   res.writeHead(200)
   res.end("front:" + v)
 })
-server.listen(8196)
+server.listen(8196, '127.0.0.1')
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8196)
 
@@ -2325,7 +2325,7 @@ const server = http.createServer(async (req: http.IncomingMessage, res: http.Ser
   res.writeHead(200)
   res.end("front:" + v)
 })
-server.listen(8198)
+server.listen(8198, '127.0.0.1')
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8198)
 
@@ -2387,7 +2387,7 @@ http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) =>
   await delay(20);
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("kalimera from the server");
-}).listen(18547, () => {
+}).listen(18547, '127.0.0.1', () => {
   http.get("http://127.0.0.1:18547/", (res) => {
     let body = "";
     res.on('data', (chunk: string) => { body = body + chunk; });
@@ -2436,7 +2436,7 @@ const server = http2.createServer(async (req, res) => {
   res.writeHead(200)
   res.end("front:" + v)
 })
-server.listen(8197)
+server.listen(8197, '127.0.0.1')
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8197)
 
@@ -2461,7 +2461,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8953, (req: HttpRequest): Res => {
   return { status: 200, body: req.headers.get("x-test-header") + "|" + (req.headers.has("nonexistent") ? "1" : "0") }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8953)
 	httpReq, err := http.NewRequest("GET", fmt.Sprintf("http://127.0.0.1:%d/", port), nil)
@@ -2488,7 +2488,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8954, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + req.query.get("a") + "|" + req.query.get("b") + "|" + (req.query.has("flag") ? "1" : "0") + "|" + req.query.get("flag") }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8954)
 	// "b"'s value is percent-encoded ("two words" / "&") and "flag" is a
@@ -2511,7 +2511,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8955, (req: HttpRequest): Res => {
   return { status: 200, body: req.path + "|" + (req.query.has("anything") ? "1" : "0") }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8955)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/plain", port))
@@ -2531,7 +2531,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8956, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8956)
 	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "application/json", strings.NewReader(`{"k":"v"}`))
@@ -2551,7 +2551,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8957, (req: HttpRequest): Res => {
   return { status: 200, body: "[" + req.body + "]" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8957)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -2577,7 +2577,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8958, (req: HttpRequest): Res => {
   return { status: 200, body: "len=" + req.body.length }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8958)
 	const size = 200_000
@@ -2610,7 +2610,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8959, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8959)
 	const size = 100_000
@@ -2636,7 +2636,7 @@ func TestE2EHTTPListenWrongHeadersFieldTypeRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `
 import http from 'klain:http'
 interface Res { status: number; body: string; headers: string }
-http.listen(8962, (req: HttpRequest): Res => { return { status: 200, body: "x", headers: "not a map" } })
+http.listen(8962, (req: HttpRequest): Res => { return { status: 200, body: "x", headers: "not a map" } }, { host: '127.0.0.1' })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a 'headers' field that isn't Map<string, string>, got none")
@@ -2652,7 +2652,7 @@ http.listen(8960, (req: HttpRequest): Res => {
   h.set("X-Custom-Header", "custom-value")
   h.set("Content-Type", "application/json")
   return { status: 200, body: "ok", headers: h }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8960)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -2681,7 +2681,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8961, (req: HttpRequest): Res => {
   return { status: 200, body: "plain" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8961)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -2716,7 +2716,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8971, (req: HttpRequest): Res => {
   return { status: 200, body: req.body }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8971)
 	payload := []byte{0x41, 0x42, 0x00, 0x43, 0x44, 0x00, 0x00, 0x45}
@@ -2741,7 +2741,7 @@ interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
 http.listen(8963, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = req.bodyBytes()
   return { status: 200, body: "", bodyBytes: buf }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8963)
 	payload := []byte{0x41, 0x42, 0x00, 0x43, 0x44, 0x00, 0x00, 0x45}
@@ -2770,7 +2770,7 @@ interface Res { status: number; body: string; bodyBytes: ArrayBuffer }
 http.listen(8964, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = new ArrayBuffer(3)
   return { status: 200, body: "this string is much longer than 3 bytes and must be ignored", bodyBytes: buf }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8964)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -2794,7 +2794,7 @@ interface Res { status: number; body: string }
 http.listen(8965, (req: HttpRequest): Res => {
   const buf: ArrayBuffer = req.bodyBytes()
   return { status: 200, body: "len=" + buf.byteLength }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8965)
 	payload := []byte{0x41, 0x00, 0x42}
@@ -2814,7 +2814,7 @@ func TestE2EHTTPListenWrongBodyBytesFieldTypeRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `
 import http from 'klain:http'
 interface Res { status: number; body: string; bodyBytes: string }
-http.listen(8966, (req: HttpRequest): Res => { return { status: 200, body: "x", bodyBytes: "not an ArrayBuffer" } })
+http.listen(8966, (req: HttpRequest): Res => { return { status: 200, body: "x", bodyBytes: "not an ArrayBuffer" } }, { host: '127.0.0.1' })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a 'bodyBytes' field that isn't ArrayBuffer, got none")
@@ -2835,7 +2835,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8963, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
-}, { workers: 3 })
+}, { host: '127.0.0.1', workers: 3 })
 `
 	port := startHTTPClusterServer(t, src, 8963)
 
@@ -2886,10 +2886,10 @@ interface Res { status: number; body: string }
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.end("extra")
-}).listen(%d)
+}).listen(%d, '127.0.0.1')
 khttp.listen(%d, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
-}, { workers: 3 })
+}, { host: '127.0.0.1', workers: 3 })
 `, p1, p2)
 	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
@@ -2957,7 +2957,7 @@ import cluster from 'cluster'
 interface Res { status: number; body: string }
 http.listen(8964, (req: HttpRequest): Res => {
   return { status: 200, body: (cluster.isPrimary ? "primary" : "worker") + " " + (cluster.worker?.id ?? 0).toString() }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8964)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -2989,7 +2989,7 @@ interface Res { status: number; body: string }
 console.log("BANNER")
 http.listen(8965, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
-}, { workers: 4 })
+}, { host: '127.0.0.1', workers: 4 })
 `
 	binFile := buildBinaryImports(t, src)
 	cmd := exec.Command(binFile)
@@ -3044,7 +3044,7 @@ http.listen(8974, (req: HttpRequest): Res => {
     return { status: 200, body: "shutting down" }
   }
   return { status: 200, body: process.pid.toString() }
-}, { workers: 3 })
+}, { host: '127.0.0.1', workers: 3 })
 `
 	port := startHTTPClusterServer(t, src, 8974)
 
@@ -3098,7 +3098,7 @@ http.listen(8966, (req: HttpRequest): Res => {
     total = total + s.length;
   }
   return { status: 200, body: process.pid.toString() + ":" + total.toString() };
-}, { workers: 3 })
+}, { host: '127.0.0.1', workers: 3 })
 `
 	port := startHTTPClusterServerGC(t, src, 8966)
 
@@ -3153,7 +3153,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8976, (req: HttpRequest): Res => {
   return { status: 200, body: Object.keys(req).join(",") }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8976)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/hi", port))
@@ -3194,7 +3194,7 @@ http.listen(8967, (req: HttpRequest): Res => {
     return { status: 200, body: "shutting down" }
   }
   return { status: 200, body: "ok" }
-})
+}, { host: '127.0.0.1' })
 console.log("after listen returned")
 `
 	cmd, out, port := startBackgroundServer(t, src, 8967)
@@ -3231,7 +3231,7 @@ http.listen(8968, (req: HttpRequest): Res => {
   http.close()
   http.close()
   return { status: 200, body: "ok" }
-})
+}, { host: '127.0.0.1' })
 console.log("after listen returned")
 `
 	cmd, out, port := startBackgroundServer(t, src, 8968)
@@ -3267,7 +3267,7 @@ http.listen(8975, (req: HttpRequest): Res => {
     return { status: 200, body: "closed all" }
   }
   return { status: 200, body: "ok" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8975)
 
@@ -3320,8 +3320,8 @@ func TestE2EHTTPListenSecondCallSiteRejected(t *testing.T) {
 	_, err := parseAndCompileImports(t, `
 import http from 'klain:http'
 interface Res { status: number; body: string }
-http.listen(8969, (req: HttpRequest): Res => { http.close(); return { status: 200, body: "a" } })
-http.listen(8970, (req: HttpRequest): Res => { return { status: 200, body: "b" } })
+http.listen(8969, (req: HttpRequest): Res => { http.close(); return { status: 200, body: "a" } }, { host: '127.0.0.1' })
+http.listen(8970, (req: HttpRequest): Res => { return { status: 200, body: "b" } }, { host: '127.0.0.1' })
 `)
 	if err == nil {
 		t.Fatal("expected a compile error for a second http.listen call site, got none")
@@ -3387,7 +3387,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8961, (req: HttpRequest): Res => {
   return { status: 200, body: "h2:" + req.method + ":" + req.path + ":" + req.body }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 8961)
 
@@ -3436,7 +3436,7 @@ const server = http.createServer(mustCall((req, res) => {
   res.end("resp:" + req.url)
   server.close()
 }))
-server.listen(0, mustCall(() => {
+server.listen(0, '127.0.0.1', mustCall(() => {
   http.get({ port: (server.address() as AddressInfo).port, path: "/req7" }, mustCall((res) => {
     let data = ""
     res.on('data', (chunk: string) => { data = data + chunk })
@@ -3464,7 +3464,7 @@ const server = http2.createServer((req, res) => {
   res.writeHead(200)
   res.end("h2mod:" + req.url)
 })
-server.listen(8983)
+server.listen(8983, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8983)
 	out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
@@ -3490,7 +3490,7 @@ func TestE2EHTTP2MultiInstanceH2C(t *testing.T) {
 import http2 from 'http2'
 const a = http2.createServer((req, res) => { res.writeHead(200); res.end("A:" + req.url) })
 const b = http2.createServer((req, res) => { res.writeHead(200); res.end("B:" + req.url) })
-a.listen(19901, () => { b.listen(19902, () => { console.log("ready") }) })
+a.listen(19901, '127.0.0.1', () => { b.listen(19902, '127.0.0.1', () => { console.log("ready") }) })
 `
 	src = strings.ReplaceAll(src, "19901", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19902", fmt.Sprintf("%d", pb))
@@ -3542,7 +3542,7 @@ const plain = http.createServer((req: http.IncomingMessage, res: http.ServerResp
 const secure = http2.createSecureServer({ cert: cert, key: key }, (req, res) => {
   res.writeHead(200); res.end("h2:" + req.url)
 })
-plain.listen(19911, () => { secure.listen(19912, () => { console.log("ready") }) })
+plain.listen(19911, '127.0.0.1', () => { secure.listen(19912, '127.0.0.1', () => { console.log("ready") }) })
 `, certLit, keyLit)
 	src = strings.ReplaceAll(src, "19911", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19912", fmt.Sprintf("%d", pb))
@@ -3596,7 +3596,7 @@ const server = http2.createSecureServer({ cert: cert, key: key }, (req, res) => 
   res.writeHead(200)
   res.end("h2tls:" + req.method + ":" + req.url)
 })
-server.listen(8985)
+server.listen(8985, '127.0.0.1')
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8985)
 
@@ -3649,7 +3649,7 @@ const server = https.createServer({ cert: cert, key: key }, (req, res) => {
     res.end("https:" + req.method + ":" + req.url + ":" + body)
   })
 })
-server.listen(8987)
+server.listen(8987, '127.0.0.1')
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8987)
 
@@ -3702,7 +3702,7 @@ https.createServer({ cert: cert, key: key }, (req, res) => {
     res.writeHead(200)
     res.end("quick")
   }
-}).listen(8993)
+}).listen(8993, '127.0.0.1')
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8993)
 
@@ -3796,7 +3796,7 @@ https.createServer({ cert: cert, key: key }, (req, res) => {
   res.writeHead(200)
   res.write("chunk-")
   res.end("end")
-}).listen(8993)
+}).listen(8993, '127.0.0.1')
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8993)
 	conn, err := tls.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port), &tls.Config{InsecureSkipVerify: true})
@@ -3846,7 +3846,7 @@ const plain = http.createServer((req: http.IncomingMessage, res: http.ServerResp
 const secure = https.createServer({ cert: cert, key: key }, (req, res) => {
   res.writeHead(200); res.end("secure:" + req.method + ":" + req.url)
 })
-plain.listen(19801, () => { secure.listen(19802, () => { console.log("ready") }) })
+plain.listen(19801, '127.0.0.1', () => { secure.listen(19802, '127.0.0.1', () => { console.log("ready") }) })
 `, certLit, keyLit)
 	src = strings.ReplaceAll(src, "19801", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19802", fmt.Sprintf("%d", pb))
@@ -3903,7 +3903,7 @@ const a = https.createServer({ cert: cert, key: key }, (req, res) => {
 const b = https.createServer({ cert: cert, key: key }, (req, res) => {
   res.writeHead(200); res.end("B:" + req.url)
 })
-a.listen(19811, () => { b.listen(19812, () => { console.log("ready") }) })
+a.listen(19811, '127.0.0.1', () => { b.listen(19812, '127.0.0.1', () => { console.log("ready") }) })
 `, certLit, keyLit)
 	src = strings.ReplaceAll(src, "19811", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19812", fmt.Sprintf("%d", pb))
@@ -3952,7 +3952,7 @@ const server = http2.createSecureServer({ cert: cert, key: key, allowHTTP1: true
   res.writeHead(200)
   res.end("both:" + req.method + ":" + req.url)
 })
-server.listen(8988)
+server.listen(8988, '127.0.0.1')
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8988)
 
@@ -3991,7 +3991,7 @@ server.on('stream', (stream, headers) => {
   stream.respond({ ':status': 201, 'x-served-by': 'kml' })
   stream.end("p=" + headers[':path'] + " m=" + headers[':method'])
 })
-server.listen(8984)
+server.listen(8984, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8984)
 	out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
@@ -4021,7 +4021,7 @@ server.on('stream', (stream, headers) => {
     stream.end("body:" + seen)
   })
 })
-server.listen(8985)
+server.listen(8985, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8985)
 	out, err := exec.Command(nativeCurl(), "-s", "--http2-prior-knowledge",
@@ -4042,7 +4042,7 @@ func TestE2EHTTPServerNoHandlerListen(t *testing.T) {
 import http from 'http'
 import type { AddressInfo } from 'net'
 const server = http.createServer()
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   console.log("up", (server.address() as AddressInfo).port > 0)
   setTimeout(() => { server.close() }, 10)
 })
@@ -4064,7 +4064,7 @@ server.on('stream', mustCall((stream, headers) => {
   stream.respond({ ':status': 200, 'x-mode': 'h2' })
   stream.end("srv:" + headers[':path'])
 }))
-server.listen(0, mustCall(() => {
+server.listen(0, '127.0.0.1', mustCall(() => {
   const client = http2.connect("http://127.0.0.1:" + (server.address() as any).port)
   const req = client.request({ ':path': '/from-client' })
   let data = ""
@@ -4098,7 +4098,7 @@ server.on('stream', (stream, headers) => {
   stream.respond({ ':status': 200 })
   stream.end("tok=" + headers['x-token'])
 })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const client = http2.connect("http://127.0.0.1:" + (server.address() as any).port)
   const req = client.request({ ':path': '/t', 'x-token': 'abc123' })
   req.on('data', (c: string) => { console.log("body", c) })
@@ -4141,7 +4141,7 @@ import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
   res.end("hi:" + req.url)
-})).listen(0, mustCall(() => {
+})).listen(0, '127.0.0.1', mustCall(() => {
   http.get({ port: (server.address() as AddressInfo).port, path: "/c" }, mustCall((res) => {
     let data = ""
     res.on('data', (chunk: string) => { data = data + chunk })
@@ -4165,7 +4165,7 @@ import http from 'http'
 import type { AddressInfo } from 'net'
 import { mustCall, mustNotCall } from 'test'
 const server = http.createServer(mustNotCall())
-server.listen(0, mustCall(() => {
+server.listen(0, '127.0.0.1', mustCall(() => {
   console.log("bound: " + ((server.address() as AddressInfo).port > 0))
   server.close()
 }))
@@ -4194,7 +4194,7 @@ function nextRequest(i: number) {
     if (i === 1) { nextRequest(2) } else { server.close() }
   }))
 }
-server.listen(0, mustCall(() => { nextRequest(1) }))
+server.listen(0, '127.0.0.1', mustCall(() => { nextRequest(1) }))
 console.log("done")
 `
 	out := compileAndRunImports(t, src)
@@ -4211,7 +4211,7 @@ import http from 'http'
 import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => { res.end("v:" + req.url) }))
-server.listen(0, mustCall(() => {
+server.listen(0, '127.0.0.1', mustCall(() => {
   const options = { agent: false, port: (server.address() as AddressInfo).port, path: "/varopt" }
   http.get(options, mustCall((res) => {
     let d = ""
@@ -4238,7 +4238,7 @@ import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
   res.end('ok')
   server.close()
-})).listen(0, mustCall(() => {
+})).listen(0, '127.0.0.1', mustCall(() => {
   http.request({ port: (server.address() as AddressInfo).port }, mustCall((res) => {
     let data = ''
     res.on('data', (chunk: string) => { data = data + chunk })
@@ -4266,7 +4266,7 @@ const server = http.createServer(mustCall((req, res) => {
     res.end(req.method + ":" + body)
     server.close()
   })
-})).listen(0, mustCall(() => {
+})).listen(0, '127.0.0.1', mustCall(() => {
   const req = http.request({ port: (server.address() as AddressInfo).port, method: "POST" }, mustCall((res) => {
     let data = ''
     res.on('data', (chunk: string) => { data = data + chunk })
@@ -4288,7 +4288,7 @@ import http from 'http'
 import type { AddressInfo } from 'net'
 import { mustCall, mustNotCall } from 'test'
 const server = http.createServer(mustNotCall())
-server.listen(0, mustCall(() => {
+server.listen(0, '127.0.0.1', mustCall(() => {
   const req = http.request({ port: (server.address() as AddressInfo).port })
   req.on('error', mustNotCall())
   req.abort()
@@ -4313,7 +4313,7 @@ import type { AddressInfo } from 'net'
 import { mustCall } from 'test'
 const agent = new http.Agent({ keepAlive: true, maxSockets: 1 })
 const server = http.createServer(mustCall((req, res) => { res.end('a') }))
-server.listen(0, mustCall(() => {
+server.listen(0, '127.0.0.1', mustCall(() => {
   http.get({ port: (server.address() as AddressInfo).port, agent: agent }, mustCall((res) => {
     res.resume()
     agent.destroy()
@@ -4336,7 +4336,7 @@ import http from 'http'
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(404)
   res.end("nope")
-}).listen(8956)
+}).listen(8956, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8956)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -4359,7 +4359,7 @@ import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
   res.end(req.method + "|" + req.headers["x-probe"])
 }))
-server.listen(0, mustCall(() => {
+server.listen(0, '127.0.0.1', mustCall(() => {
   const req = http.request({
     port: (server.address() as AddressInfo).port,
     path: "/m",
@@ -4395,7 +4395,7 @@ server.on('listening', mustCall(() => {
     res.on('end', () => { server.close(); process.exit(0) })
   }))
 }))
-server.listen(0)
+server.listen(0, '127.0.0.1')
 `
 	out := compileAndRunImports(t, src)
 	if !strings.Contains(out, "listening on true") {
@@ -4411,7 +4411,7 @@ func TestE2EHTTPCreateServerRequireHostHeaderFalse(t *testing.T) {
 import http from 'http'
 import type { AddressInfo } from 'net'
 const server = http.createServer({ requireHostHeader: false }, (req, res) => { res.end("ok") })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   http.get({ port: (server.address() as AddressInfo).port }, (res) => {
     console.log("status", res.statusCode)
     res.on('data', (c: string) => {})
@@ -4479,7 +4479,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   let total = 0
   req.on('data', (c: Uint8Array) => { total = total + c.length })
   req.on('end', () => { res.end("ff=" + total) })
-}).listen(8991)
+}).listen(8991, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8991)
 	body := []byte("abcdefghij-1234567890")
@@ -4522,7 +4522,7 @@ import { mustCall } from 'test'
 const server = http.createServer(mustCall((req, res) => {
   res.end(String(req.headers.connection))
   server.close()
-})).listen(0, mustCall(() => {
+})).listen(0, '127.0.0.1', mustCall(() => {
   const port = (server.address() as AddressInfo).port
   http.request({ port, createConnection: mustCall((opts, oncreate) => net.createConnection(port, '127.0.0.1')) }, mustCall((res) => {
     let data = ''
@@ -4562,8 +4562,43 @@ setTimeout(() => {
 }, 20)
 http.listen(port, (req: HttpRequest): Res => {
   return { status: 200, body: 'hello ' + req.path }
-})
+}, { host: '127.0.0.1' })
 console.log('closed')
 `
 	assertOutput(t, src, "1.1 answered: hello /one\nclosed")
+}
+
+// A request body that fills the IncomingMessage's buffer pauses the socket
+// (readStop); reading the request resumes it (readStart). readStart refused
+// a socket whose flow was false — the state readStop leaves — so the rest of
+// the body never came: the server hung. Node's test-http-client-keep-alive-
+// release-before-finish, on a paused request.
+func TestE2EHTTPServerBodyResumesAfterBackpressure(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	assertSameAsNodeImports(t, `
+import http from 'http'
+const server = http.createServer((req, res) => {
+  let n = 0
+  req.pause()
+  setTimeout(() => {
+    req.on('data', (c: Buffer) => { n += c.length })
+    req.on('end', () => { console.log('body', n); res.end('ok') })
+    req.resume()
+  }, 50)
+})
+server.listen(0, () => {
+  const port = (server.address() as any).port
+  const agent = new http.Agent({ maxSockets: 1, keepAlive: true })
+  const post = http.request({ agent, method: 'POST', port }, (res) => {
+    res.resume()
+    res.on('end', () => console.log('post done', res.statusCode))
+  })
+  post.write(Buffer.alloc(256 * 1024, 'X'))
+  setTimeout(() => post.end('something'), 100)
+  http.request({ agent, method: 'GET', port }, (res) => {
+    res.resume()
+    res.on('end', () => { console.log('get done', res.statusCode); agent.destroy(); server.close() })
+  }).end()
+})
+`)
 }

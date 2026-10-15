@@ -499,6 +499,17 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 		e.dynEntryWidened = widened
 		defer func() { e.dynEntryWidened = saved }()
 	}
+	// The body's own analyses, as every other function body gets them
+	// (emit_func.go): untyped bindings assigned several kinds, and an
+	// empty [] or Map typed by its later use — without them a `var a = []`
+	// here stayed number[] whatever was assigned to it.
+	savedWidened, savedEmptyArr, savedEmptyMap := e.widenedBindings, e.emptyArrayElems, e.emptyMapKV
+	e.widenedBindings = e.crossTypeWidenedBindings(bodyStmts)
+	e.emptyArrayElems = e.inferEmptyArrayElemTypes(bodyStmts)
+	e.emptyMapKV = e.inferEmptyMapKVTypes(bodyStmts)
+	defer func() {
+		e.widenedBindings, e.emptyArrayElems, e.emptyMapKV = savedWidened, savedEmptyArr, savedEmptyMap
+	}()
 	e.emitSafepoint()
 	emitBody := func() error {
 		for _, stmt := range bodyStmts {

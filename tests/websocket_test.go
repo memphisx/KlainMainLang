@@ -142,7 +142,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send("echo: " + ev.data)
     }
 })
-server.listen(8975)
+server.listen(8975, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8975)
 
@@ -183,7 +183,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send("echo: " + ev.data)
     }
 })
-primary.listen(19701, () => { wsServer.listen(19702, () => { console.log("ready") }) })
+primary.listen(19701, '127.0.0.1', () => { wsServer.listen(19702, '127.0.0.1', () => { console.log("ready") }) })
 `
 	src = strings.ReplaceAll(src, "19701", fmt.Sprintf("%d", pa))
 	src = strings.ReplaceAll(src, "19702", fmt.Sprintf("%d", pb))
@@ -238,7 +238,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send("echo: " + ev.data)
     }
 })
-server.listen(8976)
+server.listen(8976, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8976)
 
@@ -274,7 +274,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send("ws: " + ev.data)
     }
 })
-server.listen(8977)
+server.listen(8977, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8977)
 
@@ -316,7 +316,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send("echo: " + ev.data)
     }
 })
-server.listen(8978)
+server.listen(8978, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8978)
 
@@ -376,7 +376,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send("got onmessage: " + ev.data)
     }
 })
-server.listen(8979)
+server.listen(8979, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8979)
 
@@ -428,7 +428,7 @@ wss.on('connection', (socket: WSConnection) => {
       }
     }
 })
-server.listen(8980)
+server.listen(8980, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8980)
 
@@ -491,7 +491,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send("echo: " + ev.data)
     }
 })
-server.listen(8981)
+server.listen(8981, '127.0.0.1')
 `
 	port := startHTTPServer(t, serverSrc, 8981)
 
@@ -541,7 +541,7 @@ wss.on('connection', (socket: WSConnection) => {
       socket.send(ev.dataBytes())
     }
 })
-server.listen(8983)
+server.listen(8983, '127.0.0.1')
 `
 	port := startHTTPServer(t, serverSrc, 8983)
 

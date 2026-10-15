@@ -7,7 +7,7 @@ typedef long long i64;
 
 #define F(p, off, T) (*(T *)((char *)(p) + (off)))
 
-extern void *malloc(unsigned long);
+extern void *malloc(__SIZE_TYPE__);
 extern void __kml_microtask_enqueue(void *);
 extern void __kml_promise_settle(void *, i64);
 extern void *__kml_task_alloc_promise(void);

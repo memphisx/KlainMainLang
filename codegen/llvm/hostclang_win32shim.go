@@ -23,11 +23,13 @@ var win32FSSource string
 //go:embed win32src/win32proc.c
 var win32ProcSource string
 
-//go:embed win32src/win32fswatch.c
-var win32FsWatchSource string
-
 //go:embed win32src/kml_posix_compat.h
 var win32CompatHeader string
+
+// kml_uv_win.h: <uv.h> beside the compat header (TDD-00252).
+//
+//go:embed win32src/kml_uv_win.h
+var win32UVHeader string
 
 // win32ShimObject compiles win32shim.c once per distinct source (keyed by a
 // content hash, so a compiler rebuild with a changed shim never links a
@@ -36,7 +38,7 @@ var win32CompatHeader string
 // plain clang and let the link report the missing symbols itself.
 func win32ShimObjects() ([]string, error) {
 	var objs []string
-	for _, s := range []struct{ name, src string }{{"win32shim", win32ShimSource}, {"win32io", win32IOSource}, {"win32fs", win32FSSource}, {"win32proc", win32ProcSource}, {"win32fswatch", win32FsWatchSource}} {
+	for _, s := range []struct{ name, src string }{{"win32shim", win32ShimSource}, {"win32io", win32IOSource}, {"win32fs", win32FSSource}, {"win32proc", win32ProcSource}} {
 		o, err := win32ShimObject(s.name, s.src)
 		if err != nil {
 			return nil, err
@@ -121,7 +123,7 @@ func win32ShimDir() string {
 	// One directory per distinct set of embedded shim sources: two compiler
 	// builds running side by side (a test binary and a rebuilt CLI, say)
 	// must never share a header or object, or one overwrites the other's.
-	sum := sha256.Sum256([]byte(win32ShimSource + win32IOSource + win32FSSource + win32ProcSource + win32CompatHeader))
+	sum := sha256.Sum256([]byte(win32ShimSource + win32IOSource + win32FSSource + win32ProcSource + win32CompatHeader + win32UVHeader))
 	return filepath.Join(base, "klainmain", "win32shim", hex.EncodeToString(sum[:6]))
 }
 
@@ -129,12 +131,14 @@ func win32ShimDir() string {
 // missing or stale (content compare, so a compiler rebuild refreshes it).
 func win32EnsureCompatHeader() {
 	dir := win32ShimDir()
-	p := filepath.Join(dir, "kml_posix_compat.h")
-	if cur, err := os.ReadFile(p); err == nil && string(cur) == win32CompatHeader {
-		return
+	for name, body := range map[string]string{"kml_posix_compat.h": win32CompatHeader, "kml_uv_win.h": win32UVHeader} {
+		p := filepath.Join(dir, name)
+		if cur, err := os.ReadFile(p); err == nil && string(cur) == body {
+			continue
+		}
+		_ = os.MkdirAll(dir, 0o755)
+		_ = os.WriteFile(p, []byte(body), 0o644)
 	}
-	_ = os.MkdirAll(dir, 0o755)
-	_ = os.WriteFile(p, []byte(win32CompatHeader), 0o644)
 }
 
 // win32CompileArgs adds -I<shim dir> when the invocation compiles C/C++

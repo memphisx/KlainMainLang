@@ -27,7 +27,7 @@ server.on('upgrade', (req, socket, head) => {
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n')
   socket.on('data', (chunk) => { socket.write('echo:' + chunk.toString()) })
 })
-server.listen(%d)
+server.listen(%d, '127.0.0.1')
 `
 
 // readUpgradeHandshake consumes the 101 response headers up to the blank line.
@@ -122,7 +122,7 @@ server.on('upgrade', (req, socket, head) => {
   socket.write('HTTP/1.1 101 Switching Protocols\r\nUpgrade: echo\r\nConnection: Upgrade\r\n\r\n')
   socket.on('data', (chunk) => { socket.write('secho:' + chunk.toString()) })
 })
-server.listen(8963)
+server.listen(8963, '127.0.0.1')
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8963)
 
@@ -169,7 +169,7 @@ const wss = new WebSocketServer({ server })
 wss.on('connection', (socket: WSConnection) => {
   socket.onmessage = (ev) => { socket.send('wsecho: ' + ev.data) }
 })
-server.listen(8964)
+server.listen(8964, '127.0.0.1')
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8964)
 
@@ -211,7 +211,7 @@ server.on('upgrade', (req, socket, head) => {
     'Upgrade: websocket\r\nConnection: Upgrade\r\n' +
     'Sec-WebSocket-Accept: ' + accept + '\r\n\r\n')
 })
-server.listen(8965)
+server.listen(8965, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8965)
 	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)

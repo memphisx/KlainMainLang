@@ -47,9 +47,11 @@ func (e *Emitter) ensureBoxedViews() {
 	e.ensureMalloc()
 	e.ensureHostBoxHooks()
 	id := e.hostID(ArrayBufferType())
-	e.emitGlobal(fmt.Sprintf("@__kml_view_ab_header = constant i64 %d", id))
 	sid := e.hostID(SharedArrayBufferType())
-	e.emitGlobal(fmt.Sprintf("@__kml_view_sab_header = constant i64 %d", sid))
+	// hooks.c holds the two type ids; the hooks constructor stores them.
+	e.emitGlobal("@__kml_view_ab_header = external global i64")
+	e.emitGlobal("@__kml_view_sab_header = external global i64")
+	e.addHookInit(fmt.Sprintf("  store i64 %d, ptr @__kml_view_ab_header, align 8\n  store i64 %d, ptr @__kml_view_sab_header, align 8\n", id, sid))
 	e.emitGlobal("declare i64 @__kml_view_buffer_any(ptr, i64)")
 }
 

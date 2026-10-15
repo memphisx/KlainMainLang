@@ -25,23 +25,50 @@ import (
 // (Value{}, false, nil) when no applicable method field exists (caller keeps its
 // existing behavior), or an error from the method call.
 func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, error) {
+	// OrdinaryToPrimitive's order: toString then valueOf for the string
+	// hint, valueOf then toString otherwise. A method missing from the object
+	// is Object.prototype's: its toString always gives "[object Object]" (the
+	// caller's default), so under the string hint valueOf is reached only
+	// past an own toString; its valueOf gives the object itself, so the
+	// ladder goes on. A method whose result is an object is still called, and
+	// the ladder goes on past it; when no method gives a primitive, the
+	// conversion is a TypeError.
 	var order []string
 	if hint == "string" {
-		// valueOf is intentionally omitted: in real JS the inherited
-		// Object.prototype.toString always intercepts the string hint before
-		// valueOf is reached, so `String({valueOf(){return 5}})` is
-		// "[object Object]", not "5". A plain object with no own toString falls
-		// through to the caller's Object.prototype.toString default.
-		order = []string{"@@toPrimitive", "toString"}
+		order = []string{"@@toPrimitive", "toString", "valueOf"}
 	} else { // "number" and "default"
 		order = []string{"@@toPrimitive", "valueOf", "toString"}
+	}
+	// objectResult records the ladder methods present whose result is an
+	// object; noPrimitive reports, after the ladder, whether the object has
+	// no primitive value at all (an own toString giving an object, and an
+	// own valueOf giving one or the inherited one).
+	objectResult := map[string]bool{}
+	has := map[string]bool{}
+	noPrimitive := func() bool {
+		return objectResult["toString"] && (!has["valueOf"] || objectResult["valueOf"])
+	}
+	throwNoPrimitive := func() {
+		e.emitThrowTypeError("Cannot convert object to primitive value")
+		e.emitLabel(e.freshLabel("toprim.dead"))
 	}
 	// A class instance carries the ladder's methods as class methods.
 	if canon := e.canonicalizeClassTy(v.Ty); canon.IsClass {
 		if info, ok := e.classes[canon.ClassName]; ok {
 			for _, name := range order {
-				sig, has := info.MethodSigs[name]
-				if !has {
+				sig, ok := info.MethodSigs[name]
+				if !ok {
+					if name == "toString" && hint == "string" {
+						return Value{}, false, nil // Object.prototype.toString
+					}
+					continue
+				}
+				has[name] = true
+				if name != "@@toPrimitive" && !isPrimitiveResultTy(sig.RetType) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined {
+					if _, err := e.emitClassCall(canon, Value{Ref: v.Ref, Ty: canon}, name, nil, ast.Pos{}, false); err != nil {
+						return Value{}, false, err
+					}
+					objectResult[name] = true
 					continue
 				}
 				if name != "@@toPrimitive" && !resultUsableForHint(sig.RetType, hint) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined {
@@ -65,17 +92,35 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 				}
 				return res, true, nil
 			}
+			if noPrimitive() {
+				throwNoPrimitive()
+			}
 			return Value{}, false, nil
 		}
 	}
 	for _, name := range order {
 		idx, fieldTy, ok := v.Ty.FieldIndex(name)
 		if !ok || !fieldTy.IsFunc {
+			if name == "toString" && hint == "string" {
+				return Value{}, false, nil // Object.prototype.toString
+			}
 			continue
 		}
+		has[name] = true
 		retTy := TypeF64
 		if fieldTy.FuncRetType != nil {
 			retTy = *fieldTy.FuncRetType
+		}
+		if name != "@@toPrimitive" && !isPrimitiveResultTy(retTy) && retTy.IR != "void" && !retTy.IsUndefined {
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
+			closure := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
+			if _, err := e.emitClosureCallByPtr(closure, fieldTy, nil, ast.Pos{}); err != nil {
+				return Value{}, false, err
+			}
+			objectResult[name] = true
+			continue
 		}
 		// A valueOf/toString returning void/undefined still produces a VALID
 		// primitive — `undefined` — so the ladder stops on it (ADR-00912). The
@@ -119,6 +164,9 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 			return Value{}, false, err
 		}
 		return res, true, nil
+	}
+	if noPrimitive() {
+		throwNoPrimitive()
 	}
 	return Value{}, false, nil
 }

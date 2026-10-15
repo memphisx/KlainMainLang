@@ -61,20 +61,20 @@ func TestE2EChildProcessSpawnBatWithoutShellFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	batFwd := filepath.ToSlash(bat)
-	// A .bat/.cmd spawned WITHOUT a shell is refused (CVE-2024-27980): Node
-	// emits an 'error' event (EINVAL), not an 'exit' — the spawn 'error' path
-	// (ADR-00754). The 'close' that follows drives the shelled retry, which
-	// runs the batch correctly through cmd.exe.
+	// A .bat/.cmd spawned WITHOUT a shell is refused (CVE-2024-27980): Node 24
+	// throws spawn EINVAL from spawn() itself, before any child exists. The
+	// shelled form runs the batch through cmd.exe.
 	assertOutputImports(t, fmt.Sprintf(`
 import { spawn } from 'child_process'
-const direct = spawn(%q, [])
-direct.on('error', (e) => { console.log('direct error:', e.message.indexOf('spawn') === 0) })
-direct.on('close', () => {
-  const shelled = spawn(%q, { shell: true })
-  shelled.stdout.on('data', (d: string) => { console.log('shelled:', d.trim()) })
-  shelled.on('exit', (c2: number) => { console.log('shelled exit:', c2) })
-})
-`, batFwd, batFwd), "direct error: true\nshelled: pwned\nshelled exit: 0")
+try {
+  spawn(%q, [])
+} catch (e: any) {
+  console.log('direct error:', e.code, e.syscall)
+}
+const shelled = spawn(%q, { shell: true })
+shelled.stdout.on('data', (d: string) => { console.log('shelled:', d.trim()) })
+shelled.on('exit', (c2: number) => { console.log('shelled exit:', c2) })
+`, batFwd, batFwd), "direct error: EINVAL spawn\nshelled: pwned\nshelled exit: 0")
 }
 
 // ADR-00759: a child's exit code is the full 32-bit value Windows reports,

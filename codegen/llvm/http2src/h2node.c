@@ -29,6 +29,7 @@ enum {
 	H2E_WANT_TRAILERS = 10, // a: stream
 	H2E_PRIORITY = 11,    // a: stream
 	H2E_ALTSVC = 12,
+	H2E_SESSION_ERROR = 13, // b: nghttp2 error, c: 1 for too many invalid frames
 };
 
 typedef struct h2ev {
@@ -66,6 +67,8 @@ typedef struct {
 	int32_t lastid;
 	h2stream *pend;     // streams submitted here: nghttp2 knows their user
 	                    // data only once their HEADERS frame is sent
+	uint32_t invalid_frames;
+	uint8_t goaway_local, goaway_remote; // a GOAWAY submitted / received
 } h2sess;
 
 #define H2_MAX 4096
@@ -202,6 +205,7 @@ static int on_frame_recv(nghttp2_session *s, const nghttp2_frame *f, void *ud) {
 		break;
 	}
 	case NGHTTP2_GOAWAY: {
+		h->goaway_remote = 1;
 		h2ev *e = new_ev(H2E_GOAWAY, f->goaway.last_stream_id, f->goaway.error_code, 0);
 		if (f->goaway.opaque_data_len > 0) {
 			e->bytes = malloc(f->goaway.opaque_data_len);
@@ -250,7 +254,28 @@ static int on_stream_close(nghttp2_session *s, int32_t sid, uint32_t code, void 
 static int on_frame_not_send(nghttp2_session *s, const nghttp2_frame *f, int lib_error, void *ud) {
 	h2sess *h = ud;
 	(void)s;
+	// As Node: a frame dropped because its session or stream is closing is
+	// not an error to report.
+	if (lib_error == NGHTTP2_ERR_SESSION_CLOSING || lib_error == NGHTTP2_ERR_STREAM_CLOSED ||
+	    lib_error == NGHTTP2_ERR_STREAM_CLOSING)
+		return 0;
 	push_ev(h, new_ev(H2E_FRAME_ERROR, f->hd.stream_id, f->hd.type, lib_error));
+	return 0;
+}
+
+// Node's OnInvalidFrame: past maxSessionInvalidFrames (1000) the session
+// fails with ERR_HTTP2_TOO_MANY_INVALID_FRAMES; a fatal, stream-closed or
+// protocol error (nghttp2 ending the connection, e.g. on a flow-control
+// violation) destroys the session with that error.
+static int on_invalid_frame(nghttp2_session *s, const nghttp2_frame *f, int lib_error, void *ud) {
+	h2sess *h = ud;
+	(void)s; (void)f;
+	if (h->invalid_frames++ > 1000) {
+		push_ev(h, new_ev(H2E_SESSION_ERROR, 0, NGHTTP2_ERR_CALLBACK_FAILURE, 1));
+		return NGHTTP2_ERR_CALLBACK_FAILURE;
+	}
+	if (nghttp2_is_fatal(lib_error) || lib_error == NGHTTP2_ERR_STREAM_CLOSED || lib_error == NGHTTP2_ERR_PROTO)
+		push_ev(h, new_ev(H2E_SESSION_ERROR, 0, lib_error, 0));
 	return 0;
 }
 
@@ -342,6 +367,7 @@ double __kml_native_h2_new(double type, double maxHeaderListPairs, double maxRes
 	nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cb, on_data_chunk);
 	nghttp2_session_callbacks_set_on_stream_close_callback(cb, on_stream_close);
 	nghttp2_session_callbacks_set_on_frame_not_send_callback(cb, on_frame_not_send);
+	nghttp2_session_callbacks_set_on_invalid_frame_recv_callback(cb, on_invalid_frame);
 	nghttp2_option *opt;
 	nghttp2_option_new(&opt);
 	// Node sends its own WINDOW_UPDATEs as data is consumed; nghttp2's
@@ -581,13 +607,17 @@ double __kml_native_h2_goaway(double id, double code, double lastStreamId, void 
 	h2sess *h = sess_of(id);
 	if (!h) return NGHTTP2_ERR_INVALID_STATE;
 	int32_t last = lastStreamId < 0 ? nghttp2_session_get_last_proc_stream_id(h->s) : (int32_t)lastStreamId;
+	h->goaway_local = 1;
 	return nghttp2_submit_goaway(h->s, NGHTTP2_FLAG_NONE, last, (uint32_t)code, (const uint8_t *)data, (size_t)len);
 }
 
 // h2State: which: 0 effectiveLocalWindowSize, 1 effectiveRecvDataLength,
 // 2 nextStreamID, 3 localWindowSize, 4 lastProcStreamID, 5 remoteWindowSize,
 // 6 outboundQueueSize, 7 deflateDynamicTableSize, 8 inflateDynamicTableSize,
-// 9 want read, 10 want write, 20+id: a remote setting, 40+id: a local one.
+// 9 want read, 10 want write, 11 terminated internally (nghttp2 ended the
+// session itself, answering a connection error with its own GOAWAY, e.g. a
+// flow-control violation: it stops reading while no GOAWAY was submitted or
+// received), 20+id: a remote setting, 40+id: a local one.
 double __kml_native_h2_state(double id, double which) {
 	h2sess *h = sess_of(id);
 	if (!h) return 0;
@@ -606,6 +636,7 @@ double __kml_native_h2_state(double id, double which) {
 	case 8: return (double)nghttp2_session_get_hd_inflate_dynamic_table_size(h->s);
 	case 9: return nghttp2_session_want_read(h->s);
 	case 10: return nghttp2_session_want_write(h->s);
+	case 11: return !h->goaway_local && !h->goaway_remote && !nghttp2_session_want_read(h->s);
 	}
 	return 0;
 }

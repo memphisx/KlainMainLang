@@ -449,7 +449,7 @@ func TestCompatJSProgramUsingHTTP(t *testing.T) {
 	if err := os.WriteFile(src, []byte(`
 const http = require('http');
 const server = http.createServer(function(req, res) { res.end('ok:' + req.url); });
-server.listen(0, function() {
+server.listen(0, '127.0.0.1', function() {
   const port = server.address().port;
   http.get({ port: port, path: '/x' }, function(res) {
     let body = '';
@@ -520,7 +520,7 @@ func TestCompatJSTopLevelReadInFunction(t *testing.T) {
 	src := filepath.Join(dir, "main.js")
 	if err := os.WriteFile(src, []byte(`
 const http = require('http');
-const server = http.createServer((req, res) => { res.end('ok'); }).listen(0, client);
+const server = http.createServer((req, res) => { res.end('ok'); }).listen(0, '127.0.0.1', client);
 function client() {
   const port = server.address().port;
   http.get({ port }, (res) => { res.resume(); res.on('end', () => { console.log('status', res.statusCode); server.close(); }); });

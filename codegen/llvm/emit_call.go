@@ -871,6 +871,20 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 				// the optional call, which evaluates to `undefined` here
 				// (emitOptionalCalleeCall). Elsewhere they are
 				// internal_process_methods.ts's (processMemberRewrite).
+				// Untyped JS (-compat=js) has no such check: the call is
+				// Node's runtime TypeError, after its arguments, and only
+				// when reached (a program may test the platform first).
+				if e.compatJS() {
+					for _, a := range ex.Args {
+						if _, err := e.emitExpr(a); err != nil {
+							return Value{}, err
+						}
+					}
+					ty := e.inferExprType(ex)
+					e.emitThrowTypeError("process." + mem.Property + " is not a function")
+					e.emitLabel(e.freshLabel("process.cred.dead"))
+					return Value{Ref: zeroRef(ty), Ty: ty}, nil
+				}
 				return Value{}, fmt.Errorf("%d:%d: process.%s is not available on Windows (Node defines it only on POSIX) — use the optional call `process.%s?.()`, which is `undefined` on Windows", ex.GetPos().Line, ex.GetPos().Col, mem.Property, mem.Property)
 			}
 		}

@@ -1,13 +1,18 @@
 package tests
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // process's methods in TypeScript (lib/node/internal_process_methods.ts,
 // TDD-00230): Node's errors for chdir, kill and hrtime, the methods on
 // `process` read as a value, and a tuple read through `any`.
 
+// On Windows '/' is the current drive's root and umask is a no-op, as
+// Node's are there, so the oracle is Node itself.
 func TestE2EProcessMethodsErrors(t *testing.T) {
-	assertOutput(t, `
+	src := `
 process.chdir('/')
 console.log(process.cwd())
 try { process.chdir('no-such-dir-kml') } catch (e: any) { console.log(e.message, e.errno, e.code, e.syscall, e.path, e.dest) }
@@ -18,7 +23,12 @@ try { process.hrtime(5 as any) } catch (e: any) { console.log(e.code, e.message)
 const old = process.umask('027')
 console.log(process.umask(old).toString(8))
 try { process.umask('9x') } catch (e: any) { console.log(e.code) }
-`, `/
+`
+	if runtime.GOOS == "windows" {
+		assertSameAsNode(t, src)
+		return
+	}
+	assertOutput(t, src, `/
 ENOENT: no such file or directory, chdir '/' -> 'no-such-dir-kml' -2 ENOENT chdir / no-such-dir-kml
 TypeError ERR_UNKNOWN_SIGNAL Unknown signal: SIGNOPE
 true

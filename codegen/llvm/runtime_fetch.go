@@ -37,7 +37,7 @@ func (e *Emitter) UsesFetch() bool { return e.usedFetch || e.usedFetchAsync }
 func (e *Emitter) FetchCFlags() []string {
 	connOffs, _ := irStructOffsets("{ i64, ptr, ptr, ptr, ptr }")
 	rsOffs, _ := irStructOffsets(rstreamStructIR)
-	return append([]string{
+	return append(append([]string{},
 		fmt.Sprintf("-DKML_KIND_TYPEERR=%dLL", errorTypeIDStored(errorKindIDs["TypeError"])),
 		fmt.Sprintf("-DKML_KIND_DOMEXC=%dLL", errorTypeIDStored(errorKindIDs["DOMException"])),
 		fmt.Sprintf("-DKML_ERR_FLAG=%dLL", errorTypeIDFlag),
@@ -45,8 +45,7 @@ func (e *Emitter) FetchCFlags() []string {
 		fmt.Sprintf("-DKML_FETCH_CONN_PGROUP=%d", connOffs[4]),
 		fmt.Sprintf("-DKML_RS_STATE=%d", rsOffs[0]),
 		fmt.Sprintf("-DKML_RS_RH=%d", rsOffs[14]),
-		fmt.Sprintf("-DKML_RS_RL=%d", rsOffs[15]),
-	}, DeadStripFlags(e.exportsRuntime())...)
+		fmt.Sprintf("-DKML_RS_RL=%d", rsOffs[15])), DeadStripFlags(e.exportsRuntime())...)
 }
 
 // ensureFetch declares the curl_easy_* primitives and the pieces shared by
@@ -89,9 +88,13 @@ func (e *Emitter) ensureFetch() {
 		}
 		refs += "ptr " + e.internString(s)
 	}
-	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs = constant [%d x ptr] [%s], align 8", len(strs), refs))
+	// hooks.c holds them; the hooks constructor fills them in.
+	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs.ir = private constant [%d x ptr] [%s], align 8", len(strs), refs))
+	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs = external global [%d x ptr], align 8", len(strs)))
+	e.ensureMemcpy()
+	e.addHookInit(fmt.Sprintf("  call ptr @memcpy(ptr @__kml_fetch_strs, ptr @__kml_fetch_strs.ir, i64 %d)\n", 8*len(strs)))
 	// Read by the worker pre-init (emitter.go) and fetch.c.
-	e.emitGlobal("@__kml_curl_inited = global i1 0, align 1")
+	e.emitGlobal("@__kml_curl_inited = external global i1, align 1")
 	e.emitGlobal(`declare ptr @__kml_fetch_errstr(i32)
 declare ptr @__kml_fetch_failed_pending(i64)`)
 }
@@ -129,12 +132,11 @@ func (e *Emitter) ensureFetchAsync() {
 	e.emitGlobal("declare ptr @curl_multi_init()")
 	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_remove_handle(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i32 @curl_multi_fdset(ptr noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_timeout(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_perform(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @curl_multi_info_read(ptr noundef, ptr noundef)")
 	// The one CURLM handle, created on first use; the HTTP client reads it too.
-	e.emitGlobal("@__kml_curl_multi = thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_curl_multi = external thread_local global ptr, align 8")
 	e.emitGlobal(`declare ptr @__kml_fetch_async(ptr, ptr, ptr, ptr, ptr)
 declare ptr @__kml_fetch_async_n(ptr, ptr, ptr, ptr, i64, ptr)
 declare void @__kml_curl_drain_messages()

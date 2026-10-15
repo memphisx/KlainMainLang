@@ -23,7 +23,7 @@ const u = userInfo({ encoding: "buffer" })
 console.log(Buffer.isBuffer(u.username), u.shell !== null, Object.keys(userInfo()))
 console.log(userInfo({ encoding: "hex" }).username === Buffer.from(userInfo().username).toString("hex"))
 const ni = networkInterfaces()
-const lo = ni.lo0 || ni.lo
+const lo = ni.lo0 || ni.lo || ni["Loopback Pseudo-Interface 1"]
 console.log(Object.keys(lo[0]), lo.map((x: any) => x.family + " " + x.cidr + " " + x.internal + " " + (x.scopeid ?? "-")))
 console.log(JSON.stringify(EOL), typeof os.hostname, os.uptime() > 0, os.loadavg().every((x) => typeof x === "number"))
 console.log(os.cpus()[0].times.idle > 0, os.release() === os.release(), os.version().length > 0)

@@ -382,6 +382,30 @@ func (e *Emitter) ensureFloatMinMaxIntrinsics() {
 // truncation of 1/base^|exp|, matching this compiler's truncating integer `/`);
 // exp == 0 returns 1 (including 0 ** 0 === 1, as in JS). i64 overflow wraps like
 // every other integer op here.
+// ensureByteBlockAlloc declares coresrc/core.c's ArrayBuffer data-block
+// allocator: calloc behind a call the optimizer cannot see into, so a failed
+// allocation stays observable even when the buffer is unused.
+func (e *Emitter) ensureByteBlockAlloc() {
+	if e.usedByteBlockAlloc {
+		return
+	}
+	e.usedByteBlockAlloc = true
+	e.usedCoreC = true
+	e.emitGlobal("declare ptr @__kml_byte_block_alloc(i64)")
+}
+
+// ensureReceivedInt declares coresrc/core.c's ERR_OUT_OF_RANGE "Received"
+// formatter (Node's digit grouping past 2**32); it returns a header string.
+func (e *Emitter) ensureReceivedInt() {
+	if e.usedReceivedInt {
+		return
+	}
+	e.usedReceivedInt = true
+	e.usedCoreC = true
+	e.ensureStrHeaderRuntime()
+	e.emitGlobal("declare ptr @__kml_received_int(i64)")
+}
+
 func (e *Emitter) ensureIPow() {
 	if e.usedIPow {
 		return
@@ -549,10 +573,19 @@ func (e *Emitter) ensureToNumber() {
 	e.emitGlobal("declare double @__kml_to_number(ptr)")
 }
 
+// ensureQsort declares the array sorts (coresrc/core.c): __kml_stable_sort,
+// qsort's signature and V8's TimSort, and __kml_sort_any, which sets an
+// any[]'s undefined elements aside first, and __kml_sort_ptr, a string or
+// object array's.
 func (e *Emitter) ensureQsort() {
 	if !e.usedQsort {
-		e.emitGlobal("declare void @qsort(ptr, i64, i64, ptr)")
+		e.emitGlobal("declare void @__kml_stable_sort(ptr, i64, i64, ptr)")
+		e.emitGlobal("declare void @__kml_sort_any(ptr, i64, ptr)")
+		e.emitGlobal("declare void @__kml_sort_ptr(ptr, i64, ptr)")
+		e.emitGlobal("@__kml_sort_nullref = external thread_local global ptr")
+		e.ensureStrHeaderRuntime() // __kml_sort_nullref, the default string sort
 		e.usedQsort = true
+		e.usedCoreC = true
 	}
 }
 

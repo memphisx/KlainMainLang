@@ -148,7 +148,7 @@ try { const bad = new DataView(buf, 12, 8); } catch (e) { console.log("ctor oob 
 // Growable SharedArrayBuffer / resizable ArrayBuffer (ADR-00494): the
 // {maxByteLength} option reserves the max upfront (views never move), so
 // grow()/resize() only bumps the length word; out-of-range throws a
-// catchable RangeError. Fixed-size buffers report growable=false and
+// RangeError with V8's message (ADR-01636). Fixed-size buffers report growable=false and
 // maxByteLength=byteLength.
 func TestE2EGrowableBuffers(t *testing.T) {
 	assertOutput(t, `
@@ -168,8 +168,8 @@ const ab = new ArrayBuffer(4, {maxByteLength: 8})
 console.log(ab.resizable)
 ab.resize(8)
 console.log(ab.byteLength)
-try { sab.grow(8) } catch (e) { console.log("caught RangeError:", (e as Error).message.indexOf("RangeError") === 0) }
-`, "8\ntrue\n32\n16\n42\nfalse\n4\ntrue\n8\ncaught RangeError: true")
+try { sab.grow(8) } catch (e) { console.log("caught RangeError:", e instanceof RangeError, (e as Error).message) }
+`, "8\ntrue\n32\n16\n42\nfalse\n4\ntrue\n8\ncaught RangeError: true SharedArrayBuffer.prototype.grow: Invalid length parameter")
 }
 
 // ArrayBuffer.resize permits shrinking (ADR-00564), unlike SharedArrayBuffer.grow.
@@ -186,9 +186,9 @@ ab.resize(4)
 console.log(ab.byteLength)
 ab.resize(10)
 console.log(ab.byteLength)
-try { ab.resize(20) } catch (e) { console.log("caught:", (e as Error).message.indexOf("RangeError") === 0) }
+try { ab.resize(20) } catch (e) { console.log("caught:", e instanceof RangeError) }
 const sab = new SharedArrayBuffer(8, {maxByteLength: 16})
-try { sab.grow(4) } catch (e) { console.log("shrink-blocked:", (e as Error).message.indexOf("RangeError") === 0) }
+try { sab.grow(4) } catch (e) { console.log("shrink-blocked:", e instanceof RangeError) }
 `, "8\n12\n4\n10\ncaught: true\nshrink-blocked: true")
 }
 
@@ -229,5 +229,48 @@ class B {
 new B().bytes().then(u => console.log(u.length, u[0]));
 const when = (d: Date) => d.getTime();
 [new Date(5)].forEach((d) => console.log(when(d)));
+`)
+}
+
+// A data block that cannot be created is a RangeError (CreateByteDataBlock),
+// even for a buffer nothing uses: the optimizer deleted an unused calloc and
+// took it to succeed (Test262's allocation-limit files). The range checks on
+// typed-array views, resize/grow and Buffer accessors are RangeErrors with
+// V8's and Node's messages, in the spec's order, and Buffer's carry Node's
+// codes.
+func TestE2EArrayBufferAllocationFailureIsRangeError(t *testing.T) {
+	assertSameAsNode(t, `
+const t = (name: string, f: () => void) => {
+  try { f(); console.log(name, 'ok'); } catch (e: any) { console.log(name, e.constructor.name, JSON.stringify(e.message)); }
+};
+t('neg offset', () => { new Int32Array(new ArrayBuffer(8), -4); });
+t('misaligned', () => { new Int32Array(new ArrayBuffer(8), 3); });
+t('misaligned u16', () => { new Uint16Array(new ArrayBuffer(8), 1); });
+t('offset past end', () => { new Int32Array(new ArrayBuffer(8), 12); });
+t('offset past end, length', () => { new Int32Array(new ArrayBuffer(8), 12, 1); });
+t('neg length', () => { new Uint8Array(new ArrayBuffer(8), 0, -1); });
+t('length past end', () => { new Uint8Array(new ArrayBuffer(8), 0, 9); });
+t('length past end f64', () => { new Float64Array(new ArrayBuffer(16), 8, 2); });
+t('remainder', () => { new Int32Array(new ArrayBuffer(7)); });
+t('remainder offset', () => { new Int32Array(new ArrayBuffer(10), 4); });
+const rb = new ArrayBuffer(4, { maxByteLength: 8 });
+t('resize up', () => rb.resize(16));
+t('resize neg', () => rb.resize(-1));
+const sb = new SharedArrayBuffer(4, { maxByteLength: 8 });
+t('grow down', () => sb.grow(2));
+t('grow up', () => sb.grow(16));
+t('buffer readInt8', () => { Buffer.alloc(2).readInt8(5); });
+const bc = (name: string, f: () => void) => {
+  try { f(); console.log(name, 'ok'); } catch (e: any) { console.log(name, e.constructor.name, e.code, JSON.stringify(e.message)); }
+};
+bc('readUInt32LE short', () => { Buffer.alloc(2).readUInt32LE(0); });
+bc('readInt16BE far', () => { Buffer.alloc(4).readInt16BE(5000000000); });
+bc('readInt8 neg', () => { Buffer.alloc(4).readInt8(-1); });
+bc('writeUInt8 past', () => { Buffer.alloc(4).writeUInt8(1, 4); });
+bc('readInt8 frac', () => { Buffer.alloc(4).readInt8(1.5); });
+t('neg', () => { new Int32Array(-1); });
+t('2^40', () => { new Int32Array(1099511627776); });
+t('2^50', () => { new Float64Array(1125899906842624); });
+t('2^53-1', () => { new Uint8Array(9007199254740991); });
 `)
 }

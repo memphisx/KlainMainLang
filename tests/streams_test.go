@@ -1,10 +1,12 @@
 package tests
 
 import (
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -535,7 +537,7 @@ http.listen(18631, (req: HttpRequest) => {
     }
   });
   return { status: 200, body: body };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18631)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -567,7 +569,7 @@ http.listen(18632, (req: HttpRequest) => {
     }
   });
   return { status: 200, body: body };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18632)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -599,7 +601,7 @@ async function count(req: HttpRequest): Promise<string> {
 }
 http.listen(18651, async (req: HttpRequest) => {
   return { status: 200, body: await count(req) };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18651)
 	body := bytes.Repeat([]byte("y"), 12*1024*1024)
@@ -615,6 +617,60 @@ http.listen(18651, async (req: HttpRequest) => {
 	}
 }
 
+func TestE2EStreamsRequestBodyExpectContinue(t *testing.T) {
+	// A client sending `Expect: 100-continue` holds the body until the server
+	// answers 100 Continue, as Node's server does unprompted. The body then
+	// arrives in slow pieces, so the streamed read waits on the socket many
+	// times between them.
+	src := `
+import http from 'klain:http';
+async function count(req: HttpRequest): Promise<string> {
+  let total = 0;
+  for await (const chunk of req.stream()) {
+    total = total + chunk.length;
+  }
+  return total + " bytes";
+}
+http.listen(18657, async (req: HttpRequest) => {
+  return { status: 200, body: await count(req) };
+}, { host: '127.0.0.1' });
+`
+	port := startHTTPServer(t, src, 18657)
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	const n = 4 * 65536
+	fmt.Fprintf(conn, "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n", n)
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	br := bufio.NewReader(conn)
+	line, err := br.ReadString('\n')
+	if err != nil || !strings.HasPrefix(line, "HTTP/1.1 100 ") {
+		t.Fatalf("interim response = %q, %v; want HTTP/1.1 100 Continue", line, err)
+	}
+	if blank, _ := br.ReadString('\n'); blank != "\r\n" {
+		t.Fatalf("100 Continue not followed by a blank line: %q", blank)
+	}
+	piece := bytes.Repeat([]byte("z"), n/8)
+	for i := 0; i < 8; i++ {
+		time.Sleep(50 * time.Millisecond)
+		if _, err := conn.Write(piece); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+	}
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("response: %v", err)
+	}
+	defer resp.Body.Close()
+	got, _ := io.ReadAll(resp.Body)
+	if want := fmt.Sprintf("%d bytes", n); resp.StatusCode != 200 || string(got) != want {
+		t.Fatalf("got %d %q, want 200 %q", resp.StatusCode, got, want)
+	}
+}
+
 func TestE2EStreamsRequestBodyEcho(t *testing.T) {
 	// req.stream() piped straight into a chunked response — the body flows
 	// through the server without ever being fully buffered, fed by the event
@@ -623,7 +679,7 @@ func TestE2EStreamsRequestBodyEcho(t *testing.T) {
 import http from 'klain:http';
 http.listen(18652, (req: HttpRequest) => {
   return { status: 200, body: req.stream() };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18652)
 	body := bytes.Repeat([]byte("z"), 4*1024*1024)
@@ -656,7 +712,7 @@ http.listen(18653, async (req: HttpRequest) => {
     return { status: 200, body: await streamed(req) };
   }
   return { status: 200, body: "buffered:" + req.body };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18653)
 	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/plain", port), "text/plain", strings.NewReader("hello body"))
@@ -698,7 +754,7 @@ async function handle(req: HttpRequest): Promise<string> {
 }
 http.listen(18654, async (req: HttpRequest) => {
   return { status: 200, body: await handle(req) };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18654)
 	resp, err := http.Post(fmt.Sprintf("http://127.0.0.1:%d/", port), "text/plain", strings.NewReader("0123456789"))
@@ -725,7 +781,7 @@ http.listen(18655, (req: HttpRequest): Res => {
     return { status: 200, body: req.stream() }
   }
   return { status: 201, body: "plain body" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 18655)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/plain", port))
@@ -751,7 +807,7 @@ http.listen(18656, (req: HttpRequest): Res => {
     return { status: 200, body: req.stream() }
   }
   return { status: 200, body: "plain" }
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServer(t, src, 18656)
 	payload := bytes.Repeat([]byte("q"), 3*1024*1024)
@@ -873,7 +929,7 @@ http.listen(18661, (req: HttpRequest) => {
     }
   });
   return { status: 200, body: source.pipeThrough(new CompressionStream("gzip")) };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18661)
 	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
@@ -947,7 +1003,7 @@ async function count(req: HttpRequest): Promise<string> {
 }
 http.listen(18661, async (req: HttpRequest) => {
   return { status: 200, body: await count(req) };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18661)
 	body := bytes.Repeat([]byte("q"), 3*1024*1024)
@@ -975,7 +1031,7 @@ http.listen(18662, async (req: HttpRequest) => {
     req.on('end', () => { resolve(); });
   });
   return { status: 200, body: "on=" + total };
-});
+}, { host: '127.0.0.1' });
 `
 	port := startHTTPServer(t, src, 18662)
 	body := []byte("abcdefghij-1234567890")
@@ -1006,7 +1062,7 @@ http.listen(18663, async (req: HttpRequest) => {
   });
   const back: string = fs.readFileSync(%q, 'utf8');
   return { status: 200, body: "piped=" + back.length };
-});
+}, { host: '127.0.0.1' });
 `, out, out)
 	port := startHTTPServer(t, src, 18663)
 	body := []byte("PIPE-THIS-BODY-0123456789")

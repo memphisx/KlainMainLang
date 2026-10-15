@@ -19,7 +19,7 @@ func TestE2EHTTPResponseDateAndKeepAlive(t *testing.T) {
 import http from 'http'
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("ok")
-}).listen(8971)
+}).listen(8971, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8971)
 
@@ -79,7 +79,7 @@ func TestE2EHTTPResponseConnectionClose(t *testing.T) {
 import http from 'http'
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("bye")
-}).listen(8973)
+}).listen(8973, '127.0.0.1')
 `
 	port := startHTTPServer(t, src, 8973)
 

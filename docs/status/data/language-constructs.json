@@ -212,7 +212,7 @@
             "feature": "Comparison operators `== === != !== < > <= >=`",
             "status": "implemented",
             "notes": [
-              "String comparison via `strcmp`",
+              "Strings compare by UTF-16 code units, as JavaScript's do ([ADR-01620](../adr/ADR-01620.md))",
               "NaN compares per JS: `NaN !== NaN` (and `NaN != x`) is `true` while `===`/`<`/`>`/`<=`/`>=` against NaN are all `false` — `!=`/`!==` use the unordered `fcmp une` predicate ([ADR-00188](../adr/ADR-00188.md))"
             ]
           },

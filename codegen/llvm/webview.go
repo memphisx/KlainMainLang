@@ -26,8 +26,8 @@ import (
 //go:embed webviewsrc/webview.h
 var webviewSource string
 
-// webviewLoopEmbed runs the runtime's loop inside the GUI's main loop on
-// macOS and GTK (TDD-00244 Stage 7).
+// webviewLoopEmbed runs the runtime's loop inside the GUI's main loop
+// (TDD-00244 Stage 7; Windows TDD-00252).
 //
 //go:embed webviewsrc/loop_embed.cc
 var webviewLoopEmbed string
@@ -57,7 +57,7 @@ func WebviewSource(backend string) string {
 		return fmt.Sprintf("// webview backend %q not yet implemented (TDD-00144).\n", backend)
 	}
 	if runtime.GOOS == "windows" {
-		return webviewSource + webviewWin32Deferral
+		return webviewSource + webviewWin32Deferral + "\n" + webviewLoopEmbed
 	}
 	return webviewSource + "\n" + webviewLoopEmbed
 }

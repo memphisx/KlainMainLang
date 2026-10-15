@@ -42,7 +42,7 @@ below exclude every row from Strict.
 | `.bind` async (`cb` returns `Promise<string>`) | ✅ | Page promise settles when the native promise settles, on the GUI thread ([ADR-00439](../adr/ADR-00439.md), [ADR-01405](../adr/ADR-01405.md)) |
 | `.unbind(name)` | ✅ | |
 | `.run()` | ✅ | Blocks — owns the GUI main loop; statements after it are the shutdown path |
-| The event loop on the GUI thread | ✅ | Timers, promise reactions, `fs.promises`, `fetch`, servers and the rest of the loop run under `run()` without a Worker: on macOS and Linux the GUI's main loop watches the runtime's libuv loop ([ADR-01405](../adr/ADR-01405.md)); Windows runs timers, microtasks and tasks through a 16 ms page-driven tick pump, and servers and other descriptor-driven work there still need a Worker ([ADR-00439](../adr/ADR-00439.md)) |
+| The event loop on the GUI thread | ✅ | Timers, promise reactions, `fs.promises`, `fetch`, servers and the rest of the loop run under `run()` without a Worker: the GUI's main loop watches the runtime's libuv loop ([ADR-01405](../adr/ADR-01405.md)); on Windows a thread waits on libuv's completion port and wakes the GUI thread for each pass, as Electron embeds Node ([ADR-01614](../adr/ADR-01614.md)) |
 | `.terminate()` | ✅ | Ends `run()` (from a bound callback or another thread) |
 | `.destroy()` | ✅ | |
 | bind throw → page-promise reject | ✅ | Via the setjmp catch scaffold |

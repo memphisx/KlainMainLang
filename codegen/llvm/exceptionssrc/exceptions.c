@@ -28,9 +28,10 @@ extern _Thread_local int __kml_jmp_top;
  * emitted with the program. */
 extern u8 __kml_process_uncaught(u8 tag, i64 pay, _Bool rejection);
 extern void __kml_run_exit_handlers(i64 code);
-extern void __kml_worker_uncaught(u8 tag, i64 pay);
 
 #ifdef KML_WORKERS
+/* Emitted with the Worker runtime, so named only with Workers (TDD-00251). */
+extern void __kml_worker_uncaught(u8 tag, i64 pay);
 /* process.exit's end: the thread on a worker, the process elsewhere. */
 extern void __kml_thread_exit(int code) __attribute__((noreturn));
 #define KML_EXIT(c) __kml_thread_exit(c)
@@ -42,9 +43,34 @@ _Thread_local void *__kml_thrown;
 static _Thread_local u8 thrown_tag = KML_TAG_ERROR;
 static _Thread_local i64 thrown_pay;
 
-void *__kml_get_thrown(void) { return __kml_thrown; }
-u8 __kml_get_thrown_tag(void) { return thrown_tag; }
-i64 __kml_get_thrown_pay(void) { return thrown_pay; }
+#ifdef _WIN32
+/* A stack overflow spends the thread's guard page (stackguard.c), which the
+ * C runtime re-arms only once the stack has unwound. A throw from within the
+ * last SG_DEEP bytes of the stack marks it, and the catch that reads the
+ * value re-arms the page, so the next overflow throws too. */
+__declspec(dllimport) void __stdcall GetCurrentThreadStackLimits(unsigned long long *low, unsigned long long *high);
+int _resetstkoflw(void);
+#define SG_DEEP (128 * 1024)
+static _Thread_local u8 rearm_stack;
+static void note_deep_throw(void) {
+    unsigned long long low = 0, high = 0;
+    GetCurrentThreadStackLimits(&low, &high);
+    if ((unsigned long long)(size_t)__builtin_frame_address(0) < low + SG_DEEP) rearm_stack = 1;
+}
+static void rearm(void) {
+    if (rearm_stack) {
+        rearm_stack = 0;
+        _resetstkoflw();
+    }
+}
+#else
+static void note_deep_throw(void) {}
+static void rearm(void) {}
+#endif
+
+void *__kml_get_thrown(void) { rearm(); return __kml_thrown; }
+u8 __kml_get_thrown_tag(void) { rearm(); return thrown_tag; }
+i64 __kml_get_thrown_pay(void) { rearm(); return thrown_pay; }
 
 /* The tag a thrown or rejected value keeps. An object box whose field 0
  * carries the boxed-object Error type-id (TDD-00222: flag bit set, low bits
@@ -83,6 +109,14 @@ void *__kml_caught_unc_msg(int tag, i64 pay) {
     }
 }
 
+/* The uncaught-error report goes to stderr, as Node's does, after whatever
+ * the program had written to stdout. */
+void __kml_print_uncaught(int tag, i64 pay) {
+    fflush(stdout);
+    fprintf(stderr, "Uncaught: %s\n", (char *)__kml_caught_unc_msg(tag, pay));
+    fflush(stderr);
+}
+
 /* Set while the 'uncaughtException' listeners run. */
 static _Thread_local int in_uncaught;
 
@@ -98,6 +132,7 @@ _Bool __kml_process_uncaught_guarded(u8 tag, i64 pay, _Bool rejection) {
 /* The core: record the value, then unwind to the nearest try frame, or end
  * the program (or the worker thread) when there is none. */
 void __kml_throw_any(int tag, i64 pay) {
+    note_deep_throw();
     u8 t = __kml_caught_tag(tag, pay);
     thrown_tag = t;
     thrown_pay = pay;
@@ -106,7 +141,7 @@ void __kml_throw_any(int tag, i64 pay) {
         /* A listener of 'uncaughtException' threw: Node reports that error
          * and exits 7 rather than calling the listeners again. */
         if (in_uncaught) {
-            printf("Uncaught: %s\n", (char *)__kml_caught_unc_msg(t, pay));
+            __kml_print_uncaught(t, pay);
             KML_EXIT(7);
         }
         /* The process 'uncaughtException' event: if a listener runs the
@@ -117,10 +152,12 @@ void __kml_throw_any(int tag, i64 pay) {
             __kml_run_exit_handlers(1);
             KML_EXIT(1);
         }
+#ifdef KML_WORKERS
         /* On a worker thread this does not return: the error goes to the
          * parent's 'error' listener and only that thread ends. */
         __kml_worker_uncaught(t, pay);
-        printf("Uncaught: %s\n", (char *)__kml_caught_unc_msg(t, pay));
+#endif
+        __kml_print_uncaught(t, pay);
         KML_EXIT(1);
     }
     longjmp(__kml_jmp_unwind_slot(), 1);

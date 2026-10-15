@@ -3,6 +3,8 @@ package tests
 import (
 	"os"
 	"os/exec"
+	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -116,8 +118,36 @@ func runNodeFFI(t *testing.T, src string) string {
 // equalities) rather than a raw pointer bigint, whose value differs per process.
 func assertSameAsNodeFFI(t *testing.T, src, want string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		// Node's Windows build opens no library for null (ADR-01608): the
+		// program opens the C runtime instead, and is held to Node's own
+		// output, since the expectations were written against dlopen(NULL).
+		src = ffiWindowsLibrary(src)
+		compareLines(t, compileAndRunImports(t, src), runNodeFFI(t, src))
+		return
+	}
 	compareLines(t, compileAndRunImports(t, src), want)
 	compareLines(t, runNodeFFI(t, src), want)
+}
+
+// ffiPortable is src as it runs on this host: on Windows the C runtime
+// stands in for the process's own symbols (ffiWindowsLibrary).
+func ffiPortable(src string) string {
+	if runtime.GOOS == "windows" {
+		return ffiWindowsLibrary(src)
+	}
+	return src
+}
+
+// ffiWindowsLibrary names the C runtime where src opens the process itself,
+// and its name for POSIX's getpid.
+func ffiWindowsLibrary(src string) string {
+	src = strings.NewReplacer(
+		"dlopen(null", "dlopen('ucrtbase.dll'",
+		"DynamicLibrary(null)", "DynamicLibrary('ucrtbase.dll')",
+		"['get', 'pid']", "['_get', 'pid']", // a name built at run time
+	).Replace(src)
+	return regexp.MustCompile(`\bgetpid\b`).ReplaceAllString(src, "_getpid")
 }
 
 // assertMatchesNodeFFI runs src under our compiler and under real node:ffi
@@ -127,6 +157,9 @@ func assertSameAsNodeFFI(t *testing.T, src, want string) {
 // node:ffi-capable Node.
 func assertMatchesNodeFFI(t *testing.T, src string) {
 	t.Helper()
+	if runtime.GOOS == "windows" {
+		src = ffiWindowsLibrary(src)
+	}
 	node := runNodeFFI(t, src)
 	compareLines(t, compileAndRunImports(t, src), node)
 }

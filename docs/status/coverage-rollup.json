@@ -138,9 +138,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 29,
+            "impl": 30,
             "total": 37,
-            "pct": 78
+            "pct": 81
           },
           "caveats": "• `.flat(depth?)`/`.flatMap(fn)`: `depth` must be a compile-time constant (or `Infinity`), since this compiler's array element types are static ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/ADR-00107.md))\u003cbr\u003e• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators, plus the array-like `{ length: n }` overload ([ADR-00957](../adr/ADR-00957.md)) — generators and `thisArg` are not supported ([ADR-00482](../adr/ADR-00482.md)/[ADR-00491](../adr/ADR-00491.md))"
         },
@@ -480,9 +480,9 @@
             "pct": 90
           },
           "strict": {
-            "impl": 11,
+            "impl": 13,
             "total": 21,
-            "pct": 52
+            "pct": 62
           },
           "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))\u003cbr\u003e• `readFileSync` returns a Buffer without an encoding; `readFile` (async) is still text-only"
         },
@@ -495,9 +495,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 19,
+            "impl": 21,
             "total": 33,
-            "pct": 58
+            "pct": 64
           },
           "caveats": "• An `'uncaughtException'` handler runs then still exits after a synchronous throw (can't resume)\u003cbr\u003e• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons\u003cbr\u003e• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/ADR-00791.md))\u003cbr\u003e• `child_process.fork()` is self-fork only — forking a different module stays out"
         },
@@ -510,9 +510,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 14,
+            "impl": 15,
             "total": 16,
-            "pct": 88
+            "pct": 94
           },
           "caveats": "• The `createServer` options argument accepts `highWaterMark` and real `requestTimeout`/`headersTimeout`/`keepAliveTimeout` (primary server, silent close, no `408` body — [TDD-00217](../tdd/TDD-00217.md)) plus the fixed-behavior no-ops; a custom `IncomingMessage`/`ServerResponse` class and `maxHeaderSize` reject, and the `listen` options form is numeric-host-only ([ADR-00503](../adr/ADR-00503.md)/[ADR-00801](../adr/ADR-00801.md))\u003cbr\u003e• Multiple concurrent servers run with non-blocking `listen`, `close()`/relisten, and streaming `res.write` backpressure/keep-alive over both HTTP and HTTPS ([TDD-00191](../tdd/TDD-00191.md)/[TDD-00214](../tdd/TDD-00214.md)); what's left — a non-primary server can't combine with Worker/cluster ([TDD-00219](../tdd/TDD-00219.md)), its listener must be inline, the `'clientError'`/`'error'` events are primary-server only ([TDD-00215](../tdd/TDD-00215.md)), and over HTTP/2 the request body is delivered as one buffered chunk with no `res.write` flow-control (async h2 handlers themselves work — [TDD-00218](../tdd/TDD-00218.md))\u003cbr\u003e• No HTTP pipelining; `Keep-Alive: timeout=5` is advertised but not enforced by an idle timer"
         },
@@ -544,7 +544,7 @@
             "total": 14,
             "pct": 93
           },
-          "caveats": "• A `SystemError`'s `errno`/`syscall` are copies of its `info`, not accessors\u003cbr\u003e• Windows' priority-class mapping is compile-checked only"
+          "caveats": "• A `SystemError`'s `errno`/`syscall` are copies of its `info`, not accessors"
         },
         {
           "category": "`events` (`EventEmitter`)",
@@ -585,9 +585,9 @@
             "pct": 92
           },
           "strict": {
-            "impl": 8,
+            "impl": 9,
             "total": 12,
-            "pct": 67
+            "pct": 75
           },
           "caveats": "• Signatures/definitions must be compile-time object literals (AOT lowering)\u003cbr\u003e• `registerCallback` caps at 16 concurrently-live callbacks per signature shape (static trampoline families) and `close()` doesn't invalidate callbacks; `using`/`[Symbol.dispose]` not there yet; the Windows `symbols`/`functions` order (an MSVC-STL port) is unverified against a Windows Node"
         },
@@ -633,7 +633,7 @@
             "total": 20,
             "pct": 0
           },
-          "caveats": "• One window per process (V1); a second `new Webview` is a clean rejection; multi-window deferred (engine run-loop/app-delegate rework)\u003cbr\u003e• Windows: servers/fd-loops still need a Worker — timers/microtasks/async bind run on the GUI thread via a page-tick pump ([ADR-00439](../adr/ADR-00439.md)); macOS/Linux run the whole loop inside the GUI loop ([ADR-01405](../adr/ADR-01405.md))\u003cbr\u003e• Sailfish: the GUI-loop embedding is not yet built against a sysroot or run on a device\u003cbr\u003e• Linux is compile-tier only, not yet run (macOS/Windows verified)"
+          "caveats": "• One window per process (V1); a second `new Webview` is a clean rejection; multi-window deferred (engine run-loop/app-delegate rework)\u003cbr\u003e• Windows: the loop inside the GUI loop ([ADR-01614](../adr/ADR-01614.md)) is compile-checked; its windowed run needs a desktop session and has not been done\u003cbr\u003e• Sailfish: the GUI-loop embedding is not yet built against a sysroot or run on a device\u003cbr\u003e• Linux is compile-tier only, not yet run (macOS/Windows verified)"
         }
       ]
     },

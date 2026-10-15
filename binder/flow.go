@@ -326,7 +326,7 @@ func (b *Binding) FlowDiagnostics(offset func(line, col int) int, definite bool)
 				continue
 			}
 		}
-		if definite && trackedForAssignment(sym) {
+		if definite && trackedForAssignment(sym) && !b.asserted[id] {
 			if _, missed := walkBack(f, sym, func(n *FlowNode) bool { return n.Assign }); missed {
 				add(diag.UsedBeforeAssigned, id)
 			}

@@ -4,7 +4,7 @@
   "kind": "node",
   "statusPage": "HTTP-SERVER.md",
   "coversRows": "all",
-  "coverage": { "loose": "16/16", "loosePct": 100, "strict": "14/16", "strictPct": 88 },
+  "coverage": { "loose": "16/16", "loosePct": 100, "strict": "15/16", "strictPct": 94 },
   "lede": "Two server APIs. http.createServer((req, res) => …) is the real Node.js shape — Node's own http server layers (_http_common/_http_incoming/_http_outgoing/_http_server) ported to TypeScript over net and a native HTTP/1 parser with llhttp's strict rules, so a program written against it runs unchanged under Node. Connections are ordinary callbacks on the single event loop; an async handler awaits without blocking other connections. The bespoke model where a handler returns a { status, body, headers } object is this project's own re-imagining, reachable only via the explicitly-non-Node klain:http specifier (`import http from 'klain:http'`) — it is not on the Node http namespace and keeps its fiber-per-connection engine. Everything below the two createServer rows is the klain:http model.",
   "entries": [
     {
@@ -12,7 +12,7 @@
       "name": "http.createServer((req, res) => …)",
       "statusRow": "`http.createServer((req, res) => …).listen(port[, cb])` — real Node shape",
       "signature": "http.createServer((req: IncomingMessage, res: ServerResponse) => void).listen(port, cb?)",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "The real Node.js server shape — a program written against it runs unchanged under Node. req is an IncomingMessage (a Readable: 'data'/'end', pipe, for await, headers/rawHeaders/trailers); res is a ServerResponse (an OutgoingMessage) that streams to the socket. Node's _http_server layering in TypeScript over net's Socket and a native HTTP/1 parser with llhttp's strict rules and HPE_* error codes.",
       "returns": { "type": "Server", "desc": "The server handle; .listen() starts it." },
       "exampleKey": "http/node_createserver",
@@ -20,8 +20,7 @@
       "differences": [
         "`res` surface: `writeHead`/`setHeader`/`appendHeader`/`getHeader(s)`/`removeHeader`/`hasHeader`/`write`/`end`/`flushHeaders`/`writeContinue`, `statusCode`/`statusMessage` (default reason phrase from `http.STATUS_CODES`). The body is chunked or `Content-Length` as Node decides; `res.write` returns `false` past `highWaterMark` and `'drain'` follows, over HTTP and HTTPS alike.",
         "Keep-alive and pipelining, the `Date` header, and `requireHostHeader`'s 400 behave as in Node; an `async` handler is an ordinary callback — the server keeps serving while it awaits.",
-        "Several http and https servers run on different ports in one program, all on the same event loop.",
-        "On Windows the TCP handles are compile-checked, not yet run."
+        "Several http and https servers run on different ports in one program, all on the same event loop."
       ],
       "seeAlso": ["http.server", "http.listen"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#httpcreateserveroptions-requestlistener" }

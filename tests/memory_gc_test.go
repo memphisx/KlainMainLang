@@ -199,7 +199,7 @@ http.listen(8952, (req: HttpRequest): Res => {
     total = total + s.length;
   }
   return { status: 200, body: req.path + ":" + total };
-})
+}, { host: '127.0.0.1' })
 `
 	port := startHTTPServerGC(t, src, 8952)
 

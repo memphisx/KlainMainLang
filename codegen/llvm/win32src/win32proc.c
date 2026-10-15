@@ -1,12 +1,11 @@
 // Windows process and signal layer (TDD-00177 Stage 4). Compiled alongside
 // the other win32*.c shims; shares the fd table with win32io.c.
 //
-// Node on Windows spawns with CreateProcessW; there is no fork. The IR keeps
-// its pipe()-based plumbing and, on Windows, calls __kml_win_spawn where it
-// would fork+exec: the pipe ends become the child's stdio, the pid comes
-// back, and waitpid()/kill() work through a pid→handle table. Argument
-// quoting follows libuv's make_program_args (the rules cmd.exe and the
-// MSVCRT argv parser agree on). Signals: process.on('SIGINT') is a console
+// A child process is libuv's uv_spawn (klainpool.c); this layer answers what
+// that path asks (the batch-file refusal, the self-spawn test, CRT
+// descriptors) and re-spawns this executable as a cluster worker, with
+// argument quoting after libuv's make_program_args (the rules cmd.exe and the
+// MSVCRT argv parser agree on). kill() is libuv's uv_kill. Signals: process.on('SIGINT') is a console
 // control handler (Ctrl+C is SIGINT, Ctrl+Break SIGBREAK, as in Node); a
 // 'SIGTERM' listener is accepted but never fires, since nothing on Windows
 // delivers SIGTERM; SIGWINCH comes from a console-size watcher thread, the
@@ -17,6 +16,8 @@
 #define _WIN32_WINNT 0x0601 // PROC_THREAD_ATTRIBUTE_HANDLE_LIST needs Vista+
 #endif
 #include <windows.h>
+#include <tlhelp32.h>
+#include <stdio.h>
 #include <errno.h>
 #include <io.h>
 #include <stdint.h>
@@ -24,9 +25,9 @@
 #include <string.h>
 #include <wchar.h>
 
-enum { L_EACCES = 13, L_ENOENT = 2, L_EINVAL = 22, L_ENOSYS = 38, L_ECHILD = 10, L_ESRCH = 3 };
+enum { L_EACCES = 13, L_ENOENT = 2, L_EINVAL = 22, L_ENOSYS = 38, L_ESRCH = 3, L_EBADF = 9, L_EMFILE = 24 };
 enum { KFD_PLAIN = 0, KFD_SOCKET = 1 };
-#define KFD_MAX 1024
+#define KFD_MAX 16384
 
 // From win32io.c. The fd descriptor table (kind/inherited/…) is owned there
 // and reached through accessors, so this object never binds to its layout
@@ -35,6 +36,7 @@ int kfd_kind_of(int fd);
 void kfd_set_inherited(int fd);
 int kfd_register(HANDLE h, int kind);
 int kfd_adopt_socket(HANDLE s, int fd);
+void __kml_win_ipc_set_peer(int fd, int pid);
 int kfd_listeners(int *out, int max);
 void kfd_rr_add_worker(int lfd, unsigned long pid, int chan);
 void kfd_rr_adopt(int lfd, int chan, int nonblock);
@@ -64,31 +66,6 @@ static DWORD kml_cluster_primary(void) {
 static HANDLE kml_flag_section;   // this process's handle (primary: created; worker: inherited)
 static void *kml_flag_view;       // mapped once, reused
 static HANDLE kml_flag_inherited; // handed over at spawn, before main runs
-
-// ---- pid table -----------------------------------------------------------------
-// A reaped child keeps its slot (pid + reaped flag, handle closed) so a
-// later kill()/waitpid() of that pid answers ESRCH/ECHILD from the table
-// instead of OpenProcess(pid) reaching whatever unrelated process now owns
-// the reused pid (ADR-00737). Reaped slots are reclaimed only when the
-// table needs room for a new child.
-typedef struct { DWORD pid; HANDLE h; int killsig; int failed; int reaped; int spawnerrno; DWORD exitcode; HANDLE wait; } kml_proc;
-#define KML_PROC_MAX 256
-static kml_proc kml_procs[KML_PROC_MAX];
-
-static kml_proc *proc_slot(DWORD pid, int create) {
-	kml_proc *freep = NULL, *reapedp = NULL;
-	for (int i = 0; i < KML_PROC_MAX; i++) {
-		if (kml_procs[i].pid == pid && kml_procs[i].pid) return &kml_procs[i];
-		if (!kml_procs[i].pid && !freep) freep = &kml_procs[i];
-		if (kml_procs[i].pid && kml_procs[i].reaped && !reapedp) reapedp = &kml_procs[i];
-	}
-	if (!create) return NULL;
-	if (!freep) freep = reapedp;
-	if (!freep) return NULL;
-	memset(freep, 0, sizeof *freep);
-	freep->pid = pid;
-	return freep;
-}
 
 // ---- command line -------------------------------------------------------------------
 static int arg_needs_quotes(const wchar_t *a) {
@@ -139,15 +116,8 @@ static HANDLE inheritable_dup(int fd) {
 // inheritable duplicate of ours, or NUL when ours is missing/invalid — the
 // replacement libuv makes, so a GUI-subsystem parent (no console handles)
 // still hands its children usable fds 0/1/2 (ADR-00737).
-static HANDLE inheritable_std(int fd, DWORD std_which, int for_input) {
+static HANDLE inheritable_std(DWORD std_which, int for_input) {
 	HANDLE d;
-	if (fd >= 0) return inheritable_dup(fd);
-	// fd == -2: stdio 'ignore' — always NUL, never our std handle (ADR-00766).
-	if (fd == -2) {
-		SECURITY_ATTRIBUTES sa2 = { sizeof sa2, NULL, TRUE };
-		return CreateFileW(L"NUL", for_input ? GENERIC_READ : GENERIC_WRITE,
-		                   FILE_SHARE_READ | FILE_SHARE_WRITE, &sa2, OPEN_EXISTING, 0, NULL);
-	}
 	HANDLE h = GetStdHandle(std_which);
 	if (h && h != INVALID_HANDLE_VALUE &&
 	    DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &d, 0, TRUE, DUPLICATE_SAME_ACCESS))
@@ -196,7 +166,94 @@ static int is_self_spawn(const char *file, char **argv) {
 	return match;
 }
 
-// ---- child environment block + program search (libuv's process.c) ---------------------
+// is_self_word is is_self_spawn for one command word of a shell command: a
+// path, or a bare name searched on PATH the way the shell would (.exe
+// assumed).
+static int is_self_word(const char *word) {
+	if (strpbrk(word, "/\:")) return is_self_spawn(word, NULL);
+	wchar_t *w = wide_alloc(word);
+	if (!w) return 0;
+	static wchar_t found[32768];
+	DWORD n = SearchPathW(NULL, w, L".exe", 32768, found, NULL);
+	free(w);
+	if (n == 0 || n >= 32768) return 0;
+	int len = WideCharToMultiByte(CP_UTF8, 0, found, -1, NULL, 0, NULL, NULL);
+	char *u = len > 0 ? (char *)malloc((size_t)len) : NULL;
+	if (!u) return 0;
+	WideCharToMultiByte(CP_UTF8, 0, found, -1, u, len, NULL, NULL);
+	int r = is_self_spawn(u, NULL);
+	free(u);
+	return r;
+}
+
+// shell_env_value is name's value in the child's given environment, or in
+// ours (Windows names are case-insensitive).
+static const char *shell_env_value(char **env, const char *name, size_t nl) {
+	static char buf[32768];
+	if (!env) {
+		char key[256];
+		if (nl >= sizeof key) return NULL;
+		memcpy(key, name, nl);
+		key[nl] = 0;
+		DWORD n = GetEnvironmentVariableA(key, buf, sizeof buf);
+		return n > 0 && n < sizeof buf ? buf : NULL;
+	}
+	for (int i = 0; env[i]; i++)
+		if (_strnicmp(env[i], name, nl) == 0 && env[i][nl] == '=') return env[i] + nl + 1;
+	return NULL;
+}
+
+// shell_runs_self reports whether a shell spawn starts this executable
+// (ADR-01581 on Windows): cmd.exe's `/c <command>` (exec and shell: true) or
+// a POSIX shell's `-c <command>`. A word in command position (the start, or
+// after | & ; or a parenthesis) is compared after quotes are stripped; a
+// variable (%NAME%, $NAME, ${NAME}) is looked up first. The shell is then
+// marked and passes the mark to the copy it starts, whose guard exits 9.
+static int shell_runs_self(char **argv, char **env) {
+	if (!argv || !argv[0]) return 0;
+	const char *cmd = NULL;
+	int is_cmd = 0;
+	for (int i = 1; argv[i] && argv[i + 1]; i++) {
+		if (_stricmp(argv[i], "/c") == 0) { cmd = argv[i + 1]; is_cmd = 1; break; }
+		if (strcmp(argv[i], "-c") == 0) { cmd = argv[i + 1]; break; }
+	}
+	if (!cmd) return 0;
+	const char *p = cmd, *end = cmd + strlen(cmd);
+	// cmd /s (exec's form, `""<file>" args"`) drops the command's outer
+	// quotes; cmd quotes only with ", a POSIX shell with ' as well.
+	if (is_cmd && end - p >= 2 && *p == '"' && end[-1] == '"') { p++; end--; }
+	int cmdpos = 1;
+	while (p < end) {
+		if (strchr(" \t\r\n", *p)) { p++; continue; }
+		if (strchr("|;&()", *p)) { cmdpos = 1; p++; continue; }
+		char word[4096];
+		size_t wl = 0;
+		char quote = 0;
+		while (p < end && (quote || !strchr(" \t\r\n|;&()<>", *p))) {
+			if (quote ? *p == quote : (*p == '"' || (!is_cmd && *p == '\''))) quote = quote ? 0 : *p;
+			else if (wl + 1 < sizeof word) word[wl++] = *p;
+			p++;
+		}
+		word[wl] = 0;
+		if (p < end && (*p == '<' || *p == '>')) p++;
+		if (!cmdpos || wl == 0) continue;
+		cmdpos = 0;
+		const char *target = word;
+		size_t nl = strlen(word);
+		if (word[0] == '%' && nl > 2 && word[nl - 1] == '%') {
+			target = shell_env_value(env, word + 1, nl - 2);
+		} else if (word[0] == '$') {
+			const char *name = word + 1;
+			nl--;
+			if (*name == '{' && nl > 1 && name[nl - 1] == '}') { name++; nl -= 2; }
+			target = shell_env_value(env, name, nl);
+		}
+		if (target && *target && is_self_word(target)) return 1;
+	}
+	return 0;
+}
+
+// ---- the cluster worker's environment block (libuv's make_program_env) -------------------
 // env_key_len is the length of an entry's name. A leading '=' belongs to the
 // name: the hidden per-drive "=C:=C:\dir" variables.
 static size_t env_key_len(const wchar_t *e) {
@@ -294,256 +351,149 @@ static wchar_t *build_env_block(char **custom, const wchar_t **markers, int nmar
 	return block;
 }
 
-// block_lookup finds NAME in a double-NUL environment block (NULL if absent).
-static const wchar_t *block_lookup(const wchar_t *block, const wchar_t *name) {
-	size_t nl = wcslen(name);
-	for (const wchar_t *q = block; q && *q; q += wcslen(q) + 1)
-		if (env_key_cmp(q, env_key_len(q), name, nl) == 0) return q + nl + 1;
-	return NULL;
-}
-
-static int is_regular_file(const wchar_t *path) {
-	DWORD a = GetFileAttributesW(path);
-	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-// try_in_dir probes dir\name[.com|.exe] in libuv's order: the name as given
-// first when it already carries an extension, then with each of the two
-// extensions CreateProcess itself can start. Batch files are deliberately not
-// searched for: without a shell they are refused (CVE-2024-27980). Returns a
-// malloc'd path or NULL.
-static wchar_t *try_in_dir(const wchar_t *dir, size_t dirlen, const wchar_t *name, int has_ext) {
-	static const wchar_t *exts[] = { L"", L".com", L".exe" };
-	size_t nl = wcslen(name);
-	wchar_t *buf = (wchar_t *)malloc((dirlen + 1 + nl + 5) * sizeof(wchar_t));
-	if (!buf) return NULL;
-	for (int i = has_ext ? 0 : 1; i < 3; i++) {
-		size_t o = 0;
-		if (dirlen) {
-			memcpy(buf, dir, dirlen * sizeof(wchar_t)); o = dirlen;
-			if (buf[o - 1] != L'\\' && buf[o - 1] != L'/' && buf[o - 1] != L':') buf[o++] = L'\\';
-		}
-		memcpy(buf + o, name, nl * sizeof(wchar_t)); o += nl;
-		wcscpy(buf + o, exts[i]);
-		if (is_regular_file(buf)) return buf;
-	}
-	free(buf);
-	return NULL;
-}
-
-// search_program resolves argv[0] to the executable the child will run, as
-// libuv's search_path does — against the CHILD's working directory and the
-// CHILD's PATH (a custom `env` redirects the lookup, which CreateProcessW's own
-// search, keyed on the parent, cannot honour). A name with a directory part is
-// looked up there only; a bare name is tried in the working directory and then
-// along PATH. NULL when nothing matches (the spawn then fails ENOENT).
-static wchar_t *search_program(const wchar_t *file, const wchar_t *cwd, const wchar_t *path) {
-	size_t fl = wcslen(file);
-	if (fl == 0 || file[fl - 1] == L'\\' || file[fl - 1] == L'/' || file[fl - 1] == L':') return NULL;
-	const wchar_t *base = file + fl;
-	while (base > file && base[-1] != L'\\' && base[-1] != L'/' && base[-1] != L':') base--;
-	const wchar_t *dot = wcsrchr(base, L'.');
-	int has_ext = dot && dot[1] != 0;
-	wchar_t *cwdbuf = NULL;
-	if (!cwd) {
-		cwdbuf = (wchar_t *)malloc(32768 * sizeof(wchar_t));
-		DWORD n = cwdbuf ? GetCurrentDirectoryW(32768, cwdbuf) : 0;
-		cwd = (n && n < 32768) ? cwdbuf : L".";
-	}
-	wchar_t *r = NULL;
-	if (base != file) {
-		// A directory part: absolute as is, otherwise relative to the child's cwd.
-		size_t dl = (size_t)(base - file);
-		int absolute = file[0] == L'\\' || file[0] == L'/' || (fl > 1 && file[1] == L':');
-		if (absolute) {
-			r = try_in_dir(file, dl, base, has_ext);
-		} else {
-			size_t cl = wcslen(cwd);
-			wchar_t *dir = (wchar_t *)malloc((cl + 1 + dl + 1) * sizeof(wchar_t));
-			if (dir) {
-				memcpy(dir, cwd, cl * sizeof(wchar_t));
-				size_t o = cl;
-				if (o && dir[o - 1] != L'\\' && dir[o - 1] != L'/') dir[o++] = L'\\';
-				memcpy(dir + o, file, dl * sizeof(wchar_t)); o += dl;
-				r = try_in_dir(dir, o, base, has_ext);
-				free(dir);
-			}
-		}
-		free(cwdbuf);
-		return r;
-	}
-	r = try_in_dir(cwd, wcslen(cwd), file, has_ext);
-	for (const wchar_t *d = path; !r && d && *d;) {
-		const wchar_t *end = d;
-		int quoted = 0;
-		while (*end && (quoted || *end != L';')) { if (*end == L'"') quoted = !quoted; end++; }
-		const wchar_t *ds = d; size_t dl = (size_t)(end - d);
-		if (dl >= 2 && ds[0] == L'"' && ds[dl - 1] == L'"') { ds++; dl -= 2; }
-		if (dl) r = try_in_dir(ds, dl, file, has_ext);
-		d = *end ? end + 1 : end;
-	}
-	free(cwdbuf);
-	return r;
-}
-
 // ---- spawn ------------------------------------------------------------------------------
-// __kml_win_spawn(file, argv, cwd, in_fd, out_fd, err_fd, inherit_fd, flags):
-// file is the program, found by search_program (libuv's lookup against the
-// child's cwd and PATH); argv is NULL-terminated with argv[0] the name the
-// child sees; in/out/err are the pipe ends the child owns as fds 0/1/2 (-1
-// inherits ours); inherit_fd (-1 or a socket fd) reaches the child under
-// the same fd number, for cluster IPC. flags bit 0 is Node's
-// windowsVerbatimArguments: the arguments join with single spaces and no
-// quoting — set by the shell (`cmd.exe /d /s /c <command>`) paths, where
-// libuv passes the command line through verbatim. Returns the pid, or -1
-// with errno set (ENOENT when CreateProcess cannot find the program).
-int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, int out_fd, int err_fd, int inherit_fd, int flags, char **spawn_env) {
-	int verbatim = flags & 1;
-	// flags bit 1 = windowsHide (CREATE_NO_WINDOW, ADR-00763); flags bit 2 =
-	// detached (DETACHED_PROCESS + CREATE_NEW_PROCESS_GROUP so the child has no
-	// console and its own group, ADR-00765). DETACHED_PROCESS already implies no
-	// window and is mutually exclusive with CREATE_NO_WINDOW, so detached wins.
-	DWORD create_flag;
-	if (flags & 4) create_flag = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-	else if (flags & 2) create_flag = CREATE_NO_WINDOW;
-	else create_flag = 0;
+// A child process is libuv's uv_spawn (klainpool.c, TDD-00252 Stage 3); what
+// it asks of this layer is below. The one CreateProcessW left is the
+// http.listen({ workers }) cluster re-spawn, which hands each worker the
+// primary's listening sockets.
+
+// __kml_win_is_batch_file: whether file names a .bat or .cmd, which Node
+// refuses to spawn without a shell (EINVAL).
+int __kml_win_is_batch_file(const char *file) {
+	return is_batch_file(file);
+}
+
+// __kml_win_spawn_is_self: whether the spawn runs this executable, directly
+// or through a shell's command line (ADR-00972, ADR-01581).
+int __kml_win_spawn_is_self(const char *file, char **argv, char **env) {
+	return (file && *file && is_self_word(file)) || shell_runs_self(argv, env);
+}
+
+// __kml_win_fd_crt: a CRT descriptor over a duplicate of fd's handle, the
+// currency of libuv's Windows calls (uv_pipe_open, uv_tty_init,
+// UV_INHERIT_FD), or -1 with errno set. A socket shared with a child that
+// way releases only its own handle at its close.
+int __kml_win_fd_crt(int fd) {
+	HANDLE h = kfd_handle(fd), d;
+	if (!h || h == INVALID_HANDLE_VALUE ||
+	    !DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &d, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+		errno = L_EBADF;
+		return -1;
+	}
+	int crt = _open_osfhandle((intptr_t)d, 0);
+	if (crt < 0) {
+		CloseHandle(d);
+		errno = L_EMFILE;
+		return -1;
+	}
+	if (kfd_kind_of(fd) == KFD_SOCKET) kfd_set_inherited(fd);
+	return crt;
+}
+
+// __kml_win_spawn_worker(exe, argv): re-spawn this executable as a cluster
+// worker (runtime_spawn_win.go). It inherits our stdio and every listening
+// socket this process holds, each with the far end of a socket pair the
+// primary deals that listener's connections over (win32io.c, "cluster
+// round-robin"), plus the cluster's close-flag section. The handles reach
+// the worker as CRT descriptors (STARTUPINFO's lpReserved2, the table the
+// worker's CRT rebuilds before main, as libuv hands a child its descriptors);
+// the environment names only their numbers. KML_WIN_RR is the primary's pid,
+// then the listeners as fd:listener-descriptor:channel-descriptor:nonblock,
+// the worker adopting each listener under the fd number it has here;
+// KML_WIN_FLAG is the section's descriptor. Returns the pid, or -1.
+int __kml_win_spawn_worker(const char *exe, char **argv) {
 	size_t total = 1;
 	int argc = 0;
 	for (; argv[argc]; argc++) total += strlen(argv[argc]) * 2 + 4;
-	if (!verbatim && (is_batch_file(argv[0]) || is_batch_file(file))) {
-		// Without a shell, a .bat/.cmd on the command line would be run by
-		// an implicit cmd.exe with cmd's own parsing — argument injection.
-		// Node refuses with EINVAL (CVE-2024-27980); surface it through the
-		// same failed-spawn path CreateProcess errors take.
-		errno = L_EINVAL;
-		static DWORD next_pseudo_bat = 0x7e000000;
-		kml_proc *bpr = proc_slot(next_pseudo_bat++, 1);
-		if (!bpr) return -1;
-		bpr->h = NULL;
-		bpr->failed = 1;
-		bpr->spawnerrno = L_EINVAL;
-		return (int)bpr->pid;
-	}
 	wchar_t *cmd = (wchar_t *)malloc(total * sizeof(wchar_t) * 2);
-	if (!cmd) { errno = L_EINVAL; return -1; }
+	wchar_t *app = wide_alloc(exe);
+	if (!cmd || !app) { free(cmd); free(app); errno = L_EINVAL; return -1; }
 	wchar_t *p = cmd;
 	for (int i = 0; i < argc; i++) {
 		wchar_t *wa = wide_alloc(argv[i]);
-		if (!wa) { free(cmd); errno = L_EINVAL; return -1; }
+		if (!wa) { free(cmd); free(app); errno = L_EINVAL; return -1; }
 		if (i) *p++ = L' ';
-		if (verbatim) { for (wchar_t *q = wa; *q; q++) *p++ = *q; }
-		else p = quote_arg(p, wa);
+		p = quote_arg(p, wa);
 		free(wa);
 	}
 	*p = 0;
-	wchar_t *wcwd = cwd ? wide_alloc(cwd) : NULL;
 
 	STARTUPINFOEXW siex;
 	memset(&siex, 0, sizeof siex);
 	siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
-	HANDLE hin = inheritable_std(in_fd, STD_INPUT_HANDLE, 1);
-	HANDLE hout = inheritable_std(out_fd, STD_OUTPUT_HANDLE, 0);
-	HANDLE herr = inheritable_std(err_fd, STD_ERROR_HANDLE, 0);
+	HANDLE hin = inheritable_std(STD_INPUT_HANDLE, 1);
+	HANDLE hout = inheritable_std(STD_OUTPUT_HANDLE, 0);
+	HANDLE herr = inheritable_std(STD_ERROR_HANDLE, 0);
 	siex.StartupInfo.hStdInput = hin; siex.StartupInfo.hStdOutput = hout; siex.StartupInfo.hStdError = herr;
 
-	// Environment. A custom spawn_env (a NULL-terminated UTF-8 "KEY=val" list)
-	// fully REPLACES the child's, matching Node (ADR-00762); otherwise
-	// CreateProcessW inherits ours. The inherited-socket marker (cluster IPC)
-	// is appended to whichever block is built.
-	wchar_t *env = NULL;
-	HANDLE hinh = INVALID_HANDLE_VALUE;
-	wchar_t markerbuf[96];
-	const wchar_t *markers[4];
-	int nmarkers = 0;
-	// flags bit 0x20000 = cluster worker (the http.listen({ workers }) re-spawn):
-	// it inherits every listening socket this process holds, each with the far
-	// end of a socket pair the primary deals that listener's connections over
-	// (win32io.c, "cluster round-robin"). KML_WIN_RR is the primary's pid, then
-	// the listeners as fd:listener-handle:channel-handle:nonblock, the worker
-	// adopting each listener under the fd number it has here.
 	enum { RR_MAX = 16 };
+	const wchar_t *markers[2];
+	int nmarkers = 0;
 	int rr_fd[RR_MAX], rr_near[RR_MAX], rr_n = 0;
 	HANDLE rr_lh[RR_MAX], rr_ch[RR_MAX];
 	wchar_t rrbuf[32 + RR_MAX * 64], flagbuf[64];
 	HANDLE flag_h = INVALID_HANDLE_VALUE;
-	if (flags & 0x20000) {
-		// The close-flag section, inheritable, so a worker that is still starting
-		// up when the cluster shuts down still shares the primary's page.
-		if (__kml_win_cluster_flag() != (void *)(intptr_t)-1 &&
-		    DuplicateHandle(GetCurrentProcess(), kml_flag_section, GetCurrentProcess(),
-		                    &flag_h, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
-			wsprintfW(flagbuf, L"KML_WIN_FLAG=%I64u", (unsigned long long)(uintptr_t)flag_h);
-			markers[nmarkers++] = flagbuf;
-		} else {
-			flag_h = INVALID_HANDLE_VALUE;
-		}
-		int lfds[RR_MAX];
-		int nl = kfd_listeners(lfds, RR_MAX);
-		wchar_t *rp = rrbuf + wsprintfW(rrbuf, L"KML_WIN_RR=%lu|", (unsigned long)kml_cluster_primary());
-		for (int i = 0; i < nl; i++) {
-			int sv[2];
-			if (socketpair(0, 0, 0, sv) != 0) continue;
-			HANDLE lh = inheritable_dup(lfds[i]), ch = inheritable_dup(sv[1]);
-			close(sv[1]);
-			if (lh == INVALID_HANDLE_VALUE || ch == INVALID_HANDLE_VALUE) {
-				if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
-				if (ch != INVALID_HANDLE_VALUE) CloseHandle(ch);
-				close(sv[0]);
-				continue;
-			}
-			rr_fd[rr_n] = lfds[i]; rr_near[rr_n] = sv[0]; rr_lh[rr_n] = lh; rr_ch[rr_n] = ch;
-			rp += wsprintfW(rp, L"%s%d:%I64u:%I64u:%d", rr_n ? L";" : L"", lfds[i],
-			                (unsigned long long)(uintptr_t)lh, (unsigned long long)(uintptr_t)ch, kfd_nonblock_of(lfds[i]));
-			rr_n++;
-		}
-		markers[nmarkers++] = rrbuf;
+	// The worker's CRT descriptors: its stdio, then the section, then each
+	// listener and its channel.
+	HANDLE crt_h[4 + 2 * RR_MAX];
+	int ncrt = 3;
+	crt_h[0] = hin; crt_h[1] = hout; crt_h[2] = herr;
+	// The close-flag section, inheritable, so a worker that is still starting
+	// up when the cluster shuts down still shares the primary's page.
+	if (__kml_win_cluster_flag() != (void *)(intptr_t)-1 &&
+	    DuplicateHandle(GetCurrentProcess(), kml_flag_section, GetCurrentProcess(),
+	                    &flag_h, 0, TRUE, DUPLICATE_SAME_ACCESS)) {
+		wsprintfW(flagbuf, L"KML_WIN_FLAG=%d", ncrt);
+		crt_h[ncrt++] = flag_h;
+		markers[nmarkers++] = flagbuf;
+	} else {
+		flag_h = INVALID_HANDLE_VALUE;
 	}
-	if (inherit_fd >= 0) {
-		hinh = inheritable_dup(inherit_fd);
-		wsprintfW(markerbuf, L"KML_WIN_INHERIT_FD=%d:%I64u", inherit_fd, (unsigned long long)(uintptr_t)hinh);
-		markers[nmarkers++] = markerbuf;
+	int lfds[RR_MAX];
+	int nl = kfd_listeners(lfds, RR_MAX);
+	wchar_t *rp = rrbuf + wsprintfW(rrbuf, L"KML_WIN_RR=%lu|", (unsigned long)kml_cluster_primary());
+	for (int i = 0; i < nl; i++) {
+		int sv[2];
+		if (socketpair(0, 0, 0, sv) != 0) continue;
+		HANDLE lh = inheritable_dup(lfds[i]), ch = inheritable_dup(sv[1]);
+		close(sv[1]);
+		if (lh == INVALID_HANDLE_VALUE || ch == INVALID_HANDLE_VALUE) {
+			if (lh != INVALID_HANDLE_VALUE) CloseHandle(lh);
+			if (ch != INVALID_HANDLE_VALUE) CloseHandle(ch);
+			close(sv[0]);
+			continue;
+		}
+		rr_fd[rr_n] = lfds[i]; rr_near[rr_n] = sv[0]; rr_lh[rr_n] = lh; rr_ch[rr_n] = ch;
+		rp += wsprintfW(rp, L"%s%d:%d:%d:%d", rr_n ? L";" : L"", lfds[i], ncrt, ncrt + 1, kfd_nonblock_of(lfds[i]));
+		crt_h[ncrt++] = lh;
+		crt_h[ncrt++] = ch;
+		rr_n++;
 	}
-	// A self-spawn (target is this executable) is marked so the child's startup
-	// guard refuses to re-run main — otherwise it ignores argv and re-forks (a
-	// fork bomb). Only the child_process spawn/spawnSync/execFileSync paths set
-	// the guard bit (flags & 0x10000); the cluster / child_process.fork /
-	// http-cluster re-exec of ourselves is a DELIBERATE self-run (the worker
-	// detects its channel/id and does worker work) and must NOT be marked — the
-	// POSIX side likewise marks only the child_process spawn sites, not execv of
-	// a cluster worker. Injected even when a custom spawn_env replaces the block.
-	if ((flags & 0x10000) && is_self_spawn(file, argv)) markers[nmarkers++] = L"KML_KLAIN_REEXEC=1";
-	env = build_env_block(spawn_env, (const wchar_t **)markers, nmarkers);
+	markers[nmarkers++] = rrbuf;
+	wchar_t *env = build_env_block(NULL, markers, nmarkers);
+	// The CRT's inherited-descriptor block: a count, a flag byte per
+	// descriptor (FOPEN | FPIPE: open, and taken as it is), then the handles.
+	size_t crt_sz = sizeof(int) + (size_t)ncrt + (size_t)ncrt * sizeof(HANDLE);
+	unsigned char *crt_blk = (unsigned char *)calloc(1, crt_sz);
+	if (crt_blk) {
+		memcpy(crt_blk, &ncrt, sizeof(int));
+		for (int i = 0; i < ncrt; i++) {
+			int open = crt_h[i] && crt_h[i] != INVALID_HANDLE_VALUE;
+			crt_blk[sizeof(int) + i] = open ? 0x01 | 0x08 : 0;
+			HANDLE h = open ? crt_h[i] : INVALID_HANDLE_VALUE;
+			memcpy(crt_blk + sizeof(int) + ncrt + (size_t)i * sizeof(HANDLE), &h, sizeof(HANDLE));
+		}
+		siex.StartupInfo.cbReserved2 = (WORD)crt_sz;
+		siex.StartupInfo.lpReserved2 = crt_blk;
+	}
 
-	// Resolve the program against the child's cwd and PATH (libuv's search), and
-	// hand CreateProcessW the result so its own parent-keyed search — which also
-	// looks in this executable's directory and the system directories first —
-	// never runs.
-	// `file` is the program to run (execvp's first argument); argv[0] is only
-	// what the child sees as its own name.
-	wchar_t *wfile = wide_alloc((file && *file) ? file : argv[0]);
-	wchar_t *parent_path = NULL;
-	const wchar_t *child_path = env ? block_lookup(env, L"PATH") : NULL;
-	if (!env) {
-		DWORD pn = GetEnvironmentVariableW(L"PATH", NULL, 0);
-		if (pn && (parent_path = (wchar_t *)malloc((pn + 1) * sizeof(wchar_t)))) {
-			GetEnvironmentVariableW(L"PATH", parent_path, pn);
-			child_path = parent_path;
-		}
-	}
-	wchar_t *app = wfile ? search_program(wfile, wcwd, child_path) : NULL;
-	free(wfile); free(parent_path);
-
-	// bInheritHandles=TRUE inherits EVERY inheritable handle in the process
-	// unless an explicit PROC_THREAD_ATTRIBUTE_HANDLE_LIST narrows it to
-	// exactly the handles meant for this child — libuv's practice, and the
-	// difference between "safe by convention" and safe (ADR-00737). If the
-	// attribute list cannot be built, fall back to the old wide inherit.
-	HANDLE inherit_list[5 + 2 * RR_MAX];
+	// Exactly the handles meant for the worker (PROC_THREAD_ATTRIBUTE_HANDLE_LIST),
+	// not every inheritable handle in the process (ADR-00737).
+	HANDLE inherit_list[4 + 2 * RR_MAX];
 	DWORD nlist = 0;
 	if (hin && hin != INVALID_HANDLE_VALUE) inherit_list[nlist++] = hin;
 	if (hout && hout != INVALID_HANDLE_VALUE) inherit_list[nlist++] = hout;
 	if (herr && herr != INVALID_HANDLE_VALUE) inherit_list[nlist++] = herr;
-	if (hinh != INVALID_HANDLE_VALUE) inherit_list[nlist++] = hinh;
 	for (int i = 0; i < rr_n; i++) { inherit_list[nlist++] = rr_lh[i]; inherit_list[nlist++] = rr_ch[i]; }
 	if (flag_h != INVALID_HANDLE_VALUE) inherit_list[nlist++] = flag_h;
 	SIZE_T asz = 0;
@@ -558,41 +508,24 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 
 	PROCESS_INFORMATION pi;
 	memset(&pi, 0, sizeof pi);
-	BOOL ok = app && CreateProcessW(app, cmd, NULL, NULL, TRUE,
-	                         CREATE_UNICODE_ENVIRONMENT | create_flag | (attrok ? EXTENDED_STARTUPINFO_PRESENT : 0),
-	                         env, wcwd, &siex.StartupInfo, &pi);
-	DWORD err = app ? GetLastError() : ERROR_FILE_NOT_FOUND;
-	free(app); free(cmd); free(wcwd); free(env);
+	BOOL ok = CreateProcessW(app, cmd, NULL, NULL, TRUE,
+	                         CREATE_UNICODE_ENVIRONMENT | (attrok ? EXTENDED_STARTUPINFO_PRESENT : 0),
+	                         env, NULL, &siex.StartupInfo, &pi);
+	free(app); free(cmd); free(env); free(crt_blk);
 	if (attrok) DeleteProcThreadAttributeList(attrs);
 	free(attrs);
 	if (hin && hin != INVALID_HANDLE_VALUE) CloseHandle(hin);
 	if (hout && hout != INVALID_HANDLE_VALUE) CloseHandle(hout);
 	if (herr && herr != INVALID_HANDLE_VALUE) CloseHandle(herr);
-	if (hinh != INVALID_HANDLE_VALUE) CloseHandle(hinh);
 	for (int i = 0; i < rr_n; i++) { CloseHandle(rr_lh[i]); CloseHandle(rr_ch[i]); }
 	if (flag_h != INVALID_HANDLE_VALUE) CloseHandle(flag_h);
 	if (!ok) {
 		for (int i = 0; i < rr_n; i++) close(rr_near[i]);
-		// On POSIX a program that cannot be exec'd still yields a child, one
-		// that _exit(127)s (Node's exec-failure convention), and every caller
-		// reads that through waitpid. Mirror it: hand back a pseudo-pid whose
-		// waitpid reports exit status 127 immediately. Pseudo-pids sit above
-		// the real pid range so they never collide with a live process.
-		static DWORD next_pseudo = 0x7f000000;
-		errno = (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) ? L_ENOENT : err == ERROR_ACCESS_DENIED ? L_EACCES : L_EINVAL;
-		kml_proc *pr = proc_slot(next_pseudo++, 1);
-		if (!pr) return -1;
-		pr->h = NULL;
-		pr->failed = 1;
-		pr->spawnerrno = errno;
-		return (int)pr->pid;
+		errno = L_ENOENT;
+		return -1;
 	}
 	CloseHandle(pi.hThread);
-	kml_proc *pr = proc_slot(pi.dwProcessId, 1);
-	if (pr) pr->h = pi.hProcess; else CloseHandle(pi.hProcess);
-	// The child now shares the socket object behind inherit_fd; the parent's
-	// close() of that fd must release only its own handle (win32io.c).
-	if (inherit_fd >= 0 && inherit_fd < KFD_MAX && kfd_kind_of(inherit_fd) == KFD_SOCKET) kfd_set_inherited(inherit_fd);
+	CloseHandle(pi.hProcess);
 	for (int i = 0; i < rr_n; i++) {
 		kfd_set_inherited(rr_fd[i]);
 		kfd_rr_add_worker(rr_fd[i], pi.dwProcessId, rr_near[i]);
@@ -600,34 +533,46 @@ int __kml_win_spawn(const char *file, char **argv, const char *cwd, int in_fd, i
 	return (int)pi.dwProcessId;
 }
 
-// __kml_win_spawn_failed(pid): the Linux-ABI errno a failed CreateProcessW
-// mapped to (0 if the child actually started), so the IR can fire the spawn
-// 'error' event instead of a bogus exit 127 (ADR-00754). There is no fork on
-// Windows, so this replaces the POSIX status-pipe path.
-int __kml_win_spawn_failed(int pid) {
-	kml_proc *pr = proc_slot((DWORD)pid, 0);
-	if (pr && pr->failed) return pr->spawnerrno ? pr->spawnerrno : L_ENOENT;
-	return 0;
+// __kml_win_getppid: process.ppid, the process that created this one (the
+// ParentProcessId libuv's uv_os_getppid reads), or -1 if it cannot be read.
+int __kml_win_getppid(void) {
+	DWORD self = GetCurrentProcessId();
+	HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+	if (snap == INVALID_HANDLE_VALUE) return -1;
+	PROCESSENTRY32W pe;
+	pe.dwSize = sizeof pe;
+	int ppid = -1;
+	for (BOOL ok = Process32FirstW(snap, &pe); ok; ok = Process32NextW(snap, &pe)) {
+		if (pe.th32ProcessID == self) {
+			ppid = (int)pe.th32ParentProcessID;
+			break;
+		}
+	}
+	CloseHandle(snap);
+	return ppid;
 }
 
-// Child side of inherit_fd: runs before main() and re-homes the inherited
-// socket handle at the fd number the parent advertised.
-__attribute__((constructor)) static void kml_win_adopt_inherited(void) {
-	char buf[96];
-	if (!GetEnvironmentVariableA("KML_WIN_INHERIT_FD", buf, sizeof buf)) return;
-	int want = atoi(buf);
-	char *colon = strchr(buf, ':');
-	if (!colon) return;
-	unsigned long long hv = strtoull(colon + 1, NULL, 10);
+// Child side of the IPC channel: Node's parent puts the channel at the stdio
+// slot NODE_CHANNEL_FD names, which libuv hands over through the CRT's
+// descriptor table (UV_INHERIT_FD). The socket behind that CRT descriptor is
+// adopted into this layer's socket range before main() runs, and the
+// variable is pointed at the descriptor it has here. The child's runtime
+// reads it once and deletes it, as Node does.
+__attribute__((constructor)) static void kml_win_adopt_channel(void) {
+	char chan[16];
+	if (!GetEnvironmentVariableA("NODE_CHANNEL_FD", chan, sizeof chan)) return;
+	int crt = atoi(chan);
+	HANDLE h = (HANDLE)_get_osfhandle(crt);
+	if (h == INVALID_HANDLE_VALUE || GetFileType(h) != FILE_TYPE_PIPE) return;
 	ws_init();
-	// The parent's socket fds come from the socket range, so the same number
-	// is free here: adopt the inherited handle under it directly.
-	if (kfd_adopt_socket((HANDLE)(uintptr_t)hv, want) < 0) kfd_register((HANDLE)(uintptr_t)hv, KFD_SOCKET);
-	// Scrub the marker (it carries a raw handle value) from BOTH views: the
-	// Win32 block, and the CRT snapshot getenv/process.env read — the CRT
-	// copies the environment before constructors run (ADR-00737).
-	SetEnvironmentVariableA("KML_WIN_INHERIT_FD", NULL);
-	_putenv("KML_WIN_INHERIT_FD=");
+	int fd = kfd_register(h, KFD_SOCKET);
+	if (fd < 0) return;
+	char set[48];
+	snprintf(set, sizeof set, "NODE_CHANNEL_FD=%d", fd);
+	SetEnvironmentVariableA("NODE_CHANNEL_FD", set + 16);
+	_putenv(set);
+	// Its peer, for a socket sent over it: the parent.
+	__kml_win_ipc_set_peer(fd, __kml_win_getppid());
 }
 
 // A cluster worker does not outlive its primary: Node's worker exits when its
@@ -665,7 +610,8 @@ __attribute__((constructor)) static void kml_win_adopt_cluster(void) {
 	kml_watch_primary(kml_cluster_primary_pid);
 	char fb[64];
 	if (GetEnvironmentVariableA("KML_WIN_FLAG", fb, sizeof fb)) {
-		kml_flag_inherited = (HANDLE)(uintptr_t)strtoull(fb, NULL, 10);
+		HANDLE fh = (HANDLE)_get_osfhandle(atoi(fb));
+		if (fh != INVALID_HANDLE_VALUE) kml_flag_inherited = fh;
 		SetEnvironmentVariableA("KML_WIN_FLAG", NULL);
 		_putenv("KML_WIN_FLAG=");
 	}
@@ -675,8 +621,8 @@ __attribute__((constructor)) static void kml_win_adopt_cluster(void) {
 		char *c1 = strchr(q, ':');
 		char *c2 = c1 ? strchr(c1 + 1, ':') : NULL;
 		if (!c2) break;
-		HANDLE lh = (HANDLE)(uintptr_t)strtoull(c1 + 1, NULL, 10);
-		HANDLE ch = (HANDLE)(uintptr_t)strtoull(c2 + 1, NULL, 10);
+		HANDLE lh = (HANDLE)_get_osfhandle(atoi(c1 + 1));
+		HANDLE ch = (HANDLE)_get_osfhandle(atoi(c2 + 1));
 		char *c3 = strchr(c2 + 1, ':');
 		if (kfd_adopt_socket(lh, fd) >= 0) { fds[n] = fd; chans[n] = ch; nbs[n] = c3 ? atoi(c3 + 1) : 0; n++; }
 		q = strchr(c2, ';');
@@ -728,70 +674,7 @@ char *__kml_win_self_exe(void) {
 	return s;
 }
 
-// ---- exit watch ---------------------------------------------------------------------------
-// __kml_win_child_watch(pid): wake the calling thread's reactor when the child
-// ends (TDD-00223 §5) — a registered wait on the process handle whose callback
-// posts a packet to that reactor's completion port, which is how libuv learns
-// of a child's exit on Windows. The loop then reaps it with waitpid(WNOHANG)
-// and fires 'exit', however long the child's stdio stays open. A process that
-// has already ended fires the callback at once.
-void *__kml_win_reactor_port(void);
-void __kml_win_port_wake(void *port);
-static void CALLBACK kml_child_exit_cb(void *port, BOOLEAN timed_out) {
-	(void)timed_out;
-	__kml_win_port_wake(port);
-}
-void __kml_win_child_watch(int pid) {
-	kml_proc *pr = proc_slot((DWORD)pid, 0);
-	if (!pr || !pr->h || pr->wait) return;
-	if (!RegisterWaitForSingleObject(&pr->wait, pr->h, kml_child_exit_cb, __kml_win_reactor_port(),
-	                                 INFINITE, WT_EXECUTEONLYONCE | WT_EXECUTEINWAITTHREAD))
-		pr->wait = NULL;
-}
-
-// ---- wait / kill -------------------------------------------------------------------------
-// Status is encoded the POSIX way the IR decodes: (code << 8) for a normal
-// exit, the signal number in the low bits when kill() terminated it — so
-// Node's { exitCode: null, signal: 'SIGTERM' } shape survives.
-int waitpid(int pid, int *status, int options) {
-	kml_proc *pr = proc_slot((DWORD)pid, 0);
-	if (pr && pr->failed) {
-		// A spawn that never started: the "child exited 127" of exec failure.
-		if (status) *status = 127 << 8;
-		pr->pid = 0;
-		return pid;
-	}
-	if (pr && pr->reaped) { errno = L_ECHILD; return -1; }
-	HANDLE h = pr ? pr->h : OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-	if (!h) { errno = L_ECHILD; return -1; }
-	DWORD w = WaitForSingleObject(h, (options & 1) ? 0 : INFINITE);
-	if (w == WAIT_TIMEOUT) { if (!pr) CloseHandle(h); return 0; }
-	DWORD code = 0;
-	GetExitCodeProcess(h, &code);
-	// The full 32-bit code (e.g. 0xC0000005 for an access violation) cannot
-	// fit the POSIX wait word's 8-bit exit field, so stash it in the slot for
-	// __kml_win_exit_code to hand back the wide value (ADR-00759). *status
-	// keeps the POSIX encoding for WIFEXITED/WIFSIGNALED shape.
-	if (pr && !pr->killsig) pr->exitcode = code;
-	int st = (pr && pr->killsig) ? (pr->killsig & 0x7f) : (int)((code & 0xff) << 8);
-	if (status) *status = st;
-	// The exit watch holds the handle: retire it (waiting out a callback that is
-	// mid-flight) before the handle it waits on is closed.
-	if (pr && pr->wait) { UnregisterWaitEx(pr->wait, INVALID_HANDLE_VALUE); pr->wait = NULL; }
-	CloseHandle(h);
-	if (pr) { pr->h = NULL; pr->reaped = 1; }
-	return pid;
-}
-
-// Full 32-bit exit code of a (reaped) child, for the wide exit-code path the
-// POSIX 8-bit wait status cannot carry (ADR-00759). -1 when the pid has no
-// slot (e.g. an OpenProcess-attached pid), so callers fall back to
-// WEXITSTATUS's low 8 bits.
-int __kml_win_exit_code(int pid) {
-	kml_proc *pr = proc_slot((DWORD)pid, 0);
-	return pr ? (int)pr->exitcode : -1;
-}
-
+// ---- kill ---------------------------------------------------------------------------------
 // Delivers a signal to our own process through the handler queue (defined with
 // the signal machinery below); returns 1 when queued, 0 when there is no
 // handler to run.
@@ -799,11 +682,16 @@ static int kml_deliver_self_signal(int sig);
 
 int kill(int pid, int sig) {
 	if (sig == 0) {
-		kml_proc *pr0 = proc_slot((DWORD)pid, 0);
-		if (pr0 && pr0->reaped) { errno = L_ESRCH; return -1; }
+		// libuv's health check: a process that has exited but whose handle
+		// is still held (by its parent, until reaped) opens fine, so the exit
+		// code decides.
 		HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
 		if (!h) { errno = GetLastError() == ERROR_ACCESS_DENIED ? L_EACCES : L_ESRCH; return -1; }
+		DWORD status = 0;
+		BOOL got = GetExitCodeProcess(h, &status);
 		CloseHandle(h);
+		if (!got) { errno = L_EACCES; return -1; }
+		if (status != STILL_ACTIVE) { errno = L_ESRCH; return -1; }
 		return 0;
 	}
 	// A signal to OURSELVES with a registered handler is delivered to that
@@ -817,16 +705,17 @@ int kill(int pid, int sig) {
 	// unconditionally; any other signal has no Windows meaning and is ENOSYS
 	// (Node throws `kill ENOSYS`), rather than silently killing the process.
 	if (sig != 15 && sig != 9 && sig != 2 && sig != 3) { errno = L_ENOSYS; return -1; }
-	kml_proc *pr = proc_slot((DWORD)pid, 0);
-	// A child this process already reaped is gone: ESRCH from the table,
-	// never OpenProcess(pid) — the pid may belong to an unrelated process
-	// by now (libuv's uv_kill answers UV_ESRCH for an exited child too).
-	if (pr && pr->reaped) { errno = L_ESRCH; return -1; }
-	HANDLE h = pr ? pr->h : OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+	HANDLE h = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
 	if (!h) { errno = L_ESRCH; return -1; }
 	int ok = TerminateProcess(h, 1);
-	if (pr) pr->killsig = sig; else CloseHandle(h);
-	return ok ? 0 : (errno = L_EACCES, -1);
+	// As libuv: terminating a process that already exited is ESRCH, not a
+	// permission error.
+	DWORD status = 0;
+	int gone = !ok && GetExitCodeProcess(h, &status) && status != STILL_ACTIVE;
+	CloseHandle(h);
+	if (ok) return 0;
+	errno = gone ? L_ESRCH : L_EACCES;
+	return -1;
 }
 
 // socketpair(AF_UNIX, SOCK_STREAM): a connected loopback TCP pair. libuv

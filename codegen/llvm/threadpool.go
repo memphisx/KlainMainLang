@@ -71,6 +71,9 @@ func (e *Emitter) ThreadPoolCFlags() []string {
 	// program, and the link drops what one does not use.
 	if e.usedZlibNatives {
 		cflags = append(cflags, "-DKLAINPOOL_ZLIB=1")
+		if winSelfContained(e.opts.Target.OS()) {
+			cflags = append(cflags, "-DKZ_STATIC=1") // Brotli and Zstd from the link
+		}
 	}
 	if e.usedSqliteNatives {
 		cflags = append(cflags, "-DKLAINPOOL_SQLITE=1")
@@ -107,6 +110,13 @@ func (e *Emitter) ensureZlibNatives() {
 	}
 	e.usedZlibNatives = true
 	e.requireLink("z")
+	if winSelfContained(e.opts.Target.OS()) {
+		// A self-contained build links what is otherwise loaded at run time
+		// (TDD-00253); the encoder and decoder before their common part.
+		for _, l := range []string{"brotlienc", "brotlidec", "brotlicommon", "zstd"} {
+			e.requireLink(l)
+		}
+	}
 	if e.opts.Target.OS() == "linux" {
 		e.requireLink("dl") // libbrotli and libzstd load with dlopen
 	}

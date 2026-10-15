@@ -51,8 +51,6 @@ declare void @__kml_pop_jmpbuf()
 declare ptr @__kml_jmp_unwind_slot()
 declare ptr @__kml_jmp_stack_new()
 declare void @__kml_jmp_stack_free(ptr)`)
-	// The uncaught-error line (emit_unhandled.go prints it too).
-	e.emitGlobal(`@.kml_unc_fmt  = private unnamed_addr constant [14 x i8] c"Uncaught: %s\0A\00", align 1`)
 	if e.opts.Target.OS() == "windows" {
 		e.emitGlobal(`declare i32 @_setjmp(ptr, ptr) returns_twice`)
 	} else {
@@ -71,6 +69,7 @@ declare void @__kml_throw(ptr)
 declare void @__kml_throw_any(i8, i64)
 declare i8 @__kml_caught_tag(i8, i64)
 declare ptr @__kml_caught_unc_msg(i8, i64)
+declare void @__kml_print_uncaught(i8, i64)
 declare zeroext i1 @__kml_process_uncaught_guarded(i8, i64, i1)`)
 }
 

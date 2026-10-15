@@ -4,9 +4,9 @@
  * anything keeps the loop alive; fold the extra deadlines into the wait;
  * run libuv once, where every handle's callback runs and the HTTP
  * listeners' and connection fibers' watchers record readiness; accept on
- * the ready listeners; resume the ready connection fibers. Windows still
- * builds select() sets from each subsystem's *_fdset_add hook and scans
- * the JS timer queue itself.
+ * the ready listeners; resume the ready connection fibers. Windows runs
+ * the same loop on libuv's Windows backend, polling sockets by their
+ * SOCKET (TDD-00252).
  *
  * Compile-time options (cflags from the emitter):
  *   KML_GC_SB=0|1|2|3  how a resumed fiber's GC stack bottom is set: none,
@@ -24,15 +24,6 @@ typedef unsigned char u8;
 #define KML_FIBER_STACK (1024 * 1024)
 #endif
 
-#ifdef _WIN32
-/* Windows keeps win32io.c's select() over its IOCP until TDD-00244 Stage 6;
- * its sets are 1024-bit bitmaps. */
-#define FDSET_BYTES 128
-void *memset(void *, int, unsigned long);
-void *realloc(void *, unsigned long);
-int select(int, void *, void *, void *, void *);
-int close(int);
-#else
 /* The readiness bitmaps' starting size: they grow to the highest watched
  * descriptor. */
 #define FDSET_BYTES 128
@@ -41,7 +32,6 @@ int close(int);
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <uv.h>
-#endif
 int swapcontext(void *, void *);
 /* ucontext_t is opaque here: its size and field offsets differ per platform
  * (and Windows uses win32io.c's own), so the emitter passes them. As in
@@ -56,16 +46,23 @@ void makecontext(void *, void (*)(void), int, ...);
 #define KML_UC_LINK 8
 #endif
 #ifdef _WIN32
-void *malloc(unsigned long);
-int accept(int, void *, void *);
-int setsockopt(int, int, int, const void *, int);
+/* The shim's descriptor-level socket calls (win32io.c), under their POSIX
+ * names; <uv.h> brought Winsock's SOCKET-typed ones (TDD-00252). */
+int kml_accept(int, void *, void *) __asm__("accept");
+int kml_setsockopt(int, int, int, const void *, int) __asm__("setsockopt");
 int fcntl(int, int, ...);
 #define F_GETFL 3
 #define F_SETFL 4
 #define O_NONBLOCK 0x800
+/* libuv polls a Windows socket by its SOCKET, not the shim's descriptor. */
+intptr_t __kml_win_poll_socket(int fd);
+#define kml_uv_poll_init(loop, h, fd) uv_poll_init_socket((loop), (h), (uv_os_sock_t)__kml_win_poll_socket(fd))
 #else
 #include <fcntl.h>
 #include <sys/socket.h>
+#define kml_accept accept
+#define kml_setsockopt setsockopt
+#define kml_uv_poll_init uv_poll_init
 #endif
 #ifdef KML_CLUSTER_ORPHAN
 void exit(int);
@@ -78,14 +75,6 @@ _Thread_local _Bool __kml_loop_idle;
 
 /* Timers (timers.c). */
 i64 __kml_monotonic_ns(void);
-#ifdef _WIN32
-/* Node's timers binding on Windows (timers.c): the timers and check phases
- * the select() pass runs itself. */
-_Bool __kml_timers_keepalive(void);
-i64 __kml_timers_deadline_ns(void);
-void __kml_timers_run_due(void);
-void __kml_timers_check(void);
-#endif
 
 /* The primary HTTP server and its connection fibers (runtime_http.go). A
  * slot is { fd, ucontext, stack, pendingFetch, pendingGroup }. */
@@ -135,21 +124,16 @@ static _Bool conn_park_ready(void *group) {
         return *(i64 *)((char *)(g & ~1ULL) + KML_PROMISE_STATE) != 0;
     return __kml_group_satisfied(group);
 }
-#ifdef _WIN32
-int __kml_curl_loop_fdset(void *r, void *w, void *e, int *maxfd);
-#endif
-#ifdef _WIN32
-i64 __kml_curl_loop_deadline_ns(void);
-#endif
 _Bool __kml_curl_loop_active(void);
-#ifdef _WIN32
-void __kml_curl_loop_perform(void *r, void *w);
-#endif
 int __kml_curl_inflight(void);
 void __kml_httpc_fire_ready(void);
 
 /* Tasks and microtasks (task.c, microtask.c, or the emitter's stubs). */
 #ifdef _WIN32
+/* Windows' signals are the shim's console handler (win32proc.c): it queues
+ * the signal and wakes the loop, whose pass delivers it to process.c's
+ * handler and runs the watchers. */
+int __kml_win_sig_deliver(void);
 void __kml_signal_dispatch(void);
 #endif
 void __kml_drain_microtasks(void);
@@ -161,37 +145,15 @@ _Bool __kml_task_resumable(void);
 _Bool __kml_microtasks_pending(void);
 
 /* Subsystem hooks: real, or the emitter's no-op stubs. */
-#ifdef _WIN32
-_Bool __kml_ipcc_keepalive(void);
-_Bool __kml_ipcc_fdset_add(void *, int *);
-void __kml_ipcc_dispatch(void);
-#endif
-#ifdef _WIN32
-_Bool __kml_fswatch_keepalive(void);
-_Bool __kml_fswatch_fdset_add(void *, int *);
-void __kml_fswatch_dispatch(void);
-#endif
-#ifdef _WIN32
-_Bool __kml_pool_keepalive(void);
-_Bool __kml_pool_dispatch(void);
-#endif
-#ifdef _WIN32
-/* The TCP handles' reactor hooks; POSIX handles are libuv watchers. */
-_Bool __kml_tcp_keepalive(void);
-_Bool __kml_tcp_fdset_add(void *, void *, int *);
-_Bool __kml_tcp_dispatch(void);
-#endif
 _Bool __kml_http_xl_keepalive(void);
-#ifdef _WIN32
-_Bool __kml_http_xl_fdset_add(void *, int *);
-#endif
 /* The additional listeners (httpsrv.c). */
 typedef struct { i64 fd; void (*dispatch)(void); void *tlsctx, *h2vtbl; } kml_xl;
 extern _Thread_local kml_xl *__kml_http_xl_data;
 extern _Thread_local i64 __kml_http_xl_len;
-_Bool __kml_dynimport_keepalive(void);
-void __kml_dynimport_dispatch(void);
-i64 __kml_dynimport_next_deadline_ns(void);
+/* The dynamic-import islands' hooks (hooks.c; dynimportwatch.c registers them). */
+extern _Bool (*__kml_hook_dynimport_keepalive)(void);
+extern void (*__kml_hook_dynimport_dispatch)(void);
+extern i64 (*__kml_hook_dynimport_next_deadline_ns)(void);
 
 #define BIT_SET(set, fd) ((set)[(fd) / 8] |= (u8)(1u << ((fd) % 8)))
 #define BIT_ISSET(set, fd) (((set)[(fd) / 8] >> ((fd) % 8)) & 1)
@@ -253,7 +215,7 @@ void __kml_http_append_conn(int fd, void (*dispatch)(void)) {
         i64 cap = __kml_conn_cap * 2;
         if (cap < 8)
             cap = 8;
-        __kml_conn_data = realloc(__kml_conn_data, (unsigned long)cap * sizeof(kml_conn));
+        __kml_conn_data = realloc(__kml_conn_data, (__SIZE_TYPE__)cap * sizeof(kml_conn));
         __kml_conn_cap = cap;
     }
     i64 idx = __kml_conn_len;
@@ -289,11 +251,11 @@ void __kml_http_append_conn(int fd, void (*dispatch)(void)) {
 /* Node's http.Server sets TCP_NODELAY on every accepted socket (noDelay
  * defaults to true); the connection is non-blocking for its fiber. */
 static void accept_into(int listenfd, void (*dispatch)(void)) {
-    int fd = accept(listenfd, 0, 0);
+    int fd = kml_accept(listenfd, 0, 0);
     if (fd < 0)
         return;
     int one = 1;
-    setsockopt(fd, 6 /* IPPROTO_TCP */, 1 /* TCP_NODELAY */, &one, sizeof one);
+    kml_setsockopt(fd, 6 /* IPPROTO_TCP */, 1 /* TCP_NODELAY */, &one, sizeof one);
     fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK);
     __kml_http_append_conn(fd, dispatch);
 }
@@ -351,14 +313,6 @@ static void scan_conns(u8 *rset, u8 *wset) {
 }
 
 
-#ifdef _WIN32
-static int wait_ready(int maxfd, u8 *r, u8 *w, u8 *e, i64 wait) {
-    if (wait < 0)
-        return select(maxfd + 1, r, w, e, 0);
-    struct { i64 sec, usec; } tv = {wait / 1000000000, (wait % 1000000000) / 1000};
-    return select(maxfd + 1, r, w, e, &tv);
-}
-#else
 /* The thread's libuv loop. The HTTP listeners and connection fibers each
  * own a uv_poll_t (sync_sources); their callbacks record readiness in
  * bitmaps the pass then dispatches from, as the fibers resume outside
@@ -430,7 +384,14 @@ static void ready_bits_fit(kml_uvstate *b, int fd) {
 }
 
 static void on_timer(uv_timer_t *t) { (void)t; }
+
+/* Windows: a signal (the console's control handler, the resize watcher,
+ * win32proc.c) wakes the loop through its async; the pass delivers it. */
 static void on_wake(uv_async_t *a) { (void)a; }
+#ifdef _WIN32
+void __kml_win_set_loop_wake(void (*fn)(void *), void *arg);
+static void win_wake(void *arg) { uv_async_send((uv_async_t *)arg); }
+#endif
 
 static kml_uvstate *uvs_get(void) {
     if (uvs)
@@ -441,6 +402,9 @@ static kml_uvstate *uvs_get(void) {
     uv_loop_init(&b->loop);
     uv_timer_init(&b->loop, &b->timer);
     uv_async_init(&b->loop, &b->wake, on_wake);
+#ifdef _WIN32
+    __kml_win_set_loop_wake(win_wake, &b->wake);
+#endif
     /* The loop's own timer and wake never hold it: the pass decides. */
     uv_unref((uv_handle_t *)&b->timer);
     uv_unref((uv_handle_t *)&b->wake);
@@ -568,7 +532,7 @@ void *__kml_loop_fd_watch(int fd, void (*cb)(void *), void *data, int refd) {
     kml_uvstate *b = uvs_get();
     __kml_loop_fd_forget(fd);
     kml_fdwatch *w = RAW_MALLOC(sizeof *w);
-    if (uv_poll_init(&b->loop, &w->h, fd) < 0) {
+    if (kml_uv_poll_init(&b->loop, &w->h, fd) < 0) {
         RAW_FREE(w);
         return 0;
     }
@@ -610,7 +574,7 @@ void *__kml_loop_io_watch(int fd, int events, void (*cb)(void *, int, int), void
     kml_uvstate *b = uvs_get();
     __kml_loop_fd_forget(fd);
     kml_iowatch *w = RAW_MALLOC(sizeof *w);
-    if (uv_poll_init(&b->loop, &w->h, fd) < 0) {
+    if (kml_uv_poll_init(&b->loop, &w->h, fd) < 0) {
         RAW_FREE(w);
         return 0;
     }
@@ -622,6 +586,26 @@ void *__kml_loop_io_watch(int fd, int events, void (*cb)(void *, int, int), void
         uv_poll_start(&w->h, uv_events(events), on_iowatch);
     return w;
 }
+
+#ifdef _WIN32
+/* The same watcher for a Winsock SOCKET a library owns (libcurl's, linked
+ * against Winsock itself): fd is the value handed back to cb. */
+void *__kml_loop_sock_watch(intptr_t sock, int fd, int events, void (*cb)(void *, int, int), void *data) {
+    kml_uvstate *b = uvs_get();
+    kml_iowatch *w = RAW_MALLOC(sizeof *w);
+    if (uv_poll_init_socket(&b->loop, &w->h, (uv_os_sock_t)sock) < 0) {
+        RAW_FREE(w);
+        return 0;
+    }
+    w->fd = fd;
+    w->cb = cb;
+    w->data = data;
+    uv_unref((uv_handle_t *)&w->h);
+    if (uv_events(events))
+        uv_poll_start(&w->h, uv_events(events), on_iowatch);
+    return w;
+}
+#endif
 
 void __kml_loop_io_events(void *p, int events) {
     kml_iowatch *w = (kml_iowatch *)p;
@@ -702,7 +686,7 @@ static void src_want(kml_uvstate *b, kml_srcwatch *w, int fd, int events) {
     ready_bits_fit(b, fd);
     if (!w->h) {
         uv_poll_t *h = RAW_MALLOC(sizeof *h);
-        if (uv_poll_init(&b->loop, h, fd) != 0) {
+        if (kml_uv_poll_init(&b->loop, h, fd) != 0) {
             RAW_FREE(h);
             BIT_SET(b->rr, fd);
             return;
@@ -792,7 +776,6 @@ static int wait_ready(int listenfd, u8 **r, u8 **w, i64 wait) {
     *w = b->rw;
     return 0;
 }
-#endif
 
 /* Work runnable without waiting: queued microtasks, a request body
  * wanting a pump, a task whose wait is over, an unserviced poke. */
@@ -822,12 +805,7 @@ static i64 pass_wait(_Bool immediate, _Bool have_timer, i64 bestfire, _Bool has_
             fold(&extra, dl);
         }
     }
-#ifdef _WIN32
-    /* POSIX: libcurl's sockets and deadline are libuv handles (fetch.c) */
-    if (has_curl)
-        fold(&extra, __kml_curl_loop_deadline_ns());
-#endif
-    fold(&extra, __kml_dynimport_next_deadline_ns());
+    fold(&extra, __kml_hook_dynimport_next_deadline_ns());
     _Bool cluster = __kml_cluster_close_flag != 0;
     _Bool bounded = have_timer | immediate | fetch_deadline | (extra != 0) | cluster;
     if (!bounded)
@@ -849,28 +827,9 @@ static i64 pass_wait(_Bool immediate, _Bool have_timer, i64 bestfire, _Bool has_
     return wait == inf ? -1 : wait;
 }
 
-/* A wait with nothing to park: no coroutine, no async generator step, no
- * connection fiber. Every async callable that waits is a coroutine
- * (TDD-00223 section 2) and the module body with a top-level await is a
- * task (TDD-00224), so reaching this is a compiler bug. */
-#ifdef _WIN32
-long long write(int, const void *, unsigned long long);
-void abort(void);
-#endif
-void __kml_wait_outside_coroutine(void) {
-    static const char msg[] =
-        "internal error: a wait outside a coroutine inside an event-loop callback\n";
-    (void)!write(2, msg, sizeof msg - 1);
-    abort();
-}
-
 void __kml_event_loop_run(void) {
     __kml_reactor_thread_lock();
-#ifdef _WIN32
-    static _Thread_local u8 rset[FDSET_BYTES], wset[FDSET_BYTES], eset[FDSET_BYTES];
-#else
     u8 *rset = 0, *wset = 0;
-#endif
     for (;;) {
         /* A single-pass run (an island's poll) takes exactly one pass. */
         if (__kml_loop_oneshot == 2)
@@ -878,6 +837,7 @@ void __kml_event_loop_run(void) {
         if (__kml_loop_oneshot == 1)
             __kml_loop_oneshot = 2;
 #ifdef _WIN32
+        __kml_win_sig_deliver();
         __kml_signal_dispatch();
 #endif
 
@@ -888,13 +848,8 @@ void __kml_event_loop_run(void) {
         _Bool tasks_hold = __kml_task_holds_loop();
 
         i64 bestfire = 0;
-#ifdef _WIN32
-        bestfire = __kml_timers_deadline_ns();
-        _Bool have_timer = bestfire != 0;
-#else
         /* JS timers are libuv's: they fire inside the wait. */
         _Bool have_timer = 0;
-#endif
 
         cluster_poll();
         int listenfd = __kml_listen_fd;
@@ -904,25 +859,11 @@ void __kml_event_loop_run(void) {
 
         /* Evaluate every keep-alive hook: several also do work. */
         _Bool keep = has_listener | has_conns;
-#ifdef _WIN32
-        keep |= __kml_timers_keepalive();
-#endif
-#ifdef _WIN32
-        keep |= __kml_ipcc_keepalive();
-#endif
-#ifdef _WIN32
-        keep |= __kml_fswatch_keepalive();
-#endif
-#ifdef _WIN32
-        keep |= __kml_pool_keepalive();
-        keep |= __kml_tcp_keepalive();
-#else
         /* The handles on their own libuv watchers (timers, TCP, UDP, pipes,
          * child processes, fs.watch) hold the loop as libuv counts them. */
         keep |= uv_loop_alive(&uvs_get()->loop) != 0;
-#endif
         keep |= __kml_http_xl_keepalive();
-        keep |= __kml_dynimport_keepalive();
+        keep |= __kml_hook_dynimport_keepalive();
         keep |= tasks_hold;
         /* An in-flight transfer is an open socket. Asked of libcurl now: a
          * transfer finishing inside this call settles its promise, whose
@@ -937,36 +878,6 @@ void __kml_event_loop_run(void) {
 
         _Bool forcezero = 0;
         _Bool has_curl = __kml_curl_loop_active();
-#ifdef _WIN32
-        memset(rset, 0, sizeof rset);
-        memset(wset, 0, sizeof wset);
-        memset(eset, 0, sizeof eset);
-        int maxfd = -1;
-        if (has_listener) {
-            BIT_SET(rset, listenfd);
-            maxfd = listenfd;
-        }
-        for (i64 i = 0; i < __kml_conn_len; i++) {
-            i64 fd = __kml_conn_data[i].fd;
-            if (fd < 0)
-                continue;
-            BIT_SET(rset, fd);
-            if (fd < writepark_cap * 8 && BIT_ISSET(writepark, fd))
-                BIT_SET(wset, fd);
-            if ((int)fd > maxfd)
-                maxfd = (int)fd;
-        }
-        __kml_ipcc_fdset_add(rset, &maxfd);
-        __kml_fswatch_fdset_add(rset, &maxfd);
-        forcezero |= __kml_tcp_fdset_add(rset, wset, &maxfd);
-        __kml_http_xl_fdset_add(rset, &maxfd);
-        if (has_curl) {
-            int cmax = -1;
-            __kml_curl_loop_fdset(rset, wset, eset, &cmax);
-            if (cmax > maxfd)
-                maxfd = cmax;
-        }
-#endif
 
         /* Never block with work already runnable: a fiber that ran (an
          * in-process client must read what it wrote) among the rest. */
@@ -975,48 +886,23 @@ void __kml_event_loop_run(void) {
         _Bool immediate = forcezero | ran | runnable_now() | (__kml_loop_nowait != 0);
         i64 wait = pass_wait(immediate, have_timer, bestfire, has_curl);
         u8 *rp = rset, *wp = wset;
-#ifdef _WIN32
-        int rc = wait_ready(maxfd, rset, wset, eset, wait);
-#else
         int rc = wait_ready(listenfd, &rp, &wp, wait);
-#endif
         /* On failure (EINTR) the sets hold the watch set, not readiness. */
         if (rc < 0)
             continue;
 
-        __kml_dynimport_dispatch();
-#ifdef _WIN32
-        __kml_ipcc_dispatch();
-#endif
-#ifdef _WIN32
-        __kml_fswatch_dispatch();
-#endif
-#ifdef _WIN32
-        /* POSIX delivers pool completions from each port's async */
-        _Bool pool_ran = __kml_pool_dispatch();
-        pool_ran |= __kml_tcp_dispatch();
-        if (pool_ran)
-            __kml_conn_poke = 1;
-#endif
+        __kml_hook_dynimport_dispatch();
         __kml_http_xl_accept(rp);
         if (has_curl) {
-#ifdef _WIN32
-            __kml_curl_loop_perform(rset, wset);
-#endif
             __kml_httpc_fire_ready();
         }
         if (has_listener && BIT_ISSET(rp, listenfd))
             __kml_http_accept_primary(listenfd);
         scan_conns(rp, wp);
 
-#ifdef _WIN32
-        __kml_timers_run_due();
-        __kml_timers_check();
-#endif
     }
 }
 
-#ifndef _WIN32
 /* The loop inside a host's main loop (TDD-00244 Stage 7): the webview's GUI
  * thread owns the thread, so it watches libuv's backend descriptor and a
  * timer for the next deadline, and runs one non-blocking pass on either. */
@@ -1031,6 +917,10 @@ void __kml_loop_run_once(void) {
 }
 
 int __kml_loop_backend_fd(void) { return uv_backend_fd(&uvs_get()->loop); }
+#ifdef _WIN32
+/* libuv's backend on Windows: its completion port, no descriptor. */
+void *__kml_loop_backend_port(void) { return uvs_get()->loop.iocp; }
+#endif
 
 /* Milliseconds until the next pass is due (-1: only when the backend
  * descriptor is readable), rounded up: a timer never fires early. */
@@ -1046,4 +936,3 @@ i64 __kml_loop_next_ms(void) {
         ms = ut;
     return ms;
 }
-#endif

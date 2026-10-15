@@ -144,8 +144,49 @@ void __kml_fiber_stack_free(void *s, size_t n) {
     if (s) munmap((char *)s - g, n + g);
 }
 #else
+/* Windows (TDD-00249 Stage 3): the thread's guard page raises
+ * EXCEPTION_STACK_OVERFLOW, which a vectored handler turns into the
+ * RangeError. Windows has no alternate signal stack: the handler runs on what
+ * is left below the guard page, which SetThreadStackGuarantee keeps at
+ * SG_GUARANTEE. The throw longjmps to the innermost try frame (setjmp with a
+ * null frame: no unwinding through the handler's frames), and the catch
+ * re-arms the spent guard page (exceptions.c, __kml_get_thrown_tag). */
+#include <windows.h>
+#include <stdio.h>
+
+#define SG_GUARANTEE (64 * 1024)
+
+static void (*sg_throw)(const char *);
+static const char *sg_msg;
+
+/* Not instrumented under -fsanitize: the handler sees every exception of
+ * every thread first, including the access faults with which ASan commits its
+ * shadow memory on Windows. An instrumented read here checks shadow that may
+ * not be committed yet, faults, and re-enters the handler without end. */
+__attribute__((no_sanitize("address", "undefined")))
+static LONG CALLBACK sg_handler(EXCEPTION_POINTERS *ep) {
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_STACK_OVERFLOW) return EXCEPTION_CONTINUE_SEARCH;
+    if (sg_throw) sg_throw(sg_msg);
+    static const char m[] = "RangeError: Maximum call stack size exceeded\n";
+    fflush(stdout);
+    DWORD w;
+    WriteFile(GetStdHandle(STD_ERROR_HANDLE), m, sizeof m - 1, &w, NULL);
+    ExitProcess(1);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 void __kml_stack_guard_init(void (*throw_fn)(const char *), const char *msg) {
-    (void)throw_fn;
-    (void)msg;
+    sg_throw = throw_fn;
+    sg_msg = msg;
+    ULONG g = SG_GUARANTEE;
+    SetThreadStackGuarantee(&g);
+    AddVectoredExceptionHandler(1, sg_handler);
+}
+
+/* Another thread that runs program code (a Worker): the handler is the
+ * process's, but the stack it runs on below the guard page is per thread. */
+void __kml_stack_guard_thread(void) {
+    ULONG g = SG_GUARANTEE;
+    SetThreadStackGuarantee(&g);
 }
 #endif

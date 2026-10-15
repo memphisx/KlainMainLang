@@ -548,16 +548,14 @@ void __kml_own_symbols_c(i64 boxed, void **out) {
 
 // Reflect.ownKeys: the string keys, then the symbols, each boxed (a string
 // boxes as its pointer, a symbol as an object: its pointer with kind 1).
-typedef struct {
-    void **data;
-    i64 len;
-} PtrArr;
-
-void __kml_own_keys_c(PtrArr names, PtrArr syms, void **out) {
-    i64 n = names.len + syms.len;
+// The IR passes each array as a { ptr, i64 } value, which LLVM flattens into
+// its two fields on every target; a C struct parameter would match only the
+// System V ABI (Windows x64 passes a 16-byte struct by reference).
+void __kml_own_keys_c(void **names, i64 names_len, void **syms, i64 syms_len, void **out) {
+    i64 n = names_len + syms_len;
     i64 *data = malloc((size_t)(n ? n : 1) * sizeof(i64));
-    for (i64 i = 0; i < names.len; i++) data[i] = (i64)(size_t)names.data[i];
-    for (i64 i = 0; i < syms.len; i++) data[names.len + i] = (i64)((size_t)syms.data[i] | 1);
+    for (i64 i = 0; i < names_len; i++) data[i] = (i64)(size_t)names[i];
+    for (i64 i = 0; i < syms_len; i++) data[names_len + i] = (i64)((size_t)syms[i] | 1);
     out[0] = data;
     out[1] = (void *)(size_t)n;
 }

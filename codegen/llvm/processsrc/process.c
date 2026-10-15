@@ -160,10 +160,18 @@ double __kml_native_kill_pid(double pid, double sig) {
     return 0.0;
 }
 
-/* 0 pid, 1 ppid, 2 uid, 3 euid, 4 gid, 5 egid; Windows has only the pid. */
+/* 0 pid, 1 ppid, 2 uid, 3 euid, 4 gid, 5 egid; Windows has only the pid and
+ * the parent's (the user and group ids are -1, as libuv's are there). */
+#if defined(_WIN32)
+int __kml_win_getppid(void);
+#endif
 double __kml_native_process_id(double which) {
 #if defined(_WIN32)
-    return (int)which == 0 ? (double)__kml_getpid() : -1.0;
+    switch ((int)which) {
+    case 0: return (double)__kml_getpid();
+    case 1: return (double)__kml_win_getppid();
+    default: return -1.0;
+    }
 #else
     switch ((int)which) {
     case 1: return (double)getppid();
@@ -225,9 +233,9 @@ double __kml_native_process_memory(double which) {
 /* ---- signals ----
  * On POSIX each watched signal is a uv_signal_t on the event loop
  * (loop.c), whose callback runs the watcher inside the wait, as Node's
- * does. Windows keeps signal() until its loop moves to libuv (TDD-00244
- * Stage 6): the handler only sets a flag the loop's next pass dispatches
- * (__kml_signal_dispatch). */
+ * does. Windows keeps the shim's signal(), whose console handler matches
+ * Node's Windows signals: the handler sets a flag and wakes the loop
+ * (TDD-00252), whose next pass dispatches it (__kml_signal_dispatch). */
 typedef void (*sig_watch_fn)(void *clo, double signo);
 #ifdef _WIN32
 static _Thread_local volatile unsigned char sig_pending[65];

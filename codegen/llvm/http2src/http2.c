@@ -311,13 +311,15 @@ extern _Thread_local int64_t __kml_current_conn_idx;
 extern _Thread_local char *__kml_conn_data;
 extern _Thread_local unsigned char __kml_main_ctx[];
 extern void __kml_conn_park_write(int fd, int on);
+#ifndef _WIN32
 int swapcontext(void *, void *);
+#endif
 
 static void yield_fiber(h2_conn *c, int want_write) {
 	int64_t idx = __kml_current_conn_idx;
 	if (want_write) __kml_conn_park_write(c->fd, 1);
 	char *slot = __kml_conn_data + idx * KML_CONN_SIZE;
-	swapcontext(*(void **)(slot + KML_CONN_CTX), __kml_main_ctx);
+	swapcontext(*(void **)(slot + KML_CONN_CTX), (void *)__kml_main_ctx);
 	if (want_write) __kml_conn_park_write(c->fd, 0);
 }
 

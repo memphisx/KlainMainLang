@@ -6,7 +6,7 @@
   "coverage": {
     "loose": "37/37",
     "loosePct": 100,
-    "strict": "29/37",
+    "strict": "30/37",
     "strictPct": 78
   },
   "lede": "Every Array method is present, and arrays are full reference values: a length change (push/pop/splice) inside a callee is visible to the caller for every argument shape — a plain variable, an object-field or array-element array, or a HOF-callback element. The remaining recurring caveat is structural: the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
@@ -470,17 +470,14 @@
       "id": "array.sort",
       "name": ".sort(fn?)",
       "signature": "sort(fn?: (a: T, b: T) => number): T[]",
-      "badge": "caveats",
-      "description": "Sorts the array in place. With no comparator the default is JS-faithful — elements are stringified and compared lexicographically, so `[10,1,21,2].sort()` is `[1,10,2,21]`; pass a comparator for a numeric sort. A custom comparator returns a negative, zero, or positive number.",
+      "badge": "exact",
+      "description": "Sorts the array in place, stably, with V8's TimSort — the same order as Node for any comparator. With no comparator the default is JS-faithful — elements are stringified and compared lexicographically, so `[10,1,21,2].sort()` is `[1,10,2,21]`; pass a comparator for a numeric sort. A custom comparator returns a negative, zero, or positive number; undefined elements go last.",
       "returns": {
         "type": "T[]",
         "desc": "The array, sorted in place."
       },
       "exampleKey": "arrays/sort",
       "snippet": "const desc: number[] = [3, 1, 4, 1, 5]\ndesc.sort((a: number, b: number) => b - a)   // [5,4,3,1,1]",
-      "differences": [
-        "Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI qsort() trampoline with one fixed variant per element kind."
-      ],
       "seeAlso": [
         "array.toSorted",
         "array.reverse"

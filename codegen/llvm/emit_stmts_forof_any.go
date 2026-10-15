@@ -123,8 +123,12 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
 	varPtr := e.freshReg()
 	if !isPattern {
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varPtr))
-		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: TypeAny})
+		if cell, ok := e.boxLoopVar(s.Kind, s.VarName, TypeAny); ok {
+			varPtr = cell
+		} else {
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", varPtr))
+			e.define(s.VarName, Symbol{Ptr: varPtr, Ty: TypeAny})
+		}
 	}
 	// Leaving the loop early closes a protocol iterator (IteratorClose).
 	closeName := "__kml_forof_any_it_" + e.freshReg()[1:]

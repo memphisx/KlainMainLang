@@ -148,7 +148,7 @@ process.on('SIGINT', () => {
 });
 http.listen(8231, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
-});
+}, { host: '127.0.0.1' });
 `
 	cmd, out, _ := startBackgroundServer(t, src, 8231)
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {
@@ -173,7 +173,7 @@ process.on('SIGTERM', () => {
 });
 http.listen(8232, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
-});
+}, { host: '127.0.0.1' });
 `
 	cmd, out, _ := startBackgroundServer(t, src, 8232)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -205,7 +205,7 @@ process.on('SIGTERM', () => {
 });
 http.listen(8233, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
-});
+}, { host: '127.0.0.1' });
 `
 	cmd, out, _ := startBackgroundServer(t, src, 8233)
 	if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
@@ -238,7 +238,7 @@ func TestE2ESignalNoHandlerDefaultDisposition(t *testing.T) {
 import http from 'klain:http'
 http.listen(8234, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
-});
+}, { host: '127.0.0.1' });
 `
 	cmd, out, _ := startBackgroundServer(t, src, 8234)
 	if err := cmd.Process.Signal(syscall.SIGINT); err != nil {

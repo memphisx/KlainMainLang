@@ -19,8 +19,11 @@ var cryptoOpenSSLSource string
 //go:embed cryptosrc/crypto_commoncrypto.c
 var cryptoCommonCryptoSource string
 
+//go:embed cryptosrc/crypto_cng.c
+var cryptoCNGSource string
+
 // CryptoBackends are the accepted -crypto values, default (openssl) first.
-var CryptoBackends = []string{"openssl", "commoncrypto"}
+var CryptoBackends = []string{"openssl", "commoncrypto", "cng"}
 
 // CryptoBackendSource returns the C source implementing node:crypto's
 // natives for a backend, and whether the name is known.
@@ -30,6 +33,8 @@ func CryptoBackendSource(backend string) (string, bool) {
 		return cryptoOpenSSLSource, true
 	case "commoncrypto":
 		return cryptoCommonCryptoSource, true
+	case "cng":
+		return cryptoCNGSource, true
 	}
 	return "", false
 }
@@ -41,9 +46,13 @@ func CryptoBackendSource(backend string) (string, bool) {
 // `brew --prefix` root LocateBigInt uses is not enough here), then a bare
 // -lcrypto. commoncrypto: the symmetric primitives live in libSystem (no -l
 // at all); SecKey-based RSA/EC needs Security + CoreFoundation frameworks.
+// cng: Windows' bcrypt.dll, a system DLL (so --static keeps it an import).
 func LocateCrypto(backend string) (cflags, libs []string) {
 	if backend == "commoncrypto" {
 		return nil, []string{"-framework", "Security", "-framework", "CoreFoundation"}
+	}
+	if backend == "cng" {
+		return nil, []string{"-lbcrypt"}
 	}
 	if out, err := exec.Command("pkg-config", "--cflags", "libcrypto").Output(); err == nil {
 		cflags = strings.Fields(strings.TrimSpace(string(out)))

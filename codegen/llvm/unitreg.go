@@ -80,7 +80,7 @@ func (e *Emitter) addUnitRowLit(kind int, rowTy, lit string) {
 func (e *Emitter) addCtor(fn string) { e.ctors = append(e.ctors, fn) }
 
 // emitUnitRegFinalize emits each table as a constant array and the
-// constructor registering them, then the program's constructor list.
+// constructor registering them.
 func (e *Emitter) emitUnitRegFinalize() {
 	e.emitConstructorOfOnce() // a constructor read a late finalize step generated
 	e.emitClassParentRows()
@@ -106,6 +106,11 @@ func (e *Emitter) emitUnitRegFinalize() {
 		e.emitGlobal(fmt.Sprintf("define internal void @__kml_unit_init() {\nentry:\n%s  ret void\n}", body.String()))
 		e.addCtor("@__kml_unit_init")
 	}
+}
+
+// emitCtorList emits the program's constructor list, after every finalize
+// step has added its constructor.
+func (e *Emitter) emitCtorList() {
 	if len(e.ctors) == 0 {
 		return
 	}

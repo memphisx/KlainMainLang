@@ -22,6 +22,23 @@ extern i64 __kml_str_len(const char *s);
 
 void __kml_str_finalize(char *s) { *(i64 *)(s - 8) = (i64)strlen(s); }
 
+/* Array.prototype.join over n already-converted parts: the lengths summed,
+ * one allocation, one copy each. Concatenating into an accumulator instead
+ * allocated a new string per element (quadratic bytes, none freed). */
+void *__kml_str_join(char *const *parts, i64 n, const char *sep) {
+    i64 ls = __kml_str_len(sep), total = n > 1 ? ls * (n - 1) : 0;
+    for (i64 i = 0; i < n; i++) total += __kml_str_len(parts[i]);
+    char *out = (char *)__kml_str_alloc(total), *w = out;
+    for (i64 i = 0; i < n; i++) {
+        if (i > 0) { memcpy(w, sep, (size_t)ls); w += ls; }
+        i64 lp = __kml_str_len(parts[i]);
+        memcpy(w, parts[i], (size_t)lp);
+        w += lp;
+    }
+    *w = '\0';
+    return out;
+}
+
 void *__kml_str_from_cstr(const char *c) {
     if (!c) return NULL;
     i64 len = (i64)strlen(c);
@@ -30,14 +47,38 @@ void *__kml_str_from_cstr(const char *c) {
     return dst;
 }
 
-/* strcmp-shaped (<0/0/>0) lexicographic compare by header length + memcmp,
- * so an embedded NUL does not stop it early. */
+/* strcmp-shaped (<0/0/>0) compare of two strings in JavaScript's order, by
+ * UTF-16 code units (IsLessThan), over the header lengths so an embedded NUL
+ * does not stop it early. UTF-8's byte order is code-point order, which
+ * differs from UTF-16's in one place: U+E000..U+FFFF (lead byte EE or EF)
+ * comes after the supplementary characters (lead F0..F4), whose first unit
+ * is a surrogate. The strings agree up to the first differing byte, so that
+ * byte starts a character in both. */
 int __kml_str_cmp(const char *a, const char *b) {
-    i64 la = __kml_str_len(a), lb = __kml_str_len(b);
-    int c = memcmp(a, b, (size_t)(la < lb ? la : lb));
-    if (c != 0) return c;
+    i64 la = __kml_str_len(a), lb = __kml_str_len(b), n = la < lb ? la : lb;
+    for (i64 i = 0; i < n; i++) {
+        unsigned char ca = (unsigned char)a[i], cb = (unsigned char)b[i];
+        if (ca == cb) continue;
+        if ((ca == 0xEE || ca == 0xEF) && cb >= 0xF0) return 1;
+        if (ca >= 0xF0 && (cb == 0xEE || cb == 0xEF)) return -1;
+        return ca < cb ? -1 : 1;
+    }
     return la < lb ? -1 : la > lb ? 1 : 0;
 }
+
+/* The program's null of a three-state pointer (emit_undefined.go nullRef),
+ * stored before a string array's sort, and the default string sort: by
+ * __kml_str_cmp, with that null compared as "null", String(null). */
+_Thread_local void *__kml_sort_nullref;
+
+static const struct {
+    i64 n;
+    char b[5];
+} __attribute__((aligned(8))) sort_null = {4, "null"};
+
+static const char *sort_str(char *p) { return p == __kml_sort_nullref ? sort_null.b : p; }
+
+int __kml_cmp_str(char *const *pa, char *const *pb) { return __kml_str_cmp(sort_str(*pa), sort_str(*pb)); }
 
 _Bool __kml_str_startswith_at(const char *hay, const char *needle, i64 pos) {
     i64 lh = __kml_str_len(hay), ln = __kml_str_len(needle);

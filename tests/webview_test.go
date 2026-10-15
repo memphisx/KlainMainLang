@@ -343,7 +343,7 @@ import { Webview } from 'klain:webview'
 import fs from 'fs'
 const w = new Webview({ title: "Loop", width: 320, height: 200 })
 const guard = setTimeout(() => { console.log("gave up"); w.terminate() }, 5000)
-fs.promises.readFile("/etc/hosts", "utf8").then((s) => {
+fs.promises.readFile(process.execPath).then((s) => {
   console.log("read " + (s.length > 0))
   setTimeout(() => setTimeout(() => {
     console.log("timers chained")
@@ -371,7 +371,7 @@ import http from 'http'
 const w = new Webview({ title: "Server", width: 320, height: 200 })
 const guard = setTimeout(() => { console.log("gave up"); w.terminate() }, 5000)
 const server = http.createServer((req, res) => { res.end("hello from server") })
-server.listen(0, async () => {
+server.listen(0, '127.0.0.1', async () => {
   const port = (server.address() as { port: number }).port
   const r = await fetch("http://127.0.0.1:" + port + "/")
   console.log("fetched: " + (await r.text()))

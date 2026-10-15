@@ -90,6 +90,88 @@ func TestE2ECryptoPortCommonCrypto(t *testing.T) {
 	}
 }
 
+// The same program on the CNG backend (Windows), less the SHAKE digests CNG
+// has no implementation of.
+func TestE2ECryptoPortCNG(t *testing.T) {
+	var kept []string
+	for _, l := range strings.Split(cryptoPortSyncSrc, "\n") {
+		if !strings.Contains(l, "shake") {
+			kept = append(kept, l)
+		}
+	}
+	assertSameAsNodeCrypto(t, strings.Join(kept, "\n"), "cng")
+}
+
+// The passphrase-encrypted key program on the CNG backend.
+func TestE2ECryptoPortCNGEncryptedKey(t *testing.T) {
+	assertSameAsNodeCrypto(t, cryptoPortEncryptedKeySrc, "cng")
+}
+
+// RSA (PKCS#1 v1.5, PSS, OAEP, raw private encrypt), EC (DER and P1363
+// ECDSA, ECDH with point compression) and KeyObject conversions on the CNG
+// backend, against Node: every deterministic output must match byte for byte.
+const cryptoPortAsymSrc = `
+import * as c from 'crypto';
+const t = (n: string, f: () => any) => { try { console.log(n, 'ok', f()); } catch (e: any) { console.log(n, e.name, e.code); } };
+const rsaPem = "-----BEGIN PRIVATE KEY-----\nMIICdgIBADANBgkqhkiG9w0BAQEFAASCAmAwggJcAgEAAoGBAKqCn7ZBvK6KkSfI\n4eh0ndntGF22LTemROpnTnMn8pdL1QwTTR20U+9ysHypWyrt2G4I1KpXmpvatCvF\n5sbLY86zAAwhIFePrb+1LJTGvbhCtW7ty7Hcg/Cpo27Hqyi2SDx5GBkt2XzCM5U/\nw99SQZMl1sDaMzsotWXP68rImPqRAgMBAAECgYBZ3+AvQRcjKQa54bixvkY1yDM/\nsfbDjnBk3W8MY9IKzX3Oj53mOlbDr8A29U2IozWhSiZOYz6rR+wP5pBt2GcSgBZZ\nATy/moBaUhHszMmHbYoeg4snumTDemmhhZ5zNfCC90n6i7KY6swNR8CsI4uFoSMO\njpd7LVnRsyBvq4qJwQJBANYURfMLmS+dyIEuek2cI7WtTGdGPu1hspX33YK1kvdC\n2YM1Ev6sCrd+wiWGjBOCwFbsmNZlca3VMK1/Bvc+aY8CQQDL5kCcMW6j4v2Wjg9W\nOUODTBtPUCA/UL0xknXEEfolNCg1dv18gjD23iWZ9VKAnY4PeQofRKTOE8tFY2B7\nqwnfAkAgUbM1vByGScXJauDf8qCZfu438Szy3Xr+lQsF/q+PULJR0qNpe0Oq7CIX\nVDa1g1nSRanVRD9jRPoyVykQDoYVAkAE5NjmJtWV/2vAwlYh5qv1Kc16AN1VR7XS\ny8Yh16CeZfsVFW8OHv3X3wsd/+JkDeQMAQa6K2adP6JgXvtA3KEXAkEAo/3nsWX6\n68AxhQ9HPIyIXkYqgzhSKsnwyHmtm+uJ/lgKV+uM3o5h4/XvMDHHUGVMF22AxP8L\nI51tkfdy43YXYg==\n-----END PRIVATE KEY-----\n";
+const ecPem = "-----BEGIN PRIVATE KEY-----\nMIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgWwNx8777t1/hTY9e\nn4Splt03KtI1iGNsuQNgfEmJtJyhRANCAATFE0ME7C53vpp2iWil9U4eTMD+pqe3\nj7T9OuZ3U+bVR6QLYmklhW+EBq9hbnjEFlBckT/G/ZZbXkcPKdE/Peiq\n-----END PRIVATE KEY-----\n";
+const rsa = c.createPrivateKey(rsaPem), rsaPub = c.createPublicKey(rsa);
+const ec = c.createPrivateKey(ecPem), ecPub = c.createPublicKey(ec);
+const m = Buffer.from('message');
+t('rsa-type', () => [rsa.asymmetricKeyType, rsa.asymmetricKeyDetails!.modulusLength, String(rsa.asymmetricKeyDetails!.publicExponent)]);
+t('rsa-spki', () => rsaPub.export({ type: 'spki', format: 'pem' }));
+t('rsa-pkcs1', () => rsa.export({ type: 'pkcs1', format: 'pem' }));
+t('rsa-pkcs1-pub', () => (rsaPub.export({ type: 'pkcs1', format: 'der' }) as Buffer).toString('hex'));
+t('rsa-jwk', () => JSON.stringify(rsa.export({ format: 'jwk' })));
+t('rsa-pkcs1v15', () => c.sign('sha256', m, rsa).toString('hex'));
+t('rsa-sha224', () => c.sign('sha224', m, rsa).toString('hex'));
+t('rsa-verify', () => c.verify('sha1', m, rsaPub, c.sign('sha1', m, rsa)));
+t('rsa-pss', () => { const s = c.sign('sha256', m, { key: rsa, padding: c.constants.RSA_PKCS1_PSS_PADDING }); return [s.length, c.verify('sha256', m, { key: rsaPub, padding: c.constants.RSA_PKCS1_PSS_PADDING }, s)]; });
+t('rsa-pss-salt', () => { const s = c.sign('sha256', m, { key: rsa, padding: c.constants.RSA_PKCS1_PSS_PADDING, saltLength: 20 }); return [c.verify('sha256', m, { key: rsaPub, padding: c.constants.RSA_PKCS1_PSS_PADDING, saltLength: 20 }, s), c.verify('sha256', m, { key: rsaPub, padding: c.constants.RSA_PKCS1_PSS_PADDING, saltLength: 32 }, s)]; });
+t('rsa-oaep', () => c.privateDecrypt({ key: rsa, oaepHash: 'sha256', oaepLabel: Buffer.from('L') }, c.publicEncrypt({ key: rsaPub, oaepHash: 'sha256', oaepLabel: Buffer.from('L') }, m)).toString());
+t('rsa-oaep-sha1', () => c.privateDecrypt(rsa, c.publicEncrypt(rsaPub, m)).toString());
+t('rsa-privenc', () => c.privateEncrypt(rsa, m).toString('hex'));
+t('rsa-pubdec', () => c.publicDecrypt(rsaPub, c.privateEncrypt(rsa, m)).toString());
+t('ec-type', () => [ec.asymmetricKeyType, ec.asymmetricKeyDetails!.namedCurve]);
+t('ec-spki', () => ecPub.export({ type: 'spki', format: 'pem' }));
+t('ec-sec1', () => ec.export({ type: 'sec1', format: 'pem' }));
+t('ec-jwk', () => JSON.stringify(ec.export({ format: 'jwk' })));
+t('ec-jwk-back', () => c.createPublicKey({ key: ecPub.export({ format: 'jwk' }), format: 'jwk' }).export({ type: 'spki', format: 'der' }).toString('hex'));
+t('ecdsa', () => c.verify('sha384', m, ecPub, c.sign('sha384', m, ec)));
+t('ecdsa-p1363', () => { const s = c.sign('sha256', m, { key: ec, dsaEncoding: 'ieee-p1363' }); return [s.length, c.verify('sha256', m, { key: ecPub, dsaEncoding: 'ieee-p1363' }, s)]; });
+const d = Buffer.from((ec.export({ format: 'jwk' }) as any).d, 'base64url');
+const peer = c.createECDH('prime256v1');
+peer.setPrivateKey(c.createHash('sha256').update('peer').digest());
+t('ecdh-pub', () => { const e = c.createECDH('prime256v1'); e.setPrivateKey(d); return [e.getPublicKey('hex'), e.getPublicKey('hex', 'compressed')]; });
+t('ecdh-secret', () => { const e = c.createECDH('prime256v1'); e.setPrivateKey(d); return e.computeSecret(peer.getPublicKey(null, 'compressed')).toString('hex'); });
+t('ecdh-convert', () => c.ECDH.convertKey(peer.getPublicKey('hex', 'compressed'), 'prime256v1', 'hex', 'hex', 'uncompressed') === peer.getPublicKey('hex'));
+t('ecdh-badpoint', () => { const e = c.createECDH('prime256v1'); e.setPrivateKey(d); return e.computeSecret(Buffer.alloc(65, 4)); });
+t('diffieHellman', () => c.diffieHellman({ privateKey: ec, publicKey: c.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: peer.getPublicKey().subarray(1, 33).toString('base64url'), y: peer.getPublicKey().subarray(33).toString('base64url') }, format: 'jwk' }) }).toString('hex'));
+`
+
+func TestE2ECryptoPortCNGAsymmetric(t *testing.T) {
+	assertSameAsNodeCrypto(t, cryptoPortAsymSrc, "cng")
+}
+
+// assertSameAsNodeCrypto builds src with a -crypto backend and compares its
+// output with Node's.
+func assertSameAsNodeCrypto(t *testing.T, src, backend string) {
+	t.Helper()
+	theirs := runNodeTS(t, src)
+	d := tempDir(t)
+	srcFile := filepath.Join(d, "main.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	raw, err := exec.Command(buildBinaryFromFileCrypto(t, srcFile, backend)).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if ours := strings.TrimRight(string(raw), "\n"); ours != theirs {
+		t.Fatalf("output differs from node:\n--- ours ---\n%s\n--- node ---\n%s", ours, theirs)
+	}
+}
+
 func TestE2ECryptoPortCallbacks(t *testing.T) {
 	assertSameAsNodeImports(t, `
 import * as c from 'crypto';

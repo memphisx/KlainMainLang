@@ -149,11 +149,10 @@
           {
             "feature": "`fs.open` / `close` / `read` / `write` / `writev` / `readv` / `fsync` (callback form)",
             "status": "implemented",
-            "caveats": [
-              "On Windows a positioned read or write seeks, then transfers — not atomic against another operation on the same descriptor; not verified on Windows"
-            ],
+            "caveats": [],
             "notes": [
-              "Node's argument forms, validation errors and `uvException` errors ([ADR-01166](../adr/ADR-01166.md), [ADR-01298](../adr/ADR-01298.md))"
+              "Node's argument forms, validation errors and `uvException` errors ([ADR-01166](../adr/ADR-01166.md), [ADR-01298](../adr/ADR-01298.md))",
+              "A positioned transfer is one `pread`/`pwrite`; on Windows one `ReadFile`/`WriteFile` at the offset with the file position put back after, as libuv does ([ADR-01618](../adr/ADR-01618.md))"
             ]
           },
           {
@@ -176,12 +175,10 @@
           {
             "feature": "`fs.watch(path[, options][, listener])` → `FSWatcher`",
             "status": "implemented",
-            "caveats": [
-              "`recursive` is applied on macOS only: on Linux and Windows it watches the top directory alone"
-            ],
+            "caveats": [],
             "notes": [
               "Node's `FSWatcher`, an EventEmitter: `'change'` with `(eventType, filename)` in the requested encoding, `'close'`, `close()`, `ref()`/`unref()`, `persistent`, `signal`; a watched file reports its own base name ([ADR-01298](../adr/ADR-01298.md))",
-              "A libuv `uv_fs_event_t` per watcher on Linux and macOS; `ReadDirectoryChangesW` on Windows ([TDD-00244](../tdd/TDD-00244.md))"
+              "A libuv `uv_fs_event_t` per watcher ([TDD-00244](../tdd/TDD-00244.md), [TDD-00252](../tdd/TDD-00252.md)); `recursive` is libuv's tree watch on macOS and Windows and a handle per directory on Linux, as Node's own walk there ([ADR-01618](../adr/ADR-01618.md))"
             ]
           },
           {

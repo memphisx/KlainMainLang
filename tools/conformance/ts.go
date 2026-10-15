@@ -195,8 +195,15 @@ func runOneTS(path, group string, hasErrorsBaseline map[string]bool, workDir str
 		_ = os.RemoveAll(caseDir)
 		entry := ""
 		for _, vf := range splitTSMultiFile(src) {
-			// Normalize the occasional absolute-style virtual path ("/a.ts").
-			name := strings.TrimPrefix(filepath.ToSlash(vf.name), "/")
+			// Normalize the occasional absolute-style virtual path ("/a.ts",
+			// "c:/root/f1.ts"), on every host alike: a drive prefix becomes a
+			// directory (a `:` is no path character on Windows), and the
+			// stray trailing space TypeScript's harness trims goes.
+			name := strings.TrimPrefix(filepath.ToSlash(strings.TrimSpace(vf.name)), "/")
+			if len(name) >= 2 && name[1] == ':' {
+				name = name[:1] + name[2:]
+			}
+			name = strings.TrimPrefix(name, "/")
 			p := filepath.Join(caseDir, filepath.FromSlash(name))
 			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
 				res.Status = "SKIP_OUT_OF_SCOPE"

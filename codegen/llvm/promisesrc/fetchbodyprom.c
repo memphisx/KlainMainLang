@@ -52,6 +52,12 @@ void __kml_fetch_bodyprom_register(void *pending, void *closure) {
 /* Fire and remove the request keyed to this completed fetch (at most one: a
  * second body read on one Response is a WHATWG "disturbed" violation).
  * Removal is swap-with-last; called from the curl drain on CURLMSG_DONE. */
+void __kml_fetch_bodyprom_on_done(void *pending);
+/* fetch.c's curl drain reaches it through hooks.c (TDD-00251). */
+extern void (*__kml_hook_fetch_bodyprom_on_done)(void *);
+__attribute__((constructor)) static void kml_fbp_register(void) {
+    __kml_hook_fetch_bodyprom_on_done = __kml_fetch_bodyprom_on_done;
+}
 void __kml_fetch_bodyprom_on_done(void *pending) {
     for (i64 i = 0; i < fbp_len; i++) {
         if (fbp_data[i].pending != pending) continue;

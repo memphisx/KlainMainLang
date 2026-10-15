@@ -23,15 +23,12 @@ int64_t recvfrom(int, void *, size_t, int, void *, int *);
 int64_t read(int, void *, size_t);
 int64_t write(int, const void *, size_t);
 int close(int);
-typedef struct { int64_t sec, usec; } kml_timeval;
-int select(int, unsigned char *, unsigned char *, unsigned char *, kml_timeval *);
+struct kml_pollfd { int fd; short events, revents; };
+int poll(struct kml_pollfd *, unsigned long, int);
 
 static int wait_readable(int fd, int ms) {
-	unsigned char r[128];
-	memset(r, 0, sizeof r);
-	r[fd >> 3] |= (unsigned char)(1u << (fd & 7));
-	kml_timeval tv = { ms / 1000, (ms % 1000) * 1000 };
-	return select(fd + 1, r, NULL, NULL, &tv) > 0;
+	struct kml_pollfd p = { fd, 1 /* POLLIN */, 0 };
+	return poll(&p, 1, ms) > 0 && (p.revents & 1);
 }
 
 #define FAIL(...) do { printf("FAIL " __VA_ARGS__); printf("\n"); return 1; } while (0)
@@ -73,7 +70,7 @@ int main(void) {
 	printf("SO_LINGER accepted\n");
 
 	// ---- SO_RCVTIMEO: a Linux timeval becomes milliseconds ----
-	kml_timeval tv = { 0, 150000 };
+	struct { int64_t sec, usec; } tv = { 0, 150000 }; // Linux struct timeval
 	if (setsockopt(s, 1, 20, &tv, sizeof tv) != 0) FAIL("SO_RCVTIMEO errno=%d", errno);
 	printf("SO_RCVTIMEO accepted\n");
 	(void)got; (void)gl;

@@ -26,10 +26,10 @@ import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 class NghttpError extends Error {
     code: string;
     errno: number;
-    constructor(integerCode: number) {
+    constructor(integerCode: number, customErrorCode?: string) {
         __kml_native.h2ErrorText(integerCode);
         super(__kml_native.lastString());
-        this.code = 'ERR_HTTP2_ERROR';
+        this.code = customErrorCode ?? 'ERR_HTTP2_ERROR';
         this.errno = integerCode;
     }
 }
@@ -296,6 +296,7 @@ export const constants = {
 const NGHTTP2_NO_ERROR = 0;
 const NGHTTP2_INTERNAL_ERROR = 2;
 const NGHTTP2_CANCEL = 8;
+const NGHTTP2_ERR_PROTO = -505;
 const NGHTTP2_SESSION_SERVER = 0;
 const NGHTTP2_SESSION_CLIENT = 1;
 const NGHTTP2_FLAG_END_STREAM = 1;
@@ -326,6 +327,7 @@ const H2E_GOAWAY = 7;
 const H2E_PUSH = 8;
 const H2E_FRAME_ERROR = 9;
 const H2E_WANT_TRAILERS = 10;
+const H2E_SESSION_ERROR = 13;
 
 const kMaxFrameSize = 16777215;
 const kMaxInt = 4294967295;
@@ -815,6 +817,7 @@ export class Http2Session extends EventEmitter {
         this._kmlUpdateTimer();
         const n = __kml_native.h2Feed(this._kmlHandle, chunk, 0, chunk.length);
         this._kmlProcessEvents();
+        if (this._kmlTerminated()) return;
         if (n < 0) {
             this.destroy(new NghttpError(n));
             return;
@@ -853,6 +856,23 @@ export class Http2Session extends EventEmitter {
             if (socket !== undefined && !socket.destroyed) socket.write(out);
         }
         this._kmlProcessEvents();
+        this._kmlTerminated();
+    }
+
+    // When nghttp2 ended the session on its own (h2State 11), its GOAWAY
+    // goes out and the session fails with a protocol error, as in Node.
+    private _kmlTerminated(): boolean {
+        if (this.destroyed || this._kmlHandle <= 0) return this.destroyed;
+        if (__kml_native.h2State(this._kmlHandle, 11) !== 1) return false;
+        const n = __kml_native.h2Flush(this._kmlHandle);
+        if (n > 0) {
+            const out = Buffer.alloc(n);
+            __kml_native.h2Take(this._kmlHandle, out);
+            const socket = this._kmlSocket;
+            if (socket !== undefined && !socket.destroyed) socket.write(out);
+        }
+        this.destroy(new NghttpError(NGHTTP2_ERR_PROTO));
+        return true;
     }
 
     private _kmlProcessEvents(): void {
@@ -913,6 +933,13 @@ export class Http2Session extends EventEmitter {
                     this._kmlOnPush(a, b, __kml_native.lastString());
                     break;
                 case H2E_FRAME_ERROR: {
+                    // As Node: only reported (and acted on) while something
+                    // listens for 'frameError', on the session or a stream.
+                    let listened = this.listenerCount('frameError') > 0;
+                    for (const s of this._kmlStreams.values()) {
+                        if (s.listenerCount('frameError') > 0) listened = true;
+                    }
+                    if (!listened) break;
                     const stream = this._kmlStreams.get(a);
                     const emitter: EventEmitter = stream !== undefined ? stream : this;
                     emitter.emit('frameError', b, c, a);
@@ -922,6 +949,10 @@ export class Http2Session extends EventEmitter {
                     });
                     break;
                 }
+                case H2E_SESSION_ERROR:
+                    // Node's onSessionInternalError.
+                    this.destroy(new NghttpError(b, c === 1 ? 'ERR_HTTP2_TOO_MANY_INVALID_FRAMES' : undefined));
+                    return;
                 case H2E_WANT_TRAILERS: {
                     const stream = this._kmlStreams.get(a);
                     if (stream !== undefined) stream._kmlOnWantTrailers();

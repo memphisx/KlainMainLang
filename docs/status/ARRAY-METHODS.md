@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 37/37 (100%) · **Strict Coverage**: 29/37 (~78%).
+**Coverage**: 37/37 (100%) · **Strict Coverage**: 30/37 (~81%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -33,7 +33,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.reduceRight(fn, init?)` | ✅ | | • Right-to-left fold sharing `.reduce`'s machinery — only the traversal direction reverses ([ADR-00776](../adr/ADR-00776.md)) |
 | `.forEach(fn)` | ✅ | | |
 | `.join(sep?)` | ✅ | | • A nested-array element is unboxed and rendered as its own comma-joined string (real JS's recursive `Array.prototype.toString`), so `[[1,2],[3,4]].join("-")` is `"1,2-3,4"` — shares the array→string coercion path (`String(arr)`/`` `${arr}` ``) added in [ADR-00528](../adr/ADR-00528.md) |
-| `.sort(fn?)` | ✅ | • Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI `qsort()` trampoline with one fixed variant per element kind ([ADR-00152](../adr/ADR-00152.md)) | • The no-comparator default sort is JS-faithful: elements are stringified and compared lexicographically even for numbers, so `[10,1,21,2].sort()` is `[1,10,2,21]` ([ADR-00546](../adr/ADR-00546.md)) |
+| `.sort(fn?)` | ✅ | | • V8's TimSort, so the order — and, for an inconsistent comparator, the comparator calls — are Node's; stable; `undefined` elements go last uncompared ([ADR-01620](../adr/ADR-01620.md))<br>• The no-comparator default sort is JS-faithful: elements are stringified and compared lexicographically even for numbers, so `[10,1,21,2].sort()` is `[1,10,2,21]` ([ADR-00546](../adr/ADR-00546.md)); objects, Dates and nested arrays by their strings, a `toString()` deciding ([ADR-01620](../adr/ADR-01620.md)) |
 | `.reverse()` | ✅ | | |
 | `.fill(val, start?, end?)` | ✅ | | |
 | `.concat(...arrays)` | ✅ | | • Any number of arguments — arrays flatten one level, plain values append; zero arguments copy the receiver ([ADR-00463](../adr/ADR-00463.md)) |

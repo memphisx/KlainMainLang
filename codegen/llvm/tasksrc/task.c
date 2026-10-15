@@ -6,6 +6,7 @@
  * per-call slot of the scheduler or the resume runner). Under -mm=gc whoever
  * swaps into a fiber repoints the GC stack bottom at that fiber's stack and
  * restores it after the swap. kml_layout.h is prepended by the compiler. */
+#include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 
@@ -77,7 +78,15 @@ extern void __kml_curl_drain_messages(void);
 extern void __kml_reqbody_pump(void);
 extern _Bool __kml_group_satisfied(void *);
 extern void __kml_worker_abort_check(void);
-extern void __kml_wait_outside_coroutine(void);
+/* A wait with nothing to park: no coroutine, no async generator step, no
+ * connection fiber. Every async callable that waits is a coroutine
+ * (TDD-00223 section 2) and the module body with a top-level await is a
+ * task (TDD-00224), so reaching this is a compiler bug. Each runtime file
+ * that waits has its own copy, so none names another (TDD-00251). */
+static void __kml_wait_outside_coroutine(void) {
+    fputs("internal error: a wait outside a coroutine inside an event-loop callback\n", stderr);
+    abort();
+}
 extern void __kml_drain_microtasks(void);
 extern void __kml_microtask_enqueue(void *);
 extern void __kml_promise_drain_reactions(void *);
@@ -147,6 +156,11 @@ void __kml_task_gc_restore(void) {
         return;
     }
     GC_SB_SET((char *)T_STACK(ct) + T_STACKSZ(ct));
+}
+/* fetch.c reaches it through hooks.c (TDD-00251). */
+extern void (*__kml_hook_task_gc_restore)(void);
+__attribute__((constructor)) static void kml_task_gc_restore_register(void) {
+    __kml_hook_task_gc_restore = __kml_task_gc_restore;
 }
 #define GC_RESTORE() __kml_task_gc_restore()
 #define GC_INTO(t) GC_SB_SET((char *)T_STACK(t) + T_STACKSZ(t))

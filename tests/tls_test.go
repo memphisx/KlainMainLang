@@ -62,7 +62,7 @@ const key = "%s"
 const server = tls.createServer({ cert: cert, key: key }, (socket) => {
   socket.on('data', (chunk: string) => { socket.write("echo:" + chunk) })
 })
-server.listen(8971, () => {})
+server.listen(8971, '127.0.0.1', () => {})
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8971)
 
@@ -164,7 +164,7 @@ const opts = { cert: "%s", key: "%s" }
 const server = tls.createServer(opts, (socket) => {
   socket.on('data', (chunk: string) => { socket.write("v:" + chunk) })
 })
-server.listen(8982, () => {})
+server.listen(8982, '127.0.0.1', () => {})
 `, certLit, keyLit)
 	port := startHTTPServer(t, src, 8982)
 
@@ -196,7 +196,7 @@ func TestE2ETLSAltnameMismatchMessage(t *testing.T) {
 	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}), 0644); err != nil {
 		t.Fatal(err)
 	}
-	src := strings.NewReplacer("PORT", port, "CAFILE", caFile).Replace(`
+	src := strings.NewReplacer("PORT", port, "CAFILE", filepath.ToSlash(caFile)).Replace(`
 import tls from 'tls'
 import fs from 'fs'
 const ca = fs.readFileSync("CAFILE", "utf8")

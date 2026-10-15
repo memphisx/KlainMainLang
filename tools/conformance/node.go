@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -350,13 +351,22 @@ var commonShimmable = map[string]bool{
 }
 
 // commonShimLiteral is the object literal bound wherever a file uses `common`.
-// Values are best-effort static probes (the host the conformance run executes on
-// is irrelevant to whether the module-under-test behaves correctly).
-// commonShimFor builds it per file so `PIPE` (a unix-socket path) is unique to
-// the test, keeping parallel workers from colliding on one socket.
+// The platform flags are the host's, as Node's own `common` computes them:
+// the tests branch on them (a POSIX-only test skips itself on Windows, a
+// Windows path test takes its Windows expectations), so a fixed platform ran
+// every host's tests down another platform's branches. commonShimFor builds
+// it per file so `PIPE` (a unix-socket path, a named pipe on Windows) is
+// unique to the test, keeping parallel workers from colliding on one socket.
 func commonShimFor(absPath string) string {
-	sock := "/tmp/kml-" + strings.TrimSuffix(filepath.Base(absPath), ".js") + ".sock"
-	return `{ isWindows: false, isLinux: false, isMacOS: true, isOSX: true, isAIX: false, isFreeBSD: false, isSunOS: false, isOpenBSD: false, isIBMi: false, isMainThread: true, hasIntl: false, hasCrypto: true, hasIPv6: true, enoughTestMem: true, isDumbTerminal: false, hasOpenSSL3: false, localhostIPv4: '127.0.0.1', PIPE: ` + strconv.Quote(sock) + `, platformTimeout: (...a: number[]): number => a[0], skipIfWorker: (): void => {}, skipIfDumbTerminal: (): void => {} }`
+	base := strings.TrimSuffix(filepath.Base(absPath), ".js")
+	sock := "/tmp/kml-" + base + ".sock"
+	if runtime.GOOS == "windows" {
+		sock = `\\.\pipe\kml-` + base
+	}
+	flag := func(b bool) string { return strconv.FormatBool(b) }
+	mac := runtime.GOOS == "darwin"
+	return `{ isWindows: ` + flag(runtime.GOOS == "windows") + `, isLinux: ` + flag(runtime.GOOS == "linux") +
+		`, isMacOS: ` + flag(mac) + `, isOSX: ` + flag(mac) + `, isAIX: false, isFreeBSD: false, isSunOS: false, isOpenBSD: false, isIBMi: false, isMainThread: true, hasIntl: false, hasCrypto: true, hasIPv6: true, enoughTestMem: true, isDumbTerminal: false, hasOpenSSL3: false, localhostIPv4: '127.0.0.1', PIPE: ` + strconv.Quote(sock) + `, platformTimeout: (...a: number[]): number => a[0], skipIfWorker: (): void => {}, skipIfDumbTerminal: (): void => {} }`
 }
 
 // commonBuildInapplicable maps `common.*` guards whose skip condition is
@@ -913,9 +923,12 @@ func writeTmpdirShim(workDir string) error {
 		return err
 	}
 	shim := `import fs from 'fs';
+import os from 'os';
 import path from 'path';
 
-const tmpBase: string = "/tmp/kml-tmpdir-" + process.pid;
+// Under the host's temp directory, an absolute path on every platform, as
+// Node's own tmpdir is.
+const tmpBase: string = path.join(os.tmpdir(), "kml-tmpdir-" + process.pid);
 
 const tmpdir = {
   path: tmpBase,
@@ -936,6 +949,12 @@ export default tmpdir;
 
 func runOneNode(path, name, workDir string, workerID int, timeout time.Duration) (res nodeResult) {
 	res.File = name
+	if os.Getenv("NODE_TRACE") != "" {
+		// A fatal error (out of memory) cannot be recovered: the last file
+		// a worker started without finishing names the culprit.
+		fmt.Fprintln(os.Stderr, "node start", name)
+		defer func() { fmt.Fprintln(os.Stderr, "node done", name, res.Status, res.Reason) }()
+	}
 	res.Suite = strings.SplitN(name, "/", 2)[0]
 	res.Module = moduleOf(filepath.Base(name))
 	defer func() {
@@ -1271,6 +1290,25 @@ func nodeReasonBucket(reason string) string {
 // needed when triaging NODE_FAILLIST output for which method/member is missing.
 var nodeRawReasons = os.Getenv("NODE_RAW_REASONS") != ""
 
+// failureText is what a failed program printed, for its reason: the first
+// line, or under NODE_RAW_REASONS the first few non-empty ones (an assertion
+// names the differing values on the lines after its first).
+func failureText(out string) string {
+	if !nodeRawReasons {
+		return firstLine(strings.TrimLeft(out, "\r\n"))
+	}
+	var lines []string
+	for _, l := range strings.Split(out, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+			if len(lines) == 8 {
+				break
+			}
+		}
+	}
+	return strings.Join(lines, " | ")
+}
+
 func nodeReason(kind, msg string) string {
 	if nodeRawReasons {
 		return kind + ": " + msg
@@ -1291,10 +1329,14 @@ func nodeReason(kind, msg string) string {
 // subdirectory the entry compiles under so `../common/*` resolves to the
 // generated shims — the test's own suite dir name for the Node track.
 func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir, entrySub string) (bool, string, string, string) {
+	// The compile's share of the run's memory (budget.go).
+	rsv := budget.reserve(compileDefault)
+	defer budget.release(rsv)
 	prog, perr := frontEndSource(src, filepath.Join(workDir, entrySub), tag)
 	if perr != nil {
 		return false, nodeReason("COMPILE_ERROR", firstLine(perr.Error())), "", ""
 	}
+	budget.grow(rsv, irReservation(len(prog.ir)))
 
 	llFile := filepath.Join(workDir, tag+".ll")
 	binFile := filepath.Join(workDir, tag+".bin")
@@ -1336,14 +1378,18 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 	cctx, cancel := context.WithTimeout(context.Background(), clangTimeout)
 	defer cancel()
 	var clangOut bytes.Buffer
-	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)
+	clangCmd := killableCommand(cctx, "clang", llvm.HostClangExecArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
 	if err := runTracked(clangCmd); err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			return false, "CLANG_TIMEOUT", "", ""
 		}
-		return false, nodeReason("CLANG_ERROR", firstLine(clangOut.String())), "", ""
+		msg := firstLine(clangOut.String())
+		if strings.TrimSpace(msg) == "" {
+			msg = err.Error() // a silent failure: name the exit status
+		}
+		return false, nodeReason("CLANG_ERROR", msg), "", ""
 	}
 	defer os.Remove(binFile)
 
@@ -1369,7 +1415,16 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 		if rctx.Err() == context.DeadlineExceeded {
 			return false, "RUN_TIMEOUT", stdout.String(), stderr.String()
 		}
-		return false, nodeReason("RUNTIME_NONZERO_EXIT", firstLine(stderr.String())), stdout.String(), stderr.String()
+		msg := failureText(stderr.String())
+		if msg == "" {
+			msg = failureText(stdout.String())
+		}
+		if msg == "" {
+			// A silent failure still names how it ended (a crash's exception
+			// code on Windows, a signal elsewhere).
+			msg = err.Error()
+		}
+		return false, nodeReason("RUNTIME_NONZERO_EXIT", msg), stdout.String(), stderr.String()
 	}
 	return true, "", stdout.String(), stderr.String()
 }

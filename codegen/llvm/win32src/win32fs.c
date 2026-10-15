@@ -185,6 +185,11 @@ char *strerror(int e) {
 	default: return (char *)"unknown error";
 	}
 }
+// A unit compiled against the CRT headers calls strerror through its import
+// slot (__imp_strerror). Supplying the slot here keeps the linker from
+// pulling the CRT's import member, whose own strerror would collide with
+// the one above.
+char *(*__imp_strerror)(int) = strerror;
 
 // ---- UTF-8 <-> UTF-16 ------------------------------------------------------------
 // Returns a malloc'd wide string, or NULL with errno set. Forward slashes
@@ -442,6 +447,43 @@ int kml_win_fsync(int fd) {
 	return 0;
 }
 
+// pread/pwrite: one ReadFile/WriteFile at the offset (an OVERLAPPED on a
+// synchronous handle), so the transfer is atomic against another on the
+// descriptor; the file position is put back after, as libuv's
+// fs__read/fs__write do, leaving the next unpositioned transfer where it
+// was. A pipe or console has no position: ESPIPE.
+static int64_t positioned(int fd, void *buf, size_t n, int64_t pos, int wr) {
+	HANDLE h = kfd_handle(fd);
+	if (h == INVALID_HANDLE_VALUE) { errno = L_EBADF; return -1; }
+	if (GetFileType(h) != FILE_TYPE_DISK) { errno = L_ESPIPE; return -1; }
+	LARGE_INTEGER zero = {0}, cur;
+	int restore = SetFilePointerEx(h, zero, &cur, FILE_CURRENT);
+	OVERLAPPED ov;
+	memset(&ov, 0, sizeof ov);
+	ov.Offset = (DWORD)((uint64_t)pos & 0xFFFFFFFFu);
+	ov.OffsetHigh = (DWORD)((uint64_t)pos >> 32);
+	DWORD got = 0;
+	BOOL ok = wr ? WriteFile(h, buf, (DWORD)n, &got, &ov) : ReadFile(h, buf, (DWORD)n, &got, &ov);
+	DWORD e = ok ? 0 : GetLastError();
+	if (restore) SetFilePointerEx(h, cur, NULL, FILE_BEGIN);
+	if (!ok) {
+		if (!wr && e == ERROR_HANDLE_EOF) return 0;
+		BY_HANDLE_FILE_INFORMATION fi;
+		if (!wr && GetFileInformationByHandle(h, &fi) && (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+			errno = L_EISDIR;
+			return -1;
+		}
+		errno = win_errno(e);
+		return -1;
+	}
+	return got;
+}
+
+int64_t kml_win_pread(int fd, void *buf, size_t n, int64_t pos) __asm__("pread");
+int64_t kml_win_pread(int fd, void *buf, size_t n, int64_t pos) { return positioned(fd, buf, n, pos, 0); }
+int64_t kml_win_pwrite(int fd, const void *buf, size_t n, int64_t pos) __asm__("pwrite");
+int64_t kml_win_pwrite(int fd, const void *buf, size_t n, int64_t pos) { return positioned(fd, (void *)buf, n, pos, 1); }
+
 // ftruncate(fd, len): resize an open file, mirroring truncate(path,len) above
 // (SetFilePointerEx + SetEndOfFile). Growing zero-fills, as on POSIX.
 int kml_win_ftruncate(int fd, int64_t len) __asm__("ftruncate");
@@ -499,11 +541,21 @@ int open(const char *path, int flags, ...) {
 		va_end(ap);
 	}
 	if (is_dir_path(w)) {
-		// Node: opening a directory for reading is EISDIR (libuv maps the
-		// CreateFile refusal to that, matching POSIX read attempts).
-		free_keep_err(w);
-		errno = L_EISDIR;
-		return -1;
+		// libuv opens with FILE_FLAG_BACKUP_SEMANTICS, so a directory opens
+		// for reading (or reading and writing) and only its reads fail
+		// (EISDIR, read); creating or truncating one is EISDIR at the open.
+		if ((flags & 3) == 1 || (flags & (L_O_CREAT | L_O_TRUNC))) {
+			free_keep_err(w);
+			errno = L_EISDIR;
+			return -1;
+		}
+		HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+		                       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+		if (h == INVALID_HANDLE_VALUE) { errno = win_errno(GetLastError()); free(w); return -1; }
+		free(w);
+		int fd = _open_osfhandle((intptr_t)h, CRT_O_BINARY | CRT_O_RDONLY);
+		if (fd < 0) { CloseHandle(h); errno = L_EMFILE; return -1; }
+		return fd;
 	}
 	int fd = open_shared(w, flags, mode);
 	free_keep_err(w);
@@ -973,6 +1025,10 @@ static char *reparse_target_utf8(HANDLE h) {
 	int drive = nt && nlen >= 6 && ((p[4] >= L'A' && p[4] <= L'Z') || (p[4] >= L'a' && p[4] <= L'z')) && p[5] == L':' && (nlen == 6 || p[6] == L'\\');
 	if (drive) {
 		p += 4;
+		// A junction is stored with a trailing separator; Node reports its
+		// target without one (a drive root keeps its own: `C:\`).
+		size_t n = wcslen(p);
+		if (junction && n > 3 && p[n - 1] == L'\\') p[n - 1] = 0;
 	} else if (!junction && nt && nlen >= 8 && (p[4] == L'U' || p[4] == L'u') && (p[5] == L'N' || p[5] == L'n') && (p[6] == L'C' || p[6] == L'c') && p[7] == L'\\') {
 		p += 6; // leaves "\server…" with one cell before it
 		p[0] = L'\\';
@@ -1102,6 +1158,9 @@ int symlink(const char *target, const char *path) {
 		errno = e;
 		return r;
 	}
+	// Windows symlinks do not tolerate forward slashes in the target: Node
+	// (preprocessSymlinkDestination) turns them into backslashes.
+	for (wchar_t *c = wt; *c; c++) if (*c == L'/') *c = L'\\';
 	// Node picks 'dir' vs 'file' from the target when no type is given; a
 	// relative target is resolved against the link's directory for that.
 	DWORD flags = 0;
@@ -1134,22 +1193,14 @@ int symlink(const char *target, const char *path) {
 
 // __kml_win_copyfile is fs.copyFileSync's transfer, libuv's fs__copyfile: the
 // OS copy, which carries what a read-then-write loses — the file's attributes,
-// its timestamps, alternate data streams, sparseness and compression. 0, or -1
-// with errno set.
+// its timestamps, alternate data streams, sparseness and compression. A
+// read-only destination is refused (EPERM), as in Node. 0, or -1 with errno
+// set.
 int __kml_win_copyfile(const char *src, const char *dst) {
 	wchar_t *ws = to_wide(src), *wd = to_wide(dst);
 	if (!ws || !wd) { free_keep_err(ws); free_keep_err(wd); return -1; }
 	BOOL ok = CopyFileW(ws, wd, FALSE);
 	DWORD err = GetLastError();
-	if (!ok && err == ERROR_ACCESS_DENIED) {
-		// A read-only destination refuses the overwrite; POSIX (and Node, by
-		// reopening it) replaces it. Clear the bit and retry once.
-		DWORD a = GetFileAttributesW(wd);
-		if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY) && SetFileAttributesW(wd, a & ~(DWORD)FILE_ATTRIBUTE_READONLY)) {
-			ok = CopyFileW(ws, wd, FALSE);
-			err = GetLastError();
-		}
-	}
 	free(ws); free(wd);
 	if (ok) return 0;
 	errno = win_errno(err);

@@ -1,6 +1,9 @@
 package tests
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -141,7 +144,7 @@ async function main(): Promise<void> {
 // The second stream starts once the first is done: two opens racing on the
 // thread pool finish in either order, in Node as here.
 rs.on('close', () => { console.log('close'); main(); });
-`, "created\nerror ENOENT errno open ENOENT: no such file or directory, open '/nonexistent/kml-stream-dir/missing.txt'\nclose\ncaught ENOENT\n")
+`, winPaths("created\nerror ENOENT errno open ENOENT: no such file or directory, open '/nonexistent/kml-stream-dir/missing.txt'\nclose\ncaught ENOENT\n", "/nonexistent/kml-stream-dir/missing.txt"))
 }
 
 // Leaving a for await early destroys the stream: its descriptor closes and 'close' fires.
@@ -178,8 +181,15 @@ rs.on('close', () => { console.log('close'); });
 }
 
 // fs.open/read/write/fsync/close in callback form, each callback on a later loop turn, errors as Node's.
+// ENOENT's errno is libuv's: -2 on POSIX, -4058 on Windows, as Node's is;
+// and Node on Windows reports the path resolved against the current drive.
 func TestE2EFsCallbackOpenReadWriteClose(t *testing.T) {
-	assertFsOutput(t, `
+	enoent, missing := "-2", "/nonexistent/kml-cb/x.txt"
+	if runtime.GOOS == "windows" {
+		cwd, _ := os.Getwd()
+		enoent, missing = "-4058", filepath.VolumeName(cwd)+`\nonexistent\kml-cb\x.txt`
+	}
+	assertFsOutput(t, strings.ReplaceAll(`
 import fs from 'fs';
 const path = '__DIR__/cb.txt';
 fs.open(path, 'w+', (err, fd) => {
@@ -196,7 +206,7 @@ fs.open(path, 'w+', (err, fd) => {
                     fs.close(fd, (err6) => {
                         console.log('close again', err6!.code, err6!.syscall, err6!.message);
                         fs.open('/nonexistent/kml-cb/x.txt', 'r', (err7, fd7) => {
-                            console.log(err7!.code, err7!.errno === -2, err7!.syscall, err7!.path, err7!.message);
+                            console.log(err7!.code, err7!.errno === __ENOENT__, err7!.syscall, err7!.path, err7!.message);
                         });
                     });
                 });
@@ -205,7 +215,7 @@ fs.open(path, 'w+', (err, fd) => {
     });
 });
 console.log('sync end');
-`, "sync end\nopen null number\nwrite null 12 hello, world\nfsync null\nread null 5 world true\nclose null\nclose again EBADF close EBADF: bad file descriptor, close\nENOENT true open /nonexistent/kml-cb/x.txt ENOENT: no such file or directory, open '/nonexistent/kml-cb/x.txt'\n")
+`, "__ENOENT__", enoent), "sync end\nopen null number\nwrite null 12 hello, world\nfsync null\nread null 5 world true\nclose null\nclose again EBADF close EBADF: bad file descriptor, close\nENOENT true open "+missing+" ENOENT: no such file or directory, open '"+missing+"'\n")
 }
 
 // fs.read's other forms: (fd, buffer, options, cb), (fd, options, cb) and (fd, cb); position null reads on from the current offset.

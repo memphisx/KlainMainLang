@@ -101,6 +101,28 @@ void *__kml_errno_desc(int e) {
     return 0;
 }
 
+/* The errno a libuv number stands for (uv is negative): __kml_uv_errno's
+ * inverse, 0 when it names none. */
+int __kml_errno_from_uv(int uv) {
+#ifdef _WIN32
+    /* Several errnos have no libuv number of their own and share UNKNOWN's
+     * (-4094); ENOTSUP and EOPNOTSUPP share one, which names ENOTSUP. The
+     * first entry listed for a number is its name. */
+    static const struct { int u, w; } map[] = {
+#define X(n, w, u, d) {u, w},
+        KML_ERRNOS_WIN(X)
+        KML_ERRNOS(X)
+#undef X
+    };
+    if (uv == -4094) return 4094;
+    for (int i = 0; i < (int)(sizeof map / sizeof map[0]); i++)
+        if (map[i].u == uv) return map[i].w;
+    return 0;
+#else
+    return -uv;
+#endif
+}
+
 /* Node's err.errno: POSIX libuv numbers are the negated OS errno. */
 int __kml_uv_errno(int e) {
 #ifdef _WIN32

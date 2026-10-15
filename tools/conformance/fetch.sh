@@ -24,9 +24,20 @@ not_a_checkout() {
     rm -rf "$1"
   fi
 }
+# A checkout whose files git converted to CRLF (core.autocrlf, the Windows
+# default) is not the corpus: its tests read LF line terminators, Test262's
+# line-terminator tests above all. Every corpus is checked out with
+# core.autocrlf=false; one that was not is fetched again.
+crlf_checkout() {
+  if [ -d "$1/.git" ] && [ "$(git -C "$1" config core.autocrlf || true)" != "false" ]; then
+    echo "$1 was checked out with line-ending conversion — removing and re-fetching."
+    rm -rf "$1"
+  fi
+}
 DEST="$SCRIPT_DIR/../../.test262"
 
 not_a_checkout "$DEST"
+crlf_checkout "$DEST"
 test262_ready=""
 if [ -d "$DEST/.git" ]; then
   current="$(git -C "$DEST" rev-parse HEAD)"
@@ -41,6 +52,7 @@ fi
 
 if [ -z "$test262_ready" ]; then
   git init -q "$DEST"
+  git -C "$DEST" config core.autocrlf false
   git -C "$DEST" remote add origin "$REPO_URL"
   git -C "$DEST" fetch --depth 1 origin "$PINNED_SHA"
   git -C "$DEST" checkout -q FETCH_HEAD
@@ -69,6 +81,7 @@ NODE_DEST="$SCRIPT_DIR/../../.node-tests"
 NODE_SLICE="suites-v2"
 NODE_MARKER="$NODE_DEST/.git/kml-corpus-version"
 not_a_checkout "$NODE_DEST"
+crlf_checkout "$NODE_DEST"
 if [ -d "$NODE_DEST/.git" ]; then
   current_tag="$(cat "$NODE_MARKER" 2>/dev/null || echo none)"
   if [ "$current_tag" = "$NODE_TAG+$NODE_SLICE" ]; then
@@ -81,6 +94,7 @@ fi
 
 if [ ! -d "$NODE_DEST/.git" ]; then
   git init -q "$NODE_DEST"
+  git -C "$NODE_DEST" config core.autocrlf false
   git -C "$NODE_DEST" remote add origin "$NODE_URL"
   git -C "$NODE_DEST" config core.sparseCheckout true
   git -C "$NODE_DEST" sparse-checkout init --no-cone 2>/dev/null || true
@@ -129,6 +143,7 @@ WPT_DEST="$SCRIPT_DIR/../../.wpt-tests"
 WPT_SLICE="full-headless-v3"
 WPT_MARKER="$WPT_DEST/.git/kml-corpus-version"
 not_a_checkout "$WPT_DEST"
+crlf_checkout "$WPT_DEST"
 if [ -d "$WPT_DEST/.git" ]; then
   current="$(cat "$WPT_MARKER" 2>/dev/null || echo none)"
   if [ "$current" = "$WPT_SHA+$WPT_SLICE" ]; then
@@ -141,6 +156,7 @@ fi
 
 if [ ! -d "$WPT_DEST/.git" ]; then
   git init -q "$WPT_DEST"
+  git -C "$WPT_DEST" config core.autocrlf false
   git -C "$WPT_DEST" remote add origin "$WPT_URL"
   git -C "$WPT_DEST" config core.sparseCheckout true
   git -C "$WPT_DEST" sparse-checkout init --no-cone 2>/dev/null || true
@@ -204,6 +220,7 @@ TS_DEST="$SCRIPT_DIR/../../.ts-tests"
 # the pinned tag after a shallow tag fetch).
 TS_MARKER="$TS_DEST/.git/kml-corpus-version"
 not_a_checkout "$TS_DEST"
+crlf_checkout "$TS_DEST"
 if [ -d "$TS_DEST/.git" ]; then
   current_tag="$(cat "$TS_MARKER" 2>/dev/null || echo none)"
   if [ "$current_tag" = "$TS_TAG" ]; then
@@ -216,6 +233,7 @@ fi
 
 if [ ! -d "$TS_DEST/.git" ]; then
   git init -q "$TS_DEST"
+  git -C "$TS_DEST" config core.autocrlf false
   git -C "$TS_DEST" remote add origin "$TS_URL"
   git -C "$TS_DEST" config core.sparseCheckout true
   git -C "$TS_DEST" sparse-checkout init --no-cone 2>/dev/null || true

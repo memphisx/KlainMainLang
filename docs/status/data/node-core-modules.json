@@ -75,8 +75,7 @@
             "feature": "`net`",
             "status": "implemented",
             "caveats": [
-              "BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported",
-              "On Windows the TCP handles are compile-checked, not yet run"
+              "BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported"
             ],
             "notes": [
               "Node's `lib/net.js` ported to TypeScript (`lib/node/net.ts`) over native TCP handles on the event loop: Socket (a Duplex — back-pressure, `'drain'`, pause/resume, `setEncoding`, `setTimeout`, `ref`/`unref`), Server (`listen` by port/host/backlog/options or a Unix-socket path, dual-stack `::` by default, `'listening'`/`'error'` on the next tick, `maxConnections`, `getConnections`), `connect`/`createConnection` (port, options, `{ path }`), `isIP`/`isIPv4`/`isIPv6`; errors built as Node builds them ([ADR-01170](../adr/ADR-01170.md))"
@@ -87,8 +86,7 @@
             "status": "implemented",
             "caveats": [
               "Sends are synchronous (a full send buffer is waited out), so `getSendQueueSize()`/`getSendQueueCount()` are always 0",
-              "The `lookup`, `receiveBlockList`/`sendBlockList` options, `bind({ fd })` and cluster-shared sockets are not ported",
-              "Windows: the TTL and multicast options and membership apply to `udp4` sockets only, and that path is compile-checked, not run"
+              "The `lookup`, `receiveBlockList`/`sendBlockList` options, `bind({ fd })` and cluster-shared sockets are not ported"
             ],
             "notes": [
               "Node's lib/dgram.js in TypeScript ([ADR-01263](../adr/ADR-01263.md)) over datagram handles in the pool reactor: `udp4`/`udp6`, `createSocket(type | options, listener?)`, `bind` (resolving its address; `'listening'`), `send` in every form (offset/length, a list, before the bind completes — queued), `connect`/`disconnect`/`remoteAddress`, `close`, `address`, `setBroadcast`/`setTTL`/`setMulticastTTL`/`setMulticastLoopback`/`setMulticastInterface`, `addMembership`/`dropMembership`, buffer sizes, `ref`/`unref`",
@@ -100,8 +98,7 @@
             "status": "implemented",
             "caveats": [
               "OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)",
-              "Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported",
-              "On Windows the TCP handles are compile-checked, not yet run"
+              "Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported"
             ],
             "notes": [
               "Node's `_tls_wrap` shape in TypeScript (`lib/node/tls.ts`): a TLSSocket is a net.Socket whose handle carries a non-blocking OpenSSL session — `tls.connect` (`servername`, `rejectUnauthorized`, `ca`/`cert`/`key`, ALPN; `'secureConnect'`, `authorized`/`authorizationError`, Node's verify error codes and messages), `tls.createServer` (`'secureConnection'`, `'tlsClientError'`), `createSecureContext`, `getProtocol`/`getCipher` ([ADR-01170](../adr/ADR-01170.md))"
@@ -111,8 +108,7 @@
             "feature": "`dns`",
             "status": "implemented",
             "caveats": [
-              "A c-ares error has no `errno` key (Node's has `errno: undefined`): the error layout's `errno` slot is numeric",
-              "On Windows a channel runs on c-ares' own event thread (no libuv loop there yet), and is compile-checked, not yet run"
+              "A c-ares error has no `errno` key (Node's has `errno: undefined`): the error layout's `errno` slot is numeric"
             ],
             "notes": [
               "Node's lib/dns.js in TypeScript: `lookup` (`all`/`family`/`hints`/`order`/`verbatim`), `lookupService`, `resolve`/`resolve4`/`resolve6` (with `ttl`)/`resolveMx`/`Txt`/`Srv`/`Ns`/`Cname`/`Ptr`/`Soa`/`Naptr`/`Caa`/`Tlsa`/`Any`, `reverse`, `Resolver` (`timeout`/`tries`/`maxTimeout`, `setServers`/`getServers`, `cancel`, `setLocalAddress`), `get`/`setDefaultResultOrder`, the error-code constants and `dns.promises` ([ADR-01294](../adr/ADR-01294.md))",
@@ -186,8 +182,7 @@
             "caveats": [
               "`setupPrimary({ exec })` naming another file fails at `fork()` with `ERR_CHILD_PROCESS_FORK_MODULE`: a worker is this compiled program, so there is no other script for it to run (a genuine impossibility of native compilation, [ADR-01015](../adr/ADR-01015.md))",
               "`inspectPort` and the inspector flags are ignored: a compiled program has no inspector",
-              "A `dgram` socket bound in a worker binds on its own, not through the primary",
-              "Windows: a worker's `listen` has no handle to receive — descriptor passing over the fork channel is POSIX-only"
+              "A `dgram` socket bound in a worker binds on its own, not through the primary"
             ],
             "notes": [
               "Node's lib/internal/cluster in TypeScript (`lib/node/cluster.ts`): workers are forks over the IPC channel; a worker's `net`/`http` server listens through the primary, which accepts and hands connections round (`SCHED_RR`, the POSIX default) or sends the listening socket to every worker (`SCHED_NONE`, `NODE_CLUSTER_SCHED_POLICY=none`); Worker and cluster-level events, `cluster.workers` keyed by id, `worker.disconnect()`/`kill()`, `cluster.disconnect(cb)`, `setupPrimary` and `settings` ([ADR-01302](../adr/ADR-01302.md))",

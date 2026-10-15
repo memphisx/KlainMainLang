@@ -103,6 +103,12 @@ declare i64 @__kml_promise_first_fulfilled(ptr, i64)`)
 // and/or not microtasks. When the real runtimes are present their definitions are
 // used and the corresponding stub is skipped. Called once at program finalization.
 func (e *Emitter) emitLoopTaskStubs() {
+	// timers.c's handles and fetch.c's sockets are the event loop's (loop.c,
+	// on libuv), whether or not the program runs it: linked first, so the
+	// stubs below cover it.
+	if (e.UsesFetch() || e.UsesTimers()) && !e.usedEventLoop {
+		e.ensureHTTPRuntime()
+	}
 	// A top-level await's tick (@__kml_microtask_tick): microtask.c's.
 	if e.needMicrotaskTick {
 		e.ensureMicrotasks()
@@ -111,21 +117,6 @@ func (e *Emitter) emitLoopTaskStubs() {
 	// group; without the combinator runtime no task ever parks on one.
 	if e.usedTaskRuntime && !e.usedPromiseCombinators {
 		e.emitGlobal("define i1 @__kml_group_satisfied(ptr %g) {\n  ret i1 1\n}")
-	}
-	// TDD-00142 Stage 3: the webview page-tick pump (@__kml_wv_pump, Windows
-	// only: elsewhere the loop runs inside the GUI's main loop) calls
-	// the timers binding's phases (linked by the pump),
-	// @__kml_task_sched_step and @__kml_drain_microtasks unconditionally.
-	// When the task runtime is absent, a no-op stub stands in — but only for
-	// symbols the HTTP path below does not already stub (guarded on
-	// !usedHTTP), so no symbol is defined twice.
-	if e.usedWebview && e.opts.Target.OS() == "windows" {
-		if !e.usedTaskRuntime && !e.usedHTTP {
-			e.emitGlobal("define void @__kml_task_sched_step() {\nentry:\n  ret void\n}")
-		}
-		if !e.usedHTTP {
-			e.ensureMicrotasks()
-		}
 	}
 	// Streaming-request-body pump stubs — referenced by both the event loop
 	// and the task scheduler's step, so emitted whenever either exists.
@@ -143,35 +134,6 @@ func (e *Emitter) emitLoopTaskStubs() {
 		e.emitGlobal("define i1 @__kml_task_holds_loop() {\nentry:\n  ret i1 0\n}")
 	}
 	e.ensureMicrotasks()
-	// dynamic-import island hooks likewise (TDD-00225).
-	if !e.usedDynImportWatch {
-		e.emitGlobal("define i1 @__kml_dynimport_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_dynimport_dispatch() {\nentry:\n  ret void\n}")
-		e.emitGlobal("define i64 @__kml_dynimport_next_deadline_ns() {\nentry:\n  ret i64 0\n}")
-	}
-	// fs.watch hooks likewise (TDD-00181): Windows only (POSIX watchers are
-	// libuv handles).
-	if !e.usedFsWatchRuntime && e.opts.Target.OS() == "windows" {
-		e.emitGlobal("define i1 @__kml_fswatch_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_fswatch_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_fswatch_dispatch() {\nentry:\n  ret void\n}")
-	}
-	// TDD-00185: async-I/O thread-pool hooks. When the pool is used, klainpool.c
-	// defines these; otherwise they are no-ops, like every hook above.
-	// Windows only: a POSIX port delivers through its own uv_async_t.
-	if !e.usedThreadPool && e.opts.Target.OS() == "windows" {
-		e.emitGlobal("define i1 @__kml_pool_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define zeroext i1 @__kml_pool_dispatch() {\nentry:\n  ret i1 0\n}")
-	}
-	if !e.usedThreadPool {
-		// The TCP handles' reactor hooks: Windows only (POSIX handles are
-		// libuv watchers).
-		if e.opts.Target.OS() == "windows" {
-			e.emitGlobal("define i1 @__kml_tcp_keepalive() {\nentry:\n  ret i1 0\n}")
-			e.emitGlobal("define i1 @__kml_tcp_fdset_add(ptr %fdset, ptr %wfdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-			e.emitGlobal("define zeroext i1 @__kml_tcp_dispatch() {\nentry:\n  ret i1 0\n}")
-		}
-	}
 }
 
 func (e *Emitter) ensureTaskRuntime() {

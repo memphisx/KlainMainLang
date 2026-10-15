@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "19/21",
     "loosePct": 90,
-    "strict": "11/21",
+    "strict": "13/21",
     "strictPct": 52
   },
   "lede": "Node's fs, ported from lib/fs.js to TypeScript: the synchronous functions, their callback and promise forms, FileHandle, the file streams and fs.watch. Each operation is one native request — on the calling thread for a *Sync function, on the thread pool with the callback on the event loop otherwise — as libuv's are.",
@@ -212,12 +212,9 @@
       "name": "fs.open / read / write / writev / readv / fsync / close",
       "statusRow": "fs.open / close / read / write / writev / readv / fsync (callback form)",
       "signature": "fs.open(path, flags?, mode?, cb); fs.read(fd, buffer, offset, length, position, cb); fs.write(fd, data, …, cb)",
-      "badge": "caveats",
-      "description": "The descriptor-level callback operations with Node's argument forms, validation errors and system errors.",
+      "badge": "exact",
+      "description": "The descriptor-level callback operations with Node's argument forms, validation errors and system errors. A positioned read or write is a single transfer at the offset on every platform.",
       "snippet": "fs.open('a.txt', 'r', (err, fd) => fs.close(fd))",
-      "differences": [
-        "On Windows a positioned read or write seeks, then transfers: not atomic against another operation on the same descriptor."
-      ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fsopenpath-flags-mode-callback"
       }
@@ -255,13 +252,10 @@
       "name": "fs.watch",
       "statusRow": "fs.watch(path[, options][, listener]) → FSWatcher",
       "signature": "fs.watch(filename, options?, listener?): FSWatcher",
-      "badge": "caveats",
-      "description": "Native, event-driven change watching in the event loop: an FSWatcher (an EventEmitter) emitting 'change' with (eventType, filename), and 'close', with ref()/unref() and persistent. Backends: libuv on Linux and macOS, ReadDirectoryChangesW on Windows.",
+      "badge": "exact",
+      "description": "Native, event-driven change watching in the event loop: an FSWatcher (an EventEmitter) emitting 'change' with (eventType, filename), and 'close', with ref()/unref() and persistent. libuv on every platform; recursive watches the whole tree, with names relative to the watched directory.",
       "exampleKey": "fs_watch/fs_watch",
       "snippet": "const w = fs.watch('config.json', (ev, name) => { console.log(ev, name); w.close() })",
-      "differences": [
-        "`recursive` is applied on macOS only: on Linux and Windows it watches the top directory alone."
-      ],
       "spec": {
         "mdn": "https://nodejs.org/api/fs.html#fswatchfilename-options-listener"
       }

@@ -51,7 +51,7 @@ process.on('SIGINT', () => {
 fs.writeFileSync(%q, "ready");
 http.listen(8241, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
-});
+}, { host: '127.0.0.1' });
 `, readyPath))
 	res := runInConPTY(t, bin, 80, 24, 30*time.Second, ctrlCWhenReady(t, readyPath))
 	if res.ExitCode != 0 {
@@ -79,7 +79,7 @@ process.on('SIGTERM', () => {
 fs.writeFileSync(%q, "ready");
 http.listen(8242, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
-});
+}, { host: '127.0.0.1' });
 `, readyPath))
 	res := runInConPTY(t, bin, 80, 24, 30*time.Second, ctrlCWhenReady(t, readyPath))
 	if !strings.Contains(res.Text, "handled:SIGINT") {
@@ -101,7 +101,7 @@ import fs from 'fs'
 fs.writeFileSync(%q, "ready");
 http.listen(8243, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
-});
+}, { host: '127.0.0.1' });
 `, readyPath))
 	res := runInConPTY(t, bin, 80, 24, 30*time.Second, ctrlCWhenReady(t, readyPath))
 	if res.ExitCode == 0 {

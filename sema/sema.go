@@ -144,6 +144,9 @@ func (w *walker) rewrite(n ast.Node) ast.Node {
 		// A binding named undefined is in scope (only plain JS accepts one).
 		return ast.NewIdentifier("undefined", nl.GetPos())
 	}
+	if m, ok := w.globalThisLink(n); ok {
+		return ast.NewIdentifier(m, n.GetPos())
+	}
 	w.link(n)
 	if v, ok := n.(*ast.VarDeclaration); ok {
 		w.noteAlias(v)
@@ -232,6 +235,22 @@ func (w *walker) link(n ast.Node) {
 			n.BaseClass = m
 		}
 	}
+}
+
+// globalThisLink is the module binding `globalThis.x` reads when a global
+// module implements the global x (`globalThis.performance`): the global
+// object's own property, whatever a local named x shadows.
+func (w *walker) globalThisLink(n ast.Node) (string, bool) {
+	mem, ok := n.(*ast.MemberExpression)
+	if !ok || mem.Optional || w.prog == nil {
+		return "", false
+	}
+	id, ok := mem.Object.(*ast.Identifier)
+	if !ok || id.Name != "globalThis" || w.declared("globalThis") {
+		return "", false
+	}
+	m, ok := w.prog.GlobalLinks[mem.Property]
+	return m, ok
 }
 
 // functionScope is the set of names a function introduces: its parameters, a

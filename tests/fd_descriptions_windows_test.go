@@ -10,14 +10,13 @@ import (
 // TestWin32FdDescriptions drives the Windows shim's refcounted fd descriptions
 // natively (TDD-00183 Stage 3). dup2() shares one description between two fds:
 // the handle is torn down by the last close rather than the first, readiness is
-// seen through every alias, and sockets, pipe ends and foreign sockets all
-// allocate from one 512-slot pool (the former 384-socket cap), which answers
-// EMFILE when full.
+// seen through every alias, and every owned handle allocates from one 8192-slot pool (TDD-00252; 512 before the loop moved to
+// libuv), which answers EMFILE when full.
 //
 // Nothing in the emitted runtime calls dup2 on this platform — a child's stdio
 // is handed over by handle — so no E2E program reaches the aliasing path;
 // testdata/win32/fd_descriptions.c goes through the shim's own
-// socket()/pipe()/dup2()/select()/close().
+// socket()/socketpair()/dup2()/poll()/close().
 func TestWin32FdDescriptions(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
@@ -28,7 +27,6 @@ func TestWin32FdDescriptions(t *testing.T) {
 		filepath.Join("testdata", "win32", "fd_descriptions.c"),
 		filepath.Join(shim, "win32io.c"), filepath.Join(shim, "win32proc.c"),
 		filepath.Join(shim, "win32shim.c"), filepath.Join(shim, "win32fs.c"),
-		filepath.Join(shim, "win32fswatch.c"),
 		"-lws2_32", "-lntdll", "-lbcrypt", "-luserenv", "-ladvapi32", "-lshell32", "-lole32", "-liphlpapi", "-lpsapi"}
 	if out, err := exec.Command("clang", args...).CombinedOutput(); err != nil {
 		t.Fatalf("building the native shim test: %v\n%s", err, out)
@@ -42,8 +40,8 @@ func TestWin32FdDescriptions(t *testing.T) {
 		"socket alias survived the original's close: ping/pong",
 		"socket closed once, by the last reference",
 		"readiness seen through both aliases",
-		"pipe alias: write end closed once, by the last reference",
-		"opened 512 sockets from the shared pool, then EMFILE",
+		"pair alias: write end closed once, by the last reference",
+		"opened 8192 sockets from the shared pool, then EMFILE",
 		"OK",
 	} {
 		if !strings.Contains(s, want) {
@@ -64,7 +62,7 @@ const socks: dgram.Socket[] = []
 let bound = 0
 for (let i = 0; i < 450; i++) {
   const s = dgram.createSocket('udp4')
-  s.bind(0, () => {
+  s.bind(0, '127.0.0.1', () => {
     if (s.address().port > 0) bound = bound + 1
     if (bound === 450) {
       console.log("bound", bound)

@@ -35,6 +35,7 @@ func (e *Emitter) ensureReqBodyRuntime() {
 	e.ensureStreamRuntime()
 	e.ensureMalloc()
 	e.ensureRealloc()
+	e.ensureFree()
 	e.ensureMemcpy()
 	e.ensureErrnoAccessor()
 	e.ensureCurrentTaskGlobal()
@@ -159,8 +160,13 @@ ckagain:
   %%isEagain = icmp eq i32 %%errnoVal, %d
   br i1 %%isEagain, label %%again, label %%earlyend
 again:
+  ; The chunk buffer is handed over only on a successful read; the pump
+  ; calls this every loop pass while the body is in flight, so an EAGAIN
+  ; that kept it leaked 64 KiB per pass.
+  call void @free(ptr %%buf)
   ret i64 0
 earlyend:
+  call void @free(ptr %%buf)
   %%eo = call ptr @malloc(i64 24)
   %%eo_kind = getelementptr { i64, ptr, ptr }, ptr %%eo, i32 0, i32 0
   store i64 281474976710656, ptr %%eo_kind, align 8

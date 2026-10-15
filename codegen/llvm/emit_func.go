@@ -900,6 +900,14 @@ func (e *Emitter) emitCapturingNestedFunc(fd *ast.FunctionDeclaration) error {
 	if err != nil {
 		return err
 	}
+	if e.hoistedCaptures[fd.Name] {
+		// A closure in the body captures the function: its cell is made
+		// here, where the name is bound, as a captured variable's is
+		// (ADR-00619), not at the first capture — that may sit in one arm of
+		// a branch the other arm's capture does not pass through.
+		e.boxHoistedCapture(fd.Name, val.Ty, val.Ref, false, false)
+		return nil
+	}
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
 	e.define(fd.Name, Symbol{Ptr: ptrName, Ty: val.Ty})
@@ -2213,8 +2221,10 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 			}
 		case *ast.AwaitExpression, *ast.UnaryExpression, *ast.BinaryExpression,
 			*ast.ConditionalExpression, *ast.SequenceExpression, *ast.NonNullExpression, *ast.AsExpression,
-			*ast.SpreadElement, *ast.TemplateLiteral, *ast.MemberExpression, *ast.IndexExpression:
-			// Their operands may contribute (`await a.push(x)`, `c ? a.push(x) : 0`).
+			*ast.SpreadElement, *ast.TemplateLiteral, *ast.MemberExpression, *ast.IndexExpression,
+			*ast.NewExpression, *ast.YieldExpression:
+			// Their operands may contribute (`await a.push(x)`, `c ? a.push(x) : 0`,
+			// a callback passed to `new PerformanceObserver(…)` that reassigns one).
 			ast.ForEachChild(ex, func(n ast.Node) bool {
 				if sub, ok := n.(ast.Expression); ok {
 					walkExpr(sub)

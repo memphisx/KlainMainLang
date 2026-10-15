@@ -5,6 +5,48 @@ import os, sys, subprocess, glob, time, urllib.request, argparse
 # the fetch/http examples. Binaries go under --out (default $KML_SCRATCH/examples)
 # instead of next to the sources; stdout of each run is kept there as <name>.out
 # so two modes can be diffed. Run from the repo root.
+
+def bound_run():
+    # Windows: put this runner, and every program it starts, in one job of
+    # 2 GB, 1 GB per program and 64 processes: an example needs tens of MB.
+    if os.name != 'nt':
+        return
+    import ctypes
+    from ctypes import wintypes
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    k.CreateJobObjectW.restype = wintypes.HANDLE
+    k.GetCurrentProcess.restype = wintypes.HANDLE
+    k.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    k.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+
+    class BASIC(ctypes.Structure):
+        _fields_ = [('PerProcessUserTimeLimit', ctypes.c_int64), ('PerJobUserTimeLimit', ctypes.c_int64),
+                    ('LimitFlags', wintypes.DWORD), ('MinimumWorkingSetSize', ctypes.c_size_t),
+                    ('MaximumWorkingSetSize', ctypes.c_size_t), ('ActiveProcessLimit', wintypes.DWORD),
+                    ('Affinity', ctypes.c_size_t), ('PriorityClass', wintypes.DWORD),
+                    ('SchedulingClass', wintypes.DWORD)]
+
+    class IO(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_uint64) for n in ('r', 'w', 'o', 'rt', 'wt', 'ot')]
+
+    class EXT(ctypes.Structure):
+        _fields_ = [('Basic', BASIC), ('Io', IO), ('ProcessMemoryLimit', ctypes.c_size_t),
+                    ('JobMemoryLimit', ctypes.c_size_t), ('PeakProcessMemoryUsed', ctypes.c_size_t),
+                    ('PeakJobMemoryUsed', ctypes.c_size_t)]
+
+    info = EXT()
+    info.Basic.LimitFlags = 0x8 | 0x100 | 0x200 | 0x2000  # ACTIVE_PROCESS | PROCESS_MEMORY | JOB_MEMORY | KILL_ON_JOB_CLOSE
+    info.Basic.ActiveProcessLimit = 64
+    info.ProcessMemoryLimit = 1 << 30
+    info.JobMemoryLimit = 2 << 30
+    job = k.CreateJobObjectW(None, None)
+    if not job or not k.SetInformationJobObject(job, 9, ctypes.byref(info), ctypes.sizeof(info)) \
+            or not k.AssignProcessToJobObject(job, k.GetCurrentProcess()):
+        sys.exit('examples.py: cannot set up the job object (error %d)' % ctypes.get_last_error())
+    globals()['_job'] = job
+
+
+bound_run()
 ap = argparse.ArgumentParser()
 ap.add_argument('--mm')
 ap.add_argument('--optmem', action='store_true')

@@ -5,6 +5,7 @@ package llvm
 import (
 	"fmt"
 	"sort"
+	"strings"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/checker"
@@ -1262,12 +1263,29 @@ func (e *Emitter) defineForOfVar(s *ast.ForOfStatement, elemTy, iterTaTy Type) (
 		// the current element's {data, len} header, rebuilt each iteration.
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
+	} else if cell, ok := e.boxLoopVar(s.Kind, s.VarName, bindTy); ok {
+		varPtr = cell
 	} else {
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, bindTy.IR, bindTy.Align()))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: bindTy})
 	}
 
 	return varPtr, bindTy
+}
+
+// boxLoopVar gives a captured `for (var x of/in …)` binding its heap cell in
+// the entry block, as any function-scoped `var` gets (boxHoistedCapture):
+// the one binding every iteration and every closure share. Promoted lazily
+// at the first capturing closure instead, a closure built inside a branch
+// left the other branches reading a cell their blocks never made. Each
+// iteration's value is stored into the cell. A `let`/`const` head gets a
+// fresh binding per iteration and is not boxed here.
+func (e *Emitter) boxLoopVar(kind, name string, ty Type) (string, bool) {
+	if kind != "var" || !e.hoistedCaptures[name] || ty.IsArray ||
+		ty.IR == "" || ty.IR == "void" || strings.HasPrefix(ty.IR, "{") {
+		return "", false
+	}
+	return e.boxHoistedCapture(name, ty, "", false, true), true
 }
 
 // bindForOfElem binds one iteration's element to the loop head.
@@ -1808,8 +1826,12 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 
 	// Loop variable (key: string/ptr).
 	varPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
-	e.define(s.VarName, Symbol{Ptr: varPtr, Ty: TypePtr})
+	if cell, ok := e.boxLoopVar(s.Kind, s.VarName, TypePtr); ok {
+		varPtr = cell
+	} else {
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
+		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: TypePtr})
+	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 

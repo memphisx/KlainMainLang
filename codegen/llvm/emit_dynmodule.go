@@ -217,10 +217,14 @@ func SharedLibExt() string {
 }
 
 // ExportDynamicFlags make the executable export every symbol, which the
-// lazy backend's shared libraries bind to.
-func ExportDynamicFlags() []string {
-	if runtime.GOOS == "darwin" {
+// lazy backend's shared libraries bind to. On Windows the libraries link
+// against the executable's import library, written to implib (TDD-00254).
+func ExportDynamicFlags(implib string) []string {
+	switch runtime.GOOS {
+	case "darwin":
 		return []string{"-Wl,-export_dynamic"}
+	case "windows":
+		return []string{"-Wl,--export-all-symbols", "-Wl,--out-implib," + implib}
 	}
 	return []string{"-rdynamic"}
 }
@@ -228,9 +232,13 @@ func ExportDynamicFlags() []string {
 // IslandLinkFlags leave a lazy shared library's references to the
 // executable undefined until it is loaded (a Linux shared library allows
 // that by default).
-func IslandLinkFlags() []string {
-	if runtime.GOOS == "darwin" {
+func IslandLinkFlags(implib string) []string {
+	switch runtime.GOOS {
+	case "darwin":
 		return []string{"-Wl,-undefined,dynamic_lookup"}
+	case "windows":
+		// A DLL binds at link time: to the executable's import library.
+		return []string{implib}
 	}
 	return nil
 }

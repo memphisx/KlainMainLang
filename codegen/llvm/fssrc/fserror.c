@@ -22,6 +22,33 @@ extern void *__kml_fs_error_new(int e, const char *syscall, const char *path, co
 
 #define PUT(o, off, T, v) (*(T *)((char *)(o) + (off)) = (v))
 
+#ifdef _WIN32
+/* Node on Windows reports an fs error's path and dest resolved, as
+ * path.resolve does (libuv receives the namespaced, resolved path): '/x' is
+ * the current drive's '\x', a relative path joins the cwd. A symlink's
+ * target is not resolved, only given Windows separators. */
+extern char *__kml_path_win32_resolve(i64 n, char **args, const char *cwd, int host_is_windows);
+char *getcwd(char *buf, size_t size);
+
+static const char *win_resolved(const char *p) {
+    if (!p || !*p) return p;
+    char cwd[4096];
+    if (!getcwd(cwd, sizeof cwd)) return p;
+    char *args[1] = {(char *)p};
+    return __kml_path_win32_resolve(1, args, cwd, 1);
+}
+
+static const char *win_separators(const char *p) {
+    if (!p || !strchr(p, '/')) return p;
+    i64 n = (i64)strlen(p);
+    char *s = __kml_str_alloc(n);
+    for (i64 i = 0; i < n; i++) s[i] = p[i] == '/' ? '\\' : p[i];
+    s[n] = 0;
+    __kml_str_finalize(s);
+    return s;
+}
+#endif
+
 char *__kml_fs_errmsg(const char *code, const char *desc, const char *sc, const char *path, const char *dest) {
     if (!path) path = "";
     if (!dest) dest = "";
@@ -36,6 +63,15 @@ char *__kml_fs_errmsg(const char *code, const char *desc, const char *sc, const 
 
 void *__kml_fs_error_new_named(int e, const char *syscall, const char *path, const char *dest, void *name) {
     static const struct { i64 n; char b[1]; } __attribute__((aligned(8))) empty = { 0, "" };
+#ifdef _WIN32
+    /* mkdtemp and watch report the path as given, as Node's do (neither goes
+     * through a resolved, namespaced path to libuv). */
+    const char *sc = syscall ? syscall : "";
+    if (strcmp(sc, "mkdtemp") && strcmp(sc, "watch")) {
+        path = !strcmp(sc, "symlink") ? win_separators(path) : win_resolved(path);
+        dest = win_resolved(dest);
+    }
+#endif
     const char *errmsg = strerror(e);
     const char *code_raw = __kml_errno_code(e);
     const char *code = code_raw ? code_raw : empty.b;

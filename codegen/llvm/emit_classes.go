@@ -2306,9 +2306,17 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 			ptrName := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 			e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+			if p.ArrayPattern != nil && pty.IsDynamic {
+				// An `any` argument: destructured as a dynamic value, as a
+				// function's parameter is.
+				if err := e.unpackDynArrayParam(ptrName, pty, p.ArrayPattern, pos); err != nil {
+					return err
+				}
+				continue
+			}
 			if p.ObjectPattern != nil {
 				objPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", objPtrReg, patternParamIR(pty), ptrName))
 				if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, pos); err != nil {
 					return err
 				}

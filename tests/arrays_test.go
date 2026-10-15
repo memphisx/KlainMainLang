@@ -1482,7 +1482,6 @@ func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {
 	cases := []string{
 		`const m: number[][] = [[1,2]]; m.indexOf([1,2]);`,
 		`const m: number[][] = [[1,2]]; m.includes([1,2]);`,
-		`const m: number[][] = [[1,2]]; m.sort();`,
 		`const m = new Array<number[]>(3);`,
 	}
 	for _, src := range cases {

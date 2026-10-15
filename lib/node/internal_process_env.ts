@@ -37,9 +37,25 @@ export function argv(): string[] {
     return argvCache;
 }
 
-// Node's own command-line options: a compiled program has none.
+// Node's own command-line options: a compiled program has none, except a
+// forked child's fork({ execArgv }), which arrives in KML_EXEC_ARGV
+// (child_process.ts) and leaves the environment on first read, as
+// NODE_CHANNEL_FD does. One array, as Node's process.execArgv is.
+let execArgvValue: string[] | null = null;
 export function execArgv(): string[] {
-    return [];
+    if (execArgvValue === null) {
+        const v: string[] = [];
+        const json = __kml_native.envGet('KML_EXEC_ARGV');
+        if (json !== undefined) {
+            __kml_native.envDelete('KML_EXEC_ARGV');
+            try {
+                const parsed = JSON.parse(json);
+                if (Array.isArray(parsed)) for (const s of parsed) v.push(String(s));
+            } catch (e) {}
+        }
+        execArgvValue = v;
+    }
+    return execArgvValue;
 }
 
 export function argv0(): string {

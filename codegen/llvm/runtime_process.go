@@ -100,6 +100,10 @@ declare double @__kml_process_uptime()`)
 //
 // Emitted whenever exceptions or any process-lifecycle surface is used.
 func (e *Emitter) emitProcessLifecycleRuntime() {
+	if e.fnDecls["__kml_process_uncaught"] {
+		return
+	}
+	e.fnDecls["__kml_process_uncaught"] = true
 	e.ensureProcessHooks()
 	e.emitGlobal(`@__kml_process_exit_code = external thread_local global i64, align 8
 declare void @__kml_run_exit_handlers(i64)`)

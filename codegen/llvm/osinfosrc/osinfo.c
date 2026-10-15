@@ -1338,6 +1338,22 @@ static const kml_osconst kml_os_errno[] = {
 #endif
 #endif
 	{NULL, 0}};
+#ifdef _WIN32
+/* The signals libuv defines on Windows beyond the CRT's (uv/win.h), which
+ * Node lists in os.constants.signals. */
+#ifndef SIGHUP
+#define SIGHUP 1
+#endif
+#ifndef SIGQUIT
+#define SIGQUIT 3
+#endif
+#ifndef SIGKILL
+#define SIGKILL 9
+#endif
+#ifndef SIGWINCH
+#define SIGWINCH 28
+#endif
+#endif
 static const kml_osconst kml_os_signals[] = {
 #ifdef SIGHUP
 	{"SIGHUP", (double)SIGHUP},

@@ -95,11 +95,33 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %s)", dataReg, allocRef))
 		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %d)", hdrReg, hdrBytes))
 	} else {
-		e.ensureCalloc()
+		e.ensureByteBlockAlloc()
 		e.ensureMalloc()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", dataReg, allocRef))
+		// Out of line (core.c): an unused buffer's inline calloc is elided,
+		// and an elided allocation is assumed to succeed — the RangeError
+		// below would vanish with it.
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_byte_block_alloc(i64 %s)", dataReg, allocRef))
 		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", hdrReg, hdrBytes))
 	}
+	// CreateByteDataBlock: a block that cannot be created is a RangeError
+	// (Node: "Array buffer allocation failed", or for a growable buffer's
+	// reservation "Invalid array buffer max length"), not a buffer with no
+	// memory behind it. A zero-length block may legitimately be null.
+	failed := e.freshReg()
+	nonEmpty := e.freshReg()
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, dataReg))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", nonEmpty, allocRef))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", failed, isNull, nonEmpty))
+	failL, okL := e.freshLabel("abuf.allocfail"), e.freshLabel("abuf.allocok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", failed, failL, okL))
+	e.emitLabel(failL)
+	if ex.MaxByteLength != nil {
+		e.emitInternalThrowKind("RangeError", e.internString("Invalid array buffer max length"))
+	} else {
+		e.emitInternalThrowKind("RangeError", e.internString("Array buffer allocation failed"))
+	}
+	e.emitLabel(okL)
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sizeVal.Ref, hdrReg))
 	dataSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
@@ -543,6 +565,27 @@ func (e *Emitter) emitTypedArrayFromArrayLiteral(lit *ast.ArrayLiteral, ptrName,
 	return nil
 }
 
+// emitThrowRangeErrorNum throws a RangeError whose message is prefix, the i64
+// in nReg, then suffix — V8's wording for a typed array's or buffer's bad
+// offset or length ("Invalid typed array length: 9"). It ends the block.
+func (e *Emitter) emitThrowRangeErrorNum(prefix, nReg, suffix string) error {
+	numStr, err := e.emitValueToString(Value{Ref: nReg, Ty: TypeI64})
+	if err != nil {
+		return err
+	}
+	msg, err := e.emitStringConcat(Value{Ref: e.internString(prefix), Ty: TypePtr}, numStr)
+	if err != nil {
+		return err
+	}
+	if suffix != "" {
+		if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(suffix), Ty: TypePtr}); err != nil {
+			return err
+		}
+	}
+	e.emitInternalThrowKind("RangeError", msg.Ref)
+	return nil
+}
+
 // emitTypedArrayFromSize handles `new XArray(n)` — an implicit, own
 // zero-initialized buffer. Identical to NewArrayExpression's own
 // calloc-based construction (emit_arrays_core.go), just with elemTy fixed
@@ -553,9 +596,35 @@ func (e *Emitter) emitTypedArrayFromSize(nta *ast.NewTypedArrayExpression, ptrNa
 		return err
 	}
 	sizeVal = e.coerce(sizeVal, TypeI64)
-	e.ensureCalloc()
+	// V8: a negative length, or one past 2^53-1 bytes, is "Invalid typed
+	// array length: n"; a block that cannot be had is "Array buffer
+	// allocation failed".
+	elemSize := int64(elemTy.Align())
+	neg, tooBig, bad := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, sizeVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %d", tooBig, sizeVal.Ref, (int64(1)<<53-1)/elemSize))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, neg, tooBig))
+	badL, okL := e.freshLabel("typedarray.badsize"), e.freshLabel("typedarray.oksize")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+	e.emitLabel(badL)
+	if err := e.emitThrowRangeErrorNum("Invalid typed array length: ", sizeVal.Ref, ""); err != nil {
+		return err
+	}
+	e.emitLabel(okL)
+	byteLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLen, sizeVal.Ref, elemSize))
+	e.ensureByteBlockAlloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", dataReg, sizeVal.Ref, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_byte_block_alloc(i64 %s)", dataReg, byteLen))
+	isNull, nonEmpty, failed := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, dataReg))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", nonEmpty, byteLen))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", failed, isNull, nonEmpty))
+	failL, allocOkL := e.freshLabel("typedarray.allocfail"), e.freshLabel("typedarray.allocok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", failed, failL, allocOkL))
+	e.emitLabel(failL)
+	e.emitInternalThrowKind("RangeError", e.internString("Array buffer allocation failed"))
+	e.emitLabel(allocOkL)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrName))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sizeVal.Ref, lenName))
 	return nil
@@ -585,6 +654,7 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataReg, dataSlot))
 
 	elemSize := int64(elemTy.Align())
+	taName := typedArrayConstructorName(TypedArrayType(nta.ElemKind))
 
 	offRef := "0"
 	if nta.ByteOffset != nil {
@@ -594,27 +664,27 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 		}
 		offRef = e.coerce(offVal, TypeI64).Ref
 
-		// Spec RangeErrors for the view's start: negative or misaligned
-		// offsets are rejected (unaligned element access is never allowed —
-		// same line real JS draws), and the offset must lie inside the
-		// buffer.
+		// InitializeTypedArrayFromArrayBuffer, in its order and with V8's
+		// words: a negative offset (ToIndex), then a misaligned one.
+		// Unaligned element access is never allowed, as in JS.
 		offNeg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", offNeg, offRef))
+		negOffL, offIdxL := e.freshLabel("typedarray.negoff"), e.freshLabel("typedarray.offidx")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", offNeg, negOffL, offIdxL))
+		e.emitLabel(negOffL)
+		if err := e.emitThrowRangeErrorNum("Start offset ", offRef, " is outside the bounds of the buffer"); err != nil {
+			return err
+		}
+		e.emitLabel(offIdxL)
 		offRem := e.freshReg()
 		offMis := e.freshReg()
-		offBig := e.freshReg()
-		b1 := e.freshReg()
-		bad := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", offNeg, offRef))
 		e.emitInstr(fmt.Sprintf("%s = srem i64 %s, %d", offRem, offRef, elemSize))
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", offMis, offRem))
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", offBig, offRef, byteLenReg))
-		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", b1, offNeg, offMis))
-		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", bad, b1, offBig))
 		badOffL := e.freshLabel("typedarray.badoff")
 		okOffL := e.freshLabel("typedarray.okoff")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badOffL, okOffL))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", offMis, badOffL, okOffL))
 		e.emitLabel(badOffL)
-		e.emitInternalThrow(e.internString("RangeError: start offset is outside the bounds of the buffer or not a multiple of the element size"))
+		e.emitInternalThrowKind("RangeError", e.internString(fmt.Sprintf("start offset of %s should be a multiple of %d", taName, elemSize)))
 		e.emitLabel(okOffL)
 	}
 
@@ -640,7 +710,9 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 		okLenL := e.freshLabel("typedarray.okviewlen")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badLenL, okLenL))
 		e.emitLabel(badLenL)
-		e.emitInternalThrow(e.internString("RangeError: length is outside the bounds of the buffer, starting at the given offset"))
+		if err := e.emitThrowRangeErrorNum("Invalid typed array length: ", lenRef, ""); err != nil {
+			return err
+		}
 		e.emitLabel(okLenL)
 		elemCountReg = lenRef
 	} else {
@@ -655,9 +727,19 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", badReg, badL, okL))
 
 		e.emitLabel(badL)
-		e.emitInternalThrow(e.internString("ArrayBuffer length is not a multiple of the element size"))
+		e.emitInternalThrowKind("RangeError", e.internString(fmt.Sprintf("byte length of %s should be a multiple of %d", taName, elemSize)))
 
 		e.emitLabel(okL)
+		// The offset must lie inside the buffer.
+		pastEnd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", pastEnd, remBytes))
+		pastL, inL := e.freshLabel("typedarray.offpast"), e.freshLabel("typedarray.offin")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", pastEnd, pastL, inL))
+		e.emitLabel(pastL)
+		if err := e.emitThrowRangeErrorNum("Start offset ", offRef, " is outside the bounds of the buffer"); err != nil {
+			return err
+		}
+		e.emitLabel(inL)
 		cnt := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, %d", cnt, remBytes, elemSize))
 		elemCountReg = cnt
@@ -1119,9 +1201,9 @@ func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Po
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, throwL, okL))
 	e.emitLabel(throwL)
 	if allowShrink {
-		e.emitInternalThrow(e.internString("RangeError: ArrayBuffer.resize: new length is negative or above maxByteLength"))
+		e.emitInternalThrowKind("RangeError", e.internString("ArrayBuffer.prototype.resize: Invalid length parameter"))
 	} else {
-		e.emitInternalThrow(e.internString("RangeError: SharedArrayBuffer.grow: new length is below the current length or above maxByteLength"))
+		e.emitInternalThrowKind("RangeError", e.internString("SharedArrayBuffer.prototype.grow: Invalid length parameter"))
 	}
 	e.emitLabel(okL)
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nVal.Ref, bufVal.Ref))

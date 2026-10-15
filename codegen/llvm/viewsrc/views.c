@@ -151,7 +151,8 @@ void *__kml_view_buffer(void *data, i64 len) {
 /* ta.buffer of a typed array held in `any`: the buffer boxed as a host
  * object, a two-word cell {header, handle} under the object tag. The header
  * word is the program's ArrayBuffer host type, exported by the compiler. */
-extern const i64 __kml_view_ab_header, __kml_view_sab_header;
+/* The type ids hooks.c holds, stored by the program's constructor. */
+extern i64 __kml_view_ab_header, __kml_view_sab_header;
 i64 __kml_view_buffer_any(void *data, i64 len) {
     void *buf = __kml_view_buffer(data, len);
     pthread_mutex_lock(&kml_views_mu);

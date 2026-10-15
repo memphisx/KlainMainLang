@@ -272,6 +272,11 @@ func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size 
 	extraGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 13", extraGep, errorObjType.StructIR(), dataReg))
 	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", extraGep))
+	// `name` is the prototype's until assigned on the error itself.
+	nameOwnIdx, _, _ := errorObjType.FieldIndex(errorNameOwnField)
+	nameOwnGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", nameOwnGep, errorObjType.StructIR(), dataReg, nameOwnIdx))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", nameOwnGep))
 
 	return dataReg
 }

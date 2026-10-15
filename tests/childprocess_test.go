@@ -1,6 +1,10 @@
 package tests
 
-import "testing"
+import (
+	"runtime"
+	"strings"
+	"testing"
+)
 
 // --- Node `child_process`: async spawn/exec/execFile (ADR-00322) ---
 //
@@ -70,21 +74,28 @@ child.on('close', (code: number) => { console.log('code:', code) })
 // A shell spawn that starts this executable is marked too (ADR-01581):
 // exec('"$SELF" x', { env: { SELF: process.execPath } }) runs /bin/sh, which
 // starts the binary. The copy's startup guard exits 9 instead of re-running main.
+// On Windows the shell is cmd.exe, whose variables are %NAME%.
 func TestE2EChildProcessShellSelfSpawnRejected(t *testing.T) {
-	assertOutputImports(t, `
+	ref := "$SELF"
+	if runtime.GOOS == "windows" {
+		ref = "%SELF%"
+	}
+	assertOutputImports(t, strings.ReplaceAll(`
 import { exec } from 'child_process'
-exec('"$SELF" x', { env: { ...process.env, SELF: process.execPath } }, (err) => {
+exec('"REF" x', { env: { ...process.env, SELF: process.execPath } }, (err) => {
   console.log('var:', err ? err.code : 0)
   exec('"' + process.execPath + '" x', (err2) => { console.log('path:', err2 ? err2.code : 0) })
 })
-`, "var: 9\npath: 9")
+`, "REF", ref), "var: 9\npath: 9")
 }
 
 func TestE2EChildProcessSpawnStreaming(t *testing.T) {
 	assertOutputImports(t, `
 import { spawn } from 'child_process'
 const dec = new TextDecoder()
-const child = spawn("printf", ["a\nb\nc\n"])
+// printf expands the escapes: an argument holding newlines is not quoted on
+// Windows (libuv's quote_cmd_arg), and an MSYS program splits it there.
+const child = spawn("printf", ["a\\nb\\nc\\n"])
 let acc = ""
 child.stdout.on('data', (chunk: Uint8Array) => { acc = acc + dec.decode(chunk) })
 child.on('close', (code: number) => {
@@ -546,6 +557,24 @@ if (process.argv[2] === 'child') {
 `, "got: hello from child")
 }
 
+func TestE2EChildProcessForkExecArgv(t *testing.T) {
+	// fork({ execArgv }) is the child's process.execArgv, as Node passes it to
+	// the child's node; it leaves the child's environment (ADR-01606). The
+	// parent's own, without the option, is [] for a compiled program.
+	assertOutputImports(t, `
+import cp from 'child_process'
+import { mustCall } from 'test'
+if (process.argv[2] === 'child') {
+  process.send!(JSON.stringify(process.execArgv) + " " + (process.env.KML_EXEC_ARGV === undefined))
+  process.disconnect!()
+} else {
+  console.log("parent", JSON.stringify(process.execArgv))
+  const child = cp.fork(process.argv[1], ['child'], { execArgv: ['--max-old-space-size=100'], stdio: ['pipe', 'inherit', 'inherit', 'ipc'] })
+  child.on('message', mustCall((msg) => { console.log("child " + msg) }))
+}
+`, "parent []\nchild [\"--max-old-space-size=100\"] true")
+}
+
 func TestE2EChildProcessSendUnforked(t *testing.T) {
 	// process.send in a non-forked process: undefined, as in Node.
 	assertOutput(t, `
@@ -582,5 +611,5 @@ p.on('close', (code: number) => {
 // child accepts on.
 func TestE2EChildProcessForkSendHandle(t *testing.T) {
 	skipIfLoopbackTrafficFiltered(t)
-	assertSameAsNodeImports(t, "import { fork } from 'child_process';\nimport * as net from 'net';\nimport type { AddressInfo } from 'net';\nif (process.argv[2] === 'child') {\n    process.on('message', (m: any, handle: any) => {\n        if (m === 'server') {\n            const server = handle as net.Server;\n            console.log('child got server', server instanceof net.Server, server.listening);\n            server.on('connection', (s: net.Socket) => {\n                s.end('hello from child');\n                server.close();\n                process.disconnect!();\n            });\n            process.send!('ready');\n        } else if (m === 'socket') {\n            const s = handle as net.Socket;\n            s.end('socket via child');\n        }\n    });\n} else {\n    const child = fork(process.argv[1], ['child']);\n    const server = net.createServer();\n    server.listen(0, () => {\n        const port = (server.address() as AddressInfo).port;\n        child.send('server', server, (err) => { console.log('sent server', err); server.close(); });\n        child.on('message', (m: any) => {\n            if (m !== 'ready') return;\n            const c = net.connect(port, '127.0.0.1');\n            let body = '';\n            c.setEncoding('utf8');\n            c.on('data', (d: string) => { body += d; });\n            c.on('end', () => { console.log('client got', body); });\n        });\n    });\n    child.on('exit', (code) => { console.log('child exit', code); });\n}\n")
+	assertSameAsNodeImports(t, "import { fork } from 'child_process';\nimport * as net from 'net';\nimport type { AddressInfo } from 'net';\nif (process.argv[2] === 'child') {\n    process.on('message', (m: any, handle: any) => {\n        if (m === 'server') {\n            const server = handle as net.Server;\n            console.log('child got server', server instanceof net.Server, server.listening);\n            server.on('connection', (s: net.Socket) => {\n                s.end('hello from child');\n                server.close();\n                process.disconnect!();\n            });\n            process.send!('ready');\n        } else if (m === 'socket') {\n            const s = handle as net.Socket;\n            s.end('socket via child');\n        }\n    });\n} else {\n    const child = fork(process.argv[1], ['child']);\n    const server = net.createServer();\n    server.listen(0, '127.0.0.1', () => {\n        const port = (server.address() as AddressInfo).port;\n        child.send('server', server, (err) => { console.log('sent server', err); server.close(); });\n        child.on('message', (m: any) => {\n            if (m !== 'ready') return;\n            const c = net.connect(port, '127.0.0.1');\n            let body = '';\n            c.setEncoding('utf8');\n            c.on('data', (d: string) => { body += d; });\n            c.on('end', () => { console.log('client got', body); });\n        });\n    });\n    child.on('exit', (code) => { console.log('child exit', code); });\n}\n")
 }

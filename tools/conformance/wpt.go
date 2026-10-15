@@ -411,7 +411,9 @@ func runOneWPT(path, workDir string, workerID int, timeout time.Duration) (res w
 		// A fatal error (a Go stack overflow) cannot be recovered below: the
 		// last file a worker started names the culprit.
 		fmt.Fprintf(os.Stderr, "wpt start [%d] %s\n", workerID, rel)
-		defer func() { fmt.Fprintf(os.Stderr, "wpt done [%d] %s %s %.80s\n", workerID, rel, res.Status, res.Reason) }()
+		defer func() {
+			fmt.Fprintf(os.Stderr, "wpt done [%d] %s %s %d/%d %.80s\n", workerID, rel, res.Status, res.SubPass, res.SubPass+res.SubFail, res.Reason)
+		}()
 	}
 	defer func() {
 		if r := recover(); r != nil {
@@ -439,6 +441,10 @@ func runOneWPT(path, workDir string, workerID int, timeout time.Duration) (res w
 		return res
 	}
 
+	if dir := os.Getenv("WPT_DUMP"); dir != "" {
+		// The program as compiled, for reproducing a failure by hand.
+		_ = os.WriteFile(filepath.Join(dir, strings.ReplaceAll(rel, "/", "__")+".ts"), []byte(src), 0o644)
+	}
 	// The compiled binary runs with its cwd set to the test file's directory so a
 	// `fetch("resources/x.json")` — rewritten by wptFetchShim to a relative
 	// fs.readFileSync — resolves against the file's own resources/ dir.

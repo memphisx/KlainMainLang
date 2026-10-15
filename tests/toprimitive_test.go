@@ -263,3 +263,32 @@ console.log(inspect(a, { customInspect: false }))
 `
 	assertOutputImports(t, src, "A { x: 1, next: [Object] }\nA { x: 1, next: { deep: { deeper: 1 } } }")
 }
+
+// OrdinaryToPrimitive on a typed object: under the string hint an own
+// toString giving an object falls back to valueOf, a method giving an object
+// is still called, and when no method gives a primitive the conversion is a
+// TypeError. Compared with Node in both lanes, including the call order.
+func TestE2EToPrimitiveObjectResultFallsThrough(t *testing.T) {
+	src := `
+let calls = "";
+const a = { valueOf: function() { calls += "v"; return 5 }, toString: function() { calls += "t"; return {} } };
+console.log(String(a), ` + "`" + `${a}` + "`" + `, a + "", +a, calls);
+calls = "";
+const b = { valueOf: function() { calls += "v"; return {} }, toString: function() { calls += "t"; return "B" } };
+console.log(String(b), ` + "`" + `${b}` + "`" + `, b + "", calls);
+calls = "";
+const c = { toString: function() { calls += "t"; return {} } };
+try { console.log(String(c)) } catch (e) { console.log((e as Error).constructor.name, (e as Error).message, calls) }
+calls = "";
+const d = { valueOf: function() { calls += "v"; return {} }, toString: function() { calls += "t"; return {} } };
+try { console.log(` + "`" + `${d}` + "`" + `) } catch (e) { console.log((e as Error).constructor.name, (e as Error).message, calls) }
+const f = { valueOf: function() { return 7 } };
+console.log(String(f), ` + "`" + `${f}` + "`" + `);
+class K { valueOf() { return 9 } toString(): any { return {} } }
+console.log(String(new K()), ` + "`" + `${new K()}` + "`" + `);
+class J { toString(): any { return {} } }
+try { console.log(String(new J())) } catch (e) { console.log((e as Error).constructor.name, (e as Error).message) }
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCompatJS(t, src)
+}

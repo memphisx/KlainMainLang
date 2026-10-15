@@ -1,6 +1,9 @@
 package tests
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // Node's `stream` module (lib/node/stream.ts), each program's expected output
 // taken from Node v24.
@@ -327,8 +330,17 @@ r.on("data", (v) => { seen.push(v); });
 await finished(r);
 console.log("hwm", r.readableHighWaterMark, seen.join(","));
 console.log(new Readable().readableHighWaterMark, new Writable({ objectMode: true }).writableHighWaterMark);
-`, "hwm 8 1,2\n65536 16\n")
+`, "hwm 8 1,2\n"+defaultHighWaterMark+" 16\n")
 }
+
+// defaultHighWaterMark is Node's default byte-stream highWaterMark: 16 KiB on
+// Windows, 64 KiB elsewhere (lib/internal/streams/state.js).
+var defaultHighWaterMark = func() string {
+	if runtime.GOOS == "windows" {
+		return "16384"
+	}
+	return "65536"
+}()
 
 // class extends stream.Readable through the default import.
 func TestE2ENodeStreamQualifiedExtends(t *testing.T) {

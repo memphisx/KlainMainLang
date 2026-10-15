@@ -3,11 +3,14 @@ package llvm
 import (
 	"KlainMainLang/options"
 	"bytes"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 )
 
 // HostClangArgv is the single place that builds a `clang` argv for the
@@ -38,8 +41,9 @@ func (tc Toolchain) Argv(args ...string) []string {
 	}
 	full := tc.Args()
 	if runtime.GOOS == "windows" {
-		// The shim objects go *before* the caller's arguments: they shadow a
-		// few library exports (curl_multi_fdset), and lld resolves a symbol
+		// The shim objects go *before* the caller's arguments: they define
+		// the POSIX socket calls under Winsock's names (inet_pton, getaddrinfo,
+		// …) and their import slots, and lld resolves a symbol
 		// from the first definition it meets — an object listed after -lcurl
 		// would collide with the import-library member already pulled in.
 		full = append(full, win32CompileArgs(args)...)
@@ -70,7 +74,75 @@ func ClangCommand(args ...string) *exec.Cmd { return Toolchain{}.Command(args...
 
 // Command is Argv as a ready-to-run command.
 func (tc Toolchain) Command(args ...string) *exec.Cmd {
-	return exec.Command("clang", tc.Argv(args...)...)
+	return exec.Command("clang", tc.ExecArgv(args...)...)
+}
+
+// HostClangExecArgv is HostClangArgv as clang's command line: on Windows,
+// one that would overflow CreateProcess's limit goes through a response file.
+func HostClangExecArgv(args ...string) []string { return Toolchain{}.ExecArgv(args...) }
+
+// ExecArgv is Argv as clang's command line (see HostClangExecArgv).
+func (tc Toolchain) ExecArgv(args ...string) []string {
+	argv := tc.Argv(args...)
+	if runtime.GOOS == "windows" {
+		if rsp, ok := responseFile(argv); ok {
+			argv = []string{"--rsp-quoting=windows", "@" + rsp}
+		}
+	}
+	return argv
+}
+
+// winCmdLineMax is CreateProcess's command-line limit (32767 UTF-16 units),
+// with room for the program name.
+const winCmdLineMax = 32000
+
+// responseFile moves an argv that would overflow Windows' command line into a
+// clang response file. Its name is the content's hash, so repeating a link
+// rewrites the same file instead of adding one; the file is not removed
+// because the command it serves has not run yet.
+func responseFile(argv []string) (string, bool) {
+	var b strings.Builder
+	for _, a := range argv {
+		b.WriteString(winQuoteArg(a))
+		b.WriteByte('\n')
+	}
+	if b.Len() < winCmdLineMax {
+		return "", false
+	}
+	dir := filepath.Join(os.TempDir(), "klainmain-rsp")
+	if os.MkdirAll(dir, 0o755) != nil {
+		return "", false
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%x.rsp", sha256.Sum256([]byte(b.String()))))
+	if os.WriteFile(path, []byte(b.String()), 0o644) != nil {
+		return "", false
+	}
+	return path, true
+}
+
+// winQuoteArg quotes one argument the way clang's Windows response-file
+// tokenizer (the CommandLineToArgvW rules) reads it back: backslashes are
+// literal unless they precede a double quote.
+func winQuoteArg(s string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	slashes := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch c {
+		case '\\':
+			slashes++
+		case '"':
+			b.WriteString(strings.Repeat(`\`, slashes+1))
+			slashes = 0
+		default:
+			slashes = 0
+		}
+		b.WriteByte(c)
+	}
+	b.WriteString(strings.Repeat(`\`, slashes))
+	b.WriteByte('"')
+	return b.String()
 }
 
 // RunLink is RunClangLink for tc's target.
@@ -102,15 +174,14 @@ func (tc Toolchain) RunLink(args ...string) error {
 	}
 	cmd := tc.Command(args...)
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
 	var diag bytes.Buffer
-	if irSites {
-		cmd.Stderr = &diag // annotated with the emitting Go sites below
-	}
+	cmd.Stderr = &diag
 	err := cmd.Run()
+	out := dropIntendedDuplicates(diag.Bytes())
 	if irSites {
-		os.Stderr.WriteString(AnnotateClangOutput(diag.Bytes()))
+		out = []byte(AnnotateClangOutput(out)) // annotated with the emitting Go sites
 	}
+	os.Stderr.Write(out)
 	if err != nil {
 		return err
 	}
@@ -234,7 +305,14 @@ func lldAvailable() bool {
 // program that uses them is still a single self-contained .exe — the point of a
 // terminal/CLI binary. pcre2 (the RegExp engine) is a lone self-contained archive;
 // curl expands to a whole dependency chain instead (winCurlStaticChain). ADR-00771/00772.
-var winStaticFeatureLibs = map[string]bool{"pcre2-8": true, "cares": true}
+var winStaticFeatureLibs = map[string]bool{"pcre2-8": true, "cares": true, "sqlite3": true, "z": true,
+	"brotlienc": true, "brotlidec": true, "brotlicommon": true, "zstd": true}
+
+// winSelfContained: a --static build for Windows, which imports only what
+// Windows ships (TDD-00253).
+func winSelfContained(goos string) bool {
+	return goos == "windows" && runtime.GOOS == "windows" && staticLinkMode
+}
 
 // winCurlStaticChain is the full static link chain for libcurl on the ucrt64
 // mingw sysroot, so a `fetch`/`http`/`tls`/WebSocket program is a single
@@ -347,8 +425,40 @@ func (tc Toolchain) Args() []string {
 		// x86_64-pc-linux-gnu); the host triple is the intended one.
 		return []string{"-Wno-override-module"}
 	}
-	return []string{"--target=x86_64-w64-mingw32", "--sysroot=" + windowsSysroot()}
+	args := []string{"--target=x86_64-w64-mingw32", "--sysroot=" + windowsSysroot()}
+	// lld links on Windows when installed: GNU ld's COFF reader takes a
+	// section number as a signed 16-bit value and loses every symbol in a
+	// section numbered past 32767, so a program with that many functions and
+	// literals (each in its own section or comdat) does not link with it.
+	if windowsUsesLLD() {
+		args = append(args, "-fuse-ld=lld")
+	}
+	if emulatedTLS {
+		args = append(args, "-femulated-tls")
+	}
+	return args
 }
+
+// emulatedTLS compiles every thread-local through a control variable and
+// __emutls_get_address (-femulated-tls): a lazy dynamic-import library on
+// Windows can import a variable from the executable, never a TLS slot
+// (TDD-00254). Part of every compile's arguments, so of the object cache's
+// keys too.
+var emulatedTLS bool
+
+// SetEmulatedTLS turns emulated thread-locals on for this compile.
+func SetEmulatedTLS(v bool) { emulatedTLS = v }
+
+// windowsUsesLLD reports whether Windows links with lld (Args).
+func windowsUsesLLD() bool {
+	lldOnce.Do(func() { lldFound = lldAvailable() })
+	return lldFound
+}
+
+var (
+	lldOnce  sync.Once
+	lldFound bool
+)
 
 // windowsSysroot locates the mingw-w64 UCRT sysroot. KLAIN_SYSROOT overrides;
 // otherwise the default MSYS2 layout (C:\msys64\ucrt64) is probed, then the
@@ -371,6 +481,37 @@ func windowsSysroot() string {
 	return candidates[len(candidates)-1]
 }
 
+// SanitizerClang is the clang an ASan/UBSan build runs with the same argv as
+// ClangCommand, and the files a sanitized program needs beside it at run
+// time. Elsewhere it is the host's clang and nothing. On Windows MSYS2's
+// UCRT64 clang ships no sanitizer runtime for the mingw target; the CLANG64
+// environment's clang (the same LLVM release, the same UCRT C runtime) does,
+// and with ClangCommand's --target/--sysroot it builds against the UCRT64
+// libraries the program links, taking only the sanitizer runtime from its
+// own tree; it links libgcc's unwinder, as UCRT64's code does (its own
+// default, libunwind, is not in that tree). The runtime DLL and the libc++
+// it imports are copied beside the program. ok is false when no sanitizer
+// clang is installed.
+func SanitizerClang() (clang string, extraArgs, runtimeFiles []string, ok bool) {
+	if runtime.GOOS != "windows" {
+		path, err := exec.LookPath("clang")
+		return path, nil, nil, err == nil
+	}
+	extraArgs = []string{"--unwindlib=libgcc"}
+	bin := filepath.Join(filepath.Dir(windowsSysroot()), "clang64", "bin")
+	clang = filepath.Join(bin, "clang.exe")
+	runtimeFiles = []string{
+		filepath.Join(bin, "libclang_rt.asan_dynamic-x86_64.dll"),
+		filepath.Join(bin, "libc++.dll"),
+	}
+	for _, f := range append([]string{clang}, runtimeFiles...) {
+		if _, err := os.Stat(f); err != nil {
+			return "", nil, nil, false
+		}
+	}
+	return clang, extraArgs, runtimeFiles, true
+}
+
 // HostExeSuffix is ".exe" on Windows and "" elsewhere — the suffix a caller
 // appends to a default output path that has no extension.
 func HostExeSuffix() string {
@@ -378,4 +519,30 @@ func HostExeSuffix() string {
 		return ".exe"
 	}
 	return ""
+}
+
+// dropIntendedDuplicates removes lld's "duplicate symbol" warnings from a
+// Windows --static link, where the shim's POSIX-named socket and time
+// functions deliberately shadow the same names in the static archives and
+// Winsock's import library (--allow-multiple-definition, ADR-00772). GNU ld
+// said nothing about them; lld lists each one. Any other output is kept.
+func dropIntendedDuplicates(b []byte) []byte {
+	if runtime.GOOS != "windows" || !staticLinkMode || !bytes.Contains(b, []byte("duplicate symbol")) {
+		return b
+	}
+	var out bytes.Buffer
+	skipping := false
+	for _, line := range strings.SplitAfter(string(b), "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case strings.Contains(t, "warning: duplicate symbol:"):
+			skipping = true
+			continue
+		case skipping && (strings.HasPrefix(t, ">>>") || t == ""):
+			continue
+		}
+		skipping = false
+		out.WriteString(line)
+	}
+	return out.Bytes()
 }

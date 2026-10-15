@@ -37,26 +37,11 @@ func (e *Emitter) ensureIPCChildRuntime() {
 	e.ensureReadDecl()
 	e.ensureCloseDecl()
 	e.ensureFcntlDecl()
-	if e.opts.Target.OS() == "windows" {
-		e.ensureWorkerFdSetbit()
-	}
 	e.ensureAtoll()
 	e.ensureGetenv()
 
 	e.emitGlobal(`declare i32 @__kml_ipcc_fd()
 declare i1 @__kml_ipcc_send(ptr)`)
-}
-
-// emitCPRuntimeStubs finalizes the child-side __kml_ipcc_* loop hooks when
-// the program never touches the channel: Windows only (POSIX reads it on a
-// libuv watcher). Called from program finalization beside
-// emitLoopTaskStubs.
-func (e *Emitter) emitCPRuntimeStubs() {
-	if e.usedHTTP && !e.usedIPCChildRuntime && e.opts.Target.OS() == "windows" {
-		e.emitGlobal("define i1 @__kml_ipcc_keepalive() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_ipcc_fdset_add(ptr %fdset, ptr %maxfd) {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define void @__kml_ipcc_dispatch() {\nentry:\n  ret void\n}")
-	}
 }
 
 // ensureNativeIPCChildClaim defines lib/native.d.ts's ipcChildClaim: the

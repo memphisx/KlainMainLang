@@ -59,7 +59,7 @@ func TestE2EFetchedResponseStatusTextAndType(t *testing.T) {
 	assertSameAsNodeImports(t, `
 import http from 'http'
 const server = http.createServer((req, res) => { res.writeHead(404, 'Custom Reason'); res.end('x') })
-server.listen(0, async () => {
+server.listen(0, '127.0.0.1', async () => {
   const port = (server.address() as { port: number }).port
   const res = await fetch('http://127.0.0.1:' + port + '/')
   console.log(res.type, res.status, JSON.stringify(res.statusText), await res.text())

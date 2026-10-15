@@ -61,9 +61,14 @@ phase that owns them, not at the symptom site.
 Wrong behaviour in something that claims to work. A bug found and not fixed the
 same day lands here, at the top. One bug per line.
 
-- Stack overflow in a generator, an HTTP connection fiber, a goroutine or a
-  worker thread is not a RangeError: no guard page or signal stack there
-  ([TDD-00249](tdd/TDD-00249.md) Stages 2-3).
+- POSIX: stack overflow in a generator, an HTTP connection fiber, a goroutine
+  or a worker thread may not be a RangeError: no guard page or signal stack
+  there ([TDD-00249](tdd/TDD-00249.md) Stage 2). Windows throws it on every
+  stack (ADR-01605, `TestE2EStackOverflowEveryContextWindows`): run that test
+  on Linux and macOS and lift its skip.
+- `new Worker(new URL(import.meta.url))` is not a worker of the file itself
+  (only `new Worker(__filename)` is, `resolver.go` `rewriteSelfWorker`): the
+  program fails with "Cannot find module" (ADR-01605).
 - A library call whose arguments hold a function literal ignores a method the
   program assigned on its object (both arms would emit the closure), ADR-01596.
 - Unannotated parameter (`function f(n)`) is `i64` (ADR-00042), not tsc's implicit `any`: truncates `f(0.5)` in strict, rejects `(f) => f()` in js; `staging/sm/Date/timeclip.js` strict.
@@ -106,6 +111,42 @@ recheck on the next CI run.
     `GC_DONT_GC=1`). Get a backtrace first (loop the CLI binary; gdb hides it).
 15. **One-off:** `TestE2EHTTPCreateServerResStreamLargeBodyIntact` — "server
     never started listening", once in 274 runs. Chase it when it recurs.
+168. **A `for (var x of/in …)` binding is not visible after the loop**:
+    `for (var k of xs) {} console.log(k)` fails "undefined variable 'k'"
+    (Node: the last element, `undefined` after zero iterations). It needs
+    the binding promoted to the function scope and widened to
+    `T | undefined` there, as `hoistedVarMaySkip` does for a nested `var`.
+169. **An untyped array of closures cannot be called through**: under
+    `-compat=js`, `var fs = []; fs.push(() => 1); fs[0]()` fails "only
+    simple function calls are supported", and `for (var f of fs) f()` /
+    `fs.forEach(f => f())` fail "undefined function or closure 'f'". The
+    evolving `[]` gets no function element type.
+170. **Array callbacks read a stale buffer when the callback grows the
+    array**: `find`, `findIndex`, `findLast`, `findLastIndex`, `forEach`,
+    `map`, `some`, `every`, `filter`, `reduce` (`emit_arrays_hof.go`,
+    `emit_arrays_search.go`) load the data pointer once, before the loop. A
+    callback that does `arr.push(x); arr[0] = y` reallocates, so the loop
+    reads the old, freed buffer: `['Skateboard','Barefoot'].findLast(...)`
+    sees `Skateboard` where Node sees `Magic Carpet`. Each step must read
+    the element through the live array (spec `Get(O, k)`; a `k` past a
+    shrunk length is a hole). Test262 `findLast`/`findLastIndex`
+    `array-altered-during-loop.js` fail on Windows and pass on Linux AMD64
+    only because realloc grew in place there.
+171. **Linux AMD64 only (`-compat=js`), Test262 files that exit with no
+    output**: `Array/prototype/copyWithin/coerced-values-{start,end,target}`,
+    `Array/prototype/toSpliced/start-and-deleteCount-undefineds`,
+    `…/start-undefined-and-deleteCount-missing`, and
+    `Promise/prototype/finally/{rejection-reason-no-fulfill,
+    rejection-reason-override-with-throw,resolution-value-no-override}`.
+    They pass on Windows. Not reproduced yet; first step is to run each one
+    alone in the `klain-ci` container and capture the signal.
+172. **Linux AMD64 only (`-compat=js`), `GeneratorPrototype/{next,return,
+    throw}/from-state-executing.js` time out**; they pass on Windows.
+173. **Conformance runs leave empty files in the repo root** (named `0`,
+    a port number such as `54945`, `k.txt`, `n.txt`) on Windows: a Node
+    suite test writes to a relative path while the runner's working
+    directory is the checkout. The runner should run each test in its own
+    scratch directory.
 
 ### Values and representation (→ TDD-00230 P3.3 unless noted)
 
@@ -196,8 +237,6 @@ recheck on the next CI run.
 117. **After the restructure: delete `klain:tty`** (bespoke `readByte`/
     `readKey`; `klain:tui` reads keys from `process.stdin` `'data'`). Not a
     restructure step.
-124. **`Date` is UTC-only**: local-time getters, `new Date(y, m, …)`,
-    `getTimezoneOffset`, `toString` ignore the time zone (Node: local).
 118. **`klain:sync` async preemption (TDD-00143 Stage 4)**: no `SIGURG`
     preemption; C helpers/ffi calls run unpreemptible; back-edge polls
     remain. After phase 4, with Stage 5 (precise stack maps).
@@ -236,7 +275,11 @@ recheck on the next CI run.
     case or accumulated state; not yet narrowed).
 135. **An `any` object passed for an interface-typed parameter is copied
     into its layout**: a member of another kind (a string for `string[]`)
-    becomes garbage where JS passes the object itself.
+    becomes garbage where JS passes the object itself. Reading it can crash:
+    `{ shell: true }` through `any` into `{ shell?: string }` segfaults on
+    `String(o.shell)`. It is why `exec(cmd, { shell: true })` from untyped JS
+    ignores the shell (`ExecOptions.shell` is a string in `@types/node`;
+    Node's `test-child-process-exec-any-shells-windows`).
 138. **An instance method read as a value fails to compile**: `const f =
     k.greet` and `k.greet.name` give "no field 'greet'" (unbound `this`,
     one function identity per method, `.bind`/`.call` all open). Blocks
@@ -277,55 +320,7 @@ laptop. Cross-platform work is driven from Mac/Linux (Docker + CI), but anything
 that genuinely needs a native Windows box to complete or verify should be
 finished while on it — don't defer such work into another comeback.
 
-Cross-platform features that block a Windows row (build on every host; the
-Windows half is named):
-
-- **`server.listen(path)` / `listen({ path, host })`** — no host has it. POSIX
-  AF_UNIX; Windows a named-pipe server (`CreateNamedPipeW` overlapped +
-  `ConnectNamedPipe` as the accept op, a fresh instance per client; the client
-  half exists, ADR-01034).
-- **child_process residue** (ADR-01080 did the rest) — `fork()` options
-  (`cwd`/`env`/`silent`/`stdio`/`timeout`/`execArgv`: its runtime is a separate
-  fork/exec path on both hosts, `runtime_ipc.go` + `runtime_spawn_win.go`);
-  numeric-fd `stdio` entries; the exec callback Error's numeric `code`/`cmd`.
-- **Local-time `Date`** (UTC-only on every host today; in scope) — Windows:
-  `GetTimeZoneInformationForYear`/`TZ`.
-
-Windows-only:
-
-- **`TestE2EWinRealpathWalksLinks`** (CI windows-x64): `realpath` returns the
-  link's path, not its target.
-- **node:ffi `unordered_map` order** (MSVC STL port) unverified against a
-  Windows Node ≥ 26.10.0.
-- **`-dynamic-import=lazy`** (ADR-01330) refuses Windows: a DLL binding to the
-  executable's symbols needs an export library for the `.exe`.
-- **The C runtimes from the IR → C port (TDD-00240)**: ~40 `_WIN32` branches
-  (task ucontext/fibers, fs errno, child_process, net, ipc, timers) are
-  compile-checked only — build and run the corpus natively.
-- **`--static` = "self-contained"** (depends on nothing the OS doesn't ship), not
-  "Linux full-static": Windows already links the optional libraries statically —
-  audit per library and prove it with an import-table check per feature
-  (generalise `tests/tui_selfcontained_windows_test.go`); macOS links the Homebrew
-  `.a` archives and leaves system libraries dynamic (`otool -L` check). Decide
-  webview (WebView2 loader is a DLL) and whether `-package` defaults to it. TDD
-  first; then fix the "Linux only" help text and the stale out-of-scope notes.
-- **Non-ASCII `%TEMP%`**: mingw `ld` opens intermediates through the narrow API
-  (ADR-01035 covers only the output path) — stage the build dir under an ASCII root.
-- **Writes to a redirected stdout/stderr pipe block the loop** (non-overlapped
-  inherited pipe). Check what Node does on Windows first; then a writer thread +
-  flush at exit. Same spot: the 10 ms re-probe for unarmable pipe handles.
-- **512-descriptor ceiling** — the IR speaks a 1024-bit `fd_set` (same limit on
-  Linux). A loop-interface change (poll- or registration-shaped); TDD.
-- Child IPC channel → named pipe (today a peer-verified loopback TCP pair).
-- Spawn markers carry raw handle values in the environment → `STARTUPINFO.lpReserved2`.
-- **`-crypto=cng`** (TDD-00177 Stage 5) — BCrypt/NCrypt backend; removes OpenSSL
-  from non-TLS programs.
-- TLS write-error probe: client `destroy()`s a `wss`/h2 connection while the
-  server writes; compare `err.code` with Node on Windows.
-- **Deferred edges (low value / untestable from a dev box):** broken-pipe write
-  codes + the TLS-BIO error on long-lived pub/sub (TDD-00180 §5).
-- **Out of scope:** `-crypto=commoncrypto`, ASan/UBSan.
-- `tools/ramdisk/run.sh` is unverified on macOS/Linux.
+Nothing open.
 
 ## 3. Node / runtime surface (mostly small, incremental)
 
@@ -419,6 +414,11 @@ Windows-only:
   (TDD-00072); `@readonly`/`@pure` enforcement (TDD-00126/00128).
 - Conformance infra: the WPT slice (TDD-00082); statusgen deriving the website
   reference badges from the status source instead of hand-mirroring (TDD-00145).
+- **`--static` self-contained on macOS** ([TDD-00253](tdd/TDD-00253.md); Windows
+  done, ADR-01610): link the Homebrew `.a` archives, leave `libSystem` and
+  frameworks dynamic, check with `otool -L` in the import guard, lift the
+  refusal in `main.go`. Decide whether `-package` defaults to `--static`.
+- `tools/ramdisk/run.sh` is unverified on macOS/Linux.
 - Docker builder images (TDD-00193) — GHCR toolchain + sfos-aarch64 images for
   install-free builds and reusable CI lanes (backs the Sailfish CI lane).
 
@@ -440,6 +440,7 @@ Windows-only:
 - The `klmpm` package manager (TDD-00054); npm/`node_modules` interop (TDD-00053).
 - Self-hosting (TDD-00124) with its `klain:` module set (TDD-00189).
 - `klain:ffi` beyond-Node FFI (TDD-00190).
+- `-crypto=commoncrypto` (macOS).
 
 Reference docs, not queued work: the WASM target (TDD-00048), the Pico (TDD-00036)
 and Raspberry Pi (TDD-00045) targets, Immix (TDD-00135).
@@ -450,7 +451,7 @@ and Raspberry Pi (TDD-00045) targets, Immix (TDD-00135).
 
 Generated by `make status` from `docs/status/data/*.json`. **Every line here is an issue to tackle.** A missing feature and a behavioural divergence both break code ported from Node/TS/JS, so both count. **Strict Coverage** of an area = the ✅ features carrying zero caveats; the number rises only when a caveat is *fixed and deleted*, never by rewording. Fix a caveat in the status data and it disappears from here; do not edit below the marker by hand.
 
-**Total: 452 caveats · overall Strict Coverage 399/649 (~61%).** Areas below are ordered worst Strict Coverage first.
+**Total: 438 caveats · overall Strict Coverage 406/649 (~63%).** Areas below are ordered worst Strict Coverage first.
 
 ### Memory Management — Strict 0/5 (0%) · 22 caveats — [Memory Management](status/MEMORY-MANAGEMENT.md)
 - `manual` (default) — Never frees on its own — a program's footprint grows monotonically with runtime unless the programmer calls `Memory.free(x)` by hand
@@ -510,7 +511,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `crypto.subtle.deriveKey` / `.deriveBits` — On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide
 - `crypto.subtle.wrapKey` / `.unwrapKey` — On `-crypto=commoncrypto` the asymmetric algorithms (RSA, EC, Ed25519, X25519) fail: they run over `node:crypto`'s KeyObject, which that backend does not provide
 
-### Other Node.js Core Modules — Strict 3/17 (~18%) · 36 caveats — [Other Node.js Core Modules](status/NODE-CORE-MODULES.md)
+### Other Node.js Core Modules — Strict 3/17 (~18%) · 31 caveats — [Other Node.js Core Modules](status/NODE-CORE-MODULES.md)
 - `assert` — No `assert.CallTracker` (deprecated in Node, DEP0173)
 - `assert` — Deep equality does not compare symbol-keyed properties, and a failure diff does not invoke getters (Node's `getters: true`)
 - `assert` — An uncaught `AssertionError` prints `Uncaught: <message>`; Node prints `AssertionError [ERR_ASSERTION]: <message>`, its stack and its properties
@@ -521,15 +522,11 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `util` — `.inspect` renders through the compiler's inspector: `depth`, `compact` (a number or `false`; `true` is treated as 3), `sorted` (not a comparator), `breakLength`, `maxArrayLength` and `[inspect.custom]` methods apply; `colors`, `showHidden`, `getters`, `maxStringLength` and `numericSeparator` do not, so `%o` shows no hidden properties; a custom method's `depth` argument is `Infinity`, not `null`, when the depth is unlimited
 - `util` — No `inherits`, `MIMEType`, `getCallSites`, `transferableAbortSignal`, `parseEnv`; `debuglog`'s logger is typed `any`
 - `net` — BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported
-- `net` — On Windows the TCP handles are compile-checked, not yet run
 - `dgram` — Sends are synchronous (a full send buffer is waited out), so `getSendQueueSize()`/`getSendQueueCount()` are always 0
 - `dgram` — The `lookup`, `receiveBlockList`/`sendBlockList` options, `bind({ fd })` and cluster-shared sockets are not ported
-- `dgram` — Windows: the TTL and multicast options and membership apply to `udp4` sockets only, and that path is compile-checked, not run
 - `tls` — OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)
 - `tls` — Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported
-- `tls` — On Windows the TCP handles are compile-checked, not yet run
 - `dns` — A c-ares error has no `errno` key (Node's has `errno: undefined`): the error layout's `errno` slot is numeric
-- `dns` — On Windows a channel runs on c-ares' own event thread (no libuv loop there yet), and is compile-checked, not yet run
 - `zlib` — Brotli and Zstd load the system libbrotli/libzstd at run time (Node bundles them): where they are missing, making a Brotli or Zstd stream is `ERR_ZLIB_INITIALIZATION_FAILED`
 - `zlib` — Compressed bytes are the system libz's, which can differ from Node's bundled zlib at the same level (each inflates the other's)
 - `zlib` — A `*Sync` call with `info: true` is typed `{ buffer, engine }` by an extra overload (@types types it `Buffer`)
@@ -538,7 +535,6 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `cluster` — `setupPrimary({ exec })` naming another file fails at `fork()` with `ERR_CHILD_PROCESS_FORK_MODULE`: a worker is this compiled program, so there is no other script for it to run (a genuine impossibility of native compilation, [ADR-01015](adr/ADR-01015.md))
 - `cluster` — `inspectPort` and the inspector flags are ignored: a compiled program has no inspector
 - `cluster` — A `dgram` socket bound in a worker binds on its own, not through the primary
-- `cluster` — Windows: a worker's `listen` has no handle to receive — descriptor passing over the fork channel is POSIX-only
 - `http2` **module** — `respondWithFD`/`respondWithFile` read the whole file into memory before sending it, where Node streams it
 - `http2` **module** — `session.altsvc()`/`origin()` validate their arguments but send no frame
 - `http2` **module** — `setNextStreamID`/`setLocalWindowSize` validate their argument only
@@ -668,8 +664,8 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Dynamic `import(...)` — String-literal specifier only — a runtime-computed `import(expr)` is a clean compile error (all imports resolve at compile time)
 - Dynamic `import(...)` — The result object exposes the target's **annotated scalar/string exports** only; `function`/`class`/array/object exports are omitted, and an un-annotated export has no field (module namespace objects are missing for static `import * as ns` too)
 - Dynamic `import(...)` — `import('node:…')` of a builtin module is a clean compile error
-- Dynamic `import(...)` — `-dynamic-import=lazy` and `-dynamic-import=isolated` refuse `--static` (a static binary can't `dlopen`), and `lazy` is not available on Windows
-- Dynamic `import(...)` — Under `-dynamic-import=isolated`, an island's sockets, pipes and children are invisible to the importer's `select()`: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](tdd/TDD-00225.md)); the island's timers are folded exactly
+- Dynamic `import(...)` — `-dynamic-import=lazy` and `-dynamic-import=isolated` refuse `--static` (a static binary can't `dlopen`); on Windows `lazy` compiles the program's thread-locals emulated (a call per access, [TDD-00254](tdd/TDD-00254.md))
+- Dynamic `import(...)` — Under `-dynamic-import=isolated`, an island's sockets, pipes and children are invisible to the importer's event loop: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](tdd/TDD-00225.md)); the island's timers are folded exactly
 - `import.meta.url` — `import.meta.url` is the only supported member — bare `import.meta` or any other member (`import.meta.resolve`, etc.) is a clean parse-time error
 
 ### Concurrency (Workers) — Strict 2/4 (50%) · 13 caveats — [Concurrency (Workers)](status/CONCURRENCY-WORKERS.md)
@@ -697,16 +693,6 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 ### Encoding / Text — Strict 1/2 (50%) · 1 caveat — [Encoding / Text](status/ENCODING-TEXT.md)
 - `TextDecoder` — The CJK encodings (GBK, GB18030, Big5, EUC-JP, EUC-KR, ISO-2022-JP, Shift_JIS), which Node decodes through ICU, throw `ERR_ENCODING_NOT_SUPPORTED`
 
-### File System (fs) — Strict 11/21 (~52%) · 8 caveats — [File System (fs)](status/FILE-SYSTEM.md)
-- `fs.statSync` / `lstatSync` / `fstatSync` → `Stats` — `{ bigint: true }` (`BigIntStats`) is not implemented: the option is ignored
-- `fs.statfsSync(path)` → `StatFs` — `{ bigint: true }` is ignored: the fields are numbers
-- `fs.mkdirSync` / `mkdtempSync` / `rmdirSync` / `rmSync` / `unlinkSync` — `rmSync`'s `maxRetries`/`retryDelay` are validated and unused (Node retries `EBUSY`/`ENOTEMPTY`/`EPERM`)
-- `fs.readdirSync(path[, options])` → names or `Dirent[]` — No `.path` alias on `Dirent` (Node v24 removed it): reading `dirent.path` is a compile-time error, not `undefined`
-- `fs.renameSync` / `copyFileSync` / `linkSync` / `symlinkSync` / `readlinkSync` / `realpathSync` — `COPYFILE_FICLONE_FORCE` fails with `ENOTSUP`: there is no copy-on-write clone (`COPYFILE_FICLONE` copies)
-- `fs.open` / `close` / `read` / `write` / `writev` / `readv` / `fsync` (callback form) — On Windows a positioned read or write seeks, then transfers — not atomic against another operation on the same descriptor; not verified on Windows
-- `fs.promises.open` → `FileHandle` — Not ported: `chown`, `readv`, `readLines`, `readableWebStream`, `[Symbol.asyncDispose]`
-- `fs.watch(path[, options][, listener])` → `FSWatcher` — `recursive` is applied on macOS only: on Linux and Windows it watches the top directory alone
-
 ### Terminal UI — `klain:tui` — Strict 6/11 (~55%) · 5 caveats — [Terminal UI — `klain:tui`](status/TERMINAL-UI.md)
 - Flexbox layout (vendored Yoga) — Percentage units, `position:absolute`, and `aspectRatio` are not yet surfaced
 - `Text(text, props?)` — styled, wrapped text — Multi-code-point grapheme clusters joined by ZWJ (flag, family, and skin-tone emoji sequences) paint as their separate wide glyphs, not one cluster
@@ -714,31 +700,13 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `render(root)` — layout + diff paint — Immediate-mode: the whole tree is rebuilt and re-laid-out every frame (the cell diff keeps *output* minimal); a retained/memoized node tree is a deferred perf question
 - `state → view → update` app loop — The loop is written in userland TypeScript over the `klain:tty` key reads + `SIGWINCH` — there is no built-in app-runner and no callback-driven loop yet (a closure→C function-pointer trampoline is TDD-00150 Stage 2)
 
-### Process / CLI I/O — Strict 19/33 (~58%) · 24 caveats — [Process / CLI I/O](status/PROCESS-CLI.md)
-- `process.emitWarning(warning, type?\|options?, code?, ctor?)` — The one-shot `(Use \`node --trace-warnings ...\`)` hint Node prints is omitted: a compiled program has no `--trace-warnings` flag
-- `process.stdout.write(s)` / `process.stderr.write(s)` (raw write, no auto-newline) — `process.stdin`/`stdout`/`stderr` are typed `any` to the checker until `process` itself is typed from its module ([TDD-00230](tdd/TDD-00230.md) P3.2), so a wrong call (`process.stdout.write()` with no argument) is not reported as a TypeScript error
-- `klain:tty` `readByte()` / `readKey()` (synchronous raw reads) — Bespoke, non-Node surface under the explicit `klain:` specifier — Node has no synchronous single-key read (it uses `process.stdin.on('data')` events)
-- `klain:tty` `readByte()` / `readKey()` (synchronous raw reads) — Blocking reads on fd 0; do not mix with `process.stdin.on('data')` in the same run, which puts fd 0 in non-blocking mode (a synchronous read would then see EOF-on-EAGAIN)
-- `process.env` as a value (`Object.keys`/`values`/`entries`, `for…in`, `{ ...process.env }`, `JSON.stringify`, `const env = process.env`) — The object is a snapshot taken when the bare `process.env` expression is evaluated: keyed reads/writes (`process.env.X`) stay live, but a write through an alias (`const env = process.env; env.X = '1'`) lands in the copy, not the environment — Node's object is a live proxy
-- `process.on(signal, listener)` (signal listeners) — Windows delivery through the signal table ([ADR-01250](adr/ADR-01250.md)) is compile-checked only; the watcher path was run on macOS
-- `process` as an `EventEmitter` (`on`/`once`/`off`/`emit`/…, `'exit'`/`'uncaughtException'`/`'unhandledRejection'`/`'warning'`) + `process.exitCode` — `'uncaughtException'` runs the listener (suppressing the default `Uncaught:` print) but, after a synchronous throw, the process still exits (code 1) — the setjmp/longjmp exception model has already unwound to the top-level catch-all, so it can't resume execution like Node does (a rejection reported to it does go on)
-- `process.memoryUsage()` — `external`/`arrayBuffers` report 0 — V8's off-heap C++-binding accounting has no native analogue (all allocation lives in `rss` and the one heap above), so they are disclosed rather than invented
-- `process.memoryUsage()` — `heapTotal`/`heapUsed` measure this compiler's object heap, not a V8 JS-object heap — a native reinterpretation (the C allocator arena, or Boehm's heap under `-mm=gc`), so the magnitudes differ from Node's even though the direction (growth on allocation) matches
-- `process.nextTick(fn)` — Shares the one microtask FIFO with Promise reactions rather than draining strictly before them (Node keeps a separate nextTick queue ahead of promises)
-- `process.version` / `process.versions` — `versions` omits bundled-lib keys this compiler doesn't ship (`uv`/`undici`/`icu`/…) rather than fabricate them
-- `process.version` / `process.versions` — Linked-library versions that could be reported truthfully (`openssl` under the OpenSSL backend, `zlib` when linked) are not surfaced
-- `process.version` / `process.versions` — `node`/`v8` track the compatibility *ceiling* (the pinned test-corpus release); a `--node-compat` floor is deferred ([TDD-00136](tdd/TDD-00136.md))
-- `process.stdin` (streamed reads) — `process.stdin`/`stdout`/`stderr` are typed `any` to the checker until `process` itself is typed from its module ([TDD-00230](tdd/TDD-00230.md) P3.2), so a wrong call (`process.stdout.write()` with no argument) is not reported as a TypeScript error
-- `readline` module (`createInterface`, `'line'`/`'close'` events, `question()`, `close()`) — `readline.promises` holds `createInterface` only; its `Interface` and `Readline` classes are imported from `readline/promises` (a class is not yet a value)
-- `readline` module (`createInterface`, `'line'`/`'close'` events, `question()`, `close()`) — `util.promisify(rl.question)` is not the promise form: `question` has no `util.promisify.custom` (a class's `prototype` is not reachable yet); `readline/promises`' `question` is
-- `readline` module (`createInterface`, `'line'`/`'close'` events, `question()`, `close()`) — Display widths use Node's non-ICU `getStringWidth` table, so a few wide or emoji code points can take a different column count than an ICU build of Node
-- `child_process.spawn()` / `.exec()` / `.execFile()` (async, event-driven) — Handle passing over the IPC channel and `serialization: 'advanced'` are not ported
-- `child_process.spawn()` / `.exec()` / `.execFile()` (async, event-driven) — On Windows the process handles are compile-checked, not yet run
-- `child_process.spawn()` / `.exec()` / `.execFile()` (async, event-driven) — `-mm=manual`: a process handle's table slot is never reused
-- `child_process.fork()` (self-fork + IPC channel) — Self-fork only: the module must be this program's entry (a different module is a second compiled program: `ERR_CHILD_PROCESS_FORK_MODULE`)
-- `child_process.fork()` (self-fork + IPC channel) — `serialization: 'advanced'` is not ported: messages always cross as json
-- `child_process.fork()` (self-fork + IPC channel) — A `dgram` socket cannot be sent as a handle; on Windows no handle can (descriptor passing is POSIX-only)
-- `child_process.spawnSync()` / `.execSync()` / `.execFileSync()` (blocking) — On Windows the blocking spawn is compile-checked, not yet run
+### File System (fs) — Strict 13/21 (~62%) · 6 caveats — [File System (fs)](status/FILE-SYSTEM.md)
+- `fs.statSync` / `lstatSync` / `fstatSync` → `Stats` — `{ bigint: true }` (`BigIntStats`) is not implemented: the option is ignored
+- `fs.statfsSync(path)` → `StatFs` — `{ bigint: true }` is ignored: the fields are numbers
+- `fs.mkdirSync` / `mkdtempSync` / `rmdirSync` / `rmSync` / `unlinkSync` — `rmSync`'s `maxRetries`/`retryDelay` are validated and unused (Node retries `EBUSY`/`ENOTEMPTY`/`EPERM`)
+- `fs.readdirSync(path[, options])` → names or `Dirent[]` — No `.path` alias on `Dirent` (Node v24 removed it): reading `dirent.path` is a compile-time error, not `undefined`
+- `fs.renameSync` / `copyFileSync` / `linkSync` / `symlinkSync` / `readlinkSync` / `realpathSync` — `COPYFILE_FICLONE_FORCE` fails with `ENOTSUP`: there is no copy-on-write clone (`COPYFILE_FICLONE` copies)
+- `fs.promises.open` → `FileHandle` — Not ported: `chown`, `readv`, `readLines`, `readableWebStream`, `[Symbol.asyncDispose]`
 
 ### Language Constructs — Strict 54/86 (~63%) · 65 caveats — [Language Constructs](status/LANGUAGE-CONSTRUCTS.md)
 - `for…of` over arrays, strings, `Map`, `Set`, a bare `any`, and a class implementing `next(): T \| null` — Over a bare `any`, each element is read through a numeric-string key (a per-element `sprintf` + dynamic get) — a direct per-tag element walk is the perf follow-up
@@ -807,8 +775,31 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Experimental decorators — class, property, parameter & method `@decorator` — A dynamic function (any closure boxed into an `any`/decorator position) now binds its **declared parameter types** (so a typed body like a `(initial: number)` field initializer works) and **captures enclosing locals** (by shared heap cell, into the tag-12 record's env — so factory decorators, wrapping method decorators, and capturing `addInitializer` callbacks all work) ([ADR-00647](adr/ADR-00647.md))
 - Experimental decorators — class, property, parameter & method `@decorator` — `emitDecoratorMetadata` design types are name-carrying descriptor objects (`{ name: "Number" }`, the class name for a class type) — correct for `.name` inspection, but not the real runtime constructors (no first-class class-constructor value), so identity checks fail; `Reflect.metadata` used manually as a decorator factory is rejected; a metadata target must be a real dynamic object (a boxed static class instance is rejected at runtime)
 
+### Process / CLI I/O — Strict 21/33 (~64%) · 21 caveats — [Process / CLI I/O](status/PROCESS-CLI.md)
+- `process.emitWarning(warning, type?\|options?, code?, ctor?)` — The one-shot `(Use \`node --trace-warnings ...\`)` hint Node prints is omitted: a compiled program has no `--trace-warnings` flag
+- `process.stdout.write(s)` / `process.stderr.write(s)` (raw write, no auto-newline) — `process.stdin`/`stdout`/`stderr` are typed `any` to the checker until `process` itself is typed from its module ([TDD-00230](tdd/TDD-00230.md) P3.2), so a wrong call (`process.stdout.write()` with no argument) is not reported as a TypeScript error
+- `klain:tty` `readByte()` / `readKey()` (synchronous raw reads) — Bespoke, non-Node surface under the explicit `klain:` specifier — Node has no synchronous single-key read (it uses `process.stdin.on('data')` events)
+- `klain:tty` `readByte()` / `readKey()` (synchronous raw reads) — Blocking reads on fd 0; do not mix with `process.stdin.on('data')` in the same run, which puts fd 0 in non-blocking mode (a synchronous read would then see EOF-on-EAGAIN)
+- `process.env` as a value (`Object.keys`/`values`/`entries`, `for…in`, `{ ...process.env }`, `JSON.stringify`, `const env = process.env`) — The object is a snapshot taken when the bare `process.env` expression is evaluated: keyed reads/writes (`process.env.X`) stay live, but a write through an alias (`const env = process.env; env.X = '1'`) lands in the copy, not the environment — Node's object is a live proxy
+- `process` as an `EventEmitter` (`on`/`once`/`off`/`emit`/…, `'exit'`/`'uncaughtException'`/`'unhandledRejection'`/`'warning'`) + `process.exitCode` — `'uncaughtException'` runs the listener (suppressing the default `Uncaught:` print) but, after a synchronous throw, the process still exits (code 1) — the setjmp/longjmp exception model has already unwound to the top-level catch-all, so it can't resume execution like Node does (a rejection reported to it does go on)
+- `process.memoryUsage()` — `external`/`arrayBuffers` report 0 — V8's off-heap C++-binding accounting has no native analogue (all allocation lives in `rss` and the one heap above), so they are disclosed rather than invented
+- `process.memoryUsage()` — `heapTotal`/`heapUsed` measure this compiler's object heap, not a V8 JS-object heap — a native reinterpretation (the C allocator arena, or Boehm's heap under `-mm=gc`), so the magnitudes differ from Node's even though the direction (growth on allocation) matches
+- `process.nextTick(fn)` — Shares the one microtask FIFO with Promise reactions rather than draining strictly before them (Node keeps a separate nextTick queue ahead of promises)
+- `process.version` / `process.versions` — `versions` omits bundled-lib keys this compiler doesn't ship (`uv`/`undici`/`icu`/…) rather than fabricate them
+- `process.version` / `process.versions` — Linked-library versions that could be reported truthfully (`openssl` under the OpenSSL backend, `zlib` when linked) are not surfaced
+- `process.version` / `process.versions` — `node`/`v8` track the compatibility *ceiling* (the pinned test-corpus release); a `--node-compat` floor is deferred ([TDD-00136](tdd/TDD-00136.md))
+- `process.stdin` (streamed reads) — `process.stdin`/`stdout`/`stderr` are typed `any` to the checker until `process` itself is typed from its module ([TDD-00230](tdd/TDD-00230.md) P3.2), so a wrong call (`process.stdout.write()` with no argument) is not reported as a TypeScript error
+- `readline` module (`createInterface`, `'line'`/`'close'` events, `question()`, `close()`) — `readline.promises` holds `createInterface` only; its `Interface` and `Readline` classes are imported from `readline/promises` (a class is not yet a value)
+- `readline` module (`createInterface`, `'line'`/`'close'` events, `question()`, `close()`) — `util.promisify(rl.question)` is not the promise form: `question` has no `util.promisify.custom` (a class's `prototype` is not reachable yet); `readline/promises`' `question` is
+- `readline` module (`createInterface`, `'line'`/`'close'` events, `question()`, `close()`) — Display widths use Node's non-ICU `getStringWidth` table, so a few wide or emoji code points can take a different column count than an ICU build of Node
+- `child_process.spawn()` / `.exec()` / `.execFile()` (async, event-driven) — Handle passing over the IPC channel and `serialization: 'advanced'` are not ported
+- `child_process.spawn()` / `.exec()` / `.execFile()` (async, event-driven) — `-mm=manual`: a process handle's table slot is never reused
+- `child_process.fork()` (self-fork + IPC channel) — Self-fork only: the module must be this program's entry (a different module is a second compiled program: `ERR_CHILD_PROCESS_FORK_MODULE`)
+- `child_process.fork()` (self-fork + IPC channel) — `serialization: 'advanced'` is not ported: messages always cross as json
+- `child_process.fork()` (self-fork + IPC channel) — A `dgram` socket cannot be sent as a handle
+
 ### Performance & Timing — Strict 9/14 (~64%) · 4 caveats — [Performance & Timing](status/PERFORMANCE-TIMING.md)
-- `Date` — `toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`)
+- `Date` — On Linux and macOS `toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`). On Windows the zone and its name come from the system's ICU, as Node's do ([ADR-01599](adr/ADR-01599.md))
 - `Date.prototype.toLocaleDateString()` — One fixed `"M/D/YYYY"` format (the default en-US shape) in local time; no locale argument or full `Intl`-style locale support
 - `Date.prototype.toLocaleTimeString()` / `toLocaleString()` — One fixed en-US shape (`"1:04:09 PM"`, `"1/5/2020, 1:04:09 PM"`) in local time; no locale argument or full `Intl`-style locale support
 - `createHistogram` / `monitorEventLoopDelay` — A histogram keeps exact samples, not Node's HDR histogram (3 significant figures): a percentile of large values can differ in its last digits
@@ -831,12 +822,6 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `str.replace(regexp, replacement)` (string or callback) — Replacement template supports `$1`-`$9`/`$&`/`$$` only (`` $` ``/`$'` — pre-/post-match text — are out of scope)
 - `str.replace(regexp, replacement)` (string or callback) — The callback form is invoked with a fixed `(match, offset, string)` — real JS's variadic `...capturedGroups` in the middle isn't supported (a callback's arity is fixed at compile time but a pattern's capture count is only known at runtime; a callback declaring more than 3 parameters is a compile-time error)
 - `str.replaceAll(regexp, replacement)` (string or callback) — Same replacement narrowing as `.replace()` (`$1`-`$9`/`$&`/`$$` only; fixed `(match, offset, string)` callback)
-
-### FFI (node:ffi) — Strict 8/12 (~67%) · 4 caveats — [FFI (node:ffi)](status/FFI.md)
-- `new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)` — `console.log(lib)` shows `DynamicLibrary {}` where Node shows its own accessors (`{ path: [Getter], symbols: [Getter] }`): a class instance here cannot carry own accessor properties
-- `new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)` — `using` declarations are not parsed yet; `lib[Symbol.dispose]()` and `close()` dispose
-- `library.functions` / `library.symbols` / no-arg `getFunctions()` / `getSymbols()` — Windows: the order is an MSVC-STL port (Node's Windows build uses the MSVC STL, this toolchain mingw) not yet checked against a Windows `node:ffi`
-- `library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback` — `refCallback`/`unrefCallback` are validated no-ops (a registered callback is always strongly referenced here), and `library.close()` does not invalidate callbacks — unregister explicitly; an exception a callback throws is reported as uncaught once the foreign call returns
 
 ### console — Strict 8/12 (~67%) · 4 caveats — [console](status/CONSOLE.md)
 - `console.log(...)` — A bare string argument with an embedded null byte truncates *on display* at the first `\0` (`printf` `"%s"`); the stored string is intact, and inside a container it renders as `'a\x00b'`. A length-driven write needs every runtime string to carry its length header first — the URL/crypto sidecars do not yet ([ADR-01075](adr/ADR-01075.md)). Use `process.stdout.write` for binary output
@@ -876,21 +861,25 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `JSON.parse(s)` validates input (throws `SyntaxError` on malformed JSON) — The `SyntaxError` message is position-based (`Unexpected token in JSON at position N`), not Node/V8's exact per-token wording
 - `JSON.parse(s)` → `any`/`unknown` (dynamic shape) — The result is a dynamic tree — statically-typed operations on it (arithmetic on elements, passing into typed slots) hit the normal `any` limits until narrowed; `JSON.parse(s) as T` narrows at the source, routing through the typed projection instead ([ADR-00715](adr/ADR-00715.md))
 
-### Array Methods — Strict 29/37 (~78%) · 8 caveats — [Array Methods](status/ARRAY-METHODS.md)
-- `new Array<T>(n?)` — A preallocated `new Array<T>(n)` fills real zero-valued slots, not holes — `new Array<number>(3)[0]` is `0` (Node: `undefined`), and `map`/`forEach` visit those slots instead of skipping holes.
-- `.length` — Growing `a.length` fills zero-valued slots in a typed-element array, not holes (a boxed-element `any[]` reads `undefined`, as Node)
-- `.indexOf(item, fromIndex?)` — Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](adr/ADR-00152.md))
-- `.lastIndexOf(item)` — Rejects a nested-array element (`number[][]`) — compares a bare register, like `.indexOf` ([ADR-00152](adr/ADR-00152.md)/[ADR-00843](adr/ADR-00843.md))
-- `.includes(item)` — Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](adr/ADR-00152.md))
-- `.sort(fn?)` — Rejects a nested-array element (`number[][]`) — the custom comparator is a C-ABI `qsort()` trampoline with one fixed variant per element kind ([ADR-00152](adr/ADR-00152.md))
-- `.flat(depth?)` — `depth` must be a compile-time constant integer or `Infinity` — this compiler's arrays have a fixed nesting depth at the type level, so the result's element type has to be known at compile time ([TDD-00029](tdd/TDD-00029.md)/[ADR-00107](adr/ADR-00107.md))
-- `Array.from(iterable, mapFn?)` — `thisArg` (the third argument) is not supported
+### FFI (node:ffi) — Strict 9/12 (75%) · 3 caveats — [FFI (node:ffi)](status/FFI.md)
+- `new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)` — `console.log(lib)` shows `DynamicLibrary {}` where Node shows its own accessors (`{ path: [Getter], symbols: [Getter] }`): a class instance here cannot carry own accessor properties
+- `new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)` — `using` declarations are not parsed yet; `lib[Symbol.dispose]()` and `close()` dispose
+- `library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback` — `refCallback`/`unrefCallback` are validated no-ops (a registered callback is always strongly referenced here), and `library.close()` does not invalidate callbacks — unregister explicitly; an exception a callback throws is reported as uncaught once the foreign call returns
 
 ### Global Functions & Constants — Strict 17/21 (~81%) · 4 caveats — [Global Functions & Constants](status/GLOBAL-FUNCTIONS.md)
 - `structuredClone(obj)` — Statically typed `EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError` for it); a `Map`/`Set` with an **array/Map/Set** key or value element type is also rejected (only scalar/string/object elements clone — [ADR-00574](adr/ADR-00574.md))
 - `structuredClone(obj)` — A cloned `AggregateError`'s `.errors` degrades to empty
 - `queueMicrotask(fn)` — Drained at the reachable checkpoints (end of the top-level script, each scheduler step); a program with neither timers nor async tasks drains once at exit
 - `gc()` — A no-op under `-mm=manual` (the default) — nothing is ever collected; only meaningful under `-mm=gc`, where it forces a full Boehm collection
+
+### Array Methods — Strict 30/37 (~81%) · 7 caveats — [Array Methods](status/ARRAY-METHODS.md)
+- `new Array<T>(n?)` — A preallocated `new Array<T>(n)` fills real zero-valued slots, not holes — `new Array<number>(3)[0]` is `0` (Node: `undefined`), and `map`/`forEach` visit those slots instead of skipping holes.
+- `.length` — Growing `a.length` fills zero-valued slots in a typed-element array, not holes (a boxed-element `any[]` reads `undefined`, as Node)
+- `.indexOf(item, fromIndex?)` — Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](adr/ADR-00152.md))
+- `.lastIndexOf(item)` — Rejects a nested-array element (`number[][]`) — compares a bare register, like `.indexOf` ([ADR-00152](adr/ADR-00152.md)/[ADR-00843](adr/ADR-00843.md))
+- `.includes(item)` — Rejects a nested-array element (`number[][]`) — compares a bare register, no callback ([ADR-00152](adr/ADR-00152.md))
+- `.flat(depth?)` — `depth` must be a compile-time constant integer or `Infinity` — this compiler's arrays have a fixed nesting depth at the type level, so the result's element type has to be known at compile time ([TDD-00029](tdd/TDD-00029.md)/[ADR-00107](adr/ADR-00107.md))
+- `Array.from(iterable, mapFn?)` — `thisArg` (the third argument) is not supported
 
 ### Number / Math — Strict 30/36 (~83%) · 6 caveats — [Number / Math](status/NUMBER-MATH.md)
 - `Math.log/log2/log10` — Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)
@@ -900,11 +889,6 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `Math.sinh/cosh/tanh` — Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)
 - `Math.exp` and `Math.asinh/acosh/atanh` — Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)
 
-### HTTP Server — Strict 14/16 (~88%) · 3 caveats — [HTTP Server](status/HTTP-SERVER.md)
-- `http.createServer((req, res) => …).listen(port[, cb])` — real Node shape — On Windows the TCP handles are compile-checked, not yet run
-- `const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)` — The `IncomingMessage`/`ServerResponse` options (custom classes) are not accepted
-- `const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)` — `res.setHeaders` takes a `Map` only — a `Headers` argument is a union code generation cannot tell apart ([BACKLOG](../BACKLOG.md))
-
 ### SQLite (node:sqlite) — Strict 16/18 (~89%) · 2 caveats — [SQLite (node:sqlite)](status/SQLITE.md)
 - `db.createSession()` / `db.applyChangeset()` / `Session` — Available only where the system `libsqlite3` is built with sessions (macOS's is); elsewhere `ERR_INVALID_STATE` names the omission — Node bundles its own SQLite
 - `db.enableLoadExtension()` / `db.loadExtension()` — The system `libsqlite3` on macOS omits extension loading, so loading an extension there is `ERR_INVALID_STATE`; Node bundles its own SQLite
@@ -913,9 +897,12 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `new EventEmitter<T>()` / extending it via `class X extends EventEmitter<T>` — An override's declared signature isn't checked for compatibility against the method it replaces (tsc's TS2416)
 - `new EventEmitter<T>()` / extending it via `class X extends EventEmitter<T>` — The checker types every event as taking `...args: any[]`: `lib/node/events.ts` declares its methods that way, not through @types/node's conditional types (`Key`/`Args`/`Listener`), so a typed map's event names and argument types are not checked
 
-### os — Strict 13/14 (~93%) · 2 caveats — [os](status/OS.md)
+### os — Strict 13/14 (~93%) · 1 caveat — [os](status/OS.md)
 - `os.getPriority()` / `os.setPriority()` — The error's `errno`/`syscall` are copies of `info`'s, not accessors over it
-- `os.getPriority()` / `os.setPriority()` — Windows' priority-class mapping is compile-checked only
+
+### HTTP Server — Strict 15/16 (~94%) · 2 caveats — [HTTP Server](status/HTTP-SERVER.md)
+- `const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)` — The `IncomingMessage`/`ServerResponse` options (custom classes) are not accepted
+- `const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)` — `res.setHeaders` takes a `Map` only — a `Headers` argument is a union code generation cannot tell apart ([BACKLOG](../BACKLOG.md))
 
 ### JavaScript built-in objects (completeness index) — completeness index (not parity-counted) · 29 caveats — [JavaScript built-in objects (completeness index)](status/JAVASCRIPT-BUILTINS.md)
 - `Function` instances — `name`, `length`, util.inspect form (`[Function: f]`, `[AsyncFunction: f]`, `bound f`, …) — `toString()` / `String(f)` has no source text (a compile error on a statically-typed function)

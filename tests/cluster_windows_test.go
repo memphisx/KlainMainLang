@@ -24,7 +24,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8979, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
-}, { workers: 3 })
+}, { host: '127.0.0.1', workers: 3 })
 `
 	np := freePort(t)
 	binFile := buildBinaryImports(t, subPort(src, 8979, np))
@@ -107,7 +107,7 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8978, (req: HttpRequest): Res => {
   return { status: 200, body: process.pid.toString() }
-}, { workers: 3 })
+}, { host: '127.0.0.1', workers: 3 })
 `
 	port := startHTTPClusterServer(t, src, 8978)
 

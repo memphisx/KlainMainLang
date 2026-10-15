@@ -47,17 +47,17 @@ Windows 11 x86-64 is supported through the mingw-w64 UCRT toolchain from MSYS2 (
 
 1. Git for Windows (`winget install Git.Git`) — the Makefile and the test scripts assume its Git Bash.
 2. Go 1.26+ (`winget install GoLang.Go`).
-3. LLVM 15+ (`winget install LLVM.LLVM`) — `clang` and `lld`. The compiler drives this clang with `--target=x86_64-w64-mingw32 --sysroot=C:\msys64\ucrt64`; set `KLAIN_SYSROOT` if MSYS2 lives elsewhere.
+3. LLVM 15+ (`winget install LLVM.LLVM`) — `clang` and `lld`, which links every program (without it the compiler falls back to MSYS2's GNU `ld`, which cannot link a program of more than about 32,000 functions and literals). The compiler drives this clang with `--target=x86_64-w64-mingw32 --sysroot=C:\msys64\ucrt64`; set `KLAIN_SYSROOT` if MSYS2 lives elsewhere.
 4. GNU Make (`winget install GnuWin32.Make`, or MSYS2's `make`).
 5. MSYS2 (`winget install MSYS2.MSYS2`), then in an MSYS2 shell: `pacman -S mingw-w64-ucrt-x86_64-toolchain` for the C runtime headers and libraries, and `pacman -S mingw-w64-ucrt-x86_64-{curl,sqlite3,pcre2,libtommath,openssl,nghttp2,libuv,c-ares,gc,zlib}` for the optional libraries listed above (plus `mingw-w64-ucrt-x86_64-webview2-loader` for `klain:webview`).
 
 PATH matters on Windows: put `C:\msys64\ucrt64\bin` *ahead of* Git for Windows' `mingw64\bin` (Git's own `curl` has no HTTP/2, and compiled programs find the optional libraries' DLLs there at run time), and add `C:\msys64\usr\bin` for the coreutils (`echo`, `printf`, `sh`) the child_process tests spawn. A freshly installed tool is often visible only to terminals opened afterwards — or after a sign-out — on Windows. If a traffic-filtering product such as AdGuard is running, exclude `127.0.0.1` from it (or pause it) before running the test suite: it resets loopback TLS handshakes, answers HTTP/2 prefaces itself, and cuts large request bodies, which shows up as failing network tests that pass the moment it is off.
 
-What differs on Windows, by design (Node behaves the same way there): `process.platform` is `win32`, `os.EOL` is `\r\n`, `os.homedir()`/`os.tmpdir()` read `USERPROFILE`/`TEMP`, `fs.chmod` only toggles the read-only attribute, `fs.symlink` needs Developer Mode or an elevated token, `process.on('SIGINT')` fires on Ctrl+C and `process.on('SIGBREAK')` on Ctrl+Break while `process.on('SIGTERM')` listeners are accepted but never fire (`process.kill` terminates unconditionally), and the `process.getuid` family does not exist. `-package` produces a GUI-subsystem `<name>\<name>.exe` with icon and version resources beside the console build. Known gaps: `cluster`/`http.listen({ workers })` share one listening socket across workers instead of Node's round-robin from the primary, `--static` and `-crypto=commoncrypto` stay out of scope, and there is no ASan/UBSan runtime for the mingw target in LLVM's Windows build.
+What differs on Windows, by design (Node behaves the same way there): `process.platform` is `win32`, `os.EOL` is `\r\n`, `os.homedir()`/`os.tmpdir()` read `USERPROFILE`/`TEMP`, `fs.chmod` only toggles the read-only attribute, `fs.symlink` needs Developer Mode or an elevated token, `process.on('SIGINT')` fires on Ctrl+C and `process.on('SIGBREAK')` on Ctrl+Break while `process.on('SIGTERM')` listeners are accepted but never fire (`process.kill` terminates unconditionally), and the `process.getuid` family does not exist. `-package` produces a GUI-subsystem `<name>\<name>.exe` with icon and version resources beside the console build. Known gaps: `-crypto=commoncrypto` stays out of scope, and there is no ASan/UBSan runtime for the mingw target in LLVM's Windows build.
 
 ### Debugging tools (optional, for chasing memory-corruption bugs)
 
-- **AddressSanitizer/UndefinedBehaviorSanitizer** — no separate install: bundled with `clang` itself, including Xcode's clang on macOS (confirmed directly on the Linux x86-64 box; not yet re-confirmed on Apple Silicon — see "Switching development machines" in the project's own instructions). `tests/compiler_test.go`'s `buildBinaryASan`/`buildBinaryGCASan` build a `-fsanitize=address -fsanitize=undefined` binary for a given source, for a specific investigation to call deliberately (not part of the regular `go test ./...` run — ASan roughly doubles memory/time cost). See `docs/adr/README.md` for what had to be fixed in `-mm=gc`'s allocator shim before this was actually usable.
+- **AddressSanitizer/UndefinedBehaviorSanitizer** — no separate install on Linux and macOS: bundled with `clang` itself, including Xcode's clang on macOS (confirmed directly on the Linux x86-64 box; not yet re-confirmed on Apple Silicon — see "Switching development machines" in the project's own instructions). On Windows MSYS2's UCRT64 clang has no sanitizer runtime; install the CLANG64 one (`pacman -S mingw-w64-clang-x86_64-clang mingw-w64-clang-x86_64-compiler-rt`), which sanitizer builds then use while linking the UCRT64 libraries. `tests/compiler_test.go`'s `buildBinaryASan`/`buildBinaryGCASan` build a `-fsanitize=address -fsanitize=undefined` binary for a given source, for a specific investigation to call deliberately (not part of the regular `go test ./...` run — ASan roughly doubles memory/time cost). See `docs/adr/README.md` for what had to be fixed in `-mm=gc`'s allocator shim before this was actually usable.
 - **Valgrind** — `apt-get install valgrind` on Debian/Ubuntu. **On Apple Silicon (arm64) macOS, Valgrind has historically had no official upstream support** — `brew install valgrind` may fail outright or install a build that doesn't actually work; confirm directly before relying on it there rather than assuming parity with the Linux box. ASan/UBSan (above) work identically on both platforms and should be the default tool; reach for Valgrind only for the specific class of bug (e.g. conservative-GC-adjacent memory questions) where its instruction-level, allocator-agnostic instrumentation is worth the extra setup friction — and expect some false-positive "uninitialized value" noise from Boehm GC's own conservative stack scanning under Memcheck, a known pattern for conservative collectors, generally addressed with suppressions rather than code changes.
 
 ## Install
@@ -195,10 +195,12 @@ klainmain [flags] <file.ts>
   
   -crypto <lib> crypto.subtle backend library, compiled+linked only when a
                 program uses crypto.subtle: openssl (default — libcrypto
-                3.x, all platforms) or commoncrypto (macOS only — Apple
+                3.x, all platforms), commoncrypto (macOS only — Apple
                 CommonCrypto plus Security.framework, no OpenSSL
-                dependency). Both give identical Web Crypto semantics.
-                See docs/tdd/TDD-00104.md.
+                dependency) or cng (Windows only — the OS's CNG,
+                bcrypt.dll, no OpenSSL dependency). All give identical
+                Web Crypto semantics. See docs/tdd/TDD-00104.md and
+                docs/tdd/TDD-00177.md.
   
   -webview <b>  klain:webview engine backend, selected only when a program
                 opens a webview window: system (default — the per-platform
@@ -315,13 +317,16 @@ plus a `clang`-then-`gcc` two-step on Alpine/musl — too distro-specific to
 safely automate, so the full recipe lives in `docs/adr/` rather than in the
 compiler. `RegExp`'s pcre2 has none of that drama and just links statically.
 
-`--static` works on **Windows** too, and there it links the *non-system*
-libraries statically — the mingw C++ runtime (`libstdc++`/`libgcc`/`libwinpthread`,
-pulled in by the vendored Yoga layout engine), `pcre2` (`RegExp`), and the full
-`libcurl` chain (`fetch`/`http`/`tls`; ucrt64's curl uses Windows SSPI, not MIT
-krb5, so the static chain has no gssapi drag) — while the UCRT and core Win32 DLLs
-stay dynamic, since they ship with Windows 10/11. The result is a single
-self-contained `.exe` that runs on a box with no MSYS2 install (ADR-00771/00772).
+`--static` works on **Windows** too, and there it means *self-contained*: every
+library the program uses is linked in — the mingw C++ runtime
+(`libstdc++`/`libgcc`/`libwinpthread`, pulled in by the vendored Yoga layout
+engine), `pcre2` (`RegExp`), the full `libcurl` chain (`fetch`/`http`/`tls`;
+ucrt64's curl uses Windows SSPI, not MIT krb5, so the static chain has no gssapi
+drag), libuv, c-ares, sqlite, libtommath (`BigInt`), zlib, and Brotli and Zstd
+(which a dynamic build loads only when used) — while the UCRT and core Win32
+DLLs stay dynamic, since they ship with Windows 10/11. The result is a single
+`.exe` that imports only Windows' own DLLs and runs on a box with no MSYS2
+install (ADR-00771/00772, TDD-00253).
 Without `--static` the build is dynamic, like Mac/Linux: the program needs those
 DLLs bundled beside it or on `PATH` (a Windows app ships them; on Mac/Linux you
 declare the dependency instead). Showcase apps are built `--static` (`make apps`).
@@ -419,7 +424,7 @@ ast/                AST node definitions
 codegen/
   llvm/             LLVM IR emitter — ~60 small domain files, not a handful of
                      giant ones: emit_*.go per feature area, runtime_*.go for
-                     the C-runtime decls + the select()/ucontext fiber engine,
+                     the C-runtime decls + the libuv loop/ucontext fiber engine,
                      gc* for the -mm=gc shim. Full file-by-file map lives in
                      docs/ARCHITECTURE.md (not re-typed here to go stale)
 docs/
@@ -454,7 +459,7 @@ Makefile            Build, test, and example targets
    - A scope stack for symbol resolution, plus a two-pass setup so functions can forward-reference each other.
    - Arrays are `{ptr, i64}` aggregates; objects are heap-allocated structs reached via GEP; closures are heap-allocated `{funcPtr, envPtr}` pairs; exceptions are `setjmp`/`longjmp` with a 64-slot jump-buffer stack; `any`/`unknown` are a boxed `{tag, payload}` pair with runtime-dispatched `typeof`/print/equality.
    - `ensure*()` pattern: every C stdlib dependency (`malloc`, `sscanf`, `gmtime`, you name it) gets declared exactly once, the first time it's actually needed.
-   - Concurrency, such as it is: a `select()`-based event loop merges the listening socket, every open `http.listen` connection, libcurl's own fds (for `fetch`), and the timer queue into one wait. Actual suspension is `ucontext.h` fibers, not LLVM's coroutine intrinsics — a direct prototype proved coroutines segfault the moment a `try`/`catch` spans a suspend point, since this compiler's `setjmp`/`longjmp` exceptions assume a C stack frame that a coroutine's suspend unwinds out from under them. Fibers keep their own OS stack, so they don't have that problem. Within one thread there is no preemption: exactly one fiber runs at a time, cooperatively, same as JS's own single-threaded model. Real parallelism exists one level up — `worker_threads`' `Worker` spawns actual pthreads, each running its own independent instance of this same loop (every runtime singleton is `thread_local`), talking to the parent over pipe-based message channels.
+   - Concurrency, such as it is: one libuv event loop per thread (as Node's) merges the listening socket, every open `http.listen` connection, libcurl's own sockets (for `fetch`), child processes, pipes and the timer queue into one wait. Actual suspension is `ucontext.h` fibers, not LLVM's coroutine intrinsics — a direct prototype proved coroutines segfault the moment a `try`/`catch` spans a suspend point, since this compiler's `setjmp`/`longjmp` exceptions assume a C stack frame that a coroutine's suspend unwinds out from under them. Fibers keep their own OS stack, so they don't have that problem. Within one thread there is no preemption: exactly one fiber runs at a time, cooperatively, same as JS's own single-threaded model. Real parallelism exists one level up — `worker_threads`' `Worker` spawns actual pthreads, each running its own independent instance of this same loop (every runtime singleton is `thread_local`), talking to the parent over pipe-based message channels.
 4. **Compile**: the emitter writes a `.ll` file next to the source, then shells out to `clang -O2` for the actual native codegen. KlainMainLang does the fun 90% and quietly lets a real compiler backend handle the part that would otherwise take a PhD.
 
 ## Things this compiler will cheerfully never do

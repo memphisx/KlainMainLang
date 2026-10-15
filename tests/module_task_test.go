@@ -153,7 +153,7 @@ setTimeout(async () => {
 
 http.listen(18431, (req: HttpRequest): Res => {
   return { status: 200, body: greeting + " " + req.path };
-});
+}, { host: '127.0.0.1' });
 
 console.log("server closed");
 const tail = await Promise.resolve("tail");

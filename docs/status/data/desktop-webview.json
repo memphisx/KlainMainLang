@@ -116,7 +116,7 @@
             "feature": "The event loop on the GUI thread",
             "status": "implemented",
             "notes": [
-              "Timers, promise reactions, `fs.promises`, `fetch`, servers and the rest of the loop run under `run()` without a Worker: on macOS and Linux the GUI's main loop watches the runtime's libuv loop ([ADR-01405](../adr/ADR-01405.md)); Windows runs timers, microtasks and tasks through a 16 ms page-driven tick pump, and servers and other descriptor-driven work there still need a Worker ([ADR-00439](../adr/ADR-00439.md))"
+              "Timers, promise reactions, `fs.promises`, `fetch`, servers and the rest of the loop run under `run()` without a Worker: the GUI's main loop watches the runtime's libuv loop ([ADR-01405](../adr/ADR-01405.md)); on Windows a thread waits on libuv's completion port and wakes the GUI thread for each pass, as Electron embeds Node ([ADR-01614](../adr/ADR-01614.md))"
             ],
             "notesPlain": true
           },

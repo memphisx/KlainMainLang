@@ -64,7 +64,7 @@ func TestE2EFsErrorMessageENOENTWithPath(t *testing.T) {
 import * as fs from 'fs'
 try { fs.readFileSync('/no_such_kml_dir/f.txt') }
 catch (e) { const x = e as any; console.log(x.message + '|' + x.code + '|' + x.syscall + '|' + x.path) }
-`, "ENOENT: no such file or directory, open '/no_such_kml_dir/f.txt'|ENOENT|open|/no_such_kml_dir/f.txt")
+`, winPaths("ENOENT: no such file or directory, open '/no_such_kml_dir/f.txt'|ENOENT|open|/no_such_kml_dir/f.txt", "/no_such_kml_dir/f.txt"))
 }
 
 // EISDIR reading a directory: Node emits NO path clause and `err.path` is
@@ -94,7 +94,7 @@ func TestE2EFsErrorMessageRenameTwoPath(t *testing.T) {
 import * as fs from 'fs'
 try { fs.renameSync('/no_such_kml_dir/a', '/no_such_kml_dir/b') }
 catch (e) { const x = e as any; console.log(x.message + '|' + x.syscall + '|' + x.path + '|' + x.dest) }
-`, "ENOENT: no such file or directory, rename '/no_such_kml_dir/a' -> '/no_such_kml_dir/b'|rename|/no_such_kml_dir/a|/no_such_kml_dir/b")
+`, winPaths("ENOENT: no such file or directory, rename '/no_such_kml_dir/a' -> '/no_such_kml_dir/b'|rename|/no_such_kml_dir/a|/no_such_kml_dir/b", "/no_such_kml_dir/a", "/no_such_kml_dir/b"))
 }
 
 // copyFileSync surfaces the two-path `copyfile` error (not the underlying
@@ -105,7 +105,7 @@ func TestE2EFsErrorMessageCopyFileTwoPath(t *testing.T) {
 import * as fs from 'fs'
 try { fs.copyFileSync('/no_such_kml_dir/a', '/no_such_kml_dir2/b') }
 catch (e) { const x = e as any; console.log(x.message + '|' + x.code + '|' + x.syscall + '|' + x.path + '|' + x.dest) }
-`, "ENOENT: no such file or directory, copyfile '/no_such_kml_dir/a' -> '/no_such_kml_dir2/b'|ENOENT|copyfile|/no_such_kml_dir/a|/no_such_kml_dir2/b")
+`, winPaths("ENOENT: no such file or directory, copyfile '/no_such_kml_dir/a' -> '/no_such_kml_dir2/b'|ENOENT|copyfile|/no_such_kml_dir/a|/no_such_kml_dir2/b", "/no_such_kml_dir/a", "/no_such_kml_dir2/b"))
 }
 
 // unlink of a file the program itself holds open succeeds on every host: on

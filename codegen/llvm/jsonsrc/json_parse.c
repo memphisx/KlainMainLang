@@ -115,9 +115,16 @@ static char *parse_string_raw(Parser *ps) {
         return NULL;
     }
     ps->p++; // opening quote
-    // The decoded form is never longer than the remaining raw bytes; over-
-    // allocate once (plus 3 slack for a 4-byte UTF-8 write, plus NUL).
-    int64_t cap = (int64_t)(ps->end - ps->p) + 4;
+    // The decoded form is never longer than its raw bytes up to the closing
+    // quote (each escape decodes shorter than it is written); allocate that
+    // once, plus 3 slack for a 4-byte UTF-8 write, plus NUL. Sized by the
+    // rest of the input instead, every string of a large document held a
+    // buffer of the whole remainder: untouched pages on Linux, but committed
+    // memory on Windows, gigabytes for a few-hundred-KB file.
+    const char *q = ps->p;
+    while (q < ps->end && *q != '"') q += (*q == '\\') ? 2 : 1;
+    if (q > ps->end) q = ps->end;
+    int64_t cap = (int64_t)(q - ps->p) + 4;
     char *out = (char *)malloc(cap);
     if (!out) {
         ps->ok = 0;

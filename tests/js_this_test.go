@@ -47,7 +47,7 @@ func TestE2EJSThisInFunctionExpressionCallbacks(t *testing.T) {
 const net = require('net');
 const { EventEmitter } = require('events');
 const server = net.createServer();
-server.listen(0, function () {
+server.listen(0, '127.0.0.1', function () {
   console.log(typeof this.address().port, this === server);
   this.close();
 });
@@ -63,7 +63,7 @@ func TestE2EJSThisInFunctionDeclarationCallbacks(t *testing.T) {
 const net = require('net');
 const { EventEmitter } = require('events');
 const server = net.createServer();
-server.listen(0, onListen);
+server.listen(0, '127.0.0.1', onListen);
 function onListen() {
   console.log(typeof this.address().port, this === server);
   this.close();

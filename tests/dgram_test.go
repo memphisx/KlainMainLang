@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,7 @@ const server = dgram.createSocket('udp4')
 server.on('message', (msg: Uint8Array, rinfo) => {
   server.send("echo:" + dec.decode(msg), rinfo.port, rinfo.address)
 })
-server.bind(8961)
+server.bind(8961, '127.0.0.1')
 `
 	port := startUDPServer(t, src, 8961)
 
@@ -56,7 +57,7 @@ func TestE2EDgramSetBroadcast(t *testing.T) {
 import dgram from 'dgram'
 const s = dgram.createSocket('udp4')
 try { s.setBroadcast(true) } catch (e: any) { console.log(e.code, e.syscall) }
-s.bind(0, () => {
+s.bind(0, '127.0.0.1', () => {
   s.setBroadcast(true)
   const a = s.address()
   console.log(a.family, a.port > 0)
@@ -104,8 +105,8 @@ server.on('message', (msg, rinfo) => {
 server.bind(0, '127.0.0.1')
 try { dgram.createSocket('udp5' as any) } catch (e: any) { console.log(e.code, e.message) }
 const s2 = dgram.createSocket('udp4')
-s2.bind(0)
-try { s2.bind(0) } catch (e: any) { console.log(e.code) }
+s2.bind(0, '127.0.0.1')
+try { s2.bind(0, '127.0.0.1') } catch (e: any) { console.log(e.code) }
 s2.close()
 try { s2.close() } catch (e: any) { console.log(e.code, e.message) }
 `, "ERR_SOCKET_BAD_TYPE Bad socket type specified. Valid types are: udp4, udp6\nERR_SOCKET_ALREADY_BOUND\nERR_SOCKET_DGRAM_NOT_RUNNING Not running\nlistening 127.0.0.1 IPv4\nsent null 5\nconnected true\nerr2 ERR_SOCKET_DGRAM_NOT_CONNECTED Not connected\nmessage hello 127.0.0.1 IPv4 5\nmessage abc 127.0.0.1 IPv4 3\nmessage multi-part 127.0.0.1 IPv4 10\nserver closed\nclient closed")
@@ -124,7 +125,7 @@ s6.bind(0, '::1', () => {
   c.send('six', a.port, '::1', () => c.close())
 })
 const s = dgram.createSocket('udp4')
-s.bind(0, () => {
+s.bind(0, '127.0.0.1', () => {
   console.log('ttl', s.setTTL(64), s.setMulticastTTL(2), s.setMulticastLoopback(true))
   s.addMembership('239.1.2.3')
   s.dropMembership('239.1.2.3')
@@ -132,9 +133,42 @@ s.bind(0, () => {
   const port = s.address().port
   const t2 = dgram.createSocket('udp4')
   t2.on('error', (e: any) => { console.log('bind error', e.code, e.syscall); t2.close(); s.close() })
-  t2.bind(port)
+  t2.bind(port, '127.0.0.1')
 })
 `, "v6 bound IPv6 ::1\nttl 64 2 true\nERR_MISSING_ARGS\nbind error EADDRINUSE bind\nv6 six IPv6 ::1")
+}
+
+// The TTL and multicast options and membership on a udp6 socket (Winsock's
+// IPPROTO_IPV6 numbers on Windows, ADR-01618); dropping a group not joined
+// is the kernel's EADDRNOTAVAIL. On Windows libuv refuses a group of the
+// other family with EINVAL.
+func TestE2EDgramUdp6MulticastOptions(t *testing.T) {
+	want := "ttl6 33 3 false\ndrop again EADDRNOTAVAIL dropMembership"
+	v4 := ""
+	if runtime.GOOS == "windows" {
+		v4 = "try { s.addMembership('239.1.2.3') } catch (e: any) { console.log('v4 group', e.code) }"
+		want += "\nv4 group EINVAL"
+	}
+	out := compileAndRunImports(t, fmt.Sprintf(`
+import dgram from 'dgram'
+const s = dgram.createSocket('udp6')
+s.bind(0, '::', () => {
+  console.log('ttl6', s.setTTL(33), s.setMulticastTTL(3), s.setMulticastLoopback(false))
+  try {
+    s.addMembership('ff02::1:3')
+    s.dropMembership('ff02::1:3')
+    try { s.dropMembership('ff02::1:3') } catch (e: any) { console.log('drop again', e.code, e.syscall) }
+  } catch (e: any) { console.log('join', e.code) }
+  %s
+  s.close()
+})
+`, v4))
+	// A host with no IPv6 multicast route (a container with only loopback)
+	// refuses the join, as it does Node's.
+	if strings.Contains(out, "join ENODEV") {
+		t.Skip("no IPv6 multicast interface on this host")
+	}
+	compareLines(t, out, want)
 }
 
 // startUDPServer compiles a dgram server and waits until it responds to a
@@ -145,8 +179,7 @@ func startUDPServer(t *testing.T, src string, port int) int {
 	binFile := buildBinaryImports(t, subPort(src, port, np))
 	cmd := exec.Command(binFile)
 	// Kept for the failure message: a server that never answers is otherwise
-	// opaque (run with KML_IO_TRACE=1 in the environment to get the Windows
-	// reactor's trace here too).
+	// opaque.
 	serverOut := &syncBuffer{}
 	cmd.Stdout = serverOut
 	cmd.Stderr = serverOut

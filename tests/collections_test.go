@@ -1056,7 +1056,7 @@ const fw = new WeakRef(() => 1); console.log(typeof fw.deref());
 // A bare `new WeakMap()` under a `WeakMap<K, V>` annotation takes its value
 // type from the annotation (a number stays a number).
 func TestE2EWeakMapAnnotatedValueType(t *testing.T) {
-	assertSameAsNode(t, `
+	assertSameAsNodeImports(t, `
 const wm: WeakMap<object, number> = new WeakMap();
 const k = {};
 wm.set(k, 3.5);

@@ -29,6 +29,7 @@ extern "C" {
 #undef ENOTCONN
 #undef EPIPE
 #undef ETIMEDOUT
+#undef ENOBUFS
 #define EAGAIN 11
 #define EWOULDBLOCK 11
 #define EINTR 4
@@ -39,6 +40,7 @@ extern "C" {
 #define ETIMEDOUT 110
 #define ECONNREFUSED 111
 #define EINPROGRESS 115
+#define ENOBUFS 105
 
 // ---- fcntl -----------------------------------------------------------------------
 #define F_GETFL 3
@@ -117,6 +119,12 @@ int poll(struct kml_pollfd *fds, nfds_t n, int timeout);
 #define SHUT_RDWR 2
 #define INADDR_ANY 0u
 #define INADDR_LOOPBACK 0x7f000001u
+#if defined(KML_COMPAT_OVER_WINSOCK)
+// Winsock's structs (same layout) without the POSIX names for their fields.
+typedef uint16_t sa_family_t;
+typedef uint16_t in_port_t;
+typedef uint32_t in_addr_t;
+#endif
 #ifndef _WINSOCK2API_ // winsock2.h (via OpenSSL) already defines these, same layout
 typedef int socklen_t;
 typedef uint16_t sa_family_t;
@@ -131,7 +139,9 @@ struct sockaddr_in {
 	char sin_zero[8];
 };
 #endif
-// Windows layout: ai_canonname precedes ai_addr (unlike glibc).
+// Windows layout: ai_canonname precedes ai_addr (unlike glibc); ws2tcpip.h's
+// is the same struct.
+#ifndef _WS2TCPIP_H_
 struct addrinfo {
 	int ai_flags, ai_family, ai_socktype, ai_protocol;
 	size_t ai_addrlen;
@@ -139,7 +149,9 @@ struct addrinfo {
 	struct sockaddr *ai_addr;
 	struct addrinfo *ai_next;
 };
-#ifndef _WINSOCK2API_
+#endif
+// KML_COMPAT_OVER_WINSOCK: Winsock is in, its names renamed (kml_uv_win.h).
+#if !defined(_WINSOCK2API_) || defined(KML_COMPAT_OVER_WINSOCK)
 int socket(int domain, int type, int protocol);
 int bind(int fd, const void *addr, int len);
 int listen(int fd, int backlog);
@@ -166,6 +178,12 @@ const char *inet_ntop(int af, const void *src, char *dst, size_t size);
 int getaddrinfo(const char *node, const char *svc, const void *hints, struct addrinfo **res);
 void freeaddrinfo(struct addrinfo *ai);
 int getnameinfo(const void *sa, int salen, char *host, size_t hostlen, char *serv, size_t servlen, int flags);
+#endif
+#if defined(_WINSOCK2API_) && !defined(_WS2TCPIP_H_) && !defined(KML_COMPAT_OVER_WINSOCK)
+// winsock2.h alone (OpenSSL's include) leaves the address converters to
+// ws2tcpip.h; the shim's are the same calls.
+int inet_pton(int af, const char *src, void *dst);
+const char *inet_ntop(int af, const void *src, char *dst, size_t size);
 #endif
 
 #ifdef __cplusplus

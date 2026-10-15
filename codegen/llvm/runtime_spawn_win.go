@@ -4,22 +4,20 @@ import (
 	"fmt"
 )
 
-// Windows process model (TDD-00177 Stage 4). The three fork+exec sites in
-// the runtime (child_process spawn, execFileSync, cluster.fork) keep their
-// pipe/socketpair plumbing on every host; only the fork→child→exec region
-// differs. On Windows that region becomes one call into win32proc.c's
-// __kml_win_spawn (CreateProcessW with the pipe ends as the child's stdio),
-// which returns the pid the parent path already expects. The helpers below
-// return the region's IR text with single '%' (they are inserted through a
-// %s verb or concatenation, never re-formatted).
+// Windows process model. A child_process child is libuv's uv_spawn
+// (klainpool.c, TDD-00252 Stage 3); the one fork site left in the IR, the
+// http.listen({ workers }) cluster, re-spawns this executable through
+// win32proc.c's __kml_win_spawn_worker on Windows. The helpers below return
+// IR text with single '%' (they are inserted through a %s verb or
+// concatenation, never re-formatted).
 
-// ensureWinSpawnDecl declares __kml_win_spawn once (Windows only).
+// ensureWinSpawnDecl declares __kml_win_spawn_worker once (Windows only).
 func (e *Emitter) ensureWinSpawnDecl() {
 	if e.opts.Target.OS() != "windows" || e.usedWinSpawn {
 		return
 	}
 	e.usedWinSpawn = true
-	e.emitGlobal("declare i32 @__kml_win_spawn(ptr, ptr, ptr, i32, i32, i32, i32, i32, ptr)")
+	e.emitGlobal("declare i32 @__kml_win_spawn_worker(ptr, ptr)")
 }
 
 // The http.listen({ workers: N }) cluster (TDD-00025) forks N-1 workers that
@@ -34,8 +32,9 @@ func (e *Emitter) ensureWinSpawnDecl() {
 // everything), so connections are dealt round-robin instead, the way Node's
 // cluster does there: the primary accepts and hands each connection to the
 // next process in turn, itself included (win32io.c, "cluster round-robin").
-// The mmap'd close flag has no Windows equivalent yet; it stays null, so
-// http.close() in a worker does not reach its siblings there.
+// A worker maps the primary's close-flag page (__kml_win_cluster_flag), so
+// http.close() in one worker reaches its siblings, as fork's shared mapping
+// does on POSIX.
 
 // httpClusterEntryIR is inserted at the top of __kml_http_cluster_fork.
 func (e *Emitter) httpClusterEntryIR() string {
@@ -99,16 +98,16 @@ child:
 	e.ensureUnsetenv()
 	idFmt := e.internString("%lld")
 	envID := e.internString("KML_CLUSTER_WORKER_ID")
-	// Spawn flag 131072 (0x20000) = cluster worker: the platform layer hands it
-	// every listening socket this process holds plus a hand-off channel for each
-	// (win32proc.c); %lfd, the fork model's one shared listener, is not needed.
+	// The platform layer hands the worker every listening socket this process
+	// holds plus a hand-off channel for each (win32proc.c); %lfd, the fork
+	// model's one shared listener, is not needed.
 	return `  call i32 @fflush(ptr null)
   %idbuf = call ptr @malloc(i64 24)
   call i32 (ptr, ptr, ...) @sprintf(ptr %idbuf, ptr ` + idFmt + `, i64 %i)
   call i32 @setenv(ptr ` + envID + `, ptr %idbuf, i32 1)
   %exe = call ptr @__kml_win_self_exe()
   %argv = load ptr, ptr @__argv_ptr, align 8
-  %pid = call i32 @__kml_win_spawn(ptr %exe, ptr %argv, ptr null, i32 -1, i32 -1, i32 -1, i32 -1, i32 131072, ptr null)
+  %pid = call i32 @__kml_win_spawn_worker(ptr %exe, ptr %argv)
   call i32 @unsetenv(ptr ` + envID + `)
   br label %parentnext
 `
@@ -169,5 +168,5 @@ func (e *Emitter) ensureListenFdGlobal() {
 		return
 	}
 	e.usedListenFdGlobal = true
-	e.emitGlobal("@__kml_listen_fd = thread_local global i32 -1, align 4")
+	e.emitGlobal("@__kml_listen_fd = external thread_local global i32, align 4")
 }

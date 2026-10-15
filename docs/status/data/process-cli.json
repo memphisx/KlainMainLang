@@ -197,7 +197,6 @@
             "feature": "`process.on(signal, listener)` (signal listeners)",
             "status": "implemented",
             "caveats": [
-              "Windows delivery through the signal table ([ADR-01250](../adr/ADR-01250.md)) is compile-checked only; the watcher path was run on macOS"
             ],
             "notes": [
               "Any signal is an event name, dynamic names included: the first listener starts a watcher and removing the last restores the default disposition, as Node's per_thread.js does; a signal the host refuses (`SIGKILL`, `SIGSTOP`) throws `uv_signal_start EINVAL`, and a watcher never holds the process open ([ADR-01250](../adr/ADR-01250.md))",
@@ -229,7 +228,7 @@
             "feature": "`process.getuid()` / `geteuid()` / `getgid()` / `getegid()`",
             "status": "implemented",
             "notes": [
-              "Direct POSIX credential reads returning a `number`, matching Node-on-POSIX ([ADR-00428](../adr/ADR-00428.md)); on Windows Node leaves them `undefined`, so the bare call is rejected at compile time (in Node it is a `TypeError`) and the portable optional call `process.getuid?.()` evaluates to `undefined` there — typed `number | undefined` on every host ([TDD-00177](../tdd/TDD-00177.md), [ADR-01037](../adr/ADR-01037.md))"
+              "Direct POSIX credential reads returning a `number`, matching Node-on-POSIX ([ADR-00428](../adr/ADR-00428.md)); on Windows Node leaves them `undefined`, so in typed code the bare call is rejected at compile time (as tsc does: the members are optional) and in untyped JS (`-compat=js`) it is Node's runtime `TypeError` when reached ([ADR-01632](../adr/ADR-01632.md)); the portable optional call `process.getuid?.()` evaluates to `undefined` there — typed `number | undefined` on every host ([TDD-00177](../tdd/TDD-00177.md), [ADR-01037](../adr/ADR-01037.md))"
             ],
             "caveats": []
           },
@@ -313,7 +312,6 @@
             "status": "implemented",
             "caveats": [
               "Handle passing over the IPC channel and `serialization: 'advanced'` are not ported",
-              "On Windows the process handles are compile-checked, not yet run",
               "`-mm=manual`: a process handle's table slot is never reused"
             ],
             "notes": [
@@ -329,7 +327,7 @@
             "caveats": [
               "Self-fork only: the module must be this program's entry (a different module is a second compiled program: `ERR_CHILD_PROCESS_FORK_MODULE`)",
               "`serialization: 'advanced'` is not ported: messages always cross as json",
-              "A `dgram` socket cannot be sent as a handle; on Windows no handle can (descriptor passing is POSIX-only)"
+              "A `dgram` socket cannot be sent as a handle"
             ],
             "notes": [
               "The parent's side is TypeScript ([ADR-01228](../adr/ADR-01228.md)) over TDD-00141's wire: json serialization, newline-framed, on a socketpair at `NODE_CHANNEL_FD`; `send(msg, cb?)`, `'message'`, `disconnect()`, `connected`; `silent`, `stdio`, `execArgv`, `env`, `cwd` options; the child's own arguments start at `process.argv[2]`",
@@ -341,7 +339,6 @@
             "feature": "`child_process.spawnSync()` / `.execSync()` / `.execFileSync()` (blocking)",
             "status": "implemented",
             "caveats": [
-              "On Windows the blocking spawn is compile-checked, not yet run"
             ],
             "notes": [
               "A native blocking spawn (Node's `spawn_sync.cc` is native too) under TypeScript `spawnSync`/`execSync`/`execFileSync` ([ADR-01228](../adr/ADR-01228.md)): `input` fed to a piped stdin, piped output collected by poll, `timeout` + `killSignal` (`ETIMEDOUT`), `maxBuffer` (`ENOBUFS`), `stdio`, `env`, `cwd`, `argv0`, `shell`, `uid`/`gid`",

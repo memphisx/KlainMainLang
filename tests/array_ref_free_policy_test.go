@@ -33,7 +33,7 @@ func TestE2EArrayRefSharedBufferFreePolicyASan(t *testing.T) {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
-	skipSanitizersOnWindows(t)
+	requireSanitizers(t)
 
 	cases := map[string]string{
 		"local-alias": `
@@ -154,8 +154,6 @@ func buildArrayRefASanAuto(t *testing.T, src string, optMem bool) string {
 	args := []string{"-O1", "-g", "-fno-omit-frame-pointer",
 		"-fsanitize=address", "-fsanitize=undefined", llFile, "-o", binFile}
 	args = appendRuntime(t, em, dir, args)
-	if out, err := llvm.ClangCommand(args...).CombinedOutput(); err != nil {
-		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
-	}
+	clangSanitized(t, binFile, args)
 	return binFile
 }

@@ -677,6 +677,28 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 		if err != nil {
 			return Value{}, err
 		}
+		if ov.Ty.Float {
+			// boundsError: a fractional offset is out of range as "an
+			// integer", before any bounds are looked at.
+			f := e.coerce(ov, TypeF64)
+			fl, frac := e.freshReg(), e.freshReg()
+			e.ensureMathFuncs()
+			e.emitInstr(fmt.Sprintf("%s = call double @floor(double %s)", fl, f.Ref))
+			e.emitInstr(fmt.Sprintf("%s = fcmp une double %s, %s", frac, fl, f.Ref))
+			fracL, intL := e.freshLabel("buf.acc.frac"), e.freshLabel("buf.acc.int")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", frac, fracL, intL))
+			e.emitLabel(fracL)
+			recv, err := e.emitValueToString(f)
+			if err != nil {
+				return Value{}, err
+			}
+			msg, err := e.emitStringConcat(Value{Ref: e.internString(`The value of "offset" is out of range. It must be an integer. Received `), Ty: TypePtr}, recv)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitThrowCoded("RangeError", "ERR_OUT_OF_RANGE", msg.Ref)
+			e.emitLabel(intL)
+		}
 		offRef = e.coerce(ov, TypeI64).Ref
 	}
 	// Bounds: 0 <= offset && offset + width <= length.
@@ -692,7 +714,35 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 	okL := e.freshLabel("buf.acc.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
 	e.emitLabel(badL)
-	e.emitInternalThrow(e.internString("RangeError: The offset is outside the bounds of the Buffer"))
+	// Node's boundsError: a buffer shorter than the access is
+	// ERR_BUFFER_OUT_OF_BOUNDS; otherwise the offset is out of
+	// [0, length - width], ERR_OUT_OF_RANGE naming both.
+	maxOff, short := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", maxOff, lenReg, k.width))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", short, maxOff))
+	shortL, rangeL := e.freshLabel("buf.acc.short"), e.freshLabel("buf.acc.range")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", short, shortL, rangeL))
+	e.emitLabel(shortL)
+	e.emitThrowCoded("RangeError", "ERR_BUFFER_OUT_OF_BOUNDS", e.internString("Attempt to access memory outside buffer bounds"))
+	e.emitLabel(rangeL)
+	maxStr, err := e.emitValueToString(Value{Ref: maxOff, Ty: TypeI64})
+	if err != nil {
+		return Value{}, err
+	}
+	msg, err := e.emitStringConcat(Value{Ref: e.internString(`The value of "offset" is out of range. It must be >= 0 and <= `), Ty: TypePtr}, maxStr)
+	if err != nil {
+		return Value{}, err
+	}
+	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(". Received "), Ty: TypePtr}); err != nil {
+		return Value{}, err
+	}
+	e.ensureReceivedInt()
+	recv := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_received_int(i64 %s)", recv, offRef))
+	if msg, err = e.emitStringConcat(msg, Value{Ref: recv, Ty: TypePtr}); err != nil {
+		return Value{}, err
+	}
+	e.emitThrowCoded("RangeError", "ERR_OUT_OF_RANGE", msg.Ref)
 	e.emitLabel(okL)
 	elemPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", elemPtr, ptrReg, offRef))

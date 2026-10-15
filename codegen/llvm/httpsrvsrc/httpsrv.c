@@ -12,7 +12,7 @@ typedef unsigned char u8;
 #pragma clang diagnostic ignored "-Wincompatible-library-redeclaration"
 extern int close(int);
 extern int shutdown(int, int);
-extern void *realloc(void *, unsigned long);
+extern void *realloc(void *, __SIZE_TYPE__);
 
 /* The connection table (runtime_http.go): a slot is { fd, ucontext, stack,
  * pendingFetch, pendingGroup }, fd -1 when free. */
@@ -46,7 +46,7 @@ void __kml_http_register_extra_listener(int fd, void *dispatch, void *tlsctx, vo
     if (!s) {
         if (__kml_http_xl_len + 1 > xl_cap) {
             i64 nc = xl_cap * 2 > 4 ? xl_cap * 2 : 4;
-            __kml_http_xl_data = (kml_xl *)realloc(__kml_http_xl_data, (unsigned long)nc * sizeof(kml_xl));
+            __kml_http_xl_data = (kml_xl *)realloc(__kml_http_xl_data, (__SIZE_TYPE__)nc * sizeof(kml_xl));
             xl_cap = nc;
         }
         s = &__kml_http_xl_data[__kml_http_xl_len++];

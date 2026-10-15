@@ -40,6 +40,8 @@ int fchmod(int fd, int mode);
 int truncate(const char *path, int64_t len);
 int ftruncate(int fd, int64_t len);
 char *realpath(const char *path, char *resolved);
+char *getcwd(char *buf, size_t size);
+char *__kml_path_win32_to_namespaced_path(const char *path, const char *cwd, int host_is_windows);
 int64_t readlink(const char *path, char *buf, size_t cap);
 int symlink(const char *target, const char *path);
 int link(const char *existing, const char *path);
@@ -54,6 +56,7 @@ struct kfs_timeval { int64_t tv_sec; int64_t tv_usec; };
 #define KFS_S_IFDIR 0040000
 #define KFS_S_IFLNK 0120000
 #define kfs_errno_EEXIST 17
+#define kfs_errno_ENOTDIR 20
 #define kfs_errno_ENOENT 2
 #define kfs_errno_ENOTSUP 95
 #define kfs_errno_ENOSYS 38
@@ -73,6 +76,7 @@ typedef struct dirent kfs_dirent;
 #define KFS_S_IFDIR S_IFDIR
 #define KFS_S_IFLNK S_IFLNK
 #define kfs_errno_EEXIST EEXIST
+#define kfs_errno_ENOTDIR ENOTDIR
 #define kfs_errno_ENOENT ENOENT
 #define kfs_errno_ENOTSUP ENOTSUP
 #define kfs_errno_ENOSYS ENOSYS
@@ -168,7 +172,14 @@ static void kfs_set_times(kml_pool_item *it, struct kfs_timeval tv[2]) {
 
 // A recursive mkdir (Node's MKDirpSync): the first directory it creates, or
 // none when the path already is one.
+// An existing non-directory is EEXIST for the path asked for, and ENOTDIR for
+// one of its parents (Node's MKDirpSync; Windows reports a file in the way
+// as a missing path, so the walk up meets it).
+static int kfs_mkdirp_at(const char *path, int mode, char **first, int parent_of);
 static int kfs_mkdirp(const char *path, int mode, char **first) {
+    return kfs_mkdirp_at(path, mode, first, 0);
+}
+static int kfs_mkdirp_at(const char *path, int mode, char **first, int parent_of) {
     if (mkdir(path, mode) == 0) {
         if (!*first) *first = strdup(path);
         return 0;
@@ -177,7 +188,7 @@ static int kfs_mkdirp(const char *path, int mode, char **first) {
     if (e == kfs_errno_EEXIST) {
         kfs_stat st;
         if (stat(path, &st) == 0 && (st.st_mode & KFS_S_IFMT) == KFS_S_IFDIR) return 0;
-        return kfs_errno_EEXIST;
+        return parent_of ? kfs_errno_ENOTDIR : kfs_errno_EEXIST;
     }
     if (e != kfs_errno_ENOENT) return e;
     // The parent: the path without its last component.
@@ -192,7 +203,7 @@ static int kfs_mkdirp(const char *path, int mode, char **first) {
     char *parent = (char *)malloc(n + 1);
     memcpy(parent, path, n);
     parent[n] = 0;
-    int r = kfs_mkdirp(parent, mode, first);
+    int r = kfs_mkdirp_at(parent, mode, first, 1);
     free(parent);
     if (r != 0) return r;
     if (mkdir(path, mode) == 0) {
@@ -435,6 +446,18 @@ static void work_fs(kml_pool_item *it) {
         // res 1: a directory was created (its path is the string).
         if (e == 0 && first) {
             it->res = 1;
+#ifdef _WIN32
+            // Node on Windows returns it namespaced (toNamespacedPath of the
+            // resolved path: '\\?\C:\x'). The path helper's string sits 8
+            // bytes into its allocation (path_win32.c kml_str_alloc).
+            char cwd[4096];
+            char *ns = getcwd(cwd, sizeof cwd) ? __kml_path_win32_to_namespaced_path(first, cwd, 1) : NULL;
+            if (ns) {
+                free(first);
+                first = strdup(ns);
+                free(ns - 8);
+            }
+#endif
             free(it->res_str);
             it->res_str = first;
         } else {

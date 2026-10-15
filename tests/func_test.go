@@ -3180,7 +3180,7 @@ console.log(k(), o)
 	assertSameAsNodeImports(t, `
 import http from 'http'
 const srv = http.createServer((req, res) => { res.end("x") })
-srv.listen(0, () => {
+srv.listen(0, '127.0.0.1', () => {
   const port = (srv.address() as { port: number }).port
   http.get("http://127.0.0.1:" + port + "/", (r) => { let b = ""; r.on("data", (c) => b += c); r.on("end", () => { console.log(b); srv.close() }) })
 })
@@ -3329,4 +3329,86 @@ func TestE2EUseStrictRegionEarlyErrors(t *testing.T) {
 const o = { get z() { var eval = 2; return eval; } };
 console.log(k(), (function () { var q = 1; return delete q; })(), o.z);
 `, "1 false 2")
+}
+
+// A capturing nested function declaration captured by a callback passed to an
+// Array method on an `any` receiver: the call is emitted twice, for an array
+// and for anything else, and the function's capture cell was made at the
+// first capture, inside the array arm, so the other arm used a value it never
+// defined (invalid IR). The cell is now made where the function is bound
+// (ADR-01619).
+func TestE2ECapturedNestedFunctionInBothArms(t *testing.T) {
+	assertOutput(t, `
+function check(list: any, want: number) {
+  function match(v: any): boolean { return v === want }
+  let n = 0
+  list.forEach(function (x: any) { if (match(x)) n++ })
+  console.log(n)
+}
+check([1, 2, 1], 1)
+check(new Set([3, 4]), 4)
+`, "2\n1")
+}
+
+// A `for (var x of/in …)` binding captured by closures in both arms of an
+// `if` is one function-scoped binding: its cell is made at the function's
+// entry, not at the first closure, which left the other arm reading a cell
+// its block never made (invalid IR). Every closure sees the last value.
+func TestE2ECapturedLoopVarInBothArms(t *testing.T) {
+	assertOutput(t, `
+function forOf(xs: string[]) {
+  const fs: (() => string)[] = []
+  for (var key of xs) {
+    if (key === "a") fs.push(() => "then " + key); else fs.push(() => "else " + key)
+  }
+  console.log(fs.map(f => f()).join(","))
+}
+forOf(["a", "b", "c"])
+function forIn(o: { [k: string]: number }) {
+  const fs: (() => string)[] = []
+  for (var k in o) {
+    if (k === "a") fs.push(() => "then " + k); else fs.push(() => "else " + k)
+  }
+  console.log(fs.map(f => f()).join(","))
+}
+forIn({ a: 1, b: 2, c: 3 })
+function forOfAny(xs: any) {
+  const fs: (() => string)[] = []
+  for (var x of xs) {
+    if (x === "a") fs.push(() => "then " + x); else fs.push(() => "else " + x)
+  }
+  console.log(fs.map(f => f()).join(","))
+}
+forOfAny(JSON.parse('["a","b","c"]'))
+function perIteration(xs: string[]) {
+  const fs: (() => string)[] = []
+  for (const y of xs) {
+    if (y === "a") fs.push(() => "then " + y); else fs.push(() => "else " + y)
+  }
+  console.log(fs.map(f => f()).join(","))
+}
+perIteration(["a", "b", "c"])
+`, "then c,else c,else c\nthen c,else c,else c\nthen c,else c,else c\nthen a,else b,else c")
+}
+
+// A class method's destructured parameter of an untyped (any) argument is
+// read as the dynamic value it is, as a function's is: it was loaded as a
+// pointer from its i64 slot (invalid IR).
+func TestE2EClassMethodDestructuredAnyParam(t *testing.T) {
+	assertOutputCompatJS(t, `
+var o = { poisoned: 5, q: "s" };
+class C {
+  method({ poisoned, q }) { console.log("m", poisoned, q); }
+  arr([a, b]) { console.log("a", a, b); }
+  static s({ poisoned }) { console.log("s", poisoned); }
+}
+new C().method(o);
+new C().arr([1, "x"]);
+C.s(o);
+var D = class { method({ poisoned }) { console.log("e", poisoned); } };
+new D().method(o);
+try { new C().method(null); } catch (e) { console.log(e.constructor.name); }
+var bad = Object.defineProperty({}, 'poisoned', { get: function() { throw new Error("boom"); } });
+try { new C().method(bad); } catch (e) { console.log("caught", e.message); }
+`, "m 5 s\na 1 x\ns 5\ne 5\nTypeError\ncaught boom")
 }

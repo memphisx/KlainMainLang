@@ -2,7 +2,7 @@
  * adoption takes; TDD-00240). kml_layout.h is prepended by the compiler. */
 typedef long long i64;
 
-extern void *malloc(unsigned long);
+extern void *malloc(__SIZE_TYPE__);
 extern void __kml_microtask_enqueue(void *);
 extern void __kml_promise_settle(void *, i64);
 

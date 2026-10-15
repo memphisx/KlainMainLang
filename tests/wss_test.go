@@ -81,6 +81,13 @@ func newWSSEchoServer(t *testing.T) (port, certFile string) {
 			return
 		}
 		wsWriteText(brw.Writer, "echo: "+msg)
+		// Finish the closing handshake before closing the socket: closing
+		// with the client's close frame unread makes Windows reset the
+		// connection, and Node then reports an error event too.
+		if _, err := wsReadText(brw.Reader); err == nil {
+			brw.Write([]byte{0x88, 0x00})
+			brw.Flush()
+		}
 	})
 	srv := httptest.NewTLSServer(handler)
 	t.Cleanup(srv.Close)

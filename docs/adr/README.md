@@ -1639,3 +1639,45 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01594](ADR-01594.md) | The node suite's common/dns harness | |
 | [01595](ADR-01595.md) | Windows library imports and the process unit's headers | |
 | [01596](ADR-01596.md) | A library call prefers the instance's own method | |
+| [01597](ADR-01597.md) | Windows links: runtime dependencies, comdats and lld | Implements [TDD-00251](../tdd/TDD-00251.md) (Stages 2–3, partly 4), Extends [ADR-01476](ADR-01476.md), [ADR-01327](ADR-01327.md) |
+| [01598](ADR-01598.md) | Windows test runs are bounded | Extends [ADR-01581](ADR-01581.md), [ADR-01582](ADR-01582.md), [ADR-01042](ADR-01042.md) |
+| [01599](ADR-01599.md) | Windows runtime fidelity after the restructure | Implements [TDD-00249](../tdd/TDD-00249.md) (Stage 3), Extends [ADR-01597](ADR-01597.md) |
+| [01600](ADR-01600.md) | Streamed request bodies: EAGAIN leak and 100 Continue | Extends [ADR-00362](ADR-00362.md) |
+| [01601](ADR-01601.md) | Test servers bind to loopback; `http.listen` takes `host` | Extends [ADR-00801](ADR-00801.md), [ADR-01598](ADR-01598.md) |
+| [01602](ADR-01602.md) | Windows runs the libuv event loop | Implements [TDD-00252](../tdd/TDD-00252.md) (Stages 1–2), Extends [TDD-00244](../tdd/TDD-00244.md), Supersedes [ADR-01024](ADR-01024.md) |
+| [01603](ADR-01603.md) | net.connect tries every address (autoSelectFamily) | Extends [ADR-01601](ADR-01601.md) |
+| [01604](ADR-01604.md) | A Windows cluster worker takes its inherited listeners | Extends [ADR-01027](ADR-01027.md), [ADR-01602](ADR-01602.md) |
+| [01605](ADR-01605.md) | Windows stack overflow in Workers; Worker paths from URLs | Implements [TDD-00249](../tdd/TDD-00249.md) (Stage 2, Windows), Extends [ADR-01599](ADR-01599.md) |
+| [01606](ADR-01606.md) | fork() passes execArgv; the child_process residue checked | Extends [ADR-01080](ADR-01080.md) |
+| [01607](ADR-01607.md) | Windows static links: no duplicate-symbol noise; non-ASCII TEMP | Extends [ADR-01597](ADR-01597.md), [ADR-00772](ADR-00772.md), [ADR-01035](ADR-01035.md) |
+| [01608](ADR-01608.md) | node:ffi on Windows checked against Node 26.10 | Extends [ADR-01095](ADR-01095.md), [TDD-00229](../tdd/TDD-00229.md) |
+| [01609](ADR-01609.md) | server.listen(path) on Windows: a named-pipe server | Extends [ADR-01034](ADR-01034.md), [ADR-01602](ADR-01602.md) |
+| [01610](ADR-01610.md) | Windows --static is self-contained; the webview pump on libuv | Implements [TDD-00253](../tdd/TDD-00253.md) (Windows), Extends [ADR-00771](ADR-00771.md), [ADR-00772](ADR-00772.md), [ADR-01602](ADR-01602.md) |
+| [01611](ADR-01611.md) | -dynamic-import=lazy works on Windows | Implements [TDD-00254](../tdd/TDD-00254.md), Extends [ADR-01330](ADR-01330.md) |
+| [01612](ADR-01612.md) | A guard on runtime objects' undefined symbols | Implements [TDD-00251](../tdd/TDD-00251.md) (Stage 1) |
+| [01613](ADR-01613.md) | Windows children through uv_spawn; pipes and consoles as libuv streams | Implements [TDD-00252](../tdd/TDD-00252.md) (Stage 3), Extends [ADR-01602](ADR-01602.md) |
+| [01614](ADR-01614.md) | Windows' own reactor goes: named pipes on libuv, a plain socket layer, the webview loop embedded | Implements [TDD-00252](../tdd/TDD-00252.md) (Stage 4), Extends [ADR-01602](ADR-01602.md), [ADR-01609](ADR-01609.md), [ADR-01613](ADR-01613.md) |
+| [01615](ADR-01615.md) | The runtime's C resolves on its own: hooks.c | Implements [TDD-00251](../tdd/TDD-00251.md) (Stages 4–5), Extends [ADR-01612](ADR-01612.md) |
+| [01616](ADR-01616.md) | `-crypto=cng`: node:crypto over Windows CNG | Implements [TDD-00177](../tdd/TDD-00177.md) (Stage 5), Extends [ADR-00637](ADR-00637.md) |
+| [01617](ADR-01617.md) | A non-null assertion counts as initialized; timers and fetch link the loop | Extends [ADR-00475](ADR-00475.md) |
+| [01618](ADR-01618.md) | Recursive fs.watch everywhere, positioned transfers in one call, udp6 options on Windows | Extends [ADR-01614](ADR-01614.md), [TDD-00244](../tdd/TDD-00244.md), [ADR-01263](ADR-01263.md) |
+| [01619](ADR-01619.md) | A captured nested function's cell is made where it is bound | Extends [ADR-00619](ADR-00619.md), [TDD-00129](../tdd/TDD-00129.md) |
+| [01620](ADR-01620.md) | Array.prototype.sort is V8's TimSort; strings compare by UTF-16 code units | Supersedes the sort mechanics of [ADR-00152](ADR-00152.md), Extends [ADR-00546](ADR-00546.md), [ADR-00681](ADR-00681.md) |
+| [01621](ADR-01621.md) | concat with an any argument makes an any[]; a dynamic function gets its own body analyses | Extends [ADR-00463](ADR-00463.md), [TDD-00205](../tdd/TDD-00205.md), [TDD-00200](../tdd/TDD-00200.md) |
+| [01622](ADR-01622.md) | globalThis reaches the globals of global modules; a Date element converts to its string | Extends [TDD-00232](../tdd/TDD-00232.md), [ADR-01040](ADR-01040.md) |
+| [01623](ADR-01623.md) | The conformance runners fit their memory and Windows' command line | Extends [ADR-01582](ADR-01582.md), [ADR-01598](ADR-01598.md), [ADR-01476](ADR-01476.md), [ADR-01615](ADR-01615.md) |
+| [01624](ADR-01624.md) | A class method's destructured `any` parameter, and a captured `for (var …)` binding, compile | Extends [ADR-01619](ADR-01619.md), [TDD-00065](../tdd/TDD-00065.md) |
+| [01625](ADR-01625.md) | Windows' broken-pipe and TLS write errors are Node's; the windowed webview runs on the embedded loop | Extends [TDD-00180](../tdd/TDD-00180.md), [TDD-00252](../tdd/TDD-00252.md), [ADR-01614](ADR-01614.md) |
+| [01626](ADR-01626.md) | ASan/UBSan on Windows through MSYS2's CLANG64 clang; the stack guard's handler is not instrumented | Extends [ADR-01605](ADR-01605.md), [TDD-00177](../tdd/TDD-00177.md), [TDD-00249](../tdd/TDD-00249.md) |
+| [01627](ADR-01627.md) | `JSON.parse` and `Array.prototype.join` allocate in proportion to their input | Extends [ADR-01582](ADR-01582.md), [ADR-01623](ADR-01623.md), [TDD-00120](../tdd/TDD-00120.md) |
+| [01628](ADR-01628.md) | An uncaught error is reported on stderr | Extends [ADR-01584](ADR-01584.md) |
+| [01629](ADR-01629.md) | `existsSync` follows a link on Windows; a junction reads back without a trailing separator | Extends [ADR-01030](ADR-01030.md) |
+| [01630](ADR-01630.md) | `process.kill` answers ESRCH for an exited process on Windows | Extends [ADR-00737](ADR-00737.md) |
+| [01631](ADR-01631.md) | An HTTP/2 session nghttp2 ends itself fails as in Node | Extends [ADR-01401](ADR-01401.md) |
+| [01632](ADR-01632.md) | In untyped JS, `process.getuid()` on Windows is Node's runtime TypeError | Extends [TDD-00177](../tdd/TDD-00177.md) |
+| [01633](ADR-01633.md) | `copyFile` onto a read-only file fails with EPERM on Windows | Extends [ADR-01030](ADR-01030.md) |
+| [01634](ADR-01634.md) | `realpathSync` walks a UNC path from its share root | |
+| [01635](ADR-01635.md) | An HTTP request body resumes after backpressure | |
+| [01636](ADR-01636.md) | A buffer that cannot be allocated is a RangeError; range errors carry Node's messages | Extends [ADR-00312](ADR-00312.md), [ADR-00494](ADR-00494.md) |
+| [01637](ADR-01637.md) | ToPrimitive on a typed object goes past a method that gives an object | Extends [ADR-00859](ADR-00859.md) |
+| [01638](ADR-01638.md) | A var redeclared with another object-literal type is TS2403 | Extends [ADR-01470](ADR-01470.md) |

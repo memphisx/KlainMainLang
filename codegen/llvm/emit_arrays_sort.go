@@ -50,10 +50,13 @@ func (e *Emitter) emitArrayJoin(mem *ast.MemberExpression, args []ast.Expression
 // Elements are loaded via loadArrayElem so a nested-array element's box pointer
 // is transparently unboxed to a real array aggregate before stringification.
 func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal Value) (Value, error) {
-	emptyStr := e.internString("")
-	accAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", emptyStr, accAlloca))
+	// Each element's string goes into a scratch array, joined in one
+	// allocation at the end (__kml_str_join).
+	e.ensureStrHeaderRuntime()
+	sepVal = e.emitStringNullToLiteral(sepVal)
+	partsBytes, parts := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = shl i64 %s, 3", partsBytes, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", parts, partsBytes))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -61,8 +64,6 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 
 	condL := e.freshLabel("join.cond")
 	bodyL := e.freshLabel("join.body")
-	firstL := e.freshLabel("join.first")
-	restL := e.freshLabel("join.rest")
 	incL := e.freshLabel("join.inc")
 	doneL := e.freshLabel("join.done")
 
@@ -124,26 +125,9 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 			elemStrVal = Value{Ref: r, Ty: TypePtr}
 		}
 	}
-	isFirst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isFirst, idxVal))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFirst, firstL, restL))
-
-	e.emitLabel(firstL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemStrVal.Ref, accAlloca))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
-
-	e.emitLabel(restL)
-	accCur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", accCur, accAlloca))
-	withSep, err := e.emitStringConcat(Value{Ref: accCur, Ty: TypePtr}, sepVal)
-	if err != nil {
-		return Value{}, err
-	}
-	newAcc, err := e.emitStringConcat(withSep, elemStrVal)
-	if err != nil {
-		return Value{}, err
-	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newAcc.Ref, accAlloca))
+	partSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", partSlot, parts, idxVal))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.emitStringNullToLiteral(elemStrVal).Ref, partSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
@@ -154,12 +138,13 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, accAlloca))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_join(ptr %s, i64 %s, ptr %s)", result, parts, lenReg, sepVal.Ref))
+	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", parts))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
 // emitArraySort implements arr.sort() and arr.sort(compareFn).
-// Sorts in-place using qsort and returns the same array (ptr+len aggregate).
+// Sorts in-place, stably (__kml_stable_sort), and returns the same array (ptr+len aggregate).
 func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 1 {
 		return Value{}, fmt.Errorf("%d:%d: sort takes 0 or 1 arguments", pos.Line, pos.Col)
@@ -184,18 +169,69 @@ func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression
 	return Value{Ref: r1, Ty: retTy}, nil
 }
 
+// defaultObjectComparator is SortCompare's no-comparator case as a
+// comparator: (a, b) => { const x = `${a}`; const y = `${b}`; return x < y ?
+// -1 : x > y ? 1 : 0 }.
+func defaultObjectComparator(pos ast.Pos) ast.Expression {
+	const a, b, x, y = "__kml_sort_a", "__kml_sort_b", "__kml_sort_x", "__kml_sort_y"
+	str := func(n string) ast.Expression {
+		return ast.NewTemplateLiteral([]string{"", ""}, []ast.Expression{ast.NewIdentifier(n, pos)}, pos)
+	}
+	id := func(n string) ast.Expression { return ast.NewIdentifier(n, pos) }
+	ret := ast.NewConditionalExpression(ast.NewBinaryExpression("<", id(x), id(y), pos),
+		ast.NewNumberLiteral("-1", pos),
+		ast.NewConditionalExpression(ast.NewBinaryExpression(">", id(x), id(y), pos),
+			ast.NewNumberLiteral("1", pos), ast.NewNumberLiteral("0", pos), pos), pos)
+	body := ast.NewBlockStatement([]ast.Statement{
+		ast.NewVarDeclaration("const", x, nil, str(a), pos),
+		ast.NewVarDeclaration("const", y, nil, str(b), pos),
+		ast.NewReturnStatement(ret, pos),
+	}, pos)
+	return ast.NewArrowFunction([]ast.Param{{Name: a}, {Name: b}}, nil, nil, body, pos)
+}
+
+// sortResultKind is how the sort's trampoline reads a comparator's result
+// (collections.c SORT_RES_*): by the comparator's own return type, whatever
+// the elements are.
+func sortResultKind(t Type) int {
+	switch {
+	case t.IsDynamic:
+		return 2
+	case t.IR == "double":
+		return 1
+	case t.IR == "float":
+		return 5
+	case t.IR == "i1":
+		return 3
+	case t.IR == "i32":
+		return 4
+	case t.IR == "i16":
+		return 7
+	case t.IR == "i8":
+		return 8
+	case t.IR == "void" || t.IR == "":
+		return 6
+	}
+	return 0
+}
+
 // emitQsortCall resolves a sort comparator (default or custom) and issues the
 // qsort() call against ptrReg[0:lenReg] in place — shared by emitArraySort
 // (sorts the caller's own array) and emitArrayToSorted (sorts a fresh copy,
 // leaving the original untouched).
 func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.Expression, pos ast.Pos) error {
-	if err := e.rejectNestedArrayElem(elemTy, "sort", pos); err != nil {
-		return err
-	}
 	e.ensureQsort()
 
 	var cmpFnRef string
 
+	if len(args) == 0 && !elemTy.IsDynamic && elemTy.IR == "ptr" && !isForOfStringTy(elemTy.withoutNullable()) {
+		// An object array's (a class's, a Date's, …) default order is its
+		// elements' strings
+		// (SortCompare: ToString each side once per comparison), so a
+		// toString() decides and plain objects, all "[object Object]", keep
+		// their order.
+		args = []ast.Expression{defaultObjectComparator(pos)}
+	}
 	if len(args) == 0 {
 		// Default (no-comparator) sort is JS-faithful: every element is
 		// converted to a string and compared lexicographically, even numbers
@@ -229,6 +265,7 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 
 		e.ensureSortClosGlobal()
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sort_clos, align 8", cb.hdrPtr))
+		e.emitInstr(fmt.Sprintf("store i32 %d, ptr @__kml_sort_res, align 4", sortResultKind(cb.retType())))
 
 		switch {
 		case elemTy.IsDynamic:
@@ -242,6 +279,10 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		case isStringTy(elemTy):
 			e.ensureSortTrampolineStr()
 			cmpFnRef = "@__kml_sort_tramp_str"
+		case elemTy.IsArray:
+			// An array of arrays: header pointers, each passed with its length.
+			e.ensureSortTrampolineArr()
+			cmpFnRef = "@__kml_sort_tramp_arr"
 		case elemTy.IsObject || elemTy.IsClass:
 			// An object/class comparator (`(a, b) => a.k - b.k`) returns a
 			// `number` (double); the i64 trampoline would read that double's bits
@@ -267,7 +308,20 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		elemSize = 4
 	}
 
-	e.emitInstr(fmt.Sprintf("call void @qsort(ptr %s, i64 %s, i64 %d, ptr %s)", ptrReg, lenReg, elemSize, cmpFnRef))
+	if elemTy.IsDynamic {
+		// undefined elements go last, unsorted and never compared.
+		e.emitInstr(fmt.Sprintf("call void @__kml_sort_any(ptr %s, i64 %s, ptr %s)", ptrReg, lenReg, cmpFnRef))
+		return nil
+	}
+	if elemTy.IR == "ptr" {
+		// A string or object array: its undefined (a null pointer) goes last
+		// the same way; its null (nullRef) is compared, as "null" by the
+		// default string sort.
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sort_nullref, align 8", e.nullRef()))
+		e.emitInstr(fmt.Sprintf("call void @__kml_sort_ptr(ptr %s, i64 %s, ptr %s)", ptrReg, lenReg, cmpFnRef))
+		return nil
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_stable_sort(ptr %s, i64 %s, i64 %d, ptr %s)", ptrReg, lenReg, elemSize, cmpFnRef))
 	return nil
 }
 

@@ -8,6 +8,12 @@
 
 import { mustCall, mustNotCall, skip, isWindows } from 'test'
 
+// Environment probes gate platform-specific expectations. Skip before
+// registering any: skip() exits, and the exit check still counts them.
+if (isWindows) {
+  skip('this example targets POSIX')
+}
+
 // A timer callback that MUST fire exactly once — verified at exit, no manual
 // bookkeeping.
 setTimeout(mustCall((): void => {
@@ -25,11 +31,6 @@ each(3)
 // mustNotCall marks a path that must never run — e.g. an error callback on a
 // call we expect to succeed. If it were ever invoked, the process would fail.
 const onError = mustNotCall()
-
-// Environment probes gate platform-specific expectations.
-if (isWindows) {
-  skip('this example targets POSIX')
-}
 
 console.log('all expectations registered; they are checked at exit')
 

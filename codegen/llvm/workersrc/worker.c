@@ -52,6 +52,18 @@ extern _Thread_local void *__kml_gc_orig_stackbottom;
 #endif
 
 static _Thread_local u8 worker_abort;
+#ifdef _WIN32
+/* __kml_worker_thread's start frame, where __kml_worker_end_thread returns. */
+static _Thread_local void *worker_end_jb[5];
+/* The shim's wake and completion forwarder for this thread's loop
+ * (TDD-00252), released as the thread ends. */
+void __kml_win_clear_loop_wake(void);
+#define LOOP_RELEASE() __kml_win_clear_loop_wake()
+/* The stack the overflow handler runs on, kept per thread (stackguard.c). */
+void __kml_stack_guard_thread(void);
+#else
+#define LOOP_RELEASE() ((void)0)
+#endif
 
 /* The thread a Worker runs. Signals are the main thread's; the worker's
  * modules evaluate (its entry), then its loop runs until nothing holds it
@@ -68,19 +80,35 @@ void *__kml_worker_thread(void *ctx) {
     sigfillset(sigset);
     pthread_sigmask(KML_SIG_BLOCK, sigset, NULL);
     __kml_worker_set_end(__kml_thread_exit);
+#ifdef _WIN32
+    __kml_stack_guard_thread();
+    if (__builtin_setjmp(worker_end_jb)) {
+        LOOP_RELEASE();
+        GC_UNREGISTER();
+        return NULL;
+    }
+#endif
     void (*entry)(void) = (void (*)(void))__kml_worker_enter(ctx);
     entry();
     i64 code = __kml_worker_run_loop();
     __kml_worker_leave(code);
+    LOOP_RELEASE();
     GC_UNREGISTER();
     return NULL;
 }
 
 /* The end of a worker thread from anywhere on its own stack (process.exit,
- * an uncaught error, terminate()). */
+ * an uncaught error, terminate()). On Windows winpthreads' pthread_exit
+ * unwinds with RtlUnwindEx, which fails the process (0xC00000FF) at a frame
+ * without unwind data; the thread instead jumps back to its start function,
+ * restoring registers only, and returns from there. */
 __attribute__((noreturn)) void __kml_worker_end_thread(void) {
+#ifdef _WIN32
+    __builtin_longjmp(worker_end_jb, 1);
+#else
     GC_UNREGISTER();
     pthread_exit(NULL);
+#endif
 }
 
 /* process.exit's end on a worker: the thread ends with the code; elsewhere

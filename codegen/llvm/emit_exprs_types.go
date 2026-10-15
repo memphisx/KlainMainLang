@@ -209,9 +209,10 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, present, payloadStr.Ref, e.internString(absentLiteral(v.Ty))))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
-	// An absent object or function reference converts to "null" or
-	// "undefined"; a present one as its non-null type does.
-	if v.Ty.IR == "ptr" && v.Ty.Nullable && (v.Ty.IsObject || v.Ty.IsFunc) && !v.Ty.IsArray && !v.Ty.IsDynamic {
+	// An absent object, function or Date reference (a `Date[]` element read
+	// is `Date | undefined`) converts to "null" or "undefined"; a present one
+	// as its non-null type does.
+	if v.Ty.IR == "ptr" && v.Ty.Nullable && (v.Ty.IsObject || v.Ty.IsFunc || v.Ty.IsDate) && !v.Ty.IsArray && !v.Ty.IsDynamic {
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(absentLiteral(v.Ty)), slot))
@@ -2034,6 +2035,9 @@ func (e *Emitter) inferMethodNameType(ex *ast.CallExpression, mem *ast.MemberExp
 		}
 		if mem.Property == "concat" && isForOfStringTy(objTy) {
 			return TypePtr, true // String.prototype.concat — mirrors emitStringConcatMethod
+		}
+		if mem.Property == "concat" && objTy.IsArray && objTy.ElemType != nil {
+			return ArrayOf(e.concatElemType(mem.Object, *objTy.ElemType, ex.Args)), true // as emitArrayConcat
 		}
 		if objTy.IsArray {
 			return objTy, true

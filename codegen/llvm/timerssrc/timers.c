@@ -9,9 +9,8 @@
  * from blocking while a referenced immediate is pending; and the loop's
  * clock in milliseconds.
  *
- * On POSIX these are libuv handles on the thread's loop (loop.c). Windows
- * keeps the same state for its select() pass (loop.c's __kml_timers_*
- * hooks) until its loop moves to libuv (TDD-00244 Stage 6). */
+ * They are libuv handles on the thread's loop (loop.c), on Windows too
+ * (TDD-00252). */
 #include <stdlib.h>
 #include <stdint.h>
 
@@ -51,7 +50,6 @@ static _Thread_local double imm_count;
 static _Thread_local i64 due_ns;
 static _Thread_local int timer_refed, imm_refed;
 
-#ifndef _WIN32
 #include <uv.h>
 uv_loop_t *__kml_loop_uv(void);
 void *__kml_loop_raw_alloc(size_t n);
@@ -83,16 +81,6 @@ static void set_timer_ref(int on) {
     else
         uv_unref((uv_handle_t *)timer);
 }
-#else
-static double now_ms(void) { return (double)(__kml_monotonic_ns() / 1000000); }
-
-static void arm(double ms) {
-    i64 d = ms < 1 ? 1 : (i64)ms;
-    due_ns = __kml_monotonic_ns() + d * 1000000;
-}
-
-static void set_timer_ref(int on) { timer_refed = on; }
-#endif
 
 /* Node's RunTimers: processTimers(now), then the timer re-armed for the
  * next expiry it answers, referenced or not as that list is; the microtasks
@@ -122,7 +110,6 @@ static void run_immediates(void) {
     __kml_drain_microtasks();
 }
 
-#ifndef _WIN32
 static void on_timer(uv_timer_t *h) {
     (void)h;
     run_timers();
@@ -134,7 +121,6 @@ static void on_check(uv_check_t *h) {
 }
 
 static void on_idle(uv_idle_t *h) { (void)h; }
-#endif
 
 /* The natives lib/native.d.ts declares (`@link timers`). Numbers cross as
  * doubles; each callback as an (invoke, closure) pair. */
@@ -143,7 +129,6 @@ void __kml_native_timers_setup(void *ti, void *tc, void *ii, void *ic) {
     pt_clo = tc;
     pi_inv = ii;
     pi_clo = ic;
-#ifndef _WIN32
     if (timer)
         return;
     uv_loop_t *l = __kml_loop_uv();
@@ -158,7 +143,6 @@ void __kml_native_timers_setup(void *ti, void *tc, void *ii, void *ic) {
     uv_unref((uv_handle_t *)check);
     idle = (uv_idle_t *)__kml_loop_raw_alloc(sizeof *idle);
     uv_idle_init(l, idle);
-#endif
 }
 
 double __kml_native_timers_now(void) { return now_ms(); }
@@ -171,12 +155,10 @@ void __kml_native_timers_next(double next) { next_expiry = next; }
 
 void __kml_native_immediate_toggle_ref(double on) {
     imm_refed = on != 0;
-#ifndef _WIN32
     if (imm_refed)
         uv_idle_start(idle, on_idle);
     else
         uv_idle_stop(idle);
-#endif
 }
 
 void __kml_native_immediate_count(double n) { imm_count = n; }
@@ -185,22 +167,3 @@ void __kml_native_immediate_count(double n) { imm_count = n; }
  * it into its wait. */
 i64 __kml_timer_next_deadline_ns(void) { return due_ns; }
 
-#ifdef _WIN32
-/* The Windows select() pass (loop.c): whether timers or immediates hold
- * the loop, the deadline the wait folds in (now while a referenced
- * immediate is pending), and the timers and check phases. */
-_Bool __kml_timers_keepalive(void) { return (due_ns != 0 && timer_refed) || imm_refed; }
-
-i64 __kml_timers_deadline_ns(void) {
-    if (imm_count > 0)
-        return __kml_monotonic_ns();
-    return due_ns;
-}
-
-void __kml_timers_run_due(void) {
-    if (due_ns != 0 && __kml_monotonic_ns() >= due_ns)
-        run_timers();
-}
-
-void __kml_timers_check(void) { run_immediates(); }
-#endif

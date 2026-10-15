@@ -700,7 +700,17 @@ export function existsSync(path: any): boolean {
         }
         return false;
     }
-    return __kml_native.fsCall(OP_ACCESS, p, '', 0, 0, 0, 0, Buffer.alloc(0)) === 0;
+    if (__kml_native.fsCall(OP_ACCESS, p, '', 0, 0, 0, 0, Buffer.alloc(0)) !== 0) return false;
+    // Access does not follow a link on Windows, so a dangling one would
+    // exist; Node stats it there as well.
+    if (process.platform === 'win32') {
+        try {
+            return statSyncOf(OP_STAT, 'stat', p, 0, false) !== undefined;
+        } catch {
+            return false;
+        }
+    }
+    return true;
 }
 
 export function exists(path: PathLike, callback: (exists: boolean) => void): void;
@@ -1280,10 +1290,24 @@ function realpathJS(p: string): string {
     let base = '';
     let previous = '';
     let pos = 0;
-    // The root: '/' (or the drive on Windows).
+    // The root and the separators after it, Node's splitRootRe: '/' (on
+    // Windows a drive, or a UNC share `\\server\share`).
     const rootEnd = (s: string): number => {
-        if (isWin && s.length >= 2 && s[1] === ':') return s.length > 2 && isSep(s[2]) ? 3 : 2;
-        return isSep(s[0]) ? 1 : 0;
+        let i = 0;
+        if (isWin && s.length >= 2 && s[1] === ':') {
+            i = 2;
+        } else if (isWin && s.length >= 2 && isSep(s[0]) && isSep(s[1])) {
+            // `\\server\share`: both names non-empty, else no root prefix.
+            let j = 2;
+            while (j < s.length && !isSep(s[j])) j++;
+            if (j > 2 && j < s.length) {
+                let k = j + 1;
+                while (k < s.length && !isSep(s[k])) k++;
+                if (k > j + 1) i = k;
+            }
+        }
+        while (i < s.length && isSep(s[i])) i++;
+        return i;
     };
     const start = (): void => {
         const r = rootEnd(p);

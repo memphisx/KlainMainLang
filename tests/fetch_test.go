@@ -1130,7 +1130,7 @@ func TestE2EHTTPSCreateServerWithoutCertKey(t *testing.T) {
 	assertOutputImports(t, `
 import https from 'https'
 const server = https.createServer((req, res) => { res.end("x") })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   console.log("listening")
   server.close()
 })
@@ -1184,7 +1184,7 @@ import http from 'http'
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
   res.end("pong")
-}).listen(18499, () => {
+}).listen(18499, '127.0.0.1', () => {
   http.get("http://127.0.0.1:18499/", (res) => {
     let data = ""
     res.on('data', (chunk: string) => { data = data + chunk })

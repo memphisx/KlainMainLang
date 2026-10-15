@@ -352,7 +352,11 @@ func main() {
 	// ~42GB and OOM-killed the machine. The reaper (reaper.go) sweeps orphaned
 	// workdir processes and hard-aborts the run if their aggregate RSS crosses
 	// this ceiling. Default is deliberately conservative for a laptop.
-	memCapMB := flag.Int("mem-cap-mb", 4096, "abort the run if workdir processes' total RSS exceeds this many MB (0 disables); the machine-safety backstop for runaway detached/cluster children")
+	// 2 GB: the run shares a developer machine with an IDE, a VM and a RAM
+	// drive, and a 4 GB run left one such machine under 4 GB of free RAM
+	// (the runner's in-process codegen holds most of it, budget.go). A
+	// smaller cap makes the run slower, not wrong.
+	memCapMB := flag.Int("mem-cap-mb", 2048, "abort the run if workdir processes' total RSS exceeds this many MB (0 disables); the machine-safety backstop for runaway detached/cluster children")
 	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing; for -suite=ts every case with its verdict")
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
@@ -395,6 +399,18 @@ func main() {
 	}
 	stopReaper := startReaper(absWorkDir, *memCapMB)
 	defer stopReaper()
+	// The compiles' budget (budget.go): on Windows the run's job, capped at
+	// -mem-cap-mb, holds this process, every clang and every test program
+	// (up to programCapMB each), so half the cap, the programs the other
+	// half: at four fifths a 2 GB run left the programs 400 MB, and when they
+	// took it the job refused this process an allocation, which Go cannot
+	// survive. Elsewhere the cap bounds the programs only, so a share of the
+	// memory the OS can still hand out.
+	if runtime.GOOS == "windows" && *memCapMB > 0 {
+		setBudget(int64(*memCapMB) << 20 / 2)
+	} else if avail := availableCommitBytes(); avail > 0 {
+		setBudget(int64(avail) * 3 / 5)
+	}
 
 	// TDD-00121 Tracks B/C run entirely different corpora with different oracles
 	// (Node behavioral run; TS front-end accept/reject) — dispatch to their own
@@ -404,6 +420,9 @@ func main() {
 	case "strict", "js", "both":
 	default:
 		fatal("unknown -compat %q (want strict, js, or both)", *compatFlag)
+	}
+	if *out != "" && *compatFlag != "both" {
+		suiteReportOverride = *out
 	}
 	switch *suite {
 	case "test262":
@@ -634,7 +653,14 @@ func platformLabel() string {
 // delta (spotting a regression, or an error that only appears on one
 // platform or in one lane, is a per-file diff), and the layout extends to a
 // new platform or flag by adding a folder, not a column (TDD-00204).
+// suiteReportOverride is -out for a single-lane Node, WPT or TS run: a
+// scratch or triage report that must not replace the committed one.
+var suiteReportOverride string
+
 func reportPath(filename string) string {
+	if suiteReportOverride != "" && filename != "CONFORMANCE-RESULTS.md" {
+		return suiteReportOverride
+	}
 	return filepath.Join("docs", "testing", platformLabel(), laneLabel(), filename)
 }
 
@@ -755,6 +781,10 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		ffiDl      bool
 		err        error
 	}
+	// The compile's share of the run's memory (budget.go), held until its
+	// clang and program are done.
+	rsv := budget.reserve(compileDefault)
+	defer budget.release(rsv)
 	cgCh := make(chan cgOut, 1)
 	go func() {
 		var out cgOut
@@ -808,6 +838,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	case cg := <-cgCh:
 		ir, compileErr = cg.ir, cg.err
 		linkLibs, cSources, embedBlobs, ffiDl = cg.linkLibs, cg.cSources, cg.embedBlobs, cg.ffiDl
+		budget.grow(rsv, irReservation(len(ir)))
 	case <-time.After(codegenTimeout):
 		res.Reason = "CODEGEN_TIMEOUT"
 		return res
@@ -899,7 +930,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	cctx, cancel := context.WithTimeout(context.Background(), clangTimeout)
 	defer cancel()
 	var clangOut bytes.Buffer
-	clangCmd := killableCommand(cctx, "clang", llvm.HostClangArgv(clangArgs...)...)
+	clangCmd := killableCommand(cctx, "clang", llvm.HostClangExecArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
 	if err := runTracked(clangCmd); err != nil {

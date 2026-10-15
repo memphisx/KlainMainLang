@@ -283,6 +283,17 @@ function globalThisClone(value: any): any {
 // The global object: Node's enumerable globals, the builtins as its other
 // (non-enumerable) properties, and whatever the program sets on it. A
 // module's top-level bindings are not on it, as in an ES module.
+// A global a global module implements (`performance`, `URL`), put on the
+// global object the first time the program reads it as a value — the
+// modules are only in the program that names them. Once per name: a
+// property the program then deletes stays deleted.
+const globLinked: Set<string> = new Set<string>();
+export function _kmlGlobalThisLink(name: string, value: any, enumerable: boolean): void {
+    if (globLinked.has(name)) return;
+    globLinked.add(name);
+    Object.defineProperty(_kmlGlobalThis(), name, { value: value, writable: true, enumerable: enumerable, configurable: true });
+}
+
 export function _kmlGlobalThis(): any {
     if (glob !== null) return glob;
     const g: any = {};

@@ -52,7 +52,7 @@
               "Local time follows the host's time zone, as Node's does: the local getters, the component constructor, the local setters, `toString` (`GMT+0300 (Eastern European Summer Time)`), `toDateString` and `getTimezoneOffset`; `Date.UTC` and the `getUTC*`/`setUTC*` accessors are UTC. An unparseable string or a `NaN` time value is an Invalid Date: `getTime()` is `NaN`, `toString()` is `Invalid Date`, `toISOString()` throws a `RangeError` and JSON gives `null` ([ADR-01315](../adr/ADR-01315.md)); its getters are `NaN`, `setFullYear` starts from +0 and the other setters leave it invalid; `setTime` is TimeClip(ToNumber(t)) ([ADR-01383](../adr/ADR-01383.md))"
             ],
             "caveats": [
-              "`toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`)"
+              "On Linux and macOS `toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`). On Windows the zone and its name come from the system's ICU, as Node's do ([ADR-01599](../adr/ADR-01599.md))"
             ]
           },
           {

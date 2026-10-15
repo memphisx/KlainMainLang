@@ -12,7 +12,7 @@ const server = http.createServer((req, res) => {
   console.log(req.headers['x-a'], req.headers.host === undefined)
   res.end('ok')
 })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const port = (server.address() as { port: number }).port
   http.get({ port, headers: ['X-A', '1', 'X-B', '2', 'Connection', 'close'] }, (res) => {
     res.resume()

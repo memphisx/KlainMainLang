@@ -5,9 +5,9 @@ import (
 )
 
 // Web Crypto crypto.subtle tests (TDD-00104). Known-answer digests are the
-// standard "abc" NIST vectors; every deterministic test runs under both
-// backends (openssl everywhere, commoncrypto matrix-skipped off macOS) and
-// must produce identical output.
+// standard "abc" NIST vectors; every deterministic test runs under each
+// backend (openssl everywhere, commoncrypto matrix-skipped off macOS, cng off
+// Windows) and must produce identical output.
 
 const subtleDigestVectorsSrc = `
 function toHex(view: Uint8Array): string {
@@ -37,7 +37,7 @@ cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc23
 ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f`
 
 func TestE2ESubtleDigestVectors(t *testing.T) {
-	for _, backend := range []string{"openssl", "commoncrypto"} {
+	for _, backend := range []string{"openssl", "commoncrypto", "cng"} {
 		t.Run(backend, func(t *testing.T) {
 			got := compileAndRunCryptoMode(t, subtleDigestVectorsSrc, backend)
 			compareLines(t, got, subtleDigestVectorsWant)
@@ -134,7 +134,7 @@ oct SmVmZQ
 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843`
 
 func TestE2ESubtleHmacJwk(t *testing.T) {
-	for _, backend := range []string{"openssl", "commoncrypto"} {
+	for _, backend := range []string{"openssl", "commoncrypto", "cng"} {
 		t.Run(backend, func(t *testing.T) {
 			got := compileAndRunCryptoMode(t, subtleSymmetricSrc, backend)
 			compareLines(t, got, subtleSymmetricWant)
@@ -264,10 +264,11 @@ true
 RSA AQAB
 true`
 
-// OpenSSL only: crypto.subtle's asymmetric algorithms run over node:crypto's
-// KeyObject, which -crypto=commoncrypto does not provide (out of scope).
+// Not commoncrypto: crypto.subtle's asymmetric algorithms run over
+// node:crypto's KeyObject, which -crypto=commoncrypto does not provide (out
+// of scope); -crypto=cng does.
 func TestE2ESubtleAsymmetric(t *testing.T) {
-	for _, backend := range []string{"openssl"} {
+	for _, backend := range []string{"openssl", "cng"} {
 		t.Run(backend, func(t *testing.T) {
 			got := compileAndRunCryptoMode(t, subtleAsymSrc, backend)
 			compareLines(t, got, subtleAsymWant)
@@ -340,7 +341,7 @@ derived secret
 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865`
 
 func TestE2ESubtleDerive(t *testing.T) {
-	for _, backend := range []string{"openssl", "commoncrypto"} {
+	for _, backend := range []string{"openssl", "commoncrypto", "cng"} {
 		t.Run(backend, func(t *testing.T) {
 			got := compileAndRunCryptoMode(t, subtleDeriveSrc, backend)
 			compareLines(t, got, subtleDeriveWant)

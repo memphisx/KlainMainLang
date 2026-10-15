@@ -58,7 +58,6 @@
             "feature": "`library.functions` / `library.symbols` / no-arg `getFunctions()` / `getSymbols()`",
             "status": "implemented",
             "caveats": [
-              "Windows: the order is an MSVC-STL port (Node's Windows build uses the MSVC STL, this toolchain mingw) not yet checked against a Windows `node:ffi`"
             ],
             "notes": [
               "Fresh null-prototype objects, enumerated in Node's `std::unordered_map` order — the real container on macOS (libc++) and Linux (libstdc++), identical to Node by construction; every resolution is recorded, runtime-string names included. `lib.symbols` reads type as the typings' `bigint`"

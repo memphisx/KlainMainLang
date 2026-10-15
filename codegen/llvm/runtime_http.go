@@ -543,12 +543,13 @@ func (e *Emitter) ensureFiberRuntime() {
 	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
 	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
 	ctxSize, _, _, _ := e.ucontextLayout()
-	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = thread_local global [%d x i8] zeroinitializer, align 16", ctxSize))
-	e.emitGlobal("@__kml_conn_data = thread_local global ptr null, align 8")
-	e.emitGlobal("@__kml_conn_len = thread_local global i64 0, align 8")
-	e.emitGlobal("@__kml_conn_cap = thread_local global i64 0, align 8")
-	e.emitGlobal("@__kml_current_conn_idx = thread_local global i64 -1, align 8")
-	e.emitGlobal("@__kml_conn_active = thread_local global i64 0, align 8")
+	// The connection fibers' state is hooks.c's (TDD-00251).
+	e.emitGlobal(fmt.Sprintf("@__kml_main_ctx = external thread_local global [%d x i8], align 16", ctxSize))
+	e.emitGlobal("@__kml_conn_data = external thread_local global ptr, align 8")
+	e.emitGlobal("@__kml_conn_len = external thread_local global i64, align 8")
+	e.emitGlobal("@__kml_conn_cap = external thread_local global i64, align 8")
+	e.emitGlobal("@__kml_current_conn_idx = external thread_local global i64, align 8")
+	e.emitGlobal("@__kml_conn_active = external thread_local global i64, align 8")
 	// ADR-00986: set whenever a connection fiber was just resumed/run (append or
 	// resume-scan). A fiber that ran may have written a response an in-process
 	// http client (same curl-multi, same loop) now needs to read — so the very
@@ -558,7 +559,7 @@ func (e *Emitter) ensureFiberRuntime() {
 	// blocking in select() with no JS timer and an idle curl deadline, and the
 	// in-process client's completion reaction was never fired (the process hung).
 	// Consumed and cleared in the select-timeout decision (one poll per run).
-	e.emitGlobal("@__kml_conn_ran = thread_local global i8 0, align 1")
+	e.emitGlobal("@__kml_conn_ran = external thread_local global i8, align 1")
 	// TDD-00195 Stage 2 (Layer A backpressure): a connection fiber parked in
 	// __kml_res_write_all on EAGAIN marks its fd write-parked (loop.c's
 	// growable set, any descriptor number); the event loop waits for it to be
@@ -737,7 +738,7 @@ func (e *Emitter) ensureHTTPClusterFork() {
 	// The primary's pid in a forked worker (0 in the primary and in a
 	// single-process program): what the worker's orphan poll compares its parent
 	// against (httpClusterOrphanIR).
-	e.emitGlobal("@__kml_cluster_primary_pid = global i32 0, align 4")
+	e.emitGlobal("@__kml_cluster_primary_pid = external global i32, align 4") // hooks.c
 	e.ensureGetpid()
 	e.ensureHTTPClusterSeed()
 	// TDD-00117: shared close flags. Null until __kml_http_cluster_fork mmaps a
@@ -746,7 +747,7 @@ func (e *Emitter) ensureHTTPClusterFork() {
 	// listener), [1] set by http.closeAllConnections() (force-close in-flight
 	// connections). Null in a single-process program, where every access below
 	// is a guarded no-op.
-	e.emitGlobal("@__kml_cluster_close_flag = global ptr null, align 8")
+	e.emitGlobal("@__kml_cluster_close_flag = external global ptr, align 8")
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_http_cluster_fork(i64 %%numWorkers, i32 %%lfd) {
 entry:
@@ -899,7 +900,7 @@ define void @__kml_reactor_thread_lock() {
 	e.ensureFiberRuntime()
 	e.ensureHTTPClientReactions() // defines __kml_httpc_fire_ready, called by the loop below
 	// __kml_event_loop_run below unconditionally references
-	// @__kml_curl_multi/curl_multi_fdset/curl_multi_perform/
+	// @__kml_curl_multi/curl_multi_perform/
 	// __kml_curl_drain_messages (its own "does curl have work to do"
 	// checks are a runtime branch, not something Go-side codegen can
 	// decide in advance — a fetch() call inside this very handler's body
@@ -943,14 +944,13 @@ define void @__kml_reactor_thread_lock() {
 	e.ensureReadDecl()
 	e.ensureWriteDecl()
 	e.ensureCloseDecl()
-	e.emitGlobal("declare i32 @select(i32 noundef, ptr noundef, ptr noundef, ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i16 @htons(i16 noundef)")
 	e.ensureFcntlDecl()
 	e.ensureForkDecl()
 
 	e.ensureListenFdGlobal()
 	e.ensureHTTPFireClose() // the loop calls __kml_http_fire_close() each iteration
-	e.emitGlobal("@__kml_listen_dispatch = thread_local global ptr null, align 8")
+	e.emitGlobal("@__kml_listen_dispatch = external thread_local global ptr, align 8")
 	e.emitGlobal("@__kml_listen_handler = internal thread_local global ptr null, align 8")
 	// @__kml_listen_upgrade_handler (TDD-00158): the Node-faithful `'upgrade'`
 	// event handler closure from `server.on('upgrade', …)`, null when none —

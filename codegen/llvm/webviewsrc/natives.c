@@ -30,18 +30,13 @@ extern void __kml_wv_navigate(webview_t w, const char *url);
 extern void __kml_wv_set_html(webview_t w, const char *html);
 #define KWV_NAVIGATE __kml_wv_navigate
 #define KWV_SET_HTML __kml_wv_set_html
-/* The page-tick pump's drains (TDD-00142 Stage 3). */
-extern void __kml_timers_run_due(void);
-extern void __kml_timers_check(void);
-extern void __kml_task_sched_step(void);
-extern void __kml_drain_microtasks(void);
 #else
 #define KWV_NAVIGATE webview_navigate
 #define KWV_SET_HTML webview_set_html
+#endif
 /* The runtime's loop inside the GUI's main loop (webviewsrc/loop_embed.cc). */
 extern void __kml_wv_loop_embed(void);
 extern void __kml_wv_loop_kick(void);
-#endif
 
 #define KWV(h) ((webview_t)(uintptr_t)(h))
 
@@ -82,27 +77,9 @@ void __kml_native_wv_eval(double h, const char *js) {
   webview_dispatch(KWV(h), kwv_eval, copy);
 }
 
-#ifdef _WIN32
-/* The page drives the loop on Windows: a bound __kml_tick the page calls on
-   an interval runs the due timers, the task scheduler and the microtasks. */
-static void kwv_pump(const char *id, const char *req, void *w) {
-  (void)req;
-  __kml_timers_run_due();
-  __kml_timers_check();
-  __kml_task_sched_step();
-  __kml_drain_microtasks();
-  webview_return((webview_t)w, id, 0, "null");
-}
-#endif
-
 void __kml_native_wv_run(double h) {
   webview_t w = KWV(h);
-#ifdef _WIN32
-  webview_bind(w, "__kml_tick", kwv_pump, w);
-  webview_init(w, "if(!window.__kml_pump){window.__kml_pump=setInterval(function(){window.__kml_tick&&window.__kml_tick()},16)}");
-#else
   __kml_wv_loop_embed();
-#endif
   webview_run(w);
 }
 
@@ -116,11 +93,9 @@ typedef void (*kwv_inv)(void *clo, const char *id, const char *req);
 static void kwv_bound(const char *id, const char *req, void *env) {
   void **e = (void **)env;
   ((kwv_inv)e[0])(e[1], kwv_str(id), kwv_str(req));
-#ifndef _WIN32
   /* Whatever the callback started (a fetch, a timer, a settled promise)
      gets a loop pass now, not at the next deadline the host had armed. */
   __kml_wv_loop_kick();
-#endif
 }
 
 void __kml_native_wv_bind(double h, const char *name, void *inv, void *clo) {

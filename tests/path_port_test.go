@@ -1,12 +1,17 @@
 package tests
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 // `path` as Node's lib/path.js in TypeScript (ADR-01290), compared with
 // Node's output.
 
+// The expectation below is Node's on POSIX, where `path` is path.posix; on
+// Windows `path` is path.win32, so there the oracle is Node itself.
 func TestE2EPathPort(t *testing.T) {
-	assertOutputImports(t, `
+	src := `
 import path from 'path'
 import { join, posix, win32, sep } from 'path'
 const cases = ['/a/b/../c/./d', 'a//b/', '', '.', '..', '/', 'C:\\x\\..\\y', '//server/share/x', 'a/b.tar.gz', '.bashrc', 'dir/']
@@ -18,7 +23,12 @@ console.log(join('a', 'b', '../c'), path.join(), posix.join('/x', 'y'), win32.jo
 console.log(path.relative('/data/orandea/test/aaa', '/data/orandea/impl/bbb'), win32.relative('C:\\orandea\\test\\aaa', 'C:\\orandea\\impl\\bbb'))
 console.log(path.resolve('/foo/bar', './baz'), path.resolve('/foo/bar', '/tmp/file/'), path.format({ dir: '/home/user/dir', base: 'file.txt' }), path.format({ root: '/', name: 'file', ext: 'txt' }))
 console.log(path.basename('/foo/bar/quux.html', '.html'), path.posix === posix, path.win32 === win32, posix.win32 === win32, path.toNamespacedPath('/x'), win32.toNamespacedPath('C:\\x'))
-`, `["/a/c/d","/a/b/../c/.","d","",true,{"root":"/","dir":"/a/b/../c/.","base":"d","ext":"","name":"d"}]
+`
+	if runtime.GOOS == "windows" {
+		assertSameAsNodeImports(t, src)
+		return
+	}
+	assertOutputImports(t, src, `["/a/c/d","/a/b/../c/.","d","",true,{"root":"/","dir":"/a/b/../c/.","base":"d","ext":"","name":"d"}]
 ["\\a\\c\\d","/a/b/../c/.","d","",true,{"root":"/","dir":"/a/b/../c/.","base":"d","ext":"","name":"d"}]
 ["a/b/","a/","b","",false,{"root":"","dir":"a/","base":"b","ext":"","name":"b"}]
 ["a\\b\\","a/","b","",false,{"root":"","dir":"a/","base":"b","ext":"","name":"b"}]

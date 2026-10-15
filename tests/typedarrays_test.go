@@ -92,7 +92,7 @@ try {
 } catch (e) {
   console.log("caught: " + (e as Error).message)
 }
-`, "caught: ArrayBuffer length is not a multiple of the element size")
+`, "caught: byte length of Int32Array should be a multiple of 4")
 }
 
 // The 3-argument sub-range view form: new XArray(buffer, byteOffset, length?).

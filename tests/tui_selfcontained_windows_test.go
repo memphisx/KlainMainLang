@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"os"
 	"os/exec"
 	"strings"
 	"testing"
@@ -36,6 +37,7 @@ const label: string = 'x'.replace(/x/, 'y')  // pull in the RegExp engine (pcre2
 render(Box({ width: 10 }, [Text(label)]))
 `)
 	assertNoBundledRuntimeDLLs(t, bin, "TUI")
+	assertImportsOnlyWindows(t, bin)
 }
 
 // ADR-00771: a klain:webview desktop program must likewise be a single
@@ -51,6 +53,75 @@ import { Webview } from 'klain:webview'
 const w = new Webview({ title: "T" })
 `)
 	assertNoBundledRuntimeDLLs(t, bin, "webview")
+	assertImportsOnlyWindows(t, bin)
+}
+
+// TDD-00253: a --static build depends on nothing Windows does not ship. One
+// program pulls in every feature library: the HTTP server and fetch (curl,
+// OpenSSL, nghttp2, libuv), zlib with Brotli and Zstd (loaded at run time
+// without --static), sqlite, BigInt (libtommath), the RegExp engine and
+// crypto. It runs with only Windows' own directories on PATH.
+func TestE2EStaticBinaryImportsOnlyWindows(t *testing.T) {
+	staticBuild(t)
+	bin := buildBinaryImports(t, `
+import http from 'node:http'
+import zlib from 'node:zlib'
+import crypto from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
+const db = new DatabaseSync(':memory:')
+db.exec('create table t(x)')
+console.log(zlib.brotliDecompressSync(zlib.brotliCompressSync('br')).toString(),
+  zlib.zstdDecompressSync(zlib.zstdCompressSync('zs')).toString(),
+  zlib.gunzipSync(zlib.gzipSync('gz')).toString(), 10n ** 30n > 0n,
+  crypto.createHash('sha256').update('x').digest('hex').slice(0, 8), /a(b)/.exec('ab')![1])
+const s = http.createServer((q, r) => r.end('ok'))
+s.listen(0, '127.0.0.1', async () => {
+  const res = await fetch('http://127.0.0.1:' + (s.address() as any).port + '/')
+  console.log(await res.text())
+  s.close()
+})
+`)
+	assertImportsOnlyWindows(t, bin)
+	cmd := exec.Command(bin)
+	sys := os.Getenv("SystemRoot")
+	cmd.Env = []string{"SystemRoot=" + sys, "PATH=" + sys + `\System32;` + sys}
+	out, err := cmd.CombinedOutput()
+	if err != nil || string(out) != "br zs gz true 2d711642 b\nok\n" {
+		t.Fatalf("run with a Windows-only PATH: %v\n%s", err, out)
+	}
+}
+
+// windowsShippedDLLs: what a stock Windows 10/11 provides. The UCRT's
+// api-ms-win-crt-* forwarders are matched by prefix.
+var windowsShippedDLLs = map[string]bool{
+	"kernel32.dll": true, "user32.dll": true, "advapi32.dll": true, "shell32.dll": true,
+	"ws2_32.dll": true, "iphlpapi.dll": true, "userenv.dll": true, "bcrypt.dll": true,
+	"crypt32.dll": true, "secur32.dll": true, "wldap32.dll": true, "dbghelp.dll": true,
+	"ole32.dll": true, "oleaut32.dll": true, "psapi.dll": true, "shlwapi.dll": true,
+	"version.dll": true, "gdi32.dll": true, "ntdll.dll": true, "ncrypt.dll": true,
+	"comctl32.dll": true, "comdlg32.dll": true, "dwmapi.dll": true, "uxtheme.dll": true,
+	"winmm.dll": true, "normaliz.dll": true, "rpcrt4.dll": true, "mswsock.dll": true,
+}
+
+// assertImportsOnlyWindows fails when the binary imports a DLL Windows does
+// not ship (TDD-00253).
+func assertImportsOnlyWindows(t *testing.T, bin string) {
+	t.Helper()
+	out, err := exec.Command("objdump", "-p", bin).CombinedOutput()
+	if err != nil {
+		t.Skipf("objdump unavailable (need binutils on PATH): %v", err)
+	}
+	for _, ln := range strings.Split(string(out), "\n") {
+		i := strings.Index(ln, "DLL Name:")
+		if i < 0 {
+			continue
+		}
+		dll := strings.ToLower(strings.TrimSpace(ln[i+len("DLL Name:"):]))
+		if strings.HasPrefix(dll, "api-ms-win-") || windowsShippedDLLs[dll] {
+			continue
+		}
+		t.Errorf("imports %s, which Windows does not ship (TDD-00253)", dll)
+	}
 }
 
 // assertNoBundledRuntimeDLLs fails if the produced Windows binary dynamically

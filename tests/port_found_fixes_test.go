@@ -35,7 +35,7 @@ console.log(f(...nums), f(0, ...nums), f(...["x"], ...nums));
 }
 
 func TestE2ETernaryIntoADictionary(t *testing.T) {
-	assertSameAsNode(t, `
+	assertSameAsNodeImports(t, `
 type Init = { [k: string]: string | undefined };
 function read(): Init { const i: Init = {}; i["a"] = "x"; return i; }
 function m(cond: boolean): number {

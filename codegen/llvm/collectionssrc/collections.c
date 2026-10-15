@@ -123,7 +123,6 @@ int __kml_cmp_i64_lex(const i64 *pa, const i64 *pb) {
     return strcmp(ba, bb);
 }
 
-int __kml_cmp_str(char *const *pa, char *const *pb) { return strcmp(*pa, *pb); }
 
 static int sign_of(double r) { return r < 0 ? -1 : r > 0 ? 1 : 0; }
 
@@ -134,31 +133,105 @@ static void *clos_fn(void **env) {
 }
 
 /* Custom-comparator trampolines: load both elements, call the closure with
- * (env, a, b) and reduce the result. An integer comparator's result is
- * truncated to i32; the others return a `number` (double) reduced to the
- * -1/0/1 sign (a fractional difference must not collapse to 0). */
-int __kml_sort_tramp_i64(const i64 *pa, const i64 *pb) {
+ * (env, a, b) and reduce its result to the -1/0/1 sign. The element's slot
+ * (an integer or NaN box, a double, a pointer) picks the trampoline; the
+ * comparator's own return type, which the program stores in __kml_sort_res
+ * before the sort, picks how the result is read: a fractional double must
+ * not collapse to 0, a boxed any is a number first, a boolean is 1 or 0 and
+ * a void comparator's undefined is NaN, which sorts as 0. */
+_Thread_local int __kml_sort_res;
+
+enum { SORT_RES_I64, SORT_RES_F64, SORT_RES_ANY, SORT_RES_BOOL, SORT_RES_I32, SORT_RES_F32, SORT_RES_VOID, SORT_RES_I16, SORT_RES_I8 };
+
+extern double __kml_any_tonum(i64 v);
+
+static int sign_i64(i64 r) { return r < 0 ? -1 : r > 0 ? 1 : 0; }
+
+/* One comparator call for each element slot, reading the result as the
+ * comparator's return type says. */
+static int sort_call_i64(i64 a, i64 b) {
     void *env;
-    i64 (*fn)(void *, i64, i64) = (i64 (*)(void *, i64, i64))clos_fn(&env);
-    return (int)fn(env, *pa, *pb);
+    void *f = clos_fn(&env);
+    switch (__kml_sort_res) {
+    case SORT_RES_F64: return sign_of(((double (*)(void *, i64, i64))f)(env, a, b));
+    case SORT_RES_F32: return sign_of(((float (*)(void *, i64, i64))f)(env, a, b));
+    case SORT_RES_ANY: return sign_of(__kml_any_tonum(((i64 (*)(void *, i64, i64))f)(env, a, b)));
+    case SORT_RES_BOOL: return ((_Bool (*)(void *, i64, i64))f)(env, a, b) ? 1 : 0;
+    case SORT_RES_I32: return sign_i64(((int (*)(void *, i64, i64))f)(env, a, b));
+    case SORT_RES_I16: return sign_i64(((short (*)(void *, i64, i64))f)(env, a, b));
+    case SORT_RES_I8: return sign_i64(((signed char (*)(void *, i64, i64))f)(env, a, b));
+    case SORT_RES_VOID: ((void (*)(void *, i64, i64))f)(env, a, b); return 0;
+    default: return sign_i64(((i64 (*)(void *, i64, i64))f)(env, a, b));
+    }
 }
 
-int __kml_sort_tramp_f64(const double *pa, const double *pb) {
+static int sort_call_f64(double a, double b) {
     void *env;
-    double (*fn)(void *, double, double) = (double (*)(void *, double, double))clos_fn(&env);
-    return sign_of(fn(env, *pa, *pb));
+    void *f = clos_fn(&env);
+    switch (__kml_sort_res) {
+    case SORT_RES_F64: return sign_of(((double (*)(void *, double, double))f)(env, a, b));
+    case SORT_RES_F32: return sign_of(((float (*)(void *, double, double))f)(env, a, b));
+    case SORT_RES_ANY: return sign_of(__kml_any_tonum(((i64 (*)(void *, double, double))f)(env, a, b)));
+    case SORT_RES_BOOL: return ((_Bool (*)(void *, double, double))f)(env, a, b) ? 1 : 0;
+    case SORT_RES_I32: return sign_i64(((int (*)(void *, double, double))f)(env, a, b));
+    case SORT_RES_I16: return sign_i64(((short (*)(void *, double, double))f)(env, a, b));
+    case SORT_RES_I8: return sign_i64(((signed char (*)(void *, double, double))f)(env, a, b));
+    case SORT_RES_VOID: ((void (*)(void *, double, double))f)(env, a, b); return 0;
+    default: return sign_i64(((i64 (*)(void *, double, double))f)(env, a, b));
+    }
 }
+
+static int sort_call_ptr(void *a, void *b) {
+    void *env;
+    void *f = clos_fn(&env);
+    switch (__kml_sort_res) {
+    case SORT_RES_F64: return sign_of(((double (*)(void *, void *, void *))f)(env, a, b));
+    case SORT_RES_F32: return sign_of(((float (*)(void *, void *, void *))f)(env, a, b));
+    case SORT_RES_ANY: return sign_of(__kml_any_tonum(((i64 (*)(void *, void *, void *))f)(env, a, b)));
+    case SORT_RES_BOOL: return ((_Bool (*)(void *, void *, void *))f)(env, a, b) ? 1 : 0;
+    case SORT_RES_I32: return sign_i64(((int (*)(void *, void *, void *))f)(env, a, b));
+    case SORT_RES_I16: return sign_i64(((short (*)(void *, void *, void *))f)(env, a, b));
+    case SORT_RES_I8: return sign_i64(((signed char (*)(void *, void *, void *))f)(env, a, b));
+    case SORT_RES_VOID: ((void (*)(void *, void *, void *))f)(env, a, b); return 0;
+    default: return sign_i64(((i64 (*)(void *, void *, void *))f)(env, a, b));
+    }
+}
+
+/* Integer elements and NaN boxes (an any[]) are 8-byte i64 slots. */
+int __kml_sort_tramp_i64(const i64 *pa, const i64 *pb) { return sort_call_i64(*pa, *pb); }
+
+int __kml_sort_tramp_any(const i64 *pa, const i64 *pb) { return sort_call_i64(*pa, *pb); }
+
+int __kml_sort_tramp_f64(const double *pa, const double *pb) { return sort_call_f64(*pa, *pb); }
 
 /* Object/class elements (ADR-00681) and strings are 8-byte pointer slots. */
-int __kml_sort_tramp_obj(void *const *pa, void *const *pb) {
+int __kml_sort_tramp_obj(void *const *pa, void *const *pb) { return sort_call_ptr(*pa, *pb); }
+
+int __kml_sort_tramp_str(void *const *pa, void *const *pb) { return sort_call_ptr(*pa, *pb); }
+
+/* Array elements (an array of arrays) are header pointers ({ data, length },
+ * a null one an absent array); a closure takes each array parameter as the
+ * header and its length. */
+static i64 arr_len(void *h) { return h ? ((const i64 *)h)[1] : 0; }
+
+static int sort_call_arr(void *a, void *b) {
     void *env;
-    double (*fn)(void *, void *, void *) = (double (*)(void *, void *, void *))clos_fn(&env);
-    return sign_of(fn(env, *pa, *pb));
+    void *f = clos_fn(&env);
+    i64 la = arr_len(a), lb = arr_len(b);
+    switch (__kml_sort_res) {
+    case SORT_RES_F64: return sign_of(((double (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb));
+    case SORT_RES_F32: return sign_of(((float (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb));
+    case SORT_RES_ANY: return sign_of(__kml_any_tonum(((i64 (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb)));
+    case SORT_RES_BOOL: return ((_Bool (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb) ? 1 : 0;
+    case SORT_RES_I32: return sign_i64(((int (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb));
+    case SORT_RES_I16: return sign_i64(((short (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb));
+    case SORT_RES_I8: return sign_i64(((signed char (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb));
+    case SORT_RES_VOID: ((void (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb); return 0;
+    default: return sign_i64(((i64 (*)(void *, void *, i64, void *, i64))f)(env, a, la, b, lb));
+    }
 }
 
-int __kml_sort_tramp_str(void *const *pa, void *const *pb) {
-    return __kml_sort_tramp_obj(pa, pb);
-}
+int __kml_sort_tramp_arr(void *const *pa, void *const *pb) { return sort_call_arr(*pa, *pb); }
 
 /* ---- Object.freeze's frozen-object set ----------------------------------- */
 

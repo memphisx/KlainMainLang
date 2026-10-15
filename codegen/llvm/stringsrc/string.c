@@ -616,8 +616,119 @@ static int kml_localtime(long long t_ms, struct tm *out) {
 #endif
 }
 
+#ifdef _WIN32
+/* Windows: the zone comes from ICU, as Node's does. The C runtime reads TZ as
+ * a POSIX string ("Europe/Athens" becomes a zone named "Eur") and names the
+ * system zone in Windows' terms ("GTB Daylight Time"). Windows 10 1903 and
+ * later ship ICU as icu.dll, with its C API unversioned; it is loaded on first
+ * use, and without it the C runtime's answer stands. A calendar is kept per
+ * thread for the zone TZ names (the system's when unset), reopened when TZ
+ * changes, as Node follows process.env.TZ. */
+__declspec(dllimport) void *__stdcall LoadLibraryA(const char *name);
+__declspec(dllimport) void *__stdcall GetProcAddress(void *module, const char *name);
+
+typedef struct {
+	void *(*open)(const uint16_t *zone, int32_t len, const char *locale, int type, int *status);
+	void (*close)(void *cal);
+	void (*set_millis)(void *cal, double ms, int *status);
+	int32_t (*get)(void *cal, int field, int *status);
+	int8_t (*in_dst)(void *cal, int *status);
+	int32_t (*zone_name)(void *cal, int type, const char *locale, uint16_t *out, int32_t cap, int *status);
+} kml_icu;
+
+static kml_icu *kml_icu_api(void) {
+	static kml_icu api;
+	static int state; /* 0 untried, 1 loaded, -1 absent */
+	if (state == 0) {
+		void *m = LoadLibraryA("icu.dll");
+		void *f[6] = {0};
+		static const char *names[6] = {"ucal_open", "ucal_close", "ucal_setMillis", "ucal_get",
+		                               "ucal_inDaylightTime", "ucal_getTimeZoneDisplayName"};
+		int ok = m != NULL;
+		for (int i = 0; ok && i < 6; i++) ok = (f[i] = GetProcAddress(m, names[i])) != NULL;
+		if (ok) {
+			api.open = f[0];
+			api.close = f[1];
+			api.set_millis = f[2];
+			api.get = f[3];
+			api.in_dst = f[4];
+			api.zone_name = f[5];
+		}
+		state = ok ? 1 : -1;
+	}
+	return state == 1 ? &api : NULL;
+}
+
+/* The thread's calendar at instant t_ms, or NULL. */
+static void *kml_icu_cal(long long t_ms) {
+	static _Thread_local void *cal;
+	static _Thread_local char zone[128];
+	kml_icu *icu = kml_icu_api();
+	if (!icu) return NULL;
+	const char *tz = getenv("TZ");
+	if (!tz) tz = "";
+	if (!cal || strcmp(zone, tz) != 0) {
+		if (cal) icu->close(cal);
+		cal = NULL;
+		uint16_t wz[128];
+		size_t n = 0;
+		for (; tz[n] && n < 127; n++) wz[n] = (unsigned char)tz[n];
+		int status = 0;
+		/* UCAL_GREGORIAN (1); a null zone is ICU's default, the system's. */
+		cal = icu->open(n ? wz : NULL, n ? (int32_t)n : 0, "en_US", 1, &status);
+		if (status > 0) {
+			if (cal) icu->close(cal);
+			cal = NULL;
+			return NULL;
+		}
+		snprintf(zone, sizeof zone, "%s", tz);
+	}
+	int status = 0;
+	icu->set_millis(cal, (double)t_ms, &status);
+	return status > 0 ? NULL : cal;
+}
+
+/* The offset from ICU (UCAL_ZONE_OFFSET 15 plus UCAL_DST_OFFSET 16). */
+static int kml_icu_offset_ms(long long t_ms, long long *out) {
+	kml_icu *icu = kml_icu_api();
+	void *cal = kml_icu_cal(t_ms);
+	if (!cal) return 0;
+	int status = 0;
+	long long off = (long long)icu->get(cal, 15, &status) + icu->get(cal, 16, &status);
+	if (status > 0) return 0;
+	*out = off;
+	return 1;
+}
+
+/* The zone's long name at t_ms, as V8 prints it (UCAL_DST 2 or
+ * UCAL_STANDARD 0, en_US), in UTF-8. */
+static int kml_icu_zone_name(long long t_ms, char *out, size_t cap) {
+	kml_icu *icu = kml_icu_api();
+	void *cal = kml_icu_cal(t_ms);
+	if (!cal) return 0;
+	int status = 0;
+	int dst = icu->in_dst(cal, &status);
+	uint16_t w[96];
+	int32_t n = icu->zone_name(cal, dst ? 2 : 0, "en_US", w, 96, &status);
+	if (status > 0 || n <= 0) return 0;
+	size_t o = 0;
+	for (int32_t i = 0; i < n && i < 96; i++) {
+		unsigned c = w[i];
+		if (c < 0x80 && o + 1 < cap) out[o++] = (char)c;
+		else if (c < 0x800 && o + 2 < cap) { out[o++] = (char)(0xC0 | c >> 6); out[o++] = (char)(0x80 | (c & 0x3F)); }
+		else if (o + 3 < cap) { out[o++] = (char)(0xE0 | c >> 12); out[o++] = (char)(0x80 | (c >> 6 & 0x3F)); out[o++] = (char)(0x80 | (c & 0x3F)); }
+	}
+	out[o] = 0;
+	return 1;
+}
+#endif
+
 /* The local zone's offset from UTC, in milliseconds, at UTC instant t_ms. */
 long long __kml_tz_offset_ms(long long t_ms) {
+#ifdef _WIN32
+	long long icu_off;
+	if (kml_icu_offset_ms(t_ms, &icu_off)) return icu_off;
+#endif
 	struct tm lt;
 	if (!kml_localtime(t_ms, &lt)) {
 		return 0;
@@ -683,6 +794,13 @@ void __kml_tz_suffix(long long t_ms, char *buf) {
 	long long east = __kml_tz_offset_ms(t_ms) / 60000;
 	long long off = east < 0 ? -east : east;
 	char sign = east < 0 ? '-' : '+';
+#ifdef _WIN32
+	char zname[160];
+	if (kml_icu_zone_name(t_ms, zname, sizeof zname)) {
+		snprintf(buf, 80, " GMT%c%02lld%02lld (%s)", sign, off / 60, off % 60, zname);
+		return;
+	}
+#endif
 	char abbr[64] = "UTC";
 	struct tm lt;
 	if (kml_localtime(t_ms, &lt)) {

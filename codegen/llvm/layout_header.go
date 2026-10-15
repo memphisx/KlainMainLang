@@ -89,8 +89,10 @@ func layoutHeader() string {
 		}
 		fmt.Fprintf(&b, "#define %s_SIZE %d\n", d.prefix, size)
 	}
+	// Guarded: a unit compiled with ProcessCFlags gets the same constant on
+	// the command line.
 	for _, c := range layoutConsts {
-		fmt.Fprintf(&b, "#define %s %d\n", c.name, c.value)
+		fmt.Fprintf(&b, "#ifndef %s\n#define %s %d\n#endif\n", c.name, c.name, c.value)
 	}
 	b.WriteString("#endif\n")
 	return b.String()

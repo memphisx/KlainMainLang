@@ -29,6 +29,7 @@ func main() {
 	if *shards < 1 || *shard >= *shards {
 		fatal("need 0 <= -shard < -shards, or -shard -1")
 	}
+	boundRun()
 	os.Exit(run(*pkg, *shard, *shards, *jobs, *timeout))
 }
 
@@ -66,6 +67,8 @@ func run(pkg string, shard, shards, jobs int, timeout string) int {
 			dealt[i%jobs] = append(dealt[i%jobs], n)
 		}
 	}
+	// A group whose pattern would not fit one command line runs as several
+	// processes in turn (runBatches).
 	var todo []int
 	for i := range dealt {
 		if len(dealt[i]) > 0 {
@@ -84,9 +87,18 @@ func run(pkg string, shard, shards, jobs int, timeout string) int {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			c := exec.Command(bin, "-test.run", anchored(dealt[i]), "-test.timeout", timeout)
-			out, err := c.CombinedOutput()
-			results[i] = result{out, failedTests(out), err}
+			var all []byte
+			var firstErr error
+			for _, part := range runBatches(dealt[i]) {
+				c := exec.Command(bin, "-test.run", anchored(part), "-test.timeout", timeout)
+				c.Dir = pkgDir(pkg)
+				out, err := c.CombinedOutput()
+				all = append(all, out...)
+				if err != nil && firstErr == nil {
+					firstErr = err
+				}
+			}
+			results[i] = result{all, failedTests(all), firstErr}
 		}(i)
 	}
 	wg.Wait()
@@ -114,10 +126,38 @@ func run(pkg string, shard, shards, jobs int, timeout string) int {
 		return 0
 	}
 	fmt.Printf("parallel run had failures; re-running serially to rule out concurrency flakes: %s\n", strings.Join(failed, " "))
-	if err := command(bin, "-test.run", anchored(failed), "-test.v", "-test.timeout", timeout).Run(); err != nil {
-		return 1
+	rc := 0
+	for _, part := range runBatches(failed) {
+		c := command(bin, "-test.run", anchored(part), "-test.v", "-test.timeout", timeout)
+		c.Dir = pkgDir(pkg)
+		if err := c.Run(); err != nil {
+			rc = 1
+		}
 	}
-	return 0
+	return rc
+}
+
+// maxRunArg bounds one -test.run pattern: Windows limits a whole command line
+// to 32767 characters.
+const maxRunArg = 24000
+
+// runBatches splits names into lists whose anchored pattern fits maxRunArg.
+func runBatches(names []string) [][]string {
+	var out [][]string
+	var cur []string
+	size := 4
+	for _, n := range names {
+		if len(cur) > 0 && size+len(n)+1 > maxRunArg {
+			out = append(out, cur)
+			cur, size = nil, 4
+		}
+		cur = append(cur, n)
+		size += len(n) + 1
+	}
+	if len(cur) > 0 {
+		out = append(out, cur)
+	}
+	return out
 }
 
 // listTests is every top-level test of the binary, in its own order.
@@ -146,6 +186,16 @@ func failedTests(out []byte) []string {
 		}
 	}
 	return names
+}
+
+// pkgDir is the directory a test binary runs in: its package's, as go test
+// runs it, so a test's relative paths (testdata/, ../apps) resolve.
+func pkgDir(pkg string) string {
+	d, err := filepath.Abs(filepath.FromSlash(pkg))
+	if err != nil {
+		return ""
+	}
+	return d
 }
 
 func anchored(names []string) string {

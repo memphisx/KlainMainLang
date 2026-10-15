@@ -288,7 +288,7 @@ import os from 'os'
 import http from 'http'
 import { Readable } from 'stream'
 const srv = http.createServer((req, res) => { res.end(req.method + " " + req.headers["x-a"]) })
-srv.listen(0, () => {
+srv.listen(0, '127.0.0.1', () => {
   const port = (srv.address() as { port: number }).port
   const opts = { hostname: "127.0.0.1", port, path: "/", method: "PUT", headers: { "x-a": "2" }, extra: 1 }
   const req = http.request(opts, (r) => { let b = ""; r.on("data", (c) => b += c); r.on("end", () => { console.log(b); srv.close() }) })

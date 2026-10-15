@@ -266,6 +266,9 @@ interface NormalizedSpawn {
     serialization: SerializationType | undefined;
     // fork's deliberate re-run of this program (not refused at its start).
     selfRun: boolean;
+    // fork's execArgv: the child's process.execArgv (Node passes them to the
+    // child's node; a compiled child has no Node options to apply).
+    execArgv?: string[];
 }
 
 function pathOf(p: string | URL | undefined, name: string): string {
@@ -359,6 +362,7 @@ function normalizeSpawnArguments(file: string, args: readonly string[], options:
         signal: options.signal,
         serialization: options.serialization,
         selfRun: false,
+        execArgv: undefined,
     };
 }
 
@@ -533,6 +537,7 @@ export class ChildProcess extends EventEmitter {
             }
             envPairs.push('NODE_CHANNEL_FD=' + ipcFd);
             envPairs.push('NODE_CHANNEL_SERIALIZATION_MODE=' + (o.serialization !== undefined ? o.serialization : 'json'));
+            if (o.execArgv !== undefined && o.execArgv.length > 0) envPairs.push('KML_EXEC_ARGV=' + JSON.stringify(o.execArgv));
         }
         this.spawnfile = o.file;
         this.spawnargs = o.args;
@@ -1223,5 +1228,6 @@ export function fork(modulePath: string | URL, a?: any, b?: any): ChildProcess {
         shell: false,
     });
     normalized.selfRun = true;
+    normalized.execArgv = (options.execArgv ?? process.execArgv).slice();
     return spawnNormalized(normalized);
 }

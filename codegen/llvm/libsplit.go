@@ -528,9 +528,9 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 			for _, o := range others {
 				b.WriteString(o + "\n")
 			}
-			out.Program = b.String()
+			out.Program = coffWeakComdats(b.String())
 		} else {
-			out.Modules[owner] = b.String()
+			out.Modules[owner] = coffWeakComdats(b.String())
 		}
 	}
 	return out, nil

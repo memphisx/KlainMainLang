@@ -66,15 +66,11 @@ func TestCrossTargetPresetResolves(t *testing.T) {
 	// Sailfish's native triple is aarch64-meego-linux-gnu (see crossPresets). On a
 	// Linux host this is a same-OS cross build; on a macOS host it is the enabled
 	// macOS→Linux cross-OS build (TDD-00146 Stage 1 completion) — both resolve the
-	// preset and stamp the triple. Only a Windows host is a still-rejected pair.
-	if runtime.GOOS == "linux" || runtime.GOOS == "darwin" {
-		if !strings.Contains(string(out), `target triple = "aarch64-meego-linux-gnu"`) {
-			t.Fatalf("sfos-aarch64 preset did not resolve to the aarch64-meego-linux-gnu triple:\n%s", out)
-		}
-		return
-	}
-	if !strings.Contains(string(out), "is not supported yet") {
-		t.Fatalf("expected the cross-OS guard to reject sfos-aarch64 on %s:\n%s", runtime.GOOS, out)
+	// preset and stamp the triple. A Windows host is a still-rejected pair for a
+	// linked build, but -emit-llvm links nothing and takes any target, so it
+	// resolves the preset there too.
+	if !strings.Contains(string(out), `target triple = "aarch64-meego-linux-gnu"`) {
+		t.Fatalf("sfos-aarch64 preset did not resolve to the aarch64-meego-linux-gnu triple:\n%s", out)
 	}
 }
 

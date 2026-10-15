@@ -37,8 +37,11 @@ type Binding struct {
 	// that store without reading (the target of a plain `=` or of a
 	// destructuring assignment). refFlow and refContainer give each
 	// reference's flow node and the function (or module) scope it occurs in.
-	accesses     []*ast.Identifier
-	written      map[*ast.Identifier]bool
+	accesses []*ast.Identifier
+	written  map[*ast.Identifier]bool
+	// asserted: a read under a non-null assertion (`x!`), which TypeScript's
+	// definite-assignment check takes as initialized.
+	asserted     map[*ast.Identifier]bool
 	refFlow      map[*ast.Identifier]*FlowNode
 	refContainer map[*ast.Identifier]*Scope
 	// stores lists, per symbol, the nodes that store to it (see StoresTo).
@@ -280,6 +283,7 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 			newTargets:          map[*ast.NewExpression]*Symbol{},
 			refFlow:             map[*ast.Identifier]*FlowNode{},
 			written:             map[*ast.Identifier]bool{},
+			asserted:            map[*ast.Identifier]bool{},
 			refContainer:        map[*ast.Identifier]*Scope{},
 			stores:              map[*Symbol][]ast.Node{},
 			foreignStores:       map[*Symbol]bool{},
@@ -602,6 +606,11 @@ func (b *binder) visit(n ast.Node) {
 }
 
 func (b *binder) visitNode(n ast.Node) {
+	if nn, ok := n.(*ast.NonNullExpression); ok {
+		if id, ok := nn.Arg.(*ast.Identifier); ok {
+			b.asserted[id] = true
+		}
+	}
 	switch n := n.(type) {
 	case *ast.AmbientModuleDeclaration:
 		scope := b.enter(n, 0, ModuleScope)

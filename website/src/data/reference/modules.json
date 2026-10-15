@@ -216,7 +216,7 @@
         "String-literal specifier only — a runtime-computed import(expr) is a clean compile error",
         "The result object exposes annotated scalar/string exports only; function/class/array/object exports are omitted",
         "import('node:…') of a builtin module is a clean compile error",
-        "lazy and isolated need the sibling <binary>.d/ directory and refuse --static; lazy is not available on Windows",
+        "lazy and isolated need the sibling <binary>.d/ directory and refuse --static; on Windows lazy compiles thread-locals emulated (a call per access)",
         "isolated is a deliberate divergence: the target gets its own instance of every module it imports"
       ],
       "seeAlso": ["modules.require", "modules.namedImport", "modules.importMetaUrl"],

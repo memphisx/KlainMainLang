@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "33/33",
     "loosePct": 100,
-    "strict": "19/33",
-    "strictPct": 58
+    "strict": "21/33",
+    "strictPct": 64
   },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. The recurring divergence: every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
   "entries": [
@@ -412,14 +412,13 @@
       "name": "process.on(signal, listener)",
       "statusRow": "process.on(signal, listener) (signal listeners)",
       "signature": "process.on(signal: NodeJS.Signals, listener: (signal: NodeJS.Signals) => void): NodeJS.Process",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Any signal is an event name — SIGINT/SIGTERM to shut down gracefully, SIGWINCH (terminal resize) to re-read process.stdout.columns/.rows and repaint a TUI, SIGHUP, SIGUSR1/2, … The first listener starts a watcher and removing the last restores the default disposition; SIGKILL/SIGSTOP throw uv_signal_start EINVAL. On Windows, as in Node, SIGINT fires on Ctrl+C, SIGBREAK on Ctrl+Break, and a SIGTERM listener is accepted but never fires.",
       "returns": {
         "type": "NodeJS.Process",
         "desc": "process, for chaining."
       },
       "differences": [
-        "Windows delivery through the signal table is compile-checked only; the watcher path was run on macOS."
       ],
       "seeAlso": [
         "process.exit-events",
@@ -480,7 +479,7 @@
       "statusRow": "process.getuid() / geteuid() / getgid() / getegid()",
       "signature": "process.getuid(): number; geteuid(); getgid(); getegid()",
       "badge": "exact",
-      "description": "Direct POSIX credential reads returning a number, matching Node-on-POSIX. Node leaves all four undefined on Windows: there the bare call is rejected at compile time (Node throws a TypeError), and the portable optional call process.getuid?.() evaluates to undefined — it is typed number | undefined on every host.",
+      "description": "Direct POSIX credential reads returning a number, matching Node-on-POSIX. Node leaves all four undefined on Windows: there the bare call is rejected at compile time in typed code and throws Node's TypeError when reached in untyped JS, and the portable optional call process.getuid?.() evaluates to undefined — it is typed number | undefined on every host.",
       "returns": {
         "type": "number",
         "desc": "The uid/gid."
@@ -708,8 +707,8 @@
       "name": "child_process.spawnSync / execSync / execFileSync",
       "statusRow": "child_process.spawnSync() / .execSync() / .execFileSync() (blocking)",
       "signature": "spawnSync(cmd, args?, opts?): { status, signal, output, pid, stdout, stderr, error? }; execSync(cmd, opts?): Buffer | string; execFileSync(file, args?, opts?): Buffer | string",
-      "badge": "caveats",
-      "description": "One embedded C core: fork + execvp with the piped stdio poll-multiplexed to completion (no deadlock when a child fills stderr while stdout drains), an optional input fed to stdin, a timeout/maxBuffer kill, then a blocking waitpid; execSync runs via /bin/sh -c (%ComSpec% /d /s /c on Windows). Node's full options set: cwd, env (replaces the child's), input (string or Uint8Array), argv0, stdio ('pipe'/'inherit'/'ignore', string or 3-element array), timeout + killSignal (error.code ETIMEDOUT), maxBuffer (1 MiB default, ENOBUFS on overrun), shell (true or a shell path; args join the command with spaces), windowsHide, windowsVerbatimArguments. spawnSync returns Node's record in Node's key order — status is null on a signal death or a never-started child, output is [null, stdout, stderr], error carries code/errno/syscall 'spawnSync <file>'/path for a failed spawn (ENOENT: status null, pid 0, null streams). execSync/execFileSync return stdout — a Buffer, or a string with encoding: 'utf8' — or throw: the spawn/timeout/maxBuffer error itself, or 'Command failed: <cmd>' plus the captured stderr, the Error carrying the ExecException own properties status, signal, output, pid, stdout, stderr (readable through catch (e: any)); without an explicit stdio the child's stderr is mirrored to ours, as in Node.",
+      "badge": "exact",
+      "description": "A native blocking spawn on its own libuv loop, as Node's spawn_sync is (uv_spawn): the piped stdio read to completion (no deadlock when a child fills stderr while stdout drains), an optional input fed to stdin, a timeout/maxBuffer kill, then the exit; execSync runs via /bin/sh -c (%ComSpec% /d /s /c on Windows). Node's full options set: cwd, env (replaces the child's), input (string or Uint8Array), argv0, stdio ('pipe'/'inherit'/'ignore', string or 3-element array), timeout + killSignal (error.code ETIMEDOUT), maxBuffer (1 MiB default, ENOBUFS on overrun), shell (true or a shell path; args join the command with spaces), windowsHide, windowsVerbatimArguments. spawnSync returns Node's record in Node's key order — status is null on a signal death or a never-started child, output is [null, stdout, stderr], error carries code/errno/syscall 'spawnSync <file>'/path for a failed spawn (ENOENT: status null, pid 0, null streams). execSync/execFileSync return stdout — a Buffer, or a string with encoding: 'utf8' — or throw: the spawn/timeout/maxBuffer error itself, or 'Command failed: <cmd>' plus the captured stderr, the Error carrying the ExecException own properties status, signal, output, pid, stdout, stderr (readable through catch (e: any)); without an explicit stdio the child's stderr is mirrored to ours, as in Node.",
       "returns": {
         "type": "SpawnSyncResult | string",
         "desc": "The result object / captured stdout."
@@ -717,8 +716,6 @@
       "exampleKey": "process/spawn_sync",
       "snippet": "const r = spawnSync(\"echo\", [\"kalimera\", \"kosme\"])\nconsole.log(r.status, r.stdout.trim())",
       "differences": [
-        "`spawnSync`'s `stdout`/`stderr`/`output` are strings (the `encoding: 'utf8'` shape), not Buffers; `encoding` accepts `'utf8'` or `'buffer'` only. `status` is the child's real-width exit code: the full 32-bit value on Windows, the 8-bit wait-status field on POSIX (as Node also reports there).",
-        "`stdio`, `shell`, `killSignal`, `windowsHide` and `windowsVerbatimArguments` must be literals; `env` must be an object literal of string values; `uid`/`gid` are not supported.",
         "An unpiped `stdout`/`stderr` (`stdio: 'inherit'`/`'ignore'`) is `null` at run time while the field stays typed `string` (Node's own typings do the same); `output` is typed `(string | null)[]`."
       ],
       "seeAlso": [

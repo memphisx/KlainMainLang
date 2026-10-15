@@ -21,19 +21,19 @@ Each file has its `// META:` frontmatter stripped, a typed `testharness.js`-shap
 
 ## Overall
 
-4207 headless source files — the full corpus class, every one attempted: **12 passed**, 1954 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
+4207 headless source files — the full corpus class, every one attempted: **45 passed**, 1921 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
 
-Of the 1966 files that were in scope and compiled far enough to run, **12 passed (0.6%)** at the file level (a file passes only if *every* subtest in it passes).
+Of the 1966 files that were in scope and compiled far enough to run, **45 passed (2.3%)** at the file level (a file passes only if *every* subtest in it passes).
 
-**Subtest level (the metric WPT itself reports): 45 / 105 subtests passed (42.9%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
+**Subtest level (the metric WPT itself reports): 421 / 645 subtests passed (65.3%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
 
 ## By area
 
 | Area | Files pass | Files fail | Files skip | Subtests pass/total |
 |---|---|---|---|---|
 | FileAPI | 1 | 33 | 11 | 4/4 |
-| IndexedDB | 0 | 3 | 210 | 0/0 |
-| WebCryptoAPI | 0 | 103 | 26 | 0/0 |
+| IndexedDB | 1 | 2 | 210 | 1/1 |
+| WebCryptoAPI | 0 | 103 | 26 | 2/8 |
 | accelerometer | 0 | 0 | 1 | 0/0 |
 | ai | 0 | 1 | 158 | 0/0 |
 | ambient-light | 0 | 0 | 1 | 0/0 |
@@ -54,7 +54,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | compression | 0 | 19 | 1 | 0/0 |
 | compute-pressure | 0 | 3 | 15 | 0/0 |
 | connection-allowlist | 0 | 0 | 73 | 0/0 |
-| console | 0 | 6 | 1 | 0/0 |
+| console | 2 | 4 | 1 | 11/12 |
 | contacts | 0 | 0 | 1 | 0/0 |
 | content-index | 0 | 0 | 2 | 0/0 |
 | content-security-policy | 1 | 9 | 14 | 1/1 |
@@ -63,22 +63,22 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | cors | 0 | 0 | 3 | 0/0 |
 | cpu-performance | 0 | 0 | 1 | 0/0 |
 | credential-management | 0 | 0 | 1 | 0/0 |
-| css | 0 | 14 | 5 | 0/0 |
+| css | 1 | 13 | 5 | 1/1 |
 | custom-elements | 0 | 0 | 9 | 0/0 |
 | delegated-ink | 0 | 0 | 2 | 0/0 |
 | deprecation-reporting | 0 | 0 | 1 | 0/0 |
 | device-memory | 0 | 0 | 2 | 0/0 |
 | device-posture | 0 | 0 | 1 | 0/0 |
 | digital-credentials | 0 | 0 | 1 | 0/0 |
-| dom | 0 | 38 | 29 | 2/4 |
+| dom | 4 | 34 | 29 | 10/11 |
 | domparsing | 0 | 0 | 1 | 0/0 |
 | element-timing | 0 | 0 | 1 | 0/0 |
-| encoding | 0 | 30 | 11 | 0/0 |
+| encoding | 5 | 25 | 11 | 247/372 |
 | entries-api | 0 | 0 | 2 | 0/0 |
 | event-timing | 0 | 0 | 3 | 0/0 |
-| eventsource | 1 | 33 | 13 | 1/1 |
+| eventsource | 0 | 34 | 13 | 0/7 |
 | eyedropper | 0 | 0 | 1 | 0/0 |
-| fetch | 0 | 119 | 128 | 0/0 |
+| fetch | 1 | 118 | 128 | 19/29 |
 | file-system-access | 0 | 0 | 5 | 0/0 |
 | font-access | 0 | 0 | 6 | 0/0 |
 | fs | 0 | 10 | 33 | 0/0 |
@@ -88,8 +88,8 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | geolocation | 0 | 0 | 3 | 0/0 |
 | gpc | 0 | 0 | 1 | 0/0 |
 | gyroscope | 0 | 0 | 1 | 0/0 |
-| hr-time | 0 | 3 | 1 | 0/0 |
-| html | 1 | 1075 | 288 | 2/2 |
+| hr-time | 1 | 2 | 1 | 2/2 |
+| html | 1 | 1075 | 288 | 4/5 |
 | html-aam | 0 | 0 | 1 | 0/0 |
 | html-media-capture | 0 | 0 | 1 | 0/0 |
 | idle-detection | 0 | 0 | 4 | 0/0 |
@@ -131,7 +131,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | paint-timing | 0 | 0 | 4 | 0/0 |
 | payment-method-manifest | 0 | 0 | 9 | 0/0 |
 | payment-request | 0 | 1 | 1 | 0/0 |
-| performance-timeline | 1 | 18 | 15 | 1/1 |
+| performance-timeline | 4 | 15 | 15 | 5/6 |
 | periodic-background-sync | 0 | 0 | 2 | 0/0 |
 | permissions | 0 | 1 | 2 | 0/0 |
 | permissions-policy | 0 | 0 | 12 | 0/0 |
@@ -153,21 +153,21 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | screen-capture | 0 | 1 | 3 | 0/0 |
 | screen-details | 0 | 0 | 3 | 0/0 |
 | screen-orientation | 0 | 0 | 1 | 0/0 |
-| screen-wake-lock | 0 | 1 | 4 | 0/0 |
+| screen-wake-lock | 1 | 0 | 4 | 1/1 |
 | scroll-animations | 0 | 0 | 1 | 0/0 |
 | scroll-performance-timing | 0 | 0 | 1 | 0/0 |
 | scroll-to-text-fragment | 0 | 0 | 1 | 0/0 |
 | selection | 0 | 0 | 1 | 0/0 |
 | serial | 0 | 0 | 3 | 0/0 |
 | server-timing | 0 | 0 | 1 | 0/0 |
-| service-workers | 0 | 6 | 15 | 0/0 |
+| service-workers | 0 | 6 | 15 | 0/1 |
 | shape-detection | 0 | 3 | 3 | 0/0 |
-| soft-navigation-heuristics | 0 | 1 | 3 | 0/0 |
+| soft-navigation-heuristics | 1 | 0 | 3 | 1/1 |
 | speculation-rules | 0 | 2 | 1 | 0/0 |
 | speech-api | 0 | 0 | 2 | 0/0 |
 | storage | 0 | 0 | 23 | 0/0 |
 | storage-access-api | 0 | 0 | 41 | 0/0 |
-| streams | 0 | 72 | 7 | 0/0 |
+| streams | 0 | 72 | 7 | 0/1 |
 | subapps | 0 | 0 | 1 | 0/0 |
 | subresource-integrity | 0 | 1 | 14 | 0/0 |
 | svg | 0 | 0 | 1 | 0/0 |
@@ -177,9 +177,9 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | trusted-types | 0 | 0 | 1 | 0/0 |
 | ua-client-hints | 0 | 0 | 2 | 0/0 |
 | uievents | 0 | 0 | 1 | 0/0 |
-| url | 6 | 15 | 7 | 31/43 |
-| urlpattern | 0 | 7 | 0 | 0/0 |
-| user-timing | 0 | 22 | 1 | 0/0 |
+| url | 5 | 16 | 7 | 43/44 |
+| urlpattern | 1 | 6 | 0 | 2/2 |
+| user-timing | 12 | 10 | 1 | 34/44 |
 | vibration | 0 | 0 | 1 | 0/0 |
 | video-rvfc | 0 | 0 | 1 | 0/0 |
 | virtual-keyboard | 0 | 0 | 1 | 0/0 |
@@ -197,7 +197,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | webdriver | 0 | 0 | 1 | 0/0 |
 | webgl | 0 | 0 | 1 | 0/0 |
 | webhid | 0 | 0 | 2 | 0/0 |
-| webidl | 0 | 12 | 6 | 2/48 |
+| webidl | 0 | 12 | 6 | 0/1 |
 | webmcp | 0 | 0 | 1 | 0/0 |
 | webmessaging | 0 | 2 | 31 | 0/0 |
 | webmidi | 0 | 0 | 1 | 0/0 |
@@ -212,7 +212,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **12 passed
 | webusb | 0 | 5 | 16 | 0/0 |
 | webvtt | 0 | 0 | 1 | 0/0 |
 | webxr | 0 | 0 | 10 | 0/0 |
-| workers | 1 | 36 | 29 | 1/1 |
+| workers | 3 | 34 | 29 | 33/91 |
 | worklets | 0 | 0 | 1 | 0/0 |
 | xhr | 0 | 14 | 73 | 0/0 |
 | xml | 0 | 0 | 4 | 0/0 |
@@ -223,46 +223,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 939 | COMPILE_ERROR: undefined function or closure '%s' |
-| 97 | COMPILE_ERROR: undefined variable '%s' |
-| 90 | COMPILE_ERROR: unknown class '%s' |
-| 86 | COMPILE_ERROR: .length is only supported on arrays and strings |
-| 71 | COMPILE_ERROR: a number has no method '%s' |
-| 22 | COMPILE_ERROR: missing argument 1 with no default |
-| 12 | COMPILE_ERROR: field access on non-object (no field '%s') |
-| 11 | COMPILE_ERROR: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method |
-| 10 | COMPILE_ERROR: '%s' is not an array |
-| 10 | COMPILE_ERROR: no field '%s' |
-| 7 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt2.ts: 223:22:… |
-| 6 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt15.ts: 223:22… |
-| 6 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt18.ts: 223:22… |
-| 6 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt19.ts: 223:22… |
-| 6 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt4.ts: 223:22:… |
-| 6 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt6.ts: 223:22:… |
-| 5 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt11.ts: 223:22… |
-| 5 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt14.ts: 212:22… |
-| 5 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt20.ts: 223:22… |
-| 5 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt5.ts: 984:31:… |
-| 5 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt8.ts: 223:22:… |
-| 5 | COMPILE_ERROR: array elements must share one type — element 1 does not match the array's element t… |
-| 5 | COMPILE_ERROR: array elements must share one type — element 2 does not match the array's element t… |
-| 5 | COMPILE_ERROR: instanceof is only supported against user-defined classes; '%s' is not a registered c… |
-| 5 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
-| 5 | COMPILE_ERROR: operator '%s' between incompatible types is not supported — this compiler is a type… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt0.ts: 223:22:… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt1.ts: 212:22:… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt1.ts: 252:32:… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt12.ts: 223:22… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt13.ts: 252:32… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt18.ts: 252:32… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt2.ts: 252:32:… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt20.ts: 223:55… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt20.ts: 984:31… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt3.ts: 212:22:… |
-| 4 | COMPILE_ERROR: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-57028\parallel\wpt4.ts: 984:31:… |
-| 4 | COMPILE_ERROR: cannot assign a string value to '%s' (a number) — a variable's type is fixed at its… |
-| 4 | COMPILE_ERROR: object has no field '%s' |
-| 4 | RUNTIME_NONZERO_EXIT:  |
+| 862 | COMPILE_ERROR: argument of type '%s' is not assignable to parameter of type '%s' |
+| 291 | COMPILE_ERROR: expected IDENT, got => |
+| 241 | COMPILE_ERROR: parameter '%s' implicitly has an '%s' type |
+| 124 | COMPILE_ERROR: cannot find name '%s' |
+| 36 | COMPILE_ERROR: unknown class '%s' |
+| 33 | COMPILE_ERROR: undefined variable '%s' |
+| 31 | COMPILE_ERROR: rest parameter '%s' implicitly has an '%s' type |
+| 30 | COMPILE_ERROR: cannot find name '%s'; did you mean '%s'? |
+| 27 | COMPILE_ERROR: '%s' is possibly '%s' |
+| 25 | COMPILE_ERROR: subsequent variable declarations must have the same type. Variable '%s' must be of ty… |
+| 22 | COMPILE_ERROR: property '%s' does not exist on type '%s' |
+| 16 | COMPILE_ERROR: variable '%s' implicitly has type '%s' in some locations where its type cannot be det… |
+| 15 | COMPILE_ERROR: a number has no method '%s' |
+| 12 | COMPILE_ERROR: R:\kml-scratch\s4\cw-wpt\parallel\wpt3.ts: resolving dynamic import('%s'): cannot fin… |
+| 11 | COMPILE_ERROR: '%s' implicitly has type '%s' because it does not have a type annotation |
+| 11 | COMPILE_ERROR: expected ;, got IDENT |
+| 8 | COMPILE_ERROR: undefined function or closure '%s' |
+| 6 | COMPILE_ERROR: R:\kml-scratch\s4\cw-wpt\parallel\wpt3.ts: cannot find worker module '%s' (resolved t… |
+| 6 | COMPILE_ERROR: expected 1 arguments, but got 0. Did you forget to include '%s' in your type argument… |
+| 5 | COMPILE_ERROR: binding element '%s' implicitly has an '%s' type |
+| 5 | COMPILE_ERROR: expected {, got STRING |
+| 4 | COMPILE_ERROR: expected '%s', got , |
+| 4 | COMPILE_ERROR: expected 1 arguments, but got 0 |
+| 4 | COMPILE_ERROR: expected 1 arguments, but got 2 |
+| 3 | COMPILE_ERROR: a default value on a destructured parameter is not yet supported |
+| 3 | COMPILE_ERROR: an object has no method '%s' |
+| 3 | COMPILE_ERROR: class '%s' has no static field '%s' |
+| 3 | COMPILE_ERROR: expected '%s' after '%s' |
+| 3 | COMPILE_ERROR: expected }, got STRING |
+| 3 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
+| 2 | COMPILE_ERROR: '%s' is not an array |
+| 2 | COMPILE_ERROR: R:\kml-scratch\s4\cw-wpt\parallel\wpt1.ts: cannot find worker module '%s' (resolved t… |
+| 2 | COMPILE_ERROR: a '%s' accessor must return a value |
+| 2 | COMPILE_ERROR: a queuing strategy must be an object literal ({highWaterMark, size}) or a CountQueuin… |
+| 2 | COMPILE_ERROR: cannot assign to '%s' because it is a constant |
+| 2 | COMPILE_ERROR: cannot convert type ptr to string in template literal |
+| 2 | COMPILE_ERROR: class '%s' has no static method '%s' |
+| 2 | COMPILE_ERROR: expected 0 arguments, but got 1 |
+| 2 | COMPILE_ERROR: expected 1-2 arguments, but got 0 |
+| 2 | COMPILE_ERROR: expected }, got [ |
 
 ## Top skip reasons
 
@@ -286,19 +286,52 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | 1 | uses DOM/browser global (GLOBAL.isWindow) |
 | 1 | uses DOM/browser global (requestAnimationFrame) |
 
-## Passing files (12)
+## Passing files (45)
 
 | File | Area |
 |---|---|
 | `FileAPI/blob/Blob-slice-overflow.any.js` | FileAPI |
+| `IndexedDB/globalscope-indexedDB-SameObject.any.js` | IndexedDB |
+| `console/console-log-large-array.any.js` | console |
+| `console/console-log-symbol.any.js` | console |
 | `content-security-policy/generic/src-trailing-dot.sub.any.js` | content-security-policy |
-| `eventsource/eventsource-url.any.js` | eventsource |
+| `css/css-highlight-api/historical.window.js` | css |
+| `dom/abort/AbortSignal.any.js` | dom |
+| `dom/abort/timeout.any.js` | dom |
+| `dom/events/AddEventListenerOptions-once.any.js` | dom |
+| `dom/events/EventTarget-addEventListener.any.js` | dom |
+| `encoding/api-replacement-encodings.any.js` | encoding |
+| `encoding/textdecoder-fatal.any.js` | encoding |
+| `encoding/textdecoder-ignorebom.any.js` | encoding |
+| `encoding/textdecoder-utf16-surrogates.any.js` | encoding |
+| `encoding/textencoder-utf16-surrogates.any.js` | encoding |
+| `fetch/h1-parsing/lone-cr.window.js` | fetch |
+| `hr-time/monotonic-clock.any.js` | hr-time |
 | `html/webappapis/timers/cleartimeout-clearinterval.any.js` | html |
+| `performance-timeline/buffered-flag-after-timeout.any.js` | performance-timeline |
+| `performance-timeline/buffered-flag-observer.any.js` | performance-timeline |
 | `performance-timeline/buffered-flag-with-entryTypes-observer.tentative.any.js` | performance-timeline |
+| `performance-timeline/observer-buffered-false.any.js` | performance-timeline |
+| `screen-wake-lock/wakelock-insecure-context.any.js` | screen-wake-lock |
+| `soft-navigation-heuristics/smoke/tentative/supported-entry-types.window.js` | soft-navigation-heuristics |
+| `url/url-statics-canparse.any.js` | url |
 | `url/url-tojson.any.js` | url |
-| `url/urlsearchparams-append.any.js` | url |
 | `url/urlsearchparams-get.any.js` | url |
 | `url/urlsearchparams-getall.any.js` | url |
-| `url/urlsearchparams-set.any.js` | url |
-| `url/urlsearchparams-size.any.js` | url |
+| `url/urlsearchparams-sort.any.js` | url |
+| `urlpattern/urlpattern-constructor.any.js` | urlpattern |
+| `user-timing/buffered-flag.any.js` | user-timing |
+| `user-timing/case-sensitivity.any.js` | user-timing |
+| `user-timing/clear_all_marks.any.js` | user-timing |
+| `user-timing/clear_all_measures.any.js` | user-timing |
+| `user-timing/clear_non_existent_mark.any.js` | user-timing |
+| `user-timing/clear_non_existent_measure.any.js` | user-timing |
+| `user-timing/clear_one_mark.any.js` | user-timing |
+| `user-timing/clear_one_measure.any.js` | user-timing |
+| `user-timing/mark-measure-return-objects.any.js` | user-timing |
+| `user-timing/measure_syntax_err.any.js` | user-timing |
+| `user-timing/structured-serialize-detail.any.js` | user-timing |
+| `user-timing/user_timing_exists.any.js` | user-timing |
 | `workers/Worker-base64.any.js` | workers |
+| `workers/Worker-replace-global-constructor.any.js` | workers |
+| `workers/semantics/interface-objects/004.any.js` | workers |

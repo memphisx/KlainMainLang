@@ -397,14 +397,14 @@ fs.stat('/nope', (err) => {
   })
 })
 order = "async"
-`, `stat err async ENOENT ENOENT: no such file or directory, stat '/nope'
+`, winPaths(`stat err async ENOENT ENOENT: no such file or directory, stat '/nope'
 mkdtemp null true
 truncate null he
 chmod null `+chmodMode600()+`
 links null null null true
 lstat null true
 ENOENT: no such file or directory, link '/nx-a' -> '/nx-b'
-rm null false`)
+rm null false`, "/nope", "/nx-a", "/nx-b"))
 }
 
 // The Promise forms of stat, lstat, realpath and access (fs.promises and
@@ -421,7 +421,7 @@ async function main(): Promise<void> {
   try { await fs.promises.lstat('/nope') } catch (e) { console.log((e as Error).message) }
 }
 main()
-`, "true\ntrue true\nENOENT\nENOENT: no such file or directory, lstat '/nope'")
+`, winPaths("true\ntrue true\nENOENT\nENOENT: no such file or directory, lstat '/nope'", "/nope"))
 }
 
 // `import { promises } from 'fs'` is fs/promises' namespace.

@@ -22,7 +22,6 @@ func TestWin32SockOptionTranslation(t *testing.T) {
 		filepath.Join("testdata", "win32", "sock_options.c"),
 		filepath.Join(shim, "win32io.c"), filepath.Join(shim, "win32proc.c"),
 		filepath.Join(shim, "win32shim.c"), filepath.Join(shim, "win32fs.c"),
-		filepath.Join(shim, "win32fswatch.c"),
 		"-lws2_32", "-lntdll", "-lbcrypt", "-luserenv", "-ladvapi32", "-lshell32", "-lole32", "-liphlpapi", "-lpsapi"}
 	if out, err := exec.Command("clang", args...).CombinedOutput(); err != nil {
 		t.Fatalf("building the native shim test: %v\n%s", err, out)

@@ -22,15 +22,25 @@ void *__kml_native_headered(const char *s) {
     return out;
 }
 
+/* e is an OS errno, or (from util.getSystemErrorName, a DNS error) a negated
+ * libuv number; on Windows those are 4000 and up, apart from the errnos. */
+extern int __kml_errno_from_uv(int uv);
+static int os_errno(int e) {
+#ifdef _WIN32
+    if (e >= 4000) return __kml_errno_from_uv(-e);
+#endif
+    return e;
+}
+
 /* The code name ("ECONNREFUSED"), "UNKNOWN" when the table lacks it. */
 void *__kml_native_errno_name(double e) {
-    const char *c = __kml_errno_code((int)e);
+    const char *c = __kml_errno_code(os_errno((int)e));
     return __kml_native_headered(c ? c : "UNKNOWN");
 }
 
 /* libuv's description, strerror when the table lacks it. */
 void *__kml_native_errno_desc(double e) {
-    int n = (int)e;
+    int n = os_errno((int)e);
     const char *d = __kml_errno_desc(n);
     return __kml_native_headered(d ? d : strerror(n));
 }

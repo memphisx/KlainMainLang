@@ -496,7 +496,7 @@ import http from 'http'
 import { IncomingMessage as IM, ServerResponse } from 'node:http'
 function handle(req: IM, res: http.ServerResponse): void { res.end("hi " + req.url) }
 const server = http.createServer(handle)
-server.listen(0, () => { console.log("up"); server.close() })
+server.listen(0, '127.0.0.1', () => { console.log("up"); server.close() })
 `, "up")
 	assertOutputImports(t, "import { IncomingMessage } from 'http'\nconsole.log(typeof IncomingMessage)\n", "function")
 	for _, c := range []struct{ src, want string }{
@@ -648,7 +648,7 @@ import http from 'http'
 class Base { n = 0; bump(): this { this.n++; return this } }
 class Sub extends Base { label = "sub"; tag(): string { return this.label + this.n } }
 console.log(new Sub().bump().bump().tag())
-const server = http.createServer((req, res) => { res.end('ok') }).listen(0, () => {
+const server = http.createServer((req, res) => { res.end('ok') }).listen(0, '127.0.0.1', () => {
   server.keepAliveTimeout = 1234
   console.log(server.keepAliveTimeout, server instanceof http.Server)
   server.close()

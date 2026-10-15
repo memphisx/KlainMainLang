@@ -139,7 +139,7 @@ wss.on('connection', (socket: WSConnection) => {
     socket.send((ev.isBinary ? "bin:" : "txt:") + ev.data)
   }
 })
-server.listen(8984)
+server.listen(8984, '127.0.0.1')
 `
 	port := startHTTPServer(t, serverSrc, 8984)
 	clientSrc := `

@@ -13,7 +13,21 @@
 // BrotliDecoderContext, ZstdCompressContext, ZstdDecompressContext).
 
 #ifdef KLAINPOOL_ZLIB
+#ifdef _WIN32
+// MSYS2's zconf.h includes unistd.h, whose io.h declares read/write/mkdir
+// with the CRT's types; the shim's POSIX ones (kml_posix_compat.h,
+// klainfs.c) are what this unit uses. zconf.h only wants off_t from it.
+#include <sys/types.h>
+#ifndef _UNISTD_H
+#define _UNISTD_H
+#define KML_ZLIB_UNISTD_GUARD
+#endif
+#endif
 #include <zlib.h>
+#ifdef KML_ZLIB_UNISTD_GUARD
+#undef _UNISTD_H
+#undef KML_ZLIB_UNISTD_GUARD
+#endif
 #ifndef _WIN32
 #include <dlfcn.h>
 #endif
@@ -70,9 +84,98 @@ static struct {
 } kz_lib;
 static pthread_mutex_t kz_lib_lock = PTHREAD_MUTEX_INITIALIZER;
 
+#ifdef _WIN32
+#ifndef _WINDOWS_ /* windows.h, when <uv.h> brought it (klainpool.c) */
+__declspec(dllimport) void *__stdcall LoadLibraryA(const char *name);
+__declspec(dllimport) void *__stdcall GetProcAddress(void *module, const char *name);
+#endif
+#endif
+
+#ifdef KZ_STATIC
+/* A self-contained build (--static, TDD-00253) links Brotli and Zstd: their
+ * entry points come from the link, not a library loaded at run time. Only
+ * their addresses are taken, so no prototypes (and no headers) are needed. */
+extern char BrotliDecoderAttachDictionary[];
+extern char BrotliDecoderCreateInstance[];
+extern char BrotliDecoderDecompressStream[];
+extern char BrotliDecoderDestroyInstance[];
+extern char BrotliDecoderErrorString[];
+extern char BrotliDecoderGetErrorCode[];
+extern char BrotliDecoderSetParameter[];
+extern char BrotliEncoderAttachPreparedDictionary[];
+extern char BrotliEncoderCompressStream[];
+extern char BrotliEncoderCreateInstance[];
+extern char BrotliEncoderDestroyInstance[];
+extern char BrotliEncoderDestroyPreparedDictionary[];
+extern char BrotliEncoderPrepareDictionary[];
+extern char BrotliEncoderSetParameter[];
+extern char ZSTD_CCtx_loadDictionary[];
+extern char ZSTD_CCtx_reset[];
+extern char ZSTD_CCtx_setParameter[];
+extern char ZSTD_CCtx_setPledgedSrcSize[];
+extern char ZSTD_DCtx_loadDictionary[];
+extern char ZSTD_DCtx_reset[];
+extern char ZSTD_DCtx_setParameter[];
+extern char ZSTD_createCCtx[];
+extern char ZSTD_createDCtx[];
+extern char ZSTD_decompressStream[];
+extern char ZSTD_freeCCtx[];
+extern char ZSTD_freeDCtx[];
+extern char ZSTD_getErrorCode[];
+extern char ZSTD_getErrorString[];
+extern char ZSTD_isError[];
+extern char ZSTD_compressStream2[];
+static void *kz_open(const char *const *names) {
+    (void)names;
+    return (void *)1;
+}
+static void *kz_static_sym(const char *n) {
+    static const struct { const char *name; void *addr; } tab[] = {
+        {"BrotliDecoderAttachDictionary", BrotliDecoderAttachDictionary},
+        {"BrotliDecoderCreateInstance", BrotliDecoderCreateInstance},
+        {"BrotliDecoderDecompressStream", BrotliDecoderDecompressStream},
+        {"BrotliDecoderDestroyInstance", BrotliDecoderDestroyInstance},
+        {"BrotliDecoderErrorString", BrotliDecoderErrorString},
+        {"BrotliDecoderGetErrorCode", BrotliDecoderGetErrorCode},
+        {"BrotliDecoderSetParameter", BrotliDecoderSetParameter},
+        {"BrotliEncoderAttachPreparedDictionary", BrotliEncoderAttachPreparedDictionary},
+        {"BrotliEncoderCompressStream", BrotliEncoderCompressStream},
+        {"BrotliEncoderCreateInstance", BrotliEncoderCreateInstance},
+        {"BrotliEncoderDestroyInstance", BrotliEncoderDestroyInstance},
+        {"BrotliEncoderDestroyPreparedDictionary", BrotliEncoderDestroyPreparedDictionary},
+        {"BrotliEncoderPrepareDictionary", BrotliEncoderPrepareDictionary},
+        {"BrotliEncoderSetParameter", BrotliEncoderSetParameter},
+        {"ZSTD_CCtx_loadDictionary", ZSTD_CCtx_loadDictionary},
+        {"ZSTD_CCtx_reset", ZSTD_CCtx_reset},
+        {"ZSTD_CCtx_setParameter", ZSTD_CCtx_setParameter},
+        {"ZSTD_CCtx_setPledgedSrcSize", ZSTD_CCtx_setPledgedSrcSize},
+        {"ZSTD_DCtx_loadDictionary", ZSTD_DCtx_loadDictionary},
+        {"ZSTD_DCtx_reset", ZSTD_DCtx_reset},
+        {"ZSTD_DCtx_setParameter", ZSTD_DCtx_setParameter},
+        {"ZSTD_createCCtx", ZSTD_createCCtx},
+        {"ZSTD_createDCtx", ZSTD_createDCtx},
+        {"ZSTD_decompressStream", ZSTD_decompressStream},
+        {"ZSTD_freeCCtx", ZSTD_freeCCtx},
+        {"ZSTD_freeDCtx", ZSTD_freeDCtx},
+        {"ZSTD_getErrorCode", ZSTD_getErrorCode},
+        {"ZSTD_getErrorString", ZSTD_getErrorString},
+        {"ZSTD_isError", ZSTD_isError},
+        {"ZSTD_compressStream2", ZSTD_compressStream2},
+    };
+    for (size_t i = 0; i < sizeof tab / sizeof tab[0]; i++)
+        if (strcmp(tab[i].name, n) == 0) return tab[i].addr;
+    return NULL;
+}
+#define KZ_SYM(h, n) ((void)(h), kz_static_sym(n))
+#else
 static void *kz_open(const char *const *names) {
 #ifdef _WIN32
-    (void)names;
+    /* The DLL names come last in each list; LoadLibrary searches the
+     * executable's directory, the system's and PATH. */
+    for (int i = 0; names[i]; i++) {
+        void *h = LoadLibraryA(names[i]);
+        if (h) return h;
+    }
     return NULL;
 #else
     static const char *const dirs[] = { "", "/opt/homebrew/lib/", "/usr/local/lib/", NULL };
@@ -89,18 +192,19 @@ static void *kz_open(const char *const *names) {
 }
 
 #ifdef _WIN32
-#define KZ_SYM(h, n) NULL
+#define KZ_SYM(h, n) GetProcAddress((h), (n))
 #else
 #define KZ_SYM(h, n) dlsym((h), (n))
 #endif
+#endif /* KZ_STATIC */
 
 static void kz_load(void) {
     pthread_mutex_lock(&kz_lib_lock);
     if (!kz_lib.tried) {
         kz_lib.tried = 1;
-        static const char *const enc_names[] = { "libbrotlienc.dylib", "libbrotlienc.1.dylib", "libbrotlienc.so.1", "libbrotlienc.so", NULL };
-        static const char *const dec_names[] = { "libbrotlidec.dylib", "libbrotlidec.1.dylib", "libbrotlidec.so.1", "libbrotlidec.so", NULL };
-        static const char *const zstd_names[] = { "libzstd.dylib", "libzstd.1.dylib", "libzstd.so.1", "libzstd.so", NULL };
+        static const char *const enc_names[] = { "libbrotlienc.dylib", "libbrotlienc.1.dylib", "libbrotlienc.so.1", "libbrotlienc.so", "libbrotlienc.dll", NULL };
+        static const char *const dec_names[] = { "libbrotlidec.dylib", "libbrotlidec.1.dylib", "libbrotlidec.so.1", "libbrotlidec.so", "libbrotlidec.dll", NULL };
+        static const char *const zstd_names[] = { "libzstd.dylib", "libzstd.1.dylib", "libzstd.so.1", "libzstd.so", "libzstd.dll", NULL };
         void *e = kz_open(enc_names), *d = kz_open(dec_names), *z = kz_open(zstd_names);
         if (e && d) {
             *(void **)&kz_lib.enc_create = KZ_SYM(e, "BrotliEncoderCreateInstance");

@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strings"
 	"testing"
 )
 
@@ -381,10 +383,15 @@ try {
     fs.mkdirSync(%q)
     console.log("should not print")
 } catch (e) {
-    console.log((e as Error).message === "EEXIST: file already exists, mkdir '%s'")
+    console.log((e as Error).message)
 }
-`, sub, sub)
-	assertOutputImports(t, src, "true")
+`, sub)
+	// Node on Windows reports the path resolved, with backslashes.
+	reported := sub
+	if runtime.GOOS == "windows" {
+		reported = filepath.Clean(filepath.FromSlash(sub))
+	}
+	assertOutputImports(t, src, "EEXIST: file already exists, mkdir '"+reported+"'")
 }
 
 func TestE2EFsMkdirSyncWrongArgCountRejected(t *testing.T) {
@@ -836,7 +843,12 @@ const all = fs.readdirSync(%q, { recursive: true })
 console.log(all.length)
 for (const e of all.sort()) console.log(e)
 `, dir)
-	assertOutputImports(t, src, "7\na.txt\nother\nother/d.txt\nsub\nsub/b.txt\nsub/deep\nsub/deep/c.txt")
+	// Node joins the relative names with the platform's separator.
+	want := "7\na.txt\nother\nother/d.txt\nsub\nsub/b.txt\nsub/deep\nsub/deep/c.txt"
+	if runtime.GOOS == "windows" {
+		want = strings.ReplaceAll(want, "/", `\`)
+	}
+	assertOutputImports(t, src, want)
 }
 
 // fs.readdirSync(path, { recursive: true, withFileTypes: true }) — every entry
@@ -867,8 +879,16 @@ for (const r of rows) console.log(r)
 // parentPath + name are own-enumerable; mode stays hidden.
 console.log(JSON.stringify(ents[0]).indexOf('mode') === -1 ? 'no-mode-leak' : 'LEAK')
 `, dir)
-	want := fmt.Sprintf("%s/sub/deep|c.txt|F\n%s/sub|b.txt|F\n%s/sub|deep|D\n%s|a.txt|F\n%s|sub|D\nno-mode-leak",
-		dir, dir, dir, dir, dir)
+	// A top-level entry's parentPath is the path as given; a nested one is
+	// path.join's, which on Windows also turns the given path's separators
+	// into backslashes.
+	nested := func(rel string) string { return dir + "/" + rel }
+	if runtime.GOOS == "windows" {
+		nested = func(rel string) string { return strings.ReplaceAll(dir+"/"+rel, "/", `\`) }
+	}
+	rows := []string{nested("sub/deep") + "|c.txt|F", nested("sub") + "|b.txt|F", nested("sub") + "|deep|D", dir + "|a.txt|F", dir + "|sub|D"}
+	sort.Strings(rows)
+	want := strings.Join(rows, "\n") + "\nno-mode-leak"
 	assertOutputImports(t, src, want)
 }
 
@@ -1012,6 +1032,35 @@ setTimeout(() => { fs.writeFileSync("%s", "bb") }, 150)
 	assertOutputImports(t, src, "event=change")
 }
 
+// fs.watch(dir, { recursive: true }): a change two levels down, and one in
+// a directory created after the watch started, reach the listener with the
+// name relative to the root — libuv's own tree watch on macOS and Windows,
+// a handle per directory on Linux (ADR-01618).
+func TestE2EFsWatchRecursive(t *testing.T) {
+	dir := tempDir(t)
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+const root = "%s/r"
+fs.mkdirSync(root + "/a/b", { recursive: true })
+let step = 0
+const w = fs.watch(root, { recursive: true }, (evt: string, name: string) => {
+  const n = String(name).split("\\").join("/")
+  if (step === 0 && n === "a/b/x.txt") {
+    step = 1
+    console.log("deep")
+    fs.mkdirSync(root + "/c")
+    setTimeout(() => { fs.writeFileSync(root + "/c/y.txt", "y") }, 150)
+  } else if (step === 1 && n === "c/y.txt") {
+    step = 2
+    console.log("new dir")
+    w.close()
+  }
+})
+setTimeout(() => { fs.writeFileSync(root + "/a/b/x.txt", "x") }, 150)
+`, dir)
+	assertOutputImports(t, src, "deep\nnew dir")
+}
+
 func TestE2EFsLinkSync(t *testing.T) {
 	dir := tempDir(t)
 	a := dir + "/orig.txt"
@@ -1029,6 +1078,50 @@ console.log(fs.readFileSync("%s", 'utf8'))
 try { fs.linkSync("%s/absent", "%s/x") } catch (e: any) { console.log("caught:", e.code) }
 `, a, a, b, b, b, a, b, a, b, dir, dir)
 	assertOutputImports(t, src, "shared\n2\nCHANGED\nCHANGED\ncaught: ENOENT")
+}
+
+// Positioned fs.read/fs.write on one descriptor from the thread pool, many
+// at once: each transfers at its own offset; serially, an unpositioned read
+// continues where the last unpositioned one stopped (concurrently, Node's
+// own position restore on Windows races, so it is not checked). On Windows a positioned
+// transfer is one ReadFile/WriteFile at the offset (ADR-01618).
+func TestE2EFsPositionedParallel(t *testing.T) {
+	f := tempDir(t) + "/data.bin"
+	src := fmt.Sprintf(`
+import * as fs from 'fs'
+const f = "%s"
+const n = 64, sz = 4096
+const all = new Uint8Array(n * sz)
+for (let i = 0; i < n; i++) all.fill(i, i * sz, (i + 1) * sz)
+fs.writeFileSync(f, all)
+const fd = fs.openSync(f, "r+")
+fs.readSync(fd, new Uint8Array(3), 0, 3, null)
+const one = new Uint8Array(1)
+fs.readSync(fd, one, 0, 1, 5 * sz)
+console.log("positioned", one[0])
+console.log("position", fs.readSync(fd, one, 0, 1, null), one[0])
+const jobs: Promise<boolean>[] = []
+for (let r = 0; r < 4; r++)
+  for (let i = n - 1; i >= 0; i--)
+    jobs.push(new Promise<boolean>((res) => {
+      const b = new Uint8Array(sz)
+      fs.read(fd, b, 0, sz, i * sz, (err, got) => res(!err && got === sz && b[0] === i && b[sz - 1] === i))
+    }))
+Promise.all(jobs).then((ok) => {
+  console.log("reads", ok.every((x) => x))
+  const w: Promise<void>[] = []
+  for (let i = 0; i < n; i++)
+    w.push(new Promise<void>((res) => fs.write(fd, new Uint8Array(sz).fill(200 - i), 0, sz, i * sz, () => res())))
+  return Promise.all(w)
+}).then(() => {
+  fs.closeSync(fd)
+  const d = fs.readFileSync(f)
+  let good = d.length === n * sz
+  for (let i = 0; i < n; i++) if (d[i * sz] !== 200 - i || d[i * sz + sz - 1] !== 200 - i) good = false
+  console.log("writes", good)
+})
+`, f)
+	assertOutputImports(t, src, "positioned 5\nposition 1 0\nreads true\nwrites true")
 }
 
 // fd-based fs ops (ADR-00498): openSync (literal flags → host O_* bits) /
@@ -1162,12 +1255,12 @@ function main2(): void {
   }
 }
 main2()
-`, `read open /no/such/f.txt
+`, winPaths(`read open /no/such/f.txt
 stat stat /no/such/f
 unlink unlink /no/such/f
 mkdir mkdir /no/deep/f
 scandir scandir /no/such/f
-plain undefined undefined`)
+plain undefined undefined`, "/no/such/f.txt", "/no/such/f", "/no/deep/f"))
 }
 
 // ADR-00770: fs errors carry Node's numeric `err.errno` — libuv's errno. On

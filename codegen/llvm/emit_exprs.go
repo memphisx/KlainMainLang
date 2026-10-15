@@ -12,6 +12,7 @@ import (
 	"KlainMainLang/sema"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -438,6 +439,11 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		if key, ok := namespaceValueExport(id.Name); ok && (e.isGlobalName(id) || id.Name == "globalThis" && !e.isShadowedByLocal(id.Name)) {
 			if m, ok := e.libExports[key]; ok {
 				e.shadowReference(id, false)
+				if id.Name == "globalThis" {
+					if err := e.emitGlobalThisLinks(id.GetPos()); err != nil {
+						return Value{}, err
+					}
+				}
 				return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, id.GetPos()), nil, id.GetPos()))
 			}
 		}
@@ -586,6 +592,53 @@ func (e *Emitter) flowNarrowedTy(id *ast.Identifier, sym Symbol) Type {
 func (e *Emitter) isGlobalName(id *ast.Identifier) bool {
 	c := e.front()
 	return c != nil && e.isBuiltinGlobal(c, id)
+}
+
+// globalOnGlobalThis are the globals global modules implement that Node's
+// global object carries, each with whether it is enumerable there
+// (`performance` is; the classes are not). The others the modules export
+// (`Worker`, `self`, `Histogram`, `IteratorHelper`, `ErrorEvent`,
+// `EventSource`) are no property of Node's globalThis.
+var globalOnGlobalThis = map[string]bool{
+	"performance":  true,
+	"SubtleCrypto": false, "Blob": false, "DataView": false, "TextEncoder": false,
+	"TextDecoder": false, "Event": false, "CustomEvent": false, "EventTarget": false,
+	"AbortSignal": false, "AbortController": false, "MessageEvent": false,
+	"CloseEvent": false, "Headers": false, "URLSearchParams": false, "URL": false,
+	"URLPattern": false, "WeakRef": false, "WebSocket": false,
+	"PerformanceEntry": false, "PerformanceMark": false, "PerformanceMeasure": false,
+	"PerformanceObserverEntryList": false, "PerformanceObserver": false,
+	"Performance": false, "MessagePort": false, "MessageChannel": false,
+	"BroadcastChannel": false,
+}
+
+// emitGlobalThisLinks puts the program's global-module globals on the
+// global object before `globalThis` is read as a value
+// (internal_namespaces.ts _kmlGlobalThisLink): the modules are in the program
+// only when it names them, so the object cannot list them itself.
+func (e *Emitter) emitGlobalThisLinks(pos ast.Pos) error {
+	link, ok := e.libExports["internal_namespaces:_kmlGlobalThisLink"]
+	if !ok {
+		return nil
+	}
+	names := make([]string, 0, len(e.globalLinks))
+	for name := range e.globalLinks {
+		if _, on := globalOnGlobalThis[name]; on {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		args := []ast.Expression{
+			ast.NewStringLiteral(name, pos),
+			ast.NewIdentifier(e.globalLinks[name], pos),
+			ast.NewBooleanLiteral(globalOnGlobalThis[name], pos),
+		}
+		if _, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(link, pos), args, pos)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // namespaceValueExport is the library export that makes the global object

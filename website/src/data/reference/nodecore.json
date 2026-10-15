@@ -144,8 +144,7 @@
       "differences": [
         "`connect`/`createConnection` take a port, an options object or `{ path }`; the connect is non-blocking and a failure arrives as an async `'error'` then `'close'`",
         "`listen`'s `'listening'` and `'error'` fire on the next tick, as in Node; `maxConnections` and `getConnections` are supported; `isIP`/`isIPv4`/`isIPv6`",
-        "BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported",
-        "On Windows the TCP handles are compile-checked, not yet run"
+        "BlockList, SocketAddress and happy-eyeballs address selection (`autoSelectFamily`) are not ported"
       ],
       "seeAlso": [
         "nodecore.tls",
@@ -170,8 +169,7 @@
       "snippet": "const server = dgram.createSocket('udp4');\nserver.on('message', (msg, rinfo) => {\n  server.send('reply:' + msg.toString(), rinfo.port, rinfo.address);\n});\nserver.bind(0, '127.0.0.1');",
       "differences": [
         "Sends are synchronous, so getSendQueueSize()/getSendQueueCount() are always 0.",
-        "The lookup and block-list options, bind({ fd }) and cluster-shared sockets are not ported.",
-        "Windows: TTL/multicast options and membership apply to udp4 sockets only (compile-checked, not run)."
+        "The lookup and block-list options, bind({ fd }) and cluster-shared sockets are not ported."
       ],
       "seeAlso": [
         "nodecore.net",
@@ -196,8 +194,7 @@
       "snippet": "const sock = tls.connect(443, \"example.com\", () => {\n  sock.write(\"GET / HTTP/1.1\\r\\nHost: example.com\\r\\nConnection: close\\r\\n\\r\\n\");\n});\nsock.on(\"data\", (chunk: string) => { response += chunk; });",
       "differences": [
         "OpenSSL-only (libssl) — a `-crypto=commoncrypto` build using `tls` is a clean compile error (Mac's CommonCrypto has no TLS API)",
-        "Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported",
-        "On Windows the TCP handles are compile-checked, not yet run"
+        "Session resumption, OCSP, renegotiation, PSK and `getPeerCertificate()`'s certificate object are not ported"
       ],
       "seeAlso": [
         "nodecore.net",
@@ -228,8 +225,7 @@
       "exampleKey": "dns/lookup",
       "snippet": "dns.lookup(\"localhost\", (err, address, family) => {\n  console.log(\"localhost ->\", address, \"family\", family);\n});",
       "differences": [
-        "A resolve error has no `errno` key (Node's has `errno: undefined`)",
-        "On Windows the resolver runs on c-ares' own event thread and is compile-checked only"
+        "A resolve error has no `errno` key (Node's has `errno: undefined`)"
       ],
       "seeAlso": [
         "nodecore.net"

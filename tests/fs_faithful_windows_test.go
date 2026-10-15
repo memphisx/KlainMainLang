@@ -99,7 +99,9 @@ console.log(process.env.KML_UNI_OUT)
 // link that needs no privilege (so this runs without Developer Mode, unlike a
 // symlink). It reads back as a symbolic link to the absolute target, resolves
 // through, and unlinks without touching the target. A relative target is
-// resolved against the link's own directory.
+// resolved against the link's own directory. readlink gives the target
+// without the separator a junction is stored with, and a junction whose
+// target is gone does not exist (existsSync follows it, as Node does).
 func TestE2EWinSymlinkJunction(t *testing.T) {
 	dir, err := filepath.EvalSymlinks(tempDir(t))
 	if err != nil {
@@ -116,11 +118,13 @@ symlinkSync(root + "/real", root + "/abs-j", 'junction')
 symlinkSync("real", root + "/rel-j", 'junction')
 console.log(lstatSync(root + "/abs-j").isSymbolicLink(), lstatSync(root + "/abs-j").isDirectory())
 console.log(readFileSync(root + "/abs-j/f.txt", 'utf8'), readFileSync(root + "/rel-j/f.txt", 'utf8'))
-const want = path.resolve(root, "real") + path.sep
+const want = path.resolve(root, "real")
 console.log(readlinkSync(root + "/abs-j") === want, readlinkSync(root + "/rel-j") === want)
 unlinkSync(root + "/abs-j")
 console.log(existsSync(root + "/abs-j"), existsSync(root + "/real/f.txt"))
-`, "true false\nthrough through\ntrue true\nfalse true")
+symlinkSync(root + "/gone", root + "/dangling-j", 'junction')
+console.log(lstatSync(root + "/dangling-j").isSymbolicLink(), existsSync(root + "/dangling-j"))
+`, "true false\nthrough through\ntrue true\nfalse true\ntrue false")
 }
 
 // copyFileSync is the OS copy on Windows, so the destination carries the
@@ -198,4 +202,51 @@ for (const p of ["/w/loopa", "/w/dangling", "/w/missing"]) {
   try { fs.realpathSync(tmp + p); console.log("no throw"); } catch (e) { console.log((e as any).code); }
 }
 `, strings.Repeat(want+"\n", 4)+"ELOOP\nENOENT\nENOENT")
+}
+
+// copyFile onto a read-only destination is refused with EPERM and leaves the
+// destination as it was, as in Node — sync, callback and promise forms.
+func TestE2EWinCopyFileReadOnlyDestinationEPERM(t *testing.T) {
+	dir := tempDir(t)
+	d := filepath.ToSlash(dir)
+	assertOutputImports(t, `
+import fs from 'fs'
+const src = "`+d+`/src", dst = "`+d+`/dst"
+fs.writeFileSync(src, "source")
+fs.writeFileSync(dst, "dest")
+fs.chmodSync(dst, 0o444)
+try { fs.copyFileSync(src, dst); console.log("copied") } catch (e: any) { console.log(e.code, fs.readFileSync(dst, 'utf8')) }
+fs.copyFile(src, dst, (e) => {
+  console.log(e ? e.code : "copied")
+  fs.promises.copyFile(src, dst).then(() => console.log("copied"), (e: any) => console.log(e.code))
+})
+`, "EPERM dest\nEPERM\nEPERM")
+}
+
+// realpathSync walks a UNC path from its `\\server\share` root (Node's
+// splitRootRe); the root was taken as a lone separator, so the server name
+// was looked up on the current drive.
+func TestE2EWinRealpathUNC(t *testing.T) {
+	host, err := os.Hostname()
+	if err != nil {
+		t.Fatal(err)
+	}
+	share := `\\` + host + `\c$\Windows`
+	if _, err := os.Stat(share); err != nil {
+		t.Skipf("administrative share not reachable here: %v", err)
+	}
+	// The program's paths are built from String.fromCharCode(92) so no
+	// escaping layer can disturb them.
+	assertOutputImports(t, `
+import fs from 'fs'
+const b = String.fromCharCode(92)
+const h = "`+host+`"
+const root = b + b + h + b + "c$" + b
+const cases: string[][] = [
+  ["//" + h + "/c$/Windows", root + "Windows"],
+  [root, root],
+  ["//" + h + "/c$/", root],
+]
+for (const c of cases) console.log(fs.realpathSync(c[0]).toLowerCase() === c[1].toLowerCase())
+`, "true\ntrue\ntrue")
 }

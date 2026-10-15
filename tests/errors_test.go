@@ -131,19 +131,19 @@ func TestE2EUncaughtErrorSubtypePrintsMessage(t *testing.T) {
 	// Regression guard for runtime_exceptions.go's hand-written uncaught-path
 	// GEP, which reads errorObjType's message field by hardcoded index —
 	// easy to silently desync from errorObjType's layout. The uncaught
-	// message goes to stdout (@printf, not @dprintf) — existing behavior,
-	// unrelated to this change.
+	// message goes to stderr, as Node's does, and nothing to stdout.
 	bin := buildBinary(t, `throw new TypeError('boom')`)
 	cmd := exec.Command(bin)
-	var stdout strings.Builder
+	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Run()
 	if _, ok := err.(*exec.ExitError); !ok {
 		t.Fatalf("expected a non-zero exit for an uncaught error, got: %v", err)
 	}
 	want := "Uncaught: boom\n"
-	if stdout.String() != want {
-		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
+	if stderr.String() != want || stdout.String() != "" {
+		t.Fatalf("stdout = %q, stderr = %q, want stderr %q", stdout.String(), stderr.String(), want)
 	}
 }
 

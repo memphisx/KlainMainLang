@@ -140,7 +140,7 @@ func TestE2EFetchOwnServerFromCallback(t *testing.T) {
 import http from 'http'
 import type { AddressInfo } from 'net'
 const server = http.createServer((req, res) => { res.end('pong:' + req.url) })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const addr = server.address() as AddressInfo
   fetch('http://127.0.0.1:' + addr.port + '/ping')
     .then((r) => r.text())

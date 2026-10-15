@@ -331,6 +331,13 @@ static void *failure_cause(void *easy, int code) {
     long oserr = 0, port = 0;
     char *ip = 0;
     curl_easy_getinfo(easy, CURLINFO_OS_ERRNO, &oserr);
+#ifdef _WIN32
+    /* libcurl reports the Winsock code (WSAECONNREFUSED, 10061). */
+    {
+        extern int __kml_win_wsa_errno(int wsa);
+        if (oserr >= 10000) oserr = __kml_win_wsa_errno((int)oserr);
+    }
+#endif
     curl_easy_getinfo(easy, CURLINFO_PRIMARY_IP, &ip);
     curl_easy_getinfo(easy, CURLINFO_PRIMARY_PORT, &port);
     const char *ecode = oserr ? (const char *)__kml_errno_code((int)oserr) : 0;
@@ -392,7 +399,6 @@ extern void *curl_multi_init(void);
 extern int curl_multi_add_handle(void *, void *);
 extern int curl_multi_remove_handle(void *, void *);
 extern void *curl_multi_info_read(void *, int *);
-extern int curl_multi_fdset(void *, void *, void *, void *, int *);
 extern int curl_multi_timeout(void *, long *);
 extern i64 __kml_monotonic_ns(void);
 extern _Thread_local void *__kml_curl_multi;
@@ -403,7 +409,15 @@ extern _Thread_local void *__kml_conn_data;
 extern _Thread_local i64 __kml_current_conn_idx;
 extern _Thread_local int __kml_jmp_top;
 extern int swapcontext(void *, void *);
-extern void __kml_wait_outside_coroutine(void);
+/* A wait with nothing to park: no coroutine, no async generator step, no
+ * connection fiber. Every async callable that waits is a coroutine
+ * (TDD-00223 section 2) and the module body with a top-level await is a
+ * task (TDD-00224), so reaching this is a compiler bug. Each runtime file
+ * that waits has its own copy, so none names another (TDD-00251). */
+static void __kml_wait_outside_coroutine(void) {
+    fputs("internal error: a wait outside a coroutine inside an event-loop callback\n", stderr);
+    abort();
+}
 extern int __kml_signal_aborted(void *sig);
 extern i64 __kml_signal_reason(void *sig);
 extern int __kml_signal_timeout(void *sig);
@@ -412,14 +426,14 @@ extern i64 __kml_nb_pay(i64);
 extern void __kml_throw_any(u8 tag, i64 pay) __attribute__((noreturn));
 extern void __kml_fetch_body_abort(void *pend, void *err);
 extern void __kml_drain_microtasks(void);
-/* The task runtime's definitions replace these when the program has tasks
- * (and, for the GC restore, -mm=gc); without them no task ever runs. */
-_Thread_local void *__kml_current_task __attribute__((weak)) = 0;
-__attribute__((weak)) void __kml_task_gc_restore(void) {}
-/* The Response-body-promise drain (promise runtime) replaces this when a
- * body accessor made one. */
-__attribute__((weak)) void __kml_fetch_bodyprom_on_done(void *pend) { (void)pend; }
-#define GC_RESTORE() __kml_task_gc_restore()
+/* The current task (hooks.c's), and two routines other runtime files
+ * register in hooks.c when they are linked: the task runtime's GC restore
+ * under -mm=gc, and the Response-body-promise drain (TDD-00251). Without
+ * them no task runs and no body promise waits. */
+extern _Thread_local void *__kml_current_task;
+extern void (*__kml_hook_task_gc_restore)(void);
+extern void (*__kml_hook_fetch_bodyprom_on_done)(void *);
+#define GC_RESTORE() __kml_hook_task_gc_restore()
 
 #define T_CTX(t) F(t, KML_TASK_CTX, void *)
 #define T_STATE(t) F(t, KML_TASK_STATE, i64)
@@ -497,23 +511,64 @@ void __kml_fetch_throw_abort(void *sig) {
 }
 
 /* ---- driving libcurl ----
- * On POSIX libcurl is driven through its socket API (TDD-00244 Stage 3):
+ * libcurl is driven through its socket API (TDD-00244 Stage 3):
  * it reports the sockets it waits on and its next deadline through
  * CURLMOPT_SOCKETFUNCTION / CURLMOPT_TIMERFUNCTION, and every drive is a
  * curl_multi_socket_action. Each reported socket is a libuv watcher and the
  * deadline a libuv timer on the event loop (loop.c), whose callbacks drive
  * libcurl inside the wait (no FD_SETSIZE ceiling: curl_multi_fdset cannot
  * report a socket at or above it); a wait outside the loop polls the
- * sockets itself. Windows keeps
- * curl_multi_fdset/curl_multi_perform until its loop moves to libuv
- * (TDD-00244 Stage 6): its sockets are Winsock handles, not small fds. */
-#ifndef _WIN32
+ * sockets itself. On Windows (TDD-00252) a socket libcurl reports is a
+ * Winsock SOCKET in both link modes (libcurl calls Winsock, not the shim),
+ * which the watch and the outside wait take as it is. */
+#ifdef _WIN32
+/* Winsock's pollfd and POLL* (ws2tcpip.h) take a SOCKET: this file's poll
+ * keeps libcurl's own socket values and the 1/2/4 bits. */
+#undef POLLIN
+#undef POLLOUT
+#undef POLLERR
+#undef POLLHUP
+#define POLLIN 1
+#define POLLOUT 2
+#define POLLERR 4
+#define POLLHUP 4
+#define pollfd kml_curl_pollfd
+#define poll kml_curl_poll
+struct pollfd { int fd; short events, revents; };
+extern void *__kml_loop_sock_watch(intptr_t sock, int fd, int events, void (*cb)(void *, int, int), void *data);
+extern int __kml_win_poll_sockets(const intptr_t *socks, const int *want, int *got, int n, int ms);
+static intptr_t curl_os_sock(int s) { return (intptr_t)s; }
+/* poll(2) over libcurl's sockets, in the 1/2/4 bits above. */
+static int poll(struct pollfd *pfd, unsigned n, int ms) {
+    intptr_t socks[64];
+    int want[64], got[64];
+    if (n > 64) n = 64;
+    for (unsigned i = 0; i < n; i++) {
+        socks[i] = curl_os_sock(pfd[i].fd);
+        want[i] = pfd[i].events;
+    }
+    int r = __kml_win_poll_sockets(socks, want, got, (int)n, ms);
+    for (unsigned i = 0; i < n; i++)
+        pfd[i].revents = r > 0 ? (short)got[i] : 0;
+    return r;
+}
+#else
 #include <poll.h>
+#endif
 #define CURLMOPT_SOCKETFUNCTION 20001
 #define CURLMOPT_TIMERFUNCTION 20004
 #define CURL_SOCKET_TIMEOUT (-1)
 extern int curl_multi_setopt(void *, int, ...);
+extern int curl_multi_socket_all(void *, int *);
+/* curl_socket_t: a SOCKET (64-bit) on Windows, where CURL_SOCKET_TIMEOUT is
+ * ~0; an int passed there would reach libcurl as 0xFFFFFFFF, an unknown
+ * socket, and the timeout (a finished resolve among it) never runs. */
+#ifdef _WIN32
+extern int kml_curl_multi_socket_action(void *, intptr_t, int, int *) __asm__("curl_multi_socket_action");
+#define curl_multi_socket_action(m, s, ev, run) kml_curl_multi_socket_action((m), (intptr_t)(s), (ev), (run))
+#else
 extern int curl_multi_socket_action(void *, int, int, int *);
+#endif
 
 typedef struct { int fd, what; void *uvw; } curl_watch;
 extern void *__kml_loop_io_watch(int fd, int events, void (*cb)(void *, int, int), void *data);
@@ -550,7 +605,11 @@ static int on_curl_socket(void *easy, int fd, int what, void *userp, void *sockp
     }
     watches[nwatches].fd = fd;
     watches[nwatches].what = what;
+#ifdef _WIN32
+    watches[nwatches].uvw = __kml_loop_sock_watch(curl_os_sock(fd), fd, what, on_curl_io, 0);
+#else
     watches[nwatches].uvw = __kml_loop_io_watch(fd, what, on_curl_io, 0);
+#endif
     nwatches++;
     return 0;
 }
@@ -593,6 +652,10 @@ static void on_curl_io(void *data, int fd, int ev) {
 
 static void on_curl_due(void *unused) {
     (void)unused;
+    /* libcurl 8.20's resolver thread pool hands its results back only when
+     * every handle is processed; a timeout action alone leaves a finished
+     * lookup waiting until the transfer times out (TDD-00252). */
+    curl_multi_socket_all(__kml_curl_multi, &curl_running);
     curl_deadline = 0;
     act(CURL_SOCKET_TIMEOUT, 0);
     __kml_curl_drain_messages();
@@ -637,17 +700,6 @@ static void drive_once(int max_ms) {
     kick();
     __kml_curl_drain_messages();
 }
-#else
-extern int curl_multi_wait(void *, void *, unsigned, int, int *);
-static _Thread_local int curl_running;
-static void *multi_new(void) { return curl_multi_init(); }
-static void kick(void) { curl_multi_perform(__kml_curl_multi, &curl_running); }
-static void drive_once(int max_ms) {
-    kick();
-    __kml_curl_drain_messages();
-    if (max_ms > 0) curl_multi_wait(__kml_curl_multi, 0, 0, max_ms, 0);
-}
-#endif
 
 /* One drive and drain with no wait: the scheduler's and the loop's
  * keep-alive check's hook. It polls libcurl's sockets without blocking, as
@@ -683,25 +735,6 @@ int __kml_curl_inflight(void) {
  * deadline (0 for none), and one drive after the wait. */
 _Bool __kml_curl_loop_active(void) { return __kml_curl_multi != 0; }
 
-#ifdef _WIN32
-int __kml_curl_loop_fdset(void *r, void *w, void *e, int *maxfd) {
-    return curl_multi_fdset(__kml_curl_multi, r, w, e, maxfd);
-}
-
-i64 __kml_curl_loop_deadline_ns(void) {
-    long ms = -1;
-    curl_multi_timeout(__kml_curl_multi, &ms);
-    if (ms < 0) return 0;
-    i64 dl = __kml_monotonic_ns() + (i64)ms * 1000000;
-    return dl == 0 ? 1 : dl;
-}
-
-void __kml_curl_loop_perform(void *r, void *w) {
-    (void)r; (void)w;
-    kick();
-    __kml_curl_drain_messages();
-}
-#endif
 
 /* Starts a transfer without blocking and returns its pending struct. method/
  * headers/body are each nullable (a null skips the setopt); headers is a
@@ -834,7 +867,7 @@ void __kml_curl_drain_messages(void) {
         curl_easy_cleanup(easy);
         p->done = 1;
         __kml_fetch_body_on_done(p);
-        __kml_fetch_bodyprom_on_done(p);
+        __kml_hook_fetch_bodyprom_on_done(p);
     }
 }
 

@@ -163,6 +163,22 @@ attempt('{"x":1,"y":2}')
 `, "reject\nreject\nreject\nreject\nreject\nok")
 }
 
+// A large document of many strings is built and parsed in memory proportional
+// to it. `join` once concatenated into an accumulator (a new string per
+// element, ~8 GB committed here), and each parsed string's buffer was sized
+// by the rest of the input (~6 GB); Windows counts both, the test job caps a
+// process at 4 GB, and the parser's failed allocation surfaced as a
+// SyntaxError. Escapes still decode.
+func TestE2EJSONParseManyStringsBoundedMemory(t *testing.T) {
+	assertSameAsNode(t, `
+const parts: string[] = []
+for (let i = 0; i < 20000; i++) parts.push('{"k":"v' + i + '\\u00e9\\n"}')
+const text = "[" + parts.join(",") + "]"
+const v: any = JSON.parse(text)
+console.log(text.length > 400000, v.length, JSON.stringify(v[19999].k), JSON.stringify(v[0].k))
+`)
+}
+
 func TestE2EJSONParseValidStillWorks(t *testing.T) {
 	// Regression: valid documents (incl. escapes and a float field) still parse
 	// through the existing projection after validation.

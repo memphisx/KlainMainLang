@@ -118,8 +118,7 @@
               "`getpriority`/`setpriority` (Windows: the priority class, mapped as libuv does); Node's argument validation, and `ERR_SYSTEM_ERROR` with the failed call's `info` on failure"
             ],
             "caveats": [
-              "The error's `errno`/`syscall` are copies of `info`'s, not accessors over it",
-              "Windows' priority-class mapping is compile-checked only"
+              "The error's `errno`/`syscall` are copies of `info`'s, not accessors over it"
             ]
           },
           {

@@ -19,16 +19,11 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 		srcElemTy   Type   // array part's own element type
 		scalar      *Value // scalar part (length 1)
 	}
-	// `[].concat(…)`: tsc types the empty literal never[]; its elements
-	// are whatever the arguments bring, so an `any` argument makes it any[].
-	if lit, ok := mem.Object.(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 && !elemTy.IsDynamic {
-		for _, arg := range args {
-			if e.inferExprType(arg).IsDynamic {
-				elemTy = TypeAny
-				break
-			}
-		}
-	}
+	// An `any` argument may hold an array to spread or any other value, so
+	// the result is an any[] (concatWidensToAny); the receiver's own
+	// elements are boxed into it.
+	srcElemTy := elemTy
+	elemTy = e.concatElemType(mem.Object, elemTy, args)
 	var parts []concatPart
 	for _, arg := range args {
 		if argTy := e.inferExprType(arg); argTy.IsDynamic && elemTy.IsDynamic {
@@ -76,9 +71,13 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", totalBytes, newLen, elemTy.Align()))
 	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, totalBytes))
 
-	bytes1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes1, lenReg1, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg1, bytes1))
+	if elemTy.IsDynamic && !srcElemTy.IsDynamic {
+		e.emitBoxCopyLoop(newPtr, ptrReg1, lenReg1, srcElemTy)
+	} else {
+		bytes1 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes1, lenReg1, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg1, bytes1))
+	}
 
 	off := lenReg1
 	for _, p := range parts {
@@ -109,6 +108,50 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
 	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, newLen))
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// concatElemType is the element type of recv.concat(args) over recv's
+// elemTy: an `any` argument makes an any[] (concatWidensToAny); an empty
+// literal receiver takes its arguments' element type, the one they share or
+// any, under -compat=js only: to tsc it is never[], and the strict lane
+// rejects what tsc does.
+func (e *Emitter) concatElemType(recv ast.Expression, elemTy Type, args []ast.Expression) Type {
+	if e.concatWidensToAny(elemTy, args) {
+		return TypeAny
+	}
+	lit, ok := recv.(*ast.ArrayLiteral)
+	if !ok || len(lit.Elements) != 0 || len(args) == 0 || !e.compatJS() {
+		return elemTy
+	}
+	var shared *Type
+	for _, arg := range args {
+		t := e.inferExprType(arg)
+		if t.IsArray && t.ElemType != nil {
+			t = *t.ElemType
+		}
+		if shared == nil {
+			shared = &t
+		} else if arrayStorageKey(ArrayOf(*shared)) != arrayStorageKey(ArrayOf(t)) {
+			return TypeAny
+		}
+	}
+	return *shared
+}
+
+// concatWidensToAny reports whether Array.prototype.concat over elements of
+// elemTy with args makes an any[]: an `any` argument is spread when it holds
+// an array (IsConcatSpreadable) and appended otherwise, whatever it holds,
+// which only boxed elements can carry.
+func (e *Emitter) concatWidensToAny(elemTy Type, args []ast.Expression) bool {
+	if elemTy.IsDynamic {
+		return false
+	}
+	for _, arg := range args {
+		if e.inferExprType(arg).IsDynamic {
+			return true
+		}
+	}
+	return false
 }
 
 // emitConcatAnyPart is concat's view of an `any` argument: an Array's

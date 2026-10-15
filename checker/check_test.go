@@ -175,6 +175,11 @@ func TestCheck(t *testing.T) {
 		{"const o = { get p() { return 1; } };\nconst n: string = o.p;\nexport {}", "2:TS2322"},
 		// A primitive redeclared as an object type (TS2403).
 		{"var x = 1;\nvar x = { y: 1 };\nexport {}", "2:TS2403"},
+		// Object literals whose methods return different types; the same
+		// shape again is no error.
+		{"var o = { f: function() { return 1 } };\nvar o = { f: function() { return {} } };\nexport {}", "2:TS2403"},
+		{"var o = { f: function() { return 1 } };\nvar o = { f: function() { return \"s\" } };\nexport {}", "2:TS2403"},
+		{"var o = { f: function() { return 1 } };\nvar o = { f: function() { return 2 } };\nexport {}", ""},
 		// An evolving `[]` array: its element type grows by push/unshift
 		// and element stores along the flow.
 		{"function f() { const a = []; a.push(1); a.push(\"s\"); const x: boolean = a; }\nexport {}", "1:TS2322"},

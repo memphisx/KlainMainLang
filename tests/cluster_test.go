@@ -40,7 +40,7 @@ if (cluster.isPrimary) {
 } else {
   http.listen(8793, (req: HttpRequest): Res => {
     return { status: 200, body: "served by worker " + (cluster.worker?.id ?? 0) }
-  })
+  }, { host: '127.0.0.1' })
 }
 `
 	port := startHTTPClusterServer(t, src, 8793)
@@ -167,7 +167,7 @@ if (cluster.isPrimary) {
   cluster.fork()
 } else {
   const server = net.createServer((s) => { s.end('w' + cluster.worker!.id) })
-  server.listen(8159)
+  server.listen(8159, '127.0.0.1')
   process.on('message', (m) => { if (m === 'bye') cluster.worker!.disconnect() })
 }
 `)
@@ -205,7 +205,7 @@ if (cluster.isPrimary) {
 } else {
   console.log("argv " + process.argv[2] + " " + process.argv[3])
   const server = http.createServer((req, res) => { res.end("hi " + req.url) })
-  server.listen(8153)
+  server.listen(8153, '127.0.0.1')
 }
 `)
 }

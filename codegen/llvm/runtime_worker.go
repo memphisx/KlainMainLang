@@ -106,7 +106,6 @@ func (e *Emitter) ensureWorkerRuntime() {
 	}
 	e.usedWorkerRuntime = true
 	e.ensureExit()
-	e.ensureWorkerFdSetbit()
 	e.ensureTaskRuntime()
 	// klainpool.c's worker natives, and worker.c's own entry points.
 	e.emitGlobal(`declare void @__kml_worker_register(ptr, ptr, ptr)
@@ -142,35 +141,4 @@ worker:
   %%rec = insertvalue { i8, i64 } %%rec0, i64 %%pay, 1
 %s}
 `, body))
-}
-
-// ensureWorkerFdSetbit emits the fd_set bit-set helper exactly once — used
-// by both the worker and channel event-loop hooks.
-func (e *Emitter) ensureWorkerFdSetbit() {
-	if e.usedWorkerFdSetbit {
-		return
-	}
-	e.usedWorkerFdSetbit = true
-	e.emitGlobal(`define void @__kml_worker_fd_setbit(i32 %fd, ptr %fdset, ptr %maxfd) {
-entry:
-  %fddiv8 = sdiv i32 %fd, 8
-  %fdmod8 = srem i32 %fd, 8
-  %fddiv8_64 = sext i32 %fddiv8 to i64
-  %byteptr = getelementptr i8, ptr %fdset, i64 %fddiv8_64
-  %bitpos8 = trunc i32 %fdmod8 to i8
-  %bitmask = shl i8 1, %bitpos8
-  %oldbyte = load i8, ptr %byteptr, align 1
-  %newbyte = or i8 %oldbyte, %bitmask
-  store i8 %newbyte, ptr %byteptr, align 1
-  %curmax = load i32, ptr %maxfd, align 4
-  %bigger = icmp sgt i32 %fd, %curmax
-  br i1 %bigger, label %update, label %done
-
-update:
-  store i32 %fd, ptr %maxfd, align 4
-  br label %done
-
-done:
-  ret void
-}`)
 }

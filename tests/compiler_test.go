@@ -222,7 +222,15 @@ func buildBinary(t *testing.T, src string) string {
 		t.Skip("clang not found in PATH")
 	}
 
-	prog, err := parseStrict(src)
+	// Through the resolver, as every real compile is: top-level names are
+	// module-mangled, so a test program's `function read()` cannot meet the C
+	// library's or the Windows shim's (ADR-01597).
+	dir := tempDir(t)
+	srcFile := filepath.Join(dir, "main.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	prog, err := resolver.ResolveProgram(srcFile)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -234,7 +242,6 @@ func buildBinary(t *testing.T, src string) string {
 		t.Fatalf("codegen: %v", err)
 	}
 
-	dir := tempDir(t)
 	llFile := filepath.Join(dir, "prog.ll")
 	binFile := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
 
@@ -444,6 +451,9 @@ func buildBinaryFromFileCrypto(t *testing.T, srcFile, cryptoBackend string) stri
 	if cryptoBackend == "commoncrypto" && runtime.GOOS != "darwin" {
 		t.Skip("-crypto=commoncrypto is macOS-only")
 	}
+	if cryptoBackend == "cng" && runtime.GOOS != "windows" {
+		t.Skip("-crypto=cng is Windows-only")
+	}
 
 	prog, err := resolver.ResolveProgram(srcFile)
 	if err != nil {
@@ -641,17 +651,7 @@ func assertOutputImportsEnv(t *testing.T, src, want string, overrides ...string)
 func compileAndRunExpectExitImports(t *testing.T, src string) (string, int) {
 	t.Helper()
 	binFile := buildBinaryImports(t, src)
-	cmd := exec.Command(binFile)
-	var stdout strings.Builder
-	cmd.Stdout = &stdout
-	err := cmd.Run()
-	exitCode := 0
-	if exitErr, ok := err.(*exec.ExitError); ok {
-		exitCode = exitErr.ExitCode()
-	} else if err != nil {
-		t.Fatalf("run: %v", err)
-	}
-	return strings.TrimRight(stdout.String(), "\n"), exitCode
+	return runExpectExit(t, binFile)
 }
 
 // parseAndCompileImports is parseAndCompile's counterpart for source using
@@ -708,7 +708,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
-	skipSanitizersOnWindows(t)
+	requireSanitizers(t)
 
 	prog, err := parseStrict(src)
 	if strings.Contains(src, "import ") {
@@ -751,10 +751,7 @@ func buildBinaryASan(t *testing.T, src string) string {
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
-	out, err := llvm.ClangCommand(clangArgs...).CombinedOutput()
-	if err != nil {
-		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
-	}
+	clangSanitized(t, binFile, clangArgs)
 	return binFile
 }
 
@@ -1113,7 +1110,7 @@ func assertOutputCompatJS(t *testing.T, src, want string) {
 }
 
 // buildBinaryCryptoMode is buildBinary with an explicit `-crypto` backend
-// (TDD-00104: "openssl" or "commoncrypto"). Mirrors main.go's
+// (TDD-00104: "openssl", "commoncrypto" or "cng"). Mirrors main.go's
 // em.SetCryptoBackend() so the backend-matrix Web Crypto tests exercise each
 // library; skips (not fails) when the backend isn't installed/applicable.
 func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
@@ -1123,6 +1120,9 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	}
 	if backend == "commoncrypto" && runtime.GOOS != "darwin" {
 		t.Skip("-crypto=commoncrypto is macOS-only")
+	}
+	if backend == "cng" && runtime.GOOS != "windows" {
+		t.Skip("-crypto=cng is Windows-only")
 	}
 	prog, err := parseStrict(src)
 	if err != nil {
@@ -1210,9 +1210,18 @@ func compileAndRunWithArgs(t *testing.T, src string, args ...string) string {
 func compileAndRunExpectExit(t *testing.T, src string) (string, int) {
 	t.Helper()
 	binFile := buildBinary(t, src)
+	return runExpectExit(t, binFile)
+}
+
+// runExpectExit runs a binary expected to fail and returns its exit code and
+// what a terminal would show: stdout, then stderr, where an uncaught error is
+// reported (the runtime flushes stdout before writing it).
+func runExpectExit(t *testing.T, binFile string) (string, int) {
+	t.Helper()
 	cmd := exec.Command(binFile)
-	var stdout strings.Builder
+	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 	err := cmd.Run()
 	exitCode := 0
 	if exitErr, ok := err.(*exec.ExitError); ok {
@@ -1220,7 +1229,7 @@ func compileAndRunExpectExit(t *testing.T, src string) (string, int) {
 	} else if err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	return strings.TrimRight(stdout.String(), "\n"), exitCode
+	return strings.TrimRight(stdout.String()+stderr.String(), "\n"), exitCode
 }
 
 // compileAndRunCaptureStderr is like compileAndRun but returns stdout and
@@ -1290,8 +1299,10 @@ func runNodeTS(t *testing.T, src string) string {
 	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
 		t.Fatalf("write prog.ts: %v", err)
 	}
+	// Node runs in the test's own working directory, as the compiled program
+	// does: a relative path, or on Windows a drive-less '/x', resolves the
+	// same for both.
 	cmd := exec.Command(bin, "--experimental-strip-types", "--no-warnings", file)
-	cmd.Dir = dir
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	raw, err := cmd.Output()
@@ -1342,6 +1353,21 @@ func assertSameAsNodeCompatJS(t *testing.T, src string) {
 	if ours != theirs {
 		t.Fatalf("output differs from node:\n--- ours ---\n%s\n--- node ---\n%s", ours, theirs)
 	}
+}
+
+// winPaths rewrites each POSIX path in want ("/nope") the way Node on Windows
+// reports a failed fs call's path: resolved against the current drive, with
+// backslashes ("C:\nope"). Elsewhere want is unchanged.
+func winPaths(want string, paths ...string) string {
+	if runtime.GOOS != "windows" {
+		return want
+	}
+	cwd, _ := os.Getwd()
+	vol := filepath.VolumeName(cwd)
+	for _, p := range paths {
+		want = strings.ReplaceAll(want, p, vol+strings.ReplaceAll(p, "/", `\`))
+	}
+	return want
 }
 
 // compareLines compares got against want line by line so individual
@@ -1402,13 +1428,99 @@ func skipPOSIXToolsOnWindows(t *testing.T, why string) {
 	}
 }
 
-// skipSanitizersOnWindows: LLVM's Windows release ships the ASan/UBSan
-// runtime only for the MSVC target; the mingw-w64 target this port builds
-// for has none, so -fsanitize builds cannot link there (TDD-00177).
-func skipSanitizersOnWindows(t *testing.T) {
+// requireSanitizers skips when no clang with an ASan/UBSan runtime is
+// installed: on Windows that is MSYS2's CLANG64 clang (llvm.SanitizerClang),
+// not the UCRT64 one the rest of the build uses.
+func requireSanitizers(t *testing.T) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("no ASan/UBSan runtime for the mingw-w64 target in LLVM's Windows build")
+	if !sanitizersLink() {
+		t.Skip("no ASan/UBSan runtime: install clang's compiler-rt (Debian/Ubuntu: libclang-rt-<N>-dev; Windows: MSYS2's mingw-w64-clang-x86_64-clang and mingw-w64-clang-x86_64-compiler-rt)")
+	}
+}
+
+var (
+	sanitizersOnce sync.Once
+	sanitizersOK   bool
+)
+
+// sanitizersLink reports, once per run, whether a sanitizer build links here:
+// a clang can be present without its runtime libraries (a slim CI image).
+func sanitizersLink() bool {
+	sanitizersOnce.Do(func() {
+		clang, extraArgs, _, ok := llvm.SanitizerClang()
+		if !ok {
+			return
+		}
+		dir, err := os.MkdirTemp("", "kml-sanprobe")
+		if err != nil {
+			return
+		}
+		defer os.RemoveAll(dir)
+		src := filepath.Join(dir, "p.c")
+		if os.WriteFile(src, []byte("int main(void) { return 0; }\n"), 0644) != nil {
+			return
+		}
+		args := append(extraArgs, "-fsanitize=address", "-fsanitize=undefined", src, "-o", filepath.Join(dir, "p"+llvm.HostExeSuffix()))
+		cmd := llvm.ClangCommand(args...)
+		cmd.Path, cmd.Args[0] = clang, clang
+		sanitizersOK = cmd.Run() == nil
+	})
+	return sanitizersOK
+}
+
+// TestSanitizersReport: the sanitizer build the ASan tests use reports a
+// seeded heap overflow and a signed overflow, so a clean ASan test means a
+// clean program and not a silent sanitizer (on Windows, MSYS2's CLANG64
+// runtime against the UCRT64 libraries, llvm.SanitizerClang).
+func TestSanitizersReport(t *testing.T) {
+	requireSanitizers(t)
+	dir := tempDir(t)
+	src := filepath.Join(dir, "bug.c")
+	writeFile(t, src, `#include <stdio.h>
+#include <stdlib.h>
+#include <limits.h>
+int main(int argc, char **argv) {
+  (void)argv;
+  int x = INT_MAX;
+  x += argc;
+  printf("%d\n", x);
+  int *a = malloc(4 * sizeof(int));
+  a[argc + 3] = 1;
+  free(a);
+  return 0;
+}
+`)
+	bin := filepath.Join(dir, "bug"+llvm.HostExeSuffix())
+	clangSanitized(t, bin, []string{"-O1", "-g", "-fsanitize=address", "-fsanitize=undefined", src, "-o", bin})
+	out, err := exec.Command(bin).CombinedOutput()
+	got := string(out)
+	if err == nil || !strings.Contains(got, "runtime error: signed integer overflow") ||
+		!strings.Contains(got, "AddressSanitizer: heap-buffer-overflow") {
+		t.Fatalf("want a UBSan and an ASan report and a failing exit, got err=%v:\n%s", err, got)
+	}
+}
+
+// clangSanitized runs a sanitizer build of binFile (llvm.SanitizerClang) and
+// puts the runtime files the program loads beside it.
+func clangSanitized(t *testing.T, binFile string, args []string) {
+	t.Helper()
+	clang, extraArgs, runtimeFiles, ok := llvm.SanitizerClang()
+	if !ok {
+		t.Skip("no ASan/UBSan runtime")
+	}
+	cmd := llvm.ClangCommand(append(extraArgs, args...)...)
+	cmd.Path, cmd.Args[0] = clang, clang
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("clang: %v\n%s", err, llvm.AnnotateClangOutput(out))
+	}
+	for _, f := range runtimeFiles {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("sanitizer runtime: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(filepath.Dir(binFile), filepath.Base(f)), b, 0755); err != nil {
+			t.Fatalf("sanitizer runtime: %v", err)
+		}
 	}
 }
 

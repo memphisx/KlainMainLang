@@ -24,12 +24,18 @@ var httpSrvSource string
 func HTTPSrvSource() string { return httpSrvSource }
 
 // LocateUV returns the cflags and libs that compile and link against libuv:
-// pkg-config's, or a bare -luv. Windows keeps its select() emulation until
-// TDD-00244 Stage 6 and links nothing. A cross build takes a bare -luv, which
+// pkg-config's, or a bare -luv. On Windows (TDD-00252) the ucrt64 sysroot's
+// libuv, static under --static like the other feature libraries, with the
+// system libraries its libuv.pc names. A cross build takes a bare -luv, which
 // --sysroot resolves: the host's pkg-config names the host's copy.
 func LocateUV(goos string, cross bool) (cflags, libs []string) {
 	if goos == "windows" {
-		return nil, nil
+		uv := "-luv"
+		if staticLinkMode {
+			uv = "-l:libuv.a"
+		}
+		return nil, []string{uv, "-lpsapi", "-luser32", "-ladvapi32", "-liphlpapi",
+			"-luserenv", "-lws2_32", "-ldbghelp", "-lole32", "-lshell32"}
 	}
 	if cross {
 		return nil, []string{"-luv"}

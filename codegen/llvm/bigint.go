@@ -3,6 +3,7 @@ package llvm
 import (
 	_ "embed"
 	"os/exec"
+	"runtime"
 	"strings"
 )
 
@@ -35,10 +36,15 @@ func BigIntBackendSource(backend string) (string, bool) {
 }
 
 func bigIntLinkLib(backend string) string {
+	lib := "tommath"
 	if backend == "gmp" {
-		return "-lgmp"
+		lib = "gmp"
 	}
-	return "-ltommath"
+	// A self-contained Windows build takes the archive (TDD-00253).
+	if winSelfContained(runtime.GOOS) {
+		return "-l:lib" + lib + ".a"
+	}
+	return "-l" + lib
 }
 
 // LocateBigInt returns the clang cflags/libs to compile and link the selected

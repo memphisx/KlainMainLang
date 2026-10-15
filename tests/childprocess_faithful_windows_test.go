@@ -44,8 +44,10 @@ int main(int argc, char **argv) {
 }
 
 // A custom `env` replaces the child's environment, but the block the child
-// receives is sorted case-insensitively, de-duplicated (first spelling wins),
-// and still carries the variables Windows programs cannot start without.
+// receives is sorted case-insensitively and de-duplicated, and still carries
+// the variables Windows programs cannot start without. Node sorts the keys
+// with a plain string sort first, so of `Alpha` and `ALPHA` the upper-case
+// spelling is the one kept (checked against Node 24).
 func TestE2EWinSpawnEnvBlockSortedDedupedWithRequired(t *testing.T) {
 	dir := tempDir(t)
 	exe := filepath.ToSlash(buildEnvDumper(t, dir, "envdump"))
@@ -62,10 +64,10 @@ c.on('close', () => { console.log(buf.split(/\r?\n/).filter((l) => l.length > 0)
 	for i, n := range names {
 		idx[n] = i
 	}
-	if _, ok := idx["ALPHA"]; ok {
-		t.Errorf("duplicate key ALPHA survived (first spelling should win): %v", names)
+	if _, ok := idx["Alpha"]; ok {
+		t.Errorf("duplicate key Alpha survived (ALPHA sorts first and wins): %v", names)
 	}
-	for _, want := range []string{"Alpha", "mid", "zeta", "SystemRoot", "PATH", "TEMP", "USERPROFILE"} {
+	for _, want := range []string{"ALPHA", "mid", "zeta", "SystemRoot", "PATH", "TEMP", "USERPROFILE"} {
 		found := false
 		for _, n := range names {
 			if strings.EqualFold(n, want) {
@@ -114,7 +116,7 @@ func TestE2EWinKillUnsupportedSignalIsENOSYS(t *testing.T) {
 import { spawn } from 'child_process'
 const c = spawn("cmd.exe", ["/d", "/c", "ping -n 30 127.0.0.1 >NUL"])
 try {
-  process.kill(c.pid, 'SIGHUP')
+  process.kill(c.pid!, 'SIGHUP')
   console.log("no throw")
 } catch (e: any) {
   console.log(e.code)

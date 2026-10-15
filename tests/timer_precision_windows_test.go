@@ -7,19 +7,15 @@ import (
 	"testing"
 )
 
-// timer_precision_windows_test.go — TDD-00183 Stage 4. The Windows event loop's
-// waits used to inherit the system timer resolution (~15.6 ms), so a 50 ms
-// setInterval fired every ~62 ms and twenty ticks took ~1250 ms. QPC deadlines
-// plus a high-resolution waitable timer (ADR-01024) bring it to the real
-// period. The loop has three distinct waits, and each is covered, because a fix
-// to one does not reach the others: a timers-only program sleeps in
-// nanosleep(); with a signal handler installed nanosleep() sleeps in slices
-// between signal checks; and once any descriptor is open the loop waits in the
-// reactor's select(). This is a coarse guard, not a tight timing test: the
-// pre-fix value was ~1250 ms and the post-fix value ~1010 ms on the dev box, so
-// a 1150 ms ceiling catches the regression with margin, and a 950 ms floor
-// catches an interval that fires too early. Windows-only: POSIX timers were
-// always precise, so guarding them here would only add CI jitter.
+// timer_precision_windows_test.go — Windows timers keep Node's timing. The
+// loop is libuv's (TDD-00252), whose Windows wait has the system timer's
+// resolution (~15.6 ms), as Node's does: twenty 50 ms intervals take about
+// 1250 ms under Node 24 on the dev box, and here. (ADR-01024's
+// high-resolution wait made them about 1010 ms, unlike Node.) Three programs,
+// one per kind of wait the loop used to have: timers only, a signal handler
+// installed, a socket open. The floor catches an interval that fires early;
+// the ceiling, a wait that loses whole ticks. Windows-only: POSIX timers do
+// not quantise this way.
 
 var elapsedRe = regexp.MustCompile(`elapsed=(\d+)`)
 
@@ -49,7 +45,7 @@ function done(): void { process.exit(0) }
 import * as http from "node:http"
 const server = http.createServer((req, res) => { res.end("ok") })
 function done(): void { server.close() }
-server.listen(0, () => {` + timerPrecisionTicks + `})
+server.listen(0, '127.0.0.1', () => {` + timerPrecisionTicks + `})
 `},
 	}
 	for _, c := range cases {
@@ -68,8 +64,8 @@ server.listen(0, () => {` + timerPrecisionTicks + `})
 			if ms < 950 {
 				t.Errorf("twenty 50ms intervals finished in %d ms (< 950): the interval is firing early", ms)
 			}
-			if ms > 1150 {
-				t.Errorf("twenty 50ms intervals took %d ms (> 1150): the wait is quantised to the ~15.6ms system tick, not the real deadline", ms)
+			if ms > 1400 {
+				t.Errorf("twenty 50ms intervals took %d ms (> 1400; Node takes about 1250): the wait loses whole ticks", ms)
 			}
 		})
 	}

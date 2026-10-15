@@ -203,6 +203,11 @@ export class DynamicLibrary {
     #callbacks = new Map<number, any>();
 
     constructor(path: string | null) {
+        // Node's Windows build opens no library for null (the process's own
+        // symbols are POSIX's dlopen(NULL)).
+        if (process.platform === 'win32' && typeof path !== 'string') {
+            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Library path must be a string');
+        }
         if (path !== null && path !== undefined && typeof path !== 'string') {
             throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Library path must be a string or null');
         }

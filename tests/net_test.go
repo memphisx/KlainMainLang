@@ -31,7 +31,7 @@ const server = net.createServer((socket) => {
     socket.write("echo:" + dec.decode(chunk))
   })
 })
-server.listen(8951, () => {})
+server.listen(8951, '127.0.0.1', () => {})
 `
 	port := startHTTPServer(t, src, 8951)
 
@@ -69,7 +69,7 @@ const server = net.createServer((socket) => {
     socket.write("echo:" + chunk)
   })
 })
-server.listen(8956, () => {})
+server.listen(8956, '127.0.0.1', () => {})
 `
 	port := startHTTPServer(t, src, 8956)
 
@@ -104,7 +104,7 @@ const server = net.createServer((socket) => {
     socket.write(dec.decode(chunk).toUpperCase())
   })
 })
-server.listen(8952, () => {})
+server.listen(8952, '127.0.0.1', () => {})
 `
 	port := startHTTPServer(t, src, 8952)
 
@@ -140,7 +140,7 @@ server.on('connection', (socket) => {
     socket.write("ok")
   })
 })
-server.listen(8953, () => {})
+server.listen(8953, '127.0.0.1', () => {})
 `
 	port := startHTTPServer(t, src, 8953)
 
@@ -309,7 +309,7 @@ const server = net.createServer((sock) => {
   sock.on('data', (c: Uint8Array) => { sock.write("pong") })
 })
 server.on('listening', () => { console.log("listening") })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const client = net.connect((server.address() as net.AddressInfo).port, "127.0.0.1", () => {
     const ca = client.address() as net.AddressInfo
     console.log("local", ca.address, ca.family, ca.port > 0)
@@ -343,7 +343,7 @@ const server = net.createServer((sock) => {
   sock.setNoDelay(true)
   sock.on('data', (c: Uint8Array) => { sock.write("ok") })
 })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const client = net.connect({ port: (server.address() as net.AddressInfo).port, host: "127.0.0.1" }, () => {
     client.setKeepAlive()
     client.write("go")
@@ -366,7 +366,7 @@ import net from 'net'
 const server = net.createServer((socket) => {
   socket.on('data', (c: string) => { socket.write("e:" + c); socket.end() })
 })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const sock = net.connect((server.address() as net.AddressInfo).port)
   sock.on('data', (c: string) => { console.log("got", c); server.close() })
   sock.write("hi")
@@ -380,7 +380,7 @@ func TestE2EDgramSocketAddress(t *testing.T) {
 	assertOutputImports(t, `
 import dgram from 'dgram'
 const sock = dgram.createSocket('udp4')
-sock.bind(0, () => {
+sock.bind(0, '127.0.0.1', () => {
   const port: number = sock.address().port
   if (port > 0) { console.log("dgram port ok") }
   sock.close()
@@ -419,7 +419,7 @@ server.on('listening', mustCall(() => {
   c.on('end', mustCall(() => { console.log("end") }))
   c.on('close', mustCall(() => { console.log("close"); server.close(); process.exit(0) }))
 }))
-server.listen(0)
+server.listen(0, '127.0.0.1')
 `, "ready\ndata: bye\nend\nclose")
 }
 
@@ -437,7 +437,7 @@ const server = net.createServer((sock) => {
   sock.setKeepAlive(true, 5000)
   sock.on('data', (c: Uint8Array) => { sock.write("ok") })
 })
-server.listen(0, () => {
+server.listen(0, '127.0.0.1', () => {
   const client = net.connect({ port: (server.address() as net.AddressInfo).port, host: "127.0.0.1" }, () => {
     client.setKeepAlive(true, 10000)
     client.setKeepAlive(false)

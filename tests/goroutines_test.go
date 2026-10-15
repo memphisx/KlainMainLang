@@ -198,7 +198,7 @@ go(() => {
     let acc = 0;
     for (let i = 0; i < 2000; i++) acc = (acc + i) >>> 0;
     return { status: 200, body: acc + '', headers: h };
-  });
+  }, { host: '127.0.0.1' });
 });
 
 const reqs = new Channel<number>(256);

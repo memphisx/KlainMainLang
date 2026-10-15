@@ -34,7 +34,7 @@ const srv = http.createServer((req, res) => {
   res.setHeaders(new Headers({ "x-b": "2", "content-type": "text/plain" }))
   res.end(req.method + " " + req.url)
 })
-srv.listen(0, () => {
+srv.listen(0, '127.0.0.1', () => {
   const port = (srv.address() as { port: number }).port
   const u = new URL("http://127.0.0.1:" + port + "/p?q=1")
   const req = http.request(u, (r) => {

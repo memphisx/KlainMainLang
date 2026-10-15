@@ -2180,14 +2180,22 @@ func (c *Checker) checkVarRedeclared(node ast.Node, name string, pos ast.Pos) {
 	// tsc's identity relation, approximated as assignability both ways: a
 	// structurally identical type (an intersection and its flattening, a
 	// mapped type and its expansion) is the same, however it is interned.
-	if c.Unanswered(want) || c.Unanswered(got) || want == got ||
-		c.assignableTo(got, want) != no && c.assignableTo(want, got) != no {
+	if c.Unanswered(want) || c.Unanswered(got) || want == got {
 		return
 	}
-	// Only where the checker's types are exact: primitives, literals and
-	// unions and arrays of them. An object type (a mapped `Required<T>`,
-	// an intersection) may be identical to tsc and not to this checker.
-	if !c.exactForIdentity(want) || !c.exactForIdentity(got) {
+	gw, wg := c.assignableTo(got, want), c.assignableTo(want, got)
+	if gw != no && wg != no {
+		return
+	}
+	// A definite no either way is never identity, whatever the types: an
+	// object literal whose method returns an object where the first
+	// declaration's returned a number is not the variable's type, and the
+	// variable's storage is the first declaration's (`var o = { f() { return
+	// 1 } }; var o = { f() { return {} } }`). Short of that, only where the
+	// checker's types are exact: an object type (a mapped `Required<T>`, an
+	// intersection) may be identical to tsc and not to this checker.
+	plain := func(t *Type) bool { return t.Flags&Object != 0 && t.Kind == Anonymous }
+	if !(plain(want) && plain(got)) && (!c.exactForIdentity(want) || !c.exactForIdentity(got)) {
 		// … except an object type against a primitive one, which no
 		// identity makes the same.
 		ew, eg := c.exactForIdentity(want), c.exactForIdentity(got)

@@ -708,6 +708,21 @@ console.log(process.getegid() === process.getgid())
 `, "true\ntrue\ntrue\ntrue")
 }
 
+// In untyped JS the family's absence on Windows is Node's runtime TypeError,
+// raised only when the call is reached (after its arguments), so a program
+// that tests the platform first runs.
+func TestE2EProcessGetUIDWindowsCompatJSTypeError(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the process.getuid family exists on POSIX")
+	}
+	assertOutputCompatJS(t, `
+if (process.platform !== 'win32') console.log(process.getuid())
+console.log("guarded")
+let n = 0
+try { process.getgid(n++) } catch (e) { console.log(e instanceof TypeError, e.message, n) }
+`, "guarded\ntrue process.getgid is not a function 1")
+}
+
 // --- process.env / argv absence as real `string | undefined` (TDD-00187 Stage 3) ---
 
 func TestE2EProcessEnvMissingIsUndefined(t *testing.T) {

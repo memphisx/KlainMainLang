@@ -70,7 +70,8 @@ func (c CSource) SrcExt() string {
 // link in the runner even though the CLI compiled it fine). Order matches the
 // CLI's historical order. Returns an error only for an unknown backend name.
 func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
-	var out []CSource
+	// What the runtime reads from and calls into the program (TDD-00251).
+	out := []CSource{e.hooksCSource()}
 	if e.UsesBigInt() {
 		backend := e.BigIntBackend()
 		src, ok := BigIntBackendSource(backend)
@@ -90,7 +91,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"crypto", src, cflags, libs, ""})
 	}
 	if e.UsesTLSHandles() {
-		if e.CryptoBackend() == "commoncrypto" {
+		if b := e.CryptoBackend(); b == "commoncrypto" || b == "cng" {
 			return nil, fmt.Errorf("tls: the `tls` module requires the OpenSSL crypto backend")
 		}
 		cflags, libs := LocateTLS()
@@ -103,12 +104,6 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.UsesH2Node() {
 		cflags, libs := LocateHTTP2()
 		out = append(out, CSource{"h2node", H2NodeSource(), cflags, libs, ""})
-	}
-	if e.UsesSpawnSync() {
-		out = append(out, CSource{"spawnsync", SpawnSyncSource(), nil, nil, ""})
-	}
-	if e.UsesReexecGuard() {
-		out = append(out, CSource{"reexecguard", ReexecGuardSource(), nil, nil, ""})
 	}
 	if e.UsesFFIDl() && e.opts.Target.OS() == "windows" {
 		// Windows has no libdl; supply dlopen/dlsym/dlclose/dlerror over
@@ -256,11 +251,8 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"net", NetSource(), nil, nil, ""})
 	}
 	if e.UsesTimers() {
-		// POSIX timers are uv_timer_t handles (the loop links libuv).
-		var cflags []string
-		if e.opts.Target.OS() != "windows" {
-			cflags, _ = LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
-		}
+		// Timers are uv_timer_t handles (the loop links libuv).
+		cflags, _ := LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
 		out = append(out, CSource{"timers", TimersSource(), cflags, nil, ""})
 	}
 	if e.usedEventLoop {

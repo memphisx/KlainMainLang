@@ -55,6 +55,7 @@ function dnsException(status: number, hostname: string): Error {
 export { isIP, isIPv4, isIPv6 } from './internal_net';
 import { isIP, isIPv4, isIPv6 } from './internal_net';
 import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
+import { DNSException } from './internal_dns_utils';
 
 export interface AddressInfo {
     address: string;
@@ -145,6 +146,23 @@ export interface NetConnectOpts {
     keepAliveInitialDelay?: number;
     timeout?: number;
     allowHalfOpen?: boolean;
+    autoSelectFamily?: boolean;
+    autoSelectFamilyAttemptTimeout?: number;
+}
+
+// Node's happy-eyeballs defaults (net.getDefaultAutoSelectFamily and its
+// attempt timeout): on, 250 ms.
+let defaultAutoSelectFamily = true;
+let defaultAutoSelectFamilyAttemptTimeout = 250;
+export function getDefaultAutoSelectFamily(): boolean { return defaultAutoSelectFamily; }
+export function setDefaultAutoSelectFamily(value: boolean): void {
+    if (typeof value !== 'boolean') throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "value" argument must be of type boolean.');
+    defaultAutoSelectFamily = value;
+}
+export function getDefaultAutoSelectFamilyAttemptTimeout(): number { return defaultAutoSelectFamilyAttemptTimeout; }
+export function setDefaultAutoSelectFamilyAttemptTimeout(value: number): void {
+    if (!Number.isInteger(value) || value < 1) throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "value" is out of range. It must be >= 1. Received ' + String(value));
+    defaultAutoSelectFamilyAttemptTimeout = value < 10 ? 10 : value;
 }
 
 export type TcpSocketConnectOpts = NetConnectOpts;
@@ -512,7 +530,8 @@ export class Socket extends Duplex {
     connect(options: NetConnectOpts, connectionListener?: () => void): this;
     connect(port: number, host: string, connectionListener?: () => void): this;
     connect(port: number, connectionListener?: () => void): this;
-    connect(arg0: NetConnectOpts | number, arg1?: string | Listener, arg2?: Listener): this {
+    connect(path: string, connectionListener?: () => void): this;
+    connect(arg0: NetConnectOpts | number | string, arg1?: string | Listener, arg2?: Listener): this {
         const [options, cb] = normalizeArgs(arg0, arg1, arg2);
         if (cb !== null) this.once('connect', cb);
         if (options.port === undefined && options.path === undefined) {
@@ -542,6 +561,13 @@ export class Socket extends Duplex {
             });
             return;
         }
+        // Node's lookupAndConnectMultiple: every address, tried in turn.
+        if ((options.autoSelectFamily ?? defaultAutoSelectFamily) && !options.family) {
+            let t = options.autoSelectFamilyAttemptTimeout ?? defaultAutoSelectFamilyAttemptTimeout;
+            if (t < 10) t = 10;
+            this.lookupAndConnectMultiple(host, port, t);
+            return;
+        }
         __kml_native.dnsLookup(host, options.family ?? 0, (status: number, family: number) => {
             const address = status === 0 ? __kml_native.lastString() : '';
             const err = status === 0 ? null : dnsException(status, host);
@@ -554,6 +580,100 @@ export class Socket extends Duplex {
             }
             this.internalConnect(address, port, family);
         });
+    }
+
+    private lookupAndConnectMultiple(host: string, port: number, attemptTimeout: number): void {
+        __kml_native.dnsGetaddrinfo(host, 0, 0, 0, (status: number, unused: number) => {
+            if (status !== 0) {
+                const err = new DNSException(status, 'getaddrinfo', host);
+                this.emit('lookup', err, undefined, undefined, host);
+                if (!this.connecting) return;
+                process.nextTick(() => { this.connecting = false; this.destroy(err); });
+                return;
+            }
+            const found: string[] = JSON.parse(__kml_native.lastString());
+            // Node interleaves the families, starting with the first address's.
+            const first: string[] = [];
+            const other: string[] = [];
+            const firstFamily = isIP(found[0]);
+            for (const a of found) {
+                if (isIP(a) === firstFamily) { if (!first.includes(a)) first.push(a); }
+                else if (!other.includes(a)) other.push(a);
+            }
+            const addrs: string[] = [];
+            for (let i = 0; i < first.length || i < other.length; i++) {
+                if (i < first.length) addrs.push(first[i]);
+                if (i < other.length) addrs.push(other[i]);
+            }
+            for (const a of addrs) this.emit('lookup', null, a, isIP(a), host);
+            if (!this.connecting) return;
+            if (addrs.length === 1) {
+                this.internalConnect(addrs[0], port, isIP(addrs[0]));
+                return;
+            }
+            this.connectAttempt(addrs, 0, port, attemptTimeout, []);
+        });
+    }
+
+    // One happy-eyeballs attempt: a failure, or no connection within the
+    // attempt timeout, moves on to the next address; when every address has
+    // failed the socket ends with them all (an AggregateError, as Node's).
+    private connectAttempt(addrs: string[], i: number, port: number, attemptTimeout: number, errors: Error[]): void {
+        const address = addrs[i];
+        const family = isIP(address);
+        const last = i === addrs.length - 1;
+        let settled = false;
+        let timer: any = null;
+        const next = (ex: Error | null): void => {
+            if (ex !== null) errors.push(ex);
+            if (!this.connecting || this.destroyed) return;
+            if (!last) {
+                this.connectAttempt(addrs, i + 1, port, attemptTimeout, errors);
+                return;
+            }
+            this.connecting = false;
+            if (errors.length === 1) {
+                this.destroy(errors[0]);
+                return;
+            }
+            const agg: any = new AggregateError(errors, errors.map((e: any) => e.message).join(', '));
+            agg.code = (errors[errors.length - 1] as any).code;
+            this.destroy(agg);
+        };
+        this.emit('connectionAttempt', address, port, family);
+        const h = __kml_native.tcpConnect(address, port, (status: number, unused: number) => {
+            if (settled) return;
+            settled = true;
+            if (timer !== null) clearTimeout(timer);
+            if (status === 0) {
+                this.afterConnect(0, address, port);
+                return;
+            }
+            const ex = errnoException(status, 'connect', address, port);
+            this.emit('connectionAttemptFailed', address, port, family, ex);
+            this._handle = -1;
+            __kml_native.tcpClose(h, (s: number, u: number) => {});
+            next(ex);
+        });
+        if (h < 0) {
+            settled = true;
+            const ex = errnoException(-h, 'connect', address, port);
+            this.emit('connectionAttemptFailed', address, port, family, ex);
+            next(ex);
+            return;
+        }
+        this._handle = h;
+        if (!last) {
+            timer = setTimeout(() => {
+                if (settled) return;
+                settled = true;
+                this.emit('connectionAttemptTimeout', address, port, family);
+                this._handle = -1;
+                __kml_native.tcpClose(h, (s: number, u: number) => {});
+                next(null);
+            }, attemptTimeout);
+            timer.unref();
+        }
     }
 
     private internalConnectPipe(path: string): void {
@@ -613,10 +733,13 @@ function validatePort(port: number | string): number {
 type Listener = () => void;
 
 // normalizeArgs: ([port][, host][, cb]) or (options[, cb]).
-function normalizeArgs(arg0: NetConnectOpts | number | undefined, arg1?: string | Listener, arg2?: Listener): [NetConnectOpts, Listener | null] {
+function normalizeArgs(arg0: NetConnectOpts | number | string | undefined, arg1?: string | Listener, arg2?: Listener): [NetConnectOpts, Listener | null] {
     let options: NetConnectOpts;
     let cb: Listener | null = null;
-    if (typeof arg0 === 'number' || arg0 === undefined) {
+    if (typeof arg0 === 'string' && !isNumericPort(arg0)) {
+        // (path[, connectListener]): a Unix socket or a Windows named pipe
+        options = { path: arg0 };
+    } else if (typeof arg0 === 'number' || typeof arg0 === 'string' || arg0 === undefined) {
         options = { port: arg0 as number };
         if (typeof arg1 === 'string') options.host = arg1;
     } else {
@@ -625,6 +748,12 @@ function normalizeArgs(arg0: NetConnectOpts | number | undefined, arg1?: string 
     if (typeof arg2 === 'function') cb = arg2;
     else if (typeof arg1 === 'function') cb = arg1;
     return [options, cb];
+}
+
+// Node's toNumber test in normalizeArgs: a string that is a port number
+// connects by port, any other names a path.
+function isNumericPort(s: string): boolean {
+    return s.trim() !== '' && Number(s) >= 0;
 }
 
 // ---- Server ----
@@ -937,7 +1066,8 @@ export function createServer(options?: ServerOpts | ((socket: Socket) => void), 
 
 export function connect(options: NetConnectOpts, connectionListener?: () => void): Socket;
 export function connect(port: number, host?: string, connectionListener?: () => void): Socket;
-export function connect(arg0: NetConnectOpts | number, arg1?: string | Listener, arg2?: Listener): Socket {
+export function connect(path: string, connectionListener?: () => void): Socket;
+export function connect(arg0: NetConnectOpts | number | string, arg1?: string | Listener, arg2?: Listener): Socket {
     const [options, cb] = normalizeArgs(arg0, arg1, arg2);
     const socket = new Socket();
     if (options.timeout) socket.setTimeout(options.timeout);
@@ -946,7 +1076,11 @@ export function connect(arg0: NetConnectOpts | number, arg1?: string | Listener,
 
 export function createConnection(options: NetConnectOpts, connectionListener?: () => void): Socket;
 export function createConnection(port: number, host?: string, connectionListener?: () => void): Socket;
-export function createConnection(arg0: NetConnectOpts | number, arg1?: string | Listener, arg2?: Listener): Socket {
+export function createConnection(path: string, connectionListener?: () => void): Socket;
+export function createConnection(arg0: NetConnectOpts | number | string, arg1?: string | Listener, arg2?: Listener): Socket {
+    if (typeof arg0 === 'string') {
+        return typeof arg1 === 'function' ? connect(arg0, arg1) : connect(arg0);
+    }
     if (typeof arg0 === 'number') {
         if (typeof arg1 === 'string') return arg2 !== undefined ? connect(arg0, arg1, arg2) : connect(arg0, arg1);
         return arg1 !== undefined ? connect(arg0, undefined, arg1) : connect(arg0);

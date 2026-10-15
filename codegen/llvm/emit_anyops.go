@@ -309,7 +309,8 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", lp, lb.Ref))
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rp, rb.Ref))
 		c := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", c, lp, rp))
+		e.ensureStrHeaderRuntime() // __kml_str_cmp: by UTF-16 code units
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", c, lp, rp))
 		var scond string
 		switch op {
 		case "<":

@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**6194 / 11011 agree with TypeScript (56.3%)** on accept/reject over 11011 classified cases (823 multi-file/out-of-scope skipped).
+**7028 / 11247 agree with TypeScript (62.5%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
 
-- **2311** match-accept (both compile clean)
-- **3883** match-reject (both reject)
-- **3701** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **1116** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **2773** match-accept (both compile clean)
+- **4255** match-reject (both reject)
+- **2806** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **1413** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 3200 | 5967 | 53.6% | 721 | 296 |
-| conformance | 2994 | 5044 | 59.4% | 395 | 527 |
+| compiler | 3794 | 6129 | 61.9% | 891 | 286 |
+| conformance | 3234 | 5118 | 63.2% | 522 | 541 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -28,12 +28,17 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 
 | Case | Group |
 |---|---|
+| `ClassAndModuleThatMergeWithModulesExportedGenericFunctionAndGenericClassStaticFunctionOfTheSameName` | conformance |
+| `ClassAndModuleThatMergeWithModulesExportedGenericFunctionAndNonGenericClassStaticFunctionOfTheSameName` | conformance |
 | `ClassAndModuleWithSameNameAndCommonRoot` | conformance |
 | `ClassAndModuleWithSameNameAndCommonRootES6` | conformance |
 | `ClassDeclaration24` | compiler |
-| `ClassDeclarationWithInvalidConstOnPropertyDeclaration` | compiler |
-| `ES5For-of17` | conformance |
-| `ES5For-ofTypeCheck13` | conformance |
+| `ExportClassWithAccessibleTypesInTypeParameterConstraintsClassHeritageListMemberTypeAnnotations` | conformance |
+| `ExportClassWithInaccessibleTypeInIndexerTypeAnnotations` | conformance |
+| `ExportFunctionWithAccessibleTypesInParameterAndReturnTypeAnnotation` | conformance |
+| `ExportFunctionWithInaccessibleTypesInParameterTypeAnnotation` | conformance |
+| `ExportFunctionWithInaccessibleTypesInReturnTypeAnnotation` | conformance |
+| `ExportVariableOfGenericTypeWithInaccessibleTypeAsTypeArgument` | conformance |
 | `FunctionAndModuleWithSameNameAndCommonRoot` | conformance |
 | `InterfaceDeclaration8` | compiler |
 | `ModuleAndClassWithSameNameAndCommonRoot` | conformance |
@@ -44,91 +49,86 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `Protected4` | conformance |
 | `Protected6` | conformance |
 | `Protected7` | conformance |
+| `SystemModuleForStatementNoInitializer` | compiler |
+| `TypeGuardWithArrayUnion` | conformance |
+| `abstractClassUnionInstantiation` | compiler |
 | `abstractPropertyInitializer` | conformance |
-| `accessorDeclarationEmitVisibilityErrors` | compiler |
+| `accessorDeclarationOrder` | compiler |
+| `accessorInferredReturnTypeErrorInReturnStatement` | compiler |
+| `accessorsAreNotContextuallyTyped` | conformance |
 | `addMoreOverloadsToBaseSignature` | compiler |
-| `additionOperatorWithTypeParameter` | conformance |
+| `additionOperatorWithNumberAndEnum` | conformance |
 | `aliasBug` | compiler |
 | `allowJscheckJsTypeParameterNoCrash` | compiler |
 | `allowSyntheticDefaultImports3` | compiler |
-| `alwaysStrict` | compiler |
-| `alwaysStrictES6` | compiler |
-| `alwaysStrictModule` | compiler |
-| `alwaysStrictModule2` | compiler |
-| `alwaysStrictNoImplicitUseStrict` | compiler |
 | `ambientDeclarationsPatterns_tooManyAsterisks` | conformance |
 | `ambientEnum1` | compiler |
 | `ambientExternalModuleInsideNonAmbient` | conformance |
 | `ambientExternalModuleInsideNonAmbientExternalModule` | conformance |
+| `ambientExternalModuleMerging` | conformance |
 | `ambientExternalModuleWithRelativeExternalImportDeclaration` | compiler |
 | `ambientExternalModuleWithRelativeModuleName` | compiler |
-| `ambientGetters` | compiler |
+| `ambientInsideNonAmbientExternalModule` | conformance |
 | `ambiguousOverload` | compiler |
-| `anonymousClassExpression2` | compiler |
+| `amdModuleBundleNoDuplicateDeclarationEmitComments` | compiler |
+| `anonymousDefaultExportsAmd` | conformance |
+| `anonymousDefaultExportsSystem` | conformance |
+| `anonymousDefaultExportsUmd` | conformance |
+| `anyAsConstructor` | conformance |
+| `anyAsGenericFunctionCall` | conformance |
+| `anyAssignableToEveryType` | conformance |
 | `anyDeclare` | compiler |
 | `anyIdenticalToItself` | compiler |
-| `argumentsBindsToFunctionScopeArgumentList` | compiler |
-| `argumentsObjectIterator03_ES5` | compiler |
-| `arithmeticOnInvalidTypes` | compiler |
+| `anyIndexedAccessArrayNoException` | compiler |
 | `arithmeticOnInvalidTypes2` | compiler |
-| `arithmeticOperatorWithTypeParameter` | conformance |
-| `arrayAssignmentTest5` | compiler |
+| `arithmeticOperatorWithAnyAndNumber` | conformance |
+| `arithmeticOperatorWithEnum` | conformance |
+| `arithmeticOperatorWithEnumUnion` | conformance |
+| `arrayBufferIsViewNarrowsType` | compiler |
 | `arrayCast` | compiler |
+| `arrayFakeFlatNoCrashInferenceDeclarations` | compiler |
 | `arrayIndexWithArrayFails` | compiler |
+| `arrayLiteralWithMultipleBestCommonTypes` | conformance |
 | `arrayReferenceWithoutTypeArgs` | compiler |
-| `arrowFunctionErrorSpan` | compiler |
+| `arraySlice` | compiler |
+| `arrayTypeOfFunctionTypes2` | conformance |
+| `asOperator1` | conformance |
 | `asOperator2` | conformance |
-| `asOperatorContextualType` | conformance |
 | `asOperatorNames` | conformance |
+| `asiAmbientFunctionDeclaration` | compiler |
+| `asiPreventsParsingAsAmbientExternalModule01` | conformance |
+| `asiPreventsParsingAsInterface02` | conformance |
+| `asiPreventsParsingAsInterface04` | conformance |
 | `asiPreventsParsingAsInterface05` | conformance |
-| `asiReturn` | compiler |
-| `assignFromBooleanInterface` | conformance |
-| `assignFromNumberInterface` | conformance |
 | `assignLambdaToNominalSubtypeOfFunction` | compiler |
-| `assigningFunctionToTupleIssuesError` | compiler |
-| `assignmentCompatInterfaceWithStringIndexSignature` | compiler |
 | `assignmentCompatWithCallSignatures` | conformance |
 | `assignmentCompatWithCallSignatures6` | conformance |
-| `assignmentCompatWithCallSignaturesWithOptionalParameters` | conformance |
-| `assignmentCompatWithCallSignaturesWithRestParameters` | conformance |
 | `assignmentCompatWithConstructSignatures` | conformance |
 | `assignmentCompatWithConstructSignatures2` | conformance |
-| `assignmentCompatWithConstructSignaturesWithOptionalParameters` | conformance |
-| `assignmentCompatWithEnumIndexer` | conformance |
+| `assignmentCompatWithConstructSignatures6` | conformance |
+| `assignmentCompatWithGenericCallSignatures` | conformance |
+| `assignmentCompatWithGenericCallSignatures2` | conformance |
+| `assignmentCompatWithGenericCallSignatures3` | conformance |
 | `assignmentCompatWithGenericCallSignatures4` | conformance |
-| `assignmentCompatWithNumericIndexer2` | conformance |
-| `assignmentCompatWithObjectMembers5` | conformance |
+| `assignmentCompatibilityForConstrainedTypeParameters` | compiler |
+| `assignmentLHSIsReference` | conformance |
+| `assignmentStricterConstraints` | compiler |
 | `assignmentToAnyArrayRestParameters` | compiler |
-| `asyncAliasReturnType_es5` | conformance |
-| `asyncDeclare_es5` | conformance |
 | `asyncDeclare_es6` | conformance |
 | `augmentedClassWithPrototypePropertyOnModule` | compiler |
+| `augmentedTypeAssignmentCompatIndexSignature` | conformance |
+| `augmentedTypesExternalModule1` | compiler |
 | `augmentedTypesModules2` | compiler |
 | `augmentedTypesModules3` | compiler |
-| `autoAccessor11` | conformance |
 | `autoTypeAssignedUsingDestructuringFromNeverNoCrash` | compiler |
-| `awaitAndYield` | conformance |
-| `awaitCallExpressionInSyncFunction` | compiler |
-| `awaitInNonAsyncFunction` | compiler |
-| `awaitLiteralValues` | compiler |
+| `avoidListingPropertiesForTypesWithOnlyCallOrConstructSignatures` | compiler |
+| `awaitBinaryExpression5_es2017` | conformance |
+| `awaitBinaryExpression5_es6` | conformance |
 | `awaitedTypeNoLib` | compiler |
-| `baseConstraintOfDecorator` | compiler |
 | `baseTypePrivateMemberClash` | compiler |
-| `bigIntWithTargetLessThanES2016` | compiler |
-| `binaryArithmatic1` | compiler |
-| `binaryArithmatic2` | compiler |
-| `binaryArithmatic3` | compiler |
-| `binaryArithmatic4` | compiler |
-| `binaryIntegerLiteralError` | conformance |
-| `bitwiseCompoundAssignmentOperators` | compiler |
-| `boolInsteadOfBoolean` | conformance |
-| `bundlerOptionsCompat` | conformance |
-| `callConstructAssignment` | compiler |
-| `callSignatureAssignabilityInInheritance6` | conformance |
-| `cannotIndexGenericWritingError` | compiler |
-| `capturedLetConstInLoop14` | compiler |
-| `capturedLetConstInLoop8` | compiler |
-| … | +1016 more |
+| `bestCommonTypeOfConditionalExpressions` | conformance |
+| `bestCommonTypeOfConditionalExpressions2` | conformance |
+| … | +1313 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -136,67 +136,67 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 
 | Count | Reason |
 |---|---|
-| 186 | REJECTED: undefined variable '%s' |
-| 156 | REJECTED: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not supported |
-| 91 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
-| 89 | REJECTED: undefined function or closure '%s' |
-| 72 | REJECTED: '%s' is declared more than once in C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts |
-| 60 | REJECTED: a number has no method '%s' |
-| 58 | REJECTED: unknown class '%s' |
-| 51 | REJECTED: '%s' is only valid inside a method or constructor body |
-| 34 | REJECTED: a union with two or more object members must be a discriminated union — every member needs a common first-position str… |
-| 33 | REJECTED: '%s' is not an array |
-| 31 | REJECTED: generic function '%s': type argument is not supported in V1 (only number, string, boolean, arrays of these, and object/c… |
-| 31 | REJECTED: union member types are limited to number, string, boolean (plus null/undefined), object<path>, and ReadableStream types |
-| 30 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
-| 29 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts: 7:10: expected '%s' after export specifier list, got … |
-| 29 | REJECTED: an object has no method '%s' |
-| 27 | REJECTED: static getters/setters are not yet supported ('%s' on class '%s') |
-| 26 | REJECTED: dynamic import('%s') under -dynamic-import=eager — the eager result-object backend (TDD-00055 Stage 2) is not yet impl… |
-| 26 | REJECTED: field access on non-object (no field '%s') |
-| 25 | REJECTED: only simple function calls are supported (the callee is not a named function, a function value, or a supported method) |
-| 24 | REJECTED: initializer'%s's type — this compiler is a typed subset |
-| 24 | REJECTED: object has no field '%s' |
-| 22 | REJECTED: a class expression is only supported as a top-level `const<path> X = class {...}` binding (V1) — using it as a value (… |
-| 21 | REJECTED: operator '%s' on any/unknown is not yet supported |
-| 20 | REJECTED: no field '%s' |
-| 19 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts: expected ] in array type annotation |
-| 19 | REJECTED: class '%s' extends unknown class '%s' |
-| 18 | REJECTED: class '%s' extends '%s' with type arguments, but only EventEmitter<T> currently supports generic extends |
-| 18 | REJECTED: class '%s' redeclares inherited field '%s' |
-| 18 | REJECTED: for...in requires an object with known fields |
-| 18 | REJECTED: generic class '%s' cannot use '%s' — not yet supported |
-| 17 | REJECTED: constructor of class '%s' calls super(...) but base class '%s' has no constructor |
-| 17 | REJECTED: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtim… |
-| 17 | REJECTED: object destructuring requires an object variable, function call, or object literal |
-| 16 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts: 4:14: unexpected token , in expression |
-| 15 | REJECTED: array elements must share one type — element 1 does not match the array's element type (a heterogeneous array is not s… |
-| 14 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\tscase\foo_1.ts: 1:1: `import foo = require(...)` is not sup… |
-| 14 | REJECTED: generic class '%s' cannot have a static method ('%s') — not yet supported |
-| 14 | REJECTED: type argument for '%s' does not satisfy the constraint '%s' on function '%s' |
-| 12 | REJECTED: field assignment on non-object |
-| 10 | REJECTED: '%s' is not an object |
-| 10 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts: 3:12: expected :, got . |
-| 10 | REJECTED: a decorator on this member is not yet supported — accessor (get/set), static, and generator method decorators, and dec… |
-| 10 | REJECTED: nested function declarations are only supported directly in an enclosing function's own body (not inside a further if<pa… |
-| 9 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts: 2:11: at most one index signature is supported per in… |
-| 9 | REJECTED: class '%s' does not satisfy interface '%s': missing or incompatible field '%s' |
-| 9 | REJECTED: undefined label '%s' |
-| 8 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts: 3:1: '%s' can only precede a function, variable, inte… |
-| 8 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\tscase\file1.ts: 1:1: `import b1 = require(...)` is not supp… |
-| 8 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\tscase\main.ts: 2:8: expected {, got STRING |
-| 8 | REJECTED: a destructuring default requires field '%s' to be nullable/optional (T \| null, T \| undefined, or `key?: T`) — no other… |
-| 8 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
-| 7 | REJECTED: .length is only supported on arrays and strings |
-| 7 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\ts.ts: 3:5: a computed class member name must be a constant … |
-| 7 | REJECTED: C:\Users\memph\Git\KlainMainLang\.conformance-out\run-93568\tscase\b.ts: 1:1: `import y = require(...)` is not supported… |
-| 7 | REJECTED: an array has no method '%s' |
-| 7 | REJECTED: argument 1 has a type incompatible with the parameter's declared type — this compiler is a typed subset |
-| 7 | REJECTED: array elements must share one type — element 2 does not match the array's element type (a heterogeneous array is not s… |
-| 7 | REJECTED: cannot index a non-array expression |
-| 7 | REJECTED: operator '%s' on an object without a primitive value (no valueOf/toString) is not supported in strict mode — TypeScrip… |
-| 7 | REJECTED: value's type is not a member of the declared union type |
-| … | +1549 more distinct reasons |
+| 162 | REJECTED: parameter '%s' implicitly has an '%s' type |
+| 126 | REJECTED: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not supported |
+| 87 | REJECTED: cannot find name '%s' |
+| 81 | REJECTED: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s' to infer from, or p… |
+| 76 | REJECTED: expected '%s', got IDENT |
+| 73 | REJECTED: type '%s' is not assignable to type '%s' |
+| 73 | REJECTED: undefined variable '%s' |
+| 58 | REJECTED: a computed class member name must be a constant string or number literal, a well-known symbol, or a const holding one or… |
+| 52 | REJECTED: member '%s' implicitly has an '%s' type |
+| 48 | REJECTED: expected ;, got IDENT |
+| 37 | REJECTED: rest parameter '%s' implicitly has an '%s' type |
+| 35 | REJECTED: expected '%s', got , |
+| 35 | REJECTED: unknown class '%s' |
+| 33 | REJECTED: R:\kml-scratch\s4\cw-ts\ts.ts: '%s' is declared as a class, interface, type or enum in more than one namespace; namespac… |
+| 31 | REJECTED: at most one call signature is supported per object type |
+| 30 | REJECTED: internal error: mangled name '%s' collided between R:\kml-scratch\s4\cw-ts\ts.ts and R:\kml-scratch\s4\cw-ts\ts.ts |
+| 29 | REJECTED: '%s' is only valid inside a method or constructor body |
+| 28 | REJECTED: expected IDENT, got await |
+| 27 | REJECTED: unexpected token = in expression |
+| 25 | REJECTED: a number has no method '%s' |
+| 24 | REJECTED: cannot export '%s': it is not declared at the top level of this file |
+| 24 | REJECTED: class '%s' extends unknown class '%s' |
+| 23 | REJECTED: a default value on a destructured parameter is not yet supported |
+| 23 | REJECTED: property '%s' does not exist on type '%s' |
+| 23 | REJECTED: undefined function or closure '%s' |
+| 22 | REJECTED: a rest tuple element is not yet supported |
+| 22 | REJECTED: expected {, got ( |
+| 20 | REJECTED: object has no field '%s' |
+| 19 | REJECTED: a decorator on this member is not yet supported — accessor (get/set), static, and generator method decorators, and dec… |
+| 19 | REJECTED: expected {, got STRING |
+| 18 | REJECTED: a call signature combined with other interface members is not supported — a callable object value has no runtime shape… |
+| 18 | REJECTED: unknown expression type *ast.SuperExpression |
+| 17 | REJECTED: '%s' can only precede a function, variable, interface, type alias, enum, or class declaration |
+| 17 | REJECTED: a call signature combined with other object-type members is not supported — a callable object value has no runtime sha… |
+| 17 | REJECTED: unexpected character '%s' |
+| 16 | REJECTED: a computed destructuring key must be a constant string or number literal, got IDENT |
+| 16 | REJECTED: expected }, got [ |
+| 16 | REJECTED: identifier '%s' has already been declared |
+| 15 | REJECTED: '%s' is possibly '%s' |
+| 15 | REJECTED: at most one index signature is supported per interface |
+| 14 | REJECTED: '%s' is not an array |
+| 14 | REJECTED: expected ], got IDENT |
+| 14 | REJECTED: generic class '%s' cannot use '%s' — not yet supported |
+| 13 | REJECTED: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtim… |
+| 13 | REJECTED: field access on non-object (no field '%s') |
+| 13 | REJECTED: the '%s' type is not yet supported here |
+| 12 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
+| 12 | REJECTED: class '%s' extends '%s' with type arguments, but a generic class base is not supported yet |
+| 12 | REJECTED: expected '%s' to close type assertion |
+| 12 | REJECTED: namespace re-exports ('%s') are not supported yet |
+| 12 | REJECTED: unexpected token @ in expression |
+| 11 | REJECTED: `import foo = require(...)` is not supported — use an ES import declaration instead |
+| 11 | REJECTED: an object has no method '%s' |
+| 11 | REJECTED: argument of type '%s' is not assignable to parameter of type '%s' |
+| 11 | REJECTED: expected ), got , |
+| 11 | REJECTED: invalid Unicode escape sequence |
+| 11 | REJECTED: invalid use of '%s' in strict mode |
+| 11 | REJECTED: only a string or number index signature `[k: string]: T` / `[i: number]: T` is supported (a `symbol` key is not yet supp… |
+| 11 | REJECTED: unexpected token ) in expression |
+| 11 | REJECTED: variable '%s' implicitly has type '%s' in some locations where its type cannot be determined |
+| … | +434 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -204,64 +204,64 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 
 | Count | Blocker |
 |---|---|
-| 153 | `from` |
-| 152 | `require(...)`` |
-| 71 | `T` |
-| 59 | `>` |
-| 56 | `foo` |
-| 51 | `this` |
-| 48 | `members` |
-| 43 | `x` |
-| 32 | `a` |
-| 31 | `C__kml_mod0` |
-| 24 | `s type is incompatible with the variable` |
-| 22 | `array` |
-| 20 | `dec__kml_mod0` |
-| 19 | `b` |
-| 17 | `B__kml_mod0` |
-| 17 | `c` |
-| 16 | `./0` |
-| 16 | `export` |
-| 16 | `f__kml_mod0` |
-| 15 | `C` |
-| 14 | `D__kml_mod0` |
-| 13 | `Foo` |
-| 13 | `foo__kml_mod0` |
-| 13 | `new` |
-| 12 | `A` |
+| 144 | `;` |
+| 102 | `require(...)`` |
+| 95 | `x` |
+| 68 | `a` |
+| 55 | `T` |
+| 53 | `foo` |
+| 50 | `this` |
+| 35 | `members` |
+| 34 | `null` |
+| 31 | `arguments` |
+| 25 | `A` |
+| 22 | `b` |
+| 21 | `>` |
+| 21 | `undefined` |
+| 17 | `export` |
+| 17 | `rest` |
+| 16 | `Foo` |
+| 16 | `M` |
+| 15 | `$` |
+| 14 | `C__kml_mod0` |
+| 14 | `any` |
+| 14 | `c` |
+| 14 | `v` |
 | 12 | `Foo__kml_mod0` |
-| 12 | `a__kml_mod0` |
+| 12 | `X` |
 | 12 | `export * as ns from` |
-| 11 | `+` |
-| 11 | `B` |
-| 11 | `f` |
-| 11 | `obj4` |
-| 11 | `x__kml_mod0` |
-| 10 | `A__kml_mod0` |
-| 10 | `bar` |
-| 10 | `callback` |
-| 10 | `decorator__kml_mod0` |
-| 10 | `get x` |
-| 10 | `object)` |
-| 10 | `y` |
-| 9 | `./test` |
-| 8 | `./b` |
-| 8 | `<` |
-| 8 | `Object` |
-| 8 | `Symbol` |
-| 8 | `U` |
-| 8 | `of` |
-| 8 | `which` |
-| 7 | `M` |
-| 7 | `Point` |
+| 12 | `which` |
+| 11 | `E` |
+| 11 | `get` |
+| 11 | `of` |
+| 11 | `prop` |
+| 10 | `U` |
+| 9 | `B__kml_mod0` |
+| 9 | `Point` |
+| 9 | `string` |
+| 9 | `unknown` |
+| 8 | `B` |
+| 8 | `does` |
+| 8 | `f` |
+| 8 | `m` |
+| 8 | `new` |
+| 8 | `obj4` |
+| 8 | `target` |
+| 8 | `value` |
+| 7 | `C` |
+| 7 | `bar` |
+| 7 | `f__kml_mod0` |
+| 7 | `m1` |
+| 7 | `restParameters` |
 | 6 | `#` |
-| 6 | `C2__kml_mod0` |
-| 6 | `Derived__kml_mod0` |
-| 6 | `does` |
-| 6 | `in` |
-| 6 | `m` |
-| 6 | `m__kml_mod0` |
-| 6 | `obj__kml_mod0` |
-| 6 | `s type is not a member of ` |
-| 6 | `string \| undefined` |
-| … | +529 more distinct blockers |
+| 6 | `./b` |
+| 6 | `e` |
+| 6 | `number` |
+| 6 | `s type is incompatible with the variable` |
+| 6 | `with` |
+| 6 | `yield` |
+| 5 | `#x` |
+| 5 | `@this/package` |
+| 5 | `D__kml_mod0` |
+| 5 | `\\` |
+| … | +494 more distinct blockers |

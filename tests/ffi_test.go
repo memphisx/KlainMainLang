@@ -299,8 +299,18 @@ lib2.getSymbol('strlen');
 console.log(Object.keys(lib2.getSymbols()).length);
 lib.close();
 lib2.close();
-`, "6n\n4\ntrue true true\ntrue\n9\nabs,getpid,strlen\n1")
+`, "6n\n4\ntrue true true\ntrue\n9\n"+ffiSymbolOrder+"\n1")
 }
+
+// ffiSymbolOrder is the three keys' order in Node's std::unordered_map:
+// libstdc++/libc++ on POSIX, the MSVC STL on Windows (ffi_umap_msvc.c,
+// ADR-01095), where keys in distinct buckets keep their insertion order.
+var ffiSymbolOrder = func() string {
+	if runtime.GOOS == "windows" {
+		return "strlen,getpid,abs"
+	}
+	return "abs,getpid,strlen"
+}()
 
 func TestE2EFFIFunctionObjects(t *testing.T) {
 	// A bound native function is a real function object: typeof, name,
@@ -521,7 +531,7 @@ lib.close();
 // Signatures are ordinary values: computed at run time, and any number of
 // callbacks may be live at once (libffi closures, as in Node).
 func TestE2EFFIRuntimeSignaturesAndManyCallbacks(t *testing.T) {
-	assertOutputImports(t, `
+	assertOutputImports(t, ffiPortable(`
 import ffi from 'node:ffi';
 const { lib } = ffi.dlopen(null);
 const argType = ['int', '32'].join('');
@@ -535,5 +545,18 @@ for (let i = 0; i < 40; i++) {
 console.log(cbs.length, new Set(cbs).size);
 for (const cb of cbs) lib.unregisterCallback(cb);
 lib.close();
-`, "12\n40 40")
+`), "12\n40 40")
+}
+
+func TestE2EFFINullLibraryWindows(t *testing.T) {
+	// Node's Windows build opens no library for null: the process's own
+	// symbols are POSIX's dlopen(NULL) (ADR-01608).
+	if runtime.GOOS != "windows" {
+		t.Skip("dlopen(null) opens the process on POSIX")
+	}
+	assertOutputImports(t, `
+import ffi from 'node:ffi';
+try { ffi.dlopen(null); } catch (e: any) { console.log(e.name, e.code, e.message); }
+try { new ffi.DynamicLibrary(null); } catch (e: any) { console.log(e.name, e.code, e.message); }
+`, "TypeError ERR_INVALID_ARG_TYPE Library path must be a string\nTypeError ERR_INVALID_ARG_TYPE Library path must be a string")
 }

@@ -34,12 +34,16 @@ const wptHarness = `
 // __WPT_RESULT__ summary line so a file with 30 passing subtests and 1 failing
 // reports 30/31, not 0. __wpt_pending gates the drain until every async subtest
 // settles; sync subtests pend-and-finish immediately so one path counts both.
+// A WPT .any.js file runs in a window or worker scope, whose self is the
+// global object (self.performance, self.setTimeout); Node has no self.
+const self: any = globalThis;
 let __wpt_pass: number = 0;
 let __wpt_fail: number = 0;
 let __wpt_pending: number = 0;
 
 function __wpt_err(name: string, e: unknown): void {
   console.error("WPT FAIL [" + name + "]");
+  console.error("  " + String(e)); // a second line: the reason's bucket is the first
 }
 
 // The async test context passed to test/async_test/promise_test callbacks.
@@ -66,13 +70,15 @@ class __WptT {
   step(f: () => void): void {
     try { f(); } catch (e) { this.markFail(e); this.finish(); }
   }
-  step_func(f: () => void): () => void {
+  // The wrapped function gets the wrapper's arguments, as testharness.js
+  // passes them on (an observer's (list, observer), an event).
+  step_func(f: (...args: any[]) => void): (...args: any[]) => void {
     const self: __WptT = this;
-    return (): void => { try { f(); } catch (e) { self.markFail(e); self.finish(); } };
+    return (...args: any[]): void => { try { f(...args); } catch (e) { self.markFail(e); self.finish(); } };
   }
-  step_func_done(f: () => void): () => void {
+  step_func_done(f: (...args: any[]) => void): (...args: any[]) => void {
     const self: __WptT = this;
-    return (): void => { try { f(); } catch (e) { self.markFail(e); } self.finish(); };
+    return (...args: any[]): void => { try { f(...args); } catch (e) { self.markFail(e); } self.finish(); };
   }
   unreached_func(msg: string): () => void {
     const self: __WptT = this;

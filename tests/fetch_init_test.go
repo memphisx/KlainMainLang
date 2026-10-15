@@ -18,7 +18,7 @@ const srv = http.createServer((req, res) => {
   req.on("data", (c) => b += c)
   req.on("end", () => res.end(req.method + " " + (req.headers["x-a"] ?? "-") + " " + b))
 })
-srv.listen(0, async () => {
+srv.listen(0, '127.0.0.1', async () => {
   const port = (srv.address() as { port: number }).port
   console.log(await api(port, "/"))
   console.log(await api(port, "/p", { method: "POST", body: "hi", headers: { "x-a": "1" } }))
@@ -44,7 +44,7 @@ async function send(port: number, init: RequestInit): Promise<void> {
   const r = await fetch("http://127.0.0.1:" + port + "/", init)
   console.log(await r.text())
 }
-srv.listen(0, async () => {
+srv.listen(0, '127.0.0.1', async () => {
   const port = (srv.address() as { port: number }).port
   await send(port, { method: "POST", body: "héllo" })
   await send(port, { method: "POST", body: new Uint8Array([0, 1, 2, 255]) })

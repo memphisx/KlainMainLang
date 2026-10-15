@@ -5,7 +5,6 @@ import (
 	"bufio"
 	"bytes"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -99,9 +98,6 @@ sock.on('error', (e) => { console.log("error", (e as any).code) })
 	run := exec.Command(bin)
 	var buf bytes.Buffer
 	run.Stdout, run.Stderr = &buf, &buf
-	if os.Getenv("KML_TEST_IO_TRACE") != "" {
-		run.Env = append(os.Environ(), "KML_IO_TRACE=1")
-	}
 	if err := run.Start(); err != nil {
 		t.Fatal(err)
 	}

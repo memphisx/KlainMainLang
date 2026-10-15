@@ -14,6 +14,7 @@ package llvm
 
 import (
 	"fmt"
+	"net"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -150,7 +151,28 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	// needed evaluating. The former `ws` handler option was removed (TDD-00158)
 	// — a WebSocket server is klain:ws's `new WebSocketServer({server})` now.
 	workersRef := "1"
+	hostWord := uint32(0) // INADDR_ANY: every interface, as Node's listen(port)
 	if len(args) == 3 {
+		// `host` binds one IPv4 address, as server.listen({ host }) does. It
+		// is read at compile time, like the Node options form (ADR-00801).
+		hasHostField := false
+		if lit, ok := args[2].(*ast.ObjectLiteral); ok {
+			for _, prop := range lit.Properties {
+				if prop.KeyExpr != nil || prop.Key != "host" {
+					continue
+				}
+				hasHostField = true
+				hs, ok := stringLiteralThrough(prop.Value)
+				if !ok {
+					return Value{}, fmt.Errorf("%d:%d: http.listen's 'host' must be a string literal", pos.Line, pos.Col)
+				}
+				w, ok := ipv4Word(hs.Value)
+				if !ok {
+					return Value{}, fmt.Errorf("%d:%d: http.listen's 'host' must be an IPv4 address or 'localhost', got %q", pos.Line, pos.Col, hs.Value)
+				}
+				hostWord = w
+			}
+		}
 		optsVal, err := e.emitExpr(args[2])
 		if err != nil {
 			return Value{}, err
@@ -184,8 +206,8 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 			// integer, so coerce it (truncating) to i64.
 			workersRef = e.coerce(e.loadFieldValue(optsVal, idx, fieldTy), TypeI64).Ref
 		}
-		if !hasWorkersField {
-			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must have a 'workers' field", pos.Line, pos.Col)
+		if !hasWorkersField && !hasHostField {
+			return Value{}, fmt.Errorf("%d:%d: http.listen's third argument must have a 'workers' or 'host' field", pos.Line, pos.Col)
 		}
 	}
 
@@ -201,10 +223,9 @@ func (e *Emitter) emitHTTPListen(args []ast.Expression, pos ast.Pos) (Value, err
 	port32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", port32, portVal.Ref))
 	listenfd := e.freshReg()
-	// klain:http's http.listen binds INADDR_ANY (0) with the default listen
-	// backlog (128); host/backlog selection is a Node server.listen(options)
-	// feature, not part of this bespoke shape.
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s, i32 0, i32 128)", listenfd, port32))
+	// klain:http's http.listen binds INADDR_ANY unless the options name a
+	// host, with the default listen backlog (128).
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_http_bind_and_listen(i32 %s, i32 %d, i32 128)", listenfd, port32, int32(hostWord)))
 
 	if comboMode {
 		// Cluster-combo (ADR-00989): join the shared non-blocking reactor as an
@@ -1084,6 +1105,36 @@ func (e *Emitter) buildHTTPDispatcher(paramTy, retTy Type, isAsyncHandler bool, 
 	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ 0, %%%s ]", clFinal, clParsed, haveCLL, noCLL))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", clFinal, contentLenA))
 	e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", headersParsedA))
+	// `Expect: 100-continue`: the client holds the body back until it hears
+	// 100 Continue. Node's server sends it at once when nothing listens for
+	// 'checkContinue'; without it the body never comes (libcurl waits 1 s,
+	// Node's client indefinitely).
+	e.ensureStrcasecmp()
+	e.ensureStrlen()
+	expKey := e.internString("expect")
+	hasExp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", hasExp, newMap, expKey))
+	expL := e.freshLabel("http.expect")
+	contL := e.freshLabel("http.continue")
+	expDoneL := e.freshLabel("http.expectdone")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasExp, expL, expDoneL))
+	e.emitLabel(expL)
+	expInt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", expInt, newMap, expKey))
+	expStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", expStr, expInt))
+	expCmp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @strcasecmp(ptr %s, ptr %s)", expCmp, expStr, e.internString("100-continue")))
+	isCont := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isCont, expCmp))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isCont, contL, expDoneL))
+	e.emitLabel(contL)
+	resp100 := e.internString("HTTP/1.1 100 Continue\r\n\r\n")
+	len100 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", len100, resp100))
+	e.emitInstr(fmt.Sprintf("call i64 @write(i32 %s, ptr %s, i64 %s)", fd32, resp100, len100))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", expDoneL))
+	e.emitLabel(expDoneL)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", checkBodyCompleteL))
 
 	// checkBodyCompleteL: do we have Content-Length bytes past the header
@@ -1881,4 +1932,17 @@ func (e *Emitter) buildHTTP2Bridge(paramTy, retTy Type, isAsyncHandler bool, sfx
 	}
 	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_name"+sfx+"(ptr %resp, i64 %i)", hdrSlot(16))
 	e.emitStandaloneFunc("ptr @__kml_h2_resp_hdr_val"+sfx+"(ptr %resp, i64 %i)", hdrSlot(24))
+}
+
+// ipv4Word is host as a network-order s_addr word read on a little-endian
+// host (the bind helper stores it as is); "localhost" is 127.0.0.1.
+func ipv4Word(host string) (uint32, bool) {
+	if host == "localhost" {
+		host = "127.0.0.1"
+	}
+	ip := net.ParseIP(host).To4()
+	if ip == nil {
+		return 0, false
+	}
+	return uint32(ip[0]) | uint32(ip[1])<<8 | uint32(ip[2])<<16 | uint32(ip[3])<<24, true
 }

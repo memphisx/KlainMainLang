@@ -162,6 +162,7 @@ func (e *Emitter) ensureSortClosGlobal() {
 	if !e.usedSortClosGlobal {
 		e.usedCollections = true
 		e.emitGlobal("@__kml_sort_clos = external thread_local global ptr")
+		e.emitGlobal("@__kml_sort_res = external thread_local global i32")
 		e.usedSortClosGlobal = true
 	}
 }
@@ -208,6 +209,7 @@ func (e *Emitter) ensureSortCmpStr() {
 	}
 	e.usedSortCmpStr = true
 	e.usedCollections = true
+	e.ensureStrHeaderRuntime() // __kml_str_cmp
 	e.emitGlobal("declare i32 @__kml_cmp_str(ptr, ptr)")
 }
 
@@ -276,48 +278,40 @@ func (e *Emitter) ensureSortCmpAnyLex() {
 		return
 	}
 	e.usedSortCmpAnyLex = true
-	e.ensureStrcmp()
+	e.ensureStrHeaderRuntime() // __kml_str_cmp: JavaScript's string order
 	e.ensureAnyToCStr()
 	e.emitGlobal(`define i32 @__kml_cmp_any_lex(ptr %pa, ptr %pb) {
   %a = load i64, ptr %pa, align 8
   %b = load i64, ptr %pb, align 8
   %as = call ptr @__kml_any_to_cstr(i64 %a)
   %bs = call ptr @__kml_any_to_cstr(i64 %b)
-  %r = call i32 @strcmp(ptr %as, ptr %bs)
+  %r = call i32 @__kml_str_cmp(ptr %as, ptr %bs)
   ret i32 %r
 }`)
 }
 
-// ensureSortTrampolineAny is the custom-comparator trampoline for a boxed-
-// element array (`any[]`): elements are NaN boxes (i64 slots) passed straight
-// to the closure (whose params are `any`), and the closure returns a boxed
-// `any` number (e.g. `(x, y) => x - y` under -compat=js any-arithmetic). The
-// i64 result is a NaN box, so it is reduced to a double via __kml_any_tonum
-// before taking qsort's -1/0/1 sign — reading the box bits as an integer
-// (the i64 trampoline) made the sort a silent no-op.
+// ensureSortTrampolineArr declares the custom-comparator trampoline for an
+// array of arrays (collections.c): each element a header pointer, passed to
+// the closure with its length.
+func (e *Emitter) ensureSortTrampolineArr() {
+	if e.usedSortTrampolineArr {
+		return
+	}
+	e.usedSortTrampolineArr = true
+	e.ensureSortClosGlobal()
+	e.emitGlobal("declare i32 @__kml_sort_tramp_arr(ptr, ptr)")
+}
+
+// ensureSortTrampolineAny declares the custom-comparator trampoline for a
+// boxed-element array (`any[]`, collections.c): the NaN boxes go straight to
+// the closure, whose params are `any`.
 func (e *Emitter) ensureSortTrampolineAny() {
 	if e.usedSortTrampolineAny {
 		return
 	}
 	e.usedSortTrampolineAny = true
 	e.ensureSortClosGlobal()
-	e.ensureAnyOps() // __kml_any_tonum
-	e.emitGlobal(`define i32 @__kml_sort_tramp_any(ptr %pa, ptr %pb) {
-  %clos = load ptr, ptr @__kml_sort_clos, align 8
-  %a = load i64, ptr %pa, align 8
-  %b = load i64, ptr %pb, align 8
-  %fp_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 0
-  %fp = load ptr, ptr %fp_slot, align 8
-  %ep_slot = getelementptr {ptr, ptr}, ptr %clos, i32 0, i32 1
-  %ep = load ptr, ptr %ep_slot, align 8
-  %r = call i64 (ptr, i64, i64) %fp(ptr %ep, i64 %a, i64 %b)
-  %rd = call double @__kml_any_tonum(i64 %r)
-  %neg = fcmp olt double %rd, 0.0
-  %pos = fcmp ogt double %rd, 0.0
-  %s1 = select i1 %pos, i32 1, i32 0
-  %ri = select i1 %neg, i32 -1, i32 %s1
-  ret i32 %ri
-}`)
+	e.emitGlobal("declare i32 @__kml_sort_tramp_any(ptr, ptr)")
 }
 
 // ensureSortTrampolineI64 declares the trampoline for a custom comparator

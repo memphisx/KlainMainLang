@@ -180,8 +180,8 @@
               "String-literal specifier only — a runtime-computed `import(expr)` is a clean compile error (all imports resolve at compile time)",
               "The result object exposes the target's **annotated scalar/string exports** only; `function`/`class`/array/object exports are omitted, and an un-annotated export has no field (module namespace objects are missing for static `import * as ns` too)",
               "`import('node:…')` of a builtin module is a clean compile error",
-              "`-dynamic-import=lazy` and `-dynamic-import=isolated` refuse `--static` (a static binary can't `dlopen`), and `lazy` is not available on Windows",
-              "Under `-dynamic-import=isolated`, an island's sockets, pipes and children are invisible to the importer's `select()`: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](../tdd/TDD-00225.md)); the island's timers are folded exactly"
+              "`-dynamic-import=lazy` and `-dynamic-import=isolated` refuse `--static` (a static binary can't `dlopen`); on Windows `lazy` compiles the program's thread-locals emulated (a call per access, [TDD-00254](../tdd/TDD-00254.md))",
+              "Under `-dynamic-import=isolated`, an island's sockets, pipes and children are invisible to the importer's event loop: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](../tdd/TDD-00225.md)); the island's timers are folded exactly"
             ],
             "notes": [
               "Default `-dynamic-import=bundled`: the target is compiled into the binary and runs on first `import()`, as a task on the program's one event loop, on the microtask Node evaluates it on; it shares every module instance (builtin or user) with the program, a top-level throw rejects every `import()` of it, and an unsettled top-level `await` ends the process with code 13. Works with `--static`",

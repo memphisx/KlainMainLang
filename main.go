@@ -20,14 +20,14 @@ import (
 func main() {
 	emitLLVM := flag.Bool("emit-llvm", false, "emit LLVM IR and stop")
 	output := flag.String("o", "", "output binary `name` (default: the input name without its extension)")
-	static := flag.Bool("static", false, "statically link the output binary — for minimal/scratch Docker images. Linux only: run klainmain itself on Linux to use this (macOS's linker has no static-libc support at all, by design)")
+	static := flag.Bool("static", false, "a self-contained binary: it depends on nothing the OS does not ship. Linux: fully static (scratch/distroless images). Windows: every library linked in, importing only Windows' own DLLs. Not yet on macOS (TDD-00253)")
 	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only), gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed), or auto (the compiler inserts free calls where it can prove them safe — /** @free */ and /** @owned */ annotations plus automatic freeing of provably-local values; Memory.free is a compile error)")
 	dynImport := flag.String("dynamic-import", "bundled", "dynamic `import()` `mode`: bundled (default — the target is compiled into the binary and its top-level runs on first import(), one module instance shared with the program, as in Node), lazy (the same, with the target's code in a shared library beside the binary, loaded on first use; incompatible with --static) or isolated (the target is its own program in a shared library, with its own instances of every module it imports: nothing it imports shares state with the importer; incompatible with --static)")
 	diagFormat := flag.String("diagnostics", "text", "how errors in the program are reported (the `format`): text (default — one file: line:col: message line each; parsing continues past an error, so every syntax error is reported) or json (an array on stdout, one object per error with code, severity, file, line, col, start, end, message, kind, phase; a code below 90000 is TypeScript's)")
 	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
-	cryptoBackend := flag.String("crypto", "openssl", "crypto.subtle backend `library`, compiled+linked only when a program uses crypto.subtle: openssl (default — libcrypto 3.x, all platforms) or commoncrypto (macOS only — Apple CommonCrypto plus Security.framework, no OpenSSL dependency). Both give identical Web Crypto semantics")
+	cryptoBackend := flag.String("crypto", "openssl", "crypto.subtle backend `library`, compiled+linked only when a program uses crypto.subtle: openssl (default — libcrypto 3.x, all platforms), commoncrypto (macOS only — Apple CommonCrypto plus Security.framework, no OpenSSL dependency) or cng (Windows only — the OS's CNG, bcrypt.dll, no OpenSSL dependency). All give identical Web Crypto semantics")
 	webviewBackend := flag.String("webview", "system", "klain:webview engine `backend`, selected only when a program opens a webview window: system (default — the platform engine: WebKitGTK/WKWebView/WebView2) sailfish (Gecko/embedlite backend for cross-compiled Sailfish OS builds) or cef / qt (opt-in Chromium/Qt backends, not yet built). The bind/eval/serve contract is identical across backends")
 	var pkg packageFlag
 	flag.Var(&pkg, "package", "after compiling, also build a package around the binary. Bare -package builds a double-clickable host bundle (a .app on macOS, a .desktop launcher on Linux, a GUI-subsystem <name>\\<name>.exe on Windows) — for webview GUI programs. -package=rpm builds an RPM (for Sailfish OS / RPM Linux), -package=rpm:harbour applies Sailfish Harbour naming (harbour-<name>); the .spec + build tree are always written and rpmbuild is run when present, so an RPM cross-package can be produced from a --target build. The standalone binary is still produced too")
@@ -98,9 +98,12 @@ func main() {
 	}
 
 	if *static && runtime.GOOS == "darwin" {
-		fatal("--static is not supported on macOS: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. On Linux, --static produces a fully static binary (scratch/distroless-ready). On Windows, --static statically links the non-system libraries (libstdc++, winpthread, pcre2, the curl chain) so the .exe is self-contained — the UCRT and core Win32 DLLs stay dynamic, as they ship with Windows 10+. To produce a static Linux binary from here, use a Linux build stage in a multi-stage Dockerfile.")
+		fatal("--static is not supported on macOS: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. On Linux, --static produces a fully static binary (scratch/distroless-ready). On Windows, --static links every library in, so the .exe imports only Windows' own DLLs (the UCRT and system DLLs ship with Windows 10+). To produce a static Linux binary from here, use a Linux build stage in a multi-stage Dockerfile.")
 	}
 	llvm.SetStaticLink(*static)
+	// A lazy dynamic-import library imports the executable's thread-locals:
+	// on Windows only as emulated ones (TDD-00254).
+	llvm.SetEmulatedTLS(runtime.GOOS == "windows" && *dynImport == "lazy")
 
 	// Cross-compilation target (TDD-00146 Stage 1). A preset name resolves to a
 	// real clang triple; a bare triple is passed through. --sysroot is always
@@ -189,8 +192,14 @@ func main() {
 		if *static {
 			fatal("-crypto=commoncrypto cannot be combined with --static: Apple frameworks are dynamic-only (and --static itself is Linux-only). Use -crypto=openssl for static builds")
 		}
+	case "cng":
+		// bcrypt.dll is a Windows system DLL, so --static (every non-system
+		// library linked in) keeps it a plain import.
+		if runtime.GOOS != "windows" {
+			fatal("-crypto=cng is only supported when compiling on Windows (this run is on %s) — CNG (bcrypt.dll) is a Windows system library with no ports elsewhere. Use the default -crypto=openssl instead", runtime.GOOS)
+		}
 	default:
-		fatal("unrecognized -crypto value %q — must be one of: openssl (default), commoncrypto (macOS only)", *cryptoBackend)
+		fatal("unrecognized -crypto value %q — must be one of: openssl (default), commoncrypto (macOS only), cng (Windows only)", *cryptoBackend)
 	}
 
 	switch *webviewBackend {
@@ -365,9 +374,6 @@ func main() {
 	// executable's library, runtime and event loop.
 	var lazyIslands map[string][]string
 	if *dynImport == "lazy" && len(prog.DynModules) > 0 {
-		if runtime.GOOS == "windows" {
-			fatal("-dynamic-import=lazy is not supported on Windows yet; use -dynamic-import=bundled (the default)")
-		}
 		unitCache := objCache
 		if unitCache == "" {
 			d, terr := os.MkdirTemp("", "klainunits-")
@@ -384,7 +390,10 @@ func main() {
 		clangArgs = append(clangArgs, host...)
 		// The libraries bind to the executable's symbols: all of them stay,
 		// with the runtime's unreachable references.
-		clangArgs = append(clangArgs, llvm.ExportDynamicFlags()...)
+		if err := os.MkdirAll(outBin+".d", 0755); err != nil {
+			fatal("cannot create island directory %s.d: %v", outBin, err)
+		}
+		clangArgs = append(clangArgs, llvm.ExportDynamicFlags(lazyImplib(outBin))...)
 		clangArgs = append(clangArgs, llvm.UnreachableRefFlags()...)
 		lazyIslands = isl
 	} else if *libObjects && objCache != "" {
@@ -490,7 +499,7 @@ func main() {
 		for _, h := range sortedIslandHashes(lazyIslands) {
 			soPath := filepath.Join(islandDir, h+llvm.SharedLibExt())
 			args := append([]string{"-shared", "-fPIC"}, lazyIslands[h]...)
-			args = append(args, llvm.IslandLinkFlags()...)
+			args = append(args, llvm.IslandLinkFlags(lazyImplib(outBin))...)
 			args = append(args, "-o", soPath)
 			if err := em.Toolchain().RunLink(args...); err != nil {
 				fatal("dynamic import library %s: clang: %v", h, err)
@@ -808,4 +817,10 @@ func sortedIslandHashes(m map[string][]string) []string {
 	}
 	sort.Strings(hs)
 	return hs
+}
+
+// lazyImplib is the executable's import library, which a lazy dynamic-import
+// library links against on Windows (TDD-00254).
+func lazyImplib(outBin string) string {
+	return filepath.Join(outBin+".d", "program.lib")
 }

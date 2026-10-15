@@ -243,8 +243,7 @@
       "badge": "caveats",
       "description": "A process's scheduling priority (-20 highest to 19 lowest; pid 0 is this process) through getpriority/setpriority — on Windows the priority class, mapped as libuv maps it. Node's argument validation; a failure throws ERR_SYSTEM_ERROR with the failed call's info ({ errno, code, message, syscall }).",
       "differences": [
-        "The error's `errno`/`syscall` are copies of `info`'s, not accessors over it.",
-        "Windows' priority-class mapping is compile-checked only."
+        "The error's `errno`/`syscall` are copies of `info`'s, not accessors over it."
       ],
       "snippet": "os.setPriority(10);\nconsole.log(os.getPriority()); // 10\ntry { os.getPriority(999999) } catch (e: any) { console.log(e.info.code) } // ESRCH",
       "seeAlso": [
