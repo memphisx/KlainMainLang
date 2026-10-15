@@ -1681,3 +1681,5 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01636](ADR-01636.md) | A buffer that cannot be allocated is a RangeError; range errors carry Node's messages | Extends [ADR-00312](ADR-00312.md), [ADR-00494](ADR-00494.md) |
 | [01637](ADR-01637.md) | ToPrimitive on a typed object goes past a method that gives an object | Extends [ADR-00859](ADR-00859.md) |
 | [01638](ADR-01638.md) | A var redeclared with another object-literal type is TS2403 | Extends [ADR-01470](ADR-01470.md) |
+| [01639](ADR-01639.md) | Windows links libuv with the synchronization library | Extends [ADR-01602](ADR-01602.md) |
+| [01640](ADR-01640.md) | SIGPIPE is ignored from startup on POSIX | Extends [ADR-01625](ADR-01625.md) |

@@ -3389,6 +3389,9 @@ done:
 	if e.opts.Target.OS() != "windows" {
 		e.emitGlobal("declare i32 @setvbuf(ptr, ptr, i32, i64)")
 		e.ensureStdoutGlobal()
+		// Node ignores SIGPIPE at startup: a write to a closed pipe fails with
+		// EPIPE on the stream instead of killing the process.
+		e.emitGlobal("declare ptr @signal(i32, ptr)")
 	}
 	// A stack overflow throws Node's RangeError (TDD-00249): main installs
 	// the handler first. Without a throw path the handler reports it itself.
@@ -3454,6 +3457,8 @@ done:
 		// Line-buffer stdout before any output (see the decl above).
 		fmt.Fprintf(&out, "  %%__kml_stdout_fp = load ptr, ptr @%s, align 8\n", e.stdoutGlobalSymbol())
 		out.WriteString("  call i32 @setvbuf(ptr %__kml_stdout_fp, ptr null, i32 1, i64 0)\n")
+		// SIGPIPE is 13 on Linux and Darwin; inttoptr 1 is SIG_IGN.
+		out.WriteString("  call ptr @signal(i32 13, ptr inttoptr (i64 1 to ptr))\n")
 	}
 	if e.opts.Target.OS() == "windows" {
 		// The UCRT opens stdin/stdout/stderr in text mode, translating every

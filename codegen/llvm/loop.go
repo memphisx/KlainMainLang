@@ -35,7 +35,9 @@ func LocateUV(goos string, cross bool) (cflags, libs []string) {
 			uv = "-l:libuv.a"
 		}
 		return nil, []string{uv, "-lpsapi", "-luser32", "-ladvapi32", "-liphlpapi",
-			"-luserenv", "-lws2_32", "-ldbghelp", "-lole32", "-lshell32"}
+			"-luserenv", "-lws2_32", "-ldbghelp", "-lole32", "-lshell32",
+			// newer libuv builds wait on pipes with WaitOnAddress
+			"-lsynchronization"}
 	}
 	if cross {
 		return nil, []string{"-luv"}
