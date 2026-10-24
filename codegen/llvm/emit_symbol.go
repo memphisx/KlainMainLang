@@ -27,18 +27,18 @@ func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Val
 				return Value{}, err
 			}
 			switch {
-			case val.Ty.IsDynamic:
+			case val.Ty.IsDynamic():
 				// undefined stays no description; anything else is ToString'd.
 				undef := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, e.coerce(val, TypeAny).Ref, nbUndefined))
-				str, err := e.emitDynamicToString(e.coerce(val, TypeAny))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, e.convert(val, TypeAny).Ref, nbUndefined))
+				str, err := e.emitDynamicToString(e.convert(val, TypeAny))
 				if err != nil {
 					return Value{}, err
 				}
 				r := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, undef, str.Ref))
 				descPtr = r
-			case val.Ty.IR == "ptr" && !val.Ty.IsObject && !val.Ty.IsArray && !val.Ty.IsFunc && !val.Ty.IsSymbol:
+			case val.Ty.IR == "ptr" && !val.Ty.IsObject() && !val.Ty.IsArray() && !val.Ty.IsFunc() && !val.Ty.IsSymbol():
 				descPtr = val.Ref // a string (null when `string | undefined` is undefined)
 			default:
 				str, err := e.emitValueToString(val)
@@ -54,11 +54,11 @@ func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Val
 	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitObjMallocInto(dataReg, ty)
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", symbolTypeIDFlag, dataReg))
+	e.heapStore("i64", fmt.Sprint(symbolTypeIDFlag), dataReg, 8)
 	idx, fieldTy, _ := ty.FieldIndex("description")
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, ty.StructIR(), dataReg, idx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), descPtr, gepReg, fieldTy.Align()))
+	e.heapStore(StructFieldIR(fieldTy), descPtr, gepReg, fieldTy.Align())
 	return Value{Ref: dataReg, Ty: ty}, nil
 }
 
@@ -182,45 +182,46 @@ miss:
 }`))
 }
 
-// emitSymbolStatic dispatches Symbol.for(key) / Symbol.keyFor(sym)
-// (ADR-00488). Symbols from the registry share pointer identity per key,
-// so Symbol.for("a") === Symbol.for("a"); keyFor of an unregistered symbol
-// is null.
-func (e *Emitter) emitSymbolStatic(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+// emitSymbolStaticFor is Symbol.for(key) (ADR-00488). Symbols from the
+// registry share pointer identity per key, so Symbol.for("a") ===
+// Symbol.for("a").
+func (e *Emitter) emitSymbolStaticFor(args []ast.Expression, pos ast.Pos) (Value, error) {
 	e.ensureSymbolRegistry()
-	switch method {
-	case "for":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: Symbol.for takes exactly 1 string key", pos.Line, pos.Col)
-		}
-		kv, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		if kv.Ty.IR != "ptr" || kv.Ty.IsObject || kv.Ty.IsSymbol {
-			return Value{}, fmt.Errorf("%d:%d: Symbol.for's key must be a string", pos.Line, pos.Col)
-		}
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_for(ptr %s)", r, kv.Ref))
-		return Value{Ref: r, Ty: SymbolType()}, nil
-	case "keyFor":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: Symbol.keyFor takes exactly 1 symbol", pos.Line, pos.Col)
-		}
-		sv, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		if !sv.Ty.IsSymbol {
-			return Value{}, fmt.Errorf("%d:%d: Symbol.keyFor's argument must be a symbol", pos.Line, pos.Col)
-		}
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_keyfor(ptr %s)", r, sv.Ref))
-		nt := TypePtr // string | undefined: a symbol not in the registry
-		nt.Nullable, nt.IsUndefined = true, true
-		return Value{Ref: r, Ty: nt}, nil
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Symbol.for takes exactly 1 string key", pos.Line, pos.Col)
 	}
-	return Value{}, fmt.Errorf("%d:%d: Symbol.%s is not supported", pos.Line, pos.Col, method)
+	kv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if kv.Ty.IR != "ptr" || kv.Ty.IsObject() || kv.Ty.IsSymbol() {
+		return Value{}, fmt.Errorf("%d:%d: Symbol.for's key must be a string", pos.Line, pos.Col)
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_for(ptr %s)", r, kv.Ref))
+	return Value{Ref: r, Ty: SymbolType()}, nil
+}
+
+// emitSymbolStaticKeyFor is Symbol.keyFor(sym): undefined for a symbol not
+// in the registry.
+func (e *Emitter) emitSymbolStaticKeyFor(args []ast.Expression, pos ast.Pos) (Value, error) {
+	e.ensureSymbolRegistry()
+	if len(args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Symbol.keyFor takes exactly 1 symbol", pos.Line, pos.Col)
+	}
+	sv, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !sv.Ty.IsSymbol() {
+		return Value{}, fmt.Errorf("%d:%d: Symbol.keyFor's argument must be a symbol", pos.Line, pos.Col)
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_keyfor(ptr %s)", r, sv.Ref))
+	nt := TypePtr // string | undefined: a symbol not in the registry
+	nt.setNullable(true)
+	nt.setUndefined(true)
+	return Value{Ref: r, Ty: nt}, nil
 }
 
 // wellKnownSymbols are the ECMAScript well-known symbols (`Symbol.iterator`,

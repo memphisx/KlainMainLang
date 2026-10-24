@@ -18,14 +18,18 @@ typedef unsigned char u8;
 #pragma clang diagnostic ignored "-Wincompatible-library-redeclaration"
 extern int pthread_sigmask(int, const void *, void *);
 extern int sigfillset(void *);
+extern int sigdelset(void *, int);
 extern void pthread_exit(void *) __attribute__((noreturn));
 extern int swapcontext(void *, void *);
 
 #if defined(__APPLE__)
 #define KML_SIG_BLOCK 1 /* glibc defines SIG_BLOCK as 0, Darwin as 1 */
+#define KML_SIGBUS 10
 #else
 #define KML_SIG_BLOCK 0
+#define KML_SIGBUS 7
 #endif
+#define KML_SIGSEGV 11
 
 __attribute__((noreturn)) void __kml_thread_exit(int code);
 
@@ -39,14 +43,10 @@ extern void __kml_worker_set_end(void (*end)(int));
 extern i64 __kml_worker_run_loop(void);
 extern _Thread_local void *__kml_current_task;
 
-#ifdef KLAIN_GC
-extern int GC_get_stack_base(void *);
-extern int GC_register_my_thread(const void *);
-extern int GC_unregister_my_thread(void);
+#ifdef KML_GC
 extern void __kml_gc_tls_register(void);
 extern void __kml_gc_tls_unregister(void);
-extern _Thread_local void *__kml_gc_orig_stackbottom;
-#define GC_UNREGISTER() (__kml_gc_tls_unregister(), GC_unregister_my_thread())
+#define GC_UNREGISTER() (__kml_gc_tls_unregister(), kml_gc_thread_unregister())
 #else
 #define GC_UNREGISTER() ((void)0)
 #endif
@@ -59,29 +59,37 @@ static _Thread_local void *worker_end_jb[5];
  * (TDD-00252), released as the thread ends. */
 void __kml_win_clear_loop_wake(void);
 #define LOOP_RELEASE() __kml_win_clear_loop_wake()
-/* The stack the overflow handler runs on, kept per thread (stackguard.c). */
-void __kml_stack_guard_thread(void);
 #else
 #define LOOP_RELEASE() ((void)0)
 #endif
+/* The stack the overflow handler runs on, kept per thread (stackguard.c). */
+void __kml_stack_guard_thread(void);
 
 /* The thread a Worker runs. Signals are the main thread's; the worker's
  * modules evaluate (its entry), then its loop runs until nothing holds it
  * open, and the parent hears the exit code. */
 void *__kml_worker_thread(void *ctx) {
-#ifdef KLAIN_GC
-    void *gcsb[2];
-    GC_get_stack_base(gcsb);
-    GC_register_my_thread(gcsb);
+#ifdef KML_GC
+    kml_gc_thread_register();
     __kml_gc_tls_register();
-    __kml_gc_orig_stackbottom = gcsb[0];
 #endif
     char sigset[128] __attribute__((aligned(8)));
     sigfillset(sigset);
+#ifndef _WIN32
+    /* A fault is this thread's own: a stack overflow's is its RangeError. */
+    sigdelset(sigset, KML_SIGSEGV);
+    sigdelset(sigset, KML_SIGBUS);
+#if defined(KML_GC) && !defined(__APPLE__)
+    /* The collector stops a registered thread by signal (Mach calls on
+     * Darwin): blocked, a collection while the worker runs never completes. */
+    sigdelset(sigset, kml_gc_suspend_signal());
+    sigdelset(sigset, kml_gc_restart_signal());
+#endif
+#endif
     pthread_sigmask(KML_SIG_BLOCK, sigset, NULL);
     __kml_worker_set_end(__kml_thread_exit);
-#ifdef _WIN32
     __kml_stack_guard_thread();
+#ifdef _WIN32
     if (__builtin_setjmp(worker_end_jb)) {
         LOOP_RELEASE();
         GC_UNREGISTER();
@@ -123,7 +131,7 @@ __attribute__((noreturn)) void __kml_thread_exit(int code) {
     void *ct = __kml_current_task;
     if (!ct) __kml_worker_end_thread();
     worker_abort = 1;
-    swapcontext(F(ct, KML_TASK_CTX, void *), F(ct, KML_TASK_RESUMER, void *));
+    KML_SWAPCONTEXT(F(ct, KML_TASK_CTX, void *), F(ct, KML_TASK_RESUMER, void *));
     __builtin_unreachable();
 }
 

@@ -88,3 +88,17 @@ void __kml_promise_run_executor(void *clo, void *res, void *rej, void *p) {
     __kml_pop_jmpbuf();
 }
 
+
+/* __kml_promise_settle_later: fulfils promise p (its value already stored)
+ * one microtask turn from now — an async generator's return(v) on a
+ * finished or unstarted generator, which awaits v first
+ * (AsyncGeneratorAwaitReturn). */
+extern void __kml_microtask_enqueue(void *);
+static void settle_later_tramp(void *p) { __kml_promise_settle(p, 1); }
+
+void __kml_promise_settle_later(void *p) {
+    void **cl = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    cl[0] = (void *)settle_later_tramp;
+    cl[1] = p;
+    __kml_microtask_enqueue(cl);
+}

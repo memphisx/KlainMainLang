@@ -147,3 +147,21 @@ console.log(from, any);
 3
 Uint8Array(2) [ 1, 2 ] [ Uint8Array(2) [ 1, 2 ] ]`)
 }
+
+// A species result keeps the class when its elements change kind, when the
+// receiver is typed as the plain array a species result is, and through
+// `any`.
+func TestE2EArraySpeciesAcrossLayouts(t *testing.T) {
+	assertSameAsNode(t, `class Q extends Array<number> { tag = "q" }
+const q = new Q(); q.push(1, 2, 3)
+const s = q.map(x => "v" + x)
+console.log(s, s instanceof Q, s.length, s[1], s.join("|"))
+const f = s.filter(x => x !== "v2")
+console.log(f, f instanceof Q, f.map(x => x.length), q.map(x => x > 1))
+const a: any = q
+console.log(a.map((x: number) => x + 1), a.filter((x: number) => x > 2), a.slice(1), a.slice(1, 2))
+console.log(a.concat([9]), a.flat(), a.flatMap((x: number) => [x, x]), a.map(String))
+const c: any = new Q(); c.push(1, 2, 3)
+console.log(c.splice(1), c, c.splice())
+`)
+}

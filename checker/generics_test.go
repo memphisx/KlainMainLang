@@ -116,7 +116,7 @@ func TestThis(t *testing.T) {
 		{"class Q { v: number = 1; m() { this; return 0 } }", "Q"},
 		{"class Q { v: number = 1; static m() { this; return 0 } }", "typeof Q"},
 		{"class B<T> { items: T[] = []; m(): number { this.items; return 0 } }", "T[]"},
-		{"const o = { a: 1, m() { this; return 0 } }", "?"},
+		{"const o = { a: 1, m() { this; return 0 } }", "{ a: number; m: () => number; }"},
 		// A property value (or an arrow in one) sees the enclosing `this`.
 		{"class Q { v = 1; m() { const o = { a: 0 }; return { a: o, b: this } } }\nnew Q().m().b", "Q"},
 		{"class Q { v = 1; m() { return { f: () => this } } }\nnew Q().m().f()", "Q"},
@@ -139,7 +139,10 @@ func TestEnums(t *testing.T) {
 		{en + "declare const d: Dir\nd", "Dir"},
 		{en + "Col.Red", "Col.Red"},
 		{en + "declare const c: Col\nc", "Col"},
-		{"enum X { A = 1 + 1 }\nX.A", "?"},
+		{"enum X { A = 1 + 1 }\nX.A", "X.A"},                             // a constant expression
+		{"declare function f(): number\nenum Y { A = f() }\nY.A", "Y.A"}, // a computed member: its own member type, value unknown
+		{"declare function f(): number\nenum Y { A = f(), B = 2 }\ndeclare const y: Y\ny", "Y"},
+		{"declare function f(): number\nenum Y { A = f(), B = A + 1 }\nY.B", "Y.B"},
 	} {
 		if got := typeOfLast(t, tc.src); got != tc.want {
 			t.Errorf("%q: got %s, want %s", tc.src, got, tc.want)

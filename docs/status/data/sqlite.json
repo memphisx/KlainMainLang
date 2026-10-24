@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. Node's built-in `node:sqlite` module — a synchronous, dependency-free SQL database. Import-gated (`import { DatabaseSync } from 'node:sqlite'`). Backed by the system `libsqlite3` (linked only when a program imports the module, the same posture as `fetch`/libcurl); `DatabaseSync`/`StatementSync` block like `fs.readFileSync`, so no `async`/`await` is involved. See [ADR-00540](../adr/ADR-00540.md)/[TDD-00151](../tdd/TDD-00151.md)."
+      "text": "> Part of the [Implementation Status](README.md) index. Node's built-in `node:sqlite` module — a synchronous, dependency-free SQL database. Import-gated (`import { DatabaseSync } from 'node:sqlite'`). Backed by the system `libsqlite3` (linked only when a program imports the module, the same posture as `fetch`/libcurl); `DatabaseSync`/`StatementSync` block like `fs.readFileSync`, so no `async`/`await` is involved. See [ADR-00540](../adr/00/ADR-00540.md)/[TDD-00151](../tdd/TDD-00151.md)."
     },
     {
       "kind": "coverage",
@@ -27,7 +27,10 @@
             "feature": "`new DatabaseSync(path, options?)`",
             "status": "implemented",
             "notes": [
-              "`lib/node/sqlite.ts`, ported from Node v24's src/node_sqlite.cc ([ADR-01304](../adr/ADR-01304.md)): path as a string, `Uint8Array` or `file:` URL; `open`, `readOnly`, `enableForeignKeyConstraints`, `enableDoubleQuotedStringLiterals`, `allowExtension`, `timeout`, `readBigInts`, `returnArrays`, `allowBareNamedParameters`, `allowUnknownNamedParameters`, `defensive`, validated with Node's errors"
+              "`lib/node/sqlite.ts`, ported from Node v24's src/node_sqlite.cc ([ADR-01304](../adr/01/ADR-01304.md)): path as a string, `Uint8Array` or `file:` URL; `open`, `readOnly`, `enableForeignKeyConstraints`, `enableDoubleQuotedStringLiterals`, `allowExtension`, `timeout`, `readBigInts`, `returnArrays`, `allowBareNamedParameters`, `allowUnknownNamedParameters`, `defensive`, validated with Node's errors"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync"
             ]
           },
           {
@@ -35,17 +38,27 @@
             "status": "implemented",
             "notes": [
               "Closing finalizes the database's statements: using one after is `ERR_INVALID_STATE` (`statement has been finalized`)"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync"
             ]
           },
           {
             "feature": "`db.exec(sql)` / `db.prepare(sql)` → `StatementSync`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:sqlite#DatabaseSync",
+              "node:sqlite#StatementSync"
+            ]
           },
           {
             "feature": "`db.location(dbName?)`",
             "status": "implemented",
             "notes": [
               "The backing file, or `null` for an in-memory/temp database"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync"
             ]
           },
           {
@@ -53,6 +66,9 @@
             "status": "implemented",
             "notes": [
               "`deterministic`, `directOnly`, `useBigIntArguments`, `varargs`; arguments and results as Node maps them; an exception in the function is rethrown from the statement"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync"
             ]
           },
           {
@@ -60,17 +76,27 @@
             "status": "implemented",
             "notes": [
               "`start` (value or function), `step`, `result`, `inverse` (a window function), `useBigIntArguments`, `varargs`, `directOnly`"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync"
             ]
           },
           {
             "feature": "`db.setAuthorizer(callback)`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:sqlite#DatabaseSync"
+            ]
           },
           {
             "feature": "`db.createSession()` / `db.applyChangeset()` / `Session`",
             "status": "implemented",
             "caveats": [
               "Available only where the system `libsqlite3` is built with sessions (macOS's is); elsewhere `ERR_INVALID_STATE` names the omission — Node bundles its own SQLite"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync",
+              "node:sqlite#Session"
             ]
           },
           {
@@ -78,17 +104,27 @@
             "status": "implemented",
             "caveats": [
               "The system `libsqlite3` on macOS omits extension loading, so loading an extension there is `ERR_INVALID_STATE`; Node bundles its own SQLite"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync"
             ]
           },
           {
             "feature": "`db.serialize()` / `db.deserialize()` / `db.enableDefensive()`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:sqlite#DatabaseSync"
+            ]
           },
           {
             "feature": "`db.createTagStore()` → `SQLTagStore`",
             "status": "implemented",
             "notes": [
               "Statements cached by template, least recently used evicted"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync",
+              "node:sqlite#SQLTagStore"
             ]
           },
           {
@@ -96,21 +132,33 @@
             "status": "implemented",
             "notes": [
               "Rows are null-prototype objects (arrays with `returnArrays`); `get()` is `undefined` without a row; `iterate()` steps lazily; `run()` gives `{ changes, lastInsertRowid }`"
+            ],
+            "decl": [
+              "node:sqlite#StatementSync"
             ]
           },
           {
             "feature": "`stmt.columns()` / `stmt.sourceSQL` / `stmt.expandedSQL`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:sqlite#StatementSync"
+            ]
           },
           {
             "feature": "`stmt.setReadBigInts()` / `setReturnArrays()` / `setAllowBareNamedParameters()` / `setAllowUnknownNamedParameters()`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:sqlite#StatementSync"
+            ]
           },
           {
             "feature": "Parameter binding (positional + named)",
             "status": "implemented",
             "notes": [
               "A leading plain object binds named parameters (`:x`/`@x`/`$x`, or the bare key); a number binds as REAL and a bigint as INTEGER, as in Node; unbindable values are `ERR_INVALID_ARG_TYPE`"
+            ],
+            "decl": [
+              "node:sqlite#StatementSync"
             ]
           },
           {
@@ -118,6 +166,9 @@
             "status": "implemented",
             "notes": [
               "INTEGER → number (bigint with `readBigInts`; past 2^53 `ERR_OUT_OF_RANGE`), REAL → number, TEXT → string, BLOB → `Uint8Array`, NULL → null"
+            ],
+            "decl": [
+              "node:sqlite#StatementSync"
             ]
           },
           {
@@ -125,6 +176,10 @@
             "status": "implemented",
             "notes": [
               "`ERR_SQLITE_ERROR` with `errcode` and `errstr`, as Node's"
+            ],
+            "decl": [
+              "node:sqlite#DatabaseSync",
+              "node:sqlite#StatementSync"
             ]
           },
           {
@@ -132,6 +187,10 @@
             "status": "implemented",
             "notes": [
               "Copies `rate` pages per turn of the loop, reporting `progress`; resolves the page count"
+            ],
+            "decl": [
+              "node:sqlite#backup",
+              "node:sqlite#constants"
             ]
           }
         ]

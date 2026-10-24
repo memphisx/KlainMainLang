@@ -18,7 +18,7 @@ import (
 // from this test binary's own Go runtime (GOOS, NumCPU), that's asserted
 // directly so the same test source is portable across whatever machine
 // `go test` actually runs on (Linux here; Darwin once tested there per
-// docs/tdd/TDD-00024.md/docs/adr/ADR-00090.md).
+// docs/tdd/TDD-00024.md, docs/adr/00/ADR-00090.md).
 
 func TestE2EOSPlatform(t *testing.T) {
 	want := runtime.GOOS

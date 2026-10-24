@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"KlainMainLang/lib"
 	"fmt"
 	"os"
 	"os/signal"
@@ -39,6 +40,16 @@ func TestMain(m *testing.M) {
 	// local time sets its own zone.
 	if os.Getenv("TZ") == "" {
 		os.Setenv("TZ", "UTC")
+	}
+	// klain:http's server backend (TDD-00255): `make test-h2o` runs the
+	// klain:http tests again on h2o.
+	if b := os.Getenv("KLAIN_TEST_HTTP_BACKEND"); b != "" {
+		lib.HTTPBackend = b
+	}
+	// Every allocation and heap store the compiler emits goes through a heap
+	// primitive (TDD-00230 P3.3a); any other panics the compile.
+	if os.Getenv("KML_HEAPCHECK") == "" {
+		os.Setenv("KML_HEAPCHECK", "panic")
 	}
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, os.Interrupt)

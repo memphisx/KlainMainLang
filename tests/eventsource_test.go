@@ -516,3 +516,20 @@ func eventSourceRefusedGraceMs() string {
 	}
 	return "200"
 }
+
+// An event's data, lastEventId and origin are ordinary strings: their
+// length, comparison, concatenation and methods work as on any other.
+func TestE2EEventSourceDataStringsAreStrings(t *testing.T) {
+	srv := newEventSourceTestServer(t)
+	src := fmt.Sprintf(`
+const es = new EventSource("%s/multi");
+es.onmessage = (ev) => {
+  const d = ev.data;
+  console.log(d.length, d === "line1\nline2", JSON.stringify(d + "!"), d.toUpperCase().split("\n").join(","));
+  console.log(ev.lastEventId.length, ev.lastEventId === "2", ev.origin.startsWith("http://"), ev.origin.length > 7);
+  es.close();
+};
+setTimeout(() => {}, 300);
+`, srv.URL)
+	assertOutput(t, src, "11 true \"line1\\nline2!\" LINE1,LINE2\n1 true true true")
+}

@@ -78,7 +78,8 @@ function hasBuiltInToString(value: any): boolean {
     if (Object.prototype.hasOwnProperty.call(value, 'toString')) return false;
     const key = __kml_native.protoKey(value);
     if (key.startsWith('C:') || key.startsWith('P:')) {
-        return typeof value.toString !== 'function';
+        // A class extending Array inherits Array.prototype's, a builtin one.
+        return typeof value.toString !== 'function' || value.toString === Array.prototype.toString;
     }
     return true;
 }
@@ -236,7 +237,7 @@ export function format(...args: any[]): string {
 export function formatWithOptions(inspectOptions: InspectOptions, format?: any, ...param: any[]): string;
 export function formatWithOptions(inspectOptions: any, ...args: any[]): string {
     if (inspectOptions === null || typeof inspectOptions !== 'object') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "inspectOptions" argument must be of type object.' + received(inspectOptions));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "inspectOptions" argument must be of type object.' + received(inspectOptions));
     }
     return formatWithOptionsInternal(inspectOptions, args);
 }
@@ -255,12 +256,12 @@ export function isDeepStrictEqual(val1: unknown, val2: unknown, skipPrototype?: 
 export function callbackify(original: (...args: any[]) => Promise<any>): (...args: any[]) => void {
     const fn: any = original;
     if (typeof fn !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "original" argument must be of type function.' + received(fn));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "original" argument must be of type function.' + received(fn));
     }
     return (...args: any[]): void => {
         const maybeCb: any = args.pop();
         if (typeof maybeCb !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "last argument" argument must be of type function.' + received(maybeCb));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "last argument" argument must be of type function.' + received(maybeCb));
         }
         const p: Promise<any> = fn(...args);
         p.then(
@@ -301,7 +302,7 @@ export function deprecate<T extends Function>(fn: T, msg: string, code?: string)
 export function deprecate(fn: any, msg: string, code?: string): any {
     const f: any = fn;
     if (code !== undefined && typeof code !== 'string') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "code" argument must be of type string.' + received(code));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "code" argument must be of type string.' + received(code));
     }
     let warned = false;
     const deprecated: any = (...args: any[]): any => {
@@ -375,7 +376,7 @@ const ansi = /[\u001B\u009B][[\]()#;?]*(?:(?:(?:(?:;[-a-zA-Z\d\/\#&.:=?%@~_]+)*|
  */
 export function stripVTControlCharacters(str: string): string {
     if (typeof str !== 'string') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "str" argument must be of type string.' + received(str));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "str" argument must be of type string.' + received(str));
     }
     if (str.indexOf('\u001B') === -1 && str.indexOf('\u009B') === -1) {
         return str;
@@ -393,10 +394,10 @@ export function toUSVString(input: string): string {
 
 function validateErrno(err: any): void {
     if (typeof err !== 'number') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "err" argument must be of type number.' + received(err));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "err" argument must be of type number.' + received(err));
     }
     if (err >= 0 || !Number.isSafeInteger(err)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "err" is out of range. It must be a negative integer. Received ' + String(err));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "err" is out of range. It must be a negative integer. Received ' + String(err));
     }
 }
 
@@ -483,7 +484,7 @@ function streamColorizes(stream: any): boolean {
  */
 export function styleText(format: string | string[], text: string, options?: { validateStream?: boolean; stream?: any }): string {
     if (typeof text !== 'string') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "text" argument must be of type string.' + received(text));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "text" argument must be of type string.' + received(text));
     }
     const o: any = options;
     const validateStream = o === undefined || o.validateStream === undefined ? true : o.validateStream;
@@ -500,7 +501,7 @@ export function styleText(format: string | string[], text: string, options?: { v
         if (key === 'none') continue;
         if (typeof key === 'string' && key[0] === '#') {
             if (hexColorRegExp.exec(key) === null) {
-                throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'format' must be a valid hex color (#RGB or #RRGGBB). Received " + inspect(key));
+                throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'format' must be a valid hex color (#RGB or #RRGGBB). Received " + inspect(key));
             }
             if (skipColorize) continue;
             const hex = key.length === 4 ? key[1] + key[1] + key[2] + key[2] + key[3] + key[3] : key.slice(1);
@@ -517,7 +518,7 @@ export function styleText(format: string | string[], text: string, options?: { v
         const codes = colorCodes(key);
         if (codes === undefined) {
             const names = Object.keys(inspect.colors).map((n) => `'${n}'`).join(', ');
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'format' must be one of: " + names + '. Received ' + inspect(key));
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'format' must be one of: " + names + '. Received ' + inspect(key));
         }
         const open = `\u001b[${codes[0]}m`;
         const close = `\u001b[${codes[1]}m`;
@@ -540,7 +541,7 @@ export const isArray = deprecate((object: unknown): boolean => Array.isArray(obj
  */
 export function aborted(signal: AbortSignal, resource: any): Promise<void> {
     if (resource === undefined || resource === null || (typeof resource !== 'object' && typeof resource !== 'function')) {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "resource" argument must be of type object.' + received(resource));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "resource" argument must be of type object.' + received(resource));
     }
     return new Promise<void>((resolve) => {
         if (signal.aborted) {

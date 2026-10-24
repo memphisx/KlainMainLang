@@ -380,7 +380,7 @@ func TestE2EWeakMapPrimitiveKeyRejected(t *testing.T) {
 	mustCompileError(t, `
 const wm = new WeakMap<string, number>()
 wm.set('x', 1)
-`, "type 'string' does not satisfy the constraint 'object'")
+`, "type 'string' does not satisfy the constraint")
 }
 
 func TestE2EWeakMapDynamicObjectKeyCompatJS(t *testing.T) {
@@ -785,34 +785,25 @@ for (const v of m) { console.log("val", v); }
 `, "a 1\nb 2\n10 x\nval [ 'a', 1 ]\nval [ 'b', 2 ]")
 }
 
-func TestE2EMapFromHeterogeneousEntriesRejected(t *testing.T) {
-	// ADR-00650: new Map(...) infers its key/value types from the first entry
-	// pair; a later pair with a different key or value type (a mixed-type map
-	// that would need any-typed keys/values, not yet supported) is a clean
-	// compile error rather than storing the mismatched scalar raw into a ptr
-	// field (invalid IR).
-	cases := []string{
-		`const m = new Map([['a', 'b'], [1, 1]]);`,   // key string→number
-		`const m = new Map([['a', 1], ['b', 'c']]);`, // value number→string
-	}
-	for _, src := range cases {
-		if _, err := parseAndCompile(src); err == nil {
-			t.Fatalf("expected a clean rejection for a heterogeneous Map entries array, got none for: %s", src)
-		}
-	}
-	// The homogeneous forms still compile and run.
-	assertOutput(t, `
+func TestE2EMapFromHeterogeneousEntries(t *testing.T) {
+	// A pair of another key or value type makes the map any-keyed, as Node
+	// keeps every entry as given (ADR-01830; ADR-00650 rejected it).
+	assertSameAsNodeCompatJS(t, `
+const m = new Map([['a', 'b'], [1, 1]]);
+console.log(m.get('a'), m.get(1), m.size);
+const v = new Map([['a', 1], ['b', 'c']]);
+console.log(v.get('a'), v.get('b'));
 const s = new Map([['foo', 'bar'], ['baz', 'qux']]);
 console.log(s.get('foo'));
 const n = new Map([[1, 10], [2, 20]]);
 console.log(n.get(2));
-`, "bar\n20")
+`)
 }
 
 // Array.of(...) is the array literal of its arguments: mixed kinds build
 // the same array a mixed literal does, and no arguments an empty array.
 func TestE2EArrayOfMixedAndEmpty(t *testing.T) {
-	assertSameAsNode(t, `
+	assertSameAsNodeCompatJS(t, `
 const a = Array.of(1, 'x');
 console.log(a, typeof a[1]);
 const u: any[] = Array.of(undefined, false, null);
@@ -1082,5 +1073,45 @@ console.log(n.get("k"), a.get("k"), a.has("k"), a);
 a.forEach((v: number[], k: string) => console.log(k, v.length));
 const arr: any = [10, 20];
 arr.forEach((v: number, i: number) => console.log(v, i));
+`)
+}
+
+// Object.fromEntries over number, symbol and boolean keys (an array or a
+// Map source): each key goes through ToPropertyKey.
+func TestE2EObjectFromEntriesNonStringKeys(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const a = Object.fromEntries([[1, "x"], [2, "y"]] as [number, string][])
+console.log(a, Object.keys(a))
+const s = Symbol("k")
+const b = Object.fromEntries([[s, 1], ["z", 2]] as [string | symbol, number][])
+console.log(b, b[s])
+const m = new Map<number, boolean>([[3, true]])
+console.log(Object.fromEntries(m))
+console.log(Object.fromEntries(new Map([[true, 1]]) as any))
+`)
+}
+
+// new WeakMap(entries) / new WeakSet(values) / WeakRef with symbol keys, from literals, a Map and an array parameter; a primitive throws.
+func TestE2EWeakCollectionsFromIterable(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const k1 = {}, k2 = {}
+const wm = new WeakMap([[k1, "a"], [k2, "b"]])
+console.log(wm.get(k1), wm.get(k2), wm.has({}))
+const m = new Map<object, number>([[k1, 7]])
+console.log(new WeakMap(m).get(k1))
+const s = Symbol("x")
+const wm2 = new WeakMap<symbol, number>([[s, 5]])
+console.log(wm2.get(s))
+try { new WeakSet([1 as any]) } catch (e: any) { console.log(e.constructor.name, e.message) }
+try { new WeakMap([["str" as any, 1]]) } catch (e: any) { console.log(e.constructor.name, e.message) }
+const wr = new WeakRef(s)
+console.log(wr.deref() === s)
+const ws = new WeakSet(null)
+ws.add(k1)
+console.log(ws.has(k1), ws.has(k2))
+function mk(objs: object[]) { return new WeakSet(objs) }
+console.log(mk([k1]).has(k1))
 `)
 }

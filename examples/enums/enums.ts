@@ -102,3 +102,13 @@ enum Size { S, M, L }
 console.log(Size["M"]);   // 1
 console.log(Size[2]);     // L
 console.log(Size[42]);    // undefined
+
+// A computed member is evaluated where the enum is declared; a bare member
+// name inside it reads that member.
+const base = (n: number) => n * 10;
+enum Port { Http = base(8), Alt = Http + 1, Tls = 443 }
+console.log(Port.Http, Port.Alt, Port[443]);  // 80 81 Tls
+
+// A mixed enum: string members, and numeric ones with reverse entries.
+enum Answer { No = 0, Yes = "YES" }
+console.log(Answer.Yes, Answer[0]);           // YES No

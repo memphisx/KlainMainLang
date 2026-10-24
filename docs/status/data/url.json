@@ -27,43 +27,52 @@
             "feature": "`URL`",
             "status": "implemented",
             "notes": [
-              "The URL Standard's basic URL parser in TypeScript (`lib/node/kml_url.ts`, [TDD-00237](../tdd/TDD-00237.md), [ADR-01320](../adr/ADR-01320.md)) — the algorithm Node's ada implements: special and non-special schemes, opaque paths, IPv4 number forms, IPv6 compression, per-component percent-encode sets, and the setters as the standard's state overrides",
+              "The URL Standard's basic URL parser in TypeScript (`lib/node/kml_url.ts`, [TDD-00237](../tdd/TDD-00237.md), [ADR-01320](../adr/01/ADR-01320.md)) — the algorithm Node's ada implements: special and non-special schemes, opaque paths, IPv4 number forms, IPv6 compression, per-component percent-encode sets, and the setters as the standard's state overrides",
               "Node's `URL` surface (lib/internal/url.js): every component getter and setter, `searchParams`, `toString`/`toJSON`, `URL.parse`/`URL.canParse`, util.inspect's `URL { … }`, and `TypeError [ERR_INVALID_URL]` with `input` (and `base`) on a bad input",
               "`URL`/`URLSearchParams` are globals (no import), and the same classes `url` exports; a class may extend them"
             ],
             "caveats": [
               "A non-ASCII hostname is case-folded and punycoded, without the rest of UTS 46's mapping: a full-width `ＥＸＡＭＰＬＥ.com` punycodes where Node reads `example.com`"
+            ],
+            "decl": [
+              "URL"
             ]
           },
           {
             "feature": "`URLSearchParams`",
             "status": "implemented",
             "notes": [
-              "Node's `URLSearchParams` (lib/internal/url.js) in TypeScript ([ADR-01320](../adr/ADR-01320.md)): the name/value list, `append`/`delete(name, value?)`/`get`/`getAll`/`has(name, value?)`/`set`/`sort` (stable, by UTF-16 code units)/`size`, `keys`/`values`/`entries`/`forEach` and iteration, `toString` (the form-urlencoded serializer), util.inspect's `URLSearchParams { 'a' => '1' }`",
+              "Node's `URLSearchParams` (lib/internal/url.js) in TypeScript ([ADR-01320](../adr/01/ADR-01320.md)): the name/value list, `append`/`delete(name, value?)`/`get`/`getAll`/`has(name, value?)`/`set`/`sort` (stable, by UTF-16 code units)/`size`, `keys`/`values`/`entries`/`forEach` and iteration, `toString` (the form-urlencoded serializer), util.inspect's `URLSearchParams { 'a' => '1' }`",
               "`url.searchParams` is live: a change rewrites the URL's query, and a new `search`/`href` re-reads the list",
               "`new URLSearchParams(init)`: a query string (one leading `?` dropped), an iterable of pairs, a record, or another `URLSearchParams`"
+            ],
+            "decl": [
+              "URLSearchParams"
             ]
           },
           {
             "feature": "`URLPattern`",
             "status": "implemented",
-            "caveats": [
-              "Component regexes run on PCRE2, so a regexp group's ECMAScript-only semantics differ: an empty optional group iteration reads `\"\"` (JavaScript: `undefined`), `v`-flag set operations (`[[a-z]--a]`) never match, and invalid `v`-mode syntax is accepted (3 of the 369 WPT `urlpatterntestdata.json` cases)"
-            ],
             "notes": [
-              "The URL Pattern Standard in TypeScript (`lib/node/kml_urlpattern.ts`), with ada's departures as Node 24 shows them: the constructor-string and init forms, `baseURL`, `ignoreCase`, the full pattern grammar (`{}` groups, modifiers, regexp groups, wildcards), the component getters, `hasRegExpGroups`, `test` and `exec` with the standard's `URLPatternResult` ([ADR-01340](../adr/ADR-01340.md))",
+              "The URL Pattern Standard in TypeScript (`lib/node/kml_urlpattern.ts`), with ada's departures as Node 24 shows them: the constructor-string and init forms, `baseURL`, `ignoreCase`, the full pattern grammar (`{}` groups, modifiers, regexp groups, wildcards), the component getters, `hasRegExpGroups`, `test` and `exec` with the standard's `URLPatternResult` ([ADR-01340](../adr/01/ADR-01340.md))",
               "A result's `groups` are in Node's order: ada's `std::unordered_map`, reproduced with the platform's own C++ library"
+            ],
+            "decl": [
+              "URLPattern"
             ]
           },
           {
             "feature": "`url.parse(urlString[, parseQueryString[, slashesDenoteHost]])` (legacy)",
             "status": "implemented",
             "caveats": [
-              "The `parseQueryString` object form of `query` is a dictionary held in a union field: reading it after narrowing works, but `console.log`/`JSON.stringify` of it through `any` do not see its keys ([ADR-01225](../adr/ADR-01225.md))"
+              "The `parseQueryString` object form of `query` is a dictionary held in a union field: reading it after narrowing works, but `console.log`/`JSON.stringify` of it through `any` do not see its keys ([ADR-01225](../adr/01/ADR-01225.md))"
             ],
             "notes": [
-              "Node's own lib/url.js, in TypeScript (`lib/node/url.ts`): the lenient never-throw parse, `null` for an absent component, `slashes`, backslash handling, auto-escaping, and the DEP0169 warning once per process ([ADR-01221](../adr/ADR-01221.md))",
+              "Node's own lib/url.js, in TypeScript (`lib/node/url.ts`): the lenient never-throw parse, `null` for an absent component, `slashes`, backslash handling, auto-escaping, and the DEP0169 warning once per process ([ADR-01221](../adr/01/ADR-01221.md))",
               "Importable named (`import { parse } from 'url'`), via namespace, and via default; `Url` and its `parse`/`format`/`resolve`/`resolveObject` methods are exported too"
+            ],
+            "decl": [
+              "url#parse"
             ]
           },
           {
@@ -71,41 +80,56 @@
             "status": "implemented",
             "caveats": [],
             "notes": [
-              "lib/url.js's `urlFormat`: a `Url`-shaped object (slashed protocols, `[ipv6]` hosts, `query` objects through `querystring.stringify`, `#`/`?` escaping in the pathname), a string (parsed then formatted), or a WHATWG `URL` with the `auth`/`fragment`/`search`/`unicode` options ([ADR-01221](../adr/ADR-01221.md))"
+              "lib/url.js's `urlFormat`: a `Url`-shaped object (slashed protocols, `[ipv6]` hosts, `query` objects through `querystring.stringify`, `#`/`?` escaping in the pathname), a string (parsed then formatted), or a WHATWG `URL` with the `auth`/`fragment`/`search`/`unicode` options ([ADR-01221](../adr/01/ADR-01221.md))"
+            ],
+            "decl": [
+              "url#format"
             ]
           },
           {
             "feature": "`url.fileURLToPath(url[, { windows }])`",
             "status": "implemented",
             "notes": [
-              "Converts a `file:` URL (string or WHATWG `URL`) to the percent-decoded filesystem path; throws on a non-`file:` scheme. On Windows `file:///C:/dir/f` is `C:\\dir\\f` and `file://server/share/f` is the UNC path `\\\\server\\share\\f` ([ADR-00722](../adr/ADR-00722.md))",
-              "`{ windows }` picks the flavor on any host — a literal at compile time, a run-time boolean through both halves — and `undefined` means the host; the POSIX half throws Node's `File URL host must be \"localhost\" or empty on <platform>` for a non-empty, non-`localhost` host and rejects an encoded `/`; neither half goes through libcurl, which refuses a drive letter in a file URL on Linux/macOS ([ADR-01079](../adr/ADR-01079.md))"
+              "Converts a `file:` URL (string or WHATWG `URL`) to the percent-decoded filesystem path; throws on a non-`file:` scheme. On Windows `file:///C:/dir/f` is `C:\\dir\\f` and `file://server/share/f` is the UNC path `\\\\server\\share\\f` ([ADR-00722](../adr/00/ADR-00722.md))",
+              "`{ windows }` picks the flavor on any host — a literal at compile time, a run-time boolean through both halves — and `undefined` means the host; the POSIX half throws Node's `File URL host must be \"localhost\" or empty on <platform>` for a non-empty, non-`localhost` host and rejects an encoded `/`; neither half goes through libcurl, which refuses a drive letter in a file URL on Linux/macOS ([ADR-01079](../adr/01/ADR-01079.md))"
+            ],
+            "decl": [
+              "url#fileURLToPath"
             ]
           },
           {
             "feature": "`url.pathToFileURL(path[, { windows }])`",
             "status": "implemented",
             "notes": [
-              "`{ windows }` selects the win32 (`file:///C:/dir/f`, UNC host) or POSIX form on any host, `undefined` meaning the host's ([ADR-01079](../adr/ADR-01079.md))",
-              "Resolves the path to absolute, percent-encodes it, and returns a WHATWG `URL` with the `file:` scheme; on Windows a drive path is `file:///C:/dir/f` and a UNC path keeps its server as the host ([ADR-00722](../adr/ADR-00722.md))",
-              "The escape set is Node's: controls, space, `\" # % < > ? [ ] ^ { | } ~`, the backtick and every non-ASCII byte become upper-case `%XX`; the sub-delims `! $ & ' ( ) * + , ; = @` stay literal; `href` and `pathname` agree ([ADR-01046](../adr/ADR-01046.md))"
+              "`{ windows }` selects the win32 (`file:///C:/dir/f`, UNC host) or POSIX form on any host, `undefined` meaning the host's ([ADR-01079](../adr/01/ADR-01079.md))",
+              "Resolves the path to absolute, percent-encodes it, and returns a WHATWG `URL` with the `file:` scheme; on Windows a drive path is `file:///C:/dir/f` and a UNC path keeps its server as the host ([ADR-00722](../adr/00/ADR-00722.md))",
+              "The escape set is Node's: controls, space, `\" # % < > ? [ ] ^ { | } ~`, the backtick and every non-ASCII byte become upper-case `%XX`; the sub-delims `! $ & ' ( ) * + , ; = @` stay literal; `href` and `pathname` agree ([ADR-01046](../adr/01/ADR-01046.md))"
+            ],
+            "decl": [
+              "url#pathToFileURL"
             ]
           },
           {
             "feature": "`url.resolve(from, to)` (legacy)",
             "status": "implemented",
             "notes": [
-              "lib/url.js's `urlResolve`/`resolveObject`: relative paths, `..`/`.` segments, protocol-relative and cross-protocol targets, non-slashed schemes (`mailto:`), with `url.resolveObject` alongside ([ADR-01221](../adr/ADR-01221.md))"
+              "lib/url.js's `urlResolve`/`resolveObject`: relative paths, `..`/`.` segments, protocol-relative and cross-protocol targets, non-slashed schemes (`mailto:`), with `url.resolveObject` alongside ([ADR-01221](../adr/01/ADR-01221.md))"
+            ],
+            "decl": [
+              "url#resolve"
             ]
           },
           {
             "feature": "`url.urlToHttpOptions(url)`",
             "status": "implemented",
             "caveats": [
-              "Expects a WHATWG `URL`; a legacy `Url`/plain object isn't accepted ([ADR-00672](../adr/ADR-00672.md))"
+              "Expects a WHATWG `URL`; a legacy `Url`/plain object isn't accepted ([ADR-00672](../adr/00/ADR-00672.md))"
             ],
             "notes": [
               "Remaps a `URL` into the `http.request` option bag (`protocol`/`hostname`/`hash`/`search`/`pathname`/`path`/`href`/`port`/`auth`)"
+            ],
+            "decl": [
+              "url#urlToHttpOptions"
             ]
           },
           {
@@ -115,7 +139,11 @@
               "A non-ASCII hostname is case-folded and punycoded, without the rest of UTS 46's mapping: a full-width `ＥＸＡＭＰＬＥ.com` punycodes where Node reads `example.com`"
             ],
             "notes": [
-              "The URL Standard's host parser's domain to ASCII, in TypeScript: lowercased, each non-ASCII label `xn--` and its Punycode; `\"\"` on failure, as Node ([ADR-01320](../adr/ADR-01320.md))"
+              "The URL Standard's host parser's domain to ASCII, in TypeScript: lowercased, each non-ASCII label `xn--` and its Punycode; `\"\"` on failure, as Node ([ADR-01320](../adr/01/ADR-01320.md))"
+            ],
+            "decl": [
+              "url#domainToASCII",
+              "url#domainToUnicode"
             ]
           }
         ]

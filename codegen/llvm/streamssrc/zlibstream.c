@@ -42,11 +42,12 @@ extern int inflateEnd(ptr);
 
 extern void __kml_rs_error(ptr rs, i64 err);
 extern i64 __kml_rs_enqueue(ptr rs, i64 v0, i64 v1);
+extern i64 __kml_rs_chunk_hdr(ptr data, i64 n);
 /* The constructor-name constant "Error" (one symbol per name, compared by
  * address): { i64 len, bytes }; a string value points at the bytes. Weak:
  * the program's linkonce copy, when it has one, is the same symbol. */
 __attribute__((weak, aligned(8))) const struct { i64 len; char s[6]; }
-    kml_ctorname_Error_def __asm__("__kml_ctorname.Error") = {5, "Error"};
+    kml_ctorname_Error_def __asm__("__kml_ctorname.Error") = {KML_STR_ASCII_HDR(5), "Error"};
 #define kml_ctorname_Error ((const char *)&kml_ctorname_Error_def)
 
 #define F(p, off, T) (*(T *)((char *)(p) + (off)))
@@ -60,7 +61,7 @@ _Static_assert(sizeof(zctx) == KML_ZCTX_SIZE, "zctx layout");
 static const struct {
     i64 len;
     char s[18];
-} zmsg = {17, "zlib stream error"};
+} zmsg = {KML_STR_ASCII_HDR(17), "zlib stream error"};
 
 /* The error object { type-id flag, message, name }. */
 typedef struct {
@@ -71,11 +72,11 @@ typedef struct {
 /* (mode, windowBits) -> zctx, the readable patched in by the construction
  * site. Null when zlib rejects the init. */
 ptr __kml_zs_init(i64 mode, i64 wbits) {
-    ptr strm = calloc(1, Z_STREAM_SIZE);
+    ptr strm = calloc(1, Z_STREAM_SIZE); /* scratch */
     int rc = mode != 0 ? inflateInit2_(strm, (int)wbits, zlibVersion(), Z_STREAM_SIZE)
                        : deflateInit2_(strm, 6, 8, (int)wbits, 8, 0, zlibVersion(), Z_STREAM_SIZE);
     if (rc != 0) return NULL;
-    zctx *c = (zctx *)malloc(sizeof(zctx));
+    zctx *c = (zctx *)kml_alloc(KML_HEAP_WORDS, sizeof(zctx));
     c->strm = strm;
     c->readable = NULL;
     c->mode = mode;
@@ -89,13 +90,13 @@ void __kml_zs_pump(ptr cp, int flush) {
     zctx *c = (zctx *)cp;
     ptr strm = c->strm;
     for (;;) {
-        char *out = (char *)malloc(Z_BLOCK);
+        char *out = (char *)kml_alloc(KML_HEAP_RAW, Z_BLOCK);
         F(strm, Z_NEXT_OUT, ptr) = out;
         F(strm, Z_AVAIL_OUT, u32) = Z_BLOCK;
         int rc = c->mode != 0 ? inflate(strm, 0) : deflate(strm, flush);
         u32 ao = F(strm, Z_AVAIL_OUT, u32);
         i64 produced = Z_BLOCK - (i64)ao;
-        if (produced > 0) __kml_rs_enqueue(c->readable, (i64)(size_t)out, produced);
+        if (produced > 0) __kml_rs_enqueue(c->readable, __kml_rs_chunk_hdr(out, produced), produced);
         if (rc == 1) {
             c->finished = 1;
             return;
@@ -105,7 +106,7 @@ void __kml_zs_pump(ptr cp, int flush) {
              * now": stop without erroring; any other negative code errors
              * the readable side. */
             if (rc == -5) return;
-            errobj *eo = (errobj *)malloc(sizeof(errobj));
+            errobj *eo = (errobj *)kml_alloc(KML_HEAP_WORDS, sizeof(errobj));
             eo->kind = KML_ERROR_TYPE_FLAG;
             eo->msg = zmsg.s;
             eo->name = kml_ctorname_Error + 8;
@@ -122,7 +123,7 @@ void __kml_zs_pump(ptr cp, int flush) {
 ptr __kml_zs_transform(ptr cp, i64 v0, i64 v1) {
     zctx *c = (zctx *)cp;
     if (c->finished) return NULL;
-    F(c->strm, Z_NEXT_IN, ptr) = (ptr)(size_t)v0;
+    F(c->strm, Z_NEXT_IN, ptr) = *(ptr *)(size_t)v0; /* the chunk's data */
     F(c->strm, Z_AVAIL_IN, u32) = (u32)v1;
     __kml_zs_pump(c, 0);
     return NULL;

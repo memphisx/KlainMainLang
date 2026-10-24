@@ -49,7 +49,7 @@ func fnValueTrampolineName(mangled string) string {
 // array) expands to a `(ptr, i64)` pair; every other type is one operand,
 // nullable scalars included (their `{ i1, T }` storage shape).
 func paramABITypes(pty Type) []string {
-	if pty.IsArray {
+	if pty.IsArray() {
 		return []string{"ptr", "i64"}
 	}
 	return []string{storageIR(pty)}
@@ -86,11 +86,8 @@ func (e *Emitter) ensureFuncValueTrampoline(mangled string, sig FuncSig) string 
 		argVals := make([]Value, len(sig.ParamTypes))
 		n := 0
 		for i, pty := range sig.ParamTypes {
-			if pty.IsArray {
-				agg0, agg1 := e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %%a%d, 0", agg0, n))
-				e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %%a%d, 1", agg1, agg0, n+1))
-				argVals[i] = Value{Ref: agg1, Ty: pty}
+			if pty.IsArray() {
+				argVals[i] = Value{Ref: fmt.Sprintf("%%a%d", n), Ty: pty}
 				n += 2
 				continue
 			}
@@ -105,7 +102,7 @@ func (e *Emitter) ensureFuncValueTrampoline(mangled string, sig FuncSig) string 
 		}
 		body := e.allocas.String() + e.body.String()
 		restore()
-		e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n%s}\n", ret, sym, strings.Join(decls, ", "), body))
+		e.writeFunc(fmt.Sprintf("%s %s(%s)", ret, sym, strings.Join(decls, ", ")), body)
 		return sym
 	}
 	call := fmt.Sprintf("call %s @%s(%s)", ret, llvmSafeSymbol(mangled), strings.Join(fwd, ", "))
@@ -143,7 +140,18 @@ func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig, displayName st
 	tramp := e.ensureFuncValueTrampoline(mangled, sig)
 	// The trampoline is the header's code pointer, so the function's `name`/
 	// `length` are registered under it (TDD-00229).
-	e.registerFnMeta(tramp, unmangleTopLevelName(displayName), fnLengthFromSig(sig), fnKindOf(sig.IsAsync, false))
+	kind := fnKindOf(sig.IsAsync, false)
+	if e.sloppyFuncs[mangled] {
+		kind |= fnKindSloppy
+	}
+	e.registerFnMeta(tramp, unmangleTopLevelName(displayName), fnLengthFromSig(sig), kind)
+	if fd := e.topFuncDecls[mangled]; fd != nil {
+		e.fnMetaSource(tramp, fd.Src)
+	} else if fd := e.genericFuncs[displayName]; fd != nil {
+		e.fnMetaSource(tramp, fd.Src)
+	} else if src, ok := e.nestedFuncSrc[mangled]; ok {
+		e.fnMetaSource(tramp, src)
+	}
 	sym := fnValueHeaderName(mangled)
 	if !e.fnValueHeaders[mangled] {
 		e.fnValueHeaders[mangled] = true

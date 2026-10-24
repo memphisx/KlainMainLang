@@ -224,7 +224,7 @@ arr.push(double(2))
 const settled = await Promise.allSettled(arr)
 for (const s of settled) {
     console.log(s.status)
-    console.log(s.value)
+    if (s.status === "fulfilled") console.log(s.value)
 }
 `, "fulfilled\n2\nfulfilled\n4")
 }
@@ -964,4 +964,49 @@ main();
 async function m() { console.log(await t); const z: any = 3; console.log(await z); }
 m();
 `)
+}
+
+// A .then callback annotated with an object type whose fields are `any`
+// receives the promise's value of the concrete layout.
+func TestE2EPromiseThenAnnotatedAnyFieldParam(t *testing.T) {
+	assertSameAsNode(t, `
+interface Rec<T> { value: T; done: boolean }
+function get(): Promise<Rec<Uint8Array>> { return Promise.resolve({ value: new Uint8Array([1, 2]), done: false }) }
+get().then((r: Rec<any>) => { const v: any = r.value; console.log(typeof v, v.length, r.done) })
+const p: Promise<{ a: number }> = Promise.resolve({ a: 5 })
+p.then((r: { a: any }) => { console.log(typeof r.a, r.a) })
+`)
+}
+
+// Promise.all over a thenable instance and a promise fulfills with the
+// values; an element read off the result is the value, typeof included.
+func TestE2EPromiseAllThenableElementRead(t *testing.T) {
+	assertSameAsNode(t, `class T {
+  v: number;
+  constructor(v: number) { this.v = v; }
+  then(res: (x: number) => void): void { res(this.v * 2); }
+}
+async function main() {
+  const all = await Promise.all([new T(2), Promise.resolve(7)]);
+  console.log(all, all[0], typeof all[0], all[1] + 1);
+}
+main();
+`)
+}
+
+// Promise.all over plain objects resolves with those objects, not copies,
+// however the callback's parameter holds them.
+func TestE2EPromiseAllKeepsObjectIdentity(t *testing.T) {
+	assertOutput(t, `
+var v1 = {};
+var v2 = {};
+Promise.all([v1, v2]).then(function (values) { console.log(values[0] === v1, values[1] === v2); });
+Promise.resolve([v1]).then((r: any) => console.log(r[0] === v1));
+async function m() {
+  const x = await Promise.all([v1]);
+  const y: any = await Promise.all([v2]);
+  console.log(x[0] === v1, y[0] === v2);
+}
+m();
+`, "true\ntrue true\ntrue true\n")
 }

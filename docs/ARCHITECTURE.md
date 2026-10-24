@@ -2,7 +2,7 @@
 
 Every `ensure*()`-heavy or dispatch-heavy domain is split into a small
 `<domain>.go` (or bare dispatcher) plus several `<domain>_<subarea>.go`
-files once it outgrows one file — see [ADR-00075](adr/ADR-00075.md)
+files once it outgrows one file — see [ADR-00075](adr/00/ADR-00075.md)
 for the file-count history. Emitter-side codegen (`emit_*.go`) and its
 paired runtime-declaration side (`runtime_*.go`) are split independently,
 so a domain's codegen and its C-runtime declarations don't have to land in
@@ -13,7 +13,7 @@ the same number of files.
 | `emitter.go` | `Emitter` struct, `freshReg`/`freshLabel`, `emitInstr`/`emitAlloca`/`emitTerminator`/`emitLabel`, scope stack |
 | `types.go` | `Type` struct, `ArrayOf`, `ObjectOf`, IR helpers, `Align()` |
 | `shadow.go` + `shadow_binder.go` | The shadow comparison (`KML_SHADOW`, `make shadow-report`): hooks on the old type deciders and `emitIdent` ask the new front end the same question and record disagreements; the binder is the registered oracle |
-| `emit_exprs.go` (core dispatch `emitExpr`/literals) + `emit_exprs_operators.go` (binary/unary/update/ternary/`??`) + `emit_exprs_assign.go` (`emitAssign`) + `emit_exprs_member.go` (`emitIndexPtr`, `emitMember`, `?.`) + `emit_exprs_types.go` (`inferExprType` and friends) + `emit_exprs_coerce.go` (`coerce`/`toBool`) + `emit_exprs_vardecl.go` (`emitVarDecl`) | Expression evaluation, member/index access, static type inference, scalar coercion, variable declarations |
+| `emit_exprs.go` (core dispatch `emitExpr`/literals) + `emit_exprs_operators.go` (binary/unary/update/ternary/`??`) + `emit_exprs_assign.go` (`emitAssign`) + `emit_exprs_member.go` (`emitIndexPtr`, `emitMember`, `?.`) + `emit_exprs_types.go` (`inferExprType` and friends) + `emit_convert.go` (`convert`/`toBool`) + `emit_exprs_vardecl.go` (`emitVarDecl`) | Expression evaluation, member/index access, static type inference, scalar coercion, variable declarations |
 | `emit_stmts.go` | Statement dispatch (`emitStmt`), all loop forms, break/continue stacks |
 | `emit_call.go` (dispatch router only) + `emit_call_console.go` + `emit_call_json.go` + `emit_call_math.go` + `emit_call_number.go` + `emit_call_encoding.go` + `emit_structured_clone.go` | Call dispatch router (routes to every other domain's own call implementation) plus console.\*/JSON.\*/Math.\*/Number.\*/btoa-atob-encodeURI-crypto-TextEncoder/TextDecoder/structuredClone, the built-ins with nowhere else to live |
 | `emit_func.go` | Function declarations, closures, environment structs |
@@ -33,7 +33,7 @@ the same number of files.
 | `emit_promise.go` | `Promise.all`/`.race`/`.allSettled` |
 | `emit_fetch.go` | `fetch(url)`/`fetch(url, init)`/`fetch(request)` and `Response` (backed by libcurl) |
 | `emit_headers.go` | `Headers` — a case-insensitive `Map<string,string>` wrapper (`get`/`set`/`has`/`delete`/`append`; `forEach`/`entries`/`keys`/`values` reuse `Map`'s own) |
-| `emit_fetch_request.go` | `Request` (the client-side fetch class — not `http.listen`'s server-side `HttpRequest`, see `emit_http.go`) |
+| `emit_fetch_request.go` | `Request` (the client-side fetch class — not `klain:http`'s server-side `HttpRequest`, which is TypeScript in `lib/node/kml_http_request.ts`) |
 | `emit_xhr.go` | `XMLHttpRequest` — legacy synchronous-style client built on `fetch`'s own non-blocking primitives |
 | `emit_fs.go` | `fs.readFileSync`/`writeFileSync`/`appendFileSync`/`existsSync`/`unlinkSync` |
 | `emit_url.go` | `URL`/`URLSearchParams` (backed by libcurl's URL API + the existing `Map<string,string>` machinery), plus `emitMapStrToQueryString` (shared with `emit_querystring.go`) |
@@ -42,11 +42,10 @@ the same number of files.
 | `emit_arraybuffer.go` | `ArrayBuffer` + TypedArrays (`Int8Array`…`Float64Array`) — construction, `.set()`/`.subarray()`/`.byteLength`; everything else reuses `emit_arrays_*.go` unchanged |
 | `emit_memory.go` | `Memory.free` (manual memory-management escape hatch) |
 | `emit_timers.go` | `setTimeout`/`setInterval`/`clearTimeout`/`clearInterval`, plus their `ensureTimerRuntime` C-runtime backing store (kept together, not under `runtime_*.go`, since this domain's runtime queue has only ever had one caller) |
-| `emit_http.go` | `http.listen`, request/response handling — the server-side request-object type annotation is `HttpRequest` (not `Request`, which is the client-side `fetch` class, see `emit_fetch_request.go`) |
 | `emit_iter_collect.go` | The iteration protocol over non-arrays, collected: `__kml_any_iter_collect` (spread, destructuring, `Array.from`), the array-like reading, and an Error's own enumerable fields for the object walkers |
-| `lib/node/klain_tui.ts` (with `emit_tui.go` linking the runtime) | `klain:tui` native TUI framework (TDD-00150): `Box`/`Text`/`List`/`Spinner`/`Progress`/`TextInput`/`render`/`enter`/`leave` as TypeScript over the painter's natives; each builder makes a Yoga node carrying paint attributes, a handle in a `Node` ([ADR-01471](adr/ADR-01471.md)) |
+| `lib/node/klain_tui.ts` (with `emit_tui.go` linking the runtime) | `klain:tui` native TUI framework (TDD-00150): `Box`/`Text`/`List`/`Spinner`/`Progress`/`TextInput`/`render`/`enter`/`leave` as TypeScript over the painter's natives; each builder makes a Yoga node carrying paint attributes, a handle in a `Node` ([ADR-01471](adr/01/ADR-01471.md)) |
 | `tui.go` | The `tui.c` painter runtime string: Yoga bridge + per-node paint model + double-buffered ANSI diff painter (UTF-8-decoded text). Plain C over Yoga's extern-"C" ABI |
-| `yoga.go` / `yogasrc/` | Vendored Yoga flexbox engine (`//go:embed`, pinned): extracted per-version and compiled per-`.cpp` to objects (C++20), linked only when a program uses `klain:tui` — see [ADR-00519](adr/ADR-00519.md) for why prebuilt objects rather than a shared-line `.cc` |
+| `yoga.go` / `yogasrc/` | Vendored Yoga flexbox engine (`//go:embed`, pinned): extracted per-version and compiled per-`.cpp` to objects (C++20), linked only when a program uses `klain:tui` — see [ADR-00519](adr/00/ADR-00519.md) for why prebuilt objects rather than a shared-line `.cc` |
 | `gclocate.go` / `gcshim.go` | Locating and shimming the Boehm GC library for `-mm=gc` |
 | `runtime_core.go` | Universal libc primitives (malloc/free/memcpy/strlen/…), math/random/qsort, errno/strerror |
 | `runtime_strings.go` | String C-runtime helpers (trim/case/replace/split) |
@@ -63,7 +62,8 @@ the same number of files.
 | `runtime_process.go` | `process.*`/readline/execFileSync C-runtime helpers |
 | `runtime_url.go` | libcurl URL API declarations (`curl_url*`) |
 | `runtime_misc.go` | console group/timer/count-map state, closure/map-free helpers |
-| `runtime_http.go` | HTTP server + fiber-scheduler C-runtime helpers |
+| `fiber_runtime.go` | ucontext declarations and layout for coroutine fibers |
+| `event_loop.go` | `ensureEventLoop`: links loopsrc/loop.c and what each pass calls |
 | `threadpoolsrc/klaindns.c` | The dns module's getaddrinfo/getnameinfo natives, in the pool's unit |
 | `caressrc/klaincares.c` | The dns resolver: Node's cares_wrap over c-ares (channels on the loop, the parsers, records as JSON); its own unit |
 | `runtime_os.go` | `process.env`'s libc helpers (`unsetenv`); the `os` module is `lib/node/os.ts` over `osinfosrc/osinfo.c` |

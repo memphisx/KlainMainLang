@@ -248,7 +248,7 @@ export const codes: { [key: string]: any } = Object.freeze({
 });
 
 function invalidArgType(name: string, expected: string, value: any): Error {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '.' + received(value));
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '.' + received(value));
 }
 
 function addNumericalSeparator(val: string): string {
@@ -262,7 +262,7 @@ function addNumericalSeparator(val: string): string {
 function outOfRange(name: string, range: string, value: any): Error {
     let shown = String(value);
     if (Number.isInteger(value) && Math.abs(value) > 2 ** 32) shown = addNumericalSeparator(shown);
-    return new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + shown);
+    return NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + shown);
 }
 
 // internal/validators' checkFiniteNumber: false for undefined and NaN.
@@ -281,11 +281,11 @@ function checkRangesOrGetDefault(n: any, name: string, lower: number, upper: num
 }
 
 function bufferTooLarge(max: number): Error {
-    return new NodeRangeError('ERR_BUFFER_TOO_LARGE', 'Cannot create a Buffer larger than ' + max + ' bytes');
+    return NodeRangeError('ERR_BUFFER_TOO_LARGE', 'Cannot create a Buffer larger than ' + max + ' bytes');
 }
 
 function trailingJunk(): Error {
-    return new NodeTypeError('ERR_TRAILING_JUNK_AFTER_STREAM_END', 'Trailing junk found after the end of the compressed stream');
+    return NodeTypeError('ERR_TRAILING_JUNK_AFTER_STREAM_END', 'Trailing junk found after the end of the compressed stream');
 }
 
 // A view's bytes: a Uint8Array as it is, a DataView over its window, any
@@ -754,7 +754,7 @@ export interface ZstdOptions extends ZlibOptions {
 }
 
 function initFailed(): Error {
-    return new NodeError('ERR_ZLIB_INITIALIZATION_FAILED', 'Initialization failed');
+    return NodeError('ERR_ZLIB_INITIALIZATION_FAILED', 'Initialization failed');
 }
 
 // The params of a Brotli or Zstd stream, applied to its fresh handle: a key
@@ -785,7 +785,7 @@ class Brotli extends ZlibBase {
     constructor(opts: BrotliOptions | undefined, mode: number) {
         const id = __kml_native.zlibNew(mode);
         applyParams(id, opts, kMaxBrotliParam, (key: string) =>
-            new NodeRangeError('ERR_BROTLI_INVALID_PARAM', key + ' is not a valid Brotli parameter'));
+            NodeRangeError('ERR_BROTLI_INVALID_PARAM', key + ' is not a valid Brotli parameter'));
         const dictionary = opts ? dictionaryBytes(opts.dictionary) : emptyBuffer;
         if (__kml_native.zlibInitOther(id, dictionary, -1) !== 0) {
             __kml_native.zlibClose(id);
@@ -809,7 +809,7 @@ class Zstd extends ZlibBase {
     constructor(opts: ZstdOptions | undefined, mode: number, maxParam: number) {
         const id = __kml_native.zlibNew(mode);
         applyParams(id, opts, maxParam, (key: string) =>
-            new NodeRangeError('ERR_ZSTD_INVALID_PARAM', key + ' is not a valid zstd parameter'));
+            NodeRangeError('ERR_ZSTD_INVALID_PARAM', key + ' is not a valid zstd parameter'));
         const pledged: any = opts?.pledgedSrcSize;
         const dictionary = opts && opts.dictionary !== undefined && isArrayBufferView(opts.dictionary) ? viewBytes(opts.dictionary) : emptyBuffer;
         if (__kml_native.zlibInitOther(id, dictionary, typeof pledged === 'number' ? pledged as number : -1) !== 0) {

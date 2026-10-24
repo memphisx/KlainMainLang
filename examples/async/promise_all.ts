@@ -48,7 +48,7 @@ forSettled.push(double(6))
 const settled = await Promise.allSettled(forSettled)
 for (const s of settled) {
     console.log(s.status)           // fulfilled, fulfilled
-    console.log(s.value)            // 10, 12
+    if (s.status === "fulfilled") console.log(s.value)  // 10, 12
 }
 
 // ── real concurrency: N in-flight fetches waited on together ───────────────

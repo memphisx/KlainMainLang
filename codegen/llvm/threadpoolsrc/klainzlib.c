@@ -315,13 +315,13 @@ static void zctx_free(kml_zctx *c) {
         if (c->mode == KZ_DEFLATE || c->mode == KZ_GZIP || c->mode == KZ_DEFLATERAW) deflateEnd(&c->strm);
         else if (c->mode != KZ_NONE) inflateEnd(&c->strm);
     }
-    free(c->dict);
-    free(c);
+    free(c->dict); /* scratch */
+    free(c); /* scratch */
 }
 
 // A new handle of the mode (Node's node_zlib_mode): its id.
 double __kml_native_zlib_new(double mode) {
-    kml_zctx *c = (kml_zctx *)calloc(1, sizeof *c);
+    kml_zctx *c = (kml_zctx *)calloc(1, sizeof *c); /* scratch */
     c->used = 1;
     c->mode = (int)mode;
     c->pledged = -1;
@@ -338,7 +338,7 @@ double __kml_native_zlib_new(double mode) {
         if (!zctx_tab[i]) { id = i; break; }
     if (id < 0) {
         int ncap = zctx_cap ? zctx_cap * 2 : 16;
-        zctx_tab = (kml_zctx **)realloc(zctx_tab, (size_t)ncap * sizeof *zctx_tab);
+        zctx_tab = (kml_zctx **)realloc(zctx_tab, (size_t)ncap * sizeof *zctx_tab); /* scratch */
         for (int i = zctx_cap; i < ncap; i++) zctx_tab[i] = NULL;
         id = zctx_cap;
         zctx_cap = ncap;
@@ -411,7 +411,7 @@ static int zctx_init_zlib(kml_zctx *c) {
         c->err = Z_STREAM_ERROR;
     }
     if (c->err != Z_OK) {
-        free(c->dict);
+        free(c->dict); /* scratch */
         c->dict = NULL;
         c->dict_len = 0;
         c->mode = KZ_NONE;
@@ -438,11 +438,11 @@ void __kml_native_zlib_init(double id, double level, double window_bits, double 
     if (c->mode == KZ_GZIP || c->mode == KZ_GUNZIP) c->window_bits += 16;
     if (c->mode == KZ_UNZIP) c->window_bits += 32;
     if (c->mode == KZ_DEFLATERAW || c->mode == KZ_INFLATERAW) c->window_bits *= -1;
-    free(c->dict);
+    free(c->dict); /* scratch */
     c->dict = NULL;
     c->dict_len = 0;
     if (dict && dict_len > 0) {
-        c->dict = (unsigned char *)malloc((size_t)dict_len);
+        c->dict = (unsigned char *)malloc((size_t)dict_len); /* scratch */
         memcpy(c->dict, dict, (size_t)dict_len);
         c->dict_len = (size_t)dict_len;
     }
@@ -813,7 +813,7 @@ double __kml_native_zlib_init_other(double id, const unsigned char *dict, int64_
             if (!c->bdict || !kz_lib.enc_attach(c->benc, c->bdict)) return 1;
             break;
         case KZ_BROTLI_DECODE:
-            c->dict = (unsigned char *)malloc((size_t)dict_len);
+            c->dict = (unsigned char *)malloc((size_t)dict_len); /* scratch */
             memcpy(c->dict, dict, (size_t)dict_len);
             c->dict_len = (size_t)dict_len;
             if (!kz_lib.dec_attach || !kz_lib.dec_attach(c->bdec, BROTLI_SHARED_DICTIONARY_RAW, c->dict_len, c->dict)) return 1;

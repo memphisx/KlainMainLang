@@ -121,7 +121,7 @@ d.xs[4] = 50
 console.log(d.xs.length, d.xs[2], d.xs[3], d.xs[4])
 console.log(Object.keys(d.xs))
 for (const i in d.xs) console.log(i)
-`, "5 30 undefined 50\n[ '0', '1', '2', '3', '4' ]\n0\n1\n2\n3\n4")
+`, "5 30 undefined 50\n[ '0', '1', '2', '4' ]\n0\n1\n2\n4")
 }
 
 func TestE2EDynJSONStringifyRoundTrip(t *testing.T) {
@@ -343,4 +343,18 @@ named.push(4)
 console.log(a.length)
 console.log(s.foo)
 `, "5 number\n3\n4\nundefined")
+}
+
+// Only `__proto__: value` sets a literal's prototype; the shorthand
+// `{ __proto__ }` defines an own property named __proto__.
+func TestE2EProtoShorthandIsOwnProperty(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var __proto__ = { a: 1 };
+var o = { __proto__ };
+console.log(Object.keys(o).join(","), Object.getPrototypeOf(o) === Object.prototype, o.a);
+var p = { __proto__: { b: 2 } };
+console.log(Object.keys(p).join(","), p.b);
+var n = { __proto__: null, c: 3 };
+console.log(Object.getPrototypeOf(n), n.c);
+`)
 }

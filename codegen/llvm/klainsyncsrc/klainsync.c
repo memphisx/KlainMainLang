@@ -19,7 +19,7 @@
  * compiler bitcasts every Channel<T> element through an i64. That covers
  * number/string/object/boolean channels without per-type marshalling.
  *
- * GC interaction: under -mm=gc the compiler defines KLAINSYNC_GC=1; each M
+ * GC interaction: under -mm=gc the compiler defines KML_GC=1; each M
  * thread registers with Boehm, and each goroutine stack is added as a root
  * region for its lifetime (conservative but correct — a live object reachable
  * only from a parked goroutine's stack must not be collected). Under manual
@@ -54,31 +54,29 @@
 #include <unistd.h>
 #endif
 
+/* A goroutine's overflow is its RangeError (stackguard.c): each machine
+ * thread takes the fault on its own alternate stack. */
+#ifndef _WIN32
+extern void __kml_stack_guard_thread(void);
+#define KS_STACK_GUARD_THREAD() __kml_stack_guard_thread()
+#else
+#define KS_STACK_GUARD_THREAD() ((void)0)
+#endif
+
 /* ------------------------------------------------------------------ *
- *  GC glue — weakly bound so manual-mode builds (which never link      *
- *  -lgc) resolve these to NULL and skip the calls entirely.            *
+ *  GC glue — the GC interface (kml_heap.h), gc mode only.              *
  * ------------------------------------------------------------------ */
-#ifdef KLAINSYNC_GC
-/* Declared by the Boehm headers we link against; we forward-declare the
- * few we need so this file needs no gc.h on the include path. */
-extern int  GC_get_stack_base(void *);
-extern int  GC_register_my_thread(void *);
-extern int  GC_unregister_my_thread(void);
-extern void GC_allow_register_threads(void);
-extern void GC_add_roots(void *low, void *high_plus_one);
-extern void GC_remove_roots(void *low, void *high_plus_one);
+#ifdef KML_GC
 /* gcshim.c: this thread's TLS block as a root (a no-op off Windows). */
 extern void __kml_gc_tls_register(void);
 extern void __kml_gc_tls_unregister(void);
-extern void *GC_malloc_uncollectable(size_t);
-extern void GC_free(void *);
 /* Control blocks live across threads and are reachable from queues the
  * collector cannot see into reliably; keep them uncollectable + scanned. */
-#define KS_CTLALLOC(sz) GC_malloc_uncollectable(sz)
-#define KS_CTLFREE(p) GC_free(p)
+#define KS_CTLALLOC(sz) kml_gc_alloc_pinned(sz)
+#define KS_CTLFREE(p) kml_gc_free(p)
 #else
-#define KS_CTLALLOC(sz) calloc(1, (sz))
-#define KS_CTLFREE(p) free(p)
+#define KS_CTLALLOC(sz) calloc(1, (sz)) /* scratch */
+#define KS_CTLFREE(p) free(p) /* scratch */
 #endif
 
 /* ------------------------------------------------------------------ *
@@ -134,6 +132,7 @@ typedef struct ks_p {
 typedef struct ks_m {
     pthread_t thread;
     ucontext_t sched_ctx;   /* the scheduler loop's own context */
+    void *gc_base;          /* gc mode: this thread's own stack base */
     ks_p *p;                /* the P this M runs */
     /* The G currently running on this M and when it started (monotonic ns).
      * Written by this M in ks_execute, read by the sysmon thread — atomic so
@@ -361,6 +360,28 @@ static long long ks_now_ns(void) {
     return (long long)ts.tv_sec * 1000000000LL + ts.tv_nsec;
 }
 
+/* gc mode: the collector scans a registered thread's stack from its stack
+ * pointer to the stack bottom it holds, so every switch between the
+ * scheduler's stack and a goroutine's moves that bottom along. The switch
+ * runs with the collector's lock held, taken just before it and released on
+ * the other side (the same thread), so no collection ever sees the stack
+ * pointer on one stack and the bottom on another. */
+#ifdef KML_GC
+static void ks_gc_to_g(ks_g *g) {
+    kml_gc_lock();
+    kml_gc_set_stack_bottom_locked((char *)g->stack + g->stacksize);
+}
+static void ks_gc_to_sched(ks_m *m) {
+    kml_gc_lock();
+    kml_gc_set_stack_bottom_locked(m->gc_base);
+}
+#define KS_GC_SWITCHED() kml_gc_unlock()
+#else
+#define ks_gc_to_g(g) ((void)0)
+#define ks_gc_to_sched(m) ((void)0)
+#define KS_GC_SWITCHED() ((void)0)
+#endif
+
 static void ks_execute(ks_m *m, ks_g *g) {
     g->preempt = 0; /* clear any stale flag before this run window */
     atomic_store_explicit(&m->cur_start_ns, ks_now_ns(), memory_order_relaxed);
@@ -369,7 +390,9 @@ static void ks_execute(ks_m *m, ks_g *g) {
     ks_curg = g;
     if (!g->started)
         ks_g_prime(g); /* build context lazily, on this M's stack */
-    swapcontext(&m->sched_ctx, &g->ctx);
+    ks_gc_to_g(g);
+    KML_SWAPCONTEXT(&m->sched_ctx, &g->ctx);
+    KS_GC_SWITCHED();
     /* back on the scheduler stack */
     ks_curg = NULL;
     atomic_store_explicit(&m->cur, NULL, memory_order_relaxed);
@@ -421,7 +444,11 @@ static void ks_sched_loop(ks_m *m) {
  *  Goroutine stack + entry                                             *
  * ------------------------------------------------------------------ */
 static void ks_g_trampoline(void) {
+    KS_GC_SWITCHED();
     ks_g *g = ks_curg;
+    /* A goroutine runs on any M: nothing below it is its creator's. */
+    KML_FIBER_ENTRY(fiber_base);
+    fiber_base[0] = 0;
     g->fn(g->env);
     /* body returned — the goroutine is done. */
     g->status = KS_DEAD;
@@ -430,7 +457,8 @@ static void ks_g_trampoline(void) {
      * that parked and resumed on a different M must hand control back to
      * whichever M is running it now (ks_curm), or it would fall through into
      * a stale M's context. This never returns (the G is dead). */
-    swapcontext(&g->ctx, &ks_curm->sched_ctx);
+    ks_gc_to_sched(ks_curm);
+    KML_SWAPCONTEXT(&g->ctx, &ks_curm->sched_ctx);
 }
 
 /* Per-goroutine stack size, resolved once from KLAINSYNC_STACK_KB (default
@@ -449,12 +477,16 @@ static ks_g *ks_g_new(void (*fn)(void *), void *env) {
     g->env = env;
     g->status = KS_RUNNABLE;
 
-    /* Fixed goroutine stack, no overflow guard page: macOS makecontext faults
-     * if the ucontext's stack region contains any PROT_NONE page, and the
-     * existing HTTP/generator fibers likewise run on plain unguarded stacks.
-     * Very deep recursion in a goroutine is undefined behaviour, documented
-     * like the other fibers. */
-    size_t total = ks_stack_bytes;
+    /* Fixed goroutine stack with a PROT_NONE guard page below it, so an
+     * overflow faults (a RangeError, stackguard.c) instead of writing over
+     * the mapping below. The page sits below the range makecontext gets:
+     * macOS makecontext faults on a stack range holding one. */
+#ifdef _WIN32
+    size_t guard = 0;
+#else
+    size_t guard = (size_t)sysconf(_SC_PAGESIZE);
+#endif
+    size_t total = ks_stack_bytes + guard;
 #ifdef _WIN32
     void *base = VirtualAlloc(NULL, total, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (base == NULL) {
@@ -466,22 +498,25 @@ static ks_g *ks_g_new(void (*fn)(void *), void *env) {
         fprintf(stderr, "klain:sync: goroutine stack mmap failed\n");
         abort();
     }
+#ifndef _WIN32
+    mprotect(base, guard, PROT_NONE);
+#endif
     g->stack_alloc = base;
     g->alloc_size = total;
-    g->stack = base;
-    g->stacksize = total;
+    g->stack = (char *)base + guard;
+    g->stacksize = total - guard;
 
-#ifdef KLAINSYNC_GC
+#ifdef KML_GC
     /* Register the usable stack span as a conservative root region so a live
      * object reachable only from this (possibly parked) goroutine survives. */
-    GC_add_roots(g->stack, (char *)g->stack + g->stacksize);
+    kml_gc_add_roots(g->stack, (char *)g->stack + g->stacksize);
 #endif
     return g;
 }
 
 static void ks_g_free(ks_g *g) {
-#ifdef KLAINSYNC_GC
-    GC_remove_roots(g->stack, (char *)g->stack + g->stacksize);
+#ifdef KML_GC
+    kml_gc_remove_roots(g->stack, (char *)g->stack + g->stacksize);
 #endif
 #ifdef _WIN32
     VirtualFree(g->stack_alloc, 0, MEM_RELEASE);
@@ -514,7 +549,9 @@ static void ks_park(pthread_mutex_t *mu) {
     ks_m *m = ks_curm;
     g->status = KS_WAITING;
     m->park_unlock = mu;
-    swapcontext(&g->ctx, &m->sched_ctx);
+    ks_gc_to_sched(m);
+    KML_SWAPCONTEXT(&g->ctx, &m->sched_ctx);
+    KS_GC_SWITCHED();
     /* resumed: we are running again on some M (possibly a different one). */
 }
 
@@ -527,7 +564,9 @@ static void ks_park_all(pthread_mutex_t **mus, int n) {
     for (int i = 0; i < n; i++)
         m->park_unlock_list[i] = mus[i];
     m->park_unlock_n = n;
-    swapcontext(&g->ctx, &m->sched_ctx);
+    ks_gc_to_sched(m);
+    KML_SWAPCONTEXT(&g->ctx, &m->sched_ctx);
+    KS_GC_SWITCHED();
 }
 
 /* ------------------------------------------------------------------ *
@@ -870,7 +909,8 @@ int klainsync_select(void *cases_v, int n, int has_default) {
         /* select {} with no default blocks forever (Go semantics). */
         if (ks_curg) {
             ks_curg->status = KS_WAITING;
-            swapcontext(&ks_curg->ctx, &ks_curm->sched_ctx); /* never readied */
+            ks_gc_to_sched(ks_curm);
+            KML_SWAPCONTEXT(&ks_curg->ctx, &ks_curm->sched_ctx); /* never readied */
         } else {
             for (;;) {
                 struct timespec req = {3600, 0};
@@ -1054,16 +1094,16 @@ int klainsync_select(void *cases_v, int n, int has_default) {
 static void *ks_m_main(void *arg) {
     ks_m *m = (ks_m *)arg;
     ks_curm = m;
-#ifdef KLAINSYNC_GC
-    void *sb[2];
-    GC_get_stack_base(sb);
-    GC_register_my_thread(sb);
+    KS_STACK_GUARD_THREAD();
+#ifdef KML_GC
+    kml_gc_thread_register();
+    m->gc_base = kml_gc_thread_base();
     __kml_gc_tls_register();
 #endif
     ks_sched_loop(m);
-#ifdef KLAINSYNC_GC
+#ifdef KML_GC
     __kml_gc_tls_unregister();
-    GC_unregister_my_thread();
+    kml_gc_thread_unregister();
 #endif
     return NULL;
 }
@@ -1093,10 +1133,10 @@ static int ks_rescue_cap;
 static void *ks_rescue_main(void *arg) {
     ks_m *m = (ks_m *)arg;
     ks_curm = m;
-#ifdef KLAINSYNC_GC
-    void *sb[2];
-    GC_get_stack_base(sb);
-    GC_register_my_thread(sb);
+    KS_STACK_GUARD_THREAD();
+#ifdef KML_GC
+    kml_gc_thread_register();
+    m->gc_base = kml_gc_thread_base();
     __kml_gc_tls_register();
 #endif
     ks_sched_loop(m); /* never returns; parks when idle */
@@ -1153,7 +1193,7 @@ static void *ks_sysmon_main(void *arg) {
          * work, and there IS runnable work, spawn one bounded rescue M. */
         if (stuck && ks_idle == 0 && ks_work_pending() &&
             atomic_load(&ks_rescue_count) < ks_rescue_cap) {
-            ks_m *rm = (ks_m *)calloc(1, sizeof(ks_m));
+            ks_m *rm = (ks_m *)calloc(1, sizeof(ks_m)); /* scratch */
             rm->p = NULL;
             pthread_mutex_init(&rm->lmu, NULL);
             pthread_cond_init(&rm->lcv, NULL);
@@ -1162,7 +1202,7 @@ static void *ks_sysmon_main(void *arg) {
                 pthread_detach(t);
                 atomic_fetch_add(&ks_rescue_count, 1);
             } else {
-                free(rm);
+                free(rm); /* scratch */
             }
         }
     }
@@ -1195,10 +1235,10 @@ static void ks_init(void) {
         if (kb >= 8)
             ks_stack_bytes = (size_t)kb * 1024;
     }
-    ks_procs = (ks_p *)calloc(ks_nprocs, sizeof(ks_p));
-    ks_machines = (ks_m *)calloc(ks_nprocs, sizeof(ks_m));
-#ifdef KLAINSYNC_GC
-    GC_allow_register_threads();
+    ks_procs = (ks_p *)calloc(ks_nprocs, sizeof(ks_p)); /* scratch */
+    ks_machines = (ks_m *)calloc(ks_nprocs, sizeof(ks_m)); /* scratch */
+#ifdef KML_GC
+    kml_gc_allow_threads();
 #endif
     for (int i = 0; i < ks_nprocs; i++)
         pthread_mutex_init(&ks_procs[i].mu, NULL);
@@ -1275,7 +1315,9 @@ void klainsync_gosched(void) {
         return;
     g->status = KS_RUNNABLE;
     m->ready_after = g; /* scheduler re-enqueues us after the switch-out */
-    swapcontext(&g->ctx, &m->sched_ctx);
+    ks_gc_to_sched(m);
+    KML_SWAPCONTEXT(&g->ctx, &m->sched_ctx);
+    KS_GC_SWITCHED();
 }
 
 /* Cooperative preempt safepoint. Emitted by the compiler at function entry

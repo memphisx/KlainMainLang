@@ -104,7 +104,7 @@ interface Pair { a: number; b: number }
 const p: Pair = JSON.parse('{"a":5}')
 console.log(p.a)
 console.log(p.b)
-`, "5\n0")
+`, "5\nundefined")
 }
 
 // TestE2EJSONParseObjectMissingStringField is a regression test: a missing
@@ -121,8 +121,8 @@ func TestE2EJSONParseObjectMissingStringField(t *testing.T) {
 interface Ip { origin: string }
 const p: Ip = JSON.parse('{"other":"x"}')
 console.log("[" + p.origin + "]")
-console.log(p.origin.length)
-`, "[]\n0")
+try { console.log(p.origin.length) } catch (e) { console.log((e as Error).message) }
+`, "[undefined]\nCannot read properties of undefined (reading 'length')")
 }
 
 func TestE2EJSONParseObjectEscapedString(t *testing.T) {

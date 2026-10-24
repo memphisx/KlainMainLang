@@ -484,7 +484,7 @@ function churn(rounds: number): number {
     const parsed = JSON.parse('[{"id":1,"name":"a","scores":[1,2,3]},{"id":2,"scores":[]},{"id":3,"name":null,"scores":[9]}]') as Row[]
     total += parsed.length
     total += parsed[0].scores[2]
-    total += parsed[1].name.length
+    total += parsed[0].name.length + (parsed[1].name ?? 'xy').length + (parsed[2].name ?? 'xyz').length
   }
   return total
 }
@@ -642,4 +642,49 @@ console.log('done')
 		t.Fatalf("run (crash = a bad auto-free): %v", err)
 	}
 	compareLines(t, strings.TrimRight(string(out), "\n"), "5 text/x-word\ndone")
+}
+
+// TestE2EMemoryAutoClassCaptureCell: a local a nested class's methods capture
+// lives in a cell the class record keeps; -mm=auto must not free it when the
+// declaring function returns (ADR-01719).
+func TestE2EMemoryAutoClassCaptureCell(t *testing.T) {
+	const src = `
+function mk(f: number) {
+  let created = 0
+  class U { bump() { created++; return created * f } }
+  return U
+}
+const A = mk(1), B = mk(10)
+console.log(new A().bump(), new B().bump(), new A().bump(), new B().bump())
+`
+	out, err := exec.Command(buildBinaryAuto(t, src)).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := strings.TrimSpace(string(out)); got != "1 10 2 20" {
+		t.Errorf("got %q, want %q", got, "1 10 2 20")
+	}
+}
+
+// -mm=auto: a binding declared in a try body after the throw is freed at
+// the scope's end from a null slot, and a function bound by .bind() stays
+// alive while the bound function can run.
+func TestAutoSkippedDeclAndBoundTarget(t *testing.T) {
+	cases := []struct{ src, want string }{
+		{`interface C { x: number }
+try {
+  const c: C = JSON.parse("{oops}")
+  console.log("NOT REACHED", c.x)
+} catch (e) {
+  console.log((e as Error).name)
+}
+`, "SyntaxError\n"},
+		{`const log = (tag: string, n: number): void => { console.log(tag, n); };
+setTimeout(log.bind(null, "bound", 42), 5);
+`, "bound 42\n"},
+	}
+	t.Setenv("KLAIN_TEST_MM", "auto")
+	for _, c := range cases {
+		assertOutput(t, c.src, strings.TrimSuffix(c.want, "\n"))
+	}
 }

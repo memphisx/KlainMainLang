@@ -135,7 +135,13 @@ func nmSymbols(t *testing.T, nm, obj, which string) []string {
 	}
 	var syms []string
 	for _, m := range nmSymbolRE.FindAllStringSubmatch(string(out), -1) {
-		syms = append(syms, m[1])
+		sym := m[1]
+		// Mach-O prefixes every C symbol with an underscore: `___kml_x` is
+		// C's `__kml_x`.
+		if runtime.GOOS == "darwin" {
+			sym = strings.TrimPrefix(sym, "_")
+		}
+		syms = append(syms, sym)
 	}
 	return syms
 }

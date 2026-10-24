@@ -5,7 +5,9 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"KlainMainLang/checker"
+	"KlainMainLang/resolver"
 	"fmt"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -17,6 +19,16 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 	return e.emitFunctionDeclAs(decl, decl.Name, e.funcs[decl.Name])
 }
 
+// enterOwnNewTarget starts a function body with its own new.target (a
+// prototype constructor sets newTargetFn; any other function has none); the
+// returned func restores the enclosing one. An arrow keeps its enclosing
+// function's.
+func (e *Emitter) enterOwnNewTarget() func() {
+	saved, savedDecl := e.newTargetFn, e.newTargetDecl
+	e.newTargetFn, e.newTargetDecl = "", nil
+	return func() { e.newTargetFn, e.newTargetDecl = saved, savedDecl }
+}
+
 // emitFunctionDeclAs emits decl's body into e.functions under llvmName,
 // using sig for parameter/return types instead of decl's own (possibly
 // generic, T-named) annotations — the shared core both emitFunctionDecl
@@ -24,6 +36,7 @@ func (e *Emitter) emitFunctionDecl(decl *ast.FunctionDeclaration) error {
 // on-demand generic-function instantiation (a mangled llvmName, a
 // per-instantiation substituted sig — see emit_generics.go) go through.
 func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName string, sig FuncSig) error {
+	defer e.enterOwnNewTarget()()
 	// TDD-00061/ADR-00172: a top-level generator function is diverted to
 	// emitGeneratorFunctionDecl straight from EmitProgram's own Pass 2 loop
 	// and never reaches this function at all — so IsGenerator reaching here
@@ -53,32 +66,30 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	}
 	defer func() { e.curNamespace = savedCurNamespace }()
 
-	// Save current function context.
-	savedAllocas := e.allocas
-	savedSawAwait := e.sawAwait // TDD-00223 §2: did THIS body await?
-	e.sawAwait = false
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedLabelCtr := e.labelCtr
-	savedScopes := e.scopes
-	// An error return partway through the body must not leave this function's
-	// own scope stack in place: the enclosing statement emitters pop their
-	// scopes as the error unwinds, and on the wrong (shorter) stack that was a
-	// slice-bounds panic instead of the compile error.
-	scopesRestored := false
+	// Save current function context; an error partway through the body
+	// restores it too, or the caller would go on writing into this body.
+	restoreBuilder := e.beginThunkEmit()
+	builderRestored := false
 	defer func() {
-		if !scopesRestored {
-			e.scopes = savedScopes
+		if !builderRestored {
+			restoreBuilder()
 		}
 	}()
-	savedRetType := e.currentRetType
-	savedIsAsync := e.isAsync
-	savedCoroHdl := e.coroHdl
-	savedAsyncPromiseReg := e.asyncPromiseReg
-	savedAsyncCatchLabel := e.asyncCatchLabel
-	savedPromiseTy := e.currentPromiseTy
-	savedCoroRetLabel := e.coroRetLabel
-	savedAdoptSlot := e.asyncAdoptSlot
+	// A fresh context (TDD-00223 §2: sawAwait asks whether THIS body
+	// awaited), restored by defer: an error return partway through the body
+	// must not leave this function's own stacks in place, because the
+	// enclosing statement emitters pop theirs as the error unwinds (on the
+	// wrong stack that was a slice-bounds panic instead of the compile
+	// error). The scopes start as the enclosing ones, which the body's
+	// pre-passes below read, and are reset before the body.
+	savedCtx := e.funcContext
+	e.funcContext = &funcContext{
+		scopes:         savedCtx.scopes,
+		currentRetType: savedCtx.currentRetType,
+		inModuleTask:   savedCtx.inModuleTask,
+	}
+	defer func() { e.funcContext = savedCtx }()
+	e.enterFrame(decl, unmangleTopLevelName(decl.Name))
 
 	// Reset for this function. break/continue/named-label stacks reset too
 	// (not just scopes) — a bare `break`/`continue` or a `break LABEL`/
@@ -98,23 +109,12 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// recognizes (observed directly: a slice-bounds panic in emitDoWhile's
 	// own deferred cleanup, from restoring this via plain assignment
 	// instead of defer on a first attempt at this same fix).
-	savedBreakStack := e.breakStack
-	savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
-	e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
-	savedContinueStack := e.continueStack
-	savedNamedLabelStack := e.namedLabelStack
-	e.breakStack = nil
-	e.continueStack = nil
-	e.namedLabelStack = nil
 	// An enclosing loop's pending iterator-close finallys (the generator
 	// for-of `.return()` synthesis) must not run inside THIS function's own
 	// `return` — the synthesized statement references the enclosing frame's
 	// synthetic generator binding, which does not exist in this function
 	// (found as "a number has no method 'return'" on an arrow with a block
 	// `return` inside a generator for-of body).
-	savedPendingFinallys := e.pendingFinallys
-	savedBreakFinallyDepth, savedContinueFinallyDepth := e.breakFinallyDepth, e.continueFinallyDepth
-	e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = nil, nil, nil
 	// currentGenerator resets the same way, same reasoning, same
 	// defer-not-plain-assignment fix: a `return`/`yield` inside THIS
 	// function's own body must never be misrouted into an *enclosing*
@@ -126,13 +126,9 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// unrelated memory (a different function's `%env` parameter
 	// reinterpreted as if it were a generator instance pointer) instead of
 	// a normal `ret`.
-	savedCurrentGenerator := e.currentGenerator
-	e.currentGenerator = nil
 	// A nested function/closure body is not the constructor, even when lexically
 	// inside one — a `readonly` write here is an error (TDD-00154), so clear the
 	// ctor context for the duration of this body's emission.
-	savedCurrentCtorClass := e.currentCtorClass
-	e.currentCtorClass = ""
 	// Eager-boxing capture set for this body (see hoistedCaptures): its own
 	// locals/params captured by some nested closure, boxed at declaration.
 	savedHoistedCaptures := e.hoistedCaptures
@@ -151,8 +147,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		// to their signature types, not unbound (an i64 default).
 		e.pushParamTypes(decl.Params, sig.ParamTypes)
 		e.widenedBindings = e.crossTypeWidenedBindings(decl.Body.Body)
-		e.emptyArrayElems = e.inferEmptyArrayElemTypes(decl.Body.Body)
-		e.emptyMapKV = e.inferEmptyMapKVTypes(decl.Body.Body)
+		e.inferEmptyContainers(decl.Body.Body)
 		e.popScope()
 	} else {
 		e.hoistedCaptures = nil
@@ -162,32 +157,15 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		e.emptyMapKV = nil
 	}
 	defer func() {
-		e.breakStack = savedBreakStack
-		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
-		e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = savedPendingFinallys, savedBreakFinallyDepth, savedContinueFinallyDepth
-		e.continueStack = savedContinueStack
-		e.namedLabelStack = savedNamedLabelStack
-		e.currentGenerator = savedCurrentGenerator
-		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
 		e.forwardClosures, e.forwardBoxes = savedForwardClosures, savedForwardBoxes
 		e.widenedBindings = savedWidened
 		e.emptyArrayElems = savedEmptyArrayElems
 		e.emptyMapKV = savedEmptyMapKV
 	}()
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.labelCtr = 0
 	e.scopes = nil
-	e.blockDone = false
 	e.isAsync = decl.IsAsync
-	e.coroHdl = ""
-	e.asyncPromiseReg = ""
-	e.asyncCatchLabel = ""
 	e.currentPromiseTy = TypeVoid
-	e.coroRetLabel = ""
-	e.asyncAdoptSlot = ""
 	e.pushScope()
 	if decl.Body != nil {
 		if err := e.pushNestedFuncScope(decl.Params, decl.Body.Body); err != nil {
@@ -228,7 +206,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// For async functions, the IR return type is always ptr (the coro handle).
 	// The logical return type (Promise<T>) is stored; T is tracked in currentPromiseTy.
 	if decl.IsAsync {
-		if retType.IsPromise && retType.PromiseType != nil {
+		if retType.IsPromise() && retType.PromiseType != nil {
 			e.currentPromiseTy = *retType.PromiseType
 		}
 		// IR return type is ptr (the coroutine handle); a task body returns void.
@@ -260,12 +238,14 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 	// A recognized prototype constructor (TDD-00155 Stage 4, `-compat=js`)
 	// takes a hidden boxed `this` first parameter — its body's `this.x = v`
 	// assignments are dynamic member writes on the receiver bag.
-	if e.compatJS() && e.jsProtoCtor[llvmName] {
+	if e.jsProtoCtor[decl.Name] && !e.protoCtorOwnThis[decl.Name] {
 		llvmParams = append(llvmParams, "i64 %p_this")
 		thisPtr := "%v_this"
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", thisPtr))
 		e.emitInstr(fmt.Sprintf("store i64 %%p_this, ptr %s, align 8", thisPtr))
 		e.define("this", Symbol{Ptr: thisPtr, Ty: TypeAny})
+		e.newTargetFn = decl.Name
+		e.newTargetDecl = decl
 	}
 	if taskBody {
 		// Params come from the args bundle, not LLVM parameters; the only LLVM
@@ -281,10 +261,16 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 			if !e.hoistedCaptures[p.Name] || p.ArrayPattern != nil || p.ObjectPattern != nil {
 				continue
 			}
-			if sym, ok := e.lookup(p.Name); ok && !sym.Boxed && sym.Ptr != "" && !sym.Ty.IsArray {
+			if sym, ok := e.lookup(p.Name); ok && !sym.Boxed && sym.Ptr != "" && !sym.Ty.IsArray() {
 				e.promoteCaptureToCell(p.Name, sym.Ty, sym.Ptr, sym.IsConst)
 			}
 		}
+	}
+	// A body reading `arguments` destructures its pattern parameters after
+	// building it: their defaults may read it.
+	var unpackLater *[]func() error
+	if !taskBody && functionUsesArguments(decl) {
+		unpackLater = &[]func() error{}
 	}
 	for i, p := range decl.Params {
 		if taskBody {
@@ -301,7 +287,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		if err := validateCompositeType(pty, decl.GetPos().Line, decl.GetPos().Col); err != nil {
 			return err
 		}
-		if pty.IsArray {
+		if pty.IsArray() {
 			llvmParams = append(llvmParams,
 				fmt.Sprintf("ptr %%p_%s_ptr", p.Name),
 				fmt.Sprintf("i64 %%p_%s_len", p.Name),
@@ -313,14 +299,19 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 			// straight from the header's data field + the passed length — no
 			// named binding, since nothing in the body can reference it.
 			if p.ArrayPattern != nil {
-				dataPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
-				if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern); err != nil {
+				e.bindRawPatternParam(unpackLater, p, pty, "")
+				if err := e.patternStep(unpackLater, func() error {
+					dataPtrReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
+					return e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern)
+				}); err != nil {
 					return err
 				}
 				continue
 			}
-			e.bindArrayParam(p.Name, pty)
+			if err := e.bindArrayParamPatternLater(unpackLater, p, pty); err != nil {
+				return err
+			}
 		} else if isNullableScalar(pty) {
 			// A nullable-scalar parameter is passed and stored as its
 			// presence-flagged { i1, T } aggregate (TDD-00064 Stage 3).
@@ -334,10 +325,15 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 			// A heterogeneous tuple destructured parameter (`[k, v]:
 			// [string, V]`) is passed as a single object pointer, so it lands
 			// here; bind each position by its own type (TDD-00199).
-			if p.ArrayPattern != nil && pty.IsTuple {
-				objPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
-				if err := e.unpackTuplePatternInto(objPtrReg, pty, p.ArrayPattern, decl.GetPos()); err != nil {
+			if p.ArrayPattern != nil || p.ObjectPattern != nil {
+				e.bindRawPatternParam(unpackLater, p, pty, ptrName)
+			}
+			if p.ArrayPattern != nil && pty.IsTuple() {
+				if err := e.patternStep(unpackLater, func() error {
+					objPtrReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+					return e.unpackTuplePatternInto(objPtrReg, pty, p.ArrayPattern, decl.GetPos())
+				}); err != nil {
 					return err
 				}
 				continue
@@ -345,17 +341,21 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 			// A destructured object parameter (`{x, y}: T`) unpacks straight
 			// from the raw incoming object pointer — same reasoning as the
 			// array-pattern branch above.
-			if p.ArrayPattern != nil && pty.IsDynamic {
+			if p.ArrayPattern != nil && pty.IsDynamic() {
 				// An `any` argument: destructure it as a dynamic value.
-				if err := e.unpackDynArrayParam(ptrName, pty, p.ArrayPattern, decl.GetPos()); err != nil {
+				if err := e.patternStep(unpackLater, func() error {
+					return e.unpackDynArrayParam(ptrName, pty, p.ArrayPattern, decl.GetPos())
+				}); err != nil {
 					return err
 				}
 				continue
 			}
 			if p.ObjectPattern != nil {
-				objPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", objPtrReg, patternParamIR(pty), ptrName))
-				if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, decl.GetPos()); err != nil {
+				if err := e.patternStep(unpackLater, func() error {
+					objPtrReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", objPtrReg, patternParamIR(pty), ptrName))
+					return e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, decl.GetPos())
+				}); err != nil {
 					return err
 				}
 				continue
@@ -377,9 +377,16 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		if err := e.synthesizeArgumentsObject(decl, sig); err != nil {
 			return err
 		}
+		e.recordActivation(decl)
+		if err := e.runPatternSteps(unpackLater); err != nil {
+			return err
+		}
 	}
 	if err := e.emitParamDefaultPrologue(decl.Params, sig.ParamTypes, decl.Body, decl.GetPos()); err != nil {
 		return err
+	}
+	if decl.Body != nil {
+		e.dropReplacedParams(decl.Params, decl.Body.Body)
 	}
 
 	// Emit body statements.
@@ -408,8 +415,8 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		// May-suspend task body: coro.ret resolves the task promise; signature
 		// is `void @f(ptr %__taskargs)`.
 		e.emitTaskEpilogue()
-		e.functions.WriteString(fmt.Sprintf("\ndefine void @%s(%s) {\nentry:\n",
-			llvmName, strings.Join(llvmParams, ", ")))
+		e.writeFunc(fmt.Sprintf("void @%s(%s)",
+			llvmName, strings.Join(llvmParams, ", ")), e.allocas.String()+e.body.String())
 	} else if decl.IsAsync {
 		// Non-suspending async: coro.ret fulfills the settled promise, plus a
 		// catch block that rejects it on a thrown error (TDD-00084 Part A).
@@ -420,31 +427,12 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		// Non-async: falling off the end returns `undefined`/the zero of the
 		// return type (emitValuelessRet, ADR-01061) — never `unreachable`.
 		e.emitValuelessRet()
-		e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n",
-			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")))
+		e.writeFunc(fmt.Sprintf("%s @%s(%s)",
+			retType.LLVMRetType(), llvmName, strings.Join(llvmParams, ", ")), e.allocas.String()+e.body.String())
 	}
-	if !decl.IsAsync || taskBody {
-		e.functions.WriteString(e.allocas.String())
-		e.functions.WriteString(e.body.String())
-		e.functions.WriteString("}\n")
-	}
-	e.sawAwait = savedSawAwait
-
-	// Restore saved context.
-	e.allocas = savedAllocas
-	e.body = savedBody
-	e.regCtr = savedRegCtr
-	e.labelCtr = savedLabelCtr
-	e.scopes = savedScopes
-	scopesRestored = true
-	e.currentRetType = savedRetType
-	e.isAsync = savedIsAsync
-	e.coroHdl = savedCoroHdl
-	e.asyncPromiseReg = savedAsyncPromiseReg
-	e.asyncCatchLabel = savedAsyncCatchLabel
-	e.currentPromiseTy = savedPromiseTy
-	e.coroRetLabel = savedCoroRetLabel
-	e.asyncAdoptSlot = savedAdoptSlot
+	// Restore the enclosing function (its context by the defer above).
+	restoreBuilder()
+	builderRestored = true
 	e.blockDone = false // main body starts unterminated
 
 	return nil
@@ -469,10 +457,21 @@ func paramsUseArguments(params []ast.Param, body []ast.Statement) bool {
 			return false // a user binding named `arguments` wins
 		}
 	}
+	// A body function declaration replacing it hides it from the body,
+	// never from the parameter defaults.
+	replaced := false
+	for _, s := range body {
+		if fd, ok := s.(*ast.FunctionDeclaration); ok && fd.Name == "arguments" {
+			replaced = true
+		}
+	}
 	bound := map[string]bool{}
 	addParamBoundNames(bound, params)
 	refs := map[string]bool{}
-	scanStmtsFV(body, bound, refs)
+	if !replaced {
+		scanStmtsFV(body, bound, refs)
+	}
+	scanParamDefaultsFV(params, bound, refs)
 	return refs["arguments"]
 }
 
@@ -495,7 +494,9 @@ func hasArgumentsRestParamSlice(params []ast.Param) bool {
 // resulting variadic arity. A function with an explicit `...rest` is left
 // untouched: synthesizeArgumentsObject keeps V1's clean rejection for that.
 func maybeAddArgumentsRestParams(params []ast.Param, body []ast.Statement) []ast.Param {
-	if body == nil || hasArgumentsRestParamSlice(params) {
+	// An empty body is a nil list; its parameter defaults may still read
+	// `arguments`.
+	if hasArgumentsRestParamSlice(params) {
 		return params
 	}
 	for _, p := range params {
@@ -549,11 +550,76 @@ func (e *Emitter) maybeAddThisParamExpr(fe *ast.FunctionExpression) bool {
 		return false
 	}
 	ta := e.prog.ThisParams[fe]
+	if ta == nil && fe.Method && usesOwnThis(fe.Body.Body) {
+		// A method shorthand reading `this` with no `this` parameter: the
+		// receiver it is called on, which TypeScript types as the literal.
+		// It is read by name, so any object (or undefined, called bare)
+		// can be it.
+		ta = &ast.TypeAnnotation{Name: "any"}
+		if e.implicitThis == nil {
+			e.implicitThis = map[*ast.FunctionExpression]bool{}
+		}
+		e.implicitThis[fe] = true
+	}
 	if ta == nil || ta.Name == "void" {
 		return false
 	}
 	fe.Params = append([]ast.Param{{Name: "this", Type: ta}}, fe.Params...)
 	return true
+}
+
+// funcExprThisType is the `this` parameter maybeAddThisParamExpr gives fe,
+// without adding it: a declared one's type, `any` for a method shorthand
+// reading its own `this`.
+func (e *Emitter) funcExprThisType(fe *ast.FunctionExpression) (Type, bool) {
+	if len(fe.Params) > 0 && fe.Params[0].Name == "this" {
+		return e.resolveType(fe.Params[0].Type), true
+	}
+	if e.prog == nil {
+		return Type{}, false
+	}
+	ta := e.prog.ThisParams[fe]
+	if ta == nil && fe.Method && usesOwnThis(fe.Body.Body) {
+		return TypeAny, true
+	}
+	if ta == nil || ta.Name == "void" {
+		return Type{}, false
+	}
+	return e.resolveType(ta), true
+}
+
+// literalParamType is the type a function literal binds its unannotated,
+// non-rest parameter i as (emitFunctionExpression,
+// emitArrowFunctionWithHints): its default's, the checker's contextual
+// type, its call sites' (-compat=js), else an implicit any.
+func (e *Emitter) literalParamType(fn ast.Expression, i int) (Type, bool) {
+	var params []ast.Param
+	switch f := fn.(type) {
+	case *ast.ArrowFunction:
+		params = f.Params
+	case *ast.FunctionExpression:
+		params = f.Params
+	}
+	if i >= len(params) {
+		return Type{}, false
+	}
+	p := params[i]
+	if p.Type != nil || p.Rest || p.Name == "this" || p.ArrayPattern != nil || p.ObjectPattern != nil {
+		return Type{}, false
+	}
+	var t Type
+	if dt, ok := e.paramDefaultType(p); ok {
+		t = dt
+	} else if ct, ok := e.checkerContextualParam(fn, i); ok {
+		t = ct
+	} else if st, ok := e.jsSiteParam(fn, i); ok {
+		t = st
+	} else if e.front() != nil {
+		t = TypeAny
+	} else {
+		return Type{}, false
+	}
+	return optionalParamType(p, t), true
 }
 
 // hasArgumentsRestParam reports whether fd carries the synthetic rest param.
@@ -583,6 +649,12 @@ func countsArgs(hasRest bool, names []string) bool {
 // the callee then counts every declared parameter.
 func (e *Emitter) noteArgc(counts bool, args []ast.Expression, regularCount int) {
 	if !counts {
+		return
+	}
+	if e.argcOverride != "" {
+		// A dynamic adapter's call: the count its caller passed.
+		e.ensureArgc()
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_argc, align 8", e.argcOverride))
 		return
 	}
 	n := len(args)
@@ -619,22 +691,46 @@ func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig F
 		declared = decl.Params[:len(decl.Params)-1]
 		restName = argumentsRestParam
 	}
-	// V1 keeps the clean rejection for an explicit `...rest` or a destructured
-	// parameter combined with `arguments` (open question in TDD-00210).
+	// V1 keeps the clean rejection for an explicit `...rest` combined with
+	// `arguments` (open question in TDD-00210). A destructured parameter's
+	// slot is the argument it destructures (bindRawPatternParam).
 	for _, p := range declared {
 		if p.Rest {
 			return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a rest parameter — iterate the `...%s` parameter directly", decl.GetPos().Line, decl.GetPos().Col, p.Name)
 		}
-		if p.ArrayPattern != nil || p.ObjectPattern != nil {
-			return fmt.Errorf("%d:%d: `arguments` is not supported in a function with a destructured parameter", decl.GetPos().Line, decl.GetPos().Col)
-		}
+	}
+	// A `this` parameter (maybeAddThisParam) receives the receiver, not an
+	// argument.
+	thisArg := len(declared) > 0 && declared[0].Name == "this"
+	if thisArg {
+		declared = declared[1:]
 	}
 	numDeclared := int64(len(declared))
 	// Strict code's `arguments` holds the values passed: as many declared
-	// parameters as the caller supplied, then the overflow.
+	// parameters as the caller supplied, then the overflow. A generator's
+	// body first runs at its first next(), long after the call: its
+	// construction kept the count in the instance.
 	e.ensureArgc()
 	argc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_argc, align 8", argc))
+	if decl.IsGenerator {
+		// The count the construction stored, plus one (0: not known).
+		if g := e.currentGenerator; g != nil {
+			c := e.loadGeneratorField(g.genObjReg, g.genTy, GeneratorArgcField)
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", argc, c.Ref))
+		} else {
+			e.emitInstr(fmt.Sprintf("%s = add i64 0, -1", argc))
+		}
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_argc, align 8", argc))
+	}
+	if thisArg {
+		known0, less := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", known0, argc))
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", less, argc))
+		adj := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", adj, known0, less, argc))
+		argc = adj
+	}
 	e.emitInstr("store i64 -1, ptr @__kml_argc, align 8")
 	known := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", known, argc))
@@ -667,7 +763,7 @@ func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig F
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, totalLen, TypeAny.Align()))
 	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", dataReg, bytes))
+	e.heapMallocInto(dataReg, bytes)
 
 	// Slot 0..n-1: each declared parameter, boxed to `any`. emitExpr loads the
 	// parameter's current value in whatever shape it was bound (scalar, string,
@@ -683,7 +779,7 @@ func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig F
 		}
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align %d", boxed.Ref, gep, TypeAny.Align()))
+		e.heapStore("i64", boxed.Ref, gep, TypeAny.Align())
 	}
 
 	// Slot n..: memcpy the already-boxed overflow elements in bulk.
@@ -701,6 +797,11 @@ func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig F
 	argsLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", argsLen, passed, restLen))
 	slot := e.newArrayHeaderSlot(dataReg, argsLen)
+	// An Arguments object, not an Array: its header word says so.
+	hdr, wordp := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, slot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", wordp, hdr))
+	e.heapStore("i64", fmt.Sprint(e.argumentsHeaderWord()), wordp, 8)
 	e.define("arguments", Symbol{Ptr: slot, Ty: ArrayOf(TypeAny)})
 	return nil
 }
@@ -740,6 +841,9 @@ type nestedFuncScope struct {
 	// undefined function/closure (Stage 1 supports use at or after the
 	// declaration point only).
 	capturing map[*ast.FunctionDeclaration]bool
+	// assigned holds the names the body assigns anywhere (a `var` of a
+	// nested function's name then keeps its own slot).
+	assigned map[string]bool
 }
 
 // pushNestedFuncScope pre-scans body (direct statements only) for nested
@@ -774,6 +878,10 @@ func (e *Emitter) pushNestedFuncScope(params []ast.Param, body []ast.Statement) 
 		byName:    map[string]nestedFuncEntry{},
 		byDecl:    map[*ast.FunctionDeclaration]nestedFuncEntry{},
 		capturing: map[*ast.FunctionDeclaration]bool{},
+	}
+	scope.assigned = map[string]bool{}
+	for _, s := range body {
+		collectReassignedIdents(s, scope.assigned)
 	}
 	e.nestedFuncScopes = append(e.nestedFuncScopes, scope)
 
@@ -862,6 +970,7 @@ func (e *Emitter) pushNestedFuncScope(params []ast.Param, body []ast.Statement) 
 			Mangled: fmt.Sprintf("%s__nested%d", fd.Name, e.nestedFuncCtr),
 			Sig:     e.buildFunctionSig(fd),
 		}
+		e.nestedFuncSrc[entry.Mangled] = fd.Src
 		scope.byName[fd.Name] = entry
 		scope.byDecl[fd] = entry
 		if fd.ReturnType == nil {
@@ -896,6 +1005,7 @@ func (e *Emitter) pushNestedFuncScope(params []ast.Param, body []ast.Statement) 
 // recursion inside the body resolves through the self-capture, not this slot.
 func (e *Emitter) emitCapturingNestedFunc(fd *ast.FunctionDeclaration) error {
 	fe := ast.NewFunctionExpression(fd.Name, fd.Params, fd.ReturnType, fd.Body, fd.IsAsync, fd.GetPos())
+	fe.Src = fd.Src
 	val, err := e.emitFunctionExpression(fe, nil)
 	if err != nil {
 		return err
@@ -1001,6 +1111,7 @@ func (e *Emitter) nestedDeclCaptures(fd *ast.FunctionDeclaration) bool {
 	addParamBoundNames(bound, fd.Params)
 	refs := map[string]bool{}
 	scanStmtsFV(fd.Body.Body, bound, refs)
+	scanParamDefaultsFV(fd.Params, bound, refs)
 	for name := range refs {
 		for _, frame := range e.enclosingCapturables {
 			if frame[name] {
@@ -1091,27 +1202,27 @@ type CapturedVar struct {
 func (e *Emitter) promoteCaptureToCell(name string, ty Type, srcPtr string, isConst bool) string {
 	newCell := e.freshReg()
 	// A nullable-scalar local's slot is the { i1, T } aggregate (TDD-00064):
-	// the cell holds the whole aggregate, and stays NullableBoxed.
+	// the cell holds the whole aggregate.
 	if sym, ok := e.lookup(name); ok && sym.isNullableScalarLocal() {
 		sir := nullableScalarStorageIR(ty)
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", newCell))
+		e.heapMallocInto(newCell, "16")
 		if e.varsBeingInitialized[name] {
 			e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", sir, newCell))
 		} else {
 			curVal := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", curVal, sir, srcPtr))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", sir, curVal, newCell))
+			e.heapStore(sir, curVal, newCell, 8)
 		}
-		e.updateSymbolInPlace(name, Symbol{Ptr: newCell, Ty: ty, Boxed: true, IsConst: isConst, NullableBoxed: true})
+		e.updateSymbolInPlace(name, Symbol{Ptr: newCell, Ty: ty, Boxed: true, IsConst: isConst})
 		return newCell
 	}
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", newCell, ty.Align()))
+	e.heapMallocInto(newCell, fmt.Sprint(ty.Align()))
 	if e.varsBeingInitialized[name] {
 		// Seed with the type's deterministic default (a body-block store, since
 		// newCell is a body register — emitVarSlotDefault targets the entry block).
-		if ty.IsDynamic {
+		if ty.IsDynamic() {
 			e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, newCell))
-		} else if ty.IsArray {
+		} else if ty.IsArray() {
 			// An array cell holds a shared {data,len} header pointer (TDD-00213
 			// Stage 3). Seed the TDZ-misuse case with a fresh EMPTY header rather
 			// than a null pointer, so a closure that (mis)reads the array before
@@ -1125,7 +1236,7 @@ func (e *Emitter) promoteCaptureToCell(name string, ty Type, srcPtr string, isCo
 	} else {
 		curVal := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curVal, ty.IR, srcPtr, ty.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, curVal, newCell, ty.Align()))
+		e.heapStore(ty.IR, curVal, newCell, ty.Align())
 	}
 	e.updateSymbolInPlace(name, Symbol{Ptr: newCell, Ty: ty, Boxed: true, IsConst: isConst})
 	return newCell
@@ -1215,7 +1326,13 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		scanExprFV(x.Arg, bound, result)
 	case *ast.NewArrayExpression:
 		scanExprFV(x.Size, bound, result)
+	case *ast.NewTargetExpression:
+		scanExprFV(x.This, bound, result)
 	case *ast.NewSetExpression:
+		scanExprFV(x.Init, bound, result)
+	case *ast.NewWeakSetExpression:
+		scanExprFV(x.Init, bound, result)
+	case *ast.NewWeakMapExpression:
 		scanExprFV(x.Init, bound, result)
 	case *ast.NewMapExpression:
 		scanExprFV(x.Init, bound, result)
@@ -1291,6 +1408,7 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 			innerBound[k] = v
 		}
 		addParamBoundNames(innerBound, x.Params)
+		scanParamDefaultsFV(x.Params, innerBound, result)
 		if x.Body != nil {
 			scanExprFV(x.Body, innerBound, result)
 		}
@@ -1306,6 +1424,8 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 			innerBound[k] = v
 		}
 		addParamBoundNames(innerBound, x.Params)
+		innerBound["arguments"] = true // its own, not the enclosing function's
+		scanParamDefaultsFV(x.Params, innerBound, result)
 		scanStmtsFV(x.Body.Body, innerBound, result)
 	default:
 		// Any other expression (`new C(…)`, `typeof x`, …): its
@@ -1510,6 +1630,9 @@ func scanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 		case *ast.ObjectDestructuring:
 			scanExprFV(s.Init, local, result)
 			for _, prop := range s.Props {
+				if prop.KeyExpr != nil {
+					scanExprFV(prop.KeyExpr, local, result)
+				}
 				if prop.Default != nil {
 					scanExprFV(prop.Default, local, result)
 				}
@@ -1579,7 +1702,13 @@ func capScanExpr(expr ast.Expression, bound map[string]bool, result map[string]b
 		capScanExpr(x.Arg, bound, result)
 	case *ast.NewArrayExpression:
 		capScanExpr(x.Size, bound, result)
+	case *ast.NewTargetExpression:
+		capScanExpr(x.This, bound, result)
 	case *ast.NewSetExpression:
+		capScanExpr(x.Init, bound, result)
+	case *ast.NewWeakSetExpression:
+		capScanExpr(x.Init, bound, result)
+	case *ast.NewWeakMapExpression:
 		capScanExpr(x.Init, bound, result)
 	case *ast.NewMapExpression:
 		capScanExpr(x.Init, bound, result)
@@ -1654,6 +1783,7 @@ func capScanExpr(expr ast.Expression, bound map[string]bool, result map[string]b
 		// Closure boundary: RESET bound to this closure's own params only.
 		innerBound := make(map[string]bool, len(x.Params))
 		addParamBoundNames(innerBound, x.Params)
+		innerBound["arguments"] = true // its own, not the enclosing function's
 		capScanStmts(x.Body.Body, innerBound, result)
 	default:
 		// Any other expression (`new C({ m() { … } })`, `typeof x`, …): its
@@ -1818,6 +1948,9 @@ func capScanStmts(stmts []ast.Statement, bound map[string]bool, result map[strin
 		case *ast.ObjectDestructuring:
 			capScanExpr(s.Init, local, result)
 			for _, prop := range s.Props {
+				if prop.KeyExpr != nil {
+					capScanExpr(prop.KeyExpr, local, result)
+				}
 				if prop.Default != nil {
 					capScanExpr(prop.Default, local, result)
 				}
@@ -1833,6 +1966,7 @@ func capScanStmts(stmts []ast.Statement, bound map[string]bool, result map[strin
 			// invalid IR ("Instruction does not dominate all uses").
 			innerBound := make(map[string]bool, len(s.Params)+1)
 			innerBound[s.Name] = true
+			innerBound["arguments"] = true
 			addParamBoundNames(innerBound, s.Params)
 			if s.Body != nil {
 				capScanStmts(s.Body.Body, innerBound, result)
@@ -1875,6 +2009,21 @@ func capturedLocalNames(body []ast.Statement, paramNames []string) map[string]bo
 	return result
 }
 
+// widenedKinds reports a set of value kinds one slot can't hold: two
+// scalar kinds, or null/undefined beside a number, boolean, string or
+// array (a string slot's absent value reads as undefined, so it can't keep
+// null apart; an object slot holds null already).
+func widenedKinds(ks map[string]bool) bool {
+	n := len(ks)
+	if ks["array"] {
+		n--
+	}
+	if !ks["nullish"] {
+		return n > 1
+	}
+	return ks["number"] || ks["boolean"] || ks["string"] || ks["any"] || ks["array"] || n > 2
+}
+
 // crossTypeWidenedBindings (compat=js only) returns the untyped scalar bindings
 // in one scope's body that are assigned two or more distinct scalar kinds
 // (number / string / boolean) across their lifetime — a "dynamic variable" in
@@ -1915,6 +2064,11 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 		if k == "" && isUnconstrainedDynamic(t) {
 			k = "any" // a value of unknown kind: any other kind beside it widens
 		}
+		if k == "" && (t.IsNull() || t.IsUndefined()) {
+			k = "nullish" // widens a number, boolean or array slot, which can't hold it
+		} else if k == "" && t.IsArray() && !t.IsDynamic() {
+			k = "array" // counts only beside null/undefined
+		}
 		if k != "" {
 			if kinds[name] == nil {
 				kinds[name] = map[string]bool{}
@@ -1939,14 +2093,18 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 		if v.Init != nil {
 			it := e.inferExprType(v.Init)
 			note(v.Name, it)
-			if it.IsDate && !it.IsDynamic {
+			if it.IsDate() && !it.IsDynamic() {
 				dateInit[v.Name] = true
 			}
 		}
 	}
 	// noteAssign records a name assignment for both the cross-kind (compat=js)
 	// and the null-evolving (both-lane) widening decisions.
+	copies := map[string][]string{} // b ← a for each `b = a`
 	noteAssign := func(name, op string, rhs ast.Expression) {
+		if id, ok := rhs.(*ast.Identifier); ok && op == "=" {
+			copies[name] = append(copies[name], id.Name)
+		}
 		if op == "=" {
 			if rhs == nil {
 				note(name, TypeAny) // a destructuring target: a value of unknown kind
@@ -1962,7 +2120,7 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 			rhsNullish := false
 			if rhs != nil {
 				rt := e.inferExprType(rhs)
-				rhsNullish = rt.IsNull || rt.IsUndefined
+				rhsNullish = rt.IsNull() || rt.IsUndefined()
 			}
 			if logical || (op == "=" && !rhsNullish) {
 				nullEvolve[name] = true
@@ -2085,11 +2243,95 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 		}
 	}
 	walkStmts(body)
+	if compatJS {
+		// A nested function assigning one of these bindings (free in it)
+		// a literal counts too: `var g = "s"; function f() { g = null; }`,
+		// and so does one of its own unannotated parameters, a value of any
+		// kind (`function tag(p) { g = p; }`). Another value's type is the
+		// function's to infer.
+		nested := func(params []ast.Param, stmts []ast.Statement, expr ast.Expression) {
+			bound := map[string]bool{}
+			addParamBoundNames(bound, params)
+			untypedParam := map[string]bool{}
+			for _, p := range params {
+				if p.Type == nil && p.Name != "" && p.ArrayPattern == nil && p.ObjectPattern == nil {
+					untypedParam[p.Name] = true
+				}
+			}
+			free := map[string]bool{}
+			scanStmtsFV(stmts, bound, free)
+			if expr != nil {
+				scanExprFV(expr, bound, free)
+			}
+			visit := func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignmentExpression)
+				if !ok {
+					return true
+				}
+				if id, ok := as.Left.(*ast.Identifier); ok && free[id.Name] && untyped[id.Name] {
+					switch r := as.Right.(type) {
+					case *ast.NullLiteral, *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral:
+						noteAssign(id.Name, as.Op, as.Right)
+					case *ast.Identifier:
+						if untypedParam[r.Name] {
+							noteAssign(id.Name, as.Op, nil) // a value of unknown kind
+						}
+					}
+				}
+				return true
+			}
+			for _, st := range stmts {
+				ast.Inspect(st, visit)
+			}
+			if expr != nil {
+				ast.Inspect(expr, visit)
+			}
+		}
+		for _, st := range body {
+			ast.Inspect(st, func(n ast.Node) bool {
+				switch f := n.(type) {
+				case *ast.FunctionDeclaration:
+					if f.Body != nil {
+						nested(f.Params, f.Body.Body, nil)
+					}
+					return false
+				case *ast.FunctionExpression:
+					if f.Body != nil {
+						nested(f.Params, f.Body.Body, nil)
+					}
+					return false
+				case *ast.ArrowFunction:
+					var sts []ast.Statement
+					if f.Block != nil {
+						sts = f.Block.Body
+					}
+					nested(f.Params, sts, f.Body)
+					return false
+				}
+				return true
+			})
+		}
+	}
 	result := map[string]bool{}
 	if compatJS {
 		for name := range untyped {
-			if len(kinds[name]) > 1 || dateArith[name] {
+			if widenedKinds(kinds[name]) || dateArith[name] {
 				result[name] = true
+			}
+		}
+		// A copy of a widened binding holds its boxed values too.
+		for changed := true; changed; {
+			changed = false
+			for name, srcs := range copies {
+				if result[name] || !untyped[name] {
+					continue
+				}
+				for _, src := range srcs {
+					if result[src] {
+						result[name], changed = true, true
+						break
+					}
+				}
 			}
 		}
 	}
@@ -2126,6 +2368,10 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 	defer e.analysisPass()()
 	candidates := map[string]bool{}
 	contrib := map[string][]Type{}
+	// filled names the -compat=js candidates whose literal has elements: an
+	// element of another kind stored into one makes it any[], as the
+	// JavaScript array holds anything; it never narrows.
+	filled := map[string]bool{}
 	// The pre-pass runs before the body's symbols are defined, so a bare
 	// e.inferExprType of a pushed local (`const s = …; a.push(s)`, or the RegExp
 	// idiom `const e = re.exec(s); a.push(e[0])`) can't resolve it. Register the
@@ -2150,6 +2396,8 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 		var t Type
 		if v.TypeAnnot != nil {
 			t = e.resolveType(v.TypeAnnot)
+		} else if bt, ok := e.bareCollectionType(v); ok {
+			t = bt // a bare `new Set()` holds what its calls make of it
 		} else if v.Init != nil {
 			t = e.inferExprType(v.Init)
 		}
@@ -2159,6 +2407,12 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 		}
 		if lit, ok := v.Init.(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 && nested == 0 {
 			candidates[v.Name] = true
+			e.emptyPending = append(e.emptyPending, v)
+		} else if ok && e.compatJS() && nested == 0 && t.IsArray() && t.ElemType != nil && !t.IsDynamic() && !t.ElemType.IsDynamic() {
+			candidates[v.Name] = true
+			filled[v.Name] = true
+			e.filledPending = append(e.filledPending, v)
+			contrib[v.Name] = []Type{*t.ElemType}
 		}
 	}
 	var walkExpr func(ast.Expression)
@@ -2179,6 +2433,21 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 						}
 					}
 				}
+				// An accessor defined on an element: its getter's result
+				// is of no element kind.
+				if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Object" && mem.Property == "defineProperty" && len(ex.Args) == 3 {
+					if arr, ok := ex.Args[0].(*ast.Identifier); ok {
+						if d, ok := ex.Args[2].(*ast.ObjectLiteral); ok {
+							for _, p := range d.Properties {
+								if p.Key == "get" || p.Key == "set" {
+									add(arr.Name, TypeAny)
+								} else if p.Key == "value" {
+									add(arr.Name, e.inferExprType(p.Value))
+								}
+							}
+						}
+					}
+				}
 			}
 			if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 				walkExpr(mem.Object) // a chain's earlier calls (`p.then(f).then(g)`)
@@ -2194,7 +2463,7 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 						add(id.Name, e.inferExprType(ex.Right))
 					}
 				case *ast.Identifier:
-					if rt := e.inferExprType(ex.Right); rt.IsArray && rt.ElemType != nil {
+					if rt := e.inferExprType(ex.Right); rt.IsArray() && rt.ElemType != nil {
 						add(lhs.Name, *rt.ElemType)
 					}
 				}
@@ -2271,6 +2540,9 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 				ty = optionalParamType(p, e.resolveType(p.Type))
 			}
 			e.define(p.Name, Symbol{Ty: ty})
+		}
+		for _, x := range paramExprs(params) {
+			walkExpr(x) // defaults and computed pattern keys run in the call too
 		}
 		if expr != nil {
 			walkExpr(expr)
@@ -2376,6 +2648,12 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 	result := map[string]Type{}
 	for name := range candidates {
 		cs := contrib[name]
+		if filled[name] {
+			if slices.ContainsFunc(cs, isUnconstrainedDynamic) || isHeterogeneousElems(cs) {
+				result[name] = TypeAny
+			}
+			continue
+		}
 		// A pushed value of unknown kind (an untyped parameter) makes the
 		// array any[], as an evolving array's `any` element does in tsc.
 		if slices.ContainsFunc(cs, isUnconstrainedDynamic) {
@@ -2384,6 +2662,18 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 		}
 		if unified, ok := unifyElemTypes(cs); ok {
 			result[name] = unified
+			continue
+		}
+		// Functions pushed (`fs.push(() => 1)`): their one type, or boxed
+		// function values when their types differ.
+		if len(cs) > 0 && !slices.ContainsFunc(cs, func(t Type) bool { return !t.IsFunc() }) {
+			result[name] = cs[0]
+			for _, c := range cs[1:] {
+				if !reflect.DeepEqual(c, cs[0]) {
+					result[name] = TypeAny
+					break
+				}
+			}
 			continue
 		}
 		// Genuinely heterogeneous usage (≥2 distinct element kinds, e.g.
@@ -2409,12 +2699,12 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 // differing non-scalar kinds — or a scalar and an object — count as distinct.
 func elemKindKeyBroad(t Type) string {
 	switch {
-	case t.IsArray:
+	case t.IsArray():
 		// Two arrays are the same kind only when their storage is (ADR-01059):
 		// `[[7], new Int32Array([8])]` used to unify to `number[][]` and read the
 		// Int32Array's i32 bits as doubles.
 		return "array:" + arrayStorageKey(t)
-	case t.IsObject || t.IsClass:
+	case t.IsObject() || t.IsClass():
 		return "object"
 	case t.IR == "i1":
 		return "bool"
@@ -2422,8 +2712,12 @@ func elemKindKeyBroad(t Type) string {
 		return "number"
 	case isForOfStringTy(t):
 		return "string"
-	case t.IsBigInt:
+	case t.IsBigInt():
 		return "bigint"
+	case isHostHandle(t):
+		// A Map and a Set (or two Maps of different element types) are
+		// different kinds: `[new Set(), new Map()]` holds boxes.
+		return "host:" + reprKey(t)
 	default:
 		return "other"
 	}
@@ -2441,9 +2735,9 @@ func arrayStorageKey(t Type) string {
 	el := *t.ElemType
 	k := el.IR
 	switch {
-	case el.IsArray:
+	case el.IsArray():
 		k = "[" + arrayStorageKey(el) + "]"
-	case el.IsDynamic:
+	case el.IsDynamic():
 		k = "any"
 	}
 	switch {
@@ -2451,9 +2745,9 @@ func arrayStorageKey(t Type) string {
 		k += "/clamped"
 	case t.BigIntElem:
 		k += "/bigint"
-	case t.IsBuffer:
+	case t.IsBuffer():
 		k += "/buffer"
-	case t.IsTypedArray:
+	case t.IsTypedArray():
 		k += "/typed"
 	}
 	return k
@@ -2463,9 +2757,9 @@ func arrayStorageKey(t Type) string {
 // `number[]`, `string[][]`, `any[]`.
 func arrayTypeName(t Type) string {
 	switch {
-	case t.IsBuffer:
+	case t.IsBuffer():
 		return "Buffer"
-	case t.IsTypedArray:
+	case t.IsTypedArray():
 		if n := typedArrayConstructorName(t); n != "" {
 			return n
 		}
@@ -2475,13 +2769,13 @@ func arrayTypeName(t Type) string {
 	}
 	el := *t.ElemType
 	switch {
-	case el.IsArray:
+	case el.IsArray():
 		return arrayTypeName(el) + "[]"
-	case el.IsDynamic:
+	case el.IsDynamic():
 		return "any[]"
 	case el.IR == "i1":
 		return "boolean[]"
-	case isStringTy(el) && !el.IsObject && !el.IsClass:
+	case isStringTy(el) && !el.IsObject() && !el.IsClass():
 		return "string[]"
 	case el.Float || el.IsInteger():
 		return "number[]"
@@ -2492,7 +2786,7 @@ func arrayTypeName(t Type) string {
 // arrayStorageCompatible reports whether a value of array type a can be stored
 // where array type b is expected without reinterpreting its buffer.
 func arrayStorageCompatible(a, b Type) bool {
-	if a.IsBuffer && b.IsTypedArray && !b.IsBuffer && !b.Clamped && a.ElemType != nil && b.ElemType != nil &&
+	if a.IsBuffer() && b.IsTypedArray() && !b.IsBuffer() && !b.Clamped && a.ElemType != nil && b.ElemType != nil &&
 		a.ElemType.IR == b.ElemType.IR && a.ElemType.Signed == b.ElemType.Signed {
 		return true // a Buffer is a Uint8Array
 	}
@@ -2588,35 +2882,31 @@ func elemKindKey(t Type) string {
 func (e *Emitter) boxHoistedNullableCapture(name string, ty Type, isConst bool) string {
 	e.ensureMalloc()
 	box := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", box))
-	e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", nullableScalarStorageIR(ty), box))
-	e.define(name, Symbol{Ptr: box, Ty: ty, Boxed: true, IsConst: isConst, NullableBoxed: true})
+	e.heapMallocInto(box, "16")
+	e.heapStore(nullableScalarStorageIR(ty), "zeroinitializer", box, 8)
+	e.define(name, Symbol{Ptr: box, Ty: ty, Boxed: true, IsConst: isConst})
 	return box
 }
 
 func (e *Emitter) boxHoistedCapture(name string, ty Type, initReg string, isConst, atEntry bool) string {
 	e.ensureMalloc()
 	box := e.freshReg()
-	emit := e.emitInstr
-	if atEntry {
-		emit = e.emitAlloca
-	}
 	size := ty.Align()
 	if strings.HasPrefix(ty.IR, "{") {
 		// A two-word aggregate (a caught value's { i8, i64 }).
 		size = 8 * (strings.Count(ty.IR, ",") + 1)
 	}
-	emit(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", box, size))
+	e.heapMallocAt(atEntry, box, fmt.Sprint(size))
 	if initReg == "" {
 		if strings.HasPrefix(ty.IR, "{") {
-			emit(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", ty.IR, box))
-		} else if ty.IsDynamic {
-			emit(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, box))
+			e.heapStoreAt(atEntry, ty.IR, "zeroinitializer", box, 8)
+		} else if ty.IsDynamic() {
+			e.heapStoreAt(atEntry, "i64", fmt.Sprint(nbUndefined), box, 8)
 		} else {
-			emit(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, ty.zeroLiteral(), box, ty.Align()))
+			e.heapStoreAt(atEntry, ty.IR, ty.zeroLiteral(), box, ty.Align())
 		}
 	} else {
-		emit(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, initReg, box, ty.Align()))
+		e.heapStoreAt(atEntry, ty.IR, initReg, box, ty.Align())
 	}
 	e.define(name, Symbol{Ptr: box, Ty: ty, Boxed: true, IsConst: isConst})
 	return box
@@ -2643,11 +2933,7 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 	// evaluated in the body prologue (TDD-00206 Stage 2), so it captures that
 	// variable just like the body does — scan the defaults too, or the prologue
 	// would find the name unbound.
-	for _, p := range af.Params {
-		if p.Default != nil {
-			scanExprFV(p.Default, bound, refs)
-		}
-	}
+	scanParamDefaultsFV(af.Params, bound, refs)
 
 	var caps []CapturedVar
 	for _, name := range sortedSet(refs) {
@@ -2708,6 +2994,8 @@ func (e *Emitter) gatherGeneratorCaptures(fd *ast.FunctionDeclaration) []Capture
 	if fd.Body != nil {
 		scanStmtsFV(fd.Body.Body, bound, refs)
 	}
+	scanParamDefaultsFV(fd.Params, bound, refs)
+	scanStmtsFV(e.genPatternInits[fd], bound, refs) // its destructured parameters
 	var caps []CapturedVar
 	for _, name := range sortedSet(refs) {
 		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
@@ -2734,39 +3022,23 @@ func (e *Emitter) gatherGeneratorCaptures(fd *ast.FunctionDeclaration) []Capture
 // the arrow function's regular parameters. Captured variables are accessed via
 // GEP into %env.
 func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, retTy Type, paramTypes []Type, closureName string) error {
-	// Only the http.listen handler arrow itself keeps the bare-slot async
-	// model — a nested async closure gets the real settled-promise path.
-	if e.emittingHTTPHandler && ast.Node(af) != e.httpHandlerNode {
-		e.emittingHTTPHandler = false
-		defer func() { e.emittingHTTPHandler = true }()
-	}
 	// Save emitter state.
-	savedAllocas := e.allocas
-	savedSawAwait := e.sawAwait // TDD-00223 §2: did THIS body await?
-	e.sawAwait = false
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedLabelCtr := e.labelCtr
-	savedScopes := e.scopes
-	// An error return partway through the body must not leave this function's
-	// own scope stack in place: the enclosing statement emitters pop their
-	// scopes as the error unwinds, and on the wrong (shorter) stack that was a
-	// slice-bounds panic instead of the compile error.
-	scopesRestored := false
-	defer func() {
-		if !scopesRestored {
-			e.scopes = savedScopes
-		}
-	}()
-	savedRetType := e.currentRetType
-	savedBlockDone := e.blockDone
-	savedIsAsync := e.isAsync
-	savedCoroHdl := e.coroHdl
-	savedAsyncPromiseReg := e.asyncPromiseReg
-	savedAsyncCatchLabel := e.asyncCatchLabel
-	savedPromiseTy := e.currentPromiseTy
-	savedCoroRetLabel := e.coroRetLabel
-	savedAdoptSlot := e.asyncAdoptSlot
+	restoreBuilder := e.beginThunkEmit()
+	// A fresh context (TDD-00223 §2: sawAwait asks whether THIS body
+	// awaited), restored by defer: an error return partway through the body
+	// must not leave this function's own stacks in place, because the
+	// enclosing statement emitters pop theirs as the error unwinds (on the
+	// wrong stack that was a slice-bounds panic instead of the compile
+	// error). The scopes start as the enclosing ones, which the body's
+	// pre-passes below read, and are reset before the body.
+	savedCtx := e.funcContext
+	e.funcContext = &funcContext{
+		scopes:         savedCtx.scopes,
+		currentRetType: savedCtx.currentRetType,
+		inModuleTask:   savedCtx.inModuleTask,
+	}
+	defer func() { e.funcContext = savedCtx }()
+	e.enterFrame(af, e.fnLitName(af))
 	// A closure's own break/continue/named-label context starts empty, not
 	// inherited from whatever loop happens to enclose it lexically — a
 	// `break`/`continue`/`break LABEL` inside this closure's body can only
@@ -2778,35 +3050,20 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// partway through this closure's own body emission must not skip the
 	// restore, or an *enclosing* loop's own deferred break/continue/label
 	// stack pop panics on a stack it no longer recognizes.
-	savedBreakStack := e.breakStack
-	savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
-	e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
-	savedContinueStack := e.continueStack
-	savedNamedLabelStack := e.namedLabelStack
-	e.breakStack = nil
-	e.continueStack = nil
-	e.namedLabelStack = nil
 	// An enclosing loop's pending iterator-close finallys (the generator
 	// for-of `.return()` synthesis) must not run inside THIS function's own
 	// `return` — the synthesized statement references the enclosing frame's
 	// synthetic generator binding, which does not exist in this function
 	// (found as "a number has no method 'return'" on an arrow with a block
 	// `return` inside a generator for-of body).
-	savedPendingFinallys := e.pendingFinallys
-	savedBreakFinallyDepth, savedContinueFinallyDepth := e.breakFinallyDepth, e.continueFinallyDepth
-	e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = nil, nil, nil
 	// currentGenerator resets the same way, same reasoning — see
 	// emitFunctionDeclAs's identical reset for the real, confirmed bug this
 	// avoids (a `return`/`yield` inside this function's own body must
 	// never be misrouted into an *enclosing* generator's own suspend
 	// machinery).
-	savedCurrentGenerator := e.currentGenerator
-	e.currentGenerator = nil
 	// A nested function/closure body is not the constructor, even when lexically
 	// inside one — a `readonly` write here is an error (TDD-00154), so clear the
 	// ctor context for the duration of this body's emission.
-	savedCurrentCtorClass := e.currentCtorClass
-	e.currentCtorClass = ""
 	// Eager-boxing capture set for this closure body (see hoistedCaptures).
 	savedHoistedCaptures := e.hoistedCaptures
 	savedForwardClosures, savedForwardBoxes := e.forwardClosures, e.forwardBoxes
@@ -2823,16 +3080,14 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			e.setForwardClosures(af.Block.Body)
 			e.pushParamTypes(af.Params, paramTypes)
 			e.widenedBindings = e.crossTypeWidenedBindings(af.Block.Body)
-			e.emptyArrayElems = e.inferEmptyArrayElemTypes(af.Block.Body)
-			e.emptyMapKV = e.inferEmptyMapKVTypes(af.Block.Body)
+			e.inferEmptyContainers(af.Block.Body)
 			e.popScope()
 		} else if af.Body != nil {
 			e.hoistedCaptures = capturedLocalNames([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}}, paramBindingNames(af.Params))
 			e.setForwardClosures(nil)
 			e.pushParamTypes(af.Params, paramTypes)
 			e.widenedBindings = e.crossTypeWidenedBindings([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
-			e.emptyArrayElems = e.inferEmptyArrayElemTypes([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
-			e.emptyMapKV = e.inferEmptyMapKVTypes([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
+			e.inferEmptyContainers([]ast.Statement{&ast.ExpressionStatement{Expr: af.Body}})
 			e.popScope()
 		} else {
 			e.hoistedCaptures = nil
@@ -2843,13 +3098,6 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		}
 	}
 	defer func() {
-		e.breakStack = savedBreakStack
-		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
-		e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = savedPendingFinallys, savedBreakFinallyDepth, savedContinueFinallyDepth
-		e.continueStack = savedContinueStack
-		e.namedLabelStack = savedNamedLabelStack
-		e.currentGenerator = savedCurrentGenerator
-		e.currentCtorClass = savedCurrentCtorClass
 		e.hoistedCaptures = savedHoistedCaptures
 		e.forwardClosures, e.forwardBoxes = savedForwardClosures, savedForwardBoxes
 		e.widenedBindings = savedWidened
@@ -2857,20 +3105,10 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		e.emptyMapKV = savedEmptyMapKV
 	}()
 
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.labelCtr = 0
 	e.scopes = nil
-	e.blockDone = false
 	e.currentRetType = retTy
 	e.isAsync = af.IsAsync
-	e.coroHdl = ""
-	e.asyncPromiseReg = ""
-	e.asyncCatchLabel = ""
 	e.currentPromiseTy = TypeVoid
-	e.coroRetLabel = ""
-	e.asyncAdoptSlot = ""
 	e.pushScope()
 	if af.Block != nil {
 		if err := e.pushNestedFuncScope(af.Params, af.Block.Body); err != nil {
@@ -2894,7 +3132,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// tracked limitation — so an async arrow function used to be the only
 	// way to get an async *callback*, and nothing exercised it before now).
 	if af.IsAsync {
-		if retTy.IsPromise && retTy.PromiseType != nil {
+		if retTy.IsPromise() && retTy.PromiseType != nil {
 			e.currentPromiseTy = *retTy.PromiseType
 		}
 		e.coroRetLabel = e.freshLabel("coro.ret")
@@ -2917,11 +3155,27 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// untouched and still rejected by gatherCaptures; that's a genuinely
 	// different problem (an env slot holds one heap-cell pointer, not a
 	// (ptr, i64) pair) not attempted here.
+	// Set up captured-variable access: each env slot holds a pointer to a heap
+	// cell shared with the enclosing scope (and any other closure capturing the
+	// same variable), so load that pointer once and use it directly as storage.
+	// These go in the body builder (not allocas) but come before the parameters,
+	// whose destructuring defaults read them (a parameter shadows a capture).
+	if len(caps) > 0 {
+		ir := envStructIR(caps)
+		for i, cap := range caps {
+			slotGep := fmt.Sprintf("%%vcapslot_%s", cap.Name)
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", slotGep, ir, i))
+			cellPtr := fmt.Sprintf("%%vcap_%s", cap.Name)
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
+			e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, IsCapture: true, ForwardName: cap.Sym.ForwardName, SelfName: cap.IsSelf || cap.Sym.SelfName})
+		}
+	}
+
 	paramStr := "ptr %env"
 	boxParams := e.closureBoxOnEntry
 	for i, p := range af.Params {
 		pty := paramTypes[i]
-		if pty.IsArray {
+		if pty.IsArray() {
 			paramStr += fmt.Sprintf(", ptr %%p_%s_ptr, i64 %%p_%s_len", p.Name, p.Name)
 			// Object-reference array param (TDD-00127): see bindArrayParam.
 			if p.ArrayPattern != nil {
@@ -2932,7 +3186,9 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				}
 				continue
 			}
-			e.bindArrayParam(p.Name, pty)
+			if err := e.bindArrayParamPattern(p, pty); err != nil {
+				return err
+			}
 			continue
 		}
 		if isNullableScalar(pty) {
@@ -2945,7 +3201,10 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 		ptrName := "%v_" + p.Name
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
-		if p.ArrayPattern != nil && pty.IsTuple {
+		if err := e.emitPatternParamBodyDefault(i, p, pty, ptrName, af.Params); err != nil {
+			return err
+		}
+		if p.ArrayPattern != nil && pty.IsTuple() {
 			// Heterogeneous tuple destructured param (`([k, v]) => ...` over
 			// Object.entries / Map entries / pair arrays — TDD-00199). A tuple
 			// is passed as a single object pointer (not the two-word array
@@ -2960,7 +3219,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 			}
 			continue
 		}
-		if p.ArrayPattern != nil && pty.IsDynamic {
+		if p.ArrayPattern != nil && pty.IsDynamic() {
 			// An `any` argument: destructure it as a dynamic value.
 			if err := e.unpackDynArrayParam(ptrName, pty, p.ArrayPattern, af.GetPos()); err != nil {
 				return err
@@ -3002,21 +3261,6 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	// (TDD-00206 Stage 2) — see emitBodyDefaultPrologue.
 	if closureHasBodyDefault(af.Params) {
 		paramStr += ", i32 %__dmask"
-	}
-
-	// Set up captured-variable access: each env slot holds a pointer to a heap
-	// cell shared with the enclosing scope (and any other closure capturing the
-	// same variable), so load that pointer once and use it directly as storage.
-	// These go in the body builder (not allocas) but come before body statements.
-	if len(caps) > 0 {
-		ir := envStructIR(caps)
-		for i, cap := range caps {
-			slotGep := fmt.Sprintf("%%vcapslot_%s", cap.Name)
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", slotGep, ir, i))
-			cellPtr := fmt.Sprintf("%%vcap_%s", cap.Name)
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
-			e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, IsCapture: true, NullableBoxed: cap.Sym.NullableBoxed, ForwardName: cap.Sym.ForwardName})
-		}
 	}
 
 	// Fill body-default parameters (defaults referencing captures/globals) now
@@ -3062,18 +3306,17 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				return err
 			}
 			e.emitTerminator("ret void")
-		} else if retTy.IsArray {
+		} else if retTy.IsArray() {
 			// Mirrors emitReturn's own IsArray branch (emit_stmts.go): an array is
 			// returned as a pointer to its shared {data,len} header (TDD-00213
-			// Stage 3), sharing identity when the body value has a live header
-			// (named/field/global/captured array) and minting one otherwise. The
+			// Stage 3), which is the body value itself. The
 			// hint-aware evaluation (emitExprWithObjectHint) still coerces an
 			// array-literal body's element type against the declared return type.
 			arrVal, err := e.emitExprWithObjectHint(af.Body, retTy)
 			if err != nil {
 				return err
 			}
-			if !arrVal.Ty.IsArray {
+			if !arrVal.Ty.IsArray() {
 				return fmt.Errorf("%d:%d: expression is not an array", af.Body.GetPos().Line, af.Body.GetPos().Col)
 			}
 			e.emitTerminator(fmt.Sprintf("ret ptr %s", e.arrayReturnHeader(arrVal)))
@@ -3099,7 +3342,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 				// A body of a void call (`() => fs.linkSync(a, b)`) returns
 				// undefined.
 				e.emitValuelessRet()
-			} else if retTy.IsDynamic {
+			} else if retTy.IsDynamic() {
 				// Constrained union return type (TDD-00043) — same reasoning
 				// as emitReturn's own IsDynamic branch (emit_stmts.go): coerce
 				// doesn't box, so a dynamic-typed return needs emitBoxValue
@@ -3113,7 +3356,7 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 					return err
 				}
 			} else {
-				val = e.coerce(val, retTy)
+				val = e.convert(val, retTy)
 			}
 			if val.Ref != "" && val.Ty.IR != "void" {
 				e.emitTerminator(fmt.Sprintf("ret %s %s", retTy.LLVMRetType(), val.Ref))
@@ -3126,30 +3369,10 @@ func (e *Emitter) emitClosureFunc(af *ast.ArrowFunction, caps []CapturedVar, ret
 	if af.IsAsync {
 		e.writeAsyncDefinition(closureName, paramStr, e.sawAwait)
 	} else {
-		e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n",
-			retTy.LLVMRetType(), closureName, paramStr))
-		e.functions.WriteString(e.allocas.String())
-		e.functions.WriteString(e.body.String())
-		e.functions.WriteString("}\n")
+		e.writeFunc(fmt.Sprintf("%s %s(%s)",
+			retTy.LLVMRetType(), closureName, paramStr), e.allocas.String()+e.body.String())
 	}
-	e.sawAwait = savedSawAwait
-
-	// Restore state.
-	e.allocas = savedAllocas
-	e.body = savedBody
-	e.regCtr = savedRegCtr
-	e.labelCtr = savedLabelCtr
-	e.scopes = savedScopes
-	scopesRestored = true
-	e.currentRetType = savedRetType
-	e.blockDone = savedBlockDone
-	e.isAsync = savedIsAsync
-	e.coroHdl = savedCoroHdl
-	e.asyncPromiseReg = savedAsyncPromiseReg
-	e.asyncCatchLabel = savedAsyncCatchLabel
-	e.currentPromiseTy = savedPromiseTy
-	e.coroRetLabel = savedCoroRetLabel
-	e.asyncAdoptSlot = savedAdoptSlot
+	restoreBuilder()
 	return nil
 }
 
@@ -3279,7 +3502,7 @@ func (e *Emitter) inferUnannotatedReturnType(block *ast.BlockStatement, paramNam
 	}
 	// A returned function the old inference does not see as one (a named
 	// function expression returning itself).
-	if !answered && cok && cty.IsFunc && ok && !ty.IsFunc && !ty.IsDynamic {
+	if !answered && cok && cty.IsFunc() && ok && !ty.IsFunc() && !ty.IsDynamic() {
 		return cty, true
 	}
 	if e.shadowOracle != nil {
@@ -3310,7 +3533,7 @@ func (e *Emitter) checkerBodyReturn(block *ast.BlockStatement) (ty Type, ok, ans
 	// A returned function keeps the old answer: its call sites need the
 	// parameter defaults the closure carries, which a type has not.
 	r, ok := reprOf(t)
-	if ok && !r.IsFunc {
+	if ok && !r.IsFunc() {
 		return r, true, true
 	}
 	return r, ok, false // a function: the caller decides
@@ -3353,12 +3576,21 @@ func (e *Emitter) checkerReturnTypeOnDisagreement(block *ast.BlockStatement, fir
 	}
 	kind := reprClass(firstTy)
 	agree := true
+	savedCycleHit := e.sigInferCycleHit
 	for _, r := range rets {
-		if r != first && reprClass(e.inferBlockReturnExpr(block, r)) != kind {
+		if r == first {
+			continue
+		}
+		// A return reaching back into the signature being inferred (a
+		// recursive call) has no type yet: it does not disagree.
+		e.sigInferCycleHit = false
+		rk := reprClass(e.inferBlockReturnExpr(block, r))
+		if !e.sigInferCycleHit && rk != kind {
 			agree = false
 			break
 		}
 	}
+	e.sigInferCycleHit = savedCycleHit
 	if agree {
 		return Type{}, false
 	}
@@ -3382,17 +3614,17 @@ func (e *Emitter) checkerReturnTypeOnDisagreement(block *ast.BlockStatement, fir
 // nullability aside.
 func reprClass(t Type) string {
 	switch {
-	case (t.IsNull || t.IsUndefined) && !t.Nullable:
+	case (t.IsNull() || t.IsUndefined()) && !t.Nullable():
 		return "nullish" // a bare null/undefined literal
-	case t.IsDynamic:
+	case t.IsDynamic():
 		return "dynamic"
-	case t.IsBigInt:
+	case t.IsBigInt():
 		return "bigint"
-	case t.IsArray:
+	case t.IsArray():
 		return "array"
-	case t.IsFunc:
+	case t.IsFunc():
 		return "function"
-	case t.IsObject || t.IsClass:
+	case t.IsObject() || t.IsClass():
 		return "object"
 	case t.IR == "i1":
 		return "boolean"
@@ -3412,7 +3644,7 @@ func reprClass(t Type) string {
 // function has no base type to find.
 func (e *Emitter) inferCandidateReturnExpr(block *ast.BlockStatement, retExpr ast.Expression) Type {
 	t := e.inferCandidateReturnExprRaw(block, retExpr)
-	if t.IsCaught {
+	if t.IsCaught() {
 		return TypeAny // a caught value leaves its catch as an `any` box (coerce packs it)
 	}
 	return t
@@ -3462,12 +3694,17 @@ func defineArgumentsForInference(e *Emitter, paramNames []string) {
 // synthetic pattern name. Used by the arrow/function-expression callback paths,
 // the only ones that carry a destructuring pattern in a parameter position.
 func (e *Emitter) inferUnannotatedReturnTypeParams(block *ast.BlockStatement, params []ast.Param, paramTypes []Type) (Type, bool) {
+	// A body with no `return <value>` returns undefined, whatever type a
+	// context would accept (a `.then` callback's `T | PromiseLike<T>`).
+	if firstReturnExpr(block) == nil {
+		return TypeVoid, true
+	}
 	cty, cok, answered := e.checkerBodyReturn(block)
 	ty, ok := e.inferReturnTypeParamsOld(block, params, paramTypes)
 	if answered && !(ok && widerStorage(ty, cty, cok)) {
 		return cty, cok
 	}
-	if !answered && cok && cty.IsFunc && ok && !ty.IsFunc && !ty.IsDynamic {
+	if !answered && cok && cty.IsFunc() && ok && !ty.IsFunc() && !ty.IsDynamic() {
 		return cty, true // as inferUnannotatedReturnType
 	}
 	return ty, ok
@@ -3483,14 +3720,14 @@ func widerStorage(old, neu Type, neuOK bool) bool {
 	if !neuOK {
 		return false
 	}
-	if isUnconstrainedDynamic(old) && !neu.IsDynamic {
+	if isUnconstrainedDynamic(old) && !neu.IsDynamic() {
 		return true
 	}
-	if old.IsGenerator && !neu.IsGenerator {
+	if old.IsGenerator() && !neu.IsGenerator() {
 		return true // `function* g(): T` names its yield type (this compiler's form)
 	}
-	return (isNullableScalar(old) || old.IsUndefined) && !isNullableScalar(neu) && !neu.IsUndefined && !neu.IsDynamic &&
-		(old.withoutNullable().IR == neu.IR || neu.IsNull || neu.IsUndefined)
+	return (isNullableScalar(old) || old.IsUndefined()) && !isNullableScalar(neu) && !neu.IsUndefined() && !neu.IsDynamic() &&
+		(old.withoutNullable().IR == neu.IR || neu.IsNull() || neu.IsUndefined())
 }
 
 func (e *Emitter) inferReturnTypeParamsOld(block *ast.BlockStatement, params []ast.Param, paramTypes []Type) (Type, bool) {
@@ -3563,6 +3800,16 @@ func (e *Emitter) inferBlockReturnExpr(block *ast.BlockStatement, retExpr ast.Ex
 	e.defineForOfBindingsForInference(block.Body)
 	for _, st := range block.Body {
 		switch vd := st.(type) {
+		case *ast.ObjectDestructuring:
+			// A rest over a value that is not a static object is a new
+			// dynamic object (emitAnyObjRest).
+			if t := e.inferExprType(vd.Init); t.IsDynamic() || !t.IsObject() {
+				for _, p := range vd.Props {
+					if p.Rest {
+						e.define(p.Local, Symbol{Ty: TypeAny})
+					}
+				}
+			}
 		case *ast.VarDeclaration:
 			e.defineForInference(vd)
 		case *ast.VarDeclarationList:
@@ -3667,7 +3914,7 @@ func (e *Emitter) defineNestedVarsForInference(s ast.Statement, nested bool) {
 		} else {
 			return
 		}
-		if ty.IsDynamic || ty.IR == "void" || ty.IR == "" {
+		if ty.IsDynamic() || ty.IR == "void" || ty.IR == "" {
 			return
 		}
 		e.define(vd.Name, Symbol{Ty: indexReadType(ty)})
@@ -3701,8 +3948,19 @@ func (e *Emitter) defineNestedVarsForInference(s ast.Statement, nested bool) {
 		e.defineNestedVarsForInference(n.Init, nested)
 		e.defineNestedVarsForInference(n.Body, true)
 	case *ast.ForOfStatement:
+		// A `for (var x of …)` binding outlives the loop (emitForVarOuter).
+		if n.Kind == "var" && n.VarName != "" && n.ArrayPattern == nil && n.ObjectPattern == nil {
+			if t := e.inferExprType(n.Iterable); t.IsArray() && t.ElemType != nil {
+				e.define(n.VarName, Symbol{Ty: indexReadType(*t.ElemType)})
+			} else if isPlainStringTy(t) && !t.Nullable() {
+				e.define(n.VarName, Symbol{Ty: indexReadType(TypePtr)})
+			}
+		}
 		e.defineNestedVarsForInference(n.Body, true)
 	case *ast.ForInStatement:
+		if n.Kind == "var" && n.VarName != "" {
+			e.define(n.VarName, Symbol{Ty: indexReadType(TypePtr)})
+		}
 		e.defineNestedVarsForInference(n.Body, true)
 	case *ast.WhileStatement:
 		e.defineNestedVarsForInference(n.Body, true)
@@ -3746,7 +4004,7 @@ func (e *Emitter) defineNestedVarsForInference(s ast.Statement, nested bool) {
 // defaulting to a number. Non-pattern behavior is therefore unchanged; only the
 // destructured-parameter case gains bindings.
 func (e *Emitter) definePatternParamForInference(p ast.Param, pty Type, i int) {
-	if pty.IsDynamic && (p.ArrayPattern != nil || p.ObjectPattern != nil) {
+	if pty.IsDynamic() && (p.ArrayPattern != nil || p.ObjectPattern != nil) {
 		// A dynamic argument: every leaf is read as `any`.
 		leaves := map[string]bool{}
 		collectArrayPatternNames(p.ArrayPattern, leaves)
@@ -3764,7 +4022,7 @@ func (e *Emitter) definePatternParamForInference(p ast.Param, pty Type, i int) {
 			}
 			var lty Type
 			switch {
-			case pty.IsTuple && j < len(pty.Fields):
+			case pty.IsTuple() && j < len(pty.Fields):
 				lty = pty.Fields[j].Ty
 			case pty.ElemType != nil:
 				lty = *pty.ElemType
@@ -3782,6 +4040,13 @@ func (e *Emitter) definePatternParamForInference(p ast.Param, pty Type, i int) {
 			if _, fty, ok := pty.FieldIndex(prop.Key); ok {
 				lty = fty
 			}
+			// `{x = 1}`: the default fills an absent field, so the binding
+			// is the field's present type when the default's is.
+			if prop.Default != nil && isNullableScalar(lty) {
+				if dt := e.inferExprType(prop.Default); dt.IR != "" && dt.IR != "void" && !dt.Nullable() && !dt.IsDynamic() {
+					lty = lty.withoutNullable()
+				}
+			}
 			e.define(prop.Local, Symbol{Ty: lty})
 		}
 	default:
@@ -3794,10 +4059,10 @@ func (e *Emitter) definePatternParamForInference(p ast.Param, pty Type, i int) {
 // rebinds it to `arg ?? default`, present when the default is
 // (emitParamDefaultPrologue).
 func (e *Emitter) bodyParamType(p ast.Param, pty Type) Type {
-	if !bodyDefaulted(p) || !pty.Nullable || pty.NullAndUndef || pty.IsDynamic {
+	if !bodyDefaulted(p) || !pty.Nullable() || pty.NullAndUndef() || pty.IsDynamic() {
 		return pty
 	}
-	if dt := e.inferExprType(p.Default); dt.IR == "" || dt.IR == "void" || dt.Nullable || dt.IsDynamic {
+	if dt := e.inferExprType(p.Default); dt.IR == "" || dt.IR == "void" || dt.Nullable() || dt.IsDynamic() {
 		return pty
 	}
 	return pty.withoutNullable()
@@ -3844,7 +4109,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	paramTypes := make([]Type, len(af.Params))
 	boxOnEntry := map[int]bool{}
 	for i, p := range af.Params {
-		if p.Rest && p.Type == nil && i < len(hints) && hints[i].IsArray {
+		if p.Rest && p.Type == nil && i < len(hints) && hints[i].IsArray() {
 			paramTypes[i] = hints[i] // `(...args) =>` given `(...args: any[]) => void`
 		} else if p.Rest && p.Type == nil {
 			// Same default rest-element type buildFunctionSig (emitter.go)
@@ -3873,7 +4138,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			paramTypes[i] = TypeAny
 		} else if p.Type == nil {
 			paramTypes[i] = TypeF64
-			paramTypes[i].Inferred = true // no annotation, no hint — see docs/adr/ADR-00042.md
+			paramTypes[i].Inferred = true // no annotation, no hint — see docs/adr/00/ADR-00042.md
 		} else {
 			paramTypes[i] = e.resolveType(p.Type)
 			// `(err: any) => …` handed to a runtime that calls with a concrete
@@ -3881,8 +4146,8 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			// string): the hint is the ABI, and the body sees the value boxed
 			// into a real `any` on entry (ADR-01080) — otherwise the raw pointer
 			// bits land in the i64 slot as a string-kind box.
-			if isUnconstrainedDynamic(paramTypes[i]) && i < len(hints) && !hints[i].IsDynamic &&
-				hints[i].IR != "" && hints[i].IR != "void" && !hints[i].IsArray && !isNullableScalar(hints[i]) &&
+			if isUnconstrainedDynamic(paramTypes[i]) && i < len(hints) && !hints[i].IsDynamic() &&
+				hints[i].IR != "" && hints[i].IR != "void" && !hints[i].IsArray() && !isNullableScalar(hints[i]) &&
 				p.ArrayPattern == nil && p.ObjectPattern == nil {
 				paramTypes[i] = hints[i]
 				boxOnEntry[i] = true
@@ -3911,6 +4176,16 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			return Value{}, err
 		}
 	}
+	// A parameter the hints make a box where the checker's contextual type
+	// is another kind (a callback of a method called on a box): the body
+	// reads it as the box it is.
+	checkerTys := append([]Type(nil), paramTypes...)
+	for i, p := range af.Params {
+		if ct, ok := e.checkerContextualParam(af, i); ok && p.Type == nil {
+			checkerTys[i] = ct
+		}
+	}
+	defer e.widenDynEntryParams(af.Params, checkerTys, paramTypes)()
 	var retTy Type
 	if af.RetType != nil {
 		retTy = e.resolveType(af.RetType)
@@ -3923,15 +4198,20 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			return Value{}, err
 		}
 	} else if af.Body != nil {
-		// Temporarily push params into scope so inferExprType can resolve them.
+		// Temporarily push params into scope so inferExprType can resolve them,
+		// as the body sees them (a boxed-on-entry `any`, a box).
 		e.pushScope()
 		for i, p := range af.Params {
-			e.definePatternParamForInference(p, paramTypes[i], i)
+			e.definePatternParamForInference(p, bodyParamTy(paramTypes, boxOnEntry, i), i)
 		}
 		retTy = e.inferExprType(af.Body)
 		e.popScope()
 	} else if hasReturn(af.Block) {
-		if inferred, ok := e.inferUnannotatedReturnTypeParams(af.Block, af.Params, paramTypes); ok {
+		bodyTys := make([]Type, len(paramTypes))
+		for i := range paramTypes {
+			bodyTys[i] = bodyParamTy(paramTypes, boxOnEntry, i)
+		}
+		if inferred, ok := e.inferUnannotatedReturnTypeParams(af.Block, af.Params, bodyTys); ok {
 			retTy = inferred
 		} else if firstReturnExpr(af.Block) == nil {
 			// Every return in the block is a bare `return;` — a void closure.
@@ -3947,6 +4227,18 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		retTy = TypeVoid // block body with no reachable return (e.g. forEach callback)
 	}
 
+	// Returns of differently shaped object literals (one setting an optional
+	// field) build the contextual return's one object type, as if annotated.
+	if af.RetType == nil && !retTy.IsPromise() {
+		var body ast.Node = af.Block
+		if af.Body != nil {
+			body = af.Body
+		}
+		if ct, ok := e.contextualObjectReturn(af, af.IsAsync, body); ok {
+			retTy = ct
+		}
+	}
+
 	// An async arrow always returns a promise slot (the inline async
 	// prologue/epilogue below) — wrap a non-promise inferred/void return type
 	// so the emitted define's return IR (ptr) matches what the epilogue
@@ -3954,10 +4246,10 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	// wiring ReadableStream's async pull (TDD-00097): an async block-bodied
 	// arrow with no `return` inferred `void` and emitted `ret ptr` inside a
 	// `define void`, which clang rejects.
-	if af.IsAsync && !retTy.IsPromise {
+	if af.IsAsync && !retTy.IsPromise() {
 		// Typed as returning Promise<any> (a callback parameter's type): the
 		// promise holds the value boxed, as its consumers read it.
-		if af.RetType == nil && retTy.IR != "void" && !retTy.IsDynamic && e.contextualPromiseOfAny(af) {
+		if af.RetType == nil && retTy.IR != "void" && !retTy.IsDynamic() && e.contextualPromiseOfAny(af) {
 			retTy = TypeAny
 		}
 		retTy = PromiseOf(e.awaitedRet(retTy))
@@ -3967,6 +4259,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	// Emit the LLVM function for this closure.
 	closureName := e.closureSymbol(af.GetPos())
 	e.registerFnMeta(closureName, e.fnLitName(af), fnLengthFromParams(af.Params), fnKindOf(af.IsAsync, false))
+	e.fnMetaSource(closureName, af.Src)
 	savedBoxOnEntry := e.closureBoxOnEntry
 	e.closureBoxOnEntry = boxOnEntry
 	err = e.emitClosureFunc(af, caps, retTy, paramTypes, closureName)
@@ -3999,7 +4292,7 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 	// Store function pointer into header[0].
 	fpSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", closureName, fpSlot))
+	e.heapStore("ptr", closureName, fpSlot, 8)
 
 	// Populate the environment (if there are captures).
 	epSlot := e.freshReg()
@@ -4017,11 +4310,11 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 			slotReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 				slotReg, envIR, env, i))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cellPtr, slotReg))
+			e.heapStore("ptr", cellPtr, slotReg, 8)
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, epSlot))
+		e.heapStore("ptr", env, epSlot, 8)
 	} else {
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", epSlot))
+		e.heapStore("ptr", "null", epSlot, 8)
 	}
 
 	closureTy := FuncType(paramTypes, retTy)
@@ -4155,6 +4448,9 @@ func (e *Emitter) emitBodyDefaultPrologue(params []ast.Param, paramTypes []Type,
 			continue
 		}
 		pty := paramTypes[i]
+		if patternBodyDefault(p, pty) {
+			continue // filled before its pattern is unpacked (emitPatternParamBodyDefault)
+		}
 		if isNullableScalar(pty) || p.ArrayPattern != nil || p.ObjectPattern != nil {
 			return fmt.Errorf("%d:%d: a parameter default that references a captured variable is only supported for a scalar, string, object, or array parameter when the function is called as a value — pass the argument explicitly", pos.Line, pos.Col)
 		}
@@ -4170,14 +4466,14 @@ func (e *Emitter) emitBodyDefaultPrologue(params []ast.Param, paramTypes []Type,
 		if err != nil {
 			return err
 		}
-		if pty.IsArray {
+		if pty.IsArray() {
 			// Object-reference array model (TDD-00127): the parameter's stable
-			// slot holds a pointer to the {data, len} header. Store a fresh header
-			// wrapping the default array's aggregate.
+			// slot holds a pointer to the {data, len} header. Store the default
+			// array's header.
 			header, _ := e.arrayArgFromAggregate(val)
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %%v_%s_ptr, align 8", header, p.Name))
 		} else {
-			val = e.coerce(val, pty)
+			val = e.convert(val, pty)
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %%v_%s, align %d", pty.IR, val.Ref, p.Name, pty.Align()))
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
@@ -4193,6 +4489,7 @@ func (e *Emitter) emitBodyDefaultPrologue(params []ast.Param, paramTypes []Type,
 // have expression bodies) and with the same capture / LLVM-function-emission
 // / {funcPtr,envPtr} heap-allocation pipeline.
 func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Type) (Value, error) {
+	defer e.enterOwnNewTarget()()
 	// A generator expression that reaches here wasn't a top-level `const G =
 	// function* ...` binding (those were rewritten into named declarations,
 	// TDD-00096) — an argument/nested/IIFE use has no first-class
@@ -4212,13 +4509,19 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	if !thisTaking && e.compatJS() && !fe.IsAsync && usesOwnThis(fe.Body.Body) {
 		ft := e.inferExprType(fe)
 		dyn, err := e.emitDynFunctionExpression(fe, fe.GetPos())
-		if err != nil || !ft.IsFunc || ft.FuncRetType == nil {
+		if err != nil || !ft.IsFunc() || ft.FuncRetType == nil || hasArgumentsRestParamSlice(fe.Params) {
+			// One reading `arguments` stays dynamic: a typed call passes
+			// every fixed parameter, which would count as supplied.
 			return dyn, err
 		}
 		if len(hints) == len(ft.FuncParams) {
-			ft = FuncType(hints, *ft.FuncRetType)
+			// The hinted parameter types, keeping the arity shape (an
+			// implicit `arguments` rest the call site spreads into).
+			nft := FuncType(hints, *ft.FuncRetType)
+			nft.FuncHasRest, nft.FuncThis = ft.FuncHasRest, ft.FuncThis
+			ft = nft
 		}
-		return e.coerce(dyn, ft), nil
+		return e.convert(dyn, ft), nil
 	}
 	// Gather captured variables BEFORE resetting emitter state — the
 	// free-variable scan needs the enclosing scope's context (same
@@ -4229,11 +4532,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	scanStmtsFV(fe.Body.Body, bound, refs)
 	// A parameter default referencing an enclosing variable is evaluated in the
 	// body prologue (TDD-00206 Stage 2), so it captures that variable too.
-	for _, p := range fe.Params {
-		if p.Default != nil {
-			scanExprFV(p.Default, bound, refs)
-		}
-	}
+	scanParamDefaultsFV(fe.Params, bound, refs)
 
 	var caps []CapturedVar
 	for _, name := range sortedSet(refs) {
@@ -4342,6 +4641,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	} else {
 		retTy = TypeVoid
 	}
+	if fe.RetType == nil && !retTy.IsPromise() && fe.Body != nil {
+		if ct, ok := e.contextualObjectReturn(fe, fe.IsAsync, fe.Body); ok {
+			retTy = ct // as in the arrow path
+		}
+	}
 
 	// An async function expression always returns a promise (the inline async
 	// prologue/epilogue below returns the settled promise pointer), so wrap a
@@ -4352,7 +4656,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	// lacked it, so an async function expression that falls off the end — e.g.
 	// `async function () { try { await p } finally { await q } }` — emitted
 	// `ret ptr` inside `define void`.
-	if fe.IsAsync && !retTy.IsPromise {
+	if fe.IsAsync && !retTy.IsPromise() {
 		retTy = PromiseOf(e.awaitedRet(retTy))
 	}
 
@@ -4392,72 +4696,57 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	if feName == "" {
 		feName = e.fnLitName(fe)
 	}
-	e.registerFnMeta(closureName, feName, fnLengthFromParams(fe.Params), fnKindOf(fe.IsAsync, false))
+	feKind := fnKindOf(fe.IsAsync, false)
+	if !fe.IsAsync && !fe.IsGenerator && !fe.Method && !e.strictFns[fe] && !e.fileIsLib(e.fileOfFunc(fe)) {
+		feKind |= fnKindSloppy
+	}
+	e.registerFnMeta(closureName, feName, fnLengthFromParams(fe.Params), feKind)
+	e.fnMetaSource(closureName, fe.Src)
 
 	closureParamTypes := paramTypes
 	// emitBody emits the function under sym with its parameters as paramTypes.
 	emitBody := func(paramTypes []Type, closureName string) error {
 		closureParamTypes := paramTypes // the loop below consumes paramTypes
-		savedAllocas := e.allocas
-		savedSawAwait := e.sawAwait // TDD-00223 §2: did THIS body await?
-		e.sawAwait = false
-		savedBody := e.body
-		savedRegCtr := e.regCtr
-		savedLabelCtr := e.labelCtr
-		savedScopes := e.scopes
-		// An error return partway through the body must not leave this function's
-		// own scope stack in place: the enclosing statement emitters pop their
-		// scopes as the error unwinds, and on the wrong (shorter) stack that was a
-		// slice-bounds panic instead of the compile error.
-		scopesRestored := false
-		defer func() {
-			if !scopesRestored {
-				e.scopes = savedScopes
-			}
-		}()
-		savedRetType := e.currentRetType
-		savedBlockDone := e.blockDone
-		savedIsAsync := e.isAsync
-		savedCoroHdl := e.coroHdl
-		savedAsyncPromiseReg := e.asyncPromiseReg
-		savedAsyncCatchLabel := e.asyncCatchLabel
-		savedPromiseTy := e.currentPromiseTy
-		savedCoroRetLabel := e.coroRetLabel
-		savedAdoptSlot := e.asyncAdoptSlot
+		defer e.enterOwnNewTarget()()
+		restoreBuilder := e.beginThunkEmit()
+		// A fresh context (TDD-00223 §2: sawAwait asks whether THIS body
+		// awaited), restored by defer: an error return partway through the body
+		// must not leave this function's own stacks in place, because the
+		// enclosing statement emitters pop theirs as the error unwinds (on the
+		// wrong stack that was a slice-bounds panic instead of the compile
+		// error). The scopes start as the enclosing ones, which the body's
+		// pre-passes below read, and are reset before the body.
+		savedCtx := e.funcContext
+		e.funcContext = &funcContext{
+			scopes:         savedCtx.scopes,
+			currentRetType: savedCtx.currentRetType,
+			inModuleTask:   savedCtx.inModuleTask,
+		}
+		defer func() { e.funcContext = savedCtx }()
+		if e.objLitMethods[fe] && feName != "" {
+			e.enterFrame(fe, "Object."+feName)
+		} else {
+			e.enterFrame(fe, feName)
+		}
 		// Same reset emitClosureFunc gives an arrow function's own break/
 		// continue/named-label context, restored via defer for the same
 		// reason (see its comment) — an error return partway through this
 		// function expression's own body must not skip the restore, or an
 		// enclosing loop's own deferred stack pop panics.
-		savedBreakStack := e.breakStack
-		savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
-		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
-		savedContinueStack := e.continueStack
-		savedNamedLabelStack := e.namedLabelStack
-		e.breakStack = nil
-		e.continueStack = nil
-		e.namedLabelStack = nil
 		// An enclosing loop's pending iterator-close finallys (the generator
 		// for-of `.return()` synthesis) must not run inside THIS function's own
 		// `return` — the synthesized statement references the enclosing frame's
 		// synthetic generator binding, which does not exist in this function
 		// (found as "a number has no method 'return'" on an arrow with a block
 		// `return` inside a generator for-of body).
-		savedPendingFinallys := e.pendingFinallys
-		savedBreakFinallyDepth, savedContinueFinallyDepth := e.breakFinallyDepth, e.continueFinallyDepth
-		e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = nil, nil, nil
 		// currentGenerator resets the same way, same reasoning — see
 		// emitFunctionDeclAs's identical reset for the real, confirmed bug this
 		// avoids (a `return`/`yield` inside this function's own body must
 		// never be misrouted into an *enclosing* generator's own suspend
 		// machinery).
-		savedCurrentGenerator := e.currentGenerator
-		e.currentGenerator = nil
 		// A nested function/closure body is not the constructor, even when lexically
 		// inside one — a `readonly` write here is an error (TDD-00154), so clear the
 		// ctor context for the duration of this body's emission.
-		savedCurrentCtorClass := e.currentCtorClass
-		e.currentCtorClass = ""
 		// Eager-boxing capture set for this function-expression body.
 		savedHoistedCaptures := e.hoistedCaptures
 		savedForwardClosures, savedForwardBoxes := e.forwardClosures, e.forwardBoxes
@@ -4474,8 +4763,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 				e.setForwardClosures(fe.Body.Body)
 				e.pushParamTypes(fe.Params, paramTypes)
 				e.widenedBindings = e.crossTypeWidenedBindings(fe.Body.Body)
-				e.emptyArrayElems = e.inferEmptyArrayElemTypes(fe.Body.Body)
-				e.emptyMapKV = e.inferEmptyMapKVTypes(fe.Body.Body)
+				e.inferEmptyContainers(fe.Body.Body)
 				e.popScope()
 			} else {
 				e.hoistedCaptures = nil
@@ -4486,13 +4774,6 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			}
 		}
 		defer func() {
-			e.breakStack = savedBreakStack
-			e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
-			e.pendingFinallys, e.breakFinallyDepth, e.continueFinallyDepth = savedPendingFinallys, savedBreakFinallyDepth, savedContinueFinallyDepth
-			e.continueStack = savedContinueStack
-			e.namedLabelStack = savedNamedLabelStack
-			e.currentGenerator = savedCurrentGenerator
-			e.currentCtorClass = savedCurrentCtorClass
 			e.hoistedCaptures = savedHoistedCaptures
 			e.forwardClosures, e.forwardBoxes = savedForwardClosures, savedForwardBoxes
 			e.widenedBindings = savedWidened
@@ -4500,20 +4781,10 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			e.emptyMapKV = savedEmptyMapKV
 		}()
 
-		e.allocas = strings.Builder{}
-		e.body = strings.Builder{}
-		e.regCtr = 0
-		e.labelCtr = 0
 		e.scopes = nil
-		e.blockDone = false
 		e.currentRetType = retTy
 		e.isAsync = fe.IsAsync
-		e.coroHdl = ""
-		e.asyncPromiseReg = ""
-		e.asyncCatchLabel = ""
 		e.currentPromiseTy = TypeVoid
-		e.coroRetLabel = ""
-		e.asyncAdoptSlot = ""
 		e.pushScope()
 		if err := e.pushNestedFuncScope(fe.Params, fe.Body.Body); err != nil {
 			return err
@@ -4521,7 +4792,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		defer e.popNestedFuncScope()
 
 		if fe.IsAsync {
-			if retTy.IsPromise && retTy.PromiseType != nil {
+			if retTy.IsPromise() && retTy.PromiseType != nil {
 				e.currentPromiseTy = *retTy.PromiseType
 			}
 			e.coroRetLabel = e.freshLabel("coro.ret")
@@ -4529,28 +4800,50 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			e.emitInlineAsyncPrologue()
 		}
 
+		// Set up captured-variable access — same pattern emitClosureFunc uses,
+		// before the parameters (their destructuring defaults read captures).
+		if len(caps) > 0 {
+			ir := envStructIR(caps)
+			for i, cap := range caps {
+				slotGep := fmt.Sprintf("%%vcapslot_%s", cap.Name)
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", slotGep, ir, i))
+				cellPtr := fmt.Sprintf("%%vcap_%s", cap.Name)
+				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
+				e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, IsCapture: true, ForwardName: cap.Sym.ForwardName, SelfName: cap.IsSelf || cap.Sym.SelfName})
+			}
+		}
+
 		// Build the LLVM parameter list string and alloca+store each regular param.
 		// Mirrors emitClosureFunc's own identical shape exactly.
 		paramStr := "ptr %env"
-		for _, p := range fe.Params {
+		var unpackLater *[]func() error
+		if fe.Body != nil && paramsUseArguments(fe.Params, fe.Body.Body) {
+			unpackLater = &[]func() error{}
+		}
+		for pi, p := range fe.Params {
 			pty := paramTypes[0]
 			paramTypes = paramTypes[1:] // consume
-			if pty.IsArray {
+			if pty.IsArray() {
 				paramStr += fmt.Sprintf(", ptr %%p_%s_ptr, i64 %%p_%s_len", p.Name, p.Name)
 				// Object-reference array param (TDD-00127): see bindArrayParam.
 				if p.ArrayPattern != nil {
-					dataPtrReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
-					elemTy := TypeF64
-					if pty.ElemType != nil {
-						elemTy = *pty.ElemType
-					}
-					if err := e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", elemTy, p.ArrayPattern); err != nil {
+					e.bindRawPatternParam(unpackLater, p, pty, "")
+					if err := e.patternStep(unpackLater, func() error {
+						dataPtrReg := e.freshReg()
+						e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
+						elemTy := TypeF64
+						if pty.ElemType != nil {
+							elemTy = *pty.ElemType
+						}
+						return e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", elemTy, p.ArrayPattern)
+					}); err != nil {
 						return err
 					}
 					continue
 				}
-				e.bindArrayParam(p.Name, pty)
+				if err := e.bindArrayParamPatternLater(unpackLater, p, pty); err != nil {
+					return err
+				}
 				continue
 			}
 			if isNullableScalar(pty) {
@@ -4563,30 +4856,47 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			ptrName := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
 			e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
-			if p.ArrayPattern != nil && pty.IsTuple {
+			if p.ArrayPattern != nil || p.ObjectPattern != nil {
+				e.bindRawPatternParam(unpackLater, p, pty, ptrName)
+			}
+			if err := e.patternStep(unpackLater, func() error {
+				return e.emitPatternParamBodyDefault(pi, p, pty, ptrName, fe.Params)
+			}); err != nil {
+				return err
+			}
+			if p.ArrayPattern != nil && pty.IsTuple() {
 				// Heterogeneous tuple destructured param, passed as one object
 				// pointer (TDD-00199).
-				objPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
-				if err := e.unpackTuplePatternInto(objPtrReg, pty, p.ArrayPattern, fe.GetPos()); err != nil {
+				if err := e.patternStep(unpackLater, func() error {
+					objPtrReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtrReg, ptrName))
+					return e.unpackTuplePatternInto(objPtrReg, pty, p.ArrayPattern, fe.GetPos())
+				}); err != nil {
 					return err
 				}
 				continue
 			}
-			if p.ArrayPattern != nil && pty.IsDynamic {
+			if p.ArrayPattern != nil && pty.IsDynamic() {
 				// An `any` argument: destructure it as a dynamic value.
-				if err := e.unpackDynArrayParam(ptrName, pty, p.ArrayPattern, fe.GetPos()); err != nil {
+				if err := e.patternStep(unpackLater, func() error {
+					return e.unpackDynArrayParam(ptrName, pty, p.ArrayPattern, fe.GetPos())
+				}); err != nil {
 					return err
 				}
 				continue
 			}
 			if p.ObjectPattern != nil {
-				objPtrReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", objPtrReg, patternParamIR(pty), ptrName))
-				if err := e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, fe.GetPos()); err != nil {
+				if err := e.patternStep(unpackLater, func() error {
+					objPtrReg := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", objPtrReg, patternParamIR(pty), ptrName))
+					return e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, fe.GetPos())
+				}); err != nil {
 					return err
 				}
 				continue
+			}
+			if p.Name == "this" && isUnconstrainedDynamic(pty) && e.sloppyFileSet[e.fileOfFunc(fe)] {
+				e.emitSloppyThis(ptrName, fe.GetPos()) // undefined or null: globalThis
 			}
 			if e.hoistedCaptures[p.Name] {
 				e.boxHoistedCapture(p.Name, pty, "%p_"+p.Name, false, true)
@@ -4600,18 +4910,17 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			paramStr += ", i32 %__dmask"
 		}
 
-		// Set up captured-variable access — same pattern emitClosureFunc uses.
-		if len(caps) > 0 {
-			ir := envStructIR(caps)
-			for i, cap := range caps {
-				slotGep := fmt.Sprintf("%%vcapslot_%s", cap.Name)
-				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", slotGep, ir, i))
-				cellPtr := fmt.Sprintf("%%vcap_%s", cap.Name)
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellPtr, slotGep))
-				e.define(cap.Name, Symbol{Ptr: cellPtr, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, IsCapture: true, NullableBoxed: cap.Sym.NullableBoxed, ForwardName: cap.Sym.ForwardName})
-			}
+		// A function expression that reads `arguments` binds it from the boxed
+		// declared params + the implicit rest's overflow (TDD-00210), reusing the
+		// named-function builder via a synthetic declaration (the same adapter the
+		// class-method path uses). Arrow functions never reach here.
+		// Before the defaults, which may read it.
+		if err := e.synthesizeArgumentsObject(&ast.FunctionDeclaration{Params: fe.Params, Body: fe.Body}, FuncSig{}); err != nil {
+			return err
 		}
-
+		if err := e.runPatternSteps(unpackLater); err != nil {
+			return err
+		}
 		// Fill body-default parameters now that parameters and captures are in scope
 		// (TDD-00206 Stage 2). closureParamTypes is the pre-consumed copy.
 		if err := e.emitBodyDefaultPrologue(fe.Params, closureParamTypes, fe.GetPos()); err != nil {
@@ -4620,13 +4929,8 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if err := e.emitParamDefaultPrologue(fe.Params, closureParamTypes, fe.Body, fe.GetPos()); err != nil {
 			return err
 		}
-
-		// A function expression that reads `arguments` binds it from the boxed
-		// declared params + the implicit rest's overflow (TDD-00210), reusing the
-		// named-function builder via a synthetic declaration (the same adapter the
-		// class-method path uses). Arrow functions never reach here.
-		if err := e.synthesizeArgumentsObject(&ast.FunctionDeclaration{Params: fe.Params, Body: fe.Body}, FuncSig{}); err != nil {
-			return err
+		if fe.Body != nil {
+			e.dropReplacedParams(fe.Params, fe.Body.Body)
 		}
 
 		// Emit the body.
@@ -4650,30 +4954,10 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if fe.IsAsync {
 			e.writeAsyncDefinition(closureName, paramStr, e.sawAwait)
 		} else {
-			e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n",
-				retTy.LLVMRetType(), closureName, paramStr))
-			e.functions.WriteString(e.allocas.String())
-			e.functions.WriteString(e.body.String())
-			e.functions.WriteString("}\n")
+			e.writeFunc(fmt.Sprintf("%s %s(%s)",
+				retTy.LLVMRetType(), closureName, paramStr), e.allocas.String()+e.body.String())
 		}
-		e.sawAwait = savedSawAwait
-
-		// Restore state.
-		e.allocas = savedAllocas
-		e.body = savedBody
-		e.regCtr = savedRegCtr
-		e.labelCtr = savedLabelCtr
-		e.scopes = savedScopes
-		scopesRestored = true
-		e.currentRetType = savedRetType
-		e.blockDone = savedBlockDone
-		e.isAsync = savedIsAsync
-		e.coroHdl = savedCoroHdl
-		e.asyncPromiseReg = savedAsyncPromiseReg
-		e.asyncCatchLabel = savedAsyncCatchLabel
-		e.currentPromiseTy = savedPromiseTy
-		e.coroRetLabel = savedCoroRetLabel
-		e.asyncAdoptSlot = savedAdoptSlot
+		restoreBuilder()
 		return nil
 	}
 	if err := emitBody(paramTypes, closureName); err != nil {
@@ -4703,7 +4987,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 
 	fpSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 0", fpSlot, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", closureName, fpSlot))
+	e.heapStore("ptr", closureName, fpSlot, 8)
 
 	epSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, ptr}, ptr %s, i32 0, i32 1", epSlot, hdr))
@@ -4716,12 +5000,12 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			// header — which is exactly what lets the body call itself.
 			if cap.IsSelf {
 				selfCell := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", selfCell))
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, selfCell))
+				e.heapMallocInto(selfCell, "8")
+				e.heapStore("ptr", hdr, selfCell, 8)
 				slotReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 					slotReg, envIR, env, i))
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", selfCell, slotReg))
+				e.heapStore("ptr", selfCell, slotReg, 8)
 				continue
 			}
 			cellPtr := cap.Sym.Ptr
@@ -4731,11 +5015,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 			slotReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
 				slotReg, envIR, env, i))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cellPtr, slotReg))
+			e.heapStore("ptr", cellPtr, slotReg, 8)
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, epSlot))
+		e.heapStore("ptr", env, epSlot, 8)
 	} else {
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", epSlot))
+		e.heapStore("ptr", "null", epSlot, 8)
 	}
 
 	closureTy := FuncType(closureParamTypes, retTy)
@@ -4763,7 +5047,7 @@ func (e *Emitter) emitClosureCall(sym Symbol, args []ast.Expression, pos ast.Pos
 		e.ensureExceptionHelpers()
 		name := unmangleTopLevelName(sym.ForwardName)
 		errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+name+"' before initialization"), e.internString("ReferenceError"))
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+		e.excThrow(errObj)
 		e.emitTerminator("unreachable")
 		e.emitLabel(okL)
 	}
@@ -4783,7 +5067,12 @@ func (e *Emitter) emitFunctionCallApply(fnExpr ast.Expression, method string, ar
 	if err != nil {
 		return Value{}, err
 	}
-	if !fnVal.Ty.IsFunc {
+	if e.mayBeMethodValue(fnExpr) && !fnVal.Ty.FuncThis {
+		// A class method read as a value reads its `this`: thisArg is the
+		// receiver, through the method's dynamic adapter.
+		return e.emitClosureCallWithThis(fnVal, method, args, pos)
+	}
+	if !fnVal.Ty.IsFunc() {
 		return Value{}, fmt.Errorf("%d:%d: .%s requires a function value", pos.Line, pos.Col, method)
 	}
 	if fnVal.Ty.FuncThis {
@@ -4855,7 +5144,28 @@ func (e *Emitter) emitFunctionBind(fnExpr ast.Expression, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	if !fnVal.Ty.IsFunc {
+	if e.mayBeMethodValue(fnExpr) && !fnVal.Ty.FuncThis {
+		v, err := e.emitDynBind(fnVal, args, pos)
+		if err == nil && !fnVal.Ty.IsFunc() {
+			// The method read's own signature, less the bound arguments.
+			if ft := e.inferExprType(fnExpr); ft.IsFunc() {
+				n := len(args) - 1
+				if n < 0 {
+					n = 0
+				}
+				if n > len(ft.FuncParams) {
+					n = len(ft.FuncParams)
+				}
+				ret := TypeVoid
+				if ft.FuncRetType != nil {
+					ret = *ft.FuncRetType
+				}
+				v = e.convert(v, FuncType(ft.FuncParams[n:], ret))
+			}
+		}
+		return v, err
+	}
+	if !fnVal.Ty.IsFunc() {
 		return Value{}, fmt.Errorf("%d:%d: .bind requires a function value", pos.Line, pos.Col)
 	}
 	if e.bindsDynamically(fnVal.Ty) {
@@ -4886,18 +5196,18 @@ func (e *Emitter) emitFunctionBind(fnExpr ast.Expression, args []ast.Expression,
 	// fits in 8 bytes).
 	e.ensureMalloc()
 	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, 8*(1+boundCount)))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fnVal.Ref, env))
+	e.heapMallocInto(env, fmt.Sprint(8*(1+boundCount)))
+	e.heapStore("ptr", fnVal.Ref, env, 8)
 	for i := 0; i < boundCount; i++ {
 		paramTy := fnVal.Ty.FuncParams[i]
 		bv, err := e.emitExprWithObjectHint(args[i+shift], paramTy)
 		if err != nil {
 			return Value{}, err
 		}
-		bv = e.coerce(bv, paramTy)
+		bv = e.convert(bv, paramTy)
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", slot, env, 8*(1+i)))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(paramTy), bv.Ref, slot))
+		e.heapStore(storageIR(paramTy), bv.Ref, slot, 8)
 	}
 
 	tramp := e.emitBindTrampoline(fnVal.Ty, boundCount)
@@ -4927,6 +5237,42 @@ func (e *Emitter) emitFunctionBind(fnExpr ast.Expression, args []ast.Expression,
 // trampoline, which holds each bound argument in one 8-byte slot: always
 // under -compat=js, and for a rest, array or nullable-scalar parameter. A
 // `this: T` function keeps the trampoline, which binds thisArg.
+// mayBeMethodValue reports whether x is a class method read as a value
+// (`k.greet`), or a `const` initialized with one: a function that reads
+// its `this`.
+func (e *Emitter) mayBeMethodValue(x ast.Expression) bool {
+	switch x := x.(type) {
+	case *ast.MemberExpression:
+		return e.isClassMethodRead(x)
+	case *ast.Identifier:
+		sym, ok := e.lookup(x.Name)
+		return ok && e.methodValueSlots[sym.Ptr]
+	}
+	return false
+}
+
+// isClassMethodRead reports whether m reads a method of its object's class.
+func (e *Emitter) isClassMethodRead(m *ast.MemberExpression) bool {
+	t := e.inferExprType(m.Object)
+	if !t.IsClass() || t.IsDynamic() {
+		return false
+	}
+	for cls, i := t.ClassName, 0; cls != "" && i < 64; i++ {
+		info, ok := e.classes[cls]
+		if !ok {
+			return false
+		}
+		if _, _, field := info.Ty.FieldIndex(m.Property); field {
+			return false
+		}
+		if _, ok := info.MethodSigs[m.Property]; ok {
+			return true
+		}
+		cls = info.BaseClass
+	}
+	return false
+}
+
 func (e *Emitter) bindsDynamically(fnTy Type) bool {
 	if fnTy.FuncThis {
 		return false
@@ -4935,7 +5281,7 @@ func (e *Emitter) bindsDynamically(fnTy Type) bool {
 		return true
 	}
 	for _, p := range fnTy.FuncParams {
-		if p.IsArray || isNullableScalar(p) {
+		if p.IsArray() || isNullableScalar(p) {
 			return true
 		}
 	}
@@ -5066,6 +5412,10 @@ func (e *Emitter) emitBindTrampoline(fnTy Type, boundCount int) string {
 
 // emitClosureCallByPtr calls a closure given the direct header pointer and its type.
 func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// A method call's receiver naming (callAs), for this call only: not for
+	// a call in its arguments.
+	as := e.callAs
+	e.callAs = callAs{}
 	// Load function pointer from header[0].
 	fpSlot := e.freshReg()
 	fpVal := e.freshReg()
@@ -5084,7 +5434,7 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	// The resolve closure carries IsPromiseResolver; adoption fires only when the
 	// single argument is actually a Promise (a plain value falls through to the
 	// normal settle path below).
-	if ty.IsPromiseResolver && len(args) == 1 && e.inferExprType(args[0]).IsPromise {
+	if ty.IsPromiseResolver() && len(args) == 1 && e.inferExprType(args[0]).IsPromise() {
 		argVal, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
@@ -5093,7 +5443,7 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		return Value{Ty: TypeVoid}, nil
 	}
 	// A thenable class instance: adopted through its `then`.
-	if ty.IsPromiseResolver && len(args) == 1 && e.isThenableExpr(args[0]) {
+	if ty.IsPromiseResolver() && len(args) == 1 && e.isThenableExpr(args[0]) {
 		pv, err := e.emitThenableResolveCall(ast.NewCallExpression(ast.NewIdentifier(thenableResolveName, pos), args, pos))
 		if err != nil {
 			return Value{}, err
@@ -5167,7 +5517,7 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			// no `undefined` value in this ABI, so fill an empty array; every
 			// other slot takes an `undefined` literal, which the paths below
 			// coerce (scalar → zero) or box as absent (nullable-scalar).
-			if paramTy.IsArray {
+			if paramTy.IsArray() {
 				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
 				continue
 			}
@@ -5214,22 +5564,22 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 		if i < len(args) && i < len(ty.FuncBodyDefaults) && ty.FuncBodyDefaults[i] != nil {
 			if nl, ok := arg.(*ast.NullLiteral); ok && nl.IsUndefined {
 				absentBits[i] = "true"
-			} else if sym, ok := e.nullableScalarLValue(arg); ok && sym.Ty.IsUndefined && !sym.NarrowedNonNull {
+			} else if sym, ok := e.nullableScalarLValue(arg); ok && sym.Ty.IsUndefined() && !sym.NarrowedNonNull {
 				present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
 				r := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", r, present))
 				absentBits[i] = r
-			} else if val.Ty.IsDynamic {
+			} else if val.Ty.IsDynamic() {
 				r := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, val.Ref, nbUndefined))
 				absentBits[i] = r
-			} else if val.Ty.IR == "ptr" && val.Ty.IsUndefined {
+			} else if val.Ty.IR == "ptr" && val.Ty.IsUndefined() {
 				r := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", r, val.Ref))
 				absentBits[i] = r
 			}
 		}
-		if paramTy.IsDynamic {
+		if paramTy.IsDynamic() {
 			// A constrained-union-typed closure parameter (TDD-00043) —
 			// coerce has no notion of boxing, so this needs the same
 			// explicit emitBoxValue call every other dynamic-typed target
@@ -5248,18 +5598,18 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 				return Value{}, err
 			}
 		} else {
-			if !coerciblePure(val.Ty, paramTy) {
+			if !convertiblePure(val.Ty, paramTy) {
 				return Value{}, fmt.Errorf("%d:%d: argument %d has a type incompatible with the parameter's declared type — this compiler is a typed subset", arg.GetPos().Line, arg.GetPos().Col, i+1)
 			}
-			val = e.coerce(val, paramTy)
+			val = e.convert(val, paramTy)
 		}
 		// An array-typed parameter decomposes into two LLVM args (ptr, i64
 		// len) at the call site — matches the (ptr, i64) callee ABI
 		// emitClosureFunc's own parameter loop now expands an array
-		// parameter into (ADR-00151/TDD-00059). val is already the real
-		// {ptr,i64} aggregate (emitExprWithObjectHint/emitExpr's own
-		// IsArray handling), so this only needs to split it, not build it.
-		if paramTy.IsArray {
+		// parameter into (ADR-00151/TDD-00059). val is already the array
+		// value (emitExprWithObjectHint/emitExpr's own IsArray handling), so
+		// this only needs its header and length.
+		if paramTy.IsArray() {
 			header, lenReg := e.packArrayArg(arg, val, paramTy)
 			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 			scratch.bindArray(i, header, paramTy)
@@ -5306,16 +5656,16 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 			n := int64(len(restArgs))
 			e.ensureMalloc()
 			dataReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+			e.heapMallocInto(dataReg, fmt.Sprint(n*int64(elemTy.Align())))
 			for i, arg := range restArgs {
 				val, err := e.emitExprWithObjectHint(arg, elemTy)
 				if err != nil {
 					return Value{}, err
 				}
-				val = e.coerce(val, elemTy)
+				val = e.convert(val, elemTy)
 				gepReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
-				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+				e.storeArrayElem(gepReg, elemTy, val)
 			}
 			restHdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
 			argParts = append(argParts, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
@@ -5326,7 +5676,7 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	// Format: retTy (ptr, argTy1, argTy2, ...)
 	paramTyStrs := []string{"ptr"}
 	for _, p := range ty.FuncParams {
-		if p.IsArray {
+		if p.IsArray() {
 			paramTyStrs = append(paramTyStrs, "ptr", "i64")
 			continue
 		}
@@ -5369,14 +5719,17 @@ func (e *Emitter) emitClosureCallByPtr(closurePtr string, ty Type, args []ast.Ex
 	fnTypePart := "(" + strings.Join(paramTyStrs, ", ") + ")"
 
 	retTy := ty.FuncRetType
+	popAs := e.pushCallAs(as)
 	if retTy == nil || retTy.IR == "void" {
 		e.emitInstr(fmt.Sprintf("call void %s %s(%s)", fnTypePart, fpVal, strings.Join(argParts, ", ")))
+		popAs()
 		return Value{Ty: TypeVoid}, nil
 	}
 
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", result, retTy.LLVMRetType(), fnTypePart, fpVal, strings.Join(argParts, ", ")))
-	if retTy.IsArray {
+	popAs()
+	if retTy.IsArray() {
 		// Array return ABI is a header pointer (TDD-00213 Stage 3): deref + alias.
 		return e.arrayValueFromHeaderReg(result, *retTy), nil
 	}
@@ -5465,7 +5818,7 @@ func (e *Emitter) packBoxedRestArg(vals []Value) (header, lenReg string, err err
 	}
 	e.ensureMalloc()
 	data := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", data, n*int64(TypeAny.Align())))
+	e.heapMallocInto(data, fmt.Sprint(n*int64(TypeAny.Align())))
 	for i, v := range vals {
 		// emitBoxValue, not coerce: a NaN box is itself an i64, so coerce's
 		// IR-equality shortcut would pass an i64-typed value (a HOF index) through
@@ -5476,7 +5829,7 @@ func (e *Emitter) packBoxedRestArg(vals []Value) (header, lenReg string, err err
 		}
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, data, i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align %d", boxed.Ref, gep, TypeAny.Align()))
+		e.heapStore("i64", boxed.Ref, gep, TypeAny.Align())
 	}
 	return e.newArrayHeader(data, fmt.Sprintf("%d", n)), fmt.Sprintf("%d", n), nil
 }
@@ -5507,7 +5860,7 @@ func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
 		if mangled, sig, found := e.resolveFuncRef(cb.Name); found {
 			return Callback{kind: cbNamed, name: mangled, sig: sig}, nil
 		}
-		if sym, found := e.lookup(cb.Name); found && sym.Ty.IsFunc {
+		if sym, found := e.lookup(cb.Name); found && sym.Ty.IsFunc() {
 			hdr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, sym.Ptr))
 			return Callback{kind: cbClosure, hdrPtr: hdr, ty: sym.Ty}, nil
@@ -5527,7 +5880,7 @@ func (e *Emitter) resolveCallback(arg ast.Expression) (Callback, error) {
 	// `handlers[i]`), a ternary (`cond ? f : g`), etc. Evaluate it once to its
 	// closure header and dispatch as a closure. Checked after the specific
 	// arrow/expression/identifier cases above so their tailored handling wins.
-	if ty := e.inferExprType(arg); ty.IsFunc {
+	if ty := e.inferExprType(arg); ty.IsFunc() {
 		v, err := e.emitExpr(arg)
 		if err != nil {
 			return Callback{}, err
@@ -5589,10 +5942,10 @@ func (e *Emitter) resolveCallbackWithHints(arg ast.Expression, hints []Type) (Ca
 				if err != nil {
 					return Callback{}, err
 				}
-				if v.Ty.IsFunc {
+				if v.Ty.IsFunc() {
 					return Callback{kind: cbClosure, hdrPtr: v.Ref, ty: v.Ty}, nil
 				}
-				if c, ok := e.emitAnyToClosure(e.coerce(v, TypeAny), inner.ty); ok {
+				if c, ok := e.emitAnyToClosure(e.convert(v, TypeAny), inner.ty); ok {
 					return Callback{kind: cbClosure, hdrPtr: c.Ref, ty: inner.ty}, nil
 				}
 			}
@@ -5600,18 +5953,41 @@ func (e *Emitter) resolveCallbackWithHints(arg ast.Expression, hints []Type) (Ca
 	}
 	// A callback held as `any` (a wrapper such as `mustCall(fn)` over an
 	// untyped arrow): converted to the hinted signature, called through its
-	// box.
+	// box, its result a box too (a map's element, a reduce's accumulator).
 	if hints != nil && isUnconstrainedDynamic(e.inferExprType(arg)) {
 		v, err := e.emitExpr(arg)
 		if err != nil {
 			return Callback{}, err
 		}
-		ft := FuncType(hints, TypeVoid)
+		if !v.Ty.IsDynamic() {
+			// Inferred any, emitted as its own kind (a bound function's
+			// closure): the box the steps below read.
+			if v, err = e.emitBoxValue(v); err != nil {
+				return Callback{}, err
+			}
+		}
+		if err := e.emitRequireCallable(v); err != nil {
+			return Callback{}, err
+		}
+		ft := FuncType(hints, TypeAny)
 		if c, ok := e.emitAnyToClosure(v, ft); ok {
 			return Callback{kind: cbClosure, hdrPtr: c.Ref, ty: ft}, nil
 		}
 	}
 	return e.resolveCallback(arg)
+}
+
+// emitRequireCallable throws, as an Array method does before it iterates,
+// when the callback v (held in `any`) is no function.
+func (e *Emitter) emitRequireCallable(v Value) error {
+	t, err := e.emitDynamicTypeof(v)
+	if err != nil {
+		return err
+	}
+	e.ensureDynJSONC()
+	e.declareFn("__kml_require_callable", "declare void @__kml_require_callable(i64, ptr)")
+	e.emitInstr(fmt.Sprintf("call void @__kml_require_callable(i64 %s, ptr %s)", v.Ref, t.Ref))
+	return nil
 }
 
 // monomorphizeNamedCallback re-emits a named top-level function with its untyped
@@ -5647,10 +6023,10 @@ func (e *Emitter) monomorphizeNamedCallback(id *ast.Identifier, hints []Type) (C
 			continue
 		}
 		h := hints[i]
-		if h.IR == "" || h.IR == "void" || h.IsDynamic {
+		if h.IR == "" || h.IR == "void" || h.IsDynamic() {
 			continue
 		}
-		if h.IR != newParams[i].IR || h.IsArray != newParams[i].IsArray || isStringTy(h) != isStringTy(newParams[i]) {
+		if h.IR != newParams[i].IR || h.IsArray() != newParams[i].IsArray() || isStringTy(h) != isStringTy(newParams[i]) {
 			newParams[i] = h
 			changed = true
 		}
@@ -5730,7 +6106,7 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 				e.pushScope()
 				defer e.popScope()
 				for j := 0; j < i; j++ {
-					if j < len(cb.ty.FuncParamNames) && cb.ty.FuncParamNames[j] != "" && coerced[j].Ref != "" && !params[j].IsArray {
+					if j < len(cb.ty.FuncParamNames) && cb.ty.FuncParamNames[j] != "" && coerced[j].Ref != "" && !params[j].IsArray() {
 						e.define(cb.ty.FuncParamNames[j], Symbol{Ptr: e.spillValue(coerced[j]), Ty: params[j]})
 					}
 				}
@@ -5739,35 +6115,35 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			coerced[i] = e.coerce(dv, params[i])
+			coerced[i] = e.convert(dv, params[i])
 			continue
 		}
 		switch {
 		case i < len(args):
 			arg := args[i]
-			if isNullableScalar(params[i]) && !isNullableScalar(arg.Ty) && !arg.Ty.IsDynamic {
+			if isNullableScalar(params[i]) && !isNullableScalar(arg.Ty) && !arg.Ty.IsDynamic() {
 				// Into an optional slot: the value converted to its payload
 				// first, then wrapped as present.
-				arg = e.coerce(arg, params[i].withoutNullable())
+				arg = e.convert(arg, params[i].withoutNullable())
 			}
-			coerced[i] = e.coerce(arg, params[i])
+			coerced[i] = e.convert(arg, params[i])
 			// A fundamentally incompatible argument can't coerce — most commonly
-			// the HOF's 3rd `array` argument ({ptr,i64}) against a *named*
+			// the HOF's 3rd `array` argument against a *named*
 			// callback's untyped 3rd parameter (which defaults to i64, so the
 			// contextual array hint never reached it): coerce returns the array
-			// unchanged and the emitted call passes an aggregate into a scalar
-			// slot, which is invalid IR. Substitute the parameter's zero value so
+			// unchanged and the emitted call passes a header pointer into a
+			// scalar slot, which is invalid IR. Substitute the parameter's zero value so
 			// the call stays well-typed (the callback sees a 0/empty stand-in for
 			// a parameter it didn't type as an array). ADR-00686 — the same
 			// "always emit a well-typed call" principle as the missing-param and
 			// arity-reconciliation branches here.
-			if !params[i].IsArray && coerced[i].Ty.IsArray {
+			if !params[i].IsArray() && coerced[i].Ty.IsArray() {
 				coerced[i] = Value{Ref: zeroRef(params[i]), Ty: params[i]}
 			}
-		case params[i].IsArray:
+		case params[i].IsArray():
 			// A missing array parameter: an empty Ref marks it for the
-			// decomposition branches below, which emit an empty `ptr null,
-			// i64 0` header rather than materializing a real aggregate.
+			// decomposition branches below, which emit a null header
+			// (`ptr null, i64 0`) rather than materializing a real array.
 			coerced[i] = Value{Ty: params[i]}
 		case isNullableScalar(params[i]):
 			// A missing optional scalar is undefined: the absent { i1 0, T 0 }.
@@ -5790,7 +6166,7 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 
 		tyParts := []string{"ptr"}
 		for _, p := range params {
-			if p.IsArray {
+			if p.IsArray() {
 				tyParts = append(tyParts, "ptr", "i64")
 				continue
 			}
@@ -5803,17 +6179,17 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		argParts := []string{"ptr " + epVal}
 		for i, v := range coerced {
 			// An array-typed callback param decomposes into two call args
-			// (ptr, i64 len) — v is already the real {ptr,i64} aggregate
-			// (whatever built `args` upstream, e.g. a HOF's own element
-			// value, already produced it in that shape); this only splits
-			// it, matching emitClosureFunc's (ptr, i64) callee ABI for an
+			// (ptr, i64 len) — v is already the array value (whatever built
+			// `args` upstream, e.g. a HOF's own element value, already
+			// produced it in that shape); this only passes its header and
+			// length, matching emitClosureFunc's (ptr, i64) callee ABI for an
 			// array parameter. Previously this branch used v.Ty.IR ("ptr",
-			// the array-type marker) directly as if the aggregate were a
+			// the array-type marker) directly as if it were a
 			// plain scalar pointer — invalid IR the moment a callback
 			// actually took an array parameter (the array-methods "no
 			// nested-array element as the callback's own parameter"
 			// caveat). See ADR-00151/TDD-00059.
-			if params[i].IsArray {
+			if params[i].IsArray() {
 				if v.Ref == "" {
 					// Padded missing array parameter (see the reconciliation
 					// above) — an empty header.
@@ -5821,12 +6197,12 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 					continue
 				}
 				// An absent array (a null header) stays absent.
-				if v.ArrayHeader == "null" {
+				if v.Ref == "null" {
 					argParts = append(argParts, "ptr null", "i64 0")
 					continue
 				}
-				// The callback's array argument is a transient element value —
-				// materialize a fresh header for it (TDD-00127).
+				// The callback's array argument is an element value — pass its
+				// header (TDD-00127).
 				header, lenReg := e.arrayArgFromAggregate(v)
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
@@ -5867,7 +6243,7 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		}
 		result := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", result, retTy.LLVMRetType(), fnType, fpVal, argStr))
-		if retTy.IsArray {
+		if retTy.IsArray() {
 			return e.arrayValueFromHeaderReg(result, retTy), nil
 		}
 		return Value{Ref: result, Ty: retTy}, nil
@@ -5879,14 +6255,14 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 			// plain top-level function called as a callback (e.g. passed
 			// by name to .map()) needs it too, independent of the closure
 			// ABI change: this branch also used to pass an array's raw
-			// {ptr,i64} aggregate as if it were a single scalar pointer.
-			if params[i].IsArray {
+			// array as if it were a single scalar pointer.
+			if params[i].IsArray() {
 				if v.Ref == "" {
 					argParts = append(argParts, "ptr null", "i64 0")
 					continue
 				}
-				// The callback's array argument is a transient element value —
-				// materialize a fresh header for it (TDD-00127).
+				// The callback's array argument is an element value — pass its
+				// header (TDD-00127).
 				header, lenReg := e.arrayArgFromAggregate(v)
 				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
 				continue
@@ -5912,7 +6288,7 @@ func (e *Emitter) emitCBCall(cb Callback, args []Value) (Value, error) {
 		}
 		result := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", result, retTy.LLVMRetType(), cb.name, argStr))
-		if retTy.IsArray {
+		if retTy.IsArray() {
 			return e.arrayValueFromHeaderReg(result, retTy), nil
 		}
 		return Value{Ref: result, Ty: retTy}, nil
@@ -6043,7 +6419,7 @@ func (e *Emitter) forwardClosureSym(name string) (Symbol, bool) {
 	} else {
 		ty = e.inferExprType(d.Init)
 	}
-	if !ty.IsFunc || ty.IR != "ptr" {
+	if !ty.IsFunc() || ty.IR != "ptr" {
 		return Symbol{}, false
 	}
 	e.ensureMalloc()
@@ -6065,38 +6441,61 @@ func (e *Emitter) forwardClosureSym(name string) (Symbol, bool) {
 // `any`). A top-level `const G = function* …` binding was already rewritten
 // into a declaration (TDD-00096).
 func (e *Emitter) emitGeneratorExpressionValue(fe *ast.FunctionExpression) (Value, error) {
-	e.genExprCtr++
-	name := fmt.Sprintf("__kml_genexpr_%d", e.genExprCtr)
+	name, seen := e.genExprNames[fe]
+	if !seen {
+		e.genExprCtr++
+		name = fmt.Sprintf("__kml_genexpr_%d", e.genExprCtr)
+		if e.genExprNames == nil {
+			e.genExprNames = map[*ast.FunctionExpression]string{}
+		}
+		e.genExprNames[fe] = name
+		// Its own name, inside it, is the declaration it is compiled as.
+		if fe.Name != "" && !paramBindingNamesHas(fe.Params, fe.Name) {
+			e.renameGeneratorSelfName(fe, name)
+		}
+	}
 	params := append([]ast.Param(nil), fe.Params...)
 	for i := range params {
 		if params[i].Type == nil && !params[i].Rest && params[i].ArrayPattern == nil && params[i].ObjectPattern == nil {
 			params[i].Type = &ast.TypeAnnotation{Name: "any"}
 		}
 	}
-	decl := &ast.FunctionDeclaration{Name: name, Params: params, ReturnType: fe.RetType, Body: fe.Body, IsAsync: fe.IsAsync, IsGenerator: true}
+	// A generator method reading `this` takes its receiver first, as a
+	// method shorthand's function does (maybeAddThisParamExpr).
+	takesThis := fe.Method && usesOwnThis(fe.Body.Body)
+	if takesThis {
+		params = append([]ast.Param{{Name: "this", Type: &ast.TypeAnnotation{Name: "any"}}}, params...)
+	}
+	decl := &ast.FunctionDeclaration{Name: name, Params: params, ReturnType: fe.RetType, Body: fe.Body, IsAsync: fe.IsAsync, IsGenerator: true, Src: fe.Src}
 	info, err := e.buildGeneratorSig(decl)
 	if err != nil {
 		return Value{}, err
 	}
 	caps := e.gatherGeneratorCaptures(decl)
 	for _, c := range caps {
-		if c.Ty.IsArray {
+		if c.Ty.IsArray() {
 			return Value{}, fmt.Errorf("%d:%d: a generator expression capturing an array variable ('%s') is not yet supported", fe.GetPos().Line, fe.GetPos().Col, c.Name)
 		}
-	}
-	info.Captures = caps
-	if err := e.emitGeneratorFunctionDecl(decl, info); err != nil {
-		return Value{}, err
 	}
 	// Its name is its own, else the one its binding or property gives it.
 	display := fe.Name
 	if display == "" {
 		display = e.fnLitName(fe)
 	}
-	ctor, err := e.emitGeneratorCtorClosure(info, display, fe.GetPos())
+	var ctor Value
+	if fe.Name != "" && readsOwnValue(decl) {
+		// Its own name inside it (renamed to decl's): one function object.
+		ctor, err = e.emitSelfReferencingGenerator(decl, info, caps, display)
+	} else {
+		info.Captures = caps
+		if err = e.emitGeneratorFunctionDecl(decl, info); err == nil {
+			ctor, err = e.emitGeneratorCtorClosure(info, display, fe.GetPos())
+		}
+	}
 	if err != nil {
 		return Value{}, err
 	}
+	ctor.Ty.FuncThis = takesThis
 	return e.emitBoxValue(ctor)
 }
 
@@ -6176,11 +6575,20 @@ func (e *Emitter) checkerContextualParam(fn ast.Expression, i int) (Type, bool) 
 		params[i].ArrayPattern != nil || params[i].ObjectPattern != nil {
 		return Type{}, false
 	}
+	// A `this` parameter (declared, or prepended by maybeAddThisParamExpr)
+	// is not among the checker's parameters.
+	j := i
+	if params[0].Name == "this" {
+		if i == 0 {
+			return Type{}, false
+		}
+		j = i - 1
+	}
 	ft := c.TypeOf(fn)
-	if c.Unanswered(ft) || ft.Flags&checker.Object == 0 || ft.Kind != checker.Function || i >= len(ft.Params) {
+	if c.Unanswered(ft) || ft.Flags&checker.Object == 0 || ft.Kind != checker.Function || j >= len(ft.Params) {
 		return Type{}, false
 	}
-	t := ft.Params[i]
+	t := ft.Params[j]
 	if c.Unanswered(t) {
 		return Type{}, false
 	}
@@ -6203,7 +6611,7 @@ func (e *Emitter) checkerContextualParam(fn ast.Expression, i int) (Type, bool) 
 		return TypeBool, true
 	}
 	// A builtin with a native layout (`ArrayBuffer`, `Uint8Array`, `Date`).
-	if lt, ok := lowerTypeRepr(t); ok && lt.IR == "ptr" && !lt.IsDynamic {
+	if lt, ok := lowerTypeRepr(t); ok && lt.IR == "ptr" && !lt.IsDynamic() {
 		return lt, true
 	}
 	// Anything else the checker's type has a representation for: a
@@ -6250,6 +6658,85 @@ func (e *Emitter) contextualPromiseOfAny(fn ast.Expression) bool {
 	}
 	r := cs.Result
 	return r.Symbol != nil && r.Symbol.Name == "Promise" && len(r.TypeArgs) == 1 && r.TypeArgs[0].Flags&checker.Any != 0
+}
+
+// contextualObjectReturn is the one object type fn's contextual signature
+// returns (for an async fn, the awaited one of `R | Promise<R>`), as its
+// representation, when every value body returns is an object literal of
+// that type's fields of more than one shape. Inferred from the first return
+// alone, the second literal had no field for what only it sets.
+func (e *Emitter) contextualObjectReturn(fn ast.Expression, async bool, body ast.Node) (Type, bool) {
+	c := e.front()
+	if c == nil || e.compatJS() || body == nil {
+		return Type{}, false
+	}
+	var rets []ast.Expression
+	if ex, ok := body.(ast.Expression); ok {
+		rets = []ast.Expression{ex}
+	} else {
+		rets = returnExprs(body, nil)
+	}
+	if len(rets) < 2 {
+		return Type{}, false
+	}
+	shapes := map[string]bool{}
+	for _, r := range rets {
+		lit, ok := r.(*ast.ObjectLiteral)
+		if !ok {
+			return Type{}, false
+		}
+		keys := make([]string, 0, len(lit.Properties))
+		for _, p := range lit.Properties {
+			if p.KeyExpr != nil || p.Key == "" || p.AccessorKind != "" {
+				return Type{}, false
+			}
+			keys = append(keys, p.Key)
+		}
+		sort.Strings(keys)
+		shapes[strings.Join(keys, ",")] = true
+	}
+	if len(shapes) < 2 {
+		return Type{}, false
+	}
+	cs := c.ContextualSignature(fn)
+	if cs == nil || cs.Result == nil || c.Unanswered(cs.Result) {
+		return Type{}, false
+	}
+	members := []*checker.Type{cs.Result}
+	if cs.Result.Flags&checker.Union != 0 {
+		members = cs.Result.Types
+	}
+	var obj *checker.Type
+	for _, m := range members {
+		if m.Symbol != nil && m.Symbol.Name == "Promise" && len(m.TypeArgs) == 1 {
+			if !async {
+				continue
+			}
+			m = m.TypeArgs[0]
+		}
+		if m.Flags&checker.Object == 0 || m.Kind == checker.Function || m.Kind == checker.Array || m.Kind == checker.Tuple {
+			return Type{}, false
+		}
+		if obj != nil && obj != m {
+			return Type{}, false
+		}
+		obj = m
+	}
+	if obj == nil {
+		return Type{}, false
+	}
+	t, ok := e.repr().of(obj)
+	if !ok || len(t.Fields) == 0 {
+		return Type{}, false
+	}
+	for _, r := range rets {
+		for _, p := range r.(*ast.ObjectLiteral).Properties {
+			if _, _, ok := t.FieldIndex(p.Key); !ok {
+				return Type{}, false
+			}
+		}
+	}
+	return t, true
 }
 
 // sortedSet is set's members in order: a walk over it that emits code
@@ -6303,7 +6790,7 @@ func assignmentPatternTargets(pat ast.Expression) []string {
 // lazily at the capturing closure instead, a closure built inside a branch
 // would leave a later block reading a cell its own block never made.
 func (e *Emitter) definePatternLocal(name string, sym Symbol) {
-	if e.hoistedCaptures[name] && !sym.Ty.IsArray && !sym.NullableBoxed && !sym.Boxed &&
+	if e.hoistedCaptures[name] && !sym.Ty.IsArray() && !isNullableScalar(sym.Ty) && !sym.Boxed &&
 		sym.Ty.IR != "" && sym.Ty.IR != "void" && !strings.HasPrefix(sym.Ty.IR, "{") {
 		cur := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
@@ -6411,17 +6898,306 @@ func (e *Emitter) jsCheckerParam(fd *ast.FunctionDeclaration, i int) (Type, bool
 	if c == nil {
 		return Type{}, false
 	}
-	t := c.JSCallSiteParam(fd, i)
+	return e.jsCallSiteType(c.JSCallSiteParam(fd, i))
+}
+
+// patternParamType is an unannotated destructured parameter's
+// representation in the strict lane: the type tsc reads off its pattern
+// (`[a = 1]`), not the number default an unannotated name gets.
+func (e *Emitter) patternParamType(fd *ast.FunctionDeclaration, i int) (Type, bool) {
+	return e.patternParamTypeOf(fd, i)
+}
+
+// patternParamTypeOf is patternParamType for a parameter list that may
+// have no declaration (fd nil).
+func (e *Emitter) patternParamTypeOf(fd *ast.FunctionDeclaration, i int) (Type, bool) {
+	if fd == nil || e.compatJS() || i >= len(fd.Params) || fd.Params[i].Default != nil {
+		return Type{}, false
+	}
+	c := e.front()
+	if c == nil {
+		return Type{}, false
+	}
+	t := c.PatternParamType(fd, i)
+	if t == nil {
+		return Type{}, false
+	}
+	if r, ok := e.repr().of(t); ok && r.IR != "" && r.IR != "void" {
+		return r, true
+	}
+	return Type{}, false
+}
+
+// jsCallSiteType is the representation of a parameter type the checker
+// reads off the call sites (-compat=js): any where it has none.
+func (e *Emitter) jsCallSiteType(t *checker.Type) (Type, bool) {
 	if t == nil {
 		return Type{}, false
 	}
 	if t.Flags&checker.Any != 0 {
 		return TypeAny, true
 	}
-	return Type{}, false
+	if r, ok := e.repr().of(t); ok && r.IR != "" && r.IR != "void" {
+		return r, true
+	}
+	return TypeAny, true
 }
 
 // untypedRestType is an unannotated rest parameter with no contextual
 // type: any[], as tsc types it (strict reports TS7019 first; -compat=js
 // collects whatever the call passes).
 func untypedRestType() Type { return ArrayOf(TypeAny) }
+
+// scanParamDefaultsFV adds the free names of params' defaults to refs: each
+// parameter's own default and every default inside a destructuring pattern,
+// all evaluated in the function's prologue.
+func scanParamDefaultsFV(params []ast.Param, bound, refs map[string]bool) {
+	var arr func([]ast.ArrayPatternElem)
+	var obj func([]ast.DestructProp)
+	arr = func(elems []ast.ArrayPatternElem) {
+		for _, el := range elems {
+			if el.Default != nil {
+				scanExprFV(el.Default, bound, refs)
+			}
+			arr(el.SubArray)
+			obj(el.SubObject)
+		}
+	}
+	obj = func(props []ast.DestructProp) {
+		for _, pr := range props {
+			if pr.KeyExpr != nil {
+				scanExprFV(pr.KeyExpr, bound, refs)
+			}
+			if pr.Default != nil {
+				scanExprFV(pr.Default, bound, refs)
+			}
+			arr(pr.SubArray)
+			obj(pr.SubObject)
+		}
+	}
+	for _, p := range params {
+		if p.Default != nil {
+			scanExprFV(p.Default, bound, refs)
+		}
+		arr(p.ArrayPattern)
+		obj(p.ObjectPattern)
+	}
+}
+
+// paramExprs is every expression params evaluate in a call: their
+// defaults and their patterns' computed keys and defaults, in source order.
+func paramExprs(params []ast.Param) []ast.Expression {
+	var out []ast.Expression
+	var arr func([]ast.ArrayPatternElem)
+	var obj func([]ast.DestructProp)
+	arr = func(elems []ast.ArrayPatternElem) {
+		for _, el := range elems {
+			arr(el.SubArray)
+			obj(el.SubObject)
+			if el.Default != nil {
+				out = append(out, el.Default)
+			}
+		}
+	}
+	obj = func(props []ast.DestructProp) {
+		for _, pr := range props {
+			if pr.KeyExpr != nil {
+				out = append(out, pr.KeyExpr)
+			}
+			arr(pr.SubArray)
+			obj(pr.SubObject)
+			if pr.Default != nil {
+				out = append(out, pr.Default)
+			}
+		}
+	}
+	for _, p := range params {
+		arr(p.ArrayPattern)
+		obj(p.ObjectPattern)
+		if p.Default != nil {
+			out = append(out, p.Default)
+		}
+	}
+	return out
+}
+
+// paramBindingNamesHas reports whether params bind name.
+func paramBindingNamesHas(params []ast.Param, name string) bool {
+	for _, n := range paramBindingNames(params) {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// renameGeneratorSelfName points a named generator expression's own name,
+// in its body and parameter defaults, at the declaration it is compiled as
+// (to). Assignments to the name are recorded first: they leave the binding
+// unchanged (emitSelfNameAssign).
+func (e *Emitter) renameGeneratorSelfName(fe *ast.FunctionExpression, to string) {
+	mark := func(n ast.Node) {
+		ast.Inspect(n, func(x ast.Node) bool {
+			if a, ok := x.(*ast.AssignmentExpression); ok {
+				if id, ok := a.Left.(*ast.Identifier); ok && id.Name == fe.Name {
+					if e.selfNameAssigns == nil {
+						e.selfNameAssigns = map[*ast.AssignmentExpression]bool{}
+					}
+					e.selfNameAssigns[a] = true
+				}
+			}
+			return true
+		})
+	}
+	for i, p := range fe.Params {
+		if p.Default == nil {
+			continue
+		}
+		mark(p.Default)
+		blk := &ast.BlockStatement{Body: []ast.Statement{ast.NewExpressionStatement(p.Default, p.Default.GetPos())}}
+		resolver.RenameInBlock(blk, fe.Name, to)
+		fe.Params[i].Default = blk.Body[0].(*ast.ExpressionStatement).Expr
+	}
+	if fe.Body != nil {
+		mark(fe.Body)
+		resolver.RenameInBlock(fe.Body, fe.Name, to)
+	}
+}
+
+// patternBodyDefault reports a destructured closure parameter whose default
+// reads a captured variable, held in one slot (boxed, or an object pointer):
+// the body fills it before unpacking (emitPatternParamBodyDefault).
+func patternBodyDefault(p ast.Param, pty Type) bool {
+	return (p.ArrayPattern != nil || p.ObjectPattern != nil) && p.Default != nil &&
+		(pty.IsDynamic() || pty.IR == "ptr" && !pty.IsArray() && !pty.IsTuple())
+}
+
+// emitPatternParamBodyDefault fills destructured parameter i's slot from its
+// default, when that default reads a captured variable and the argument was
+// left out (its presence-mask bit clear) or, for a boxed slot, is undefined.
+func (e *Emitter) emitPatternParamBodyDefault(i int, p ast.Param, pty Type, slot string, params []ast.Param) error {
+	sib := map[string]bool{}
+	for _, q := range params {
+		sib[q.Name] = true
+	}
+	if !patternBodyDefault(p, pty) || !defaultIsBodyFilled(p.Default, sib) {
+		return nil
+	}
+	bit, absent := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i32 %%__dmask, %d", bit, uint64(1)<<uint(i)))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", absent, bit))
+	if pty.IsDynamic() {
+		cur, isU, either := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, slot))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, cur, nbUndefined))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, absent, isU))
+		absent = either
+	}
+	fillL, contL := e.freshLabel("pdflt.fill"), e.freshLabel("pdflt.cont")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, fillL, contL))
+	e.emitLabel(fillL)
+	val, err := e.emitExprWithObjectHint(p.Default, pty)
+	if err != nil {
+		return err
+	}
+	if pty.IsDynamic() {
+		if val, err = e.emitBoxValue(val); err != nil {
+			return err
+		}
+	} else {
+		val = e.convert(val, pty)
+	}
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", pty.IR, val.Ref, slot, pty.Align()))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+	e.emitLabel(contL)
+	return nil
+}
+
+// bodyParamTy is parameter i's type as the closure's body sees it: an
+// `any` the runtime hands a concrete value is boxed on entry (ADR-01080).
+func bodyParamTy(paramTypes []Type, boxOnEntry map[int]bool, i int) Type {
+	if boxOnEntry[i] {
+		return TypeAny
+	}
+	return paramTypes[i]
+}
+
+// patternStep runs a pattern parameter's destructuring now, or queues it
+// when later is set: a function reading `arguments` builds it first, and a
+// pattern's defaults may read it.
+func (e *Emitter) patternStep(later *[]func() error, step func() error) error {
+	if later != nil {
+		*later = append(*later, step)
+		return nil
+	}
+	return step()
+}
+
+// runPatternSteps runs the queued destructurings in parameter order.
+func (e *Emitter) runPatternSteps(later *[]func() error) error {
+	if later == nil {
+		return nil
+	}
+	for _, step := range *later {
+		if err := step(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// bindRawPatternParam binds a pattern parameter's incoming argument under
+// its synthetic name when its destructuring waits for `arguments`, whose
+// slot for it is that argument. slot is the scalar or object parameter's
+// alloca; "" for an array parameter.
+func (e *Emitter) bindRawPatternParam(later *[]func() error, p ast.Param, pty Type, slot string) {
+	if later == nil {
+		return
+	}
+	if slot == "" {
+		e.bindArrayParam(p.Name, pty)
+		return
+	}
+	e.define(p.Name, Symbol{Ptr: slot, Ty: pty})
+}
+
+// bindArrayParamPatternLater is bindArrayParamPattern with its object
+// destructuring queued like patternStep's.
+func (e *Emitter) bindArrayParamPatternLater(later *[]func() error, p ast.Param, pty Type) error {
+	if later == nil {
+		return e.bindArrayParamPattern(p, pty)
+	}
+	e.bindArrayParam(p.Name, pty)
+	if p.ObjectPattern == nil {
+		return nil
+	}
+	*later = append(*later, func() error {
+		return e.emitStmt(ast.NewObjectDestructuring("let", p.ObjectPattern, ast.NewIdentifier(p.Name, p.Pos), p.Pos))
+	})
+	return nil
+}
+
+// dropReplacedParams unbinds each parameter a body function declaration of
+// its name replaces, after the defaults that still read the parameter: the
+// name then resolves to the function, as JavaScript instantiates function
+// declarations after the parameters.
+func (e *Emitter) dropReplacedParams(params []ast.Param, body []ast.Statement) {
+	for _, s := range body {
+		fd, ok := s.(*ast.FunctionDeclaration)
+		if !ok {
+			continue
+		}
+		for _, p := range params {
+			if p.Name != fd.Name || p.ArrayPattern != nil || p.ObjectPattern != nil {
+				continue
+			}
+			for i := len(e.scopes) - 1; i >= 0; i-- {
+				if _, has := e.scopes[i].syms[p.Name]; has {
+					delete(e.scopes[i].syms, p.Name)
+					e.inferMemoDefined()
+					break
+				}
+			}
+		}
+	}
+}

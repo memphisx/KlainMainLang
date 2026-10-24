@@ -205,6 +205,9 @@ func (r *reaper) sweepOnce() {
 		}
 		if big != nil && totalKB-big.rssKB <= r.memCapKB {
 			fmt.Fprintf(os.Stderr, "reaper: killed %s at %dMB (over the --mem-cap-mb ceiling %dMB)\n", big.cmd, big.rssKB/1024, r.memCapKB/1024)
+			if t, ok := runningTests.Load(strings.Fields(big.cmd + " ")[0]); ok {
+				fmt.Fprintf(os.Stderr, "        running %s\n", t)
+			}
 			r.kill(big.pid)
 			return
 		}
@@ -226,10 +229,17 @@ func (r *reaper) sweepOnce() {
 				cmd = cmd[:160]
 			}
 			fmt.Fprintf(os.Stderr, "    %6dMB  %s\n", p.rssKB/1024, cmd)
+			if t, ok := runningTests.Load(strings.Fields(p.cmd + " ")[0]); ok {
+				fmt.Fprintf(os.Stderr, "             running %s\n", t)
+			}
 		}
 		os.Exit(3)
 	}
 }
+
+// runningTests maps a running test binary's absolute path to the test it
+// runs, for the abort message.
+var runningTests sync.Map
 
 func (r *reaper) run() {
 	defer close(r.done)

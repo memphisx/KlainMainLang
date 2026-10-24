@@ -2,6 +2,13 @@
 // TypeScript's and @types/node's own shapes; tools/libconform checks them
 // against TypeScript's library.
 
+// V8's Error extensions, as @types/node declares them.
+interface ErrorConstructor {
+    /** @lower __kml_Error_captureStackTrace */
+    captureStackTrace(targetObject: object, constructorOpt?: Function): void;
+    stackTraceLimit: number;
+}
+
 interface Console {
     /** @intrinsic console.assert */
     assert(condition?: boolean, ...data: any[]): void;
@@ -193,8 +200,11 @@ interface Buffer<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> extends
     /** @intrinsic Buffer.prototype.readDoubleBE */
     readDoubleBE(offset?: number): number;
     reverse(): this;
+    /** @lower __kml_Buffer_swap16 */
     swap16(): this;
+    /** @lower __kml_Buffer_swap32 */
     swap32(): this;
+    /** @lower __kml_Buffer_swap64 */
     swap64(): this;
     /** @intrinsic Buffer.prototype.writeUInt8 */
     writeUInt8(value: number, offset?: number): number;
@@ -392,6 +402,10 @@ declare namespace NodeJS {
         ref(): void;
         unref(): void;
     }
+    // process.stdin / stdout / stderr: tty's streams (a terminal), or a
+    // net.Socket / Writable by what the descriptor is.
+    type ReadStream = import("tty").ReadStream & { fd: 0 };
+    type WriteStream = import("tty").WriteStream & { _isStdio: true; destroySoon(): void };
     // Process is an EventEmitter; its members are declared here, as
     // @types/node's own overloads are.
     interface Process {
@@ -486,18 +500,42 @@ declare namespace NodeJS {
         exitCode: number | string | null | undefined;
         readonly pid: number;
         readonly ppid: number;
+        stdin: ReadStream;
+        stdout: WriteStream & { fd: 1 };
+        stderr: WriteStream & { fd: 2 };
+        umask(mask?: string | number): number;
+        getuid(): number;
+        geteuid(): number;
+        getgid(): number;
+        getegid(): number;
         readonly platform: Platform;
         readonly arch: Architecture;
         readonly version: string;
+        readonly versions: ProcessVersions;
         title: string;
         cwd(): string;
         chdir(directory: string): void;
         exit(code?: number | string | null): never;
         uptime(): number;
+        hrtime: HRTime;
         memoryUsage(): MemoryUsage;
         kill(pid: number, signal?: string | number): true;
-        /** @intrinsic process.nextTick */
+        /** @lower __kml_process_nextTick */
         nextTick(callback: Function, ...args: any[]): void;
+    }
+    interface ProcessVersions extends Dict<string> {
+        http_parser: string;
+        node: string;
+        v8: string;
+        ares: string;
+        uv: string;
+        zlib: string;
+        modules: string;
+        openssl: string;
+    }
+    interface HRTime {
+        (time?: [number, number]): [number, number];
+        bigint(): bigint;
     }
     type TypedArray<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> =
         | Uint8Array<TArrayBuffer>
@@ -535,6 +573,9 @@ declare namespace NodeJS {
 }
 
 declare var process: NodeJS.Process;
+
+// Node's `--expose-gc` global.
+declare function gc(): void;
 
 // Node's timers (@types/node's timers.d.ts globals).
 /** @lower __kml_setTimeout */
@@ -599,8 +640,17 @@ declare module "url" {
 type RequestInfo = Request | string;
 // FormData has no implementation: the type is declared for BodyInit and
 // Body.formData(), and no constructor is.
-interface FormData {}
+interface FormData {
+    append(name: string, value: string | Blob, fileName?: string): void;
+    delete(name: string): void;
+    get(name: string): FormDataEntryValue | null;
+    getAll(name: string): FormDataEntryValue[];
+    has(name: string): boolean;
+    set(name: string, value: string | Blob, fileName?: string): void;
+}
+type FormDataEntryValue = File | string;
 type BodyInit =
+    | ReadableStream
     | ArrayBuffer
     | AsyncIterable<Uint8Array>
     | Blob
@@ -828,6 +878,7 @@ interface ReadableStreamReadValueResult<T> {
     done: false;
     value: T;
 }
+/** @lowerType readablestreamreadresult */
 type ReadableStreamReadResult<T> = ReadableStreamReadValueResult<T> | ReadableStreamReadDoneResult<T>;
 interface ReadableStreamAsyncIterator<T> extends AsyncIterableIterator<T> {
     [Symbol.asyncIterator](): ReadableStreamAsyncIterator<T>;
@@ -955,6 +1006,7 @@ interface GenericTransformStream {
     readonly writable: WritableStream;
 }
 type CompressionFormat = "deflate" | "deflate-raw" | "gzip";
+/** @lowerType compressionstream */
 interface CompressionStream extends GenericTransformStream {
     readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
     readonly writable: WritableStream<BufferSource>;
@@ -963,6 +1015,7 @@ declare var CompressionStream: {
     prototype: CompressionStream;
     new (format: CompressionFormat): CompressionStream;
 };
+/** @lowerType decompressionstream */
 interface DecompressionStream extends GenericTransformStream {
     readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
     readonly writable: WritableStream<BufferSource>;
@@ -1439,4 +1492,23 @@ declare var DOMException: {
     readonly TIMEOUT_ERR: 23;
     readonly INVALID_NODE_TYPE_ERR: 24;
     readonly DATA_CLONE_ERR: 25;
+};
+
+// klain:http's request (TDD-00255): what its handler receives. Also a Node
+// Readable over its body (`on`, `pipe`, `for await`).
+interface HttpRequest {
+    method: string;
+    path: string;
+    query: Map<string, string>;
+    headers: Map<string, string>;
+    readonly body: string;
+    bodyBytes(): ArrayBuffer;
+    stream(): ReadableStream<Uint8Array>;
+    on(event: string, listener: (...args: any[]) => void): this;
+    pipe<T>(dest: T, options?: { end?: boolean }): T;
+    [Symbol.asyncIterator](): AsyncIterator<Uint8Array>;
+}
+declare var HttpRequest: {
+    prototype: HttpRequest;
+    new (resume: () => void, method: string, url: string, headers: Map<string, string>): HttpRequest;
 };

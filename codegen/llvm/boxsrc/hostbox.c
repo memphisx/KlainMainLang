@@ -27,7 +27,7 @@ extern i64 __kml_inspect_opt_depth;
 extern i64 __kml_inspect_indent_shift;
 
 #define KML_UNIT_HOST 2
-#define KSTR(id, s) static const struct { i64 len; char d[sizeof(s)]; } id = { sizeof(s) - 1, s }
+#define KSTR(id, s) static const struct { i64 len; char d[sizeof(s)]; } id = { KML_STR_ASCII_HDR(sizeof(s) - 1), s }
 KSTR(k_object, "[Object]");
 KSTR(k_objobj, "[object Object]");
 
@@ -42,7 +42,7 @@ KSTR(k_objobj, "[object Object]");
  * (TDD-00247) carries its class tag: its row is the host layout its class
  * chain reaches, whose body follows the tag word as a host's does. */
 static const HostRow *host_row(const void *cell) {
-    i64 h = *(const i64 *)cell;
+    i64 h = *(const i64 *)cell & ~KML_HDR_STATE_MASK;
     const HostRow *row = (const HostRow *)__kml_unit_find(KML_UNIT_HOST, h);
     if (row || (h & KML_HDR_MAGIC_MASK) != KML_HDR_MAGIC || (h & KML_HOST_FLAG)) return row;
     i64 id = h & KML_ID_MASK;

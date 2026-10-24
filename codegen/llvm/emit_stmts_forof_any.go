@@ -34,8 +34,12 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	if err != nil {
 		return err
 	}
-	// A string iterates its code points: as the array of them.
-	iterVal = e.anyStringAsCodePoints(iterVal)
+	forceProto := e.forceArrayProtocol
+	e.forceArrayProtocol = false
+	origTag, _ := e.emitUnboxTagPayload(iterVal)
+	// A string iterates its code points: as the array of them; so does a
+	// String wrapper.
+	iterVal = e.anyStringAsCodePoints(e.emitUnwrapPrim(iterVal))
 	// A boxed Map, Set, Headers or URLSearchParams: its entries.
 	iterVal = Value{Ref: e.emitHostIterValue(iterVal.Ref), Ty: TypeAny}
 	e.ensureSprintf()
@@ -65,8 +69,22 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynArray))
 	isArr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
-	arrMode := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", arrMode, isDyn, isArr))
+	arrMode0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", arrMode0, isDyn, isArr))
+	arrMode := arrMode0
+	if forceProto {
+		// The value itself is an array: its iteration runs the protocol
+		// (a string's or a collection's walk, made an array, does not).
+		a1, a2, wasArr, keep := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", a1, origTag, kmlTagArray))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", a2, origTag, kmlTagDynArray))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", wasArr, a1, a2))
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", keep, wasArr))
+		arrMode = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", arrMode, arrMode0, keep))
+	} else {
+		arrMode = e.emitArrayFastPathOK(arrMode0)
+	}
 	arrModeSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", arrModeSlot))
 	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", arrMode, arrModeSlot))
@@ -77,6 +95,9 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	// Protocol mode: iterator = iterable[@@asyncIterator | @@iterator]().
 	e.emitLabel(protoL)
 	notIterable := forOfIterableName(s.Iterable) + " is not iterable"
+	if t, ok := e.v8ExprText(s.Iterable); ok {
+		notIterable = t + " is not iterable"
+	}
 	if s.Await {
 		notIterable = forOfIterableName(s.Iterable) + " is not async iterable"
 	}
@@ -87,6 +108,11 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	}
 	methodOf := func(key string) (Value, string) {
 		m, _ := e.emitAnyMemberOrUndefined(Value{Ref: iterVal.Ref, Ty: TypeAny}, key)
+		if key == "@@iterator" && forceProto {
+			m = e.emitIterMethodOf(Value{Ref: iterVal.Ref, Ty: TypeAny}, m)
+		} else if key == "@@iterator" {
+			m = e.emitIterMethodFix(Value{Ref: iterVal.Ref, Ty: TypeAny}, m)
+		}
 		mt, _ := e.emitUnboxTagPayload(m)
 		isFn := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isFn, mt, kmlTagDynFunc))
@@ -167,7 +193,7 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, arrReadL, endL))
 	e.emitLabel(arrReadL)
 	key := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", key))
+	e.heapMallocInto(key, "24")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", key, e.internString("%lld"), i))
 	elem, err := e.emitDynAnyMemberGet(anyAt(iterSlot), key, pos)
 	if err != nil {
@@ -250,9 +276,9 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 			return err
 		}
 	default:
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", elemV.Ref, varPtr))
+		e.heapStore("i64", elemV.Ref, varPtr, 8)
 	}
-	if err := e.emitForOfBody(s); err != nil {
+	if err := e.emitForOfBody(throwClosesIterator(s, closeName, pos)); err != nil {
 		return err
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
@@ -320,6 +346,30 @@ func (e *Emitter) emitAnyMemberOrUndefined(v Value, key string) (Value, error) {
 	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
+// throwClosesIterator is s with its body wrapped so that a throw out of it
+// closes the iterator bound to name before the error propagates:
+// `try { body } catch (e) { try { close } catch {} throw e }`. The body's
+// error wins over one the iterator's return() throws (IteratorClose with a
+// throw completion). break and return close it through pendingFinallys.
+// Perf note: the wrapper sets up a catch frame per iteration; a frame
+// around the whole loop that closes only for a body-raised error is the
+// cheaper follow-up.
+func throwClosesIterator(s *ast.ForOfStatement, name string, pos ast.Pos) *ast.ForOfStatement {
+	errName := name + "_err"
+	rethrow := ast.NewThrowStatement(ast.NewIdentifier(errName, pos), pos)
+	closer := iteratorCloseStmt(name, pos)
+	if s.Await {
+		closer = asyncIteratorCloseStmt(name, pos)
+	}
+	quiet := ast.NewTryStatement(ast.NewBlockStatement([]ast.Statement{closer}, pos),
+		&ast.CatchClause{Param: errName + "_close", Body: ast.NewBlockStatement(nil, pos), Pos: pos}, nil, pos)
+	guarded := ast.NewTryStatement(s.Body, &ast.CatchClause{Param: errName,
+		Body: ast.NewBlockStatement([]ast.Statement{quiet, rethrow}, pos), Pos: pos}, nil, pos)
+	out := *s
+	out.Body = ast.NewBlockStatement([]ast.Statement{guarded}, pos)
+	return &out
+}
+
 // iteratorCloseStmt is `if (typeof it.return === "function") it.return()`
 // over the iterator bound to name — JS's IteratorClose, run when a loop over
 // it is left early. name holds undefined once the iterator is done.
@@ -331,13 +381,23 @@ func iteratorCloseStmt(name string, pos ast.Pos) ast.Statement {
 	return ast.NewIfStatement(ast.NewBinaryExpression("&&", isObj, hasRet, pos), ast.NewBlockStatement([]ast.Statement{call}, pos), nil, pos)
 }
 
+// asyncIteratorCloseStmt is iteratorCloseStmt for an async iterator:
+// AsyncIteratorClose awaits what its return() gives.
+func asyncIteratorCloseStmt(name string, pos ast.Pos) ast.Statement {
+	it := ast.NewIdentifier(name, pos)
+	isObj := ast.NewBinaryExpression("!==", ast.NewUnaryExpression("typeof", true, it, pos), ast.NewStringLiteral("undefined", pos), pos)
+	hasRet := ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, ast.NewMemberExpression(it, "return", pos), pos), ast.NewStringLiteral("function", pos), pos)
+	call := ast.NewExpressionStatement(ast.NewAwaitExpression(ast.NewCallExpression(ast.NewMemberExpression(it, "return", pos), nil, pos), pos), pos)
+	return ast.NewIfStatement(ast.NewBinaryExpression("&&", isObj, hasRet, pos), ast.NewBlockStatement([]ast.Statement{call}, pos), nil, pos)
+}
+
 // forOfIterableName renders the iterable expression for the "is not
 // iterable" message the way Node does for the common shapes (`x`, `o.p`,
 // `o[k]`); anything else is Node's generic "object".
 func forOfIterableName(expr ast.Expression) string {
 	switch x := expr.(type) {
 	case *ast.Identifier:
-		return x.Name
+		return demangleModuleName(x.Name)
 	case *ast.MemberExpression:
 		return forOfIterableName(x.Object) + "." + x.Property
 	case *ast.IndexExpression:

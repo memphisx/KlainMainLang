@@ -3,7 +3,7 @@
 // let/const are block-scoped: a binding declared inside { ... } (or a loop or
 // if body) is not visible after that block. var is function-scoped: it "leaks"
 // out of the block it was declared in and stays visible for the rest of the
-// enclosing function. See docs/adr/ADR-00210.md.
+// enclosing function. See docs/adr/00/ADR-00210.md.
 
 // --- var leaks out of a plain block ---
 function leaks(): void {

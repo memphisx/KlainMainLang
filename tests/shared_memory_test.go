@@ -261,3 +261,18 @@ ch.port1.onmessage = (e: { data: string }) => {
 ch.port2.postMessage("ping")
 `, "got: ping")
 }
+
+// Atomics.wait blocks only on shared memory: a TypeError on an ordinary
+// buffer's view (before the index is coerced), however the shared buffer
+// reached the view (through `any` included), whose .buffer is that buffer.
+func TestE2EAtomicsWaitRequiresSharedBuffer(t *testing.T) {
+	assertSameAsNode(t, `
+try { Atomics.wait(new Int32Array(new ArrayBuffer(16)), 0, 0, 0); } catch (e) { console.log((e as Error).message); }
+const poisoned: any = { valueOf() { throw new Error("evaluated"); } };
+try { Atomics.wait(new Int32Array(4), poisoned, 0, 0); } catch (e) { console.log(e instanceof TypeError); }
+const raw: any = new SharedArrayBuffer(8);
+const sab: SharedArrayBuffer = raw;
+const ta = new Int32Array(sab);
+console.log(ta.buffer === sab, Atomics.wait(ta, 0, 1, 10), Atomics.wait(ta, 0, 0, 10));
+`)
+}

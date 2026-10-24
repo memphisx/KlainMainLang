@@ -24,3 +24,33 @@ let a2 = 0, b2 = ''; ({ a2 = 3, b2 = 'd' } = { a2: 7, b2: 'k' }); console.log(a2
 let c2: string | null = 'c'; ({ c2 = 'D' } = { c2: null as string | null }); console.log(c2);
 `)
 }
+
+// An unannotated destructured parameter takes its type from its default,
+// an array pattern over an array literal as a tuple, as tsc types it.
+func TestE2EPatternParameterTypedFromDefault(t *testing.T) {
+	assertSameAsNode(t, `
+function f([x, y, z] = [1, 2, 3]) { return x + y + z; }
+console.log(f(), f([4, 5, 6]));
+const g = ({ a } = { a: 7 }) => a;
+console.log(g(), g({ a: 8 }));
+function m([n, s] = [1, "a"]) { return s + n; }
+console.log(m(), m([2, "b"]));
+class C { static async *p([x, y] = [1, 2]) { yield x + y; } }
+C.p().next().then((r) => console.log(r.value));
+`)
+}
+
+// An empty default typed by its pattern: `{ a = 1 } = {}` and
+// `[[x] = [4]] = []` take each element's default when the argument omits it.
+func TestE2EPatternParameterEmptyDefault(t *testing.T) {
+	assertSameAsNode(t, `
+function g2({ a = 1, b = "s" } = {}) { return b + a; }
+console.log(g2(), g2({ a: 2, b: "t" }), g2({ b: "u" }));
+const g = ({ a = 1, b = "s" } = {}) => b + a;
+console.log(g(), g({ a: 2, b: "t" }));
+const f = ([[x, y, z] = [4, 5, 6]] = []) => x + y + z;
+console.log(f(), f([[1, 2, 3]]));
+function h([p = 7] = []) { return p; }
+console.log(h(), h([8]));
+`)
+}

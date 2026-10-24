@@ -1,7 +1,6 @@
 /* ipcc.c — the child side of child_process.fork's IPC channel (TDD-00141; in
  * C per TDD-00240): NODE_CHANNEL_FD parsed once, send, and the event-loop
- * reader, an unreferenced libuv watcher on POSIX (the select bridge's hooks
- * on Windows, until TDD-00244 Stage 6). The framing is ipc.c's. Linked only
+ * reader, an unreferenced libuv watcher. The framing is ipc.c's. Linked only
  * when a program touches the channel. kml_layout.h is prepended by the
  * compiler. */
 #include <stdlib.h>
@@ -93,7 +92,7 @@ static void drain(void *unused) {
     }
     if (!c) return;
     char *msg;
-    while ((msg = __kml_ipc_take2(c, &isstr)) != NULL) free(msg);
+    while ((msg = __kml_ipc_take2(c, &isstr)) != NULL) free(msg); /* scratch */
 }
 
 

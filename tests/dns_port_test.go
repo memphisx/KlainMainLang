@@ -114,7 +114,7 @@ function done(label: string, e: any, a: any) {
   out.push(label + " " + (e ? e.code + " " + e.syscall + " " + e.hostname : JSON.stringify(a)))
   if (--pending === 0) { out.sort(); for (const l of out) console.log(l) }
 }
-function q(label: string, f: (cb: (e: any, a: any) => void) => void) { pending++; f((e, a) => done(label, e, a)) }
+function q(label: string, f: (cb: (e: any, a?: any) => void) => void) { pending++; f((e, a) => done(label, e, a)) }
 serve((port: number) => {
   dns.setServers(["127.0.0.1:" + port])
   q("mx", (cb) => dns.resolveMx("mail.test", cb))

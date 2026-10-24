@@ -23,20 +23,19 @@ func (e *Emitter) bindTaskParamsFromBundle(decl *ast.FunctionDeclaration, sig Fu
 		// array the trailing args were packed into (emitRestArgsArray), so it
 		// binds through the IsArray case below like any other array param.
 		switch {
-		case pty.IsArray:
-			// Read the (data, len) the caller packed into the bundle and wrap
-			// them in a fresh header referenced from a stable slot
-			// (object-reference model, TDD-00127). As before the header change, a
-			// suspending function's array parameter is an independent copy — an
-			// in-place mutation does not propagate back to the caller across the
-			// async boundary (the bundle carries the aggregate, not the header).
+		case pty.IsArray():
+			// The bundle holds the caller's array header (object-reference
+			// model, TDD-00127): the parameter shares it, so an in-place
+			// mutation after a suspension reaches the caller's array.
 			fp := e.freshReg()
-			pv := e.freshReg()
+			hdr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%__taskargs, i32 0, i32 %d", fp, bundleIR, fi))
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pv, fp))
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, fp))
+			pv := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pv, hdr))
 			fl := e.freshReg()
 			lv := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%__taskargs, i32 0, i32 %d", fl, bundleIR, fi+1))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", fl, arrayHeaderTy, hdr))
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lv, fl))
 			// A destructured array parameter unpacks straight from the (ptr, len)
 			// pair, mirroring the non-suspending binding (emit_func.go). lv is the
@@ -47,7 +46,9 @@ func (e *Emitter) bindTaskParamsFromBundle(decl *ast.FunctionDeclaration, sig Fu
 				}
 				continue
 			}
-			slot := e.newArrayHeaderSlot(pv, lv)
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, slot))
 			e.define(p.Name, Symbol{Ptr: slot, Ty: pty})
 		case isNullableScalar(pty):
 			// Reassemble the { i1, T } aggregate from the presence + payload slots
@@ -68,7 +69,7 @@ func (e *Emitter) bindTaskParamsFromBundle(decl *ast.FunctionDeclaration, sig Fu
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", payBits, fl))
 			payload := e.promiseValFromBits(payBits, base)
 			e.storeNullableScalarFields(ptrName, pty, pres1, payload.Ref)
-			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty, NullableBoxed: true})
+			e.define(p.Name, Symbol{Ptr: ptrName, Ty: pty})
 		default:
 			alloca := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", alloca, pty.IR, pty.Align()))
@@ -118,7 +119,7 @@ func (e *Emitter) emitTaskEpilogue() {
 			e.ensureTaskAdopted()
 			e.emitInstr(fmt.Sprintf("call void @__kml_promise_adopt(ptr %s, ptr %s)", ps, h))
 			e.emitInstr("call void @__kml_task_adopted()")
-			e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
+			e.heapFree(e.coroHdl)
 			e.emitTerminator("ret void")
 			e.emitLabel(fulfillL)
 		}
@@ -132,16 +133,16 @@ func (e *Emitter) emitTaskEpilogue() {
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", valReg, e.coroHdl))
 			e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", ps, valReg))
 			e.emitInstr("call void @__kml_task_adopted()")
-		} else if pty.IsArray {
+		} else if pty.IsArray() {
 			// The coro return-value slot holds a header pointer (TDD-00213 Stage 2);
-			// deref it to the aggregate before decomposing into the promise value.
+			// load it as the array value for the promise.
 			e.storePromiseValue(ps, e.loadArraySlotAggregate(e.coroHdl, pty))
 		} else {
 			valReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
 			e.storePromiseValue(ps, Value{Ref: valReg, Ty: pty})
 		}
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
+		e.heapFree(e.coroHdl)
 	}
 	e.emitTerminator("ret void")
 }
@@ -154,7 +155,7 @@ func taskBundleFields(paramTypes []Type) (fields []string, paramStart []int) {
 	for _, pty := range paramTypes {
 		paramStart = append(paramStart, len(fields))
 		switch {
-		case pty.IsArray:
+		case pty.IsArray():
 			fields = append(fields, "ptr", "i64")
 		case isNullableScalar(pty):
 			// A nullable-scalar { i1, T } travels as two i64 slots (presence bit,
@@ -251,27 +252,21 @@ func (e *Emitter) emitTaskRethrowIfRejected(promiseReg string) {
 	// Error-wrapper assumption (TDD-00207).
 	reasonC := e.loadRejectReasonCaught(promiseReg)
 	rtag, rpay := e.caughtParts(reasonC)
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", rtag, rpay))
+	e.excThrowAny(rtag, rpay)
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 }
 
-// storePromiseValue marshals val into promiseReg's v0 (index 2) and, for
-// array-shaped {ptr,i64} values, v1 (index 3).
+// storePromiseValue marshals val into promiseReg's v0 (index 2) and, for a
+// nullable scalar, v1 (index 3). An array is its header pointer, so every
+// reader shares the array that settled the promise.
 func (e *Emitter) storePromiseValue(promiseReg string, val Value) {
 	v0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, promiseReg))
-	if val.Ty.IsArray {
-		p := e.freshReg()
-		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", p, val.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", l, val.Ref))
+	if val.Ty.IsArray() {
 		pi := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", pi, p))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", pi, v0))
-		v1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, promiseReg))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, v1))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", pi, e.arrayReturnHeader(val)))
+		e.heapStore("i64", pi, v0, 8)
 		return
 	}
 	if isNullableScalar(val.Ty) {
@@ -279,36 +274,28 @@ func (e *Emitter) storePromiseValue(promiseReg string, val Value) {
 		// same two-word split the task-args bundle uses for such a parameter.
 		present, payload := e.nullableScalarAggParts(val)
 		bits := e.promiseBitsOf(payload)
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, v0))
+		e.heapStore("i64", bits, v0, 8)
 		presI64 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", presI64, present))
 		v1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, promiseReg))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", presI64, v1))
+		e.heapStore("i64", presI64, v1, 8)
 		return
 	}
 	bits := e.promiseBitsOf(val)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, v0))
+	e.heapStore("i64", bits, v0, 8)
 }
 
 // loadPromiseValue reads a value of type ty from promiseReg's v0/v1 fields.
 func (e *Emitter) loadPromiseValue(promiseReg string, ty Type) Value {
 	v0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, promiseReg))
-	if ty.IsArray {
+	if ty.IsArray() {
 		lo := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lo, v0))
-		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, lo))
-		v1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, promiseReg))
-		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, v1))
-		agg0 := e.freshReg()
-		agg1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", agg0, p))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", agg1, agg0, l))
-		return Value{Ref: agg1, Ty: ty}
+		h := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", h, lo))
+		return e.arrayValueFromHeaderReg(h, ty)
 	}
 	bits := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", bits, v0))
@@ -354,7 +341,7 @@ func (e *Emitter) emitMaySuspendCall(name string, sig FuncSig, args []ast.Expres
 				if err != nil {
 					return Value{}, err
 				}
-				if pty.IsDynamic {
+				if pty.IsDynamic() {
 					if v, err = e.emitBoxValue(v); err != nil {
 						return Value{}, err
 					}
@@ -362,11 +349,11 @@ func (e *Emitter) emitMaySuspendCall(name string, sig FuncSig, args []ast.Expres
 				argVals[i] = v
 			case i < len(sig.Optional) && sig.Optional[i]:
 				switch {
-				case pty.IsArray:
-					argVals[i] = Value{Ref: "{ptr null, i64 0}", Ty: pty}
+				case pty.IsArray():
+					argVals[i] = Value{Ref: e.omittedArrayArgHeader(pty), Ty: pty}
 				case isNullableScalar(pty):
 					argVals[i] = Value{Ref: "zeroinitializer", Ty: pty}
-				case pty.IsDynamic:
+				case pty.IsDynamic():
 					argVals[i] = Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: pty}
 				default:
 					argVals[i] = Value{Ref: pty.zeroLiteral(), Ty: pty}
@@ -395,7 +382,7 @@ func (e *Emitter) emitMaySuspendCall(name string, sig FuncSig, args []ast.Expres
 }
 
 // emitRestArgsArray packs the trailing (rest) arguments of a suspending-fn call
-// into an `{ ptr, i64 }` array aggregate Value typed restTy — the same shape a
+// into an array Value typed restTy — the same shape a
 // named-array argument already flows through the task bundle as.
 func (e *Emitter) emitRestArgsArray(restArgs []ast.Expression, restTy Type) (Value, error) {
 	elemTy := TypeI64
@@ -407,23 +394,20 @@ func (e *Emitter) emitRestArgsArray(restArgs []ast.Expression, restTy Type) (Val
 	if n > 0 {
 		e.ensureMalloc()
 		dataReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+		e.heapMallocInto(dataReg, fmt.Sprint(n*int64(elemTy.Align())))
 		for i, arg := range restArgs {
 			val, err := e.emitExprWithObjectHint(arg, elemTy)
 			if err != nil {
 				return Value{}, err
 			}
-			val = e.coerce(val, elemTy)
+			val = e.convert(val, elemTy)
 			gep := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataReg, i))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gep, elemTy.Align()))
+			e.storeArrayElem(gep, elemTy, val)
 		}
 		dataRef = dataReg
 	}
-	agg0 := e.freshReg()
-	agg1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", agg0, dataRef))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %d, 1", agg1, agg0, n))
+	agg1 := e.newArrayHeader(dataRef, fmt.Sprint(n))
 	return Value{Ref: agg1, Ty: restTy}, nil
 }
 
@@ -441,22 +425,21 @@ func (e *Emitter) emitSpawnCall(name string, sig FuncSig, argVals []Value) (Valu
 		bundleReg = "null"
 	} else {
 		bundleReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", bundleReg, 8*len(fields)))
+		e.heapMallocInto(bundleReg, fmt.Sprint(8*len(fields)))
 		for i := range sig.ParamTypes {
 			pty := sig.ParamTypes[i]
-			av := e.coerce(argVals[i], pty)
+			av := e.convert(argVals[i], pty)
 			fi := paramStart[i]
-			if pty.IsArray {
-				p := e.freshReg()
+			if pty.IsArray() {
+				// The array's header, so the task shares the caller's array.
 				l := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 0", p, av.Ref))
-				e.emitInstr(fmt.Sprintf("%s = extractvalue { ptr, i64 } %s, 1", l, av.Ref))
+				l = e.arrayLen(av)
 				fp := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fp, bundleIR, bundleReg, fi))
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, fp))
+				e.heapStore("ptr", e.arrayReturnHeader(av), fp, 8)
 				fl := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fl, bundleIR, bundleReg, fi+1))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, fl))
+				e.heapStore("i64", l, fl, 8)
 			} else if isNullableScalar(pty) {
 				// { i1, T } aggregate → presence (zext to i64) + payload bits. Box
 				// the raw arg (coerce doesn't box a bare value toward nullable).
@@ -466,15 +449,15 @@ func (e *Emitter) emitSpawnCall(name string, sig FuncSig, argVals []Value) (Valu
 				e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", presI64, present))
 				fp := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fp, bundleIR, bundleReg, fi))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", presI64, fp))
+				e.heapStore("i64", presI64, fp, 8)
 				bits := e.promiseBitsOf(payload)
 				fl := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fl, bundleIR, bundleReg, fi+1))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, fl))
+				e.heapStore("i64", bits, fl, 8)
 			} else {
 				fp := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fp, bundleIR, bundleReg, fi))
-				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", pty.IR, av.Ref, fp, pty.Align()))
+				e.heapStore(pty.IR, av.Ref, fp, pty.Align())
 			}
 		}
 	}
@@ -484,7 +467,7 @@ func (e *Emitter) emitSpawnCall(name string, sig FuncSig, argVals []Value) (Valu
 	e.emitInstr(fmt.Sprintf("call ptr @__kml_spawn_task(ptr @%s, ptr %s, ptr %s)", name, bundleReg, promise))
 
 	inner := sig.RetType
-	if inner.IsPromise && inner.PromiseType != nil {
+	if inner.IsPromise() && inner.PromiseType != nil {
 		inner = *inner.PromiseType
 	} else {
 		inner = TypeVoid

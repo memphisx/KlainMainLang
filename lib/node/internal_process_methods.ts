@@ -19,7 +19,7 @@ function received(value: any): string {
 }
 
 function invalidArgType(name: string, expected: string, value: any): NodeTypeError {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
 }
 
 // ErrnoException: `${syscall} ${code}`.
@@ -71,7 +71,7 @@ export function kill(pid: number, signal?: string | number): true {
     } else {
         const name: any = s || 'SIGTERM';
         const num = typeof name === 'string' ? __kml_native.signalNumber(name as string) : 0;
-        if (num <= 0) throw new NodeTypeError('ERR_UNKNOWN_SIGNAL', 'Unknown signal: ' + String(name));
+        if (num <= 0) throw NodeTypeError('ERR_UNKNOWN_SIGNAL', 'Unknown signal: ' + String(name));
         err = __kml_native.killPid(pid, num);
     }
     if (err < 0) throw errnoException(err, 'kill');
@@ -99,12 +99,12 @@ export function umask(mask?: string | number): number {
     let value = 0;
     if (typeof m === 'string') {
         if (!/^[0-7]+$/.test(m as string)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'mask' must be a 32-bit unsigned integer or an octal string. Received '" + (m as string) + "'");
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'mask' must be a 32-bit unsigned integer or an octal string. Received '" + (m as string) + "'");
         }
         value = parseInt(m as string, 8);
     } else if (typeof m === 'number') {
         if (!Number.isInteger(m) || (m as number) < 0 || (m as number) > 4294967295) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "mask" is out of range. It must be >= 0 && <= 4294967295. Received ' + String(m));
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "mask" is out of range. It must be >= 0 && <= 4294967295. Received ' + String(m));
         }
         value = m as number;
     } else {

@@ -32,10 +32,10 @@ runs:
       with:
         node-version: '24.19.0'
 
-    - name: Linux — clang + curl, gc, tommath, pcre2, ssl, nghttp2, libuv, sqlite3, gtk3/webkit2gtk
+    - name: Linux — clang + curl, gc, tommath, pcre2, ssl, nghttp2, libuv, h2o, sqlite3, gtk3/webkit2gtk
       if: inputs.goos == 'linux'
       shell: bash
-      run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libuv1-dev libc-ares-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+      run: sudo apt-get update && sudo apt-get install -y clang libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libuv1-dev libh2o-dev libc-ares-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
     - name: macOS — Homebrew pcre2, tommath, openssl@3, nghttp2, libuv, bdw-gc (keg-only openssl@3 exposed to clang)
       if: inputs.goos == 'darwin'

@@ -40,17 +40,6 @@ var virtualBuiltinMarkers = map[string]string{
 	// loop is TLS-wrapped.
 	"https":      "https__kml_builtin",
 	"stream/web": "streamweb__kml_builtin",
-	// TDD-00131: the `klain:` namespace holds this project's own bespoke
-	// re-imaginings, distinct from the Node-faithful module names. `klain:http`
-	// is the current `http.listen(handler ⇒ response)` server model, which is
-	// NOT Node's `http.createServer` shape — kept intentionally, on the same
-	// runtime, under an explicitly-non-Node specifier.
-	// klain:http gets its OWN marker (distinct from http's) so codegen can tell
-	// a bespoke `listen`/`close`/`closeAllConnections` call apart by its import
-	// origin — the same implementation, but only reachable through klain:http
-	// (ADR-00635). http and klain:http sharing one marker is what previously let
-	// `http.listen` slip through the http namespace.
-	"klain:http": "klainhttp__kml_builtin",
 	"memory":     "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00165: Web-global-backed Node modules. Their primary exports are
 	// spec-identical re-exports of an ambient global (`URL`, `setTimeout`,
@@ -122,7 +111,6 @@ var virtualModuleMembers = map[string]map[string]bool{
 	// `klain:http` now (TDD-00158 follow-up / ADR-00635) — importing them from
 	// `http` is a clean "no export" rejection pointing there.
 	"http":       {"get": true, "request": true, "createServer": true, "Agent": true},
-	"klain:http": {"listen": true, "close": true, "closeAllConnections": true},
 	"klain:sync": {"go": true, "Channel": true, "select": true, "defaultCase": true},
 	"memory":     {"free": true},
 	"https":      {"get": true, "request": true, "Agent": true},

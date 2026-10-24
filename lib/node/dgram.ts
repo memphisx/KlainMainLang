@@ -58,7 +58,7 @@ function validatePort(port: any, name: string, allowZero: boolean): number {
         +port === (+port >>> 0) && +port <= 0xFFFF && (allowZero || +port !== 0);
     if (!ok) {
         const shown = typeof port === 'string' ? "'" + port + "'" : String(port);
-        throw new NodeRangeError('ERR_SOCKET_BAD_PORT', name + ' should be ' + (allowZero ? '>=' : '>') +
+        throw NodeRangeError('ERR_SOCKET_BAD_PORT', name + ' should be ' + (allowZero ? '>=' : '>') +
             ' 0 and < 65536. Received type ' + typeof port + ' (' + shown + ').');
     }
     return +port | 0;
@@ -66,13 +66,13 @@ function validatePort(port: any, name: string, allowZero: boolean): number {
 
 function validateString(value: any, name: string): void {
     if (typeof value !== 'string') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type string.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type string.' + received(value));
     }
 }
 
 function validateNumber(value: any, name: string): void {
     if (typeof value !== 'number') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
     }
 }
 
@@ -127,7 +127,7 @@ function toBuffer(chunk: any): Buffer {
         const bytes = new Uint8Array(v.buffer as ArrayBuffer, v.byteOffset as number, v.byteLength as number);
         return Buffer.from(bytes);
     }
-    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "buffer" argument must be of type string or an instance of Buffer, TypedArray, or DataView.' + received(chunk));
+    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "buffer" argument must be of type string or an instance of Buffer, TypedArray, or DataView.' + received(chunk));
 }
 
 function sliceBuffer(buffer: any, offset: any, length: any): Buffer {
@@ -135,10 +135,10 @@ function sliceBuffer(buffer: any, offset: any, length: any): Buffer {
     const off = offset >>> 0;
     const len = length >>> 0;
     if (off > buf.byteLength) {
-        throw new NodeRangeError('ERR_BUFFER_OUT_OF_BOUNDS', '"offset" is outside of buffer bounds');
+        throw NodeRangeError('ERR_BUFFER_OUT_OF_BOUNDS', '"offset" is outside of buffer bounds');
     }
     if (off + len > buf.byteLength) {
-        throw new NodeRangeError('ERR_BUFFER_OUT_OF_BOUNDS', '"length" is outside of buffer bounds');
+        throw NodeRangeError('ERR_BUFFER_OUT_OF_BOUNDS', '"length" is outside of buffer bounds');
     }
     return buf.subarray(off, off + len);
 }
@@ -171,7 +171,7 @@ export class Socket extends EventEmitter {
             this.ipv6Only = options.ipv6Only === true;
         }
         if (t !== 'udp4' && t !== 'udp6') {
-            throw new NodeTypeError('ERR_SOCKET_BAD_TYPE', 'Bad socket type specified. Valid types are: udp4, udp6');
+            throw NodeTypeError('ERR_SOCKET_BAD_TYPE', 'Bad socket type specified. Valid types are: udp4, udp6');
         }
         this.type = t;
         if (typeof listener === 'function') this.on('message', listener);
@@ -186,7 +186,7 @@ export class Socket extends EventEmitter {
     }
 
     private healthCheck(): void {
-        if (this.closed) throw new NodeError('ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
+        if (this.closed) throw NodeError('ERR_SOCKET_DGRAM_NOT_RUNNING', 'Not running');
     }
 
     // The bound socket's handle; before the bind, an option or address read
@@ -239,7 +239,7 @@ export class Socket extends EventEmitter {
     bind(port?: any, address?: any, callback?: () => void): this {
         this.healthCheck();
         if (this.bindState !== BIND_STATE_UNBOUND) {
-            throw new NodeError('ERR_SOCKET_ALREADY_BOUND', 'Socket is already bound');
+            throw NodeError('ERR_SOCKET_ALREADY_BOUND', 'Socket is already bound');
         }
         this.bindState = BIND_STATE_BINDING;
         let cb: any = undefined;
@@ -336,7 +336,7 @@ export class Socket extends EventEmitter {
         }
         validateString(addr, 'address');
         if (this.connectState !== CONNECT_STATE_DISCONNECTED) {
-            throw new NodeError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
+            throw NodeError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
         }
         this.connectState = CONNECT_STATE_CONNECTING;
         if (this.bindState === BIND_STATE_UNBOUND) this.bind({ port: 0, exclusive: true });
@@ -375,7 +375,7 @@ export class Socket extends EventEmitter {
 
     disconnect(): void {
         if (this.connectState !== CONNECT_STATE_CONNECTED) {
-            throw new NodeError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
+            throw NodeError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
         }
         const rc = __kml_native.udpConnect(this.handle, '', 0);
         if (rc < 0) throw errnoException(rc, 'connect');
@@ -410,7 +410,7 @@ export class Socket extends EventEmitter {
             } else {
                 cb = off;
             }
-            if (p || addr) throw new NodeError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
+            if (p || addr) throw NodeError('ERR_SOCKET_DGRAM_IS_CONNECTED', 'Already connected');
         }
         let list: Buffer[];
         if (Array.isArray(buffer)) {
@@ -494,7 +494,7 @@ export class Socket extends EventEmitter {
     remoteAddress(): { address: string; family: string; port: number } {
         this.healthCheck();
         if (this.connectState !== CONNECT_STATE_CONNECTED) {
-            throw new NodeError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
+            throw NodeError('ERR_SOCKET_DGRAM_NOT_CONNECTED', 'Not connected');
         }
         const r = __kml_native.tcpAddress(this.handle, true);
         if (r < 0) throw errnoException(r, 'getpeername');
@@ -538,7 +538,7 @@ export class Socket extends EventEmitter {
     addMembership(multicastAddress: string, interfaceAddress?: string): void {
         this.healthCheck();
         if (!multicastAddress) {
-            throw new NodeTypeError('ERR_MISSING_ARGS', 'The "multicastAddress" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "multicastAddress" argument must be specified');
         }
         const rc = __kml_native.udpMembership(this.boundHandle('addMembership'), multicastAddress, interfaceAddress ?? '', true);
         if (rc < 0) throw errnoException(rc, 'addMembership');
@@ -547,7 +547,7 @@ export class Socket extends EventEmitter {
     dropMembership(multicastAddress: string, interfaceAddress?: string): void {
         this.healthCheck();
         if (!multicastAddress) {
-            throw new NodeTypeError('ERR_MISSING_ARGS', 'The "multicastAddress" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "multicastAddress" argument must be specified');
         }
         const rc = __kml_native.udpMembership(this.boundHandle('dropMembership'), multicastAddress, interfaceAddress ?? '', false);
         if (rc < 0) throw errnoException(rc, 'dropMembership');
@@ -555,11 +555,11 @@ export class Socket extends EventEmitter {
 
     private bufferSize(size: number, recv: boolean): number {
         if (size >>> 0 !== size) {
-            throw new NodeTypeError('ERR_SOCKET_BAD_BUFFER_SIZE', 'Buffer size must be a positive integer');
+            throw NodeTypeError('ERR_SOCKET_BAD_BUFFER_SIZE', 'Buffer size must be a positive integer');
         }
         const rc = this.handle < 0 ? -9 : __kml_native.udpOption(this.handle, recv ? OPT_RCVBUF : OPT_SNDBUF, size === 0 ? -1 : size);
         if (rc < 0) {
-            const e: any = new NodeError('ERR_SOCKET_BUFFER_SIZE', 'Could not get or set buffer size: ' +
+            const e: any = NodeError('ERR_SOCKET_BUFFER_SIZE', 'Could not get or set buffer size: ' +
                 (recv ? 'uv_recv_buffer_size' : 'uv_send_buffer_size') + ' returned ' + __kml_native.errnoName(-rc));
             throw e;
         }

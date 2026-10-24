@@ -27,3 +27,7 @@ console.log(m.size); // 7
 // A miss reads back as undefined.
 console.log(m.has("missing")); // false
 console.log(m.get("missing")); // undefined
+
+// A seed of mixed key and value types keeps each entry as given.
+const mixed = new Map<string | number | boolean, number | string | null>([["a", 1], [2, "two"], [true, null]]);
+for (const [k, v] of mixed) console.log(typeof k, k, v);

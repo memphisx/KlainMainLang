@@ -547,3 +547,21 @@ func TestE2EDOMExceptionConstants(t *testing.T) {
 console.log(DOMException.ABORT_ERR, e.TIMEOUT_ERR, e.code === DOMException.ABORT_ERR, DOMException.DATA_CLONE_ERR);
 `, `20 23 true 25`, "TZ=UTC")
 }
+
+func TestE2EJSONParseEmbeddedNul(t *testing.T) {
+	// The text is read to its length, so a raw NUL byte is a SyntaxError,
+	// and a decoded \u0000 stays in the string.
+	assertOutput(t, `
+try { console.log(JSON.parse("{\"a\":1}\x00junk")); } catch (e) { console.log("err", (e as Error).name); }
+const a: string = JSON.parse("\"x\\u0000y\"");
+console.log(a.length);
+const o: any = JSON.parse("{\"k\":\"p\\u0000q\"}");
+console.log(o.k.length);
+const t: { k: string } = JSON.parse("{\"k\":\"p\\u0000q\"}");
+console.log(t.k.length, JSON.stringify(t));
+`, `err SyntaxError
+3
+3
+3 {"k":"p\u0000q"}
+`)
+}

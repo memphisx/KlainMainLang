@@ -75,6 +75,10 @@ func TestScopes(t *testing.T) {
 	// `arguments` is implicit in a function, not in an arrow.
 	check(t, "function f() { return arguments }\nconst g = () => arguments",
 		"arguments@1:23 -> implicit", "arguments@2:17 -> global")
+	// A parameter default reads the arguments object even where the body
+	// declares a function of that name.
+	check(t, "var f = function (x = arguments) { function arguments() {} }",
+		"arguments@1:23 -> implicit")
 	// for-of and for-let heads are scoped to the loop.
 	check(t, "for (const v of xs) { log(v) }\nfor (let i = 0; i < 3; i++) {}\nlog(i)",
 		"xs@1:17 -> global", "log@1:23 -> global", "v@1:27 -> 1:1", "i@2:17 -> 2:6", "i@2:24 -> 2:6", "log@3:1 -> global", "i@3:5 -> global")

@@ -409,7 +409,7 @@ func (tc Toolchain) Args() []string {
 		// would warn that it is overriding the module triple with the --target
 		// one. That override is exactly the intended behavior — the --target value
 		// wins — so the warning is pure noise here.
-		args := []string{"--target=" + tc.Target.Triple, "-Wno-override-module"}
+		args := []string{"--target=" + tc.Target.Triple, "-Wno-override-module", noFPContract}
 		if tc.Target.Sysroot != "" {
 			args = append(args, "--sysroot="+tc.Target.Sysroot)
 		}
@@ -423,9 +423,9 @@ func (tc Toolchain) Args() []string {
 		// spelling differs from its own (Apple clang 21 for every textual-IR
 		// input; Linux clang 18 normalizes x86_64-unknown-linux-gnu to
 		// x86_64-pc-linux-gnu); the host triple is the intended one.
-		return []string{"-Wno-override-module"}
+		return []string{"-Wno-override-module", noFPContract}
 	}
-	args := []string{"--target=x86_64-w64-mingw32", "--sysroot=" + windowsSysroot()}
+	args := []string{"--target=x86_64-w64-mingw32", "--sysroot=" + windowsSysroot(), noFPContract}
 	// lld links on Windows when installed: GNU ld's COFF reader takes a
 	// section number as a signed 16-bit value and loses every symbol in a
 	// section numbered past 32767, so a program with that many functions and
@@ -438,6 +438,11 @@ func (tc Toolchain) Args() []string {
 	}
 	return args
 }
+
+// noFPContract keeps the runtime's C from fusing a*b+c into one rounding
+// (arm64's default): JavaScript rounds every operation, so Date's MakeTime
+// and MakeDate arithmetic, and any other number math in C, must too.
+const noFPContract = "-ffp-contract=off"
 
 // emulatedTLS compiles every thread-local through a control variable and
 // __emutls_get_address (-femulated-tls): a lazy dynamic-import library on

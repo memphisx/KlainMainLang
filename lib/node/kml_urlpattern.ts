@@ -1161,11 +1161,11 @@ function readInit(source: any): Init {
 }
 
 function failedToConstruct(): NodeTypeError {
-    return new NodeTypeError('ERR_INVALID_URL_PATTERN', 'Failed to construct URLPattern');
+    return NodeTypeError('ERR_INVALID_URL_PATTERN', 'Failed to construct URLPattern');
 }
 
 function invalidArgType(message: string): NodeTypeError {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', message);
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', message);
 }
 
 export class URLPattern {
@@ -1314,7 +1314,7 @@ export class URLPattern {
             for (const name of COMPONENTS) values[name] = parsed[name];
         } else {
             if (base !== undefined) {
-                throw new NodeTypeError('ERR_OPERATION_FAILED', 'Failed to ' + method + ' URLPattern');
+                throw NodeTypeError('ERR_OPERATION_FAILED', 'Failed to ' + method + ' URLPattern');
             }
             const init: Init = readInit(source);
             inputs.push(init);

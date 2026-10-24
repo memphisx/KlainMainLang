@@ -732,3 +732,46 @@ const q = ["z"]; arr.push(q); arr.push(q);
 console.log(arr[0] === arr[1], arr[0] === q, arr[0] !== arr[1], arr[3] === undefined);
 `)
 }
+
+// Strings index by UTF-16 code units, as JavaScript's do: a four-byte
+// character is a surrogate pair, every other character one unit.
+func TestE2EStringUTF16Indexing(t *testing.T) {
+	assertOutput(t, `
+const s: string = "café ☕ 😀!";
+console.log(s.length, s[3], s.charAt(4), s.charCodeAt(3), s.codePointAt(7), s.charCodeAt(7), s.charCodeAt(8));
+console.log(s.slice(2, 6), s.substring(5), s.indexOf("!"), s.lastIndexOf("é"), s.at(-2), s[99] === undefined);
+console.log(s.padEnd(12, "*"), s.startsWith("☕", 5), s.includes("😀", 9), s.split("").length);
+console.log(/☕/.exec(s)!.index, s.search(/!/), s.replace(/é/, (m: string, off: number) => "[" + off + "]"));
+const hi = s.slice(7, 8), lo = s.slice(8, 9);
+console.log(JSON.stringify(hi), hi.length, hi + lo === "😀", (hi + lo).length, [hi]);
+console.log(Buffer.from(hi).toString("hex"), String.fromCharCode(0xD83D, 0xDE00) === "😀");
+console.log(Object.keys("aé😀").join(), Object.values("a😀").length, Object.entries("é")[0].join("="));
+const a: any = "naïve"; console.log(a.length, a[2], a.slice(-3));
+let t = ""; for (let i = 0; i < s.length; i++) t += s[i]; console.log(t === s);
+`, `10 é   233 128512 55357 56832
+fé ☕ ☕ 😀! 9 3 � true
+café ☕ 😀!** true false 10
+5 9 caf[3] ☕ 😀!
+"\ud83d" 1 true 2 [ '\ud83d' ]
+efbfbd true
+0,1,2,3 3 0=é
+5 ï ïve
+true`)
+}
+
+func TestE2EStringLocaleCompareCollation(t *testing.T) {
+	assertOutput(t, `
+const w: string[] = ["zebra", "Zebra", "Äpfel", "apple", "résumé", "resume", "Resume", "straße", "Strasse", "strasse", "œuvre", "oeuvre", "Ölung", "olung", "Θεσσαλονίκη", "Αθήνα", "москва", "a-b", "ab", "10", "9", "", "ﬁ", "fi", "😀", "$", "ẞ", "ß"];
+console.log(w.sort((a, b) => a.localeCompare(b)).join("|"));
+const files: string[] = ["file10", "file9", "File2", "file1"];
+console.log(files.sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).join(" "));
+const opts = { sensitivity: "base" };
+console.log("a".localeCompare("Á", "en", opts), "a".localeCompare("A", "en", { sensitivity: "accent" }), "a".localeCompare("á", "en", { sensitivity: "case" }));
+const x: any = "é";
+console.log(x.localeCompare("e"), "ä".localeCompare("ä"), "x2".localeCompare("X10", undefined, { numeric: true, sensitivity: "base" }));
+`, `|😀|$|10|9|a-b|ab|Äpfel|apple|fi|ﬁ|oeuvre|œuvre|olung|Ölung|resume|Resume|résumé|ß|ẞ|strasse|Strasse|straße|zebra|Zebra|Αθήνα|Θεσσαλονίκη|москва
+file1 File2 file9 file10
+0 0 0
+1 0 -1
+`)
+}

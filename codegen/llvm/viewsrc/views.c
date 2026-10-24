@@ -29,11 +29,9 @@ typedef struct kml_view {
 } kml_view;
 
 #ifdef KML_GC
-extern void *GC_malloc_atomic(size_t n);
-extern int GC_general_register_disappearing_link(void **link, const void *obj);
-#define KML_VIEW_ALLOC(n) GC_malloc_atomic(n)
+#define KML_VIEW_ALLOC(n) kml_gc_alloc_atomic(n)
 #else
-#define KML_VIEW_ALLOC(n) malloc(n)
+#define KML_VIEW_ALLOC(n) kml_alloc(KML_HEAP_RAW, n)
 #endif
 
 #define KML_VIEW_BUCKETS 4096
@@ -73,7 +71,7 @@ static kml_view *kml_view_put(void *key, void *root, i64 root_len, i64 off) {
 static void kml_view_set_buf(kml_view *v, void *buf) {
     v->buf = buf;
 #ifdef KML_GC
-    GC_general_register_disappearing_link(&v->buf, buf);
+    kml_gc_weak_link(&v->buf, buf);
 #endif
 }
 
@@ -123,6 +121,23 @@ static int kml_view_shared(void *data) {
     return r && r->root == root && r->shared;
 }
 
+/* Whether a typed array's bytes are a SharedArrayBuffer's (Atomics.wait). */
+i64 __kml_view_is_shared(void *data) {
+    pthread_mutex_lock(&kml_views_mu);
+    int sh = kml_view_shared(data);
+    if (!sh && data) {
+        /* A view registered without knowing its buffer was shared (one
+           reached through ArrayBufferLike or any): the buffer's own
+           header word says. */
+        kml_view *v = kml_view_find(data);
+        void *root = v ? v->root : data;
+        kml_view *r = root ? kml_view_find(root) : NULL;
+        if (r && r->buf && ((i64 *)r->buf)[-1] == KML_SAB_HDR) sh = 1;
+    }
+    pthread_mutex_unlock(&kml_views_mu);
+    return sh;
+}
+
 /* ta.buffer: the root's ArrayBuffer header, made on first use. len is the
  * array's byte length, the root's when the array is its own root. */
 void *__kml_view_buffer(void *data, i64 len) {
@@ -137,7 +152,10 @@ void *__kml_view_buffer(void *data, i64 len) {
     kml_view *r = root ? kml_view_find(root) : NULL;
     if (!r || r->root != root) r = kml_view_put(root, root, root_len, 0);
     if (!r->buf) {
-        void **hdr = (void **)malloc(16);
+        /* The ArrayBuffer's host header word precedes its header. */
+        i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 24);
+        base[0] = r->shared ? KML_SAB_HDR : KML_AB_HDR;
+        void **hdr = (void **)(base + 1);
         *(i64 *)hdr = root_len;
         hdr[1] = root;
         kml_view_set_buf(r, hdr);
@@ -149,18 +167,9 @@ void *__kml_view_buffer(void *data, i64 len) {
 
 #ifdef KML_BOXED_VIEWS
 /* ta.buffer of a typed array held in `any`: the buffer boxed as a host
- * object, a two-word cell {header, handle} under the object tag. The header
- * word is the program's ArrayBuffer host type, exported by the compiler. */
-/* The type ids hooks.c holds, stored by the program's constructor. */
-extern i64 __kml_view_ab_header, __kml_view_sab_header;
+ * object under the object tag, at its header word. */
 i64 __kml_view_buffer_any(void *data, i64 len) {
     void *buf = __kml_view_buffer(data, len);
-    pthread_mutex_lock(&kml_views_mu);
-    int shared = kml_view_shared(data);
-    pthread_mutex_unlock(&kml_views_mu);
-    i64 *cell = (i64 *)malloc(16);
-    cell[0] = shared ? __kml_view_sab_header : __kml_view_ab_header;
-    ((void **)cell)[1] = buf;
-    return (i64)((uintptr_t)cell | 1);
+    return (i64)((uintptr_t)((i64 *)buf - 1) | 1);
 }
 #endif

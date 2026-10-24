@@ -23,7 +23,7 @@ function received(value: any): string {
 
 function validateFunction(value: any, name: string): void {
     if (typeof value !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type function.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type function.' + received(value));
     }
 }
 
@@ -144,7 +144,7 @@ export function channel(name: string | symbol): Channel {
     const existing = channels.get(name);
     if (existing !== undefined) return existing;
     if (typeof name !== 'string' && typeof name !== 'symbol') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "channel" argument must be of type string or symbol.' + received(name));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "channel" argument must be of type string or symbol.' + received(name));
     }
     return new Channel(name);
 }
@@ -188,11 +188,11 @@ function tracingChannelFrom(nameOrChannels: any, name: string): Channel {
     if (typeof nameOrChannels === 'object' && nameOrChannels !== null) {
         const ch: any = nameOrChannels[name];
         if (!(ch instanceof Channel)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "nameOrChannels.' + name + '" property must be an instance of Channel.' + received(ch));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "nameOrChannels.' + name + '" property must be an instance of Channel.' + received(ch));
         }
         return ch as Channel;
     }
-    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "nameOrChannels" argument must be of type string or an instance of TracingChannel or Object.' + received(nameOrChannels));
+    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "nameOrChannels" argument must be of type string or an instance of TracingChannel or Object.' + received(nameOrChannels));
 }
 
 export class TracingChannel implements TracingChannelCollection {

@@ -14,13 +14,9 @@
 //   curl -H "X-Greeting: hi" "http://localhost:8080/hello?name=world"
 //   curl -X POST -d '{"k":"v"}' "http://localhost:8080/echo"
 
-import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
+import http, { HttpResponse } from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
-interface Res {
-  status: number
-  body: string
-  headers: Map<string, string>
-}
+const port = Number(process.env.PORT ?? '8080')  // make examples passes a free port
 
 let requestCount = 0
 
@@ -29,9 +25,9 @@ setTimeout(() => {
   process.exit(0)
 }, 300)
 
-console.log('listening on :8080')
+console.log('listening on :' + port)
 
-http.listen(8080, (req: HttpRequest): Res => {
+http.listen(port, (req: HttpRequest): HttpResponse => {
   requestCount = requestCount + 1
   let respHeaders: Map<string, string> = new Map<string, string>()
   respHeaders.set('Content-Type', 'text/plain')

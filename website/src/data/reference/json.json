@@ -290,17 +290,14 @@
       "name": "JSON.parse(s) validates input",
       "statusRow": "JSON.parse(s) validates input (throws SyntaxError on malformed JSON)",
       "signature": "JSON.parse(s: string): T  // throws SyntaxError",
-      "badge": "caveats",
-      "description": "A real recursive-descent parser builds and validates a tagged value tree. Strict JSON only (double quotes, no trailing commas/leading zeros/trailing junk), with \\uXXXX + surrogate decoding and a 512-deep runtime depth guard on untrusted input. A malformed input throws a catchable SyntaxError; Response.json() inherits the same parser.",
+      "badge": "exact",
+      "description": "A real recursive-descent parser builds and validates a tagged value tree. Strict JSON only (double quotes, no trailing commas/leading zeros/trailing junk), with \\uXXXX + surrogate decoding. A malformed input throws a catchable SyntaxError with V8's message; Response.json() inherits the same parser.",
       "returns": {
         "type": "T",
         "desc": "The parsed value, or throws SyntaxError."
       },
       "exampleKey": "json/json_methods",
       "snippet": "try {\n  const bad: number = JSON.parse(\"{oops}\")\n} catch (e) {\n  console.log(e.name)                // SyntaxError\n}",
-      "differences": [
-        "The `SyntaxError` message is position-based (`Unexpected token in JSON at position N`), not Node/V8's exact per-token wording"
-      ],
       "seeAlso": [
         "json.parse.object",
         "json.parse.number"

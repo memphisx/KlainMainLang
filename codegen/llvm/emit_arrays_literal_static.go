@@ -42,12 +42,12 @@ const staticArrayLiteralMinLen = 16
 // element in a buffer of elemTy, or ok=false when the element is not a
 // foldable literal for that element type.
 func constArrayElemOperand(elem ast.Expression, elemTy Type) (string, bool) {
-	if elemTy.IsArray || elemTy.IsDynamic || elemTy.Inline || elemTy.Nullable || elemTy.UnionMembers != nil || isNullableScalar(elemTy) {
+	if elemTy.IsArray() || elemTy.IsDynamic() || elemTy.Inline || elemTy.Nullable() || elemTy.UnionMembers != nil || isNullableScalar(elemTy) {
 		return "", false
 	}
 	switch ex := elem.(type) {
 	case *ast.StringLiteral:
-		if elemTy.IR != "ptr" || elemTy.IsObject || elemTy.IsTuple || elemTy.IsFunc || elemTy.IsMap || elemTy.IsSet || elemTy.IsClass || elemTy.IsPromise {
+		if elemTy.IR != "ptr" || elemTy.IsObject() || elemTy.IsTuple() || elemTy.IsFunc() || elemTy.IsMap() || elemTy.IsSet() || elemTy.IsClass() || elemTy.IsPromise() {
 			return "", false
 		}
 		return "", true // interned by the caller (needs the emitter)
@@ -192,7 +192,7 @@ func (e *Emitter) tryEmitStaticArrayLiteral(lit *ast.ArrayLiteral, elemTy Type) 
 	}
 
 	// Flat literal: one image, one malloc, one memcpy.
-	if !elemTy.IsArray {
+	if !elemTy.IsArray() {
 		if n < staticArrayLiteralMinLen {
 			return "", false
 		}
@@ -206,7 +206,7 @@ func (e *Emitter) tryEmitStaticArrayLiteral(lit *ast.ArrayLiteral, elemTy Type) 
 		e.ensureMalloc()
 		e.ensureMemcpy()
 		dataReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, bytes))
+		e.heapMallocInto(dataReg, fmt.Sprint(bytes))
 		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", dataReg, g, bytes))
 		return dataReg, true
 	}
@@ -214,7 +214,7 @@ func (e *Emitter) tryEmitStaticArrayLiteral(lit *ast.ArrayLiteral, elemTy Type) 
 	// Table of literal rows: every element is itself a flat literal-only array
 	// of the row element type. (A deeper nesting stays on the general path.)
 	rowTy := *elemTy.ElemType
-	if rowTy.IsArray {
+	if rowTy.IsArray() {
 		return "", false
 	}
 	var flat []ast.Expression
@@ -249,7 +249,7 @@ func (e *Emitter) tryEmitStaticArrayLiteral(lit *ast.ArrayLiteral, elemTy Type) 
 
 	e.ensureArrLitRows()
 	dataReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, int64(n)*8))
+	e.heapMallocInto(dataReg, fmt.Sprint(int64(n)*8))
 	e.emitInstr(fmt.Sprintf("call void @__kml_arr_lit_rows(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d, i64 %d)", dataReg, flatG, lensG, int64(n), int64(rowTy.Align()), e.arrayHeaderWord()))
 	return dataReg, true
 }
@@ -282,12 +282,14 @@ body:
   %data = call ptr @malloc(i64 %bytes)
   %src = getelementptr i8, ptr %flat, i64 %off
   call void @memcpy(ptr %data, ptr %src, i64 %bytes)
-  %cell = call ptr @malloc(i64 24)
+  %cell = call ptr @malloc(i64 32)
   store i64 %word, ptr %cell, align 8
   %box = getelementptr i8, ptr %cell, i64 8
   store ptr %data, ptr %box, align 8
   %boxlen = getelementptr i8, ptr %box, i64 8
   store i64 %len, ptr %boxlen, align 8
+  %boxholes = getelementptr i8, ptr %box, i64 16
+  store ptr null, ptr %boxholes, align 8
   %slot = getelementptr ptr, ptr %outer, i64 %i
   store ptr %box, ptr %slot, align 8
   %inext = add i64 %i, 1

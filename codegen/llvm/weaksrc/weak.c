@@ -18,24 +18,26 @@ typedef struct kml_weak_cell {
 } kml_weak_cell;
 
 #ifdef KML_GC
-extern void *GC_malloc_atomic(size_t n);
-extern int GC_general_register_disappearing_link(void **link, const void *obj);
 static void **link_new(void *obj) {
-    void **w = (void **)GC_malloc_atomic(sizeof(void *));
+    void **w = (void **)kml_gc_alloc_atomic(sizeof(void *));
     *w = obj;
-    GC_general_register_disappearing_link(w, obj);
+    kml_gc_weak_link(w, obj);
     return w;
 }
 #else
 static void **link_new(void *obj) {
-    void **w = (void **)malloc(sizeof(void *));
+    void **w = (void **)kml_alloc(KML_HEAP_RAW, sizeof(void *));
     *w = obj;
     return w;
 }
 #endif
 
-void *__kml_weak_create(void) {
-    kml_weak_cell **h = (kml_weak_cell **)malloc(8);
+/* A WeakMap's or WeakSet's handle, its list head, after its host header
+ * word hdr. */
+void *__kml_weak_create(i64 hdr) {
+    i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 16);
+    base[0] = hdr;
+    kml_weak_cell **h = (kml_weak_cell **)(base + 1);
     *h = NULL;
     return h;
 }
@@ -55,7 +57,7 @@ void __kml_weak_set(void *h, void *key, i64 val) {
         return;
     }
     void **w = link_new(key);
-    c = (kml_weak_cell *)malloc(sizeof *c);
+    c = (kml_weak_cell *)kml_alloc(KML_HEAP_WORDS, sizeof *c);
     c->next = *(kml_weak_cell **)h;
     c->link = w;
     c->val = val;
@@ -102,11 +104,9 @@ void *__kml_weakref_deref(void *box) { return *(void **)box; }
 typedef struct { void *obj; i64 tag; } kml_weak_any;
 
 #ifdef KML_GC
-extern void *GC_malloc_atomic_uncollectable(size_t n);
-extern void *GC_base(void *p);
-#define KML_WEAK_ANY_ALLOC(n) GC_malloc_atomic_uncollectable(n)
+#define KML_WEAK_ANY_ALLOC(n) kml_gc_alloc_atomic_pinned(n)
 #else
-#define KML_WEAK_ANY_ALLOC(n) malloc(n)
+#define KML_WEAK_ANY_ALLOC(n) kml_alloc(KML_HEAP_RAW, n)
 #endif
 
 /* The kept objects (AddToKeptObjects): a WeakRef's target stays alive until
@@ -125,7 +125,7 @@ static void kml_clear_kept(void) {
 static void kml_keep(i64 box) {
     if (kml_nkept == kml_capkept) {
         long cap = kml_capkept ? kml_capkept * 2 : 16;
-        i64 *n = (i64 *)malloc((size_t)cap * sizeof(i64));
+        i64 *n = (i64 *)kml_alloc(KML_HEAP_WORDS, (size_t)cap * sizeof(i64));
         for (long i = 0; i < kml_nkept; i++) n[i] = kml_kept[i];
         kml_kept = n;
         kml_capkept = cap;
@@ -142,8 +142,8 @@ double __kml_weak_link_any(i64 box) {
 #ifdef KML_GC
     /* The link is registered on the object holding the target: a box's
        payload may point inside its allocation (a dynamic object's). */
-    void *base = GC_base(c->obj);
-    GC_general_register_disappearing_link(&c->obj, base ? base : c->obj);
+    void *base = kml_gc_base(c->obj);
+    kml_gc_weak_link(&c->obj, base ? base : c->obj);
 #endif
     return (double)(uintptr_t)c;
 }

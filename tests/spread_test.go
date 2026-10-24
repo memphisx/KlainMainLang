@@ -231,3 +231,39 @@ const q = setup({ n: 2 })
 console.log(q.exec, q.silent, q.n)
 `)
 }
+
+// Spreading a primitive into an object literal is tsc's TS2698 (its type
+// is any); as JavaScript, a string spreads its indices and every other
+// primitive nothing.
+func TestE2EObjectSpreadPrimitive(t *testing.T) {
+	mustCompileError(t, `
+declare var n: number;
+export const a = { ...n };
+`, "spread types may only be created from object types")
+	mustCompileError(t, `
+export const c = { ...null, k: 1 };
+`, "spread types may only be created from object types")
+	assertSameAsNode(t, `
+const o: { k: number } | undefined = Math.random() < 2 ? { k: 1 } : undefined;
+const f = (b: false | { j: number }) => ({ ...o, ...b });
+console.log(JSON.stringify(f({ j: 2 })), JSON.stringify(f(false)));
+const g = (b: 0 | "" | { j: number; k?: string }) => { const r = { z: true, ...b }; return r; };
+console.log(JSON.stringify(g({ j: 3, k: "x" })), JSON.stringify(g(0)), JSON.stringify(g("").j));
+const h = (b: { j: number } | undefined) => ({ x: 1, ...b });
+console.log(JSON.stringify(h(undefined)), "j" in h(undefined), Object.keys(h({ j: 1 })));
+`)
+	assertSameAsNodeCompatJS(t, `
+var n = 1, s = "ab";
+var a = { ...n, x: 1 };
+var b = { ...s, y: 2 };
+var c = { ...null, ...undefined, k: 3 };
+console.log(JSON.stringify(a), JSON.stringify(b), JSON.stringify(c), JSON.stringify({ ...true }));
+var f = function (arg) { var yield = arg; return { ...yield }; };
+console.log(JSON.stringify(f({ q: 1 })), JSON.stringify(f(5)));
+var gen = async function* g() { yield 1; };
+var iter = gen();
+var iter = gen();
+var item = iter.next();
+item.then(r => console.log(r.value, r.done));
+`)
+}

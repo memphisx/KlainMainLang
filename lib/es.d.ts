@@ -30,11 +30,17 @@ interface PropertyDescriptor {
     set?(v: any): void;
 }
 
+/** Marker for the contextual `this` of an object literal's methods. */
+interface ThisType<T> {}
+
 interface PropertyDescriptorMap {
     [key: PropertyKey]: PropertyDescriptor;
 }
 
 interface ObjectConstructor {
+    new (value?: any): Object;
+    (): any;
+    (value: any): any;
     readonly prototype: Object;
     /** @intrinsic Object.keys */
     keys(o: {}): string[];
@@ -69,9 +75,9 @@ interface ObjectConstructor {
     /** @intrinsic Object.getOwnPropertyDescriptor */
     getOwnPropertyDescriptor(o: any, p: PropertyKey): PropertyDescriptor | undefined;
     /** @intrinsic Object.defineProperty */
-    defineProperty<T>(o: T, p: PropertyKey, attributes: PropertyDescriptor): T;
+    defineProperty<T>(o: T, p: PropertyKey, attributes: PropertyDescriptor & ThisType<any>): T;
     /** @intrinsic Object.defineProperties */
-    defineProperties<T>(o: T, properties: PropertyDescriptorMap): T;
+    defineProperties<T>(o: T, properties: PropertyDescriptorMap & ThisType<any>): T;
     /** @intrinsic Object.hasOwn */
     hasOwn(o: object, v: PropertyKey): boolean;
     /** @lower __kml_Object_is */
@@ -94,7 +100,7 @@ declare namespace Reflect {
     /** @intrinsic Reflect.construct */
     function construct(target: Function, argumentsList: ArrayLike<any>, newTarget?: Function): any;
     /** @intrinsic Reflect.defineProperty */
-    function defineProperty(target: object, propertyKey: PropertyKey, attributes: PropertyDescriptor): boolean;
+    function defineProperty(target: object, propertyKey: PropertyKey, attributes: PropertyDescriptor & ThisType<any>): boolean;
     /** @intrinsic Reflect.deleteProperty */
     function deleteProperty(target: object, propertyKey: PropertyKey): boolean;
     /** @intrinsic Reflect.get */
@@ -142,6 +148,7 @@ interface Function {
     /** @intrinsic Function.prototype.bind */
     bind(this: Function, thisArg: any, ...argArray: any[]): any;
     toString(): string;
+    prototype: any;
     arguments: any;
     caller: Function;
 }
@@ -156,6 +163,7 @@ declare var Function: FunctionConstructor;
 
 interface String {
     readonly length: number;
+    [Symbol.iterator](): StringIterator<string>;
     /** @intrinsic Object.prototype.toString */
     toString(): string;
     /** @lower __kml_String_charAt @link string */
@@ -225,6 +233,7 @@ interface String {
     trimEnd(): string;
     /** @lower __kml_String_at @link string */
     at(index: number): string | undefined;
+    /** @intrinsic String.prototype.valueOf */
     valueOf(): string;
 }
 
@@ -265,6 +274,8 @@ interface SymbolConstructor {
 declare var Symbol: SymbolConstructor;
 
 interface Boolean {
+    toString(): string;
+    /** @intrinsic Boolean.prototype.valueOf */
     valueOf(): boolean;
 }
 
@@ -286,6 +297,7 @@ interface Number {
     toExponential(fractionDigits?: number): string;
     /** @lower __kml_Number_toPrecision @link number */
     toPrecision(precision?: number): string;
+    /** @intrinsic Number.prototype.valueOf */
     valueOf(): number;
 }
 
@@ -334,19 +346,19 @@ interface Math {
     readonly SQRT2: number;
     /** @intrinsic Math.abs */
     abs(x: number): number;
-    /** @lower acos @link m */
+    /** @lower __kml_fd_acos @link fdlibm */
     acos(x: number): number;
-    /** @lower acosh @link m */
+    /** @lower __kml_fd_acosh @link fdlibm */
     acosh(x: number): number;
-    /** @lower asin @link m */
+    /** @lower __kml_fd_asin @link fdlibm */
     asin(x: number): number;
-    /** @lower asinh @link m */
+    /** @lower __kml_fd_asinh @link fdlibm */
     asinh(x: number): number;
-    /** @lower atan @link m */
+    /** @lower __kml_fd_atan @link fdlibm */
     atan(x: number): number;
-    /** @lower atanh @link m */
+    /** @lower __kml_fd_atanh @link fdlibm */
     atanh(x: number): number;
-    /** @lower atan2 @link m */
+    /** @lower __kml_fd_atan2 @link fdlibm */
     atan2(y: number, x: number): number;
     /** @intrinsic Math.cbrt */
     cbrt(x: number): number;
@@ -354,13 +366,13 @@ interface Math {
     ceil(x: number): number;
     /** @intrinsic Math.clz32 */
     clz32(x: number): number;
-    /** @lower cos @link m */
+    /** @lower __kml_fd_cos @link fdlibm */
     cos(x: number): number;
-    /** @lower cosh @link m */
+    /** @lower __kml_fd_cosh @link fdlibm */
     cosh(x: number): number;
-    /** @lower exp @link m */
+    /** @lower __kml_fd_exp @link fdlibm */
     exp(x: number): number;
-    /** @lower expm1 @link m */
+    /** @lower __kml_fd_expm1 @link fdlibm */
     expm1(x: number): number;
     /** @intrinsic Math.floor */
     floor(x: number): number;
@@ -370,13 +382,13 @@ interface Math {
     hypot(...values: number[]): number;
     /** @intrinsic Math.imul */
     imul(x: number, y: number): number;
-    /** @lower log @link m */
+    /** @lower __kml_fd_log @link fdlibm */
     log(x: number): number;
-    /** @lower log10 @link m */
+    /** @lower __kml_fd_log10 @link fdlibm */
     log10(x: number): number;
-    /** @lower log1p @link m */
+    /** @lower __kml_fd_log1p @link fdlibm */
     log1p(x: number): number;
-    /** @lower log2 @link m */
+    /** @lower __kml_fd_log2 @link fdlibm */
     log2(x: number): number;
     /** @intrinsic Math.max */
     max(...values: number[]): number;
@@ -390,15 +402,15 @@ interface Math {
     round(x: number): number;
     /** @intrinsic Math.sign */
     sign(x: number): number;
-    /** @lower sin @link m */
+    /** @lower __kml_fd_sin @link fdlibm */
     sin(x: number): number;
-    /** @lower sinh @link m */
+    /** @lower __kml_fd_sinh @link fdlibm */
     sinh(x: number): number;
     /** @lower sqrt @link m */
     sqrt(x: number): number;
-    /** @lower tan @link m */
+    /** @lower __kml_fd_tan @link fdlibm */
     tan(x: number): number;
-    /** @lower tanh @link m */
+    /** @lower __kml_fd_tanh @link fdlibm */
     tanh(x: number): number;
     /** @intrinsic Math.trunc */
     trunc(x: number): number;
@@ -553,6 +565,8 @@ interface Array<T> {
     fill(value: T, start?: number, end?: number): this;
     /** @intrinsic Array.prototype.copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
+    /** @intrinsic Array.prototype.flat */
+    flat<A, D extends number = 1>(this: A, depth?: D): FlatArray<A, D>[];
     /** @intrinsic Array.prototype.flatMap */
     flatMap<U>(callback: (value: T, index: number, array: T[]) => U | readonly U[], thisArg?: any): U[];
     /** @intrinsic Array.prototype.at */
@@ -816,7 +830,9 @@ interface IteratorReturnResult<TReturn> {
 }
 type IteratorResult<T, TReturn = any> = IteratorYieldResult<T> | IteratorReturnResult<TReturn>;
 
-interface Iterable<T> {}
+interface Iterable<T, TReturn = any, TNext = any> {
+    [Symbol.iterator](): Iterator<T, TReturn, TNext>;
+}
 interface Iterator<T, TReturn = any, TNext = any> {
     next(...[value]: [] | [TNext]): IteratorResult<T, TReturn>;
     return?(value?: TReturn): IteratorResult<T, TReturn>;
@@ -873,6 +889,10 @@ interface ArrayIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unkn
 
 interface MapIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
     [Symbol.iterator](): MapIterator<T>;
+}
+
+interface StringIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): StringIterator<T>;
 }
 
 interface RegExpStringIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
@@ -944,6 +964,14 @@ interface PromiseConstructor {
     resolve<T>(value: T): Promise<Awaited<T>>;
     /** @intrinsic Promise.resolve */
     resolve<T>(value: T | PromiseLike<T>): Promise<Awaited<T>>;
+    /** @lower __kml_Promise_withResolvers */
+    withResolvers<T>(): PromiseWithResolvers<T>;
+}
+
+interface PromiseWithResolvers<T> {
+    promise: Promise<T>;
+    resolve: (value: T | PromiseLike<T>) => void;
+    reject: (reason?: any) => void;
 }
 
 interface PromiseFulfilledResult<T> {
@@ -1042,7 +1070,7 @@ interface SetConstructor {
 declare var Set: SetConstructor;
 
 /** @lowerType weakmap */
-interface WeakMap<K extends object, V> {
+interface WeakMap<K extends WeakKey, V> {
     /** @intrinsic WeakMap.prototype.delete */
     delete(key: K): boolean;
     /** @intrinsic WeakMap.prototype.get */
@@ -1054,15 +1082,15 @@ interface WeakMap<K extends object, V> {
 }
 
 interface WeakMapConstructor {
-    new <K extends object = object, V = any>(entries?: readonly (readonly [K, V])[] | null): WeakMap<K, V>;
-    new <K extends object, V>(iterable: Iterable<readonly [K, V]>): WeakMap<K, V>;
-    readonly prototype: WeakMap<object, any>;
+    new <K extends WeakKey = WeakKey, V = any>(entries?: readonly (readonly [K, V])[] | null): WeakMap<K, V>;
+    new <K extends WeakKey, V>(iterable: Iterable<readonly [K, V]>): WeakMap<K, V>;
+    readonly prototype: WeakMap<WeakKey, any>;
 }
 
 declare var WeakMap: WeakMapConstructor;
 
 /** @lowerType weakset */
-interface WeakSet<T extends object> {
+interface WeakSet<T extends WeakKey> {
     /** @intrinsic WeakSet.prototype.add */
     add(value: T): this;
     /** @intrinsic WeakSet.prototype.delete */
@@ -1072,19 +1100,19 @@ interface WeakSet<T extends object> {
 }
 
 interface WeakSetConstructor {
-    new <T extends object = object>(values?: readonly T[] | null): WeakSet<T>;
-    new <T extends object>(iterable: Iterable<T>): WeakSet<T>;
-    readonly prototype: WeakSet<object>;
+    new <T extends WeakKey = WeakKey>(values?: readonly T[] | null): WeakSet<T>;
+    new <T extends WeakKey>(iterable: Iterable<T>): WeakSet<T>;
+    readonly prototype: WeakSet<WeakKey>;
 }
 
 declare var WeakSet: WeakSetConstructor;
 
-interface WeakRef<T extends object> {
+interface WeakRef<T extends WeakKey> {
     deref(): T | undefined;
 }
 interface WeakRefConstructor {
     readonly prototype: WeakRef<any>;
-    new <T extends object>(target: T): WeakRef<T>;
+    new <T extends WeakKey>(target: T): WeakRef<T>;
 }
 declare var WeakRef: WeakRefConstructor;
 
@@ -1130,6 +1158,8 @@ interface ProxyConstructor {
 declare var Proxy: ProxyConstructor;
 
 declare var NaN: number;
+/** Only a compile-time-constant expression string is supported. */
+declare function eval(x: string): any;
 declare var Infinity: number;
 /** @intrinsic parseInt */
 declare function parseInt(string: string, radix?: number): number;
@@ -2784,3 +2814,8 @@ interface DataView<TArrayBuffer extends ArrayBufferLike> {
     getFloat16(byteOffset: number, littleEndian?: boolean): number;
     setFloat16(byteOffset: number, value: number, littleEndian?: boolean): void;
 }
+
+type FlatArray<Arr, Depth extends number> = {
+    done: Arr;
+    recur: Arr extends ReadonlyArray<infer InnerArr> ? FlatArray<InnerArr, [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20][Depth]> : Arr;
+}[Depth extends -1 ? "done" : "recur"];

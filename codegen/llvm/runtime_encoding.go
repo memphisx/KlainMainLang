@@ -8,8 +8,8 @@ import _ "embed"
 //go:embed encodingsrc/encoding.c
 var encodingSource string
 
-// EncodingSource is the encoding runtime's C source.
-func EncodingSource() string { return encodingSource }
+// EncodingSource is the encoding runtime's C source, behind kml_layout.h.
+func EncodingSource() string { return layoutHeader() + encodingSource }
 
 // UsesEncoding reports whether the program links the encoding runtime.
 func (e *Emitter) UsesEncoding() bool {
@@ -59,12 +59,6 @@ func (e *Emitter) ensureEncodeURIComponent() {
 
 func (e *Emitter) ensureEncodeURI() {
 	e.ensurePercentFn(&e.usedEncodeURI, "__kml_encode_uri", false)
-}
-
-// ensureDecodeURIComponent declares the lenient decoder (a malformed
-// escape passes through), kept for HTTP query strings.
-func (e *Emitter) ensureDecodeURIComponent() {
-	e.ensurePercentFn(&e.usedDecodeURIComponent, "__kml_decode_uri_component", false)
 }
 
 // The strict variants back the global decodeURIComponent()/decodeURI(),

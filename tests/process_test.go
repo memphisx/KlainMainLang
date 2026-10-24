@@ -550,7 +550,7 @@ console.log("unreachable")
 }
 
 func TestE2EProcessUncaughtException(t *testing.T) {
-	// The handler runs (skipping the default "Uncaught: ..." print); the process
+	// The handler runs (skipping the default stack print); the process
 	// still exits 1 (this exception model has already unwound to the top).
 	out, code := compileAndRunExpectExit(t, `
 process.on('uncaughtException', (err) => { console.log("caught:" + err.message) })
@@ -576,7 +576,7 @@ process.on('uncaughtException', (err) => {
 })
 setTimeout(() => { throw new Error("first") }, 0)
 `)
-	if got := strings.TrimSpace(out); !strings.HasPrefix(got, "listener 1: first\nUncaught: ") || strings.Contains(got, "listener 2") {
+	if got := strings.TrimSpace(out); !strings.HasPrefix(got, "listener 1: first\nError: inside\n") || strings.Contains(got, "listener 2") {
 		t.Errorf("output: got %q", got)
 	}
 	if code != 7 {
@@ -592,7 +592,7 @@ process.on('uncaughtException', (err) => {
 })
 Promise.reject(new Error("rejected"))
 `)
-	if got := strings.TrimSpace(out); !strings.HasPrefix(got, "listener 1: rejected\nUncaught: ") || strings.Contains(got, "listener 2") {
+	if got := strings.TrimSpace(out); !strings.HasPrefix(got, "listener 1: rejected\nError: inside\n") || strings.Contains(got, "listener 2") {
 		t.Errorf("rejection output: got %q", got)
 	}
 	if code != 7 {
@@ -808,4 +808,48 @@ setTimeout(() => {
   Promise.reject(42);
 }, 5);
 `, "uncaught UnhandledPromiseRejection ERR_UNHANDLED_REJECTION  with the reason \"text\". unhandledRejection\nrejection 42 true")
+}
+
+// process.title reads argv[0] until set, and reads back what was set.
+func TestE2EProcessTitle(t *testing.T) {
+	assertOutput(t, `const first = process.title;
+process.title = "renamed";
+const p: any = process;
+console.log(first.length > 0, process.title, p.title);
+`, "true renamed renamed\n")
+}
+
+// cluster.worker.process in a worker is the process itself.
+func TestE2EClusterWorkerProcessPid(t *testing.T) {
+	assertOutput(t, `import cluster from "node:cluster";
+if (cluster.isPrimary) {
+  const w = cluster.fork();
+  w.on("message", (m: any) => { console.log("primary got", m); w.disconnect(); });
+} else {
+  const me = cluster.worker!;
+  me.send(String(me.id) + " " + typeof me.process.pid + " " + (me.process.pid === process.pid));
+}
+`, "primary got 1 number true\n")
+}
+
+// The stdio streams are typed through lib's `import("tty")` types, as
+// tsc types them: a stream's own literal members and net.Socket's
+// write overloads are checked, while their run-time values stay the
+// stream's own, a pipe's without `isTTY` (ADR-01879).
+func TestE2EProcessStdioImportTypes(t *testing.T) {
+	mustCompileError(t, "process.stdout.fd = 3;\n", "type '3' is not assignable to type '1'")
+	mustCompileError(t, "process.stdout.write(5);\n", "no overload matches this call")
+	assertOutput(t, `
+const o = process.stdout;
+function f(): void {
+  const e = process.stderr;
+  e.write('e\n');
+  let i = process.stdin;
+  console.log(typeof i.isTTY);
+}
+const fd: 1 = process.stdout.fd;
+o.write('o\n');
+f();
+console.log(fd, typeof process.stdout.columns, typeof o.write);
+`, "o\nundefined\n1 undefined function") // e.write goes to stderr
 }

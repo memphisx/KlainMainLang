@@ -137,12 +137,15 @@ func (e *Emitter) emitHostToPrimFinalize() {
 // hostToPrimFn generates h's primitive conversion (a Date's, a RegExp's),
 // or "" for a host class without one.
 func (e *Emitter) hostToPrimFn(h hostLayout) string {
-	if h.class != "Date" && h.class != "RegExp" {
+	if h.class != "Date" && h.class != "RegExp" && !h.ty.IsPrimWrapper() {
 		return ""
 	}
 	restore := e.beginDetachedFunc()
 	t := e.emitHostCellLoad("%cell", h.ty)
-	if h.class == "RegExp" {
+	if h.ty.IsPrimWrapper() {
+		// Its valueOf is the primitive, whatever the hint.
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitWrapperValue(t).Ref))
+	} else if h.class == "RegExp" {
 		// Its valueOf is the object itself: every hint takes its toString
 		// (`/a+b/g`), which reaches a class extending RegExp's body too.
 		if s, err := e.emitValueToString(Value{Ref: t, Ty: h.ty}); err == nil && !e.blockDone {
@@ -169,6 +172,6 @@ func (e *Emitter) hostToPrimFn(h hostLayout) string {
 	body := e.allocas.String() + e.body.String()
 	restore()
 	fn := fmt.Sprintf("@__kml_host_toprim_%d", h.id&kmlHdrIDMask)
-	fmt.Fprintf(&e.functions, "\ndefine internal i64 %s(ptr %%cell, i64 %%v, i8 %%hint) {\nentry:\n%s}\n", fn, body)
+	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%cell, i64 %%v, i8 %%hint)", fn), body)
 	return fn
 }

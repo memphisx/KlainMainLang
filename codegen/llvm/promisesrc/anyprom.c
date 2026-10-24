@@ -7,7 +7,7 @@ typedef long long i64;
 
 #define F(p, off, T) (*(T *)((char *)(p) + (off)))
 
-extern void *malloc(__SIZE_TYPE__);
+extern void *malloc(__SIZE_TYPE__); /* scratch */
 extern void __kml_microtask_enqueue(void *);
 extern void __kml_promise_settle(void *, i64);
 extern void *__kml_task_alloc_promise(void);
@@ -41,7 +41,7 @@ extern i64 __kml_obj_get(void *, const void *);
 extern i64 __kml_dynobj_get(void *, const void *);
 
 typedef unsigned long long u64;
-static const struct { i64 len; char d[5]; } k_then = {4, "then"};
+static const struct { i64 len; char d[5]; } k_then = {KML_STR_ASCII_HDR(4), "then"};
 
 #define NB_HDR_MAGIC (0x4B4DLL << 32)
 #define NB_HDR_MAGIC_MASK (0x7FFFLL << 32)
@@ -101,10 +101,10 @@ static i64 resolving_reject(void *env, i64 recv, i64 argc, i64 *argv) {
  * either is called rejects q. */
 static void thenable_job(void *envp) {
     i64 *env = envp;
-    resolving *r = malloc(sizeof *r);
+    resolving *r = kml_alloc(KML_HEAP_WORDS, sizeof *r);
     r->q = (void *)env[0];
     r->done = 0;
-    void **res = malloc(3 * sizeof(void *)), **rej = malloc(3 * sizeof(void *));
+    void **res = kml_alloc(KML_HEAP_WORDS, 3 * sizeof(void *)), **rej = kml_alloc(KML_HEAP_WORDS, 3 * sizeof(void *));
     res[0] = (void *)resolving_resolve, res[1] = r, res[2] = (void *)1;
     rej[0] = (void *)resolving_reject, rej[1] = r, rej[2] = (void *)1;
     i64 argv[2] = {(i64)(u64)res | 7, (i64)(u64)rej | 7};
@@ -126,8 +126,8 @@ static void thenable_job(void *envp) {
 void __kml_promise_resolve_any(void *q, i64 v) {
     i64 then = then_of(v);
     if (then && ((u64)then & 7) == 7 && (u64)then >= 65536 && (u64)then < (1ULL << 49) && !__kml_promise_wrapper_of(v)) {
-        i64 *env = malloc(3 * sizeof(i64));
-        void **clo = malloc(2 * sizeof(void *));
+        i64 *env = kml_alloc(KML_HEAP_WORDS, 3 * sizeof(i64));
+        void **clo = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
         env[0] = (i64)(u64)q, env[1] = v, env[2] = then;
         clo[0] = (void *)thenable_job;
         clo[1] = env;
@@ -136,8 +136,8 @@ void __kml_promise_resolve_any(void *q, i64 v) {
     }
     void *w = __kml_promise_wrapper_of(v);
     if (w) {
-        void **env = malloc(3 * sizeof(void *));
-        void **clo = malloc(2 * sizeof(void *));
+        void **env = kml_alloc(KML_HEAP_WORDS, 3 * sizeof(void *));
+        void **clo = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
         env[0] = q;
         env[1] = F(w, KML_PBOX_PROMISE, void *);
         env[2] = F(w, KML_PBOX_BOXFN, void *);
@@ -177,7 +177,7 @@ void *__kml_promise_view_any(void *w) {
     void *src = F(w, KML_PBOX_PROMISE, void *);
     void *boxer = F(w, KML_PBOX_BOXFN, void *);
     void *q = __kml_task_alloc_promise();
-    void **env = malloc(3 * sizeof(void *));
+    void **env = kml_alloc(KML_HEAP_WORDS, 3 * sizeof(void *));
     env[0] = src;
     env[1] = q;
     env[2] = boxer;
@@ -187,7 +187,7 @@ void *__kml_promise_view_any(void *w) {
         pview_mirror(env);
         return q;
     }
-    void **clo = malloc(2 * sizeof(void *));
+    void **clo = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     clo[0] = (void *)pview_mirror;
     clo[1] = env;
     __kml_promise_attach_sync(src, clo);

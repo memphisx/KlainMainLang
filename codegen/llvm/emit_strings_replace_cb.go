@@ -11,7 +11,7 @@ import (
 // callback (emit_regexp_replace.go); this brings the plain-string-search
 // forms to parity. Real JS invokes the replacer with (match, offset,
 // string): the matched substring (always identical to the literal search
-// string here), the byte offset of the match, and the whole subject
+// string here), the UTF-16 index of the match, and the whole subject
 // string. Untyped callback parameters default to (string, number, string),
 // the same hint the RegExp path applies via resolveCallbackWithHints.
 //
@@ -23,23 +23,20 @@ import (
 // gap-then-replacement segment plus the trailing gap. For replace() (all =
 // false) the match count is clamped to at most one.
 //
-// Narrowings (documented): the offset is a byte offset (identity with JS's
-// UTF-16 code-unit index for BMP/ASCII text). An empty search string with a
-// function replacer produces zero matches (returns the subject unchanged)
-// rather than JS's insert-between-every-position behavior — the string-value
-// empty-search path is unaffected.
+// An empty search string matches at every UTF-16 position (replaceAll) or at
+// the start (replace), and runs apart from the scan.
 func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbExpr ast.Expression, all bool, pos ast.Pos) (Value, error) {
 	cb, err := e.resolveCallbackWithHints(cbExpr, []Type{TypePtr, TypeF64, TypePtr})
 	if err != nil {
 		return Value{}, err
 	}
 
-	objVal = e.coerce(objVal, TypePtr)
+	objVal = e.convert(objVal, TypePtr)
 	searchVal, err := e.emitExpr(searchExpr)
 	if err != nil {
 		return Value{}, err
 	}
-	searchVal = e.coerce(searchVal, TypePtr)
+	searchVal = e.convert(searchVal, TypePtr)
 
 	e.ensureMalloc()
 	e.ensureMemcpy()
@@ -51,8 +48,10 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	resultSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultSlot))
 
-	// Empty-search narrowing: return the subject unchanged. Also sidesteps the
-	// zero-length-needle memmem loop that would never make forward progress.
+	// An empty search matches at every UTF-16 position (replaceAll) or at
+	// the start (replace): the replacer's result goes before each unit, and
+	// after the last for replaceAll. Kept apart from the memmem scan, which
+	// makes no progress on an empty needle.
 	isEmpty := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, searchLen))
 	emptyL := e.freshLabel("strrepcb.empty")
@@ -61,8 +60,66 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isEmpty, emptyL, scanL))
 
 	e.emitLabel(emptyL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objVal.Ref, resultSlot))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	{
+		units := e.emitStrU16Len(objVal.Ref)
+		last := "0"
+		if all {
+			last = units
+		}
+		accSlot, kSlot := e.freshReg(), e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accSlot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", kSlot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), accSlot))
+		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", kSlot))
+		condL, bodyL, unitL, nextL, doneL := e.freshLabel("strrepcb.e.cond"), e.freshLabel("strrepcb.e.body"), e.freshLabel("strrepcb.e.unit"), e.freshLabel("strrepcb.e.next"), e.freshLabel("strrepcb.e.done")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(condL)
+		k, more := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", k, kSlot))
+		e.emitInstr(fmt.Sprintf("%s = icmp sle i64 %s, %s", more, k, last))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
+		e.emitLabel(bodyL)
+		r, err := e.emitCBCall(cb, []Value{{Ref: searchVal.Ref, Ty: TypePtr}, {Ref: k, Ty: TypeI64}, {Ref: objVal.Ref, Ty: TypePtr}})
+		if err != nil {
+			return Value{}, err
+		}
+		r = e.convert(r, TypePtr)
+		acc := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", acc, accSlot))
+		withR, err := e.emitStringConcat(Value{Ref: acc, Ty: TypePtr}, r)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", withR.Ref, accSlot))
+		inside := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", inside, k, units))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inside, unitL, nextL))
+		e.emitLabel(unitL)
+		k1, unit := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", k1, k))
+		if all {
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_u16_sub(ptr %s, i64 %s, i64 %s)", unit, objVal.Ref, k, k1))
+		} else {
+			// replace: the whole subject follows the one insertion.
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_u16_sub(ptr %s, i64 %s, i64 %s)", unit, objVal.Ref, k, units))
+		}
+		withU, err := e.emitStringConcat(withR, Value{Ref: unit, Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", withU.Ref, accSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
+		e.emitLabel(nextL)
+		k2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", k2, k))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", k2, kSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+		e.emitLabel(doneL)
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, accSlot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", res, resultSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	}
 
 	e.emitLabel(scanL)
 
@@ -80,11 +137,11 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	byteCount8 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount8, count))
 	starts := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", starts, byteCount8))
+	e.heapMallocInto(starts, byteCount8)
 	replPtrs := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", replPtrs, byteCount8))
+	e.heapMallocInto(replPtrs, byteCount8)
 	replLens := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", replLens, byteCount8))
+	e.heapMallocInto(replLens, byteCount8)
 
 	// --- pass 2: fill (callback runs exactly once per match) ---
 	// A running cursor into the subject and the running match index.
@@ -129,30 +186,30 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	// Record the start offset.
 	startGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", startGep, starts, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startOff, startGep))
+	e.heapStore("i64", startOff, startGep, 8)
 
 	// Invoke the callback with (match, offset, string). The matched substring
-	// is exactly the literal search string; offset is its byte position.
+	// is exactly the literal search string; offset is its UTF-16 index.
+	u16Off := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_u16_index(ptr %s, i64 %s)", u16Off, objVal.Ref, startOff))
 	cbArgs := []Value{
 		{Ref: searchVal.Ref, Ty: TypePtr},
-		{Ref: startOff, Ty: TypeI64},
+		{Ref: u16Off, Ty: TypeI64},
 		{Ref: objVal.Ref, Ty: TypePtr},
 	}
 	resultVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
 	}
-	resultVal = e.coerce(resultVal, TypePtr)
-	e.ensureStrlen()
-	replLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", replLen, resultVal.Ref))
+	resultVal = e.convert(resultVal, TypePtr)
+	replLen := e.emitStrLenHeader(resultVal.Ref)
 
 	replPtrGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", replPtrGep, replPtrs, idxVal))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", resultVal.Ref, replPtrGep))
+	e.heapStore("ptr", resultVal.Ref, replPtrGep, 8)
 	replLenGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", replLenGep, replLens, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", replLen, replLenGep))
+	e.heapStore("i64", replLen, replLenGep, 8)
 
 	// Advance the cursor past this match.
 	nextPtr := e.freshReg()
@@ -358,7 +415,7 @@ func (e *Emitter) emitStringLiteralBuildOutput(sRef, sLen, searchLen, count, sta
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", trailDstGep, trailSrcGep, trailingLen))
 	termGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, outBuf, grandTotal))
-	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termGep))
+	e.heapStore("i8", "0", termGep, 1)
 
 	return outBuf
 }

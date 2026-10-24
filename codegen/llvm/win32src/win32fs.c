@@ -141,14 +141,14 @@ static int win_errno(DWORD e) {
 }
 static int fail(void) { errno = win_errno(GetLastError()); return -1; }
 static void *failp(void) { errno = win_errno(GetLastError()); return NULL; }
-// free() can reach HeapFree, which may clobber GetLastError() between a
+// free() can reach HeapFree, which may clobber GetLastError() between a /* scratch */
 // failed Win32 call and the fail()/failp() that reads it — a dozen error
 // paths in this file freed the wide path first (ADR-00739). Every free in
 // this file goes through this preserving wrapper; the cost on success
 // paths is one SetLastError.
 static void free_keep_err(void *p) {
 	DWORD e = GetLastError();
-	free(p);
+	free(p); /* scratch */
 	SetLastError(e);
 }
 
@@ -206,7 +206,7 @@ static wchar_t *long_path_prefix(const wchar_t *w) {
 	// Already extended (`\\?\` or `\\.\`): leave it.
 	if (unc && (w[2] == L'?' || w[2] == L'.') && w[3] == L'\\') return NULL;
 	size_t extra = unc ? 8 : 4; // "\\?\UNC\" replaces the leading "\\", or "\\?\"
-	wchar_t *out = (wchar_t *)malloc((len + extra + 1) * sizeof(wchar_t));
+	wchar_t *out = (wchar_t *)malloc((len + extra + 1) * sizeof(wchar_t)); /* scratch */
 	if (!out) return NULL;
 	if (unc) { wcscpy(out, L"\\\\?\\UNC\\"); wcscpy(out + 8, w + 2); }
 	else { wcscpy(out, L"\\\\?\\"); wcscpy(out + 4, w); }
@@ -217,7 +217,7 @@ static wchar_t *to_wide(const char *s) {
 	if (!s) { errno = L_EINVAL; return NULL; }
 	int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
 	if (n <= 0) { errno = L_EINVAL; return NULL; }
-	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t)); /* scratch */
 	if (!w) { errno = L_ENOSPC; return NULL; }
 	MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
 	// Short paths (the overwhelming majority) are returned byte-for-byte as
@@ -232,20 +232,20 @@ static wchar_t *to_wide(const char *s) {
 	if ((size_t)(n - 1) < MAX_PATH - 12) return w;
 	DWORD full = GetFullPathNameW(w, 0, NULL, NULL);
 	if (full == 0) return w; // couldn't normalize — keep the plain path
-	wchar_t *abs = (wchar_t *)malloc((size_t)full * sizeof(wchar_t));
+	wchar_t *abs = (wchar_t *)malloc((size_t)full * sizeof(wchar_t)); /* scratch */
 	if (!abs) return w;
 	DWORD got = GetFullPathNameW(w, full, abs, NULL);
-	if (got == 0 || got >= full) { free(abs); return w; }
-	free(w);
+	if (got == 0 || got >= full) { free(abs); return w; } /* scratch */
+	free(w); /* scratch */
 	wchar_t *ext = long_path_prefix(abs);
 	if (!ext) return abs; // already extended, or alloc failed
-	free(abs);
+	free(abs); /* scratch */
 	return ext;
 }
 static char *to_utf8(const wchar_t *w) {
 	int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
 	if (n <= 0) return NULL;
-	char *s = (char *)malloc((size_t)n);
+	char *s = (char *)malloc((size_t)n); /* scratch */
 	if (!s) return NULL;
 	WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL);
 	return s;
@@ -319,7 +319,7 @@ static int stat_handle(HANDLE h, kml_stat *st, int as_link) {
 	if ((mode & S_IFMT) == S_IFLNK) {
 		char *tgt = reparse_target_utf8(h);
 		st->st_size = tgt ? (int64_t)strlen(tgt) : 0;
-		if (tgt) free(tgt);
+		if (tgt) free(tgt); /* scratch */
 	}
 	st->st_blksize = 4096;
 	// 512-byte units of what the file actually occupies (libuv:
@@ -551,8 +551,8 @@ int open(const char *path, int flags, ...) {
 		}
 		HANDLE h = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 		                       NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
-		if (h == INVALID_HANDLE_VALUE) { errno = win_errno(GetLastError()); free(w); return -1; }
-		free(w);
+		if (h == INVALID_HANDLE_VALUE) { errno = win_errno(GetLastError()); free(w); return -1; } /* scratch */
+		free(w); /* scratch */
 		int fd = _open_osfhandle((intptr_t)h, CRT_O_BINARY | CRT_O_RDONLY);
 		if (fd < 0) { CloseHandle(h); errno = L_EMFILE; return -1; }
 		return fd;
@@ -607,7 +607,7 @@ void *opendir(const char *path) {
 	wchar_t *w = to_wide(path);
 	if (!w) return NULL;
 	size_t len = wcslen(w);
-	wchar_t *pat = (wchar_t *)malloc((len + 3) * sizeof(wchar_t));
+	wchar_t *pat = (wchar_t *)malloc((len + 3) * sizeof(wchar_t)); /* scratch */
 	if (!pat) { free_keep_err(w); errno = L_ENOSPC; return NULL; }
 	wcscpy(pat, w);
 	if (len > 0 && pat[len - 1] != L'\\' && pat[len - 1] != L'/') pat[len++] = L'\\';
@@ -618,7 +618,7 @@ void *opendir(const char *path) {
 	free_keep_err(w);
 	if (a == INVALID_FILE_ATTRIBUTES) { free_keep_err(pat); return failp(); }
 	if (!(a & FILE_ATTRIBUTE_DIRECTORY)) { free_keep_err(pat); errno = L_ENOTDIR; return NULL; }
-	kml_dir *d = (kml_dir *)calloc(1, sizeof *d);
+	kml_dir *d = (kml_dir *)calloc(1, sizeof *d); /* scratch */
 	if (!d) { free_keep_err(pat); errno = L_ENOSPC; return NULL; }
 	d->h = FindFirstFileW(pat, &d->fd);
 	free_keep_err(pat);
@@ -710,13 +710,13 @@ static int posix_rename(const wchar_t *from, const wchar_t *to) {
 	if (h == INVALID_HANDLE_VALUE) return 0;
 	size_t n = wcslen(to);
 	size_t bytes = sizeof(kml_rename_ex) + n * sizeof(WCHAR);
-	kml_rename_ex *ri = (kml_rename_ex *)calloc(1, bytes);
+	kml_rename_ex *ri = (kml_rename_ex *)calloc(1, bytes); /* scratch */
 	if (!ri) { CloseHandle(h); return 0; }
 	ri->Flags = KML_RENAME_REPLACE | KML_RENAME_POSIX | KML_RENAME_IGNORE_READONLY;
 	ri->FileNameLength = (DWORD)(n * sizeof(WCHAR));
 	memcpy(ri->FileName, to, n * sizeof(WCHAR));
 	BOOL ok = SetFileInformationByHandle(h, (FILE_INFO_BY_HANDLE_CLASS)KML_FileRenameInfoEx, ri, (DWORD)bytes);
-	free(ri);
+	free(ri); /* scratch */
 	CloseHandle(h);
 	return ok ? 1 : 0;
 }
@@ -885,10 +885,10 @@ static char *final_path_utf8(HANDLE h) {
 // or NULL with the Win32 last-error set.
 static char *realpath_walk(const wchar_t *in) {
 	static const size_t CAP = 32768;
-	wchar_t *full = (wchar_t *)malloc(CAP * sizeof(wchar_t));
-	wchar_t *acc = (wchar_t *)malloc(CAP * sizeof(wchar_t));
-	wchar_t *rest = (wchar_t *)malloc(CAP * sizeof(wchar_t));
-	wchar_t *join = (wchar_t *)malloc(CAP * sizeof(wchar_t));
+	wchar_t *full = (wchar_t *)malloc(CAP * sizeof(wchar_t)); /* scratch */
+	wchar_t *acc = (wchar_t *)malloc(CAP * sizeof(wchar_t)); /* scratch */
+	wchar_t *rest = (wchar_t *)malloc(CAP * sizeof(wchar_t)); /* scratch */
+	wchar_t *join = (wchar_t *)malloc(CAP * sizeof(wchar_t)); /* scratch */
 	char *out = NULL;
 	int hops = 0;
 	if (!full || !acc || !rest || !join) { SetLastError(ERROR_NOT_ENOUGH_MEMORY); goto done; }
@@ -927,9 +927,9 @@ restart:;
 		CloseHandle(h);
 		if (!link) continue;
 		if (!target) goto done;
-		if (++hops > 40) { free(target); SetLastError(ERROR_CANT_RESOLVE_FILENAME); goto done; }
+		if (++hops > 40) { free(target); SetLastError(ERROR_CANT_RESOLVE_FILENAME); goto done; } /* scratch */
 		wchar_t *wt = to_wide(target);
-		free(target);
+		free(target); /* scratch */
 		if (!wt) { SetLastError(ERROR_INVALID_NAME); goto done; }
 		// An absolute target replaces the walked prefix; a relative one joins
 		// onto the link's parent. Then the not-yet-walked remainder follows.
@@ -940,10 +940,10 @@ restart:;
 		} else {
 			wchar_t *last = wcsrchr(acc, L'\\');
 			size_t plen = last ? (size_t)(last - acc) + 1 : 0;
-			if (plen + wcslen(wt) + 1 >= CAP) { free(wt); SetLastError(ERROR_FILENAME_EXCED_RANGE); goto done; }
+			if (plen + wcslen(wt) + 1 >= CAP) { free(wt); SetLastError(ERROR_FILENAME_EXCED_RANGE); goto done; } /* scratch */
 			wmemcpy(join, acc, plen); wcscpy(join + plen, wt);
 		}
-		free(wt);
+		free(wt); /* scratch */
 		if (rest[0]) {
 			size_t jl = wcslen(join);
 			if (jl + 1 + wcslen(rest) + 1 >= CAP) { SetLastError(ERROR_FILENAME_EXCED_RANGE); goto done; }
@@ -957,7 +957,7 @@ restart:;
 	out = to_utf8(acc);
 	if (!out) SetLastError(ERROR_NOT_ENOUGH_MEMORY);
 done:
-	free(full); free(acc); free(rest); free(join);
+	free(full); free(acc); free(rest); free(join); /* scratch */
 	return out;
 }
 
@@ -1097,7 +1097,7 @@ static int create_junction(const wchar_t *wt, const wchar_t *wp) {
 	int absolute = wt[0] == L'\\' || wt[0] == L'/' || (wt[0] && wt[1] == L':');
 	if (!absolute) {
 		size_t pl = wcslen(wp), tl = wcslen(wt);
-		joined = (wchar_t *)malloc((pl + tl + 2) * sizeof(wchar_t));
+		joined = (wchar_t *)malloc((pl + tl + 2) * sizeof(wchar_t)); /* scratch */
 		if (!joined) { errno = L_ENOMEM; return -1; }
 		wcscpy(joined, wp);
 		wchar_t *slash = wcsrchr(joined, L'\\'), *slash2 = wcsrchr(joined, L'/');
@@ -1106,26 +1106,26 @@ static int create_junction(const wchar_t *wt, const wchar_t *wp) {
 		wcscat(joined, wt);
 		src = joined;
 	}
-	wchar_t *full = (wchar_t *)malloc(32768 * sizeof(wchar_t));
-	if (!full) { free(joined); errno = L_ENOMEM; return -1; }
+	wchar_t *full = (wchar_t *)malloc(32768 * sizeof(wchar_t)); /* scratch */
+	if (!full) { free(joined); errno = L_ENOMEM; return -1; } /* scratch */
 	DWORD fn = GetFullPathNameW(src, 32768 - 2, full, NULL);
-	free(joined);
-	if (fn == 0 || fn >= 32768 - 2) { free(full); errno = L_ENAMETOOLONG; return -1; }
+	free(joined); /* scratch */
+	if (fn == 0 || fn >= 32768 - 2) { free(full); errno = L_ENAMETOOLONG; return -1; } /* scratch */
 	// GetFullPathNameW keeps a "\\?\" prefix; the reparse data wants the bare path.
 	wchar_t *abs = full;
 	if (wcsncmp(abs, L"\\\\?\\", 4) == 0) { abs += 4; fn -= 4; }
 	if (abs[fn - 1] != L'\\') { abs[fn++] = L'\\'; abs[fn] = 0; }
 
-	if (!CreateDirectoryW(wp, NULL)) { DWORD e = GetLastError(); free(full); errno = win_errno(e); return -1; }
+	if (!CreateDirectoryW(wp, NULL)) { DWORD e = GetLastError(); free(full); errno = win_errno(e); return -1; } /* scratch */
 	HANDLE h = CreateFileW(wp, GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
 	                       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
-	if (h == INVALID_HANDLE_VALUE) { DWORD e = GetLastError(); RemoveDirectoryW(wp); free(full); errno = win_errno(e); return -1; }
+	if (h == INVALID_HANDLE_VALUE) { DWORD e = GetLastError(); RemoveDirectoryW(wp); free(full); errno = win_errno(e); return -1; } /* scratch */
 
 	size_t sub_cells = 4 + fn, print_cells = fn;
 	size_t path_bytes = (sub_cells + 1 + print_cells + 1) * sizeof(WCHAR);
 	size_t hdr = 8 /* tag, length, reserved */ + 8 /* the four name offsets/lengths */;
-	char *raw = (char *)calloc(1, hdr + path_bytes);
-	if (!raw) { CloseHandle(h); RemoveDirectoryW(wp); free(full); errno = L_ENOMEM; return -1; }
+	char *raw = (char *)calloc(1, hdr + path_bytes); /* scratch */
+	if (!raw) { CloseHandle(h); RemoveDirectoryW(wp); free(full); errno = L_ENOMEM; return -1; } /* scratch */
 	kml_reparse *rp = (kml_reparse *)raw;
 	rp->ReparseTag = IO_REPARSE_TAG_MOUNT_POINT;
 	rp->ReparseDataLength = (USHORT)(8 + path_bytes);
@@ -1141,7 +1141,7 @@ static int create_junction(const wchar_t *wt, const wchar_t *wp) {
 	BOOL ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, raw, (DWORD)(hdr + path_bytes), NULL, 0, &got, NULL);
 	DWORD e = GetLastError();
 	CloseHandle(h);
-	free(raw); free(full);
+	free(raw); free(full); /* scratch */
 	if (!ok) { RemoveDirectoryW(wp); errno = win_errno(e); return -1; }
 	return 0;
 }
@@ -1154,7 +1154,7 @@ int symlink(const char *target, const char *path) {
 	if (type == KML_LINK_JUNCTION) {
 		int r = create_junction(wt, wp);
 		int e = errno;
-		free(wt); free(wp);
+		free(wt); free(wp); /* scratch */
 		errno = e;
 		return r;
 	}
@@ -1201,7 +1201,7 @@ int __kml_win_copyfile(const char *src, const char *dst) {
 	if (!ws || !wd) { free_keep_err(ws); free_keep_err(wd); return -1; }
 	BOOL ok = CopyFileW(ws, wd, FALSE);
 	DWORD err = GetLastError();
-	free(ws); free(wd);
+	free(ws); free(wd); /* scratch */
 	if (ok) return 0;
 	errno = win_errno(err);
 	return -1;

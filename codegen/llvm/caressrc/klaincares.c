@@ -24,7 +24,6 @@
 extern uv_loop_t *__kml_loop_uv(void);
 extern void *__kml_loop_raw_alloc(size_t n);
 extern void __kml_loop_free_handle(uv_handle_t *h);
-extern void __kml_loop_fd_forget(int fd);
 #endif
 extern void *__kml_pool_begin(void *inv, void *clo);
 extern void __kml_pool_finish(void *item, int64_t err, char *res_str);
@@ -41,7 +40,7 @@ static void jb_put(kml_jbuf *b, const char *p, size_t n) {
     if (b->n + n + 1 > b->cap) {
         size_t cap = b->cap ? b->cap * 2 : 128;
         while (cap < b->n + n + 1) cap *= 2;
-        b->s = (char *)realloc(b->s, cap);
+        b->s = (char *)realloc(b->s, cap); /* scratch */
         b->cap = cap;
     }
     memcpy(b->s + b->n, p, n);
@@ -156,16 +155,15 @@ static void kml_ares_sockstate_cb(void *data, ares_socket_t sock, int read, int 
         if (!task) {
             // A new socket.
             kml_ares_start_timer(c);
-            task = (kml_ares_task *)calloc(1, sizeof *task);
+            task = (kml_ares_task *)calloc(1, sizeof *task); /* scratch */
             task->sock = sock;
             task->poll = (uv_poll_t *)__kml_loop_raw_alloc(sizeof *task->poll);
 #ifndef _WIN32
-            __kml_loop_fd_forget((int)sock);
 #endif
             if (uv_poll_init_socket(c->loop, task->poll, sock) < 0) {
                 // The socket won't be polled; the query will time out.
                 __kml_loop_free_handle((uv_handle_t *)task->poll);
-                free(task);
+                free(task); /* scratch */
                 return;
             }
             task->poll->data = task;
@@ -176,7 +174,7 @@ static void kml_ares_sockstate_cb(void *data, ares_socket_t sock, int read, int 
     } else if (task) {
         *pp = task->next;
         uv_close((uv_handle_t *)task->poll, ares_close_free);
-        free(task);
+        free(task); /* scratch */
         if (c->tasks == NULL) kml_ares_close_timer(c);
     }
 }
@@ -293,7 +291,7 @@ static char *kml_ares_str(kml_jbuf *b) {
     char *out = __kml_str_alloc(n + 1);
     memcpy(out, b->s, (size_t)n + 1);
     __kml_str_finalize(out);
-    free(b->s);
+    free(b->s); /* scratch */
     return out;
 }
 
@@ -332,7 +330,7 @@ double __kml_native_dns_channel_set_servers(double id, const char *spec) {
     for (const char *q = p; *q; q++) if (*q == '\n') len++;
     if (*p && p[strlen(p) - 1] != '\n') len++;
     if (len == 0) return ares_set_servers(c->channel, NULL);
-    struct ares_addr_port_node *servers = (struct ares_addr_port_node *)calloc((size_t)len, sizeof *servers);
+    struct ares_addr_port_node *servers = (struct ares_addr_port_node *)calloc((size_t)len, sizeof *servers); /* scratch */
     struct ares_addr_port_node *last = NULL;
     int err = 0;
     for (int i = 0; i < len && *p; i++) {
@@ -362,7 +360,7 @@ double __kml_native_dns_channel_set_servers(double id, const char *spec) {
     }
     if (err == 0) err = ares_set_servers_ports(c->channel, servers);
     else err = ARES_EBADSTR;
-    free(servers);
+    free(servers); /* scratch */
     if (err == ARES_SUCCESS) c->is_servers_default = 0;
     return err;
 }
@@ -703,11 +701,11 @@ static int parse_any(const unsigned char *buf, int len, kml_jbuf *b) {
     jb_cstr(b, "[");
     // A records, or the CNAME (ParseGeneralReply with ns_t_cname_or_a).
     int n = ttl_buffer_len(buf, len);
-    struct ares_addrttl *addrttls = (struct ares_addrttl *)calloc((size_t)n, sizeof *addrttls);
+    struct ares_addrttl *addrttls = (struct ares_addrttl *)calloc((size_t)n, sizeof *addrttls); /* scratch */
     int naddrttls = n;
     struct hostent *host = NULL;
     status = ares_parse_a_reply(buf, len, &host, addrttls, &naddrttls);
-    if (status != ARES_SUCCESS && status != ARES_ENODATA) { free(addrttls); return status; }
+    if (status != ARES_SUCCESS && status != ARES_ENODATA) { free(addrttls); return status; } /* scratch */
     if (status == ARES_SUCCESS) {
         if (host->h_name && host->h_aliases[0]) {
             jb_sep(b, &count);
@@ -725,14 +723,14 @@ static int parse_any(const unsigned char *buf, int len, kml_jbuf *b) {
         }
         ares_free_hostent(host);
     }
-    free(addrttls);
+    free(addrttls); /* scratch */
     // AAAA records.
     n = ttl_buffer_len(buf, len);
-    struct ares_addr6ttl *addr6ttls = (struct ares_addr6ttl *)calloc((size_t)n, sizeof *addr6ttls);
+    struct ares_addr6ttl *addr6ttls = (struct ares_addr6ttl *)calloc((size_t)n, sizeof *addr6ttls); /* scratch */
     int naddr6ttls = n;
     host = NULL;
     status = ares_parse_aaaa_reply(buf, len, &host, addr6ttls, &naddr6ttls);
-    if (status != ARES_SUCCESS && status != ARES_ENODATA) { free(addr6ttls); return status; }
+    if (status != ARES_SUCCESS && status != ARES_ENODATA) { free(addr6ttls); return status; } /* scratch */
     if (status == ARES_SUCCESS) {
         for (int i = 0; host->h_addr_list[i]; i++) {
             jb_sep(b, &count);
@@ -743,7 +741,7 @@ static int parse_any(const unsigned char *buf, int len, kml_jbuf *b) {
         }
         ares_free_hostent(host);
     }
-    free(addr6ttls);
+    free(addr6ttls); /* scratch */
     // MX records.
     status = parse_mx(buf, len, b, &count);
     if (status != ARES_SUCCESS && status != ARES_ENODATA) return status;
@@ -825,7 +823,7 @@ static int parse_reply(int qtype, const unsigned char *buf, int len, kml_jbuf *b
     if (qtype == ns_t_a || qtype == ns_t_aaaa) {
         int n = ttl_buffer_len(buf, len);
         size_t sz = qtype == ns_t_a ? sizeof(struct ares_addrttl) : sizeof(struct ares_addr6ttl);
-        void *ttls = calloc((size_t)n, sz);
+        void *ttls = calloc((size_t)n, sz); /* scratch */
         int nttls = n, type = qtype;
         status = parse_general(buf, len, &type, b, &count, ttls, &nttls);
         if (status == ARES_SUCCESS) {
@@ -836,7 +834,7 @@ static int parse_reply(int qtype, const unsigned char *buf, int len, kml_jbuf *b
                                                      : ((struct ares_addr6ttl *)ttls)[i].ttl));
             }
         }
-        free(ttls);
+        free(ttls); /* scratch */
     } else if (qtype == ns_t_cname || qtype == ns_t_ns || qtype == ns_t_ptr) {
         int type = qtype;
         status = parse_general(buf, len, &type, b, &count, NULL, NULL);
@@ -872,7 +870,7 @@ static void kml_ares_complete(kml_ares_query *q, int status, char *json) {
     __atomic_store_n(&q->chan->query_last_ok, status != ARES_ECONNREFUSED, __ATOMIC_RELAXED);
     __atomic_fetch_sub(&q->chan->active_query_count, 1, __ATOMIC_RELAXED);
     __kml_pool_finish(q->item, status, json);
-    free(q);
+    free(q); /* scratch */
 }
 
 static void kml_ares_query_cb(void *arg, int status, int timeouts, unsigned char *abuf, int alen) {
@@ -883,7 +881,7 @@ static void kml_ares_query_cb(void *arg, int status, int timeouts, unsigned char
         kml_jbuf b = {0};
         status = parse_reply(q->qtype, abuf, alen, &b);
         if (status == ARES_SUCCESS) json = b.s;
-        else free(b.s);
+        else free(b.s); /* scratch */
     }
     kml_ares_complete(q, status, json);
 }
@@ -919,7 +917,7 @@ double __kml_native_dns_query(double channel, double type, const char *name, voi
         if (ares_inet_pton(AF_INET, name, addr) == 1) { length = 4; family = AF_INET; }
         else if (ares_inet_pton(AF_INET6, name, addr) == 1) { length = 16; family = AF_INET6; }
         else return -1;
-        kml_ares_query *q = (kml_ares_query *)calloc(1, sizeof *q);
+        kml_ares_query *q = (kml_ares_query *)calloc(1, sizeof *q); /* scratch */
         q->chan = c; q->qtype = 0;
         kml_ares_ensure_servers(c);
         __atomic_fetch_add(&c->active_query_count, 1, __ATOMIC_RELAXED);
@@ -927,7 +925,7 @@ double __kml_native_dns_query(double channel, double type, const char *name, voi
         ares_gethostbyaddr(c->channel, addr, length, family, kml_ares_host_cb, q);
         return 0;
     }
-    kml_ares_query *q = (kml_ares_query *)calloc(1, sizeof *q);
+    kml_ares_query *q = (kml_ares_query *)calloc(1, sizeof *q); /* scratch */
     q->chan = c; q->qtype = qtype;
     kml_ares_ensure_servers(c);
     __atomic_fetch_add(&c->active_query_count, 1, __ATOMIC_RELAXED);

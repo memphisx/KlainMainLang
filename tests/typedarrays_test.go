@@ -2,7 +2,7 @@ package tests
 
 import "testing"
 
-// --- ArrayBuffer / TypedArrays (see docs/adr/ADR-00078.md, docs/tdd/TDD-00018.md) ---
+// --- ArrayBuffer / TypedArrays (see docs/adr/00/ADR-00078.md, docs/tdd/TDD-00018.md) ---
 
 func TestE2EArrayBufferByteLength(t *testing.T) {
 	assertOutput(t, `
@@ -516,5 +516,18 @@ console.log(mixed);
 const ta = new Int32Array(2);
 ta.set(mixed[1]);
 console.log(ta, mixed[1].length, mixed[0][0]);
+`)
+}
+
+func TestE2ETypedArraySetAssertedView(t *testing.T) {
+	// `v as Uint8Array` asserts, never converts: a DataView behind an
+	// ArrayBufferView is the array-like it is (no length, nothing copied).
+	assertSameAsNode(t, `
+function g(opaqueData?: NodeJS.ArrayBufferView): void {
+  const data = Buffer.alloc(opaqueData !== undefined ? opaqueData.byteLength : 0);
+  if (opaqueData !== undefined) data.set(opaqueData as Uint8Array);
+  console.log(data);
+}
+g(new Uint8Array([1, 2, 3])); g(); g(new DataView(new ArrayBuffer(5)));
 `)
 }

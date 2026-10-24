@@ -60,7 +60,7 @@ double __kml_native_sqlite_open(const char *path, double flags, double timeout, 
     sqlite3 *db = NULL;
     int rc = sqlite3_open_v2(path, &db, (int)flags | SQLITE_OPEN_URI, NULL);
     if (rc != SQLITE_OK) {
-        free(sq_open_err);
+        free(sq_open_err); /* scratch */
         sq_open_err = strdup(db ? sqlite3_errmsg(db) : sqlite3_errstr(rc));
         sq_open_code = db ? sqlite3_extended_errcode(db) : rc;
         if (db) sqlite3_close_v2(db);
@@ -74,7 +74,7 @@ double __kml_native_sqlite_open(const char *path, double flags, double timeout, 
     if (timeout > 0) sqlite3_busy_timeout(db, (int)timeout);
     if (sq_db_n == sq_db_cap) {
         int nc = sq_db_cap ? sq_db_cap * 2 : 8;
-        sqlite3 **nt = (sqlite3 **)calloc((size_t)nc, sizeof *nt);
+        sqlite3 **nt = (sqlite3 **)calloc((size_t)nc, sizeof *nt); /* scratch */
         if (sq_db) memcpy(nt, sq_db, (size_t)sq_db_cap * sizeof *nt);
         sq_db = nt;
         sq_db_cap = nc;
@@ -171,7 +171,7 @@ double __kml_native_sqlite_prepare(double id, const char *sql) {
     if (!st) return -2;
     if (sq_st_n == sq_st_cap) {
         int nc = sq_st_cap ? sq_st_cap * 2 : 16;
-        sqlite3_stmt **nt = (sqlite3_stmt **)calloc((size_t)nc, sizeof *nt);
+        sqlite3_stmt **nt = (sqlite3_stmt **)calloc((size_t)nc, sizeof *nt); /* scratch */
         if (sq_st) memcpy(nt, sq_st, (size_t)sq_st_cap * sizeof *nt);
         sq_st = nt;
         sq_st_cap = nc;
@@ -370,14 +370,14 @@ static void sq_x_step(sqlite3_context *c, int n, sqlite3_value **v) { sq_call(c,
 static void sq_x_final(sqlite3_context *c) { sq_call(c, 2, 0, NULL); }
 static void sq_x_value(sqlite3_context *c) { sq_call(c, 3, 0, NULL); }
 static void sq_x_inverse(sqlite3_context *c, int n, sqlite3_value **v) { sq_call(c, 4, n, v); }
-static void sq_x_destroy(void *p) { free(p); }
+static void sq_x_destroy(void *p) { free(p); } /* scratch */
 
 // flags: 1 deterministic, 2 direct only. kind: 0 a scalar function, 1 an
 // aggregate, 2 an aggregate window function (with inverse).
 double __kml_native_sqlite_create_function(double id, const char *name, double argc, double flags, double kind, void *inv, void *clo) {
     sqlite3 *db = sq_db_get(id);
     if (!db) return SQLITE_MISUSE;
-    kml_sqlite_fn *fn = (kml_sqlite_fn *)calloc(1, sizeof *fn);
+    kml_sqlite_fn *fn = (kml_sqlite_fn *)calloc(1, sizeof *fn); /* scratch */
     fn->inv = inv;
     fn->clo = clo;
     int tf = SQLITE_UTF8;
@@ -524,7 +524,7 @@ double __kml_native_sqlite_session_create(double id, const char *dbname, const c
     if (rc != SQLITE_OK) return -2 - rc;
     if (sq_ss_n == sq_ss_cap) {
         int nc = sq_ss_cap ? sq_ss_cap * 2 : 8;
-        kml_sqlite_session **nt = (kml_sqlite_session **)calloc((size_t)nc, sizeof *nt);
+        kml_sqlite_session **nt = (kml_sqlite_session **)calloc((size_t)nc, sizeof *nt); /* scratch */
         if (sq_ss) memcpy(nt, sq_ss, (size_t)sq_ss_cap * sizeof *nt);
         sq_ss = nt;
         sq_ss_cap = nc;
@@ -652,7 +652,7 @@ double __kml_native_sqlite_backup_init(double id, const char *source, const char
     sqlite3 *dest = NULL;
     int rc = sqlite3_open_v2(path, &dest, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_URI, NULL);
     if (rc != SQLITE_OK) {
-        free(sq_open_err);
+        free(sq_open_err); /* scratch */
         sq_open_err = strdup(dest ? sqlite3_errmsg(dest) : sqlite3_errstr(rc));
         if (dest) sqlite3_close_v2(dest);
         return -1 - rc;
@@ -660,15 +660,15 @@ double __kml_native_sqlite_backup_init(double id, const char *source, const char
     sqlite3_backup *b = sqlite3_backup_init(dest, target, db, source);
     if (!b) {
         rc = sqlite3_extended_errcode(dest);
-        free(sq_open_err);
+        free(sq_open_err); /* scratch */
         sq_open_err = strdup(sqlite3_errmsg(dest));
         sqlite3_close_v2(dest);
         return -1 - rc;
     }
     if (sq_bk_n == sq_bk_cap) {
         int nc = sq_bk_cap ? sq_bk_cap * 2 : 4;
-        sqlite3_backup **nb = (sqlite3_backup **)calloc((size_t)nc, sizeof *nb);
-        sqlite3 **nd = (sqlite3 **)calloc((size_t)nc, sizeof *nd);
+        sqlite3_backup **nb = (sqlite3_backup **)calloc((size_t)nc, sizeof *nb); /* scratch */
+        sqlite3 **nd = (sqlite3 **)calloc((size_t)nc, sizeof *nd); /* scratch */
         if (sq_bk) {
             memcpy(nb, sq_bk, (size_t)sq_bk_cap * sizeof *nb);
             memcpy(nd, sq_bk_dest, (size_t)sq_bk_cap * sizeof *nd);
@@ -701,7 +701,7 @@ double __kml_native_sqlite_backup_finish(double bid) {
     if (i < 0 || i >= sq_bk_n || !sq_bk[i]) return SQLITE_MISUSE;
     int rc = sqlite3_backup_finish(sq_bk[i]);
     if (rc != SQLITE_OK) {
-        free(sq_open_err);
+        free(sq_open_err); /* scratch */
         sq_open_err = strdup(sqlite3_errmsg(sq_bk_dest[i]));
     }
     sqlite3_close_v2(sq_bk_dest[i]);

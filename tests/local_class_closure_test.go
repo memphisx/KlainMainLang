@@ -187,3 +187,21 @@ const C1 = counter(10), C2 = counter(20);
 console.log(C1.next(), C1.next(), C2.next(), C1.v, C2.v);
 `, "10 11 1 0\n101 101 0 100\n11.5 22.5 1.5 20\n[ 'base', 'count' ] [ 'base', 'count' ]\n[class D] { base: 10, count: 101 } 20\n10 5\n11 12 21 12 21")
 }
+
+// `++this.v` in a static method, called directly and through a boxed class
+// value: `this` is the class, its static read as declared.
+func TestE2EStaticThisUpdate(t *testing.T) {
+	assertSameAsNode(t, `class T { static v = 5; static next() { return ++this.v; } static back() { return this.v--; } }
+console.log(T.next(), T.back(), T.v);
+function counter(start: number) {
+  return class {
+    static v = start;
+    static next() { return ++this.v; }
+  };
+}
+const K: any = counter(10);
+console.log(K.next(), K.next(), K.v);
+const L: any = T;
+console.log(L.next(), L.v);
+`)
+}

@@ -595,3 +595,32 @@ e.emit('m', 'mem', 7)
 console.log(b.emitted)
 `, "cpu 42\nmem 7\n2")
 }
+
+// A typed event map types each event's arguments and listeners, as
+// @types/node's conditional types do; with no map every event takes any.
+func TestE2EEventEmitterTypedMapChecked(t *testing.T) {
+	assertSameAsNode(t, `import { EventEmitter } from "events";
+const e = new EventEmitter<{ data: [number, string]; end: [] }>();
+e.on("data", (n, s) => console.log(n + 1, s.length));
+e.once("data", (n) => n.toFixed());
+e.emit("data", 41, "abc");
+e.emit("end");
+console.log(e.listenerCount("data"), e.eventNames());
+const plain = new EventEmitter();
+plain.on("x", (a, b) => console.log(a + b));
+plain.emit("x", 1, 2);
+class My extends EventEmitter<{ ping: [number] }> {}
+const m = new My();
+m.on("ping", (v) => console.log(v.toFixed(1)));
+m.emit("ping", 3);
+`)
+	for _, c := range []struct{ src, want string }{
+		{`e.emit("undeclared");`, "argument of type '[]' is not assignable to parameter of type 'never'"},
+		{`e.emit("data", "bad", 1);`, "argument of type 'string' is not assignable to parameter of type 'number'"},
+		{`e.on("end", (x: number) => {});`, "argument of type '(x: number) => void' is not assignable to parameter"},
+	} {
+		syncCompileError(t, `import { EventEmitter } from "events";
+const e = new EventEmitter<{ data: [number, string]; end: [] }>();
+`+c.src, c.want)
+	}
+}

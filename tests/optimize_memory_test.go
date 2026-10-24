@@ -43,11 +43,12 @@ function f(i: number): number {
 }
 console.log(f(1))
 `)
-	// The layout is the header word plus the two fields (24 bytes).
-	if strings.Contains(ir, "@calloc(i64 1, i64 24)") {
+	// The layout is the header word, the two fields, the presence word and
+	// the key-order slot (40 bytes).
+	if strings.Contains(ir, "@calloc(i64 1, i64 40)") {
 		t.Errorf("non-escaping literal still calloc'd:\n%s", ir)
 	}
-	if !strings.Contains(ir, "alloca { i64, double, double }") {
+	if !strings.Contains(ir, "alloca { i64, double, double, i64, ptr }") {
 		t.Errorf("expected a stack alloca for the literal")
 	}
 }
@@ -69,7 +70,7 @@ console.log(make(1).x)
 stash(2)
 console.log(keep.length)
 `)
-	if c := strings.Count(ir, "call ptr @calloc(i64 1, i64 24)"); c != 2 {
+	if c := strings.Count(ir, "call ptr @calloc(i64 1, i64 40)"); c != 2 {
 		t.Errorf("expected both escaping literals on the heap (2 callocs), got %d", c)
 	}
 }
@@ -339,4 +340,36 @@ console.log(pen.length)
 	}
 	compareLines(t, strings.TrimRight(string(out), "\n"), want)
 	assertOutput(t, src, want)
+}
+
+// A closure that hands itself on from its own body (a 'drain' re-arm)
+// outlives its block, and a builtin module's global object outlives the
+// module's init (ADR-01713): both stay on the heap.
+func TestE2EOptimizeMemorySelfReferencingClosure(t *testing.T) {
+	const src = `
+import { EventEmitter } from 'events'
+import { Readable } from 'stream'
+const em = new EventEmitter()
+let n = 0
+function arm(): void {
+  const again = () => { n++; if (n < 3) em.once('tick', again) }
+  em.once('tick', again)
+}
+arm()
+setTimeout(() => {
+  const filler: number[] = []
+  for (let i = 0; i < 1000; i++) filler.push(i)
+  for (let i = 0; i < 5; i++) em.emit('tick')
+  console.log("ticks", n)
+  Readable.from(["a", "b"]).on('data', (c: string) => console.log(c))
+}, 0)
+`
+	for _, mm := range []string{"auto", ""} {
+		binFile := buildBinaryOptimizeMemory(t, src, mm)
+		out, err := exec.Command(binFile).Output()
+		if err != nil {
+			t.Fatalf("-mm=%s run: %v\n%s", mm, err, out)
+		}
+		compareLines(t, strings.TrimRight(string(out), "\n"), "ticks 3\na\nb")
+	}
 }

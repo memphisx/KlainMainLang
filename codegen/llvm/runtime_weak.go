@@ -46,9 +46,6 @@ func (e *Emitter) WeakSource() string {
 		// objects, which the microtask runtime releases.
 		src = "#define KML_WEAK_NATIVES 1\n" + src
 	}
-	if e.isGCMode() {
-		return "#define KML_GC 1\n" + src
-	}
 	return src
 }
 
@@ -61,7 +58,7 @@ func (e *Emitter) ensureWeakHelpers() {
 		return
 	}
 	e.usedWeakHelpers = true
-	e.emitGlobal(`declare ptr @__kml_weak_create()
+	e.emitGlobal(`declare ptr @__kml_weak_create(i64)
 declare void @__kml_weak_set(ptr, ptr, i64)
 declare i64 @__kml_weak_get(ptr, ptr)
 declare zeroext i1 @__kml_weak_has(ptr, ptr)

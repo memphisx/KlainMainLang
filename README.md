@@ -38,7 +38,8 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - OpenSSL 3's **libssl**, needed only if the compiled program uses the `tls` module (`tls.connect`/`tls.createServer`) or a `WebSocket` (its URL scheme — `ws://` vs `wss://` — is a runtime value, so any WebSocket program links libssl) — ships alongside libcrypto (`brew install openssl@3` / `apt-get install libssl-dev` / `apk add openssl-dev`). `tls` is OpenSSL-only (`-crypto=commoncrypto` is rejected for it). Same conditional-linking convention: a program that doesn't use `tls` never links libssl. See [docs/tdd/TDD-00109.md](docs/tdd/TDD-00109.md)
 - **libuv**, needed by every program with an event loop (timers with promises, `fetch`, servers, child processes, fs.watch, Workers): the loop runs on libuv, as Node's does (`brew install libuv` / `apt-get install libuv1-dev` / `apk add libuv-dev`). A program with no asynchronous work never links it. See [docs/tdd/TDD-00244.md](docs/tdd/TDD-00244.md)
 - **c-ares**, needed by a program using the `dns` module: its resolver is Node's, over c-ares (`brew install c-ares` / `apt-get install libc-ares-dev` / `apk add c-ares-dev`).
-- **libnghttp2**, needed if the compiled program calls `http.listen` — the server transparently accepts cleartext HTTP/2 (h2c) via nghttp2's session API, so every `http.listen` program links `-lnghttp2` (`brew install nghttp2` / `apt-get install libnghttp2-dev` / `apk add nghttp2-dev`). Same conditional-linking convention: a program without `http.listen` never links it. See [docs/tdd/TDD-00111.md](docs/tdd/TDD-00111.md)
+- **libnghttp2**, needed by a program that serves HTTP/2: `http2`, and `klain:http`'s `listen` on its default `native` backend, which accepts cleartext HTTP/2 (h2c) beside HTTP/1.1 (`brew install nghttp2` / `apt-get install libnghttp2-dev` / `apk add nghttp2-dev`). A program serving neither never links it. See [docs/tdd/TDD-00111.md](docs/tdd/TDD-00111.md)
+- **libh2o** (the libuv build), needed only for `klain:http` with `-http-backend=h2o` (`apt-get install libh2o-dev`; no macOS or MSYS2 package, so those keep the default `native` backend). See [docs/tdd/TDD-00255.md](docs/tdd/TDD-00255.md)
 - a **system webview**, needed only if the compiled program constructs a `Webview` (`import { Webview } from 'klain:webview'`) — the desktop-window module compiles a vendored C++ binding over the OS browser engine. **macOS needs nothing** (WebKit.framework ships with the OS). Linux needs the WebKitGTK dev packages at build time (`apt-get install libgtk-4-dev libwebkitgtk-6.0-dev`, or the older `libgtk-3-dev libwebkit2gtk-4.1-dev`; Fedora: `gtk4-devel webkitgtk6.0-devel`) and the matching shared libs at run time. Windows needs only the WebView2 SDK header at build time (`pacman -S mingw-w64-ucrt-x86_64-webview2-loader`); it renders with the Edge WebView2 runtime that is part of Windows 10/11, and nothing ships beside the app. Same conditional-linking convention: a program without a `Webview` never links it. `new Webview({ serve: embedDir('./dist') })` (`embedDir` from `klain:assets`) embeds a built SPA/SSG directory into the binary and serves it from an in-binary static server — a single-file desktop app with no external `dist/`. See [docs/status/DESKTOP-WEBVIEW.md](docs/status/DESKTOP-WEBVIEW.md)
 
 ### Windows
@@ -202,6 +203,16 @@ klainmain [flags] <file.ts>
                 Web Crypto semantics. See docs/tdd/TDD-00104.md and
                 docs/tdd/TDD-00177.md.
   
+  -http-backend <b>
+                klain:http server backend, used only when a program imports
+                klain:http: native (default — libuv TCP handles, a parser per
+                connection with llhttp's rules, h2c over nghttp2; every
+                platform) or h2o (libh2o's libuv build, Linux, libh2o-dev).
+                h2o buffers a request's whole body (up to 1 GiB) before the
+                handler runs, where native runs it at 10 MiB and streams the
+                rest. The handler contract is identical across backends. See
+                docs/tdd/TDD-00255.md.
+  
   -webview <b>  klain:webview engine backend, selected only when a program
                 opens a webview window: system (default — the per-platform
                 system engine: WebKitGTK/WKWebView/WebView2), sailfish (a
@@ -218,6 +229,14 @@ klainmain [flags] <file.ts>
                 effort JS-faithful — e.g. real-JS/browser global shadowing).
                 Constructor-style Map/Date/RegExp stay reserved either way.
   
+  -no-unused-locals, -no-unused-parameters
+                TypeScript's noUnusedLocals and noUnusedParameters: a
+                local, import or private member (resp. a parameter or type
+                parameter) that nothing reads is a compile error with tsc's
+                code (TS6133 and its group forms). A name starting with _ is
+                exempt where tsc exempts it. Strict lane only; ignored with
+                a warning under -compat=js.
+
   -regex <m>    RegExp dialect: es-unicode (default) / ecmascript / es-utf16 /
                 es-ascii / pcre. See docs/tdd/TDD-00067.md.
 
@@ -398,7 +417,7 @@ subsystems still build for the host — compile them natively on the target OS).
 
 ## Test262 conformance
 
-The conformance reports under [`docs/testing/`](docs/testing/) are generated, not hand-written — regenerate them, don't edit them. They're produced by running the *full, unfiltered* upstream [tc39/test262](https://github.com/tc39/test262) suite (53k+ files) through this compiler's own real pipeline (`parser.Parse` → `llvm.NewEmitter`/`EmitProgram` → `clang`, the same path `tests/compiler_test.go` uses), giving a real external conformance number rather than a hand-curated one. See [TDD-00008](docs/tdd/TDD-00008.md) (Design V2) and [ADR-00153](docs/adr/ADR-00153.md) for the full design/investigation.
+The conformance reports under [`docs/testing/`](docs/testing/) are generated, not hand-written — regenerate them, don't edit them. They're produced by running the *full, unfiltered* upstream [tc39/test262](https://github.com/tc39/test262) suite (53k+ files) through this compiler's own real pipeline (`parser.Parse` → `llvm.NewEmitter`/`EmitProgram` → `clang`, the same path `tests/compiler_test.go` uses), giving a real external conformance number rather than a hand-curated one. See [TDD-00008](docs/tdd/TDD-00008.md) (Design V2) and [ADR-00153](docs/adr/00/ADR-00153.md) for the full design/investigation.
 
 Each report is written **once per `-compat` flag**, into its own folder — `docs/testing/strict/` and `docs/testing/js/` — so each flag's history is independently diffable and a regression that only shows up under one flag is a clean per-file delta. Alongside Test262 there are two companion oracles regenerated the same way: `make conformance-node` (Node-core `test/parallel` behavioral suite) and `make conformance-ts` (the TypeScript accept/reject oracle). See [`docs/testing/README.md`](docs/testing/README.md) for the index.
 

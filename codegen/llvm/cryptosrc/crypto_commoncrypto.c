@@ -83,7 +83,7 @@ static int kml_der_put(kml_der *d, const unsigned char *p, size_t n) {
         size_t nc = (d->cap ? d->cap * 2 : 256);
         unsigned char *nb;
         while (nc < d->len + n) nc *= 2;
-        nb = (unsigned char *)realloc(d->buf, nc);
+        nb = (unsigned char *)realloc(d->buf, nc); /* scratch */
         if (!nb) return 0;
         d->buf = nb;
         d->cap = nc;
@@ -209,7 +209,7 @@ static ll kml_rsa_wrap(const unsigned char *pkcs1, size_t p1len, int isPriv,
              kml_der_put(&d, derNull, 2) && kml_der_hdr(&d, 0x03, p1len + 1) &&
              kml_der_put(&d, &zero, 1) && kml_der_put(&d, pkcs1, p1len);
     }
-    if (!ok) { free(d.buf); return -1; }
+    if (!ok) { free(d.buf); return -1; } /* scratch */
     *out = d.buf;
     *outLen = (ll)d.len;
     return 0;
@@ -258,7 +258,7 @@ static ll kml_ec_wrap(ll curveId, const unsigned char *x963, size_t xlen,
              kml_der_put(&d, oid, oidn) && kml_der_hdr(&d, 0x03, ptLen + 1) &&
              kml_der_put(&d, &zero, 1) && kml_der_put(&d, x963, ptLen);
     }
-    if (!ok) { free(d.buf); return -1; }
+    if (!ok) { free(d.buf); return -1; } /* scratch */
     *out = d.buf;
     *outLen = (ll)d.len;
     return 0;
@@ -576,7 +576,7 @@ static long long kncc_alloc(void) {
     for (long long i = 0; i < kncc_cap; i++)
         if (kncc_tab[i].kind == KNCC_FREE) return i;
     long long ncap = kncc_cap ? kncc_cap * 2 : 16;
-    kncc_handle *t = (kncc_handle *)realloc(kncc_tab, (size_t)ncap * sizeof *t);
+    kncc_handle *t = (kncc_handle *)realloc(kncc_tab, (size_t)ncap * sizeof *t); /* scratch */
     if (!t) return -1;
     memset(t + kncc_cap, 0, (size_t)(ncap - kncc_cap) * sizeof *t);
     long long id = kncc_cap;
@@ -595,7 +595,7 @@ static void kncc_release(kncc_handle *h) {
     if (h->cipher) {
         if (h->cipher->cc) CCCryptorRelease(h->cipher->cc);
         memset(h->cipher, 0, sizeof *h->cipher);
-        free(h->cipher);
+        free(h->cipher); /* scratch */
     }
     memset(h, 0, sizeof *h);
 }
@@ -707,12 +707,12 @@ static void kncc_rand_work(void *job, long long *err, double *res) {
     kncc_rand_job *j = (kncc_rand_job *)job;
     *err = (j->len == 0 || SecRandomCopyBytes(kSecRandomDefault, (size_t)j->len, j->p) == errSecSuccess) ? 0 : 1;
     *res = 0;
-    free(j);
+    free(j); /* scratch */
 }
 
 void __kml_native_crypto_random_fill_async(void *data, long long size, double offset, double length, void *inv, void *clo) {
     long long off = (long long)offset, len = (long long)length;
-    kncc_rand_job *j = (kncc_rand_job *)malloc(sizeof *j);
+    kncc_rand_job *j = (kncc_rand_job *)malloc(sizeof *j); /* scratch */
     if (off < 0 || len < 0 || off + len > size) len = 0, off = 0;
     j->p = (unsigned char *)data + off;
     j->len = len;
@@ -864,9 +864,9 @@ static long long kncc_scrypt(const unsigned char *pw, size_t pwlen, const unsign
     if (maxmem == 0) maxmem = 1024 * 1024 * 32;
     if (Blen + Vlen > maxmem) { kncc_set_err(KNCC_E_MEMLIMIT); return 1; }
     if (outlen == 0) return 0;
-    unsigned char *B = (unsigned char *)malloc((size_t)Blen);
-    uint32_t *V = (uint32_t *)malloc((size_t)(32 * r * N * 4));
-    uint32_t *XY = (uint32_t *)malloc((size_t)(64 * r * 4));
+    unsigned char *B = (unsigned char *)malloc((size_t)Blen); /* scratch */
+    uint32_t *V = (uint32_t *)malloc((size_t)(32 * r * N * 4)); /* scratch */
+    uint32_t *XY = (uint32_t *)malloc((size_t)(64 * r * 4)); /* scratch */
     long long rc = 1;
     if (B && V && XY &&
         CCKeyDerivationPBKDF(kCCPBKDF2, (const char *)pw, pwlen, salt, saltlen, kCCPRFHmacAlgSHA256, 1, B, (size_t)Blen) ==
@@ -877,7 +877,7 @@ static long long kncc_scrypt(const unsigned char *pw, size_t pwlen, const unsign
             rc = 0;
     }
     if (B) memset(B, 0, (size_t)Blen);
-    free(B); free(V); free(XY);
+    free(B); free(V); free(XY); /* scratch */
     return rc;
 }
 
@@ -913,14 +913,14 @@ static long long kncc_kdf_run(kncc_kdf *k) {
 }
 
 static unsigned char *kncc_dup(const void *p, long long n) {
-    unsigned char *d = (unsigned char *)malloc((size_t)(n > 0 ? n : 1));
+    unsigned char *d = (unsigned char *)malloc((size_t)(n > 0 ? n : 1)); /* scratch */
     if (n > 0) memcpy(d, p, (size_t)n);
     return d;
 }
 
 static kncc_kdf *kncc_kdf_new(double op, void *a, long long alen, void *b, long long blen, void *c, long long clen,
                               double n1, double n2, double n3, double n4, const char *digest, void *out, long long outlen) {
-    kncc_kdf *k = (kncc_kdf *)calloc(1, sizeof *k);
+    kncc_kdf *k = (kncc_kdf *)calloc(1, sizeof *k); /* scratch */
     k->op = (int)op;
     k->a = kncc_dup(a, alen); k->alen = alen;
     k->b = kncc_dup(b, blen); k->blen = blen;
@@ -933,7 +933,7 @@ static kncc_kdf *kncc_kdf_new(double op, void *a, long long alen, void *b, long 
 }
 
 static void kncc_kdf_free(kncc_kdf *k) {
-    free(k->a); free(k->b); free(k->c); free(k);
+    free(k->a); free(k->b); free(k->c); free(k); /* scratch */
 }
 
 /* 0 ok, 1 failed, 2 an unknown digest. */
@@ -1047,7 +1047,7 @@ double __kml_native_crypto_cipher_new(const char *alg, void *key, long long keyL
     if (mode == KC_ECB && ivLen != 0) return -3;
     if ((mode == KC_CBC || mode == KC_CTR) && ivLen != 16) return -3;
     if (mode == KC_GCM && ivLen <= 0) return -3;
-    kncc_cipher *c = (kncc_cipher *)calloc(1, sizeof *c);
+    kncc_cipher *c = (kncc_cipher *)calloc(1, sizeof *c); /* scratch */
     if (!c) return -1;
     c->mode = mode;
     c->encrypt = encrypt != 0;
@@ -1095,13 +1095,13 @@ double __kml_native_crypto_cipher_new(const char *alg, void *key, long long keyL
     }
     if (st != kCCSuccess) {
         if (c->cc) CCCryptorRelease(c->cc);
-        free(c);
+        free(c); /* scratch */
         return -1;
     }
     long long id = kncc_alloc();
     if (id < 0) {
         CCCryptorRelease(c->cc);
-        free(c);
+        free(c); /* scratch */
         return -1;
     }
     kncc_tab[id].kind = KNCC_CIPHER;
@@ -1634,7 +1634,7 @@ static unsigned char *kncc_pem_decode(const char *pem, char *label, size_t label
         dek[k] = 0;
         body = blank + 2;
     }
-    unsigned char *out = (unsigned char *)malloc((size_t)(end - body) + 1);
+    unsigned char *out = (unsigned char *)malloc((size_t)(end - body) + 1); /* scratch */
     size_t n = 0;
     unsigned acc = 0;
     int bits = 0;
@@ -1643,7 +1643,7 @@ static unsigned char *kncc_pem_decode(const char *pem, char *label, size_t label
         int v = kncc_b64val(*p);
         if (v < 0) {
             if (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') continue;
-            free(out);
+            free(out); /* scratch */
             return NULL;
         }
         acc = acc << 6 | (unsigned)v;
@@ -1665,20 +1665,20 @@ static int kncc_der_eq(const unsigned char *c, size_t clen, const unsigned char 
 static int kncc_cbc_decrypt(CCAlgorithm alg, const unsigned char *key, size_t keylen, const unsigned char *iv,
                             const unsigned char *in, size_t n, unsigned char **out, size_t *outn) {
     size_t moved = 0;
-    unsigned char *buf = (unsigned char *)malloc(n + 16);
+    unsigned char *buf = (unsigned char *)malloc(n + 16); /* scratch */
     if (!buf) return 2;
     /* The padding is checked here: CCCrypt does not reject a bad one. */
     size_t bs = alg == kCCAlgorithmAES ? 16 : 8;
     if (n == 0 || n % bs || CCCrypt(kCCDecrypt, alg, 0, key, keylen, iv, in, n, buf, n + 16, &moved) != kCCSuccess ||
         moved != n) {
-        free(buf);
+        free(buf); /* scratch */
         return 1;
     }
     unsigned char pad = buf[n - 1];
     int bad = pad == 0 || pad > bs;
     for (size_t i = 0; !bad && i < pad; i++) bad = buf[n - 1 - i] != pad;
     if (bad) {
-        free(buf);
+        free(buf); /* scratch */
         return 1;
     }
     moved = n - pad;
@@ -1882,11 +1882,11 @@ static SecKeyRef kncc_ec_priv(const unsigned char *c, size_t clen, ll *curve) {
     ll cb = kml_curve_bytes(*curve);
     if (!cb || !pt || ptlen != (size_t)(1 + 2 * cb) || kn > (size_t)cb) return NULL;
     size_t xl = ptlen + (size_t)cb;
-    unsigned char *x = (unsigned char *)calloc(1, xl);
+    unsigned char *x = (unsigned char *)calloc(1, xl); /* scratch */
     memcpy(x, pt, ptlen);
     memcpy(x + ptlen + ((size_t)cb - kn), k, kn);
     SecKeyRef sk = kml_seckey_import(x, xl, 0, 1);
-    free(x);
+    free(x); /* scratch */
     return sk;
 }
 
@@ -1903,14 +1903,14 @@ static int kncc_parse_key(const char *pem, int wantPriv, const unsigned char *pa
          * PUBKEY decoder does; then the private read asks for the phrase. */
         if (passLen < 0) {
             kncc_set_err(KNCC_E_INTERRUPTED);
-            free(der);
+            free(der); /* scratch */
             return 0;
         }
         unsigned char *plain = NULL;
         size_t plen = 0;
         int rc = dek[0] ? kncc_decrypt_legacy(dek, der, n, pass, (size_t)passLen, &plain, &plen)
                         : kncc_decrypt_pkcs8(der, n, pass, (size_t)passLen, &plain, &plen);
-        free(der);
+        free(der); /* scratch */
         if (rc != 0) {
             if (rc == 1) kncc_set_err(KNCC_E_BAD_DECRYPT);
             return 0;
@@ -1974,7 +1974,7 @@ static int kncc_parse_key(const char *pem, int wantPriv, const unsigned char *pa
         ok = key->sk != NULL;
     }
 done:
-    free(der);
+    free(der); /* scratch */
     if (!ok && key->sk) {
         CFRelease(key->sk);
         key->sk = NULL;
@@ -2025,8 +2025,8 @@ static char *kncc_keygen_pem(double type, double bits, double exponent, const ch
         if (SecRandomCopyBytes(kSecRandomDefault, 32, seed) != errSecSuccess) return NULL;
         if (t == 2) kncc_ed_pub(seed, pub);
         else kncc_x25519(pub, seed, nine);
-        spki = (unsigned char *)malloc(44);
-        pkcs8 = (unsigned char *)malloc(48);
+        spki = (unsigned char *)malloc(44); /* scratch */
+        pkcs8 = (unsigned char *)malloc(48); /* scratch */
         static const unsigned char sp[] = {0x30, 0x2a, 0x30, 0x05};
         static const unsigned char pk[] = {0x30, 0x2e, 0x02, 0x01, 0x00, 0x30, 0x05};
         memcpy(spki, sp, 4);
@@ -2048,15 +2048,15 @@ static char *kncc_keygen_pem(double type, double bits, double exponent, const ch
     kncc_pem_append(&d, "PRIVATE KEY", pkcs8, (size_t)p8len);
     kml_der_put(&d, (const unsigned char *)"", 1);
     memset(pkcs8, 0, (size_t)p8len);
-    free(pkcs8);
-    free(spki);
+    free(pkcs8); /* scratch */
+    free(spki); /* scratch */
     return (char *)d.buf;
 }
 
 char *__kml_native_crypto_keygen(double type, double bits, double exponent, const char *curve) {
     char *pem = kncc_keygen_pem(type, bits, exponent, curve);
     char *out = kncc_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -2067,11 +2067,11 @@ static void kncc_keygen_work(void *job, long long *err, double *res) {
     char *pem = kncc_keygen_pem(j->type, j->bits, j->exponent, j->curve);
     *err = pem ? 0 : 1;
     *res = (double)(intptr_t)pem;
-    free(j);
+    free(j); /* scratch */
 }
 
 void __kml_native_crypto_keygen_async(double type, double bits, double exponent, const char *curve, void *inv, void *clo) {
-    kncc_keygen_job *j = (kncc_keygen_job *)calloc(1, sizeof *j);
+    kncc_keygen_job *j = (kncc_keygen_job *)calloc(1, sizeof *j); /* scratch */
     j->type = type; j->bits = bits; j->exponent = exponent;
     snprintf(j->curve, sizeof j->curve, "%s", curve ? curve : "");
     __kml_pool_job(kncc_keygen_work, j, inv, clo);
@@ -2080,7 +2080,7 @@ void __kml_native_crypto_keygen_async(double type, double bits, double exponent,
 char *__kml_native_crypto_keygen_take(double result) {
     char *pem = (char *)(intptr_t)result;
     char *out = kncc_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 

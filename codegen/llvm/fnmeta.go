@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"KlainMainLang/checker"
+	"KlainMainLang/lib"
 	_ "embed"
 	"fmt"
 	"reflect"
@@ -53,24 +54,49 @@ type fnMetaEntry struct {
 	name   string
 	length int
 	kind   int
+	src    string // its source text (Function.prototype.toString), "" for none
+	island string // the dynamic-only file it was registered in (unitRow.island)
+}
+
+// fnMetaSource gives the function registered under sym its source text,
+// as a later registerFnMeta of the node it was compiled from knows it.
+func (e *Emitter) fnMetaSource(sym string, src ast.SourceRange) {
+	text := src.String()
+	if text == "" {
+		return
+	}
+	for i := len(e.fnMetas) - 1; i >= 0; i-- {
+		if e.fnMetas[i].sym == sym {
+			if e.fnMetas[i].src == "" {
+				e.fnMetas[i].src = text
+			}
+			return
+		}
+	}
 }
 
 // registerFnMeta records a function's metadata under its code symbol. The
 // first registration of a symbol wins (a memoized trampoline is registered
-// once however many references reach it).
+// once however many references reach it), once per lazy shared library:
+// a dynamic-only file's own table does not stand in for the executable's.
 func (e *Emitter) registerFnMeta(sym, name string, length, kind int) {
 	if e.fnMetaSeen == nil {
 		e.fnMetaSeen = map[string]bool{}
 	}
-	if e.fnMetaSeen[sym] {
+	if e.fnMetaSeen[e.curDynFile+"\x00"+sym] {
 		return
 	}
-	e.fnMetaSeen[sym] = true
+	e.fnMetaSeen[e.curDynFile+"\x00"+sym] = true
 	// A `[Symbol.x]` member (named "@@x") is named `[Symbol.x]`, as in JS.
 	if strings.HasPrefix(name, "@@") {
 		name = "[Symbol." + strings.TrimPrefix(name, "@@") + "]"
 	}
-	e.fnMetas = append(e.fnMetas, fnMetaEntry{sym: sym, name: name, length: length, kind: kind})
+	// A library function a builtin lowers to (`// kml:lower process.nextTick`)
+	// is named for the builtin: `nextTick`.
+	if path, ok := lib.LoweredFuncUses()[name]; ok && len(path) > 0 {
+		name = path[len(path)-1]
+	}
+	e.fnMetas = append(e.fnMetas, fnMetaEntry{sym: sym, name: name, length: length, kind: kind, island: e.curDynFile})
 }
 
 // fnLengthFromParams is Function.prototype.length: the parameters before the
@@ -91,6 +117,9 @@ func fnLengthFromParams(params []ast.Param) int {
 func fnLengthFromSig(sig FuncSig) int {
 	n := 0
 	for i := range sig.ParamTypes {
+		if i == 0 && sig.This {
+			continue // the `this` parameter
+		}
 		if sig.HasRest && i == len(sig.ParamTypes)-1 {
 			break
 		}
@@ -128,11 +157,14 @@ func (e *Emitter) ensureFnMeta() {
 	e.emitGlobal("declare ptr @__kml_fn_name_hdr(ptr)")
 	e.emitGlobal("declare i64 @__kml_fn_length_hdr(ptr)")
 	e.emitGlobal("declare ptr @__kml_fn_name_dyn(ptr)")
+	e.emitGlobal("declare ptr @__kml_fn_tostring_dyn(ptr)")
+	e.emitGlobal("declare i64 @__kml_fn_static_get(ptr, ptr)")
 	e.emitGlobal("declare i64 @__kml_fn_length_dyn(ptr)")
 	e.emitGlobal("declare ptr @__kml_fn_props_dyn(ptr)")
 	e.emitGlobal("declare ptr @__kml_fn_props_dyn_make(ptr, ptr, ptr, ptr)")
 	e.emitGlobal("declare i1 @__kml_fn_has_builtin(ptr, i1)")
-	e.emitGlobal("declare i1 @__kml_array_has_key(i64, ptr, i1)")
+	e.emitGlobal("declare i1 @__kml_fn_has_proto_member(ptr)")
+	e.emitGlobal("declare i1 @__kml_array_has_key(i64, ptr, i1, i64)")
 	e.emitGlobal("declare i64 @__kml_fn_thunk_box(ptr, ptr)")
 }
 
@@ -159,11 +191,13 @@ func (e *Emitter) ensureFnBagSeed() {
 }
 
 // FnMetaCFlags passes the NaN-box double offset and the configurable
-// attribute bit fnmeta.c's bag seed uses.
+// attribute bit fnmeta.c's bag seed uses, and the null and undefined words.
 func (e *Emitter) FnMetaCFlags() []string {
 	return []string{
 		"-DKML_NB_DOUBLE_OFFSET=" + strconv.FormatInt(nbDoubleOffset, 10) + "LL",
 		"-DKML_DYN_ATTR_CONFIGURABLE=" + strconv.Itoa(dynAttrConfigurable),
+		"-DKML_NB_NULL=" + strconv.FormatInt(nbNull, 10) + "LL",
+		"-DKML_NB_UNDEFINED=" + strconv.FormatInt(nbUndefined, 10) + "LL",
 	}
 }
 
@@ -181,8 +215,14 @@ func (e *Emitter) emitFnMetaFinalize() {
 	// finds a function's row there. The registry links even with no rows.
 	e.ensureUnitReg()
 	for _, m := range e.fnMetas {
-		e.addUnitRowLit(unitKindFnMeta, "{ i64, ptr, i64, i64 }", fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), ptr %s, i64 %d, i64 %d }",
-			m.sym, e.internString(m.name), m.length, m.kind))
+		src := "null"
+		if m.src != "" {
+			src = e.internString(m.src)
+		}
+		e.curDynFile = m.island
+		e.addUnitRowLit(unitKindFnMeta, "{ i64, ptr, i64, i64, ptr }", fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), ptr %s, i64 %d, i64 %d, ptr %s }",
+			m.sym, e.internString(m.name), m.length, m.kind, src))
+		e.curDynFile = ""
 	}
 }
 
@@ -194,6 +234,7 @@ func (e *Emitter) emitFnMetaFinalize() {
 // this pass having to learn about them.
 func (e *Emitter) inferFunctionNames(prog *ast.Program) {
 	e.fnLitNames = map[ast.Node]string{}
+	e.objLitMethods = map[ast.Node]bool{}
 	name := func(expr ast.Expression, n string) {
 		for {
 			switch w := expr.(type) {
@@ -214,7 +255,7 @@ func (e *Emitter) inferFunctionNames(prog *ast.Program) {
 				e.fnLitNames[lit] = n
 			}
 		case *ast.ClassExpression:
-			if lit.Decl != nil && lit.Decl.Name == "" {
+			if lit.Decl != nil && anonymousClass(lit) {
 				e.fnLitNames[lit] = n
 			}
 		}
@@ -252,6 +293,11 @@ func (e *Emitter) inferFunctionNames(prog *ast.Program) {
 					for _, p := range n.Properties {
 						if p.KeyExpr == nil && p.Key != "" && p.AccessorKind == "" {
 							name(p.Value, p.Key)
+							// A function (not an arrow) called as the object's
+							// method: Node's frame names its receiver.
+							if fe, ok := p.Value.(*ast.FunctionExpression); ok {
+								e.objLitMethods[fe] = true
+							}
 						}
 					}
 				case *ast.ClassDeclaration:
@@ -265,6 +311,16 @@ func (e *Emitter) inferFunctionNames(prog *ast.Program) {
 			walk(v.Elem())
 			return
 		case reflect.Struct:
+			switch el := v.Interface().(type) {
+			case ast.ArrayPatternElem:
+				if el.Default != nil && el.Name != "" && el.SubArray == nil && el.SubObject == nil {
+					name(el.Default, unmangleTopLevelName(el.Name))
+				}
+			case ast.DestructProp:
+				if el.Default != nil && el.Local != "" && el.SubArray == nil && el.SubObject == nil {
+					name(el.Default, unmangleTopLevelName(el.Local))
+				}
+			}
 			if v.Type() == reflect.TypeOf(ast.Param{}) {
 				p := v.Interface().(ast.Param)
 				if p.Default != nil && p.ArrayPattern == nil && p.ObjectPattern == nil {
@@ -290,6 +346,11 @@ func (e *Emitter) inferFunctionNames(prog *ast.Program) {
 		}
 	}
 	walk(reflect.ValueOf(prog))
+	// A generator's destructured parameters, already moved into the
+	// statements its start runs (desugarGeneratorPatternParams).
+	for _, sts := range e.genPatternInits {
+		walk(reflect.ValueOf(sts))
+	}
 }
 
 // fnLitName returns a literal's inferred name ("" when anonymous).
@@ -302,7 +363,7 @@ func (e *Emitter) fnLitName(lit ast.Node) string {
 // function renders `undefined`.
 func (e *Emitter) emitInspectFunc(v Value) Value {
 	e.ensureFnMeta()
-	if !v.Ty.Nullable && !v.Ty.IsUndefined {
+	if !v.Ty.Nullable() && !v.Ty.IsUndefined() {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_inspect_hdr(ptr %s)", r, v.Ref))
 		return Value{Ref: r, Ty: TypePtr}
@@ -333,7 +394,14 @@ func (e *Emitter) emitIntToPtr(i64Reg string) string {
 // caller's own default in place (it may reference sibling parameters, not yet
 // in scope).
 func (e *Emitter) paramDefaultType(p ast.Param) (Type, bool) {
+	if (p.ArrayPattern != nil || p.ObjectPattern != nil) && p.Type == nil && p.Default != nil && !p.Rest && !e.compatJS() {
+		return e.patternDefaultType(p)
+	}
 	if p.Type != nil || p.Default == nil || p.Rest || p.ArrayPattern != nil || p.ObjectPattern != nil {
+		return Type{}, false
+	}
+	// JavaScript binds whatever is passed (`f(null)`): the call sites decide.
+	if e.compatJS() {
 		return Type{}, false
 	}
 	switch d := p.Default.(type) {
@@ -347,17 +415,17 @@ func (e *Emitter) paramDefaultType(p ast.Param) (Type, bool) {
 	case *ast.BooleanLiteral:
 		return TypeBool, true
 	case *ast.ArrayLiteral:
-		if t := e.inferArrayType(d); t.IsArray && t.ElemType != nil {
+		if t := e.inferArrayType(d); t.IsArray() && t.ElemType != nil {
 			return t, true
 		}
 	case *ast.ObjectLiteral:
-		if t := e.inferObjectType(d); t.IsObject && !t.IsDynamicObject {
+		if t := e.inferObjectType(d); t.IsObject() && !t.IsDynamicObject() {
 			return t, true
 		}
 	case *ast.Identifier:
 		// A module-level binding's type is fixed before any function is
 		// emitted (TDD-00093), so `c = SUFFIX` takes SUFFIX's type.
-		if g, ok := e.moduleGlobals[d.Name]; ok && g.Ty.IR != "" && !g.Ty.IsDynamic {
+		if g, ok := e.moduleGlobals[d.Name]; ok && g.Ty.IR != "" && !g.Ty.IsDynamic() {
 			return g.Ty, true
 		}
 	}
@@ -373,6 +441,68 @@ func (e *Emitter) paramDefaultType(p ast.Param) (Type, bool) {
 			case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 				return TypeBool, true
 			}
+			// An object, function or array default (`a = console.log`,
+			// `a = v`): the checker's type as the oracle represents it, a
+			// box when none holds it — never the number fallback a value
+			// of another kind cannot convert to.
+			if t.Flags&checker.Object != 0 {
+				if rt, ok := e.repr().of(t); ok && rt.IR != "" && rt.IR != "void" {
+					return rt, true
+				}
+				return TypeAny, true
+			}
+		}
+	}
+	return Type{}, false
+}
+
+// patternDefaultType is an unannotated destructured parameter's type from
+// its default, as the checker gives it: an array pattern over an array
+// literal is the tuple of its widened elements (`[x, y] = [1, "a"]` is
+// [number, string]), held as an array when they are of one kind; an object
+// pattern takes the literal's object type.
+func (e *Emitter) patternDefaultType(p ast.Param) (Type, bool) {
+	// The checker's type, mapped as the oracle maps it, when it has one.
+	// An object pattern keeps the literal's own layout below: a defaulted
+	// key the argument omits must read absent, which the optional field of
+	// a layout from `{ a = 1 } = {}` does not hold for a number.
+	if c := e.front(); c != nil {
+		if ct := c.PatternDefaultType(p); !c.Unanswered(ct) {
+			if t, ok := e.repr().of(ct); ok && !t.IsDynamic() {
+				return t, true
+			}
+		}
+	}
+	switch d := p.Default.(type) {
+	case *ast.ArrayLiteral:
+		if p.ArrayPattern == nil || len(d.Elements) == 0 {
+			return Type{}, false
+		}
+		elems := make([]Type, 0, len(d.Elements))
+		for _, x := range d.Elements {
+			if _, spread := x.(*ast.SpreadElement); spread {
+				return Type{}, false
+			}
+			et := e.inferExprType(x)
+			if et.IsStrLiteral() {
+				et = TypePtr
+			}
+			elems = append(elems, et)
+		}
+		// An inferred tuple of one element kind is the array codegen
+		// builds (reprCtx.of); mixed kinds keep their positions.
+		for _, et := range elems[1:] {
+			if reprKey(et) != reprKey(elems[0]) {
+				return TupleType(elems), true
+			}
+		}
+		if t := e.inferArrayType(d); t.IsArray() && t.ElemType != nil {
+			return t, true
+		}
+		return Type{}, false
+	case *ast.ObjectLiteral:
+		if t := e.inferObjectType(d); p.ObjectPattern != nil && t.IsObject() && !t.IsDynamicObject() {
+			return t, true
 		}
 	}
 	return Type{}, false

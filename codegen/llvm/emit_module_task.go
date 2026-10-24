@@ -43,14 +43,6 @@ func ModuleTaskSource() string { return layoutHeader() + moduleTaskSource }
 // UsesModuleTask reports whether the program links module.c.
 func (e *Emitter) UsesModuleTask() bool { return e.usedModuleTaskRuntime }
 
-// ModuleTaskCFlags: module.c restores the GC stack bottom after a swap.
-func (e *Emitter) ModuleTaskCFlags() []string {
-	if e.isGCMode() {
-		return []string{"-DKLAIN_GC=1"}
-	}
-	return nil
-}
-
 // tlaUnsettledMsg is what Node prints (first line) for a module whose top-level
 // await can never settle.
 const tlaUnsettledMsg = "Warning: Detected unsettled top-level await\n"
@@ -95,8 +87,7 @@ func (e *Emitter) ensureModuleTaskRuntime() {
 	e.emitGlobal(`@__kml_module_task = external thread_local global ptr, align 8
 @__kml_module_wants_loop = external thread_local global i1, align 1
 @__kml_module_promise = external thread_local global ptr, align 8
-declare void @__kml_module_trampoline()
-declare void @__kml_module_run_loop()`)
+declare void @__kml_module_trampoline()`)
 }
 
 // moduleBodySplit holds main()'s builders while the module body is emitted into
@@ -104,12 +95,16 @@ declare void @__kml_module_run_loop()`)
 type moduleBodySplit struct {
 	allocas, body strings.Builder
 	blockDone     bool
+	// main()'s shadow-call-stack state; the body's fiber has its own.
+	frame, frameOld string
+	sitePos         []ast.Pos
 }
 
 // beginModuleBody switches emission from main() to @__kml_module_body. Called
 // after main()'s prologue, before the first top-level statement.
 func (e *Emitter) beginModuleBody() *moduleBodySplit {
-	s := &moduleBodySplit{blockDone: e.blockDone}
+	s := &moduleBodySplit{blockDone: e.blockDone, frame: e.frame, frameOld: e.frameOld, sitePos: e.sitePos}
+	e.frame, e.frameOld, e.sitePos = "", "", nil
 	s.allocas.WriteString(e.allocas.String())
 	s.body.WriteString(e.body.String())
 	e.allocas = strings.Builder{}
@@ -133,6 +128,7 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 	e.allocas.WriteString(s.allocas.String())
 	e.body.WriteString(s.body.String())
 	e.blockDone = s.blockDone
+	e.frame, e.frameOld, e.sitePos = s.frame, s.frameOld, s.sitePos
 
 	e.ensureModuleTaskRuntime()
 	prom := e.freshReg()
@@ -156,7 +152,7 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 
 // emitModuleLoopResume closes main()'s loop around the event loop: when the loop
 // returned because the module task asked for an inline run of it
-// (@__kml_module_run_loop), resume the task and run the loop again.
+// (__kml_module_park_for_loop), resume the task and run the loop again.
 func (e *Emitter) emitModuleLoopResume(loopL string) {
 	wants := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i1, ptr @__kml_module_wants_loop, align 1", wants))

@@ -33,10 +33,9 @@ try { execSync("exit 3", { stdio: "pipe" }) } catch (e: any) { console.log(Objec
 
 // ADR-01319: an Error subclass's instance prints as an error — Node's
 // header (`G [Error]` when the class is not what the name says), then its
-// own properties — without the stack's frames, which this compiler has no
-// equivalent of.
+// frames, then its own properties.
 func TestE2EErrorSubclassInspect(t *testing.T) {
-	assertOutput(t, `
+	assertSameAsNodeFrames(t, `
 class G extends Error {}
 class Gx extends Error { kode = 7; constructor(m: string) { super(m); this.name = "Gx"; } }
 console.log(new G("g"));
@@ -45,7 +44,7 @@ console.log([new Gx("n")], { e: new Error("o") });
 const t = new TypeError("x");
 (t as any).extra1 = 5;
 console.log(t);
-`, "G [Error]: g\nGx: m {\n  kode: 7\n}\n[\n  Gx: n {\n    kode: 7\n  }\n] { e: Error: o }\nTypeError: x {\n  extra1: 5\n}")
+`)
 }
 
 // ADR-01319: an Error's own enumerable keys and JSON: its subclass's fields,
@@ -85,5 +84,18 @@ try { throw n; } catch (e) {
 const a: any = n;
 console.log(a.status, a.code, a instanceof AppError);
 Promise.allSettled([Promise.reject(n)]).then((r) => console.log(JSON.stringify(r)));
+`)
+}
+
+// An error with own properties past the depth limit is its bracketed
+// constructor name; a subclass may declare a field named `extra`
+// (ADR-01718).
+func TestE2EErrorWithPropsPastDepth(t *testing.T) {
+	assertSameAsNode(t, `const e: any = new TypeError("x"); e.code = "C";
+console.log({ a: { b: { c: e } } });
+console.log({ a: { b: { c: new Error("y", { cause: 1 }) } } });
+class MyErr extends Error { extra = 2 }
+const m = new MyErr("z");
+console.log({ a: { b: { c: m } } }, m.extra);
 `)
 }

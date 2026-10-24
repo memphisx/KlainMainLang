@@ -25,7 +25,7 @@ typedef struct {
 static void push(segs *s, const char *p, i64 len) {
     if (s->len + 1 > s->cap) {
         i64 nc = s->cap * 2 > 8 ? s->cap * 2 : 8;
-        s->v = (seg *)realloc(s->v, (size_t)nc * sizeof(seg));
+        s->v = (seg *)realloc(s->v, (size_t)nc * sizeof(seg)); /* scratch */
         s->cap = nc;
     }
     s->v[s->len].p = p;
@@ -84,6 +84,6 @@ char *__kml_path_normalize(const char *raw, _Bool is_absolute) {
         }
         *w = 0;
     }
-    free(s.v);
+    free(s.v); /* scratch */
     return out;
 }

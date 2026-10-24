@@ -10,7 +10,7 @@ import (
 // new Set<T>()/new EventEmitter<T>()) could only ever appear directly as a
 // const/let initializer — not as a call argument, a return value, an
 // object-literal field value, or a plain reassignment target. See
-// docs/tdd/TDD-00028.md and docs/adr/ADR-00104.md.
+// docs/tdd/TDD-00028.md and docs/adr/00/ADR-00104.md.
 
 func TestE2ELeadingDotFloatLiteral(t *testing.T) {
 	// A fraction written without a leading integer digit (`.9`, `-.9`) is valid

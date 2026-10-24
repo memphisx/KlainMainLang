@@ -10,7 +10,7 @@ export const kClearLine = kEscape + '[2K';
 export const kClearScreenDown = kEscape + '[0J';
 
 function invalidArgValue(name: string, value: any): Error {
-    return new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' is invalid. Received " + String(value));
+    return NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' is invalid. Received " + String(value));
 }
 
 function done(callback: any): boolean {
@@ -21,7 +21,7 @@ function done(callback: any): boolean {
 // Moves the cursor to (x, y), or to column x of the current line.
 export function cursorTo(stream: any, x: any, y?: any, callback?: any): boolean {
     if (callback !== undefined && typeof callback !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
     }
     if (typeof y === 'function') {
         callback = y;
@@ -32,7 +32,7 @@ export function cursorTo(stream: any, x: any, y?: any, callback?: any): boolean 
     if (stream === null || stream === undefined || (typeof x !== 'number' && typeof y !== 'number')) {
         return done(callback);
     }
-    if (typeof x !== 'number') throw new NodeTypeError('ERR_INVALID_CURSOR_POS', 'Cannot set cursor row without setting its column');
+    if (typeof x !== 'number') throw NodeTypeError('ERR_INVALID_CURSOR_POS', 'Cannot set cursor row without setting its column');
     const data = typeof y !== 'number' ? kEscape + '[' + (x + 1) + 'G' : kEscape + '[' + (y + 1) + ';' + (x + 1) + 'H';
     return stream.write(data, callback);
 }
@@ -40,7 +40,7 @@ export function cursorTo(stream: any, x: any, y?: any, callback?: any): boolean 
 // Moves the cursor relative to its current position.
 export function moveCursor(stream: any, dx: number, dy: number, callback?: any): boolean {
     if (callback !== undefined && typeof callback !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
     }
     if (stream === null || stream === undefined || !(dx || dy)) return done(callback);
     let data = '';
@@ -54,7 +54,7 @@ export function moveCursor(stream: any, dx: number, dy: number, callback?: any):
 // Clears the current line: dir < 0 to its start, > 0 to its end, 0 all.
 export function clearLine(stream: any, dir: number, callback?: any): boolean {
     if (callback !== undefined && typeof callback !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
     }
     if (stream === null || stream === undefined) return done(callback);
     const type = dir < 0 ? kClearToLineBeginning : dir > 0 ? kClearToLineEnd : kClearLine;
@@ -64,7 +64,7 @@ export function clearLine(stream: any, dir: number, callback?: any): boolean {
 // Clears the screen from the cursor down.
 export function clearScreenDown(stream: any, callback?: any): boolean {
     if (callback !== undefined && typeof callback !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.');
     }
     if (stream === null || stream === undefined) return done(callback);
     return stream.write(kClearScreenDown, callback);

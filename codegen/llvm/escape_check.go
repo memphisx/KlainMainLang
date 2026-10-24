@@ -101,6 +101,10 @@ func (e *Emitter) planAutoFrees(prog *ast.Program) error {
 
 type escPlanner struct {
 	auto bool
+	// preceding: the statements before the one being walked, in its block —
+	// a closure among them may name a later binding (its captured cell) and
+	// carry it out.
+	preceding []ast.Statement
 	// stack (TDD-00134 Stage 1, -optimize-memory): this run plans stack
 	// allocations, not frees — candidacy narrows to implicit let/const object
 	// literals, verdicts land in `plan` all the same, and the finreg
@@ -391,7 +395,10 @@ func (p *escPlanner) checkOwnedArgs(fd *ast.FunctionDeclaration, call *ast.CallE
 // nested blocks and function bodies (each function body is its own analysis
 // region with its own suspension flag).
 func (p *escPlanner) walkStmts(stmts []ast.Statement, suspends bool) error {
+	saved := p.preceding
+	defer func() { p.preceding = saved }()
 	for i, stmt := range stmts {
+		p.preceding = stmts[:i]
 		if err := p.walkStmt(stmt, stmts[i+1:], suspends); err != nil {
 			return err
 		}
@@ -670,7 +677,20 @@ func (p *escPlanner) analyzeDecl(d *ast.VarDeclaration, siblingInits []ast.Expre
 	c := &escChecker{name: d.Name, finregNames: p.finregNames,
 		allowRebind: !explicit && p.auto && !p.stack}
 	var v *escViolation
+	// A closure declared earlier in the block that names this binding
+	// captures its cell, and may carry it out of the block.
+	if c.mentionsStmts(p.preceding) {
+		v = &escViolation{reason: "named by a closure declared before it", pos: d.GetPos()}
+	}
+	// A closure naming itself (`const pump = () => { res.once('drain', pump) }`)
+	// can hand itself on from inside its own body.
+	if v == nil && d.Init != nil {
+		v = c.expr(d.Init)
+	}
 	for _, init := range siblingInits {
+		if v != nil {
+			break
+		}
 		if c.aliases(init) {
 			v = &escViolation{reason: "aliased by a sibling declarator in the same statement", pos: d.GetPos()}
 			break
@@ -701,7 +721,7 @@ func (p *escPlanner) analyzeDecl(d *ast.VarDeclaration, siblingInits []ast.Expre
 	// Any violation (or a rebind) just leaves the shallow verdict.
 	if p.auto && !p.stack && !explicit && !c.rebound {
 		c2 := &escChecker{name: d.Name, finregNames: p.finregNames, interior: true}
-		ok := true
+		ok := (d.Init == nil || c2.expr(d.Init) == nil) && !c2.mentionsStmts(p.preceding)
 		for _, init := range siblingInits {
 			if c2.aliases(init) || c2.expr(init) != nil {
 				ok = false
@@ -789,6 +809,31 @@ func (c *escChecker) mentionsExpr(expr ast.Expression) bool {
 	res := map[string]bool{}
 	scanExprFV(expr, map[string]bool{}, res)
 	return res[c.name]
+}
+
+// mentionsClass reports whether a nested class's members name the binding:
+// its record keeps what they capture past the declaring block.
+func (c *escChecker) mentionsClass(d *ast.ClassDeclaration) bool {
+	if d == nil {
+		return false
+	}
+	fns := append([]*ast.FunctionDeclaration{d.Constructor}, d.Methods...)
+	for _, m := range fns {
+		if m != nil && m.Body != nil && c.mentionsStmts(m.Body.Body) {
+			return true
+		}
+	}
+	for _, f := range d.Fields {
+		if f.Initializer != nil && c.mentionsExpr(f.Initializer) {
+			return true
+		}
+	}
+	for _, b := range d.StaticBlocks {
+		if c.mentionsStmts(b.Body) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *escChecker) mentionsStmts(stmts []ast.Statement) bool {
@@ -1014,6 +1059,10 @@ func (c *escChecker) stmt(stmt ast.Statement) *escViolation {
 		if s.Body != nil && c.mentionsStmts(s.Body.Body) {
 			return &escViolation{reason: fmt.Sprintf("captured by nested function '%s'", s.Name), pos: s.GetPos()}
 		}
+	case *ast.ClassDeclaration:
+		if c.mentionsClass(s) {
+			return &escViolation{reason: fmt.Sprintf("captured by nested class '%s'", s.Name), pos: s.GetPos()}
+		}
 	case *ast.ArrayDestructuring:
 		if c.mentionsExpr(s.Init) {
 			return &escViolation{reason: "destructured from", pos: s.GetPos()}
@@ -1181,6 +1230,10 @@ func (c *escChecker) expr(expr ast.Expression) *escViolation {
 		if c.mentionsStmts(x.Body.Body) {
 			return &escViolation{reason: "captured by a closure", pos: x.GetPos()}
 		}
+	case *ast.ClassExpression:
+		if c.mentionsClass(x.Decl) {
+			return &escViolation{reason: "captured by a class", pos: x.GetPos()}
+		}
 	default:
 		if c.mentionsExpr(expr) {
 			return &escViolation{reason: "used in a construct the escape analysis doesn't model", pos: expr.GetPos()}
@@ -1235,6 +1288,10 @@ func (c *escChecker) call(x *ast.CallExpression) *escViolation {
 		// the candidate (or anything reachable through it) can extract or
 		// mutate interior pointers (`x.slice()` shares elements, `x.push(y)`
 		// plants an alias) — conservative: no deep free.
+		// Except `f.bind(...)`: the bound function holds its target.
+		if callee.Property == "bind" && c.leaks(callee.Object) {
+			return &escViolation{reason: "bound by .bind() (the bound function retains it)", pos: x.GetPos()}
+		}
 		if c.interior && c.rootedAt(callee.Object) {
 			return &escViolation{reason: "a method call on the value may extract or mutate interior pointers", pos: x.GetPos()}
 		}

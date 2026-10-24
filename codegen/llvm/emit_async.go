@@ -17,8 +17,8 @@ func (e *Emitter) emitAsyncPrologue() {
 	e.ensureMalloc()
 	size := int64(8) // default: enough for i64 / ptr
 	if e.currentPromiseTy.IR != "void" && e.currentPromiseTy.IR != "" {
-		// Array-typed promises store {ptr, i64} (16 bytes), not the bare
-		// 8-byte ptr Align() alone would suggest — see StructFieldSize.
+		// Array-typed promises store a header pointer (8 bytes) — see
+		// StructFieldSize.
 		a := StructFieldSize(e.currentPromiseTy)
 		if a > size {
 			size = a
@@ -35,36 +35,14 @@ func (e *Emitter) emitAsyncPrologue() {
 	e.coroHdl = frameReg
 }
 
-// emitAsyncEpilogue emits an implicit branch to the async-return label and the
-// return block itself.  Must be called after all body instructions.
-func (e *Emitter) emitAsyncEpilogue() {
-	e.emitTerminator(fmt.Sprintf("br label %%%s", e.coroRetLabel))
-	e.body.WriteString(fmt.Sprintf("\n%s:\n", e.coroRetLabel))
-	e.body.WriteString(fmt.Sprintf("  ret ptr %s\n", e.coroHdl))
-}
+// emitInlineAsyncPrologue / emitInlineAsyncEpilogue are the inline (non-fiber)
+// async model: the settled task-promise wrapper (TDD-00084 Part A).
+func (e *Emitter) emitInlineAsyncPrologue() { e.emitSettledAsyncPrologue() }
 
-// emitInlineAsyncPrologue / emitInlineAsyncEpilogue choose the inline (non-fiber)
-// async model: the settled task-promise wrapper (TDD-00084 Part A) for an ordinary
-// async function/arrow, or the old bare-slot model for an http.listen handler,
-// which the connection-fiber dispatcher reads directly (not as a task promise).
-func (e *Emitter) emitInlineAsyncPrologue() {
-	if e.emittingHTTPHandler {
-		e.emitAsyncPrologue()
-	} else {
-		e.emitSettledAsyncPrologue()
-	}
-}
-
-func (e *Emitter) emitInlineAsyncEpilogue() {
-	if e.emittingHTTPHandler {
-		e.emitAsyncEpilogue()
-	} else {
-		e.emitSettledAsyncEpilogue()
-	}
-}
+func (e *Emitter) emitInlineAsyncEpilogue() { e.emitSettledAsyncEpilogue() }
 
 // asyncSlotSize is the byte size of the coroHdl return-value slot for a
-// Promise<T> — enough for the marshalled value (array T is {ptr,i64} = 16).
+// Promise<T> — enough for the marshalled value (array T is a header pointer = 8).
 func asyncSlotSize(pty Type) int64 {
 	if pty.IR == "void" || pty.IR == "" {
 		return 1 // Promise<void>: one byte, never written
@@ -107,13 +85,7 @@ func (e *Emitter) emitSettledAsyncPrologue() {
 	// proper starts at async.body.
 	e.asyncCatchLabel = e.freshLabel("async.caught")
 	bodyL := e.freshLabel("async.body")
-	jb := e.freshReg()
-	sj := e.freshReg()
-	threw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-	e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(jb)))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, e.asyncCatchLabel, bodyL))
+	e.excEnter(e.asyncCatchLabel, bodyL)
 	e.emitLabel(bodyL)
 }
 
@@ -127,13 +99,13 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	setResolved := func(state int) {
 		rp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
-		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", state, rp))
+		e.heapStore("i64", fmt.Sprint(state), rp, 8)
 	}
 
 	// --- normal completion: fulfill ---
 	e.emitTerminator("br label %" + e.coroRetLabel)
 	e.emitLabel(e.coroRetLabel)
-	e.emitInstr("call void @__kml_pop_jmpbuf()")
+	e.excLeave()
 	if h, ok := e.emitAdoptedResult(); ok {
 		// A returned promise: this one adopts its state (spec timing).
 		fulfillL, adoptL := e.freshLabel("async.fulfill"), e.freshLabel("async.adopt")
@@ -142,7 +114,7 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, fulfillL, adoptL))
 		e.emitLabel(adoptL)
 		e.emitInstr(fmt.Sprintf("call void @__kml_promise_adopt(ptr %s, ptr %s)", prom, h))
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
+		e.heapFree(e.coroHdl)
 		e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
 		e.emitLabel(fulfillL)
 	}
@@ -156,9 +128,9 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 		e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", prom, valReg))
 	} else {
 		if pty.IR != "void" && pty.IR != "" {
-			if pty.IsArray {
+			if pty.IsArray() {
 				// The return-value slot holds a header pointer (TDD-00213 Stage 2);
-				// deref it to the aggregate before decomposing into the promise value.
+				// load it as the array value before storing into the promise.
 				e.storePromiseValue(prom, e.loadArraySlotAggregate(e.coroHdl, pty))
 			} else {
 				valReg := e.freshReg()
@@ -168,7 +140,7 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 		}
 		setResolved(1)
 	}
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
+	e.heapFree(e.coroHdl)
 	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
 
 	// --- throw caught: reject ---
@@ -186,7 +158,7 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	setResolved(2)
 	e.ensureUnhandledRejections()
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_note_rejected(ptr %s)", prom))
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", e.coroHdl))
+	e.heapFree(e.coroHdl)
 	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
 }
 
@@ -210,7 +182,7 @@ func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef str
 		idx, _, _ := respTy.FieldIndex(name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, respReg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, ref, gep, align))
+		e.heapStore(ir, ref, gep, align)
 	}
 	// status is a `number` (float64) field (TDD-00123); the runtime hands an i64.
 	statusF := e.freshReg()
@@ -229,6 +201,8 @@ func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef str
 // emitAwait evaluates the Promise (a ptr to the heap slot), loads the resolved
 // value, frees the slot, and returns the inner value.
 func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
+	// A suspended async function's frame is at its await, as V8 shows it.
+	defer e.callSite(ex.GetPos())()
 	e.sawAwait = true // the enclosing async callable runs as a coroutine (TDD-00223 §2)
 	hdlVal, err := e.emitExpr(ex.Argument)
 	if err != nil {
@@ -258,11 +232,12 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 		}
 		hdlVal, argTy = pv, pv.Ty
 	}
-	// A dynamic value may hold a promise: await it, or the value itself.
-	if hdlVal.Ty.IsDynamic && !argTy.IsPromise && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
+	// A dynamic value may hold a promise: await it, or the value itself
+	// (whatever promise inference expected: the box is what was emitted).
+	if hdlVal.Ty.IsDynamic() && (!argTy.IsPromise() || !hdlVal.Ty.IsPromise()) && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
 		return e.emitAwaitAny(hdlVal)
 	}
-	if !hdlVal.Ty.IsPromise && !argTy.IsPromise {
+	if !hdlVal.Ty.IsPromise() && !argTy.IsPromise() {
 		inAsyncGenBody := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
 		if ((e.isAsync || e.inModuleTask) && e.currentGenerator == nil && e.hasMaySuspend) || inAsyncGenBody {
 			e.ensurePromiseRuntime()
@@ -275,7 +250,7 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 			// store (no settle-drain) is safe here.
 			rp := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
-			e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", rp))
+			e.heapStore("i64", "1", rp, 8)
 			return e.emitAwaitTaskPromise(prom, hdlVal.Ty)
 		}
 		// Every module top level with an await is a coroutine now — the entry
@@ -292,9 +267,9 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 
 	// Determine the unwrapped type (T in Promise<T>).
 	var promiseTy Type
-	if hdlVal.Ty.IsPromise && hdlVal.Ty.PromiseType != nil {
+	if hdlVal.Ty.IsPromise() && hdlVal.Ty.PromiseType != nil {
 		promiseTy = *hdlVal.Ty.PromiseType
-	} else if argTy.IsPromise && argTy.PromiseType != nil {
+	} else if argTy.IsPromise() && argTy.PromiseType != nil {
 		promiseTy = *argTy.PromiseType
 	} else {
 		promiseTy = TypeVoid
@@ -305,7 +280,7 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// level). When it has none (TDD-00084 Part A), every async result settled
 	// inline, so there is nothing to wait for — read it directly, no scheduler,
 	// no libcurl. Either way, read the marshalled value and free the promise.
-	if hdlVal.Ty.Nullable && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
+	if hdlVal.Ty.Nullable() && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
 		// `Promise<T> | null`: awaiting the null is awaiting a plain value,
 		// which the dynamic await does (a tick, then the value itself).
 		bv, err := e.emitBoxValue(hdlVal)
@@ -313,21 +288,22 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 			return Value{}, err
 		}
 		absent := int64(nbNull)
-		if hdlVal.Ty.IsUndefined {
+		if hdlVal.Ty.IsUndefined() {
 			absent = nbUndefined
 		}
 		isNull, sel := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, hdlVal.Ref))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, absent, bv.Ref))
 		v, err := e.emitAwaitAny(Value{Ref: sel, Ty: TypeAny})
-		if err != nil || promiseTy.IsDynamic || promiseTy.IR == "void" || promiseTy.IR == "" {
+		if err != nil || promiseTy.IsDynamic() || promiseTy.IR == "void" || promiseTy.IR == "" {
 			return v, err
 		}
 		target := promiseTy
 		if target.IR == "ptr" {
-			target.Nullable, target.IsUndefined = true, hdlVal.Ty.IsUndefined
+			target.setNullable(true)
+			target.setUndefined(hdlVal.Ty.IsUndefined())
 		}
-		return e.coerce(v, target), nil
+		return e.convert(v, target), nil
 	}
 	if hdlVal.Ty.PromiseTask {
 		return e.emitAwaitTaskPromise(hdlVal.Ref, promiseTy)
@@ -342,13 +318,13 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 		return Value{Ty: TypeVoid}, nil
 	}
 
-	if promiseTy.IsResponse && !promiseTy.PromiseResolved {
+	if promiseTy.IsResponse() && !promiseTy.PromiseResolved {
 		return e.emitAwaitFetchSlot(hdlVal.Ref), nil
 	}
 
-	if promiseTy.IsArray {
+	if promiseTy.IsArray() {
 		// The resolved-value buffer holds a header pointer for an array (TDD-00213
-		// Stage 2); deref it back into the {ptr,i64} aggregate.
+		// Stage 2); load it back as the array value.
 		return e.loadArraySlotAggregate(hdlVal.Ref, promiseTy), nil
 	}
 	resultReg := e.freshReg()
@@ -375,10 +351,9 @@ func (e *Emitter) emitAwaitFetchSlot(slotRef string) Value {
 	// `await p` on a fetch promise awaits the fetch's one bridge promise — the
 	// same promise `p.then(...)` reacts to — so awaits and reactions interleave
 	// in registration order and share one Response (TDD-00223 §3). An async
-	// generator's body parks its step on that promise. The http.listen handler
-	// keeps the direct wait: it parks its connection fiber on the transfer.
+	// generator's body parks its step on that promise.
 	inAsyncGen := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
-	if e.hasMaySuspend && (e.currentGenerator == nil || inAsyncGen) && !e.emittingHTTPHandler {
+	if e.hasMaySuspend && (e.currentGenerator == nil || inAsyncGen) {
 		prom := e.emitFetchHandleToPendingPromise(slotRef)
 		if v, err := e.emitAwaitTaskPromise(prom.Ref, ResponseType()); err == nil {
 			return v
@@ -410,7 +385,7 @@ func (e *Emitter) emitAwaitPromiseElem(elemRef string, elemTy Type) (Value, erro
 	if elemTy.PromiseType != nil {
 		awaitedTy = *elemTy.PromiseType
 	}
-	if awaitedTy.IsResponse && !awaitedTy.PromiseResolved && !elemTy.PromiseTask {
+	if awaitedTy.IsResponse() && !awaitedTy.PromiseResolved && !elemTy.PromiseTask {
 		return e.emitAwaitFetchSlot(elemRef), nil
 	}
 	return e.emitAwaitTaskPromise(elemRef, awaitedTy)
@@ -459,7 +434,7 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 	// combinator — freeing it here made the second read a use-after-free. The
 	// 40-byte task-promise struct leaks in manual mode, the same ambient
 	// behavior every unreclaimed allocation has (collected under `-mm=gc`).
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", rtag, rpay))
+	e.excThrowAny(rtag, rpay)
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 	if promiseTy.IR == "void" || promiseTy.IR == "" {

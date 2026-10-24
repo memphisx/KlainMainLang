@@ -53,14 +53,14 @@ static int kml_umap_eq(const kml_umap_node* n, const char* key, size_t len) {
 }
 
 static void kml_umap_reset_vec(kml_umap* u, size_t nb) {
-  free(u->vec);
-  u->vec = (kml_umap_node**)malloc(2 * nb * sizeof(kml_umap_node*));
+  free(u->vec); /* scratch */
+  u->vec = (kml_umap_node**)malloc(2 * nb * sizeof(kml_umap_node*)); /* scratch */
   for (size_t i = 0; i < 2 * nb; i++) u->vec[i] = &u->head;
   u->nbuckets = nb;
 }
 
 kml_umap* kml_umap_new(void) {
-  kml_umap* u = (kml_umap*)calloc(1, sizeof(kml_umap));
+  kml_umap* u = (kml_umap*)calloc(1, sizeof(kml_umap)); /* scratch */
   u->head.prev = u->head.next = &u->head;
   kml_umap_reset_vec(u, KML_UMAP_MIN_BUCKETS);
   return u;
@@ -146,9 +146,9 @@ int kml_umap_emplace(kml_umap* u, const char* key, size_t len, void* val) {
   kml_umap_node* dup;
   kml_umap_node* before = kml_umap_find_last(u, key, len, hash, &dup);
   if (dup) return 0;
-  kml_umap_node* n = (kml_umap_node*)malloc(sizeof(kml_umap_node));
+  kml_umap_node* n = (kml_umap_node*)malloc(sizeof(kml_umap_node)); /* scratch */
   n->hash = hash;
-  n->key = (char*)malloc(len ? len : 1);
+  n->key = (char*)malloc(len ? len : 1); /* scratch */
   memcpy(n->key, key, len);
   n->len = len;
   n->val = val;
@@ -195,8 +195,8 @@ void kml_umap_clear(kml_umap* u) {
   kml_umap_node* n = u->head.next;
   while (n != &u->head) {
     kml_umap_node* next = n->next;
-    free(n->key);
-    free(n);
+    free(n->key); /* scratch */
+    free(n); /* scratch */
     n = next;
   }
   u->head.prev = u->head.next = &u->head;
@@ -206,6 +206,6 @@ void kml_umap_clear(kml_umap* u) {
 
 void kml_umap_free(kml_umap* u) {
   kml_umap_clear(u);
-  free(u->vec);
-  free(u);
+  free(u->vec); /* scratch */
+  free(u); /* scratch */
 }

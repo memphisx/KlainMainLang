@@ -23,6 +23,7 @@ export interface EventInit {
 }
 
 export class Event {
+    get [Symbol.toStringTag](): string { return "Event" }
     static readonly NONE = 0;
     static readonly CAPTURING_PHASE = 1;
     static readonly AT_TARGET = 2;
@@ -124,6 +125,7 @@ export interface CustomEventInit extends EventInit {
 // CustomEvent<T>'s implementation: the declaration (lib/node.d.ts) carries
 // T; the value is any.
 export class CustomEvent extends Event {
+    get [Symbol.toStringTag](): string { return "CustomEvent" }
     #detail: any;
     constructor(type: string, options?: CustomEventInit) {
         if (arguments.length === 0) {
@@ -165,6 +167,7 @@ interface Registration {
 }
 
 export class EventTarget {
+    get [Symbol.toStringTag](): string { return "EventTarget" }
     #listeners = new Map<string, Registration[]>();
 
     [inspect.custom](depth: number, options: any): string {
@@ -260,6 +263,7 @@ export class EventTarget {
 }
 
 export class AbortSignal extends EventTarget {
+    get [Symbol.toStringTag](): string { return "AbortSignal" }
     // Read by fetch's native abort check (codegen/llvm/emit_signal.go):
     // #aborted, #reason, and #deadline, AbortSignal.timeout's
     // performance.now() deadline (0: none), which cancels a transfer the
@@ -349,6 +353,7 @@ export class AbortSignal extends EventTarget {
 }
 
 export class AbortController {
+    get [Symbol.toStringTag](): string { return "AbortController" }
     #signal: AbortSignal = AbortSignal._new();
     get signal(): AbortSignal { return this.#signal; }
     [inspect.custom](depth: number, options: any): string {
@@ -369,6 +374,7 @@ export interface MessageEventInit extends EventInit {
 }
 
 export class MessageEvent extends Event {
+    get [Symbol.toStringTag](): string { return "MessageEvent" }
     #data: any;
     #origin: string;
     #lastEventId: string;
@@ -399,6 +405,7 @@ export interface CloseEventInit extends EventInit {
 }
 
 export class CloseEvent extends Event {
+    get [Symbol.toStringTag](): string { return "CloseEvent" }
     #wasClean: boolean;
     #code: number;
     #reason: string;
@@ -425,6 +432,7 @@ export interface ErrorEventInit extends EventInit {
 }
 
 export class ErrorEvent extends Event {
+    get [Symbol.toStringTag](): string { return "ErrorEvent" }
     #message: string;
     #filename: string;
     #lineno: number;

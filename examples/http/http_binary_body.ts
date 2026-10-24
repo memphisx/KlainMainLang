@@ -19,6 +19,8 @@
 
 import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
+const port = Number(process.env.PORT ?? '8081')  // make examples passes a free port
+
 interface Res {
   status: number
   body: string
@@ -30,9 +32,9 @@ setTimeout(() => {
   process.exit(0)
 }, 300)
 
-console.log('listening on :8081')
+console.log('listening on :' + port)
 
-http.listen(8081, (req: HttpRequest): Res => {
+http.listen(port, (req: HttpRequest): Res => {
   // .bodyBytes() exposes the exact byte range the server already buffered
   // (Content-Length-aware, ADR-00072) — .byteLength reflects the real
   // count even when the body contains an embedded null.

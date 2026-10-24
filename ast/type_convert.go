@@ -32,7 +32,7 @@ func TypeAnnotationOfIn(n TypeNode, source, thisClass string) (*TypeAnnotation, 
 // NodeAnnotation wraps a type node without converting it: a declaration
 // file's annotation, which only the checker reads (TDD-00230 P3.1).
 func NodeAnnotation(n TypeNode, source string) *TypeAnnotation {
-	return &TypeAnnotation{Source: source, node: n}
+	return &TypeAnnotation{Source: source, node: n, nodeOnly: true}
 }
 
 type typeConverter struct{ source, thisClass string }
@@ -90,22 +90,30 @@ func (c typeConverter) convNode(n TypeNode) (*TypeAnnotation, error) {
 		if len(n.Elements) == 0 {
 			return &TypeAnnotation{Source: c.source, EmptyTuple: true}, nil
 		}
+		// A tuple with an optional or rest element has no fixed shape: its
+		// value is an array of boxed elements, as JavaScript holds it.
+		for _, el := range n.Elements {
+			if variableTupleElement(el) {
+				for _, el := range n.Elements {
+					if _, err := c.conv(tupleElementType(el)); err != nil {
+						return nil, err
+					}
+				}
+				return AnyArrayAnnotation(c.source), nil
+			}
+		}
 		elems, err := c.convList(n.Elements)
 		if err != nil {
 			return nil, err
 		}
 		return &TypeAnnotation{Source: c.source, TupleElems: elems}, nil
 	case *NamedTupleMember:
-		// The label documents the element; an optional or rest element
-		// has no storage in the fixed-shape tuple model.
-		if n.Optional || n.Rest {
-			return nil, tupleElementError(n.Range, n.Rest)
-		}
+		// The label documents the element.
 		return c.conv(n.Type)
 	case *OptionalType:
-		return nil, tupleElementError(n.Range, false)
+		return c.conv(n.Type)
 	case *RestType:
-		return nil, tupleElementError(n.Range, true)
+		return c.conv(n.Type)
 	case *UnionType:
 		return c.convUnion(n)
 	case *IntersectionType:
@@ -214,11 +222,46 @@ func (c typeConverter) convNode(n TypeNode) (*TypeAnnotation, error) {
 	return nil, fmt.Errorf("%d:%d: unsupported type syntax %T", n.GetPos().Line, n.GetPos().Col, n)
 }
 
-func tupleElementError(r Loc, rest bool) error {
-	if rest {
-		return errAt(r, diag.RestTupleElement)
+// variableTupleElement reports whether a tuple element is optional or rest.
+func variableTupleElement(n TypeNode) bool {
+	switch n := n.(type) {
+	case *NamedTupleMember:
+		return n.Optional || n.Rest
+	case *OptionalType, *RestType:
+		return true
 	}
-	return errAt(r, diag.OptionalTupleElement)
+	return false
+}
+
+// tupleElementType is a tuple element's type, without its label or marker.
+func tupleElementType(n TypeNode) TypeNode {
+	switch n := n.(type) {
+	case *NamedTupleMember:
+		return n.Type
+	case *OptionalType:
+		return n.Type
+	case *RestType:
+		return n.Type
+	}
+	return n
+}
+
+// AnyAnnotation is `any`.
+func AnyAnnotation(source string) *TypeAnnotation {
+	return &TypeAnnotation{Name: "any", Source: source}
+}
+
+// AnyArrayAnnotation is `any[]`.
+func AnyArrayAnnotation(source string) *TypeAnnotation {
+	return &TypeAnnotation{Source: source, ElemType: &TypeAnnotation{Name: "any", Source: source}}
+}
+
+// WithAnyArrayStorage is ta stored as `any[]`, still standing for ta's
+// type node (what the checker reads).
+func WithAnyArrayStorage(ta *TypeAnnotation) *TypeAnnotation {
+	out := AnyArrayAnnotation(ta.Source)
+	out.node = ta.node
+	return out
 }
 
 // errAt reports m over a node's source range.

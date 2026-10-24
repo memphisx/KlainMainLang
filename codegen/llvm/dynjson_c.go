@@ -26,10 +26,11 @@ func (e *Emitter) ensureDynJSONC() {
 		return
 	}
 	e.usedDynJSONC = true
-	e.ensureArrayGuard()    // an any-held array's writes check its integrity level
-	e.ensureShapeRuntime()  // a static object renders through its layout row (TDD-00233)
-	e.ensureDtoa()          // dynjson.c calls __kml_dtoa for float rendering
-	e.ensureInspectReduce() // and the util.inspect layout/quote helpers (ADR-01067)
+	e.ensureArrayGuard()       // an any-held array's writes check its integrity level
+	e.ensureShapeRuntime()     // a static object renders through its layout row (TDD-00233)
+	e.ensureDtoa()             // dynjson.c calls __kml_dtoa for float rendering
+	e.ensureStrHeaderRuntime() // and indexes a string by UTF-16 units (strheader.c)
+	e.ensureInspectReduce()    // and the util.inspect layout/quote helpers (ADR-01067)
 	// The any-array element helpers (ADR-01059) call ToPrimitive/ToNumber and
 	// the dynamic-object getter; the C object references them unconditionally,
 	// so they must be defined whenever the file is linked in.
@@ -56,6 +57,7 @@ func (e *Emitter) ensureDynJSONC() {
 	e.emitGlobal(`declare ptr @__kml_anyarr_flat(ptr, i64, i64)`)
 	e.emitGlobal(`declare ptr @__kml_received(i64)`)
 	e.emitGlobal(`declare i64 @__kml_anyarr_len(ptr)`)
+	e.emitGlobal(`declare ptr @__kml_anyarr_keys_c(ptr, ptr)`)
 	e.emitGlobal(`declare i32 @__kml_anyarr_typed_is(ptr, ptr)`)
 	e.emitGlobal(`declare i32 @__kml_anyarr_set_by_key(ptr, ptr, i64)`)
 	e.emitGlobal(`declare ptr @__kml_any_arraylike_f64(i64, ptr)`)

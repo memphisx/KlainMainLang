@@ -82,7 +82,6 @@ func TestFallOffClosureAgainstDeclaredTypeRejected(t *testing.T) {
 		"const g: (x: number) => number = x => { if (x > 1) return x * 2 }\nconsole.log(g(3))\n",
 		"interface H { f: (x: number) => number }\nconst h: H = { f: x => { if (x > 1) return x * 2 } }\nconsole.log(h.f(3))\n",
 		"console.log([1, 2, 3].reduce((acc, x) => { if (x > 1) return acc + x }, 0))\n",
-		"console.log([1, 2, 3].flatMap(x => { if (x > 1) return [x, x] }))\n",
 	} {
 		_, err := parseAndCompile(src)
 		if err == nil {
@@ -94,6 +93,11 @@ func TestFallOffClosureAgainstDeclaredTypeRejected(t *testing.T) {
 		if !strings.Contains(err.Error(), "falls off the end") && !strings.Contains(err.Error(), "is not assignable to") {
 			t.Errorf("unexpected error for:\n%s\n%v", src, err)
 		}
+	}
+	// flatMap's callback returns `U | ReadonlyArray<U>`: a fall-off is an
+	// undefined element, as tsc and Node take it.
+	if _, err := parseAndCompile("console.log([1, 2, 3].flatMap(x => { if (x > 1) return [x, x] }))\n"); err != nil {
+		t.Errorf("flatMap must accept a fall-off callback: %v", err)
 	}
 	// A void or `T | undefined` slot accepts the closure.
 	if _, err := parseAndCompile("const g: (x: number) => number | undefined = x => { if (x > 1) return x * 2 }\nconsole.log(g(3), g(0))\n"); err != nil {

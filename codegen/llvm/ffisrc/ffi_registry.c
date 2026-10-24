@@ -63,7 +63,7 @@ enum {
 static _Thread_local char *kffi_err;
 
 static char *kml_str(const char *s, size_t n) {
-    char *base = (char *)malloc(8 + n + 1);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, 8 + n + 1);
     *(long long *)base = (long long)n;
     memcpy(base + 8, s, n);
     base[8 + n] = 0;
@@ -72,10 +72,10 @@ static char *kml_str(const char *s, size_t n) {
 
 static void set_err(const char *prefix, const char *detail) {
     size_t n = strlen(prefix) + strlen(detail);
-    char *buf = (char *)malloc(n + 1);
+    char *buf = (char *)malloc(n + 1); /* scratch */
     snprintf(buf, n + 1, "%s%s", prefix, detail);
     kffi_err = kml_str(buf, n);
-    free(buf);
+    free(buf); /* scratch */
 }
 
 /* The message of the last failing call on this thread, as a KML string. */
@@ -90,7 +90,7 @@ long long __kml_ffi_open(char *path, KmlFfiLib **out) {
         set_err("dlopen failed: ", d ? d : "unknown error");
         return KFFI_DLOPEN;
     }
-    KmlFfiLib *lib = (KmlFfiLib *)calloc(1, sizeof(KmlFfiLib));
+    KmlFfiLib *lib = (KmlFfiLib *)calloc(1, sizeof(KmlFfiLib)); /* scratch */
     lib->handle = h;
     lib->path = path ? path : kml_str("", 0);
     lib->syms = kml_umap_new();
@@ -143,10 +143,10 @@ long long __kml_ffi_prepare(KmlFfiLib *lib, char *name, long long len, const cha
         KmlFfiFn *fn = (KmlFfiFn *)existing;
         if (strcmp(fn->sig, sig) != 0) {
             size_t n = (size_t)len + 64;
-            char *buf = (char *)malloc(n);
+            char *buf = (char *)malloc(n); /* scratch */
             int w = snprintf(buf, n, "Function %s was already requested with a different signature", name);
             kffi_err = kml_str(buf, (size_t)(w < 0 ? 0 : w));
-            free(buf);
+            free(buf); /* scratch */
             return KFFI_SIGDIFF;
         }
         *out = fn;
@@ -156,7 +156,7 @@ long long __kml_ffi_prepare(KmlFfiLib *lib, char *name, long long len, const cha
     void *p;
     long long st = resolve(lib, name, (size_t)len, &p);
     if (st != KFFI_OK) return st;
-    KmlFfiFn *fn = (KmlFfiFn *)calloc(1, sizeof(KmlFfiFn));
+    KmlFfiFn *fn = (KmlFfiFn *)calloc(1, sizeof(KmlFfiFn)); /* scratch */
     fn->cfn = p;
     fn->sig = sig;
     fn->lib = lib;
@@ -169,7 +169,7 @@ long long __kml_ffi_prepare(KmlFfiLib *lib, char *name, long long len, const cha
 /* Record a prepared function (GetFunction/GetFunctions' caching step):
  * `symbols` first, then `functions` — both no-ops for a present name. */
 void __kml_ffi_commit(KmlFfiLib *lib, KmlFfiFn *fn) {
-    size_t len = (size_t)*(long long *)(fn->name - 8);
+    size_t len = (size_t)KML_STR_LEN(fn->name);
     kml_umap_emplace(lib->syms, fn->name, len, fn->cfn);
     kml_umap_emplace(lib->fns, fn->name, len, fn);
 }

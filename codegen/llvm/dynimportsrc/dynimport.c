@@ -16,12 +16,12 @@ static void *dlopen(const char *p, int f) {
   (void)f;
   int n = MultiByteToWideChar(CP_UTF8, 0, p, -1, NULL, 0);
   if (n <= 0) return NULL;
-  wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+  wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t)); /* scratch */
   if (!w) return NULL;
   MultiByteToWideChar(CP_UTF8, 0, p, -1, w, n);
   HMODULE m = LoadLibraryW(w);
   DWORD err = GetLastError();
-  free(w);
+  free(w); /* scratch */
   SetLastError(err);
   return (void *)m;
 }
@@ -40,11 +40,11 @@ static const char *dlerror(void) { static char b[64]; snprintf(b, sizeof b, "err
 static int kml_self_path(char *buf, unsigned long cap) {
 #if defined(_WIN32)
   DWORD wcap = 32768;
-  wchar_t *w = (wchar_t *)malloc(wcap * sizeof(wchar_t));
+  wchar_t *w = (wchar_t *)malloc(wcap * sizeof(wchar_t)); /* scratch */
   if (!w) return -1;
   DWORD n = GetModuleFileNameW(NULL, w, wcap);
   int ok = n != 0 && n < wcap && WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, (int)cap, NULL, NULL) != 0;
-  free(w);
+  free(w); /* scratch */
   return ok ? 0 : -1;
 #elif defined(__APPLE__)
   unsigned int size = (unsigned int)cap;
@@ -102,3 +102,6 @@ void *__kml_dynimport_sym(void *handle, const char *symname) {
   }
   return p;
 }
+
+// The same, null when the island does not define it.
+void *__kml_dynimport_sym_opt(void *handle, const char *symname) { return dlsym(handle, symname); }

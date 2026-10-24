@@ -57,12 +57,12 @@ func TestLeadingStatus(t *testing.T) {
 
 func TestNormalizeRelations(t *testing.T) {
 	in := "- **Relations**: Extends ADR-00012, [ADR-00037](ADR-00037.md). Implements TDD-00009"
-	want := "Extends [ADR-00012](ADR-00012.md), [ADR-00037](ADR-00037.md). Implements [TDD-00009](../tdd/TDD-00009.md)"
+	want := "Extends [ADR-00012](00/ADR-00012.md), [ADR-00037](00/ADR-00037.md). Implements [TDD-00009](../tdd/TDD-00009.md)"
 	if got := normalizeRelations(in); got != want {
 		t.Errorf("normalizeRelations:\n got=%q\nwant=%q", got, want)
 	}
 	// A half-linked reference (`[ADR-00083]`) is canonicalized too.
-	if got := normalizeRelations("- **Relations**: Extends [ADR-00083]"); got != "Extends [ADR-00083](ADR-00083.md)" {
+	if got := normalizeRelations("- **Relations**: Extends [ADR-00083]"); got != "Extends [ADR-00083](00/ADR-00083.md)" {
 		t.Errorf("half-linked ref not canonicalized: %q", got)
 	}
 	// No Relations bullet → empty.

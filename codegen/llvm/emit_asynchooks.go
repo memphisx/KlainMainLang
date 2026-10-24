@@ -29,17 +29,17 @@ func (e *Emitter) wrapTimerClosureWithAsyncCtx(closurePtr string) string {
 	cc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_als_ctx_get()", cc))
 	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", closurePtr, env))
+	e.heapMallocInto(env, "16")
+	e.heapStore("ptr", closurePtr, env, 8)
 	ccp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ccp, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cc, ccp))
+	e.heapStore("ptr", cc, ccp, 8)
 	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
-	e.emitInstr(fmt.Sprintf("store ptr @__kml_als_timer_tramp, ptr %s, align 8", hdr))
+	e.heapMallocInto(hdr, "16")
+	e.heapStore("ptr", "@__kml_als_timer_tramp", hdr, 8)
 	hep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", hep, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, hep))
+	e.heapStore("ptr", env, hep, 8)
 	return hdr
 }
 

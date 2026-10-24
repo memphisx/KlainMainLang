@@ -90,7 +90,7 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 	// a non-Error caught value has no `.errors`, so an empty array.
 	if propName == "errors" {
 		resPtr := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca { ptr, i64 }, align 8", resPtr))
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
 		errL := e.freshLabel("caught.errs")
 		elseL := e.freshLabel("caught.noerrs")
 		mergeL := e.freshLabel("caught.errsmerge")
@@ -99,14 +99,14 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 		errObj := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errObj, pay))
 		arr := e.emitErrorErrorsAccess(errObj)
-		e.emitInstr(fmt.Sprintf("store { ptr, i64 } %s, ptr %s, align 8", arr.Ref, resPtr))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", arr.Ref, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(elseL)
-		e.emitInstr(fmt.Sprintf("store { ptr, i64 } { ptr null, i64 0 }, ptr %s, align 8", resPtr))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.newArrayHeader("null", "0"), resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(mergeL)
 		res := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load { ptr, i64 }, ptr %s, align 8", res, resPtr))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, resPtr))
 		return Value{Ref: res, Ty: ArrayOf(TypeAny)}, nil
 	}
 

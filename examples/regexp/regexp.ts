@@ -68,11 +68,10 @@ if (m !== null) {
   console.log(m[2]) // 34
 }
 
-// An unmatched optional capture group becomes "" (this compiler has no
-// per-element-nullable-string array — a documented V1 narrowing).
+// An unmatched optional capture group is undefined.
 const optional = /a(b)?c/
 const m2 = optional.exec("ac")!
-console.log(m2[1]) // "" (empty line)
+console.log(m2[1]) // undefined
 
 // A no-match returns real null, not an empty array.
 const none = /xyz/.exec("no match here")

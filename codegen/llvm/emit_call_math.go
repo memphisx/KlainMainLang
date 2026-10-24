@@ -5,40 +5,94 @@ import (
 	"fmt"
 )
 
-func (e *Emitter) emitMathCall(property string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	switch property {
-	case "floor", "ceil", "round", "trunc":
-		return e.emitMathRound(property, args, pos)
-	case "abs":
-		return e.emitMathAbs(args, pos)
-	case "cbrt":
+// The Math intrinsics: each function's emitter, and its result type, which keeps an integer input an i64 through floor/ceil/round/
+// trunc/sign/abs/min/max and a float input a double (preserving NaN and
+// ±Infinity) — the emitters' own result types.
+func init() {
+	argsEmit := func(f func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error)) func(*Emitter, *ast.CallExpression) (Value, error) {
+		return func(e *Emitter, ex *ast.CallExpression) (Value, error) { return f(e, ex.Args, ex.GetPos()) }
+	}
+	fixed := func(t Type) func(*Emitter, *ast.CallExpression) Type {
+		return func(*Emitter, *ast.CallExpression) Type { return t }
+	}
+	// An integer argument stays an i64, a float one a double.
+	rounding := func(e *Emitter, ex *ast.CallExpression) Type {
+		if len(ex.Args) == 1 && e.inferExprType(ex.Args[0]).Float {
+			return TypeF64
+		}
+		return TypeI64
+	}
+	round := func(name string) intrinsic {
+		return intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				return e.emitMathRound(name, ex.Args, ex.GetPos())
+			},
+			ty: rounding,
+		}
+	}
+	minMax := func(name string) intrinsic {
+		return intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				return e.emitMathMinMax(name, ex.Args, ex.GetPos())
+			},
+			ty: mathMinMaxType,
+		}
+	}
+	for name, m := range map[string]intrinsic{
+		"floor": round("floor"),
+		"ceil":  round("ceil"),
+		"round": round("round"),
+		"trunc": round("trunc"),
+		"sign":  {emit: argsEmit((*Emitter).emitMathSign), ty: rounding},
+		"abs": {emit: argsEmit((*Emitter).emitMathAbs), ty: func(e *Emitter, ex *ast.CallExpression) Type {
+			if len(ex.Args) == 1 {
+				return e.inferExprType(ex.Args[0])
+			}
+			return TypeF64
+		}},
 		// Not the platform libm cbrt — that isn't reliably correctly-rounded
 		// (glibc's runtime cbrt(27) is 3.0000000000000004, where macOS/V8/fdlibm
 		// give exactly 3). @__kml_cbrt is the deterministic fdlibm algorithm.
-		return e.emitMathCbrt(args, pos)
-	case "pow":
+		"cbrt": {emit: argsEmit((*Emitter).emitMathCbrt), ty: fixed(TypeF64)},
 		// __kml_js_pow: libm pow plus the JS deviation — |base| exactly 1
 		// with an infinite exponent is NaN (ensureJsPow).
-		e.ensureJsPow()
-		return e.emitMathBinaryFloat("__kml_js_pow", args, pos)
-	case "hypot":
-		return e.emitMathHypot(args, pos)
-	case "min":
-		return e.emitMathMinMax("min", args, pos)
-	case "max":
-		return e.emitMathMinMax("max", args, pos)
-	case "sign":
-		return e.emitMathSign(args, pos)
-	case "random":
-		return e.emitMathRandom(pos)
-	case "clz32":
-		return e.emitMathClz32(args, pos)
-	case "fround":
-		return e.emitMathFround(args, pos)
-	case "imul":
-		return e.emitMathImul(args, pos)
+		"pow": {emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			e.ensureJsPow()
+			return e.emitMathBinaryFloat("__kml_js_pow", ex.Args, ex.GetPos())
+		}, ty: fixed(TypeF64)},
+		"hypot":  {emit: argsEmit((*Emitter).emitMathHypot), ty: fixed(TypeF64)},
+		"min":    minMax("min"),
+		"max":    minMax("max"),
+		"random": {emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitMathRandom(ex.GetPos()) }, ty: fixed(TypeF64)},
+		"clz32":  {emit: argsEmit((*Emitter).emitMathClz32), ty: fixed(TypeI64)},
+		"fround": {emit: argsEmit((*Emitter).emitMathFround), ty: fixed(TypeF64)},
+		"imul":   {emit: argsEmit((*Emitter).emitMathImul), ty: fixed(TypeI64)},
+	} {
+		intrinsics["Math."+name] = m
 	}
-	return Value{}, fmt.Errorf("%d:%d: Math.%s is not supported", pos.Line, pos.Col, property)
+}
+
+// mathMinMaxType: any float argument promotes the whole fold to a double
+// (llvm.minimum/maximum), as emitMathMinMax does; a spread argument
+// contributes its array's element type, and no argument is the ±Infinity
+// identity, a double.
+func mathMinMaxType(e *Emitter, ex *ast.CallExpression) Type {
+	if len(ex.Args) == 0 {
+		return TypeF64
+	}
+	for _, a := range ex.Args {
+		if sp, ok := a.(*ast.SpreadElement); ok {
+			at := e.inferExprType(sp.Arg)
+			if at.ElemType != nil && at.ElemType.Float {
+				return TypeF64
+			}
+			continue
+		}
+		if e.inferExprType(a).Float {
+			return TypeF64
+		}
+	}
+	return TypeI64
 }
 
 // emitMathClz32 counts leading zero bits in the ToUint32 of its argument,
@@ -58,7 +112,7 @@ func (e *Emitter) emitMathOperand(arg ast.Expression) (Value, error) {
 	if isNullableScalar(v.Ty) {
 		v = e.nullableScalarPayloadOf(v)
 	}
-	if v.Ty.IsDynamic || !isNumberTy(v.Ty) {
+	if v.Ty.IsDynamic() || !isNumberTy(v.Ty) {
 		return e.emitUnaryPlus(v, arg.GetPos()) // ToNumber (`Math.max("3")`)
 	}
 	return v, nil
@@ -72,7 +126,7 @@ func (e *Emitter) emitMathClz32(args []ast.Expression, pos ast.Pos) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
-	i64Val := e.coerce(val, TypeI64)
+	i64Val := e.convert(val, TypeI64)
 	trunc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", trunc, i64Val.Ref))
 	e.ensureCtlz32()
@@ -93,7 +147,7 @@ func (e *Emitter) emitMathFround(args []ast.Expression, pos ast.Pos) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
-	dblVal := e.coerce(val, TypeF64)
+	dblVal := e.convert(val, TypeF64)
 	narrowed := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fptrunc double %s to float", narrowed, dblVal.Ref))
 	widened := e.freshReg()
@@ -118,8 +172,8 @@ func (e *Emitter) emitMathImul(args []ast.Expression, pos ast.Pos) (Value, error
 	}
 	a32 := e.freshReg()
 	b32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", a32, e.coerce(aVal, TypeI64).Ref))
-	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", b32, e.coerce(bVal, TypeI64).Ref))
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", a32, e.convert(aVal, TypeI64).Ref))
+	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", b32, e.convert(bVal, TypeI64).Ref))
 	prod := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i32 %s, %s", prod, a32, b32))
 	result := e.freshReg()
@@ -136,7 +190,7 @@ func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (
 		return Value{}, err
 	}
 	if val.Ty.IR == "i64" || (val.Ty.IsInteger() && !val.Ty.Float) {
-		return e.coerce(val, TypeI64), nil
+		return e.convert(val, TypeI64), nil
 	}
 	// Float input stays a double all the way through — real JS returns a
 	// double here too, and this is what lets NaN/±Infinity pass through
@@ -144,7 +198,7 @@ func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (
 	// non-finite input — the pre-fix behavior printed garbage). An integral
 	// double prints without a fraction (TDD-00080's shortest-round-trip
 	// formatter), so Math.floor(2.9) still displays as `2`.
-	fval := e.coerce(val, TypeF64)
+	fval := e.convert(val, TypeF64)
 	e.ensureMathFuncs()
 	rounded := e.freshReg()
 	if fn == "round" {
@@ -183,7 +237,7 @@ func (e *Emitter) emitMathAbs(args []ast.Expression, pos ast.Pos) (Value, error)
 		e.emitInstr(fmt.Sprintf("%s = call double @fabs(double %s)", r, val.Ref))
 		return Value{Ref: r, Ty: TypeF64}, nil
 	}
-	iVal := e.coerce(val, TypeI64)
+	iVal := e.convert(val, TypeI64)
 	neg := e.freshReg()
 	cmp := e.freshReg()
 	r := e.freshReg()
@@ -203,7 +257,7 @@ func (e *Emitter) emitMathCbrt(args []ast.Expression, pos ast.Pos) (Value, error
 	if err != nil {
 		return Value{}, err
 	}
-	fval := e.coerce(val, TypeF64)
+	fval := e.convert(val, TypeF64)
 	e.ensureCbrt()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_cbrt(double %s)", r, fval.Ref))
@@ -222,8 +276,8 @@ func (e *Emitter) emitMathBinaryFloat(fn string, args []ast.Expression, pos ast.
 	if err != nil {
 		return Value{}, err
 	}
-	f1 := e.coerce(v1, TypeF64)
-	f2 := e.coerce(v2, TypeF64)
+	f1 := e.convert(v1, TypeF64)
+	f2 := e.convert(v2, TypeF64)
 	e.ensureMathFuncs()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s, double %s)", r, fn, f1.Ref, f2.Ref))
@@ -275,9 +329,9 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 		if fn == "max" {
 			intrinsic = "llvm.maximum.f64"
 		}
-		result := e.coerce(vals[0], TypeF64)
+		result := e.convert(vals[0], TypeF64)
 		for _, v := range vals[1:] {
-			next := e.coerce(v, TypeF64)
+			next := e.convert(v, TypeF64)
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s, double %s)", r, intrinsic, result.Ref, next.Ref))
 			result = Value{Ref: r, Ty: TypeF64}
@@ -286,9 +340,9 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 		// undefined operand (TDD-00241) would come back as the sentinel.
 		return Value{Ref: e.emitQuietF64(result.Ref), Ty: TypeF64}, nil
 	}
-	result := e.coerce(vals[0], TypeI64)
+	result := e.convert(vals[0], TypeI64)
 	for _, v := range vals[1:] {
-		next := e.coerce(v, TypeI64)
+		next := e.convert(v, TypeI64)
 		cmp := e.freshReg()
 		r := e.freshReg()
 		op := "icmp slt"
@@ -327,10 +381,10 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 			if err != nil {
 				return Value{}, err
 			}
-			if elemTy.IsArray || elemTy.IsObject {
+			if elemTy.IsArray() || elemTy.IsObject() {
 				return Value{}, fmt.Errorf("%d:%d: Math.%s cannot spread an array of arrays or objects", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col, fn)
 			}
-			if elemTy.Float || elemTy.IsDynamic || !isNumberTy(elemTy) {
+			if elemTy.Float || elemTy.IsDynamic() || !isNumberTy(elemTy) {
 				anyFloat = true // an `any`/string element ToNumbers to a double
 			}
 			items = append(items, mmItem{spread: true, ptr: ptrReg, length: lenReg, elemTy: elemTy})
@@ -394,7 +448,7 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 
 	for _, it := range items {
 		if !it.spread {
-			nv := e.coerce(it.val, resTy)
+			nv := e.convert(it.val, resTy)
 			combine(nv.Ref)
 			continue
 		}
@@ -419,14 +473,14 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 		if isNullableScalar(elem.Ty) {
 			elem = e.nullableScalarPayloadOf(elem)
 		}
-		if elem.Ty.IsDynamic || !isNumberTy(elem.Ty) {
+		if elem.Ty.IsDynamic() || !isNumberTy(elem.Ty) {
 			nv, err := e.emitUnaryPlus(elem, pos)
 			if err != nil {
 				return Value{}, err
 			}
 			elem = nv
 		}
-		ev := e.coerce(elem, resTy)
+		ev := e.convert(elem, resTy)
 		combine(ev.Ref)
 		idxNext := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
@@ -453,7 +507,7 @@ func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error
 		// itself — the exact JS behavior (Math.sign(NaN) is NaN, and the
 		// sign of a signed zero is that same zero). Both fcmp's are ordered,
 		// so a NaN input fails both and falls through to itself.
-		fval := e.coerce(val, TypeF64)
+		fval := e.convert(val, TypeF64)
 		isPos := e.freshReg()
 		isNeg := e.freshReg()
 		fromPos := e.freshReg()
@@ -464,7 +518,7 @@ func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double -1.0, double %s", r, isNeg, fromPos))
 		return Value{Ref: r, Ty: TypeF64}, nil
 	}
-	iVal := e.coerce(val, TypeI64)
+	iVal := e.convert(val, TypeI64)
 	isPos := e.freshReg()
 	isNeg := e.freshReg()
 	fromPos := e.freshReg()
@@ -520,7 +574,7 @@ func (e *Emitter) emitNumberArgsBuffer(args []ast.Expression, pos ast.Pos) (stri
 		if isNullableScalar(val.Ty) {
 			val = e.nullableScalarPayloadOf(val)
 		}
-		if val.Ty.IsDynamic || !isNumberTy(val.Ty) {
+		if val.Ty.IsDynamic() || !isNumberTy(val.Ty) {
 			return e.emitUnaryPlus(val, pos)
 		}
 		return val, nil
@@ -537,7 +591,7 @@ func (e *Emitter) emitNumberArgsBuffer(args []ast.Expression, pos ast.Pos) (stri
 		bytes := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, length))
 		codes, n = e.freshReg(), length
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", codes, bytes))
+		e.heapMallocInto(codes, bytes)
 		idx := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
@@ -555,10 +609,10 @@ func (e *Emitter) emitNumberArgsBuffer(args []ast.Expression, pos ast.Pos) (stri
 		if err != nil {
 			return "", "", err
 		}
-		d := e.coerce(v, TypeF64)
+		d := e.convert(v, TypeF64)
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr double, ptr %s, i64 %s", slot, codes, i))
-		e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", d.Ref, slot))
+		e.heapStore("double", d.Ref, slot, 8)
 		next := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
@@ -575,7 +629,7 @@ func (e *Emitter) emitNumberArgsBuffer(args []ast.Expression, pos ast.Pos) (stri
 			if val, err = toCode(val, arg.GetPos()); err != nil {
 				return "", "", err
 			}
-			d := e.coerce(val, TypeF64)
+			d := e.convert(val, TypeF64)
 			slot := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr [%s x double], ptr %s, i64 0, i64 %d", slot, n, codes, i))
 			e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", d.Ref, slot))

@@ -39,15 +39,15 @@ export interface TimerOptions {
 // `ref` a boolean.
 function readOptions(options: any): { signal: AbortSignal | undefined; ref: boolean } {
     if (options === null || typeof options !== 'object') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
     }
     const signal: any = options.signal;
     if (signal !== undefined && !(signal instanceof AbortSignal)) {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.signal" property must be an instance of AbortSignal.' + received(signal));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.signal" property must be an instance of AbortSignal.' + received(signal));
     }
     const ref: any = options.ref === undefined ? true : options.ref;
     if (typeof ref !== 'boolean') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.ref" property must be of type boolean.' + received(ref));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.ref" property must be of type boolean.' + received(ref));
     }
     return { signal: signal as AbortSignal | undefined, ref: ref as boolean };
 }

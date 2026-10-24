@@ -39,7 +39,7 @@ func (e *Emitter) globalClass(name string) (Type, bool) {
 // derived from it).
 func (e *Emitter) isAbortSignalType(t Type) bool {
 	sig, ok := e.abortSignalClass()
-	if !ok || !t.IsClass {
+	if !ok || !t.IsClass() {
 		return false
 	}
 	for name := t.ClassName; name != ""; {
@@ -128,7 +128,7 @@ entry:
 // implements global name with, or of a class derived from it.
 func (e *Emitter) isGlobalClassInstance(t Type, name string) bool {
 	cls, ok := e.globalClass(name)
-	if !ok || !t.IsClass || t.IsDynamic {
+	if !ok || !t.IsClass() || t.IsDynamic() {
 		return false
 	}
 	for c, i := t.ClassName, 0; c != "" && i < 64; i++ {

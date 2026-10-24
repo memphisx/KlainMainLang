@@ -11,6 +11,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -20,16 +21,21 @@ type GeneratorInfo struct {
 	// ctorFn is the function its value calls, once emitted; valueGlobal
 	// holds a capture-free generator's one value.
 	ctorFn, valueGlobal string
-	ParamTypes          []Type
-	ParamNames          []string
-	ElemTy              Type   // T in `function* f(): T` — the yielded/returned value type
-	IsAsync             bool   // an `async function*` (TDD-00085) — .next() returns Promise<{value,done}>, the body may await
-	GenTy               Type   // GeneratorType(ElemTy, ParamTypes) — the constructed instance's own type
-	BodyFuncName        string // mangled LLVM function name for the compiled body, e.g. "@__generator_body_gen_1"
+	// displayName is its declared name, its function value's name when the
+	// value is first made for an instance's prototype (genproto.go).
+	displayName  string
+	ParamTypes   []Type
+	ParamNames   []string
+	ElemTy       Type   // T in `function* f(): T` — the yielded/returned value type
+	IsAsync      bool   // an `async function*` (TDD-00085) — .next() returns Promise<{value,done}>, the body may await
+	GenTy        Type   // GeneratorType(ElemTy, ParamTypes) — the constructed instance's own type
+	BodyFuncName string // mangled LLVM function name for the compiled body, e.g. "@__generator_body_gen_1"
 	// ThisTy is the receiver type for a generator *method* (TDD-00063 Stage
 	// 2b) — nil for a free-function generator. When set, GenTy carries a
 	// __this slot and the body binds `this` from it at entry.
 	ThisTy *Type
+	// Src is the declaration's source text (Function.prototype.toString).
+	Src ast.SourceRange
 	// Captures are the enclosing-scope variables a *nested* generator closes over
 	// (TDD-00094), gathered at the declaration's emission point. Empty for a
 	// top-level generator. At construction the captured cells are boxed into the
@@ -39,6 +45,13 @@ type GeneratorInfo struct {
 	// HasRest marks the last parameter as a rest parameter: a call packs its
 	// trailing arguments into that array.
 	HasRest bool
+	// MinArgs is the count of leading required parameters (Function.length).
+	MinArgs int
+	// Optional marks each non-rest parameter that may be omitted.
+	Optional []bool
+	// EagerStart: the body runs its parameter defaults when constructed
+	// (FunctionDeclarationInstantiation at the call), then suspends.
+	EagerStart bool
 }
 
 // generatorEmitCtx tracks state while emitting one generator function's own
@@ -95,15 +108,29 @@ func generatorElemAnnotation(rt *ast.TypeAnnotation) *ast.TypeAnnotation {
 }
 
 func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo, error) {
+	return e.buildGeneratorSigThis(fd, nil)
+}
+
+// buildGeneratorSigThis is buildGeneratorSig with a method's receiver type,
+// which `this` binds to while the element type is inferred.
+func (e *Emitter) buildGeneratorSigThis(fd *ast.FunctionDeclaration, thisTy *Type) (*GeneratorInfo, error) {
 	// A body reading `arguments` collects the overflow in a hidden rest
 	// parameter, as a function's does (TDD-00210).
 	maybeAddArgumentsRestParam(fd)
+	e.desugarGeneratorPatternParams(fd)
 	var paramTypes []Type
 	var paramNames []string
 	hasRest := false
+	minArgs, seenOpt := 0, false
+	var optional []bool
 	for _, p := range fd.Params {
-		if p.ArrayPattern != nil || p.ObjectPattern != nil {
-			return nil, fmt.Errorf("%d:%d: a destructured parameter is not yet supported on a generator function", fd.GetPos().Line, fd.GetPos().Col)
+		isOpt := p.Rest || p.Optional || p.Default != nil || (seenOpt && e.compatJS())
+		seenOpt = seenOpt || isOpt
+		if !seenOpt {
+			minArgs++
+		}
+		if !p.Rest {
+			optional = append(optional, isOpt)
 		}
 		if p.Rest {
 			// The trailing arguments, collected as a call to an ordinary
@@ -119,19 +146,26 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 			hasRest = true
 			continue
 		}
-		if p.Default != nil || p.Optional {
-			return nil, fmt.Errorf("%d:%d: a default or optional parameter is not yet supported on a generator function", fd.GetPos().Line, fd.GetPos().Col)
-		}
 		var pty Type
 		if p.Type != nil {
 			pty = e.resolveType(p.Type)
+		} else if p.Default != nil || p.Optional || (seenOpt && e.compatJS()) {
+			// An unannotated optional parameter: its default's type, or any.
+			pty = TypeAny
+			if p.Default != nil && !e.compatJS() {
+				if dt := e.inferExprType(p.Default); dt.IR != "" && dt.IR != "void" {
+					pty = dt
+				}
+			}
+		} else if e.compatJS() {
+			pty = TypeAny // any argument may be omitted: undefined
 		} else {
 			pty = TypeI64
 			pty.Inferred = true
 		}
-		if pty.IR == "void" {
-			pty = TypeUndefined
-		}
+		// An optional or defaulted parameter arrives as `T | undefined`; the
+		// body's prologue fills the default (emitParamDefaultPrologue).
+		pty = optionalParamType(p, pty)
 		paramTypes = append(paramTypes, pty)
 		paramNames = append(paramNames, p.Name)
 	}
@@ -146,34 +180,40 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 		// `Generator<undefined, number>` returns a number through it, so a
 		// TReturn of another representation boxes both.
 		if rt := fd.ReturnType; generatorWrapperNames[rt.Name] && len(rt.TypeArgs) > 1 && rt.TypeArgs[1] != nil {
-			if ret := e.resolveType(rt.TypeArgs[1]); ret.IR != "" && ret.IR != "void" && !(ret.IsUndefined && !ret.Nullable) && reprKey(ret) != reprKey(elemTy) {
+			if ret := e.resolveType(rt.TypeArgs[1]); ret.IR != "" && ret.IR != "void" && !(ret.IsUndefined() && !ret.Nullable()) && reprKey(ret) != reprKey(elemTy) {
 				elemTy = TypeAny
 			}
 		}
 	} else {
 		// No usable annotation (none at all, or a bare `Generator` with no type
 		// argument): infer the element type from the body's own yield expressions
-		// (TDD-00096 Part 2) — real-JS sources never carry the annotation. Only
-		// the genuinely ambiguous case still rejects.
-		inferred, ok := e.inferGeneratorElemType(fd, paramNames, paramTypes)
+		// (TDD-00096 Part 2) — real-JS sources never carry the annotation.
+		// Yields of different representations are a union (TypeScript's
+		// `Generator<number | number[]>`), held boxed.
+		inferred, ok := e.inferGeneratorElemType(fd, paramNames, paramTypes, thisTy)
 		if !ok {
-			return nil, fmt.Errorf("%d:%d: generator function '%s' requires an explicit return type annotation — its yield expressions produce conflicting element types that don't join", fd.GetPos().Line, fd.GetPos().Col, fd.Name)
+			inferred = TypeAny
 		}
 		elemTy = inferred
 	}
 	e.generatorBodyCtr++
-	body := fmt.Sprintf("@__generator_body_%s_%d", fd.Name, e.generatorBodyCtr)
+	body := fmt.Sprintf("@__generator_body_%s_%d", llvmSafeSymbol(fd.Name), e.generatorBodyCtr)
 	if e.inLib != "" {
 		body = e.literalSymbol("@__generator_body", fd.GetPos())
 	}
 	return &GeneratorInfo{
+		displayName:  fd.Name,
 		ParamTypes:   paramTypes,
 		ParamNames:   paramNames,
 		ElemTy:       elemTy,
 		IsAsync:      fd.IsAsync,
+		Src:          fd.Src,
 		GenTy:        GeneratorType(elemTy, paramTypes, nil, fd.IsAsync),
 		BodyFuncName: body,
 		HasRest:      hasRest,
+		MinArgs:      minArgs,
+		EagerStart:   hasBodyDefault(fd.Params) || len(e.genPatternInits[fd]) > 0,
+		Optional:     optional,
 	}, nil
 }
 
@@ -183,7 +223,7 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 // name is namespaced by class+method rather than a bare function name.
 // classTy is the receiver type `this` binds to inside the body.
 func (e *Emitter) buildGeneratorMethodInfo(fd *ast.FunctionDeclaration, className string, classTy Type) (*GeneratorInfo, error) {
-	base, err := e.buildGeneratorSig(fd)
+	base, err := e.buildGeneratorSigThis(fd, &classTy)
 	if err != nil {
 		return nil, err
 	}
@@ -208,14 +248,12 @@ func genNextResultType(elem Type) Type {
 }
 
 // ensureGeneratorRuntime declares the fiber-context-switching primitive
-// (shared with http.listen/fetch() via ensureFiberRuntime — same
+// (shared with the tasks via ensureFiberRuntime — same
 // getcontext/makecontext/swapcontext declares, same ucontextLayout()
 // constants) plus one generator-specific global: a "pending generator
 // object" handoff slot. makecontext's target function (the generator's own
-// compiled body, see emitGeneratorFunctionDecl) takes zero arguments —
-// mirroring http.listen's own `@__kml_listen_dispatch` entry point, which
-// also takes none and instead reads a global (`@__kml_current_conn_idx`)
-// to find its own context on first entry. A generator's own entry needs
+// compiled body, see emitGeneratorFunctionDecl) takes zero arguments and
+// reads a global to find its own object on first entry. A generator's own entry needs
 // its genObj pointer exactly once, at first-call time only: every
 // subsequent resume picks up mid-function, wherever its last yield's own
 // swapcontext call left off, with %genObj still live as an ordinary local
@@ -244,35 +282,31 @@ func (e *Emitter) ensureGeneratorRuntime() {
 // FieldIndex-then-GEP-then-store shape enough times to warrant one helper.
 //
 // An array-typed slot (the __yielded/__sent/__paramN fields of a generator
-// yielding an array element type, ADR-00676) is laid out and stored as the
-// inline { ptr, i64 } aggregate StructFieldIR reserves for it — the caller
-// passes the array's aggregate Value.Ref (its established {data,len} shape),
-// and the passed `ir` string ("ptr", the array *type*'s IR) is overridden
-// with the field's storage IR so the 16-byte slot and the store agree. Every
+// yielding an array element type, ADR-00676) holds the array's header
+// pointer — the caller passes the array's Value.Ref. Every
 // non-array field is unaffected (StructFieldIR == Type.IR there).
 func (e *Emitter) storeGeneratorField(genObjReg string, genTy Type, field, ir, val string) {
 	idx, fieldTy, _ := genTy.FieldIndex(field)
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, genTy.StructIR(), genObjReg, idx))
-	if fieldTy.IsArray {
+	if fieldTy.IsArray() {
 		// The slot holds a pointer to the array's {data,len} header (TDD-00213
-		// Stage 2); mint/share a header from the passed aggregate register.
+		// Stage 2); store the passed array's header.
 		e.storeArrayFieldHeader(gep, Value{Ref: val, Ty: fieldTy})
 		return
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, val, gep, fieldTy.Align()))
+	e.heapStore(ir, val, gep, fieldTy.Align())
 }
 
 // loadGeneratorField GEPs+loads one field of a generator instance — see
-// storeGeneratorField's own doc comment. An array-typed slot is loaded as the
-// inline { ptr, i64 } aggregate (StructFieldIR), returned as an ordinary array
-// Value whose Ref is that aggregate register (ADR-00676).
+// storeGeneratorField's own doc comment. An array-typed slot is loaded as its
+// header pointer, returned as an ordinary array Value (ADR-00676).
 func (e *Emitter) loadGeneratorField(genObjReg string, genTy Type, field string) Value {
 	idx, fieldTy, _ := genTy.FieldIndex(field)
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, genTy.StructIR(), genObjReg, idx))
-	if fieldTy.IsArray {
-		// The slot holds a header pointer (TDD-00213 Stage 2); deref it. A generator
+	if fieldTy.IsArray() {
+		// The slot holds a header pointer (TDD-00213 Stage 2). A generator
 		// field is always written before it is read, so the branchless load is safe.
 		return e.loadArraySlotAggregate(gep, fieldTy)
 	}
@@ -283,27 +317,25 @@ func (e *Emitter) loadGeneratorField(genObjReg string, genTy Type, field string)
 
 // genZeroElem produces a zero value of a generator's element type for the
 // "nothing more to give" / uninitialised-slot positions (ADR-00676). For an
-// array element type this is the empty { null, 0 } aggregate (emitScalarZero
-// only builds scalar/pointer zeros, and would produce a bare null ptr where
-// the inline {ptr,i64} aggregate is required); every other type defers to
+// array element type this is the empty array (emitScalarZero
+// only builds scalar/pointer zeros); every other type defers to
 // emitScalarZero unchanged.
 // genElemValIR is the LLVM type of a generator element VALUE as it lives in an
-// SSA register or a phi — the {ptr,i64} aggregate for an array element (its
-// natural value form), or StructFieldIR otherwise. Distinct from the element's
-// STATE-SLOT storage, which for an array is a header pointer (TDD-00213 Stage 2),
-// reached via genLoadElemAt / storeArrayFieldHeader.
+// SSA register or a phi (an array's header pointer).
 func genElemValIR(elemTy Type) string {
-	if elemTy.IsArray {
-		return "{ptr, i64}"
-	}
 	return StructFieldIR(elemTy)
 }
 
 func (e *Emitter) genZeroElem(t Type) Value {
-	if t.IsArray {
-		agg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} { ptr null, i64 0 }, ptr null, 0", agg))
-		return Value{Ref: agg, Ty: t}
+	if t.IsArray() {
+		return Value{Ref: "null", Ty: t}
+	}
+	if t.IsDynamic() {
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: t}
+	}
+	if isNullableScalar(t) {
+		// An absent `T | null`: the presence bit clear.
+		return Value{Ref: "zeroinitializer", Ty: t}
 	}
 	return e.emitScalarZero(t)
 }
@@ -311,26 +343,23 @@ func (e *Emitter) genZeroElem(t Type) Value {
 // genUnpackArrayElemPattern destructures a `for (const [a, b] of gen())` /
 // `for await` loop pattern whose element type is itself an array (ADR-00676) —
 // `const [a, b]` over a yielded `number[]` binds a=arr[0], b=arr[1]. The
-// element arrives as the inline {ptr,i64} aggregate; its data/len are extracted
+// element arrives as an array value; its data/len are loaded
 // and fed to the shared array-pattern unpack core (the same one plain array
 // destructuring uses). elemTy is the array element type (elemTy.ElemType is the
 // per-slot type the bindings receive).
 func (e *Emitter) genUnpackArrayElemPattern(agg string, elemTy Type, elems []ast.ArrayPatternElem) error {
-	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataReg, agg))
-	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, agg))
+	dataReg, lenReg := e.arrayParts(Value{Ref: agg, Ty: elemTy})
 	return e.unpackArrayPatternInto(dataReg, lenReg, *elemTy.ElemType, elems)
 }
 
 // genLoadElemAt loads a generator element value (the {value} slot of a
 // `{value,done}` result object, or an async request-queue sent-value slot)
-// from an already-GEP'd address, as the inline {ptr,i64} aggregate for an
+// from an already-GEP'd address, as the header pointer for an
 // array element type or a plain scalar/pointer load otherwise (ADR-00676).
 func (e *Emitter) genLoadElemAt(gepReg string, elemTy Type) string {
-	if elemTy.IsArray {
-		// The slot holds a header pointer (TDD-00213 Stage 2); deref it into the
-		// {ptr,i64} aggregate the generator machinery carries in registers. The
+	if elemTy.IsArray() {
+		// The slot holds a header pointer (TDD-00213 Stage 2), which the generator
+		// machinery carries in registers. The
 		// slot is always written before read, so no null guard is needed.
 		return e.loadArraySlotAggregate(gepReg, elemTy).Ref
 	}
@@ -340,15 +369,15 @@ func (e *Emitter) genLoadElemAt(gepReg string, elemTy Type) string {
 }
 
 // genStoreElemAt stores a generator element VALUE register into an already-GEP'd
-// state slot — the header-pointer store for an array element (mint/share a header
-// from the {ptr,i64} aggregate, TDD-00213 Stage 2) or a plain store otherwise.
-// valRef is the element value register ({ptr,i64} for an array).
+// state slot — the header-pointer store for an array element (TDD-00213
+// Stage 2) or a plain store otherwise.
+// valRef is the element value register (the header pointer for an array).
 func (e *Emitter) genStoreElemAt(gepReg string, elemTy Type, valRef string) {
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		e.storeArrayFieldHeader(gepReg, Value{Ref: valRef, Ty: elemTy})
 		return
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), valRef, gepReg, elemTy.Align()))
+	e.heapStore(StructFieldIR(elemTy), valRef, gepReg, elemTy.Align())
 }
 
 // genDefineLoopVar binds a `for (const x of gen())` / `for await` loop
@@ -358,27 +387,27 @@ func (e *Emitter) genStoreElemAt(gepReg string, elemTy Type, valRef string) {
 // type binds a plain alloca of its own IR. Returns the slot register.
 func (e *Emitter) genDefineLoopVar(name string, elemTy Type) string {
 	varPtr := e.freshReg()
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
 	} else {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, elemTy.IR, elemTy.Align()))
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, StructFieldIR(elemTy), elemTy.Align()))
 	}
 	e.define(name, Symbol{Ptr: varPtr, Ty: elemTy})
 	return varPtr
 }
 
-// genStoreLoopVar writes one iteration's element aggregate into a loop-var
-// slot made by genDefineLoopVar. An array element is boxed into a fresh
-// {data,len} header whose pointer is stored into the stable ptr slot (a
+// genStoreLoopVar writes one iteration's element value into a loop-var
+// slot made by genDefineLoopVar. An array element's header pointer is
+// stored into the stable ptr slot (a
 // per-iteration reassignment, object-reference model); every other type
 // stores its scalar/pointer value directly.
 func (e *Emitter) genStoreLoopVar(varPtr string, elemTy Type, val string) {
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		header := e.boxArrayValue(Value{Ref: val, Ty: elemTy})
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, varPtr))
 		return
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val, varPtr, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(elemTy), val, varPtr, elemTy.Align()))
 }
 
 // emitGeneratorConstruction implements `gen(args)` — calling a generator
@@ -399,6 +428,41 @@ func (e *Emitter) emitGeneratorConstruction(info *GeneratorInfo, args []ast.Expr
 // generator passes "". Everything else (fiber ctx/stack setup, __paramN
 // stores, the returned opaque instance value) is identical either way.
 func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// The declared parameters the call passes (a spread among them: not
+	// known), for the body's `arguments`.
+	passed := len(args)
+	for _, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			passed = -1
+			break
+		}
+	}
+	regular := len(info.ParamTypes)
+	if info.HasRest {
+		regular--
+	}
+	if passed > regular {
+		passed = regular
+	}
+	// Untyped JavaScript may omit any argument (undefined) or pass extra
+	// ones, evaluated in order after the declared ones and dropped.
+	var extraArgs []ast.Expression
+	if e.compatJS() {
+		regular := len(info.ParamTypes)
+		if info.HasRest {
+			regular--
+		}
+		if !info.HasRest && len(args) > regular {
+			extraArgs = args[regular:]
+			args = args[:regular:regular]
+		}
+		if len(args) < regular {
+			args = append([]ast.Expression(nil), args...)
+			for len(args) < regular {
+				args = append(args, ast.NewNullLiteral(true, pos))
+			}
+		}
+	}
 	if info.HasRest {
 		// The trailing arguments become the rest parameter's array.
 		regular := len(info.ParamTypes) - 1
@@ -408,17 +472,24 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 		packed := append(append([]ast.Expression(nil), args[:regular]...), ast.NewArrayLiteral(args[regular:], pos))
 		args = packed
 	}
+	if !info.HasRest && len(args) < len(info.ParamTypes) && len(args) >= info.MinArgs {
+		// Omitted optional parameters take undefined (their defaults fill in).
+		args = append([]ast.Expression(nil), args...)
+		for len(args) < len(info.ParamTypes) {
+			args = append(args, ast.NewNullLiteral(true, pos))
+		}
+	}
 	if len(args) != len(info.ParamTypes) {
 		return Value{}, fmt.Errorf("%d:%d: generator expects %d argument(s), got %d", pos.Line, pos.Col, len(info.ParamTypes), len(args))
 	}
 	paramVals := make([]Value, len(args))
 	for i, argExpr := range args {
-		if pty := info.ParamTypes[i]; pty.IsArray {
+		if pty := info.ParamTypes[i]; pty.IsArray() {
 			val, err := e.emitExprWithObjectHint(argExpr, pty)
 			if err != nil {
 				return Value{}, err
 			}
-			paramVals[i] = e.coerce(val, pty)
+			paramVals[i] = e.convert(val, pty)
 			continue
 		}
 		if pty := info.ParamTypes[i]; isNullableScalar(pty) {
@@ -435,12 +506,18 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 		if err != nil {
 			return Value{}, err
 		}
-		paramVals[i] = e.coerce(val, info.ParamTypes[i])
+		paramVals[i] = e.convert(val, info.ParamTypes[i])
+	}
+	for _, x := range extraArgs {
+		if _, err := e.emitExpr(x); err != nil {
+			return Value{}, err
+		}
 	}
 	env, err := e.packGeneratorEnv(info, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	e.genArgc = fmt.Sprint(passed + 1)
 	return e.emitGeneratorConstructValues(info, thisRef, paramVals, env), nil
 }
 
@@ -451,6 +528,13 @@ func (e *Emitter) emitGeneratorConstructionWithThis(info *GeneratorInfo, thisRef
 // first-class generator-value thunk (emitGeneratorCtorClosure), which packs
 // the env at the escape point and constructs later.
 func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef string, paramVals []Value, envReg string) Value {
+	// Taken first: emitting the instance's prototype may emit the
+	// generator's thunk, itself a construction.
+	argc := e.genArgc
+	if argc == "" {
+		argc = "0"
+	}
+	e.genArgc = ""
 	e.ensureGeneratorRuntime()
 
 	genTy := info.GenTy
@@ -460,15 +544,30 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 	ctxSize, ssSpOff, ssSizeOff, ucLinkOff := e.ucontextLayout()
 	ctxReg := e.freshReg()
 	stackReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", ctxReg, ctxSize))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", stackReg, fiberStackBytes))
+	e.heapMallocInto(ctxReg, fmt.Sprint(ctxSize))
+	stackField := stackReg
+	if e.genStackOwned() {
+		// Under -mm=gc the field holds the stack's owner cell, whose mark
+		// procedure scans the guarded stack (gcshim.c); its first word is
+		// the stack.
+		e.declareFn("__kml_gen_stack_alloc", "declare ptr @__kml_gen_stack_alloc(i64)")
+		stackField = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_gen_stack_alloc(i64 %d)", stackField, fiberStackBytes))
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", stackReg, stackField))
+	} else if !e.isGCMode() && e.opts.Target.OS() != "windows" {
+		// A guard page under the stack, so an overflow throws (TDD-00249).
+		e.declareFn("__kml_fiber_stack_alloc", "declare ptr @__kml_fiber_stack_alloc(i64)")
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fiber_stack_alloc(i64 %d)", stackReg, fiberStackBytes))
+	} else {
+		e.heapMallocInto(stackReg, fmt.Sprint(fiberStackBytes))
+	}
 	e.emitInstr(fmt.Sprintf("call void @getcontext(ptr %s)", ctxReg))
 	spGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", spGep, ctxReg, ssSpOff))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", stackReg, spGep))
+	e.heapStore("ptr", stackReg, spGep, 8)
 	szGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", szGep, ctxReg, ssSizeOff))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", fiberStackBytes, szGep))
+	e.heapStore("i64", fmt.Sprint(fiberStackBytes), szGep, 8)
 	// uc_link: null, not a fallback scheduler ctx (http.listen's own
 	// @__kml_main_ctx precedent) — this compiler's own generator-body
 	// codegen guarantees every exit path (yield, return, fall-off-the-end)
@@ -479,17 +578,19 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 	// not a resume into a stale/unpopulated fallback context.
 	linkGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", linkGep, ctxReg, ucLinkOff))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", linkGep))
+	e.heapStore("ptr", "null", linkGep, 8)
 	e.emitInstr(fmt.Sprintf("call void (ptr, ptr, i32, ...) @makecontext(ptr %s, ptr %s, i32 0)", ctxReg, info.BodyFuncName))
 
+	e.storeGeneratorField(genObj, genTy, GeneratorProtoField, "i64", e.emitGenInstanceProto(info))
+	e.storeGeneratorField(genObj, genTy, GeneratorArgcField, "i64", argc)
 	e.storeGeneratorField(genObj, genTy, GeneratorCtxField, "ptr", ctxReg)
-	e.storeGeneratorField(genObj, genTy, GeneratorStackField, "ptr", stackReg)
+	e.storeGeneratorField(genObj, genTy, GeneratorStackField, "ptr", stackField)
 	e.storeGeneratorField(genObj, genTy, GeneratorCallerCtxField, "ptr", "null")
 	e.storeGeneratorField(genObj, genTy, GeneratorStartedField, "i1", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorHasRetField, "i1", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorDoneField, "i1", "0")
 	zeroElem := e.genZeroElem(info.ElemTy)
-	e.storeGeneratorField(genObj, genTy, GeneratorYieldedField, zeroElem.Ty.IR, zeroElem.Ref)
+	e.storeGeneratorField(genObj, genTy, GeneratorYieldedField, StructFieldIR(zeroElem.Ty), zeroElem.Ref)
 	e.storeGeneratorField(genObj, genTy, GeneratorSentField, "i64", fmt.Sprint(nbUndefined))
 	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorThrownField, "ptr", "null")
@@ -501,6 +602,11 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 	jmpStk := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_jmp_stack_new()", jmpStk))
 	e.storeGeneratorField(genObj, genTy, GeneratorJmpStkField, "ptr", jmpStk)
+	if e.genStackOwned() {
+		// Freed with the stack, once the generator is unreachable.
+		e.declareFn("__kml_gen_stack_own", "declare void @__kml_gen_stack_own(ptr, ptr, ptr)")
+		e.emitInstr(fmt.Sprintf("call void @__kml_gen_stack_own(ptr %s, ptr %s, ptr @__kml_jmp_stack_free)", stackField, jmpStk))
+	}
 	e.storeGeneratorField(genObj, genTy, GeneratorJmpTopField, "i64", "0")
 	e.storeGeneratorField(genObj, genTy, GeneratorGenErrorField, "ptr", "null")
 	e.storeGeneratorField(genObj, genTy, GeneratorPendingQField, "ptr", "null")
@@ -509,12 +615,12 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 	e.storeGeneratorField(genObj, genTy, GeneratorReqTailField, "ptr", "null")
 
 	for i, val := range paramVals {
-		if val.Ty.IsArray && val.ArrayHeader != "" {
+		if val.Ty.IsArray() {
 			// The caller's array itself (its live header), not a copy.
 			idx, _, _ := genTy.FieldIndex(fmt.Sprintf("__param%d", i))
 			gep := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, genTy.StructIR(), genObj, idx))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, gep))
+			e.heapStore("ptr", val.Ref, gep, 8)
 			continue
 		}
 		e.storeGeneratorField(genObj, genTy, fmt.Sprintf("__param%d", i), StructFieldIR(val.Ty), val.Ref)
@@ -527,7 +633,33 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 	// mirroring an arrow's capture); "null" for a top-level/capture-free one.
 	e.storeGeneratorField(genObj, genTy, GeneratorEnvField, "ptr", envReg)
 
+	if info.EagerStart {
+		// Run the parameter defaults now, as the call does; a throwing one
+		// throws here.
+		e.emitGeneratorSwapCore(genObj, genTy, info.IsAsync)
+		e.storeGeneratorField(genObj, genTy, GeneratorCallerCtxField, "ptr", "null")
+		genErr := e.loadGeneratorField(genObj, genTy, GeneratorGenErrorField)
+		isErr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isErr, genErr.Ref))
+		rethrowL, contL := e.freshLabel("gen.dflt.throw"), e.freshLabel("gen.dflt.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, rethrowL, contL))
+		e.emitLabel(rethrowL)
+		tag, pay := e.loadThrownCell(genErr.Ref)
+		e.excThrowAny(tag, pay)
+		e.emitTerminator("unreachable")
+		e.emitLabel(contL)
+	}
 	return Value{Ref: genObj, Ty: genTy}
+}
+
+// hasBodyDefault reports a parameter list with a default its body fills.
+func hasBodyDefault(params []ast.Param) bool {
+	for _, p := range params {
+		if bodyDefaulted(p) {
+			return true
+		}
+	}
+	return false
 }
 
 // emitGeneratorCtorClosure realizes a generator referenced in VALUE position
@@ -555,8 +687,7 @@ func (e *Emitter) emitGeneratorCtorClosure(info *GeneratorInfo, displayName stri
 	// A generator capturing nothing is one function value: every reference
 	// reads the same closure (`G === G`), made on first use.
 	if info.valueGlobal == "" {
-		info.valueGlobal = fmt.Sprintf("@__kml_genval_%d", e.closureCtr)
-		e.closureCtr++
+		info.valueGlobal = genSymbol(info, "@__kml_genval")
 		e.emitGlobal(info.valueGlobal + " = internal global ptr null, align 8")
 	}
 	cur := e.freshReg()
@@ -574,24 +705,35 @@ func (e *Emitter) emitGeneratorCtorClosure(info *GeneratorInfo, displayName stri
 	return Value{Ref: v, Ty: generatorValueType(info)}, nil
 }
 
+// genSymbol names one of info's helpers after its body: by source position
+// in the builtin library, so library code spells it the same in every
+// program.
+func genSymbol(info *GeneratorInfo, prefix string) string {
+	b := strings.TrimPrefix(info.BodyFuncName, "@")
+	quoted := strings.HasPrefix(b, `"`)
+	name := strings.TrimPrefix(prefix, "@") + strings.TrimPrefix(strings.Trim(b, `"`), "__generator_body")
+	if quoted {
+		return `@"` + name + `"`
+	}
+	return "@" + name
+}
+
 // emitGeneratorCtorThunk emits the function a generator's value calls: it
 // constructs an instance from its arguments and closure env.
 func (e *Emitter) emitGeneratorCtorThunk(info *GeneratorInfo, displayName string) string {
-	fn := fmt.Sprintf("@__kml_genctor_%d", e.closureCtr)
-	e.closureCtr++
-	// Generators take no default parameters; a rest one is not counted.
-	arity := len(info.ParamTypes)
-	if info.HasRest {
-		arity--
-	}
+	fn := genSymbol(info, "@__kml_genctor")
+	info.ctorFn = fn // named before its body, which may read its value (genproto.go)
+	// Function.length: the parameters before the first optional or rest one.
+	arity := info.MinArgs
 	e.registerFnMeta(fn, unmangleTopLevelName(displayName), arity, fnKindOf(info.IsAsync, true))
+	e.fnMetaSource(fn, info.Src)
 	restore := e.beginThunkEmit()
 	paramDecl := "ptr %env"
 	paramVals := make([]Value, len(info.ParamTypes))
 	for i, pt := range info.ParamTypes {
-		if pt.IsArray {
+		if pt.IsArray() {
 			// The closure ABI passes an array as (header ptr, i64 len) —
-			// rebuild the aggregate (carrying the live header) for the store.
+			// the header is the array value for the store.
 			paramDecl += fmt.Sprintf(", ptr %%p%d_ptr, i64 %%p%d_len", i, i)
 			paramVals[i] = e.arrayValueFromHeaderReg(fmt.Sprintf("%%p%d_ptr", i), pt)
 			continue
@@ -603,6 +745,17 @@ func (e *Emitter) emitGeneratorCtorThunk(info *GeneratorInfo, displayName string
 			paramDecl += fmt.Sprintf(", %s %%p%d", pt.IR, i)
 		}
 		paramVals[i] = Value{Ref: fmt.Sprintf("%%p%d", i), Ty: pt}
+	}
+	if countsArgs(info.HasRest, info.ParamNames) {
+		// The count the caller stored (TDD-00210), for the body's
+		// `arguments`.
+		e.ensureArgc()
+		c := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_argc, align 8", c))
+		e.emitInstr("store i64 -1, ptr @__kml_argc, align 8")
+		inc := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", inc, c))
+		e.genArgc = inc // -1 (not known) becomes 0
 	}
 	inst := e.emitGeneratorConstructValues(info, "", paramVals, "%env")
 	body := e.allocas.String() + e.body.String()
@@ -616,6 +769,13 @@ func (e *Emitter) emitGeneratorCtorThunk(info *GeneratorInfo, displayName string
 func generatorValueType(info *GeneratorInfo) Type {
 	ft := FuncType(info.ParamTypes, info.GenTy)
 	ft.FuncHasRest = info.HasRest
+	ft.FuncCountsArgs = countsArgs(info.HasRest, info.ParamNames)
+	for _, o := range info.Optional {
+		if o {
+			ft.FuncParamOptional = append([]bool(nil), info.Optional...)
+			break
+		}
+	}
 	return ft
 }
 
@@ -631,7 +791,7 @@ func (e *Emitter) packGeneratorEnv(info *GeneratorInfo, pos ast.Pos) (string, er
 	}
 	env := e.freshReg()
 	envIR := envStructIR(info.Captures)
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envStructSize(info.Captures)))
+	e.heapMallocInto(env, fmt.Sprint(envStructSize(info.Captures)))
 	for i, cap := range info.Captures {
 		sym, ok := e.lookup(cap.Name)
 		if !ok {
@@ -643,7 +803,7 @@ func (e *Emitter) packGeneratorEnv(info *GeneratorInfo, pos ast.Pos) (string, er
 		}
 		slotReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slotReg, envIR, env, i))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cellPtr, slotReg))
+		e.heapStore("ptr", cellPtr, slotReg, 8)
 	}
 	return env, nil
 }
@@ -664,12 +824,17 @@ func (e *Emitter) emitGeneratorSwapToCaller(gctx *generatorEmitCtx, val Value, d
 	if done {
 		doneLit = "1"
 	}
-	e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorYieldedField, val.Ty.IR, val.Ref)
+	if val.Ty.IsArray() {
+		// Keep the value's live header, so the caller reads the yielded array.
+		idx, _, _ := gctx.genTy.FieldIndex(GeneratorYieldedField)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, gctx.genTy.StructIR(), gctx.genObjReg, idx))
+		e.storeArrayFieldHeader(gep, val)
+	} else {
+		e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorYieldedField, StructFieldIR(val.Ty), val.Ref)
+	}
 	e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorDoneField, "i1", doneLit)
-	callerCtx := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorCallerCtxField)
-	ownCtx := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorCtxField)
-	swaprc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @swapcontext(ptr %s, ptr %s)", swaprc, ownCtx.Ref, callerCtx.Ref))
+	e.genSwapOut(gctx.genObjReg, gctx.genTy)
 }
 
 // emitYieldExpression implements `yield expr` / a bare `yield` inside a
@@ -686,7 +851,14 @@ func (e *Emitter) emitYieldExpression(ex *ast.YieldExpression) (Value, error) {
 		return e.emitYieldStar(ex)
 	}
 	var val Value
-	if ex.Argument != nil {
+	switch {
+	case ex.Argument != nil && gctx.genTy.GeneratorIsAsync:
+		v, err := e.emitAsyncGenOperand(ex.Argument, gctx.elemTy)
+		if err != nil {
+			return Value{}, err
+		}
+		val = e.convert(v, gctx.elemTy)
+	case ex.Argument != nil:
 		// Hint the element type so a `yield [a, b]` / `yield { … }` whose slot is
 		// a tuple/object builds that shape directly rather than a bare array
 		// aggregate the tuple slot can't hold (ADR-00257).
@@ -694,12 +866,57 @@ func (e *Emitter) emitYieldExpression(ex *ast.YieldExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		val = e.coerce(v, gctx.elemTy)
-	} else {
+		val = e.convert(v, gctx.elemTy)
+	default:
 		val = e.genZeroElem(gctx.elemTy)
+		if err := e.asyncGenAwaitTick(gctx, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
 	}
 	e.emitGeneratorSwapToCaller(gctx, val, false)
 	return e.emitYieldResumeDispatch(gctx)
+}
+
+// asyncGenAwaitTick is the Await an async generator's `yield v` and
+// `return v` make on v before they complete the request: one microtask
+// turn, so the request's promise settles a tick after an async function's
+// would.
+func (e *Emitter) asyncGenAwaitTick(gctx *generatorEmitCtx, pos ast.Pos) error {
+	if gctx == nil || !gctx.genTy.GeneratorIsAsync {
+		return nil
+	}
+	_, err := e.emitAwait(ast.NewAwaitExpression(ast.NewNullLiteral(true, pos), pos))
+	return err
+}
+
+// awaitedIn is the type an async generator yields or returns for a value of
+// type t (a promise's settled type: `yield p` awaits p); t elsewhere.
+func awaitedIn(async bool, t Type) Type {
+	if async && t.IsPromise() && !t.IsDynamic() {
+		if t.PromiseType == nil {
+			return TypeUndefined
+		}
+		return *t.PromiseType
+	}
+	return t
+}
+
+// emitAsyncGenOperand evaluates a `yield`/`return` operand in an async
+// generator and awaits it, as the spec's AsyncGeneratorYield and return do:
+// a promise yields its settled value, any other value takes one microtask
+// turn.
+func (e *Emitter) emitAsyncGenOperand(arg ast.Expression, elemTy Type) (Value, error) {
+	v, err := e.emitExprWithObjectHint(arg, elemTy)
+	if err != nil {
+		return Value{}, err
+	}
+	if v.Ty.IsPromise() || v.Ty.IsDynamic() {
+		return e.emitAwait(ast.NewAwaitExpression(e.bindValue(v, arg.GetPos()), arg.GetPos()))
+	}
+	if _, err := e.emitAwait(ast.NewAwaitExpression(ast.NewNullLiteral(true, arg.GetPos()), arg.GetPos())); err != nil {
+		return Value{}, err
+	}
+	return v, nil
 }
 
 // emitYieldStar implements `yield* inner` inside a generator body (TDD-00086):
@@ -715,7 +932,7 @@ func (e *Emitter) emitYieldStar(ex *ast.YieldExpression) (Value, error) {
 		return Value{}, fmt.Errorf("%d:%d: yield* requires an operand", ex.GetPos().Line, ex.GetPos().Col)
 	}
 	innerTy := e.inferExprType(ex.Argument)
-	if !innerTy.IsGenerator && !innerTy.Nullable && (innerTy.IsArray || innerTy.IsSet || innerTy.IsMap || isForOfStringTy(innerTy)) && !gctx.genTy.GeneratorIsAsync {
+	if !innerTy.IsGenerator() && !innerTy.Nullable() && (innerTy.IsArray() || innerTy.IsSet() || innerTy.IsMap() || isForOfStringTy(innerTy)) && !gctx.genTy.GeneratorIsAsync {
 		// A builtin iterable: each element is yielded, and the delegation
 		// evaluates to undefined (an array iterator's return value).
 		pos := ex.GetPos()
@@ -728,28 +945,36 @@ func (e *Emitter) emitYieldStar(ex *ast.YieldExpression) (Value, error) {
 		}
 		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
 	}
-	if !innerTy.IsGenerator {
+	if !innerTy.IsGenerator() {
 		// yield* over a user `Symbol.asyncIterator` iterable (TDD-00094) — only
 		// inside an async generator, since awaiting each step needs an async
 		// context. Delegates by re-yielding each awaited element.
-		if innerTy.IsClass && gctx != nil && gctx.genTy.GeneratorIsAsync {
+		if innerTy.IsClass() && gctx != nil && gctx.genTy.GeneratorIsAsync {
 			if info, ok := e.classes[innerTy.ClassName]; ok {
 				if _, ok := info.MethodSigs[asyncIteratorMethodName]; ok {
 					return e.emitYieldStarAsyncIterable(gctx, ex, innerTy)
 				}
 			}
 		}
-		return Value{}, fmt.Errorf("%d:%d: yield* requires a generator operand, or a class with [Symbol.asyncIterator]() inside an async generator (TDD-00094); a general sync `Symbol.iterator` iterable is not yet supported", ex.GetPos().Line, ex.GetPos().Col)
+		return e.emitYieldStarAny(gctx, ex)
 	}
 	isAsyncInner := innerTy.GeneratorIsAsync
 	if isAsyncInner && !gctx.genTy.GeneratorIsAsync {
 		return Value{}, fmt.Errorf("%d:%d: yield* over an async generator is only allowed inside an async generator (awaiting each step needs an async context)", ex.GetPos().Line, ex.GetPos().Col)
 	}
 	innerElem := *innerTy.GeneratorElemType
+	if innerElem.IR != gctx.elemTy.IR && gctx.elemTy.IsDynamic() && !isAsyncInner {
+		// An outer generator yielding a union (boxed elements) delegates
+		// through the dynamic protocol, which boxes each inner value.
+		return e.emitYieldStarAny(gctx, ex)
+	}
 	if innerElem.IR != gctx.elemTy.IR {
 		return Value{}, fmt.Errorf("%d:%d: yield* inner generator element type must match the outer generator's", ex.GetPos().Line, ex.GetPos().Col)
 	}
 	resultTy := genNextResultType(innerElem)
+	if isAsyncInner {
+		resultTy = asyncGenResultType(innerElem)
+	}
 
 	// One inner step (.next/.throw/.return), returning the `{value,done}` result
 	// object pointer — for an async inner it awaits the returned promise.
@@ -806,8 +1031,11 @@ func (e *Emitter) emitYieldStar(ex *ast.YieldExpression) (Value, error) {
 		idx, _, _ := resultTy.FieldIndex(field)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, resultTy.StructIR(), r, idx))
-		// An array-typed value field holds a header pointer (TDD-00213 Stage 2) —
-		// deref it into the {ptr,i64} aggregate the caller re-yields/returns.
+		// An array-typed value field holds a header pointer (TDD-00213 Stage 2),
+		// the array value the caller re-yields/returns.
+		if field == "value" {
+			return e.loadGenResultValue(gep, resultTy, fieldTy)
+		}
 		return e.genLoadElemAt(gep, fieldTy)
 	}
 
@@ -867,6 +1095,7 @@ func (e *Emitter) emitYieldStar(ex *ast.YieldExpression) (Value, error) {
 	if err := e.emitPendingFinallys(); err != nil {
 		return Value{}, err
 	}
+	e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorHasRetField, "i1", "1") // completes with a value
 	e.emitGeneratorSwapToCaller(gctx, Value{Ref: finalRet, Ty: gctx.elemTy}, true)
 	e.emitTerminator("ret void")
 
@@ -902,7 +1131,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 	if err != nil {
 		return Value{}, err
 	}
-	if !iterVal.Ty.IsClass {
+	if !iterVal.Ty.IsClass() {
 		return Value{}, fmt.Errorf("%d:%d: [Symbol.asyncIterator]() must return a class instance with a next() method (TDD-00094)", pos.Line, pos.Col)
 	}
 	iterTy := iterVal.Ty
@@ -911,7 +1140,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 		return Value{}, fmt.Errorf("%d:%d: unknown iterator class '%s'", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
 	}
 	nextSig, ok := iterInfo.MethodSigs["next"]
-	if !ok || !nextSig.RetType.IsPromise || nextSig.RetType.PromiseType == nil {
+	if !ok || !nextSig.RetType.IsPromise() || nextSig.RetType.PromiseType == nil {
 		return Value{}, fmt.Errorf("%d:%d: async iterator '%s'.next() must return a Promise<{value,done}> (TDD-00094)", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
 	}
 	resultTy := *nextSig.RetType.PromiseType
@@ -948,7 +1177,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 		if len(sig.ParamTypes) > 0 {
 			paramTy = sig.ParamTypes[0]
 		}
-		coerced := e.coerce(arg, paramTy)
+		coerced := e.convert(arg, paramTy)
 		tmp := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", tmp, paramTy.IR, paramTy.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", paramTy.IR, coerced.Ref, tmp, paramTy.Align()))
@@ -971,7 +1200,7 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 	// (present and returning a Promise<{value,done}>-shaped result).
 	canForward := func(method string) bool {
 		sig, ok := iterInfo.MethodSigs[method]
-		return ok && sig.RetType.IsPromise && sig.RetType.PromiseType != nil
+		return ok && sig.RetType.IsPromise() && sig.RetType.PromiseType != nil
 	}
 
 	condL := e.freshLabel("ystar.ai.cond")
@@ -1028,13 +1257,14 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 	e.emitLabel(aiThrowL)
 	thrown := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorThrownField)
 	if canForward("throw") {
-		if err := forwardCall("throw", thrown); err != nil {
+		if err := forwardCall("throw", e.thrownCellAny(thrown.Ref)); err != nil {
 			return Value{}, err
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", procL))
 	} else {
 		e.ensureExceptionHelpers()
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", thrown.Ref))
+		tag, pay := e.loadThrownCell(thrown.Ref)
+		e.excThrowAny(tag, pay)
 		e.emitTerminator("unreachable")
 	}
 
@@ -1061,12 +1291,14 @@ func (e *Emitter) emitYieldStarAsyncIterable(gctx *generatorEmitCtx, ex *ast.Yie
 		if err := e.emitPendingFinallys(); err != nil {
 			return Value{}, err
 		}
+		e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorHasRetField, "i1", "1") // completes with a value
 		e.emitGeneratorSwapToCaller(gctx, Value{Ref: rvVal, Ty: gctx.elemTy}, true)
 		e.emitTerminator("ret void")
 	} else {
 		if err := e.emitPendingFinallys(); err != nil {
 			return Value{}, err
 		}
+		e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorHasRetField, "i1", "1") // completes with a value
 		e.emitGeneratorSwapToCaller(gctx, rv, true)
 		e.emitTerminator("ret void")
 	}
@@ -1097,12 +1329,23 @@ func (e *Emitter) emitYieldResumeDispatch(gctx *generatorEmitCtx) (Value, error)
 	e.emitLabel(throwL)
 	e.ensureExceptionHelpers()
 	thrown := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorThrownField)
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", thrown.Ref))
+	tag, pay := e.loadThrownCell(thrown.Ref)
+	e.excThrowAny(tag, pay)
 	e.emitTerminator("unreachable")
 
 	// mode 2: run enclosing finallys, then complete the generator with __sent.
 	e.emitLabel(returnL)
 	rv := e.genSentAs(gctx.genObjReg, gctx.genTy, gctx.elemTy)
+	e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorHasRetField, "i1", "1")
+	// An async generator resumed by return(v) awaits v before completing
+	// (AsyncGeneratorUnwrapYieldResumption).
+	if gctx.genTy.GeneratorIsAsync {
+		aw, err := e.emitAwait(ast.NewAwaitExpression(e.bindValue(rv, ast.Pos{}), ast.Pos{}))
+		if err != nil {
+			return Value{}, err
+		}
+		rv = e.convert(aw, gctx.elemTy)
+	}
 	if err := e.emitPendingFinallys(); err != nil {
 		return Value{}, err
 	}
@@ -1135,11 +1378,17 @@ func (e *Emitter) emitGeneratorReturn(r *ast.ReturnStatement) error {
 	gctx := e.currentGenerator
 	var val Value
 	if r.Value != nil {
-		v, err := e.emitExprWithObjectHint(r.Value, gctx.elemTy)
+		var v Value
+		var err error
+		if gctx.genTy.GeneratorIsAsync {
+			v, err = e.emitAsyncGenOperand(r.Value, gctx.elemTy)
+		} else {
+			v, err = e.emitExprWithObjectHint(r.Value, gctx.elemTy)
+		}
 		if err != nil {
 			return err
 		}
-		val = e.coerce(v, gctx.elemTy)
+		val = e.convert(v, gctx.elemTy)
 		e.storeGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorHasRetField, "i1", "1")
 	} else {
 		val = e.genZeroElem(gctx.elemTy)
@@ -1171,32 +1420,16 @@ func (e *Emitter) emitGeneratorReturn(r *ast.ReturnStatement) error {
 // arrow function's closure — so referencing an outer local from inside a
 // generator body is a clean "undefined variable" error, not a capture.
 func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info *GeneratorInfo) error {
-	savedAllocas := e.allocas
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedLabelCtr := e.labelCtr
-	savedScopes := e.scopes
-	savedRetType := e.currentRetType
-	savedBlockDone := e.blockDone
-	savedCurrentGenerator := e.currentGenerator
-	// break/continue/named-label stacks reset too, defensively, same
-	// reasoning as every other per-function emitter-state reset in
-	// emit_func.go — a generator declaration is only ever entered from
-	// top-level code in V1 (never itself nested inside a live loop's own
-	// break/continue context), so this isn't yet exploitable in practice,
-	// but leaving it unreset would be a landmine for whenever nested
-	// generator support is picked up. Restored via defer, not a plain
-	// assignment — see emitFunctionDeclAs's identical fix for why a plain
-	// assignment isn't safe against an error return partway through body
-	// emission.
-	savedBreakStack := e.breakStack
-	savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope := e.pendingFrees, e.breakFreeScope, e.continueFreeScope
-	e.pendingFrees, e.breakFreeScope, e.continueFreeScope = nil, nil, nil
-	savedContinueStack := e.continueStack
-	savedNamedLabelStack := e.namedLabelStack
-	e.breakStack = nil
-	e.continueStack = nil
-	e.namedLabelStack = nil
+	restoreBuilder := e.beginThunkEmit()
+	// A fresh context, as every function emitter's (emit_func.go): none of
+	// the enclosing function's loop, cleanup, async or constructor state.
+	// Restored via defer, not a plain assignment — see emitFunctionDeclAs
+	// for why a plain assignment isn't safe against an error return partway
+	// through body emission.
+	savedCtx := e.funcContext
+	e.funcContext = &funcContext{
+		inModuleTask: savedCtx.inModuleTask,
+	}
 	// Eager-boxing capture set (see hoistedCaptures): a local or parameter a
 	// nested closure captures is boxed where it is declared, not where the
 	// closure is made — a closure made in one branch would otherwise box it
@@ -1212,26 +1445,19 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	}
 	defer func() {
 		e.hoistedCaptures = savedHoistedCaptures
-		e.allocas = savedAllocas
-		e.body = savedBody
-		e.regCtr = savedRegCtr
-		e.labelCtr = savedLabelCtr
-		e.scopes = savedScopes
-		e.currentRetType = savedRetType
-		e.blockDone = savedBlockDone
-		e.currentGenerator = savedCurrentGenerator
-		e.breakStack = savedBreakStack
-		e.pendingFrees, e.breakFreeScope, e.continueFreeScope = savedPendingFrees, savedBreakFreeScope, savedContinueFreeScope
-		e.continueStack = savedContinueStack
-		e.namedLabelStack = savedNamedLabelStack
+		restoreBuilder()
+		e.funcContext = savedCtx
 	}()
+	// The body runs on its own fiber: its base frame, then its own. A body
+	// with no frame of its own (one the compiler synthesized, as a static
+	// generator method's) still cuts its callees' frames from its creator's,
+	// which may be gone when it resumes.
+	if e.fileOfFunc(decl) != "" || e.programHasFrames() {
+		e.enterFiberBase()
+	}
+	e.enterFrame(decl, unmangleTopLevelName(decl.Name))
 
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.labelCtr = 0
 	e.scopes = nil
-	e.blockDone = false
 	e.currentRetType = info.ElemTy
 	e.pushScope()
 
@@ -1280,7 +1506,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 
 	for i, p := range decl.Params {
 		pty := info.ParamTypes[i]
-		if pty.IsArray && !e.hoistedCaptures[p.Name] {
+		if pty.IsArray() && !e.hoistedCaptures[p.Name] {
 			// An array parameter: the named array's header slot, holding the
 			// header the instance's field points to (the caller's array).
 			idx, _, _ := info.GenTy.FieldIndex(fmt.Sprintf("__param%d", i))
@@ -1298,7 +1524,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 			agg := nullableScalarStorageIR(pty)
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", localPtr, agg, storageAlign(pty)))
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, val.Ref, localPtr, storageAlign(pty)))
-			e.define(p.Name, Symbol{Ptr: localPtr, Ty: pty, NullableBoxed: true})
+			e.define(p.Name, Symbol{Ptr: localPtr, Ty: pty})
 			continue
 		}
 		if e.hoistedCaptures[p.Name] {
@@ -1311,15 +1537,6 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		e.define(p.Name, Symbol{Ptr: localPtr, Ty: pty})
 	}
 	if err := e.synthesizeArgumentsObject(decl, FuncSig{}); err != nil {
-		return err
-	}
-	genParamTypes := make([]Type, len(decl.Params))
-	for i, p := range decl.Params {
-		if sym, ok := e.lookup(p.Name); ok {
-			genParamTypes[i] = sym.Ty
-		}
-	}
-	if err := e.emitParamDefaultPrologue(decl.Params, genParamTypes, decl.Body, decl.GetPos()); err != nil {
 		return err
 	}
 
@@ -1335,7 +1552,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 			cellReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slotReg, envIR, envVal.Ref, i))
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cellReg, slotReg))
-			e.define(cap.Name, Symbol{Ptr: cellReg, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, NullableBoxed: cap.Sym.NullableBoxed, ForwardName: cap.Sym.ForwardName})
+			e.define(cap.Name, Symbol{Ptr: cellReg, Ty: cap.Ty, Boxed: true, IsConst: cap.Sym.IsConst, ForwardName: cap.Sym.ForwardName})
 		}
 	}
 
@@ -1350,15 +1567,9 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	// former per-`.next()` setjmp guard.
 	{
 		e.ensureExceptionHelpers()
-		outerJb := e.freshReg()
-		sj := e.freshReg()
-		threw := e.freshReg()
 		bodyStartL := e.freshLabel("gen.body")
 		catchAllL := e.freshLabel("gen.catchall")
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", outerJb))
-		e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(outerJb)))
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchAllL, bodyStartL))
+		e.excEnter(catchAllL, bodyStartL)
 
 		e.emitLabel(catchAllL)
 		// Reload genObj from the handoff global — a longjmp may have clobbered the
@@ -1366,19 +1577,42 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		// the swap-in that wrote it (ensureGeneratorRuntime's own reasoning).
 		reGen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_gen_pending_obj, align 8", reGen))
-		errReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", errReg))
+		// The thrown value as it was thrown (any value, not only an Error):
+		// a {tag, payload} cell the caller side re-throws or rejects with.
+		errReg := e.emitThrownCell()
 		e.storeGeneratorField(reGen, info.GenTy, GeneratorGenErrorField, "ptr", errReg)
 		zeroY := e.genZeroElem(info.ElemTy)
-		e.storeGeneratorField(reGen, info.GenTy, GeneratorYieldedField, zeroY.Ty.IR, zeroY.Ref)
+		e.storeGeneratorField(reGen, info.GenTy, GeneratorYieldedField, StructFieldIR(zeroY.Ty), zeroY.Ref)
 		e.storeGeneratorField(reGen, info.GenTy, GeneratorDoneField, "i1", "1")
-		callerCtx := e.loadGeneratorField(reGen, info.GenTy, GeneratorCallerCtxField)
-		ownCtx := e.loadGeneratorField(reGen, info.GenTy, GeneratorCtxField)
-		swaprc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @swapcontext(ptr %s, ptr %s)", swaprc, ownCtx.Ref, callerCtx.Ref))
+		e.genSwapOut(reGen, info.GenTy)
 		e.emitTerminator("ret void")
 
 		e.emitLabel(bodyStartL)
+	}
+
+	// Parameter defaults, with captures in scope and a throw caught above.
+	genParamTypes := make([]Type, len(decl.Params))
+	for i, p := range decl.Params {
+		if sym, ok := e.lookup(p.Name); ok {
+			genParamTypes[i] = sym.Ty
+		}
+	}
+	if err := e.emitParamDefaultPrologue(decl.Params, genParamTypes, decl.Body, decl.GetPos()); err != nil {
+		return err
+	}
+	// Destructured parameters, unpacked from their hidden plain ones.
+	for _, st := range e.genPatternInits[decl] {
+		if err := e.emitStmt(st); err != nil {
+			return err
+		}
+	}
+	if info.EagerStart {
+		// Suspended at the start, as a fresh generator is; the construction
+		// swapped in only to run the defaults.
+		e.emitGeneratorSwapToCaller(gctx, e.genZeroElem(info.ElemTy), false)
+		if _, err := e.emitYieldResumeDispatch(gctx); err != nil {
+			return err
+		}
 	}
 
 	if err := e.pushNestedFuncScope(decl.Params, decl.Body.Body); err != nil {
@@ -1405,10 +1639,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		e.emitTerminator("ret void")
 	}
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine void %s() {\nentry:\n", info.BodyFuncName))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	e.writeFunc(fmt.Sprintf("void %s()", info.BodyFuncName), e.allocas.String()+e.body.String())
 
 	return nil
 }
@@ -1480,8 +1711,7 @@ func (e *Emitter) emitGeneratorSwapCore(genObj string, genTy Type, resetCurrentT
 		e.body.WriteString(gcSet)
 	}
 	ownCtx := e.loadGeneratorField(genObj, genTy, GeneratorCtxField)
-	swaprc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @swapcontext(ptr %s, ptr %s)", swaprc, saveCtx, ownCtx.Ref))
+	e.fiberSwitch(saveCtx, ownCtx.Ref)
 	if gcRestore != "" {
 		e.body.WriteString(gcRestore)
 	}
@@ -1503,7 +1733,19 @@ func (e *Emitter) emitGeneratorSwapCore(genObj string, genTy Type, resetCurrentT
 }
 
 func (e *Emitter) emitGeneratorSwapIntoBody(genObj string, genTy Type) string {
+	// A caller context is set only while the body runs: resuming a running
+	// generator (its own body calling next()) is a TypeError.
+	running := e.loadGeneratorField(genObj, genTy, GeneratorCallerCtxField)
+	isRun := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isRun, running.Ref))
+	runL, okL := e.freshLabel("gen.running"), e.freshLabel("gen.resume")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRun, runL, okL))
+	e.emitLabel(runL)
+	e.emitThrowTypeError("Generator is already running")
+	e.emitLabel(okL)
 	e.emitGeneratorSwapCore(genObj, genTy, false)
+	e.storeGeneratorField(genObj, genTy, GeneratorCallerCtxField, "ptr", "null")
+	e.emitGenReleaseIfDone(genObj, genTy)
 
 	// Re-throw an uncaught body error on the caller side (its own jmpbuf stack is
 	// active again now).
@@ -1515,7 +1757,8 @@ func (e *Emitter) emitGeneratorSwapIntoBody(genObj string, genTy Type) string {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, rethrowL, contL))
 	e.emitLabel(rethrowL)
 	e.storeGeneratorField(genObj, genTy, GeneratorGenErrorField, "ptr", "null")
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", genErr.Ref))
+	tag, pay := e.loadThrownCell(genErr.Ref)
+	e.excThrowAny(tag, pay)
 	e.emitTerminator("unreachable")
 	e.emitLabel(contL)
 	return contL
@@ -1621,7 +1864,7 @@ func (e *Emitter) buildGenNextResult(resultTy, elemTy Type, yielded, done Value)
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultReg, vIdx))
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		e.storeArrayFieldHeader(vGep, yielded) // {value} slot holds a header pointer (TDD-00213 S2)
 	} else {
 		e.genStoreElemAt(vGep, elemTy, yielded.Ref)
@@ -1629,7 +1872,7 @@ func (e *Emitter) buildGenNextResult(resultTy, elemTy Type, yielded, done Value)
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReg, dIdx))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", done.Ref, dGep))
+	e.heapStore("i1", done.Ref, dGep, 1)
 	return Value{Ref: resultReg, Ty: resultTy}
 }
 
@@ -1651,7 +1894,7 @@ func (e *Emitter) emitGeneratorThrow(receiver ast.Expression, genTy Type, args [
 	if err != nil {
 		return Value{}, err
 	}
-	errPtr, err := e.errorPtrFromValue(ev)
+	errPtr, err := e.thrownCellOf(ev)
 	if err != nil {
 		return Value{}, err
 	}
@@ -1691,7 +1934,8 @@ func (e *Emitter) emitGeneratorThrowByValue(genObj string, genTy Type, errPtr st
 	// never handled it), completing it.
 	e.emitLabel(propL)
 	e.storeGeneratorField(genObj, genTy, GeneratorDoneField, "i1", "1")
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr))
+	tag, pay := e.loadThrownCell(errPtr)
+	e.excThrowAny(tag, pay)
 	e.emitTerminator("unreachable")
 
 	// suspended: resume in mode 1 — the yield-point handler throws __thrown, which
@@ -1725,7 +1969,7 @@ func (e *Emitter) emitGeneratorReturnMethod(receiver ast.Expression, genTy Type,
 		}
 		// A mismatched `.return(x)` argument is a clean COMPILE_ERROR, not a raw
 		// store of the wrong shape (invalid IR) — see the `.next()` path.
-		rv, err = e.coerceChecked(v, elemTy, args[0].GetPos(), "generator .return() value")
+		rv, err = e.convertChecked(v, elemTy, args[0].GetPos(), "generator .return() value")
 		if err != nil {
 			return Value{}, err
 		}
@@ -1808,14 +2052,13 @@ func (e *Emitter) emitAsyncGenRuntimeSetup() {
 }
 
 // emitAsyncGenRejectPromise stores errPtr as promise q's rejection reason.
-func (e *Emitter) emitAsyncGenRejectPromise(q, errPtr string) {
-	errBits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", errBits, errPtr))
-	// errPtr is an errorObj — carry it as a caught Error (tag kmlTagError) so a
-	// .then/.catch reject handler reads its message/name/instanceof (TDD-00207).
-	// Settling wakes a parked awaiter (a deferred .next()); a no-op drain
-	// in the synchronous no-waiter case.
-	e.emitRejectPromise(q, fmt.Sprintf("%d", kmlTagError), false, errBits)
+func (e *Emitter) emitAsyncGenRejectPromise(q, cell string) {
+	// cell is a thrown cell (emitThrownCell/thrownCellOf): the value as
+	// thrown, an Error keeping its tag so a reject handler reads its
+	// message/name/instanceof (TDD-00207). Settling wakes a parked awaiter (a
+	// deferred .next()); a no-op drain in the synchronous no-waiter case.
+	tag, pay := e.loadThrownCell(cell)
+	e.emitRejectCaught(q, tag, pay)
 }
 
 // emitAsyncGenSwapAndSettle runs a suspended async generator one resume step
@@ -1837,7 +2080,8 @@ func (e *Emitter) emitAsyncGenSettleFromFields(genObj string, genTy Type, elemTy
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, rejL, fulL))
 	e.emitLabel(rejL)
 	e.storeGeneratorField(genObj, genTy, GeneratorGenErrorField, "ptr", "null")
-	e.emitAsyncGenRejectPromise(q, genErr.Ref)
+	tag, pay := e.loadThrownCell(genErr.Ref)
+	e.emitRejectCaught(q, tag, pay)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mrgL))
 	e.emitLabel(fulL)
 	yielded := e.loadGeneratorField(genObj, genTy, GeneratorYieldedField)
@@ -1864,13 +2108,13 @@ func (e *Emitter) emitAsyncGenAwaitParkUntilSettled(pReg string) {
 	stepFn := e.ensureAsyncGenStepFn(genTy)
 
 	clo := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.heapMallocInto(clo, "16")
 	cf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cf, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", stepFn, cf))
+	e.heapStore("ptr", stepFn, cf, 8)
 	ce := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ce, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", genObj, ce))
+	e.heapStore("ptr", genObj, ce, 8)
 
 	// Settled → enqueue the resume now; pending → attach a reaction node.
 	e.emitMarkPromiseHandled(pReg)
@@ -1889,26 +2133,23 @@ func (e *Emitter) emitAsyncGenAwaitParkUntilSettled(pReg string) {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", parkL))
 	e.emitLabel(attachL)
 	node := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", node))
+	e.heapMallocInto(node, "16")
 	rxP := e.freshReg()
 	oldHead := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, pReg))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, rxP))
 	nClo := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", nClo, node))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", clo, nClo))
+	e.heapStore("ptr", clo, nClo, 8)
 	nNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", nNext, node))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", oldHead, nNext))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, rxP))
+	e.heapStore("ptr", oldHead, nNext, 8)
+	e.heapStore("ptr", node, rxP, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", parkL))
 
 	e.emitLabel(parkL)
 	e.storeGeneratorField(genObj, genTy, GeneratorParkedField, "i64", "1")
-	callerCtx := e.loadGeneratorField(genObj, genTy, GeneratorCallerCtxField)
-	ownCtx := e.loadGeneratorField(genObj, genTy, GeneratorCtxField)
-	swaprc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @swapcontext(ptr %s, ptr %s)", swaprc, ownCtx.Ref, callerCtx.Ref))
+	e.genSwapOut(genObj, genTy)
 	// Resumed by the step fn: the awaited promise is settled now.
 	e.storeGeneratorField(genObj, genTy, GeneratorParkedField, "i64", "0")
 }
@@ -1924,14 +2165,14 @@ const asyncGenReqNodeIR = "{ i64, ptr, ptr, ptr, ptr }"
 func (e *Emitter) emitAsyncGenSubmitRequest(genObj string, genTy Type, elemTy Type, mode string, sentVal Value, thrown string, q string) {
 	e.ensureMalloc()
 	node := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 40)", node))
+	e.heapMallocInto(node, "40")
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", slot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.genBoxSent(sentVal), slot))
+	e.heapMallocInto(slot, "8")
+	e.heapStore("i64", e.genBoxSent(sentVal), slot, 8)
 	storeAt := func(idx int, ir, val string) {
 		gp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, asyncGenReqNodeIR, node, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, val, gp))
+		e.heapStore(ir, val, gp, 8)
 	}
 	storeAt(0, "i64", mode)
 	storeAt(1, "ptr", slot)
@@ -1954,7 +2195,7 @@ func (e *Emitter) emitAsyncGenSubmitRequest(genObj string, genTy Type, elemTy Ty
 	tail := e.loadGeneratorField(genObj, genTy, GeneratorReqTailField)
 	tn := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", tn, asyncGenReqNodeIR, tail.Ref))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, tn))
+	e.heapStore("ptr", node, tn, 8)
 	e.storeGeneratorField(genObj, genTy, GeneratorReqTailField, "ptr", node)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -1967,7 +2208,7 @@ func (e *Emitter) emitAsyncGenSubmitRequest(genObj string, genTy Type, elemTy Ty
 func (e *Emitter) emitAsyncGeneratorThrowByValue(genObj string, genTy Type, errPtr string, pos ast.Pos) (Value, error) {
 	e.emitAsyncGenRuntimeSetup()
 	elemTy := *genTy.GeneratorElemType
-	resultTy := genNextResultType(elemTy)
+	resultTy := asyncGenResultType(elemTy)
 
 	// A not-started, idle generator rejects immediately without running the
 	// body (and is marked done). Otherwise the request goes through the shared
@@ -2019,7 +2260,7 @@ func (e *Emitter) emitAsyncGeneratorThrowByValue(genObj string, genTy Type, errP
 func (e *Emitter) emitAsyncGeneratorReturnByValue(genObj string, genTy Type, rv Value, pos ast.Pos) (Value, error) {
 	e.emitAsyncGenRuntimeSetup()
 	elemTy := *genTy.GeneratorElemType
-	resultTy := genNextResultType(elemTy)
+	resultTy := asyncGenResultType(elemTy)
 	trueVal := Value{Ref: "true", Ty: TypeBool}
 
 	// A not-started, idle generator settles {v, done:true} immediately without
@@ -2047,10 +2288,12 @@ func (e *Emitter) emitAsyncGeneratorReturnByValue(genObj string, genTy Type, rv 
 	qp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", qp))
 	e.storeGeneratorField(genObj, genTy, GeneratorDoneField, "i1", "1")
-	resProp := e.buildGenNextResult(resultTy, elemTy, rv, trueVal)
+	resProp := e.buildAsyncGenResult(resultTy, elemTy, rv, trueVal, "true")
 	e.storePromiseValue(qp, resProp)
+	// return(v) awaits v first (AsyncGeneratorAwaitReturn): one turn later.
 	e.ensurePromiseSettle()
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", qp))
+	e.ensureMicrotasks()
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle_later(ptr %s)", qp))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", qp, qSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
@@ -2098,7 +2341,7 @@ func (e *Emitter) emitAsyncGeneratorNextByValue(genObj string, genTy Type, args 
 func (e *Emitter) emitAsyncGeneratorNextCore(genObj string, genTy Type, sentVal Value) Value {
 	e.emitAsyncGenRuntimeSetup()
 	elemTy := *genTy.GeneratorElemType
-	resultTy := genNextResultType(elemTy)
+	resultTy := asyncGenResultType(elemTy)
 	q := e.emitAsyncGenSubmitOrStart(genObj, genTy, elemTy, "0", sentVal, "null")
 	qt := PromiseOf(resultTy)
 	qt.PromiseTask = true
@@ -2162,7 +2405,7 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	name := contentSymbol("@__kml_agen_step.", key)
 	e.asyncGenStepFns[key] = name
 	elemTy := *genTy.GeneratorElemType
-	resultTy := genNextResultType(elemTy)
+	resultTy := asyncGenResultType(elemTy)
 	restore := e.beginThunkEmit()
 	defer restore()
 	e.ensureFree()
@@ -2181,6 +2424,9 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	popL := e.freshLabel("agstep.pop")
 	retL := e.freshLabel("agstep.ret")
 
+	laterSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", laterSlot))
+	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", laterSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
 
 	e.emitLabel(loopL)
@@ -2207,11 +2453,30 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is2, dRetL, dZeroL))
 	e.emitLabel(dRetL)
 	sentBack := e.genSentAs(genObj, genTy, elemTy)
-	e.settleAsyncGenResult(q, genObj, genTy, resultTy, elemTy, sentBack)
+	doneNow := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
+	e.storePromiseValue(q, e.buildAsyncGenResult(resultTy, elemTy, sentBack, doneNow, "true"))
+	// return(v) on a finished generator awaits v first: one turn later, and
+	// the requests queued behind it complete after it (laterSlot).
+	e.ensurePromiseSettle()
+	e.ensureMicrotasks()
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle_later(ptr %s)", q))
+	e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", laterSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
 	e.emitLabel(dZeroL)
 	zeroV := e.genZeroElem(elemTy)
-	e.settleAsyncGenResult(q, genObj, genTy, resultTy, elemTy, zeroV)
+	doneZ := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
+	e.storePromiseValue(q, e.buildAsyncGenResult(resultTy, elemTy, zeroV, doneZ, "false"))
+	e.ensurePromiseSettle()
+	e.ensureMicrotasks()
+	later := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", later, laterSlot))
+	nowL, laterL := e.freshLabel("agstep.zeronow"), e.freshLabel("agstep.zerolater")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", later, laterL, nowL))
+	e.emitLabel(laterL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle_later(ptr %s)", q))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
+	e.emitLabel(nowL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
 
 	// Live generator: swap into the fiber; the resume fields (__sent /
@@ -2258,8 +2523,8 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	e.storeGeneratorField(genObj, genTy, GeneratorReqHeadField, "ptr", pnext)
 	psent := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", psent, pslot))
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", pslot))
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", head.Ref))
+	e.heapFree(pslot)
+	e.heapFree(head.Ref)
 	e.storeGeneratorField(genObj, genTy, GeneratorSentField, "i64", psent)
 	e.storeGeneratorField(genObj, genTy, GeneratorResumeModeField, "i64", pmode)
 	e.storeGeneratorField(genObj, genTy, GeneratorThrownField, "ptr", pthrown)
@@ -2269,10 +2534,7 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	e.emitLabel(retL)
 	e.emitInstr("ret void")
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine linkonce_odr hidden void %s(ptr %%env) {\nentry:\n", name))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	e.writeFunc(fmt.Sprintf("linkonce_odr hidden void %s(ptr %%env)", name), e.allocas.String()+e.body.String())
 	return name
 }
 
@@ -2281,21 +2543,18 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 // with it (TDD-00085).
 func (e *Emitter) settleAsyncGenResult(q, genObj string, genTy, resultTy, elemTy Type, yielded Value) {
 	done := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
-	resultReg := e.freshReg()
-	e.emitObjMallocInto(resultReg, resultTy)
-	vIdx, _, _ := resultTy.FieldIndex("value")
-	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultReg, vIdx))
-	if elemTy.IsArray {
-		e.storeArrayFieldHeader(vGep, yielded) // {value} slot holds a header pointer (TDD-00213 S2)
-	} else {
-		e.genStoreElemAt(vGep, elemTy, yielded.Ref)
-	}
-	dIdx, _, _ := resultTy.FieldIndex("done")
-	dGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReg, dIdx))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", done.Ref, dGep))
-	e.storePromiseValue(q, Value{Ref: resultReg, Ty: resultTy})
+	// The value is the step's while not done, the return value on the step
+	// that completed with one, and undefined otherwise (emitUserGenResult).
+	hasRet := e.loadGeneratorField(genObj, genTy, GeneratorHasRetField)
+	e.storeGeneratorField(genObj, genTy, GeneratorHasRetField, "i1", "0")
+	present := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", present, e.boolNot(done.Ref), hasRet.Ref))
+	e.settleAsyncGenWith(q, e.buildAsyncGenResult(resultTy, elemTy, yielded, done, present))
+}
+
+// settleAsyncGenWith fulfils q with the result object res.
+func (e *Emitter) settleAsyncGenWith(q string, res Value) {
+	e.storePromiseValue(q, res)
 	// Settle through __kml_promise_settle (not a bare state store) so any
 	// awaiter parked on q — the deferred-.next() microtask step settles q after
 	// its awaiter has already attached a resume reaction — is actually woken.
@@ -2338,7 +2597,7 @@ func (e *Emitter) emitAwaitSettledResult(promReg string, resultTy Type) Value {
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", v0, v0P))
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errReg, v0))
 	e.emitFreePromise(promReg)
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.excThrow(errReg)
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 	val := e.loadPromiseValue(promReg, resultTy)
@@ -2361,10 +2620,15 @@ func (e *Emitter) generatorGCStackbottomOps(genObj string, genTy Type) (setOp, r
 		return "", ""
 	}
 	saved := e.freshReg()
-	stack := e.loadGeneratorField(genObj, genTy, GeneratorStackField)
+	stack := e.loadGeneratorField(genObj, genTy, GeneratorStackField).Ref
+	lo := ""
+	if e.genStackOwned() {
+		lo, stack = fmt.Sprintf("  %s = load ptr, ptr %s, align 8\n", e.freshReg(), stack), ""
+		stack = strings.Fields(lo)[0]
+	}
 	high := e.freshReg()
-	setOp = fmt.Sprintf("  %s\n  %s = getelementptr i8, ptr %s, i64 %d\n  %s\n",
-		e.gcSBLoad(saved), high, stack.Ref, fiberStackBytes, e.gcSBStore(high))
+	setOp = fmt.Sprintf("%s  %s\n  %s = getelementptr i8, ptr %s, i64 %d\n  %s\n",
+		lo, e.gcSBLoad(saved), high, stack, fiberStackBytes, e.gcSBStore(high))
 	restoreOp = fmt.Sprintf("  %s\n", e.gcSBStore(saved))
 	return setOp, restoreOp
 }
@@ -2389,7 +2653,7 @@ func (e *Emitter) generatorGCStackbottomOps(genObj string, genTy Type) (setOp, r
 // the scheduler / re-throwing a rejected step) before reading `.done`/`.value`.
 func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, genVal Value, condL, bodyL, incL, endL string) error {
 	elemTy := *genTy.GeneratorElemType
-	resultTy := genNextResultType(elemTy)
+	resultTy := asyncGenResultType(elemTy)
 	e.ensureTaskRuntime()
 	e.ensureFree()
 	e.ensureExceptionHelpers()
@@ -2457,7 +2721,7 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 	vIdx, _, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultForBody, vIdx))
-	loaded := e.genLoadElemAt(vGep, elemTy)
+	loaded := e.loadGenResultValue(vGep, resultTy, elemTy)
 	switch {
 	case s.ObjectPattern != nil:
 		// The yielded object's fields become the loop-body bindings; a
@@ -2470,16 +2734,16 @@ func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, gen
 		// A tuple element binds positionally to the tuple's fields (an async
 		// generator's element type is never an array, so a tuple is the only
 		// array-destructurable element shape here).
-		if elemTy.IsArray {
+		if elemTy.IsArray() {
 			if err := e.genUnpackArrayElemPattern(loaded, elemTy, s.ArrayPattern); err != nil {
 				return err
 			}
-		} else if elemTy.IsTuple {
+		} else if elemTy.IsTuple() {
 			if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, s.GetPos()); err != nil {
 				return err
 			}
-		} else {
-			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", s.GetPos().Line, s.GetPos().Col)
+		} else if err := e.genUnpackIterableElem(Value{Ref: loaded, Ty: elemTy}, s.ArrayPattern, s.GetPos()); err != nil {
+			return err
 		}
 	default:
 		e.genStoreLoopVar(varPtr, elemTy, loaded)
@@ -2512,7 +2776,7 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 
 	// The bound value's type is the yielded element awaited.
 	awaitedTy := elemTy
-	if elemTy.IsPromise {
+	if elemTy.IsPromise() {
 		if elemTy.PromiseType != nil {
 			awaitedTy = *elemTy.PromiseType
 		} else {
@@ -2558,7 +2822,7 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 	// Await the yielded value before binding (identity for a plain value).
 	boundVal := Value{Ref: loaded, Ty: elemTy}
 	boundTy := elemTy
-	if elemTy.IsPromise {
+	if elemTy.IsPromise() {
 		aw, err := e.emitAwaitPromiseElem(loaded, elemTy)
 		if err != nil {
 			return err
@@ -2576,16 +2840,16 @@ func (e *Emitter) emitForAwaitOfSyncGenerator(s *ast.ForOfStatement, genTy Type,
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if boundTy.IsArray {
+		if boundTy.IsArray() {
 			if err := e.genUnpackArrayElemPattern(boundVal.Ref, boundTy, s.ArrayPattern); err != nil {
 				return err
 			}
-		} else if boundTy.IsTuple {
+		} else if boundTy.IsTuple() {
 			if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
 				return err
 			}
-		} else {
-			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", pos.Line, pos.Col)
+		} else if err := e.genUnpackIterableElem(boundVal, s.ArrayPattern, pos); err != nil {
+			return err
 		}
 	default:
 		if awaitedTy.IR != "void" && awaitedTy.IR != "" {
@@ -2624,17 +2888,17 @@ func (e *Emitter) emitForAwaitOfAsyncIterable(s *ast.ForOfStatement, iterableTy 
 		return err
 	}
 	switch {
-	case iterVal.Ty.IsGenerator && iterVal.Ty.GeneratorIsAsync:
+	case iterVal.Ty.IsGenerator() && iterVal.Ty.GeneratorIsAsync:
 		// `async *[Symbol.asyncIterator]() { yield … }`: the method's own
 		// async generator is the iterator.
 		return e.emitForAwaitOfGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
-	case iterVal.Ty.IsGenerator:
+	case iterVal.Ty.IsGenerator():
 		return e.emitForAwaitOfSyncGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
-	case iterVal.Ty.IsDynamic:
+	case iterVal.Ty.IsDynamic():
 		// An iterator typed `any` (a library's `on()` iterator): driven
 		// through the dynamic protocol, as an async iterable itself.
 		return e.emitForOfAnyValue(s, iterVal, condL, bodyL, incL, endL)
-	case !iterVal.Ty.IsClass:
+	case !iterVal.Ty.IsClass():
 		return fmt.Errorf("%d:%d: [Symbol.asyncIterator]() must return a class instance with a next() method (TDD-00089)", pos.Line, pos.Col)
 	}
 	return e.emitForAwaitOfAsyncIteratorInstance(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
@@ -2654,7 +2918,7 @@ func (e *Emitter) emitForAwaitOfAsyncIteratorInstance(s *ast.ForOfStatement, ite
 	if !ok {
 		return fmt.Errorf("%d:%d: async iterator '%s' has no next() method (TDD-00089)", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
 	}
-	if !nextSig.RetType.IsPromise || nextSig.RetType.PromiseType == nil {
+	if !nextSig.RetType.IsPromise() || nextSig.RetType.PromiseType == nil {
 		return fmt.Errorf("%d:%d: async iterator '%s'.next() must return a Promise<{value,done}> (TDD-00089)", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
 	}
 	resultTy := *nextSig.RetType.PromiseType
@@ -2717,16 +2981,16 @@ func (e *Emitter) emitForAwaitOfAsyncIteratorInstance(s *ast.ForOfStatement, ite
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if elemTy.IsArray {
+		if elemTy.IsArray() {
 			if err := e.genUnpackArrayElemPattern(loaded, elemTy, s.ArrayPattern); err != nil {
 				return err
 			}
-		} else if elemTy.IsTuple {
+		} else if elemTy.IsTuple() {
 			if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, pos); err != nil {
 				return err
 			}
-		} else {
-			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", pos.Line, pos.Col)
+		} else if err := e.genUnpackIterableElem(Value{Ref: loaded, Ty: elemTy}, s.ArrayPattern, pos); err != nil {
+			return err
 		}
 	default:
 		e.genStoreLoopVar(varPtr, elemTy, loaded)
@@ -2764,7 +3028,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 	if err != nil {
 		return err
 	}
-	if !iterVal.Ty.IsClass {
+	if !iterVal.Ty.IsClass() {
 		return e.emitForOfIteratorObject(s, iterVal, isAwait, condL, bodyL, incL, endL)
 	}
 	iterTy := iterVal.Ty
@@ -2777,11 +3041,11 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 		return fmt.Errorf("%d:%d: iterator '%s' has no next() method", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
 	}
 	resultTy := nextSig.RetType
-	if resultTy.IsPromise {
+	if resultTy.IsPromise() {
 		return fmt.Errorf("%d:%d: '%s'.next() returns a Promise — a [Symbol.iterator]() iterator must be synchronous (use [Symbol.asyncIterator] with for await)", pos.Line, pos.Col, inspectClassName(iterTy.ClassName))
 	}
 	_, elemTy, ok := resultTy.FieldIndex("value")
-	if !ok && (resultTy.IsDynamic || !resultTy.IsObject) {
+	if !ok && (resultTy.IsDynamic() || !resultTy.IsObject()) {
 		// next() returns a result whose shape is known only at run time (an
 		// `any`, a null-prototype object): the iteration protocol read
 		// dynamically, the loop variable an `any`.
@@ -2796,7 +3060,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 
 	// The bound value's type: with `for await`, a Promise value awaits to its T.
 	boundDeclTy := elemTy
-	if isAwait && elemTy.IsPromise {
+	if isAwait && elemTy.IsPromise() {
 		if elemTy.PromiseType != nil {
 			boundDeclTy = *elemTy.PromiseType
 		} else {
@@ -2845,7 +3109,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 
 	boundVal := Value{Ref: loaded, Ty: elemTy}
 	boundTy := elemTy
-	if isAwait && elemTy.IsPromise {
+	if isAwait && elemTy.IsPromise() {
 		aw, err := e.emitAwaitPromiseElem(loaded, elemTy)
 		if err != nil {
 			return err
@@ -2863,16 +3127,16 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if boundTy.IsArray {
+		if boundTy.IsArray() {
 			if err := e.genUnpackArrayElemPattern(boundVal.Ref, boundTy, s.ArrayPattern); err != nil {
 				return err
 			}
-		} else if boundTy.IsTuple {
+		} else if boundTy.IsTuple() {
 			if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
 				return err
 			}
-		} else {
-			return fmt.Errorf("%d:%d: cannot array-destructure a for-of element of non-tuple type", pos.Line, pos.Col)
+		} else if err := e.genUnpackIterableElem(boundVal, s.ArrayPattern, pos); err != nil {
+			return err
 		}
 	default:
 		if boundDeclTy.IR != "void" && boundDeclTy.IR != "" {
@@ -2902,7 +3166,7 @@ func (e *Emitter) emitForOfSymbolIterator(s *ast.ForOfStatement, iterableTy Type
 func (e *Emitter) emitForOfObjectSymbolIterable(s *ast.ForOfStatement, objTy Type, key string, isAwait bool, condL, bodyL, incL, endL string) error {
 	pos := s.GetPos()
 	fIdx, fTy, _ := objTy.FieldIndex(key)
-	if fTy.IsDynamic {
+	if fTy.IsDynamic() {
 		// A member held as `any` (a generator method, `*[Symbol.iterator]()`)
 		// runs the iteration protocol at run time, on the boxed object.
 		objVal, err := e.emitExpr(s.Iterable)
@@ -2911,7 +3175,7 @@ func (e *Emitter) emitForOfObjectSymbolIterable(s *ast.ForOfStatement, objTy Typ
 		}
 		return e.emitForOfAnyValue(s, objVal, condL, bodyL, incL, endL)
 	}
-	if !fTy.IsFunc {
+	if !fTy.IsFunc() {
 		return fmt.Errorf("%d:%d: a [Symbol.iterator]/[Symbol.asyncIterator] member must be function-valued", pos.Line, pos.Col)
 	}
 	objVal, err := e.emitExpr(s.Iterable)
@@ -2922,22 +3186,34 @@ func (e *Emitter) emitForOfObjectSymbolIterable(s *ast.ForOfStatement, objTy Typ
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objTy.StructIR(), objVal.Ref, fIdx))
 	hdr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, gep))
-	iterVal, err := e.emitClosureCallByPtr(hdr, fTy, nil, pos)
+	var recv []ast.Expression
+	if fTy.FuncThis {
+		// A method reading its own `this` (`[Symbol.iterator]() { return
+		// this; }`) is called on the object, held under a hidden name so
+		// the iterable is evaluated once.
+		name := "__kml_iterobj" + strings.TrimPrefix(e.freshReg(), "%")
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, objVal.Ty.IR, objVal.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", objVal.Ty.IR, objVal.Ref, slot, objVal.Ty.Align()))
+		e.define(name, Symbol{Ptr: slot, Ty: objVal.Ty})
+		recv = []ast.Expression{ast.NewIdentifier(name, pos)}
+	}
+	iterVal, err := e.emitClosureCallByPtr(hdr, fTy, recv, pos)
 	if err != nil {
 		return err
 	}
 	switch {
-	case iterVal.Ty.IsGenerator && iterVal.Ty.GeneratorIsAsync:
+	case iterVal.Ty.IsGenerator() && iterVal.Ty.GeneratorIsAsync:
 		if !isAwait {
 			return fmt.Errorf("%d:%d: a [Symbol.iterator]() returning an async generator requires 'for await...of'", pos.Line, pos.Col)
 		}
 		return e.emitForAwaitOfGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
-	case iterVal.Ty.IsGenerator:
+	case iterVal.Ty.IsGenerator():
 		if isAwait {
 			return e.emitForAwaitOfSyncGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
 		}
 		return e.emitForOfGenerator(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
-	case iterVal.Ty.IsClass:
+	case iterVal.Ty.IsClass():
 		if info, ok := e.classes[iterVal.Ty.ClassName]; ok {
 			if _, has := info.MethodSigs[asyncIteratorMethodName]; has && isAwait {
 				return e.emitForAwaitOfAsyncIterable(s, iterVal.Ty, iterVal, condL, bodyL, incL, endL)
@@ -2975,7 +3251,7 @@ func (e *Emitter) emitForOfIteratorObject(s *ast.ForOfStatement, iterVal Value, 
 	}
 	store := func(id *ast.Identifier, v Value) {
 		sym, _ := e.lookup(id.Name)
-		v = e.coerce(v, sym.Ty)
+		v = e.convert(v, sym.Ty)
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, v.Ref, sym.Ptr, sym.Ty.Align()))
 	}
 	it := hidden(iterVal)
@@ -2989,7 +3265,12 @@ func (e *Emitter) emitForOfIteratorObject(s *ast.ForOfStatement, iterVal Value, 
 	valueExpr := ast.NewMemberExpression(res, "value", pos)
 	elemTy := e.inferExprType(valueExpr)
 	boundDeclTy := elemTy
-	if isAwait && elemTy.IsPromise {
+	if _, yt, isGen := iterVal.Ty.FieldIndex(GeneratorYieldedField); isGen && iterVal.Ty.IsGenerator() && isNullableScalar(elemTy) && !isNullableScalar(yt) {
+		// A generator's value is read only while done is false: what it
+		// yields, as tsc types the binding, not the result's `T | undefined`.
+		boundDeclTy = elemTy.withoutNullable()
+	}
+	if isAwait && elemTy.IsPromise() {
 		boundDeclTy = TypeVoid
 		if elemTy.PromiseType != nil {
 			boundDeclTy = *elemTy.PromiseType
@@ -3020,7 +3301,7 @@ func (e *Emitter) emitForOfIteratorObject(s *ast.ForOfStatement, iterVal Value, 
 	if err != nil {
 		return err
 	}
-	if isAwait && v.Ty.IsPromise {
+	if isAwait && v.Ty.IsPromise() {
 		if v, err = e.emitAwaitPromiseElem(v.Ref, v.Ty); err != nil {
 			return err
 		}
@@ -3032,19 +3313,19 @@ func (e *Emitter) emitForOfIteratorObject(s *ast.ForOfStatement, iterVal Value, 
 		}
 	case s.ArrayPattern != nil:
 		switch {
-		case v.Ty.IsArray:
+		case v.Ty.IsArray():
 			err = e.genUnpackArrayElemPattern(v.Ref, v.Ty, s.ArrayPattern)
-		case v.Ty.IsTuple:
+		case v.Ty.IsTuple():
 			err = e.unpackTuplePatternInto(v.Ref, v.Ty, s.ArrayPattern, pos)
 		default:
-			err = fmt.Errorf("%d:%d: cannot array-destructure a for-of element of non-tuple type", pos.Line, pos.Col)
+			err = e.genUnpackIterableElem(v, s.ArrayPattern, pos)
 		}
 		if err != nil {
 			return err
 		}
 	default:
 		if boundDeclTy.IR != "void" && boundDeclTy.IR != "" {
-			e.genStoreLoopVar(varPtr, boundDeclTy, e.coerce(v, boundDeclTy).Ref)
+			e.genStoreLoopVar(varPtr, boundDeclTy, e.convert(v, boundDeclTy).Ref)
 		}
 	}
 	if err := e.emitForOfBody(s); err != nil {
@@ -3081,7 +3362,7 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 	// element (Response for a raw fetch element), or the element type itself
 	// for a plain value.
 	awaitedTy := elemTy
-	isPromiseElem := elemTy.IsPromise
+	isPromiseElem := elemTy.IsPromise()
 	if isPromiseElem {
 		if elemTy.PromiseType != nil {
 			awaitedTy = *elemTy.PromiseType
@@ -3098,7 +3379,7 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 	varPtr := e.freshReg()
 	if isPattern {
 		// no pre-loop binding — the element is unpacked in the body
-	} else if awaitedTy.IsArray {
+	} else if awaitedTy.IsArray() {
 		// Object-reference model (TDD-00127): a stable slot holding a pointer to
 		// the current element's header, rebuilt each iteration.
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
@@ -3140,6 +3421,21 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 		if aw.Ty.IR != "" {
 			boundTy = aw.Ty
 		}
+	} else if elemTy.IsDynamic() {
+		// A boxed element may hold a promise (`[p, 2]`): its value, else
+		// the value itself, after the await's tick.
+		aw, err := e.emitAwaitAny(elemVal)
+		if err != nil {
+			return err
+		}
+		boundVal = e.convert(aw, elemTy)
+	} else if _, err := e.emitAwaitAny(Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}); err != nil {
+		return err // a plain value takes the await's tick
+	}
+	// An array's async-from-sync iterator settles each step's promise from
+	// a reaction on the value's, one tick before the loop's await resumes.
+	if _, err := e.emitAwaitAny(Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}); err != nil {
+		return err
 	}
 
 	switch {
@@ -3148,20 +3444,20 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if boundTy.IsArray {
+		if boundTy.IsArray() {
 			if err := e.genUnpackArrayElemPattern(boundVal.Ref, boundTy, s.ArrayPattern); err != nil {
 				return err
 			}
-		} else if boundTy.IsTuple {
+		} else if boundTy.IsTuple() {
 			if err := e.unpackTuplePatternInto(boundVal.Ref, boundTy, s.ArrayPattern, pos); err != nil {
 				return err
 			}
-		} else {
-			return fmt.Errorf("%d:%d: cannot array-destructure a for-await element of non-tuple type", pos.Line, pos.Col)
+		} else if err := e.genUnpackIterableElem(boundVal, s.ArrayPattern, pos); err != nil {
+			return err
 		}
 	default:
-		if awaitedTy.IsArray {
-			// Point the loop variable's slot at a fresh header for this element.
+		if awaitedTy.IsArray() {
+			// Point the loop variable's slot at this element's header.
 			elemHeader := e.boxArrayValue(boundVal)
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemHeader, varPtr))
 		} else if awaitedTy.IR != "void" && awaitedTy.IR != "" {
@@ -3233,16 +3529,16 @@ func (e *Emitter) emitForOfGenerator(s *ast.ForOfStatement, genTy Type, genVal V
 			return err
 		}
 	case s.ArrayPattern != nil:
-		if elemTy.IsArray {
+		if elemTy.IsArray() {
 			if err := e.genUnpackArrayElemPattern(loaded, elemTy, s.ArrayPattern); err != nil {
 				return err
 			}
-		} else if elemTy.IsTuple {
+		} else if elemTy.IsTuple() {
 			if err := e.unpackTuplePatternInto(loaded, elemTy, s.ArrayPattern, s.GetPos()); err != nil {
 				return err
 			}
-		} else {
-			return fmt.Errorf("%d:%d: cannot array-destructure a for-of generator element of non-tuple type", s.GetPos().Line, s.GetPos().Col)
+		} else if err := e.genUnpackIterableElem(Value{Ref: loaded, Ty: elemTy}, s.ArrayPattern, s.GetPos()); err != nil {
+			return err
 		}
 	default:
 		e.genStoreLoopVar(varPtr, elemTy, loaded)
@@ -3299,10 +3595,35 @@ func collectYields(body *ast.BlockStatement) []*ast.YieldExpression {
 // <expr>`'s type, then i64. Parameters are temporarily bound so a
 // `yield param` infers from the declared parameter type. Reports !ok only
 // for a genuinely non-joinable mix.
-func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames []string, paramTypes []Type) (Type, bool) {
+func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames []string, paramTypes []Type, thisTy *Type) (Type, bool) {
 	e.pushScope()
+	// Its own name, read inside it before it is registered (a nested
+	// generator's signature is built first): a function value, boxed.
+	if fd.Name != "" {
+		if _, found := e.lookupGenerator(fd.Name); !found {
+			if _, found := e.lookup(fd.Name); !found {
+				e.define(fd.Name, Symbol{Ty: TypeAny})
+			}
+		}
+	}
+	if thisTy != nil {
+		e.define("this", Symbol{Ty: *thisTy})
+	}
 	for i, n := range paramNames {
 		e.define(n, Symbol{Ty: paramTypes[i]})
+	}
+	// A destructured parameter's names (desugarGeneratorPatternParams).
+	for _, st := range e.genPatternInits[fd] {
+		names := map[string]bool{}
+		switch d := st.(type) {
+		case *ast.ArrayDestructuring:
+			collectArrayPatternNames(d.Elems, names)
+		case *ast.ObjectDestructuring:
+			collectObjectPatternNames(d.Props, names)
+		}
+		for _, n := range sortedSet(names) {
+			e.define(n, Symbol{Ty: TypeAny})
+		}
 	}
 	defer e.popScope()
 
@@ -3363,6 +3684,14 @@ func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames
 				if st.VarName != "" && st.ArrayPattern == nil && st.ObjectPattern == nil {
 					e.define(st.VarName, Symbol{Ty: forOfBindingType(e.inferExprType(st.Iterable), st.Await)})
 				}
+				if st.ArrayPattern != nil {
+					elemTy := forOfBindingType(e.inferExprType(st.Iterable), st.Await)
+					for i, el := range st.ArrayPattern {
+						if el.Name != "" && el.SubArray == nil {
+							e.define(el.Name, Symbol{Ty: patternElemType(elemTy, i, el.Rest)})
+						}
+					}
+				}
 				if st.Body != nil {
 					bindLocals(st.Body.Body)
 				}
@@ -3385,15 +3714,22 @@ func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames
 
 	yields := collectYields(fd.Body)
 	var joined Type
-	have := false
+	have, sawNull := false, false
 	join := func(t Type) bool {
 		if t.IR == "void" || t.IR == "" {
+			return true
+		}
+		if t.IsNull() && !t.Nullable() {
+			sawNull = true // `yield null`: the join is `T | null`
 			return true
 		}
 		if !have {
 			joined = t
 			have = true
 			return true
+		}
+		if joined.IsDynamic() != t.IsDynamic() {
+			return false // an any beside a typed value: the element is any
 		}
 		if joined.IR == t.IR {
 			return true
@@ -3409,6 +3745,11 @@ func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames
 	}
 	for _, y := range yields {
 		if y.Argument == nil {
+			if !y.Delegate {
+				// A bare `yield` yields undefined, which only the
+				// element any carries.
+				return Type{}, false
+			}
 			continue
 		}
 		if y.Delegate {
@@ -3418,32 +3759,38 @@ func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames
 						if !join(info.ElemTy) {
 							return Type{}, false
 						}
+						continue
 					}
 				}
+			}
+			// An operand the dynamic delegation drives (emitYieldStarAny):
+			// its values are not known statically.
+			if t := e.inferExprType(y.Argument); e.yieldStarIsDynamic(t, fd.IsAsync) {
+				return Type{}, false
 			}
 			continue
 		}
-		if !join(e.inferExprType(y.Argument)) {
+		if !join(awaitedIn(fd.IsAsync, e.inferExprType(y.Argument))) {
 			return Type{}, false
 		}
 	}
-	if !have {
-		var rets []*ast.YieldExpression
-		_ = rets
-		// No yields at all: fall back to the first return-with-value's type,
-		// else i64 (a generator that only completes).
-		if fd.Body != nil {
-			for _, s := range fd.Body.Body {
-				if r, ok := s.(*ast.ReturnStatement); ok && r.Value != nil {
-					if join(e.inferExprType(r.Value)) {
-						break
-					}
-				}
+	// The returned values are read through the same value slot: a return
+	// of another representation makes the element any.
+	if fd.Body != nil {
+		for _, r := range returnExprs(fd.Body, nil) {
+			if !join(awaitedIn(fd.IsAsync, e.inferExprType(r))) {
+				return Type{}, false
 			}
 		}
+	}
+	if !have {
+		joined = TypeI64 // a generator that only completes
+	}
+	if sawNull {
 		if !have {
-			joined = TypeI64
+			return TypeNull, true
 		}
+		joined.setNullable(true)
 	}
 	return joined, true
 }
@@ -3454,16 +3801,18 @@ func (e *Emitter) inferGeneratorElemType(fd *ast.FunctionDeclaration, paramNames
 func forOfBindingType(it Type, await bool) Type {
 	var el Type
 	switch {
-	case it.IsArray && it.ElemType != nil:
+	case it.IsArray() && it.ElemType != nil:
 		el = *it.ElemType
-	case it.IsGenerator && it.GeneratorElemType != nil:
+	case it.IsGenerator() && it.GeneratorElemType != nil:
 		el = *it.GeneratorElemType
+	case it.IsSet() && it.MapKey != nil:
+		el = *it.MapKey
 	case isStringTy(it):
 		return TypePtr
 	default:
 		return TypeAny
 	}
-	if await && el.IsPromise {
+	if await && el.IsPromise() {
 		if el.PromiseType != nil {
 			return *el.PromiseType
 		}
@@ -3474,7 +3823,7 @@ func forOfBindingType(it Type, await bool) Type {
 
 // genBoxSent is v as the boxed word the sent slot holds.
 func (e *Emitter) genBoxSent(v Value) string {
-	if v.Ty.IsDynamic && v.Ref != "" {
+	if v.Ty.IsDynamic() && v.Ref != "" {
 		return v.Ref
 	}
 	b, err := e.emitBoxValue(v)
@@ -3488,7 +3837,7 @@ func (e *Emitter) genBoxSent(v Value) string {
 // the generator's result.
 func (e *Emitter) genSentAs(genObj string, genTy Type, ty Type) Value {
 	w := e.loadGeneratorField(genObj, genTy, GeneratorSentField)
-	if ty.IsDynamic {
+	if ty.IsDynamic() {
 		return Value{Ref: w.Ref, Ty: ty}
 	}
 	return e.emitUnboxBoxToType(w.Ref, ty)
@@ -3499,7 +3848,7 @@ func (e *Emitter) genSentAs(genObj string, genTy Type, ty Type) Value {
 // undefined once the generator is done without a return value.
 func genUserResultType(elem Type) Type {
 	v := elem
-	if !v.IsDynamic && !v.Nullable {
+	if !v.IsDynamic() && !v.Nullable() {
 		v = undefinedableElem(v)
 	}
 	return genNextResultType(v)
@@ -3532,18 +3881,18 @@ func (e *Emitter) emitUserGenResult(genObj string, genTy Type, res Value) Value 
 	uvGep, udGep := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", uvGep, userTy.StructIR(), out, uvIdx))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", udGep, userTy.StructIR(), out, udIdx))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", done, udGep))
+	e.heapStore("i1", done, udGep, 1)
 	raw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(elemTy), vGep))
 	switch {
 	case isNullableScalar(vTy) && !isNullableScalar(elemTy):
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(vTy), e.makeNullableScalarAgg(vTy, present, raw), uvGep))
+		e.heapStore(StructFieldIR(vTy), e.makeNullableScalarAgg(vTy, present, raw), uvGep, 8)
 	case StructFieldIR(elemTy) == "ptr":
 		sel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, present, raw))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sel, uvGep))
+		e.heapStore("ptr", sel, uvGep, 8)
 	default:
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(elemTy), raw, uvGep))
+		e.heapStore(StructFieldIR(elemTy), raw, uvGep, 8)
 	}
 	return Value{Ref: out, Ty: userTy}
 }
@@ -3552,14 +3901,9 @@ func (e *Emitter) emitUserGenResult(genObj string, genTy Type, res Value) Value 
 // (TDD-00061, TDD-00086): the step, its result read as the program sees it
 // (emitUserGenResult) for a sync generator.
 func (e *Emitter) emitGeneratorUserCall(mem *ast.MemberExpression, genTy Type, args []ast.Expression, pos ast.Pos) (Value, error) {
+	m := generatorMethods[mem.Property]
 	if genTy.GeneratorIsAsync {
-		switch mem.Property {
-		case "next":
-			return e.emitGeneratorNext(mem.Object, genTy, args, pos)
-		case "throw":
-			return e.emitGeneratorThrow(mem.Object, genTy, args, pos)
-		}
-		return e.emitGeneratorReturnMethod(mem.Object, genTy, args, pos)
+		return m.async(e, mem.Object, genTy, args, pos)
 	}
 	genVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -3574,22 +3918,380 @@ func (e *Emitter) emitGeneratorUserCall(mem *ast.MemberExpression, genTy Type, a
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", genVal.Ref, slot))
 	e.define(name, Symbol{Ptr: slot, Ty: genTy})
 	recv := ast.NewIdentifier(name, mem.GetPos())
-	var res Value
-	switch mem.Property {
-	case "next":
-		res, err = e.emitGeneratorNextByValue(genVal.Ref, genTy, args, pos)
-	case "throw":
-		res, err = e.emitGeneratorThrow(recv, genTy, args, pos)
-	default:
-		if len(args) > 0 && !isUndefinedLiteral(e, args[0]) {
-			// `.return(v)` completes with v; `.return(undefined)` is
-			// `.return()`.
-			e.storeGeneratorField(genVal.Ref, genTy, GeneratorHasRetField, "i1", "1")
-		}
-		res, err = e.emitGeneratorReturnMethod(recv, genTy, args, pos)
-	}
+	res, err := m.sync(e, genVal.Ref, recv, genTy, args, pos)
 	if err != nil {
 		return Value{}, err
 	}
 	return e.emitUserGenResult(genVal.Ref, genTy, res), nil
+}
+
+// generatorMethod is one of a generator's own methods: its async form on
+// the receiver expression, and its sync step on the evaluated instance
+// (gen) and the name bound to it (recv).
+type generatorMethod struct {
+	async func(e *Emitter, obj ast.Expression, genTy Type, args []ast.Expression, pos ast.Pos) (Value, error)
+	sync  func(e *Emitter, gen string, recv ast.Expression, genTy Type, args []ast.Expression, pos ast.Pos) (Value, error)
+}
+
+// generatorMethods are a generator's next, throw and return (TDD-00061).
+var generatorMethods map[string]generatorMethod
+
+func init() {
+	generatorMethods = map[string]generatorMethod{
+		"next": {
+			async: (*Emitter).emitGeneratorNext,
+			sync: func(e *Emitter, gen string, _ ast.Expression, genTy Type, args []ast.Expression, pos ast.Pos) (Value, error) {
+				return e.emitGeneratorNextByValue(gen, genTy, args, pos)
+			},
+		},
+		"throw": {
+			async: (*Emitter).emitGeneratorThrow,
+			sync: func(e *Emitter, _ string, recv ast.Expression, genTy Type, args []ast.Expression, pos ast.Pos) (Value, error) {
+				return e.emitGeneratorThrow(recv, genTy, args, pos)
+			},
+		},
+		"return": {
+			async: (*Emitter).emitGeneratorReturnMethod,
+			sync: func(e *Emitter, gen string, recv ast.Expression, genTy Type, args []ast.Expression, pos ast.Pos) (Value, error) {
+				if len(args) > 0 && !isUndefinedLiteral(e, args[0]) {
+					// `.return(v)` completes with v; `.return(undefined)` is
+					// `.return()`.
+					e.storeGeneratorField(gen, genTy, GeneratorHasRetField, "i1", "1")
+				}
+				return e.emitGeneratorReturnMethod(recv, genTy, args, pos)
+			},
+		},
+	}
+}
+
+// genStackOwned reports whether a generator's stack field holds the owner
+// cell of a guarded stack (-mm=gc on POSIX, gcshim.c) rather than the stack.
+func (e *Emitter) genStackOwned() bool {
+	return e.isGCMode() && e.opts.Target.OS() != "windows"
+}
+
+// genSwapOut suspends the running generator body back to its caller. With
+// an owned stack the owner records where the parked frames end, so the
+// collector scans only them, until the body runs again.
+func (e *Emitter) genSwapOut(genObj string, genTy Type) {
+	callerCtx := e.loadGeneratorField(genObj, genTy, GeneratorCallerCtxField)
+	ownCtx := e.loadGeneratorField(genObj, genTy, GeneratorCtxField)
+	if !e.genStackOwned() {
+		e.fiberSwitch(ownCtx.Ref, callerCtx.Ref)
+		return
+	}
+	owner := e.loadGeneratorField(genObj, genTy, GeneratorStackField)
+	e.declareFn("__kml_gen_stack_park", "declare void @__kml_gen_stack_park(ptr)")
+	e.declareFn("__kml_gen_stack_unpark", "declare void @__kml_gen_stack_unpark(ptr)")
+	e.emitInstr(fmt.Sprintf("call void @__kml_gen_stack_park(ptr %s)", owner.Ref))
+	e.fiberSwitch(ownCtx.Ref, callerCtx.Ref)
+	e.emitInstr(fmt.Sprintf("call void @__kml_gen_stack_unpark(ptr %s)", owner.Ref))
+}
+
+// emitGenReleaseIfDone releases a sync generator's stack and jmpbuf stack
+// once its body has completed: it never runs again, and a program making
+// many short generators must not keep a stack per instance.
+func (e *Emitter) emitGenReleaseIfDone(genObj string, genTy Type) {
+	if e.opts.Target.OS() == "windows" {
+		return
+	}
+	done := e.loadGeneratorField(genObj, genTy, GeneratorDoneField)
+	stack := e.loadGeneratorField(genObj, genTy, GeneratorStackField)
+	has := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, stack.Ref))
+	both := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, done.Ref, has))
+	relL, contL := e.freshLabel("gen.release"), e.freshLabel("gen.kept")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", both, relL, contL))
+	e.emitLabel(relL)
+	if e.genStackOwned() {
+		e.declareFn("__kml_gen_stack_release", "declare void @__kml_gen_stack_release(ptr)")
+		e.emitInstr(fmt.Sprintf("call void @__kml_gen_stack_release(ptr %s)", stack.Ref))
+	} else if !e.isGCMode() {
+		e.declareFn("__kml_fiber_stack_free", "declare void @__kml_fiber_stack_free(ptr, i64)")
+		e.emitInstr(fmt.Sprintf("call void @__kml_fiber_stack_free(ptr %s, i64 %d)", stack.Ref, fiberStackBytes))
+		jmp := e.loadGeneratorField(genObj, genTy, GeneratorJmpStkField)
+		e.emitInstr(fmt.Sprintf("call void @__kml_jmp_stack_free(ptr %s)", jmp.Ref))
+	}
+	e.storeGeneratorField(genObj, genTy, GeneratorStackField, "ptr", "null")
+	e.storeGeneratorField(genObj, genTy, GeneratorJmpStkField, "ptr", "null")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+	e.emitLabel(contL)
+}
+
+// genUnpackIterableElem array-destructures a loop element that is not an
+// array or a tuple (a Set, a value held in `any`, an object with
+// [Symbol.iterator]) through its elements as an array (`[...elem]`), as
+// `let [a] = iterable` does.
+func (e *Emitter) genUnpackIterableElem(v Value, pat []ast.ArrayPatternElem, pos ast.Pos) error {
+	if v.Ty.IR == "" || v.Ty.IR == "void" {
+		return fmt.Errorf("%d:%d: cannot array-destructure a loop element of no value", pos.Line, pos.Col)
+	}
+	if v.Ty.IsGenerator() || v.Ty.IsDynamic() {
+		// An iterator is stepped only as far as the pattern reads (`[]`
+		// reads nothing), and closed when left unfinished.
+		return e.unpackDynArrayPatternInto(v, pat, pos)
+	}
+	arr, err := e.emitExpr(ast.NewArrayLiteral([]ast.Expression{&ast.SpreadElement{Arg: e.bindValue(v, pos)}}, pos))
+	if err != nil {
+		return err
+	}
+	if !arr.Ty.IsArray() {
+		return fmt.Errorf("%d:%d: cannot array-destructure a loop element that is not iterable", pos.Line, pos.Col)
+	}
+	return e.genUnpackArrayElemPattern(arr.Ref, arr.Ty, pat)
+}
+
+// patternElemType is the type an array pattern's i-th name binds over a
+// value of type t: an array's element (an array for a rest), a tuple's
+// field, a Set's element, a Map entry's key or value; any otherwise.
+func patternElemType(t Type, i int, rest bool) Type {
+	switch {
+	case t.IsDynamic():
+		return TypeAny
+	case t.IsTuple() && !t.IsArray():
+		if rest {
+			return ArrayOf(tupleCommonElem(t, i))
+		}
+		if i < len(t.Fields) {
+			return t.Fields[i].Ty
+		}
+		return TypeAny
+	case t.IsArray() && t.ElemType != nil:
+		if rest {
+			return t
+		}
+		return *t.ElemType
+	case t.IsSet() && t.MapKey != nil && !rest:
+		return *t.MapKey
+	}
+	return TypeAny
+}
+
+// emitThrownCell copies the value just caught (its tag and payload) into a
+// fresh 16-byte cell: a generator's catch-all keeps it there until the
+// caller side re-throws or rejects with it (loadThrownCell).
+func (e *Emitter) emitThrownCell() string {
+	e.ensureMalloc()
+	tag, pay := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tag))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", pay))
+	return e.thrownCellFrom(tag, pay)
+}
+
+// thrownCellFrom stores a thrown value's tag and payload into a fresh cell.
+func (e *Emitter) thrownCellFrom(tag, pay string) string {
+	e.ensureMalloc()
+	cell := e.freshReg()
+	e.heapMallocInto(cell, "16")
+	e.heapStore("i8", tag, cell, 8)
+	pp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", pp, cell))
+	e.heapStore("i64", pay, pp, 8)
+	return cell
+}
+
+// loadThrownCell reads an emitThrownCell cell's tag and payload.
+func (e *Emitter) loadThrownCell(cell string) (tag, pay string) {
+	tag, pay = e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 8", tag, cell))
+	pp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", pp, cell))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", pay, pp))
+	return tag, pay
+}
+
+// thrownCellOf is a thrown cell holding v as `throw v` throws it (an Error
+// keeps its Error tag, any other value its own), for .throw(v).
+func (e *Emitter) thrownCellOf(v Value) (string, error) {
+	var tag, pay string
+	isErrSubclass := false
+	if v.Ty.ClassName != "" {
+		if info, ok := e.classes[v.Ty.ClassName]; ok && info.IsErrorSubclass {
+			isErrSubclass = true
+		}
+	}
+	switch {
+	case v.Ty.IsCaught():
+		tag, pay = e.caughtParts(v)
+	case v.Ty.IsError() || isErrSubclass:
+		p := e.convert(v, TypePtr)
+		tag, pay = e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i8 0, %d", tag, kmlTagError))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", pay, p.Ref))
+	default:
+		b, err := e.emitBoxValue(v)
+		if err != nil {
+			return "", err
+		}
+		tag, pay = e.emitUnboxTagPayload(b)
+	}
+	return e.thrownCellFrom(tag, pay), nil
+}
+
+// thrownCellAny is a thrown cell's value as `any`.
+func (e *Emitter) thrownCellAny(cell string) Value {
+	tag, pay := e.loadThrownCell(cell)
+	return e.emitCaughtToAny(e.emitCaughtAggregate(tag, pay))
+}
+
+// asyncGenResultType is the {value, done} object an async generator's
+// next/throw/return promise settles with: value may be undefined (a
+// generator that completes without a return value), as the program reads it.
+func asyncGenResultType(elem Type) Type {
+	return genUserResultType(elem)
+}
+
+// buildAsyncGenResult builds an asyncGenResultType object holding yielded
+// (of type elemTy) when present is true, undefined otherwise.
+func (e *Emitter) buildAsyncGenResult(resultTy, elemTy Type, yielded, done Value, present string) Value {
+	resultReg := e.freshReg()
+	e.emitObjMallocInto(resultReg, resultTy)
+	vIdx, vTy, _ := resultTy.FieldIndex("value")
+	vGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), resultReg, vIdx))
+	switch {
+	case elemTy.IsArray():
+		e.storeArrayFieldHeader(vGep, yielded) // {value} slot holds a header pointer (TDD-00213 S2)
+	case isNullableScalar(vTy) && !isNullableScalar(elemTy):
+		e.heapStore(StructFieldIR(vTy), e.makeNullableScalarAgg(vTy, present, yielded.Ref), vGep, 8)
+	case StructFieldIR(elemTy) == "ptr" && present != "true":
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, present, yielded.Ref))
+		e.heapStore("ptr", sel, vGep, 8)
+	default:
+		e.genStoreElemAt(vGep, elemTy, yielded.Ref)
+	}
+	dIdx, _, _ := resultTy.FieldIndex("done")
+	dGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), resultReg, dIdx))
+	e.heapStore("i1", done.Ref, dGep, 1)
+	return Value{Ref: resultReg, Ty: resultTy}
+}
+
+// loadGenResultValue reads a result object's value field (at gep, of the
+// layout resultTy) as elemTy: an undefined-capable scalar slot gives its
+// payload (read only while the result is not done).
+func (e *Emitter) loadGenResultValue(gep string, resultTy, elemTy Type) string {
+	_, vTy, _ := resultTy.FieldIndex("value")
+	if isNullableScalar(vTy) && !isNullableScalar(elemTy) {
+		return e.loadNullableScalarPayload(gep, vTy)
+	}
+	return e.genLoadElemAt(gep, elemTy)
+}
+
+// desugarGeneratorPatternParams turns each destructured parameter of a
+// generator into a hidden plain one (keeping its type and default) and
+// records the destructuring the body's start runs over it, before the
+// generator first suspends — so it runs at the call. Idempotent: the
+// recorded statements are kept per declaration.
+func (e *Emitter) desugarGeneratorPatternParams(fd *ast.FunctionDeclaration) {
+	if c := e.front(); c != nil && hasPatternParam(fd) {
+		c.WarmDecl(fd) // the checker types the parameters as written
+	}
+	for i := range fd.Params {
+		p := &fd.Params[i]
+		if p.ArrayPattern == nil && p.ObjectPattern == nil {
+			continue
+		}
+		hidden := fmt.Sprintf("__kml_gdp%d", i)
+		arg := ast.NewIdentifier(hidden, p.Pos)
+		var st ast.Statement
+		if p.ArrayPattern != nil {
+			st = ast.NewArrayDestructuring("let", p.ArrayPattern, arg, p.Pos)
+		} else {
+			st = ast.NewObjectDestructuring("let", p.ObjectPattern, arg, p.Pos)
+		}
+		if e.genPatternInits == nil {
+			e.genPatternInits = map[*ast.FunctionDeclaration][]ast.Statement{}
+		}
+		e.genPatternInits[fd] = append(e.genPatternInits[fd], st)
+		p.Name, p.ArrayPattern, p.ObjectPattern = hidden, nil, nil
+		if p.Type == nil && p.Rest {
+			// A rest pattern (`...[a, b]`) destructures the collected array.
+			p.Type = &ast.TypeAnnotation{Name: "any[]", Source: "ts"}
+		} else if p.Type == nil {
+			p.Type = &ast.TypeAnnotation{Name: "any", Source: "ts"}
+		}
+	}
+}
+
+// genDesugaredBody reports whether the generator with body body had its
+// destructured parameters rewritten (desugarGeneratorPatternParams).
+func (e *Emitter) genDesugaredBody(body *ast.BlockStatement) bool {
+	for fd := range e.genPatternInits {
+		if fd.Body == body {
+			return true
+		}
+	}
+	return false
+}
+
+// hasPatternParam reports whether fd has a destructured parameter.
+func hasPatternParam(fd *ast.FunctionDeclaration) bool {
+	for _, p := range fd.Params {
+		if p.ArrayPattern != nil || p.ObjectPattern != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// readsOwnValue reports whether fd's body reads fd's name other than as a
+// call's callee (`return g`, `yield g`).
+func readsOwnValue(fd *ast.FunctionDeclaration) bool {
+	if fd.Body == nil || fd.Name == "" {
+		return false
+	}
+	refs, calls := 0, 0
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.Identifier:
+			if x.Name == fd.Name {
+				refs++
+			}
+		case *ast.CallExpression:
+			if id, ok := x.Callee.(*ast.Identifier); ok && id.Name == fd.Name {
+				calls++
+			}
+		}
+		return true
+	})
+	return refs > calls
+}
+
+// emitSelfCapturingNestedGenerator emits a capturing nested generator whose
+// body reads its own value. Its function object is made once per run of
+// the enclosing function, into a cell under its name that its body
+// captures, so every reference is the same value (`g().next().value === g`).
+func (e *Emitter) emitSelfCapturingNestedGenerator(fd *ast.FunctionDeclaration, info *GeneratorInfo, caps []CapturedVar) error {
+	shown := fd.Name
+	if n, ok := e.genShownNames[fd.Name]; ok {
+		shown = n
+	}
+	_, err := e.emitSelfReferencingGenerator(fd, info, caps, shown)
+	return err
+}
+
+// emitSelfReferencingGenerator emits generator fd, whose body reads its own
+// name as a value, and returns its function object: made once, into a cell
+// under fd's name that the body captures.
+func (e *Emitter) emitSelfReferencingGenerator(fd *ast.FunctionDeclaration, info *GeneratorInfo, caps []CapturedVar, shown string) (Value, error) {
+	cell := e.freshReg()
+	e.heapMallocInto(cell, "8")
+	e.heapStore("ptr", "null", cell, 8)
+	sym := Symbol{Ptr: cell, Ty: generatorValueType(info), Boxed: true}
+	caps = append(caps, CapturedVar{Name: fd.Name, Ty: sym.Ty, Sym: sym})
+	sort.Slice(caps, func(i, j int) bool { return caps[i].Name < caps[j].Name })
+	info.Captures = caps
+	if err := e.emitGeneratorFunctionDecl(fd, info); err != nil {
+		return Value{}, err
+	}
+	e.define(fd.Name, sym) // the env packs it by name
+	v, err := e.emitGeneratorCtorClosure(info, shown, fd.GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	e.heapStore("ptr", v.Ref, cell, 8)
+	return v, nil
 }

@@ -25,7 +25,7 @@ export function isatty(fd: number): boolean {
 // A terminal descriptor's stream handle; ERR_TTY_INIT_FAILED otherwise.
 function ttyHandle(fd: number, readable: boolean): number {
     if (!Number.isInteger(fd) || fd < 0 || fd > 2147483647) {
-        throw new NodeRangeError('ERR_INVALID_FD', '"fd" must be a positive integer: ' + fd);
+        throw NodeRangeError('ERR_INVALID_FD', '"fd" must be a positive integer: ' + fd);
     }
     const h = __kml_native.streamOpen(fd, readable);
     if (h < 0 || !isatty(fd)) {
@@ -110,7 +110,7 @@ export class WriteStream extends Socket {
             e = n;
             n = 16;
         } else if (typeof n !== 'number' || !Number.isInteger(n) || n < 2) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "count" is out of range. It must be >= 2. Received ' + String(n));
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "count" is out of range. It must be >= 2. Received ' + String(n));
         }
         return n <= Math.pow(2, getColorDepth(e));
     }

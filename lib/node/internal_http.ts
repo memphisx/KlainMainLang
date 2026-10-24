@@ -523,11 +523,18 @@ export class IncomingMessage extends Readable {
                 if (ex && (ex as HttpError).code === 'ERR_STREAM_PREMATURE_CLOSE') ex = null;
                 cleanup();
                 const final: Error | null = ex ?? err;
-                process.nextTick(() => { cb(final); });
+                process.nextTick(() => { this.onDestroyError(final, cb); });
             });
         } else {
-            process.nextTick(() => { cb(err); });
+            process.nextTick(() => { this.onDestroyError(err, cb); });
         }
+    }
+
+    // Kept from Node for backward compatibility: the error is emitted only
+    // when an 'error' listener is attached.
+    private onDestroyError(err: Error | null, cb: (error?: Error | null) => void): void {
+        if (this.listenerCount('error') === 0) cb();
+        else cb(err);
     }
 
     _addHeaderLines(headers: string[], n: number): void {
@@ -2387,14 +2394,30 @@ export const globalAgent = new Agent({ keepAlive: true, scheduling: 'lifo', time
 
 // ---- lib/_http_client.js ----
 
-export interface RequestOptions extends AgentConnectOptions {
-    protocol?: string;
-    hostname?: string;
+// host, port, protocol, hostname, path and auth take null and a string port
+// as Node's (a url.parse() result is one).
+export interface RequestOptions {
+    host?: string | null;
+    port?: number | string | null;
+    localAddress?: string;
+    family?: number;
+    socketPath?: string;
+    servername?: string;
+    rejectUnauthorized?: boolean;
+    ca?: string | Buffer | Array<string | Buffer>;
+    cert?: string | Buffer | Array<string | Buffer>;
+    key?: string | Buffer | Array<string | Buffer>;
+    timeout?: number;
+    keepAlive?: boolean;
+    keepAliveInitialDelay?: number;
+    noDelay?: boolean;
+    protocol?: string | null;
+    hostname?: string | null;
     defaultPort?: number;
     method?: string;
-    path?: string;
+    path?: string | null;
     headers?: OutgoingHttpHeaders | readonly string[];
-    auth?: string;
+    auth?: string | null;
     agent?: Agent | boolean;
     setHost?: boolean;
     maxHeaderSize?: number;
@@ -2473,15 +2496,16 @@ export class ClientRequest extends OutgoingMessage {
         const createConnection = opts.createConnection;
         this.agent = agent;
         const protocol = opts.protocol || defaultAgent.protocol;
-        const expectedProtocol = agent !== null ? agent.protocol : defaultAgent.protocol;
-        if (opts.path !== undefined && INVALID_PATH_REGEX.test(opts.path)) {
+        // The agent's protocol when it has one, else the default agent's.
+        const expectedProtocol = agent !== null && agent.protocol ? agent.protocol : defaultAgent.protocol;
+        if (opts.path != null && INVALID_PATH_REGEX.test(opts.path)) {
             throw new HttpTypeError('ERR_UNESCAPED_CHARACTERS', 'Request path contains unescaped characters');
         }
         if (protocol !== expectedProtocol) {
             throw new HttpTypeError('ERR_INVALID_PROTOCOL', 'Protocol "' + protocol + '" not supported. Expected "' + expectedProtocol + '"');
         }
         const defaultPort = opts.defaultPort || (agent !== null ? agent.defaultPort : 80);
-        this.port = opts.port || defaultPort || 80;
+        this.port = Number(opts.port) || defaultPort || 80;
         const host = opts.hostname || opts.host || 'localhost';
         this.host = host;
         const setHost = opts.setHost === undefined || opts.setHost;
@@ -2548,7 +2572,7 @@ export class ClientRequest extends OutgoingMessage {
                 if (this.port && this.port !== defaultPort) hostHeader += ':' + this.port;
                 this.setHeader('Host', hostHeader);
             }
-            if (opts.auth !== undefined && !this.getHeader('Authorization')) {
+            if (opts.auth != null && !this.getHeader('Authorization')) {
                 this.setHeader('Authorization', 'Basic ' + Buffer.from(opts.auth).toString('base64'));
             }
             if (this.getHeader('expect')) {

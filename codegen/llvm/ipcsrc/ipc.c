@@ -23,7 +23,7 @@ typedef struct {
 } KmlIpcChan;
 
 void *__kml_ipc_chan_new(void) {
-    return calloc(1, sizeof(KmlIpcChan));
+    return calloc(1, sizeof(KmlIpcChan)); /* scratch */
 }
 
 void __kml_ipc_feed(void *chanv, const char *src, int64_t n) {
@@ -32,7 +32,7 @@ void __kml_ipc_feed(void *chanv, const char *src, int64_t n) {
         int64_t need = ch->len + n + 1;
         int64_t cap = ch->cap < 64 ? 64 : ch->cap;
         while (cap < need) cap *= 2;
-        ch->data = realloc(ch->data, cap);
+        ch->data = realloc(ch->data, cap); /* scratch */
         ch->cap = cap;
     }
     memcpy(ch->data + ch->len, src, n);
@@ -45,7 +45,7 @@ void __kml_ipc_feed(void *chanv, const char *src, int64_t n) {
 // (BMP only; a surrogate pair decodes to UTF-8).
 static char *ipc_unquote(const char *s, int64_t n) {
     if (n < 2 || s[0] != '"') return NULL;
-    char *out = malloc(n); // decoded is never longer than input
+    char *out = malloc(n); // decoded is never longer than input /* scratch */
     int64_t o = 0;
     int64_t i = 1;
     while (i < n) {
@@ -64,7 +64,7 @@ static char *ipc_unquote(const char *s, int64_t n) {
         case 'r': out[o++] = '\r'; break;
         case 't': out[o++] = '\t'; break;
         case 'u': {
-            if (i + 4 > n) { free(out); return NULL; }
+            if (i + 4 > n) { free(out); return NULL; } /* scratch */
             unsigned int cp = 0;
             for (int k = 0; k < 4; k++) {
                 char h = s[i + k];
@@ -72,7 +72,7 @@ static char *ipc_unquote(const char *s, int64_t n) {
                 if (h >= '0' && h <= '9') cp |= h - '0';
                 else if (h >= 'a' && h <= 'f') cp |= h - 'a' + 10;
                 else if (h >= 'A' && h <= 'F') cp |= h - 'A' + 10;
-                else { free(out); return NULL; }
+                else { free(out); return NULL; } /* scratch */
             }
             i += 4;
             if (cp >= 0xD800 && cp <= 0xDBFF && i + 6 <= n && s[i] == '\\' && s[i + 1] == 'u') {
@@ -107,10 +107,10 @@ static char *ipc_unquote(const char *s, int64_t n) {
             }
             break;
         }
-        default: free(out); return NULL;
+        default: free(out); return NULL; /* scratch */
         }
     }
-    free(out);
+    free(out); /* scratch */
     return NULL;
 }
 
@@ -124,7 +124,7 @@ char *__kml_ipc_take(void *chanv) {
     char *msg = ipc_unquote(ch->data, linelen);
     if (!msg) {
         // Malformed line: deliver its raw bytes rather than dropping it.
-        msg = malloc(linelen + 1);
+        msg = malloc(linelen + 1); /* scratch */
         memcpy(msg, ch->data, linelen);
         msg[linelen] = 0;
     }
@@ -138,7 +138,7 @@ char *__kml_ipc_take(void *chanv) {
 // JSON-quote s and write "<quoted>\n" to fd. Returns 1 on a full write.
 int64_t __kml_ipc_send(int64_t fd, const char *s) {
     int64_t n = (int64_t)strlen(s);
-    char *buf = malloc(n * 6 + 4);
+    char *buf = malloc(n * 6 + 4); /* scratch */
     int64_t o = 0;
     buf[o++] = '"';
     for (int64_t i = 0; i < n; i++) {
@@ -162,7 +162,7 @@ int64_t __kml_ipc_send(int64_t fd, const char *s) {
         if (r <= 0) break;
         w += r;
     }
-    free(buf);
+    free(buf); /* scratch */
     return w == o ? 1 : 0;
 }
 
@@ -182,7 +182,7 @@ char *__kml_ipc_take2(void *chanv, int64_t *isstr) {
     if (msg) {
         *isstr = 1;
     } else {
-        msg = malloc(linelen + 1);
+        msg = malloc(linelen + 1); /* scratch */
         memcpy(msg, ch->data, linelen);
         msg[linelen] = 0;
     }
@@ -197,7 +197,7 @@ char *__kml_ipc_take2(void *chanv, int64_t *isstr) {
 // send path (send({...}) / send(5) stringifies first, then frames here).
 int64_t __kml_ipc_send_raw(int64_t fd, const char *s) {
     int64_t n = (int64_t)strlen(s);
-    char *buf = malloc(n + 2);
+    char *buf = malloc(n + 2); /* scratch */
     memcpy(buf, s, n);
     buf[n] = '\n';
     int64_t o = n + 1;
@@ -207,6 +207,6 @@ int64_t __kml_ipc_send_raw(int64_t fd, const char *s) {
         if (r <= 0) break;
         w += r;
     }
-    free(buf);
+    free(buf); /* scratch */
     return w == o ? 1 : 0;
 }

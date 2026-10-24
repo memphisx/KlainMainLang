@@ -235,3 +235,33 @@ console.log(ctrl.signal.aborted)
 ctrl.abort()
 `, "false\ncancelled")
 }
+
+// A handler's fetch aborted by AbortSignal.timeout rejects inside the handler;
+// the upstream server's request, destroyed by the client's close, emits
+// 'error' only to a listener (Node's IncomingMessage._destroy), so nothing is
+// uncaught.
+func TestE2EFetchTimeoutSignalInHandler(t *testing.T) {
+	assertOutput(t, `
+import * as http from 'http';
+const slow = http.createServer((req, res) => { setTimeout(() => res.end('late'), 1500); });
+slow.listen(0, () => {
+  const sp = (slow.address() as any).port;
+  const front = http.createServer(async (req, res) => {
+    try {
+      const r = await fetch(`+"`"+`http://127.0.0.1:${sp}/`+"`"+`, { signal: AbortSignal.timeout(100) });
+      res.end('got ' + (await r.text()));
+    } catch (e: any) {
+      res.end('err ' + e.name);
+    }
+  });
+  front.listen(0, async () => {
+    const fp = (front.address() as any).port;
+    const t0 = Date.now();
+    const r = await fetch(`+"`"+`http://127.0.0.1:${fp}/`+"`"+`);
+    console.log(await r.text(), Date.now() - t0 < 1000);
+    front.close(); slow.close();
+    process.exit(0);
+  });
+});
+`, "err TimeoutError true")
+}

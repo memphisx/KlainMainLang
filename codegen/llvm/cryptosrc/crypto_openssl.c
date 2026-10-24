@@ -18,6 +18,15 @@
 #include <openssl/x509.h>
 #include <openssl/rsa.h>
 #include <openssl/dsa.h>
+#include <openssl/crypto.h>
+
+/* OpenSSL frees its global state from an atexit handler, which a pool
+ * thread still running a job (an RSA keygen when process.exit() is called)
+ * then reads freed: Node initialises it without that handler, and so does
+ * this backend, before any other use. */
+__attribute__((constructor)) static void kml_openssl_no_atexit(void) {
+    OPENSSL_init_crypto(OPENSSL_INIT_NO_ATEXIT, NULL);
+}
 
 /* base64url (RFC 4648 §5, no padding) — the JWK `k`/component codec. Kept
  * in the backend file (duplicated across backends) so each stays a single
@@ -28,7 +37,7 @@ static const char kml_b64u[] =
 long long __kml_crypto_b64url_encode(const unsigned char *in, long long len,
                                      char **out, long long *outLen) {
     long long olen = (len + 2) / 3 * 4, i, o = 0;
-    char *buf = (char *)malloc((size_t)olen + 1);
+    char *buf = (char *)malloc((size_t)olen + 1); /* scratch */
     if (!buf) return -1;
     for (i = 0; i + 2 < len; i += 3) {
         unsigned v = (unsigned)in[i] << 16 | (unsigned)in[i + 1] << 8 | in[i + 2];
@@ -66,11 +75,11 @@ long long __kml_crypto_b64url_decode(const char *in, long long len,
     unsigned acc = 0;
     int bits = 0;
     if (len % 4 == 1) return -2;
-    buf = (unsigned char *)malloc((size_t)(len / 4 * 3 + 3) + 1);
+    buf = (unsigned char *)malloc((size_t)(len / 4 * 3 + 3) + 1); /* scratch */
     if (!buf) return -1;
     for (i = 0; i < len; i++) {
         int v = kml_b64u_val(in[i]);
-        if (v < 0) { free(buf); return -2; }
+        if (v < 0) { free(buf); return -2; } /* scratch */
         acc = acc << 6 | (unsigned)v;
         bits += 6;
         if (bits >= 8) {
@@ -120,7 +129,7 @@ static long long kml_pkey_to_der(EVP_PKEY *pkey, unsigned char **pkcs8,
         if (!p8) return -1;
         n = i2d_PKCS8_PRIV_KEY_INFO(p8, NULL);
         if (n <= 0) { PKCS8_PRIV_KEY_INFO_free(p8); return -1; }
-        *pkcs8 = (unsigned char *)malloc((size_t)n);
+        *pkcs8 = (unsigned char *)malloc((size_t)n); /* scratch */
         p = *pkcs8;
         i2d_PKCS8_PRIV_KEY_INFO(p8, &p);
         *pkcs8Len = n;
@@ -129,7 +138,7 @@ static long long kml_pkey_to_der(EVP_PKEY *pkey, unsigned char **pkcs8,
     if (spki) {
         n = i2d_PUBKEY(pkey, NULL);
         if (n <= 0) return -1;
-        *spki = (unsigned char *)malloc((size_t)n);
+        *spki = (unsigned char *)malloc((size_t)n); /* scratch */
         p = *spki;
         i2d_PUBKEY(pkey, &p);
         *spkiLen = n;
@@ -167,11 +176,11 @@ static char *kml_bn_b64u(const BIGNUM *bn) {
     char *out = NULL;
     long long outLen;
     if (n <= 0) n = 1;
-    tmp = (unsigned char *)malloc((size_t)n);
+    tmp = (unsigned char *)malloc((size_t)n); /* scratch */
     if (!tmp) return NULL;
     BN_bn2binpad(bn, tmp, n);
     if (__kml_crypto_b64url_encode(tmp, n, &out, &outLen) != 0) out = NULL;
-    free(tmp);
+    free(tmp); /* scratch */
     return out;
 }
 
@@ -192,7 +201,7 @@ static BIGNUM *kml_b64u_bn(const char *s) {
     if (__kml_crypto_b64url_decode(s, (long long)strlen(s), &bytes, &len) != 0)
         return NULL;
     bn = BN_bin2bn(bytes, (int)len, NULL);
-    free(bytes);
+    free(bytes); /* scratch */
     return bn;
 }
 
@@ -264,7 +273,7 @@ long long __kml_crypto_jwk_import_ec(long long curveId, const char *x,
         __kml_crypto_b64url_decode(y, (long long)strlen(y), &yb, &yl) != 0 ||
         xl != cb || yl != cb)
         goto done;
-    pt = (unsigned char *)malloc((size_t)(1 + 2 * cb));
+    pt = (unsigned char *)malloc((size_t)(1 + 2 * cb)); /* scratch */
     if (!pt) goto done;
     pt[0] = 4;
     memcpy(pt + 1, xb, (size_t)cb);
@@ -297,7 +306,7 @@ done:
     OSSL_PARAM_free(params);
     OSSL_PARAM_BLD_free(bld);
     BN_free(priv);
-    free(xb); free(yb); free(db); free(pt);
+    free(xb); free(yb); free(db); free(pt); /* scratch */
     return rc;
 }
 
@@ -346,7 +355,7 @@ static long long knc_alloc(void) {
     for (long long i = 0; i < knc_cap; i++)
         if (knc_tab[i].kind == KNC_FREE) return i;
     long long ncap = knc_cap ? knc_cap * 2 : 16;
-    knc_handle *t = (knc_handle *)realloc(knc_tab, (size_t)ncap * sizeof *t);
+    knc_handle *t = (knc_handle *)realloc(knc_tab, (size_t)ncap * sizeof *t); /* scratch */
     if (!t) return -1;
     memset(t + knc_cap, 0, (size_t)(ncap - knc_cap) * sizeof *t);
     long long id = knc_cap;
@@ -494,7 +503,7 @@ static void knc_names_add(knc_names *n, const char *name) {
     size_t l = strlen(name);
     if (n->len + l + 2 > n->cap) {
         size_t nc = (n->cap ? n->cap * 2 : 1024) + l;
-        char *b = (char *)realloc(n->buf, nc);
+        char *b = (char *)realloc(n->buf, nc); /* scratch */
         if (!b) return;
         n->buf = b;
         n->cap = nc;
@@ -541,21 +550,21 @@ char *__kml_native_crypto_names(double which) {
     knc_names n = {0};
     if (which == 3) {
         size_t count = EC_get_builtin_curves(NULL, 0);
-        EC_builtin_curve *curves = (EC_builtin_curve *)malloc(sizeof(EC_builtin_curve) * (count ? count : 1));
+        EC_builtin_curve *curves = (EC_builtin_curve *)malloc(sizeof(EC_builtin_curve) * (count ? count : 1)); /* scratch */
         EC_get_builtin_curves(curves, count);
         for (size_t i = 0; i < count; i++) {
             const char *sn = OBJ_nid2sn(curves[i].nid);
             if (sn) knc_names_add(&n, sn);
         }
-        free(curves);
+        free(curves); /* scratch */
         char *out = kml_ncrypto_str(n.buf ? n.buf : "");
-        free(n.buf);
+        free(n.buf); /* scratch */
         return out;
     }
     if (which == 0) EVP_MD_do_all_sorted(knc_md_push, &n);
     else EVP_CIPHER_do_all_sorted(knc_cipher_push, &n);
     char *out = kml_ncrypto_str(n.buf ? n.buf : "");
-    free(n.buf);
+    free(n.buf); /* scratch */
     return out;
 }
 
@@ -572,12 +581,12 @@ static void knc_rand_work(void *job, long long *err, double *res) {
     knc_rand_job *j = (knc_rand_job *)job;
     *err = RAND_bytes(j->p, (int)j->len) == 1 ? 0 : 1;
     *res = 0;
-    free(j);
+    free(j); /* scratch */
 }
 
 void __kml_native_crypto_random_fill_async(void *data, long long size, double offset, double length, void *inv, void *clo) {
     long long off = (long long)offset, len = (long long)length;
-    knc_rand_job *j = (knc_rand_job *)malloc(sizeof *j);
+    knc_rand_job *j = (knc_rand_job *)malloc(sizeof *j); /* scratch */
     if (off < 0 || len < 0 || off + len > size) len = 0, off = 0;
     j->p = (unsigned char *)data + off;
     j->len = len;
@@ -626,14 +635,14 @@ static long long knc_kdf_run(knc_kdf *k) {
 }
 
 static unsigned char *knc_dup(const void *p, long long n) {
-    unsigned char *d = (unsigned char *)malloc((size_t)(n > 0 ? n : 1));
+    unsigned char *d = (unsigned char *)malloc((size_t)(n > 0 ? n : 1)); /* scratch */
     if (n > 0) memcpy(d, p, (size_t)n);
     return d;
 }
 
 static knc_kdf *knc_kdf_new(double op, void *a, long long alen, void *b, long long blen, void *c, long long clen,
                             double n1, double n2, double n3, double n4, const char *digest, void *out, long long outlen) {
-    knc_kdf *k = (knc_kdf *)calloc(1, sizeof *k);
+    knc_kdf *k = (knc_kdf *)calloc(1, sizeof *k); /* scratch */
     k->op = (int)op;
     k->a = knc_dup(a, alen); k->alen = alen;
     k->b = knc_dup(b, blen); k->blen = blen;
@@ -646,7 +655,7 @@ static knc_kdf *knc_kdf_new(double op, void *a, long long alen, void *b, long lo
 }
 
 static void knc_kdf_free(knc_kdf *k) {
-    free(k->a); free(k->b); free(k->c); free(k);
+    free(k->a); free(k->b); free(k->c); free(k); /* scratch */
 }
 
 /* 0 ok, 1 failed, 2 an unknown digest. */
@@ -838,7 +847,7 @@ static char *knc_pem_pair(EVP_PKEY *pkey) {
     if (pub && priv && PEM_write_bio_PUBKEY(pub, pkey) && PEM_write_bio_PKCS8PrivateKey(priv, pkey, NULL, NULL, 0, NULL, NULL)) {
         char *a, *b;
         long al = BIO_get_mem_data(pub, &a), bl = BIO_get_mem_data(priv, &b);
-        out = (char *)malloc((size_t)(al + bl + 1));
+        out = (char *)malloc((size_t)(al + bl + 1)); /* scratch */
         memcpy(out, a, (size_t)al);
         memcpy(out + al, b, (size_t)bl);
         out[al + bl] = 0;
@@ -854,7 +863,7 @@ char *__kml_native_crypto_keygen(double type, double bits, double exponent, cons
     char *pem = pkey ? knc_pem_pair(pkey) : NULL;
     EVP_PKEY_free(pkey);
     char *out = kml_ncrypto_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -868,11 +877,11 @@ static void knc_keygen_work(void *job, long long *err, double *res) {
     /* The PEM rides back as the result's address; the loop reads it. */
     *err = pem ? 0 : 1;
     *res = (double)(intptr_t)pem;
-    free(j);
+    free(j); /* scratch */
 }
 
 void __kml_native_crypto_keygen_async(double type, double bits, double exponent, const char *curve, void *inv, void *clo) {
-    knc_keygen_job *j = (knc_keygen_job *)calloc(1, sizeof *j);
+    knc_keygen_job *j = (knc_keygen_job *)calloc(1, sizeof *j); /* scratch */
     j->type = type; j->bits = bits; j->exponent = exponent;
     snprintf(j->curve, sizeof j->curve, "%s", curve ? curve : "");
     __kml_pool_job(knc_keygen_work, j, inv, clo);
@@ -882,7 +891,7 @@ void __kml_native_crypto_keygen_async(double type, double bits, double exponent,
 char *__kml_native_crypto_keygen_take(double result) {
     char *pem = (char *)(intptr_t)result;
     char *out = kml_ncrypto_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -905,7 +914,7 @@ static EVP_PKEY *knc_read_key(const char *pem, int priv, const char *pass, long 
     if (!bio) return NULL;
     char *pw = NULL;
     if (passLen >= 0) {
-        pw = malloc((size_t)passLen + 1);
+        pw = malloc((size_t)passLen + 1); /* scratch */
         memcpy(pw, pass, (size_t)passLen);
         pw[passLen] = 0;
     }
@@ -921,7 +930,7 @@ static EVP_PKEY *knc_read_key(const char *pem, int priv, const char *pass, long 
             k = PEM_read_bio_PrivateKey(bio, NULL, knc_pass_cb, pw);
         }
     }
-    free(pw);
+    free(pw); /* scratch */
     BIO_free(bio);
     return k;
 }
@@ -972,7 +981,7 @@ double __kml_native_crypto_sign(const char *digest, const char *pem, void *pass,
     int half = dsaEncoding == 1 ? knc_p1363_half(k) : 0;
     if (ctx && EVP_DigestSignInit(ctx, &pctx, md, NULL, k) > 0 && knc_sig_opts(pctx, k, padding, saltLength) &&
         EVP_DigestSign(ctx, NULL, &n, data, (size_t)len) > 0) {
-        unsigned char *sig = (unsigned char *)malloc(n);
+        unsigned char *sig = (unsigned char *)malloc(n); /* scratch */
         if (sig && EVP_DigestSign(ctx, sig, &n, data, (size_t)len) > 0) {
             if (half > 0) {
                 const unsigned char *p = sig;
@@ -994,7 +1003,7 @@ double __kml_native_crypto_sign(const char *digest, const char *pem, void *pass,
                 r = (double)n;
             }
         }
-        free(sig);
+        free(sig); /* scratch */
     }
     EVP_MD_CTX_free(ctx);
     EVP_PKEY_free(k);
@@ -1079,7 +1088,7 @@ static char *knc_pkey_pem(EVP_PKEY *pkey, int priv) {
     size_t len = 0;
     char *out = NULL;
     if (ec && OSSL_ENCODER_CTX_get_num_encoders(ec) > 0 && OSSL_ENCODER_to_data(ec, &data, &len)) {
-        out = (char *)malloc(len + 1);
+        out = (char *)malloc(len + 1); /* scratch */
         memcpy(out, data, len);
         out[len] = 0;
     }
@@ -1106,7 +1115,7 @@ static EVP_PKEY *knc_decode_key(const unsigned char *data, long long len, int fo
      * none cancels the read rather than prompting. */
     char *pw = NULL;
     if (passLen >= 0) {
-        pw = (char *)malloc((size_t)passLen + 1);
+        pw = (char *)malloc((size_t)passLen + 1); /* scratch */
         memcpy(pw, pass, (size_t)passLen);
         pw[passLen] = 0;
     }
@@ -1118,7 +1127,7 @@ static EVP_PKEY *knc_decode_key(const unsigned char *data, long long len, int fo
         pkey = NULL;
     }
     OSSL_DECODER_CTX_free(dc);
-    free(pw);
+    free(pw); /* scratch */
     return pkey;
 }
 
@@ -1136,7 +1145,7 @@ char *__kml_native_crypto_key_parse(void *data, long long len, double format, do
     char *pem = pkey ? knc_pkey_pem(pkey, wantPriv != 0) : NULL;
     EVP_PKEY_free(pkey);
     char *out = kml_ncrypto_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -1253,17 +1262,17 @@ char *__kml_native_crypto_key_info(const char *pem) {
     }
     EVP_PKEY_free(pkey);
     size_t cap = strlen(type) + strlen(bits) + strlen(exp) + strlen(curve) + strlen(hash) + strlen(mgf1) + strlen(salt) + strlen(div) + 16;
-    char *buf = (char *)malloc(cap);
+    char *buf = (char *)malloc(cap); /* scratch */
     snprintf(buf, cap, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s", type, bits, exp, curve, hash, mgf1, salt, div);
     char *out = kml_ncrypto_str(buf);
-    free(buf);
+    free(buf); /* scratch */
     return out;
 }
 
 static void knc_append(char **buf, size_t *len, const char *key, const char *val) {
     if (!val) return;
     size_t add = strlen(key) + strlen(val) + 2;
-    *buf = (char *)realloc(*buf, *len + add + 1);
+    *buf = (char *)realloc(*buf, *len + add + 1); /* scratch */
     *len += (size_t)snprintf(*buf + *len, add + 1, "%s%s=%s", *len ? "\t" : "", key, val);
 }
 
@@ -1294,7 +1303,7 @@ char *__kml_native_crypto_key_jwk(const char *pem, double priv) {
         for (int i = 0; i < (priv != 0 ? 8 : 2); i++) {
             char *v = kml_pkey_bn_b64u(pkey, params[i]);
             knc_append(&buf, &len, names[i], v);
-            free(v);
+            free(v); /* scratch */
         }
         err = NULL;
     } else if (base == EVP_PKEY_EC) {
@@ -1317,8 +1326,8 @@ char *__kml_native_crypto_key_jwk(const char *pem, double priv) {
                 knc_append(&buf, &len, "x", x);
                 knc_append(&buf, &len, "y", y);
                 knc_append(&buf, &len, "crv", crv);
-                free(x);
-                free(y);
+                free(x); /* scratch */
+                free(y); /* scratch */
                 err = NULL;
                 if (priv != 0) {
                     BIGNUM *bn = NULL;
@@ -1328,7 +1337,7 @@ char *__kml_native_crypto_key_jwk(const char *pem, double priv) {
                         if (BN_bn2binpad(bn, tmp, (int)cb) == (int)cb) {
                             char *d = knc_b64u(tmp, cb);
                             knc_append(&buf, &len, "d", d);
-                            free(d);
+                            free(d); /* scratch */
                             err = NULL;
                         }
                         BN_free(bn);
@@ -1345,20 +1354,20 @@ char *__kml_native_crypto_key_jwk(const char *pem, double priv) {
         if (priv != 0 && EVP_PKEY_get_raw_private_key(pkey, raw, &n)) {
             char *d = knc_b64u(raw, (long long)n);
             knc_append(&buf, &len, "d", d);
-            free(d);
+            free(d); /* scratch */
         }
         n = sizeof raw;
         if (EVP_PKEY_get_raw_public_key(pkey, raw, &n)) {
             char *x = knc_b64u(raw, (long long)n);
             knc_append(&buf, &len, "x", x);
-            free(x);
+            free(x); /* scratch */
         }
         knc_append(&buf, &len, "kty", "OKP");
         err = NULL;
     }
     EVP_PKEY_free(pkey);
     char *out = kml_ncrypto_str(err ? err : buf ? buf : "");
-    free(buf);
+    free(buf); /* scratch */
     return out;
 }
 
@@ -1392,15 +1401,15 @@ char *__kml_native_crypto_key_from_jwk(double kty, const char *crv, const char *
         if (nid && KNC_OPT(src) && __kml_crypto_b64url_decode(src, (long long)strlen(src), &raw, &rawLen) == 0) {
             pkey = priv ? EVP_PKEY_new_raw_private_key(nid, NULL, raw, (size_t)rawLen)
                         : EVP_PKEY_new_raw_public_key(nid, NULL, raw, (size_t)rawLen);
-            free(raw);
+            free(raw); /* scratch */
         }
     }
 #undef KNC_OPT
-    free(der);
+    free(der); /* scratch */
     char *pem = pkey ? knc_pkey_pem(pkey, priv) : NULL;
     EVP_PKEY_free(pkey);
     char *out = kml_ncrypto_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     ERR_clear_error();
     return out;
 }
@@ -1455,7 +1464,7 @@ double __kml_native_crypto_pkey_crypt(double op, const char *pem, void *pass, lo
         }
     }
     if (ok) {
-        unsigned char *buf = (unsigned char *)malloc(n ? n : 1);
+        unsigned char *buf = (unsigned char *)malloc(n ? n : 1); /* scratch */
         const unsigned char *in = (const unsigned char *)data;
         switch (o) {
         case 0: ok = EVP_PKEY_encrypt(ctx, buf, &n, in, (size_t)len) > 0; break;
@@ -1471,7 +1480,7 @@ double __kml_native_crypto_pkey_crypt(double op, const char *pem, void *pass, lo
                 r = (double)n;
             }
         }
-        free(buf);
+        free(buf); /* scratch */
     }
     EVP_PKEY_CTX_free(ctx);
     EVP_PKEY_free(k);

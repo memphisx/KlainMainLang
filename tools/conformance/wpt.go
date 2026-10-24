@@ -286,7 +286,7 @@ func isIdentChar(c byte) bool {
 	return c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
-func runWPTSuite(workDir string, timeout time.Duration, workers int, compat string) {
+func runWPTSuite(workDir string, timeout time.Duration, workers int, compat string, passList string) {
 	var files []string
 	err := filepath.Walk(wptCorpus, func(p string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -343,6 +343,13 @@ func runWPTSuite(workDir string, timeout time.Duration, workers int, compat stri
 			fatal("writing WPT report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "WPT suite (lane=%s): %d files, report written to %s\n", laneLabel(), len(results), out)
+		var passing []string
+		for _, r := range results {
+			if r.Status == "PASS" {
+				passing = append(passing, r.File)
+			}
+		}
+		writeLanePassList(passList, laneLabel(), passing)
 	}
 
 	if fl := os.Getenv("WPT_FAILLIST"); fl != "" {

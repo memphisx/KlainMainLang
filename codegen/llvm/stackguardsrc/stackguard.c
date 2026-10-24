@@ -1,7 +1,8 @@
 /* stackguard.c — a stack overflow throws Node's RangeError (TDD-00249).
  * The emitted code makes no tail calls, so unbounded recursion grows the
  * stack until it faults on the guard region below it: the main thread's,
- * or the guard page under a task fiber's stack (__kml_fiber_stack_alloc).
+ * or the guard page under a fiber's or goroutine's stack
+ * (__kml_fiber_stack_alloc).
  * The fault is taken on an alternate signal stack. When its address is next
  * to the faulting stack pointer, the handler throws through the normal
  * throw path, which longjmps to the innermost try frame (or reports it
@@ -50,6 +51,9 @@
 
 static void (*sg_throw)(const char *);
 static const char *sg_msg;
+/* Set once the handler is installed: another thread then needs its own
+ * alternate stack (__kml_stack_guard_thread). */
+static int sg_on;
 
 /* The interrupted stack pointer, 0 on a host this does not know. */
 static uintptr_t sg_sp(void *uc) {
@@ -122,16 +126,60 @@ void __kml_stack_guard_init(void (*throw_fn)(const char *), const char *msg) {
     sigemptyset(&sa.sa_mask);
     sigaction(SIGSEGV, &sa, NULL);
     sigaction(SIGBUS, &sa, NULL);
+    sg_on = 1;
 #else
     (void)throw_fn;
     (void)msg;
 #endif
 }
 
+/* An alternate stack is per thread: a thread that runs program code (a
+ * Worker, a goroutine's machine) maps its own, unmapped as it ends. */
+static pthread_key_t sg_alt_key;
+static pthread_once_t sg_alt_once = PTHREAD_ONCE_INIT;
+
+static void sg_alt_free(void *p) {
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_flags = SS_DISABLE;
+    sigaltstack(&ss, NULL);
+    munmap(p, SG_ALT_BYTES);
+}
+
+static void sg_alt_key_make(void) { pthread_key_create(&sg_alt_key, sg_alt_free); }
+
+void __kml_stack_guard_thread(void) {
+    if (!sg_on) return;
+    pthread_once(&sg_alt_once, sg_alt_key_make);
+    stack_t ss;
+    memset(&ss, 0, sizeof ss);
+    ss.ss_sp = mmap(NULL, SG_ALT_BYTES, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    ss.ss_size = SG_ALT_BYTES;
+    if (ss.ss_sp == MAP_FAILED) return;
+    if (sigaltstack(&ss, NULL) != 0) {
+        munmap(ss.ss_sp, SG_ALT_BYTES);
+        return;
+    }
+    pthread_setspecific(sg_alt_key, ss.ss_sp);
+}
+
 /* A task fiber's stack, with a PROT_NONE guard page under it so an overflow
  * faults instead of writing over the heap. The page sits below the range
  * returned: macOS makecontext faults on a stack range holding one. */
+/* Spent stacks of the common size are kept for the next fiber: a
+ * short-lived generator or task would otherwise pay an mmap, mprotect and
+ * munmap each. */
+#define FS_POOL 64
+static char *fs_pool[FS_POOL];
+static size_t fs_pool_n, fs_pool_len;
+static pthread_mutex_t fs_pool_mu = PTHREAD_MUTEX_INITIALIZER;
+
 void *__kml_fiber_stack_alloc(size_t n) {
+    pthread_mutex_lock(&fs_pool_mu);
+    if (fs_pool_len == 0) fs_pool_len = n;
+    char *s = fs_pool_n > 0 && fs_pool_len == n ? fs_pool[--fs_pool_n] : NULL;
+    pthread_mutex_unlock(&fs_pool_mu);
+    if (s) return s;
     size_t g = (size_t)getpagesize();
     char *p = mmap(NULL, n + g, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p == MAP_FAILED) return NULL;
@@ -140,6 +188,13 @@ void *__kml_fiber_stack_alloc(size_t n) {
 }
 
 void __kml_fiber_stack_free(void *s, size_t n) {
+    if (!s) return;
+    pthread_mutex_lock(&fs_pool_mu);
+    if (fs_pool_len == n && fs_pool_n < FS_POOL) {
+        fs_pool[fs_pool_n++] = s;
+        s = NULL;
+    }
+    pthread_mutex_unlock(&fs_pool_mu);
     size_t g = (size_t)getpagesize();
     if (s) munmap((char *)s - g, n + g);
 }

@@ -28,8 +28,8 @@ void __kml_fbp_invoke(void *closure) {
     kml_fn fn = F(closure, KML_CLOSURE_FN, kml_fn);
     void *env = F(closure, KML_CLOSURE_ENV, void *);
     fn(env);
-    free(env);
-    free(closure);
+    kml_free(KML_HEAP_WORDS, env);
+    kml_free(KML_HEAP_WORDS, closure);
 }
 
 /* Settle now when the body is already complete (pending null, or done set),
@@ -41,7 +41,7 @@ void __kml_fetch_bodyprom_register(void *pending, void *closure) {
     }
     if (fbp_len + 1 > fbp_cap) {
         i64 nc = fbp_cap * 2 > 4 ? fbp_cap * 2 : 4;
-        fbp_data = (fbp_req *)realloc(fbp_data, (size_t)nc * sizeof(fbp_req));
+        fbp_data = (fbp_req *)realloc(fbp_data, (size_t)nc * sizeof(fbp_req)); /* scratch */
         fbp_cap = nc;
     }
     fbp_data[fbp_len].pending = pending;

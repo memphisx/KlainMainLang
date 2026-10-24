@@ -186,19 +186,6 @@ func (e *Emitter) ensureGetpid() {
 	e.emitGlobal("declare i64 @__kml_getpid()")
 }
 
-// ensureSigpipeIgnored emits __kml_ignore_sigpipe, which sets SIGPIPE (signal 13
-// on both Linux and Darwin) to SIG_IGN so a client disconnecting mid-write
-// unwinds the connection via a write() EPIPE rather than killing the whole
-// server process (TDD-00214). Global disposition is deliberate and one-shot;
-// unlike SIGINT/SIGTERM there is no per-signal user handler to reconcile.
-func (e *Emitter) ensureSigpipeIgnored() {
-	if e.usedSigpipeIgnored {
-		return
-	}
-	e.usedSigpipeIgnored = true
-	e.emitGlobal("declare void @__kml_ignore_sigpipe()")
-}
-
 // ensureSignalHandlerRuntime links process.c's signal watchers (TDD-00019;
 // the process emitter starts one per signal). On POSIX a watcher runs from
 // its uv_signal_t callback; on Windows a signal only marks itself pending
@@ -209,20 +196,19 @@ func (e *Emitter) ensureSignalHandlerRuntime() {
 }
 
 // ensureNativeSignal defines lib/native.d.ts's signalStart and signalStop:
-// Node's signal_wrap. On POSIX a watcher is an unref'd uv_signal_t on the
-// event loop (loop.c), so a watcher never holds the loop open; stopping
-// restores the default disposition (SIGPIPE's is ignored, as this runtime
-// ignores it). A signal the host refuses (SIGKILL, SIGSTOP) is -EINVAL. On
-// Windows the handler above stays until TDD-00244 Stage 6: the signal() shim
-// (win32proc.c) raises SIGINT, SIGHUP, SIGBREAK and SIGWINCH; a watcher for
-// another is accepted and never runs, as libuv's is.
+// Node's signal_wrap. A watcher is an unref'd uv_signal_t on the event loop
+// (loop.c), so a watcher never holds the loop open; stopping restores the
+// default disposition (SIGPIPE's is ignored, as this runtime ignores it). A
+// signal the host refuses (SIGKILL, SIGSTOP; on Windows a number above
+// SIGWINCH) is -EINVAL. On Windows libuv delivers SIGINT, SIGHUP, SIGBREAK
+// and SIGWINCH; a watcher for another is accepted and never runs.
 func (e *Emitter) ensureNativeSignal() {
 	if e.fnDecls["__kml_native_signal_start"] {
 		return
 	}
 	e.fnDecls["__kml_native_signal_start"] = true
 	e.ensureSignalHandlerRuntime()
-	e.ensureHTTPRuntime() // loop.c holds the uv_signal_t handles
+	e.ensureEventLoop() // loop.c holds the uv_signal_t handles
 	e.emitGlobal(`declare double @__kml_native_signal_start(double, ptr, ptr)
 declare void @__kml_native_signal_stop(double)`)
 }

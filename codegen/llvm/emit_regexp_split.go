@@ -42,8 +42,10 @@ func (e *Emitter) emitRegexMatchAtData(handleReg string, strVal Value, startOffs
 	matchDataReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_match_data_create_from_pattern_8(ptr %s, ptr null)", matchDataReg, handleReg))
 	rcReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 0, ptr %s, ptr null)",
-		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchDataReg))
+	mctx := e.emitRegexMatchContext()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 0, ptr %s, ptr %s)",
+		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchDataReg, mctx))
+	e.emitRegexFixOptional(handleReg, matchDataReg, rcReg)
 	matched := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i32 %s, 0", matched, rcReg))
 
@@ -250,7 +252,7 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	byteCount := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount, totalCount))
 	data := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", data, byteCount))
+	e.heapMallocInto(data, byteCount)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -262,7 +264,7 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curIdx, idxAlloca))
 		dstGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", dstGep, data, curIdx))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, dstGep))
+		e.heapStore("ptr", p, dstGep, 8)
 		nextIdx := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, curIdx))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxAlloca))
@@ -317,7 +319,7 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, srcPtr, segLen))
 		termGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, buf, segLen))
-		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termGep))
+		e.heapStore("i8", "0", termGep, 1)
 		storePtr(buf)
 	}
 
@@ -336,9 +338,6 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	length := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", length, noPieces, totalCount))
 
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, data))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, length))
+	r1 := e.newArrayHeader(data, length)
 	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}
 }

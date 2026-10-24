@@ -145,12 +145,12 @@ func (e *Emitter) matchExtends(check Type, pattern *ast.TypeAnnotation, bindings
 	if pattern.ElemType != nil {
 		switch pattern.Name {
 		case "Array":
-			if check.IsArray && check.ElemType != nil {
+			if check.IsArray() && check.ElemType != nil {
 				return e.matchExtends(*check.ElemType, pattern.ElemType, bindings)
 			}
 			return false
 		case "Promise":
-			if check.IsPromise && check.PromiseType != nil {
+			if check.IsPromise() && check.PromiseType != nil {
 				return e.matchExtends(*check.PromiseType, pattern.ElemType, bindings)
 			}
 			return false
@@ -188,14 +188,14 @@ func (e *Emitter) resolveWithInferBindings(ta *ast.TypeAnnotation, bindings map[
 // IR-equality (with numeric width leniency) for scalars; `any`/`unknown`/a union
 // on the right accepts anything, and null/undefined follow nullability.
 func (e *Emitter) assignable(a, b Type) bool {
-	if b.IsDynamic {
+	if b.IsDynamic() {
 		return true
 	}
-	if a.IsNull || a.IsUndefined {
-		return b.IsNull || b.IsUndefined || b.Nullable
+	if a.IsNull() || a.IsUndefined() {
+		return b.IsNull() || b.IsUndefined() || b.Nullable()
 	}
-	if b.IsObject {
-		if !a.IsObject {
+	if b.IsObject() {
+		if !a.IsObject() {
 			return false
 		}
 		for _, bf := range b.UserFields() {
@@ -212,8 +212,8 @@ func (e *Emitter) assignable(a, b Type) bool {
 		}
 		return true
 	}
-	if b.IsArray {
-		return a.IsArray && a.ElemType != nil && b.ElemType != nil && e.assignable(*a.ElemType, *b.ElemType)
+	if b.IsArray() {
+		return a.IsArray() && a.ElemType != nil && b.ElemType != nil && e.assignable(*a.ElemType, *b.ElemType)
 	}
 	if a.IR == b.IR {
 		return true
@@ -222,7 +222,7 @@ func (e *Emitter) assignable(a, b Type) bool {
 }
 
 func isNumericAssignable(t Type) bool {
-	if t.IsObject || t.IsArray || t.IsDynamic || t.IsNull || t.IsUndefined {
+	if t.IsObject() || t.IsArray() || t.IsDynamic() || t.IsNull() || t.IsUndefined() {
 		return false
 	}
 	switch t.IR {

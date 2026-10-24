@@ -171,3 +171,29 @@ function g() { return (arguments) => arguments; }
 console.log(g()(4));
 `, "false 1 [ false, false, 3, 2 ] true\n4")
 }
+
+// An auto-typed (`let f;`) or `any` name gives a function assigned to it no
+// context: its unannotated parameters are TS7006, and its parameters' types
+// do not wait on the name's own storage type (ADR-01834).
+func TestE2ETypeErrorAssignedFunctionNoContext(t *testing.T) {
+	for _, src := range []string{
+		"export {}\nlet f;\nf = (a) => a;\nconsole.log(f(1));\n",
+		"export {}\nlet h: any;\nh = (a) => a;\nconsole.log(h(3));\n",
+	} {
+		_, err := resolveAndCompile(t, src)
+		if err == nil || !strings.Contains(err.Error(), "parameter 'a' implicitly has an 'any' type") {
+			t.Errorf("%s: expected TS7006, got %v", src, err)
+		}
+	}
+	if _, err := resolveAndCompile(t, "export {}\nlet f: (n: number) => number;\nf = (a) => a + 1;\nlet g;\ng = async () => 2;\ng().then((v: number) => console.log(f(v)));\n"); err != nil {
+		t.Errorf("contextually typed assignments rejected: %v", err)
+	}
+	assertSameAsNodeCompatJS(t, `var callCount = 0;
+var ref;
+ref = async (a) => { callCount = callCount + 1; return a; };
+ref(false).then((v) => { console.log(v, callCount); });
+var h;
+h = function (x, y) { return [x, y]; };
+console.log(h(1, "s"));
+`)
+}

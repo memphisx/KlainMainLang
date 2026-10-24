@@ -131,7 +131,7 @@ func (e *Emitter) emitStandardDecoratorApplications(cd *ast.ClassDeclaration) er
 			if err != nil {
 				return err
 			}
-			if ret.Ty.IsDynamic {
+			if ret.Ty.IsDynamic() {
 				boxedRet, err := e.emitBoxValue(ret)
 				if err != nil {
 					return err
@@ -229,7 +229,7 @@ func (e *Emitter) emitStandardDecoratorApplications(cd *ast.ClassDeclaration) er
 			if err != nil {
 				return err
 			}
-			if !ret.Ty.IsDynamic {
+			if !ret.Ty.IsDynamic() {
 				continue
 			}
 			retBox, err := e.emitBoxValue(ret)
@@ -311,7 +311,7 @@ func (e *Emitter) emitStandardDecoratorApplications(cd *ast.ClassDeclaration) er
 			}
 			// A standard decorator returns the replacement (or undefined to
 			// keep the current value). Adopt a dynamic function/object return.
-			if ret.Ty.IsDynamic {
+			if ret.Ty.IsDynamic() {
 				boxedRet, err := e.emitBoxValue(ret)
 				if err != nil {
 					return err
@@ -354,7 +354,7 @@ func (e *Emitter) emitStandardDecoratorApplications(cd *ast.ClassDeclaration) er
 			// Store a returned initializer (a callable); a void/undefined return
 			// leaves the slot as undefined (the constructor tail then keeps the
 			// field's original value).
-			if ret.Ty.IsDynamic {
+			if ret.Ty.IsDynamic() {
 				boxedRet, err := e.emitBoxValue(ret)
 				if err != nil {
 					return err
@@ -379,7 +379,7 @@ func (e *Emitter) emitStandardDecoratorApplications(cd *ast.ClassDeclaration) er
 			if err != nil {
 				return err
 			}
-			if ret.Ty.IsDynamic {
+			if ret.Ty.IsDynamic() {
 				boxedRet, err := e.emitBoxValue(ret)
 				if err != nil {
 					return err
@@ -456,22 +456,19 @@ func (e *Emitter) emitAddInitializerFn(className string) (Value, error) {
 	e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push(ptr %s, i64 %s)", arr, fn))
 	e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine i64 %s(ptr %%env, i64 %%p_this, i64 %%p_argc, ptr %%p_argv) {\nentry:\n", fnName))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	e.writeFunc(fmt.Sprintf("i64 %s(ptr %%env, i64 %%p_this, i64 %%p_argc, ptr %%p_argv)", fnName), e.allocas.String()+e.body.String())
 	restoreFn()
 
 	e.ensureMalloc()
 	rec := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", rec))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fnName, rec))
+	e.heapMallocInto(rec, "24")
+	e.heapStore("ptr", fnName, rec, 8)
 	envSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", envSlot))
+	e.heapStore("ptr", "null", envSlot, 8)
 	aritySlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", aritySlot, rec))
-	e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", aritySlot))
+	e.heapStore("i64", "1", aritySlot, 8)
 	return Value{Ref: e.emitNbTagPtr(rec, kmlTagDynFunc), Ty: TypeAny}, nil
 }
 
@@ -512,7 +509,7 @@ func (e *Emitter) emitStandardConstructorTail(className string) error {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, thisPtr, idx))
 		var curField Value
-		if fieldTy.IsArray {
+		if fieldTy.IsArray() {
 			curField = e.loadArrayFieldValue(gep, fieldTy) // header-ptr slot (TDD-00213 S2)
 		} else {
 			cur := e.freshReg()
@@ -546,11 +543,11 @@ func (e *Emitter) emitStandardConstructorTail(className string) error {
 		e.emitLabel(doneL)
 		newBox := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", newBox, res))
-		newVal := e.coerce(Value{Ref: newBox, Ty: TypeAny}, fieldTy)
-		if fieldTy.IsArray {
+		newVal := e.convert(Value{Ref: newBox, Ty: TypeAny}, fieldTy)
+		if fieldTy.IsArray() {
 			e.storeArrayFieldHeader(gep, newVal) // header-ptr slot (TDD-00213 S2)
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), newVal.Ref, gep, fieldTy.Align()))
+			e.heapStore(StructFieldIR(fieldTy), newVal.Ref, gep, fieldTy.Align())
 		}
 	}
 

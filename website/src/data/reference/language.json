@@ -72,11 +72,11 @@
     },
     {
       "id": "lang.forof",
-      "name": "for…of over arrays, strings, Map, Set, a bare any, and a class implementing next(): T | null",
-      "statusRow": "for…of over arrays, strings, Map, Set, a bare any, and a class implementing next(): T | null",
+      "name": "for…of over arrays, strings, Map, Set, a bare any, and iterables",
+      "statusRow": "for…of over arrays, strings, Map, Set, a bare any, and iterables",
       "signature": "for (const x of iterable) { … }",
       "badge": "caveats",
-      "description": "Iterates arrays, a string (its code points), Map (its [key, value] entries, live: an entry added during the loop is visited, a deleted one is not), Set (elements), generators, a bare any holding a string, a dynamic or boxed array (by its runtime length), or any iterable through its [Symbol.iterator]() (an any loop variable; anything else throws Node's 'is not iterable' TypeError), and both the structural next(): T | null shape and the spec's real [Symbol.iterator]() protocol. The loop variable may be a destructuring pattern, including nested. A scalar next() returns a presence-flagged aggregate so a yielded 0/false doesn't end iteration.",
+      "description": "Iterates arrays, a string (its code points), Map (its [key, value] entries, live: an entry added during the loop is visited, a deleted one is not), Set (elements), generators, a bare any holding a string, a dynamic or boxed array (by its runtime length), or any iterable through its [Symbol.iterator]() (an any loop variable; anything else throws Node's 'is not iterable' TypeError). A class or object with a [Symbol.iterator]() iterates through it; one without (a bare next() method included) is TypeScript's TS2488, and a TypeError under -compat=js. The loop variable may be a destructuring pattern, including nested.",
       "differences": [
         "Over a bare `any`, each element is read through a numeric-string key — a per-tag element walk is the perf follow-up."
       ],
@@ -928,6 +928,21 @@
       }
     },
     {
+      "id": "lang.promisewithresolvers",
+      "name": "Promise.withResolvers",
+      "statusRow": "Promise.withResolvers",
+      "signature": "const { promise, resolve, reject } = Promise.withResolvers<T>()",
+      "badge": "caveats",
+      "description": "A pending promise and the functions that settle it, for settling from outside an executor. The type argument is explicit or taken from the declared type. Called with another constructor as this, it still builds a plain Promise.",
+      "seeAlso": [
+        "lang.promiseexecutor",
+        "lang.promiseresolvereject"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/withResolvers"
+      }
+    },
+    {
       "id": "lang.promiseresolvereject",
       "name": "Promise.resolve / Promise.reject",
       "statusRow": "Promise.resolve / Promise.reject",
@@ -1008,7 +1023,7 @@
       "statusRow": "Enums (numeric)",
       "signature": "enum E { A, B = 5 }",
       "badge": "exact",
-      "description": "Numeric enums with auto-increment and explicit values.",
+      "description": "Numeric enums with auto-increment and constant-expression values (fractions, negatives, operators, earlier members), the reverse mapping, and the enum object as a value.",
       "snippet": "enum Direction {\n  North,\n  East,\n  South,\n  West,\n}\nconsole.log(Direction.East)  // 1",
       "seeAlso": [
         "lang.enumsstr",
@@ -1038,9 +1053,9 @@
       "statusRow": "Namespaces (namespace X {}, function merging)",
       "signature": "namespace X { export function f() {} }",
       "badge": "caveats",
-      "description": "Merges with a same-name top-level function X(...) — TS's callable-object duality idiom (assert(x) + assert.sameValue(...)); members desugar to flat top-level declarations.",
+      "description": "Merges with a same-name top-level function X(...) — TS's callable-object duality idiom (assert(x) + assert.sameValue(...)); members desugar to flat top-level declarations. Read as a value (`console.log(X)`, `Object.keys(X)`, `const o = X.Sub`), a namespace is the object TypeScript's emit builds: its exports in declaration order, nested namespaces as objects, an exported `let` a live property.",
       "differences": [
-        "V1 scope: top-level only, members must be `export function` / `export const`/`let` (single binding); no nesting, no `declare namespace`, no cross-module `export namespace`; the same namespace member declared in two files is a link-time duplicate-symbol error, not file-private."
+        "Top-level only (no namespace inside a function body), single-binding members; no `declare namespace`, no cross-module `export namespace`; the same namespace member declared in two files is a link-time duplicate-symbol error, not file-private."
       ],
       "seeAlso": [
         "lang.functiondecl"
@@ -1103,10 +1118,8 @@
       "statusRow": "Getters / setters (get x() {} / set x(v) {}) on classes and object literals",
       "signature": "get x() { … } / set x(v) { … }",
       "badge": "caveats",
-      "description": "get/set are contextual (not reserved). No new storage: an accessor is registered as an ordinary method under an internal dispatch key. obj.x / obj.x = v / compound assignment all route through the accessor, including from inside the class's own methods and through optional chaining. On object literals too: the literal is lowered to a synthetic anonymous class so the accessor body gets a real this reading/writing the object's own fields.",
+      "description": "get/set are contextual (not reserved). No new storage: an accessor is registered as an ordinary method under an internal dispatch key. obj.x / obj.x = v / compound assignment all route through the accessor, including from inside the class's own methods and through optional chaining. On object literals too: the literal is lowered to a synthetic anonymous class so the accessor body gets a real this reading/writing the object's own fields; its accessors are own enumerable properties (Object.keys, JSON, spread, x: [Getter] in console.log, getOwnPropertyDescriptor), and it can be passed where a structural type is expected.",
       "differences": [
-        "An accessor-bearing object literal can't be assigned to a differently-shaped structural object type (its accessors are methods, not fields) — a clean rejection; used directly it works.",
-        "console.log of an accessor object prints only its data fields, not x: [Getter].",
         "Static accessors, and logical assignment (`&&=`/`||=`/`??=`) on an accessor, remain out of scope for V1."
       ],
       "seeAlso": [
@@ -1136,13 +1149,8 @@
       "name": "Built-in Error subtypes",
       "statusRow": "Built-in Error subtypes (new TypeError(msg), RangeError, SyntaxError, EvalError, URIError, ReferenceError, DOMException) and instanceof against them",
       "signature": "new TypeError(msg); e instanceof RangeError",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "A small fixed kind enum (a hidden runtime tag on the shared Error object shape, not a real class hierarchy), plus a real .name field. instanceof Error matches any kind; instanceof TypeError matches only that one. new DOMException(message?, name?) takes its .name from the 2nd argument. The ES2022 error-options bag works too: new Error(msg, { cause }) stores any value as err.cause (default undefined), preserved through throw/catch.",
-      "differences": [
-        "`.stack`/`Error.captureStackTrace` don't exist: console.log shows an error as Node does minus the stack's frames. `class X extends Error` works at any depth — construction, `super(msg)`, `.message`/`.name`, fields of its own, `instanceof` at every level.",
-        "`DOMException` carries no legacy numeric `.code`.",
-        "The error-options second argument must be a `{ cause: <expr> }` object literal — a variable/computed options bag is a clean rejection; `AggregateError` takes no options (its `.cause` reads `undefined`)."
-      ],
       "seeAlso": [
         "lang.newerror",
         "lang.instanceof"
@@ -1247,9 +1255,6 @@
       "signature": "class C { static x = 1; static {} private y; abstract m(); }",
       "badge": "caveats",
       "description": "static members are inherited through extends (a non-redeclared static field shares its base's storage). private/protected are compile-time-only (zero runtime check, matching TS erasure), checked with tsc's own diagnostics (including super.privateMethod() and private or protected constructors); o[\"p\"] reaches a private member, as in TypeScript. abstract reuses override-detection; implements is checked by the type checker (tsc's TS2420).",
-      "differences": [
-        "A plain object passed where another plain object type is expected is copied into that type's layout, so writes through the copy do not reach the original (a class instance keeps its identity)."
-      ],
       "seeAlso": [
         "lang.class",
         "lang.privatefield"
@@ -1263,12 +1268,9 @@
       "name": "Real JS/TS #x runtime-private field syntax",
       "statusRow": "Real JS/TS #x runtime-private field syntax",
       "signature": "class C { #x; #m() {} }",
-      "badge": "caveats",
-      "description": "Fields, methods, static fields/methods, and get/set accessors — exact-class-only access (the same rule private enforces), plus real reflection-hiding (Object.keys/.values/.entries/JSON.stringify/spread never see a #-named field, unlike private's type-level-only erasure).",
-      "differences": [
-        "No class-field-initializer syntax (`#x = 1;` — a pre-existing gap for every field, not `#`-specific).",
-        "No early-error check for a `#m`/`static #m` name collision in the same class, or for the `#constructor`-is-always-banned rule."
-      ],
+      "badge": "exact",
+      "description": "Fields (with initializers), methods, static fields/methods, and get/set accessors — exact-class-only access, `#x in o` brand checks, V8's brand-check TypeErrors on a foreign receiver, and real reflection-hiding (Object.keys/.values/.entries/JSON.stringify/spread never see a #-named field, unlike private's type-level-only erasure).",
+      "differences": [],
       "seeAlso": [
         "lang.classstatic",
         "lang.class"
@@ -1293,15 +1295,26 @@
       }
     },
     {
+      "id": "lang.newtarget",
+      "name": "new.target",
+      "statusRow": "new.target",
+      "signature": "constructor() { if (new.target === Base) throw …; }",
+      "badge": "exact",
+      "description": "The class new was called with, inside a constructor (a derived class's name through super(), and inside an arrow). undefined in a method, accessor, field initializer, static block, or a function called without new; in a prototype constructor (-compat=js) it is the function when called with new. Outside any function it is a SyntaxError.",
+      "seeAlso": [
+        "lang.classinherit"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Operators/new.target"
+      }
+    },
+    {
       "id": "lang.extendspromise",
       "name": "class X extends Promise",
       "statusRow": "class X extends Promise<T>",
       "signature": "class Timed extends Promise<string> { describe() { return \"timed\"; } }",
-      "badge": "partial",
-      "description": "The instance is the promise itself: await, instanceof Promise and instanceof the class, passing it where a Promise is expected, console.log as Node shows it (Timed [Promise] { 'x', label: 'timed' }), and Promise's then/catch/finally and statics (resolve, reject, all, race, allSettled, any) making instances of the class through its constructor, as Node's species does. The same holds through any.",
-      "differences": [
-        "Only a non-generic class extends Promise: `class P<T> extends Promise<T>` meets the generic-class extends limitation."
-      ],
+      "badge": "exact",
+      "description": "The instance is the promise itself: await, instanceof Promise and instanceof the class, passing it where a Promise is expected, console.log as Node shows it (Timed [Promise] { 'x', label: 'timed' }), and Promise's then/catch/finally and statics (resolve, reject, all, race, allSettled, any) making instances of the class through its constructor, as Node's species does. The same holds through any, and for a generic subclass (`class P<T> extends Promise<T>`).",
       "seeAlso": [
         "lang.classinherit",
         "lang.extendsmap",
@@ -1375,11 +1388,9 @@
       "name": "instanceof (against user-defined classes)",
       "statusRow": "instanceof (against user-defined classes)",
       "signature": "x instanceof C",
-      "badge": "caveats",
-      "description": "Every instance carries a hidden runtime type tag. A class-typed variable whose static class is T or an ancestor of T folds to a compile-time constant; one whose static class is an ancestor of the right-hand class needs a real runtime tag read. instanceof against Array/Map/Set/Date/RegExp is a compile-time constant for a statically typed value; a value held in any is tested at run time.",
-      "differences": [
-        "`x instanceof Object` is a compile-time constant — true for any non-primitive (class instance, object, array, function, Date, Map/Set, RegExp, …), false for a primitive. Only an undecidable static type (any/union/nullable) is a clean rejection."
-      ],
+      "badge": "exact",
+      "description": "Every instance carries a hidden runtime type tag. A class-typed variable whose static class is T or an ancestor of T folds to a compile-time constant; one whose static class is an ancestor of the right-hand class needs a real runtime tag read. instanceof against Array/Map/Set/Date/RegExp, Object and Function is a compile-time constant for a statically typed value; a value held in any is tested at run time (Object walks its prototype chain, so a null-prototype object is not one), and so is a builtin constructor held in a variable.",
+      "differences": [],
       "seeAlso": [
         "lang.classinherit",
         "lang.errorsubtypes"

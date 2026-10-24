@@ -7,10 +7,6 @@ package llvm
 // 'end')`). V1 delivers the response body as a single 'data' chunk then 'end',
 // synchronously right after the callback registers its listeners.
 
-import (
-	"fmt"
-)
-
 // ensureHTTPClientReactions emits the http-client completion-reaction registry
 // (TDD-00138 Stage 2): a { pending, closure } list an async `http.get` registers
 // into, fired by the event loop after each fetch-message drain when the
@@ -25,7 +21,7 @@ func (e *Emitter) ensureHTTPClientReactions() {
 	e.usedHTTPClientReactions = true
 	e.ensureMalloc()
 	e.ensureRealloc()
-	e.ensureFetch() // @__kml_curl_multi, curl_multi_perform, __kml_curl_drain_messages
+	e.ensureFetch() // @__kml_curl_multi, __kml_curl_drain_messages
 	e.emitGlobal(`
 @__kml_httpc_data = internal global ptr null, align 8
 @__kml_httpc_len = internal global i64 0, align 8
@@ -97,75 +93,5 @@ cont:
   br label %loop
 ret:
   ret void
-}
-
-declare i32 @__kml_curl_drive_once(i32)
-
-; flush: pump curl until EVERY registered reaction has fired. Installed into
-; @__kml_httpc_flush_hook and invoked after the event loop exits, so a
-; server.close() from inside a request handler can't strand a client response
-; whose transfer completes as the loop winds down.
-define void @__kml_httpc_flush() {
-entry:
-  br label %scan
-scan:
-  %len = load i64, ptr @__kml_httpc_len, align 8
-  %data = load ptr, ptr @__kml_httpc_data, align 8
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %scan ], [ %inext, %cont ]
-  %done = icmp sge i64 %i, %len
-  br i1 %done, label %ret, label %body
-body:
-  %slot = getelementptr { ptr, ptr }, ptr %data, i64 %i
-  %pp = getelementptr { ptr, ptr }, ptr %slot, i32 0, i32 0
-  %pending = load ptr, ptr %pp, align 8
-  %isnull = icmp eq ptr %pending, null
-  br i1 %isnull, label %cont, label %haswork
-cont:
-  %inext = add i64 %i, 1
-  br label %loop
-haswork:
-  %running = call i32 @__kml_curl_drive_once(i32 0)
-  call void @__kml_httpc_fire_ready()
-  ; wait on curl's sockets before rescanning, rather than spinning (see drive)
-  %busy = icmp sgt i32 %running, 0
-  br i1 %busy, label %waitmore, label %scan
-waitmore:
-  call i32 @__kml_curl_drive_once(i32 100)
-  br label %scan
-ret:
-  ret void
 }`)
-	e.ensureHTTPCFlushHook()
-}
-
-// ensureHTTPCFlushHook defines the post-event-loop flush hook global exactly
-// once. The client runtime stores @__kml_httpc_flush into it at each
-// http.get/request site; the listen emitters call through it (null-guarded)
-// after @__kml_event_loop_run returns. Split from ensureHTTPClientReactions so
-// server-only programs can reference the (null) hook without dragging curl in.
-func (e *Emitter) ensureHTTPCFlushHook() {
-	if e.usedHTTPCFlushHook {
-		return
-	}
-	e.usedHTTPCFlushHook = true
-	e.emitGlobal("@__kml_httpc_flush_hook = internal global ptr null, align 8")
-}
-
-// emitPostLoopFlush emits the null-guarded indirect call through the flush
-// hook — placed immediately after every @__kml_event_loop_run call site.
-func (e *Emitter) emitPostLoopFlush() {
-	e.ensureHTTPCFlushHook()
-	h := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_httpc_flush_hook, align 8", h))
-	isnull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isnull, h))
-	skipL := e.freshLabel("postloop.skip")
-	callL := e.freshLabel("postloop.flush")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isnull, skipL, callL))
-	e.emitLabel(callL)
-	e.emitInstr(fmt.Sprintf("call void %s()", h))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
-	e.emitLabel(skipL)
 }

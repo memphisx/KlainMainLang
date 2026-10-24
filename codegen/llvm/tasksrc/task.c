@@ -61,10 +61,7 @@ static void __kml_ctx_release(void *ctx) { (void)ctx; }
 /* The generated program's side. */
 extern _Thread_local void *__kml_current_task;
 extern _Thread_local void *__kml_root_async_ctx;
-extern _Thread_local u8 __kml_conn_poke;
 extern _Thread_local char __kml_main_ctx[];
-extern _Thread_local void *__kml_conn_data;
-extern _Thread_local i64 __kml_current_conn_idx;
 extern _Thread_local void *__kml_curl_multi;
 extern _Thread_local void *__kml_thrown;
 extern _Thread_local void *__kml_cur_jmp_stk;
@@ -75,7 +72,6 @@ extern void *__kml_jmp_stack_new(void);
 extern void __kml_jmp_stack_free(void *);
 extern void __kml_curl_kick(void);
 extern void __kml_curl_drain_messages(void);
-extern void __kml_reqbody_pump(void);
 extern _Bool __kml_group_satisfied(void *);
 extern void __kml_worker_abort_check(void);
 /* A wait with nothing to park: no coroutine, no async generator step, no
@@ -93,20 +89,14 @@ extern void __kml_promise_drain_reactions(void *);
 extern void __kml_promise_note_rejected(void *);
 extern void __kml_promise_mark_handled(void *);
 
-#ifdef KLAIN_GC
+#ifdef KML_GC
 extern void *__kml_task_stack_alloc(i64);
 extern void __kml_task_stack_free(void *, i64);
-extern _Thread_local void *__kml_gc_orig_stackbottom;
-#if defined(_WIN32)
-extern void __kml_gc_sb_cur(void);
-#define GC_SB_SET(p) ((void)(p), __kml_gc_sb_cur())
-#elif defined(KLAIN_GC_WORKERS)
-extern void __kml_gc_set_sb(void *);
-#define GC_SB_SET(p) __kml_gc_set_sb(p)
-#else
-extern void *GC_stackbottom;
-#define GC_SB_SET(p) (GC_stackbottom = (p))
-#endif
+extern void __kml_gc_stack_leave(void *sp, void *base);
+extern void __kml_gc_stack_back(void);
+/* The GC interface (kml_heap.h): a fiber switch repoints the stack the
+ * collector scans; this thread's own base is the way back. */
+#define GC_SB_SET(p) kml_gc_set_stack_bottom(p)
 #define STACK_ALLOC(n) __kml_task_stack_alloc(n)
 #define STACK_FREE(s, n) __kml_task_stack_free((s), (n))
 #else
@@ -118,8 +108,8 @@ extern void __kml_fiber_stack_free(void *, size_t);
 #define STACK_ALLOC(n) __kml_fiber_stack_alloc((size_t)(n))
 #define STACK_FREE(s, n) __kml_fiber_stack_free((s), (size_t)(n))
 #else
-#define STACK_ALLOC(n) malloc((size_t)(n))
-#define STACK_FREE(s, n) ((void)(n), free(s))
+#define STACK_ALLOC(n) malloc((size_t)(n)) /* scratch */
+#define STACK_FREE(s, n) ((void)(n), free(s)) /* scratch */
 #endif
 #endif
 
@@ -146,13 +136,19 @@ static _Thread_local i64 task_len, task_cap, sched_depth;
 #define P_WAITER(p) F(p, KML_PROMISE_WAITER, void *)
 #define P_V0(p) F(p, KML_PROMISE_V0, i64)
 
-#ifdef KLAIN_GC
+#ifdef KML_GC
+/* Is this thread running on a task's stack (since the last GC_INTO from its
+ * own stack)? */
+static _Thread_local int gc_on_task;
+#define __kml_task_on_own_stack() gc_on_task
 /* The GC stack bottom back to the swapper's stack: the process stack on main,
  * else the current task's. */
 void __kml_task_gc_restore(void) {
     void *ct = __kml_current_task;
     if (!ct) {
-        GC_SB_SET(__kml_gc_orig_stackbottom);
+        GC_SB_SET(kml_gc_thread_base());
+        gc_on_task = 0;
+        __kml_gc_stack_back();
         return;
     }
     GC_SB_SET((char *)T_STACK(ct) + T_STACKSZ(ct));
@@ -163,23 +159,31 @@ __attribute__((constructor)) static void kml_task_gc_restore_register(void) {
     __kml_hook_task_gc_restore = __kml_task_gc_restore;
 }
 #define GC_RESTORE() __kml_task_gc_restore()
-#define GC_INTO(t) GC_SB_SET((char *)T_STACK(t) + T_STACKSZ(t))
+/* Into t's stack. From the thread's own stack, its frames (from here down)
+ * stay roots through gcshim's record while the task runs. */
+#define GC_INTO(t)                                                                       \
+    do {                                                                                 \
+        if (!__kml_task_on_own_stack()) {                                               \
+            volatile char here_;                                                         \
+            __kml_gc_stack_leave((void *)&here_, kml_gc_thread_base());            \
+            gc_on_task = 1;                                                              \
+        }                                                                                \
+        GC_SB_SET((char *)T_STACK(t) + T_STACKSZ(t));                                    \
+    } while (0)
 #else
 #define GC_RESTORE() ((void)0)
 #define GC_INTO(t) ((void)(t))
 #endif
 
 /* The swap out of a task that settled its promise: wake its waiter, mark it
- * done, poke the connection scan (a parked connection fiber may await exactly
- * this promise), run the promise's reactions, and leave. */
+ * done, run the promise's reactions, and leave. */
 static void task_leave_settled(void *task, void *prom) {
     void *w = P_WAITER(prom);
     if (w) T_PPROM(w) = 0;
     T_STATE(task) = 2;
     __kml_task_active--;
-    __kml_conn_poke = 1;
     __kml_promise_drain_reactions(prom);
-    swapcontext(T_CTX(task), T_RESUMER(task));
+    KML_SWAPCONTEXT(T_CTX(task), T_RESUMER(task));
 }
 
 /* Set by a body that returned a promise: its own promise adopts that one's
@@ -195,8 +199,7 @@ void __kml_task_finish(void *task) {
         task_adopted = 0;
         T_STATE(task) = 2;
         __kml_task_active--;
-        __kml_conn_poke = 1;
-        swapcontext(T_CTX(task), T_RESUMER(task));
+            KML_SWAPCONTEXT(T_CTX(task), T_RESUMER(task));
         return;
     }
     P_STATE(prom) = 1;
@@ -216,6 +219,8 @@ void __kml_task_reject(void *task, void *err) {
  * catch-all. */
 void __kml_task_trampoline(void) {
     void *t = __kml_task_launching;
+    KML_FIBER_ENTRY(fiber_base);
+    F(t, KML_TASK_FRAME_BASE, void *) = fiber_base;
     kml_body fn = T_FN(t);
     void *args = T_ARGS(t);
     void *jb = __kml_push_jmpbuf();
@@ -228,10 +233,30 @@ void __kml_task_trampoline(void) {
     __kml_task_finish(t);
 }
 
+void __kml_task_resume(void *t);
+
+/* The suspended task awaiting promise p, or null: a stack's async part
+ * (framesrc/frames.c). */
+void *__kml_task_awaiting(void *p) {
+    void *w = P_WAITER(p);
+    if (w) return w;
+    /* An await's reaction resumes its task (__kml_task_await_ready). */
+    for (void *r = F(p, KML_PROMISE_REACTIONS, void *); r; r = F(r, KML_REACTION_NEXT, void *)) {
+        void *clo = F(r, KML_REACTION_CLOSURE, void *);
+        if (clo && F(clo, KML_CLOSURE_FN, void *) == (void *)__kml_task_resume) return F(clo, KML_CLOSURE_ENV, void *);
+    }
+    for (i64 i = 0; i < task_len; i++)
+        if (T_STATE(task_data[i]) != 2 && T_PPROM(task_data[i]) == p) return task_data[i];
+    return 0;
+}
+
+extern void *(*__kml_task_awaiting_hook)(void *p);
+
 void __kml_task_register(void *t) {
+    __kml_task_awaiting_hook = __kml_task_awaiting;
     if (task_len + 1 > task_cap) {
         i64 nc = task_cap * 2 > 8 ? task_cap * 2 : 8;
-        task_data = (void **)realloc(task_data, (size_t)nc * sizeof(void *));
+        task_data = (void **)realloc(task_data, (size_t)nc * sizeof(void *)); /* scratch */
         task_cap = nc;
     }
     task_data[task_len++] = t;
@@ -246,7 +271,7 @@ void __kml_task_reclaim(void *t) {
     void *ctx = T_CTX(t);
     __kml_ctx_release(ctx);
     STACK_FREE(T_STACK(t), T_STACKSZ(t));
-    free(ctx);
+    free(ctx); /* scratch */
     __kml_jmp_stack_free(T_JMPSTK(t));
     T_STACK(t) = 0;
     T_CTX(t) = 0;
@@ -262,7 +287,7 @@ void __kml_task_compact(void) {
     for (i64 i = 0; i < task_len; i++) {
         void *t = task_data[i];
         if (T_STATE(t) == 2)
-            free(t);
+            kml_free(KML_HEAP_WORDS, t);
         else
             task_data[w++] = t;
     }
@@ -270,8 +295,8 @@ void __kml_task_compact(void) {
 }
 
 void *__kml_spawn_task_ex(void *fn, void *args, void *promiseSlot, i64 stackBytes, void (*tramp)(void)) {
-    void *t = malloc(KML_TASK_SIZE);
-    void *ctx = malloc(UC_SIZE);
+    void *t = kml_alloc(KML_HEAP_WORDS, KML_TASK_SIZE);
+    void *ctx = malloc(UC_SIZE); /* scratch */
     void *stack = STACK_ALLOC(stackBytes);
     getcontext(ctx);
     F(ctx, UC_SS_SP, void *) = stack;
@@ -293,6 +318,7 @@ void *__kml_spawn_task_ex(void *fn, void *args, void *promiseSlot, i64 stackByte
     T_ALS(t) = prev ? T_ALS(prev) : __kml_root_async_ctx;
     T_JMPSTK(t) = __kml_jmp_stack_new();
     T_JMPTOP(t) = 0;
+    F(t, KML_TASK_FRAME_BASE, void *) = 0;
     __kml_task_register(t);
     /* The caller's resume point is a per-call slot: never the main context
      * (the spawner may be a connection fiber whose uc_link it is — TDD-00097
@@ -306,7 +332,7 @@ void *__kml_spawn_task_ex(void *fn, void *args, void *promiseSlot, i64 stackByte
     __kml_current_task = t;
     __kml_task_launching = t;
     GC_INTO(t);
-    swapcontext(callerctx, ctx);
+    KML_SWAPCONTEXT(callerctx, ctx);
     __kml_current_task = prev;
     GC_RESTORE();
     __kml_cur_jmp_stk = callerStk;
@@ -344,7 +370,7 @@ static void task_swap_in(void *t) {
     __kml_jmp_top = (int)T_JMPTOP(t);
     __kml_current_task = t;
     GC_INTO(t);
-    swapcontext(saveslot, T_CTX(t));
+    KML_SWAPCONTEXT(saveslot, T_CTX(t));
     __kml_current_task = 0;
     GC_RESTORE();
     __kml_cur_jmp_stk = mstk;
@@ -356,7 +382,6 @@ static void task_swap_in(void *t) {
 /* One scheduler step: pump libcurl, then resume each suspended task whose park
  * condition holds. Re-entrant: a resumed task may drive it (ADR-00985). */
 void __kml_task_sched_step(void) {
-    __kml_reqbody_pump();
     __kml_curl_kick();
     /* Only the outermost step compacts: a nested one must not move entries
      * under the scan in progress above it. */
@@ -382,18 +407,6 @@ _Bool __kml_task_resumable(void) {
     return 0;
 }
 
-/* A task holds the loop when it can run now or is parked on a fetch or a
- * fetch group (its transfer may not have reached libcurl yet). One parked on a
- * promise holds nothing, as in Node. */
-_Bool __kml_task_holds_loop(void) {
-    if (__kml_task_resumable()) return 1;
-    for (i64 i = 0; i < task_len; i++) {
-        void *t = task_data[i];
-        if (T_STATE(t) == 1 && (T_PFETCH(t) || T_PGROUP(t))) return 1;
-    }
-    return 0;
-}
-
 /* Drops task from the waiter field of each member still naming it. */
 void __kml_task_unwait(void **members, i64 count, void *task) {
     for (i64 i = 0; i < count; i++)
@@ -407,7 +420,7 @@ static void park_on_members(void *ct, void **members, i64 count) {
     for (i64 i = 0; i < count; i++) P_WAITER(members[i]) = ct;
     T_STATE(ct) = 1;
     T_JMPTOP(ct) = (i64)(unsigned)__kml_jmp_top;
-    swapcontext(T_CTX(ct), T_RESUMER(ct));
+    KML_SWAPCONTEXT(T_CTX(ct), T_RESUMER(ct));
     GC_RESTORE();
     __kml_task_unwait(members, count, ct);
 }
@@ -451,46 +464,28 @@ void __kml_task_resume(void *t) { task_swap_in(t); }
 
 /* On a task: attach a resume reaction to the promise (or queue it now if
  * settled) and park in state 3, which only the resume microtask wakes. On a
- * connection fiber it yields the fiber (ADR-00986) or busy-drives (until
- * TDD-00244 Stage 5). Anywhere else it is a compiler bug. */
+ * connection fiber it parks the fiber on the promise and yields it
+ * (ADR-00986). Anywhere else it is a compiler bug. */
 void __kml_task_await_ready(void *promise) {
     __kml_promise_mark_handled(promise);
     void *ct = __kml_current_task;
     if (ct) {
-        void **clo = (void **)malloc(KML_CLOSURE_SIZE);
+        void **clo = (void **)kml_alloc(KML_HEAP_WORDS, KML_CLOSURE_SIZE);
         F(clo, KML_CLOSURE_FN, void *) = (void *)__kml_task_resume;
         F(clo, KML_CLOSURE_ENV, void *) = ct;
         if (P_STATE(promise) != 0) {
             __kml_microtask_enqueue(clo);
         } else {
-            void *node = malloc(KML_REACTION_SIZE);
+            void *node = kml_alloc(KML_HEAP_WORDS, KML_REACTION_SIZE);
             F(node, KML_REACTION_CLOSURE, void *) = clo;
             F(node, KML_REACTION_NEXT, void *) = F(promise, KML_PROMISE_REACTIONS, void *);
             F(promise, KML_PROMISE_REACTIONS, void *) = node;
         }
         T_STATE(ct) = 3;
         T_JMPTOP(ct) = (i64)(unsigned)__kml_jmp_top;
-        swapcontext(T_CTX(ct), T_RESUMER(ct));
+        KML_SWAPCONTEXT(T_CTX(ct), T_RESUMER(ct));
         GC_RESTORE();
         return;
     }
-    i64 cidx = __kml_current_conn_idx;
-    if (cidx < 0) {
-        __kml_wait_outside_coroutine();
-        return;
-    }
-    /* On a connection fiber: park the fiber on the promise and yield to
-     * the loop, which runs timers and I/O meanwhile and resumes the fiber
-     * once the promise settles, not on its descriptor's readiness. */
-    (void)cidx;
-    while (P_STATE(promise) == 0) {
-        __kml_drain_microtasks();
-        if (P_STATE(promise) != 0) return;
-        /* The connection array may have moved while suspended. */
-        char *slot = (char *)__kml_conn_data + __kml_current_conn_idx * KML_CONN_SIZE;
-        F(slot, KML_CONN_GROUP, void *) = (void *)((uintptr_t)promise | 1);
-        swapcontext(F(slot, KML_CONN_CTX, void *), __kml_main_ctx);
-        slot = (char *)__kml_conn_data + __kml_current_conn_idx * KML_CONN_SIZE;
-        F(slot, KML_CONN_GROUP, void *) = 0;
-    }
+    __kml_wait_outside_coroutine();
 }

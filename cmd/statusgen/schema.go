@@ -53,4 +53,7 @@ type Row struct {
 	Notes        []string `json:"notes,omitempty"`
 	CaveatsPlain bool     `json:"caveatsPlain,omitempty"`
 	NotesPlain   bool     `json:"notesPlain,omitempty"`
+	// Decl names the builtin declarations the row covers (lib/conform's
+	// ResolveDecl forms); every ✅ row of a builtin area has one.
+	Decl []string `json:"decl,omitempty"`
 }

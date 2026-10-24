@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. Node's `os` module — operating-system information: Node's `lib/os.js` in TypeScript over the host reads of `osinfo.c` ([ADR-01291](../adr/ADR-01291.md)). See [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/ADR-00090.md)."
+      "text": "> Part of the [Implementation Status](README.md) index. Node's `os` module — operating-system information: Node's `lib/os.js` in TypeScript over the host reads of `osinfo.c` ([ADR-01291](../adr/01/ADR-01291.md)). See [TDD-00024](../tdd/TDD-00024.md)/[ADR-00090](../adr/00/ADR-00090.md)."
     },
     {
       "kind": "coverage",
@@ -28,13 +28,19 @@
             "status": "implemented",
             "notes": [
               "`process.platform`, as Node's `platform()` returns"
+            ],
+            "decl": [
+              "os#platform"
             ]
           },
           {
             "feature": "`os.homedir()`",
             "status": "implemented",
             "notes": [
-              "Mirrors libuv's `uv_os_homedir` (ADR-00790): a set `$HOME` wins (an empty one included, matching Node's `\"\"`), POSIX unset falls back to the passwd database (`getpwuid(getuid())->pw_dir`), and it throws only when that fails too; Windows reads `USERPROFILE`, falling back to the process token's profile directory (`GetUserProfileDirectoryW`, [ADR-01032](../adr/ADR-01032.md))"
+              "Mirrors libuv's `uv_os_homedir` (ADR-00790): a set `$HOME` wins (an empty one included, matching Node's `\"\"`), POSIX unset falls back to the passwd database (`getpwuid(getuid())->pw_dir`), and it throws only when that fails too; Windows reads `USERPROFILE`, falling back to the process token's profile directory (`GetUserProfileDirectoryW`, [ADR-01032](../adr/01/ADR-01032.md))"
+            ],
+            "decl": [
+              "os#homedir"
             ]
           },
           {
@@ -43,6 +49,9 @@
             "notes": [
               "POSIX: Node's `getTempDir` — `TMPDIR`, then `TMP`, then `TEMP` (the first set, non-empty one), one trailing `/` stripped, else `/tmp`",
               "On Windows: `TEMP`, then `TMP`, then `<SystemRoot|windir>\\temp`, with one trailing backslash stripped unless it names a drive root — Node's exact algorithm"
+            ],
+            "decl": [
+              "os#tmpdir"
             ]
           },
           {
@@ -50,6 +59,9 @@
             "status": "implemented",
             "notes": [
               "`gethostname()`; a failure throws `ERR_SYSTEM_ERROR`"
+            ],
+            "decl": [
+              "os#hostname"
             ]
           },
           {
@@ -57,9 +69,12 @@
             "status": "implemented",
             "notes": [
               "Real per-core `{model, speed, times: {user,nice,sys,idle,irq}}` — Linux via `/proc/cpuinfo`/`/proc/stat` parsing, Darwin via `sysctlbyname`/Mach `host_processor_info` — both verified (Darwin on Apple Silicon M4 Pro: `model` = `\"Apple M4 Pro\"`, live tick counters)",
-              "Darwin `speed`: `hw.cpufrequency` is unavailable on Apple Silicon (M-series removed the fixed-clock model), so a fixed `2400` MHz nominal is reported there — byte-for-byte what real Node/libuv reports on the same hardware; an Intel Mac's real value flows through unchanged ([ADR-00569](../adr/ADR-00569.md))",
+              "Darwin `speed`: `hw.cpufrequency` is unavailable on Apple Silicon (M-series removed the fixed-clock model), so a fixed `2400` MHz nominal is reported there — byte-for-byte what real Node/libuv reports on the same hardware; an Intel Mac's real value flows through unchanged ([ADR-00569](../adr/00/ADR-00569.md))",
               "Darwin `times.irq` is always `0` — Mach's per-core tick array has no `irq` bucket (only user/system/idle/nice); real Node reports `irq: 0` on Darwin too, so this is parity, not a gap",
-              "Linux `speed` is cpufreq's `scaling_max_freq` (`/sys/devices/system/cpu/cpuN/cpufreq/`, kHz → MHz) and `0` where cpufreq is absent — VMs and containers included — exactly what Node 22's libuv reports; `/proc/cpuinfo`'s `cpu MHz` is no longer consulted. On aarch64, with no `model name` line, `model` comes from the `CPU part` code through libuv's ARM part table (`Neoverse-N1`, `Cortex-A72`, …), else `unknown` ([ADR-00733](../adr/ADR-00733.md))"
+              "Linux `speed` is cpufreq's `scaling_max_freq` (`/sys/devices/system/cpu/cpuN/cpufreq/`, kHz → MHz) and `0` where cpufreq is absent — VMs and containers included — exactly what Node 22's libuv reports; `/proc/cpuinfo`'s `cpu MHz` is no longer consulted. On aarch64, with no `model name` line, `model` comes from the `CPU part` code through libuv's ARM part table (`Neoverse-N1`, `Cortex-A72`, …), else `unknown` ([ADR-00733](../adr/00/ADR-00733.md))"
+            ],
+            "decl": [
+              "os#cpus"
             ]
           },
           {
@@ -67,6 +82,10 @@
             "status": "implemented",
             "notes": [
               "Verified on Linux and on Apple Silicon M4 Pro — `totalmem()` matches `sysctl hw.memsize`; Darwin `freemem()` (Mach `host_statistics`) returns a live free-page figure"
+            ],
+            "decl": [
+              "os#totalmem",
+              "os#freemem"
             ]
           },
           {
@@ -74,13 +93,22 @@
             "status": "implemented",
             "notes": [
               "`\"\\r\\n\"` on Windows, `\"\\n\"` on POSIX"
+            ],
+            "decl": [
+              "os#EOL"
             ]
           },
           {
             "feature": "`os.type()` / `os.release()` / `os.version()` / `os.machine()`",
             "status": "implemented",
             "notes": [
-              "POSIX `uname` fields; Windows `Windows_NT`, `RtlGetVersion`'s `major.minor.build` (unaffected by the manifest shim), the registry `ProductName` with libuv's `Windows 10` → `Windows 11` rewrite for build ≥ 22000, and `x86_64`/`arm64` from `GetNativeSystemInfo` — verified byte-identical to Node on Windows 11 ([ADR-01077](../adr/ADR-01077.md))"
+              "POSIX `uname` fields; Windows `Windows_NT`, `RtlGetVersion`'s `major.minor.build` (unaffected by the manifest shim), the registry `ProductName` with libuv's `Windows 10` → `Windows 11` rewrite for build ≥ 22000, and `x86_64`/`arm64` from `GetNativeSystemInfo` — verified byte-identical to Node on Windows 11 ([ADR-01077](../adr/01/ADR-01077.md))"
+            ],
+            "decl": [
+              "os#type",
+              "os#release",
+              "os#version",
+              "os#machine"
             ]
           },
           {
@@ -88,20 +116,33 @@
             "status": "implemented",
             "notes": [
               "`process.arch`; the host's byte order; `devNull` is `\\\\.\\nul` on Windows, `/dev/null` elsewhere"
+            ],
+            "decl": [
+              "os#arch",
+              "os#endianness",
+              "os#devNull"
             ]
           },
           {
             "feature": "`os.uptime()` / `os.loadavg()` / `os.availableParallelism()`",
             "status": "implemented",
             "notes": [
-              "libuv's sources: `CLOCK_BOOTTIME` (Linux) / `kern.boottime` (Darwin) / `GetTickCount64` (Windows) seconds as a double; `getloadavg` with Windows' `[0, 0, 0]`; the affinity-set CPU count on Linux, the online count elsewhere, `GetActiveProcessorCount` on Windows ([ADR-01077](../adr/ADR-01077.md))"
+              "libuv's sources: `CLOCK_BOOTTIME` (Linux) / `kern.boottime` (Darwin) / `GetTickCount64` (Windows) seconds as a double; `getloadavg` with Windows' `[0, 0, 0]`; the affinity-set CPU count on Linux, the online count elsewhere, `GetActiveProcessorCount` on Windows ([ADR-01077](../adr/01/ADR-01077.md))"
+            ],
+            "decl": [
+              "os#uptime",
+              "os#loadavg",
+              "os#availableParallelism"
             ]
           },
           {
             "feature": "`os.userInfo()`",
             "status": "implemented",
             "notes": [
-              "`{ uid, gid, username, homedir, shell }` from the effective uid's passwd entry; Windows reports `uid`/`gid` `-1`, `GetUserNameW`, `os.homedir()` and `shell: null`, as Node does ([ADR-01077](../adr/ADR-01077.md)); `{ encoding: 'buffer' }` gives Buffers and another encoding re-encodes the strings; a failed lookup throws `ERR_SYSTEM_ERROR`"
+              "`{ uid, gid, username, homedir, shell }` from the effective uid's passwd entry; Windows reports `uid`/`gid` `-1`, `GetUserNameW`, `os.homedir()` and `shell: null`, as Node does ([ADR-01077](../adr/01/ADR-01077.md)); `{ encoding: 'buffer' }` gives Buffers and another encoding re-encodes the strings; a failed lookup throws `ERR_SYSTEM_ERROR`"
+            ],
+            "decl": [
+              "os#userInfo"
             ]
           },
           {
@@ -109,6 +150,9 @@
             "status": "implemented",
             "notes": [
               "An object keyed by interface name, each an array of `{ address, netmask, family, mac, internal, cidr, scopeid }` records with `scopeid` on IPv6 entries only; `getifaddrs` (up+running interfaces, MAC from the link-layer entry) / `GetAdaptersAddresses` (operational adapters, `FriendlyName`, `OnLinkPrefixLength`); `cidr` is Node's own `getCIDR` over the netmask"
+            ],
+            "decl": [
+              "os#networkInterfaces"
             ]
           },
           {
@@ -119,6 +163,10 @@
             ],
             "caveats": [
               "The error's `errno`/`syscall` are copies of `info`'s, not accessors over it"
+            ],
+            "decl": [
+              "os#getPriority",
+              "os#setPriority"
             ]
           },
           {
@@ -126,6 +174,9 @@
             "status": "implemented",
             "notes": [
               "Null-prototype `dlopen`/`errno`/`signals`/`priority` groups, `signals` frozen, the host's values in `node_constants.cc`'s order (`WSA*` codes in `errno` on Windows)"
+            ],
+            "decl": [
+              "os#constants"
             ]
           }
         ]

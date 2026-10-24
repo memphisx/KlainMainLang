@@ -2,7 +2,6 @@ package llvm
 
 import (
 	_ "embed"
-	"fmt"
 )
 
 // A typed array's buffer and byteOffset (TDD-00243) live in viewsrc/views.c:
@@ -14,10 +13,7 @@ var viewsSource string
 // ViewsSource is the view registry's C source; under -mm=gc entries are
 // unscanned and their buffer links disappearing (KML_GC).
 func (e *Emitter) ViewsSource() string {
-	if e.isGCMode() {
-		return "#define KML_GC 1\n" + viewsSource
-	}
-	return viewsSource
+	return layoutHeader() + viewsSource
 }
 
 // UsesViews reports whether the program links views.c.
@@ -32,12 +28,13 @@ func (e *Emitter) ensureViews() {
 	e.emitGlobal(`declare void @__kml_view_register(ptr, ptr, i64, i64)
 declare void @__kml_view_derive(ptr, i64, ptr)
 declare i64 @__kml_view_offset(ptr)
+declare i64 @__kml_view_is_shared(ptr)
 declare ptr @__kml_view_buffer(ptr, i64)`)
 }
 
 // ensureBoxedViews makes a boxed typed array's `buffer` and `byteOffset`
-// readable through `any`: the ArrayBuffer host type is registered, and its
-// header word is exported for views.c to box the buffer with.
+// readable through `any`: the ArrayBuffer host types are registered, and
+// views.c boxes a buffer at its header word.
 func (e *Emitter) ensureBoxedViews() {
 	if e.usedBoxedViews {
 		return
@@ -46,12 +43,10 @@ func (e *Emitter) ensureBoxedViews() {
 	e.ensureViews()
 	e.ensureMalloc()
 	e.ensureHostBoxHooks()
-	id := e.hostID(ArrayBufferType())
-	sid := e.hostID(SharedArrayBufferType())
-	// hooks.c holds the two type ids; the hooks constructor stores them.
-	e.emitGlobal("@__kml_view_ab_header = external global i64")
-	e.emitGlobal("@__kml_view_sab_header = external global i64")
-	e.addHookInit(fmt.Sprintf("  store i64 %d, ptr @__kml_view_ab_header, align 8\n  store i64 %d, ptr @__kml_view_sab_header, align 8\n", id, sid))
+	// views.c boxes a buffer by its header word; register both types so
+	// their inspection and instanceof rows exist.
+	e.hostID(ArrayBufferType())
+	e.hostID(SharedArrayBufferType())
 	e.emitGlobal("declare i64 @__kml_view_buffer_any(ptr, i64)")
 }
 

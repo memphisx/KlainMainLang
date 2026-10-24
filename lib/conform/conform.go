@@ -182,15 +182,69 @@ func parseTSLib(tsLib string) (*decls, error) {
 	return ts, nil
 }
 
-// MemberLines lists, for each interface TypeScript's library declares that
-// the builtin declarations declare too, and each interface those extend,
-// every member name across all of TypeScript's declarations of it and its
-// `extends` names: "Name<TAB>base,base<TAB>member member". The checker
-// reports TS2339 for a member none of them has (lib.TSInterfaceHas).
-func MemberLines(tsLib string) ([]string, error) {
+// MemberLines lists, for each interface TypeScript's library or @types/node
+// (typesNode) declares that the builtin declarations declare too, and each
+// interface or class those extend, every member name across all of their
+// declarations of it and its `extends` names: "Name<TAB>base,base<TAB>member
+// member". Node's members of a name TypeScript's library declares are
+// added, its bases not. A name with a base neither declares (a type alias,
+// an intersection) is left out, as is one extending it: its members are
+// not all known. The checker reports TS2339 for a member none of them has
+// (lib.TSInterfaceHas).
+func MemberLines(tsLib, typesNode string) ([]string, error) {
 	ts, err := parseTSLib(tsLib)
 	if err != nil {
 		return nil, err
+	}
+	nodeMembers, nodeBases, err := nodeDecls(typesNode)
+	if err != nil {
+		return nil, err
+	}
+	for n, ms := range nodeMembers {
+		// A name TypeScript's library declares takes Node's members, not
+		// its bases: Node's global declarations extend a conditional alias
+		// of the library's own (`interface Blob extends _Blob {}`).
+		inLib := ts.ifaces[n] != nil
+		if !inLib {
+			ts.ifaces[n] = map[string]*member{}
+		}
+		for m := range ms {
+			if ts.ifaces[n][m] == nil {
+				ts.ifaces[n][m] = &member{kind: "property"}
+			}
+		}
+		for b := range nodeBases[n] {
+			if inLib {
+				break
+			}
+			if ts.bases[n] == nil {
+				ts.bases[n] = map[string]bool{}
+			}
+			ts.bases[n][b] = true
+		}
+	}
+	closed := map[string]int{} // 1 closed, 2 open, 3 being decided
+	var isClosed func(string) bool
+	isClosed = func(n string) bool {
+		switch closed[n] {
+		case 1, 3:
+			return true
+		case 2:
+			return false
+		}
+		if ts.ifaces[n] == nil || ts.ifaces[n][indexMember] != nil {
+			closed[n] = 2
+			return false
+		}
+		closed[n] = 3
+		for b := range ts.bases[n] {
+			if !isClosed(b) {
+				closed[n] = 2
+				return false
+			}
+		}
+		closed[n] = 1
+		return true
 	}
 	progs, err := lib.Programs()
 	if err != nil {
@@ -203,7 +257,7 @@ func MemberLines(tsLib string) ([]string, error) {
 	want := map[string]bool{}
 	var visit func(string)
 	visit = func(n string) {
-		if want[n] || ts.ifaces[n] == nil {
+		if want[n] || !isClosed(n) {
 			return
 		}
 		want[n] = true
@@ -214,13 +268,42 @@ func MemberLines(tsLib string) ([]string, error) {
 	for n := range ours.ifaces {
 		visit(n)
 	}
+	// A namespace's interface (`NodeJS.Process`) is listed by its dotted
+	// name, with the members and bases of @types/node's declarations of
+	// its last name.
+	qualified := map[string]string{}
+	for _, p := range progs {
+		for _, g := range p.NamespaceGroups {
+			for _, st := range g.Members {
+				it, ok := st.(*ast.InterfaceDeclaration)
+				if !ok {
+					continue
+				}
+				short := it.Name
+				if i := strings.LastIndex(short, "__kmlns_"); i >= 0 {
+					short = short[i+len("__kmlns_"):]
+				}
+				if nodeMembers[short] != nil && isClosed(short) {
+					qualified[g.Name+"."+short] = short
+					visit(short)
+				}
+			}
+		}
+	}
 	var names []string
 	for n := range want {
 		names = append(names, n)
 	}
+	for q := range qualified {
+		names = append(names, q)
+	}
 	sort.Strings(names)
 	var out []string
-	for _, n := range names {
+	for _, line := range names {
+		n := line
+		if short, ok := qualified[line]; ok {
+			n = short
+		}
 		var bs, ms []string
 		for b := range ts.bases[n] {
 			if ts.ifaces[b] != nil {
@@ -234,7 +317,7 @@ func MemberLines(tsLib string) ([]string, error) {
 		}
 		sort.Strings(bs)
 		sort.Strings(ms)
-		out = append(out, n+"\t"+strings.Join(bs, ",")+"\t"+strings.Join(ms, " "))
+		out = append(out, line+"\t"+strings.Join(bs, ",")+"\t"+strings.Join(ms, " "))
 	}
 	return out, nil
 }

@@ -23,6 +23,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -106,15 +107,15 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 	if !ok {
 		return nil
 	}
-	if sym.Boxed || sym.NullableBoxed {
+	if sym.Boxed || isNullableScalar(sym.Ty) {
 		return reject("its storage is boxed")
 	}
-	if sym.Ty.IsClass {
+	if sym.Ty.IsClass() {
 		// A class instance's methods may retain `this`; receiver-position
 		// calls are only escape-safe for builtin containers.
 		return reject("class instances are not supported (a method could retain `this`)")
 	}
-	if sym.Ty.IsDynamic || sym.Ty.IsDynamicObject {
+	if sym.Ty.IsDynamic() || sym.Ty.IsDynamicObject() {
 		return reject("dynamic objects have no free routine")
 	}
 	if !symbolTypeFreeable(sym.Ty) {
@@ -137,6 +138,12 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 		cp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", cp, cur))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cp, sym.Ptr))
+	}
+	// The slot starts null in the entry block: a path that skips the
+	// declaration (a throw before it, caught later) reaches the free with
+	// nothing to free.
+	if strings.Contains(e.allocas.String(), "  "+sym.Ptr+" = alloca ptr") {
+		e.emitAlloca(fmt.Sprintf("store ptr null, ptr %s, align 8", sym.Ptr))
 	}
 	e.pendingFrees = append(e.pendingFrees, pendingFree{
 		scopeDepth: len(e.scopes),
@@ -181,7 +188,7 @@ func (e *Emitter) registerOwnedParam(fd *ast.FunctionDeclaration, prm ast.Param)
 	if !ok {
 		return nil
 	}
-	if sym.Boxed || sym.NullableBoxed || sym.Ty.IsClass || sym.Ty.IsDynamic || sym.Ty.IsDynamicObject || !symbolTypeFreeable(sym.Ty) {
+	if sym.Boxed || isNullableScalar(sym.Ty) || sym.Ty.IsClass() || sym.Ty.IsDynamic() || sym.Ty.IsDynamicObject() || !symbolTypeFreeable(sym.Ty) {
 		return fmt.Errorf("%d:%d: @owned parameter '%s' of '%s': this type has no compiler-insertable free", pos.Line, pos.Col, prm.Name, fd.Name)
 	}
 	var lastUse ast.Statement
@@ -270,7 +277,7 @@ func (e *Emitter) autoFreeOwningInit(init ast.Expression, explicit bool) bool {
 				// The strict string test: a Blob/URL/TypedArray handle is a `ptr`
 				// too, and its `slice` is not a fresh string (a Blob's slice
 				// was freed as one — `free(): invalid pointer` under -mm=auto).
-				if rt.IsArray || isForOfStringTy(rt.withoutNullable()) || rt.IsMap || rt.IsSet {
+				if rt.IsArray() || isForOfStringTy(rt.withoutNullable()) || rt.IsMap() || rt.IsSet() {
 					return true
 				}
 			}

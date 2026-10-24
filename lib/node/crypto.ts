@@ -35,11 +35,11 @@ function received(value: any): string {
 }
 
 function invalidArgType(name: string, expected: string, value: any): NodeTypeError {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
 }
 
 function outOfRange(name: string, range: string, value: any): NodeRangeError {
-    return new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + String(value));
+    return NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + String(value));
 }
 
 function validateString(value: any, name: string): void {
@@ -99,7 +99,7 @@ class OpenSSLError extends Error {
 function keygenError(kind: number): Error {
     const text = __kml_native.cryptoLastError();
     if (kind === 1 && text.indexOf('unknown object name') >= 0) {
-        return new NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
+        return NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
     }
     return new Error(text === '' ? 'Key generation failed' : text);
 }
@@ -159,18 +159,18 @@ export class Hash extends Transform {
     }
 
     copy(options?: HashOptions): Hash {
-        if (this._kmlFinalized) throw new NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
+        if (this._kmlFinalized) throw NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
         return new Hash(this, options);
     }
 
     update(data: BinaryLike, inputEncoding?: Encoding): Hash;
     update(data: any, inputEncoding?: any): Hash {
-        if (this._kmlFinalized) throw new NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
+        if (this._kmlFinalized) throw NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
         if (typeof data !== 'string' && !isView(data)) {
             throw invalidArgType('data', 'of type string or an instance of Buffer, TypedArray, or DataView', data);
         }
         if (__kml_native.cryptoHashUpdate(this._kmlHandle, toBytes(data, 'data', inputEncoding)) === 0) {
-            throw new NodeError('ERR_CRYPTO_HASH_UPDATE_FAILED', 'Hash update failed');
+            throw NodeError('ERR_CRYPTO_HASH_UPDATE_FAILED', 'Hash update failed');
         }
         return this;
     }
@@ -178,7 +178,7 @@ export class Hash extends Transform {
     digest(): Buffer;
     digest(encoding: BinaryToTextEncoding): string;
     digest(encoding?: any): any {
-        if (this._kmlFinalized) throw new NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
+        if (this._kmlFinalized) throw NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
         this._kmlFinalized = true;
         const out = Buffer.alloc(__kml_native.cryptoHashSize(this._kmlHandle));
         const n = __kml_native.cryptoHashDigest(this._kmlHandle, out);
@@ -205,17 +205,17 @@ export class Hmac extends Transform {
         validateString(hmac, 'hmac');
         const k = toBytes(key, 'key');
         this._kmlHandle = __kml_native.cryptoHmacNew(hmac, k);
-        if (this._kmlHandle < 0) throw new NodeTypeError('ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest: ' + hmac);
+        if (this._kmlHandle < 0) throw NodeTypeError('ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest: ' + hmac);
     }
 
     update(data: BinaryLike, inputEncoding?: Encoding): Hmac;
     update(data: any, inputEncoding?: any): Hmac {
-        if (this._kmlFinalized) throw new NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
+        if (this._kmlFinalized) throw NodeError('ERR_CRYPTO_HASH_FINALIZED', 'Digest already called');
         if (typeof data !== 'string' && !isView(data)) {
             throw invalidArgType('data', 'of type string or an instance of Buffer, TypedArray, or DataView', data);
         }
         if (__kml_native.cryptoHashUpdate(this._kmlHandle, toBytes(data, 'data', inputEncoding)) === 0) {
-            throw new NodeError('ERR_CRYPTO_HASH_UPDATE_FAILED', 'Hash update failed');
+            throw NodeError('ERR_CRYPTO_HASH_UPDATE_FAILED', 'Hash update failed');
         }
         return this;
     }
@@ -319,8 +319,11 @@ export function randomFillSync<T extends NodeJS.ArrayBufferView>(buffer: T, offs
 export function randomFillSync(buffer: any, offset?: number, size?: number): any {
     if (!isView(buffer)) throw invalidArgType('buf', 'an instance of ArrayBuffer or ArrayBufferView', buffer);
     const bytes = viewBytes(buffer);
-    const off = offset ?? 0;
-    const len = size ?? bytes.byteLength - off;
+    // offset and size count elements of a typed array (Node's assertOffset,
+    // assertSize).
+    const elementSize: number = (buffer as any).BYTES_PER_ELEMENT || 1;
+    const off = (offset ?? 0) * elementSize;
+    const len = size === undefined ? bytes.byteLength - off : size * elementSize;
     if (off < 0 || off > bytes.byteLength) throw outOfRange('offset', '>= 0 && <= ' + bytes.byteLength, off);
     if (len < 0 || off + len > bytes.byteLength) throw outOfRange('size + offset', '<= ' + bytes.byteLength, len + off);
     __kml_native.cryptoRandomFill(bytes, off, len);
@@ -334,9 +337,10 @@ export function randomFill<T extends NodeJS.ArrayBufferView>(buffer: T, offset: 
 export function randomFill(buffer: any, ...rest: any[]): void {
     const callback: any = rest[rest.length - 1];
     validateFunction(callback, 'callback');
-    const offset: number = rest.length > 1 ? rest[0] : 0;
     const bytes = viewBytes(buffer);
-    const size: number = rest.length > 2 ? rest[1] : bytes.byteLength - offset;
+    const elementSize: number = (buffer as any).BYTES_PER_ELEMENT || 1;
+    const offset: number = (rest.length > 1 ? rest[0] : 0) * elementSize;
+    const size: number = rest.length > 2 ? rest[1] * elementSize : bytes.byteLength - offset;
     __kml_native.cryptoRandomFillAsync(bytes, offset, size, (status: number, unused: number) => {
         callback(status === 0 ? null : opensslError('random generation failed'), buffer);
     });
@@ -362,11 +366,11 @@ export function randomInt(a: any, b?: any, c?: any): any {
     if (!Number.isSafeInteger(min)) throw invalidArgType('min', 'a safe integer', min);
     if (!Number.isSafeInteger(max)) throw invalidArgType('max', 'a safe integer', max);
     if (max <= min) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "max" is out of range. It must be greater than the value of "min" (' + min + '). Received ' + max);
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "max" is out of range. It must be greater than the value of "min" (' + min + '). Received ' + max);
     }
     const range = max - min;
     if (range > 281474976710655) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "max - min" is out of range. It must be <= 281474976710655. Received ' + range);
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "max - min" is out of range. It must be <= 281474976710655. Received ' + range);
     }
     const randLimit = 281474976710656 - (281474976710656 % range);
     const draw = (): number => {
@@ -397,7 +401,7 @@ export function timingSafeEqual(a: NodeJS.ArrayBufferView, b: NodeJS.ArrayBuffer
     const x = viewBytes(a);
     const y = viewBytes(b);
     if (x.byteLength !== y.byteLength) {
-        throw new NodeRangeError('ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH', 'Input buffers must have the same byte length');
+        throw NodeRangeError('ERR_CRYPTO_TIMING_SAFE_EQUAL_LENGTH', 'Input buffers must have the same byte length');
     }
     return __kml_native.cryptoTimingEqual(x, y) === 1;
 }
@@ -410,7 +414,7 @@ const KDF_HKDF = 2;
 const empty = Buffer.alloc(0);
 
 function kdfStatusError(status: number, digest: string): Error {
-    if (status === 2) return new NodeTypeError('ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest: ' + digest);
+    if (status === 2) return NodeTypeError('ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest: ' + digest);
     return opensslError('Key derivation failed');
 }
 
@@ -459,7 +463,7 @@ function scryptParams(options: any): [number, number, number, number] {
     const p = o.p ?? o.parallelization ?? 1;
     const maxmem = o.maxmem ?? 32 * 1024 * 1024;
     if (N < 2 || (N & (N - 1)) !== 0) {
-        throw new NodeRangeError('ERR_CRYPTO_INVALID_SCRYPT_PARAMS', 'Invalid scrypt params: N must be a power of 2 greater than 1');
+        throw NodeRangeError('ERR_CRYPTO_INVALID_SCRYPT_PARAMS', 'Invalid scrypt params: N must be a power of 2 greater than 1');
     }
     return [N, r, p, maxmem];
 }
@@ -471,7 +475,7 @@ export function scryptSync(password: BinaryLike, salt: BinaryLike, keylen: numbe
     const [N, r, p, maxmem] = scryptParams(options);
     const out = Buffer.alloc(keylen);
     const st = __kml_native.cryptoKdf(KDF_SCRYPT, pw, s, empty, N, r, p, maxmem, '', out);
-    if (st !== 0) throw new NodeRangeError('ERR_CRYPTO_INVALID_SCRYPT_PARAMS', 'Invalid scrypt params: ' + __kml_native.cryptoLastError());
+    if (st !== 0) throw NodeRangeError('ERR_CRYPTO_INVALID_SCRYPT_PARAMS', 'Invalid scrypt params: ' + __kml_native.cryptoLastError());
     return out;
 }
 
@@ -489,7 +493,7 @@ export function scrypt(password: any, salt: any, keylen: any, options: any, call
     const [N, r, p, maxmem] = scryptParams(options);
     const out = Buffer.alloc(keylen);
     __kml_native.cryptoKdfAsync(KDF_SCRYPT, pw, s, empty, N, r, p, maxmem, '', out, (status: number, unused: number) => {
-        if (status !== 0) callback(new NodeRangeError('ERR_CRYPTO_INVALID_SCRYPT_PARAMS', 'Invalid scrypt params'), undefined);
+        if (status !== 0) callback(NodeRangeError('ERR_CRYPTO_INVALID_SCRYPT_PARAMS', 'Invalid scrypt params'), undefined);
         else callback(null, out);
     });
 }
@@ -497,10 +501,10 @@ export function scrypt(password: any, salt: any, keylen: any, options: any, call
 // lib/internal/crypto/hkdf.js: at most 255 blocks of the digest.
 function validateHkdfLength(digest: string, keylen: number): void {
     const h = __kml_native.cryptoHashNew(digest.toLowerCase(), 0);
-    if (h < 0) throw new NodeTypeError('ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest: ' + digest);
+    if (h < 0) throw NodeTypeError('ERR_CRYPTO_INVALID_DIGEST', 'Invalid digest: ' + digest);
     const size = __kml_native.cryptoHashSize(h);
     __kml_native.cryptoFree(h);
-    if (keylen > size * 255) throw new NodeRangeError('ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
+    if (keylen > size * 255) throw NodeRangeError('ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
 }
 
 export function hkdfSync(digest: string, ikm: BinaryLike, salt: BinaryLike, info: BinaryLike, keylen: number): ArrayBuffer {
@@ -565,9 +569,9 @@ class CipherBase extends Transform {
         const k = toBytes(key, 'key');
         const v = iv === null ? empty : toBytes(iv, 'iv');
         this._kmlHandle = __kml_native.cryptoCipherNew(cipher, k, v, encrypt ? 1 : 0, options?.authTagLength ?? 0);
-        if (this._kmlHandle === -1) throw new NodeError('ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
-        if (this._kmlHandle === -2) throw new NodeRangeError('ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
-        if (this._kmlHandle === -3) throw new NodeTypeError('ERR_CRYPTO_INVALID_IV', 'Invalid initialization vector');
+        if (this._kmlHandle === -1) throw NodeError('ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
+        if (this._kmlHandle === -2) throw NodeRangeError('ERR_CRYPTO_INVALID_KEYLEN', 'Invalid key length');
+        if (this._kmlHandle === -3) throw NodeTypeError('ERR_CRYPTO_INVALID_IV', 'Invalid initialization vector');
     }
 
     private out(bytes: Buffer, n: number, outputEncoding: any): any {
@@ -584,7 +588,7 @@ class CipherBase extends Transform {
     update(data: NodeJS.ArrayBufferView, inputEncoding: undefined, outputEncoding: Encoding): string;
     update(data: string, inputEncoding: Encoding | undefined, outputEncoding: Encoding): string;
     update(data: any, inputEncoding?: any, outputEncoding?: any): any {
-        if (this._kmlDone) throw new NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation update');
+        if (this._kmlDone) throw NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation update');
         if (typeof data !== 'string' && !isView(data)) {
             throw invalidArgType('data', 'of type string or an instance of Buffer, TypedArray, or DataView', data);
         }
@@ -603,7 +607,7 @@ class CipherBase extends Transform {
     final(): Buffer;
     final(outputEncoding: BufferEncoding): string;
     final(outputEncoding?: any): any {
-        if (this._kmlDone) throw new NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation final');
+        if (this._kmlDone) throw NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation final');
         this._kmlDone = true;
         const outBytes = Buffer.alloc(Math.max(__kml_native.cryptoCipherBlockSize(this._kmlHandle), 16));
         const n = __kml_native.cryptoCipherFinal(this._kmlHandle, outBytes);
@@ -623,7 +627,7 @@ class CipherBase extends Transform {
 
     setAAD(buffer: NodeJS.ArrayBufferView, options?: { plaintextLength: number }): this {
         if (!this._kmlAead || __kml_native.cryptoCipherSetAAD(this._kmlHandle, viewBytes(buffer)) === 0) {
-            throw new NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAAD');
+            throw NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAAD');
         }
         return this;
     }
@@ -650,7 +654,7 @@ export class Cipheriv extends CipherBase {
     }
 
     getAuthTag(): Buffer {
-        if (this._kmlTag === null) throw new NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation getAuthTag');
+        if (this._kmlTag === null) throw NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation getAuthTag');
         return this._kmlTag;
     }
 }
@@ -669,7 +673,7 @@ export class Decipheriv extends CipherBase {
     setAuthTag(buffer: NodeJS.ArrayBufferView): this {
         const tag = viewBytes(buffer);
         if (!this._kmlAead || __kml_native.cryptoCipherSetTag(this._kmlHandle, tag) === 0) {
-            throw new NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAuthTag');
+            throw NodeError('ERR_CRYPTO_INVALID_STATE', 'Invalid state for operation setAuthTag');
         }
         if (tag.byteLength < 16 && this._kmlAuthTagLength === 0 && !shortGcmTagWarned &&
             this._kmlAlgorithm.indexOf('gcm') >= 0) {
@@ -729,11 +733,11 @@ export interface JwkKeyExportOptions {
 function invalidArgValue(name: string, value: any, reason?: string): NodeTypeError {
     const shown = typeof value === 'string' ? "'" + value + "'" : String(value);
     const kind = name.indexOf('.') >= 0 ? 'property' : 'argument';
-    return new NodeTypeError('ERR_INVALID_ARG_VALUE', 'The ' + kind + " '" + name + "' " + (reason ?? 'is invalid') + '. Received ' + shown);
+    return NodeTypeError('ERR_INVALID_ARG_VALUE', 'The ' + kind + " '" + name + "' " + (reason ?? 'is invalid') + '. Received ' + shown);
 }
 
 function incompatibleKeyOptions(encoding: string, message: string): NodeError {
-    return new NodeError('ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS', 'The selected key encoding ' + encoding + ' ' + message + '.');
+    return NodeError('ERR_CRYPTO_INCOMPATIBLE_KEY_OPTIONS', 'The selected key encoding ' + encoding + ' ' + message + '.');
 }
 
 function validateObject(value: any, name: string): void {
@@ -747,7 +751,9 @@ export class KeyObject {
     #type: KeyObjectType;
     #handle: KeyObjectHandle;
 
-    constructor(type: KeyObjectType, handle: any) {
+    // TypeScript's declaration makes the constructor private; protected
+    // keeps it to this module's subclasses.
+    protected constructor(type: KeyObjectType, handle: any) {
         if (type !== 'secret' && type !== 'public' && type !== 'private') throw invalidArgValue('type', type);
         if (!(handle instanceof KeyObjectHandle)) throw invalidArgType('handle', 'of type object', handle);
         this.#type = type;
@@ -802,7 +808,7 @@ export class KeyObject {
     export(options?: KeyExportOptions<'der'>): Buffer;
     export(options?: JwkKeyExportOptions): JsonWebKey;
     export(options?: any): any {
-        throw new NodeError('ERR_METHOD_NOT_IMPLEMENTED', 'The export() method is not implemented');
+        throw NodeError('ERR_METHOD_NOT_IMPLEMENTED', 'The export() method is not implemented');
     }
 }
 
@@ -878,8 +884,8 @@ class AsymmetricKeyObject extends KeyObject {
     _kmlExport(options: any, isPrivate: boolean): any {
         if (options !== undefined && options !== null && typeof options === 'object' && options.format === 'jwk') {
             const text = __kml_native.cryptoKeyJwk(this._kmlHandle().pem, isPrivate ? 1 : 0);
-            if (text === '!curve') throw new NodeError('ERR_CRYPTO_JWK_UNSUPPORTED_CURVE', 'Unsupported JWK EC curve: ' + this.asymmetricKeyDetails!.namedCurve + '.');
-            if (text === '!type' || text === '') throw new NodeError('ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE', 'Unsupported JWK Key Type.');
+            if (text === '!curve') throw NodeError('ERR_CRYPTO_JWK_UNSUPPORTED_CURVE', 'Unsupported JWK EC curve: ' + this.asymmetricKeyDetails!.namedCurve + '.');
+            if (text === '!type' || text === '') throw NodeError('ERR_CRYPTO_JWK_UNSUPPORTED_KEY_TYPE', 'Unsupported JWK Key Type.');
             const jwk: any = {};
             for (const member of text.split('\t')) {
                 const at = member.indexOf('=');
@@ -914,7 +920,7 @@ class AsymmetricKeyObject extends KeyObject {
             n = __kml_native.cryptoKeyExport(this._kmlHandle().pem, isPrivate ? 1 : 0, kFormats[format], kEncodings[type], cipher, pass, hasPass, out);
         }
         if (n < 0) {
-            if (cipher !== '' && getCiphers().indexOf(cipher.toLowerCase()) < 0) throw new NodeTypeError('ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
+            if (cipher !== '' && getCiphers().indexOf(cipher.toLowerCase()) < 0) throw NodeTypeError('ERR_CRYPTO_UNKNOWN_CIPHER', 'Unknown cipher');
             throw opensslError('Failed to encode key');
         }
         const bytes = out.subarray(0, n);
@@ -975,22 +981,22 @@ function pemFromJwk(jwk: any, wantPrivate: boolean): string {
         str(jwk.e, 'e');
         if (wantPrivate) for (const m of ['d', 'p', 'q', 'dp', 'dq', 'qi']) str(jwk[m], m);
         pem = __kml_native.cryptoKeyFromJwk(0, '', jwk.n, jwk.e, opt(jwk.d), opt(jwk.p), opt(jwk.q), opt(jwk.dp), opt(jwk.dq), opt(jwk.qi), '', '', wantPrivate ? 1 : 0);
-        if (pem === '') throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK RSA key');
+        if (pem === '') throw NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK RSA key');
     } else if (kty === 'EC') {
         if (['P-256', 'secp256k1', 'P-384', 'P-521'].indexOf(jwk.crv) < 0) throw invalidArgValue('key.crv', jwk.crv, "must be one of: 'P-256', 'secp256k1', 'P-384', 'P-521'");
         str(jwk.x, 'x');
         str(jwk.y, 'y');
         if (wantPrivate) str(jwk.d, 'd');
         pem = __kml_native.cryptoKeyFromJwk(1, jwk.crv, '', '', opt(jwk.d), '', '', '', '', '', jwk.x, jwk.y, wantPrivate ? 1 : 0);
-        if (pem === '') throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK EC key');
+        if (pem === '') throw NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK EC key');
     } else if (kty === 'OKP') {
         if (['Ed25519', 'Ed448', 'X25519', 'X448'].indexOf(jwk.crv) < 0) throw invalidArgValue('key.crv', jwk.crv, "must be one of: 'Ed25519', 'Ed448', 'X25519', 'X448'");
         str(jwk.x, 'x');
         if (wantPrivate) str(jwk.d, 'd');
         pem = __kml_native.cryptoKeyFromJwk(2, jwk.crv, '', '', opt(jwk.d), '', '', '', '', '', jwk.x, '', wantPrivate ? 1 : 0);
-        if (pem === '') throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK OKP key');
+        if (pem === '') throw NodeTypeError('ERR_CRYPTO_INVALID_JWK', 'Invalid JWK OKP key');
     } else {
-        throw new NodeTypeError('ERR_CRYPTO_INVALID_JWK', String(kty) + ' is not a supported JWK key type');
+        throw NodeTypeError('ERR_CRYPTO_INVALID_JWK', String(kty) + ' is not a supported JWK key type');
     }
     return pem;
 }
@@ -1070,7 +1076,7 @@ export function createPrivateKey(key: PrivateKeyInput | string | Buffer | JsonWe
 export function createPublicKey(key: PublicKeyInput | string | Buffer | KeyObject | JsonWebKeyInput): KeyObject {
     if (key instanceof KeyObject) {
         const k = key as KeyObject;
-        if (k.type !== 'private') throw new NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type ' + k.type + ', expected private.');
+        if (k.type !== 'private') throw NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type ' + k.type + ', expected private.');
         return publicKeyFromPem(parsePem(Buffer.from(keyHandle(k).pem), 0, 0, false, empty, 0));
     }
     const k: any = key;
@@ -1086,8 +1092,8 @@ function signKey(key: any, wantPrivate: boolean): [string, Uint8Array, number] {
     const k = key !== null && typeof key === 'object' && !(key instanceof KeyObject) && !isView(key) && key.key !== undefined ? key.key : key;
     if (k instanceof KeyObject) {
         const ko = k as KeyObject;
-        if (wantPrivate && ko.type !== 'private') throw new NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type ' + ko.type + ', expected private.');
-        if (ko.type === 'secret') throw new NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type secret, expected private.');
+        if (wantPrivate && ko.type !== 'private') throw NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type ' + ko.type + ', expected private.');
+        if (ko.type === 'secret') throw NodeTypeError('ERR_CRYPTO_INVALID_KEY_OBJECT_TYPE', 'Invalid key object type secret, expected private.');
         return [keyHandle(ko).pem, empty, 0];
     }
     if (typeof k === 'string') {
@@ -1263,7 +1269,7 @@ function rsaCrypt(op: number, defaultPadding: number, options: any, buffer: any)
         out = Buffer.alloc(-n - 2);
         n = __kml_native.cryptoPkeyCrypt(op, pem, pass, hasPass, padding, oaepHash, label, data, out);
     }
-    if (n === -3) throw new NodeError('ERR_OSSL_EVP_INVALID_DIGEST', 'Invalid digest used');
+    if (n === -3) throw NodeError('ERR_OSSL_EVP_INVALID_DIGEST', 'Invalid digest used');
     if (n < 0) throw opensslError('RSA operation failed');
     return Buffer.from(out.subarray(0, n));
 }
@@ -1296,7 +1302,7 @@ function ecdhFormat(format: any): number {
     if (format) {
         if (format === 'compressed') return constants.POINT_CONVERSION_COMPRESSED;
         if (format === 'hybrid') return constants.POINT_CONVERSION_HYBRID;
-        if (format !== 'uncompressed') throw new NodeTypeError('ERR_CRYPTO_ECDH_INVALID_FORMAT', 'Invalid ECDH format: ' + format);
+        if (format !== 'uncompressed') throw NodeTypeError('ERR_CRYPTO_ECDH_INVALID_FORMAT', 'Invalid ECDH format: ' + format);
     }
     return constants.POINT_CONVERSION_UNCOMPRESSED;
 }
@@ -1305,10 +1311,10 @@ function ecdhFormat(format: any): number {
 function ecdhOp(op: number, curve: string, priv: Uint8Array, pub: Uint8Array, format: number): Buffer {
     const out = Buffer.alloc(200);
     const n = __kml_native.cryptoEcdh(op, curve, priv, pub, format, out);
-    if (n === -8) throw new NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
-    if (n === -6) throw new NodeError('ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY', 'Public key is not valid for specified curve');
-    if (n === -7) throw new NodeRangeError('ERR_CRYPTO_INVALID_KEYTYPE', 'Private key is not valid for specified curve.');
-    if (n < 0) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'ECDH operation failed');
+    if (n === -8) throw NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
+    if (n === -6) throw NodeError('ERR_CRYPTO_ECDH_INVALID_PUBLIC_KEY', 'Public key is not valid for specified curve');
+    if (n === -7) throw NodeRangeError('ERR_CRYPTO_INVALID_KEYTYPE', 'Private key is not valid for specified curve.');
+    if (n < 0) throw NodeError('ERR_CRYPTO_OPERATION_FAILED', 'ECDH operation failed');
     return Buffer.from(out.subarray(0, n));
 }
 
@@ -1320,7 +1326,7 @@ export class ECDH {
     constructor(curve: string) {
         validateString(curve, 'curve');
         if (__kml_native.cryptoEcdh(4, curve, Buffer.alloc(1, 1), empty, 0, Buffer.alloc(0)) === -8) {
-            throw new NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
+            throw NodeTypeError('ERR_CRYPTO_INVALID_CURVE', 'Invalid EC curve name');
         }
         this.#curve = curve;
     }
@@ -1347,7 +1353,7 @@ export class ECDH {
     computeSecret(otherPublicKey: string, inputEncoding: BinaryToTextEncoding, outputEncoding: BinaryToTextEncoding): string;
     computeSecret(otherPublicKey: any, inputEncoding?: any, outputEncoding?: any): any {
         const key = toBytes(otherPublicKey, 'key', inputEncoding);
-        if (this.#privateKey === null) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH private key');
+        if (this.#privateKey === null) throw NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH private key');
         const secret = ecdhOp(2, this.#curve, this.#privateKey as Buffer, key, 0);
         return typeof outputEncoding === 'string' && outputEncoding !== 'buffer' ? secret.toString(outputEncoding as BufferEncoding) : secret;
     }
@@ -1355,7 +1361,7 @@ export class ECDH {
     getPrivateKey(): Buffer;
     getPrivateKey(encoding: BinaryToTextEncoding): string;
     getPrivateKey(encoding?: any): any {
-        if (this.#privateKey === null) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH private key');
+        if (this.#privateKey === null) throw NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH private key');
         // The key as a big-endian integer without leading zero bytes, as
         // Node's BN_bn2bin gives it: a key below 2^248 is 31 bytes or fewer.
         const k = this.#privateKey as Buffer;
@@ -1368,7 +1374,7 @@ export class ECDH {
     getPublicKey(encoding: BinaryToTextEncoding, format?: ECDHKeyFormat): string;
     getPublicKey(encoding?: any, format?: any): any {
         const f = ecdhFormat(format);
-        if (this.#publicKey === null) throw new NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH public key');
+        if (this.#publicKey === null) throw NodeError('ERR_CRYPTO_OPERATION_FAILED', 'Failed to get ECDH public key');
         return encodeOut(ecdhOp(3, this.#curve, empty, this.#publicKey as Buffer, f), encoding);
     }
 
@@ -1406,7 +1412,7 @@ export function diffieHellman(options: any): Buffer {
     if (priv instanceof KeyObject && pub instanceof KeyObject) {
         const a = (priv as KeyObject).asymmetricKeyType;
         const b = (pub as KeyObject).asymmetricKeyType;
-        if (a !== b) throw new NodeError('ERR_CRYPTO_INCOMPATIBLE_KEY', 'Incompatible key types for Diffie-Hellman: ' + a + ' and ' + b);
+        if (a !== b) throw NodeError('ERR_CRYPTO_INCOMPATIBLE_KEY', 'Incompatible key types for Diffie-Hellman: ' + a + ' and ' + b);
     }
     let out = Buffer.alloc(256);
     let n = __kml_native.cryptoDeriveSecret(privPem, pubPem, out);
@@ -1485,7 +1491,7 @@ function keygenArgs(type: any, options: any): [number, number, number, string] {
     validateString(type, 'type');
     const kind = kKeygenKinds[type as string];
     if (kind === undefined) {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'type' must be a supported key type. Received '" + type + "'");
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'type' must be a supported key type. Received '" + type + "'");
     }
     const o: any = options ?? {};
     if (options !== undefined) validateObject(options, 'options');

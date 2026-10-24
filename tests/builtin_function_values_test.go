@@ -16,9 +16,9 @@ console.log(fl(2.7), fl.name, fl.length, r(16), r.name, r === Math.sqrt);
 console.log(parseInt.name, parseInt.length, Math.max.length, String.fromCharCode.length, typeof isFinite);
 const mx = Math.max;
 console.log(mx(1, 5, 3), [1.2, -3.7].map(Math.abs), [NaN, 1].filter(Number.isNaN));
-console.log([65, 66].map(String.fromCharCode).map(s => s.length), [-2].map(Math.hypot));
+console.log([65, 66].map(String.fromCharCode as (...a: any[]) => string).map(s => s.length), [-2].map(Math.hypot as (...a: any[]) => number));
 console.log(['a b', 'é'].map(encodeURIComponent), [btoa('x')].map(atob), encodeURIComponent.name);
-console.log(globalThis.Math.max(3, 7), [1.5].map(globalThis.parseFloat), [4].map(globalThis.Math.sqrt), globalThis.Number.isNaN(NaN));
+console.log(globalThis.Math.max(3, 7), ['1.5'].map(globalThis.parseFloat), [4].map(globalThis.Math.sqrt), globalThis.Number.isNaN(NaN));
 console.log(Math.max.apply(null, [1, 9, 3]), Math.floor.call(null, 2.5), parseInt.bind(null)('10'), Math.pow.bind(null, 2)(10));
 function g(a: any, b: any) { return String(a) + String(b); }
 const gb = g.bind(null, [1, 2]);

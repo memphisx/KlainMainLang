@@ -300,7 +300,7 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 				}
 				es[i] = e
 			}
-			return c.in.tuple(es)
+			return c.in.tupleLabelled(es, src.Opt, src.Labels)
 		case src.Flags&Object != 0 && (src.Kind == Anonymous || src.Kind == Interface || src.Kind == Instance):
 			var props []*Property
 			for _, p := range src.Props {
@@ -408,7 +408,9 @@ func (c *Checker) typeParamBinder(name string, scope *binder.Scope) func(*Type) 
 }
 
 func (c *Checker) conditionalOnce(n *ast.ConditionalType, scope *binder.Scope, check *Type) *Type {
-	if c.generic(check) {
+	// A generic signature's own type parameters (`typeof setTimeout`'s
+	// `<TArgs>`) are bound by it, not free: the check is decided.
+	if c.generic(check) && hasFreeTypeParam(check, map[*Type]bool{}, nil) {
 		return c.deferredType(n, scope)
 	}
 	var names []string
@@ -614,4 +616,37 @@ func disjointKinds(s, t *Type) bool {
 		}
 	}
 	return true
+}
+
+// deferredBranches is a deferred conditional type's true and false branch
+// types, evaluated with its bindings; nil for another deferred type. A
+// branch that binds `infer` names is left out.
+func (c *Checker) deferredBranches(t *Type) []*Type {
+	n, ok := t.deferNode.(*ast.ConditionalType)
+	if !ok {
+		return nil
+	}
+	env := map[string]*Type{}
+	for k, v := range t.deferEnv {
+		env[k] = v
+	}
+	subst := map[*Type]*Type{}
+	for k, v := range t.deferSubst {
+		subst[k] = v
+	}
+	hasInfer := false
+	collectInfers(n.ExtendsType, func(*ast.InferType) { hasInfer = true })
+	savedEnv, savedSubsts := c.env, c.substs
+	c.env, c.substs = []map[string]*Type{env}, []map[*Type]*Type{subst}
+	defer func() { c.env, c.substs = savedEnv, savedSubsts }()
+	var out []*Type
+	for i, b := range []ast.TypeNode{n.TrueType, n.FalseType} {
+		if i == 0 && hasInfer {
+			continue
+		}
+		if bt := c.typeFromNode(b, t.deferScope); !c.Unanswered(bt) {
+			out = append(out, bt)
+		}
+	}
+	return out
 }

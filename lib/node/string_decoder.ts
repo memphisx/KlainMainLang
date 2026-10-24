@@ -48,7 +48,7 @@ export class StringDecoder {
     constructor(encoding?: BufferEncoding | string) {
         const enc = normalizeEncoding(encoding);
         if (enc === undefined) {
-            throw new NodeTypeError('ERR_UNKNOWN_ENCODING', 'Unknown encoding: ' + String(encoding));
+            throw NodeTypeError('ERR_UNKNOWN_ENCODING', 'Unknown encoding: ' + String(encoding));
         }
         this.encoding = enc;
         this.lastChar = Buffer.alloc(4);

@@ -36,7 +36,6 @@ int kfd_kind_of(int fd);
 void kfd_set_inherited(int fd);
 int kfd_register(HANDLE h, int kind);
 int kfd_adopt_socket(HANDLE s, int fd);
-void __kml_win_ipc_set_peer(int fd, int pid);
 int kfd_listeners(int *out, int max);
 void kfd_rr_add_worker(int lfd, unsigned long pid, int chan);
 void kfd_rr_adopt(int lfd, int chan, int nonblock);
@@ -100,7 +99,7 @@ static wchar_t *quote_arg(wchar_t *out, const wchar_t *arg) {
 static wchar_t *wide_alloc(const char *s) {
 	int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
 	if (n <= 0) return NULL;
-	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t)); /* scratch */
 	if (w) MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n);
 	return w;
 }
@@ -162,7 +161,7 @@ static int is_self_spawn(const char *file, char **argv) {
 	    GetFullPathNameW(selfw, 32768, fullself, NULL) &&
 	    GetFullPathNameW(wc, 32768, fullcand, NULL))
 		match = (_wcsicmp(fullself, fullcand) == 0);
-	free(wc);
+	free(wc); /* scratch */
 	return match;
 }
 
@@ -175,14 +174,14 @@ static int is_self_word(const char *word) {
 	if (!w) return 0;
 	static wchar_t found[32768];
 	DWORD n = SearchPathW(NULL, w, L".exe", 32768, found, NULL);
-	free(w);
+	free(w); /* scratch */
 	if (n == 0 || n >= 32768) return 0;
 	int len = WideCharToMultiByte(CP_UTF8, 0, found, -1, NULL, 0, NULL, NULL);
-	char *u = len > 0 ? (char *)malloc((size_t)len) : NULL;
+	char *u = len > 0 ? (char *)malloc((size_t)len) : NULL; /* scratch */
 	if (!u) return 0;
 	WideCharToMultiByte(CP_UTF8, 0, found, -1, u, len, NULL, NULL);
 	int r = is_self_spawn(u, NULL);
-	free(u);
+	free(u); /* scratch */
 	return r;
 }
 
@@ -291,9 +290,9 @@ static wchar_t *build_env_block(char **custom, const wchar_t **markers, int nmar
 	int nparent = 0;
 	if (!custom && parent) for (wchar_t *q = parent; *q; q += wcslen(q) + 1) nparent++;
 	int cap = ncustom + nparent + nmarkers + NREQ + 1;
-	wchar_t **ent = (wchar_t **)calloc((size_t)cap, sizeof *ent);
-	char *owned = (char *)calloc((size_t)cap, 1); // entries this function malloc'd
-	if (!ent || !owned) { free(ent); free(owned); if (parent) FreeEnvironmentStringsW(parent); return NULL; }
+	wchar_t **ent = (wchar_t **)calloc((size_t)cap, sizeof *ent); /* scratch */
+	char *owned = (char *)calloc((size_t)cap, 1); // entries this function malloc'd /* scratch */
+	if (!ent || !owned) { free(ent); free(owned); if (parent) FreeEnvironmentStringsW(parent); return NULL; } /* scratch */
 	int n = 0;
 	// Markers first so that, under first-wins de-duplication, they override a
 	// same-named entry from either source.
@@ -301,7 +300,7 @@ static wchar_t *build_env_block(char **custom, const wchar_t **markers, int nmar
 	for (int i = 0; i < ncustom; i++) {
 		wchar_t *w = wide_alloc(custom[i]);
 		if (!w) continue;
-		if (!wcschr(w[0] == L'=' ? w + 1 : w, L'=')) { free(w); continue; } // not KEY=val
+		if (!wcschr(w[0] == L'=' ? w + 1 : w, L'=')) { free(w); continue; } // not KEY=val /* scratch */
 		owned[n] = 1; ent[n++] = w;
 	}
 	if (!custom && parent) for (wchar_t *q = parent; *q; q += wcslen(q) + 1) ent[n++] = q;
@@ -311,7 +310,7 @@ static wchar_t *build_env_block(char **custom, const wchar_t **markers, int nmar
 		int dup = 0;
 		size_t kl = env_key_len(ent[i]);
 		for (int j = 0; j < m && !dup; j++) dup = env_key_cmp(ent[i], kl, ent[j], env_key_len(ent[j])) == 0;
-		if (dup) { if (owned[i]) free(ent[i]); continue; }
+		if (dup) { if (owned[i]) free(ent[i]); continue; } /* scratch */
 		ent[m] = ent[i]; owned[m] = owned[i]; m++;
 	}
 	n = m;
@@ -323,7 +322,7 @@ static wchar_t *build_env_block(char **custom, const wchar_t **markers, int nmar
 			if (have) continue;
 			DWORD vn = GetEnvironmentVariableW(required[r], NULL, 0);
 			if (!vn) continue; // the parent has none either
-			wchar_t *e = (wchar_t *)malloc((rl + 1 + vn + 1) * sizeof(wchar_t));
+			wchar_t *e = (wchar_t *)malloc((rl + 1 + vn + 1) * sizeof(wchar_t)); /* scratch */
 			if (!e) continue;
 			memcpy(e, required[r], rl * sizeof(wchar_t));
 			e[rl] = L'=';
@@ -332,21 +331,21 @@ static wchar_t *build_env_block(char **custom, const wchar_t **markers, int nmar
 		}
 	}
 	// qsort moves the pointers, so remember which to free by value.
-	wchar_t **tofree = (wchar_t **)calloc((size_t)n + 1, sizeof *tofree);
+	wchar_t **tofree = (wchar_t **)calloc((size_t)n + 1, sizeof *tofree); /* scratch */
 	int nfree = 0;
 	if (tofree) for (int i = 0; i < n; i++) if (owned[i]) tofree[nfree++] = ent[i];
 	qsort(ent, (size_t)n, sizeof *ent, env_entry_cmp);
 	size_t total = 1;
 	for (int i = 0; i < n; i++) total += wcslen(ent[i]) + 1;
-	wchar_t *block = (wchar_t *)malloc((total + 1) * sizeof(wchar_t));
+	wchar_t *block = (wchar_t *)malloc((total + 1) * sizeof(wchar_t)); /* scratch */
 	if (block) {
 		wchar_t *p = block;
 		for (int i = 0; i < n; i++) { size_t l = wcslen(ent[i]) + 1; memcpy(p, ent[i], l * sizeof(wchar_t)); p += l; }
 		if (n == 0) *p++ = 0; // an empty block is two NULs
 		*p = 0;
 	}
-	for (int i = 0; i < nfree; i++) free(tofree[i]);
-	free(tofree); free(ent); free(owned);
+	for (int i = 0; i < nfree; i++) free(tofree[i]); /* scratch */
+	free(tofree); free(ent); free(owned); /* scratch */
 	if (parent) FreeEnvironmentStringsW(parent);
 	return block;
 }
@@ -405,16 +404,16 @@ int __kml_win_spawn_worker(const char *exe, char **argv) {
 	size_t total = 1;
 	int argc = 0;
 	for (; argv[argc]; argc++) total += strlen(argv[argc]) * 2 + 4;
-	wchar_t *cmd = (wchar_t *)malloc(total * sizeof(wchar_t) * 2);
+	wchar_t *cmd = (wchar_t *)malloc(total * sizeof(wchar_t) * 2); /* scratch */
 	wchar_t *app = wide_alloc(exe);
-	if (!cmd || !app) { free(cmd); free(app); errno = L_EINVAL; return -1; }
+	if (!cmd || !app) { free(cmd); free(app); errno = L_EINVAL; return -1; } /* scratch */
 	wchar_t *p = cmd;
 	for (int i = 0; i < argc; i++) {
 		wchar_t *wa = wide_alloc(argv[i]);
-		if (!wa) { free(cmd); free(app); errno = L_EINVAL; return -1; }
+		if (!wa) { free(cmd); free(app); errno = L_EINVAL; return -1; } /* scratch */
 		if (i) *p++ = L' ';
 		p = quote_arg(p, wa);
-		free(wa);
+		free(wa); /* scratch */
 	}
 	*p = 0;
 
@@ -474,7 +473,7 @@ int __kml_win_spawn_worker(const char *exe, char **argv) {
 	// The CRT's inherited-descriptor block: a count, a flag byte per
 	// descriptor (FOPEN | FPIPE: open, and taken as it is), then the handles.
 	size_t crt_sz = sizeof(int) + (size_t)ncrt + (size_t)ncrt * sizeof(HANDLE);
-	unsigned char *crt_blk = (unsigned char *)calloc(1, crt_sz);
+	unsigned char *crt_blk = (unsigned char *)calloc(1, crt_sz); /* scratch */
 	if (crt_blk) {
 		memcpy(crt_blk, &ncrt, sizeof(int));
 		for (int i = 0; i < ncrt; i++) {
@@ -498,7 +497,7 @@ int __kml_win_spawn_worker(const char *exe, char **argv) {
 	if (flag_h != INVALID_HANDLE_VALUE) inherit_list[nlist++] = flag_h;
 	SIZE_T asz = 0;
 	InitializeProcThreadAttributeList(NULL, 1, 0, &asz);
-	LPPROC_THREAD_ATTRIBUTE_LIST attrs = asz ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(asz) : NULL;
+	LPPROC_THREAD_ATTRIBUTE_LIST attrs = asz ? (LPPROC_THREAD_ATTRIBUTE_LIST)malloc(asz) : NULL; /* scratch */
 	BOOL attrok = attrs && nlist &&
 	              InitializeProcThreadAttributeList(attrs, 1, 0, &asz) &&
 	              UpdateProcThreadAttribute(attrs, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
@@ -511,9 +510,9 @@ int __kml_win_spawn_worker(const char *exe, char **argv) {
 	BOOL ok = CreateProcessW(app, cmd, NULL, NULL, TRUE,
 	                         CREATE_UNICODE_ENVIRONMENT | (attrok ? EXTENDED_STARTUPINFO_PRESENT : 0),
 	                         env, NULL, &siex.StartupInfo, &pi);
-	free(app); free(cmd); free(env); free(crt_blk);
+	free(app); free(cmd); free(env); free(crt_blk); /* scratch */
 	if (attrok) DeleteProcThreadAttributeList(attrs);
-	free(attrs);
+	free(attrs); /* scratch */
 	if (hin && hin != INVALID_HANDLE_VALUE) CloseHandle(hin);
 	if (hout && hout != INVALID_HANDLE_VALUE) CloseHandle(hout);
 	if (herr && herr != INVALID_HANDLE_VALUE) CloseHandle(herr);
@@ -550,29 +549,6 @@ int __kml_win_getppid(void) {
 	}
 	CloseHandle(snap);
 	return ppid;
-}
-
-// Child side of the IPC channel: Node's parent puts the channel at the stdio
-// slot NODE_CHANNEL_FD names, which libuv hands over through the CRT's
-// descriptor table (UV_INHERIT_FD). The socket behind that CRT descriptor is
-// adopted into this layer's socket range before main() runs, and the
-// variable is pointed at the descriptor it has here. The child's runtime
-// reads it once and deletes it, as Node does.
-__attribute__((constructor)) static void kml_win_adopt_channel(void) {
-	char chan[16];
-	if (!GetEnvironmentVariableA("NODE_CHANNEL_FD", chan, sizeof chan)) return;
-	int crt = atoi(chan);
-	HANDLE h = (HANDLE)_get_osfhandle(crt);
-	if (h == INVALID_HANDLE_VALUE || GetFileType(h) != FILE_TYPE_PIPE) return;
-	ws_init();
-	int fd = kfd_register(h, KFD_SOCKET);
-	if (fd < 0) return;
-	char set[48];
-	snprintf(set, sizeof set, "NODE_CHANNEL_FD=%d", fd);
-	SetEnvironmentVariableA("NODE_CHANNEL_FD", set + 16);
-	_putenv(set);
-	// Its peer, for a socket sent over it: the parent.
-	__kml_win_ipc_set_peer(fd, __kml_win_getppid());
 }
 
 // A cluster worker does not outlive its primary: Node's worker exits when its
@@ -669,7 +645,7 @@ char *__kml_win_self_exe(void) {
 	DWORD n = GetModuleFileNameW(NULL, w, 32768);
 	if (n == 0 || n >= 32768) return NULL;
 	int len = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
-	char *s = (char *)malloc((size_t)len);
+	char *s = (char *)malloc((size_t)len); /* scratch */
 	if (s) WideCharToMultiByte(CP_UTF8, 0, w, -1, s, len, NULL, NULL);
 	return s;
 }
@@ -700,7 +676,13 @@ int kill(int pid, int sig) {
 	// process.kill(process.pid, 'SIGINT') for a graceful self-shutdown.
 	// TerminateProcess(self) would instead kill the process before the handler
 	// could run. With no handler it falls through to the default terminate.
-	if ((DWORD)pid == GetCurrentProcessId() && kml_deliver_self_signal(sig)) return 0;
+	// A process.on() watcher is libuv's uv_signal_t: libuv's own dispatch
+	// delivers it, as uv_kill does for the current process.
+	if ((DWORD)pid == GetCurrentProcessId()) {
+		extern int uv__signal_dispatch(int signum);
+		if ((sig == 2 || sig == 1 || sig == 21 || sig == 28) && uv__signal_dispatch(sig)) return 0;
+		if (kml_deliver_self_signal(sig)) return 0;
+	}
 	// libuv's uv_kill: SIGTERM, SIGKILL, SIGINT and SIGQUIT terminate the target
 	// unconditionally; any other signal has no Windows meaning and is ENOSYS
 	// (Node throws `kill ENOSYS`), rather than silently killing the process.

@@ -396,25 +396,6 @@ console.log(lib.internalHelper())
 	}
 }
 
-func TestE2ENamespaceImportBareUseRejected(t *testing.T) {
-	// A namespace import is a compile-time-only construct (TDD-00042) —
-	// it has no runtime representation, so using it as anything other than
-	// the object of a dotted member access is rejected. Resolution itself
-	// doesn't catch this (there's no special-case detection — see the
-	// TDD's Open Questions); the bare "lib" identifier simply reaches
-	// codegen unresolved and fails there.
-	err := resolveAndEmitMultiFile(t, map[string]string{
-		"lib.ts": `export function add(a: number, b: number): number { return a + b }`,
-		"main.ts": `
-import * as lib from './lib'
-console.log(lib)
-`,
-	}, "main.ts")
-	if err == nil {
-		t.Fatal("expected a compile error using a namespace import as a bare value, got none")
-	}
-}
-
 // --- re-exports (TDD-00051) ---
 
 func TestE2EReExportNamed(t *testing.T) {
@@ -798,4 +779,21 @@ console.log(area(b), area(c), s.s, basename("/x/y.ts"), typeof method, type)
 	if err == nil || !strings.Contains(err.Error(), "'area' cannot be used as a value because it was imported using 'import type'") {
 		t.Fatalf("expected TS1361, got %v", err)
 	}
+}
+
+func TestE2EModuleNamespaceLiveBindings(t *testing.T) {
+	// A module namespace object's `let` export is a live binding: read
+	// through the object after the module changes it, it is the new value,
+	// described as a writable data property, and a write through it throws.
+	assertMultiFileOutput(t, map[string]string{
+		"m.ts": "export let n = 0;\nexport function inc(): void { n++; }\n",
+		"main.ts": `import * as M from "./m";
+const o: any = M;
+M.inc();
+console.log(o.n, M.n, o);
+console.log(Object.getOwnPropertyDescriptor(o, "n"), Object.keys(o));
+try { o.n = 5; } catch (e) { console.log((e as Error).constructor.name); }
+console.log(M.n);
+`,
+	}, "main.ts", "1 1 [Module: null prototype] { inc: [Function: inc], n: 1 }\n{ value: 1, writable: true, enumerable: true, configurable: false } [ 'inc', 'n' ]\nTypeError\n1")
 }

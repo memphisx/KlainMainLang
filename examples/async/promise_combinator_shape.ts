@@ -42,7 +42,8 @@ const results = await Promise.allSettled([
     Promise.reject("boom"),
 ])
 console.log(results[0].status) // fulfilled
-console.log(results[0].value)  // 7
+const first = results[0]
+if (first.status === "fulfilled") console.log(first.value)  // 7
 console.log(results[1].status) // rejected
 
 // ── Promise.allSettled: rejection reason keeps its original value ────────────

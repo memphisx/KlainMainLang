@@ -4,8 +4,9 @@
 // An island is a separate runtime copy in a shared library. When its top level
 // has an `await`, its main() runs the body to the first await as a module task
 // and returns; from then on this program's event loop drives the island through
-// four exports the island defines (emitIslandTaskGlue): `_state`, `_poll` (one
-// non-blocking turn of the island's own loop), `_next_deadline_ns` and `_error`.
+// five exports the island defines (emitIslandTaskGlue): `_state`, `_poll` (one
+// non-blocking turn of the island's own loop), `_next_deadline_ns`, `_error`
+// and `_backend` (its loop's backend descriptor, which this loop watches).
 // The import() promise is a pending task promise here, settled from the
 // island's module promise by the watcher below.
 package llvm
@@ -13,8 +14,10 @@ package llvm
 import (
 	_ "embed"
 	"fmt"
-	"strings"
 )
+
+//go:embed islandsrc/island.c
+var islandSource string
 
 //go:embed dynimportsrc/dynimportwatch.c
 var dynImportWatchSource string
@@ -25,21 +28,11 @@ func DynImportWatchSource() string { return dynImportWatchSource }
 // UsesDynImportWatch reports whether the program links the watcher.
 func (e *Emitter) UsesDynImportWatch() bool { return e.usedDynImportWatch }
 
-// ensureDynImportWatch declares the watcher (dynimportsrc/dynimportwatch.c),
-// which registers the event loop's three hooks in hooks.c; a program without
-// import() keeps hooks.c's no-op defaults.
-//
-//   - @__kml_dynimport_watch settles the import() promise at once when the
-//     island's state export says its module promise is already settled (no
-//     top-level await, or one that settled during init), else appends a watcher.
-//   - @__kml_dynimport_dispatch polls every pending island once per loop turn
-//     and settles the promise when the island's module promise has.
-//   - @__kml_dynimport_keepalive holds the loop while a pending island still
-//     has something that can wake it (its last poll did not report idle).
-//   - @__kml_dynimport_next_deadline_ns folds the islands' earliest timer into
-//     the loop's wait; while a pending, non-idle island reports no
-//     timer, the wait is capped at 10 ms — its sockets are invisible to this
-//     loop's fd sets, the V1 blind spot the TDD records.
+// ensureDynImportWatch declares @__kml_dynimport_watch
+// (dynimportsrc/dynimportwatch.c): it settles the import() promise at once
+// when the island's module promise is already settled, else watches the
+// island's loop as a handle on this one (its backend descriptor and its
+// earliest deadline) and runs a pass of it whenever either fires.
 func (e *Emitter) ensureDynImportWatch() {
 	if e.usedDynImportWatch {
 		return
@@ -48,7 +41,8 @@ func (e *Emitter) ensureDynImportWatch() {
 	e.ensurePromiseRuntime()
 	e.ensurePromiseSettle()
 	e.ensureTimerRuntime() // @__kml_monotonic_ns
-	e.emitGlobal(`declare void @__kml_dynimport_watch(ptr, ptr, ptr, ptr, ptr, ptr, ptr)`)
+	e.ensureEventLoop()    // the loop the watcher's handles live on
+	e.emitGlobal(`declare void @__kml_dynimport_watch(ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr)`)
 }
 
 // emitImportSettleFn emits the per-call-site function that fulfils an import()
@@ -58,14 +52,7 @@ func (e *Emitter) ensureDynImportWatch() {
 func (e *Emitter) emitImportSettleFn(hash string, objTy Type) string {
 	e.importSettleCtr++
 	name := fmt.Sprintf("__kml_dynimport_settle_%d", e.importSettleCtr)
-	savedAllocas := e.allocas
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedBlockDone := e.blockDone
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.blockDone = false
+	restoreBuilder := e.beginThunkEmit()
 
 	e.ensureCalloc()
 	obj := e.freshReg()
@@ -80,18 +67,12 @@ func (e *Emitter) emitImportSettleFn(hash string, objTy Type) string {
 		idx, _, _ := objTy.FieldIndex(f.Name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", f.Ty.IR, v, gep, f.Ty.Align()))
+		e.heapStore(f.Ty.IR, v, gep, f.Ty.Align())
 	}
 	e.storePromiseValue("%prom", Value{Ref: obj, Ty: objTy})
 	e.emitInstr("call void @__kml_promise_settle(ptr %prom, i64 1)")
 	e.emitTerminator("ret void")
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal void @%s(ptr %%handle, ptr %%prom) {\nentry:\n", name))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
-	e.allocas = savedAllocas
-	e.body = savedBody
-	e.regCtr = savedRegCtr
-	e.blockDone = savedBlockDone
+	e.writeFunc(fmt.Sprintf("internal void @%s(ptr %%handle, ptr %%prom)", name), e.allocas.String()+e.body.String())
+	restoreBuilder()
 	return name
 }

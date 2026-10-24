@@ -132,7 +132,7 @@ double __kml_native_process_hrtime_read(double which) { return (double)hrtime_bu
 void *__kml_process_cwd(void) {
     char *r = getcwd(NULL, 0);
     void *s = __kml_str_from_cstr(r);
-    free(r);
+    free(r); /* scratch */
     return s;
 }
 
@@ -194,14 +194,14 @@ void *__kml_native_process_argv(double i) { return ((void **)__process_argv_ptr)
 char *__kml_execpath(void) {
 #if defined(__APPLE__)
     uint32_t size = 4096;
-    char *buf = (char *)malloc(4096);
+    char *buf = (char *)malloc(4096); /* scratch */
     _NSGetExecutablePath(buf, &size);
     char *res = realpath(buf, NULL);
     if (!res) return buf;
-    free(buf);
+    free(buf); /* scratch */
     return res;
 #else
-    char *buf = (char *)malloc(4097);
+    char *buf = (char *)malloc(4097); /* scratch */
     i64 n = (i64)readlink("/proc/self/exe", buf, 4096);
     buf[n < 0 ? 0 : n] = 0;
     return buf;
@@ -231,15 +231,10 @@ double __kml_native_process_memory(double which) {
 }
 
 /* ---- signals ----
- * On POSIX each watched signal is a uv_signal_t on the event loop
- * (loop.c), whose callback runs the watcher inside the wait, as Node's
- * does. Windows keeps the shim's signal(), whose console handler matches
- * Node's Windows signals: the handler sets a flag and wakes the loop
- * (TDD-00252), whose next pass dispatches it (__kml_signal_dispatch). */
+ * Each watched signal is a uv_signal_t on the event loop (loop.c), whose
+ * callback runs the watcher inside the wait, as Node's does; on Windows
+ * libuv delivers the console's SIGINT, SIGBREAK, SIGHUP and SIGWINCH. */
 typedef void (*sig_watch_fn)(void *clo, double signo);
-#ifdef _WIN32
-static _Thread_local volatile unsigned char sig_pending[65];
-#endif
 static _Thread_local sig_watch_fn sig_inv[65];
 static _Thread_local void *sig_clo[65];
 
@@ -252,29 +247,11 @@ static void *sig_install(int n, void *h) {
 }
 
 void __kml_signal_note(int signum) {
-#ifdef _WIN32
-    if ((unsigned)signum < 65) sig_pending[signum] = 1;
-#else
     if ((unsigned)signum < 65 && sig_inv[signum]) sig_inv[signum](sig_clo[signum], (double)signum);
-#endif
 }
 
-#ifdef _WIN32
-static void sig_handler(int signum) { __kml_signal_note(signum); }
-#else
 int __kml_loop_signal_start(int n);
 void __kml_loop_signal_stop(int n);
-#endif
-
-#ifdef _WIN32
-void __kml_signal_dispatch(void) {
-    for (int i = 1; i < 65; i++) {
-        if (!sig_pending[i]) continue;
-        sig_pending[i] = 0;
-        if (sig_inv[i]) sig_inv[i](sig_clo[i], (double)i);
-    }
-}
-#endif
 
 /* A client dropping mid-write unwinds via write() EPIPE, not a kill. */
 void __kml_ignore_sigpipe(void) { sig_install(13, (void *)1); }
@@ -286,12 +263,7 @@ double __kml_native_signal_start(double signo, void *inv, void *clo) {
     if (n < 1 || n > 64) return -22.0;
     sig_clo[n] = clo;
     sig_inv[n] = (sig_watch_fn)inv;
-#ifdef _WIN32
-    if (sig_install(n, (void *)sig_handler) == (void *)-1) return -22.0;
-    return 0.0;
-#else
     return (double)__kml_loop_signal_start(n);
-#endif
 }
 
 /* Stopping restores the default disposition (SIGPIPE's is ignored). */
@@ -299,10 +271,6 @@ void __kml_native_signal_stop(double signo) {
     int n = (int)signo;
     if (n < 1 || n > 64) return;
     sig_inv[n] = 0;
-#ifdef _WIN32
-    sig_install(n, n == 13 ? (void *)1 : (void *)0);
-#else
     __kml_loop_signal_stop(n);
     if (n == 13) sig_install(13, (void *)1);
-#endif
 }

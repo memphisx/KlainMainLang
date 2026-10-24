@@ -225,7 +225,10 @@ func (e *Emitter) emitConsolePrintArgToken(arg ast.Expression, fd int, term stri
 // (emitConsolePrintArgToken) and a spread array's elements
 // (emitConsolePrintSpread).
 func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) error {
-	if val.Ty.NullAndUndef {
+	if t, ok := e.asTriStr(val); ok {
+		val = t
+	}
+	if val.Ty.NullAndUndef() {
 		nullL, plainL, doneL := e.freshLabel("clog.trinull"), e.freshLabel("clog.triplain"), e.freshLabel("clog.tridone")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.isTriNull(val), nullL, plainL))
 		e.emitLabel(nullL)
@@ -241,7 +244,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	}
 	// A caught value (TypeCaught ≈ `unknown`, TDD-00202) prints as the value
 	// it holds: an Error with its own properties, anything else inspected.
-	if val.Ty.IsCaught {
+	if val.Ty.IsCaught() {
 		return e.emitConsolePrintValueToken(e.emitCaughtToAny(val), fd, term)
 	}
 	// A nullable-scalar aggregate value (a T|null return/field) prints
@@ -251,7 +254,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	}
 	// An Error (a builtin one, or a subclass's instance typed as Error) prints
 	// as its boxed form does: `Name: message`, its own properties after.
-	if val.Ty.IsError && !val.Ty.IsDynamic && !val.Ty.IsClass {
+	if val.Ty.IsError() && !val.Ty.IsDynamic() && !val.Ty.IsClass() {
 		// An absent one (a callback's `err` on success) prints its keyword.
 		isNull := e.ptrIsNull(val.Ref)
 		absentL, errL, doneL := e.freshLabel("clog.errnull"), e.freshLabel("clog.err"), e.freshLabel("clog.errdone")
@@ -261,7 +264,8 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(errL)
 		present := val
-		present.Ty.Nullable, present.Ty.IsUndefined = false, false
+		present.Ty.setNullable(false)
+		present.Ty.setUndefined(false)
 		boxed, err := e.emitBoxValue(present)
 		if err != nil {
 			return err
@@ -275,14 +279,14 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	}
 	// A function value renders util.inspect's `[Function: name]` form
 	// (TDD-00229); before this it fell through to a `%s` of the header.
-	if val.Ty.IsFunc {
+	if val.Ty.IsFunc() {
 		e.emitConsolePrintVal(e.emitInspectFunc(val), e.internString("%s"+term), fd)
 		return nil
 	}
 	// A bare `null`/`undefined` value renders its keyword (Node shows
 	// `undefined`, not a blank line). Routed through emitValueToString, which
 	// already distinguishes the two via IsUndefined.
-	if val.Ty.IsNull {
+	if val.Ty.IsNull() {
 		strVal, err := e.emitValueToString(val)
 		if err != nil {
 			return err
@@ -293,17 +297,17 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	// A Node Buffer prints Node's `<Buffer 68 69>` form, not the `[ 104, 105 ]`
 	// a plain Uint8Array shows — checked before the array branch, since a
 	// Buffer is structurally a Uint8Array (IsArray also set).
-	if val.Ty.IsBuffer {
+	if val.Ty.IsBuffer() {
 		// An absent `Buffer | undefined` prints its keyword, as an array's;
 		// so does a Buffer binding holding undefined (a null header).
 		doneL := ""
-		if val.Ty.Nullable || val.ArrayHeader != "" {
+		if val.Ty.Nullable() || true {
 			isAbsent := e.emitArrayIsAbsent(val)
 			absentL, bufL := e.freshLabel("clog.bufnull"), e.freshLabel("clog.buf")
 			doneL = e.freshLabel("clog.bufdone")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, bufL))
 			e.emitLabel(absentL)
-			e.emitConsolePrintVal(Value{Ref: e.internString(consoleAbsentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+			e.emitConsolePrintVal(Value{Ref: e.arrayAbsentLiteral(val), Ty: TypePtr}, e.internString("%s"+term), fd)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(bufL)
 		}
@@ -328,7 +332,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		return nil
 	}
 	// An index-signature dictionary inspects as the plain object it is.
-	if val.Ty.IsDynamicObject {
+	if val.Ty.IsDynamicObject() {
 		bag, err := e.emitDictToBag(val)
 		if err != nil {
 			return err
@@ -341,7 +345,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		return nil
 	}
 	// A WeakMap / WeakSet hides its entries, a WeakRef its target.
-	if val.Ty.Weak && (val.Ty.IsMap || val.Ty.IsSet) || val.Ty.IsCollIter {
+	if val.Ty.Weak && (val.Ty.IsMap() || val.Ty.IsSet()) || val.Ty.IsCollIter() {
 		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
 			return err
@@ -350,7 +354,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		return nil
 	}
 	// A class extending Map or Set: `Counter(2) [Map] { 'a' => 1, x: 1 }`.
-	if val.Ty.IsClass {
+	if val.Ty.IsClass() {
 		if info, ok := e.classes[val.Ty.ClassName]; ok && info.HostBase != nil {
 			strVal, err := e.emitInspectHostClass(val, info, 0)
 			if err != nil {
@@ -361,7 +365,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		}
 	}
 	// Map / Set inspect as `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`.
-	if val.Ty.IsMap {
+	if val.Ty.IsMap() {
 		strVal, err := e.emitInspectMap(val, 0)
 		if err != nil {
 			return err
@@ -369,7 +373,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsSet {
+	if val.Ty.IsSet() {
 		strVal, err := e.emitInspectSet(val, 0)
 		if err != nil {
 			return err
@@ -380,13 +384,13 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	// A heap tuple prints like an array, `[ 1, 'a' ]` (util.inspect; ADR-01063
 	// — it was the `1,a` String() join before), an absent one its keyword; a
 	// by-value tuple keeps the join (its aggregate has no inspect path).
-	if val.Ty.IsTuple {
+	if val.Ty.IsTuple() {
 		var strVal Value
 		var err error
 		switch {
 		case val.Ty.TupleByVal:
 			strVal, err = e.emitValueToString(val)
-		case val.Ty.Nullable || val.Ty.IsNull:
+		case val.Ty.Nullable() || val.Ty.IsNull():
 			strVal, err = e.emitInspectNullablePtr(val, func(b Value) (Value, error) { return e.emitInspectTuple(b, 0) })
 		default:
 			strVal, err = e.emitInspectTuple(val, 0)
@@ -399,23 +403,24 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	}
 	// console.log(array) → Node-style `[ 1, 2, 3 ]` (util.inspect). Previously
 	// a hard rejection; now rendered via the inspector (TDD-00075/ADR-00218).
-	if val.Ty.IsArray {
+	if val.Ty.IsArray() {
 		// A `T[] | undefined` value (a nested-array element absence, TDD-00221)
-		// prints its keyword on a miss (null data-ptr), not `[]` — mirroring the
+		// prints its keyword on a miss (null header), not `[]` — mirroring the
 		// absent-object case below.
-		if val.Ty.Nullable || val.ArrayHeader != "" {
+		if val.Ty.Nullable() || true {
 			isAbsent := e.emitArrayIsAbsent(val)
 			absentL := e.freshLabel("clog.arrnull")
 			arrL := e.freshLabel("clog.arr")
 			doneL := e.freshLabel("clog.arrdone")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, absentL, arrL))
 			e.emitLabel(absentL)
-			e.emitConsolePrintVal(Value{Ref: e.internString(consoleAbsentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+			e.emitConsolePrintVal(Value{Ref: e.arrayAbsentLiteral(val), Ty: TypePtr}, e.internString("%s"+term), fd)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(arrL)
 			base := val.Ty
-			base.Nullable, base.IsUndefined = false, false
-			strVal, err := e.emitInspectArray(Value{Ref: val.Ref, Ty: base, ArrayHeader: val.ArrayHeader}, 0)
+			base.setNullable(false)
+			base.setUndefined(false)
+			strVal, err := e.emitInspectArray(Value{Ref: val.Ref, Ty: base}, 0)
 			if err != nil {
 				return err
 			}
@@ -437,7 +442,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		// An absent object (`C | undefined` / `C | null` — a null pointer, e.g.
 		// an object-array `.find()` miss or a `Map<K,object>.get()` miss) must
 		// print its keyword, not dereference null to inspect fields (a segfault).
-		if val.Ty.Nullable || val.Ty.IsNull {
+		if val.Ty.Nullable() || val.Ty.IsNull() {
 			isNull := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
 			nullL := e.freshLabel("clog.objnull")
@@ -451,7 +456,9 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 			// Present: the object itself, which may be another layout's
 			// (a structural view, emitRecordSplit).
 			present := val
-			present.Ty.Nullable, present.Ty.IsUndefined, present.Ty.IsNull = false, false, false
+			present.Ty.setNullable(false)
+			present.Ty.setUndefined(false)
+			present.Ty.setKind(kindNull, false)
 			strVal, err := e.emitInspectObject(present, 0)
 			if err != nil {
 				return err
@@ -468,7 +475,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsDynamic {
+	if val.Ty.IsDynamic() {
 		// console.log renders a boxed value in its util.inspect form (a boxed
 		// array as `[ 1, 2, 3 ]`, not the `1,2,3` String() join) — TDD-00212 S2.
 		strVal, err := e.emitDynamicInspect(val)
@@ -478,7 +485,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsDate && !val.Ty.IsDynamic || val.Ty.IsRegExp && val.Ty.IsObject && !val.Ty.Nullable && !val.Ty.IsDynamic {
+	if val.Ty.IsDate() && !val.Ty.IsDynamic() || val.Ty.IsRegExp() && val.Ty.IsObject() && !val.Ty.Nullable() && !val.Ty.IsDynamic() {
 		// console.log(date) shows its util.inspect form, the ISO string.
 		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
@@ -487,7 +494,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsBigInt {
+	if val.Ty.IsBigInt() {
 		// console.log(10n) shows the trailing `n` (String(10n) does not).
 		strVal, err := e.emitBigIntToString(val, true)
 		if err != nil {
@@ -496,7 +503,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsSymbol {
+	if val.Ty.IsSymbol() {
 		strVal, err := e.emitSymbolToString(val)
 		if err != nil {
 			return err
@@ -528,7 +535,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 // String(-0) — what emitValueToString computes — is "0". Detected by exact
 // bit pattern (only -0.0 has just the sign bit set), so no other value pays.
 func (e *Emitter) inspectNegZero(val Value, strVal Value) Value {
-	f64 := e.coerce(val, TypeF64)
+	f64 := e.convert(val, TypeF64)
 	bits := e.freshReg()
 	isNegZero := e.freshReg()
 	sel := e.freshReg()
@@ -584,7 +591,7 @@ func (e *Emitter) emitConsolePrintSpread(args []ast.Expression, fd int, prefix s
 			if err != nil {
 				return Value{}, err
 			}
-			if elemTy.IsArray || elemTy.IsObject {
+			if elemTy.IsArray() || elemTy.IsObject() {
 				return Value{}, fmt.Errorf("%d:%d: console spread of an array of arrays or objects is not supported", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
 			}
 			idxAlloca := e.freshReg()
@@ -819,14 +826,14 @@ func (e *Emitter) consoleLabelArgKind(args []ast.Expression, name string, pos as
 	}
 	// Node: `label = 'default'` as the parameter's default, then
 	// `${label}` (console.count(1) counts "1", null counts "null").
-	if val.Ty.IsUndefined && !val.Ty.IsDynamic && !val.Ty.Nullable {
+	if val.Ty.IsUndefined() && !val.Ty.IsDynamic() && !val.Ty.Nullable() {
 		return e.internString("default"), "1", nil
 	}
 	isStr := "0"
 	switch {
-	case isStringTy(val.Ty) && !val.Ty.Nullable:
+	case isStringTy(val.Ty) && !val.Ty.Nullable():
 		isStr = "1"
-	case val.Ty.IsDynamic:
+	case val.Ty.IsDynamic():
 		tag, _ := e.emitUnboxTagPayload(val)
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", r, tag, kmlTagString))
@@ -915,7 +922,7 @@ func (e *Emitter) emitConsoleTimeEnd(args []ast.Expression, pos ast.Pos) (Value,
 	bufSize := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 48", bufSize, labelLen))
 	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bufSize))
+	e.heapMallocInto(buf, bufSize)
 	msgFmt := e.internString("%s: %gms")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, double %s)", buf, msgFmt, labelPtr, elapsed))
 
@@ -982,7 +989,7 @@ func (e *Emitter) emitConsoleCount(args []ast.Expression, pos ast.Pos) (Value, e
 	bufSize := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 32", bufSize, labelLen))
 	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, bufSize))
+	e.heapMallocInto(buf, bufSize)
 	msgFmt := e.internString("%s: %lld")
 	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, i64 %s)", buf, msgFmt, labelPtr, next))
 
@@ -1092,6 +1099,17 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 		// A `T | undefined` pointer (an element-absence result, TDD-00187)
 		// renders its null as "undefined", matching real JS.
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString(absentLiteral(val.Ty)), val.Ref))
+		// `%s` and literal text: the string is written by its length, so an
+		// embedded NUL byte prints as Node prints it.
+		if raw, ok := e.strConstRaw[fmtPtr]; ok && strings.HasPrefix(raw, "%s") && !strings.Contains(raw[2:], "%") {
+			e.ensureStrHeaderRuntime()
+			e.emitInstr(fmt.Sprintf("call void @__kml_write_str(i64 %d, ptr %s)", fd, safe))
+			if rest := raw[2:]; rest != "" {
+				fmtPtr = e.internString(rest)
+				call()
+			}
+			return
+		}
 		call("ptr " + safe)
 	}
 }
@@ -1138,8 +1156,21 @@ func (e *Emitter) emitConsoleAssert(args []ast.Expression, pos ast.Pos) (Value, 
 // or undefined for a binding whose type has neither (a value that crossed
 // an `any` boundary).
 func consoleAbsentLiteral(ty Type) string {
-	if !ty.Nullable {
+	if !ty.Nullable() {
 		return "undefined"
 	}
 	return absentLiteral(ty)
+}
+
+// arrayAbsentLiteral is the keyword an absent array prints: "null" for
+// nullRef (null unboxed from `any`), else its type's absent keyword.
+func (e *Emitter) arrayAbsentLiteral(val Value) string {
+	lit := e.internString(consoleAbsentLiteral(val.Ty))
+	if val.Ref == "zeroinitializer" {
+		return lit
+	}
+	isRef, r := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isRef, val.Ref, e.nullRef()))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isRef, e.internString("null"), lit))
+	return r
 }

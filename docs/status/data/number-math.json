@@ -27,214 +27,348 @@
             "feature": "`Number.isInteger(x)`",
             "status": "implemented",
             "notes": [
-              "`false` for any non-finite value (`Infinity`/`-Infinity`/`NaN`) — the whole-number test is gated on a finiteness check ([ADR-00531](../adr/ADR-00531.md))"
+              "`false` for any non-finite value (`Infinity`/`-Infinity`/`NaN`) — the whole-number test is gated on a finiteness check ([ADR-00531](../adr/00/ADR-00531.md))"
+            ],
+            "decl": [
+              "NumberConstructor.isInteger"
             ]
           },
           {
             "feature": "`Number.isFinite(x)`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.isFinite"
+            ]
           },
           {
             "feature": "`Number.isNaN(x)`",
             "status": "implemented",
             "notes": [
-              "All four `Number.isX` predicates are `false` for an absent value — an out-of-range `xs[i]`, a `Map.get` miss, an omitted optional parameter — where the global `isNaN`/`isFinite` ToNumber it first (`isNaN(undefined)` is `true`) ([ADR-01043](../adr/ADR-01043.md))"
+              "All four `Number.isX` predicates are `false` for an absent value — an out-of-range `xs[i]`, a `Map.get` miss, an omitted optional parameter — where the global `isNaN`/`isFinite` ToNumber it first (`isNaN(undefined)` is `true`) ([ADR-01043](../adr/01/ADR-01043.md))"
+            ],
+            "decl": [
+              "NumberConstructor.isNaN"
             ]
           },
           {
             "feature": "`Number.isSafeInteger(x)`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.isSafeInteger"
+            ]
           },
           {
             "feature": "`Number.parseInt(s)`",
             "status": "implemented",
             "notes": [
-              "Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/ADR-00287.md))",
-              "With radix omitted, auto-detects base 16 for a `\"0x\"`/`\"0X\"` prefix and base 10 otherwise — no octal auto-detect ([ADR-00530](../adr/ADR-00530.md))"
+              "Returns a double (as real JS) so a no-digits input is a real `NaN` — endptr-checked `strtoll` ([ADR-00287](../adr/00/ADR-00287.md))",
+              "With radix omitted, auto-detects base 16 for a `\"0x\"`/`\"0X\"` prefix and base 10 otherwise — no octal auto-detect ([ADR-00530](../adr/00/ADR-00530.md))"
+            ],
+            "decl": [
+              "NumberConstructor.parseInt"
             ]
           },
           {
             "feature": "`Number.parseFloat(s)`",
             "status": "implemented",
             "notes": [
-              "A `\"0x10\"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number(\"0x10\")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/ADR-00545.md))",
-              "A no-conversion input returns a real `NaN` via the endptr check; only the exact word `\"Infinity\"` parses to `Infinity` (`\"inf\"` → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
+              "A `\"0x10\"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number(\"0x10\")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/00/ADR-00545.md))",
+              "A no-conversion input returns a real `NaN` via the endptr check; only the exact word `\"Infinity\"` parses to `Infinity` (`\"inf\"` → `NaN`) ([ADR-00287](../adr/00/ADR-00287.md)/[ADR-00529](../adr/00/ADR-00529.md))"
+            ],
+            "decl": [
+              "NumberConstructor.parseFloat"
             ]
           },
           {
             "feature": "`Number.MAX_SAFE_INTEGER`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.MAX_SAFE_INTEGER"
+            ]
           },
           {
             "feature": "`Number.MIN_SAFE_INTEGER`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.MIN_SAFE_INTEGER"
+            ]
           },
           {
             "feature": "`Number.EPSILON`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.EPSILON"
+            ]
           },
           {
             "feature": "`Number.MAX_VALUE`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.MAX_VALUE"
+            ]
           },
           {
             "feature": "`Number.MIN_VALUE`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.MIN_VALUE"
+            ]
           },
           {
             "feature": "`Number.POSITIVE_INFINITY`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.POSITIVE_INFINITY"
+            ]
           },
           {
             "feature": "`Number.NEGATIVE_INFINITY`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.NEGATIVE_INFINITY"
+            ]
           },
           {
             "feature": "`Number.NaN`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "NumberConstructor.NaN"
+            ]
           },
           {
             "feature": "`Number.prototype.toFixed(n)`",
             "status": "implemented",
             "notes": [
-              "The spec's algorithm over the double's exact decimal expansion: an exact tie rounds to the larger value (`(2.5).toFixed(0)` is `'3'`), `|x| ≥ 1e21` gives `String(x)`, and a digit count outside 0..100 throws Node's `RangeError` ([ADR-01143](../adr/ADR-01143.md))"
+              "The spec's algorithm over the double's exact decimal expansion: an exact tie rounds to the larger value (`(2.5).toFixed(0)` is `'3'`), `|x| ≥ 1e21` gives `String(x)`, and a digit count outside 0..100 throws Node's `RangeError` ([ADR-01143](../adr/01/ADR-01143.md))"
+            ],
+            "decl": [
+              "Number.toFixed"
             ]
           },
           {
             "feature": "`Number.prototype.toString(radix?)`",
             "status": "implemented",
             "notes": [
-              "Radix 10 is `String(x)`; any other base is V8's own algorithm (`DoubleToRadixCString`): the integer digits exactly and the fraction only as far as the double's precision reaches, so every base matches Node digit for digit ([ADR-01143](../adr/ADR-01143.md))",
-              "A radix outside 2..36 throws a `RangeError` as in real JS ([ADR-00552](../adr/ADR-00552.md))"
+              "Radix 10 is `String(x)`; any other base is V8's own algorithm (`DoubleToRadixCString`): the integer digits exactly and the fraction only as far as the double's precision reaches, so every base matches Node digit for digit ([ADR-01143](../adr/01/ADR-01143.md))",
+              "A radix outside 2..36 throws a `RangeError` as in real JS ([ADR-00552](../adr/00/ADR-00552.md))"
+            ],
+            "decl": [
+              "Number.toString"
             ]
           },
           {
             "feature": "`Number.prototype.toPrecision(n)`",
             "status": "implemented",
             "notes": [
-              "The spec's algorithm: exact decimal rounding with ties to the larger value, exponential notation below `1e-6` or at `10^precision` and up (`(0.00001).toPrecision(2)` is `'0.000010'`), and Node's `RangeError` outside 1..100 ([ADR-01143](../adr/ADR-01143.md))",
-              "The precision argument is optional; `x.toPrecision()` with no argument is exactly `String(x)`, as real JS ([ADR-00534](../adr/ADR-00534.md))"
+              "The spec's algorithm: exact decimal rounding with ties to the larger value, exponential notation below `1e-6` or at `10^precision` and up (`(0.00001).toPrecision(2)` is `'0.000010'`), and Node's `RangeError` outside 1..100 ([ADR-01143](../adr/01/ADR-01143.md))",
+              "The precision argument is optional; `x.toPrecision()` with no argument is exactly `String(x)`, as real JS ([ADR-00534](../adr/00/ADR-00534.md))"
+            ],
+            "decl": [
+              "Number.toPrecision"
             ]
           },
           {
             "feature": "`Number.prototype.toExponential(n?)`",
             "status": "implemented",
             "notes": [
-              "The spec's algorithm over the exact decimal expansion (ties to the larger value); with no argument, the shortest round-trip mantissa, as in Node ([ADR-01143](../adr/ADR-01143.md))"
+              "The spec's algorithm over the exact decimal expansion (ties to the larger value); with no argument, the shortest round-trip mantissa, as in Node ([ADR-01143](../adr/01/ADR-01143.md))"
+            ],
+            "decl": [
+              "Number.toExponential"
             ]
           },
           {
             "feature": "`parseInt(s, radix?)` (global)",
             "status": "implemented",
             "notes": [
-              "No-digits input → real `NaN`; with radix omitted, hex auto-detect for a `\"0x\"` prefix, base 10 otherwise — same as `Number.parseInt(s)` above ([ADR-00287](../adr/ADR-00287.md)/[ADR-00530](../adr/ADR-00530.md))"
+              "No-digits input → real `NaN`; with radix omitted, hex auto-detect for a `\"0x\"` prefix, base 10 otherwise — same as `Number.parseInt(s)` above ([ADR-00287](../adr/00/ADR-00287.md)/[ADR-00530](../adr/00/ADR-00530.md))"
+            ],
+            "decl": [
+              "parseInt"
             ]
           },
           {
             "feature": "`parseFloat(s)` (global)",
             "status": "implemented",
             "notes": [
-              "Same `__kml_strtod_parsefloat` wrapper as `Number.parseFloat(s)` above — a `\"0x10\"` hex prefix reads only its leading `0` → `0` ([ADR-00545](../adr/ADR-00545.md))",
-              "No-conversion input → real `NaN`; only the exact word `\"Infinity\"` parses to `Infinity` ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
+              "Same `__kml_strtod_parsefloat` wrapper as `Number.parseFloat(s)` above — a `\"0x10\"` hex prefix reads only its leading `0` → `0` ([ADR-00545](../adr/00/ADR-00545.md))",
+              "No-conversion input → real `NaN`; only the exact word `\"Infinity\"` parses to `Infinity` ([ADR-00287](../adr/00/ADR-00287.md)/[ADR-00529](../adr/00/ADR-00529.md))"
+            ],
+            "decl": [
+              "parseFloat"
             ]
           },
           {
             "feature": "`isNaN(x)` (global)",
             "status": "implemented",
-            "caveats": []
+            "caveats": [],
+            "decl": [
+              "isNaN"
+            ]
           },
           {
             "feature": "`isFinite(x)` (global)",
             "status": "implemented",
-            "caveats": []
+            "caveats": [],
+            "decl": [
+              "isFinite"
+            ]
           },
           {
             "feature": "`Math.floor/ceil/round/trunc`",
             "status": "implemented",
             "notes": [
-              "A float input stays a double end-to-end, so `NaN`/`±Infinity` pass through unchanged; `Math.round` uses JS's tie-toward-`+Infinity` (`Math.round(-4.5) === -4`) incl. the `-0` result for `Math.round(-0.5)` ([ADR-00286](../adr/ADR-00286.md)); integer input keeps the exact-i64 path"
+              "A float input stays a double end-to-end, so `NaN`/`±Infinity` pass through unchanged; `Math.round` uses JS's tie-toward-`+Infinity` (`Math.round(-4.5) === -4`) incl. the `-0` result for `Math.round(-0.5)` ([ADR-00286](../adr/00/ADR-00286.md)); integer input keeps the exact-i64 path"
+            ],
+            "decl": [
+              "Math.floor",
+              "Math.ceil",
+              "Math.round",
+              "Math.trunc"
             ]
           },
           {
             "feature": "`Math.abs`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "Math.abs"
+            ]
           },
           {
             "feature": "`Math.sqrt/pow/hypot`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "Math.sqrt",
+              "Math.pow",
+              "Math.hypot"
+            ]
           },
           {
             "feature": "`Math.log/log2/log10`",
             "status": "implemented",
-            "caveats": [
-              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            "decl": [
+              "Math.log",
+              "Math.log2",
+              "Math.log10"
+            ],
+            "notes": [
+              "V8's fdlibm port, not the platform libm, so results carry Node's exact bits ([ADR-01679](../adr/01/ADR-01679.md))"
             ]
           },
           {
             "feature": "`Math.sin/cos/tan`",
             "status": "implemented",
-            "caveats": [
-              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            "decl": [
+              "Math.sin",
+              "Math.cos",
+              "Math.tan"
+            ],
+            "notes": [
+              "V8's fdlibm port, not the platform libm, so results carry Node's exact bits ([ADR-01679](../adr/01/ADR-01679.md))"
             ]
           },
           {
             "feature": "`Math.min/max`",
             "status": "implemented",
             "notes": [
-              "Any float argument promotes the fold to `llvm.minimum`/`llvm.maximum` — `NaN` propagates and `-0.0` orders below `+0.0`, as the JS spec; all-integer calls stay exact i64 ([ADR-00286](../adr/ADR-00286.md))"
+              "Any float argument promotes the fold to `llvm.minimum`/`llvm.maximum` — `NaN` propagates and `-0.0` orders below `+0.0`, as the JS spec; all-integer calls stay exact i64 ([ADR-00286](../adr/00/ADR-00286.md))"
+            ],
+            "decl": [
+              "Math.min",
+              "Math.max"
             ]
           },
           {
             "feature": "`Math.sign`",
             "status": "implemented",
             "notes": [
-              "Float path returns ±1.0 or the input itself (`NaN` stays `NaN`, a signed zero keeps its sign); integer path exact i64 ([ADR-00286](../adr/ADR-00286.md))"
+              "Float path returns ±1.0 or the input itself (`NaN` stays `NaN`, a signed zero keeps its sign); integer path exact i64 ([ADR-00286](../adr/00/ADR-00286.md))"
+            ],
+            "decl": [
+              "Math.sign"
             ]
           },
           {
             "feature": "`Math.random()`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "Math.random"
+            ]
           },
           {
             "feature": "`Math.PI/E/LN2/LN10/SQRT2/LOG2E/LOG10E`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "Math.PI",
+              "Math.E",
+              "Math.LN2",
+              "Math.LN10",
+              "Math.SQRT2",
+              "Math.LOG2E",
+              "Math.LOG10E"
+            ]
           },
           {
             "feature": "`Math.cbrt/expm1/log1p`",
             "status": "implemented",
             "notes": [
-              "`cbrt` uses a deterministic, correctly-rounded fdlibm implementation (`@__kml_cbrt`) rather than platform libm, whose runtime `cbrt` is not reliably correctly-rounded and diverged by OS (glibc `cbrt(27)` → `3.0000000000000004`); `expm1`/`log1p` delegate to libm ([ADR-00242](../adr/ADR-00242.md))"
+              "`cbrt` uses a deterministic, correctly-rounded fdlibm implementation (`@__kml_cbrt`) rather than platform libm, whose runtime `cbrt` is not reliably correctly-rounded and diverged by OS (glibc `cbrt(27)` → `3.0000000000000004`) ([ADR-00242](../adr/00/ADR-00242.md))",
+              "V8's fdlibm port, not the platform libm, so results carry Node's exact bits ([ADR-01679](../adr/01/ADR-01679.md))"
             ],
-            "caveats": [
-              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            "decl": [
+              "Math.cbrt",
+              "Math.expm1",
+              "Math.log1p"
             ]
           },
           {
             "feature": "`Math.asin/acos/atan/atan2`",
             "status": "implemented",
-            "caveats": [
-              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            "decl": [
+              "Math.asin",
+              "Math.acos",
+              "Math.atan",
+              "Math.atan2"
+            ],
+            "notes": [
+              "V8's fdlibm port, not the platform libm, so results carry Node's exact bits ([ADR-01679](../adr/01/ADR-01679.md))"
             ]
           },
           {
             "feature": "`Math.sinh/cosh/tanh`",
             "status": "implemented",
-            "caveats": [
-              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            "decl": [
+              "Math.sinh",
+              "Math.cosh",
+              "Math.tanh"
+            ],
+            "notes": [
+              "V8's fdlibm port, not the platform libm, so results carry Node's exact bits ([ADR-01679](../adr/01/ADR-01679.md))"
             ]
           },
           {
             "feature": "`Math.exp` and `Math.asinh/acosh/atanh`",
             "status": "implemented",
-            "caveats": [
-              "Results come from the platform libm, which can differ from V8's fdlibm port in the last binary digit (`Math.tan(1)` prints `1.557407724654902` here, `1.5574077246549023` in Node; macOS)"
+            "decl": [
+              "Math.exp",
+              "Math.asinh",
+              "Math.acosh",
+              "Math.atanh"
+            ],
+            "notes": [
+              "V8's fdlibm port, not the platform libm, so results carry Node's exact bits ([ADR-01679](../adr/01/ADR-01679.md))"
             ]
           },
           {
             "feature": "`Math.clz32/fround/imul`",
             "status": "implemented",
             "notes": [
-              "`clz32` via LLVM's own `llvm.ctlz.i32` intrinsic; `fround` via an `fptrunc`/`fpext` float32 round-trip; `imul` via 32-bit `mul` + sign-extend, giving real 32-bit-wraparound integer multiplication distinct from plain `*`'s double-precision result ([ADR-00065](../adr/ADR-00065.md))"
+              "`clz32` via LLVM's own `llvm.ctlz.i32` intrinsic; `fround` via an `fptrunc`/`fpext` float32 round-trip; `imul` via 32-bit `mul` + sign-extend, giving real 32-bit-wraparound integer multiplication distinct from plain `*`'s double-precision result ([ADR-00065](../adr/00/ADR-00065.md))"
+            ],
+            "decl": [
+              "Math.clz32",
+              "Math.fround",
+              "Math.imul"
             ]
           }
         ]

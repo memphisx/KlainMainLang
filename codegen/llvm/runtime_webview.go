@@ -19,7 +19,7 @@ func (e *Emitter) ensureWebviewRuntime() {
 	e.usedWebview = true
 	e.ensureStrHeaderRuntime()
 	if e.opts.Target.OS() != "windows" {
-		e.ensureHTTPRuntime()
+		e.ensureEventLoop()
 		return
 	}
 	e.ensureTimerRuntime()

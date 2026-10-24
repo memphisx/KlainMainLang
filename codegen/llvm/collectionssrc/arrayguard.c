@@ -1,5 +1,5 @@
 // arrayguard.c — an array's integrity level: Object.freeze, Object.seal and
-// Object.preventExtensions of an array record it in the frozen set, keyed by
+// Object.preventExtensions of an array record it in the header word before
 // the array's shared {data, len} header, and every array mutation asks here
 // first. The rejections are strict-mode TypeErrors with V8's messages.
 
@@ -9,13 +9,11 @@
 
 typedef long long i64;
 
-extern void *__kml_frozen_set_get(void);
-extern i64 __kml_map_num_get(void *map, i64 key);
 extern void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
 
 typedef struct { void *data; i64 len; } ArrHdr;
 
-// The integrity levels the frozen set records (emitStaticIntegrity).
+// The integrity levels a header word records (emitStaticIntegrity).
 enum { LVL_NONE = 0, LVL_FROZEN = 1, LVL_SEALED = 2, LVL_NONEXT = 3 };
 
 // The operations a mutation performs.
@@ -33,7 +31,7 @@ static void throw_type_error(const char *fmt, i64 arg) __attribute__((noreturn))
 static void throw_type_error(const char *fmt, i64 arg) {
     char buf[160];
     int n = snprintf(buf, sizeof buf, fmt, arg);
-    char *s = malloc(8 + (size_t)n + 1);
+    char *s = kml_alloc(KML_HEAP_RAW, 8 + (size_t)n + 1);
     *(i64 *)s = n;
     memcpy(s + 8, buf, (size_t)n + 1);
     __kml_throw_nullderef(s + 8);
@@ -45,24 +43,35 @@ static void read_only(i64 i) {
 static void not_extensible(i64 i) { throw_type_error("Cannot add property %lld, object is not extensible", i); }
 static void cannot_delete(i64 i) { throw_type_error("Cannot delete property '%lld' of [object Array]", i); }
 
-extern void __kml_map_num_set(void *map, i64 key, i64 value);
-
 // Set once any array has a level: until then a mutation skips the guard.
 char __kml_array_integrity_any;
 
 void __kml_array_set_level(void *hdr, i64 lvl) {
     if (!hdr) return;
-    void *set = __kml_frozen_set_get();
-    i64 cur = __kml_map_num_get(set, (i64)hdr);
     // A level only tightens: frozen (1) beats sealed (2) beats non-extensible (3).
-    if (cur != LVL_NONE && cur < lvl) return;
-    __kml_map_num_set(set, (i64)hdr, lvl);
+    kml_hdr_raise_level((i64 *)hdr - 1, lvl);
     __kml_array_integrity_any = 1;
 }
 
 i64 __kml_array_level(void *hdr) {
     if (!hdr) return LVL_NONE;
-    return __kml_map_num_get(__kml_frozen_set_get(), (i64)hdr);
+    return kml_hdr_level((const i64 *)hdr - 1);
+}
+
+// Whether sloppy code's direct write (OP_SET, OP_LENGTH) to the array is
+// refused: there it does nothing instead of throwing. Built-in methods
+// throw in sloppy code too, so they keep __kml_array_guard.
+i64 __kml_array_refuses(void *hdr, i64 op, i64 a) {
+    i64 lvl = __kml_array_level(hdr);
+    if (lvl == LVL_NONE) return 0;
+    i64 len = ((ArrHdr *)hdr)->len;
+    switch (op) {
+    case OP_SET:
+        return a >= len || lvl == LVL_FROZEN;
+    case OP_LENGTH:
+        return (lvl == LVL_FROZEN && a != len) || (lvl == LVL_SEALED && a < len);
+    }
+    return 0;
 }
 
 void __kml_array_guard(void *hdr, i64 op, i64 a, i64 b) {

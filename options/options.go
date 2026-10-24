@@ -14,6 +14,10 @@ type Options struct {
 	// NoAny bans the any/unknown escape hatch (TDD-00209). It has no meaning
 	// under -compat=js, and the CLI never sets it there.
 	NoAny bool
+	// NoUnusedLocals and NoUnusedParameters are TypeScript's checks of the
+	// same names: a local, or a parameter, that nothing reads is an error.
+	// Strict lane only.
+	NoUnusedLocals, NoUnusedParameters bool
 	// Decorators is the decorator dialect (TDD-00161): "experimental"
 	// (default, also "") or "standard" (TC39).
 	Decorators string

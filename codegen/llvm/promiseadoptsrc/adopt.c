@@ -19,7 +19,7 @@ typedef struct {
 } adopt_env;
 
 static void *closure_new(kml_fn0 fn, void *env) {
-    void *clo = malloc(KML_CLOSURE_SIZE);
+    void *clo = kml_alloc(KML_HEAP_WORDS, KML_CLOSURE_SIZE);
     F(clo, KML_CLOSURE_FN, kml_fn0) = fn;
     F(clo, KML_CLOSURE_ENV, void *) = env;
     return clo;
@@ -32,7 +32,7 @@ void __kml_promise_attach(void *p, void *clo) {
         __kml_microtask_enqueue(clo);
         return;
     }
-    void *node = malloc(KML_REACTION_SIZE);
+    void *node = kml_alloc(KML_HEAP_WORDS, KML_REACTION_SIZE);
     F(node, KML_REACTION_CLOSURE, void *) = clo;
     F(node, KML_REACTION_NEXT, void *) = F(p, KML_PROMISE_REACTIONS, void *);
     F(p, KML_PROMISE_REACTIONS, void *) = node;
@@ -53,7 +53,7 @@ void __kml_promise_adopt_job(void *envp) {
 }
 
 void __kml_promise_adopt(void *q, void *h) {
-    adopt_env *env = (adopt_env *)malloc(sizeof(adopt_env));
+    adopt_env *env = (adopt_env *)kml_alloc(KML_HEAP_WORDS, sizeof(adopt_env));
     env->q = q;
     env->h = h;
     __kml_microtask_enqueue(closure_new(__kml_promise_adopt_job, env));

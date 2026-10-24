@@ -10,11 +10,11 @@ import (
 // the address its data pointer lives at and the address its length lives at —
 // so the in-place mutators (push/pop/shift/unshift/splice) can write a new
 // ptr/len back. Three receiver shapes exist:
-//   - a named variable: the two allocas of its Symbol (Ptr/LenPtr);
-//   - an object/class array field (incl. `this.field`): the field's inline
-//     {ptr, i64} struct slot, split into its two sub-slots;
-//   - a nested-array element (`matrix[i]`): the element slot holds a box
-//     pointer to a heap {ptr, i64}, so mutating through the box updates every
+//   - a named variable: the data/len fields of the header its Symbol points at;
+//   - an object/class array field (incl. `this.field`): the field slot holds
+//     the array's shared header pointer, whose data/len fields are the location;
+//   - a nested-array element (`matrix[i]`): the element slot holds the inner
+//     array's header pointer, so mutating through the header updates every
 //     alias of that inner array.
 //
 // Anything else (a slice result, a call result, ...) has no writable home for
@@ -34,7 +34,7 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		if e.isDynamicBinding(obj.Name) {
 			break // a union narrowed to its array member: through its value
 		}
-		if !sym.Ty.IsArray || sym.Ty.ElemType == nil {
+		if !sym.Ty.IsArray() || sym.Ty.ElemType == nil {
 			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, obj.Name)
 		}
 		// Object-reference model (TDD-00127): the data/len field addresses of the
@@ -47,14 +47,14 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		return dataSlot, lenSlot, *sym.Ty.ElemType, nil
 
 	case *ast.MemberExpression:
-		if ot := e.inferExprType(obj.Object); (ot.IsMap && ot.IsDynamicObject) || (isUnconstrainedDynamic(ot) && ot.DynPropTy != nil) {
+		if ot := e.inferExprType(obj.Object); (ot.IsMap() && ot.IsDynamicObject()) || (isUnconstrainedDynamic(ot) && ot.DynPropTy != nil) {
 			break // `r.x.push(v)`: a dictionary's array value, as `r["x"]`
 		}
 		objVal, evalErr := e.emitExpr(obj.Object)
 		if evalErr != nil {
 			return "", "", Type{}, evalErr
 		}
-		if !objVal.Ty.IsObject {
+		if !objVal.Ty.IsObject() {
 			return "", "", Type{}, fmt.Errorf("%d:%d: %s requires an array variable, array field, or nested-array element", pos.Line, pos.Col, verb)
 		}
 		idx, fieldTy, ok := objVal.Ty.FieldIndex(obj.Property)
@@ -62,7 +62,7 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 			return "", "", Type{}, fmt.Errorf("%d:%d: no field '%s'", pos.Line, pos.Col, obj.Property)
 		}
 		fieldTy = e.canonicalizeClassTy(fieldTy)
-		if !fieldTy.IsArray || fieldTy.ElemType == nil {
+		if !fieldTy.IsArray() || fieldTy.ElemType == nil {
 			return "", "", Type{}, fmt.Errorf("%d:%d: field '%s' is not an array", pos.Line, pos.Col, obj.Property)
 		}
 		slot := e.freshReg()
@@ -84,14 +84,14 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		return ptrPtr, lenPtr, *fieldTy.ElemType, nil
 
 	case *ast.IndexExpression:
-		if ot := e.inferExprType(obj.Object); ot.IsMap || ot.IsDynamicObject || (isUnconstrainedDynamic(ot) && ot.DynPropTy != nil) {
-			break // a dictionary's array value: through its value (below)
+		if ot := e.inferExprType(obj.Object); ot.IsMap() || ot.IsDynamicObject() || ot.IsTuple() || (isUnconstrainedDynamic(ot) && ot.DynPropTy != nil) {
+			break // a dictionary's or tuple's array value: through its value (below)
 		}
 		slot, eTy, idxErr := e.emitIndexPtr(obj)
 		if idxErr != nil {
 			return "", "", Type{}, idxErr
 		}
-		if !eTy.IsArray || eTy.ElemType == nil {
+		if !eTy.IsArray() || eTy.ElemType == nil {
 			return "", "", Type{}, fmt.Errorf("%d:%d: %s requires an array-typed element", pos.Line, pos.Col, verb)
 		}
 		boxPtr := e.freshReg()
@@ -104,10 +104,10 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 	}
 	// Any other expression whose value carries its live header (an array
 	// unboxed from `any`, `(o.list as string[]).push(x)`): mutate through it.
-	if v, err := e.emitExpr(objExpr); err == nil && v.Ty.IsArray && v.Ty.ElemType != nil && v.ArrayHeader != "" {
+	if v, err := e.emitExpr(objExpr); err == nil && v.Ty.IsArray() && v.Ty.ElemType != nil {
 		lenPtr = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenPtr, arrayHeaderTy, v.ArrayHeader))
-		return v.ArrayHeader, lenPtr, *v.Ty.ElemType, nil
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenPtr, arrayHeaderTy, v.Ref))
+		return v.Ref, lenPtr, *v.Ty.ElemType, nil
 	}
 	return "", "", Type{}, fmt.Errorf("%d:%d: %s requires an array variable, array field, or nested-array element", pos.Line, pos.Col, verb)
 }
@@ -145,13 +145,9 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 
 	e.emitLabel(emptyL)
 	var zeroVal Value
-	if elemTy.IsArray {
-		// Nested-array element: zero is a {null, 0} aggregate.
-		r0 := e.freshReg()
-		r1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", r0))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
-		zeroVal = Value{Ref: r1, Ty: elemTy}
+	if elemTy.IsArray() {
+		// Nested-array element: the null header, undefined.
+		zeroVal = Value{Ref: "null", Ty: elemTy}
 	} else {
 		zeroVal = Value{Ref: missRef(elemTy), Ty: elemTy}
 	}
@@ -165,17 +161,13 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, curPtr, newLen))
 	result := e.loadArrayElem(slot, elemTy)
 
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.heapStore("i64", newLen, lenPtr, 8)
+	e.emitHolesCall("__kml_holes_splice", ptrPtr, newLen, "1", "0", curLen)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
 	phiReg := e.freshReg()
-	if elemTy.IsArray {
-		// Nested array: {ptr, i64} aggregate.
-		e.emitInstr(fmt.Sprintf("%s = phi {ptr, i64} [ %s, %%%s ], [ %s, %%%s ]", phiReg, zeroVal.Ref, emptyL, result.Ref, popL))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, popL))
-	}
+	e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, popL))
 
 	// The result is `T | undefined` (TDD-00187): present exactly when the
 	// array wasn't empty. isEmpty was computed in the pre-branch block, which
@@ -195,12 +187,13 @@ func (e *Emitter) emitPop(mem *ast.MemberExpression, args []ast.Expression, pos 
 // read past the backing allocation and corrupted the array's own length to
 // negative, a real memory-safety bug, not just a wrong-answer one).
 func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: splice takes at least 1 argument (start)", pos.Line, pos.Col)
-	}
 	ptrPtr, lenPtr, elemTy, err := e.resolveArrayMutLoc(mem.Object, "splice", pos)
 	if err != nil {
 		return Value{}, err
+	}
+	if len(args) == 0 {
+		// `splice()` (reachable through `any`) removes nothing.
+		return Value{Ref: e.newArrayHeader("null", "0"), Ty: ArrayOf(elemTy)}, nil
 	}
 
 	curPtr := e.freshReg()
@@ -230,7 +223,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 		if err != nil {
 			return Value{}, err
 		}
-		delRaw, err = e.coerceChecked(delRaw, TypeI64, args[1].GetPos(), "splice deleteCount")
+		delRaw, err = e.convertChecked(delRaw, TypeI64, args[1].GetPos(), "splice deleteCount")
 		if err != nil {
 			return Value{}, err
 		}
@@ -260,7 +253,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	copyBytes := e.freshReg()
 	removedSrc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", copyBytes, delCount, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", resultPtr, copyBytes))
+	e.heapMallocInto(resultPtr, copyBytes)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", removedSrc, elemTy.IR, curPtr, startN))
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", resultPtr, removedSrc, copyBytes))
 
@@ -293,7 +286,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	newBytes := e.freshReg()
 	reallocedPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", reallocedPtr, curPtr, newBytes))
+	e.heapReallocInto(reallocedPtr, curPtr, newBytes)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterGrowL))
 
 	e.emitLabel(afterGrowL)
@@ -324,7 +317,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 		if err != nil {
 			return Value{}, err
 		}
-		itemVal, err = e.coerceChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
+		itemVal, err = e.convertChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
 		if err != nil {
 			return Value{}, err
 		}
@@ -335,14 +328,15 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 		e.storeArrayElem(slot, elemTy, itemVal)
 	}
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", workPtr, ptrPtr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.heapStore("ptr", workPtr, ptrPtr, 8)
+	e.heapStore("i64", newLen, lenPtr, 8)
 
-	// Pack the removed elements into a {ptr, i64} aggregate.
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, resultPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, delCount))
+	// Pack the removed elements into a fresh array header, their holes kept.
+	r1 := e.newArrayHeader(resultPtr, delCount)
+	if e.holesUsed() {
+		e.emitHolesCopy(r1, "0", ptrPtr, startN, delCount)
+	}
+	e.emitHolesCall("__kml_holes_splice", ptrPtr, startN, delCount, fmt.Sprint(numInserted), curLen)
 
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
@@ -380,7 +374,7 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 		if err != nil {
 			return Value{}, err
 		}
-		delRaw, err := e.coerceChecked(delRaw0, TypeI64, args[1].GetPos(), "splice deleteCount")
+		delRaw, err := e.convertChecked(delRaw0, TypeI64, args[1].GetPos(), "splice deleteCount")
 		if err != nil {
 			return Value{}, err
 		}
@@ -411,7 +405,7 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 	newBytes := e.freshReg()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, newBytes))
+	e.heapMallocInto(newPtr, newBytes)
 
 	// Segment 1: [0, start) copied as-is.
 	headBytes := e.freshReg()
@@ -424,7 +418,7 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 		if err != nil {
 			return Value{}, err
 		}
-		itemVal, err = e.coerceChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
+		itemVal, err = e.convertChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
 		if err != nil {
 			return Value{}, err
 		}
@@ -450,10 +444,7 @@ func (e *Emitter) emitArrayToSpliced(mem *ast.MemberExpression, args []ast.Expre
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", tailDst, elemTy.IR, newPtr, startPlusIns))
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", tailDst, tailSrc, tailBytes))
 
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, newLen))
+	r1 := e.newArrayHeader(newPtr, newLen)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
@@ -487,12 +478,8 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 
 	e.emitLabel(emptyL)
 	var zeroVal Value
-	if elemTy.IsArray {
-		r0 := e.freshReg()
-		r1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", r0))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
-		zeroVal = Value{Ref: r1, Ty: elemTy}
+	if elemTy.IsArray() {
+		zeroVal = Value{Ref: "null", Ty: elemTy}
 	} else {
 		zeroVal = Value{Ref: missRef(elemTy), Ty: elemTy}
 	}
@@ -512,17 +499,14 @@ func (e *Emitter) emitShift(mem *ast.MemberExpression, args []ast.Expression, po
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", moveBytes, newLen, elemTy.Align()))
 	e.ensureMemmove()
 	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", curPtr, src, moveBytes))
+	e.emitHolesCall("__kml_holes_splice", ptrPtr, "0", "1", "0", curLen)
 
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.heapStore("i64", newLen, lenPtr, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
 	phiReg := e.freshReg()
-	if elemTy.IsArray {
-		e.emitInstr(fmt.Sprintf("%s = phi {ptr, i64} [ %s, %%%s ], [ %s, %%%s ]", phiReg, zeroVal.Ref, emptyL, result.Ref, shiftL))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, shiftL))
-	}
+	e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", phiReg, elemTy.IR, zeroVal.Ref, emptyL, result.Ref, shiftL))
 
 	// `T | undefined`: present exactly when the array wasn't empty (TDD-00187).
 	notEmpty := e.freshReg()
@@ -551,10 +535,10 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 		// numeric default and mis-decode when later called.
 		var v Value
 		var err error
-		if lit, ok := arg.(*ast.ArrayLiteral); ok && elemTy.IsTuple && !elemTy.IsArray {
+		if lit, ok := arg.(*ast.ArrayLiteral); ok && elemTy.IsTuple() && !elemTy.IsArray() {
 			// A tuple element (`[number, string][]`): the literal is that tuple.
 			v, err = e.emitTupleLiteral(lit, lit.Elements, elemTy)
-		} else if elemTy.IsFunc || elemTy.IsDynamic {
+		} else if elemTy.IsFunc() || elemTy.IsDynamic() {
 			// A boxed-element array (`any[]`, TDD-00200): route object/array
 			// literals through the object-hint path so they lower to
 			// self-describing D1 dynamic values (dynobj/dynarr) rather than a
@@ -569,7 +553,7 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 		if err != nil {
 			return Value{}, err
 		}
-		ce, err := e.coerceChecked(v, elemTy, arg.GetPos(), "array element")
+		ce, err := e.convertChecked(v, elemTy, arg.GetPos(), "array element")
 		if err != nil {
 			return Value{}, err
 		}
@@ -593,7 +577,7 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 
 	e.ensureRealloc()
 	newPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+	e.heapReallocInto(newPtr, curPtr, newBytes)
 
 	// dst = newPtr + N elements; move existing elements right
 	dst := e.freshReg()
@@ -610,8 +594,9 @@ func (e *Emitter) emitUnshift(mem *ast.MemberExpression, args []ast.Expression, 
 		e.storeArrayElem(slot, elemTy, val)
 	}
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.heapStore("ptr", newPtr, ptrPtr, 8)
+	e.heapStore("i64", newLen, lenPtr, 8)
+	e.emitHolesCall("__kml_holes_splice", ptrPtr, "0", "0", fmt.Sprint(len(vals)), curLen)
 
 	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }
@@ -639,10 +624,10 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 		// numeric default and mis-decode when later called.
 		var v Value
 		var err error
-		if lit, ok := arg.(*ast.ArrayLiteral); ok && elemTy.IsTuple && !elemTy.IsArray {
+		if lit, ok := arg.(*ast.ArrayLiteral); ok && elemTy.IsTuple() && !elemTy.IsArray() {
 			// A tuple element (`[number, string][]`): the literal is that tuple.
 			v, err = e.emitTupleLiteral(lit, lit.Elements, elemTy)
-		} else if elemTy.IsFunc || elemTy.IsDynamic {
+		} else if elemTy.IsFunc() || elemTy.IsDynamic() {
 			// A boxed-element array (`any[]`, TDD-00200): route object/array
 			// literals through the object-hint path so they lower to
 			// self-describing D1 dynamic values (dynobj/dynarr) rather than a
@@ -657,7 +642,7 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 		if err != nil {
 			return Value{}, err
 		}
-		ce, err := e.coerceChecked(v, elemTy, arg.GetPos(), "array element")
+		ce, err := e.convertChecked(v, elemTy, arg.GetPos(), "array element")
 		if err != nil {
 			return Value{}, err
 		}
@@ -675,13 +660,8 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 	e.emitArrayGuard(ptrPtr, arrOpAdd, curLen, "0")
 
 	newLen := e.freshReg()
-	newBytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, curLen, len(vals)))
-	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
-
-	e.ensureRealloc()
-	newPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+	newPtr := e.emitArrayReserve(ptrPtr, curPtr, curLen, newLen, elemTy)
 
 	for i, val := range vals {
 		slotIdx := e.freshReg()
@@ -691,10 +671,49 @@ func (e *Emitter) emitPush(mem *ast.MemberExpression, args []ast.Expression, pos
 		e.storeArrayElem(slot, elemTy, val)
 	}
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.heapStore("ptr", newPtr, ptrPtr, 8)
+	e.heapStore("i64", newLen, lenPtr, 8)
 
 	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
+}
+
+// emitArrayReserve is the data buffer of the array header hdr (data
+// curPtr, length curLen) with room for newLen elements: curPtr itself when
+// its heap block already has the room, else a reallocation to geometric
+// capacity (twice the length, at least newLen and 4). Amortized, as an
+// engine's backing store grows, so n pushes cost O(n) and not O(n²) copies
+// under an allocator that never grows a block in place (ASan's). The room
+// is the allocator's own answer, never a word in the header: any writer of
+// the data pointer, however it got its buffer, leaves it truthful.
+func (e *Emitter) emitArrayReserve(hdr, curPtr, curLen, newLen string, elemTy Type) string {
+	e.ensureHeapUsable()
+	have, need, fits := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_heap_usable(ptr %s)", have, curPtr))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", need, newLen, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = icmp sle i64 %s, %s", fits, need, have))
+	fromL := e.freshLabel("reserve.from")
+	growL, doneL := e.freshLabel("reserve.grow"), e.freshLabel("reserve.done")
+	e.emitTerminator("br label %" + fromL)
+	e.emitLabel(fromL)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fits, doneL, growL))
+
+	e.emitLabel(growL)
+	dbl, c1, m1, c2, newCap, bytes := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = shl i64 %s, 1", dbl, curLen))
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", c1, dbl, newLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", m1, c1, dbl, newLen))
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 4", c2, m1))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 4", newCap, c2, m1))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, newCap, elemTy.Align()))
+	e.ensureRealloc()
+	grown := e.freshReg()
+	e.heapReallocInto(grown, curPtr, bytes)
+	e.emitTerminator("br label %" + doneL)
+
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, curPtr, fromL, grown, growL))
+	return r
 }
 
 // emitArrayLengthAssign implements `arr.length = n`: a shorter length drops
@@ -712,7 +731,7 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	num, err := e.coerceChecked(v, TypeF64, rhs.GetPos(), "array length")
+	num, err := e.convertChecked(v, TypeF64, rhs.GetPos(), "array length")
 	if err != nil {
 		return Value{}, err
 	}
@@ -737,14 +756,15 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	e.emitLabel(badL)
 	e.ensureExceptionHelpers()
 	errObj := e.buildErrorObj(errorKindIDs["RangeError"], e.internString("Invalid array length"), e.internString("RangeError"))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.excThrow(errObj)
 	e.emitTerminator("unreachable")
 	e.emitLabel(goodL)
 
 	curPtr, curLen := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenPtr))
-	e.emitArrayGuard(ptrPtr, arrOpLength, n, "0")
+	refusedL := e.freshLabel("arrlen.refused")
+	e.emitArrayWriteGuard(ptrPtr, arrOpLength, n, refusedL)
 	grow := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", grow, n, curLen))
 	growL, doneL := e.freshLabel("arrlen.grow"), e.freshLabel("arrlen.done")
@@ -764,14 +784,14 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	e.emitLabel(freshL)
 	e.ensureCalloc()
 	e.ensureFree()
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", curPtr))
+	e.heapFree(curPtr)
 	freshPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", freshPtr, n, width))
+	e.heapCallocInto(freshPtr, n, fmt.Sprint(width))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(keepL)
 	e.ensureRealloc()
 	keptPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", keptPtr, curPtr, bytes))
+	e.heapReallocInto(keptPtr, curPtr, bytes)
 	tail := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", tail, keptPtr, e.mulConst(curLen, width)))
 	tailBytes := e.freshReg()
@@ -782,7 +802,7 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	e.emitLabel(joinL)
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", newPtr, freshPtr, freshL, keptPtr, keepL))
-	if elemTy.IsDynamic && elemTy.IR == "i64" {
+	if elemTy.IsDynamic() && elemTy.IR == "i64" {
 		// Boxed elements: each new slot holds undefined.
 		idx := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
@@ -798,18 +818,21 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 		e.emitLabel(bodyL)
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, newPtr, i))
-		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+		e.heapStore("i64", fmt.Sprint(nbUndefined), slot, 8)
 		next := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(endL)
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
+	e.heapStore("ptr", newPtr, ptrPtr, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", n, lenPtr))
+	e.heapStore("i64", n, lenPtr, 8)
+	e.emitHolesCall("__kml_holes_setlen", ptrPtr, curLen, n)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", refusedL))
+	e.emitLabel(refusedL) // sloppy code's refused write lands here too
 	return num, nil
 }
 
@@ -850,15 +873,15 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 		return Value{}, true, err
 	}
 
-	// Hint + coerceChecked mirror the fixed-bounds path exactly: the hint
+	// Hint + convertChecked mirror the fixed-bounds path exactly: the hint
 	// types array/object-literal RHSes against the element type
-	// (TDD-00028), and coerceChecked turns a genuine mismatch (`a[i] =
+	// (TDD-00028), and convertChecked turns a genuine mismatch (`a[i] =
 	// 'str'` into number[]) into a clean compile error (ADR-00688).
 	val, err := e.emitExprWithObjectHint(rhs, elemTy)
 	if err != nil {
 		return Value{}, true, err
 	}
-	val, err = e.coerceChecked(val, elemTy, idxEx.GetPos(), "array-element assignment")
+	val, err = e.convertChecked(val, elemTy, idxEx.GetPos(), "array-element assignment")
 	if err != nil {
 		return Value{}, true, err
 	}
@@ -867,7 +890,27 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	// reallocated this array (e.g. `arr[i] = arr.push(0)`).
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenPtr))
-	e.emitArrayGuard(ptrPtr, arrOpSet, idxVal.Ref, "0")
+	doneL := e.freshLabel("arridx.done")
+	e.emitArrayWriteGuard(ptrPtr, arrOpSet, idxVal.Ref, doneL)
+
+	// An index no array index (negative, or 2^32-1 and up) names an
+	// ordinary own property of the array: no element, no growth.
+	if e.holesUsed() {
+		e.ensureHoles()
+		e.ensureShapeRuntime()
+		notIdx := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, 4294967295", notIdx, idxVal.Ref))
+		propL, idxL := e.freshLabel("arridx.prop"), e.freshLabel("arridx.index")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notIdx, propL, idxL))
+		e.emitLabel(propL)
+		boxed, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, true, err
+		}
+		e.emitInstr(fmt.Sprintf("call void @__kml_holes_prop_set(ptr %s, i64 %s, i64 %s)", ptrPtr, idxVal.Ref, boxed.Ref))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(idxL)
+	}
 
 	past := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", past, idxVal.Ref, lenReg))
@@ -875,11 +918,24 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	inrangeChkL := e.freshLabel("arridx.chk")
 	appendL := e.freshLabel("arridx.append")
 	storeL := e.freshLabel("arridx.store")
-	doneL := e.freshLabel("arridx.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", past, oobL, inrangeChkL))
 
+	// A write past the end grows the array, the elements between left holes.
 	e.emitLabel(oobL)
-	e.emitInternalThrow(e.internString("Array index out of bounds"))
+	e.ensureRealloc()
+	gPtr, gLen, gBytes, gNew := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", gPtr, ptrPtr))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", gLen, idxVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", gBytes, gLen, elemTy.Align()))
+	e.heapReallocInto(gNew, gPtr, gBytes)
+	e.emitFillHoles(gNew, lenReg, idxVal.Ref, elemTy)
+	gSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gSlot, elemTy.IR, gNew, idxVal.Ref))
+	e.storeArrayElem(gSlot, elemTy, val)
+	e.heapStore("ptr", gNew, ptrPtr, 8)
+	e.heapStore("i64", gLen, lenPtr, 8)
+	e.emitHolesMark(ptrPtr, lenReg, idxVal.Ref)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(inrangeChkL)
 	isAppend := e.freshReg()
@@ -895,20 +951,41 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newLen, lenReg))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, elemTy.Align()))
 	newPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+	e.heapReallocInto(newPtr, curPtr, newBytes)
 	slotA := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotA, elemTy.IR, newPtr, idxVal.Ref))
 	e.storeArrayElem(slotA, elemTy, val)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.heapStore("ptr", newPtr, ptrPtr, 8)
+	e.heapStore("i64", newLen, lenPtr, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(storeL)
+	if e.holesUsed() && !elemTy.Inline {
+		// A write to an accessor element runs its setter instead.
+		e.ensureHoles()
+		holey := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", holey, e.emitHolesWord(ptrPtr)))
+		accL, plainL := e.freshLabel("arridx.acc"), e.freshLabel("arridx.plain")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", holey, accL, plainL))
+		e.emitLabel(accL)
+		boxed, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, true, err
+		}
+		took, tookB := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_holes_elem_set(ptr %s, i64 %s, i64 %s)", took, ptrPtr, idxVal.Ref, boxed.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", tookB, took))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tookB, doneL, plainL))
+		e.emitLabel(plainL)
+	}
 	curPtr2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr2, ptrPtr))
 	slotB := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotB, elemTy.IR, curPtr2, idxVal.Ref))
 	e.storeArrayElem(slotB, elemTy, val)
+	if e.holesUsed() {
+		e.emitHoleFill(ptrPtr, idxVal.Ref)
+	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
@@ -956,7 +1033,7 @@ func (e *Emitter) emitArrayInsertSpread(ptrPtr, lenPtr string, elemTy Type, args
 	e.ensureRealloc()
 	e.ensureMemcpy()
 	newPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+	e.heapReallocInto(newPtr, curPtr, newBytes)
 	if atStart {
 		e.ensureMemmove()
 		shifted := e.freshReg()
@@ -968,7 +1045,10 @@ func (e *Emitter) emitArrayInsertSpread(ptrPtr, lenPtr string, elemTy Type, args
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, newPtr, curBytes))
 		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, src, addBytes))
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, ptrPtr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenPtr))
+	e.heapStore("ptr", newPtr, ptrPtr, 8)
+	e.heapStore("i64", newLen, lenPtr, 8)
+	if atStart {
+		e.emitHolesCall("__kml_holes_splice", ptrPtr, "0", "0", n, curLen)
+	}
 	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }

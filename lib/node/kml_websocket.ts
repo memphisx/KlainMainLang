@@ -316,7 +316,7 @@ export class WebSocket extends EventTarget {
             new Uint8Array(ab).set(bytes);
             data = ab;
         } else {
-            data = new Blob([bytes]);
+            data = new Blob([new Uint8Array(bytes)]);
         }
         this.dispatchEvent(new MessageEvent('message', { data, origin: new URL(this.#url).origin }));
     }

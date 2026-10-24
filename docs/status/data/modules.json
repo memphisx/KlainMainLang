@@ -34,7 +34,7 @@
             "feature": "Local export list (`export { a, b as c }`, `export {}`)",
             "status": "implemented",
             "notes": [
-              "Exports the file's own top-level declarations, optionally under another name; a name the file does not declare is a compile error. `export {}` exports nothing ([ADR-01130](../adr/ADR-01130.md))"
+              "Exports the file's own top-level declarations, optionally under another name; a name the file does not declare is a compile error. `export {}` exports nothing ([ADR-01130](../adr/01/ADR-01130.md))"
             ]
           },
           {
@@ -71,7 +71,7 @@
             "notes": [
               "An *acyclic* imported file's top-level statements run exactly once, in real dependency order, strictly before whatever imports it — no restriction to declarations-only",
               "Diamond-shared dependencies still run exactly once (existing per-path memoization)",
-              "The literal-only initializer rule exists because a cyclic pair reading each other's not-yet-initialized binding would be an uninitialized read; a literal can never observe one. See [TDD-00052](../tdd/TDD-00052.md)/[ADR-00145](../adr/ADR-00145.md)"
+              "The literal-only initializer rule exists because a cyclic pair reading each other's not-yet-initialized binding would be an uninitialized read; a literal can never observe one. See [TDD-00052](../tdd/TDD-00052.md)/[ADR-00145](../adr/00/ADR-00145.md)"
             ]
           },
           {
@@ -80,7 +80,7 @@
             "notes": [
               "Every top-level declaration gets a file-private mangled name, and every reference to it is rewritten via a real scope-aware walk — two unrelated files may freely declare the same top-level name",
               "Binding two different files' exports to the *same local name* in one importing file with no `as` is still rejected (a real conflict, same as real ES modules)",
-              "See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/ADR-00134.md)"
+              "See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/00/ADR-00134.md)"
             ]
           },
           {
@@ -88,7 +88,7 @@
             "status": "implemented",
             "notes": [
               "A direct consequence of the per-file rename mechanism above — `b` is simply bound to the target's mangled name for `a`, no separate rename step",
-              "See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/ADR-00134.md)"
+              "See [TDD-00041](../tdd/TDD-00041.md)/[ADR-00134](../adr/00/ADR-00134.md)"
             ]
           },
           {
@@ -96,9 +96,9 @@
             "status": "implemented",
             "notes": [
               "Erased with the statement; a builtin module's types (`import type { IncomingMessage } from 'http'`) are the library's",
-              "A named import of a Node class this compiler implements only as a type (`import { IncomingMessage } from 'http'`) is a type import too, plain or aliased ([ADR-01152](../adr/ADR-01152.md))",
+              "A named import of a Node class this compiler implements only as a type (`import { IncomingMessage } from 'http'`) is a type import too, plain or aliased ([ADR-01152](../adr/01/ADR-01152.md))",
               "A value use of a type-only import is TS1361; `import type from './x'` stays a default import named `type`",
-              "See [ADR-01146](../adr/ADR-01146.md)"
+              "See [ADR-01146](../adr/01/ADR-01146.md)"
             ],
             "caveats": [
               "A Node class of a module code generation implements (`Hash`, `Http2ServerRequest`, …) is a type only: a value use is a compile error; the classes of the modules written in TypeScript (`net`, `tls`, `http`, `https`, `stream`, `events`, `child_process`, `tty`, `readline`, `string_decoder`) are values"
@@ -110,7 +110,7 @@
             "notes": [
               "Named (`export default function foo() {...}`/`class Foo {...}`/`interface`/`type`/`enum`) and anonymous function/class forms, plus an arbitrary expression (`export default 42`, wrapped as a synthetic `const`)",
               "Exposed only under the export key `\"default\"` — a named default export's own name stays usable for intra-file self-reference (recursion, etc.) but is not itself importable via `import { foo }`, matching real ES modules",
-              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/ADR-00135.md)"
+              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/00/ADR-00135.md)"
             ]
           },
           {
@@ -119,19 +119,18 @@
             "notes": [
               "Also combinable with a named list in one statement: `import x, { a, b } from './path'`",
               "Sugar over the same specifier machinery as a named import (`{Imported: \"default\", Local: \"x\"}`) — no separate resolver mechanism",
-              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/ADR-00135.md)"
+              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/00/ADR-00135.md)"
             ]
           },
           {
             "feature": "`import * as ns from '...'` (namespace import)",
             "status": "implemented",
-            "caveats": [
-              "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message"
-            ],
+            "caveats": [],
             "notes": [
               "`ns.member` is rewritten directly to that member's mangled name during resolution",
+              "`ns` read as a value (`typeof ns`, `const p = ns`, `ns[\"x\"]`, an argument) is the module namespace object: the value exports in sorted key order, sealed, its writes rejected, printed `[Module: null prototype] { … }` ([ADR-01731](../adr/01/ADR-01731.md))",
               "Only actually-exported members are reachable (`ns.privateHelper` is rejected, same visibility rule as a named import); `ns.default` reaches a default export the same way any other member does",
-              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/ADR-00135.md)"
+              "See [TDD-00042](../tdd/TDD-00042.md)/[ADR-00135](../adr/00/ADR-00135.md)"
             ]
           },
           {
@@ -143,7 +142,7 @@
             "notes": [
               "`const x = require('m')` binds the namespace (whole module object); `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only",
               "Desugared to the equivalent ES import at parse time, so it resolves and dispatches identically to `import`; interoperates with `import` in the same file",
-              "See [ADR-00369](../adr/ADR-00369.md)"
+              "See [ADR-00369](../adr/00/ADR-00369.md)"
             ]
           },
           {
@@ -158,7 +157,7 @@
               "`export *` never forwards a `default`, matching real ES modules",
               "Chains of arbitrary depth resolve transitively (a file re-exporting from a file that itself re-exports resolves through)",
               "A re-export forwards a name to this file's importers only — it does *not* become a usable bare identifier inside the re-exporting file itself, same as real ES modules",
-              "See [TDD-00051](../tdd/TDD-00051.md)/[ADR-00144](../adr/ADR-00144.md)"
+              "See [TDD-00051](../tdd/TDD-00051.md)/[ADR-00144](../adr/00/ADR-00144.md)"
             ]
           },
           {
@@ -178,16 +177,17 @@
             "status": "implemented",
             "caveats": [
               "String-literal specifier only — a runtime-computed `import(expr)` is a clean compile error (all imports resolve at compile time)",
-              "The result object exposes the target's **annotated scalar/string exports** only; `function`/`class`/array/object exports are omitted, and an un-annotated export has no field (module namespace objects are missing for static `import * as ns` too)",
+              "Under `-dynamic-import=isolated` the result object exposes the target's **annotated scalar/string exports** only; `function`/`class`/array/object exports are omitted, and an un-annotated export has no field",
               "`import('node:…')` of a builtin module is a clean compile error",
               "`-dynamic-import=lazy` and `-dynamic-import=isolated` refuse `--static` (a static binary can't `dlopen`); on Windows `lazy` compiles the program's thread-locals emulated (a call per access, [TDD-00254](../tdd/TDD-00254.md))",
               "Under `-dynamic-import=isolated`, an island's sockets, pipes and children are invisible to the importer's event loop: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](../tdd/TDD-00225.md)); the island's timers are folded exactly"
             ],
             "notes": [
+              "Under `bundled` and `lazy` the import resolves to the target's module namespace object, as Node's: every value export, `let` exports live, keys sorted, one object per module",
               "Default `-dynamic-import=bundled`: the target is compiled into the binary and runs on first `import()`, as a task on the program's one event loop, on the microtask Node evaluates it on; it shares every module instance (builtin or user) with the program, a top-level throw rejects every `import()` of it, and an unsettled top-level `await` ends the process with code 13. Works with `--static`",
               "`-dynamic-import=lazy`: the same semantics, with each target's own code in a shared library in `<binary>.d/`, loaded on first `import()` and bound to the executable's library, runtime and event loop. Verified on darwin/arm64 and Linux x86-64, both memory modes",
               "`-dynamic-import=isolated`: each target is its own program in a shared-library island, with its own instance of every module it imports — a deliberate divergence from Node, for keeping a target's import-time state apart from the program's",
-              "See [ADR-01330](../adr/ADR-01330.md)/[TDD-00238](../tdd/TDD-00238.md) (bundled, lazy) and [ADR-00515](../adr/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md) (isolated)"
+              "See [ADR-01330](../adr/01/ADR-01330.md)/[TDD-00238](../tdd/TDD-00238.md) (bundled, lazy) and [ADR-00515](../adr/00/ADR-00515.md)/[TDD-00056](../tdd/TDD-00056.md) (isolated)"
             ]
           },
           {
@@ -197,19 +197,19 @@
               "`import.meta.url` is the only supported member — bare `import.meta` or any other member (`import.meta.resolve`, etc.) is a clean parse-time error"
             ],
             "notes": [
-              "Resolved entirely at compile time, per file, into a plain string literal — that file's own absolute path as Node renders it: percent-encoded (`my dir/a#b.ts` → `…/my%20dir/a%23b.ts`), `file:///C:/dir/f.ts` on Windows, `file://server/share/f.ts` for a UNC path — so `fileURLToPath(import.meta.url)` and `new URL('./x', import.meta.url)` behave as in Node ([ADR-01046](../adr/ADR-01046.md)); codegen never sees a real \"module metadata object\"",
-              "See [TDD-00055](../tdd/TDD-00055.md) Stage 1/[ADR-00148](../adr/ADR-00148.md)"
+              "Resolved entirely at compile time, per file, into a plain string literal — that file's own absolute path as Node renders it: percent-encoded (`my dir/a#b.ts` → `…/my%20dir/a%23b.ts`), `file:///C:/dir/f.ts` on Windows, `file://server/share/f.ts` for a UNC path — so `fileURLToPath(import.meta.url)` and `new URL('./x', import.meta.url)` behave as in Node ([ADR-01046](../adr/01/ADR-01046.md)); codegen never sees a real \"module metadata object\"",
+              "See [TDD-00055](../tdd/TDD-00055.md) Stage 1/[ADR-00148](../adr/00/ADR-00148.md)"
             ]
           },
           {
             "feature": "Import-gated built-in bindings (`fs`/`path`/`os`/`querystring`/`assert`/`http`/`cluster`/`Memory`)",
             "status": "implemented",
             "notes": [
-              "`import fs from 'fs'`, `import * as fs from 'fs'`, and `import { readFileSync } from 'fs'` (including aliasing and combining a default with named specifiers in one statement) all bind through the same scope-aware machinery as a real file import; every Node-named builtin also resolves under the **`node:` prefix** (`import test from 'node:test'` — [ADR-00419](../adr/ADR-00419.md))",
+              "`import fs from 'fs'`, `import * as fs from 'fs'`, and `import { readFileSync } from 'fs'` (including aliasing and combining a default with named specifiers in one statement) all bind through the same scope-aware machinery as a real file import; every Node-named builtin also resolves under the **`node:` prefix** (`import test from 'node:test'` — [ADR-00419](../adr/00/ADR-00419.md))",
               "A local variable of the same name correctly shadows it instead of silently colliding ([TDD-00049](../tdd/TDD-00049.md))",
               "Importing an unknown member is a clean, explicit rejection",
               "Node-style built-ins require a default, namespace, or named import; `process`/`console` stay ambient by design, matching real Node/JS",
-              "See [ADR-00141](../adr/ADR-00141.md)/[ADR-00142](../adr/ADR-00142.md)"
+              "See [ADR-00141](../adr/00/ADR-00141.md)/[ADR-00142](../adr/00/ADR-00142.md)"
             ]
           }
         ]
@@ -221,7 +221,7 @@
     },
     {
       "kind": "block",
-      "text": "- Whole-program compilation, not separate compilation units — `resolver.ResolveProgram` merges the entry file plus every transitive import into one `*ast.Program` before codegen. No linker step, no per-file LLVM module boundary, and `codegen/llvm` never sees an `import`/`export` node. See [ADR-00022](../adr/ADR-00022.md)/[ADR-00134](../adr/ADR-00134.md)/[ADR-00135](../adr/ADR-00135.md)."
+      "text": "- Whole-program compilation, not separate compilation units — `resolver.ResolveProgram` merges the entry file plus every transitive import into one `*ast.Program` before codegen. No linker step, no per-file LLVM module boundary, and `codegen/llvm` never sees an `import`/`export` node. See [ADR-00022](../adr/00/ADR-00022.md)/[ADR-00134](../adr/00/ADR-00134.md)/[ADR-00135](../adr/00/ADR-00135.md)."
     }
   ]
 }

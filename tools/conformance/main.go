@@ -160,6 +160,10 @@ func inScope(fm frontmatter, category string) bool {
 // performance gate.
 const codegenTimeout = 30 * time.Second
 
+// nodeDefaultTimeout is the node suite's per-test run limit when -timeout
+// is not given.
+const nodeDefaultTimeout = 30 * time.Second
+
 // clangCommitBudget is the memory reserved per worker when deriving the
 // default worker count: a `clang -O2` over an emitted module with the
 // runtimes linked in peaks well under 1 GiB; 1.5 GiB leaves the run phase
@@ -170,9 +174,8 @@ const clangCommitBudget = 1536 << 20
 // ("" == strict, "js" == -compat=js) — a package global, like regexModeFlag,
 // because the per-file runners are deep in worker goroutines. Lanes never
 // run concurrently (a -compat=both node run is strictly sequential), so a
-// plain global is safe. Note the resolver-side permissive bool is `true` in
-// BOTH lanes (ADR-00472: both oracles' referents allow global shadowing) —
-// the lane axis is the emitter's -compat semantics.
+// plain global is safe. The resolver runs under the same lane, as the CLI
+// does under -compat.
 var laneCompat string
 
 // regexModeFlag mirrors klainmain's -regex flag (TDD-00067) for the compiled
@@ -299,6 +302,11 @@ func blockerOf(msg string) string {
 var reQuotedCapture = regexp.MustCompile(`'([^']+)'`)
 
 func main() {
+	// The front end runs in this process for every file; without a limit
+	// the collector lets its garbage reach gigabytes over a suite.
+	if os.Getenv("GOMEMLIMIT") == "" {
+		debug.SetMemoryLimit(1536 << 20)
+	}
 	corpus := flag.String("corpus", ".test262", "path to a test262 checkout (see fetch.sh)")
 	out := flag.String("out", "", "report output path override for a single-lane run (default: the per-lane folder docs/testing/<lane>/CONFORMANCE-RESULTS.md); ignored under -compat=both")
 	category := flag.String("category", "", "only run files under test/<category> (default: everything, unfiltered)")
@@ -357,7 +365,8 @@ func main() {
 	// (the runner's in-process codegen holds most of it, budget.go). A
 	// smaller cap makes the run slower, not wrong.
 	memCapMB := flag.Int("mem-cap-mb", 2048, "abort the run if workdir processes' total RSS exceeds this many MB (0 disables); the machine-safety backstop for runaway detached/cluster children")
-	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing; for -suite=ts every case with its verdict")
+	passList := flag.String("passlist", "", "optional path: write the sorted list of passing file paths (one per line) for regression diffing, one file per lane under -compat=both (<path>.strict, <path>.js); for -suite=ts every case with its verdict")
+	onlyList := flag.String("only", "", "optional path: run only the test262 files it lists (one test/-relative path per line), for re-checking a regression list")
 	failList := flag.String("faillist", "", "optional path: write the sorted list of failing files as `path\\treason` (one per line) — for finding near-miss clusters (e.g. RUNTIME_NONZERO_EXIT, which already compiled and ran)")
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
 	compatFlag := flag.String("compat", "strict", "emitter compat lane: strict (default), js, or both (node suite only) — TDD-00022; the corpora are untyped JS, so the js lane measures the vanilla-JS-compat surface")
@@ -430,10 +439,20 @@ func main() {
 		// corpus once per lane (strict then js) and the report carries both
 		// scores plus the delta (TDD-00022).
 	case "node":
-		runNodeSuite(*workDir, *perFileTimeout, *workers, *compatFlag, *limit, *category)
+		// Node's own tests outlive Test262's: a keep-alive connection holds a
+		// test open for the server's 5 s keepAliveTimeout under Node too, so
+		// the 5 s Test262 default timed such a test out. Node's harness
+		// allows far longer.
+		nodeTimeout := *perFileTimeout
+		timeoutSet := false
+		flag.Visit(func(f *flag.Flag) { timeoutSet = timeoutSet || f.Name == "timeout" })
+		if !timeoutSet {
+			nodeTimeout = nodeDefaultTimeout
+		}
+		runNodeSuite(*workDir, nodeTimeout, *workers, *compatFlag, *limit, *category, *passList)
 		return
 	case "wpt":
-		runWPTSuite(*workDir, *perFileTimeout, *workers, *compatFlag)
+		runWPTSuite(*workDir, *perFileTimeout, *workers, *compatFlag, *passList)
 		return
 	case "ts":
 		runTSSuite(*workDir, *perFileTimeout, *compatFlag, *passList)
@@ -442,7 +461,7 @@ func main() {
 		fatal("unknown -suite %q (want test262, node, wpt, or ts)", *suite)
 	}
 
-	partialRun = *category != "" || *limit > 0
+	partialRun = *category != "" || *limit > 0 || *onlyList != ""
 
 	testDir := filepath.Join(*corpus, "test")
 	harnessDir := filepath.Join(*corpus, "harness")
@@ -487,6 +506,25 @@ func main() {
 		return nil
 	}); err != nil {
 		fatal("walking %s: %v", walkRoot, err)
+	}
+	if *onlyList != "" {
+		data, err := os.ReadFile(*onlyList)
+		if err != nil {
+			fatal("reading -only list: %v", err)
+		}
+		want := map[string]bool{}
+		for _, l := range strings.Split(string(data), "\n") {
+			if l = strings.TrimSpace(l); l != "" {
+				want[filepath.Join(testDir, l)] = true
+			}
+		}
+		kept := files[:0]
+		for _, f := range files {
+			if want[f] {
+				kept = append(kept, f)
+			}
+		}
+		files = kept
 	}
 	if *limit > 0 && len(files) > *limit {
 		files = files[:*limit]
@@ -756,6 +794,11 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		full += string(content) + "\n"
 	}
 	full += string(src)
+	if hasFlag(fm, "module") {
+		// INTERPRETING.md: a module file is module code (strict, `await`
+		// reserved); an empty export makes the program one.
+		full += "\nexport {};\n"
+	}
 	if hasFlag(fm, "onlyStrict") {
 		// INTERPRETING.md: an onlyStrict file runs as strict code, with a
 		// "use strict" directive before everything.
@@ -966,10 +1009,16 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	rctx, rcancel := context.WithTimeout(context.Background(), timeout)
 	defer rcancel()
 	var stdout, stderr bytes.Buffer
+	if abs, err := filepath.Abs(binFile); err == nil {
+		binFile = abs
+	}
 	runCmd := killableCommand(rctx, binFile)
 	limitProgram(runCmd)
+	runningTests.Store(binFile, res.Path)
+	defer runningTests.Delete(binFile)
 	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
+	runCmd.Dir = scratchCwd(workDir, fmt.Sprintf("w%d", workerID))
 	runErr := runTracked(runCmd)
 
 	negativeRuntime := fm.NegativePhase == "runtime" || fm.NegativePhase == "resolution"
@@ -1366,3 +1415,16 @@ func typeErrorOnly(err error) bool {
 var libObjectFlags = []string{"-O2", "-ffunction-sections", "-fdata-sections"}
 
 func objCacheDir() string { return filepath.Join(os.TempDir(), "klainmain-conform-cobj") }
+
+// writeLanePassList writes one lane's passing files, sorted, to
+// <path>.<lane> (-passlist for the node and wpt suites): diffed against an
+// earlier run's, it names every file that stopped passing.
+func writeLanePassList(path, lane string, passing []string) {
+	if path == "" {
+		return
+	}
+	sort.Strings(passing)
+	if err := os.WriteFile(path+"."+lane, []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
+		fatal("writing pass list: %v", err)
+	}
+}

@@ -67,12 +67,12 @@ void __kml_native_wv_set_size(double h, double width, double height) {
    thread calls it (a Worker pushing a UI update). */
 static void kwv_eval(webview_t w, void *js) {
   webview_eval(w, (const char *)js);
-  free(js);
+  free(js); /* scratch */
 }
 
 void __kml_native_wv_eval(double h, const char *js) {
   size_t n = strlen(js) + 1;
-  char *copy = (char *)malloc(n);
+  char *copy = (char *)malloc(n); /* scratch */
   memcpy(copy, js, n);
   webview_dispatch(KWV(h), kwv_eval, copy);
 }
@@ -99,7 +99,7 @@ static void kwv_bound(const char *id, const char *req, void *env) {
 }
 
 void __kml_native_wv_bind(double h, const char *name, void *inv, void *clo) {
-  void **env = (void **)malloc(2 * sizeof(void *));
+  void **env = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *)); /* holds the JS closure, never freed */
   env[0] = inv;
   env[1] = clo;
   webview_bind(KWV(h), name, kwv_bound, env);

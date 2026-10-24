@@ -8,6 +8,7 @@ package llvm
 import (
 	_ "embed"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -15,8 +16,11 @@ import (
 //go:embed unitregsrc/unitreg.c
 var unitRegSource string
 
-// UnitRegSource returns the C runtime holding the registered tables.
-func UnitRegSource() string { return unitRegSource }
+// UnitRegSource returns the C runtime holding the registered tables; under
+// -mm=gc its per-evaluation tables are weak (KML_GC).
+func UnitRegSource() string {
+	return unitRegSource
+}
 
 // UsesUnitReg reports whether the program registered any table rows (the
 // registry runtime is then linked in).
@@ -33,11 +37,15 @@ const (
 	unitKindCtorOf        = 6 // { i64 id, ptr payload }: obj.constructor by type id
 	unitKindClassParent   = 7 // { i64 id, i64 parent id }: __kml_class_is walks it
 	unitKindDynEntry      = 8 // { i64 fn, ptr entry }: a literal's dynamic entry (emit_dynentry.go)
+	unitKindFnStatic      = 9 // { i64 fn identity, ptr get(ptr key) }: a builtin constructor's statics by value (fnmeta.c)
 )
 
 // unitRow is one table row: its constant, `{ i64 <id>, ... }`.
 type unitRow struct {
 	lit string
+	// island is the hash of the dynamic-only file being emitted when the
+	// row was added, "" outside one.
+	island string
 }
 
 // unitTable is one kind's rows and the IR struct type of a row.
@@ -73,7 +81,7 @@ func (e *Emitter) addUnitRowLit(kind int, rowTy, lit string) {
 		t = &unitTable{rowTy: rowTy}
 		e.unitTables[kind] = t
 	}
-	t.rows = append(t.rows, unitRow{lit: lit})
+	t.rows = append(t.rows, unitRow{lit: lit, island: e.curDynFile})
 }
 
 // addCtor runs fn (a `void ()` function) before main.
@@ -90,21 +98,90 @@ func (e *Emitter) emitUnitRegFinalize() {
 			kinds = append(kinds, k)
 		}
 		sort.Ints(kinds)
+		// Under the lazy backend a row naming a dynamic-only file's code
+		// belongs to that file's shared library: the executable may not
+		// name it. Its table is registered when the file's body first runs
+		// (dynModuleInit).
+		island := map[string]map[int][]string{}
 		var body strings.Builder
 		for _, k := range kinds {
 			t := e.unitTables[k]
-			elems := make([]string, len(t.rows))
-			for i, r := range t.rows {
-				elems[i] = t.rowTy + " " + r.lit
+			var elems []string
+			for _, r := range t.rows {
+				h := r.island
+				if h == "" {
+					h = rowIsland(r.lit)
+				}
+				if h != "" && e.opts.DynamicImport == "lazy" {
+					if island[h] == nil {
+						island[h] = map[int][]string{}
+					}
+					island[h][k] = append(island[h][k], t.rowTy+" "+r.lit)
+					continue
+				}
+				elems = append(elems, t.rowTy+" "+r.lit)
+			}
+			if len(elems) == 0 {
+				continue
 			}
 			name := fmt.Sprintf("@__kml_unit_rows_%d", k)
-			arr := fmt.Sprintf("[%d x %s]", len(t.rows), t.rowTy)
-			e.emitGlobal(fmt.Sprintf("%s = private constant %s [%s]", name, arr, strings.Join(elems, ", ")))
-			stride := fmt.Sprintf("ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64)", t.rowTy)
-			fmt.Fprintf(&body, "  call void @__kml_unit_register(i64 %d, ptr %s, i64 %d, i64 %s)\n", k, name, len(t.rows), stride)
+			e.emitUnitRows(&body, name, k, t.rowTy, elems)
 		}
-		e.emitGlobal(fmt.Sprintf("define internal void @__kml_unit_init() {\nentry:\n%s  ret void\n}", body.String()))
+		e.defineUnitInit("internal ", "@__kml_unit_init", body.String())
 		e.addCtor("@__kml_unit_init")
+		e.islandUnitRows = island
+	}
+	e.emitIslandUnitInits()
+}
+
+// defineUnitInit defines the function registering a unit's tables: body's
+// registration calls, then return.
+func (e *Emitter) defineUnitInit(linkage, name, body string) {
+	e.emitGlobal(fmt.Sprintf("define %svoid %s() {\nentry:\n%s  ret void\n}", linkage, name, body))
+}
+
+// emitUnitRows emits one table's rows as a constant array, and its
+// registration into body.
+func (e *Emitter) emitUnitRows(body *strings.Builder, name string, kind int, rowTy string, elems []string) {
+	arr := fmt.Sprintf("[%d x %s]", len(elems), rowTy)
+	e.emitGlobal(fmt.Sprintf("%s = private constant %s [%s]", name, arr, strings.Join(elems, ", ")))
+	stride := fmt.Sprintf("ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64)", rowTy)
+	fmt.Fprintf(body, "  call void @__kml_unit_register(i64 %d, ptr %s, i64 %d, i64 %s)\n", kind, name, len(elems), stride)
+}
+
+// islandRowRe finds a dynamic-only file's key in a row's symbols.
+var islandRowRe = regexp.MustCompile(`__kml_modL\d+isl_([0-9a-f]{16})|__kml_dynfile_([0-9a-f]{16})_`)
+
+// rowIsland is the hash of the dynamic-only file whose code a row names,
+// "" for none.
+func rowIsland(lit string) string {
+	if m := islandRowRe.FindStringSubmatch(lit); m != nil {
+		return m[1] + m[2]
+	}
+	return ""
+}
+
+// emitIslandUnitInits defines, for each dynamic-only file under the lazy
+// backend, the function registering its rows (empty when it has none),
+// which its body calls before its first statement.
+func (e *Emitter) emitIslandUnitInits() {
+	hs := make([]string, 0, len(e.islandUnitFiles))
+	for h := range e.islandUnitFiles {
+		hs = append(hs, h)
+	}
+	sort.Strings(hs)
+	for _, h := range hs {
+		var body strings.Builder
+		tables := e.islandUnitRows[h]
+		kinds := make([]int, 0, len(tables))
+		for k := range tables {
+			kinds = append(kinds, k)
+		}
+		sort.Ints(kinds)
+		for _, k := range kinds {
+			e.emitUnitRows(&body, fmt.Sprintf("@__kml_dynfile_%s_rows_%d", h, k), k, e.unitTables[k].rowTy, tables[k])
+		}
+		e.defineUnitInit("", "@__kml_dynfile_"+h+"_unitinit", body.String())
 	}
 }
 
@@ -195,7 +272,7 @@ func (e *Emitter) emitClassParentRows() {
 	anyArr := e.hostID(ArrayOf(TypeAny)) & kmlHdrIDMask
 	seen := map[int64]bool{anyArr: true}
 	for _, name := range names {
-		if h := e.classes[name].HostBase; h != nil && h.IsArray && !h.IsTypedArray {
+		if h := e.classes[name].HostBase; h != nil && h.IsArray() && !h.IsTypedArray() {
 			if id := e.hostID(*h) & kmlHdrIDMask; !seen[id] {
 				seen[id] = true
 				e.addUnitRow(unitKindClassParent, "{ i64, i64 }", id, fmt.Sprintf("i64 %d", anyArr))

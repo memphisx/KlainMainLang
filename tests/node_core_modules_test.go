@@ -66,7 +66,7 @@ console.log(querystring.stringify(parsed))
 `, "a=1&b=2")
 }
 
-// --- assert (see docs/adr/ADR-00140.md) ---
+// --- assert (see docs/adr/00/ADR-00140.md) ---
 
 func TestE2EAssertOkPasses(t *testing.T) {
 	assertOutputImports(t, `

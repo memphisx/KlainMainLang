@@ -139,17 +139,17 @@ s.bind(0, '127.0.0.1', () => {
 }
 
 // The TTL and multicast options and membership on a udp6 socket (Winsock's
-// IPPROTO_IPV6 numbers on Windows, ADR-01618); dropping a group not joined
-// is the kernel's EADDRNOTAVAIL. On Windows libuv refuses a group of the
-// other family with EINVAL.
+// IPPROTO_IPV6 numbers on Windows, ADR-01618), against Node on the same
+// host: what joining the link-local group gives depends on the host's
+// interfaces (Linux joins and a second drop is EADDRNOTAVAIL; macOS, with no
+// interface named, refuses the join with EADDRNOTAVAIL). On Windows libuv
+// refuses a group of the other family with EINVAL.
 func TestE2EDgramUdp6MulticastOptions(t *testing.T) {
-	want := "ttl6 33 3 false\ndrop again EADDRNOTAVAIL dropMembership"
 	v4 := ""
 	if runtime.GOOS == "windows" {
 		v4 = "try { s.addMembership('239.1.2.3') } catch (e: any) { console.log('v4 group', e.code) }"
-		want += "\nv4 group EINVAL"
 	}
-	out := compileAndRunImports(t, fmt.Sprintf(`
+	src := fmt.Sprintf(`
 import dgram from 'dgram'
 const s = dgram.createSocket('udp6')
 s.bind(0, '::', () => {
@@ -158,17 +158,16 @@ s.bind(0, '::', () => {
     s.addMembership('ff02::1:3')
     s.dropMembership('ff02::1:3')
     try { s.dropMembership('ff02::1:3') } catch (e: any) { console.log('drop again', e.code, e.syscall) }
-  } catch (e: any) { console.log('join', e.code) }
+  } catch (e: any) { console.log('join', e.code, e.syscall) }
   %s
   s.close()
 })
-`, v4))
-	// A host with no IPv6 multicast route (a container with only loopback)
-	// refuses the join, as it does Node's.
-	if strings.Contains(out, "join ENODEV") {
-		t.Skip("no IPv6 multicast interface on this host")
+`, v4)
+	out := compileAndRunImports(t, src)
+	if !strings.HasPrefix(out, "ttl6 33 3 false\n") {
+		t.Fatalf("options: got %q", out)
 	}
-	compareLines(t, out, want)
+	compareLines(t, out, runNodeTS(t, src))
 }
 
 // startUDPServer compiles a dgram server and waits until it responds to a

@@ -235,14 +235,14 @@ int __kml_embed_serve(const void *blob) {
   if (getsockname(lfd, (struct sockaddr *)&got, &gl) < 0) { close(lfd); return -1; }
   int port = (int)ntohs(got.sin_port);
 
-  kml_embed_ctx *c = (kml_embed_ctx *)malloc(sizeof(kml_embed_ctx));
+  kml_embed_ctx *c = (kml_embed_ctx *)malloc(sizeof(kml_embed_ctx)); /* scratch */
   c->lfd = lfd;
   c->blob = blob;
   pthread_t t;
   pthread_attr_t at;
   pthread_attr_init(&at);
   pthread_attr_setdetachstate(&at, PTHREAD_CREATE_DETACHED);
-  if (pthread_create(&t, &at, kml_embed_loop, c) != 0) { close(lfd); free(c); return -1; }
+  if (pthread_create(&t, &at, kml_embed_loop, c) != 0) { close(lfd); free(c); return -1; } /* scratch */
   pthread_attr_destroy(&at);
   return port;
 }

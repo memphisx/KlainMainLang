@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "10/10",
     "loosePct": 100,
-    "strict": "5/10",
-    "strictPct": 50
+    "strict": "6/10",
+    "strictPct": 60
   },
   "lede": "WHATWG URL parsing, query-string building, and route matching — the natural companions to fetch() for the REST-client priority. URL is parsed by the URL Standard's own algorithm, written in TypeScript, as Node's ada implements it. URLSearchParams is an ordered list of pairs, live on its URL. URLPattern is the URL Pattern Standard, in TypeScript, as Node exposes it.",
   "entries": [
@@ -84,7 +84,7 @@
       "name": "URLPattern",
       "statusRow": "URLPattern",
       "signature": "new URLPattern(input?: string | URLPatternInit, baseURL?: string, options?: { ignoreCase?: boolean }): URLPattern",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "WHATWG route matching, the URL Pattern Standard as Node's ada implements it. A pattern is a constructor string or an init object, optionally relative to a base URL; the full pattern grammar is supported (named and regexp groups, wildcards, {} groups, ? + * modifiers). test() and exec() take a URL string or an init object; exec() returns the standard's URLPatternResult, its groups in the order Node lists them. An invalid pattern throws a TypeError.",
       "params": [
         {
@@ -104,9 +104,6 @@
       },
       "exampleKey": "url/urlpattern",
       "snippet": "const pattern = new URLPattern({ pathname: \"/books/:id\" })\nconsole.log(pattern.test(\"https://example.com/books/123\"))  // true\nconst m = pattern.exec(\"https://example.com/books/123\")\nif (m !== null) { console.log(m.pathname.groups.id) }  // 123",
-      "differences": [
-        "Regexp groups run on PCRE2: an empty optional group iteration reads `\"\"` (JavaScript: `undefined`), `v`-flag set operations never match, and invalid `v`-mode syntax is accepted"
-      ],
       "seeAlso": [
         "url.URL",
         "url.URLSearchParams"

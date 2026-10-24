@@ -76,7 +76,7 @@ console.log(invalidFromString.getTime()) // -1 (same unparseable sentinel as Dat
 // strings use. Fields are treated as UTC directly here, same as every other
 // Date operation in this compiler (a deliberate, documented deviation from
 // real JS, where this specific constructor form interprets its fields as
-// local time — see docs/adr/ADR-00014.md).
+// local time — see docs/adr/00/ADR-00014.md).
 const fromFields: Date = new Date(2023, 10, 14)
 console.log(fromFields.toISOString())   // 2023-11-14T00:00:00.000Z
 console.log(fromFields.getMonth())      // 10 (round-trips the 0-indexed value back)

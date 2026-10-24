@@ -28,7 +28,7 @@ function inputBytes(input: any): Uint8Array {
         __kml_native.typedBytes(input, out);
         return out;
     }
-    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "list" argument must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView.');
+    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "list" argument must be an instance of SharedArrayBuffer, ArrayBuffer or ArrayBufferView.');
 }
 
 function concat(a: Uint8Array, b: Uint8Array): Uint8Array {
@@ -100,7 +100,7 @@ function incompleteTail(bytes: Uint8Array): number {
 }
 
 function invalidData(encoding: string): NodeTypeError {
-    return new NodeTypeError('ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding ' + encoding);
+    return NodeTypeError('ERR_ENCODING_INVALID_ENCODED_DATA', 'The encoded data was not valid for encoding ' + encoding);
 }
 
 export class TextEncoder {
@@ -163,10 +163,10 @@ export class TextDecoder {
         const label = String(encoding).trim().toLowerCase();
         const name = kEncodingLabels[label];
         if (name === 'replacement') {
-            throw new NodeRangeError('ERR_ENCODING_NOT_SUPPORTED', 'The "replacement" encoding is not supported');
+            throw NodeRangeError('ERR_ENCODING_NOT_SUPPORTED', 'The "replacement" encoding is not supported');
         }
         if (name === undefined || kMultiByte.indexOf(name) >= 0) {
-            throw new NodeRangeError('ERR_ENCODING_NOT_SUPPORTED', 'The "' + String(encoding) + '" encoding is not supported');
+            throw NodeRangeError('ERR_ENCODING_NOT_SUPPORTED', 'The "' + String(encoding) + '" encoding is not supported');
         }
         this.#encoding = name;
         const o: any = options ?? {};

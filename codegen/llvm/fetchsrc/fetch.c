@@ -182,7 +182,7 @@ const char *__kml_fetch_errstr(int code) {
 /* A fetch already settled with failure `code` (no transfer): its await
  * rejects with __kml_fetch_errstr(code). */
 void *__kml_fetch_failed_pending(i64 code) {
-    pend_t *p = (pend_t *)calloc(1, sizeof(pend_t));
+    pend_t *p = (pend_t *)kml_calloc(KML_HEAP_WORDS, 1, sizeof(pend_t));
     p->done = 1;
     p->result = code;
     return p;
@@ -207,7 +207,7 @@ i64 __kml_curl_write_cb(const char *chunk, i64 size, i64 nmemb, kbuf *ud) {
         i64 nc = ud->cap * 2;
         if (need > nc) nc = need;
         if (nc < 64) nc = 64;
-        ud->data = (char *)realloc(ud->data, (size_t)nc);
+        ud->data = (char *)kml_realloc(KML_HEAP_RAW, ud->data, (size_t)nc);
         ud->cap = nc;
     }
     memcpy(ud->data + ud->len, chunk, (size_t)total);
@@ -217,7 +217,7 @@ i64 __kml_curl_write_cb(const char *chunk, i64 size, i64 nmemb, kbuf *ud) {
 }
 
 static void *mk_error(i64 kind, void *msg, void *name) {
-    kerr *e = (kerr *)calloc(1, KML_ERR_SIZE);
+    kerr *e = (kerr *)kml_calloc(KML_HEAP_WORDS, 1, KML_ERR_SIZE);
     e->kind = kind;
     e->msg = msg;
     e->name = name;
@@ -231,7 +231,7 @@ extern i64 __kml_nb_pack(u8 tag, i64 pay);
 static void *mk_aggregate(void *msg, void **errs, i64 n) {
     for (i64 i = 0; i < n; i++)
         ((i64 *)errs)[i] = __kml_nb_pack(KML_TAG_ERROR, (i64)(intptr_t)errs[i]);
-    char *agg = (char *)calloc(1, KML_AGG_SIZE);
+    char *agg = (char *)kml_calloc(KML_HEAP_WORDS, 1, KML_AGG_SIZE);
     F(agg, KML_ERROR_KIND, i64) = KML_ERRKIND_AGG;
     F(agg, KML_ERR_MESSAGE, void *) = msg;
     F(agg, KML_ERR_NAME, void *) = __kml_fetch_strs[S_AGGNAME];
@@ -247,7 +247,7 @@ extern void *__kml_dynobj_new(void);
 extern void __kml_dynobj_set(void *o, const char *key, i64 v);
 extern void __kml_error_own_cause(void *op);
 
-static const struct { i64 len; char d[9]; } k_hostname = { 8, "hostname" };
+static const struct { i64 len; char d[9]; } k_hostname = { KML_STR_ASCII_HDR(8), "hostname" };
 
 /* A string from printf-style parts. */
 static void *fmt_str(const char *fmt, const char *a, const char *b, long n) {
@@ -367,7 +367,7 @@ static void *failure_cause(void *easy, int code) {
                 for (i64 i = 0; i < n; i++) dup |= strcmp(seen[i], addr) == 0;
                 if (dup) continue;
                 strcpy(seen[n], addr);
-                errs = (void **)realloc(errs, (size_t)(n + 1) * sizeof(void *));
+                errs = (void **)kml_realloc(KML_HEAP_WORDS, errs, (size_t)(n + 1) * sizeof(void *));
                 errs[n++] = connect_error(ecode, oserr, addr, port);
             }
             freeaddrinfo(res);
@@ -394,7 +394,6 @@ __attribute__((unused)) static void *fetch_error(pend_t *p) {
     return e;
 }
 
-extern int curl_multi_perform(void *, int *);
 extern void *curl_multi_init(void);
 extern int curl_multi_add_handle(void *, void *);
 extern int curl_multi_remove_handle(void *, void *);
@@ -404,9 +403,6 @@ extern i64 __kml_monotonic_ns(void);
 extern _Thread_local void *__kml_curl_multi;
 extern void __kml_curl_drain_messages(void);
 
-extern _Thread_local char __kml_main_ctx[];
-extern _Thread_local void *__kml_conn_data;
-extern _Thread_local i64 __kml_current_conn_idx;
 extern _Thread_local int __kml_jmp_top;
 extern int swapcontext(void *, void *);
 /* A wait with nothing to park: no coroutine, no async generator step, no
@@ -449,7 +445,7 @@ static _Thread_local i64 sf_len, sf_cap;
 void __kml_sigfetch_add(void *pending) {
     if (sf_len == sf_cap) {
         i64 nc = sf_cap * 2 + 4;
-        sf_data = (void **)realloc(sf_data, (size_t)nc * sizeof(void *));
+        sf_data = (void **)realloc(sf_data, (size_t)nc * sizeof(void *)); /* scratch */
         sf_cap = nc;
     }
     sf_data[sf_len++] = pending;
@@ -516,50 +512,20 @@ void __kml_fetch_throw_abort(void *sig) {
  * CURLMOPT_SOCKETFUNCTION / CURLMOPT_TIMERFUNCTION, and every drive is a
  * curl_multi_socket_action. Each reported socket is a libuv watcher and the
  * deadline a libuv timer on the event loop (loop.c), whose callbacks drive
- * libcurl inside the wait (no FD_SETSIZE ceiling: curl_multi_fdset cannot
- * report a socket at or above it); a wait outside the loop polls the
- * sockets itself. On Windows (TDD-00252) a socket libcurl reports is a
+ * libcurl inside the wait (no FD_SETSIZE ceiling); a wait outside the loop
+ * waits in libcurl itself (curl_multi_poll). On Windows (TDD-00252) a socket libcurl reports is a
  * Winsock SOCKET in both link modes (libcurl calls Winsock, not the shim),
  * which the watch and the outside wait take as it is. */
 #ifdef _WIN32
-/* Winsock's pollfd and POLL* (ws2tcpip.h) take a SOCKET: this file's poll
- * keeps libcurl's own socket values and the 1/2/4 bits. */
-#undef POLLIN
-#undef POLLOUT
-#undef POLLERR
-#undef POLLHUP
-#define POLLIN 1
-#define POLLOUT 2
-#define POLLERR 4
-#define POLLHUP 4
-#define pollfd kml_curl_pollfd
-#define poll kml_curl_poll
-struct pollfd { int fd; short events, revents; };
 extern void *__kml_loop_sock_watch(intptr_t sock, int fd, int events, void (*cb)(void *, int, int), void *data);
-extern int __kml_win_poll_sockets(const intptr_t *socks, const int *want, int *got, int n, int ms);
 static intptr_t curl_os_sock(int s) { return (intptr_t)s; }
-/* poll(2) over libcurl's sockets, in the 1/2/4 bits above. */
-static int poll(struct pollfd *pfd, unsigned n, int ms) {
-    intptr_t socks[64];
-    int want[64], got[64];
-    if (n > 64) n = 64;
-    for (unsigned i = 0; i < n; i++) {
-        socks[i] = curl_os_sock(pfd[i].fd);
-        want[i] = pfd[i].events;
-    }
-    int r = __kml_win_poll_sockets(socks, want, got, (int)n, ms);
-    for (unsigned i = 0; i < n; i++)
-        pfd[i].revents = r > 0 ? (short)got[i] : 0;
-    return r;
-}
-#else
-#include <poll.h>
 #endif
 #define CURLMOPT_SOCKETFUNCTION 20001
 #define CURLMOPT_TIMERFUNCTION 20004
 #define CURL_SOCKET_TIMEOUT (-1)
 extern int curl_multi_setopt(void *, int, ...);
 extern int curl_multi_socket_all(void *, int *);
+extern int curl_multi_poll(void *, void *, unsigned, int, int *);
 /* curl_socket_t: a SOCKET (64-bit) on Windows, where CURL_SOCKET_TIMEOUT is
  * ~0; an int passed there would reach libcurl as 0xFFFFFFFF, an unknown
  * socket, and the timeout (a finished resolve among it) never runs. */
@@ -577,6 +543,8 @@ extern void __kml_loop_io_unwatch(void *w);
 extern void *__kml_loop_timer_new(void (*cb)(void *), void *data);
 extern void __kml_loop_timer_start(void *t, i64 ms);
 extern void __kml_loop_timer_stop(void *t);
+extern void *__kml_loop_async_new(void (*cb)(void *), void *data);
+extern void __kml_loop_handle_ref(void *h, int on);
 static _Thread_local void *curl_timer;
 static void on_curl_io(void *data, int fd, int ev);
 static _Thread_local curl_watch *watches;
@@ -601,7 +569,7 @@ static int on_curl_socket(void *easy, int fd, int what, void *userp, void *sockp
     if (what == 4) return 0;
     if (nwatches == capwatches) {
         capwatches = capwatches ? capwatches * 2 : 16;
-        watches = realloc(watches, sizeof(curl_watch) * (size_t)capwatches);
+        watches = realloc(watches, sizeof(curl_watch) * (size_t)capwatches); /* scratch */
     }
     watches[nwatches].fd = fd;
     watches[nwatches].what = what;
@@ -637,8 +605,23 @@ static void *multi_new(void) {
     return m;
 }
 
+/* Holds the event loop while libcurl has a transfer running, awaited yet
+ * or not, as an open socket would: a referenced handle that never fires. */
+static _Thread_local void *curl_hold;
+static _Thread_local _Bool curl_held;
+static void on_curl_hold(void *unused) { (void)unused; }
+
+static void hold_sync(void) {
+    _Bool want = curl_running > 0;
+    if (want == curl_held) return;
+    if (!curl_hold) curl_hold = __kml_loop_async_new(on_curl_hold, 0);
+    curl_held = want;
+    __kml_loop_handle_ref(curl_hold, want);
+}
+
 static void act(int fd, int ev) {
     curl_multi_socket_action(__kml_curl_multi, fd, ev, &curl_running);
+    hold_sync();
 }
 
 /* Inside the wait: a socket's readiness or the deadline drives libcurl,
@@ -656,6 +639,7 @@ static void on_curl_due(void *unused) {
      * every handle is processed; a timeout action alone leaves a finished
      * lookup waiting until the transfer times out (TDD-00252). */
     curl_multi_socket_all(__kml_curl_multi, &curl_running);
+    hold_sync();
     curl_deadline = 0;
     act(CURL_SOCKET_TIMEOUT, 0);
     __kml_curl_drain_messages();
@@ -671,39 +655,19 @@ static void kick(void) {
     act(CURL_SOCKET_TIMEOUT, 0);
 }
 
-/* A wait outside the event loop: poll libcurl's own sockets for up to
- * max_ms (bounded by its deadline), then drive what is ready. */
+/* A wait outside the event loop: libcurl waits on its own sockets for up
+ * to max_ms (bounded by its deadline), then every socket is served. */
 static void drive_once(int max_ms) {
     kick();
-    struct pollfd stackfds[16];
-    struct pollfd *pfd = nwatches <= 16 ? stackfds : malloc(sizeof(struct pollfd) * (size_t)nwatches);
-    int n = nwatches;
-    for (int i = 0; i < n; i++) {
-        pfd[i].fd = watches[i].fd;
-        pfd[i].events = (short)(((watches[i].what & 1) ? POLLIN : 0) | ((watches[i].what & 2) ? POLLOUT : 0));
-        pfd[i].revents = 0;
-    }
-    int ms = max_ms;
-    if (curl_deadline != 0) {
-        i64 left = (curl_deadline - __kml_monotonic_ns() + 999999) / 1000000;
-        if (left < 0) left = 0;
-        if (left < ms) ms = (int)left;
-    }
-    int r = poll(pfd, (unsigned)n, ms);
-    for (int i = 0; r > 0 && i < n; i++) {
-        int ev = ((pfd[i].revents & (POLLIN | POLLHUP | POLLERR)) ? 1 : 0) |
-                 ((pfd[i].revents & (POLLOUT | POLLERR)) ? 2 : 0) |
-                 ((pfd[i].revents & POLLERR) ? 4 : 0);
-        if (ev) act(pfd[i].fd, ev);
-    }
-    if (pfd != stackfds) free(pfd);
+    if (max_ms > 0 && curl_running > 0) curl_multi_poll(__kml_curl_multi, 0, 0, max_ms, 0);
+    curl_multi_socket_all(__kml_curl_multi, &curl_running);
+    hold_sync();
     kick();
     __kml_curl_drain_messages();
 }
 
 /* One drive and drain with no wait: the scheduler's and the loop's
- * keep-alive check's hook. It polls libcurl's sockets without blocking, as
- * curl_multi_perform did: a scheduler step can run in a wait outside the
+ * keep-alive check's hook. It serves libcurl's sockets without blocking: a scheduler step can run in a wait outside the
  * loop (a connection fiber consuming its own request body), and a transfer
  * whose readiness nothing reports would stall there. */
 void __kml_curl_kick(void) {
@@ -719,10 +683,9 @@ int __kml_curl_drive_once(int max_ms) {
     return curl_running;
 }
 
-/* libcurl's count of transfers still in flight (0 with no multi handle). An
- * in-flight transfer keeps the event loop alive whether or not anything is
- * awaiting it yet; driving libcurl here first drains transfers that just
- * finished. */
+/* libcurl's count of transfers still in flight (0 with no multi handle),
+ * after aborting those whose signal fired and draining those that just
+ * finished; each pass's libcurl step. What holds the loop is curl_hold. */
 int __kml_curl_inflight(void) {
     __kml_sigfetch_scan();
     if (!__kml_curl_multi) return 0;
@@ -767,7 +730,7 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
     if (!__kml_curl_multi) __kml_curl_multi = multi_new();
     void *multi = __kml_curl_multi;
 
-    kbuf *buf = (kbuf *)malloc(sizeof(kbuf));
+    kbuf *buf = (kbuf *)kml_alloc(KML_HEAP_WORDS, sizeof(kbuf));
     buf->data = 0;
     buf->len = buf->cap = 0;
     buf->pend = 0;
@@ -775,7 +738,7 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
      * callback via HEADERFUNCTION/HEADERDATA, reachable from the body buffer
      * so the Response can parse it lazily. Its `pend` is null so a header
      * write always takes the buffer branch. */
-    kbuf *hbuf = (kbuf *)malloc(sizeof(kbuf));
+    kbuf *hbuf = (kbuf *)kml_alloc(KML_HEAP_WORDS, sizeof(kbuf));
     hbuf->data = 0;
     hbuf->len = hbuf->cap = 0;
     hbuf->pend = 0;
@@ -816,7 +779,7 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
         curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
     }
 
-    pend_t *p = (pend_t *)malloc(sizeof(pend_t));
+    pend_t *p = (pend_t *)kml_alloc(KML_HEAP_WORDS, sizeof(pend_t));
     p->bridge = 0;
     p->cause = 0;
     p->easy = curl;
@@ -871,11 +834,14 @@ void __kml_curl_drain_messages(void) {
     }
 }
 
-/* One multi_perform + drain, reporting whether transfers are still running:
- * the no-fiber await drive's hook (TDD-00097 Stage 4). */
+/* A drive without waiting after a paused body resumes: a timeout action
+ * starts what unpausing made due; returns whether transfers still run. */
 _Bool __kml_fetch_pump(void) {
     __kml_sigfetch_scan();
-    return __kml_curl_drive_once(0) > 0;
+    if (!__kml_curl_multi) return 0;
+    kick();
+    __kml_curl_drain_messages();
+    return curl_running > 0;
 }
 
 /* ---- finishing ---- */
@@ -894,7 +860,7 @@ void __kml_pending_finish_c(void *pending, fres *out) {
     kbuf *b = p->buf;
     out->status = p->status;
     if (!b->data) {
-        char *e = (char *)malloc(1);
+        char *e = (char *)kml_alloc(KML_HEAP_RAW, 1);
         e[0] = 0;
         out->body = e;
         out->len = 0;
@@ -906,29 +872,20 @@ void __kml_pending_finish_c(void *pending, fres *out) {
 
 /* ---- waits ---- */
 
-/* Parks the caller once while `what` is unsatisfied. On a task it records
- * what it waits for (task_off), suspends, and resumes; on a connection fiber
- * it parks in the connection's slot (conn_off) and yields to the loop.
- * Returns 0 when the caller is on neither (the main stack). */
-static _Bool park(void *what, i64 task_off, i64 conn_off, _Bool use_task) {
+/* Parks the caller once while `what` is unsatisfied: on a task it records
+ * what it waits for (task_off), suspends, and resumes. Returns 0 when the
+ * caller is on the main stack. */
+static _Bool park(void *what, i64 task_off, _Bool use_task) {
     void *ct = use_task ? __kml_current_task : 0;
     if (ct) {
         F(ct, task_off, void *) = what;
         T_STATE(ct) = 1;
         T_JMPTOP(ct) = (i64)(unsigned)__kml_jmp_top;
-        swapcontext(T_CTX(ct), T_RESUMER(ct));
+        KML_SWAPCONTEXT(T_CTX(ct), T_RESUMER(ct));
         GC_RESTORE();
         return 1;
     }
-    i64 idx = __kml_current_conn_idx;
-    if (idx < 0) return 0;
-    char *slot = (char *)__kml_conn_data + idx * KML_CONN_SIZE;
-    F(slot, conn_off, void *) = what;
-    swapcontext(F(slot, KML_CONN_CTX, void *), __kml_main_ctx);
-    /* The connection array may have moved while suspended. */
-    slot = (char *)__kml_conn_data + idx * KML_CONN_SIZE;
-    F(slot, conn_off, void *) = 0;
-    return 1;
+    return 0;
 }
 
 /* Loops until the transfer is done. Done is checked before the abort signal so
@@ -950,7 +907,7 @@ void __kml_await_fetch_c(void *pending, fres *out) {
             __kml_fetch_abort_now(p);
             __kml_fetch_throw_abort(sig);
         }
-        if (park(p, KML_TASK_PENDING_FETCH, KML_FETCH_CONN_PFETCH, 1)) continue;
+        if (park(p, KML_TASK_PENDING_FETCH, 1)) continue;
         __kml_wait_outside_coroutine();
     }
     __kml_pending_finish_c(p, out);
@@ -988,7 +945,7 @@ i64 __kml_await_fetch_headers(void *pending) {
             curl_easy_getinfo(p->easy, CURLINFO_RESPONSE_CODE, &st);
             return st;
         }
-        if (park(p, KML_TASK_PENDING_FETCH, KML_FETCH_CONN_PFETCH, 1)) continue;
+        if (park(p, KML_TASK_PENDING_FETCH, 1)) continue;
         /* Module top level: a turn of the loop, which drains microtasks */
         __kml_wait_outside_coroutine();
     }
@@ -1020,7 +977,7 @@ void __kml_pending_finish_settled_c(void *pending, sres *out) {
     out->status = p->status;
     out->reason = 0;
     if (!b->data) {
-        char *e = (char *)malloc(1);
+        char *e = (char *)kml_alloc(KML_HEAP_RAW, 1);
         e[0] = 0;
         out->body = e;
         out->len = 0;
@@ -1037,7 +994,7 @@ void __kml_pending_finish_settled_c(void *pending, sres *out) {
 void __kml_await_fetch_settled_c(void *pending, sres *out) {
     pend_t *p = (pend_t *)pending;
     while (!p->done) {
-        if (park(p, 0, KML_FETCH_CONN_PFETCH, 0)) continue;
+        if (park(p, 0, 0)) continue;
         __kml_curl_drive_once(100);
     }
     __kml_pending_finish_settled_c(p, out);
@@ -1090,7 +1047,7 @@ i64 __kml_first_success_index(void *group) {
  * Error per member carrying that fetch's transport-failure message. */
 void __kml_group_throw_aggregate(void *group) {
     grp *g = (grp *)group;
-    void **errs = (void **)malloc((size_t)g->count * sizeof(void *));
+    void **errs = (void **)kml_alloc(KML_HEAP_WORDS, (size_t)g->count * sizeof(void *));
     for (i64 i = 0; i < g->count; i++) errs[i] = fetch_error(g->members[i]);
     void *agg = mk_aggregate(__kml_fetch_strs[S_AGGMSG], errs, g->count);
     __kml_throw(agg);
@@ -1100,7 +1057,7 @@ void __kml_group_throw_aggregate(void *group) {
  * and parking in the pendingGroup slot. */
 void __kml_await_group_wait(void *group) {
     while (!__kml_group_satisfied(group)) {
-        if (park(group, KML_TASK_PENDING_GROUP, KML_FETCH_CONN_PGROUP, 1)) continue;
+        if (park(group, KML_TASK_PENDING_GROUP, 1)) continue;
         __kml_wait_outside_coroutine();
     }
 }

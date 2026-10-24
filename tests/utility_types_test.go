@@ -71,14 +71,14 @@ console.log(b.name + " " + b.age)
 }
 
 // Record<K, V> with a string-literal-union key is a fixed-shape object; with a
-// general `string` key it is a Map<string, V>.
+// general `string` key it takes any key.
 func TestE2EUtilityRecord(t *testing.T) {
 	assertOutput(t, `
 const scores: Record<"math" | "science", number> = { math: 90, science: 85 }
 console.log(scores.math + scores.science)
-const m: Record<string, number> = new Map()
-m.set("a", 1)
-console.log(m.get("a"))
+const m: Record<string, number> = {}
+m["a"] = 1
+console.log(m["a"])
 `, "175\n1")
 }
 
@@ -121,5 +121,23 @@ console.log(c.hasOwnProperty("x"), c.toString())
 console.log(Symbol("s").toString(), (10n).toString(), (255n).toString(16), new Error("m").toString(), /a+/g.toString())
 console.log(true.toString(), (1.5).toString(), "s".toString(), [1, 2].toString())
 const e = new TypeError("t"); console.log(e.toString())
+`)
+}
+
+// ReturnType<typeof f> of a declared function is its result type.
+func TestE2EUtilityReturnTypeOfFunction(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+function f(n: number): number { return n * 1.5 }
+function g(): string[] { return ["a", "b"] }
+type R = ReturnType<typeof f>
+const a: R = f(3)
+let b: R | null = null
+b = f(5)
+const s: ReturnType<typeof g> = g()
+console.log(a + 1, b, typeof a, s.length, s.join("-"))
+const k: typeof f = f
+const m: typeof f = (n) => n * 2
+console.log(k(1), m(4), typeof k)
 `)
 }

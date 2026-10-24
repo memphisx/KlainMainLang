@@ -5,7 +5,7 @@
   "segments": [
     {
       "kind": "block",
-      "text": "> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. Runs on POSIX and Windows — the latter over a `LoadLibrary`/`GetProcAddress` shim for `dlopen`/`dlsym` ([ADR-01019](../adr/ADR-01019.md)). Node-conformance is machine-checked by a differential oracle: the same program compiled here and run under a real `--experimental-ffi` Node (26.1.0+) must print identically (`assertSameAsNodeFFI`; a `string` return is the raw pointer `bigint`, `ffi.types.DOUBLE` is `\"double\"` — as Node does). A library is a runtime registry mirroring Node's own (`symbols`/`functions` tables in `std::unordered_map` order, per-name callable identity, Node's argument validation and error codes), and a bound function is a real function object ([ADR-01095](../adr/ADR-01095.md)). See [ADR-00797](../adr/ADR-00797.md)/[ADR-00798](../adr/ADR-00798.md)/[ADR-00799](../adr/ADR-00799.md)/[ADR-00800](../adr/ADR-00800.md)/[ADR-00808](../adr/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md)."
+      "text": "> Part of the [Implementation Status](README.md) index. Node's experimental `node:ffi` module (v26.1.0+, `--experimental-ffi`) — call C functions from shared libraries with plain-object signatures, and peek/poke native memory through `bigint` pointers. Import-gated (`import ffi from 'node:ffi'`). Signatures are resolved at compile time and lowered to direct C-ABI calls (no libffi, no trampoline); 64-bit integers and pointers travel as `bigint`, exactly as in Node. `registerCallback` hands a closure to C as a real function pointer via statically-emitted trampoline families. Runs on POSIX and Windows — the latter over a `LoadLibrary`/`GetProcAddress` shim for `dlopen`/`dlsym` ([ADR-01019](../adr/01/ADR-01019.md)). Node-conformance is machine-checked by a differential oracle: the same program compiled here and run under a real `--experimental-ffi` Node (26.1.0+) must print identically (`assertSameAsNodeFFI`; a `string` return is the raw pointer `bigint`, `ffi.types.DOUBLE` is `\"double\"` — as Node does). A library is a runtime registry mirroring Node's own (`symbols`/`functions` tables in `std::unordered_map` order, per-name callable identity, Node's argument validation and error codes), and a bound function is a real function object ([ADR-01095](../adr/01/ADR-01095.md)). See [ADR-00797](../adr/00/ADR-00797.md)/[ADR-00798](../adr/00/ADR-00798.md)/[ADR-00799](../adr/00/ADR-00799.md)/[ADR-00800](../adr/00/ADR-00800.md)/[ADR-00808](../adr/00/ADR-00808.md)/[TDD-00164](../tdd/TDD-00164.md)."
     },
     {
       "kind": "coverage",
@@ -27,8 +27,12 @@
             "feature": "`ffi.dlopen(path, definitions?)` → `{ lib, functions }`",
             "status": "implemented",
             "notes": [
-              "`lib/node/ffi.ts` over libffi ([ADR-01306](../adr/ADR-01306.md)): definitions are ordinary values, checked when requested; a failing definition closes the library, as in Node",
+              "`lib/node/ffi.ts` over libffi ([ADR-01306](../adr/01/ADR-01306.md)): definitions are ordinary values, checked when requested; a failing definition closes the library, as in Node",
               "The `path` may be any runtime string, or `null` for the current process image"
+            ],
+            "decl": [
+              "node:ffi#dlopen",
+              "node:ffi#DynamicLibrary"
             ]
           },
           {
@@ -40,6 +44,10 @@
             ],
             "notes": [
               "`close()` is idempotent; afterwards every call, lookup and accumulator read throws `ERR_FFI_LIBRARY_CLOSED` (`path` still reads — `''` for a `null` open), as in Node"
+            ],
+            "decl": [
+              "node:ffi#DynamicLibrary",
+              "node:ffi#dlclose"
             ]
           },
           {
@@ -48,19 +56,28 @@
             "notes": [
               "A bound function is a function object: `typeof` is `'function'`, `name`/`length`, an own `pointer` bigint, one identity per symbol per library (`getFunction`/`getFunctions`/`lib.functions` hand out the same one), and util.inspect's `[Function: abs] { pointer: … }`",
               "Re-requesting a symbol with a different libffi signature throws Node's `ERR_INVALID_ARG_VALUE`; aliases and the whole pointer family compare equal, as in Node. An invalid static signature (unknown type, a `void` argument, non-array `arguments`) is Node's runtime `TypeError`, and keys other than `arguments`/`return` are ignored"
+            ],
+            "decl": [
+              "node:ffi#DynamicLibrary"
             ]
           },
           {
             "feature": "`lib.getSymbol(name)` / `ffi.dlsym(lib, name)` → `bigint`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:ffi#DynamicLibrary",
+              "node:ffi#dlsym"
+            ]
           },
           {
             "feature": "`library.functions` / `library.symbols` / no-arg `getFunctions()` / `getSymbols()`",
             "status": "implemented",
-            "caveats": [
-            ],
+            "caveats": [],
             "notes": [
               "Fresh null-prototype objects, enumerated in Node's `std::unordered_map` order — the real container on macOS (libc++) and Linux (libstdc++), identical to Node by construction; every resolution is recorded, runtime-string names included. `lib.symbols` reads type as the typings' `bigint`"
+            ],
+            "decl": [
+              "node:ffi#DynamicLibrary"
             ]
           },
           {
@@ -70,11 +87,19 @@
               "Arguments are validated as Node does, for direct calls and calls through `any` alike: 8–32-bit integers in range (`-0` is rejected only by the 32-bit kinds), `int64`/`uint64` only an in-range `bigint`, floats any number, the pointer family a bigint in [0, 2^64), a string, a buffer/view/`ArrayBuffer`, `null` or `undefined`; a wrong argument count throws. `bool` is `uint8` and `char` the platform char (`int8` on macOS, `uint8` on Linux/arm64)",
               "`string` is pointer-like exactly as in Node: a JS string *argument* to a C call is marshalled to a `char*`, but a `string` *return value* (and a `string` callback parameter) arrives as the raw pointer `bigint` — read it with `ffi.toString(ptr)`; Node does not auto-marshal it. Marshalling `string` returns/args to a JS value is a `klain:ffi` extension ([TDD-00190](../tdd/TDD-00190.md))",
               "A `function`-typed value can be passed through as a raw `bigint` address; to hand C a callable made from a closure, use `library.registerCallback([sig,] cb)` (its own row below), which emits a real C-ABI function pointer"
+            ],
+            "decl": [
+              "node:ffi#DynamicLibrary",
+              "node:ffi#types"
             ]
           },
           {
             "feature": "`ffi.suffix` / `ffi.types` constants",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:ffi#suffix",
+              "node:ffi#types"
+            ]
           },
           {
             "feature": "`library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback`",
@@ -84,17 +109,48 @@
             ],
             "notes": [
               "A libffi closure per callback (`ffi_closure_alloc`), any number live at once; arguments arrive and the result returns with the same marshalling as calls"
+            ],
+            "decl": [
+              "node:ffi#DynamicLibrary"
             ]
           },
           {
             "feature": "Primitive accessors (`ffi.getInt8`…`getFloat64(ptr, offset?)`, `ffi.setInt8`…`setFloat64(ptr, offset, value)`)",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "node:ffi#getInt8",
+              "node:ffi#getUint8",
+              "node:ffi#getInt16",
+              "node:ffi#getUint16",
+              "node:ffi#getInt32",
+              "node:ffi#getUint32",
+              "node:ffi#getInt64",
+              "node:ffi#getUint64",
+              "node:ffi#getFloat32",
+              "node:ffi#getFloat64",
+              "node:ffi#setInt8",
+              "node:ffi#setUint8",
+              "node:ffi#setInt16",
+              "node:ffi#setUint16",
+              "node:ffi#setInt32",
+              "node:ffi#setUint32",
+              "node:ffi#setInt64",
+              "node:ffi#setUint64",
+              "node:ffi#setFloat32",
+              "node:ffi#setFloat64"
+            ]
           },
           {
             "feature": "`ffi.toString(ptr)` / `ffi.toBuffer(ptr, len, copy?)` / `ffi.toArrayBuffer(ptr, len, copy?)` / `ffi.getRawPointer(src)`",
             "status": "implemented",
             "notes": [
               "`copy: false` wraps the native memory zero-copy (the caller keeps it valid, Node's contract); `toString(0n)` → `null`"
+            ],
+            "decl": [
+              "node:ffi#toString",
+              "node:ffi#toBuffer",
+              "node:ffi#toArrayBuffer",
+              "node:ffi#getRawPointer"
             ]
           },
           {
@@ -102,6 +158,12 @@
             "status": "implemented",
             "notes": [
               "`exportString` takes any Buffer encoding (`utf16le`/`ucs2` write a 2-byte terminator) and validates like Node: the length is an integer `number` (`ERR_INVALID_ARG_TYPE` for a bigint, `ERR_OUT_OF_RANGE` otherwise), an unknown encoding is `ERR_UNKNOWN_ENCODING`, and a length that cannot hold the encoded string plus its terminator throws `ERR_OUT_OF_RANGE`; the byte-export forms need room for the source's `byteLength`"
+            ],
+            "decl": [
+              "node:ffi#exportString",
+              "node:ffi#exportBuffer",
+              "node:ffi#exportArrayBuffer",
+              "node:ffi#exportArrayBufferView"
             ]
           },
           {

@@ -49,10 +49,10 @@ console.log(noAge.name)            // Jo
 const grades: Record<"math" | "science", number> = { math: 90, science: 85 }
 console.log(grades.math + grades.science)   // 175
 
-// … and a general `string` key gives a Map<string, V>.
-const counts: Record<string, number> = new Map()
-counts.set("hits", 3)
-console.log(counts.get("hits"))    // 3
+// … and a general `string` key takes any key.
+const counts: Record<string, number> = {}
+counts["hits"] = 3
+console.log(counts["hits"])        // 3
 
 // A string-literal union type is usable on its own (resolves to string).
 type Direction = "north" | "south" | "east" | "west"

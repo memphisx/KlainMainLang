@@ -27,12 +27,15 @@
             "feature": "`crypto.getRandomValues(view)`",
             "status": "implemented",
             "caveats": [
-              "A whole `ArrayBuffer` is accepted as a deliberate extension (real JS throws `TypeMismatchError` — only integer TypedArrays are spec-legal) ([ADR-00554](../adr/ADR-00554.md))"
+              "A whole `ArrayBuffer` is accepted as a deliberate extension (real JS throws `TypeMismatchError` — only integer TypedArrays are spec-legal) ([ADR-00554](../adr/00/ADR-00554.md))"
             ],
             "notes": [
-              "The spec's 65,536-byte quota is enforced — an oversize view throws `QuotaExceededError`; a float TypedArray (`Float32Array`/`Float64Array`) is a compile-time rejection, matching the spec's `TypeMismatchError` ([ADR-00554](../adr/ADR-00554.md))",
-              "Fills any integer TypedArray/`ArrayBuffer` in place and returns it ([ADR-00317](../adr/ADR-00317.md)); the legacy plain-`number[]` form (one random byte value per element) still works",
-              "See [ADR-00024](../adr/ADR-00024.md)"
+              "The spec's 65,536-byte quota is enforced — an oversize view throws `QuotaExceededError`; a float TypedArray (`Float32Array`/`Float64Array`) is a compile-time rejection, matching the spec's `TypeMismatchError` ([ADR-00554](../adr/00/ADR-00554.md))",
+              "Fills any integer TypedArray/`ArrayBuffer` in place and returns it ([ADR-00317](../adr/00/ADR-00317.md)); the legacy plain-`number[]` form (one random byte value per element) still works",
+              "See [ADR-00024](../adr/00/ADR-00024.md)"
+            ],
+            "decl": [
+              "Crypto.getRandomValues"
             ]
           },
           {
@@ -40,7 +43,10 @@
             "status": "implemented",
             "notes": [
               "RFC 4122 version-4 UUID string",
-              "See [ADR-00024](../adr/ADR-00024.md)"
+              "See [ADR-00024](../adr/00/ADR-00024.md)"
+            ],
+            "decl": [
+              "Crypto.randomUUID"
             ]
           },
           {
@@ -48,7 +54,10 @@
             "status": "implemented",
             "notes": [
               "SHA-1, SHA-256, SHA-384, SHA-512 over any BufferSource → `Promise<ArrayBuffer>`; an unknown name rejects with `NotSupportedError`",
-              "See [ADR-00316](../adr/ADR-00316.md), [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-00316](../adr/00/ADR-00316.md), [ADR-01347](../adr/01/ADR-01347.md)"
+            ],
+            "decl": [
+              "SubtleCrypto.digest"
             ]
           },
           {
@@ -59,7 +68,11 @@
             ],
             "notes": [
               "AES-CTR (`counter`, `length`), AES-CBC, AES-GCM (`iv`, `additionalData`, `tagLength`) and RSA-OAEP (`label`), with Node's errors; a failure rejects with `OperationError`",
-              "See [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-01347](../adr/01/ADR-01347.md)"
+            ],
+            "decl": [
+              "SubtleCrypto.encrypt",
+              "SubtleCrypto.decrypt"
             ]
           },
           {
@@ -70,7 +83,11 @@
             ],
             "notes": [
               "HMAC, RSASSA-PKCS1-v1_5, RSA-PSS (`saltLength`), ECDSA (P-256/P-384/P-521, IEEE P1363 signatures) and Ed25519",
-              "See [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-01347](../adr/01/ADR-01347.md)"
+            ],
+            "decl": [
+              "SubtleCrypto.sign",
+              "SubtleCrypto.verify"
             ]
           },
           {
@@ -81,7 +98,10 @@
             ],
             "notes": [
               "AES-CTR/CBC/GCM/KW, HMAC, RSASSA-PKCS1-v1_5/RSA-PSS/RSA-OAEP (any `publicExponent`), ECDSA/ECDH, Ed25519 and X25519; usages checked and split across a pair as Node splits them",
-              "See [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-01347](../adr/01/ADR-01347.md)"
+            ],
+            "decl": [
+              "SubtleCrypto.generateKey"
             ]
           },
           {
@@ -92,7 +112,11 @@
             ],
             "notes": [
               "`raw` (secret keys; EC points, compressed or not; Ed25519/X25519), `pkcs8`, `spki` and `jwk` for every algorithm, with Node's JWK checks (`kty`, `crv`, `alg`, `ext`, `key_ops`, `use`) and member order; `CryptoKey.type`/`extractable`/`algorithm`/`usages`",
-              "See [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-01347](../adr/01/ADR-01347.md)"
+            ],
+            "decl": [
+              "SubtleCrypto.importKey",
+              "SubtleCrypto.exportKey"
             ]
           },
           {
@@ -100,10 +124,18 @@
             "status": "implemented",
             "notes": [
               "Node's lib/internal/crypto/hash.js in TypeScript over the backend's incremental digest contexts: every digest the backend has (`shake128`/`shake256` with `outputLength`), Node's argument validation and error codes (`ERR_CRYPTO_HASH_FINALIZED`, `ERR_INVALID_ARG_TYPE`, `Digest method not supported`)",
-              "See [ADR-01300](../adr/ADR-01300.md)"
+              "See [ADR-01300](../adr/01/ADR-01300.md)"
             ],
             "caveats": [
               "On `-crypto=commoncrypto`: `md5`/`sha1`/`sha224`/`sha256`/`sha384`/`sha512` only — SHAKE, SHA-3, SHA-512/t, RIPEMD-160 and BLAKE2 throw `Digest method not supported`"
+            ],
+            "decl": [
+              "crypto#createHash",
+              "crypto#createHmac",
+              "crypto#Hash",
+              "crypto#Hmac",
+              "crypto#hash",
+              "crypto#getHashes"
             ]
           },
           {
@@ -112,10 +144,17 @@
             "notes": [
               "Every cipher the backend has, with `setAutoPadding`, and `setAAD`/`getAuthTag`/`setAuthTag` for AEAD modes; key/IV length errors and `bad decrypt`/`Unsupported state or unable to authenticate data` as Node reports them",
               "`getCiphers`/`getHashes` list what the linked OpenSSL can fetch, as Node lists its own (so a system OpenSSL 3.0 lists `des3-wrap` where Node's bundled 3.5 lists the `-wrap-pad` aliases)",
-              "See [ADR-01300](../adr/ADR-01300.md), [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-01300](../adr/01/ADR-01300.md), [ADR-01347](../adr/01/ADR-01347.md)"
             ],
             "caveats": [
               "On `-crypto=commoncrypto`: AES-128/192/256 in CBC, ECB, CTR and GCM only — other ciphers throw `ERR_CRYPTO_UNKNOWN_CIPHER`"
+            ],
+            "decl": [
+              "crypto#createCipheriv",
+              "crypto#createDecipheriv",
+              "crypto#Cipheriv",
+              "crypto#Decipheriv",
+              "crypto#getCiphers"
             ]
           },
           {
@@ -123,10 +162,18 @@
             "status": "implemented",
             "notes": [
               "The callback forms run on the thread pool, as Node's do",
-              "See [ADR-01300](../adr/ADR-01300.md)"
+              "See [ADR-01300](../adr/01/ADR-01300.md)"
             ],
             "caveats": [
               "On `-crypto=commoncrypto`: the digests are the six `createHash` has there"
+            ],
+            "decl": [
+              "crypto#pbkdf2",
+              "crypto#pbkdf2Sync",
+              "crypto#scrypt",
+              "crypto#scryptSync",
+              "crypto#hkdf",
+              "crypto#hkdfSync"
             ]
           },
           {
@@ -134,7 +181,17 @@
             "status": "implemented",
             "notes": [
               "`randomBytes`/`randomFill` callbacks run on the thread pool; `randomInt` is Node's rejection-sampling loop",
-              "See [ADR-01300](../adr/ADR-01300.md)"
+              "See [ADR-01300](../adr/01/ADR-01300.md)"
+            ],
+            "decl": [
+              "crypto#randomBytes",
+              "crypto#randomFill",
+              "crypto#randomFillSync",
+              "crypto#randomInt",
+              "crypto#randomUUID",
+              "crypto#getRandomValues",
+              "crypto#timingSafeEqual",
+              "crypto#constants"
             ]
           },
           {
@@ -147,7 +204,15 @@
             "notes": [
               "Without an encoding a pair is two `KeyObject`s; an encoding may be `pem`/`der`/`jwk` with `pkcs1`/`spki`/`pkcs8`/`sec1` and a `cipher`/`passphrase`. A key may be a `KeyObject`, PEM or `{ key, passphrase, padding, saltLength, dsaEncoding }`",
               "Generation runs on the thread pool in the callback form",
-              "See [ADR-01300](../adr/ADR-01300.md), [ADR-01345](../adr/ADR-01345.md)"
+              "See [ADR-01300](../adr/01/ADR-01300.md), [ADR-01345](../adr/01/ADR-01345.md)"
+            ],
+            "decl": [
+              "crypto#generateKeyPair",
+              "crypto#generateKeyPairSync",
+              "crypto#createSign",
+              "crypto#createVerify",
+              "crypto#sign",
+              "crypto#verify"
             ]
           },
           {
@@ -159,7 +224,13 @@
             ],
             "notes": [
               "PEM, DER (`pkcs1`/`spki`/`pkcs8`/`sec1`, encrypted PKCS#8 with a passphrase) and JWK (RSA, EC, OKP) input; `export` in each; `type`, `asymmetricKeyType`, `asymmetricKeyDetails`, `symmetricKeySize`, `equals`, Node's errors and `ERR_OSSL_*` codes",
-              "See [ADR-01345](../adr/ADR-01345.md)"
+              "See [ADR-01345](../adr/01/ADR-01345.md)"
+            ],
+            "decl": [
+              "crypto#KeyObject",
+              "crypto#createPrivateKey",
+              "crypto#createPublicKey",
+              "crypto#createSecretKey"
             ]
           },
           {
@@ -170,7 +241,17 @@
             ],
             "notes": [
               "ECDH on every built-in curve with compressed/uncompressed/hybrid points and `ECDH.convertKey`; `diffieHellman` over EC, X25519 and X448 KeyObjects; the RSA functions with OAEP (`oaepHash`, `oaepLabel`), PKCS#1 and no padding, Node's errors and `ERR_OSSL_*` codes",
-              "See [ADR-01346](../adr/ADR-01346.md)"
+              "See [ADR-01346](../adr/01/ADR-01346.md)"
+            ],
+            "decl": [
+              "crypto#createECDH",
+              "crypto#ECDH",
+              "crypto#diffieHellman",
+              "crypto#publicEncrypt",
+              "crypto#privateDecrypt",
+              "crypto#privateEncrypt",
+              "crypto#publicDecrypt",
+              "crypto#getCurves"
             ]
           },
           {
@@ -188,7 +269,11 @@
             ],
             "notes": [
               "PBKDF2, HKDF (non-extractable base keys, as Node requires), ECDH and X25519; `deriveKey` to any key the algorithm can make",
-              "See [ADR-00320](../adr/ADR-00320.md), [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-00320](../adr/00/ADR-00320.md), [ADR-01347](../adr/01/ADR-01347.md)"
+            ],
+            "decl": [
+              "SubtleCrypto.deriveKey",
+              "SubtleCrypto.deriveBits"
             ]
           },
           {
@@ -199,7 +284,11 @@
             ],
             "notes": [
               "Any exportable key in any format, wrapped with AES-KW, AES-GCM/CBC/CTR or RSA-OAEP",
-              "See [ADR-01347](../adr/ADR-01347.md)"
+              "See [ADR-01347](../adr/01/ADR-01347.md)"
+            ],
+            "decl": [
+              "SubtleCrypto.wrapKey",
+              "SubtleCrypto.unwrapKey"
             ]
           },
           {

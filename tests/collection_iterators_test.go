@@ -212,3 +212,18 @@ function* arr(): Generator<number[]> { yield [1, 2]; }
 const q = arr(); console.log(q.next(), q.next());
 `)
 }
+
+// TestE2EMapHeterogeneousSeed: a `new Map([...])` seed whose pairs differ in
+// key or value type keeps every entry as given, annotated `<any, any>` or
+// not.
+func TestE2EMapHeterogeneousSeed(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const m = new Map<any, any>([["a", 1], [{ x: 2 }, "s"], [3.5, null]]);
+for (const [k, v] of m) console.log(typeof k, k, typeof v, v);
+const u = new Map([["a", 1], [2, 2]]);
+for (const [k, v] of u) console.log(typeof k, k, v);
+console.log(u.get(2), u.get("a"), u.has("2"), m.size);
+const w = new Map([["a", 1], ["b", "two"], ["c", null]]);
+console.log(w.get("b"), w.get("c"), w.get("zz"), [...w.values()]);
+`)
+}

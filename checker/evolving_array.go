@@ -139,6 +139,19 @@ func (c *Checker) addArrayElems(t *Type, n ast.Node) *Type {
 	return c.evolvedArray(append(base, add...))
 }
 
+// TupleAsArray is the array of a tuple's element types (their widened
+// union), as the tuple's values are held where nothing asks for a tuple.
+func (c *Checker) TupleAsArray(t *Type) *Type {
+	if t == nil || t.Flags&Object == 0 || t.Kind != Tuple {
+		return t
+	}
+	elems := make([]*Type, len(t.Elems))
+	for i, el := range t.Elems {
+		elems[i] = c.widenUnit(el)
+	}
+	return c.evolvedArray(elems)
+}
+
 // evolvedArray is the array of elems, never[] with none.
 func (c *Checker) evolvedArray(elems []*Type) *Type {
 	if len(elems) == 0 {

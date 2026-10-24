@@ -57,3 +57,24 @@ const al = { length: 3, 0: "a", 1: "b" }
 console.log(Array.from(al), Array.from({ length: 2 }, (_, i) => i))
 `)
 }
+
+// A literal whose `[Symbol.iterator]()` returns its own `this` iterates by
+// its `next`: the method is called on the object.
+func TestE2ESelfIteratorLiteral(t *testing.T) {
+	src := `
+let n = 0;
+const it = {
+  [Symbol.iterator]() { return this; },
+  next() { n++; return { done: n > 3, value: n }; },
+  tag: "it",
+};
+for (const v of it) console.log(v);
+console.log(it.tag);
+for (var r of [1, "s", true]) {
+  const o = { k: r, j: 2 };
+  console.log(o.k, o.j, typeof o.k);
+}
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCompatJS(t, src)
+}

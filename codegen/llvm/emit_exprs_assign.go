@@ -59,16 +59,16 @@ func (e *Emitter) tryEmitAccessorAssign(objVal Value, prop, op string, rhsExpr a
 		if err != nil {
 			return true, Value{}, err
 		}
-		if err := dateCompoundAssignGuard(op, paramTy.IsDate, rhsVal.Ty.IsDate); err != nil {
+		if err := dateCompoundAssignGuard(op, paramTy.IsDate(), rhsVal.Ty.IsDate()); err != nil {
 			return true, Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
 		}
-		rhsVal = e.coerce(rhsVal, paramTy)
+		rhsVal = e.convert(rhsVal, paramTy)
 		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, paramTy, pos)
 		if err != nil {
 			return true, Value{}, err
 		}
 	}
-	rhs = e.coerce(rhs, paramTy)
+	rhs = e.convert(rhs, paramTy)
 	if _, err := e.emitClassSetterCall(objVal.Ty, objVal, accessorMethodName("set", prop), rhs, pos); err != nil {
 		return true, Value{}, err
 	}
@@ -91,14 +91,14 @@ func (e *Emitter) tryEmitAccessorAssign(objVal Value, prop, op string, rhsExpr a
 // bare `x ?? y`.
 func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast.Expression) (Value, error) {
 	curReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, ty.IR, ptr, ty.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, storageIR(ty), ptr, ty.Align()))
 	cur := Value{Ref: curReg, Ty: ty}
 
 	// `??=` can only ever fire against a location whose value may be nullish: a
 	// bare `ptr` (which may be null) or a dynamic any-box (whose tag may be
 	// null/undefined). Any other scalar type is never nullish, so the right side
 	// is never evaluated — exactly like bare `x ?? y`.
-	if op == "??=" && ty.IR != "ptr" && !ty.IsDynamic && !isF64Slot(ty) {
+	if op == "??=" && ty.IR != "ptr" && !ty.IsDynamic() && !isF64Slot(ty) && !isNullableScalar(ty) {
 		return cur, nil
 	}
 
@@ -111,7 +111,7 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notReg, e.toBool(cur).Ref))
 		cond = Value{Ref: notReg, Ty: TypeBool}
 	case "??=":
-		if ty.IsDynamic {
+		if ty.IsDynamic() {
 			// Nullish when the box tag is null or undefined.
 			tag, _ := e.emitUnboxTagPayload(cur)
 			isNull := e.freshReg()
@@ -127,9 +127,15 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 			cond = Value{Ref: e.emitF64IsUndefined(cur.Ref), Ty: TypeBool}
 			break
 		}
-		nullReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", nullReg, cur.Ref))
-		cond = Value{Ref: nullReg, Ty: TypeBool}
+		if isNullableScalar(ty) {
+			// Nullish when the presence bit is clear.
+			present, _ := e.nullableScalarAggParts(cur)
+			absent := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", absent, present))
+			cond = Value{Ref: absent, Ty: TypeBool}
+			break
+		}
+		cond = Value{Ref: e.isAbsentPtr(cur.Ref, cur.Ty), Ty: TypeBool} // a string's nullRef too
 	default:
 		return Value{}, fmt.Errorf("unknown logical assignment operator '%s'", op)
 	}
@@ -143,27 +149,62 @@ func (e *Emitter) emitLogicalCompoundAssign(op, ptr string, ty Type, rhsExpr ast
 	if err != nil {
 		return Value{}, err
 	}
-	// coerceChecked, not coerce: a right-hand side whose type is incompatible
+	// convertChecked, not coerce: a right-hand side whose type is incompatible
 	// with the location (e.g. `x ??= 1` where x is a null-typed `ptr` and the
 	// evolving-any widening is off under --no-any) is a clean compile error, not
 	// a `store ptr <double>` (invalid IR).
-	rhs, err = e.coerceChecked(rhs, ty, rhsExpr.GetPos(), "compound assignment")
+	rhs, err = e.convertChecked(rhs, ty, rhsExpr.GetPos(), "compound assignment")
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, rhs.Ref, ptr, ty.Align()))
+	e.heapStore(storageIR(ty), rhs.Ref, ptr, ty.Align())
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, ty.IR, ptr, ty.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, storageIR(ty), ptr, ty.Align()))
 	return Value{Ref: result, Ty: ty}, nil
 }
 
 func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
+	if id, ok := ex.Left.(*ast.Identifier); ok {
+		if m := e.nsSiblingTarget(id); m != nil {
+			// A store to a sibling namespace member from a member
+			// function's body: its mangled binding.
+			syn := ast.NewAssignmentExpression(ex.Op, m, ex.Right, ex.GetPos())
+			e.originate(syn, ex)
+			return e.emitAssign(syn)
+		}
+	}
+	if m, ok := ex.Left.(*ast.MemberExpression); ok && len(ex.Op) > 1 && !logicalAssignOp(ex.Op) && e.shadowableRead(m) {
+		// A compound write to a field a write through any may shadow:
+		// `(o as any).k = o.k op r`, the read seeing the shadow and the
+		// write storing the field or the shadow as the result's kind is.
+		anyObj := ast.NewAsExpression(m.Object, &ast.TypeAnnotation{Name: "any"}, m.GetPos())
+		rhs := ast.NewBinaryExpression(strings.TrimSuffix(ex.Op, "="), m, ex.Right, ex.GetPos())
+		return e.emitAssign(ast.NewAssignmentExpression("=", ast.NewMemberExpression(anyObj, m.Property, m.GetPos()), rhs, ex.GetPos()))
+	}
 	// A namespace-member assignment (`X.member = v` / `A.B.member = v`,
 	// TDD-00148/ADR-00474) rewrites to an assignment to the desugared flat
 	// binding, mirroring the call/value-read dispatch in emitCall/emitMember.
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && e.isStackTraceLimit(memEx) {
+		right := ex.Right
+		if ex.Op != "=" {
+			right = ast.NewBinaryExpression(strings.TrimSuffix(ex.Op, "="), memEx, ex.Right, ex.GetPos())
+		}
+		v, err := e.emitExpr(right)
+		if err != nil {
+			return Value{}, err
+		}
+		n, err := e.convertChecked(v, TypeF64, ex.GetPos(), "Error.stackTraceLimit")
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureFrames()
+		e.declareFn("__kml_stack_limit_set", "declare void @__kml_stack_limit_set(double)")
+		e.emitInstr(fmt.Sprintf("call void @__kml_stack_limit_set(double %s)", n.Ref))
+		return n, nil
+	}
 	if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
 		if id, isID := memEx.Object.(*ast.Identifier); isID {
 			if members, nsName := e.namespaceMembers(id.Name); members != nil && !e.isShadowedByLocal(id.Name) {
@@ -217,6 +258,17 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		defer undo()
 	}
 
+	// Buffer.poolSize = v (or compound): an assignment to internal_buffer.ts's
+	// variable.
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
+		if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "Buffer" && memEx.Property == "poolSize" && !e.isShadowedByLocal(id.Name) {
+			if m, ok := e.libExports["internal_buffer:poolSize"]; ok {
+				re := *ex
+				re.Left = ast.NewIdentifier(m, memEx.GetPos())
+				return e.emitAssign(&re)
+			}
+		}
+	}
 	// process.exitCode = v: setExitCode(v) (lib/node/internal_process_methods.ts).
 	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && memEx.Property == "exitCode" {
 		if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) && ex.Op == "=" {
@@ -225,29 +277,17 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		}
 	}
-	// res.statusCode = N → store into the ServerResponse's `status` field
-	// (Node names the property `statusCode`; the object field is `status`).
-	// TDD-00131: the imperative alternative to writeHead(status).
-	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && memEx.Property == "statusCode" {
-		if objTy := e.inferExprType(memEx.Object); objTy.IsServerResponse {
-			if ex.Op != "=" {
-				return Value{}, fmt.Errorf("%d:%d: compound assignment to res.statusCode is not supported — assign a status code directly", ex.GetPos().Line, ex.GetPos().Col)
+	// process.title = v (or another member the emitter object holds): a
+	// write to that object.
+	if memEx, ok := ex.Left.(*ast.MemberExpression); ok && processEmitterMembers[memEx.Property] {
+		if id, ok := memEx.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
+			if obj, ok := e.processEmitterValue(memEx.GetPos()); ok {
+				re := *ex
+				m := *memEx
+				m.Object = obj
+				re.Left = &m
+				return e.emitAssign(&re)
 			}
-			resVal, err := e.emitExpr(memEx.Object)
-			if err != nil {
-				return Value{}, err
-			}
-			val, err := e.emitExpr(ex.Right)
-			if err != nil {
-				return Value{}, err
-			}
-			val = e.coerce(val, TypeI64)
-			ty := ServerResponseType()
-			idx, _, _ := ty.FieldIndex("status")
-			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, ty.StructIR(), resVal.Ref, idx))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", val.Ref, gep))
-			return val, nil
 		}
 	}
 	// process.env.KEY = v / process.env[key] = v: envSet(key, v); a compound
@@ -258,7 +298,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// `F.prototype = value` on a recognized vanilla-JS constructor function
 	// (TDD-00155 Stage 4, `-compat=js`) re-points the prototype bag.
 	if memEx, ok := ex.Left.(*ast.MemberExpression); ok {
-		if id, ok := memEx.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] && memEx.Property == "prototype" {
+		if id, ok := memEx.Object.(*ast.Identifier); ok && e.jsProtoCtor[id.Name] && memEx.Property == "prototype" {
 			if ex.Op != "=" {
 				return Value{}, fmt.Errorf("%d:%d: compound assignment to a prototype is not supported", ex.GetPos().Line, ex.GetPos().Col)
 			}
@@ -279,6 +319,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if info, found := e.classes[id.Name]; found {
 				return e.emitStaticFieldAssign(info, id.Name, memEx.Property, ex.Op, ex.Right, ex.GetPos())
 			}
+			if info, name, found := e.genericStaticMember(id, memEx.Property); found {
+				return e.emitStaticFieldAssign(info, name, memEx.Property, ex.Op, ex.Right, ex.GetPos())
+			}
 		}
 	}
 	// Dynamic object bracket assignment: obj[expr] = val (or compound ops) —
@@ -286,12 +329,12 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// checked before emitIndexPtr, which only understands array storage.
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
 		if id, ok := idxEx.Object.(*ast.Identifier); ok {
-			if sym, found := e.lookup(id.Name); found && sym.Ty.IsDynamicObject {
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsDynamicObject() {
 				mapPtr := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, sym.Ptr))
 				return e.emitDynamicObjectAssign(sym.Ty, mapPtr, idxEx.Index, ex.Op, ex.Right, ex.GetPos())
 			}
-		} else if objTy := e.inferExprType(idxEx.Object); objTy.IsDynamicObject {
+		} else if objTy := e.inferExprType(idxEx.Object); objTy.IsDynamicObject() {
 			objVal, err := e.emitExpr(idxEx.Object)
 			if err != nil {
 				return Value{}, err
@@ -303,15 +346,17 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// the D1 dynamic object model (TDD-00155 Stage 1).
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
 		baseTy := e.inferExprType(idxEx.Object)
-		fnObj := baseTy.IsFunc && !baseTy.IsDynamic
+		// A function's own property, or a computed key into a class
+		// instance (classDynIndex): through the boxed value.
+		fnObj := baseTy.IsFunc() && !baseTy.IsDynamic() || e.classDynIndex(idxEx)
 		if isUnconstrainedDynamic(baseTy) || fnObj {
 			objVal, err := e.emitExpr(idxEx.Object)
 			if err != nil {
 				return Value{}, err
 			}
 			if fnObj {
-				// A function's own property: its boxed function object's
-				// bag (TDD-00229).
+				// Its boxed function object's bag (TDD-00229), or the boxed
+				// instance.
 				if objVal, err = e.emitBoxValue(objVal); err != nil {
 					return Value{}, err
 				}
@@ -332,9 +377,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	}
 	// Tuple element assignment: t[0] = val (TDD-00066). A tuple is a fixed-shape
 	// struct, so a constant index maps to that field — checked before array
-	// indexing, whose {ptr,i64} storage a tuple doesn't have.
+	// indexing, whose header storage a tuple doesn't have.
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
-		if tupleTy := e.inferExprType(idxEx.Object); tupleTy.IsTuple {
+		if tupleTy := e.inferExprType(idxEx.Object); tupleTy.IsTuple() {
 			return e.emitTupleElemAssign(idxEx, tupleTy, ex.Op, ex.Right)
 		}
 	}
@@ -343,7 +388,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	// (ADR-00608) — rewrite to a member-target assignment so it reuses the
 	// accessor / readonly / nullable / frozen machinery unchanged.
 	if idxEx, ok := ex.Left.(*ast.IndexExpression); ok {
-		if objTy := e.inferExprType(idxEx.Object); objTy.IsObject && !objTy.IsArray && !objTy.IsDynamicObject {
+		if objTy := e.inferExprType(idxEx.Object); objTy.IsObject() && !objTy.IsArray() && !objTy.IsDynamicObject() {
 			if key, ok := constObjectKey(idxEx.Index); ok {
 				member := ast.NewMemberExpression(idxEx.Object, key, idxEx.GetPos())
 				rewritten := ast.NewAssignmentExpression(ex.Op, member, ex.Right, ex.GetPos())
@@ -367,9 +412,20 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// fixed-bounds semantics; compound ops read the slot first, where
 		// out-of-range is genuinely an error.
 		if ex.Op == "=" {
-			if objTy := e.inferExprType(idxEx.Object); objTy.IsArray && !objTy.IsFlatArray && !objTy.IsTypedArray {
+			if objTy := e.inferExprType(idxEx.Object); objTy.IsArray() && !objTy.IsFlatArray() && !objTy.IsTypedArray() {
 				if v, handled, err := e.emitArrayIndexAssignGrow(idxEx, ex.Right); handled {
 					return v, err
+				}
+			}
+		}
+		if ex.Op != "=" && e.sloppyWrite && !isLogicalAssignOp(ex.Op) && pureArrayRef(idxEx.Object) {
+			switch idxEx.Index.(type) {
+			case *ast.Identifier, *ast.NumberLiteral:
+				// Sloppy code: `a[i] op= v` is `a[i] = a[i] op v` (its parts
+				// have no side effects), whose refused write does nothing.
+				if t := e.inferExprType(idxEx.Object); t.IsArray() && !t.IsTypedArray() && !t.IsFlatArray() {
+					op := strings.TrimSuffix(ex.Op, "=")
+					return e.emitAssign(ast.NewAssignmentExpression("=", idxEx, ast.NewBinaryExpression(op, idxEx, ex.Right, ex.GetPos()), ex.GetPos()))
 				}
 			}
 		}
@@ -383,7 +439,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// TDD-00101: BigInt64Array/BigUint64Array/Uint8ClampedArray element
 		// stores go through the conversion layer (bigint unwrap / ToUint8Clamp)
 		// instead of the plain coerce below.
-		if taTy := e.inferExprType(idxEx.Object); taTy.IsTypedArray && (taTy.BigIntElem || taTy.Clamped) {
+		if taTy := e.inferExprType(idxEx.Object); taTy.IsTypedArray() && (taTy.BigIntElem || taTy.Clamped) {
 			if ex.Op != "=" {
 				if taTy.BigIntElem {
 					// Load the raw i64 element, wrap it into a bigint (signed for
@@ -402,14 +458,14 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 					if err != nil {
 						return Value{}, err
 					}
-					if !rhsVal.Ty.IsBigInt {
+					if !rhsVal.Ty.IsBigInt() {
 						return Value{}, fmt.Errorf("%d:%d: a BigInt64Array/BigUint64Array element compound assignment needs a bigint right-hand side", ex.GetPos().Line, ex.GetPos().Col)
 					}
 					res, err := e.emitBigIntBinary(strings.TrimSuffix(ex.Op, "="), Value{Ref: curBig, Ty: BigIntType()}, rhsVal, ex.GetPos())
 					if err != nil {
 						return Value{}, err
 					}
-					stored, err := e.coerceTypedArrayStore(res, taTy, ex.GetPos())
+					stored, err := e.toTypedArrayElem(res, taTy, ex.GetPos())
 					if err != nil {
 						return Value{}, err
 					}
@@ -425,11 +481,11 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				if err != nil {
 					return Value{}, err
 				}
-				res, err := e.emitArith(strings.TrimSuffix(ex.Op, "="), e.coerce(cur, TypeI64), e.coerce(rhsVal, TypeI64), TypeI64, ex.GetPos())
+				res, err := e.emitArith(strings.TrimSuffix(ex.Op, "="), e.convert(cur, TypeI64), e.convert(rhsVal, TypeI64), TypeI64, ex.GetPos())
 				if err != nil {
 					return Value{}, err
 				}
-				stored, err := e.coerceTypedArrayStore(res, taTy, ex.GetPos())
+				stored, err := e.toTypedArrayElem(res, taTy, ex.GetPos())
 				if err != nil {
 					return Value{}, err
 				}
@@ -440,7 +496,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			stored, err := e.coerceTypedArrayStore(rhsVal, taTy, ex.GetPos())
+			stored, err := e.toTypedArrayElem(rhsVal, taTy, ex.GetPos())
 			if err != nil {
 				return Value{}, err
 			}
@@ -469,22 +525,22 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			if err := dateCompoundAssignGuard(ex.Op, elemTy.IsDate, rhsVal.Ty.IsDate); err != nil {
+			if err := dateCompoundAssignGuard(ex.Op, elemTy.IsDate(), rhsVal.Ty.IsDate()); err != nil {
 				return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
 			}
-			rhsVal = e.coerce(rhsVal, elemTy)
+			rhsVal = e.convert(rhsVal, elemTy)
 			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, elemTy, ex.GetPos())
 			if err != nil {
 				return Value{}, err
 			}
 		}
-		// coerceChecked (not plain coerce): a value that can't convert to the
+		// convertChecked (not plain coerce): a value that can't convert to the
 		// element type — e.g. `const a: number[] = []; a[i] = 'str'` — is a clean
 		// compile error, not an aggregate/pointer stored into a scalar slot
 		// (invalid IR: "constant expression type mismatch"). ADR-00688. In
 		// `-compat=js` the element type is `any`, which every value coerces into
 		// (boxes), so this only rejects a genuine strict-mode type mismatch.
-		rhs, err = e.coerceChecked(rhs, elemTy, ex.GetPos(), "array-element assignment")
+		rhs, err = e.convertChecked(rhs, elemTy, ex.GetPos(), "array-element assignment")
 		if err != nil {
 			return Value{}, err
 		}
@@ -494,17 +550,15 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 
 	// Array variable reassignment: arr = val (the whole array, not
 	// arr[i] = val). A separate branch from the generic scalar-variable
-	// case below, because this compiler represents an array as two
-	// allocas (Ptr/LenPtr — see the project's own Array value duality note), not
-	// the single alloca every other assignable form uses; the generic
-	// scalar path's single "store %s %s, ptr sym.Ptr" would try to store a
-	// whole {ptr,i64} aggregate into sym.Ptr's plain "alloca ptr" slot, a
-	// hard clang-stage type mismatch. Found while wiring TDD-00028's
+	// case below, because an array binding's slot holds a shared header
+	// pointer that the whole-array store must rebind (not copy through), unlike
+	// the generic scalar path's single "store %s %s, ptr sym.Ptr". Found
+	// while wiring TDD-00028's
 	// array-literal-as-general-expression fix — a real, pre-existing,
 	// unrelated bug (arr = otherArrayVar already failed identically before
 	// any array-literal changes, confirmed directly).
 	if ident, ok := ex.Left.(*ast.Identifier); ok {
-		if sym, found := e.lookup(ident.Name); found && sym.Ty.IsArray {
+		if sym, found := e.lookup(ident.Name); found && sym.Ty.IsArray() {
 			if ex.Op != "=" {
 				return Value{}, fmt.Errorf("%d:%d: compound assignment ('%s') is not supported on an array variable", ex.GetPos().Line, ex.GetPos().Col, ex.Op)
 			}
@@ -530,35 +584,25 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			// `xs = null` / `xs = undefined` on a `T[] | null` binding: the slot
 			// holds no array (the null header). Only this binding changes — an
 			// alias keeps the array.
-			if val.Ty.IsNull && sym.Ty.Nullable {
+			if val.Ty.IsNull() && sym.Ty.Nullable() {
 				val = e.emitAbsentArrayValue(sym.Ty)
 			}
-			if !val.Ty.IsArray {
+			if !val.Ty.IsArray() {
 				return Value{}, fmt.Errorf("%d:%d: cannot assign a non-array value to array variable '%s'", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 			}
 			// A concrete array into an `any[]` binding (or the reverse): its
 			// elements converted, in a copy.
-			if conv, ok := e.coerceArrayElems(val, sym.Ty); ok {
+			if conv, ok := e.convertArrayElems(val, sym.Ty); ok {
 				val = conv
 			}
 			// Reference semantics (TDD-00213 Stage 1): if the RHS is an existing
 			// header-backed array (`a = b`), rebind this slot to the SAME header
 			// cell so `a` and `b` alias — a later `push` through either is visible
 			// through the other, and they are `===`. A RHS that produces a NEW array
-			// (`a = a.filter(...)`, a literal — no ArrayHeader) rebinds to a fresh
+			// (`a = a.filter(...)`, a literal) rebinds to a fresh
 			// header, so this frame gets its own array without clobbering a caller's
 			// (an in-place `a.push(...)` still writes through to the caller).
-			if val.ArrayHeader != "" {
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, sym.Ptr))
-				return val, nil
-			}
-			newHeader := ""
-			if sym.Ty.Nullable {
-				newHeader = e.arrayReturnHeader(val) // null for an absent transient
-			} else {
-				newHeader = e.boxArrayValue(val)
-			}
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newHeader, sym.Ptr))
+			e.heapStore("ptr", val.Ref, sym.Ptr, 8)
 			return val, nil
 		}
 	}
@@ -569,7 +613,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		if objVal.Ty.IsDynamicObject {
+		if objVal.Ty.IsDynamicObject() {
 			keyExpr := ast.NewStringLiteral(memEx.Property, memEx.GetPos())
 			return e.emitDynamicObjectAssign(objVal.Ty, objVal.Ref, keyExpr, ex.Op, ex.Right, ex.GetPos())
 		}
@@ -580,7 +624,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// (TDD-00229).
 		// A write through `(x as any).p`: x is written as an `any` holding it
 		// is, a property it lacks added at run time.
-		if objVal.Ty.IsFunc && !objVal.Ty.IsDynamic || castToAny(memEx.Object) && !objVal.Ty.IsDynamic {
+		if objVal.Ty.IsFunc() && !objVal.Ty.IsDynamic() || castToAny(memEx.Object) && !objVal.Ty.IsDynamic() {
 			boxed, err := e.emitBoxValue(objVal)
 			if err != nil {
 				return Value{}, err
@@ -599,10 +643,57 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 			return e.emitDynAnyMemberSetNamed(objVal, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
 		}
-		if objVal.Ty.IsArray && !objVal.Ty.IsTypedArray && memEx.Property == "length" && ex.Op == "=" {
+		if objVal.Ty.IsArray() && !objVal.Ty.IsTypedArray() && memEx.Property == "length" && ex.Op == "=" {
 			return e.emitArrayLengthAssign(memEx, ex.Right)
 		}
-		if !objVal.Ty.IsObject {
+		if _, member := e.nativeIfaceMember(objVal.Ty, memEx.Property); member && !objVal.Ty.IsObject() {
+			// An interface's own member over a native layout (`Date`).
+			box, err := e.emitBoxValue(objVal)
+			if err != nil {
+				return Value{}, err
+			}
+			if ex.Op != "=" {
+				return e.emitDynAnyCompoundAssign(box, e.internString(memEx.Property), memEx.Property, ex.Op, ex.Right, ex.GetPos())
+			}
+			rhs, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMemberSetNamed(box, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
+		}
+		if e.compatJS() && (isStringTy(objVal.Ty) || objVal.Ty.IR == "i1" || objVal.Ty.Float || objVal.Ty.IsInteger()) && !objVal.Ty.IsArray() {
+			// A property write on a primitive: through the box (refused —
+			// a TypeError in strict code, nothing in sloppy code).
+			box, err := e.emitBoxValue(objVal)
+			if err != nil {
+				return Value{}, err
+			}
+			if ex.Op != "=" {
+				return e.emitDynAnyCompoundAssign(box, e.internString(memEx.Property), memEx.Property, ex.Op, ex.Right, ex.GetPos())
+			}
+			rhs, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMemberSetNamed(box, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
+		}
+		if objVal.Ty.IsArray() && !objVal.Ty.IsObject() {
+			// An array's own named property (`a.foo = 1`): its box keeps it,
+			// keyed by the array's header, as a write through `any` does.
+			box, err := e.emitBoxValue(objVal)
+			if err != nil {
+				return Value{}, err
+			}
+			if ex.Op != "=" {
+				return e.emitDynAnyCompoundAssign(box, e.internString(memEx.Property), memEx.Property, ex.Op, ex.Right, ex.GetPos())
+			}
+			rhs, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMemberSetNamed(box, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
+		}
+		if !objVal.Ty.IsObject() {
 			return Value{}, fmt.Errorf("%d:%d: field assignment on non-object", ex.GetPos().Line, ex.GetPos().Col)
 		}
 		// TDD-00030: a class accessor (getter/setter) is checked before the
@@ -610,7 +701,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// name is never a real Field, so FieldIndex would otherwise report
 		// "no field" for it. Every non-accessor class, and every non-class
 		// object, falls through unchanged.
-		if objVal.Ty.IsClass {
+		if objVal.Ty.IsClass() {
 			if handled, result, err := e.tryEmitAccessorAssign(objVal, memEx.Property, ex.Op, ex.Right, ex.GetPos()); err != nil {
 				return Value{}, err
 			} else if handled {
@@ -619,7 +710,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		}
 		idx, fieldTy, ok := objVal.Ty.FieldIndex(memEx.Property)
 		if !ok {
-			if info, isHost := e.classes[objVal.Ty.ClassName]; objVal.Ty.IsClass && isHost && info.HostBase != nil {
+			if info, isHost := e.classes[objVal.Ty.ClassName]; objVal.Ty.IsClass() && isHost && info.HostBase != nil {
 				// The host base's property (`lastIndex`), on the instance's
 				// body.
 				body := e.bindHostBody(objVal, *info.HostBase, memEx.GetPos())
@@ -627,7 +718,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 				hostEx.Left = ast.NewMemberExpression(body, memEx.Property, memEx.GetPos())
 				return e.emitAssign(&hostEx)
 			}
-			if objVal.Ty.IsClass {
+			if _, member := e.nativeIfaceMember(objVal.Ty, memEx.Property); objVal.Ty.IsClass() || member {
 				// A property (or method) the instance takes as its own.
 				box, err := e.emitBoxValue(objVal)
 				if err != nil {
@@ -644,102 +735,152 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 			return Value{}, fmt.Errorf("%d:%d: no field '%s'", ex.GetPos().Line, ex.GetPos().Col, memEx.Property)
 		}
-		if objVal.Ty.IsClass {
+		if objVal.Ty.IsClass() {
 			if err := e.checkReadonlyWrite(objVal.Ty.ClassName, memEx.Property, ex.GetPos()); err != nil {
 				return Value{}, err
 			}
 		}
-		e.emitFrozenCheck(objVal.Ref)
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
-		// A structural type's value may have another layout (TDD-00233): the
-		// member is written into a temporary, then through the layout table.
-		view := isRecordView(objVal.Ty)
-		var viewForeign string
-		if view {
-			gepReg, viewForeign = e.emitRecordFieldSlot(objVal, gepReg, fieldTy, memEx.Property, ex.Op != "=")
+		ownPath := func() (Value, error) {
+			if e.sloppyWrite && ex.Op != "=" && !isLogicalAssignOp(ex.Op) && !isNullableScalar(fieldTy) && !isRecordView(objVal.Ty) && pureArrayRef(memEx.Object) {
+				// Sloppy code: `o.f op= v` is `o.f = o.f op v` (o has no side
+				// effects), whose refused write does nothing.
+				op := strings.TrimSuffix(ex.Op, "=")
+				return e.emitAssign(ast.NewAssignmentExpression("=", memEx, ast.NewBinaryExpression(op, memEx, ex.Right, ex.GetPos()), ex.GetPos()))
+			}
+			if e.sloppyWrite && ex.Op == "=" && !isNullableScalar(fieldTy) && !isRecordView(objVal.Ty) {
+				// Sloppy code: the value is computed, and a frozen object or a
+				// read-only property keeps its old one.
+				rhs, err := e.emitExprWithObjectHint(ex.Right, fieldTy)
+				if err != nil {
+					return Value{}, err
+				}
+				if !fieldTy.IsArray() && !fieldTy.IsDynamic() {
+					rhs = e.convert(rhs, fieldTy)
+					if rhs.Ty.IR != fieldTy.IR || rhs.Ty.IsArray() != fieldTy.IsArray() {
+						return Value{}, fmt.Errorf("%d:%d: type '%s' is not assignable to type '%s' (field '%s')",
+							ex.GetPos().Line, ex.GetPos().Col, tsTypeName(rhs.Ty), tsTypeName(fieldTy), memEx.Property)
+					}
+				}
+				refused := e.emitStaticWriteRefused(objVal, memEx.Property)
+				storeL, skipL := e.freshLabel("sloppyset.store"), e.freshLabel("sloppyset.done")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", refused, skipL, storeL))
+				e.emitLabel(storeL)
+				e.emitUnshadow(objVal.Ref, memEx.Property)
+				gepReg := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+				e.storeScalarOrNullableField(gepReg, fieldTy, rhs)
+				if memEx.Property == "name" && e.isErrorValue(objVal.Ty) {
+					e.markErrorNameOwn(objVal)
+				}
+				if memEx.Property == "cause" && e.isErrorValue(objVal.Ty) {
+					e.markErrorCauseOwn(objVal)
+				}
+				e.emitSetPresence(objVal.Ref, objVal.Ty, memEx.Property, true)
+				e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
+				e.emitLabel(skipL)
+				return rhs, nil
+			}
+			e.emitFrozenCheck(objVal, memEx.Property)
+			e.emitReadOnlyCheck(objVal.Ref, objVal.Ty, memEx.Property)
+			e.emitUnshadow(objVal.Ref, memEx.Property)
+			gepReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objVal.Ty.StructIR(), objVal.Ref, idx))
+			// A structural type's value may have another layout (TDD-00233): the
+			// member is written into a temporary, then through the layout table.
+			view := isRecordView(objVal.Ty)
+			var viewForeign string
+			if view {
+				gepReg, viewForeign = e.emitRecordFieldSlot(objVal, gepReg, fieldTy, memEx.Property, ex.Op != "=")
+			}
+			finish := func(v Value, err error) (Value, error) {
+				if err == nil && view {
+					e.emitRecordWriteBack(objVal, gepReg, viewForeign, fieldTy, memEx.Property)
+				}
+				if err == nil {
+					e.emitSetPresence(objVal.Ref, objVal.Ty, memEx.Property, true) // the key now exists
+				}
+				return v, err
+			}
+			if isLogicalAssignOp(ex.Op) {
+				// A nullable-scalar field's { i1, T } presence-flagged slot needs the
+				// dedicated present-bit path (TDD-00064 Stage 3); the generic
+				// emitLogicalCompoundAssign reads the whole aggregate as a non-`ptr`
+				// value and would no-op `??=` (it can never equal null). Every other
+				// field type uses the generic path unchanged.
+				if isNullableScalar(fieldTy) {
+					return finish(e.emitNullableScalarNullishOrLogicalAssignAt(gepReg, fieldTy, ex.Op, ex.Right))
+				}
+				return finish(e.emitLogicalCompoundAssign(ex.Op, gepReg, fieldTy, ex.Right))
+			}
+			// A plain `=` into a nullable-scalar field boxes straight from the RHS
+			// expression, preserving a null-valued source lvalue's null-ness
+			// (TDD-00064 Stage 3) — reading it back into a Value first would
+			// auto-unwrap to a present payload.
+			if ex.Op == "=" && isNullableScalar(fieldTy) {
+				if err := e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, ex.Right); err != nil {
+					return Value{}, err
+				}
+				return finish(e.loadScalarOrNullableField(gepReg, fieldTy), nil)
+			}
+			var rhs Value
+			if ex.Op == "=" {
+				// Hint-aware (TDD-00028/TDD-00007): `obj.field = [1,2,3]`/`obj.field
+				// = {...}` coerces against the field's own declared type.
+				rhs, err = e.emitExprWithObjectHint(ex.Right, fieldTy)
+				if err != nil {
+					return Value{}, err
+				}
+			} else {
+				// A nullable-scalar field's current value loads as its { i1, T }
+				// aggregate; compound arithmetic runs on the demoted payload (a
+				// null reads as its zero, lenient) and re-boxes on store.
+				cur := e.loadScalarOrNullableField(gepReg, fieldTy)
+				arithTy := fieldTy
+				if isNullableScalar(fieldTy) {
+					cur = e.nullableScalarPayloadOf(cur)
+					arithTy = fieldTy.withoutNullable()
+				}
+				rhsVal, err := e.emitExpr(ex.Right)
+				if err != nil {
+					return Value{}, err
+				}
+				if err := dateCompoundAssignGuard(ex.Op, fieldTy.IsDate(), rhsVal.Ty.IsDate()); err != nil {
+					return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
+				}
+				rhsVal = e.convert(rhsVal, arithTy)
+				rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, arithTy, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+			}
+			// The field counterpart of the variable-reassignment check below: a value
+			// with no conversion to the field's declared type (`p.n = "foo"` into a
+			// `number` field, `re.lastIndex = {}`) is tsc's "Type 'string' is not
+			// assignable to type 'number'". coerce leaves such a value as it is, and
+			// storing it was invalid IR (the variable path rejected it, the field
+			// path did not). Aggregate-shaped fields box or re-header whatever they
+			// are given in storeScalarOrNullableField, so only a plain slot can
+			// mismatch.
+			if !fieldTy.IsArray() && !fieldTy.IsDynamic() && !isNullableScalar(fieldTy) {
+				rhs = e.convert(rhs, fieldTy)
+				if rhs.Ty.IR != fieldTy.IR || rhs.Ty.IsArray() != fieldTy.IsArray() {
+					return Value{}, fmt.Errorf("%d:%d: type '%s' is not assignable to type '%s' (field '%s')",
+						ex.GetPos().Line, ex.GetPos().Col, tsTypeName(rhs.Ty), tsTypeName(fieldTy), memEx.Property)
+				}
+			}
+			e.storeScalarOrNullableField(gepReg, fieldTy, rhs)
+			if memEx.Property == "name" && e.isErrorValue(objVal.Ty) {
+				e.markErrorNameOwn(objVal)
+			}
+			if memEx.Property == "cause" && e.isErrorValue(objVal.Ty) {
+				e.markErrorCauseOwn(objVal)
+			}
+			return finish(rhs, nil)
 		}
-		finish := func(v Value, err error) (Value, error) {
-			if err == nil && view {
-				e.emitRecordWriteBack(objVal, gepReg, viewForeign, fieldTy, memEx.Property)
-			}
-			return v, err
+		if tags := e.foreignFieldTags(memEx.Object, objVal.Ty, memEx.Property); tags != nil && !argsHoldFunctionLiteral([]ast.Expression{ex.Right}) {
+			return e.emitClassFieldWriteOrForeign(objVal, memEx.Property, ex, tags, ownPath)
 		}
-		if isLogicalAssignOp(ex.Op) {
-			// A nullable-scalar field's { i1, T } presence-flagged slot needs the
-			// dedicated present-bit path (TDD-00064 Stage 3); the generic
-			// emitLogicalCompoundAssign reads the whole aggregate as a non-`ptr`
-			// value and would no-op `??=` (it can never equal null). Every other
-			// field type uses the generic path unchanged.
-			if isNullableScalar(fieldTy) {
-				return finish(e.emitNullableScalarNullishOrLogicalAssignAt(gepReg, fieldTy, ex.Op, ex.Right))
-			}
-			return finish(e.emitLogicalCompoundAssign(ex.Op, gepReg, fieldTy, ex.Right))
-		}
-		// A plain `=` into a nullable-scalar field boxes straight from the RHS
-		// expression, preserving a null-valued source lvalue's null-ness
-		// (TDD-00064 Stage 3) — reading it back into a Value first would
-		// auto-unwrap to a present payload.
-		if ex.Op == "=" && isNullableScalar(fieldTy) {
-			if err := e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, ex.Right); err != nil {
-				return Value{}, err
-			}
-			return finish(e.loadScalarOrNullableField(gepReg, fieldTy), nil)
-		}
-		var rhs Value
-		if ex.Op == "=" {
-			// Hint-aware (TDD-00028/TDD-00007): `obj.field = [1,2,3]`/`obj.field
-			// = {...}` coerces against the field's own declared type.
-			rhs, err = e.emitExprWithObjectHint(ex.Right, fieldTy)
-			if err != nil {
-				return Value{}, err
-			}
-		} else {
-			// A nullable-scalar field's current value loads as its { i1, T }
-			// aggregate; compound arithmetic runs on the demoted payload (a
-			// null reads as its zero, lenient) and re-boxes on store.
-			cur := e.loadScalarOrNullableField(gepReg, fieldTy)
-			arithTy := fieldTy
-			if isNullableScalar(fieldTy) {
-				cur = e.nullableScalarPayloadOf(cur)
-				arithTy = fieldTy.withoutNullable()
-			}
-			rhsVal, err := e.emitExpr(ex.Right)
-			if err != nil {
-				return Value{}, err
-			}
-			if err := dateCompoundAssignGuard(ex.Op, fieldTy.IsDate, rhsVal.Ty.IsDate); err != nil {
-				return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
-			}
-			rhsVal = e.coerce(rhsVal, arithTy)
-			rhs, err = e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, arithTy, ex.GetPos())
-			if err != nil {
-				return Value{}, err
-			}
-		}
-		// The field counterpart of the variable-reassignment check below: a value
-		// with no conversion to the field's declared type (`p.n = "foo"` into a
-		// `number` field, `re.lastIndex = {}`) is tsc's "Type 'string' is not
-		// assignable to type 'number'". coerce leaves such a value as it is, and
-		// storing it was invalid IR (the variable path rejected it, the field
-		// path did not). Aggregate-shaped fields box or re-header whatever they
-		// are given in storeScalarOrNullableField, so only a plain slot can
-		// mismatch.
-		if !fieldTy.IsArray && !fieldTy.IsDynamic && !isNullableScalar(fieldTy) {
-			rhs = e.coerce(rhs, fieldTy)
-			if rhs.Ty.IR != fieldTy.IR || rhs.Ty.IsArray != fieldTy.IsArray {
-				return Value{}, fmt.Errorf("%d:%d: type '%s' is not assignable to type '%s' (field '%s')",
-					ex.GetPos().Line, ex.GetPos().Col, tsTypeName(rhs.Ty), tsTypeName(fieldTy), memEx.Property)
-			}
-		}
-		e.storeScalarOrNullableField(gepReg, fieldTy, rhs)
-		if memEx.Property == "name" && e.isErrorValue(objVal.Ty) {
-			e.markErrorNameOwn(objVal)
-		}
-		if memEx.Property == "cause" && e.isErrorValue(objVal.Ty) {
-			e.markErrorCauseOwn(objVal)
-		}
-		return finish(rhs, nil)
+		return ownPath()
 	}
 
 	// Array destructuring assignment: [a, b] = expr (ADR-00160), extended
@@ -757,12 +898,37 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if ex.Op != "=" {
 			return Value{}, fmt.Errorf("%d:%d: compound assignment is not supported in a destructuring assignment", ex.GetPos().Line, ex.GetPos().Col)
 		}
-		dataPtr, lenVal, elemTy, err := e.resolveArrayDataPtr(ex.Right, ex.GetPos())
+		// The assignment's value is its right-hand side (`r = [a] = v` is
+		// v): read where used, the source is evaluated once into a binding
+		// both the destructuring and the result read.
+		src := ex.Right
+		var result Value
+		used := e.assignValueUsed(ex)
+		if used {
+			v, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, v.Ty.IR))
+			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", v.Ty.IR, v.Ref, slot))
+			name := "__kml_destr_src" + slot[1:]
+			e.define(name, Symbol{Ptr: slot, Ty: v.Ty})
+			src = ast.NewIdentifier(name, ex.Right.GetPos())
+			result = v
+		}
+		e.iterTake = assignPatternTake(arrLit.Elements) + 1
+		e.iterUse = true
+		dataPtr, lenVal, elemTy, err := e.resolveArrayDataPtr(src, ex.GetPos())
+		e.iterTake = 0
 		if err != nil {
 			return Value{}, err
 		}
 		if err := e.emitDestructAssignArrayElems(dataPtr, lenVal, elemTy, arrLit.Elements, ex.GetPos()); err != nil {
 			return Value{}, err
+		}
+		if used {
+			return result, nil
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
@@ -794,11 +960,20 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	if !ok {
 		return Value{}, fmt.Errorf("can only assign to identifiers or array elements")
 	}
+	if e.selfNameAssigns[ex] {
+		return e.emitSelfNameAssign(ex, ident)
+	}
 	sym, ok := e.lookup(ident.Name)
+	if !ok && e.unresolvedReference(ident) {
+		return e.emitGlobalPropertyAssign(ex, ident)
+	}
 	if !ok {
 		return Value{}, fmt.Errorf("undefined variable '%s'", ident.Name)
 	}
 
+	if sym.SelfName {
+		return e.emitSelfNameAssign(ex, ident)
+	}
 	if sym.IsConst {
 		return Value{}, fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
 	}
@@ -816,7 +991,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	if ex.Op == "=" {
 	}
 
-	if sym.Ty.IsDynamic && ex.Op != "=" && !isLogicalAssignOp(ex.Op) {
+	if sym.Ty.IsDynamic() && ex.Op != "=" && !isLogicalAssignOp(ex.Op) {
 		// Compound assignment dispatches the operator at runtime (TDD-00076
 		// A2), as TypeScript allows on `any`.
 		cur := e.freshReg()
@@ -836,7 +1011,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if fresh, ok := e.lookup(ident.Name); ok {
 			sym = fresh
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, sym.Ptr))
+		e.heapStore("i64", boxed.Ref, sym.Ptr, 8)
 		return boxed, nil
 	}
 
@@ -850,7 +1025,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// `obj = JSON.parse(s)` / `obj = await res.json()` into an object-typed
 		// binding projects against the binding's declared shape — the bare-
 		// reassignment counterpart of the typed var-decl path (ADR-00571).
-		if sym.Ty.IsObject {
+		if sym.Ty.IsObject() {
 			if val, ok, perr := e.emitDeclJSONProjection(ex.Right, sym.Ty); ok {
 				if perr != nil {
 					return Value{}, perr
@@ -876,19 +1051,21 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		if err := dateCompoundAssignGuard(ex.Op, sym.Ty.IsDate, rhsVal.Ty.IsDate); err != nil {
+		if err := dateCompoundAssignGuard(ex.Op, sym.Ty.IsDate(), rhsVal.Ty.IsDate()); err != nil {
 			return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
 		}
-		rhsVal = e.coerce(rhsVal, sym.Ty)
-
 		op := strings.TrimSuffix(ex.Op, "=")
+		if op != "+" || !isStringTy(sym.Ty) || hasHandleFlag(sym.Ty) {
+			// (`s += n` concatenates n's string form, in emitArith.)
+			rhsVal = e.convert(rhsVal, sym.Ty)
+		}
 		rhs, err = e.emitArith(op, cur, rhsVal, sym.Ty, ex.GetPos())
 		if err != nil {
 			return Value{}, err
 		}
 	}
 
-	if sym.Ty.IsDynamic {
+	if sym.Ty.IsDynamic() {
 		var err error
 		if sym.Ty.UnionMembers != nil && !unionAllowsAssignmentFrom(sym.Ty, rhs.Ty) {
 			return Value{}, fmt.Errorf("%d:%d: value's type is not a member of '%s's declared union type", ex.GetPos().Line, ex.GetPos().Col, ident.Name)
@@ -898,7 +1075,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			return Value{}, err
 		}
 	} else {
-		rhs = e.coerce(rhs, sym.Ty)
+		rhs = e.convert(rhs, sym.Ty)
 		// A binding's type is fixed at its declaration (annotated, or inferred
 		// from its initializer / first assignment). Assigning an incompatible
 		// type (`let x = 5; x = 'hi'`, or an untyped `let x; x = 1; x = 's'`)
@@ -912,27 +1089,27 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// return from their own branches above, so this scalar-store site is
 		// the only place an IR mismatch can reach the emitter.
 		//
-		// An array Value reports Type.IR "ptr" but is really a { ptr, i64 }
-		// aggregate register (an array-typed sym takes its own store branch far
+		// An array Value reports Type.IR "ptr" but is really a header pointer
+		// (an array-typed sym takes its own store branch far
 		// above; this else branch only runs for a non-array slot). A bare `.IR`
 		// comparison therefore accepts an array RHS into a `ptr`-shaped object /
-		// string / handle slot and then emits `store ptr %agg` — the aggregate
-		// where a pointer is required, invalid IR. Reject that shape divergence
+		// string / handle slot, storing a header where an object or string is
+		// expected. Reject that shape divergence
 		// too (e.g. `var x = {}; x = []` in strict, ADR-00933).
 		// A binding that is `undefined` because its initializer produced no value
 		// (`let c = log()`, ADR-00479) takes another no-value result the same way:
 		// the call has run for its effects, and the binding still reads `undefined`.
-		if rhs.Ty.IR == "void" && sym.Ty.IsUndefined {
+		if rhs.Ty.IR == "void" && sym.Ty.IsUndefined() {
 			return Value{Ref: "null", Ty: TypeUndefined}, nil
 		}
-		if rhs.Ty.IR != sym.Ty.IR || rhs.Ty.IsArray != sym.Ty.IsArray {
+		if rhs.Ty.IR != sym.Ty.IR || rhs.Ty.IsArray() != sym.Ty.IsArray() {
 			describe := func(t Type) string {
 				switch {
-				case t.IsArray:
+				case t.IsArray():
 					return "array"
-				case t.IsSymbol:
+				case t.IsSymbol():
 					return "symbol"
-				case t.IsObject:
+				case t.IsObject():
 					return "object"
 				}
 				if k := scalarTypeKind(t); k != "" {
@@ -958,7 +1135,7 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	if e.isAutoMode() {
 		e.maybeFreeOnRebind(ident.Name, sym, ex.GetPos())
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, rhs.Ref, sym.Ptr, sym.Ty.Align()))
+	e.heapStore(sym.Ty.IR, rhs.Ref, sym.Ptr, sym.Ty.Align())
 	return rhs, nil
 }
 
@@ -990,7 +1167,7 @@ func (e *Emitter) emitDestructAssignArrayElems(dataPtr, lenVal string, elemTy Ty
 			if sym.IsConst {
 				return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
 			}
-			if !sym.Ty.IsArray {
+			if !sym.Ty.IsArray() {
 				return fmt.Errorf("%d:%d: '%s' is not an array — a rest target must already be declared as one", spread.Arg.GetPos().Line, spread.Arg.GetPos().Col, id.Name)
 			}
 			e.ensureMalloc()
@@ -1001,7 +1178,7 @@ func (e *Emitter) emitDestructAssignArrayElems(dataPtr, lenVal string, elemTy Ty
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", restLen, isNegLen, rawLen))
 			byteCount, newPtr := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, restLen, elemTy.Align()))
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
+			e.heapMallocInto(newPtr, byteCount)
 			srcGep := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", srcGep, elemTy.IR, dataPtr, i))
 			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
@@ -1011,12 +1188,27 @@ func (e *Emitter) emitDestructAssignArrayElems(dataPtr, lenVal string, elemTy Ty
 		}
 
 		target, def := unwrapDestructDefault(elemExpr)
+		_, arrPat := target.(*ast.ArrayLiteral)
+		_, objPat := target.(*ast.ObjectLiteral)
+		mismatch := arrPat && (!elemTy.IsArray() || elemTy.ElemType == nil) || objPat && !elemTy.IsObject()
+		if (def != nil || mismatch && elemTy.IsDynamic()) && isNestedAssignPattern(target) {
+			// `[[a] = d] = src`: the element (or d) under a hidden any,
+			// then assigned into the nested pattern.
+			hidden, err := e.declareHiddenAny(pos)
+			if err != nil {
+				return err
+			}
+			if err := e.destructAssignArrayLeaf(dataPtr, lenVal, elemTy, i, ast.NewIdentifier(hidden, pos), def); err != nil {
+				return err
+			}
+			if _, err := e.emitExpr(ast.NewAssignmentExpression("=", target, ast.NewIdentifier(hidden, pos), pos)); err != nil {
+				return err
+			}
+			continue
+		}
 		switch t := target.(type) {
 		case *ast.ArrayLiteral:
-			if def != nil {
-				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", t.GetPos().Line, t.GetPos().Col)
-			}
-			if !elemTy.IsArray || elemTy.ElemType == nil {
+			if !elemTy.IsArray() || elemTy.ElemType == nil {
 				return fmt.Errorf("%d:%d: cannot array-destructure a non-array element", t.GetPos().Line, t.GetPos().Col)
 			}
 			subPtr, subLen := e.destructLoadNestedArray(dataPtr, lenVal, elemTy, i)
@@ -1024,10 +1216,7 @@ func (e *Emitter) emitDestructAssignArrayElems(dataPtr, lenVal string, elemTy Ty
 				return err
 			}
 		case *ast.ObjectLiteral:
-			if def != nil {
-				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", t.GetPos().Line, t.GetPos().Col)
-			}
-			if !elemTy.IsObject {
+			if !elemTy.IsObject() {
 				return fmt.Errorf("%d:%d: cannot object-destructure a non-object element", t.GetPos().Line, t.GetPos().Col)
 			}
 			subObj := e.destructLoadNestedObject(dataPtr, lenVal, elemTy, i)
@@ -1061,28 +1250,47 @@ func (e *Emitter) emitDestructAssignObjectProps(objPtr string, objTy Type, props
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, objPtr, idx))
 
 		target, def := unwrapDestructDefault(prop.Value)
+		if def != nil && isNestedAssignPattern(target) {
+			// `{ k: [a] = d } = src`: field k (or d, when undefined) under a
+			// hidden any, then assigned into the nested pattern.
+			hidden, err := e.declareHiddenAny(pos)
+			if err != nil {
+				return err
+			}
+			var fv Value
+			if fieldTy.IsArray() {
+				fv = e.loadArrayFieldValue(gepReg, fieldTy)
+			} else {
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
+				fv = Value{Ref: r, Ty: fieldTy}
+			}
+			bv, err := e.emitBoxValue(fv)
+			if err != nil {
+				return err
+			}
+			hid := ast.NewIdentifier(hidden, pos)
+			isU := ast.NewBinaryExpression("===", e.bindValue(bv, pos), ast.NewNullLiteral(true, pos), pos)
+			pick := ast.NewConditionalExpression(isU, def, e.bindValue(bv, pos), pos)
+			if _, err := e.emitExpr(ast.NewAssignmentExpression("=", hid, pick, pos)); err != nil {
+				return err
+			}
+			if _, err := e.emitExpr(ast.NewAssignmentExpression("=", target, ast.NewIdentifier(hidden, pos), pos)); err != nil {
+				return err
+			}
+			continue
+		}
 		switch t := target.(type) {
 		case *ast.ArrayLiteral:
-			if def != nil {
-				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", pos.Line, pos.Col)
-			}
-			if !fieldTy.IsArray || fieldTy.ElemType == nil {
+			if !fieldTy.IsArray() || fieldTy.ElemType == nil {
 				return fmt.Errorf("%d:%d: cannot array-destructure a non-array field '%s'", pos.Line, pos.Col, prop.Key)
 			}
-			// An array-typed field slot holds a header pointer (TDD-00213 Stage 2);
-			// deref it into the {ptr,i64} aggregate to destructure.
-			aggReg := e.loadArrayFieldValue(gepReg, fieldTy).Ref
-			subPtr, subLen := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", subPtr, aggReg))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", subLen, aggReg))
+			subPtr, subLen := e.arrayParts(e.loadArrayFieldValue(gepReg, fieldTy))
 			if err := e.emitDestructAssignArrayElems(subPtr, subLen, *fieldTy.ElemType, t.Elements, pos); err != nil {
 				return err
 			}
 		case *ast.ObjectLiteral:
-			if def != nil {
-				return fmt.Errorf("%d:%d: a default value on a nested destructuring pattern is not yet supported", pos.Line, pos.Col)
-			}
-			if !fieldTy.IsObject {
+			if !fieldTy.IsObject() {
 				return fmt.Errorf("%d:%d: cannot object-destructure a non-object field '%s'", pos.Line, pos.Col, prop.Key)
 			}
 			subObj := e.freshReg()
@@ -1098,16 +1306,16 @@ func (e *Emitter) emitDestructAssignObjectProps(objPtr string, objTy Type, props
 			if sym.IsConst {
 				return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", t.GetPos().Line, t.GetPos().Col, t.Name)
 			}
-			if fieldTy.IsArray || sym.Ty.IsArray {
+			if fieldTy.IsArray() || sym.Ty.IsArray() {
 				return fmt.Errorf("%d:%d: destructuring assignment into/from an array-typed field is not yet supported", pos.Line, pos.Col)
 			}
-			if def != nil && !fieldTy.IsUndefined {
+			if def != nil && !fieldTy.IsUndefined() {
 				def = nil // a default replaces only undefined, which this field never holds
 			}
 			if def != nil {
 				// An object-field default fires when the field is undefined — a
 				// nullable reference's null slot (the declaration form's rule).
-				if !(fieldTy.Nullable && fieldTy.IR == "ptr") {
+				if !(fieldTy.Nullable() && fieldTy.IR == "ptr") {
 					return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be a nullable reference type (string | null, T[] | null, an interface/class type | null) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
 				}
 				valReg := e.freshReg()
@@ -1121,11 +1329,11 @@ func (e *Emitter) emitDestructAssignObjectProps(objPtr string, objTy Type, props
 				if err != nil {
 					return err
 				}
-				defVal = e.coerce(defVal, sym.Ty)
+				defVal = e.convert(defVal, sym.Ty)
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, defVal.Ref, sym.Ptr, sym.Ty.Align()))
 				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 				e.emitLabel(presentL)
-				pv := e.coerce(Value{Ref: valReg, Ty: fieldTy}, sym.Ty)
+				pv := e.convert(Value{Ref: valReg, Ty: fieldTy}, sym.Ty)
 				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, pv.Ref, sym.Ptr, sym.Ty.Align()))
 				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 				e.emitLabel(afterL)
@@ -1133,8 +1341,8 @@ func (e *Emitter) emitDestructAssignObjectProps(objPtr string, objTy Type, props
 			}
 			valReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, fieldTy.IR, gepReg, fieldTy.Align()))
-			val := e.coerce(Value{Ref: valReg, Ty: fieldTy}, sym.Ty)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", sym.Ty.IR, val.Ref, sym.Ptr, sym.Ty.Align()))
+			val := e.convert(Value{Ref: valReg, Ty: fieldTy}, sym.Ty)
+			e.heapStore(sym.Ty.IR, val.Ref, sym.Ptr, sym.Ty.Align())
 		default:
 			return fmt.Errorf("%d:%d: a destructuring assignment target must be a plain variable or a nested pattern", pos.Line, pos.Col)
 		}
@@ -1153,7 +1361,7 @@ func (e *Emitter) destructAssignArrayLeaf(dataPtr, lenVal string, elemTy Type, i
 	if sym.IsConst {
 		return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a constant", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}
-	if sym.Ty.IsArray {
+	if sym.Ty.IsArray() {
 		return fmt.Errorf("%d:%d: '%s' is an array — destructuring assignment into an array-typed target is not yet supported", id.GetPos().Line, id.GetPos().Col, id.Name)
 	}
 	inBounds := e.freshReg()
@@ -1163,10 +1371,18 @@ func (e *Emitter) destructAssignArrayLeaf(dataPtr, lenVal string, elemTy Type, i
 	e.emitLabel(okL)
 	gepReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
-	okVal := e.coerce(e.loadArrayElem(gepReg, elemTy), sym.Ty)
+	loaded := e.loadArrayElem(gepReg, elemTy)
+	if def != nil && elemTy.IsDynamic() {
+		// An undefined element takes the default as a missing one does.
+		isU, haveL := e.freshReg(), e.freshLabel("destrassign.have")
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, loaded.Ref, nbUndefined))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isU, oobL, haveL))
+		e.emitLabel(haveL)
+	}
+	okVal := e.convert(loaded, sym.Ty)
 	// A nullable scalar's slot is its { i1, T } storage.
 	stIR, stAlign := storageIR(sym.Ty), storageAlign(sym.Ty)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", stIR, okVal.Ref, sym.Ptr, stAlign))
+	e.heapStore(stIR, okVal.Ref, sym.Ptr, stAlign)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 	// Out of bounds: the array-pattern default fires here (the length is the
 	// presence signal, so no nullable-reference requirement — unlike an object
@@ -1177,13 +1393,17 @@ func (e *Emitter) destructAssignArrayLeaf(dataPtr, lenVal string, elemTy Type, i
 		if err != nil {
 			return err
 		}
-		defVal = e.coerce(defVal, sym.Ty)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", stIR, defVal.Ref, sym.Ptr, stAlign))
+		defVal = e.convert(defVal, sym.Ty)
+		e.heapStore(stIR, defVal.Ref, sym.Ptr, stAlign)
 	} else if isNullableScalar(sym.Ty) {
 		// Past the end is undefined: the slot's absent state.
 		e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align %d", stIR, sym.Ptr, stAlign))
+	} else if isF64Slot(sym.Ty) {
+		e.heapStore("i64", fmt.Sprint(undefF64), sym.Ptr, 8) // the double slot's undefined (TDD-00241)
+	} else if sym.Ty.IsDynamic() && stIR == "i64" {
+		e.heapStore("i64", fmt.Sprint(nbUndefined), sym.Ptr, 8)
 	} else {
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", stIR, sym.Ty.zeroLiteral(), sym.Ptr, stAlign))
+		e.heapStore(stIR, sym.Ty.zeroLiteral(), sym.Ptr, stAlign)
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 	e.emitLabel(afterL)
@@ -1205,8 +1425,8 @@ func (e *Emitter) destructLoadNestedArray(dataPtr, lenVal string, elemTy Type, i
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataPtr, i))
 	val := e.loadArrayElem(gep, elemTy)
 	p, l := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", p, val.Ref))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", l, val.Ref))
+	p = e.arrayData(val)
+	l = e.arrayLen(val)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, subPtrA))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, subLenA))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
@@ -1369,23 +1589,29 @@ func (e *Emitter) emitDynDestructAssign(pat *ast.ObjectLiteral, rhs ast.Expressi
 	if err != nil {
 		return Value{}, err
 	}
-	temp := func(word string) *ast.Identifier {
-		name := fmt.Sprintf("__kml_dtmp_%d", e.optRecvCtr)
-		e.optRecvCtr++
-		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", word, slot))
-		e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
-		return ast.NewIdentifier(name, pos)
-	}
+	temp := func(word string) *ast.Identifier { return e.anyTemp(word, pos) }
 	srcID := temp(src.Ref)
+	var named []ast.Expression // the keys read so far, which a rest leaves out
 	for _, p := range pat.Properties {
-		if _, rest := p.Value.(*ast.SpreadElement); rest {
-			return Value{}, fmt.Errorf("%d:%d: a rest element in a destructuring assignment from a dynamic value is not supported", pos.Line, pos.Col)
+		if sp, rest := p.Value.(*ast.SpreadElement); rest {
+			rv, err := e.emitAnyObjRestExcluding(src, named, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			if _, err := e.emitExpr(ast.NewAssignmentExpression("=", sp.Arg, temp(rv.Ref), pos)); err != nil {
+				return Value{}, err
+			}
+			continue
 		}
 		var read ast.Expression = ast.NewMemberExpression(srcID, p.Key, pos)
+		named = append(named, ast.NewStringLiteral(p.Key, pos))
 		if p.KeyExpr != nil {
-			read = ast.NewIndexExpression(srcID, p.KeyExpr, pos)
+			kid, err := e.emitPropertyKeyTemp(p.KeyExpr, pos)
+			if err != nil {
+				return Value{}, err
+			}
+			read = ast.NewIndexExpression(srcID, kid, pos)
+			named[len(named)-1] = kid
 		}
 		target, dflt := p.Value, ast.Expression(nil)
 		if a, ok := p.Value.(*ast.AssignmentExpression); ok && a.Op == "=" {
@@ -1421,4 +1647,158 @@ func (e *Emitter) dynStoreHint(baseTy Type, rhs ast.Expression) Type {
 		return *baseTy.DynPropTy
 	}
 	return TypeAny
+}
+
+// logicalAssignOp reports `&&=`, `||=` and `??=`.
+func logicalAssignOp(op string) bool { return op == "&&=" || op == "||=" || op == "??=" }
+
+// emitGlobalPropertyAssign assigns an undeclared name as JavaScript does:
+// in sloppy code, the global object's property (created by `=`; a compound
+// assignment reads it first, so a missing one is a ReferenceError); in
+// strict code, a ReferenceError once the right-hand side is evaluated.
+func (e *Emitter) emitGlobalPropertyAssign(ex *ast.AssignmentExpression, id *ast.Identifier) (Value, error) {
+	key, linked := namespaceValueExport("globalThis")
+	linked = linked && e.libExports[key] != ""
+	if !linked || !e.sloppyAt(id) {
+		v, err := e.emitExpr(ex.Right)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitNotDefined(id)
+		return v, nil
+	}
+	if ex.Op != "=" {
+		if _, err := e.emitGlobalPropertyRead(id); err != nil {
+			return Value{}, err
+		}
+	}
+	target := ast.NewMemberExpression(ast.NewIdentifier("globalThis", id.GetPos()), id.Name, id.GetPos())
+	return e.emitExpr(ast.NewAssignmentExpression(ex.Op, target, ex.Right, ex.GetPos()))
+}
+
+// sloppyAt reports whether id is in a sloppy-mode file (sloppyFiles).
+func (e *Emitter) sloppyAt(id *ast.Identifier) bool {
+	if len(e.sloppyFileSet) == 0 {
+		return false
+	}
+	if e.identFiles == nil {
+		e.identFiles = map[*ast.Identifier]string{}
+		if e.prog != nil {
+			for st, path := range e.prog.StmtFiles {
+				ast.Inspect(st, func(n ast.Node) bool {
+					if i, ok := n.(*ast.Identifier); ok {
+						e.identFiles[i] = path
+					}
+					return true
+				})
+			}
+		}
+	}
+	return e.sloppyFileSet[e.identFiles[id]]
+}
+
+// isNestedAssignPattern reports a destructuring-assignment target that is
+// itself a pattern (`[a]`, `{ a }`).
+func isNestedAssignPattern(t ast.Expression) bool {
+	switch t.(type) {
+	case *ast.ArrayLiteral, *ast.ObjectLiteral:
+		return true
+	}
+	return false
+}
+
+// declareHiddenAny declares a fresh hidden `let` of type any and returns
+// its name.
+func (e *Emitter) declareHiddenAny(pos ast.Pos) (string, error) {
+	name := e.nestedDefaultName()
+	err := e.emitStmt(ast.NewVarDeclaration("let", name, &ast.TypeAnnotation{Name: "any", Source: "ts"}, nil, pos))
+	return name, err
+}
+
+// assignPatternTake is patternTake for a destructuring-assignment pattern.
+func assignPatternTake(elems []ast.Expression) int {
+	for _, el := range elems {
+		if _, ok := el.(*ast.SpreadElement); ok {
+			return -1
+		}
+	}
+	return len(elems)
+}
+
+// emitSelfNameAssign is an assignment to a named function expression's own
+// name inside it: the right side is evaluated, then the binding is left
+// unchanged, silently in sloppy code and with a TypeError in strict code.
+func (e *Emitter) emitSelfNameAssign(ex *ast.AssignmentExpression, ident *ast.Identifier) (Value, error) {
+	rhs := ex.Right
+	if op := strings.TrimSuffix(ex.Op, "="); op != "" && !isLogicalAssignOp(ex.Op) {
+		rhs = ast.NewBinaryExpression(op, ident, ex.Right, ex.GetPos())
+	}
+	v, err := e.emitExpr(rhs)
+	if err != nil {
+		return Value{}, err
+	}
+	if !e.sloppyAt(ident) {
+		e.emitThrowTypeError("Assignment to constant variable.")
+		e.emitLabel(e.freshLabel("selfassign.after"))
+	}
+	return v, nil
+}
+
+// anyTemp holds boxed word in a new named temporary, for expressions built
+// over an already-evaluated value.
+func (e *Emitter) anyTemp(word string, pos ast.Pos) *ast.Identifier {
+	name := fmt.Sprintf("__kml_dtmp_%d", e.optRecvCtr)
+	e.optRecvCtr++
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", word, slot))
+	e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
+	return ast.NewIdentifier(name, pos)
+}
+
+// emitPropertyKeyTemp evaluates a computed key once, as a property key (a
+// symbol stays one, anything else becomes its string), into a temporary.
+func (e *Emitter) emitPropertyKeyTemp(keyExpr ast.Expression, pos ast.Pos) (*ast.Identifier, error) {
+	kv, err := e.emitExprWithObjectHint(keyExpr, TypeAny)
+	if err != nil {
+		return nil, err
+	}
+	kb, err := e.emitBoxValue(kv)
+	if err != nil {
+		return nil, err
+	}
+	k := e.anyTemp(kb.Ref, pos)
+	isSym := ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, k, pos), ast.NewStringLiteral("symbol", pos), pos)
+	key, err := e.emitExpr(ast.NewConditionalExpression(isSym, k, stringCall(k, pos), pos))
+	if err != nil {
+		return nil, err
+	}
+	if key, err = e.emitBoxValue(key); err != nil {
+		return nil, err
+	}
+	return e.anyTemp(key.Ref, pos), nil
+}
+
+// assignValueUsed reports an assignment whose value something reads: not
+// an expression statement's, a for loop's update or a sequence's non-last
+// element.
+func (e *Emitter) assignValueUsed(ex *ast.AssignmentExpression) bool {
+	c := e.front()
+	if c == nil {
+		return true
+	}
+	switch p := c.ParentOf(ex).(type) {
+	case *ast.ExpressionStatement:
+		return false
+	case *ast.ForStatement:
+		for _, u := range p.Update {
+			if u == ast.Expression(ex) {
+				return false
+			}
+		}
+		return true
+	case *ast.SequenceExpression:
+		return len(p.Exprs) > 0 && p.Exprs[len(p.Exprs)-1] == ast.Expression(ex)
+	}
+	return true
 }

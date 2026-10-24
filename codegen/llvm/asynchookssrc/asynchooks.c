@@ -43,10 +43,10 @@ void __kml_als_timer_tramp(void *env) {
 void *__kml_als_wrap(void *clo) {
     void *cc = __kml_als_ctx_get();
     if (!cc) return clo;
-    void **env = malloc(2 * sizeof(void *));
+    void **env = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     env[0] = clo;
     env[1] = cc;
-    char *hdr = malloc(2 * sizeof(void *));
+    char *hdr = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     *(void (**)(void *))(hdr + KML_CLOSURE_FN) = __kml_als_timer_tramp;
     *(void **)(hdr + KML_CLOSURE_ENV) = env;
     return hdr;

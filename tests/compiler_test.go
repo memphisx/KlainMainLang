@@ -2,6 +2,7 @@ package tests
 
 import (
 	"KlainMainLang/options"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,8 +83,11 @@ func parseCompatJS(src string) (*ast.Program, error) {
 // namesGlobalModule reports whether src mentions a global a global module
 // implements, or `process`, parts of which are modules the resolver brings
 // in the same way (its stdio streams, its emitter, emitWarning).
+// importRE matches an import declaration, which only the resolver binds.
+var importRE = regexp.MustCompile(`(?m)^\s*import\s`)
+
 func namesGlobalModule(src string) bool {
-	if processRE.MatchString(src) {
+	if processRE.MatchString(src) || importRE.MatchString(src) {
 		return true
 	}
 	for name := range lib.NativeGlobalUses {
@@ -131,19 +135,58 @@ func resolveAndCompile(t *testing.T, src string) (string, error) {
 // buildBinary emitter: KLAIN_TEST_MM=manual|auto and KLAIN_TEST_OPTMEM=1 run
 // the whole E2E suite through that memory mode / -optimize-memory, turning it
 // into a mode-differential lane (assertions are unchanged — a mode-sensitive
-// failure IS the finding). gc is deliberately not env-selectable here: it
-// needs extra link flags and per-machine libgc, and has its own suite.
-// Mode-specific helpers (buildBinaryGC, buildBinaryOptimizeMemory, …) keep
-// their explicit pins and never read these.
+// failure IS the finding). KLAIN_TEST_MM=gc also links the collector
+// (testGCArgs). Mode-specific helpers (buildBinaryGC,
+// buildBinaryOptimizeMemory, …) keep their explicit pins and never read
+// these.
 func applyTestModeEnv(em *llvm.Emitter) {
 	switch mm := os.Getenv("KLAIN_TEST_MM"); mm {
-	case "", "gc":
+	case "":
 	default:
 		em.SetMemMode(mm)
 	}
 	if os.Getenv("KLAIN_TEST_OPTMEM") == "1" {
 		em.SetOptimizeMemory(true)
 	}
+}
+
+// testSanitizerArgs is the sanitizer lane (TDD-00230 P0.3): with
+// KLAIN_TEST_SAN=1 every program a plain builder compiles gets ASan and
+// UBSan, a UBSan finding aborting the program as an ASan one does, so the
+// suite's ordinary assertions fail on it. Off, it adds nothing. Leak
+// detection stays off (asanOptionsSource): the manual mode never frees by
+// design.
+func testSanitizerArgs(t *testing.T, dir string) []string {
+	t.Helper()
+	if os.Getenv("KLAIN_TEST_SAN") != "1" {
+		return nil
+	}
+	requireSanitizers(t)
+	opt := filepath.Join(dir, "asan_options.c")
+	if err := os.WriteFile(opt, []byte(asanOptionsSource), 0644); err != nil {
+		t.Fatalf("write asan_options.c: %v", err)
+	}
+	return []string{"-O1", "-g", "-fno-omit-frame-pointer", "-fsanitize=address", "-fsanitize=undefined",
+		"-fno-sanitize-recover=undefined", "-fno-sanitize=vptr,function", opt}
+}
+
+// testGCArgs is the gc lane's link line (KLAIN_TEST_MM=gc): the GC shim
+// and the collector, as buildBinaryGC links them; nothing in another mode.
+// A machine without libgc skips, as the gc suite does.
+func testGCArgs(t *testing.T, dir string) []string {
+	t.Helper()
+	if os.Getenv("KLAIN_TEST_MM") != "gc" {
+		return nil
+	}
+	cflags, libs, err := llvm.LocateGC()
+	if err != nil {
+		t.Skipf("gc mode: %v", err)
+	}
+	shim := filepath.Join(dir, "gcshim.c")
+	if err := os.WriteFile(shim, []byte(llvm.GCShimSource), 0644); err != nil {
+		t.Fatalf("write GC shim: %v", err)
+	}
+	return append(append([]string{shim}, cflags...), libs...)
 }
 
 // sidecarObj returns what to hand clang for one embedded C runtime file: the
@@ -249,7 +292,8 @@ func buildBinary(t *testing.T, src string) string {
 		t.Fatalf("write IR: %v", err)
 	}
 
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
+	clangArgs = append(clangArgs, testGCArgs(t, dir)...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -477,7 +521,7 @@ func buildBinaryFromFileCrypto(t *testing.T, srcFile, cryptoBackend string) stri
 		t.Fatalf("write IR: %v", err)
 	}
 
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -604,7 +648,7 @@ func compileAndRunImports(t *testing.T, src string) string {
 	binFile := buildBinaryImports(t, src)
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return strings.TrimRight(string(result), "\n")
 }
@@ -641,7 +685,7 @@ func assertOutputImportsEnv(t *testing.T, src, want string, overrides ...string)
 	cmd.Env = env
 	result, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
@@ -688,7 +732,7 @@ func parseAndCompileImports(t *testing.T, src string) (string, error) {
 // corruption bugs (heap-buffer-overflow, use-after-free, UBSan's checks)
 // are unaffected by this — only the separate "still-reachable-at-exit"
 // leak check is disabled.
-const asanOptionsSource = `const char *__asan_default_options(void) { return "detect_leaks=0"; }`
+const asanOptionsSource = `const char *__asan_default_options(void) { return "detect_leaks=0:allocator_may_return_null=1"; }`
 
 // buildBinaryASan is buildBinary's AddressSanitizer/UndefinedBehaviorSanitizer
 // counterpart, for chasing memory-corruption bugs that don't reproduce
@@ -822,7 +866,7 @@ func buildBinaryMultiFile(t *testing.T, files map[string]string, entryName strin
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -872,7 +916,7 @@ func buildBinaryMultiFilePermissive(t *testing.T, files map[string]string, entry
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -895,7 +939,7 @@ func assertMultiFileOutputPermissive(t *testing.T, files map[string]string, entr
 	binFile := buildBinaryMultiFilePermissive(t, files, entryName)
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
@@ -907,7 +951,7 @@ func assertMultiFileOutput(t *testing.T, files map[string]string, entryName, wan
 	binFile := buildBinaryMultiFile(t, files, entryName)
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
@@ -919,7 +963,7 @@ func compileAndRun(t *testing.T, src string) string {
 	binFile := buildBinary(t, src)
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return strings.TrimRight(string(result), "\n")
 }
@@ -950,7 +994,7 @@ func buildBinaryRegexMode(t *testing.T, src, mode string) string {
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -991,7 +1035,7 @@ func buildBinaryCompatJS(t *testing.T, src string) string {
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -1031,7 +1075,7 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
@@ -1041,7 +1085,7 @@ func assertOutputWithDecoratorMetadata(t *testing.T, src, want string) {
 	}
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
@@ -1069,7 +1113,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	clangArgs = appendRuntime(t, em, dir, clangArgs)
 	for _, lib := range em.LinkLibs() {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
@@ -1079,7 +1123,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	}
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
@@ -1104,7 +1148,7 @@ func assertOutputCompatJS(t *testing.T, src, want string) {
 	binFile := buildBinaryCompatJS(t, src)
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	compareLines(t, strings.TrimRight(string(result), "\n"), want)
 }
@@ -1140,7 +1184,7 @@ func buildBinaryCryptoMode(t *testing.T, src, backend string) string {
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	clangArgs := []string{"-O2", llFile, "-o", binFile}
+	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -1163,7 +1207,7 @@ func compileAndRunCryptoMode(t *testing.T, src, backend string) string {
 	binFile := buildBinaryCryptoMode(t, src, backend)
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return strings.TrimRight(string(result), "\n")
 }
@@ -1175,7 +1219,7 @@ func compileAndRunRegexMode(t *testing.T, src, mode string) string {
 	binFile := buildBinaryRegexMode(t, src, mode)
 	result, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return strings.TrimRight(string(result), "\n")
 }
@@ -1189,7 +1233,7 @@ func compileAndRunWithStdinImports(t *testing.T, src, stdin string) string {
 	cmd.Stdin = strings.NewReader(stdin)
 	result, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return strings.TrimRight(string(result), "\n")
 }
@@ -1200,7 +1244,7 @@ func compileAndRunWithArgs(t *testing.T, src string, args ...string) string {
 	binFile := buildBinary(t, src)
 	result, err := exec.Command(binFile, args...).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return strings.TrimRight(string(result), "\n")
 }
@@ -1227,7 +1271,7 @@ func runExpectExit(t *testing.T, binFile string) (string, int) {
 	if exitErr, ok := err.(*exec.ExitError); ok {
 		exitCode = exitErr.ExitCode()
 	} else if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return strings.TrimRight(stdout.String()+stderr.String(), "\n"), exitCode
 }
@@ -1245,7 +1289,7 @@ func compileAndRunCaptureStderr(t *testing.T, src string) (stdout, stderr string
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	return outBuf.String(), errBuf.String()
 }
@@ -1328,6 +1372,44 @@ func assertSameAsNode(t *testing.T, src string) {
 	compareLines(t, ours, theirs)
 }
 
+// assertSameAsNodeFrames is assertSameAsNode for output that prints stack
+// frames: each side's file URL reads as its base name's stem, and Node's
+// frames of its own internals (its module loader below the program's,
+// `Array.forEach (<anonymous>)`) and its "... N lines matching cause stack
+// trace ..." elisions of them are dropped.
+func assertSameAsNodeFrames(t *testing.T, src string) {
+	t.Helper()
+	theirs := normalizeFrames(runNodeTS(t, src))
+	ours := normalizeFrames(compileAndRun(t, src))
+	if ours != theirs {
+		t.Fatalf("output differs from node:\n--- ours ---\n%s\n--- node ---\n%s", ours, theirs)
+	}
+}
+
+var (
+	frameURLRe    = regexp.MustCompile(`file://\S*/(main|prog)\.ts`)
+	nodeFrameRe   = regexp.MustCompile(`^\s+at (.*\(node:|node:|async node:|async |ModuleJob\.run|.*\(<anonymous>\))`)
+	nodeElisionRe = regexp.MustCompile(`^\s+\.\.\. \d+ lines? matching cause stack trace \.\.\.$`)
+)
+
+func normalizeFrames(out string) string {
+	var kept []string
+	for _, l := range strings.Split(frameURLRe.ReplaceAllString(out, "prog"), "\n") {
+		if nodeFrameRe.MatchString(l) || nodeElisionRe.MatchString(l) {
+			// The brace of the error's properties, or the comma after it,
+			// follows its last frame.
+			for _, tail := range []string{" {", ","} {
+				if strings.HasSuffix(l, tail) && len(kept) > 0 && !strings.HasSuffix(kept[len(kept)-1], tail) {
+					kept[len(kept)-1] += tail
+				}
+			}
+			continue
+		}
+		kept = append(kept, l)
+	}
+	return strings.Join(kept, "\n")
+}
+
 // assertSameAsNodeImports is assertSameAsNode for source using a real `import`
 // statement (the resolver path, see buildBinaryImports).
 func assertSameAsNodeImports(t *testing.T, src string) {
@@ -1347,7 +1429,7 @@ func assertSameAsNodeCompatJS(t *testing.T, src string) {
 	binFile := buildBinaryCompatJS(t, src)
 	raw, err := exec.Command(binFile).Output()
 	if err != nil {
-		t.Fatalf("run: %v", err)
+		t.Fatalf("run: %v%s", err, exitStderr(err))
 	}
 	ours := strings.TrimRight(string(raw), "\n")
 	if ours != theirs {
@@ -1374,6 +1456,7 @@ func winPaths(want string, paths ...string) string {
 // mismatches are clear, rather than one big diff on the whole string.
 func compareLines(t *testing.T, got, want string) {
 	t.Helper()
+	got = dropSanitizerNotes(got)
 	gotLines := strings.Split(got, "\n")
 	wantLines := strings.Split(want, "\n")
 	for i := 0; i < len(wantLines) || i < len(gotLines); i++ {
@@ -1537,3 +1620,30 @@ func skipForkOnlyOnWindows(t *testing.T, why string) {
 }
 
 var processRE = regexp.MustCompile(`\bprocess\b`)
+
+// exitStderr is the program's stderr after a failed Output(), so a crash
+// reports its own message (a sanitizer's report among them).
+func exitStderr(err error) string {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		return "\n" + string(ee.Stderr)
+	}
+	return ""
+}
+
+// dropSanitizerNotes removes, in the sanitizer lane, the one-time note ASan
+// prints on its first context switch (a fiber's swapcontext), which a test
+// reading the program's stderr would otherwise compare.
+func dropSanitizerNotes(out string) string {
+	if os.Getenv("KLAIN_TEST_SAN") != "1" {
+		return out
+	}
+	lines := strings.Split(out, "\n")
+	kept := lines[:0]
+	for _, l := range lines {
+		if !strings.Contains(l, "WARNING: ASan doesn't fully support makecontext/swapcontext") {
+			kept = append(kept, l)
+		}
+	}
+	return strings.Join(kept, "\n")
+}

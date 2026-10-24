@@ -53,7 +53,7 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		e.emitLabel(e.freshLabel("toprim.dead"))
 	}
 	// A class instance carries the ladder's methods as class methods.
-	if canon := e.canonicalizeClassTy(v.Ty); canon.IsClass {
+	if canon := e.canonicalizeClassTy(v.Ty); canon.IsClass() {
 		if info, ok := e.classes[canon.ClassName]; ok {
 			for _, name := range order {
 				sig, ok := info.MethodSigs[name]
@@ -64,14 +64,14 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 					continue
 				}
 				has[name] = true
-				if name != "@@toPrimitive" && !isPrimitiveResultTy(sig.RetType) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined {
+				if name != "@@toPrimitive" && !isPrimitiveResultTy(sig.RetType) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined() {
 					if _, err := e.emitClassCall(canon, Value{Ref: v.Ref, Ty: canon}, name, nil, ast.Pos{}, false); err != nil {
 						return Value{}, false, err
 					}
 					objectResult[name] = true
 					continue
 				}
-				if name != "@@toPrimitive" && !resultUsableForHint(sig.RetType, hint) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined {
+				if name != "@@toPrimitive" && !resultUsableForHint(sig.RetType, hint) && sig.RetType.IR != "void" && !sig.RetType.IsUndefined() {
 					continue
 				}
 				// The hint is the method's argument; one declaring no
@@ -84,7 +84,7 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 				if err != nil {
 					return Value{}, false, err
 				}
-				if res.Ty.IR == "void" || res.Ty.IsUndefined {
+				if res.Ty.IR == "void" || res.Ty.IsUndefined() {
 					if hint == "number" {
 						return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, true, nil // NaN
 					}
@@ -100,7 +100,7 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 	}
 	for _, name := range order {
 		idx, fieldTy, ok := v.Ty.FieldIndex(name)
-		if !ok || !fieldTy.IsFunc {
+		if !ok || !fieldTy.IsFunc() {
 			if name == "toString" && hint == "string" {
 				return Value{}, false, nil // Object.prototype.toString
 			}
@@ -111,7 +111,7 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		if fieldTy.FuncRetType != nil {
 			retTy = *fieldTy.FuncRetType
 		}
-		if name != "@@toPrimitive" && !isPrimitiveResultTy(retTy) && retTy.IR != "void" && !retTy.IsUndefined {
+		if name != "@@toPrimitive" && !isPrimitiveResultTy(retTy) && retTy.IR != "void" && !retTy.IsUndefined() {
 			gep := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
 			closure := e.freshReg()
@@ -129,7 +129,7 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		// otherwise. Without this the candidate was skipped as non-primitive, the
 		// object pointer reached the numeric op, and clang rejected a `ptr` where a
 		// `double` was expected.
-		if name != "@@toPrimitive" && (retTy.IR == "void" || retTy.IsUndefined) {
+		if name != "@@toPrimitive" && (retTy.IR == "void" || retTy.IsUndefined()) {
 			gep := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
 			closure := e.freshReg()
@@ -171,20 +171,20 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 	return Value{}, false, nil
 }
 
-// coerceStringArg applies ToString to a value flowing into a string-typed
+// toStringArg applies ToString to a value flowing into a string-typed
 // position (e.g. a string method's search argument): an object is run through
 // the string-hint ToPrimitive ladder / Object.prototype.toString via
 // emitValueToString, matching real JS's ToString(argument). A value that is
 // already a string is returned unchanged. Only objects are converted here (the
 // TDD-00201 scope); a non-string, non-object argument keeps its current handling.
-func (e *Emitter) coerceStringArg(v Value) (Value, error) {
+func (e *Emitter) toStringArg(v Value) (Value, error) {
 	if isStringTy(v.Ty) {
-		return e.coerce(v, TypePtr), nil
+		return e.convert(v, TypePtr), nil
 	}
 	// undefined/null flow through unchanged: some callers (split's absent
 	// separator) treat these specially rather than as the literal
 	// "undefined"/"null" string, and their `ptr` slot already accepts null.
-	if v.Ty.IsUndefined || v.Ty.IsNull || v.Ty.IR == "void" {
+	if v.Ty.IsUndefined() || v.Ty.IsNull() || v.Ty.IR == "void" {
 		return v, nil
 	}
 	// Everything else — an object (via the ToPrimitive ladder), a dynamic `any`
@@ -209,10 +209,10 @@ func disjointEqConstResult(op string) string {
 // undefined (loosely equal only each other), booleans, and objects are excluded:
 // `obj == null` is false and `obj == obj` is reference equality, neither coercing.
 func isLooseEqPrimitive(t Type) bool {
-	if t.IsNull || t.IsUndefined || t.IsObject || t.IsArray || t.IsFunc || t.IsDynamic {
+	if t.IsNull() || t.IsUndefined() || t.IsObject() || t.IsArray() || t.IsFunc() || t.IsDynamic() {
 		return false
 	}
-	return t.Float || t.IsBigInt || isPlainStringType(t) ||
+	return t.Float || t.IsBigInt() || isPlainStringType(t) ||
 		t.IR == "i8" || t.IR == "i16" || t.IR == "i32" || t.IR == "i64"
 }
 
@@ -225,7 +225,7 @@ func resultUsableForHint(retTy Type, hint string) bool {
 		return false
 	}
 	if hint == "number" {
-		return retTy.Float || retTy.IsBigInt || retTy.IR == "i1" ||
+		return retTy.Float || retTy.IsBigInt() || retTy.IR == "i1" ||
 			retTy.IR == "i8" || retTy.IR == "i16" || retTy.IR == "i32" || retTy.IR == "i64"
 	}
 	return true
@@ -237,7 +237,7 @@ func resultUsableForHint(retTy Type, hint string) bool {
 // their methods as builtins, not struct fields, so they never match); this just
 // screens out arrays and already-dynamic values cheaply.
 func objectMayToPrimitive(t Type) bool {
-	return t.IsObject && !t.IsArray && !t.IsDynamic
+	return t.IsObject() && !t.IsArray() && !t.IsDynamic()
 }
 
 // isPrimitiveResultTy reports whether a method's declared return type is a JS
@@ -245,10 +245,10 @@ func objectMayToPrimitive(t Type) bool {
 // composite/boxed types: Type.IsInteger() is true for aggregate boxes too, so
 // the machine-integer IRs are listed explicitly.
 func isPrimitiveResultTy(t Type) bool {
-	if t.IsDynamic || t.IsObject || t.IsArray || t.IsMap || t.IsSet || t.IsFunc {
+	if t.IsDynamic() || t.IsObject() || t.IsArray() || t.IsMap() || t.IsSet() || t.IsFunc() {
 		return false
 	}
-	if t.Float || t.IsBigInt || isPlainStringType(t) {
+	if t.Float || t.IsBigInt() || isPlainStringType(t) {
 		return true
 	}
 	switch t.IR {

@@ -90,3 +90,16 @@ console.log(Math.floor(3.7))
 console.log(parseInt("42") + 1)
 `, "3\n43")
 }
+
+// A local function named like a global builtin types its call's result
+// from its own signature, not the builtin's.
+func TestE2EShadowedGlobalLocalFetchFunction(t *testing.T) {
+	shadowCase(t, `
+function inner(): void {
+    function fetch(n: number): number { return n * 2 }
+    const r = fetch(21)
+    console.log(r + 1)
+}
+inner()
+`, "43")
+}

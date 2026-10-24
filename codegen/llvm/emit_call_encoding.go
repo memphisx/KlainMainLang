@@ -17,7 +17,7 @@ func (e *Emitter) emitStringToStringBuiltin(args []ast.Expression, pos ast.Pos, 
 	if err != nil {
 		return Value{}, err
 	}
-	val = e.coerce(val, TypePtr)
+	val = e.convert(val, TypePtr)
 	ensure()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr %s(ptr %s)", r, runtimeFn, val.Ref))
@@ -35,16 +35,16 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues takes exactly 1 argument", pos.Line, pos.Col)
 	}
 	argTy := e.inferExprType(args[0])
-	if argTy.IsArray && argTy.ElemType != nil && !argTy.ElemType.Float &&
-		(argTy.IsTypedArray || argTy.IsBuffer || (argTy.ElemType.IR == "i8" && !argTy.ElemType.Signed)) {
+	if argTy.IsArray() && argTy.ElemType != nil && !argTy.ElemType.Float &&
+		(argTy.IsTypedArray() || argTy.IsBuffer() || (argTy.ElemType.IR == "i8" && !argTy.ElemType.Signed)) {
 		// The argument itself is returned (`getRandomValues(a) === a`).
 		v, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
 		ptrReg, lenReg := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, v.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, v.Ref))
+		ptrReg = e.arrayData(v)
+		lenReg = e.arrayLen(v)
 		e.ensureCryptoRandomBytes()
 		byteLenReg := lenReg
 		if w := argTy.ElemType.Align(); w != 1 {
@@ -79,11 +79,11 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", quota, qL, tL))
 	e.emitLabel(qL)
 	qErr := e.buildErrorObj(errorKindIDs["DOMException"], e.internString("The requested length exceeds 65,536 bytes"), e.internString("QuotaExceededError"))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", qErr))
+	e.excThrow(qErr)
 	e.emitTerminator("unreachable")
 	e.emitLabel(tL)
 	tErr := e.buildErrorObj(errorKindIDs["DOMException"], e.internString("The data argument must be an integer-type TypedArray"), e.internString("TypeMismatchError"))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", tErr))
+	e.excThrow(tErr)
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 	return v, nil
@@ -102,7 +102,7 @@ func (e *Emitter) emitCryptoQuotaCheck(byteLenReg string) {
 	e.emitLabel(badL)
 	msg := e.internString("The requested length exceeds 65,536 bytes")
 	errObj := e.buildErrorObj(errorKindIDs["DOMException"], msg, e.internString("QuotaExceededError"))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.excThrow(errObj)
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 }

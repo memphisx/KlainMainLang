@@ -133,7 +133,8 @@ var errorObjType = func() Type {
 	// A field an error has only when something sets it (Node's own
 	// properties): absent, it reads undefined.
 	optStr := TypePtr
-	optStr.Nullable, optStr.IsUndefined = true, true
+	optStr.setNullable(true)
+	optStr.setUndefined(true)
 	ty := ObjectType([]Field{
 		{Name: ClassTagField, Ty: TypeI64}, // the kind, flagged: the header word
 		{Name: "message", Ty: TypePtr},
@@ -165,36 +166,50 @@ var errorObjType = func() Type {
 		// cleanly on errors that don't set them.
 		{Name: "address", Ty: optStr},
 		{Name: "port", Ty: TypeF64},
-		// `extra` — a D1 dynamic-object bag of further own properties an error
+		// errorExtraField — a D1 dynamic-object bag of further own properties an error
 		// carries beyond the fixed fields above (child_process's `status`/
 		// `signal`/`stdout`/`stderr`/`pid`/`output` on an execSync failure,
 		// ADR-01080); null for every other error. A caught value's unknown
 		// property read consults it (emitDynAnyMemberGetNamed's error arm).
-		{Name: "extra", Ty: TypePtr},
+		{Name: errorExtraField, Ty: TypePtr},
 		// errorNameOwnField: 1 once `name` is assigned on the error itself
 		// (`this.name = "X"`), making it an own enumerable property, as in
 		// JavaScript; the constructor's default name is not.
 		{Name: errorNameOwnField, Ty: TypeI64},
+		// `err.stack`: as assigned, or null until first read, when
+		// __kml_error_stack formats it from the name, the message and the
+		// frames captured when the error was made (errorFramesField).
+		{Name: "stack", Ty: optStr},
+		{Name: errorFramesField, Ty: TypePtr},
 	})
-	ty.IsError = true
+	ty.setHost(hostError, true)
 	return ty
 }()
+
+// errorExtraField holds an error's bag of further own properties (hidden:
+// a subclass may declare its own `extra`).
+const errorExtraField = "__kml_extra"
+
+// errorFramesField holds an error's frame lines, captured where it is made
+// (framesrc/frames.c).
+const errorFramesField = "__kml_frames"
 
 // errorOptionalNumber reports whether an error's number field name is one it
 // has only when something sets it (`errno`, `port`, node:sqlite's
 // `errcode`): stored as 0 when absent, which no set value is, and read as
 // undefined then.
 func errorOptionalNumber(objTy Type, name string) bool {
-	if !objTy.IsError && !objTy.IsClass {
+	if !objTy.IsError() && !objTy.IsClass() {
 		return false
 	}
-	switch name {
-	case "errno", "errcode", "port":
-		_, ty, ok := objTy.FieldIndex(name)
-		return ok && ty.Float
+	if !errorOptionalNumbers[name] {
+		return false
 	}
-	return false
+	_, ty, ok := objTy.FieldIndex(name)
+	return ok && ty.Float
 }
+
+var errorOptionalNumbers = map[string]bool{"errno": true, "errcode": true, "port": true}
 
 // buildErrorObj mallocs and fills a new errorObjType instance ({i64 kind,
 // ptr message, ptr name}) from already-computed operands, returning the
@@ -219,64 +234,71 @@ func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size 
 
 	dataReg := e.freshReg()
 	e.ensureMalloc()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, size))
+	e.heapMallocInto(dataReg, fmt.Sprint(size))
 	e.emitStoreObjHeader(dataReg, errorObjType)
 
 	kindGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", errorTypeIDStored(kindID), kindGep))
+	e.heapStore("i64", fmt.Sprint(errorTypeIDStored(kindID)), kindGep, 8)
 
 	msgGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", msgGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", msgPtr, msgGep))
+	e.heapStore("ptr", msgPtr, msgGep, 8)
 
 	nameGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", nameGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", namePtr, nameGep))
+	e.heapStore("ptr", namePtr, nameGep, 8)
 
 	// Default the Node error-code trio (code/errcode/errstr) — set only for
 	// errors that carry one (node:sqlite). buildErrorObjWithCode overwrites them.
 	codeGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", codeGep))
+	e.heapStore("ptr", "null", codeGep, 8)
 	ecGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", ecGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", ecGep))
+	e.heapStore("double", "0.0", ecGep, 8)
 	esGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", esGep))
+	e.heapStore("ptr", "null", esGep, 8)
 	// Default the fs-error extras (syscall/path) — set only by __kml_fs_throw.
 	scGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 6", scGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", scGep))
+	e.heapStore("ptr", "null", scGep, 8)
 	pGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 7", pGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", pGep))
+	e.heapStore("ptr", "null", pGep, 8)
 	enGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 8", enGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", enGep))
+	e.heapStore("double", "0.0", enGep, 8)
 	destGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 9", destGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", destGep))
+	e.heapStore("ptr", "null", destGep, 8)
 	causeGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, causeGep))
+	e.heapStore("i64", fmt.Sprint(nbUndefined), causeGep, 8)
 	// The net-error extras address (11) / port (12) default null/0 on every error
 	// that does not set them (only the async net.connect failure path does).
 	addrGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 11", addrGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", addrGep))
+	e.heapStore("ptr", "null", addrGep, 8)
 	portGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 12", portGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store double 0.0, ptr %s, align 8", portGep))
+	e.heapStore("double", "0.0", portGep, 8)
 	extraGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 13", extraGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", extraGep))
+	e.heapStore("ptr", "null", extraGep, 8)
 	// `name` is the prototype's until assigned on the error itself.
 	nameOwnIdx, _, _ := errorObjType.FieldIndex(errorNameOwnField)
 	nameOwnGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", nameOwnGep, errorObjType.StructIR(), dataReg, nameOwnIdx))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", nameOwnGep))
+	e.heapStore("i64", "0", nameOwnGep, 8)
+	// No `stack` until read; the frames where the error is made.
+	stackIdx, _, _ := errorObjType.FieldIndex("stack")
+	stackGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", stackGep, errorObjType.StructIR(), dataReg, stackIdx))
+	e.heapStore("ptr", "null", stackGep, 8)
+	e.ensureFrames()
+	e.emitInstr(fmt.Sprintf("call void @__kml_error_capture(ptr %s)", dataReg))
 
 	return dataReg
 }
@@ -323,13 +345,13 @@ func (e *Emitter) buildErrorObjWithCode(kindID int64, msgPtr, namePtr, codePtr, 
 	dataReg := e.buildErrorObj(kindID, msgPtr, namePtr)
 	codeGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", codePtr, codeGep))
+	e.heapStore("ptr", codePtr, codeGep, 8)
 	ecGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", ecGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", errcodeD, ecGep))
+	e.heapStore("double", errcodeD, ecGep, 8)
 	esGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", errstrPtr, esGep))
+	e.heapStore("ptr", errstrPtr, esGep, 8)
 	return dataReg
 }
 
@@ -349,7 +371,7 @@ func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string
 	store := func(idx int, ty, ref string) {
 		gp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, aggregateErrorStructIR(), data, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ty, ref, gp))
+		e.heapStore(ty, ref, gp, 8)
 	}
 	store(aggregateErrorsIdx(), "ptr", dataPtr)
 	store(aggregateErrorsIdx()+1, "i64", lenRef)
@@ -365,7 +387,7 @@ func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string
 // into this call; this only covers "build the Error object and throw it."
 func (e *Emitter) emitInternalThrow(msgPtr string) {
 	errReg := e.buildErrorObj(0, msgPtr, e.internString("Error"))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.excThrow(errReg)
 	e.emitTerminator("unreachable")
 }
 
@@ -375,7 +397,7 @@ func (e *Emitter) emitInternalThrow(msgPtr string) {
 // emitInternalThrow would tag it kmlTagError with a generic "Error" name.
 func (e *Emitter) emitInternalThrowKind(kind, msgPtr string) {
 	errReg := e.buildErrorObj(errorKindIDs[kind], msgPtr, e.internString(kind))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.excThrow(errReg)
 	e.emitTerminator("unreachable")
 }
 
@@ -383,6 +405,7 @@ func (e *Emitter) emitInternalThrowKind(kind, msgPtr string) {
 // allocates the 24-byte {i64, ptr, ptr} errorObjType struct, storing the
 // kind tag, message, and name, and returns a ptr Value typed as errorObjType.
 func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
+	defer e.callSite(ne.GetPos())()
 	e.ensureExceptionHelpers()
 
 	// AggregateError(errors, message?) carries the aggregated errors array in its
@@ -407,7 +430,7 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 	// "Error"), unlike the fixed-name kinds whose name is the kind itself.
 	namePtr := e.internString(ne.Kind)
 	if ne.Kind == "DOMException" && ne.Name != nil && ne.Cause == nil {
-		if nt := e.inferExprType(ne.Name); nt.IsObject || nt.IsDynamicObject || isUnconstrainedDynamic(nt) {
+		if nt := e.inferExprType(ne.Name); nt.IsObject() || nt.IsDynamicObject() || isUnconstrainedDynamic(nt) {
 			// An options object held in a value: its name and cause.
 			opts := ne.Name
 			if _, ok := opts.(*ast.Identifier); ok {
@@ -427,7 +450,7 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			nameVal = e.coerce(nameVal, TypePtr)
+			nameVal = e.convert(nameVal, TypePtr)
 			namePtr = nameVal.Ref
 		}
 	}
@@ -444,7 +467,7 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 		}
 		causeGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, causeGep))
+		e.heapStore("i64", boxed.Ref, causeGep, 8)
 	}
 	return Value{Ref: dataReg, Ty: errorObjType}, nil
 }
@@ -466,7 +489,7 @@ func (e *Emitter) emitNewAggregateError(ne *ast.NewErrorExpression) (Value, erro
 			e.ensureMalloc()
 			bytes, out := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, l))
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", out, bytes))
+			e.heapMallocInto(out, bytes)
 			if err := e.emitSpreadBoxLoop(p, l, elemTy, out); err != nil {
 				return Value{}, err
 			}
@@ -480,7 +503,7 @@ func (e *Emitter) emitNewAggregateError(ne *ast.NewErrorExpression) (Value, erro
 		if err != nil {
 			return Value{}, err
 		}
-		msgVal = e.coerce(msgVal, TypePtr)
+		msgVal = e.convert(msgVal, TypePtr)
 		msgPtr = msgVal.Ref
 	}
 	namePtr := e.internString("AggregateError")
@@ -500,7 +523,7 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	isAgg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kp, errorObjType.StructIR(), errPtr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", k, kp))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isAgg, k, errorTypeIDStored(aggID)))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isAgg, e.headerIdentity(k), errorTypeIDStored(aggID)))
 	aggL := e.freshLabel("aggerr.errors")
 	emptyL := e.freshLabel("aggerr.empty")
 	mergeL := e.freshLabel("aggerr.merge")
@@ -525,10 +548,7 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	length := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ null, %%%s ]", data, d, aggL, emptyL))
 	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ 0, %%%s ]", length, l, aggL, emptyL))
-	a0 := e.freshReg()
-	a1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", a0, data))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", a1, a0, length))
+	a1 := e.newArrayHeader(data, length)
 	return Value{Ref: a1, Ty: ArrayOf(TypeAny)}
 }
 
@@ -538,7 +558,7 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 // `.message`/`.name`/`instanceof Error` against the caught value work as if
 // `new Error(...)` had been thrown.
 func (e *Emitter) errorPtrFromValue(val Value) (string, error) {
-	if val.Ty.IsObject {
+	if val.Ty.IsObject() {
 		return val.Ref, nil
 	}
 	// A dynamic value holding an Error is that Error; any other value is
@@ -591,9 +611,9 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 	// tag-13 ptr shim; everything else boxes to a NaN-box value whose (tag,
 	// payload) the catch reconstructs — so `throw "x"` is caught as the string
 	// "x", not wrapped in an Error.
-	if val.Ty.IsCaught {
+	if val.Ty.IsCaught() {
 		tag, pay := e.caughtParts(val)
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", tag, pay))
+		e.excThrowAny(tag, pay)
 		e.emitTerminator("unreachable")
 		return nil
 	}
@@ -606,9 +626,9 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 			isErrSubclass = true
 		}
 	}
-	if val.Ty.IsError || isErrSubclass {
-		errPtr := e.coerce(val, TypePtr)
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errPtr.Ref))
+	if val.Ty.IsError() || isErrSubclass {
+		errPtr := e.convert(val, TypePtr)
+		e.excThrow(errPtr.Ref)
 		e.emitTerminator("unreachable")
 		return nil
 	}
@@ -617,7 +637,7 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 		return err
 	}
 	tag, pay := e.emitUnboxTagPayload(boxed)
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", tag, pay))
+	e.excThrowAny(tag, pay)
 	e.emitTerminator("unreachable")
 	return nil
 }
@@ -690,13 +710,7 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	}
 
 	// Push a jmpbuf slot and call setjmp.
-	jmpbuf := e.freshReg()
-	sjRet := e.freshReg()
-	threw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jmpbuf))
-	e.emitInstr(fmt.Sprintf("%s = %s", sjRet, e.setjmpCall(jmpbuf)))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sjRet))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchL, tryL))
+	e.excEnter(catchL, tryL)
 
 	// A `return`/`break`/`continue` inside the try must pop its handler and
 	// run its finally before it exits (emitPendingFinallys).
@@ -718,7 +732,7 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 	e.popScope()
 	e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1]
 	// Pop jmpbuf only on the success path; __kml_throw pops it on the throw path.
-	e.emitInstr("call void @__kml_pop_jmpbuf()")
+	e.excLeave()
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 	// --- handler: the try threw ---
@@ -733,11 +747,7 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 			// The catch runs under a handler of its own: an exception it
 			// throws is pending until the finally has run.
 			catchThrewL := e.freshLabel("try.catch.threw")
-			jb2, sj2, threw2 := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb2))
-			e.emitInstr(fmt.Sprintf("%s = %s", sj2, e.setjmpCall(jb2)))
-			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw2, sj2))
-			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw2, catchThrewL, catchRunL))
+			e.excEnter(catchThrewL, catchRunL)
 			e.emitLabel(catchThrewL)
 			recordPending()
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
@@ -751,7 +761,7 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 		}
 		if hasFinally {
 			e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1]
-			e.emitInstr("call void @__kml_pop_jmpbuf()")
+			e.excLeave()
 		}
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
@@ -776,7 +786,7 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 			tag, pay := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load volatile i8, ptr %s, align 1", tag, tagSlot))
 			e.emitInstr(fmt.Sprintf("%s = load volatile i64, ptr %s, align 8", pay, paySlot))
-			e.emitInstr(fmt.Sprintf("call void @__kml_throw_any(i8 %s, i64 %s)", tag, pay))
+			e.excThrowAny(tag, pay)
 			e.emitTerminator("unreachable")
 			e.emitLabel(doneL)
 		}
@@ -873,9 +883,9 @@ func flatCatchPattern(ps []ast.DestructProp) bool {
 // its ToString (`null` is "null").
 func (e *Emitter) emitErrorMessage(v Value) (string, error) {
 	switch {
-	case v.Ty.IsUndefined && !v.Ty.Nullable:
+	case v.Ty.IsUndefined() && !v.Ty.Nullable():
 		return e.internString(""), nil
-	case v.Ty.IsDynamic:
+	case v.Ty.IsDynamic():
 		tag, _ := e.emitUnboxTagPayload(v)
 		isU := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isU, tag, kmlTagUndefined))
@@ -886,10 +896,10 @@ func (e *Emitter) emitErrorMessage(v Value) (string, error) {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isU, e.internString(""), s.Ref))
 		return r, nil
-	case isStringTy(v.Ty) && v.Ty.Nullable:
+	case isStringTy(v.Ty) && v.Ty.Nullable():
 		// An absent `string | undefined` is undefined; a `string | null` null.
 		absent := "null"
-		if v.Ty.IsUndefined {
+		if v.Ty.IsUndefined() {
 			absent = ""
 		}
 		r := e.freshReg()
@@ -912,7 +922,7 @@ func (e *Emitter) emitThrowCoded(kind, code, msgPtr string) {
 	errReg := e.buildErrorObj(errorKindIDs[kind], msgPtr, e.internString(kind))
 	codeGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), errReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(code), codeGep))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+	e.heapStore("ptr", e.internString(code), codeGep, 8)
+	e.excThrow(errReg)
 	e.emitTerminator("unreachable")
 }

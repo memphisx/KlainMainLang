@@ -35,6 +35,7 @@ func (e *Emitter) ensureJSONParseTree() {
 	}
 	e.declaredJSONParseTree = true
 	e.emitGlobal(`declare ptr @__kml_json_parse(ptr, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_json_syntax_message(ptr, i64)`)
 	e.emitGlobal(`declare void @__kml_json_free(ptr)`)
 	e.emitGlobal(`declare i32 @__kml_json_kind(ptr)`)
 	e.emitGlobal(`declare i32 @__kml_json_bool(ptr)`)
@@ -43,6 +44,7 @@ func (e *Emitter) ensureJSONParseTree() {
 	e.emitGlobal(`declare ptr @__kml_json_item(ptr, i64)`)
 	e.emitGlobal(`declare ptr @__kml_json_string_dup(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_json_get(ptr, ptr)`)
+	e.emitGlobal(`declare void @__kml_keyorder_json(ptr, ptr, ptr, ptr, i64)`)
 }
 
 // emitJSONParseTree parses jsonText with the real validating parser, throwing a
@@ -70,12 +72,10 @@ func (e *Emitter) emitJSONParseTree(jsonText Value) string {
 	e.emitLabel(badL)
 	offReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", offReg, errSlot))
+	// V8's message for the error (__kml_json_syntax_message).
 	msgBuf := e.freshReg()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 64)", msgBuf))
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)",
-		msgBuf, e.internString("Unexpected token in JSON at position %lld"), offReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize(ptr %s)", msgBuf))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_syntax_message(ptr %s, i64 %s)", msgBuf, jsonText.Ref, offReg))
 	errReg := e.buildErrorObj(errorKindIDs["SyntaxError"], msgBuf, e.internString("SyntaxError"))
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
 	e.emitTerminator("unreachable")

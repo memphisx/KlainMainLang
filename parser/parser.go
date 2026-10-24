@@ -2,9 +2,11 @@ package parser
 
 import (
 	"KlainMainLang/diag"
+	"fmt"
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/jsdoc"
@@ -12,6 +14,24 @@ import (
 )
 
 type Parser struct {
+	// inGen is set while parsing a generator's parameters and body, where
+	// `yield` is an expression; nextGen tells parseFunctionRestThis that the
+	// function it parses next is one. Elsewhere `yield` reads as an
+	// identifier (sloppy code; strictYieldName rejects it in strict code).
+	inGen, nextGen bool
+	// parenLiterals is the object and array literals written in
+	// parentheses, which are never a destructuring assignment's target.
+	parenLiterals map[ast.Expression]bool
+	// inGenParams is set while parsing a generator's parameter list.
+	inGenParams bool
+	// awaitCtx is where `await` is read: in a function that is not async
+	// (awaitFn) and at the top level (awaitTop) the operator unless no
+	// operand can follow, as in `var await = 0`; the operator in an async
+	// function (awaitAsync) and directly in a class static block
+	// (awaitStatic). nextAsyncArrow tells parseArrowFunction that the
+	// arrow it parses is async.
+	awaitCtx       uint8
+	nextAsyncArrow bool
 	// sigThis is the last parsed signature's leading `this: T` type
 	// (parseSignatureTail).
 	sigThis ast.TypeNode
@@ -42,6 +62,7 @@ type Parser struct {
 	// after every statement.
 	namespaces      map[string]map[string]bool
 	namespaceGroups []ast.NamespaceGroup
+	nsExports       map[string][]ast.NamespaceExport
 	pendingTopLevel []ast.Statement
 	// nsAliases collects `import X = Y.Z` alias declarations (ADR-00456).
 	nsAliases []ast.NSAliasDecl
@@ -78,50 +99,53 @@ type Parser struct {
 	// TDD-00230 P3.1): its annotations stay type nodes, which only the
 	// checker reads, so every TypeScript type form parses.
 	declarations bool
-	// src is the source text; blanks are the byte ranges of its type syntax
-	// (annotations, `as T`, `!`, type arguments), which a call's Source shows
-	// as spaces, as Node's type stripping leaves them.
-	src    string
-	blanks [][2]int
+	// src is the source text; text holds it with the byte ranges of its type
+	// syntax (annotations, `as T`, `!`, type arguments), which a call's
+	// Source and a function's toString show as spaces, as Node's type
+	// stripping leaves them.
+	src  string
+	text *ast.SourceText
+	// memberStart is the byte offset a method's source text begins at, set
+	// by its member parse just before parseFunctionRest; -1 for none.
+	memberStart int
 }
 
 func New(src string) *Parser {
-	return &Parser{lx: lexer.New(src), docAt: -1, noInFrom: -1, src: src}
+	return &Parser{lx: lexer.New(src), docAt: -1, noInFrom: -1, memberStart: -1, src: src, text: &ast.SourceText{Src: src}}
 }
 
 // blank records [start, end) as type syntax.
+// blankTok blanks token t's text, a TypeScript-only token type stripping
+// removes.
+func (p *Parser) blankTok(t lexer.Token) { p.blank(t.Pos, t.End) }
+
 func (p *Parser) blank(start, end int) {
 	if start < end {
-		p.blanks = append(p.blanks, [2]int{start, end})
+		p.text.Blanks = append(p.text.Blanks, [2]int{start, end})
 	}
 }
 
 // callSource is the source text of a call spanning [start, end), its type
 // syntax blanked.
-func (p *Parser) callSource(start, end int) string {
-	if start < 0 || end > len(p.src) || start >= end {
-		return ""
+func (p *Parser) callSource(start, end int) string { return p.text.Slice(start, end) }
+
+// srcRange is the source range of a node starting at pos and ending with the
+// last token consumed.
+func (p *Parser) srcRange(pos ast.Pos) ast.SourceRange {
+	if p.pos == 0 {
+		return ast.SourceRange{}
 	}
-	raw := p.src[start:end]
-	var out []byte
-	for _, b := range p.blanks {
-		lo, hi := max(b[0], start), min(b[1], end)
-		if lo >= hi {
-			continue
+	end := p.at(p.pos - 1).End
+	for i := p.pos - 1; i >= 0; i-- {
+		t := p.at(i)
+		if t.Line == pos.Line && t.Col == pos.Col {
+			return ast.SourceRange{Text: p.text, Start: t.Pos, End: end}
 		}
-		if out == nil {
-			out = []byte(raw)
-		}
-		for i := lo; i < hi; i++ {
-			if out[i-start] != '\n' {
-				out[i-start] = ' '
-			}
+		if t.Line < pos.Line {
+			break
 		}
 	}
-	if out == nil {
-		return raw
-	}
-	return string(out)
+	return ast.SourceRange{}
 }
 
 // inExcluded reports whether a relational `in` at the current token is
@@ -191,11 +215,55 @@ func (p *Parser) at(i int) lexer.Token {
 
 func (p *Parser) peek() lexer.Token {
 	t := p.at(p.pos)
+	if t.Type == lexer.YIELD && !p.inGen {
+		t.Type = lexer.IDENT
+	}
+	if t.Type == lexer.AWAIT && p.awaitIsIdent() {
+		t.Type = lexer.IDENT
+	}
 	if t.Doc != "" && p.docAt != p.pos {
 		p.pendingDoc = jsdoc.Parse(t.Doc)
 		p.docAt = p.pos
 	}
 	return t
+}
+
+const (
+	awaitTop uint8 = iota
+	awaitFn
+	awaitAsync
+	awaitStatic
+)
+
+// awaitIsIdent reports whether the `await` at the current token is an
+// identifier (awaitCtx).
+func (p *Parser) awaitIsIdent() bool {
+	switch p.awaitCtx {
+	case awaitFn, awaitTop:
+		// `await 1` in a function that is not async is the operator,
+		// misplaced (TS1308), as tsc reads it.
+		return !startsOperand(p.at(p.pos + 1).Type)
+	}
+	return false
+}
+
+// startsOperand reports whether a token of type t may begin an `await`
+// operand: every token but a closing, separating or binary-operator one.
+func startsOperand(t lexer.TokenType) bool {
+	switch t {
+	case lexer.EOF, lexer.SEMICOLON, lexer.COMMA, lexer.COLON, lexer.DOT, lexer.OPTIONAL_DOT,
+		lexer.RPAREN, lexer.RBRACKET, lexer.RBRACE, lexer.ARROW, lexer.QUESTION,
+		lexer.ASSIGN, lexer.PLUS_ASSIGN, lexer.MINUS_ASSIGN, lexer.STAR_ASSIGN, lexer.SLASH_ASSIGN,
+		lexer.PERCENT_ASSIGN, lexer.POW_ASSIGN, lexer.LSHIFT_ASSIGN, lexer.RSHIFT_ASSIGN,
+		lexer.URSHIFT_ASSIGN, lexer.AND_ASSIGN, lexer.OR_ASSIGN, lexer.XOR_ASSIGN,
+		lexer.LOGICAL_AND_ASSIGN, lexer.LOGICAL_OR_ASSIGN, lexer.NULLISH_ASSIGN,
+		lexer.EQ, lexer.NEQ, lexer.STRICT_EQ, lexer.STRICT_NEQ, lexer.GT, lexer.GTE, lexer.LTE,
+		lexer.AND, lexer.OR, lexer.NULLISH, lexer.STAR, lexer.SLASH, lexer.PERCENT, lexer.POW,
+		lexer.BITAND, lexer.BITOR, lexer.BITXOR, lexer.LSHIFT, lexer.RSHIFT, lexer.URSHIFT,
+		lexer.INSTANCEOF:
+		return false
+	}
+	return true
 }
 
 // rescanAt re-reads token i under mode, discarding everything scanned after
@@ -219,11 +287,11 @@ func (p *Parser) rewind(i int) {
 	if i < len(p.tokens) {
 		// Type syntax recorded past the rewound point was a guess.
 		cut := p.tokens[i].Pos
-		k := len(p.blanks)
-		for k > 0 && p.blanks[k-1][0] >= cut {
+		k := len(p.text.Blanks)
+		for k > 0 && p.text.Blanks[k-1][0] >= cut {
 			k--
 		}
-		p.blanks = p.blanks[:k]
+		p.text.Blanks = p.text.Blanks[:k]
 	}
 	p.pos = i
 	k := sort.SearchInts(p.rescans, i)
@@ -318,6 +386,13 @@ func (p *Parser) expectGT(context string) error {
 // carry a `extends X` constraint (TDD-00113) and a `= T` default; the returned
 // constraints and defaults are positionally aligned with names (nil: none).
 func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnotation, []*ast.TypeAnnotation, error) {
+	// Type syntax: blanked in the source text, as type stripping does.
+	ltStart := p.peek().Pos
+	defer func() {
+		if end := p.at(p.pos - 1).End; end > ltStart {
+			p.blank(ltStart, end)
+		}
+	}()
 	p.advance() // consume '<'
 	var names []string
 	var constraints, defaults []*ast.TypeAnnotation
@@ -478,22 +553,74 @@ func (p *Parser) collectTypedefs() []ast.Statement {
 	return out
 }
 
+// typedefSource is the TypeScript spelling of an object or callback
+// typedef (`{ x: number; y?: string }`, `(a: number, ...b: string[]) =>
+// number`), or "" for an alias or a member without a type.
+func typedefSource(d jsdoc.TypedefDecl) string {
+	var sb strings.Builder
+	switch d.Kind {
+	case "object":
+		sb.WriteString("{ ")
+		for _, f := range d.Fields {
+			if f.Type == "" || f.Name == "" {
+				return ""
+			}
+			name, opt := f.Name, ""
+			if strings.HasPrefix(name, "[") && strings.HasSuffix(name, "]") {
+				name, opt = strings.SplitN(strings.Trim(name, "[]"), "=", 2)[0], "?"
+			}
+			fmt.Fprintf(&sb, "%s%s: %s; ", name, opt, f.Type)
+		}
+		sb.WriteString("}")
+	case "callback":
+		sb.WriteString("(")
+		for i, f := range d.Fields {
+			if f.Type == "" || f.Name == "" {
+				return ""
+			}
+			if i > 0 {
+				sb.WriteString(", ")
+			}
+			if f.Rest {
+				fmt.Fprintf(&sb, "...%s: %s[]", f.Name, f.Type)
+			} else {
+				fmt.Fprintf(&sb, "%s: %s", f.Name, f.Type)
+			}
+		}
+		ret := d.Return
+		if ret == "" {
+			ret = "void"
+		}
+		fmt.Fprintf(&sb, ") => %s", ret)
+	default:
+		return ""
+	}
+	return sb.String()
+}
+
 // synthTypedef builds the `type Name = ...` AST node for one JSDoc typedef.
 func (p *Parser) synthTypedef(d jsdoc.TypedefDecl, pos ast.Pos) ast.Statement {
 	if d.Name == "" {
 		return nil
 	}
 	var ta *ast.TypeAnnotation
-	switch d.Kind {
-	case "alias":
+	// An object or callback typedef is spelled as the TypeScript type it
+	// declares and parsed as one, so it carries a type node as every other
+	// JSDoc type does; the structural form below is the fallback.
+	if src := typedefSource(d); src != "" {
+		ta = parseJSDocTypeString(src)
+	}
+	switch {
+	case ta != nil:
+	case d.Kind == "alias":
 		ta = jsdocTypeAnnotation(d.Base)
-	case "object":
+	case d.Kind == "object":
 		fields := make([]ast.AnnotField, 0, len(d.Fields))
 		for _, f := range d.Fields {
 			fields = append(fields, ast.AnnotField{Name: f.Name, Type: jsdocTypeAnnotation(f.Type)})
 		}
 		ta = &ast.TypeAnnotation{Source: "jsdoc", Fields: fields}
-	case "callback":
+	case d.Kind == "callback":
 		params := make([]ast.TypeAnnotation, 0, len(d.Fields))
 		for _, f := range d.Fields {
 			params = append(params, *jsdocTypeAnnotation(f.Type))
@@ -549,6 +676,7 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	prog.Body = append(p.collectTypedefs(), prog.Body...)
 	prog.Namespaces = p.namespaces
 	prog.NamespaceGroups = p.namespaceGroups
+	prog.NamespaceExports = p.nsExports
 	prog.Assertions = p.assertions
 	prog.ThisParams = p.thisParams
 	prog.NSAliases = p.nsAliases
@@ -558,6 +686,9 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 		return nil, err
 	}
 	if err := awaitOutsideAsync(prog, true); err != nil {
+		return nil, err
+	}
+	if err := newTargetContexts(prog, -1); err != nil {
 		return nil, err
 	}
 	if !p.evalCode {
@@ -580,7 +711,17 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	if err := superErrors(prog, superContext{}); err != nil {
 		return nil, err
 	}
+	if isModuleProgram(prog) {
+		// Module code reserves `await` everywhere.
+		if pos, ok := reservedNameIn(prog, "await"); ok {
+			return nil, errAtPos(pos, diag.ReservedWordIdent, "await")
+		}
+	}
 	if programIsStrict(prog) {
+		// `yield` outside a generator is an identifier only in sloppy code.
+		if pos, ok := reservedNameIn(prog, "yield"); ok {
+			return nil, errAtPos(pos, diag.ReservedWordIdent, "yield")
+		}
 		if err := strictBindingError(prog.Body); err != nil {
 			return nil, err
 		}
@@ -611,12 +752,16 @@ func strictRegionErrors(prog *ast.Program) error {
 		case *ast.ArrowFunction:
 			body = x.Block
 		case *ast.ClassDeclaration, *ast.ClassExpression:
-			err = strictErrors(n)
+			if err = strictYieldName(n); err == nil {
+				err = strictErrors(n)
+			}
 			return false
 		}
 		if body != nil && bodyStartsWithUseStrict(body) {
-			if err = strictBindingError(body.Body); err == nil {
-				err = strictErrors(n)
+			if err = strictYieldName(n); err == nil {
+				if err = strictBindingError(body.Body); err == nil {
+					err = strictErrors(n)
+				}
 			}
 			return false
 		}
@@ -740,6 +885,82 @@ func yieldOutsideGenerator(n ast.Node, inGenerator bool) error {
 	return err
 }
 
+// newTargetContexts records each `new.target`'s function (ctx, -1 outside
+// any: the early error V8 and tsc report). An arrow keeps its enclosing
+// context; a class's constructor, methods, field initializers and static
+// blocks set theirs.
+// newTargetIDs numbers the declarations whose body reads new.target.
+var newTargetIDs atomic.Int64
+
+func newTargetContexts(n ast.Node, ctx ast.NewTargetContext) error {
+	walk := func(n ast.Node, ctx ast.NewTargetContext, skip map[ast.Node]bool) error {
+		var err error
+		ast.ForEachChild(n, func(ch ast.Node) bool {
+			if err == nil && !skip[ch] {
+				err = newTargetContexts(ch, ctx)
+			}
+			return err == nil
+		})
+		return err
+	}
+	switch x := n.(type) {
+	case *ast.NewTargetExpression:
+		if ctx < 0 {
+			return errAtPos(x.GetPos(), diag.NewTargetNotAllowed)
+		}
+		x.Ctx = ctx
+		return nil
+	case *ast.FunctionDeclaration:
+		// Its own new.target nodes (an arrow's too) name it.
+		id := int(newTargetIDs.Add(1))
+		ast.ForEachChild(x, func(ch ast.Node) bool {
+			ast.Inspect(ch, func(m ast.Node) bool {
+				switch m := m.(type) {
+				case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+					return false
+				case *ast.NewTargetExpression:
+					m.FnID, x.NewTargetID = id, id
+				}
+				return true
+			})
+			return true
+		})
+		return walk(n, ast.NewTargetFunction, nil)
+	case *ast.FunctionExpression:
+		return walk(n, ast.NewTargetFunction, nil)
+	case *ast.ClassDeclaration:
+		inner := map[ast.Node]bool{}
+		if x.Constructor != nil {
+			if err := walk(x.Constructor, ast.NewTargetConstructor, nil); err != nil {
+				return err
+			}
+			inner[x.Constructor] = true
+		}
+		for _, m := range x.Methods {
+			if err := walk(m, ast.NewTargetUndefined, nil); err != nil {
+				return err
+			}
+			inner[m] = true
+		}
+		for _, f := range x.Fields {
+			if f.Initializer != nil {
+				if err := newTargetContexts(f.Initializer, ast.NewTargetUndefined); err != nil {
+					return err
+				}
+				inner[f.Initializer] = true
+			}
+		}
+		for _, b := range x.StaticBlocks {
+			if err := newTargetContexts(b, ast.NewTargetUndefined); err != nil {
+				return err
+			}
+			inner[b] = true
+		}
+		return walk(n, ctx, inner)
+	}
+	return walk(n, ctx, nil)
+}
+
 // awaitOutsideAsync is the early error for an `await` expression outside
 // an async body (tsc's TS1308, V8's "Unexpected reserved word"): a module's
 // top level allows it, every function sets the context by being async or
@@ -827,6 +1048,17 @@ func privateNameErrors(n ast.Node, scopes []map[string]bool) error {
 				return errAtPos(x.GetPos(), diag.PrivateNameUndeclared, x.Property)
 			}
 		}
+	case *ast.BinaryExpression:
+		// `#x in o`: its private name, the left operand, likewise.
+		if id, ok := x.Left.(*ast.Identifier); ok && x.Op == "in" && strings.HasPrefix(id.Name, "#") {
+			declared := false
+			for _, s := range scopes {
+				declared = declared || s[id.Name]
+			}
+			if !declared {
+				return errAtPos(id.GetPos(), diag.PrivateNameUndeclared, id.Name)
+			}
+		}
 	case *ast.UnaryExpression:
 		if m, ok := x.Arg.(*ast.MemberExpression); ok && x.Op == "delete" && strings.HasPrefix(m.Property, "#") {
 			return errAtPos(x.GetPos(), diag.DeletePrivateName)
@@ -877,6 +1109,9 @@ func strictErrors(n ast.Node) error {
 		}
 		if id, ok := x.Left.(*ast.Identifier); ok && strictReservedBinding(id.Name) {
 			return errAtPos(x.GetPos(), diag.StrictAssignTargetName, id.Name)
+		}
+		if name := patternReservedName(x.Left); name != "" {
+			return errAtPos(x.GetPos(), diag.StrictAssignTargetName, name)
 		}
 	case *ast.UpdateExpression:
 		if _, ok := x.Arg.(*ast.CallExpression); ok {
@@ -1047,4 +1282,123 @@ func (p *Parser) declareTypeParam(name string) {
 		p.typeParamNames = map[string]bool{}
 	}
 	p.typeParamNames[name] = true
+}
+
+// firstYieldIdent is the earliest `yield` read as an identifier.
+// isModuleProgram reports whether prog is module code: it imports or
+// exports.
+func isModuleProgram(prog *ast.Program) bool {
+	for _, st := range prog.Body {
+		switch st.(type) {
+		case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+			return true
+		}
+	}
+	return false
+}
+
+// reservedNameIn is the position of the first use of word as a name in the
+// program (a reference or a binding): `yield` in strict code, `await` in
+// a module. A property name (`o.yield`, `{ yield: 1 }`, a `yield()`
+// method) is not one.
+func reservedNameIn(prog *ast.Program, word string) (ast.Pos, bool) {
+	for _, st := range prog.Body {
+		if at, found := reservedNameUnder(st, word); found {
+			return at, true
+		}
+	}
+	return ast.Pos{}, false
+}
+
+// strictYieldName rejects `yield` used as a name in a strict region (a
+// class body, a function whose body opens with "use strict").
+func strictYieldName(n ast.Node) error {
+	if pos, ok := reservedNameUnder(n, "yield"); ok {
+		return errAtPos(pos, diag.ReservedWordIdent, "yield")
+	}
+	return nil
+}
+
+// reservedNameUnder is reservedNameIn over one node: a statement, or the
+// strict region of a sloppy program (strictRegionErrors).
+func reservedNameUnder(root ast.Node, word string) (ast.Pos, bool) {
+	var at ast.Pos
+	found := false
+	bad := func(name string, pos ast.Pos) {
+		if name == word && !found {
+			at, found = pos, true
+		}
+	}
+	params := func(ps []ast.Param) {
+		for _, p := range ps {
+			bad(p.Name, p.Pos)
+		}
+	}
+	members := map[*ast.FunctionDeclaration]bool{} // named by a property key
+	{
+		ast.Inspect(root, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.ClassDeclaration:
+				for _, m := range x.Methods {
+					members[m] = true
+				}
+				if x.Constructor != nil {
+					members[x.Constructor] = true
+				}
+				bad(x.Name, x.GetPos())
+			case *ast.Identifier:
+				bad(x.Name, x.GetPos())
+			case *ast.VarDeclaration:
+				bad(x.Name, x.GetPos())
+			case *ast.FunctionDeclaration:
+				if !members[x] {
+					bad(x.Name, x.GetPos())
+				}
+				params(x.Params)
+			case *ast.FunctionExpression:
+				bad(x.Name, x.GetPos())
+				params(x.Params)
+			case *ast.ArrowFunction:
+				params(x.Params)
+			case *ast.TryStatement:
+				if x.Catch != nil {
+					bad(x.Catch.Param, x.GetPos())
+				}
+			case *ast.LabeledStatement:
+				bad(x.Label, x.GetPos()) // `yield: 1`, `await: 1`
+			}
+			return !found
+		})
+	}
+	return at, found
+}
+
+// patternReservedName is `eval` or `arguments` named as a target inside an
+// assignment pattern (`[arguments] = []`), or "".
+func patternReservedName(e ast.Expression) string {
+	switch x := e.(type) {
+	case *ast.Identifier:
+		if strictReservedBinding(x.Name) {
+			return x.Name
+		}
+	case *ast.ArrayLiteral:
+		for _, el := range x.Elements {
+			if n := patternReservedName(el); n != "" {
+				return n
+			}
+		}
+	case *ast.ObjectLiteral:
+		for _, p := range x.Properties {
+			if n := patternReservedName(p.Value); n != "" {
+				return n
+			}
+		}
+	case *ast.SpreadElement:
+		return patternReservedName(x.Arg)
+	case *ast.AssignmentExpression:
+		if x.Op == "=" {
+			return patternReservedName(x.Left)
+		}
+	}
+	return ""
 }

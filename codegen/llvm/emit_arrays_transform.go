@@ -10,12 +10,14 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	// JS concat takes any number of arguments — each an array (flattened
 	// one level) or a plain value (appended) — and zero arguments copy the
 	// receiver (ADR-00463; previously exactly one array argument).
-	ptrReg1, lenReg1, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	hdr1, ptrReg1, lenReg1, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	hdr1 = e.hofHolesHeader(mem.Object, hdr1)
 	type concatPart struct {
 		ptr, length string // array part
+		hdr         string // array part's header, when it may hold holes
 		srcElemTy   Type   // array part's own element type
 		scalar      *Value // scalar part (length 1)
 	}
@@ -26,7 +28,7 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	elemTy = e.concatElemType(mem.Object, elemTy, args)
 	var parts []concatPart
 	for _, arg := range args {
-		if argTy := e.inferExprType(arg); argTy.IsDynamic && elemTy.IsDynamic {
+		if argTy := e.inferExprType(arg); argTy.IsDynamic() && elemTy.IsDynamic() {
 			// An `any` holding an Array is spread (IsConcatSpreadable);
 			// any other value is appended — decided on the box at runtime.
 			p, l, err := e.emitConcatAnyPart(arg)
@@ -36,19 +38,19 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 			parts = append(parts, concatPart{ptr: p, length: l, srcElemTy: TypeAny})
 			continue
 		}
-		if e.inferExprType(arg).IsArray {
-			p, l, aet, err := e.resolveArrayForHOF(arg, pos)
+		if e.inferExprType(arg).IsArray() {
+			h, p, l, aet, err := e.resolveArrayHOF(arg, pos)
 			if err != nil {
 				return Value{}, err
 			}
-			parts = append(parts, concatPart{ptr: p, length: l, srcElemTy: aet})
+			parts = append(parts, concatPart{ptr: p, length: l, hdr: e.hofHolesHeader(arg, h), srcElemTy: aet})
 			continue
 		}
 		v, err := e.emitExpr(arg)
 		if err != nil {
 			return Value{}, err
 		}
-		if v, err = e.coerceChecked(v, elemTy, arg.GetPos(), "concat argument"); err != nil {
+		if v, err = e.convertChecked(v, elemTy, arg.GetPos(), "concat argument"); err != nil {
 			return Value{}, err
 		}
 		parts = append(parts, concatPart{scalar: &v})
@@ -69,9 +71,9 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	totalBytes := e.freshReg()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", totalBytes, newLen, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, totalBytes))
+	e.heapMallocInto(newPtr, totalBytes)
 
-	if elemTy.IsDynamic && !srcElemTy.IsDynamic {
+	if elemTy.IsDynamic() && !srcElemTy.IsDynamic() {
 		e.emitBoxCopyLoop(newPtr, ptrReg1, lenReg1, srcElemTy)
 	} else {
 		bytes1 := e.freshReg()
@@ -85,9 +87,9 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dst, elemTy.IR, newPtr, off))
 		next := e.freshReg()
 		if p.scalar != nil {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, p.scalar.Ref, dst, elemTy.Align()))
+			e.heapStore(elemTy.IR, p.scalar.Ref, dst, elemTy.Align())
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, off))
-		} else if elemTy.IsDynamic && !p.srcElemTy.IsDynamic {
+		} else if elemTy.IsDynamic() && !p.srcElemTy.IsDynamic() {
 			// Concatenating a concrete-element array into a boxed-element array
 			// (`any[]`, TDD-00200): the source slots hold raw scalars, not NaN
 			// boxes, so a byte-copy would mis-tag them. Copy element-wise,
@@ -103,10 +105,20 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 		off = next
 	}
 
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, newLen))
+	r1 := e.newArrayHeader(newPtr, newLen)
+	// Each array part keeps its holes.
+	e.emitHolesCopy(r1, "0", hdr1, "0", lenReg1)
+	at := lenReg1
+	for _, p := range parts {
+		next := e.freshReg()
+		if p.scalar != nil {
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, at))
+		} else {
+			e.emitHolesCopy(r1, at, p.hdr, "0", p.length)
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, at, p.length))
+		}
+		at = next
+	}
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
@@ -126,7 +138,7 @@ func (e *Emitter) concatElemType(recv ast.Expression, elemTy Type, args []ast.Ex
 	var shared *Type
 	for _, arg := range args {
 		t := e.inferExprType(arg)
-		if t.IsArray && t.ElemType != nil {
+		if t.IsArray() && t.ElemType != nil {
 			t = *t.ElemType
 		}
 		if shared == nil {
@@ -143,11 +155,11 @@ func (e *Emitter) concatElemType(recv ast.Expression, elemTy Type, args []ast.Ex
 // an array (IsConcatSpreadable) and appended otherwise, whatever it holds,
 // which only boxed elements can carry.
 func (e *Emitter) concatWidensToAny(elemTy Type, args []ast.Expression) bool {
-	if elemTy.IsDynamic {
+	if elemTy.IsDynamic() {
 		return false
 	}
 	for _, arg := range args {
-		if e.inferExprType(arg).IsDynamic {
+		if e.inferExprType(arg).IsDynamic() {
 			return true
 		}
 	}
@@ -203,16 +215,14 @@ func (e *Emitter) emitArrayReverse(mem *ast.MemberExpression, args []ast.Express
 	if len(args) != 0 {
 		return Value{}, fmt.Errorf("%d:%d: reverse takes no arguments", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
 	e.emitArrayGuardFor(mem.Object, arrOpReorder, nil)
 	e.emitReverseInPlace(ptrReg, lenReg, elemTy)
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	e.emitHolesCall("__kml_holes_reverse", e.hofHolesHeader(mem.Object, hdr), lenReg)
+	r1 := e.receiverArrayHeader(hdr, ptrReg, lenReg)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
@@ -251,8 +261,8 @@ func (e *Emitter) emitReverseInPlace(ptrReg, lenReg string, elemTy Type) {
 	valJ := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valI, elemTy.IR, gepI, elemTy.Align()))
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valJ, elemTy.IR, gepJ, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, valJ, gepI, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, valI, gepJ, elemTy.Align()))
+	e.heapStore(elemTy.IR, valJ, gepI, elemTy.Align())
+	e.heapStore(elemTy.IR, valI, gepJ, elemTy.Align())
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
@@ -273,11 +283,8 @@ func (e *Emitter) emitArrayToReversed(mem *ast.MemberExpression, args []ast.Expr
 	}
 	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)
 	e.emitReverseInPlace(newPtr, lenReg, elemTy)
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	r1 := e.newArrayHeader(newPtr, lenReg)
+	return Value{Ref: r1, Ty: e.copyResultType(mem.Object, elemTy)}, nil
 }
 
 // emitArrayFill implements arr.fill(val[, start[, end]]): fills elements in
@@ -286,7 +293,7 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 	if len(args) < 1 || len(args) > 3 {
 		return Value{}, fmt.Errorf("%d:%d: fill takes 1–3 arguments", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
@@ -295,15 +302,28 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
+	// A numeric element filled with an array: a Buffer repeats a typed
+	// array's bytes, and any other fill takes the value's ToNumber
+	// (`[5]` → 5, `[1, 2]` → NaN → 0), as Node does.
+	var pattern *Value
+	if !elemTy.IsArray() && elemTy.IR != "ptr" && fillVal.Ty.IsArray() && !fillVal.Ty.IsDynamic() {
+		if taTy := e.inferExprType(mem.Object); taTy.IsBuffer() && (fillVal.Ty.IsTypedArray() || fillVal.Ty.IsBuffer()) {
+			pattern = &fillVal
+		} else if n, err := e.emitUnaryPlus(fillVal, args[0].GetPos()); err == nil {
+			fillVal = n
+		}
+	}
 	// TDD-00101: bigint-element / clamped TypedArrays convert the fill value
 	// through the store conversion layer instead of the plain coerce.
-	if taTy := e.inferExprType(mem.Object); taTy.BigIntElem || taTy.Clamped {
-		fillVal, err = e.coerceTypedArrayStore(fillVal, taTy, pos)
+	if pattern != nil {
+		// Stored below as bytes, not as one element.
+	} else if taTy := e.inferExprType(mem.Object); taTy.BigIntElem || taTy.Clamped {
+		fillVal, err = e.toTypedArrayElem(fillVal, taTy, pos)
 		if err != nil {
 			return Value{}, err
 		}
 	} else {
-		fillVal, err = e.coerceChecked(fillVal, elemTy, args[0].GetPos(), "array element")
+		fillVal, err = e.convertChecked(fillVal, elemTy, args[0].GetPos(), "array element")
 		if err != nil {
 			return Value{}, err
 		}
@@ -315,7 +335,7 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 	// per slot inside the loop would give every slot its own equal-by-value
 	// but not reference-equal copy instead.
 	fillSlotRef := fillVal.Ref
-	if elemTy.IsArray {
+	if elemTy.IsArray() && pattern == nil {
 		fillSlotRef = e.boxArrayValue(fillVal)
 	}
 
@@ -335,17 +355,17 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 	}
 	var endN string
 	if len(args) >= 3 {
-		er, err := e.emitExpr(args[2])
-		if err != nil {
+		if endN, err = e.emitEndIndex(args[2], lenReg); err != nil {
 			return Value{}, err
 		}
-		eIdx, err := e.arrayIndexToI64(er, args[2].GetPos())
-		if err != nil {
-			return Value{}, err
-		}
-		endN = e.emitNormalizeSliceIdx(eIdx.Ref, lenReg)
 	} else {
 		endN = lenReg
+	}
+
+	if pattern != nil {
+		e.emitBufferFillPattern(*pattern, ptrReg, startN, endN)
+		r1 := e.receiverArrayHeader(hdr, ptrReg, lenReg)
+		return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 	}
 
 	idxAlloca := e.freshReg()
@@ -367,18 +387,42 @@ func (e *Emitter) emitArrayFill(mem *ast.MemberExpression, args []ast.Expression
 	e.emitLabel(bodyL)
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, fillSlotRef, gep, elemTy.Align()))
+	e.heapStore(elemTy.IR, fillSlotRef, gep, elemTy.Align())
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrReg))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	e.emitHolesCall("__kml_holes_clear", e.hofHolesHeader(mem.Object, hdr), startN, endN)
+	r1 := e.receiverArrayHeader(hdr, ptrReg, lenReg)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+}
+
+// emitBufferFillPattern is buf.fill(view, start, end) for a typed array view:
+// the view's bytes repeated over [start, end) of the Buffer's bytes at dst.
+// An empty view is Node's ERR_INVALID_ARG_VALUE.
+func (e *Emitter) emitBufferFillPattern(view Value, dst, start, end string) {
+	data, n := e.arrayParts(view)
+	width := int64(1)
+	if view.Ty.ElemType != nil {
+		width = int64(view.Ty.ElemType.Align()) // a scalar element's size
+	}
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, n, width))
+	empty := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, bytes))
+	throwL, okL := e.freshLabel("buffill.empty"), e.freshLabel("buffill.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", empty, throwL, okL))
+	e.emitLabel(throwL)
+	shown := "<Buffer >"
+	if !view.Ty.IsBuffer() {
+		shown = typedArrayConstructorName(view.Ty) + "(0) []"
+	}
+	e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_VALUE", e.internString("The argument 'value' is invalid. Received "+shown))
+	e.emitLabel(okL)
+	e.ensureBufferCodecs()
+	e.emitInstr(fmt.Sprintf("call void @__kml_buf_fill_bytes(ptr %s, i64 %s, i64 %s, ptr %s, i64 %s)", dst, start, end, data, bytes))
 }
 
 // emitArrayAt implements arr.at(index): returns the element at the given index
@@ -412,22 +456,13 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, rawI, lenReg))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", normIdx, isNeg, plusLen, rawI))
 
-	// An array-typed result (nested array, TDD-00029) is materialized as the
-	// {ptr,i64} value aggregate in this result buffer, not the header-pointer
-	// field storage StructFieldIR now reports (TDD-00213 Stage 2); the OOB branch
-	// stores the {null,0} zero-shape and the found branch the loaded aggregate.
+	// An array-typed result (nested array, TDD-00029) is its header; the OOB
+	// branch stores the null header, undefined.
 	resIR := StructFieldIR(elemTy)
-	if elemTy.IsArray {
-		resIR = "{ptr, i64}"
-	}
 	resultAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", resultAlloca, resIR, elemTy.Align()))
-	if elemTy.IsArray {
-		z0 := e.freshReg()
-		z1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", z0))
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", z1, z0))
-		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align %d", z1, resultAlloca, elemTy.Align()))
+	if elemTy.IsArray() {
+		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", resultAlloca))
 	} else {
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, missRef(elemTy), resultAlloca, elemTy.Align()))
 	}
@@ -474,7 +509,7 @@ func (e *Emitter) emitArrayAt(mem *ast.MemberExpression, args []ast.Expression, 
 // index still out of range after normalization throws a catchable Error,
 // matching real JS's RangeError (the same "index out of range" failure this
 // compiler already treats as a real, catchable exception, e.g. array
-// index-out-of-bounds reads — see docs/adr/ADR-00044.md).
+// index-out-of-bounds reads — see docs/adr/00/ADR-00044.md).
 func (e *Emitter) emitArrayWith(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 2 {
 		return Value{}, fmt.Errorf("%d:%d: with takes exactly 2 arguments (index, value)", pos.Line, pos.Col)
@@ -491,22 +526,31 @@ func (e *Emitter) emitArrayWith(mem *ast.MemberExpression, args []ast.Expression
 	if err != nil {
 		return Value{}, err
 	}
-	normIdx := e.emitNormalizeSliceIdx(idxI.Ref, lenReg)
+	// The relative index, from the end when negative; out of [0, len) is a
+	// RangeError (no clamping, unlike slice).
+	neg, fromEnd, normIdx := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, idxI.Ref))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", fromEnd, lenReg, idxI.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", normIdx, neg, fromEnd, idxI.Ref))
 
 	valRaw, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
 	}
-	val := e.coerce(valRaw, elemTy)
+	val := e.convert(valRaw, elemTy)
 
 	inBounds := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", inBounds, normIdx, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %s", inBounds, normIdx, lenReg))
 	oobL := e.freshLabel("with.oob")
 	okL := e.freshLabel("with.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
 
 	e.emitLabel(oobL)
-	e.emitInternalThrow(e.internString("Array index out of range"))
+	if e.inferExprType(mem.Object).IsTypedArray() {
+		e.emitThrowRangeError("Invalid typed array index")
+	} else if err := e.emitThrowRangeErrorNum("Invalid index : ", idxI.Ref, ""); err != nil {
+		return Value{}, err
+	}
 
 	e.emitLabel(okL)
 	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)
@@ -514,11 +558,8 @@ func (e *Emitter) emitArrayWith(mem *ast.MemberExpression, args []ast.Expression
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, newPtr, normIdx))
 	e.storeArrayElem(slot, elemTy, val)
 
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	r1 := e.newArrayHeader(newPtr, lenReg)
+	return Value{Ref: r1, Ty: e.copyResultType(mem.Object, elemTy)}, nil
 }
 
 // --- .flat(depth?) / .flatMap(fn) ---
@@ -609,7 +650,7 @@ func (e *Emitter) emitArrayFlattenOnce(ptrReg, lenReg string, elemTy Type) (newP
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", sumGep, elemTy.IR, ptrReg, idxVal))
 	sumInner := e.loadArrayElem(sumGep, elemTy)
 	innerLenForSum := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", innerLenForSum, sumInner.Ref))
+	innerLenForSum = e.arrayLen(sumInner)
 	curTotal := e.freshReg()
 	newTotal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curTotal, totalAlloca))
@@ -629,7 +670,7 @@ func (e *Emitter) emitArrayFlattenOnce(ptrReg, lenReg string, elemTy Type) (newP
 	outBytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", outBytes, totalFinal, innerElemTy.Align()))
 	outPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", outPtr, outBytes))
+	e.heapMallocInto(outPtr, outBytes)
 
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
 	cursorAlloca := e.freshReg()
@@ -653,8 +694,8 @@ func (e *Emitter) emitArrayFlattenOnce(ptrReg, lenReg string, elemTy Type) (newP
 	copyInner := e.loadArrayElem(copyGep, elemTy)
 	innerPtr := e.freshReg()
 	innerLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", innerPtr, copyInner.Ref))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", innerLen, copyInner.Ref))
+	innerPtr = e.arrayData(copyInner)
+	innerLen = e.arrayLen(copyInner)
 	cursorVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cursorVal, cursorAlloca))
 	dst := e.freshReg()
@@ -691,7 +732,12 @@ func (e *Emitter) emitArrayFlat(mem *ast.MemberExpression, args []ast.Expression
 		return Value{}, err
 	}
 
-	if elemTy.IsDynamic && !elemTy.IsDynamicObject && elemTy.IR == TypeAny.IR {
+	if flatHasAbsentRow(elemTy, depth) {
+		// A row that may be undefined stays as an element (JS keeps it):
+		// the rows go boxed through the dynamic flatten.
+		return e.emitFlatBoxedRows(ptrReg, lenReg, elemTy, depth), nil
+	}
+	if elemTy.IsDynamic() && !elemTy.IsDynamicObject() && elemTy.IR == TypeAny.IR {
 		// Boxed elements (`any`, a union): an element that is an Array at run time is
 		// spliced in (dynjson.c).
 		e.ensureDynJSONC()
@@ -701,7 +747,7 @@ func (e *Emitter) emitArrayFlat(mem *ast.MemberExpression, args []ast.Expression
 	}
 	curPtr, curLen, curElemTy := ptrReg, lenReg, elemTy
 	flattened := false
-	for i := 0; i < depth && curElemTy.IsArray; i++ {
+	for i := 0; i < depth && curElemTy.IsArray(); i++ {
 		curPtr, curLen, curElemTy, err = e.emitArrayFlattenOnce(curPtr, curLen, curElemTy)
 		if err != nil {
 			return Value{}, err
@@ -713,10 +759,7 @@ func (e *Emitter) emitArrayFlat(mem *ast.MemberExpression, args []ast.Expression
 		curLen = lenReg
 	}
 
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, curPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, curLen))
+	r1 := e.newArrayHeader(curPtr, curLen)
 	return Value{Ref: r1, Ty: ArrayOf(curElemTy)}, nil
 }
 
@@ -736,29 +779,30 @@ func (e *Emitter) emitArrayFlatMap(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
-	if mapped.Ty.ElemType == nil || !mapped.Ty.ElemType.IsArray {
+	// A callback returning `any`: an array result is flattened, anything
+	// else kept, decided per element at run time.
+	if mapped.Ty.ElemType != nil && mapped.Ty.ElemType.IsDynamic() {
+		return e.emitFlatBoxedRows(e.arrayData(mapped), e.arrayLen(mapped), *mapped.Ty.ElemType, 1), nil
+	}
+	if mapped.Ty.ElemType == nil || !mapped.Ty.ElemType.IsArray() {
 		return mapped, nil
 	}
 	// A callback that can fall off the end maps to `U[] | undefined` (ADR-01065):
-	// JS appends the `undefined` itself as an element, so the result is
-	// `(U | undefined)[]` — a nullable-scalar element array, which has no storage
-	// here yet. Reject cleanly instead of flattening past the absent rows.
-	if mapped.Ty.ElemType.Nullable {
-		return Value{}, fmt.Errorf("%d:%d: flatMap callback may return undefined (a path falls off the end), so the result would be a `(T | undefined)[]` — a nullable array element type is not yet supported; return an array on every path", pos.Line, pos.Col)
+	// JS appends the `undefined` itself as an element, so the rows go boxed
+	// through the dynamic flatten.
+	if flatHasAbsentRow(*mapped.Ty.ElemType, 1) {
+		return e.emitFlatBoxedRows(e.arrayData(mapped), e.arrayLen(mapped), *mapped.Ty.ElemType, 1), nil
 	}
 
 	ptrReg := e.freshReg()
 	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, mapped.Ref))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, mapped.Ref))
+	ptrReg = e.arrayData(mapped)
+	lenReg = e.arrayLen(mapped)
 	newPtr, newLen, innerElemTy, err := e.emitArrayFlattenOnce(ptrReg, lenReg, *mapped.Ty.ElemType)
 	if err != nil {
 		return Value{}, err
 	}
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, newPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, newLen))
+	r1 := e.newArrayHeader(newPtr, newLen)
 	return Value{Ref: r1, Ty: ArrayOf(innerElemTy)}, nil
 }
 
@@ -766,3 +810,58 @@ func (e *Emitter) emitArrayFlatMap(mem *ast.MemberExpression, args []ast.Express
 // indices [0, len) — the same "return a materialized array, not a lazy
 // iterator" convention Map.keys()/Set.values() already use, since this
 // compiler has no general iterator protocol.
+
+// flatHasAbsentRow reports whether flattening an array of elem to depth
+// meets a row that may be undefined: JS keeps such a row as an element.
+func flatHasAbsentRow(elem Type, depth int) bool {
+	for i := 0; i < depth && elem.IsArray(); i++ {
+		if elem.Nullable() {
+			return true
+		}
+		if elem.ElemType == nil {
+			return false
+		}
+		elem = *elem.ElemType
+	}
+	return false
+}
+
+// emitFlatBoxedRows flattens rows of elemTy to depth through the dynamic
+// flatten (__kml_anyarr_flat): each row boxed, an absent one as undefined.
+func (e *Emitter) emitFlatBoxedRows(ptrReg, lenReg string, elemTy Type, depth int) Value {
+	e.ensureMalloc()
+	bytes := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, lenReg))
+	buf := e.freshReg()
+	e.heapMallocInto(buf, bytes)
+	idxSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxSlot))
+	condL, bodyL, doneL := e.freshLabel("flatbox.cond"), e.freshLabel("flatbox.body"), e.freshLabel("flatbox.done")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	idx, more := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx, idxSlot))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, idx, lenReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
+	e.emitLabel(bodyL)
+	src := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", src, elemTy.IR, ptrReg, idx))
+	row := e.genLoadElemAt(src, elemTy)
+	boxed, err := e.emitBoxValue(Value{Ref: row, Ty: elemTy})
+	if err != nil {
+		boxed = Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
+	}
+	dst := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", dst, buf, idx))
+	e.heapStore("i64", boxed.Ref, dst, 8)
+	next := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, idx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idxSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(doneL)
+	e.ensureDynJSONC()
+	hdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_anyarr_flat(ptr %s, i64 %s, i64 %d)", hdr, buf, lenReg, depth))
+	return e.arrayValueFromHeaderReg(hdr, ArrayOf(TypeAny))
+}

@@ -28,12 +28,12 @@ export function promisify<T1, T2, T3>(fn: (arg1: T1, arg2: T2, arg3: T3, callbac
 export function promisify(fn: Function): Function;
 export function promisify(original: any): (...args: any[]) => Promise<any> {
     if (typeof original !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "original" argument must be of type function.' + received(original));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "original" argument must be of type function.' + received(original));
     }
     const custom = original[kCustomPromisifiedSymbol];
     if (custom) {
         if (typeof custom !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "util.promisify.custom" argument must be of type function.' + received(custom));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "util.promisify.custom" argument must be of type function.' + received(custom));
         }
         Object.defineProperty(custom, kCustomPromisifiedSymbol, { value: custom, enumerable: false, writable: false, configurable: true });
         return custom;

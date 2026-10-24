@@ -9,13 +9,11 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, fmt.Errorf("%d:%d: indexOf takes 1 or 2 arguments (item[, fromIndex])", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "indexOf", pos); err != nil {
-		return Value{}, err
-	}
+	hdr = e.hofHolesHeader(mem.Object, hdr)
 	needleVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -31,26 +29,9 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	// end, clamped to 0); default 0.
 	startVal := "0"
 	if len(args) == 2 {
-		fromVal, ferr := e.emitExpr(args[1])
-		if ferr != nil {
-			return Value{}, ferr
+		if startVal, err = e.emitSearchFrom(args[1], lenReg, "indexOf"); err != nil {
+			return Value{}, err
 		}
-		fromIdx, ferr := e.coerceChecked(fromVal, TypeI64, args[1].GetPos(), "indexOf fromIndex")
-		if ferr != nil {
-			return Value{}, ferr
-		}
-		from := fromIdx.Ref
-		neg := e.freshReg()
-		plusLen := e.freshReg()
-		adj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, from))
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, from, lenReg))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", adj, neg, plusLen, from))
-		stillNeg := e.freshReg()
-		clamped := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", stillNeg, adj))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", clamped, stillNeg, adj))
-		startVal = clamped
 	}
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startVal, idxAlloca))
 
@@ -70,6 +51,7 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
+	e.emitHoleSkip(hdr, idxVal, idxAlloca, 1, condL)
 	gep := e.freshReg()
 	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
@@ -96,20 +78,41 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	return e.countToNumber(Value{Ref: result, Ty: TypeI64}), nil
 }
 
+// emitSearchFrom is a forward search's start index from its fromIndex
+// argument: ToIntegerOrInfinity (undefined is 0), a negative index counting
+// from the end, clamped to 0.
+func (e *Emitter) emitSearchFrom(arg ast.Expression, lenReg, what string) (string, error) {
+	fromVal, err := e.emitExpr(arg)
+	if err != nil {
+		return "", err
+	}
+	fromIdx, err := e.convertChecked(fromVal, TypeI64, arg.GetPos(), what+" fromIndex")
+	if err != nil {
+		return "", err
+	}
+	from := fromIdx.Ref
+	neg, plusLen, adj := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, from))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, from, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", adj, neg, plusLen, from))
+	stillNeg, clamped := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", stillNeg, adj))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", clamped, stillNeg, adj))
+	return clamped, nil
+}
+
 // emitArrayLastIndexOf implements arr.lastIndexOf(val): the index of the LAST
 // occurrence of val (scanning from the end), or -1. Mirror of emitArrayIndexOf
 // with a descending scan; returns on the first match found from the back.
 func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: lastIndexOf takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: lastIndexOf takes 1 or 2 arguments (item[, fromIndex])", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "lastIndexOf", pos); err != nil {
-		return Value{}, err
-	}
+	hdr = e.hofHolesHeader(mem.Object, hdr)
 	needleVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -121,9 +124,27 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", resultAlloca))
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	// start at len-1
+	// start at len-1, or at fromIndex (undefined is 0): a negative one
+	// counts from the end, one past the end is clamped to len-1
 	startIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", startIdx, lenReg))
+	if len(args) == 2 {
+		fromVal, ferr := e.emitExpr(args[1])
+		if ferr != nil {
+			return Value{}, ferr
+		}
+		fromIdx, ferr := e.convertChecked(fromVal, TypeI64, args[1].GetPos(), "lastIndexOf fromIndex")
+		if ferr != nil {
+			return Value{}, ferr
+		}
+		neg, plusLen, adj, over, from := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, fromIdx.Ref))
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", plusLen, fromIdx.Ref, lenReg))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", adj, neg, plusLen, fromIdx.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", over, adj, startIdx))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", from, over, startIdx, adj))
+		startIdx = from
+	}
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startIdx, idxAlloca))
 
 	condL := e.freshLabel("lidxof.cond")
@@ -141,6 +162,7 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
+	e.emitHoleSkip(hdr, idxVal, idxAlloca, -1, condL)
 	gep := e.freshReg()
 	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
@@ -169,16 +191,14 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 
 // emitArrayIncludes implements arr.includes(val): returns true if val is present.
 func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: includes takes exactly 1 argument", pos.Line, pos.Col)
+	if len(args) < 1 || len(args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: includes takes 1 or 2 arguments (item[, fromIndex])", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	if err := e.rejectNestedArrayElem(elemTy, "includes", pos); err != nil {
-		return Value{}, err
-	}
+	hdr = e.hofHolesHeader(mem.Object, hdr)
 	needleVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -189,13 +209,18 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	// IR (ADR-00908). strict reports TypeScript's argument-type error; js folds to a
 	// constant false. Only fires for two concrete, differing scalar kinds — a
 	// dynamic/object/array element array keeps the existing boxed comparison.
-	if ek := scalarTypeKind(elemTy); ek != "" && !needleVal.Ty.IsDynamic {
+	if ek := scalarTypeKind(elemTy); ek != "" && !needleVal.Ty.IsDynamic() {
 		if nk := scalarTypeKind(needleVal.Ty); ek != nk {
 			if e.compatJS() {
 				return Value{Ref: "false", Ty: TypeBool}, nil
 			}
 			return Value{}, fmt.Errorf("%d:%d: Array.includes search value of a type disjoint from the element type is always false — TypeScript reports an argument-type error; compile with -compat=js to evaluate it", pos.Line, pos.Col)
 		}
+	}
+	// A hole is undefined to includes: it matches an undefined needle only.
+	needleUndef := "false"
+	if hdr != "" {
+		needleUndef = e.emitIsUndefinedValue(needleVal)
 	}
 	needleVal = e.searchNeedle(needleVal, elemTy)
 
@@ -204,7 +229,13 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", foundAlloca))
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	startVal := "0"
+	if len(args) == 2 {
+		if startVal, err = e.emitSearchFrom(args[1], lenReg, "includes"); err != nil {
+			return Value{}, err
+		}
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startVal, idxAlloca))
 
 	condL := e.freshLabel("inc.cond")
 	bodyL := e.freshLabel("inc.body")
@@ -217,10 +248,18 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	idxVal := e.freshReg()
 	done := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
+	if hdr != "" {
+		hole := e.emitHoleTest(hdr, idxVal)
+		holeL, elemL := e.freshLabel("inc.hole"), e.freshLabel("inc.elem")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hole, holeL, elemL))
+		e.emitLabel(holeL)
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", needleUndef, matchL, incL))
+		e.emitLabel(elemL)
+	}
 	gep := e.freshReg()
 	elem := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
@@ -253,11 +292,12 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: findIndex takes exactly 1 argument", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	live, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
+	live = e.hofLiveHeader(mem.Object, live)
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{findElemHint(live, elemTy), TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -284,10 +324,9 @@ func (e *Emitter) emitArrayFindIndex(mem *ast.MemberExpression, args []ast.Expre
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+	gep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, nil)
 	elemVal := e.loadArrayElem(gep, elemTy)
-	cbArgs := e.hofCBArgs(cb, []Value{elemVal}, idxVal, ptrReg, lenReg, elemTy)
+	cbArgs := e.hofCBArgs(cb, []Value{e.findElemArg(live, idxVal, elemTy, elemVal)}, idxVal, live, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -319,11 +358,12 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: findLast takes exactly 1 argument", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	live, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
+	live = e.hofLiveHeader(mem.Object, live)
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{findElemHint(live, elemTy), TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -356,10 +396,9 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", loopDone, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+	gep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, nil)
 	elemVal := e.loadArrayElem(gep, elemTy)
-	cbArgs := e.hofCBArgs(cb, []Value{elemVal}, idxVal, ptrReg, lenReg, elemTy)
+	cbArgs := e.hofCBArgs(cb, []Value{e.findElemArg(live, idxVal, elemTy, elemVal)}, idxVal, live, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -379,7 +418,7 @@ func (e *Emitter) emitArrayFindLast(mem *ast.MemberExpression, args []ast.Expres
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		return e.loadArrayElemMaybeNull(foundAlloca, elemTy), nil
 	}
 	result := e.freshReg()
@@ -395,11 +434,12 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: findLastIndex takes exactly 1 argument", pos.Line, pos.Col)
 	}
-	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
+	live, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
+	live = e.hofLiveHeader(mem.Object, live)
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{findElemHint(live, elemTy), TypeF64, ArrayOf(elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -428,10 +468,9 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", loopDone, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+	gep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, nil)
 	elemVal := e.loadArrayElem(gep, elemTy)
-	cbArgs := e.hofCBArgs(cb, []Value{elemVal}, idxVal, ptrReg, lenReg, elemTy)
+	cbArgs := e.hofCBArgs(cb, []Value{e.findElemArg(live, idxVal, elemTy, elemVal)}, idxVal, live, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -465,7 +504,7 @@ func (e *Emitter) emitArrayFindLastIndex(mem *ast.MemberExpression, args []ast.E
 // against numbers) is boxed the same way: it equals no element, and
 // converting it would make `[1].indexOf("1")` find one.
 func (e *Emitter) searchNeedle(needle Value, elemTy Type) Value {
-	if needle.Ty.IsDynamic && scalarTypeKind(elemTy) != "" {
+	if needle.Ty.IsDynamic() && scalarTypeKind(elemTy) != "" {
 		return needle
 	}
 	if searchKind(needle.Ty) != "" && searchKind(elemTy) != "" && searchKind(needle.Ty) != searchKind(elemTy) {
@@ -473,14 +512,14 @@ func (e *Emitter) searchNeedle(needle Value, elemTy Type) Value {
 			return boxed
 		}
 	}
-	return e.coerce(needle, elemTy)
+	return e.convert(needle, elemTy)
 }
 
 // searchKind is the strict-equality kind of a statically typed value (number,
 // boolean, string or object), "" for one searchNeedle leaves to coerce.
 func searchKind(t Type) string {
 	switch {
-	case t.IsDynamic || t.IsNull || t.IsUndefined || t.IsNever || isNullableScalar(t) || t.NullAndUndef || t.IsSymbol || t.IsBigInt:
+	case t.IsDynamic() || t.IsNull() || t.IsUndefined() || t.IsNever() || isNullableScalar(t) || t.NullAndUndef() || t.IsSymbol() || t.IsBigInt():
 		return ""
 	case t.IR == "i1":
 		return "boolean"
@@ -488,7 +527,7 @@ func searchKind(t Type) string {
 		return "number"
 	case isStringTy(t) && !hasHandleFlag(t):
 		return "string"
-	case t.IsObject || t.IsArray || t.IsFunc || t.IsClass || t.IR == "ptr" && hasHandleFlag(t):
+	case t.IsObject() || t.IsArray() || t.IsFunc() || t.IsClass() || t.IR == "ptr" && hasHandleFlag(t):
 		return "object"
 	}
 	return ""
@@ -496,7 +535,7 @@ func searchKind(t Type) string {
 
 // emitSearchEq compares the element elem with a needle from searchNeedle.
 func (e *Emitter) emitSearchEq(elemTy Type, elem string, needle Value) (string, error) {
-	if !needle.Ty.IsDynamic || elemTy.IsDynamic {
+	if !needle.Ty.IsDynamic() || elemTy.IsDynamic() {
 		return e.emitElemEq(elemTy, elem, needle.Ref), nil
 	}
 	boxed, err := e.emitBoxValue(Value{Ref: elem, Ty: elemTy})

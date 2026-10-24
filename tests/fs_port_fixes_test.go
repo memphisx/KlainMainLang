@@ -86,8 +86,9 @@ function g(xs?: number[]): number[] { const ys = xs || [1, 2]; return ys; }
 console.log(g(), g([5]));
 function k(s?: string): string { return s || 'default'; }
 console.log(k(), k('x'));
-const n = 0 || 'zero'; console.log(n);
-const e = '' && 'never'; console.log(JSON.stringify(e));
+const zero = 0, empty = '';
+const n = zero || 'zero'; console.log(n);
+const e = empty && 'never'; console.log(JSON.stringify(e));
 `, "m\n[ 1, 2 ] [ 5 ]\ndefault x\nzero\n\"\"\n")
 }
 

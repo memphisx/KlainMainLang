@@ -108,10 +108,10 @@ export function setExitCode(code: any): any {
     if (code !== null && code !== undefined) {
         if (typeof code === 'string' && code !== '' && Number.isInteger(+code)) value = +code;
         if (typeof value !== 'number') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "code" argument must be of type number. ' + received(value));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "code" argument must be of type number. ' + received(value));
         }
         if (!Number.isInteger(value)) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "code" is out of range. It must be an integer. Received ' + String(value));
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "code" is out of range. It must be an integer. Received ' + String(value));
         }
     }
     exitCodeValue = value;

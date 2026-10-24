@@ -125,9 +125,14 @@ func (e *Emitter) shadowExprType(expr ast.Expression, old Type) {
 		// scope: not the answer codegen emits by.
 		return
 	}
+	if e.foreignThisBody {
+		// A method body compiled for any receiver (its shape record):
+		// emission never asks the checker there (reprOracle).
+		return
+	}
 	// A function read while its own return type is inferred answers the
 	// recursion guard's void placeholder: not the type codegen emits by.
-	if id, ok := expr.(*ast.Identifier); ok && old.IsFunc && old.FuncRetType != nil && old.FuncRetType.IR == "void" && len(e.sigInferInProgress) > 0 {
+	if id, ok := expr.(*ast.Identifier); ok && old.IsFunc() && old.FuncRetType != nil && old.FuncRetType.IR == "void" && len(e.sigInferInProgress) > 0 {
 		for fd := range e.sigInferInProgress {
 			if fd.Name == id.Name && fd.ReturnType == nil {
 				return
@@ -163,6 +168,11 @@ func (e *Emitter) shadowGlobalType(v *ast.VarDeclaration, old Type, oldOK bool) 
 // It runs only where codegen fell back to the old inference, so every call
 // is a row: an answer the checker gives but codegen cannot use, or none.
 func (e *Emitter) shadowReturnType(body *ast.BlockStatement, old Type, oldOK bool) {
+	if e.foreignThisBody {
+		// A method body compiled for any receiver (its shape record), as
+		// shadowExprType: emission never asks the checker there.
+		return
+	}
 	neu, hasValue, ok := e.shadowOracle.ReturnType(body)
 	if !ok {
 		pos := body.GetPos()
@@ -256,11 +266,12 @@ func writeKey(b *strings.Builder, v reflect.Value, depth int) {
 		t := v.Type()
 		// A class is nominal: its name stands for its layout, which can be
 		// large and nest other classes.
-		class := t == reflect.TypeOf(Type{}) && v.FieldByName("IsClass").Bool()
+		ty, isType := v.Interface().(Type)
+		class := isType && ty.IsClass()
 		// A plain `any` box holds undefined and null itself: marking it
 		// nullable or undefined-able (an optional `any` parameter) is the
 		// same representation.
-		box := t == reflect.TypeOf(Type{}) && v.FieldByName("IsDynamic").Bool()
+		box := isType && ty.IsDynamic()
 		plainAny := box && v.FieldByName("UnionMembers").Len() == 0
 		b.WriteByte('{')
 		first := true
@@ -273,12 +284,18 @@ func writeKey(b *strings.Builder, v reflect.Value, depth int) {
 			if class && (f.Name == "Fields" || f.Name == "HasVTable") {
 				continue
 			}
-			if plainAny && (f.Name == "Nullable" || f.Name == "IsUndefined" || f.Name == "NullAndUndef") {
+			if plainAny && f.Name == "Absent" {
 				continue
 			}
 			// A union box tags which absence it holds: whether that is null
-			// or undefined is the value's, not the representation's.
-			if box && (f.Name == "IsUndefined" || f.Name == "NullAndUndef") {
+			// or undefined is the value's, not the representation's, so its
+			// key says only that it is nullable.
+			if box && f.Name == "Absent" {
+				if !first {
+					b.WriteByte(' ')
+				}
+				first = false
+				b.WriteString("Absent=nullable")
 				continue
 			}
 			if !first {
@@ -295,8 +312,9 @@ func writeKey(b *strings.Builder, v reflect.Value, depth int) {
 				var keys []string
 				for i := 0; i < fv.Len(); i++ {
 					m := fv.Index(i)
-					if mt, ok := m.Interface().(Type); ok && mt.IsStrLiteral {
-						mt.IsStrLiteral, mt.LitValue = false, ""
+					if mt, ok := m.Interface().(Type); ok && mt.IsStrLiteral() {
+						mt.setKind(kindStrLiteral, false)
+						mt.LitValue = ""
 						m = reflect.ValueOf(mt)
 					}
 					var mb strings.Builder
@@ -381,20 +399,20 @@ func (e *Emitter) analysisPass() func() {
 // disagreement about the representation of the type.
 func intPromoted(old, neu Type) bool {
 	o, n := old.withoutNullable(), neu.withoutNullable()
-	return o.Nullable == n.Nullable && !o.IsDynamic && !o.Float && (o.IR == "i64" || o.IR == "i32" || o.IR == "i16" || o.IR == "i8") &&
-		n.Float && n.IR == "double" && old.Nullable == neu.Nullable && old.IsUndefined == neu.IsUndefined
+	return o.Nullable() == n.Nullable() && !o.IsDynamic() && !o.Float && (o.IR == "i64" || o.IR == "i32" || o.IR == "i16" || o.IR == "i8") &&
+		n.Float && n.IR == "double" && old.Nullable() == neu.Nullable() && old.IsUndefined() == neu.IsUndefined()
 }
 
 // shadowSwitchFallback records a switched expression kind the checker
 // left unanswered, answered by its fallback (settledExprKind).
-func (e *Emitter) shadowSwitchFallback(expr ast.Expression) {
-	if e.shadowRec == nil {
-		return
+func (e *Emitter) shadowSwitchFallback(expr ast.Expression, fallback Type) {
+	if e.shadowRec == nil || e.analysisDepth > 0 {
+		return // an analysis pre-pass asks before its bindings are in scope
 	}
 	pos := expr.GetPos()
 	e.shadowRec.Record(shadow.Disagreement{
 		Module:  e.inLib,
 		Decider: "switchFallback", Kind: nodeKind(expr), Line: pos.Line, Col: pos.Col,
-		Old: "fallback", New: "unanswered", Fields: []string{"unanswered"},
+		Old: reprKey(fallback), New: "unanswered", Fields: []string{"unanswered"},
 	})
 }

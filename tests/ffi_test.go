@@ -485,8 +485,9 @@ func TestE2EFFIExportStringEncodingsAndErrors(t *testing.T) {
 	assertSameAsNodeFFI(t, `
 import ffi from 'node:ffi';
 const lib = new ffi.DynamicLibrary(null);
-const malloc = lib.getFunction('malloc', { arguments: ['uint64'], return: 'pointer' });
-const p = malloc(64n);
+// calloc: the bytes past a terminator are read too, and must be defined.
+const calloc = lib.getFunction('calloc', { arguments: ['uint64', 'uint64'], return: 'pointer' });
+const p = calloc(64n, 1n);
 function show(label: string, f: () => void) {
   try { f(); console.log(label, 'ok'); } catch (e: any) { console.log(label, e.name, e.code, e.message); }
 }

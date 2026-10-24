@@ -24,22 +24,22 @@ var collectionsEngineSource string
 var arrayGuardSource string
 
 // ArrayGuardSource is the array integrity runtime (Object.freeze of an array).
-func ArrayGuardSource() string { return arrayGuardSource }
+func ArrayGuardSource() string { return layoutHeader() + arrayGuardSource }
 
 // UsesArrayGuard reports whether the program links arrayguard.c.
 func (e *Emitter) UsesArrayGuard() bool { return e.usedArrayGuard }
 
 // ensureArrayGuard declares the array integrity runtime: the level an
-// array's header carries in the frozen set, and the guard every mutation
-// calls (arrayguard.c).
+// array's header word carries, and the guard every mutation calls
+// (arrayguard.c).
 func (e *Emitter) ensureArrayGuard() {
 	if e.usedArrayGuard {
 		return
 	}
 	e.usedArrayGuard = true
-	e.ensureFrozenSet()
 	e.ensureNullDerefThrow()
 	e.emitGlobal(`declare void @__kml_array_guard(ptr, i64, i64, i64)
+declare i64 @__kml_array_refuses(ptr, i64, i64)
 declare i32 @__kml_array_integrity(ptr, i64)
 declare void @__kml_array_set_level(ptr, i64)
 @__kml_array_integrity_any = external global i8`)
@@ -74,6 +74,28 @@ func (e *Emitter) emitArrayGuard(hdr string, op int, a, b string) {
 	e.emitLabel(okL)
 }
 
+// emitArrayWriteGuard is emitArrayGuard for a direct element or length
+// write: in sloppy code a refused write branches to skipL, doing nothing.
+func (e *Emitter) emitArrayWriteGuard(hdr string, op int, a, skipL string) {
+	if !e.sloppyWrite {
+		e.emitArrayGuard(hdr, op, a, "0")
+		return
+	}
+	e.ensureArrayGuard()
+	flag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr @__kml_array_integrity_any, align 1", flag))
+	any := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", any, flag))
+	checkL, okL := e.freshLabel("arrguard.check"), e.freshLabel("arrguard.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", any, checkL, okL))
+	e.emitLabel(checkL)
+	r, refused := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_array_refuses(ptr %s, i64 %d, i64 %s)", r, hdr, op, a))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", refused, r))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", refused, skipL, okL))
+	e.emitLabel(okL)
+}
+
 // emitArrayGuardFor guards an in-place write to the array objExpr names
 // when it names one without side effects (a binding, or a field of one): a
 // fresh array has no integrity level. idx is the written element's index
@@ -82,7 +104,7 @@ func (e *Emitter) emitArrayGuardFor(objExpr ast.Expression, op int, idx ast.Expr
 	if !pureArrayRef(objExpr) {
 		return
 	}
-	if t := e.inferExprType(objExpr); !t.IsArray || t.IsTypedArray || t.IsFlatArray {
+	if t := e.inferExprType(objExpr); !t.IsArray() || t.IsTypedArray() || t.IsFlatArray() {
 		return
 	}
 	hdr, _, _, err := e.resolveArrayMutLoc(objExpr, "write", objExpr.GetPos())
@@ -130,13 +152,9 @@ var collectionsSource string
 var collectionsAnySource string
 
 // CollectionsSource is the Map/Set/sort/frozen-set runtime's C source, behind
-// kml_layout.h. gc selects the -mm=gc allocation of the frozen set's header.
-func CollectionsSource(gc bool) string {
-	pre := ""
-	if gc {
-		pre = "#define KML_GC_MODE 1\n"
-	}
-	return layoutHeader() + pre + collectionsEngineSource + collectionsSource
+// kml_layout.h.
+func CollectionsSource() string {
+	return layoutHeader() + collectionsEngineSource + collectionsSource
 }
 
 // CollectionsAnySource is the any-keyed map's C source; it needs the box
@@ -229,20 +247,11 @@ func (e *Emitter) ensureAnyToCStr() {
 	}
 	e.usedAnyToCStr = true
 
-	savedAllocas := e.allocas
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedLabelCtr := e.labelCtr
+	restoreBuilder := e.beginThunkEmit()
 	savedScopes := e.scopes
 	savedRetType := e.currentRetType
-	savedBlockDone := e.blockDone
 
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.labelCtr = 0
 	e.scopes = nil
-	e.blockDone = false
 	e.currentRetType = TypePtr
 
 	// %v is the incoming boxed value; the first fresh reg is %1, so reserve
@@ -260,13 +269,9 @@ func (e *Emitter) ensureAnyToCStr() {
 	e.functions.WriteString(e.body.String())
 	e.functions.WriteString("}\n")
 
-	e.allocas = savedAllocas
-	e.body = savedBody
-	e.regCtr = savedRegCtr
-	e.labelCtr = savedLabelCtr
+	restoreBuilder()
 	e.scopes = savedScopes
 	e.currentRetType = savedRetType
-	e.blockDone = savedBlockDone
 }
 
 // ensureSortCmpAnyLex emits the default (no-comparator) sort comparator for a
@@ -389,7 +394,7 @@ func (e *Emitter) ensureMapIters() {
 	}
 	e.usedMapIters = true
 	e.usedCollections = true
-	e.emitGlobal(`declare ptr @__kml_map_iter_open(ptr)
+	e.emitGlobal(`declare ptr @__kml_map_iter_open(ptr, i64)
 declare void @__kml_map_iter_close(ptr)`)
 }
 
@@ -445,24 +450,16 @@ func (e *Emitter) ensureMapNumHelpers() {
 	e.emitMapFlavor("num", "i64")
 }
 
-// ensureFrozenSet declares the global frozen-object tracker Object.freeze(obj)
-// uses: a Set<number>-shaped structure (the number-keyed map Set<T> itself is
-// built on, keyed on ptrtoint(obj)). __kml_frozen_set_get() lazily creates the
-// one per-thread set on first use and returns it — called both by
-// Object.freeze (to add) and by every object-field write site (to check), so
-// a program that never calls Object.freeze never pays for the lazy-init branch
-// beyond one null check, but any object mutation still pays one lookup against
-// the (possibly empty) frozen set — an unconditional correctness cost, the
-// same trade-off ADR-00044's array bounds check already made. Under -mm=gc the
-// header is allocated uncollectable (Boehm does not scan thread-local storage).
-func (e *Emitter) ensureFrozenSet() {
-	if e.usedFrozenSet {
+// ensureIntegrityLevels declares the static-object integrity runtime
+// (collections.c): the level Object.freeze, seal and preventExtensions
+// record in an object's header word, which every field write reads.
+func (e *Emitter) ensureIntegrityLevels() {
+	if e.usedIntegrityLevels {
 		return
 	}
-	e.usedFrozenSet = true
+	e.usedIntegrityLevels = true
 	e.usedCollections = true
-	e.ensureMapNumHelpers()
-	e.emitGlobal("declare ptr @__kml_frozen_set_get()")
+	e.emitGlobal("declare i64 @__kml_obj_level(ptr)\ndeclare void @__kml_obj_set_level(ptr, i64)\ndeclare i64 @__kml_side_level(ptr)\ndeclare void @__kml_side_set_level(ptr, i64)")
 }
 
 // ensureMapAnyHelpers declares the any-keyed Map/Set (TDD-00211): keys and

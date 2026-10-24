@@ -97,6 +97,15 @@ func (e *Emitter) dynModuleInit(target string) (string, error) {
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ran, skipL, runL))
 		e.emitLabel(runL)
 		e.emitInstr(fmt.Sprintf("store i1 true, ptr %s", done))
+		if e.opts.DynamicImport == "lazy" {
+			// Its shared library's table rows (emitIslandUnitInits).
+			if e.islandUnitFiles == nil {
+				e.islandUnitFiles = map[string]bool{}
+			}
+			e.islandUnitFiles[IslandHash(f)] = true
+			e.emitInstr(fmt.Sprintf("call void @__kml_dynfile_%s_unitinit()", IslandHash(f)))
+			e.curDynFile = IslandHash(f)
+		}
 		for _, st := range e.dynGroups[f] {
 			if _, ok := st.(*ast.FunctionDeclaration); ok {
 				continue
@@ -106,6 +115,7 @@ func (e *Emitter) dynModuleInit(target string) (string, error) {
 			}
 			e.emitOwnedFreesAfter(st)
 		}
+		e.curDynFile = ""
 		if err != nil {
 			break
 		}
@@ -181,6 +191,23 @@ func (e *Emitter) emitBundledFulfillFn(ex *ast.ImportCallExpression, objTy Type)
 		mangled[x.Name] = x.Mangled
 	}
 	restore := e.beginDetachedFunc()
+	if ex.Namespace != "" {
+		// The target's module namespace object, built as its top-level's
+		// last statement.
+		sym, ok := e.moduleGlobals[ex.Namespace]
+		v := Value{Ref: "null", Ty: TypeAny}
+		if ok && sym.Ptr != "" {
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+			v = e.convert(Value{Ref: r, Ty: sym.Ty}, TypeAny)
+		}
+		e.storePromiseValue("%q", v)
+		e.emitTerminator("ret void")
+		body := e.allocas.String() + e.body.String()
+		restore()
+		e.writeDetachedFunc(e.dynLinkage(), "void", "@"+name, "ptr %q", body)
+		return name
+	}
 	e.ensureCalloc()
 	obj := e.freshReg()
 	e.emitObjAllocInto(obj, objTy)
@@ -195,7 +222,7 @@ func (e *Emitter) emitBundledFulfillFn(ex *ast.ImportCallExpression, objTy Type)
 		idx, _, _ := objTy.FieldIndex(f.Name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", f.Ty.IR, v, gep, f.Ty.Align()))
+		e.heapStore(f.Ty.IR, v, gep, f.Ty.Align())
 	}
 	e.storePromiseValue("%q", Value{Ref: obj, Ty: objTy})
 	e.emitTerminator("ret void")

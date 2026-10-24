@@ -87,9 +87,10 @@ func TestCrossTargetMacToLinuxCodegen(t *testing.T) {
 	bin := buildCLI(t)
 	dir := tempDir(t)
 	src := filepath.Join(dir, "a.ts")
-	prog := "async function f(): Promise<number> { return 1; }\n" +
-		"async function main(): Promise<void> { const n = await f(); console.log(process.platform + process.arch + n); }\n" +
-		"main();\n"
+	// A generator's ucontext is sized in the IR (the tasks' main context is
+	// hooks.c's, sized by its build flags).
+	prog := "function* g(): Generator<number> { yield 1; }\n" +
+		"for (const v of g()) console.log(process.platform + process.arch + v);\n"
 	if err := os.WriteFile(src, []byte(prog), 0644); err != nil {
 		t.Fatalf("write ts: %v", err)
 	}
@@ -100,10 +101,10 @@ func TestCrossTargetMacToLinuxCodegen(t *testing.T) {
 	s := string(out)
 	for _, want := range []string{"[4560 x i8]", `c"linux\00"`, `c"arm64\00"`} {
 		if !strings.Contains(s, want) {
-			t.Fatalf("cross build did not retarget codegen: missing %q in IR (async ucontext size / platform / arch)\n%s", want, s)
+			t.Fatalf("cross build did not retarget codegen: missing %q in IR (generator ucontext size / platform / arch)\n%s", want, s)
 		}
 	}
-	if strings.Contains(s, "[880 x i8]") {
+	if strings.Contains(s, "[880 x i8]") || strings.Contains(s, "malloc(i64 880)") {
 		t.Fatalf("cross build emitted the macOS ucontext layout (880 bytes) instead of the Linux one")
 	}
 }

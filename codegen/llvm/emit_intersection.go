@@ -33,7 +33,7 @@ func mergeIntersectionFields(members []Type) ([]Field, error) {
 	var merged []Field
 	seen := map[string]int{} // field name -> index in merged
 	for _, m := range members {
-		if !m.IsObject {
+		if !m.IsObject() {
 			return nil, fmt.Errorf("an intersection member must be an object type (a non-object type like number/string/a function/an array intersects to `never`, which is not supported)")
 		}
 		for _, f := range m.Fields {
@@ -45,12 +45,12 @@ func mergeIntersectionFields(members []Type) ([]Field, error) {
 				// Same field name with two different object types is itself an
 				// intersection of those objects (`{ x: A } & { x: B }` ⇒
 				// `x: A & B`), so merge them recursively rather than conflict.
-				if existing.IsObject && f.Ty.IsObject {
+				if existing.IsObject() && f.Ty.IsObject() {
 					subFields, err := mergeIntersectionFields([]Type{existing, f.Ty})
 					if err != nil {
 						return nil, err
 					}
-					merged[idx].Ty = ObjectType(subFields)
+					merged[idx].Ty = UserObjectType(subFields)
 					continue
 				}
 				return nil, fmt.Errorf("field %q has conflicting types across the intersection members", f.Name)
@@ -79,6 +79,9 @@ func validateIntersectionDepth(ty Type, line, col, depth int) error {
 		return nil
 	}
 	if ty.IntersectionMembers != nil {
+		if _, branded := brandedPrimitive(ty.IntersectionMembers); branded {
+			return nil
+		}
 		if _, err := mergeIntersectionFields(ty.IntersectionMembers); err != nil {
 			return fmt.Errorf("%d:%d: %s", line, col, err.Error())
 		}
@@ -133,9 +136,9 @@ func typeMergeKey(t Type, depth int) string {
 		return t.IR
 	}
 	switch {
-	case t.IsArray && t.ElemType != nil:
+	case t.IsArray() && t.ElemType != nil:
 		return "[]" + typeMergeKey(*t.ElemType, depth+1)
-	case t.IsObject:
+	case t.IsObject():
 		var sb strings.Builder
 		sb.WriteString("{")
 		for _, f := range t.Fields {
@@ -148,9 +151,31 @@ func typeMergeKey(t Type, depth int) string {
 		return sb.String()
 	default:
 		k := t.IR
-		if t.Nullable {
+		if t.Nullable() {
 			k += "?"
 		}
 		return k
 	}
+}
+
+// brandedPrimitive is the primitive of an intersection whose one non-object
+// member is a string, number, boolean or bigint and whose other members are
+// object types (a branded primitive, `string & { __brand: "id" }`).
+func brandedPrimitive(members []Type) (Type, bool) {
+	var prim *Type
+	for i := range members {
+		m := members[i]
+		switch {
+		case m.IsObject() && !m.IsArray() && !m.IsTuple() && !m.IsFunc():
+			continue
+		case prim == nil && !m.IsDynamic() && !m.IsArray() && !m.IsFunc() && (isStringTy(m) && !m.IsClass() || m.IR == "double" || m.IR == "i1" || m.IsBigInt() || isNumberTy(m) && m.IR != "ptr"):
+			prim = &members[i]
+		default:
+			return Type{}, false
+		}
+	}
+	if prim == nil {
+		return Type{}, false
+	}
+	return *prim, true
 }

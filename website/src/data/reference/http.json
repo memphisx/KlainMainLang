@@ -5,7 +5,7 @@
   "statusPage": "HTTP-SERVER.md",
   "coversRows": "all",
   "coverage": { "loose": "16/16", "loosePct": 100, "strict": "15/16", "strictPct": 94 },
-  "lede": "Two server APIs. http.createServer((req, res) => …) is the real Node.js shape — Node's own http server layers (_http_common/_http_incoming/_http_outgoing/_http_server) ported to TypeScript over net and a native HTTP/1 parser with llhttp's strict rules, so a program written against it runs unchanged under Node. Connections are ordinary callbacks on the single event loop; an async handler awaits without blocking other connections. The bespoke model where a handler returns a { status, body, headers } object is this project's own re-imagining, reachable only via the explicitly-non-Node klain:http specifier (`import http from 'klain:http'`) — it is not on the Node http namespace and keeps its fiber-per-connection engine. Everything below the two createServer rows is the klain:http model.",
+  "lede": "Two server APIs. http.createServer((req, res) => …) is the real Node.js shape — Node's own http server layers (_http_common/_http_incoming/_http_outgoing/_http_server) ported to TypeScript over net and a native HTTP/1 parser with llhttp's strict rules, so a program written against it runs unchanged under Node. Connections are ordinary callbacks on the single event loop; an async handler awaits without blocking other connections. The bespoke model where a handler returns a { status, body, headers } object is this project's own re-imagining, reachable only via the explicitly-non-Node klain:http specifier (`import http from 'klain:http'`) — it is not on the Node http namespace, and is itself TypeScript (lib/node/klain_http.ts) over a server backend chosen at build time. Everything below the two createServer rows is the klain:http model.",
   "entries": [
     {
       "id": "http.createServer",
@@ -50,7 +50,7 @@
       "statusRow": "`klain:http`'s `http.listen(port, handler)` — bind, accept, dispatch (bespoke)",
       "signature": "import http from 'klain:http'; http.listen(port: number, handler: (req: HttpRequest) => Res): void",
       "badge": "exact",
-      "description": "This project's own server model, under the explicitly-non-Node klain:http specifier — a handler returns a { status, body, headers } object rather than writing to a res. One fiber per accepted connection (ucontext.h), so a slow connection never blocks the others, running on the shared select() event loop alongside timers, fetch, and the other socket APIs. Not on the Node http namespace: `import http from 'klain:http'`.",
+      "description": "This project's own server model, under the explicitly-non-Node klain:http specifier — a handler returns a { status, body, headers } object rather than writing to a res. Each connection is a libuv TCP handle with its own HTTP/1 parser (keep-alive, pipelining, chunked request bodies, Expect: 100-continue), and a client opening with the HTTP/2 preface gets h2c, so a slow connection never blocks the others; it runs on the shared event loop alongside timers, fetch, and the other socket APIs. An async handler is an ordinary promise. listen blocks until http.close(), then the code after it runs; a later listen serves in turn. On Linux, -http-backend=h2o serves the same handlers through libh2o on the same loop; it reads each request body whole before the handler runs, so the default stays the native backend. Not on the Node http namespace: `import http from 'klain:http'`.",
       "params": [
         { "name": "port", "type": "number", "desc": "Port to bind." },
         { "name": "handler", "type": "(req: HttpRequest) => Res", "desc": "Returns an object with status / body / optional headers." }
@@ -67,7 +67,7 @@
       "statusRow": "`http.listen(port, handler, { workers: N })` — multi-process clustering",
       "signature": "http.listen(port, handler, { workers: N }): void",
       "badge": "exact",
-      "description": "Multi-process clustering: fork()s N-1 workers sharing the listening socket — parallelism across cores on top of each process's own fiber concurrency. cluster.isPrimary / cluster.worker (undefined in the original process, the Worker with ids 1..N-1 in each fork) branch on the current process. Works under both memory modes. os.cpus().length is the natural N. On Windows, which has no fork(), each worker is a re-spawned process that runs the program from the top (as a Node cluster worker does) and the primary deals connections out round-robin, itself included.",
+      "description": "Multi-process clustering: fork()s N-1 workers sharing the listening socket — parallelism across cores on top of each process's own event-loop concurrency. cluster.isPrimary / cluster.worker (undefined in the original process, the Worker with ids 1..N-1 in each fork) branch on the current process. Works under both memory modes. os.cpus().length is the natural N. On Windows, which has no fork(), each worker is a re-spawned process that runs the program from the top (as a Node cluster worker does) and the primary deals connections out round-robin, itself included.",
       "exampleKey": "http/http_cluster",
       "snippet": "import cluster from 'cluster'\nhttp.listen(8081, (req: HttpRequest): Res => {\n  return { status: 200, body: 'served by worker ' + (cluster.worker?.id ?? 0).toString() }\n}, { workers: os.cpus().length })",
       "seeAlso": ["http.listen", "http.close"],
@@ -118,7 +118,7 @@
       "statusRow": "Request body (`req.body: string`)",
       "signature": "req.body: string",
       "badge": "exact",
-      "description": "The request body as a string — Content-Length-aware, accumulated across reads, capped at 10MiB. Binary-safe: the buffer, the string value, and every string operation carry a length header, so an embedded null byte survives (an \"ab\\0cd\" body reports length 5 and echoes 5 bytes).",
+      "description": "The request body as a string — Content-Length or chunked, read across reads and filled before the handler runs. A body reaching 10 MiB runs the handler at that point instead: req.stream() reads the rest, and req.body throws a RangeError naming the cap. Binary-safe: the buffer, the string value, and every string operation carry a length header, so an embedded null byte survives (an \"ab\\0cd\" body reports length 5 and echoes 5 bytes).",
       "returns": { "type": "string", "desc": "The full request body." },
       "seeAlso": ["http.req.bodyBytes", "http.req.stream"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#event-data" }
@@ -129,7 +129,7 @@
       "statusRow": "Binary-safe request body (`req.bodyBytes(): ArrayBuffer`)",
       "signature": "req.bodyBytes(): ArrayBuffer",
       "badge": "exact",
-      "description": "Wraps the same already-buffered, Content-Length-accurate bytes into an ArrayBuffer (no copy) — an explicit ArrayBuffer view for callers that want one. req.body is itself binary-safe now, so this is a convenience rather than the only NUL-safe path.",
+      "description": "A copy of the buffered bytes as an ArrayBuffer, for callers that want one. req.body is itself binary-safe, so this is a convenience rather than the only NUL-safe path. Past the 10 MiB cap it throws a RangeError naming the cap.",
       "returns": { "type": "ArrayBuffer", "desc": "The request body as bytes." },
       "seeAlso": ["http.req.body", "http.req.stream"],
       "spec": { "mdn": "https://nodejs.org/api/http.html#event-data" }
@@ -181,11 +181,11 @@
       "statusRow": "Streaming request body (`req.stream(): ReadableStream<Uint8Array>`, or `req` as a Node `Readable`)",
       "signature": "req.stream(): ReadableStream<Uint8Array>",
       "badge": "exact",
-      "description": "Streams the request body as Uint8Array chunks read off the socket. The server `req` is itself a Node Readable over this body: `for await (const chunk of req)`, `req.on('data'|'end')`, and `req.pipe(dest)` all consume the same underlying stream (cached on first use). Using it switches the program to headers-complete dispatch: the handler runs once headers are parsed and the body flows as chunks (fiber-yield on EAGAIN); the 10MiB cap then applies to the header block only. Piped into a streaming response body, it echoes without ever buffering the payload.",
+      "description": "Streams the request body as Uint8Array chunks read off the socket. The server `req` is itself a Node Readable over this body: `for await (const chunk of req)`, `req.on('data'|'end')`, and `req.pipe(dest)` all consume the same underlying stream (cached on first use). A body reaching the 10 MiB cap runs the handler at that point: the stream yields what arrived, then the rest as it arrives, pausing the socket while the reader is behind. A smaller body runs the handler once complete, and the stream yields the buffer. Piped into a streaming response body, it echoes a body past the cap without buffering the rest.",
       "returns": { "type": "ReadableStream<Uint8Array>", "desc": "The request body stream." },
       "exampleKey": "streams/http_upload",
       "differences": [
-        "`req.body`/`req.bodyBytes()` after consuming `req.stream()` throw a catchable `TypeError` (WHATWG \"body already disturbed\") — though before consuming the stream they still drain the remaining body into the buffer in place and stay correct.",
+        "`req.body`/`req.bodyBytes()` after consuming `req.stream()` throw a catchable `TypeError` (WHATWG \"body already disturbed\").",
         "A handler may mix response `body` shapes across branches by declaring a union `body: string | ReadableStream<Uint8Array>` — the writer branches on the runtime tag."
       ],
       "seeAlso": ["http.req.body", "http.res.stream"],
@@ -208,7 +208,7 @@
       "statusRow": "`http.close()` (formal listener teardown, distinct from the graceful-shutdown row above)",
       "signature": "http.close(): void",
       "badge": "exact",
-      "description": "Formal, graceful listener teardown — a bare global function reachable only from inside a running request handler, a setTimeout/setInterval callback, or a process.on handler. Stops accepting immediately and lets already-open connections finish before http.listen()'s call returns control to the rest of the program (matching Node's default server.close()). In a { workers: N } cluster, one worker's .close() drains and exits every worker via a shared mmap'd flag, with no external signal.",
+      "description": "Formal, graceful listener teardown, called from a request handler, a timer or any other callback (listen blocks the code after it). Stops accepting immediately and lets already-open connections finish before http.listen()'s call returns control to the rest of the program (matching Node's default server.close()). In a { workers: N } cluster, one worker's .close() drains and exits every worker via a shared flag page each worker checks every 200 ms, with no external signal.",
       "returns": { "type": "void", "desc": "Begins graceful shutdown." },
       "exampleKey": "http/http_close",
       "snippet": "if (req.path === '/shutdown') {\n  http.close()\n  return { status: 200, body: 'shutting down' }\n}",
@@ -221,7 +221,7 @@
       "statusRow": "`http.closeAllConnections()` (forceful in-flight teardown)",
       "signature": "http.closeAllConnections(): void",
       "badge": "exact",
-      "description": "The forceful counterpart to http.close() (Node's server.closeAllConnections()): shutdown(2)s every in-flight connection so each fiber unwinds through its own EOF path. It shuts down the calling handler's own connection too (Node parity), so send the response before calling it if the response must be delivered. In a cluster, one worker's call force-closes every worker's connections via the same shared mmap flag.",
+      "description": "The forceful counterpart to http.close() (Node's server.closeAllConnections()): closes every connection's handle at once, answered or not. It shuts down the calling handler's own connection too (Node parity), so send the response before calling it if the response must be delivered. In a cluster, one worker's call force-closes every worker's connections via the same shared mmap flag.",
       "returns": { "type": "void", "desc": "Force-closes in-flight connections." },
       "exampleKey": "http/http_close",
       "seeAlso": ["http.close"],

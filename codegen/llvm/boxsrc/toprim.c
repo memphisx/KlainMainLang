@@ -15,6 +15,7 @@ typedef unsigned long long u64;
 
 extern i64 __kml_obj_get(void *o, const void *key);
 extern i64 __kml_dynobj_get(void *o, const void *key);
+extern i64 __kml_dynobj_find(void *o, const char *key);
 extern void *__kml_array_join(void *arr);
 extern void *__kml_dynarr_join(void *arr);
 extern void *__kml_fn_props_dyn(void *rec);
@@ -23,7 +24,7 @@ extern void *__kml_fn_props_dyn(void *rec);
 extern i64 __kml_host_toprim(i64 v, int hint);
 
 /* Length-prefixed string constants, laid out as the compiler's own. */
-#define KSTR(id, s) static const struct { i64 len; char d[sizeof(s)]; } id = { sizeof(s) - 1, s }
+#define KSTR(id, s) static const struct { i64 len; char d[sizeof(s)]; } id = { KML_STR_ASCII_HDR(sizeof(s) - 1), s }
 KSTR(k_vo, "valueOf");
 KSTR(k_ts, "toString");
 KSTR(k_tp, "@@toPrimitive");
@@ -109,7 +110,12 @@ i64 __kml_toprimitive(i64 v, int hint) {
              * Object.prototype's, which always gives a primitive: the ladder
              * ends there (`String({ valueOf() { return 1 } })` is
              * "[object Object]"). */
-            if (isobj && order[i] == k_ts.d) break;
+            /* An own toString that is not callable (`toString: undefined`)
+             * is skipped as GetMethod skips it, on to valueOf. */
+            if (isobj && order[i] == k_ts.d) {
+                if (__kml_dynobj_find(bag, k_ts.d) < 0) break;
+                ownToStringObject = 1; /* no Object.prototype.toString to end on */
+            }
             continue;
         }
         i64 argv[1];
@@ -129,8 +135,8 @@ i64 __kml_toprimitive(i64 v, int hint) {
     i64 t = tp_get(bag, 0, k_tag.d);
     if (nb_tag(t) != 2) return (i64)(u64)k_obj.d;
     const char *name = (const char *)nb_ptr(t);
-    i64 n = *(const i64 *)(name - 8);
-    char *s = (char *)malloc((size_t)n + 18);
+    i64 n = KML_STR_LEN(name);
+    char *s = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 18);
     *(i64 *)s = n + 9;
     memcpy(s + 8, "[object ", 8);
     memcpy(s + 16, name, (size_t)n);

@@ -28,6 +28,7 @@ func (e *Emitter) ensureBufferCodecs() {
 	for _, d := range []string{
 		"declare ptr @__kml_buf_hex_enc(ptr, i64)",
 		"declare ptr @__kml_buf_utf8_str(ptr, i64)",
+		"declare void @__kml_buf_fill_bytes(ptr, i64, i64, ptr, i64)",
 		"declare ptr @__kml_buf_ascii_str(ptr, i64)",
 		"declare i64 @__kml_buf_hex_dec(ptr, ptr)",
 		"declare ptr @__kml_buf_b64_enc(ptr, i64, i32)",

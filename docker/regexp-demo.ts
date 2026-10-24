@@ -2,7 +2,7 @@
 // build: proves a RegExp-using program links and runs correctly when
 // statically linked (PCRE2 included) inside a `scratch` container — no
 // libc, no dynamic linker, nothing else at all. See docs/tdd/TDD-00035.md
-// Stage 6 / docs/adr/ADR-00120.md.
+// Stage 6 / docs/adr/00/ADR-00120.md.
 const r = /(\d+)-(\d+)/g
 const s = "range: 12-34, 56-78 end"
 

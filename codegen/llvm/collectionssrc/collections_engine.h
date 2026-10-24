@@ -54,7 +54,7 @@ void __kml_map_remove_at(kml_map *m, i64 idx);
 
 /* A map body after its header word. */
 static inline kml_map *kml_map_alloc(i64 header) {
-    i64 *base = (i64 *)malloc(sizeof(i64) + sizeof(kml_map));
+    i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, sizeof(i64) + sizeof(kml_map));
     base[0] = header;
     return (kml_map *)(base + 1);
 }
@@ -64,9 +64,9 @@ KML_INL void kml_map_init(kml_map *h) {
     h->flags = 0;
     h->size = 0;
     h->cap = 8;
-    h->keys = (i64 *)malloc(64);
-    h->vals = (i64 *)malloc(64);
-    h->idx = (i64 *)malloc(128);
+    h->keys = (i64 *)kml_alloc(KML_HEAP_WORDS, 64);
+    h->vals = (i64 *)kml_alloc(KML_HEAP_WORDS, 64);
+    h->idx = (i64 *)kml_alloc(KML_HEAP_RAW, 128);
     memset(h->idx, 255, 128);
     h->idxcap = 16;
     h->used = 0;
@@ -105,9 +105,9 @@ KML_INL i64 kml_find(kml_map *m, i64 key, kml_hash_fn hf, kml_eq_fn eq) {
 /* Double the index, re-place every live entry, purge the tombstones. */
 KML_INL void kml_rehash(kml_map *m, kml_hash_fn hf) {
     i64 ncap = m->idxcap * 2, mask = ncap - 1;
-    i64 *nidx = (i64 *)malloc((size_t)ncap * 8);
+    i64 *nidx = (i64 *)kml_alloc(KML_HEAP_RAW, (size_t)ncap * 8);
     memset(nidx, 255, (size_t)ncap * 8);
-    free(m->idx);
+    kml_free(KML_HEAP_RAW, m->idx);
     m->idx = nidx;
     m->idxcap = ncap;
     m->used = m->size;
@@ -127,8 +127,8 @@ KML_INL void kml_set(kml_map *m, i64 key, i64 val, kml_hash_fn hf, kml_eq_fn eq)
     }
     if (m->size >= m->cap) {
         i64 ncap = m->cap * 2;
-        m->keys = (i64 *)realloc(m->keys, (size_t)ncap * 8);
-        m->vals = (i64 *)realloc(m->vals, (size_t)ncap * 8);
+        m->keys = (i64 *)kml_realloc(KML_HEAP_WORDS, m->keys, (size_t)ncap * 8);
+        m->vals = (i64 *)kml_realloc(KML_HEAP_WORDS, m->vals, (size_t)ncap * 8);
         m->cap = ncap;
     }
     i64 at = m->size;

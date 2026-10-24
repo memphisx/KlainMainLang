@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// --- Date (UTC only, not local time — see docs/adr/ADR-00014.md) ---
+// --- Date (UTC only, not local time — see docs/adr/00/ADR-00014.md) ---
 
 // A non-numeric argument to a Date calendar constructor or setter (e.g. a
 // Symbol) is tsc's TS2345, not invalid IR at the component arithmetic (the A1

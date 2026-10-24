@@ -51,7 +51,10 @@ console.log(scores.get('bob') === null)  // true
 
 // --- Class iterator: yielding 0 no longer ends iteration early ---
 class CountTo3 {
-    private i: number = 0
+    private i: number = 0;
+    *[Symbol.iterator]() {
+      for (let v = this.next(); v !== null; v = this.next()) yield v;
+    }
     next(): number | null {
         if (this.i > 2) return null
         const v = this.i

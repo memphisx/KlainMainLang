@@ -42,10 +42,11 @@ typedef ptr (*fn_env_2i64)(ptr env, i64 a, i64 b);
 typedef double (*fn_size)(ptr env, i64 a, i64 b);
 typedef void (*fn_ff)(ptr prom, i64 v0, i64 v1, i64 done);
 typedef void (*fn_react)(ptr env);
+typedef i64 (*fn_box)(i64 v0, i64 v1);
 
 /* A {fn, env} closure header. */
 ptr __kml_mkclo(ptr fn, ptr env) {
-    clo_t *c = (clo_t *)malloc(sizeof(clo_t));
+    clo_t *c = (clo_t *)kml_alloc(KML_HEAP_WORDS, sizeof(clo_t));
     c->fn = fn;
     c->env = env;
     return c;
@@ -60,7 +61,7 @@ void __kml_promise_add_reaction(ptr p, ptr clo) {
         __kml_microtask_enqueue(clo);
         return;
     }
-    char *node = (char *)malloc(KML_REACTION_SIZE);
+    char *node = (char *)kml_alloc(KML_HEAP_WORDS, KML_REACTION_SIZE);
     F(node, KML_REACTION_CLOSURE, ptr) = clo;
     F(node, KML_REACTION_NEXT, ptr) = F(p, KML_PROMISE_REACTIONS, ptr);
     F(p, KML_PROMISE_REACTIONS, ptr) = node;
@@ -84,7 +85,7 @@ static char *fifo_slot(ptr *data, i64 *cap, i64 *head, i64 *len, i64 esz) {
         }
         if (*len >= *cap) {
             i64 nc = *cap * 2 > 8 ? *cap * 2 : 8;
-            *data = realloc(*data, (size_t)(nc * esz));
+            *data = kml_realloc(KML_HEAP_WORDS, *data, (size_t)(nc * esz));
             *cap = nc;
         }
     }
@@ -104,6 +105,10 @@ typedef struct {
     ptr rdData;
     i64 rdCap, rdHead, rdLen;
     ptr closedProm, fulfillFn; /* fulfillFn: void (prom, v0, v1, done) */
+    /* A chunk in the producer's own two words boxed as an `any` (null when
+     * the chunks already are), and the fulfill routine of a reader that reads
+     * the chunks as `any` (__kml_rs_read_any). */
+    ptr boxFn, anyFulfillFn;
 } rstream;
 _Static_assert(sizeof(rstream) == KML_RSTREAM_SIZE, "rstream layout");
 
@@ -124,13 +129,17 @@ void __kml_rs_error(ptr s, i64 err);
 
 /* A fresh readable stream; closure fields are stored by the construction
  * site. The closed promise is marked handled (SetPromiseIsHandledToTrue). */
-ptr __kml_rs_alloc(double hwm, ptr ff) {
-    rstream *s = (rstream *)malloc(sizeof(rstream));
+ptr __kml_rs_alloc(double hwm, ptr ff, ptr box) {
+    /* Its host header word precedes it. */
+    i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 8 + sizeof(rstream));
+    base[0] = KML_RS_HDR;
+    rstream *s = (rstream *)(base + 1);
     memset(s, 0, sizeof(rstream));
     s->hwm = hwm;
     s->closedProm = __kml_task_alloc_promise();
     __kml_promise_mark_handled(s->closedProm);
     s->fulfillFn = ff;
+    s->boxFn = box;
     return s;
 }
 
@@ -156,7 +165,7 @@ void __kml_rs_qunshift(ptr sp, i64 v0, i64 v1, double sz) {
     } else {
         if (s->qLen >= s->qCap) {
             i64 nc = s->qCap * 2 > 8 ? s->qCap * 2 : 8;
-            s->qData = realloc(s->qData, (size_t)(nc * (i64)sizeof(rentry)));
+            s->qData = kml_realloc(KML_HEAP_WORDS, s->qData, (size_t)(nc * (i64)sizeof(rentry)));
             s->qCap = nc;
         }
         memmove((rentry *)s->qData + 1, s->qData, (size_t)(s->qLen * (i64)sizeof(rentry)));
@@ -189,6 +198,22 @@ void __kml_rs_tryread_out(ptr sp, i64 *out) {
     } else {
         out[0] = out[1] = out[2] = 0;
     }
+}
+
+/* Settle read promise prom with a chunk (or {done: true}). A promise tagged
+ * with its low bit came from __kml_rs_read_any: its reader takes the chunk
+ * boxed, through the reader's own routine. */
+static void rs_fulfill(rstream *s, ptr prom, i64 v0, i64 v1, i64 done) {
+    if ((size_t)prom & 1) {
+        prom = (ptr)((size_t)prom & ~(size_t)1);
+        if (!done && s->boxFn) {
+            v0 = ((fn_box)s->boxFn)(v0, v1);
+            v1 = 0;
+        }
+        ((fn_ff)s->anyFulfillFn)(prom, v0, v1, done);
+        return;
+    }
+    ((fn_ff)s->fulfillFn)(prom, v0, v1, done);
 }
 
 /* The pending-read promise FIFO (8-byte ptr entries). */
@@ -247,7 +272,7 @@ static void rs_pull_if_needed(rstream *s) {
         rs_pull_done(s);
         return;
     }
-    ptr *env = (ptr *)malloc(16);
+    ptr *env = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);
     env[0] = p;
     env[1] = s;
     react(p, __kml_rs_pull_settled, env);
@@ -264,12 +289,23 @@ void __kml_rs_started(ptr sp) {
  * / close was already requested (the compile site turns 0 into a thrown
  * TypeError). A pending read is fulfilled directly (the queue is
  * necessarily empty then); otherwise the chunk is queued with its size. */
+/* A runtime-made byte chunk: the Uint8Array header over n bytes at data, as
+ * an enqueued array chunk's first word. */
+i64 __kml_rs_chunk_hdr(ptr data, i64 n) {
+    i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 32);
+    base[0] = KML_ARRAY_HDR_WORD;
+    ((ptr *)base)[1] = data;
+    base[2] = n;
+    base[3] = 0; /* packed */
+    return (i64)(size_t)(base + 1);
+}
+
 i64 __kml_rs_enqueue(ptr sp, i64 v0, i64 v1) {
     rstream *s = (rstream *)sp;
     if (s->state != 0 || (s->flags & RS_CLOSEREQ)) return 0;
     ptr prom = __kml_rs_rdpop(s);
     if (prom) {
-        ((fn_ff)s->fulfillFn)(prom, v0, v1, 0);
+        rs_fulfill(s, prom, v0, v1, 0);
     } else {
         double sz = 1.0;
         clo_t *sc = (clo_t *)s->sizeClo;
@@ -286,9 +322,8 @@ void __kml_rs_finalize_close(ptr sp) {
     rstream *s = (rstream *)sp;
     if (s->state != 0) return;
     s->state = 1;
-    fn_ff ff = (fn_ff)s->fulfillFn;
     ptr prom;
-    while ((prom = __kml_rs_rdpop(s)) != NULL) ff(prom, 0, 0, 1);
+    while ((prom = __kml_rs_rdpop(s)) != NULL) rs_fulfill(s, prom, 0, 0, 1);
     __kml_promise_settle(s->closedProm, 1);
 }
 
@@ -312,13 +347,13 @@ void __kml_rs_error(ptr sp, i64 err) {
     s->qHead = s->qLen = 0;
     s->total = 0.0;
     ptr prom;
-    while ((prom = __kml_rs_rdpop(s)) != NULL) __kml_promise_reject_err(prom, err);
+    while ((prom = __kml_rs_rdpop(s)) != NULL) __kml_promise_reject_err((ptr)((size_t)prom & ~(size_t)1), err);
     __kml_promise_reject_err(s->closedProm, err);
 }
 
-/* reader.read()'s core: the read promise. */
-ptr __kml_rs_read(ptr sp) {
-    rstream *s = (rstream *)sp;
+/* reader.read()'s core: the read promise. tag 1: the reader reads the
+ * chunks as `any` (rs_fulfill). */
+static ptr rs_read(rstream *s, size_t tag) {
     s->flags |= RS_DISTURBED;
     if (s->state == 2) {
         ptr ep = __kml_task_alloc_promise();
@@ -327,13 +362,13 @@ ptr __kml_rs_read(ptr sp) {
     }
     if (s->state == 1) {
         ptr cp = __kml_task_alloc_promise();
-        ((fn_ff)s->fulfillFn)(cp, 0, 0, 1);
+        rs_fulfill(s, (ptr)((size_t)cp | tag), 0, 0, 1);
         return cp;
     }
     if (s->qHead < s->qLen) {
         rentry e = qpop(s);
         ptr pm = __kml_task_alloc_promise();
-        ((fn_ff)s->fulfillFn)(pm, e.v0, e.v1, 0);
+        rs_fulfill(s, (ptr)((size_t)pm | tag), e.v0, e.v1, 0);
         if ((s->flags & RS_CLOSEREQ) && s->qHead >= s->qLen)
             __kml_rs_finalize_close(s);
         else
@@ -341,9 +376,20 @@ ptr __kml_rs_read(ptr sp) {
         return pm;
     }
     ptr pp = __kml_task_alloc_promise();
-    __kml_rs_rdpush(s, pp);
+    __kml_rs_rdpush(s, (ptr)((size_t)pp | tag));
     rs_pull_if_needed(s);
     return pp;
+}
+
+ptr __kml_rs_read(ptr sp) { return rs_read((rstream *)sp, 0); }
+
+/* read() by a reader whose chunk type is `any` (a ReadableStream<any> view
+ * of a typed stream): ff is that reader's routine, the chunks go to it boxed
+ * by the stream's own boxFn. */
+ptr __kml_rs_read_any(ptr sp, ptr ff) {
+    rstream *s = (rstream *)sp;
+    s->anyFulfillFn = ff;
+    return rs_read(s, 1);
 }
 
 /* controller.desiredSize: hwm - total while readable; 0 once
@@ -392,6 +438,44 @@ i64 __kml_rs_lock(ptr sp) {
 
 void __kml_rs_unlock(ptr sp) { ((rstream *)sp)->flags &= ~(i64)RS_LOCKED; }
 
+/* A promise for a released reader's or writer's slot: p rejected with err
+ * when still pending, else a fresh rejected one (marked handled). */
+static ptr released_promise(ptr p, i64 err) {
+    if (ST(p) != 0) p = __kml_task_alloc_promise();
+    __kml_promise_mark_handled(p);
+    __kml_promise_reject_err(p, err);
+    return p;
+}
+
+/* reader.releaseLock() (h: the reader's {stream, closed} slots): its closed
+ * rejects with closedErr, its pending reads with readErr; a readable stream
+ * gets a fresh closed promise for its next reader, and is unlocked. */
+void __kml_rs_release(ptr sp, ptr *h, i64 closedErr, i64 readErr) {
+    rstream *s = (rstream *)sp;
+    ptr old = s->closedProm;
+    int pending = ST(old) == 0;
+    h[1] = released_promise(old, closedErr);
+    if (pending) {
+        s->closedProm = __kml_task_alloc_promise();
+        __kml_promise_mark_handled(s->closedProm);
+    }
+    ptr prom;
+    while ((prom = __kml_rs_rdpop(s)) != NULL) __kml_promise_reject_err((ptr)((size_t)prom & ~(size_t)1), readErr);
+    s->flags &= ~(i64)RS_LOCKED;
+}
+
+/* A reader's pending read requests (console.log's readRequests). */
+i64 __kml_rs_read_requests(ptr sp) {
+    rstream *s = (rstream *)sp;
+    return s->rdLen - s->rdHead;
+}
+
+/* console.log's view of a readable stream: its state, plus 4 when locked. */
+i64 __kml_rs_inspect_bits(ptr sp) {
+    rstream *s = (rstream *)sp;
+    return s->state | ((s->flags & RS_LOCKED) ? 4 : 0);
+}
+
 /* ---- WritableStream ---------------------------------------------------
  * Every write() enqueues a {chunk words, size, per-write promise} entry; a
  * drain loop dequeues one at a time, invokes the sink's write and advances
@@ -433,7 +517,10 @@ void __kml_ws_advance(ptr s);
 /* A fresh writable stream: ready starts fulfilled (no backpressure while
  * the queue is empty), closed starts pending; both marked handled. */
 ptr __kml_ws_alloc(double hwm) {
-    wstream *s = (wstream *)malloc(sizeof(wstream));
+    /* Its host header word precedes it. */
+    i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 8 + sizeof(wstream));
+    base[0] = KML_WS_HDR;
+    wstream *s = (wstream *)(base + 1);
     memset(s, 0, sizeof(wstream));
     s->hwm = hwm;
     ptr rdy = __kml_task_alloc_promise();
@@ -531,7 +618,7 @@ void __kml_ws_advance(ptr sp) {
                 s->flags &= ~(i64)WS_INFLIGHT;
                 continue;
             }
-            ptr *env = (ptr *)malloc(24);
+            ptr *env = (ptr *)kml_alloc(KML_HEAP_WORDS, 24);
             env[0] = wp;
             env[1] = s;
             env[2] = e.prom;
@@ -546,7 +633,7 @@ void __kml_ws_advance(ptr sp) {
             __kml_ws_finish_close(s);
             return;
         }
-        ptr *env2 = (ptr *)malloc(16);
+        ptr *env2 = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);
         env2[0] = cp2;
         env2[1] = s;
         react(cp2, __kml_ws_close_settled, env2);
@@ -646,6 +733,33 @@ i64 __kml_ws_lock(ptr sp) {
 
 void __kml_ws_unlock(ptr sp) { ((wstream *)sp)->flags &= ~(i64)WS_LOCKED; }
 
+/* writer.releaseLock() (h: the writer's {stream, closed, ready} slots): its
+ * ready and closed reject with err; the stream keeps a fresh promise in place
+ * of each one that was pending, for its next writer, and is unlocked. */
+void __kml_ws_release(ptr sp, ptr *h, i64 err) {
+    wstream *s = (wstream *)sp;
+    ptr rdy = s->readyProm, cl = s->closedProm;
+    int rdyPending = ST(rdy) == 0, clPending = ST(cl) == 0;
+    h[2] = released_promise(rdy, err);
+    h[1] = released_promise(cl, err);
+    if (rdyPending) {
+        s->readyProm = __kml_task_alloc_promise();
+        __kml_promise_mark_handled(s->readyProm);
+        if (s->state == 0 && s->hwm > s->total) __kml_promise_settle(s->readyProm, 1);
+    }
+    if (clPending) {
+        s->closedProm = __kml_task_alloc_promise();
+        __kml_promise_mark_handled(s->closedProm);
+    }
+    s->flags &= ~(i64)WS_LOCKED;
+}
+
+/* console.log's view of a writable stream: its state, plus 4 when locked. */
+i64 __kml_ws_inspect_bits(ptr sp) {
+    wstream *s = (wstream *)sp;
+    return s->state | ((s->flags & WS_LOCKED) ? 4 : 0);
+}
+
 /* ---- pipeTo -----------------------------------------------------------
  * flags: 1 preventClose · 2 preventAbort · 4 preventCancel. sigA points at
  * the AbortSignal's aborted flag byte (or null), sigR at its reason slot. */
@@ -673,7 +787,7 @@ static void pipe_on_written(ptr env);
 static void pipe_on_closed(ptr env);
 
 ptr __kml_pipe_to(ptr src, ptr dst, ptr decode, i64 flags, ptr sigA, ptr sigR) {
-    pipectx *c = (pipectx *)malloc(sizeof(pipectx));
+    pipectx *c = (pipectx *)kml_alloc(KML_HEAP_WORDS, sizeof(pipectx));
     memset(c, 0, sizeof(pipectx));
     c->src = (rstream *)src;
     c->dst = (wstream *)dst;
@@ -810,7 +924,7 @@ void __kml_tee_pullhook(ptr cp) {
     if (c->reading) return;
     c->reading = 1;
     ptr p = __kml_rs_read(c->src);
-    ptr *env = (ptr *)malloc(16);
+    ptr *env = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);
     env[0] = p;
     env[1] = c;
     react(p, tee_on_read, env);
@@ -892,7 +1006,7 @@ ptr __kml_ts_pull(ptr cp) {
         __kml_promise_settle(wprom, 1);
         return NULL;
     }
-    ptr *env = (ptr *)malloc(16);
+    ptr *env = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);
     env[0] = p;
     env[1] = wprom;
     react(p, __kml_ts_mirror_settle, env);
@@ -922,7 +1036,7 @@ ptr __kml_ts_sink_close(ptr cp) {
         return NULL;
     }
     c->closeProm = __kml_task_alloc_promise();
-    ptr *env = (ptr *)malloc(16);
+    ptr *env = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);
     env[0] = p;
     env[1] = c;
     react(p, __kml_ts_flush_done, env);

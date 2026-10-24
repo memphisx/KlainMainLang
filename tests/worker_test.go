@@ -410,3 +410,18 @@ if (isMainThread) {
 `,
 	}, "main.ts", "main got worker false 21 top-level true top-level")
 }
+
+// The ES-module form of a self-worker: `new Worker(new URL(import.meta.url))`.
+func TestE2EWorkerSelfImportMetaURL(t *testing.T) {
+	assertMultiFileOutput(t, map[string]string{
+		"main.ts": `
+import { Worker, isMainThread, parentPort } from 'worker_threads';
+if (isMainThread) {
+  const w = new Worker(new URL(import.meta.url));
+  w.on('message', (m: string) => { console.log('main got', m); w.terminate(); });
+} else {
+  parentPort!.postMessage('worker ' + isMainThread);
+}
+`,
+	}, "main.ts", "main got worker false")
+}

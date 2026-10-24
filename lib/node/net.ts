@@ -156,12 +156,12 @@ let defaultAutoSelectFamily = true;
 let defaultAutoSelectFamilyAttemptTimeout = 250;
 export function getDefaultAutoSelectFamily(): boolean { return defaultAutoSelectFamily; }
 export function setDefaultAutoSelectFamily(value: boolean): void {
-    if (typeof value !== 'boolean') throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "value" argument must be of type boolean.');
+    if (typeof value !== 'boolean') throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "value" argument must be of type boolean.');
     defaultAutoSelectFamily = value;
 }
 export function getDefaultAutoSelectFamilyAttemptTimeout(): number { return defaultAutoSelectFamilyAttemptTimeout; }
 export function setDefaultAutoSelectFamilyAttemptTimeout(value: number): void {
-    if (!Number.isInteger(value) || value < 1) throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "value" is out of range. It must be >= 1. Received ' + String(value));
+    if (!Number.isInteger(value) || value < 1) throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "value" is out of range. It must be >= 1. Received ' + String(value));
     defaultAutoSelectFamilyAttemptTimeout = value < 10 ? 10 : value;
 }
 
@@ -345,7 +345,7 @@ export class Socket extends Duplex {
         // Still connecting: buffer this one until the connect.
         if (this.connecting) {
             const onClose = () => {
-                cb(new NodeError('ERR_SOCKET_CLOSED_BEFORE_CONNECTION', 'Socket closed before the connection was established'));
+                cb(NodeError('ERR_SOCKET_CLOSED_BEFORE_CONNECTION', 'Socket closed before the connection was established'));
             };
             this.once('connect', () => {
                 this.off('close', onClose);
@@ -355,7 +355,7 @@ export class Socket extends Duplex {
             return;
         }
         if (this._handle < 0) {
-            cb(new NodeError('ERR_SOCKET_CLOSED', 'Socket is closed'));
+            cb(NodeError('ERR_SOCKET_CLOSED', 'Socket is closed'));
             return;
         }
         this.refreshTimer();
@@ -384,8 +384,26 @@ export class Socket extends Duplex {
         } else if (r === 1) {
             // The request completed synchronously.
             this.bytesWrittenCount += buf.length;
-            cb();
+            cb(null);
         }
+    }
+
+    // Node's writeAfterFIN: once the peer's end has ended the writable side
+    // too (allowHalfOpen false), a write is EPIPE. A string or bytes, as
+    // @types/node declares it.
+    write(buffer: Uint8Array | string, cb?: (err?: Error | null) => void): boolean;
+    write(str: Uint8Array | string, encoding?: BufferEncoding, cb?: (err?: Error | null) => void): boolean;
+    write(chunk: any, encoding?: BufferEncoding | ((error?: Error | null) => void), cb?: (error?: Error | null) => void): boolean {
+        if (!this.endedByPeer || this.allowHalfOpen || !this.writableEnded) return super.write(chunk, encoding, cb);
+        if (typeof encoding === 'function') cb = encoding;
+        const er: any = new Error('This socket has been ended by the other party');
+        er.code = 'EPIPE';
+        if (typeof cb === 'function') {
+            const f = cb;
+            process.nextTick(() => { f(er); });
+        }
+        this.destroy(er);
+        return false;
     }
 
     _final(cb: (error?: Error | null) => void): void {
@@ -535,7 +553,7 @@ export class Socket extends Duplex {
         const [options, cb] = normalizeArgs(arg0, arg1, arg2);
         if (cb !== null) this.once('connect', cb);
         if (options.port === undefined && options.path === undefined) {
-            throw new NodeTypeError('ERR_MISSING_ARGS', 'The "options" or "port" or "path" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "options" or "port" or "path" argument must be specified');
         }
         this.connecting = true;
         if (options.noDelay === true) this.noDelayWanted = true;
@@ -725,7 +743,7 @@ export { Socket as Stream };
 function validatePort(port: number | string): number {
     const n = typeof port === 'string' ? (port.trim() !== '' ? Number(port) : NaN) : port;
     if (!Number.isInteger(n) || n < 0 || n > 65535) {
-        throw new NodeRangeError('ERR_SOCKET_BAD_PORT', 'Port should be >= 0 and < 65536. Received ' + (typeof port === 'string' ? "type string ('" + port + "')" : 'type number (' + String(port) + ')') + '.');
+        throw NodeRangeError('ERR_SOCKET_BAD_PORT', 'Port should be >= 0 and < 65536. Received ' + (typeof port === 'string' ? "type string ('" + port + "')" : 'type number (' + String(port) + ')') + '.');
     }
     return n;
 }
@@ -875,7 +893,7 @@ export class Server extends EventEmitter {
         else if (typeof arg2 === 'function') cb = arg2;
         else if (typeof arg1 === 'function') cb = arg1;
         if (this._handle >= 0 || this._kmlClusterHandle !== null) {
-            throw new NodeError('ERR_SERVER_ALREADY_LISTEN', 'Listen method has been called more than once without closing.');
+            throw NodeError('ERR_SERVER_ALREADY_LISTEN', 'Listen method has been called more than once without closing.');
         }
         if (cb !== null) this.once('listening', cb);
         const backlog = (typeof arg1 === 'number' ? arg1 : 0) || (typeof arg2 === 'number' ? arg2 : 0) || options.backlog || 511;
@@ -1013,7 +1031,7 @@ export class Server extends EventEmitter {
         if (typeof cb === 'function') {
             if (this._handle < 0) {
                 this.once('close', () => {
-                    cb(new NodeError('ERR_SERVER_NOT_RUNNING', 'Server is not running.'));
+                    cb(NodeError('ERR_SERVER_NOT_RUNNING', 'Server is not running.'));
                 });
             } else {
                 this.once('close', () => { cb(); });

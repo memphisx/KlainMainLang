@@ -328,7 +328,7 @@ function expectedException(actual: any, expected: any, messageArg: any, fnName: 
             if (expected instanceof Error) {
                 keys.push('name', 'message');
             } else if (keys.length === 0) {
-                throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'error' may not be an empty object. Received {}");
+                throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'error' may not be an empty object. Received {}");
             }
             for (const key of keys) {
                 if (typeof actual[key] === 'string' && isRegExp(expected[key]) && expected[key].exec(actual[key]) !== null) {
@@ -390,7 +390,7 @@ const NO_EXCEPTION_SENTINEL: any = new NoException();
 
 function getActual(fn: any): any {
     if (typeof fn !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "fn" argument must be of type function.' + receivedDescription(fn));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "fn" argument must be of type function.' + receivedDescription(fn));
     }
     try {
         fn();
@@ -415,13 +415,13 @@ async function waitForActual(promiseFn: any): Promise<any> {
         resultPromise = promiseFn();
         // Fail in case no promise is returned.
         if (!checkIsPromise(resultPromise)) {
-            throw new NodeTypeError('ERR_INVALID_RETURN_VALUE', 'Expected instance of Promise to be returned from the "promiseFn" function but got ' +
+            throw NodeTypeError('ERR_INVALID_RETURN_VALUE', 'Expected instance of Promise to be returned from the "promiseFn" function but got ' +
                 (resultPromise === null ? 'null' : typeof resultPromise === 'object' ? 'instance of ' + String(resultPromise) : 'type ' + typeof resultPromise) + '.');
         }
     } else if (checkIsPromise(promiseFn)) {
         resultPromise = promiseFn;
     } else {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "promiseFn" argument must be of type function or an instance of Promise.' + receivedDescription(promiseFn));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "promiseFn" argument must be of type function or an instance of Promise.' + receivedDescription(promiseFn));
     }
 
     try {
@@ -439,19 +439,19 @@ function expectsError(fnName: string, actual: any, argc: number, errorArg: any, 
     let message: any = messageArg;
     if (typeof error === 'string') {
         if (argc === 2) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "error" argument must be of type function or an instance of Error, RegExp, or Object.' + receivedDescription(error));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "error" argument must be of type function or an instance of Error, RegExp, or Object.' + receivedDescription(error));
         }
         if (typeof actual === 'object' && actual !== null) {
             if (actual.message === error) {
-                throw new NodeTypeError('ERR_AMBIGUOUS_ARGUMENT', `The "error/message" argument is ambiguous. The error message "${actual.message}" is identical to the message.`);
+                throw NodeTypeError('ERR_AMBIGUOUS_ARGUMENT', `The "error/message" argument is ambiguous. The error message "${actual.message}" is identical to the message.`);
             }
         } else if (actual === error) {
-            throw new NodeTypeError('ERR_AMBIGUOUS_ARGUMENT', `The "error/message" argument is ambiguous. The error "${actual}" is identical to the message.`);
+            throw NodeTypeError('ERR_AMBIGUOUS_ARGUMENT', `The "error/message" argument is ambiguous. The error "${actual}" is identical to the message.`);
         }
         message = error;
         error = undefined;
     } else if (error !== null && error !== undefined && typeof error !== 'object' && typeof error !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "error" argument must be of type function or an instance of Error, RegExp, or Object.' + receivedDescription(error));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "error" argument must be of type function or an instance of Error, RegExp, or Object.' + receivedDescription(error));
     }
 
     if (actual === NO_EXCEPTION_SENTINEL) {
@@ -477,7 +477,7 @@ function hasMatchingError(actual: any, expected: any): boolean {
             const str = String(actual);
             return expected.exec(str) !== null;
         }
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "expected" argument must be of type function or an instance of RegExp.' + receivedDescription(expected));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "expected" argument must be of type function or an instance of RegExp.' + receivedDescription(expected));
     }
     // Guard instanceof against arrow functions as they don't have a prototype.
     if (__kml_native.ctorKind(expected) !== kNotConstructor && actual instanceof expected) {
@@ -570,7 +570,7 @@ export function ifError(value: unknown): asserts value is null | undefined {
 
 function internalMatch(string: any, regexp: any, messageArg: any, fnName: string): void {
     if (!isRegExp(regexp)) {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "regexp" argument must be an instance of RegExp.' + receivedDescription(regexp));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "regexp" argument must be an instance of RegExp.' + receivedDescription(regexp));
     }
     const match = fnName === 'match';
     if (typeof string !== 'string' || (regexp.exec(string) !== null) !== match) {
@@ -627,7 +627,7 @@ export class Assert {
     constructor(options?: AssertOptions) {
         const o: any = options === undefined ? {} : options;
         if (o.diff !== undefined && o.diff !== 'simple' && o.diff !== 'full') {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'options.diff' must be one of: 'simple', 'full'. Received " + inspect(o.diff));
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'options.diff' must be one of: 'simple', 'full'. Received " + inspect(o.diff));
         }
         this.diff = o.diff === undefined ? 'simple' : o.diff;
         this.strict = o.strict === undefined ? true : !!o.strict;

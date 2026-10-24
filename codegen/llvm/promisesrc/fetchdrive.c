@@ -51,8 +51,10 @@ void __kml_fetch_drive_run(void *env) {
     i64 status = __kml_await_fetch_headers(pending);
     __kml_pop_jmpbuf();
     /* Zeroed: the constructed-Response slots (headers, statusText, type,
-     * stream) are null on a fetched one. */
-    void *resp = calloc(1, KML_RESP_SIZE);
+     * stream) are null on a fetched one. Its header word precedes it. */
+    char *resp_base = (char *)kml_calloc(KML_HEAP_WORDS, 1, 8 + KML_RESP_SIZE);
+    *(i64 *)resp_base = KML_RESP_HDR;
+    void *resp = resp_base + 8;
     F(resp, KML_RESP_STATUS, double) = (double)status;
     F(resp, KML_RESP_OK, u8) = status >= 200 && status < 300;
     F(resp, KML_RESP_PENDING, void *) = pending;

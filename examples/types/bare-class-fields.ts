@@ -1,45 +1,40 @@
-// A class with declared-but-uninitialized fields and no explicit constructor.
-// The instance is calloc'd, so every unassigned field reads as its deterministic
-// zero value (0 / false / null) — the same ADR-00157 convention a class *with* a
-// constructor already relies on — and any field initializers that ARE present
-// still run. See docs/status/LANGUAGE-CONSTRUCTS.md.
+// Declared fields nothing initializes. A `name!: T` field (the definite
+// assignment assertion) is an own property holding undefined until
+// something assigns it, as in Node; a field with an initializer runs it.
+// Without the `!`, the strict lane rejects such a field (TS2564), as tsc
+// does.
 
-// --- bare fields, no constructor: all zero-filled ---
+// --- definite fields, no constructor: all undefined until assigned ---
 class Counters {
-  hits: number
-  misses: number
+  hits!: number
+  misses!: number
+  bump() { this.hits = (this.hits ?? 0) + 1 }
 }
 const c = new Counters()
-console.log(c.hits)      // 0
-console.log(c.misses)    // 0
+console.log(c.hits)      // undefined
+console.log(c.misses)    // undefined
+c.bump()
+c.bump()
+console.log(c.hits)      // 2
 
-// --- mix of initialized and bare fields ---
+// --- mix of initialized and definite fields ---
 class Config {
   retries = 3
-  timeout: number        // bare → 0
+  timeout!: number
   verbose = true
-  level: number          // bare → 0
+  level!: number
 }
 const cfg = new Config()
 console.log(cfg.retries) // 3
-console.log(cfg.timeout) // 0
+console.log(cfg.timeout) // undefined
 console.log(cfg.verbose) // true
-console.log(cfg.level)   // 0
+console.log(JSON.stringify(cfg)) // {"retries":3,"verbose":true}
 
-// --- a nullable reference field defaults to null; an initialized one runs ---
+// --- a nullable reference field reads undefined, not null ---
 class ListNode {
   value: number = 42
-  next: ListNode | null   // bare → null
+  next!: ListNode | null
 }
 const n = new ListNode()
-console.log(n.value)         // 42
-console.log(n.next === null) // true
-
-// --- works for a generic class too (generic classes can't `extends`) ---
-class Box<T> {
-  value: T
-  count: number
-}
-const b = new Box<number>()
-console.log(b.value)     // 0
-console.log(b.count)     // 0
+console.log(n.value)              // 42
+console.log(n.next === undefined) // true

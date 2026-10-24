@@ -264,9 +264,8 @@ console.log(built.length)    // 3
 console.log(built[1])        // 20
 
 // =============================================================================
-// Array.from — the array-like overload: a plain array (a fresh, independent
-// copy) or a class implementing the Stage 1a iterator protocol
-// (next(): T | null)
+// Array.from — a plain array (a fresh, independent copy) or an iterable
+// class instance
 // =============================================================================
 
 let srcArr = [1, 2, 3]
@@ -282,6 +281,9 @@ class CountUp {
     constructor(max: number) {
         this.current = 1
         this.max = max
+    }
+    *[Symbol.iterator]() {
+      for (let v = this.next(); v !== null; v = this.next()) yield v;
     }
     next(): number | null {
         if (this.current > this.max) {

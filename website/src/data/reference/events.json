@@ -253,9 +253,7 @@
         "desc": "Resolves with the event's arguments."
       },
       "snippet": "import { EventEmitter, once } from 'events'\nconst ee = new EventEmitter<{ ready: [number] }>()\nsetTimeout(() => { ee.emit('ready', 42) }, 0)\nconst arr = await once(ee, 'ready') // [42]",
-      "differences": [
-        "Single-value / homogeneous multi-arg events only (mixed-type tuples rejected)"
-      ],
+      "differences": [],
       "seeAlso": [
         "EventEmitter",
         "events.on"

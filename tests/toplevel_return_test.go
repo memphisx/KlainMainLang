@@ -32,3 +32,11 @@ if (process.argv.length > 0) {
 		t.Fatalf("want TS1108, got %v", err)
 	}
 }
+
+// Code spliced in from a constant eval string is plain JavaScript that
+// tsc never sees: its comma operands are not TS2695.
+func TestE2EStaticEvalSkipsSyntacticChecks(t *testing.T) {
+	if _, err := parseAndCompile(`console.log(eval("false,\ttrue"))`); err != nil {
+		t.Fatalf("eval code rejected: %v", err)
+	}
+}

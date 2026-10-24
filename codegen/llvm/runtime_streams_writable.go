@@ -33,5 +33,7 @@ declare ptr @__kml_ws_abort(ptr, i64)
 declare double @__kml_ws_desired(ptr)
 declare void @__kml_ws_started(ptr)
 declare i64 @__kml_ws_lock(ptr)
-declare void @__kml_ws_unlock(ptr)`)
+declare void @__kml_ws_unlock(ptr)
+declare i64 @__kml_ws_inspect_bits(ptr)
+declare void @__kml_ws_release(ptr, ptr, i64)`)
 }

@@ -9,6 +9,12 @@
 //	bit  50      hostInlineFlag (with bit 49: the header of a host body that
 //	             follows it, a Map's or a Set's, rather than of a two-word
 //	             cell holding a handle; TDD-00247)
+//	bits 51..52  the integrity level Object.freeze, seal and
+//	             preventExtensions record (staticIntegrity*): 0 none
+//	bit  53      kmlHdrImmortal: a shared sentinel cell, never changed
+//
+// Bits 51..53 are object state, not type: a type test compares a header
+// with them cleared (headerIdentity).
 //
 // A class instance's header is its TagID (which carries the magic), an
 // object literal's the id its layout was registered under. A header with
@@ -26,6 +32,10 @@ import (
 )
 
 const (
+	kmlHdrLevelShift       = 51
+	kmlHdrLevelMask  int64 = 3 << kmlHdrLevelShift
+	kmlHdrImmortal   int64 = 1 << 53
+	kmlHdrStateMask        = kmlHdrLevelMask | kmlHdrImmortal
 	kmlHdrMagic      int64 = 0x4B4D << 32
 	kmlHdrMagicMask  int64 = 0x7FFF << 32
 	kmlHdrIDMask     int64 = 0xFFFFFFFF
@@ -101,12 +111,12 @@ func layoutKeyMemo(t Type, memo map[*Field]string) string {
 	var id *Field
 	if len(fs) > 0 {
 		id = &fs[0]
-		if k, ok := memo[id]; ok && !t.IsTuple {
+		if k, ok := memo[id]; ok && !t.IsTuple() {
 			return k
 		}
 	}
 	var b strings.Builder
-	if t.IsTuple {
+	if t.IsTuple() {
 		b.WriteString("T|")
 	}
 	for _, f := range fs {
@@ -115,8 +125,24 @@ func layoutKeyMemo(t Type, memo map[*Field]string) string {
 		b.WriteString(layoutFieldKeyMemo(f.Ty, memo))
 		b.WriteByte(';')
 	}
+	// The hidden words are part of the layout: a declared `{ value, done }`
+	// has them and a builtin one of the same fields does not.
+	if t.presenceIndex() >= 0 {
+		b.WriteString("|P")
+	}
+	if t.orderIndex() >= 0 {
+		b.WriteString("|O")
+	}
+	// A generator's id selects its method table: a sync and an async one
+	// of the same fields answer next() differently.
+	if t.IsGenerator() {
+		b.WriteString("|G")
+		if t.GeneratorIsAsync {
+			b.WriteString("A")
+		}
+	}
 	k := b.String()
-	if id != nil && !t.IsTuple {
+	if id != nil && !t.IsTuple() {
 		memo[id] = k
 	}
 	return k
@@ -124,9 +150,9 @@ func layoutKeyMemo(t Type, memo map[*Field]string) string {
 
 func layoutFieldKeyMemo(t Type, memo map[*Field]string) string {
 	switch {
-	case t.IsArray && t.ElemType != nil:
+	case t.IsArray() && t.ElemType != nil:
 		return "[" + layoutFieldKeyMemo(*t.ElemType, memo) + "]"
-	case t.IsObject && !t.IsClass:
+	case t.IsObject() && !t.IsClass():
 		k := layoutKeyMemo(t, memo)
 		if len(k) > 128 {
 			// A nested layout is named by its digest past a short length:
@@ -134,7 +160,7 @@ func layoutFieldKeyMemo(t Type, memo map[*Field]string) string {
 			k = fmt.Sprintf("#%x", sha256.Sum256([]byte(k)))
 		}
 		return "{" + k + "}"
-	case t.IsClass:
+	case t.IsClass():
 		return "C" + t.ClassName
 	}
 	// The pointer kinds read differently (a string field is not a
@@ -143,9 +169,9 @@ func layoutFieldKeyMemo(t Type, memo map[*Field]string) string {
 	switch {
 	case isHostHandle(t):
 		kind = "H" + hostKey(t)
-	case t.IsDynamicObject:
+	case t.IsDynamicObject():
 		kind = "D"
-	case t.IsFunc:
+	case t.IsFunc():
 		// A function member's signature is part of the layout: a box's
 		// method adapter calls it with its own parameters' types.
 		var ps []string
@@ -157,19 +183,19 @@ func layoutFieldKeyMemo(t Type, memo map[*Field]string) string {
 			ret = layoutFieldKeyMemo(*t.FuncRetType, memo)
 		}
 		kind = "F(" + strings.Join(ps, ",") + ")" + ret + fmt.Sprint(t.FuncHasRest)
-	case t.IsPromise:
+	case t.IsPromise():
 		kind = "P"
 	case isStringTy(t):
 		kind = "s"
 	}
-	return fmt.Sprintf("%s%s/%v/%v/%v/%v", kind, StructFieldIR(t), t.IsDynamic, t.Nullable, t.IsUndefined, t.Signed)
+	return fmt.Sprintf("%s%s/%v/%v/%v/%v", kind, StructFieldIR(t), t.IsDynamic(), t.Nullable(), t.IsUndefined(), t.Signed)
 }
 
 // objHeaderWord returns the header word stored at field 0 of a freshly
 // allocated t: a class's TagID, an Error's flagged kind (set by its own
 // builders), or the interned layout id of any other object type.
 func (e *Emitter) objHeaderWord(t Type) int64 {
-	if t.IsClass {
+	if t.IsClass() {
 		if info, ok := e.classes[t.ClassName]; ok {
 			if info.IsErrorSubclass {
 				return errorTypeIDStored(info.TagID)
@@ -190,12 +216,50 @@ func (e *Emitter) objHeaderWord(t Type) int64 {
 	return id
 }
 
+// hdrStateDefines is the C side of a header word's object state, in every
+// runtime member's prelude.
+func hdrStateDefines() string {
+	return fmt.Sprintf("#define KML_HDR_LEVEL_SHIFT %d\n#define KML_HDR_LEVEL_MASK %dLL\n#define KML_HDR_IMMORTAL %dLL\n#define KML_HDR_STATE_MASK %dLL\n",
+		kmlHdrLevelShift, kmlHdrLevelMask, kmlHdrImmortal, kmlHdrStateMask) + hdrLevelHelpers
+}
+
+// hdrLevelHelpers read and tighten a header word's integrity level, in
+// every runtime member that includes the state defines: a level only
+// tightens, and an immortal header is never written.
+const hdrLevelHelpers = `static inline long long kml_hdr_level(const long long *w) { return (*w & KML_HDR_LEVEL_MASK) >> KML_HDR_LEVEL_SHIFT; }
+static inline void kml_hdr_raise_level(long long *w, long long lvl) {
+    if (*w & KML_HDR_IMMORTAL) return;
+    long long cur = kml_hdr_level(w);
+    if (cur != 0 && cur <= lvl) return;
+    *w = (*w & ~KML_HDR_LEVEL_MASK) | (lvl << KML_HDR_LEVEL_SHIFT);
+}
+`
+
+// headerIdentity is header word w without its object state (bits 51..53):
+// the part a type test compares.
+func (e *Emitter) headerIdentity(w string) string {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", r, w, ^kmlHdrStateMask))
+	return r
+}
+
 // emitStoreObjHeader writes t's header word into the object at ptr.
 func (e *Emitter) emitStoreObjHeader(ptr string, t Type) {
 	if !hasObjHeader(t) {
 		return // a tuple or a host class layout
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", e.objHeaderWord(t), ptr))
+	e.heapStore("i64", fmt.Sprint(e.objHeaderWord(t)), ptr, 8)
+	// A malloc'd object starts with no key absent and its layout's order.
+	if i := t.presenceIndex(); i >= 0 {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, t.StructIR(), ptr, i))
+		e.heapStore("i64", "0", g, 8)
+	}
+	if i := t.orderIndex(); i >= 0 {
+		g := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, t.StructIR(), ptr, i))
+		e.heapStore("ptr", "null", g, 8)
+	}
 }
 
 // registeredLayout is one object layout that received a type id.

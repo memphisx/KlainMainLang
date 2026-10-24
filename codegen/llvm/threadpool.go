@@ -44,10 +44,15 @@ var fsNativeSource string
 //go:embed threadpoolsrc/klainsqlite.c
 var sqliteNativeSource string
 
+// klain:http's cluster natives (the fork, the shared close flags).
+//
+//go:embed threadpoolsrc/klainkhttp.c
+var khttpNativeSource string
+
 // ThreadPoolSource returns the embedded pool C runtime, linked (with -pthread)
 // whenever the program routes an fs op through the pool.
 func ThreadPoolSource() string {
-	return threadPoolSource + "\n" + httpParserSource + "\n" + dnsNativeSource + "\n" + zlibNativeSource + "\n" + fsNativeSource + "\n" + sqliteNativeSource
+	return threadPoolSource + "\n" + httpParserSource + "\n" + dnsNativeSource + "\n" + zlibNativeSource + "\n" + fsNativeSource + "\n" + sqliteNativeSource + "\n" + khttpNativeSource
 }
 
 // UsesThreadPool reports whether any pooled async fs op was emitted, so the CLI
@@ -79,11 +84,8 @@ func (e *Emitter) ThreadPoolCFlags() []string {
 		cflags = append(cflags, "-DKLAINPOOL_SQLITE=1")
 	}
 	cflags = append(cflags, DeadStripFlags(e.exportsRuntime())...)
-	if e.isGCMode() {
-		cflags = append(cflags, "-DKLAINPOOL_GC=1")
-		if !e.hasWorkers && !e.UsesSync() {
-			cflags = append(cflags, "-DKLAINPOOL_GC_ENABLE=1")
-		}
+	if e.isGCMode() && !e.hasWorkers && !e.UsesSync() {
+		cflags = append(cflags, "-DKLAINPOOL_GC_ENABLE=1")
 	}
 	return cflags
 }

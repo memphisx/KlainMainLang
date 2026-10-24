@@ -1,6 +1,6 @@
 // Static CommonJS `require('<literal>')` — Node-style module loading, accepted
 // at the top level and desugared into the equivalent ES import at parse time
-// (see docs/adr/ADR-00369.md), so it resolves into exactly the same dispatch as
+// (see docs/adr/00/ADR-00369.md), so it resolves into exactly the same dispatch as
 // an `import`. Only the *static* form (a string-literal module path) is
 // supported; a dynamic `require(variable)` is a clean compile error, because
 // runtime/lazy module loading is a separate, deferred capability.

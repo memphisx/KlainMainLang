@@ -9,7 +9,6 @@ import (
 	"KlainMainLang/ast"
 	_ "embed"
 	"fmt"
-	"strings"
 )
 
 // The settle, reject and adoption routines live in promisesrc/settle.c
@@ -41,7 +40,8 @@ func (e *Emitter) ensurePromiseSettle() {
 declare void @__kml_promise_reject_with(ptr, i64, i64)
 declare void @__kml_promise_reject_err(ptr, i64)
 declare void @__kml_promise_reject_from(ptr, ptr)
-declare void @__kml_promise_reject_box(ptr, i64)`)
+declare void @__kml_promise_reject_box(ptr, i64)
+declare void @__kml_promise_settle_later(ptr)`)
 }
 
 // emitRejectPromise rejects promise q with the caught value (tag, an i8 or
@@ -68,6 +68,10 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 	}
 
 	valTy := e.newPromiseValueType(ex)
+	if e.promiseValue == nil {
+		e.promiseValue = map[*ast.NewExpression]Type{}
+	}
+	e.promiseValue[ex] = valTy
 
 	e.ensurePromiseSettle()
 	e.ensureExceptionHelpers()
@@ -108,7 +112,7 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 	// (TDD-00091). A `Promise<void>` resolve takes no argument, so it can't be
 	// handed a thenable — leave it unmarked.
 	if len(resolveParams) == 1 {
-		resolveTy.IsPromiseResolver = true
+		resolveTy.setKind(kindPromiseResolver, true)
 	}
 	// reject(reason) carries the real value as a caught-value record ({i8,i64}),
 	// not an Error pointer — so `rej(42)`/`rej("x")`/`rej(new Error())` all round-
@@ -129,7 +133,7 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 		execVal, err = e.emitFunctionExpression(fn, []Type{resolveTy, rejectTy})
 	default:
 		execVal, err = e.emitExpr(exec)
-		if err == nil && !execVal.Ty.IsFunc {
+		if err == nil && !execVal.Ty.IsFunc() {
 			return Value{}, fmt.Errorf("%d:%d: new Promise's executor must be a function (arrow, function expression, or a closure-typed value)", pos.Line, pos.Col)
 		}
 	}
@@ -143,7 +147,7 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 	// (A parameter held in `any` takes the box, passed in the same
 	// register a pointer is.)
 	adapt := func(ref string, from, to Type) string {
-		v := e.coerce(Value{Ref: ref, Ty: from}, to)
+		v := e.convert(Value{Ref: ref, Ty: from}, to)
 		if v.Ty.IR == "i64" {
 			p := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, v.Ref))
@@ -151,10 +155,10 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 		}
 		return v.Ref
 	}
-	if ps := execVal.Ty.FuncParams; execVal.Ty.IsFunc && len(ps) >= 2 {
+	if ps := execVal.Ty.FuncParams; execVal.Ty.IsFunc() && len(ps) >= 2 {
 		resolveClo = adapt(resolveClo, resolveTy, ps[0])
 		rejectClo = adapt(rejectClo, rejectTy, ps[1])
-	} else if len(ps) == 1 && execVal.Ty.IsFunc {
+	} else if len(ps) == 1 && execVal.Ty.IsFunc() {
 		resolveClo = adapt(resolveClo, resolveTy, ps[0])
 	}
 	// A throw from the executor rejects the promise (settle.c).
@@ -196,21 +200,21 @@ func (e *Emitter) emitPromiseAdopt(tgtRef, srcRef string) {
 	env := e.freshReg()
 	envSrc := e.freshReg()
 	envTgt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+	e.heapMallocInto(env, "16")
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", envSrc, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", srcRef, envSrc))
+	e.heapStore("ptr", srcRef, envSrc, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", envTgt, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", tgtRef, envTgt))
+	e.heapStore("ptr", tgtRef, envTgt, 8)
 
 	// closure = { adopt_runner, env }
 	clo := e.freshReg()
 	cfp := e.freshReg()
 	cep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.heapMallocInto(clo, "16")
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
-	e.emitInstr(fmt.Sprintf("store ptr @__kml_promise_adopt_runner, ptr %s, align 8", cfp))
+	e.heapStore("ptr", "@__kml_promise_adopt_runner", cfp, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, cep))
+	e.heapStore("ptr", env, cep, 8)
 
 	// If src already settled → enqueue now; else attach a reaction node onto
 	// src.reactions (the same pattern emitPromiseThen uses).
@@ -234,14 +238,14 @@ func (e *Emitter) emitPromiseAdopt(tgtRef, srcRef string) {
 	oldHead := e.freshReg()
 	nodeClo := e.freshReg()
 	nodeNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", node))
+	e.heapMallocInto(node, "16")
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, srcRef))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, rxP))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", nodeClo, node))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", clo, nodeClo))
+	e.heapStore("ptr", clo, nodeClo, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", nodeNext, node))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", oldHead, nodeNext))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, rxP))
+	e.heapStore("ptr", oldHead, nodeNext, 8)
+	e.heapStore("ptr", node, rxP, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 }
@@ -254,11 +258,11 @@ func (e *Emitter) buildBuiltinClosure(fn, envPtr string) string {
 	hdr := e.freshReg()
 	fpp := e.freshReg()
 	epp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
+	e.heapMallocInto(hdr, "16")
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fn, fpp))
+	e.heapStore("ptr", fn, fpp, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", envPtr, epp))
+	e.heapStore("ptr", envPtr, epp, 8)
 	return hdr
 }
 
@@ -278,21 +282,12 @@ func (e *Emitter) emitResolveThunk(valTy Type) string {
 	e.emitThunkAlreadySettledGuard()
 	if !isVoid {
 		v := Value{Ref: "%v", Ty: valTy}
-		if valTy.IsArray {
+		if valTy.IsArray() {
 			// A resolved array value arrives via the closure array-argument ABI
-			// (`ptr %vptr` — the boxed {data, len} header — plus `i64 %vlen`), the
-			// same shape `emitClosureCall` marshals a `resolve(arr)` call into. Load
-			// the data pointer out of the box and rebuild the {ptr, i64} aggregate
-			// storePromiseValue expects. (Previously the thunk declared a single
-			// `{ptr,i64} %v` param, so it read the *box* pointer as the data pointer
-			// — corrupting every `Promise<T[]>`.)
-			dp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%vptr, align 8", dp))
-			a0 := e.freshReg()
-			a1 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", a0, dp))
-			e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %%vlen, 1", a1, a0))
-			v = Value{Ref: a1, Ty: valTy}
+			// (`ptr %vptr` — the {data, len} header — plus `i64 %vlen`), the
+			// same shape `emitClosureCall` marshals a `resolve(arr)` call into.
+			// The header is the array value storePromiseValue expects.
+			v = e.arrayValueFromHeaderReg("%vptr", valTy)
 		}
 		if isUnconstrainedDynamic(valTy) {
 			// resolve(x) with a promise adopts it.
@@ -309,7 +304,7 @@ func (e *Emitter) emitResolveThunk(valTy Type) string {
 	}
 	params := "ptr %p"
 	if !isVoid {
-		if valTy.IsArray {
+		if valTy.IsArray() {
 			params = "ptr %p, ptr %vptr, i64 %vlen"
 		} else {
 			params = fmt.Sprintf("ptr %%p, %s %%v", StructFieldIR(valTy))
@@ -357,23 +352,9 @@ func (e *Emitter) emitThunkAlreadySettledGuard() {
 // thunks have no scopes/generator/async state to preserve, so this is the minimal
 // subset of emitClosureFunc's own save/restore dance.
 func (e *Emitter) beginThunkEmit() func() {
-	savedAllocas := e.allocas
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedLabelCtr := e.labelCtr
-	savedBlockDone := e.blockDone
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.labelCtr = 0
-	e.blockDone = false
-	return func() {
-		e.allocas = savedAllocas
-		e.body = savedBody
-		e.regCtr = savedRegCtr
-		e.labelCtr = savedLabelCtr
-		e.blockDone = savedBlockDone
-	}
+	saved := e.funcBuilder
+	e.funcBuilder = &funcBuilder{}
+	return func() { e.funcBuilder = saved }
 }
 
 // newPromiseValueType is T of `new Promise<T>(executor)`: the type argument,
@@ -386,7 +367,7 @@ func (e *Emitter) newPromiseValueType(ex *ast.NewExpression) Type {
 	if c := e.front(); c != nil {
 		t := c.TypeOf(ex)
 		if !c.Unanswered(t) && len(t.TypeArgs) == 1 {
-			if r, ok := lowerRepr(t.TypeArgs[0]); ok && !r.IsArray && !r.IsObject {
+			if r, ok := lowerRepr(t.TypeArgs[0]); ok && !r.IsArray() && !r.IsObject() {
 				return r
 			}
 		}

@@ -34,7 +34,7 @@ func (e *Emitter) defineContentNamed(prefix, retIR, params, body string) string 
 
 // writeHelper writes a generated helper's definition.
 func (e *Emitter) writeHelper(linkage, retIR, name, params, body string) {
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s %s(%s) {\nentry:\n%s}\n", linkage, retIR, name, params, body))
+	e.writeFunc(fmt.Sprintf("%s %s %s(%s)", linkage, retIR, name, params), body)
 }
 
 // closureSymbol names the function of a closure literal at pos. In a
@@ -42,7 +42,7 @@ func (e *Emitter) writeHelper(linkage, retIR, name, params, body string) {
 // module's code names it the same in every program; a literal emitted more
 // than once (a generic instantiation) numbers the later copies.
 func (e *Emitter) closureSymbol(pos ast.Pos) string {
-	if e.inLib == "" {
+	if e.inLib == "" && e.sharedLitUnit == "" {
 		name := fmt.Sprintf("@__closure_%d", e.closureCtr)
 		e.closureCtr++
 		return name
@@ -55,14 +55,20 @@ func (e *Emitter) closureSymbol(pos ast.Pos) string {
 // arguments inside a generic one), numbered past the first copy.
 // Outside the library it is prefix_<n>.
 func (e *Emitter) literalSymbol(prefix string, pos ast.Pos) string {
-	if e.inLib == "" {
+	// A shared unit names its literals itself, whichever module first
+	// emits it.
+	mod := e.sharedLitUnit
+	if mod == "" {
+		mod = e.inLib
+	}
+	if mod == "" {
 		e.dynFnCtr++
 		return fmt.Sprintf("%s_%d", prefix, e.dynFnCtr-1)
 	}
-	name := fmt.Sprintf("%s.%s.%d_%d", prefix, e.inLib, pos.Line, pos.Col)
+	name := fmt.Sprintf("%s.%s.%d_%d", prefix, mod, pos.Line, pos.Col)
 	if e.genericInst != "" {
 		// A literal in a generic instantiation: one copy per instantiation.
-		name = fmt.Sprintf("%s.%s.%s.%d_%d", prefix, e.inLib, llvmSafeSymbol(e.genericInst), pos.Line, pos.Col)
+		name = fmt.Sprintf("%s.%s.%s.%d_%d", prefix, mod, llvmSafeSymbol(e.genericInst), pos.Line, pos.Col)
 	}
 	if e.libClosures == nil {
 		e.libClosures = map[string]int{}
@@ -98,7 +104,7 @@ func (e *Emitter) contentNamedHelper(memo map[string]string, key, prefix, retIR,
 	body := e.allocas.String() + e.body.String()
 	restore()
 	if e.pendingHelpers[placeholder] {
-		e.functions.WriteString(fmt.Sprintf("\ndefine internal %s %s(%s) {\nentry:\n%s}\n", retIR, placeholder, params, body))
+		e.writeFunc(fmt.Sprintf("internal %s %s(%s)", retIR, placeholder, params), body)
 		return placeholder
 	}
 	delete(e.pendingHelpers, placeholder)

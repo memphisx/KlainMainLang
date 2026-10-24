@@ -34,13 +34,13 @@ function received(value: any): string {
 
 function validateString(value: any, name: string): void {
     if (typeof value !== 'string') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type string.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type string.' + received(value));
     }
 }
 
 function validateObject(value: any, name: string): void {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type object.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type object.' + received(value));
     }
 }
 

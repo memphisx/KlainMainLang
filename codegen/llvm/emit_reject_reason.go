@@ -34,7 +34,7 @@ func (e *Emitter) clearDynamicRejectParam(arg ast.Expression) func() {
 	if len(params) != 1 || params[0].Type == nil {
 		return func() {}
 	}
-	if !e.resolveType(params[0].Type).IsDynamic {
+	if !e.resolveType(params[0].Type).IsDynamic() {
 		return func() {}
 	}
 	saved := params[0].Type
@@ -76,7 +76,7 @@ func (e *Emitter) emitRejectAdapter(userClo Value) Value {
 	callArgs := "ptr " + ep
 	if hasParam {
 		reason := Value{Ref: "%reason", Ty: TypeCaught}
-		arg := e.coerce(reason, paramTy)
+		arg := e.convert(reason, paramTy)
 		callArgs = fmt.Sprintf("ptr %s, %s %s", ep, StructFieldIR(arg.Ty), arg.Ref)
 	}
 	if retIR == "void" {
@@ -105,7 +105,7 @@ func (e *Emitter) emitRejectAdapter(userClo Value) Value {
 // bits as payload; anything else boxes to a NaN-box `any` and splits into
 // (tag, payload) via emitUnboxTagPayload.
 func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error) {
-	if val.Ty.IsCaught {
+	if val.Ty.IsCaught() {
 		t, p := e.caughtParts(val)
 		return t, p, nil
 	}
@@ -115,8 +115,8 @@ func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error)
 			isErrSubclass = true
 		}
 	}
-	if val.Ty.IsError || isErrSubclass {
-		errPtr := e.coerce(val, TypePtr)
+	if val.Ty.IsError() || isErrSubclass {
+		errPtr := e.convert(val, TypePtr)
 		p := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", p, errPtr.Ref))
 		return fmt.Sprintf("%d", kmlTagError), p, nil
@@ -140,10 +140,10 @@ func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error)
 func (e *Emitter) storeRejectReasonI64Tag(prom, tagI64, pay string) {
 	v0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", pay, v0))
+	e.heapStore("i64", pay, v0, 8)
 	v1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", tagI64, v1))
+	e.heapStore("i64", tagI64, v1, 8)
 }
 
 // loadRejectReasonCaught reconstructs a TypeCaught value from a rejected promise's

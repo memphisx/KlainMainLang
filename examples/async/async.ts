@@ -39,3 +39,7 @@ async function fetchWithCleanup(id: number): Promise<number> {
 }
 const result = await fetchWithCleanup(3)
 console.log("result", result)  // open 3 / close 3 / result 30
+
+// An async arrow with one bare parameter, typed from where it is used.
+const doubled = await Promise.all([1, 2, 3].map(async n => n * 2))
+console.log("doubled", doubled.join(","))  // doubled 2,4,6

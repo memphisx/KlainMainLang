@@ -1,8 +1,8 @@
 // string.c — String.prototype methods the builtin declarations (lib/es.d.ts)
-// lower to. A string is a length-headered byte buffer: the i64 length sits in
-// the 8 bytes before the pointer. Positions are byte offsets, as everywhere in
-// the string layer. An optional parameter arrives as a presence flag and a
-// value.
+// lower to. A string is a length-headered UTF-8 byte buffer (kml_heap.h).
+// Positions and lengths are UTF-16 code units, as in JavaScript: an ASCII
+// string's are its bytes, and other text converts through strheader.c's
+// walkers. An optional parameter arrives as a presence flag and a value.
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -11,11 +11,29 @@
 #include <string.h>
 #include <time.h>
 
-static long long str_len(const char *s) { return *(const long long *)(s - 8); }
+static long long str_len(const char *s) { return KML_STR_LEN(s); }
+
+// strheader.c's UTF-16 walkers.
+extern long long __kml_u16_off(const char *s, long long idx, int *mid);
+extern long long __kml_u16_index(const char *s, long long off);
+extern unsigned __kml_u16_unit_at(const char *s, long long idx);
+extern unsigned __kml_u16_code_point_at(const char *s, long long idx);
+extern char *__kml_u16_sub(const char *s, long long a, long long b);
+
+// u16_len is the string's length in UTF-16 units.
+static long long u16_len(const char *s) { return kml_str_u16len(s); }
+
+// u16_at is the byte offset where a search from unit idx starts: the next
+// character's when idx is the second half of a pair.
+static long long u16_at(const char *s, long long idx) {
+    int mid;
+    long long o = __kml_u16_off(s, idx, &mid);
+    return mid ? o + 4 : o;
+}
 
 // A new headered string holding n bytes of p.
 static char *str_new(const char *p, long long n) {
-    char *base = (char *)malloc((size_t)n + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
     if (n > 0) memcpy(base + 8, p, (size_t)n);
     base[n + 8] = 0;
@@ -63,72 +81,95 @@ static long long index_from(const char *s, const char *search, long long from) {
     return -1;
 }
 
+// u16_index_of is indexOf in UTF-16 units: the first occurrence at or after
+// unit from, or -1.
+static long long u16_index_of(const char *s, const char *search, long long from) {
+    if (kml_str_ascii(s)) return index_from(s, search, from);
+    if (str_len(search) == 0) return from;
+    long long at = index_from(s, search, u16_at(s, from));
+    return at < 0 ? -1 : __kml_u16_index(s, at);
+}
+
 double __kml_String_indexOf(const char *s, const char *search, bool has, double pos) {
-    return (double)index_from(s, search, clamp_pos(has, pos, str_len(s)));
+    return (double)u16_index_of(s, search, clamp_pos(has, pos, u16_len(s)));
 }
 
 bool __kml_String_includes(const char *s, const char *search, bool has, double pos) {
-    return index_from(s, search, clamp_pos(has, pos, str_len(s))) >= 0;
+    return u16_index_of(s, search, clamp_pos(has, pos, u16_len(s))) >= 0;
 }
 
-// String.prototype.charAt(pos): the byte at ToIntegerOrInfinity(pos), or "".
+// String.prototype.charAt(pos): the unit at ToIntegerOrInfinity(pos), or "".
 char *__kml_String_charAt(const char *s, double pos) {
     double p = to_integer(pos);
-    long long n = str_len(s);
+    long long n = u16_len(s);
     if (p < 0 || p >= (double)n) return str_new("", 0);
-    return str_new(s + (long long)p, 1);
+    if (kml_str_ascii(s)) return str_new(s + (long long)p, 1);
+    return __kml_u16_sub(s, (long long)p, (long long)p + 1);
 }
 
-// String.prototype.charCodeAt(index): the byte's value, or NaN.
+// String.prototype.charCodeAt(index): the UTF-16 unit's value, or NaN.
 double __kml_String_charCodeAt(const char *s, double index) {
     double p = to_integer(index);
-    if (p < 0 || p >= (double)str_len(s)) return NAN;
-    return (double)(unsigned char)s[(long long)p];
+    if (p < 0 || p >= (double)u16_len(s)) return NAN;
+    if (kml_str_ascii(s)) return (double)(unsigned char)s[(long long)p];
+    return (double)__kml_u16_unit_at(s, (long long)p);
+}
+
+// sub is units [a, b) of s (a <= b, both in range).
+static char *sub(const char *s, long long a, long long b) {
+    if (a >= b) return str_new("", 0);
+    if (kml_str_ascii(s)) return str_new(s + a, b - a);
+    return __kml_u16_sub(s, a, b);
 }
 
 // String.prototype.slice(start, end): a negative bound counts from the end.
 char *__kml_String_slice(const char *s, bool hasStart, double start, bool hasEnd, double end) {
-    long long n = str_len(s);
+    long long n = u16_len(s);
     double a = hasStart ? to_integer(start) : 0, b = hasEnd ? to_integer(end) : (double)n;
     long long from = a < 0 ? clamp((double)n + a, 0, n) : clamp(a, 0, n);
     long long to = b < 0 ? clamp((double)n + b, 0, n) : clamp(b, 0, n);
-    return from >= to ? str_new("", 0) : str_new(s + from, to - from);
+    return sub(s, from, to);
 }
 
 // String.prototype.substring(start, end): bounds clamped to the string and
 // taken in order.
 char *__kml_String_substring(const char *s, double start, bool hasEnd, double end) {
-    long long n = str_len(s);
+    long long n = u16_len(s);
     long long a = clamp(to_integer(start), 0, n), b = hasEnd ? clamp(to_integer(end), 0, n) : n;
     if (a > b) {
         long long t = a;
         a = b;
         b = t;
     }
-    return str_new(s + a, b - a);
+    return sub(s, a, b);
 }
 
 // String.prototype.substr(start, length) (Annex B).
 char *__kml_String_substr(const char *s, double start, bool hasLength, double length) {
-    long long n = str_len(s);
+    long long n = u16_len(s);
     double a = to_integer(start);
     long long from = a < 0 ? clamp((double)n + a, 0, n) : clamp(a, 0, n);
     long long len = hasLength ? clamp(to_integer(length), 0, n) : n;
     long long to = from + len > n ? n : from + len;
-    return from >= to ? str_new("", 0) : str_new(s + from, to - from);
+    return sub(s, from, to);
 }
 
 // String.prototype.startsWith(search, position).
 bool __kml_String_startsWith(const char *s, const char *search, bool has, double pos) {
     long long n = str_len(s), m = str_len(search);
-    long long from = has ? clamp(to_integer(pos), 0, n) : 0;
+    long long from = has ? clamp(to_integer(pos), 0, u16_len(s)) : 0;
+    if (!kml_str_ascii(s)) from = u16_at(s, from);
     return from + m <= n && memcmp(s + from, search, (size_t)m) == 0;
 }
 
 // String.prototype.endsWith(search, endPosition).
 bool __kml_String_endsWith(const char *s, const char *search, bool has, double end) {
-    long long n = str_len(s), m = str_len(search);
-    long long to = has && !isnan(end) ? clamp(to_integer(end), 0, n) : n;
+    long long m = str_len(search);
+    long long to = has && !isnan(end) ? clamp(to_integer(end), 0, u16_len(s)) : u16_len(s);
+    if (!kml_str_ascii(s)) {
+        int mid;
+        to = __kml_u16_off(s, to, &mid);
+    }
     return to - m >= 0 && memcmp(s + to - m, search, (size_t)m) == 0;
 }
 
@@ -136,10 +177,17 @@ bool __kml_String_endsWith(const char *s, const char *search, bool has, double e
 // before position (NaN or absent: the end).
 double __kml_String_lastIndexOf(const char *s, const char *search, bool has, double pos) {
     long long n = str_len(s), m = str_len(search);
-    long long start = has && !isnan(pos) ? clamp(to_integer(pos), 0, n) : n;
+    bool ascii = kml_str_ascii(s);
+    long long un = ascii ? n : u16_len(s);
+    long long start = has && !isnan(pos) ? clamp(to_integer(pos), 0, un) : un;
+    if (!ascii) {
+        if (m == 0) return (double)start;
+        int mid;
+        start = __kml_u16_off(s, start, &mid);
+    }
     if (start > n - m) start = n - m;
     for (long long i = start; i >= 0; i--) {
-        if (memcmp(s + i, search, (size_t)m) == 0) return (double)i;
+        if (memcmp(s + i, search, (size_t)m) == 0) return ascii ? (double)i : (double)__kml_u16_index(s, i);
     }
     return -1;
 }
@@ -150,10 +198,36 @@ static char *pad(const char *s, double maxLength, bool hasFill, const char *fill
     double target = to_integer(maxLength);
     const char *f = hasFill ? fill : " ";
     long long fl = hasFill ? str_len(fill) : 1;
-    if (target <= (double)n || fl == 0) return str_new(s, n);
+    long long un = u16_len(s);
+    if (target <= (double)un || fl == 0) return str_new(s, n);
     if (target > (double)maxStringLength) __kml_throw_range_error(str_new("Invalid string length", 21));
+    if (un != n || (hasFill && !kml_str_ascii(f))) {
+        // Units, not bytes: whole copies of the fill, then its first units
+        // (the default fill, a bare " ", is one unit).
+        long long add = (long long)target - un, fu = hasFill ? u16_len(f) : 1, whole = add / fu, rest = add % fu;
+        char *part = rest ? sub(f, 0, rest) : NULL; // (rest > 0 only for a given fill)
+        long long pl = part ? str_len(part) : 0, total = whole * fl + pl + n;
+        char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)total + 9);
+        *(long long *)base = total;
+        char *out = base + 8, *w = out;
+        if (!atStart) {
+            memcpy(w, s, (size_t)n);
+            w += n;
+        }
+        for (long long i = 0; i < whole; i++, w += fl) memcpy(w, f, (size_t)fl);
+        if (pl) {
+            memcpy(w, part, (size_t)pl);
+            w += pl;
+        }
+        if (atStart) {
+            memcpy(w, s, (size_t)n);
+            w += n;
+        }
+        *w = 0;
+        return out;
+    }
     long long total = (long long)target, add = total - n;
-    char *base = (char *)malloc((size_t)total + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)total + 9);
     *(long long *)base = total;
     char *out = base + 8, *fillAt = atStart ? out : out + n;
     for (long long i = 0; i < add; i++) fillAt[i] = f[i % fl];
@@ -174,21 +248,25 @@ char *__kml_String_padEnd(const char *s, double maxLength, bool hasFill, const c
 // String.prototype.at(index): the byte at the index, a negative one counting
 // from the end; absent past either end.
 bool __kml_String_at(const char *s, double index, char **out) {
-    long long n = str_len(s);
+    long long n = u16_len(s);
     double k = to_integer(index);
     if (k < 0) k += (double)n;
     if (k < 0 || k >= (double)n) return false;
-    *out = str_new(s + (long long)k, 1);
+    *out = sub(s, (long long)k, (long long)k + 1);
     return true;
 }
 
-// String.prototype.codePointAt(pos): the code point of the UTF-8 character
-// starting at the byte offset (positions are byte offsets in this
-// compiler's strings); a byte that starts no valid sequence reads as
-// itself. Absent out of range.
+// String.prototype.codePointAt(pos): the code point at UTF-16 unit pos (a
+// pair's whole code point at its first unit, a surrogate's own value
+// otherwise). Absent out of range.
 bool __kml_String_codePointAt(const char *s, double pos, double *out) {
-    long long n = str_len(s);
     double k = to_integer(pos);
+    if (!kml_str_ascii(s)) {
+        if (k < 0 || k >= (double)u16_len(s)) return false;
+        *out = (double)__kml_u16_code_point_at(s, (long long)k);
+        return true;
+    }
+    long long n = str_len(s);
     if (k < 0 || k >= (double)n) return false;
     const unsigned char *u = (const unsigned char *)s;
     long long i = (long long)k;
@@ -241,7 +319,7 @@ char *__kml_String_repeat(const char *s, double count) {
     if (n == 0 || times == 0) return str_new("", 0);
     if ((double)n * (double)times > (double)maxStringLength) __kml_throw_range_error(str_new("Invalid string length", 21));
     long long total = n * times;
-    char *base = (char *)malloc((size_t)total + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)total + 9);
     *(long long *)base = total;
     char *out = base + 8;
     for (long long i = 0; i < times; i++) memcpy(out + i * n, s, (size_t)n);
@@ -250,10 +328,11 @@ char *__kml_String_repeat(const char *s, double count) {
 }
 
 // An array's header: the cell a JavaScript array value refers to, its
-// elements and their count.
+// elements, their count and its holes (null: none).
 typedef struct {
     void *data;
     long long len;
+    void *holes;
 } array_header;
 
 // String.prototype.concat(...strings): the receiver followed by each
@@ -265,7 +344,7 @@ char *__kml_String_concat(const char *s, const array_header *strings) {
         n += str_len(xs[i]);
         if (n > maxStringLength) __kml_throw_range_error("Invalid string length");
     }
-    char *base = (char *)malloc((size_t)n + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
     char *out = base + 8, *p = out;
     memcpy(p, s, (size_t)str_len(s));
@@ -303,16 +382,17 @@ static long long utf8_len(unsigned char c) {
 array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, double limit) {
     // The header word before it, as every array header has (KML_ARRAY_HDR_WORD,
     // passed in by the compiler): only an instance's body has another.
-    long long *cell = (long long *)malloc(8 + sizeof(array_header));
+    long long *cell = (long long *)kml_alloc(KML_HEAP_WORDS, 8 + sizeof(array_header));
     cell[0] = KML_ARRAY_HDR_WORD;
     array_header *h = (array_header *)(cell + 1);
     h->data = NULL;
     h->len = 0;
+    h->holes = NULL;
     unsigned long long lim = hasLimit ? to_uint32(limit) : 4294967295ULL;
     if (lim == 0) return h;
     if (sep == NULL) {
         // An undefined separator: the whole string, unsplit.
-        char **one = (char **)malloc(sizeof(char *));
+        char **one = (char **)kml_alloc(KML_HEAP_WORDS, sizeof(char *));
         one[0] = str_new(s, str_len(s));
         h->data = one;
         h->len = 1;
@@ -321,14 +401,14 @@ array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, 
     long long n = str_len(s), m = str_len(sep);
     if (n == 0) {
         if (m == 0) return h;
-        char **one = (char **)malloc(sizeof(char *));
+        char **one = (char **)kml_alloc(KML_HEAP_WORDS, sizeof(char *));
         one[0] = str_new("", 0);
         h->data = one;
         h->len = 1;
         return h;
     }
     long long cap = 8, count = 0;
-    char **out = (char **)malloc((size_t)cap * sizeof(char *));
+    char **out = (char **)kml_alloc(KML_HEAP_WORDS, (size_t)cap * sizeof(char *));
     long long start = 0;
     while ((unsigned long long)count < lim) {
         long long at;
@@ -336,6 +416,18 @@ array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, 
             if (start >= n) break;
             long long k = utf8_len((unsigned char)s[start]);
             if (start + k > n) k = n - start;
+            if (k == 4) {
+                // A pair splits into its two surrogates, as UTF-16 does.
+                if (count + 2 > cap) {
+                    cap *= 2;
+                    out = (char **)kml_realloc(KML_HEAP_WORDS, out, (size_t)cap * sizeof(char *));
+                }
+                long long u = __kml_u16_index(s, start);
+                out[count++] = __kml_u16_sub(s, u, u + 1);
+                if ((unsigned long long)count < lim) out[count++] = __kml_u16_sub(s, u + 1, u + 2);
+                start += 4;
+                continue;
+            }
             at = start + k;
         } else {
             at = index_from(s, sep, start);
@@ -343,7 +435,7 @@ array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, 
         }
         if (count == cap) {
             cap *= 2;
-            out = (char **)realloc(out, (size_t)cap * sizeof(char *));
+            out = (char **)kml_realloc(KML_HEAP_WORDS, out, (size_t)cap * sizeof(char *));
         }
         out[count++] = str_new(s + start, at - start);
         if (m == 0) {
@@ -389,7 +481,7 @@ char *__kml_url_whatwg_encode(const char *in) {
     size_t n = strlen(in), a = 0, b = n;
     while (a < b && (unsigned char)in[a] <= 0x20) a++;
     while (b > a && (unsigned char)in[b - 1] <= 0x20) b--;
-    char *out = (char *)malloc((b - a) * 3 + 1), *o = out;
+    char *out = (char *)malloc((b - a) * 3 + 1), *o = out; /* scratch */
     // The scheme, and whether it is a special one.
     size_t i = a, s = a;
     bool special = false;
@@ -513,7 +605,7 @@ char *__kml_url_opaque_set(const char *href, int part, const char *value) {
     const char *pathEnd = q ? q : h ? h : href + n;
     const char *qEnd = h ? h : href + n;
     size_t vn = strlen(value);
-    char *buf = (char *)malloc(n + vn * 3 + 3), *o = buf;
+    char *buf = (char *)malloc(n + vn * 3 + 3), *o = buf; /* scratch */
     memcpy(o, href, (size_t)(pathEnd - href)), o += pathEnd - href;
     static const char hex[] = "0123456789ABCDEF";
     if (part == 6) {
@@ -538,7 +630,7 @@ char *__kml_url_opaque_set(const char *href, int part, const char *value) {
         }
     }
     char *out = str_new(buf, (long long)(o - buf));
-    free(buf);
+    free(buf); /* scratch */
     return out;
 }
 
@@ -570,7 +662,7 @@ static bool url_special_protocol(const char *protocol) {
 char *__kml_url_opaque_host_pct(const char *protocol, const char *host) {
     if (url_special_protocol(protocol)) return (char *)host;
     size_t n = strlen(host);
-    char *buf = (char *)malloc(n * 3 + 1), *o = buf;
+    char *buf = (char *)malloc(n * 3 + 1), *o = buf; /* scratch */
     static const char hex[] = "0123456789ABCDEF";
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)host[i];
@@ -578,7 +670,7 @@ char *__kml_url_opaque_host_pct(const char *protocol, const char *host) {
         else *o++ = (char)c;
     }
     char *out = str_new(buf, (long long)(o - buf));
-    free(buf);
+    free(buf); /* scratch */
     return out;
 }
 
@@ -586,7 +678,7 @@ char *__kml_url_opaque_href(const char *protocol, const char *href) {
     if (url_special_protocol(protocol)) return (char *)href;
     char *enc = __kml_url_whatwg_encode(href);
     char *out = str_new(enc, (long long)strlen(enc));
-    free(enc);
+    free(enc); /* scratch */
     return out;
 }
 
@@ -607,7 +699,7 @@ static long long kml_days_from_civil(long long y, long long m, long long d) {
 
 /* localtime of the whole seconds holding t_ms; false when out of range. */
 static int kml_localtime(long long t_ms, struct tm *out) {
-	long long secs = t_ms >= 0 ? t_ms / 1000 : -((-t_ms + 999) / 1000);
+	long long secs = t_ms / 1000 - (t_ms % 1000 < 0); /* floor, no overflow */
 	time_t t = (time_t)secs;
 #ifdef _WIN32
 	return localtime_s(out, &t) == 0;
@@ -733,7 +825,7 @@ long long __kml_tz_offset_ms(long long t_ms) {
 	if (!kml_localtime(t_ms, &lt)) {
 		return 0;
 	}
-	long long secs = t_ms >= 0 ? t_ms / 1000 : -((-t_ms + 999) / 1000);
+	long long secs = t_ms / 1000 - (t_ms % 1000 < 0); /* floor, no overflow */
 	long long days = kml_days_from_civil(lt.tm_year + 1900LL, lt.tm_mon + 1LL, lt.tm_mday);
 	long long local = ((days * 24 + lt.tm_hour) * 60 + lt.tm_min) * 60 + lt.tm_sec;
 	return (local - secs) * 1000;

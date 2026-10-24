@@ -29,6 +29,10 @@ func (c *Checker) typeParamType(sym *binder.Symbol) *Type {
 		switch n := d.Node.(type) {
 		case *ast.FunctionDeclaration:
 			names, constraints, defaults = n.TypeParams, n.TypeParamConstraints, n.TypeParamDefaults
+		case *ast.ArrowFunction:
+			names, constraints, defaults = n.TypeParams, n.TypeParamConstraints, n.TypeParamDefaults
+		case *ast.FunctionExpression:
+			names, constraints, defaults = n.TypeParams, n.TypeParamConstraints, n.TypeParamDefaults
 		case *ast.ClassDeclaration:
 			names, constraints, defaults = n.TypeParams, n.TypeParamConstraints, n.TypeParamDefaults
 		default:
@@ -60,11 +64,38 @@ func (c *Checker) typeParamType(sym *binder.Symbol) *Type {
 	return t
 }
 
+// ErasedSignature is a generic function type with each of its own type
+// parameters instantiated to any: the function a generic is as a value
+// compiled once (an erased generic's signature).
+func (c *Checker) ErasedSignature(t *Type) *Type {
+	if t == nil || t.Flags&Object == 0 || t.Kind != Function || len(t.TypeParams) == 0 {
+		return t
+	}
+	m := make(map[*Type]*Type, len(t.TypeParams))
+	for _, tp := range t.TypeParams {
+		m[tp] = c.anyT
+	}
+	return c.instantiate(t, m)
+}
+
 // instantiate substitutes m's types for the type parameters in t.
 func (c *Checker) instantiate(t *Type, m map[*Type]*Type) *Type {
 	if len(m) == 0 || t == nil {
 		return t
 	}
+	if t.LiteralThis != nil {
+		// A `ThisType<T>` marker instantiates with the object it marks.
+		r := c.instantiateType(t, m)
+		if lt := c.instantiate(t.LiteralThis, m); r.Flags&Object != 0 && r.LiteralThis != lt {
+			r = c.in.withLiteralThis(r, lt)
+		}
+		return r
+	}
+	return c.instantiateType(t, m)
+}
+
+// instantiateType is instantiate, the `ThisType<T>` marker aside.
+func (c *Checker) instantiateType(t *Type, m map[*Type]*Type) *Type {
 	switch {
 	case t.Flags&Deferred != 0:
 		return c.instantiateDeferred(t, m)
@@ -90,7 +121,7 @@ func (c *Checker) instantiate(t *Type, m map[*Type]*Type) *Type {
 		for i, x := range t.Elems {
 			es[i] = c.instantiate(x, m)
 		}
-		return c.in.tuple(es)
+		return c.in.tupleLabelled(es, t.Opt, t.Labels)
 	case Function:
 		if len(t.Overloads) > 0 {
 			// An overload set: each signature instantiated, still a set.
@@ -149,6 +180,9 @@ func (c *Checker) instantiate(t *Type, m map[*Type]*Type) *Type {
 		}
 		return r
 	case Anonymous:
+		if t.RecursiveAlias() {
+			return t // names no type parameter
+		}
 		props := make([]*Property, len(t.Props))
 		for i, p := range t.Props {
 			props[i] = &Property{Name: p.Name, Type: c.instantiate(p.Type, m), Optional: p.Optional}
@@ -179,6 +213,25 @@ func (c *Checker) instantiate(t *Type, m map[*Type]*Type) *Type {
 
 // paramAt is the parameter type of fn an argument at index i binds to (a
 // rest parameter's element type past the fixed ones).
+// restTypeParam is fn's rest parameter when its type is one of owner's type
+// parameters (`...args: A`), else nil.
+func restTypeParam(fn, owner *Type) *Type {
+	n := len(fn.Params)
+	if !fn.restParam || n == 0 {
+		return nil
+	}
+	rp := fn.Params[n-1]
+	if rp.Flags&TypeParam == 0 {
+		return nil
+	}
+	for _, tp := range owner.TypeParams {
+		if tp == rp {
+			return rp
+		}
+	}
+	return nil
+}
+
 func paramAt(fn *Type, i int) *Type {
 	n := len(fn.Params)
 	if fn.restParam && i >= n-1 && n > 0 {
@@ -240,15 +293,44 @@ func (c *Checker) inferArgs(callArgs []ast.Expression, typeArgs []*ast.TypeAnnot
 	return m
 }
 
+// inferArgsRecv is inferArgs for a call through recv (`recv.m(…)`, else
+// nil): a generic `this: T` parameter infers from the receiver's type too
+// (`flat<A>(this: A)`).
+func (c *Checker) inferArgsRecv(recv ast.Expression, callArgs []ast.Expression, typeArgs []*ast.TypeAnnotation, fn *Type, withSensitive bool) map[*Type]*Type {
+	m, _ := c.inferArgsDetailRecv(recv, callArgs, typeArgs, fn, withSensitive)
+	return m
+}
+
+// callRecv is the receiver of n when it is a call through a property
+// (`o.m(…)`), else nil.
+func callRecv(n ast.Node) ast.Expression {
+	call, ok := n.(*ast.CallExpression)
+	if !ok {
+		return nil
+	}
+	if m, ok := skipOuter(call.Callee).(*ast.MemberExpression); ok {
+		return m.Object
+	}
+	return nil
+}
+
+func (c *Checker) inferArgsDetail(callArgs []ast.Expression, typeArgs []*ast.TypeAnnotation, fn *Type, withSensitive bool) (map[*Type]*Type, map[*Type]bool) {
+	return c.inferArgsDetailRecv(nil, callArgs, typeArgs, fn, withSensitive)
+}
+
 // inferArgsDetail is inferArgs, also reporting the type parameters that no
 // argument gave a candidate (fixed to their default or unknown).
-func (c *Checker) inferArgsDetail(callArgs []ast.Expression, typeArgs []*ast.TypeAnnotation, fn *Type, withSensitive bool) (map[*Type]*Type, map[*Type]bool) {
+func (c *Checker) inferArgsDetailRecv(recv ast.Expression, callArgs []ast.Expression, typeArgs []*ast.TypeAnnotation, fn *Type, withSensitive bool) (map[*Type]*Type, map[*Type]bool) {
 	uninferred := map[*Type]bool{}
 	m := map[*Type]*Type{}
 	if len(typeArgs) > 0 {
 		for i, tp := range fn.TypeParams {
 			if i < len(typeArgs) && typeArgs[i] != nil && typeArgs[i].TypeNode() != nil {
-				if t := c.typeFromNode(typeArgs[i].TypeNode(), c.b.Module); !c.Unanswered(t) {
+				scope := c.b.TypeArgScope(typeArgs[i])
+				if scope == nil {
+					scope = c.b.Module
+				}
+				if t := c.typeFromNode(typeArgs[i].TypeNode(), scope); !c.Unanswered(t) {
 					m[tp] = t
 					continue
 				}
@@ -258,6 +340,9 @@ func (c *Checker) inferArgsDetail(callArgs []ast.Expression, typeArgs []*ast.Typ
 		return m, uninferred
 	}
 	cands := map[*Type][]*Type{}
+	savedKept := c.literalKept
+	c.literalKept = map[*Type]bool{}
+	defer func() { c.literalKept = savedKept }()
 	// poisoned marks the type parameters an unanswered argument could have
 	// inferred: their answer is unanswered too, never a guess.
 	poisoned := map[*Type]bool{}
@@ -280,13 +365,53 @@ func (c *Checker) inferArgsDetail(callArgs []ast.Expression, typeArgs []*ast.Typ
 		}
 		c.unify(p, at, fn, cands)
 	}
+	// The receiver against a `this: T` parameter (tsc's inferTypes over
+	// the this-argument).
+	if recv != nil && fn.ThisType != nil {
+		if rt := c.TypeOf(recv); !c.Unanswered(rt) {
+			c.unify(fn.ThisType, rt, fn, cands)
+		} else {
+			for _, tp := range fn.TypeParams {
+				if occurs(tp, fn.ThisType) {
+					poisoned[tp] = true
+				}
+			}
+		}
+	}
+	// A rest parameter typed by a type parameter (`...args: A`, A extends
+	// any[]) infers the tuple of the arguments it collects (`[X, Y]`).
+	restTP := restTypeParam(fn, fn)
+	restAt := len(fn.Params) - 1
+	if restTP != nil && len(callArgs) >= restAt {
+		var elems []*Type
+		ok := true
+		for _, a := range callArgs[restAt:] {
+			at := c.TypeOf(a)
+			if c.Unanswered(at) {
+				ok = false
+				break
+			}
+			elems = append(elems, widen(c, at))
+		}
+		if ok {
+			cands[restTP] = append(cands[restTP], c.in.tuple(elems))
+		} else {
+			poisoned[restTP] = true
+		}
+	}
 	for i, a := range callArgs {
+		if restTP != nil && i >= restAt {
+			break
+		}
 		if !contextSensitive(a) {
 			infer(i, a)
 		}
 	}
 	if withSensitive {
 		for i, a := range callArgs {
+			if restTP != nil && i >= restAt {
+				break
+			}
 			if contextSensitive(a) {
 				infer(i, a)
 			}
@@ -313,12 +438,71 @@ func (c *Checker) inferArgsDetail(callArgs []ast.Expression, typeArgs []*ast.Typ
 			continue
 		}
 		t := c.in.union(cs...)
-		if !c.keepsLiterals(tp, fn) && !c.keepLiterals {
+		keep := c.keepsLiterals(tp, fn) || c.keepLiterals || c.literalKept[tp]
+		if !keep {
 			t = widen(c, t)
+		}
+		if first, ok := c.firstPrimitiveCandidate(cs, keep); ok {
+			t = first
 		}
 		m[tp] = t
 	}
 	return m, uninferred
+}
+
+// firstPrimitiveCandidate is tsc's common supertype of candidates of
+// unrelated primitive types (`f(1, "x")` for `f<T>(a: T, b: T)`): none is a
+// supertype of the others, so the leftmost wins (getCommonSupertype), its
+// null and undefined kept, and the arguments of the other types then fail
+// their check.
+func (c *Checker) firstPrimitiveCandidate(cs []*Type, keepLiterals bool) (*Type, bool) {
+	var firsts, bases, nulls []*Type
+	for _, cand := range cs {
+		// Each candidate is one inference site: a union one (an array's
+		// mixed elements) is a single candidate, not several.
+		var first, base *Type
+		for _, m := range members(cand) {
+			w := widen(c, m)
+			switch {
+			case w.Flags&(Null|Undefined) != 0:
+				nulls = append(nulls, w)
+			case w.Flags&(String|Number|Boolean|BigInt) != 0 && w.Flags&(Object|Union) == 0:
+				if base == nil {
+					first, base = m, w
+				} else if base != w {
+					return nil, false // a mixed site: a union candidate
+				}
+			default:
+				return nil, false
+			}
+		}
+		if base != nil {
+			if !keepLiterals {
+				first = base
+			}
+			firsts, bases = append(firsts, first), append(bases, base)
+		}
+	}
+	if len(bases) < 2 {
+		return nil, false
+	}
+	distinct := false
+	for _, b := range bases[1:] {
+		if b != bases[0] {
+			distinct = true
+		}
+	}
+	if !distinct {
+		return nil, false // one primitive: its literals unite (`1 | 2`)
+	}
+	// The leftmost site, with the other sites' literals of its own kind.
+	keep := []*Type{}
+	for i, b := range bases {
+		if b == bases[0] {
+			keep = append(keep, firsts[i])
+		}
+	}
+	return c.in.union(append(keep, nulls...)...), true
 }
 
 // keepsLiterals reports whether a type parameter's inference keeps literal
@@ -339,12 +523,40 @@ func (c *Checker) keepsLiterals(tp, fn *Type) bool {
 // unify collects inference candidates for fn's type parameters from an
 // argument of type a passed where p is expected.
 func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
+	key := [2]*Type{p, a}
+	if c.unifying[key] {
+		return
+	}
+	if c.unifying == nil {
+		c.unifying = map[[2]*Type]bool{}
+	}
+	c.unifying[key] = true
+	defer delete(c.unifying, key)
 	switch {
+	case p.Flags&Deferred != 0 && c.unifyDepth < 4:
+		// A conditional type not yet decided: infer to both its branches
+		// (tsc's inferToConditionalType).
+		if br := c.deferredBranches(p); br != nil {
+			c.unifyDepth++
+			for _, b := range br {
+				c.unify(b, a, fn, cands)
+			}
+			c.unifyDepth--
+		}
+		return
 	case p.Flags&TypeParam != 0:
 		for _, tp := range fn.TypeParams {
 			if tp == p {
 				cands[p] = append(cands[p], a)
 			}
+		}
+		return
+	case a.Flags&Union != 0 && p.Flags&Object != 0 && p.Kind == Tuple:
+		// A union of tuples to a tuple: each member is its own inference
+		// (tsc's inferFromTypes over a union source), so `[string, number]
+		// | [number, string]` gives K the candidates string and number.
+		for _, m := range a.Types {
+			c.unify(p, m, fn, cands)
 		}
 		return
 	case p.Flags&Union != 0:
@@ -368,6 +580,21 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 		if len(generic) == 1 {
 			if len(rest) > 0 {
 				c.unify(generic[0], c.in.union(rest...), fn, cands)
+				// `"a"` to `K | "z"`: a literal member of the parameter's
+				// own kind keeps the inferred literal (`K | undefined` does
+				// not).
+				if g := generic[0]; g.Flags&TypeParam != 0 && c.literalKept != nil && literalOfKind(fixed, rest) {
+					c.literalKept[g] = true
+				}
+			} else if g := generic[0]; g.Flags&TypeParam != 0 && len(cands[g]) == 0 && a.Flags&Never == 0 {
+				// Every member matched a fixed one (`"data"` to `K | keyof
+				// Ev`): rather than infer nothing, the whole source infers
+				// the bare type parameter, at tsc's lower priority — so
+				// only while nothing else has, and keeping its literals.
+				c.unify(g, a, fn, cands)
+				if c.literalKept != nil {
+					c.literalKept[g] = true
+				}
 			}
 			return
 		}
@@ -401,7 +628,7 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 		// A string to `Iterable<T>` / `ArrayLike<T>`: its characters, as
 		// tsc infers through the String interface (its iterator, its
 		// `[index: number]: string`).
-		if p.Symbol != nil && (p.Symbol.Name == "Iterable" || p.Symbol.Name == "ArrayLike" || p.Symbol.Name == "IterableIterator") && len(p.TypeArgs) == 1 {
+		if p.Symbol != nil && (p.Symbol.Name == "Iterable" || p.Symbol.Name == "ArrayLike" || p.Symbol.Name == "IterableIterator") && len(p.TypeArgs) >= 1 {
 			c.unify(p.TypeArgs[0], c.strT, fn, cands)
 		}
 		return
@@ -457,6 +684,16 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 		}
 	case p.Kind == Function && a.Kind == Function:
 		for i := range p.Params {
+			if tp := restTypeParam(p, fn); tp != nil && i == len(p.Params)-1 && !a.restParam {
+				// `(...args: A) => void` from `(q: X, r: Y) => void`: A is
+				// the tuple of the remaining parameters, `[X, Y]`.
+				var rest []*Type
+				if i < len(a.Params) {
+					rest = a.Params[i:]
+				}
+				c.unify(tp, c.in.tuple(rest), fn, cands)
+				break
+			}
 			if i < len(a.Params) {
 				c.unify(p.Params[i], a.Params[i], fn, cands)
 			}
@@ -548,6 +785,9 @@ func occurs(tp, t *Type) bool {
 			}
 			return occurs(tp, t.Result)
 		case Anonymous:
+			if t.RecursiveAlias() {
+				return false
+			}
 			for _, p := range t.Props {
 				if occurs(tp, p.Type) {
 					return true
@@ -621,6 +861,9 @@ func hasFreeTypeParam(t *Type, seen, bound map[*Type]bool) bool {
 			}
 			return hasFreeTypeParam(t.Result, seen, bound)
 		case Anonymous:
+			if t.RecursiveAlias() {
+				return false
+			}
 			for _, p := range t.Props {
 				if hasFreeTypeParam(p.Type, seen, bound) {
 					return true
@@ -680,6 +923,19 @@ func (c *Checker) contextualParam(fn ast.Node, i int, rest bool) *Type {
 		}
 		return nil
 	}
+	if c.iifeArgContextFree(fn) {
+		return nil
+	}
+	// An argument of a call through any: tsc's untyped call resolves to
+	// the any signature, whose parameters are any.
+	if call, ok := c.parentOf(fn).(*ast.CallExpression); ok && ast.Node(call.Callee) != fn {
+		if ct := c.TypeOf(call.Callee); !c.Unanswered(ct) && ct.Flags&Any != 0 {
+			if rest {
+				return c.in.array(c.anyT)
+			}
+			return c.anyT
+		}
+	}
 	ct := c.callSignatureContext(c.contextualType(fn))
 	if ct == nil || ct.Flags&Object == 0 || ct.Kind != Function {
 		return nil
@@ -713,6 +969,9 @@ func (c *Checker) contextualParam(fn ast.Node, i int, rest bool) *Type {
 // contextualType is the type expected where the expression e occurs: a
 // call's parameter, or an annotated variable's type.
 func (c *Checker) contextualType(e ast.Node) *Type {
+	if orig, ok := c.ctxStandIn[e]; ok {
+		return c.contextualType(orig)
+	}
 	if x, ok := e.(ast.Expression); ok {
 		if a, ok := c.assertion(x); ok && a.Satisfies != nil && a.Satisfies.TypeNode() != nil {
 			if t := c.typeFromNode(a.Satisfies.TypeNode(), c.b.Module); !c.Unanswered(t) {
@@ -724,6 +983,9 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 	case *ast.ObjectLiteral:
 		// A property's value: the property of the literal's own context.
 		for _, prop := range p.Properties {
+			if sp, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" && ast.Node(sp.Arg) == e {
+				return c.contextualType(p) // an object spread's operand: the literal's own context
+			}
 			if ast.Node(prop.Value) == e && prop.KeyExpr == nil && prop.Key != "" {
 				ct := c.contextualType(p)
 				if ct != nil && ct.Flags&Union != 0 {
@@ -736,6 +998,12 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 					return c.nonNullableContext(tp.Type) // an optional member's, without its undefined
 				}
 			}
+		}
+	case *ast.SpreadElement:
+		// An object spread's operand: the literal's own context (tsc's
+		// getContextualTypeForObjectLiteralElement on a spread assignment).
+		if ol, ok := c.parentOf(p).(*ast.ObjectLiteral); ok && ast.Node(p.Arg) == e {
+			return c.contextualType(ol)
 		}
 	case *ast.ArrowFunction:
 		// An expression body: the contextual signature's result (an
@@ -787,7 +1055,10 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 				sig, m, ok := c.pickOverload(p, callee, false)
 				delete(c.contextualizing, p)
 				if !ok {
-					return nil
+					// The pick needs this argument's own type: as tsc
+					// checks it against each candidate in turn, the first
+					// whose arity and other arguments fit gives it.
+					return c.firstFittingOverloadParam(p, callee, j)
 				}
 				if rt := c.returnTypeContext(p, sig, j, m); rt != nil {
 					return rt
@@ -809,7 +1080,7 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 				// argument's context is the uninstantiated parameter: typing
 				// the argument must not start the same inference again.
 				c.inferring[p] = true
-				m := c.contextualInference(c.inferArgs(p.Args, p.TypeArgs, callee, false), callee)
+				m := c.contextualInference(c.inferArgsRecv(callRecv(p), p.Args, p.TypeArgs, callee, false), callee)
 				delete(c.inferring, p)
 				if rt := c.returnTypeContext(p, callee, j, m); rt != nil {
 					return rt
@@ -846,7 +1117,7 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 			pt := paramAt(ctor, j)
 			if pt != nil && len(ctor.TypeParams) > 0 && !c.inferring[p] {
 				c.inferring[p] = true
-				pt = c.instantiate(pt, c.contextualInference(c.inferArgs(p.Args, p.TypeArgs, ctor, false), ctor))
+				pt = c.instantiate(pt, c.contextualInference(c.inferArgsRecv(callRecv(p), p.Args, p.TypeArgs, ctor, false), ctor))
 				delete(c.inferring, p)
 			}
 			return pt
@@ -870,7 +1141,32 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 					return ct.Elems[i]
 				}
 			}
+			// A readonly array's, an iterable's or an array-like's element
+			// (tsc's iterated type of the context).
+			if ct.Symbol != nil && len(ct.TypeArgs) == 1 {
+				switch ct.Symbol.Name {
+				case "ReadonlyArray", "Iterable", "ArrayLike":
+					return ct.TypeArgs[0]
+				}
+			}
 			return nil
+		}
+	case *ast.ConditionalExpression:
+		// A branch: the conditional's own context, so `c ? null : [1, "a"]`
+		// is a tuple where a tuple is expected.
+		if ast.Node(p.Consequent) == e || ast.Node(p.Alternate) == e {
+			return c.contextualType(p)
+		}
+	case *ast.BinaryExpression:
+		// `a || e`, `a ?? e`, `a && e`: an operand the result can be takes
+		// the result's context (tsc's getContextualTypeForBinaryOperand).
+		switch p.Op {
+		case "||", "??":
+			return c.contextualType(p)
+		case "&&":
+			if ast.Node(p.Right) == e {
+				return c.contextualType(p)
+			}
 		}
 	case *ast.AwaitExpression:
 		// An awaited operand: the await's own context (tsc's
@@ -884,12 +1180,27 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 				return t
 			}
 		}
+	case *ast.ArrayDestructuring:
+		if ast.Node(p.Init) == e {
+			if t := c.patternAnnotation(p.TypeAnnot); t != nil && !c.Unanswered(t) {
+				return t
+			}
+		}
+	case *ast.ObjectDestructuring:
+		if ast.Node(p.Init) == e {
+			if t := c.patternAnnotation(p.TypeAnnot); t != nil && !c.Unanswered(t) {
+				return t
+			}
+		}
 	case *ast.AssignmentExpression:
 		// `x = e`: e in the context of x's declared type (tsc's assignment
 		// context), so `pt = [a, b]` is a tuple where pt is declared one.
 		if ast.Node(p.Right) == e && (p.Op == "=" || p.Op == "??=" || p.Op == "||=" || p.Op == "&&=") {
 			if id, ok := p.Left.(*ast.Identifier); ok {
-				if sym, _ := c.b.Resolve(id); sym != nil {
+				// An auto-typed binding (`let f;`) gives no context: tsc's
+				// declared type for it is the auto type, and its storage
+				// type is built from this very value.
+				if sym, _ := c.b.Resolve(id); sym != nil && !evolvingDecl(sym) {
 					if t := c.typeOfSymbol(sym); t != nil && !c.Unanswered(t) {
 						return t
 					}
@@ -1065,7 +1376,7 @@ func (c *Checker) constructParamContext(p *ast.NewExpression, j int) *Type {
 			if len(sig.TypeParams) == 0 {
 				return c.nonNullableContext(pt)
 			}
-			m := c.inferArgs(p.Args, nil, sig, false)
+			m := c.inferArgsRecv(callRecv(p), p.Args, nil, sig, false)
 			c.inferFromReturnContext(p, sig, m)
 			for _, tp := range sig.TypeParams {
 				if m[tp] == nil {
@@ -1108,7 +1419,7 @@ func (c *Checker) inferFromReturnContext(e ast.Expression, sig *Type, m map[*Typ
 	}
 	cands := map[*Type][]*Type{}
 	c.unify(sig.Result, ct, sig, cands)
-	if len(cands) == 0 && c.asyncReturnValue(e) {
+	if _, awaited := c.parentOf(e).(*ast.AwaitExpression); len(cands) == 0 && (awaited || c.asyncReturnValue(e)) {
 		// An async function's return context is `T | PromiseLike<T>` in
 		// tsc; a promise the value is matched against it as Promise<T>.
 		if pt := c.promiseOf(ct); pt != nil {
@@ -1157,6 +1468,30 @@ func (c *Checker) constructsParamContext(sigs []*Type, typeArgs []*ast.TypeAnnot
 	return nil
 }
 
+// literalInContext reports whether a literal holding a function sits where
+// a contextual type reaches it: its own contextual type, unless that is
+// any (which gives a member nothing), else an argument of a callee this
+// checker could not type (the benefit of the doubt), or an element of a
+// literal that is itself in context.
+func (c *Checker) literalInContext(lit ast.Expression) bool {
+	if ct := c.contextualType(lit); ct != nil {
+		return c.Unanswered(ct) || ct.Flags&Any == 0
+	}
+	switch p := c.parentOf(lit).(type) {
+	case *ast.CallExpression, *ast.NewExpression:
+		return true
+	case *ast.ObjectLiteral:
+		return c.literalInContext(p)
+	case *ast.ArrayLiteral:
+		return c.literalInContext(p)
+	case *ast.ConditionalExpression:
+		return c.literalInContext(p)
+	case *ast.SpreadElement:
+		return c.literalInContext(p)
+	}
+	return false
+}
+
 // contextuallyTyped reports whether parameter i of fn has a contextual
 // signature to take its type from (even one naming a type parameter), so an
 // unannotated parameter there is not an implicit any.
@@ -1166,18 +1501,62 @@ func (c *Checker) constructsParamContext(sigs []*Type, typeArgs []*ast.TypeAnnot
 // typed even where the checker cannot name that context yet (a callee it
 // has no type for): reporting there would reject what TypeScript accepts.
 func (c *Checker) contextuallyTyped(fn ast.Node, i int) bool {
-	if ct := c.contextualType(fn); ct != nil && ct.Flags&Object != 0 && (ct.Kind == Function || len(ct.Calls) > 0) {
-		return true
+	if c.iifeArgContextFree(fn) {
+		return false
+	}
+	if ct := c.contextualType(fn); ct != nil {
+		// A union's function member gives the signature (`f: F | null`).
+		if !c.Unanswered(ct) {
+			ct = c.nonNullable(ct)
+		}
+		if ct.Flags&Object != 0 && (ct.Kind == Function || len(ct.Calls) > 0) {
+			return true
+		}
+		if ct.Flags&Union != 0 {
+			for _, m := range ct.Types {
+				if m.Flags&Object != 0 && (m.Kind == Function || len(m.Calls) > 0) {
+					return true
+				}
+			}
+		}
 	}
 	switch p := c.parentOf(fn).(type) {
-	case *ast.CallExpression, *ast.NewExpression, *ast.ObjectLiteral, *ast.ReturnStatement,
-		*ast.ArrayLiteral, *ast.ConditionalExpression, *ast.AwaitExpression, *ast.SpreadElement:
+	case *ast.ObjectLiteral:
+		// A method or property value: typed when the literal itself sits
+		// where a context reaches it (`const o = { m(x) {} }` has none,
+		// and tsc reports x).
+		return c.literalInContext(p)
+	case *ast.ArrayLiteral:
+		return c.literalInContext(p) // as an object literal's member
+	case *ast.CallExpression, *ast.NewExpression, *ast.ReturnStatement,
+		*ast.ConditionalExpression, *ast.AwaitExpression, *ast.SpreadElement:
 		return true
 	case *ast.AssignmentExpression:
-		return ast.Node(p.Right) == fn
+		// Only a function type gives an assigned value's parameters
+		// context (above): an `any` or auto-typed (`let f;`) name leaves
+		// them implicitly any, as tsc reports. A target this checker
+		// cannot type is given the benefit of the doubt.
+		if ast.Node(p.Right) != fn {
+			return false
+		}
+		if id, ok := p.Left.(*ast.Identifier); ok {
+			if sym, _ := c.b.Resolve(id); sym != nil {
+				if evolvingDecl(sym) {
+					return false
+				}
+				if t := c.typeOfSymbol(sym); t != nil && !c.Unanswered(t) {
+					return false
+				}
+			}
+		}
+		return true
 	case *ast.BinaryExpression:
 		return p.Op == "||" || p.Op == "??" || p.Op == "&&"
 	case *ast.VarDeclaration:
+		return p.TypeAnnot != nil
+	case *ast.ArrayDestructuring:
+		return p.TypeAnnot != nil
+	case *ast.ObjectDestructuring:
 		return p.TypeAnnot != nil
 	}
 	return false
@@ -1238,8 +1617,39 @@ func (c *Checker) thisType(e ast.Node) *Type {
 					return sig.ThisType
 				}
 			}
+			// An object literal's method: the literal's contextual type, else
+			// the literal's own type (getThisTypeOfObjectLiteral).
+			if lit, ok := c.parentOf(x).(*ast.ObjectLiteral); ok {
+				if t := c.literalThis(lit, e); t != nil {
+					return t
+				}
+			}
 			if c.thisImplicitlyAny(e) {
 				return c.anyT // no `this` type from anywhere: any (TS2683)
+			}
+			// `new function () {…}()` in JavaScript: the constructed
+			// instance, which tsc's JS constructor-function inference
+			// reads as any here.
+			if ne, ok := c.parentOf(x).(*ast.NewExpression); ok && ast.Node(ne.Callee) == x && c.opts.CompatJS() {
+				return c.anyT
+			}
+			// `obj.p = function () {…}`: obj (noImplicitThis), else any.
+			if as, ok := c.parentOf(x).(*ast.AssignmentExpression); ok && ast.Node(as.Right) == x && as.Op == "=" {
+				var obj ast.Expression
+				switch l := as.Left.(type) {
+				case *ast.MemberExpression:
+					obj = l.Object
+				case *ast.IndexExpression:
+					obj = l.Object
+				}
+				if obj != nil {
+					if c.opts.CompatJS() {
+						return c.anyT
+					}
+					if ot := c.TypeOf(obj); !c.Unanswered(ot) {
+						return c.widenFrom(obj, ot)
+					}
+				}
 			}
 			return c.unanswered
 		case *ast.ObjectLiteral:
@@ -1306,6 +1716,10 @@ func (c *Checker) thisImplicitlyAny(e ast.Node) bool {
 				if p.TypeAnnot == nil {
 					return true
 				}
+			case *ast.CallExpression:
+				if ast.Node(p.Callee) == x {
+					return true // invoked in place: nothing gives it a `this`
+				}
 			}
 			ct := c.contextualType(x)
 			if ct == nil || c.Unanswered(ct) {
@@ -1350,7 +1764,7 @@ func (c *Checker) classInstance(cls *ast.ClassDeclaration) *Type {
 		return c.unanswered
 	}
 	var args []*Type
-	for _, n := range cls.TypeParams {
+	for _, n := range cls.DeclaredTypeParams().Names {
 		args = append(args, c.classTypeParam(sym, n))
 	}
 	if t := c.instanceOf(sym, args); t != nil {
@@ -1360,6 +1774,9 @@ func (c *Checker) classInstance(cls *ast.ClassDeclaration) *Type {
 }
 
 // classValueOf is a class's value, `typeof C`: a static member's `this`.
+// ClassValueOf is a class's value, `typeof C`.
+func (c *Checker) ClassValueOf(cls *ast.ClassDeclaration) *Type { return c.classValueOf(cls) }
+
 func (c *Checker) classValueOf(cls *ast.ClassDeclaration) *Type {
 	if sym := c.symbolOf(cls); sym != nil {
 		return c.typeOfSymbol(sym)
@@ -1430,6 +1847,10 @@ func (c *Checker) mayHaveContext(e ast.Expression) bool {
 		return false
 	case *ast.VarDeclaration:
 		return p.TypeAnnot != nil
+	case *ast.ArrayDestructuring:
+		return p.TypeAnnot != nil
+	case *ast.ObjectDestructuring:
+		return p.TypeAnnot != nil
 	case *ast.MemberExpression:
 		return ast.Node(p.Object) != e // a receiver has no contextual type
 	case *ast.IndexExpression:
@@ -1466,8 +1887,19 @@ func (c *Checker) rawContext(e ast.Node) *Type {
 			}
 			return c.in.union(out...)
 		}
+	case *ast.SpreadElement:
+		if ol, ok := c.parentOf(p).(*ast.ObjectLiteral); ok && ast.Node(p.Arg) == e {
+			return c.rawContext(ol) // an object spread's operand: the literal's own context
+		}
+	case *ast.AssignmentExpression:
+		if p.Op == "=" && ast.Node(p.Right) == e {
+			return c.contextualType(e) // the target's declared type
+		}
 	case *ast.ObjectLiteral:
 		for _, prop := range p.Properties {
+			if sp, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" && ast.Node(sp.Arg) == e {
+				return c.rawContext(p) // an object spread's operand: the literal's own context
+			}
 			if ast.Node(prop.Value) != e || prop.KeyExpr != nil || prop.Key == "" {
 				continue
 			}
@@ -1502,6 +1934,18 @@ func (c *Checker) rawContext(e ast.Node) *Type {
 	case *ast.VarDeclaration:
 		if ast.Node(p.Init) == e && p.TypeAnnot != nil && p.TypeAnnot.TypeNode() != nil {
 			if t := c.typeFromNode(p.TypeAnnot.TypeNode(), c.b.Module); !c.Unanswered(t) {
+				return t
+			}
+		}
+	case *ast.ArrayDestructuring:
+		if ast.Node(p.Init) == e {
+			if t := c.patternAnnotation(p.TypeAnnot); t != nil && !c.Unanswered(t) {
+				return t
+			}
+		}
+	case *ast.ObjectDestructuring:
+		if ast.Node(p.Init) == e {
+			if t := c.patternAnnotation(p.TypeAnnot); t != nil && !c.Unanswered(t) {
 				return t
 			}
 		}
@@ -1668,8 +2112,292 @@ func (c *Checker) ParentOf(n ast.Node) ast.Node { return c.parentOf(n) }
 // interface such as `TransformerTransformCallback<I, O>`), as tsc's
 // getContextualSignature takes it.
 func (c *Checker) callSignatureContext(ct *Type) *Type {
+	if ct != nil && ct.Flags&Union != 0 {
+		return c.unionSignatureContext(ct)
+	}
 	if ct == nil || ct.Flags&Object == 0 || ct.Kind == Function || len(ct.Calls) != 1 || len(ct.Props) > 0 {
 		return ct
 	}
 	return ct.Calls[0]
+}
+
+// CallTypeArgs is the type arguments a call of a generic, non-overloaded
+// function takes, by type parameter name: the explicit ones, else the ones
+// its arguments infer, else the call's contextual type through the result
+// (tsc's inference from the return type). nil when the callee is not such
+// a function.
+func (c *Checker) CallTypeArgs(e *ast.CallExpression) map[string]*Type {
+	callee := c.signaturesOf(c.TypeOf(e.Callee), false)
+	if c.Unanswered(callee) || callee.Flags&Object == 0 || callee.Kind != Function || len(callee.Overloads) > 0 || len(callee.TypeParams) == 0 {
+		return nil
+	}
+	m := c.inferArgsRecv(callRecv(e), e.Args, e.TypeArgs, callee, true)
+	if len(e.TypeArgs) == 0 {
+		c.inferFromReturnContext(e, callee, m)
+	}
+	out := map[string]*Type{}
+	for _, tp := range callee.TypeParams {
+		name := tp.Value
+		if tp.Symbol != nil {
+			name = tp.Symbol.Name
+		}
+		if t := m[tp]; t != nil && t != c.unknownT && !c.Unanswered(t) {
+			out[name] = t
+		}
+	}
+	return out
+}
+
+// literalOfKind reports whether a union parameter's fixed members include a
+// literal of the same primitive kind as one of the source's literals.
+func literalOfKind(fixed map[*Type]bool, rest []*Type) bool {
+	for _, r := range rest {
+		if r.Flags&Literal == 0 {
+			continue
+		}
+		base := literalBase(r.Flags)
+		for f := range fixed {
+			if f.Flags&Literal != 0 && literalBase(f.Flags)&base != 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// literalThis is `this` in a method of object literal lit: its contextual
+// object type, else its own type. While the literal is typed (its methods'
+// results may read `this`), it is a snapshot of the literal's other
+// properties, and the `this` reading it gets the finished type afterwards.
+func (c *Checker) literalThis(lit *ast.ObjectLiteral, this ast.Node) *Type {
+	if ct := c.contextualType(lit); ct != nil {
+		if ct.LiteralThis != nil {
+			return c.settledThis(ct.LiteralThis)
+		}
+		// An enclosing literal's `ThisType<T>`, through property values
+		// (tsc's getContextualThisParameterType walk).
+		for outer := lit; ; {
+			ol, ok := c.parentOf(outer).(*ast.ObjectLiteral)
+			if !ok || !literalPropertyValue(ol, outer) {
+				break
+			}
+			oct := c.contextualType(ol)
+			if oct == nil {
+				break
+			}
+			if oct.LiteralThis != nil {
+				return c.settledThis(oct.LiteralThis)
+			}
+			outer = ol
+		}
+		if !c.Unanswered(ct) && ct.Flags&Object != 0 && ct.Flags&Union == 0 && ct.Kind != Function {
+			return ct
+		}
+		return nil
+	}
+	if snap, busy := c.literalSnaps[lit]; busy {
+		// A method returning `this` itself returns the literal's own type,
+		// circular to tsc: the polymorphic `this` a read through the
+		// literal instantiates with it (withThis).
+		if x, ok := this.(ast.Expression); ok && returnedWhole(c.parentOf(x), x) {
+			return c.thisT
+		}
+		if snap == nil {
+			return nil
+		}
+		if x, ok := this.(ast.Expression); ok {
+			c.literalThisFix[lit] = append(c.literalThisFix[lit], x)
+		}
+		return snap
+	}
+	t := c.TypeOf(lit)
+	if c.Unanswered(t) || t.Flags&Object == 0 || t.Kind != Anonymous {
+		return nil
+	}
+	return t
+}
+
+// literalSnapshot is object literal lit's properties other than its
+// methods and function values, as a partial object; nil when one of them
+// is unanswered or the literal has a spread, accessor or computed key.
+func (c *Checker) literalSnapshot(lit *ast.ObjectLiteral) *Type {
+	var props []*Property
+	for _, p := range lit.Properties {
+		if p.AccessorKind != "" || p.KeyExpr != nil || p.Key == "" {
+			return nil
+		}
+		switch p.Value.(type) {
+		case *ast.SpreadElement:
+			return nil
+		case *ast.FunctionExpression, *ast.ArrowFunction:
+			continue
+		}
+		t := c.TypeOf(p.Value)
+		if c.Unanswered(t) {
+			return nil
+		}
+		if !c.constAsserted(p.Value) && !c.keepsLiteral(p.Value, t) {
+			t = c.widenFrom(p.Value, t)
+		}
+		props = append(props, &Property{Name: p.Key, Type: t})
+	}
+	snap := c.in.objectOf(props, true, false)
+	c.snapshotOf[snap] = lit
+	return snap
+}
+
+// literalNames reports whether object literal lit names property name.
+func literalNames(lit *ast.ObjectLiteral, name string) bool {
+	for _, p := range lit.Properties {
+		if p.Key == name || p.KeyExpr != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// returnedWhole reports x as the whole value a function returns: a return
+// statement's argument or an arrow's expression body.
+func returnedWhole(parent ast.Node, x ast.Expression) bool {
+	switch p := parent.(type) {
+	case *ast.ReturnStatement:
+		return p.Value == x
+	case *ast.ArrowFunction:
+		return p.Body == x
+	}
+	return false
+}
+
+// iifeArgContextFree reports whether fn is an argument of an immediately
+// invoked function whose parameter at fn's position is unannotated: that
+// parameter is typed from fn (iifeParam), so fn is typed with no context
+// (tsc resolves the circularity that way: fn's own unannotated parameters
+// are any, TS7006).
+func (c *Checker) iifeArgContextFree(fn ast.Node) bool {
+	call, ok := c.parentOf(fn).(*ast.CallExpression)
+	if !ok {
+		return false
+	}
+	var params []ast.Param
+	switch callee := call.Callee.(type) {
+	case *ast.FunctionExpression:
+		params = callee.Params
+	case *ast.ArrowFunction:
+		params = callee.Params
+	default:
+		return false
+	}
+	for j, a := range call.Args {
+		if ast.Node(a) != fn {
+			continue
+		}
+		if j >= len(params) {
+			return false
+		}
+		p := params[j]
+		return p.Type == nil && p.Default == nil && !p.Rest && p.ArrayPattern == nil && p.ObjectPattern == nil
+	}
+	return false
+}
+
+// firstFittingOverloadParam is argument j's context in a call of an
+// overloaded callee whose pick could not be made: parameter j of the first
+// non-generic overload whose arity fits and whose other arguments, typed
+// without context, are assignable. nil when none does.
+func (c *Checker) firstFittingOverloadParam(call *ast.CallExpression, callee *Type, j int) *Type {
+	for _, sig := range callee.Overloads {
+		if len(sig.TypeParams) > 0 || !arityFits(sig, len(call.Args)) {
+			continue
+		}
+		fits := true
+		for i, a := range call.Args {
+			if i == j {
+				continue
+			}
+			if _, spread := a.(*ast.SpreadElement); spread || contextSensitive(a) {
+				fits = false
+				break
+			}
+			pt, at := paramAt(sig, i), c.TypeOf(a)
+			if pt == nil || c.Unanswered(at) || !c.assignable(at, pt) {
+				fits = false
+				break
+			}
+		}
+		if fits {
+			if pt := paramAt(sig, j); pt != nil {
+				return c.nonNullableContext(pt)
+			}
+		}
+	}
+	return nil
+}
+
+// unionSignatureContext is tsc's getContextualSignature over a union: the
+// members' signatures, when they are identical but for their results, as
+// one signature returning the union of the results. A nullish member gives
+// none; any other mismatch, the union itself (no signature).
+func (c *Checker) unionSignatureContext(ct *Type) *Type {
+	var first *Type
+	var results []*Type
+	for _, m := range ct.Types {
+		if m.Flags&Nullish != 0 {
+			continue
+		}
+		s := c.callSignatureContext(m)
+		if s == nil || s.Flags&Object == 0 || s.Kind != Function || len(s.TypeParams) > 0 || s.Result == nil {
+			return ct
+		}
+		if first == nil {
+			first = s
+		} else if !sameParams(first, s) {
+			return ct
+		}
+		results = append(results, s.Result)
+	}
+	if first == nil || len(results) < 2 {
+		if first != nil {
+			return first
+		}
+		return ct
+	}
+	return c.in.function(first.Params, first.optionals, first.restParam, c.in.union(results...), nil, nil)
+}
+
+// sameParams reports two signatures with identical parameter lists.
+func sameParams(a, b *Type) bool {
+	if len(a.Params) != len(b.Params) || a.restParam != b.restParam || len(a.optionals) != len(b.optionals) || a.ThisType != b.ThisType {
+		return false
+	}
+	for i := range a.Params {
+		if a.Params[i] != b.Params[i] {
+			return false
+		}
+	}
+	for i := range a.optionals {
+		if a.optionals[i] != b.optionals[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// literalPropertyValue reports that x is the value of a named property of
+// literal ol (`{ k: x }`).
+func literalPropertyValue(ol *ast.ObjectLiteral, x ast.Expression) bool {
+	for _, p := range ol.Properties {
+		if ast.Node(p.Value) == ast.Node(x) && p.Key != "" && p.AccessorKind == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// settledThis is a `ThisType<T>` marker's T for a method's `this`, or nil
+// (not modelled) while T still holds a type parameter the call infers.
+func (c *Checker) settledThis(t *Type) *Type {
+	if c.generic(t) {
+		return nil
+	}
+	return t
 }

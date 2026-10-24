@@ -10,77 +10,34 @@ import (
 )
 
 // gcSBStore returns the IR statement that repoints the CURRENT thread's GC
-// stack bottom at val: single-threaded, the direct @GC_stackbottom store the
-// fiber machinery has always used; under Worker threads, the lock-guarded
-// per-thread @__kml_gc_set_sb call (TDD-00098 stage 4) — a raw store to the
-// process-wide global would corrupt the other threads' scanning.
-//
-// Windows: a context is a Win32 fiber running on a stack the OS allocated, not
-// on the block the IR malloc'd for it (win32io.c), so val — computed from that
-// block — is never the stack in use. The shim re-points the collector on every
-// switch; an IR store after the switch would undo that with a heap address and
-// the next collection would scan from the live SP into unrelated memory. There
-// the statement records the stack actually running, read from the TEB.
+// stack bottom at val, a fiber's own stack, through the GC interface
+// (gcshim.c), which knows whether other threads run and, on Windows, reads the
+// stack actually running from the TEB instead.
 func (e *Emitter) gcSBStore(val string) string {
-	if e.opts.Target.OS() == "windows" {
-		e.ensureGCStackBottomCurrent()
-		return "call void @__kml_gc_sb_cur()"
-	}
-	if e.hasWorkers {
-		return fmt.Sprintf("call void @__kml_gc_set_sb(ptr %s)", val)
-	}
-	return fmt.Sprintf("store ptr %s, ptr @GC_stackbottom, align 8", val)
+	e.ensureGCInterface()
+	return fmt.Sprintf("call void @kml_gc_set_stack_bottom(ptr %s)", val)
 }
 
 // gcSBLoad returns the IR statement that reads the CURRENT thread's GC stack
-// bottom into reg — the value a later gcSBStore(reg) puts back. Single-threaded
-// that is @GC_stackbottom, the variable gcSBStore writes; under Worker threads
-// the per-thread record @__kml_gc_set_sb writes, read back through
-// GC_get_my_stackbottom. On Windows gcSBStore ignores its operand (it reads the
-// TEB), so any defined value serves.
+// bottom into reg — the value a later gcSBStore(reg) puts back.
 func (e *Emitter) gcSBLoad(reg string) string {
-	if e.opts.Target.OS() == "windows" {
-		return fmt.Sprintf("%s = load ptr, ptr @__kml_gc_orig_stackbottom, align 8", reg)
-	}
-	if e.hasWorkers {
-		if !e.usedGCSBGet {
-			e.usedGCSBGet = true
-			e.emitGlobal("declare ptr @GC_get_my_stackbottom(ptr noundef)")
-			e.emitGlobal(`define ptr @__kml_gc_get_sb() {
-entry:
-  %sb = alloca [2 x ptr], align 8
-  call ptr @GC_get_my_stackbottom(ptr %sb)
-  %slot = getelementptr [2 x ptr], ptr %sb, i32 0, i32 0
-  %mem = load ptr, ptr %slot, align 8
-  ret ptr %mem
-}`)
-		}
-		return fmt.Sprintf("%s = call ptr @__kml_gc_get_sb()", reg)
-	}
-	return fmt.Sprintf("%s = load ptr, ptr @GC_stackbottom, align 8", reg)
+	e.ensureGCInterface()
+	return fmt.Sprintf("%s = call ptr @kml_gc_stack_bottom()", reg)
 }
 
-// ensureGCStackBottomCurrent declares @__kml_gc_sb_cur (gcshim.c, Windows only —
-// see gcSBStore): record the stack this code is running on, as the TEB reports
-// it, as the current thread's GC stack base.
-func (e *Emitter) ensureGCStackBottomCurrent() {
-	if e.usedGCSBCur {
+// ensureGCInterface declares the GC interface entry points codegen calls
+// (gcshim.c, linked under -mm=gc): codegen never names the collector.
+func (e *Emitter) ensureGCInterface() {
+	if e.usedGCInterface {
 		return
 	}
-	e.usedGCSBCur = true
-	e.emitGlobal("declare void @__kml_gc_sb_cur()")
-}
-
-// ensureGCUncollectable declares GC_malloc_uncollectable exactly once —
-// zeroed, never collected, but still scanned. Used for any allocation whose
-// only live reference can be invisible to Boehm (pipe-buffered envelopes,
-// cross-thread shared blocks; TDD-00098/TDD-00099).
-func (e *Emitter) ensureGCUncollectable() {
-	if e.usedGCUncollectable {
-		return
-	}
-	e.usedGCUncollectable = true
-	e.emitGlobal("declare ptr @GC_malloc_uncollectable(i64 noundef)")
+	e.usedGCInterface = true
+	e.emitGlobal(`declare void @kml_gc_main_started(i32)
+declare void @kml_gc_set_stack_bottom(ptr)
+declare ptr @kml_gc_stack_bottom()
+declare ptr @kml_gc_alloc_pinned(i64)
+declare void @kml_gc_collect()
+declare i32 @kml_gc_run_finalizers()`)
 }
 
 //go:embed workersrc/worker.c
@@ -88,15 +45,6 @@ var workerSource string
 
 // WorkerSource is the Worker thread runtime's C source, behind kml_layout.h.
 func WorkerSource() string { return layoutHeader() + workerSource }
-
-// WorkerCFlags is worker.c's mode define: under -mm=gc the thread registers
-// with the collector.
-func (e *Emitter) WorkerCFlags() []string {
-	if e.isGCMode() {
-		return []string{"-DKLAIN_GC=1"}
-	}
-	return nil
-}
 
 // ensureWorkerRuntime declares the Worker thread runtime (workersrc/worker.c)
 // once and emits the generated @__kml_worker_uncaught.

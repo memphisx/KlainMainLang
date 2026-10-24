@@ -104,3 +104,37 @@ function f() { return [m, s, w]; }
 console.log(f());
 `, "[ Map(0) {}, Set(0) {}, WeakMap { <items unknown> } ]")
 }
+
+// A `Map | undefined` slot takes its map back out of a dynamic value, and
+// an absent one boxes as undefined; an object read through a structural
+// view keeps an optional map field.
+func TestE2EAnyOptionalHostHandle(t *testing.T) {
+	assertSameAsNode(t, `
+let mo: Map<string, string> | undefined = undefined
+const a: any = mo
+console.log(a === undefined, a)
+mo = new Map<string, string>([["k", "v"]])
+const b: any = mo
+const back: Map<string, string> | undefined = b
+console.log(back!.size, back!.get("k"))
+interface HR { status: number; zz?: number; headers?: Map<string, string> }
+interface Res { status: number; headers: Map<string, string> }
+const r: Res = { status: 1, headers: mo }
+const o: any = r
+console.log((o as HR).headers!.get("k"))
+`)
+}
+
+// An object lacking a Promise's members is no Promise, nor a member of a
+// union with one (tsc's TS2739, TS2322).
+func TestE2EObjectNotAssignableToPromise(t *testing.T) {
+	for _, src := range []string{
+		"interface H { s: number }\ninterface R { s: string }\ndeclare const r: R\nconst p: Promise<H> = r\nexport {}",
+		"interface H { s: number }\ninterface R { s: string }\ndeclare const r: R\nconst p: H | Promise<H> = r\nexport {}",
+		"interface H { s: number }\ninterface R { s: string }\ndeclare function f(fn: () => H | Promise<H>): void\nf((): R => ({ s: '' }))\nexport {}",
+	} {
+		if _, err := parseAndCompileImports(t, src); err == nil {
+			t.Errorf("expected a type error, got none:\n%s", src)
+		}
+	}
+}

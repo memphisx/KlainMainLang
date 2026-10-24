@@ -20,7 +20,7 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	urlVal = e.coerce(urlVal, TypePtr)
+	urlVal = e.convert(urlVal, TypePtr)
 
 	e.ensureMalloc()
 	e.ensureMemcpy()
@@ -48,7 +48,7 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 			return Value{}, err
 		}
 		dyn := isUnconstrainedDynamic(initVal.Ty)
-		if !initVal.Ty.IsObject && !dyn {
+		if !initVal.Ty.IsObject() && !dyn {
 			return Value{}, fmt.Errorf("%d:%d: Request's second argument must be an object with an optional method/headers/body field", ex.GetPos().Line, ex.GetPos().Col)
 		}
 		doneInitL := e.freshLabel("req.initdone")
@@ -85,19 +85,20 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", c, cSlot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneInitL))
 			e.emitLabel(doneInitL)
-		} else if initVal.Ty.Nullable {
+		} else if initVal.Ty.Nullable() {
 			haveL := e.freshLabel("req.init")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(initVal.Ref), doneInitL, haveL))
 			e.emitLabel(haveL)
 			nn := initVal.Ty
-			nn.Nullable, nn.IsUndefined = false, false
+			nn.setNullable(false)
+			nn.setUndefined(false)
 			initVal = Value{Ref: initVal.Ref, Ty: nn}
 		}
 		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok && !dyn {
 			mv := e.loadFieldValue(initVal, idx, fieldTy)
 			switch {
-			case isStringTy(mv.Ty) && !mv.Ty.IsObject && !mv.Ty.IsArray:
-			case mv.Ty.IsDynamic:
+			case isStringTy(mv.Ty) && !mv.Ty.IsObject() && !mv.Ty.IsArray():
+			case mv.Ty.IsDynamic():
 				mv, _ = e.emitAnyIntoString(mv, TypePtr)
 			default:
 				return Value{}, fmt.Errorf("%d:%d: Request's init.method must be a string", ex.GetPos().Line, ex.GetPos().Col)
@@ -184,7 +185,7 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", cp, bodyData, bodyLen))
 		end := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", end, cp, bodyLen))
-		e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", end))
+		e.heapStore("i8", "0", end, 1)
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cp, bodySlot))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bodyLen, lenSlot))
 		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", flagSlot))
@@ -209,7 +210,7 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 		idx, fieldTy, _ := ty.FieldIndex(name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, objReg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, val.Ref, gep, fieldTy.Align()))
+		e.heapStore(fieldTy.IR, val.Ref, gep, fieldTy.Align())
 	}
 	storeField("url", urlVal)
 	storeField("method", methodVal)

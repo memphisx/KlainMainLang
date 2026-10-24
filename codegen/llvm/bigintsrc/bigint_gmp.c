@@ -14,7 +14,7 @@
 #include <math.h>
 
 static mpz_ptr bi_new(void) {
-	mpz_ptr r = (mpz_ptr)malloc(sizeof(mpz_t));
+	mpz_ptr r = (mpz_ptr)kml_alloc(KML_HEAP_WORDS, sizeof(mpz_t));
 	mpz_init(r);
 	return r;
 }
@@ -216,17 +216,17 @@ void *__kml_bigint_parse(const char *s) {
 		start = a + 1;
 		if (start == b) return NULL;
 	}
-	char *buf = (char *)malloc(b - start + 2);
+	char *buf = (char *)malloc(b - start + 2); /* scratch */
 	size_t k = 0;
 	if (neg) buf[k++] = '-';
 	for (size_t i = start; i < b; i++) {
 		unsigned char c = (unsigned char)s[i];
 		int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
-		if (d >= radix) { free(buf); return NULL; }
+		if (d >= radix) { free(buf); return NULL; } /* scratch */
 		buf[k++] = (char)c;
 	}
 	buf[k] = 0;
 	void *r = __kml_bigint_from_str(buf, (long long)k, radix);
-	free(buf);
+	free(buf); /* scratch */
 	return r;
 }

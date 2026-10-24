@@ -67,6 +67,17 @@ char *__kml_json_str_str(const char *s) {
             buf[j++] = '0';
             buf[j++] = hex[c >> 4];
             buf[j++] = hex[c & 15];
+        } else if (c == 0xED && i + 2 < len && (unsigned char)s[i + 1] >= 0xA0) {
+            /* A lone surrogate (WTF-8): well-formed JSON.stringify's \udXXX. */
+            static const char hex[] = "0123456789abcdef";
+            unsigned u = 0xD000 | ((unsigned)s[i + 1] & 0x3F) << 6 | ((unsigned)s[i + 2] & 0x3F);
+            buf[j++] = '\\';
+            buf[j++] = 'u';
+            buf[j++] = hex[(u >> 12) & 15];
+            buf[j++] = hex[(u >> 8) & 15];
+            buf[j++] = hex[(u >> 4) & 15];
+            buf[j++] = hex[u & 15];
+            i += 2;
         } else {
             buf[j++] = (char)c;
         }

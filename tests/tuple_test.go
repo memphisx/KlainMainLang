@@ -1,11 +1,6 @@
 package tests
 
-import (
-	"strings"
-	"testing"
-
-	"KlainMainLang/parser"
-)
+import "testing"
 
 // Tuple types `[T0, T1, ...]` (TDD-00066): declaration, constant-index read,
 // and rendering.
@@ -110,18 +105,17 @@ console.log(lo, hi)
 `, "Thessaloniki 24 24 2\n2 9")
 }
 
-// An optional or rest element has no storage in the fixed-shape tuple, and is
-// rejected cleanly.
-func TestE2ETupleOptionalRestRejected(t *testing.T) {
-	for src, want := range map[string]string{
-		`const t: [a: number, b?: string] = [1]`: "1:22: an optional tuple element is not yet supported",
-		`const t: [number, string?] = [1]`:       "1:19: an optional tuple element is not yet supported",
-		`const t: [number, ...string[]] = [1]`:   "1:19: a rest tuple element is not yet supported",
-	} {
-		if _, err := parser.Parse(src); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("%s: got %v, want %q", src, err, want)
-		}
-	}
+// A tuple with an optional or rest element is held as an array of boxed
+// elements, as JavaScript holds it.
+func TestE2ETupleOptionalRestElements(t *testing.T) {
+	assertSameAsNode(t, `const t: [a: number, b?: string] = [1];
+const u: [number, string?] = [1, "x"];
+const v: [number, ...string[]] = [1, "a", "b"];
+console.log(t, t.length, u, u[1], v, v.length);
+for (const x of v) console.log(typeof x);
+const [h, ...tail] = v;
+console.log(h, tail);
+`)
 }
 
 // A tuple element may itself be an array or a nullable scalar.
@@ -194,4 +188,42 @@ console.log(keys.join(","))
 const bigKeys = Object.entries(o).filter(([k, v]) => v >= 2).map(([k, v]) => k)
 console.log(bigKeys.join(","))
 `, "a=1,b=2,c=3\n2,4,6\nx,y\ny\n30\ntrue\n30\np:1,q:2\n6\na1true\na,b,c\nb,c")
+}
+
+// An array literal asserted to an array of tuples is built as those tuples,
+// whether their elements share one kind or not, and reads back the same
+// typed, through a field and through `any`.
+func TestE2EAssertedTupleArrayLiteral(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const a = [[1, "x"]] as [number, string][]
+console.log(a[0][0], a[0][1], Object.fromEntries(a))
+const ha: any = a
+console.log(ha[0][0], ha[0][1])
+const b = [["X", "abc"]] as [string, string][]
+console.log(b[0][0], b[0][1], b.length, b[0].length, Object.fromEntries(b))
+const hb: any = b
+console.log(hb[0][0], hb[0][1])
+const o = { h: [["X", "abc"]] as [string, string][], n: 3 }
+const ho: any = o.h
+console.log(o.h[0][1], ho[0][1], o.n)
+`)
+}
+
+// A Map whose value type is a tuple stores each set value as that tuple,
+// read back through get, `!` and destructuring.
+func TestE2EMapOfTuples(t *testing.T) {
+	assertSameAsNode(t, `
+import * as util from 'node:util';
+const t = new Map<number, [string, string]>();
+t.set(1, ['a', 'b']);
+const v = t.get(1)!;
+console.log(v[0], v[1], v.length);
+const w = t.get(1);
+if (w) console.log(w[0], w);
+const [p, q] = t.get(1)!;
+console.log(p, q, t.get(2));
+const m = util.getSystemErrorMap();
+console.log(m.get(-2), util.getSystemErrorName(-2));
+`)
 }

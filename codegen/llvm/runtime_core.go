@@ -54,48 +54,10 @@ func (e *Emitter) ensureMalloc() {
 	}
 }
 
-// ensureForkDecl/ensureCloseDecl/ensureReadDecl exist as their own
-// dedicated ensure*() helpers (rather than being inlined into whichever
-// ensure*() happened to need them first) because both
-// ensureExecFileSync (runtime_process.go) and ensureHTTPRuntime
-// (runtime_http.go, including this feature's __kml_http_cluster_fork)
-// independently need fork()/close()/read() — inlining a `declare` in both
-// places produces two identical `declare`s in the same module when a
-// program uses both features, which LLVM rejects outright ("invalid
-// redefinition of function"), confirmed directly against clang. The
-// ensure*() pattern's whole point (the project's own instructions: "declared exactly once") is
-// what this fixes.
-func (e *Emitter) ensureForkDecl() {
-	if !e.usedForkDecl {
-		e.emitGlobal("declare i32 @fork()")
-		e.emitGlobal("declare void @__kml_loop_after_fork()") // loop.c
-		e.usedForkDecl = true
-	}
-}
-
 func (e *Emitter) ensureCloseDecl() {
 	if !e.usedCloseDecl {
 		e.emitGlobal("declare i32 @close(i32 noundef)")
 		e.usedCloseDecl = true
-	}
-}
-
-// ensureMmapDecl declares mmap(2) exactly once — used by the cluster close-flag
-// page (runtime_http.go, TDD-00117). Prototyped with the POSIX signature; the
-// off_t last arg is i64 on both host targets (arm64 Darwin, x86-64/arm64 Linux).
-func (e *Emitter) ensureMmapDecl() {
-	if !e.usedMmapDecl {
-		e.emitGlobal("declare ptr @mmap(ptr noundef, i64 noundef, i32 noundef, i32 noundef, i32 noundef, i64 noundef)")
-		e.usedMmapDecl = true
-	}
-}
-
-// ensureSetenvDecl declares setenv(3) exactly once — shared by cluster's
-// worker-id passing (runtime_cluster.go) and process.env writes (emit_process.go).
-func (e *Emitter) ensureSetenvDecl() {
-	if !e.usedSetenvDecl {
-		e.emitGlobal("declare i32 @setenv(ptr noundef, ptr noundef, i32 noundef)")
-		e.usedSetenvDecl = true
 	}
 }
 
@@ -117,13 +79,6 @@ func (e *Emitter) ensureFcntlDecl() {
 	if !e.usedFcntlDecl {
 		e.emitGlobal("declare i32 @fcntl(i32 noundef, i32 noundef, ...)")
 		e.usedFcntlDecl = true
-	}
-}
-
-func (e *Emitter) ensureFflushDecl() {
-	if !e.usedFflushDecl {
-		e.emitGlobal("declare i32 @fflush(ptr noundef)")
-		e.usedFflushDecl = true
 	}
 }
 
@@ -240,13 +195,6 @@ func (e *Emitter) ensureSprintf() {
 	}
 }
 
-func (e *Emitter) ensureStrstr() {
-	if !e.usedStrstr {
-		e.emitGlobal("declare ptr @strstr(ptr noundef, ptr noundef)")
-		e.usedStrstr = true
-	}
-}
-
 func (e *Emitter) ensureStrncmp() {
 	if !e.usedStrncmp {
 		e.emitGlobal("declare i32 @strncmp(ptr noundef, ptr noundef, i64 noundef)")
@@ -259,14 +207,6 @@ func (e *Emitter) ensureAtoll() {
 		e.emitGlobal("declare i64 @atoll(ptr noundef)")
 		e.usedAtoll = true
 	}
-}
-
-func (e *Emitter) ensureSscanf() {
-	if e.usedSscanf {
-		return
-	}
-	e.usedSscanf = true
-	e.emitGlobal("declare i32 @sscanf(ptr noundef, ptr noundef, ...)")
 }
 
 // ensureDaysFromCivil declares __kml_days_from_civil: days since the Unix
@@ -394,6 +334,17 @@ func (e *Emitter) ensureByteBlockAlloc() {
 	e.emitGlobal("declare ptr @__kml_byte_block_alloc(i64)")
 }
 
+// ensureHeapUsable declares coresrc/core.c's usable-size query: the bytes a
+// heap block has room for, which an array's push grows into.
+func (e *Emitter) ensureHeapUsable() {
+	if e.usedHeapUsable {
+		return
+	}
+	e.usedHeapUsable = true
+	e.usedCoreC = true
+	e.emitGlobal("declare i64 @__kml_heap_usable(ptr)")
+}
+
 // ensureReceivedInt declares coresrc/core.c's ERR_OUT_OF_RANGE "Received"
 // formatter (Node's digit grouping past 2**32); it returns a header string.
 func (e *Emitter) ensureReceivedInt() {
@@ -457,18 +408,6 @@ func (e *Emitter) ensureRandS() {
 		e.emitGlobal("declare i32 @rand_s(ptr)")
 		e.usedArc4Random = true
 	}
-}
-
-// ensureRandRandom declares @__klain_math_random (coresrc/core.c), which uses
-// C89 rand()/srand()/time() — available on every libc — as the portable
-// fallback for Math.random() on non-BSD platforms.
-// ensureTime declares libc's time(3) once.
-func (e *Emitter) ensureTime() {
-	if e.declaredTime {
-		return
-	}
-	e.declaredTime = true
-	e.emitGlobal("declare i64 @time(ptr)")
 }
 
 func (e *Emitter) ensureRandRandom() {
@@ -587,38 +526,6 @@ func (e *Emitter) ensureQsort() {
 		e.usedQsort = true
 		e.usedCoreC = true
 	}
-}
-
-// errnoAccessor returns the C symbol that exposes the current thread's
-// errno as an `int*` on the host this compiler itself is running on (and
-// will therefore also be clang'ing on — this project doesn't cross-compile
-// today). glibc (Linux) and Darwin/BSD (macOS) use different symbol names
-// for the same thing, since `errno` is a macro, not a portable global
-// symbol — the same class of platform check emitMathRandom already makes
-// for arc4random vs a portable fallback.
-func (e *Emitter) errnoAccessor() string {
-	switch e.opts.Target.OS() {
-	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
-		return "__error"
-	case "windows":
-		return "_errno"
-	default:
-		return "__errno_location"
-	}
-}
-
-// ensureErrnoAccessor declares the errnoAccessor() symbol exactly once.
-// Extracted as its own singleton after ensureFsThrow and ensureProcessKill
-// both independently declared it and collided ("invalid redefinition of
-// function '__error'") the first time a program used both fs and
-// process.kill — the same class of bug ADR-00023 already found and fixed
-// once for fopen/fclose/fwrite; fixed the same way here.
-func (e *Emitter) ensureErrnoAccessor() {
-	if e.usedErrnoAccessor {
-		return
-	}
-	e.usedErrnoAccessor = true
-	e.emitGlobal(fmt.Sprintf("declare ptr @%s()", e.errnoAccessor()))
 }
 
 // ensureStrerror declares C strerror() exactly once — same singleton-sharing

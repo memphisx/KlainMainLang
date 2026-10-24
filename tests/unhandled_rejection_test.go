@@ -55,7 +55,7 @@ setTimeout(() => console.log("timer ran"), 3000)
 	if !ok || ee.ExitCode() != 1 {
 		t.Fatalf("want exit 1, got %v\n%s", err, out)
 	}
-	if !strings.Contains(string(out), "Uncaught: boom") || strings.Contains(string(out), "timer ran") {
+	if !strings.Contains(string(out), "Error: boom\n    at f") || strings.Contains(string(out), "timer ran") {
 		t.Fatalf("want the uncaught report before the timer, got:\n%s", out)
 	}
 }

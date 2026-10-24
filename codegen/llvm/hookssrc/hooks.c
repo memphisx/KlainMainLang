@@ -28,25 +28,14 @@ typedef unsigned char u8;
 #error "KML_MAIN_CTX_SIZE: the ucontext size (ucontextLayout)"
 #endif
 _Thread_local char __kml_main_ctx[KML_MAIN_CTX_SIZE] __attribute__((aligned(16)));
-_Thread_local void *__kml_conn_data;
-_Thread_local i64 __kml_conn_len;
-_Thread_local i64 __kml_conn_cap;
-_Thread_local i64 __kml_current_conn_idx = -1;
-_Thread_local i64 __kml_conn_active;
-_Thread_local u8 __kml_conn_ran;
-_Thread_local u8 __kml_conn_poke;
 _Thread_local void *__kml_curl_multi;
 _Thread_local void *__kml_current_task;
 _Thread_local void *__kml_root_async_ctx;
-_Thread_local void *__kml_listen_dispatch;
-_Thread_local int __kml_listen_fd = -1;
 void *__kml_cluster_close_flag;
 int __kml_cluster_primary_pid;
 _Bool __kml_curl_inited;
 /* Per-program values, stored by the program's constructor. */
 void *__kml_fetch_strs[10];
-i64 __kml_view_ab_header;
-i64 __kml_view_sab_header;
 
 /* ---- NaN-box and string-header primitives (runtime_nanbox.go,
  * runtime_strheader.go: the same arithmetic) -------------------------------- */
@@ -107,12 +96,12 @@ i64 __kml_nb_pay(i64 v) {
 }
 
 char *__kml_str_alloc(i64 n) {
-    char *base = (char *)malloc((size_t)n + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(i64 *)base = n;
     return base + 8;
 }
-i64 __kml_str_len(char *s) { return *(i64 *)(s - 8); }
-void __kml_str_free(char *s) { free(s - 8); }
+i64 __kml_str_len(char *s) { return KML_STR_LEN(s); }
+void __kml_str_free(char *s) { kml_free(KML_HEAP_RAW, s - 8); }
 
 /* ---- hooks ---------------------------------------------------------------- */
 static void kml_hook_missing(const char *name) {
@@ -136,6 +125,12 @@ HOOK(u8, any_tobool, (i64 v), (v), { (void)v; MISSING(any_tobool) return 0; })
 HOOK(double, any_tonum, (i64 v), (v), { (void)v; MISSING(any_tonum) return 0; })
 /* A class value's statics, for inspection (emit_classref_rows.go). */
 HOOK(const char *, classref_shown, (void *p), (p), { (void)p; return 0; })
+/* Object.prototype's own methods, installed into its bag when it is made;
+ * a program that never reads them leaves it empty. */
+VHOOK(objproto_fill, (void *b), (b), { (void)b; })
+/* A number's or boolean's class prototype (its bag, boxed), 0 when the
+ * program reads none of its methods. */
+HOOK(i64, prim_proto_of, (i64 v), (v), { (void)v; return 0; })
 HOOK(i64, classref_nstatic, (void *p), (p), { (void)p; return 0; })
 HOOK(const char *, classref_skey, (void *p, i64 i), (p, i), { (void)p; (void)i; return 0; })
 HOOK(i64, classref_sget, (void *p, i64 i), (p, i), { (void)p; (void)i; return 0; })
@@ -145,14 +140,9 @@ HOOK(i64, promise_inspect_parts, (void *o, i64 *out), (o, out), { (void)o; (void
 /* fs errors (runtime_fs.go). */
 HOOK(void *, fs_error_new, (int e, const char *syscall, const char *path, const char *dest), (e, syscall, path, dest),
      { (void)e; (void)syscall; (void)path; (void)dest; MISSING(fs_error_new) return 0; })
-/* The event loop's per-pass callbacks into the HTTP server and client
- * (runtime_http.go, emit_http_client.go, runtime_http_reqbody.go): none
- * without them. */
-VHOOK(http_fire_close, (void), (), { })
+/* The event loop's per-pass callback into the HTTP client
+ * (emit_http_client.go): none without it. */
 VHOOK(httpc_fire_ready, (void), (), { })
-VHOOK(reactor_thread_lock, (void), (), { })
-VHOOK(reqbody_pump, (void), (), { })
-HOOK(u8, reqbody_want, (void), (), { return 0; })
 /* Promise<any> (emit_anyprom.go). */
 VHOOK(pdyn_attach, (void *src, i64 onF, i64 onR, i64 onFin, void *q, void *boxer, i64 kind),
      (src, onF, onR, onFin, q, boxer, kind),
@@ -183,11 +173,3 @@ static void dflt_task_gc_restore(void) {}
 void (*__kml_hook_task_gc_restore)(void) = dflt_task_gc_restore;
 static void dflt_fetch_bodyprom_on_done(void *pend) { (void)pend; }
 void (*__kml_hook_fetch_bodyprom_on_done)(void *) = dflt_fetch_bodyprom_on_done;
-/* The dynamic-import islands' loop hooks (dynimportwatch.c, TDD-00225): no
- * island, no work. */
-static _Bool dflt_dynimport_keepalive(void) { return 0; }
-static void dflt_dynimport_dispatch(void) {}
-static i64 dflt_dynimport_next_deadline_ns(void) { return 0; }
-_Bool (*__kml_hook_dynimport_keepalive)(void) = dflt_dynimport_keepalive;
-void (*__kml_hook_dynimport_dispatch)(void) = dflt_dynimport_dispatch;
-i64 (*__kml_hook_dynimport_next_deadline_ns)(void) = dflt_dynimport_next_deadline_ns;

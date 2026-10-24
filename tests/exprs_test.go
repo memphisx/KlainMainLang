@@ -1029,7 +1029,7 @@ console.log(t2?.length)
 // A sequence yields its last operand's value; earlier operands run for side
 // effects only.
 func TestE2ESequenceYieldsLast(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 const x = (1, 2, 3);
 console.log(x);
 `, "3")
@@ -1055,7 +1055,7 @@ console.log(a, b);
 // The last operand's type drives the result even when it differs from earlier
 // operands (a regression guard: the value's storage slot must match).
 func TestE2ESequenceLastTypeWins(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 const s = (1, "hello");
 console.log(s);
 console.log(typeof s);
@@ -1898,4 +1898,15 @@ for (const i of [0, 1, 2]) {
 const o: any = { h(x: number) { return x + 1; } };
 console.log(o.f?.("x"), o.h?.(1));
 `, "undefined undefined undefined undefined undefined undefined 0\nundefined undefined undefined undefined undefined undefined 0\n{ g: 7 } 7 7 H H undefined 0\nundefined 2")
+}
+
+func TestE2EConsoleLogEmbeddedNul(t *testing.T) {
+	// A string is written by its length, so an embedded NUL byte prints as
+	// Node prints it, as the first argument or after a separator.
+	assertOutput(t, `
+const s = "a\x00b";
+console.log(s);
+console.log(s, s.length);
+console.log("x", s);
+`, "a\x00b\na\x00b 3\nx a\x00b\n")
 }

@@ -53,17 +53,17 @@ const kmlBoxedBigIntMagic int64 = 0x7FF40000B1616B16
 func (e *Emitter) emitBoxBigInt(v Value) Value {
 	e.ensureMalloc()
 	cell := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", cell))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", kmlBoxedBigIntMagic, cell))
+	e.heapMallocInto(cell, "16")
+	e.heapStore("i64", fmt.Sprint(kmlBoxedBigIntMagic), cell, 8)
 	slot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", slot, cell))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+	e.heapStore("ptr", v.Ref, slot, 8)
 	tagged := e.emitNbTagPtr(cell, kmlTagObject)
-	if !v.Ty.Nullable {
+	if !v.Ty.Nullable() {
 		return Value{Ref: tagged, Ty: TypeAny}
 	}
 	absent := int64(nbNull)
-	if v.Ty.IsUndefined {
+	if v.Ty.IsUndefined() {
 		absent = nbUndefined
 	}
 	isNull := e.freshReg()

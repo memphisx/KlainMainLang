@@ -50,7 +50,7 @@ typedef struct {
 static long long kml_inspect_cur_depth = 0;
 
 static char *str_alloc(long long n) {
-    char *base = (char *)malloc((size_t)n + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
     base[8 + n] = 0;
     return base + 8;
@@ -112,12 +112,22 @@ static long long str_width(const char *s) {
     return w;
 }
 
+/* An array's added properties (`a.tag = 1`), pushed after its elements;
+ * their count. dynjson.c defines it, linked whenever a program can add
+ * one; this weak default pushes none. */
+__attribute__((weak)) long long __kml_inspect_push_arr_extras(void *list, void *hdr, long long depth) {
+    (void)list;
+    (void)hdr;
+    (void)depth;
+    return 0;
+}
+
 void *__kml_inspect_begin(long long depth, long long nonempty) {
-    KmlInspectList *l = (KmlInspectList *)malloc(sizeof *l);
+    KmlInspectList *l = (KmlInspectList *)kml_alloc(KML_HEAP_WORDS, sizeof *l);
     l->n = 0;
     l->cap = 8;
     l->extra = 0;
-    l->items = (char **)malloc(sizeof(char *) * (size_t)l->cap);
+    l->items = (char **)kml_alloc(KML_HEAP_WORDS, sizeof(char *) * (size_t)l->cap);
     if (nonempty) kml_inspect_cur_depth = depth;
     return l;
 }
@@ -126,7 +136,7 @@ void __kml_inspect_push(void *lp, char *entry) {
     KmlInspectList *l = (KmlInspectList *)lp;
     if (l->n == l->cap) {
         l->cap *= 2;
-        l->items = (char **)realloc(l->items, sizeof(char *) * (size_t)l->cap);
+        l->items = (char **)kml_realloc(KML_HEAP_WORDS, l->items, sizeof(char *) * (size_t)l->cap);
     }
     l->items[l->n++] = entry;
 }
@@ -141,12 +151,19 @@ void __kml_inspect_push_more(void *lp, long long remaining) {
     ((KmlInspectList *)lp)->extra = 1;
 }
 
+/* A run of n holes in an array: Node's `<n empty items>` entry. */
+void __kml_inspect_push_holes(void *lp, long long n) {
+    char tmp[64];
+    snprintf(tmp, sizeof tmp, "<%lld empty item%s>", n, n > 1 ? "s" : "");
+    __kml_inspect_push(lp, str_alloc_lit(tmp));
+}
+
 typedef struct { char *p; size_t n, cap; } Sb;
 static void sb_put(Sb *b, const char *s, size_t n) {
     if (b->n + n + 1 > b->cap) {
         size_t c = b->cap ? b->cap : 64;
         while (c < b->n + n + 1) c *= 2;
-        b->p = (char *)realloc(b->p, c);
+        b->p = (char *)realloc(b->p, c); /* scratch */
         b->cap = c;
     }
     memcpy(b->p + b->n, s, n);
@@ -157,7 +174,7 @@ static void sb_pad(Sb *b, long long n) { while (n-- > 0) sb_put(b, " ", 1); }
 static char *sb_finish(Sb *b) {
     char *out = str_alloc((long long)b->n);
     if (b->n) memcpy(out, b->p, b->n);
-    free(b->p);
+    free(b->p); /* scratch */
     return out;
 }
 
@@ -165,7 +182,7 @@ static char *sb_finish(Sb *b) {
    Returns a fresh list (the caller frees) or NULL when no grouping applies. */
 static KmlInspectList *group_array(KmlInspectList *l, long long indent, long long numeric) {
     long long n = l->n - l->extra;
-    long long *dataLen = (long long *)malloc(sizeof(long long) * (size_t)n);
+    long long *dataLen = (long long *)malloc(sizeof(long long) * (size_t)n); /* scratch */
     long long totalLength = 0, maxLength = 0;
     const long long separatorSpace = 2;
     for (long long i = 0; i < n; i++) {
@@ -188,7 +205,7 @@ static KmlInspectList *group_array(KmlInspectList *l, long long indent, long lon
         if (__kml_inspect_opt_compact * 4 < columns) columns = __kml_inspect_opt_compact * 4;
         if (15 < columns) columns = 15;
         if (columns > 1) {
-            long long *maxLineLength = (long long *)malloc(sizeof(long long) * (size_t)columns);
+            long long *maxLineLength = (long long *)malloc(sizeof(long long) * (size_t)columns); /* scratch */
             for (long long i = 0; i < columns; i++) {
                 long long lineLength = 0;
                 for (long long j = i; j < n; j += columns)
@@ -218,16 +235,16 @@ static KmlInspectList *group_array(KmlInspectList *l, long long indent, long lon
                 __kml_inspect_push(out, sb_finish(&b));
             }
             if (l->extra) __kml_inspect_push(out, l->items[n]);
-            free(maxLineLength);
+            free(maxLineLength); /* scratch */
         }
     }
-    free(dataLen);
+    free(dataLen); /* scratch */
     return out;
 }
 
 static void list_free(KmlInspectList *l) {
-    free(l->items);
-    free(l);
+    kml_free(KML_HEAP_WORDS, l->items);
+    kml_free(KML_HEAP_WORDS, l);
 }
 
 /* __kml_inspect_end lays out the collected entries between open/close
@@ -307,7 +324,7 @@ char *__kml_inspect_quote(const char *s) {
     /* A null (absent / `string | null`) value: the caller selects its keyword
        afterwards, but the call itself runs unconditionally — answer `''`. */
     if (!s) return str_alloc_lit("''");
-    long long n = *(const long long *)(s - 8);
+    long long n = KML_STR_LEN(s);
     int hasS = 0, hasD = 0, hasB = 0;
     for (long long i = 0; i < n; i++) {
         if (s[i] == '\'') hasS = 1;
@@ -335,6 +352,12 @@ char *__kml_inspect_quote(const char *s) {
             static const char hex[] = "0123456789ABCDEF";
             esc[0] = '\\'; esc[1] = 'x'; esc[2] = hex[c >> 4]; esc[3] = hex[c & 15];
             sb_put(&b, esc, 4);
+        } else if (c == 0xED && i + 2 < n && (unsigned char)s[i + 1] >= 0xA0) {
+            /* A lone surrogate (WTF-8): \udXXX, lowercase as Node writes it. */
+            char u[8];
+            snprintf(u, sizeof u, "\\u%04x", 0xD000 | ((unsigned)s[i + 1] & 0x3F) << 6 | ((unsigned)s[i + 2] & 0x3F));
+            sb_put(&b, u, 6);
+            i += 2;
         } else sb_put(&b, (const char *)&c, 1);
     }
     sb_put(&b, &q, 1);
@@ -345,7 +368,7 @@ char *__kml_inspect_quote(const char *s) {
    it is an identifier (`x`), quoted otherwise (`'content-type'`). */
 char *__kml_inspect_key(const char *k) {
     if (!k) return str_alloc_lit("''");
-    long long n = *(const long long *)(k - 8);
+    long long n = KML_STR_LEN(k);
     int ident = n > 0 && !(k[0] >= '0' && k[0] <= '9');
     for (long long i = 0; ident && i < n; i++) {
         char c = k[i];
@@ -415,7 +438,7 @@ char *__kml_inspect_tagged(const char *name, const char *tag, const char *rest) 
 char *__kml_inspect_reindent(char *s, long long depth) {
     long long indent = 2 * (depth - __kml_inspect_indent_shift);
     if (!s || indent <= 0) return s;
-    long long n = *(const long long *)(s - 8), lines = 0;
+    long long n = KML_STR_LEN(s), lines = 0;
     for (long long i = 0; i < n; i++)
         if (s[i] == '\n') lines++;
     if (!lines) return s;

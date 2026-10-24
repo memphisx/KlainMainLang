@@ -118,6 +118,11 @@ func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	if me.Property == "toStringTag" {
 		return "@@toStringTag", true
 	}
+	// [Symbol.species]: the constructor a species-creating method (an
+	// array's map, a promise's then) makes its result with.
+	if me.Property == "species" {
+		return "@@species", true
+	}
 	// [Symbol.toPrimitive](hint) — the ToPrimitive ladder (TDD-00201) checks this
 	// reserved method field before valueOf/toString. Same static string-alias
 	// mechanism, no dynamic-property-bag dependency.
@@ -133,6 +138,14 @@ func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 }
 
 func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.ClassDeclaration, error) {
+	lowerType := ""
+	if doc := p.takeDoc(); doc != nil {
+		for _, a := range doc.Annotations {
+			if a.Tag == "lowerType" {
+				lowerType = a.Value
+			}
+		}
+	}
 	tok := p.advance() // consume 'class'
 	pos := posOf(tok)
 	name := defaultName
@@ -190,6 +203,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		// parses any type-argument list; whether the base takes them is
 		// checked at registration, like "extends unknown class".
 		if p.check(lexer.LT) {
+			ltStart := p.peek().Pos
 			p.advance() // consume '<'
 			for {
 				arg, err := p.parseTypeAnnotation("ts")
@@ -204,6 +218,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			if err := p.expectGT(baseClass + "<T>"); err != nil {
 				return nil, err
 			}
+			p.blank(ltStart, p.at(p.pos-1).End)
 		}
 	}
 	var implementsNames []string
@@ -291,9 +306,17 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					return p.errAt(p.peek(), diag.DecoratorOnStaticBlock)
 				}
 				p.advance() // static
+				savedAwait := p.awaitCtx
+				p.awaitCtx = awaitStatic
 				block, err := p.parseBlock()
+				p.awaitCtx = savedAwait
 				if err != nil {
 					return err
+				}
+				// A static block sees no function's arguments either (an early
+				// error, as in a field initializer).
+				if id := argumentsReference(block); id != nil {
+					return p.errAt(lexer.Token{Line: id.GetPos().Line, Col: id.GetPos().Col}, diag.ArgumentsInFieldInit)
 				}
 				staticBlocks = append(staticBlocks, block)
 				return nil
@@ -304,13 +327,14 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// when a member name follows; like the ctor-param form (ADR-00447)
 			// it is parsed and recorded but not enforced as immutability
 			// (ADR-00480).
-			var isStatic, isMemberAbstract, isReadonly, isAutoAccessor, isOverride bool
+			memberFirst := p.peek().Pos // where the member's text begins
+			var isStatic, isMemberAbstract, isReadonly, isAutoAccessor, isOverride, isDeclare bool
 			var visibility string
 			for {
 				if p.peek().Type == lexer.IDENT && p.peek().Literal == "readonly" &&
 					(isClassMemberNameStart(p.peekNth(1)) || p.peekNth(1).Type == lexer.LBRACKET) {
 					isReadonly = true
-					p.advance()
+					p.blankTok(p.advance()) // type syntax
 					continue
 				}
 				// `accessor x` — a TC39 auto-accessor field (contextual, like
@@ -326,14 +350,21 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				// at run time.
 				if p.isWord(0, "override") && p.sameLine(1) && (isClassMemberNameStart(p.peekNth(1)) || p.peekNth(1).Type == lexer.LBRACKET) {
 					isOverride = true
-					p.advance()
+					p.blankTok(p.advance()) // type syntax
+					continue
+				}
+				// `declare` is contextual too: a field with no own property until
+				// assigned.
+				if p.isWord(0, "declare") && p.sameLine(1) && (isClassMemberNameStart(p.peekNth(1)) || p.peekNth(1).Type == lexer.LBRACKET) {
+					isDeclare = true
+					p.blankTok(p.advance()) // type syntax
 					continue
 				}
 				// `abstract` is contextual: a modifier only when a member name follows
 				// on the same line (a member may itself be named `abstract`).
 				if p.isWord(0, "abstract") && p.sameLine(1) && isClassMemberNameStart(p.peekNth(1)) {
 					isMemberAbstract = true
-					p.advance()
+					p.blankTok(p.advance()) // type syntax
 					continue
 				}
 				switch p.peek().Type {
@@ -343,15 +374,15 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					continue
 				case lexer.PRIVATE:
 					visibility = "private"
-					p.advance()
+					p.blankTok(p.advance()) // type syntax
 					continue
 				case lexer.PROTECTED:
 					visibility = "protected"
-					p.advance()
+					p.blankTok(p.advance()) // type syntax
 					continue
 				case lexer.PUBLIC:
 					visibility = ""
-					p.advance()
+					p.blankTok(p.advance()) // type syntax
 					continue
 				}
 				break
@@ -363,6 +394,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// `async(` is the method literally named `async`. `*` here is
 			// unambiguous: a generator method.
 			var isAsyncMethod, isGeneratorMethod bool
+			memberStart := p.peek().Pos // a method's source text begins here
 			if p.isWord(0, "async") && p.sameLine(1) && isClassMemberNameStart(p.peekNth(1)) {
 				isAsyncMethod = true
 				p.advance()
@@ -500,7 +532,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			isOptionalMethod := false
 			if !isCtor && accessorKind == "" && p.check(lexer.QUESTION) &&
 				(p.peekNth(1).Type == lexer.LPAREN || p.peekNth(1).Type == lexer.LT) {
-				p.advance()
+				p.blankTok(p.advance()) // type syntax
 				isOptionalMethod = true
 			}
 			// Method or constructor: `name(...) { ... }` (or, if isMemberAbstract,
@@ -516,10 +548,17 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				if isAutoAccessor {
 					return p.errAt(memberTok, diag.AccessorOnMethod)
 				}
+				p.memberStart = memberStart
+				p.nextGen = isGeneratorMethod
 				fn, err := p.parseFunctionRest(memberTok.Literal, isAsyncMethod, isMemberAbstract || isOptionalMethod, !isMemberAbstract && !isOptionalMethod && accessorKind == "")
 				p.inCtorParams = false
 				if err != nil {
 					return err
+				}
+				if fn.Body == nil {
+					// A body-less signature (abstract, optional, an overload):
+					// stripped whole.
+					p.blank(memberFirst, p.at(p.pos-1).End)
 				}
 				if isOptionalMethod {
 					fn.IsAbstract = false
@@ -671,11 +710,17 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			if isCtor {
 				return p.errAt(memberTok, diag.FieldConstructor)
 			}
-			optionalField := p.match(lexer.QUESTION)
+			optionalField := false
+			if p.check(lexer.QUESTION) {
+				p.blankTok(p.advance()) // type syntax
+				optionalField = true
+			}
+			definiteField := false
 			if !optionalField && p.check(lexer.NOT) {
 				// `name!: T`, a definite assignment assertion: it only waives
 				// the initialisation check, and needs the annotation.
-				p.advance()
+				p.blankTok(p.advance()) // type syntax
+				definiteField = true
 				if !p.check(lexer.COLON) {
 					_, err := p.expect(lexer.COLON)
 					return err
@@ -710,11 +755,15 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					return p.errAt(lexer.Token{Line: call.GetPos().Line, Col: call.GetPos().Col}, diag.SuperCallOutsideConstructor)
 				}
 			}
-			fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Pos: ast.Pos{Line: memberTok.Line, Col: memberTok.Col}, Key: symKey, Type: ft, Optional: optionalField, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly, Override: isOverride, Decorators: memberDecorators, IsAutoAccessor: isAutoAccessor})
+			fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Pos: ast.Pos{Line: memberTok.Line, Col: memberTok.Col}, Key: symKey, Type: ft, Optional: optionalField, Definite: definiteField, Abstract: isMemberAbstract, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly, Override: isOverride, Declare: isDeclare, Decorators: memberDecorators, IsAutoAccessor: isAutoAccessor})
 			// a field declaration ends like a statement: `;`, or ASI before `}` /
 			// at a line break (`x = 1 y = 2` on one line is an error, as in JS)
 			if err := p.parseSemicolon(); err != nil {
 				return err
+			}
+			if isDeclare || isMemberAbstract {
+				// A type-only member: stripped whole.
+				p.blank(memberFirst, p.at(p.pos-1).End)
 			}
 			return nil
 		}()); err != nil {
@@ -768,12 +817,14 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		return nil, err
 	}
 	decl := ast.NewClassDeclaration(name, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos)
+	decl.Src = p.srcRange(pos)
 	decl.BaseQualified = baseQualified
 	decl.BaseQualifier = baseQualifier
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
 	decl.TypeParamDefaults = typeParamDefaults
 	decl.AutoAccessors = autoAccessors
+	decl.LowerType = lowerType
 	return decl, nil
 }
 
@@ -832,6 +883,7 @@ func isInspectCustomKey(expr ast.Expression) bool {
 }
 
 // argumentsReference finds a reference to `arguments` in a field initializer
+// or a static block
 // (an early SyntaxError), looking through arrow functions, which have no
 // `arguments` of their own, but not into functions or classes, which do.
 // superCallIn returns a super(...) call in a field initializer, outside a
@@ -855,7 +907,7 @@ func superCallIn(init ast.Expression) *ast.CallExpression {
 	return found
 }
 
-func argumentsReference(init ast.Expression) *ast.Identifier {
+func argumentsReference(init ast.Node) *ast.Identifier {
 	var found *ast.Identifier
 	ast.Inspect(init, func(n ast.Node) bool {
 		if found != nil {

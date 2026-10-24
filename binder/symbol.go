@@ -198,6 +198,10 @@ type Scope struct {
 	// Inline marks a function scope bound as part of its caller's flow (an
 	// immediately invoked function expression).
 	Inline bool
+	// ParamArguments is the function's own `arguments` where its body
+	// declares that name (`function arguments() {}`): its parameters'
+	// defaults still read the arguments object.
+	ParamArguments *Symbol
 }
 
 // Table is a symbol table that keeps insertion order, so every walk over it
@@ -205,10 +209,29 @@ type Scope struct {
 type Table struct {
 	names []string
 	m     map[string]*Symbol
+	// aliases are names that stand for another symbol (`import X = A.B`):
+	// found by Get, not walked by Each.
+	aliases map[string]*Symbol
 }
 
 // Get returns the symbol named name.
-func (t *Table) Get(name string) *Symbol { return t.m[name] }
+func (t *Table) Get(name string) *Symbol {
+	if s := t.m[name]; s != nil {
+		return s
+	}
+	return t.aliases[name]
+}
+
+// alias makes name stand for s, unless the table declares name itself.
+func (t *Table) alias(name string, s *Symbol) {
+	if t.m[name] != nil {
+		return
+	}
+	if t.aliases == nil {
+		t.aliases = map[string]*Symbol{}
+	}
+	t.aliases[name] = s
+}
 
 // Len is the number of symbols.
 func (t *Table) Len() int { return len(t.names) }

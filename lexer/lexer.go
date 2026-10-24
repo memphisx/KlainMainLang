@@ -498,6 +498,19 @@ func (l *Lexer) readDigitRun(buf *strings.Builder, isDigit func(rune) bool, line
 }
 
 func (l *Lexer) readNumber(line, col int) (Token, error) {
+	tok, err := l.readNumberBody(line, col)
+	if err != nil {
+		return tok, err
+	}
+	// The character after a numeric literal is neither an identifier start
+	// nor a digit (`3in []`, `10._`).
+	if c := l.peek(); unicode.IsLetter(c) || c == '_' || c == '$' || c == '\\' {
+		return Token{}, l.errAt(line, col, diag.IdentAfterNumeric)
+	}
+	return tok, nil
+}
+
+func (l *Lexer) readNumberBody(line, col int) (Token, error) {
 	var buf strings.Builder
 	isHexDigit := func(c rune) bool {
 		return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
@@ -565,6 +578,14 @@ func (l *Lexer) readNumber(line, col int) (Token, error) {
 			hasDot = true
 			buf.WriteRune(l.advance())
 			lastWasDigit = false
+		} else if c == '.' && !hasDot && !legacyLeadingZero && lastWasDigit {
+			// A trailing `.` belongs to the literal (`10.` is 10, `10..x`
+			// reads x of it): what follows is an exponent (`1.e3`), the
+			// next token, or an error (`10._`).
+			hasDot = true
+			l.advance()
+			lastWasDigit = false
+			break
 		} else if c == '_' {
 			if legacyLeadingZero {
 				return Token{}, l.errAt(line, col, diag.NumericSeparatorLegacy)
@@ -786,12 +807,9 @@ func hexDigitVal(c rune) (int, bool) {
 // ended" token types), matching how real JS engines actually implement
 // this same heuristic. See docs/tdd/TDD-00035.md's Stage 0 design.
 //
-// One known, deliberately accepted gap: `in`/`of` are lexed as plain IDENT
-// tokens with contextual parser-side checks (parser/parser_exprs.go), not
-// their own TokenType, so `x in /foo/` mis-lexes the `/` as division. Rare
-// enough to document rather than fix — fixing it would mean threading
-// parser-level context back into the lexer, a much bigger change than this
-// feature justifies.
+// `in`/`of` are plain IDENT tokens, so `x in /foo/` scans a division here;
+// the parser, expecting an operand there, re-scans it as a regex
+// (ScanRegex).
 var regexIllegalAfter = map[TokenType]bool{
 	IDENT: true, NUMBER: true, BIGINT: true, STRING: true, PRIVATE_NAME: true,
 	TEMPLATE_NO_SUB: true, TEMPLATE_TAIL: true,

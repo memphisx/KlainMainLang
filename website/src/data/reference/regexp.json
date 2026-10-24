@@ -4,7 +4,7 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "10/15", "strictPct": 67 },
+  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "14/15", "strictPct": 93 },
   "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; `exec` results carry `index`, `input` and `groups`, and so does each step of `matchAll`'s iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`d` flags are out of scope for V1 (`y`/sticky is implemented).",
   "entries": [
     {
@@ -29,13 +29,10 @@
       "name": "Literal syntax: /pattern/flags",
       "statusRow": "Literal syntax: `/pattern/flags`",
       "signature": "/pattern/flags",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Regex literals desugar to the same construction at parse time. An unescaped '/' inside a [...] character class does not end the literal.",
       "exampleKey": "regexp/regexp",
       "snippet": "const fromLiteral = /[a-z]+@[a-z]+\\.[a-z]+/i\nconst withSlashClass = /[a/b]/\nconsole.log(withSlashClass.source) // [a/b]",
-      "differences": [
-        "`x in /foo/` mis-lexes the `/` as division (the lexer's regex-vs-division disambiguation gap, since `in` isn't its own token in this lexer) — a small, deliberately-accepted gap"
-      ],
       "seeAlso": ["regexp.construction"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Regular_expressions" }
     },
@@ -111,16 +108,13 @@
       "id": "regexp.match",
       "name": "str.match(regexp)",
       "statusRow": "str.match(regexp)",
-      "signature": "str.match(regexp: RegExp): string[] | null",
-      "badge": "caveats",
+      "signature": "str.match(regexp: RegExp): RegExpMatchArray | null",
+      "badge": "exact",
       "description": "Without g: identical to regexp.exec(str). With g: full-match-only strings, and null (not []) on zero matches — matching real JS exactly.",
       "params": [{ "name": "regexp", "type": "RegExp", "desc": "The pattern to match." }],
       "returns": { "type": "string[] | null", "desc": "Match array, or null." },
       "exampleKey": "regexp/regexp",
       "snippet": "const allDigits = \"a1 b22 c333\".match(/\\d+/g)\nif (allDigits !== null) { console.log(allDigits.length) } // 3\nconsole.log(\"nothing\".match(/\\d+/g) === null) // true",
-      "differences": [
-        "With a regex held in a variable (not a literal), the result has no `index`/`input`/`groups`; a non-global literal's result carries them, as `.exec()`'s does"
-      ],
       "seeAlso": ["regexp.exec", "regexp.matchAll"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/match" }
     },
@@ -142,9 +136,9 @@
       "id": "regexp.replace",
       "name": "str.replace(regexp, replacement)",
       "statusRow": "str.replace(regexp, replacement) (string or callback)",
-      "signature": "str.replace(regexp: RegExp, replacement: string | ((m, offset, string) => string)): string",
-      "badge": "caveats",
-      "description": "Replaces the first match without g, every match with g; the callback runs exactly once per match.",
+      "signature": "str.replace(regexp: RegExp, replacement: string | ((match, ...captures, offset, string) => string)): string",
+      "badge": "exact",
+      "description": "Replaces the first match without g, every match with g; the callback runs exactly once per match, with the match, its captures, the offset and the string. A template expands $$, $&, $`, $' and $n/$nn.",
       "params": [
         { "name": "regexp", "type": "RegExp", "desc": "The pattern to match." },
         { "name": "replacement", "type": "string | function", "desc": "Template string or a callback." }
@@ -152,10 +146,6 @@
       "returns": { "type": "string", "desc": "The resulting string." },
       "exampleKey": "regexp/regexp",
       "snippet": "console.log(\"range: 12-34 end\".replace(/(\\d+)-(\\d+)/, \"[$2:$1]\")) // range: [34:12] end\nconsole.log(\"a1 b22 c333\".replace(/\\d+/g, (m: string, offset: number) => m + \"@\" + offset))",
-      "differences": [
-        "Replacement template supports `$1`-`$9`/`$&`/`$$` only (`` $` ``/`$'` — pre-/post-match text — are out of scope)",
-        "The callback form is invoked with a fixed `(match, offset, string)` — real JS's variadic `...capturedGroups` in the middle isn't supported (a callback's arity is fixed at compile time but a pattern's capture count is only known at runtime; a callback declaring more than 3 parameters is a compile-time error)"
-      ],
       "seeAlso": ["regexp.replaceAll", "regexp.match"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replace" }
     },
@@ -163,8 +153,8 @@
       "id": "regexp.replaceAll",
       "name": "str.replaceAll(regexp, replacement)",
       "statusRow": "str.replaceAll(regexp, replacement) (string or callback)",
-      "signature": "str.replaceAll(regexp: RegExp, replacement: string | ((m, offset, string) => string)): string",
-      "badge": "caveats",
+      "signature": "str.replaceAll(regexp: RegExp, replacement: string | ((match, ...captures, offset, string) => string)): string",
+      "badge": "exact",
       "description": "Same replacement rules as .replace(); requires the g flag, throwing TypeError otherwise.",
       "params": [
         { "name": "regexp", "type": "RegExp", "desc": "A g-flagged pattern." },
@@ -173,9 +163,6 @@
       "returns": { "type": "string", "desc": "The resulting string." },
       "exampleKey": "regexp/regexp",
       "snippet": "console.log(\"cat dog cat\".replaceAll(/cat/g, \"DOG\")) // DOG dog DOG",
-      "differences": [
-        "Same replacement narrowing as `.replace()` (`$1`-`$9`/`$&`/`$$` only; fixed `(match, offset, string)` callback)"
-      ],
       "seeAlso": ["regexp.replace"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/replaceAll" }
     },

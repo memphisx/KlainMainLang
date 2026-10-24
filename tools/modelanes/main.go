@@ -11,8 +11,9 @@
 // nondeterministic and not compared. A mode that rejects an
 // example at compile time by design (Memory.free under -mm=auto) or cannot
 // build at all on this machine (-mm=gc without libgc) is reported apart from
-// a mismatch. Examples run one at a time: several start servers on fixed
-// ports. `make mode-lanes` starts the httpbin-lite fixture the fetch
+// a mismatch. Every build runs concurrently (-j; compiling is most of the
+// time); the binaries then run one at a time, since several start servers on
+// fixed ports. `make mode-lanes` starts the httpbin-lite fixture the fetch
 // examples talk to, as `make examples` does.
 package main
 
@@ -25,8 +26,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -54,6 +57,12 @@ var notUnderGC = map[string]bool{
 	"examples/finalization/finalization_registry.ts": true,
 }
 
+// runArgs gives an example the arguments its run takes: one that reads its
+// own binary by default (which differs per mode) reads its source instead.
+var runArgs = map[string][]string{
+	"examples/readline/lines.ts": {"examples/readline/lines.ts"},
+}
+
 type run struct {
 	out    string
 	status string // "exit 0", "exit 3", "timeout", "build: …"
@@ -64,6 +73,7 @@ func main() {
 	out := flag.String("out", ".modelanes-out/MODE-LANES.md", "report path")
 	only := flag.String("only", "", "only examples matching this regexp")
 	timeout := flag.Duration("timeout", 300*time.Second, "per-run time limit")
+	jobs := flag.Int("j", runtime.NumCPU(), "concurrent builds")
 	flag.Parse()
 
 	absBin, err := filepath.Abs(*bin)
@@ -93,50 +103,92 @@ func main() {
 	var nondeterministic []string
 	compared := 0
 	start := time.Now()
+	var exs []string
 	for _, ex := range examples() {
-		if re != nil && !re.MatchString(ex) {
-			continue
+		if re == nil || re.MatchString(ex) {
+			exs = append(exs, ex)
 		}
-		// Every build of an example goes to the same path: an example may
-		// print its own path (process.argv).
+	}
+	// Build every example in every lane at once, each lane into its own
+	// directory; lane 0 is the default mode.
+	lanes := make([][]string, len(modes)+1)
+	for k, m := range modes {
+		lanes[k+1] = m.flags
+	}
+	built := make([][]run, len(exs))
+	laneExe := func(k int, ex string) string {
+		return filepath.Join(work, fmt.Sprint("lane", k), exeName(ex))
+	}
+	type job struct{ e, k int }
+	jobCh := make(chan job)
+	var wg sync.WaitGroup
+	for w := 0; w < *jobs; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for jb := range jobCh {
+				built[jb.e][jb.k] = buildOnly(absBin, exs[jb.e], laneFlags(exs[jb.e], jb.k, lanes), laneExe(jb.k, exs[jb.e]))
+			}
+		}()
+	}
+	for k := range lanes {
+		os.MkdirAll(filepath.Join(work, fmt.Sprint("lane", k)), 0o755)
+	}
+	for e := range exs {
+		built[e] = make([]run, len(lanes))
+	}
+	for e, ex := range exs {
+		for k := range lanes {
+			if laneFlags(ex, k, lanes) != nil || k == 0 {
+				jobCh <- job{e, k}
+			}
+		}
+	}
+	close(jobCh)
+	wg.Wait()
+	fmt.Printf("built %d examples in %d lanes (%s)\n", len(exs), len(lanes), time.Since(start).Round(time.Second))
+
+	// Run them one at a time. Every run goes through the same path: an
+	// example may print its own path (process.argv).
+	for e, ex := range exs {
 		exe := filepath.Join(work, exeName(ex))
-		base := buildAndRun(absBin, ex, nil, exe, *timeout)
-		if strings.HasPrefix(base.status, "build:") {
-			results = append(results, result{ex, "default", "rejected", base.status})
+		runLane := func(k int) run {
+			if err := copyFile(laneExe(k, ex), exe); err != nil {
+				return run{status: "build: " + err.Error()}
+			}
+			return runBinary(exe, runArgs[ex], *timeout)
+		}
+		if built[e][0].status != "" {
+			results = append(results, result{ex, "default", "rejected", built[e][0].status})
 			continue
 		}
-		again := runBinary(exe, *timeout)
+		base := runLane(0)
+		again := runBinary(exe, runArgs[ex], *timeout)
 		if again.out != base.out || again.status != base.status {
 			nondeterministic = append(nondeterministic, ex)
 			continue
 		}
 		unstable := false
-		for _, m := range modes {
-			if unstable {
-				break
-			}
-			if m.name == "-mm=gc" && notUnderGC[ex] {
+		for k := 1; k < len(lanes) && !unstable; k++ {
+			m := modes[k-1]
+			if laneFlags(ex, k, lanes) == nil {
 				continue
 			}
-			flags := m.flags
-			if pinned[ex] {
-				flags = without(flags, "-mm=auto")
-				if len(flags) == 0 {
-					continue
+			if st := built[e][k].status; st != "" {
+				kind := "rejected"
+				if m.name == "-mm=gc" && strings.Contains(strings.ToLower(st), "gc") {
+					kind = "unavailable"
 				}
+				results = append(results, result{ex, m.name, kind, st})
+				continue
 			}
-			r := buildAndRun(absBin, ex, flags, exe, *timeout)
-			switch {
-			case strings.HasPrefix(r.status, "build:") && m.name == "-mm=gc" && strings.Contains(strings.ToLower(r.status), "gc"):
-				results = append(results, result{ex, m.name, "unavailable", r.status})
-			case strings.HasPrefix(r.status, "build:"):
-				results = append(results, result{ex, m.name, "rejected", r.status})
-			case r.out != base.out || r.status != base.status:
+			r := runLane(k)
+			if r.out != base.out || r.status != base.status {
 				// Rerun both before calling it a mismatch: timings and the
 				// order of concurrent output vary between runs of one build.
-				r2 := runBinary(exe, *timeout)
-				rebuilt := buildAndRun(absBin, ex, nil, exe, *timeout)
-				if r2.out != r.out || r2.status != r.status || rebuilt.out != base.out || rebuilt.status != base.status {
+				r2 := runBinary(exe, runArgs[ex], *timeout)
+				b2 := runLane(0)
+				if r2.out != r.out || r2.status != r.status || b2.out != base.out || b2.status != base.status {
 					unstable = true
 					continue
 				}
@@ -215,9 +267,28 @@ func exeName(ex string) string {
 	return strings.NewReplacer("/", "__", ".ts", "").Replace(ex)
 }
 
-// buildAndRun builds ex with flags into exe and, with a nonzero timeout,
-// runs it.
-func buildAndRun(bin, ex string, flags []string, exe string, timeout time.Duration) run {
+// laneFlags is ex's flags in lane k (nil in lane 0, and for a lane ex
+// skips): a pinned example drops -mm=auto, and some skip -mm=gc.
+func laneFlags(ex string, k int, lanes [][]string) []string {
+	if k == 0 {
+		return nil
+	}
+	if modes[k-1].name == "-mm=gc" && notUnderGC[ex] {
+		return nil
+	}
+	flags := lanes[k]
+	if pinned[ex] {
+		flags = without(flags, "-mm=auto")
+	}
+	if len(flags) == 0 {
+		return nil
+	}
+	return flags
+}
+
+// buildOnly builds ex with flags into exe; a failed build's status is
+// "build: <first stderr line>", a good one's empty.
+func buildOnly(bin, ex string, flags []string, exe string) run {
 	args := append(append([]string{}, flags...), "-o", exe, ex)
 	var stderr bytes.Buffer
 	cmd := exec.Command(bin, args...)
@@ -225,17 +296,23 @@ func buildAndRun(bin, ex string, flags []string, exe string, timeout time.Durati
 	if err := cmd.Run(); err != nil {
 		return run{status: "build: " + firstLine(stderr.String())}
 	}
-	if timeout == 0 {
-		return run{}
-	}
-	return runBinary(exe, timeout)
+	return run{}
 }
 
-func runBinary(exe string, timeout time.Duration) run {
+func copyFile(src, dst string) error {
+	data, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	os.Remove(dst)
+	return os.WriteFile(dst, data, 0o755)
+}
+
+func runBinary(exe string, args []string, timeout time.Duration) run {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var stdout bytes.Buffer
-	cmd := exec.CommandContext(ctx, exe)
+	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.Stdout = &stdout
 	cmd.Stdin = nil
 	err := cmd.Run()

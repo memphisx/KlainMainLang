@@ -35,7 +35,7 @@ function invalidArgValue(name: string, value: unknown, reason: string): Error {
     let shown: string;
     if (typeof value === 'string') shown = "'" + value + "'";
     else shown = String(value);
-    return new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' " + reason + '. Received ' + shown);
+    return NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' " + reason + '. Received ' + shown);
 }
 
 function invalidArgType(name: string, expected: string, value: unknown): Error {
@@ -46,7 +46,7 @@ function invalidArgType(name: string, expected: string, value: unknown): Error {
     else if (typeof value === 'number') received = 'type number (' + value + ')';
     else if (typeof value === 'boolean') received = 'type boolean (' + value + ')';
     else received = 'an instance of Object';
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" ' + (name.indexOf('.') >= 0 ? 'property' : 'argument') + ' must be ' + expected + '. Received ' + received);
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" ' + (name.indexOf('.') >= 0 ? 'property' : 'argument') + ' must be ' + expected + '. Received ' + received);
 }
 
 // ---- types (@types/node's child_process.d.ts) ----
@@ -54,7 +54,7 @@ function invalidArgType(name: string, expected: string, value: unknown): Error {
 export type Serializable = string | object | number | boolean | bigint;
 export type SendHandle = Socket | Server | DgramSocket | undefined;
 export type IOType = 'overlapped' | 'pipe' | 'ignore' | 'inherit';
-export type StdioOptions = IOType | Array<IOType | 'ipc' | number | null | undefined>;
+export type StdioOptions = IOType | Array<IOType | 'ipc' | Readable | Writable | number | null | undefined>;
 export type SerializationType = 'json' | 'advanced';
 export type StdioPipeNamed = 'pipe' | 'overlapped';
 export type StdioPipe = undefined | null | StdioPipeNamed;
@@ -220,7 +220,7 @@ function convertToValidSignal(signal: string | number): number {
         const n = __kml_native.signalNumber(signal);
         if (n > 0) return n;
     }
-    throw new NodeTypeError('ERR_UNKNOWN_SIGNAL', 'Unknown signal: ' + signal);
+    throw NodeTypeError('ERR_UNKNOWN_SIGNAL', 'Unknown signal: ' + signal);
 }
 
 function sanitizeKillSignal(killSignal: NodeJS.Signals | number | undefined): number {
@@ -230,18 +230,20 @@ function sanitizeKillSignal(killSignal: NodeJS.Signals | number | undefined): nu
 
 function validateTimeout(timeout: number | undefined): void {
     if (timeout !== undefined && !(Number.isInteger(timeout) && timeout >= 0)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "timeout" is out of range. It must be an unsigned integer. Received ' + timeout);
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "timeout" is out of range. It must be an unsigned integer. Received ' + timeout);
     }
 }
 
 function validateMaxBuffer(maxBuffer: number | undefined): void {
     if (maxBuffer !== undefined && !(maxBuffer >= 0)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.maxBuffer" is out of range. It must be a positive number. Received ' + maxBuffer);
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.maxBuffer" is out of range. It must be a positive number. Received ' + maxBuffer);
     }
 }
 
-function validateArgumentNullCheck(arg: string, propName: string): void {
-    if (arg.indexOf('\u0000') >= 0) {
+// A string holding a null byte (an env value of another type is
+// stringified unchecked, as Node does).
+function validateArgumentNullCheck(arg: any, propName: string): void {
+    if (typeof arg === 'string' && arg.indexOf('\u0000') >= 0) {
         throw invalidArgValue(propName, arg, 'must be a string without null bytes');
     }
 }
@@ -278,7 +280,7 @@ function pathOf(p: string | URL | undefined, name: string): string {
         return p;
     }
     if (p.protocol !== 'file:') {
-        throw new NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+        throw NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
     }
     return decodeURIComponent(p.pathname);
 }
@@ -399,7 +401,7 @@ function stdioStringToArray(stdio: string, channel?: string): Array<IOType | 'ip
 }
 
 function getValidStdio(stdio: StdioOptions, sync: boolean): StdioEntry[] {
-    let list: Array<IOType | 'ipc' | number | null | undefined>;
+    let list: Array<IOType | 'ipc' | Readable | Writable | number | null | undefined>;
     if (typeof stdio === 'string') list = stdioStringToArray(stdio);
     else list = stdio.slice();
     while (list.length < 3) list.push(undefined);
@@ -414,8 +416,8 @@ function getValidStdio(stdio: StdioOptions, sync: boolean): StdioEntry[] {
             out.push({ type: 'pipe', fd: -1 });
         } else if (s === 'ipc') {
             if (sync || ipc) {
-                if (!sync) throw new NodeError('ERR_IPC_ONE_PIPE', 'Child process can have only one IPC pipe');
-                throw new NodeError('ERR_IPC_SYNC_FORK', 'IPC cannot be used with synchronous forks');
+                if (!sync) throw NodeError('ERR_IPC_ONE_PIPE', 'Child process can have only one IPC pipe');
+                throw NodeError('ERR_IPC_SYNC_FORK', 'IPC cannot be used with synchronous forks');
             }
             ipc = true;
             out.push({ type: 'ipc', fd: -1 });
@@ -423,6 +425,9 @@ function getValidStdio(stdio: StdioOptions, sync: boolean): StdioEntry[] {
             out.push({ type: 'inherit', fd: i });
         } else if (typeof s === 'number') {
             out.push({ type: 'fd', fd: s });
+        } else if (typeof s === 'object' && typeof (s as any).fd === 'number') {
+            // A stream over a descriptor (process.stdin) shares it.
+            out.push({ type: 'fd', fd: (s as any).fd });
         } else {
             throw invalidArgValue('stdio', s, 'is invalid');
         }
@@ -634,7 +639,7 @@ export class ChildProcess extends EventEmitter {
     send(message: Serializable, a?: any, b?: any, c?: any): boolean {
         const chan = this._kmlChannel;
         if (chan === null) {
-            const ex = new NodeError('ERR_IPC_CHANNEL_CLOSED', 'Channel closed');
+            const ex = NodeError('ERR_IPC_CHANNEL_CLOSED', 'Channel closed');
             const cb = typeof a === 'function' ? a : typeof b === 'function' ? b : typeof c === 'function' ? c : undefined;
             if (cb !== undefined) process.nextTick(() => { cb(ex); });
             else process.nextTick(() => { this.emit('error', ex); });
@@ -645,7 +650,7 @@ export class ChildProcess extends EventEmitter {
 
     disconnect(): void {
         if (this._kmlChannel === null) {
-            this.emit('error', new NodeError('ERR_IPC_DISCONNECTED', 'IPC channel is already disconnected'));
+            this.emit('error', NodeError('ERR_IPC_DISCONNECTED', 'IPC channel is already disconnected'));
             return;
         }
         this._kmlChannel.disconnect();
@@ -831,7 +836,7 @@ function execFileImpl(file: string, args: readonly string[], options: ExecFileOp
             if (stdoutLen > maxBuffer) {
                 const truncatedLen = maxBuffer - (stdoutLen - length);
                 push(stdoutText, stdoutBytes, chunk.slice(0, truncatedLen));
-                ex = new NodeRangeError('ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'stdout maxBuffer length exceeded');
+                ex = NodeRangeError('ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'stdout maxBuffer length exceeded');
                 kill();
             } else {
                 push(stdoutText, stdoutBytes, chunk);
@@ -852,7 +857,7 @@ function execFileImpl(file: string, args: readonly string[], options: ExecFileOp
             if (stderrLen > maxBuffer) {
                 const truncatedLen = maxBuffer - (stderrLen - length);
                 push(stderrText, stderrBytes, chunk.slice(0, truncatedLen));
-                ex = new NodeRangeError('ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'stderr maxBuffer length exceeded');
+                ex = NodeRangeError('ERR_CHILD_PROCESS_STDIO_MAXBUFFER', 'stderr maxBuffer length exceeded');
                 kill();
             } else {
                 push(stderrText, stderrBytes, chunk);
@@ -1195,7 +1200,7 @@ export function fork(modulePath: string | URL, a?: any, b?: any): ChildProcess {
     const resolved = resolvePath(path);
     const argv1 = process.argv[1];
     if (resolved !== __kml_native.entryPath() && (argv1 === undefined || resolved !== resolvePath(argv1))) {
-        throw new NodeError('ERR_CHILD_PROCESS_FORK_MODULE', "fork('" + path + "'): only this program's own module can be forked; a different module is a second compiled program");
+        throw NodeError('ERR_CHILD_PROCESS_FORK_MODULE', "fork('" + path + "'): only this program's own module can be forked; a different module is a second compiled program");
     }
     const execPath = options.execPath !== undefined ? options.execPath : process.execPath;
     let stdio: StdioOptions;
@@ -1206,7 +1211,7 @@ export function fork(modulePath: string | URL, a?: any, b?: any): ChildProcess {
     } else {
         stdio = options.stdio;
         if (stdio.indexOf('ipc') < 0) {
-            throw new NodeError('ERR_CHILD_PROCESS_IPC_REQUIRED', "Forked processes must have an IPC channel, missing value 'ipc' in options.stdio");
+            throw NodeError('ERR_CHILD_PROCESS_IPC_REQUIRED', "Forked processes must have an IPC channel, missing value 'ipc' in options.stdio");
         }
     }
     // The child is this binary, whose process.argv repeats the executable

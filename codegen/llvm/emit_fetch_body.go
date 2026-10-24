@@ -96,7 +96,7 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 			blobL, nb := e.freshLabel("fbody.blob"), e.freshLabel("fbody.nb")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBlob.Ref, blobL, nb))
 			e.emitLabel(blobL)
-			bd, size, tv, err := e.emitBlobBytes(e.coerce(box, blobCls), ast.Pos{})
+			bd, size, tv, err := e.emitBlobBytes(e.convert(box, blobCls), ast.Pos{})
 			if err != nil {
 				bd, size, tv = "null", "0", "null"
 			}
@@ -133,7 +133,7 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 		uspL, nusp := e.freshLabel("fbody.usp"), e.freshLabel("fbody.nusp")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isUSP.Ref, uspL, nusp))
 		e.emitLabel(uspL)
-		obj := e.coerce(box, usp)
+		obj := e.convert(box, usp)
 		sv, err := e.emitClassCall(usp, obj, "toString", nil, ast.Pos{}, false)
 		if err != nil {
 			panic(err)
@@ -149,7 +149,7 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	e.emitLabel(strDefL)
 	sv, ok := e.emitAnyIntoString(box, TypePtr)
 	if !ok {
-		sv = e.coerce(box, TypePtr)
+		sv = e.convert(box, TypePtr)
 	}
 	svl := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", svl, sv.Ref))

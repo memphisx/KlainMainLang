@@ -21,7 +21,7 @@ extern i64 __kml_dynobj_rawpay_at(void *o, i64 i);
 extern void __kml_dynobj_patch(void *o, i64 i, i64 tag, i64 pay, i64 attrs);
 #define KML_ATTR_ENUM 2 /* dynobj.c's A_ENUM */
 
-#define KSTR(id, s) static const struct { i64 len; char d[sizeof(s)]; } id = { sizeof(s) - 1, s }
+#define KSTR(id, s) static const struct { i64 len; char d[sizeof(s)]; } id = { KML_STR_ASCII_HDR(sizeof(s) - 1), s }
 KSTR(k_name, "name");
 KSTR(k_errno, "errno");
 KSTR(k_code, "code");
@@ -98,8 +98,16 @@ void *__kml_error_extra_key(void *op, i64 i) {
 
 /* A present field's boxed value, else the bag's. An own `name` is listed by
  * __kml_obj_key at its place among the layout's. */
+extern void *__kml_error_stack(void *err);
+
 i64 __kml_error_extra_get(void *op, const char *key, int *found) {
     const char *o = (const char *)op;
+    /* `stack`, an own non-enumerable property formatted on first read
+     * (framesrc/frames.c). */
+    if (!strcmp(key, "stack")) {
+        *found = 1;
+        return (i64)(u64)__kml_error_stack(op);
+    }
     if (!strcmp(key, k_name.d) && *(const i64 *)(o + KML_ERR_NAME_OWN) != 0) {
         *found = 1;
         return (i64)(u64) * (void *const *)(o + KML_ERR_NAME);
@@ -120,7 +128,7 @@ i64 __kml_error_extra_get(void *op, const char *key, int *found) {
         *found = 0;
         return 10;
     }
-    *found = 1;
+    *found = __kml_dynobj_find(bag, key) >= 0;
     return __kml_dynobj_get(bag, key);
 }
 
@@ -181,8 +189,59 @@ int __kml_error_option_cause(void *op, i64 *out) {
  * as `[errors]`; 0 for any other error. */
 int __kml_error_aggregate(void *op, void ***errs, i64 *n) {
     const char *o = (const char *)op;
-    if (*(const i64 *)(o + KML_ERROR_KIND) != KML_ERRKIND_AGG) return 0;
+    if ((*(const i64 *)(o + KML_ERROR_KIND) & ~KML_HDR_STATE_MASK) != KML_ERRKIND_AGG) return 0;
     *errs = *(void **const *)(o + KML_AGG_ERRORS);
     *n = *(const i64 *)(o + KML_AGG_ERRORS + 8);
     return 1;
+}
+
+/* Object.getOwnPropertyDescriptor of an Error's own key: `message` (when
+ * the constructor was given one), `cause` (when its option was given, even
+ * as undefined), `stack` and an own `name` are writable, configurable and
+ * not enumerable; a system field or an extra-bag entry is enumerable as it
+ * is listed. Attributes Object.defineProperty changed (propattr.c, linked
+ * only when the program defines a property) apply over them. The boxed
+ * descriptor, or undefined for a key the error does not own. */
+/* propattr.c's attributes when the program defines a property; this weak
+ * default (no attributes) stands in otherwise. */
+__attribute__((weak)) i64 __kml_pattr_attrs(void *obj, const char *name) {
+    (void)obj;
+    (void)name;
+    return 0;
+}
+KSTR(k_message, "message");
+KSTR(k_stack, "stack");
+KSTR(d_value, "value");
+KSTR(d_writable, "writable");
+KSTR(d_enumerable, "enumerable");
+KSTR(d_configurable, "configurable");
+
+i64 __kml_error_own_desc(void *op, const char *key) {
+    const char *o = (const char *)op;
+    i64 v;
+    int en = 0, found = 0;
+    if (!strcmp(key, k_message.d)) {
+        void *m = *(void *const *)(o + KML_ERR_MESSAGE);
+        if (!m) return KML_NB_UNDEFINED;
+        v = (i64)(u64)m;
+        found = 1;
+    } else if (!strcmp(key, k_cause.d) && *(const i64 *)(o + KML_ERR_CAUSE) != 0 &&
+               *(const i64 *)(o + KML_ERR_CAUSE) != KML_NB_UNDEFINED &&
+               __kml_error_key_enumerable(op, key) == 0) {
+        v = *(const i64 *)(o + KML_ERR_CAUSE);
+        found = 1;
+    } else {
+        v = __kml_error_extra_get(op, key, &found);
+        if (found != 1) return KML_NB_UNDEFINED;
+        en = strcmp(key, k_stack.d) && strcmp(key, k_name.d);
+        void *bag = extra_bag(o);
+        if (bag && __kml_dynobj_find(bag, key) >= 0) en = (int)__kml_error_key_enumerable(op, key);
+    }
+    i64 at = __kml_pattr_attrs(op, key);
+    void *d = __kml_dynobj_new();
+    __kml_dynobj_set(d, d_value.d, v);
+    __kml_dynobj_set(d, d_writable.d, (at & 1) ? KML_NB_FALSE : KML_NB_TRUE);
+    __kml_dynobj_set(d, d_enumerable.d, en && !(at & 2) ? KML_NB_TRUE : KML_NB_FALSE);
+    __kml_dynobj_set(d, d_configurable.d, (at & 4) ? KML_NB_FALSE : KML_NB_TRUE);
+    return (i64)d | 5; /* a dynamic object's box */
 }

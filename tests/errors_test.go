@@ -141,9 +141,11 @@ func TestE2EUncaughtErrorSubtypePrintsMessage(t *testing.T) {
 	if _, ok := err.(*exec.ExitError); !ok {
 		t.Fatalf("expected a non-zero exit for an uncaught error, got: %v", err)
 	}
-	want := "Uncaught: boom\n"
-	if stderr.String() != want || stdout.String() != "" {
-		t.Fatalf("stdout = %q, stderr = %q, want stderr %q", stdout.String(), stderr.String(), want)
+	// Node's report: the error's stack (its frame is the CommonJS module's,
+	// at the `new`).
+	got := stderr.String()
+	if !strings.HasPrefix(got, "TypeError: boom\n    at Object.<anonymous> (file://") || !strings.HasSuffix(got, ":1:7)\n") || stdout.String() != "" {
+		t.Fatalf("stdout = %q, stderr = %q", stdout.String(), got)
 	}
 }
 
@@ -166,7 +168,7 @@ func TestE2EErrorInspectCause(t *testing.T) {
 	// `[cause]: …` and an AggregateError's errors as `[errors]: […]`; an
 	// assigned cause is an ordinary property, and an AggregateError has no
 	// system fields (ADR-01418).
-	assertOutput(t, `
+	assertSameAsNodeFrames(t, `
 const e = new TypeError("outer", { cause: new Error("inner") })
 console.log(e)
 const f: any = new Error("f", { cause: 42 })
@@ -179,6 +181,5 @@ console.log(new Error("plain"))
 const a = new AggregateError([new Error("x")], "m")
 console.log(a)
 console.log(Object.keys(a), JSON.stringify(a), (a as any).code)
-`, "TypeError: outer {\n  [cause]: Error: inner\n}\nError: f {\n  code: 'X',\n  [cause]: 42\n}\nError: g {\n  cause: 'own'\n}\nError: plain\n"+
-		"AggregateError: m {\n  [errors]: [ Error: x ]\n}\n[] {} undefined")
+`)
 }

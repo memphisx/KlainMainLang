@@ -22,12 +22,12 @@ import (
 // bare payload type a nullable scalar unwraps to once its presence bit has
 // been consulted (or once it is read into an ordinary scalar expression).
 func (t Type) withoutNullable() Type {
-	t.Nullable = false
+	t.setNullable(false)
 	// The payload of a `T | undefined` is a plain T — leaving IsUndefined set
 	// would make downstream null-aware paths (`??`'s statically-nullish check,
 	// string rendering) misread the bare payload as `undefined` itself.
-	t.IsUndefined = false
-	t.NullAndUndef = false
+	t.setUndefined(false)
+	t.setNullAndUndef(false)
 	t.UncheckedIndex = false // the absence it qualified is gone
 	return t
 }
@@ -44,9 +44,9 @@ func (e *Emitter) nullableScalarFieldPtr(ptr string, ty Type, idx int) string {
 // storeNullableScalarFields writes both fields of the { i1, T } slot at ptr.
 func (e *Emitter) storeNullableScalarFields(ptr string, ty Type, presentRef, payloadRef string) {
 	f0 := e.nullableScalarFieldPtr(ptr, ty, 0)
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", presentRef, f0))
+	e.heapStore("i1", presentRef, f0, 1)
 	f1 := e.nullableScalarFieldPtr(ptr, ty, 1)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, payloadRef, f1, ty.Align()))
+	e.heapStore(ty.IR, payloadRef, f1, ty.Align())
 }
 
 // storeNullableScalarAbsent writes { present=0, payload=zero } — the "null"/
@@ -70,7 +70,7 @@ func (e *Emitter) copyNullableScalar(dstPtr string, ty Type, srcPtr string) {
 	agg := nullableScalarStorageIR(ty)
 	tmp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", tmp, agg, srcPtr, storageAlign(ty)))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, tmp, dstPtr, storageAlign(ty)))
+	e.heapStore(agg, tmp, dstPtr, storageAlign(ty))
 }
 
 // loadNullableScalarPayload loads the bare payload T from the { i1, T } slot.
@@ -136,7 +136,7 @@ func (e *Emitter) nullableScalarLValue(expr ast.Expression) (sym Symbol, ok bool
 // carries the { i1, T } aggregate in its Ref (an SSA register). A bare payload
 // Value always has Nullable cleared, so isNullableScalar(v.Ty) reliably means
 // "this Ref is an aggregate." The helpers below build and take apart that
-// aggregate; coerce() demotes one to its bare payload wherever a plain scalar
+// aggregate; convert() demotes one to its bare payload wherever a plain scalar
 // is wanted, so most consumers never need to know the aggregate shape exists.
 
 // emitConcatOperandString stringifies a string-concatenation operand (the
@@ -201,7 +201,7 @@ func (e *Emitter) nullableScalarPayloadOf(v Value) Value {
 // ToInt32(NaN) = 0.
 func (e *Emitter) nullableScalarOperand(v Value, op string) Value {
 	present, payload := e.nullableScalarAggParts(v)
-	if !v.Ty.IsUndefined || scalarTypeKind(payload.Ty) != "number" {
+	if !v.Ty.IsUndefined() || scalarTypeKind(payload.Ty) != "number" {
 		return payload
 	}
 	switch op {
@@ -209,7 +209,7 @@ func (e *Emitter) nullableScalarOperand(v Value, op string) Value {
 	default:
 		return payload
 	}
-	f := e.coerce(payload, TypeF64)
+	f := e.convert(payload, TypeF64)
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double 0x7FF8000000000000", r, present, f.Ref))
 	return Value{Ref: r, Ty: TypeF64}
@@ -221,7 +221,7 @@ func (e *Emitter) nullableScalarOperand(v Value, op string) Value {
 // presence-aware. Any other operand is returned as is.
 func (e *Emitter) jsUndefinedLocalOperand(expr ast.Expression, cur Value, op string) Value {
 	sym, ok := e.nullableScalarLValue(expr)
-	if !ok || !sym.Ty.IsUndefined || isStringTy(cur.Ty) {
+	if !ok || !sym.Ty.IsUndefined() || isStringTy(cur.Ty) {
 		return cur
 	}
 	return e.nullableScalarOperand(e.loadNullableScalarAgg(sym.Ptr, sym.Ty), op)
@@ -239,11 +239,11 @@ func (e *Emitter) emitNullableScalarBoxedValue(expr ast.Expression, ty Type) (st
 	// parameter is) has no conversion here in the strict lane: the
 	// typed-subset rejection a plain parameter makes, never invalid IR. The
 	// js lane converts it as JavaScript does.
-	if at := e.inferExprType(expr); !e.compatJS() && !at.IsDynamic && !isNullableScalar(at) && !at.IsNull && !at.IsUndefined && at.IR != "" &&
-		isPrimitiveRepr(at) && isPrimitiveRepr(ty.withoutNullable()) && !coerciblePure(at, ty.withoutNullable()) {
+	if at := e.inferExprType(expr); !e.compatJS() && !at.IsDynamic() && !isNullableScalar(at) && !at.IsNull() && !at.IsUndefined() && at.IR != "" &&
+		isPrimitiveRepr(at) && isPrimitiveRepr(ty.withoutNullable()) && !convertiblePure(at, ty.withoutNullable()) {
 		return "", fmt.Errorf("%d:%d: type mismatch in argument — a value of one type cannot be used where an incompatible type is expected (this compiler is a typed subset)", expr.GetPos().Line, expr.GetPos().Col)
 	}
-	if ty.NullAndUndef {
+	if ty.NullAndUndef() {
 		v, err := e.emitExpr(expr)
 		if err != nil {
 			return "", err
@@ -269,13 +269,13 @@ func (e *Emitter) emitNullableScalarBoxedValue(expr ast.Expression, ty Type) (st
 // boxNullableScalarFromValue boxes an already-evaluated Value into a { i1, T }
 // aggregate of type ty. See emitNullableScalarBoxedValue for the cases.
 func (e *Emitter) boxNullableScalarFromValue(v Value, ty Type) string {
-	if ty.NullAndUndef {
-		if v.Ty.NullAndUndef {
+	if ty.NullAndUndef() {
+		if v.Ty.NullAndUndef() {
 			return v.Ref
 		}
 		return e.toThreeState(v, ty).Ref
 	}
-	if v.Ty.IsNull {
+	if v.Ty.IsNull() {
 		return e.makeNullableScalarAgg(ty, "false", zeroRef(ty.withoutNullable()))
 	}
 	if isNullableScalar(v.Ty) && v.Ty.IR == ty.IR {
@@ -285,14 +285,14 @@ func (e *Emitter) boxNullableScalarFromValue(v Value, ty Type) string {
 		// A different payload (`{ i1, i64 }` into a `number | undefined` slot):
 		// coerce converts the payload and keeps the presence bit — boxing the
 		// demoted payload as present turned `undefined` into `0`.
-		return e.coerce(v, ty).Ref
+		return e.convert(v, ty).Ref
 	}
-	if v.Ty.IsDynamic {
+	if v.Ty.IsDynamic() {
 		// A box (`any`, a `(number | undefined)[]` element): coerce reads the tag,
 		// so a boxed undefined/null arrives absent rather than as a present NaN.
-		return e.coerce(v, ty).Ref
+		return e.convert(v, ty).Ref
 	}
-	bare := e.coerce(v, ty.withoutNullable())
+	bare := e.convert(v, ty.withoutNullable())
 	return e.makeNullableScalarAgg(ty, "true", bare.Ref)
 }
 
@@ -322,7 +322,7 @@ func (e *Emitter) defineNullableScalarParam(name, ptrName string, pty Type) {
 	agg := nullableScalarStorageIR(pty)
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, agg, storageAlign(pty)))
 	e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", agg, name, ptrName, storageAlign(pty)))
-	e.define(name, Symbol{Ptr: ptrName, Ty: pty, NullableBoxed: true})
+	e.define(name, Symbol{Ptr: ptrName, Ty: pty})
 }
 
 // storeNullableScalar writes an init/RHS expression into the { i1, T } slot at
@@ -330,7 +330,7 @@ func (e *Emitter) defineNullableScalarParam(name, ptrName string, pty Type) {
 // undefined literal, another nullable-scalar local, or a plain bare-T value).
 // See the file header for why the bare-T fallback marks the result present.
 func (e *Emitter) storeNullableScalar(ptr string, ty Type, init ast.Expression) error {
-	if ty.NullAndUndef {
+	if ty.NullAndUndef() {
 		agg, err := e.emitNullableScalarBoxedValue(init, ty)
 		if err != nil {
 			return err
@@ -363,34 +363,34 @@ func (e *Emitter) storeNullableScalar(ptr string, ty Type, init ast.Expression) 
 // storeScalarOrNullableField stores a Value into an object/interface/class
 // field slot at gepReg. A nullable-scalar field (TDD-00064 Stage 3) is boxed
 // into its { i1, T } aggregate, preserving a null as absent; every other field
-// type coerces and stores exactly as before (StructFieldIR handles the array
-// {ptr,i64} shape).
+// type coerces and stores exactly as before (an array field stores its header
+// pointer).
 func (e *Emitter) storeScalarOrNullableField(gepReg string, fieldTy Type, val Value) {
 	// An array field slot holds a shared {data,len} header pointer (TDD-00213
-	// Stage 2): coerce (so a null value becomes the {null,0} aggregate), then
-	// share the value's live header (reference aliasing) or mint one.
-	if fieldTy.IsArray {
-		e.storeArrayFieldHeader(gepReg, e.coerce(val, fieldTy))
+	// Stage 2): coerce (so a null value becomes the null header), then store
+	// the value's header (reference aliasing).
+	if fieldTy.IsArray() {
+		e.storeArrayFieldHeader(gepReg, e.convert(val, fieldTy))
 		return
 	}
 	if isNullableScalar(fieldTy) {
 		agg := e.boxNullableScalarFromValue(val, fieldTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(fieldTy), agg, gepReg, storageAlign(fieldTy)))
+		e.heapStore(nullableScalarStorageIR(fieldTy), agg, gepReg, storageAlign(fieldTy))
 		return
 	}
 	// A constrained-union field (TDD-00119) holds an { i8, i64 } box: box the
 	// concrete value into it rather than coercing (coerce doesn't box). Already-
 	// boxed dynamic values pass through emitBoxValue unchanged.
-	if fieldTy.IsDynamic && len(fieldTy.UnionMembers) > 0 {
+	if fieldTy.IsDynamic() && len(fieldTy.UnionMembers) > 0 {
 		boxed, err := e.emitBoxValue(val)
 		if err == nil {
 			val = boxed
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+		e.heapStore(StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align())
 		return
 	}
-	val = e.coerce(val, fieldTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+	val = e.convert(val, fieldTy)
+	e.heapStore(StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align())
 }
 
 // storeScalarOrNullableFieldExpr stores an *expression* into a field slot. For
@@ -405,7 +405,7 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(fieldTy), agg, gepReg, storageAlign(fieldTy)))
+		e.heapStore(nullableScalarStorageIR(fieldTy), agg, gepReg, storageAlign(fieldTy))
 		return nil
 	}
 	// TDD-00187 strict gate: storing a `T | undefined` absence result into a
@@ -415,18 +415,17 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 		return err
 	}
 	// An array field slot holds a shared {data,len} header pointer (TDD-00213
-	// Stage 2): share the value's live header (`obj.arr = existing` aliases) or
-	// mint a fresh one for a new array expression. Coerce first so a null literal
-	// (`{ items: null }` for a `T[] | null` field) becomes the {null,0} aggregate
-	// rather than a bare `null` boxArrayValue would mis-store.
-	if fieldTy.IsArray {
-		e.storeArrayFieldHeader(gepReg, e.coerce(val, fieldTy))
+	// Stage 2): store the value's header (`obj.arr = existing` aliases). Coerce
+	// first so a null literal (`{ items: null }` for a `T[] | null` field)
+	// becomes the null header.
+	if fieldTy.IsArray() {
+		e.storeArrayFieldHeader(gepReg, e.convert(val, fieldTy))
 		return nil
 	}
 	// A constrained-union field (TDD-00119) holds an { i8, i64 } box: check the
 	// value's type against the member set, then box it (coerce doesn't box).
-	if fieldTy.IsDynamic && len(fieldTy.UnionMembers) > 0 {
-		if !val.Ty.IsDynamic && !unionAllowsAssignmentFrom(fieldTy, val.Ty) {
+	if fieldTy.IsDynamic() && len(fieldTy.UnionMembers) > 0 {
+		if !val.Ty.IsDynamic() && !unionAllowsAssignmentFrom(fieldTy, val.Ty) {
 			return fmt.Errorf("%d:%d: value's type is not a member of the field's union type", expr.GetPos().Line, expr.GetPos().Col)
 		}
 		boxed, err := e.emitBoxValue(val)
@@ -434,11 +433,11 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 			return err
 		}
 		val = boxed
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+		e.heapStore(StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align())
 		return nil
 	}
-	val = e.coerce(val, fieldTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align()))
+	val = e.convert(val, fieldTy)
+	e.heapStore(StructFieldIR(fieldTy), val.Ref, gepReg, fieldTy.Align())
 	return nil
 }
 
@@ -448,8 +447,8 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 // as needed; every other field loads exactly as before.
 func (e *Emitter) loadScalarOrNullableField(gepReg string, fieldTy Type) Value {
 	// An array field slot holds a shared {data,len} header pointer (TDD-00213
-	// Stage 2): deref it into the {ptr,i64} aggregate, carrying the live header.
-	if fieldTy.IsArray {
+	// Stage 2): the header is the array value.
+	if fieldTy.IsArray() {
 		return e.loadArrayFieldValue(gepReg, fieldTy)
 	}
 	reg := e.freshReg()
@@ -464,7 +463,7 @@ func (e *Emitter) loadScalarOrNullableField(gepReg string, fieldTy Type) Value {
 // storeNullableScalarAggregate stores a whole { i1, T } aggregate register into
 // the slot at ptr.
 func (e *Emitter) storeNullableScalarAggregate(ptr string, ty Type, aggRef string) {
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(ty), aggRef, ptr, storageAlign(ty)))
+	e.heapStore(nullableScalarStorageIR(ty), aggRef, ptr, storageAlign(ty))
 }
 
 // nullCoalesceUnion reports the result type of `left ?? right` when the two
@@ -477,7 +476,7 @@ func (e *Emitter) storeNullableScalarAggregate(ptr string, ty Type, aggRef strin
 // member. Shared by emission and inferExprType so the two cannot disagree.
 func nullCoalesceUnion(leftBare, right Type) (Type, bool) {
 	kind := func(t Type) string {
-		if t.IR == "ptr" && !isStringTy(t) && !t.IsSymbol && !t.IsBigInt {
+		if t.IR == "ptr" && !isStringTy(t) && !t.IsSymbol() && !t.IsBigInt() {
 			return ""
 		}
 		return scalarTypeKind(t)
@@ -487,7 +486,7 @@ func nullCoalesceUnion(leftBare, right Type) (Type, bool) {
 	if lk == "" || rk == "" || lk == rk {
 		return Type{}, false
 	}
-	return Type{IR: TypeAny.IR, IsDynamic: true, UnionMembers: []Type{leftBare, rightBare}, Nullable: right.Nullable}, true
+	return Type{IR: TypeAny.IR, Kind: kindDynamic, UnionMembers: []Type{leftBare, rightBare}, Absent: absenceOf(right.Nullable(), false, false)}, true
 }
 
 // emitNullCoalesceUnion emits `left ?? right` with a union result (see
@@ -508,7 +507,7 @@ func (e *Emitter) emitNullCoalesceUnion(present string, left Value, rightExpr as
 		return Value{}, err
 	}
 	var rb Value
-	if right.Ty.IR == "ptr" && right.Ty.Nullable && !right.Ty.IsNull {
+	if right.Ty.IR == "ptr" && right.Ty.Nullable() && !right.Ty.IsNull() {
 		// A `string | undefined` right operand: its absence is a run-time null
 		// pointer, while the box reads the static `undefined` flag as the literal
 		// — so a present string boxed as `undefined`. Box the two cases apart.
@@ -516,20 +515,20 @@ func (e *Emitter) emitNullCoalesceUnion(present string, left Value, rightExpr as
 		if uerr != nil {
 			return Value{}, uerr
 		}
-		asUndef := e.coerce(undef, uTy)
-		asValue := e.coerce(Value{Ref: right.Ref, Ty: right.Ty.withoutNullable()}, uTy)
+		asUndef := e.convert(undef, uTy)
+		asValue := e.convert(Value{Ref: right.Ref, Ty: right.Ty.withoutNullable()}, uTy)
 		isNull := e.ptrIsNull(right.Ref)
 		sel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", sel, isNull, uTy.IR, asUndef.Ref, uTy.IR, asValue.Ref))
 		rb = Value{Ref: sel, Ty: uTy}
 	} else {
-		rb = e.coerce(right, uTy)
+		rb = e.convert(right, uTy)
 	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", uTy.IR, rb.Ref, resPtr, uTy.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(presentL)
-	lb := e.coerce(left, uTy)
+	lb := e.convert(left, uTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", uTy.IR, lb.Ref, resPtr, uTy.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -573,7 +572,7 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 	if err != nil {
 		return Value{}, err
 	}
-	right = e.coerce(right, base)
+	right = e.convert(right, base)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", base.IR, right.Ref, resPtr, base.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -590,11 +589,12 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 // nullCoalesceNullishRight is the result type of `x ?? null` (or `??
 // undefined`) for a scalar x of type base: base | null (| undefined).
 func nullCoalesceNullishRight(base, right Type) (Type, bool) {
-	if !right.IsNull || right.IsDynamic {
+	if !right.IsNull() || right.IsDynamic() {
 		return Type{}, false
 	}
 	res := base
-	res.Nullable, res.IsUndefined = true, right.IsUndefined
+	res.setNullable(true)
+	res.setUndefined(right.IsUndefined())
 	return res, isNullableScalar(res)
 }
 
@@ -621,10 +621,10 @@ func (e *Emitter) emitNullCoalesceScalarNullableRight(presentRef string, payload
 	var rightAgg string
 	if isNullableScalar(right.Ty) {
 		rightAgg = right.Ref // already a { i1, T } aggregate (may be absent)
-	} else if right.Ty.IsNull {
+	} else if right.Ty.IsNull() {
 		rightAgg = e.makeNullableScalarAgg(resTy, "false", zeroRef(resTy.withoutNullable()))
 	} else {
-		rv := e.coerce(right, resTy.withoutNullable())
+		rv := e.convert(right, resTy.withoutNullable())
 		rightAgg = e.makeNullableScalarAgg(resTy, "true", rv.Ref)
 	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, rightAgg, resPtr, storageAlign(resTy)))
@@ -667,18 +667,18 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	// not marked IsUndefined, so a genuinely-undefined dynamic value never
 	// strict-equalled the literal (a missing dynamic property, `als.getStore()`,
 	// etc.).
-	if e.inferExprType(scalarExpr).IsDynamic {
+	if e.inferExprType(scalarExpr).IsDynamic() {
 		return Value{}, false, nil
 	}
 	// An array operand compared to the `undefined` literal is a `Map<K,T[]>` miss
-	// check: the result reads as a {null,0} aggregate whose absence is a null data
-	// pointer, and it is never statically marked IsUndefined (that would fold its
+	// check: the result reads as the null header when absent, and it is never
+	// statically marked IsUndefined (that would fold its
 	// truthiness to a constant false), so the strict litUndef!=valUndef fold below
 	// would wrongly make `map.get(k) === undefined` a constant false. Defer to
 	// emitBinary's array-vs-nullish branch, which tests the data pointer at
 	// runtime. Only for the `undefined` literal — a `T[] | null` field compared to
 	// `null` keeps its existing presence-bit handling below.
-	if litUndef && e.inferExprType(scalarExpr).IsArray {
+	if litUndef && e.inferExprType(scalarExpr).IsArray() {
 		return Value{}, false, nil
 	}
 	// Strict `===`/`!==` distinguishes `null` from `undefined` (JS: `undefined
@@ -688,10 +688,10 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	// equal), regardless of the presence bit.
 	strict := ex.Op == "===" || ex.Op == "!=="
 	vt := e.inferExprType(scalarExpr)
-	if vt.NullAndUndef && vt.IR == "ptr" {
+	if vt.NullAndUndef() && vt.IR == "ptr" || triStr(vt) {
 		return Value{}, false, nil // either absence, tested at run time (emitBinary)
 	}
-	if vt.NullAndUndef {
+	if vt.NullAndUndef() {
 		// A three-state scalar: its slot says which absence it holds.
 		agg, err := e.emitExpr(scalarExpr)
 		if err != nil {
@@ -700,7 +700,7 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 		if !isNullableScalar(agg.Ty) {
 			return Value{}, false, nil
 		}
-		agg.Ty.NullAndUndef = true
+		agg.Ty.setNullAndUndef(true)
 		present, _ := e.nullableScalarAggParts(agg)
 		var cond string
 		switch {
@@ -721,8 +721,8 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 		}
 		return Value{Ref: cond, Ty: TypeBool}, true, nil
 	}
-	valUndef := vt.IsUndefined
-	if vt.Nullable && !isNullableScalar(vt) && !vt.IsNull && !vt.IsUndefined {
+	valUndef := vt.IsUndefined()
+	if vt.Nullable() && !isNullableScalar(vt) && !vt.IsNull() && !vt.IsUndefined() {
 		// A pointer that may be absent (a `(() => void) | undefined`, an
 		// object or string): its flags don't say which absence it holds, so
 		// no constant; the pointer compare decides.
@@ -730,7 +730,7 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	}
 	// A double slot may hold undefined as its sentinel (TDD-00241):
 	// emitF64UndefinedEq tests the bits.
-	f64Slot := vt.IR == "double" && !vt.IsDynamic && !isNullableScalar(vt)
+	f64Slot := vt.IR == "double" && !vt.IsDynamic() && !isNullableScalar(vt)
 	if strict && litUndef != valUndef && !(f64Slot && litUndef) {
 		switch ex.Op {
 		case "===":
@@ -809,7 +809,7 @@ func isNullLiteralExpr(expr ast.Expression) bool {
 func (e *Emitter) emitNullableScalarVarDecl(v *ast.VarDeclaration, ty Type) error {
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, nullableScalarStorageIR(ty), storageAlign(ty)))
-	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const", NullableBoxed: true})
+	e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 	if v.Init == nil {
 		e.storeNullableScalarAbsent(ptrName, ty)
 		return nil
@@ -844,15 +844,15 @@ func (e *Emitter) emitNullableScalarAssign(sym Symbol, ex *ast.AssignmentExpress
 		if err != nil {
 			return Value{}, err
 		}
-		if err := dateCompoundAssignGuard(ex.Op, base.IsDate, rhsVal.Ty.IsDate); err != nil {
+		if err := dateCompoundAssignGuard(ex.Op, base.IsDate(), rhsVal.Ty.IsDate()); err != nil {
 			return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
 		}
-		rhsVal = e.coerce(rhsVal, base)
+		rhsVal = e.convert(rhsVal, base)
 		res, err := e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, base, ex.GetPos())
 		if err != nil {
 			return Value{}, err
 		}
-		res = e.coerce(res, base)
+		res = e.convert(res, base)
 		e.storeNullableScalarPresent(sym.Ptr, ty, res.Ref)
 		return res, nil
 	}
@@ -905,7 +905,7 @@ func (e *Emitter) emitNullableScalarNullishOrLogicalAssignAt(ptr string, ty Type
 	if err != nil {
 		return Value{}, err
 	}
-	rhs = e.coerce(rhs, base)
+	rhs = e.convert(rhs, base)
 	e.storeNullableScalarPresent(ptr, ty, rhs.Ref)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -1007,7 +1007,7 @@ func (e *Emitter) emitConsoleNullableScalarAgg(val Value, fd int, term string) e
 // `T | undefined` (an element-absence result, TDD-00187), "null" for a
 // `T | null` annotation (TDD-00064).
 func absentLiteral(ty Type) string {
-	if ty.IsUndefined {
+	if ty.IsUndefined() {
 		return "undefined"
 	}
 	return "null"
@@ -1071,7 +1071,7 @@ func (e *Emitter) boolNot(b string) string {
 // isPrimitiveRepr reports a number, bigint, boolean or string
 // representation.
 func isPrimitiveRepr(t Type) bool {
-	if t.IsDynamic || t.IsObject || t.IsArray || t.IsFunc || t.IsMap || t.IsSet || t.IsPromise || t.IsClass {
+	if t.IsDynamic() || t.IsObject() || t.IsArray() || t.IsFunc() || t.IsMap() || t.IsSet() || t.IsPromise() || t.IsClass() {
 		return false
 	}
 	switch t.IR {

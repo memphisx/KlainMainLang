@@ -1,6 +1,7 @@
 package llvm
 
 import (
+	_ "embed"
 	"fmt"
 	"runtime"
 	"strings"
@@ -97,10 +98,6 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		cflags, libs := LocateTLS()
 		out = append(out, CSource{"tlshandle", TLSHandleSource(), cflags, libs, ""})
 	}
-	if e.UsesHTTP2() {
-		cflags, libs := LocateHTTP2()
-		out = append(out, CSource{"http2", HTTP2ServerSource(), cflags, libs, ""})
-	}
 	if e.UsesH2Node() {
 		cflags, libs := LocateHTTP2()
 		out = append(out, CSource{"h2node", H2NodeSource(), cflags, libs, ""})
@@ -140,8 +137,11 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"pathwin32", PathWin32Source(), nil, nil, ""})
 	}
 	if e.UsesDynJSON() {
-		out = append(out, CSource{"dynjson", DynJSONSource(), append(e.dynJSONViewFlags(), fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord())), nil, ""})
+		out = append(out, CSource{"dynjson", DynJSONSource(), append(e.dynJSONViewFlags(), fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord()), fmt.Sprintf("-DKML_ARGS_HDR_WORD=%dLL", e.argumentsHeaderWord())), nil, ""})
 	}
+	// Every runtime unit that switches fibers or unwinds keeps the shadow
+	// call stack's thread-locals (kml_heap.h), so it always links.
+	out = append(out, CSource{"frames", FramesSource(), nil, nil, ""})
 	if e.usedJmpStack {
 		out = append(out, CSource{"jmpstack", JmpStackSource(), nil, nil, ""})
 	}
@@ -155,7 +155,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"promise", PromiseSource(), nil, nil, ""})
 	}
 	if e.usedTaskRuntime {
-		out = append(out, CSource{"task", TaskSource(), e.TaskCFlags(), nil, ""})
+		out = append(out, CSource{"task", TaskSource(), nil, nil, ""})
 	}
 	if e.UsesCoreC() {
 		out = append(out, CSource{"core", CoreSource(), nil, LibmLibs(), ""})
@@ -239,16 +239,10 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"exceptions", ExceptionsSource(), e.ExceptionsCFlags(), nil, ""})
 	}
 	if e.UsesWorkers() {
-		out = append(out, CSource{"worker", WorkerSource(), e.WorkerCFlags(), nil, ""})
+		out = append(out, CSource{"worker", WorkerSource(), nil, nil, ""})
 	}
 	if e.UsesIPCChild() {
 		out = append(out, CSource{"ipcc", IPCChildSource(), nil, nil, ""})
-	}
-	if e.UsesNetSockIO() {
-		out = append(out, CSource{"netsock", NetSockSource(), nil, nil, ""})
-	}
-	if e.UsesNet() {
-		out = append(out, CSource{"net", NetSource(), nil, nil, ""})
 	}
 	if e.UsesTimers() {
 		// Timers are uv_timer_t handles (the loop links libuv).
@@ -258,13 +252,15 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if e.usedEventLoop {
 		cflags, libs := LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
 		out = append(out, CSource{"loop", LoopSource(), append(cflags, e.loopCFlags...), libs, ""})
-		out = append(out, CSource{"httpsrv", HTTPSrvSource(), nil, nil, ""})
 	}
 	if e.UsesNative() {
 		out = append(out, CSource{"native", NativeSource(), e.NativeCFlags(), nil, ""})
 	}
 	if e.UsesDynWhen() {
 		out = append(out, CSource{"dynwhen", DynWhenSource(), nil, nil, ""})
+	}
+	if e.usedIslandLoop {
+		out = append(out, CSource{"island", islandSource, nil, nil, ""})
 	}
 	if e.UsesDynImportWatch() {
 		out = append(out, CSource{"dynimportwatch", DynImportWatchSource(), nil, nil, ""})
@@ -288,7 +284,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"fetchbodyprom", FetchBodyPromSource(), nil, nil, ""})
 	}
 	if e.UsesModuleTask() {
-		out = append(out, CSource{"module_task", ModuleTaskSource(), e.ModuleTaskCFlags(), nil, ""})
+		out = append(out, CSource{"module_task", ModuleTaskSource(), nil, nil, ""})
 	}
 	if e.UsesBigIntBoxC() {
 		out = append(out, CSource{"bigintbox", BigIntBoxSource(), nil, nil, ""})
@@ -312,7 +308,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"arrayguard", ArrayGuardSource(), nil, nil, ""})
 	}
 	if e.UsesCollections() {
-		out = append(out, CSource{"collections", CollectionsSource(e.isGCMode()), nil, nil, ""})
+		out = append(out, CSource{"collections", CollectionsSource(), nil, nil, ""})
 	}
 	if e.UsesCollectionsAny() {
 		out = append(out, CSource{"collections_any", CollectionsAnySource(), nil, nil, ""})
@@ -327,6 +323,9 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// Unicode case mapping for toUpperCase/toLowerCase. Tables + code,
 		// libc only.
 		out = append(out, CSource{"casemap", CasemapSource(), nil, LibmLibs(), ""})
+	}
+	if e.UsesCollate() {
+		out = append(out, CSource{"collate", CollateSource(), nil, nil, ""})
 	}
 	if e.UsesStringC() {
 		out = append(out, CSource{"string", StringSource(), []string{fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord())}, LibmLibs(), ""})
@@ -377,15 +376,10 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"wvnatives", webviewNatives, nil, nil, ""})
 	}
 	if e.UsesHeapStats() {
-		// process.memoryUsage() heapTotal/heapUsed. Under -mm=gc it reads Boehm's
-		// heap (gc.h, on the global include path LocateGC adds); -DKLAIN_GC selects
-		// that branch. No extra libs — malloc.h/malloc/malloc.h live in libc, and
-		// -lgc is already linked globally in gc mode.
-		var cflags []string
-		if e.isGCMode() {
-			cflags = []string{"-DKLAIN_GC=1"}
-		}
-		out = append(out, CSource{"procmem", ProcMemSource(), cflags, nil, ""})
+		// process.memoryUsage() heapTotal/heapUsed. Under -mm=gc it reads the
+		// collector's heap through the GC interface. No extra libs —
+		// malloc.h/malloc/malloc.h live in libc.
+		out = append(out, CSource{"procmem", ProcMemSource(), nil, nil, ""})
 	}
 	if e.UsesTtyShim() {
 		// TDD-00031: termios/ioctl/raw-read shim. No extra libs — termios and
@@ -406,7 +400,7 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// TDD-00143: the klain:sync GMP goroutine runtime. Needs pthread; the
 		// macOS ucontext calls are deprecated-but-functional (silence the
 		// warning). Under -mm=gc the runtime registers each M thread and each
-		// goroutine stack with Boehm — gated by KLAINSYNC_GC; the -lgc link is
+		// goroutine stack with the collector (KML_GC); the -lgc link is
 		// already added globally in gc mode (LocateGC).
 		cflags := []string{"-Wno-deprecated-declarations"}
 		var libs []string
@@ -419,15 +413,12 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		} else {
 			cflags = append(cflags, "-pthread") // dynamic winpthread (default / POSIX)
 		}
-		if e.isGCMode() {
-			cflags = append(cflags, "-DKLAINSYNC_GC=1")
-		}
 		out = append(out, CSource{"klainsync", SyncSource(), cflags, libs, ""})
 	}
 	if e.UsesThreadPool() {
 		// TDD-00185: the blocking-work thread pool for real async fs I/O. Needs
 		// pthread; under -mm=gc each worker registers with Boehm before its first
-		// allocation (KLAINPOOL_GC), matching the Worker/klain:sync threads.
+		// allocation (KML_GC), matching the Worker/klain:sync threads.
 		// --static on Windows links the static winpthread archive instead of
 		// -pthread's DLL, as klain:sync does above (ADR-00772).
 		if runtime.GOOS == "windows" && staticLinkMode {
@@ -446,6 +437,10 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		cflags, libs := e.CaresFlags()
 		out = append(out, CSource{"cares", CaresSource(), cflags, libs, ""})
 	}
+	if e.usedH2ONatives {
+		cflags, libs := e.H2OFlags()
+		out = append(out, CSource{"h2o", H2OSource(), cflags, libs, ""})
+	}
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added
 		// by the CLI when workers are used, but a serve-only program needs it too.
@@ -455,8 +450,39 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			out = append(out, CSource{"embedassets", EmbedAssetsSource(), []string{"-pthread"}, nil, ""})
 		}
 	}
+	if e.usedFdlibm {
+		out = append(out, CSource{"fdlibm", fdlibmSource, nil, LibmLibs(), ""})
+	}
+	if e.usedBufFill {
+		out = append(out, CSource{"buffill", bufFillSource, nil, LibmLibs(), ""})
+	}
+	if e.usedKeyOrder {
+		out = append(out, CSource{"keyorder", keyOrderSource, nil, nil, ""})
+	}
+	if e.usedPropAttr {
+		out = append(out, CSource{"propattr", propAttrSource, nil, nil, ""})
+	}
+	if e.usedHoles {
+		out = append(out, CSource{"holes", holesSource, nil, nil, ""})
+	}
+	if e.usedWrapper {
+		out = append(out, CSource{"wrapper", wrapperSource, nil, nil, ""})
+	}
+	// Every member allocates program values through the managed-heap
+	// interface (TDD-00230 P3.3a), reads a header word's object state
+	// through the same constants, and sees -mm=gc as KML_GC.
+	prelude := kmlHeapHeader + hdrStateDefines()
+	if e.isGCMode() {
+		prelude = "#define KML_GC 1\n" + prelude
+	}
+	for i := range out {
+		out[i].Content = prelude + out[i].Content
+	}
 	return out, nil
 }
+
+//go:embed kmlheapsrc/kml_heap.h
+var kmlHeapHeader string
 
 // LibmLibs is the link flag a C runtime file calling libm (trunc, floor, …)
 // needs: glibc and mingw keep the math functions in libm; macOS has them in

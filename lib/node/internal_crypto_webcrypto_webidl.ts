@@ -284,17 +284,18 @@ dictionaries.RsaOaepParams = createDictionaryConverter('RsaOaepParams', [
 dictionaries.EcdsaParams = createDictionaryConverter('EcdsaParams', [
     dictAlgorithm, [hashMember('EcdsaParams')]]);
 
-function hmacDict(name: string, zeroError: string): (j: any, o: any, n?: string) => any {
-    return createDictionaryConverter(name, [dictAlgorithm, [
-        hashMember(name),
-        new Member('length', enforceUnsignedLong(), false, (v: any, dict: any): void => {
-            if (v === 0) throw lazyDOMException(name + '.length cannot be 0', zeroError);
-        }),
-    ]]);
-}
-
-dictionaries.HmacKeyGenParams = hmacDict('HmacKeyGenParams', 'OperationError');
-dictionaries.HmacImportParams = hmacDict('HmacImportParams', 'DataError');
+dictionaries.HmacKeyGenParams = createDictionaryConverter('HmacKeyGenParams', [dictAlgorithm, [
+    hashMember('HmacKeyGenParams'),
+    new Member('length', enforceUnsignedLong(), false, (v: any, dict: any): void => {
+        if (v === 0) throw lazyDOMException('HmacKeyGenParams.length cannot be 0', 'OperationError');
+    }),
+]]);
+// A zero import length passes the dictionary: importing reports it
+// ("Zero-length key is not supported").
+dictionaries.HmacImportParams = createDictionaryConverter('HmacImportParams', [dictAlgorithm, [
+    hashMember('HmacImportParams'),
+    new Member('length', enforceUnsignedLong(), false, null),
+]]);
 
 dictionaries.HkdfParams = createDictionaryConverter('HkdfParams', [dictAlgorithm, [
     hashMember('HkdfParams'),

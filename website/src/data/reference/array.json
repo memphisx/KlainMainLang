@@ -6,8 +6,8 @@
   "coverage": {
     "loose": "37/37",
     "loosePct": 100,
-    "strict": "30/37",
-    "strictPct": 78
+    "strict": "34/37",
+    "strictPct": 92
   },
   "lede": "Every Array method is present, and arrays are full reference values: a length change (push/pop/splice) inside a callee is visible to the caller for every argument shape — a plain variable, an object-field or array-element array, or a HOF-callback element. The remaining recurring caveat is structural: the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
   "entries": [
@@ -209,15 +209,12 @@
       "name": ".indexOf(item, fromIndex?)",
       "statusRow": "`.indexOf(item, fromIndex?)`",
       "signature": "indexOf(item: T, fromIndex?: number): number",
-      "badge": "caveats",
-      "description": "Returns the index of the first matching element at or after the optional fromIndex (negative counts from the end), or -1.",
+      "badge": "exact",
+      "description": "Returns the index of the first matching element at or after the optional fromIndex (negative counts from the end), or -1. Elements that are objects or arrays compare by identity.",
       "returns": {
         "type": "number",
         "desc": "First match index, or -1."
       },
-      "differences": [
-        "Rejects a nested-array element (`number[][]`) — compares a bare register, no callback."
-      ],
       "seeAlso": [
         "array.includes",
         "array.find"
@@ -230,15 +227,12 @@
       "id": "array.includes",
       "name": ".includes(item)",
       "signature": "includes(item: T): boolean",
-      "badge": "caveats",
-      "description": "Whether the array contains the element.",
+      "badge": "exact",
+      "description": "Whether the array contains the element (SameValueZero; objects and arrays by identity).",
       "returns": {
         "type": "boolean",
         "desc": "true if present."
       },
-      "differences": [
-        "Rejects a nested-array element (`number[][]`) — compares a bare register, no callback."
-      ],
       "seeAlso": [
         "array.indexOf"
       ],
@@ -691,18 +685,15 @@
     },
     {
       "id": "array.from",
-      "name": "Array.from(iterable, mapFn?)",
-      "signature": "Array.from(source, mapFn?: (v: T, i: number) => U): T[] | U[]",
-      "badge": "caveats",
-      "description": "Builds an array from an array, a Set, a Map (as entries), a string (its characters), a generator, any iterable (a [Symbol.iterator]() method, a value held in `any`), a class implementing next(): T | null, or an array-like object (its length, then its indexed properties). An optional mapFn transforms each element by value and index. Static method on Array.",
+      "name": "Array.from(iterable, mapFn?, thisArg?)",
+      "signature": "Array.from(source, mapFn?: (v: T, i: number) => U, thisArg?: any): T[] | U[]",
+      "badge": "exact",
+      "description": "Builds an array from an array, a Set, a Map (as entries), a string (its characters), a generator, any iterable (a [Symbol.iterator]() method, a value held in `any`), or an array-like object (its length, then its indexed properties). An optional mapFn transforms each element by value and index, called with thisArg as its `this`. Static method on Array.",
       "returns": {
         "type": "T[] | U[]",
         "desc": "The constructed array (the mapped type when mapFn is given)."
       },
       "exampleKey": "arrays/array_from_arraylike",
-      "differences": [
-        "`thisArg` (the third argument) is not supported."
-      ],
       "seeAlso": [
         "array.of",
         "array.isArray"

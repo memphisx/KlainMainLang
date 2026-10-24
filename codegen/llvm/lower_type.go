@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/sema"
 	"fmt"
+	"hash/fnv"
 	"strings"
 	"sync"
 
@@ -16,26 +17,28 @@ import (
 // `/** @lowerType <layout> */` (TDD-00230 P3.2): the representation every
 // value of that interface has.
 var lowerLayouts = map[string]func() Type{
-	"error":             func() Type { return errorObjType },
-	"date":              func() Type { return TypeDate },
-	"regexp":            RegExpType,
-	"arraybuffer":       ArrayBufferType,
-	"sharedarraybuffer": SharedArrayBufferType,
-	"int8array":         func() Type { return TypedArrayType("int8") },
-	"uint8array":        func() Type { return TypedArrayType("uint8") },
-	"uint8clampedarray": func() Type { return TypedArrayType("uint8clamped") },
-	"int16array":        func() Type { return TypedArrayType("int16") },
-	"uint16array":       func() Type { return TypedArrayType("uint16") },
-	"int32array":        func() Type { return TypedArrayType("int32") },
-	"uint32array":       func() Type { return TypedArrayType("uint32") },
-	"float32array":      func() Type { return TypedArrayType("float32") },
-	"float64array":      func() Type { return TypedArrayType("float64") },
-	"bigint64array":     func() Type { return TypedArrayType("bigint64") },
-	"biguint64array":    func() Type { return TypedArrayType("biguint64") },
-	"buffer":            BufferType,
-	"response":          ResponseType,
-	"request":           FetchRequestType,
-	"xmlhttprequest":    XMLHttpRequestType,
+	"error":               func() Type { return errorObjType },
+	"date":                func() Type { return TypeDate },
+	"compressionstream":   func() Type { return compressionStreamType(false) },
+	"decompressionstream": func() Type { return compressionStreamType(true) },
+	"regexp":              RegExpType,
+	"arraybuffer":         ArrayBufferType,
+	"sharedarraybuffer":   SharedArrayBufferType,
+	"int8array":           func() Type { return TypedArrayType("int8") },
+	"uint8array":          func() Type { return TypedArrayType("uint8") },
+	"uint8clampedarray":   func() Type { return TypedArrayType("uint8clamped") },
+	"int16array":          func() Type { return TypedArrayType("int16") },
+	"uint16array":         func() Type { return TypedArrayType("uint16") },
+	"int32array":          func() Type { return TypedArrayType("int32") },
+	"uint32array":         func() Type { return TypedArrayType("uint32") },
+	"float32array":        func() Type { return TypedArrayType("float32") },
+	"float64array":        func() Type { return TypedArrayType("float64") },
+	"bigint64array":       func() Type { return TypedArrayType("bigint64") },
+	"biguint64array":      func() Type { return TypedArrayType("biguint64") },
+	"buffer":              BufferType,
+	"response":            ResponseType,
+	"request":             FetchRequestType,
+	"xmlhttprequest":      XMLHttpRequestType,
 	// "dynamic" is a builtin whose values are held as `any` (a property
 	// descriptor, which the Object and Reflect builtins read and build as a
 	// dynamic object).
@@ -60,6 +63,9 @@ func lowerTypeOfSymbol(sym *binder.Symbol, seen map[*binder.Symbol]bool) string 
 	for _, d := range sym.Declarations {
 		if id, ok := d.Node.(*ast.InterfaceDeclaration); ok && id.LowerType != "" {
 			return id.LowerType
+		}
+		if ad, ok := d.Node.(*ast.TypeAliasDeclaration); ok && ad.LowerType != "" {
+			return ad.LowerType
 		}
 	}
 	for _, d := range sym.Declarations {
@@ -174,7 +180,7 @@ var genericLayouts = map[string]genericLayoutDef{
 		// functions and methods alike, except a raw fetch's
 		// `Promise<Response>`; so a declared `Promise<T>` is task-shaped and
 		// `const p: Promise<T> = f(); await p` reads the right slot.
-		if !inner.IsResponse {
+		if !inner.IsResponse() {
 			pt.PromiseTask = true
 		}
 		return pt, true
@@ -208,16 +214,19 @@ var genericLayouts = map[string]genericLayoutDef{
 	"readablestream": {1, func(args []*Type) (Type, bool) {
 		return ReadableStreamType(argOr(args[0], TypeAny)), true
 	}},
-	"readablestreamdefaultreader":     {1, elemLayout(StreamReaderType)},
-	"readablestreamdefaultcontroller": {1, elemLayout(RSControllerType)},
+	"readablestreamdefaultreader": {1, anyElemLayout(StreamReaderType)},
+	"readablestreamreadresult": {1, func(args []*Type) (Type, bool) {
+		return streamReadResultType(argOr(args[0], TypeAny)), true
+	}},
+	"readablestreamdefaultcontroller": {1, anyElemLayout(RSControllerType)},
 	"writablestream": {1, func(args []*Type) (Type, bool) {
 		return WritableStreamType(argOr(args[0], TypeAny)), true
 	}},
-	"writablestreamdefaultwriter":     {1, elemLayout(WSWriterType)},
-	"writablestreamdefaultcontroller": {1, elemLayout(WSControllerType)},
+	"writablestreamdefaultwriter":     {1, anyElemLayout(WSWriterType)},
+	"writablestreamdefaultcontroller": {1, anyElemLayout(WSControllerType)},
 	"transformstream": {2, func(args []*Type) (Type, bool) {
 		i, o := argOr(args[0], TypeAny), argOr(args[1], TypeAny)
-		return Type{IR: "ptr", IsTransformStream: true, StreamChunk: &i, StreamOut: &o}, true
+		return Type{IR: "ptr", Host: hostTransformStream, StreamChunk: &i, StreamOut: &o}, true
 	}},
 }
 
@@ -241,6 +250,15 @@ func elemLayout(mk func(Type) Type) func([]*Type) (Type, bool) {
 			return Type{}, false
 		}
 		return mk(*args[0]), true
+	}
+}
+
+// anyElemLayout is elemLayout whose bare form's element is `any`, the
+// declaration's default (`ReadableStreamDefaultReader<R = any>`; a
+// WritableStreamDefaultController takes no argument at all).
+func anyElemLayout(mk func(Type) Type) func([]*Type) (Type, bool) {
+	return func(args []*Type) (Type, bool) {
+		return mk(argOr(args[0], TypeAny)), true
 	}
 }
 
@@ -312,7 +330,7 @@ func (e *Emitter) hostBaseOf(cd *ast.ClassDeclaration) *Type {
 	if typedArrayNames[cd.BaseClass] {
 		// A typed array: its own array type.
 		t := e.resolveType(&ast.TypeAnnotation{Name: cd.BaseClass})
-		if t.IsTypedArray {
+		if t.IsTypedArray() {
 			return &t
 		}
 	}
@@ -371,14 +389,14 @@ const hostBodyPrefix = "__kml_hb"
 // (collections_engine.h), or a RegExp's struct.
 func hostBodySize(host Type) int {
 	switch {
-	case host.IsRegExp:
+	case host.IsRegExp():
 		return int(host.StructSize() / 8)
-	case host.IsPromise:
+	case host.IsPromise():
 		return promiseStructSize / 8
-	case host.IsDate:
+	case host.IsDate():
 		return 1 // the time value
-	case host.IsArray:
-		return 2 // the array header's {data, len}
+	case host.IsArray():
+		return 3 // the array header's {data, len, holes}
 	}
 	return 9
 }
@@ -408,10 +426,10 @@ func hostBodyFieldsPrefix(inherited []Field) int {
 func (e *Emitter) emitHostBody(instance string, host Type) string {
 	body := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, instance))
-	if host.IsRegExp || host.IsDate || host.IsArray {
+	if host.IsRegExp() || host.IsDate() || host.IsArray() {
 		return body
 	}
-	if host.IsPromise {
+	if host.IsPromise() {
 		e.ensurePromiseRuntime()
 		e.declareFn("__kml_promise_init_at", "declare void @__kml_promise_init_at(ptr)")
 		e.emitInstr(fmt.Sprintf("call void @__kml_promise_init_at(ptr %s)", body))
@@ -429,7 +447,7 @@ func (e *Emitter) emitHostBody(instance string, host Type) string {
 func (e *Emitter) emitHostArrayBody(body string, host Type, args []ast.Expression, pos ast.Pos) error {
 	var v Value
 	var err error
-	if host.IsTypedArray {
+	if host.IsTypedArray() {
 		// A typed array's own construction: a length, an array-like or a
 		// buffer.
 		if len(args) == 0 {
@@ -448,8 +466,8 @@ func (e *Emitter) emitHostArrayBody(body string, host Type, args []ast.Expressio
 	if err != nil {
 		return err
 	}
-	v = e.coerce(v, host)
-	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", v.Ref, body))
+	v = e.convert(v, host)
+	e.storeArrayPartsInto(v, body)
 	return nil
 }
 
@@ -476,7 +494,7 @@ func (e *Emitter) emitHostBodySeed(body string, host Type, src ast.Expression, p
 	suffix, _ := mapRuntime(*host.MapKey)
 	e.ensureMapFamily(suffix)
 	if id, ok := src.(*ast.Identifier); ok {
-		if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray {
+		if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray() {
 			// An absent optional array (its null header) seeds nothing, as
 			// `new Map(undefined)` makes an empty Map.
 			hdr := e.freshReg()
@@ -499,14 +517,14 @@ func (e *Emitter) emitHostBodySeed(body string, host Type, src ast.Expression, p
 
 // emitHostBodySeedFrom is emitHostBodySeed's seeding from a present source.
 func (e *Emitter) emitHostBodySeedFrom(body string, host Type, src ast.Expression, pos ast.Pos) error {
-	if host.IsMap {
+	if host.IsMap() {
 		return e.emitMapSeedFromEntries(body, src, *host.MapKey, *host.MapVal, pos)
 	}
 	ptr, n, elemTy, err := e.resolveArrayForHOF(src, pos)
 	if err != nil {
 		return err
 	}
-	if reprKey(elemTy) != reprKey(*host.MapKey) && !host.MapKey.IsDynamic {
+	if reprKey(elemTy) != reprKey(*host.MapKey) && !host.MapKey.IsDynamic() {
 		return fmt.Errorf("%d:%d: the Set's elements and the array's differ in type", pos.Line, pos.Col)
 	}
 	return e.emitSetSeed(body, ptr, n, elemTy)
@@ -531,11 +549,11 @@ func (e *Emitter) bindHostBody(instance Value, host Type, pos ast.Pos) *ast.Iden
 // an element or array property reads and writes the instance's own array.
 func (e *Emitter) hostArrayReceiver(obj ast.Expression) (ast.Expression, bool, error) {
 	t := e.inferExprType(obj)
-	if !t.IsClass || t.IsDynamic || t.Nullable {
+	if !t.IsClass() || t.IsDynamic() || t.Nullable() {
 		return nil, false, nil
 	}
 	info, ok := e.classes[t.ClassName]
-	if !ok || info.HostBase == nil || !info.HostBase.IsArray {
+	if !ok || info.HostBase == nil || !info.HostBase.IsArray() {
 		return nil, false, nil
 	}
 	v, err := e.emitExpr(obj)
@@ -550,25 +568,25 @@ func (e *Emitter) hostArrayReceiver(obj ast.Expression) (ast.Expression, bool, e
 // body, then its own fields.
 func (e *Emitter) emitInspectHostClass(v Value, info ClassInfo, depth int) (Value, error) {
 	host := *info.HostBase
-	if host.IsRegExp || host.IsDate {
+	if host.IsRegExp() || host.IsDate() {
 		return e.emitInspectRegExpClass(v, info, depth)
 	}
-	if host.IsPromise {
+	if host.IsPromise() {
 		return e.emitInspectPromiseClass(v, info, depth)
 	}
-	if host.IsArray {
+	if host.IsArray() {
 		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[" + ast.Unmangle(info.Ty.ClassName) + "]"), Ty: TypePtr}, nil
 		}
 		fields := info.Ty.VisibleFields()
 		tag := ""
-		if host.IsTypedArray {
+		if host.IsTypedArray() {
 			tag = "[" + typedArrayConstructorName(host) + "] " // `Bytes(3) [Uint8Array] [ … ]`
 		}
 		label := collLabel{class: ast.Unmangle(info.Ty.ClassName), tag: tag, push: func(list string) error {
 			return e.inspectPushFields(list, v, info, fields, depth)
 		}}
-		return e.emitInspectArrayAs(e.coerce(v, host), depth, label)
+		return e.emitInspectArrayAs(e.convert(v, host), depth, label)
 	}
 	if depth > e.effectiveInspectDepth() {
 		// Past util.inspect's depth: `[Counter [Map]]`.
@@ -579,7 +597,7 @@ func (e *Emitter) emitInspectHostClass(v Value, info ClassInfo, depth int) (Valu
 	bv := Value{Ref: body, Ty: host}
 	fields := info.Ty.VisibleFields()
 	label := collLabel{class: ast.Unmangle(info.Ty.ClassName), nextra: len(fields)}
-	if host.IsMap {
+	if host.IsMap() {
 		label.tag = "[Map] "
 	} else {
 		label.tag = "[Set] "
@@ -587,7 +605,7 @@ func (e *Emitter) emitInspectHostClass(v Value, info ClassInfo, depth int) (Valu
 	label.push = func(list string) error {
 		return e.inspectPushFields(list, v, info, fields, depth)
 	}
-	if host.IsMap {
+	if host.IsMap() {
 		return e.emitInspectMapAs(bv, depth, label)
 	}
 	return e.emitInspectSetAs(bv, depth, label)
@@ -646,10 +664,10 @@ func hostAnnotation(cd *ast.ClassDeclaration, host Type) *ast.TypeAnnotation {
 		return &ast.TypeAnnotation{Name: "any"}
 	}
 	switch {
-	case host.IsRegExp, host.IsDate:
-	case host.IsPromise:
+	case host.IsRegExp(), host.IsDate():
+	case host.IsPromise():
 		ta.ElemType = arg(0)
-	case host.IsMap:
+	case host.IsMap():
 		ta.KeyType, ta.ElemType = arg(0), arg(1)
 	default:
 		ta.ElemType = arg(0)
@@ -663,18 +681,18 @@ func hostAnnotation(cd *ast.ClassDeclaration, host Type) *ast.TypeAnnotation {
 // otherwise.
 func (e *Emitter) hostView(expr ast.Expression) ast.Expression {
 	t := e.inferExprType(expr)
-	if !t.IsClass {
+	if !t.IsClass() {
 		return nil
 	}
 	info, ok := e.classes[t.ClassName]
-	if !ok || info.HostBase == nil || info.HostBase.IsRegExp || info.HostBase.IsPromise || info.HostBase.IsDate {
+	if !ok || info.HostBase == nil || info.HostBase.IsRegExp() || info.HostBase.IsPromise() || info.HostBase.IsDate() {
 		return nil
 	}
 	if _, own := info.MethodSigs["@@iterator"]; own {
 		return nil
 	}
 	method := "values"
-	if info.HostBase.IsMap {
+	if info.HostBase.IsMap() {
 		method = "entries"
 	}
 	return ast.NewCallExpression(ast.NewMemberExpression(expr, method, expr.GetPos()), nil, expr.GetPos())
@@ -684,25 +702,25 @@ func (e *Emitter) hostView(expr ast.Expression) ast.Expression {
 // or Set on its body. Map.prototype.set and Set.prototype.add return their
 // receiver: the instance.
 func (e *Emitter) emitHostBaseCall(instance Value, host Type, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if host.IsPromise && (method == "then" || method == "catch" || method == "finally") {
+	if host.IsPromise() && (method == "then" || method == "catch" || method == "finally") {
 		// The body settles to the instance's own value type, which a
 		// species construction may have made other than the class's.
 		host = PromiseOf(e.promiseSubclassValueType(instance.Ty))
 		host.PromiseTask = true
 		return e.emitPromiseSpecies(instance, host, method, args, pos)
 	}
-	if host.IsTypedArray {
+	if host.IsTypedArray() {
 		if typedArraySpeciesMethods[method] {
 			return e.emitArraySpecies(instance, host, method, args, pos)
 		}
-	} else if host.IsArray {
+	} else if host.IsArray() {
 		if _, ok := arraySpeciesMethods[method]; ok {
 			return e.emitArraySpecies(instance, host, method, args, pos)
 		}
 	}
 	recv := e.bindHostBody(instance, host, pos)
 	call := ast.NewCallExpression(ast.NewMemberExpression(recv, method, pos), args, pos)
-	if host.IsDate {
+	if host.IsDate() {
 		// The bound body has no declaration to resolve Date's method by.
 		if _, ok := intrinsics["Date.prototype."+method]; ok {
 			call.Intrinsic = "Date.prototype." + method
@@ -747,13 +765,13 @@ func (e *Emitter) emitHostClassInspectThunk(info ClassInfo) {
 // hostTagName is the builtin tag of a host base (`[object RegExp]`).
 func hostTagName(host Type) string {
 	switch {
-	case host.IsRegExp:
+	case host.IsRegExp():
 		return "RegExp"
-	case host.IsDate:
+	case host.IsDate():
 		return "Date"
-	case host.IsPromise:
+	case host.IsPromise():
 		return "Promise"
-	case host.IsMap:
+	case host.IsMap():
 		return "Map"
 	}
 	return "Set"
@@ -806,11 +824,11 @@ func (e *Emitter) hostRegExpArgs(args []ast.Expression) ([]ast.Expression, error
 		return args, nil
 	}
 	t := e.inferExprType(args[0])
-	if !t.IsClass {
+	if !t.IsClass() {
 		return args, nil
 	}
 	info, ok := e.classes[t.ClassName]
-	if !ok || info.HostBase == nil || !info.HostBase.IsRegExp {
+	if !ok || info.HostBase == nil || !info.HostBase.IsRegExp() {
 		return args, nil
 	}
 	v, err := e.emitExpr(args[0])
@@ -828,7 +846,7 @@ func (e *Emitter) checkerHostSubclass(id *ast.Identifier, ty Type) (ClassInfo, b
 	if e.dynEntryWidenedIdent(id) {
 		return ClassInfo{}, false // a dynamic entry's box stays one
 	}
-	if !hostBodyAt8(ty) || ty.Nullable {
+	if !hostBodyAt8(ty) || ty.Nullable() {
 		return ClassInfo{}, false
 	}
 	c := e.front()
@@ -930,7 +948,7 @@ func (e *Emitter) emitPromiseCapabilityThen(instance Value, host Type, method st
 				return nil, err
 			}
 			settle := stmt(call(res, call(f, id(param))))
-			if rt, ok := e.callbackReturnType(cb, el); ok && (rt.IsPromise || e.isThenableType(rt)) {
+			if rt, ok := e.callbackReturnType(cb, el); ok && (rt.IsPromise() || e.isThenableType(rt)) {
 				// A returned promise resolves the capability through its
 				// `then`, from a job (NewPromiseResolveThenableJob).
 				r := ast.NewVarDeclaration("const", "__kml_r", nil, call(f, id(param)), pos)
@@ -946,7 +964,7 @@ func (e *Emitter) emitPromiseCapabilityThen(instance Value, host Type, method st
 		return ast.NewArrowFunction([]ast.Param{{Name: param}}, nil, nil, ast.NewBlockStatement(body, pos), pos), nil
 	}
 	fulfilled, err := handler(onF, "__kml_v", res, func(cb ast.Expression) (ast.Expression, error) {
-		if e.inferExprType(cb).IsDynamic {
+		if e.inferExprType(cb).IsDynamic() {
 			v, err := e.emitExpr(cb) // a function held in `any`: called dynamically
 			if err != nil {
 				return nil, err
@@ -963,7 +981,7 @@ func (e *Emitter) emitPromiseCapabilityThen(instance Value, host Type, method st
 		return Value{}, err
 	}
 	rejected, err := handler(onR, "__kml_e", rej, func(cb ast.Expression) (ast.Expression, error) {
-		if e.inferExprType(cb).IsDynamic {
+		if e.inferExprType(cb).IsDynamic() {
 			v, err := e.emitExpr(cb)
 			if err != nil {
 				return nil, err
@@ -996,7 +1014,7 @@ func (e *Emitter) emitPromiseCapabilityThen(instance Value, host Type, method st
 	if onF != nil {
 		if t, ok := e.callbackReturnType(onF, el); ok {
 			rt = e.awaitedRet(t)
-			if rt.IsPromise {
+			if rt.IsPromise() {
 				rt = TypeAny
 				if t.PromiseType != nil {
 					rt = *t.PromiseType
@@ -1134,6 +1152,21 @@ func (e *Emitter) emitPromiseSpecies(instance Value, host Type, method string, a
 	if method == "finally" {
 		return e.emitPromiseSpeciesFinally(instance, host, args, pos)
 	}
+	// The class's [Symbol.species] picks the constructor: another class
+	// extending Promise, or Promise itself (a plain then).
+	ctor, err := e.speciesOf(instance.Ty.ClassName, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if ctor == "" {
+		// Promise's own method on the body: a plain promise.
+		return e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(e.bindHostBody(instance, host, pos), method, pos), args, pos))
+	}
+	if ctor != instance.Ty.ClassName {
+		// Another class's instance, settled from this one's body (the host
+		// body's offset is the same in every class extending Promise).
+		instance.Ty = e.classes[ctor].Ty
+	}
 	if !e.promiseSpeciesPassThrough(instance.Ty.ClassName) {
 		return e.emitPromiseCapabilityThen(instance, host, method, args, pos)
 	}
@@ -1158,7 +1191,7 @@ func (e *Emitter) emitPromiseSpecies(instance Value, host Type, method string, a
 	}
 	thenArgs = append([]ast.Expression(nil), thenArgs...)
 	for i, a := range thenArgs {
-		if i > 1 || e.isNonCallableThenArg(a) || !e.inferExprType(a).IsDynamic {
+		if i > 1 || e.isNonCallableThenArg(a) || !e.inferExprType(a).IsDynamic() {
 			continue
 		}
 		fv, err := e.emitExpr(a)
@@ -1190,7 +1223,7 @@ func (e *Emitter) emitPromiseSpecies(instance Value, host Type, method string, a
 func promiseSubclassOf(c, p Type) Type {
 	c.PromiseType = nil
 	// A rejection's `never` stores no value: the class's own type stands.
-	if p.PromiseType != nil && !p.PromiseType.IsNever {
+	if p.PromiseType != nil && !p.PromiseType.IsNever() {
 		t := *p.PromiseType
 		c.PromiseType = &t
 	}
@@ -1213,6 +1246,16 @@ func (e *Emitter) promiseSubclassValueType(c Type) Type {
 // `p.then(v => C.resolve(f()).then(() => v), r => C.resolve(f()).then(() =>
 // { throw r }))`, C the class; a non-callable f passes both through.
 func (e *Emitter) emitPromiseSpeciesFinally(instance Value, host Type, args []ast.Expression, pos ast.Pos) (Value, error) {
+	// C is the species constructor: Promise's own finally when
+	// [Symbol.species] is Promise.
+	ctor, err := e.speciesOf(instance.Ty.ClassName, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if ctor == "" {
+		// Promise's own finally on the body: a plain promise.
+		return e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(e.bindHostBody(instance, host, pos), "finally", pos), args, pos))
+	}
 	if len(args) == 0 || e.isNonCallableThenArg(args[0]) {
 		var f ast.Expression = ast.NewNullLiteral(true, pos)
 		if len(args) > 0 {
@@ -1227,7 +1270,7 @@ func (e *Emitter) emitPromiseSpeciesFinally(instance Value, host Type, args []as
 	f := e.bindValue(fv, pos)
 	id := func(n string) *ast.Identifier { return ast.NewIdentifier(n, pos) }
 	call := func(c ast.Expression, a ...ast.Expression) ast.Expression { return ast.NewCallExpression(c, a, pos) }
-	cls := id(instance.Ty.ClassName)
+	cls := id(ctor)
 	// C.resolve(f()), with f's result when it has one.
 	resolved := func() ast.Expression {
 		if rt := e.inferExprType(call(f)); rt.IR == "void" || rt.IR == "" {
@@ -1252,11 +1295,7 @@ func (e *Emitter) emitPromiseSpeciesFinally(instance Value, host Type, args []as
 // promiseSubclassStaticType is the type of `C.m(args)` for a Promise static
 // m reached through a class C extending Promise: Promise.m's.
 func (e *Emitter) promiseSubclassStaticType(m string, ex *ast.CallExpression) (Type, bool) {
-	switch m {
-	case "resolve", "reject", "all", "race", "allSettled", "any":
-		return e.promiseStaticType(m, ex)
-	}
-	return Type{}, false
+	return e.promiseStaticType(m, ex)
 }
 
 // emitPromiseCapability is NewPromiseCapability(C) for a class C extending
@@ -1298,7 +1337,7 @@ func (e *Emitter) emitPromiseCapability(className string, valTy Type, pos ast.Po
 	}
 	resolveTy := FuncType(resolveParams, TypeVoid)
 	if len(resolveParams) == 1 {
-		resolveTy.IsPromiseResolver = true
+		resolveTy.setKind(kindPromiseResolver, true)
 	}
 	rejectTy := FuncType([]Type{TypeCaught}, TypeVoid)
 	res = e.bindValue(Value{Ref: "null", Ty: resolveTy}, pos)
@@ -1327,7 +1366,7 @@ func (e *Emitter) emitPromiseSubclassStatic(className, m string, args []ast.Expr
 	switch m {
 	case "resolve":
 		if len(args) > 0 {
-			if at := e.inferExprType(args[0]); at.IsClass && at.ClassName == className {
+			if at := e.inferExprType(args[0]); at.IsClass() && at.ClassName == className {
 				// PromiseResolve(C, x) is x when its constructor is C.
 				v, err := e.emitExpr(args[0])
 				return v, true, err
@@ -1389,7 +1428,10 @@ func (e *Emitter) emitPromiseSubclassCombinator(className, m string, cty, el Typ
 	var pre, post []ast.Statement
 	switch m {
 	case "race":
-		loop = []ast.Statement{stmt(resolveThen(res, rej))}
+		// The settled value reaches the typed resolver through a call,
+		// which converts a member's box to the value type.
+		onF := ast.NewArrowFunction([]ast.Param{{Name: "__kml_v", Type: anyT}}, nil, call(res, id("__kml_v")), nil, pos)
+		loop = []ast.Statement{stmt(resolveThen(onF, rej))}
 	case "all", "allSettled", "any":
 		list, done := res, rej
 		if m == "any" {
@@ -1399,7 +1441,7 @@ func (e *Emitter) emitPromiseSubclassCombinator(className, m string, cty, el Typ
 		// (`number[]` for C.all over numbers); `any` for a tuple or a
 		// rejection list.
 		valsAnnot, elemAnnot := &ast.TypeAnnotation{Name: "any[]", ElemType: anyT}, anyT
-		if m != "any" && el.IsArray && el.ElemType != nil && !el.IsTuple && !el.ElemType.IsDynamic {
+		if m != "any" && el.IsArray() && el.ElemType != nil && !el.IsTuple() && !el.ElemType.IsDynamic() {
 			valsAnnot, elemAnnot = e.synthTypeAnnotation(el), e.synthTypeAnnotation(*el.ElemType)
 		}
 		pre = []ast.Statement{
@@ -1451,7 +1493,7 @@ func (e *Emitter) emitPromiseSubclassCombinator(className, m string, cty, el Typ
 	// The members as Promise's own combinators read them (an array literal
 	// mixing instances and plain values included).
 	var iv Value
-	if at := e.inferExprType(args[0]); at.IsArray {
+	if at := e.inferExprType(args[0]); at.IsArray() {
 		ptr, n, elemTy, err := e.resolveArrayForHOF(args[0], pos)
 		if err != nil {
 			return Value{}, true, err
@@ -1506,7 +1548,7 @@ func (e *Emitter) emitMarkBoxedPromiseValue(inst string, ty Type) {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", fp, inst, 8+promiseFlagsSlot*8))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", old, fp))
 	e.emitInstr(fmt.Sprintf("%s = or i64 %s, %d", nw, old, promiseFlagBoxedValue))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nw, fp))
+	e.heapStore("i64", nw, fp, 8)
 }
 
 // emitBoxedPromiseValueTest is an i1: the body of class instance inst is
@@ -1528,11 +1570,11 @@ func (e *Emitter) hasClassAccessor(className, prop string) bool {
 
 // arrayClassHost is the array type a class extending Array has as its body.
 func (e *Emitter) arrayClassHost(t Type) (Type, bool) {
-	if !t.IsClass || t.IsDynamic {
+	if !t.IsClass() || t.IsDynamic() {
 		return Type{}, false
 	}
 	info, ok := e.classes[t.ClassName]
-	if !ok || info.HostBase == nil || !info.HostBase.IsArray {
+	if !ok || info.HostBase == nil || !info.HostBase.IsArray() {
 		return Type{}, false
 	}
 	return *info.HostBase, true
@@ -1547,7 +1589,7 @@ func isSpread(x ast.Expression) bool {
 // Array that is no field, method or accessor of the class: its array's.
 func (e *Emitter) isHostArrayMember(ex *ast.MemberExpression) bool {
 	t := e.inferExprType(ex.Object)
-	if _, ok := e.arrayClassHost(t); !ok || t.Nullable {
+	if _, ok := e.arrayClassHost(t); !ok || t.Nullable() {
 		return false
 	}
 	if _, _, own := t.FieldIndex(ex.Property); own {
@@ -1567,7 +1609,7 @@ func (e *Emitter) isHostArrayMember(ex *ast.MemberExpression) bool {
 // program-independent code calls it whatever classes the program has.
 func (e *Emitter) emitArrayClassReceiver(v Value, method string) Value {
 	var classes []ClassInfo
-	for _, name := range e.sortedClassNames(func(_ string, info ClassInfo) bool { return info.HostBase != nil && info.HostBase.IsArray }) {
+	for _, name := range e.sortedClassNames(func(_ string, info ClassInfo) bool { return info.HostBase != nil && info.HostBase.IsArray() }) {
 		classes = append(classes, e.classes[name])
 	}
 	if len(classes) == 0 && !e.programIndependent() {
@@ -1590,9 +1632,12 @@ func (e *Emitter) emitArrayClassReceiver(v Value, method string) Value {
 			if _, own := info.MethodSigs[method]; own {
 				continue
 			}
+			if _, species := arraySpeciesMethods[method]; species && !info.HostBase.IsTypedArray() {
+				continue // the instance's own record makes its class's result
+			}
 			hit, next := e.freshLabel("arrcls.hit"), e.freshLabel("arrcls.next")
 			is := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, tag, e.objHeaderWord(info.Ty)))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, e.headerIdentity(tag), e.objHeaderWord(info.Ty)))
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is, hit, next))
 			e.emitLabel(hit)
 			hdr := e.freshReg()
@@ -1627,7 +1672,7 @@ func (e *Emitter) hasArrayClass() bool {
 		return true
 	}
 	for _, info := range e.classes {
-		if info.HostBase != nil && info.HostBase.IsArray {
+		if info.HostBase != nil && info.HostBase.IsArray() {
 			return true
 		}
 	}
@@ -1649,8 +1694,19 @@ func (e *Emitter) emitArrayClassObject(hdr string) (isClass, obj string) {
 	}
 	word := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", word, obj))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", isClass, word, e.arrayHeaderWord()))
+	isClass = e.emitArrayWordIsClass(word)
 	return isClass, obj
+}
+
+// emitArrayWordIsClass is whether an array header's word is a class's tag:
+// neither the Array word nor an Arguments object's.
+func (e *Emitter) emitArrayWordIsClass(word string) string {
+	notArr, notArgs, is := e.freshReg(), e.freshReg(), e.freshReg()
+	wid := e.headerIdentity(word)
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", notArr, wid, e.arrayHeaderWord()))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", notArgs, wid, e.argumentsHeaderWord()))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", is, notArr, notArgs))
+	return is
 }
 
 // ensureArrayClassBodyTest defines @__kml_is_arrclass_body(obj), whether
@@ -1669,10 +1725,9 @@ func (e *Emitter) ensureArrayClassBodyTest() {
 	if !e.hasArrayClass() {
 		e.emitTerminator("ret i1 false")
 	} else {
-		word, is := e.freshReg(), e.freshReg()
+		word := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %%obj, align 8", word))
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", is, word, e.arrayHeaderWord()))
-		e.emitTerminator(fmt.Sprintf("ret i1 %s", is))
+		e.emitTerminator(fmt.Sprintf("ret i1 %s", e.emitArrayWordIsClass(word)))
 	}
 	body := e.allocas.String() + e.body.String()
 	e.inLib, e.sharedCode = saved, savedShared
@@ -1684,13 +1739,13 @@ func (e *Emitter) ensureArrayClassBodyTest() {
 // instance of a class extending Array: the program declares one and v has
 // a header (a fresh aggregate never is one).
 func (e *Emitter) arrayMayBeClassBody(v Value) bool {
-	return v.ArrayHeader != "" && !v.Ty.IsBuffer && !v.Ty.Nullable && e.hasArrayClass()
+	return !v.Ty.IsBuffer() && !v.Ty.Nullable() && e.hasArrayClass()
 }
 
 // emitBoxArrayClassObject boxes obj, an instance of some class extending
 // Array, as that instance.
 func (e *Emitter) emitBoxArrayClassObject(obj string) string {
-	for _, name := range e.sortedClassNames(func(_ string, info ClassInfo) bool { return info.HostBase != nil && info.HostBase.IsArray }) {
+	for _, name := range e.sortedClassNames(func(_ string, info ClassInfo) bool { return info.HostBase != nil && info.HostBase.IsArray() }) {
 		e.noteBoxedLayout(e.classes[name].Ty)
 	}
 	return e.emitNbTagPtr(obj, kmlTagObject)
@@ -1717,15 +1772,18 @@ var typedArraySpeciesMethods = map[string]bool{"map": true, "filter": true, "sli
 // instance's body.
 func (e *Emitter) emitArraySpecies(instance Value, host Type, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	recv := e.bindHostBody(instance, host, pos)
+	saved := e.speciesInner
+	e.speciesInner = true
 	res, err := e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(recv, method, pos), args, pos))
+	e.speciesInner = saved
 	if err != nil {
 		return Value{}, err
 	}
-	if !res.Ty.IsArray || e.blockDone {
+	if !res.Ty.IsArray() || e.blockDone {
 		return res, nil
 	}
 	// A typed array's result is made at its length.
-	setsLength := arraySpeciesMethods[method] || host.IsTypedArray
+	setsLength := arraySpeciesMethods[method] || host.IsTypedArray()
 	// The constructors the instance may have: its class's and every class
 	// extending it.
 	classes := e.sortedClassNames(func(name string, _ ClassInfo) bool {
@@ -1736,6 +1794,170 @@ func (e *Emitter) emitArraySpecies(instance Value, host Type, method string, arg
 	return e.emitArrayClassFill(classes, tag, res, method == "map" || setsLength, setsLength, pos)
 }
 
+// arrayBodySpeciesRule is a species-creating Array method on a value typed
+// as a plain array, in a program with a class extending Array: the value
+// may be such an instance's body (a species result, typed as the plain
+// array TypeScript gives it), whose class then makes the result, as
+// ArraySpeciesCreate reads the receiver's constructor at run time.
+func (e *Emitter) arrayBodySpeciesRule(ex *ast.CallExpression) (Value, bool, error) {
+	me, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || me.Optional || e.speciesInner || !e.hasArrayClass() {
+		return Value{}, false, nil
+	}
+	setsLength, ok := arraySpeciesMethods[me.Property]
+	if !ok {
+		return Value{}, false, nil
+	}
+	if _, isSuper := me.Object.(*ast.SuperExpression); isSuper {
+		return Value{}, false, nil // the super method call creates its species itself
+	}
+	rt := e.inferExprType(me.Object)
+	if !rt.IsArray() || rt.IsTypedArray() || rt.IsBuffer() || rt.IsTuple() || rt.Nullable() || rt.IsClass() || rt.IsDynamic() {
+		return Value{}, false, nil
+	}
+	classes := e.arrayBodyClasses()
+	indep := e.programIndependent()
+	if len(classes) == 0 && !indep {
+		return Value{}, false, nil
+	}
+	pos := ex.GetPos()
+	recv, err := e.emitExpr(me.Object)
+	if err != nil {
+		return Value{}, true, err
+	}
+	if !recv.Ty.IsArray() || recv.Ref == "zeroinitializer" {
+		return Value{}, true, fmt.Errorf("%d:%d: internal: array receiver expected", pos.Line, pos.Col)
+	}
+	saved := e.speciesInner
+	e.speciesInner = true
+	bound := e.bindValue(recv, pos)
+	e.setSynthDisplay(bound, e.iterableDisplayName(me.Object))
+	res, err := e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(bound, me.Property, pos), ex.Args, pos))
+	e.speciesInner = saved
+	if err != nil || !res.Ty.IsArray() || e.blockDone {
+		return res, true, err
+	}
+	isClass, obj := e.emitArrayClassObject(recv.Ref)
+	// Program-independent code names no class: the dispatcher filters.
+	if over := e.arrayOverriders(me.Property); len(over) > 0 && !indep {
+		// An instance whose class overrides the method ran its own (the
+		// override dispatch): its result is the method's, not a species.
+		word := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", word, obj))
+		for _, name := range over {
+			ne, and := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", ne, e.headerIdentity(word), e.objHeaderWord(e.classes[name].Ty)))
+			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", and, isClass, ne))
+			isClass = and
+		}
+	}
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+	clsL, plainL, doneL := e.freshLabel("species.body"), e.freshLabel("species.plain"), e.freshLabel("species.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isClass, clsL, plainL))
+	e.emitLabel(clsL)
+	var filled Value
+	if indep {
+		// Program-independent code names no class: the program's own
+		// dispatcher makes the result.
+		fn, err := e.ensureSpeciesFill(res.Ty, me.Property, me.Property == "map" || setsLength, setsLength, pos)
+		if err != nil {
+			return Value{}, true, err
+		}
+		filled = Value{Ref: e.freshReg(), Ty: res.Ty}
+		e.emitInstr(fmt.Sprintf("%s = call ptr %s(ptr %s, ptr %s)", filled.Ref, fn, obj, res.Ref))
+	} else {
+		tag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", tag, obj))
+		filled, err = e.emitArrayClassFill(classes, tag, res, me.Property == "map" || setsLength, setsLength, pos)
+		if err != nil {
+			return Value{}, true, err
+		}
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", filled.Ref, out))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(plainL)
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", res.Ref, out))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	v := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", v, out))
+	return Value{Ref: v, Ty: res.Ty}, true, nil
+}
+
+// arrayBodyClasses are the program's classes extending Array (not a typed
+// array) whose instances' bodies arrayBodySpeciesRule recognizes.
+func (e *Emitter) arrayBodyClasses() []string {
+	return e.sortedClassNames(func(name string, info ClassInfo) bool {
+		return info.HostBase != nil && info.HostBase.IsArray() && !info.HostBase.IsTypedArray() && e.arrayVariantOf[name] == ""
+	})
+}
+
+// ensureSpeciesFill defines the program's dispatcher for a species result
+// of type resTy made in program-independent code: given the receiver's
+// instance and the plain result, the instance its class makes
+// (emitArrayClassFill), or the result itself in a program without a class
+// extending Array. One per result type and length mode.
+func (e *Emitter) ensureSpeciesFill(resTy Type, method string, withLength, setsLength bool, pos ast.Pos) (string, error) {
+	key, err := mangleTypeArg(resTy)
+	if err != nil {
+		return "", err
+	}
+	// Named by a hash of the type: a library type's mangle carries its
+	// module's key, which would make the splitter give the dispatcher to
+	// that module's unit.
+	h := fnv.New64a()
+	fmt.Fprintf(h, "%s.%s.%t.%t", key, method, withLength, setsLength)
+	fn := fmt.Sprintf("@__kml_species_fill_%x", h.Sum64())
+	if e.fnDecls[fn] {
+		return fn, nil
+	}
+	e.fnDecls[fn] = true
+	restore := e.beginDetachedFunc()
+	saved, savedShared := e.inLib, e.sharedCode
+	e.inLib, e.sharedCode = "", 0
+	// Only a class whose elements are the result's can have made a body
+	// typed as it.
+	var classes []string
+	for _, name := range e.arrayBodyClasses() {
+		if ek, kerr := mangleTypeArg(*e.classes[name].HostBase.ElemType); kerr == nil && resTy.ElemType != nil {
+			if rk, rerr := mangleTypeArg(*resTy.ElemType); rerr == nil && rk == ek {
+				classes = append(classes, name)
+			}
+		}
+	}
+	out := "%res"
+	if len(classes) > 0 {
+		tag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %%obj, align 8", tag))
+		// An instance whose class overrides the method ran its own: its
+		// result is the method's, not a species.
+		for _, name := range e.arrayOverriders(method) {
+			is := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, e.headerIdentity(tag), e.objHeaderWord(e.classes[name].Ty)))
+			ownL, nextL := e.freshLabel("species.own"), e.freshLabel("species.notown")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is, ownL, nextL))
+			e.emitLabel(ownL)
+			e.emitTerminator("ret ptr %res")
+			e.emitLabel(nextL)
+		}
+		filled, ferr := e.emitArrayClassFill(classes, tag, Value{Ref: "%res", Ty: resTy}, withLength, setsLength, pos)
+		if ferr != nil {
+			err = ferr
+		}
+		out = filled.Ref
+	}
+	e.emitTerminator(fmt.Sprintf("ret ptr %s", out))
+	body := e.allocas.String() + e.body.String()
+	e.inLib, e.sharedCode = saved, savedShared
+	restore()
+	if err != nil {
+		return "", err
+	}
+	e.writeHelper("internal", "ptr", fn, "ptr %obj, ptr %res", body)
+	return fn, nil
+}
+
 // emitArrayClassFill makes the instance a class extending Array makes for
 // an Array result res, as ArraySpeciesCreate and Array.from/of do: `new
 // C(n)` (n res's length when withLength, else no length), its elements then
@@ -1743,9 +1965,13 @@ func (e *Emitter) emitArraySpecies(instance Value, host Type, method string, arg
 // tag (an instance's tag word) the one of classes it names. The value is
 // typed as res, its header the instance's body.
 func (e *Emitter) emitArrayClassFill(classes []string, tag string, res Value, withLength, setsLength bool, pos ast.Pos) (Value, error) {
+	// Its own Array calls run on plain arrays.
+	saved := e.speciesInner
+	e.speciesInner = true
+	defer func() { e.speciesInner = saved }()
 	resultTy := res.Ty
 	k := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", k, res.Ref))
+	k = e.arrayLen(res)
 	n := "0.0"
 	if withLength {
 		n = e.freshReg()
@@ -1757,16 +1983,44 @@ func (e *Emitter) emitArrayClassFill(classes []string, tag string, res Value, wi
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
 	doneL := e.freshLabel("species.done")
 	for i, name := range classes {
-		info := e.classes[name]
 		hitL, nextL := e.freshLabel("species.new"), e.freshLabel("species.next")
 		if tag == "" || i == len(classes)-1 {
 			e.emitTerminator(fmt.Sprintf("br label %%%s", hitL))
 		} else {
 			is := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, tag, e.objHeaderWord(info.Ty)))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, e.headerIdentity(tag), e.objHeaderWord(e.classes[name].Ty)))
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is, hitL, nextL))
 		}
 		e.emitLabel(hitL)
+		// The class's [Symbol.species] picks the constructor: another class,
+		// or the builtin itself, whose result is a plain one.
+		ctor, err := e.speciesOf(name, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if ctor == "" {
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.boxArrayValue(res), out))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			if tag == "" {
+				break
+			}
+			if i < len(classes)-1 {
+				e.emitLabel(nextL)
+			}
+			continue
+		}
+		if base, ok := e.arrayVariantOf[ctor]; ok {
+			ctor = base // a variant is made by its class
+		}
+		info := e.classes[ctor]
+		// A result whose elements another layout holds (`map(String)` on a
+		// class extending Array<number>) is an instance of the class's
+		// variant for that layout.
+		variant := ""
+		if h := info.HostBase; h != nil && h.IsArray() && !h.IsTypedArray() && resultTy.IsArray() &&
+			!sameArrayLayout(*h, resultTy) {
+			variant = e.arrayClassVariant(ctor, resultTy)
+		}
 		// A constructor whose first parameter cannot hold a number (a
 		// `...items: string[]`) is called without the length: a native
 		// string slot has no room for one. Its instance's elements are the
@@ -1775,7 +2029,7 @@ func (e *Emitter) emitArrayClassFill(classes []string, tag string, res Value, wi
 		if withLength && e.ctorTakesNumber(info) {
 			ctorArgs = []ast.Expression{nID}
 		}
-		obj, err := e.emitExpr(ast.NewNewExpression(name, ctorArgs, pos))
+		obj, err := e.emitExpr(ast.NewNewExpression(ctor, ctorArgs, pos))
 		if err != nil {
 			return Value{}, err
 		}
@@ -1783,7 +2037,11 @@ func (e *Emitter) emitArrayClassFill(classes []string, tag string, res Value, wi
 		// Its elements: the result's, over any the constructor made; a set
 		// length then drops the rest.
 		fill := ast.Expression(resID)
-		if !setsLength {
+		if variant != "" {
+			// The class's own elements are of the other layout: the result's
+			// alone.
+			e.heapStore("i64", fmt.Sprint(e.objHeaderWord(e.classes[variant].Ty)), obj.Ref, 8)
+		} else if !setsLength {
 			rest := ast.NewCallExpression(ast.NewMemberExpression(body, "slice", pos), []ast.Expression{ast.NewMemberExpression(resID, "length", pos)}, pos)
 			fill = ast.NewCallExpression(ast.NewMemberExpression(resID, "concat", pos), []ast.Expression{rest}, pos)
 		}
@@ -1791,10 +2049,12 @@ func (e *Emitter) emitArrayClassFill(classes []string, tag string, res Value, wi
 		if err != nil {
 			return Value{}, err
 		}
-		fv = e.coerce(fv, *info.HostBase)
+		if variant == "" {
+			fv = e.convert(fv, *info.HostBase)
+		}
 		hdr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", hdr, obj.Ref))
-		e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", fv.Ref, hdr))
+		e.storeArrayPartsInto(fv, hdr)
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, out))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		if tag == "" {
@@ -1807,7 +2067,131 @@ func (e *Emitter) emitArrayClassFill(classes []string, tag string, res Value, wi
 	e.emitLabel(doneL)
 	hdr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, out))
-	return e.coerce(e.arrayValueFromHeaderReg(hdr, *e.classes[classes[0]].HostBase), resultTy), nil
+	return e.arrayValueFromHeaderReg(hdr, resultTy), nil
+}
+
+// sameArrayLayout reports whether arrays of a's and b's types store their
+// elements alike.
+func sameArrayLayout(a, b Type) bool {
+	return a.ElemType != nil && b.ElemType != nil && sameReprKey(*a.ElemType) == sameReprKey(*b.ElemType)
+}
+
+// arrayClassVariant registers (once) the variant of class, a class
+// extending Array, whose elements are arr's: a child of class shown under
+// its name, as every element layout of Array is a child of any[]'s.
+func (e *Emitter) arrayClassVariant(class string, arr Type) string {
+	key, err := mangleTypeArg(*arr.ElemType)
+	if err != nil {
+		key = hashedTypeArg(*arr.ElemType)
+	}
+	name := class + "__elems_" + key
+	if _, ok := e.classes[name]; ok {
+		return name
+	}
+	info := e.classes[class]
+	host := ArrayOf(*arr.ElemType)
+	ty := info.Ty
+	ty.ClassName = name
+	info.Ty = ty
+	info.HostBase = &host
+	info.BaseClass = class
+	info.TagID = e.classTypeID(name)
+	e.classes[name] = info
+	e.interfaces[name] = ty
+	if e.arrayVariantOf == nil {
+		e.arrayVariantOf = map[string]string{}
+	}
+	e.arrayVariantOf[name] = class
+	if e.classShownNames == nil {
+		e.classShownNames = map[string]string{}
+	}
+	e.classShownNames[name] = e.classDisplayName(class)
+	return name
+}
+
+// speciesOf is the constructor a species-creating method of className's
+// makes its result with: className itself, unless it or an ancestor
+// declares `static get [Symbol.species]()`. The getter's body is one
+// return: of `this` (className), of another class extending the same
+// builtin, or of the builtin (Array, a typed array's constructor) itself,
+// or undefined or null, for which ctor is "" (a plain result, as
+// ArraySpeciesCreate makes). A getter computing its result is rejected:
+// the constructor is chosen at compile time.
+// speciesClass is speciesOf for the checker's oracle: the class's type,
+// plain for Promise itself; not ok when the getter is not one it reads.
+func (e *Emitter) speciesClass(className string) (Type, bool, bool) {
+	c, err := e.speciesOf(className, ast.Pos{})
+	if err != nil {
+		return Type{}, false, false
+	}
+	if c == "" {
+		return Type{}, true, true
+	}
+	return e.classes[c].Ty, false, true
+}
+
+func (e *Emitter) speciesOf(className string, pos ast.Pos) (ctor string, err error) {
+	for c := className; c != ""; c = e.classes[c].BaseClass {
+		if _, ok := e.classes[c]; !ok {
+			break
+		}
+		getter := e.staticSpeciesGetter(c)
+		if getter == nil {
+			continue
+		}
+		var ret ast.Expression
+		if getter.Body != nil && len(getter.Body.Body) == 1 {
+			if r, ok := getter.Body.Body[0].(*ast.ReturnStatement); ok {
+				ret = r.Value
+			}
+		}
+		switch v := ret.(type) {
+		case *ast.ThisExpression:
+			return className, nil
+		case *ast.NullLiteral:
+			return "", nil
+		case *ast.Identifier:
+			if target, ok := e.identClassAlias(v); ok {
+				v = ast.NewIdentifier(target, v.GetPos())
+			}
+			if v.Name == e.speciesBuiltin(className) {
+				return "", nil
+			}
+			if info, ok := e.classes[v.Name]; ok && info.HostBase != nil && e.speciesBuiltin(v.Name) == e.speciesBuiltin(className) {
+				return v.Name, nil
+			}
+		}
+		return "", fmt.Errorf("%d:%d: %s's [Symbol.species] must return this, a class extending %s, %s itself, or undefined", pos.Line, pos.Col,
+			ast.Unmangle(c), e.speciesBuiltin(className), e.speciesBuiltin(className))
+	}
+	return className, nil
+}
+
+// speciesBuiltin names the builtin a class extending Array, a typed array
+// or Promise extends.
+func (e *Emitter) speciesBuiltin(className string) string {
+	switch host := e.classes[className].HostBase; {
+	case host != nil && host.IsTypedArray():
+		return typedArrayConstructorName(*host)
+	case host != nil && host.IsPromise():
+		return "Promise"
+	}
+	return "Array"
+}
+
+// staticSpeciesGetter is a class's own `static get [Symbol.species]()`.
+func (e *Emitter) staticSpeciesGetter(className string) *ast.FunctionDeclaration {
+	for cd, name := range e.classDeclName {
+		if name != className {
+			continue
+		}
+		for _, m := range cd.Methods {
+			if m.IsStatic && m.AccessorKind == "get" && m.Name == "@@species" {
+				return m
+			}
+		}
+	}
+	return nil
 }
 
 // emitArrayClassStatic is Array's static method on a class extending
@@ -1818,7 +2202,7 @@ func (e *Emitter) emitArrayClassStatic(className, method string, args []ast.Expr
 		return Value{}, false, nil
 	}
 	var call *ast.CallExpression
-	if host := e.classes[className].HostBase; host.IsTypedArray {
+	if host := e.classes[className].HostBase; host.IsTypedArray() {
 		// A typed array's from/of: its library function.
 		fn, ok := e.globalLinks["__kml_"+typedArrayConstructorName(*host)+"_"+method]
 		if !ok || method == "isArray" {
@@ -1830,10 +2214,10 @@ func (e *Emitter) emitArrayClassStatic(className, method string, args []ast.Expr
 		call.Intrinsic = "Array." + method
 	}
 	res, err := e.emitCall(call)
-	if err != nil || method == "isArray" || !res.Ty.IsArray || e.blockDone {
+	if err != nil || method == "isArray" || !res.Ty.IsArray() || e.blockDone {
 		return res, true, err
 	}
-	typed := e.classes[className].HostBase.IsTypedArray
+	typed := e.classes[className].HostBase.IsTypedArray()
 	v, err := e.emitArrayClassFill([]string{className}, "", res, method == "of" || typed, true, pos)
 	return v, true, err
 }
@@ -1860,7 +2244,7 @@ func (e *Emitter) ctorTakesNumber(info ClassInfo) bool {
 // Array method, themselves (or inherit it from a class of the program).
 func (e *Emitter) arrayOverriders(method string) []string {
 	return e.sortedClassNames(func(_ string, info ClassInfo) bool {
-		if info.HostBase == nil || !info.HostBase.IsArray {
+		if info.HostBase == nil || !info.HostBase.IsArray() {
 			return false
 		}
 		_, own := info.MethodSigs[method]
@@ -1886,7 +2270,7 @@ func (e *Emitter) emitArrayOverrideDispatch(mem *ast.MemberExpression, name stri
 		return Value{}, false, nil
 	}
 	rt := e.inferExprType(mem.Object)
-	if !rt.IsArray || rt.IsTypedArray || rt.IsBuffer || rt.IsTuple || rt.IsFlatArray || rt.Nullable || rt.IsDynamic {
+	if !rt.IsArray() || rt.IsTypedArray() || rt.IsBuffer() || rt.IsTuple() || rt.IsFlatArray() || rt.Nullable() || rt.IsDynamic() {
 		return Value{}, false, nil
 	}
 	classes := e.arrayOverriders(name)
@@ -1898,14 +2282,7 @@ func (e *Emitter) emitArrayOverrideDispatch(mem *ast.MemberExpression, name stri
 	if err != nil {
 		return Value{}, true, err
 	}
-	if recv.ArrayHeader == "" {
-		// A fresh array is no instance's body.
-		v, err := e.withArrayOverrideDispatchOff(func() (Value, error) {
-			return emit(e, ast.NewMemberExpression(e.bindValue(recv, pos), name, pos), ex.Args, pos)
-		})
-		return v, true, err
-	}
-	hdr := e.nullSafeArrayHeader(recv.ArrayHeader)
+	hdr := e.nullSafeArrayHeader(recv.Ref)
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, slot))
@@ -1917,7 +2294,7 @@ func (e *Emitter) emitArrayOverrideDispatch(mem *ast.MemberExpression, name stri
 		out = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", out, resTy.IR))
 	}
-	arrRes := resTy.IsArray && resTy.IR == "ptr" // crosses as its header
+	arrRes := resTy.IsArray() && resTy.IR == "ptr" // crosses as its header
 	obj, word := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", obj, hdr))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", word, obj))
@@ -1928,10 +2305,10 @@ func (e *Emitter) emitArrayOverrideDispatch(mem *ast.MemberExpression, name stri
 			return
 		}
 		if out != "" {
-			v = e.coerce(v, resTy)
+			v = e.convert(v, resTy)
 			ref := v.Ref
 			if arrRes {
-				ref = v.ArrayHeader
+				ref = v.Ref
 				if ref == "" {
 					ref = e.boxArrayValue(v)
 				}
@@ -1944,7 +2321,7 @@ func (e *Emitter) emitArrayOverrideDispatch(mem *ast.MemberExpression, name stri
 		info := e.classes[name2]
 		hitL, nextL := e.freshLabel("arrov.cls"), e.freshLabel("arrov.next")
 		is := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, word, e.objHeaderWord(info.Ty)))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, e.headerIdentity(word), e.objHeaderWord(info.Ty)))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", is, hitL, nextL))
 		e.emitLabel(hitL)
 		v, err := e.emitClassCall(info.Ty, Value{Ref: obj, Ty: info.Ty}, name, ex.Args, pos, false)
@@ -2005,4 +2382,35 @@ func (e *Emitter) hostInferReceiver(host Type, pos ast.Pos) *ast.Identifier {
 	const name = "__kml_hostbody_infer"
 	e.define(name, Symbol{Ptr: "null", Ty: host})
 	return ast.NewIdentifier(name, pos)
+}
+
+// nativeIfaceMember is the declared type of an own member prop of an
+// interface over a native layout (nativeHeritage) that the layout itself
+// does not hold: the instance's property, read and written at run time.
+func (e *Emitter) nativeIfaceMember(t Type, prop string) (Type, bool) {
+	if t.RefName == "" {
+		return Type{}, false
+	}
+	if _, _, ok := t.FieldIndex(prop); ok {
+		return Type{}, false
+	}
+	ft, ok := e.nativeIfaceMembers[t.RefName][prop]
+	return ft, ok
+}
+
+// nativeHeritage is the native layout an interface's builtin base names
+// (`extends TypeError`), unless the program declares that base itself.
+func (e *Emitter) nativeHeritage(s *ast.InterfaceDeclaration) (Type, bool) {
+	for _, base := range s.Extends {
+		if _, own := e.interfaces[base]; own {
+			continue
+		}
+		if _, own := e.classes[base]; own {
+			continue
+		}
+		if t, ok := e.declaredLayout(base); ok {
+			return t, true
+		}
+	}
+	return Type{}, false
 }

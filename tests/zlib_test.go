@@ -43,7 +43,7 @@ func parseDecimalBytes(t *testing.T, s string) []byte {
 	return out
 }
 
-// --- Node `zlib` core module (see docs/adr/ADR-00321.md) ---
+// --- Node `zlib` core module (see docs/adr/00/ADR-00321.md) ---
 //
 // One-shot gzip/gunzip, deflate/inflate, deflateRaw/inflateRaw, unzip in both
 // the *Sync and (err, result) callback forms, over the shared libz runtime

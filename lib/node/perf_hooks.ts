@@ -29,7 +29,7 @@ function received(value: any): string {
 }
 
 function invalidTimestamp(value: number): Error {
-    return new NodeTypeError('ERR_PERFORMANCE_INVALID_TIMESTAMP', value + ' is not a valid timestamp');
+    return NodeTypeError('ERR_PERFORMANCE_INVALID_TIMESTAMP', value + ' is not a valid timestamp');
 }
 
 function now(): number {
@@ -108,11 +108,11 @@ export class PerformanceMark extends PerformanceEntry {
         let detail: any = null;
         if (options !== undefined && options !== null) {
             if (typeof options !== 'object') {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
             }
             if (options.startTime !== undefined) {
                 if (typeof options.startTime !== 'number') {
-                    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "startTime" argument must be of type number.' + received(options.startTime));
+                    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "startTime" argument must be of type number.' + received(options.startTime));
                 }
                 startTime = options.startTime;
             }
@@ -127,7 +127,7 @@ export class PerformanceMark extends PerformanceEntry {
 export class PerformanceMeasure extends PerformanceEntry {}
 
 function measureInvalid(message: string): Error {
-    return new NodeTypeError('ERR_PERFORMANCE_MEASURE_INVALID_OPTIONS', message);
+    return NodeTypeError('ERR_PERFORMANCE_MEASURE_INVALID_OPTIONS', message);
 }
 
 function calculateStartDuration(startOrMeasureOptions: any, endMark: any): { start: number; duration: number } {
@@ -232,7 +232,7 @@ export class PerformanceObserver {
 
     constructor(callback: PerformanceObserverCallback) {
         if (typeof callback !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.' + received(callback));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function.' + received(callback));
         }
         this.callback = callback;
     }
@@ -240,19 +240,19 @@ export class PerformanceObserver {
     observe(options?: PerformanceObserverInit): void {
         const o: any = options ?? {};
         if (typeof o !== 'object') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(o));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(o));
         }
         const entryTypes: any = o.entryTypes;
         const type: any = o.type;
-        if (entryTypes === undefined && type === undefined) throw new NodeTypeError('ERR_MISSING_ARGS', 'The "options.entryTypes" or "options.type" argument must be specified');
+        if (entryTypes === undefined && type === undefined) throw NodeTypeError('ERR_MISSING_ARGS', 'The "options.entryTypes" or "options.type" argument must be specified');
         if (entryTypes != null && type != null) {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'options.entryTypes' can not be used with 'options.type'. Received " + String(entryTypes));
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'options.entryTypes' can not be used with 'options.type'. Received " + String(entryTypes));
         }
-        if (this.typeForm === 1 && type !== undefined) throw new NodeError('ERR_INVALID_ARG_VALUE', "The property 'options.type' is invalid for an observer observing entryTypes");
-        if (this.typeForm === 2 && entryTypes !== undefined) throw new NodeError('ERR_INVALID_ARG_VALUE', "The property 'options.entryTypes' is invalid for an observer observing type");
+        if (this.typeForm === 1 && type !== undefined) throw NodeError('ERR_INVALID_ARG_VALUE', "The property 'options.type' is invalid for an observer observing entryTypes");
+        if (this.typeForm === 2 && entryTypes !== undefined) throw NodeError('ERR_INVALID_ARG_VALUE', "The property 'options.entryTypes' is invalid for an observer observing type");
         if (entryTypes !== undefined) {
             if (!Array.isArray(entryTypes)) {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.entryTypes" property must be an instance of Array.' + received(entryTypes));
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.entryTypes" property must be an instance of Array.' + received(entryTypes));
             }
             this.typeForm = 1;
             this.entryTypes = [];
@@ -367,10 +367,10 @@ export class Histogram {
 
     percentile(percentile: number): number {
         if (typeof percentile !== 'number') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "percentile" argument must be of type number.' + received(percentile));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "percentile" argument must be of type number.' + received(percentile));
         }
         if (!(percentile > 0 && percentile <= 100)) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "percentile" is out of range. It must be > 0 && <= 100. Received ' + percentile);
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "percentile" is out of range. It must be > 0 && <= 100. Received ' + percentile);
         }
         if (this.values.length === 0) return 0;
         const sorted = this.values.slice().sort((a, b) => a - b);
@@ -443,7 +443,7 @@ export class RecordableHistogram extends Histogram {
     record(val: number | bigint): void {
         const v = typeof val === 'bigint' ? Number(val as bigint) : val as number;
         if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "val" is out of range. It must be >= 1 && <= 9007199254740991. Received ' + String(val));
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "val" is out of range. It must be >= 1 && <= 9007199254740991. Received ' + String(val));
         }
         if (v < this.lowest || v > this.highest) {
             this.exceedsCount++;
@@ -474,10 +474,10 @@ export function createHistogram(options?: CreateHistogramOptions): RecordableHis
         if (options.lowest !== undefined) lowest = Number(options.lowest);
         if (options.highest !== undefined) highest = Number(options.highest);
         if (lowest < 1) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.lowest" is out of range. It must be >= 1 && <= 9007199254740991. Received ' + lowest);
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.lowest" is out of range. It must be >= 1 && <= 9007199254740991. Received ' + lowest);
         }
         if (highest < 2 * lowest) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.highest" is out of range. It must be >= ' + (2 * lowest) + ' && <= 9007199254740991. Received ' + highest);
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.highest" is out of range. It must be >= ' + (2 * lowest) + ' && <= 9007199254740991. Received ' + highest);
         }
     }
     return new RecordableHistogram(lowest, highest);
@@ -529,14 +529,14 @@ export function monitorEventLoopDelay(options?: EventLoopMonitorOptions): Interv
     let resolution = 10;
     if (options !== undefined) {
         if (typeof options !== 'object' || options === null) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
         }
         if (options.resolution !== undefined) {
             if (typeof options.resolution !== 'number') {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.resolution" property must be of type number.' + received(options.resolution));
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.resolution" property must be of type number.' + received(options.resolution));
             }
             if (options.resolution <= 0 || !Number.isInteger(options.resolution)) {
-                throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.resolution" is out of range. It must be > 0 && <= 9007199254740991. Received ' + options.resolution);
+                throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "options.resolution" is out of range. It must be > 0 && <= 9007199254740991. Received ' + options.resolution);
             }
             resolution = options.resolution;
         }
@@ -564,7 +564,7 @@ export class Performance {
 
     measure(name: string, startOrMeasureOptions?: string | MeasureOptions, endMark?: string): PerformanceMeasure {
         if (typeof name !== 'string') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string.' + received(name));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "name" argument must be of type string.' + received(name));
         }
         const r = calculateStartDuration(startOrMeasureOptions, endMark);
         const o: any = startOrMeasureOptions;
@@ -614,7 +614,7 @@ export class Performance {
 
     timerify<T extends (...args: any[]) => any>(fn: T): T {
         if (typeof fn !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "fn" argument must be of type function.' + received(fn));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "fn" argument must be of type function.' + received(fn));
         }
         const name = (fn as any).name || 'anonymous';
         const timed = (...args: any[]): any => {
@@ -624,6 +624,11 @@ export class Performance {
             enqueue(entry);
             return result;
         };
+        // As timerify.js defines them.
+        Object.defineProperties(timed, {
+            length: { configurable: false, enumerable: true, value: (fn as any).length },
+            name: { configurable: false, enumerable: true, value: `timerified ${(fn as any).name}` },
+        });
         return timed as any;
     }
 

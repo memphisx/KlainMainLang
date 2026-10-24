@@ -105,7 +105,7 @@ func (e *Emitter) emitHostDateBody(body string, args []ast.Expression, pos ast.P
 	if err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", t, body))
+	e.heapStore("i64", t, body, 8)
 	return nil
 }
 
@@ -134,10 +134,10 @@ func (e *Emitter) emitNewDateTime(n *ast.NewDateExpression) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if val.Ty.IR == "ptr" && !val.Ty.IsDate && !e.isDateClass(val.Ty) {
+	if val.Ty.IR == "ptr" && !val.Ty.IsDate() && !e.isDateClass(val.Ty) {
 		// A string argument is parsed (an absent `string | undefined`,
 		// undefined, is Invalid Date: its parse fails).
-		parsed, err := e.emitDateParseValue(e.coerce(val, TypePtr))
+		parsed, err := e.emitDateParseValue(e.convert(val, TypePtr))
 		if err != nil {
 			return "", err
 		}
@@ -151,14 +151,14 @@ func (e *Emitter) emitNewDateTime(n *ast.NewDateExpression) (string, error) {
 // (NaN, or one past the range, being Invalid Date).
 func (e *Emitter) emitDateTimeArg(val Value) (string, error) {
 	switch {
-	case val.Ty.IsDate || e.isDateClass(val.Ty):
+	case val.Ty.IsDate() || e.isDateClass(val.Ty):
 		return e.emitDateTimeValue(val), nil
 	case isUnconstrainedDynamic(val.Ty):
 		return e.emitDateTimeFromAny(val)
 	case val.Ty.Float:
-		return e.emitTimeValueToDate(e.coerce(val, TypeF64).Ref), nil
+		return e.emitTimeValueToDate(e.convert(val, TypeF64).Ref), nil
 	}
-	return e.coerce(val, TypeI64).Ref, nil
+	return e.convert(val, TypeI64).Ref, nil
 }
 
 // emitDateTimeFromAny is the time value of `new Date(value)` with value
@@ -185,7 +185,7 @@ func (e *Emitter) emitDateTimeFromAny(val Value) (string, error) {
 	e.emitInstr(fmt.Sprintf("%s = call zeroext i1 @__kml_host_is(i64 %s, ptr %s)", isDate, val.Ref, e.internString("Date")))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDate, dateL, numL))
 	e.emitLabel(dateL)
-	d := e.emitDateTimeValue(e.coerce(val, TypeDate))
+	d := e.emitDateTimeValue(e.convert(val, TypeDate))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", d, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(numL)
@@ -211,7 +211,7 @@ func (e *Emitter) emitDateFields(args []ast.Expression) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			cv, err := e.coerceChecked(v, TypeF64, args[i].GetPos(), "Date component")
+			cv, err := e.convertChecked(v, TypeF64, args[i].GetPos(), "Date component")
 			if err != nil {
 				return Value{}, err
 			}
@@ -230,29 +230,31 @@ func (e *Emitter) emitDateFields(args []ast.Expression) (Value, error) {
 // emitDateNow implements the static Date.now(): a number.
 func (e *Emitter) emitDateNow() (Value, error) {
 	e.ensureDateNow()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_date_now()", r))
-	return Value{Ref: r, Ty: TypeI64}, nil
+	ms, r := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_date_now()", ms))
+	// A number, as every number is: a double holding the integral ms.
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", r, ms))
+	return Value{Ref: r, Ty: TypeF64}, nil
 }
 
 // emitDateObject allocates a Date holding the time value t.
 func (e *Emitter) emitDateObject(t string) Value {
 	e.ensureMalloc()
 	base, body := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", base))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", e.hostHeaderWord(TypeDate), base))
+	e.heapMallocInto(base, "16")
+	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(TypeDate)), base, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, base))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", t, body))
+	e.heapStore("i64", t, body, 8)
 	return Value{Ref: body, Ty: TypeDate}
 }
 
 // isDateClass reports an instance of a class extending Date.
 func (e *Emitter) isDateClass(t Type) bool {
-	if !t.IsClass || t.IsDynamic {
+	if !t.IsClass() || t.IsDynamic() {
 		return false
 	}
 	info, ok := e.classes[t.ClassName]
-	return ok && info.HostBase != nil && info.HostBase.IsDate
+	return ok && info.HostBase != nil && info.HostBase.IsDate()
 }
 
 // emitDateBody is the body pointer of a Date-valued v: the Date itself, an
@@ -263,8 +265,8 @@ func (e *Emitter) emitDateBody(v Value) string {
 		body := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, v.Ref))
 		return body
-	case v.Ty.IsDynamic:
-		return e.coerce(v, TypeDate).Ref
+	case v.Ty.IsDynamic():
+		return e.convert(v, TypeDate).Ref
 	}
 	return v.Ref
 }
@@ -279,7 +281,7 @@ func (e *Emitter) emitDateTimeValue(v Value) string {
 // emitDateNumber is a Date's time value as a number (ToPrimitive with the
 // number hint): NaN for Invalid Date.
 func (e *Emitter) emitDateNumber(v Value) Value {
-	if !v.Ty.Nullable && !v.Ty.IsUndefined {
+	if !v.Ty.Nullable() && !v.Ty.IsUndefined() {
 		return e.emitDateTimeNumber(e.emitDateTimeValue(v))
 	}
 	// An absent `Date | undefined` is NaN (null would be 0, but a Date
@@ -307,38 +309,52 @@ func (e *Emitter) emitDateTimeNumber(t string) Value {
 	return Value{Ref: r, Ty: TypeF64}
 }
 
-// emitDateCall dispatches a Date instance method call on the Date dateVal.
+// emitDateCall is a Date method that reads the Date dateVal's time value
+// and returns a fresh value.
 func (e *Emitter) emitDateCall(dateVal Value, method string, pos ast.Pos) (Value, error) {
-	return e.emitDateTimeCall(Value{Ref: e.emitDateTimeValue(dateVal), Ty: TypeI64}, method, pos)
+	read, ok := dateReaders[method]
+	if !ok {
+		return Value{}, fmt.Errorf("%d:%d: unknown Date method '%s'", pos.Line, pos.Col, method)
+	}
+	return read(e, Value{Ref: e.emitDateTimeValue(dateVal), Ty: TypeI64})
 }
 
-// emitDateTimeCall is a Date method that reads the time value dateVal (an
-// i64) and returns a fresh value.
-func (e *Emitter) emitDateTimeCall(dateVal Value, method string, pos ast.Pos) (Value, error) {
-	switch method {
-	case "getTime", "valueOf":
-		// An Invalid Date's time value is NaN.
-		return e.emitDateTimeNumber(dateVal.Ref), nil
-	case "toISOString":
-		e.emitDateThrowIfInvalid(dateVal.Ref)
-		return e.emitDateToISOString(dateVal)
-	case "toJSON":
-		// An Invalid Date's toJSON is null (its time value is not finite).
-		iso, err := e.emitDateOrInvalid(dateVal, e.emitDateToISOString)
-		if err != nil {
-			return Value{}, err
+// dateReaders are the Date methods reading a time value (an i64), by name.
+var dateReaders map[string]func(e *Emitter, t Value) (Value, error)
+
+func init() {
+	orInvalid := func(f func(e *Emitter, v Value) (Value, error)) func(e *Emitter, t Value) (Value, error) {
+		return func(e *Emitter, t Value) (Value, error) {
+			return e.emitDateOrInvalid(t, func(v Value) (Value, error) { return f(e, v) })
 		}
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, e.emitDateIsInvalid(dateVal.Ref), iso.Ref))
-		return Value{Ref: r, Ty: TypePtr}, nil
-	case "toDateString":
-		return e.emitDateOrInvalid(dateVal, e.emitDateToDateString)
-	case "toTimeString":
-		return e.emitDateOrInvalid(dateVal, e.emitDateToTimeString)
-	case "toLocaleTimeString":
-		return e.emitDateOrInvalid(dateVal, e.emitDateToLocaleTimeString)
-	case "toLocaleString":
-		return e.emitDateOrInvalid(dateVal, func(v Value) (Value, error) {
+	}
+	timeNumber := func(e *Emitter, t Value) (Value, error) {
+		// An Invalid Date's time value is NaN.
+		return e.emitDateTimeNumber(t.Ref), nil
+	}
+	dateReaders = map[string]func(e *Emitter, t Value) (Value, error){
+		"getTime": timeNumber,
+		"valueOf": timeNumber,
+		"toISOString": func(e *Emitter, t Value) (Value, error) {
+			e.emitDateThrowIfInvalid(t.Ref)
+			return e.emitDateToISOString(t)
+		},
+		// An Invalid Date's toJSON is null (its time value is not finite).
+		"toJSON": func(e *Emitter, t Value) (Value, error) {
+			iso, err := e.emitDateOrInvalid(t, e.emitDateToISOString)
+			if err != nil {
+				return Value{}, err
+			}
+			r := e.freshReg()
+			// null is nullRef: a string's null pointer is undefined (TDD-00257).
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.emitDateIsInvalid(t.Ref), e.nullRef(), iso.Ref))
+			return Value{Ref: r, Ty: TypePtr}, nil
+		},
+		"toDateString":       orInvalid((*Emitter).emitDateToDateString),
+		"toTimeString":       orInvalid((*Emitter).emitDateToTimeString),
+		"toLocaleTimeString": orInvalid((*Emitter).emitDateToLocaleTimeString),
+		"toString":           orInvalid((*Emitter).emitDateToString),
+		"toLocaleString": orInvalid(func(e *Emitter, v Value) (Value, error) {
 			d, err := e.emitDateToLocaleDateString(v)
 			if err != nil {
 				return Value{}, err
@@ -352,34 +368,38 @@ func (e *Emitter) emitDateTimeCall(dateVal Value, method string, pos ast.Pos) (V
 				return Value{}, err
 			}
 			return e.emitStringConcat(ds, t)
-		})
-	case "toString":
-		return e.emitDateOrInvalid(dateVal, e.emitDateToString)
-	case "toUTCString", "toGMTString":
-		return e.emitDateToUTCString(dateVal)
-	case "toLocaleDateString":
-		return e.emitDateToLocaleDateString(dateVal)
-	case "getTimezoneOffset":
+		}),
+		"toUTCString":        (*Emitter).emitDateToUTCString,
+		"toGMTString":        (*Emitter).emitDateToUTCString,
+		"toLocaleDateString": (*Emitter).emitDateToLocaleDateString,
 		// Minutes local time is behind UTC.
-		off, q, neg := e.emitTZOffset(dateVal.Ref), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, 60000", q, off))
-		e.emitInstr(fmt.Sprintf("%s = sub i64 0, %s", neg, q))
-		return Value{Ref: neg, Ty: TypeI64}, nil
+		"getTimezoneOffset": func(e *Emitter, t Value) (Value, error) {
+			off, q, neg := e.emitTZOffset(t.Ref), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, 60000", q, off))
+			e.emitInstr(fmt.Sprintf("%s = sub i64 0, %s", neg, q))
+			return Value{Ref: neg, Ty: TypeI64}, nil
+		},
 	}
-	if idx, ok := dateDecomposeFieldIndex[method]; ok {
-		invalid := e.emitDateIsInvalid(dateVal.Ref)
-		if !strings.HasPrefix(method, "getUTC") {
-			dateVal = e.emitDateLocal(dateVal)
+	for name, idx := range dateDecomposeFieldIndex {
+		dateReaders[name] = dateFieldReader(idx, !strings.HasPrefix(name, "getUTC"))
+	}
+}
+
+// dateFieldReader is a getter of one decomposed field, in local time or
+// UTC; an Invalid Date's every field is NaN.
+func dateFieldReader(idx int, local bool) func(e *Emitter, t Value) (Value, error) {
+	return func(e *Emitter, t Value) (Value, error) {
+		invalid := e.emitDateIsInvalid(t.Ref)
+		if local {
+			t = e.emitDateLocal(t)
 		}
-		decomposed := e.emitDateDecompose(dateVal)
+		decomposed := e.emitDateDecompose(t)
 		result, f, r := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64, i64, i64, i64, i64, i64 } %s, %d", result, decomposed, idx))
-		// An Invalid Date's every field is NaN.
 		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", f, result))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", r, invalid, f))
 		return Value{Ref: r, Ty: TypeF64}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown Date method '%s'", pos.Line, pos.Col, method)
 }
 
 // emitDateSetterCall implements a Date setter (setFullYear, setMonth,
@@ -406,12 +426,12 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 	if err != nil {
 		return Value{}, err
 	}
-	if !recv.Ty.IsDate && !e.isDateClass(recv.Ty) && !recv.Ty.IsDynamic {
+	if !recv.Ty.IsDate() && !e.isDateClass(recv.Ty) && !recv.Ty.IsDynamic() {
 		return Value{}, fmt.Errorf("%d:%d: '%s' is not a Date", pos.Line, pos.Col, method)
 	}
 	body := e.emitDateBody(recv)
 	store := func(t string) {
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", t, body))
+		e.heapStore("i64", t, body, 8)
 	}
 	// The time value is read before the arguments are converted
 	// (ECMA-262 §21.4.4.20 and its siblings).
@@ -425,7 +445,7 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		if err != nil {
 			return Value{}, err
 		}
-		n, err := e.coerceChecked(v, TypeF64, args[0].GetPos(), "Date setter argument")
+		n, err := e.convertChecked(v, TypeF64, args[0].GetPos(), "Date setter argument")
 		if err != nil {
 			return Value{}, err
 		}
@@ -440,7 +460,7 @@ func (e *Emitter) emitDateSetterCall(mem *ast.MemberExpression, method string, a
 		if err != nil {
 			return Value{}, err
 		}
-		cv, err := e.coerceChecked(v, TypeI64, a.GetPos(), "Date setter argument")
+		cv, err := e.convertChecked(v, TypeI64, a.GetPos(), "Date setter argument")
 		if err != nil {
 			return Value{}, err
 		}
@@ -525,7 +545,7 @@ func (e *Emitter) emitDateParse(args []ast.Expression, pos ast.Pos) (Value, erro
 		return Value{}, err
 	}
 	// Date.parse takes ToString of its argument (a box, a number, an object).
-	if strVal, err = e.coerceStringArg(strVal); err != nil {
+	if strVal, err = e.toStringArg(strVal); err != nil {
 		return Value{}, err
 	}
 	return e.emitDateParseValue(strVal)
@@ -909,11 +929,11 @@ func (e *Emitter) emitDateInspect(v Value) (Value, error) {
 	render := func(v Value) (Value, error) {
 		return e.emitDateOrInvalid(Value{Ref: e.emitDateTimeValue(v), Ty: TypeI64}, e.emitDateToISOString)
 	}
-	if !v.Ty.Nullable && !v.Ty.IsUndefined {
+	if !v.Ty.Nullable() && !v.Ty.IsUndefined() {
 		return render(v)
 	}
 	absent := "null"
-	if v.Ty.IsUndefined {
+	if v.Ty.IsUndefined() {
 		absent = "undefined"
 	}
 	slot := e.freshReg()
@@ -947,7 +967,7 @@ func (e *Emitter) emitDateBodyOrNull(v Value) string {
 // emitDeepCloneDate is structuredClone of the Date v: a new Date with its
 // time value (an absent one stays absent).
 func (e *Emitter) emitDeepCloneDate(v Value) Value {
-	if !v.Ty.Nullable && !v.Ty.IsUndefined {
+	if !v.Ty.Nullable() && !v.Ty.IsUndefined() {
 		return e.emitDateObject(e.emitDateTimeValue(v))
 	}
 	slot := e.freshReg()
@@ -986,7 +1006,7 @@ func (e *Emitter) emitDateUTCFromRest(rest ast.Expression) (Value, error) {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, ptr, i))
 		v := e.loadArrayElem(gep, elemTy)
-		e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", e.coerce(v, TypeF64).Ref, slot))
+		e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", e.convert(v, TypeF64).Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", done))
 		e.emitLabel(done)
 		vals[i] = e.freshReg()

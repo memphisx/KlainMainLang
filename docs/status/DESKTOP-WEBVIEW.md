@@ -9,20 +9,20 @@ compiled binary opens a window, renders an HTML/CSS/JS UI (any SPA that builds
 to static assets), and its buttons call straight into typed native functions.
 
 Design: [TDD-00142](../tdd/TDD-00142.md). Implementation:
-[ADR-00436](../adr/ADR-00436.md) (Stage 0 — C++ build plumbing),
-[ADR-00437](../adr/ADR-00437.md) (Stage 1 — the window),
-[ADR-00438](../adr/ADR-00438.md) (Stage 2 — bind/IPC + served SPA),
-[ADR-00439](../adr/ADR-00439.md) (Stage 3 — loop fusion + async bind),
-[ADR-00440](../adr/ADR-00440.md) (Stage 4 — packaging),
-[ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md) (Stage 5–6 —
+[ADR-00436](../adr/00/ADR-00436.md) (Stage 0 — C++ build plumbing),
+[ADR-00437](../adr/00/ADR-00437.md) (Stage 1 — the window),
+[ADR-00438](../adr/00/ADR-00438.md) (Stage 2 — bind/IPC + served SPA),
+[ADR-00439](../adr/00/ADR-00439.md) (Stage 3 — loop fusion + async bind),
+[ADR-00440](../adr/00/ADR-00440.md) (Stage 4 — packaging),
+[ADR-00441](../adr/00/ADR-00441.md)/[ADR-00442](../adr/00/ADR-00442.md) (Stage 5–6 —
 typed bind, `bindings`, `--emit-window-dts`),
-[ADR-00443](../adr/ADR-00443.md) (Stage 7 — SPA embedding),
-[ADR-00725](../adr/ADR-00725.md)/[ADR-00726](../adr/ADR-00726.md) (Windows —
+[ADR-00443](../adr/00/ADR-00443.md) (Stage 7 — SPA embedding),
+[ADR-00725](../adr/00/ADR-00725.md)/[ADR-00726](../adr/00/ADR-00726.md) (Windows —
 WebView2 backend, GUI-subsystem `-package`).
 
 `import { Webview } from 'klain:webview'`
 
-The engine is selectable via `-webview=<backend>` ([TDD-00144](../tdd/TDD-00144.md), Stage 1 — [ADR-00815](../adr/ADR-00815.md)): `system` (default — the per-platform system engine above) plus `sailfish` (Sailfish OS's Gecko/embedlite, [TDD-00146](../tdd/TDD-00146.md) Stage 3 — [ADR-00816](../adr/ADR-00816.md)–[ADR-00819](../adr/ADR-00819.md)), which cross-compiles against a Sailfish `-devel` sysroot and is **verified running on a physical Xperia 10 II** — renders a page, round-trips `bind`, drove klain timers from a native `QTimer` pump, exits cleanly. The pump has since been replaced by the libuv loop embedding of [ADR-01405](../adr/ADR-01405.md), not yet built against a Sailfish sysroot or run on the device. `cef` / `qt` validate at the flag but reject cleanly until their shims land. The `bind`/`eval`/`serve` contract is backend-agnostic.
+The engine is selectable via `-webview=<backend>` ([TDD-00144](../tdd/TDD-00144.md), Stage 1 — [ADR-00815](../adr/00/ADR-00815.md)): `system` (default — the per-platform system engine above) plus `sailfish` (Sailfish OS's Gecko/embedlite, [TDD-00146](../tdd/TDD-00146.md) Stage 3 — [ADR-00816](../adr/00/ADR-00816.md)–[ADR-00819](../adr/00/ADR-00819.md)), which cross-compiles against a Sailfish `-devel` sysroot and is **verified running on a physical Xperia 10 II** — renders a page, round-trips `bind`, drove klain timers from a native `QTimer` pump, exits cleanly. The pump has since been replaced by the libuv loop embedding of [ADR-01405](../adr/01/ADR-01405.md), not yet built against a Sailfish sysroot or run on the device. `cef` / `qt` validate at the flag but reject cleanly until their shims land. The `bind`/`eval`/`serve` contract is backend-agnostic.
 
 **Coverage: 20/20 surface, 100%. Strict: 0/20** — the module-wide V1 caveats
 below exclude every row from Strict.
@@ -39,18 +39,18 @@ below exclude every row from Strict.
 | `.init(js)` | ✅ | Runs before every page load |
 | `.eval(js)` | ✅ | Fire-and-forget; routed through `webview_dispatch` (thread-safe from a Worker) |
 | `.bind(name, cb)` | ✅ | `window.name(...)` in the page → native `cb(reqJSON)`; returns a page-side Promise |
-| `.bind` async (`cb` returns `Promise<string>`) | ✅ | Page promise settles when the native promise settles, on the GUI thread ([ADR-00439](../adr/ADR-00439.md), [ADR-01405](../adr/ADR-01405.md)) |
+| `.bind` async (`cb` returns `Promise<string>`) | ✅ | Page promise settles when the native promise settles, on the GUI thread ([ADR-00439](../adr/00/ADR-00439.md), [ADR-01405](../adr/01/ADR-01405.md)) |
 | `.unbind(name)` | ✅ | |
 | `.run()` | ✅ | Blocks — owns the GUI main loop; statements after it are the shutdown path |
-| The event loop on the GUI thread | ✅ | Timers, promise reactions, `fs.promises`, `fetch`, servers and the rest of the loop run under `run()` without a Worker: the GUI's main loop watches the runtime's libuv loop ([ADR-01405](../adr/ADR-01405.md)); on Windows a thread waits on libuv's completion port and wakes the GUI thread for each pass, as Electron embeds Node ([ADR-01614](../adr/ADR-01614.md)) |
+| The event loop on the GUI thread | ✅ | Timers, promise reactions, `fs.promises`, `fetch`, servers and the rest of the loop run under `run()` without a Worker: the GUI's main loop watches the runtime's libuv loop ([ADR-01405](../adr/01/ADR-01405.md)); on Windows a thread waits on libuv's completion port and wakes the GUI thread for each pass, as Electron embeds Node ([ADR-01614](../adr/01/ADR-01614.md)) |
 | `.terminate()` | ✅ | Ends `run()` (from a bound callback or another thread) |
 | `.destroy()` | ✅ | |
 | bind throw → page-promise reject | ✅ | Via the setjmp catch scaffold |
-| `bindings: { … }` + `.bindTyped(name, fn)` (typed) | ✅ | Auto-decode the page's args into the callback's declared parameter types, auto-JSON-encode the return, incl. **async** (`Promise<T>`, settled value encoded) and nested-tuple params; the `bindings` keys are the exposed `window.*` allowlist ([ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md)) |
-| `--emit-window-dts` | ✅ | Writes `<output>.window.d.ts` declaring `interface Window { … }` from the typed bindings — page-side autocomplete + the audit surface for the allowlist ([ADR-00442](../adr/ADR-00442.md)) |
-| `new Webview({ serve: embedDir("./dist") })` | ✅ | Embeds a built SPA/SSG directory into the binary at compile time (`.incbin`) and serves it from an in-binary static server on an ephemeral loopback port, then navigates — a **single-file** desktop app, no external `dist/` ([ADR-00443](../adr/ADR-00443.md)) |
-| `klain:assets` `embedDir(path)` + `.get(path)` | ✅ | Embed a directory at compile time; `.get(path): ArrayBuffer` reads an embedded file byte-exact (binary-safe) over the static blob, no copy ([ADR-00443](../adr/ADR-00443.md)) |
-| `klainmain -package` → `.app` / `.desktop` | ✅ | Wraps the binary into a double-clickable macOS `.app` bundle (Info.plist + optional `.icns` icon) or a Linux `.desktop` launcher, or re-links it on Windows as a GUI-subsystem `<name>\<name>.exe` with icon + `VERSIONINFO` resources; `-app-name`/`-app-id`/`-app-version`/`-app-icon` ([ADR-00440](../adr/ADR-00440.md), [ADR-00726](../adr/ADR-00726.md)). `-package=rpm` / `-package=rpm:harbour` instead emit an RPM (Sailfish OS / RPM Linux) — a prebuilt-binary `.spec` + rpmbuild tree, `rpmbuild` run when present so an RPM cross-package rides a `--target` build, Harbour mode applying `harbour-<name>` naming and shipping non-allowlisted link libraries app-privately under `/usr/share/harbour-<name>/lib` with an rpath — `pcre2` (RegExp), and `bdw-gc` under `-mm=gc` ([ADR-00810](../adr/ADR-00810.md), [ADR-00812](../adr/ADR-00812.md), [TDD-00146](../tdd/TDD-00146.md)) |
+| `bindings: { … }` + `.bindTyped(name, fn)` (typed) | ✅ | Auto-decode the page's args into the callback's declared parameter types, auto-JSON-encode the return, incl. **async** (`Promise<T>`, settled value encoded) and nested-tuple params; the `bindings` keys are the exposed `window.*` allowlist ([ADR-00441](../adr/00/ADR-00441.md)/[ADR-00442](../adr/00/ADR-00442.md)) |
+| `--emit-window-dts` | ✅ | Writes `<output>.window.d.ts` declaring `interface Window { … }` from the typed bindings — page-side autocomplete + the audit surface for the allowlist ([ADR-00442](../adr/00/ADR-00442.md)) |
+| `new Webview({ serve: embedDir("./dist") })` | ✅ | Embeds a built SPA/SSG directory into the binary at compile time (`.incbin`) and serves it from an in-binary static server on an ephemeral loopback port, then navigates — a **single-file** desktop app, no external `dist/` ([ADR-00443](../adr/00/ADR-00443.md)) |
+| `klain:assets` `embedDir(path)` + `.get(path)` | ✅ | Embed a directory at compile time; `.get(path): ArrayBuffer` reads an embedded file byte-exact (binary-safe) over the static blob, no copy ([ADR-00443](../adr/00/ADR-00443.md)) |
+| `klainmain -package` → `.app` / `.desktop` | ✅ | Wraps the binary into a double-clickable macOS `.app` bundle (Info.plist + optional `.icns` icon) or a Linux `.desktop` launcher, or re-links it on Windows as a GUI-subsystem `<name>\<name>.exe` with icon + `VERSIONINFO` resources; `-app-name`/`-app-id`/`-app-version`/`-app-icon` ([ADR-00440](../adr/00/ADR-00440.md), [ADR-00726](../adr/00/ADR-00726.md)). `-package=rpm` / `-package=rpm:harbour` instead emit an RPM (Sailfish OS / RPM Linux) — a prebuilt-binary `.spec` + rpmbuild tree, `rpmbuild` run when present so an RPM cross-package rides a `--target` build, Harbour mode applying `harbour-<name>` naming and shipping non-allowlisted link libraries app-privately under `/usr/share/harbour-<name>/lib` with an rpath — `pcre2` (RegExp), and `bdw-gc` under `-mm=gc` ([ADR-00810](../adr/00/ADR-00810.md), [ADR-00812](../adr/00/ADR-00812.md), [TDD-00146](../tdd/TDD-00146.md)) |
 
 ## Loading patterns
 
@@ -72,26 +72,26 @@ below exclude every row from Strict.
 - **Two bind contracts.** `w.bind(name, cb)` is the raw escape hatch — the page's
   argument list arrives as one JSON-array string and the callback returns a JSON
   string (sync, or `async` returning `Promise<string>` settled later,
-  [ADR-00439](../adr/ADR-00439.md)). **Typed** bind (`bindings: {…}` on the
+  [ADR-00439](../adr/00/ADR-00439.md)). **Typed** bind (`bindings: {…}` on the
   constructor, or `w.bindTyped(name, fn)`) auto-decodes the args into the
   callback's declared parameter types and JSON-encodes the return
-  ([ADR-00441](../adr/ADR-00441.md)/[ADR-00442](../adr/ADR-00442.md)); the
+  ([ADR-00441](../adr/00/ADR-00441.md)/[ADR-00442](../adr/00/ADR-00442.md)); the
   `bindings` keys are the exposed `window.*` allowlist. **Async** typed bind (a
   callback returning `Promise<T>` settles the page promise with the JSON-encoded
   `T`) and nested-tuple params work; `--emit-window-dts` writes the page-side
   `Window` typing. A rejection carries a fixed message, not `error.message`.
 - **Windows loop fusion is page-driven.** On macOS and Linux the GUI's main
-  loop runs the runtime's whole loop ([ADR-01405](../adr/ADR-01405.md)). On
+  loop runs the runtime's whole loop ([ADR-01405](../adr/01/ADR-01405.md)). On
   Windows a page-injected 16 ms tick pump runs timers, microtasks and tasks
   under `run()`; servers and other descriptor-driven work (stream pumps, fork
   IPC) there still belong in a Worker.
 - **Windows has not run the TypeScript module yet.** `klain:webview` is
-  lib/node/klain_webview.ts over webview_* natives ([ADR-01471](../adr/ADR-01471.md));
+  lib/node/klain_webview.ts over webview_* natives ([ADR-01471](../adr/01/ADR-01471.md));
   every windowed smoke run passes on macOS, on Windows it is compile-checked
   (CI) only — the windowed runs there predate it.
 - **Sailfish's loop embedding is unverified.** It replaced the
   hardware-verified 16 ms `QTimer` pump with a `QSocketNotifier` and a
-  deadline timer ([ADR-01405](../adr/ADR-01405.md)), not yet built against a
+  deadline timer ([ADR-01405](../adr/01/ADR-01405.md)), not yet built against a
   Sailfish sysroot or run on an Xperia.
 - **Single-file apps.** `new Webview({ serve: embedDir("./dist") })` embeds the built SPA
   into the binary and serves it from an in-binary server, so a packaged `.app`
@@ -102,7 +102,7 @@ below exclude every row from Strict.
   Requirements. Windows needs the WebView2 SDK header from MSYS2
   (`mingw-w64-ucrt-x86_64-webview2-loader`) at build time and nothing at run
   time beyond the Edge WebView2 runtime that ships with Windows 10/11 — no
-  loader DLL beside the app ([ADR-00725](../adr/ADR-00725.md)). On Windows a
+  loader DLL beside the app ([ADR-00725](../adr/00/ADR-00725.md)). On Windows a
   navigation issued before `run()` is deferred to the loop start so an `init`
   registered after `html()`/`navigate()` still runs first, the order WebKit
   gives; the Edge runtime prints one `Failed to unregister class` log line on
@@ -121,4 +121,4 @@ below exclude every row from Strict.
   WebView2)** — the same windowed smoke runs as macOS (round trip, page-tick
   pump, async/typed/async-typed bind, `serve`, `init` after `html`), all four
   examples, and `-package` producing a GUI-subsystem exe with resources
-  ([ADR-00725](../adr/ADR-00725.md), [ADR-00726](../adr/ADR-00726.md)).
+  ([ADR-00725](../adr/00/ADR-00725.md), [ADR-00726](../adr/00/ADR-00726.md)).

@@ -10,13 +10,13 @@ import { NodeTypeError, NodeRangeError } from './internal_errors';
 
 function validateInteger(value: any, name: string, min: number = Number.MIN_SAFE_INTEGER, max: number = Number.MAX_SAFE_INTEGER): void {
     if (typeof value !== 'number') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number. Received ' + (value === undefined || value === null ? String(value) : 'type ' + typeof value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number. Received ' + (value === undefined || value === null ? String(value) : 'type ' + typeof value));
     }
     if (!Number.isInteger(value)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be an integer. Received ' + String(value));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be an integer. Received ' + String(value));
     }
     if (value < min || value > max) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be >= ' + min + ' && <= ' + max + '. Received ' + String(value));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be >= ' + min + ' && <= ' + max + '. Received ' + String(value));
     }
 }
 
@@ -31,12 +31,12 @@ export class Readline {
 
     constructor(stream: any, options?: { autoCommit?: boolean }) {
         if (stream === null || typeof stream !== 'object' || typeof stream.write !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "stream" argument must be an instance of Writable.');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "stream" argument must be an instance of Writable.');
         }
         this.#stream = stream;
         if (options?.autoCommit !== undefined && options?.autoCommit !== null) {
             if (typeof options.autoCommit !== 'boolean') {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.autoCommit" property must be of type boolean.');
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.autoCommit" property must be of type boolean.');
             }
             this.#autoCommit = options.autoCommit;
         }

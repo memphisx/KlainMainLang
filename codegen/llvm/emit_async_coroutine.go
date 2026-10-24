@@ -58,6 +58,10 @@ func programMayWait(prog *ast.Program) bool {
 			if id, ok := n.Callee.(*ast.Identifier); ok && id.Name == "fetch" {
 				found = true
 			}
+		case *ast.NewExpression:
+			// A Response may take a stream body, read through an async
+			// collector (ensureResponseStreamCollect).
+			found = found || (n.ClassName == "Response" && len(n.Args) > 0 && !isNullBodyArg(n.Args[0]))
 		case *ast.FunctionDeclaration:
 			found = found || (n.IsAsync && n.Body != nil && returnsValue(n.Body))
 		case *ast.FunctionExpression:
@@ -143,13 +147,8 @@ func (e *Emitter) writeAsyncDefinition(name, paramStr string, awaited bool) {
 	if !strings.HasPrefix(sym, "@") {
 		sym = "@" + sym
 	}
-	if !awaited || e.emittingHTTPHandler {
-		// An http.listen handler is driven by its connection fiber, which parks
-		// on the fiber itself — it is already a coroutine of its own kind.
-		e.functions.WriteString(fmt.Sprintf("\ndefine ptr %s(%s) {\nentry:\n", sym, paramStr))
-		e.functions.WriteString(e.allocas.String())
-		e.functions.WriteString(e.body.String())
-		e.functions.WriteString("}\n")
+	if !awaited {
+		e.writeFunc(fmt.Sprintf("ptr %s(%s)", sym, paramStr), e.allocas.String()+e.body.String())
 		return
 	}
 	e.ensureTaskRuntime()
@@ -157,10 +156,7 @@ func (e *Emitter) writeAsyncDefinition(name, paramStr string, awaited bool) {
 	inner := quoteSymSuffix(sym, ".inner")
 	tramp := quoteSymSuffix(sym, ".tramp")
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal ptr %s(%s) {\nentry:\n", inner, paramStr))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	e.writeFunc(fmt.Sprintf("internal ptr %s(%s)", inner, paramStr), e.allocas.String()+e.body.String())
 
 	types, names := splitLLVMParams(paramStr)
 	bundleTy := "{ " + strings.Join(types, ", ") + " }"

@@ -35,17 +35,17 @@ class NghttpError extends Error {
 }
 
 function errInvalidSession(): Error {
-    return new NodeError('ERR_HTTP2_INVALID_SESSION', 'The session has been destroyed');
+    return NodeError('ERR_HTTP2_INVALID_SESSION', 'The session has been destroyed');
 }
 
 function errInvalidStream(): Error {
-    return new NodeError('ERR_HTTP2_INVALID_STREAM', 'The stream has been destroyed');
+    return NodeError('ERR_HTTP2_INVALID_STREAM', 'The stream has been destroyed');
 }
 
 function errInvalidSettingValue(name: string, value: any, range: boolean): Error {
     const msg = 'Invalid value for setting "' + name + '": ' + String(value);
-    return range ? new NodeRangeError('ERR_HTTP2_INVALID_SETTING_VALUE', msg)
-        : new NodeTypeError('ERR_HTTP2_INVALID_SETTING_VALUE', msg);
+    return range ? NodeRangeError('ERR_HTTP2_INVALID_SETTING_VALUE', msg)
+        : NodeTypeError('ERR_HTTP2_INVALID_SETTING_VALUE', msg);
 }
 
 // ---- constants (the binding's) ----
@@ -383,18 +383,18 @@ type PseudoCheck = (key: string) => void;
 
 function assertValidPseudoHeader(key: string): void {
     if (!kValidPseudoHeaders.has(key)) {
-        throw new NodeTypeError('ERR_HTTP2_INVALID_PSEUDOHEADER', '"' + key + '" is an invalid pseudoheader or is used incorrectly');
+        throw NodeTypeError('ERR_HTTP2_INVALID_PSEUDOHEADER', '"' + key + '" is an invalid pseudoheader or is used incorrectly');
     }
 }
 
 function assertValidPseudoHeaderResponse(key: string): void {
     if (key !== ':status') {
-        throw new NodeTypeError('ERR_HTTP2_INVALID_PSEUDOHEADER', '"' + key + '" is an invalid pseudoheader or is used incorrectly');
+        throw NodeTypeError('ERR_HTTP2_INVALID_PSEUDOHEADER', '"' + key + '" is an invalid pseudoheader or is used incorrectly');
     }
 }
 
 function assertValidPseudoHeaderTrailer(key: string): void {
-    throw new NodeTypeError('ERR_HTTP2_INVALID_PSEUDOHEADER', '"' + key + '" is an invalid pseudoheader or is used incorrectly');
+    throw NodeTypeError('ERR_HTTP2_INVALID_PSEUDOHEADER', '"' + key + '" is an invalid pseudoheader or is used incorrectly');
 }
 
 function assertIsObject(value: any, name: string, types?: string): void {
@@ -427,7 +427,7 @@ function buildNgHeaderString(arrayOrMap: any, validatePseudo: PseudoCheck, stric
                     break;
                 default:
                     if (isStrictSingleValueField) {
-                        throw new NodeTypeError('ERR_HTTP2_HEADER_SINGLE_VALUE', 'Header field "' + key + '" must only have a single value');
+                        throw NodeTypeError('ERR_HTTP2_HEADER_SINGLE_VALUE', 'Header field "' + key + '" must only have a single value');
                     }
             }
         } else {
@@ -435,7 +435,7 @@ function buildNgHeaderString(arrayOrMap: any, validatePseudo: PseudoCheck, stric
         }
         if (isStrictSingleValueField) {
             if (singles.has(key)) {
-                throw new NodeTypeError('ERR_HTTP2_HEADER_SINGLE_VALUE', 'Header field "' + key + '" must only have a single value');
+                throw NodeTypeError('ERR_HTTP2_HEADER_SINGLE_VALUE', 'Header field "' + key + '" must only have a single value');
             }
             singles.add(key);
         }
@@ -446,10 +446,10 @@ function buildNgHeaderString(arrayOrMap: any, validatePseudo: PseudoCheck, stric
             return;
         }
         if (!checkIsHttpToken(key)) {
-            throw new NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + key + '"]');
+            throw NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + key + '"]');
         }
         if (isIllegalConnectionSpecificHeader(key, value)) {
-            throw new NodeTypeError('ERR_HTTP2_INVALID_CONNECTION_HEADERS', 'HTTP/1 Connection specific headers are forbidden: "' + key + '"');
+            throw NodeTypeError('ERR_HTTP2_INVALID_CONNECTION_HEADERS', 'HTTP/1 Connection specific headers are forbidden: "' + key + '"');
         }
         if (isArray) {
             for (let j = 0; j < value.length; ++j) headers += name + '\n' + String(value[j]) + '\n';
@@ -544,7 +544,7 @@ function validateSettings(settings: any): void {
     if (settings.customSettings) {
         const keys = Object.keys(settings.customSettings);
         if (keys.length > MAX_ADDITIONAL_SETTINGS) {
-            throw new NodeRangeError('ERR_HTTP2_TOO_MANY_CUSTOM_SETTINGS', 'Number of custom settings exceeds MAX_ADDITIONAL_SETTINGS');
+            throw NodeRangeError('ERR_HTTP2_TOO_MANY_CUSTOM_SETTINGS', 'Number of custom settings exceeds MAX_ADDITIONAL_SETTINGS');
         }
         for (const key of keys) {
             assertWithinRange('customSettings:id', Number(key), 0, 0xffff);
@@ -592,10 +592,10 @@ function packSettings(settings: any): Buffer {
             if (typeof val !== 'number') continue;
             const id = Number(key);
             if (Number.isNaN(id) || id <= 0 || id > 0xffff) {
-                throw new NodeRangeError('ERR_HTTP2_INVALID_SETTING_VALUE', 'Invalid value for setting "Range Error": ' + id);
+                throw NodeRangeError('ERR_HTTP2_INVALID_SETTING_VALUE', 'Invalid value for setting "Range Error": ' + id);
             }
             if (Number.isNaN(val) || val <= 0 || val > 0xffffffff) {
-                throw new NodeRangeError('ERR_HTTP2_INVALID_SETTING_VALUE', 'Invalid value for setting "Range Error": ' + val);
+                throw NodeRangeError('ERR_HTTP2_INVALID_SETTING_VALUE', 'Invalid value for setting "Range Error": ' + val);
             }
             add(id, val);
         }
@@ -635,7 +635,7 @@ export function getUnpackedSettings(buf: any, options?: any): any {
         throw invalidArgType('buf', 'an instance of Buffer or TypedArray', buf);
     }
     if (buf.length % 6 !== 0) {
-        throw new NodeRangeError('ERR_HTTP2_INVALID_PACKED_SETTINGS_LENGTH', 'Packed settings length must be a multiple of six');
+        throw NodeRangeError('ERR_HTTP2_INVALID_PACKED_SETTINGS_LENGTH', 'Packed settings length must be a multiple of six');
     }
     const settings: any = {};
     let offset = 0;
@@ -762,7 +762,7 @@ export class Http2Session extends EventEmitter {
     constructor(type: number, options: any, socket: any) {
         super();
         if (boundSessions.has(socket)) {
-            throw new NodeError('ERR_HTTP2_SOCKET_BOUND', 'The socket is already bound to an Http2Session');
+            throw NodeError('ERR_HTTP2_SOCKET_BOUND', 'The socket is already bound to an Http2Session');
         }
         boundSessions.set(socket, this);
         this._kmlType = type;
@@ -1033,7 +1033,7 @@ export class Http2Session extends EventEmitter {
         if (code === NGHTTP2_NO_ERROR) {
             this.close();
         } else {
-            this.destroy(new NodeError('ERR_HTTP2_SESSION_ERROR', 'Session closed with error code ' + code), NGHTTP2_NO_ERROR);
+            this.destroy(NodeError('ERR_HTTP2_SESSION_ERROR', 'Session closed with error code ' + code), NGHTTP2_NO_ERROR);
         }
     }
 
@@ -1058,7 +1058,7 @@ export class Http2Session extends EventEmitter {
     // socketOnClose
     private _kmlSocketClose(): void {
         if (this.destroyed) return;
-        const err = this.connecting ? new NodeError('ERR_SOCKET_CLOSED', 'Socket is closed') : null;
+        const err = this.connecting ? NodeError('ERR_SOCKET_CLOSED', 'Socket is closed') : null;
         for (const s of Array.from(this._kmlStreams.values())) s.close(NGHTTP2_CANCEL);
         for (const s of Array.from(this._kmlPendingStreams)) s.close(NGHTTP2_CANCEL);
         this.close();
@@ -1188,13 +1188,13 @@ export class Http2Session extends EventEmitter {
         }
         if (payload) {
             if (!ArrayBuffer.isView(payload)) throw invalidArgType('payload', 'an instance of Buffer, TypedArray, or DataView', payload);
-            if (payload.byteLength !== 8) throw new NodeRangeError('ERR_HTTP2_PING_LENGTH', 'HTTP2 ping payload must be 8 bytes');
+            if (payload.byteLength !== 8) throw NodeRangeError('ERR_HTTP2_PING_LENGTH', 'HTTP2 ping payload must be 8 bytes');
         }
         validateFunction(callback, 'callback');
         const body = Buffer.alloc(8);
         if (payload) body.set((payload as Uint8Array).subarray(0, 8));
         if (this.connecting || this.closed) {
-            process.nextTick(() => { callback(new NodeError('ERR_HTTP2_PING_CANCEL', 'HTTP2 ping cancelled')); });
+            process.nextTick(() => { callback(NodeError('ERR_HTTP2_PING_CANCEL', 'HTTP2 ping cancelled')); });
             return false;
         }
         this._kmlPings.push({ cb: callback, start: Date.now() });
@@ -1252,7 +1252,7 @@ export class Http2Session extends EventEmitter {
         let c: any = code;
         if (typeof error === 'number') {
             c = error;
-            err = c !== NGHTTP2_NO_ERROR ? new NodeError('ERR_HTTP2_SESSION_ERROR', 'Session closed with error code ' + c) : undefined;
+            err = c !== NGHTTP2_NO_ERROR ? NodeError('ERR_HTTP2_SESSION_ERROR', 'Session closed with error code ' + c) : undefined;
         }
         if (err === NGHTTP2_NO_ERROR) err = undefined;
         if (c === undefined && err != null) c = NGHTTP2_INTERNAL_ERROR;
@@ -1275,7 +1275,7 @@ export class Http2Session extends EventEmitter {
         this.removeAllListeners('timeout');
         const socket = this._kmlSocket;
         if (this._kmlPendingStreams.size > 0 || this._kmlStreams.size > 0) {
-            const cancel = new NodeError('ERR_HTTP2_STREAM_CANCEL', 'The pending stream has been canceled' +
+            const cancel = NodeError('ERR_HTTP2_STREAM_CANCEL', 'The pending stream has been canceled' +
                 (error ? ' (caused by: ' + error.message + ')' : ''));
             for (const s of Array.from(this._kmlPendingStreams)) s.destroy(cancel);
             for (const s of Array.from(this._kmlStreams.values())) s.destroy(error);
@@ -1373,7 +1373,7 @@ export class ClientHttp2Session extends Http2Session {
         if (this.destroyed) {
             requestError = errInvalidSession();
         } else if (this.closed) {
-            requestError = new NodeError('ERR_HTTP2_GOAWAY_SESSION', 'New streams cannot be created after receiving a GOAWAY');
+            requestError = NodeError('ERR_HTTP2_GOAWAY_SESSION', 'New streams cannot be created after receiving a GOAWAY');
         }
         this._kmlUpdateTimer();
         let headersObject: any = undefined;
@@ -1498,9 +1498,9 @@ function prepareRequestHeadersArray(headers: any[], session: Http2Session): any 
         }
         if (path === undefined) additional.push(':path', '/');
     } else {
-        if (authority === undefined) throw new NodeError('ERR_HTTP2_CONNECT_AUTHORITY', ':authority header is required for CONNECT requests');
-        if (scheme !== undefined) throw new NodeError('ERR_HTTP2_CONNECT_SCHEME', 'The :scheme header is forbidden for CONNECT requests');
-        if (path !== undefined) throw new NodeError('ERR_HTTP2_CONNECT_PATH', 'The :path header is forbidden for CONNECT requests');
+        if (authority === undefined) throw NodeError('ERR_HTTP2_CONNECT_AUTHORITY', ':authority header is required for CONNECT requests');
+        if (scheme !== undefined) throw NodeError('ERR_HTTP2_CONNECT_SCHEME', 'The :scheme header is forbidden for CONNECT requests');
+        if (path !== undefined) throw NodeError('ERR_HTTP2_CONNECT_PATH', 'The :path header is forbidden for CONNECT requests');
     }
     const rawHeaders = additional.length ? additional.concat(headers) : headers;
     const headersList = buildNgHeaderString(rawHeaders, assertValidPseudoHeader, session._kmlStrictSingleValueFields);
@@ -1517,9 +1517,9 @@ function prepareRequestHeadersObject(headers: any, session: Http2Session): any {
         if (headersObject[':scheme'] === undefined) headersObject[':scheme'] = session._kmlProtocol.slice(0, -1);
         if (headersObject[':path'] === undefined) headersObject[':path'] = '/';
     } else {
-        if (headersObject[':authority'] === undefined) throw new NodeError('ERR_HTTP2_CONNECT_AUTHORITY', ':authority header is required for CONNECT requests');
-        if (headersObject[':scheme'] !== undefined) throw new NodeError('ERR_HTTP2_CONNECT_SCHEME', 'The :scheme header is forbidden for CONNECT requests');
-        if (headersObject[':path'] !== undefined) throw new NodeError('ERR_HTTP2_CONNECT_PATH', 'The :path header is forbidden for CONNECT requests');
+        if (headersObject[':authority'] === undefined) throw NodeError('ERR_HTTP2_CONNECT_AUTHORITY', ':authority header is required for CONNECT requests');
+        if (headersObject[':scheme'] !== undefined) throw NodeError('ERR_HTTP2_CONNECT_SCHEME', 'The :scheme header is forbidden for CONNECT requests');
+        if (headersObject[':path'] !== undefined) throw NodeError('ERR_HTTP2_CONNECT_PATH', 'The :path header is forbidden for CONNECT requests');
     }
     const headersList = buildNgHeaderString(headersObject, assertValidPseudoHeader, session._kmlStrictSingleValueFields);
     return {
@@ -1744,9 +1744,9 @@ export class Http2Stream extends Duplex {
 
     sendTrailers(headers: OutgoingHttpHeaders): void {
         if (this.destroyed || this.closed) throw errInvalidStream();
-        if (this._kmlSentTrailers) throw new NodeError('ERR_HTTP2_TRAILERS_ALREADY_SENT', 'Trailing headers have already been sent');
+        if (this._kmlSentTrailers) throw NodeError('ERR_HTTP2_TRAILERS_ALREADY_SENT', 'Trailing headers have already been sent');
         if (!this._kmlTrailersReady) {
-            throw new NodeError('ERR_HTTP2_TRAILERS_NOT_READY', 'Trailing headers cannot be sent until after the wantTrailers event is emitted');
+            throw NodeError('ERR_HTTP2_TRAILERS_NOT_READY', 'Trailing headers cannot be sent until after the wantTrailers event is emitted');
         }
         assertIsObject(headers, 'headers');
         const h: any = Object.assign({ __proto__: null }, headers);
@@ -1776,7 +1776,7 @@ export class Http2Stream extends Duplex {
     close(code?: number, callback?: () => void): void {
         const c = code ?? NGHTTP2_NO_ERROR;
         if (typeof c !== 'number' || c < 0 || c > kMaxInt || Math.floor(c) !== c) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "code" is out of range. It must be >= 0 && <= ' + kMaxInt + '. Received ' + String(c));
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "code" is out of range. It must be >= 0 && <= ' + kMaxInt + '. Received ' + String(c));
         }
         if (callback !== undefined) validateFunction(callback, 'callback');
         if (this.closed) return;
@@ -1857,7 +1857,7 @@ export class Http2Stream extends Duplex {
         if (hasHandle) session._kmlStreams.delete(id);
         else session._kmlPendingStreams.delete(this);
         if (error == null && code !== NGHTTP2_NO_ERROR && code !== NGHTTP2_CANCEL) {
-            error = new NodeError('ERR_HTTP2_STREAM_ERROR', 'Stream closed with error code ' + codeName(code));
+            error = NodeError('ERR_HTTP2_STREAM_ERROR', 'Stream closed with error code ' + codeName(code));
         }
         this._kmlSession = undefined;
         setImmediate(() => { session._kmlMaybeDestroy(); });
@@ -1914,8 +1914,8 @@ export class ServerHttp2Stream extends Http2Stream {
     pushStream(headers: OutgoingHttpHeaders, callback: (err: Error | null, pushStream: ServerHttp2Stream, headers: OutgoingHttpHeaders) => void): void;
     pushStream(headers: OutgoingHttpHeaders, options: { exclusive?: boolean; parent?: number }, callback: (err: Error | null, pushStream: ServerHttp2Stream, headers: OutgoingHttpHeaders) => void): void;
     pushStream(headersIn: any, options: any, callback?: any): void {
-        if (!this.pushAllowed) throw new NodeError('ERR_HTTP2_PUSH_DISABLED', 'HTTP/2 client has disabled push streams');
-        if ((this._kmlId as number) % 2 === 0) throw new NodeError('ERR_HTTP2_NESTED_PUSH', 'A push stream cannot initiate another push stream.');
+        if (!this.pushAllowed) throw NodeError('ERR_HTTP2_PUSH_DISABLED', 'HTTP/2 client has disabled push streams');
+        if ((this._kmlId as number) % 2 === 0) throw NodeError('ERR_HTTP2_NESTED_PUSH', 'A push stream cannot initiate another push stream.');
         const session = this._kmlSession;
         this._kmlUpdateTimer();
         if (typeof options === 'function') {
@@ -1941,7 +1941,7 @@ export class ServerHttp2Stream extends Http2Stream {
         const ret = __kml_native.h2Push(session._kmlHandle, this._kmlId as number, headersList);
         if (ret < 0) {
             let err: Error;
-            if (ret === NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE) err = new NodeError('ERR_HTTP2_OUT_OF_STREAMS', 'No stream ID is available because maximum stream ID has been reached');
+            if (ret === NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE) err = NodeError('ERR_HTTP2_OUT_OF_STREAMS', 'No stream ID is available because maximum stream ID has been reached');
             else if (ret === NGHTTP2_ERR_STREAM_CLOSED) err = errInvalidStream();
             else err = new NghttpError(ret);
             process.nextTick(() => { callback(err); });
@@ -1958,7 +1958,7 @@ export class ServerHttp2Stream extends Http2Stream {
 
     respond(headersParam?: OutgoingHttpHeaders | string[], options?: ServerStreamResponseOptions): void {
         if (this.destroyed || this.closed) throw errInvalidStream();
-        if (this.headersSent) throw new NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+        if (this.headersSent) throw NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
         assertIsObject(options, 'options');
         const opts: any = { ...options };
         this._kmlUpdateTimer();
@@ -1992,15 +1992,15 @@ export class ServerHttp2Stream extends Http2Stream {
 
     additionalHeaders(headersIn: OutgoingHttpHeaders): void {
         if (this.destroyed || this.closed) throw errInvalidStream();
-        if (this.headersSent) throw new NodeError('ERR_HTTP2_HEADERS_AFTER_RESPOND', 'Cannot specify additional headers after response initiated');
+        if (this.headersSent) throw NodeError('ERR_HTTP2_HEADERS_AFTER_RESPOND', 'Cannot specify additional headers after response initiated');
         assertIsObject(headersIn, 'headers');
         const headers: any = Object.assign({ __proto__: null }, headersIn);
         if (headers[':status'] != null) {
             const statusCode = headers[':status'] | 0;
             headers[':status'] = statusCode;
-            if (statusCode === 101) throw new NodeError('ERR_HTTP2_STATUS_101', 'HTTP status code 101 (Switching Protocols) is forbidden in HTTP/2');
+            if (statusCode === 101) throw NodeError('ERR_HTTP2_STATUS_101', 'HTTP status code 101 (Switching Protocols) is forbidden in HTTP/2');
             if (statusCode < 100 || statusCode >= 200) {
-                throw new NodeRangeError('ERR_HTTP2_INVALID_INFO_STATUS', 'Invalid informational status code: ' + String(headersIn[':status']));
+                throw NodeRangeError('ERR_HTTP2_INVALID_INFO_STATUS', 'Invalid informational status code: ' + String(headersIn[':status']));
             }
         }
         this._kmlUpdateTimer();
@@ -2030,7 +2030,7 @@ function prepareResponseHeaders(stream: Http2Stream, headersParam: any, options:
         }
         if (!isDateSet && (options.sendDate == null || options.sendDate)) headersParam.push('date', utcDate());
         if (statusCode < 200 || statusCode > 599) {
-            throw new NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + statusCode);
+            throw NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + statusCode);
         }
         const headersList = buildNgHeaderString(headersParam, assertValidPseudoHeaderResponse, stream._kmlSession._kmlStrictSingleValueFields);
         return { headersList, statusCode };
@@ -2047,11 +2047,11 @@ function prepareResponseHeaders(stream: Http2Stream, headersParam: any, options:
         if (headers['date'] === undefined || headers['date'] === null) headers['date'] = utcDate();
     }
     if (statusCode < 200 || statusCode > 599) {
-        throw new NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + statusCode);
+        throw NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + statusCode);
     }
     const neverIndex = headers[sensitiveHeaders];
     if (neverIndex !== undefined && !Array.isArray(neverIndex)) {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'headers[http2.neverIndex]' is invalid. Received " + String(neverIndex));
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'headers[http2.neverIndex]' is invalid. Received " + String(neverIndex));
     }
     stream._kmlSentHeaders = headers;
     const headersList = buildNgHeaderString(headers, assertValidPseudoHeaderResponse, stream._kmlSession._kmlStrictSingleValueFields);
@@ -2073,13 +2073,13 @@ export class ClientHttp2Stream extends Http2Stream {
         const session = this._kmlSession;
         if (session === undefined || session.destroyed) return;
         if (session.closed) {
-            this.destroy(new NodeError('ERR_HTTP2_GOAWAY_SESSION', 'New streams cannot be created after receiving a GOAWAY'));
+            this.destroy(NodeError('ERR_HTTP2_GOAWAY_SESSION', 'New streams cannot be created after receiving a GOAWAY'));
             return;
         }
         const ret = __kml_native.h2Request(session._kmlHandle, headersList, options.endStream ? 1 : 0, options.waitForTrailers ? 1 : 0);
         if (ret < 0) {
             if (ret === NGHTTP2_ERR_STREAM_ID_NOT_AVAILABLE) {
-                this.destroy(new NodeError('ERR_HTTP2_OUT_OF_STREAMS', 'No stream ID is available because maximum stream ID has been reached'));
+                this.destroy(NodeError('ERR_HTTP2_OUT_OF_STREAMS', 'No stream ID is available because maximum stream ID has been reached'));
             } else {
                 session.destroy(new NghttpError(ret));
             }
@@ -2114,13 +2114,13 @@ function connectionHeaderMessageWarn(): void {
 
 function assertValidHeader(name: string, value: any): void {
     if (name === '' || typeof name !== 'string' || name.indexOf(' ') >= 0) {
-        throw new NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + name + '"]');
+        throw NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + name + '"]');
     }
     if (name === ':status' || name === ':method' || name === ':path' || name === ':authority' || name === ':scheme') {
-        throw new NodeError('ERR_HTTP2_PSEUDOHEADER_NOT_ALLOWED', 'Cannot set HTTP/2 pseudo-headers');
+        throw NodeError('ERR_HTTP2_PSEUDOHEADER_NOT_ALLOWED', 'Cannot set HTTP/2 pseudo-headers');
     }
     if (value === undefined || value === null) {
-        throw new NodeTypeError('ERR_HTTP2_INVALID_HEADER_VALUE', 'Invalid value "' + String(value) + '" for header "' + name + '"');
+        throw NodeTypeError('ERR_HTTP2_INVALID_HEADER_VALUE', 'Invalid value "' + String(value) + '" for header "' + name + '"');
     }
     if (name === 'connection' && value !== 'trailers') connectionHeaderMessageWarn();
 }
@@ -2236,7 +2236,7 @@ export class Http2ServerRequest extends Readable {
     set method(method: string) {
         validateString(method, 'method');
         if (method.trim() === '') {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'method' is invalid. Received '" + method + "'");
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'method' is invalid. Received '" + method + "'");
         }
         this._kmlHeaders[':method'] = method;
     }
@@ -2343,8 +2343,8 @@ export class Http2ServerResponse extends Stream {
 
     set statusCode(codeIn: number) {
         const code = codeIn | 0;
-        if (code >= 100 && code < 200) throw new NodeRangeError('ERR_HTTP2_INFO_STATUS_NOT_ALLOWED', 'Informational status codes cannot be used');
-        if (code < 100 || code > 599) throw new NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + code);
+        if (code >= 100 && code < 200) throw NodeRangeError('ERR_HTTP2_INFO_STATUS_NOT_ALLOWED', 'Informational status codes cannot be used');
+        if (code < 100 || code > 599) throw NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + code);
         this._kmlStatusCode = code;
     }
 
@@ -2400,7 +2400,7 @@ export class Http2ServerResponse extends Stream {
 
     removeHeader(nameIn: string): void {
         validateString(nameIn, 'name');
-        if (this._kmlStream.headersSent) throw new NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+        if (this._kmlStream.headersSent) throw NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
         const name = nameIn.trim().toLowerCase();
         if (name === 'date') {
             this._kmlSendDate = false;
@@ -2411,7 +2411,7 @@ export class Http2ServerResponse extends Stream {
 
     setHeader(name: string, value: number | string | readonly string[]): this {
         validateString(name, 'name');
-        if (this._kmlStream.headersSent) throw new NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+        if (this._kmlStream.headersSent) throw NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
         this._kmlSetHeader(name, value);
         return this;
     }
@@ -2421,13 +2421,13 @@ export class Http2ServerResponse extends Stream {
         assertValidHeader(name, value);
         if (name === 'connection' && value !== 'trailers') return;
         if (name[0] === ':') assertValidPseudoHeader(name);
-        else if (!checkIsHttpToken(name)) this.destroy(new NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + name + '"]'));
+        else if (!checkIsHttpToken(name)) this.destroy(NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + name + '"]'));
         this._kmlResHeaders[name] = value;
     }
 
     appendHeader(name: string, value: string | string[]): this {
         validateString(name, 'name');
-        if (this._kmlStream.headersSent) throw new NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+        if (this._kmlStream.headersSent) throw NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
         this._kmlAppendHeader(name, value);
         return this;
     }
@@ -2437,7 +2437,7 @@ export class Http2ServerResponse extends Stream {
         assertValidHeader(name, value);
         if (name === 'connection' && value !== 'trailers') return;
         if (name[0] === ':') assertValidPseudoHeader(name);
-        else if (!checkIsHttpToken(name)) this.destroy(new NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + name + '"]'));
+        else if (!checkIsHttpToken(name)) this.destroy(NodeTypeError('ERR_INVALID_HTTP_TOKEN', 'Header name must be a valid HTTP token ["' + name + '"]'));
         const headers = this._kmlResHeaders;
         if (!headers[name]) {
             this.setHeader(name, value);
@@ -2469,7 +2469,7 @@ export class Http2ServerResponse extends Stream {
     writeHead(statusCode: number, statusMessage: string, headers?: OutgoingHttpHeaders | string[]): this;
     writeHead(statusCode: number, statusMessage?: any, headersIn?: any): this {
         if (this._kmlResClosed || this.stream.destroyed || this.stream.closed) return this;
-        if (this._kmlStream.headersSent) throw new NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
+        if (this._kmlStream.headersSent) throw NodeError('ERR_HTTP2_HEADERS_SENT', 'Response has already been initiated.');
         if (typeof statusMessage === 'string') statusMessageWarn();
         let headers: any = headersIn;
         if (headers === undefined && typeof statusMessage === 'object') headers = statusMessage;
@@ -2479,7 +2479,7 @@ export class Http2ServerResponse extends Stream {
                 for (const h of headers) this._kmlAppendHeader(h[0], h[1]);
             } else {
                 if (headers.length % 2 !== 0) {
-                    throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'headers' is invalid. Received " + String(headers));
+                    throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'headers' is invalid. Received " + String(headers));
                 }
                 for (let n = 0; n < headers.length; n += 2) this.removeHeader(headers[n]);
                 for (let i = 0; i < headers.length; i += 2) this._kmlAppendHeader(headers[i], headers[i + 1]);
@@ -2508,7 +2508,7 @@ export class Http2ServerResponse extends Stream {
             encoding = 'utf8';
         }
         let err: Error | undefined = undefined;
-        if (this._kmlEnding) err = new NodeError('ERR_STREAM_WRITE_AFTER_END', 'write after end');
+        if (this._kmlEnding) err = NodeError('ERR_STREAM_WRITE_AFTER_END', 'write after end');
         else if (this._kmlResClosed) err = errInvalidStream();
         else if (this._kmlResDestroyed) return false;
         if (err !== undefined) {
@@ -2587,7 +2587,7 @@ export class Http2ServerResponse extends Stream {
 
     writeInformation(statusCode: number, headers?: any): boolean {
         if (typeof statusCode !== 'number' || statusCode < 100 || statusCode > 199 || statusCode === 101) {
-            throw new NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + String(statusCode));
+            throw NodeRangeError('ERR_HTTP2_STATUS_INVALID', 'Invalid status code: ' + String(statusCode));
         }
         const stream = this._kmlStream;
         if (stream.headersSent || this._kmlResClosed) return false;
@@ -2862,7 +2862,7 @@ export function connect(authorityIn: any, options?: any, listener?: any): Client
         if (net.isIP(host) === 0 && !tlsOpts.servername) tlsOpts.servername = host;
         socket = tls.connect(tlsOpts);
     } else {
-        throw new NodeError('ERR_HTTP2_UNSUPPORTED_PROTOCOL', 'protocol "' + protocol + '" is unsupported.');
+        throw NodeError('ERR_HTTP2_UNSUPPORTED_PROTOCOL', 'protocol "' + protocol + '" is unsupported.');
     }
     const session = new ClientHttp2Session(opts, socket);
     session._kmlAuthority = (opts.servername || host) + ':' + port;

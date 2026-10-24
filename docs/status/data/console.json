@@ -26,15 +26,16 @@
           {
             "feature": "`console.log(...)`",
             "status": "implemented",
-            "caveats": [
-              "A bare string argument with an embedded null byte truncates *on display* at the first `\\0` (`printf` `\"%s\"`); the stored string is intact, and inside a container it renders as `'a\\x00b'`. A length-driven write needs every runtime string to carry its length header first — the URL/crypto sidecars do not yet ([ADR-01075](../adr/ADR-01075.md)). Use `process.stdout.write` for binary output"
-            ],
+            "caveats": [],
             "notes": [
-              "An array shows at most 100 elements then `... n more items`, `-0` prints as `-0` inside a container too, and the column layout measures a full-width glyph as 2 cells and a combining mark as 0 — Node's `getStringWidth` ([ADR-01076](../adr/ADR-01076.md))",
-              "An object with an omitted optional field prints without that key (`{ name: 'a' }`, not `{ name: 'a', age: undefined }`), a tuple prints like an array (`[ 1, 'a' ]`), and an absent nullable object/tuple field prints its keyword instead of dereferencing null ([ADR-01063](../adr/ADR-01063.md))",
-              "Multiple arguments are all evaluated before the line is printed (a later argument's own console output can't land mid-line, [ADR-01057](../adr/ADR-01057.md)), join with single spaces on one line, a no-arg call prints a bare newline, and `-0` displays as `-0` (Node's util.inspect display; `String(-0)` stays `\"0\"`) — [ADR-00285](../adr/ADR-00285.md)",
-              "On Windows, VT/ANSI output processing is enabled on the console at startup (as Node does), so an escape like `\\x1b[31m` renders as colour rather than printing literally — no raw mode required ([ADR-00744](../adr/ADR-00744.md))",
-              "On Windows, the console is set to UTF-8 at startup (restored at exit), so non-ASCII output (`café`, CJK, emoji) renders correctly instead of OEM-code-page mojibake; redirected/piped output is unaffected either way ([ADR-00747](../adr/ADR-00747.md))"
+              "An array shows at most 100 elements then `... n more items`, `-0` prints as `-0` inside a container too, and the column layout measures a full-width glyph as 2 cells and a combining mark as 0 — Node's `getStringWidth` ([ADR-01076](../adr/01/ADR-01076.md))",
+              "An object with an omitted optional field prints without that key (`{ name: 'a' }`, not `{ name: 'a', age: undefined }`), a tuple prints like an array (`[ 1, 'a' ]`), and an absent nullable object/tuple field prints its keyword instead of dereferencing null ([ADR-01063](../adr/01/ADR-01063.md))",
+              "Multiple arguments are all evaluated before the line is printed (a later argument's own console output can't land mid-line, [ADR-01057](../adr/01/ADR-01057.md)), join with single spaces on one line, a no-arg call prints a bare newline, and `-0` displays as `-0` (Node's util.inspect display; `String(-0)` stays `\"0\"`) — [ADR-00285](../adr/00/ADR-00285.md)",
+              "On Windows, VT/ANSI output processing is enabled on the console at startup (as Node does), so an escape like `\\x1b[31m` renders as colour rather than printing literally — no raw mode required ([ADR-00744](../adr/00/ADR-00744.md))",
+              "On Windows, the console is set to UTF-8 at startup (restored at exit), so non-ASCII output (`café`, CJK, emoji) renders correctly instead of OEM-code-page mojibake; redirected/piped output is unaffected either way ([ADR-00747](../adr/00/ADR-00747.md))"
+            ],
+            "decl": [
+              "Console.log"
             ]
           },
           {
@@ -42,36 +43,51 @@
             "status": "implemented",
             "notes": [
               "Writes to stderr"
+            ],
+            "decl": [
+              "Console.error"
             ]
           },
           {
             "feature": "`console.warn(...)`",
             "status": "implemented",
             "notes": [
-              "Writes to stderr, unprefixed — identical to `console.error`, as real Node ([ADR-00285](../adr/ADR-00285.md))"
+              "Writes to stderr, unprefixed — identical to `console.error`, as real Node ([ADR-00285](../adr/00/ADR-00285.md))"
+            ],
+            "decl": [
+              "Console.warn"
             ]
           },
           {
             "feature": "`console.info(...)`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "Console.info"
+            ]
           },
           {
             "feature": "`console.debug(...)`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "Console.debug"
+            ]
           },
           {
             "feature": "`console.trace(...)`",
             "status": "implemented",
-            "caveats": [
-              "Prints `\"Trace: <message>\"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all"
-            ],
             "notes": [
-              "Same generic print path as `.debug()`/`.info()`, no stack-walking logic. See [ADR-00166](../adr/ADR-00166.md)."
+              "`Trace: <message>`, then the program's frames as Node prints them, from the shadow call stack. See [ADR-00166](../adr/00/ADR-00166.md), [ADR-01678](../adr/01/ADR-01678.md)."
+            ],
+            "decl": [
+              "Console.trace"
             ]
           },
           {
             "feature": "`console.assert(cond, msg)`",
-            "status": "implemented"
+            "status": "implemented",
+            "decl": [
+              "Console.assert"
+            ]
           },
           {
             "feature": "`console.table()`",
@@ -80,29 +96,44 @@
               "An array of objects (columns = the shared fields) or an array of primitives (a single `Values` column) is tabulated; a `columns` filter argument, a plain-object argument, and an array-of-arrays shape aren't tabulated (they fall back to `console.log`, as a non-tabular value does)"
             ],
             "notes": [
-              "Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/ADR-00560.md))"
+              "Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/00/ADR-00560.md))"
+            ],
+            "decl": [
+              "Console.table"
             ]
           },
           {
             "feature": "`console.time()` / `.timeEnd()`",
             "status": "implemented",
             "notes": [
-              "Per-label backing `Map<string, number>` — distinct labels track independent timers, matching real Node. See [ADR-00029](../adr/ADR-00029.md), [ADR-00544](../adr/ADR-00544.md)."
+              "Per-label backing `Map<string, number>` — distinct labels track independent timers, matching real Node. See [ADR-00029](../adr/00/ADR-00029.md), [ADR-00544](../adr/00/ADR-00544.md)."
+            ],
+            "decl": [
+              "Console.time",
+              "Console.timeEnd"
             ]
           },
           {
             "feature": "`console.count()` / `.countReset()`",
             "status": "implemented",
             "notes": [
-              "Backed by a real `Map<string, number>`, one count per label; a label is converted with ToString, as Node's `${label}`, and `countReset` of a label with no count is Node's process warning ([ADR-00029](../adr/ADR-00029.md), [ADR-01477](../adr/ADR-01477.md), [ADR-01495](../adr/ADR-01495.md))."
+              "Backed by a real `Map<string, number>`, one count per label; a label is converted with ToString, as Node's `${label}`, and `countReset` of a label with no count is Node's process warning ([ADR-00029](../adr/00/ADR-00029.md), [ADR-01477](../adr/01/ADR-01477.md), [ADR-01495](../adr/01/ADR-01495.md))."
+            ],
+            "decl": [
+              "Console.count",
+              "Console.countReset"
             ]
           },
           {
             "feature": "`console.group()` / `.groupEnd()`",
             "status": "implemented",
             "notes": [
-              "Indents every subsequent `console.*` line by two spaces per nesting level; an unbalanced extra `groupEnd()` floors at depth 0 rather than going negative. See [ADR-00029](../adr/ADR-00029.md).",
-              "`console.group(...label)` takes variadic label args, formatted like `console.log`; `console.groupCollapsed` is the terminal-identical alias (a browser devtools console would render it collapsed) ([ADR-00792](../adr/ADR-00792.md))"
+              "Indents every subsequent `console.*` line by two spaces per nesting level; an unbalanced extra `groupEnd()` floors at depth 0 rather than going negative. See [ADR-00029](../adr/00/ADR-00029.md).",
+              "`console.group(...label)` takes variadic label args, formatted like `console.log`; `console.groupCollapsed` is the terminal-identical alias (a browser devtools console would render it collapsed) ([ADR-00792](../adr/00/ADR-00792.md))"
+            ],
+            "decl": [
+              "Console.group",
+              "Console.groupEnd"
             ]
           },
           {
@@ -112,8 +143,11 @@
               "The `colors` option is accepted but ignored — inspected output carries no ANSI here"
             ],
             "notes": [
-              "Prints a single value like a single-argument `console.log`, but with Node's `util.inspect` default nesting depth of **2** (a bare `console.log` uses this compiler's deeper default); the `depth` option overrides it — a literal number caps nesting, `null` is unlimited, and beyond the cap a nested value shows as `[Object]`/`[Array]`, matching Node ([ADR-00583](../adr/ADR-00583.md))",
-              "See [ADR-00029](../adr/ADR-00029.md)."
+              "Prints a single value like a single-argument `console.log`, but with Node's `util.inspect` default nesting depth of **2** (a bare `console.log` uses this compiler's deeper default); the `depth` option overrides it — a literal number caps nesting, `null` is unlimited, and beyond the cap a nested value shows as `[Object]`/`[Array]`, matching Node ([ADR-00583](../adr/00/ADR-00583.md))",
+              "See [ADR-00029](../adr/00/ADR-00029.md)."
+            ],
+            "decl": [
+              "Console.dir"
             ]
           }
         ]

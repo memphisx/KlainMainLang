@@ -22,6 +22,17 @@ __attribute__((weak)) i64 __kml_rs_close(void *s) { (void)s; return 0; }
 __attribute__((weak)) void __kml_rs_error(void *s, i64 err) { (void)s; (void)err; }
 extern _Bool __kml_fetch_pump(void);
 
+/* A body chunk: the Uint8Array header over n bytes at data (the queue
+ * carries an array chunk as its header). */
+static i64 body_chunk(void *data, i64 n) {
+    i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 32);
+    base[0] = KML_ARRAY_HDR_WORD;
+    ((void **)base)[1] = data;
+    base[2] = n;
+    base[3] = 0; /* packed */
+    return (i64)(intptr_t)(base + 1);
+}
+
 i64 __kml_fetch_body_write(void *pending, const char *chunk, i64 total) {
     pend_t *p = (pend_t *)pending;
     void *bs = p->bstream;
@@ -34,9 +45,9 @@ i64 __kml_fetch_body_write(void *pending, const char *chunk, i64 total) {
         p->paused = 1;
         return 2;
     }
-    void *copy = malloc((size_t)total);
+    void *copy = kml_alloc(KML_HEAP_RAW, (size_t)total);
     memcpy(copy, chunk, (size_t)total);
-    __kml_rs_enqueue(bs, (i64)(intptr_t)copy, total);
+    __kml_rs_enqueue(bs, body_chunk(copy, total), total);
     return 1;
 }
 
@@ -75,13 +86,13 @@ void *__kml_fetch_body_pull(void *pending) {
 void *__kml_fetch_body_stream(void *pending, void *s, void *bodyPtr, i64 bodyLen) {
     pend_t *p = (pend_t *)pending;
     if (!p) {
-        if (bodyLen > 0) __kml_rs_enqueue(s, (i64)(intptr_t)bodyPtr, bodyLen);
+        if (bodyLen > 0) __kml_rs_enqueue(s, body_chunk(bodyPtr, bodyLen), bodyLen);
         __kml_rs_close(s);
         return s;
     }
     if (p->bstream) return p->bstream;
     p->bstream = s;
-    if (p->buf->len > 0) __kml_rs_enqueue(s, (i64)(intptr_t)p->buf->data, p->buf->len);
+    if (p->buf->len > 0) __kml_rs_enqueue(s, body_chunk(p->buf->data, p->buf->len), p->buf->len);
     if (p->done) __kml_fetch_body_on_done(p);
     return s;
 }

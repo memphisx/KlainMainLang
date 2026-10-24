@@ -90,6 +90,10 @@ jobs:
         run: make -o build examples
       - name: The builtin library compiles the same everywhere, deterministically
         run: make -o build drift
+      # klain:http's h2o backend has a package only on Linux (libh2o-dev).
+      - name: klain:http tests on the h2o backend
+        if: inputs.goos == 'linux'
+        run: make -o build test-h2o
 
   gate:
     name: gate

@@ -51,7 +51,8 @@ func TestE2EPromiseAllSettledPropertyAccessStillWorks(t *testing.T) {
 	assertOutput(t, `
 const r = await Promise.allSettled([Promise.resolve(7), Promise.reject("boom")])
 console.log(r[0].status)
-console.log(r[0].value)
+const r0 = r[0]
+if (r0.status === "fulfilled") console.log(r0.value)
 console.log(r[1].status)
 `, "fulfilled\n7\nrejected")
 }

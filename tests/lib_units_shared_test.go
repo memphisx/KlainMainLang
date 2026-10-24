@@ -106,3 +106,20 @@ const x: string[] = d;
 console.log(x, new Zq().length);
 `)
 }
+
+// An override's result reached through a value typed as a plain array is
+// the override's own, not a species instance; a builtin used as a value
+// (Array.from) runs Array's own methods (ADR-01802).
+func TestArraySubclassOverrideResultNotSpecies(t *testing.T) {
+	assertSameAsNode(t, `class R extends Array<string> {
+  map(f: (v: string) => string): string[] { return ["over"]; }
+}
+function g(a: string[], k: number): string[] { return a.map((s: string) => s + k); }
+const r = new R(); r.push("a");
+const a: string[] = r;
+const m = a.map((s: string) => s);
+console.log(m, m instanceof R, g(["x"], 1), g(r, 2));
+const from: any = Array.from;
+console.log(from([1, 2], (x: number) => x * 2));
+`)
+}

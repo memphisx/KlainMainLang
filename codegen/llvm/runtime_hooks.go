@@ -3,7 +3,6 @@ package llvm
 import (
 	_ "embed"
 	"fmt"
-	"regexp"
 	"strings"
 )
 
@@ -18,8 +17,8 @@ import (
 //go:embed hookssrc/hooks.c
 var hooksSource string
 
-// hooksCSource is hooks.c for this program: the connection fibers' main
-// context is a ucontext, whose size is the target's.
+// hooksCSource is hooks.c for this program: the tasks' main context is a
+// ucontext, whose size is the target's.
 func (e *Emitter) hooksCSource() CSource {
 	ctxSize, _, _, _ := e.ucontextLayout()
 	return CSource{"hooks", hooksSource, []string{fmt.Sprintf("-DKML_MAIN_CTX_SIZE=%d", ctxSize)}, nil, ""}
@@ -32,8 +31,9 @@ var hookFuncs = []string{
 	"classref_shown", "classref_nstatic", "classref_skey", "classref_sget",
 	"error_inspect", "promise_inspect_parts",
 	"fs_error_new",
-	"http_fire_close", "httpc_fire_ready", "reactor_thread_lock", "reqbody_pump", "reqbody_want",
-	"pdyn_attach", "promise_wrapper_of",
+	"httpc_fire_ready",
+	"objproto_fill",
+	"pdyn_attach", "prim_proto_of", "promise_wrapper_of",
 	"process_uncaught", "unhandled_report",
 	"signal_aborted", "signal_reason", "signal_timeout",
 	"stream_decode",
@@ -62,13 +62,10 @@ func (e *Emitter) addHookInit(ir string) { e.hookInits = append(e.hookInits, ir)
 // program defines, and the per-program values. Run before the constructor
 // list is finalized.
 func (e *Emitter) emitHookRegistration() {
-	defined := map[string]bool{}
-	for _, m := range hookDefineRe.FindAllStringSubmatch(e.globals.String()+e.functions.String(), -1) {
-		defined[m[1]] = true
-	}
+	globals, funcs := e.globals.String(), e.functions.String()
 	var body strings.Builder
 	for _, name := range hookFuncs {
-		if !defined[name] {
+		if !definesHook(globals, name) && !definesHook(funcs, name) {
 			continue
 		}
 		e.emitGlobal(fmt.Sprintf("@__kml_hookp_%s = external global ptr, align 8", name))
@@ -84,7 +81,24 @@ func (e *Emitter) emitHookRegistration() {
 	e.addCtor("@__kml_hooks_init")
 }
 
-var hookDefineRe = regexp.MustCompile(`(?m)^define [^@\n]*@__kml_(` + strings.Join(hookFuncs, "|") + `)\(`)
+// definesHook reports whether ir defines @__kml_<name>: a line starting
+// "define" that names it. A search per name, not one regexp over the whole
+// program's IR, which ran to a sixth of a small program's compile.
+func definesHook(ir, name string) bool {
+	sym := "@__kml_" + name + "("
+	for i := 0; ; {
+		j := strings.Index(ir[i:], sym)
+		if j < 0 {
+			return false
+		}
+		j += i
+		line := strings.LastIndexByte(ir[:j], '\n') + 1
+		if strings.HasPrefix(ir[line:], "define") {
+			return true
+		}
+		i = j + len(sym)
+	}
+}
 
 // renameHooks gives the program's copies of the hooks and primitives their
 // __kml_ir_ names, at their definitions and every use. One pass into a

@@ -42,21 +42,21 @@ const (
 // name, or "" for a position whose design type is `undefined` (void/never).
 func designTypeName(ty Type) string {
 	switch {
-	case ty.IR == "void" || ty.IR == "" || ty.IsNever || ty.IsUndefined || ty.IsNull:
+	case ty.IR == "void" || ty.IR == "" || ty.IsNever() || ty.IsUndefined() || ty.IsNull():
 		return ""
 	case ty.Float:
 		return "Number"
 	case ty.IR == "i1":
 		return "Boolean"
-	case ty.IsBigInt:
+	case ty.IsBigInt():
 		return "BigInt"
-	case ty.IsDate:
+	case ty.IsDate():
 		return "Date"
-	case ty.IsPromise:
+	case ty.IsPromise():
 		return "Promise"
-	case ty.IsArray:
+	case ty.IsArray():
 		return "Array"
-	case ty.IsFunc:
+	case ty.IsFunc():
 		return "Function"
 	case ty.ClassName != "":
 		return demangleModuleName(ty.ClassName)
@@ -190,7 +190,7 @@ func (e *Emitter) emitClassMemberDesignMetadata(targetBagPtr string, cd *ast.Cla
 		}
 		sig := e.classes[cd.Name].MethodSigs[m.Name]
 		// A method's own design:type is always Function.
-		fnDesc := e.emitDesignTypeDescriptor(Type{IR: "ptr", IsFunc: true})
+		fnDesc := e.emitDesignTypeDescriptor(Type{IR: "ptr", Kind: kindFunc})
 		e.emitDefineMetadata(targetBagPtr, e.internString(m.Name), e.internString("design:type"), fnDesc.Ref)
 		e.emitDefineMetadata(targetBagPtr, e.internString(m.Name), e.internString("design:paramtypes"), e.emitDesignParamtypes(sig.ParamTypes).Ref)
 		e.emitDefineMetadata(targetBagPtr, e.internString(m.Name), e.internString("design:returntype"), e.emitDesignTypeDescriptor(sig.RetType).Ref)

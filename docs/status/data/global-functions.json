@@ -26,12 +26,18 @@
           {
             "feature": "`isNaN(x)`",
             "status": "implemented",
-            "caveats": []
+            "caveats": [],
+            "decl": [
+              "isNaN"
+            ]
           },
           {
             "feature": "`isFinite(x)`",
             "status": "implemented",
-            "caveats": []
+            "caveats": [],
+            "decl": [
+              "isFinite"
+            ]
           },
           {
             "feature": "`String(x)`",
@@ -39,6 +45,9 @@
             "caveats": [],
             "notes": [
               "Routes through the template-literal renderer; an `any` input dispatches on its runtime tag"
+            ],
+            "decl": [
+              "String"
             ]
           },
           {
@@ -46,37 +55,52 @@
             "status": "implemented",
             "notes": [
               "JS ToNumber: whole-string parse (`\"12px\"` → `NaN`, unlike `parseFloat`), `\"\"`/whitespace → 0, `\"0x10\"` → 16, boolean → 0/1, `null` → 0; a numeric input passes through unchanged (exact i64 stays i64)",
-              "Only the exact word `\"Infinity\"` (optionally signed) is `Infinity`; C's `\"inf\"`/`\"infinity\"`/case variants are `NaN`, matching real JS ([ADR-00291](../adr/ADR-00291.md)/[ADR-00529](../adr/ADR-00529.md))"
+              "Only the exact word `\"Infinity\"` (optionally signed) is `Infinity`; C's `\"inf\"`/`\"infinity\"`/case variants are `NaN`, matching real JS ([ADR-00291](../adr/00/ADR-00291.md)/[ADR-00529](../adr/00/ADR-00529.md))"
+            ],
+            "decl": [
+              "Number"
             ]
           },
           {
             "feature": "`Boolean(x)`",
             "status": "implemented",
             "notes": [
-              "Shared truthiness (`NaN`, `\"\"`, 0 falsy — [ADR-00116](../adr/ADR-00116.md))"
+              "Shared truthiness (`NaN`, `\"\"`, 0 falsy — [ADR-00116](../adr/00/ADR-00116.md))"
+            ],
+            "decl": [
+              "Boolean"
             ]
           },
           {
             "feature": "`parseInt(s, radix?)`",
             "status": "implemented",
             "notes": [
-              "A no-digits input returns a real `NaN` (endptr-checked, double result — [ADR-00287](../adr/ADR-00287.md))",
-              "With `radix` omitted, auto-detects base 16 for a `\"0x\"`/`\"0X\"` prefix (`\"0xFF\"` → `255`) and base 10 otherwise — no octal auto-detect (`\"077\"` → `77`), and `\"0x\"` with no trailing hex digit is `NaN`, matching real JS ([ADR-00530](../adr/ADR-00530.md))"
+              "A no-digits input returns a real `NaN` (endptr-checked, double result — [ADR-00287](../adr/00/ADR-00287.md))",
+              "With `radix` omitted, auto-detects base 16 for a `\"0x\"`/`\"0X\"` prefix (`\"0xFF\"` → `255`) and base 10 otherwise — no octal auto-detect (`\"077\"` → `77`), and `\"0x\"` with no trailing hex digit is `NaN`, matching real JS ([ADR-00530](../adr/00/ADR-00530.md))"
+            ],
+            "decl": [
+              "parseInt"
             ]
           },
           {
             "feature": "`parseFloat(s)`",
             "status": "implemented",
             "notes": [
-              "A `\"0x\"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number(\"0x10\")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/ADR-00545.md))",
-              "A no-conversion input returns a real `NaN`; the only accepted infinity spelling is the exact word `\"Infinity\"` (`\"inf\"`/case variants → `NaN`) ([ADR-00287](../adr/ADR-00287.md)/[ADR-00529](../adr/ADR-00529.md))"
+              "A `\"0x\"` hex prefix reads only its leading `0` → `0` (real parseFloat, unlike `Number(\"0x10\")` → `16`) via `__kml_strtod_parsefloat` ([ADR-00545](../adr/00/ADR-00545.md))",
+              "A no-conversion input returns a real `NaN`; the only accepted infinity spelling is the exact word `\"Infinity\"` (`\"inf\"`/case variants → `NaN`) ([ADR-00287](../adr/00/ADR-00287.md)/[ADR-00529](../adr/00/ADR-00529.md))"
+            ],
+            "decl": [
+              "parseFloat"
             ]
           },
           {
             "feature": "`NaN` (global constant)",
             "status": "implemented",
             "notes": [
-              "`NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/ADR-00188.md)"
+              "`NaN != x`/`!== x` comparisons are correct — compiled as unordered `fcmp une`, so `NaN !== NaN` is `true` as in JS — see [ADR-00188](../adr/00/ADR-00188.md)"
+            ],
+            "decl": [
+              "NaN"
             ]
           },
           {
@@ -84,7 +108,10 @@
             "status": "implemented",
             "caveats": [],
             "notes": [
-              "See [ADR-00166](../adr/ADR-00166.md)."
+              "See [ADR-00166](../adr/00/ADR-00166.md)."
+            ],
+            "decl": [
+              "Infinity"
             ]
           },
           {
@@ -92,43 +119,61 @@
             "status": "implemented",
             "notes": [
               "As a literal value"
+            ],
+            "decl": [
+              "syntax"
             ]
           },
           {
             "feature": "`globalThis`",
             "status": "implemented",
             "notes": [
-              "`globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/ADR-00508.md))",
-              "`globalThis` as a value is the global object: the builtins as its properties, and whatever the program sets on it (`globalThis.x = …`, computed keys); a module's top-level bindings are not on it, as in an ES module ([ADR-01333](../adr/ADR-01333.md))"
+              "`globalThis.X` (and nested/call forms like `globalThis.JSON.stringify(...)`, `globalThis.setTimeout(...)`) desugars to the bare ambient global X ([ADR-00508](../adr/00/ADR-00508.md))",
+              "`globalThis` as a value is the global object: the builtins as its properties, and whatever the program sets on it (`globalThis.x = …`, computed keys); a module's top-level bindings are not on it, as in an ES module ([ADR-01333](../adr/01/ADR-01333.md))"
+            ],
+            "decl": [
+              "syntax"
             ]
           },
           {
             "feature": "`encodeURI(s)`",
             "status": "implemented",
             "notes": [
-              "Leaves the unreserved *and* reserved (`;/?:@&=+$,#`) character sets unescaped. See [ADR-00024](../adr/ADR-00024.md)."
+              "Leaves the unreserved *and* reserved (`;/?:@&=+$,#`) character sets unescaped. See [ADR-00024](../adr/00/ADR-00024.md)."
+            ],
+            "decl": [
+              "encodeURI"
             ]
           },
           {
             "feature": "`decodeURI(s)`",
             "status": "implemented",
             "notes": [
-              "A malformed escape (a lone/truncated `%`, or one not followed by two hex digits) throws a real `URIError` as in JS ([ADR-00556](../adr/ADR-00556.md))",
-              "Does **not** decode a `%XX` escape representing a reserved character (leaves it as literal `%XX` text) — the one real behavioral difference from `decodeURIComponent`. See [ADR-00024](../adr/ADR-00024.md)."
+              "A malformed escape (a lone/truncated `%`, or one not followed by two hex digits) throws a real `URIError` as in JS ([ADR-00556](../adr/00/ADR-00556.md))",
+              "Does **not** decode a `%XX` escape representing a reserved character (leaves it as literal `%XX` text) — the one real behavioral difference from `decodeURIComponent`. See [ADR-00024](../adr/00/ADR-00024.md)."
+            ],
+            "decl": [
+              "decodeURI"
             ]
           },
           {
             "feature": "`encodeURIComponent(s)`",
             "status": "implemented",
             "notes": [
-              "Leaves only the unreserved set (letters, digits, `-_.!~*'()`) unescaped. See [ADR-00024](../adr/ADR-00024.md)."
+              "Leaves only the unreserved set (letters, digits, `-_.!~*'()`) unescaped. See [ADR-00024](../adr/00/ADR-00024.md)."
+            ],
+            "decl": [
+              "encodeURIComponent"
             ]
           },
           {
             "feature": "`decodeURIComponent(s)`",
             "status": "implemented",
             "notes": [
-              "Decodes every valid `%XX` escape unconditionally; a malformed escape throws a real `URIError` as in JS ([ADR-00556](../adr/ADR-00556.md)). See [ADR-00024](../adr/ADR-00024.md)."
+              "Decodes every valid `%XX` escape unconditionally; a malformed escape throws a real `URIError` as in JS ([ADR-00556](../adr/00/ADR-00556.md)). See [ADR-00024](../adr/00/ADR-00024.md)."
+            ],
+            "decl": [
+              "decodeURIComponent"
             ]
           },
           {
@@ -136,30 +181,40 @@
             "status": "implemented",
             "notes": [
               "Base64 decode",
-              "WHATWG forgiving-base64: ASCII whitespace is stripped, a missing-padding trailing 2-/3-char group still decodes, and a remaining length ≡ 1 (mod 4) throws `InvalidCharacterError` ([ADR-00550](../adr/ADR-00550.md))",
-              "After the up-to-two trailing `=` are stripped, an interior or excess `=` in the data region throws `InvalidCharacterError` — `=` is accepted only as trailing padding, matching real atob ([ADR-00563](../adr/ADR-00563.md))",
-              "Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed). See [ADR-00024](../adr/ADR-00024.md).",
-              "An input character outside the base64 alphabet throws a real `InvalidCharacterError` DOMException, matching WHATWG atob ([ADR-00458](../adr/ADR-00458.md))"
+              "WHATWG forgiving-base64: ASCII whitespace is stripped, a missing-padding trailing 2-/3-char group still decodes, and a remaining length ≡ 1 (mod 4) throws `InvalidCharacterError` ([ADR-00550](../adr/00/ADR-00550.md))",
+              "After the up-to-two trailing `=` are stripped, an interior or excess `=` in the data region throws `InvalidCharacterError` — `=` is accepted only as trailing padding, matching real atob ([ADR-00563](../adr/00/ADR-00563.md))",
+              "Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed). See [ADR-00024](../adr/00/ADR-00024.md).",
+              "An input character outside the base64 alphabet throws a real `InvalidCharacterError` DOMException, matching WHATWG atob ([ADR-00458](../adr/00/ADR-00458.md))"
+            ],
+            "decl": [
+              "atob"
             ]
           },
           {
             "feature": "`btoa(s)`",
             "status": "implemented",
             "notes": [
-              "Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/ADR-00024.md)."
+              "Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/00/ADR-00024.md)."
+            ],
+            "decl": [
+              "btoa"
             ]
           },
           {
             "feature": "`structuredClone(obj)`",
             "status": "implemented",
             "caveats": [
-              "Statically typed `EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError` for it); a `Map`/`Set` with an **array/Map/Set** key or value element type is also rejected (only scalar/string/object elements clone — [ADR-00574](../adr/ADR-00574.md))",
-              "A cloned `AggregateError`'s `.errors` degrades to empty"
+              "Statically typed `EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError` for it); a `Map`/`Set` with an **array/Map/Set** key or value element type is also rejected (only scalar/string/object elements clone — [ADR-00574](../adr/00/ADR-00574.md))",
+              "A cloned `AggregateError`'s `.errors` degrades to empty",
+              "An `ArrayBuffer` in `options.transfer` is copied, not detached: the original stays usable"
             ],
             "notes": [
-              "Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, plain objects, and `Map`/`Set` recurse, cloning every entry deeply — [ADR-00574](../adr/ADR-00574.md); scalars pass through as value types) — see [ADR-00113](../adr/ADR-00113.md)",
-              "A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name ([ADR-00591](../adr/ADR-00591.md))",
-              "A value typed `any`/`unknown` (or asserted `as any`) clones by its run-time shape in TypeScript (`lib/node/internal_structured_clone.ts`); a function throws `DataCloneError` ([ADR-01266](../adr/ADR-01266.md))"
+              "Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, plain objects, and `Map`/`Set` recurse, cloning every entry deeply — [ADR-00574](../adr/00/ADR-00574.md); scalars pass through as value types) — see [ADR-00113](../adr/00/ADR-00113.md)",
+              "A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name ([ADR-00591](../adr/00/ADR-00591.md))",
+              "A value typed `any`/`unknown` (or asserted `as any`) clones by its run-time shape in TypeScript (`lib/node/internal_structured_clone.ts`); a function throws `DataCloneError` ([ADR-01266](../adr/01/ADR-01266.md))"
+            ],
+            "decl": [
+              "structuredClone"
             ]
           },
           {
@@ -169,7 +224,10 @@
               "Drained at the reachable checkpoints (end of the top-level script, each scheduler step); a program with neither timers nor async tasks drains once at exit"
             ],
             "notes": [
-              "A FIFO of callback closures, run after the current synchronous script and before timers ([TDD-00083](../tdd/TDD-00083.md) Stage 3 / [ADR-00245](../adr/ADR-00245.md))"
+              "A FIFO of callback closures, run after the current synchronous script and before timers ([TDD-00083](../tdd/TDD-00083.md) Stage 3 / [ADR-00245](../adr/00/ADR-00245.md))"
+            ],
+            "decl": [
+              "queueMicrotask"
             ]
           },
           {
@@ -179,14 +237,17 @@
               "A no-op under `-mm=manual` (the default) — nothing is ever collected; only meaningful under `-mm=gc`, where it forces a full Boehm collection"
             ],
             "notes": [
-              "The Node `--expose-gc` `global.gc()` idiom; added to make weak-reference reclamation deterministically observable ([ADR-00349](../adr/ADR-00349.md))"
+              "The Node `--expose-gc` `global.gc()` idiom; added to make weak-reference reclamation deterministically observable ([ADR-00349](../adr/00/ADR-00349.md))"
+            ],
+            "decl": [
+              "gc"
             ]
           },
           {
             "feature": "`eval(s)`",
             "status": "missing",
             "notes": [
-              "General/dynamic `eval` is unimplemented (needs the opt-in embedded engine, [TDD-00046](../tdd/TDD-00046.md), not started). A narrow **static subset** does work: a compile-time-constant `eval(\"<expression>\")` is compiled in place through this compiler's own parser+codegen, no engine — see [ADR-00198](../adr/ADR-00198.md). A dynamic string, a statement/declaration, or a reference to a top-level binding is a clean compile error, never a runtime throw (so it can't false-pass a negative test)"
+              "General/dynamic `eval` is unimplemented (needs the opt-in embedded engine, [TDD-00046](../tdd/TDD-00046.md), not started). A narrow **static subset** does work: a compile-time-constant `eval(\"<expression>\")` is compiled in place through this compiler's own parser+codegen, no engine — see [ADR-00198](../adr/00/ADR-00198.md). A dynamic string, a statement/declaration, or a reference to a top-level binding is a clean compile error, never a runtime throw (so it can't false-pass a negative test)"
             ]
           }
         ]

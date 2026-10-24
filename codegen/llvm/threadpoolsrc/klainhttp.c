@@ -20,7 +20,7 @@ static void hbuf_put(kml_hbuf *b, const char *p, int64_t n) {
     if (b->n + n + 1 > b->cap) {
         int64_t nc = b->cap ? b->cap * 2 : 64;
         while (nc < b->n + n + 1) nc *= 2;
-        b->s = (char *)realloc(b->s, (size_t)nc);
+        b->s = (char *)realloc(b->s, (size_t)nc); /* scratch */
         b->cap = nc;
     }
     memcpy(b->s + b->n, p, (size_t)n);
@@ -68,7 +68,7 @@ static kml_hp *hp_get(double id) {
 }
 
 static void hp_clear_headers(kml_hp *p) {
-    for (int i = 0; i < p->nh; i++) free(p->hdrs[i]);
+    for (int i = 0; i < p->nh; i++) free(p->hdrs[i]); /* scratch */
     p->nh = 0;
 }
 
@@ -87,12 +87,12 @@ static void hp_reset_message(kml_hp *p) {
 double __kml_native_http_parser_new(double type, double maxHeader) {
     if (hp_n == hp_cap) {
         int nc = hp_cap ? hp_cap * 2 : 16;
-        kml_hp **nt = (kml_hp **)calloc((size_t)nc, sizeof *nt);
+        kml_hp **nt = (kml_hp **)calloc((size_t)nc, sizeof *nt); /* scratch */
         if (hp_tab) memcpy(nt, hp_tab, (size_t)hp_cap * sizeof *nt);
         hp_tab = nt;
         hp_cap = nc;
     }
-    kml_hp *p = (kml_hp *)calloc(1, sizeof *p);
+    kml_hp *p = (kml_hp *)calloc(1, sizeof *p); /* scratch */
     p->type = (int)type;
     p->max_header = maxHeader > 0 ? (int64_t)maxHeader : 16384;
     hp_reset_message(p);
@@ -205,15 +205,15 @@ static int hp_header_done(kml_hp *p, int64_t i) {
     }
     if (p->nh + 2 > p->hcap) {
         int nc = p->hcap ? p->hcap * 2 : 32;
-        p->hdrs = (char **)realloc(p->hdrs, (size_t)nc * sizeof *p->hdrs);
-        p->hdr_len = (int64_t *)realloc(p->hdr_len, (size_t)nc * sizeof *p->hdr_len);
+        p->hdrs = (char **)realloc(p->hdrs, (size_t)nc * sizeof *p->hdrs); /* scratch */
+        p->hdr_len = (int64_t *)realloc(p->hdr_len, (size_t)nc * sizeof *p->hdr_len); /* scratch */
         p->hcap = nc;
     }
-    p->hdrs[p->nh] = (char *)malloc((size_t)fn + 1);
+    p->hdrs[p->nh] = (char *)malloc((size_t)fn + 1); /* scratch */
     memcpy(p->hdrs[p->nh], f, (size_t)fn);
     p->hdrs[p->nh][fn] = 0;
     p->hdr_len[p->nh++] = fn;
-    p->hdrs[p->nh] = (char *)malloc((size_t)vn + 1);
+    p->hdrs[p->nh] = (char *)malloc((size_t)vn + 1); /* scratch */
     memcpy(p->hdrs[p->nh], v, (size_t)vn);
     p->hdrs[p->nh][vn] = 0;
     p->hdr_len[p->nh++] = vn;

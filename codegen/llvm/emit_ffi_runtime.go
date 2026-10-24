@@ -95,13 +95,13 @@ func (e *Emitter) ensureNativeFFIView() {
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", bv.Ref))
 	e.emitLabel(abL)
 	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
+	e.emitArrayBufferHeaderAlloc(hdr, 16, false, "malloc")
 	lg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 0", lg, hdr))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", n, lg))
+	e.heapStore("i64", n, lg, 8)
 	dg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dg, hdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, dg))
+	e.heapStore("ptr", p, dg, 8)
 	av, err := e.emitBoxValue(Value{Ref: hdr, Ty: ArrayBufferType()})
 	if err != nil {
 		panic(err)
@@ -109,7 +109,7 @@ func (e *Emitter) ensureNativeFFIView() {
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", av.Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine i64 @__kml_native_ffi_view(double %%addr, double %%len, i1 %%ab) {\nentry:\n%s}\n", body))
+	e.writeFunc("i64 @__kml_native_ffi_view(double %addr, double %len, i1 %ab)", body)
 }
 
 // UsesFFIRegistry reports whether the registry or the order container must

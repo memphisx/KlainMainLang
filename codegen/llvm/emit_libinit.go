@@ -62,7 +62,7 @@ func (e *Emitter) libModuleInit(key string) (string, error) {
 // writeDetachedFunc writes a function compiled detached from its caller
 // (beginDetachedFunc): a module init, an import() target's body.
 func (e *Emitter) writeDetachedFunc(linkage, ret, name, params, body string) {
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s%s %s(%s) {\nentry:\n%s}\n", linkage, ret, name, params, body))
+	e.writeFunc(fmt.Sprintf("%s%s %s(%s)", linkage, ret, name, params), body)
 }
 
 // emitLibInitCalls emits stmts, calling a builtin module's init function in

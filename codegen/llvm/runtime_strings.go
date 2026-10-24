@@ -102,26 +102,3 @@ func (e *Emitter) ensureStringReplaceAll() {
 	e.ensureStrHeaderRuntime()
 	e.emitGlobal("declare ptr @__kml_replace_all(ptr, i64, ptr, i64, ptr, i64)")
 }
-
-// ensureStringSplit declares __kml_split. The splitting is __kml_split_parts in
-// strings.c; this wrapper returns {ptr, i64}, which the C ABI would pass
-// differently on Windows than the generated callers expect.
-func (e *Emitter) ensureStringSplit() {
-	if e.usedStringSplit {
-		return
-	}
-	e.usedStringSplit = true
-	e.ensureMalloc()
-	e.ensureMemcpy()
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal(`declare ptr @__kml_split_parts(ptr, i64, ptr, i64, ptr)
-define {ptr, i64} @__kml_split(ptr %s, i64 %slen_c, ptr %sep, i64 %sep_len) {
-entry:
-  %n = alloca i64, align 8
-  %arr = call ptr @__kml_split_parts(ptr %s, i64 %slen_c, ptr %sep, i64 %sep_len, ptr %n)
-  %len = load i64, ptr %n, align 8
-  %r0 = insertvalue {ptr, i64} undef, ptr %arr, 0
-  %r1 = insertvalue {ptr, i64} %r0, i64 %len, 1
-  ret {ptr, i64} %r1
-}`)
-}

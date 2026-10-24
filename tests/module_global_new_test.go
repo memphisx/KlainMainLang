@@ -200,3 +200,14 @@ later = "set";
 console.log(f(), g(), h(), k());
 `, "x [ 1.5 ] [ 5, 7 ] set")
 }
+
+func TestE2EModuleGlobalBuiltinFunctionValue(t *testing.T) {
+	assertSameAsNode(t, `
+const g = parseInt;
+let h = Math.max;
+const gopd = Object.getOwnPropertyDescriptor;
+function f() { return [typeof g, typeof h, g("42"), h(1, 3)]; }
+function d(o: object, n: string) { return gopd(o, n); }
+console.log(f(), d({ a: 1 }, "a"));
+`)
+}

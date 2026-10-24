@@ -25,6 +25,9 @@
             "status": "implemented",
             "notes": [
               "→ [File system](FILE-SYSTEM.md)"
+            ],
+            "decl": [
+              "fs#"
             ]
           },
           {
@@ -32,6 +35,9 @@
             "status": "implemented",
             "notes": [
               "→ [File system](FILE-SYSTEM.md)"
+            ],
+            "decl": [
+              "fs/promises#"
             ]
           },
           {
@@ -39,6 +45,9 @@
             "status": "implemented",
             "notes": [
               "→ [path](PATH.md)"
+            ],
+            "decl": [
+              "path#"
             ]
           },
           {
@@ -46,6 +55,9 @@
             "status": "implemented",
             "notes": [
               "→ [os](OS.md)"
+            ],
+            "decl": [
+              "os#"
             ]
           },
           {
@@ -53,6 +65,9 @@
             "status": "implemented",
             "notes": [
               "Ambient global (no import needed) → [Process & CLI](PROCESS-CLI.md)"
+            ],
+            "decl": [
+              "process"
             ]
           },
           {
@@ -60,6 +75,9 @@
             "status": "implemented",
             "notes": [
               "→ [Process & CLI](PROCESS-CLI.md)"
+            ],
+            "decl": [
+              "child_process#"
             ]
           },
           {
@@ -67,6 +85,9 @@
             "status": "implemented",
             "notes": [
               "→ [Process & CLI](PROCESS-CLI.md)"
+            ],
+            "decl": [
+              "readline#"
             ]
           },
           {
@@ -74,6 +95,9 @@
             "status": "implemented",
             "notes": [
               "Ambient global (no import needed) → [console](CONSOLE.md)"
+            ],
+            "decl": [
+              "console"
             ]
           },
           {
@@ -81,6 +105,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "assert#"
             ]
           },
           {
@@ -88,6 +115,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "querystring#"
             ]
           },
           {
@@ -95,6 +125,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "util#"
             ]
           },
           {
@@ -102,6 +135,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "net#"
             ]
           },
           {
@@ -109,6 +145,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "dgram#"
             ]
           },
           {
@@ -116,6 +155,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "dns#"
             ]
           },
           {
@@ -123,6 +165,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "tls#"
             ]
           },
           {
@@ -130,6 +175,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "zlib#"
             ]
           },
           {
@@ -137,6 +185,9 @@
             "status": "implemented",
             "notes": [
               "→ [HTTP server](HTTP-SERVER.md) + client in [core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "http#"
             ]
           },
           {
@@ -144,6 +195,9 @@
             "status": "implemented",
             "notes": [
               "Client + `createServer` → [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "https#"
             ]
           },
           {
@@ -151,6 +205,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "http2#"
             ]
           },
           {
@@ -158,6 +215,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "cluster#"
             ]
           },
           {
@@ -165,6 +225,9 @@
             "status": "implemented",
             "notes": [
               "→ [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "diagnostics_channel#"
             ]
           },
           {
@@ -172,6 +235,9 @@
             "status": "implemented",
             "notes": [
               "WebCrypto global + node crypto hashes/HMAC/keygen → [Web Crypto](WEB-CRYPTO.md)"
+            ],
+            "decl": [
+              "crypto#"
             ]
           },
           {
@@ -179,6 +245,9 @@
             "status": "implemented",
             "notes": [
               "→ [Concurrency & workers](CONCURRENCY-WORKERS.md)"
+            ],
+            "decl": [
+              "worker_threads#"
             ]
           },
           {
@@ -186,6 +255,10 @@
             "status": "implemented",
             "notes": [
               "Node's `lib/events.js` ported to TypeScript ([TDD-00230](../tdd/TDD-00230.md) P3.1). `EventEmitter` exists only through an import of `events` (named, default or namespace): it is no global, in Node or the web platform (the web's is `EventTarget`). `once`, `on` (async iterator), `getEventListeners`, `getMaxListeners`, `setMaxListeners`, `listenerCount` and `EventEmitter.defaultMaxListeners`/`captureRejections` work too → [EventEmitter](EVENT-EMITTER.md)"
+            ],
+            "decl": [
+              "events#",
+              "events#EventEmitter"
             ]
           },
           {
@@ -193,6 +266,9 @@
             "status": "implemented",
             "notes": [
               "→ [Streams](STREAMS.md)"
+            ],
+            "decl": [
+              "stream#"
             ]
           },
           {
@@ -200,6 +276,9 @@
             "status": "implemented",
             "notes": [
               "→ [Streams](STREAMS.md)"
+            ],
+            "decl": [
+              "stream/promises#"
             ]
           },
           {
@@ -207,6 +286,11 @@
             "status": "implemented",
             "notes": [
               "→ [Streams](STREAMS.md)"
+            ],
+            "decl": [
+              "ReadableStream",
+              "WritableStream",
+              "TransformStream"
             ]
           },
           {
@@ -214,6 +298,9 @@
             "status": "implemented",
             "notes": [
               "→ [node:sqlite](SQLITE.md)"
+            ],
+            "decl": [
+              "node:sqlite#"
             ]
           },
           {
@@ -221,6 +308,10 @@
             "status": "implemented",
             "notes": [
               "Runner and Node's test-suite helpers, in TypeScript → [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "test#",
+              "node:test#"
             ]
           },
           {
@@ -228,6 +319,9 @@
             "status": "implemented",
             "notes": [
               "`AsyncLocalStorage` + `AsyncResource` → [Other Node core modules](NODE-CORE-MODULES.md)"
+            ],
+            "decl": [
+              "async_hooks#"
             ]
           }
         ]
@@ -235,7 +329,7 @@
     },
     {
       "kind": "block",
-      "text": "## Web-global-backed — primary exports fully importable, module extras pending\n\nThe primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/ADR-00666.md)–[ADR-00668](../adr/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { Buffer } from 'node:buffer'`), and **aliased** (`import { URL as U } from 'url'`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). `Buffer` is a Node-*specific* global (not a Web API)."
+      "text": "## Web-global-backed — primary exports fully importable, module extras pending\n\nThe primary export of each is a spec-identical re-export of an ambient global, and as of [TDD-00165](../tdd/TDD-00165.md) (Stages 1–3, [ADR-00666](../adr/00/ADR-00666.md)–[ADR-00668](../adr/00/ADR-00668.md)) it is **fully importable in every common form** — same-name (`import { URL } from 'url'`), `node:` (`import { Buffer } from 'node:buffer'`), and **aliased** (`import { URL as U } from 'url'`, `{ Buffer as B }`) — validated and either erased to the global or renamed/rebuilt onto it (using the global directly still works too). `Buffer` is a Node-*specific* global (not a Web API)."
     },
     {
       "kind": "table",
@@ -251,10 +345,13 @@
             "status": "implemented",
             "notes": [
               "A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)",
-              "The module's own exports are TypeScript (`lib/node/internal_buffer.ts`, [ADR-01281](../adr/ADR-01281.md)): `constants`, `kMaxLength`, `kStringMaxLength`, `INSPECT_MAX_BYTES`, `isUtf8`, `isAscii`, `transcode`, `SlowBuffer`; namespace and default imports reach them and the globals"
+              "The module's own exports are TypeScript (`lib/node/internal_buffer.ts`, [ADR-01281](../adr/01/ADR-01281.md)): `constants`, `kMaxLength`, `kStringMaxLength`, `INSPECT_MAX_BYTES`, `isUtf8`, `isAscii`, `transcode`, `SlowBuffer`; namespace and default imports reach them and the globals"
             ],
             "caveats": [
               "`File` and `resolveObjectURL` are not exported (no `File` global, no object-URL registry)"
+            ],
+            "decl": [
+              "Buffer"
             ]
           },
           {
@@ -264,7 +361,10 @@
               "The module's timer functions wrap the globals rather than being them: `timers.setTimeout === setTimeout` is `false` (Node: `true`)"
             ],
             "notes": [
-              "Written in TypeScript (`lib/node/timers.ts`, [ADR-01280](../adr/ADR-01280.md)): named, aliased, default and namespace imports from 'timers'/'node:timers'; extra arguments reach the callback, `clear*` ignore `undefined`/`null`, and `timers.promises` is `timers/promises` → [Timers](TIMERS.md)"
+              "Written in TypeScript (`lib/node/timers.ts`, [ADR-01280](../adr/01/ADR-01280.md)): named, aliased, default and namespace imports from 'timers'/'node:timers'; extra arguments reach the callback, `clear*` ignore `undefined`/`null`, and `timers.promises` is `timers/promises` → [Timers](TIMERS.md)"
+            ],
+            "decl": [
+              "timers#"
             ]
           },
           {
@@ -275,6 +375,9 @@
             ],
             "notes": [
               "Node's `url` module in TypeScript (`lib/node/url.ts`): `URL`/`URLSearchParams` (the globals' classes), the legacy `parse`/`format`/`resolve`/`resolveObject`/`Url`, `fileURLToPath`/`pathToFileURL`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode`; named, namespace and default imports → [URL](URL.md)"
+            ],
+            "decl": [
+              "url#"
             ]
           },
           {
@@ -284,7 +387,10 @@
               "Histograms keep exact samples (not HDR); `eventLoopUtilization`/`nodeTiming` missing"
             ],
             "notes": [
-              "Written in TypeScript (`lib/node/perf_hooks.ts`, [ADR-01265](../adr/ADR-01265.md)): `performance`, the entry classes, `PerformanceObserver`, `createHistogram`, `monitorEventLoopDelay` → [Performance & Timing](PERFORMANCE-TIMING.md)"
+              "Written in TypeScript (`lib/node/perf_hooks.ts`, [ADR-01265](../adr/01/ADR-01265.md)): `performance`, the entry classes, `PerformanceObserver`, `createHistogram`, `monitorEventLoopDelay` → [Performance & Timing](PERFORMANCE-TIMING.md)"
+            ],
+            "decl": [
+              "perf_hooks#"
             ]
           }
         ]
@@ -308,27 +414,39 @@
             "status": "implemented",
             "notes": [
               "Node's `StringDecoder`, ported to TypeScript: `write` holds back a character split across Buffers (UTF-8, UTF-16LE, base64) and `end` flushes it (a partial UTF-8 character as U+FFFD); other encodings decode each Buffer whole"
+            ],
+            "decl": [
+              "string_decoder#"
             ]
           },
           {
             "feature": "`util/types`",
             "status": "implemented",
             "notes": [
-              "The type predicates `util.types` carries (`lib/node/util_types.ts`, [ADR-01289](../adr/ADR-01289.md)); the boxed-primitive, external, proxy and module-namespace ones are always false, as no such value exists here"
+              "The type predicates `util.types` carries (`lib/node/util_types.ts`, [ADR-01289](../adr/01/ADR-01289.md)); the boxed-primitive, external, proxy and module-namespace ones are always false, as no such value exists here"
+            ],
+            "decl": [
+              "util/types#"
             ]
           },
           {
             "feature": "`assert/strict`",
             "status": "implemented",
             "notes": [
-              "`assert.strict`: `equal` is `strictEqual`, and so on (`lib/node/assert_strict.ts`, [ADR-01288](../adr/ADR-01288.md))"
+              "`assert.strict`: `equal` is `strictEqual`, and so on (`lib/node/assert_strict.ts`, [ADR-01288](../adr/01/ADR-01288.md))"
+            ],
+            "decl": [
+              "assert/strict#"
             ]
           },
           {
             "feature": "`dns/promises`",
             "status": "implemented",
             "notes": [
-              "`dns.promises`'s module: `lookup`, `lookupService`, the `resolve*` family, `reverse`, `Resolver`, `getServers`/`setServers` ([ADR-01294](../adr/ADR-01294.md))"
+              "`dns.promises`'s module: `lookup`, `lookupService`, the `resolve*` family, `reverse`, `Resolver`, `getServers`/`setServers` ([ADR-01294](../adr/01/ADR-01294.md))"
+            ],
+            "decl": [
+              "dns/promises#"
             ]
           },
           {
@@ -336,13 +454,19 @@
             "status": "implemented",
             "notes": [
               "`createInterface` and an `Interface` whose `question` returns a promise (with an `AbortSignal`); `Readline` queues cursor moves and clears until `commit()` → [Process & CLI](PROCESS-CLI.md)"
+            ],
+            "decl": [
+              "readline/promises#"
             ]
           },
           {
             "feature": "`timers/promises`",
             "status": "implemented",
             "notes": [
-              "Written in TypeScript (`lib/node/timers_promises.ts`, [ADR-01271](../adr/ADR-01271.md)) → [Timers](TIMERS.md)"
+              "Written in TypeScript (`lib/node/timers_promises.ts`, [ADR-01271](../adr/01/ADR-01271.md)) → [Timers](TIMERS.md)"
+            ],
+            "decl": [
+              "timers/promises#"
             ]
           },
           {
@@ -378,6 +502,9 @@
             "status": "implemented",
             "notes": [
               "Foreign function interface (Node v26.1.0, experimental); POSIX only → [FFI.md](FFI.md) ([TDD-00164](../tdd/TDD-00164.md))"
+            ],
+            "decl": [
+              "node:ffi#"
             ]
           },
           {
@@ -421,7 +548,7 @@
             "feature": "`module`",
             "status": "missing",
             "notes": [
-              "Whole-program AOT compilation — no runtime `require()`/`import()` or module API ([ADR-00022](../adr/ADR-00022.md))"
+              "Whole-program AOT compilation — no runtime `require()`/`import()` or module API ([ADR-00022](../adr/00/ADR-00022.md))"
             ]
           },
           {

@@ -5,7 +5,7 @@
 // `TypeError: Cannot read properties of undefined (reading 'length')` /
 // `Cannot set properties of null (setting 'x')` in JS — catchable, and
 // `instanceof TypeError`. A statically-typed base is a bare pointer (or a
-// { i1, T } optional, or a nullable array's {null,0} aggregate), so an absent
+// { i1, T } optional, or a nullable array's header pointer), so an absent
 // one used to be dereferenced: a segfault. The guard is a null test in front of
 // the access that calls one shared cold, noreturn thrower.
 //
@@ -107,16 +107,19 @@ func (e *Emitter) ensureRangeErrorThrow() {
 // alone: the type flags cannot tell a string from a runtime handle, and some
 // handles are legitimately null (a TextDecoder holds no storage at all).
 func derefGuardable(ty Type) bool {
-	if ty.IsDynamic || ty.IsNull || ty.IsFunc {
+	if ty.IsDynamic() || ty.IsNull() || ty.IsFunc() {
 		return false
 	}
-	if ty.Nullable {
+	if ty.Nullable() {
 		return ty.IR != "void" && ty.IR != ""
 	}
 	if isF64Slot(ty) {
 		return true // it may hold undefined as its sentinel (TDD-00241)
 	}
-	return ty.IR == "ptr" && ty.IsObject && !ty.IsArray && !ty.IsFlatArray && !ty.IsTuple
+	if triStr(ty) {
+		return true // undefined, or null as nullRef (TDD-00257)
+	}
+	return ty.IR == "ptr" && ty.IsObject() && !ty.IsArray() && !ty.IsFlatArray() && !ty.IsTuple()
 }
 
 // absentWord is how JS names the absent base in the message: a `T | null`
@@ -124,7 +127,7 @@ func derefGuardable(ty Type) bool {
 // missing element) is "undefined" — the same static discriminator the
 // string/typeof/JSON coercions use (TDD-00187).
 func absentWord(ty Type) string {
-	if ty.Nullable && !ty.IsUndefined {
+	if ty.Nullable() && !ty.IsUndefined() {
 		return "null"
 	}
 	return "undefined"
@@ -133,7 +136,7 @@ func absentWord(ty Type) string {
 // emitNullDerefGuard emits the absent-base test for v in front of a read (or
 // write, when g.setting) of the property g names.
 func (e *Emitter) emitNullDerefGuard(v Value, g derefGuard) error {
-	if e.blockDone || !derefGuardable(v.Ty) || strings.HasPrefix(v.Ref, "@") {
+	if e.blockDone || !derefGuardable(v.Ty) || constPtrRef(v.Ref) && v.Ref != "null" {
 		return nil
 	}
 	absent := e.freshReg()
@@ -142,14 +145,15 @@ func (e *Emitter) emitNullDerefGuard(v Value, g derefGuard) error {
 		present := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = extractvalue %s %s, 0", present, nullableScalarStorageIR(v.Ty), v.Ref))
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", absent, present))
-	case v.Ty.IsArray || v.Ty.IsFlatArray:
-		// An absent array is a null *header*. The {null,0} aggregate alone cannot
-		// say so — a present, empty array has the same data pointer — so a value
-		// with no header to consult is left to read as the empty array it may be.
-		if v.ArrayHeader == "" {
-			return nil
+	case v.Ty.IsArray() || v.Ty.IsFlatArray():
+		// An absent array is a null header.
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.Ref))
+	case triStr(v.Ty):
+		// nullRef is null, the null pointer undefined (TDD-00257).
+		if err := e.emitDerefThrowIf(e.isNullRef(v.Ref), "null", g); err != nil {
+			return err
 		}
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.ArrayHeader))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.Ref))
 	case v.Ty.IR == "ptr":
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.Ref))
 	case isF64Slot(v.Ty):
@@ -159,11 +163,18 @@ func (e *Emitter) emitNullDerefGuard(v Value, g derefGuard) error {
 	default:
 		return nil
 	}
+	return e.emitDerefThrowIf(absent, absentWord(v.Ty), g)
+}
+
+// emitDerefThrowIf branches to the TypeError for an access to g's property
+// on an absent base when the i1 absent is set; word names the base
+// ("undefined", "null").
+func (e *Emitter) emitDerefThrowIf(absent, word string, g derefGuard) error {
 	verb, gerund := "read", "reading"
 	if g.setting {
 		verb, gerund = "set", "setting"
 	}
-	head := fmt.Sprintf("Cannot %s properties of %s (%s '", verb, absentWord(v.Ty), gerund)
+	head := fmt.Sprintf("Cannot %s properties of %s (%s '", verb, word, gerund)
 	e.ensureNullDerefThrow()
 	throwL := e.freshLabel("nullderef.throw")
 	okL := e.freshLabel("nullderef.ok")

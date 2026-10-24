@@ -87,16 +87,16 @@ static void push_ev(h2sess *h, h2ev *e) {
 }
 
 static h2ev *new_ev(int type, int32_t a, int64_t b, int64_t c) {
-	h2ev *e = calloc(1, sizeof(h2ev));
+	h2ev *e = calloc(1, sizeof(h2ev)); /* scratch */
 	e->type = type; e->a = a; e->b = b; e->c = c;
 	return e;
 }
 
 static void free_ev(h2ev *e) {
 	if (!e) return;
-	free(e->text);
-	free(e->bytes);
-	free(e);
+	free(e->text); /* scratch */
+	free(e->bytes); /* scratch */
+	free(e); /* scratch */
 }
 
 static h2stream *stream_of(h2sess *h, int32_t sid) {
@@ -122,7 +122,7 @@ static void pend_remove(h2sess *h, h2stream *st) {
 }
 
 static h2stream *stream_new(h2sess *h, int32_t sid) {
-	h2stream *st = calloc(1, sizeof(h2stream));
+	h2stream *st = calloc(1, sizeof(h2stream)); /* scratch */
 	st->id = sid;
 	nghttp2_session_set_stream_user_data(h->s, sid, st);
 	return st;
@@ -131,16 +131,16 @@ static h2stream *stream_new(h2sess *h, int32_t sid) {
 static void stream_free(h2stream *st) {
 	if (!st) return;
 	h2chunk *c = st->head;
-	while (c) { h2chunk *n = c->next; free(c->p); free(c); c = n; }
-	free(st->hbuf);
-	free(st);
+	while (c) { h2chunk *n = c->next; free(c->p); free(c); c = n; } /* scratch */
+	free(st->hbuf); /* scratch */
+	free(st); /* scratch */
 }
 
 static void hbuf_add(h2stream *st, const uint8_t *p, size_t n) {
 	if (st->hlen + n + 1 > st->hcap) {
 		size_t cap = st->hcap ? st->hcap * 2 : 256;
 		while (cap < st->hlen + n + 1) cap *= 2;
-		st->hbuf = realloc(st->hbuf, cap);
+		st->hbuf = realloc(st->hbuf, cap); /* scratch */
 		st->hcap = cap;
 	}
 	memcpy(st->hbuf + st->hlen, p, n);
@@ -149,7 +149,7 @@ static void hbuf_add(h2stream *st, const uint8_t *p, size_t n) {
 }
 
 static char *hbuf_take(h2stream *st) {
-	char *t = st->hbuf ? st->hbuf : calloc(1, 1);
+	char *t = st->hbuf ? st->hbuf : calloc(1, 1); /* scratch */
 	st->hbuf = NULL; st->hlen = st->hcap = 0;
 	return t;
 }
@@ -186,7 +186,7 @@ static int on_frame_recv(nghttp2_session *s, const nghttp2_frame *f, void *ud) {
 	case NGHTTP2_HEADERS: {
 		h2stream *st = stream_of(h, sid);
 		h2ev *e = new_ev(H2E_HEADERS, sid, f->headers.cat, f->hd.flags);
-		e->text = st ? hbuf_take(st) : calloc(1, 1);
+		e->text = st ? hbuf_take(st) : calloc(1, 1); /* scratch */
 		push_ev(h, e);
 		break;
 	}
@@ -198,7 +198,7 @@ static int on_frame_recv(nghttp2_session *s, const nghttp2_frame *f, void *ud) {
 		break;
 	case NGHTTP2_PING: {
 		h2ev *e = new_ev(H2E_PING, 0, (f->hd.flags & NGHTTP2_FLAG_ACK) ? 1 : 0, 0);
-		e->bytes = malloc(8);
+		e->bytes = malloc(8); /* scratch */
 		memcpy(e->bytes, f->ping.opaque_data, 8);
 		e->len = 8;
 		push_ev(h, e);
@@ -208,7 +208,7 @@ static int on_frame_recv(nghttp2_session *s, const nghttp2_frame *f, void *ud) {
 		h->goaway_remote = 1;
 		h2ev *e = new_ev(H2E_GOAWAY, f->goaway.last_stream_id, f->goaway.error_code, 0);
 		if (f->goaway.opaque_data_len > 0) {
-			e->bytes = malloc(f->goaway.opaque_data_len);
+			e->bytes = malloc(f->goaway.opaque_data_len); /* scratch */
 			memcpy(e->bytes, f->goaway.opaque_data, f->goaway.opaque_data_len);
 			e->len = f->goaway.opaque_data_len;
 		}
@@ -219,7 +219,7 @@ static int on_frame_recv(nghttp2_session *s, const nghttp2_frame *f, void *ud) {
 		int32_t pid = f->push_promise.promised_stream_id;
 		h2stream *st = stream_of(h, pid);
 		h2ev *e = new_ev(H2E_PUSH, sid, pid, 0);
-		e->text = st ? hbuf_take(st) : calloc(1, 1);
+		e->text = st ? hbuf_take(st) : calloc(1, 1); /* scratch */
 		push_ev(h, e);
 		break;
 	}
@@ -234,7 +234,7 @@ static int on_data_chunk(nghttp2_session *s, uint8_t flags, int32_t sid, const u
 	h2sess *h = ud;
 	(void)s; (void)flags;
 	h2ev *e = new_ev(H2E_DATA, sid, 0, 0);
-	e->bytes = malloc(len ? len : 1);
+	e->bytes = malloc(len ? len : 1); /* scratch */
 	memcpy(e->bytes, data, len);
 	e->len = len;
 	push_ev(h, e);
@@ -299,8 +299,8 @@ static ssize_t read_data(nghttp2_session *s, int32_t sid, uint8_t *buf, size_t l
 		if (c->off == c->len) {
 			st->head = c->next;
 			if (!st->head) st->tail = NULL;
-			free(c->p);
-			free(c);
+			free(c->p); /* scratch */
+			free(c); /* scratch */
 		}
 	}
 	if (!st->head && st->eof) {
@@ -322,7 +322,7 @@ static nghttp2_nv *parse_nv(const char *text, size_t *count, char **store) {
 	for (const char *p = text; *p; p++) if (*p == '\n') n++;
 	n /= 2;
 	char *buf = strdup(text);
-	nghttp2_nv *nv = calloc(n ? n : 1, sizeof(nghttp2_nv));
+	nghttp2_nv *nv = calloc(n ? n : 1, sizeof(nghttp2_nv)); /* scratch */
 	char *p = buf;
 	for (size_t i = 0; i < n; i++) {
 		char *name = p;
@@ -358,7 +358,7 @@ double __kml_native_h2_new(double type, double maxHeaderListPairs, double maxRes
 	int slot = 0;
 	for (int i = 1; i < H2_MAX; i++) if (!h2tab[i]) { slot = i; break; }
 	if (!slot) return -1;
-	h2sess *h = calloc(1, sizeof(h2sess));
+	h2sess *h = calloc(1, sizeof(h2sess)); /* scratch */
 	nghttp2_session_callbacks *cb;
 	nghttp2_session_callbacks_new(&cb);
 	nghttp2_session_callbacks_set_on_begin_headers_callback(cb, on_begin_headers);
@@ -378,7 +378,7 @@ double __kml_native_h2_new(double type, double maxHeaderListPairs, double maxRes
 	int rv = type == 0 ? nghttp2_session_server_new2(&h->s, cb, h, opt) : nghttp2_session_client_new2(&h->s, cb, h, opt);
 	nghttp2_option_del(opt);
 	nghttp2_session_callbacks_del(cb);
-	if (rv != 0) { free(h); return rv; }
+	if (rv != 0) { free(h); return rv; } /* scratch */
 	h2tab[slot] = h;
 	return slot;
 }
@@ -406,7 +406,7 @@ double __kml_native_h2_flush(double id) {
 		if (h->outlen + (size_t)n > h->outcap) {
 			size_t cap = h->outcap ? h->outcap * 2 : 16384;
 			while (cap < h->outlen + (size_t)n) cap *= 2;
-			h->out = realloc(h->out, cap);
+			h->out = realloc(h->out, cap); /* scratch */
 			h->outcap = cap;
 		}
 		memcpy(h->out + h->outlen, p, (size_t)n);
@@ -419,6 +419,7 @@ double __kml_native_h2_take(double id, void *out, long long len) {
 	h2sess *h = sess_of(id);
 	if (!h) return 0;
 	size_t n = h->outlen < (size_t)len ? h->outlen : (size_t)len;
+	if (n == 0) return 0; /* nothing buffered: h->out may be NULL */
 	memcpy(out, h->out, n);
 	memmove(h->out, h->out + n, h->outlen - n);
 	h->outlen -= n;
@@ -457,7 +458,7 @@ double __kml_native_h2_event_bytes(double id, void *out, long long len) {
 	h2sess *h = sess_of(id);
 	if (!h || !h->cur) return 0;
 	size_t n = h->cur->len < (size_t)len ? h->cur->len : (size_t)len;
-	memcpy(out, h->cur->bytes, n);
+	if (n) memcpy(out, h->cur->bytes, n); /* an empty event has no bytes */
 	return (double)n;
 }
 
@@ -468,13 +469,13 @@ double __kml_native_h2_request(double id, const char *headers, double endStream,
 	size_t n;
 	char *store;
 	nghttp2_nv *nv = parse_nv(headers, &n, &store);
-	h2stream *st = calloc(1, sizeof(h2stream));
+	h2stream *st = calloc(1, sizeof(h2stream)); /* scratch */
 	st->want_trailers = waitForTrailers != 0;
 	nghttp2_data_provider dp = { .source = { .ptr = NULL }, .read_callback = read_data };
 	int32_t sid = nghttp2_submit_request(h->s, NULL, nv, n, endStream != 0 ? NULL : &dp, st);
-	free(nv);
-	free(store);
-	if (sid < 0) { free(st); return sid; }
+	free(nv); /* scratch */
+	free(store); /* scratch */
+	if (sid < 0) { free(st); return sid; } /* scratch */
 	st->id = sid;
 	pend_add(h, st);
 	return sid;
@@ -493,8 +494,8 @@ double __kml_native_h2_respond(double id, double sid, const char *headers, doubl
 	st->want_trailers = waitForTrailers != 0;
 	nghttp2_data_provider dp = { .source = { .ptr = NULL }, .read_callback = read_data };
 	int rv = nghttp2_submit_response(h->s, (int32_t)sid, nv, n, endStream != 0 ? NULL : &dp);
-	free(nv);
-	free(store);
+	free(nv); /* scratch */
+	free(store); /* scratch */
 	return rv;
 }
 
@@ -522,8 +523,8 @@ double __kml_native_h2_headers(double id, double sid, const char *headers, doubl
 	} else {
 		rv = nghttp2_submit_headers(h->s, NGHTTP2_FLAG_NONE, (int32_t)sid, NULL, nv, n, NULL);
 	}
-	free(nv);
-	free(store);
+	free(nv); /* scratch */
+	free(store); /* scratch */
 	return rv;
 }
 
@@ -534,11 +535,11 @@ double __kml_native_h2_push(double id, double sid, const char *headers) {
 	size_t n;
 	char *store;
 	nghttp2_nv *nv = parse_nv(headers, &n, &store);
-	h2stream *st = calloc(1, sizeof(h2stream));
+	h2stream *st = calloc(1, sizeof(h2stream)); /* scratch */
 	int32_t pid = nghttp2_submit_push_promise(h->s, NGHTTP2_FLAG_NONE, (int32_t)sid, nv, n, st);
-	free(nv);
-	free(store);
-	if (pid < 0) { free(st); return pid; }
+	free(nv); /* scratch */
+	free(store); /* scratch */
+	if (pid < 0) { free(st); return pid; } /* scratch */
 	st->id = pid;
 	pend_add(h, st);
 	return pid;
@@ -552,9 +553,9 @@ double __kml_native_h2_write(double id, double sid, void *data, long long len, d
 	if (!st) return NGHTTP2_ERR_STREAM_CLOSED;
 	(void)len;
 	if (n > 0) {
-		h2chunk *c = calloc(1, sizeof(h2chunk));
+		h2chunk *c = calloc(1, sizeof(h2chunk)); /* scratch */
 		c->len = (size_t)n;
-		c->p = malloc(c->len);
+		c->p = malloc(c->len); /* scratch */
 		memcpy(c->p, (const uint8_t *)data + (long long)off, c->len);
 		if (st->tail) st->tail->next = c; else st->head = c;
 		st->tail = c;
@@ -584,14 +585,14 @@ double __kml_native_h2_settings(double id, void *settings, long long len) {
 	h2sess *h = sess_of(id);
 	if (!h) return NGHTTP2_ERR_INVALID_STATE;
 	size_t n = (size_t)len / 6;
-	nghttp2_settings_entry *iv = calloc(n ? n : 1, sizeof(nghttp2_settings_entry));
+	nghttp2_settings_entry *iv = calloc(n ? n : 1, sizeof(nghttp2_settings_entry)); /* scratch */
 	const uint8_t *p = settings;
 	for (size_t i = 0; i < n; i++) {
 		iv[i].settings_id = (int32_t)((p[i * 6] << 8) | p[i * 6 + 1]);
 		iv[i].value = ((uint32_t)p[i * 6 + 2] << 24) | ((uint32_t)p[i * 6 + 3] << 16) | ((uint32_t)p[i * 6 + 4] << 8) | p[i * 6 + 5];
 	}
 	int rv = nghttp2_submit_settings(h->s, NGHTTP2_FLAG_NONE, iv, n);
-	free(iv);
+	free(iv); /* scratch */
 	return rv;
 }
 
@@ -670,6 +671,6 @@ void __kml_native_h2_free(double id) {
 	free_ev(h->cur);
 	for (h2ev *e = h->qh; e;) { h2ev *n = e->next; free_ev(e); e = n; }
 	nghttp2_session_del(h->s);
-	free(h->out);
-	free(h);
+	free(h->out); /* scratch */
+	free(h); /* scratch */
 }

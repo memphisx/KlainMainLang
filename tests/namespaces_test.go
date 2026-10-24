@@ -294,3 +294,76 @@ const g = (e: any) => C.same(e, 2);
 g(2);
 `, "3 8 5\nN 1\nfunction\nok")
 }
+
+func TestE2ENamespaceTypeMembersAsValues(t *testing.T) {
+	// A namespace's enum or class read as a value, or indexed, is the
+	// member itself: its object, its reverse mapping, its constructor.
+	assertOutput(t, `
+namespace Geo {
+    export enum Kind { Flat = 0.5, Tall = 2 ** 40 + 0.25 }
+    export class Point { constructor(public x: number) {} }
+}
+const k: Geo.Kind = Geo.Kind.Tall;
+console.log(Geo.Kind.Flat, k / 2, Geo.Kind[0.5], Object.keys(Geo.Kind));
+console.log(Geo.Kind);
+const P = Geo.Point;
+console.log(new P(3).x, typeof Geo.Point, Geo.Point.name);
+`, "0.5 549755813888.125 Flat [ 'Flat', '0.5', 'Tall', '1099511627776.25' ]\n{\n  Flat: 0.5,\n  '0.5': 'Flat',\n  Tall: 1099511627776.25,\n  '1099511627776.25': 'Tall'\n}\n3 function Point")
+}
+
+func TestE2ENamespaceAsValue(t *testing.T) {
+	// A namespace read whole is TypeScript's emitted object: its exports in
+	// declaration order, nested namespaces as objects, a `let` export live,
+	// one object however it is reached.
+	assertOutput(t, `
+namespace App {
+    export namespace Config {
+        export const port = 8080;
+        export function f(): number { return 1; }
+    }
+    export let count = 0;
+    export function bump(): void { count++; }
+    export class Point { constructor(public x: number) {} }
+    export enum Kind { A, B }
+    const hidden = 1;
+    export const name = "app" + hidden;
+}
+namespace Outer.Inner { export const v = 3; }
+import Cfg = App.Config;
+console.log(Object.keys(App));
+console.log(App.Config);
+console.log(Object.keys(Cfg), Cfg.port);
+const c = App.Config;
+console.log(c.port, c === App.Config);
+App.bump(); App.bump();
+const a: any = App;
+console.log(a.count, App.count, App === a);
+console.log(Object.keys(Outer), Outer.Inner.v);
+const P = App.Point;
+console.log(new P(2).x, App.Kind.B, App.Config.f.name);
+`, "[ 'Config', 'count', 'bump', 'Point', 'Kind', 'name' ]\n{ port: 8080, f: [Function: f] }\n[ 'port', 'f' ] 8080\n8080 true\n2 2 true\n[ 'Inner' ] 3\n2 1 f")
+}
+
+func TestE2ENamespaceSiblingsAtTopLevel(t *testing.T) {
+	// A namespace's own top-level statements, and member functions storing
+	// to a sibling, see its members by their bare names; a `let` export
+	// read through the object is live, and writes through it reach the
+	// binding.
+	assertOutput(t, `
+namespace A {
+  const s = 2;
+  export const t = s * 3;
+  export function g(): number { return t + 1; }
+  export const u = g() + s;
+  export let w = t;
+  w = w + u;
+  export function reset(): void { w = 0; }
+}
+console.log(A.t, A.u, A.w, A.g());
+const o: any = A;
+A.reset();
+console.log(o.w, Object.getOwnPropertyDescriptor(o, "w"));
+o.w = 9;
+console.log(A.w, JSON.stringify(o));
+`, "6 9 15 7\n0 { value: 0, writable: true, enumerable: true, configurable: true }\n9 {\"t\":6,\"u\":9,\"w\":9}")
+}

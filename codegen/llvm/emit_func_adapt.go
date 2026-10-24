@@ -20,7 +20,7 @@
 // Coverage (ADR-00478 completed the aggregate shapes):
 //   - scalars/strings/pointers ↔ any, both directions, params and returns;
 //   - arrays: forwarded through their split (ptr, len) ABI, boxed into a
-//     dynamic slot via the { ptr, i64 } array header, and unboxed back out
+//     dynamic slot via the array's header pointer, and unboxed back out
 //     of one (the header representation preserves the length);
 //   - nullable scalars ({ i1, T }): boxed via emitBoxValue's existing
 //     nullable path, unboxed via the null/undefined-tag → absent rule;
@@ -39,7 +39,7 @@ import (
 // adapterConvertible reports whether a dynamism-mismatched pair at one
 // position is a conversion the adapter implements.
 func adapterConvertible(concrete Type) bool {
-	if concrete.IsArray || isNullableScalar(concrete) {
+	if concrete.IsArray() || isNullableScalar(concrete) {
 		return true // header boxing / { i1, T } wrapping (ADR-00478)
 	}
 	switch concrete.IR {
@@ -61,13 +61,13 @@ func restElem(rest Type) Type {
 // passed to a fixed parameter of type sp: the same scalar storage, or a
 // dynamic element unboxed (or a concrete one boxed) across the boundary.
 func spreadConvertible(te, sp Type) bool {
-	if (sp.IsArray || isNullableScalar(sp)) && te.IsDynamic {
+	if (sp.IsArray() || isNullableScalar(sp)) && te.IsDynamic() {
 		return true // the box's array or optional scalar (emitUnboxBoxToType)
 	}
-	if sp.IsArray || te.IsArray || isNullableScalar(sp) || isNullableScalar(te) {
+	if sp.IsArray() || te.IsArray() || isNullableScalar(sp) || isNullableScalar(te) {
 		return false
 	}
-	if te.IsDynamic || sp.IsDynamic {
+	if te.IsDynamic() || sp.IsDynamic() {
 		return adapterConvertible(te) || adapterConvertible(sp)
 	}
 	return storageIR(te) == storageIR(sp)
@@ -95,7 +95,7 @@ func adapterRetOf(t Type) Type {
 // adapter supports. When needed && !supported the caller keeps the old
 // passthrough behavior — a disclosed narrowing, never worse than before.
 func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
-	if !src.IsFunc || !tgt.IsFunc {
+	if !src.IsFunc() || !tgt.IsFunc() {
 		return false, false
 	}
 	if hasParamDefaults(src) && !hasParamDefaults(tgt) {
@@ -139,10 +139,10 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 	}
 	for i := range sFixed {
 		sp, tp := sFixed[i], tFixed[i]
-		if sp.IsDynamic != tp.IsDynamic {
+		if sp.IsDynamic() != tp.IsDynamic() {
 			needed = true
 			concrete := sp
-			if sp.IsDynamic {
+			if sp.IsDynamic() {
 				concrete = tp
 			}
 			if !adapterConvertible(concrete) {
@@ -154,7 +154,7 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 			// the argument is converted in turn (coerce, through the box when
 			// the direct adapter does not take it).
 			needed = true
-		} else if storageIR(sp) != storageIR(tp) || sp.IsArray != tp.IsArray {
+		} else if storageIR(sp) != storageIR(tp) || sp.IsArray() != tp.IsArray() {
 			// A concrete-vs-concrete shape mismatch isn't this adapter's job
 			// (and shouldn't type-check upstream anyway).
 			supported = false
@@ -170,7 +170,7 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 		if tRest.ElemType != nil {
 			te = *tRest.ElemType
 		}
-		if storageIR(se) != storageIR(te) || se.IsDynamic != te.IsDynamic {
+		if storageIR(se) != storageIR(te) || se.IsDynamic() != te.IsDynamic() {
 			supported = false
 		}
 	}
@@ -189,14 +189,14 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 	switch {
 	case trVoid:
 		// Result dropped or absent — no conversion either way.
-	case srVoid && tr.IsDynamic:
+	case srVoid && tr.IsDynamic():
 		needed = true // void → any: return a boxed undefined
 	case srVoid:
 		supported = false // void → concrete has no value to produce
-	case sr.IsDynamic != tr.IsDynamic:
+	case sr.IsDynamic() != tr.IsDynamic():
 		needed = true
 		concrete := sr
-		if sr.IsDynamic {
+		if sr.IsDynamic() {
 			concrete = tr
 		}
 		if !adapterConvertible(concrete) {
@@ -206,7 +206,7 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 		// A Promise<T> where a Promise<any> is expected (an async callback
 		// returning an array): the value converted when it settles.
 		needed = true
-	case storageIR(sr) != storageIR(tr) || sr.IsArray != tr.IsArray:
+	case storageIR(sr) != storageIR(tr) || sr.IsArray() != tr.IsArray():
 		supported = false
 	}
 	return needed, supported
@@ -215,7 +215,7 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 // funcParamNeedsAdapt reports a function-typed parameter pair whose argument
 // (of the target's parameter type tp) needs converting to the source's sp.
 func funcParamNeedsAdapt(sp, tp Type) bool {
-	if !sp.IsFunc || !tp.IsFunc || sp.IsDynamic || tp.IsDynamic {
+	if !sp.IsFunc() || !tp.IsFunc() || sp.IsDynamic() || tp.IsDynamic() {
 		return false
 	}
 	needed, _ := funcAdapterPlan(tp, sp)
@@ -226,7 +226,7 @@ func funcParamNeedsAdapt(sp, tp Type) bool {
 // position i (arrays split into ptr+len; a rest slot is its (ptr, len)
 // buffer) and returns the value-reference strings for reading them back.
 func adapterSigParams(sig *[]string, ty Type, i int, isRest bool) (refs []string) {
-	if ty.IsArray || isRest {
+	if ty.IsArray() || isRest {
 		p := fmt.Sprintf("%%a%d_p", i)
 		l := fmt.Sprintf("%%a%d_l", i)
 		*sig = append(*sig, "ptr "+p, "i64 "+l)
@@ -245,7 +245,7 @@ func adapterSigParams(sig *[]string, ty Type, i int, isRest bool) (refs []string
 // dynamic ABI converts every parameter kind, so this serves a conversion the
 // direct adapter does not take.
 func (e *Emitter) emitBoxedClosureAs(orig Value, tgt Type) (Value, bool) {
-	if orig.Ty.IsDynamic || tgt.IsDynamic {
+	if orig.Ty.IsDynamic() || tgt.IsDynamic() {
 		return Value{}, false
 	}
 	boxed, err := e.emitBoxValue(orig)
@@ -286,7 +286,12 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 
 	e.ensureMalloc()
 	hdr := e.buildBuiltinClosure(name, orig.Ref)
-	return Value{Ref: hdr, Ty: tgt}, true
+	// An absent function (an optional callback passed on) stays undefined:
+	// a header around null would pass the callee's `cb === undefined`.
+	isNull, ref := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, orig.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", ref, isNull, hdr))
+	return Value{Ref: ref, Ty: tgt}, true
 }
 
 // emitAdapterFunc emits function name with the target type's caller ABI
@@ -319,7 +324,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 	syncAlt := func(from int, sp Type) {
 		// The arguments this parameter added, the same for the entry.
 		altParts = append(altParts, argParts[from:]...)
-		if sp.IsArray {
+		if sp.IsArray() {
 			altTys = append(altTys, "ptr", "i64")
 		} else if len(argParts) > from {
 			altTys = append(altTys, storageIR(sp))
@@ -340,15 +345,15 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 		}
 		switch {
 		case funcParamNeedsAdapt(sp, tp):
-			v := e.coerce(Value{Ref: refs[0], Ty: tp}, sp)
+			v := e.convert(Value{Ref: refs[0], Ty: tp}, sp)
 			argParts = append(argParts, "ptr "+v.Ref)
-		case sp.IsDynamic == tp.IsDynamic:
-			if sp.IsArray {
+		case sp.IsDynamic() == tp.IsDynamic():
+			if sp.IsArray() {
 				argParts = append(argParts, "ptr "+refs[0], "i64 "+refs[1])
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", storageIR(sp), refs[0]))
 			}
-		case tp.IsDynamic: // dynamic argument → concrete parameter: unbox
+		case tp.IsDynamic(): // dynamic argument → concrete parameter: unbox
 			if info, isCls := e.dynEntryClass(sp); isCls {
 				foreign = append(foreign, e.emitForeignClassArg(refs[0], info))
 				altParts = append(altParts, "i64 "+refs[0])
@@ -358,9 +363,9 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 				continue
 			}
 			v := e.unboxArgToParam(refs[0], sp)
-			if sp.IsArray {
-				// The unboxed array is a {ptr,i64} aggregate; the target's array
-				// param expects a header pointer (TDD-00127).
+			if sp.IsArray() {
+				// The target's array param expects a header pointer and length
+				// (TDD-00127).
 				header, lReg := e.arrayArgFromAggregate(v)
 				argParts = append(argParts, "ptr "+header, "i64 "+lReg)
 			} else {
@@ -368,18 +373,10 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			}
 		default: // concrete argument → dynamic parameter: box
 			var concrete Value
-			if tp.IsArray {
-				// refs[0] is the incoming header pointer; a boxed array carries
-				// the {data,len} aggregate, so read data out of the header first
-				// (TDD-00127).
-				dataR, agg0, agg1 := e.freshReg(), e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataR, refs[0]))
-				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", agg0, dataR))
-				e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg1, agg0, refs[1]))
-				// refs[0] is the incoming array's live header pointer — carry it so
-				// boxing shares the live header (mutations visible through the box),
-				// not a snapshot (TDD-00212 Stage 3).
-				concrete = Value{Ref: agg1, Ty: tp, ArrayHeader: refs[0]}
+			if tp.IsArray() {
+				// refs[0] is the incoming array's header, the value itself, so
+				// boxing shares it (TDD-00212 Stage 3).
+				concrete = Value{Ref: refs[0], Ty: tp}
 			} else {
 				concrete = Value{Ref: refs[0], Ty: tp}
 			}
@@ -405,7 +402,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 				break
 			}
 			argParts = append(argParts, a)
-			if info, isCls := e.dynEntryClass(sFixed[j]); isCls && te.IsDynamic {
+			if info, isCls := e.dynEntryClass(sFixed[j]); isCls && te.IsDynamic() {
 				if b, bok := e.spreadRestArg(refs[0], refs[1], j-len(tFixed), te, TypeAny); bok {
 					foreign = append(foreign, e.emitForeignClassArg(strings.TrimPrefix(b, "i64 "), info))
 					altParts = append(altParts, b)
@@ -414,7 +411,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 				}
 			}
 			altParts = append(altParts, a)
-			if sFixed[j].IsArray {
+			if sFixed[j].IsArray() {
 				altTys = append(altTys, "ptr", "i64")
 			} else {
 				altTys = append(altTys, storageIR(sFixed[j]))
@@ -434,7 +431,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 	// Indirect call typed by the source signature.
 	srcParamTys := []string{"ptr"}
 	for _, sp := range sFixed {
-		if sp.IsArray {
+		if sp.IsArray() {
 			srcParamTys = append(srcParamTys, "ptr", "i64")
 			continue
 		}
@@ -460,7 +457,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 				e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
 			}
 			e.emitInstr("ret void")
-		case sr.IR == "void" && tr.IsDynamic:
+		case sr.IR == "void" && tr.IsDynamic():
 			e.emitInstr(fmt.Sprintf("call void %s %s(%s)", fnTypePart, fp, strings.Join(argParts, ", ")))
 			b, err := e.emitBoxValue(Value{Ty: TypeUndefined})
 			if err != nil {
@@ -475,17 +472,17 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
 			v := e.emitConvertPromise(Value{Ref: r, Ty: sr}, tr)
 			e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
-		case sr.IsDynamic == tr.IsDynamic:
+		case sr.IsDynamic() == tr.IsDynamic():
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
 			e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), r))
-		case tr.IsDynamic: // concrete return → dynamic slot: box
+		case tr.IsDynamic(): // concrete return → dynamic slot: box
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
 			callResult := Value{Ref: r, Ty: sr}
-			if sr.IsArray {
-				// Array return ABI is a header pointer (TDD-00213 Stage 3): deref
-				// before boxing so emitBoxValue sees the {ptr,i64} aggregate.
+			if sr.IsArray() {
+				// Array return ABI is a header pointer (TDD-00213 Stage 3): wrap
+				// it as the array value before boxing.
 				callResult = e.arrayValueFromHeaderReg(r, sr)
 			}
 			b, err := e.emitBoxValue(callResult)
@@ -498,9 +495,9 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
 			v := e.emitUnboxBoxToType(r, tr)
-			if tr.IsArray {
+			if tr.IsArray() {
 				// The target's array return ABI is a header pointer (TDD-00213
-				// Stage 3): mint/share a header from the unboxed aggregate.
+				// Stage 3): the unboxed array's header.
 				e.emitInstr(fmt.Sprintf("ret ptr %s", e.arrayReturnHeader(v)))
 			} else {
 				e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
@@ -562,7 +559,7 @@ func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool
 	// Every element crosses as a box word, so a missing one can be
 	// undefined whatever the parameter's type.
 	word := el
-	if !te.IsDynamic {
+	if !te.IsDynamic() {
 		b, err := e.emitBoxValue(Value{Ref: el, Ty: te})
 		if err != nil {
 			return "", false
@@ -577,11 +574,11 @@ func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool
 	e.emitLabel(joinL)
 	w := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, slot))
-	if sp.IsDynamic {
+	if sp.IsDynamic() {
 		return "i64 " + w, true
 	}
 	v := e.unboxArgToParam(w, sp)
-	if sp.IsArray {
+	if sp.IsArray() {
 		// An array parameter takes its header pointer and length.
 		header, lReg := e.arrayArgFromAggregate(v)
 		return fmt.Sprintf("ptr %s, i64 %s", header, lReg), true

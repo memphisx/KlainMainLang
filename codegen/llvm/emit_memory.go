@@ -54,11 +54,11 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
-	if val.Ty.IsArray {
+	if val.Ty.IsArray() {
 		e.ensureFree()
 		dataPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, val.Ref))
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", dataPtr))
+		dataPtr = e.arrayData(val)
+		e.heapFree(dataPtr)
 		return Value{Ty: TypeVoid}, nil
 	}
 	if err := e.freeResolvedPointer(val.Ref, val.Ty, pos); err != nil {
@@ -74,7 +74,7 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 // death-signal hook (e.g. FinalizationRegistry's pointer-map lookup,
 // TDD-00163 Stage 2) belongs here and fires for all of them at once.
 func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
-	if sym.Ty.IsArray || sym.Ty.IsFlatArray {
+	if sym.Ty.IsArray() || sym.Ty.IsFlatArray() {
 		// A flat @value array (TDD-00134 Stage 2) shares the {data, len}
 		// header storage shape and owns exactly one buffer (elements are
 		// inline), so the same free-data-and-reset path is correct for it.
@@ -89,9 +89,9 @@ func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		dataPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataSlot))
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", dataPtr))
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", dataSlot))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenSlot))
+		e.heapFree(dataPtr)
+		e.heapStore("ptr", "null", dataSlot, 8)
+		e.heapStore("i64", "0", lenSlot, 8)
 		return nil
 	}
 	ptrReg := e.freshReg()
@@ -99,7 +99,12 @@ func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
 	if err := e.freeResolvedPointer(ptrReg, sym.Ty, pos); err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", sym.Ptr))
+	// The freed binding reads as null; a string's null is nullRef (TDD-00257).
+	nul := "null"
+	if triStr(sym.Ty) {
+		nul = e.nullRef()
+	}
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nul, sym.Ptr))
 	return nil
 }
 
@@ -108,13 +113,13 @@ func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
 // eligibility check (TDD-00173), answerable without emitting anything.
 func symbolTypeFreeable(ty Type) bool {
 	switch {
-	case ty.IsArray, ty.IsFlatArray:
+	case ty.IsArray(), ty.IsFlatArray():
 		return true
-	case ty.IsMap || ty.IsSet, ty.IsFunc:
+	case ty.IsMap() || ty.IsSet(), ty.IsFunc():
 		return true
-	case isStringTy(ty) && !ty.IsPromise && !ty.IsDynamic:
+	case isStringTy(ty) && !ty.IsPromise() && !ty.IsDynamic():
 		return true
-	case ty.IsObject || ty.IsPromise || (ty.IR == "ptr" && !ty.IsDynamic && !ty.IsArray):
+	case ty.IsObject() || ty.IsPromise() || (ty.IR == "ptr" && !ty.IsDynamic() && !ty.IsArray()):
 		return true
 	}
 	return false
@@ -135,33 +140,33 @@ func (e *Emitter) freeResolvedPointer(ptrReg string, ty Type, pos ast.Pos) error
 		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree(ptr %s)", ptrReg))
 	}
 	switch {
-	case (ty.IsMap || ty.IsSet) && !ty.Weak:
-		// (A WeakMap/WeakSet's handle is its list head, freed as a plain
-		// allocation below.)
+	case (ty.IsMap() || ty.IsSet()) && !ty.Weak:
+		// (A WeakMap/WeakSet's handle is its list head, freed after its
+		// header word below.)
 		e.ensureMapFree()
 		e.emitInstr(fmt.Sprintf("call void @__kml_map_free(ptr %s)", ptrReg))
-	case headeredHost(ty) || ty.IsPromise && ty.PromiseTask && !ty.IsDynamic:
+	case headeredHost(ty) || ty.IsPromise() && ty.PromiseTask && !ty.IsDynamic():
 		// A RegExp's or task promise's allocation starts at its header word
 		// (TDD-00247).
 		e.ensureFree()
 		base := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", base, ptrReg))
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", base))
-	case ty.IsFunc:
+		e.heapFree(base)
+	case ty.IsFunc():
 		e.ensureClosureFree()
 		e.emitInstr(fmt.Sprintf("call void @__kml_closure_free(ptr %s)", ptrReg))
-	case isStringTy(ty) && !ty.IsPromise && !ty.IsDynamic:
+	case isStringTy(ty) && !ty.IsPromise() && !ty.IsDynamic():
 		// (A Blob is a `ptr` handle too — its record is a plain malloc, below.)
 		// A heap string is length-prefixed (TDD-00120): its malloc base is 8
 		// bytes before the value pointer, so free the base, not the value ptr.
 		// (An interned literal is static and never legitimately freed here — a
 		// pre-existing Memory.free-on-a-literal misuse stays undefined.)
 		e.emitStringFree(ptrReg)
-	case ty.IsObject || ty.IsPromise || (ty.IR == "ptr" && !ty.IsDynamic && !ty.IsArray):
+	case ty.IsObject() || ty.IsPromise() || (ty.IR == "ptr" && !ty.IsDynamic() && !ty.IsArray()):
 		// A plain single heap pointer: string, object literal/interface
 		// value, or an un-awaited Promise's malloc'd slot.
 		e.ensureFree()
-		e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", ptrReg))
+		e.heapFree(ptrReg)
 	default:
 		return fmt.Errorf("%d:%d: Memory.free is not supported for this type — nothing heap-allocated to free (or, for any/unknown, no safe way to tell what's inside without runtime tag inspection this builtin doesn't do)", pos.Line, pos.Col)
 	}

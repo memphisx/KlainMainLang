@@ -25,20 +25,11 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 	anyModuleTask := false
 	for i, wm := range prog.WorkerModules {
 		symbol := fmt.Sprintf("__kml_worker_entry_%d", i)
-		savedAllocas := e.allocas
-		savedBody := e.body
-		savedRegCtr := e.regCtr
-		savedLabelCtr := e.labelCtr
+		restoreBuilder := e.beginThunkEmit()
 		savedScopes := e.scopes
 		savedRetType := e.currentRetType
-		savedBlockDone := e.blockDone
-		e.allocas = strings.Builder{}
-		e.body = strings.Builder{}
-		e.regCtr = 0
-		e.labelCtr = 0
 		e.scopes = nil
 		e.currentRetType = TypeVoid
-		e.blockDone = false
 		e.pushScope()
 		e.currentWorkerMod = wm.Path
 		// A worker module with a top-level await takes the entry program's
@@ -56,10 +47,7 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		if emitErr == nil {
 			e.emitTerminator("ret void")
 			if moduleTask {
-				e.functions.WriteString(fmt.Sprintf("\ndefine internal void @%s_body(ptr %%__kml_module_args) {\nentry:\n", symbol))
-				e.functions.WriteString(e.allocas.String())
-				e.functions.WriteString(e.body.String())
-				e.functions.WriteString("}\n")
+				e.writeFunc(fmt.Sprintf("internal void @%s_body(ptr %%__kml_module_args)", symbol), e.allocas.String()+e.body.String())
 				e.ensureModuleTaskRuntime()
 				e.functions.WriteString(fmt.Sprintf(`
 define void @%s() {
@@ -71,22 +59,15 @@ entry:
 }
 `, symbol, symbol, e.moduleTaskStackBytes()))
 			} else {
-				e.functions.WriteString(fmt.Sprintf("\ndefine void @%s() {\nentry:\n", symbol))
-				e.functions.WriteString(e.allocas.String())
-				e.functions.WriteString(e.body.String())
-				e.functions.WriteString("}\n")
+				e.writeFunc(fmt.Sprintf("void @%s()", symbol), e.allocas.String()+e.body.String())
 			}
 		}
 
 		e.inModuleTask = savedInModuleTask
 		e.currentWorkerMod = ""
-		e.allocas = savedAllocas
-		e.body = savedBody
-		e.regCtr = savedRegCtr
-		e.labelCtr = savedLabelCtr
+		restoreBuilder()
 		e.scopes = savedScopes
 		e.currentRetType = savedRetType
-		e.blockDone = savedBlockDone
 		if emitErr != nil {
 			return fmt.Errorf("worker module %s: %w", wm.Path, emitErr)
 		}
@@ -104,7 +85,7 @@ entry:
 // thread runs after its modules evaluate: the event loop, then the exit code
 // the parent hears (process.exitCode). With a worker module task it is
 // main()'s shape from TDD-00224: run the loop; if the module task parked
-// asking for an inline loop run (@__kml_module_run_loop), resume it and run
+// asking for an inline loop run (__kml_module_park_for_loop), resume it and run
 // the loop again; when the loop finally returns with the module promise
 // still pending, print Node's warning and end with code 13.
 func (e *Emitter) emitWorkerRunLoop(anyModuleTask bool) {

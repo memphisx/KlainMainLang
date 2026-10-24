@@ -799,12 +799,31 @@ func TestUnknownBuiltinMemberIsTS2339(t *testing.T) {
 	for src, want := range map[string]string{
 		"import * as fs from 'fs'; fs.nopeSync();":                                       `does not exist on type 'typeof import("fs")'`,
 		"import { EventEmitter } from 'events'; const e = new EventEmitter(); e.nope();": "property 'nope' does not exist",
+		// Interfaces only @types/node declares, and a builtin constructor's
+		// statics.
+		`const b = Buffer.from("hi"); console.log(b.nope);`:       "property 'nope' does not exist on type 'Buffer<ArrayBuffer>'",
+		`console.log(Buffer.nope);`:                               "property 'nope' does not exist on type 'BufferConstructor'",
+		`console.log(process.nope);`:                              "property 'nope' does not exist on type 'Process'",
+		`console.log(Map.nope);`:                                  "property 'nope' does not exist on type 'MapConstructor'",
+		`const t = setTimeout(() => {}, 1); console.log(t.nope);`: "property 'nope' does not exist on type 'Timeout'",
 	} {
 		_, err := parseAndCompileImports(t, src)
 		if err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%q: want %q, got %v", src, want, err)
 		}
 	}
+}
+
+// The members @types/node declares on Buffer, process and timers compile.
+func TestE2ENodeGlobalMembersCompile(t *testing.T) {
+	assertOutput(t, `const b = Buffer.from("hi");
+console.log(b.toString("hex"), b.length, b.readUInt8(0), Buffer.isBuffer(b), Buffer.byteLength("x"));
+console.log(typeof process.pid, typeof process.hrtime.bigint(), process.memoryUsage().rss > 0);
+const t = setTimeout(() => {}, 1); t.unref(); console.log(typeof t.hasRef());
+console.log(Buffer.poolSize);
+Buffer.poolSize = 16;
+Buffer.poolSize += 1;
+console.log(Buffer.poolSize);`, "6869 2 104 true 1\nnumber bigint true\nboolean\n65536\n17")
 }
 
 // `new X(…)` through a value's construct signatures checks its arguments,

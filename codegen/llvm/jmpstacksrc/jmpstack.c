@@ -12,6 +12,10 @@
 #endif
 
 #define JMP_SLOT 512   /* a jmp_buf on every target, 16-aligned (Win64) */
+/* The slot's last two words, past every target's jmp_buf (Win64's, the
+ * largest, is 256 bytes): the shadow call stack at the try. */
+#define JMP_FRAME_TOP (JMP_SLOT - 16)
+#define JMP_FRAME_BASE (JMP_SLOT - 8)
 #define JMP_CHUNK 64   /* slots per chunk */
 #define JMP_CHUNKS 256 /* chunks per stack: 16384 nested frames */
 
@@ -55,13 +59,13 @@ static char *slot(kml_jmpstack *s, int i) {
     return s->chunk[c] + (i % JMP_CHUNK) * JMP_SLOT;
 }
 
-void *__kml_jmp_stack_new(void) { return calloc(1, sizeof(kml_jmpstack)); }
+void *__kml_jmp_stack_new(void) { return calloc(1, sizeof(kml_jmpstack)); } /* scratch */
 
 void __kml_jmp_stack_free(void *p) {
     kml_jmpstack *s = (kml_jmpstack *)p;
     if (!s) return;
     for (int c = 0; c < JMP_CHUNKS && s->chunk[c]; c++) chunk_free(s->chunk[c]);
-    free(s);
+    free(s); /* scratch */
 }
 
 /* The next buffer, for the try frame setjmp'ing into it. */
@@ -73,7 +77,12 @@ void *__kml_push_jmpbuf(void) {
         exit(1);
     }
     __kml_jmp_top = t + 1;
-    return slot(cur(), t);
+    char *b = slot(cur(), t);
+    /* The shadow call stack as the try is entered (frames.c): a throw
+     * longjmps past every epilogue between, so it restores these. */
+    *(void **)(b + JMP_FRAME_TOP) = __kml_frame_top;
+    *(void **)(b + JMP_FRAME_BASE) = __kml_frame_base;
+    return b;
 }
 
 void __kml_pop_jmpbuf(void) { __kml_jmp_top--; }
@@ -81,5 +90,8 @@ void __kml_pop_jmpbuf(void) { __kml_jmp_top--; }
 /* The innermost buffer, popped, for a throw to longjmp to. */
 void *__kml_jmp_unwind_slot(void) {
     int t = --__kml_jmp_top;
-    return slot(cur(), t);
+    char *b = slot(cur(), t);
+    __kml_frame_top = *(void **)(b + JMP_FRAME_TOP);
+    __kml_frame_base = *(void **)(b + JMP_FRAME_BASE);
+    return b;
 }

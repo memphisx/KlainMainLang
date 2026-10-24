@@ -1,10 +1,7 @@
 // --- The comma / sequence operator (ADR-00179) ---
 // `(a, b, c)` evaluates each operand left to right and yields the last one.
-// Earlier operands run purely for their side effects.
-
-// The value is the last operand.
-const x = (1, 2, 3);
-console.log(x);  // 3
+// Earlier operands run purely for their side effects (an earlier operand
+// with none, as in `(1, 2)`, is TS2695 under the strict lane, as in tsc).
 
 // Earlier operands still execute (here, two console.log calls run first).
 const r = (console.log("first"), console.log("second"), 42);
@@ -16,12 +13,9 @@ let count = 0;
 const next = (count = count + 1, count * 10);
 console.log(count, next);  // 1 / 10
 
-// The last operand's type is the sequence's type — here a string. (The first
-// operand is written `count + 0` rather than a bare `count`: a sequence whose
-// first operand is a lone identifier, `(count, "ready")`, is instead parsed as
-// an arrow-function parameter list — a known limitation, see ADR-00179.)
-const label = (count + 0, "ready");
-console.log(label);  // ready
+// The last operand's type is the sequence's type — here a string.
+const label = (count++, "ready");
+console.log(label, count);  // ready 2
 
 // Useful in a condition: perform a side effect, then test.
 let a = 0;

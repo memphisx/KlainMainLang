@@ -4,6 +4,7 @@ import (
 	"KlainMainLang/ast"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
@@ -47,31 +48,32 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	}
 	// `let a: T[] | null = null` (or no initializer at all): the binding holds no
 	// array — a null header, which every read of a nullable binding guards.
-	if _, isNullLit := v.Init.(*ast.NullLiteral); ty.Nullable && (isNullLit || v.Init == nil) {
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	if _, isNullLit := v.Init.(*ast.NullLiteral); ty.Nullable() && (isNullLit || v.Init == nil) {
+		e.heapStore("ptr", "null", slot, 8)
 		return nil
 	}
 	ptrName := e.newArrayHeader("null", "0")
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrName, slot))
+	e.heapStore("ptr", ptrName, slot, 8)
 	lenName := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenName, arrayHeaderTy, ptrName))
 
 	if v.Init == nil {
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenName))
+		e.heapStore("ptr", "null", ptrName, 8)
+		e.heapStore("i64", "0", lenName, 8)
 		return nil
 	}
 
 	// Dynamic-size array: new Array<T>(runtimeSize) — built via
 	// emitNewArraySizedAggregate (TDD-00028's general-expression producer)
-	// and extracted here, the same "build the aggregate once, every
-	// consumer extracts from it" shape every branch below now shares.
+	// and its header taken here, the same "build the array value once, every
+	// consumer reads it" shape every branch below now shares.
 	if na, ok := v.Init.(*ast.NewArrayExpression); ok {
 		val, err := e.emitNewArraySizedAggregate(na, elemTy)
 		if err != nil {
 			return err
 		}
-		return e.storeArrayAggregateInto(val, ptrName, lenName)
+		e.heapStore("ptr", val.Ref, slot, 8)
+		return nil
 	}
 
 	// TypedArray construction: new Int8Array(...)/.../new Float64Array(...)
@@ -94,43 +96,46 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if err != nil {
 			return err
 		}
-		return e.storeArrayAggregateInto(val, ptrName, lenName)
+		e.heapStore("ptr", val.Ref, slot, 8)
+		return nil
 	}
 
 	// JSON.parse / Response.json() into an array type (`const xs: T[] =
 	// JSON.parse(...)`, or the same awaited): pass the array type through so
-	// projection builds a T[] aggregate (TDD-00077 P3), mirroring the scalar/
+	// projection builds a T[] array value (TDD-00077 P3), mirroring the scalar/
 	// object var-decl's own type-context branch. The generic emitExpr path below
 	// would call it with no type context.
 	if val, ok, err := e.emitDeclJSONProjection(v.Init, ty); ok {
 		if err != nil {
 			return err
 		}
-		return e.storeArrayAggregateInto(val, ptrName, lenName)
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, slot))
+		return nil
 	}
 
-	// Any other expression that produces a {ptr, i64} array aggregate — a
+	// Any other expression that produces an array value — a
 	// function call, an index expression (e.g. groupMap["key"]), a Map/Set
 	// method result, etc.
 	val, err := e.emitExpr(v.Init)
 	if err != nil {
 		return err
 	}
-	if val.Ty.IsDynamic {
+	if val.Ty.IsDynamic() {
 		// `const xs: T[] = anyValue` (an assertion in TS), or the array member
 		// of a union the checker narrowed to it: the box's array.
 		val = e.emitUnboxBoxToType(val.Ref, ty)
 	}
-	if val.Ty.IsClass && !val.Ty.IsArray {
-		// An instance of a class extending Array: the array its body is.
-		val = e.coerce(val, ty)
+	if val.Ty.IsClass() && !val.Ty.IsArray() || val.Ty.IsTuple() && !val.Ty.IsArray() {
+		// An instance of a class extending Array: the array its body is; a
+		// tuple: its elements.
+		val = e.convert(val, ty)
 	}
-	if !val.Ty.IsArray {
+	if !val.Ty.IsArray() {
 		return fmt.Errorf("%d:%d: array variable must be initialized with an array expression", v.GetPos().Line, v.GetPos().Col)
 	}
 	// A concrete array into an `any[]` binding (or the reverse): its elements
 	// converted, in a copy.
-	if conv, ok := e.coerceArrayElems(val, ty); ok {
+	if conv, ok := e.convertArrayElems(val, ty); ok {
 		val = conv
 	}
 	// Reference semantics (TDD-00213 Stage 1): if the initializer is an existing
@@ -138,7 +143,7 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	// point this binding's slot at the SAME header cell so the two bindings alias
 	// — a `push` through either is visible through the other, and they are `===`.
 	// The fresh header minted above is discarded; a genuinely new array
-	// expression (literal/new/slice/HOF — no ArrayHeader) keeps it and fills it.
+	// expression (literal/new/slice/HOF) keeps it and fills it.
 	// A nullable-array initializer (a `Map<K,T[]>` get that may miss) binds a
 	// `T[] | undefined`: remember the nullability on the symbol so a later
 	// identifier load rebuilds it null-safely and its truthiness tests the
@@ -146,176 +151,172 @@ func (e *Emitter) emitArrayVarDecl(v *ast.VarDeclaration, ty Type) error {
 	// local (a promoted global keeps its declared type). A non-nullable
 	// annotation (`const a: T[] = c ? x : y`) is the binding's type whatever
 	// the initializer's branches look like.
-	if val.Ty.Nullable && !e.promotedGlobalDecls[v] && (v.TypeAnnot == nil || v.TypeAnnot.Nullable) {
+	if val.Ty.Nullable() && !e.promotedGlobalDecls[v] && (v.TypeAnnot == nil || v.TypeAnnot.Nullable) {
 		if sym, ok := e.lookup(v.Name); ok {
-			sym.Ty.Nullable = true
+			sym.Ty.setNullable(true)
 			e.define(v.Name, sym)
 		}
 	}
-	if val.ArrayHeader != "" {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.ArrayHeader, slot))
-		return nil
-	}
-	if val.Ty.Nullable && (ty.Nullable || !e.promotedGlobalDecls[v]) {
-		// A header-less possibly-absent value (a RegExp miss): absent binds the
-		// null header, so the binding's absence test is the header alone.
-		sel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, e.emitArrayIsAbsent(val), ptrName))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sel, slot))
-	}
-	return e.storeArrayAggregateInto(val, ptrName, lenName)
-}
-
-// storeArrayAggregateInto extracts val's {ptr, i64} aggregate into a
-// var-decl's own two allocas (the "Named Symbol" array representation —
-// see the project's own Array value duality note) — the common tail every
-// emitArrayVarDecl branch now shares.
-func (e *Emitter) storeArrayAggregateInto(val Value, ptrName, lenName string) error {
-	ptrReg := e.freshReg()
-	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptrReg, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lenName))
+	e.heapStore("ptr", val.Ref, slot, 8)
 	return nil
 }
 
-// loadArrayFieldValue reads an array-typed struct field into a plain {ptr,i64}
-// array Value. Under the header-pointer field model (TDD-00213 Stage 2) a struct
-// slot for an array holds a pointer to a shared {data,len} header, so this loads
-// the header, derefs its data/len into the aggregate, and carries the header in
-// ArrayHeader — making a binding of the field value alias the same array
-// (`let x = obj.arr`) and a mutation through the field visible. A null header (a
-// calloc'd/absent field) reads as the {null,0} empty array, matching the
-// pre-migration inline behavior. fieldSlot is the field's GEP address.
+// loadArrayFieldValue reads an array-typed struct field: the field slot holds
+// the array's shared header (TDD-00213 Stage 2), which is the value, so a
+// binding of the field aliases it. A null header (a calloc'd field) is absent
+// for a nullable type, else the empty array. fieldSlot is the field's GEP
+// address.
 func (e *Emitter) loadArrayFieldValue(fieldSlot string, fieldTy Type) Value {
 	header := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, fieldSlot))
-	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, header))
-	nullL := e.freshLabel("arrfld.null")
-	loadL := e.freshLabel("arrfld.load")
-	doneL := e.freshLabel("arrfld.done")
+	if fieldTy.Nullable() {
+		return Value{Ref: header, Ty: fieldTy}
+	}
+	return Value{Ref: e.nonNullArrayHeader(header), Ty: fieldTy}
+}
+
+// nonNullArrayHeader is header, or a fresh empty array's header when it is
+// null.
+func (e *Emitter) nonNullArrayHeader(header string) string {
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", slot))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, loadL))
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, slot))
+	nullL := e.freshLabel("arrhdr.null")
+	doneL := e.freshLabel("arrhdr.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(header), nullL, doneL))
 	e.emitLabel(nullL)
-	e.emitInstr(fmt.Sprintf("store {ptr, i64} {ptr null, i64 0}, ptr %s, align 8", slot))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(loadL)
-	agg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, header))
-	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", agg, slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.newArrayHeader("null", "0"), slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", out, slot))
-	return Value{Ref: out, Ty: fieldTy, ArrayHeader: header}
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	return out
 }
 
-// loadArraySlotAggregate is the branchless sibling of loadArrayFieldValue for a
-// slot that is ALWAYS written before it is read (a generator/promise/iterator
-// state-struct slot, never a calloc'd-and-untouched object field) — it derefs the
-// header without the null guard, so it introduces no basic blocks and is safe to
-// call inside a state machine's linear control flow. The slot holds a header
-// pointer (TDD-00213 Stage 2); the returned Value carries it in ArrayHeader.
+// loadArraySlotAggregate reads an array from a slot that is always written
+// before it is read (a generator/promise/iterator state-struct slot): the
+// header it holds, with no null guard and no basic blocks, so it is safe
+// inside a state machine's linear control flow.
 func (e *Emitter) loadArraySlotAggregate(slot string, ty Type) Value {
 	header := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, slot))
-	agg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, header))
-	return Value{Ref: agg, Ty: ty, ArrayHeader: header}
+	return Value{Ref: header, Ty: ty}
 }
 
-// arrayReturnHeader produces the header pointer to return an array value across
-// the `ret ptr` array ABI (TDD-00213 Stage 3): it shares the value's live header
-// when it has one (a returned field/global/captured/named array keeps its
-// identity so the caller aliases the same array), else mints a fresh header from
-// the {data,len} aggregate (a transient/new array expression). Mirrors
-// storeArrayFieldHeader, the field-storage analogue.
-//
-// A possibly-absent header-less value (a RegExp miss — absent by its null data
-// pointer) yields the null header, so absence has one meaning across the ABI.
+// arrayReturnHeader is the header pointer an array value crosses the `ret ptr`
+// array ABI (TDD-00213 Stage 3) and every header-pointer slot with: the value
+// itself, since an array value is its shared header (TDD-00230 P3.3).
 func (e *Emitter) arrayReturnHeader(val Value) string {
-	if val.ArrayHeader != "" {
-		return val.ArrayHeader
-	}
-	if val.Ty.Nullable {
-		sel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, e.emitArrayIsAbsent(val), e.boxArrayValue(val)))
-		return sel
-	}
-	return e.boxArrayValue(val)
+	return val.Ref
 }
 
-// arrayValueFromHeaderReg wraps an array `ret ptr` call result (a header pointer,
-// TDD-00213 Stage 3) into an ordinary {ptr,i64} array Value: it derefs the header
-// for the aggregate and carries the header in ArrayHeader, so binding the call
-// result aliases the returned array (`let x = f(); x === f()`'s source shares one
-// header). headerReg is the raw call-instruction result.
+// arrayValueFromHeaderReg is the array value a header pointer is (an array
+// `ret ptr` call result, TDD-00213 Stage 3).
 func (e *Emitter) arrayValueFromHeaderReg(headerReg string, ty Type) Value {
-	if ty.Nullable {
-		// A `T[] | null` result may be the null header (arrayReturnHeader): read
-		// the shared all-zero cell instead. Branchless — this runs inside state
-		// machines' linear control flow too.
-		return e.loadArrayHeaderOrAbsent(headerReg, ty)
-	}
-	agg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, headerReg))
-	return Value{Ref: agg, Ty: ty, ArrayHeader: headerReg}
+	return Value{Ref: headerReg, Ty: ty}
 }
 
-// arrayValueFromHeaderSlotGuarded is the null-guarded sibling of
-// arrayValueFromHeaderReg: `header` is a header pointer that may be null (e.g. a
-// Map<K,T[]> get() miss returns 0 → inttoptr null). A null header reads as the
-// {null,0} empty array instead of dereferencing null, mirroring
-// loadArrayFieldValue's absent-field guard.
-func (e *Emitter) arrayValueFromHeaderSlotGuarded(header string, ty Type) Value {
-	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, header))
-	nullL := e.freshLabel("arrhdr.null")
-	loadL := e.freshLabel("arrhdr.load")
-	doneL := e.freshLabel("arrhdr.done")
-	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, i64}, align 8", slot))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, loadL))
-	e.emitLabel(nullL)
-	e.emitInstr(fmt.Sprintf("store {ptr, i64} {ptr null, i64 0}, ptr %s, align 8", slot))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(loadL)
-	agg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, header))
-	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", agg, slot))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(doneL)
-	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", out, slot))
-	return Value{Ref: out, Ty: ty, ArrayHeader: header}
-}
-
-// storeArrayFieldHeader stores an array Value into a header-pointer field slot
-// (TDD-00213 Stage 2): it shares the value's live header when it has one
-// (reference semantics — `obj.arr = existingArray` aliases), else mints a fresh
-// header from the {data,len} aggregate (a new array expression). fieldSlot is the
-// field's GEP address.
+// storeArrayFieldHeader stores an array value into a header-pointer field slot
+// (TDD-00213 Stage 2): the value is its header, so `obj.arr = xs` aliases xs,
+// and an absent value stores the null header.
 func (e *Emitter) storeArrayFieldHeader(fieldSlot string, val Value) {
-	// arrayReturnHeader: a header-less absent value of a nullable type (a SQL
-	// NULL blob, a RegExp miss) stores the null header — the field's absence.
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(val), fieldSlot))
+	e.heapStore("ptr", val.Ref, fieldSlot, 8)
 }
 
-// boxArrayValue heap-allocates a 16-byte {ptr, i64} box and stores val's
-// aggregate into it, returning the box pointer — the storage TDD-00029 uses
-// for a nested-array element so an outer array's backing buffer can stay a
-// uniform 8-byte-per-slot layout (elemTy.IR/Align() already report "ptr"/8
-// for an array-typed elemTy) instead of needing 16-byte slots only when the
-// element happens to itself be an array. One extra malloc + one extra
-// indirection per nested-array element access is the accepted cost — see
-// docs/tdd/TDD-00029.md's Design for the (a)-vs-(b) tradeoff this resolves.
+// boxArrayValue is the header pointer an array value stores into an 8-byte
+// slot (a nested-array element, TDD-00029): the value itself.
 func (e *Emitter) boxArrayValue(val Value) string {
-	box := e.allocArrayHeader()
-	e.emitInstr(fmt.Sprintf("store {ptr, i64} %s, ptr %s, align 8", val.Ref, box))
-	return box
+	return val.Ref
+}
+
+// mkArray is the array value of type ty over a data pointer and length: a
+// fresh header holding them.
+func (e *Emitter) mkArray(dataReg, lenReg string, ty Type) Value {
+	return Value{Ref: e.newArrayHeader(dataReg, lenReg), Ty: ty}
+}
+
+// arrayFromAgg is the array value of type ty over a runtime routine's
+// {data, len} aggregate result: a fresh header holding them.
+func (e *Emitter) arrayFromAgg(aggReg string, ty Type) Value {
+	d, n := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", d, aggReg))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", n, aggReg))
+	return e.mkArray(d, n, ty)
+}
+
+// arrayAggOf is an array value's current {data, len} as an aggregate, for a
+// runtime routine that takes one by value.
+func (e *Emitter) arrayAggOf(v Value) string {
+	d, n := e.arrayParts(v)
+	a0, a1 := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", a0, d))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", a1, a0, n))
+	return a1
+}
+
+// storeArrayPartsInto writes an array value's current data pointer and length
+// into an inline header at hdr (a class-extends-Array instance's body).
+func (e *Emitter) storeArrayPartsInto(v Value, hdr string) {
+	d, n := e.arrayParts(v)
+	lp := e.freshReg()
+	e.heapStore("ptr", d, hdr, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lp, arrayHeaderTy, hdr))
+	e.heapStore("i64", n, lp, 8)
+	e.storeArrayHolesNull(hdr)
+}
+
+// arrayHolesOff is the offset of an array header's holes word (TDD-00226):
+// null for a packed array, else the bitmap of its holes.
+const arrayHolesOff = 16
+
+// arrayHeaderSize is an array header's size past its header word:
+// {data, len, holes}.
+const arrayHeaderSize = 24
+
+// storeArrayHolesNull marks the header at hdr packed.
+func (e *Emitter) storeArrayHolesNull(hdr string) {
+	hp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", hp, hdr, arrayHolesOff))
+	e.heapStore("ptr", "null", hp, 8)
+}
+
+// arrayParts loads an array value's current data pointer and length from its
+// header. A null header (an absent array) reads as the empty array.
+func (e *Emitter) arrayParts(v Value) (data, n string) {
+	h := e.absentSafeArrayHeader(v.Ref)
+	data, n = e.freshReg(), e.freshReg()
+	lp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, h))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lp, arrayHeaderTy, h))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, lp))
+	return data, n
+}
+
+// arrayLen loads an array value's current length.
+func (e *Emitter) arrayLen(v Value) string {
+	_, n := e.arrayParts(v)
+	return n
+}
+
+// arrayData loads an array value's current data pointer.
+func (e *Emitter) arrayData(v Value) string {
+	d, _ := e.arrayParts(v)
+	return d
+}
+
+// absentSafeArrayHeader is header, or the shared read-only empty cell when it
+// is null — branchless, so it is safe inside a state machine's linear flow.
+func (e *Emitter) absentSafeArrayHeader(header string) string {
+	if header == "null" || header == "zeroinitializer" {
+		header = "null"
+	}
+	if !e.usedAbsentArrayCell {
+		e.usedAbsentArrayCell = true
+		e.emitGlobal(fmt.Sprintf("@__kml_absent_array_cell = internal constant {i64, ptr, i64, ptr} {i64 %d, ptr null, i64 0, ptr null}, align 8", e.arrayHeaderWord()|kmlHdrImmortal))
+	}
+	src := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr getelementptr (i8, ptr @__kml_absent_array_cell, i64 8), ptr %s", src, e.ptrIsNull(header), header))
+	return src
 }
 
 // arrayHeaderTy is the LLVM type of a named array's shared header cell — a
@@ -338,8 +339,9 @@ func (e *Emitter) newArrayHeader(dataReg, lenReg string) string {
 	h := e.allocArrayHeader()
 	lp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lp, arrayHeaderTy, h))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, h))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, lp))
+	e.heapStore("ptr", dataReg, h, 8)
+	e.heapStore("i64", lenReg, lp, 8)
+	e.storeArrayHolesNull(h)
 	return h
 }
 
@@ -349,10 +351,78 @@ func (e *Emitter) arrayHeaderWord() int64 {
 	return e.stableTypeID("HArray") | hostTypeIDFlag
 }
 
+// argumentsHeaderWord is an Arguments object's header word: an array
+// header (its elements, its length) that is no Array (Array.isArray,
+// constructor, inspection, JSON).
+func (e *Emitter) argumentsHeaderWord() int64 {
+	return e.stableTypeID("HArguments") | hostTypeIDFlag
+}
+
+// emitArrayIsArguments is whether the array header hdr (an any[] value) is
+// an Arguments object's, by its word; a null header is not.
+func (e *Emitter) emitArrayIsArguments(hdr string) string {
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, hdr))
+	r := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", r))
+	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", r))
+	readL, doneL := e.freshLabel("isargs.read"), e.freshLabel("isargs.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, readL))
+	e.emitLabel(readL)
+	wp, w, is := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", wp, hdr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, wp))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, e.headerIdentity(w), e.argumentsHeaderWord()))
+	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", is, r))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", out, r))
+	return out
+}
+
+// emitArgumentsBranch is a ptr-valued result for the array value v: args()
+// when v holds an Arguments object, else plain(). Without an any[] type,
+// plain() alone.
+func (e *Emitter) emitArgumentsBranch(v Value, args, plain func() (Value, error)) (Value, error) {
+	if !mayBeArguments(v.Ty) || v.Ref == "zeroinitializer" {
+		return plain()
+	}
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+	argsL, plainL, doneL := e.freshLabel("args.yes"), e.freshLabel("args.no"), e.freshLabel("args.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayIsArguments(v.Ref), argsL, plainL))
+	for i, fn := range []func() (Value, error){args, plain} {
+		if i == 0 {
+			e.emitLabel(argsL)
+		} else {
+			e.emitLabel(plainL)
+		}
+		r, err := fn()
+		if err != nil {
+			return Value{}, err
+		}
+		if !e.blockDone {
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r.Ref, out))
+			e.emitTerminator("br label %" + doneL)
+		}
+	}
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, out))
+	return Value{Ref: r, Ty: TypePtr}, nil
+}
+
+// mayBeArguments reports whether t, an array type, may hold an Arguments
+// object: an any[] (the type `arguments` has).
+func mayBeArguments(t Type) bool {
+	return t.IsArray() && !t.IsTypedArray() && !t.IsBuffer() && t.ElemType != nil && t.ElemType.IsDynamic() && !t.IsTuple()
+}
+
 // allocArrayHeader mallocs an array header with its header word, returning
 // the header (past the word); its {data, len} fields are left to the caller.
 func (e *Emitter) allocArrayHeader() string {
-	return e.allocArrayHeaderSized(16, false)
+	return e.allocArrayHeaderSized(arrayHeaderSize, false)
 }
 
 // allocArrayHeaderSized is allocArrayHeader for a header of size bytes (an
@@ -362,12 +432,12 @@ func (e *Emitter) allocArrayHeaderSized(size int, zero bool) string {
 	base, h := e.freshReg(), e.freshReg()
 	if zero {
 		e.ensureCalloc()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", base, size+8))
+		e.heapCallocInto(base, "1", fmt.Sprint(size+8))
 	} else {
 		e.ensureMalloc()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", base, size+8))
+		e.heapMallocInto(base, fmt.Sprint(size+8))
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", e.arrayHeaderWord(), base))
+	e.heapStore("i64", fmt.Sprint(e.arrayHeaderWord()), base, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", h, base))
 	return h
 }
@@ -393,7 +463,7 @@ func (e *Emitter) arrayDataLenSlots(sym Symbol) (dataSlot, lenSlot string) {
 func (e *Emitter) nullSafeArrayHeader(header string) string {
 	if !e.fnDecls["__kml_empty_arr_hdr"] {
 		e.fnDecls["__kml_empty_arr_hdr"] = true
-		e.emitGlobal(fmt.Sprintf("@__kml_empty_arr_cell = internal global {i64, ptr, i64} {i64 %d, ptr null, i64 0}, align 8", e.arrayHeaderWord()))
+		e.emitGlobal(fmt.Sprintf("@__kml_empty_arr_cell = internal global {i64, ptr, i64, ptr} {i64 %d, ptr null, i64 0, ptr null}, align 8", e.arrayHeaderWord()|kmlHdrImmortal))
 	}
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, header))
@@ -413,73 +483,34 @@ func (e *Emitter) newArrayHeaderSlot(dataReg, lenReg string) string {
 	return slot
 }
 
-// newArrayHeaderSlotFromAggregate boxes an array aggregate Value into a fresh
-// header and returns a stable slot (`alloca ptr`) pointing at it — the storage
-// of a named array variable initialised from an expression result (TDD-00127).
+// newArrayHeaderSlotFromAggregate returns a stable slot (`alloca ptr`) holding
+// an array value's header — the storage of a named array variable (TDD-00127).
 func (e *Emitter) newArrayHeaderSlotFromAggregate(val Value) string {
-	header := e.boxArrayValue(val)
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, slot))
+	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, slot))
 	return slot
 }
 
-// arrayArgFromAggregate produces the {data, len} header to pass an array Value
-// as a (ptr, i64) call argument under the object-reference ABI (TDD-00127).
-// A Value carrying a live header (a field read, nested element, returned or
-// captured array) passes that SAME header so mutations inside the callee
-// (push/splice) propagate — JS reference semantics across every argument
-// shape, not just named variables. Only a genuinely transient expression
-// (literal, slice/map result — no ArrayHeader) gets a fresh header: the callee
-// may mutate it, but it has no caller-visible identity. A carried header can
-// be null (an absent field, a Map get miss, undefined through `any`): it
-// passes as is, and the callee sees undefined.
+// arrayArgFromAggregate produces the (header, len) pair that passes an array
+// value as a (ptr, i64) call argument (TDD-00127): its own header, so a
+// mutation inside the callee reaches the caller. A null header (an absent
+// array) passes as is, and the callee sees undefined.
 func (e *Emitter) arrayArgFromAggregate(val Value) (header, lenReg string) {
-	lenReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-	if val.ArrayHeader == "" {
-		return e.boxArrayValue(val), lenReg
-	}
-	return val.ArrayHeader, lenReg
+	return val.Ref, e.arrayLen(val)
 }
 
 // packArrayArg produces the (headerReg, lenReg) pair to pass an array argument
-// under the object-reference ABI (TDD-00127). When the argument is a named array
-// variable, its own header pointer is passed, so an in-place mutation inside the
-// callee (push/splice) propagates back to the caller — JS reference semantics.
-// Any other array expression goes through arrayArgFromAggregate, which shares
-// the value's own live header when it carries one (a member/index/field read)
-// and mints a fresh header only for a true transient.
-//
-// An absent array crosses the call as a null header: the callee reads it as
-// undefined, with length 0.
+// under the object-reference ABI (TDD-00127): the value's header, so an
+// in-place mutation inside the callee propagates back to the caller. An absent
+// array crosses the call as a null header: the callee reads it as undefined,
+// with length 0.
 func (e *Emitter) packArrayArg(arg ast.Expression, val Value, paramTy Type) (header, lenReg string) {
-	if id, ok := arg.(*ast.Identifier); ok {
-		if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray {
-			// The header itself: null for an absent array or undefined, which
-			// the callee reads null-safely (nullSafeArrayHeader) and guards
-			// before writing.
-			h := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, sym.Ptr))
-			lenSlot := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lenSlot, arrayHeaderTy, e.nullSafeArrayHeader(h)))
-			lr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lr, lenSlot))
-			return h, lr
+	if val.Ref == "" {
+		// A named array: its binding's header.
+		if v, err := e.emitExpr(arg); err == nil {
+			val = v
 		}
-	}
-	if paramTy.Nullable && val.Ty.Nullable {
-		// A possibly-absent value into a parameter that can be absent: keep a
-		// carried header as is; a header-less transient is absent exactly when
-		// its data pointer is null (a `null` literal, a RegExp miss).
-		if val.ArrayHeader != "" {
-			return val.ArrayHeader, "0"
-		}
-		lenReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
-		sel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, e.emitArrayIsAbsent(val), e.boxArrayValue(val)))
-		return sel, lenReg
 	}
 	return e.arrayArgFromAggregate(val)
 }
@@ -495,54 +526,67 @@ func (e *Emitter) emptyArrayArgHeader() string {
 // null header — the absent array, `undefined` in the callee — when the
 // parameter's type can say so, else the empty array it has always been.
 func (e *Emitter) omittedArrayArgHeader(paramTy Type) string {
-	if paramTy.Nullable {
+	if paramTy.Nullable() {
 		return "null"
 	}
 	return e.emptyArrayArgHeader()
 }
 
-// emitAbsentArrayValue is the `null`/`undefined` value of a nullable array type:
-// the {null,0} aggregate carrying a null header, which is what every absence
-// test consults (emitArrayIsAbsent).
+// emitAbsentArrayValue is the `null`/`undefined` value of a nullable array
+// type: the null header.
 func (e *Emitter) emitAbsentArrayValue(ty Type) Value {
-	return Value{Ref: "zeroinitializer", Ty: ty, ArrayHeader: "null"}
+	return Value{Ref: "null", Ty: ty}
 }
 
-// emitArrayIsAbsent yields the i1 "this nullable array value is null/undefined".
-// The header decides when the value carries one — a present array, even an
-// empty one, has a header — and the data pointer otherwise (a header-less
-// transient: a RegExp miss, a `find` miss).
+// emitArrayIsAbsent yields the i1 "this nullable array value is
+// null/undefined": its header is null. A present array, even an empty one,
+// has a header.
 func (e *Emitter) emitArrayIsAbsent(v Value) string {
-	if v.ArrayHeader != "" {
-		return e.ptrIsNull(v.ArrayHeader)
+	if v.Ref == "zeroinitializer" {
+		return "true"
 	}
-	d := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", d, v.Ref))
-	return e.ptrIsNull(d)
+	// The null header, or nullRef (null unboxed from `any`).
+	isRef, r := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isRef, v.Ref, e.nullRef()))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", r, e.ptrIsNull(v.Ref), isRef))
+	return r
 }
 
 // iterableDisplayName renders an iterated expression the way Node names it in
 // "… is not iterable": `xs`, `o.tags`, `this.items`, `f(...)`.
-func iterableDisplayName(expr ast.Expression) string {
+func (e *Emitter) iterableDisplayName(expr ast.Expression) string {
 	switch ex := expr.(type) {
 	case *ast.Identifier:
-		return demangleModuleName(ex.Name)
+		return e.displayName(ex.Name)
 	case *ast.ThisExpression:
 		return "this"
 	case *ast.MemberExpression:
-		return iterableDisplayName(ex.Object) + "." + ex.Property
+		return e.iterableDisplayName(ex.Object) + "." + ex.Property
 	case *ast.NonNullExpression:
-		return iterableDisplayName(ex.Arg)
+		return e.iterableDisplayName(ex.Arg)
 	case *ast.CallExpression:
-		return iterableDisplayName(ex.Callee) + " is not a function or its return value"
+		return e.iterableDisplayName(ex.Callee) + " is not a function or its return value"
 	}
 	return "object"
+}
+
+// displayName is a binding's name as a message shows it: a binding the
+// compiler synthesized (bindValue, a host body) shows the expression it
+// stands for, or "object".
+func (e *Emitter) displayName(name string) string {
+	if d, ok := e.synthDisplay[name]; ok {
+		return d
+	}
+	if strings.HasPrefix(name, "__kml_bound_") || strings.HasPrefix(name, "__kml_hostbody_") || strings.HasPrefix(name, "__kml_dynarr_") {
+		return "object"
+	}
+	return demangleModuleName(name)
 }
 
 // emitNotIterableValueGuard is emitNotIterableGuard for an array *value* (a
 // field read, a call result) of a nullable type.
 func (e *Emitter) emitNotIterableValueGuard(expr ast.Expression, v Value) {
-	if !v.Ty.IsArray || !v.Ty.Nullable || e.blockDone {
+	if !v.Ty.IsArray() || !v.Ty.Nullable() || e.blockDone {
 		return
 	}
 	e.ensureNullDerefThrow()
@@ -550,7 +594,7 @@ func (e *Emitter) emitNotIterableValueGuard(expr ast.Expression, v Value) {
 	okL := e.freshLabel("notiter.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayIsAbsent(v), throwL, okL))
 	e.emitLabel(throwL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw_nullderef(ptr %s)", e.internString(iterableDisplayName(expr)+" is not iterable")))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_nullderef(ptr %s)", e.internString(e.iterableDisplayName(expr)+" is not iterable")))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 }
@@ -559,7 +603,7 @@ func (e *Emitter) emitNotIterableValueGuard(expr ast.Expression, v Value) {
 // nullable array binding sym (named name) holds no array — the check `for…of`
 // and spread make before touching the header.
 func (e *Emitter) emitNotIterableGuard(name string, sym Symbol) {
-	e.emitArrayBindingGuard(sym, demangleModuleName(name)+" is not iterable")
+	e.emitArrayBindingGuard(sym, e.displayName(name)+" is not iterable")
 }
 
 // emitArrayBindingGuard throws a TypeError with msg when the array binding
@@ -579,6 +623,16 @@ func (e *Emitter) emitArrayBindingGuard(sym Symbol, msg string) {
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw_nullderef(ptr %s)", e.internString(msg)))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
+}
+
+// bindArrayParamPattern binds an array parameter, then unpacks a rest
+// object pattern (`...{ length }`) over the collected array.
+func (e *Emitter) bindArrayParamPattern(p ast.Param, pty Type) error {
+	e.bindArrayParam(p.Name, pty)
+	if p.ObjectPattern == nil {
+		return nil
+	}
+	return e.emitStmt(ast.NewObjectDestructuring("let", p.ObjectPattern, ast.NewIdentifier(p.Name, p.Pos), p.Pos))
 }
 
 // bindArrayParam binds an array-typed function/method/closure parameter under
@@ -604,35 +658,14 @@ func (e *Emitter) bindArrayParam(name string, pty Type) {
 	e.define(name, Symbol{Ptr: slot, Ty: pty})
 }
 
-// unboxArrayValue loads the {ptr, i64} aggregate out of a box pointer
-// produced by boxArrayValue, returning it as an ordinary array Value —
-// exactly the representation every other array-producing expression already
-// returns (function return, literal, slice, ...), so nothing downstream of a
-// nested-array element read needs to know boxing happened at all. The box IS
-// the element's live {data,len} header (one shared cell per nested array), so
-// the Value carries it in ArrayHeader — a nested element passed onward (call
-// argument, binding, HOF callback element) then aliases the same array
-// instead of snapshotting (TDD-00127 residual).
-//
-// A null box is an absent element (`[xs.at(9)]`, storeArrayElem): it reads as
-// the {null,0} aggregate carrying the null header, never through the pointer.
+// unboxArrayValue reads a nested-array element's header (TDD-00029).
 func (e *Emitter) unboxArrayValue(boxPtr string, elemTy Type) Value {
-	return e.loadArrayHeaderOrAbsent(boxPtr, elemTy)
+	return Value{Ref: boxPtr, Ty: elemTy}
 }
 
-// loadArrayHeaderOrAbsent reads the {data,len} aggregate behind a header that
-// may be null, selecting one shared all-zero cell for the null case —
-// branchless, so it is safe inside a state machine's linear control flow.
+// loadArrayHeaderOrAbsent is the array value a possibly-null header is.
 func (e *Emitter) loadArrayHeaderOrAbsent(header string, ty Type) Value {
-	if !e.usedAbsentArrayCell {
-		e.usedAbsentArrayCell = true
-		e.emitGlobal(fmt.Sprintf("@__kml_absent_array_cell = internal constant {i64, ptr, i64} {i64 %d, ptr null, i64 0}, align 8", e.arrayHeaderWord()))
-	}
-	src := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr getelementptr (i8, ptr @__kml_absent_array_cell, i64 8), ptr %s", src, e.ptrIsNull(header), header))
-	agg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, src))
-	return Value{Ref: agg, Ty: ty, ArrayHeader: header}
+	return Value{Ref: header, Ty: ty}
 }
 
 // loadArrayElem loads the value at a GEP'd array-backing-buffer slot
@@ -648,7 +681,7 @@ func (e *Emitter) loadArrayElem(gepReg string, elemTy Type) Value {
 		elemTy.Inline = false
 		return Value{Ref: gepReg, Ty: elemTy}
 	}
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		boxPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", boxPtr, gepReg))
 		return e.unboxArrayValue(boxPtr, elemTy)
@@ -659,49 +692,17 @@ func (e *Emitter) loadArrayElem(gepReg string, elemTy Type) Value {
 }
 
 // loadArrayElemMaybeNull is loadArrayElem for a slot that may itself hold a
-// null box pointer — a "no match" sentinel (e.g. .find()'s own pre-loop
-// zero-init, reusing the same "0/null doubles as absent" convention
-// .find() already established for every other element type). Unboxing a
-// null box would dereference null; this branches around the unbox instead
-// and produces the {ptr:null,i64:0} "null array" sentinel shape
-// RegExp.exec()'s own T[] | null result already uses, rather than crashing.
-// Only meaningful for elemTy.IsArray — added alongside ADR-00151/TDD-00059
-// lifting rejectNestedArrayElem for the callback-invoking HOF methods.
+// null box pointer — a "no match" sentinel (.find()'s pre-loop zero-init):
+// the null header, the absent array.
 func (e *Emitter) loadArrayElemMaybeNull(slotPtr string, elemTy Type) Value {
 	boxPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", boxPtr, slotPtr))
-	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, boxPtr))
-	nullL := e.freshLabel("arrelem.null")
-	foundL := e.freshLabel("arrelem.found")
-	doneL := e.freshLabel("arrelem.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, foundL))
-
-	e.emitLabel(nullL)
-	r0 := e.freshReg()
-	nullAgg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", r0))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", nullAgg, r0))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-
-	e.emitLabel(foundL)
-	foundAgg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", foundAgg, boxPtr))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-
-	e.emitLabel(doneL)
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi {ptr, i64} [ %s, %%%s ], [ %s, %%%s ]", result, nullAgg, nullL, foundAgg, foundL))
-	// The box IS the element's live header; carry it (possibly null — the
-	// "no match" sentinel, which downstream consumers null-guard) so a found
-	// element aliases the source array (TDD-00127 residual).
-	return Value{Ref: result, Ty: elemTy, ArrayHeader: boxPtr}
+	return Value{Ref: boxPtr, Ty: elemTy}
 }
 
 // storeArrayElem stores val (of type elemTy) into a GEP'd array-backing-
-// buffer slot. For a nested-array element, val's {ptr,i64} aggregate is
-// boxed first (see boxArrayValue) and the box pointer is what's actually
-// stored in the slot; every other element type stores directly, unchanged
+// buffer slot. For a nested-array element, val's header pointer is
+// stored in the slot (see boxArrayValue); every other element type stores directly, unchanged
 // from before TDD-00029. Use this instead of a raw
 // `store elemTy.IR val.Ref, ptr gepReg` at any array-element-write call site.
 func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
@@ -712,21 +713,21 @@ func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
 		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", gepReg, val.Ref, elemTy.StructSize()))
 		return
 	}
-	if elemTy.IsArray && isSelfDescribingBox(val.Ty) {
+	if elemTy.IsArray() && isSelfDescribingBox(val.Ty) {
 		// An `any` element into an array-of-arrays (or Buffer[]): the box's
 		// array.
 		val = e.emitUnboxBoxToType(val.Ref, elemTy)
 	}
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		// Share the value's live header when it has one (reference semantics:
 		// `m[i] = existingArray` aliases, matching storeArrayFieldHeader); a
 		// new array expression mints its own box. A null carried header (an
 		// absent field read) falls back to the fresh box, since element reads
 		// unbox unguarded.
-		box := val.ArrayHeader
+		box := val.Ref
 		if box == "" {
 			box = e.arrayReturnHeader(val) // a null box for an absent value
-		} else if val.Ty.Nullable {
+		} else if val.Ty.Nullable() {
 			// keep a carried null header: the element is absent
 		} else {
 			fresh := e.boxArrayValue(val)
@@ -736,10 +737,10 @@ func (e *Emitter) storeArrayElem(gepReg string, elemTy Type, val Value) {
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNull, fresh, box))
 			box = sel
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", box, gepReg))
+		e.heapStore("ptr", box, gepReg, 8)
 		return
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+	e.heapStore(elemTy.IR, val.Ref, gepReg, elemTy.Align())
 }
 
 // emitBoxCopyLoop copies srcLen elements from srcPtr (a buffer of srcElemTy
@@ -765,10 +766,10 @@ func (e *Emitter) emitBoxCopyLoop(dst, srcPtr, srcLen string, srcElemTy Type) {
 	srcGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcGep, srcElemTy.IR, srcPtr, idxVal))
 	srcElem := e.loadArrayElem(srcGep, srcElemTy)
-	boxed := e.coerce(srcElem, TypeAny)
+	boxed := e.convert(srcElem, TypeAny)
 	dstGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", dstGep, dst, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, dstGep))
+	e.heapStore("i64", boxed.Ref, dstGep, 8)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
@@ -777,9 +778,8 @@ func (e *Emitter) emitBoxCopyLoop(dst, srcPtr, srcLen string, srcElemTy Type) {
 }
 
 // emitScalarZero emits a zero constant of the given scalar type as a Value.
-// For an aggregate type (array {ptr,i64}) the caller should emit the two-part
-// insertvalue {ptr,i64} undef, ptr null, 0 / insertvalue {ptr,i64} ..., i64 0, 1
-// pattern directly instead — this helper is for scalar-typed zeros only.
+// For an array type the caller should use mkArray / the null header instead —
+// this helper is for scalar-typed zeros only.
 func (e *Emitter) emitScalarZero(t Type) Value {
 	zero := t.zeroLiteral()
 	reg := e.freshReg()
@@ -794,33 +794,13 @@ func (e *Emitter) emitScalarZero(t Type) Value {
 	return Value{Ref: reg, Ty: t}
 }
 
-// rejectNestedArrayElem returns a clear compile-time error when elemTy is
-// itself an array — used by array operations that either invoke a callback
-// with the loaded element (map/filter/forEach/reduce/find*/some/every/sort's
-// comparator) or compare/consume elements as bare, elemTy.IR-typed scalar
-// registers (indexOf/includes/join) — neither is safe yet for a boxed
-// nested-array element: closures don't decompose an array-typed parameter
-// into (ptr, i64) the way a named top-level function call's own ABI already
-// does (emitCallToFuncSig), and a raw register can't be compared/stringified
-// without knowing it's actually a box pointer needing an unbox first.
-// Indexing, destructuring, for...of, and the copy/insert-based methods
-// (concat/reverse/slice/splice/fill/at/with/...) don't have this problem —
-// they route through loadArrayElem/storeArrayElem instead and remain fully
-// supported for nested arrays. See docs/tdd/TDD-00029.md.
-func (e *Emitter) rejectNestedArrayElem(elemTy Type, opName string, pos ast.Pos) error {
-	if elemTy.IsArray {
-		return fmt.Errorf("%d:%d: .%s() does not yet support an array-of-arrays element type", pos.Line, pos.Col, opName)
-	}
-	return nil
-}
-
 // emitSpreadArrayLitData handles array literals that contain one or more
 // spread elements: computes total length at runtime, allocates one
 // contiguous buffer, and fills it using a write cursor (memcpy per spread,
 // store per static element), returning the data pointer and length operands
 // rather than storing into caller-supplied allocas — shared by
-// emitArrayVarDecl (which stores the result into its own two allocas) and
-// emitArrayLiteralAggregate (TDD-00028, which builds a {ptr,i64} aggregate
+// emitArrayVarDecl (which stores the result into its own header's fields) and
+// emitArrayLiteralAggregate (TDD-00028, which builds a fresh array header
 // from it instead), so there's exactly one spread-array-literal
 // implementation rather than one per caller shape.
 func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (dataReg, lenReg string, err error) {
@@ -849,13 +829,13 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 		}
 		arg := e.collectionSpreadSource(sp.Arg)
 		if id, ok := sp.Arg.(*ast.Identifier); ok {
-			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFlatArray {
+			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFlatArray() {
 				return "", "", fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — spreading '%s' needs a regular (pointer-element) array", sp.GetPos().Line, sp.GetPos().Col, id.Name)
 			}
 		}
 		// Spreading a string (`[..."abc"]`) yields its characters — materialize
 		// the char array once and hand its ptr+len to the copy loops.
-		if at := e.inferExprType(arg); isStringTy(at) && !at.IsArray && !at.IsClass && !at.IsObject {
+		if at := e.inferExprType(arg); isStringTy(at) && !at.IsArray() && !at.IsClass() && !at.IsObject() {
 			sv, verr := e.emitExpr(arg)
 			if verr != nil {
 				return "", "", verr
@@ -863,8 +843,8 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			chars := e.emitStringToCharArray(sv)
 			sp0 := e.freshReg()
 			sl0 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", sp0, chars.Ref))
-			e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", sl0, chars.Ref))
+			sp0 = e.arrayData(chars)
+			sl0 = e.arrayLen(chars)
 			spreadOf[sp] = spreadSrc{ptr: sp0, length: sl0, elem: TypePtr}
 			continue
 		}
@@ -892,7 +872,7 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 	bytesReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, totalReg, elemTy.Align()))
 	dataReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", dataReg, bytesReg))
+	e.heapMallocInto(dataReg, bytesReg)
 
 	// Write cursor.
 	cursorPtr := e.freshReg()
@@ -910,7 +890,7 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstReg, elemTy.IR, dataReg, cVal))
 			// Concrete elements spread into box elements (`[...nums]` as
 			// any[]) are boxed one by one; a copy would reinterpret them.
-			if elemTy.IsDynamic && !elemTy.IsArray && src.elem.IR != "" && !src.elem.IsDynamic {
+			if elemTy.IsDynamic() && !elemTy.IsArray() && src.elem.IR != "" && !src.elem.IsDynamic() {
 				if err := e.emitSpreadBoxLoop(srcPtr, srcLen, src.elem, dstReg); err != nil {
 					return "", "", err
 				}
@@ -921,7 +901,7 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			}
 			// Box elements (a protocol iterable's values) into concrete
 			// elements are unboxed one by one.
-			if src.elem.IsDynamic && !src.elem.IsArray && !elemTy.IsDynamic && elemTy.IR != "" {
+			if src.elem.IsDynamic() && !src.elem.IsArray() && !elemTy.IsDynamic() && elemTy.IR != "" {
 				if err := e.emitSpreadUnboxLoop(srcPtr, srcLen, elemTy, dstReg); err != nil {
 					return "", "", err
 				}
@@ -940,17 +920,23 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newC, cVal, srcLen))
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newC, cursorPtr))
 		} else {
+			if nl, ok := elem.(*ast.NullLiteral); ok && nl.Elision {
+				// An elision after a spread: a hole at the cursor's index.
+				at := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", at, cursorPtr))
+				e.spreadElisions = append(e.spreadElisions, at)
+			}
 			// Static element.
 			val, verr := e.emitExprWithObjectHint(elem, elemTy)
 			if verr != nil {
 				return "", "", verr
 			}
 			if elemTy.UnionMembers != nil {
-				if val, verr = e.coerceChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
+				if val, verr = e.convertChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
 					return "", "", verr
 				}
 			}
-			val = e.coerce(val, elemTy)
+			val = e.convert(val, elemTy)
 			cVal := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cVal, cursorPtr))
 			gepReg := e.freshReg()
@@ -986,14 +972,14 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 	}
 	e.ensureMalloc()
 	dataReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
+	e.heapMallocInto(dataReg, fmt.Sprint(n*int64(elemTy.Align())))
 	for i, elem := range lit.Elements {
 		var val Value
 		var verr error
-		if elemTy.IsDynamic && e.inferExprType(elem).NullAndUndef {
+		if elemTy.IsDynamic() && e.inferExprType(elem).NullAndUndef() {
 			// Keep a three-state local's absence (a plain read unwraps it).
 			val, verr = e.emitExpr(elem)
-			val.Ty.NullAndUndef = val.Ty.NullAndUndef || isNullableScalar(val.Ty) || val.Ty.IR == "ptr"
+			val.Ty.setNullAndUndef(val.Ty.NullAndUndef() || isNullableScalar(val.Ty) || val.Ty.IR == "ptr")
 		} else {
 			val, verr = e.emitExprWithObjectHint(elem, elemTy)
 		}
@@ -1001,19 +987,19 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 			return "", 0, verr
 		}
 		if elemTy.UnionMembers != nil {
-			if val, verr = e.coerceChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
+			if val, verr = e.convertChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
 				return "", 0, verr
 			}
 		}
 		// A boolean among numbers (or a number among booleans) is as
 		// heterogeneous as a string among them — both are plain scalars, so
 		// coerce would silently turn `[true, 5]` into `[true, true]`.
-		if !elemTy.IsDynamic && !val.Ty.IsDynamic && elemTy.IR != "ptr" && val.Ty.IR != "ptr" &&
-			!isNullableScalar(elemTy) && !isNullableScalar(val.Ty) && !elemTy.IsDate && !val.Ty.IsDate &&
+		if !elemTy.IsDynamic() && !val.Ty.IsDynamic() && elemTy.IR != "ptr" && val.Ty.IR != "ptr" &&
+			!isNullableScalar(elemTy) && !isNullableScalar(val.Ty) && !elemTy.IsDate() && !val.Ty.IsDate() &&
 			(elemTy.IR == "i1") != (val.Ty.IR == "i1") && val.Ty.IR != "" && val.Ty.IR != "void" {
 			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d is a %s, not a %s (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i, typeofString(val.Ty), typeofString(elemTy))
 		}
-		val = e.coerce(val, elemTy)
+		val = e.convert(val, elemTy)
 		// A heterogeneous array literal (`[obj, 0, "s"]`) reaches here with an
 		// element whose type coerce couldn't convert to the array's element type
 		// (e.g. a number into a ptr/string element) — reject cleanly instead of
@@ -1021,17 +1007,17 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 		// types (nested array, object, Map/Set, any, nullable scalar) legitimately
 		// carry a different storage IR than their Type.IR, so they're exempt —
 		// storeArrayElem handles those. This compiler's arrays are homogeneous.
-		if val.Ty.IR != elemTy.IR && !elemTy.IsArray && !elemTy.IsDynamic && !isNullableScalar(elemTy) {
+		if val.Ty.IR != elemTy.IR && !elemTy.IsArray() && !elemTy.IsDynamic() && !isNullableScalar(elemTy) {
 			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d does not match the array's element type (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i)
 		}
 		// The IR=="ptr" trap: an array-shaped element reports Ty.IR=="ptr" just
 		// like an object/string slot, so the IR-equality check above cannot see
 		// a nested-array element landing in a non-array slot (e.g. `[obj, [x]]`,
 		// whose element type infers to the first element's object type). Storing
-		// the array's `{ptr,i64}` aggregate into a bare ptr slot would be invalid
+		// the array's header pointer into a bare ptr slot would be invalid
 		// IR — reject cleanly. A dynamic/any elemTy boxes arrays via storeArrayElem
 		// and is exempt; an array-of-arrays elemTy (both sides IsArray) matches.
-		if val.Ty.IsArray != elemTy.IsArray && !elemTy.IsDynamic {
+		if val.Ty.IsArray() != elemTy.IsArray() && !elemTy.IsDynamic() {
 			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d does not match the array's element type (a heterogeneous array is not supported)", elem.GetPos().Line, elem.GetPos().Col, i)
 		}
 		// Both sides arrays, but with different storage (`[[7], new
@@ -1039,7 +1025,7 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 		// header would silently reinterpret the element bits (ADR-01059). Under
 		// -compat=js inferArrayType already boxed such a literal to `any[]`; a
 		// strict literal, or an explicit `number[][]` annotation, is rejected.
-		if val.Ty.IsArray && elemTy.IsArray && !elemTy.IsDynamic && !arrayStorageCompatible(val.Ty, elemTy) {
+		if val.Ty.IsArray() && elemTy.IsArray() && !elemTy.IsDynamic() && !arrayStorageCompatible(val.Ty, elemTy) {
 			return "", 0, fmt.Errorf("%d:%d: array elements must share one type — element %d is a %s, not a %s (a heterogeneous array is not supported; under -compat=js it becomes any[])", elem.GetPos().Line, elem.GetPos().Col, i, arrayTypeName(val.Ty), arrayTypeName(elemTy))
 		}
 		gepReg := e.freshReg()
@@ -1049,8 +1035,8 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 	return dataReg, n, nil
 }
 
-// emitArrayLiteralAggregate builds an array literal as a {ptr, i64}
-// aggregate Value (TDD-00028) — the general "array as an expression"
+// emitArrayLiteralAggregate builds an array literal as an array
+// Value (TDD-00028) — the general "array as an expression"
 // representation this compiler already produces for a function's own
 // array-typed return value, and already consumes in resolveArrayForHOF/
 // resolveArrayDataPtr/emitArrayVarDecl's own *ast.CallExpression branch.
@@ -1088,9 +1074,13 @@ func (e *Emitter) emitArrayLiteralAggregate(lit *ast.ArrayLiteral, hintElemTy *T
 	}
 
 	var dataReg, lenVal string
+	var elisions []string
 	if hasSpread {
 		var err error
+		saved := e.spreadElisions
+		e.spreadElisions = nil
 		dataReg, lenVal, err = e.emitSpreadArrayLitData(lit, elemTy)
+		elisions, e.spreadElisions = e.spreadElisions, saved
 		if err != nil {
 			return Value{}, err
 		}
@@ -1103,15 +1093,18 @@ func (e *Emitter) emitArrayLiteralAggregate(lit *ast.ArrayLiteral, hintElemTy *T
 		lenVal = fmt.Sprintf("%d", n)
 	}
 
-	r0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenVal))
+	r1 := e.newArrayHeader(dataReg, lenVal)
+	e.emitElisionHoles(r1, lit)
+	for _, at := range elisions {
+		next := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, at))
+		e.emitHolesMark(r1, at, next)
+	}
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
 // emitNewArraySizedAggregate builds `new Array<T>(size)` (dynamic length,
-// zero-initialized) as a {ptr, i64} aggregate — the general-expression
+// zero-initialized) as an array Value — the general-expression
 // sibling of emitArrayVarDecl's own *ast.NewArrayExpression branch, for the
 // same TDD-00028 reasons emitArrayLiteralAggregate exists.
 func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy Type) (Value, error) {
@@ -1123,20 +1116,20 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 	// path for a construction form real code is unlikely to combine with
 	// nested arrays anyway, this is deliberately out of scope for now — use
 	// an array literal (`[[1,2],[3,4]]`) instead, which never has this gap.
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		return Value{}, fmt.Errorf("%d:%d: new Array<T>(n) does not yet support an array-typed element (nested arrays) — use an array literal instead.", na.GetPos().Line, na.GetPos().Col)
 	}
 	sizeVal, err := e.emitExpr(na.Size)
 	if err != nil {
 		return Value{}, err
 	}
-	sizeVal, err = e.coerceChecked(sizeVal, TypeI64, na.Size.GetPos(), "new Array size")
+	sizeVal, err = e.convertChecked(sizeVal, TypeI64, na.Size.GetPos(), "new Array size")
 	if err != nil {
 		return Value{}, err
 	}
 	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", dataReg, sizeVal.Ref, elemTy.Align()))
+	e.heapCallocInto(dataReg, sizeVal.Ref, fmt.Sprint(elemTy.Align()))
 	if isUnconstrainedDynamic(elemTy) {
 		// An any[]'s unwritten slots read undefined.
 		idx := e.freshReg()
@@ -1152,16 +1145,18 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 		e.emitLabel(bodyL)
 		slot, next := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+		e.heapStore("i64", fmt.Sprint(nbUndefined), slot, 8)
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(doneL)
 	}
-	r0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, sizeVal.Ref))
+	r1 := e.newArrayHeader(dataReg, sizeVal.Ref)
+	// Every element of `new Array(n)` is a hole until written.
+	if elemTy.Float && elemTy.IR == "double" {
+		e.emitFillHoles(dataReg, "0", sizeVal.Ref, elemTy)
+	}
+	e.emitHolesMark(r1, "0", sizeVal.Ref)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
@@ -1184,14 +1179,19 @@ func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
 	}
 	// A tuple source (`const [a, b] = someTuple`, TDD-00066) binds positionally
 	// to the tuple's fields rather than indexing an array backing buffer.
-	if srcTy := e.inferExprType(s.Init); srcTy.IsTuple {
+	// (Unless the program may replace Array.prototype[Symbol.iterator]: a
+	// tuple is an array, which iterates through it.)
+	if srcTy := e.inferExprType(s.Init); srcTy.IsTuple() && !e.arrayIterPatchable() {
 		objVal, err := e.emitExpr(s.Init)
 		if err != nil {
 			return err
 		}
 		return e.unpackTuplePatternInto(objVal.Ref, srcTy, s.Elems, s.GetPos())
 	}
+	e.iterTake = patternTake(s.Elems) + 1
+	e.iterUse = true
 	dataPtr, lenVal, elemTy, err := e.resolveArrayDataPtr(s.Init, s.GetPos())
+	e.iterTake = 0
 	if err != nil {
 		return err
 	}
@@ -1220,21 +1220,6 @@ func (e *Emitter) emitArrayDestructuring(s *ast.ArrayDestructuring) error {
 // instead of the fallback zero literal.
 func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, elems []ast.ArrayPatternElem) error {
 	for i, elem := range elems {
-		// Nested sub-pattern at this position (`[[a, b], c]` /
-		// `[{ x }, { y }]`, TDD-00065 Stage 2) — Name is "" but the element
-		// is not a hole; destructure the element at index i with the
-		// sub-pattern. Checked before the hole test below, which keys on the
-		// same empty Name.
-		if elem.SubArray != nil || elem.SubObject != nil {
-			if err := e.unpackNestedArrayElem(dataPtr, lenVal, elemTy, i, elem); err != nil {
-				return err
-			}
-			continue
-		}
-		if elem.Name == "" {
-			continue
-		}
-
 		// Rest element (`[a, ...rest]`, ADR-00161) — parser-enforced last
 		// element, always defined regardless of the source array's length
 		// (an empty array when this position is already past it, the same
@@ -1256,14 +1241,30 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 			byteCount := e.freshReg()
 			newPtr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, restLen, elemTy.Align()))
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
+			e.heapMallocInto(newPtr, byteCount)
 
 			srcGep := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", srcGep, elemTy.IR, dataPtr, i))
 			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
 
 			slot := e.newArrayHeaderSlot(newPtr, restLen)
-			e.define(elem.Name, Symbol{Ptr: slot, Ty: ArrayOf(elemTy)})
+			if err := e.bindRestArray(slot, newPtr, restLen, elemTy, elem); err != nil {
+				return err
+			}
+			continue
+		}
+		// Nested sub-pattern at this position (`[[a, b], c]` /
+		// `[{ x }, { y }]`, TDD-00065 Stage 2) — Name is "" but the element
+		// is not a hole; destructure the element at index i with the
+		// sub-pattern. Checked before the hole test below, which keys on the
+		// same empty Name.
+		if elem.SubArray != nil || elem.SubObject != nil {
+			if err := e.unpackNestedArrayElem(dataPtr, lenVal, elemTy, i, elem); err != nil {
+				return err
+			}
+			continue
+		}
+		if elem.Name == "" {
 			continue
 		}
 
@@ -1276,12 +1277,12 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 		// [undefined]` must be `23`) and avoids invalid IR — a differently-
 		// represented default (a number's double bits) stored into the
 		// `undefined`-typed ptr slot emitted `store ptr <fpconst>`.
-		if elem.Default != nil && elemTy.IsUndefined && elem.SubArray == nil && elem.SubObject == nil {
+		if elem.Default != nil && elemTy.IsUndefined() && elem.SubArray == nil && elem.SubObject == nil {
 			defVal, derr := e.emitExpr(elem.Default)
 			if derr != nil {
 				return derr
 			}
-			if defVal.Ty.IsArray {
+			if defVal.Ty.IsArray() {
 				hdr := e.boxArrayValue(defVal)
 				slot := e.freshReg()
 				e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
@@ -1303,12 +1304,42 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 		afterL := e.freshLabel("destr.after")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBoundsReg, okL, oobL))
 
+		// A default of another kind than the elements (`[h = [1]] = []`,
+		// whose elements type as numbers): the binding holds either, as an
+		// any.
+		if elem.Default != nil && !defaultFitsElem(elemTy, e.inferExprType(elem.Default)) {
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+			e.emitLabel(okL)
+			gepReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
+			bv, err := e.emitBoxValue(e.loadArrayElem(gepReg, elemTy))
+			if err != nil {
+				return err
+			}
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+			e.emitLabel(oobL)
+			dv, err := e.emitExpr(elem.Default)
+			if err != nil {
+				return err
+			}
+			if dv, err = e.emitBoxValue(dv); err != nil {
+				return err
+			}
+			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", dv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
+			e.emitLabel(afterL)
+			e.definePatternLocal(elem.Name, Symbol{Ptr: slot, Ty: TypeAny})
+			continue
+		}
+
 		// A destructured element that's itself an array is stored under the
 		// object-reference model (TDD-00127): a stable slot holding a pointer to
 		// a heap {data, len} header. Each branch builds its own header from the
-		// aggregate it produces and points the shared slot at it. See
+		// element it produces and points the shared slot at it. See
 		// docs/tdd/TDD-00029.md.
-		if elemTy.IsArray {
+		if elemTy.IsArray() {
 			slot := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 
@@ -1326,19 +1357,33 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 				if err != nil {
 					return err
 				}
-				if !defVal.Ty.IsArray {
+				if defVal.Ty.IsDynamic() {
+					defVal = e.convert(defVal, elemTy)
+				}
+				switch {
+				case defVal.Ty.IsArray():
+					defHeader := e.boxArrayValue(defVal)
+					e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", defHeader, slot))
+				case defVal.Ty.IR == "void" || defVal.Ty.Kind == kindUndefined:
+					// An undefined default binds undefined, as past the
+					// end does.
+					e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+				default:
 					return fmt.Errorf("%d:%d: destructuring default must be an array to match '%s'", elem.Default.GetPos().Line, elem.Default.GetPos().Col, elem.Name)
 				}
-				defHeader := e.boxArrayValue(defVal)
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", defHeader, slot))
 			} else {
-				emptyHeader := e.newArrayHeader("null", "0")
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", emptyHeader, slot))
+				// Past the end is undefined: no header, read as an
+				// element read's absent array is.
+				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
 			}
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 			e.emitLabel(afterL)
-			e.definePatternLocal(elem.Name, Symbol{Ptr: slot, Ty: elemTy})
+			bindTy := elemTy
+			if knownLen, err := strconv.Atoi(lenVal); elem.Default == nil && !(err == nil && i < knownLen) {
+				bindTy = indexReadType(elemTy)
+			}
+			e.definePatternLocal(elem.Name, Symbol{Ptr: slot, Ty: bindTy})
 			continue
 		}
 
@@ -1371,7 +1416,7 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 			e.emitLabel(afterL)
-			e.define(elem.Name, Symbol{Ptr: nsPtr, Ty: nty, NullableBoxed: true})
+			e.define(elem.Name, Symbol{Ptr: nsPtr, Ty: nty})
 			continue
 		}
 
@@ -1382,6 +1427,13 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataPtr, i))
 		val := e.loadArrayElem(gepReg, elemTy)
+		if elem.Default != nil && elemTy.IsDynamic() {
+			// An undefined element takes the default as a missing one does.
+			isU, haveL := e.freshReg(), e.freshLabel("destr.have")
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, val.Ref, nbUndefined))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isU, oobL, haveL))
+			e.emitLabel(haveL)
+		}
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, localPtr, elemTy.Align()))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
@@ -1391,7 +1443,7 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 			if err != nil {
 				return err
 			}
-			defVal = e.coerce(defVal, elemTy)
+			defVal = e.convert(defVal, elemTy)
 			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, defVal.Ref, localPtr, elemTy.Align()))
 		} else {
 			// Miss default: the undefined box for a dynamic element, the
@@ -1421,8 +1473,19 @@ func (e *Emitter) unpackArrayPatternInto(dataPtr, lenVal string, elemTy Type, el
 // unpack with the sub-pattern. A `= default` on a nested position isn't
 // supported yet (a clean rejection, not silently ignored).
 func (e *Emitter) unpackNestedArrayElem(dataPtr, lenVal string, elemTy Type, i int, elem ast.ArrayPatternElem) error {
-	if elem.Default != nil {
-		return fmt.Errorf("a default value on a nested destructuring pattern is not yet supported")
+	// An object pattern over an element that is not a static object (null,
+	// a primitive, a union): the element under a hidden name, destructured
+	// as a value — null and undefined throw.
+	if elem.Default != nil || (elem.SubObject != nil && (!elemTy.IsObject() || elemTy.IsDynamic())) {
+		// `[[a, b] = d]`: the element (or d) under a hidden name, then that
+		// name destructured.
+		hidden := e.nestedDefaultName()
+		elems := make([]ast.ArrayPatternElem, i+1)
+		elems[i] = ast.ArrayPatternElem{Name: hidden, Pos: elem.Pos, Default: elem.Default}
+		if err := e.unpackArrayPatternInto(dataPtr, lenVal, elemTy, elems); err != nil {
+			return err
+		}
+		return e.emitNestedPatternDecl(elem.SubArray, elem.SubObject, hidden, elem.Pos)
 	}
 	inBounds := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %d, %s", inBounds, i, lenVal))
@@ -1441,7 +1504,7 @@ func (e *Emitter) unpackNestedArrayElem(dataPtr, lenVal string, elemTy Type, i i
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, dataPtr, i))
 		w := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, gep))
-		p, l := e.emitAnyArrayElems(Value{Ref: w, Ty: TypeAny}, nil)
+		p, l := e.emitAnyArrayElemsTake(Value{Ref: w, Ty: TypeAny}, nil, patternTake(elem.SubArray))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, subPtrA))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, subLenA))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
@@ -1455,8 +1518,21 @@ func (e *Emitter) unpackNestedArrayElem(dataPtr, lenVal string, elemTy Type, i i
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", subLen, subLenA))
 		return e.unpackArrayPatternInto(subPtr, subLen, TypeAny, elem.SubArray)
 	}
+	if elem.SubArray != nil && elemTy.IsTuple() && !elemTy.IsArray() && !elemTy.IsDynamic() {
+		// A tuple element (`[[k, v]] = [...map]`): its fields; past the
+		// source's end it is undefined, which is not iterable.
+		okL, oobL := e.freshLabel("destr.tok"), e.freshLabel("destr.toob")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inBounds, okL, oobL))
+		e.emitLabel(oobL)
+		e.emitThrowTypeError("undefined is not iterable (cannot read property Symbol(Symbol.iterator))")
+		e.emitLabel(okL)
+		gep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, dataPtr, i))
+		val := e.loadArrayElem(gep, elemTy)
+		return e.unpackTuplePatternInto(val.Ref, elemTy, elem.SubArray, ast.Pos{})
+	}
 	if elem.SubArray != nil {
-		if !elemTy.IsArray || elemTy.ElemType == nil {
+		if !elemTy.IsArray() || elemTy.ElemType == nil {
 			return fmt.Errorf("cannot array-destructure a non-array element")
 		}
 		subPtrA := e.freshReg()
@@ -1471,8 +1547,8 @@ func (e *Emitter) unpackNestedArrayElem(dataPtr, lenVal string, elemTy Type, i i
 		val := e.loadArrayElem(gep, elemTy)
 		p := e.freshReg()
 		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", p, val.Ref))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", l, val.Ref))
+		p = e.arrayData(val)
+		l = e.arrayLen(val)
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, subPtrA))
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, subLenA))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
@@ -1491,7 +1567,7 @@ func (e *Emitter) unpackNestedArrayElem(dataPtr, lenVal string, elemTy Type, i i
 	}
 
 	// Nested object sub-pattern — the element must be an object/class type.
-	if !elemTy.IsObject {
+	if !elemTy.IsObject() {
 		return fmt.Errorf("cannot object-destructure a non-object element")
 	}
 	subObjA := e.freshReg()
@@ -1545,14 +1621,34 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr
 		}
 		charArr := e.emitStringToCharArray(sv)
 		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, charArr.Ref))
+		ptrReg = e.arrayData(charArr)
 		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, charArr.Ref))
+		lenReg = e.arrayLen(charArr)
 		return ptrReg, lenReg, TypePtr, nil
+	}
+	// A Map or Set: its iteration's elements (`[...s]`), entries for a Map.
+	if srcTy := e.inferExprType(init); (srcTy.IsMap() || srcTy.IsSet()) && !srcTy.IsDynamic() {
+		val, err := e.emitExpr(ast.NewArrayLiteral([]ast.Expression{&ast.SpreadElement{Arg: init}}, pos))
+		if err != nil {
+			return "", "", Type{}, err
+		}
+		if !val.Ty.IsArray() || val.Ty.ElemType == nil {
+			return "", "", Type{}, fmt.Errorf("%d:%d: array destructuring needs an array, a string or an iterable", pos.Line, pos.Col)
+		}
+		return e.arrayData(val), e.arrayLen(val), *val.Ty.ElemType, nil
 	}
 	// A value held in `any`, or a static iterable that is not an array:
 	// its elements are decided at run time (the iteration protocol).
-	if srcTy := e.inferExprType(init); !srcTy.IsArray && (isUnconstrainedDynamic(srcTy) || e.hasIteratorMember(srcTy)) {
+	if srcTy := e.inferExprType(init); !srcTy.IsArray() && (isUnconstrainedDynamic(srcTy) || e.hasIteratorMember(srcTy)) {
+		return e.resolveArrayForHOF(init, pos)
+	}
+	// A js-lane value of no iterable type throws at run time.
+	if e.jsNonIterable(init) {
+		return e.resolveArrayForHOF(init, pos)
+	}
+	// So may an array's, once the program may replace
+	// Array.prototype[Symbol.iterator] (resolveArrayHOF checks it).
+	if srcTy := e.inferExprType(init); e.iterUse && (srcTy.IsArray() || srcTy.IsTuple()) && !srcTy.IsFlatArray() && !srcTy.IsTypedArray() && e.arrayIterPatchable() {
 		return e.resolveArrayForHOF(init, pos)
 	}
 	if id, ok := init.(*ast.Identifier); ok && e.isDynamicBinding(id.Name) {
@@ -1561,22 +1657,22 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr
 		if verr != nil {
 			return "", "", Type{}, verr
 		}
-		if !val.Ty.IsArray || val.Ty.ElemType == nil {
+		if !val.Ty.IsArray() || val.Ty.ElemType == nil {
 			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
 		}
 		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+		ptrReg = e.arrayData(val)
 		lenReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+		lenReg = e.arrayLen(val)
 		return ptrReg, lenReg, *val.Ty.ElemType, nil
 	}
 	switch src := init.(type) {
 	case *ast.Identifier:
 		sym, found := e.lookup(src.Name)
-		if found && sym.Ty.IsFlatArray {
+		if found && sym.Ty.IsFlatArray() {
 			return "", "", Type{}, fmt.Errorf("%d:%d: a @value array supports index read/write, .length, for...of, and .push — destructuring '%s' needs a regular (pointer-element) array", pos.Line, pos.Col, src.Name)
 		}
-		if !found || !sym.Ty.IsArray {
+		if !found || !sym.Ty.IsArray() {
 			return "", "", Type{}, fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, src.Name)
 		}
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
@@ -1595,18 +1691,18 @@ func (e *Emitter) resolveArrayDataPtr(init ast.Expression, pos ast.Pos) (dataPtr
 		return dataReg, fmt.Sprintf("%d", n), elemTy, nil
 	}
 	// Any other expression holding an array (a call, `xs as T[]`, `o.items`,
-	// `c ? xs : ys`): its {data, len} value.
+	// `c ? xs : ys`): its array value.
 	val, valErr := e.emitExpr(init)
 	if valErr != nil {
 		return "", "", Type{}, valErr
 	}
-	if !val.Ty.IsArray || val.Ty.ElemType == nil {
+	if !val.Ty.IsArray() || val.Ty.ElemType == nil {
 		return "", "", Type{}, fmt.Errorf("%d:%d: array destructuring needs an array, a string or an iterable", pos.Line, pos.Col)
 	}
 	ptrReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
+	ptrReg = e.arrayData(val)
 	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+	lenReg = e.arrayLen(val)
 	return ptrReg, lenReg, *val.Ty.ElemType, nil
 }
 
@@ -1619,12 +1715,12 @@ func (e *Emitter) collectionSpreadSource(arg ast.Expression) ast.Expression {
 		return arrayFromCall(arg.GetPos(), []ast.Expression{hv})
 	}
 	t := e.inferExprType(arg)
-	if t.IsArray || t.IsDynamic {
+	if t.IsArray() || t.IsDynamic() {
 		return arg
 	}
 	// A generator or a collection iterator is spread by running it to
 	// completion, as Array.from does.
-	if t.IsGenerator && !t.GeneratorIsAsync || t.IsCollIter {
+	if t.IsGenerator() && !t.GeneratorIsAsync || t.IsCollIter() {
 		pos := arg.GetPos()
 		return arrayFromCall(pos, []ast.Expression{arg})
 	}
@@ -1634,9 +1730,9 @@ func (e *Emitter) collectionSpreadSource(arg ast.Expression) ast.Expression {
 	}
 	method := ""
 	switch {
-	case t.IsMap && !t.IsSet:
+	case t.IsMap() && !t.IsSet():
 		method = "entries"
-	case t.IsSet:
+	case t.IsSet():
 		method = "values"
 	default:
 		return arg
@@ -1647,6 +1743,18 @@ func (e *Emitter) collectionSpreadSource(arg ast.Expression) ast.Expression {
 // emitAnyArrayElems is the data pointer and length of the array an `any`
 // holds, its elements boxed; a value that is not an array throws the
 // TypeError Node's spread and for-of throw.
+// emitAnyArrayElemsTake is emitAnyArrayElems reading at most n values from
+// an iterator that is not an array (n < 0: every value), as array
+// destructuring does.
+func (e *Emitter) emitAnyArrayElemsTake(val Value, src ast.Expression, n int) (ptrReg, lenReg string) {
+	if n >= 0 {
+		e.iterTakeNow = n + 1
+	}
+	p, l := e.emitAnyArrayElems(val, src)
+	e.iterTakeNow = 0
+	return p, l
+}
+
 func (e *Emitter) emitAnyArrayElems(val Value, src ast.Expression) (ptrReg, lenReg string) {
 	e.ensureDynJSONC()
 	if !e.declaredAnyArrView {
@@ -1654,8 +1762,8 @@ func (e *Emitter) emitAnyArrayElems(val Value, src ast.Expression) (ptrReg, lenR
 		e.emitGlobal("declare ptr @__kml_anyarr_view(i64)")
 		e.emitGlobal("declare void @__kml_anyarr_sync(i64, ptr)")
 	}
-	// A string walks its code points.
-	val = e.anyStringAsCodePoints(val)
+	// A string walks its code points, as does a String wrapper.
+	val = e.anyStringAsCodePoints(e.emitUnwrapPrim(val))
 	viewSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", viewSlot))
 	direct := e.freshReg()
@@ -1664,28 +1772,42 @@ func (e *Emitter) emitAnyArrayElems(val Value, src ast.Expression) (ptrReg, lenR
 	isArr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isArr, direct))
 	okL, protoL := e.freshLabel("anyarr.ok"), e.freshLabel("anyarr.proto")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, okL, protoL))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayFastPathOK(isArr), okL, protoL))
 	// Not an array: the iteration protocol (a string's code points, a
 	// generator, a [Symbol.iterator]() method), collected; a value with
 	// none throws the loop's "is not iterable".
 	e.emitLabel(protoL)
 	iterable := val
 	method, _ := e.emitAnyMemberOrUndefined(iterable, "@@iterator")
+	method = e.emitIterMethodFix(iterable, method)
 	mtag, _ := e.emitUnboxTagPayload(method)
 	isFn := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isFn, mtag, kmlTagDynFunc))
 	collectL, badL := e.freshLabel("anyarr.collect"), e.freshLabel("anyarr.bad")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFn, collectL, badL))
 	e.emitLabel(badL)
-	name := "value"
-	if id, ok := src.(*ast.Identifier); ok {
-		name = demangleModuleName(id.Name)
+	if msg := e.notIterableMessage(src); msg != "" {
+		e.emitThrowTypeError(msg)
+	} else {
+		take := e.iterTakeNow
+		e.iterTakeNow = 0
+		if err := e.emitThrowNotIterableValue(val); err != nil {
+			e.emitThrowTypeError("object is not iterable (cannot read property Symbol(Symbol.iterator))")
+		}
+		e.iterTakeNow = take
 	}
-	e.emitThrowTypeError(name + " is not iterable")
 	e.emitLabel(collectL)
-	e.ensureAnyIterCollect()
 	collected := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect(i64 %s)", collected, iterable.Ref))
+	if take := e.iterTakeNow; take > 0 {
+		// A destructuring pattern's own count: only that many values,
+		// the iterator closed when it is left unfinished.
+		e.iterTakeNow = 0
+		e.ensureAnyIterTake()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_take(i64 %s, i64 %d)", collected, iterable.Ref, take-1))
+	} else {
+		e.ensureAnyIterCollect()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect(i64 %s)", collected, iterable.Ref))
+	}
 	cview := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_anyarr_view(i64 %s)", cview, collected))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cview, viewSlot))
@@ -1705,31 +1827,58 @@ func (e *Emitter) emitAnyArrayElems(val Value, src ast.Expression) (ptrReg, lenR
 // time: it holds `any`, or a static iterable that is not an array.
 func (e *Emitter) identWalksAtRunTime(id *ast.Identifier) bool {
 	sym, found := e.lookup(id.Name)
-	if !found || sym.Ty.IsArray {
+	if !found || sym.Ty.IsArray() {
 		return false
 	}
 	return isUnconstrainedDynamic(sym.Ty) || e.hasIteratorMember(sym.Ty)
 }
 
 func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrReg, lenReg string, elemTy Type, err error) {
+	_, ptrReg, lenReg, elemTy, err = e.resolveArrayHOF(objExpr, pos)
+	return
+}
+
+// receiverArrayHeader is the value a method that returns its receiver
+// (sort, reverse, fill, copyWithin) produces: the receiver's own header, or a
+// header over its elements when it has none (a view of an `any`'s elements).
+func (e *Emitter) receiverArrayHeader(hdr, ptrReg, lenReg string) string {
+	if hdr != "" {
+		return hdr
+	}
+	return e.newArrayHeader(ptrReg, lenReg)
+}
+
+// resolveArrayHOF is resolveArrayForHOF that also returns the array's header
+// (empty for the elements of an `any` or an iterable object, which are a
+// view): a method returning its receiver returns that header.
+func (e *Emitter) resolveArrayHOF(objExpr ast.Expression, pos ast.Pos) (hdr, ptrReg, lenReg string, elemTy Type, err error) {
+	// A destructuring pattern's count, taken before anything nested runs.
+	take := e.iterTake - 1
+	e.iterTake = 0
+	iterating := e.iterUse || (e.arrayIterPatchable() && e.spreadArgs[objExpr])
+	e.iterUse = false
 	objExpr = e.iterableArraySource(objExpr)
+	if t := e.inferExprType(objExpr); t.IsTuple() && !t.IsDynamic() {
+		// A tuple walks as an array of its elements (tupleAsArray).
+		objExpr = ast.NewAsExpression(objExpr, ast.AnyArrayAnnotation(""), pos)
+	}
 	if body, ok, herr := e.hostArrayReceiver(objExpr); herr != nil || ok {
 		if herr != nil {
-			return "", "", Type{}, herr
+			return "", "", "", Type{}, herr
 		}
 		objExpr = body // an instance of a class extending Array: its array
 	}
 	// `xs!` walks xs (the assertion is erased at run time).
 	for {
 		nn, ok := objExpr.(*ast.NonNullExpression)
-		if !ok || !e.inferExprType(nn.Arg).IsArray {
+		if !ok || !e.inferExprType(nn.Arg).IsArray() {
 			break
 		}
 		objExpr = nn.Arg
 	}
-	if id, ok := objExpr.(*ast.Identifier); ok && !e.isDynamicBinding(id.Name) && !e.identWalksAtRunTime(id) {
+	if id, ok := objExpr.(*ast.Identifier); ok && !e.isDynamicBinding(id.Name) && !e.identWalksAtRunTime(id) && !e.jsNonIterable(objExpr) {
 		sym, found := e.lookup(id.Name)
-		if !found || !sym.Ty.IsArray {
+		if !found || !sym.Ty.IsArray() {
 			err = fmt.Errorf("%d:%d: '%s' is not an array", pos.Line, pos.Col, id.Name)
 			return
 		}
@@ -1741,40 +1890,56 @@ func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrRe
 		// of an omitted `xs?: T[]`) is `TypeError: xs is not iterable`; a method
 		// call already threw its own TypeError at the member access.
 		e.emitNotIterableGuard(id.Name, sym)
+		hdr = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, sym.Ptr))
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		ptrReg = e.freshReg()
 		lenReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, dataSlot))
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenSlot))
+		if iterating {
+			ptrReg, lenReg, err = e.emitPatchedArrayElems(hdr, ptrReg, lenReg, sym.Ty, elemTy, objExpr, take)
+		}
 		return
 	}
-	// Non-identifier: evaluate and extract from {ptr, i64} aggregate.
+	// Non-identifier: evaluate and read data/len from the array's header.
 	var val Value
 	val, err = e.emitExpr(objExpr)
 	if err != nil {
 		return
 	}
-	if isUnconstrainedDynamic(val.Ty) || (val.Ty.IsDynamic && !val.Ty.IsDynamicObject && unionHasArrayMember(val.Ty)) {
+	if isUnconstrainedDynamic(val.Ty) || (val.Ty.IsDynamic() && !val.Ty.IsDynamicObject() && unionHasArrayMember(val.Ty)) {
 		// An `any` holding an array at run time (a dynamic function's rest
 		// parameter, a JSON.parse result), or a union box narrowed to its
 		// array member (`Array.isArray(v) ? v.join() : …`): its elements as
 		// `any[]` (__kml_anyarr_view); anything else is not iterable.
-		ptrReg, lenReg = e.emitAnyArrayElems(val, objExpr)
+		ptrReg, lenReg = e.emitAnyArrayElemsTake(val, objExpr, take)
 		elemTy = TypeAny
 		return
 	}
-	if !val.Ty.IsArray && e.hasIteratorMember(val.Ty) {
+	if !val.Ty.IsArray() && e.hasIteratorMember(val.Ty) {
 		// A static object or class instance with a [Symbol.iterator]
 		// member: the protocol's values, boxed.
 		var boxed Value
 		if boxed, err = e.emitBoxValue(val); err != nil {
 			return
 		}
-		ptrReg, lenReg = e.emitAnyArrayElems(boxed, objExpr)
+		ptrReg, lenReg = e.emitAnyArrayElemsTake(boxed, objExpr, take)
 		elemTy = TypeAny
 		return
 	}
-	if !val.Ty.IsArray {
+	if !val.Ty.IsArray() && e.compatJS() {
+		// JavaScript: iterating a value that is not iterable throws at run
+		// time (the protocol's TypeError).
+		var boxed Value
+		if boxed, err = e.emitBoxValue(val); err != nil {
+			return
+		}
+		ptrReg, lenReg = e.emitAnyArrayElemsTake(boxed, objExpr, take)
+		elemTy = TypeAny
+		return
+	}
+	if !val.Ty.IsArray() {
 		err = fmt.Errorf("%d:%d: value is not an array", pos.Line, pos.Col)
 		return
 	}
@@ -1783,10 +1948,12 @@ func (e *Emitter) resolveArrayForHOF(objExpr ast.Expression, pos ast.Pos) (ptrRe
 	if val.Ty.ElemType != nil {
 		elemTy = *val.Ty.ElemType
 	}
-	ptrReg = e.freshReg()
-	lenReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", ptrReg, val.Ref))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, val.Ref))
+	hdr = val.Ref
+	ptrReg = e.arrayData(val)
+	lenReg = e.arrayLen(val)
+	if iterating {
+		ptrReg, lenReg, err = e.emitPatchedArrayElems(hdr, ptrReg, lenReg, val.Ty, elemTy, objExpr, take)
+	}
 	return
 }
 
@@ -1799,7 +1966,7 @@ func (e *Emitter) emitArrayCopy(ptrReg, lenReg string, elemTy Type) string {
 	byteCount := e.freshReg()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, lenReg, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", newPtr, byteCount))
+	e.heapMallocInto(newPtr, byteCount)
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg, byteCount))
 	return newPtr
 }
@@ -1815,13 +1982,13 @@ func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
 	// numbers — not the raw i64 identity the default arm would give (which
 	// would fail for two equal-but-distinct string boxes). Used by indexOf /
 	// lastIndexOf / includes.
-	if elemTy.IsDynamic {
+	if elemTy.IsDynamic() {
 		e.ensureAnyEq()
 		eq := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", eq, aReg, bReg))
 		return eq
 	}
-	if elemTy.IR == "ptr" && !elemTy.IsArray && !elemTy.IsObject && !elemTy.IsFunc && !hasHandleFlag(elemTy) {
+	if elemTy.IR == "ptr" && !elemTy.IsArray() && !elemTy.IsObject() && !elemTy.IsFunc() && !hasHandleFlag(elemTy) {
 		// A string slot can hold null (`[null]` typed string[]): the same
 		// pointer is equal, a null against anything else is not, and only
 		// two non-null strings reach strcmp.
@@ -1870,18 +2037,29 @@ func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
 // spelling); a non-index string such as "1.1" or "4294967296" resolves to an
 // out-of-range slot and is caught by the same bounds check, never a crash.
 func (e *Emitter) arrayIndexToI64(idxVal Value, pos ast.Pos) (Value, error) {
-	if isStringTy(idxVal.Ty) && !idxVal.Ty.IsClass && !idxVal.Ty.IsObject {
+	// undefined and null are 0 (ToIntegerOrInfinity of NaN and of +0).
+	if idxVal.Ty.Kind == kindUndefined || idxVal.Ty.IsNull() {
+		return Value{Ref: "0", Ty: TypeI64}, nil
+	}
+	if isStringTy(idxVal.Ty) && !idxVal.Ty.IsClass() && !idxVal.Ty.IsObject() {
 		e.ensureStrtoll()
 		r := e.freshReg()
+		if idxVal.Ty.Nullable() {
+			// An absent string is undefined or null: 0, not strtoll's read.
+			safe, isNull := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, idxVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString("0"), idxVal.Ref))
+			idxVal.Ref = safe
+		}
 		e.emitInstr(fmt.Sprintf("%s = call i64 @strtoll(ptr %s, ptr null, i32 10)", r, idxVal.Ref))
 		return Value{Ref: r, Ty: TypeI64}, nil
 	}
 	// A non-numeric, non-string index (e.g. an object or Symbol) has no sound
-	// conversion to an integer slot — coerceChecked rejects it cleanly rather
+	// conversion to an integer slot — convertChecked rejects it cleanly rather
 	// than letting the bare coerce fall through and leave a `ptr` where an i64
 	// is required (the A1 invalid-IR cluster; matches tsc, which rejects a
 	// non-number index type). ADR-00882/00883 did the same for DataView/String.
-	return e.coerceChecked(idxVal, TypeI64, pos, "array index")
+	return e.convertChecked(idxVal, TypeI64, pos, "array index")
 }
 
 // emitArrayIndexOf implements arr.indexOf(val): returns the index of the first
@@ -1892,7 +2070,7 @@ func (e *Emitter) arrayIndexToI64(idxVal Value, pos ast.Pos) (Value, error) {
 // narrowing unboxes, not through an array binding's header slot.
 func (e *Emitter) isDynamicBinding(name string) bool {
 	sym, ok := e.lookup(name)
-	return ok && sym.Ty.IsDynamic && !sym.Ty.IsArray
+	return ok && sym.Ty.IsDynamic() && !sym.Ty.IsArray()
 }
 
 // emitSpreadBoxLoop boxes n concrete elements of type srcElem at src into the
@@ -1942,7 +2120,7 @@ func (e *Emitter) emitSpreadBoxLoop(src, n string, srcElem Type, dst string) err
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
 	e.emitLabel(bodyL)
 	slotIR := srcElem.IR
-	if srcElem.IsArray {
+	if srcElem.IsArray() {
 		slotIR = "ptr" // an element array is its header pointer
 	}
 	sg := e.freshReg()
@@ -1954,7 +2132,7 @@ func (e *Emitter) emitSpreadBoxLoop(src, n string, srcElem Type, dst string) err
 	}
 	dg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", dg, dst, i))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, dg))
+	e.heapStore("i64", boxed.Ref, dg, 8)
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
@@ -1966,7 +2144,7 @@ func (e *Emitter) emitSpreadBoxLoop(src, n string, srcElem Type, dst string) err
 // unionHasArrayMember reports whether union type t has an array member.
 func unionHasArrayMember(t Type) bool {
 	for _, m := range t.UnionMembers {
-		if m.IsArray {
+		if m.IsArray() {
 			return true
 		}
 	}
@@ -1986,27 +2164,78 @@ func (e *Emitter) iterableArraySource(expr ast.Expression) ast.Expression {
 		return arrayFromCall(expr.GetPos(), []ast.Expression{hv})
 	}
 	t := e.inferExprType(expr)
-	if mapIterable(t) || t.IsCollIter || t.IsGenerator && !t.GeneratorIsAsync {
+	if mapIterable(t) || t.IsCollIter() || t.IsGenerator() && !t.GeneratorIsAsync {
 		pos := expr.GetPos()
 		return arrayFromCall(pos, []ast.Expression{expr})
 	}
 	return expr
 }
 
-// receiverArrayIdentity is v, the result of an array method returning its
-// receiver, as that receiver: a named array's live header, so the result
-// is the same array (`a.sort() === a`, a push through it grows a).
-func (e *Emitter) receiverArrayIdentity(recv ast.Expression, v Value) Value {
-	id, ok := recv.(*ast.Identifier)
-	if !ok {
-		return v
+// bindRestArray binds a rest element's new array (its header in slot): to
+// its name, or destructured by its sub-pattern (`[a, ...[b, c]]`,
+// `[...{ length }]`).
+func (e *Emitter) bindRestArray(slot, dataPtr, lenVal string, elemTy Type, elem ast.ArrayPatternElem) error {
+	switch {
+	case elem.SubArray != nil:
+		return e.unpackArrayPatternInto(dataPtr, lenVal, elemTy, elem.SubArray)
+	case elem.SubObject != nil:
+		tmp := "__kml_rest_" + slot[1:]
+		e.define(tmp, Symbol{Ptr: slot, Ty: ArrayOf(elemTy)})
+		return e.emitObjectDestructuring(ast.NewObjectDestructuring("const", elem.SubObject, ast.NewIdentifier(tmp, elem.Pos), elem.Pos))
+	case elem.Name != "":
+		e.define(elem.Name, Symbol{Ptr: slot, Ty: ArrayOf(elemTy)})
 	}
-	sym, ok := e.lookup(id.Name)
-	if !ok || !sym.Ty.IsArray || sym.Ty.IsFlatArray || sym.Ty.Nullable || sym.Ptr == "" || sym.Ptr == "null" || e.isDynamicBinding(id.Name) {
-		return v
+	return nil
+}
+
+// nestedDefaultName is a fresh hidden binding for a nested pattern with a
+// default (`[[a] = d]` / `{ k: { a } = d }`).
+func (e *Emitter) nestedDefaultName() string {
+	return "__kml_nd" + strings.TrimPrefix(e.freshReg(), "%")
+}
+
+// emitNestedPatternDecl destructures the hidden binding name with a nested
+// pattern: `let <pattern> = name`. A value with no static shape for the
+// pattern (an element of an empty literal) is destructured as an any.
+func (e *Emitter) emitNestedPatternDecl(sub []ast.ArrayPatternElem, obj []ast.DestructProp, name string, pos ast.Pos) error {
+	var src ast.Expression = ast.NewIdentifier(name, pos)
+	if sym, ok := e.lookup(name); ok {
+		shaped := sym.Ty.IsDynamic() || (sub != nil && (sym.Ty.IsArray() || sym.Ty.IsTuple())) || (obj != nil && sym.Ty.IsObject())
+		if !shaped {
+			v, err := e.emitExpr(src)
+			if err != nil {
+				return err
+			}
+			b, err := e.emitBoxValue(v)
+			if err != nil {
+				return err
+			}
+			src = e.bindValue(b, pos)
+		}
 	}
-	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, sym.Ptr))
-	r := e.arrayValueFromHeaderReg(e.nullSafeArrayHeader(hdr), v.Ty)
-	return r
+	if sub != nil {
+		return e.emitStmt(ast.NewArrayDestructuring("let", sub, src, pos))
+	}
+	return e.emitStmt(ast.NewObjectDestructuring("let", obj, src, pos))
+}
+
+// defaultFitsElem reports a destructuring default of type def that the
+// element type elem can hold as it is: the same kind of value (numbers
+// with numbers, an array with arrays, an object with objects). An unknown
+// or dynamic side fits (the element's own conversion applies).
+func defaultFitsElem(elem, def Type) bool {
+	if def.IR == "" || def.IR == "void" || elem.IsDynamic() || elem.IsUndefined() {
+		return true
+	}
+	if def.IsDynamic() {
+		return false // a dynamic default in a static element's slot loses its value
+	}
+	if elem.IsArray() || def.IsArray() {
+		return elem.IsArray() && def.IsArray()
+	}
+	num := func(t Type) bool { return t.Float || t.IsInteger() }
+	if num(elem) || num(def) {
+		return num(elem) && num(def)
+	}
+	return elem.IR == def.IR && elem.IsObject() == def.IsObject()
 }

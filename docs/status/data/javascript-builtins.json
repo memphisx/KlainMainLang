@@ -25,6 +25,24 @@
             "status": "implemented",
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
+            "decl": [
+              "ObjectConstructor.keys",
+              "ObjectConstructor.values",
+              "ObjectConstructor.entries",
+              "ObjectConstructor.assign",
+              "ObjectConstructor.freeze",
+              "ObjectConstructor.seal",
+              "ObjectConstructor.fromEntries",
+              "ObjectConstructor.hasOwn",
+              "ObjectConstructor.groupBy",
+              "ObjectConstructor.create",
+              "ObjectConstructor.defineProperty",
+              "ObjectConstructor.defineProperties",
+              "ObjectConstructor.getOwnPropertyDescriptor",
+              "ObjectConstructor.getPrototypeOf",
+              "ObjectConstructor.setPrototypeOf",
+              "ObjectConstructor.is"
             ]
           },
           {
@@ -32,19 +50,27 @@
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+            ],
+            "decl": [
+              "Function.call",
+              "Function.apply",
+              "Function.bind"
             ]
           },
           {
-            "feature": "`Function` instances — `name`, `length`, util.inspect form (`[Function: f]`, `[AsyncFunction: f]`, `bound f`, …)",
+            "feature": "`Function` instances — `name`, `length`, util.inspect form (`[Function: f]`, `[AsyncFunction: f]`, `bound f`, `[class X]`, …), `toString()` source text, identity",
             "status": "implemented",
-            "caveats": [
-              "`toString()` / `String(f)` has no source text (a compile error on a statically-typed function)",
-              "A function unboxed from `any` into a typed slot is a new function (`promisify(p) === p` is false)",
-              "A class value has no `[class X]` rendering"
-            ],
+            "caveats": [],
             "notes": [
-              "Names follow ECMAScript NamedEvaluation (binding, property key, assignment target, default, class field); `length` counts the parameters before the first default/rest one; the same holds through `any` and for built-in Error constructors ([ADR-01093](../adr/ADR-01093.md))",
-              "Own properties (`f.x = 1`, `Object.defineProperty(f, …)`, a TypeScript expando declaration), through `any` too, and in its inspect form (`[Function: f] { x: 1 }`) ([ADR-01232](../adr/ADR-01232.md))"
+              "`Function.prototype` is a value: a function doing nothing whose `toString`/`call`/`apply`/`bind` act on their receiver; a function or class value reads them unbound, and `Object.getPrototypeOf` gives `Function.prototype` for a function or base class and the base class for a derived one ([ADR-01725](../adr/01/ADR-01725.md))",
+              "Names follow ECMAScript NamedEvaluation (binding, property key, assignment target, default, class field); `length` counts the parameters before the first default/rest one; the same holds through `any` and for built-in Error constructors ([ADR-01093](../adr/01/ADR-01093.md))",
+              "Own properties (`f.x = 1`, `Object.defineProperty(f, …)`, a TypeScript expando declaration), through `any` too, and in its inspect form (`[Function: f] { x: 1 }`) ([ADR-01232](../adr/01/ADR-01232.md))",
+              "`toString()` gives a function's or class's source text with its type syntax blanked, as Node's type stripping leaves it; a function unboxed from `any` keeps its identity ([ADR-01725](../adr/01/ADR-01725.md))"
+            ],
+            "decl": [
+              "Function",
+              "Function.name",
+              "Function.length"
             ]
           },
           {
@@ -52,22 +78,41 @@
             "status": "implemented",
             "notes": [
               "→ [Global functions](GLOBAL-FUNCTIONS.md)"
+            ],
+            "decl": [
+              "Boolean"
             ]
           },
           {
             "feature": "`Number` (all statics/constants, `toFixed`/`toString`/`toPrecision`/`toExponential`)",
             "status": "implemented",
             "notes": [
-              "`toExponential()` with no argument uses the shortest round-trip mantissa (`(12345).toExponential()` → `1.2345e+4`), as in Node ([ADR-00832](../adr/ADR-00832.md))",
+              "`toExponential()` with no argument uses the shortest round-trip mantissa (`(12345).toExponential()` → `1.2345e+4`), as in Node ([ADR-00832](../adr/00/ADR-00832.md))",
               "→ [Number & Math](NUMBER-MATH.md)"
+            ],
+            "decl": [
+              "Number",
+              "Number.toFixed",
+              "Number.toString",
+              "Number.toPrecision",
+              "Number.toExponential"
             ]
           },
           {
             "feature": "`Math` (full surface incl. `cbrt`/`clz32`/`fround`/`imul`/`hypot`/`expm1`/`log1p`)",
             "status": "implemented",
             "notes": [
-              "`Math.max`/`Math.min` accept any arity: zero args give the JS identity (`-Infinity`/`+Infinity`), one arg returns that value, as in Node ([ADR-00831](../adr/ADR-00831.md))",
+              "`Math.max`/`Math.min` accept any arity: zero args give the JS identity (`-Infinity`/`+Infinity`), one arg returns that value, as in Node ([ADR-00831](../adr/00/ADR-00831.md))",
               "→ [Number & Math](NUMBER-MATH.md)"
+            ],
+            "decl": [
+              "Math.cbrt",
+              "Math.clz32",
+              "Math.fround",
+              "Math.imul",
+              "Math.hypot",
+              "Math.expm1",
+              "Math.log1p"
             ]
           },
           {
@@ -75,6 +120,11 @@
             "status": "implemented",
             "notes": [
               "→ [Type system](TYPE-SYSTEM.md)"
+            ],
+            "decl": [
+              "BigInt",
+              "BigIntConstructor.asIntN",
+              "BigIntConstructor.asUintN"
             ]
           },
           {
@@ -82,6 +132,11 @@
             "status": "implemented",
             "notes": [
               "→ [String methods](STRING-METHODS.md)"
+            ],
+            "decl": [
+              "StringConstructor.raw",
+              "StringConstructor.fromCharCode",
+              "StringConstructor.fromCodePoint"
             ]
           },
           {
@@ -89,6 +144,15 @@
             "status": "implemented",
             "notes": [
               "→ [Array methods](ARRAY-METHODS.md)"
+            ],
+            "decl": [
+              "Array.toSorted",
+              "Array.toReversed",
+              "Array.with",
+              "Array.findLast",
+              "ArrayConstructor.from",
+              "ArrayConstructor.of",
+              "ArrayConstructor.isArray"
             ]
           },
           {
@@ -96,6 +160,19 @@
             "status": "implemented",
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
+            "decl": [
+              "Map",
+              "Set",
+              "Map.set",
+              "Map.get",
+              "Map.has",
+              "Map.delete",
+              "Map.size",
+              "Set.add",
+              "Set.has",
+              "Set.delete",
+              "Set.size"
             ]
           },
           {
@@ -103,6 +180,11 @@
             "status": "implemented",
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
+            "decl": [
+              "WeakMap",
+              "WeakSet",
+              "WeakRef"
             ]
           },
           {
@@ -110,6 +192,10 @@
             "status": "implemented",
             "notes": [
               "→ [JSON](JSON.md)"
+            ],
+            "decl": [
+              "JSON.stringify",
+              "JSON.parse"
             ]
           },
           {
@@ -117,6 +203,35 @@
             "status": "implemented",
             "notes": [
               "→ [RegExp](REGEXP.md)"
+            ],
+            "decl": [
+              "RegExp",
+              "RegExp.exec",
+              "RegExp.test",
+              "String.match",
+              "String.matchAll",
+              "String.replace",
+              "String.replaceAll",
+              "String.split",
+              "String.search"
+            ]
+          },
+          {
+            "feature": "`err.stack`, `Error.captureStackTrace(obj, fn?)`, `Error.stackTraceLimit`",
+            "status": "implemented",
+            "notes": [
+              "The program's frames, named and positioned as V8 does: functions, `Object.m`, `Class.method`/`new Class`, `Type.fn [as prop]` for a call through a property, `Object.<anonymous>` for a CommonJS file's top level, and `at async fn` for the async functions awaiting the current one; also printed by `console.log(err)` and the uncaught report. See [ADR-01678](../adr/01/ADR-01678.md)"
+            ],
+            "caveats": [
+              "`captureStackTrace`'s `constructorOpt` is matched by the function's name, not its identity",
+              "V8's builtin frames (`at Array.map (<anonymous>)`) are not shown",
+              "The uncaught-exception report leaves out Node's source excerpt and `Node.js vX` line",
+              "`Error.prepareStackTrace` is not supported"
+            ],
+            "decl": [
+              "Error.stack",
+              "ErrorConstructor.captureStackTrace",
+              "ErrorConstructor.stackTraceLimit"
             ]
           },
           {
@@ -124,13 +239,23 @@
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)",
-              "`.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/ADR-00846.md)",
-              "`console.log(err)` shows the options' cause after the own properties as `[cause]: …`, as util.inspect does ([ADR-01418](../adr/ADR-01418.md))"
+              "`.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/00/ADR-00846.md)",
+              "`console.log(err)` shows the options' cause after the own properties as `[cause]: …`, as util.inspect does ([ADR-01418](../adr/01/ADR-01418.md))"
             ],
             "caveats": [
-              "The error-options second argument must be a `{ cause: <expr> }` object **literal** — a variable/computed options bag is a clean rejection ([ADR-01007](../adr/ADR-01007.md)); `AggregateError` takes no options (its `.cause` reads `undefined`)",
-              "`.stack` is typed a number, not a string (`typeof err.stack` is `'number'`, Node: `'string'`)",
+              "The error-options second argument must be a `{ cause: <expr> }` object **literal** — a variable/computed options bag is a clean rejection ([ADR-01007](../adr/01/ADR-01007.md)); `AggregateError` takes no options (its `.cause` reads `undefined`)",
               "`console.log(err)` leaves out the `[cause]: undefined` line of an error made with `{ cause: undefined }`"
+            ],
+            "decl": [
+              "Error",
+              "TypeError",
+              "RangeError",
+              "SyntaxError",
+              "EvalError",
+              "URIError",
+              "ReferenceError",
+              "AggregateError",
+              "DOMException"
             ]
           },
           {
@@ -138,7 +263,11 @@
             "status": "implemented",
             "notes": [
               "→ [Type system](TYPE-SYSTEM.md)",
-              "A Symbol keeps its identity inside an `any` (hidden type-id word): `typeof` → `\"symbol\"` and narrows, `===`, `.description`, `Symbol(desc)` rendering, and ToNumber (`Number(x)`, a `TypedArray.set` offset, `+x`/`x * 1` under `-compat=js`) throws the spec's `TypeError` ([ADR-01059](../adr/ADR-01059.md))"
+              "A Symbol keeps its identity inside an `any` (hidden type-id word): `typeof` → `\"symbol\"` and narrows, `===`, `.description`, `Symbol(desc)` rendering, and ToNumber (`Number(x)`, a `TypedArray.set` offset, `+x`/`x * 1` under `-compat=js`) throws the spec's `TypeError` ([ADR-01059](../adr/01/ADR-01059.md))"
+            ],
+            "decl": [
+              "Symbol",
+              "Symbol.description"
             ]
           },
           {
@@ -146,6 +275,18 @@
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+            ],
+            "decl": [
+              "Promise",
+              "PromiseConstructor.all",
+              "PromiseConstructor.race",
+              "PromiseConstructor.allSettled",
+              "PromiseConstructor.any",
+              "PromiseConstructor.resolve",
+              "PromiseConstructor.reject",
+              "Promise.then",
+              "Promise.catch",
+              "Promise.finally"
             ]
           },
           {
@@ -153,6 +294,9 @@
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+            ],
+            "decl": [
+              "syntax"
             ]
           },
           {
@@ -160,6 +304,10 @@
             "status": "implemented",
             "notes": [
               "→ [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+            ],
+            "decl": [
+              "syntax",
+              "Generator"
             ]
           },
           {
@@ -167,6 +315,9 @@
             "status": "implemented",
             "notes": [
               "→ [Global functions](GLOBAL-FUNCTIONS.md)"
+            ],
+            "decl": [
+              "syntax"
             ]
           },
           {
@@ -174,6 +325,16 @@
             "status": "implemented",
             "notes": [
               "→ [Global functions](GLOBAL-FUNCTIONS.md)"
+            ],
+            "decl": [
+              "isNaN",
+              "isFinite",
+              "parseInt",
+              "parseFloat",
+              "encodeURI",
+              "decodeURI",
+              "atob",
+              "btoa"
             ]
           },
           {
@@ -181,6 +342,9 @@
             "status": "implemented",
             "notes": [
               "→ [Global functions](GLOBAL-FUNCTIONS.md)"
+            ],
+            "decl": [
+              "structuredClone"
             ]
           },
           {
@@ -188,6 +352,9 @@
             "status": "implemented",
             "notes": [
               "→ [Timers](TIMERS.md)"
+            ],
+            "decl": [
+              "queueMicrotask"
             ]
           },
           {
@@ -195,6 +362,23 @@
             "status": "implemented",
             "notes": [
               "→ [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
+            ],
+            "decl": [
+              "ArrayBuffer",
+              "SharedArrayBuffer",
+              "DataView",
+              "Atomics",
+              "Uint8Array",
+              "Int8Array",
+              "Uint16Array",
+              "Int16Array",
+              "Uint32Array",
+              "Int32Array",
+              "Float32Array",
+              "Float64Array",
+              "BigInt64Array",
+              "BigUint64Array",
+              "Uint8ClampedArray"
             ]
           },
           {
@@ -202,6 +386,10 @@
             "status": "implemented",
             "notes": [
               "→ [Encoding & text](ENCODING-TEXT.md)"
+            ],
+            "decl": [
+              "TextEncoder",
+              "TextDecoder"
             ]
           },
           {
@@ -209,6 +397,11 @@
             "status": "implemented",
             "notes": [
               "→ [URL](URL.md)"
+            ],
+            "decl": [
+              "URL",
+              "URLSearchParams",
+              "URLPattern"
             ]
           },
           {
@@ -216,6 +409,12 @@
             "status": "implemented",
             "notes": [
               "→ [Web Crypto](WEB-CRYPTO.md)"
+            ],
+            "decl": [
+              "crypto",
+              "Crypto.getRandomValues",
+              "Crypto.randomUUID",
+              "Crypto.subtle"
             ]
           },
           {
@@ -223,6 +422,14 @@
             "status": "implemented",
             "notes": [
               "→ [Events & cancellation](EVENTS-CANCELLATION.md)"
+            ],
+            "decl": [
+              "Event",
+              "CustomEvent",
+              "EventTarget",
+              "AbortController",
+              "AbortSignal",
+              "DOMException"
             ]
           },
           {
@@ -230,6 +437,14 @@
             "status": "implemented",
             "notes": [
               "→ [Timers](TIMERS.md)"
+            ],
+            "decl": [
+              "setTimeout",
+              "setInterval",
+              "setImmediate",
+              "clearTimeout",
+              "clearInterval",
+              "clearImmediate"
             ]
           },
           {
@@ -237,7 +452,16 @@
             "status": "implemented",
             "notes": [
               "→ [Performance timing](PERFORMANCE-TIMING.md)",
-              "The `getUTC*`/`setUTC*` instance accessors work. See [ADR-00844](../adr/ADR-00844.md)"
+              "The `getUTC*`/`setUTC*` instance accessors work. See [ADR-00844](../adr/00/ADR-00844.md)"
+            ],
+            "decl": [
+              "performance",
+              "Performance.now",
+              "Performance.mark",
+              "Performance.measure",
+              "Date",
+              "DateConstructor.now",
+              "DateConstructor.parse"
             ]
           },
           {
@@ -245,13 +469,28 @@
             "status": "implemented",
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
+            "decl": [
+              "Reflect.get",
+              "Reflect.set",
+              "Reflect.has",
+              "Reflect.deleteProperty",
+              "Reflect.ownKeys",
+              "Reflect.getPrototypeOf",
+              "Reflect.setPrototypeOf",
+              "Reflect.isExtensible",
+              "Reflect.preventExtensions",
+              "Reflect.defineProperty"
             ]
           },
           {
-            "feature": "`Proxy` (`get`/`set`/`has`/`deleteProperty` traps) — dynamic target",
+            "feature": "`Proxy` (`get`/`set`/`has`/`deleteProperty`/`ownKeys`/`getOwnPropertyDescriptor` traps) — dynamic target",
             "status": "implemented",
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
+            "decl": [
+              "Proxy"
             ]
           },
           {
@@ -263,9 +502,12 @@
               "Under `-mm=gc`, firing depends on the target actually being collected (conservative scanning can pin a stack-reachable pointer — same posture as the `WeakRef` tests)"
             ],
             "notes": [
-              "Mode-dependent timing, one API ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/ADR-00701.md)): `-mm=manual` fires deterministically at `Memory.free(target)` plus an exit flush for survivors; `-mm=gc` fires via a real Boehm finalizer (observable after `gc()`); `-mm=auto`'s compiler-inserted frees are the same death signal — a registered target's cleanup fires deterministically at its scope exit ([ADR-00703](../adr/ADR-00703.md)), and the same exemption serves explicit `@free`/`@owned` in manual mode. Callbacks run on the microtask drain points, never synchronously at the death site",
+              "Mode-dependent timing, one API ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/00/ADR-00701.md)): `-mm=manual` fires deterministically at `Memory.free(target)` plus an exit flush for survivors; `-mm=gc` fires via a real Boehm finalizer (observable after `gc()`); `-mm=auto`'s compiler-inserted frees are the same death signal — a registered target's cleanup fires deterministically at its scope exit ([ADR-00703](../adr/00/ADR-00703.md)), and the same exemption serves explicit `@free`/`@owned` in manual mode. Callbacks run on the microtask drain points, never synchronously at the death site",
               "`-finalizers=report` prints one labeled leak line per registration never freed at exit (held value + `register()` call site) — the manual-memory leak detector",
               "`register`/`unregister` with tokens; `-compat=js` dynamic-object targets unbox like WeakMap keys; `held === target` is a compile error when statically obvious"
+            ],
+            "decl": [
+              "FinalizationRegistry"
             ]
           }
         ]
@@ -288,7 +530,10 @@
             "feature": "`String`",
             "status": "implemented",
             "caveats": [
-              "`.normalize()` **missing** (no Unicode tables); `.at()` OOB returns `\"\"` not `undefined`; `.codePointAt()` == `.charCodeAt()` (byte strings, correct only ASCII/Latin-1); `.matchAll()` eager not lazy; `.localeCompare()` is byte-order → [String methods](STRING-METHODS.md)"
+              "`.normalize()` **missing** (no Unicode tables); `.matchAll()` eager not lazy; `.localeCompare()` ignores `locales` (root order) → [String methods](STRING-METHODS.md)"
+            ],
+            "decl": [
+              "String"
             ]
           },
           {
@@ -296,13 +541,20 @@
             "status": "implemented",
             "caveats": [
               "length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers); `.flat(depth)` needs a constant depth → [Array methods](ARRAY-METHODS.md)"
+            ],
+            "decl": [
+              "Array"
             ]
           },
           {
             "feature": "`Object` / dynamic model",
             "status": "implemented",
             "caveats": [
-              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype); `Object.assign` between static objects can't graft new fields → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype) → [Object, Map & Set](OBJECT-COLLECTIONS.md)",
+              "a bigint or a symbol has no wrapper object: `Object(1n)` / `Object(sym)` is a compile error for a typed value and returns the primitive itself for an `any`"
+            ],
+            "decl": [
+              "Object"
             ]
           },
           {
@@ -310,13 +562,22 @@
             "status": "implemented",
             "caveats": [
               "missing `construct`; the object methods require a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
+            "decl": [
+              "Reflect.get",
+              "Reflect.set",
+              "Reflect.has",
+              "Reflect.ownKeys"
             ]
           },
           {
             "feature": "`Proxy`",
             "status": "implemented",
             "caveats": [
-              "only `get`/`set`/`has`/`deleteProperty` traps; dynamic target only → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+              "only `get`/`set`/`has`/`deleteProperty`/`ownKeys`/`getOwnPropertyDescriptor` traps; dynamic target only → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+            ],
+            "decl": [
+              "Proxy"
             ]
           },
           {
@@ -324,6 +585,9 @@
             "status": "implemented",
             "caveats": [
               "`toString(radix)` non-power-of-two fractional trailing-digit divergence; `toPrecision` fixed/exp threshold differs → [Number & Math](NUMBER-MATH.md)"
+            ],
+            "decl": [
+              "Number"
             ]
           },
           {
@@ -331,13 +595,21 @@
             "status": "implemented",
             "caveats": [
               "`thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md)"
+            ],
+            "decl": [
+              "Function.call",
+              "Function.apply",
+              "Function.bind"
             ]
           },
           {
             "feature": "`Symbol`",
             "status": "implemented",
             "caveats": [
-              "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive`; `toStringTag`, `hasInstance`, `species` and the rest are values only → [Type system](TYPE-SYSTEM.md)"
+              "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive`, `Symbol.species` as a class's static getter (extending Array, a typed array or Promise), and `Symbol.toStringTag` as a class getter; an object literal's `toStringTag` member, `hasInstance` and the rest are values only → [Type system](TYPE-SYSTEM.md)"
+            ],
+            "decl": [
+              "Symbol"
             ]
           },
           {
@@ -345,6 +617,9 @@
             "status": "implemented",
             "caveats": [
               "`u`/`d` flags **missing** (accepted, not implemented) → [RegExp](REGEXP.md)"
+            ],
+            "decl": [
+              "RegExp"
             ]
           },
           {
@@ -352,6 +627,9 @@
             "status": "implemented",
             "caveats": [
               "a strict-lane literal mixing two object types is rejected → [JSON](JSON.md)"
+            ],
+            "decl": [
+              "JSON"
             ]
           },
           {
@@ -359,6 +637,20 @@
             "status": "implemented",
             "caveats": [
               "`resize`/`grow` need `{maxByteLength}`; views don't length-track resize → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
+            ],
+            "decl": [
+              "ArrayBuffer",
+              "Uint8Array",
+              "Int8Array",
+              "Uint16Array",
+              "Int16Array",
+              "Uint32Array",
+              "Int32Array",
+              "Float32Array",
+              "Float64Array",
+              "BigInt64Array",
+              "BigUint64Array",
+              "Uint8ClampedArray"
             ]
           },
           {
@@ -366,13 +658,17 @@
             "status": "implemented",
             "caveats": [
               "UTF-8 only; non-UTF-8 labels throw `RangeError` at construction → [Encoding & text](ENCODING-TEXT.md)"
+            ],
+            "decl": [
+              "TextDecoder"
             ]
           },
           {
             "feature": "`URLSearchParams` / `URLPattern`",
             "status": "implemented",
-            "caveats": [
-              "`URLPattern`'s regexp groups follow PCRE2 where ECMAScript differs → [URL](URL.md)"
+            "decl": [
+              "URLSearchParams",
+              "URLPattern"
             ]
           },
           {
@@ -380,6 +676,11 @@
             "status": "implemented",
             "caveats": [
               "`AbortSignal` isn't wired into `setTimeout` → [Events & cancellation](EVENTS-CANCELLATION.md)"
+            ],
+            "decl": [
+              "EventTarget",
+              "Event",
+              "AbortSignal"
             ]
           },
           {
@@ -387,6 +688,9 @@
             "status": "implemented",
             "caveats": [
               "literal-only algorithm dispatch; ops throw synchronously rather than rejecting; `CryptoKey.algorithm`/`.usages` unimplemented → [Web Crypto](WEB-CRYPTO.md)"
+            ],
+            "decl": [
+              "Crypto.subtle"
             ]
           },
           {
@@ -394,6 +698,9 @@
             "status": "implemented",
             "caveats": [
               "Setters need a named-variable receiver; no locale/`Intl` formatting; `toString`'s zone name covers the common zones only → [Performance timing](PERFORMANCE-TIMING.md)"
+            ],
+            "decl": [
+              "Date"
             ]
           },
           {
@@ -401,6 +708,9 @@
             "status": "implemented",
             "caveats": [
               "`eventLoopUtilization`/`nodeTiming` missing → [Performance timing](PERFORMANCE-TIMING.md)"
+            ],
+            "decl": [
+              "performance"
             ]
           },
           {
@@ -408,6 +718,9 @@
             "status": "implemented",
             "caveats": [
               "general/dynamic eval **missing**; only a compile-time-constant `eval(\"<expression>\")` static subset works → [Global functions](GLOBAL-FUNCTIONS.md)"
+            ],
+            "decl": [
+              "eval"
             ]
           },
           {
@@ -415,6 +728,9 @@
             "status": "implemented",
             "notes": [
               "→ [Global functions](GLOBAL-FUNCTIONS.md)"
+            ],
+            "decl": [
+              "syntax"
             ]
           }
         ]
@@ -454,7 +770,14 @@
               "`Iterator.from` and the global `Iterator` constructor (`instanceof Iterator`, `extends Iterator`) are missing"
             ],
             "notes": [
-              "`map`, `filter`, `take`, `drop`, `flatMap` (lazy, closing the source on `return()`), `reduce`, `toArray`, `forEach`, `some`, `every` and `find` on generators and the Array, Map and Set iterators, also through `any`, written in TypeScript ([ADR-01373](../adr/ADR-01373.md)); Node has no `AsyncIterator` helpers"
+              "`map`, `filter`, `take`, `drop`, `flatMap` (lazy, closing the source on `return()`), `reduce`, `toArray`, `forEach`, `some`, `every` and `find` on generators and the Array, Map and Set iterators, also through `any`, written in TypeScript ([ADR-01373](../adr/01/ADR-01373.md)); Node has no `AsyncIterator` helpers"
+            ],
+            "decl": [
+              "Iterator",
+              "IteratorObject.map",
+              "IteratorObject.filter",
+              "IteratorObject.take",
+              "IteratorObject.drop"
             ]
           },
           {
@@ -464,7 +787,10 @@
               "a `newTarget` other than the target throws a TypeError rather than constructing with that prototype → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
             ],
             "notes": [
-              "Through the run-time constructor dispatch ([ADR-01333](../adr/ADR-01333.md))"
+              "Through the run-time constructor dispatch ([ADR-01333](../adr/01/ADR-01333.md))"
+            ],
+            "decl": [
+              "Reflect.construct"
             ]
           },
           {
@@ -494,7 +820,7 @@
             "feature": "`Intl.*` (Collator/NumberFormat/DateTimeFormat/…)",
             "status": "missing",
             "notes": [
-              "No locale/ICU infrastructure — a bare `Intl` reference is an undefined-variable compile error; the reason `localeCompare`/`bigint.toLocaleString`/`Date.toLocale*` are gaps. `Number.prototype.toLocaleString()` implements the **no-argument** en-US default (thousands grouping + max 3 fraction digits, [ADR-00847](../adr/ADR-00847.md)); a locale/options argument is a clean rejection"
+              "No locale/ICU infrastructure — a bare `Intl` reference is an undefined-variable compile error; the reason `bigint.toLocaleString`/`Date.toLocale*` are gaps (`localeCompare` collates by generated ICU root-order tables instead, [ADR-01827](../adr/01/ADR-01827.md)). `Number.prototype.toLocaleString()` implements the **no-argument** en-US default (thousands grouping + max 3 fraction digits, [ADR-00847](../adr/00/ADR-00847.md)); a locale/options argument is a clean rejection"
             ]
           },
           {
@@ -508,14 +834,14 @@
             "feature": "Dynamic `eval` / dynamic `import()` of arbitrary code",
             "status": "missing",
             "notes": [
-              "No runtime JS engine ([ADR-00022](../adr/ADR-00022.md)); only the static-subset eval works"
+              "No runtime JS engine ([ADR-00022](../adr/00/ADR-00022.md)); only the static-subset eval works"
             ]
           },
           {
-            "feature": "Full `Proxy` trap set (`apply`/`construct`/`ownKeys`/`getOwnPropertyDescriptor`/`defineProperty`/…)",
+            "feature": "Full `Proxy` trap set (`apply`/`construct`/`defineProperty`/`getPrototypeOf`/…)",
             "status": "missing",
             "notes": [
-              "Structurally limited to the 4 dynamic-object traps; the rest have no interception point in the fixed-shape model"
+              "Limited to the 6 dynamic-object traps; the rest have no interception point in the fixed-shape model"
             ]
           },
           {
@@ -526,10 +852,10 @@
             ]
           },
           {
-            "feature": "Well-known symbols as runtime protocol dispatch (`Symbol.hasInstance`/`toStringTag`/`species`/…)",
+            "feature": "Well-known symbols as runtime protocol dispatch (`Symbol.hasInstance`/`toStringTag`/…)",
             "status": "missing",
             "notes": [
-              "`Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` are honored — as own properties, class members and object-literal members; the others are not consulted"
+              "`Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` are honored — as own properties, class members and object-literal members — and `Symbol.species` as a class's static getter; the others are not consulted"
             ]
           }
         ]

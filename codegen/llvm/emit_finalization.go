@@ -16,7 +16,7 @@ import (
 // sizes, float sizes, boolean — or a single-pointer value (string, object,
 // class instance). Aggregates (arrays, nullable scalars) are out for V1.
 func finregHeldBoxable(ty Type) bool {
-	if ty.Nullable && ty.IR != "ptr" {
+	if ty.Nullable() && ty.IR != "ptr" {
 		return false
 	}
 	switch ty.IR {
@@ -36,7 +36,7 @@ func (e *Emitter) emitNewFinalizationRegistry(ex *ast.NewExpression) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
-	if !cbVal.Ty.IsFunc {
+	if !cbVal.Ty.IsFunc() {
 		return Value{}, fmt.Errorf("%d:%d: new FinalizationRegistry's argument must be a function (the cleanup callback)", pos.Line, pos.Col)
 	}
 	if len(cbVal.Ty.FuncParams) > 1 {
@@ -65,7 +65,7 @@ func (e *Emitter) emitNewFinalizationRegistry(ex *ast.NewExpression) (Value, err
 
 	e.ensureFinalizationHelpers()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_finreg_create(ptr %s, ptr %s, ptr %s)", r, cbVal.Ref, tramp, report))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_finreg_create(ptr %s, ptr %s, ptr %s, i64 %d)", r, cbVal.Ref, tramp, report, e.hostHeaderWord(FinalizationRegistryType(heldTy))))
 	return Value{Ref: r, Ty: FinalizationRegistryType(heldTy)}, nil
 }
 
@@ -149,13 +149,13 @@ func (e *Emitter) finregObjectArg(expr ast.Expression, what string, pos ast.Pos)
 	if err != nil {
 		return "", err
 	}
-	if v.Ty.IsDynamic && e.compatJS() {
-		return e.coerce(v, TypePtr).Ref, nil
+	if v.Ty.IsDynamic() && e.compatJS() {
+		return e.convert(v, TypePtr).Ref, nil
 	}
 	if v.Ty.IR != "ptr" || isStringTy(v.Ty) {
 		return "", fmt.Errorf("%d:%d: FinalizationRegistry's %s must be an object (not a primitive)", pos.Line, pos.Col, what)
 	}
-	if v.Ty.IsSymbol {
+	if v.Ty.IsSymbol() {
 		// A registered symbol (`Symbol.for`) cannot be held weakly: Node's
 		// TypeError.
 		e.ensureSymbolRegistry()
@@ -199,66 +199,95 @@ func (e *Emitter) emitFinalizationRegistryMethod(objExpr ast.Expression, method 
 	}
 	e.ensureFinalizationHelpers()
 
-	switch method {
-	case "register":
-		if len(args) < 2 || len(args) > 3 {
-			return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.register(target, heldValue, unregisterToken?) takes 2 or 3 arguments", pos.Line, pos.Col)
-		}
-		// held === target keeps the target reachable from the registry under
-		// gc, so it could never fire — reject the statically-obvious case.
-		if tid, ok := args[0].(*ast.Identifier); ok {
-			if hid, ok2 := args[1].(*ast.Identifier); ok2 && tid.Name == hid.Name {
-				return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.register's held value must not be the target itself (it would keep the target alive and the callback could never fire)", pos.Line, pos.Col)
-			}
-		}
-		target, err := e.finregObjectArg(args[0], "register target", pos)
-		if err != nil {
-			return Value{}, err
-		}
-		heldVal, err := e.emitExpr(args[1])
-		if err != nil {
-			return Value{}, err
-		}
-		heldVal = e.coerce(heldVal, heldTy)
-		var heldBits string
-		if heldTy.IR == "float" {
-			// Box float held values as double bits (finregUnboxIR mirrors this).
-			wide := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = fpext float %s to double", wide, heldVal.Ref))
-			heldBits = e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", heldBits, wide))
-		} else {
-			heldBits = e.valueToMapVal(heldVal, heldTy)
-		}
-		token := "null"
-		if len(args) == 3 {
-			token, err = e.finregObjectArg(args[2], "unregisterToken", pos)
-			if err != nil {
-				return Value{}, err
-			}
-		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_register(ptr %s, ptr %s, i64 %s, ptr %s, i64 %d, i64 %d)",
-			regVal.Ref, target, heldBits, token, pos.Line, pos.Col))
-		// Per spec, register() evaluates to `undefined` — return a real undefined
-		// value (not a Ref-less void) so a caller that uses the result
-		// (`x = fr.register(...)`, `assert(fr.register(...) === undefined)`) has a
-		// value to read rather than an empty operand.
-		return Value{Ref: "null", Ty: TypeUndefined}, nil
-
-	case "unregister":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.unregister(unregisterToken) takes exactly 1 argument", pos.Line, pos.Col)
-		}
-		token, err := e.finregObjectArg(args[0], "unregisterToken", pos)
-		if err != nil {
-			return Value{}, err
-		}
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_finreg_unregister(ptr %s, ptr %s)", r, regVal.Ref, token))
-		return Value{Ref: r, Ty: TypeBool}, nil
-
-	case "cleanupSome":
-		return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.cleanupSome is not supported (non-standard); pending cleanup callbacks run on the event loop and at exit", pos.Line, pos.Col)
+	c := &finregCall{objExpr: objExpr, method: method, args: args, pos: pos, regVal: regVal, heldTy: heldTy}
+	if f, ok := finregMethods[method]; ok {
+		return f(e, c)
 	}
 	return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry has no method '%s' (register, unregister)", pos.Line, pos.Col, method)
+}
+
+type finregCall struct {
+	objExpr ast.Expression
+	method  string
+	args    []ast.Expression
+	pos     ast.Pos
+	regVal  Value
+	heldTy  Type
+}
+
+// finregMethods are a FinalizationRegistry's methods, by name.
+var finregMethods map[string]func(e *Emitter, c *finregCall) (Value, error)
+
+func init() {
+	finregMethods = map[string]func(e *Emitter, c *finregCall) (Value, error){
+		"register":    (*Emitter).finregRegister,
+		"unregister":  (*Emitter).finregUnregister,
+		"cleanupSome": (*Emitter).finregCleanupSome,
+	}
+}
+
+// finregRegister is register().
+func (e *Emitter) finregRegister(c *finregCall) (Value, error) {
+	if len(c.args) < 2 || len(c.args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.register(target, heldValue, unregisterToken?) takes 2 or 3 arguments", c.pos.Line, c.pos.Col)
+	}
+	// held === target keeps the target reachable from the registry under
+	// gc, so it could never fire — reject the statically-obvious case.
+	if tid, ok := c.args[0].(*ast.Identifier); ok {
+		if hid, ok2 := c.args[1].(*ast.Identifier); ok2 && tid.Name == hid.Name {
+			return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.register's held value must not be the target itself (it would keep the target alive and the callback could never fire)", c.pos.Line, c.pos.Col)
+		}
+	}
+	target, err := e.finregObjectArg(c.args[0], "register target", c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	heldVal, err := e.emitExpr(c.args[1])
+	if err != nil {
+		return Value{}, err
+	}
+	heldVal = e.convert(heldVal, c.heldTy)
+	var heldBits string
+	if c.heldTy.IR == "float" {
+		// Box float held values as double bits (finregUnboxIR mirrors this).
+		wide := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fpext float %s to double", wide, heldVal.Ref))
+		heldBits = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", heldBits, wide))
+	} else {
+		heldBits = e.valueToMapVal(heldVal, c.heldTy)
+	}
+	token := "null"
+	if len(c.args) == 3 {
+		token, err = e.finregObjectArg(c.args[2], "unregisterToken", c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_finreg_register(ptr %s, ptr %s, i64 %s, ptr %s, i64 %d, i64 %d)",
+		c.regVal.Ref, target, heldBits, token, c.pos.Line, c.pos.Col))
+	// Per spec, register() evaluates to `undefined` — return a real undefined
+	// value (not a Ref-less void) so a caller that uses the result
+	// (`x = fr.register(...)`, `assert(fr.register(...) === undefined)`) has a
+	// value to read rather than an empty operand.
+	return Value{Ref: "null", Ty: TypeUndefined}, nil
+}
+
+// finregUnregister is unregister().
+func (e *Emitter) finregUnregister(c *finregCall) (Value, error) {
+	if len(c.args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.unregister(unregisterToken) takes exactly 1 argument", c.pos.Line, c.pos.Col)
+	}
+	token, err := e.finregObjectArg(c.args[0], "unregisterToken", c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_finreg_unregister(ptr %s, ptr %s)", r, c.regVal.Ref, token))
+	return Value{Ref: r, Ty: TypeBool}, nil
+}
+
+// finregCleanupSome is cleanupSome().
+func (e *Emitter) finregCleanupSome(c *finregCall) (Value, error) {
+	return Value{}, fmt.Errorf("%d:%d: FinalizationRegistry.cleanupSome is not supported (non-standard); pending cleanup callbacks run on the event loop and at exit", c.pos.Line, c.pos.Col)
 }

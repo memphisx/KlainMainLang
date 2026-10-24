@@ -19,9 +19,25 @@ import (
 // declaration (TS2593, TS2592), a shorthand property (TS18004), and
 // otherwise TS2304. at is the reference (an identifier, or the `new`
 // expression naming a class); scope is where its lookup started.
+// jsUndeclaredName reports, in the js lane, a name nothing declares that is
+// no global the compiler knows (whose value codegen types itself): read at
+// run time, a ReferenceError unless the host defines it, and `any` to tsc.
+func (c *Checker) jsUndeclaredName(name string, scope *binder.Scope) bool {
+	// A name a rewrite built (a namespace member's `ns__kmlns_m`) or one in
+	// the library's code is codegen's to type.
+	if !c.opts.CompatJS() || strings.Contains(name, "_kml") || strings.HasPrefix(name, "#") || scope == nil || c.inLibrary(scope) {
+		return false
+	}
+	src := sourceName(name)
+	return !intrinsicNames[src] && !c.b.Program.BuiltinImports[src] && !c.nsAlias(src) && !c.ambientName(src) && !lib.KnownGlobal(src)
+}
+
 func (c *Checker) unresolvedValue(name string, at ast.Node, pos ast.Pos, scope *binder.Scope) {
 	if c.opts.CompatJS() || strings.HasSuffix(name, "_kml_builtin") || strings.HasPrefix(name, "__kml") {
 		return
+	}
+	if strings.HasPrefix(name, "#") {
+		return // `#x in o`'s private name: the class's, checked by codegen
 	}
 	src := sourceName(name)
 	if intrinsicNames[src] || c.b.Program.BuiltinImports[src] || c.nsAlias(src) || c.ambientName(src) {
@@ -131,7 +147,7 @@ func (c *Checker) typeParamInScope(at ast.Node, name string) bool {
 		case *ast.FunctionDeclaration:
 			tps = x.TypeParams
 		case *ast.ClassDeclaration:
-			tps = x.TypeParams
+			tps = x.DeclaredTypeParams().Names
 		}
 		for _, tp := range tps {
 			if tp == name {

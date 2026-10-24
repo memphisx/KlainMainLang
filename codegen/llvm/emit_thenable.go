@@ -15,17 +15,17 @@ import (
 // class declaring (or inheriting) a `then` method, or an object whose `then`
 // member is a function.
 func (e *Emitter) thenableClass(t Type) (FuncSig, bool) {
-	if t.IsDynamic || t.IsPromise || t.Nullable {
+	if t.IsDynamic() || t.IsPromise() || t.Nullable() {
 		return FuncSig{}, false
 	}
-	if t.IsObject && !t.IsClass {
+	if t.IsObject() && !t.IsClass() {
 		// An object whose `then` member is a function (`{ then(res) {…} }`).
-		if _, ft, ok := t.FieldIndex("then"); ok && ft.IsFunc && !ft.IsDynamic {
+		if _, ft, ok := t.FieldIndex("then"); ok && ft.IsFunc() && !ft.IsDynamic() {
 			return FuncSig{ParamTypes: ft.FuncParams, RetType: TypeVoid}, true
 		}
 		return FuncSig{}, false
 	}
-	if !t.IsClass {
+	if !t.IsClass() {
 		return FuncSig{}, false
 	}
 	info, ok := e.classes[t.ClassName]
@@ -35,7 +35,7 @@ func (e *Emitter) thenableClass(t Type) (FuncSig, bool) {
 	if sig, ok := info.MethodSigs["then"]; ok {
 		return sig, true
 	}
-	if info.HostBase != nil && info.HostBase.IsPromise {
+	if info.HostBase != nil && info.HostBase.IsPromise() {
 		// A class extending Promise: its constructor is not %Promise%, so
 		// resolution goes through its `then` (Promise's, unless overridden
 		// on the way).
@@ -66,7 +66,7 @@ func thenableValueType(sig FuncSig) Type {
 		return TypeAny
 	}
 	cb := sig.ParamTypes[0]
-	if cb.IsFunc && len(cb.FuncParams) > 0 {
+	if cb.IsFunc() && len(cb.FuncParams) > 0 {
 		return cb.FuncParams[0]
 	}
 	return TypeAny
@@ -88,7 +88,7 @@ func (e *Emitter) emitThenableToPromise(v Value, sig FuncSig, pos ast.Pos) (Valu
 	}
 	resolveTy := FuncType(resolveParams, TypeVoid)
 	if len(resolveParams) == 1 {
-		resolveTy.IsPromiseResolver = true
+		resolveTy.setKind(kindPromiseResolver, true)
 	}
 	rejectTy := FuncType([]Type{TypeCaught}, TypeVoid)
 	res := e.bindValue(Value{Ref: e.buildBuiltinClosure(e.emitResolveThunk(valTy), p), Ty: resolveTy}, pos)
@@ -101,7 +101,7 @@ func (e *Emitter) emitThenableToPromise(v Value, sig FuncSig, pos ast.Pos) (Valu
 	// with both, as the member type of a mixed array may be another
 	// element's.)
 	args := []ast.Expression{res, rej}
-	if n := len(sig.ParamTypes); n < len(args) && v.Ty.IsClass {
+	if n := len(sig.ParamTypes); n < len(args) && v.Ty.IsClass() {
 		args = args[:n]
 	}
 	call := ast.NewCallExpression(ast.NewMemberExpression(recv, "then", pos), args, pos)
@@ -139,7 +139,7 @@ func (e *Emitter) emitThenableResolveCall(ex *ast.CallExpression) (Value, error)
 	if err != nil {
 		return Value{}, err
 	}
-	if v.Ty.IsPromise {
+	if v.Ty.IsPromise() {
 		return v, nil
 	}
 	if sig, ok := e.thenableClass(v.Ty); ok {
@@ -163,7 +163,7 @@ func (e *Emitter) thenableCallback(arg ast.Expression, param Type, pos ast.Pos) 
 	if err != nil {
 		return nil, err
 	}
-	if !fn.Ty.IsFunc {
+	if !fn.Ty.IsFunc() {
 		return arg, nil
 	}
 	bound := e.bindValue(fn, pos)
@@ -191,7 +191,7 @@ func (e *Emitter) awaitedRet(t Type) Type {
 	if sig, ok := e.thenableClass(t); ok {
 		return thenableValueType(sig)
 	}
-	if t.IsDynamic && len(t.UnionMembers) > 0 {
+	if t.IsDynamic() && len(t.UnionMembers) > 0 {
 		// `return p` of a promise in an async function settles with what p
 		// settles to (Awaited): its member is p's value type, none for a
 		// promise that never fulfills.
@@ -199,9 +199,9 @@ func (e *Emitter) awaitedRet(t Type) Type {
 		seen := map[string]bool{}
 		changed := false
 		for _, m := range t.UnionMembers {
-			if m.IsPromise {
+			if m.IsPromise() {
 				changed = true
-				if m.PromiseType == nil || m.PromiseType.IR == "" || m.PromiseType.IR == "void" || m.PromiseType.IsNever {
+				if m.PromiseType == nil || m.PromiseType.IR == "" || m.PromiseType.IR == "void" || m.PromiseType.IsNever() {
 					continue
 				}
 				m = *m.PromiseType
@@ -230,7 +230,7 @@ func (e *Emitter) emitFreePromise(p string) {
 	e.ensureFree()
 	base := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", base, p))
-	e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", base))
+	e.heapFree(base)
 }
 
 // queueMicrotaskName is the internal function synthesized source calls to
@@ -305,6 +305,12 @@ func (e *Emitter) emitResolveThenCall(ex *ast.CallExpression) (Value, error) {
 		return Value{}, err
 	}
 	x := e.bindValue(xv, pos)
+	if xv.Ty.IsDynamic() && len(xv.Ty.UnionMembers) > 0 {
+		// A union's box (`number | Promise<number>`) is resolved as the box
+		// it is: a promise member is adopted, not coerced to the union's
+		// value type.
+		x = e.bindValue(Value{Ref: xv.Ref, Ty: TypeAny}, pos)
+	}
 	call := func(f ast.Expression, a ...ast.Expression) *ast.CallExpression {
 		return ast.NewCallExpression(f, a, pos)
 	}
@@ -313,7 +319,7 @@ func (e *Emitter) emitResolveThenCall(ex *ast.CallExpression) (Value, error) {
 		return err
 	}
 	info, ok := e.classes[cls.Name]
-	if !ok || !isUnconstrainedDynamic(xv.Ty) && !(xv.Ty.IsDynamic && len(xv.Ty.UnionMembers) > 0) {
+	if !ok || !isUnconstrainedDynamic(xv.Ty) && !(xv.Ty.IsDynamic() && len(xv.Ty.UnionMembers) > 0) {
 		return Value{Ty: TypeVoid}, viaResolve()
 	}
 	// A boxed x: its own `then` when it is a C (its header word is C's tag).
@@ -326,7 +332,7 @@ func (e *Emitter) emitResolveThenCall(ex *ast.CallExpression) (Value, error) {
 	ptr, hdr, isC := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptr, pay))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, ptr))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isC, hdr, info.TagID))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isC, e.headerIdentity(hdr), info.TagID))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isC, ownL, resolveL))
 	e.emitLabel(ownL)
 	// The box as `any` (a union's box is one), its `then` found at run time.
@@ -361,7 +367,7 @@ func (e *Emitter) thenableResolveCallType(ex *ast.CallExpression) (Type, bool) {
 		return Type{}, false
 	}
 	t := e.inferExprType(ex.Args[0])
-	if t.IsPromise {
+	if t.IsPromise() {
 		return t, true
 	}
 	if sig, ok := e.thenableClass(t); ok {

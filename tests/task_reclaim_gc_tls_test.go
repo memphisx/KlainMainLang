@@ -134,12 +134,12 @@ console.log("done", s, it.next().value, it.next().value, it.next().done);
 // examples/async/promise_all.ts under -mm=gc on Linux, whose .invalid fetch is
 // such a lookup). Those threads now get libc's allocator (gcshim.c, ADR-01088).
 // A `.invalid` name never resolves, so this needs no network. Ten rounds fail
-// every run without that fix; at 25 a separate, older collector crash appears
-// (BACKLOG §0 item 20), so the size is deliberate, not a mask.
+// every run without that fix; 25 also covered the collector crash that the
+// klain:sync stack-bottom switching removed (ADR-01719).
 func TestE2EGCModeFetchFromResolverThread(t *testing.T) {
 	const src = `
 let failed = 0
-for (let round = 0; round < 10; round++) {
+for (let round = 0; round < 25; round++) {
   const ps: Promise<Response>[] = []
   for (let k = 0; k < 3; k++) ps.push(fetch("http://kml-gc-" + round + "-" + k + ".invalid/"))
   const junk: string[] = []
@@ -154,5 +154,5 @@ console.log("done", failed)
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
-	compareLines(t, strings.TrimRight(string(out), "\n"), "done 30")
+	compareLines(t, strings.TrimRight(string(out), "\n"), "done 75")
 }

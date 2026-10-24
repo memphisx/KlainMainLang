@@ -104,6 +104,19 @@ type Type struct {
 	TypeParams []*Type    // Function: a generic signature's type parameters
 	Overloads  []*Type    // Function: an overloaded function's signatures, in order
 	ThisType   *Type      // Function: a `this: T` parameter's T, or nil
+	// Opt is a tuple's count of trailing optional elements (`[T?]`), each
+	// held with undefined (`T | undefined`, as tsc's strict reading).
+	Opt int
+	// Labels are a labelled tuple's element names (`[x: number]`), or nil.
+	Labels []string
+	// Brand and BrandBase describe a branded primitive (`string & {
+	// __brand: "id" }`, an intersection of a primitive with object types):
+	// the type carries its primitive's flags, BrandBase is that primitive and
+	// Brand the object members' merged type.
+	Brand, BrandBase *Type
+	// LiteralThis is an intersection's `ThisType<T>` marker's T: the
+	// `this` of an object literal's methods contextually typed by it.
+	LiteralThis *Type
 	// StringIndex and NumberIndex are an object type's index signatures'
 	// value types (`[k: string]: T`, `[i: number]: T`), or nil.
 	StringIndex, NumberIndex *Type
@@ -199,7 +212,17 @@ func (t *Type) Prop(name string) *Property {
 }
 
 // String renders a type the way TypeScript prints it.
+// RecursiveAlias reports whether t is the object type of a module-level,
+// non-generic alias of a literal naming itself (recursiveLiteralAlias): a
+// cyclic type that names no type parameter.
+func (t *Type) RecursiveAlias() bool {
+	return t.Flags&Object != 0 && t.Kind == Anonymous && t.Symbol != nil && t.Symbol.Flags&binder.TypeAlias != 0
+}
+
 func (t *Type) String() string {
+	if t.Brand != nil {
+		return t.BrandBase.String() + " & " + t.Brand.String()
+	}
 	if t.ClassOf != nil {
 		return "typeof " + symbolName(t.ClassOf)
 	}
@@ -299,6 +322,17 @@ func (t *Type) String() string {
 		parts := make([]string, len(t.Elems))
 		for i, e := range t.Elems {
 			parts[i] = e.String()
+			switch {
+			case t.Labels != nil && i >= t.minLen():
+				parts[i] = t.Labels[i] + "?: " + parts[i]
+			case t.Labels != nil:
+				parts[i] = t.Labels[i] + ": " + parts[i]
+			case i >= t.minLen():
+				if e.Flags&Union != 0 || e.Flags&Object != 0 && e.Kind == Function {
+					parts[i] = "(" + parts[i] + ")"
+				}
+				parts[i] += "?"
+			}
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
 	case Function:
@@ -356,6 +390,10 @@ func (t *Type) String() string {
 			return generic + "(" + strings.Join(parts, ", ") + ") => " + s
 		}
 		return generic + "(" + strings.Join(parts, ", ") + ") => " + t.Result.String()
+	case Anonymous:
+		if t.RecursiveAlias() {
+			return symbolName(t.Symbol) // a recursive alias's literal
+		}
 	case Instance, Interface:
 		if t.Symbol != nil {
 			if len(t.TypeArgs) > 0 {
@@ -368,7 +406,14 @@ func (t *Type) String() string {
 			return symbolName(t.Symbol)
 		}
 	}
-	if len(t.Props) == 0 {
+	var idx []string
+	if t.StringIndex != nil {
+		idx = append(idx, "[x: string]: "+t.StringIndex.String()+";")
+	}
+	if t.NumberIndex != nil {
+		idx = append(idx, "[x: number]: "+t.NumberIndex.String()+";")
+	}
+	if len(t.Props) == 0 && len(idx) == 0 {
 		return "{}"
 	}
 	parts := make([]string, len(t.Props))
@@ -381,9 +426,9 @@ func (t *Type) String() string {
 		if p.Readonly {
 			ro = "readonly "
 		}
-		parts[i] = ro + p.Name + opt + ": " + p.Type.String() + ";"
+		parts[i] = ro + memberDisplayName(p.Name) + opt + ": " + p.Type.String() + ";"
 	}
-	return "{ " + strings.Join(parts, " ") + " }" // tsc: `{ x: number; y: string; }`
+	return "{ " + strings.Join(append(idx, parts...), " ") + " }" // tsc: `{ x: number; y: string; }`
 }
 
 // interner hands out the one *Type for each distinct type.
@@ -447,6 +492,37 @@ func (in *interner) tuple(elems []*Type) *Type {
 	return in.intern("t"+ids(elems), func() *Type { return &Type{Flags: Object, Kind: Tuple, Elems: elems} })
 }
 
+// tupleOpt is a tuple whose last opt elements are optional.
+func (in *interner) tupleOpt(elems []*Type, opt int) *Type {
+	return in.tupleLabelled(elems, opt, nil)
+}
+
+// tupleLabelled is tupleOpt with element labels (nil for none).
+func (in *interner) tupleLabelled(elems []*Type, opt int, labels []string) *Type {
+	opt = min(opt, len(elems))
+	if len(labels) != len(elems) {
+		labels = nil
+	}
+	if opt <= 0 && labels == nil {
+		return in.tuple(elems)
+	}
+	return in.intern("t"+ids(elems)+"?"+strconv.Itoa(opt)+"#"+strings.Join(labels, ","), func() *Type {
+		return &Type{Flags: Object, Kind: Tuple, Elems: elems, Opt: max(opt, 0), Labels: labels}
+	})
+}
+
+// minLen is how many elements a tuple requires.
+func (t *Type) minLen() int { return len(t.Elems) - t.Opt }
+
+// branded is the branded primitive base & brand (Type.Brand).
+func (in *interner) branded(base, brand *Type) *Type {
+	return in.intern("B"+strconv.Itoa(base.ID)+":"+strconv.Itoa(brand.ID), func() *Type {
+		b := *base
+		b.Brand, b.BrandBase = brand, base
+		return &b
+	})
+}
+
 func (in *interner) function(params []*Type, optionals []bool, rest bool, result *Type, pred *Predicate, typeParams []*Type) *Type {
 	key := "f" + ids(params) + ">" + strconv.Itoa(result.ID) + "?" + bools(optionals) + strconv.FormatBool(rest) + "<" + ids(typeParams)
 	if pred != nil {
@@ -490,6 +566,15 @@ func (in *interner) withThis(fn, t *Type) *Type {
 	return in.intern("t"+strconv.Itoa(fn.ID)+":"+strconv.Itoa(t.ID), func() *Type {
 		c := *fn
 		c.ThisType = t
+		return &c
+	})
+}
+
+// withLiteralThis is object type o carrying a `ThisType<t>` marker.
+func (in *interner) withLiteralThis(o, t *Type) *Type {
+	return in.intern("T"+strconv.Itoa(o.ID)+":"+strconv.Itoa(t.ID), func() *Type {
+		c := *o
+		c.LiteralThis = t
 		return &c
 	})
 }

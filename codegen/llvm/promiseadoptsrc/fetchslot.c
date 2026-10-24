@@ -26,7 +26,7 @@ void *__kml_fetch_slot_to_promise(void *slot) {
     if (have) return have;
     void *prom = __kml_task_alloc_promise();
     F(pending, KML_FETCHPENDING_BRIDGE, void *) = prom;
-    bridge_env *env = (bridge_env *)malloc(sizeof(bridge_env));
+    bridge_env *env = (bridge_env *)kml_alloc(KML_HEAP_WORDS, sizeof(bridge_env));
     env->slot = slot;
     env->prom = prom;
     /* The coroutine's own task promise is bookkeeping only: the bridge

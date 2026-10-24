@@ -818,11 +818,13 @@ func TestE2EDestructuredParamRequiresTypeAnnotation(t *testing.T) {
 	}
 }
 
-func TestE2EDestructuredParamWithDefaultRejected(t *testing.T) {
-	_, err := parseAndCompile(`function f({x, y}: {x:number,y:number} = {x:1,y:2}): number { return x + y }`)
-	if err == nil {
-		t.Fatal("expected a compile error for a default value on a destructured parameter, got none")
-	}
+// A destructured parameter takes a default (ADR-01778).
+func TestE2EDestructuredParamWithDefault(t *testing.T) {
+	assertOutput(t, `
+function f({ x, y }: { x: number; y: number } = { x: 1, y: 2 }): number { return x + y }
+const g = ([a, b]: number[] = [3, 4]): number => a * b
+console.log(f(), f({ x: 5, y: 6 }), g(), g([2, 2]))
+`, "3 11 12 4")
 }
 
 func TestE2ERestDestructuredParamRejected(t *testing.T) {
@@ -830,6 +832,26 @@ func TestE2ERestDestructuredParamRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected a compile error for a rest parameter that's also a destructuring pattern, got none")
 	}
+}
+
+// A destructured key or member a type lacks is tsc's TS2339, on arrays too.
+func TestE2EPatternMissingPropertyRejected(t *testing.T) {
+	for _, src := range []string{
+		`const o = {a: 1}; const {zz} = o; console.log(zz);`,
+		`function g({w}: {v: number}) { return w; }`,
+		`const arr: number[] = [1]; console.log(arr.qq);`,
+		`const o = {b: {c: 1}}; const {b: {d}} = o; console.log(d);`,
+	} {
+		if _, err := parseAndCompile(src); err == nil || !strings.Contains(err.Error(), "does not exist on type") {
+			t.Errorf("%s: expected TS2339, got %v", src, err)
+		}
+	}
+	assertOutput(t, `
+const o = {a: 1, b: {c: 2}};
+const {a, b: {c}} = o;
+function g({length}: string[]): number { return length; }
+console.log(a, c, g(["x", "y"]));
+`, "1 2 2")
 }
 
 // --- Nested function declarations (TDD-00057) ---
@@ -1748,23 +1770,17 @@ console.log(b.getHandler()());
 // --- Generator functions (TDD-00061/ADR-00172): V1 scope cuts still rejected ---
 // (Real, working generator behavior is covered in generators_test.go.)
 
-func TestE2EGeneratorFunctionMissingReturnTypeRejected(t *testing.T) {
-	// The element type is now inferred from yields (TDD-00096/ADR-00293) —
-	// only a genuinely non-joinable yield mix still demands the annotation.
-	_, err := parseAndCompile(`
+// Yields of different representations are a union, held boxed.
+func TestE2EGeneratorUnionYields(t *testing.T) {
+	assertOutput(t, `
 function* gen() {
     yield 1;
     yield "two";
+    yield [3];
 }
 const g = gen();
-console.log(g.next().value);
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a generator whose yields produce non-joinable element types, got none")
-	}
-	if !strings.Contains(err.Error(), "requires an explicit return type annotation") {
-		t.Fatalf("expected 'requires an explicit return type annotation', got: %v", err)
-	}
+console.log(g.next().value, g.next().value, g.next().value, g.next().done);
+`, "1 two [ 3 ] true")
 }
 
 // A non-capturing nested generator declaration works (TDD-00094); a capturing one
@@ -3239,7 +3255,8 @@ console.log([5, 6].map(function (x) { return arguments.length; }));
 // `(a, b)` is the comma operator unless `=>` (or a return type then `=>`)
 // follows the group (BACKLOG 122).
 func TestCommaExpressionIsNotArrowParams(t *testing.T) {
-	assertSameAsNode(t, `
+	// A comma whose left side has no effect is TS2695 under the strict lane.
+	assertSameAsNodeCompatJS(t, `
 let a = 1, b = 2;
 const c = (a, b);
 console.log(c);
@@ -3411,4 +3428,189 @@ try { new C().method(null); } catch (e) { console.log(e.constructor.name); }
 var bad = Object.defineProperty({}, 'poisoned', { get: function() { throw new Error("boom"); } });
 try { new C().method(bad); } catch (e) { console.log("caught", e.message); }
 `, "m 5 s\na 1 x\ns 5\ne 5\nTypeError\ncaught boom")
+}
+
+// TestE2EContextualReturnObjectShapes: an unannotated callback returning
+// object literals of different shapes (one setting an optional field)
+// builds its contextual return type's object, sync or async, arrow or
+// function expression.
+func TestE2EContextualReturnObjectShapes(t *testing.T) {
+	assertOutput(t, `
+interface R { status: number; body: string; headers?: Map<string, string> }
+function run(f: (n: number) => R | Promise<R>): void {
+  const out: any = f(1)
+  if (out instanceof Promise) (out as Promise<R>).then((r: R) => console.log(r.status, r.body, r.headers?.get('a')))
+  else { const r = out as R; console.log(r.status, r.body, r.headers?.get('a')) }
+}
+run((n: number) => {
+  if (n === 0) return { status: 200, body: 'x' }
+  const h = new Map<string, string>(); h.set('a', 'b')
+  return { status: 201, body: 'y', headers: h }
+})
+run(function (n: number) {
+  if (n === 0) return { status: 200, body: 'x' }
+  const h = new Map<string, string>(); h.set('a', 'c')
+  return { status: 202, body: 'z', headers: h }
+})
+run(async (n: number) => {
+  if (n === 1) return { status: 203, body: 'w' }
+  const h = new Map<string, string>(); h.set('a', 'd')
+  return { status: 200, body: 'x', headers: h }
+})
+`, "201 y b\n202 z c\n203 w undefined")
+}
+
+// A `for (var x of/in …)` binding is function-scoped: after the loop it
+// holds the last value, undefined after zero iterations.
+func TestE2EForVarBindingAfterLoop(t *testing.T) {
+	assertOutput(t, `const xs = [1, 2, 3];
+for (var k of xs) {}
+console.log(k);
+for (var e of [] as number[]) {}
+console.log(e);
+for (var p in { a: 1, b: 2 }) {}
+console.log(p);
+function f0() { for (var s of ["x", "y"]) { if (s === "x") continue; } return s; }
+console.log(f0());
+function z(xs: number[]) { for (var n of xs) { if (n > 1) break; } return n; }
+console.log(z([]), z([1, 2, 3]), z([5]));
+function c() { for (var q of "ab") {} const g = () => q; return g(); }
+console.log(c());
+function w() { for (var k in { x: 1 }) { } console.log(typeof k, k); }
+w();`, `3
+undefined
+b
+y
+undefined 2 5
+b
+string x`)
+}
+
+// An evolving `[]` that functions are pushed into is an array of them,
+// at top level and in a function.
+func TestE2EPushedFunctionArray(t *testing.T) {
+	assertOutput(t, `const fs = [];
+fs.push(() => 1);
+fs.push(function () { return 2; });
+console.log(fs[0](), fs[1]());
+for (const f of fs) console.log(f());
+fs.forEach(g => console.log(g()));
+function k() { const hs = []; hs.push(() => 3); return hs[0](); }
+console.log(k());`, `1 2
+1
+2
+1
+2
+3`)
+}
+
+// An array method's callback that grows or shrinks the array: each step
+// reads the live array (its moved data, its new length), and the callback's
+// third argument is the array itself.
+func TestE2EArrayCallbackMutatesArray(t *testing.T) {
+	assertOutput(t, `{
+function mk() { return ["Skateboard", "Barefoot"]; }
+let a = mk();
+console.log(a.findLast((v, i) => { if (i === 1) { for (let k = 0; k < 64; k++) a.push("x" + k); a[0] = "Magic Carpet"; } return i === 0; }));
+a = mk();
+const seen: string[] = [];
+a.forEach((v, i) => { if (i === 0) { for (let k = 0; k < 64; k++) a.push("y"); a[1] = "Z"; } if (i < 2) seen.push(v); });
+console.log(seen, a.length);
+a = mk();
+console.log(a.map((v, i) => { if (i === 0) { for (let k = 0; k < 64; k++) a.push("m"); a[1] = "W"; } return v; }));
+a = mk();
+console.log(a.find((v, i) => { if (i === 0) { for (let k = 0; k < 64; k++) a.push("f"); a[1] = "Q"; } return v === "Q"; }));
+const n = [1, 2, 3];
+console.log(n.reduce((s, v, i) => { if (i === 0) { for (let k = 0; k < 64; k++) n.push(0); n[2] = 100; } return s + v; }, 0));
+console.log(n.filter((v, i) => { if (i === 0) n.length = 1; return true; }));
+}
+{
+const grow = (a: number[]) => { for (let k = 0; k < 64; k++) a.push(9); };
+let a = [1, 2, 3];
+console.log(a.findIndex((v, i) => { if (i === 0) { grow(a); a[2] = 7; } return v === 7; }));
+a = [1, 2, 3];
+console.log(a.some((v, i) => { if (i === 0) { grow(a); a[1] = 5; } return v === 5; }));
+a = [1, 2, 3];
+console.log(a.every((v, i) => { if (i === 0) { a.length = 2; } return v < 3; }));
+a = [1, 2];
+a.forEach((v, i, arr) => console.log(arr === a, arr.length));
+console.log(a.reduceRight((s, v, i) => { if (i === 1) a.length = 1; return s + v; }, 0));
+const o = { xs: [1, 2] };
+o.xs.forEach((v, i) => { if (i === 0) { for (let k = 0; k < 64; k++) o.xs.push(0); o.xs[1] = 42; } else if (i === 1) console.log(v); });
+}`, `Magic Carpet
+[ 'Skateboard', 'Z' ] 66
+[ 'Skateboard', 'W' ]
+Q
+103
+[ 1 ]
+2
+true
+true
+true 2
+true 2
+3
+42`)
+}
+
+// `let x!: T`, a definite assignment assertion, waives the read-before-
+// assignment check (ADR-01718).
+func TestE2EDefiniteAssignmentAssertion(t *testing.T) {
+	assertSameAsNode(t, `let n!: number;
+function setN() { n = 4; }
+setN();
+console.log(n + 1);
+let ctl!: WritableStreamDefaultController;
+new WritableStream({ start(c) { ctl = c; } });
+if (ctl) console.log("bound");
+`)
+	for src, want := range map[string]string{
+		"let a!: number = 1;\n": "cannot also have definite assignment",
+		"let b!;\n":             "must also have type annotations",
+	} {
+		if _, err := parseAndCompile(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want an error containing %q, got %v", src, want, err)
+		}
+	}
+}
+
+// TestE2ETypeofNestedFunctionDeclarations: `typeof` of a nested function or
+// generator declaration is "function"; a body function declaration named
+// `arguments` replaces the arguments object, and one named like a parameter
+// replaces the parameter.
+func TestE2ETypeofNestedFunctionDeclarations(t *testing.T) {
+	assertOutput(t, `
+function f(): string { return typeof g + " " + typeof h; function g() {} function* h() {} }
+console.log(f());
+`, "function function")
+	assertOutputCompatJS(t, `
+function f3() { var r = arguments(); return typeof arguments + r; function arguments() { return 7; } }
+console.log(f3(1));
+function f1(x) { return typeof x; function x() { return 7; } }
+console.log(f1(5));
+function f2() { var x; return typeof x; function x() { return 7; } }
+console.log(f2());
+`, "function7\nfunction\nfunction")
+}
+
+// TestE2ENumberConversionIsADouble: Number() of a boolean, of null and of
+// nothing is a number (a double), so a later fractional store keeps it.
+func TestE2ENumberConversionIsADouble(t *testing.T) {
+	assertOutputCompatJS(t, `
+var m = Number(false); m = m + 0.5; console.log(m);
+console.log(Number(true) / 4, Number() + 0.25, Number(null) + 0.5, typeof Number(true));
+function f() { return 1; }
+function f() { return "A"; }
+var r = f();
+console.log(r, typeof r);
+var u = Date.now(); u = u + 0.5; console.log(u % 1);
+`, "0.5\n0.25 0.25 0.5 number\nA string\n0.5")
+}
+
+// TestE2EAwaitOfBoxedParamCall: awaiting the call of an untyped parameter
+// whose default is an async arrow awaits the box it returns.
+func TestE2EAwaitOfBoxedParamCall(t *testing.T) {
+	assertOutputCompatJS(t, `
+const f = async (a = 1, b = async () => await 2) => a + await b();
+f().then(console.log);
+`, "3")
 }

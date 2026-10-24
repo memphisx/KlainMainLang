@@ -62,9 +62,14 @@ func (e *Emitter) structAlloc(lit ast.Expression, ty Type) (dataReg string) {
 // emitObjAlloc is the one heap allocation of an object layout (TDD-00230
 // P3.3a): zeroed storage for ty with its header word stored.
 func (e *Emitter) emitObjAlloc(ty Type) string {
+	if hostPrefixedObject(ty) {
+		dataReg := e.freshReg()
+		e.emitObjAllocInto(dataReg, ty)
+		return dataReg
+	}
 	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", dataReg, ty.StructSize()))
+	e.heapCallocInto(dataReg, "1", fmt.Sprint(ty.StructSize()))
 	e.emitStoreObjHeader(dataReg, ty)
 	return dataReg
 }
@@ -92,10 +97,10 @@ func (e *Emitter) closureAllocs(lit ast.Expression, envIR string, envSize int64)
 	}
 	e.ensureMalloc()
 	hdr = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdr))
+	e.heapMallocInto(hdr, "16")
 	if envSize > 0 {
 		env = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", env, envSize))
+		e.heapMallocInto(env, fmt.Sprint(envSize))
 	}
 	return hdr, env
 }
@@ -371,14 +376,31 @@ func collectFinRegNames(prog *ast.Program) map[string]bool {
 // emitObjAllocInto is emitObjAlloc into a register the caller already named.
 func (e *Emitter) emitObjAllocInto(reg string, ty Type) {
 	e.ensureCalloc()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", reg, ty.StructSize()))
+	if hostPrefixedObject(ty) {
+		e.emitHostPrefixedAlloc(reg, ty, "calloc(i64 1, ")
+		return
+	}
+	e.heapCallocInto(reg, "1", fmt.Sprint(ty.StructSize()))
 	e.emitStoreObjHeader(reg, ty)
+}
+
+// emitHostPrefixedAlloc allocates a prefixed host object (hostPrefixedObject)
+// with call, its header word at the base, and names its body reg.
+func (e *Emitter) emitHostPrefixedAlloc(reg string, ty Type, call string) {
+	base := e.freshReg()
+	e.heapAllocCall(base, fmt.Sprintf("%si64 %d)", call, ty.StructSize()+8))
+	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", reg, base))
 }
 
 // emitObjMallocInto is emitObjAllocInto without the zeroing, for a caller
 // that stores every field itself.
 func (e *Emitter) emitObjMallocInto(reg string, ty Type) {
 	e.ensureMalloc()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", reg, ty.StructSize()))
+	if hostPrefixedObject(ty) {
+		e.emitHostPrefixedAlloc(reg, ty, "malloc(")
+		return
+	}
+	e.heapMallocInto(reg, fmt.Sprint(ty.StructSize()))
 	e.emitStoreObjHeader(reg, ty)
 }

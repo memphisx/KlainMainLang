@@ -317,3 +317,38 @@ const c: Call = { url: "/x", init: { method: "DELETE" } }
 console.log(c.url, c.init?.method)
 `)
 }
+
+// An `any` bag converted to a structural type is the bag itself: the same
+// object, its other keys, kinds and order kept, written and deleted in place.
+func TestE2EStructuralViewOfAnyBag(t *testing.T) {
+	assertSameAsNode(t, `
+interface P { a: number; b: string; c?: boolean; f?: () => string }
+const bag: any = JSON.parse('{"b":"u","a":3,"z":true}')
+const p: P = bag
+console.log(p, JSON.stringify(p), Object.keys(p), Object.entries(p))
+console.log("a" in p, "c" in p, p.c, typeof p.c, p.c ?? "none")
+for (const k in p) console.log("key", k)
+const q = { ...p, extra: 1 }
+console.log(q)
+p.c = true
+p.a += 5; p.a++
+console.log(p.a, bag.c, p)
+delete p.c
+console.log(p, String(p.b.length))
+function take(x: P): number { return x.a * 2 }
+console.log(take(bag), take(p))
+const arr: P[] = JSON.parse('[{"b":"v","a":4},{"a":1,"b":"w","y":0}]')
+console.log(arr, arr.map(x => x.a), arr[1])
+const o = { items: [] as P[] }
+o.items = JSON.parse('[{"b":"x","a":5}]')
+console.log(o.items[0].b, o)
+bag.f = () => "hi"
+console.log(p.f?.())
+const m = new Map<string, P>(); m.set("k", p); console.log(m.get("k")?.a)
+const s: string = p.a + "-" + p.b; console.log(s, p === bag, [p].includes(bag))
+interface O { shell?: string; argv: string[] }
+const opts: any = { shell: true, argv: "x" }
+function run(o: O) { return typeof o.shell + " " + typeof o.argv }
+console.log(run(opts))
+`)
+}

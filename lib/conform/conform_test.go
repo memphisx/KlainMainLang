@@ -95,7 +95,11 @@ func TestMemberListUpToDate(t *testing.T) {
 	if _, err := os.Stat(tsLib); err != nil {
 		t.Skip("TypeScript library not fetched (tools/conformance/fetch.sh)")
 	}
-	lines, err := conform.MemberLines(tsLib)
+	typesNode := filepath.Join("..", "..", ".types-node")
+	if _, err := os.Stat(typesNode); err != nil {
+		t.Skip("@types/node not fetched (tools/conformance/fetch.sh)")
+	}
+	lines, err := conform.MemberLines(tsLib, typesNode)
 	if err != nil {
 		t.Fatal(err)
 	}

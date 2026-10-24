@@ -330,12 +330,33 @@ func TestYieldAsAssignmentRHS(t *testing.T) {
 }
 
 func TestYieldReservedAsIdentifier(t *testing.T) {
-	// `yield` is a hard keyword in this compiler (matching `await`'s own
-	// precedent, not real JS's narrower "reserved only inside a generator
-	// body" rule) — see TDD-00061.
-	_, err := parser.Parse("let yield = 5;")
-	if err == nil {
-		t.Fatal("expected a parse error using 'yield' as a plain identifier, got none")
+	// `yield` outside a generator is an identifier in sloppy code, and a
+	// reserved word in strict code (ADR-01799).
+	if _, err := parser.Parse("let yield = 5;"); err != nil {
+		t.Fatalf("sloppy code: %v", err)
+	}
+	if _, err := parser.Parse(`"use strict"; let yield = 5;`); err == nil {
+		t.Fatal("expected a parse error using 'yield' as an identifier in strict code, got none")
+	}
+	if _, err := parser.Parse("function* g() { let yield = 5; }"); err == nil {
+		t.Fatal("expected a parse error using 'yield' as a binding in a generator, got none")
+	}
+}
+
+func TestYieldEarlyErrors(t *testing.T) {
+	// A yield in a generator's parameters is an early error, and `yield`
+	// then a line break ends the yield: `* 1` after it is not `yield*`
+	// (ADR-01806). A nested generator's body in a default may yield, and
+	// `yield *` may take its operand on the next line.
+	for _, src := range []string{"0, function*(x = yield) {};", "function* g() {\n  yield\n  * 1\n}"} {
+		if _, err := parser.Parse(src); err == nil {
+			t.Errorf("expected a parse error for %q, got none", src)
+		}
+	}
+	for _, src := range []string{"function* g(x = function* () { yield 1; }) {}", "function* k() { yield *\n[2]; }"} {
+		if _, err := parser.Parse(src); err != nil {
+			t.Errorf("%q: %v", src, err)
+		}
 	}
 }
 
@@ -479,6 +500,20 @@ func TestParseError(t *testing.T) {
 		"const x =", // missing initialiser
 		"if x { }",  // missing parens
 		"class Foo { constructor() {} constructor() {} }", // duplicate constructor
+		"while (false) let\n[a] = 0;",                     // a lexical declaration as a loop's statement
+		"if (x) const y = 1;",                             // likewise
+		"3in []",                                          // an identifier right after a number
+		"10._",                                            // likewise, after its trailing dot
+		"class C { m(x = yield) {} }",                     // yield as a name in strict code
+		"function f() { 'use strict'; var yield; }",       // likewise
+		"() => ({}) = 1;",                                 // a parenthesized literal is no pattern
+		"#x in {};",                                       // a private name no class declares
+		"'use strict'; yield: 1;",                         // yield as a label in strict code
+		"(async function* yield() {});",                   // an async generator named yield
+		"(async function await() {});",                    // an async function named await
+		"(async function (x = await 1) {});",              // await in an async parameter initializer
+		"await: 1; export {};",                            // await as a label in a module
+		"class C { #f; m() { #f in () => {}; } }",         // an arrow as a relational operand
 	}
 	for _, src := range cases {
 		t.Run(src, func(t *testing.T) {
@@ -601,5 +636,58 @@ func TestInterfaceLowerType(t *testing.T) {
 	}
 	if strings.Join(got, ",") != "D=date,E=" {
 		t.Fatalf("got %v", got)
+	}
+}
+
+// `(x): T => …` is an arrow; `c ? (x) : (q: number): number => q` is a
+// conditional whose alternative is the arrow: the return type must parse
+// and be followed by `=>`.
+func TestArrowUntypedParamReturnType(t *testing.T) {
+	if _, ok := mustParseExpr(t, `(x): number[] | undefined => [x]`).(*ast.ArrowFunction); !ok {
+		t.Fatal("(x): T => … is not an arrow")
+	}
+	c, ok := mustParseExpr(t, `c ? (x) : (q: number): number => q`).(*ast.ConditionalExpression)
+	if !ok {
+		t.Fatal("c ? (x) : (q: number): number => q is not a conditional")
+	}
+	if _, ok := c.Alternate.(*ast.ArrowFunction); !ok {
+		t.Fatalf("the alternative is %T, not an arrow", c.Alternate)
+	}
+}
+
+func TestStrictYieldNames(t *testing.T) {
+	// Strict code rejects `yield` as a name (a reference or a binding) but
+	// not as a property name: a method, a key, a member (ADR-01812).
+	for _, src := range []string{"\"use strict\"; var yield = 1;", "\"use strict\"; yield;", "\"use strict\"; function f(yield) {}", "\"use strict\"; class yield {}", "\"use strict\"; try {} catch (yield) {}"} {
+		if _, err := parser.Parse(src); err == nil {
+			t.Errorf("expected a parse error for %q, got none", src)
+		}
+	}
+	for _, src := range []string{
+		"export class S { yield(): number { return 1; } static yield2 = 1; }",
+		"\"use strict\"; var o = { yield: 1, yield2() {}, get yield3() { return 1; } }; o.yield;",
+		"var yield = 1; yield;",
+	} {
+		if _, err := parser.Parse(src); err != nil {
+			t.Errorf("%q: %v", src, err)
+		}
+	}
+}
+
+// TestAsyncArrowParamsAwait: an async arrow's parameters read `await` as
+// the operator, so it is never a name there, and an `await` its defaults
+// evaluate is an early error; one in a nested function or arrow is not.
+func TestAsyncArrowParamsAwait(t *testing.T) {
+	for _, src := range []string{
+		"async(a = await => {}) => {};",
+		"async(b = await 1) => {};",
+		"async(await) => {};",
+	} {
+		if _, err := parser.Parse(src); err == nil {
+			t.Errorf("%s: parsed, want a syntax error", src)
+		}
+	}
+	if _, err := parser.Parse("const f = async (a = 1, b = async () => await 2, c = function (await) {}) => a;"); err != nil {
+		t.Errorf("nested await: %v", err)
 	}
 }

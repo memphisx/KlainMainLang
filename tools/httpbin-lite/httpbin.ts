@@ -137,7 +137,7 @@ http.listen(PORT, (req: HttpRequest): Res => {
 
   // --- redirect: /redirect-to?url= ---
   if (path === "/redirect-to") {
-    const target = req.query.has("url") ? req.query.get("url") : "/get";
+    const target = req.query.get("url") ?? "/get";
     const h: Map<string, string> = new Map<string, string>();
     h.set("Location", target);
     return { status: 302, body: "", headers: h };

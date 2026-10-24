@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/32",
     "loosePct": 100,
-    "strict": "23/32",
-    "strictPct": 72
+    "strict": "26/32",
+    "strictPct": 81
   },
   "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, Object.hasOwn answered at compile time for a literal key. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
   "entries": [
@@ -67,7 +67,7 @@
       "name": "Object.keys(obj)",
       "statusRow": "Object.keys(obj)",
       "signature": "Object.keys(obj): string[]",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Returns a string[] of the object's field names in ES own-property order. An omitted optional field (x?: T) is not a key: it is filtered out at runtime by its presence, as JSON.stringify already did. The result can be iterated directly without an intermediate variable.",
       "returns": {
         "type": "string[]",
@@ -75,9 +75,6 @@
       },
       "exampleKey": "objects/object_static",
       "snippet": "for (const k of Object.keys(person)) {\n  console.log(k)\n}\nconsole.log(Object.keys(person).length)   // 3",
-      "differences": [
-        "Object.values/entries/for...in still list an omitted optional field (as undefined); only keys filters it"
-      ],
       "seeAlso": [
         "object.values",
         "object.entries"
@@ -153,13 +150,10 @@
       "name": "Object.assign(target, ...src)",
       "statusRow": "Object.assign(target, ...src)",
       "signature": "Object.assign(target, ...src): target",
-      "badge": "caveats",
-      "description": "Copies each source's fields into target in argument order — a later source overwrites an earlier one on a shared field. Mutates and returns target (same heap object, no copy). An array target takes its sources' indices, growing as needed.",
+      "badge": "exact",
+      "description": "Copies each source's own enumerable properties — string keys, then symbols — into target in argument order — a later source overwrites an earlier one on a shared field. Mutates and returns target (same heap object, no copy). An array target takes its sources' indices, growing as needed. A source property the target's type lacks is added to the target, and the result is read dynamically.",
       "exampleKey": "objects/object_static",
       "snippet": "const applied = Object.assign(defaults, userPrefs)\nconsole.log(defaults.theme)     // dark (same object)",
-      "differences": [
-        "Every field a source contributes must already exist on `target`'s struct type — a source field `target`'s type doesn't have is a clean compile error (fixed-shape heap structs), not grafted on as in real JS"
-      ],
       "seeAlso": [
         "object.spread",
         "object.freeze"
@@ -171,10 +165,10 @@
     {
       "id": "object.defineproperty",
       "name": "Object.defineProperty / getOwnPropertyDescriptor / accessors",
-      "statusRow": "Object.defineProperty / getOwnPropertyDescriptor / getOwnPropertyNames / accessors (dynamic objects)",
+      "statusRow": "Object.defineProperty / getOwnPropertyDescriptor / getOwnPropertyNames / accessors",
       "signature": "Object.defineProperty(o, \"k\", { value: 1, enumerable: false });\nconst d = Object.getOwnPropertyDescriptor(o, \"k\");\nconst t = { get x() { return this._x; }, set x(v) { this._x = v; } };",
       "badge": "implemented",
-      "description": "Real property descriptors on dynamic (any-typed, or js-mode untyped-literal) objects: defineProperty with the spec's create defaults and non-configurable redefinition rules, getOwnPropertyDescriptor in both data and accessor forms, getOwnPropertyNames including non-enumerables, and object-literal get/set accessors invoked with the original receiver — inherited getters through the prototype chain included. Object.keys, for...in, and JSON.stringify honor enumerability (stringify and spread invoke getters), and rejected writes or deletes throw the module-strict JS TypeErrors. Object.freeze/seal/preventExtensions enforce through the same attributes, with truthful isFrozen/isSealed/isExtensible. Object.defineProperties defines each key of its second argument the same way, and functions carry descriptors too. getOwnPropertyDescriptor and getOwnPropertyNames also read a statically-typed object's own fields; defineProperty needs a dynamic object, since a struct has no descriptor table.",
+      "description": "Real property descriptors on objects, arrays and class instances: defineProperty with the spec's create defaults and non-configurable redefinition rules, getOwnPropertyDescriptor in both data and accessor forms, getOwnPropertyNames including non-enumerables, and object-literal get/set accessors invoked with the original receiver — inherited getters through the prototype chain included. Object.keys, for...in, and JSON.stringify honor enumerability (stringify and spread invoke getters), and rejected writes or deletes throw the module-strict JS TypeErrors. Object.freeze/seal/preventExtensions enforce through the same attributes, with truthful isFrozen/isSealed/isExtensible. Object.defineProperties defines each key of its second argument the same way, and functions carry descriptors too. getOwnPropertyDescriptor and getOwnPropertyNames also read a statically-typed object's own fields. A statically-typed object, class instance or array takes new properties beside its layout or elements, with attributes and accessors; an accessor on an array element runs on every read of it (inspect shows [Getter]). An accessor on a declared field of a typed object is a compile error.",
       "seeAlso": [
         "object.create",
         "object.freeze"
@@ -205,7 +199,7 @@
       "statusRow": "Object.create() / getPrototypeOf / setPrototypeOf / __proto__ (dynamic objects)",
       "signature": "const child: any = Object.create(base);\nObject.getPrototypeOf(child) === base; // true\nchild.__proto__ = other;",
       "badge": "implemented",
-      "description": "Real prototype chains on dynamic (any-typed) objects: Object.create(proto or null), get/setPrototypeOf, the __proto__ accessor (non-object assignments silently ignored, as in JS), and the { __proto__: base } literal form. Property reads and the in operator walk the chain — an own property shadows an inherited one, and delete re-exposes the prototype's value — while writes, Object.keys, for...in, and JSON.stringify stay own-only, matching JS. A prototype cycle throws the Node-matching TypeError. Statically-typed structs have no prototype link (the two-tier model), and Object.create's property-descriptors second argument is not yet supported.",
+      "description": "Real prototype chains on dynamic (any-typed) objects: Object.create(proto or null), get/setPrototypeOf, the __proto__ accessor (non-object assignments silently ignored, as in JS), and the { __proto__: base } literal form. Property reads and the in operator walk the chain — an own property shadows an inherited one, and delete re-exposes the prototype's value — while writes, Object.keys and JSON.stringify stay own-only and for...in walks the chain's enumerable keys, matching JS. Object.create takes a property-descriptors second argument. A prototype cycle throws the Node-matching TypeError, and a non-extensible object refuses a new prototype (Reflect.setPrototypeOf answers false). Statically-typed structs have no prototype link (the two-tier model).",
       "seeAlso": [
         "object.literal"
       ],
@@ -218,8 +212,8 @@
       "name": "Object.freeze(obj)",
       "statusRow": "Object.freeze(obj)",
       "signature": "Object.freeze(obj): obj",
-      "badge": "exact",
-      "description": "Real runtime enforcement, not a no-op: tracks obj's heap pointer in a global frozen-object set, checked at every field-write site, so a blocked write throws a catchable Error even through a different alias or function parameter. Adding/deleting fields is already structurally impossible, so value-write is the only thing freeze needs to enforce. Arrays freeze too, every mutation checking the array's level.",
+      "badge": "caveats",
+      "description": "Real runtime enforcement, not a no-op: the object's header word records its integrity level, read at every field-write site, so a blocked write throws a catchable TypeError through any alias, function parameter or thread. Arrays freeze too, every mutation checking the array's level. A Map, Set, Date or function value is a compile error.",
       "exampleKey": "objects/object_static",
       "snippet": "Object.freeze(conf)\ntry {\n  conf.port = 9090\n} catch (e) {\n  console.log('blocked: cannot write to a frozen object')\n}",
       "seeAlso": [
@@ -272,12 +266,9 @@
       "id": "object.fromentries",
       "name": "Object.fromEntries()",
       "statusRow": "Object.fromEntries()",
-      "signature": "Object.fromEntries(entries: [string, V][]): dynamic object",
-      "badge": "caveats",
-      "description": "Returns a dynamic object (a Map<string,V>-backed value); read via obj.field / obj[key]. Seeds via the same [K,V][] walker new Map(entries) uses.",
-      "differences": [
-        "Keys must be strings (a `[string, V][]` array) — real JS stringifies any key and accepts symbol keys"
-      ],
+      "signature": "Object.fromEntries(entries: Iterable<[K, V]>): object",
+      "badge": "exact",
+      "description": "Returns a dynamic object (a Map<string,V>-backed value); read via obj.field / obj[key]. Seeds via the same [K,V][] walker new Map(entries) uses. Other keys (a number, a symbol, an object), from an array or a Map, go through ToPropertyKey as in JavaScript: a number or object key becomes its string, a symbol stays a symbol.",
       "seeAlso": [
         "object.computedkeys",
         "map.new"
@@ -343,14 +334,10 @@
       "name": "Method shorthand { foo() {...} }",
       "statusRow": "Method shorthand { foo() {...} }",
       "signature": "{ foo() {...} }  // sugar for { foo: function() {...} }",
-      "badge": "caveats",
-      "description": "Desugars to { foo: function() {...} } — a plain anonymous function value, reusing the same closure machinery. A string-literal key can carry a method body too.",
+      "badge": "exact",
+      "description": "Desugars to { foo: function() {...} } — a plain anonymous function value, reusing the same closure machinery. A string-literal key can carry a method body too. `this` in its body is the receiver it is called on (the object, another object holding the method, a call/bind target, undefined called bare in strict code). Generator and async-generator shorthands (*g() {}, async *g() {}, *[Symbol.iterator]() {}) work the same way.",
       "exampleKey": "objects/objects",
       "snippet": "const calculator = {\n  add(a: number, b: number): number {\n    return a + b\n  },\n  label: \"calc\"\n}\nconsole.log(calculator.add(2, 3))   // 5",
-      "differences": [
-        "`this` in a method-shorthand body is bound only when the literal's contextual type gives the method a `this: T` parameter; otherwise it is a clean compile-time rejection, where TypeScript types it as the object literal",
-        "No generator method shorthand (`*g() {}`): rejected like a generator expression used as a value"
-      ],
       "seeAlso": [
         "object.shorthand",
         "object.literal"
@@ -566,13 +553,11 @@
       "id": "object.weak",
       "name": "WeakMap / WeakSet / WeakRef",
       "statusRow": "WeakMap / WeakSet / WeakRef",
-      "signature": "new WeakMap(); new WeakSet(); new WeakRef(obj)",
+      "signature": "new WeakMap(entries?); new WeakSet(values?); new WeakRef(target)",
       "badge": "caveats",
-      "description": "Object-identity-keyed weak collections and references. Under -mm=gc these are genuinely weak via Boehm disappearing links (a collected referent's .deref() / WeakMap.has observably drops); a WeakRef keeps its target to the end of the job that made or derefed it, as the spec does. gc() forces a full collection under gc, a no-op under manual.",
+      "description": "Weak collections and references keyed by object identity or an unregistered symbol; the constructors seed from an iterable. Under -mm=gc these are genuinely weak via Boehm disappearing links (a collected referent's .deref() / WeakMap.has observably drops); a WeakRef keeps its target to the end of the job that made or derefed it, as the spec does. gc() forces a full collection under gc, a no-op under manual.",
       "differences": [
-        "Object-identity keys only (a primitive key is a clean compile error); non-iterable (no `size`/iteration — matches spec)",
-        "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never becomes `undefined` and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc`",
-        "A `new WeakMap()` initial-entries argument is out of V1 scope"
+        "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never becomes `undefined` and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc`"
       ],
       "seeAlso": [
         "map.core",

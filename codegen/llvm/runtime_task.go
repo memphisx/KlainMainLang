@@ -52,8 +52,9 @@ const (
 	taskSavedJmpTop  = 11 // jmp_top saved across suspension
 	taskAsyncCtx     = 12 // AsyncLocalStorage context-frame head (TDD-00168) — inherited at spawn, survives await with the task
 	taskStackSize    = 13 // bytes in this task's stack — the module task's is far larger than taskStackBytes (TDD-00224)
-	taskStructBytes  = 112
-	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, i64 }"
+	taskFrameBase    = 14 // its fiber's base frame (frames.go): an awaiter's frame for a stack's async part
+	taskStructBytes  = 120
+	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, i64, ptr }"
 	// promise resolved: 0 = pending, 1 = fulfilled (v0/v1 hold the value), 2 =
 	// rejected (v0 holds the error object pointer's bits) — TDD-00083 Stage 2.
 	// Field 4 (reactions) is the head of a { ptr closure, ptr next } list of
@@ -99,7 +100,7 @@ declare i64 @__kml_promise_first_fulfilled(ptr, i64)`)
 // emitLoopTaskStubs emits no-op definitions for the symbols __kml_event_loop_run
 // references so it can drive coroutine tasks (TDD-00084 Part B) —
 // __kml_task_active / __kml_task_sched_step / __kml_drain_microtasks — for a
-// program that uses the event loop (SSE/WS/http.listen) but not the task runtime
+// program that uses the event loop but not the task runtime
 // and/or not microtasks. When the real runtimes are present their definitions are
 // used and the corresponding stub is skipped. Called once at program finalization.
 func (e *Emitter) emitLoopTaskStubs() {
@@ -107,31 +108,19 @@ func (e *Emitter) emitLoopTaskStubs() {
 	// on libuv), whether or not the program runs it: linked first, so the
 	// stubs below cover it.
 	if (e.UsesFetch() || e.UsesTimers()) && !e.usedEventLoop {
-		e.ensureHTTPRuntime()
+		e.ensureEventLoop()
 	}
 	// A top-level await's tick (@__kml_microtask_tick): microtask.c's.
 	if e.needMicrotaskTick {
 		e.ensureMicrotasks()
 	}
-	// The scheduler asks @__kml_group_satisfied about a task parked on a fetch
-	// group; without the combinator runtime no task ever parks on one.
-	if e.usedTaskRuntime && !e.usedPromiseCombinators {
-		e.emitGlobal("define i1 @__kml_group_satisfied(ptr %g) {\n  ret i1 1\n}")
-	}
-	// Streaming-request-body pump stubs — referenced by both the event loop
-	// and the task scheduler's step, so emitted whenever either exists.
-	if (e.usedHTTP || e.usedTaskRuntime) && !e.usedReqBodyRuntime {
-		e.emitGlobal("define void @__kml_reqbody_pump() {\nentry:\n  ret void\n}")
-		e.emitGlobal("define i1 @__kml_reqbody_want() {\nentry:\n  ret i1 0\n}")
-	}
-	if !e.usedHTTP {
+	if !e.usedEventLoop {
 		return
 	}
 	if !e.usedTaskRuntime {
 		e.emitGlobal("@__kml_task_active = internal thread_local global i64 0, align 8")
 		e.emitGlobal("define void @__kml_task_sched_step() {\nentry:\n  ret void\n}")
 		e.emitGlobal("define i1 @__kml_task_resumable() {\nentry:\n  ret i1 0\n}")
-		e.emitGlobal("define i1 @__kml_task_holds_loop() {\nentry:\n  ret i1 0\n}")
 	}
 	e.ensureMicrotasks()
 }
@@ -146,7 +135,6 @@ func (e *Emitter) ensureTaskRuntime() {
 	e.ensureFree()
 	e.ensureFiberRuntime()       // getcontext/makecontext/swapcontext + @__kml_main_ctx
 	e.ensureCurrentTaskGlobal()  // @__kml_current_task
-	e.ensureConnPokeGlobal()     // task completion pokes parked connection fibers
 	e.ensureExceptionHelpers()   // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
 	e.usedAwaitTimerDrive = true // __kml_task_await_ready's top-level drive fires timers (TDD-00088)
 	e.ensureMicrotasks()         // .then/.catch/.finally reactions drain here
@@ -176,7 +164,6 @@ declare void @__kml_task_compact()
 declare void @__kml_task_finish(ptr)
 declare void @__kml_task_sched_step()
 declare zeroext i1 @__kml_task_resumable()
-declare zeroext i1 @__kml_task_holds_loop()
 declare i64 @__kml_task_await_any_of(ptr, i64)
 declare i64 @__kml_task_await_first_fulfilled(ptr, i64)
 declare void @__kml_task_unwait(ptr, i64, ptr)
@@ -189,14 +176,3 @@ func TaskSource() string { return layoutHeader() + taskSource }
 
 // PromiseSource is the promise allocator's C source, behind kml_layout.h.
 func PromiseSource() string { return layoutHeader() + promiseSource }
-
-// TaskCFlags are task.c's mode defines: the GC stack bottom is set three ways.
-func (e *Emitter) TaskCFlags() []string {
-	if !e.isGCMode() {
-		return nil
-	}
-	if e.hasWorkers {
-		return []string{"-DKLAIN_GC=1", "-DKLAIN_GC_WORKERS=1"}
-	}
-	return []string{"-DKLAIN_GC=1"}
-}

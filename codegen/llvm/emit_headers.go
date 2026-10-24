@@ -32,7 +32,7 @@ func (e *Emitter) headersClass(pos ast.Pos) (Type, error) {
 // internal binding whose slot holds it.
 func (e *Emitter) bindValue(v Value, pos ast.Pos) ast.Expression {
 	name := "__kml_bound_" + e.freshReg()[1:]
-	if v.Ty.IsArray {
+	if v.Ty.IsArray() {
 		e.define(name, Symbol{Ptr: e.newArrayHeaderSlotFromAggregate(v), Ty: v.Ty})
 		return ast.NewIdentifier(name, pos)
 	}
@@ -41,6 +41,16 @@ func (e *Emitter) bindValue(v Value, pos ast.Pos) ast.Expression {
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", v.Ty.IR, v.Ref, slot))
 	e.define(name, Symbol{Ptr: slot, Ty: v.Ty})
 	return ast.NewIdentifier(name, pos)
+}
+
+// setSynthDisplay names the synthesized binding id for messages (displayName).
+func (e *Emitter) setSynthDisplay(id ast.Expression, display string) {
+	if ident, ok := id.(*ast.Identifier); ok {
+		if e.synthDisplay == nil {
+			e.synthDisplay = map[string]string{}
+		}
+		e.synthDisplay[ident.Name] = display
+	}
 }
 
 // emitSynthExpr emits source the compiler wrote itself, prepared as sema
@@ -93,7 +103,7 @@ func (e *Emitter) emitSetHeaderIfAbsent(h Value, name, value string, pos ast.Pos
 	if err != nil {
 		return err
 	}
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.coerce(has, TypeBool).Ref, doneL, setL))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.convert(has, TypeBool).Ref, doneL, setL))
 	e.emitLabel(setL)
 	v := e.bindValue(Value{Ref: value, Ty: TypePtr}, pos)
 	if _, err := e.emitHeadersMethod(h, "set", pos, ast.NewStringLiteral(name, pos), v); err != nil {
@@ -176,7 +186,7 @@ func (e *Emitter) emitResponseHeaders(resp Value, pos ast.Pos) (Value, error) {
 	}
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, resp.Ty.StructIR(), resp.Ref, hIdx))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h.Ref, gep))
+	e.heapStore("ptr", h.Ref, gep, 8)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)

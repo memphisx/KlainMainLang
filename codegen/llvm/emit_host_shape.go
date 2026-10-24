@@ -78,7 +78,7 @@ func (e *Emitter) hostMembers(class string) []hostMember {
 
 // hostParamTypeNames reads the type names of a method's parameters off the
 // declaration of class (the signature with n parameters).
-func hostParamTypeNames(c *checker.Checker, class, method string, n int) []string {
+func hostParamTypeNames(c frontView, class, method string, n int) []string {
 	g := c.Binding().Globals
 	if g == nil {
 		return nil
@@ -112,7 +112,7 @@ func hostParamTypeNames(c *checker.Checker, class, method string, n int) []strin
 // hostParamType is the representation an adapter unboxes a declared
 // parameter to: its scalar or string, else `any` (the typed call converts).
 func hostParamType(pt *checker.Type) Type {
-	if r, ok := lowerRepr(pt); ok && !r.IsArray && !r.IsObject && r.IR != "void" {
+	if r, ok := lowerRepr(pt); ok && !r.IsArray() && !r.IsObject() && r.IR != "void" {
 		return r
 	}
 	return TypeAny
@@ -146,37 +146,69 @@ func (e *Emitter) bindHostSelf(cellReg string, h hostLayout) *ast.Identifier {
 // emitHostShapeGetter generates `i64 get(ptr cell, ptr key, ptr found)`.
 func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostMember) {
 	restore := e.beginDetachedFunc()
-	self := e.bindHostSelf("%obj", h)
+	self := e.hostReadSelf("%obj", h)
 	for _, m := range members {
-		miss := e.emitKeyIs("%key", m.name)
 		if m.method {
+			// The class's record by name (shared with class.prototype),
+			// this layout's own under the hidden key that record calls.
 			rec := e.hostMethodRecord(h, m)
-			e.emitInstr(fmt.Sprintf("store i32 %d, ptr %%found, align 4", shapeMember))
-			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(rec, kmlTagDynFunc)))
-		} else {
-			v, err := e.emitExpr(ast.NewMemberExpression(self, m.name, ast.Pos{}))
-			var bv Value
-			if err == nil && v.Ty.IR != "" && v.Ty.IR != "void" {
-				bv, err = e.emitBoxValue(v)
-			}
-			if err != nil || bv.Ref == "" {
-				if !e.blockDone && m.optional {
-					// An optional member this value does not implement.
-					e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
-				} else if !e.blockDone {
-					e.emitThrowTypeError("the property '" + m.name + "' can't be read through a dynamic value")
+			if !m.optional {
+				miss := e.emitKeyIs("%key", protoHiddenKey(h.class, m.name))
+				e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+				e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(rec, kmlTagDynFunc)))
+				e.emitLabel(miss)
+				if valueProtoClassName(h.class) {
+					// A wrapper (`new String("a")`) has no such own
+					// property: the read goes on to String.prototype's.
+					continue
 				}
-			} else {
-				e.emitInstr(fmt.Sprintf("store i32 %d, ptr %%found, align 4", shapeMember))
-				e.emitTerminator(fmt.Sprintf("ret i64 %s", bv.Ref))
+				rec = e.protoMethodRecord(h.class, m)
 			}
+			miss := e.emitKeyIs("%key", m.name)
+			e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(rec, kmlTagDynFunc)))
+			e.emitLabel(miss)
+			continue
+		}
+		miss := e.emitKeyIs("%key", m.name)
+		v, err := e.emitExpr(ast.NewMemberExpression(self, m.name, ast.Pos{}))
+		var bv Value
+		if err == nil && v.Ty.IR != "" && v.Ty.IR != "void" {
+			bv, err = e.emitBoxValue(v)
+		}
+		if err != nil || bv.Ref == "" {
+			if !e.blockDone && m.optional {
+				// An optional member this value does not implement.
+				e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+			} else if !e.blockDone {
+				e.emitThrowTypeError("the property '" + m.name + "' can't be read through a dynamic value")
+			}
+		} else {
+			e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", bv.Ref))
 		}
 		e.emitLabel(miss)
+	}
+	if valueProtoClassName(h.class) && h.class != "Array" {
+		// A wrapper's other property is its class prototype's
+		// (Boolean.prototype.valueOf), and on along that chain.
+		e.ensureDynObj()
+		_, pay := e.emitUnboxTagPayload(e.emitBuiltinProto(h.class))
+		bag, v, hit := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", bag, pay))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %%key)", v, bag))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", hit, v, nbUndefined))
+		hitL, missL := e.freshLabel("wrap.proto.hit"), e.freshLabel("wrap.proto.miss")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hit, hitL, missL))
+		e.emitLabel(hitL)
+		e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", v))
+		e.emitLabel(missL)
 	}
 	e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal i64 %s(ptr %%obj, ptr %%key, ptr %%found) {\nentry:\n%s}\n", name, body))
+	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%obj, ptr %%key, ptr %%found)", name), body)
 }
 
 // emitHostShapeSetter generates `i32 set(ptr cell, ptr key, i64 value)`: a
@@ -207,7 +239,7 @@ func (e *Emitter) emitHostShapeSetter(name string, h hostLayout, members []hostM
 	e.emitTerminator("ret i32 0")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal i32 %s(ptr %%obj, ptr %%key, i64 %%value) {\nentry:\n%s}\n", name, body))
+	e.writeFunc(fmt.Sprintf("internal i32 %s(ptr %%obj, ptr %%key, i64 %%value)", name), body)
 }
 
 // hostMethodRecord returns the dynamic-function record for method m of host
@@ -268,6 +300,7 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 	e.emitLabel(hdrL)
 	hdr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, cell))
+	hdr = e.headerIdentity(hdr)
 	same := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", same, hdr, h.id))
 	if headeredHost(h.ty) {
@@ -281,7 +314,7 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 	e.emitLabel(badL)
 	e.emitThrowTypeError("Method " + h.class + ".prototype." + m.name + " called on incompatible receiver")
 	e.emitLabel(okL)
-	self := e.bindHostSelf(cell, h)
+	self := e.hostReadSelf(cell, h)
 
 	n := len(m.sig.Params)
 	if m.sig.HasRestParam() {
@@ -291,7 +324,7 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 	for i := 0; i < n; i++ {
 		pty := hostParamType(m.sig.Params[i])
 		if i < len(m.paramTypeNames) && m.paramTypeNames[i] != "" {
-			if ta := hostTypeArg(h.ty, m.paramTypeNames[i]); !ta.IsDynamic {
+			if ta := hostTypeArg(h.ty, m.paramTypeNames[i]); !ta.IsDynamic() {
 				pty = ta
 			}
 		}
@@ -309,12 +342,12 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 		word := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
 		av := Value{Ref: word, Ty: TypeAny}
-		if !pty.IsDynamic {
+		if !pty.IsDynamic() {
 			av = e.unboxArgToParam(word, pty)
 		}
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(pty)))
-		if pty.IsArray {
+		if pty.IsArray() {
 			// An array binding's slot holds its {data, len} header.
 			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(av), slot))
 		} else {
@@ -376,10 +409,25 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 // concrete host type: a Map's K and V, a Set's T; `any` otherwise.
 func hostTypeArg(t Type, name string) Type {
 	switch {
-	case (t.IsMap || t.IsSet) && (name == "K" || name == "T") && t.MapKey != nil:
+	case (t.IsMap() || t.IsSet()) && (name == "K" || name == "T") && t.MapKey != nil:
 		return *t.MapKey
-	case t.IsMap && name == "V" && t.MapVal != nil:
+	case t.IsMap() && name == "V" && t.MapVal != nil:
 		return *t.MapVal
 	}
 	return TypeAny
 }
+
+// hostReadSelf is the receiver a host box's members are read and called
+// on: the handle, or for a wrapper its primitive (`Object(5).toFixed(1)`,
+// `Object("ab").length`).
+func (e *Emitter) hostReadSelf(cell string, h hostLayout) ast.Expression {
+	self := e.bindHostSelf(cell, h)
+	if pt, ok := primWrapperValueType[h.class]; ok && h.ty.IsPrimWrapper() {
+		handle := e.emitHostCellLoad(cell, h.ty)
+		return e.bindValue(e.convert(e.emitWrapperValue(handle), pt), ast.Pos{})
+	}
+	return self
+}
+
+// primWrapperValueType is the primitive a wrapper class holds.
+var primWrapperValueType = map[string]Type{"Number": TypeF64, "String": TypePtr, "Boolean": TypeBool}

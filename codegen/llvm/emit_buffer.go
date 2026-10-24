@@ -27,13 +27,21 @@ func (e *Emitter) ensureMemcmp() {
 }
 
 // bufferAggregate wraps (dataPtr, len) registers into a Buffer-typed
-// {ptr, i64} value — the same aggregate shape .subarray returns.
+// value over a fresh header — the same shape .subarray returns.
 func (e *Emitter) bufferAggregate(ptrRef, lenRef string) Value {
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, ptrRef))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenRef))
+	r1 := e.newArrayHeader(ptrRef, lenRef)
 	return Value{Ref: r1, Ty: BufferType()}
+}
+
+// bufferEncodingNames maps each encoding name a literal may spell, lowercased,
+// to its codec.
+var bufferEncodingNames = map[string]string{
+	"utf8": "utf8", "utf-8": "utf8",
+	"hex":       "hex",
+	"base64":    "base64",
+	"base64url": "base64url",
+	"latin1":    "latin1", "binary": "latin1", "ascii": "latin1",
+	"utf16le": "utf16le", "utf-16le": "utf16le", "ucs2": "utf16le", "ucs-2": "utf16le",
 }
 
 // bufferEncodingArg resolves an optional encoding argument. The codec choice
@@ -48,19 +56,8 @@ func bufferEncodingArg(args []ast.Expression, idx int, pos ast.Pos) (string, err
 	if !ok {
 		return "", fmt.Errorf("%d:%d: a Buffer encoding must be a string literal (the codec is chosen at compile time)", pos.Line, pos.Col)
 	}
-	switch strings.ToLower(lit.Value) {
-	case "utf8", "utf-8":
-		return "utf8", nil
-	case "hex":
-		return "hex", nil
-	case "base64":
-		return "base64", nil
-	case "base64url":
-		return "base64url", nil
-	case "latin1", "binary", "ascii":
-		return "latin1", nil
-	case "utf16le", "utf-16le", "ucs2", "ucs-2":
-		return "utf16le", nil
+	if enc, ok := bufferEncodingNames[strings.ToLower(lit.Value)]; ok {
+		return enc, nil
 	}
 	return "", fmt.Errorf("%d:%d: unknown Buffer encoding '%s' (utf8/hex/base64/base64url/latin1/binary/ascii)", pos.Line, pos.Col, lit.Value)
 }
@@ -75,14 +72,14 @@ func (e *Emitter) bufferEncoding(args []ast.Expression, idx int, pos ast.Pos) (e
 			if err != nil {
 				return "", "", err
 			}
-			if isStringTy(v.Ty) && !v.Ty.IsDynamic {
+			if isStringTy(v.Ty) && !v.Ty.IsDynamic() {
 				return "", v.Ref, nil // null (undefined) is utf8
 			}
 			s, err := e.emitArgToString(v)
 			if err != nil {
 				return "", "", err
 			}
-			if v.Ty.IsDynamic && v.Ty.IR == "i64" {
+			if v.Ty.IsDynamic() && v.Ty.IR == "i64" {
 				// An undefined encoding is utf8.
 				isU, r := e.freshReg(), e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, v.Ref, nbUndefined))
@@ -138,7 +135,7 @@ func (e *Emitter) emitUnknownEncodingGuard(bad, encRef string) {
 	e.emitLabel(throwL)
 	msg, _ := e.emitStringConcat(Value{Ref: e.internString("Unknown encoding: "), Ty: TypePtr}, Value{Ref: encRef, Ty: TypePtr})
 	errObj := e.buildErrorObjWithCode(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError"), e.internString("ERR_UNKNOWN_ENCODING"), "0.0", "null")
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.excThrow(errObj)
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 }
@@ -156,8 +153,9 @@ func (e *Emitter) emitBufferDecodeString(strRef, enc string) (ptrRef, lenRef str
 		l := e.freshReg()
 		buf := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, strRef))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", buf, l))
+		e.heapMallocInto(buf, l)
 		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, strRef, l))
+		e.emitInstr(fmt.Sprintf("call void @__kml_wtf8_to_utf8(ptr %s, i64 %s)", buf, l))
 		return buf, l
 	default:
 		e.ensureBufferCodecs()
@@ -223,318 +221,449 @@ func (e *Emitter) emitBufferEncodeString(ptrRef, lenRef, enc string) Value {
 
 // emitBufferStaticCall dispatches Buffer.<method>(...).
 func (e *Emitter) emitBufferStaticCall(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	switch method {
-	case "from":
-		if len(args) == 3 && e.inferExprType(args[0]).IsArrayBuffer {
-			return e.emitBufferFromArrayBufferRange(args, pos)
-		}
-		if len(args) < 1 || len(args) > 2 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.from takes (string, encoding?) or (array|TypedArray|ArrayBuffer|Buffer)", pos.Line, pos.Col)
-		}
-		// Inline array literal: evaluate each element directly into a fresh
-		// buffer (the same direct-evaluation trick TypedArray literals use).
-		if lit, ok := args[0].(*ast.ArrayLiteral); ok {
-			n := int64(len(lit.Elements))
-			e.ensureMalloc()
-			data := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", data, n))
-			for i, elem := range lit.Elements {
-				if _, isSpread := elem.(*ast.SpreadElement); isSpread {
-					return Value{}, fmt.Errorf("%d:%d: spread elements in Buffer.from's array literal are not supported", elem.GetPos().Line, elem.GetPos().Col)
-				}
-				v, err := e.emitExpr(elem)
-				if err != nil {
-					return Value{}, err
-				}
-				v = e.coerce(v, TypeU8)
-				gep := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, data, i))
-				e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", v.Ref, gep))
-			}
-			return e.bufferAggregate(data, fmt.Sprintf("%d", n)), nil
-		}
-		argTy := e.inferExprType(args[0])
-		switch {
-		case argTy.IsDynamic:
-			v, err := e.emitExpr(args[0])
-			if err != nil {
-				return Value{}, err
-			}
-			return e.emitBufferFromDynamic(v, args, pos)
-		case argTy.IsArrayBuffer && len(args) == 2:
-			return e.emitBufferFromArrayBufferRange(args, pos)
-		case argTy.IsArrayBuffer:
-			// A view of the ArrayBuffer's bytes, as Node's (TDD-00243).
-			v, err := e.emitExpr(args[0])
-			if err != nil {
-				return Value{}, err
-			}
-			size, data := e.emitBufSizeData(v.Ref)
-			e.emitRegisterView(data, v, "0", argTy.IsSharedArrayBuffer)
-			return e.bufferAggregate(data, size), nil
-		case argTy.IsArray:
-			if argTy.BigIntElem {
-				return Value{}, fmt.Errorf("%d:%d: Buffer.from cannot copy-construct from a BigInt64Array/BigUint64Array", pos.Line, pos.Col)
-			}
-			ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
-			if err != nil {
-				return Value{}, err
-			}
-			e.ensureMalloc()
-			data := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", data, lenReg))
-			if err := e.emitBufferCopyCoerceLoop(ptrReg, lenReg, elemTy, data); err != nil {
-				return Value{}, err
-			}
-			return e.bufferAggregate(data, lenReg), nil
-		default:
-			v, err := e.emitExpr(args[0])
-			if err != nil {
-				return Value{}, err
-			}
-			if !isStringTy(v.Ty) || v.Ty.IsArrayBuffer {
-				return Value{}, fmt.Errorf("%d:%d: Buffer.from takes a string, array, TypedArray, ArrayBuffer, or Buffer", pos.Line, pos.Col)
-			}
-			enc, encRef, err := e.bufferEncoding(args, 1, pos)
-			if err != nil {
-				return Value{}, err
-			}
-			if encRef != "" {
-				data, l := e.emitBufferDecodeStringDyn(v.Ref, encRef)
-				return e.bufferAggregate(data, l), nil
-			}
-			data, l := e.emitBufferDecodeString(v.Ref, enc)
-			return e.bufferAggregate(data, l), nil
-		}
-
-	case "alloc", "allocUnsafe", "allocUnsafeSlow":
-		if method == "allocUnsafeSlow" {
-			method = "allocUnsafe" // no pool to bypass
-		}
-		if len(args) < 1 || (method == "allocUnsafe" && len(args) != 1) || len(args) > 2 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.%s takes (size%s)", pos.Line, pos.Col, method, map[string]string{"alloc": ", fill?", "allocUnsafe": ""}[method])
-		}
-		nVal, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		nRef := e.coerce(nVal, TypeI64).Ref
-		data := e.freshReg()
-		if method == "allocUnsafe" {
-			e.ensureMalloc()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", data, nRef))
-		} else {
-			e.ensureCalloc()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", data, nRef))
-			if len(args) == 2 {
-				fv, err := e.emitExpr(args[1])
-				if err != nil {
-					return Value{}, err
-				}
-				switch {
-				case isNumberTy(fv.Ty):
-					b := e.coerce(fv, TypeU8)
-					wide := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i32", wide, b.Ref))
-					e.ensureMemset()
-					e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 %s, i64 %s)", data, wide, nRef))
-				case isStringTy(fv.Ty):
-					// String fill (ADR-00576): repeat the fill string's UTF-8 bytes
-					// across the whole buffer, matching Node's Buffer.alloc(n, str).
-					fv = e.coerce(fv, TypePtr)
-					e.ensureStrHeaderRuntime()
-					needleLen := e.emitStrLenHeader(fv.Ref)
-					e.emitBufferRepeatFill(data, fv.Ref, needleLen, "0", nRef)
-				default:
-					return Value{}, fmt.Errorf("%d:%d: Buffer.alloc's fill must be a number or a string", pos.Line, pos.Col)
-				}
-			}
-		}
-		return e.bufferAggregate(data, nRef), nil
-
-	case "concat":
-		if len(args) < 1 || len(args) > 2 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.concat takes (list, totalLength?)", pos.Line, pos.Col)
-		}
-		lit, ok := args[0].(*ast.ArrayLiteral)
-		if ok {
-			// A spread element makes the list's length dynamic: the list path.
-			for _, elem := range lit.Elements {
-				if _, spread := elem.(*ast.SpreadElement); spread {
-					ok = false
-					break
-				}
-			}
-		}
-		if !ok {
-			return e.emitBufferConcatList(args, pos)
-		}
-		type part struct{ ptrRef, lenRef string }
-		parts := make([]part, 0, len(lit.Elements))
-		for _, elem := range lit.Elements {
-			pTy := e.inferExprType(elem)
-			if !pTy.IsTypedArray || pTy.BigIntElem {
-				return Value{}, fmt.Errorf("%d:%d: Buffer.concat's list elements must be Buffers or byte TypedArrays", elem.GetPos().Line, elem.GetPos().Col)
-			}
-			ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(elem, elem.GetPos())
-			if err != nil {
-				return Value{}, err
-			}
-			byteLen := lenReg
-			if elemTy.Align() != 1 {
-				bl := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bl, lenReg, elemTy.Align()))
-				byteLen = bl
-			}
-			parts = append(parts, part{ptrRef: ptrReg, lenRef: byteLen})
-		}
-		total := "0"
-		for _, p := range parts {
-			next := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, total, p.lenRef))
-			total = next
-		}
-		if len(args) == 2 {
-			tv, err := e.emitExpr(args[1])
-			if err != nil {
-				return Value{}, err
-			}
-			total = e.coerce(tv, TypeI64).Ref
-		}
-		e.ensureCalloc()
-		e.ensureMemcpy()
-		data := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", data, total))
-		offset := "0"
-		for _, p := range parts {
-			// Clamp each copy to the remaining room (an explicit shorter
-			// totalLength truncates, per Node).
-			room := e.freshReg()
-			over := e.freshReg()
-			cnt := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", room, total, offset))
-			e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", over, p.lenRef, room))
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", cnt, over, room, p.lenRef))
-			isNeg := e.freshReg()
-			cnt2 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, cnt))
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", cnt2, isNeg, cnt))
-			dst := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, data, offset))
-			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, p.ptrRef, cnt2))
-			next := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, offset, cnt2))
-			offset = next
-		}
-		return e.bufferAggregate(data, total), nil
-
-	case "compare":
-		if len(args) != 2 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.compare takes (a, b)", pos.Line, pos.Col)
-		}
-		aPtr, aLen, _, err := e.resolveArrayForHOF(args[0], pos)
-		if err != nil {
-			return Value{}, err
-		}
-		bPtr, bLen, _, err := e.resolveArrayForHOF(args[1], pos)
-		if err != nil {
-			return Value{}, err
-		}
-		return e.emitBufferCompareCore(aPtr, aLen, bPtr, bLen), nil
-
-	case "isBuffer":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.isBuffer takes 1 argument", pos.Line, pos.Col)
-		}
-		// A compile-time constant from the inferred type (the argument is
-		// still evaluated for its side effects), except for an `any`, whose
-		// box says.
-		v, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		if isSelfDescribingBox(v.Ty) {
-			return Value{Ref: e.emitBoxIsTypedArray(v, anyArrayBuffer), Ty: TypeBool}, nil
-		}
-		if v.Ty.IsBuffer {
-			return Value{Ref: "true", Ty: TypeBool}, nil
-		}
-		return Value{Ref: "false", Ty: TypeBool}, nil
-
-	case "byteLength":
-		if len(args) < 1 || len(args) > 2 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.byteLength takes (string, encoding?)", pos.Line, pos.Col)
-		}
-		v, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		if v.Ty.IsTypedArray || v.Ty.IsArrayBuffer {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.byteLength here takes a string (use .byteLength on a TypedArray/ArrayBuffer value)", pos.Line, pos.Col)
-		}
-		if v.Ty.IsDynamic {
-			// An untyped string: its text.
-			if sv, ok := e.emitAnyIntoString(v, TypePtr); ok {
-				v = sv
-			}
-		}
-		// Node's per-encoding formula (__kml_buf_byte_length): hex is the
-		// length >>> 1 however valid its digits, an unknown name is utf8.
-		encRef := "null"
-		if len(args) > 1 {
-			lit, isLit := stringLiteralThrough(args[1])
-			switch {
-			case isLit:
-				encRef = e.internString(lit.Value)
-			default:
-				_, r, err := e.bufferEncoding(args, 1, pos)
-				if err != nil {
-					return Value{}, err
-				}
-				encRef = r
-			}
-		}
-		e.ensureBufferCodecs()
-		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_buf_byte_length(ptr %s, ptr %s)", l, v.Ref, encRef))
-		return Value{Ref: l, Ty: TypeI64}, nil
-	case "isEncoding":
-		// Buffer.isEncoding(x): a non-empty string naming an encoding Node
-		// knows, case-insensitively; anything else is false.
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.isEncoding takes 1 argument", pos.Line, pos.Col)
-		}
-		v, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		var str string
-		switch {
-		case v.Ty.IsDynamic:
-			tag, pay := e.emitUnboxTagPayload(v)
-			isStr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
-			p := e.emitIntToPtr(pay)
-			sel := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, isStr, p))
-			str = sel
-		case isStringTy(v.Ty):
-			str = v.Ref
-		default:
-			return Value{Ref: "false", Ty: TypeBool}, nil
-		}
-		e.ensureBufferCodecs()
-		r, b := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_buf_is_encoding(ptr %s)", r, str))
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
-		return Value{Ref: b, Ty: TypeBool}, nil
+	c := &bufferStaticCall{method: method, args: args, pos: pos}
+	if f, ok := bufferStatics[method]; ok {
+		return f(e, c)
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Buffer method '%s' (from/alloc/allocUnsafe/allocUnsafeSlow/concat/compare/isBuffer/byteLength/isEncoding)", pos.Line, pos.Col, method)
 }
 
-// emitBufferCopyCoerceLoop copies lenReg elements from a source array
+type bufferStaticCall struct {
+	method string
+	args   []ast.Expression
+	pos    ast.Pos
+}
+
+// bufferStatics are the Buffer constructor's static methods, by name.
+var bufferStatics map[string]func(e *Emitter, c *bufferStaticCall) (Value, error)
+
+func init() {
+	bufferStatics = map[string]func(e *Emitter, c *bufferStaticCall) (Value, error){
+		"from":            (*Emitter).bufferStaticFrom,
+		"alloc":           (*Emitter).bufferStaticAlloc,
+		"allocUnsafe":     (*Emitter).bufferStaticAlloc,
+		"allocUnsafeSlow": (*Emitter).bufferStaticAlloc,
+		"concat":          (*Emitter).bufferStaticConcat,
+		"compare":         (*Emitter).bufferStaticCompare,
+		"isBuffer":        (*Emitter).bufferStaticIsBuffer,
+		"byteLength":      (*Emitter).bufferStaticByteLength,
+		"isEncoding":      (*Emitter).bufferStaticIsEncoding,
+	}
+}
+
+// bufferStaticFrom is from().
+func (e *Emitter) bufferStaticFrom(c *bufferStaticCall) (Value, error) {
+	if len(c.args) == 3 && e.inferExprType(c.args[0]).IsArrayBuffer() {
+		return e.emitBufferFromArrayBufferRange(c.args, c.pos)
+	}
+	if len(c.args) == 3 && e.inferExprType(c.args[0]).IsDynamic() {
+		// Known only at runtime: an ArrayBuffer takes (byteOffset,
+		// length); anything else reads the second argument as its own
+		// (an encoding) and ignores the third.
+		var t []ast.Expression
+		for _, a := range c.args {
+			x, err := e.receiverTemp(a)
+			if err != nil {
+				return Value{}, err
+			}
+			t = append(t, x)
+		}
+		box, err := e.emitExpr(t[0])
+		if err != nil {
+			return Value{}, err
+		}
+		isAB := e.emitDynHostInstanceOf(box, "ArrayBuffer")
+		abL, otherL, doneL := e.freshLabel("buffrom.ab"), e.freshLabel("buffrom.other"), e.freshLabel("buffrom.done")
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAB.Ref, abL, otherL))
+		var ty Type
+		for i, arm := range [][]ast.Expression{{ast.NewAsExpression(t[0], &ast.TypeAnnotation{Name: "ArrayBuffer", Source: "ts"}, c.pos), t[1], t[2]}, {t[0], t[1]}} {
+			e.emitLabel([]string{abL, otherL}[i])
+			v, err := e.emitBufferStaticCall("from", arm, c.pos)
+			if err != nil {
+				return Value{}, err
+			}
+			ty = v.Ty
+			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		}
+		e.emitLabel(doneL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		return Value{Ref: r, Ty: ty}, nil
+	}
+	if len(c.args) < 1 || len(c.args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.from takes (string, encoding?) or (array|TypedArray|ArrayBuffer|Buffer)", c.pos.Line, c.pos.Col)
+	}
+	// Inline array literal: evaluate each element directly into a fresh
+	// buffer (the same direct-evaluation trick TypedArray literals use).
+	if lit, ok := c.args[0].(*ast.ArrayLiteral); ok {
+		n := int64(len(lit.Elements))
+		e.ensureMalloc()
+		data := e.freshReg()
+		e.heapMallocInto(data, fmt.Sprint(n))
+		for i, elem := range lit.Elements {
+			if _, isSpread := elem.(*ast.SpreadElement); isSpread {
+				return Value{}, fmt.Errorf("%d:%d: spread elements in Buffer.from's array literal are not supported", elem.GetPos().Line, elem.GetPos().Col)
+			}
+			v, err := e.emitExpr(elem)
+			if err != nil {
+				return Value{}, err
+			}
+			v = e.convert(v, TypeU8)
+			gep := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, data, i))
+			e.heapStore("i8", v.Ref, gep, 1)
+		}
+		return e.bufferAggregate(data, fmt.Sprintf("%d", n)), nil
+	}
+	argTy := e.inferExprType(c.args[0])
+	switch {
+	case argTy.IsDynamic():
+		v, err := e.emitExpr(c.args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitBufferFromDynamic(v, c.args, c.pos)
+	case argTy.IsArrayBuffer() && len(c.args) == 2:
+		return e.emitBufferFromArrayBufferRange(c.args, c.pos)
+	case argTy.IsArrayBuffer():
+		// A view of the ArrayBuffer's bytes, as Node's (TDD-00243).
+		v, err := e.emitExpr(c.args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		size, data := e.emitBufSizeData(v.Ref)
+		e.emitRegisterView(data, v, "0", argTy.IsSharedArrayBuffer())
+		return e.bufferAggregate(data, size), nil
+	case argTy.IsArray():
+		if argTy.BigIntElem {
+			return Value{}, fmt.Errorf("%d:%d: Buffer.from cannot copy-construct from a BigInt64Array/BigUint64Array", c.pos.Line, c.pos.Col)
+		}
+		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(c.args[0], c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureMalloc()
+		data := e.freshReg()
+		e.heapMallocInto(data, lenReg)
+		if err := e.emitBufferCopyConvertLoop(ptrReg, lenReg, elemTy, data); err != nil {
+			return Value{}, err
+		}
+		return e.bufferAggregate(data, lenReg), nil
+	default:
+		v, err := e.emitExpr(c.args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		if !isStringTy(v.Ty) || v.Ty.IsArrayBuffer() {
+			return Value{}, fmt.Errorf("%d:%d: Buffer.from takes a string, array, TypedArray, ArrayBuffer, or Buffer", c.pos.Line, c.pos.Col)
+		}
+		enc, encRef, err := e.bufferEncoding(c.args, 1, c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+		if encRef != "" {
+			data, l := e.emitBufferDecodeStringDyn(v.Ref, encRef)
+			return e.bufferAggregate(data, l), nil
+		}
+		data, l := e.emitBufferDecodeString(v.Ref, enc)
+		return e.bufferAggregate(data, l), nil
+	}
+}
+
+// bufferStaticAlloc is alloc/allocUnsafe/allocUnsafeSlow().
+func (e *Emitter) bufferStaticAlloc(c *bufferStaticCall) (Value, error) {
+	if c.method == "allocUnsafeSlow" {
+		c.method = "allocUnsafe" // no pool to bypass
+	}
+	if len(c.args) < 1 || (c.method == "allocUnsafe" && len(c.args) != 1) || len(c.args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.%s takes (size%s)", c.pos.Line, c.pos.Col, c.method, map[string]string{"alloc": ", fill?, encoding?", "allocUnsafe": ""}[c.method])
+	}
+	nVal, err := e.emitExpr(c.args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	nRef := e.convert(nVal, TypeI64).Ref
+	data := e.freshReg()
+	if c.method == "allocUnsafe" {
+		e.ensureMalloc()
+		e.heapMallocInto(data, nRef)
+	} else {
+		e.ensureCalloc()
+		e.heapCallocInto(data, nRef, "1")
+		viaFill := len(c.args) == 3
+		if len(c.args) == 2 {
+			fillTy := e.inferExprType(c.args[1])
+			viaFill = !isNumberTy(fillTy) && !isStringTy(fillTy)
+		}
+		if viaFill {
+			// _fill(buf, fill, 0, length, encoding), as Node's alloc does.
+			boxes := make([]string, 0, 4)
+			for _, a := range c.args[1:] {
+				v, err := e.emitExpr(a)
+				if err != nil {
+					return Value{}, err
+				}
+				b, err := e.emitBoxValue(v)
+				if err != nil {
+					return Value{}, err
+				}
+				boxes = append(boxes, b.Ref)
+			}
+			fill := boxes[0]
+			enc := fmt.Sprintf("%d", nbUndefined)
+			if len(boxes) == 2 {
+				enc = boxes[1]
+			}
+			lenD := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", lenD, nRef))
+			e.emitBufferFillBoxes(data, nRef, []string{fill, e.emitNbEncodeDouble("0.0"), e.emitNbEncodeDouble(lenD), enc})
+		} else if len(c.args) == 2 {
+			fv, err := e.emitExpr(c.args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			switch {
+			case isNumberTy(fv.Ty):
+				b := e.convert(fv, TypeU8)
+				wide := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i32", wide, b.Ref))
+				e.ensureMemset()
+				e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 %s, i64 %s)", data, wide, nRef))
+			case isStringTy(fv.Ty):
+				// String fill (ADR-00576): repeat the fill string's UTF-8 bytes
+				// across the whole buffer, matching Node's Buffer.alloc(n, str).
+				fv = e.convert(fv, TypePtr)
+				e.ensureStrHeaderRuntime()
+				needleLen := e.emitStrLenHeader(fv.Ref)
+				e.emitBufferRepeatFill(data, fv.Ref, needleLen, "0", nRef)
+			default:
+				return Value{}, fmt.Errorf("%d:%d: Buffer.alloc's fill must be a number or a string", c.pos.Line, c.pos.Col)
+			}
+		}
+	}
+	return e.bufferAggregate(data, nRef), nil
+}
+
+// bufferStaticConcat is concat().
+func (e *Emitter) bufferStaticConcat(c *bufferStaticCall) (Value, error) {
+	if len(c.args) < 1 || len(c.args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.concat takes (list, totalLength?)", c.pos.Line, c.pos.Col)
+	}
+	lit, ok := c.args[0].(*ast.ArrayLiteral)
+	if ok {
+		// A spread element makes the list's length dynamic: the list path.
+		for _, elem := range lit.Elements {
+			if _, spread := elem.(*ast.SpreadElement); spread {
+				ok = false
+				break
+			}
+		}
+	}
+	if !ok {
+		return e.emitBufferConcatList(c.args, c.pos)
+	}
+	type part struct{ ptrRef, lenRef string }
+	parts := make([]part, 0, len(lit.Elements))
+	for i, elem := range lit.Elements {
+		pTy := e.inferExprType(elem)
+		if pTy.IsDynamic() {
+			// A box (an any-held binding): a Uint8Array (a Buffer is one)
+			// is read as itself, anything else throws Node's TypeError.
+			v, err := e.emitExpr(elem)
+			if err != nil {
+				return Value{}, err
+			}
+			u8Kind, _ := arrayElemKind(TypeU8)
+			fits := e.emitBoxIsArrayOf(v, []int{anyArrayTyped, anyArrayBuffer}, []int{u8Kind})
+			throwL, okL := e.freshLabel("bufcat.throw"), e.freshLabel("bufcat.ok")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fits, okL, throwL))
+			e.emitLabel(throwL)
+			e.ensureDynJSONC()
+			suffix := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_received(i64 %s)", suffix, v.Ref))
+			msg, err := e.emitStringConcat(Value{Ref: e.internString(fmt.Sprintf("The \"list[%d]\" argument must be an instance of Buffer or Uint8Array.", i)), Ty: TypePtr}, Value{Ref: suffix, Ty: TypePtr})
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)
+			e.emitLabel(okL)
+			buf := e.convert(v, BufferType())
+			data, n := e.arrayParts(buf)
+			parts = append(parts, part{ptrRef: data, lenRef: n})
+			continue
+		}
+		if !pTy.IsTypedArray() || pTy.BigIntElem {
+			return Value{}, fmt.Errorf("%d:%d: Buffer.concat's list elements must be Buffers or byte TypedArrays", elem.GetPos().Line, elem.GetPos().Col)
+		}
+		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(elem, elem.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		byteLen := lenReg
+		if elemTy.Align() != 1 {
+			bl := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bl, lenReg, elemTy.Align()))
+			byteLen = bl
+		}
+		parts = append(parts, part{ptrRef: ptrReg, lenRef: byteLen})
+	}
+	total := "0"
+	for _, p := range parts {
+		next := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, total, p.lenRef))
+		total = next
+	}
+	if len(c.args) == 2 {
+		tv, err := e.emitExpr(c.args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		total = e.convert(tv, TypeI64).Ref
+	}
+	e.ensureCalloc()
+	e.ensureMemcpy()
+	data := e.freshReg()
+	e.heapCallocInto(data, total, "1")
+	offset := "0"
+	for _, p := range parts {
+		// Clamp each copy to the remaining room (an explicit shorter
+		// totalLength truncates, per Node).
+		room := e.freshReg()
+		over := e.freshReg()
+		cnt := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", room, total, offset))
+		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", over, p.lenRef, room))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", cnt, over, room, p.lenRef))
+		isNeg := e.freshReg()
+		cnt2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, cnt))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", cnt2, isNeg, cnt))
+		dst := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, data, offset))
+		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, p.ptrRef, cnt2))
+		next := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, offset, cnt2))
+		offset = next
+	}
+	return e.bufferAggregate(data, total), nil
+}
+
+// bufferStaticCompare is compare().
+func (e *Emitter) bufferStaticCompare(c *bufferStaticCall) (Value, error) {
+	if len(c.args) != 2 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.compare takes (a, b)", c.pos.Line, c.pos.Col)
+	}
+	aPtr, aLen, _, err := e.resolveArrayForHOF(c.args[0], c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	bPtr, bLen, _, err := e.resolveArrayForHOF(c.args[1], c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	return e.emitBufferCompareCore(aPtr, aLen, bPtr, bLen), nil
+}
+
+// bufferStaticIsBuffer is isBuffer().
+func (e *Emitter) bufferStaticIsBuffer(c *bufferStaticCall) (Value, error) {
+	if len(c.args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.isBuffer takes 1 argument", c.pos.Line, c.pos.Col)
+	}
+	// A compile-time constant from the inferred type (the argument is
+	// still evaluated for its side effects), except for an `any`, whose
+	// box says.
+	v, err := e.emitExpr(c.args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if isSelfDescribingBox(v.Ty) {
+		return Value{Ref: e.emitBoxIsTypedArray(v, anyArrayBuffer), Ty: TypeBool}, nil
+	}
+	if v.Ty.IsBuffer() {
+		return Value{Ref: "true", Ty: TypeBool}, nil
+	}
+	return Value{Ref: "false", Ty: TypeBool}, nil
+}
+
+// bufferStaticByteLength is byteLength().
+func (e *Emitter) bufferStaticByteLength(c *bufferStaticCall) (Value, error) {
+	if len(c.args) < 1 || len(c.args) > 2 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.byteLength takes (string, encoding?)", c.pos.Line, c.pos.Col)
+	}
+	v, err := e.emitExpr(c.args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if v.Ty.IsTypedArray() || v.Ty.IsArrayBuffer() {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.byteLength here takes a string (use .byteLength on a TypedArray/ArrayBuffer value)", c.pos.Line, c.pos.Col)
+	}
+	if v.Ty.IsDynamic() {
+		// An untyped string: its text.
+		if sv, ok := e.emitAnyIntoString(v, TypePtr); ok {
+			v = sv
+		}
+	}
+	// Node's per-encoding formula (__kml_buf_byte_length): hex is the
+	// length >>> 1 however valid its digits, an unknown name is utf8.
+	encRef := "null"
+	if len(c.args) > 1 {
+		lit, isLit := stringLiteralThrough(c.args[1])
+		switch {
+		case isLit:
+			encRef = e.internString(lit.Value)
+		default:
+			_, r, err := e.bufferEncoding(c.args, 1, c.pos)
+			if err != nil {
+				return Value{}, err
+			}
+			encRef = r
+		}
+	}
+	e.ensureBufferCodecs()
+	l := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_buf_byte_length(ptr %s, ptr %s)", l, v.Ref, encRef))
+	return Value{Ref: l, Ty: TypeI64}, nil
+}
+
+// bufferStaticIsEncoding is isEncoding().
+func (e *Emitter) bufferStaticIsEncoding(c *bufferStaticCall) (Value, error) {
+	// Buffer.isEncoding(x): a non-empty string naming an encoding Node
+	// knows, case-insensitively; anything else is false.
+	if len(c.args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.isEncoding takes 1 argument", c.pos.Line, c.pos.Col)
+	}
+	v, err := e.emitExpr(c.args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	var str string
+	switch {
+	case v.Ty.IsDynamic():
+		tag, pay := e.emitUnboxTagPayload(v)
+		isStr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
+		p := e.emitIntToPtr(pay)
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, isStr, p))
+		str = sel
+	case isStringTy(v.Ty):
+		str = v.Ref
+	default:
+		return Value{Ref: "false", Ty: TypeBool}, nil
+	}
+	e.ensureBufferCodecs()
+	r, b := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_buf_is_encoding(ptr %s)", r, str))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
+	return Value{Ref: b, Ty: TypeBool}, nil
+}
+
+// emitBufferCopyConvertLoop copies lenReg elements from a source array
 // (any numeric elemTy) into dstData as u8, with the standard wrap coercion.
-func (e *Emitter) emitBufferCopyCoerceLoop(srcPtr, lenReg string, srcElemTy Type, dstData string) error {
+func (e *Emitter) emitBufferCopyConvertLoop(srcPtr, lenReg string, srcElemTy Type, dstData string) error {
 	idx := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
@@ -553,10 +682,10 @@ func (e *Emitter) emitBufferCopyCoerceLoop(srcPtr, lenReg string, srcElemTy Type
 	sVal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", sGep, srcElemTy.IR, srcPtr, i))
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", sVal, srcElemTy.IR, sGep, srcElemTy.Align()))
-	c := e.coerce(Value{Ref: sVal, Ty: srcElemTy}, TypeU8)
+	c := e.convert(Value{Ref: sVal, Ty: srcElemTy}, TypeU8)
 	dGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dGep, dstData, i))
-	e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", c.Ref, dGep))
+	e.heapStore("i8", c.Ref, dGep, 1)
 	nx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nx, i))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nx, idx))
@@ -605,6 +734,22 @@ type bufferAccessorKind struct {
 	little bool
 }
 
+// bufferAccessorShapes are the element types a read*/write* name carries
+// between its prefix and its LE/BE suffix, each with Node's two spellings
+// of "UInt".
+var bufferAccessorShapes = map[string]bufferAccessorKind{
+	"UInt8": {width: 1}, "Uint8": {width: 1},
+	"Int8":   {width: 1, signed: true},
+	"UInt16": {width: 2}, "Uint16": {width: 2},
+	"Int16":  {width: 2, signed: true},
+	"UInt32": {width: 4}, "Uint32": {width: 4},
+	"Int32":     {width: 4, signed: true},
+	"Float":     {width: 4, float: true, signed: true},
+	"Double":    {width: 8, float: true, signed: true},
+	"BigInt64":  {width: 8, bigint: true, signed: true},
+	"BigUInt64": {width: 8, bigint: true}, "BigUint64": {width: 8, bigint: true},
+}
+
 func bufferAccessorKindFor(name string) (bufferAccessorKind, bool) {
 	var k bufferAccessorKind
 	rest := ""
@@ -624,30 +769,11 @@ func bufferAccessorKindFor(name string) (bufferAccessorKind, bool) {
 	case strings.HasSuffix(rest, "BE"):
 		rest = rest[:len(rest)-2]
 	}
-	switch rest {
-	case "UInt8", "Uint8":
-		k.width = 1
-	case "Int8":
-		k.width, k.signed = 1, true
-	case "UInt16", "Uint16":
-		k.width = 2
-	case "Int16":
-		k.width, k.signed = 2, true
-	case "UInt32", "Uint32":
-		k.width = 4
-	case "Int32":
-		k.width, k.signed = 4, true
-	case "Float":
-		k.width, k.float, k.signed = 4, true, true
-	case "Double":
-		k.width, k.float, k.signed = 8, true, true
-	case "BigInt64":
-		k.width, k.bigint, k.signed = 8, true, true
-	case "BigUInt64", "BigUint64":
-		k.width, k.bigint = 8, true
-	default:
+	shape, ok := bufferAccessorShapes[rest]
+	if !ok {
 		return k, false
 	}
+	k.width, k.signed, k.float, k.bigint = shape.width, shape.signed, shape.float, shape.bigint
 	// The 1-byte forms have no LE/BE suffix in Node; wider non-suffixed
 	// names (e.g. readUInt16) don't exist — but the suffix stripping above
 	// already handled every real name, and a width>1 name without a parsed
@@ -680,7 +806,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 		if ov.Ty.Float {
 			// boundsError: a fractional offset is out of range as "an
 			// integer", before any bounds are looked at.
-			f := e.coerce(ov, TypeF64)
+			f := e.convert(ov, TypeF64)
 			fl, frac := e.freshReg(), e.freshReg()
 			e.ensureMathFuncs()
 			e.emitInstr(fmt.Sprintf("%s = call double @floor(double %s)", fl, f.Ref))
@@ -699,7 +825,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 			e.emitThrowCoded("RangeError", "ERR_OUT_OF_RANGE", msg.Ref)
 			e.emitLabel(intL)
 		}
-		offRef = e.coerce(ov, TypeI64).Ref
+		offRef = e.convert(ov, TypeI64).Ref
 	}
 	// Bounds: 0 <= offset && offset + width <= length.
 	end := e.freshReg()
@@ -799,7 +925,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 	var narrow string
 	switch {
 	case k.float:
-		f := e.coerce(rawVal, TypeF64)
+		f := e.convert(rawVal, TypeF64)
 		if k.width == 4 {
 			f32 := e.freshReg()
 			narrow = e.freshReg()
@@ -810,7 +936,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 			e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", narrow, f.Ref))
 		}
 	case k.bigint:
-		if !rawVal.Ty.IsBigInt {
+		if !rawVal.Ty.IsBigInt() {
 			return Value{}, fmt.Errorf("%d:%d: a Buffer BigInt accessor takes a bigint value (e.g. 1n)", pos.Line, pos.Col)
 		}
 		e.ensureBigInt()
@@ -821,7 +947,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 		narrow = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", narrow, unwrap, rawVal.Ref))
 	default:
-		iv := e.coerce(rawVal, TypeI64)
+		iv := e.convert(rawVal, TypeI64)
 		if k.width == 8 {
 			narrow = iv.Ref
 		} else {
@@ -830,7 +956,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 		}
 	}
 	stored := e.emitMaybeSwap(narrow, k.width, littleRef)
-	e.emitInstr(fmt.Sprintf("store i%d %s, ptr %s, align 1", bits, stored, elemPtr))
+	e.heapStore(fmt.Sprintf("i%d", bits), stored, elemPtr, 1)
 	ret := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", ret, offRef, k.width))
 	return Value{Ref: ret, Ty: TypeI64}, nil
@@ -839,8 +965,7 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 // isBufferMethodName reports whether name is one of the instance methods
 // the IsBuffer flag adds (vs the shared array/TypedArray machinery).
 func isBufferMethodName(name string) bool {
-	switch name {
-	case "toString", "write", "copy", "equals", "compare":
+	if _, ok := bufferInstanceMethods[name]; ok {
 		return true
 	}
 	_, ok := bufferAccessorKindFor(name)
@@ -865,7 +990,7 @@ func (e *Emitter) emitBufferStringSearch(mem *ast.MemberExpression, method strin
 	if err != nil {
 		return Value{}, err
 	}
-	needleVal = e.coerce(needleVal, TypePtr)
+	needleVal = e.convert(needleVal, TypePtr)
 	e.ensureStrHeaderRuntime() // memmem + __kml_str_len
 	needleLen := e.emitStrLenHeader(needleVal.Ref)
 
@@ -951,50 +1076,71 @@ func (e *Emitter) emitBufferStringSearch(mem *ast.MemberExpression, method strin
 	return e.countToNumber(Value{Ref: idx, Ty: TypeI64}), nil
 }
 
-// emitBufferStringFill implements buf.fill(string[, offset[, end]]): the range
-// [offset, end) is filled by repeating the string's UTF-8 bytes, aligned to the
-// fill offset (Node: `Buffer.alloc(5).fill("ab", 1)` → `00 61 62 61 62`). An
-// empty string is a no-op. (ADR-00559.)
-func (e *Emitter) emitBufferStringFill(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: Buffer.fill(string) takes 1–3 arguments (value, offset?, end?; encoding not supported)", pos.Line, pos.Col)
+// emitBufferFill is buf.fill(value, offset?, end?, encoding?), Node's
+// argument reading and validation (dynjson.c's __kml_buf_fill_any) over the
+// boxed arguments; it returns the receiver.
+func (e *Emitter) emitBufferFill(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) < 1 || len(args) > 4 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.fill takes (value, offset?, end?, encoding?)", pos.Line, pos.Col)
 	}
-	bufPtr, bufLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
+	recvTy := e.inferExprType(mem.Object)
+	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	needleVal, err := e.emitExpr(args[0])
-	if err != nil {
-		return Value{}, err
-	}
-	needleVal = e.coerce(needleVal, TypePtr)
-	e.ensureStrHeaderRuntime()
-	needleLen := e.emitStrLenHeader(needleVal.Ref)
-
-	startN := "0"
-	if len(args) >= 2 {
-		sr, err := e.emitExpr(args[1])
+	e.emitArrayGuardFor(mem.Object, arrOpReorder, nil)
+	var boxes []string
+	for _, a := range args {
+		v, err := e.emitExpr(a)
 		if err != nil {
 			return Value{}, err
 		}
-		startN = e.emitNormalizeSliceIdx(e.coerce(sr, TypeI64).Ref, bufLen)
-	}
-	endN := bufLen
-	if len(args) >= 3 {
-		er, err := e.emitExpr(args[2])
+		b, err := e.emitBoxValue(v)
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.coerce(er, TypeI64).Ref, bufLen)
+		boxes = append(boxes, b.Ref)
 	}
+	e.emitBufferFillBoxes(ptrReg, lenReg, boxes)
+	r := e.receiverArrayHeader(hdr, ptrReg, lenReg)
+	if !recvTy.IsArray() {
+		recvTy = ArrayOf(elemTy)
+	}
+	return Value{Ref: r, Ty: recvTy}, nil
+}
 
-	e.emitBufferRepeatFill(bufPtr, needleVal.Ref, needleLen, startN, endN)
-	// Return the same buffer aggregate.
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, bufPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, bufLen))
-	return Value{Ref: r1, Ty: e.inferExprType(mem.Object)}, nil
+// emitBufferFillBoxes fills the len bytes at data as buf.fill does with the
+// boxed arguments boxes (the value first), throwing Node's error for a bad
+// argument.
+func (e *Emitter) emitBufferFillBoxes(data, length string, boxes []string) {
+	e.ensureBufFill()
+	argv := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca [4 x i64], align 8", argv))
+	for i, b := range boxes {
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr [4 x i64], ptr %s, i64 0, i64 %d", slot, argv, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", b, slot))
+	}
+	msgSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", msgSlot))
+	code := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_buf_fill_any(ptr %s, i64 %s, i64 %d, ptr %s, ptr %s)", code, data, length, len(boxes), argv, msgSlot))
+	okL := e.freshLabel("buffill.ok")
+	errs := []struct{ kind, code string }{{"TypeError", "ERR_INVALID_ARG_TYPE"}, {"RangeError", "ERR_OUT_OF_RANGE"}, {"TypeError", "ERR_UNKNOWN_ENCODING"}, {"TypeError", "ERR_INVALID_ARG_VALUE"}}
+	labels := make([]string, len(errs))
+	cases := ""
+	for i := range errs {
+		labels[i] = e.freshLabel("buffill.err")
+		cases += fmt.Sprintf(" i64 %d, label %%%s", i+1, labels[i])
+	}
+	e.emitTerminator(fmt.Sprintf("switch i64 %s, label %%%s [%s ]", code, okL, cases))
+	for i, x := range errs {
+		e.emitLabel(labels[i])
+		msg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", msg, msgSlot))
+		e.emitThrowCoded(x.kind, x.code, msg)
+	}
+	e.emitLabel(okL)
 }
 
 // emitBufferRepeatFill fills bufPtr[startN, endN) by repeating needlePtr's
@@ -1032,7 +1178,7 @@ func (e *Emitter) emitBufferRepeatFill(bufPtr, needlePtr, needleLen, startN, end
 	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", byteVal, srcGep))
 	dstGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dstGep, bufPtr, i))
-	e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", byteVal, dstGep))
+	e.heapStore("i8", byteVal, dstGep, 1)
 	iNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", iNext, i))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", iNext, idxAlloca))
@@ -1046,191 +1192,222 @@ func (e *Emitter) emitBufferInstanceCall(mem *ast.MemberExpression, method strin
 	if k, ok := bufferAccessorKindFor(method); ok {
 		return e.emitBufferAccessor(mem, k, args, pos)
 	}
-	switch method {
-	case "toString":
-		if len(args) > 3 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.toString takes (encoding?, start?, end?)", pos.Line, pos.Col)
-		}
-		enc, encRef, err := e.bufferEncoding(args, 0, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		if len(args) > 0 {
-			if lit, ok := stringLiteralThrough(args[0]); ok && strings.EqualFold(lit.Value, "ascii") {
-				enc = "ascii"
-			}
-		}
-		ptrReg, lenReg, _, err := e.resolveArrayForHOF(mem.Object, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		startN := "0"
-		if len(args) >= 2 {
-			sv, err := e.emitExpr(args[1])
-			if err != nil {
-				return Value{}, err
-			}
-			startN = e.emitNormalizeSliceIdx(e.coerce(sv, TypeI64).Ref, lenReg)
-		}
-		endN := lenReg
-		if len(args) == 3 {
-			ev, err := e.emitExpr(args[2])
-			if err != nil {
-				return Value{}, err
-			}
-			endN = e.emitNormalizeSliceIdx(e.coerce(ev, TypeI64).Ref, lenReg)
-		}
-		rawLen := e.freshReg()
-		isNeg := e.freshReg()
-		n := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", rawLen, endN, startN))
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, rawLen))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", n, isNeg, rawLen))
-		base := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", base, ptrReg, startN))
-		if encRef != "" {
-			return e.emitBufferEncodeStringDyn(base, n, encRef), nil
-		}
-		return e.emitBufferEncodeString(base, n, enc), nil
-
-	case "write":
-		// write(string, offset?, encoding?) — the 4-arg (string, offset,
-		// length, encoding) form is not supported (disclosed caveat).
-		if len(args) < 1 || len(args) > 3 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.write takes (string, offset?, encoding?)", pos.Line, pos.Col)
-		}
-		sv, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		if !isStringTy(sv.Ty) {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.write's first argument must be a string", pos.Line, pos.Col)
-		}
-		offRef := "0"
-		encIdx := 1
-		if len(args) >= 2 {
-			if _, isStr := args[1].(*ast.StringLiteral); isStr {
-				encIdx = 1
-			} else {
-				ov, err := e.emitExpr(args[1])
-				if err != nil {
-					return Value{}, err
-				}
-				offRef = e.coerce(ov, TypeI64).Ref
-				encIdx = 2
-			}
-		}
-		enc, encRef, err := e.bufferEncoding(args, encIdx, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		var srcPtr, srcLen string
-		if encRef != "" {
-			srcPtr, srcLen = e.emitBufferDecodeStringDyn(sv.Ref, encRef)
-		} else {
-			srcPtr, srcLen = e.emitBufferDecodeString(sv.Ref, enc)
-		}
-		dstPtr, dstLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		// written = min(srcLen, max(dstLen - offset, 0))
-		room := e.freshReg()
-		roomNeg := e.freshReg()
-		room2 := e.freshReg()
-		over := e.freshReg()
-		cnt := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", room, dstLen, offRef))
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", roomNeg, room))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", room2, roomNeg, room))
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", over, srcLen, room2))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", cnt, over, room2, srcLen))
-		e.ensureMemcpy()
-		dst := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, dstPtr, offRef))
-		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, srcPtr, cnt))
-		return Value{Ref: cnt, Ty: TypeI64}, nil
-
-	case "copy":
-		if len(args) < 1 || len(args) > 4 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.copy takes (target, targetStart?, sourceStart?, sourceEnd?)", pos.Line, pos.Col)
-		}
-		srcPtr, srcLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		tgtTy := e.inferExprType(args[0])
-		if !tgtTy.IsTypedArray || tgtTy.ElemType == nil || tgtTy.ElemType.Align() != 1 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.copy's target must be a Buffer or byte TypedArray", pos.Line, pos.Col)
-		}
-		tgtPtr, tgtLen, _, err := e.resolveArrayForHOF(args[0], pos)
-		if err != nil {
-			return Value{}, err
-		}
-		read := func(idx int, def string) (string, error) {
-			if len(args) <= idx {
-				return def, nil
-			}
-			v, err := e.emitExpr(args[idx])
-			if err != nil {
-				return "", err
-			}
-			return e.coerce(v, TypeI64).Ref, nil
-		}
-		tStart, err := read(1, "0")
-		if err != nil {
-			return Value{}, err
-		}
-		sStart, err := read(2, "0")
-		if err != nil {
-			return Value{}, err
-		}
-		sEnd, err := read(3, srcLen)
-		if err != nil {
-			return Value{}, err
-		}
-		// count = min(sEnd - sStart, tgtLen - tStart), clamped at 0.
-		c1 := e.freshReg()
-		c2 := e.freshReg()
-		small := e.freshReg()
-		cnt := e.freshReg()
-		neg := e.freshReg()
-		cnt2 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", c1, sEnd, sStart))
-		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", c2, tgtLen, tStart))
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", small, c1, c2))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", cnt, small, c1, c2))
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, cnt))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", cnt2, neg, cnt))
-		e.ensureMemcpy()
-		s := e.freshReg()
-		d := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", s, srcPtr, sStart))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", d, tgtPtr, tStart))
-		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", d, s, cnt2))
-		return Value{Ref: cnt2, Ty: TypeI64}, nil
-
-	case "equals", "compare":
-		if len(args) != 1 {
-			return Value{}, fmt.Errorf("%d:%d: Buffer.%s takes 1 argument", pos.Line, pos.Col, method)
-		}
-		aPtr, aLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
-		if err != nil {
-			return Value{}, err
-		}
-		bPtr, bLen, _, err := e.resolveArrayForHOF(args[0], pos)
-		if err != nil {
-			return Value{}, err
-		}
-		cmp := e.emitBufferCompareCore(aPtr, aLen, bPtr, bLen)
-		if method == "compare" {
-			return cmp, nil
-		}
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", r, cmp.Ref))
-		return Value{Ref: r, Ty: TypeBool}, nil
+	c := &bufferInstanceCall{mem: mem, method: method, args: args, pos: pos}
+	if f, ok := bufferInstanceMethods[method]; ok {
+		return f(e, c)
 	}
 	return Value{}, fmt.Errorf("%d:%d: unknown Buffer method '%s'", pos.Line, pos.Col, method)
+}
+
+type bufferInstanceCall struct {
+	mem    *ast.MemberExpression
+	method string
+	args   []ast.Expression
+	pos    ast.Pos
+}
+
+// bufferInstanceMethods are a Buffer's own instance methods other than its typed accessors, by name.
+var bufferInstanceMethods map[string]func(e *Emitter, c *bufferInstanceCall) (Value, error)
+
+func init() {
+	bufferInstanceMethods = map[string]func(e *Emitter, c *bufferInstanceCall) (Value, error){
+		"toString": (*Emitter).bufferInstanceToString,
+		"write":    (*Emitter).bufferInstanceWrite,
+		"copy":     (*Emitter).bufferInstanceCopy,
+		"equals":   (*Emitter).bufferInstanceEquals,
+		"compare":  (*Emitter).bufferInstanceEquals,
+	}
+}
+
+// bufferInstanceToString is toString().
+func (e *Emitter) bufferInstanceToString(c *bufferInstanceCall) (Value, error) {
+	if len(c.args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.toString takes (encoding?, start?, end?)", c.pos.Line, c.pos.Col)
+	}
+	enc, encRef, err := e.bufferEncoding(c.args, 0, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if len(c.args) > 0 {
+		if lit, ok := stringLiteralThrough(c.args[0]); ok && strings.EqualFold(lit.Value, "ascii") {
+			enc = "ascii"
+		}
+	}
+	ptrReg, lenReg, _, err := e.resolveArrayForHOF(c.mem.Object, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	startN := "0"
+	if len(c.args) >= 2 {
+		sv, err := e.emitExpr(c.args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		startN = e.emitNormalizeSliceIdx(e.convert(sv, TypeI64).Ref, lenReg)
+	}
+	endN := lenReg
+	if len(c.args) == 3 {
+		ev, err := e.emitExpr(c.args[2])
+		if err != nil {
+			return Value{}, err
+		}
+		endN = e.emitNormalizeSliceIdx(e.convert(ev, TypeI64).Ref, lenReg)
+	}
+	rawLen := e.freshReg()
+	isNeg := e.freshReg()
+	n := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", rawLen, endN, startN))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, rawLen))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", n, isNeg, rawLen))
+	base := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", base, ptrReg, startN))
+	if encRef != "" {
+		return e.emitBufferEncodeStringDyn(base, n, encRef), nil
+	}
+	return e.emitBufferEncodeString(base, n, enc), nil
+}
+
+// bufferInstanceWrite is write().
+func (e *Emitter) bufferInstanceWrite(c *bufferInstanceCall) (Value, error) {
+	// write(string, offset?, encoding?) — the 4-arg (string, offset,
+	// length, encoding) form is not supported (disclosed caveat).
+	if len(c.args) < 1 || len(c.args) > 3 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.write takes (string, offset?, encoding?)", c.pos.Line, c.pos.Col)
+	}
+	sv, err := e.emitExpr(c.args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	if !isStringTy(sv.Ty) {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.write's first argument must be a string", c.pos.Line, c.pos.Col)
+	}
+	offRef := "0"
+	encIdx := 1
+	if len(c.args) >= 2 {
+		if _, isStr := c.args[1].(*ast.StringLiteral); isStr {
+			encIdx = 1
+		} else {
+			ov, err := e.emitExpr(c.args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			offRef = e.convert(ov, TypeI64).Ref
+			encIdx = 2
+		}
+	}
+	enc, encRef, err := e.bufferEncoding(c.args, encIdx, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	var srcPtr, srcLen string
+	if encRef != "" {
+		srcPtr, srcLen = e.emitBufferDecodeStringDyn(sv.Ref, encRef)
+	} else {
+		srcPtr, srcLen = e.emitBufferDecodeString(sv.Ref, enc)
+	}
+	dstPtr, dstLen, _, err := e.resolveArrayForHOF(c.mem.Object, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	// written = min(srcLen, max(dstLen - offset, 0))
+	room := e.freshReg()
+	roomNeg := e.freshReg()
+	room2 := e.freshReg()
+	over := e.freshReg()
+	cnt := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", room, dstLen, offRef))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", roomNeg, room))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", room2, roomNeg, room))
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", over, srcLen, room2))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", cnt, over, room2, srcLen))
+	e.ensureMemcpy()
+	dst := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, dstPtr, offRef))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, srcPtr, cnt))
+	return Value{Ref: cnt, Ty: TypeI64}, nil
+}
+
+// bufferInstanceCopy is copy().
+func (e *Emitter) bufferInstanceCopy(c *bufferInstanceCall) (Value, error) {
+	if len(c.args) < 1 || len(c.args) > 4 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.copy takes (target, targetStart?, sourceStart?, sourceEnd?)", c.pos.Line, c.pos.Col)
+	}
+	srcPtr, srcLen, _, err := e.resolveArrayForHOF(c.mem.Object, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	tgtTy := e.inferExprType(c.args[0])
+	if !tgtTy.IsTypedArray() || tgtTy.ElemType == nil || tgtTy.ElemType.Align() != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.copy's target must be a Buffer or byte TypedArray", c.pos.Line, c.pos.Col)
+	}
+	tgtPtr, tgtLen, _, err := e.resolveArrayForHOF(c.args[0], c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	read := func(idx int, def string) (string, error) {
+		if len(c.args) <= idx {
+			return def, nil
+		}
+		v, err := e.emitExpr(c.args[idx])
+		if err != nil {
+			return "", err
+		}
+		return e.convert(v, TypeI64).Ref, nil
+	}
+	tStart, err := read(1, "0")
+	if err != nil {
+		return Value{}, err
+	}
+	sStart, err := read(2, "0")
+	if err != nil {
+		return Value{}, err
+	}
+	sEnd, err := read(3, srcLen)
+	if err != nil {
+		return Value{}, err
+	}
+	// count = min(sEnd - sStart, tgtLen - tStart), clamped at 0.
+	c1 := e.freshReg()
+	c2 := e.freshReg()
+	small := e.freshReg()
+	cnt := e.freshReg()
+	neg := e.freshReg()
+	cnt2 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", c1, sEnd, sStart))
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", c2, tgtLen, tStart))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", small, c1, c2))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", cnt, small, c1, c2))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, cnt))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", cnt2, neg, cnt))
+	e.ensureMemcpy()
+	s := e.freshReg()
+	d := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", s, srcPtr, sStart))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", d, tgtPtr, tStart))
+	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", d, s, cnt2))
+	return Value{Ref: cnt2, Ty: TypeI64}, nil
+}
+
+// bufferInstanceEquals is equals/compare().
+func (e *Emitter) bufferInstanceEquals(c *bufferInstanceCall) (Value, error) {
+	if len(c.args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: Buffer.%s takes 1 argument", c.pos.Line, c.pos.Col, c.method)
+	}
+	aPtr, aLen, _, err := e.resolveArrayForHOF(c.mem.Object, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	bPtr, bLen, _, err := e.resolveArrayForHOF(c.args[0], c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	cmp := e.emitBufferCompareCore(aPtr, aLen, bPtr, bLen)
+	if c.method == "compare" {
+		return cmp, nil
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", r, cmp.Ref))
+	return Value{Ref: r, Ty: TypeBool}, nil
 }
 
 // emitBufferConcatList is Buffer.concat(list, totalLength?) over a runtime
@@ -1238,7 +1415,7 @@ func (e *Emitter) emitBufferInstanceCall(mem *ast.MemberExpression, method strin
 // instead).
 func (e *Emitter) emitBufferConcatList(args []ast.Expression, pos ast.Pos) (Value, error) {
 	lt := e.inferExprType(args[0])
-	if !lt.IsArray || lt.ElemType == nil || !lt.ElemType.IsTypedArray || lt.ElemType.BigIntElem || lt.ElemType.ElemType == nil || lt.ElemType.ElemType.Align() != 1 {
+	if !lt.IsArray() || lt.ElemType == nil || !lt.ElemType.IsTypedArray() || lt.ElemType.BigIntElem || lt.ElemType.ElemType == nil || lt.ElemType.ElemType.Align() != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Buffer.concat's list must be an array of Buffers or byte TypedArrays", pos.Line, pos.Col)
 	}
 	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
@@ -1251,7 +1428,7 @@ func (e *Emitter) emitBufferConcatList(args []ast.Expression, pos ast.Pos) (Valu
 		if err != nil {
 			return Value{}, err
 		}
-		total = e.coerce(tv, TypeI64).Ref
+		total = e.convert(tv, TypeI64).Ref
 	}
 	e.ensureBufferCodecs()
 	outLen := e.freshReg()
@@ -1340,8 +1517,8 @@ func (e *Emitter) emitBufferFromDynamic(v Value, args []ast.Expression, pos ast.
 	e.emitLabel(okL)
 	e.ensureMalloc()
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", out, cnt))
-	if err := e.emitBufferCopyCoerceLoop(f64s, cnt, TypeF64, out); err != nil {
+	e.heapMallocInto(out, cnt)
+	if err := e.emitBufferCopyConvertLoop(f64s, cnt, TypeF64, out); err != nil {
 		return Value{}, err
 	}
 	put(out, cnt)
@@ -1367,7 +1544,7 @@ func (e *Emitter) emitBufferFromArrayBufferRange(args []ast.Expression, pos ast.
 	if err != nil {
 		return Value{}, err
 	}
-	off := e.coerce(ov, TypeI64).Ref
+	off := e.convert(ov, TypeI64).Ref
 	e.ensureExceptionHelpers()
 	badOff := e.freshReg()
 	neg := e.freshReg()
@@ -1388,7 +1565,7 @@ func (e *Emitter) emitBufferFromArrayBufferRange(args []ast.Expression, pos ast.
 		if err != nil {
 			return Value{}, err
 		}
-		l := e.coerce(lv, TypeI64).Ref
+		l := e.convert(lv, TypeI64).Ref
 		badLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", badLen, l, rest))
 		lenBadL, lenOkL := e.freshLabel("buffrom.lenbad"), e.freshLabel("buffrom.lenok")
@@ -1405,7 +1582,7 @@ func (e *Emitter) emitBufferFromArrayBufferRange(args []ast.Expression, pos ast.
 	src := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", src, data, off))
 	// A view of that range, as Node's (TDD-00243).
-	e.emitRegisterView(src, v, off, v.Ty.IsSharedArrayBuffer)
+	e.emitRegisterView(src, v, off, v.Ty.IsSharedArrayBuffer())
 	return e.bufferAggregate(src, n), nil
 }
 

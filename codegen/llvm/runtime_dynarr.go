@@ -44,6 +44,7 @@ func (e *Emitter) ensureDynArr() {
 	}
 	e.usedDynArr = true
 	e.ensureNanBox()
+	e.ensureShapeRuntime() // an array's added properties live in shape.c
 	e.ensureMalloc()
 	e.ensureRealloc()
 	e.ensureStrcmp()
@@ -59,27 +60,9 @@ declare i64 @__kml_dynarr_at(ptr, i64)
 declare void @__kml_dynarr_put(ptr, i64, i64)
 declare i64 @__kml_dynarr_index(ptr)
 declare i64 @__kml_dynarr_get_by_key(ptr, ptr)
-declare zeroext i1 @__kml_dynarr_set_by_key(ptr, ptr, i64)
+declare i32 @__kml_dynarr_set_by_key(ptr, ptr, i64)
+declare ptr @__kml_dynarr_keys_c(ptr, ptr)
 declare ptr @__kml_index_keys_c(i64)`)
-	// {ptr,i64} returns go through IR wrappers (aggregate return ABIs differ
-	// between C and IR on Windows).
-	e.emitGlobal(`
-; Index strings "0".."len-1" (Object.keys / for...in over a dynamic array).
-define { ptr, i64 } @__kml_dynarr_keys(ptr %a) {
-entry:
-  %n = load i64, ptr %a, align 8
-  %r = call { ptr, i64 } @__kml_index_keys(i64 %n)
-  ret { ptr, i64 } %r
-}
-
-; The array index keys "0".."len-1", as Object.keys lists an array's.
-define { ptr, i64 } @__kml_index_keys(i64 %len) {
-entry:
-  %arr = call ptr @__kml_index_keys_c(i64 %len)
-  %r0 = insertvalue { ptr, i64 } undef, ptr %arr, 0
-  %r1 = insertvalue { ptr, i64 } %r0, i64 %len, 1
-  ret { ptr, i64 } %r1
-}`)
 }
 
 // ensureDynJSONFromNode declares the recursive KmlJsonNode -> dynamic-value

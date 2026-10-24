@@ -29,9 +29,9 @@ The honest middle column: each of these compiles and runs for its core case but 
 
 | Feature | Status | Caveats |
 |---|---|---|
-| `any` / `unknown` | ✅ | • `Object.assign` through `any` and `Object.defineProperties` copy and define string keys only, not symbol keys → [Type system](TYPE-SYSTEM.md) |
+| `any` / `unknown` | ✅ | |
 | Union types | ✅ | • Scalars, objects (classes, plain object types, one headerless host object such as `URL`) and discriminated unions; no number-literal or non-first-position tags; narrowing is local (`typeof`/truthiness/`==null`/`instanceof`/`in`/a tag) — no `switch(typeof)` or `as`-narrowing → [Type system](TYPE-SYSTEM.md) |
-| Intersection types | ✅ | • Object-type members only; conflicting non-object fields rejected (TS `never`-field not modeled) → [Type system](TYPE-SYSTEM.md) |
+| Intersection types | ✅ | • Object-type members, or a branded primitive (one primitive with object members); conflicting non-object fields rejected (TS `never`-field not modeled) → [Type system](TYPE-SYSTEM.md) |
 | Tuple types | ✅ | • No rest/optional elements; constant index only; no array methods; not nestable in `any`/union → [Type system](TYPE-SYSTEM.md) |
 | Mapped & utility types | ✅ | • Effective ones are `Pick`/`Omit`/`Record`; `Partial`/`Required`/`Readonly` are erased structural no-ops. No key remapping (`as`), no `-?`/`-readonly` modifier removal; compile-time-only → [Type system](TYPE-SYSTEM.md) |
 | Conditional types + `infer` | ✅ | • `infer` limited to `Array`/`Promise<infer>` and bare `infer R`; no `(...) => infer R`; assignability is structural width, not full variance → [Type system](TYPE-SYSTEM.md) |
@@ -67,7 +67,7 @@ Features that depend on a live JS engine, a runtime type system, a runtime modul
 | Feature | Status | Notes |
 |---|---|---|
 | JSX / TSX | ❌ | • No JSX parsing at all — needs a JSX-runtime / framework model the fixed-shape, no-reconciler target has no equivalent for |
-| Runtime-computed dynamic `import(expr)` | ❌ | • Whole-program AOT can't resolve a runtime specifier ([ADR-00022](../adr/ADR-00022.md)); literal-specifier lazy islands *are* shipped → [Modules](MODULES.md) |
+| Runtime-computed dynamic `import(expr)` | ❌ | • Whole-program AOT can't resolve a runtime specifier ([ADR-00022](../adr/00/ADR-00022.md)); literal-specifier lazy islands *are* shipped → [Modules](MODULES.md) |
 | Dynamic property add/delete on statically-typed structs | ❌ | • By design (two-tier object model); dynamic objects get it under `any`/`-compat=js` |
 | Well-known symbols as first-class runtime values / a Symbol-keyed protocol registry | ❌ | • The fixed-shape model has no dynamic property-bag or runtime protocol-dispatch point (TDD-00044) |
 | `eval` / `Function(string)` / dynamic code construction | ❌ | • No runtime compiler; gated on an opt-in embedded JS engine |

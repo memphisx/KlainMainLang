@@ -5,6 +5,7 @@ package lib
 
 import (
 	"embed"
+	"io/fs"
 	"regexp"
 	"sort"
 	"strings"
@@ -186,6 +187,19 @@ func ModulePath(spec string) (string, bool) {
 		return "", false
 	}
 	return ModuleRoot + file, true
+}
+
+// HTTPBackend names klain:http's server backend (TDD-00255): the file
+// `./internal_khttp_backend` resolves to, internal_khttp_<name>.ts.
+var HTTPBackend = "native"
+
+// BackendPath is the library file a builtin module's relative import p
+// resolves to: p itself, except klain:http's backend.
+func BackendPath(p string) string {
+	if p == ModuleRoot+"internal_khttp_backend.ts" {
+		return ModuleRoot + "internal_khttp_" + HTTPBackend + ".ts"
+	}
+	return p
 }
 
 // CompanionPath is the pseudo-path of the part written in TypeScript of the
@@ -399,4 +413,30 @@ func TSInterfaceHas(name, member string) (known, has bool) {
 		return false
 	}
 	return true, walk(name)
+}
+
+var (
+	kmlDeclsOnce sync.Once
+	kmlDecls     map[string]bool
+	kmlDeclRe    = regexp.MustCompile(`(?m)^\s*(?:export\s+)?(?:declare\s+)?(?:async\s+)?(?:function\*?|const|let|var|class)\s+(__kml_[A-Za-z0-9_]+)`)
+)
+
+// DeclaredKmlNames are the top-level names the builtin TypeScript modules
+// declare with the reserved __kml_ prefix (an algorithm codegen links to):
+// their code is the module's, the same in every program.
+func DeclaredKmlNames() map[string]bool {
+	kmlDeclsOnce.Do(func() {
+		kmlDecls = map[string]bool{}
+		_ = fs.WalkDir(nodeModuleFiles, "node", func(p string, d fs.DirEntry, err error) error {
+			if err != nil || d.IsDir() || !strings.HasSuffix(p, ".ts") {
+				return nil
+			}
+			src, _ := nodeModuleFiles.ReadFile(p)
+			for _, m := range kmlDeclRe.FindAllSubmatch(src, -1) {
+				kmlDecls[string(m[1])] = true
+			}
+			return nil
+		})
+	})
+	return kmlDecls
 }

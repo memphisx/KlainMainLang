@@ -738,17 +738,14 @@ true get is not a function or its return value is not iterable
 true boolean`)
 }
 
-func TestE2EArrayIndexOutOfBoundsWriteThrows(t *testing.T) {
+// A write past the end grows the array, leaving holes in the gap.
+func TestE2EArrayIndexOutOfBoundsWriteGrows(t *testing.T) {
 	src := `
 const arr: number[] = [1, 2, 3]
-try {
-    arr[5] = 99
-} catch (e) {
-    console.log("caught: " + (e as Error).message)
-}
-console.log(arr[0])
+arr[5] = 99
+console.log(arr[0], arr.length, arr[4], arr[5])
 `
-	assertOutput(t, src, "caught: Array index out of bounds\n1")
+	assertOutput(t, src, "1 6 undefined 99")
 }
 
 func TestE2EArrayInBoundsAccessStillWorks(t *testing.T) {
@@ -1182,6 +1179,9 @@ class Counter {
     this.current = 1;
     this.max = max;
   }
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
+  }
   next(): number | null {
     if (this.current > this.max) {
       return null;
@@ -1205,6 +1205,9 @@ func TestE2EArrayFromClassIteratorZeroFirst(t *testing.T) {
 	assertOutput(t, `
 class ZeroUp {
   private current: number = 0;
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
+  }
   next(): number | null {
     if (this.current > 2) { return null; }
     const v = this.current;
@@ -1223,6 +1226,9 @@ console.log(arr[2])
 func TestE2EArrayFromEmptyClassIterator(t *testing.T) {
 	assertOutput(t, `
 class Empty {
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
+  }
   next(): number | null {
     return null;
   }
@@ -1292,7 +1298,7 @@ const arr: number[] = Array.from(x)
 // A nested array element is boxed (heap ptr to a malloc'd {ptr,i64} pair) so
 // an outer array's backing buffer stays a uniform 8-byte-per-slot layout
 // regardless of nesting — see codegen/llvm/emit_arrays_core.go's
-// boxArrayValue/loadArrayElem/storeArrayElem and docs/adr/ADR-00105.md.
+// boxArrayValue/loadArrayElem/storeArrayElem and docs/adr/00/ADR-00105.md.
 // Indexing, destructuring, for...of, assignment, and the copy/insert-based
 // methods (concat/reverse/slice/splice/fill/at/with/push/pop/shift/unshift/
 // copyWithin/values/entries) are all supported.
@@ -1479,9 +1485,9 @@ console.log(doubled[1]);
 }
 
 func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {
+	// (indexOf/includes on a nested array compare by identity now:
+	// TestE2EArraySearchNestedArrayIdentity.)
 	cases := []string{
-		`const m: number[][] = [[1,2]]; m.indexOf([1,2]);`,
-		`const m: number[][] = [[1,2]]; m.includes([1,2]);`,
 		`const m = new Array<number[]>(3);`,
 	}
 	for _, src := range cases {
@@ -1604,12 +1610,17 @@ console.log(h);
 }
 
 func TestE2EArrayDestructuringOutOfBoundsIsUndefined(t *testing.T) {
-	// A pattern position past the source array's actual length is ordinary,
-	// valid JS (unlike plain out-of-bounds `arr[i]` indexing, which throws)
-	// — it binds a real `undefined` (TDD-00187 Stage 2), never garbage from
-	// past the source's malloc'd buffer (the ADR-00157 bounds check).
-	assertOutput(t, `
+	// A pattern position past the source array's actual length binds a real
+	// `undefined` (TDD-00187 Stage 2), never garbage from past the source's
+	// buffer (the ADR-00157 bounds check). Past a literal's end it is a
+	// TypeScript error (TS2493), so the literal form is JavaScript.
+	assertSameAsNodeCompatJS(t, `
 let [a, b] = [1];
+console.log(a, b);
+`)
+	assertOutput(t, `
+const src: number[] = [1];
+let [a, b] = src;
 console.log(a, b);
 `, "1 undefined")
 }
@@ -1622,15 +1633,20 @@ console.log(a, b);
 `, "undefined undefined")
 }
 
-func TestE2EArrayDestructuringNestedArrayOutOfBoundsIsEmptyArray(t *testing.T) {
-	// The out-of-bounds fallback for an array-typed destructured element
-	// (nested destructuring) is a safe empty array (null ptr, length 0),
-	// not the scalar zero literal used for every other element type.
-	assertOutput(t, `
+func TestE2EArrayDestructuringNestedArrayOutOfBoundsIsUndefined(t *testing.T) {
+	// An array-typed position past the source's end is undefined, as an
+	// element read past the end is: reading its length throws.
+	assertSameAsNode(t, `
+const src: number[][] = [[1, 2, 3]];
+const [x, y] = src;
+console.log(x[0], y === undefined);
+try { console.log(y.length); } catch (e) { console.log((e as Error).constructor.name, (e as Error).message); }
+`)
+	assertSameAsNodeCompatJS(t, `
 let [x, y] = [[1, 2, 3]];
 console.log(x[0]);
-console.log(y.length);
-`, "1\n0")
+try { console.log(y.length); } catch (e) { console.log(e.constructor.name); }
+`)
 }
 
 func TestE2EDestructuredArrayParamOutOfBoundsIsUndefined(t *testing.T) {
@@ -1742,15 +1758,16 @@ let a: number = 0, b: number = 0;
 let src: number[] = [7];
 [a, b] = src;
 console.log(a, b);
-`, "7 0")
+`, "7 undefined")
 }
 
-func TestE2EArrayDestructuringAssignmentOutOfBoundsReadsZero(t *testing.T) {
-	assertOutput(t, `
-let a: number = 9, b: number = 9;
+func TestE2EArrayDestructuringAssignmentOutOfBoundsIsUndefined(t *testing.T) {
+	// Past a literal's end it is a TypeScript error (TS2493): JavaScript.
+	assertSameAsNodeCompatJS(t, `
+let a = 9, b = 9;
 [a, b] = [1];
 console.log(a, b);
-`, "1 0")
+`)
 }
 
 // ADR-00595: nested patterns in the assignment form (declaration-form parity).
@@ -2130,16 +2147,12 @@ console.log(arr.length, arr[6])
 `, "5 0 40\n6 50\na,bc\n7 99")
 }
 
-func TestE2EArrayIndexAssignGapStillThrows(t *testing.T) {
+func TestE2EArrayIndexAssignGapMakesHoles(t *testing.T) {
 	assertOutput(t, `
 const arr: number[] = []
-try {
-  arr[2] = 1
-} catch (e) {
-  console.log("caught")
-}
-console.log(arr.length)
-`, "caught\n0")
+arr[2] = 1
+console.log(arr.length, arr)
+`, "3 [ <2 empty items>, 1 ]")
 }
 
 // --- T | undefined element-absence results (TDD-00187 Stage 1) ---
@@ -2543,5 +2556,84 @@ function f(xs) { var out = []; for (const x of xs) out.push(x + "!"); return out
 console.log(f(["a"]));
 function g() { const out = []; for (const s of ["p", "q"]) out.push(s); return out; }
 console.log(g());
+`)
+}
+
+func TestE2EArrayIdentityAcrossBoundaries(t *testing.T) {
+	// An array keeps its identity through a promise, an async call's
+	// parameter, a rest parameter, a tuple element, a destructuring
+	// binding and a timer argument: every path shares the one header.
+	assertOutput(t, `
+const a = [1];
+async function f(x: number[]): Promise<void> { await null; x.push(2); }
+async function g(): Promise<number[]> { await null; return a; }
+async function main() {
+  await f(a);
+  console.log("param", a.length);
+  const r = await g();
+  console.log("await", r === a);
+  console.log("resolve", (await Promise.resolve(a)) === a);
+  console.log("new", (await new Promise<number[]>((res) => res(a))) === a);
+  console.log("then", await Promise.resolve(a).then((v) => v === a));
+  function rest(...xs: number[][]) { xs[0].push(3); }
+  rest(a);
+  console.log("rest", a.length);
+  const t: [number[], string] = [a, "x"];
+  t[0].push(4);
+  console.log("tuple", a.length, t[0] === a);
+  const [z] = [a];
+  z.push(5);
+  console.log("destructure", a.length, z === a);
+  await new Promise<void>((res) => setTimeout((q: number[]) => { q.push(6); res(); }, 1, a));
+  console.log("timer", a.length);
+}
+main();
+`, `param 2
+await true
+resolve true
+new true
+then true
+rest 3
+tuple 4 true
+destructure 5 true
+timer 6
+`)
+}
+
+// indexOf/lastIndexOf/includes over an array of arrays compare by identity.
+func TestE2EArraySearchNestedArrayIdentity(t *testing.T) {
+	assertSameAsNode(t, `
+const a = new Uint8Array([1]); const b = new Uint8Array([1]); const c = [3, 4]
+const xs: Uint8Array[] = [a, b]
+const ys: number[][] = [[1], c, c]
+console.log(xs.indexOf(b), xs.indexOf(new Uint8Array([1])), xs.includes(a), xs.lastIndexOf(a))
+console.log(ys.indexOf(c), ys.lastIndexOf(c), ys.includes([1]), ys.indexOf(c, 2))
+`)
+}
+
+// A flattened row that may be undefined stays an element, as in Node:
+// `.flat()` over `(T[] | undefined)[]` and a flatMap callback with an
+// undefined path (ADR-01715).
+func TestE2EFlatKeepsUndefinedRows(t *testing.T) {
+	assertSameAsNode(t, `
+const b: (number[] | undefined)[] = [[1, 2], undefined, [3]];
+const f = b.flat();
+console.log(f, f.length);
+const g = [1, 2, 3].flatMap((x): number[] | undefined => (x === 2 ? undefined : [x, -x]));
+console.log(g);
+const n: (number[][] | undefined)[] = [[[1], [2]], undefined];
+console.log(n.flat(2), n.flat(0));
+`)
+}
+
+func TestE2EArrayHOFThisArg(t *testing.T) {
+	assertSameAsNode(t, `
+class Scale { k: number; constructor(k: number) { this.k = k; } }
+const s = new Scale(3);
+const out = [1, 2].map(function (this: Scale, v: number) { return v * this.k; }, s);
+let sum = 0;
+[4, 5].forEach(function (this: { add: number }, v) { sum += v + this.add; }, { add: 1 });
+const big = [1, 2, 3].filter(function (this: { min: number }, v) { return v > this.min; }, { min: 1 });
+console.log(out, sum, big, [1, 2, 3].filter((v) => v > 1, undefined));
 `)
 }

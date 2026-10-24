@@ -26,7 +26,7 @@
 /* ---- heap-string helpers ------------------------------------------------ */
 
 static char *kml_str_alloc(int64_t n) {
-    char *base = (char *)malloc(8 + n + 1);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, 8 + n + 1);
     if (!base) return NULL;
     *(int64_t *)base = n;
     char *p = base + 8;
@@ -57,7 +57,7 @@ static void sb_reserve(sb_t *b, int64_t extra) {
     if (b->len + extra + 1 <= b->cap) return;
     int64_t ncap = b->cap ? b->cap * 2 : 32;
     while (ncap < b->len + extra + 1) ncap *= 2;
-    b->buf = (char *)realloc(b->buf, (size_t)ncap);
+    b->buf = (char *)realloc(b->buf, (size_t)ncap); /* scratch */
     b->cap = ncap;
 }
 
@@ -77,7 +77,7 @@ static const char *sb_cstr(const sb_t *b) { return b->buf ? b->buf : ""; }
 /* Finish: hand the bytes out as a heap string and release the scratch. */
 static char *sb_finish(sb_t *b) {
     char *out = kml_str_from(sb_cstr(b), b->len);
-    free(b->buf);
+    free(b->buf); /* scratch */
     return out;
 }
 
@@ -258,7 +258,7 @@ static char *win32_normalize(const char *path) {
                             sb_append_ch(&out, '\\');
                             sb_append_n(&out, path + last, len - last);
                             sb_append_ch(&out, '\\');
-                            free(device.buf);
+                            free(device.buf); /* scratch */
                             return sb_finish(&out);
                         } else {
                             sb_append(&device, "\\\\");
@@ -304,7 +304,7 @@ static char *win32_normalize(const char *path) {
             sb_t out; sb_init(&out);
             sb_append(&out, ".\\");
             sb_append_n(&out, sb_cstr(&tail), tail.len);
-            free(tail.buf); free(device.buf);
+            free(tail.buf); free(device.buf); /* scratch */
             return sb_finish(&out);
         }
         int64_t index = indexOfFrom(path, len, ':', 0);
@@ -313,7 +313,7 @@ static char *win32_normalize(const char *path) {
                 sb_t out; sb_init(&out);
                 sb_append(&out, ".\\");
                 sb_append_n(&out, sb_cstr(&tail), tail.len);
-                free(tail.buf); free(device.buf);
+                free(tail.buf); free(device.buf); /* scratch */
                 return sb_finish(&out);
             }
         } while ((index = indexOfFrom(path, len, ':', index + 1)) != -1);
@@ -326,7 +326,7 @@ static char *win32_normalize(const char *path) {
             sb_append(&out, ".\\");
             if (haveDevice) sb_append_n(&out, sb_cstr(&device), device.len);
             sb_append_n(&out, sb_cstr(&tail), tail.len);
-            free(tail.buf); free(device.buf);
+            free(tail.buf); free(device.buf); /* scratch */
             return sb_finish(&out);
         }
     }
@@ -340,7 +340,7 @@ static char *win32_normalize(const char *path) {
         if (isAbsolute) sb_append_ch(&out, '\\');
         sb_append_n(&out, sb_cstr(&tail), tail.len);
     }
-    free(tail.buf); free(device.buf);
+    free(tail.buf); free(device.buf); /* scratch */
     return sb_finish(&out);
 }
 
@@ -371,7 +371,7 @@ char *__kml_path_win32_join(int64_t n, char **args) {
             count++;
         }
     }
-    if (count == 0) { free(joined.buf); return kml_str_dup("."); }
+    if (count == 0) { free(joined.buf); return kml_str_dup("."); } /* scratch */
 
     int needsReplace = 1;
     int64_t slashCount = 0;
@@ -423,7 +423,7 @@ char *__kml_path_win32_join(int64_t n, char **args) {
     }
 
     char *out = win32_normalize(sb_cstr(&joined));
-    free(joined.buf);
+    free(joined.buf); /* scratch */
     return out;
 }
 
@@ -450,7 +450,7 @@ char *__kml_path_win32_resolve(int64_t n, char **args, const char *cwd, int host
                 if (!host_is_windows && out) {
                     for (char *p = out; *p; p++) if (*p == '/') *p = '\\';
                 }
-                free(resolvedDevice.buf); free(resolvedTail.buf);
+                free(resolvedDevice.buf); free(resolvedTail.buf); /* scratch */
                 return out;
             }
         } else {
@@ -464,7 +464,7 @@ char *__kml_path_win32_resolve(int64_t n, char **args, const char *cwd, int host
                 envval = getenv(envname);
             }
             if (envval && envval[0]) {
-                free(drivecwd);
+                free(drivecwd); /* scratch */
                 drivecwd = strdup(envval);
                 path = drivecwd;
             } else {
@@ -475,8 +475,8 @@ char *__kml_path_win32_resolve(int64_t n, char **args, const char *cwd, int host
             int64_t head = plen < 2 ? plen : 2;
             if (!str_ieq(path, head, sb_cstr(&resolvedDevice), resolvedDevice.len) &&
                 plen > 2 && path[2] == CHAR_BACKWARD_SLASH) {
-                free(drivecwd);
-                drivecwd = (char *)malloc((size_t)resolvedDevice.len + 2);
+                free(drivecwd); /* scratch */
+                drivecwd = (char *)malloc((size_t)resolvedDevice.len + 2); /* scratch */
                 memcpy(drivecwd, sb_cstr(&resolvedDevice), (size_t)resolvedDevice.len);
                 drivecwd[resolvedDevice.len] = '\\';
                 drivecwd[resolvedDevice.len + 1] = 0;
@@ -539,14 +539,14 @@ char *__kml_path_win32_resolve(int64_t n, char **args, const char *cwd, int host
         if (device.len > 0) {
             if (resolvedDevice.len > 0) {
                 if (!str_ieq(sb_cstr(&device), device.len, sb_cstr(&resolvedDevice), resolvedDevice.len)) {
-                    free(device.buf);
+                    free(device.buf); /* scratch */
                     continue;
                 }
             } else {
                 sb_append_n(&resolvedDevice, sb_cstr(&device), device.len);
             }
         }
-        free(device.buf);
+        free(device.buf); /* scratch */
 
         if (resolvedAbsolute) {
             if (resolvedDevice.len > 0) break;
@@ -556,7 +556,7 @@ char *__kml_path_win32_resolve(int64_t n, char **args, const char *cwd, int host
             sb_append_n(&nt, path + rootEnd, len - rootEnd);
             sb_append_ch(&nt, '\\');
             sb_append_n(&nt, sb_cstr(&resolvedTail), resolvedTail.len);
-            free(resolvedTail.buf);
+            free(resolvedTail.buf); /* scratch */
             resolvedTail = nt;
             resolvedAbsolute = isAbsolute;
             if (isAbsolute && resolvedDevice.len > 0) break;
@@ -572,7 +572,7 @@ char *__kml_path_win32_resolve(int64_t n, char **args, const char *cwd, int host
     sb_append_n(&out, sb_cstr(&tail), tail.len);
     if (out.len == 0) sb_append_ch(&out, '.');
 
-    free(tail.buf); free(resolvedTail.buf); free(resolvedDevice.buf); free(drivecwd);
+    free(tail.buf); free(resolvedTail.buf); free(resolvedDevice.buf); free(drivecwd); /* scratch */
     return sb_finish(&out);
 }
 
@@ -811,10 +811,10 @@ char *__kml_path_win32_relative(const char *from_in, const char *to_in, const ch
      * folding never changes the byte length, so Node's "length changed"
      * branch (Unicode special-casing) cannot arise here. */
     int64_t flen = (int64_t)strlen(fromOrig), tlen = (int64_t)strlen(toOrig);
-    char *from = (char *)malloc((size_t)flen + 1), *to = (char *)malloc((size_t)tlen + 1);
+    char *from = (char *)malloc((size_t)flen + 1), *to = (char *)malloc((size_t)tlen + 1); /* scratch */
     for (int64_t k = 0; k <= flen; k++) from[k] = (char)tolower((unsigned char)fromOrig[k]);
     for (int64_t k = 0; k <= tlen; k++) to[k] = (char)tolower((unsigned char)toOrig[k]);
-    if (strcmp(from, to) == 0) { free(from); free(to); return kml_str_dup(""); }
+    if (strcmp(from, to) == 0) { free(from); free(to); return kml_str_dup(""); } /* scratch */
 
     int64_t fromStart = 0;
     while (fromStart < flen && from[fromStart] == CHAR_BACKWARD_SLASH) fromStart++;
@@ -838,16 +838,16 @@ char *__kml_path_win32_relative(const char *from_in, const char *to_in, const ch
     }
 
     if (i != length) {
-        if (lastCommonSep == -1) { free(from); free(to); return toOrig; }
+        if (lastCommonSep == -1) { free(from); free(to); return toOrig; } /* scratch */
     } else {
         if (toLen > length) {
             if (to[toStart + i] == CHAR_BACKWARD_SLASH) {
                 char *r = kml_str_dup(toOrig + toStart + i + 1);
-                free(from); free(to); return r;
+                free(from); free(to); return r; /* scratch */
             }
             if (i == 2) {
                 char *r = kml_str_dup(toOrig + toStart + i);
-                free(from); free(to); return r;
+                free(from); free(to); return r; /* scratch */
             }
         }
         if (fromLen > length) {
@@ -869,11 +869,11 @@ char *__kml_path_win32_relative(const char *from_in, const char *to_in, const ch
         sb_append_n(&out, toOrig + toStart, toEnd - toStart);
         r = sb_finish(&out);
     } else {
-        free(out.buf);
+        free(out.buf); /* scratch */
         if (toOrig[toStart] == CHAR_BACKWARD_SLASH) ++toStart;
         r = kml_str_from(toOrig + toStart, toEnd - toStart);
     }
-    free(from); free(to);
+    free(from); free(to); /* scratch */
     return r;
 }
 
@@ -982,7 +982,7 @@ char *__kml_path_posix_normalize(const char *path) {
     sb_t b; sb_init(&b);
     normalizeStringWith(path, len, !isAbsolute, '/', isPosixSep, &b);
     if (b.len == 0) {
-        free(b.buf);
+        free(b.buf); /* scratch */
         if (isAbsolute) return kml_str_dup("/");
         return kml_str_dup(trailingSeparator ? "./" : ".");
     }
@@ -991,7 +991,7 @@ char *__kml_path_posix_normalize(const char *path) {
     sb_t out; sb_init(&out);
     sb_append_ch(&out, '/');
     sb_append_n(&out, sb_cstr(&b), b.len);
-    free(b.buf);
+    free(b.buf); /* scratch */
     return sb_finish(&out);
 }
 
@@ -1008,7 +1008,7 @@ char *__kml_path_posix_resolve(int64_t n, char **args, const char *cwd) {
         sb_append(&nt, path);
         sb_append_ch(&nt, '/');
         sb_append_n(&nt, sb_cstr(&resolvedPath), resolvedPath.len);
-        free(resolvedPath.buf);
+        free(resolvedPath.buf); /* scratch */
         resolvedPath = nt;
         resolvedAbsolute = path[0] == CHAR_FORWARD_SLASH;
     }
@@ -1017,21 +1017,21 @@ char *__kml_path_posix_resolve(int64_t n, char **args, const char *cwd) {
         sb_append(&nt, cwd);
         sb_append_ch(&nt, '/');
         sb_append_n(&nt, sb_cstr(&resolvedPath), resolvedPath.len);
-        free(resolvedPath.buf);
+        free(resolvedPath.buf); /* scratch */
         resolvedPath = nt;
         resolvedAbsolute = cwd[0] == CHAR_FORWARD_SLASH;
     }
     sb_t norm; sb_init(&norm);
     normalizeStringWith(sb_cstr(&resolvedPath), resolvedPath.len, !resolvedAbsolute, '/', isPosixSep, &norm);
-    free(resolvedPath.buf);
+    free(resolvedPath.buf); /* scratch */
     if (resolvedAbsolute) {
         sb_t out; sb_init(&out);
         sb_append_ch(&out, '/');
         sb_append_n(&out, sb_cstr(&norm), norm.len);
-        free(norm.buf);
+        free(norm.buf); /* scratch */
         return sb_finish(&out);
     }
-    if (norm.len == 0) { free(norm.buf); return kml_str_dup("."); }
+    if (norm.len == 0) { free(norm.buf); return kml_str_dup("."); } /* scratch */
     return sb_finish(&norm);
 }
 
@@ -1190,18 +1190,18 @@ char *__kml_path_win32_from_file_url(const char *host, const char *rawPath, int 
         sb_append(&out, "\\\\");
         sb_append(&out, host);
         sb_append_n(&out, sb_cstr(&b), b.len);
-        free(b.buf);
+        free(b.buf); /* scratch */
         return sb_finish(&out);
     }
     int letter = b.len > 1 ? (((unsigned char)b.buf[1]) | 0x20) : 0;
     int sep = b.len > 2 ? (unsigned char)b.buf[2] : 0;
     if (letter < 'a' || letter > 'z' || sep != ':') {
-        free(b.buf);
+        free(b.buf); /* scratch */
         *err = 2;
         return NULL;
     }
     char *out = kml_str_from(b.buf + 1, b.len - 1);
-    free(b.buf);
+    free(b.buf); /* scratch */
     return out;
 }
 
@@ -1224,7 +1224,7 @@ static char *kml_path_format(char sep, const char *root, const char *dir, const 
     sb_append(&out, d);
     if (strcmp(d, root ? root : "") != 0) sb_append_ch(&out, sep);
     sb_append_n(&out, sb_cstr(&b), b.len);
-    free(b.buf);
+    free(b.buf); /* scratch */
     return sb_finish(&out);
 }
 

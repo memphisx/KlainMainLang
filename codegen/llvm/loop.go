@@ -6,22 +6,13 @@ import (
 	"strings"
 )
 
-// loopsrc/loop.c is the event loop (TDD-00244); ensureHTTPRuntime links it.
+// loopsrc/loop.c is the event loop (TDD-00244); ensureEventLoop links it.
 
 //go:embed loopsrc/loop.c
 var loopSource string
 
 // LoopSource is the event loop's C source.
 func LoopSource() string { return layoutHeader() + loopSource }
-
-// httpsrvsrc/httpsrv.c is the HTTP server's fixed runtime (TDD-00244 Stage
-// 5), linked with the loop.
-
-//go:embed httpsrvsrc/httpsrv.c
-var httpSrvSource string
-
-// HTTPSrvSource is the HTTP server runtime's C source.
-func HTTPSrvSource() string { return httpSrvSource }
 
 // LocateUV returns the cflags and libs that compile and link against libuv:
 // pkg-config's, or a bare -luv. On Windows (TDD-00252) the ucrt64 sysroot's

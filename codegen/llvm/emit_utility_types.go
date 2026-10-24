@@ -38,7 +38,7 @@ var utilityTypeNames = map[string]bool{
 // usable argument, else (zero, false) so resolveType falls through to its
 // existing branches. It is consulted only after the user-defined generic
 // registry (emitter.go), so a user type of the same name still wins.
-func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (Type, bool) {
+func (e *Emitter) resolveUtilityType(ta *ast.TypeAnnotation, name string, args []*ast.TypeAnnotation) (Type, bool) {
 	switch name {
 	case "Partial":
 		// Partial<T>: T's properties, each optional (`x?: T[x]`) — a plain
@@ -48,17 +48,24 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			return Type{}, false
 		}
 		base := e.resolveType(args[0])
-		if !base.IsObject || base.IsClass || base.IsTuple || base.IsDynamicObject || isHostHandle(base) || hostCellObject(base) {
+		if !base.IsObject() || base.IsClass() || base.IsTuple() || base.IsDynamicObject() || isHostHandle(base) || hostCellObject(base) {
 			return base, true
 		}
 		fields := make([]Field, 0, len(base.Fields))
 		changed := false
 		for _, f := range base.Fields {
-			if !f.Ty.IsFunc && !jsonFieldSkippable(f.Ty) {
-				f.Ty = undefinedableElem(f.Ty)
-				changed = true
+			if f.Name == PresenceField || f.Name == OrderField {
+				continue
 			}
-			if !f.Ty.IsFunc && !f.Optional && f.Name != ClassTagField {
+			// Widened as a declared `name?: T` member is (optionalFieldType);
+			// the object's header word is no property.
+			if !f.Ty.IsFunc() && !f.Optional && f.Name != ClassTagField {
+				if w := optionalFieldType(f.Ty); w.IR != f.Ty.IR || w.Absent != f.Ty.Absent {
+					f.Ty = w
+					changed = true
+				}
+			}
+			if !f.Ty.IsFunc() && !f.Optional && f.Name != ClassTagField {
 				f.Optional = true
 				changed = true
 			}
@@ -68,7 +75,7 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			return base, true
 		}
 		ty := base
-		ty.Fields = fields
+		ty.Fields = withKeyPresence(fields)
 		ty.RefName = ""
 		return ty, true
 	case "Required", "Readonly":
@@ -84,7 +91,7 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			return Type{}, false
 		}
 		ty := e.resolveType(args[0])
-		ty.Nullable = false
+		ty.setNullable(false)
 		return ty, true
 	case "ReturnType":
 		// ReturnType<F>: the return type of a function type, or of a
@@ -102,7 +109,16 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			}
 		}
 		ft := e.resolveType(args[0])
-		if !ft.IsFunc || ft.FuncRetType == nil {
+		if !ft.IsFunc() || ft.FuncRetType == nil {
+			// The checker's result (`ReturnType<typeof f>` of a declared
+			// function, which codegen holds as no function value).
+			if ta != nil && ta.TypeNode() != nil {
+				if o := e.reprOracle(); o != nil {
+					if rt, ok := o.AnnotationType(ta); ok {
+						return rt, true
+					}
+				}
+			}
 			return Type{}, false
 		}
 		return *ft.FuncRetType, true
@@ -115,7 +131,7 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			return Type{}, false
 		}
 		base := e.resolveType(args[0])
-		if !base.IsObject {
+		if !base.IsObject() {
 			return Type{}, false
 		}
 		keys, ok := collectStringLiteralKeys(args[1])
@@ -132,7 +148,7 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 				fields = append(fields, f)
 			}
 		}
-		return ObjectType(fields), true
+		return UserObjectType(fields), true
 	case "Record":
 		// Record<K,V>: a string-literal-union K gives a fixed-shape object with
 		// those keys typed V; a general key type (`string`) gives a Map<string,V>.
@@ -145,7 +161,7 @@ func (e *Emitter) resolveUtilityType(name string, args []*ast.TypeAnnotation) (T
 			for i, k := range keys {
 				fields[i] = Field{Name: k, Ty: valTy}
 			}
-			return ObjectType(fields), true
+			return UserObjectType(fields), true
 		}
 		// The open-key form is the index-signature dictionary, exactly like
 		// `{ [k: string]: V }`: the object itself, every property typed V.

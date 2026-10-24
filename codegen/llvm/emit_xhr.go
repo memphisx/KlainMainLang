@@ -35,7 +35,7 @@ func (e *Emitter) emitNewXMLHttpRequestExpression(ex *ast.NewXMLHttpRequestExpre
 		idx, _, _ := ty.FieldIndex(name)
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, objReg, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ir, val, gep, align))
+		e.heapStore(ir, val, gep, align)
 	}
 
 	emptyStr := e.internString("")
@@ -94,7 +94,7 @@ func (e *Emitter) xhrStoreField(objVal Value, fieldName string, val Value) {
 	idx, fieldTy, _ := objVal.Ty.FieldIndex(fieldName)
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, val.Ref, gep, fieldTy.Align()))
+	e.heapStore(fieldTy.IR, val.Ref, gep, fieldTy.Align())
 }
 
 // emitXHROpen implements xhr.open(method, url, async?, user?, password?):
@@ -124,12 +124,12 @@ func (e *Emitter) emitXHROpen(objExpr ast.Expression, args []ast.Expression, pos
 	if err != nil {
 		return Value{}, err
 	}
-	methodVal = e.coerce(methodVal, TypePtr)
+	methodVal = e.convert(methodVal, TypePtr)
 	urlVal, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
 	}
-	urlVal = e.coerce(urlVal, TypePtr)
+	urlVal = e.convert(urlVal, TypePtr)
 
 	// Evaluate any async/user/password arguments so their side effects occur,
 	// even though behavior is synchronous regardless (see the doc comment).
@@ -173,12 +173,12 @@ func (e *Emitter) emitXHRSetRequestHeader(objExpr ast.Expression, args []ast.Exp
 	if err != nil {
 		return Value{}, err
 	}
-	nameVal = e.coerce(nameVal, TypePtr)
+	nameVal = e.convert(nameVal, TypePtr)
 	valVal, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
 	}
-	valVal = e.coerce(valVal, TypePtr)
+	valVal = e.convert(valVal, TypePtr)
 
 	idx, fieldTy, _ := objVal.Ty.FieldIndex(XHRHeadersField)
 	headersVal := e.loadFieldValue(objVal, idx, fieldTy)
@@ -221,7 +221,7 @@ func (e *Emitter) emitXHRSend(objExpr ast.Expression, args []ast.Expression, pos
 		if err != nil {
 			return Value{}, err
 		}
-		bodyVal = e.coerce(bodyVal, TypePtr)
+		bodyVal = e.convert(bodyVal, TypePtr)
 		bodyRef = bodyVal.Ref
 	}
 
@@ -263,7 +263,7 @@ func (e *Emitter) emitXHRSend(objExpr ast.Expression, args []ast.Expression, pos
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %s)", respTextReg, bodyLenReg))
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", respTextReg, bodyPtrReg, bodyLenReg))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", respNulReg, respTextReg, bodyLenReg))
-	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", respNulReg))
+	e.heapStore("i8", "0", respNulReg, 1)
 	e.ensureFetchHeadersMap()
 	respHdrsReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_headers_map(ptr %s)", respHdrsReg, pendingReg))
@@ -380,7 +380,7 @@ func (e *Emitter) emitLoweredHeaderName(nameExpr ast.Expression) (string, error)
 	if err != nil {
 		return "", err
 	}
-	nameVal = e.coerce(nameVal, TypePtr)
+	nameVal = e.convert(nameVal, TypePtr)
 	e.ensureStringToLower()
 	lowered := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_tolower(ptr %s)", lowered, nameVal.Ref))
@@ -403,10 +403,7 @@ func init() {
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 				return emit(e, ex.Callee.(*ast.MemberExpression).Object, ex.Args, ex.GetPos())
 			},
-			ty: func(e *Emitter, ex *ast.CallExpression) Type {
-				t, _ := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression))
-				return t
-			},
+			ty: func(*Emitter, *ast.CallExpression) Type { return Type{} },
 		}
 	}
 }

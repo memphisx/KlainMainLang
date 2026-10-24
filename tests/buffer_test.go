@@ -103,7 +103,7 @@ console.log(b.lastIndexOf("l"), b.indexOf(""), b.lastIndexOf(""));
 }
 
 // Buffer.fill(string, offset?, end?) repeats the needle's bytes aligned to the
-// fill offset; an empty string is a no-op (ADR-00559).
+// fill offset; an empty string fills zeros, as Node's _fill makes it 0.
 func TestE2EBufferStringFill(t *testing.T) {
 	assertOutput(t, `
 const a = Buffer.alloc(5);
@@ -115,7 +115,7 @@ console.log(b.toString());
 const d = Buffer.from([1, 2, 3]);
 d.fill("");
 console.log(d[0], d[1], d[2]);
-`, "0061626162\nxyzxyz\n1 2 3")
+`, "0061626162\nxyzxyz\n0 0 0")
 }
 
 func TestE2EBufferRejections(t *testing.T) {

@@ -50,13 +50,13 @@ function received(value: any): string {
 
 function validateInt32(value: any, name: string, min: number, max: number): void {
     if (typeof value !== 'number') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
     }
     if (!Number.isInteger(value)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be an integer. Received ' + String(value));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be an integer. Received ' + String(value));
     }
     if (value < min || value > max) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be >= ' + min + ' && <= ' + max + '. Received ' + String(value));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be >= ' + min + ' && <= ' + max + '. Received ' + String(value));
     }
 }
 

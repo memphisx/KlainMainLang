@@ -2,13 +2,14 @@ package main
 
 // Generators for the ADR and TDD *index* READMEs, and the status index's TDD
 // backlog. These indexes are projections of the individual record files
-// (docs/adr/ADR-*.md, docs/tdd/TDD-*.md), the same generated-from-source model
+// (docs/adr/NN/ADR-*.md, docs/tdd/TDD-*.md), the same generated-from-source model
 // docs/status/*.md already follows (TDD-00149). The preamble prose above each
 // "## Index" table stays hand-editable; only the table rows are generated.
 
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -18,6 +19,48 @@ import (
 
 const tddDir = "docs/tdd"
 const adrDir = "docs/adr"
+
+// adrRel is ADR n's path relative to docs/adr: the records sit in one folder
+// per thousand (00/ holds ADR-00001..00999, 01/ ADR-01000..01999), which keeps
+// every folder under GitHub's per-directory listing limit.
+func adrRel(n int) string { return fmt.Sprintf("%02d/ADR-%05d.md", n/1000, n) }
+
+// mdLinkRe matches a markdown link's target.
+var mdLinkRe = regexp.MustCompile(`\]\(([^)\s]+)\)`)
+
+// rebaseLinks rewrites the relative link targets of text written in docs/adr/
+// <dir> so they resolve from docs/adr/ (the index README).
+func rebaseLinks(text, dir string) string {
+	return mdLinkRe.ReplaceAllStringFunc(text, func(m string) string {
+		t := mdLinkRe.FindStringSubmatch(m)[1]
+		if strings.Contains(t, ":") || strings.HasPrefix(t, "#") || strings.HasPrefix(t, "/") {
+			return m
+		}
+		return "](" + path.Join(dir, t) + ")"
+	})
+}
+
+// adrNums lists the ADR numbers across the thousand folders.
+func adrNums() ([]int, error) {
+	entries, err := os.ReadDir(adrDir)
+	if err != nil {
+		return nil, err
+	}
+	bucketRe := regexp.MustCompile(`^\d{2}$`)
+	var nums []int
+	for _, e := range entries {
+		if !e.IsDir() || !bucketRe.MatchString(e.Name()) {
+			continue
+		}
+		ns, err := recordNums(filepath.Join(adrDir, e.Name()), "ADR")
+		if err != nil {
+			return nil, err
+		}
+		nums = append(nums, ns...)
+	}
+	sort.Ints(nums)
+	return nums, nil
+}
 
 // tddStatuses, longest-first so "Partially Implemented" wins over "Implemented".
 var tddStatuses = []string{"Partially Implemented", "Not Started", "In Progress", "Implemented", "Superseded"}
@@ -164,13 +207,13 @@ func relationsBullet(body string) string {
 // Relations bullet references it (any verb — the canonical ADR→TDD link
 // direction). This is the sole source for the TDD index's Related ADRs column.
 func deriveRelatedADRs() (map[int][]int, error) {
-	nums, err := recordNums(adrDir, "ADR")
+	nums, err := adrNums()
 	if err != nil {
 		return nil, err
 	}
 	byTDD := map[int]map[int]bool{}
 	for _, a := range nums {
-		path := filepath.Join(adrDir, fmt.Sprintf("ADR-%05d.md", a))
+		path := filepath.Join(adrDir, adrRel(a))
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
@@ -199,7 +242,7 @@ func deriveRelatedADRs() (map[int][]int, error) {
 func adrLinks(nums []int) string {
 	var parts []string
 	for _, a := range nums {
-		parts = append(parts, fmt.Sprintf("[ADR-%05d](../adr/ADR-%05d.md)", a, a))
+		parts = append(parts, fmt.Sprintf("[ADR-%05d](../adr/%s)", a, adrRel(a)))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -330,7 +373,8 @@ var refRe = regexp.MustCompile(`\[?(ADR|TDD)-(\d+)\]?(\([^)]*\))?`)
 // normalizeRelations turns an ADR's freeform Relations bullet into the index
 // cell: the prefix stripped, wraps already joined by relationsBullet, and every
 // ADR/TDD reference rewritten to a canonical markdown link (relative to
-// docs/adr/: ADR links are same-dir, TDD links reach ../tdd/).
+// docs/adr/README.md: ADR links reach into the thousand folder, TDD links
+// reach ../tdd/).
 func normalizeRelations(bullet string) string {
 	text := bullet
 	if i := strings.Index(text, "**Relations**"); i >= 0 {
@@ -342,7 +386,7 @@ func normalizeRelations(bullet string) string {
 		sub := refRe.FindStringSubmatch(m)
 		n, _ := strconv.Atoi(sub[2])
 		if sub[1] == "ADR" {
-			return fmt.Sprintf("[ADR-%05d](ADR-%05d.md)", n, n)
+			return fmt.Sprintf("[ADR-%05d](%s)", n, adrRel(n))
 		}
 		return fmt.Sprintf("[TDD-%05d](../tdd/TDD-%05d.md)", n, n)
 	})
@@ -355,13 +399,13 @@ type adrRecord struct {
 }
 
 func loadADRRecords() ([]adrRecord, error) {
-	nums, err := recordNums(adrDir, "ADR")
+	nums, err := adrNums()
 	if err != nil {
 		return nil, err
 	}
 	var recs []adrRecord
 	for _, n := range nums {
-		path := filepath.Join(adrDir, fmt.Sprintf("ADR-%05d.md", n))
+		path := filepath.Join(adrDir, adrRel(n))
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			return nil, err
@@ -375,7 +419,8 @@ func loadADRRecords() ([]adrRecord, error) {
 		if m == nil {
 			return nil, fmt.Errorf("%s: first line is not a `# ADR-NNNNN:` heading", path)
 		}
-		recs = append(recs, adrRecord{Num: n, Title: m[2], Relations: normalizeRelations(relationsBullet(body))})
+		dir := filepath.ToSlash(filepath.Dir(adrRel(n)))
+		recs = append(recs, adrRecord{Num: n, Title: rebaseLinks(m[2], dir), Relations: normalizeRelations(rebaseLinks(relationsBullet(body), dir))})
 	}
 	return recs, nil
 }
@@ -383,7 +428,7 @@ func loadADRRecords() ([]adrRecord, error) {
 func renderADRIndexRows(recs []adrRecord) string {
 	var b strings.Builder
 	for _, r := range recs {
-		fmt.Fprintf(&b, "%s\n", tableRow(fmt.Sprintf("[%05d](ADR-%05d.md)", r.Num, r.Num), escapeCell(r.Title), escapeCell(r.Relations)))
+		fmt.Fprintf(&b, "%s\n", tableRow(fmt.Sprintf("[%05d](%s)", r.Num, adrRel(r.Num)), escapeCell(r.Title), escapeCell(r.Relations)))
 	}
 	return b.String()
 }

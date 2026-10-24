@@ -32,7 +32,9 @@ func (e *Emitter) ensureInspectReduce() {
 	e.emitGlobal(`declare ptr @__kml_inspect_begin(i64, i64)`)
 	e.emitGlobal(`declare void @__kml_inspect_push(ptr, ptr)`)
 	e.emitGlobal(`declare void @__kml_inspect_push_more(ptr, i64)`)
+	e.emitGlobal(`declare void @__kml_inspect_push_holes(ptr, i64)`)
 	e.emitGlobal(`declare ptr @__kml_inspect_end(ptr, ptr, ptr, i64, i64, i64, i64)`)
+	e.emitGlobal(`declare i64 @__kml_inspect_push_arr_extras(ptr, ptr, i64)`)
 	e.emitGlobal(`declare ptr @__kml_inspect_quote(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_inspect_key(ptr)`)
 	e.emitGlobal(`declare ptr @__kml_inspect_hex(ptr, i64)`)
@@ -62,6 +64,15 @@ func (e *Emitter) inspectEnd(list, open, close string, depth int, isArray, numer
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_end(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d, i64 %s, i64 %s)",
 		r, list, open, close, 2*depth, depth, boolI64(isArray), boolI64(numeric)))
+	return Value{Ref: r, Ty: TypePtr}
+}
+
+// inspectEndNumeric is inspectEnd with the numeric alignment an i64
+// register.
+func (e *Emitter) inspectEndNumeric(list, open, close string, depth int, numeric string) Value {
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_end(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d, i64 1, i64 %s)",
+		r, list, open, close, 2*depth, depth, numeric))
 	return Value{Ref: r, Ty: TypePtr}
 }
 

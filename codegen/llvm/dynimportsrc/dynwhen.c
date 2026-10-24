@@ -70,8 +70,8 @@ void *__kml_dynimport_init(void **slot, kml_body body, i64 stack) {
     if (*slot) return *slot;
     void *p = __kml_task_alloc_promise();
     *slot = p;
-    start_env *env = (start_env *)malloc(sizeof(start_env));
-    void *clo = malloc(KML_CLOSURE_SIZE);
+    start_env *env = (start_env *)kml_alloc(KML_HEAP_WORDS, sizeof(start_env));
+    void *clo = kml_alloc(KML_HEAP_WORDS, KML_CLOSURE_SIZE);
     env->body = body;
     env->p = p;
     env->stack = stack;
@@ -84,11 +84,11 @@ void *__kml_dynimport_init(void **slot, kml_body body, i64 stack) {
 }
 
 void __kml_dynimport_when(void *mp, void *q, kml_fulfill fn) {
-    when_env *env = (when_env *)malloc(sizeof(when_env));
+    when_env *env = (when_env *)kml_alloc(KML_HEAP_WORDS, sizeof(when_env));
     env->mp = mp;
     env->q = q;
     env->fn = fn;
-    void *clo = malloc(KML_CLOSURE_SIZE);
+    void *clo = kml_alloc(KML_HEAP_WORDS, KML_CLOSURE_SIZE);
     F(clo, KML_CLOSURE_FN, kml_fn0) = when_settled;
     F(clo, KML_CLOSURE_ENV, void *) = env;
     __kml_promise_attach(mp, clo);

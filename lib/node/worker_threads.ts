@@ -21,6 +21,7 @@
 import { EventEmitter } from 'events';
 import { structuredCloneAny } from './internal_structured_clone';
 import { NodeError, NodeTypeError } from './internal_errors';
+import { received } from './internal_fs_utils';
 
 // url.fileURLToPath for a file: URL (url.ts would close an import cycle):
 // on Windows file:///C:/x is C:\x and file://host/s/x is \\host\s\x.
@@ -81,7 +82,7 @@ function serialize(value: any, transfer: any[]): any {
             if (t._kmlId < 0) throw dataCloneError('MessagePort in transfer list is already detached');
             ports.push(t as MessagePort);
         } else if (!(t instanceof ArrayBuffer) && !(t instanceof SharedArrayBuffer)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Found invalid value in transferList.');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Found invalid value in transferList.');
         }
     }
     const copy = cloneForTransfer(value, ports, new Map<any, any>());
@@ -180,7 +181,7 @@ function transferListOf(options: any): any[] {
     if (Array.isArray(options)) return options;
     if (typeof options === 'object' && options.transfer !== undefined) {
         if (!Array.isArray(options.transfer)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.transfer" property must be of type Array.');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.transfer" property must be of type Array.');
         }
         return options.transfer;
     }
@@ -350,7 +351,7 @@ export class MessageChannel {
 // The oldest message waiting on port, taken without its 'message' event.
 export function receiveMessageOnPort(port: MessagePort): { message: any } | undefined {
     if (!(port instanceof MessagePort)) {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "port" argument must be a MessagePort instance');
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "port" argument must be a MessagePort instance');
     }
     if (port._kmlId < 0 || !__kml_native.mportHas(port._kmlId)) return undefined;
     return { message: revive(__kml_native.mportTake(port._kmlId)) };
@@ -446,18 +447,24 @@ export class Worker extends EventEmitter {
         let path: string;
         if (filename instanceof URL) {
             if ((filename as URL).protocol !== 'file:') {
-                throw new NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+                throw NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
             }
             // Node's fileURLToPath: on Windows file:///C:/x is C:\x, not /C:/x.
             path = fileUrlPath(filename as URL);
         } else if (typeof filename === 'string') {
             path = filename as string;
         } else {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "filename" argument must be of type string or an instance of URL.');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "filename" argument must be of type string or an instance of URL.');
         }
         const opts: any = options === undefined ? {} : options;
+        for (const key of ['execArgv', 'argv']) {
+            const v = opts[key];
+            if (v && !Array.isArray(v)) {
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.' + key + '" property must be an instance of Array. ' + received(v));
+            }
+        }
         if (opts.eval === true) {
-            throw new NodeError('ERR_WORKER_UNSUPPORTED_OPERATION', 'Worker code given as a string (eval: true) cannot run: a worker is compiled into the program');
+            throw NodeError('ERR_WORKER_UNSUPPORTED_OPERATION', 'Worker code given as a string (eval: true) cannot run: a worker is compiled into the program');
         }
         const pub = __kml_native.mportPair();
         const internal = __kml_native.mportPair();
@@ -480,7 +487,7 @@ export class Worker extends EventEmitter {
             throw e;
         }
         if (id < 0) {
-            throw new NodeError('ERR_WORKER_INIT_FAILED', 'Worker initialization failure: ' + __kml_native.errnoName(-id));
+            throw NodeError('ERR_WORKER_INIT_FAILED', 'Worker initialization failure: ' + __kml_native.errnoName(-id));
         }
         this._kmlId = id;
         this._kmlThreadId = __kml_native.workerThreadId(id);
@@ -541,7 +548,7 @@ export class Worker extends EventEmitter {
     }
 
     getHeapSnapshot(): Promise<any> {
-        return Promise.reject(new NodeError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
+        return Promise.reject(NodeError('ERR_WORKER_NOT_RUNNING', 'Worker instance not running'));
     }
 
     // The web's Worker shape.
@@ -591,7 +598,7 @@ export class BroadcastChannel extends EventEmitter {
     constructor(name: string) {
         super();
         if (arguments.length === 0) {
-            throw new NodeTypeError('ERR_MISSING_ARGS', 'The "name" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "name" argument must be specified');
         }
         this.name = String(name);
         const id = __kml_native.mportPair();

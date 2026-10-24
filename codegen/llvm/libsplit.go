@@ -1,6 +1,7 @@
 package llvm
 
 import (
+	"KlainMainLang/lib"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -40,12 +41,13 @@ var (
 	libInitRe   = regexp.MustCompile(`^__kml_lib_(.+)_(init|done)$`)
 	// libLiteralRe is a function literal of library code, named by its
 	// position (literalSymbol): `__closure.node_internal_fs.36_34`.
-	libLiteralRe = regexp.MustCompile(`^__(?:closure|generator_body|generator_method|kml_dynfn)\.(node_[A-Za-z0-9_]+)\.\d`)
+	libLiteralRe = regexp.MustCompile(`^__(?:closure|generator_body|generator_method|kml_dynfn)\.((?:node|shared)_[A-Za-z0-9_]+)\.\d`)
 	// stableHelperRe is a helper generated for one layout or host type id
 	// (shape row, inspect routine, conversion from any): the id is the
 	// number, its low 32 bits in the stable range for a library type.
+	protoMethodRe   = regexp.MustCompile(`^__kml_proto_m_([A-Za-z0-9]+?)_`)
 	dynPropHelperRe = regexp.MustCompile(`^__kml_dyn(get|set)\.([0-9a-f]+)$`)
-	stableHelperRe  = regexp.MustCompile(`^__kml_(?:(?:shape_get|shape_set|shape_keys|shape_syms|host_inspect|any_to_layout)[._](\d+)(?:_\d+)?|shape_m\.(\d+)\..+|(?:host_m|shape_get_host|shape_set_host|rec_read|rec_write|gen_dyn|inspect_custom)_(\d+)(?:_.+)?)$`)
+	stableHelperRe  = regexp.MustCompile(`^__kml_(?:(?:shape_get|shape_set|shape_keys|shape_syms|host_inspect|any_to_layout)[._](\d+)(?:_\d+)?|shape_m\.(\d+)\..+|(?:host_m|shape_get_host|shape_set_host|rec_read|rec_write|gen_dyn|inspect_custom|host_tostr|host_toprim|tostring_tag|mview_[a-z]+)_(\d+)(?:_.+)?)$`)
 	// dynTargetRe: a lazy import() target's init, body, start and fulfill;
 	// dynFileRe: a dynamic-only file's run-once flag (emit_dynmodule.go).
 	dynTargetRe = regexp.MustCompile(`^__kml_dyn_([0-9a-f]{16})_`)
@@ -63,6 +65,16 @@ func StableUnitKey(id uint64) string { return fmt.Sprintf("stb_%08x", id) }
 
 // islandOwner reports whether owner is a lazy import() island unit.
 func islandOwner(owner string) bool { return strings.HasPrefix(owner, "isl_") }
+
+// objProtoUnit is the shared unit of Object.prototype's methods.
+const objProtoUnit = "shared_objproto"
+
+// sharedHelperUnits are generated helpers the same in every program, each
+// in a unit of its own.
+var sharedHelperUnits = map[string]string{
+	"__kml_any_iter_collect":      "shared_itercollect",
+	"__kml_any_arraylike_collect": "shared_itercollect",
+}
 
 // libOwner is the library module that owns symbol name, "" for the program.
 // A name embeds its module as __kml_modL<n><key> (the key's length, then
@@ -103,7 +115,27 @@ func libOwner(name string) string {
 			return StableUnitKey(id & uint64(kmlHdrIDMask))
 		}
 	}
-	if strings.HasPrefix(name, "__") && !strings.HasPrefix(name, "__kml_global_") {
+	// Object.prototype's methods are the same in every program.
+	if name == "__kml_ir_objproto_fill" {
+		return objProtoUnit
+	}
+	// So are these helpers, each built program-independently (sharedBody).
+	if u, ok := sharedHelperUnits[name]; ok {
+		return u
+	}
+	if strings.HasPrefix(name, "__kml_builtin_fn_") {
+		return "bfn_" + strings.TrimPrefix(name, "__kml_builtin_fn_")
+	}
+	if strings.HasPrefix(name, "__kml_fnproto") && !strings.HasSuffix(name, "_rec") {
+		return "shared_fnproto"
+	}
+	// A builtin prototype's method (`Array.prototype.push` as a value) is
+	// the same in every program: one unit per builtin class.
+	if protoMethodRe.MatchString(name) {
+		// One unit per method: which methods a program carries varies.
+		return "proto_" + strings.TrimSuffix(strings.TrimPrefix(name, "__kml_proto_m_"), "_rec")
+	}
+	if strings.HasPrefix(name, "__") && !strings.HasPrefix(name, "__kml_global_") && !libKmlDecl(name) {
 		return ""
 	}
 	loc := libModKeyRe.FindStringSubmatchIndex(name)
@@ -717,13 +749,51 @@ func cachedUnitObject(cacheDir, k, text string, compileFlags []string) (obj stri
 	}
 	args := append(append([]string{}, compileFlags...), "-Wno-override-module", "-c", stem+".ll", "-o", stem+".o.tmp")
 	out, cerr := ClangCommand(args...).CombinedOutput()
-	os.Remove(stem + ".ll")
 	if cerr != nil {
+		// The text is kept for the report: the error names its lines.
 		os.Remove(stem + ".o.tmp")
-		return "", false, fmt.Errorf("compiling library module %s: %v\n%s", k, cerr, out)
+		return "", false, fmt.Errorf("compiling library module %s (%s.ll): %v\n%s", k, stem, cerr, out)
 	}
+	os.Remove(stem + ".ll")
 	if err := os.Rename(stem+".o.tmp", obj); err != nil {
 		return "", false, err
 	}
 	return obj, false, nil
+}
+
+// dropDefinedDeclares removes each `declare` of a function the module also
+// defines (a helper declared where it is called and defined at the end):
+// one module may not hold both.
+func dropDefinedDeclares(ll string) string {
+	defined := map[string]bool{}
+	for _, ln := range strings.Split(ll, "\n") {
+		if strings.HasPrefix(ln, defineKw) {
+			defined[firstSym(ln)] = true
+		}
+	}
+	var b strings.Builder
+	b.Grow(len(ll))
+	dropped := false
+	for _, ln := range strings.SplitAfter(ll, "\n") {
+		if strings.HasPrefix(ln, "declare ") && defined[firstSym(ln)] {
+			dropped = true
+			continue
+		}
+		b.WriteString(ln)
+	}
+	if !dropped {
+		return ll
+	}
+	return b.String()
+}
+
+// libKmlDecl reports whether name is a builtin module's own declaration
+// whose source name has the reserved __kml_ prefix (`__kml_Array_generic_map`
+// in kml_array.ts), not a helper generated about one.
+func libKmlDecl(name string) bool {
+	i := strings.Index(name, "__kml_modL")
+	if !strings.HasPrefix(name, "__kml_") || i <= 0 || strings.ContainsAny(name, ".\"") {
+		return false
+	}
+	return lib.DeclaredKmlNames()[name[:i]]
 }

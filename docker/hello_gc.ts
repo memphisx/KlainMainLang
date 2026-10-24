@@ -4,7 +4,7 @@
 // tests/memory_gc_test.go's forced-collection test), then prints a value
 // that only comes out correct if none of those collections corrupted
 // anything — proof the shim + GC_stackbottom fiber fix (see
-// docs/adr/ADR-00071.md) work in a real Linux/Alpine/musl build, not just
+// docs/adr/00/ADR-00071.md) work in a real Linux/Alpine/musl build, not just
 // on this project's macOS dev machine.
 let total = 0;
 for (let i = 0; i < 500000; i++) {

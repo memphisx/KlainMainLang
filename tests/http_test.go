@@ -108,7 +108,7 @@ func startHTTPServerFixed(t *testing.T, src string, port int) {
 
 // startHTTPServerGC is startHTTPServer's -mm=gc counterpart, for exercising
 // http.listen's concurrent-fiber machinery under the Boehm GC (see
-// docs/adr/ADR-00071.md's GC_stackbottom fix) — skips (via buildBinaryGC)
+// docs/adr/00/ADR-00071.md's GC_stackbottom fix) — skips (via buildBinaryGC)
 // if libgc/bdw-gc isn't installed.
 func startHTTPServerGC(t *testing.T, src string, port int) int {
 	t.Helper()
@@ -1436,7 +1436,9 @@ http.listen(8199, (req: HttpRequest) => {
 	if !strings.Contains(first, "Connection: keep-alive") {
 		t.Fatalf("first streamed response did not advertise keep-alive:\n%q", first)
 	}
-	if !strings.Contains(first, "Transfer-Encoding: chunked") || (!strings.Contains(first, "chunk1 ") || !strings.Contains(first, "chunk2 ")) {
+	// Header names are case-insensitive; libh2o writes its framing fields
+	// lowercase.
+	if !strings.Contains(strings.ToLower(first), "transfer-encoding: chunked") || (!strings.Contains(first, "chunk1 ") || !strings.Contains(first, "chunk2 ")) {
 		t.Fatalf("first response body malformed:\n%q", first)
 	}
 
@@ -3143,6 +3145,50 @@ http.listen(8966, (req: HttpRequest): Res => {
 	}
 }
 
+// TestE2EHTTPCreateServerGCModeConcurrentConnections: under -mm=gc, a socket
+// stream closing while collections run must not be freed early — its handle's
+// data was the only pointer left, in memory the collector does not scan, and
+// the next allocation crashed in the collector's free lists.
+func TestE2EHTTPCreateServerGCModeConcurrentConnections(t *testing.T) {
+	src := `
+import http from 'http'
+http.createServer((req, res) => {
+  let total = 0;
+  for (let i = 0; i < 100000; i++) {
+    let s: string = "abcdefghijklmnopqrstuvwxyz0123456789" + "abcdefghijklmnopqrstuvwxyz0123456789";
+    total = total + s.length;
+  }
+  res.end(total.toString());
+}).listen(8971, '127.0.0.1')
+`
+	port := startHTTPClusterServerGC(t, src, 8971)
+	const n = 40
+	errs := make(chan string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c := &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
+			resp, err := c.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+			if err != nil {
+				errs <- err.Error()
+				return
+			}
+			defer resp.Body.Close()
+			body, _ := io.ReadAll(resp.Body)
+			if string(body) != "7200000" {
+				errs <- fmt.Sprintf("body %q", body)
+			}
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for e := range errs {
+		t.Error(e)
+	}
+}
+
 // TestE2EHTTPRequestObjectKeysHidesInternals: Object.keys(req) must expose only
 // the user-facing HttpRequest surface (method/path/query/headers/body), not the
 // implementation-only bodyLength/__kml_bodyctx fields that back .bodyBytes() and
@@ -3163,8 +3209,10 @@ http.listen(8976, (req: HttpRequest): Res => {
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	got := string(body)
-	if got != "method,path,query,headers,body" {
-		t.Errorf("Object.keys(req) = %q, want %q (internal fields must not leak)", got, "method,path,query,headers,body")
+	// body is an accessor (it throws once stream() took the body), and a
+	// class accessor is not an own key.
+	if got != "method,path,query,headers" {
+		t.Errorf("Object.keys(req) = %q, want %q (internal fields must not leak)", got, "method,path,query,headers")
 	}
 	for _, internal := range []string{"bodyLength", "__kml_bodyctx"} {
 		if strings.Contains(got, internal) {
@@ -3310,25 +3358,28 @@ http.listen(8975, (req: HttpRequest): Res => {
 	}
 }
 
-// TestE2EHTTPListenSecondCallSiteRejected: http.close() makes a second,
-// textually-later http.listen() call genuinely reachable at runtime for the
-// first time (the first call no longer necessarily runs forever) — without
-// emitHTTPListen's httpListenCallSeen guard, this would otherwise compile
-// and fail obscurely at the LLVM backend (a duplicate @__kml_http_dispatch
-// definition) instead of with a clear compile-time error.
-func TestE2EHTTPListenSecondCallSiteRejected(t *testing.T) {
-	_, err := parseAndCompileImports(t, `
+// TestE2EHTTPListenSequentialServers: listen blocks until close(), so a
+// second listen after it serves in turn (no once-per-program limit).
+func TestE2EHTTPListenSequentialServers(t *testing.T) {
+	skipIfLoopbackTrafficFiltered(t)
+	assertOutputImports(t, `
 import http from 'klain:http'
 interface Res { status: number; body: string }
-http.listen(8969, (req: HttpRequest): Res => { http.close(); return { status: 200, body: "a" } }, { host: '127.0.0.1' })
-http.listen(8970, (req: HttpRequest): Res => { return { status: 200, body: "b" } }, { host: '127.0.0.1' })
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a second http.listen call site, got none")
-	}
-	if !strings.Contains(err.Error(), "http.listen may only be called once") {
-		t.Errorf("error = %v, want it to mention the once-per-program limitation", err)
-	}
+setTimeout(async () => {
+  const r = await fetch("http://127.0.0.1:8969/a")
+  console.log("first:", await r.text())
+  http.close()
+}, 20)
+http.listen(8969, (req: HttpRequest): Res => ({ status: 200, body: "a" + req.path }), { host: '127.0.0.1' })
+console.log("first closed")
+setTimeout(async () => {
+  const r = await fetch("http://127.0.0.1:8970/b")
+  console.log("second:", await r.text())
+  http.close()
+}, 20)
+http.listen(8970, (req: HttpRequest): Res => ({ status: 200, body: "b" + req.path }), { host: '127.0.0.1' })
+console.log("second closed")
+`, "first: a/a\nfirst closed\nsecond: b/b\nsecond closed\n")
 }
 
 // TestE2EHTTPCloseWrongArgCountRejected mirrors

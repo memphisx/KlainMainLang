@@ -1,6 +1,7 @@
 package checker
 
 import (
+	"KlainMainLang/lib"
 	"strconv"
 	"strings"
 
@@ -45,9 +46,45 @@ func (c *Checker) assignableTo(s, t *Type) ternary {
 	return c.relate(s, t, relation{}, 0)
 }
 
+// relKey identifies one relation question for relate's memo.
+type relKey struct {
+	s, t *Type
+	rel  relation
+}
+
+// relate memoizes relateUncached for object pairs, as TypeScript's
+// relation cache does: a pair still being related answers maybe (the
+// assumption a recursive type's relation makes), and a result that leaned
+// on such an assumption is not remembered.
 func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
+	if s == nil || t == nil || s.Flags&Object == 0 || t.Flags&Object == 0 || s == t {
+		return c.relateUncached(s, t, rel, depth)
+	}
+	k := relKey{s, t, rel}
+	if r, ok := c.relMemo[k]; ok {
+		return r
+	}
+	if c.relActive[k] {
+		c.relAssumed++
+		return maybe
+	}
+	if c.relMemo == nil {
+		c.relMemo = map[relKey]ternary{}
+		c.relActive = map[relKey]bool{}
+	}
+	before := c.relAssumed
+	c.relActive[k] = true
+	r := c.relateUncached(s, t, rel, depth)
+	delete(c.relActive, k)
+	if c.relAssumed == before && depth <= 20 {
+		c.relMemo[k] = r
+	}
+	return r
+}
+
+func (c *Checker) relateUncached(s, t *Type, rel relation, depth int) ternary {
 	switch {
-	case s == nil || t == nil || c.Unanswered(s) || c.Unanswered(t) || depth > 8,
+	case s == nil || t == nil || c.Unanswered(s) || c.Unanswered(t) || depth > 20,
 		s.Flags&Deferred != 0 || t.Flags&Deferred != 0:
 		return maybe
 	case s == t:
@@ -68,6 +105,27 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 		return no
 	case s.Flags&TypeParam != 0 || t.Flags&TypeParam != 0:
 		return maybe
+	case t.Brand != nil && s.Flags&Union == 0:
+		// A branded primitive takes only a value carrying its brand: the
+		// intersection's every member must hold.
+		if s.Brand == nil {
+			return no // a plain primitive lacks the brand; an object is no primitive
+		}
+		return all(c.relate(s.BrandBase, t.BrandBase, rel, depth+1), c.relate(s.Brand, t.Brand, rel, depth+1))
+	case s.Brand != nil:
+		// A branded primitive goes where either part goes, or to the
+		// union member that is its own brand.
+		if t.Flags&Union != 0 {
+			for _, m := range t.Types {
+				if m.Brand != nil && c.relate(s, m, rel, depth+1) == yes {
+					return yes
+				}
+			}
+		}
+		if r := c.relate(s.BrandBase, t, rel, depth+1); r != no {
+			return r
+		}
+		return c.relate(s.Brand, t, rel, depth+1)
 	case s.Flags&Union != 0:
 		// Every member must go.
 		out := yes
@@ -92,9 +150,13 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 		return boolTern(f == Object|Null|Undefined)
 	case t.Flags&Union != 0:
 		// Some member must take it.
+		// A member a required property is missing from takes no part
+		// (tsc relates each member fully: TS2322 for the union).
+		mrel := rel
+		mrel.missingIsNo = rel.missingIsNo || s.Flags&Object != 0
 		out := no
 		for _, m := range t.Types {
-			switch c.relate(s, m, rel, depth+1) {
+			switch c.relate(s, m, mrel, depth+1) {
 			case yes:
 				return yes
 			case maybe:
@@ -112,7 +174,7 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 					objects++
 				}
 			}
-			if objects > 1 {
+			if objects > 1 && (s.Kind == Array || s.Kind == Tuple || c.sharesDiscriminant(s, t) && !c.nonDiscriminantRulesOut(s, t, rel, depth)) {
 				return maybe
 			}
 		}
@@ -120,8 +182,24 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 	case s.Flags&Unknown != 0:
 		return no // unknown goes only to any and unknown
 	}
-	if s.Member != "" || t.Member != "" {
-		return maybe // enums: not modelled here yet
+	// Enum literals, as TypeScript's isSimpleTypeRelatedTo relates them:
+	// two members are related only when one (s == t is answered above); a
+	// member is otherwise its literal value against a non-enum target (a
+	// numeric member goes to number, not to string or to another literal);
+	// a numeric member takes any number, and a number literal of its value.
+	if s.Member != "" && t.Member != "" {
+		return no
+	}
+	if t.Member != "" {
+		if t.Flags&NumberLiteral != 0 {
+			switch {
+			case s.Flags&(Number|Int|Float32) != 0:
+				return yes
+			case s.Flags&NumberLiteral != 0:
+				return boolTern(s.Value == t.Value)
+			}
+		}
+		return no
 	}
 	switch {
 	case t.Flags&NonPrimitive != 0:
@@ -202,6 +280,105 @@ func boolTern(b bool) ternary {
 	return no
 }
 
+// sharesDiscriminant reports whether s has a property some object member of
+// the union t types as a unit (a literal, null or undefined): the
+// discriminant tsc's discriminated-union relation decides by, member by
+// member, which the per-member relation above does not model.
+func (c *Checker) sharesDiscriminant(s, t *Type) bool {
+	for _, m := range t.Types {
+		if m.Flags&Object == 0 {
+			continue
+		}
+		for _, mp := range m.Props {
+			if mp.Type == nil || s.Prop(mp.Name) == nil {
+				continue
+			}
+			if mp.Type.Flags&(Literal|Boolean|Null|Undefined) != 0 || mp.Type.Flags&Union != 0 && everyMember(mp.Type, Literal|Boolean|Null|Undefined) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// nonDiscriminantRulesOut reports whether every object member of the union
+// t rejects s through a property that is no discriminant (one no member
+// types as a unit): s lacks it while the member requires it, or s's type
+// for it does not relate. Splitting s by its discriminants cannot change
+// such a property, so the discriminated-union relation rejects s too.
+func (c *Checker) nonDiscriminantRulesOut(s, t *Type, rel relation, depth int) bool {
+	disc := map[string]bool{}
+	for _, m := range t.Types {
+		if m.Flags&Object == 0 {
+			continue
+		}
+		for _, mp := range m.Props {
+			if mp.Type != nil && (mp.Type.Flags&(Literal|Boolean|Null|Undefined) != 0 || mp.Type.Flags&Union != 0 && everyMember(mp.Type, Literal|Boolean|Null|Undefined)) {
+				disc[mp.Name] = true
+			}
+		}
+	}
+	for _, m := range t.Types {
+		if m.Flags&Object == 0 {
+			continue
+		}
+		out := false
+		for _, mp := range m.Props {
+			if mp.Type == nil {
+				continue
+			}
+			if disc[mp.Name] {
+				// A discriminant none of whose source values the member
+				// takes: no split of s reaches the member.
+				if sp := s.Prop(mp.Name); sp != nil && sp.Type != nil {
+					overlap := false
+					for _, v := range c.discriminantValues(sp.Type) {
+						if c.relate(v, mp.Type, rel, depth+1) != no {
+							overlap = true
+							break
+						}
+					}
+					if !overlap {
+						out = true
+						break
+					}
+				}
+				continue
+			}
+			sp := s.Prop(mp.Name)
+			if sp == nil {
+				if !mp.Optional && rel.missingIsNo {
+					out = true
+					break
+				}
+				continue
+			}
+			if sp.Type != nil && c.relate(sp.Type, mp.Type, rel, depth+1) == no {
+				out = true
+				break
+			}
+		}
+		if !out {
+			return false
+		}
+	}
+	return true
+}
+
+// discriminantValues is t's members with boolean split into true and
+// false, the values tsc's discriminated-union relation tries one by one.
+func (c *Checker) discriminantValues(t *Type) []*Type {
+	var out []*Type
+	for _, m := range members(t) {
+		if m.Flags&Boolean != 0 && m.Flags&Literal == 0 {
+			out = append(out, c.trueT, c.falseT)
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
 // covariantLibInterfaces are the builtin generic interfaces whose type
 // parameters tsc measures covariant: two instantiations of one relate by
 // their type arguments (Promise<number> is no Promise<string>), which the
@@ -247,12 +424,21 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			if len(s.Props) > 0 && s.Prop("push") == nil && s.Prop("length") != nil {
 				return no
 			}
+			// A class or interface without `length` (a Map, a Set) is no
+			// array either.
+			if len(s.Props) > 0 && s.Prop("length") == nil && (!s.partial || c.libLacks(s, "length")) {
+				return no
+			}
+		case Anonymous:
+			if s.Prop("length") == nil {
+				return no // an object literal type without one is no array
+			}
 		}
 		return maybe // an object type may still carry every array member
 	case Tuple:
 		switch s.Kind {
 		case Tuple:
-			if len(s.Elems) != len(t.Elems) {
+			if len(s.Elems) > len(t.Elems) || s.minLen() < t.minLen() {
 				return no
 			}
 			out := yes
@@ -266,6 +452,10 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			return out
 		case Array, Function:
 			return no
+		case Anonymous:
+			if s.Prop("length") == nil {
+				return no // an object literal type without one is no tuple
+			}
 		}
 		return maybe
 	case Function:
@@ -308,6 +498,14 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 		}
 		if len(s.Overloads) > 0 || len(t.Overloads) > 0 || len(s.TypeParams) > 0 || len(t.TypeParams) > 0 {
 			return maybe
+		}
+		// A rest parameter of a fixed tuple type is that many parameters
+		// (`(...args: []) => void` takes none).
+		if s.restParam && len(s.TypeParams) == 0 {
+			s = c.expandTupleRest(s)
+		}
+		if t.restParam && len(t.TypeParams) == 0 {
+			t = c.expandTupleRest(t)
 		}
 		if s.restParam || t.restParam {
 			return c.relateRestSignatures(s, t, rel, depth)
@@ -362,7 +560,7 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 					}
 				}
 			}
-			if s.Kind != Function && t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) == 1 &&
+			if s.Kind != Function && t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) >= 1 &&
 				(t.Symbol.Name == "Iterable" || t.Symbol.Name == "IterableIterator" || t.Symbol.Name == "ArrayLike") {
 				// What iterating (or indexing) the array yields.
 				elems := s.Elems
@@ -383,7 +581,8 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 				// required property it lacks is a mismatch.
 				if at := c.apparentType(s); at != nil {
 					for _, tp := range t.Props {
-						if !tp.Optional && at.Prop(tp.Name) == nil {
+						// Object.prototype's members are every array's too.
+						if !tp.Optional && at.Prop(tp.Name) == nil && c.objectMember(tp.Name) == nil {
 							return no
 						}
 					}
@@ -391,9 +590,9 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			}
 			return maybe // an array's or a function's apparent members
 		}
-		// `Iterable<T>` (its `[Symbol.iterator]` is not modelled as a
-		// member): the source must iterate.
-		if t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) == 1 && c.inLibrary(t.Symbol.Scope) &&
+		// `Iterable<T>`: the source must iterate (a structural iterator
+		// counts, as iteratedType reads it).
+		if t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) >= 1 && c.inLibrary(t.Symbol.Scope) &&
 			(t.Symbol.Name == "Iterable" || t.Symbol.Name == "IterableIterator") && rel.missingIsNo &&
 			(s.Kind == Instance || s.Kind == Anonymous) && s.Symbol != nil && !c.inLibrary(s.Symbol.Scope) {
 			if c.Unanswered(c.iteratedType(s)) {
@@ -422,6 +621,17 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 		return all(r, c.indexesFit(s, t, rel, depth))
 	}
 	return maybe
+}
+
+// libInterfaceKnown reports whether t is a builtin interface TypeScript's
+// library declares (lib/tsmembers.txt): such an interface, partial as its
+// declaration here is, has no implicit index signature either.
+func (c *Checker) libInterfaceKnown(t *Type) bool {
+	if t.Symbol == nil || t.Kind != Interface || !c.inLibrary(t.Symbol.Scope) {
+		return false
+	}
+	known, _ := lib.TSInterfaceHas(sourceName(t.Symbol.Name), "")
+	return known
 }
 
 // indexesFit reports whether s satisfies t's index signatures
@@ -455,7 +665,7 @@ func (c *Checker) indexesFit(s, t *Type, rel relation, depth int) ternary {
 			out = all(out, r)
 			continue
 		}
-		if s.partial || s.Kind != Anonymous && s.Kind != Interface && s.Kind != Instance {
+		if s.partial && !c.libInterfaceKnown(s) || s.Kind != Anonymous && s.Kind != Interface && s.Kind != Instance {
 			return maybe
 		}
 		if s.Kind != Anonymous {
@@ -506,6 +716,12 @@ func (c *Checker) propsFit(s, t *Type, rel relation, depth int) ternary {
 		}
 		if sp == nil {
 			if tp.Optional {
+				continue
+			}
+			if s.partial && !c.libLacks(s, tp.Name) {
+				// A builtin declaration lists only what this compiler
+				// implements: TypeScript's may still have the member.
+				out = all(out, maybe)
 				continue
 			}
 			if rel.missingIsNo {

@@ -23,7 +23,7 @@ function received(value: any): string {
 
 function validateString(value: any, name: string): void {
     if (typeof value !== 'string') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type string.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type string.' + received(value));
     }
 }
 
@@ -85,7 +85,7 @@ export function emitWarning(warning: string | Error, type?: any, code?: any, cto
     if (typeof w === 'string') {
         w = createWarningObject(w, t, c, detail);
     } else if (!(w instanceof Error)) {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "warning" argument must be of type string or an instance of Error.' + received(w));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "warning" argument must be of type string or an instance of Error.' + received(w));
     }
     const out = w;
     process.nextTick(() => { doEmitWarning(out); });

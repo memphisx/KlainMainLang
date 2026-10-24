@@ -22,6 +22,24 @@ func (c *Checker) overloadsType(key string, scope *binder.Scope, sigs []*ast.Fun
 			}))
 		}
 		pop := c.pushEnv(sd.TypeParams, tps)
+		// Their constraints and defaults (`<T = void>`), read in the
+		// signature's own environment.
+		for j, tp := range tps {
+			if tp.Constraint == nil && j < len(sd.TypeParamConstraints) && sd.TypeParamConstraints[j] != nil {
+				if tn := sd.TypeParamConstraints[j].TypeNode(); tn != nil {
+					if ct := c.typeFromNode(tn, scope); !c.Unanswered(ct) {
+						tp.Constraint = ct
+					}
+				}
+			}
+			if tp.Default == nil && j < len(sd.TypeParamDefaults) && sd.TypeParamDefaults[j] != nil {
+				if tn := sd.TypeParamDefaults[j].TypeNode(); tn != nil {
+					if dt := c.typeFromNode(tn, scope); !c.Unanswered(dt) {
+						tp.Default = dt
+					}
+				}
+			}
+		}
 		t := c.signatureType(sd, sd.Params, sd.ReturnType, nil, nil, scope)
 		pop()
 		if c.Unanswered(t) {
@@ -47,6 +65,24 @@ func (c *Checker) resolveOverload(e *ast.CallExpression, fn *Type) *Type {
 	sig, m, ok := c.pickOverload(e, fn, true)
 	if !ok {
 		return c.unanswered
+	}
+	// The chosen signature's type parameters the arguments left open come
+	// from the call's context, as for a single signature (`const w:
+	// WeakMap<object, number> = new WeakMap()`).
+	if len(e.TypeArgs) == 0 && len(sig.TypeParams) > 0 {
+		if m == nil {
+			m = map[*Type]*Type{}
+		}
+		c.inferFromReturnContext(e, sig, m)
+	}
+	// A type parameter nothing infers takes its default (`T = void`).
+	for _, tp := range sig.TypeParams {
+		if (m[tp] == nil || m[tp] == c.unknownT) && tp.Default != nil {
+			if m == nil {
+				m = map[*Type]*Type{}
+			}
+			m[tp] = c.instantiate(tp.Default, m)
+		}
 	}
 	// A type parameter the arguments give no candidate is unknown (tsc's
 	// getInferredType): `Array.from({ length: 2 })` is unknown[].
@@ -111,7 +147,7 @@ func (c *Checker) pickOverloadPass(e *ast.CallExpression, fn *Type, guards, subt
 		if len(sig.TypeParams) > 0 {
 			// Picking a callback's own context infers from the other
 			// arguments only: typing the callback would ask for its context.
-			m, uninferred = c.inferArgsDetail(e.Args, e.TypeArgs, sig, guards)
+			m, uninferred = c.inferArgsDetailRecv(callRecv(e), e.Args, e.TypeArgs, sig, guards)
 		}
 		fits := c.satisfiesConstraints(sig, m)
 		for i, a := range e.Args {
@@ -344,7 +380,7 @@ func (c *Checker) argTypeFor(a ast.Expression, p *Type) *Type {
 	if p.Flags&Union != 0 {
 		var ctx *Type
 		for _, m := range p.Types {
-			if m.Flags&Object != 0 && (m.Kind == Tuple || m.Kind == Array || readonlyArrayElem(m) != nil) {
+			if m.Flags&Object != 0 && (m.Kind == Tuple || m.Kind == Array || readonlyArrayElem(m) != nil || m.Kind == Interface && m.Symbol != nil && m.Symbol.Name == "Iterable") {
 				if ctx != nil {
 					return c.TypeOf(a)
 				}
@@ -361,6 +397,14 @@ func (c *Checker) argTypeFor(a ast.Expression, p *Type) *Type {
 	elemCtx := p.Elem
 	if ro := readonlyArrayElem(p); ro != nil {
 		elemCtx = ro
+	}
+	// An iterable of tuples (`Iterable<readonly [K, V]>`, Map's): its
+	// element context, as an array's.
+	if p.Flags&Object != 0 && p.Kind == Interface && p.Symbol != nil && p.Symbol.Name == "Iterable" && len(p.TypeArgs) >= 1 {
+		if el := p.TypeArgs[0]; el.Flags&Object != 0 && el.Kind == Tuple {
+			p = c.in.array(el)
+			elemCtx = el
+		}
 	}
 	if p.Flags&Object != 0 && (p.Kind == Array || readonlyArrayElem(p) != nil) && elemCtx != nil && elemCtx.Flags&Object != 0 && elemCtx.Kind == Tuple && len(lit.Elements) > 0 {
 		elems := make([]*Type, 0, len(lit.Elements))
@@ -494,7 +538,7 @@ func (c *Checker) argMisfit(e *ast.CallExpression, sig *Type) (int, *Type) {
 	}
 	var m map[*Type]*Type
 	if len(sig.TypeParams) > 0 {
-		m = c.inferArgs(e.Args, e.TypeArgs, sig, true)
+		m = c.inferArgsRecv(callRecv(e), e.Args, e.TypeArgs, sig, true)
 		for _, t := range m {
 			if c.Unanswered(t) {
 				return -1, nil
@@ -788,4 +832,60 @@ func (c *Checker) weakFit(e *ast.CallExpression, sig *Type, uninferred map[*Type
 		}
 	}
 	return weak, known
+}
+
+// PatternParamType is the type tsc gives fd's unannotated destructured
+// parameter i from its pattern (`[a = 1]` is `[(number | undefined)?]`),
+// nil when the checker has none.
+func (c *Checker) PatternParamType(fd *ast.FunctionDeclaration, i int) *Type {
+	if i >= len(fd.Params) || fd.Params[i].Type != nil || fd.Params[i].ArrayPattern == nil && fd.Params[i].ObjectPattern == nil || len(fd.TypeParams) > 0 {
+		return nil
+	}
+	sym := c.symbolOf(fd)
+	if sym == nil {
+		return nil
+	}
+	t := c.signatureType(fd, fd.Params, nil, nil, nil, sym.Scope)
+	if c.Unanswered(t) || t.Flags&Object == 0 || t.Kind != Function {
+		return nil
+	}
+	if len(fd.Params) > 0 && fd.Params[0].Name == "this" {
+		i--
+	}
+	if i < 0 || i >= len(t.Params) {
+		return nil
+	}
+	return t.Params[i]
+}
+
+// ImplementationSignature is the signature of overloaded function fd's
+// implementation (its body's own parameters and result), which callers do
+// not see but its value is held by; nil when fd has no overloads or body.
+func (c *Checker) ImplementationSignature(fd *ast.FunctionDeclaration) *Type {
+	if len(fd.Overloads) == 0 || fd.Body == nil || len(fd.TypeParams) > 0 {
+		return nil
+	}
+	sym := c.symbolOf(fd)
+	if sym == nil {
+		return nil
+	}
+	t := c.signatureType(fd, fd.Params, fd.ReturnType, fd.Body, nil, sym.Scope)
+	if c.Unanswered(t) {
+		return nil
+	}
+	return t
+}
+
+// FunctionSignature is the type of function declaration fd's own body
+// signature, or nil.
+func (c *Checker) FunctionSignature(fd *ast.FunctionDeclaration) *Type {
+	sym := c.symbolOf(fd)
+	if sym == nil || fd.Body == nil {
+		return nil
+	}
+	t := c.signatureType(fd, fd.Params, fd.ReturnType, fd.Body, nil, sym.Scope)
+	if c.Unanswered(t) {
+		return nil
+	}
+	return t
 }

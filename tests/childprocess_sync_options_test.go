@@ -37,7 +37,7 @@ func TestE2ECPSpawnSyncTimeoutMaxBufferSameAsNode(t *testing.T) {
 	assertSameAsNodeImports(t, cpSyncNodeChildren+`
 const r4 = spawnSync(node, ['-e', 'setTimeout(()=>{}, 5000)'], { timeout: 300, encoding: 'utf8' })
 console.log(r4.status, r4.signal, (r4.error as any).code, (r4.error as any).message)
-const r5 = spawnSync(node, ['-e', "process.stdout.write('x'.repeat(5000))"], { maxBuffer: 1000, encoding: 'utf8' })
+const r5 = spawnSync(node, ['-e', "process.stdout.write('x'.repeat(5000)); setTimeout(()=>{}, 5000)"], { maxBuffer: 1000, encoding: 'utf8' })
 console.log(r5.status, r5.signal, (r5.error as any).code)
 const r6 = spawnSync(node, ['-e', 'setTimeout(()=>{}, 5000)'], { timeout: 200, killSignal: 'SIGKILL', encoding: 'utf8' })
 console.log(r6.signal, (r6.error as any).code)
@@ -111,7 +111,7 @@ try {
   console.log(e.code, e.signal, e.status)
 }
 try {
-  execFileSync(node, ['-e', "process.stdout.write('x'.repeat(5000))"], { maxBuffer: 1000, stdio: 'pipe' })
+  execFileSync(node, ['-e', "process.stdout.write('x'.repeat(5000)); setTimeout(()=>{}, 5000)"], { maxBuffer: 1000, stdio: 'pipe' })
 } catch (e: any) {
   console.log(e.code, e.signal)
 }

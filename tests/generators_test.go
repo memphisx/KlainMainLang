@@ -1608,3 +1608,182 @@ const holder = { seq };
 console.log([...holder.seq(5)]);
 `)
 }
+
+func TestE2EStaticGeneratorMethod(t *testing.T) {
+	assertSameAsNode(t, `
+class C {
+  static base = 10;
+  static *sg(n: number, step = 1) {
+    for (let i = 0; i < n; i += step) yield this.base + i;
+  }
+  static async *asg() { yield 7; }
+}
+console.log([...C.sg(3)], [...C.sg(6, 2)]);
+const f = C.sg;
+console.log(typeof f, typeof C.sg, C.sg.length);
+C.asg().next().then((r) => console.log(r.value, r.done));
+`)
+}
+
+func TestE2EClassMethodReturnsGenerator(t *testing.T) {
+	assertSameAsNode(t, `
+function* g(n: number) { for (let i = 0; i < n; i++) yield i; }
+class K { static w(n: number) { return g(n); } m(n: number) { return g(n); } }
+console.log(K.w(2).next().value, new K().m(2).next().value);
+for (const x of K.w(2)) console.log(x);
+console.log([...K.w(3)]);
+`)
+}
+
+func TestE2EGeneratorMethodAsValue(t *testing.T) {
+	assertSameAsNode(t, `
+class C { base = 5; *g(n: number) { yield this.base + n; } async *ag() { yield 4; } }
+const c = new C();
+const r = c.g;
+const ra = c.ag;
+console.log(typeof r, typeof ra, r.call(c, 2).next().value, r.length);
+`)
+}
+
+func TestE2ELocalClassStaticCallsCapturedFunction(t *testing.T) {
+	assertSameAsNode(t, `
+function local() {
+  function k() { return 5; }
+  function* h() { yield 1; }
+  class M { static w() { return k(); } static it() { return h(); } }
+  return [M.w() + 1, [...M.it()]];
+}
+console.log(local());
+`)
+}
+
+// A typed generator takes default and optional parameters (ADR-01774).
+func TestE2EGeneratorTypedParameterDefaults(t *testing.T) {
+	assertOutput(t, `
+function* g(a: number, b: number = a * 2, c?: string): Generator<number | string> { yield a; yield b; if (c !== undefined) yield c; }
+console.log([...g(2)].join(","), [...g(2, 3, "x")].join(","))
+`, "2,4 2,3,x")
+}
+
+// A typed generator takes destructured parameters (ADR-01779).
+func TestE2EGeneratorTypedDestructuredParams(t *testing.T) {
+	assertOutput(t, `
+function* g([a, b]: number[], { c }: { c: string }): Generator<number | string> { yield a + b; yield c }
+console.log([...g([1, 2], { c: "x" })].join(","))
+`, "3,x")
+}
+
+// An iterator whose next() result has no `value` (a primitive, or never
+// for one that only throws) is TS2490, TS2547 when async; as JavaScript the
+// delegation runs and the throw rejects the step.
+func TestE2EIteratorNextResultNoValue(t *testing.T) {
+	mustCompileError(t, `
+var o = { [Symbol.iterator]() { return { next() { throw 1; } }; } };
+export var g = function *() { yield* o; };
+`, "of an iterator must have a 'value' property")
+	mustCompileError(t, `
+var o = { [Symbol.asyncIterator]() { return { next() { return 5; } }; } };
+export var g = async function *() { yield* o; };
+`, "of an async iterator must be a promise for a type with a 'value' property")
+	mustCompileError(t, `
+var o = { [Symbol.asyncIterator]() { return { next() { throw 1; } }; } };
+export async function f() { for await (const x of o) { console.log(x); } }
+`, "of an async iterator must be a promise for a type with a 'value' property")
+	assertSameAsNodeCompatJS(t, `
+var reason = { r: 1 };
+var obj = { [Symbol.asyncIterator]() { return { next() { throw reason; } }; } };
+var gen = async function *g() { yield* obj; };
+var iter = gen();
+iter.next().then(() => console.log('fulfilled'), v => {
+  console.log('rejected', v === reason);
+  iter.next().then(({ done, value }) => console.log(done, value));
+});
+`)
+}
+
+// A static generator method's destructured parameter with a nested default
+// reads its elements as they are stored.
+func TestE2EStaticGeneratorPatternDefault(t *testing.T) {
+	assertSameAsNode(t, `
+const values = [2, 1, 3];
+class C {
+  static *method([[...x] = values]: number[][]) {
+    yield typeof x[0];
+    yield x[0] / 4 + x[1];
+  }
+}
+for (const v of C.method([])) console.log(v);
+const D = class { static async *m([[...y] = values]: number[][]) { yield typeof y[2]; } };
+D.m([]).next().then(r => console.log(r.value));
+`)
+}
+
+// `new` of a target without a construct signature is tsc's TS7009; as
+// JavaScript, a generator, async function or arrow throws a TypeError.
+func TestE2ENewWithoutConstructSignature(t *testing.T) {
+	mustCompileError(t, `
+var g = function* () {};
+export var x = new g();
+`, "whose target lacks a construct signature")
+	mustCompileError(t, `
+function f() { return 1; }
+export var y = new f();
+`, "whose target lacks a construct signature")
+	assertSameAsNodeCompatJS(t, `
+var g = function* () {};
+try { var i = new g(); console.log("no throw", typeof i); } catch (e) { console.log(e instanceof TypeError); }
+var a = () => 1;
+try { new a(); } catch (e) { console.log(e instanceof TypeError); }
+var af = async function () {};
+try { new af(); } catch (e) { console.log(e instanceof TypeError); }
+function F(x) { this.x = x; }
+console.log(new F(3).x);
+`)
+}
+
+// `yield*` over an iterator whose `next()` returns a primitive: tsc's
+// error type (any) for the value; as JavaScript, the step rejects with a
+// TypeError.
+func TestE2EYieldStarPrimitiveNextResult(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var obj = { [Symbol.asyncIterator]() { return { next() { return 42; } }; } };
+var gen = async function* g() { yield* obj; };
+var iter = gen();
+iter.next().then(() => console.log("fulfilled"), v => {
+  console.log(v.constructor === TypeError);
+  iter.next().then(({ done, value }) => console.log(done, value));
+});
+var obj2 = { [Symbol.iterator]() { return { next() { return 7; } }; } };
+var gen2 = function* () { yield* obj2; };
+try { gen2().next(); } catch (e) { console.log(e instanceof TypeError); }
+`)
+}
+
+// `for await` over an array of promises and plain values awaits each boxed
+// element: a promise's value, a plain value as itself.
+func TestE2EForAwaitMixedPromiseArray(t *testing.T) {
+	assertSameAsNode(t, `
+const xs = [Promise.resolve(1), 2];
+(async () => {
+  for await (const x of xs) console.log("v", x);
+  for await (const y of [2, Promise.resolve(7), "s"]) console.log("w", y);
+})();
+`)
+}
+
+// A generator delegating to one declared after it, whose elements are of
+// another kind than its own yields: the outer elements are a union, and
+// the delegation boxes each inner value (its return value included).
+func TestE2EYieldStarForwardMixedElements(t *testing.T) {
+	assertSameAsNode(t, `
+function* g() {
+  yield 1;
+  const r = yield* g2();
+  yield r * 2;
+}
+function* g2(): Generator<string, number> { yield "a"; yield "b"; return 5; }
+for (const v of g()) console.log(v);
+const it = g();
+console.log(it.next(), it.next(), it.next(), it.next(), it.next());
+`)
+}

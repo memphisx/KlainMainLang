@@ -39,8 +39,8 @@ func flatElemView(elemTy Type) Type {
 // tag/vtable/emitter fields and constructor identity), tuples, nested
 // arrays, and dynamic values stay on the default pointer layout.
 func flatArrayElemOK(elemTy Type) bool {
-	return elemTy.IsObject && !elemTy.IsClass && !elemTy.IsTuple &&
-		!elemTy.IsDynamic && !elemTy.IsDynamicObject && !elemTy.IsArray
+	return elemTy.IsObject() && !elemTy.IsClass() && !elemTy.IsTuple() &&
+		!elemTy.IsDynamic() && !elemTy.IsDynamicObject() && !elemTy.IsArray()
 }
 
 // emitFlatArrayVarDecl builds a `/** @value */` array binding from its
@@ -48,7 +48,7 @@ func flatArrayElemOK(elemTy Type) bool {
 // place via memcpy from the emitted element value.
 func (e *Emitter) emitFlatArrayVarDecl(v *ast.VarDeclaration, declaredTy Type) error {
 	pos := v.GetPos()
-	if !declaredTy.IsArray || declaredTy.ElemType == nil {
+	if !declaredTy.IsArray() || declaredTy.ElemType == nil {
 		return fmt.Errorf("%d:%d: @value applies to an array declaration (e.g. `/** @value */ const ps: Point[] = [...]`)", pos.Line, pos.Col)
 	}
 	elemTy := *declaredTy.ElemType
@@ -73,14 +73,14 @@ func (e *Emitter) emitFlatArrayVarDecl(v *ast.VarDeclaration, declaredTy Type) e
 	e.ensureMalloc()
 	e.ensureMemcpy()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, maxInt64(n*size, 1)))
+	e.heapMallocInto(dataReg, fmt.Sprint(maxInt64(n*size, 1)))
 	structIR := elemTy.StructIR()
 	for i, el := range lit.Elements {
 		val, err := e.emitExprWithObjectHint(el, elemTy)
 		if err != nil {
 			return err
 		}
-		if !val.Ty.IsObject {
+		if !val.Ty.IsObject() {
 			return fmt.Errorf("%d:%d: @value array element %d is not an object value", pos.Line, pos.Col, i)
 		}
 		slot := e.freshReg()
@@ -172,7 +172,7 @@ func (e *Emitter) emitFlatArrayPush(arrTy Type, mem *ast.MemberExpression, args 
 		if err != nil {
 			return Value{}, err
 		}
-		if !v.Ty.IsObject {
+		if !v.Ty.IsObject() {
 			return Value{}, fmt.Errorf("%d:%d: push on a @value array takes object values of its element type", pos.Line, pos.Col)
 		}
 		vals = append(vals, v)
@@ -190,15 +190,15 @@ func (e *Emitter) emitFlatArrayPush(arrTy Type, mem *ast.MemberExpression, args 
 	newLen, newBytes, newPtr := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, curLen, len(vals)))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, size))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", newPtr, curPtr, newBytes))
+	e.heapReallocInto(newPtr, curPtr, newBytes)
 	for i, v := range vals {
 		slotIdx, slot := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, curLen, i))
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, structIR, newPtr, slotIdx))
 		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", slot, v.Ref, size))
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newPtr, dataSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, lenSlot))
+	e.heapStore("ptr", newPtr, dataSlot, 8)
+	e.heapStore("i64", newLen, lenSlot, 8)
 	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }
 

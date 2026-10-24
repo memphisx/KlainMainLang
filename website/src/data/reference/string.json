@@ -7,8 +7,8 @@
   "coverage": {
     "loose": "32/33",
     "loosePct": 97,
-    "strict": "22/33",
-    "strictPct": 67
+    "strict": "31/33",
+    "strictPct": 94
   },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
   "entries": [
@@ -31,8 +31,8 @@
       "name": ".length",
       "signature": "length: number",
       "badge": "exact",
-      "description": "The number of bytes in the string. This compiler's strings are byte sequences, so for ASCII/Latin-1 text this equals the character count.",
-      "snippet": "console.log('Hello'.length)   // 5",
+      "description": "The number of UTF-16 code units in the string, as in Node: an accented letter counts one, an emoji outside the Basic Multilingual Plane two (a surrogate pair).",
+      "snippet": "console.log('Hello'.length)   // 5\nconsole.log('café 😀'.length) // 7",
       "seeAlso": [
         "string.at",
         "string.charCodeAt"
@@ -142,7 +142,7 @@
       "statusRow": "`.indexOf(substr, fromIndex?)`",
       "signature": "indexOf(substr: string, fromIndex?: number): number",
       "badge": "exact",
-      "description": "Returns the byte index of the first occurrence of the substring at or after the optional fromIndex, or -1 if absent. Binary-safe past an embedded NUL.",
+      "description": "Returns the UTF-16 index of the first occurrence of the substring at or after the optional fromIndex, or -1 if absent. Binary-safe past an embedded NUL.",
       "returns": {
         "type": "number",
         "desc": "First match index, or -1."
@@ -161,16 +161,13 @@
       "name": ".lastIndexOf(substr, fromIndex?)",
       "statusRow": "`.lastIndexOf(substr, fromIndex?)`",
       "signature": "lastIndexOf(substr: string, fromIndex?: number): number",
-      "badge": "caveats",
-      "description": "Returns the byte index of the LAST occurrence of the substring at or before the optional fromIndex, or -1. Binary-safe (a descending memcmp scan); an empty needle returns the string length.",
+      "badge": "exact",
+      "description": "Returns the UTF-16 index of the LAST occurrence of the substring at or before the optional fromIndex, or -1. Binary-safe; an empty needle returns the string length.",
       "returns": {
         "type": "number",
         "desc": "Last match index, or -1."
       },
       "snippet": "console.log('path/to/file'.lastIndexOf('/'))   // 7",
-      "differences": [
-        "Returns a byte offset, not a UTF-16 index — like `.indexOf` on non-ASCII text."
-      ],
       "seeAlso": [
         "string.indexOf"
       ],
@@ -482,7 +479,7 @@
       "name": ".charCodeAt(i)",
       "signature": "charCodeAt(i: number): number",
       "badge": "exact",
-      "description": "Returns the byte-space code unit at index i. Bounds-checked: an out-of-range index (negative or >= length) returns NaN, as real JS — the result is a double for exactly that reason.",
+      "description": "Returns the UTF-16 code unit at index i: a surrogate half inside a pair. Bounds-checked: an out-of-range index (negative or >= length) returns NaN, as real JS — the result is a double for exactly that reason.",
       "returns": {
         "type": "number",
         "desc": "The code unit, or NaN if out of range."
@@ -536,8 +533,8 @@
       "id": "string.codePointAt",
       "name": ".codePointAt(i)",
       "signature": "codePointAt(i: number): number | undefined",
-      "badge": "caveats",
-      "description": "Returns the code point at index i, or undefined if out of range.",
+      "badge": "exact",
+      "description": "Returns the code point at UTF-16 index i (a pair's whole code point at its first unit, a surrogate's own value otherwise), or undefined if out of range.",
       "returns": {
         "type": "number | undefined",
         "desc": "The code point, or undefined if the index is out of range (as in Node)."
@@ -545,7 +542,6 @@
       "exampleKey": "strings/char_code",
       "snippet": "console.log('Hello'.codePointAt(0))   // 72\nconsole.log('Hello'.codePointAt(99) ?? -1)   // -1",
       "differences": [
-        "Positions are byte offsets in this compiler's UTF-8 strings: at the first byte of a character the result is that character's code point, at a continuation byte that byte; Node indexes UTF-16 code units.",
         "An out-of-range index returns a real `undefined` (as in Node), so the type is `number | undefined` — narrow, `?? n`, or `!` before use; `.charCodeAt`'s out-of-range `NaN` is a separate, already-faithful behavior."
       ],
       "seeAlso": [
@@ -625,18 +621,19 @@
     },
     {
       "id": "string.localeCompare",
-      "name": ".localeCompare(other)",
-      "signature": "localeCompare(other: string): number",
+      "name": ".localeCompare(other, locales?, options?)",
+      "signature": "localeCompare(other: string, locales?: string | string[], options?: { sensitivity?: string; numeric?: boolean }): number",
       "badge": "caveats",
-      "description": "Compares two strings, returning exactly -1, 0, or 1. Binary-safe past an embedded NUL.",
+      "description": "Compares two strings by Unicode collation, as Node's ICU does: letters first, then accents, then case, returning exactly -1, 0, or 1. `sensitivity` (`base`, `accent`, `case`, `variant`) picks the levels compared; `numeric: true` compares digit runs by value.",
       "returns": {
         "type": "number",
         "desc": "-1, 0, or 1."
       },
-      "exampleKey": "strings/search_compare",
-      "snippet": "console.log('apple'.localeCompare('banana'))   // -1",
+      "exampleKey": "strings/locale_compare",
+      "snippet": "console.log(['Émile', 'zoe', 'emile'].sort((a, b) => a.localeCompare(b)))   // [ 'emile', 'Émile', 'zoe' ]\nconsole.log('track10'.localeCompare('track2', undefined, { numeric: true }))   // 1",
       "differences": [
-        "Length-aware byte-order comparison, not real Unicode collation — no locale/`Intl` infrastructure."
+        "`locales` is ignored: every comparison uses ICU's root order, without a locale's tailoring (Swedish `å` after `z`, Turkish `i`).",
+        "Options other than `sensitivity` and `numeric` are ignored; supplementary-plane Han ideographs sort by code point."
       ],
       "seeAlso": [
         "string.search"
@@ -649,8 +646,8 @@
       "id": "string.fromCharCode",
       "name": "String.fromCharCode(n)",
       "signature": "String.fromCharCode(...codes: number[]): string",
-      "badge": "caveats",
-      "description": "Builds a string from UTF-16 code units (each argument's ToUint16), stored as UTF-8; a high/low surrogate pair among the arguments is one character. Static method on String.",
+      "badge": "exact",
+      "description": "Builds a string from UTF-16 code units (each argument's ToUint16); a high/low surrogate pair is one character, also when its halves come from separate calls and are concatenated. Static method on String.",
       "returns": {
         "type": "string",
         "desc": "The constructed string."
@@ -663,10 +660,7 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/fromCharCode"
-      },
-      "differences": [
-        "An unpaired surrogate is encoded on its own, so halves from two calls concatenated don't join into one character as in Node."
-      ]
+      }
     },
     {
       "id": "string.fromCodePoint",

@@ -4,7 +4,7 @@
 // no `fs.` prefix at the call site. Resolved entirely at compile time into
 // exactly the same dispatch as the default form (`readFileSync` here is
 // indistinguishable, after resolution, from `fs.readFileSync` elsewhere) —
-// see docs/adr/ADR-00141.md.
+// see docs/adr/00/ADR-00141.md.
 //
 // The whole point, same as every other import in this project: the local
 // name is the program's own choice (aliasing works, see `wfs` below), and a

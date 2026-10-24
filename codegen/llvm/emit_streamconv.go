@@ -17,11 +17,11 @@ import (
 // streamChunksNeedConvert reports a typed web stream read as a stream of
 // `any` chunks.
 func streamChunksNeedConvert(a, b Type) bool {
-	if !a.IsReadableStream || !b.IsReadableStream || a.StreamChunk == nil || b.StreamChunk == nil {
+	if !a.IsReadableStream() || !b.IsReadableStream() || a.StreamChunk == nil || b.StreamChunk == nil {
 		return false
 	}
 	c := *a.StreamChunk
-	return !isUnconstrainedDynamic(c) && isUnconstrainedDynamic(*b.StreamChunk) && c.IR != "" && c.IR != "void" && !c.IsNever
+	return !isUnconstrainedDynamic(c) && isUnconstrainedDynamic(*b.StreamChunk) && c.IR != "" && c.IR != "void" && !c.IsNever()
 }
 
 // emitConvertStreamToAny is the ReadableStream<any> over v's reader. v is
@@ -55,7 +55,7 @@ new ReadableStream<any>({
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", reader.Ty.IR, reader.Ref, rslot))
 	e.define(rd, Symbol{Ptr: rslot, Ty: reader.Ty})
 	out, err := e.emitExpr(es.Expr)
-	if err != nil || !out.Ty.IsReadableStream {
+	if err != nil || !out.Ty.IsReadableStream() {
 		return v
 	}
 	return Value{Ref: out.Ref, Ty: target}

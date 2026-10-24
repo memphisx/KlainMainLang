@@ -167,3 +167,16 @@ const pc: any = structuredClone(new P() as any)
 console.log(pc, pc instanceof P)
 `, "1 x [ 1, 2, { d: true } ] null true true true\ntrue\nDataCloneError\n[ 1, 'two' ]\ntrue r true\nUint8Array(3) [ 1, 2, 3 ] Uint8Array(3) [ 9, 2, 3 ]\n{ x: 1 } false")
 }
+
+// structuredClone read as a value, and called with its options argument,
+// evaluated before the clone.
+func TestE2EStructuredCloneValueAndOptions(t *testing.T) {
+	assertSameAsNode(t, `const sc = structuredClone
+const a = sc([1, 2, { x: 3 }])
+const o: any = { n: [1, 2] }
+let order = ""
+const b = structuredClone((order += "v", o), (order += "o", { transfer: [] }))
+const c = structuredClone({ y: 1 }, undefined)
+console.log(typeof sc, a, b, b !== o, c, order)
+`)
+}

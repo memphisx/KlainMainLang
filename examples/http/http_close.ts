@@ -17,6 +17,8 @@
 
 import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
+const port = Number(process.env.PORT ?? '8081')  // make examples passes a free port
+
 interface Res {
   status: number
   body: string
@@ -29,9 +31,9 @@ setTimeout(() => {
   http.close()
 }, 300)
 
-console.log('listening on :8081')
+console.log('listening on :' + port)
 
-http.listen(8081, (req: HttpRequest): Res => {
+http.listen(port, (req: HttpRequest): Res => {
   requestCount = requestCount + 1
   if (req.path === '/shutdown') {
     http.close()

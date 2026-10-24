@@ -23,7 +23,7 @@ console.log((await posted.text()).indexOf('"hello":"world"') > -1)  // true — 
 // ── custom headers, sent alongside a GET ────────────────────────────────────
 const headers: Map<string, string> = new Map<string, string>()
 headers.set('X-Example-Header', 'kml-value')
-const withHeaders = await fetch('http://127.0.0.1:8765/headers', { headers: headers })
+const withHeaders = await fetch('http://127.0.0.1:8765/headers', { headers: [...headers] })
 console.log((await withHeaders.text()).indexOf('kml-value') > -1)  // true — the fixture's /headers echoes every request header back
 
 // ── an explicit method with no body still works (e.g. DELETE) ──────────────

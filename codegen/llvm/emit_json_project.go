@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strings"
 )
 
 // emit_json_project.go — P3 of the JSON parse rewrite (TDD-00077 Track P).
@@ -18,11 +19,11 @@ import (
 // Value. Strings are copied out of the tree so they survive __kml_json_free.
 func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Value, error) {
 	switch {
-	case targetTy.IsClass:
+	case targetTy.IsClass():
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a class instance is not supported", pos.Line, pos.Col)
-	case targetTy.IsDynamic && targetTy.UnionMembers != nil:
+	case targetTy.IsDynamic() && targetTy.UnionMembers != nil:
 		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a union type is not supported — use any/unknown or a concrete shape", pos.Line, pos.Col)
-	case targetTy.IsDynamic:
+	case targetTy.IsDynamic():
 		// Untyped parse (TDD-00155 Stage 2 / TDD-00077 P4): convert the whole
 		// tree into dynamic values — objects become tag-10 bags, arrays tag-11
 		// dynamic arrays, scalars their box tags. Strings/keys are copied out,
@@ -31,11 +32,11 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node(ptr %s)", r, node))
 		return Value{Ref: r, Ty: TypeAny}, nil
-	case targetTy.IsTuple:
+	case targetTy.IsTuple():
 		return e.emitJSONProjectTuple(node, targetTy, pos)
-	case targetTy.IsArray:
+	case targetTy.IsArray():
 		return e.emitJSONProjectArray(node, targetTy, pos)
-	case targetTy.IsObject:
+	case targetTy.IsObject():
 		return e.emitJSONProjectObject(node, targetTy, pos)
 	case targetTy.IR == "i1":
 		b := e.freshReg()
@@ -57,13 +58,28 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 	case isStringTy(targetTy):
 		s := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_string_dup(ptr %s)", s, node))
+		if triStr(targetTy) {
+			// A JSON null is null: nullRef (TDD-00257).
+			kind, isNull, r := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind(ptr %s)", kind, node))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isNull, kind)) // KJSON_NULL == 0
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.nullRef(), s))
+			s = r
+		}
 		return Value{Ref: s, Ty: targetTy}, nil
+	case targetTy.IR == "ptr" || targetTy.IsFunc():
+		// A member JSON cannot spell (a function, a host value): the value
+		// the text holds, converted as from any.
+		e.ensureDynJSONFromNode()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node(ptr %s)", r, node))
+		return e.convert(Value{Ref: r, Ty: TypeAny}, targetTy), nil
 	default: // integer scalars (i64/i32/i16/i8)
 		lex := e.emitJSONNumLexeme(node)
 		e.ensureAtoll()
 		n := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @atoll(ptr %s)", n, lex))
-		return e.coerce(Value{Ref: n, Ty: TypeI64}, targetTy), nil
+		return e.convert(Value{Ref: n, Ty: TypeI64}, targetTy), nil
 	}
 }
 
@@ -86,7 +102,7 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 	e.emitObjMallocInto(dataReg, targetTy)
 
 	for i, f := range targetTy.Fields {
-		if f.Name == ClassTagField {
+		if isHiddenField(f.Name) {
 			continue
 		}
 		gep := e.freshReg()
@@ -111,26 +127,53 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 		if err != nil {
 			return Value{}, err
 		}
-		// An array field holds a header pointer (TDD-00213 Stage 2); mint a header
-		// from the projected {ptr,i64} aggregate rather than storing it inline.
-		if f.Ty.IsArray {
+		// An array field holds a header pointer (TDD-00213 Stage 2); store the
+		// projected array's header.
+		if f.Ty.IsArray() {
 			e.storeArrayFieldHeader(gep, Value{Ref: foundRef, Ty: f.Ty})
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, foundRef, gep, f.Ty.Align()))
+			e.heapStore(fieldIR, foundRef, gep, f.Ty.Align())
 		}
+		e.emitPresenceInit(dataReg, targetTy, f.Name) // the input has the key
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(missingL)
-		if f.Ty.IsArray {
+		if f.Ty.IsArray() {
 			e.storeArrayFieldHeader(gep, Value{Ref: e.jsonDefaultRef(f.Ty), Ty: f.Ty})
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align()))
+			e.heapStore(fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align())
 		}
+		e.emitPresenceAbsentInit(dataReg, targetTy, f.Name) // the input lacks the key
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)
 	}
+	e.emitKeyOrderJSON(dataReg, targetTy, node) // the input's key order
+	e.emitJSONExpandoRest(dataReg, node, targetTy)
 	return Value{Ref: dataReg, Ty: targetTy}, nil
+}
+
+// emitJSONExpandoRest keeps the node's keys the target shape does not
+// declare as the projected object's own expando properties.
+func (e *Emitter) emitJSONExpandoRest(obj, node string, targetTy Type) {
+	e.ensureDynJSONFromNode()
+	e.ensureShapeRuntime()
+	e.usedObjExtensible = true // inspect, keys and stringify read the extras
+	if !e.usedJSONExpandoRest {
+		e.usedJSONExpandoRest = true
+		e.emitGlobal("declare void @__kml_json_expando_rest(ptr, ptr, ptr, i64)")
+	}
+	var refs []string
+	for _, f := range targetTy.UserFields() {
+		refs = append(refs, "ptr "+e.internString(f.Name))
+	}
+	tab := "null"
+	if len(refs) > 0 {
+		tab = fmt.Sprintf("@__kml_json_known_%d", e.jsonKnownTabs)
+		e.jsonKnownTabs++
+		e.emitGlobal(fmt.Sprintf("%s = private constant [%d x ptr] [%s]", tab, len(refs), strings.Join(refs, ", ")))
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_json_expando_rest(ptr %s, ptr %s, ptr %s, i64 %d)", obj, node, tab, len(refs)))
 }
 
 // emitJSONProjectTuple projects a JSON array node onto a fixed-arity tuple
@@ -167,20 +210,20 @@ func (e *Emitter) emitJSONProjectTuple(node string, targetTy Type, pos ast.Pos) 
 		if err != nil {
 			return Value{}, err
 		}
-		// An array field holds a header pointer (TDD-00213 Stage 2); mint a header
-		// from the projected {ptr,i64} aggregate rather than storing it inline.
-		if f.Ty.IsArray {
+		// An array field holds a header pointer (TDD-00213 Stage 2); store the
+		// projected array's header.
+		if f.Ty.IsArray() {
 			e.storeArrayFieldHeader(gep, Value{Ref: foundRef, Ty: f.Ty})
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, foundRef, gep, f.Ty.Align()))
+			e.heapStore(fieldIR, foundRef, gep, f.Ty.Align())
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(missingL)
-		if f.Ty.IsArray {
+		if f.Ty.IsArray() {
 			e.storeArrayFieldHeader(gep, Value{Ref: e.jsonDefaultRef(f.Ty), Ty: f.Ty})
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align()))
+			e.heapStore(fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align())
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
@@ -206,7 +249,7 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 			return "", err
 		}
 		pl := payload.Ref
-		if fieldTy.NullAndUndef {
+		if fieldTy.NullAndUndef() {
 			// A JSON null in a three-state field is null, not a missing key.
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", r, isNull, fieldTy.IR, triMarker(fieldTy), fieldTy.IR, pl))
@@ -214,7 +257,7 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 		}
 		return e.makeNullableScalarAgg(fieldTy, present, pl), nil
 	}
-	if fieldTy.Nullable && fieldTy.IR == "ptr" && !fieldTy.IsArray && !fieldTy.IsDynamic {
+	if fieldTy.Nullable() && fieldTy.IR == "ptr" && !fieldTy.IsArray() && !fieldTy.IsDynamic() {
 		// A JSON null in a `T | null` (or optional) string or object field
 		// is the absent pointer, not an empty string or object.
 		kind, isNull := e.freshReg(), e.freshReg()
@@ -223,7 +266,7 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 		nullRef := "null"
-		if fieldTy.NullAndUndef {
+		if fieldTy.NullAndUndef() || triStr(fieldTy) {
 			nullRef = e.nullRef() // null, distinct from a missing key's undefined
 		}
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nullRef, slot))
@@ -250,21 +293,22 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 
 // jsonDefaultRef returns the default value ref for a field whose key is absent
 // from the JSON, matching the old extractor's per-type defaults: empty string
-// for a string, an absent aggregate for a nullable scalar, an empty {ptr,i64}
+// for a string, an absent aggregate for a nullable scalar, an empty array
 // for an array, null for an object/function, and the zero value otherwise.
 func (e *Emitter) jsonDefaultRef(ty Type) string {
 	switch {
 	case isNullableScalar(ty):
 		return e.makeNullableScalarAgg(ty, "false", zeroRef(ty.withoutNullable()))
-	case ty.IsArray:
-		r0 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr null, 0", r0))
-		r1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 0, 1", r1, r0))
+	case ty.IsArray():
+		r1 := e.newArrayHeader("null", "0")
 		return r1
-	case isStringTy(ty) && ty.Nullable:
-		// A missing `name?: string` (or `string | null`) field is absent.
+	case isStringTy(ty) && ty.Nullable() || triStr(ty):
+		// A missing field is undefined, the null pointer (TDD-00257).
 		return "null"
+	case isF64Slot(ty):
+		// A missing number is undefined, the double's sentinel (TDD-00241).
+		u := int64(undefF64)
+		return fmt.Sprintf("0x%016X", uint64(u))
 	case isStringTy(ty):
 		// Under -mm=auto the projected tree may be deep-freed (TDD-00175
 		// Stage 1), and __kml_str_free on an interned global corrupts the
@@ -285,7 +329,7 @@ func (e *Emitter) jsonDefaultRef(ty Type) string {
 
 // emitJSONProjectArray projects a JSON array node onto `T[]`: a fresh buffer of
 // the node's length with each element projected as T, returned as the standard
-// {ptr,i64} aggregate. Object elements (`Item[]`) and nested arrays recurse.
+// array value. Object elements (`Item[]`) and nested arrays recurse.
 func (e *Emitter) emitJSONProjectArray(node string, targetTy Type, pos ast.Pos) (Value, error) {
 	elemTy := *targetTy.ElemType
 	e.ensureMalloc()
@@ -295,7 +339,7 @@ func (e *Emitter) emitJSONProjectArray(node string, targetTy Type, pos ast.Pos) 
 	sizeReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", sizeReg, lenReg, elemTy.Align()))
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", dataReg, sizeReg))
+	e.heapMallocInto(dataReg, sizeReg)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -333,9 +377,11 @@ func (e *Emitter) emitJSONProjectArray(node string, targetTy Type, pos ast.Pos) 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
-	r0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, dataReg))
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
-	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
+	r1 := e.newArrayHeader(dataReg, lenReg)
+	// A JSON null is null's header, nullRef, not an empty array.
+	kind, isNull, r := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind(ptr %s)", kind, node))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isNull, kind)) // KJSON_NULL == 0
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.nullRef(), r1))
+	return Value{Ref: r, Ty: ArrayOf(elemTy)}, nil
 }

@@ -184,10 +184,11 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 	// An `any` against a bigint: a bigint operator when the `any` holds a
 	// bigint too, a TypeError for any other non-string primitive.
 	_, bigArith := bigIntBinFn[op]
-	bigArith = bigArith && (left.Ty.IsBigInt || right.Ty.IsBigInt)
+	bigArith = bigArith && (left.Ty.IsBigInt() || right.Ty.IsBigInt())
 	bigOp := func() (string, error) {
 		bl, br := e.emitUnboxBoxToType(lb.Ref, BigIntType()), e.emitUnboxBoxToType(rb.Ref, BigIntType())
-		bl.Ty.Nullable, br.Ty.Nullable = true, true
+		bl.Ty.setNullable(true)
+		br.Ty.setNullable(true)
 		v, err := e.emitBigIntBinary(op, bl, br, pos)
 		if err != nil {
 			return "", err
@@ -251,7 +252,7 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 			if enc, err = bigOp(); err != nil {
 				return Value{}, err
 			}
-		} else if enc, err = e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic || !right.Ty.IsDynamic, func() string {
+		} else if enc, err = e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic() || !right.Ty.IsDynamic(), func() string {
 			ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
 			sum := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = fadd double %s, %s", sum, ld, rd))
@@ -270,7 +271,7 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 
 	switch op {
 	case "-", "*", "/", "%", "**":
-		enc, err := e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic || !right.Ty.IsDynamic, func() string {
+		enc, err := e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic() || !right.Ty.IsDynamic(), func() string {
 			ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
 			r := e.freshReg()
 			switch op {
@@ -445,7 +446,7 @@ func (e *Emitter) anyBigIntOr(lb, rb, left, right Value, op string, pos ast.Pos,
 		e.ensureAnyIsBigInt()
 		either := "false"
 		for _, side := range []struct{ box, orig Value }{{lb, left}, {rb, right}} {
-			if !side.orig.Ty.IsDynamic {
+			if !side.orig.Ty.IsDynamic() {
 				continue
 			}
 			r, b := e.freshReg(), e.freshReg()
@@ -470,7 +471,8 @@ func (e *Emitter) anyBigIntOr(lb, rb, left, right Value, op string, pos ast.Pos,
 		return e.anyBigIntOrLib(lb, rb, op, number), nil
 	}
 	bl, br := e.emitUnboxBoxToType(lb.Ref, BigIntType()), e.emitUnboxBoxToType(rb.Ref, BigIntType())
-	bl.Ty.Nullable, br.Ty.Nullable = true, true
+	bl.Ty.setNullable(true)
+	br.Ty.setNullable(true)
 	lp, rp, either := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", lp, bl.Ref))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", rp, br.Ref))
@@ -609,7 +611,8 @@ func (e *Emitter) defineAnyBigIntOp(op string) {
 		e.emitTerminator("unreachable")
 	} else {
 		bl, br := e.emitUnboxBoxToType("%a", BigIntType()), e.emitUnboxBoxToType("%b", BigIntType())
-		bl.Ty.Nullable, br.Ty.Nullable = true, true
+		bl.Ty.setNullable(true)
+		br.Ty.setNullable(true)
 		v, err := e.emitBigIntBinary(op, bl, br, ast.Pos{})
 		if err != nil {
 			e.emitTerminator("unreachable")
@@ -636,8 +639,8 @@ func (e *Emitter) ensureAnyIsBigInt() {
 // when it holds a bigint, and the operation on doubles, left unboxed.
 func (e *Emitter) emitAnyArithNumber(op string, left, right Value) (Value, error) {
 	num := func(v Value) (string, error) {
-		if !v.Ty.IsDynamic {
-			return e.coerce(v, TypeF64).Ref, nil
+		if !v.Ty.IsDynamic() {
+			return e.convert(v, TypeF64).Ref, nil
 		}
 		p := Value{Ref: e.emitAnyToPrimitiveHint(v.Ref, hintNumber), Ty: TypeAny}
 		if e.anyMayHoldBigInt() {

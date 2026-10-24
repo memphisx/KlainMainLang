@@ -22,7 +22,7 @@ static _Thread_local kml_queue mt, tq, unh;
 static void q_push(kml_queue *q, void *cl) {
     if (q->len + 1 > q->cap) {
         i64 nc = q->cap * 2 > 8 ? q->cap * 2 : 8;
-        q->data = (void **)realloc(q->data, (size_t)nc * sizeof(void *));
+        q->data = (void **)realloc(q->data, (size_t)nc * sizeof(void *)); /* scratch */
         q->cap = nc;
     }
     q->data[q->len++] = cl;
@@ -31,7 +31,12 @@ static void q_push(kml_queue *q, void *cl) {
 static void run_closure(void *cl) {
     kml_fn0 fn = *(kml_fn0 *)((char *)cl + KML_CLOSURE_FN);
     void *env = *(void **)((char *)cl + KML_CLOSURE_ENV);
+    /* A job runs on an empty stack, as in Node: no frame of whoever
+     * drained the queue is its caller. */
+    void *below = __kml_frame_top;
+    __kml_frame_top = 0;
     fn(env);
+    __kml_frame_top = below;
 }
 
 /* Run q's entries FIFO until empty; an entry may queue more, drained in the
@@ -74,6 +79,25 @@ void __kml_unhandled_check(void) {
 
 void __kml_microtask_enqueue(void *cl) { q_push(&mt, cl); }
 void __kml_nexttick_enqueue(void *cl) { q_push(&tq, cl); }
+
+/* __kml_native.nextTick (lib/node/kml_process_tick.ts): a callback queued on
+ * the tick queue, as the (invoke, closure) pair a native callback is. */
+typedef void (*tick_inv)(void *clo);
+
+static void tick_tramp(void *env) {
+    void **e = (void **)env;
+    ((tick_inv)e[0])(e[1]);
+}
+
+void __kml_native_next_tick(void *inv, void *clo) {
+    void **env = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    env[0] = inv;
+    env[1] = clo;
+    void **cl = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    cl[0] = (void *)tick_tramp;
+    cl[1] = env;
+    q_push(&tq, cl);
+}
 void __kml_drain_ticks(void) { q_drain(&tq); }
 void __kml_drain_promise_jobs(void) { q_drain(&mt); }
 
@@ -131,7 +155,7 @@ void __kml_promise_attach_sync(void *p, void *clo) {
     kml_fn0 fn = *(kml_fn0 *)((char *)clo + KML_CLOSURE_FN);
     if (!is_sync(fn) && nsync < 64) sync_fns[nsync++] = fn;
     __kml_promise_mark_handled(p);
-    void *node = malloc(KML_REACTION_SIZE);
+    void *node = kml_alloc(KML_HEAP_WORDS, KML_REACTION_SIZE);
     *(void **)((char *)node + KML_REACTION_CLOSURE) = clo;
     *(void **)((char *)node + KML_REACTION_NEXT) = *(void **)((char *)p + KML_PROMISE_REACTIONS);
     *(void **)((char *)p + KML_PROMISE_REACTIONS) = node;

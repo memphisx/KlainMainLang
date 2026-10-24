@@ -1353,12 +1353,12 @@ export class URLSearchParams {
         } else if (init !== null && typeof init === 'object' && typeof init[Symbol.iterator] === 'function') {
             for (const pair of init) {
                 if (pair === null || pair === undefined || typeof pair === 'string') {
-                    throw new NodeTypeError('ERR_INVALID_TUPLE', 'Each query pair must be an iterable [name, value] tuple');
+                    throw NodeTypeError('ERR_INVALID_TUPLE', 'Each query pair must be an iterable [name, value] tuple');
                 }
                 const items: any[] = [];
                 for (const element of pair) items.push(element);
                 if (items.length !== 2) {
-                    throw new NodeTypeError('ERR_INVALID_TUPLE', 'Each query pair must be an iterable [name, value] tuple');
+                    throw NodeTypeError('ERR_INVALID_TUPLE', 'Each query pair must be an iterable [name, value] tuple');
                 }
                 this.#list.push(toUSVString(items[0]), toUSVString(items[1]));
             }
@@ -1502,7 +1502,7 @@ export class URLSearchParams {
 
     forEach(callback: (value: string, key: string, parent: URLSearchParams) => void, thisArg?: any): void {
         if (typeof callback !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function. Received ' + (callback === undefined ? 'undefined' : typeof callback));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "callback" argument must be of type function. Received ' + (callback === undefined ? 'undefined' : typeof callback));
         }
         for (let i = 0; i < this.#list.length; i += 2) {
             callback.call(thisArg, this.#list[i + 1], this.#list[i], this);
@@ -1531,7 +1531,7 @@ export class URLSearchParams {
 // ---- URL ----
 
 function invalidURL(input: string, base?: string): NodeTypeError {
-    const err: any = new NodeTypeError('ERR_INVALID_URL', 'Invalid URL');
+    const err: any = NodeTypeError('ERR_INVALID_URL', 'Invalid URL');
     err.input = input;
     if (base !== undefined) err.base = base;
     return err;

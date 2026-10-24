@@ -109,12 +109,12 @@ export function received(value: any): string {
 }
 
 export function invalidArgType(name: string, expected: string, value: any): NodeTypeError {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
 }
 
 export function invalidArgValue(name: string, value: any, reason: string): NodeTypeError {
     let shown = typeof value === 'string' ? "'" + value + "'" : String(value);
-    return new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' " + reason + '. Received ' + shown);
+    return NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' " + reason + '. Received ' + shown);
 }
 
 export function validateFunction(value: any, name: string): void {
@@ -130,7 +130,7 @@ export function validateObject(value: any, name: string): void {
 }
 
 export function outOfRange(name: string, range: string, value: any): NodeRangeError {
-    return new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + String(value));
+    return NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + String(value));
 }
 
 export function validateInteger(value: any, name: string, min: number): void {
@@ -177,16 +177,16 @@ function isURL(path: any): boolean {
 export function getValidatedPath(path: any, name: string): string {
     let p: any = path;
     if (isURL(path)) {
-        if (path.protocol !== 'file:') throw new NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+        if (path.protocol !== 'file:') throw NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
         if (path.hostname !== '' && process.platform !== 'win32') {
-            throw new NodeTypeError('ERR_INVALID_FILE_URL_HOST', 'File URL host must be "localhost" or empty on ' + process.platform);
+            throw NodeTypeError('ERR_INVALID_FILE_URL_HOST', 'File URL host must be "localhost" or empty on ' + process.platform);
         }
         const pathname: string = path.pathname;
         for (let n = 0; n < pathname.length; n++) {
             if (pathname[n] === '%') {
                 const third = pathname.codePointAt(n + 2)! | 0x20;
                 if (pathname[n + 1] === '2' && third === 102) {
-                    throw new NodeTypeError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');
+                    throw NodeTypeError('ERR_INVALID_FILE_URL_PATH', 'File URL path must not include encoded / characters');
                 }
             }
         }
@@ -196,7 +196,7 @@ export function getValidatedPath(path: any, name: string): string {
     }
     const s: string = typeof p === 'string' ? p : Buffer.from(p as Uint8Array).toString();
     if (s.indexOf('\u0000') !== -1) {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' must be a string, Uint8Array, or URL without null bytes. Received " + JSON.stringify(s));
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' must be a string, Uint8Array, or URL without null bytes. Received " + JSON.stringify(s));
     }
     return s;
 }
@@ -206,7 +206,7 @@ export function stringToFlags(flags: any): number {
     if (flags === null || flags === undefined) return __kml_native.fsFlags('r');
     const n = typeof flags === 'string' ? __kml_native.fsFlags(flags) : -1;
     if (n < 0) {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'flags' is invalid. Received " + (typeof flags === 'string' ? "'" + flags + "'" : String(flags)));
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'flags' is invalid. Received " + (typeof flags === 'string' ? "'" + flags + "'" : String(flags)));
     }
     return n;
 }
@@ -215,7 +215,7 @@ export function parseFileMode(value: any, name: string, def: number): number {
     if (value === null || value === undefined) return def;
     if (typeof value === 'string') {
         if (!/^[0-7]+$/.test(value)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' must be a 32-bit unsigned integer or an octal string. Received '" + value + "'");
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument '" + name + "' must be a 32-bit unsigned integer or an octal string. Received '" + value + "'");
         }
         return parseInt(value, 8);
     }
@@ -227,7 +227,7 @@ const encodings: string[] = ['utf8', 'utf-8', 'hex', 'base64', 'base64url', 'lat
 
 export function assertEncoding(encoding: any): void {
     if (encoding && encodings.indexOf(String(encoding).toLowerCase()) < 0) {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'encoding' is invalid encoding. Received '" + String(encoding) + "'");
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'encoding' is invalid encoding. Received '" + String(encoding) + "'");
     }
 }
 
@@ -451,7 +451,71 @@ function makeConstants(): any {
     return c;
 }
 
-export const constants: any = makeConstants();
+// fs.constants' members, as @types/node declares them: a platform's own
+// object lacks some, which read undefined as in Node.
+export interface FsConstants {
+    readonly COPYFILE_EXCL: number;
+    readonly COPYFILE_FICLONE: number;
+    readonly COPYFILE_FICLONE_FORCE: number;
+    readonly EXTENSIONLESS_FORMAT_JAVASCRIPT: number;
+    readonly EXTENSIONLESS_FORMAT_WASM: number;
+    readonly F_OK: number;
+    readonly O_APPEND: number;
+    readonly O_CREAT: number;
+    readonly O_DIRECT: number;
+    readonly O_DIRECTORY: number;
+    readonly O_DSYNC: number;
+    readonly O_EXCL: number;
+    readonly O_NOATIME: number;
+    readonly O_NOCTTY: number;
+    readonly O_NOFOLLOW: number;
+    readonly O_NONBLOCK: number;
+    readonly O_RDONLY: number;
+    readonly O_RDWR: number;
+    readonly O_SYMLINK: number;
+    readonly O_SYNC: number;
+    readonly O_TRUNC: number;
+    readonly O_WRONLY: number;
+    readonly R_OK: number;
+    readonly S_IFBLK: number;
+    readonly S_IFCHR: number;
+    readonly S_IFDIR: number;
+    readonly S_IFIFO: number;
+    readonly S_IFLNK: number;
+    readonly S_IFMT: number;
+    readonly S_IFREG: number;
+    readonly S_IFSOCK: number;
+    readonly S_IRGRP: number;
+    readonly S_IROTH: number;
+    readonly S_IRUSR: number;
+    readonly S_IRWXG: number;
+    readonly S_IRWXO: number;
+    readonly S_IRWXU: number;
+    readonly S_IWGRP: number;
+    readonly S_IWOTH: number;
+    readonly S_IWUSR: number;
+    readonly S_IXGRP: number;
+    readonly S_IXOTH: number;
+    readonly S_IXUSR: number;
+    readonly UV_DIRENT_BLOCK: number;
+    readonly UV_DIRENT_CHAR: number;
+    readonly UV_DIRENT_DIR: number;
+    readonly UV_DIRENT_FIFO: number;
+    readonly UV_DIRENT_FILE: number;
+    readonly UV_DIRENT_LINK: number;
+    readonly UV_DIRENT_SOCKET: number;
+    readonly UV_DIRENT_UNKNOWN: number;
+    readonly UV_FS_COPYFILE_EXCL: number;
+    readonly UV_FS_COPYFILE_FICLONE: number;
+    readonly UV_FS_COPYFILE_FICLONE_FORCE: number;
+    readonly UV_FS_O_FILEMAP: number;
+    readonly UV_FS_SYMLINK_DIR: number;
+    readonly UV_FS_SYMLINK_JUNCTION: number;
+    readonly W_OK: number;
+    readonly X_OK: number;
+}
+
+export const constants: FsConstants = makeConstants();
 
 export const F_OK = 0;
 export const R_OK = 4;

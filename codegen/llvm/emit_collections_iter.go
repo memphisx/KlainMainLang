@@ -31,9 +31,9 @@ func (e *Emitter) liveMapIterable(expr ast.Expression) (coll ast.Expression, ty 
 	}
 	t := e.inferExprType(expr)
 	switch {
-	case t.IsCollIter:
+	case t.IsCollIter():
 		return expr, t, t.IterKind, true
-	case mapIterable(t) && t.IsSet:
+	case mapIterable(t) && t.IsSet():
 		return expr, t, mapIterValues, true
 	case mapIterable(t):
 		return expr, t, mapIterEntries, true
@@ -44,25 +44,20 @@ func (e *Emitter) liveMapIterable(expr ast.Expression) (coll ast.Expression, ty 
 // mapIterable reports whether t is a Map or Set with the ordered, iterable
 // runtime (not a WeakMap or dictionary).
 func mapIterable(t Type) bool {
-	return (t.IsMap || t.IsSet) && !t.Weak && !t.IsDynamicObject && !t.IsDynamic
+	return (t.IsMap() || t.IsSet()) && !t.Weak && !t.IsDynamicObject() && !t.IsDynamic()
 }
 
 // collIterMethod maps an iterator-returning method name to what it yields.
 func collIterMethod(name string) (mapIterKind, bool) {
-	switch name {
-	case "keys":
-		return mapIterKeys, true
-	case "values":
-		return mapIterValues, true
-	case "entries":
-		return mapIterEntries, true
-	}
-	return 0, false
+	k, ok := collIterMethods[name]
+	return k, ok
 }
+
+var collIterMethods = map[string]mapIterKind{"keys": mapIterKeys, "values": mapIterValues, "entries": mapIterEntries}
 
 // collIterElemType is what one step of an iterator of type t yields.
 func collIterElemType(t Type) Type {
-	if src := *t.IterSrc; src.IsArray {
+	if src := *t.IterSrc; src.IsArray() {
 		switch t.IterKind {
 		case mapIterKeys:
 			return TypeI64
@@ -86,8 +81,8 @@ func collIterElemType(t Type) Type {
 func collIterResultType(t Type) Type {
 	elem := collIterElemType(t)
 	if isNullableScalarMapValue(elem) {
-		elem.Nullable = true
-		elem.IsUndefined = true
+		elem.setNullable(true)
+		elem.setUndefined(true)
 	}
 	return genNextResultType(elem)
 }
@@ -95,28 +90,30 @@ func collIterResultType(t Type) Type {
 // emitMapIterOpen is a Map or Set iterator: a node on the map's list of open
 // iterators, whose position the map's removals adjust.
 func (e *Emitter) emitMapIterOpen(ty Type, mapPtr string, kind mapIterKind) Value {
+	mapPtr = e.mapViewPtr(ty, mapPtr) // through a view, its own layout's entries (TDD-00258)
 	e.ensureMapIters()
 	node := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_iter_open(ptr %s)", node, mapPtr))
-	return Value{Ref: node, Ty: CollIterType(ty, kind)}
+	it := CollIterType(ty, kind)
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_iter_open(ptr %s, i64 %d)", node, mapPtr, e.hostHeaderWord(it)))
+	return Value{Ref: node, Ty: it}
 }
 
 // emitCollIterElemRaw is the element at pos as a field holds it (an array
 // element is its header pointer).
 func (e *Emitter) emitCollIterElemRaw(mapPtr, pos string, srcTy Type, kind mapIterKind) Value {
-	if srcTy.IsArray {
+	if srcTy.IsArray() {
 		return e.emitArrayIterElemRaw(mapPtr, pos, srcTy, kind)
 	}
 	keyTy, valTy := mapIterTypes(srcTy)
 	switch {
-	case kind == mapIterKeys || kind == mapIterValues && srcTy.IsSet:
+	case kind == mapIterKeys || kind == mapIterValues && srcTy.IsSet():
 		return e.emitMapKeyRaw(mapPtr, pos, keyTy)
-	case kind == mapIterValues && valTy.IsArray:
+	case kind == mapIterValues && valTy.IsArray():
 		return e.emitMapSlotHeader(mapPtr, 24, pos, valTy)
 	case kind == mapIterValues:
 		return e.emitMapValAt(mapPtr, pos, valTy)
 	}
-	return e.emitMapEntryAt(mapPtr, pos, keyTy, valTy, srcTy.IsSet)
+	return e.emitMapEntryAt(mapPtr, pos, keyTy, valTy, srcTy.IsSet())
 }
 
 // emitCollIterStep advances the iterator node one entry. It returns whether
@@ -148,7 +145,7 @@ func (e *Emitter) emitCollIterStep(node string, srcTy Type, kind mapIterKind, el
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(elemTy), raw.Ref, elemSlot))
 	nx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nx, pos))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nx, pp))
+	e.heapStore("i64", nx, pp, 8)
 	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", moreSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(endL)
@@ -174,26 +171,26 @@ func (e *Emitter) emitCollIterNext(it Value) Value {
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(elemTy), slot))
 	switch {
 	case isNullableScalar(vTy):
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(vTy), e.makeNullableScalarAgg(vTy, more, raw), vGep))
+		e.heapStore(StructFieldIR(vTy), e.makeNullableScalarAgg(vTy, more, raw), vGep, 8)
 	default:
 		// A pointer value (string, object, array header) is null when done,
 		// a boxed one the undefined word, any other its zero.
 		ir, absent := StructFieldIR(elemTy), "null"
 		switch {
-		case elemTy.IsDynamic:
+		case elemTy.IsDynamic():
 			absent = fmt.Sprintf("%d", nbUndefined)
 		case ir != "ptr":
 			absent = zeroRef(elemTy)
 		}
 		sel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", sel, more, ir, raw, ir, absent))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, sel, vGep))
+		e.heapStore(ir, sel, vGep, 8)
 	}
 	dIdx, _, _ := resTy.FieldIndex("done")
 	dGep, done := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resTy.StructIR(), res, dIdx))
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", done, more))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", done, dGep))
+	e.heapStore("i1", done, dGep, 1)
 	return Value{Ref: res, Ty: resTy}
 }
 
@@ -230,7 +227,7 @@ func (e *Emitter) emitCollIterDrain(it Value) Value {
 	// 16 bytes a slot covers every element layout, a { i1, T } one included.
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 16", bytes, nc))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ob, buf))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @realloc(ptr %s, i64 %s)", nb, ob, bytes))
+	e.heapReallocInto(nb, ob, bytes)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nb, buf))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nc, capS))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", putL))
@@ -245,11 +242,10 @@ func (e *Emitter) emitCollIterDrain(it Value) Value {
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i1, n))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
 	e.emitLabel(endL)
-	fb, fl, r0, r1 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	fb, fl, r1 := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fb, buf))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fl, n))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, fb))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, fl))
+	r1 = e.newArrayHeader(fb, fl)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}
 }
 
@@ -260,7 +256,7 @@ func mapIterTypes(t Type) (keyTy, valTy Type) {
 	if t.MapKey != nil {
 		keyTy = *t.MapKey
 	}
-	if t.IsSet {
+	if t.IsSet() {
 		return keyTy, keyTy
 	}
 	valTy = TypeI64
@@ -276,7 +272,7 @@ func (e *Emitter) emitMapKeyRaw(mapPtr, pos string, keyTy Type) Value {
 	kp, ka, gep := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", kp, mapPtr))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ka, kp))
-	if isReferenceKeyTy(keyTy) || keyTy.IsBigInt {
+	if isReferenceKeyTy(keyTy) || keyTy.IsBigInt() {
 		box := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", gep, ka, pos))
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, gep))
@@ -302,7 +298,7 @@ func (e *Emitter) emitMapEntryAt(mapPtr, pos string, keyTy, valTy Type, isSet bo
 	v := k
 	if !isSet {
 		v = e.emitMapValAt(mapPtr, pos, valTy)
-		if valTy.IsArray {
+		if valTy.IsArray() {
 			// The tuple field holds the value's own header, as the map slot
 			// does, so the entry aliases the stored array.
 			v = e.emitMapSlotHeader(mapPtr, 24, pos, valTy)
@@ -311,11 +307,11 @@ func (e *Emitter) emitMapEntryAt(mapPtr, pos string, keyTy, valTy Type, isSet bo
 	entryTy := TupleType([]Type{keyTy, valTy})
 	e.ensureMalloc()
 	entry := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", entry, entryTy.StructSize()))
+	e.heapMallocInto(entry, fmt.Sprint(entryTy.StructSize()))
 	for i, f := range []Value{k, v} {
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, entryTy.StructIR(), entry, i))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(f.Ty), f.Ref, slot, f.Ty.Align()))
+		e.heapStore(StructFieldIR(f.Ty), f.Ref, slot, f.Ty.Align())
 	}
 	return Value{Ref: entry, Ty: entryTy}
 }
@@ -335,7 +331,7 @@ func (e *Emitter) emitForOfMapLive(s *ast.ForOfStatement, coll ast.Expression, c
 		return err
 	}
 	it := collVal
-	if !collTy.IsCollIter {
+	if !collTy.IsCollIter() {
 		it = e.emitMapIterOpen(collTy, collVal.Ref, kind)
 		closeNode := func() {
 			e.emitInstr(fmt.Sprintf("call void @__kml_map_iter_close(ptr %s)", it.Ref))
@@ -358,13 +354,13 @@ func (e *Emitter) emitForOfMapLive(s *ast.ForOfStatement, coll ast.Expression, c
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(elemTy), slot))
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
 	switch {
-	case elemTy.IsArray && !isPattern:
+	case elemTy.IsArray() && !isPattern:
 		// The loop variable aliases the stored array: its slot takes the
 		// header the map holds.
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", raw, varPtr))
 	default:
 		elem := Value{Ref: raw, Ty: elemTy}
-		if elemTy.IsArray {
+		if elemTy.IsArray() {
 			elem = e.unboxArrayValue(raw, elemTy)
 		}
 		if err := e.bindForOfElem(s, elem, elemTy, bindTy, varPtr, Type{}); err != nil {
@@ -428,9 +424,9 @@ func collIterName(t Type) string {
 	switch {
 	case t.IterRegExp:
 		return "RegExp String Iterator"
-	case src.IsSet:
+	case src.IsSet():
 		return "Set Iterator"
-	case src.IsMap:
+	case src.IsMap():
 		return "Map Iterator"
 	}
 	return "Array Iterator"
@@ -440,8 +436,8 @@ func collIterName(t Type) string {
 // iterator of a Map or Set shows as "Map Entries" or "Set Entries".
 func collIterInspectName(t Type) string {
 	src := *t.IterSrc
-	if t.IterKind == mapIterEntries && (src.IsMap || src.IsSet) {
-		if src.IsSet {
+	if t.IterKind == mapIterEntries && (src.IsMap() || src.IsSet()) {
+		if src.IsSet() {
 			return "Set Entries"
 		}
 		return "Map Entries"
@@ -457,7 +453,7 @@ func (e *Emitter) emitInspectCollIter(v Value, depth int) (Value, error) {
 	if depth > e.effectiveInspectDepth() {
 		return Value{Ref: e.internString("[Object]"), Ty: TypePtr}, nil
 	}
-	if v.Ty.IterSrc.IsArray {
+	if v.Ty.IterSrc.IsArray() {
 		// An Array Iterator shows no entries.
 		return Value{Ref: e.internString("Object [Array Iterator] {}"), Ty: TypePtr}, nil
 	}
@@ -491,7 +487,7 @@ func (e *Emitter) emitInspectCollIter(v Value, depth int) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", at, start, idx))
 		raw := e.emitCollIterElemRaw(mapPtr, at, srcTy, kind)
 		elem := Value{Ref: raw.Ref, Ty: elemTy}
-		if elemTy.IsArray {
+		if elemTy.IsArray() {
 			elem = e.unboxArrayValue(raw.Ref, elemTy)
 		}
 		return e.emitInspectField(elem, depth+1)
@@ -510,7 +506,7 @@ func (e *Emitter) emitInspectCollIter(v Value, depth int) (Value, error) {
 // collIterSizeSlot is the address of the source's live length: a Map's size
 // word, or an array header's length field.
 func (e *Emitter) collIterSizeSlot(src string, srcTy Type) string {
-	if !srcTy.IsArray {
+	if !srcTy.IsArray() {
 		return src
 	}
 	lp := e.freshReg()
@@ -521,19 +517,19 @@ func (e *Emitter) collIterSizeSlot(src string, srcTy Type) string {
 // emitCollIterClose ends an iterator: a Map or Set one leaves its map's list,
 // an array one drops its array.
 func (e *Emitter) emitCollIterClose(node string, srcTy Type) {
-	if !srcTy.IsArray {
+	if !srcTy.IsArray() {
 		e.emitInstr(fmt.Sprintf("call void @__kml_map_iter_close(ptr %s)", node))
 		return
 	}
 	sp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", sp, node))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", sp))
+	e.heapStore("ptr", "null", sp, 8)
 }
 
 // arrayIterable reports whether t is an ordinary array, whose keys(),
 // values() and entries() give an Array Iterator over its header.
 func arrayIterable(t Type) bool {
-	return t.IsArray && t.ElemType != nil && !t.IsTypedArray && !t.IsFlatArray && !t.IsDynamic && !t.IsTuple
+	return t.IsArray() && t.ElemType != nil && !t.IsTypedArray() && !t.IsFlatArray() && !t.IsDynamic() && !t.IsTuple()
 }
 
 // emitArrayIterOpen is an Array Iterator: an unregistered {next, pos,
@@ -552,16 +548,19 @@ func (e *Emitter) emitArrayIterOpen(arr ast.Expression, kind mapIterKind) (Value
 func (e *Emitter) emitArrayIterOpenValue(v Value, kind mapIterKind, regexp bool) Value {
 	header := e.arrayReturnHeader(v)
 	e.ensureMalloc()
-	node := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", node))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", node))
-	pp, sp := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", pp, node))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", pp))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", sp, node))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, sp))
 	ty := CollIterType(v.Ty, kind)
 	ty.IterRegExp = regexp
+	// Its host header word precedes the node.
+	base, node := e.freshReg(), e.freshReg()
+	e.heapMallocInto(base, "32")
+	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", node, base))
+	e.heapStore("ptr", "null", node, 8)
+	pp, sp := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", pp, node))
+	e.heapStore("i64", "0", pp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", sp, node))
+	e.heapStore("ptr", header, sp, 8)
 	return Value{Ref: node, Ty: ty}
 }
 
@@ -576,7 +575,7 @@ func (e *Emitter) emitArrayIterElemRaw(header, pos string, srcTy Type, kind mapI
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, header))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, data, pos))
 	var elem Value
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		h := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, gep))
 		elem = Value{Ref: h, Ty: elemTy}
@@ -589,11 +588,11 @@ func (e *Emitter) emitArrayIterElemRaw(header, pos string, srcTy Type, kind mapI
 	entryTy := TupleType([]Type{TypeI64, elemTy})
 	e.ensureMalloc()
 	entry := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", entry, entryTy.StructSize()))
+	e.heapMallocInto(entry, fmt.Sprint(entryTy.StructSize()))
 	for i, f := range []Value{{Ref: pos, Ty: TypeI64}, elem} {
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, entryTy.StructIR(), entry, i))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(f.Ty), f.Ref, slot, f.Ty.Align()))
+		e.heapStore(StructFieldIR(f.Ty), f.Ref, slot, f.Ty.Align())
 	}
 	return Value{Ref: entry, Ty: entryTy}
 }

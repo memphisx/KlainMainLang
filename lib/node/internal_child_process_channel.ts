@@ -223,11 +223,11 @@ export class Channel {
             callback = options;
             options = undefined;
         } else if (options !== undefined && (options === null || typeof options !== 'object')) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.');
         }
         options = { swallowErrors: false, ...options };
         if (this.connected) return this._send(message, handle, options, callback);
-        const ex = new NodeError('ERR_IPC_CHANNEL_CLOSED', 'Channel closed');
+        const ex = NodeError('ERR_IPC_CHANNEL_CLOSED', 'Channel closed');
         if (typeof callback === 'function') {
             process.nextTick(() => { callback(ex); });
         } else {
@@ -238,11 +238,11 @@ export class Channel {
 
     _send(message: any, handle: any, options: any, callback?: any): boolean {
         if (message === undefined) {
-            throw new NodeTypeError('ERR_MISSING_ARGS', 'The "message" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "message" argument must be specified');
         }
         if (typeof message !== 'string' && typeof message !== 'object' &&
             typeof message !== 'number' && typeof message !== 'boolean') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "message" argument must be one of type string, object, number, or boolean.');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "message" argument must be one of type string, object, number, or boolean.');
         }
         if (typeof options === 'boolean') options = { swallowErrors: options };
         let sendHandle = -1;
@@ -252,7 +252,7 @@ export class Channel {
             if (handle instanceof Socket) message.type = 'net.Socket';
             else if (handle instanceof Server) message.type = 'net.Server';
             else if (handle instanceof _KmlNativeHandle) message.type = 'net.Native';
-            else throw new NodeTypeError('ERR_INVALID_HANDLE_TYPE', 'This handle type cannot be sent');
+            else throw NodeTypeError('ERR_INVALID_HANDLE_TYPE', 'This handle type cannot be sent');
             if (this.handleQueue !== null) {
                 this.handleQueue.push({ callback, handle, options, message: message.msg });
                 return this.handleQueue.length === 1;
@@ -305,7 +305,7 @@ export class Channel {
 
     disconnect(): void {
         if (!this.connected) {
-            this.target.emit('error', new NodeError('ERR_IPC_DISCONNECTED', 'IPC channel is already disconnected'));
+            this.target.emit('error', NodeError('ERR_IPC_DISCONNECTED', 'IPC channel is already disconnected'));
             return;
         }
         this.connected = false;

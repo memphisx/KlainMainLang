@@ -18,11 +18,11 @@ import (
 // dynEntryClass reports a parameter type a dynamic entry widens: a plain
 // user class's instance (its fields at fixed offsets behind a class tag).
 func (e *Emitter) dynEntryClass(p Type) (ClassInfo, bool) {
-	if !p.IsClass || p.IR != "ptr" || p.IsArray || p.IsDynamic || p.ClassName == "" {
+	if !p.IsClass() || p.IR != "ptr" || p.IsArray() || p.IsDynamic() || p.ClassName == "" {
 		return ClassInfo{}, false
 	}
 	info, ok := e.classes[p.ClassName]
-	if !ok || info.HostBase != nil || info.Ty.IsDynamic || info.IsErrorSubclass {
+	if !ok || info.HostBase != nil || info.Ty.IsDynamic() || info.IsErrorSubclass {
 		return ClassInfo{}, false
 	}
 	return info, true
@@ -119,7 +119,7 @@ func (e *Emitter) widenDynEntryParams(params []ast.Param, paramTypes, alt []Type
 		next[k] = true
 	}
 	for i, p := range params {
-		if i < len(alt) && alt[i].IsDynamic && !paramTypes[i].IsDynamic && p.Name != "" {
+		if i < len(alt) && boxHolding(alt[i]) && !boxHolding(paramTypes[i]) && p.Name != "" {
 			next[p.Name] = true
 		}
 	}
@@ -127,14 +127,22 @@ func (e *Emitter) widenDynEntryParams(params []ast.Param, paramTypes, alt []Type
 	return func() { e.dynEntryWidened = saved }
 }
 
-// dynEntryWidenedIdent reports id as a parameter widenDynEntryParams marked,
-// bound as a box in the body being emitted.
+// boxHolding reports a type whose value is read off a box: `any`, or an
+// array of `any` (a widened rest parameter).
+func boxHolding(t Type) bool {
+	return t.IsDynamic() || t.IsArray() && t.ElemType != nil && t.ElemType.IsDynamic()
+}
+
+// dynEntryWidenedIdent reports id as bound to a box in a dynamic entry's
+// body: a parameter widenDynEntryParams marked, or a local holding a box
+// (one read off a widened parameter keeps its kind, whatever the checker
+// gives it).
 func (e *Emitter) dynEntryWidenedIdent(id *ast.Identifier) bool {
-	if !e.dynEntryWidened[id.Name] {
-		return false
+	if len(e.dynEntryWidened) == 0 {
+		return e.anyHeldIdent(id)
 	}
 	sym, found := e.lookup(id.Name)
-	return found && sym.Ty.IsDynamic
+	return found && boxHolding(sym.Ty) && (e.dynEntryWidened[id.Name] || !sym.Ty.IsArray()) || e.anyHeldIdent(id)
 }
 
 // widenedRooted reports e as a parameter widened reports, or a member read,

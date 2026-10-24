@@ -19,12 +19,12 @@ import (
 // { i64 byteLength, ptr data }, never exposed via the generic object-field
 // path (see IsArrayBuffer's doc comment in types.go). The data buffer
 // itself is calloc'd, matching real ArrayBuffer's zero-fill guarantee.
-// coerceByteLengthArg turns a `new ArrayBuffer(len)` length argument into an
+// toIndexArg turns a `new ArrayBuffer(len)` length argument into an
 // i64 byte count via JS ToIndex: a numeric value coerces directly; an object
 // runs the ToPrimitive("number") ladder; a string / dynamic `any` runs ToNumber
 // (`new ArrayBuffer("")` → 0, `"1"` → 1) rather than reaching calloc as a raw
 // `ptr` (invalid IR). A non-finite result (NaN/undefined) is ToIndex 0.
-func (e *Emitter) coerceByteLengthArg(v Value) (Value, error) {
+func (e *Emitter) toIndexArg(v Value) (Value, error) {
 	// An object with a ToPrimitive ladder resolves to its primitive first
 	// (`new ArrayBuffer({valueOf(){return 42}})`).
 	if objectMayToPrimitive(v.Ty) {
@@ -52,7 +52,23 @@ func (e *Emitter) coerceByteLengthArg(v Value) (Value, error) {
 	// Numeric, and everything else (a dynamic `any`), goes through the normal
 	// coerce — which for a dynamic value is a runtime tag-checked ToNumber that
 	// throws on a Symbol (`new ArrayBuffer(sym as any)` is a TypeError, not 0).
-	return e.coerce(v, TypeI64), nil
+	return e.convert(v, TypeI64), nil
+}
+
+// emitArrayBufferHeaderAlloc allocates an ArrayBuffer's (or a
+// SharedArrayBuffer's) {byteLength, data[, max]} header of bytes, its host
+// header word before it at -8 (TDD-00230 P3.3), and names the header reg.
+// alloc is the allocator's name; a GC-uncollectable one for a shared buffer
+// under -mm=gc.
+func (e *Emitter) emitArrayBufferHeaderAlloc(reg string, bytes int, shared bool, alloc string) {
+	base := e.freshReg()
+	e.heapAllocCall(base, fmt.Sprintf("%s(i64 %d)", alloc, bytes+8))
+	ty := ArrayBufferType()
+	if shared {
+		ty = SharedArrayBufferType()
+	}
+	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", reg, base))
 }
 
 func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression) (Value, error) {
@@ -60,14 +76,14 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 	if err != nil {
 		return Value{}, err
 	}
-	if sizeVal, err = e.coerceByteLengthArg(sizeVal); err != nil {
+	if sizeVal, err = e.toIndexArg(sizeVal); err != nil {
 		return Value{}, err
 	}
 
 	// A SharedArrayBuffer under -mm=gc must survive the window where its
 	// only live reference is on another thread (or inside a pipe envelope)
 	// — invisible to this thread's Boehm scan — so header and data are
-	// GC_malloc_uncollectable (zeroed, never collected, still scanned).
+	// kml_gc_alloc_pinned (zeroed, never collected, still scanned).
 	// TDD-00099.
 	// A growable buffer (`{maxByteLength}`, ADR-00494) reserves its maximum
 	// upfront — views hold raw data pointers, so the data block can never
@@ -80,7 +96,7 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 		if err != nil {
 			return Value{}, err
 		}
-		maxVal = e.coerce(maxVal, TypeI64)
+		maxVal = e.convert(maxVal, TypeI64)
 		maxRef = maxVal.Ref
 		allocRef = maxVal.Ref
 	}
@@ -91,9 +107,9 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 		hdrBytes = 24
 	}
 	if ex.Shared && e.isGCMode() {
-		e.ensureGCUncollectable()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %s)", dataReg, allocRef))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %d)", hdrReg, hdrBytes))
+		e.ensureGCInterface()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @kml_gc_alloc_pinned(i64 %s)", dataReg, allocRef))
+		e.emitArrayBufferHeaderAlloc(hdrReg, hdrBytes, true, "kml_gc_alloc_pinned")
 	} else {
 		e.ensureByteBlockAlloc()
 		e.ensureMalloc()
@@ -101,7 +117,7 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 		// and an elided allocation is assumed to succeed — the RangeError
 		// below would vanish with it.
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_byte_block_alloc(i64 %s)", dataReg, allocRef))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", hdrReg, hdrBytes))
+		e.emitArrayBufferHeaderAlloc(hdrReg, hdrBytes, ex.Shared, "malloc")
 	}
 	// CreateByteDataBlock: a block that cannot be created is a RangeError
 	// (Node: "Array buffer allocation failed", or for a growable buffer's
@@ -122,14 +138,14 @@ func (e *Emitter) emitNewArrayBufferExpression(ex *ast.NewArrayBufferExpression)
 		e.emitInternalThrowKind("RangeError", e.internString("Array buffer allocation failed"))
 	}
 	e.emitLabel(okL)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sizeVal.Ref, hdrReg))
+	e.heapStore("i64", sizeVal.Ref, hdrReg, 8)
 	dataSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, dataSlot))
+	e.heapStore("ptr", dataReg, dataSlot, 8)
 	if ex.MaxByteLength != nil {
 		maxSlot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr, i64 }, ptr %s, i32 0, i32 2", maxSlot, hdrReg))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", maxRef, maxSlot))
+		e.heapStore("i64", maxRef, maxSlot, 8)
 	}
 
 	if ex.Shared {
@@ -167,16 +183,16 @@ func (e *Emitter) ensureRoundEven() {
 	e.requireLink("m")
 }
 
-// coerceTypedArrayStore converts a language-level value into a TypedArray's
+// toTypedArrayElem converts a language-level value into a TypedArray's
 // raw stored scalar — the store half of TDD-00101's conversion layer. For a
 // BigIntElem array the value must already be a bigint (compile-time error,
 // the spec's TypeError) and is unwrapped through the bigint ABI; for a
 // Clamped array the spec's ToUint8Clamp applies (clamp [0,255]; floats
-// NaN→0 and round-half-to-even); every other kind is the plain e.coerce
+// NaN→0 and round-half-to-even); every other kind is the plain e.convert
 // wrap/trunc path unchanged.
-func (e *Emitter) coerceTypedArrayStore(v Value, taTy Type, pos ast.Pos) (Value, error) {
+func (e *Emitter) toTypedArrayElem(v Value, taTy Type, pos ast.Pos) (Value, error) {
 	elemTy := *taTy.ElemType
-	if !taTy.BigIntElem && !v.Ty.IsBigInt && !v.Ty.Float && !v.Ty.IsInteger() && v.Ty.IR != "i1" {
+	if !taTy.BigIntElem && !v.Ty.IsBigInt() && !v.Ty.Float && !v.Ty.IsInteger() && v.Ty.IR != "i1" {
 		// Any other value is stored as its ToNumber (`[192]` → 192), after
 		// ToPrimitive, as JavaScript converts a typed array's elements.
 		boxed, err := e.emitBoxValue(v)
@@ -188,7 +204,7 @@ func (e *Emitter) coerceTypedArrayStore(v Value, taTy Type, pos ast.Pos) (Value,
 	}
 	switch {
 	case taTy.BigIntElem:
-		if !v.Ty.IsBigInt {
+		if !v.Ty.IsBigInt() {
 			return Value{}, fmt.Errorf("%d:%d: a BigInt64Array/BigUint64Array element must be a bigint (e.g. 1n), not a number", pos.Line, pos.Col)
 		}
 		e.ensureBigInt()
@@ -201,7 +217,7 @@ func (e *Emitter) coerceTypedArrayStore(v Value, taTy Type, pos ast.Pos) (Value,
 		return Value{Ref: r, Ty: elemTy}, nil
 	case taTy.Clamped:
 		if v.Ty.Float {
-			f := e.coerce(v, TypeF64)
+			f := e.convert(v, TypeF64)
 			// ToUint8Clamp: NaN → 0 (the fcmp ult 0.0 check is
 			// unordered-true, so NaN takes the 0 branch of the low clamp),
 			// clamp to [0, 255], round half to even, then convert.
@@ -222,7 +238,7 @@ func (e *Emitter) coerceTypedArrayStore(v Value, taTy Type, pos ast.Pos) (Value,
 			e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i8", narrow, asInt))
 			return Value{Ref: narrow, Ty: elemTy}, nil
 		}
-		i := e.coerce(v, TypeI64)
+		i := e.convert(v, TypeI64)
 		neg := e.freshReg()
 		clampedLo := e.freshReg()
 		big := e.freshReg()
@@ -235,7 +251,7 @@ func (e *Emitter) coerceTypedArrayStore(v Value, taTy Type, pos ast.Pos) (Value,
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i8", narrow, clamped))
 		return Value{Ref: narrow, Ty: elemTy}, nil
 	default:
-		return e.coerce(v, elemTy), nil
+		return e.convert(v, elemTy), nil
 	}
 }
 
@@ -268,12 +284,19 @@ var bigIntElemRejectedMethods = map[string]bool{
 	"map": true, "filter": true, "reduce": true, "reduceRight": true,
 	"forEach": true, "some": true, "every": true, "find": true,
 	"findIndex": true, "findLast": true, "findLastIndex": true,
-	"indexOf": true, "lastIndexOf": true, "includes": true, "sort": true,
-	"toSorted": true, "join": true, "keys": true, "values": true,
+	"indexOf": true, "lastIndexOf": true, "includes": true, "join": true, "keys": true, "values": true,
 	"entries": true, "push": true, "pop": true, "shift": true,
 	"unshift": true, "splice": true, "toSpliced": true, "concat": true,
 	"flat": true, "flatMap": true, "with": true, "copyWithin": true,
-	"toReversed": true,
+}
+
+// bigIntSortComparatorErr rejects a comparator to a BigInt64Array's sort
+// or toSorted (its default numeric order is supported).
+func bigIntSortComparatorErr(recv Type, method string, args []ast.Expression, pos ast.Pos) error {
+	if recv.BigIntElem && len(args) > 0 {
+		return fmt.Errorf("%d:%d: .%s(compareFn) is not supported on a BigInt64Array/BigUint64Array", pos.Line, pos.Col, method)
+	}
+	return nil
 }
 
 // emitArrayBufferSlice implements arrayBuffer.slice(start?, end?) /
@@ -289,7 +312,7 @@ func (e *Emitter) emitArrayBufferSlice(mem *ast.MemberExpression, args []ast.Exp
 	if err != nil {
 		return Value{}, err
 	}
-	shared := bufVal.Ty.IsSharedArrayBuffer
+	shared := bufVal.Ty.IsSharedArrayBuffer()
 
 	byteLenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", byteLenReg, bufVal.Ref))
@@ -304,7 +327,7 @@ func (e *Emitter) emitArrayBufferSlice(mem *ast.MemberExpression, args []ast.Exp
 		if err != nil {
 			return Value{}, err
 		}
-		startN = e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, byteLenReg)
+		startN = e.emitNormalizeSliceIdx(e.convert(startRaw, TypeI64).Ref, byteLenReg)
 	}
 	endN := byteLenReg
 	if len(args) == 2 {
@@ -312,7 +335,7 @@ func (e *Emitter) emitArrayBufferSlice(mem *ast.MemberExpression, args []ast.Exp
 		if err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.coerce(endRaw, TypeI64).Ref, byteLenReg)
+		endN = e.emitNormalizeSliceIdx(e.convert(endRaw, TypeI64).Ref, byteLenReg)
 	}
 
 	rawLen := e.freshReg()
@@ -325,24 +348,24 @@ func (e *Emitter) emitArrayBufferSlice(mem *ast.MemberExpression, args []ast.Exp
 	newData := e.freshReg()
 	newHdr := e.freshReg()
 	if shared && e.isGCMode() {
-		e.ensureGCUncollectable()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 %s)", newData, newLen))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @GC_malloc_uncollectable(i64 16)", newHdr))
+		e.ensureGCInterface()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @kml_gc_alloc_pinned(i64 %s)", newData, newLen))
+		e.emitArrayBufferHeaderAlloc(newHdr, 16, true, "kml_gc_alloc_pinned")
 	} else {
 		e.ensureCalloc()
 		e.ensureMalloc()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 1)", newData, newLen))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", newHdr))
+		e.heapCallocInto(newData, newLen, "1")
+		e.emitArrayBufferHeaderAlloc(newHdr, 16, shared, "malloc")
 	}
 	srcGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", srcGep, dataReg, startN))
 	e.ensureMemcpy()
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newData, srcGep, newLen))
 
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLen, newHdr))
+	e.heapStore("i64", newLen, newHdr, 8)
 	newDataSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", newDataSlot, newHdr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newData, newDataSlot))
+	e.heapStore("ptr", newData, newDataSlot, 8)
 
 	if shared {
 		return Value{Ref: newHdr, Ty: SharedArrayBufferType()}, nil
@@ -351,7 +374,7 @@ func (e *Emitter) emitArrayBufferSlice(mem *ast.MemberExpression, args []ast.Exp
 }
 
 // emitNewTypedArrayAggregate builds a `new XArray(...)` as a general
-// expression, returning the `{ptr, i64}` array aggregate every array consumer
+// expression, returning the array value every array consumer
 // already understands — so a TypedArray construction can appear as a function
 // argument, a return value, an object field, a ternary arm, etc., not only a
 // variable declaration's initializer (TDD-00018 Stage 5 / ADR-00512). It reuses
@@ -373,10 +396,7 @@ func (e *Emitter) emitNewTypedArrayAggregate(nta *ast.NewTypedArrayExpression) (
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, ptrA))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenReg, lenA))
-	a0 := e.freshReg()
-	agg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", a0, ptrReg))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", agg, a0, lenReg))
+	agg := e.newArrayHeader(ptrReg, lenReg)
 	return Value{Ref: agg, Ty: taTy}, nil
 }
 
@@ -402,19 +422,20 @@ func (e *Emitter) emitNewTypedArrayVarDecl(nta *ast.NewTypedArrayExpression, ptr
 		return e.emitTypedArrayFromArrayLiteral(lit, ptrName, lenName, taTy)
 	}
 	argTy := e.inferExprType(nta.Arg)
-	if nta.ByteOffset != nil && argTy.IsDynamic {
+	if nta.ByteOffset != nil && argTy.IsDynamic() {
 		// An untyped buffer with an offset: the ArrayBuffer its box holds.
 		return e.emitTypedArrayFromBuffer(nta, ptrName, lenName, elemTy)
 	}
-	if nta.ByteOffset != nil && !argTy.IsArrayBuffer {
+	isBuf := argTy.IsArrayBuffer() || argTy.IsSharedArrayBuffer()
+	if nta.ByteOffset != nil && !isBuf {
 		return fmt.Errorf("%d:%d: the (buffer, byteOffset, length?) constructor form requires an ArrayBuffer first argument", nta.GetPos().Line, nta.GetPos().Col)
 	}
 	switch {
-	case argTy.IsDynamic && nta.ByteOffset == nil:
+	case argTy.IsDynamic() && nta.ByteOffset == nil:
 		return e.emitTypedArrayFromDynamic(nta, ptrName, lenName, taTy)
-	case argTy.IsArrayBuffer:
+	case isBuf:
 		return e.emitTypedArrayFromBuffer(nta, ptrName, lenName, elemTy)
-	case argTy.IsArray:
+	case argTy.IsArray():
 		return e.emitTypedArrayFromArrayLike(nta, ptrName, lenName, taTy)
 	default:
 		return e.emitTypedArrayFromSize(nta, ptrName, lenName, elemTy)
@@ -427,9 +448,6 @@ func (e *Emitter) emitNewTypedArrayVarDecl(nta *ast.NewTypedArrayExpression, ptr
 // ToNumber'd), and a primitive is a length (ToIndex).
 func (e *Emitter) emitTypedArrayFromDynamic(nta *ast.NewTypedArrayExpression, ptrName, lenName string, taTy Type) error {
 	elemTy := *taTy.ElemType
-	if taTy.BigIntElem {
-		return fmt.Errorf("%d:%d: a BigInt64Array/BigUint64Array cannot be constructed from an untyped value", nta.GetPos().Line, nta.GetPos().Col)
-	}
 	v, err := e.emitExpr(nta.Arg)
 	if err != nil {
 		return err
@@ -443,15 +461,15 @@ func (e *Emitter) emitTypedArrayFromDynamic(nta *ast.NewTypedArrayExpression, pt
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, primL))
 
 	e.emitLabel(primL)
-	n := e.coerce(Value{Ref: e.emitAnyToNum(v), Ty: TypeF64}, TypeI64)
+	n := e.convert(Value{Ref: e.emitAnyToNum(v), Ty: TypeF64}, TypeI64)
 	neg, nonNeg := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, n.Ref))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", nonNeg, neg, n.Ref))
 	e.ensureCalloc()
 	zero := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", zero, nonNeg, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", zero, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nonNeg, lenName))
+	e.heapCallocInto(zero, nonNeg, fmt.Sprint(elemTy.Align()))
+	e.heapStore("ptr", zero, ptrName, 8)
+	e.heapStore("i64", nonNeg, lenName, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(objL)
@@ -481,8 +499,11 @@ func (e *Emitter) emitTypedArrayFromDynamic(nta *ast.NewTypedArrayExpression, pt
 	e.emitLabel(viewL)
 	cnt := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sdiv i64 %s, %d", cnt, byteLen, elemSize))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", data, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cnt, lenName))
+	// The view remembers its buffer (its .buffer, a shared one's
+	// Atomics.wait), as the static buffer path's does.
+	e.emitRegisterViewDyn(data, buf, "0", isSAB.Ref)
+	e.heapStore("ptr", data, ptrName, 8)
+	e.heapStore("i64", cnt, lenName, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(likeL)
@@ -490,14 +511,20 @@ func (e *Emitter) emitTypedArrayFromDynamic(nta *ast.NewTypedArrayExpression, pt
 	lp := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lp))
 	f64s := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_f64(i64 %s, ptr %s)", f64s, v.Ref, lp))
+	if taTy.BigIntElem {
+		// Each element is ToBigInt'd: its box walked as it is.
+		e.declareFn("__kml_any_arraylike_words", "declare ptr @__kml_any_arraylike_words(i64, ptr)")
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_words(i64 %s, ptr %s)", f64s, v.Ref, lp))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_f64(i64 %s, ptr %s)", f64s, v.Ref, lp))
+	}
 	cnt2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cnt2, lp))
 	e.ensureMalloc()
 	out := e.freshReg()
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, cnt2, elemSize))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", out, bytes))
+	e.heapMallocInto(out, bytes)
 	idx := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
 	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
@@ -510,22 +537,35 @@ func (e *Emitter) emitTypedArrayFromDynamic(nta *ast.NewTypedArrayExpression, pt
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fin, endL, bodyL))
 	e.emitLabel(bodyL)
 	sg, sv := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr double, ptr %s, i64 %s", sg, f64s, i))
-	e.emitInstr(fmt.Sprintf("%s = load double, ptr %s, align 8", sv, sg))
-	c, err := e.coerceTypedArrayStore(Value{Ref: sv, Ty: TypeF64}, taTy, nta.GetPos())
-	if err != nil {
-		return err
+	var c Value
+	if taTy.BigIntElem {
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", sg, f64s, i))
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sv, sg))
+		big, err := e.emitToBigInt(Value{Ref: sv, Ty: TypeAny}, nta.GetPos())
+		if err != nil {
+			return err
+		}
+		if c, err = e.toTypedArrayElem(big, taTy, nta.GetPos()); err != nil {
+			return err
+		}
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = getelementptr double, ptr %s, i64 %s", sg, f64s, i))
+		e.emitInstr(fmt.Sprintf("%s = load double, ptr %s, align 8", sv, sg))
+		var err error
+		if c, err = e.toTypedArrayElem(Value{Ref: sv, Ty: TypeF64}, taTy, nta.GetPos()); err != nil {
+			return err
+		}
 	}
 	dg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dg, elemTy.IR, out, i))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, c.Ref, dg, elemTy.Align()))
+	e.heapStore(elemTy.IR, c.Ref, dg, elemTy.Align())
 	nx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nx, i))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nx, idx))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(endL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", out, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cnt2, lenName))
+	e.heapStore("ptr", out, ptrName, 8)
+	e.heapStore("i64", cnt2, lenName, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	return nil
@@ -545,22 +585,22 @@ func (e *Emitter) emitTypedArrayFromArrayLiteral(lit *ast.ArrayLiteral, ptrName,
 	n := int64(len(lit.Elements))
 	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", dataReg, n*int64(elemTy.Align())))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", n, lenName))
+	e.heapMallocInto(dataReg, fmt.Sprint(n*int64(elemTy.Align())))
+	e.heapStore("ptr", dataReg, ptrName, 8)
+	e.heapStore("i64", fmt.Sprint(n), lenName, 8)
 
 	for i, elem := range lit.Elements {
 		val, err := e.emitExpr(elem)
 		if err != nil {
 			return err
 		}
-		val, err = e.coerceTypedArrayStore(val, taTy, elem.GetPos())
+		val, err = e.toTypedArrayElem(val, taTy, elem.GetPos())
 		if err != nil {
 			return err
 		}
 		gepReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, val.Ref, gepReg, elemTy.Align()))
+		e.heapStore(elemTy.IR, val.Ref, gepReg, elemTy.Align())
 	}
 	return nil
 }
@@ -595,7 +635,7 @@ func (e *Emitter) emitTypedArrayFromSize(nta *ast.NewTypedArrayExpression, ptrNa
 	if err != nil {
 		return err
 	}
-	sizeVal = e.coerce(sizeVal, TypeI64)
+	sizeVal = e.convert(sizeVal, TypeI64)
 	// V8: a negative length, or one past 2^53-1 bytes, is "Invalid typed
 	// array length: n"; a block that cannot be had is "Array buffer
 	// allocation failed".
@@ -625,8 +665,8 @@ func (e *Emitter) emitTypedArrayFromSize(nta *ast.NewTypedArrayExpression, ptrNa
 	e.emitLabel(failL)
 	e.emitInternalThrowKind("RangeError", e.internString("Array buffer allocation failed"))
 	e.emitLabel(allocOkL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sizeVal.Ref, lenName))
+	e.heapStore("ptr", dataReg, ptrName, 8)
+	e.heapStore("i64", sizeVal.Ref, lenName, 8)
 	return nil
 }
 
@@ -642,7 +682,7 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 	if err != nil {
 		return err
 	}
-	if bufVal.Ty.IsDynamic {
+	if bufVal.Ty.IsDynamic() {
 		bufVal = e.emitUnboxHost(bufVal, ArrayBufferType())
 	}
 
@@ -662,7 +702,7 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 		if err != nil {
 			return err
 		}
-		offRef = e.coerce(offVal, TypeI64).Ref
+		offRef = e.convert(offVal, TypeI64).Ref
 
 		// InitializeTypedArrayFromArrayBuffer, in its order and with V8's
 		// words: a negative offset (ToIndex), then a misaligned one.
@@ -694,7 +734,7 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 		if err != nil {
 			return err
 		}
-		lenRef := e.coerce(lenVal, TypeI64).Ref
+		lenRef := e.convert(lenVal, TypeI64).Ref
 		// offset + length*elemSize must fit inside the buffer.
 		lenBytes := e.freshReg()
 		endReg := e.freshReg()
@@ -754,19 +794,19 @@ func (e *Emitter) emitTypedArrayFromBuffer(nta *ast.NewTypedArrayExpression, ptr
 	// The view remembers its buffer and offset (TDD-00243).
 	e.ensureViews()
 	shared := 0
-	if bufVal.Ty.IsSharedArrayBuffer {
+	if bufVal.Ty.IsSharedArrayBuffer() {
 		shared = 1
 	}
 	e.emitInstr(fmt.Sprintf("call void @__kml_view_register(ptr %s, ptr %s, i64 %s, i64 %d)", viewData, bufVal.Ref, offRef, shared))
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", viewData, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", elemCountReg, lenName))
+	e.heapStore("ptr", viewData, ptrName, 8)
+	e.heapStore("i64", elemCountReg, lenName, 8)
 	return nil
 }
 
 // emitTypedArrayFromArrayLike handles `new XArray(numberArrayOrTypedArray)`
 // — copy-constructs a fresh buffer, coercing each source element via the
-// same e.coerce truncation/wraparound path plain assignment already uses
+// same e.convert truncation/wraparound path plain assignment already uses
 // (so e.g. new Uint8Array([-1, 300]) correctly becomes [255, 44] with no
 // clamping-specific code).
 func (e *Emitter) emitTypedArrayFromArrayLike(nta *ast.NewTypedArrayExpression, ptrName, lenName string, taTy Type) error {
@@ -789,7 +829,7 @@ func (e *Emitter) emitTypedArrayFromArrayLike(nta *ast.NewTypedArrayExpression, 
 
 	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @calloc(i64 %s, i64 %d)", dataReg, srcLenReg, elemTy.Align()))
+	e.heapCallocInto(dataReg, srcLenReg, fmt.Sprint(elemTy.Align()))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -814,24 +854,24 @@ func (e *Emitter) emitTypedArrayFromArrayLike(nta *ast.NewTypedArrayExpression, 
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", srcElemReg, srcElemTy.IR, srcGep, srcElemTy.Align()))
 	var coerced Value
 	if taTy.Clamped {
-		coerced, err = e.coerceTypedArrayStore(Value{Ref: srcElemReg, Ty: srcElemTy}, taTy, nta.GetPos())
+		coerced, err = e.toTypedArrayElem(Value{Ref: srcElemReg, Ty: srcElemTy}, taTy, nta.GetPos())
 		if err != nil {
 			return err
 		}
 	} else {
-		coerced = e.coerce(Value{Ref: srcElemReg, Ty: srcElemTy}, elemTy)
+		coerced = e.convert(Value{Ref: srcElemReg, Ty: srcElemTy}, elemTy)
 	}
 	dstGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstGep, elemTy.IR, dataReg, idxVal))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, coerced.Ref, dstGep, elemTy.Align()))
+	e.heapStore(elemTy.IR, coerced.Ref, dstGep, elemTy.Align())
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, ptrName))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", srcLenReg, lenName))
+	e.heapStore("ptr", dataReg, ptrName, 8)
+	e.heapStore("i64", srcLenReg, lenName, 8)
 	return nil
 }
 
@@ -852,6 +892,11 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		return Value{}, fmt.Errorf("%d:%d: set takes 1 or 2 arguments (source, offset?)", pos.Line, pos.Col)
 	}
 	dstTy := e.inferExprType(mem.Object)
+	// `x as Uint8Array` asserts, never converts: a box (a DataView behind
+	// an ArrayBufferView) is read as the array-like it holds.
+	if as, ok := args[0].(*ast.AsExpression); ok && isUnconstrainedDynamic(e.inferExprType(as.Expr)) {
+		args = append([]ast.Expression{as.Expr}, args[1:]...)
+	}
 	srcTy := e.inferExprType(args[0])
 	if dstTy.BigIntElem != srcTy.BigIntElem {
 		return Value{}, fmt.Errorf("%d:%d: set()'s source and target must both (or neither) be BigInt64Array/BigUint64Array", pos.Line, pos.Col)
@@ -862,7 +907,7 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 	}
 	var srcPtrReg, srcLenReg string
 	var srcElemTy Type
-	if srcTy.IsDynamic || !srcTy.IsArray {
+	if srcTy.IsDynamic() || !srcTy.IsArray() {
 		// An `any` source — or any statically non-array one (a string, an
 		// object literal, null) — is boxed and materialised at runtime as a
 		// fresh double buffer with ToNumber applied per element (ADR-01059):
@@ -880,7 +925,7 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		if err != nil {
 			return Value{}, err
 		}
-		if srcVal.Ty.IsObject && !srcVal.Ty.IsDynamic && e.dynWidenable(srcVal.Ty, map[string]bool{}) {
+		if srcVal.Ty.IsObject() && !srcVal.Ty.IsDynamic() && e.dynWidenable(srcVal.Ty, map[string]bool{}) {
 			// A named static object (`const o = { length: 1, 0: 5 }; ta.set(o)`)
 			// is only read here, so a bag copy of its shape is exact — identity
 			// never leaves this call.
@@ -931,7 +976,7 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		if err != nil {
 			return Value{}, err
 		}
-		if offRaw.Ty.IsSymbol {
+		if offRaw.Ty.IsSymbol() {
 			// ToNumber(Symbol) throws; the call is dead from here (the throw is a
 			// terminator, so nothing below it may be emitted for this call).
 			e.emitThrowTypeError("Cannot convert a Symbol value to a number")
@@ -939,9 +984,9 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		}
 		var offD string
 		switch {
-		case offRaw.Ty.IsNull || offRaw.Ty.IR == "void":
+		case offRaw.Ty.IsNull() || offRaw.Ty.IR == "void":
 			offD = "0.0" // null → 0; undefined → NaN → 0
-		case offRaw.Ty.IsDynamic:
+		case offRaw.Ty.IsDynamic():
 			prim := e.emitAnyToPrimitive(offRaw.Ref, false)
 			offD = e.emitAnyToNum(Value{Ref: prim, Ty: TypeAny})
 		case isStringTy(offRaw.Ty):
@@ -951,7 +996,7 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 			}
 			offD = e.emitAnyToNum(boxed)
 		default:
-			offD = e.coerce(offRaw, TypeF64).Ref
+			offD = e.convert(offRaw, TypeF64).Ref
 		}
 		e.ensureMathFuncs()
 		isNaN := e.freshReg()
@@ -1017,18 +1062,18 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", srcElemReg, srcElemTy.IR, srcGep, srcElemTy.Align()))
 	var coerced Value
 	if dstTy.Clamped {
-		coerced, err = e.coerceTypedArrayStore(Value{Ref: srcElemReg, Ty: srcElemTy}, dstTy, pos)
+		coerced, err = e.toTypedArrayElem(Value{Ref: srcElemReg, Ty: srcElemTy}, dstTy, pos)
 		if err != nil {
 			return Value{}, err
 		}
 	} else {
-		coerced = e.coerce(Value{Ref: srcElemReg, Ty: srcElemTy}, elemTy)
+		coerced = e.convert(Value{Ref: srcElemReg, Ty: srcElemTy}, elemTy)
 	}
 	dstIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", dstIdx, offsetReg, idxVal))
 	dstGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstGep, elemTy.IR, dstPtrReg, dstIdx))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, coerced.Ref, dstGep, elemTy.Align()))
+	e.heapStore(elemTy.IR, coerced.Ref, dstGep, elemTy.Align())
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
@@ -1058,15 +1103,13 @@ func (e *Emitter) emitTypedArraySubarray(mem *ast.MemberExpression, args []ast.E
 		if err != nil {
 			return Value{}, err
 		}
-		startN = e.emitNormalizeSliceIdx(e.coerce(startRaw, TypeI64).Ref, lenReg)
+		startN = e.emitNormalizeSliceIdx(e.convert(startRaw, TypeI64).Ref, lenReg)
 	}
 	endN := lenReg
 	if len(args) == 2 {
-		endRaw, err := e.emitExpr(args[1])
-		if err != nil {
+		if endN, err = e.emitEndIndex(args[1], lenReg); err != nil {
 			return Value{}, err
 		}
-		endN = e.emitNormalizeSliceIdx(e.coerce(endRaw, TypeI64).Ref, lenReg)
 	}
 
 	rawLen := e.freshReg()
@@ -1084,19 +1127,16 @@ func (e *Emitter) emitTypedArraySubarray(mem *ast.MemberExpression, args []ast.E
 	e.ensureViews()
 	e.emitInstr(fmt.Sprintf("call void @__kml_view_derive(ptr %s, i64 %s, ptr %s)", ptrReg, parentBytes, viewPtr))
 
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, viewPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, viewLen))
+	r1 := e.newArrayHeader(viewPtr, viewLen)
 
 	ty := ArrayOf(elemTy)
-	ty.IsTypedArray = true
+	ty.setHost(hostTypedArray, true)
 	// Preserve the receiver's element semantics (TDD-00101) — a
 	// BigInt64Array's subarray is still a BigInt64Array.
 	recvTy := e.inferExprType(mem.Object)
 	ty.BigIntElem = recvTy.BigIntElem
 	ty.Clamped = recvTy.Clamped
-	ty.IsBuffer = recvTy.IsBuffer // Buffer.prototype.subarray returns a Buffer
+	ty.setHost(hostBuffer, recvTy.IsBuffer()) // Buffer.prototype.subarray returns a Buffer
 	return Value{Ref: r1, Ty: ty}, nil
 }
 
@@ -1173,7 +1213,7 @@ func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Po
 	if err != nil {
 		return Value{}, err
 	}
-	if nVal, err = e.coerceChecked(nVal, TypeI64, args[0].GetPos(), "argument"); err != nil {
+	if nVal, err = e.convertChecked(nVal, TypeI64, args[0].GetPos(), "argument"); err != nil {
 		return Value{}, err
 	}
 	maxSlot := e.freshReg()
@@ -1206,7 +1246,7 @@ func (e *Emitter) emitBufferGrow(bufVal Value, args []ast.Expression, pos ast.Po
 		e.emitInternalThrowKind("RangeError", e.internString("SharedArrayBuffer.prototype.grow: Invalid length parameter"))
 	}
 	e.emitLabel(okL)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nVal.Ref, bufVal.Ref))
+	e.heapStore("i64", nVal.Ref, bufVal.Ref, 8)
 	return Value{Ty: TypeVoid}, nil
 }
 

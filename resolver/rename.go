@@ -90,9 +90,14 @@ type builtinMemberRef struct {
 // reservedErr (the first rejected reference). All are built once by the caller
 // (resolver.go) and passed down unchanged through the whole walk.
 type lookupTable struct {
-	names          map[string]string
-	ns             map[string]map[string]string
-	nsSource       map[string]string // a namespace alias's module specifier
+	names    map[string]string
+	ns       map[string]map[string]string
+	nsSource map[string]string // a namespace alias's module specifier
+	// nsObjects records each namespace import read as a value, mapped to
+	// the name of the module namespace object declared for it
+	// (prependNamespaceObjects); nsObjectSuffix makes that name the file's.
+	nsObjects      map[string]string
+	nsObjectSuffix string
 	builtinMembers map[string]builtinMemberRef
 	// parseTimeAliases maps an aliased import local name to the canonical
 	// builtin constructor it stands for (`U` → `URL` for
@@ -163,7 +168,27 @@ func rewriteTopLevelStmt(stmt ast.Statement, lu lookupTable) {
 	case *ast.InterfaceDeclaration:
 		rewriteInterfaceDecl(s, lu)
 	case *ast.TypeAliasDeclaration:
-		rewriteType(s.Type, newScope(), lu)
+		// Its type parameters stay bound; their constraints and defaults
+		// name types like the body does.
+		sc := newScope()
+		sc.push()
+		for _, tp := range s.TypeParams {
+			sc.bind(tp)
+		}
+		for _, c := range s.TypeParamConstraints {
+			if c != nil {
+				rewriteType(c, sc, lu)
+			}
+		}
+		for _, tp := range s.TypeParameters {
+			if tp.Constraint != nil {
+				rewriteTypeNode(tp.Constraint, sc, lu)
+			}
+			if tp.Default != nil {
+				rewriteTypeNode(tp.Default, sc, lu)
+			}
+		}
+		rewriteType(s.Type, sc, lu)
 	case *ast.EnumDeclaration:
 		sc := newScope()
 		for i := range s.Members {
@@ -200,6 +225,11 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 	for _, c := range f.TypeParamConstraints {
 		if c != nil {
 			rewriteType(c, sc, lu)
+		}
+	}
+	for _, d := range f.TypeParamDefaults {
+		if d != nil {
+			rewriteType(d, sc, lu)
 		}
 	}
 	bindParams(f.Params, sc, lu)
@@ -278,6 +308,9 @@ func rewriteArrayPatternDefaults(elems []ast.ArrayPatternElem, sc *scope, lu loo
 
 func rewriteObjectPatternDefaults(props []ast.DestructProp, sc *scope, lu lookupTable) {
 	for i := range props {
+		if k := props[i].KeyExpr; k != nil {
+			props[i].KeyExpr = rewriteExpr(k, sc, lu)
+		}
 		if d := props[i].Default; d != nil {
 			props[i].Default = rewriteExpr(d, sc, lu)
 		}
@@ -306,16 +339,8 @@ func bindObjectPattern(props []ast.DestructProp, sc *scope) {
 // correctly rather than as an outer/imported name of the same spelling.
 func rewritePatternDefaults(params []ast.Param, sc *scope, lu lookupTable) {
 	for i := range params {
-		for j := range params[i].ArrayPattern {
-			if d := params[i].ArrayPattern[j].Default; d != nil {
-				params[i].ArrayPattern[j].Default = rewriteExpr(d, sc, lu)
-			}
-		}
-		for j := range params[i].ObjectPattern {
-			if d := params[i].ObjectPattern[j].Default; d != nil {
-				params[i].ObjectPattern[j].Default = rewriteExpr(d, sc, lu)
-			}
-		}
+		rewriteArrayPatternDefaults(params[i].ArrayPattern, sc, lu)
+		rewriteObjectPatternDefaults(params[i].ObjectPattern, sc, lu)
 	}
 }
 
@@ -379,6 +404,11 @@ func rewriteClassDeclIn(c *ast.ClassDeclaration, sc *scope, lu lookupTable) {
 	for _, tc := range c.TypeParamConstraints {
 		if tc != nil {
 			rewriteType(tc, sc, lu)
+		}
+	}
+	for _, td := range c.TypeParamDefaults {
+		if td != nil {
+			rewriteType(td, sc, lu)
 		}
 	}
 
@@ -562,10 +592,8 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
 		for i := range s.Props {
-			if s.Props[i].Default != nil {
-				s.Props[i].Default = rewriteExpr(s.Props[i].Default, sc, lu)
-			}
-			sc.bind(s.Props[i].Local)
+			rewriteObjectPatternDefaults(s.Props[i:i+1], sc, lu)
+			bindObjectPattern(s.Props[i:i+1], sc)
 		}
 	case *ast.ExpressionStatement:
 		s.Expr = rewriteExpr(s.Expr, sc, lu)
@@ -682,6 +710,11 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				e.Name = m
 				break
 			}
+			// A namespace import read as a value: its module namespace object.
+			if obj, ok := lu.nsObject(e.Name); ok {
+				e.Name = obj
+				break
+			}
 			// TDD-00049 Stage 2: a named import of one built-in module
 			// member (`import { readFileSync } from 'fs'`) resolves
 			// entirely at compile time into a synthesized member access on
@@ -756,7 +789,17 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			e.Args[i] = rewriteExpr(e.Args[i], sc, lu)
 		}
 	case *ast.MemberExpression:
-		e.Object = rewriteExpr(e.Object, sc, lu)
+		// `ns.foo` resolves before ns itself would be read as a value.
+		if id, ok := e.Object.(*ast.Identifier); ok && !sc.bound(id.Name) {
+			if members, ok := lu.ns[id.Name]; ok {
+				if mangled, ok := members[e.Property]; ok {
+					return ast.NewIdentifier(mangled, e.GetPos())
+				}
+			}
+		}
+		if id, ok := e.Object.(*ast.Identifier); !ok || sc.bound(id.Name) || lu.ns[id.Name] == nil {
+			e.Object = rewriteExpr(e.Object, sc, lu)
+		}
 		// TDD-00042: `ns.foo` for a namespace-import alias `ns` resolves
 		// entirely at compile time into a direct reference to foo's
 		// mangled name — ns is never a runtime value (see the TDD's
@@ -817,6 +860,17 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 		sc.funcDepth--
 		sc.pop()
+	case *ast.ClassExpression:
+		// Its body reads the file's names, mangled; its own name, bound
+		// inside it, shields its self-references.
+		if e.Decl != nil {
+			sc.push()
+			if e.Decl.Name != "" {
+				sc.bind(e.Decl.Name)
+			}
+			rewriteClassDeclIn(e.Decl, sc, lu)
+			sc.pop()
+		}
 	case *ast.FunctionExpression:
 		// Same treatment as ArrowFunction — the body's identifiers must be
 		// rewritten against the lookup table so they match mangled names
@@ -884,6 +938,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			// property name, which codegen resolves through the value.
 			if m, ok := lu.names[e.Qualifier]; ok && !sc.bound(e.Qualifier) {
 				e.Qualifier = m
+				if len(e.QualifierPath) == 1 {
+					e.QualifierPath = []string{m} // the binding the binder resolves
+				}
 			}
 		} else if !sc.bound(e.ClassName) {
 			// A bare class, or a namespace's (`new G.P()`: a namespace's
@@ -929,6 +986,20 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	return expr
 }
 
+// nsObject names the module namespace object of local, a namespace import
+// read as a value, recording it for prependNamespaceObjects.
+func (lu lookupTable) nsObject(local string) (string, bool) {
+	if _, imported := lu.nsSource[local]; !imported || lu.nsObjects == nil {
+		return "", false
+	}
+	obj, ok := lu.nsObjects[local]
+	if !ok {
+		obj = local + lu.nsObjectSuffix
+		lu.nsObjects[local] = obj
+	}
+	return obj, true
+}
+
 func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	if ta == nil {
 		return
@@ -937,6 +1008,12 @@ func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
 	if ta.IsTypeof && len(ta.TypeofPath) > 0 && !sc.bound(ta.TypeofName) {
 		if m, ok := lu.ns[ta.TypeofName][ta.TypeofPath[0]]; ok {
 			ta.TypeofName, ta.TypeofPath = m, ta.TypeofPath[1:]
+		}
+	}
+	// `typeof ns`: the module namespace object's type.
+	if ta.IsTypeof && len(ta.TypeofPath) == 0 && !sc.bound(ta.TypeofName) {
+		if obj, ok := lu.nsObject(ta.TypeofName); ok {
+			ta.TypeofName = obj
 		}
 	}
 	if ta.IsTypeof && !sc.bound(ta.TypeofName) {
@@ -1059,6 +1136,13 @@ func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
 				// `typeof ns.x` through a namespace import: that module's x.
 				if m, ok := lu.ns[t.Name][t.Path[0]]; ok {
 					t.Name, t.Path = m, t.Path[1:]
+					break
+				}
+			}
+			if !sc.bound(t.Name) && len(t.Path) == 0 {
+				// `typeof ns`: the module namespace object's type.
+				if obj, ok := lu.nsObject(t.Name); ok {
+					t.Name = obj
 					break
 				}
 			}

@@ -20,7 +20,7 @@
 #include "casemap_tables.h"
 
 static char *str_alloc(long long n) {
-    char *base = (char *)malloc((size_t)n + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
     base[n + 8] = 0;
     return base + 8;
@@ -121,12 +121,12 @@ static char *convert(const char *src, long long n, int upper) {
     // Worst case: every code point expands to three (ﬃ → FFI is 3 bytes → 3
     // ASCII bytes; ᾀ (3 bytes) → ἈΙ (5 bytes)); 2x plus slack covers it all.
     long long cap = n * 2 + 8;
-    char *buf = (char *)malloc((size_t)cap);
+    char *buf = (char *)malloc((size_t)cap); /* scratch */
     long long o = 0;
     for (long long i = 0; i < n;) {
         unsigned int cp; int valid;
         int len = decode(s, i, n, &cp, &valid);
-        if (o + 16 > cap) { cap = cap * 2 + 16; buf = (char *)realloc(buf, (size_t)cap); }
+        if (o + 16 > cap) { cap = cap * 2 + 16; buf = (char *)realloc(buf, (size_t)cap); } /* scratch */
         if (!valid) { buf[o++] = (char)s[i]; i += len; continue; }
         const KmlCaseSpecial *sp = find_special(cp);
         if (sp) {
@@ -144,7 +144,7 @@ static char *convert(const char *src, long long n, int upper) {
     }
     char *out = str_alloc(o);
     memcpy(out, buf, (size_t)o);
-    free(buf);
+    free(buf); /* scratch */
     return out;
 }
 
@@ -167,7 +167,7 @@ static void fmt_number(double d, char *out) {
 }
 
 char *__kml_String_fromCodes(const double *codes, long long n, int codePoint, char **err) {
-    unsigned int *cps = (unsigned int *)malloc((size_t)(n > 0 ? n : 1) * sizeof(unsigned int));
+    unsigned int *cps = (unsigned int *)malloc((size_t)(n > 0 ? n : 1) * sizeof(unsigned int)); /* scratch */
     long long m = 0;
     for (long long i = 0; i < n; i++) {
         double d = codes[i];
@@ -178,7 +178,7 @@ char *__kml_String_fromCodes(const double *codes, long long n, int codePoint, ch
                 msg = str_alloc((long long)strlen("Invalid code point ") + (long long)strlen(num));
                 strcpy(msg, "Invalid code point ");
                 strcat(msg, num);
-                free(cps);
+                free(cps); /* scratch */
                 *err = msg;
                 return 0;
             }
@@ -206,7 +206,7 @@ char *__kml_String_fromCodes(const double *codes, long long n, int codePoint, ch
     char *s = str_alloc(len);
     long long o = 0;
     for (long long i = 0; i < m; i++) o += encode(cps[i], s + o);
-    free(cps);
+    free(cps); /* scratch */
     *err = 0;
     return s;
 }

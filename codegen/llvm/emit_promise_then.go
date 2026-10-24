@@ -90,7 +90,7 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 	// different ABI — wrap it in an adapter that coerces the reason (TDD-00207).
 	// A function taking its arguments as a rest: called with the one
 	// reason, so its rest holds that reason.
-	if v.Ty.IsFunc && v.Ty.FuncHasRest && len(v.Ty.FuncParams) == 1 {
+	if v.Ty.IsFunc() && v.Ty.FuncHasRest && len(v.Ty.FuncParams) == 1 {
 		ret := TypeVoid
 		if v.Ty.FuncRetType != nil {
 			ret = *v.Ty.FuncRetType
@@ -99,7 +99,7 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 			return adapted, nil
 		}
 	}
-	if v.Ty.IsFunc && !(len(v.Ty.FuncParams) >= 1 && v.Ty.FuncParams[0].IsCaught) {
+	if v.Ty.IsFunc() && !(len(v.Ty.FuncParams) >= 1 && v.Ty.FuncParams[0].IsCaught()) {
 		return e.emitRejectAdapter(v), nil
 	}
 	return v, nil
@@ -130,7 +130,21 @@ func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, 
 			// An annotated parameter (`(buf: ArrayBuffer) => …`) over a
 			// promise of `any`: the runner passes the boxed value, which an
 			// adapter unboxes to the parameter's type.
-			if isUnconstrainedDynamic(valueTy) && v.Ty.IsFunc && len(v.Ty.FuncParams) >= 1 && !v.Ty.FuncParams[0].IsDynamic {
+			if isUnconstrainedDynamic(valueTy) && v.Ty.IsFunc() && len(v.Ty.FuncParams) >= 1 && !v.Ty.FuncParams[0].IsDynamic() {
+				ret := TypeVoid
+				if v.Ty.FuncRetType != nil {
+					ret = *v.Ty.FuncRetType
+				}
+				if adapted, ok := e.emitBoxedClosureAs(v, FuncType([]Type{valueTy}, ret)); ok {
+					return adapted, nil
+				}
+			}
+			// An annotated object parameter of another layout than the
+			// promise's (`(r: { a: any }) => …` over a Promise<{ a: number }>):
+			// the value crosses through its box, which re-reads it as the
+			// parameter's type.
+			if v.Ty.IsFunc() && len(v.Ty.FuncParams) >= 1 && valueTy.IsObject() && v.Ty.FuncParams[0].IsObject() &&
+				valueTy.StructIR() != v.Ty.FuncParams[0].StructIR() {
 				ret := TypeVoid
 				if v.Ty.FuncRetType != nil {
 					ret = *v.Ty.FuncRetType
@@ -155,8 +169,8 @@ func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, 
 	}
 	// A named function whose parameter is `any` over a promise of a
 	// concrete type: an adapter boxes the value the runner passes.
-	if v.Ty.IsFunc && !v.Ty.FuncHasRest && len(v.Ty.FuncParams) >= 1 && v.Ty.FuncParams[0].IsDynamic &&
-		valueTy.IR != "void" && valueTy.IR != "" && !valueTy.IsDynamic {
+	if v.Ty.IsFunc() && !v.Ty.FuncHasRest && len(v.Ty.FuncParams) >= 1 && v.Ty.FuncParams[0].IsDynamic() &&
+		valueTy.IR != "void" && valueTy.IR != "" && !valueTy.IsDynamic() {
 		ret := TypeVoid
 		if v.Ty.FuncRetType != nil {
 			ret = *v.Ty.FuncRetType
@@ -167,7 +181,7 @@ func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, 
 	}
 	// A void source passes undefined as an `any`: a callback taking a
 	// parameter of another type (or a rest) reads it through an adapter.
-	if v.Ty.IsFunc && len(v.Ty.FuncParams) >= 1 && (valueTy.IR == "void" || valueTy.IR == "") && (v.Ty.FuncHasRest || !v.Ty.FuncParams[0].IsDynamic) {
+	if v.Ty.IsFunc() && len(v.Ty.FuncParams) >= 1 && (valueTy.IR == "void" || valueTy.IR == "") && (v.Ty.FuncHasRest || !v.Ty.FuncParams[0].IsDynamic()) {
 		ret := TypeVoid
 		if v.Ty.FuncRetType != nil {
 			ret = *v.Ty.FuncRetType
@@ -178,7 +192,7 @@ func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, 
 	}
 	// A function taking its arguments as a rest (`(...a) => …`): called
 	// with the one value, so its rest holds that value.
-	if v.Ty.IsFunc && v.Ty.FuncHasRest && len(v.Ty.FuncParams) == 1 && valueTy.IR != "void" && valueTy.IR != "" {
+	if v.Ty.IsFunc() && v.Ty.FuncHasRest && len(v.Ty.FuncParams) == 1 && valueTy.IR != "void" && valueTy.IR != "" {
 		ret := TypeVoid
 		if v.Ty.FuncRetType != nil {
 			ret = *v.Ty.FuncRetType
@@ -213,7 +227,7 @@ func (e *Emitter) isNonCallableThenArg(arg ast.Expression) bool {
 		return true
 	}
 	t := e.inferExprType(arg)
-	return !t.IsFunc && !t.IsDynamic
+	return !t.IsFunc() && !t.IsDynamic()
 }
 
 // emitPromiseThen handles a `.then`/`.catch`/`.finally` call on a Promise value.
@@ -229,7 +243,12 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	if err != nil {
 		return Value{}, err
 	}
-	if !pVal.Ty.IsPromise {
+	if !pVal.Ty.IsPromise() {
+		// A value only known as `any` here (a method read off a prototype
+		// object, called): its own `then`, looked up at run time.
+		if pVal.Ty.IsDynamic() && into == "" {
+			return e.emitDynAnyMethodCall(pVal, kind, args, pos)
+		}
 		return Value{}, fmt.Errorf("%d:%d: .%s is only supported on a Promise", pos.Line, pos.Col, kind)
 	}
 	// A raw fetch()'s Promise<Response> is a still-pending fetch handle, not a
@@ -241,11 +260,21 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	// chained `.finally`/`.then` that itself settles to a Response (e.g.
 	// `fetch(u).finally(f).then(g)`) returns a *task* promise that also looks
 	// IsResponse — it must not be re-driven as a fetch handle.
-	if !pVal.Ty.PromiseTask && pVal.Ty.PromiseType != nil && pVal.Ty.PromiseType.IsResponse && !pVal.Ty.PromiseResolved {
+	if !pVal.Ty.PromiseTask && pVal.Ty.PromiseType != nil && pVal.Ty.PromiseType.IsResponse() && !pVal.Ty.PromiseResolved {
 		pVal = e.emitFetchHandleToPendingPromise(pVal.Ref)
 	}
 	if !pVal.Ty.PromiseTask {
 		return Value{}, fmt.Errorf("%d:%d: .%s is currently supported only on a promise from a may-suspend async function or a fetch (TDD-00083 Stage 3)", pos.Line, pos.Col, kind)
+	}
+	// An onFulfilled literal taking `any` receives an array value boxed
+	// as `any` holds it (`{}[]`'s pointers, read as `any[]`). Only a literal: a
+	// passed function's first parameter may be a rest (`console.log`).
+	if kind == "then" && len(args) >= 1 && anyAnnotatedFirstParam(args[0]) {
+		if ft := e.inferExprType(args[0]); ft.IsFunc() && len(ft.FuncParams) > 0 && ft.FuncParams[0].IsDynamic() {
+			if want := PromiseOf(ft.FuncParams[0]); promiseElemsNeedConvert(pVal.Ty, want) {
+				pVal = e.convert(pVal, want)
+			}
+		}
 	}
 	innerTy := TypeVoid
 	if pVal.Ty.PromiseType != nil {
@@ -295,7 +324,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 				return Value{}, err
 			}
 			onF, fVal = v.Ref, v
-			if t, ok := e.callbackReturnType(args[0], innerTy); ok {
+			if t, ok := emittedCallbackReturn(v); ok {
+				retTy = t
+			} else if t, ok := e.callbackReturnType(args[0], innerTy); ok {
 				retTy = t
 			}
 		} else {
@@ -307,7 +338,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 				return Value{}, err
 			}
 			onR, rVal = v2.Ref, v2
-			rTy, hasR = e.callbackReturnType(args[1], TypeCaught)
+			if rTy, hasR = emittedCallbackReturn(v2); !hasR {
+				rTy, hasR = e.callbackReturnType(args[1], TypeCaught)
+			}
 		}
 	case "catch":
 		if len(args) < 1 {
@@ -324,7 +357,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 			}
 			onR, rVal = v.Ref, v
 			retTy = innerTy // the fulfilled path passes the source value through
-			rTy, hasR = e.callbackReturnType(args[0], TypeCaught)
+			if rTy, hasR = emittedCallbackReturn(v); !hasR {
+				rTy, hasR = e.callbackReturnType(args[0], TypeCaught)
+			}
 			if hasR && !thenPathsDiffer(retTy, rTy) {
 				retTy = rTy
 			}
@@ -337,13 +372,22 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		if err != nil {
 			return Value{}, err
 		}
+		if v.Ty.IsFunc() && len(v.Ty.FuncParams) > 0 {
+			// onFinally is called with no arguments: a function taking some
+			// (its own `arguments` included) is called so, from a closure
+			// taking none.
+			call := ast.NewCallExpression(e.bindValue(v, pos), nil, pos)
+			if v, err = e.emitExpr(ast.NewArrowFunction(nil, nil, call, nil, pos)); err != nil {
+				return Value{}, err
+			}
+		}
 		onFin = v.Ref
 		retTy = innerTy // finally passes the source value through unchanged
 		// An onFinally returning a promise is waited for (and its rejection
 		// taken), as the spec's thenFinally does.
-		if v.Ty.IsFunc && v.Ty.FuncRetType != nil && v.Ty.FuncRetType.IsPromise {
+		if v.Ty.IsFunc() && v.Ty.FuncRetType != nil && v.Ty.FuncRetType.IsPromise() {
 			rt := *v.Ty.FuncRetType
-			finAwait = rt.PromiseTask || rt.PromiseType == nil || !rt.PromiseType.IsResponse
+			finAwait = rt.PromiseTask || rt.PromiseType == nil || !rt.PromiseType.IsResponse()
 		}
 	}
 
@@ -371,9 +415,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	// yields later()'s value, not a promise). A raw fetch handle returned from
 	// the callback is bridged to a task promise first, inside the runner.
 	adopt := 0
-	if retTy.IsPromise {
+	if retTy.IsPromise() {
 		adopt = 1
-		if !retTy.PromiseTask && retTy.PromiseType != nil && retTy.PromiseType.IsResponse && !retTy.PromiseResolved {
+		if !retTy.PromiseTask && retTy.PromiseType != nil && retTy.PromiseType.IsResponse() && !retTy.PromiseResolved {
 			adopt = 2
 			e.ensureFetchSlotToPromise()
 		}
@@ -390,11 +434,11 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 
 	// env = { ptr p, ptr onF, ptr onR, ptr onFin, ptr q, ptr runner }
 	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 48)", env))
+	e.heapMallocInto(env, "48")
 	storeEnv := func(idx int, ref string) {
 		gp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 %d", gp, env, idx))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ref, gp))
+		e.heapStore("ptr", ref, gp, 8)
 	}
 	storeEnv(0, pVal.Ref)
 	storeEnv(1, onF)
@@ -407,7 +451,7 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	// when a handler throws.
 	runnerSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 5", runnerSlot, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", runner, runnerSlot))
+	e.heapStore("ptr", runner, runnerSlot, 8)
 	if adopt != 0 {
 		// Q's value type is what the returned promise resolves to.
 		if retTy.PromiseType != nil {
@@ -421,11 +465,11 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	clo := e.freshReg()
 	cfp := e.freshReg()
 	cep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.heapMallocInto(clo, "16")
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
-	e.emitInstr(fmt.Sprintf("store ptr @__kml_then_guard, ptr %s, align 8", cfp))
+	e.heapStore("ptr", "@__kml_then_guard", cfp, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, cep))
+	e.heapStore("ptr", env, cep, 8)
 
 	e.emitAttachPromiseReaction(pVal.Ref, clo)
 
@@ -466,14 +510,14 @@ func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 	oldHead := e.freshReg()
 	nodeClo := e.freshReg()
 	nodeNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", node))
+	e.heapMallocInto(node, "16")
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, prom))
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, rxP))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", nodeClo, node))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", clo, nodeClo))
+	e.heapStore("ptr", clo, nodeClo, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", nodeNext, node))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", oldHead, nodeNext))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", node, rxP))
+	e.heapStore("ptr", oldHead, nodeNext, 8)
+	e.heapStore("ptr", node, rxP, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 }
@@ -566,18 +610,11 @@ func thenStoreResultIR(retTy Type, sfx string) (produce func(callExpr string) st
 	// An array result is checked before the IR switch: an array's IR is "ptr"
 	// (the header-pointer model), so it would otherwise fall into the `case
 	// "ptr"` scalar-pointer arm. The callback returns a header pointer (`ret ptr`,
-	// TDD-00213 Stage 3); deref it for the data pointer (→ v0 bits) and length (→
-	// v1), the two slots loadPromiseValue reads an array back from.
-	if retTy.IsArray {
+	// TDD-00213 Stage 3), which v0 holds as loadPromiseValue reads it back.
+	if retTy.IsArray() {
 		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
-			"  %rvdp" + sfx + " = getelementptr { ptr, i64 }, ptr %rv" + sfx + ", i32 0, i32 0\n" +
-				"  %rvd" + sfx + " = load ptr, ptr %rvdp" + sfx + ", align 8\n" +
-				"  %rvpi" + sfx + " = ptrtoint ptr %rvd" + sfx + " to i64\n" +
-				"  %rvlp" + sfx + " = getelementptr { ptr, i64 }, ptr %rv" + sfx + ", i32 0, i32 1\n" +
-				"  %rvl" + sfx + " = load i64, ptr %rvlp" + sfx + ", align 8\n" + v0slot +
-				"  store i64 %rvpi" + sfx + ", ptr %qv0" + sfx + ", align 8\n" +
-				"  %qv1" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
-				"  store i64 %rvl" + sfx + ", ptr %qv1" + sfx + ", align 8\n" + settle
+			"  %rvpi" + sfx + " = ptrtoint ptr %rv" + sfx + " to i64\n" + v0slot +
+				"  store i64 %rvpi" + sfx + ", ptr %qv0" + sfx + ", align 8\n" + settle
 	}
 	// A nullable-scalar result: payload bits → v0, presence → v1 (ADR-01065).
 	if isNullableScalar(retTy) {
@@ -656,23 +693,15 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	switch {
 	case argIR == "":
 		fCall = loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, i64 %d)", thenCallRetIR(retTy), nbUndefined))
-	case argTy.IsArray:
+	case argTy.IsArray():
 		// An array callback argument is passed by the two-slot array-param ABI
-		// (`ptr <header>, i64 <len>` — bindArrayParam): the source promise stores
-		// the array's data pointer in v0 and its length in v1 (loadPromiseValue),
-		// so mint a fresh {data,len} header from them and pass the header pointer
-		// plus the length. Without this `.then` passed the raw data pointer as the
-		// header, so the callback read `header->data` off the first element and
-		// crashed (silently-empty before the header model).
-		e.ensureMalloc()
-		arrValLoad := "  %adata = inttoptr i64 %v0 to ptr\n" +
-			"  %acell = call ptr @malloc(i64 24)\n" +
-			fmt.Sprintf("  store i64 %d, ptr %%acell, align 8\n", e.arrayHeaderWord()) +
-			"  %ahdr = getelementptr i8, ptr %acell, i64 8\n" +
-			"  store ptr %adata, ptr %ahdr, align 8\n" +
+		// (`ptr <header>, i64 <len>` — bindArrayParam): v0 holds the header
+		// of the array that settled the source promise (storePromiseValue), so
+		// the callback shares it.
+		arrValLoad := "  %ahdr = inttoptr i64 %v0 to ptr\n" +
 			"  %alenp = getelementptr { ptr, i64 }, ptr %ahdr, i32 0, i32 1\n" +
-			"  store i64 %v1, ptr %alenp, align 8\n"
-		fCall = arrValLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, ptr %%ahdr, i64 %%v1)", thenCallRetIR(retTy)))
+			"  %alen = load i64, ptr %alenp, align 8\n"
+		fCall = arrValLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, ptr %%ahdr, i64 %%alen)", thenCallRetIR(retTy)))
 	default:
 		fCall = valLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, %s %%val)", thenCallRetIR(retTy), argIR))
 	}
@@ -719,7 +748,7 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	// The callback branches either settle Q with the returned value and drain, or
 	// — when the callback returned a promise — hand Q to the adoption job and
 	// leave it pending (draining a pending promise would fire its reactions early).
-	dynRet := adopt == 0 && retTy.IsDynamic && !retTy.IsArray && StructFieldIR(retTy) == "i64"
+	dynRet := adopt == 0 && retTy.IsDynamic() && !retTy.IsArray() && StructFieldIR(retTy) == "i64"
 	if dynRet {
 		e.ensurePromiseResolveAny()
 	}
@@ -809,9 +838,9 @@ func thenCallRetIR(retTy Type) string {
 	if retTy.IR == "" || retTy.IR == "void" {
 		return "void"
 	}
-	if retTy.IsArray {
+	if retTy.IsArray() {
 		// An array is returned by the header-pointer ABI (`ret ptr`, TDD-00213
-		// Stage 3), not the {ptr,i64} aggregate.
+		// Stage 3).
 		return "ptr"
 	}
 	if isNullableScalar(retTy) {
@@ -854,10 +883,10 @@ func (e *Emitter) ensurePromiseFinallyWait() {
 // settle to values Q cannot hold in one representation. A promise-returning
 // handler (flattened by adoption) keeps its own handling.
 func thenPathsDiffer(a, b Type) bool {
-	if a.IsPromise || b.IsPromise {
+	if a.IsPromise() || b.IsPromise() {
 		return false
 	}
-	if a.IsDynamic && b.IsDynamic {
+	if a.IsDynamic() && b.IsDynamic() {
 		return false
 	}
 	return !reflect.DeepEqual(a, b) && !sameShortCircuitType(a, b)
@@ -870,7 +899,7 @@ func thenIdentityCallback(pos ast.Pos) ast.Expression {
 
 // closureReturningAny is the handler closure v adapted to box its result.
 func (e *Emitter) closureReturningAny(v Value) (Value, bool) {
-	if !v.Ty.IsFunc {
+	if !v.Ty.IsFunc() {
 		return Value{}, false
 	}
 	tgt := FuncType(v.Ty.FuncParams, TypeAny)
@@ -899,4 +928,30 @@ func (e *Emitter) thenCallbackFromAny(v Value, param Type) (Value, bool) {
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isFn, isRef, isDyn))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", out, isFn, c.Ref))
 	return Value{Ref: out, Ty: c.Ty}, true
+}
+
+// emittedCallbackReturn is the return type of a callback as it was
+// compiled (a closure's own FuncRetType, void when it returns nothing):
+// the runner must call it by that ABI.
+func emittedCallbackReturn(v Value) (Type, bool) {
+	if !v.Ty.IsFunc() || v.Ty.FuncRetType == nil {
+		return Type{}, false
+	}
+	if t := *v.Ty.FuncRetType; t.IR != "" {
+		return t, true
+	}
+	return TypeVoid, true
+}
+
+// anyAnnotatedFirstParam reports an arrow or function expression whose
+// first parameter is written `: any`.
+func anyAnnotatedFirstParam(x ast.Expression) bool {
+	var ps []ast.Param
+	switch f := x.(type) {
+	case *ast.ArrowFunction:
+		ps = f.Params
+	case *ast.FunctionExpression:
+		ps = f.Params
+	}
+	return len(ps) > 0 && !ps[0].Rest && ps[0].Type != nil && ps[0].Type.Name == "any"
 }

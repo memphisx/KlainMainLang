@@ -35,14 +35,11 @@ func (e *Emitter) UsesFetch() bool { return e.usedFetch || e.usedFetchAsync }
 // emitter; they are the same for every program, so its object is too: the
 // link drops the sections a program does not use (DeadStripFlags).
 func (e *Emitter) FetchCFlags() []string {
-	connOffs, _ := irStructOffsets("{ i64, ptr, ptr, ptr, ptr }")
 	rsOffs, _ := irStructOffsets(rstreamStructIR)
 	return append(append([]string{},
 		fmt.Sprintf("-DKML_KIND_TYPEERR=%dLL", errorTypeIDStored(errorKindIDs["TypeError"])),
 		fmt.Sprintf("-DKML_KIND_DOMEXC=%dLL", errorTypeIDStored(errorKindIDs["DOMException"])),
 		fmt.Sprintf("-DKML_ERR_FLAG=%dLL", errorTypeIDFlag),
-		fmt.Sprintf("-DKML_FETCH_CONN_PFETCH=%d", connOffs[3]),
-		fmt.Sprintf("-DKML_FETCH_CONN_PGROUP=%d", connOffs[4]),
 		fmt.Sprintf("-DKML_RS_STATE=%d", rsOffs[0]),
 		fmt.Sprintf("-DKML_RS_RH=%d", rsOffs[14]),
 		fmt.Sprintf("-DKML_RS_RL=%d", rsOffs[15])), DeadStripFlags(e.exportsRuntime())...)
@@ -133,7 +130,6 @@ func (e *Emitter) ensureFetchAsync() {
 	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_remove_handle(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare i32 @curl_multi_timeout(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i32 @curl_multi_perform(ptr noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @curl_multi_info_read(ptr noundef, ptr noundef)")
 	// The one CURLM handle, created on first use; the HTTP client reads it too.
 	e.emitGlobal("@__kml_curl_multi = external thread_local global ptr, align 8")
@@ -196,28 +192,6 @@ func (e *Emitter) ensureCurlSlist() {
 	e.usedCurlSlist = true
 	e.requireLink("curl")
 	e.emitGlobal("declare ptr @curl_slist_append(ptr noundef, ptr noundef)")
-}
-
-// ensurePromiseCombinators declares the group-wait primitives
-// Promise.all/.race/.allSettled/.any (emit_promise.go, ADR-00073) use to wait
-// on N pending fetches at once. A group is a malloc'd { ptr membersArr, i64
-// count, i64 mode } (mode 0 = every member done, 1 = the first, 2 = the first
-// to transport-succeed or all done); membersArr points at the same pending
-// structs the Promise<Response> slots hold.
-func (e *Emitter) ensurePromiseCombinators() {
-	if e.usedPromiseCombinators {
-		return
-	}
-	e.usedPromiseCombinators = true
-	e.ensureFetchAsync()
-	e.ensureMalloc()
-	e.ensureExceptionHelpers()
-	e.ensurePendingFinishSettled()
-	e.emitGlobal(`declare zeroext i1 @__kml_group_satisfied(ptr)
-declare i64 @__kml_first_done_index(ptr)
-declare i64 @__kml_first_success_index(ptr)
-declare void @__kml_group_throw_aggregate(ptr)
-declare void @__kml_await_group_wait(ptr)`)
 }
 
 // ensurePendingFinishSettled declares __kml_pending_finish_settled(ptr

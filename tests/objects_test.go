@@ -337,15 +337,15 @@ console.log(result.a)
 // Object.fromEntries with a Symbol or object key (which real JS runs through
 // ToPropertyKey) isn't representable in this string-keyed dynamic-object subset
 // — reject cleanly rather than emitting an invalid store of the non-string key.
-func TestE2EObjectFromEntriesNonStringKeyRejected(t *testing.T) {
-	mustCompileError(t, `
-const key = Symbol()
+// A symbol key stays a symbol; an object key is its toString().
+func TestE2EObjectFromEntriesSymbolAndObjectKeys(t *testing.T) {
+	assertSameAsNode(t, `export {}
+const key = Symbol("s")
 const result = Object.fromEntries([[key, 'value']])
-`, "requires string keys")
-	mustCompileError(t, `
-const key = { toString() { return 'key' } }
-const result = Object.fromEntries([[key, 'value']])
-`, "requires string keys")
+console.log(result, result[key])
+const okey = { toString() { return 'key' } }
+console.log(Object.fromEntries([[okey, 'value']]))
+`)
 }
 
 func TestE2EObjectFreezeBlocksFieldWrite(t *testing.T) {
@@ -478,17 +478,19 @@ try {
 `, "TypeError")
 }
 
-func TestE2EObjectAssignUnknownFieldRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// A source property the target's type lacks is grafted on, as in Node; the
+// result (T & U) reads it (ADR-01714).
+func TestE2EObjectAssignUnknownField(t *testing.T) {
+	assertOutput(t, `
 interface A { x: number }
 interface B { x: number; z: number }
 const a: A = { x: 1 }
 const b: B = { x: 2, z: 3 }
-Object.assign(a, b)
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for Object.assign with a source field not present on target's type, got none")
-	}
+const r = Object.assign(a, b)
+console.log(r.x, r.z, JSON.stringify(a), r === a)
+const e = Object.assign(new Error("m"), { code: "E1" })
+console.log(e.message, e.code, e instanceof Error)
+`, "2 3 {\"x\":2,\"z\":3} true\nm E1 true")
 }
 
 // --- enum ---
@@ -500,6 +502,45 @@ console.log(Direction.Up)
 console.log(Direction.Down)
 console.log(Direction.Right)
 `, "0\n1\n3")
+}
+
+// A computed member is evaluated where the enum is declared, a bare member
+// name in it reading that member; a mixed enum keeps reverse entries for
+// its numeric members; 1e999 is Infinity (outputs from Node's TypeScript
+// transform).
+func TestE2EEnumComputedAndMixedMembers(t *testing.T) {
+	assertOutput(t, `
+function f(x: number) { return x + 1; }
+enum E { A = f(1), B = 10, C }
+const k: E = E.A;
+console.log(E[E.A], E[k], E, Object.keys(E));
+function g(e: E) { return e === E.A; }
+console.log(g(E.A), g(E.C));
+enum M { X = 1, Y = "y" }
+let m: M = M.Y; console.log(m, M, M[1]);
+m = M.X; console.log(m === M.X);
+enum E20 { A = "foo".length, B = A + 1, C = +"123", D = Math.floor(2.5) }
+console.log(E20.A, E20.B, E20.C, E20.D, E20[4]);
+enum F { P = 1e999 }
+console.log(F.P, F);
+`, "A A { '2': 'A', '10': 'B', '11': 'C', A: 2, B: 10, C: 11 } [ '2', '10', '11', 'A', 'B', 'C' ]\n"+
+		"true false\n"+
+		"y { '1': 'X', X: 1, Y: 'y' } X\n"+
+		"true\n"+
+		"3 4 123 2 B\n"+
+		"Infinity { P: Infinity, Infinity: 'P' }")
+}
+
+// A template-literal key reads a member like a string literal; a run-time
+// key that is not a number indexes the enum object, forward or reverse.
+func TestE2EEnumRuntimeAndTemplateKeys(t *testing.T) {
+	assertOutput(t, `
+enum MyEnumType { foo, bar }
+const _arr: any[] = [{ key: 'foo' }, { key: 'bar' }, { key: 'zzz' }];
+console.log(_arr.map(o => MyEnumType[o.key]), MyEnumType[_arr[0].key + ""]);
+enum En { A, B, C, D }
+console.log(En[`+"`C`"+`], En["\u{44}"]);
+`, "[ 0, 1, undefined ] 0\n2 3")
 }
 
 func TestE2EEnumExplicitValues(t *testing.T) {
@@ -733,8 +774,10 @@ console.log(obj["a"])
 `, "1\n2\n1")
 }
 
+// (Writing and reading a key the literal lacks is TS7053/TS2339 under tsc:
+// a JavaScript program.)
 func TestE2EComputedPropertyKeyWriteAndCompoundAssign(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 const k = "b"
 const obj = { a: 1, [k]: 2 }
 obj.a = 10
@@ -992,20 +1035,17 @@ console.log(p.y);
 `, "undefined")
 }
 
-func TestE2EClassFieldUnassignedInConstructorReadsZero(t *testing.T) {
-	// This compiler doesn't verify every field is assigned on every path
-	// through the constructor (no definite-assignment check) — an
-	// under-assigned field must read back a deterministic zero, same
-	// reasoning and fix as the optional-object-field case above.
+func TestE2EClassFieldUnassignedInConstructorReadsUndefined(t *testing.T) {
+	// A field the constructor never assigns is undefined, as in Node.
 	assertOutput(t, `
 class Box {
   x: number;
-  y: number;
+  y!: number;
   constructor() { this.x = 1; }
 }
 const b = new Box();
 console.log(b.x, b.y);
-`, "1 0")
+`, "1 undefined")
 }
 
 // --- Object destructuring default values (`{a = expr} = obj`, ADR-00158) ---
@@ -1373,28 +1413,34 @@ console.log(obj.get());
 `, "5")
 }
 
-func TestE2EObjectLiteralMethodShorthandThisRejected(t *testing.T) {
-	// V1 scope: a method-shorthand value desugars to a plain anonymous
-	// function expression (TDD-00060), which has no `this` binding at all —
-	// unlike a class method, an object literal has no static nominal type to
-	// give `this` a known shape, and no dynamic this-binding machinery
-	// exists yet. Confirmed this fails cleanly (not a silent miscompile).
-	_, err := parseAndCompile(`
+// `this` in a method shorthand is the receiver it is called on: the object
+// itself, another object holding the method, the target of call/bind, or
+// undefined called bare; an interface's method slot keeps it.
+func TestE2EObjectLiteralMethodShorthandThis(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
 const counter = {
-    count: 0,
-    increment() {
-        this.count = this.count + 1;
-        return this.count;
-    }
-};
-console.log(counter.increment());
+  count: 0,
+  increment() { this.count = this.count + 1; return this.count },
+  twice(): number { this.increment(); return this.increment() },
+  later() { return [1, 2].map(x => x + this.count) },
+  name: "c",
+  describe() { return this.name + ":" + this.count },
+}
+console.log(counter.increment(), counter.twice(), counter.later(), counter.describe())
+const f = counter.describe
+try { f() } catch (e: any) { console.log(e.constructor.name, e.message) }
+interface Greeter { greeting: string; greet(who: string): string }
+const g: Greeter = { greeting: "hi", greet(who) { return this.greeting + " " + who } }
+console.log(g.greet("Thessaloniki"))
+const other = { greeting: "yo", greet: g.greet }
+console.log(other.greet("x"))
+const o2 = { v: 3, get() { return this.v } }
+console.log(o2.get.call({ v: 9 }), o2.get.bind({ v: 4 })(), o2.get())
+const arr = [{ n: 1, d() { return this.n * 2 } }, { n: 5, d() { return this.n * 2 } }]
+console.log(arr.map(a => a.d()))
+console.log(JSON.stringify(counter), Object.keys(counter))
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for 'this' inside an object-literal method, got none")
-	}
-	if !strings.Contains(err.Error(), "'this' is only valid inside a method or constructor body") {
-		t.Fatalf("expected the 'this' is only valid... error, got: %v", err)
-	}
 }
 
 // A nullable-scalar object/interface field (TDD-00064 Stage 3) carries a
@@ -1525,20 +1571,14 @@ o.n = 5;
 	}
 }
 
-// V1 boundary: an accessor-bearing literal can't be assigned to a differently
-// shaped structural object type (its accessors are methods, not fields).
-func TestE2EObjectLiteralAccessorStructuralAssignRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// An accessor-bearing literal behind a structural type reads its accessor
+// through its layout (ADR-01725).
+func TestE2EObjectLiteralAccessorStructuralAssign(t *testing.T) {
+	assertSameAsNode(t, `
 const o = { _n: 1, get n(): number { return this._n; } };
 const p: { n: number } = o;
 console.log(p.n);
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for the structural assignment, got none")
-	}
-	if !strings.Contains(err.Error(), "getter/setter") {
-		t.Fatalf("expected the accessor-shape error, got: %v", err)
-	}
 }
 
 // ADR-00608: constant-key bracket access reads/writes a fixed object's field.
@@ -1591,20 +1631,14 @@ console.log(first);
 `, "1 two\nzero")
 }
 
-// A runtime-valued computed key has no static field to bind — a clean rejection.
-func TestE2EObjectDestructuringComputedRuntimeKeyRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// A runtime-valued computed key is read through the value (ADR-01793).
+func TestE2EObjectDestructuringComputedRuntimeKey(t *testing.T) {
+	assertOutput(t, `
 const key = "a";
 const obj = { a: 1 };
 const { [key]: x } = obj;
-console.log(x);
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a runtime computed destructuring key, got none")
-	}
-	if !strings.Contains(err.Error(), "constant string or number") {
-		t.Fatalf("expected the constant-key error, got: %v", err)
-	}
+console.log(x + 1);
+`, "2\n")
 }
 
 // --- Optional fields are real `T | undefined` (TDD-00187 Stage 2) ---
@@ -1731,4 +1765,182 @@ console.log(d.a, d[k])
 const home = process.env.KML_NO_SUCH_VAR;
 if (home) console.log(home.length); else console.log("unset")
 `, "1 2\nunset")
+}
+
+// Generator and async-generator method shorthands read `this` as the
+// receiver; a sync and an async generator of one layout keep their own
+// next() when boxed.
+func TestE2EObjectLiteralGeneratorMethodThis(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const o = {
+  base: 10,
+  *g(n: number) { for (let i = 0; i < n; i++) yield this.base + i },
+  async *ag(n: number) { for (let i = 0; i < n; i++) yield this.base * i },
+  *[Symbol.iterator]() { yield this.base; yield this.base + 1 },
+}
+console.log([...o.g(2)], [...o])
+const other = { base: 100, g: o.g }
+console.log([...other.g(2)])
+console.log([...o.g.call({ base: 7 }, 2)])
+const bare = o.g
+try { console.log([...bare(1)]) } catch (e: any) { console.log(e.constructor.name, e.message) }
+async function main() {
+  for await (const v of o.ag(3)) console.log("ag", v)
+}
+main()
+`)
+}
+
+// for...in walks the prototype chain (shadowing, a non-enumerable shadow, integer-key order); Object.create takes a descriptor map.
+func TestE2EForInPrototypeChainAndCreateDescriptors(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const top: any = { t: 1, shared: "top", 2: "two" }
+const mid: any = Object.create(top)
+mid.m = 1; mid.shared = "mid"; mid[1] = "one"
+Object.defineProperty(mid, "t", { value: 9, enumerable: false })
+const low: any = Object.create(mid)
+low.l = 1; low[0] = "zero"
+const ks: string[] = []
+for (const k in low) ks.push(k + "=" + low[k])
+console.log(ks.join(" "))
+console.log(Object.keys(low))
+const np: any = Object.create(Object.create(null, {}))
+np.x = 1
+for (const k in np) console.log("np", k)
+const plain: any = { a: 1 }
+for (const k in plain) console.log("plain", k)
+const d: any = Object.create({ base: 1 }, { own: { value: 2, enumerable: true }, hidden: { value: 3 }, acc: { get() { return 4 }, enumerable: true } })
+const dk: string[] = []
+for (const k in d) dk.push(k)
+console.log(dk, d.hidden, d.acc, Object.getOwnPropertyDescriptor(d, "hidden"))
+console.log(Object.create(null, undefined))
+`)
+}
+
+// OrdinarySetPrototypeOf: the same prototype succeeds, a non-extensible object refuses another (Reflect false, Object TypeError), a cycle refuses.
+func TestE2ESetPrototypeOfNonExtensible(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const o: any = { a: 1 }
+Object.preventExtensions(o)
+console.log(Reflect.setPrototypeOf(o, null), Reflect.setPrototypeOf(o, Object.getPrototypeOf(o)))
+try { Object.setPrototypeOf(o, {}) } catch (e: any) { console.log(e.constructor.name, e.message) }
+const n: any = Object.create(null)
+Object.freeze(n)
+console.log(Reflect.setPrototypeOf(n, null), Object.setPrototypeOf(n, null) === n)
+const a: any = {}, b: any = Object.create(a)
+try { Object.setPrototypeOf(a, b) } catch (e: any) { console.log(e.constructor.name, e.message) }
+console.log(Reflect.setPrototypeOf(a, b))
+`)
+}
+
+// Reflect boolean forms on a frozen object; for...in over Object.create; a WeakSet of symbols.
+func TestE2EReflectFlagsAndWeakSymbol(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const o: any = { a: 1 }
+Object.freeze(o)
+console.log(Reflect.set(o, "a", 2), Reflect.deleteProperty(o, "a"), Reflect.setPrototypeOf(o, null), o.a)
+const p: any = Object.create({ inherited: 1, z: 2 })
+p.own = 3
+const ks: string[] = []
+for (const k in p) ks.push(k)
+console.log(ks)
+const wm = new WeakMap<object, number>()
+const s = Symbol("w")
+const wk = {}
+wm.set(wk, 1)
+console.log(wm.get(wk), wm.has({}))
+const ws = new WeakSet<symbol>([s])
+console.log(ws.has(s))
+`)
+}
+
+// An object literal asserted to an object type is built as it (its optional
+// fields absent); an inferred-array index whose object is emitted boxed (a
+// dictionary member's method result) reads it dynamically.
+func TestE2EObjectLiteralAssertionAndBoxedIndexBase(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const e = {} as { xs?: number[]; n?: number }
+console.log(e.xs, e.n, JSON.stringify(e))
+console.log(({} as { xs?: number[] }).xs?.slice(1)[0])
+const p = { a: 1 } as { a: number; b?: string }
+p.b = "x"
+console.log(p, Object.keys(e))
+interface H { [k: string]: string | string[] | undefined; host?: string }
+const h: H = { host: "a:1" }
+console.log(h.host?.split(":")[0])
+const d: Record<string, string | undefined> = { x: "p:q" }
+console.log(d.x?.split(":")[1], d.y?.split(":")[0])
+`)
+}
+
+// TestE2EFrozenObjectKeepsItsType: the integrity level lives in the header
+// word (ADR-01831), so a frozen or sealed object still passes instanceof,
+// dispatches virtually, inspects and stringifies as before.
+func TestE2EFrozenObjectKeepsItsType(t *testing.T) {
+	assertSameAsNode(t, `export {}
+class A { x = 1; hi(): string { return "A" + this.x; } }
+class B extends A { y = 2; hi(): string { return "B" + this.y; } }
+const b: A = Object.freeze(new B());
+console.log(b instanceof A, b instanceof B, b.hi(), Object.isFrozen(b), Object.isSealed(b), Object.isExtensible(b));
+console.log(b, JSON.stringify(b), Object.keys(b));
+try { (b as any).x = 5; } catch (e: any) { console.log(e.constructor.name, e.message); }
+console.log(b.x);
+const o = { p: 1, q: "s" };
+Object.seal(o);
+o.p = 7;
+console.log(o, Object.isSealed(o), Object.isFrozen(o));
+Object.freeze(o);
+try { o.p = 9; } catch (e: any) { console.log(e.message); }
+console.log(o.p, Object.isFrozen(o));
+const arr = [1, 2, 3];
+Object.freeze(arr);
+try { arr.push(4); } catch (e: any) { console.log(e.message); }
+console.log(arr, Array.isArray(arr), arr.length, Object.isFrozen(arr));
+const err = Object.freeze(new TypeError("boom"));
+console.log(err instanceof TypeError, err instanceof Error, err.message);
+const plain = { z: 1 };
+Object.preventExtensions(plain);
+console.log(Object.isExtensible(plain), Object.isSealed(plain));
+const fresh = new B();
+console.log(Object.isFrozen(fresh), fresh.hi());
+`)
+}
+
+// An object literal's method reading `this` keeps its receiver through
+// every call form, optional ones included, and its result is typed from
+// the literal (`this._b` read before `_b` is declared).
+func TestE2EObjectLiteralMethodThisOptionalCalls(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+const a = {
+    b() { return this._b; },
+    _b: { c: 42 },
+};
+console.log(a.b().c, a?.b().c, (a?.b)().c, a.b?.().c, (a.b)?.().c, a?.b?.().c, (a?.b)?.().c);
+const q = a;
+console.log(q.b().c + 1, a.b?.());
+`)
+}
+
+func TestE2EEnumConstantExpressions(t *testing.T) {
+	// A member's value is TypeScript's constant evaluation of its
+	// initializer, a number like any other: fractions, negatives, operators
+	// and earlier members. The enum read as a value is its object, numeric
+	// members mapped back to their names; an unknown value maps to undefined.
+	assertOutput(t, `
+enum K { A = 1, B = 2.5, C = 2 ** 53 + 1, D = -3 }
+console.log(K.A / 2, K.B, K.B * 2, K.C, K.D % 2);
+enum F { X = 1 << 30, Y = X * 8, N = ~X }
+console.log(F.Y, F.N);
+enum S { X = "x", Z = X + "!" }
+console.log(S.Z);
+enum R { A, B = 5, C }
+console.log(R[5], R[6], R[99] === undefined, Object.keys(R));
+console.log(K);
+`, "0.5 2.5 5 9007199254740992 -1\n8589934592 -1073741825\nx!\nB C true [ '0', '5', '6', 'A', 'B', 'C' ]\n{\n  '1': 'A',\n  A: 1,\n  B: 2.5,\n  '2.5': 'B',\n  C: 9007199254740992,\n  '9007199254740992': 'C',\n  D: -3,\n  '-3': 'D'\n}")
 }

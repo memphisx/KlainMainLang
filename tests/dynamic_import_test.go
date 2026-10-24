@@ -128,6 +128,25 @@ func TestE2EDynamicImportNonLiteralRejected(t *testing.T) {
 	}
 }
 
+// TestE2EDynamicImportBuiltinRejected: import() of any builtin module, one
+// written in TypeScript (`node:path`) or a `node:`-prefixed one, is the
+// clean compile error the bare names give.
+func TestE2EDynamicImportBuiltinRejected(t *testing.T) {
+	cli := buildCLI(t)
+	dir := tempDir(t)
+	for _, m := range []string{"node:path", "path", "node:https", "https"} {
+		writeFile(t, filepath.Join(dir, "entry.ts"),
+			"async function main(): Promise<void> { await import(\""+m+"\"); }\nmain();\n")
+		out, err := exec.Command(cli, filepath.Join(dir, "entry.ts")).CombinedOutput()
+		if err == nil {
+			t.Fatalf("import(%q): expected a compile failure, got success", m)
+		}
+		if want := "dynamic import('" + m + "') of a built-in module is not supported"; !strings.Contains(string(out), want) {
+			t.Errorf("import(%q): expected %q, got: %s", m, want, out)
+		}
+	}
+}
+
 // TestE2EDynamicImportIsolatedIslandNoAny: a lazy island compiles under the
 // program's own modes, so --no-any rejects an `any` in the imported module
 // exactly as it would in the entry file.
@@ -225,6 +244,29 @@ func TestE2EDynamicImportIsolatedIslandAwaitFromAsyncFunction(t *testing.T) {
 	want := "load: before\nisland: start\nmain: sync end\nmain: timer 15\nisland: after await 42\nload: after 42\nmain: loaded 42\n"
 	if out != want || code != 0 {
 		t.Errorf("exit %d, output:\ngot  %q\nwant %q", code, out, want)
+	}
+}
+
+// An island awaiting its own socket I/O wakes the importer's loop through its
+// loop's backend descriptor, with no timer of its own pending.
+func TestE2EDynamicImportIsolatedIslandAwaitsSocket(t *testing.T) {
+	out, code := runIsolatedIsland(t, map[string]string{
+		"mod.ts": "import * as net from 'net';\n" +
+			"const srv = net.createServer((s) => { s.on('data', (d) => { s.end('pong:' + d.toString()); }); });\n" +
+			"const reply: string = await new Promise<string>((res) => {\n" +
+			"  srv.listen(0, '127.0.0.1', () => {\n" +
+			"    const port = (srv.address() as net.AddressInfo).port;\n" +
+			"    const c = net.connect(port, '127.0.0.1', () => { c.write('ping'); });\n" +
+			"    let got = '';\n" +
+			"    c.on('data', (d) => { got += d.toString(); });\n" +
+			"    c.on('end', () => { srv.close(); res(got); });\n" +
+			"  });\n" +
+			"});\n" +
+			"export const r: string = reply;\n",
+		"entry.ts": "const m = await import('./mod');\nconsole.log(\"main: got\", m.r);\n",
+	})
+	if out != "main: got pong:ping\n" || code != 0 {
+		t.Errorf("exit %d, output:\n%q", code, out)
 	}
 }
 
@@ -365,6 +407,25 @@ func TestE2EDynamicImportBundledUnsettledExits13(t *testing.T) {
 	}, func(t *testing.T, out string, code int) {
 		if code != 13 || !strings.Contains(out, "unsettled top-level await") || strings.Contains(out, "never") {
 			t.Errorf("exit %d, output:\n%s", code, out)
+		}
+	})
+}
+
+// import() resolves to the target's module namespace object: every value
+// export (functions, classes, objects, default), `let` exports live, keyed
+// in sorted order, one object per module.
+func TestE2EDynamicImportBundledNamespaceObject(t *testing.T) {
+	sharedModeImport(t, map[string]string{
+		"mod.ts": "export function hello(n: number) { return 'hi ' + n; }\n" +
+			"export class K { v = 3 }\nexport const obj = { a: 1 };\nexport let plain = 7;\nexport default 42;\n",
+		"live.ts": "export let count = 0;\nexport function bump() { count++; }\n",
+		"entry.ts": "export {};\nconst m = await import('./live');\nm.bump(); m.bump();\nconsole.log(m.count);\n" +
+			"const n = await import('./mod');\nconsole.log(n.hello(2), new n.K().v, n.obj.a, n.plain, n.default);\n" +
+			"console.log(n);\nconsole.log(Object.keys(n), m === (await import('./live')));\n",
+	}, func(t *testing.T, out string, code int) {
+		want := "2\nhi 2 3 1 7 42\n[Module: null prototype] {\n  K: [class K],\n  default: 42,\n  hello: [Function: hello],\n  obj: { a: 1 },\n  plain: 7\n}\n[ 'K', 'default', 'hello', 'obj', 'plain' ] true\n"
+		if out != want || code != 0 {
+			t.Errorf("exit %d, output:\ngot  %q\nwant %q", code, out, want)
 		}
 	})
 }

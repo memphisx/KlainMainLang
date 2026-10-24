@@ -14,11 +14,11 @@
 import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
 function invalidValue(message: string): Error {
-    return new NodeTypeError('ERR_INVALID_ARG_VALUE', message);
+    return NodeTypeError('ERR_INVALID_ARG_VALUE', message);
 }
 
 function libraryClosed(): Error {
-    return new NodeError('ERR_FFI_LIBRARY_CLOSED', 'Library is closed');
+    return NodeError('ERR_FFI_LIBRARY_CLOSED', 'Library is closed');
 }
 
 // ---- types ----
@@ -130,7 +130,7 @@ class Signature {
 // ignored. notObject is the message for a signature that is no object.
 function parseSignature(name: string, sig: any, notObject: string, notObjectCode: string): Signature {
     if (sig === null || typeof sig !== 'object' || Array.isArray(sig)) {
-        throw new NodeTypeError(notObjectCode, notObject);
+        throw NodeTypeError(notObjectCode, notObject);
     }
     let ret = K_VOID;
     const r = sig.return;
@@ -172,7 +172,7 @@ function cifOf(sig: Signature): number {
 }
 
 function checkName(name: any, what: string): string {
-    if (typeof name !== 'string') throw new NodeTypeError('ERR_INVALID_ARG_TYPE', what + ' name must be a string');
+    if (typeof name !== 'string') throw NodeTypeError('ERR_INVALID_ARG_TYPE', what + ' name must be a string');
     if ((name as string).indexOf('\0') >= 0) throw invalidValue(what + ' name must not contain null bytes');
     return name as string;
 }
@@ -180,7 +180,7 @@ function checkName(name: any, what: string): string {
 function statusError(st: number): Error {
     if (st === 1) return libraryClosed();
     if (st === 3) return invalidValue(__kml_native.ffiError());
-    return new NodeError('ERR_FFI_CALL_FAILED', __kml_native.ffiError());
+    return NodeError('ERR_FFI_CALL_FAILED', __kml_native.ffiError());
 }
 
 // A pointer argument's address (a bigint, null, a string, a buffer or an
@@ -206,14 +206,14 @@ export class DynamicLibrary {
         // Node's Windows build opens no library for null (the process's own
         // symbols are POSIX's dlopen(NULL)).
         if (process.platform === 'win32' && typeof path !== 'string') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Library path must be a string');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Library path must be a string');
         }
         if (path !== null && path !== undefined && typeof path !== 'string') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Library path must be a string or null');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Library path must be a string or null');
         }
         const isNull = path === null || path === undefined;
         const id = __kml_native.ffiOpen(isNull ? '' : path as string, isNull);
-        if (id < 0) throw new NodeError('ERR_FFI_CALL_FAILED', __kml_native.ffiError());
+        if (id < 0) throw NodeError('ERR_FFI_CALL_FAILED', __kml_native.ffiError());
         this.#id = id;
         this.#path = isNull ? '' : path as string;
     }
@@ -302,7 +302,7 @@ export class DynamicLibrary {
         this._kmlCheck();
         const defs: any = definitions;
         if (defs === null || typeof defs !== 'object' || Array.isArray(defs)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Functions signatures must be an object');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Functions signatures must be an object');
         }
         const names: string[] = Object.keys(defs);
         const sigs: Signature[] = [];
@@ -330,7 +330,7 @@ export class DynamicLibrary {
             sigValue = signatureOrCallback;
             cb = maybeCallback;
         }
-        if (typeof cb !== 'function') throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Callback must be a function');
+        if (typeof cb !== 'function') throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Callback must be a function');
         const sig = parseSignature('callback', sigValue, 'Callback signature must be an object', 'ERR_INVALID_ARG_TYPE');
         const f: any = cb;
         const code = __kml_native.ffiClosure(cifOf(sig), (unused: number, unused2: number) => {
@@ -348,13 +348,13 @@ export class DynamicLibrary {
             }
             __kml_native.ffiCallbackReturn(result);
         });
-        if (code === 0) throw new NodeError('ERR_FFI_CALL_FAILED', 'Failed to create the callback');
+        if (code === 0) throw NodeError('ERR_FFI_CALL_FAILED', 'Failed to create the callback');
         this.#callbacks.set(code, f);
         return BigInt(code);
     }
 
     private _kmlCallbackCode(pointer: any): number {
-        if (typeof pointer !== 'bigint') throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Callback pointer must be a bigint');
+        if (typeof pointer !== 'bigint') throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Callback pointer must be a bigint');
         return Number(pointer as bigint);
     }
 
@@ -510,14 +510,14 @@ function received(value: any): string {
 
 function validateLength(length: any): number {
     if (typeof length !== 'number') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "len" argument must be of type number. Received ' + received(length));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "len" argument must be of type number. Received ' + received(length));
     }
     const n = length as number;
     if (!Number.isInteger(n)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be an integer. Received ' + String(n));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be an integer. Received ' + String(n));
     }
     if (n < 0 || n > Number.MAX_SAFE_INTEGER) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be >= 0 && <= 9007199254740991. Received ' + String(n));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be >= 0 && <= 9007199254740991. Received ' + String(n));
     }
     return n;
 }
@@ -526,20 +526,20 @@ function validateLength(length: any): number {
 // pointer; length must hold them.
 export function exportString(str: any, pointer: bigint, length: any, encoding?: string): void {
     if (typeof str !== 'string') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "string" argument must be of type string. Received ' + received(str));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "string" argument must be of type string. Received ' + received(str));
     }
     const a = addressOf(pointer);
     const n = validateLength(length);
     const enc = encoding === undefined ? 'utf8' : encoding;
     if (!Buffer.isEncoding(enc)) {
-        throw new NodeTypeError('ERR_UNKNOWN_ENCODING', 'Unknown encoding: ' + enc);
+        throw NodeTypeError('ERR_UNKNOWN_ENCODING', 'Unknown encoding: ' + enc);
     }
     const bytes = Buffer.from(str, enc as BufferEncoding);
     const lower = String(enc).toLowerCase();
     const term = lower === 'utf16le' || lower === 'utf-16le' || lower === 'ucs2' || lower === 'ucs-2' ? 2 : 1;
     const needed = bytes.length + term;
     if (n < needed) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be >= ' + needed + '. Received ' + String(n));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be >= ' + needed + '. Received ' + String(n));
     }
     const out = Buffer.alloc(needed);
     bytes.copy(out, 0);
@@ -550,7 +550,7 @@ function exportBytes(name: string, bytes: Uint8Array, pointer: bigint, length: n
     const a = addressOf(pointer);
     const n = validateLength(length);
     if (n < bytes.length) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be >= ' + bytes.length + '. Received ' + String(n));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "len" is out of range. It must be >= ' + bytes.length + '. Received ' + String(n));
     }
     __kml_native.ffiCopyOut(bytes, a);
 }

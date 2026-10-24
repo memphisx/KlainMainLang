@@ -7,7 +7,7 @@
 #include <errno.h>
 
 #define HSTR(s) ({ static const struct { long long n; char b[sizeof(s)]; } \
-    __attribute__((aligned(8))) h_ = { sizeof(s) - 1, s }; (void *)h_.b; })
+    __attribute__((aligned(8))) h_ = { KML_STR_ASCII_HDR(sizeof(s) - 1), s }; (void *)h_.b; })
 
 /* X(name, shim errno, libuv errno on Windows, libuv description or "") */
 #define KML_ERRNOS(X) \

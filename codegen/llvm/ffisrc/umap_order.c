@@ -31,8 +31,8 @@ static void kml_umap_order_put(void *ctx, const char *key, size_t len, void *val
  * that order after reserving their count; the result, the same names in the
  * container's iteration order, joined likewise, as a headered string. */
 char *__kml_native_umap_order(const char *keys) {
-    size_t total = *(const long long *)(keys - 8);
-    char *base = (char *)malloc(8 + total + 1);
+    size_t total = KML_STR_LEN(keys);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, 8 + total + 1);
     kml_umap_order_buf b = {base + 8, 0};
     kml_umap *u = kml_umap_new();
     /* ada reserves the group count before inserting (as Node shows). */

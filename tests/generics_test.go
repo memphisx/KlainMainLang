@@ -74,16 +74,29 @@ console.log(count(1, 2));
 `, "3\n2")
 }
 
-func TestE2EGenericFunctionNoInferableParamRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EGenericFunctionNoInferableParamIsUnknown(t *testing.T) {
+	assertSameAsNode(t, `
 function make<T>(): T {
   return 0 as any;
 }
 console.log(make());
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a generic function with no parameter to infer T from, got none")
-	}
+}
+
+// A type parameter no argument infers takes the call's contextual type
+// through the result, as tsc infers it.
+func TestE2EGenericFunctionTypeArgFromContext(t *testing.T) {
+	assertSameAsNode(t, `
+function make<T>(): T[] { return []; }
+const a: number[] = make();
+a.push(1, 2);
+interface Box<T> { v: T | undefined }
+function box<T>(): Box<T> { return { v: undefined }; }
+const b: Box<string> = box();
+b.v = "s";
+function id<T>(): T { return 0 as any; }
+console.log(a.length, b.v, id());
+`)
 }
 
 func TestE2EGenericObjectArgInterfaceClassAndArray(t *testing.T) {
@@ -448,19 +461,13 @@ console.log(firstOf(1, "x"));
 // A type parameter with no inferable parameter position must be named
 // specifically in the error, not just "a" type argument — the N-ary
 // generalization of the existing single-param rejection.
-func TestE2EGenericFunctionUninferableTypeParamNamed(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EGenericFunctionUninferableTypeParamIsUnknown(t *testing.T) {
+	assertSameAsNode(t, `
 function make<K, V>(k: K): K {
   return k;
 }
 console.log(make(1));
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for an uninferable type parameter 'V', got none")
-	}
-	if !strings.Contains(err.Error(), "'V'") {
-		t.Fatalf("expected the error to name the specific uninferable type parameter 'V', got: %v", err)
-	}
 }
 
 func TestE2EGenericInterfaceMultipleTypeParams(t *testing.T) {

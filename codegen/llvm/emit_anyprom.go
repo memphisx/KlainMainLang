@@ -11,6 +11,8 @@ package llvm
 import (
 	_ "embed"
 	"fmt"
+
+	"KlainMainLang/ast"
 )
 
 // Resolving a promise with a dynamic value and the Promise<any> view live in
@@ -84,7 +86,7 @@ func (e *Emitter) emitBoxPromise(v Value) Value {
 	store := func(idx int, ir, val string) {
 		p := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", p, boxTy.StructIR(), w, idx))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, val, p))
+		e.heapStore(ir, val, p, 8)
 	}
 	store(1, "ptr", v.Ref)
 	store(2, "ptr", e.promiseValueBoxer(elem))
@@ -93,7 +95,7 @@ func (e *Emitter) emitBoxPromise(v Value) Value {
 		anyElem = "true"
 	}
 	store(3, "i1", anyElem)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", w, slot))
+	e.heapStore("ptr", w, slot, 8)
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", w, wslot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -120,7 +122,7 @@ func (e *Emitter) promiseValueBoxer(elem Type) string {
 	restore := e.beginDetachedFunc()
 	restore = e.sharedBody(restore) // content-named: the same in every program
 	boxed := fmt.Sprintf("%d", nbUndefined)
-	if elem.IR != "" && elem.IR != "void" && !elem.IsNever {
+	if elem.IR != "" && elem.IR != "void" && !elem.IsNever() {
 		if bv, err := e.emitBoxValue(e.loadPromiseValue("%p", elem)); err == nil {
 			boxed = bv.Ref
 		}
@@ -303,14 +305,8 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", s, argv, i))
 			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", a, s))
 		}
-		jb := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-		sj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(jb)))
-		threw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", threw, sj))
 		catchL, tryL := e.freshLabel("pdyn.catch"), e.freshLabel("pdyn.try")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", threw, catchL, tryL))
+		e.excEnter(catchL, tryL)
 		e.emitLabel(catchL)
 		tp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tp))
@@ -320,7 +316,7 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 		e.emitTerminator("ret void")
 		e.emitLabel(tryL)
 		r := e.emitDynFnBoxCallUnchecked(fn, fmt.Sprintf("%d", nbUndefined), argv, n)
-		e.emitInstr("call void @__kml_pop_jmpbuf()")
+		e.excLeave()
 		return r
 	}
 	stp := e.freshReg()
@@ -385,7 +381,7 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal void @__kml_pdyn_run(ptr %%env) {\nentry:\n%s}\n", body))
+	e.writeFunc("internal void @__kml_pdyn_run(ptr %env)", body)
 
 	e.emitGlobal(fmt.Sprintf(`
 define void @__kml_pdyn_attach(ptr %%src, i64 %%onF, i64 %%onR, i64 %%onFin, ptr %%q, ptr %%boxer, i64 %%kind) {
@@ -482,7 +478,7 @@ func (e *Emitter) emitPromiseBoxMembers() {
 	for _, m := range []string{"then", "catch", "finally"} {
 		miss := e.emitKeyIs("%key", m)
 		rec := e.promiseMethodRecord(m)
-		e.emitInstr(fmt.Sprintf("store i32 %d, ptr %%found, align 4", shapeMember))
+		e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
 		e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(rec, kmlTagDynFunc)))
 		e.emitLabel(miss)
 	}
@@ -532,6 +528,31 @@ func (e *Emitter) promiseMethodRecord(m string) string {
 		onFin, kind = arg(0), pdynFinally
 	}
 	w := e.emitPromiseWrapperOrNull(Value{Ref: "%this", Ty: TypeAny})
+	// Another receiver: then throws; catch and finally are generic, an
+	// Invoke of the receiver's own `then`.
+	isNull, genL, promL := e.freshReg(), e.freshLabel("pdyn.generic"), e.freshLabel("pdyn.promise")
+	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, w))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, genL, promL))
+	e.emitLabel(genL)
+	if m == "then" {
+		e.emitThrowTypeErrorValue(e.emitReceiverMessage("Method Promise.prototype.then called on incompatible receiver ", "%this"))
+	} else {
+		thenFn, err := e.emitDynAnyMemberGetNamed(Value{Ref: "%this", Ty: TypeAny}, e.internString("then"), "then", ast.Pos{})
+		if err == nil {
+			a, b := onF, onR
+			if m == "finally" {
+				a, b = onFin, onFin
+			}
+			e.ensureShapeRuntime()
+			e.declareFn("__kml_invoke_then", "declare i64 @__kml_invoke_then(i64, i64, i64, i64)")
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_invoke_then(i64 %%this, i64 %s, i64 %s, i64 %s)", r, thenFn.Ref, a, b))
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", r))
+		} else if !e.blockDone {
+			e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+		}
+	}
+	e.emitLabel(promL)
 	src := e.emitWrapperField(w, 1, "ptr")
 	boxer := e.emitWrapperField(w, 2, "ptr")
 	q := e.freshReg()
@@ -542,7 +563,7 @@ func (e *Emitter) promiseMethodRecord(m string) string {
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitBoxPromise(Value{Ref: q, Ty: qt}).Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal i64 %s(ptr %%env, i64 %%this, i64 %%argc, ptr %%argv) {\nentry:\n%s}\n", fn, body))
+	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%env, i64 %%this, i64 %%argc, ptr %%argv)", fn), body)
 	return rec
 }
 
@@ -566,20 +587,21 @@ func (e *Emitter) emitConvertPromise(v Value, target Type) Value {
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
 	env := e.freshReg()
 	e.ensureMalloc()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, env))
+	e.heapMallocInto(env, "16")
+	e.heapStore("ptr", v.Ref, env, 8)
 	qp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", qp, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", q, qp))
+	e.heapStore("ptr", q, qp, 8)
 	runner := e.promiseConvertRunner(from, to)
-	// A fulfilled source converts at once (one object in JS: its value is
-	// there to read now); otherwise when it settles.
+	// A settled source converts at once (one object in JS: its value or
+	// reason is there now; a reaction attached to it would never run);
+	// otherwise when it settles.
 	sp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, v.Ref))
 	st := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, sp))
 	ful := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", ful, st))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", ful, st))
 	nowL, laterL, doneL := e.freshLabel("pconv.now"), e.freshLabel("pconv.later"), e.freshLabel("pconv.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ful, nowL, laterL))
 	e.emitLabel(nowL)
@@ -624,25 +646,29 @@ func (e *Emitter) promiseConvertRunner(from, to Type) string {
 	okL, rejL := e.freshLabel("pconv.ok"), e.freshLabel("pconv.rej")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, rejL))
 	e.emitLabel(okL)
-	if from.IR != "" && from.IR != "void" && !from.IsNever && to.IR != "" && to.IR != "void" {
+	if from.IR != "" && from.IR != "void" && !from.IsNever() && to.IR != "" && to.IR != "void" {
 		val := e.loadPromiseValue(src, from)
 		var conv Value
-		if to.IsDynamic {
+		if to.IsDynamic() {
 			if bv, err := e.emitBoxValue(val); err == nil {
 				conv = bv
 			} else {
 				conv = Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}
 			}
-		} else if to.IsArray {
+		} else if to.IsArray() && from.IsDynamic() {
 			conv = e.emitUnboxBoxToType(val.Ref, to)
 		} else {
-			conv = e.coerce(val, to)
+			conv = e.convert(val, to)
 		}
 		e.storePromiseValue(q, conv)
 	}
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
 	e.emitTerminator("ret void")
 	e.emitLabel(rejL)
+	// The converted view and its source are one promise in JS: the
+	// rejection is the view's to report, not the source's.
+	e.ensureMicrotasks() // declares __kml_promise_mark_handled
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_mark_handled(ptr %s)", src))
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from(ptr %s, ptr %s)", q, src))
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
@@ -655,7 +681,7 @@ func (e *Emitter) promiseConvertRunner(from, to Type) string {
 // promiseElemsNeedConvert reports whether a Promise<a> value read as a
 // Promise<b> needs emitConvertPromise: exactly one element is `any`.
 func promiseElemsNeedConvert(a, b Type) bool {
-	if !a.IsPromise || !b.IsPromise || a.PromiseType == nil || b.PromiseType == nil {
+	if !a.IsPromise() || !b.IsPromise() || a.PromiseType == nil || b.PromiseType == nil {
 		return false
 	}
 	ad, bd := isUnconstrainedDynamic(*a.PromiseType), isUnconstrainedDynamic(*b.PromiseType)
@@ -666,5 +692,5 @@ func promiseElemsNeedConvert(a, b Type) bool {
 	if bd {
 		other = *a.PromiseType
 	}
-	return other.IR != "" && other.IR != "void" && !other.IsNever
+	return other.IR != "" && other.IR != "void" && !other.IsNever()
 }

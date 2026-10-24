@@ -1,28 +1,36 @@
-// Node's coded errors (lib/internal/errors.js): an Error, TypeError or
-// RangeError carrying its `code` (ERR_*) as an own property.
+// Node's coded errors (lib/internal/errors.js): a plain Error, TypeError or
+// RangeError carrying its `code` (ERR_*) as an own property — Node builds
+// each as an instance of the base class itself, so its constructor is
+// `TypeError`, not a subclass.
 
-export class NodeError extends Error {
+export interface NodeError extends Error {
     code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
 }
 
-export class NodeTypeError extends TypeError {
-    code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
+export function NodeError(code: string, message: string): NodeError {
+    const e = new Error(message) as NodeError;
+    e.code = code;
+    return e;
 }
 
-export class NodeRangeError extends RangeError {
+export interface NodeTypeError extends TypeError {
     code: string;
-    constructor(code: string, message: string) {
-        super(message);
-        this.code = code;
-    }
+}
+
+export function NodeTypeError(code: string, message: string): NodeTypeError {
+    const e = new TypeError(message) as NodeTypeError;
+    e.code = code;
+    return e;
+}
+
+export interface NodeRangeError extends RangeError {
+    code: string;
+}
+
+export function NodeRangeError(code: string, message: string): NodeRangeError {
+    const e = new RangeError(message) as NodeRangeError;
+    e.code = code;
+    return e;
 }
 
 // ERR_MISSING_ARGS's message for the argument names.
@@ -36,5 +44,5 @@ export function missingArgs(...names: string[]): NodeTypeError {
         const quoted = names.map((n) => `"${n}"`);
         shown = `${quoted.slice(0, -1).join(', ')}, and ${quoted[quoted.length - 1]} arguments`;
     }
-    return new NodeTypeError('ERR_MISSING_ARGS', `The ${shown} must be specified`);
+    return NodeTypeError('ERR_MISSING_ARGS', `The ${shown} must be specified`);
 }

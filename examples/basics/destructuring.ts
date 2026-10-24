@@ -230,13 +230,6 @@ const coord: Coord = { cx: 5, cy: 6 }
 console.log(targetX)  // 5
 console.log(targetY)  // 6
 
-// A source array shorter than the pattern reads zero for the missing
-// positions — same as the declaration form's own out-of-bounds behavior,
-// not a real JS `undefined`.
-;[assignA, assignB] = [9]
-console.log(assignA)  // 9
-console.log(assignB)  // 0
-
 // ─── Array rest destructuring (`[a, ...rest]`) ──────────────────────────────
 // Collects every remaining position into a real, independent new array —
 // works in a declaration, a destructured function parameter, and a
@@ -359,3 +352,18 @@ function describeAccount({ name, ...numbers }: Account): string {
     return name + ' #' + numbers.id
 }
 console.log(describeAccount(account))        // Ada #42
+
+// A rest parameter can itself be a pattern over the collected arguments
+function firstTwo(...[head, second]: number[]): number {
+    return head + second
+}
+console.log(firstTwo(3, 4, 5))               // 7
+const countArgs = (...{ length }: string[]) => length
+console.log(countArgs('a', 'b', 'c'))        // 3
+
+// A declaration's pattern can carry a type annotation: the bindings take
+// their types from it, and the initializer is checked against it
+const { id: typedId, name: typedName }: Account = account
+console.log(typedName + " is #" + typedId)  // Ada is #42
+const [left, right]: [number, string] = [1, 'one']
+console.log(left + ' ' + right)              // 1 one

@@ -18,7 +18,7 @@ package llvm
 import _ "embed"
 
 const (
-	rstreamStructIR   = "{ i64, i64, ptr, i64, i64, i64, double, double, ptr, ptr, ptr, i64, ptr, i64, i64, i64, ptr, ptr }"
+	rstreamStructIR   = "{ i64, i64, ptr, i64, i64, i64, double, double, ptr, ptr, ptr, i64, ptr, i64, i64, i64, ptr, ptr, ptr, ptr }"
 	rstreamStructSize = 144
 )
 
@@ -87,7 +87,8 @@ func (e *Emitter) ensureStreamRuntime() {
 	e.usedStreamRuntime = true
 	e.ensurePromiseSettle()
 	e.ensurePromiseAddReaction()
-	e.emitGlobal(`declare ptr @__kml_rs_alloc(double, ptr)
+	e.emitGlobal(`declare ptr @__kml_rs_alloc(double, ptr, ptr)
+declare ptr @__kml_rs_read_any(ptr, ptr)
 declare void @__kml_rs_qpush(ptr, i64, i64, double)
 declare void @__kml_rs_qunshift(ptr, i64, i64, double)
 declare void @__kml_rs_rdpush(ptr, ptr)
@@ -97,6 +98,7 @@ declare void @__kml_rs_pull_done(ptr)
 declare void @__kml_rs_pull_settled(ptr)
 declare void @__kml_rs_started(ptr)
 declare i64 @__kml_rs_enqueue(ptr, i64, i64)
+declare i64 @__kml_rs_chunk_hdr(ptr, i64)
 declare void @__kml_rs_finalize_close(ptr)
 declare i64 @__kml_rs_close(ptr)
 declare void @__kml_rs_error(ptr, i64)
@@ -104,5 +106,8 @@ declare ptr @__kml_rs_read(ptr)
 declare double @__kml_rs_desired(ptr)
 declare ptr @__kml_rs_cancel(ptr, i64)
 declare i64 @__kml_rs_lock(ptr)
-declare void @__kml_rs_unlock(ptr)`)
+declare void @__kml_rs_unlock(ptr)
+declare i64 @__kml_rs_inspect_bits(ptr)
+declare void @__kml_rs_release(ptr, ptr, i64, i64)
+declare i64 @__kml_rs_read_requests(ptr)`)
 }

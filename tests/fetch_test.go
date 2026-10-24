@@ -47,6 +47,9 @@ func newFetchTestServer(t *testing.T) *httptest.Server {
 		body := strings.Repeat("x", 40000)
 		fmt.Fprint(w, body)
 	})
+	mux.HandleFunc("/badutf8", func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte{0xEF, 0xBB, 0xBF, 'a', 0xFF, 'b'})
+	})
 	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) {
 		// Embedded null NOT at the end (byte 2 of 6) — a null-at-the-end body
 		// could hide an off-by-one in the length threading (ADR-00094).
@@ -433,7 +436,7 @@ func TestE2EFetchJSONIntoTypedTarget(t *testing.T) {
 interface FlatData { title: string; count: number; active: boolean }
 
 async function main2(): Promise<void> {
-    const data: FlatData = (await fetch("%s/flat")).json()
+    const data: FlatData = await (await fetch("%s/flat")).json()
     console.log(data.title)
     console.log(data.count)
     console.log(data.active)
@@ -454,8 +457,8 @@ async function main2(): Promise<void> {
     const headers: Map<string, string> = new Map<string, string>()
     headers.set("X-Custom-Header", "hello")
     headers.set("Authorization", "Bearer abc123")
-    const r: Response = await fetch("%s/echo", { method: "POST", headers: headers, body: "payload-data" })
-    const data: EchoResp = r.json()
+    const r: Response = await fetch("%s/echo", { method: "POST", headers: [...headers], body: "payload-data" })
+    const data: EchoResp = await r.json()
     console.log(data.method)
     console.log(data.body)
     console.log(data.x_custom)
@@ -473,7 +476,7 @@ interface EchoResp { method: string; body: string }
 
 async function main2(): Promise<void> {
     const r: Response = await fetch("%s/echo", { method: "DELETE" })
-    const data: EchoResp = r.json()
+    const data: EchoResp = await r.json()
     console.log(data.method)
     console.log(data.body)
 }
@@ -490,8 +493,8 @@ interface EchoResp { method: string; x_custom: string }
 async function main2(): Promise<void> {
     const headers: Map<string, string> = new Map<string, string>()
     headers.set("X-Custom-Header", "just-a-header")
-    const r: Response = await fetch("%s/echo", { headers: headers })
-    const data: EchoResp = r.json()
+    const r: Response = await fetch("%s/echo", { headers: [...headers] })
+    const data: EchoResp = await r.json()
     console.log(data.method)
     console.log(data.x_custom)
 }
@@ -635,7 +638,7 @@ func TestE2EHeadersConstructFromMapLowercasesKeys(t *testing.T) {
 	src := `
 const m: Map<string, string> = new Map<string, string>()
 m.set("X-Foo", "bar")
-const h: Headers = new Headers(m)
+const h: Headers = new Headers([...m])
 console.log(h.get("x-foo"))
 `
 	assertOutput(t, src, "bar")
@@ -692,7 +695,7 @@ async function main2(): Promise<void> {
     h.set("X-Custom-Header", "from-request")
     const req: Request = new Request("%s/echo", { method: "POST", headers: h, body: "req-body" })
     const r: Response = await fetch(req)
-    const data: EchoResp = r.json()
+    const data: EchoResp = await r.json()
     console.log(data.method)
     console.log(data.body)
     console.log(data.x_custom)
@@ -711,7 +714,7 @@ async function main2(): Promise<void> {
     const h: Headers = new Headers()
     h.set("X-Custom-Header", "via-headers-object")
     const r: Response = await fetch("%s/echo", { headers: h })
-    const data: EchoResp = r.json()
+    const data: EchoResp = await r.json()
     console.log(data.x_custom)
 }
 main2()
@@ -784,7 +787,8 @@ async function main2(): Promise<void> {
     ps.push(fetch("http://127.0.0.1:1/unreachable"))
     const settled = await Promise.allSettled(ps)
     console.log(settled[0].status)
-    console.log(settled[0].value.status)
+    const s0 = settled[0]
+    if (s0.status === "fulfilled") console.log(s0.value.status)
     console.log(settled[1].status)
 }
 main2()
@@ -855,20 +859,33 @@ main2()
 	assertOutput(t, src, "6\n104\n105\n0\n98\n121\n101")
 }
 
-func TestE2EFetchTextStillStrlenBasedAfterArrayBuffer(t *testing.T) {
-	// .text()/.json() stay strlen-based (ADR-00094) — a body with an embedded
-	// null reads back short via `await r.text()` even though `await
-	// r.arrayBuffer()` (tested above) sees the whole thing. This pins that
-	// intentional split down as a regression guard, not an oversight.
+func TestE2EFetchTextDecodesUTF8(t *testing.T) {
+	// .text() decodes as TextDecoder does: a leading BOM dropped, an invalid
+	// byte as U+FFFD.
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+async function main2(): Promise<void> {
+    const r: Response = await fetch("%s/badutf8")
+    const t = await r.text()
+    console.log(t === "a\uFFFDb")
+}
+main2()
+`, srv.URL)
+	assertOutput(t, src, "true")
+}
+
+func TestE2EFetchTextKeepsEmbeddedNullByte(t *testing.T) {
+	// .text() reads every body byte, an embedded NUL included, as Node does.
 	srv := newFetchTestServer(t)
 	src := fmt.Sprintf(`
 async function main2(): Promise<void> {
     const r: Response = await fetch("%s/binary")
-    console.log((await r.text()).length)
+    const t = await r.text()
+    console.log(t.length, t.charCodeAt(2), t.slice(3))
 }
 main2()
 `, srv.URL)
-	assertOutput(t, src, "2")
+	assertOutput(t, src, "6 0 bye")
 }
 
 func TestE2EPromiseAllArrayBufferPreservesEmbeddedNullByte(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"KlainMainLang/codegen/llvm"
 	"KlainMainLang/diag"
 	"KlainMainLang/internal/scratch"
+	"KlainMainLang/lib"
 	"KlainMainLang/options"
 	"KlainMainLang/resolver"
 	"flag"
@@ -28,6 +29,7 @@ func main() {
 	regex := flag.String("regex", "", "RegExp `dialect`: es-unicode (default — ECMAScript matching via PCRE2_UTF + NEWLINE_ANY), ecmascript (es-unicode plus a source-normalization pass — exact dot line-terminator semantics), es-utf16 (es-unicode plus true UTF-16 code-unit indices for .search/lastIndex/replace-callback offsets), es-ascii (cheaper ASCII-faithful option alignment only), or pcre (raw PCRE2, no ES wrapping)")
 	bigint := flag.String("bigint", "libtommath", "bigint backend `library`, linked only when a program uses bigint: libtommath (default, public domain) or gmp (LGPL, faster). Both give identical arbitrary-precision semantics")
 	cryptoBackend := flag.String("crypto", "openssl", "crypto.subtle backend `library`, compiled+linked only when a program uses crypto.subtle: openssl (default — libcrypto 3.x, all platforms), commoncrypto (macOS only — Apple CommonCrypto plus Security.framework, no OpenSSL dependency) or cng (Windows only — the OS's CNG, bcrypt.dll, no OpenSSL dependency). All give identical Web Crypto semantics")
+	httpBackend := flag.String("http-backend", "native", "klain:http server `backend`, used only when a program imports klain:http: native (default — libuv TCP handles, an llhttp-rules parser per connection, h2c over nghttp2; every platform) or h2o (libh2o's libuv build, Linux: libh2o-dev; it buffers a request's whole body before the handler runs, up to 1 GiB, where native runs the handler at 10 MiB and streams the rest). The handler contract is identical across backends")
 	webviewBackend := flag.String("webview", "system", "klain:webview engine `backend`, selected only when a program opens a webview window: system (default — the platform engine: WebKitGTK/WKWebView/WebView2) sailfish (Gecko/embedlite backend for cross-compiled Sailfish OS builds) or cef / qt (opt-in Chromium/Qt backends, not yet built). The bind/eval/serve contract is identical across backends")
 	var pkg packageFlag
 	flag.Var(&pkg, "package", "after compiling, also build a package around the binary. Bare -package builds a double-clickable host bundle (a .app on macOS, a .desktop launcher on Linux, a GUI-subsystem <name>\\<name>.exe on Windows) — for webview GUI programs. -package=rpm builds an RPM (for Sailfish OS / RPM Linux), -package=rpm:harbour applies Sailfish Harbour naming (harbour-<name>); the .spec + build tree are always written and rpmbuild is run when present, so an RPM cross-package can be produced from a --target build. The standalone binary is still produced too")
@@ -44,6 +46,8 @@ func main() {
 	target := flag.String("target", "", "cross-compile for another platform instead of the host. Either a full clang `triple` (e.g. aarch64-linux-gnu) or a preset name: sfos-aarch64 (Sailfish OS on 64-bit ARM → aarch64-linux-gnu). Requires --sysroot pointing at the target's root filesystem. The emitted IR and the whole embedded C runtime are built for the target; a genuine cross-arch link needs lld on PATH (used automatically when present). Default (empty): build for the host")
 	sysroot := flag.String("sysroot", "", "for --target: `path` to the target platform's root filesystem (its /usr/include headers and /usr/lib libraries), passed to clang as --sysroot. Required whenever --target is set")
 	noAny := flag.Bool("no-any", false, "ban the any/unknown dynamic escape hatch: every explicit any/unknown annotation (and evolving-any from an untyped null-initialized binding) becomes a compile error, so the produced binary is provably fully static — no NaN-boxing, no runtime type tags. A separate opt-in on top of strict, not a compat mode. Ignored (with a warning) under -compat=js")
+	noUnusedLocals := flag.Bool("no-unused-locals", false, "report a local variable, function, class, enum, interface, type alias or import that nothing reads (TypeScript's noUnusedLocals). Ignored (with a warning) under -compat=js")
+	noUnusedParameters := flag.Bool("no-unused-parameters", false, "report a function parameter or type parameter that nothing reads; a name starting with _ is exempt (TypeScript's noUnusedParameters). Ignored (with a warning) under -compat=js")
 	runNow := flag.Bool("run", false, "compile and immediately run (like `go run`): build the binary into a temp directory, execute it with any arguments given after the filename, propagate its exit code, then delete it. Flags precede the filename; program arguments follow it (an optional `--` separator is skipped). Cannot combine with --target (a cross-built binary can't run here) or -emit-llvm")
 	flag.Usage = func() {
 		out := flag.CommandLine.Output()
@@ -101,6 +105,16 @@ func main() {
 		fatal("--static is not supported on macOS: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. On Linux, --static produces a fully static binary (scratch/distroless-ready). On Windows, --static links every library in, so the .exe imports only Windows' own DLLs (the UCRT and system DLLs ship with Windows 10+). To produce a static Linux binary from here, use a Linux build stage in a multi-stage Dockerfile.")
 	}
 	llvm.SetStaticLink(*static)
+	switch *httpBackend {
+	case "native":
+	case "h2o":
+		if _, _, ok := llvm.LocateH2O(); !ok && *target == "" && !*emitLLVM {
+			fatal("-http-backend=h2o needs libh2o, the libuv build of h2o's library (Ubuntu: apt install libh2o-dev); it was not found. macOS has no package of it (Homebrew's h2o ships only its own event loop's build): use -http-backend=native")
+		}
+	default:
+		fatal("unrecognized -http-backend value %q — must be native (default) or h2o", *httpBackend)
+	}
+	lib.HTTPBackend = *httpBackend
 	// A lazy dynamic-import library imports the executable's thread-locals:
 	// on Windows only as emulated ones (TDD-00254).
 	llvm.SetEmulatedTLS(runtime.GOOS == "windows" && *dynImport == "lazy")
@@ -237,7 +251,7 @@ func main() {
 	// The compile modes, built once: the program and each of its lazy
 	// islands compile under the same ones.
 	opts := options.Options{
-		Compat: *compat, NoAny: *noAny, Decorators: *decorators, EmitDecoratorMetadata: *emitDecoratorMetadata,
+		Compat: *compat, NoAny: *noAny, NoUnusedLocals: *noUnusedLocals, NoUnusedParameters: *noUnusedParameters, Decorators: *decorators, EmitDecoratorMetadata: *emitDecoratorMetadata,
 		MemMode: *mm, DynamicImport: *dynImport, Regex: *regex,
 		BigInt: *bigint, Crypto: *cryptoBackend, Webview: *webviewBackend,
 		OptimizeMemory: *optimizeMemory, Finalizers: *finalizers,
@@ -246,6 +260,10 @@ func main() {
 	if opts.NoAny && opts.CompatJS() {
 		fmt.Fprintln(os.Stderr, "warning: --no-any is ignored under -compat=js (js is best-effort untyped; there is no `any` to ban)")
 		opts.NoAny = false
+	}
+	if (opts.NoUnusedLocals || opts.NoUnusedParameters) && opts.CompatJS() {
+		fmt.Fprintln(os.Stderr, "warning: --no-unused-locals and --no-unused-parameters are ignored under -compat=js (TypeScript checks)")
+		opts.NoUnusedLocals, opts.NoUnusedParameters = false, false
 	}
 	inFile := flag.Arg(0)
 	prog, err := resolver.ResolveProgramWithOptions(inFile, opts)
@@ -288,8 +306,16 @@ func main() {
 		return
 	}
 
-	// Write IR to a temp file, then compile with clang.
-	llFile := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".ll"
+	// The IR and the generated sources go to a directory of this build's own:
+	// concurrent builds of one source (each memory mode) must not share them.
+	d, derr := os.MkdirTemp("", "klainbuild-")
+	if derr != nil {
+		fatal("cannot create build directory: %v", derr)
+	}
+	buildDir = d
+	defer os.RemoveAll(buildDir)
+	interBase := filepath.Join(buildDir, strings.TrimSuffix(filepath.Base(inFile), filepath.Ext(inFile)))
+	llFile := interBase + ".ll"
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		fatal("cannot write IR: %v", err)
 	}
@@ -318,7 +344,7 @@ func main() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
 	if *mm == "gc" {
-		gcShimPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + ".gcshim.c"
+		gcShimPath := interBase + ".gcshim.c"
 		if err := os.WriteFile(gcShimPath, []byte(llvm.GCShimSource), 0644); err != nil {
 			fatal("cannot write GC shim: %v", err)
 		}
@@ -420,7 +446,7 @@ func main() {
 				continue
 			}
 		}
-		cPath := strings.TrimSuffix(inFile, filepath.Ext(inFile)) + "." + cs.Name + "." + cs.SrcExt()
+		cPath := interBase + "." + cs.Name + "." + cs.SrcExt()
 		// Every source shares this one clang invocation.
 		content, rest := cs.Standalone()
 		if err := os.WriteFile(cPath, []byte(content), 0644); err != nil {
@@ -446,9 +472,8 @@ func main() {
 		fatal("%v", berr)
 	}
 	for _, b := range blobs {
-		base := strings.TrimSuffix(inFile, filepath.Ext(inFile))
-		binPath := base + "." + b.Symbol + ".bin"
-		asmPath := base + "." + b.Symbol + ".s"
+		binPath := interBase + "." + b.Symbol + ".bin"
+		asmPath := interBase + "." + b.Symbol + ".s"
 		if err := os.WriteFile(binPath, b.Blob, 0644); err != nil {
 			fatal("cannot write embed blob: %v", err)
 		}
@@ -599,6 +624,7 @@ func main() {
 		}
 		if runErr != nil {
 			if ee, ok := runErr.(*exec.ExitError); ok {
+				os.RemoveAll(buildDir)
 				os.Exit(ee.ExitCode())
 			}
 			fatal("run: %v", runErr)
@@ -698,8 +724,14 @@ func reportDiagnostics(what string, err error, format string) {
 	os.Exit(1)
 }
 
+// buildDir holds this build's IR and generated sources; fatal removes it.
+var buildDir string
+
 func fatal(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "klainmain: "+format+"\n", args...)
+	if buildDir != "" {
+		os.RemoveAll(buildDir)
+	}
 	os.Exit(1)
 }
 

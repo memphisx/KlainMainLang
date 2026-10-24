@@ -250,7 +250,6 @@ func TestTypeConversionErrors(t *testing.T) {
 		"Promise<A, B>":                      "1:17: expected '>' to close Promise<T>",
 		"Map<string>":                        "expected ',' in Map<K,V>",
 		"Map<A, B, C>":                       "1:16: expected '>' to close Map<K,V>",
-		"[a?: number]":                       "1:9: an optional tuple element is not yet supported",
 		"<T>string":                          "expected a function type after a type parameter list",
 	} {
 		_, err := parser.Parse("let v: " + typ + ";")

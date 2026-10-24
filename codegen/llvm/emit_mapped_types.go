@@ -37,7 +37,7 @@ func (e *Emitter) resolveIndexedAccess(ta *ast.TypeAnnotation) Type {
 			}
 		}
 	}
-	if obj.IsArray && obj.ElemType != nil {
+	if obj.IsArray() && obj.ElemType != nil {
 		return *obj.ElemType
 	}
 	return TypeI64
@@ -77,12 +77,12 @@ func (e *Emitter) resolveMappedType(ta *ast.TypeAnnotation) Type {
 		// `?` makes each member optional; a homomorphic mapping keeps the
 		// source member's own optionality, as TypeScript does.
 		optional := ta.MappedOptional || ke.optional
-		if optional && !fty.IsFunc {
+		if optional && !fty.IsFunc() {
 			fty = optionalFieldType(fty)
 		}
 		fields = append(fields, Field{Name: ke.name, Ty: fty, Optional: optional})
 	}
-	return ObjectType(fields)
+	return UserObjectType(fields)
 }
 
 // resolveMappedValue resolves the mapped value body for one key (see file scope).

@@ -14,3 +14,7 @@ function $DONE(error?: any): void {
         console.log("Test262:AsyncTestComplete");
     }
 }
+
+// A host injects $DONE as a global (asyncHelpers.js' asyncTest checks
+// `globalThis` for it); a top-level function of a module is not one.
+(globalThis as any).$DONE = $DONE;

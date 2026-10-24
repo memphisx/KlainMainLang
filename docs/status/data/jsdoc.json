@@ -49,7 +49,7 @@
             "status": "implemented",
             "caveats": [
               "Fills only a parameter with no inline `: T` annotation and no destructuring pattern (an inline type wins)",
-              "A `{...T}` varargs type is stripped to its base `T` (the count isn't bound as a `...rest` parameter); a body reading `arguments` sees the values actually passed ([ADR-00928](../adr/ADR-00928.md)), but for a typed variadic use a declared `...rest: T[]` parameter"
+              "A `{...T}` varargs type is stripped to its base `T` (the count isn't bound as a `...rest` parameter); a body reading `arguments` sees the values actually passed ([ADR-00928](../adr/00/ADR-00928.md)), but for a typed variadic use a declared `...rest: T[]` parameter"
             ],
             "notes": [
               "[TDD-00125](../tdd/TDD-00125.md) Stage 1; the type body uses the full grammar in the type-expression table; a `{number=}`/`[name]` optional decoration is recognized and stripped"
@@ -98,7 +98,7 @@
             "feature": "`@satisfies`",
             "status": "implemented",
             "caveats": [
-              "Accepted and erased — the value keeps its own type, no `satisfies`-style excess-property/conformance check (parity with the erased TS `satisfies` operator — [ADR-00371](../adr/ADR-00371.md))"
+              "Accepted and erased — the value keeps its own type, no `satisfies`-style excess-property/conformance check (parity with the erased TS `satisfies` operator — [ADR-00371](../adr/00/ADR-00371.md))"
             ],
             "notes": [
               "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
@@ -178,7 +178,7 @@
             "feature": "`@readonly`",
             "status": "implemented",
             "caveats": [
-              "Accepted and erased, not enforced — no mutation checking (parity with the erased TS `readonly` modifier — [ADR-00373](../adr/ADR-00373.md))"
+              "Accepted and erased, not enforced — no mutation checking (parity with the erased TS `readonly` modifier — [ADR-00373](../adr/00/ADR-00373.md))"
             ],
             "notes": [
               "[TDD-00125](../tdd/TDD-00125.md) Stage 5"
@@ -279,7 +279,7 @@
             "feature": "Varargs/rest (`...T`)",
             "status": "implemented",
             "caveats": [
-              "Stripped to the base `T`; the varargs body reads its overflow through a declared `...rest` parameter or the `arguments` object ([ADR-00928](../adr/ADR-00928.md))"
+              "Stripped to the base `T`; the varargs body reads its overflow through a declared `...rest` parameter or the `arguments` object ([ADR-00928](../adr/00/ADR-00928.md))"
             ],
             "notes": [
               "[TDD-00125](../tdd/TDD-00125.md) Stage 1"
@@ -334,7 +334,7 @@
             "feature": "`Object.<K, V>` (index map)",
             "status": "implemented",
             "notes": [
-              "Normalized to `Record<K, V>`, now backed by real index-signature support — per-key read/write (`d[key]`) works ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00557](../adr/ADR-00557.md))"
+              "Normalized to `Record<K, V>`, now backed by real index-signature support — per-key read/write (`d[key]`) works ([TDD-00130](../tdd/TDD-00130.md)/[ADR-00557](../adr/00/ADR-00557.md))"
             ]
           },
           {
@@ -425,7 +425,7 @@
             "feature": "`@pure` (enforced side-effect-free function)",
             "status": "implemented",
             "notes": [
-              "A front-end enforcement pass — **zero runtime/codegen cost**, output byte-identical to the untagged function — that rejects, inside a `@pure` function (declaration/arrow/function-expression, incl. capturing closures), the five impurity classes: parameter mutation, captured/global mutation, I/O (`console`/`fs`/`fetch`/…), nondeterminism (`Math.random`/`Date.now`/`new Date()`), and calling a non-`@pure` function (contagious) ([TDD-00128](../tdd/TDD-00128.md)/[ADR-00516](../adr/ADR-00516.md))",
+              "A front-end enforcement pass — **zero runtime/codegen cost**, output byte-identical to the untagged function — that rejects, inside a `@pure` function (declaration/arrow/function-expression, incl. capturing closures), the five impurity classes: parameter mutation, captured/global mutation, I/O (`console`/`fs`/`fetch`/…), nondeterminism (`Math.random`/`Date.now`/`new Date()`), and calling a non-`@pure` function (contagious) ([TDD-00128](../tdd/TDD-00128.md)/[ADR-00516](../adr/00/ADR-00516.md))",
               "Conservative gaps (rejected-or-allowed by design, never a silent miscompile): parameter aliasing through a local (`const y = x; y.f = 1`) is not tracked; calling a function held in a parameter/local (higher-order) is allowed as the caller's contract; an unrecognized builtin bare call is allowed. Calls to non-`@pure` user functions are always rejected"
             ]
           }

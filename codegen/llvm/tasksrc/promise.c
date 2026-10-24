@@ -25,7 +25,7 @@ void __kml_promise_init_at(void *p) {
  * (an instance of a class extending Promise has its class's tag there,
  * TDD-00247). */
 void *__kml_task_alloc_promise(void) {
-    char *b = malloc(8 + KML_PROMISE_SIZE);
+    char *b = kml_alloc(KML_HEAP_WORDS, 8 + KML_PROMISE_SIZE);
     *(i64 *)b = KML_PROMISE_HEADER;
     void *p = b + 8;
     __kml_promise_init_at(p);

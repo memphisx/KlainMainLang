@@ -41,7 +41,7 @@ func (e *Emitter) WindowDTS() string {
 		}
 		ret := "unknown"
 		if s.Ret != nil {
-			if s.Ret.IsPromise {
+			if s.Ret.IsPromise() {
 				// async callback: the page promise resolves the inner type.
 				if s.Ret.PromiseType != nil {
 					ret = tsTypeString(*s.Ret.PromiseType)
@@ -71,21 +71,21 @@ func tsTypeString(ty Type) string {
 		return "boolean"
 	case ty.Float:
 		return "number"
-	case ty.IsArray && ty.ElemType != nil:
+	case ty.IsArray() && ty.ElemType != nil:
 		return tsTypeString(*ty.ElemType) + "[]"
-	case ty.IsTuple:
+	case ty.IsTuple():
 		parts := make([]string, len(ty.Fields))
 		for i, f := range ty.Fields {
 			parts[i] = tsTypeString(f.Ty)
 		}
 		return "[" + strings.Join(parts, ", ") + "]"
-	case ty.IsObject:
+	case ty.IsObject():
 		parts := make([]string, len(ty.UserFields()))
 		for i, f := range ty.UserFields() {
 			parts[i] = fmt.Sprintf("%s: %s", f.Name, tsTypeString(f.Ty))
 		}
 		return "{ " + strings.Join(parts, "; ") + " }"
-	case ty.IsPromise:
+	case ty.IsPromise():
 		if ty.PromiseType != nil {
 			return "Promise<" + tsTypeString(*ty.PromiseType) + ">"
 		}
@@ -124,7 +124,7 @@ func (e *Emitter) noteWebviewNew(ex *ast.NewExpression) {
 			continue
 		}
 		for _, f := range e.inferExprType(p.Value).Fields {
-			if f.Name != ClassTagField {
+			if !isHiddenField(f.Name) {
 				e.noteWebviewBinding(f.Name, f.Ty)
 			}
 		}
@@ -148,7 +148,7 @@ func (e *Emitter) noteWebviewBindTyped(ex *ast.CallExpression) {
 }
 
 func (e *Emitter) noteWebviewBinding(name string, ty Type) {
-	if ty.IsFunc {
+	if ty.IsFunc() {
 		e.webviewBindings = append(e.webviewBindings, webviewBindingSig{Name: name, Params: ty.FuncParams, Ret: ty.FuncRetType})
 	}
 }

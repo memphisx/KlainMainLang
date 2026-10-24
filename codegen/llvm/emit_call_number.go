@@ -5,24 +5,6 @@ import (
 	"fmt"
 )
 
-func (e *Emitter) emitNumberStaticCall(property string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	switch property {
-	case "isInteger":
-		return e.emitNumberIsInteger(args, pos)
-	case "isFinite":
-		return e.emitNumberIsFinite(args, pos, false)
-	case "isNaN":
-		return e.emitNumberIsNaN(args, pos, false)
-	case "isSafeInteger":
-		return e.emitNumberIsSafeInteger(args, pos)
-	case "parseInt":
-		return e.emitParseInt(args, pos)
-	case "parseFloat":
-		return e.emitParseFloat(args, pos)
-	}
-	return Value{}, fmt.Errorf("%d:%d: Number.%s is not supported", pos.Line, pos.Col, property)
-}
-
 // emitNumberPredicateOperand evaluates the argument of a Number.isX / global isX
 // predicate. A `T | undefined` / `T | null` scalar — an element read that may be
 // out of range, a nullable local, a Map lookup — arrives as its `{ i1, T }`
@@ -36,7 +18,7 @@ func (e *Emitter) emitNumberPredicateOperand(arg ast.Expression) (val Value, pre
 		return Value{}, "", false, err
 	}
 	if isNullableScalar(val.Ty) {
-		absentIsUndefined = val.Ty.IsUndefined
+		absentIsUndefined = val.Ty.IsUndefined()
 		present, val = e.nullableScalarAggParts(val)
 	}
 	return val, present, absentIsUndefined, nil
@@ -50,15 +32,15 @@ func (e *Emitter) numberOperand(val Value) (num Value, isNum string) {
 	switch {
 	case val.Ty.Float:
 		return val, "1"
-	case val.Ty.IsDynamic:
+	case val.Ty.IsDynamic():
 		tag, _ := e.emitUnboxTagPayload(val)
 		isF, isI, either := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isF, tag, kmlTagFloat))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isI, tag, kmlTagInt))
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, isF, isI))
-		return e.coerce(val, TypeF64), either
+		return e.convert(val, TypeF64), either
 	case isNumericScalar(val.Ty):
-		return e.coerce(val, TypeF64), "1"
+		return e.convert(val, TypeF64), "1"
 	}
 	return Value{Ref: "0.0", Ty: TypeF64}, "0"
 }
@@ -156,13 +138,13 @@ func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos, global boo
 		// `isNaN('42' as any)` → false). An integer or boolean always `ToNumber`s to a
 		// finite value, so those keep the fast trivial false.
 		switch {
-		case val.Ty.IsDynamic || toNumberCanBeNaN(val.Ty):
+		case val.Ty.IsDynamic() || toNumberCanBeNaN(val.Ty):
 			// ToNumber, an object's ToPrimitive included (`isNaN([1])` is false).
 			n, err := e.emitUnaryPlus(val, pos)
 			if err != nil {
 				return Value{}, err
 			}
-			val = e.coerce(n, TypeF64)
+			val = e.convert(n, TypeF64)
 		default:
 			return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, absent), nil
 		}
@@ -182,7 +164,7 @@ func toNumberCanBeNaN(ty Type) bool {
 		return false // boolean → 0 or 1
 	}
 	if ty.IR == "i64" || ty.IR == "i32" || ty.IR == "i16" || ty.IR == "i8" {
-		return ty.IsUndefined // an integer converts to a finite number; undefined → NaN
+		return ty.IsUndefined() // an integer converts to a finite number; undefined → NaN
 	}
 	return true // string / object / undefined / other pointer types
 }
@@ -215,13 +197,13 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos, global 
 		// defaulted to finite. Integers and booleans always convert to a finite value,
 		// so they keep the trivial true.
 		switch {
-		case val.Ty.IsDynamic || toNumberCanBeNaN(val.Ty):
+		case val.Ty.IsDynamic() || toNumberCanBeNaN(val.Ty):
 			// ToNumber, an object's ToPrimitive included (`isNaN([1])` is false).
 			n, err := e.emitUnaryPlus(val, pos)
 			if err != nil {
 				return Value{}, err
 			}
-			val = e.coerce(n, TypeF64)
+			val = e.convert(n, TypeF64)
 		default:
 			return e.numberPredicateResult(Value{Ref: "1", Ty: TypeBool}, present, absent), nil
 		}
@@ -243,7 +225,7 @@ func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (V
 		return Value{}, err
 	}
 	const maxSafe = "9007199254740991"
-	if val.Ty.IsDynamic || !isNumericScalar(val.Ty) && !val.Ty.Float {
+	if val.Ty.IsDynamic() || !isNumericScalar(val.Ty) && !val.Ty.Float {
 		// An `any`, or a concrete non-number: a number only, then as a double.
 		num, isNum := e.numberOperand(val)
 		if isNum == "0" {
@@ -299,7 +281,7 @@ func (e *Emitter) emitGlobalStringConv(args []ast.Expression, pos ast.Pos) (Valu
 	if err != nil {
 		return Value{}, err
 	}
-	if v.Ty.IsDynamic {
+	if v.Ty.IsDynamic() {
 		return e.emitDynamicToString(v)
 	}
 	return e.emitValueToString(v)
@@ -327,7 +309,7 @@ func (e *Emitter) emitGlobalBooleanConv(args []ast.Expression, pos ast.Pos) (Val
 // no-digit string is NaN — unlike parseFloat's prefix parse); null is 0.
 func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) == 0 {
-		return Value{Ref: "0", Ty: TypeI64}, nil
+		return Value{Ref: "0.0", Ty: TypeF64}, nil
 	}
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: Number() takes at most 1 argument", pos.Line, pos.Col)
@@ -337,16 +319,16 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		if nl.IsUndefined {
 			return Value{Ref: "0x7FF8000000000000", Ty: TypeF64}, nil
 		}
-		return Value{Ref: "0", Ty: TypeI64}, nil
+		return Value{Ref: "0.0", Ty: TypeF64}, nil
 	}
 	v, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	switch {
-	case v.Ty.IsDate || e.isDateClass(v.Ty):
+	case v.Ty.IsDate() || e.isDateClass(v.Ty):
 		return e.emitUnaryPlus(v, pos) // its time value
-	case v.Ty.IsDynamic:
+	case v.Ty.IsDynamic():
 		// Number(x: any) is ordinary typed TS, so it runs in both lanes:
 		// ToPrimitive(number) then ToNumber (ADR-01057). Checked before the
 		// numeric case: the NaN-box is an i64, so IsInteger() is true for it.
@@ -356,13 +338,13 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		return e.emitUnaryPlus(v, pos) // absent → 0 (null) / NaN (undefined)
 	case v.Ty.IR == "i1":
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", r, v.Ref))
-		return Value{Ref: r, Ty: TypeI64}, nil
+		e.emitInstr(fmt.Sprintf("%s = uitofp i1 %s to double", r, v.Ref))
+		return Value{Ref: r, Ty: TypeF64}, nil
 	case v.Ty.IR == "double":
 		return e.emitUnaryPlus(v, pos) // the slot's undefined is NaN (TDD-00241)
 	case v.Ty.Float || v.Ty.IsInteger() || v.Ty.IR == "i64":
 		return v, nil
-	case v.Ty.IsBigInt:
+	case v.Ty.IsBigInt():
 		// Number(bigint) → the nearest double (Infinity when out of range), like JS.
 		e.ensureBigInt()
 		r := e.freshReg()
@@ -413,11 +395,11 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 			e.ensureToNumber()
 			d := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number(ptr %s)", d, rv.Ref))
-			r32 = e.coerce(Value{Ref: d, Ty: TypeF64}, TypeI32)
-		case rv.Ty.IsDynamic:
-			r32 = e.coerce(Value{Ref: e.emitAnyToNum(rv), Ty: TypeF64}, TypeI32)
+			r32 = e.convert(Value{Ref: d, Ty: TypeF64}, TypeI32)
+		case rv.Ty.IsDynamic():
+			r32 = e.convert(Value{Ref: e.emitAnyToNum(rv), Ty: TypeF64}, TypeI32)
 		default:
-			r32 = e.coerce(rv, TypeI32)
+			r32 = e.convert(rv, TypeI32)
 		}
 		// Spec: a radix of 0 (also NaN or absent) auto-detects; outside 2..36
 		// the result is NaN. libc differs here (glibc's strtoll parses base 1

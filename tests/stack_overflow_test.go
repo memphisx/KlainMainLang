@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -9,6 +10,7 @@ import (
 // and recover from (TDD-00249). The self-call in tail position used to
 // become a loop and never end.
 func TestE2EStackOverflowCaught(t *testing.T) {
+	skipUnderSanitizers(t)
 	assertOutput(t, `
 let n = 0
 function recurse(): void {
@@ -29,6 +31,7 @@ console.log('after')
 
 // Uncaught, the overflow ends the program with exit code 1, as in Node.
 func TestE2EStackOverflowUncaught(t *testing.T) {
+	skipUnderSanitizers(t)
 	out, code := compileAndRunExpectExit(t, `
 function f(n: number): number { return f(n + 1) + 1 }
 console.log('start')
@@ -44,6 +47,7 @@ console.log(f(0))
 // lists an empty directory: every frame's listing stays live until the
 // overflow, and the native stack holds far more frames than Node's.
 func TestE2EStackOverflowReaddir(t *testing.T) {
+	skipUnderSanitizers(t)
 	assertOutputImports(t, `
 import fs from 'fs'
 import os from 'os'
@@ -64,6 +68,7 @@ console.log('ok')
 // own fiber stack; the guard page under it turns the overflow into the same
 // RangeError instead of a write over the heap.
 func TestE2EStackOverflowInAsyncTask(t *testing.T) {
+	skipUnderSanitizers(t)
 	assertOutput(t, `
 function recurse(n: number): number { return recurse(n + 1) + 1 }
 async function main(): Promise<void> {
@@ -74,4 +79,14 @@ async function main(): Promise<void> {
 }
 main().then(() => console.log('done'))
 `, "task RangeError Maximum call stack size exceeded\nagain RangeError\ndone")
+}
+
+// skipUnderSanitizers skips in the sanitizer lane: a sanitizer's stack
+// frames and its own fault handler leave no guard for an overflow to hit,
+// so the runtime installs none there (stackguard.c).
+func skipUnderSanitizers(t *testing.T) {
+	t.Helper()
+	if os.Getenv("KLAIN_TEST_SAN") == "1" {
+		t.Skip("stack overflow detection is off in sanitizer builds")
+	}
 }

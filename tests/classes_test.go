@@ -134,16 +134,22 @@ console.log(u.double(21))
 }
 
 func TestE2EClassFieldsWithoutConstructorCompiles(t *testing.T) {
-	// ADR-00373: a class with declared-but-uninitialized fields and no explicit
-	// constructor is accepted (calloc zero-fills the instance); this used to be
-	// a compile error. Runtime behavior is covered by the TestE2EClassBareField*
-	// tests above.
+	// A typed field nothing initializes is TS2564 under the strict lane, as
+	// in tsc; `x!: number` waives it. Runtime behavior is covered by the
+	// TestE2EClassBareField* tests above.
 	if _, err := parseAndCompile(`
 class Foo {
   x: number;
 }
+`); err == nil || !strings.Contains(err.Error(), "has no initializer and is not definitely assigned") {
+		t.Fatalf("expected TS2564 for a bare typed field, got: %v", err)
+	}
+	if _, err := parseAndCompile(`
+class Foo {
+  x!: number;
+}
 `); err != nil {
-		t.Fatalf("expected a class with a bare field to compile, got: %v", err)
+		t.Fatalf("expected a definite field to compile, got: %v", err)
 	}
 }
 
@@ -157,7 +163,7 @@ class Foo {
 	if err == nil {
 		t.Fatal("expected a compile error for two methods with the same name")
 	}
-	if !strings.Contains(err.Error(), "more than one method named") {
+	if !strings.Contains(err.Error(), "duplicate function implementation of 'greet'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -166,7 +172,7 @@ func TestE2ESelfReferentialClassField(t *testing.T) {
 	// A class field typed as the class itself (or a chain of them) is the
 	// classic linked-list/tree shape. Also exercises destructuring a
 	// class-typed field into a local binding and drilling further into it —
-	// see docs/adr/ADR-00064.md for the bug this guards against.
+	// see docs/adr/00/ADR-00064.md for the bug this guards against.
 	assertOutput(t, `
 class Node {
   value: number;
@@ -205,7 +211,7 @@ console.log(root.children[0].children[0].val);
 `, "2\n3")
 }
 
-// --- TDD-00009 Stage 1a: for...of over a class-based iterator ---
+// --- for...of over a class whose [Symbol.iterator] drains its next() ---
 
 func TestE2EForOfClassIteratorNumeric(t *testing.T) {
 	assertOutput(t, `
@@ -215,6 +221,9 @@ class Range {
   constructor(start: number, max: number) {
     this.current = start;
     this.max = max;
+  }
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
   }
   next(): number | null {
     if (this.current >= this.max) {
@@ -240,6 +249,9 @@ func TestE2EForOfClassIteratorZeroFirst(t *testing.T) {
 	assertOutput(t, `
 class CountTo3 {
   current: number = 0;
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
+  }
   next(): number | null {
     if (this.current > 2) { return null; }
     const v = this.current;
@@ -267,6 +279,9 @@ class NodeIter {
   cursor: Node | null;
   constructor(head: Node | null) {
     this.cursor = head;
+  }
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
   }
   next(): Node | null {
     const n = this.cursor;
@@ -437,17 +452,12 @@ console.log(10n instanceof Object);
 
 // A value whose static type can't be decided (any/union/nullable) keeps a
 // clean rejection rather than a wrong constant.
-func TestE2EInstanceOfObjectUndecidableRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EInstanceOfObjectOnAny(t *testing.T) {
+	// A value held in any is decided at run time (ADR-01763).
+	assertSameAsNode(t, `
 function f(x: any): boolean { return x instanceof Object; }
-console.log(f(5));
+console.log(f(5), f({}), f([]), f(null), f(Object.create(null)), f(() => 1));
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for instanceof Object on an any-typed value, got none")
-	}
-	if !strings.Contains(err.Error(), "undecidable") {
-		t.Fatalf("expected 'undecidable', got: %v", err)
-	}
 }
 
 func TestE2EInstanceOfReservedFieldNameIsError(t *testing.T) {
@@ -987,7 +997,7 @@ console.log(g.greet());
 func TestE2EClassPrivateNameStaticField(t *testing.T) {
 	assertOutput(t, `
 class Box {
-  static #count: number;
+  static #count = 0;
   static increment(): void { Box.#count = Box.#count + 1; }
   static getCount(): number { return Box.#count; }
 }
@@ -2001,11 +2011,11 @@ console.log(s.label);
 func TestE2EStaticGeneratorMethodRejected(t *testing.T) {
 	_, err := parseAndCompile(`
 class C {
-  static *g(): Generator<number> { yield 1; }
+  static *g(): Generator<number> { yield arguments.length; }
 }
 `)
 	if err == nil {
-		t.Fatal("expected a compile error for a static generator method")
+		t.Fatal("expected a compile error for a static generator method reading arguments")
 	}
 	if !strings.Contains(err.Error(), "static generator method") {
 		t.Errorf("unexpected error message: %v", err)
@@ -2192,32 +2202,32 @@ console.log(e instanceof Error, e.kode, e.message)
 // field initializers that DO exist still run. ---
 
 func TestE2EClassBareFieldNoConstructor(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 class C { x: number; y: number; }
 const c = new C();
 console.log(c.x);
 console.log(c.y);
-`, "0\n0")
+`, "undefined\nundefined")
 }
 
 func TestE2EClassMixedInitAndBareFields(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 class Config { retries = 3; timeout: number; verbose = true; level: number; }
 const cfg = new Config();
 console.log(cfg.retries);
 console.log(cfg.timeout);
 console.log(cfg.verbose);
 console.log(cfg.level);
-`, "3\n0\ntrue\n0")
+`, "3\nundefined\ntrue\nundefined")
 }
 
 func TestE2EClassBareNullableRefField(t *testing.T) {
-	assertOutput(t, `
+	assertOutputCompatJS(t, `
 class Node { value: number = 7; next: Node | null; }
 const n = new Node();
 console.log(n.value);
-console.log(n.next === null);
-`, "7\ntrue")
+console.log(n.next === null, n.next);
+`, "7\nfalse undefined")
 }
 
 func TestE2EGenericClassBareField(t *testing.T) {
@@ -2226,7 +2236,7 @@ class Box<T> { value: T; count: number; }
 const b = new Box<number>();
 console.log(b.value);
 console.log(b.count);
-`, "0\n0")
+`, "undefined\nundefined")
 }
 
 // --- ADR-00375: static field initializers (`static x = expr`). Lowered to
@@ -3457,5 +3467,532 @@ r.on('end', () => console.log('end'))
 const w = new Writable()
 w._write = (chunk: any, enc: string, cb: () => void) => { console.log('write', String(chunk)); cb() }
 w.end('x')
+`)
+}
+
+// A library call that passes a function literal also honours the
+// instance's own method: the agent's own createSocket gets the request's
+// callback, and the error it passes is the one the request reports.
+func TestE2ELibraryOwnMethodWithFunctionLiteralArg(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import http from 'http'
+const agent = new http.Agent()
+const _err = new Error('kaboom')
+;(agent as any).createSocket = function (req: any, options: any, cb: (e: Error) => void) { cb(_err) }
+const req = http.request({ agent })
+req.on('error', (err) => console.log('error same', err === _err))
+req.on('close', () => console.log('close destroyed', req.destroyed))
+`)
+}
+
+func TestE2EClassSpecies(t *testing.T) {
+	// A static [Symbol.species] getter picks the constructor of a derived
+	// array or promise: the builtin itself, another subclass, or the class.
+	assertSameAsNode(t, `class Plain extends Array<number> {
+  static get [Symbol.species]() { return Array; }
+}
+class Other extends Array<number> {
+  tag(): string { return "other"; }
+}
+class ToOther extends Array<number> {
+  static get [Symbol.species]() { return Other; }
+}
+class Self extends Array<number> {
+  static get [Symbol.species]() { return this; }
+}
+class Child extends Plain {}
+const p = new Plain(); p.push(1, 2, 3);
+const pm = p.map((x) => x * 2);
+console.log("Plain", pm instanceof Plain, Array.isArray(pm), pm.length, pm[2]);
+const t = new ToOther(); t.push(4, 5);
+const tf = t.filter((x) => x > 4);
+console.log("ToOther", tf instanceof ToOther, tf instanceof Other, tf.length, tf[0]);
+const s = new Self(); s.push(7);
+console.log("Self", s.slice(0) instanceof Self);
+const c = new Child(); c.push(9);
+console.log("Child", c.map((x) => x) instanceof Child, c.map((x) => x) instanceof Plain);
+`)
+	assertSameAsNode(t, `class P extends Promise<number> {
+  static get [Symbol.species]() { return Promise; }
+}
+class Q extends Promise<number> {}
+class R extends Promise<number> {
+  static get [Symbol.species]() { return Q; }
+}
+const p = new P((r) => r(1));
+const pt = p.then((x) => x + 1);
+console.log("P", pt instanceof P, pt instanceof Promise);
+const q = new Q((r) => r(2));
+console.log("Q", q.then((x) => x) instanceof Q);
+const r = new R((res) => res(3));
+const rt = r.then((x) => x * 10);
+console.log("R", rt instanceof R, rt instanceof Q);
+const pf = p.finally(() => {});
+console.log("Pf", pf instanceof P);
+pt.then((v) => console.log("value", v));
+rt.then((v) => console.log("rvalue", v));
+pf.then((v) => console.log("fvalue", v));
+`)
+	mustCompileError(t, `class A extends Array<number> {
+  static get [Symbol.species]() { const x = 1; return x > 0 ? Array : A; }
+}
+const a = new A(); a.push(1);
+console.log(a.map((x) => x).length);
+`, "[Symbol.species] must return")
+}
+
+// A class with only `next()` is not iterable: tsc's TS2488, and under
+// -compat=js Node's TypeError from for…of and an empty array-like read from
+// Array.from.
+func TestE2EForOfClassNextOnlyNotIterable(t *testing.T) {
+	const src = `class C {
+  i = 0;
+  next(): number | null { return this.i < 2 ? this.i++ : null; }
+}
+const c = new C();
+try { for (const x of c) console.log(x); } catch (e) { console.log(String(e)); }
+console.log(Array.from(c as any).length);
+`
+	mustCompileError(t, src, "must have a '[Symbol.iterator]()' method")
+	assertSameAsNodeCompatJS(t, src)
+}
+
+// A static field declared without an initializer is undefined until
+// assigned: reads, arithmetic and logical assignment see undefined.
+func TestE2EClassStaticFieldUninitialized(t *testing.T) {
+	assertSameAsNode(t, `class C {
+  static n: number;
+  static s: string;
+  static #p: number;
+  static a: number;
+  static b: number;
+  static c: number;
+  static bump(): number { C.#p = C.#p + 1; return C.#p; }
+}
+console.log(C.n, C.s, C.n + 1, C.bump());
+C.a ||= 5; C.b ??= 6; C.c &&= 7;
+console.log(C.a, C.b, C.c);
+C.n = 3;
+console.log(C.n * 2);
+`)
+}
+
+// A call taking the own-method check with a function literal nested in an
+// argument: the instance's own method runs, and the arguments are
+// evaluated once, left to right.
+func TestE2EOwnMethodNestedFunctionLiteralArg(t *testing.T) {
+	assertSameAsNode(t, `
+class A { run(n: number, o: { cb: () => number }) { console.log("class", n, o.cb()); } }
+const a = new A();
+let x = 1;
+a.run(x++, { cb: () => x * 10 });
+(a as any).run = function (n: number, o: { cb: () => number }) { console.log("own", n, o.cb()); };
+a.run(x++, { cb: () => x * 10 });
+`)
+}
+
+// Object.assign and Object.defineProperties through any read the own
+// enumerable symbol keys after the string keys (ADR-01718).
+func TestE2ESymbolKeysAssignDefineProperties(t *testing.T) {
+	assertSameAsNode(t, `const k = Symbol("k"), j = Symbol("j");
+const src: any = { a: 1, [k]: 2 };
+const t: any = Object.assign({}, src);
+console.log(t[k], Object.getOwnPropertySymbols(t).length);
+const o: any = {};
+Object.defineProperties(o, { x: { value: 1, enumerable: true }, [j]: { value: 3, enumerable: true } });
+console.log(o.x, o[j], Object.getOwnPropertySymbols(o).length);
+const props: any = { [k]: { value: 5 } };
+const p: any = Object.defineProperties({}, props);
+console.log(p[k]);
+const typed = Object.assign({ b: 0 }, { [k]: 7 });
+console.log((typed as any)[k]);
+{
+  const k = Symbol("k"), h = Symbol("h");
+  const props: any = { [k]: { value: 1, enumerable: true } };
+  Object.defineProperty(props, h, { value: { value: 2 }, enumerable: false });
+  const o: any = Object.defineProperties({}, props);
+  console.log(o[k], o[h], Object.getOwnPropertySymbols(o).length);
+  const src: any = { [k]: 1 };
+  Object.defineProperty(src, h, { value: 2, enumerable: false });
+  const t: any = Object.assign({}, src);
+  console.log(t[k], t[h]);
+}
+`)
+}
+
+// new.target: the class new named in a constructor (a derived class through
+// super(), before super() too, and in an arrow), undefined in a method, a
+// static method and a plain call.
+func TestE2ENewTarget(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+class A {
+  kind: string
+  constructor() {
+    this.kind = new.target.name
+    const arrow = () => new.target === A
+    console.log("A ctor", new.target.name, arrow())
+  }
+  m() { return new.target === undefined }
+  static s() { return typeof new.target }
+}
+class B extends A {
+  constructor() {
+    console.log("before super", new.target.name)
+    super()
+  }
+}
+const a = new A(), b = new B()
+console.log(a.kind, b.kind, a.m(), A.s())
+function f() { return new.target === undefined ? "call" : "new" }
+console.log(f())
+`)
+}
+
+// new.target in a -compat=js prototype constructor: the function through new
+// (an arrow sees it), undefined through Base.call(this) and in a nested
+// function.
+func TestE2ENewTargetPrototypeConstructor(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function Animal(name) {
+  this.name = name
+  this.viaNew = new.target === Animal
+  const inner = () => new.target === Animal
+  this.arrow = inner()
+}
+function Dog(name) { Animal.call(this, name); this.dogNew = new.target === Dog }
+Dog.prototype = Object.create(Animal.prototype)
+const a = new Animal("a"), d = new Dog("d")
+console.log(a.viaNew, a.arrow, d.viaNew, d.dogNew, d.name)
+function plain() { return new.target === undefined }
+console.log(plain())
+function Outer() {
+  this.own = new.target === Outer
+  const self = this
+  this.inner = function () { return new.target === undefined }
+  function nested() { return new.target === undefined }
+  this.nested = nested()
+}
+const o = new Outer()
+console.log(o.own, o.inner(), o.nested)
+`)
+}
+
+func TestE2ENewTargetAtTopLevelRejected(t *testing.T) {
+	mustCompileError(t, "console.log(new.target)\n", "new.target expression is not allowed here")
+}
+
+// An abstract class constructs through any, as in JavaScript: its fields and
+// concrete methods are there, an abstract method is absent.
+func TestE2EAbstractClassConstructedThroughAny(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+abstract class Base {
+  x = 1
+  abstract area(): number
+  hello() { return "hi " + this.x }
+}
+class Sq extends Base { area() { return 4 } }
+const C: any = Base
+const b = new C()
+console.log(b.x, b.hello(), typeof b.area, b instanceof Base)
+try { b.area() } catch (e: any) { console.log(e.constructor.name) }
+console.log(new Sq().area())
+`)
+}
+
+func TestE2EClassExpressionReadsModuleNames(t *testing.T) {
+	assertSameAsNode(t, `
+function foo(x: number) { return x + 1; }
+const bar = (x: number) => x * 2;
+const C = class { m() { return foo(1) + bar(2); } };
+console.log(new C().m());
+function mk() { return class { m() { return foo(10); } }; }
+const K = mk();
+console.log(new K().m());
+var N = class Named { static k = 3; m() { return foo(Named.k); } };
+console.log(new N().m());
+`)
+}
+
+func TestE2EClassInstanceComputedKey(t *testing.T) {
+	assertSameAsNode(t, `
+class C { x = 1; y = 2; }
+const c = new C();
+const ks: (keyof C)[] = ["x", "y"];
+for (const k of ks) console.log(k, c[k] + 1);
+for (const k of ks) c[k] += 10;
+console.log(c.x, c.y);
+`)
+}
+
+func TestE2EUnannotatedAsyncMethodPromise(t *testing.T) {
+	// An unannotated async method returns a Promise (ADR-01768).
+	assertSameAsNode(t, `
+class C { async foo() { return 1; } async bar(n: number) { await 0; return n * 2; } }
+const o = new C();
+o.foo().then((r) => console.log("then", r));
+async function main() { const v = await o.bar(4); console.log("await", v, o.foo() instanceof Promise); }
+main();
+`)
+}
+
+func TestE2EStaticMethodReceiver(t *testing.T) {
+	// A static method's `this` is its call's receiver: a subclass, a value
+	// passed to .call, the class `super.m()` runs for (ADR-01821).
+	assertSameAsNode(t, `
+class C {
+  static tag = "C";
+  static #p = 1;
+  static #m() { return "pm"; }
+  static who(): string { return this.tag; }
+  static make() { return new this(); }
+  static priv() { this.#p++; return this.#p + this.#m(); }
+  static *gen() { yield this.tag; }
+  static get t() { return "get:" + this.tag; }
+  name() { return "c"; }
+}
+class D extends C { static tag = "D"; static who(): string { return "D>" + super.who(); } name() { return "d"; } }
+console.log(C.who(), D.who(), C.make().name(), D.make().name(), C.priv(), [...D.gen()].join(), D.t);
+for (const f of [() => D.priv(), () => (C.priv as any).call({})]) {
+  try { f(); } catch (e) { console.log((e as Error).constructor.name, (e as Error).message); }
+}
+console.log(C.who.call({ tag: "obj" }), C.who.length);
+class E { static n = 0; static inc() { return ++this.n; } }
+console.log(E.inc(), E.inc());
+`)
+}
+
+func TestE2EPrivateNameIn(t *testing.T) {
+	// `#x in o` tests the brand C's constructor gave o (ADR-01822).
+	assertSameAsNode(t, `
+class C {
+  #x = 1;
+  static #s = 2;
+  #m() {}
+  static has(o: any) { return #x in o; }
+  static hasM(o: object) { return #m in o && !(#s in o); }
+  static hasS(o: any) { return #s in o; }
+}
+class D extends C {}
+console.log(C.has(new C()), C.has(new D()), C.has({}), C.has(Object.create(C.prototype)), C.hasM(new C()), C.hasS(C), C.hasS(D));
+try { C.has(1); } catch (e) { console.log((e as Error).constructor.name, (e as Error).message); }
+`)
+}
+
+// A nested class reads its outer class's private field off an object: the
+// name is the outer class's, and an object without its brand throws V8's
+// TypeError.
+func TestE2ENestedClassReadsOuterPrivate(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var C = class {
+  #outer = 'test262';
+  B = class { #inner = 42; method(o) { return o.#outer; } get inner() { return this.#inner; } };
+};
+let c = new C();
+let b = new c.B();
+console.log(b.method(c), b.inner);
+try { b.method({}); } catch (e) { console.log(e.constructor.name, e.message); }
+try { b.method(b); } catch (e) { console.log(e.constructor.name, e.message); }
+`)
+	assertSameAsNode(t, `
+class C {
+  #outer = 'test262';
+  B = class { method(o: C) { return o.#outer; } };
+}
+const c = new C();
+console.log(new c.B().method(c));
+`)
+	// The outer class declared in a function, and a block class whose
+	// field holds a class expression.
+	assertSameAsNodeCompatJS(t, `
+function make() {
+  class C {
+    #outer = 'deep';
+    B = class { method(o) { return o.#outer; } };
+  }
+  return new C();
+}
+var c = make();
+var b = new c.B();
+console.log(typeof c.B, b.method(c));
+try { b.method({}); } catch (e) { console.log(e.constructor.name); }
+{ class D { E = class { hi() { return "hi"; } }; } var d = new D(); console.log(typeof d.E, new d.E().hi()); }
+`)
+}
+
+// A conditional between a derived class's instance and its base's is the
+// base (tsc's subtype reduction): its members read through the base, a
+// derived member is TS2339, and the value keeps its own class.
+func TestE2EConditionalDerivedInstanceReduced(t *testing.T) {
+	assertSameAsNode(t, `
+class A { a = 1; hi() { return 'A'; } }
+class B extends A { b = 2; hi() { return 'B' + this.b; } }
+function pick(c: boolean) { return c ? new B() : new A(); }
+const x = pick(true), y = pick(false);
+console.log(x.a, x.hi(), x instanceof B, x);
+console.log(y.a, y.hi(), y instanceof B, y);
+const z = Math.random() > 2 ? new A() : new B();
+console.log(z.hi(), (z as B).b, z.constructor.name);
+`)
+	mustCompileError(t, `
+class A { a = 1; }
+class B extends A { b = 2; }
+export const x = Math.random() > 2 ? new B() : new A();
+console.log(x.b);
+`, "property 'b' does not exist on type 'A'")
+}
+
+// A method returning `this` returns TypeScript's polymorphic `this` type:
+// a call through a subclass's instance is that subclass, and an object
+// literal's method returns the literal.
+func TestE2EReturnThisPolymorphic(t *testing.T) {
+	assertSameAsNode(t, `
+class A { x = 1; m() { return this; } set(v: number) { this.x = v; return this; } }
+class B extends A { y = 2; }
+const b = new B().m();
+console.log(b.y, b.set(5).y, b.x, b instanceof B);
+const o = { n: 3, self() { return this; }, inc() { this.n++; return this; } };
+console.log(o.self().n, o.inc().inc().n);
+const chain = new B().set(7).set(8);
+console.log(chain.x, chain.y, chain.constructor.name);
+`)
+}
+
+// A class extending a generic base without type arguments takes the base's
+// defaults; without a constructor of its own it constructs through the
+// base's.
+func TestE2EExtendsDefaultTypeArgs(t *testing.T) {
+	assertSameAsNode(t, `
+interface Opts { n: number }
+class Base<T extends object = Opts> {
+  cfg?: T;
+  constructor(cfg?: T) { this.cfg = cfg; }
+  has(): boolean { return this.cfg !== undefined; }
+}
+class Derived extends Base {
+  tag = "d";
+  describe(): string { return this.tag + ":" + (this.cfg ? this.cfg.n : -1); }
+}
+const d = new Derived({ n: 3 });
+const e = new Derived();
+console.log(d.describe(), e.describe(), d.has(), e.has(), d instanceof Base);
+`)
+}
+
+// An interface field typed `typeof C` for a class declared after the
+// interface holds the constructor reference.
+func TestE2ETypeofClassFieldBeforeClass(t *testing.T) {
+	assertSameAsNode(t, `
+interface Opts { make?: typeof Animal; n: number }
+function build(o: Opts): Animal {
+  const K = o.make ?? Animal;
+  return new K(o.n);
+}
+class Animal {
+  legs: number;
+  constructor(n: number) { this.legs = n; }
+  kind(): string { return "animal"; }
+}
+class Bird extends Animal {
+  kind(): string { return "bird"; }
+}
+const a = build({ n: 4 });
+const b = build({ make: Bird, n: 2 });
+console.log(a.kind(), a.legs, b.kind(), b.legs, b instanceof Bird);
+`)
+}
+
+// TestE2EArgumentsInPatternDefaults: a destructured parameter's defaults
+// see the function's `arguments`, in functions, function expressions,
+// methods and constructors; a constructor's `arguments` holds the overflow
+// too, and `arguments` holds the destructured argument itself.
+func TestE2EArgumentsInPatternDefaults(t *testing.T) {
+	assertOutputCompatJS(t, `
+function f({t = arguments}) { return t.length; }
+console.log(f({}, 2));
+console.log((function ({t = arguments}, [u = arguments.length]) { return arguments.length + u + t[0].k; })({k: 4}, [], 9));
+function g([a, b = arguments[2]]) { return a + b; }
+console.log(g([1], 0, 5));
+class C { m({t = arguments}, [u = arguments.length]) { return arguments.length + u + t[0].k; } }
+console.log(new C().m({k: 4}, [], 9));
+class D { constructor(x) { this.a = arguments[1]; this.n = arguments.length; } }
+var d = new D({}, 7);
+console.log(d.a, d.n);
+class G { constructor({a = arguments[1]}) { this.a = a; } }
+console.log(new G({}, 7).a);
+`, "2\n10\n6\n10\n7 2\n7")
+}
+
+// TestE2ENewClassExpressionAndValuelessGetter: `new class {…}()` constructs
+// the class expression; a JavaScript getter falling off its end is undefined.
+func TestE2ENewClassExpressionAndValuelessGetter(t *testing.T) {
+	assertOutputCompatJS(t, `
+var g;
+var o = new class { m() { return 7; } get a() { g = 1; } }();
+console.log(o.m(), o.a, g);
+var p = { get b() { g = 2; } };
+console.log(p.b, g);
+`, "7 undefined 1\nundefined 2")
+	assertOutput(t, `
+var o = new class { m(): number { return 7; } }();
+console.log(o.m());
+`, "7")
+}
+
+// TestE2EEvalArgumentsInFieldInitializer: a field initializer's eval code
+// reading `arguments` throws its SyntaxError when it runs; inside a
+// function-valued field it reads that function's arguments.
+func TestE2EEvalArgumentsInFieldInitializer(t *testing.T) {
+	// Through the resolver, which inlines static eval strings.
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+class C {
+  x = eval('() => arguments;');
+  f = function () { return eval("arguments.length"); };
+}
+try { new C(); console.log("constructed"); } catch (e) { console.log(e instanceof SyntaxError); }
+class D { f = function () { return eval("arguments.length"); }; }
+console.log(new D().f(1, 2));
+`}, "main.js", "true\n2")
+}
+
+// TestE2EMethodAssignedMemberInFieldInit: a member a class only assigns in
+// a setter, read by a field initializer, holds whatever was assigned.
+func TestE2EMethodAssignedMemberInFieldInit(t *testing.T) {
+	assertOutputCompatJS(t, `
+class C {
+  set m(v) { this._v = v; }
+  w = (this.m = "str", this._v);
+  put(x) { this._q = x; }
+  static f() { return this.#g(); }
+  static #g() { return 42.5; }
+}
+const c = new C();
+console.log(c.w);
+c.put(2.5); console.log(c._q);
+c.put("s"); console.log(c._q);
+console.log(C.f());
+`, "str\n2.5\ns\n42.5")
+}
+
+// A Promise subclass's statics construct the subclass, and its combinators
+// take members of mixed kinds: a promise member is adopted, a plain value
+// resolved, and an inherited static is typed off the base constructor.
+func TestE2EPromiseSubclassCombinatorsMixedMembers(t *testing.T) {
+	assertSameAsNode(t, `
+class Counted extends Promise<number> {}
+async function main() {
+  console.log(await Counted.all([1, 2]));
+  console.log(await Counted.all([1, Promise.resolve(3)]));
+  console.log(await Counted.all([Promise.resolve(3), 1]));
+  console.log(await Counted.all(["a", Promise.resolve("b")]));
+  console.log(await Counted.race([Promise.resolve(3), 1]));
+  console.log(await Counted.allSettled([1, Promise.resolve(3)]));
+  const x = Counted.resolve(5);
+  console.log(x instanceof Counted, await x);
+  const d = Counted.resolve(21).then((n) => n * 2);
+  console.log(d instanceof Counted, await d);
+}
+main();
 `)
 }

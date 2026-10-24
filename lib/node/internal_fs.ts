@@ -58,7 +58,7 @@ function getValidMode(mode: any, type: string): number {
     if (mode === null || mode === undefined) return def;
     validateInteger(mode, 'mode', -Number.MAX_SAFE_INTEGER);
     if (mode < 0 || mode > 7) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'mode is out of range: >= 0 && <= 7');
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'mode is out of range: >= 0 && <= 7');
     }
     return mode;
 }
@@ -181,7 +181,7 @@ export function readSync(fd: number, buffer: any, ...rest: any[]): number {
     length = length | 0;
     if (length === 0) return 0;
     if (buffer.byteLength === 0) {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'buffer' is empty and cannot be written. Received <Buffer >");
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'buffer' is empty and cannot be written. Received <Buffer >");
     }
     validateOffsetLengthRead(offset, length, buffer.byteLength);
     if (position === null || position === undefined) position = -1;
@@ -236,7 +236,7 @@ export function read(fd: number, ...rest: any[]): void {
         return;
     }
     if (buf.byteLength === 0) {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'buffer' is empty and cannot be written. Received <Buffer >");
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'buffer' is empty and cannot be written. Received <Buffer >");
     }
     validateOffsetLengthRead(offset, length, buf.byteLength);
     if (position === null || position === undefined) position = -1;
@@ -333,10 +333,10 @@ export function writeSync(fd: number, buffer: any, ...rest: any[]): number {
 
 type WriteCallback = (err: NodeJS.ErrnoException | null, written: number, buffer: any) => void;
 
-export function write(fd: number, buffer: Buffer, offset: number | undefined | null, length: number | undefined | null, position: number | undefined | null, callback: WriteCallback): void;
-export function write(fd: number, buffer: Buffer, offset: number | undefined | null, length: number | undefined | null, callback: WriteCallback): void;
-export function write(fd: number, buffer: Buffer, offset: number | undefined | null, callback: WriteCallback): void;
-export function write(fd: number, buffer: Buffer, callback: WriteCallback): void;
+export function write(fd: number, buffer: NodeJS.ArrayBufferView, offset: number | undefined | null, length: number | undefined | null, position: number | undefined | null, callback: WriteCallback): void;
+export function write(fd: number, buffer: NodeJS.ArrayBufferView, offset: number | undefined | null, length: number | undefined | null, callback: WriteCallback): void;
+export function write(fd: number, buffer: NodeJS.ArrayBufferView, offset: number | undefined | null, callback: WriteCallback): void;
+export function write(fd: number, buffer: NodeJS.ArrayBufferView, callback: WriteCallback): void;
 export function write(fd: number, string: string, position: number | undefined | null, encoding: BufferEncoding | undefined | null, callback: WriteCallback): void;
 export function write(fd: number, string: string, position: number | undefined | null, callback: WriteCallback): void;
 export function write(fd: number, string: string, callback: WriteCallback): void;
@@ -1206,7 +1206,7 @@ export function link(existingPath: PathLike, newPath: PathLike, callback: NoPara
 
 function symlinkType(type: any): number {
     if (type !== undefined && type !== null && type !== 'dir' && type !== 'file' && type !== 'junction') {
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'type' must be one of: 'dir', 'file', 'junction', null, undefined. Received " + (typeof type === 'string' ? "'" + type + "'" : String(type)));
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'type' must be one of: 'dir', 'file', 'junction', null, undefined. Received " + (typeof type === 'string' ? "'" + type + "'" : String(type)));
     }
     return type === 'file' ? 1 : type === 'dir' ? 2 : type === 'junction' ? 3 : 0;
 }
@@ -1678,7 +1678,7 @@ class FileHandle extends EventEmitter {
 
     private checkOpen(syscall: string): Error | null {
         if (this.kfd === -1) {
-            const e = new NodeError('EBADF', 'file closed') as any;
+            const e = NodeError('EBADF', 'file closed') as any;
             e.errno = -9;
             e.syscall = syscall;
             return e as Error;
@@ -1695,7 +1695,7 @@ class FileHandle extends EventEmitter {
                 return;
             }
             if (this.closePromise !== null) {
-                reject(new NodeError('EBADF', 'The FileHandle is closing'));
+                reject(NodeError('EBADF', 'The FileHandle is closing'));
                 return;
             }
             this._kmlRef();
@@ -1935,7 +1935,7 @@ function customStreamFs(ofs: any): StreamFsOps {
 // (FileHandleOperations): closing lets go of the handle's reference.
 function fileHandleStreamFs(handle: FileHandle): StreamFsOps {
     return {
-        open: (path, flags, mode, cb) => { throw new NodeError('ERR_METHOD_NOT_IMPLEMENTED', 'The open() method is not implemented'); },
+        open: (path, flags, mode, cb) => { throw NodeError('ERR_METHOD_NOT_IMPLEMENTED', 'The open() method is not implemented'); },
         close: (fd, cb) => {
             handle._kmlUnref();
             handle.close().then(() => { cb(null); }, (err: any) => { cb(err); });
@@ -1958,7 +1958,7 @@ function importFd(options: any, onHandleClose: () => void): { fd: number, fs: St
         return { fd: getValidatedFd(fd), fs: options.fs ? customStreamFs(options.fs) : defaultStreamFs };
     }
     if (fd instanceof FileHandle) {
-        if (options.fs) throw new NodeError('ERR_METHOD_NOT_IMPLEMENTED', 'The FileHandle with fs method is not implemented');
+        if (options.fs) throw NodeError('ERR_METHOD_NOT_IMPLEMENTED', 'The FileHandle with fs method is not implemented');
         const handle: FileHandle = fd;
         handle._kmlRef();
         handle.on('close', onHandleClose);
@@ -2058,7 +2058,7 @@ export class ReadStream extends Readable {
             validateInteger(opts.end, 'end', 0);
             this.end = opts.end;
             if (this.start !== undefined && this.start > this.end) {
-                throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "start" is out of range. It must be <= "end" (here: ' + this.end + '). Received ' + this.start);
+                throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "start" is out of range. It must be <= "end" (here: ' + this.end + '). Received ' + this.start);
             }
         }
     }
@@ -2224,7 +2224,7 @@ export class WriteStream extends Writable {
                 bytesWritten = 0;
             }
             if (this.destroyed || er) {
-                cb(er ?? new NodeError('ERR_STREAM_DESTROYED', 'Cannot call write after a stream was destroyed'));
+                cb(er ?? NodeError('ERR_STREAM_DESTROYED', 'Cannot call write after a stream was destroyed'));
                 return;
             }
             this.bytesWritten += bytesWritten;
@@ -2233,7 +2233,7 @@ export class WriteStream extends Writable {
             const next = pos === undefined ? undefined : pos + bytesWritten;
             // Up to five tries at writing a non-zero number of bytes.
             if (tries > 5) {
-                cb(new NodeError('ERR_SYSTEM_ERROR', 'A system error occurred: write failed'));
+                cb(NodeError('ERR_SYSTEM_ERROR', 'A system error occurred: write failed'));
             } else if (left) {
                 this.writeAll(data.subarray(bytesWritten), left, next, cb, tries);
             } else {

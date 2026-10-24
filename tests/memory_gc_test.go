@@ -12,12 +12,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 )
 
 // --- -mm=gc (Boehm GC mode) ---
 //
-// See docs/adr/ADR-00071.md and docs/tdd/TDD-00001.md. Unlike the
+// See docs/adr/00/ADR-00071.md and docs/tdd/TDD-00001.md. Unlike the
 // Memory.free(x) tests in memory_test.go (a single, small, deterministic
 // free), what actually needs proving here is that *real collections*
 // happen under load and don't corrupt anything — a program that merely
@@ -179,7 +180,7 @@ func TestE2EGCModeBoundsMemory(t *testing.T) {
 // TestE2EHTTPListenGCModeConcurrentChurn is the fiber/GC_stackbottom
 // correctness test: http.listen's concurrent connections each run on their
 // own ucontext_t fiber with a separately malloc'd stack (see
-// docs/adr/ADR-00071.md). If a collection fires while a fiber is actively
+// docs/adr/00/ADR-00071.md). If a collection fires while a fiber is actively
 // running and GC_stackbottom hasn't been repointed at that fiber's own
 // stack, Boehm's root-stack scan walks from the live SP to the *original*
 // process stack's address — an unrelated, likely-unmapped range — which
@@ -254,4 +255,78 @@ func parsePeakRSS(out string) (int64, bool) {
 		return kb * 1024, err == nil
 	}
 	return 0, false
+}
+
+// TestE2EGCModeGoroutinesSelectChurn: under -mm=gc, a collection while an M
+// thread ran a goroutine scanned from the goroutine's stack pointer up to the
+// thread's own stack base, across unmapped memory, and crashed. The main
+// thread's select allocates its cases and handlers, so collections run while
+// the workers run (ADR-01719).
+func TestE2EGCModeGoroutinesSelectChurn(t *testing.T) {
+	const src = `
+import { go, Channel, select, defaultCase } from 'klain:sync';
+const c = new Channel<number>(64), d = new Channel<number>(0);
+for (let w = 0; w < 4; w++) go(() => { for (let i = 0; i < 100000; i++) c.send(i); d.send(w); });
+let n = 0, f = 0;
+while (f < 4) select(c.recvCase((p: number) => { n += 1; }), d.recvCase((id: number) => { f += 1; }));
+let more = true;
+while (more) select(c.recvCase((p: number) => { n += 1; }), defaultCase(() => { more = false; }));
+console.log(n);
+`
+	binFile := buildBinaryGCImports(t, src)
+	out, err := exec.Command(binFile).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := strings.TrimRight(string(out), "\n"); got != "400000" {
+		t.Errorf("got %q, want 400000", got)
+	}
+}
+
+// TestE2EGCModeClassRecordsCollected: under -mm=gc a class evaluated per
+// call (with statics and instances) leaves nothing behind once unreachable:
+// its record, its instances' record entries and its static area are
+// collected, so memory stays flat as evaluations accumulate.
+func TestE2EGCModeClassRecordsCollected(t *testing.T) {
+	const src = `function make(b: number) {
+  class D {
+    static base = b * 10;
+    static count = 0;
+    v = b;
+    static inc() { return ++D.count + D.base; }
+  }
+  return D;
+}
+const N = Number(process.argv[2] ?? "1000");
+let sum = 0;
+for (let i = 0; i < N; i++) {
+  const C = make(i % 7);
+  const o = new C();
+  sum += C.inc() + o.v + (o instanceof C ? 1 : 0);
+}
+const A = make(1), B = make(2);
+A.inc(); A.inc();
+console.log(sum, A.inc(), B.inc(), new A() instanceof B);
+`
+	binFile := buildBinaryGC(t, src)
+	rss := func(n string) (string, int64) {
+		cmd := exec.Command(binFile, n)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("run %s: %v", n, err)
+		}
+		ru, _ := cmd.ProcessState.SysUsage().(*syscall.Rusage)
+		if ru == nil {
+			t.Skip("no rusage on this platform")
+		}
+		return strings.TrimRight(string(out), "\n"), int64(ru.Maxrss)
+	}
+	gotSmall, small := rss("20000")
+	gotBig, big := rss("400000")
+	if gotSmall != "699967 13 21 false" || gotBig != "13999967 13 21 false" {
+		t.Fatalf("outputs %q, %q", gotSmall, gotBig)
+	}
+	if big > small*2 {
+		t.Errorf("max RSS grew from %d to %d over 20x the evaluations", small, big)
+	}
 }

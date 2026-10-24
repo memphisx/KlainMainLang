@@ -38,11 +38,11 @@ func (e *Emitter) emitBlobBytes(b Value, pos ast.Pos) (data, size, typ string, e
 		return "", "", "", err
 	}
 	d, n := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", d, bytes.Ref))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", n, bytes.Ref))
+	d = e.arrayData(bytes)
+	n = e.arrayLen(bytes)
 	t, err := e.emitExpr(ast.NewMemberExpression(bound, "type", pos))
 	if err != nil {
 		return "", "", "", err
 	}
-	return d, n, e.coerce(t, TypePtr).Ref, nil
+	return d, n, e.convert(t, TypePtr).Ref, nil
 }

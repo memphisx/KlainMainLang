@@ -210,7 +210,7 @@ func (e *Emitter) symbolFieldGlobal(name string) (string, bool) {
 		return "", false
 	}
 	g, ok := e.moduleGlobals[key]
-	if !ok || !g.Ty.IsSymbol {
+	if !ok || !g.Ty.IsSymbol() {
 		return "", false
 	}
 	return g.Ptr, true

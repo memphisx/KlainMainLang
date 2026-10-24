@@ -33,11 +33,11 @@ char **__kml_win_argv(int *out_argc) {
 	int argc = 0;
 	wchar_t **wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
 	if (!wargv) return NULL;
-	char **argv = (char **)malloc(((size_t)argc + 1) * sizeof(char *));
+	char **argv = (char **)malloc(((size_t)argc + 1) * sizeof(char *)); /* scratch */
 	if (!argv) { LocalFree(wargv); return NULL; }
 	for (int i = 0; i < argc; i++) {
 		int n = WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, NULL, 0, NULL, NULL);
-		argv[i] = (char *)malloc(n > 0 ? (size_t)n : 1);
+		argv[i] = (char *)malloc(n > 0 ? (size_t)n : 1); /* scratch */
 		if (argv[i] && n > 0) WideCharToMultiByte(CP_UTF8, 0, wargv[i], -1, argv[i], n, NULL, NULL);
 		else if (argv[i]) argv[i][0] = 0;
 	}
@@ -174,13 +174,13 @@ int dprintf(int fd, const char *fmt, ...) {
 	if (n < 0) { va_end(ap2); return n; }
 	char *buf = stackbuf;
 	if ((size_t)n >= sizeof stackbuf) {
-		buf = (char *)malloc((size_t)n + 1);
+		buf = (char *)malloc((size_t)n + 1); /* scratch */
 		if (!buf) { va_end(ap2); return -1; }
 		vsnprintf(buf, (size_t)n + 1, fmt, ap2);
 	}
 	va_end(ap2);
 	int w = (int)kml_fd_write(fd, buf, (size_t)n); // the fd layer's write: fd may be a socket or an owned pipe end, which no CRT fd wraps
-	if (buf != stackbuf) free(buf);
+	if (buf != stackbuf) free(buf); /* scratch */
 	return w;
 }
 
@@ -188,7 +188,7 @@ int64_t getline(char **lineptr, size_t *n, FILE *stream) {
 	if (!lineptr || !n || !stream) return -1;
 	if (!*lineptr || *n == 0) {
 		*n = 128;
-		*lineptr = (char *)malloc(*n);
+		*lineptr = (char *)malloc(*n); /* scratch */
 		if (!*lineptr) return -1;
 	}
 	size_t len = 0;
@@ -196,7 +196,7 @@ int64_t getline(char **lineptr, size_t *n, FILE *stream) {
 	while ((c = fgetc(stream)) != EOF) {
 		if (len + 2 > *n) {
 			size_t nn = *n * 2;
-			char *p = (char *)realloc(*lineptr, nn);
+			char *p = (char *)realloc(*lineptr, nn); /* scratch */
 			if (!p) return -1;
 			*lineptr = p;
 			*n = nn;
@@ -219,7 +219,7 @@ int64_t getline(char **lineptr, size_t *n, FILE *stream) {
 static wchar_t *env_wide(const char *u) {
 	int n = MultiByteToWideChar(CP_UTF8, 0, u, -1, NULL, 0);
 	if (n <= 0) return NULL;
-	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+	wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t)); /* scratch */
 	if (w) MultiByteToWideChar(CP_UTF8, 0, u, -1, w, n);
 	return w;
 }
@@ -235,23 +235,23 @@ char *getenv(const char *name) {
 	SetLastError(0);
 	DWORD n = GetEnvironmentVariableW(wn, wv, 512);
 	if (n >= 512) {
-		wv = (wchar_t *)malloc((size_t)(n + 1) * sizeof(wchar_t));
-		if (!wv) { free(wn); return NULL; }
+		wv = (wchar_t *)malloc((size_t)(n + 1) * sizeof(wchar_t)); /* scratch */
+		if (!wv) { free(wn); return NULL; } /* scratch */
 		n = GetEnvironmentVariableW(wn, wv, n + 1);
 	}
 	char *res = NULL;
 	if (n != 0 || GetLastError() != ERROR_ENVVAR_NOT_FOUND) {
 		wv[n] = 0;
 		int un = WideCharToMultiByte(CP_UTF8, 0, wv, -1, NULL, 0, NULL, NULL);
-		char *nb = un > 0 ? (char *)realloc(out, (size_t)un) : NULL;
+		char *nb = un > 0 ? (char *)realloc(out, (size_t)un) : NULL; /* scratch */
 		if (nb) {
 			out = nb;
 			WideCharToMultiByte(CP_UTF8, 0, wv, -1, out, un, NULL, NULL);
 			res = out;
 		}
 	}
-	if (wv != small) free(wv);
-	free(wn);
+	if (wv != small) free(wv); /* scratch */
+	free(wn); /* scratch */
 	return res;
 }
 
@@ -268,7 +268,7 @@ int setenv(const char *name, const char *value, int overwrite) {
 		_wputenv_s(wn, wv);
 		if (SetEnvironmentVariableW(wn, wv)) r = 0;
 	}
-	free(wn); free(wv);
+	free(wn); free(wv); /* scratch */
 	return r;
 }
 
@@ -278,7 +278,7 @@ int unsetenv(const char *name) {
 	if (!wn) return -1;
 	_wputenv_s(wn, L"");
 	SetEnvironmentVariableW(wn, NULL);
-	free(wn);
+	free(wn); /* scratch */
 	return 0;
 }
 
@@ -385,7 +385,7 @@ int __kml_win_cpu_info(int i, char *model, int cap, int64_t *mhz, int64_t times[
 	if (!ntqsi) *(FARPROC *)&ntqsi = GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtQuerySystemInformation");
 	if (!ntqsi) return 0;
 	int n = __kml_win_cpu_count();
-	kml_sppi *arr = (kml_sppi *)calloc((size_t)n, sizeof *arr);
+	kml_sppi *arr = (kml_sppi *)calloc((size_t)n, sizeof *arr); /* scratch */
 	if (!arr) return 0;
 	unsigned long got = 0;
 	if (ntqsi(8 /* SystemProcessorPerformanceInformation */, arr, (unsigned long)(sizeof *arr * (size_t)n), &got) == 0 && i < n) {
@@ -395,7 +395,7 @@ int __kml_win_cpu_info(int i, char *model, int cap, int64_t *mhz, int64_t times[
 		times[3] = arr[i].idle / 10000;
 		times[4] = arr[i].irq / 10000;
 	}
-	free(arr);
+	free(arr); /* scratch */
 	return 0;
 }
 
@@ -426,7 +426,7 @@ char *strcasestr(const char *hay, const char *needle) {
 char *__kml_os_homedir(void) {
 	const char *p = getenv("USERPROFILE");
 	if (p && *p) {
-		char *out = (char *)malloc(strlen(p) + 1);
+		char *out = (char *)malloc(strlen(p) + 1); /* scratch */
 		if (out) strcpy(out, p);
 		return out;
 	}
@@ -439,12 +439,12 @@ char *__kml_os_homedir(void) {
 	if (gupd && OpenProcessToken(GetCurrentProcess(), TOKEN_READ, &tok)) {
 		DWORD n = 0;
 		gupd(tok, NULL, &n); // sizing call: fails with ERROR_INSUFFICIENT_BUFFER, n = cells
-		wchar_t *w = n ? (wchar_t *)malloc((size_t)n * sizeof(wchar_t)) : NULL;
+		wchar_t *w = n ? (wchar_t *)malloc((size_t)n * sizeof(wchar_t)) : NULL; /* scratch */
 		if (w && gupd(tok, w, &n)) {
 			int un = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
-			if (un > 0 && (out = (char *)malloc((size_t)un))) WideCharToMultiByte(CP_UTF8, 0, w, -1, out, un, NULL, NULL);
+			if (un > 0 && (out = (char *)malloc((size_t)un))) WideCharToMultiByte(CP_UTF8, 0, w, -1, out, un, NULL, NULL); /* scratch */
 		}
-		free(w);
+		free(w); /* scratch */
 		CloseHandle(tok);
 	}
 	FreeLibrary(ue);
@@ -459,14 +459,14 @@ char *__kml_os_tmpdir(void) {
 	if (!p || !*p) p = getenv("TMP");
 	char *out;
 	if (p && *p) {
-		out = (char *)malloc(strlen(p) + 1);
+		out = (char *)malloc(strlen(p) + 1); /* scratch */
 		if (!out) return NULL;
 		strcpy(out, p);
 	} else {
 		const char *root = getenv("SystemRoot");
 		if (!root || !*root) root = getenv("windir");
 		if (!root || !*root) root = "C:\\Windows";
-		out = (char *)malloc(strlen(root) + 6);
+		out = (char *)malloc(strlen(root) + 6); /* scratch */
 		if (!out) return NULL;
 		strcpy(out, root);
 		strcat(out, "\\temp");

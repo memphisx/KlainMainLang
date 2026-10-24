@@ -333,7 +333,8 @@ func main() {
 			// functions follow Annex B, as the -compat=js lane binds them.
 			sloppy := !strictFamily("alwaysstrict") && !reModule.MatchString(string(src))
 			module := reModule.MatchString(string(src))
-			c := checker.New(binder.BindWith(prog, binder.Options{AnnexB: sloppy, Script: !module, Lib: libProgs}))
+			bound := binder.BindWith(prog, binder.Options{AnnexB: sloppy, Script: !module, Lib: libProgs})
+			c := checker.New(bound)
 			c.ImplicitAnyVariables = !strictFamily("noimplicitany")
 			c.ImplicitThis = !strictFamily("noimplicitthis")
 			c.CatchVariablesAny = !strictFamily("useunknownincatchvariables")
@@ -354,7 +355,12 @@ func main() {
 					silenced[i+2] = true
 				}
 			}
-			for _, d := range c.Check() {
+			ds := c.Check()
+			ds = append(ds, checker.Unused(bound, checker.UnusedOptions{
+				Locals: dirs["nounusedlocals"] == "true", Parameters: dirs["nounusedparameters"] == "true",
+				Script: !resolver.IsModule(prog),
+			})...)
+			for _, d := range ds {
 				if silenced[d.Pos.Line] || !strict && !strictnessFree[d.Code()] {
 					continue
 				}

@@ -15,7 +15,7 @@ const s = crypto.createSecretKey(Buffer.from('secret!'));
 console.log(s.type, s.symmetricKeySize, s.asymmetricKeyType, s.export().toString(), JSON.stringify(s.export({ format: 'jwk' })));
 const kinds: [string, any][] = [['rsa', { modulusLength: 1024 }], ['ec', { namedCurve: 'P-256' }], ['ed25519', {}], ['x25519', {}], ['rsa-pss', { modulusLength: 1024, hashAlgorithm: 'sha256', mgf1HashAlgorithm: 'sha256', saltLength: 16 }]];
 for (const [ty, o] of kinds) {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync(ty as any, o);
+  const { publicKey, privateKey }: crypto.KeyPairKeyObjectResult = crypto.generateKeyPairSync(ty as any, o) as any;
   console.log(ty, publicKey.type, privateKey.type, publicKey.asymmetricKeyType, privateKey.symmetricKeySize, JSON.stringify(publicKey.asymmetricKeyDetails, (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v));
   t('jwkpriv', () => Object.keys(privateKey.export({ format: 'jwk' })).join(','));
   t('jwkpub', () => Object.keys(publicKey.export({ format: 'jwk' })).join(','));
@@ -26,8 +26,8 @@ for (const [ty, o] of kinds) {
 t('1', () => crypto.createPrivateKey('nope'));
 t('2', () => crypto.createPublicKey('nope'));
 t('3', () => s.export({ format: 'pem' } as any));
-t('5', () => new crypto.KeyObject('secret', {}));
-t('6', () => new crypto.KeyObject('bogus' as any, {}));
+t('5', () => new (crypto.KeyObject as any)('secret', {}));
+t('6', () => new (crypto.KeyObject as any)('bogus', {}));
 const { publicKey, privateKey } = crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' });
 t('7', () => (publicKey as any).export());
 t('8', () => publicKey.export({ format: 'pem' } as any));

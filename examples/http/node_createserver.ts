@@ -4,6 +4,8 @@
 
 import http from 'http'
 
+const port = Number(process.env.PORT ?? '8080')  // make examples passes a free port
+
 // The server never returns on its own, so (only for this example harness)
 // schedule a timer that exits shortly after startup — the same trick the other
 // server examples use. A real server omits this.
@@ -21,6 +23,6 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
     res.write("Hello, ")
     res.end("world")
   }
-}).listen(8080, () => {
-  console.log("server listening on http://localhost:8080")
+}).listen(port, () => {
+  console.log("server listening on http://localhost:" + port)
 })

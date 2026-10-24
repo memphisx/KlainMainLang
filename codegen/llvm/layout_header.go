@@ -28,14 +28,12 @@ var layoutDefs = []layoutDef{
 	{"KML_TASK", taskStructIR, map[int]string{taskCtx: "CTX", taskStack: "STACK", taskPromiseSlot: "PROMISE", taskState: "STATE",
 		taskPendingFetch: "PENDING_FETCH", taskPendingGroup: "PENDING_GROUP", taskPendingProm: "PENDING_PROMISE", taskFn: "FN",
 		taskArgs: "ARGS", taskResumerCtx: "RESUMER", taskJmpStk: "JMPSTK", taskSavedJmpTop: "JMPTOP", taskAsyncCtx: "ASYNC_CTX",
-		taskStackSize: "STACK_SIZE"}},
+		taskStackSize: "STACK_SIZE", taskFrameBase: "FRAME_BASE"}},
 	// The fields of an in-flight fetch a parked task polls.
 	{"KML_FETCHREQ", "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }", map[int]string{2: "DONE", 6: "HEADERS_DONE"}},
 	// A connection slot of the HTTP server's connection array.
-	{"KML_CONN", "{ i64, ptr, ptr, ptr, ptr }", map[int]string{0: "FD", 1: "CTX", 4: "GROUP"}},
 	{"KML_ERROR", errorObjType.StructIR(), map[int]string{0: "KIND", 1: "MSG", 2: "NAME", 3: "CODE", 4: "ERRCODE", 5: "ERRSTR", 6: "SYSCALL", 7: "PATH", 8: "ERRNO", 9: "DEST"}},
-	{"KML_ERR", errorObjType.StructIR(), map[int]string{1: "MESSAGE", 2: "NAME", 3: "CODE", 4: "ERRCODE", 5: "ERRSTR", 8: "ERRNO", 10: "CAUSE", 11: "ADDRESS", 12: "PORT", 13: "EXTRA", 14: "NAME_OWN"}},
-	{"KML_NETSOCK", netSocketIR, map[int]string{0: "FD", 1: "STATE", 2: "DATA", 3: "END", 5: "SSL", 6: "CLOSE"}},
+	{"KML_ERR", errorObjType.StructIR(), map[int]string{1: "MESSAGE", 2: "NAME", 3: "CODE", 4: "ERRCODE", 5: "ERRSTR", 8: "ERRNO", 10: "CAUSE", 11: "ADDRESS", 12: "PORT", 13: "EXTRA", 14: "NAME_OWN", 15: "STACK", 16: "FRAMES"}},
 	{"KML_FETCHPENDING", "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64, ptr }", map[int]string{9: "BRIDGE"}},
 	{"KML_PBOX", promiseBoxType().StructIR(), map[int]string{1: "PROMISE", 2: "BOXFN"}},
 	{"KML_RESP", ResponseType().StructIR(), respLayoutFields()},
@@ -53,6 +51,19 @@ var layoutConsts = []struct {
 	value int64
 }{
 	{"KML_PROMISE_HEADER", promiseHeaderWord},
+	// A Response's header word, before its body (hostPrefixedObject).
+	{"KML_RESP_HDR", (&Emitter{}).hostHeaderWord(ResponseType())},
+	// An ArrayBuffer's and a SharedArrayBuffer's header words, before
+	// their {byteLength, data} headers.
+	{"KML_AB_HDR", (&Emitter{}).hostHeaderWord(ArrayBufferType())},
+	{"KML_SAB_HDR", (&Emitter{}).hostHeaderWord(SharedArrayBufferType())},
+	// A WritableStream's, before its wstream.
+	{"KML_WS_HDR", (&Emitter{}).hostHeaderWord(WritableStreamType(TypeI64))},
+	// A ReadableStream's, before its rstream.
+	{"KML_RS_HDR", (&Emitter{}).hostHeaderWord(ReadableStreamType(TypeI64))},
+	// Every array header's word, before its {data, len}.
+	{"KML_ARRAY_HDR_WORD", (&Emitter{}).arrayHeaderWord()},
+	{"KML_ARGS_HDR_WORD", (&Emitter{}).argumentsHeaderWord()},
 	{"KML_PROMISE_FLAG_HANDLED", promiseFlagHandled},
 	{"KML_PROMISE_FLAG_QUEUED", promiseFlagQueued},
 	{"KML_TAG_ERROR", kmlTagError},

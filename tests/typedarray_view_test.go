@@ -105,19 +105,18 @@ console.log(new C(3).length);
 `)
 }
 
-// A non-array held in any, passed where an array is declared, throws a
-// TypeError instead of reading through its payload (ADR-01361).
-func TestE2EAnyNonArrayIntoArraySlotThrows(t *testing.T) {
-	assertOutput(t, `
+// A non-array held in any, passed where an array is declared, reaches the
+// body as itself, as in Node (ADR-01361, ADR-01741).
+func TestE2EAnyNonArrayIntoArraySlotKeepsItsKind(t *testing.T) {
+	src := `
 function f(p: any[]) { console.log(p.length); }
 const x: any = "abc";
-try { f(x); } catch (e) { console.log(e instanceof TypeError, (e as Error).message); }
+f(x);
 const y: any = 5;
-try { f(y); } catch (e) { console.log(e instanceof TypeError); }
-f([1, 2] as any);
-const n: any = null;
-f(n ?? []);
-`, "true the value is not an array\ntrue\n2\n0")
+f(y);
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCompatJS(t, src)
 }
 
 // Buffer.from(arrayBuffer[, offset, length]) views the buffer, as Node's

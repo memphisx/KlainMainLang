@@ -28,15 +28,16 @@ import (
 // tupleByValEligible reports whether a return type is a small tuple whose
 // aggregate can be returned in registers: 1–2 fields, each stored as its own
 // plain scalar IR word (i64/double/ptr/i1/…). A field needing an aggregate
-// slot (array {ptr,i64}, nullable-scalar {i1,T}) or runtime tag dispatch
-// (any/unknown) disqualifies — those keep the heap-pointer ABI.
+// slot (nullable-scalar {i1,T}) or runtime tag dispatch
+// (any/unknown) disqualifies, as does a nullable tuple — those keep the
+// heap-pointer ABI.
 func tupleByValEligible(ty Type) bool {
-	if !ty.IsTuple || len(ty.Fields) == 0 || len(ty.Fields) > 2 {
-		return false
+	if !ty.IsTuple() || len(ty.Fields) == 0 || len(ty.Fields) > 2 || ty.Nullable() {
+		return false // an aggregate has no null
 	}
 	for _, f := range ty.Fields {
 		ft := f.Ty
-		if ft.IsDynamic || ft.IsDynamicObject || ft.Inline {
+		if ft.IsDynamic() || ft.IsDynamicObject() || ft.Inline {
 			return false
 		}
 		if StructFieldIR(ft) != ft.IR {
@@ -128,7 +129,7 @@ func (e *Emitter) emitTupleByValReturn(r *ast.ReturnStatement, retTy Type) error
 			if err != nil {
 				return err
 			}
-			val = e.coerce(val, fieldTy)
+			val = e.convert(val, fieldTy)
 			next := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = insertvalue %s %s, %s %s, %d", next, structIR, agg, fieldTy.IR, val.Ref, i))
 			agg = next
@@ -138,7 +139,7 @@ func (e *Emitter) emitTupleByValReturn(r *ast.ReturnStatement, retTy Type) error
 		if err != nil {
 			return err
 		}
-		if !val.Ty.IsTuple {
+		if !val.Ty.IsTuple() {
 			return fmt.Errorf("%d:%d: expression is not a tuple", r.Value.GetPos().Line, r.Value.GetPos().Col)
 		}
 		loaded := e.freshReg()
@@ -172,7 +173,7 @@ func (e *Emitter) spillTupleAggregate(aggReg string, tupleTy Type) Value {
 	structIR := tupleTy.StructIR()
 	heap := e.freshReg()
 	e.emitObjMallocInto(heap, tupleTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", structIR, aggReg, heap))
+	e.heapStore(structIR, aggReg, heap, 8)
 	tupleTy.TupleByVal = false
 	return Value{Ref: heap, Ty: tupleTy}
 }
@@ -185,11 +186,15 @@ func (e *Emitter) unpackTupleAggregate(aggReg string, tupleTy Type, elems []ast.
 	if len(elems) > len(tupleTy.Fields) {
 		return fmt.Errorf("%d:%d: destructuring pattern has %d elements but the tuple has only %d", pos.Line, pos.Col, len(elems), len(tupleTy.Fields))
 	}
+	for _, elem := range elems {
+		if elem.Rest {
+			// The rest array reads the tuple from memory.
+			v := e.spillTupleAggregate(aggReg, tupleTy)
+			return e.unpackTuplePatternInto(v.Ref, v.Ty, elems, pos)
+		}
+	}
 	structIR := tupleTy.StructIR()
 	for i, elem := range elems {
-		if elem.Rest {
-			return fmt.Errorf("%d:%d: a rest element in a tuple destructuring pattern is not yet supported", pos.Line, pos.Col)
-		}
 		if elem.SubArray != nil || elem.SubObject != nil {
 			return fmt.Errorf("%d:%d: nested destructuring pattern does not match the tuple element's type", pos.Line, pos.Col)
 		}

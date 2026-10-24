@@ -13,7 +13,7 @@ func (e *Emitter) freshType(t Type, depth int) Type {
 	if depth > 8 {
 		return t
 	}
-	if t.IsClass {
+	if t.IsClass() {
 		return e.canonicalizeClassTy(t)
 	}
 	d := depth + 1
@@ -95,7 +95,7 @@ func (e *Emitter) refreshClassTypes() {
 		e.classes[name] = info
 	}
 	for k, t := range e.interfaces {
-		if t.IsClass {
+		if t.IsClass() {
 			continue
 		}
 		e.interfaces[k] = e.freshType(t, 0)

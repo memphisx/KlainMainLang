@@ -31,7 +31,7 @@ typedef struct {
 
 static char *dupstr(const char *s) {
 	size_t n = strlen(s) + 1;
-	char *d = (char *)malloc(n);
+	char *d = (char *)malloc(n); /* scratch */
 	if (d) memcpy(d, s, n);
 	return d;
 }
@@ -105,7 +105,7 @@ static char *mac_string(const unsigned char *p, size_t n) {
 static char *utf8_of(const wchar_t *w) {
 	int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
 	if (n <= 0) return dupstr("");
-	char *u = (char *)malloc((size_t)n);
+	char *u = (char *)malloc((size_t)n); /* scratch */
 	if (u) WideCharToMultiByte(CP_UTF8, 0, w, -1, u, n, NULL, NULL);
 	return u;
 }
@@ -116,11 +116,11 @@ static char *utf8_of(const wchar_t *w) {
 char **__kml_env_entries(void) {
 	wchar_t *block = GetEnvironmentStringsW();
 	size_t cap = 64, n = 0;
-	char **out = (char **)malloc(cap * sizeof(char *));
+	char **out = (char **)malloc(cap * sizeof(char *)); /* scratch */
 	if (block && out) {
 		for (wchar_t *p = block; *p; p += wcslen(p) + 1) {
 			if (*p == L'=') continue;
-			if (n + 1 >= cap) { cap *= 2; out = (char **)realloc(out, cap * sizeof(char *)); }
+			if (n + 1 >= cap) { cap *= 2; out = (char **)realloc(out, cap * sizeof(char *)); } /* scratch */
 			out[n++] = utf8_of(p);
 		}
 		FreeEnvironmentStringsW(block);
@@ -214,25 +214,25 @@ int __kml_os_userinfo(int64_t *uid, int64_t *gid, char **username, char **homedi
 // (Linux numbering, what the IR's fs error path decodes).
 int __kml_fs_statfs(const char *path, int64_t *out) {
 	int n = MultiByteToWideChar(CP_UTF8, 0, path, -1, NULL, 0);
-	wchar_t *w = n > 0 ? (wchar_t *)malloc((size_t)n * sizeof(wchar_t)) : NULL;
+	wchar_t *w = n > 0 ? (wchar_t *)malloc((size_t)n * sizeof(wchar_t)) : NULL; /* scratch */
 	if (!w) { errno = 22; return -1; }
 	MultiByteToWideChar(CP_UTF8, 0, path, -1, w, n);
 	// The path itself must exist (libuv probes it first): the volume lookup
 	// below would happily answer for a missing file on an existing drive.
 	if (GetFileAttributesW(w) == INVALID_FILE_ATTRIBUTES) {
 		DWORD err = GetLastError();
-		free(w);
+		free(w); /* scratch */
 		errno = (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND || err == ERROR_INVALID_NAME) ? 2 : (err == ERROR_ACCESS_DENIED ? 13 : 22);
 		return -1;
 	}
 	wchar_t root[MAX_PATH + 1];
 	if (!GetVolumePathNameW(w, root, MAX_PATH + 1)) {
 		DWORD err = GetLastError();
-		free(w);
+		free(w); /* scratch */
 		errno = (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) ? 2 : (err == ERROR_ACCESS_DENIED ? 13 : 22);
 		return -1;
 	}
-	free(w);
+	free(w); /* scratch */
 	DWORD spc, bps, freec, totalc;
 	if (!GetDiskFreeSpaceW(root, &spc, &bps, &freec, &totalc)) {
 		DWORD err = GetLastError();
@@ -256,21 +256,21 @@ kml_ifaddr *__kml_os_netifs(int64_t *count) {
 	ULONG r;
 	*count = 0;
 	for (int tries = 0; tries < 4; tries++) {
-		aa = (IP_ADAPTER_ADDRESSES *)malloc(sz);
+		aa = (IP_ADAPTER_ADDRESSES *)malloc(sz); /* scratch */
 		if (!aa) return NULL;
 		r = GetAdaptersAddresses(AF_UNSPEC, flags, NULL, aa, &sz);
 		if (r != ERROR_BUFFER_OVERFLOW) break;
-		free(aa); aa = NULL;
+		free(aa); aa = NULL; /* scratch */
 	}
-	if (r != NO_ERROR) { free(aa); return NULL; }
+	if (r != NO_ERROR) { free(aa); return NULL; } /* scratch */
 	size_t cap = 16, n = 0;
-	kml_ifaddr *out = (kml_ifaddr *)malloc(cap * sizeof *out);
+	kml_ifaddr *out = (kml_ifaddr *)malloc(cap * sizeof *out); /* scratch */
 	for (IP_ADAPTER_ADDRESSES *a = aa; a; a = a->Next) {
 		if (a->OperStatus != IfOperStatusUp || !a->FirstUnicastAddress) continue;
 		for (IP_ADAPTER_UNICAST_ADDRESS *u = a->FirstUnicastAddress; u; u = u->Next) {
 			struct sockaddr *sa = u->Address.lpSockaddr;
 			if (sa->sa_family != AF_INET && sa->sa_family != AF_INET6) continue;
-			if (n + 1 > cap) { cap *= 2; out = (kml_ifaddr *)realloc(out, cap * sizeof *out); }
+			if (n + 1 > cap) { cap *= 2; out = (kml_ifaddr *)realloc(out, cap * sizeof *out); } /* scratch */
 			kml_ifaddr *e = &out[n++];
 			char abuf[64], mbuf[64];
 			e->name = utf8_of(a->FriendlyName);
@@ -300,7 +300,7 @@ kml_ifaddr *__kml_os_netifs(int64_t *count) {
 			e->netmask = dupstr(mbuf);
 		}
 	}
-	free(aa);
+	free(aa); /* scratch */
 	*count = (int64_t)n;
 	return out;
 }
@@ -338,7 +338,7 @@ extern char **environ;
 char **__kml_env_entries(void) {
 	size_t n = 0;
 	while (environ && environ[n]) n++;
-	char **out = (char **)malloc((n + 1) * sizeof(char *));
+	char **out = (char **)malloc((n + 1) * sizeof(char *)); /* scratch */
 	if (!out) return NULL;
 	for (size_t i = 0; i < n; i++) out[i] = dupstr(environ[i]);
 	out[n] = NULL;
@@ -445,13 +445,13 @@ kml_ifaddr *__kml_os_netifs(int64_t *count) {
 	*count = 0;
 	if (getifaddrs(&list) != 0) return NULL;
 	size_t cap = 16, n = 0;
-	kml_ifaddr *out = (kml_ifaddr *)malloc(cap * sizeof *out);
+	kml_ifaddr *out = (kml_ifaddr *)malloc(cap * sizeof *out); /* scratch */
 	for (ifa = list; ifa; ifa = ifa->ifa_next) {
 		if (!ifa->ifa_addr || !ifa->ifa_netmask) continue;
 		if (!(ifa->ifa_flags & IFF_UP) || !(ifa->ifa_flags & IFF_RUNNING)) continue;
 		int fam = ifa->ifa_addr->sa_family;
 		if (fam != AF_INET && fam != AF_INET6) continue;
-		if (n + 1 > cap) { cap *= 2; out = (kml_ifaddr *)realloc(out, cap * sizeof *out); }
+		if (n + 1 > cap) { cap *= 2; out = (kml_ifaddr *)realloc(out, cap * sizeof *out); } /* scratch */
 		kml_ifaddr *e = &out[n++];
 		char abuf[64], mbuf[64];
 		e->name = dupstr(ifa->ifa_name);
@@ -678,7 +678,7 @@ static char *os_arm_part_name(const char *code) {
 		if (!end) break;
 		if ((size_t)(nl + 1 - p) == kl && strncmp(p, key, kl) == 0) {
 			size_t n = (size_t)(end - name);
-			char *out = (char *)malloc(n + 1);
+			char *out = (char *)malloc(n + 1); /* scratch */
 			memcpy(out, name, n);
 			out[n] = 0;
 			return out;
@@ -690,14 +690,14 @@ static char *os_arm_part_name(const char *code) {
 #endif
 
 static void os_cpus_read(void) {
-	for (int i = 0; i < os_cpus_n; i++) free(os_cpus_snap[i].model);
-	free(os_cpus_snap);
+	for (int i = 0; i < os_cpus_n; i++) free(os_cpus_snap[i].model); /* scratch */
+	free(os_cpus_snap); /* scratch */
 	os_cpus_snap = NULL;
 	os_cpus_n = 0;
 #ifdef _WIN32
 	int n = __kml_win_cpu_count();
 	if (n <= 0) return;
-	os_cpus_snap = (os_cpu *)calloc((size_t)n, sizeof *os_cpus_snap);
+	os_cpus_snap = (os_cpu *)calloc((size_t)n, sizeof *os_cpus_snap); /* scratch */
 	for (int i = 0; i < n; i++) {
 		char model[256];
 		int64_t mhz = 0, t[5] = {0};
@@ -714,13 +714,13 @@ static void os_cpus_read(void) {
 	if (!f) return;
 	char line[1024];
 	int cap = 16, n = 0;
-	os_cpus_snap = (os_cpu *)calloc((size_t)cap, sizeof *os_cpus_snap);
+	os_cpus_snap = (os_cpu *)calloc((size_t)cap, sizeof *os_cpus_snap); /* scratch */
 	while (fgets(line, sizeof line, f)) {
 		unsigned cpu;
 		unsigned long long user, nice, sys, idle, iowait, irq;
 		if (strncmp(line, "cpu", 3) != 0 || line[3] < '0' || line[3] > '9') continue;
 		if (sscanf(line, "cpu%u %llu %llu %llu %llu %llu %llu", &cpu, &user, &nice, &sys, &idle, &iowait, &irq) != 7) continue;
-		if (n == cap) { cap *= 2; os_cpus_snap = (os_cpu *)realloc(os_cpus_snap, (size_t)cap * sizeof *os_cpus_snap); }
+		if (n == cap) { cap *= 2; os_cpus_snap = (os_cpu *)realloc(os_cpus_snap, (size_t)cap * sizeof *os_cpus_snap); } /* scratch */
 		os_cpu *c = &os_cpus_snap[n++];
 		memset(c, 0, sizeof *c);
 		c->times[0] = (double)(user * 1000 / clk);
@@ -749,7 +749,7 @@ static void os_cpus_read(void) {
 		while (fgets(line, sizeof line, f)) {
 			if (strncmp(line, "processor\t:", 11) == 0) {
 				if (blk >= 0 && blk < n) os_cpus_snap[blk].model = model;
-				else free(model);
+				else free(model); /* scratch */
 				model = NULL;
 				blk++;
 				continue;
@@ -760,7 +760,7 @@ static void os_cpus_read(void) {
 			while (*val == ' ' || *val == '\t') val++;
 			val[strcspn(val, "\n")] = 0;
 			if (strncmp(line, "model name", 10) == 0) {
-				free(model);
+				free(model); /* scratch */
 				model = dupstr(val);
 			} else if (!model && strncmp(line, "CPU part\t:", 10) == 0) {
 				model = os_arm_part_name(val);
@@ -768,7 +768,7 @@ static void os_cpus_read(void) {
 		}
 		fclose(f);
 		if (blk >= 0 && blk < n) os_cpus_snap[blk].model = model;
-		else free(model);
+		else free(model); /* scratch */
 	}
 	for (int i = 0; i < n; i++) if (!os_cpus_snap[i].model) os_cpus_snap[i].model = dupstr("unknown");
 #else
@@ -786,7 +786,7 @@ static void os_cpus_read(void) {
 	if (host_processor_info(mach_host_self(), PROCESSOR_CPU_LOAD_INFO, &count, (processor_info_array_t *)&info, &msg) != KERN_SUCCESS) return;
 	long clk = sysconf(_SC_CLK_TCK);
 	uint64_t mult = clk > 0 ? (uint64_t)(1000L / clk) : 10;
-	os_cpus_snap = (os_cpu *)calloc((size_t)count, sizeof *os_cpus_snap);
+	os_cpus_snap = (os_cpu *)calloc((size_t)count, sizeof *os_cpus_snap); /* scratch */
 	for (natural_t i = 0; i < count; i++) {
 		os_cpu *c = &os_cpus_snap[i];
 		c->model = dupstr(brand);
@@ -858,7 +858,7 @@ static char *os_pw_str[3]; // username, homedir, shell (NULL: none)
 
 // Reads the effective user's passwd entry: 0, or the errno.
 double __kml_native_os_userinfo(void) {
-	for (int i = 0; i < 3; i++) { free(os_pw_str[i]); os_pw_str[i] = NULL; }
+	for (int i = 0; i < 3; i++) { free(os_pw_str[i]); os_pw_str[i] = NULL; } /* scratch */
 	errno = 0;
 	if (__kml_os_userinfo(&os_pw_uid, &os_pw_gid, &os_pw_str[0], &os_pw_str[1], &os_pw_str[2]) != 0)
 		return (double)(errno ? errno : ENOENT);

@@ -60,12 +60,12 @@ func TestWriteJSON(t *testing.T) {
 // Every code below FirstOwnCode is TypeScript's; the own codes are unique per
 // condition family, and every message has a phase.
 func TestMessageTable(t *testing.T) {
-	for _, m := range []*Message{ExpectedToken, UnterminatedString, RestTupleElement, PureNotFunction} {
+	for _, m := range []*Message{ExpectedToken, UnterminatedString, ComputedKeyBinding, PureNotFunction} {
 		if m.Phase == "" || m.Text == "" {
 			t.Errorf("%+v", m)
 		}
 	}
-	if RestTupleElement.Code < FirstOwnCode || ExpectedToken.Code >= FirstOwnCode {
+	if ComputedKeyBinding.Code < FirstOwnCode || ExpectedToken.Code >= FirstOwnCode {
 		t.Error("code ranges")
 	}
 }

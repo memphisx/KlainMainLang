@@ -11,6 +11,7 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
 
 typedef long long i64;
 
@@ -51,12 +52,12 @@ void __kml_unit_register(i64 kind, const void *rows, i64 n, i64 stride) {
         while (cap < (t->count + n) * 2) cap <<= 1;
         const char **old = t->slots;
         i64 oldcap = t->cap;
-        t->slots = calloc((size_t)cap, sizeof *t->slots);
+        t->slots = calloc((size_t)cap, sizeof *t->slots); /* scratch */
         t->cap = cap;
         t->count = 0;
         for (i64 i = 0; i < oldcap; i++)
             if (old[i]) kml_unit_put(t, old[i]);
-        free(old);
+        free(old); /* scratch */
     }
     for (i64 i = 0; i < n; i++) kml_unit_put(t, (const char *)rows + i * stride);
 }
@@ -87,9 +88,10 @@ const void *__kml_unit_find(i64 kind, i64 id) {
 // __kml_class_is answers `instanceof` on a stored type id: whether the class
 // it names is target or extends it, walking each class's registered parent
 // (a row { i64 id, i64 parent id }), as the prototype chain would. The bits
-// above the id (the header magic, the Error flag) must agree.
+// above the id (the header magic, the Error flag) must agree; the object
+// state (the integrity level, KML_HDR_STATE_MASK) is not the type.
 int __kml_class_is(i64 stored, i64 target) {
-    if ((stored ^ target) & ~KML_ID_MASK) return 0;
+    if ((stored ^ target) & ~(KML_ID_MASK | KML_HDR_STATE_MASK)) return 0;
     i64 id = stored & KML_ID_MASK, want = target & KML_ID_MASK;
     for (int depth = 0; depth < 4096; depth++) {
         if (id == want) return 1;
@@ -126,36 +128,136 @@ void *__kml_obj_inspect_custom(void *o, i64 depth) {
 
 static __thread void *kml_classrec_cur;
 
+// The per-evaluation tables (records, each instance's record, each record's
+// static area) are weak in their key: under -mm=gc (KML_GC) a key is held
+// through a disappearing link, so a record or instance nothing else reaches
+// is collected, and its entry, with the value it kept, is purged by the
+// next sweep of its table. A collected record's constructor-row alias is
+// removed from the constructor table with it. Under manual nothing is
+// collected, and the links are never cleared.
+#ifdef KML_GC
+#define KW_ZALLOC(n) kml_gc_alloc(n) /* scratch */
+// A key's link: cleared by the collector once the key, a heap object, dies;
+// a static key (a class's own reference) is never collected.
+static void **kw_link(const void *k) {
+    void **w = (void **)kml_gc_alloc_atomic(sizeof *w); /* scratch */
+    if (!w) abort();
+    *w = (void *)k;
+    if (kml_gc_base((void *)k) == k) kml_gc_weak_link(w, k);
+    return w;
+}
+// A copied constructor row holds no managed pointer of its own, so the
+// record it names stays collectable.
+#define KW_ROW_ALLOC(n) kml_gc_alloc_atomic(n) /* scratch */
+#else
+#define KW_ZALLOC(n) calloc(1, (n)) /* scratch */
+static void **kw_link(const void *k) {
+    void **w = (void **)malloc(sizeof *w); /* scratch */
+    if (!w) abort();
+    *w = (void *)k;
+    return w;
+}
+#define KW_ROW_ALLOC(n) malloc(n) /* scratch */
+#endif
+
+typedef struct KwCell {
+    struct KwCell *next;
+    void **link;     // the key, NULL once collected
+    uintptr_t hidden; // ~key, which no scan reads as a pointer
+    void *val;
+} KwCell;
+
+typedef struct {
+    KwCell **b;
+    i64 cap, n, since;
+    void (*ondead)(const void *key); // a collected key's clean-up, or NULL
+} KwTab;
+
+// kw_unlink_dead drops the cells of bucket *pp whose key was collected.
+static void kw_unlink_dead(KwTab *t, KwCell **pp) {
+    while (*pp) {
+        KwCell *c = *pp;
+        if (*c->link) { pp = &c->next; continue; }
+        *pp = c->next;
+        t->n--;
+        if (t->ondead) t->ondead((const void *)~c->hidden);
+    }
+}
+
+static void kw_sweep(KwTab *t) {
+    for (i64 i = 0; i < t->cap; i++) kw_unlink_dead(t, &t->b[i]);
+    t->since = 0;
+}
+
+static KwCell *kw_find(KwTab *t, const void *k) {
+    if (!t->cap) return NULL;
+    KwCell **pp = &t->b[kml_unit_hash((i64)k) & (t->cap - 1)];
+    kw_unlink_dead(t, pp);
+    for (KwCell *c = *pp; c; c = c->next)
+        if (*c->link == k) return c;
+    return NULL;
+}
+
+static void kw_put(KwTab *t, const void *k, void *v) {
+    KwCell *c = kw_find(t, k);
+    if (c) { c->val = v; return; }
+    if (++t->since > t->n / 2 + 32) kw_sweep(t);
+    if ((t->n + 1) * 2 > t->cap) {
+        i64 cap = t->cap ? t->cap * 2 : 64;
+        KwCell **nb = (KwCell **)KW_ZALLOC((size_t)cap * sizeof *nb);
+        if (!nb) abort();
+        for (i64 i = 0; i < t->cap; i++)
+            for (KwCell *x = t->b[i], *nx; x; x = nx) {
+                nx = x->next;
+                KwCell **h = &nb[kml_unit_hash((i64)~x->hidden) & (cap - 1)];
+                x->next = *h;
+                *h = x;
+            }
+#ifndef KML_GC
+        free(t->b); /* scratch */
+#endif
+        t->b = nb;
+        t->cap = cap;
+    }
+    c = (KwCell *)KW_ZALLOC(sizeof *c);
+    if (!c) abort();
+    c->link = kw_link(k);
+    c->hidden = ~(uintptr_t)k;
+    c->val = v;
+    KwCell **h = &t->b[kml_unit_hash((i64)k) & (t->cap - 1)];
+    c->next = *h;
+    *h = c;
+    t->n++;
+}
+
+// kml_unit_remove drops the row registered under id from a kind's table
+// (backward-shift deletion keeps every other row's probe chain whole).
+static void kml_unit_remove(i64 kind, i64 id) {
+    KmlUnitTable *t = &kml_unit_tables[kind];
+    if (!t->cap) return;
+    i64 mask = t->cap - 1, i = kml_unit_hash(id) & mask;
+    for (;; i = (i + 1) & mask) {
+        if (!t->slots[i]) return;
+        if (*(const i64 *)t->slots[i] == id) break;
+    }
+    for (i64 j = i;;) {
+        j = (j + 1) & mask;
+        if (!t->slots[j]) break;
+        i64 k = kml_unit_hash(*(const i64 *)t->slots[j]) & mask;
+        if (i <= j ? (i < k && k <= j) : (i < k || k <= j)) continue;
+        t->slots[i] = t->slots[j];
+        i = j;
+    }
+    t->slots[i] = NULL;
+    t->count--;
+}
+
+static void kml_rec_dead(const void *rec) { kml_unit_remove(KML_UNIT_CTOR, (i64)rec); }
+
 // The records made, for telling one from a static reference.
-static const void **kml_recs;
-static i64 kml_recs_cap, kml_recs_n;
+static KwTab kml_recs = {0, 0, 0, 0, kml_rec_dead};
 
-static void kml_recs_add(const void *r) {
-    if ((kml_recs_n + 1) * 2 > kml_recs_cap) {
-        i64 cap = kml_recs_cap ? kml_recs_cap * 2 : 64;
-        const void **old = kml_recs;
-        i64 oldcap = kml_recs_cap;
-        kml_recs = calloc((size_t)cap, sizeof *kml_recs);
-        if (!kml_recs) abort();
-        kml_recs_cap = cap;
-        kml_recs_n = 0;
-        for (i64 i = 0; i < oldcap; i++)
-            if (old[i]) kml_recs_add(old[i]);
-        free(old);
-    }
-    i64 mask = kml_recs_cap - 1;
-    for (i64 i = kml_unit_hash((i64)r) & mask;; i = (i + 1) & mask)
-        if (!kml_recs[i]) { kml_recs[i] = r; kml_recs_n++; return; }
-}
-
-static int kml_is_rec(const void *p) {
-    if (!kml_recs_cap) return 0;
-    i64 mask = kml_recs_cap - 1;
-    for (i64 i = kml_unit_hash((i64)p) & mask;; i = (i + 1) & mask) {
-        if (!kml_recs[i]) return 0;
-        if (kml_recs[i] == p) return 1;
-    }
-}
+static int kml_is_rec(const void *p) { return kw_find(&kml_recs, p) != NULL; }
 
 // __kml_classref_name is the name a constructor reference's payload holds:
 // a static reference is its name's characters; a record names its class's.
@@ -164,14 +266,14 @@ const char *__kml_classref_name(const void *pay) {
 }
 
 void *__kml_classrec_new(const void *ref, const void *base, i64 ncaps, i64 stride) {
-    i64 *rec = calloc((size_t)(2 + ncaps), sizeof(i64));
+    i64 *rec = kml_calloc(KML_HEAP_WORDS, (size_t)(2 + ncaps), sizeof(i64));
     if (!rec) abort();
     rec[0] = (i64)ref;
     rec[1] = (i64)base; // the record of the local class it extends, or NULL
-    kml_recs_add(rec);
+    kw_put(&kml_recs, rec, NULL);
     const char *row = __kml_unit_find(KML_UNIT_CTOR, (i64)ref);
     if (row && stride >= (i64)sizeof(i64)) {
-        char *alias = malloc((size_t)stride);
+        char *alias = KW_ROW_ALLOC((size_t)stride);
         if (!alias) abort();
         memcpy(alias, row, (size_t)stride);
         *(i64 *)alias = (i64)rec;
@@ -181,38 +283,11 @@ void *__kml_classrec_new(const void *ref, const void *base, i64 ncaps, i64 strid
 }
 
 // Each instance of a record's class, with the record it was built from.
-static const void **kml_inst_k, **kml_inst_v;
-static i64 kml_inst_cap, kml_inst_n;
-
-static void kml_inst_put(const void *inst, const void *rec) {
-    if ((kml_inst_n + 1) * 2 > kml_inst_cap) {
-        i64 cap = kml_inst_cap ? kml_inst_cap * 2 : 64;
-        const void **ok = kml_inst_k, **ov = kml_inst_v;
-        i64 oldcap = kml_inst_cap;
-        kml_inst_k = calloc((size_t)cap, sizeof *kml_inst_k);
-        kml_inst_v = calloc((size_t)cap, sizeof *kml_inst_v);
-        if (!kml_inst_k || !kml_inst_v) abort();
-        kml_inst_cap = cap;
-        kml_inst_n = 0;
-        for (i64 i = 0; i < oldcap; i++)
-            if (ok[i]) kml_inst_put(ok[i], ov[i]);
-        free(ok);
-        free(ov);
-    }
-    i64 mask = kml_inst_cap - 1;
-    for (i64 i = kml_unit_hash((i64)inst) & mask;; i = (i + 1) & mask) {
-        if (!kml_inst_k[i]) { kml_inst_k[i] = inst; kml_inst_v[i] = rec; kml_inst_n++; return; }
-        if (kml_inst_k[i] == inst) { kml_inst_v[i] = rec; return; }
-    }
-}
+static KwTab kml_inst;
 
 static const void *kml_inst_get(const void *inst) {
-    if (!kml_inst_cap) return NULL;
-    i64 mask = kml_inst_cap - 1;
-    for (i64 i = kml_unit_hash((i64)inst) & mask;; i = (i + 1) & mask) {
-        if (!kml_inst_k[i]) return NULL;
-        if (kml_inst_k[i] == inst) return kml_inst_v[i];
-    }
+    KwCell *c = kw_find(&kml_inst, inst);
+    return c ? c->val : NULL;
 }
 
 // __kml_classrec_of is the record inst was built from, or NULL.
@@ -220,7 +295,7 @@ const void *__kml_classrec_of(const void *inst) { return kml_inst_get(inst); }
 
 // __kml_classrec_bind records that inst was built from record rec.
 void __kml_classrec_bind(const void *inst, const void *rec) {
-    if (inst && rec) kml_inst_put(inst, rec);
+    if (inst && rec) kw_put(&kml_inst, inst, (void *)rec);
 }
 
 // __kml_classrec_is narrows `inst instanceof C` (already true for C's
@@ -254,48 +329,17 @@ i64 __kml_classrec_cap(const i64 *rec, i64 i) { return rec ? rec[2 + i] : 10; }
 // fields in an area of its own, `bytes` long, allocated zeroed on first use.
 // A class's code reached without a record (its own declaration, never used
 // as a value) uses one area per class.
-static const void **kml_sa_k, **kml_sa_v;
-static i64 kml_sa_cap, kml_sa_n;
-
-static void kml_sa_put(const void *k, void *v) {
-    if ((kml_sa_n + 1) * 2 > kml_sa_cap) {
-        i64 cap = kml_sa_cap ? kml_sa_cap * 2 : 64;
-        const void **ok = kml_sa_k, **ov = kml_sa_v;
-        i64 oldcap = kml_sa_cap;
-        kml_sa_k = calloc((size_t)cap, sizeof *kml_sa_k);
-        kml_sa_v = calloc((size_t)cap, sizeof *kml_sa_v);
-        if (!kml_sa_k || !kml_sa_v) abort();
-        kml_sa_cap = cap;
-        kml_sa_n = 0;
-        for (i64 i = 0; i < oldcap; i++)
-            if (ok[i]) kml_sa_put(ok[i], (void *)ov[i]);
-        free(ok);
-        free(ov);
-    }
-    i64 mask = kml_sa_cap - 1;
-    for (i64 i = kml_unit_hash((i64)k) & mask;; i = (i + 1) & mask)
-        if (!kml_sa_k[i]) { kml_sa_k[i] = k; kml_sa_v[i] = v; kml_sa_n++; return; }
-}
-
-static void *kml_sa_get(const void *k) {
-    if (!kml_sa_cap) return NULL;
-    i64 mask = kml_sa_cap - 1;
-    for (i64 i = kml_unit_hash((i64)k) & mask;; i = (i + 1) & mask) {
-        if (!kml_sa_k[i]) return NULL;
-        if (kml_sa_k[i] == k) return (void *)kml_sa_v[i];
-    }
-}
+static KwTab kml_sa;
 
 // __kml_classrec_statics is the static area of record rec (of the class
 // whose reference is ref), or of the class itself when rec is NULL.
 void *__kml_classrec_statics(const void *rec, const void *ref, i64 bytes) {
     const void *k = rec ? rec : ref;
-    void *a = kml_sa_get(k);
-    if (!a) {
-        a = calloc(1, (size_t)(bytes > 0 ? bytes : 1));
-        if (!a) abort();
-        kml_sa_put(k, a);
-    }
+    KwCell *c = kw_find(&kml_sa, k);
+    if (c) return c->val;
+    void *a = kml_calloc(KML_HEAP_WORDS, 1, (size_t)(bytes > 0 ? bytes : 1));
+    if (!a) abort();
+    kw_put(&kml_sa, k, a);
     return a;
 }
 

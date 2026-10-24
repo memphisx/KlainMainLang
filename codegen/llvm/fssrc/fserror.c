@@ -62,7 +62,7 @@ char *__kml_fs_errmsg(const char *code, const char *desc, const char *sc, const 
 }
 
 void *__kml_fs_error_new_named(int e, const char *syscall, const char *path, const char *dest, void *name) {
-    static const struct { i64 n; char b[1]; } __attribute__((aligned(8))) empty = { 0, "" };
+    static const struct { i64 n; char b[1]; } __attribute__((aligned(8))) empty = { KML_STR_ASCII_HDR(0), "" };
 #ifdef _WIN32
     /* mkdtemp and watch report the path as given, as Node's do (neither goes
      * through a resolved, namespaced path to libuv). */
@@ -78,7 +78,7 @@ void *__kml_fs_error_new_named(int e, const char *syscall, const char *path, con
     const char *desc_raw = __kml_errno_desc(e);
     const char *desc = desc_raw ? desc_raw : errmsg;
     char *buf = __kml_fs_errmsg(code, desc, syscall, path, dest);
-    void *o = calloc(1, KML_ERROR_SIZE);
+    void *o = kml_calloc(KML_HEAP_WORDS, 1, KML_ERROR_SIZE);
     PUT(o, KML_ERROR_KIND, i64, 1LL << 48);
     PUT(o, KML_ERROR_MSG, void *, buf);
     PUT(o, KML_ERROR_NAME, void *, name);

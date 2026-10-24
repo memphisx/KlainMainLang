@@ -38,7 +38,7 @@ func (e *Emitter) emitStreamWriteWrap(userTy, chunkTy Type) string {
 	args := fmt.Sprintf("ptr %s", ep)
 	sig := "ptr"
 	if nParams >= 1 {
-		if chunkTy.IsArray {
+		if chunkTy.IsArray() {
 			cp := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", cp))
 			// The user callback's array param expects a header (TDD-00127).
@@ -118,20 +118,11 @@ func (e *Emitter) emitNewWritableStream(ex *ast.NewWritableStreamExpression) (Va
 		if !ok {
 			return Value{}, fmt.Errorf("%d:%d: new WritableStream's underlying sink must be an object literal ({start, write, close, abort})", pos.Line, pos.Col)
 		}
-		for _, p := range ol.Properties {
-			switch p.Key {
-			case "start":
-				startExpr = p.Value
-			case "write":
-				writeExpr = p.Value
-			case "close":
-				closeExpr = p.Value
-			case "abort":
-				abortExpr = p.Value
-			default:
-				return Value{}, fmt.Errorf("%d:%d: unknown underlying sink member '%s' (expected start, write, close, abort)", pos.Line, pos.Col, p.Key)
-			}
+		members, unknown := literalMembers(ol, "start", "write", "close", "abort")
+		if unknown != "" {
+			return Value{}, fmt.Errorf("%d:%d: unknown underlying sink member '%s' (expected start, write, close, abort)", pos.Line, pos.Col, unknown)
 		}
+		startExpr, writeExpr, closeExpr, abortExpr = members["start"], members["write"], members["close"], members["abort"]
 	}
 
 	hwmRef, sizeExpr, byteLengthStrategy, err := e.resolveStreamStrategy(ex.Strategy, chunkTy, pos)
@@ -167,13 +158,13 @@ func (e *Emitter) emitNewWritableStream(ex *ast.NewWritableStreamExpression) (Va
 		}
 		wrap := e.emitStreamWriteWrap(userClo.Ty, chunkTy)
 		env := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+		e.heapMallocInto(env, "16")
 		e0 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, e0))
+		e.heapStore("ptr", userClo.Ref, e0, 8)
 		e1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s, e1))
+		e.heapStore("ptr", s, e1, 8)
 		e.storeWStreamField(s, 9, e.buildBuiltinClosure(wrap, env))
 	}
 
@@ -243,32 +234,39 @@ func (e *Emitter) emitNewWritableStream(ex *ast.NewWritableStreamExpression) (Va
 func (e *Emitter) storeWStreamField(s string, idx int, val string) {
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, wstreamStructIR, s, idx))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
+	e.heapStore("ptr", val, gep, 8)
 }
 
 // resolveWStreamForCall resolves a writable-stream/writer/controller receiver.
 func (e *Emitter) resolveWStreamForCall(objExpr ast.Expression, pos ast.Pos) (Type, string, error) {
+	ty, _, ptr, err := e.resolveWStreamHandle(objExpr, pos)
+	return ty, ptr, err
+}
+
+// resolveWStreamHandle is resolveWStreamForCall that also gives the
+// receiver itself (a writer's handle).
+func (e *Emitter) resolveWStreamHandle(objExpr ast.Expression, pos ast.Pos) (Type, string, string, error) {
 	if id, ok := objExpr.(*ast.Identifier); ok {
 		sym, found := e.lookup(id.Name)
-		if found && (sym.Ty.IsWritableStream || sym.Ty.IsStreamWriter || sym.Ty.IsWSController) {
+		if found && (sym.Ty.IsWritableStream() || sym.Ty.IsStreamWriter() || sym.Ty.IsWSController()) {
 			ptr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptr, sym.Ptr))
-			return sym.Ty, ptr, nil
+			return sym.Ty, ptr, e.streamOfHandle(sym.Ty, ptr), nil
 		}
 	}
 	val, err := e.emitExpr(objExpr)
 	if err != nil {
-		return Type{}, "", err
+		return Type{}, "", "", err
 	}
-	if !val.Ty.IsWritableStream && !val.Ty.IsStreamWriter && !val.Ty.IsWSController {
-		return Type{}, "", fmt.Errorf("%d:%d: value is not a WritableStream/writer/controller", pos.Line, pos.Col)
+	if !val.Ty.IsWritableStream() && !val.Ty.IsStreamWriter() && !val.Ty.IsWSController() {
+		return Type{}, "", "", fmt.Errorf("%d:%d: value is not a WritableStream/writer/controller", pos.Line, pos.Col)
 	}
-	return val.Ty, val.Ref, nil
+	return val.Ty, val.Ref, e.streamOfHandle(val.Ty, val.Ref), nil
 }
 
 // emitWStreamMethodCall dispatches writable stream/writer/controller methods.
 func (e *Emitter) emitWStreamMethodCall(objExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	ty, ptr, err := e.resolveWStreamForCall(objExpr, pos)
+	ty, handle, ptr, err := e.resolveWStreamHandle(objExpr, pos)
 	if err != nil {
 		return Value{}, err
 	}
@@ -277,83 +275,119 @@ func (e *Emitter) emitWStreamMethodCall(objExpr ast.Expression, method string, a
 	if ty.StreamChunk != nil {
 		chunkTy = *ty.StreamChunk
 	}
-	voidPromise := func(ref string) Value {
-		pt := PromiseOf(TypeVoid)
-		pt.PromiseTask = true
-		return Value{Ref: ref, Ty: pt}
+	c := &streamCall{ptr: ptr, handle: handle, chunkTy: chunkTy, method: method, args: args, pos: pos}
+	if f, ok := streamWriterMethods[method]; ok && ty.IsStreamWriter() {
+		// A released writer is bound to no stream (Node's state errors).
+		return e.emitIfReleased(ptr, func() (Value, error) { return f(e, c) }, func() (Value, error) {
+			if method == "releaseLock" {
+				return Value{Ty: TypeVoid}, nil
+			}
+			return e.emitRejectedStreamPromise("Invalid state: Writer is not bound to a WritableStream", taskVoidPromise("").Ty), nil
+		})
 	}
-
+	var table map[string]func(e *Emitter, c *streamCall) (Value, error)
+	var what string
 	switch {
-	case ty.IsWritableStream:
-		switch method {
-		case "getWriter":
-			ok := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_lock(ptr %s)", ok, ptr))
-			e.streamThrowTypeError(ok, "Invalid state: WritableStream is locked")
-			return Value{Ref: ptr, Ty: WSWriterType(chunkTy)}, nil
-		case "abort":
-			bits, err := e.streamReasonBits(args, pos)
-			if err != nil {
-				return Value{}, err
-			}
-			prom := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_abort(ptr %s, i64 %s)", prom, ptr, bits))
-			return voidPromise(prom), nil
-		case "close":
-			return e.emitWStreamClose(ptr)
-		}
-		return Value{}, fmt.Errorf("%d:%d: unknown WritableStream method '%s'", pos.Line, pos.Col, method)
-
-	case ty.IsStreamWriter:
-		switch method {
-		case "write":
-			if len(args) != 1 {
-				return Value{}, fmt.Errorf("%d:%d: write() expects 1 chunk argument", pos.Line, pos.Col)
-			}
-			cv, err := e.emitExprWithObjectHint(args[0], chunkTy)
-			if err != nil {
-				return Value{}, err
-			}
-			cv = e.coerce(cv, chunkTy)
-			v0, v1 := e.streamChunkWords(cv)
-			prom := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", prom, ptr, v0, v1))
-			// A null promise means the write was disallowed (closing/closed).
-			isNull := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isNull, prom))
-			okI := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", okI, isNull))
-			e.streamThrowTypeError(okI, "cannot write to a closing or closed WritableStream")
-			return voidPromise(prom), nil
-		case "close":
-			return e.emitWStreamClose(ptr)
-		case "abort":
-			bits, err := e.streamReasonBits(args, pos)
-			if err != nil {
-				return Value{}, err
-			}
-			prom := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_abort(ptr %s, i64 %s)", prom, ptr, bits))
-			return voidPromise(prom), nil
-		case "releaseLock":
-			e.emitInstr(fmt.Sprintf("call void @__kml_ws_unlock(ptr %s)", ptr))
-			return Value{Ty: TypeVoid}, nil
-		}
-		return Value{}, fmt.Errorf("%d:%d: unknown stream writer method '%s'", pos.Line, pos.Col, method)
-
-	case ty.IsWSController:
-		switch method {
-		case "error":
-			bits, err := e.streamReasonBits(args, pos)
-			if err != nil {
-				return Value{}, err
-			}
-			e.emitInstr(fmt.Sprintf("call void @__kml_ws_error(ptr %s, i64 %s)", ptr, bits))
-			return Value{Ty: TypeVoid}, nil
-		}
-		return Value{}, fmt.Errorf("%d:%d: unknown writable stream controller method '%s'", pos.Line, pos.Col, method)
+	case ty.IsWritableStream():
+		table, what = writableStreamMethods, "WritableStream"
+	case ty.IsStreamWriter():
+		table, what = streamWriterMethods, "stream writer"
+	case ty.IsWSController():
+		table, what = wsControllerMethods, "writable stream controller"
+	default:
+		return Value{}, fmt.Errorf("%d:%d: unknown writable stream method '%s'", pos.Line, pos.Col, method)
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown writable stream method '%s'", pos.Line, pos.Col, method)
+	if f, ok := table[method]; ok {
+		return f(e, c)
+	}
+	return Value{}, fmt.Errorf("%d:%d: unknown %s method '%s'", pos.Line, pos.Col, what, method)
+}
+
+// writableStreamMethods, streamWriterMethods and wsControllerMethods are a
+// WritableStream's, its default writer's and its controller's methods, by
+// name.
+var writableStreamMethods, streamWriterMethods, wsControllerMethods map[string]func(e *Emitter, c *streamCall) (Value, error)
+
+func init() {
+	closeFn := func(e *Emitter, c *streamCall) (Value, error) { return e.emitWStreamClose(c.ptr) }
+	writableStreamMethods = map[string]func(e *Emitter, c *streamCall) (Value, error){
+		"getWriter": (*Emitter).wstreamGetWriter,
+		"abort":     (*Emitter).wstreamAbort,
+		"close":     closeFn,
+	}
+	streamWriterMethods = map[string]func(e *Emitter, c *streamCall) (Value, error){
+		"write":       (*Emitter).wstreamWrite,
+		"close":       closeFn,
+		"abort":       (*Emitter).wstreamAbort,
+		"releaseLock": (*Emitter).wstreamReleaseLock,
+	}
+	wsControllerMethods = map[string]func(e *Emitter, c *streamCall) (Value, error){
+		"error": (*Emitter).wstreamError,
+	}
+}
+
+// taskVoidPromise is the Promise<void> held in ref.
+func taskVoidPromise(ref string) Value {
+	pt := PromiseOf(TypeVoid)
+	pt.PromiseTask = true
+	return Value{Ref: ref, Ty: pt}
+}
+
+func (e *Emitter) wstreamGetWriter(c *streamCall) (Value, error) {
+	ok := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_lock(ptr %s)", ok, c.ptr))
+	e.streamThrowTypeError(ok, "Invalid state: WritableStream is locked")
+	return e.newStreamHandle(c.ptr, WSWriterType(c.chunkTy)), nil
+}
+
+// wstreamAbort is a stream's and its writer's abort(reason).
+func (e *Emitter) wstreamAbort(c *streamCall) (Value, error) {
+	bits, err := e.streamReasonBits(c.args, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	prom := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_abort(ptr %s, i64 %s)", prom, c.ptr, bits))
+	return taskVoidPromise(prom), nil
+}
+
+func (e *Emitter) wstreamWrite(c *streamCall) (Value, error) {
+	if len(c.args) != 1 {
+		return Value{}, fmt.Errorf("%d:%d: write() expects 1 chunk argument", c.pos.Line, c.pos.Col)
+	}
+	cv, err := e.emitExprWithObjectHint(c.args[0], c.chunkTy)
+	if err != nil {
+		return Value{}, err
+	}
+	cv = e.convert(cv, c.chunkTy)
+	v0, v1 := e.streamChunkWords(cv)
+	prom := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_write(ptr %s, i64 %s, i64 %s)", prom, c.ptr, v0, v1))
+	// A null promise means the write was disallowed (closing/closed).
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isNull, prom))
+	okI := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", okI, isNull))
+	e.streamThrowTypeError(okI, "cannot write to a closing or closed WritableStream")
+	return taskVoidPromise(prom), nil
+}
+
+// wstreamReleaseLock is writer.releaseLock(): the writer's ready and closed
+// reject (__kml_ws_release) and it detaches from its stream.
+func (e *Emitter) wstreamReleaseLock(c *streamCall) (Value, error) {
+	err := e.emitStreamStateError("Invalid state: Writer has been released")
+	e.emitInstr(fmt.Sprintf("call void @__kml_ws_release(ptr %s, ptr %s, i64 %s)", c.ptr, c.handle, err))
+	e.heapStore("ptr", "null", c.handle, 8)
+	return Value{Ty: TypeVoid}, nil
+}
+
+func (e *Emitter) wstreamError(c *streamCall) (Value, error) {
+	bits, err := e.streamReasonBits(c.args, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_ws_error(ptr %s, i64 %s)", c.ptr, bits))
+	return Value{Ty: TypeVoid}, nil
 }
 
 // emitWStreamClose emits close() (writer or stream): TypeError when close is
@@ -369,68 +403,4 @@ func (e *Emitter) emitWStreamClose(ptr string) (Value, error) {
 	pt := PromiseOf(TypeVoid)
 	pt.PromiseTask = true
 	return Value{Ref: prom, Ty: pt}, nil
-}
-
-// emitWStreamProperty implements `.locked` (stream), `.desiredSize`/`.ready`/
-// `.closed` (writer).
-func (e *Emitter) emitWStreamProperty(ex *ast.MemberExpression) (Value, error) {
-	ty, ptr, err := e.resolveWStreamForCall(ex.Object, ex.GetPos())
-	if err != nil {
-		return Value{}, err
-	}
-	e.ensureWStreamRuntime()
-	voidPromiseAt := func(idx int) Value {
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, wstreamStructIR, ptr, idx))
-		pp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pp, gep))
-		pt := PromiseOf(TypeVoid)
-		pt.PromiseTask = true
-		return Value{Ref: pp, Ty: pt}
-	}
-	switch ex.Property {
-	case "locked":
-		if !ty.IsWritableStream {
-			break
-		}
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 12", gep, wstreamStructIR, ptr))
-		f := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f, gep))
-		bit := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = and i64 %s, 32", bit, f))
-		b := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", b, bit))
-		return Value{Ref: b, Ty: TypeBool}, nil
-	case "desiredSize":
-		if !ty.IsStreamWriter && !ty.IsWSController {
-			break
-		}
-		// Spec: desiredSize is `number | null` — `null` once errored (state 2),
-		// `hwm − queued` otherwise. Same `{ i1, double }` optional as the
-		// ReadableStream controller (TDD-00196/ADR-00826).
-		d := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @__kml_ws_desired(ptr %s)", d, ptr))
-		stGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", stGep, wstreamStructIR, ptr))
-		st := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, stGep))
-		present := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 2", present, st))
-		nty := TypeF64
-		nty.Nullable = true
-		agg := e.makeNullableScalarAgg(nty, present, d)
-		return Value{Ref: agg, Ty: nty}, nil
-	case "ready":
-		if !ty.IsStreamWriter {
-			break
-		}
-		return voidPromiseAt(13), nil
-	case "closed":
-		if !ty.IsStreamWriter {
-			break
-		}
-		return voidPromiseAt(14), nil
-	}
-	return Value{}, fmt.Errorf("%d:%d: property '%s' is not available on this writable stream value", ex.GetPos().Line, ex.GetPos().Col, ex.Property)
 }

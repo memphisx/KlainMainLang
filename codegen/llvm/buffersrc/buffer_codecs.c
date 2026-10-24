@@ -18,10 +18,18 @@
  * (hex/base64/latin1 -> string) return one of these; the decoders (-> byte
  * buffer) keep plain malloc. */
 static char *kml_str_hdr_alloc(int64_t len) {
-	char *base = (char *)malloc((size_t)(8 + len + 1));
+	char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)(8 + len + 1));
 	if (!base) return base;
 	*(int64_t *)base = len;
 	return base + 8;
+}
+
+/* buf.fill(view): the n > 0 bytes at src repeated over dst[start, end). */
+void __kml_buf_fill_bytes(unsigned char *dst, int64_t start, int64_t end, const unsigned char *src, int64_t n) {
+	for (int64_t i = start, k = 0; i < end; i++) {
+		dst[i] = src[k];
+		if (++k == n) k = 0;
+	}
 }
 
 /* ---- utf8 ----
@@ -55,7 +63,7 @@ char *__kml_buf_utf8_str(const unsigned char *src, int64_t n) {
 		return out;
 	}
 	/* Each invalid byte may grow to three. */
-	char *tmp = (char *)malloc((size_t)(n * 3 + 1));
+	char *tmp = (char *)malloc((size_t)(n * 3 + 1)); /* scratch */
 	int64_t o = 0;
 	i = 0;
 	while (i < n) {
@@ -88,7 +96,7 @@ char *__kml_buf_utf8_str(const unsigned char *src, int64_t n) {
 		memcpy(out, tmp, (size_t)o);
 		out[o] = 0;
 	}
-	free(tmp);
+	free(tmp); /* scratch */
 	return out;
 }
 
@@ -127,7 +135,7 @@ static int hexval(char c) {
  * lone digit is dropped). Returns the byte count; *out receives the buffer. */
 int64_t __kml_buf_hex_dec(const char *s, unsigned char **out) {
 	size_t sl = strlen(s);
-	unsigned char *buf = (unsigned char *)malloc(sl / 2 + 1);
+	unsigned char *buf = (unsigned char *)kml_alloc(KML_HEAP_RAW, sl / 2 + 1);
 	int64_t n = 0;
 	for (size_t i = 0; i + 1 < sl; i += 2) {
 		int hi = hexval(s[i]), lo = hexval(s[i + 1]);
@@ -176,7 +184,7 @@ static int b64val(char c) {
  * both the standard and url-safe alphabets are accepted. */
 int64_t __kml_buf_b64_dec(const char *s, unsigned char **out) {
 	size_t sl = strlen(s);
-	unsigned char *buf = (unsigned char *)malloc(sl / 4 * 3 + 3);
+	unsigned char *buf = (unsigned char *)kml_alloc(KML_HEAP_RAW, sl / 4 * 3 + 3);
 	int64_t n = 0;
 	unsigned acc = 0;
 	int bits = 0;
@@ -219,7 +227,7 @@ char *__kml_buf_latin1_str(const unsigned char *src, int64_t n) {
  * latin1-write masking). Invalid sequences fall back byte-wise. */
 int64_t __kml_buf_latin1_bytes(const char *s, unsigned char **out) {
 	size_t sl = strlen(s);
-	unsigned char *buf = (unsigned char *)malloc(sl + 1);
+	unsigned char *buf = (unsigned char *)kml_alloc(KML_HEAP_RAW, sl + 1);
 	int64_t n = 0;
 	for (size_t i = 0; i < sl;) {
 		unsigned char c = (unsigned char)s[i];
@@ -271,7 +279,7 @@ static unsigned kml_utf8_next(const char *s, size_t sl, size_t i, int *adv) {
 /* UTF-8 string -> UTF-16LE bytes. */
 int64_t __kml_buf_utf16le_bytes(const char *s, unsigned char **out) {
 	size_t sl = strlen(s);
-	unsigned char *buf = (unsigned char *)malloc(sl * 4 + 1);
+	unsigned char *buf = (unsigned char *)kml_alloc(KML_HEAP_RAW, sl * 4 + 1);
 	int64_t n = 0;
 	for (size_t i = 0; i < sl;) {
 		int adv;
@@ -339,7 +347,7 @@ char *__kml_buf_utf16le_str(const unsigned char *src, int64_t n) {
  * Returns a length-prefixed kml string. */
 char *__kml_pem_from_der(const unsigned char *der, int64_t n, const char *label) {
 	char *b64 = __kml_buf_b64_enc(der, n, 0);
-	int64_t bl = *(int64_t *)(b64 - 8);
+	int64_t bl = KML_STR_LEN(b64);
 	int64_t lines = (bl + 63) / 64;
 	int64_t ll = (int64_t)strlen(label);
 	/* "-----BEGIN -----\n" = 17 + label; "-----END -----\n" = 15 + label */
@@ -370,7 +378,7 @@ unsigned char *__kml_buf_concat(kml_bufhdr **list, int64_t n, int64_t total, int
 	for (int64_t i = 0; i < n; i++)
 		if (list[i]) sum += list[i]->len;
 	if (total < 0) total = sum;
-	unsigned char *out = calloc(total > 0 ? (size_t)total : 1, 1);
+	unsigned char *out = kml_calloc(KML_HEAP_RAW, total > 0 ? (size_t)total : 1, 1);
 	int64_t off = 0;
 	for (int64_t i = 0; i < n && off < total; i++) {
 		if (!list[i]) continue;
@@ -420,9 +428,13 @@ int32_t __kml_buf_is_encoding(const char *enc) {
 int64_t __kml_buf_decode_enc(const char *s, const char *enc, unsigned char **out) {
 	switch (kml_enc_id(enc)) {
 	case KML_ENC_UTF8: {
-		int64_t n = *(const int64_t *)(s - 8); /* the header's length: NULs included */
-		unsigned char *b = (unsigned char *)malloc((size_t)n + 1);
+		int64_t n = KML_STR_LEN(s); /* the header's length: NULs included */
+		unsigned char *b = (unsigned char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 1);
 		memcpy(b, s, (size_t)n);
+		/* A lone surrogate (WTF-8 ED A0..BF xx) encodes as U+FFFD, the same
+		   three bytes long. */
+		for (int64_t i = 0; i + 2 < n; i++)
+			if (b[i] == 0xED && b[i + 1] >= 0xA0) b[i] = 0xEF, b[i + 1] = 0xBF, b[i + 2] = 0xBD, i += 2;
 		*out = b;
 		return n;
 	}

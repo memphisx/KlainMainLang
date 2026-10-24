@@ -351,6 +351,10 @@ export function aesCipher(encrypt: boolean, key: CryptoKey, data: any, algorithm
         case 'AES-GCM': {
             const tagLength: number = algorithm.tagLength === undefined ? 128 : algorithm.tagLength;
             const tagBytes = tagLength / 8;
+            // Ciphertext shorter than its tag (Node's aes.js, before the job).
+            if (!encrypt && bytes.length < tagBytes) {
+                return Promise.reject(lazyDOMException('The provided data is too small.', 'OperationError'));
+            }
             return job((): any => {
                 const iv = algorithm.iv as Uint8Array;
                 const aad: Uint8Array | undefined = algorithm.additionalData;
@@ -363,7 +367,6 @@ export function aesCipher(encrypt: boolean, key: CryptoKey, data: any, algorithm
                     const b = c.final();
                     return toArrayBuffer(cat3(a, b, c.getAuthTag().subarray(0, tagBytes)));
                 }
-                if (bytes.length < tagBytes) throw new Error('data too short');
                 const cut = bytes.length - tagBytes;
                 const c = createDecipheriv('aes-' + bits + '-gcm', k, iv, { authTagLength: tagBytes });
                 c.setAuthTag(bytes.subarray(cut));
@@ -407,6 +410,7 @@ export function macImportKey(format: string, keyData: any, algorithm: any, extra
     let length = handle.secret.length * 8;
     if (length === 0) throw lazyDOMException('Zero-length key is not supported', 'DataError');
     if (algorithm.length !== undefined) {
+        if (algorithm.length === 0) throw lazyDOMException('Zero-length key is not supported', 'DataError');
         const byteLength = numBitsToBytes(algorithm.length as number);
         if (byteLength !== handle.secret.length) throw lazyDOMException('Invalid key length', 'DataError');
         if ((algorithm.length as number) % 8 !== 0) handle = KeyHandle.secretKey(truncateToBitLength(algorithm.length as number, handle.secret));

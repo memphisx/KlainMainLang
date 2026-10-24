@@ -45,6 +45,7 @@ func (e *Emitter) ensureDynImportShim() {
 	e.dynImportShimDeclared = true
 	e.emitGlobal("declare ptr @__kml_dynimport_load(ptr)")
 	e.emitGlobal("declare ptr @__kml_dynimport_sym(ptr, ptr)")
+	e.emitGlobal("declare ptr @__kml_dynimport_sym_opt(ptr, ptr)")
 	e.emitGlobal("declare ptr @__kml_dynimport_open(ptr)")
 }
 
@@ -54,10 +55,13 @@ func (e *Emitter) ensureDynImportShim() {
 // (to build the object) and inferExprType (so `const m = await import(...)`
 // types correctly).
 func (e *Emitter) importCallResultObjectType(ex *ast.ImportCallExpression) Type {
+	if ex.Namespace != "" {
+		return TypeAny // the target's module namespace object (emitBundledFulfillFn)
+	}
 	var fields []Field
 	for _, exp := range ex.Exports {
 		ty := e.resolveType(exp.TypeAnnot)
-		if ty.IsArray || ty.IsObject || ty.IsClass {
+		if ty.IsArray() || ty.IsObject() || ty.IsClass() {
 			continue
 		}
 		fields = append(fields, Field{Name: exp.Name, Ty: ty})
@@ -100,11 +104,18 @@ func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym(ptr %s, ptr %s)", fp, handle, e.internString("__kml_dynmod_"+hash+"_"+suffix)))
 			return fp
 		}
-		stateFn, pollFn, errFn, dlFn := sym("state"), sym("poll"), sym("error"), sym("next_deadline_ns")
+		// island.c's exports, by fixed names in the island's own library; an
+		// island without a top-level await has none and is never polled.
+		fixed := func(suffix string) string {
+			fp := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym_opt(ptr %s, ptr %s)", fp, handle, e.internString("__kml_island_"+suffix)))
+			return fp
+		}
+		stateFn, pollFn, errFn, dlFn, beFn := sym("state"), fixed("poll"), sym("error"), sym("next_deadline_ns"), fixed("backend")
 		prom := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
-		e.emitInstr(fmt.Sprintf("call void @__kml_dynimport_watch(ptr %s, ptr %s, ptr @%s, ptr %s, ptr %s, ptr %s, ptr %s)",
-			handle, prom, settleFn, stateFn, pollFn, errFn, dlFn))
+		e.emitInstr(fmt.Sprintf("call void @__kml_dynimport_watch(ptr %s, ptr %s, ptr @%s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)",
+			handle, prom, settleFn, stateFn, pollFn, errFn, dlFn, beFn))
 		promTy := PromiseOf(objTy)
 		promTy.PromiseTask = true
 		return Value{Ref: prom, Ty: promTy}, nil
@@ -116,18 +127,16 @@ func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 // emitIslandTaskGlue appends the island exports the importer's loop drives an
 // island with a top-level await through (TDD-00225): `_state` (the module
 // promise's state word — 0 pending / 1 fulfilled / 2 rejected; 1 for an island
-// without a top-level await, whose init ran it to completion), `_poll` (one
-// non-blocking turn of the island's own loop, then the state, with 0x100 set
-// when the loop reported idle — nothing in the island can wake it any more),
+// without a top-level await, whose init ran it to completion),
 // `_next_deadline_ns` (the island's earliest pending timer on the shared
 // monotonic clock, 0 for none) and `_error` (the rejection value). Written into
 // the final module text, so every runtime piece it references was ensured
-// earlier (emitter.go, where islandTask is decided).
+// earlier (emitter.go, where islandTask is decided). The poll and the loop's
+// backend are islandsrc/island.c's.
 func (e *Emitter) emitIslandTaskGlue(out *strings.Builder) {
 	h := e.islandHash
 	if !e.moduleTask {
 		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_state() {\nentry:\n  ret i64 1\n}\n", h)
-		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_poll() {\nentry:\n  ret i64 257\n}\n", h)
 		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  ret i64 0\n}\n", h)
 		fmt.Fprintf(out, "define ptr @__kml_dynmod_%s_error() {\nentry:\n  ret ptr null\n}\n", h)
 		return
@@ -139,22 +148,6 @@ entry:
   %%st = load i64, ptr %%st_p, align 8
   ret i64 %%st
 }
-define i64 @__kml_dynmod_%s_poll() {
-entry:
-  store i8 1, ptr @__kml_loop_nowait, align 1
-  store i8 1, ptr @__kml_loop_oneshot, align 1
-  store i1 false, ptr @__kml_loop_idle, align 1
-  call void @__kml_event_loop_run()
-  store i8 0, ptr @__kml_loop_oneshot, align 1
-  store i8 0, ptr @__kml_loop_nowait, align 1
-  %%idle = load i1, ptr @__kml_loop_idle, align 1
-  %%idlebit = select i1 %%idle, i64 256, i64 0
-  %%p = load ptr, ptr @__kml_module_promise, align 8
-  %%st_p = getelementptr %s, ptr %%p, i32 0, i32 0
-  %%st = load i64, ptr %%st_p, align 8
-  %%r = or i64 %%st, %%idlebit
-  ret i64 %%r
-}
 define ptr @__kml_dynmod_%s_error() {
 entry:
   %%p = load ptr, ptr @__kml_module_promise, align 8
@@ -163,7 +156,7 @@ entry:
   %%err = inttoptr i64 %%v0 to ptr
   ret ptr %%err
 }
-`, h, promiseStructIR, h, promiseStructIR, h, promiseStructIR)
+`, h, promiseStructIR, h, promiseStructIR)
 	if !e.usedTimers {
 		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  ret i64 0\n}\n", h)
 		return

@@ -99,21 +99,56 @@ void *__kml_replace(const char *s, i64 slen, const char *search, i64 search_len,
     return buf;
 }
 
+/* The bytes of the UTF-8 character a lead byte starts (clamped to left). */
+static i64 u8_char(const u8 *p, i64 left) {
+    i64 w = p[0] < 0x80 ? 1 : p[0] < 0xE0 ? 2 : p[0] < 0xF0 ? 3 : 4;
+    return w > left ? left : w;
+}
+
+/* The UTF-16 units of the character at p (n bytes), each as its own bytes:
+ * a four-byte character's two surrogates in their three-byte (WTF-8) form,
+ * any other character whole. Returns the count (1 or 2). */
+static int u16_units(const u8 *p, i64 n, u8 out[2][4], i64 len[2]) {
+    if (n < 4) {
+        memcpy(out[0], p, (size_t)n);
+        len[0] = n;
+        return 1;
+    }
+    unsigned cp = ((unsigned)(p[0] & 7) << 18 | (unsigned)(p[1] & 0x3F) << 12 | (unsigned)(p[2] & 0x3F) << 6 | (p[3] & 0x3F)) - 0x10000;
+    unsigned u[2] = {0xD800 + (cp >> 10), 0xDC00 + (cp & 0x3FF)};
+    for (int k = 0; k < 2; k++) {
+        out[k][0] = (u8)(0xE0 | (u[k] >> 12));
+        out[k][1] = (u8)(0x80 | ((u[k] >> 6) & 0x3F));
+        out[k][2] = (u8)(0x80 | (u[k] & 0x3F));
+        len[k] = 3;
+    }
+    return 2;
+}
+
 /* One left-to-right pass over the ORIGINAL string, never rescanning written
- * replacement text. An empty search inserts rep between every char:
+ * replacement text. An empty search inserts rep between every UTF-16 unit:
  * "abc".replaceAll("", "-") is "-a-b-c-". */
 void *__kml_replace_all(const char *s, i64 slen, const char *search, i64 search_len, const char *rep, i64 rep_len) {
     if (search_len == 0) {
-        char *buf = (char *)__kml_str_alloc(slen + rep_len * (slen + 1));
+        /* At most one unit per byte, a pair's two halves 3 bytes each. */
+        char *buf = (char *)__kml_str_alloc(slen * 2 + rep_len * (slen + 1));
         char *out = buf;
         memcpy(out, rep, (size_t)rep_len);
         out += rep_len;
-        for (i64 i = 0; i < slen; i++) {
-            *out++ = s[i];
-            memcpy(out, rep, (size_t)rep_len);
-            out += rep_len;
+        for (i64 i = 0; i < slen;) {
+            i64 w = u8_char((const u8 *)s + i, slen - i), len[2];
+            u8 unit[2][4];
+            int k = u16_units((const u8 *)s + i, w, unit, len);
+            for (int j = 0; j < k; j++) {
+                memcpy(out, unit[j], (size_t)len[j]);
+                out += len[j];
+                memcpy(out, rep, (size_t)rep_len);
+                out += rep_len;
+            }
+            i += w;
         }
         *out = 0;
+        *(i64 *)(buf - 8) = out - buf;
         return buf;
     }
     i64 cnt = 0, rem = slen;
@@ -146,9 +181,17 @@ void *__kml_replace_all(const char *s, i64 slen, const char *search, i64 search_
  * struct return differs between the Windows and SysV C ABIs. */
 void *__kml_split_parts(const char *s, i64 slen, const char *sep, i64 sep_len, i64 *outlen) {
     if (sep_len == 0) {
-        char **arr = (char **)malloc((size_t)slen * 8);
-        for (i64 i = 0; i < slen; i++) arr[i] = str_of(s + i, 1);
-        *outlen = slen;
+        /* One part per UTF-16 unit. */
+        char **arr = (char **)kml_alloc(KML_HEAP_WORDS, (size_t)(slen > 0 ? slen : 1) * 8);
+        i64 n = 0;
+        for (i64 i = 0; i < slen;) {
+            i64 w = u8_char((const u8 *)s + i, slen - i), len[2];
+            u8 unit[2][4];
+            int k = u16_units((const u8 *)s + i, w, unit, len);
+            for (int j = 0; j < k; j++) KML_STORE_PTR(&arr[n++], str_of((const char *)unit[j], len[j]));
+            i += w;
+        }
+        *outlen = n;
         return arr;
     }
     i64 cnt = 0, rem = slen;
@@ -158,7 +201,7 @@ void *__kml_split_parts(const char *s, i64 slen, const char *sep, i64 sep_len, i
         rem -= (f - cur) + sep_len;
         cur = f + sep_len;
     }
-    char **arr = (char **)malloc((size_t)(cnt + 1) * 8);
+    char **arr = (char **)kml_alloc(KML_HEAP_WORDS, (size_t)(cnt + 1) * 8);
     i64 idx = 0;
     cur = s;
     rem = slen;

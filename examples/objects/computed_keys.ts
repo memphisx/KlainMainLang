@@ -5,7 +5,8 @@
 // enumerated.
 
 const k = 'b'
-const obj = { a: 1, [k]: 2 }
+// Typed with an index signature: keys are added at run time below.
+const obj: Record<string, number> = { a: 1, [k]: 2 }
 console.log(obj.a)      // 1
 console.log(obj[k])     // 2
 console.log(obj['a'])   // 1

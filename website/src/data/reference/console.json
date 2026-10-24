@@ -4,20 +4,17 @@
   "kind": "node",
   "statusPage": "CONSOLE.md",
   "coversRows": "all",
-  "coverage": { "loose": "12/12", "loosePct": 100, "strict": "8/12", "strictPct": 67 },
-  "lede": "Node-console-shaped logging for CLI tools and services. The full print family works; the one remaining print-path divergence is console.trace, which prints only its message with no stack walk. console.time tracks each label independently via a per-label backing map, matching console.count. console.table renders Node's exact Unicode box-drawing table for arrays of objects or primitives (other shapes fall back to console.log).",
+  "coverage": { "loose": "12/12", "loosePct": 100, "strict": "10/12", "strictPct": 83 },
+  "lede": "Node-console-shaped logging for CLI tools and services. The full print family works, console.trace included, with the call stack Node prints. console.time tracks each label independently via a per-label backing map, matching console.count. console.table renders Node's exact Unicode box-drawing table for arrays of objects or primitives (other shapes fall back to console.log).",
   "entries": [
     {
       "id": "console.log",
       "name": "console.log(...)",
       "statusRow": "console.log(...)",
       "signature": "log(...args: any[]): void",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Writes its arguments to stdout on one line, joined by single spaces, followed by a newline. A no-argument call prints a bare newline; objects and arrays are laid out as Node's util.inspect does — 80-column breaks, grouped columns, at most 100 array elements then `... n more items`, -0 shown as -0.",
       "returns": { "type": "void", "desc": "Nothing." },
-      "differences": [
-        "A bare string is written via `printf`'s `\"%s\"`, so a value with an embedded null byte truncates *on display* at the first `\\0` — the stored string is intact, and inside an array/object it renders as `'a\\x00b'`. Use `process.stdout.write` for binary output"
-      ],
       "seeAlso": ["console.error", "console.dir", "console.group"],
       "spec": { "mdn": "https://nodejs.org/api/console.html#consolelogdata-args" }
     },
@@ -70,12 +67,9 @@
       "name": "console.trace(...)",
       "statusRow": "console.trace(...)",
       "signature": "trace(...args: any[]): void",
-      "badge": "caveats",
-      "description": "Prints \"Trace: <message>\" to stderr through the same generic print path as console.debug/info — with no stack-walking logic.",
+      "badge": "exact",
+      "description": "Prints \"Trace: <message>\" to stderr, then the program's call stack below it — each frame named and positioned as Node prints it.",
       "returns": { "type": "void", "desc": "Nothing." },
-      "differences": [
-        "Prints `\"Trace: <message>\"` and nothing else; real Node's entire point of `.trace()` is the call stack it prints below the message, which this never generates at all"
-      ],
       "seeAlso": ["console.debug", "console.error"],
       "spec": { "mdn": "https://nodejs.org/api/console.html#consoletracemessage-args" }
     },

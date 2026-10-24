@@ -730,3 +730,23 @@ function mk(): () => string { return () => "made" }
 console.log(mk()())
 `, "5 9 13 2\n15\n[ 7, 8, 'x' ]\n42\nmade")
 }
+
+func TestE2ETypeofGuardConditionalMemberRead(t *testing.T) {
+	assertSameAsNode(t, `
+function a(name: string | symbol) { return typeof name === "symbol" ? name.description : name; }
+function b(name: string | symbol) { return typeof name === "symbol" ? "[" + name.description + "]" : name; }
+function c(name: string | symbol) { return typeof name !== "symbol" ? name : name.description; }
+console.log(a("x"), a(Symbol("s")), b(Symbol("t")), c("y"), c(Symbol("u")));
+`)
+}
+
+// A binding typed as a union of function types is called, and a function
+// literal in that context keeps the literal its signatures' results allow.
+func TestE2EUnionOfFunctionTypesCall(t *testing.T) {
+	assertOutput(t, `
+function g(h: ((x: number) => number) | ((x: number) => string), v: number) { return h(v); }
+console.log(g(x => x * 2, 4), g(x => "n" + x, 5));
+const f7: (() => "foo") | (() => "bar") = () => "bar";
+console.log(f7());
+`, "8 n5\nbar")
+}

@@ -46,11 +46,7 @@ typedef struct kml_fincell { /* 72 bytes */
  * would be collected out from under its pending finalizer. */
 #ifdef KML_GC
 static kml_fincell *all;
-extern void *GC_malloc_uncollectable(size_t n);
-extern void GC_register_finalizer(void *obj, void (*fn)(void *, void *), void *cd,
-                                  void (**ofn)(void *, void *), void **ocd);
-extern int GC_invoke_finalizers(void);
-#define ENV_ALLOC GC_malloc_uncollectable
+#define ENV_ALLOC kml_gc_alloc_pinned
 #else
 static _Thread_local kml_fincell *all;
 #define ENV_ALLOC malloc
@@ -59,8 +55,12 @@ static char atexit_done;
 
 static void finreg_atexit(void);
 
-void *__kml_finreg_create(void *cl, void *tramp, void *rep) {
-    kml_registry *r = (kml_registry *)malloc(sizeof *r);
+void *__kml_finreg_create(void *cl, void *tramp, void *rep, i64 hdr) {
+    /* The registry's header word precedes it (the emitter's
+       hostPrefixedObject). */
+    char *base = (char *)kml_alloc(KML_HEAP_WORDS, 8 + sizeof(kml_registry));
+    *(i64 *)base = hdr;
+    kml_registry *r = (kml_registry *)(base + 8);
     r->cl = cl;
     r->tramp = (kml_tramp)tramp;
     r->report = (kml_report)rep;
@@ -78,7 +78,7 @@ static void gc_cb(void *obj, void *cd);
 #endif
 
 void __kml_finreg_register(void *reg, void *target, i64 held, void *token, i64 line, i64 col) {
-    kml_fincell *c = (kml_fincell *)malloc(sizeof *c);
+    kml_fincell *c = (kml_fincell *)kml_alloc(KML_HEAP_WORDS, sizeof *c);
     c->next = all;
     c->reg = (kml_registry *)reg;
 #ifdef KML_GC
@@ -94,10 +94,7 @@ void __kml_finreg_register(void *reg, void *target, i64 held, void *token, i64 l
     c->gc_next = NULL;
     all = c;
 #ifdef KML_GC
-    void (*ofn)(void *, void *);
-    void *ocd = NULL;
-    GC_register_finalizer(target, gc_cb, c, &ofn, &ocd);
-    c->gc_next = (kml_fincell *)ocd;
+    c->gc_next = (kml_fincell *)kml_gc_finalizer(target, gc_cb, c);
 #else
     (void)target;
 #endif
@@ -169,7 +166,7 @@ void __kml_finreg_onfree(void *p) {
  * FIFO so everything pending runs. */
 static void finreg_atexit(void) {
 #ifdef KML_GC
-    GC_invoke_finalizers();
+    kml_gc_run_finalizers();
 #else
 #ifdef KML_FINREPORT
     i64 total = 0;

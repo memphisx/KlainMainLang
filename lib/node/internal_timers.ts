@@ -56,7 +56,7 @@ function received(value: any): string {
 
 export function validateFunction(value: any, name: string): void {
     if (typeof value !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type function.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type function.' + received(value));
     }
 }
 
@@ -460,10 +460,10 @@ function processImmediate(): void {
         const priorContextFrame = __kml_native.asyncContextGet();
         __kml_native.asyncContextSet(immediate[asyncContextFrame]);
         try {
-            const cb = immediate._onImmediate as (...args: any[]) => void;
+            // Called as Node calls it, a method of the immediate.
             const argv = immediate._argv;
-            if (argv === undefined) cb();
-            else cb(...argv);
+            if (argv === undefined) immediate._onImmediate!();
+            else immediate._onImmediate!(...argv);
         } finally {
             immediate._onImmediate = null;
             immediate = immediate._idleNext;
@@ -520,10 +520,10 @@ function listOnTimeout(list: TimersList, now: number): void {
         let start = 0;
         if (timer._repeat) start = __kml_native.timersNow();
         try {
-            const cb = timer._onTimeout as (...args: any[]) => void;
+            // Called as Node calls it, a method of the timer.
             const args = timer._timerArgs;
-            if (args === undefined) cb();
-            else cb(...args);
+            if (args === undefined) timer._onTimeout!();
+            else timer._onTimeout!(...args);
         } finally {
             if (timer._repeat && timer._idleTimeout !== -1) {
                 timer._idleTimeout = timer._repeat;

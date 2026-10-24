@@ -96,7 +96,7 @@ void *__kml_caught_unc_msg(int tag, i64 pay) {
     case KML_TAG_ERROR: return F((void *)pay, KML_ERROR_MSG, void *);
     case 2: return (void *)pay;
     case 1: {
-        char *buf = (char *)malloc(32);
+        char *buf = (char *)malloc(32); /* scratch */
         double d;
         __builtin_memcpy(&d, &pay, sizeof d);
         __kml_dtoa(buf, d);
@@ -111,9 +111,16 @@ void *__kml_caught_unc_msg(int tag, i64 pay) {
 
 /* The uncaught-error report goes to stderr, as Node's does, after whatever
  * the program had written to stdout. */
+extern void *__kml_error_stack(void *err);
+
 void __kml_print_uncaught(int tag, i64 pay) {
     fflush(stdout);
-    fprintf(stderr, "Uncaught: %s\n", (char *)__kml_caught_unc_msg(tag, pay));
+    /* An error's stack (Node's report, short of its source excerpt and
+     * version line); any other value as it prints. */
+    if ((tag & 0xff) == KML_TAG_ERROR && pay && (*(i64 *)pay & (1LL << 48)))
+        fprintf(stderr, "%s\n", (char *)__kml_error_stack((void *)pay));
+    else
+        fprintf(stderr, "%s\n", (char *)__kml_caught_unc_msg(tag, pay));
     fflush(stderr);
 }
 
@@ -131,12 +138,19 @@ _Bool __kml_process_uncaught_guarded(u8 tag, i64 pay, _Bool rejection) {
 
 /* The core: record the value, then unwind to the nearest try frame, or end
  * the program (or the worker thread) when there is none. */
+extern void __kml_error_capture(void *err);
+
 void __kml_throw_any(int tag, i64 pay) {
     note_deep_throw();
     u8 t = __kml_caught_tag(tag, pay);
     thrown_tag = t;
     thrown_pay = pay;
     __kml_thrown = t == KML_TAG_ERROR ? (void *)pay : NULL;
+    /* An error the runtime made (a null dereference, an fs failure) has
+     * no frames yet: those where it is thrown, which is where it was made. */
+    if (__kml_thrown && (*(i64 *)__kml_thrown & (1LL << 48)) /* the header's error flag */ && !*(void **)((char *)__kml_thrown + KML_ERR_FRAMES) &&
+        !*(void **)((char *)__kml_thrown + KML_ERR_STACK))
+        __kml_error_capture(__kml_thrown);
     if (__kml_jmp_top == 0) {
         /* A listener of 'uncaughtException' threw: Node reports that error
          * and exits 7 rather than calling the listeners again. */

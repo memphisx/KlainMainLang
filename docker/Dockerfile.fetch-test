@@ -49,7 +49,7 @@ ENTRYPOINT ["/fetch-demo"]
 # transitive dependency chain explicitly (static archives don't auto-pull
 # their own deps the way shared libraries do) — GCC's own linker driver
 # knows how to invoke the LTO plugin its own toolchain produced those
-# archives with. See docs/adr/ADR-00033.md for the full investigation.
+# archives with. See docs/adr/00/ADR-00033.md for the full investigation.
 FROM alpine:3.21 AS static-fetch-builder
 RUN apk add --no-cache clang musl-dev gcc curl-static curl-dev \
     openssl-libs-static openssl-dev nghttp2-static nghttp2-dev \

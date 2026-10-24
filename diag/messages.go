@@ -23,6 +23,7 @@ func annotation(code int, text string) *Message {
 var (
 	UnexpectedCharacter       = syntax(1127, "unexpected character %q")
 	NumericSeparatorPlacement = syntax(6188, "numeric separator '_' must be between two digits")
+	IdentAfterNumeric         = syntax(1351, "an identifier or keyword cannot immediately follow a numeric literal")
 	NumericSeparatorLegacy    = syntax(6188, "a numeric separator '_' is not allowed in a legacy octal or non-octal-decimal literal")
 	BigIntDecimalPoint        = syntax(1353, "a BigInt literal cannot contain a decimal point")
 	BigIntExponent            = syntax(1352, "a BigInt literal cannot contain an exponent")
@@ -50,27 +51,31 @@ var (
 	DeletePrivateName     = syntax(18011, "the operand of a 'delete' operator cannot be a private identifier")
 	// SuperPrivateName is JavaScript's early error for `super.#x` (a private
 	// name is never reached through super); tsc reports it as TS2339.
-	SuperPrivateName      = syntax(2339, "a private name cannot be read through 'super'")
-	ModuleDeclNotTopLevel = syntax(1233, "an import or export declaration can only be used at the top level of a module")
-	CoverInitializedName  = syntax(1312, "a shorthand property with a default ('{ x = 1 }') is only valid in a destructuring assignment")
-	ReservedWordIdent     = syntax(1359, "'%s' is a reserved word that cannot be used here")
-	StrictDeleteName      = syntax(1102, "'delete' cannot be called on an identifier in strict mode")
-	UndefinedLabel        = syntax(1116, "a '%s' statement can only jump to a label of an enclosing statement ('%s' is not one)")
-	YieldOutsideGenerator = syntax(1163, "a 'yield' expression is only allowed in a generator body")
-	AwaitOutsideAsync     = syntax(1308, "'await' expressions are only allowed within async functions and at the top levels of modules")
-	InvalidAssignTarget   = syntax(2364, "the left-hand side of an assignment expression must be a variable or a property access")
-	InvalidUpdateTarget   = syntax(2357, "the operand of an increment or decrement operator must be a variable or a property access")
-	ExpectedAsNamespace   = syntax(1005, "expected 'as' after '*' in namespace import, got %s")
-	ExpectedOfDestructure = syntax(1005, "expected 'of' after a for-of destructuring pattern, got %s")
-	ExpectedImportDotOr   = syntax(1005, "expected '.' or '(' after 'import' in an expression, got %s")
-	ExpectedCaseOrDefault = syntax(1130, "expected 'case' or 'default' in switch")
-	ExpectedCatchFinally  = syntax(1472, "try statement requires at least a catch or finally clause")
-	ExpectedTemplateCont  = syntax(1160, "expected template continuation, got %s")
-	ExpectedImportMeta    = syntax(17012, "expected 'meta' after 'import.'")
-	ForAwaitNotForIn      = syntax(1005, "'for await' requires a for-of loop, not for-in")
-	ForAwaitNotForOf      = syntax(1005, "'for await' requires a for-of loop over an async iterable")
-	MethodMissingParens   = syntax(1005, "'%s %s' must be a method (missing '()')")
-	ModifierNeedsMethod   = syntax(1005, "'%s' is not a method (an async/generator modifier requires a '()' method body)")
+	SuperPrivateName       = syntax(2339, "a private name cannot be read through 'super'")
+	ModuleDeclNotTopLevel  = syntax(1233, "an import or export declaration can only be used at the top level of a module")
+	CoverInitializedName   = syntax(1312, "a shorthand property with a default ('{ x = 1 }') is only valid in a destructuring assignment")
+	ReservedWordIdent      = syntax(1359, "'%s' is a reserved word that cannot be used here")
+	DeclInSingleStatement  = syntax(1156, "'%s' declarations can only be declared inside a block")
+	AwaitInParamInit       = syntax(2524, "'await' expressions cannot be used in a parameter initializer")
+	StrictDeleteName       = syntax(1102, "'delete' cannot be called on an identifier in strict mode")
+	UndefinedLabel         = syntax(1116, "a '%s' statement can only jump to a label of an enclosing statement ('%s' is not one)")
+	YieldOutsideGenerator  = syntax(1163, "a 'yield' expression is only allowed in a generator body")
+	YieldInGeneratorParams = syntax(2523, "'yield' expressions cannot be used in a parameter initializer")
+	AwaitOutsideAsync      = syntax(1308, "'await' expressions are only allowed within async functions and at the top levels of modules")
+	NewTargetNotAllowed    = syntax(17013, "new.target expression is not allowed here")
+	InvalidAssignTarget    = syntax(2364, "the left-hand side of an assignment expression must be a variable or a property access")
+	InvalidUpdateTarget    = syntax(2357, "the operand of an increment or decrement operator must be a variable or a property access")
+	ExpectedAsNamespace    = syntax(1005, "expected 'as' after '*' in namespace import, got %s")
+	ExpectedOfDestructure  = syntax(1005, "expected 'of' after a for-of destructuring pattern, got %s")
+	ExpectedImportDotOr    = syntax(1005, "expected '.' or '(' after 'import' in an expression, got %s")
+	ExpectedCaseOrDefault  = syntax(1130, "expected 'case' or 'default' in switch")
+	ExpectedCatchFinally   = syntax(1472, "try statement requires at least a catch or finally clause")
+	ExpectedTemplateCont   = syntax(1160, "expected template continuation, got %s")
+	ExpectedImportMeta     = syntax(17012, "expected 'meta' after 'import.'")
+	ForAwaitNotForIn       = syntax(1005, "'for await' requires a for-of loop, not for-in")
+	ForAwaitNotForOf       = syntax(1005, "'for await' requires a for-of loop over an async iterable")
+	MethodMissingParens    = syntax(1005, "'%s %s' must be a method (missing '()')")
+	ModifierNeedsMethod    = syntax(1005, "'%s' is not a method (an async/generator modifier requires a '()' method body)")
 )
 
 // Parser: an element of the wrong kind.
@@ -96,6 +101,8 @@ var (
 	LineBreakBeforeArrow        = syntax(1200, "line break not allowed before '=>'")
 	LineBreakAfterThrow         = syntax(1142, "line break not allowed after 'throw'")
 	ConstMustBeInitialized      = syntax(1155, "'const' declaration '%s' must be initialized")
+	DefiniteWithInitializer     = syntax(1263, "Declarations with initializers cannot also have definite assignment assertions.")
+	DefiniteNeedsAnnotation     = syntax(1264, "Declarations with definite assignment assertions must also have type annotations.")
 	DuplicateParameter          = syntax(2300, "duplicate parameter name '%s'")
 	StrictBindingName           = syntax(1100, "'%s' cannot be used as a binding name in strict mode")
 	StrictParameterName         = syntax(1100, "'%s' cannot be a parameter name in strict mode")
@@ -135,6 +142,13 @@ var (
 	PropertyNotIndex        = &Message{Code: 2411, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' of type '%s' is not assignable to 'string' index type '%s'"}
 	DerivedNoSuper          = &Message{Code: 2377, Kind: TypeScriptError, Phase: PhaseCheck, Text: "constructors for derived classes must contain a 'super' call"}
 	VarRedeclaredType       = &Message{Code: 2403, Kind: TypeScriptError, Phase: PhaseCheck, Text: "subsequent variable declarations must have the same type. Variable '%s' must be of type '%s', but here has type '%s'"}
+	NotIterable             = &Message{Code: 2488, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' must have a '[Symbol.iterator]()' method that returns an iterator"}
+	BadAwaitOperand         = &Message{Code: 1320, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type of 'await' operand must either be a valid promise or must not contain a callable 'then' member"}
+	NextResultNoValue       = &Message{Code: 2490, Kind: TypeScriptError, Phase: PhaseCheck, Text: "the type returned by the 'next()' method of an iterator must have a 'value' property"}
+	AsyncNextResultNoValue  = &Message{Code: 2547, Kind: TypeScriptError, Phase: PhaseCheck, Text: "the type returned by the 'next()' method of an async iterator must be a promise for a type with a 'value' property"}
+	InvalidSpreadType       = &Message{Code: 2698, Kind: TypeScriptError, Phase: PhaseCheck, Text: "spread types may only be created from object types"}
+	NotAsyncIterable        = &Message{Code: 2504, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' must have a '[Symbol.asyncIterator]()' method that returns an async iterator"}
+	TupleNoElement          = &Message{Code: 2493, Kind: TypeScriptError, Phase: PhaseCheck, Text: "tuple type '%s' of length '%d' has no element at index '%d'"}
 	NotAssignable           = &Message{Code: 2322, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' is not assignable to type '%s'"}
 	GetterMustReturn        = &Message{Code: 2378, Kind: TypeScriptError, Phase: PhaseCheck, Text: "a 'get' accessor must return a value"}
 	MustReturnValue         = &Message{Code: 2355, Kind: TypeScriptError, Phase: PhaseCheck, Text: "a function whose declared type is neither 'undefined', 'void', nor 'any' must return a value"}
@@ -149,10 +163,23 @@ var (
 	ReadonlyProperty        = &Message{Code: 2540, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to '%s' because it is a read-only property"}
 	PromiseResolveArity     = &Message{Code: 2794, Kind: TypeScriptError, Phase: PhaseCheck, Text: "expected %s arguments, but got %d. Did you forget to include 'void' in your type argument to 'Promise'?"}
 	ArgCountAtLeast         = &Message{Code: 2555, Kind: TypeScriptError, Phase: PhaseCheck, Text: "expected at least %d arguments, but got %d"}
+	ParamSelfReference      = &Message{Code: 2372, Kind: TypeScriptError, Phase: PhaseCheck, Text: "parameter '%s' cannot reference itself"}
+	ParamForwardReference   = &Message{Code: 2373, Kind: TypeScriptError, Phase: PhaseCheck, Text: "parameter '%s' cannot reference identifier '%s' declared after it"}
+	ImplicitAnyOwnInit      = &Message{Code: 7022, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer"}
+	PrivateMethodAssign     = &Message{Code: 2803, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to private method '%s'. Private methods are not writable"}
 	PropertyNotExist        = &Message{Code: 2339, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' does not exist on type '%s'"}
 	AssignToConst           = &Message{Code: 2588, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to '%s' because it is a constant"}
 	AssignToFunction        = &Message{Code: 2630, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to '%s' because it is a function"}
 	AssignToClass           = &Message{Code: 2629, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to '%s' because it is a class"}
+	EnumAmbientComputed     = &Message{Code: 1066, Kind: TypeScriptError, Phase: PhaseCheck, Text: "in ambient enum declarations member initializer must be constant expression"}
+	ConstEnumComputed       = &Message{Code: 2474, Kind: TypeScriptError, Phase: PhaseCheck, Text: "const enum member initializers must be constant expressions"}
+	EnumMemberNeedsInit     = &Message{Code: 1061, Kind: TypeScriptError, Phase: PhaseCheck, Text: "enum member must have initializer"}
+	CommaLeftUnused         = &Message{Code: 2695, Kind: TypeScriptError, Phase: PhaseCheck, Text: "left side of comma operator is unused and has no side effects"}
+	AlwaysTruthy            = &Message{Code: 2872, Kind: TypeScriptError, Phase: PhaseCheck, Text: "this kind of expression is always truthy"}
+	AlwaysFalsy             = &Message{Code: 2873, Kind: TypeScriptError, Phase: PhaseCheck, Text: "this kind of expression is always falsy"}
+	EnumComputedNotNumber   = &Message{Code: 18033, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' is not assignable to type 'number' as required for computed enum member values"}
+	ConstEnumNonFinite      = &Message{Code: 2477, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'const' enum member initializer was evaluated to a non-finite value"}
+	ConstEnumNaN            = &Message{Code: 2478, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'const' enum member initializer was evaluated to disallowed value 'NaN'"}
 	AssignToEnum            = &Message{Code: 2628, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to '%s' because it is an enum"}
 	ExcessProperty          = &Message{Code: 2353, Kind: TypeScriptError, Phase: PhaseCheck, Text: "object literal may only specify known properties, and '%s' does not exist in type '%s'"}
 	PropertyMissing         = &Message{Code: 2741, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' is missing in type '%s' but required in type '%s'"}
@@ -191,6 +218,8 @@ var (
 	VarImplicitAnyArray     = &Message{Code: 7005, Kind: TypeScriptError, Phase: PhaseCheck, Text: "variable '%s' implicitly has an 'any[]' type"}
 	ReturnImplicitAnyCycle  = &Message{Code: 7023, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' implicitly has return type 'any' because it does not have a return type annotation and is referenced directly or indirectly in one of its return expressions"}
 	MemberImplicitAny       = &Message{Code: 7008, Kind: TypeScriptError, Phase: PhaseCheck, Text: "member '%s' implicitly has an 'any' type"}
+	PropertyNotInitialized  = &Message{Code: 2564, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Property '%s' has no initializer and is not definitely assigned in the constructor."}
+	NewImplicitAny          = &Message{Code: 7009, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'new' expression, whose target lacks a construct signature, implicitly has an 'any' type"}
 	ParamImplicitAny        = &Message{Code: 7006, Kind: TypeScriptError, Phase: PhaseCheck, Text: "parameter '%s' implicitly has an 'any' type"}
 	BindingImplicitAny      = &Message{Code: 7031, Kind: TypeScriptError, Phase: PhaseCheck, Text: "binding element '%s' implicitly has an 'any' type"}
 	RestParamImplicitAny    = &Message{Code: 7019, Kind: TypeScriptError, Phase: PhaseCheck, Text: "rest parameter '%s' implicitly has an 'any[]' type"}
@@ -221,10 +250,7 @@ var (
 // Parser and type conversion: valid TypeScript this compiler does not
 // implement.
 var (
-	RestParamPattern            = unsupported(90001, "a rest parameter cannot be a destructuring pattern")
-	DestructuredParamDefault    = unsupported(90002, "a default value on a destructured parameter is not yet supported")
 	ComputedKeyBinding          = unsupported(90004, "a computed destructuring key must bind through `: name`")
-	ComputedKeyConstant         = unsupported(90005, "a computed destructuring key must be a constant string or number literal, got %s")
 	LiteralKeyBinding           = unsupported(90006, "a string or numeric destructuring key ('%s') must be bound with `: name`, got %s")
 	ComputedClassMemberName     = unsupported(90007, "a computed class member name must be a constant string or number literal, a well-known symbol, or a const holding one or a symbol — a key computed at run time is not yet supported")
 	ImportMetaOnlyURL           = unsupported(90008, "'import.meta' is only supported as 'import.meta.url'")
@@ -239,8 +265,6 @@ var (
 	IndexSigWithProperties      = unsupported(90016, "combining named properties with an index signature is not yet supported — use an index signature alone")
 	InterfaceCallSigMixed       = unsupported(90017, "a call signature combined with other interface members is not supported — a callable object value has no runtime shape here")
 	ObjectCallSigMixed          = unsupported(90018, "a call signature combined with other object-type members is not supported — a callable object value has no runtime shape here; use a plain function type or split the members")
-	OptionalTupleElement        = unsupported(90020, "an optional tuple element is not yet supported")
-	RestTupleElement            = unsupported(90021, "a rest tuple element is not yet supported")
 	UnsupportedDeclarationMerge = unsupported(90022, "merging the declarations of '%s' is not yet supported")
 	ThisTypeUnsupported         = unsupported(90024, "the 'this' type is not yet supported here")
 	NamespaceTypeMemberClash    = unsupported(90023, "'%s' is declared as a class, interface, type or enum in more than one namespace; namespace type members share one top-level name, so each name must be unique")
@@ -265,6 +289,18 @@ var (
 // Strict code (TypeScript's alwaysStrict): JavaScript's strict-mode early
 // errors, reported by the checker so -compat=js keeps sloppy code.
 var (
-	StrictInvalidUse  = &Message{Code: 1100, Kind: TypeScriptError, Phase: PhaseCheck, Text: "invalid use of '%s' in strict mode"}
-	StrictDeleteIdent = &Message{Code: 1102, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'delete' cannot be called on an identifier in strict mode"}
+	StrictInvalidUse   = &Message{Code: 1100, Kind: TypeScriptError, Phase: PhaseCheck, Text: "invalid use of '%s' in strict mode"}
+	StrictDeleteIdent  = &Message{Code: 1102, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'delete' cannot be called on an identifier in strict mode"}
+	StrictReservedWord = &Message{Code: 1212, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Identifier expected. '%s' is a reserved word in strict mode."}
+)
+
+// Unused declarations (TypeScript's noUnusedLocals and noUnusedParameters).
+var (
+	UnusedNeverRead       = &Message{Code: 6133, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' is declared but its value is never read"}
+	UnusedProperty        = &Message{Code: 6138, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' is declared but its value is never read"}
+	UnusedAllImports      = &Message{Code: 6192, Kind: TypeScriptError, Phase: PhaseCheck, Text: "all imports in import declaration are unused"}
+	UnusedNeverUsed       = &Message{Code: 6196, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' is declared but never used"}
+	UnusedAllDestructured = &Message{Code: 6198, Kind: TypeScriptError, Phase: PhaseCheck, Text: "all destructured elements are unused"}
+	UnusedAllVariables    = &Message{Code: 6199, Kind: TypeScriptError, Phase: PhaseCheck, Text: "all variables are unused"}
+	UnusedAllTypeParams   = &Message{Code: 6205, Kind: TypeScriptError, Phase: PhaseCheck, Text: "all type parameters are unused"}
 )

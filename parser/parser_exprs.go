@@ -36,7 +36,7 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 	// chain, not as one more case alongside it, since `yield`'s own operand
 	// is a full AssignmentExpression, not something any higher-precedence
 	// level here could parse as an operand of its own.
-	if p.check(lexer.YIELD) {
+	if p.check(lexer.YIELD) || p.yieldExprOutsideGenerator() {
 		return p.parseYield()
 	}
 
@@ -54,7 +54,7 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 		opTok := p.advance()
 		_, call := left.(*ast.CallExpression)
 		logical := opTok.Type == lexer.LOGICAL_AND_ASSIGN || opTok.Type == lexer.LOGICAL_OR_ASSIGN || opTok.Type == lexer.NULLISH_ASSIGN
-		if !assignTarget(left, opTok.Type == lexer.ASSIGN) || call && logical {
+		if !assignTarget(left, opTok.Type == lexer.ASSIGN) || call && logical || p.parenLiterals[left] {
 			// A call is never a logical assignment's target (only `=` and
 			// the arithmetic compounds keep sloppy code's web-compatible form).
 			// An early error: `1 == 2 = 1`, `a + b += 1`.
@@ -80,10 +80,35 @@ func (p *Parser) parseAssignment() (ast.Expression, error) {
 // check) rather than needing a parser-level distinction between "wrong
 // context" and "not implemented" that codegen can give more precisely once
 // real generator support exists.
+// yieldExprOutsideGenerator reports a `yield` outside a generator that is
+// plainly meant as a yield expression, as tsc decides it: an identifier,
+// keyword or literal follows on the same line (`yield 1`). It is then
+// parsed as one, for the early error (TS1163) rather than a stray name.
+func (p *Parser) yieldExprOutsideGenerator() bool {
+	if p.at(p.pos).Type != lexer.YIELD || p.inGen {
+		return false
+	}
+	next := p.at(p.pos + 1)
+	if next.HasPrecedingLineBreak() {
+		return false
+	}
+	switch next.Type {
+	case lexer.IDENT, lexer.NUMBER, lexer.BIGINT, lexer.STRING, lexer.YIELD, lexer.TEMPLATE_NO_SUB, lexer.TEMPLATE_HEAD:
+		return true
+	}
+	return lexer.IsKeyword(next.Type)
+}
+
 func (p *Parser) parseYield() (ast.Expression, error) {
 	tok := p.advance() // 'yield'
+	tok.Type = lexer.YIELD
 	pos := posOf(tok)
-	delegate := p.match(lexer.STAR) // `yield*`
+	if p.inGenParams {
+		return nil, errAtPos(pos, diag.YieldInGeneratorParams)
+	}
+	// `yield` then a line break is a complete yield: a `*` on the next
+	// line does not make it `yield*`.
+	delegate := !p.peek().HasPrecedingLineBreak() && p.match(lexer.STAR) // `yield*`
 
 	// Same no-operand shape as a bare `return`/`break`/`continue`: a line
 	// terminator right after `yield` (ASI) means no operand, and so does
@@ -92,7 +117,7 @@ func (p *Parser) parseYield() (ast.Expression, error) {
 	// whatever comes next) — `yield` can appear inside a call's argument
 	// list or an array/object literal, unlike return/break/continue, which
 	// are always a full statement on their own.
-	if p.peek().HasPrecedingLineBreak() {
+	if !delegate && p.peek().HasPrecedingLineBreak() {
 		return ast.NewYieldExpression(nil, delegate, pos), nil
 	}
 	switch p.peek().Type {
@@ -244,8 +269,14 @@ func (p *Parser) parseEquality() (ast.Expression, error) {
 }
 
 func (p *Parser) parseRelational() (ast.Expression, error) {
-	left, err := p.parseShift()
-	if err != nil {
+	var left ast.Expression
+	var err error
+	if t := p.peek(); t.Type == lexer.PRIVATE_NAME && p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "in" && !p.inExcluded() {
+		// `#x in o`: an ergonomic brand check, its private name the left
+		// operand.
+		p.advance()
+		left = ast.NewIdentifier(t.Literal, posOf(t))
+	} else if left, err = p.parseShift(); err != nil {
 		return nil, err
 	}
 	// `in` (`key in obj`) sits at the same precedence as instanceof/</>/etc
@@ -269,9 +300,15 @@ func (p *Parser) parseRelational() (ast.Expression, error) {
 			break
 		}
 		op := p.advance()
+		rtok := p.peek()
 		right, err := p.parseShift()
 		if err != nil {
 			return nil, err
+		}
+		if a, ok := right.(*ast.ArrowFunction); ok && a == p.bareArrow {
+			// An arrow function is an assignment expression, never a
+			// relational operand (`#x in () => {}`).
+			return nil, p.errAt(rtok, diag.UnexpectedTokenInExpr, "=>")
 		}
 		left = ast.NewBinaryExpression(op.Literal, left, right, posOf(op))
 	}
@@ -839,7 +876,7 @@ func assignTarget(e ast.Expression, pattern bool) bool {
 		return true
 	case *ast.ObjectLiteral:
 		// An object pattern's rest property is last, and a plain target.
-		if !pattern {
+		if !pattern || x.RestTrailingComma {
 			return false
 		}
 		for i, p := range x.Properties {

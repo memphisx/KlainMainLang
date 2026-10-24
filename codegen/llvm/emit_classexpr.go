@@ -131,6 +131,9 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 		// (JavaScript's NamedEvaluation).
 		if v, ok := n.(*ast.VarDeclaration); ok {
 			if ce, ok := v.Init.(*ast.ClassExpression); ok {
+				// Its binding is typed off the class as written, before the
+				// expression becomes a reference to the hoisted class.
+				e.warmFront(v)
 				boundTo[ce] = v
 				if anonymousClass(ce) {
 					ce.Decl.Name = v.Name
@@ -166,9 +169,23 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 				// to the class read.
 				resolver.RenameInClass(n.Decl, n.Decl.Name, name)
 			}
+			if own == "" {
+				if shown := e.fnLitNames[n]; shown != "" {
+					if e.classShownNames == nil {
+						e.classShownNames = map[string]string{}
+					}
+					e.classShownNames[name] = shown
+				}
+			}
 			n.Decl.Name = name
 			hoisted = append(hoisted, n.Decl)
 			ref := ast.NewIdentifier(name, n.GetPos())
+			c.StandsFor(ref, n)
+			if s, ok := e.shadowOracle.(interface {
+				StandsFor(syn, orig ast.Expression)
+			}); ok {
+				s.StandsFor(ref, n) // the comparison's own checker reads it alike
+			}
 			e.markClassReeval(ref, n.Decl)
 			if captures {
 				if e.classCaptures == nil {
@@ -192,7 +209,66 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 	for i, st := range prog.Body {
 		prog.Body[i] = rewrite(st).(ast.Statement)
 	}
-	prog.Body = append(hoisted, prog.Body...)
+	prog.Body = append(fieldDepsFirst(hoisted), prog.Body...)
+}
+
+// fieldDepsFirst orders hoisted classes so that one comes after each other
+// hoisted class its field initializers or `extends` name: a field's type is
+// inferred from its initializer when the class registers, and a class
+// expression in a block class's field (`class C { B = class {} }`) is
+// hoisted after C. The order is otherwise kept.
+func fieldDepsFirst(hoisted []ast.Statement) []ast.Statement {
+	idx := map[string]int{}
+	for i, st := range hoisted {
+		if cd, ok := st.(*ast.ClassDeclaration); ok {
+			idx[cd.Name] = i
+		}
+	}
+	deps := make([][]int, len(hoisted))
+	for i, st := range hoisted {
+		cd, ok := st.(*ast.ClassDeclaration)
+		if !ok {
+			continue
+		}
+		add := func(name string) {
+			if j, ok := idx[name]; ok && j != i {
+				deps[i] = append(deps[i], j)
+			}
+		}
+		add(cd.BaseClass)
+		for _, f := range cd.Fields {
+			if f.Initializer == nil {
+				continue
+			}
+			ast.Inspect(f.Initializer, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.FunctionExpression, *ast.ArrowFunction:
+					return false // read when called, not at registration
+				case *ast.Identifier:
+					add(x.Name)
+				}
+				return true
+			})
+		}
+	}
+	out := make([]ast.Statement, 0, len(hoisted))
+	state := make([]int, len(hoisted)) // 0 new, 1 visiting, 2 placed
+	var place func(i int)
+	place = func(i int) {
+		if state[i] != 0 {
+			return // placed, or a cycle: keep the source order
+		}
+		state[i] = 1
+		for _, j := range deps[i] {
+			place(j)
+		}
+		state[i] = 2
+		out = append(out, hoisted[i])
+	}
+	for i := range hoisted {
+		place(i)
+	}
+	return out
 }
 
 // markClassReeval records site, where hoisted class cd is evaluated inside a
@@ -324,6 +400,9 @@ func (e *Emitter) classDisplayName(c string) string {
 	if shown, ok := e.classShownNames[c]; ok {
 		return shown
 	}
+	if shown, ok := e.classShownNames[ast.Unmangle(c)]; ok {
+		return shown
+	}
 	return inspectClassName(c)
 }
 
@@ -335,4 +414,24 @@ func (e *Emitter) takeStaticCaps(cd *ast.ClassDeclaration) {
 		}
 		e.classStaticCaps[cd.Name] = caps
 	}
+}
+
+// hasLocalClass reports a class expression, or a class declared in a block,
+// anywhere in prog: what hoistClassExpressions moves.
+func hasLocalClass(prog *ast.Program) bool {
+	found := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.ClassExpression:
+			found = true
+		case *ast.BlockStatement:
+			for _, st := range x.Body {
+				if _, ok := st.(*ast.ClassDeclaration); ok {
+					found = true
+				}
+			}
+		}
+		return !found
+	})
+	return found
 }

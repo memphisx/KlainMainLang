@@ -22,12 +22,12 @@ export class AbortError extends Error {
 }
 
 function useAfterClose(): Error {
-    return new NodeError('ERR_USE_AFTER_CLOSE', 'readline was closed');
+    return NodeError('ERR_USE_AFTER_CLOSE', 'readline was closed');
 }
 
 export function validateAbortSignal(signal: any, name: string): void {
     if (signal !== undefined && (signal === null || typeof signal !== 'object' || !('aborted' in signal))) {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" property must be an instance of AbortSignal.' + received(signal));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" property must be an instance of AbortSignal.' + received(signal));
     }
 }
 
@@ -158,14 +158,14 @@ class ReplHistory {
 
     constructor(context: any, options: any) {
         if (options.history !== undefined && !Array.isArray(options.history)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "history" argument must be an instance of Array.' + received(options.history));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "history" argument must be an instance of Array.' + received(options.history));
         }
         if (options.size !== undefined) {
             if (typeof options.size !== 'number') {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "size" argument must be of type number.' + received(options.size));
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "size" argument must be of type number.' + received(options.size));
             }
             if (options.size < 0 || Number.isNaN(options.size)) {
-                throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "size" is out of range. It must be >= 0. Received ' + inspect(options.size));
+                throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "size" is out of range. It must be >= 0. Received ' + inspect(options.size));
             }
         }
         this.#context = context;
@@ -364,7 +364,7 @@ export class Interface extends EventEmitter {
 
             if (input.tabSize !== undefined) {
                 if (typeof input.tabSize !== 'number' || !Number.isInteger(input.tabSize) || input.tabSize < 1 || input.tabSize > 4294967295) {
-                    throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "tabSize" is out of range. It must be >= 1 && <= 4294967295. Received ' + inspect(input.tabSize));
+                    throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "tabSize" is out of range. It must be >= 1 && <= 4294967295. Received ' + inspect(input.tabSize));
                 }
                 this.tabSize = input.tabSize;
             }
@@ -375,7 +375,7 @@ export class Interface extends EventEmitter {
                 if (Number.isFinite(input.escapeCodeTimeout)) {
                     this.escapeCodeTimeout = input.escapeCodeTimeout;
                 } else {
-                    throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'input.escapeCodeTimeout' is invalid. Received " + inspect(this.escapeCodeTimeout));
+                    throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'input.escapeCodeTimeout' is invalid. Received " + inspect(this.escapeCodeTimeout));
                 }
             }
 
@@ -394,7 +394,7 @@ export class Interface extends EventEmitter {
         this.historyManager = new ReplHistory(this, input);
 
         if (completer !== undefined && typeof completer !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'completer' is invalid. Received " + inspect(completer));
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The argument 'completer' is invalid. Received " + inspect(completer));
         }
 
         // Backwards compat; check the isTTY prop of the output stream when
@@ -600,7 +600,7 @@ export class Interface extends EventEmitter {
 
     _writeToOutput(stringToWrite: string): void {
         if (typeof stringToWrite !== 'string') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "stringToWrite" argument must be of type string.' + received(stringToWrite));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "stringToWrite" argument must be of type string.' + received(stringToWrite));
         }
 
         if (this.output !== null && this.output !== undefined) {

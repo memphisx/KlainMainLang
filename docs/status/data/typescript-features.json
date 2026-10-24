@@ -124,7 +124,6 @@
             "feature": "`any` / `unknown`",
             "status": "implemented",
             "caveats": [
-              "`Object.assign` through `any` and `Object.defineProperties` copy and define string keys only, not symbol keys → [Type system](TYPE-SYSTEM.md)"
             ]
           },
           {
@@ -138,7 +137,7 @@
             "feature": "Intersection types",
             "status": "implemented",
             "caveats": [
-              "Object-type members only; conflicting non-object fields rejected (TS `never`-field not modeled) → [Type system](TYPE-SYSTEM.md)"
+              "Object-type members, or a branded primitive (one primitive with object members); conflicting non-object fields rejected (TS `never`-field not modeled) → [Type system](TYPE-SYSTEM.md)"
             ]
           },
           {
@@ -324,7 +323,7 @@
             "feature": "Runtime-computed dynamic `import(expr)`",
             "status": "missing",
             "notes": [
-              "Whole-program AOT can't resolve a runtime specifier ([ADR-00022](../adr/ADR-00022.md)); literal-specifier lazy islands *are* shipped → [Modules](MODULES.md)"
+              "Whole-program AOT can't resolve a runtime specifier ([ADR-00022](../adr/00/ADR-00022.md)); literal-specifier lazy islands *are* shipped → [Modules](MODULES.md)"
             ]
           },
           {

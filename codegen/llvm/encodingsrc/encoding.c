@@ -16,10 +16,12 @@ static void set_len(char *s, i64 n) { *(i64 *)(s - 8) = n; }
 
 /* An Error object {kind, message, name} (errorObjType) thrown as-is. */
 static void throw_err(i64 kind, const char *msg, const char *name) {
-    void **o = (void **)malloc(24);
+    /* A whole error object: the thrower fills its frames and stack slots. */
+    char *o = (char *)kml_alloc(KML_HEAP_WORDS, KML_ERR_SIZE);
+    memset(o, 0, KML_ERR_SIZE);
     *(i64 *)o = kind;
-    o[1] = __kml_str_from_cstr(msg);
-    o[2] = __kml_str_from_cstr(name);
+    *(void **)(o + KML_ERR_MESSAGE) = __kml_str_from_cstr(msg);
+    *(void **)(o + KML_ERR_NAME) = __kml_str_from_cstr(name);
     __kml_throw(o);
 }
 
@@ -66,7 +68,7 @@ char *__kml_base64_encode_bytes(const char *str, i64 len) { return b64_encode((c
  * remaining char must be in the alphabet ('=' is not). */
 char *__kml_atob(const char *str) {
     i64 rawlen = (i64)strlen(str), nw = 0;
-    char *norm = (char *)malloc((size_t)rawlen + 5);
+    char *norm = (char *)malloc((size_t)rawlen + 5); /* scratch */
     for (i64 i = 0; i < rawlen; i++) {
         char c = str[i];
         if (c != 9 && c != 10 && c != 12 && c != 13 && c != 32) norm[nw++] = c;
@@ -96,7 +98,7 @@ char *__kml_atob(const char *str) {
             }
             out[o] = 0;
             set_len(out, o);
-            free(norm);
+            free(norm); /* scratch */
             return out;
         }
     }

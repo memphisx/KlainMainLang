@@ -44,11 +44,11 @@ export class Blob {
 
     constructor(blobParts: any = [], options: any = {}) {
         if (typeof blobParts !== 'object' || blobParts === null || typeof blobParts[Symbol.iterator] !== 'function') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Value cannot be converted to sequence.');
         }
         const endings = options === null || options === undefined ? undefined : options.endings;
         if (endings !== undefined && endings !== 'transparent' && endings !== 'native') {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received ${inspect(endings)}`);
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', `The property 'options.endings' is invalid. Received ${inspect(endings)}`);
         }
         this.#parts = [];
         this.#size = 0;

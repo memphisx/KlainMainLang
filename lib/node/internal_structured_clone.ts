@@ -106,6 +106,8 @@ function cloneValue(value: any, memory: Map<any, any>): any {
     return copy;
 }
 
-export function structuredCloneAny(value: any): any {
+// options is evaluated by the caller and otherwise unused: a transferred
+// ArrayBuffer is copied, not detached.
+export function structuredCloneAny(value: any, options?: any): any {
     return cloneValue(value, new Map<any, any>());
 }

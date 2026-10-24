@@ -6,8 +6,8 @@
   "coversRows": "all",
   "coverageScope": "subset",
   "coverage": {
-    "loose": "32/32",
-    "strict": "14/32"
+    "loose": "33/33",
+    "strict": "13/33"
   },
   "lede": "TypeScript's type surface reinterpreted for whole-program AOT compilation, so the divergences are about what a static native target can and can't model. Advanced type-level machinery — mapped/utility/conditional types, generics, intersections, typeof queries — is evaluated at compile time via monomorphization, then erased, and assertions (`as T`, `as const`, `satisfies`) and modifiers (`readonly`) are likewise erased rather than enforcing. The primitives are JS-faithful (`number` is an IEEE-754 double; `bigint` is arbitrary-precision), with the extended integer/float JSDoc types as the escape hatch for real fixed-width integer semantics.",
   "entries": [
@@ -116,14 +116,9 @@
       "name": "any",
       "statusRow": "any",
       "signature": "let x: any",
-      "badge": "caveats",
-      "description": "A runtime-tagged value supporting declare/assign/reassign/print/typeof/=== plus bare any params and returns on every function shape. Objects and arrays box by reference — === is reference identity, typeof is \"object\".",
+      "badge": "exact",
+      "description": "A runtime-tagged value: assignable, printable, comparable and usable in arithmetic, in any position (params, returns, `any[]`, object fields). Objects and arrays box by reference — === is reference identity, typeof is \"object\".",
       "snippet": "let x: any = 5\nx = \"hello\"\nx = true\nconsole.log(typeof x)   // boolean",
-      "differences": [
-        "Arithmetic on an `any` is a clean compile error",
-        "Nested positions `any[]`/`{ x: any }` are clean compile errors",
-        "A boxed array keeps only its data pointer — length/elements aren't recoverable, so it stringifies to the `[object Array]` tag, not its contents"
-      ],
       "seeAlso": [
         "types.unknown",
         "types.union"
@@ -170,7 +165,7 @@
       "description": "Opaque unique values — Symbol()/Symbol(\"desc\") (no new, Symbol is not a constructor), ===/!==, typeof, .description, .toString(), and the Symbol.for/Symbol.keyFor registry (keyFor gives undefined for a symbol not in it). Uniqueness comes from the value's own heap-pointer identity, so two Symbol() calls with the same description are never equal.",
       "snippet": "const a = Symbol(\"id\")\nconst b = Symbol(\"id\")\nconsole.log(a === b)                  // false\nconsole.log(Symbol.keyFor(Symbol.for(\"app\")))  // app",
       "differences": [
-        "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` (own properties, class and object-literal members); `toStringTag`, `hasInstance`, `species` and the rest are values only."
+        "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` (own properties, class and object-literal members), and `Symbol.species` as a class's static getter (extending Array, a typed array or Promise); `toStringTag`, `hasInstance` and the rest are values only."
       ],
       "seeAlso": [],
       "spec": {
@@ -322,7 +317,7 @@
       "description": "An object-type intersection collapses at resolveType into one merged ObjectType — member fields concatenated, compatible duplicates deduped — with no runtime tag, unlike a union. & binds tighter than |. Works as a named interface, inline {}, or type alias member, and in variable/param/return/field/array-element positions.",
       "snippet": "interface HasName { name: string }\ninterface HasAge { age: number }\nconst p: HasName & HasAge = { name: \"Kyriakos\", age: 34 }",
       "differences": [
-        "Object-type members only — a non-object member (scalar/function/array/tuple/union, all `never` in TS), or a generic-with-type-arguments member, is a clean compile error",
+        "Object-type members, or one primitive with object members (a branded primitive, `string & { __brand: \"id\" }`); any other non-object member (a function, array, tuple or union, or two primitives — `never` in TS), or a generic-with-type-arguments member, is a compile error",
         "A field declared with conflicting **non-object** types across members is rejected under `-compat=strict` (default); the `-compat=js` TS-faithful `never`-field is not yet implemented, so a conflict is currently rejected in both modes (same-named **object** fields are recursively intersected instead — `{ x: A } & { x: B }` ⇒ `x: A & B`)",
         "Inherits object types' missing-field leniency: a partial object literal for an `A & B`-typed target is not rejected (a pre-existing object-literal behavior, not intersection-specific)"
       ],
@@ -364,9 +359,8 @@
       "description": "Partial/Required/Readonly/NonNullable/Pick/Omit/Record, the general mapped form { [K in keyof T]: V }, keyof, indexed access T[K], and string-literal types — all evaluated at compile time to concrete object types via the monomorphization seam, no runtime representation.",
       "snippet": "type Clone = { [K in keyof User]: User[K] }",
       "differences": [
-        "`Partial`/`Required`/`Readonly` are structural no-ops — the object model already zero-fills omitted fields and does no mutation checking; the visibly-effective utilities are `Pick`/`Omit`/`Record`",
         "Mapped value body handles `T[K]` (homomorphic), a bare `K`, a concrete type (uniform), or `T[K]` wrapped one level in `Array`/`Promise`/`Set`; a `T[K]` nested deeper isn't substituted",
-        "No key remapping (`as`) or modifier-removal (`-?`/`-readonly`); `?`/`readonly` are accepted but near-no-ops",
+        "No key remapping (`as`) — a parse error",
         "String-literal types resolve to `string` — the literal value is not narrowed/enforced",
         "An unrecognized `Name<Args>` (or a malformed `Pick`/`Omit`) is not yet a clean rejection"
       ],
@@ -542,6 +536,27 @@
       "seeAlso": [],
       "spec": {
         "mdn": "https://www.typescriptlang.org/docs/handbook/2/everyday-types.html"
+      }
+    },
+    {
+      "id": "types.unused",
+      "name": "Unused-declaration checks",
+      "statusRow": "Unused-declaration checks (`-no-unused-locals`, `-no-unused-parameters`)",
+      "signature": "klainmain -no-unused-locals -no-unused-parameters main.ts",
+      "badge": "caveats",
+      "description": "TypeScript's noUnusedLocals and noUnusedParameters as two opt-in flags of the strict lane: a local, import, private member, parameter or type parameter that nothing reads is an error with tsc's code (TS6133, TS6196, TS6138, and TS6192/6198/6199/6205 for a statement whose every name is unused). A name starting with _ is exempt where tsc exempts it.",
+      "snippet": "export function f(x: number, _unused: number): number {\n  let tmp = 1;\n  return x;\n}\n// klainmain -no-unused-locals: type error: main.ts: 2:7: 'tmp' is declared but its value is never read",
+      "differences": [
+        "A namespace's members are not checked",
+        "Type parameters of signatures written inside a type are not checked",
+        "A private member read through a computed key of a non-literal type counts every private member as read",
+        "An unused import is reported at its import statement, not at the name"
+      ],
+      "seeAlso": [
+        "types.typeerrors"
+      ],
+      "spec": {
+        "mdn": "https://www.typescriptlang.org/tsconfig/#noUnusedLocals"
       }
     }
   ]

@@ -125,3 +125,47 @@ console.log(r3.bodyUsed)
 r3.json().catch((e: Error) => console.log("json", e.name))
 `)
 }
+
+// A stream body of chunks other than Uint8Array: each chunk is checked as
+// it is read, a non-Uint8Array one rejecting the read (ADR-01717).
+func TestE2EResponseStreamOfAnyChunks(t *testing.T) {
+	assertSameAsNode(t, `const ok = new ReadableStream<any>({
+  start(c) { c.enqueue(new TextEncoder().encode("hi ")); c.enqueue(new Uint8Array([33])); c.close(); },
+});
+const r = new Response(ok);
+console.log(r.body === ok);
+r.text().then((t) => console.log(t, r.bodyUsed));
+const bad = new ReadableStream<string>({ start(c) { c.enqueue("str"); c.close(); } });
+new Response(bad).text().then((t) => console.log("ok", t), (e: Error) => console.log(e.name, e.message));
+`)
+}
+
+func TestE2EJSResponseStreamOfAnyChunks(t *testing.T) {
+	assertJSFileSameAsNode(t, `const s = new ReadableStream({
+  start(c) { c.enqueue(new TextEncoder().encode("hi ")); c.enqueue(new TextEncoder().encode("there")); c.close(); }
+});
+new Response(s).arrayBuffer().then((b) => console.log(b.byteLength));
+const bad = new ReadableStream({ start(c) { c.enqueue(7); c.close(); } });
+new Response(bad).json().then((v) => console.log(v), (e) => console.log(e.name, e.message));
+`)
+}
+
+// Response.json() is a promise wherever it is read: awaited in an async
+// arrow, kept and subscribed to from a timer, or read un-awaited.
+func TestE2EResponseJSONPromiseUses(t *testing.T) {
+	assertSameAsNode(t, `
+const g = async () => { const r = new Response('{"n":1}'); const v: any = await r.json(); console.log("arrow", v.n); };
+g();
+(async () => { const r = new Response('{"n":2}'); const v = await r.json(); console.log("iife", v.n); })();
+const p = new Response('{"n":3}').json();
+setTimeout(() => { p.then((v: any) => console.log("late", v.n)); }, 10);
+const q: Promise<any> = new Response('{"n":4}').json();
+console.log(q instanceof Promise);
+q.then((v: any) => console.log("kept", v.n));
+`)
+	assertSameAsNodeCompatJS(t, `
+const d = new Response('{"method":"GET"}').json();
+console.log(typeof d, d instanceof Promise, d.method);
+d.then((v) => console.log(v.method));
+`)
+}

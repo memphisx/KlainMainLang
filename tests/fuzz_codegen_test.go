@@ -258,7 +258,7 @@ func genPromiseCombinatorCall(rng *rand.Rand, varName string) (decl string, want
 		fmt.Fprintf(&b, "const %s = await Promise.race(%s);\nconsole.log(%s);\n", resultVar, varName, resultVar)
 		wantLines = append(wantLines, fmt.Sprintf("%d", transform(vals[0])))
 	case 2: // .allSettled: every entry always "fulfilled", in order
-		fmt.Fprintf(&b, "const %s = await Promise.allSettled(%s);\nfor (const s of %s) { console.log(s.status); console.log(s.value); }\n",
+		fmt.Fprintf(&b, "const %s = await Promise.allSettled(%s);\nfor (const s of %s) { console.log(s.status); if (s.status === \"fulfilled\") console.log(s.value); }\n",
 			resultVar, varName, resultVar)
 		for _, v := range vals {
 			wantLines = append(wantLines, "fulfilled", fmt.Sprintf("%d", transform(v)))
@@ -376,9 +376,9 @@ func FuzzFetchInitOracle(f *testing.F) {
 			if rng.Intn(2) == 0 {
 				xCustom = fuzzRandString(rng, 1+rng.Intn(10))
 				auth = fuzzRandString(rng, 1+rng.Intn(10))
-				fmt.Fprintf(&src, "const h%d: Map<string, string> = new Map<string, string>();\n", i)
-				fmt.Fprintf(&src, "h%d.set(\"X-Custom-Header\", %q);\n", i, xCustom)
-				fmt.Fprintf(&src, "h%d.set(\"Authorization\", %q);\n", i, auth)
+				fmt.Fprintf(&src, "const h%d: Record<string, string> = {};\n", i)
+				fmt.Fprintf(&src, "h%d[\"X-Custom-Header\"] = %q;\n", i, xCustom)
+				fmt.Fprintf(&src, "h%d[\"Authorization\"] = %q;\n", i, auth)
 				initFields = append(initFields, fmt.Sprintf("headers: h%d", i))
 			}
 			body := ""
@@ -401,7 +401,7 @@ func FuzzFetchInitOracle(f *testing.F) {
 				call = fmt.Sprintf("await fetch(%q, { %s })", srv.URL+"/echo", strings.Join(initFields, ", "))
 			}
 			fmt.Fprintf(&src, "const r%d: Response = %s;\n", i, call)
-			fmt.Fprintf(&src, "const d%d: EchoResp = r%d.json();\n", i, i)
+			fmt.Fprintf(&src, "const d%d: EchoResp = await r%d.json();\n", i, i)
 			fmt.Fprintf(&src, "console.log(d%d.method);\nconsole.log(d%d.body);\nconsole.log(d%d.x_custom);\nconsole.log(d%d.authorization);\n", i, i, i, i)
 
 			wantLines = append(wantLines, method, body, xCustom, auth)

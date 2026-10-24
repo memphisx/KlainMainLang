@@ -153,3 +153,31 @@ const a: N = { next: b, val: 1 };
 console.log(a.next!.val);
 `, "2")
 }
+
+// A self-referential shape, as an alias or an interface: nested literals,
+// drilling, JSON.stringify and console.log follow it to any depth, and a
+// mistyped nested member is rejected as tsc rejects it.
+func TestE2ERecursiveShapes(t *testing.T) {
+	assertSameAsNode(t, `
+type Cons = { tail: Cons | null; head: number };
+const c: Cons = { tail: { tail: { tail: null, head: 3 }, head: 2 }, head: 1 };
+console.log(JSON.stringify(c), c.tail!.tail!.head);
+console.log(JSON.stringify(c, null, 2));
+console.log(c);
+function sum(x: Cons | null): number { return x === null ? 0 : x.head + sum(x.tail); }
+console.log(sum(c));
+type Tree = { kids: Tree[]; v: string; up?: Tree };
+const tr: Tree = { kids: [{ kids: [{ kids: [], v: "c" }], v: "b" }], v: "a" };
+console.log(tr.kids[0].kids[0].v, JSON.stringify(tr), tr.up === undefined);
+const d: { [k: string]: unknown } = c;
+console.log(d !== null);
+interface N { next: N | null; v: number; kids: N[] }
+const n: N = { next: { next: null, v: 2, kids: [] }, v: 1, kids: [{ next: null, v: 3, kids: [] }] };
+console.log(JSON.stringify(n));
+console.log(n);
+`)
+	mustCompileError(t, `
+type Cons = { tail: Cons | null; head: number };
+const bad: Cons = { tail: { tail: null, head: "x" }, head: 1 };
+`, "type 'string' is not assignable to type 'number'")
+}

@@ -27,7 +27,7 @@ OPTMEM ?=
 MODEFLAGS := $(if $(MM),-mm=$(MM)) $(if $(OPTMEM),-optimize-memory)
 MODEFLAGS_NOMM := $(if $(OPTMEM),-optimize-memory)
 
-.PHONY: all build dist install test test-unit test-par test-shard examples drift apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt shadow-report mode-lanes status status-check status-roundtrip reference-check reference-sync conformance-check conformance-sync coverage-check coverage-sync help
+.PHONY: all build dist install test test-unit test-par test-lane-auto test-lane-optmem test-lane-gc test-lane-san test-shard examples drift apps compile compile-o run ir clean fmt vet lint fuzz fuzz-codegen fuzz-all conformance-fetch conformance conformance-node conformance-ts conformance-wpt shadow-report mode-lanes status status-check status-roundtrip reference-check reference-sync conformance-check conformance-sync coverage-check coverage-sync help
 
 ## all: build the compiler
 all: build
@@ -74,6 +74,25 @@ test-unit:
 SHARDS ?= 4
 test-par: build test-unit
 	$(GO) run ./tools/testshard -shards $(SHARDS) -timeout $(TEST_TIMEOUT)
+
+## test-lane-auto: the tests/ suite again under -mm=auto, its assertions unchanged (TDD-00230 P0.3)
+test-lane-auto: build
+	KLAIN_TEST_MM=auto $(GO) run ./tools/testshard -shards $(SHARDS) -timeout $(TEST_TIMEOUT)
+## test-lane-optmem: the tests/ suite again under -mm=auto -optimize-memory
+test-lane-optmem: build
+	KLAIN_TEST_MM=auto KLAIN_TEST_OPTMEM=1 $(GO) run ./tools/testshard -shards $(SHARDS) -timeout $(TEST_TIMEOUT)
+## test-lane-gc: the tests/ suite again under -mm=gc (needs libgc)
+test-lane-gc: build
+	KLAIN_TEST_MM=gc $(GO) run ./tools/testshard -shards $(SHARDS) -timeout $(TEST_TIMEOUT)
+## test-lane-san: the tests/ suite again with ASan and UBSan armed (Linux)
+test-lane-san: build
+	KLAIN_TEST_SAN=1 $(GO) run ./tools/testshard -shards $(SHARDS) -timeout $(TEST_TIMEOUT)
+
+## test-h2o: the klain:http tests again on the h2o server backend
+## (-http-backend=h2o, TDD-00255; needs libh2o-dev)
+KLAINHTTP_TESTS = ^TestE2E(HTTPListen|HTTPClose|HTTPCluster|HTTPChunked|HTTPGCParked|HTTPRequest|HTTPUnion|KlainHTTP|Req|Signal|StreamsRequest|StreamsGzip|StreamsHTTP|ClusterHTTP|GoroutineHTTP|WindowsCluster)
+test-h2o: build
+	KLAIN_TEST_HTTP_BACKEND=h2o $(GO) test ./tests -run '$(KLAINHTTP_TESTS)' -count=1 -timeout $(TEST_TIMEOUT)
 
 ## test-shard: run one shard (SHARD, 0-based) of the tests/ suite dealt into
 ## SHARDS — one CI matrix job; the same split test-par runs all of at once
@@ -200,21 +219,21 @@ fuzz-all: fuzz fuzz-codegen
 conformance-fetch:
 	./tools/conformance/fetch.sh
 
-## conformance: regenerate the Test262 reports (both compat lanes → docs/testing/<platform>/{strict,js}/) by running the full corpus through this compiler's own pipeline (fetches first if needed; self-contained — go run, not the klainmain binary)
+## conformance: regenerate the Test262 reports (both compat lanes → docs/testing/<platform>/{strict,js}/) by running the full corpus through this compiler's own pipeline (fetches first if needed; self-contained — go run, not the klainmain binary). PASSLIST=<path> on any conformance target also writes each lane's passing files to <path>.strict / <path>.js, for diffing against an earlier run
 conformance: conformance-fetch
-	$(GO) run ./tools/conformance -compat=both
+	$(GO) run ./tools/conformance -compat=both $(if $(PASSLIST),-passlist $(PASSLIST))
 
 ## conformance-node: regenerate the Node-core reports (both compat lanes → docs/testing/<platform>/{strict|js}/CONFORMANCE-RESULTS-NODE.md) — Node pure-module behavioral tests (TDD-00121 Track B, TDD-00022)
 conformance-node: conformance-fetch
-	$(GO) run ./tools/conformance -suite=node -compat=both
+	$(GO) run ./tools/conformance -suite=node -compat=both $(if $(PASSLIST),-passlist $(PASSLIST))
 
 ## conformance-ts: regenerate the TypeScript-oracle reports (both compat lanes → docs/testing/<platform>/{strict|js}/CONFORMANCE-RESULTS-TS.md) — accept/reject oracle (TDD-00121 Track C)
 conformance-ts: conformance-fetch
-	$(GO) run ./tools/conformance -suite=ts -compat=both
+	$(GO) run ./tools/conformance -suite=ts -compat=both $(if $(PASSLIST),-passlist $(PASSLIST))
 
 ## conformance-wpt: regenerate the Web Platform Tests reports (both compat lanes → docs/testing/<platform>/{strict|js}/CONFORMANCE-RESULTS-WPT.md) — the FULL headless multi-global corpus (every .any.js/.window.js/.worker.js repo-wide, no allowlist) through a testharness.js shim (TDD-00082 Track 2, TDD-00204)
 conformance-wpt: conformance-fetch
-	$(GO) run ./tools/conformance -suite=wpt -compat=both
+	$(GO) run ./tools/conformance -suite=wpt -compat=both $(if $(PASSLIST),-passlist $(PASSLIST))
 
 ## mode-lanes: build and run every example in the default memory mode and under -mm=auto, -mm=auto -optimize-memory and -mm=gc, and fail when an output differs (.modelanes-out/MODE-LANES.md; TDD-00230 P0.3)
 mode-lanes: build
@@ -226,7 +245,7 @@ mode-lanes: build
 		curl -s -o /dev/null http://127.0.0.1:$(HTTPBIN_LITE_PORT)/get && break; \
 		sleep 0.1; \
 	done; \
-	$(GO) run ./tools/modelanes -bin ./$(BINARY)
+	$(GO) run ./tools/modelanes -bin ./$(BINARY) -j $(EXAMPLES_JOBS) -timeout $(EXAMPLE_TIMEOUT)s
 
 ## shadow-report: compile the corpus comparing every old codegen decider with the new front end, and rank the disagreements into .shadow-out/SHADOW-REPORT.md (TDD-00230 P0.2)
 shadow-report: build

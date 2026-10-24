@@ -82,11 +82,11 @@ function dbError(db: number): Error {
 }
 
 function invalidState(message: string): Error {
-    return new NodeError('ERR_INVALID_STATE', message);
+    return NodeError('ERR_INVALID_STATE', message);
 }
 
 function argType(name: string, what: string): Error {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + what + '.');
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + what + '.');
 }
 
 function isPlainObject(v: any): boolean {
@@ -108,7 +108,7 @@ function intValue(decimal: string, asBigInt: boolean): any {
     if (asBigInt) return BigInt(decimal);
     const n = Number(decimal);
     if (!Number.isSafeInteger(n)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'Value is too large to be represented as a JavaScript number: ' + decimal);
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'Value is too large to be represented as a JavaScript number: ' + decimal);
     }
     return n;
 }
@@ -163,13 +163,13 @@ function setResult(result: any): void {
     } else if (typeof result === 'bigint') {
         const b = result as bigint;
         if (b < INT64_MIN || b > INT64_MAX) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'BigInt value is too large for SQLite');
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'BigInt value is too large for SQLite');
         }
         __kml_native.sqliteResultInt(String(b));
     } else if (result instanceof Promise) {
-        throw new NodeError('ERR_SQLITE_ERROR', 'Asynchronous user-defined functions are not supported');
+        throw NodeError('ERR_SQLITE_ERROR', 'Asynchronous user-defined functions are not supported');
     } else {
-        throw new NodeError('ERR_SQLITE_ERROR', 'Returned JavaScript value cannot be converted to a SQLite value');
+        throw NodeError('ERR_SQLITE_ERROR', 'Returned JavaScript value cannot be converted to a SQLite value');
     }
 }
 
@@ -181,12 +181,12 @@ function bindValue(stmt: number, i: number, value: any): number {
     if (typeof value === 'bigint') {
         const b = value as bigint;
         if (b < INT64_MIN || b > INT64_MAX) {
-            throw new NodeError('ERR_INVALID_ARG_VALUE', 'BigInt value is too large to bind.');
+            throw NodeError('ERR_INVALID_ARG_VALUE', 'BigInt value is too large to bind.');
         }
         return __kml_native.sqliteBindInt(stmt, i, String(b));
     }
     if (ArrayBuffer.isView(value)) return __kml_native.sqliteBindBlob(stmt, i, viewBytes(value));
-    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'Provided value cannot be bound to SQLite parameter ' + i + '.');
+    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'Provided value cannot be bound to SQLite parameter ' + i + '.');
 }
 
 // ---- DatabaseSync ----
@@ -474,7 +474,7 @@ export class DatabaseSync {
                 const r = cb(action, a[0], a[1], a[2], a[3]);
                 if (typeof r !== 'number' || (r !== 0 && r !== 1 && r !== 2)) {
                     this._kmlHasPending = true;
-                    this._kmlPending = new NodeTypeError('ERR_INVALID_RETURN_VALUE', 'Authorizer callback must return an integer authorization code');
+                    this._kmlPending = NodeTypeError('ERR_INVALID_RETURN_VALUE', 'Authorizer callback must return an integer authorization code');
                     __kml_native.sqliteCallbackReturn(1);
                     return;
                 }

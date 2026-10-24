@@ -17,7 +17,7 @@
 #include <math.h>
 
 static mp_int *bi_new(void) {
-	mp_int *r = (mp_int *)malloc(sizeof(mp_int));
+	mp_int *r = (mp_int *)kml_alloc(KML_HEAP_WORDS, sizeof(mp_int));
 	mp_init(r);
 	return r;
 }
@@ -70,7 +70,7 @@ unsigned long long __kml_bigint_to_u64(void *a) {
 char *__kml_bigint_to_str(void *a, int radix) {
 	int size = 0;
 	mp_radix_size((const mp_int *)a, radix, &size);
-	char *s = (char *)malloc((size_t)size + 1);
+	char *s = (char *)malloc((size_t)size + 1); /* scratch */
 	mp_to_radix((const mp_int *)a, s, (size_t)size + 1, NULL, radix);
 	// libtommath emits A–F… uppercase; JS's toString(radix) is lowercase.
 	for (char *p = s; *p; p++) {
@@ -257,17 +257,17 @@ void *__kml_bigint_parse(const char *s) {
 		start = a + 1;
 		if (start == b) return NULL;
 	}
-	char *buf = (char *)malloc(b - start + 2);
+	char *buf = (char *)malloc(b - start + 2); /* scratch */
 	size_t k = 0;
 	if (neg) buf[k++] = '-';
 	for (size_t i = start; i < b; i++) {
 		unsigned char c = (unsigned char)s[i];
 		int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : 99;
-		if (d >= radix) { free(buf); return NULL; }
+		if (d >= radix) { free(buf); return NULL; } /* scratch */
 		buf[k++] = (char)c;
 	}
 	buf[k] = 0;
 	void *r = __kml_bigint_from_str(buf, (long long)k, radix);
-	free(buf);
+	free(buf); /* scratch */
 	return r;
 }

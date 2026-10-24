@@ -2,7 +2,7 @@
  * adoption takes; TDD-00240). kml_layout.h is prepended by the compiler. */
 typedef long long i64;
 
-extern void *malloc(__SIZE_TYPE__);
+extern void *malloc(__SIZE_TYPE__); /* scratch */
 extern void __kml_microtask_enqueue(void *);
 extern void __kml_promise_settle(void *, i64);
 
@@ -24,8 +24,8 @@ void __kml_promise_defer_step(void *envp) {
 
 /* Settle q with state after hops more microtasks. */
 void __kml_promise_defer_settle(void *q, i64 state, i64 hops) {
-    defer_env *env = malloc(sizeof *env);
-    void **clo = malloc(2 * sizeof(void *));
+    defer_env *env = kml_alloc(KML_HEAP_WORDS, sizeof *env);
+    void **clo = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     env->q = q;
     env->state = state;
     env->hops = hops;

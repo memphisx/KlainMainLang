@@ -13,7 +13,7 @@ function received(value: any): string {
 }
 
 function invalidArgType(name: string, expected: string, value: any): NodeTypeError {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '. ' + received(value));
 }
 
 export function hrtime(time?: [number, number]): [number, number];
@@ -24,7 +24,7 @@ export function hrtime(time?: any): [number, number] {
     if (time !== undefined) {
         if (!Array.isArray(time)) throw invalidArgType('time', 'an instance of Array', time);
         if (time.length !== 2) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "time" is out of range. It must be 2. Received ' + String(time.length));
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "time" is out of range. It must be 2. Received ' + String(time.length));
         }
         const dsec = sec - (time[0] as number);
         const dnsec = nsec - (time[1] as number);

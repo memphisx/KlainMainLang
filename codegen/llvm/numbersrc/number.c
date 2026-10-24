@@ -12,7 +12,7 @@
 extern void __kml_throw_range_error(const char *msg) __attribute__((noreturn));
 
 static char *str_new(const char *p, long long n) {
-    char *base = (char *)malloc((size_t)n + 9);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
     if (n > 0) memcpy(base + 8, p, (size_t)n);
     base[n + 8] = 0;

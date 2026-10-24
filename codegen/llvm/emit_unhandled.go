@@ -111,6 +111,7 @@ func (e *Emitter) emitUnhandledReport() {
 	e.emitLabel(goOnL)
 	e.emitTerminator("ret void")
 	e.emitLabel(printL)
+	e.stubWorkerUncaught() // this report may be emitted after the finalize step that stubs it
 	e.emitInstr(fmt.Sprintf("call void @__kml_worker_uncaught(i8 %s, i64 %s)", tag, pay))
 	e.emitInstr(fmt.Sprintf("call void @__kml_print_uncaught(i8 %s, i64 %s)", tag, pay))
 	e.emitInstr("call void @__kml_run_exit_handlers(i64 1)")
@@ -118,7 +119,7 @@ func (e *Emitter) emitUnhandledReport() {
 	e.emitTerminator("unreachable")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine void @__kml_unhandled_report(ptr %%p) {\nentry:\n%s}\n", body))
+	e.writeFunc("void @__kml_unhandled_report(ptr %p)", body)
 }
 
 // emitMarkPromiseHandled marks promise p consumed (a reaction, an await, a

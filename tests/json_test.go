@@ -138,7 +138,20 @@ try {
   console.log((e as Error).name)
   console.log((e as Error).message)
 }
-`, "SyntaxError\nUnexpected token in JSON at position 1")
+`, "SyntaxError\nExpected property name or '}' in JSON at position 1 (line 1 column 2)")
+}
+
+// A malformed document's SyntaxError carries V8's message: the specific
+// reason with its position, line and column, or the unexpected token with
+// up to ten characters of context.
+func TestE2EJSONParseV8Messages(t *testing.T) {
+	assertSameAsNode(t, `export {}
+for (const s of ['abc', '{"a":1,}', '[1,2', '', '{a:1}', '"x', '[1 2]', 'tru', '{"a" 1}', '01', '1.', '-', '"\\q"', '[1,]',
+  '{"a":1} x', 'nul', '"a\nb"', '{,}', '   ', '[\n1,\n2\nx]', 'undefined', '"\\u12x4"', '1e+', 'trux',
+  '[1,2,3,4,5,6,7,8,9,10,11,x,12,13,14,15]', '[1,2,3,4,5,6,7,8,9,10,x]', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', '["é", x]']) {
+  try { JSON.parse(s) } catch (e: any) { console.log(JSON.stringify(s), e.name, e.message) }
+}
+`)
 }
 
 func TestE2EJSONParseStrictRejections(t *testing.T) {
@@ -208,25 +221,23 @@ console.log(p.x, p.y)
 `, "3 1 3\n5 9")
 }
 
-func TestE2EJSONParseDeepNestingRejected(t *testing.T) {
-	// A pathologically deep document is rejected by the runtime depth guard as a
-	// SyntaxError rather than overflowing the parser's stack (TDD-00077).
-	var b strings.Builder
-	for i := 0; i < 5000; i++ {
-		b.WriteByte('[')
-	}
-	for i := 0; i < 5000; i++ {
-		b.WriteByte(']')
-	}
-	assertOutput(t, `
-interface C { x: number }
-try {
-  const c: C = JSON.parse('`+b.String()+`')
-  console.log("NOT REACHED")
-} catch (e) {
-  console.log((e as Error).name)
-}
-`, "SyntaxError")
+func TestE2EJSONParseDeepNesting(t *testing.T) {
+	// Nesting is bounded by memory alone, as in V8: a 100000-deep document
+	// parses, converts to a dynamic value and frees without deep C
+	// recursion; an unterminated one is the end of input.
+	assertSameAsNode(t, `export {}
+const d = 100000
+const v: any = JSON.parse("[".repeat(d) + "]".repeat(d))
+let x = v, n = 0
+while (x.length) { x = x[0]; n++ }
+console.log(n)
+const o: any = JSON.parse('{"a":'.repeat(d) + '1' + '}'.repeat(d))
+let y = o, m = 0
+while (typeof y === "object") { y = y.a; m++ }
+console.log(m, y)
+try { JSON.parse("[".repeat(d)) } catch (e: any) { console.log(e.name, e.message) }
+console.log(JSON.parse('{"a":[1,{"b":[true,null,"s"]}],"c":{}}'))
+`)
 }
 
 // --- JSON.parse Track P (P3): type-directed projection off the tree — nested
@@ -361,4 +372,19 @@ func TestE2EJSONStringifyPrettyNestedAny(t *testing.T) {
 const x: any = { k: [1] };
 console.log(JSON.stringify({ a: x }, null, 2))
 `, "{\n  \"a\": {\n    \"k\": [\n      1\n    ]\n  }\n}")
+}
+
+// JSON.stringify of a number or boolean slot holding undefined is the
+// value undefined; one holding null is "null".
+func TestE2EJSONStringifyUndefinedScalar(t *testing.T) {
+	assertSameAsNode(t, `
+const g = (x: number | undefined) => x;
+console.log(JSON.stringify(g(undefined)), JSON.stringify(g(2)));
+const o: { j?: number } = {};
+console.log(JSON.stringify(o.j), typeof JSON.stringify(o.j));
+const n = (x: number | null) => x;
+console.log(JSON.stringify(n(null)), JSON.stringify(n(3.5)));
+const b = (x: boolean | undefined) => x;
+console.log(JSON.stringify(b(undefined)), JSON.stringify(b(true)));
+`)
 }

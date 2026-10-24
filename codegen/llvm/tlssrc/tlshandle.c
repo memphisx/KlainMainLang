@@ -97,6 +97,11 @@ static int64_t tls_sess_read(void *p, char *buf, int64_t n) {
 	if (e == SSL_ERROR_WANT_WRITE) return -EAGAIN;
 	if (e == SSL_ERROR_ZERO_RETURN) return 0;
 	if (e == SSL_ERROR_SYSCALL) return 0; // the socket ended without close_notify
+#ifdef SSL_R_UNEXPECTED_EOF_WHILE_READING
+	// OpenSSL 3 reports that same ending as an SSL error. Node's TLSWrap hands
+	// the stream's EOF on as an end, so a later write meets the kernel's EPIPE.
+	if (e == SSL_ERROR_SSL && ERR_GET_REASON(ERR_peek_last_error()) == SSL_R_UNEXPECTED_EOF_WHILE_READING) return 0;
+#endif
 	return -ECONNRESET;
 }
 
@@ -139,8 +144,8 @@ static void tls_sess_shutdown(void *p) { SSL_shutdown(((kml_tls_sess *)p)->ssl);
 static void tls_sess_free(void *p) {
 	kml_tls_sess *s = (kml_tls_sess *)p;
 	SSL_free(s->ssl);
-	free(s->servername);
-	free(s);
+	free(s->servername); /* scratch */
+	free(s); /* scratch */
 }
 
 static const kml_tls_ops tls_sess_ops = {
@@ -179,7 +184,7 @@ static int tls_alpn_select_list(SSL *ssl, const unsigned char **out, unsigned ch
 static unsigned char *tls_alpn_wire(const char *list) {
 	if (!list || !*list) return NULL;
 	size_t n = strlen(list);
-	unsigned char *w = (unsigned char *)calloc(1, n + 3);
+	unsigned char *w = (unsigned char *)calloc(1, n + 3); /* scratch */
 	size_t o = 1;
 	const char *p = list;
 	while (*p) {
@@ -201,7 +206,7 @@ static unsigned char *tls_alpn_wire(const char *list) {
 // the ALPN protocols. Returns its id, or -1 (the reason via tlsLastError).
 double __kml_native_tls_context(_Bool server, const char *cert, const char *key, const char *ca, const char *alpn) {
 	SSL_CTX *ctx = SSL_CTX_new(server ? TLS_server_method() : TLS_client_method());
-	free(tls_last_err);
+	free(tls_last_err); /* scratch */
 	tls_last_err = NULL;
 	if (!ctx) {
 		tls_last_err = dup_err("SSL_CTX_new failed");
@@ -257,7 +262,7 @@ double __kml_native_tls_context(_Bool server, const char *cert, const char *key,
 	}
 	if (tls_ctx_n == tls_ctx_cap) {
 		tls_ctx_cap = tls_ctx_cap ? tls_ctx_cap * 2 : 8;
-		tls_ctx_tab = (SSL_CTX **)realloc(tls_ctx_tab, (size_t)tls_ctx_cap * sizeof *tls_ctx_tab);
+		tls_ctx_tab = (SSL_CTX **)realloc(tls_ctx_tab, (size_t)tls_ctx_cap * sizeof *tls_ctx_tab); /* scratch */
 	}
 	tls_ctx_tab[tls_ctx_n] = ctx;
 	return tls_ctx_n++;
@@ -273,7 +278,7 @@ double __kml_native_tls_start(double handle, double ctxId, _Bool server, const c
 	int fd = __kml_tcp_fd(handle);
 	if (ci < 0 || ci >= tls_ctx_n || fd < 0) return -EBADF;
 	__kml_tcp_set_tls_ops(&tls_sess_ops);
-	kml_tls_sess *s = (kml_tls_sess *)calloc(1, sizeof *s);
+	kml_tls_sess *s = (kml_tls_sess *)calloc(1, sizeof *s); /* scratch */
 	s->ssl = SSL_new(tls_ctx_tab[ci]);
 	s->server = server;
 	s->in = BIO_new(BIO_s_mem());

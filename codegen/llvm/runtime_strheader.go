@@ -7,7 +7,7 @@
 // embedded \0 via `ptr-8`.
 //
 //	__kml_str_alloc(n) -> ptr   malloc(n+9), store n at [0], return base+8
-//	__kml_str_len(ptr) -> i64   load the header at ptr-8
+//	__kml_str_len(ptr) -> i64   the byte length, from the header at ptr-8
 //	__kml_str_free(ptr)         free the base (ptr-8) — never free the value ptr
 //
 // The routines live in stringsrc/strheader.c (TDD-00240). __kml_argv_node_shape
@@ -49,8 +49,16 @@ declare i64 @__kml_str_lastindexof_from(ptr, ptr, i64)
 declare ptr @__kml_str_from_cstr(ptr)
 declare ptr @__kml_str_join(ptr, i64, ptr)
 declare void @__kml_str_finalize(ptr)
+declare void @__kml_write_str(i64, ptr)
 declare ptr @__kml_argv_headerize(i64, ptr)
-declare ptr @__kml_argv_node_shape(i64, ptr)`)
+declare ptr @__kml_argv_node_shape(i64, ptr)
+declare i64 @__kml_str_u16len_slow(ptr)
+declare ptr @__kml_str_index(ptr, i64)
+declare void @__kml_wtf8_join(ptr, i64)
+declare void @__kml_wtf8_to_utf8(ptr, i64)
+declare ptr @__kml_str_index_keys(ptr, ptr)
+declare i64 @__kml_u16_index(ptr, i64)
+declare ptr @__kml_u16_sub(ptr, i64, i64)`)
 	// The leaf primitives stay IR so every call site inlines them: a call
 	// into a C object cannot be inlined without LTO.
 	e.emitGlobal(`define weak_odr ptr @__kml_str_alloc(i64 %n) {
@@ -64,7 +72,8 @@ entry:
 define weak_odr i64 @__kml_str_len(ptr %s) {
 entry:
   %hp = getelementptr i8, ptr %s, i64 -8
-  %n = load i64, ptr %hp, align 8
+  %h = load i64, ptr %hp, align 8
+  %n = and i64 %h, 4294967295
   ret i64 %n
 }
 define weak_odr void @__kml_str_free(ptr %s) {

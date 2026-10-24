@@ -59,7 +59,7 @@ func (e *Emitter) resolvePipeOptions(opt ast.Expression, pos ast.Pos) (flagsRef,
 		if err != nil {
 			return err
 		}
-		v = e.coerce(v, TypeBool)
+		v = e.convert(v, TypeBool)
 		z := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", z, v.Ref))
 		sh := e.freshReg()
@@ -118,7 +118,7 @@ func (e *Emitter) emitStreamPipeTo(srcPtr string, chunkTy Type, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
-	if !dv.Ty.IsWritableStream {
+	if !dv.Ty.IsWritableStream() {
 		return Value{}, fmt.Errorf("%d:%d: pipeTo's destination must be a WritableStream", pos.Line, pos.Col)
 	}
 	var opt ast.Expression
@@ -156,7 +156,7 @@ func (e *Emitter) emitStreamPipeThrough(srcPtr string, chunkTy Type, args []ast.
 	if err != nil {
 		return Value{}, err
 	}
-	if !tv.Ty.IsTransformStream {
+	if !tv.Ty.IsTransformStream() {
 		return Value{}, fmt.Errorf("%d:%d: pipeThrough's argument must be a TransformStream", pos.Line, pos.Col)
 	}
 	var opt ast.Expression
@@ -204,16 +204,16 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 	fulfill := e.emitStreamFulfillThunk(chunkTy)
 	decode := e.emitStreamDecodeThunk(chunkTy)
 	b1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", b1, fulfill))
+	e.emitRsAlloc(b1, "1.0", fulfill, chunkTy)
 	b2 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", b2, fulfill))
+	e.emitRsAlloc(b2, "1.0", fulfill, chunkTy)
 
 	ctx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 72)", ctx))
+	e.heapMallocInto(ctx, "72")
 	storePtrAt := func(base string, idx int, val string) {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, base, idx))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
+		e.heapStore("ptr", val, gep, 8)
 	}
 	storePtrAt(ctx, 0, srcPtr)
 	storePtrAt(ctx, 1, b1)
@@ -222,7 +222,7 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 	for i := 4; i <= 8; i++ {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, ctx, i))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", gep))
+		e.heapStore("i64", "0", gep, 8)
 	}
 
 	pullClo := e.buildBuiltinClosure("@__kml_tee_pull", ctx)
@@ -230,15 +230,15 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 	e.storeStreamField(b2, 9, pullClo)
 	for i, b := range []string{b1, b2} {
 		env := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+		e.heapMallocInto(env, "16")
 		g0 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ctx, g0))
+		e.heapStore("ptr", ctx, g0, 8)
 		g1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
 		which := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %d to ptr", which, i+1))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", which, g1))
+		e.heapStore("ptr", which, g1, 8)
 		e.storeStreamField(b, 10, e.buildBuiltinClosure("@__kml_tee_cancel", env))
 		started := e.buildBuiltinClosure("@__kml_rs_started", b)
 		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", started))
@@ -247,22 +247,45 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 	// Result: a two-element array of branch streams.
 	e.ensureMalloc()
 	arr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", arr))
+	e.heapMallocInto(arr, "16")
 	s0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", s0, arr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", b1, s0))
+	e.heapStore("ptr", b1, s0, 8)
 	s1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", s1, arr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", b2, s1))
-	agg0 := e.freshReg()
-	agg1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", agg0, arr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 2, 1", agg1, agg0))
+	e.heapStore("ptr", b2, s1, 8)
+	agg1 := e.newArrayHeader(arr, "2")
 	return Value{Ref: agg1, Ty: ArrayOf(ReadableStreamType(chunkTy))}, nil
 }
 
 // emitNewTransformStream implements
 // `new TransformStream<I, O>({transform?, flush?}?, writableStrategy?, readableStrategy?)`.
+// emitTransformCtxAlloc allocates a TransformStream's 72-byte context, the
+// stream's handle, after the host header word of ty (TDD-00230 P3.3).
+func (e *Emitter) emitTransformCtxAlloc(ty Type) string {
+	e.ensureMalloc()
+	base, ctx := e.freshReg(), e.freshReg()
+	e.heapMallocInto(base, "80")
+	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", ctx, base))
+	return ctx
+}
+
+// compressionTag is a compression TransformStream's class.
+// compressionStreamType is a CompressionStream's (or, decompress, a
+// DecompressionStream's) handle: a transform of bytes to bytes.
+func compressionStreamType(decompress bool) Type {
+	u8i, u8o := TypedArrayType("uint8"), TypedArrayType("uint8")
+	return Type{IR: "ptr", Host: hostTransformStream, StreamChunk: &u8i, StreamOut: &u8o, HostTag: compressionTag(decompress)}
+}
+
+func compressionTag(decompress bool) string {
+	if decompress {
+		return "DecompressionStream"
+	}
+	return "CompressionStream"
+}
+
 func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (Value, error) {
 	pos := ex.GetPos()
 	inTy, outTy := TypeAny, TypeAny // TransformStream<I = any, O = any>
@@ -310,7 +333,7 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 
 	fulfill := e.emitStreamFulfillThunk(outTy)
 	rs := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double %s, ptr %s)", rs, rHwm, fulfill))
+	e.emitRsAlloc(rs, rHwm, fulfill, outTy)
 	ws := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double %s)", ws, wHwm))
 
@@ -337,12 +360,11 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 		return Value{}, err
 	}
 
-	ctx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 72)", ctx))
+	ctx := e.emitTransformCtxAlloc(Type{IR: "ptr", Host: hostTransformStream})
 	storeCtxPtr := func(idx int, val string) {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, ctx, idx))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
+		e.heapStore("ptr", val, gep, 8)
 	}
 	storeCtxPtr(0, rs)
 	storeCtxPtr(1, ws)
@@ -357,16 +379,16 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 		}
 		wrap := e.emitStreamWriteWrap(userClo.Ty, inTy)
 		env := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+		e.heapMallocInto(env, "16")
 		g0 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+		e.heapStore("ptr", userClo.Ref, g0, 8)
 		g1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rs, g1))
+		e.heapStore("ptr", rs, g1, 8)
 		storeCtxPtr(2, e.buildBuiltinClosure(wrap, env))
 	} else {
-		if inTy.IR != outTy.IR || inTy.IsArray != outTy.IsArray {
+		if inTy.IR != outTy.IR || inTy.IsArray() != outTy.IsArray() {
 			return Value{}, fmt.Errorf("%d:%d: an identity TransformStream (no transform callback) requires matching input/output chunk types", pos.Line, pos.Col)
 		}
 		storeCtxPtr(2, "null")
@@ -381,13 +403,13 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 		}
 		wrap := e.emitStreamPullWrap(userClo.Ty)
 		env := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+		e.heapMallocInto(env, "16")
 		g0 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", g0, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", userClo.Ref, g0))
+		e.heapStore("ptr", userClo.Ref, g0, 8)
 		g1 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", g1, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rs, g1))
+		e.heapStore("ptr", rs, g1, 8)
 		storeCtxPtr(3, e.buildBuiltinClosure(wrap, env))
 	} else {
 		storeCtxPtr(3, "null")
@@ -395,7 +417,7 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 	for i := 4; i <= 6; i++ {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, ctx, i))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", gep))
+		e.heapStore("i64", "0", gep, 8)
 	}
 	storeCtxPtr(7, "null")
 	storeCtxPtr(8, "null")
@@ -409,7 +431,7 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
 
 	i, o := inTy, outTy
-	return Value{Ref: ctx, Ty: Type{IR: "ptr", IsTransformStream: true, StreamChunk: &i, StreamOut: &o}}, nil
+	return Value{Ref: ctx, Ty: Type{IR: "ptr", Host: hostTransformStream, StreamChunk: &i, StreamOut: &o}}, nil
 }
 
 // emitTransformStreamProperty implements `.readable` / `.writable`.
@@ -470,7 +492,7 @@ func (e *Emitter) emitLockStreamIf(cond, s string) {
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f, fp))
 	f2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = or i64 %s, 48", f2, f))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", f2, fp))
+	e.heapStore("i64", f2, fp, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
 	e.emitLabel(skipL)
 }
@@ -512,7 +534,7 @@ func (e *Emitter) emitResponseBodyStream(ex *ast.MemberExpression) (Value, error
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(buildL)
 	s := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 1.0, ptr %s)", s, fulfill))
+	e.emitRsAlloc(s, "1.0", fulfill, chunkTy)
 
 	pIdx, _, _ := objVal.Ty.FieldIndex("__kml_pending")
 	pGep := e.freshReg()
@@ -533,7 +555,7 @@ func (e *Emitter) emitResponseBodyStream(ex *ast.MemberExpression) (Value, error
 	actual := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_body_stream(ptr %s, ptr %s, ptr %s, i64 %s)",
 		actual, pending, s, bVal.Ref, lVal.Ref))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", actual, sGep))
+	e.heapStore("ptr", actual, sGep, 8)
 	// After a body method the stream is the consumed one: locked, read.
 	e.emitLockUsedBodyStream(objVal, actual)
 	buildEnd := e.freshLabel("resp.body.built")
@@ -543,7 +565,15 @@ func (e *Emitter) emitResponseBodyStream(ex *ast.MemberExpression) (Value, error
 	e.emitLabel(joinL)
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, cached, fromL, actual, buildEnd))
-	return Value{Ref: r, Ty: ReadableStreamType(chunkTy)}, nil
+	return Value{Ref: r, Ty: bodyStreamType()}, nil
+}
+
+// bodyStreamType is a Request's or Response's `body`:
+// ReadableStream<Uint8Array> | null.
+func bodyStreamType() Type {
+	t := ReadableStreamType(TypedArrayType("uint8"))
+	t.setNullable(true)
+	return t
 }
 
 // emitNewCompressionStream implements `new CompressionStream(format)` /
@@ -580,7 +610,7 @@ func (e *Emitter) emitNewCompressionStream(ex *ast.NewCompressionStreamExpressio
 	u8 := TypedArrayType("uint8")
 	fulfill := e.emitStreamFulfillThunk(u8)
 	rs := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double 0.0, ptr %s)", rs, fulfill))
+	e.emitRsAlloc(rs, "0.0", fulfill, u8)
 	ws := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_ws_alloc(double 1.0)", ws))
 
@@ -594,14 +624,13 @@ func (e *Emitter) emitNewCompressionStream(ex *ast.NewCompressionStreamExpressio
 	// Patch the readable side into the zlib context.
 	rGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", rGep, zctxStructIR, zctx))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rs, rGep))
+	e.heapStore("ptr", rs, rGep, 8)
 
-	ctx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 72)", ctx))
+	ctx := e.emitTransformCtxAlloc(Type{IR: "ptr", Host: hostTransformStream, HostTag: compressionTag(ex.Decompress)})
 	storeCtxPtr := func(idx int, val string) {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, ctx, idx))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val, gep))
+		e.heapStore("ptr", val, gep, 8)
 	}
 	storeCtxPtr(0, rs)
 	storeCtxPtr(1, ws)
@@ -610,7 +639,7 @@ func (e *Emitter) emitNewCompressionStream(ex *ast.NewCompressionStreamExpressio
 	for i := 4; i <= 6; i++ {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, ctx, i))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", gep))
+		e.heapStore("i64", "0", gep, 8)
 	}
 	storeCtxPtr(7, "null")
 	storeCtxPtr(8, "null")
@@ -623,5 +652,5 @@ func (e *Emitter) emitNewCompressionStream(ex *ast.NewCompressionStreamExpressio
 	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
 
 	i8in, i8out := u8, u8
-	return Value{Ref: ctx, Ty: Type{IR: "ptr", IsTransformStream: true, StreamChunk: &i8in, StreamOut: &i8out}}, nil
+	return Value{Ref: ctx, Ty: Type{IR: "ptr", Host: hostTransformStream, StreamChunk: &i8in, StreamOut: &i8out, HostTag: compressionTag(ex.Decompress)}}, nil
 }

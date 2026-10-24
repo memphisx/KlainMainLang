@@ -50,7 +50,11 @@ type emitted struct {
 // the first error. This mirrors the klainmain binary's pipeline exactly, so an
 // `import` reaches codegen resolved. A panic in the compiler is recovered into an
 // error so one pathological input can't take down a whole conformance batch.
-func frontEnd(entryPath string) (emitted, error) {
+func frontEnd(entryPath string) (emitted, error) { return frontEndWith(entryPath, options.Options{}) }
+
+// frontEndWith is frontEnd with a case's own TypeScript checks on (its
+// noUnusedLocals and noUnusedParameters directives), in the strict lane.
+func frontEndWith(entryPath string, checks options.Options) (emitted, error) {
 	// Run the in-process front-end under the same wall-clock guard the Test262
 	// runner uses (codegenTimeout): a parser/emitter spin — seen under
 	// -compat=js on some untyped-JS inputs, which the Node corpus is full of —
@@ -71,26 +75,22 @@ func frontEnd(entryPath string) (emitted, error) {
 			}
 			ch <- out
 		}()
-		// -compat=js semantics (allowGlobalShadowing): both oracles' referents
-		// — TypeScript and Node — permit a user binding to shadow a Tier-1
-		// global (`var Symbol = …`), so the permissive compat mode is the
-		// faithful measurement configuration (ADR-00472). Tier-2 names stay
-		// reserved either way.
-		prog, perr := resolver.ResolveProgramWithOptions(entryPath, options.Options{Compat: "js"})
+		// Each lane resolves as the CLI does under its -compat: the strict
+		// lane is TypeScript's, its definite-assignment reads and type
+		// errors rejecting the program (TDD-00230 P2.7); the js lane
+		// compiles it as JavaScript.
+		ropts := options.Options{Compat: "js", Decorators: checks.Decorators, EmitDecoratorMetadata: checks.EmitDecoratorMetadata}
+		if laneCompat != "js" {
+			ropts.Compat = "strict"
+			ropts.NoUnusedLocals, ropts.NoUnusedParameters = checks.NoUnusedLocals, checks.NoUnusedParameters
+		}
+		prog, perr := resolver.ResolveProgramWithOptions(entryPath, ropts)
 		if perr != nil {
 			out.err = perr
 			return
 		}
-		// The strict lane is TypeScript's: its type errors reject the program,
-		// as the CLI's strict resolve does (TDD-00230 P2.7), though the
-		// globals rule above stays the permissive one.
-		if laneCompat != "js" {
-			if terr := resolver.TypeCheck(prog, nil, options.Options{}, false); terr != nil {
-				out.err = terr
-				return
-			}
-		}
 		em := llvm.NewEmitter()
+		em.SetOptions(options.Options{Decorators: checks.Decorators, EmitDecoratorMetadata: checks.EmitDecoratorMetadata})
 		em.SetRegexMode(regexModeFlag)
 		em.SetCompatMode(laneCompat)
 		ir, cerr := em.EmitProgram(prog)
@@ -122,6 +122,11 @@ func frontEnd(entryPath string) (emitted, error) {
 // a `parallel/` subdir so a `require('../common/fixtures')` resolves to the
 // generated `common/fixtures.ts` shim one level up (mirroring Node's tree).
 func frontEndSource(src, entryDir, tag string) (emitted, error) {
+	return frontEndSourceWith(src, entryDir, tag, options.Options{})
+}
+
+// frontEndSourceWith is frontEndSource with frontEndWith's checks.
+func frontEndSourceWith(src, entryDir, tag string, checks options.Options) (emitted, error) {
 	if err := os.MkdirAll(entryDir, 0755); err != nil {
 		return emitted{}, fmt.Errorf("mkdir entry dir: %w", err)
 	}
@@ -129,7 +134,7 @@ func frontEndSource(src, entryDir, tag string) (emitted, error) {
 	if err := os.WriteFile(entry, []byte(src), 0644); err != nil {
 		return emitted{}, fmt.Errorf("write entry: %w", err)
 	}
-	return frontEnd(entry)
+	return frontEndWith(entry, checks)
 }
 
 var (
@@ -362,6 +367,10 @@ func commonShimFor(absPath string) string {
 	sock := "/tmp/kml-" + base + ".sock"
 	if runtime.GOOS == "windows" {
 		sock = `\\.\pipe\kml-` + base
+	} else {
+		// Node's tests refresh their tmpdir, which holds PIPE: a socket an
+		// earlier, killed run left behind must not fail this one's bind.
+		os.Remove(sock)
 	}
 	flag := func(b bool) string { return strconv.FormatBool(b) }
 	mac := runtime.GOOS == "darwin"
@@ -698,7 +707,7 @@ func normalizeNodeModule(mod string) string {
 	return mod
 }
 
-func runNodeSuite(workDir string, timeout time.Duration, workers int, compat string, limit int, filter string) {
+func runNodeSuite(workDir string, timeout time.Duration, workers int, compat string, limit int, filter string, passList string) {
 	root := ".node-tests/test"
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		fatal("creating workdir: %v", err)
@@ -780,6 +789,13 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 			fatal("writing node report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "node suite (lane=%s): %d files, report written to %s\n", laneLabel(), len(results), out)
+		var passing []string
+		for _, r := range results {
+			if r.Status == "PASS" {
+				passing = append(passing, r.File)
+			}
+		}
+		writeLanePassList(passList, laneLabel(), passing)
 	}
 
 	// Optional diagnostics: dump every FAIL/SKIP as `file\treason` for triage.
@@ -1003,7 +1019,7 @@ func runOneNode(path, name, workDir string, workerID int, timeout time.Duration)
 		// Expected-output suite: the pass criterion is the combined output
 		// matching the sibling `.out` baseline (a nonzero exit is often the
 		// tested behavior), not the exit code.
-		ok, reason, stdout, stderr := compileAndRunInDir(src, workDir, tag, timeout, "", res.Suite)
+		ok, reason, stdout, stderr := compileAndRunInDir(src, workDir, tag, timeout, scratchCwd(workDir, tag), res.Suite)
 		if reason != "" && (strings.HasPrefix(reason, "COMPILE_ERROR") || strings.HasPrefix(reason, "CLANG_") || strings.HasPrefix(reason, "WRITE_ERROR") || reason == "RUN_TIMEOUT") {
 			res.Status = "FAIL"
 			res.Reason = reason
@@ -1025,7 +1041,7 @@ func runOneNode(path, name, workDir string, workerID int, timeout time.Duration)
 		return res
 	}
 
-	ok, reason, _, _ := compileAndRunInDir(src, workDir, tag, timeout, "", res.Suite)
+	ok, reason, _, _ := compileAndRunInDir(src, workDir, tag, timeout, scratchCwd(workDir, tag), res.Suite)
 	if ok {
 		res.Status = "PASS"
 	} else {
@@ -1320,7 +1336,8 @@ func nodeReason(kind, msg string) string {
 // *run* phase: when runDir is non-empty the compiled binary executes with its
 // cwd set there, so a program that opens a relative path (the WPT suite's
 // `fetch("resources/x.json")` → relative fs.readFileSync) resolves against the
-// test file's own directory. runDir empty ⇒ inherit the runner's cwd (Node track).
+// test file's own directory; the Node track runs in the worker's own scratch
+// directory (scratchCwd). runDir empty ⇒ inherit the runner's cwd.
 // compileAndRunInDir returns (pass, reason, stdout, stderr). Both output
 // streams are captured on every exit path: the WPT track parses its
 // subtest-summary line (`__WPT_RESULT__ <pass> <fail>`) from stdout, and the
@@ -1427,4 +1444,22 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 		return false, nodeReason("RUNTIME_NONZERO_EXIT", msg), stdout.String(), stderr.String()
 	}
 	return true, "", stdout.String(), stderr.String()
+}
+
+// scratchCwd is a worker's own working directory for running the programs
+// it compiles, under workDir: a test that writes to a relative path writes
+// there, never into the checkout the runner was started in. It holds one
+// file.
+func scratchCwd(workDir, tag string) string {
+	dir := filepath.Join(workDir, "cwd-"+tag)
+	if abs, err := filepath.Abs(dir); err == nil {
+		dir = abs
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return ""
+	}
+	// Node's own suite runs from its checkout, never an empty directory: a
+	// test listing its cwd (`exec("ls")`) expects output.
+	_ = os.WriteFile(filepath.Join(dir, "README"), []byte("conformance scratch directory\n"), 0644)
+	return dir
 }

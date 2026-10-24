@@ -255,6 +255,20 @@ static YGSize kmltui_measure(YGNodeConstRef node, float w, YGMeasureMode wm,
     if (t->text) { int sl=(int)strlen(t->text)+1; unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*sl); int l=kmltui_decode(t->text,cp,sl); lbl=kmltui_colwidth(cp,0,l); free(cp); }
     sz.width = (float)(1 + (lbl ? lbl + 1 : 0)); sz.height = 1; return sz;
   }
+  if (t->kind == K_INPUT && t->wrap && wm != YGMeasureModeUndefined && w >= 1) {
+    /* A wrapping input: its text's wrapped lines, plus a row for the
+       cursor when the last line fills the width. */
+    const char *s = t->text ? t->text : "";
+    int slen = (int)strlen(s) + 1;
+    unsigned int *cp = (unsigned int*)malloc(sizeof(unsigned int)*slen);
+    int n = kmltui_decode(s, cp, slen);
+    int *st = (int*)malloc(sizeof(int)*(n+1)), *ln = (int*)malloc(sizeof(int)*(n+1));
+    int lc = kmltui_wrap(cp, n, (int)w, st, ln, n+1);
+    if (lc < 1) lc = 1;
+    if (n > 0 && kmltui_colwidth(cp, st[lc-1], ln[lc-1]) >= (int)w) lc++;
+    free(st); free(ln); free(cp);
+    sz.width = w; sz.height = (float)lc; return sz;
+  }
   if (t->kind == K_INPUT) {
     int len = 0;
     if (t->text) { int sl=(int)strlen(t->text)+1; unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*sl); int l=kmltui_decode(t->text,cp,sl); len=kmltui_colwidth(cp,0,l); free(cp); }
@@ -508,8 +522,20 @@ static void paint_node(TuiNode *t, int ox, int oy) {
       int slen=(int)strlen(s)+1;
       unsigned int *cp=(unsigned int*)malloc(sizeof(unsigned int)*slen);
       int n=kmltui_decode(s,cp,slen);
-      int used = paint_cps(x, y, cp, 0, n, w, t->fg, t->bg, t->attr);
-      if (used < w) setglyph(x+used,y," ",1,1,t->fg,t->bg,t->attr|8); /* cursor block */
+      if (t->wrap && w > 0) {
+        int *st=(int*)malloc(sizeof(int)*(n+1)), *ln=(int*)malloc(sizeof(int)*(n+1));
+        int lc = kmltui_wrap(cp, n, w, st, ln, n+1);
+        if (lc < 1) { lc = 1; st[0] = 0; ln[0] = 0; }
+        int used = 0, r = 0;
+        for (; r<lc && r<h; r++) used = paint_cps(x, y+r, cp, st[r], ln[r], w, t->fg, t->bg, t->attr);
+        /* The cursor follows the last line, or starts the next row. */
+        if (used < w) setglyph(x+used,y+r-1," ",1,1,t->fg,t->bg,t->attr|8);
+        else if (r < h) setglyph(x,y+r," ",1,1,t->fg,t->bg,t->attr|8);
+        free(st); free(ln);
+      } else {
+        int used = paint_cps(x, y, cp, 0, n, w, t->fg, t->bg, t->attr);
+        if (used < w) setglyph(x+used,y," ",1,1,t->fg,t->bg,t->attr|8); /* cursor block */
+      }
       free(cp);
       break;
     }

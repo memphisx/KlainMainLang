@@ -10,7 +10,7 @@ package llvm
 //
 // Scope (deliberately narrow): trees a typed JSON.parse / Response.json
 // projection produced — objects/tuples of scalar, string, nested-object and
-// inline-{ptr,i64} array fields; arrays of those (nested arrays are boxed
+// array (header-pointer) fields; arrays of those (nested arrays are boxed
 // element pointers). Every string in such a tree is a heap dup
 // (__kml_json_string_dup; absent-field defaults heap-dup under auto too —
 // see jsonDefaultRef), every struct and buffer a fresh malloc — so the graph
@@ -36,12 +36,12 @@ import (
 // closures, promises, flat @value arrays, typed arrays — is out.
 func deepFreeEligible(ty Type) bool {
 	switch {
-	case ty.IsClass, ty.IsDynamic, ty.IsDynamicObject, ty.IsMap, ty.IsSet,
-		ty.IsFunc, ty.IsPromise, ty.Inline, ty.IsFlatArray:
+	case ty.IsClass(), ty.IsDynamic(), ty.IsDynamicObject(), ty.IsMap(), ty.IsSet(),
+		ty.IsFunc(), ty.IsPromise(), ty.Inline, ty.IsFlatArray():
 		return false
-	case ty.IsArray:
+	case ty.IsArray():
 		return ty.ElemType != nil && deepFreeEligible(*ty.ElemType)
-	case ty.IsObject:
+	case ty.IsObject():
 		if len(ty.Fields) == 0 {
 			return false
 		}
@@ -67,11 +67,11 @@ func deepFreeEligible(ty Type) bool {
 // flag would be pure overhead.
 func deepFreeOwns(ty Type) bool {
 	switch {
-	case ty.IsArray:
+	case ty.IsArray():
 		return ty.ElemType != nil && deepFreeElemOwned(*ty.ElemType)
-	case ty.IsObject:
+	case ty.IsObject():
 		for _, f := range ty.Fields {
-			if deepFreeElemOwned(f.Ty) {
+			if deepFreeElemOwned(f.Ty) && f.Name != OrderField {
 				return true
 			}
 		}
@@ -84,7 +84,7 @@ func deepFreeOwns(ty Type) bool {
 // deepFreeElemOwned: does a field/element of this type carry an owned heap
 // allocation of its own (string bytes, an object struct, an array buffer)?
 func deepFreeElemOwned(ty Type) bool {
-	return isStringTy(ty) || ty.IsObject || ty.IsArray
+	return isStringTy(ty) || ty.IsObject() || ty.IsArray()
 }
 
 // deepFreeKey builds the memoization key for a synthesized routine — a
@@ -92,9 +92,9 @@ func deepFreeElemOwned(ty Type) bool {
 // one function regardless of interface names.
 func deepFreeKey(ty Type) string {
 	switch {
-	case ty.IsArray:
+	case ty.IsArray():
 		return "a(" + deepFreeKey(*ty.ElemType) + ")"
-	case ty.IsObject:
+	case ty.IsObject():
 		var b strings.Builder
 		b.WriteString("o(")
 		for i, f := range ty.Fields {
@@ -128,15 +128,16 @@ func (e *Emitter) deepFreeSym(v *ast.VarDeclaration, ty Type) bool {
 
 // deepFreeProjectionInit recognizes the initializer shapes whose emission is
 // a typed projection producing a transitively-fresh graph: `JSON.parse(...)`
-// and `res.json()`, optionally awaited. (The receiver's Response-ness isn't
+// and an awaited `res.json()`. (The receiver's Response-ness isn't
 // re-checked here: a non-Response `.json()` init would have failed the
 // non-dynamic type gates before this is consulted.) Literal initializers are
 // deliberately NOT accepted: an array/object literal can embed interned
 // string literals and aliases of other bindings — per-store freshness for
 // literals is a documented follow-up, not Stage 1.
 func deepFreeProjectionInit(init ast.Expression) bool {
+	awaited := false
 	if aw, ok := init.(*ast.AwaitExpression); ok {
-		init = aw.Argument
+		init, awaited = aw.Argument, true
 	}
 	ce, ok := init.(*ast.CallExpression)
 	if !ok {
@@ -149,7 +150,7 @@ func deepFreeProjectionInit(init ast.Expression) bool {
 	if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && mem.Property == "parse" {
 		return true
 	}
-	return mem.Property == "json"
+	return mem.Property == "json" && awaited // un-awaited, its promise
 }
 
 // freePending frees one registered obligation — the deep routine for flagged
@@ -166,7 +167,7 @@ func (e *Emitter) freePending(pf pendingFree) error {
 // owned graph via the synthesized routine, then resets the binding's storage
 // exactly as the shallow path does (empty array header / null pointer).
 func (e *Emitter) freeSymbolDeep(sym Symbol) error {
-	if sym.Ty.IsArray {
+	if sym.Ty.IsArray() {
 		fn, err := e.ensureDeepFreeArr(*sym.Ty.ElemType)
 		if err != nil {
 			return err
@@ -177,8 +178,8 @@ func (e *Emitter) freeSymbolDeep(sym Symbol) error {
 		l := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lenSlot))
 		e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, i64 %s)", fn, d, l))
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", dataSlot))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lenSlot))
+		e.heapStore("ptr", "null", dataSlot, 8)
+		e.heapStore("i64", "0", lenSlot, 8)
 		return nil
 	}
 	fn, err := e.ensureDeepFree(sym.Ty)
@@ -194,8 +195,8 @@ func (e *Emitter) freeSymbolDeep(sym Symbol) error {
 
 // ensureDeepFree synthesizes (once per structural type signature) the
 // recursive free for an object/tuple type: `void @__kml_deep_free_N(ptr)` —
-// null-check, free each owned field (strings, nested objects, inline
-// {ptr,i64} array fields), then the struct itself. Same save/restore builder
+// null-check, free each owned field (strings, nested objects, array
+// fields), then the struct itself. Same save/restore builder
 // discipline as emitChanCloneThunk; memoized before body emission so the
 // (structurally impossible, but cheap to guard) recursive self-reference
 // terminates.
@@ -212,6 +213,9 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 	e.deepFreeFns[key] = name
 
 	savedAllocas, savedBody, savedRegCtr, savedBlockDone := e.allocas, e.body, e.regCtr, e.blockDone
+	// A helper has no shadow frame: the caller's would pop at its `ret`.
+	savedFrame := e.frame
+	e.frame = ""
 	e.allocas, e.body, e.regCtr, e.blockDone = strings.Builder{}, strings.Builder{}, 0, false
 
 	var synthErr error
@@ -223,12 +227,14 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 	e.emitLabel(bodyL)
 	structIR := ty.StructIR()
 	for i, f := range ty.Fields {
-		if !deepFreeElemOwned(f.Ty) {
+		// The order block (keyorder.c) may be shared by a copied object; it
+		// is left to the allocator's mode rather than freed here.
+		if !deepFreeElemOwned(f.Ty) || f.Name == OrderField {
 			continue
 		}
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%p, i32 0, i32 %d", gep, structIR, i))
-		if f.Ty.IsArray {
+		if f.Ty.IsArray() {
 			// The field slot now holds a pointer to the array's {data,len} header
 			// (TDD-00213 Stage 2); load the header first, then read data/len from it
 			// before handing the buffer to the element walker. A null header (an
@@ -269,7 +275,7 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 		}
 		p := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, gep))
-		if f.Ty.IsObject {
+		if f.Ty.IsObject() {
 			fn, err := e.ensureDeepFree(f.Ty)
 			if err != nil {
 				synthErr = err
@@ -285,16 +291,14 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 	if synthErr == nil {
 		e.emitDeepFreeDeathSignal("%p")
 		e.ensureFree()
-		e.emitInstr("call void @free(ptr %p)")
+		e.heapFree("%p")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		e.emitTerminator("ret void")
-		e.functions.WriteString(fmt.Sprintf("\ndefine void @%s(ptr %%p) {\nentry:\n", name))
-		e.functions.WriteString(e.allocas.String())
-		e.functions.WriteString(e.body.String())
-		e.functions.WriteString("}\n")
+		e.writeFunc(fmt.Sprintf("void @%s(ptr %%p)", name), e.allocas.String()+e.body.String())
 	}
 	e.allocas, e.body, e.regCtr, e.blockDone = savedAllocas, savedBody, savedRegCtr, savedBlockDone
+	e.frame = savedFrame
 	if synthErr != nil {
 		delete(e.deepFreeFns, key)
 		return "", synthErr
@@ -319,6 +323,9 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 	e.deepFreeFns[key] = name
 
 	savedAllocas, savedBody, savedRegCtr, savedBlockDone := e.allocas, e.body, e.regCtr, e.blockDone
+	// A helper has no shadow frame: the caller's would pop at its `ret`.
+	savedFrame := e.frame
+	e.frame = ""
 	e.allocas, e.body, e.regCtr, e.blockDone = strings.Builder{}, strings.Builder{}, 0, false
 
 	var synthErr error
@@ -349,14 +356,14 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 		p := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, slot))
 		switch {
-		case elemTy.IsObject:
+		case elemTy.IsObject():
 			fn, err := e.ensureDeepFree(elemTy)
 			if err != nil {
 				synthErr = err
 			} else {
 				e.emitInstr(fmt.Sprintf("call void @%s(ptr %s)", fn, p))
 			}
-		case elemTy.IsArray:
+		case elemTy.IsArray():
 			// Boxed nested-array element (ADR-00061): the slot holds a
 			// pointer to a malloc'd {ptr,i64} box; walk the inner buffer,
 			// then free the box.
@@ -382,7 +389,7 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 				e.ensureFree()
 				cell := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", cell, p))
-				e.emitInstr(fmt.Sprintf("call void @free(ptr %s)", cell))
+				e.heapFree(cell)
 				e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
 				e.emitLabel(skipL)
 			}
@@ -399,16 +406,14 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 	}
 	if synthErr == nil {
 		e.ensureFree()
-		e.emitInstr("call void @free(ptr %d)")
+		e.heapFree("%d")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		e.emitTerminator("ret void")
-		e.functions.WriteString(fmt.Sprintf("\ndefine void @%s(ptr %%d, i64 %%n) {\nentry:\n", name))
-		e.functions.WriteString(e.allocas.String())
-		e.functions.WriteString(e.body.String())
-		e.functions.WriteString("}\n")
+		e.writeFunc(fmt.Sprintf("void @%s(ptr %%d, i64 %%n)", name), e.allocas.String()+e.body.String())
 	}
 	e.allocas, e.body, e.regCtr, e.blockDone = savedAllocas, savedBody, savedRegCtr, savedBlockDone
+	e.frame = savedFrame
 	if synthErr != nil {
 		delete(e.deepFreeFns, key)
 		return "", synthErr
@@ -422,7 +427,7 @@ func (e *Emitter) emitDeepFreeString(p string) {
 	skipL := e.freshLabel("dfree.sskip")
 	freeL := e.freshLabel("dfree.sfree")
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, p))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isNull, e.ptrIsNull(p), e.isNullRef(p))) // nullRef is static
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, skipL, freeL))
 	e.emitLabel(freeL)
 	e.emitDeepFreeDeathSignal(p)

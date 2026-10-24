@@ -20,7 +20,9 @@ func (p *Parser) parseArrayLiteral() (*ast.ArrayLiteral, error) {
 			// toward the length, matching JS. Desugars to the same
 			// undefined literal an explicit `undefined` element uses; the
 			// comma is consumed by the shared loop tail below.
-			elems = append(elems, ast.NewNullLiteral(true, posOf(p.peek())))
+			hole := ast.NewNullLiteral(true, posOf(p.peek()))
+			hole.Elision = true
+			elems = append(elems, hole)
 			p.advance() // consume ','
 			continue
 		}
@@ -58,6 +60,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 	tok := p.advance() // consume '{'
 	pos := posOf(tok)
 	var props []ast.ObjectProperty
+	restTrailing := false
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		if p.check(lexer.ELLIPSIS) {
 			// Object spread `{ ...obj, key: val }` — stored as an
@@ -73,12 +76,14 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			if !p.match(lexer.COMMA) {
 				break
 			}
+			restTrailing = restTrailing || p.check(lexer.RBRACE)
 			continue
 		}
 		// Async / generator method shorthand: `async m() {}`, `*m() {}`,
 		// `async *m() {}`, `*[Symbol.iterator]() {}`. `async` is contextual —
 		// a modifier only when a member name, `[` or `*` follows on the same
 		// line (`{ async: 1 }`, `{ async() {} }` keep their plain meaning).
+		memberStart := p.peek().Pos // a method's source text begins here
 		isAsyncMethod := p.isWord(0, "async") && p.sameLine(1) && objectMethodNameStart(p.peekNth(1))
 		if isAsyncMethod {
 			p.advance() // 'async'
@@ -104,6 +109,8 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			isMethod := isAsyncMethod || isGeneratorMethod || p.check(lexer.LPAREN) || p.check(lexer.LT)
 			methodValue := func() (ast.Expression, error) {
 				fnPos := posOf(p.peek())
+				p.memberStart = memberStart
+				p.nextGen = isGeneratorMethod
 				fd, err := p.parseFunctionRest("", isAsyncMethod, false, false)
 				if err != nil {
 					return nil, err
@@ -160,11 +167,33 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 		// grammar: a bare `get`/`set` followed by another member name commits to
 		// accessor parsing; `get: 1`, `get() {}`, `get` (shorthand) keep working
 		// because the 2-token lookahead requires an IDENT name to follow.
-		if p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") &&
-			p.peekNth(1).Type == lexer.IDENT {
+		// The name is any property name: an identifier, a string or number,
+		// a reserved word, or a computed `[expr]`.
+		if !isAsyncMethod && !isGeneratorMethod && p.peek().Type == lexer.IDENT &&
+			(p.peek().Literal == "get" || p.peek().Literal == "set") &&
+			objectMethodNameStart(p.peekNth(1)) && p.peekNth(1).Type != lexer.STAR {
 			accessorKind := p.advance().Literal
-			nameTok := p.advance()
+			nameTok := p.peek()
+			prop := ast.ObjectProperty{AccessorKind: accessorKind}
+			if p.match(lexer.LBRACKET) {
+				keyExpr, err := p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+				if _, err := p.expect(lexer.RBRACKET); err != nil {
+					return nil, err
+				}
+				if wk, ok := wellKnownSymbolMemberName(keyExpr); ok {
+					prop.Key = wk
+				} else {
+					prop.KeyExpr = keyExpr
+				}
+			} else {
+				p.advance()
+				prop.Key = propertyKeyText(nameTok)
+			}
 			fnPos := posOf(p.peek())
+			p.memberStart = memberStart
 			fd, err := p.parseFunctionRest("", false, false, false)
 			if err != nil {
 				return nil, err
@@ -172,7 +201,8 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			eraseTypeParams(fd)
 			fnVal := p.newObjectMethod(fd, false, fnPos)
 			fnVal.NamePos = posOf(nameTok) // where a diagnostic about the accessor points
-			props = append(props, ast.ObjectProperty{Key: nameTok.Literal, Value: fnVal, AccessorKind: accessorKind})
+			prop.Value = fnVal
+			props = append(props, prop)
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -184,6 +214,8 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				return nil, p.errAt(keyTok, diag.ExpectedMethodName, keyTok.Type)
 			}
 			fnPos := posOf(p.peek())
+			p.memberStart = memberStart
+			p.nextGen = isGeneratorMethod
 			fd, err := p.parseFunctionRest("", isAsyncMethod, false, false)
 			if err != nil {
 				return nil, err
@@ -218,6 +250,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			// the same FunctionExpression value a `key: function(){}` field
 			// already works with (async/generator forms above).
 			fnPos := posOf(p.peek())
+			p.memberStart = memberStart
 			fd, err := p.parseFunctionRest("", false, false, false)
 			if err != nil {
 				return nil, err
@@ -261,7 +294,9 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
 	}
-	return ast.NewObjectLiteral(props, pos), nil
+	ol := ast.NewObjectLiteral(props, pos)
+	ol.RestTrailingComma = restTrailing
+	return ol, nil
 }
 
 // objectMethodNameStart reports whether t can follow a method modifier in an
@@ -276,6 +311,12 @@ func (p *Parser) parseNew() (ast.Expression, error) {
 	pos := posOf(tok)
 
 	nameTok := p.peek()
+	// `new.target`: the meta-property.
+	if nameTok.Type == lexer.DOT && p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "target" {
+		p.advance()
+		p.advance()
+		return ast.NewNewTargetExpression(pos), nil
+	}
 	if p.newTargetIsExpression() {
 		return p.parseNewOfExpression(pos)
 	}
@@ -317,7 +358,11 @@ func (p *Parser) parseNewGenericBody(pos ast.Pos) (*ast.NewExpression, error) {
 // dotted name: `new this.K()`, `new ctors[0]()`, `new (f())()`.
 func (p *Parser) newTargetIsExpression() bool {
 	if p.peek().Type != lexer.IDENT {
-		return p.peek().Type == lexer.THIS || p.peek().Type == lexer.LPAREN
+		switch p.peek().Type {
+		case lexer.THIS, lexer.LPAREN, lexer.CLASS, lexer.FUNCTION:
+			return true // `new class {…}()`, `new function () {…}()`
+		}
+		return false
 	}
 	i := 1
 	for p.peekNth(i).Type == lexer.DOT && p.peekNth(i+1).Type == lexer.IDENT {
@@ -373,6 +418,7 @@ func (p *Parser) parseNewTail(name string, pos ast.Pos) (*ast.NewExpression, err
 	// `new Set<T>()` already rely on.
 	var typeArgs []*ast.TypeAnnotation
 	if p.check(lexer.LT) {
+		ltStart := p.peek().Pos
 		p.advance() // consume '<'
 		for {
 			arg, err := p.parseTypeAnnotation("ts")
@@ -387,6 +433,7 @@ func (p *Parser) parseNewTail(name string, pos ast.Pos) (*ast.NewExpression, err
 		if err := p.expectGT(name + "<T>"); err != nil {
 			return nil, err
 		}
+		p.blank(ltStart, p.at(p.pos-1).End)
 	}
 	// `new X` without an argument list is `new X()`.
 	var args []ast.Expression
@@ -421,8 +468,17 @@ func (p *Parser) parseNewTail(name string, pos ast.Pos) (*ast.NewExpression, err
 }
 
 func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
+	isAsync := p.nextAsyncArrow
+	p.nextAsyncArrow = false
 	tok := p.advance() // consume '('
 	pos := posOf(tok)
+	// An async arrow's parameters are read as its body is: `await` is the
+	// operator there, never a name.
+	if isAsync {
+		savedAwait := p.awaitCtx
+		p.awaitCtx = awaitAsync
+		defer func() { p.awaitCtx = savedAwait }()
+	}
 
 	var params []ast.Param
 	for !p.check(lexer.RPAREN) && !p.check(lexer.EOF) {
@@ -448,9 +504,6 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 		// destructuring. Shares the same pattern-element grammar every other
 		// destructuring position uses.
 		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
-			if rest {
-				return nil, p.errAt(p.peek(), diag.RestParamPattern)
-			}
 			patTok := p.peek()
 			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
@@ -481,11 +534,17 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 			// supplied by contextual typing from the HOF call site — the
 			// element type flows through the `hints []Type` channel into
 			// emitArrowFunctionWithHints, which fills p.Type == nil params.
-			if p.check(lexer.ASSIGN) {
-				return nil, p.errAt(p.peek(), diag.DestructuredParamDefault)
+			var pdflt ast.Expression
+			if !rest && p.match(lexer.ASSIGN) {
+				d, err := p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+				pdflt = d
 			}
+			// A rest pattern (`...[a, b]`) unpacks the collected array.
 			syntheticName := fmt.Sprintf("__param%d", len(params))
-			params = append(params, ast.Param{Name: syntheticName, Pos: ast.Pos{Line: patTok.Line, Col: patTok.Col}, Type: pty, ArrayPattern: arrPat, ObjectPattern: objPat})
+			params = append(params, ast.Param{Name: syntheticName, Pos: ast.Pos{Line: patTok.Line, Col: patTok.Col}, Type: pty, Rest: rest, ArrayPattern: arrPat, ObjectPattern: objPat, Default: pdflt})
 			p.match(lexer.COMMA)
 			continue
 		}
@@ -544,7 +603,23 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 	if n := duplicateParamName(params); n != "" {
 		return nil, p.errAt(arrowTok, diag.DuplicateParameter, n)
 	}
+	if isAsync {
+		for _, prm := range params {
+			if prm.Name == "await" {
+				return nil, errAtPos(prm.Pos, diag.ReservedWordIdent, "await")
+			}
+			if aw := paramInitAwait(prm.Default); aw != nil {
+				return nil, errAtPos(aw.GetPos(), diag.AwaitInParamInit)
+			}
+		}
+	}
 
+	// An async arrow's body awaits; any other keeps its context.
+	if isAsync {
+		savedAwait := p.awaitCtx
+		p.awaitCtx = awaitAsync
+		defer func() { p.awaitCtx = savedAwait }()
+	}
 	// Block body or expression body
 	if p.check(lexer.LBRACE) {
 		block, err := p.parseBlock()
@@ -555,6 +630,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 			return nil, errAtPos(pos, diag.StrictNonSimpleParams)
 		}
 		arrow := ast.NewArrowFunction(params, retType, nil, block, pos)
+		arrow.Src = p.srcRange(pos)
 		p.bareArrow = arrow
 		return arrow, nil
 	}
@@ -562,7 +638,9 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 	if err != nil {
 		return nil, err
 	}
-	return ast.NewArrowFunction(params, retType, body, nil, pos), nil
+	arrow := ast.NewArrowFunction(params, retType, body, nil, pos)
+	arrow.Src = p.srcRange(pos)
+	return arrow, nil
 }
 
 // destructuredArrowParamLookahead reports whether the LPAREN at the
@@ -600,39 +678,22 @@ func (p *Parser) parenGroupFollowedByArrowAt(k int) bool {
 			depth--
 			if depth == 0 {
 				next := p.peekNth(i + 1).Type
-				return next == lexer.ARROW || next == lexer.COLON && p.returnTypeThenArrowAt(i+2)
+				return next == lexer.ARROW || next == lexer.COLON && p.typeThenArrowAt(i+2)
 			}
 		}
 	}
 }
 
-// returnTypeThenArrowAt reports whether the tokens from the k-th ahead are a
-// return type followed by `=>`: an arrow at the type's own depth before the
-// expression could end. A conditional's `: alt` after a parenthesized group
-// (`c ? (a, b) : 0`) reaches the end first.
-func (p *Parser) returnTypeThenArrowAt(k int) bool {
-	depth := 0
-	for i := k; ; i++ {
-		switch p.peekNth(i).Type {
-		case lexer.EOF, lexer.SEMICOLON:
-			return false
-		case lexer.LPAREN, lexer.LBRACE, lexer.LBRACKET:
-			depth++
-		case lexer.RPAREN, lexer.RBRACE, lexer.RBRACKET:
-			if depth == 0 {
-				return false
-			}
-			depth--
-		case lexer.COMMA:
-			if depth == 0 {
-				return false
-			}
-		case lexer.ARROW:
-			if depth == 0 {
-				return true
-			}
-		}
-	}
+// typeThenArrowAt reports whether a type parses from the k-th token ahead
+// and `=>` follows it, as TypeScript decides an arrow's return annotation:
+// by parsing it, then backtracking.
+func (p *Parser) typeThenArrowAt(k int) bool {
+	save := p.pos
+	p.pos = save + k
+	_, err := p.parseType()
+	ok := err == nil && p.check(lexer.ARROW)
+	p.rewind(save)
+	return ok
 }
 
 func (p *Parser) destructuredArrowParamLookahead() bool {
@@ -849,6 +910,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 					return nil, err
 				}
 				arrow := ast.NewArrowFunction(params, nil, nil, block, pos)
+				arrow.Src = p.srcRange(pos)
 				p.bareArrow = arrow
 				return arrow, nil
 			}
@@ -856,7 +918,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			if err != nil {
 				return nil, err
 			}
-			return ast.NewArrowFunction(params, nil, body, nil, pos), nil
+			arrow := ast.NewArrowFunction(params, nil, body, nil, pos)
+			arrow.Src = p.srcRange(pos)
+			return arrow, nil
 		}
 		return ast.NewIdentifier(tok.Literal, posOf(tok)), nil
 
@@ -872,6 +936,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			(p.peekNth(2).Type == lexer.ARROW || p.peekNth(2).Type == lexer.COLON)) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COLON) ||
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.RPAREN && p.peekNth(3).Type == lexer.ARROW) ||
+			// `(x): T => …`: an untyped parameter and a return annotation,
+			// not `c ? (x) : alt`.
+			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.RPAREN && p.peekNth(3).Type == lexer.COLON && p.typeThenArrowAt(4)) ||
 			// `(a, b) => …`, not the comma operator `(a, b)`.
 			(t1.Type == lexer.IDENT && p.peekNth(2).Type == lexer.COMMA && p.parenGroupFollowedByArrow()) ||
 			// Optional first parameter `(x?: T) => …`, `(x?) => …`, `(x?, y) => …`.
@@ -915,6 +982,14 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 			return nil, err
 		}
 		p.bareArrow = nil // `(() => {})()` calls the parenthesized arrow
+		switch expr.(type) {
+		case *ast.ObjectLiteral, *ast.ArrayLiteral:
+			// `({}) = 1` is no destructuring pattern (parseAssignment).
+			if p.parenLiterals == nil {
+				p.parenLiterals = map[ast.Expression]bool{}
+			}
+			p.parenLiterals[expr] = true
+		}
 		// Parentheses end an optional chain: `(a?.b).c` reads `.c` off the
 		// chain's *result*, where `a?.b.c` short-circuits as a whole.
 		switch n := expr.(type) {
@@ -960,6 +1035,7 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if err != nil {
 			return nil, err
 		}
+		decl.Src = p.srcRange(cPos)
 		return ast.NewClassExpression(decl, cPos), nil
 
 	case lexer.FUNCTION:
@@ -971,9 +1047,16 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		fPos := posOf(tok)
 		isGen := p.match(lexer.STAR) // generator expression (TDD-00096)
 		var name string
-		if p.check(lexer.IDENT) {
+		// Its own name is read in its own context: `function yield() {}`
+		// inside a generator names a plain function.
+		// `await` names one too, outside module code.
+		savedGen, savedAwait := p.inGen, p.awaitCtx
+		p.inGen, p.awaitCtx = isGen, awaitFn
+		if p.check(lexer.IDENT) || p.check(lexer.AWAIT) && p.awaitCtx == awaitFn {
 			name = p.advance().Literal
 		}
+		p.inGen, p.awaitCtx = savedGen, savedAwait
+		p.nextGen = isGen
 		fd, err := p.parseFunctionRest(name, false, false, false)
 		if err != nil {
 			return nil, err
@@ -998,9 +1081,16 @@ func (p *Parser) parseAsyncFunctionOrArrow(tok lexer.Token) (ast.Expression, err
 			fPos := posOf(tok)
 			isGen := p.match(lexer.STAR) // async generator expression (TDD-00096)
 			var name string
-			if p.check(lexer.IDENT) {
-				name = p.advance().Literal
+			if p.check(lexer.IDENT) || p.check(lexer.AWAIT) {
+				nt := p.advance()
+				name = nt.Literal
+				// Its name is bound in its own scope: never `await`, nor
+				// `yield` for an async generator.
+				if name == "await" || name == "yield" && isGen {
+					return nil, p.errAt(nt, diag.ReservedWordIdent, name)
+				}
 			}
+			p.nextGen = isGen
 			fd, err := p.parseFunctionRest(name, true, false, false)
 			if err != nil {
 				return nil, err
@@ -1010,11 +1100,44 @@ func (p *Parser) parseAsyncFunctionOrArrow(tok lexer.Token) (ast.Expression, err
 			fe.IsGenerator = isGen
 			return fe, nil
 		}
+		if t := p.peek(); t.Type == lexer.IDENT && p.peekNth(1).Type == lexer.ARROW {
+			// `async x => …`: one bare parameter.
+			if p.peekNth(1).HasPrecedingLineBreak() {
+				return nil, p.errAt(p.peekNth(1), diag.LineBreakBeforeArrow)
+			}
+			p.advance()
+			p.advance() // =>
+			savedAwait := p.awaitCtx
+			p.awaitCtx = awaitAsync
+			defer func() { p.awaitCtx = savedAwait }()
+			params := []ast.Param{{Name: t.Literal, Pos: ast.Pos{Line: t.Line, Col: t.Col}}}
+			var af *ast.ArrowFunction
+			if p.check(lexer.LBRACE) {
+				block, err := p.parseBlock()
+				if err != nil {
+					return nil, err
+				}
+				af = ast.NewArrowFunction(params, nil, nil, block, posOf(tok))
+			} else {
+				body, err := p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+				af = ast.NewArrowFunction(params, nil, body, nil, posOf(tok))
+			}
+			af.Src = p.srcRange(posOf(tok))
+			af.IsAsync = true
+			return af, nil
+		}
+		p.nextAsyncArrow = true
 		af, err := p.parseArrowFunction()
 		if err != nil {
 			return nil, err
 		}
 		af.IsAsync = true
+		if af.Src.Text != nil {
+			af.Src.Start = tok.Pos // its source text begins at `async`
+		}
 		return af, nil
 	}
 }
@@ -1069,6 +1192,15 @@ func (p *Parser) parseGenericArrow() (ast.Expression, error) {
 	for _, tp := range tps {
 		set[tp.Name] = true
 		af.TypeParams = append(af.TypeParams, tp.Name)
+		var c, d *ast.TypeAnnotation
+		if tp.Constraint != nil {
+			c = ast.NodeAnnotation(tp.Constraint, "ts")
+		}
+		if tp.Default != nil {
+			d = ast.NodeAnnotation(tp.Default, "ts")
+		}
+		af.TypeParamConstraints = append(af.TypeParamConstraints, c)
+		af.TypeParamDefaults = append(af.TypeParamDefaults, d)
 	}
 	for i := range af.Params {
 		ast.EraseTypeParams(af.Params[i].Type, set)
@@ -1106,6 +1238,11 @@ func (p *Parser) newObjectMethod(fd *ast.FunctionDeclaration, isAsync bool, pos 
 func (p *Parser) newFuncExpr(name string, fd *ast.FunctionDeclaration, isAsync bool, pos ast.Pos) *ast.FunctionExpression {
 	fe := ast.NewFunctionExpression(name, fd.Params, fd.ReturnType, fd.Body, isAsync, pos)
 	fe.NamePos = fd.NamePos
+	fe.TypeParams, fe.TypeParamConstraints, fe.TypeParamDefaults = fd.TypeParams, fd.TypeParamConstraints, fd.TypeParamDefaults
+	fe.Src = p.srcRange(pos)
+	if fd.Src.Text != nil && (fe.Src.Text == nil || fd.Src.Start < fe.Src.Start) {
+		fe.Src = fd.Src // a method: its source begins at its modifiers and name
+	}
 	if ta, ok := p.thisParams[fd]; ok {
 		delete(p.thisParams, fd)
 		p.thisParams[fe] = ta
@@ -1129,4 +1266,27 @@ func paramPos(rest bool, restTok, nameTok lexer.Token) ast.Pos {
 		return ast.Pos{Line: restTok.Line, Col: restTok.Col}
 	}
 	return ast.Pos{Line: nameTok.Line, Col: nameTok.Col}
+}
+
+// paramInitAwait is an `await` a parameter default evaluates (not one in a
+// function, arrow or class it holds).
+func paramInitAwait(init ast.Expression) ast.Node {
+	if init == nil {
+		return nil
+	}
+	var found ast.Node
+	ast.Inspect(init, func(n ast.Node) bool {
+		if found != nil {
+			return false
+		}
+		switch n.(type) {
+		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ArrowFunction, *ast.ClassExpression, *ast.ClassDeclaration:
+			return false
+		case *ast.AwaitExpression:
+			found = n
+			return false
+		}
+		return true
+	})
+	return found
 }

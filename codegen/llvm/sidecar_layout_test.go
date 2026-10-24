@@ -72,9 +72,14 @@ func TestDynjsonBoxLayoutMatchesEmitter(t *testing.T) {
 	dir := t.TempDir()
 	probe := filepath.Join(dir, "probe.c")
 	// The sidecar's externs are satisfied by stubs: the probe never calls them.
+	heapH, err := filepath.Abs(filepath.Join("kmlheapsrc", "kml_heap.h"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	probeSrc := `#include <stddef.h>
 #include <stdio.h>
-#include "` + filepath.ToSlash(src) + `"
+#include "` + filepath.ToSlash(heapH) + `"
+` + hdrStateDefines() + `#include "` + filepath.ToSlash(src) + `"
 void __kml_dtoa(char *buf, double v) { (void)buf; (void)v; }
 long long __kml_toprimitive(long long v, signed char h) { (void)h; return v; }
 double __kml_any_tonum(long long v) { (void)v; return 0; }
@@ -82,10 +87,18 @@ long long __kml_dynobj_get(char *o, const char *k) { (void)o; (void)k; return 10
 void *__kml_inspect_begin(long long d, long long n) { (void)d; (void)n; return 0; }
 void __kml_inspect_push(void *l, char *e) { (void)l; (void)e; }
 void __kml_inspect_push_more(void *l, long long r) { (void)l; (void)r; }
+void __kml_inspect_push_holes(void *l, long long n) { (void)l; (void)n; }
+int __kml_shape_expando_delete(void *o, const char *k) { (void)o; (void)k; return 0; }
+int __kml_shape_expando_get(void *o, const char *k, long long *v) { (void)o; (void)k; (void)v; return 0; }
+const char *__kml_shape_expando_key(void *o, long long i) { (void)o; (void)i; return 0; }
+void __kml_shape_expando_set(void *o, const char *k, long long v) { (void)o; (void)k; (void)v; }
 char *__kml_inspect_end(void *l, const char *o, const char *c, long long i, long long d, long long a, long long n) { (void)l; (void)o; (void)c; (void)i; (void)d; (void)a; (void)n; return 0; }
 char *__kml_inspect_quote(const char *s) { (void)s; return 0; }
 _Bool __kml_key_is_symbol(const char *k) { (void)k; return 0; }
 char *__kml_fn_inspect_dyn(void **r, long long d) { (void)r; (void)d; return 0; }
+const char *__kml_fn_tag_dyn(void **r) { (void)r; return "Function"; }
+const char *__kml_error_frames_shown(void *o) { (void)o; return 0; }
+const char *__kml_error_stack_assigned(void *o) { (void)o; return 0; }
 char *__kml_boxed_bigint_str(void *c) { (void)c; return 0; }
 const char *__kml_classref_shown(void *p) { (void)p; return 0; }
 long long __kml_classref_nstatic(void *p) { (void)p; return 0; }
@@ -95,12 +108,14 @@ long long __kml_obj_nkeys(void *o) { (void)o; return -1; }
 const char *__kml_obj_key(void *o, long long i) { (void)o; (void)i; return 0; }
 long long __kml_obj_get(void *o, const char *k) { (void)o; (void)k; return 10; }
 int __kml_obj_has(void *o, const char *k) { (void)o; (void)k; return 0; }
+int __kml_obj_accessor(void *o, const char *k) { (void)o; (void)k; return 0; }
 const char *__kml_obj_name(void *o) { (void)o; return 0; }
 char *__kml_host_inspect(void *c, long long d) { (void)c; (void)d; return 0; }
 char *__kml_host_tojson(void *c) { (void)c; return 0; }
 long long __kml_inspect_opt_compact = 3, __kml_inspect_opt_sorted = 0, __kml_inspect_opt_depth = 2, __kml_inspect_opt_break = 80, __kml_inspect_opt_maxarr = 100, __kml_inspect_opt_custom = 1;
 char *__kml_host_class_tag(void *c) { (void)c; return 0; }
 void *__kml_dynobj_get_proto(void *o) { (void)o; return 0; }
+char **__kml_dynobj_keys_enum_c(void *o, long long *n) { (void)o; *n = 0; return 0; }
 long long __kml_promise_inspect_parts(void *o, long long *out) { (void)o; (void)out; return -1; }
 char *__kml_error_inspect(void *o) { (void)o; return 0; }
 int __kml_error_option_cause(void *o, long long *out) { (void)o; (void)out; return 0; }
@@ -111,6 +126,23 @@ char __kml_array_integrity_any;
 long long __kml_array_level(void *h) { (void)h; return 0; }
 void __kml_array_set_level(void *h, long long l) { (void)h; (void)l; }
 void __kml_array_guard(void *h, long long op, long long a, long long b) { (void)h; (void)op; (void)a; (void)b; }
+void __kml_throw_nullderef(const char *m) { (void)m; abort(); }
+unsigned char __kml_any_tobool(long long v) { (void)v; return 0; }
+long long __kml_dynarr_len(void *a) { (void)a; return 0; }
+int __kml_dynarr_is_hole(void *a, long long i) { (void)a; (void)i; return 0; }
+void __kml_dynarr_delete_index(void *a, long long i) { (void)a; (void)i; }
+long long __kml_dynarr_get_by_key(void *a, const char *k) { (void)a; (void)k; return 10; }
+int __kml_dynarr_set_by_key(void *a, const char *k, long long v) { (void)a; (void)k; (void)v; return 0; }
+void *__kml_dynobj_new(void) { return 0; }
+void __kml_dynobj_set(void *o, const char *k, long long v) { (void)o; (void)k; (void)v; }
+int __kml_shape_expando_attrs(void *o, const char *k) { (void)o; (void)k; return -1; }
+long long __kml_shape_expando_raw(void *o, const char *k) { (void)o; (void)k; return 10; }
+void __kml_shape_expando_define(void *o, const char *k, long long v, int a) { (void)o; (void)k; (void)v; (void)a; }
+int __kml_shape_expando_get_recv(void *o, const char *k, long long r, long long *v) { (void)o; (void)k; (void)r; (void)v; return 0; }
+int __kml_shape_expando_put(void *o, const char *k, long long v, long long r) { (void)o; (void)k; (void)v; (void)r; return -1; }
+int __kml_shape_has_field(void *o, const char *k) { (void)o; (void)k; return 0; }
+char *__kml_str_index(const char *s, long long i) { (void)s; (void)i; return 0; }
+long long __kml_str_u16len_slow(const char *s) { (void)s; return 0; }
 int main(void) {
     printf("kjbox %zu %zu %zu %zu %zu %zu %zu %zu %zu\n", sizeof(KjBox), offsetof(KjBox, hdr), offsetof(KjBox, kind),
            offsetof(KjBox, typed), offsetof(KjBox, ikind), offsetof(KjBox, ityped), offsetof(KjBox, esize),
@@ -130,7 +162,7 @@ int main(void) {
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
 	}
-	if out, err := exec.Command(clang, "-w", fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", (&Emitter{}).arrayHeaderWord()), "-o", exe, probe).CombinedOutput(); err != nil {
+	if out, err := exec.Command(clang, "-w", fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", (&Emitter{}).arrayHeaderWord()), fmt.Sprintf("-DKML_ARGS_HDR_WORD=%dLL", (&Emitter{}).argumentsHeaderWord()), "-o", exe, probe).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	out, err := exec.Command(exe).Output()
@@ -189,9 +221,13 @@ var sidecarExterns = map[string]struct {
 	provider string   // the Go ensure function that links the file
 	externs  []string // symbols the C file declares extern, sorted
 }{
+	"buffillsrc/buffill.c": {
+		provider: "ensureBufFill (buffill_c.go): ensureDynJSONC (dynjson.c defines __kml_any_view_bytes, __kml_inspect_opts, __kml_received; ensureAnyOps __kml_any_tonum), ensureBufferCodecs (buffer_codecs.c)",
+		externs:  []string{"__kml_any_tonum", "__kml_any_view_bytes", "__kml_buf_decode_enc", "__kml_buf_is_encoding", "__kml_inspect_opts", "__kml_received"},
+	},
 	"dynjsonsrc/dynjson.c": {
-		provider: "ensureDynJSONC (dynjson_c.go): ensureArrayGuard, ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks; the __kml_obj_* hooks, __kml_promise_inspect_parts and __kml_error_inspect, __kml_host_inspect and __kml_host_tojson at finalize (emitObjHooksFinalize, emitHostBoxFinalize); __kml_error_option_cause and __kml_error_aggregate from errkeys.c, linked with it (UsesErrKeysC)",
-		externs:  []string{"__kml_any_tonum", "__kml_array_guard", "__kml_array_level", "__kml_array_set_level", "__kml_boxed_bigint_str", "__kml_classref_nstatic", "__kml_classref_sget", "__kml_classref_shown", "__kml_classref_skey", "__kml_dtoa", "__kml_dynobj_get", "__kml_dynobj_get_proto", "__kml_error_aggregate", "__kml_error_inspect", "__kml_error_option_cause", "__kml_fn_inspect_dyn", "__kml_host_class_tag", "__kml_host_inspect", "__kml_host_tojson", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_key_is_symbol", "__kml_obj_get", "__kml_obj_has", "__kml_obj_inspect_custom", "__kml_obj_key", "__kml_obj_name", "__kml_obj_nkeys", "__kml_obj_tostring_tag", "__kml_promise_inspect_parts", "__kml_toprimitive"},
+		provider: "ensureDynJSONC (dynjson_c.go): ensureArrayGuard, ensureDtoa, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks, ensureStrHeaderRuntime (dynobj.c and dynarr.c come with ensureDynObj, the added-property table with the shape runtime); the __kml_obj_* hooks, __kml_promise_inspect_parts and __kml_error_inspect, __kml_host_inspect and __kml_host_tojson at finalize (emitObjHooksFinalize, emitHostBoxFinalize); __kml_error_option_cause and __kml_error_aggregate from errkeys.c, linked with it (UsesErrKeysC); __kml_error_frames_shown and __kml_error_stack_assigned from frames.c, always linked",
+		externs:  []string{"__kml_any_tobool", "__kml_any_tonum", "__kml_array_guard", "__kml_array_level", "__kml_array_set_level", "__kml_boxed_bigint_str", "__kml_classref_nstatic", "__kml_classref_sget", "__kml_classref_shown", "__kml_classref_skey", "__kml_dtoa", "__kml_dynarr_delete_index", "__kml_dynarr_get_by_key", "__kml_dynarr_is_hole", "__kml_dynarr_len", "__kml_dynarr_set_by_key", "__kml_dynobj_get", "__kml_dynobj_get_proto", "__kml_dynobj_keys_enum_c", "__kml_dynobj_new", "__kml_dynobj_set", "__kml_error_aggregate", "__kml_error_frames_shown", "__kml_error_inspect", "__kml_error_option_cause", "__kml_error_stack_assigned", "__kml_fn_inspect_dyn", "__kml_fn_tag_dyn", "__kml_host_class_tag", "__kml_host_inspect", "__kml_host_tojson", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_holes", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_key_is_symbol", "__kml_obj_accessor", "__kml_obj_get", "__kml_obj_has", "__kml_obj_inspect_custom", "__kml_obj_key", "__kml_obj_name", "__kml_obj_nkeys", "__kml_obj_tostring_tag", "__kml_promise_inspect_parts", "__kml_shape_expando_attrs", "__kml_shape_expando_define", "__kml_shape_expando_delete", "__kml_shape_expando_get", "__kml_shape_expando_get_recv", "__kml_shape_expando_key", "__kml_shape_expando_put", "__kml_shape_expando_raw", "__kml_shape_expando_set", "__kml_shape_has_field", "__kml_str_index", "__kml_toprimitive"},
 	},
 }
 

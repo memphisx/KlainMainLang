@@ -21,6 +21,7 @@ import { _kmlOnWarning, _kmlSetWarningSink } from './internal_process_warning';
 import * as methods from './internal_process_methods';
 import * as penv from './internal_process_env';
 import * as phr from './internal_process_hrtime';
+import { __kml_process_nextTick } from './internal_process_tick';
 import { NodeError } from './internal_errors';
 
 const kExit = 0;
@@ -76,7 +77,7 @@ function startListeningIfLifecycle(type: any): void {
                 // is not an Error is reported as an UnhandledPromiseRejection.
                 let reported: any = err;
                 if (!(err instanceof Error)) {
-                    reported = new NodeError('ERR_UNHANDLED_REJECTION', 'This error originated either by throwing inside of an async function without a catch block, ' +
+                    reported = NodeError('ERR_UNHANDLED_REJECTION', 'This error originated either by throwing inside of an async function without a catch block, ' +
                         'or by rejecting a promise which was not handled with .catch(). The promise rejected with the reason "' + String(err) + '".');
                     reported.name = 'UnhandledPromiseRejection';
                 }
@@ -125,6 +126,14 @@ function setupChannel(p: any, fd: number): void {
 // The process object: an EventEmitter whose exitCode is the one the
 // program exits with.
 class ProcessObject extends EventEmitter {
+    get title(): string {
+        return __kml_native.processTitle();
+    }
+
+    set title(value: string) {
+        __kml_native.processSetTitle(String(value));
+    }
+
     get exitCode(): any {
         return penv.getExitCode();
     }
@@ -145,6 +154,7 @@ export function _kmlProcess(): any {
     hrtime.bigint = phr.hrtimeBigint;
     p.hrtime = hrtime;
     p.kill = methods.kill;
+    p.nextTick = __kml_process_nextTick;
     const memoryUsage: any = methods.memoryUsage;
     memoryUsage.rss = methods.memoryUsageRss;
     p.memoryUsage = memoryUsage;

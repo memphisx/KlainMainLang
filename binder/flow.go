@@ -268,7 +268,7 @@ func trackedForAssignment(sym *Symbol) bool {
 		return false
 	}
 	v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
-	return ok && !v.Ambient && v.Init == nil && v.TypeAnnot != nil && !ExemptFromAssignment(v.TypeAnnot)
+	return ok && !v.Ambient && !v.Definite && v.Init == nil && v.TypeAnnot != nil && !ExemptFromAssignment(v.TypeAnnot)
 }
 
 // alwaysTrue reports whether a loop condition never ends the loop: absent,
@@ -531,3 +531,89 @@ func (b *Binding) Exported(n ast.Node) bool { return b.exported[n] }
 // EndFlow is the flow node at the end of a function's body, or nil when no
 // path reaches it.
 func (b *Binding) EndFlow(body *ast.BlockStatement) *FlowNode { return b.endFlow[body] }
+
+// GuardedSinceStore reports a read of a local every path to which passes a
+// condition excluding undefined on it (`x`, `x !== undefined`, `x != null`,
+// a typeof test; `!x`, `x === undefined`, `x == null` on the false branch)
+// after the binding's last store: the value read is present whatever was
+// stored, an index read that may miss included.
+func (b *Binding) GuardedSinceStore(id *ast.Identifier) bool {
+	sym := b.refs[id]
+	f := b.refFlow[id]
+	if sym == nil || f == nil || b.written[id] || b.refContainer[id] != containerOf(sym.Scope) || b.foreignStores[sym] {
+		return false
+	}
+	seen := map[*FlowNode]bool{}
+	stack := []*FlowNode{f}
+	for len(stack) > 0 {
+		f := stack[len(stack)-1]
+		stack = stack[:len(stack)-1]
+		for f != nil && f.Flags&FlowUnreachable == 0 && !seen[f] {
+			seen[f] = true
+			switch {
+			case f.Flags&FlowAssignment != 0:
+				if f.Symbol == sym {
+					return false // a store before any guard
+				}
+				f = f.Antecedent
+			case f.Flags&(FlowTrueCondition|FlowFalseCondition) != 0:
+				if c, ok := f.Node.(ast.Expression); ok && b.excludesUndefined(c, sym, f.Flags&FlowTrueCondition != 0) {
+					f = nil // this path is guarded
+					continue
+				}
+				f = f.Antecedent
+			case f.Flags&(FlowSwitchClause|FlowCall|FlowPropertyAssignment) != 0:
+				f = f.Antecedent
+			case f.Flags&FlowScopeStart != 0 && f.Scope != sym.Scope:
+				f = f.Antecedent // an inner block's entry
+			case f.Flags&(FlowStart|FlowScopeStart) != 0:
+				return false
+			default:
+				stack = append(stack, f.Antecedents...)
+				f = nil
+			}
+		}
+	}
+	return true
+}
+
+// excludesUndefined reports a condition that, taking the given branch,
+// rules undefined out of sym.
+func (b *Binding) excludesUndefined(c ast.Expression, sym *Symbol, branch bool) bool {
+	isSym := func(e ast.Expression) bool {
+		id, ok := e.(*ast.Identifier)
+		return ok && b.refs[id] == sym
+	}
+	absent := func(e ast.Expression, loose bool) bool {
+		n, ok := e.(*ast.NullLiteral)
+		return ok && (n.IsUndefined && b.undefinedRefs[n] == nil || loose && !n.IsUndefined)
+	}
+	switch x := c.(type) {
+	case *ast.Identifier:
+		return branch && isSym(x)
+	case *ast.UnaryExpression:
+		return x.Op == "!" && !branch && isSym(x.Arg)
+	case *ast.BinaryExpression:
+		l, r := x.Left, x.Right
+		if !isSym(l) {
+			l, r = r, l
+		}
+		if u, ok := l.(*ast.UnaryExpression); ok && u.Op == "typeof" && isSym(u.Arg) {
+			s, isStr := r.(*ast.StringLiteral)
+			if !isStr || s.Value == "undefined" {
+				return false
+			}
+			return (x.Op == "===" || x.Op == "==") == branch
+		}
+		if !isSym(l) {
+			return false
+		}
+		switch x.Op {
+		case "!==", "!=":
+			return branch && absent(r, x.Op == "!=")
+		case "===", "==":
+			return !branch && absent(r, x.Op == "==")
+		}
+	}
+	return false
+}

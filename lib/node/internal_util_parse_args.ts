@@ -54,7 +54,7 @@ function received(value: any): string {
 
 function invalidArgType(name: string, expected: string, value: any): NodeTypeError {
     const kind = name.indexOf('.') >= 0 ? 'property' : 'argument';
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" ' + kind + ' must be ' + expected + '. ' + received(value));
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" ' + kind + ' must be ' + expected + '. ' + received(value));
 }
 
 function validateArray(v: any, name: string): void {
@@ -84,12 +84,12 @@ function validateBooleanArray(v: any, name: string): void {
 }
 
 function invalidOptionValue(message: string): NodeTypeError {
-    return new NodeTypeError('ERR_PARSE_ARGS_INVALID_OPTION_VALUE', message);
+    return NodeTypeError('ERR_PARSE_ARGS_INVALID_OPTION_VALUE', message);
 }
 
 function unknownOption(option: string, allowPositionals: boolean): NodeTypeError {
     const suggestDashDash = allowPositionals ? ". To specify a positional argument starting with a '-', place it at the end of the command after '--', as in '-- " + JSON.stringify(option) : '';
-    return new NodeTypeError('ERR_PARSE_ARGS_UNKNOWN_OPTION', "Unknown option '" + option + "'" + suggestDashDash);
+    return NodeTypeError('ERR_PARSE_ARGS_UNKNOWN_OPTION', "Unknown option '" + option + "'" + suggestDashDash);
 }
 
 function isOptionValue(value: any): boolean {
@@ -290,13 +290,13 @@ export function parseArgs(config: any = {}): any {
         validateObject(optionConfig, 'options.' + longOption);
         const optionType = objectGetOwn(optionConfig, 'type');
         if (optionType !== 'string' && optionType !== 'boolean') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.' + longOption + ".type\" property must be ('string|boolean'). " + received(optionType));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.' + longOption + ".type\" property must be ('string|boolean'). " + received(optionType));
         }
         if (hasOwn(optionConfig, 'short')) {
             const shortOption = optionConfig.short;
             validateString(shortOption, 'options.' + longOption + '.short');
             if (shortOption.length !== 1) {
-                throw new NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'options." + longOption + ".short' must be a single character. Received '" + shortOption + "'");
+                throw NodeTypeError('ERR_INVALID_ARG_VALUE', "The property 'options." + longOption + ".short' must be a single character. Received '" + shortOption + "'");
             }
         }
         const multipleOption = objectGetOwn(optionConfig, 'multiple');
@@ -330,7 +330,7 @@ export function parseArgs(config: any = {}): any {
             storeOption(token, options, values, allowNegative);
         } else if (token.kind === 'positional') {
             if (!allowPositionals) {
-                throw new NodeTypeError('ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL', "Unexpected argument '" + token.value + "'. This command does not take positional arguments");
+                throw NodeTypeError('ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL', "Unexpected argument '" + token.value + "'. This command does not take positional arguments");
             }
             positionals.push(token.value);
         }

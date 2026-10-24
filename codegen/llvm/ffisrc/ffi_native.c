@@ -54,7 +54,7 @@ static long long box_num(double d) {
 }
 
 static long long box_bigint(void *b) {
-    long long *cell = (long long *)malloc(16);
+    long long *cell = (long long *)kml_alloc(KML_HEAP_WORDS, 16);
     cell[0] = KML_BOXED_BIGINT_MAGIC;
     cell[1] = (long long)(intptr_t)b;
     return (long long)(intptr_t)cell | 1;
@@ -108,7 +108,7 @@ double __kml_native_ffi_open(char *path, _Bool isNull) {
     if (__kml_ffi_open(isNull ? NULL : path, &lib) != 0) return -1;
     if (nlibs == caplibs) {
         int nc = caplibs ? caplibs * 2 : 8;
-        KmlFfiLib **nt = (KmlFfiLib **)calloc((size_t)nc, sizeof *nt);
+        KmlFfiLib **nt = (KmlFfiLib **)calloc((size_t)nc, sizeof *nt); /* scratch */
         if (libs) memcpy(nt, libs, (size_t)caplibs * sizeof *nt);
         libs = nt;
         caplibs = nc;
@@ -175,10 +175,10 @@ double __kml_native_ffi_count(double id, _Bool functions) {
     if (!lib) return -1;
     long long n = __kml_ffi_count(lib, functions ? 1 : 0);
     if (n < 0) return -1;
-    free(list_names);
-    free(list_vals);
-    list_names = (char **)calloc((size_t)(n ? n : 1), sizeof *list_names);
-    list_vals = (void **)calloc((size_t)(n ? n : 1), sizeof *list_vals);
+    free(list_names); /* scratch */
+    free(list_vals); /* scratch */
+    list_names = (char **)calloc((size_t)(n ? n : 1), sizeof *list_names); /* scratch */
+    list_vals = (void **)calloc((size_t)(n ? n : 1), sizeof *list_vals); /* scratch */
     list_n = n;
     __kml_ffi_list(lib, functions ? 1 : 0, list_names, list_vals);
     return (double)n;
@@ -188,7 +188,7 @@ char *__kml_native_ffi_list_name(double i) {
     long long k = (long long)i;
     if (k < 0 || k >= list_n) return kml_string("", 0);
     char *n = list_names[k];
-    return kml_string(n, (size_t)*(long long *)(n - 8));
+    return kml_string(n, (size_t)KML_STR_LEN(n));
 }
 
 /* A `symbols` entry's address, or a `functions` entry's symbol address. */
@@ -216,33 +216,33 @@ static int ncifs, capcifs;
 
 /* A call interface for the kinds "ret:a,b,…": its id, or -1. */
 double __kml_native_ffi_cif(char *spec) {
-    KCif *c = (KCif *)calloc(1, sizeof *c);
+    KCif *c = (KCif *)calloc(1, sizeof *c); /* scratch */
     char *p = spec;
     c->ret = (int)strtol(p, &p, 10);
     int cap = 8;
-    c->kinds = (int *)calloc((size_t)cap, sizeof *c->kinds);
+    c->kinds = (int *)calloc((size_t)cap, sizeof *c->kinds); /* scratch */
     if (*p == ':') p++;
     while (*p) {
         if (c->nargs == cap) {
             cap *= 2;
-            c->kinds = (int *)realloc(c->kinds, (size_t)cap * sizeof *c->kinds);
+            c->kinds = (int *)realloc(c->kinds, (size_t)cap * sizeof *c->kinds); /* scratch */
         }
         c->kinds[c->nargs++] = (int)strtol(p, &p, 10);
         if (*p == ',') p++;
         else break;
     }
-    c->args = (ffi_type **)calloc((size_t)(c->nargs ? c->nargs : 1), sizeof *c->args);
+    c->args = (ffi_type **)calloc((size_t)(c->nargs ? c->nargs : 1), sizeof *c->args); /* scratch */
     for (int i = 0; i < c->nargs; i++) c->args[i] = kind_type(c->kinds[i]);
     if (ffi_prep_cif(&c->cif, FFI_DEFAULT_ABI, (unsigned)c->nargs, kind_type(c->ret), c->args) != FFI_OK) {
-        free(c->args);
-        free(c->kinds);
-        free(c);
+        free(c->args); /* scratch */
+        free(c->kinds); /* scratch */
+        free(c); /* scratch */
         return -1;
     }
     pthread_mutex_lock(&cif_mu);
     if (ncifs == capcifs) {
         int nc = capcifs ? capcifs * 2 : 16;
-        KCif **nt = (KCif **)calloc((size_t)nc, sizeof *nt);
+        KCif **nt = (KCif **)calloc((size_t)nc, sizeof *nt); /* scratch */
         if (cifs) memcpy(nt, cifs, (size_t)capcifs * sizeof *nt);
         cifs = nt;
         capcifs = nc;
@@ -379,20 +379,20 @@ static void closure_handler(ffi_cif *cif, void *ret, void **args, void *user) {
 double __kml_native_ffi_closure(double cifId, void *inv, void *clo) {
     KCif *c = cif_get(cifId);
     if (!c) return 0;
-    KClosure *k = (KClosure *)calloc(1, sizeof *k);
+    KClosure *k = (KClosure *)calloc(1, sizeof *k); /* scratch */
     k->cif = c;
     k->inv = inv;
     k->clo = clo;
     k->closure = (ffi_closure *)ffi_closure_alloc(sizeof(ffi_closure), &k->code);
     if (!k->closure || ffi_prep_closure_loc(k->closure, &c->cif, closure_handler, k, k->code) != FFI_OK) {
         if (k->closure) ffi_closure_free(k->closure);
-        free(k);
+        free(k); /* scratch */
         return 0;
     }
     pthread_mutex_lock(&clo_mu);
     if (nclos == capclos) {
         int nc = capclos ? capclos * 2 : 16;
-        KClosure **nt = (KClosure **)calloc((size_t)nc, sizeof *nt);
+        KClosure **nt = (KClosure **)calloc((size_t)nc, sizeof *nt); /* scratch */
         if (clos) memcpy(nt, clos, (size_t)capclos * sizeof *nt);
         clos = nt;
         capclos = nc;
@@ -416,7 +416,7 @@ void __kml_native_ffi_closure_free(double code) {
     pthread_mutex_unlock(&clo_mu);
     if (k) {
         ffi_closure_free(k->closure);
-        free(k);
+        free(k); /* scratch */
     }
 }
 

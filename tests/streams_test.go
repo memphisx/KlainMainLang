@@ -617,6 +617,51 @@ http.listen(18651, async (req: HttpRequest) => {
 	}
 }
 
+func TestE2EStreamsRequestBodyPipelinedPastCap(t *testing.T) {
+	// A request past the cap pipelined behind one still being answered: its
+	// bytes wait for the first response, then stream to the second handler
+	// along with the rest read after.
+	src := `
+import http from 'klain:http';
+async function count(req: HttpRequest): Promise<string> {
+  let total = 0;
+  for await (const chunk of req.stream()) total = total + chunk.length;
+  return total + " bytes";
+}
+http.listen(18658, async (req: HttpRequest) => {
+  if (req.path === '/slow') {
+    await new Promise<void>((resolve) => { setTimeout(resolve, 200); });
+    return { status: 200, body: "slow" };
+  }
+  return { status: 200, body: await count(req) };
+}, { host: '127.0.0.1' });
+`
+	port := startHTTPServer(t, src, 18658)
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.Close()
+	const n = 12 * 1024 * 1024
+	go func() {
+		fmt.Fprintf(conn, "GET /slow HTTP/1.1\r\nHost: x\r\n\r\nPOST /count HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", n)
+		conn.Write(bytes.Repeat([]byte("z"), n))
+	}()
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
+	br := bufio.NewReader(conn)
+	for _, want := range []string{"slow", "12582912 bytes"} {
+		resp, err := http.ReadResponse(br, nil)
+		if err != nil {
+			t.Fatalf("reading the response with %q: %v", want, err)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if string(got) != want {
+			t.Fatalf("body = %q, want %q", got, want)
+		}
+	}
+}
+
 func TestE2EStreamsRequestBodyExpectContinue(t *testing.T) {
 	// A client sending `Expect: 100-continue` holds the body until the server
 	// answers 100 Continue, as Node's server does unprompted. The body then
@@ -1118,5 +1163,112 @@ async function main() {
   for (;;) { const { done, value } = await tr.read(); if (done) break; console.log(value); }
 }
 main();
+`)
+}
+
+// An array chunk is the object enqueued, through tee, a TransformStream and
+// for await; a runtime-made chunk (a Response body's) is a Uint8Array.
+func TestE2EStreamsArrayChunkIdentity(t *testing.T) {
+	assertSameAsNode(t, `
+const chunk = new Uint8Array([1, 2, 3])
+const rs = new ReadableStream<Uint8Array>({ start(c) { c.enqueue(chunk); c.close() } })
+const [a, b] = rs.tee()
+const ra = await a.getReader().read(), rb = await b.getReader().read()
+console.log(ra.value === chunk, rb.value === chunk, ra.value)
+const ts = new TransformStream<Uint8Array, Uint8Array>()
+const w = ts.writable.getWriter(); w.write(chunk); w.close()
+for await (const c of ts.readable) console.log(c === chunk, c.length)
+const r = await new Response(new Uint8Array([104, 105])).body!.getReader().read()
+console.log(r.value)
+`)
+}
+
+// A typed stream read through a ReadableStream<any> view, or with the read
+// result annotated as ReadableStreamReadResult<any>, yields its chunks.
+func TestE2EStreamsReadAsAnyView(t *testing.T) {
+	assertSameAsNode(t, `
+const s = new ReadableStream<Uint8Array>({ start: (c) => { c.enqueue(new Uint8Array([104, 105])); c.close(); } });
+const a: any = s;
+(a as ReadableStream<any>).getReader().read().then((r) => { const v: any = r.value; console.log("A", typeof v, v.length); });
+const s4 = new ReadableStream<string>({ start: (c) => { c.enqueue("hey"); c.close(); } });
+s4.getReader().read().then((r: ReadableStreamReadResult<any>) => { const v: any = r.value; console.log("D", typeof v, v); });
+`)
+}
+
+// console.log of the WHATWG streams, their readers, writers and controllers,
+// as Node's custom inspect renders them (ADR-01718).
+func TestE2EStreamInspect(t *testing.T) {
+	assertSameAsNode(t, `let ctl: ReadableStreamDefaultController<number> | undefined;
+const rs = new ReadableStream<number>({ start(c) { ctl = c; c.enqueue(1); } });
+console.log(rs);
+const rd = rs.getReader();
+console.log(rs);
+console.log(rd);
+console.log(ctl);
+let wc!: WritableStreamDefaultController;
+const ws = new WritableStream<number>({ start(c) { wc = c; } });
+console.log(ws, wc);
+const w = ws.getWriter();
+console.log(w);
+console.log(new TransformStream());
+console.log({ a: { r: new ReadableStream().getReader() } });
+console.log({ a: { b: { c: new ReadableStream() } } });
+async function main() {
+  const closed = new ReadableStream({ start(c) { c.close(); } });
+  const errored = new ReadableStream({ start(c) { c.error(new Error("x")); } });
+  await 0;
+  console.log([closed, errored]);
+  await w.close();
+  console.log(ws);
+  rd.releaseLock();
+  console.log(rd);
+}
+main();
+`)
+}
+
+// A ReadableStream boxed into any keeps its members, its rendering and its
+// identity (ADR-01718).
+func TestE2EReadableStreamThroughAny(t *testing.T) {
+	assertSameAsNode(t, `const rs: any = new ReadableStream({ start(c) { c.enqueue(1); c.close(); } });
+console.log(rs instanceof ReadableStream, typeof rs, Object.prototype.toString.call(rs));
+console.log(typeof rs.getReader, typeof rs.tee, rs.locked);
+console.log(rs);
+const typed: ReadableStream<number> = rs;
+console.log(typed === rs);
+typed.getReader().read().then((r) => console.log(r, rs.locked));
+const ws: any = new WritableStream({ write(c) { console.log("w", c); } });
+console.log(ws.locked, typeof ws.getWriter);
+console.log(ws);
+const wr = ws.getWriter();
+wr.write(3).then(() => console.log("done", ws.locked));
+`)
+}
+
+// A released reader or writer is detached from its stream: its closed (and
+// ready) reject, its operations reject, and the stream takes a new one
+// (ADR-01718).
+func TestE2EStreamReleasedHandles(t *testing.T) {
+	assertSameAsNode(t, `const rs = new ReadableStream<number>({ start(c) { c.enqueue(1); } });
+const rd = rs.getReader();
+rd.closed.then(() => console.log("closed ok"), (e: any) => console.log("closed:", e.code, e.message));
+rd.releaseLock();
+console.log(rs.locked);
+rd.read().then((r) => console.log("read", r), (e: any) => console.log("read:", e.message));
+rd.releaseLock();
+rd.cancel().then(() => console.log("cancel ok"), (e: any) => console.log("cancel:", e.message));
+rs.getReader().read().then((r) => console.log("next reader", r));
+const pend = new ReadableStream();
+const pr = pend.getReader();
+pr.read().then((r) => console.log(r), (e: any) => console.log("pending read:", e.message));
+pr.releaseLock();
+const ws = new WritableStream<number>();
+const w = ws.getWriter();
+w.closed.catch((e: any) => console.log("wclosed:", e.message));
+w.releaseLock();
+w.ready.catch((e: any) => console.log("ready:", e.message));
+w.write(1).then(() => console.log("w ok"), (e: any) => console.log("write:", e.message));
+try { console.log(w.desiredSize); } catch (e) { console.log("desiredSize:", (e as Error).message); }
+ws.getWriter().write(2).then(() => console.log("next writer ok"));
 `)
 }

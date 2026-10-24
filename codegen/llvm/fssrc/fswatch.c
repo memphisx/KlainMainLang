@@ -14,7 +14,7 @@
 typedef long long i64;
 
 #define HSTR(s) ({ static const struct { long long n; char b[sizeof(s)]; } \
-    __attribute__((aligned(8))) h_ = { sizeof(s) - 1, s }; (void *)h_.b; })
+    __attribute__((aligned(8))) h_ = { KML_STR_ASCII_HDR(sizeof(s) - 1), s }; (void *)h_.b; })
 
 extern void __kml_fs_throw(void *opdesc, const char *syscall, const char *path);
 extern int __kml_errno_from_uv(int uv);
@@ -59,7 +59,7 @@ static watcher **reg;
 static i64 reg_len, reg_cap;
 
 static watcher *mkwatcher(i64 wd, const char *path) {
-    watcher *w = (watcher *)malloc(sizeof(watcher));
+    watcher *w = (watcher *)malloc(sizeof(watcher)); /* scratch */
     w->wd = wd;
     w->change_cb = w->rename_cb = 0;
     w->open = 1;
@@ -76,7 +76,7 @@ static watcher *mkwatcher(i64 wd, const char *path) {
 static void reg_add(watcher *w) {
     if (reg_len + 1 > reg_cap) {
         i64 nc = reg_cap * 2 > 8 ? reg_cap * 2 : 8;
-        reg = (watcher **)realloc(reg, (size_t)nc * sizeof(void *));
+        reg = (watcher **)realloc(reg, (size_t)nc * sizeof(void *)); /* scratch */
         reg_cap = nc;
     }
     reg[reg_len++] = w;
@@ -127,7 +127,7 @@ static void watch_tree(watcher *w, const char *rel);
 
 static char *join(const char *a, const char *b) {
     size_t la = strlen(a), lb = strlen(b);
-    char *r = (char *)malloc(la + lb + 2);
+    char *r = (char *)malloc(la + lb + 2); /* scratch */
     memcpy(r, a, la);
     r[la] = '/';
     memcpy(r + la + 1, b, lb + 1);
@@ -158,18 +158,18 @@ static void on_sub_event(void *data, const char *filename, int is_rename) {
         char *abs = join(w->name, rel);
         if (is_dir(abs) && !watching(w, rel))
             watch_tree(w, rel);
-        free(abs);
+        free(abs); /* scratch */
     }
     void *cb = is_rename ? w->rename_cb : w->change_cb;
     if (cb)
         fire(cb, is_rename ? HSTR("rename") : HSTR("change"), __kml_str_from_cstr(rel));
-    free(rel);
+    free(rel); /* scratch */
 }
 
 static void sub_add(watcher *w, struct sub *s) {
     if (w->nsubs + 1 > w->subs_cap) {
         i64 nc = w->subs_cap * 2 > 8 ? w->subs_cap * 2 : 8;
-        w->subs = (struct sub **)realloc(w->subs, (size_t)nc * sizeof(void *));
+        w->subs = (struct sub **)realloc(w->subs, (size_t)nc * sizeof(void *)); /* scratch */
         w->subs_cap = nc;
     }
     w->subs[w->nsubs++] = s;
@@ -179,15 +179,15 @@ static void sub_add(watcher *w, struct sub *s) {
  * below it; symbolic links are not followed, as Node's walk does not. */
 static void watch_tree(watcher *w, const char *rel) {
     char *abs = join(w->name, rel);
-    struct sub *s = (struct sub *)malloc(sizeof *s);
+    struct sub *s = (struct sub *)malloc(sizeof *s); /* scratch */
     s->w = w;
     s->rel = strdup(rel);
     int err = 0;
     s->h = __kml_loop_fs_event_start(abs, 0, on_sub_event, s, &err);
     if (!s->h) {
-        free(s->rel);
-        free(s);
-        free(abs);
+        free(s->rel); /* scratch */
+        free(s); /* scratch */
+        free(abs); /* scratch */
         return;
     }
     if (!w->refd)
@@ -203,13 +203,13 @@ static void watch_tree(watcher *w, const char *rel) {
             if (is_dir(ca)) {
                 char *cr = join(rel, e->d_name);
                 watch_tree(w, cr);
-                free(cr);
+                free(cr); /* scratch */
             }
-            free(ca);
+            free(ca); /* scratch */
         }
         closedir(d);
     }
-    free(abs);
+    free(abs); /* scratch */
 }
 
 /* The root's own events: a directory that appeared directly under it is
@@ -220,7 +220,7 @@ static void root_dir_added(watcher *w, const char *filename) {
     char *abs = join(w->name, filename);
     if (is_dir(abs) && !watching(w, filename))
         watch_tree(w, filename);
-    free(abs);
+    free(abs); /* scratch */
 }
 
 static void watch_children(watcher *w) {
@@ -234,7 +234,7 @@ static void watch_children(watcher *w) {
         char *ca = join(w->name, e->d_name);
         if (is_dir(ca))
             watch_tree(w, e->d_name);
-        free(ca);
+        free(ca); /* scratch */
     }
     closedir(d);
 }
@@ -245,7 +245,7 @@ void *__kml_fs_watch(const char *path, int recursive) {
     int err = 0;
     void *h = __kml_loop_fs_event_start(path, recursive, on_event, w, &err);
     if (!h) {
-        free(w);
+        free(w); /* scratch */
         /* libuv's number: -errno on POSIX, its own table on Windows (-4058) */
         errno = __kml_errno_from_uv(err);
         __kml_fs_throw(HSTR("cannot watch path"), HSTR("watch"), path);
@@ -268,8 +268,8 @@ void __kml_fswatch_close(void *wp) {
 #ifdef __linux__
     for (i64 i = 0; i < w->nsubs; i++) {
         __kml_loop_fs_event_stop(w->subs[i]->h);
-        free(w->subs[i]->rel);
-        free(w->subs[i]);
+        free(w->subs[i]->rel); /* scratch */
+        free(w->subs[i]); /* scratch */
     }
     w->nsubs = 0;
 #endif
@@ -305,10 +305,10 @@ static void tramp(void *env, void *ev, void *fname) {
 double __kml_native_fs_watch(const char *path, double flags, void *inv, void *clo) {
     int f = (int)flags;
     void *w = __kml_fs_watch(path, f & 1);
-    void **env = (void **)malloc(2 * sizeof(void *));
+    void **env = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     env[0] = inv;
     env[1] = clo;
-    void **cl = (void **)malloc(2 * sizeof(void *));
+    void **cl = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     cl[0] = (void *)tramp;
     cl[1] = env;
     __kml_fswatch_on(w, 0, cl);

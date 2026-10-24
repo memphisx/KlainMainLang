@@ -65,14 +65,13 @@ console.log(a.speak())
 `, "Rex barks lab true\nCat makes a sound")
 }
 
-func TestJSModeCtorFieldTypeConflictRejected(t *testing.T) {
-	_, err := compileCompatJS(`
-class C { constructor(f) { this.v = 1; this.v = "s" } }
-new C(0)
+// A constructor storing values of different types in one field: the field
+// holds any, as JavaScript allows (checkJs types it the same way).
+func TestE2EJSModeCtorFieldTypeConflict(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+class C { constructor(f) { this.v = 1; if (f) this.v = "s" } }
+console.log(new C(0).v, new C(1).v, typeof new C(1).v)
 `)
-	if err == nil || !strings.Contains(err.Error(), "assigned conflicting types") {
-		t.Fatalf("expected conflicting-types rejection, got: %v", err)
-	}
 }
 
 func TestE2EJSModeConflictingCallSitesWidenToAny(t *testing.T) {
@@ -223,6 +222,25 @@ console.log(d.__proto__ === Dog.prototype, Object.getPrototypeOf(Dog.prototype) 
 `, "Rex barks lab Rex\n[ 'name', 'breed' ]\ntrue true")
 }
 
+func TestE2EJSModeProtoCtorArity(t *testing.T) {
+	// A constructor function called with fewer arguments reads the missing
+	// ones as undefined; an extra one is evaluated, then dropped — through
+	// new and through Base.call(this, ...) alike.
+	assertSameAsNodeCompatJS(t, `
+function P(a, b) { this.a = a; this.b = b }
+let calls = 0
+function side() { calls++; return 9 }
+const p = new P()
+const q = new P(1)
+const r = new P(1, 2, side())
+console.log(p.a, p.b, q.a, q.b === undefined, r.a, r.b, calls, typeof p.a)
+function Q(a, b, c) { P.call(this, a); this.c = c }
+Q.prototype = Object.create(P.prototype)
+const s = new Q(5)
+console.log(s.a, s.b, s.c, Object.keys(s))
+`)
+}
+
 func TestE2EJSModeProtoMethodArgs(t *testing.T) {
 	// Method params are boxed; a missing argument reads undefined, and a
 	// missing method is undefined to read but TypeError to call — all JS.
@@ -236,18 +254,7 @@ console.log(g.greet("hello", "!"))
 console.log(g.greet("hi"))
 console.log(g.nope === undefined)
 try { g.nope() } catch (e) { console.log("caught:", e.message) }
-`, "hello, Thessaloniki!\nhi, Thessalonikiundefined\ntrue\ncaught: nope is not a function")
-}
-
-func TestJSModeProtoCtorDirectCallRejected(t *testing.T) {
-	_, err := compileCompatJS(`
-function Animal(name) { this.name = name }
-new Animal("x")
-Animal("y")
-`)
-	if err == nil || !strings.Contains(err.Error(), "prototype constructor") {
-		t.Fatalf("expected direct-call rejection, got: %v", err)
-	}
+`, "hello, Thessaloniki!\nhi, Thessalonikiundefined\ntrue\ncaught: g.nope is not a function")
 }
 
 func TestStrictModeProtoClassesOff(t *testing.T) {
@@ -601,4 +608,142 @@ console.log(JSON.stringify(fs.readFileSync(process.argv[2]).toString('utf8')));
 		t.Fatalf("run: %v\n%s", err, got)
 	}
 	compareLines(t, strings.TrimRight(string(got), "\n"), "\"xyz\\n\"\n\"xyz\\n\"")
+}
+
+// An object literal whose property contradicts the parameter's declared
+// type compiles; the value it cannot hold is a TypeError at run time.
+func TestE2EJSModeLiteralContradictsParam(t *testing.T) {
+	assertOutputCompatJS(t, `
+function f(o) { return o.argv }
+console.log(f({ argv: 'foo' }))
+const { Worker } = require('worker_threads')
+try { new Worker(process.argv[1], { argv: 'foo' }) } catch (e) { console.log(e.code, e.message) }
+`, "foo\nERR_INVALID_ARG_TYPE The \"options.argv\" property must be an instance of Array. Received type string ('foo')")
+}
+
+func TestE2ECompatJSNullIntoNumberBinding(t *testing.T) {
+	// -compat=js: a number binding later assigned null holds null, and so
+	// does a binding copied from it (ADR-01752).
+	assertOutputCompatJS(t, `
+var a = 1;
+var b = 0;
+for (var i = 0; i < 2; i++) { b = a; a = null; }
+console.log(a, b, a !== null);
+var c = true;
+c = undefined;
+console.log(c);
+var d = [1, 2];
+var e = d;
+d = null;
+console.log(d, e.length);
+`, "null null false\nundefined\nnull 2")
+}
+
+func TestE2ECompatJSBareSetForOfPush(t *testing.T) {
+	// -compat=js: a bare new Set()'s element type reaches an array its
+	// for-of loop pushes into (ADR-01752).
+	assertOutputCompatJS(t, `
+var set = new Set();
+set.add(0);
+set.add(1);
+var seen = [];
+for (var x of set) { seen.push(x); if (x === 0) { set.delete(1); set.add(1); } }
+console.log(seen, seen[0] + seen[1]);
+`, "[ 0, 1 ] 1")
+}
+
+func TestE2ECompatJSDefaultFromParam(t *testing.T) {
+	// -compat=js: a parameter defaulted from another one is held as a box,
+	// through a plain and an async function's result (ADR-01752).
+	assertOutputCompatJS(t, `
+var f = (x, y = x, z = y) => { return z; };
+console.log(f(3) + 1, f(1, "a"));
+var g = async (x, y = x) => { return y; };
+g(3).then(v => console.log(v + 1));
+`, "4 a\n4")
+}
+
+func TestE2ECompatJSDeleteResultBinding(t *testing.T) {
+	// -compat=js: delete's result held in a binding is a boolean (ADR-01753).
+	assertOutputCompatJS(t, `
+var o = {};
+Object.defineProperty(o, "foo", { value: 1, configurable: true });
+var d = delete o.foo;
+console.log(d, typeof d, o.hasOwnProperty("foo"));
+`, "true boolean false")
+}
+
+func TestE2ECompatJSClassInstanceComputedKey(t *testing.T) {
+	// -compat=js: a computed key into a class instance reads and writes its
+	// property by name (ADR-01756).
+	assertOutputCompatJS(t, `
+class C { x = 1; y = "s"; }
+var c = new C();
+for (const k of ["x", "y", "z"]) console.log(k, c[k]);
+var key = "x";
+c[key] = 5;
+console.log(c.x, c[key]);
+`, "x 1\ny s\nz undefined\n5 5")
+}
+
+func TestE2ECompatJSModuleGlobalBuiltinFunctionValue(t *testing.T) {
+	// -compat=js: a module var holding a builtin function is readable and
+	// callable from a function (ADR-01757).
+	assertOutputCompatJS(t, `
+var gopd = Object.getOwnPropertyDescriptor;
+var p = parseInt;
+function f(o, n) { return gopd(o, n).value + p("1"); }
+console.log(f({ a: 1 }, "a"), typeof JSON.stringify);
+`, "2 function")
+}
+
+func TestE2ECompatJSArrayHOFThisArg(t *testing.T) {
+	// -compat=js: an array method's thisArg is its callback's `this`, and a
+	// module var the callback assigns is a global (ADR-01759).
+	assertOutputCompatJS(t, `
+var result;
+function cb(v) { result = this.res; }
+[1].forEach(cb, { res: true });
+var o = { k: 10 };
+console.log(result, [1, 2, 3].map(function (v, i) { return v * this.k + i; }, o).join(","),
+  [1, 2, 3].find(function (v) { return v === this.k; }, { k: 2 }),
+  [1, 2].flatMap(function (v) { return [v, this.k]; }, { k: 0 }).join(","));
+`, "true 10,21,32 2 1,0,2,0")
+}
+
+func TestE2ECompatJSNonCallableArrayCallback(t *testing.T) {
+	// -compat=js: a callback that is not a function throws Node's TypeError
+	// before iterating (ADR-01761).
+	assertOutputCompatJS(t, `
+function t(fn) { try { fn(); console.log("no throw"); } catch (e) { console.log(e.constructor.name, e.message); } }
+t(function () { new Array(3).reduce(null); });
+t(function () { [1].filter(undefined); });
+t(function () { [].some(5); });
+`, "TypeError object null is not a function\nTypeError undefined is not a function\nTypeError number 5 is not a function")
+}
+
+func TestE2ECompatJSSymbolToNumberThrows(t *testing.T) {
+	// -compat=js: a Symbol where a number is taken is Node's run-time
+	// TypeError, not a compile error (ADR-01762).
+	assertOutputCompatJS(t, `
+function t(fn) { try { console.log(fn()); } catch (e) { console.log(e.constructor.name, e.message); } }
+var s = Symbol("k");
+t(function () { return [1].includes(1, s); });
+t(function () { return "abc".charAt(s); });
+`, "TypeError Cannot convert a Symbol value to a number\nTypeError Cannot convert a Symbol value to a number")
+}
+
+func TestE2ECompatJSInstanceofBuiltinCtors(t *testing.T) {
+	// -compat=js: instanceof Object/Function/Symbol on any value, and a
+	// builtin constructor held in a variable (ADR-01763).
+	assertSameAsNodeCompatJS(t, `
+var f = function () {}; class K {} var o = {}; var a = []; var n = Object.create(null); var s = Symbol("q");
+var j = JSON.parse('{"x":[1]}'); var c = Object.create(Object.create(null));
+console.log(f instanceof Function, K instanceof Function, o instanceof Function, j instanceof Function);
+console.log(o instanceof Object, n instanceof Object, j instanceof Object, j.x instanceof Object, c instanceof Object, Object.prototype instanceof Object, s instanceof Symbol);
+function chk(F) {
+  return [f instanceof F, K instanceof F, o instanceof F, a instanceof F, n instanceof F, 5 instanceof F, new Map() instanceof F, new TypeError("x") instanceof F].join(",");
+}
+console.log(chk(Function), chk(Object), chk(Array), chk(Map), chk(Error));
+`)
 }

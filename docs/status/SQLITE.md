@@ -2,7 +2,7 @@
 
 # SQLite (node:sqlite)
 
-> Part of the [Implementation Status](README.md) index. Node's built-in `node:sqlite` module — a synchronous, dependency-free SQL database. Import-gated (`import { DatabaseSync } from 'node:sqlite'`). Backed by the system `libsqlite3` (linked only when a program imports the module, the same posture as `fetch`/libcurl); `DatabaseSync`/`StatementSync` block like `fs.readFileSync`, so no `async`/`await` is involved. See [ADR-00540](../adr/ADR-00540.md)/[TDD-00151](../tdd/TDD-00151.md).
+> Part of the [Implementation Status](README.md) index. Node's built-in `node:sqlite` module — a synchronous, dependency-free SQL database. Import-gated (`import { DatabaseSync } from 'node:sqlite'`). Backed by the system `libsqlite3` (linked only when a program imports the module, the same posture as `fetch`/libcurl); `DatabaseSync`/`StatementSync` block like `fs.readFileSync`, so no `async`/`await` is involved. See [ADR-00540](../adr/00/ADR-00540.md)/[TDD-00151](../tdd/TDD-00151.md).
 
 **Coverage**: 18/18 (100%) · **Strict Coverage**: 16/18 (~89%).
 
@@ -10,7 +10,7 @@ Format: [Status page format](README.md#status-page-format).
 
 | API | Status | Caveats | Notes |
 |---|---|---|---|
-| `new DatabaseSync(path, options?)` | ✅ | | • `lib/node/sqlite.ts`, ported from Node v24's src/node_sqlite.cc ([ADR-01304](../adr/ADR-01304.md)): path as a string, `Uint8Array` or `file:` URL; `open`, `readOnly`, `enableForeignKeyConstraints`, `enableDoubleQuotedStringLiterals`, `allowExtension`, `timeout`, `readBigInts`, `returnArrays`, `allowBareNamedParameters`, `allowUnknownNamedParameters`, `defensive`, validated with Node's errors |
+| `new DatabaseSync(path, options?)` | ✅ | | • `lib/node/sqlite.ts`, ported from Node v24's src/node_sqlite.cc ([ADR-01304](../adr/01/ADR-01304.md)): path as a string, `Uint8Array` or `file:` URL; `open`, `readOnly`, `enableForeignKeyConstraints`, `enableDoubleQuotedStringLiterals`, `allowExtension`, `timeout`, `readBigInts`, `returnArrays`, `allowBareNamedParameters`, `allowUnknownNamedParameters`, `defensive`, validated with Node's errors |
 | `db.open()` / `db.close()` / `db.isOpen` / `db.isTransaction` / `db[Symbol.dispose]()` | ✅ | | • Closing finalizes the database's statements: using one after is `ERR_INVALID_STATE` (`statement has been finalized`) |
 | `db.exec(sql)` / `db.prepare(sql)` → `StatementSync` | ✅ | | |
 | `db.location(dbName?)` | ✅ | | • The backing file, or `null` for an in-memory/temp database |

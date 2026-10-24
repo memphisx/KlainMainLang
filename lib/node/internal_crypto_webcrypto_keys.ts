@@ -96,7 +96,7 @@ export function usagesUnion(set: string[], usages: string[]): string[] {
 export function validateKeyOps(keyOps: any, usages: string[] | undefined): void {
     if (keyOps === undefined) return;
     if (!Array.isArray(keyOps)) {
-        const e: any = new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "keyData.key_ops" property must be an instance of Array.');
+        const e: any = NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "keyData.key_ops" property must be an instance of Array.');
         throw e;
     }
     let opsMask = 0;

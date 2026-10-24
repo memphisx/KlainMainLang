@@ -29,28 +29,28 @@ function received(v: any): string {
 
 function checkListener(listener: any): void {
     if (typeof listener !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "listener" argument must be of type function.' + received(listener));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "listener" argument must be of type function.' + received(listener));
     }
 }
 
 function validateNumber(value: any, name: string, min: number): void {
     if (typeof value !== 'number') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
     }
     if (value < min || Number.isNaN(value)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be a non-negative number. Received ' + inspect(value));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be a non-negative number. Received ' + inspect(value));
     }
 }
 
 function validateInteger(value: any, name: string, min: number): void {
     if (typeof value !== 'number') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type number.' + received(value));
     }
     if (!Number.isInteger(value)) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be an integer. Received ' + inspect(value));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be an integer. Received ' + inspect(value));
     }
     if (value < min || value > Number.MAX_SAFE_INTEGER) {
-        throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be >= ' + min + ' && <= ' + Number.MAX_SAFE_INTEGER + '. Received ' + inspect(value));
+        throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be >= ' + min + ' && <= ' + Number.MAX_SAFE_INTEGER + '. Received ' + inspect(value));
     }
 }
 
@@ -194,7 +194,21 @@ function _listeners(target: any, type: string | symbol, unwrap: boolean): Functi
     return unwrap ? unwrapListeners(evlistener) : arrayClone(evlistener);
 }
 
-export class EventEmitter<T = any> {
+// @types/node's event-map typing: with no map every event takes any
+// arguments; with one, each event takes its tuple's.
+type EventMap<T> = Record<keyof T, any[]> | DefaultEventMap;
+type DefaultEventMap = [never];
+type AnyRest = [...args: any[]];
+type Args<K, T> = T extends DefaultEventMap ? AnyRest : (K extends keyof T ? T[K] : never);
+type Key<K, T> = T extends DefaultEventMap ? string | symbol : K | keyof T;
+type Key2<K, T> = T extends DefaultEventMap ? string | symbol : K & keyof T;
+type Listener<K, T, F> = T extends DefaultEventMap ? F : (
+    K extends keyof T ? (T[K] extends unknown[] ? (...args: T[K]) => void : never) : never
+);
+type Listener1<K, T> = Listener<K, T, (...args: any[]) => void>;
+type Listener2<K, T> = Listener<K, T, Function>;
+
+export class EventEmitter<T extends EventMap<T> = DefaultEventMap> {
     _events: any = undefined;
     _eventsCount = 0;
     _maxListeners: number | undefined = undefined;
@@ -209,7 +223,7 @@ export class EventEmitter<T = any> {
 
     static set defaultMaxListeners(arg: number) {
         if (typeof arg !== 'number' || arg < 0 || Number.isNaN(arg)) {
-            throw new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "defaultMaxListeners" is out of range. It must be a non-negative number. Received ' + inspect(arg));
+            throw NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "defaultMaxListeners" is out of range. It must be a non-negative number. Received ' + inspect(arg));
         }
         defaultMaxListenersValue = arg;
     }
@@ -220,7 +234,7 @@ export class EventEmitter<T = any> {
 
     static set captureRejections(value: boolean) {
         if (typeof value !== 'boolean') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "EventEmitter.captureRejections" property must be of type boolean.' + received(value));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "EventEmitter.captureRejections" property must be of type boolean.' + received(value));
         }
         defaultCaptureRejections = value;
     }
@@ -230,7 +244,7 @@ export class EventEmitter<T = any> {
         this._eventsCount = 0;
         if (opts !== undefined && opts !== null && opts.captureRejections !== undefined) {
             if (typeof opts.captureRejections !== 'boolean') {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.captureRejections" property must be of type boolean.' + received(opts.captureRejections));
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.captureRejections" property must be of type boolean.' + received(opts.captureRejections));
             }
             this._kmlCapture = opts.captureRejections;
         } else {
@@ -248,6 +262,7 @@ export class EventEmitter<T = any> {
         return _getMaxListeners(this);
     }
 
+    emit<K>(eventName: Key<K, T>, ...args: Args<K, T>): boolean;
     emit(eventName: string | symbol, ...args: any[]): boolean {
         let doError = eventName === 'error';
         const events: any = this._events;
@@ -292,33 +307,39 @@ export class EventEmitter<T = any> {
         return true;
     }
 
+    addListener<K>(eventName: Key<K, T>, listener: Listener1<K, T>): this;
     addListener(eventName: string | symbol, listener: (...args: any[]) => any): this {
         _addListener(this, eventName, listener, false);
         return this;
     }
 
+    on<K>(eventName: Key<K, T>, listener: Listener1<K, T>): this;
     on(eventName: string | symbol, listener: (...args: any[]) => any): this {
         _addListener(this, eventName, listener, false);
         return this;
     }
 
+    prependListener<K>(eventName: Key<K, T>, listener: Listener1<K, T>): this;
     prependListener(eventName: string | symbol, listener: (...args: any[]) => any): this {
         _addListener(this, eventName, listener, true);
         return this;
     }
 
+    once<K>(eventName: Key<K, T>, listener: Listener1<K, T>): this;
     once(eventName: string | symbol, listener: (...args: any[]) => any): this {
         checkListener(listener);
         this.on(eventName, _onceWrap(this, eventName, listener));
         return this;
     }
 
+    prependOnceListener<K>(eventName: Key<K, T>, listener: Listener1<K, T>): this;
     prependOnceListener(eventName: string | symbol, listener: (...args: any[]) => any): this {
         checkListener(listener);
         this.prependListener(eventName, _onceWrap(this, eventName, listener));
         return this;
     }
 
+    removeListener<K>(eventName: Key<K, T>, listener: Listener1<K, T>): this;
     removeListener(eventName: string | symbol, listener: (...args: any[]) => any): this {
         checkListener(listener);
         const events: any = this._events;
@@ -351,10 +372,12 @@ export class EventEmitter<T = any> {
         return this;
     }
 
+    off<K>(eventName: Key<K, T>, listener: Listener1<K, T>): this;
     off(eventName: string | symbol, listener: (...args: any[]) => any): this {
         return this.removeListener(eventName, listener);
     }
 
+    removeAllListeners(eventName?: Key<unknown, T>): this;
     removeAllListeners(eventName?: string | symbol): this {
         const events: any = this._events;
         if (events === undefined) return this;
@@ -392,14 +415,17 @@ export class EventEmitter<T = any> {
         return this;
     }
 
+    listeners<K>(eventName: Key<K, T>): Array<Listener2<K, T>>;
     listeners(eventName: string | symbol): Function[] {
         return _listeners(this, eventName, true);
     }
 
+    rawListeners<K>(eventName: Key<K, T>): Array<Listener2<K, T>>;
     rawListeners(eventName: string | symbol): Function[] {
         return _listeners(this, eventName, false);
     }
 
+    listenerCount<K>(eventName: Key<K, T>, listener?: Listener2<K, T>): number;
     listenerCount(eventName: string | symbol, listener?: Function): number {
         const events: any = this._events;
         if (events !== undefined) {
@@ -471,7 +497,7 @@ function eventTargetAgnosticAddListener(emitter: any, name: string | symbol, lis
     } else if (typeof emitter.addEventListener === 'function') {
         emitter.addEventListener(name, listener, { once: once });
     } else {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitter));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitter));
     }
 }
 
@@ -481,7 +507,7 @@ function eventTargetAgnosticRemoveListener(emitter: any, name: string | symbol, 
     } else if (typeof emitter.removeEventListener === 'function') {
         emitter.removeEventListener(name, listener);
     } else {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitter));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitter));
     }
 }
 
@@ -640,7 +666,7 @@ class EventIterator {
 
     throw(err: any): Promise<any> {
         if (!(err instanceof Error)) {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "EventEmitter.AsyncIterator" property must be an instance of Error.' + received(err));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "EventEmitter.AsyncIterator" property must be an instance of Error.' + received(err));
         }
         this.errorHandler(err);
         return Promise.resolve({ value: undefined, done: true });
@@ -664,12 +690,12 @@ export function on(emitter: any, event: string | symbol, options?: StaticEventEm
 // The listeners of an EventEmitter's (or EventTarget's) event.
 export function getEventListeners(emitterOrTarget: any, type: string | symbol): Function[] {
     if (typeof emitterOrTarget.listeners === 'function') return emitterOrTarget.listeners(type);
-    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitterOrTarget));
+    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitterOrTarget));
 }
 
 export function getMaxListeners(emitterOrTarget: any): number {
     if (typeof emitterOrTarget.getMaxListeners === 'function') return _getMaxListeners(emitterOrTarget);
-    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitterOrTarget));
+    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "emitter" argument must be an instance of EventEmitter or EventTarget.' + received(emitterOrTarget));
 }
 
 // Sets the max listeners of each target, or with none the default.
@@ -683,7 +709,7 @@ export function setMaxListeners(n?: number, ...eventTargets: any[]): void {
             if (typeof target.setMaxListeners === 'function') {
                 target.setMaxListeners(value);
             } else {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "eventTargets" argument must be an instance of EventEmitter or EventTarget.' + received(target));
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "eventTargets" argument must be an instance of EventEmitter or EventTarget.' + received(target));
             }
         }
     }

@@ -82,6 +82,13 @@ func (p *Parser) parseTrailingArrayBrackets(start lexer.Token, n ast.TypeNode) (
 // parseTypeParameterNodes parses a `<T extends C, U>` list inside a type (a
 // generic function type or method signature), positioned at the `<`.
 func (p *Parser) parseTypeParameterNodes(context string) ([]*ast.TypeParameter, error) {
+	// Type syntax: blanked in the source text, as type stripping does.
+	ltStart := p.peek().Pos
+	defer func() {
+		if end := p.at(p.pos - 1).End; end > ltStart {
+			p.blank(ltStart, end)
+		}
+	}()
 	p.advance() // consume '<'
 	var tps []*ast.TypeParameter
 	for {
@@ -1226,6 +1233,7 @@ func (p *Parser) balancedLength() int {
 }
 
 func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
+	doc := p.takeDoc()
 	tok := p.advance() // consume 'type'
 	pos := posOf(tok)
 	nameTok, err := p.expect(lexer.IDENT)
@@ -1269,6 +1277,13 @@ func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
 	decl.TypeParameters = typeParamNodes
+	if doc != nil {
+		for _, a := range doc.Annotations {
+			if a.Tag == "lowerType" {
+				decl.LowerType = a.Value
+			}
+		}
+	}
 	return decl, nil
 }
 

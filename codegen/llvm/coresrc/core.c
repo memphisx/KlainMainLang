@@ -11,6 +11,9 @@
 #include <time.h>
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <malloc/malloc.h>
+#elif defined(_WIN32) || defined(__linux__)
+#include <malloc.h>
 #endif
 
 typedef long long i64;
@@ -96,9 +99,26 @@ char *__kml_received_int(i64 v) {
 /* An ArrayBuffer's zeroed data block, or NULL when it cannot be created. Out
  * of line on purpose: the optimizer may delete an unused calloc it can see and
  * assume it succeeded, which would drop the RangeError a failed one owes. */
+/* The bytes the heap block p really has room for (0 for null, or when the
+ * allocator cannot say): an array's spare capacity, so push grows its data
+ * geometrically and reallocates only when the block is full. -mm=gc's shim
+ * answers for its own blocks with a strong definition. */
+__attribute__((weak)) i64 __kml_heap_usable(void *p) {
+    if (!p) return 0;
+#if defined(__APPLE__)
+    return (i64)malloc_size(p);
+#elif defined(_WIN32)
+    return (i64)_msize(p);
+#elif defined(__linux__)
+    return (i64)malloc_usable_size(p);
+#else
+    return 0;
+#endif
+}
+
 void *__kml_byte_block_alloc(i64 n) {
     if (n < 0) return NULL;
-    return calloc((size_t)n, 1);
+    return kml_calloc(KML_HEAP_RAW, (size_t)n, 1);
 }
 
 /* Exact i64 base**exp by squaring; a negative exponent is 0; overflow wraps. */
@@ -612,13 +632,13 @@ void __kml_stable_sort(void *base, long long n, long long size, kml_sort_cmp cmp
     s.min_gallop = TS_MIN_GALLOP;
     s.nruns = 0;
     size_t total = (size_t)n * s.sz;
-    s.a = (char *)malloc(total);
-    s.tmp = (char *)malloc(total);
-    s.key = (char *)malloc(s.sz);
+    s.a = (char *)malloc(total); /* scratch */
+    s.tmp = (char *)malloc(total); /* scratch */
+    s.key = (char *)malloc(s.sz); /* scratch */
     if (!s.a || !s.tmp || !s.key) {
-        free(s.a);
-        free(s.tmp);
-        free(s.key);
+        free(s.a); /* scratch */
+        free(s.tmp); /* scratch */
+        free(s.key); /* scratch */
         qsort(base, (size_t)n, s.sz, cmp); /* out of memory: sorted, if not stably */
         return;
     }
@@ -640,9 +660,9 @@ void __kml_stable_sort(void *base, long long n, long long size, kml_sort_cmp cmp
     }
     ts_merge_force_collapse(&s);
     memcpy(base, s.a, total);
-    free(s.a);
-    free(s.tmp);
-    free(s.key);
+    free(s.a); /* scratch */
+    free(s.tmp); /* scratch */
+    free(s.key); /* scratch */
 }
 
 /* An any[]'s sort (SortIndexedProperties): the undefined elements are set

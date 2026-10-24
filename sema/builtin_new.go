@@ -141,17 +141,17 @@ func buildSet(e *ast.NewExpression) (ast.Expression, error) {
 }
 
 func buildWeakMap(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "WeakMap", 0, 0); err != nil {
+	if err := arity(e, "WeakMap", 0, 1); err != nil {
 		return nil, err
 	}
-	return ast.NewNewWeakMapExpression(typeArg(e, 0), typeArg(e, 1), e.GetPos()), nil
+	return ast.NewNewWeakMapExpression(typeArg(e, 0), typeArg(e, 1), arg(e, 0), e.GetPos()), nil
 }
 
 func buildWeakSet(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "WeakSet", 0, 0); err != nil {
+	if err := arity(e, "WeakSet", 0, 1); err != nil {
 		return nil, err
 	}
-	return ast.NewNewWeakSetExpression(typeArg(e, 0), e.GetPos()), nil
+	return ast.NewNewWeakSetExpression(typeArg(e, 0), arg(e, 0), e.GetPos()), nil
 }
 
 func buildReadableStream(e *ast.NewExpression) (ast.Expression, error) {

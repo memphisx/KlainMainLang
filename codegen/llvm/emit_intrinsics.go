@@ -93,7 +93,7 @@ var collectionIntrinsics = map[string][]string{
 	"WeakSet": {"add", "delete", "has"},
 }
 
-// reflectIntrinsics are the Reflect functions emitReflectCall emits, with
+// reflectIntrinsics are the Reflect functions emit_reflect.go emits, with
 // the type each call has.
 var reflectIntrinsics = map[string]Type{
 	"apply": TypeAny, "construct": TypeAny, "get": TypeAny, "getPrototypeOf": TypeAny,
@@ -122,7 +122,7 @@ func (e *Emitter) emitCollectionIntrinsic(ex *ast.CallExpression) (Value, error)
 	switch {
 	case ty.Weak:
 		return e.emitWeakCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
-	case ty.IsMap:
+	case ty.IsMap():
 		return e.emitMapCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
 	}
 	return e.emitSetCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
@@ -155,10 +155,13 @@ func dateIntrinsicNames() []string {
 }
 
 func init() {
-	methodTy := func(e *Emitter, ex *ast.CallExpression) Type {
-		t, _ := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression))
-		return t
+	tableTy := func(table map[string]methodTypeFn) func(e *Emitter, ex *ast.CallExpression) Type {
+		return func(e *Emitter, ex *ast.CallExpression) Type {
+			t, _ := e.intrinsicMethodType(table, ex)
+			return t
+		}
 	}
+	noTy := func(*Emitter, *ast.CallExpression) Type { return Type{} }
 	intrinsics["TypedArray.prototype.set"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			return e.emitTypedArraySet(ex.Callee.(*ast.MemberExpression), ex.Args, ex.GetPos())
@@ -169,7 +172,10 @@ func init() {
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			return e.emitTypedArraySubarray(ex.Callee.(*ast.MemberExpression), ex.Args, ex.GetPos())
 		},
-		ty: methodTy,
+		ty: func(e *Emitter, ex *ast.CallExpression) Type {
+			t, _ := typedArraySubarrayType(e, ex, ex.Callee.(*ast.MemberExpression))
+			return t
+		},
 	}
 	for _, name := range bufferIntrinsicNames() {
 		name := name
@@ -178,7 +184,7 @@ func init() {
 				mem := ex.Callee.(*ast.MemberExpression)
 				return e.emitBufferInstanceCall(mem, name, ex.Args, ex.GetPos())
 			},
-			ty: methodTy,
+			ty: tableTy(bufferMethodTypes),
 		}
 	}
 	for _, name := range []string{"then", "catch", "finally"} {
@@ -200,15 +206,15 @@ func init() {
 		intrinsics["Buffer.prototype."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 				mem := ex.Callee.(*ast.MemberExpression)
+				if name == "fill" {
+					return e.emitBufferFill(mem, ex.Args, ex.GetPos())
+				}
 				if len(ex.Args) >= 1 && isStringTy(e.inferExprType(ex.Args[0])) {
-					if name == "fill" {
-						return e.emitBufferStringFill(mem, ex.Args, ex.GetPos())
-					}
 					return e.emitBufferStringSearch(mem, name, ex.Args, ex.GetPos())
 				}
 				return arrayIntrinsics[name](e, mem, ex.Args, ex.GetPos())
 			},
-			ty: methodTy,
+			ty: tableTy(bufferMethodTypes),
 		}
 	}
 	for _, name := range []string{"call", "apply", "bind"} {
@@ -221,7 +227,7 @@ func init() {
 				}
 				return e.emitFunctionCallApply(mem.Object, name, ex.Args, ex.GetPos())
 			},
-			ty: methodTy,
+			ty: noTy,
 		}
 	}
 	intrinsics["RegExp.prototype.exec"] = intrinsic{
@@ -240,10 +246,7 @@ func init() {
 		intrinsics["Date.prototype."+name] = intrinsic{
 			emit: (*Emitter).emitDateIntrinsic,
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
-				if t, ok := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression)); ok {
-					return t
-				}
-				return TypePtr // toString
+				return dateMethodType(ex.Callee.(*ast.MemberExpression).Property)
 			},
 		}
 	}
@@ -267,10 +270,10 @@ func init() {
 				return emit(e, ex.Callee.(*ast.MemberExpression), ex.Args, ex.GetPos())
 			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
-				if t, ok := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression)); ok {
+				if t, ok := e.intrinsicMethodType(stringMethodTypes, ex); ok {
 					return t
 				}
-				return TypePtr // replaceAll
+				return TypePtr
 			},
 		}
 	}
@@ -282,14 +285,29 @@ func init() {
 				if v, ok, err := e.emitArrayOverrideDispatch(mem, name, ex, emit); ok || err != nil {
 					return v, err
 				}
+				if args, ok := e.nonCallableCallback(name, ex.Args); ok {
+					// `[].reduce(null)`: the checked dynamic path, which
+					// throws "null is not a function" before iterating.
+					return emit(e, mem, args, ex.GetPos())
+				}
+				if hofThisArg[name] && len(ex.Args) == 2 {
+					m, args, err := e.hofWithThisArg(mem, ex.Args, ex.GetPos())
+					if err != nil {
+						return Value{}, err
+					}
+					return emit(e, m, args, ex.GetPos())
+				}
 				v, err := emit(e, mem, ex.Args, ex.GetPos())
-				if err == nil && returnsReceiver[name] && v.Ty.IsArray {
+				if err == nil && name == "flat" && v.Ty.IsArray() && v.Ty.ElemType != nil {
+					if t, ok := e.flatCheckerType(ex, *v.Ty.ElemType); ok {
+						v, err = e.emitUnboxAnyArray(v, *t.ElemType)
+					}
+				}
+				if err == nil && returnsReceiver[name] && v.Ty.IsArray() {
 					// The method returns its receiver: a typed array or a
 					// Buffer stays one (a boxed `fill()` result is a view).
-					if rt := e.inferExprType(mem.Object); rt.IsTypedArray || rt.IsBuffer {
+					if rt := e.inferExprType(mem.Object); rt.IsTypedArray() || rt.IsBuffer() {
 						v.Ty = rt
-					} else if v.ArrayHeader == "" && !e.blockDone {
-						v = e.receiverArrayIdentity(mem.Object, v)
 					}
 				}
 				return v, err
@@ -298,7 +316,7 @@ func init() {
 				if name == "forEach" {
 					return TypeVoid
 				}
-				if t, ok := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression)); ok {
+				if t, ok := e.intrinsicMethodType(arrayMethodTypes, ex); ok {
 					return t
 				}
 				return TypeI64
@@ -340,20 +358,29 @@ func init() {
 			ty: func(*Emitter, *ast.CallExpression) Type { return TypePtr },
 		}
 	}
-	for _, name := range []string{"isInteger", "isFinite", "isNaN", "isSafeInteger"} {
-		prop := name
-		intrinsics["Number."+prop] = intrinsic{
+	for name, emit := range map[string]func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error){
+		"isInteger":     (*Emitter).emitNumberIsInteger,
+		"isSafeInteger": (*Emitter).emitNumberIsSafeInteger,
+		"isFinite": func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error) {
+			return e.emitNumberIsFinite(args, pos, false)
+		},
+		"isNaN": func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error) {
+			return e.emitNumberIsNaN(args, pos, false)
+		},
+	} {
+		emit := emit
+		intrinsics["Number."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				return e.emitNumberStaticCall(prop, ex.Args, ex.GetPos())
+				return emit(e, ex.Args, ex.GetPos())
 			},
 			ty: func(*Emitter, *ast.CallExpression) Type { return TypeBool },
 		}
 	}
-	for _, name := range []string{"fromCharCode", "fromCodePoint"} {
-		prop := name
-		intrinsics["String."+prop] = intrinsic{
+	for name, codePoint := range map[string]bool{"fromCharCode": false, "fromCodePoint": true} {
+		cp := codePoint
+		intrinsics["String."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				return e.emitStringStaticCall(prop, ex.Args, ex.GetPos())
+				return e.emitStringFromCharCode(ex.Args, cp, ex.GetPos())
 			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type { return TypePtr },
 		}
@@ -390,27 +417,23 @@ func init() {
 			return TypeAny
 		},
 	}
-	for name, ty := range reflectIntrinsics {
-		method, ty := name, ty
-		intrinsics["Reflect."+method] = intrinsic{
-			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				return e.emitReflectCall(method, ex.Args, ex.GetPos())
-			},
-			ty: func(*Emitter, *ast.CallExpression) Type { return ty },
-		}
+	symbolStatics := map[string]func(*Emitter, []ast.Expression, ast.Pos) (Value, error){
+		"for":    (*Emitter).emitSymbolStaticFor,
+		"keyFor": (*Emitter).emitSymbolStaticKeyFor,
 	}
-	for _, name := range []string{"for", "keyFor"} {
-		method := name
+	for name, emit := range symbolStatics {
+		method, emit := name, emit
 		intrinsics["Symbol."+method] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				return e.emitSymbolStatic(method, ex.Args, ex.GetPos())
+				return emit(e, ex.Args, ex.GetPos())
 			},
 			ty: func(*Emitter, *ast.CallExpression) Type {
 				if method == "for" {
 					return SymbolType()
 				}
 				nt := TypePtr
-				nt.Nullable, nt.IsUndefined = true, true
+				nt.setNullable(true)
+				nt.setUndefined(true)
 				return nt
 			},
 		}
@@ -457,7 +480,7 @@ func init() {
 	}
 	intrinsics["Date.now"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitDateNow() },
-		ty:   func(*Emitter, *ast.CallExpression) Type { return TypeI64 },
+		ty:   func(*Emitter, *ast.CallExpression) Type { return TypeF64 },
 	}
 	intrinsics["Date.parse"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitDateParse(ex.Args, ex.GetPos()) },
@@ -484,7 +507,18 @@ func init() {
 		// console.warn prints to stderr with no prefix, as console.error.
 		"warn": func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitConsolePrint(ex.Args, 2, "") },
 		"trace": func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-			return e.emitConsolePrint(ex.Args, 2, "Trace: ")
+			prefix := "Trace: "
+			if len(ex.Args) == 0 {
+				prefix = "Trace"
+			}
+			v, err := e.emitConsolePrint(ex.Args, 2, prefix)
+			if err == nil {
+				// Then the frames, as Node's console.trace prints them.
+				e.ensureFrames()
+				e.declareFn("__kml_trace_frames", "declare void @__kml_trace_frames()")
+				e.emitInstr("call void @__kml_trace_frames()")
+			}
+			return v, err
 		},
 		"assert": func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			return e.emitConsoleAssert(ex.Args, ex.GetPos())
@@ -561,12 +595,6 @@ func init() {
 		},
 		ty: func(*Emitter, *ast.CallExpression) Type { return BigIntType() },
 	}
-	intrinsics["process.nextTick"] = intrinsic{
-		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-			return e.emitProcessNextTick(ex.Args, ex.GetPos())
-		},
-		ty: func(*Emitter, *ast.CallExpression) Type { return TypeVoid },
-	}
 	intrinsics["crypto.getRandomValues"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			return e.emitCryptoGetRandomValues(ex.Args, ex.GetPos())
@@ -611,18 +639,23 @@ func init() {
 		},
 		ty: func(e *Emitter, ex *ast.CallExpression) Type {
 			if len(ex.Args) == 1 {
-				if argTy := e.inferExprType(ex.Args[0]); argTy.IsArray {
+				if argTy := e.inferExprType(ex.Args[0]); argTy.IsArray() {
 					return ReadableStreamType(*argTy.ElemType)
 				}
 			}
 			return ReadableStreamType(TypeAny) // rejected by the emitter
 		},
 	}
-	for _, name := range []string{"json", "redirect", "error"} {
-		method := name
+	responseStatics := map[string]func(*Emitter, []ast.Expression, ast.Pos) (Value, error){
+		"json":     (*Emitter).emitResponseStaticJson,
+		"redirect": (*Emitter).emitResponseStaticRedirect,
+		"error":    (*Emitter).emitResponseStaticError,
+	}
+	for method, emit := range responseStatics {
+		emit := emit
 		intrinsics["Response."+method] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				return e.emitResponseStatic(method, ex.Args, ex.GetPos())
+				return emit(e, ex.Args, ex.GetPos())
 			},
 			ty: func(*Emitter, *ast.CallExpression) Type { return ResponseType() },
 		}
@@ -646,61 +679,6 @@ func init() {
 			},
 		}
 	}
-	for _, name := range []string{"abs", "cbrt", "ceil", "clz32", "floor", "fround", "hypot", "imul", "max", "min", "pow", "random", "round", "sign", "trunc"} {
-		prop := name
-		intrinsics["Math."+prop] = intrinsic{
-			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				return e.emitMathCall(prop, ex.Args, ex.GetPos())
-			},
-			ty: func(e *Emitter, ex *ast.CallExpression) Type { return e.mathResultType(prop, ex) },
-		}
-	}
-}
-
-// mathResultType is the type a Math intrinsic's call has: an integer input
-// stays an i64 through floor/ceil/round/trunc/sign/abs/min/max, a float input
-// a double — the emitters' own result types.
-func (e *Emitter) mathResultType(prop string, ex *ast.CallExpression) Type {
-	switch prop {
-	case "random", "pow", "hypot", "cbrt", "fround":
-		return TypeF64
-	case "clz32", "imul":
-		return TypeI64
-	case "floor", "ceil", "round", "trunc", "sign":
-		// Integer input stays i64; float input stays a double
-		// (preserving NaN/±Infinity) — must match emitMathRound/
-		// emitMathSign's own result types.
-		if len(ex.Args) == 1 && e.inferExprType(ex.Args[0]).Float {
-			return TypeF64
-		}
-		return TypeI64
-	case "abs":
-		if len(ex.Args) == 1 {
-			return e.inferExprType(ex.Args[0])
-		}
-	case "min", "max":
-		// Any float argument promotes the whole fold to a double
-		// (llvm.minimum/maximum) — must match emitMathMinMax. A
-		// spread argument contributes its array's element type.
-		// Zero args is the ±Infinity identity, a double.
-		if len(ex.Args) == 0 {
-			return TypeF64
-		}
-		for _, a := range ex.Args {
-			if sp, ok := a.(*ast.SpreadElement); ok {
-				at := e.inferExprType(sp.Arg)
-				if at.ElemType != nil && at.ElemType.Float {
-					return TypeF64
-				}
-				continue
-			}
-			if e.inferExprType(a).Float {
-				return TypeF64
-			}
-		}
-		return TypeI64
-	}
-	return TypeF64
 }
 
 // intrinsicSpecLength is Function.prototype.length where the spec's differs
@@ -708,7 +686,7 @@ func (e *Emitter) mathResultType(prop string, ex *ast.CallExpression) Type {
 var intrinsicSpecLength = map[string]int{
 	"Math.max": 2, "Math.min": 2, "Math.hypot": 2,
 	"String.fromCharCode": 1, "String.fromCodePoint": 1,
-	"Date.UTC": 7,
+	"Date.UTC": 7, "Symbol": 0,
 }
 
 // builtinFn is a builtin function referenced by value (`arr.map(parseFloat)`,
@@ -722,6 +700,9 @@ type builtinFn struct {
 	// call emits the builtin's body over the parameters (identifiers bound
 	// in the function's scope; a rest one spread).
 	call func(e *Emitter, args []ast.Expression) (Value, error)
+	// ctor names the builtin constructor whose call signature this is
+	// (`Number`): the value also reads that constructor's statics.
+	ctor string
 }
 
 // builtinRef reports the builtin function an expression names by value.
@@ -876,6 +857,44 @@ func (e *Emitter) builtinRef(x ast.Expression) (*builtinFn, bool) {
 		}
 		return b, true
 	}
+	b, ok := intrinsicBuiltin(key, fn)
+	if ok && callSig != nil {
+		b.ctor = x.(*ast.Identifier).Name
+	}
+	return b, ok
+}
+
+// builtinCtorValue is builtin constructor name (`String`) as the value
+// referencing it yields: the function value of its call signature, boxed.
+// ok is false for a constructor without one.
+func (e *Emitter) builtinCtorValue(name string) (Value, bool, error) {
+	c := e.front()
+	if c == nil {
+		return Value{}, false, nil
+	}
+	t := c.GlobalInterface(name + "Constructor")
+	if t == nil || len(t.Calls) == 0 {
+		return Value{}, false, nil
+	}
+	key := callSignatureIntrinsic(t)
+	if key == "" {
+		return Value{}, false, nil
+	}
+	b, ok := intrinsicBuiltin(key, t.Calls[len(t.Calls)-1])
+	if !ok {
+		return Value{}, false, nil
+	}
+	b.ctor = name
+	v, err := e.emitBuiltinValue(b)
+	if err != nil {
+		return Value{}, false, err
+	}
+	return e.convert(v, TypeAny), true, nil
+}
+
+// intrinsicBuiltin is intrinsic key's function value, typed by fn, its
+// declaration's type.
+func intrinsicBuiltin(key string, fn *checker.Type) (*builtinFn, bool) {
 	if _, known := intrinsics[key]; !known {
 		return nil, false
 	}
@@ -927,7 +946,7 @@ func (e *Emitter) ensureBuiltinFunc(b *builtinFn) (string, FuncSig, error) {
 	if sig, ok := e.intrinsicSigs[b.key]; ok {
 		return mangled, sig, nil
 	}
-	restore := e.beginDetachedFunc()
+	restore := e.sharedBody(e.beginDetachedFunc())
 	e.pushScope()
 	sig := FuncSig{ParamTypes: b.params, HasRest: b.rest}
 	var decls []string
@@ -937,7 +956,7 @@ func (e *Emitter) ensureBuiltinFunc(b *builtinFn) (string, FuncSig, error) {
 		name := fmt.Sprintf("__kml_ia%d", i)
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(ty)))
-		if ty.IsArray {
+		if ty.IsArray() {
 			// An array (the rest) arrives as its header and length.
 			decls = append(decls, fmt.Sprintf("ptr %%a%d", n), fmt.Sprintf("i64 %%a%d", n+1))
 			e.emitInstr(fmt.Sprintf("store ptr %%a%d, ptr %s, align 8", n, slot))
@@ -954,13 +973,14 @@ func (e *Emitter) ensureBuiltinFunc(b *builtinFn) (string, FuncSig, error) {
 		}
 		args = append(args, arg)
 	}
-	v, err := b.call(e, args)
+	// A builtin runs Array's own methods, never a subclass's override.
+	v, err := e.withArrayOverrideDispatchOff(func() (Value, error) { return b.call(e, args) })
 	if err == nil {
 		sig.RetType = v.Ty
 		switch {
 		case v.Ty.IR == "void":
 			e.emitTerminator("ret void")
-		case v.Ty.IsArray:
+		case v.Ty.IsArray():
 			// An array returns its shared header (`Array.of`).
 			hdr, _ := e.arrayArgFromAggregate(v)
 			e.emitTerminator(fmt.Sprintf("ret ptr %s", hdr))
@@ -974,7 +994,7 @@ func (e *Emitter) ensureBuiltinFunc(b *builtinFn) (string, FuncSig, error) {
 	if err != nil {
 		return "", FuncSig{}, err
 	}
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s @%s(%s) {\nentry:\n%s}\n", sig.RetType.LLVMRetType(), mangled, strings.Join(decls, ", "), body))
+	e.writeFunc(fmt.Sprintf("%s @%s(%s)", sig.RetType.LLVMRetType(), mangled, strings.Join(decls, ", ")), body)
 	e.intrinsicSigs[b.key] = sig
 	return mangled, sig, nil
 }
@@ -988,6 +1008,12 @@ func (e *Emitter) emitBuiltinValue(b *builtinFn) (Value, error) {
 	}
 	if n, ok := intrinsicSpecLength[b.key]; ok {
 		e.registerFnMeta(fnValueTrampolineName(mangled), b.name, n, fnKindOf(false, false))
+	}
+	if b.ctor != "" {
+		if e.fnStaticHosts == nil {
+			e.fnStaticHosts = map[string]string{}
+		}
+		e.fnStaticHosts[fnValueHeaderName(mangled)] = b.ctor
 	}
 	return e.emitNamedFuncValue(mangled, sig, b.name), nil
 }
@@ -1019,16 +1045,11 @@ var (
 // and compareExchange return the receiver's element type (a bigint for
 // BigInt64Array/BigUint64Array).
 func (e *Emitter) atomicsResultType(method string, ex *ast.CallExpression) Type {
-	switch method {
-	case "wait":
-		return TypePtr // "ok" / "not-equal" / "timed-out"
-	case "notify":
-		return TypeI64
-	case "isLockFree":
-		return TypeBool
+	if t, ok := atomicsFixedTypes[method]; ok {
+		return t
 	}
 	if len(ex.Args) > 0 {
-		if taTy := e.inferExprType(ex.Args[0]); taTy.IsTypedArray && taTy.ElemType != nil {
+		if taTy := e.inferExprType(ex.Args[0]); taTy.IsTypedArray() && taTy.ElemType != nil {
 			if taTy.BigIntElem {
 				return BigIntType()
 			}
@@ -1038,29 +1059,34 @@ func (e *Emitter) atomicsResultType(method string, ex *ast.CallExpression) Type 
 	return TypeI64
 }
 
+// atomicsFixedTypes are the Atomics results that do not follow the
+// receiver's element type.
+var atomicsFixedTypes = map[string]Type{
+	"wait":       TypePtr, // "ok" / "not-equal" / "timed-out"
+	"notify":     TypeI64,
+	"isLockFree": TypeBool,
+}
+
 // numberConvType is `Number(x)`'s type; it must match emitGlobalNumberConv:
-// numeric input passes through, a string parses to a double, everything
-// else i64.
+// a fixed-width integer input passes through, everything else (a boolean,
+// null, no argument included) is a number, a double.
 func (e *Emitter) numberConvType(ex *ast.CallExpression) Type {
 	if len(ex.Args) == 1 {
 		argTy := e.inferExprType(ex.Args[0])
-		if nl, isNull := ex.Args[0].(*ast.NullLiteral); isNull {
-			if nl.IsUndefined {
-				return TypeF64 // NaN
-			}
-			return TypeI64
+		if _, isNull := ex.Args[0].(*ast.NullLiteral); isNull {
+			return TypeF64 // 0, or NaN for undefined
 		}
 		if argTy.IR == "i1" {
-			return TypeI64
+			return TypeF64
 		}
-		if argTy.IsInteger() && !argTy.IsDynamic && !isNullableScalar(argTy) && !argTy.IsNull && argTy.IR != "void" {
+		if argTy.IsInteger() && !argTy.IsDynamic() && !isNullableScalar(argTy) && !argTy.IsNull() && argTy.IR != "void" {
 			return argTy
 		}
 		// A number, bigint, string, any, null/undefined, nullable
 		// scalar, object or array all yield a double (emitUnaryPlus).
 		return TypeF64
 	}
-	return TypeI64
+	return TypeF64
 }
 
 // Object.prototype's toString and hasOwnProperty, and BigInt's toString,
@@ -1093,14 +1119,14 @@ func init() {
 // takes a receiver held as ty.
 func objectProtoToStringApplies(ty Type) bool {
 	switch {
-	case isUnconstrainedDynamic(ty), ty.IsArray, ty.IsFunc:
+	case isUnconstrainedDynamic(ty), ty.IsArray(), ty.IsFunc():
 		return false
 	case isNumberTy(ty) && ty.IR != "i1":
 		return false // Number.prototype.toString(radix) has its own lowering
-	case ty.IsSymbol, ty.IsError, ty.IsRegExp, ty.IR == "i1", isPlainStringType(ty.staticIndexType()):
+	case ty.IsSymbol(), ty.IsError(), ty.IsRegExp(), ty.IR == "i1", isPlainStringType(ty.staticIndexType()):
 		return true
 	}
-	return ty.IsObject && !isHostHandle(ty) && !ty.IsDynamicObject
+	return ty.IsObject() && !isHostHandle(ty) && !ty.IsDynamicObject()
 }
 
 // emitObjectProtoToString is `x.toString()` where x has no toString of
@@ -1114,13 +1140,13 @@ func (e *Emitter) emitObjectProtoToString(recv ast.Expression) (Value, error) {
 		return Value{}, err
 	}
 	switch {
-	case ty.IsSymbol:
+	case ty.IsSymbol():
 		return e.emitSymbolToString(v)
-	case ty.IsError:
+	case ty.IsError():
 		return e.emitErrorToString(v)
 	case isPlainStringType(ty.staticIndexType()):
 		return v, nil
-	case ty.IsRegExp || isNumberTy(ty):
+	case ty.IsRegExp() || isNumberTy(ty):
 		return e.emitValueToString(v)
 	}
 	return Value{Ref: e.internString("[object Object]"), Ty: TypePtr}, nil
@@ -1154,4 +1180,43 @@ func init() {
 // emitArrayToString is Array.prototype.toString: join(",").
 func (e *Emitter) emitArrayToString(mem *ast.MemberExpression, _ []ast.Expression, pos ast.Pos) (Value, error) {
 	return e.emitArrayJoin(mem, nil, pos)
+}
+
+// hofThisArg is the array methods whose second argument is the callback's
+// `this` (thisArg).
+var hofThisArg = map[string]bool{
+	"map": true, "filter": true, "find": true, "findIndex": true, "findLast": true,
+	"findLastIndex": true, "some": true, "every": true, "forEach": true, "flatMap": true,
+}
+
+// hofWithThisArg rewrites `arr.m(cb, thisArg)` as `arr.m(cb.bind(thisArg))`:
+// the receiver, the callback and thisArg each evaluated once, in order, and
+// the callback called with thisArg as its `this`. An `undefined` thisArg is
+// dropped.
+func (e *Emitter) hofWithThisArg(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (*ast.MemberExpression, []ast.Expression, error) {
+	if u, ok := args[1].(*ast.Identifier); ok && u.Name == "undefined" && e.isGlobalName(u) {
+		return mem, args[:1], nil
+	}
+	recv, err := e.receiverTemp(mem.Object)
+	if err != nil {
+		return nil, nil, err
+	}
+	bound := ast.NewCallExpression(ast.NewMemberExpression(args[0], "bind", pos), []ast.Expression{args[1]}, pos)
+	m := ast.NewMemberExpression(recv, mem.Property, mem.GetPos())
+	return m, []ast.Expression{bound}, nil
+}
+
+// nonCallableCallback is args with a callback whose static type is not a
+// function (`null`, a number) held as `any`, so the call takes the dynamic
+// path's IsCallable check; ok is false for any other call.
+func (e *Emitter) nonCallableCallback(name string, args []ast.Expression) ([]ast.Expression, bool) {
+	if (!hofThisArg[name] && name != "reduce" && name != "reduceRight") || len(args) == 0 {
+		return nil, false
+	}
+	t := e.inferExprType(args[0])
+	if t.IsFunc() || t.IsDynamic() || t.IR == "" {
+		return nil, false
+	}
+	out := append([]ast.Expression{ast.NewAsExpression(args[0], &ast.TypeAnnotation{Name: "any"}, args[0].GetPos())}, args[1:]...)
+	return out, true
 }

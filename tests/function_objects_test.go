@@ -134,3 +134,35 @@ function g(a: number, b: number): number { return a + b; }
 console.log(Object.getOwnPropertyDescriptor(g, 'name'), Object.getOwnPropertyDescriptor(g, 'length'));
 `, "function abs 1 1234n pointer\n[Function: abs] { pointer: 1234n }\n{ value: 'g', writable: false, enumerable: false, configurable: true } { value: 2, writable: false, enumerable: false, configurable: true }")
 }
+
+// An absent optional callback passed on where another function type is
+// wanted stays undefined: the adapter between the two types is not built
+// around nothing, so the callee's `cb ?? nop` picks nop.
+func TestE2EAbsentCallbackThroughAdapterIsUndefined(t *testing.T) {
+	src := `
+type Cb = (e?: any) => void
+type Mine = (e?: Error | null) => void
+function nop() {}
+const pending: Cb[] = []
+class A {
+  write(chunk: string, encoding?: string | Cb, cb?: Cb): boolean {
+    if (typeof encoding === 'function') cb = encoding
+    console.log(chunk, cb === undefined)
+    pending.push(cb ?? nop)
+    return true
+  }
+}
+class B extends A {
+  write(chunk: string, encoding?: string | Mine, cb?: Mine): boolean {
+    return super.write(chunk, encoding, cb)
+  }
+}
+const b = new B()
+b.write('x')
+b.write('y', 'utf8')
+b.write('z', () => console.log('cb z'))
+for (const f of pending) f(null)
+console.log('ran', pending.length)
+`
+	compareLines(t, compileAndRun(t, src), runNodeTS(t, src))
+}

@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "MODULES.md",
   "coversRows": "all",
-  "coverage": { "loose": "18/18", "loosePct": 100, "strict": "9/18", "strictPct": 50 },
-  "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there is no runtime module object, no live bindings, and no separate-compilation boundary. Namespace imports and import.meta.url are compile-time-only constructs, and an import cycle is restricted to declarations. Dynamic import() runs its literal-specifier target on first use, sharing the program's modules as in Node; -dynamic-import=lazy moves each target's code into a shared library loaded on first use.",
+  "coverage": { "loose": "18/18", "loosePct": 100, "strict": "10/18", "strictPct": 56 },
+  "lede": "ES module syntax — named/default/namespace imports, re-exports, aliasing, and static CommonJS require — resolved by a whole-program model rather than separate compilation units. The big divergence is architectural: the resolver merges the entry file plus every transitive import into one program before codegen, so there are no live bindings and no separate-compilation boundary. A namespace import read as a value is a module namespace object built from the module's exports; import.meta.url is resolved at compile time, and an import cycle is restricted to declarations. Dynamic import() runs its literal-specifier target on first use, sharing the program's modules as in Node; -dynamic-import=lazy moves each target's code into a shared library loaded on first use.",
   "entries": [
     {
       "id": "modules.exportDeclarations",
@@ -147,13 +147,10 @@
       "name": "import * as ns from '...' (namespace import)",
       "statusRow": "import * as ns from '...' (namespace import)",
       "signature": "import * as ns from './path'",
-      "badge": "caveats",
-      "description": "`ns.member` is rewritten directly to that member's mangled name during resolution, in values, `new ns.C()`, `extends ns.C` and types (`x: ns.T[]`). Only actually-exported members are reachable (`ns.privateHelper` is rejected, same visibility rule as a named import); `ns.default` reaches a default export the same way any other member does.",
+      "badge": "exact",
+      "description": "`ns.member` is rewritten directly to that member's mangled name during resolution, in values, `new ns.C()`, `extends ns.C` and types (`x: ns.T[]`). Only actually-exported members are reachable (`ns.privateHelper` is rejected, same visibility rule as a named import); `ns.default` reaches a default export the same way any other member does. Read as a value (`typeof ns`, `const p = ns`, `ns[\"x\"]`), `ns` is the module namespace object: its value exports in sorted key order, a `let` export a live binding, with a null prototype, sealed and rejecting writes, printed as `[Module: null prototype] { … }`.",
       "exampleKey": "imports/namespace_import",
       "snippet": "import * as greetLib from './greet'\nconsole.log(greetLib.shout(\"hey\"))\nconsole.log(greetLib.default(\"there\"))",
-      "differences": [
-        "Compile-time-only — `ns` is never a runtime value, usable only as the object of a non-computed dotted access; assigning it to a variable, passing it as a value, or `ns[\"x\"]` reaches codegen as a plain undefined reference rather than a dedicated error message"
-      ],
       "seeAlso": ["modules.namedImport", "modules.defaultImport"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/import" }
     },
@@ -214,7 +211,7 @@
       "snippet": "const m = await import('./mod')\nconsole.log(m.greeting, m.answer)",
       "differences": [
         "String-literal specifier only — a runtime-computed import(expr) is a clean compile error",
-        "The result object exposes annotated scalar/string exports only; function/class/array/object exports are omitted",
+        "Under isolated the result object exposes annotated scalar/string exports only; function/class/array/object exports are omitted (bundled and lazy give the full module namespace object)",
         "import('node:…') of a builtin module is a clean compile error",
         "lazy and isolated need the sibling <binary>.d/ directory and refuse --static; on Windows lazy compiles thread-locals emulated (a call per access)",
         "isolated is a deliberate divergence: the target gets its own instance of every module it imports"

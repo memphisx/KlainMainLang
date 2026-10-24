@@ -152,7 +152,7 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 			// TS __decorate: if the decorator returns a value, it replaces the
 			// descriptor. Adopt a dynamic (or object) return at runtime; a
 			// statically void/scalar return can't be a descriptor, so ignore it.
-			if ret.Ty.IsDynamic {
+			if ret.Ty.IsDynamic() {
 				boxedRet, err := e.emitBoxValue(ret)
 				if err != nil {
 					return err
@@ -191,7 +191,7 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 			if err != nil {
 				return err
 			}
-			if ret.Ty.IsDynamic {
+			if ret.Ty.IsDynamic() {
 				boxedRet, err := e.emitBoxValue(ret)
 				if err != nil {
 					return err
@@ -334,7 +334,7 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 	info := e.classes[className]
 	sig := info.MethodSigs[methodName]
 	for _, pty := range sig.ParamTypes {
-		if pty.IsArray || isNullableScalar(pty) {
+		if pty.IsArray() || isNullableScalar(pty) {
 			return Value{}, fmt.Errorf("%d:%d: a method decorator on '%s.%s' is not supported yet — its parameter types can't be marshalled through the decorator ABI", pos.Line, pos.Col, className, methodName)
 		}
 	}
@@ -353,15 +353,8 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 
 	argParts := []string{"ptr " + thisPtr}
 	for i, pty := range sig.ParamTypes {
-		word := e.freshReg()
-		have := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%p_argc, %d", have, i))
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%p_argv, i64 %d", slot, i))
-		loaded := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loaded, slot))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
-		if pty.IsDynamic {
+		word := e.emitArgWord(i)
+		if pty.IsDynamic() {
 			argParts = append(argParts, "i64 "+word)
 			continue
 		}
@@ -378,9 +371,9 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", r, retTy.LLVMRetType(), llvmName, joinArgs(argParts)))
 		callResult := Value{Ref: r, Ty: retTy}
-		if retTy.IsArray {
-			// Array return ABI is a header pointer (TDD-00213 Stage 3): deref
-			// before boxing so emitBoxValue sees the {ptr,i64} aggregate.
+		if retTy.IsArray() {
+			// Array return ABI is a header pointer (TDD-00213 Stage 3): wrap
+			// it as the array value before boxing.
 			callResult = e.arrayValueFromHeaderReg(r, retTy)
 		}
 		b, err := e.emitBoxValue(callResult)
@@ -391,10 +384,7 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 		}
 	}
 
-	e.functions.WriteString(fmt.Sprintf("\ndefine i64 %s(ptr %%env, i64 %%p_this, i64 %%p_argc, ptr %%p_argv) {\nentry:\n", fnName))
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	e.writeFunc(fmt.Sprintf("i64 %s(ptr %%env, i64 %%p_this, i64 %%p_argc, ptr %%p_argv)", fnName), e.allocas.String()+e.body.String())
 
 	restoreFn()
 	if boxFailed {
@@ -403,14 +393,14 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 
 	e.ensureMalloc()
 	rec := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", rec))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fnName, rec))
+	e.heapMallocInto(rec, "24")
+	e.heapStore("ptr", fnName, rec, 8)
 	envSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", envSlot))
+	e.heapStore("ptr", "null", envSlot, 8)
 	aritySlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", aritySlot, rec))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", len(sig.ParamTypes), aritySlot))
+	e.heapStore("i64", fmt.Sprint(len(sig.ParamTypes)), aritySlot, 8)
 	return Value{Ref: e.emitNbTagPtr(rec, kmlTagDynFunc), Ty: TypeAny}, nil
 }
 
@@ -461,7 +451,7 @@ func (e *Emitter) emitDecoratedMethodCall(objTy Type, thisVal Value, methodName 
 	if sig.RetType.IR == "void" || sig.RetType.IR == "" {
 		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeVoid}, nil
 	}
-	return e.coerce(Value{Ref: r, Ty: TypeAny}, sig.RetType), nil
+	return e.convert(Value{Ref: r, Ty: TypeAny}, sig.RetType), nil
 }
 
 // classHasObserveDecorators reports whether cd carries any Stage-1 (property or

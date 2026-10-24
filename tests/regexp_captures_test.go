@@ -27,3 +27,30 @@ const s: any = 'a1b2'; const r: any = /\d/;
 console.log(s.split(r), s.split(r, 1));
 `)
 }
+
+// A repeated non-capturing group clears its captures each iteration: a
+// capture from an earlier iteration is undefined after the match.
+func TestE2ERegexRepeatedGroupClearsCaptures(t *testing.T) {
+	assertSameAsNode(t, `
+export {}
+console.log(JSON.stringify(/(?:(a)|b)*/.exec("ab")))
+console.log(JSON.stringify(/(z)((a+)?(b+)?(c))*/.exec("zaacbbbcac")))
+console.log(JSON.stringify(/(?:(a)|(b))+/.exec("aba")))
+console.log(JSON.stringify("abab".match(/((a)|(b))+/)))
+const j = (x: unknown) => console.log(JSON.stringify(x))
+j("ab".replace(/(?:(a)|b)*/, "[$1]"))
+j([..."abxab".matchAll(/(?:(a)|b)+/g)].map(m => [m[0], m[1]]))
+j("1a2b3".split(/(?:(a)|b)/))
+j(/(?:(?<x>a)|b)*/.exec("ab")!.groups)
+j(/(?:(?:(a)|b)c)*/.exec("acbc"))
+j(/(?:(a)|b)*?c/.exec("abc"))
+j(/(?:(a)|b){2,3}/.exec("abb"))
+j(/(?:(a)|(b))*/.exec("ba"))
+const g = /(?:(x)|y)+/g
+j(g.exec("xy xy"))
+j(g.exec("xy xy"))
+j(/(?:(a)|b)*/.exec("ba"))
+j(/(?:(a)b)*/.exec("abab"))
+j(/(?:(a)|ab)*c/.exec("aabc"))
+`)
+}

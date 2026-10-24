@@ -1,7 +1,8 @@
 // runexamples is `make examples`: it compiles every example concurrently
 // (-j jobs; compiling is most of the time) and then runs the binaries one
-// at a time in order, since examples share fixed ports and the httpbin
-// fixture. Each example prints one OK/FAIL line; the exit status is
+// at a time in order, since examples share the httpbin fixture. Each run
+// gets a free port in PORT, so a server example never depends on a fixed
+// port being unused on the machine. Each example prints one OK/FAIL line; the exit status is
 // non-zero when any failed.
 package main
 
@@ -9,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,7 +95,7 @@ func examples(mode, modeNoMM string) []*job {
 			return nil
 		}
 		switch {
-		case strings.HasSuffix(p, ".ts") && !strings.HasSuffix(p, "_worker.ts") && filepath.Base(p) != "standard_decorators.ts":
+		case strings.HasSuffix(p, ".ts") && !strings.HasSuffix(p, "_worker.ts") && filepath.Base(p) != "standard_decorators.ts" && filepath.Base(p) != "unused_checks.ts":
 			ts = append(ts, p)
 		case strings.HasPrefix(p, "examples/jsmode/") && strings.HasSuffix(p, ".js") && !strings.Contains(strings.TrimPrefix(p, "examples/jsmode/"), "/"):
 			js = append(js, p)
@@ -115,6 +117,9 @@ func examples(mode, modeNoMM string) []*job {
 	}
 	if _, err := os.Stat("examples/decorators/standard_decorators.ts"); err == nil {
 		out = append(out, &job{src: "examples/decorators/standard_decorators.ts", flags: append(append([]string{}, modeF...), "-decorators=standard"), label: " (-decorators=standard)"})
+	}
+	if _, err := os.Stat("examples/types/unused_checks.ts"); err == nil {
+		out = append(out, &job{src: "examples/types/unused_checks.ts", flags: append(append([]string{}, modeF...), "-no-unused-locals", "-no-unused-parameters"), label: " (-no-unused-locals -no-unused-parameters)"})
 	}
 	return out
 }
@@ -151,6 +156,7 @@ func runOne(src string, limit time.Duration) bool {
 		out += ".exe"
 	}
 	cmd := exec.Command("./" + out)
+	cmd.Env = append(os.Environ(), "PORT="+freePort())
 	if err := cmd.Start(); err != nil {
 		return false
 	}
@@ -164,4 +170,15 @@ func runOne(src string, limit time.Duration) bool {
 		<-done
 		return false
 	}
+}
+
+// freePort asks the kernel for an unused TCP port and releases it for the
+// example to bind.
+func freePort() string {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "0"
+	}
+	defer l.Close()
+	return fmt.Sprint(l.Addr().(*net.TCPAddr).Port)
 }

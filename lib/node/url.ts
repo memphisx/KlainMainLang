@@ -907,7 +907,7 @@ export interface PathToFileUrlOptions {
 }
 
 function invalidFileURLPath(message: string): NodeTypeError {
-    return new NodeTypeError('ERR_INVALID_FILE_URL_PATH', 'File URL path ' + message);
+    return NodeTypeError('ERR_INVALID_FILE_URL_PATH', 'File URL path ' + message);
 }
 
 function pathFromURLWin32(url: URL): string {
@@ -936,7 +936,7 @@ function pathFromURLWin32(url: URL): string {
 
 function pathFromURLPosix(url: URL): string {
     if (url.hostname !== '') {
-        throw new NodeTypeError('ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${process.platform}`);
+        throw NodeTypeError('ERR_INVALID_FILE_URL_HOST', `File URL host must be "localhost" or empty on ${process.platform}`);
     }
     const pathname = url.pathname;
     for (let n = 0; n < pathname.length; n++) {
@@ -958,10 +958,10 @@ export function fileURLToPath(p: string | URL, options?: FileUrlToPathOptions): 
     } else if (p instanceof URL) {
         url = p;
     } else {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "path" argument must be of type string or an instance of URL.' + received(p));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "path" argument must be of type string or an instance of URL.' + received(p));
     }
     if (url.protocol !== 'file:') {
-        throw new NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
+        throw NodeTypeError('ERR_INVALID_URL_SCHEME', 'The URL must be of scheme file');
     }
     return (windows ?? isWindows) ? pathFromURLWin32(url) : pathFromURLPosix(url);
 }
@@ -1008,10 +1008,10 @@ export function pathToFileURL(filepath: string, options?: PathToFileUrlOptions):
         const prefixLength = isExtendedUNC ? 8 : 2;
         const hostnameEnd = resolved.indexOf('\\', prefixLength);
         if (hostnameEnd === -1) {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', `The argument 'path' Missing UNC resource path. Received '${resolved}'`);
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', `The argument 'path' Missing UNC resource path. Received '${resolved}'`);
         }
         if (hostnameEnd === 2) {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE', `The argument 'path' Empty UNC servername. Received '${resolved}'`);
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE', `The argument 'path' Empty UNC servername. Received '${resolved}'`);
         }
         const url = new URL('file://');
         url.hostname = resolved.slice(prefixLength, hostnameEnd);

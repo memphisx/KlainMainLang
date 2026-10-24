@@ -26,6 +26,8 @@ import http from 'klain:http'  // bespoke handler⇒response server (Node's fait
 import os from 'os'
 import cluster from 'cluster'
 
+const port = Number(process.env.PORT ?? '8081')  // make examples passes a free port
+
 interface Res {
   status: number
   body: string
@@ -36,9 +38,9 @@ setTimeout(() => {
 }, 300)
 
 if (cluster.isPrimary) {
-  console.log('primary starting ' + os.cpus().length + ' worker(s) on :8081')
+  console.log('primary starting ' + os.cpus().length + ' worker(s) on :' + port)
 }
 
-http.listen(8081, (req: HttpRequest): Res => {
+http.listen(port, (req: HttpRequest): Res => {
   return { status: 200, body: 'served by worker ' + (cluster.worker?.id ?? 0).toString() + ' (pid ' + process.pid.toString() + ')' }
 }, { workers: os.cpus().length })

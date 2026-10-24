@@ -9,7 +9,19 @@ import (
 // isSyntheticObjLitClass reports whether ty is a synthetic class an
 // accessor-bearing object literal was lowered to (TDD-00153).
 func isSyntheticObjLitClass(ty Type) bool {
-	return ty.IsClass && strings.HasPrefix(ty.ClassName, "__kml_objlit_")
+	return ty.IsClass() && strings.HasPrefix(ty.ClassName, "__kml_objlit_")
+}
+
+// ownAccessorBox is v boxed when it is an accessor-bearing object literal,
+// whose accessors are own enumerable properties its layout's fields do not
+// list: key enumeration, serialization and inspection walk its boxed form.
+// ok is false for any other value.
+func (e *Emitter) ownAccessorBox(v Value) (Value, bool, error) {
+	if !isSyntheticObjLitClass(v.Ty) || v.Ty.Nullable() || v.Ty.IsDynamic() {
+		return Value{}, false, nil
+	}
+	box, err := e.emitBoxValue(v)
+	return box, true, err
 }
 
 // ensureObjLitClass registers (once, idempotently) the synthetic anonymous
@@ -73,6 +85,11 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 	for _, f := range ownFields {
 		info.FieldOrigin[f.Name] = className
 	}
+	// Registered before the accessor signatures: a getter returning the
+	// literal's own binding (`get self() { return a; }`) asks for this class
+	// while its signature is built.
+	e.classes[className] = info
+	e.objLitClasses[lit] = className
 
 	// Accessor signatures, with `this` bound to the (field-complete) class type
 	// so an unannotated getter's return type infers from `this._x`.
@@ -86,13 +103,15 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		}
 		key := accessorMethodName(p.AccessorKind, p.Key)
 		_, dup := info.MethodSigs[key]
-		fd := &ast.FunctionDeclaration{Name: p.Key, Params: fe.Params, ReturnType: fe.RetType, Body: fe.Body}
+		fd := &ast.FunctionDeclaration{Name: p.Key, Params: fe.Params, ReturnType: fe.RetType, Body: fe.Body, Src: fe.Src}
 		e.pushScope()
 		e.define("this", Symbol{Ty: ty})
 		sig := e.buildFunctionSig(fd)
 		e.popScope()
 		if p.AccessorKind == "set" {
 			sig.RetType = TypeVoid
+		} else if sig.RetType.IR == "void" && e.compatJS() {
+			sig.RetType = TypeAny // a getter falling off its end: undefined
 		}
 		// A later accessor of the same kind and name replaces the earlier,
 		// as a later property definition does.
@@ -102,6 +121,19 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		if !dup {
 			info.MethodOrder = append(info.MethodOrder, key)
 		}
+	}
+
+	// Its property names in source order, each once.
+	named := map[string]bool{}
+	for _, p := range lit.Properties {
+		if p.Key == "" || named[p.Key] {
+			continue
+		}
+		if _, isAssign := p.Value.(*ast.AssignmentExpression); isAssign {
+			continue
+		}
+		named[p.Key] = true
+		info.OwnKeyOrder = append(info.OwnKeyOrder, p.Key)
 	}
 
 	e.classes[className] = info
@@ -171,7 +203,7 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 			}
 			g, gok := info.MethodSigs[accessorMethodName("get", p.Key)]
 			s, sok := info.MethodSigs[accessorMethodName("set", p.Key)]
-			if gok && sok && !coerciblePure(s.ParamTypes[0], g.RetType) {
+			if gok && sok && !convertiblePure(s.ParamTypes[0], g.RetType) {
 				return Value{}, fmt.Errorf("%d:%d: getter and setter for '%s' disagree on its type", pos.Line, pos.Col, p.Key)
 			}
 		}
@@ -188,7 +220,7 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	if info.IsErrorSubclass { // error type-id flag, matching class construction (TDD-00222)
 		valTag = errorTypeIDStored(valTag)
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", valTag, tagGep))
+	e.heapStore("i64", fmt.Sprint(valTag), tagGep, 8)
 
 	for _, p := range lit.Properties {
 		if p.AccessorKind != "" || p.Key == "" {
@@ -201,7 +233,7 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 		if !ok {
 			return Value{}, fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, p.Key)
 		}
-		if !coerciblePure(e.inferExprType(p.Value), fieldTy) {
+		if !convertiblePure(e.inferExprType(p.Value), fieldTy) {
 			return Value{}, fmt.Errorf("%d:%d: field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", pos.Line, pos.Col, p.Key)
 		}
 		gepReg := e.freshReg()

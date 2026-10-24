@@ -1,6 +1,6 @@
 # Test build verifying TDD-00035 Stage 6: does --static work for a
 # RegExp-using program? Confirmed directly on the Linux x86-64 dev machine
-# first (docs/adr/ADR-00120.md) that PCRE2 has none of libcurl's TLS-
+# first (docs/adr/00/ADR-00120.md) that PCRE2 has none of libcurl's TLS-
 # backend-style transitive dependency chain (docker/Dockerfile.fetch-test's
 # whole reason for existing) — a plain `klainmain --static` links cleanly
 # with zero extra flags. This Dockerfile is the containerized confirmation

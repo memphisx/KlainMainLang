@@ -190,6 +190,7 @@ const (
 	chainGuardScalar                           // a `{ i1, T }` nullable scalar: presence bit
 	chainGuardAny                              // an `any`: null or undefined tag
 	chainGuardAbsent                           // statically undefined on this host
+	chainGuardArray                            // an array: its null header or nullRef
 )
 
 // classifyChainGuard decides the guard for the optional link `link` from the
@@ -213,8 +214,11 @@ func (e *Emitter) classifyChainGuard(link ast.Expression) (guard optionalChainGu
 	switch {
 	case isNullableScalar(bt):
 		return chainGuardScalar, false
-	case bt.IR == "ptr" && !bt.IsArray:
+	case bt.IR == "ptr" && !bt.IsArray():
 		return chainGuardPtr, false
+	case optionalArrayGuards(bt):
+		// Even a `T[]` binding can hold undefined or null from `any`.
+		return chainGuardArray, false
 	case isUnconstrainedDynamic(bt):
 		return chainGuardAny, false
 	}
@@ -242,8 +246,8 @@ func (e *Emitter) undefinedValueOf(inner Type) Value {
 	switch {
 	case inner.IR == "void" || inner.IR == "":
 		return Value{Ty: TypeVoid}
-	case inner.IsArray:
-		return Value{Ref: "{ ptr null, i64 0 }", Ty: inner}
+	case inner.IsArray():
+		return Value{Ref: "null", Ty: inner}
 	case isNullableScalar(resTy):
 		return Value{Ref: e.makeNullableScalarAgg(resTy, "false", zeroRef(inner)), Ty: resTy}
 	}
@@ -272,17 +276,36 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 		}
 		// Present on this host, but typed `T | undefined` on every host.
 		if resTy := optionalCallResultType(optCalleeValue, e.inferExprType(plain)); isNullableScalar(resTy) && !isNullableScalar(pv.Ty) {
-			return e.coerce(pv, resTy), true, nil
+			return e.convert(pv, resTy), true, nil
 		}
 		return pv, true, nil
 	}
 
 	base, _, _ := chainChild(link)
+	// `o.m?.()` of a field holding a method that takes its `this` (an
+	// object literal's method reading it): o is evaluated once and passed
+	// as the receiver.
+	var recv ast.Expression
+	if call, isCall := link.(*ast.CallExpression); isCall && call.Optional {
+		if mem, isMem := base.(*ast.MemberExpression); isMem {
+			if ot := e.inferExprType(mem.Object); ot.IsObject() && !ot.IsDynamic() {
+				if _, fty, ok := ot.FieldIndex(mem.Property); ok && fty.FuncThis {
+					r, err := e.receiverTemp(mem.Object)
+					if err != nil {
+						return Value{}, true, err
+					}
+					rm := ast.NewMemberExpression(r, mem.Property, mem.GetPos())
+					rm.Optional = mem.Optional
+					base, recv = rm, r
+				}
+			}
+		}
+	}
 	bv, err := e.emitExpr(base)
 	if err != nil {
 		return Value{}, true, err
 	}
-	if bv.Ty.NullAndUndef {
+	if bv.Ty.NullAndUndef() {
 		bv = e.fromThreeState(bv) // either absence short-circuits
 	}
 	e.optionalCallCtr++
@@ -299,9 +322,14 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, payload.Ty.IR, payload.Ty.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", payload.Ty.IR, payload.Ref, slot, payload.Ty.Align()))
 		e.define(tmpName, Symbol{Ptr: slot, Ty: tmpTy})
-	case bv.Ty.IR == "ptr" && !bv.Ty.IsArray:
-		isNull = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, bv.Ref))
+	case bv.Ty.IR == "ptr" && !bv.Ty.IsArray():
+		isNull = e.isAbsentPtr(bv.Ref, bv.Ty) // a plain string's nullRef too
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bv.Ref, slot))
+		e.define(tmpName, Symbol{Ptr: slot, Ty: tmpTy})
+	case bv.Ty.IsArray() && !bv.Ty.IsTuple() && bv.Ty.IR == "ptr":
+		isNull = e.emitArrayIsAbsent(bv)
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
 		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bv.Ref, slot))
@@ -315,11 +343,18 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 	default:
 		// Inference promised a nullable base and emission produced a value that
 		// cannot be absent: the base is already evaluated and cannot be bound
-		// generically (an array is two allocas), so refuse rather than evaluate
+		// generically (an array is its header pointer), so refuse rather than evaluate
 		// it a second time.
 		return Value{}, true, fmt.Errorf("%d:%d: optional chain on a value of type %s is not supported", pos.Line, pos.Col, bv.Ty.IR)
 	}
 	through := e.copyChain(top, depth, ast.NewIdentifier(tmpName, base.GetPos()))
+	if recv != nil {
+		// Called as the receiver's method (its field read again, from the
+		// bound receiver), so the method gets its `this`.
+		if call, isCall := chainLinkAt(through, depth).(*ast.CallExpression); isCall {
+			call.Callee = ast.NewMemberExpression(recv, base.(*ast.MemberExpression).Property, base.GetPos())
+		}
+	}
 	v, err = e.emitNullGuardedExpr(isNull, through)
 	return v, true, err
 }

@@ -11,8 +11,20 @@ func RegexpCSource() string { return regexpCSource }
 
 // UsesRegexpC reports whether the program links the RegExp helper runtime.
 func (e *Emitter) UsesRegexpC() bool {
-	return e.usedRegexUTF8Width || e.usedRegexUTF16Convert || e.usedRegexESNormalize || e.usedRegexESClasses ||
-		e.usedRegexFlagsCanon || e.usedRegexSourceNorm || e.usedRegexValidateFlags || e.usedRegexParseFlags
+	return e.usedRegexUTF8Width || e.usedRegexUTF16Convert || e.usedRegexESNormalize || e.usedRegexESClasses || e.usedRegexMatch ||
+		e.usedRegexFlagsCanon || e.usedRegexSourceNorm || e.usedRegexValidateFlags || e.usedRegexParseFlags || e.usedRegexExpand
+}
+
+// ensureRegexExpand declares __kml_regex_expand, a replacement template's
+// expansion for one match.
+func (e *Emitter) ensureRegexExpand() {
+	if e.fnDecls["__kml_regex_expand"] {
+		return
+	}
+	e.fnDecls["__kml_regex_expand"] = true
+	e.usedRegexExpand = true
+	e.ensureStrHeaderRuntime() // regexp.c allocates through the header runtime
+	e.emitGlobal(`declare ptr @__kml_regex_expand(ptr, ptr, i64, ptr, i64, i64)`)
 }
 
 // PCRE2 8-bit API option constants and the "match to end of string"
@@ -186,7 +198,9 @@ func (e *Emitter) ensureRegexESClasses() {
 	e.fnDecls["__kml_regex_es_classes"] = true
 	e.usedRegexESClasses = true
 	e.ensureStrHeaderRuntime() // regexp.c allocates through the header runtime
-	e.emitGlobal(`declare ptr @__kml_regex_es_classes(ptr)`)
+	e.emitGlobal(`declare ptr @__kml_regex_es_classes(ptr, ptr, ptr)`)
+	e.emitGlobal(`declare void @__kml_regex_note_optional(ptr, ptr)`)
+	e.emitGlobal(`declare ptr @__kml_regex_syntax_message(i32, ptr, ptr, ptr)`)
 }
 
 // ensureRegexFlagsCanon declares __kml_regex_flags_canon(flags): returns a
@@ -253,6 +267,9 @@ func (e *Emitter) ensureRegexMatch() {
 	e.emitGlobal("declare void @pcre2_match_data_free_8(ptr noundef)")
 	e.emitGlobal("declare i32 @pcre2_pattern_info_8(ptr noundef, i32 noundef, ptr noundef)")
 	e.emitGlobal("declare ptr @pcre2_get_ovector_pointer_8(ptr noundef)")
+	e.ensureStrHeaderRuntime() // regexp.c allocates through the header runtime
+	e.emitGlobal("declare void @__kml_regex_fix_optional(ptr, ptr, i32)")
+	e.emitGlobal("declare ptr @__kml_regex_mctx()")
 }
 
 // ensureRegexParseFlags declares __kml_regex_parse_flags: a single-pass

@@ -81,13 +81,14 @@ func (e *Emitter) emitBigIntToString(val Value, suffix bool) (Value, error) {
 	// A `bigint | undefined` / `bigint | null` slot holding no bigint is a
 	// null pointer: render its keyword instead of handing null to the digit
 	// conversion (a segfault — `console.log(map.get(missing))`, TDD-00229).
-	if val.Ty.Nullable || val.Ty.IsUndefined {
+	if val.Ty.Nullable() || val.Ty.IsUndefined() {
 		absent := "null"
-		if val.Ty.IsUndefined {
+		if val.Ty.IsUndefined() {
 			absent = "undefined"
 		}
 		bare := val
-		bare.Ty.Nullable, bare.Ty.IsUndefined = false, false
+		bare.Ty.setNullable(false)
+		bare.Ty.setUndefined(false)
 		isNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
 		res, err := e.emitStrBranch(isNull,
@@ -121,8 +122,8 @@ func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (V
 	// index-signature key) may hold no bigint at run time: JS orders
 	// `undefined` against a bigint as false, finds it unequal, and throws on
 	// arithmetic — never hand the null to the bigint runtime (TDD-00229).
-	lN := left.Ty.Nullable || left.Ty.IsUndefined
-	rN := right.Ty.Nullable || right.Ty.IsUndefined
+	lN := left.Ty.Nullable() || left.Ty.IsUndefined()
+	rN := right.Ty.Nullable() || right.Ty.IsUndefined()
 	if lN || rN {
 		present := func(v Value, nullable bool) string {
 			if !nullable {
@@ -136,7 +137,8 @@ func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (V
 		both := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, lp, rp))
 		bare := func(v Value) Value {
-			v.Ty.Nullable, v.Ty.IsUndefined = false, false
+			v.Ty.setNullable(false)
+			v.Ty.setUndefined(false)
 			return v
 		}
 		if _, arith := bigIntBinFn[op]; arith {
@@ -218,11 +220,11 @@ func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (V
 //     is a deferred -compat=js inhabitant (TDD-00075), not an approximation.
 func (e *Emitter) emitBigIntMixed(op string, left, right Value, pos ast.Pos) (Value, error) {
 	other := left
-	if left.Ty.IsBigInt {
+	if left.Ty.IsBigInt() {
 		other = right
 	}
 	// bigint vs null/undefined: never equal, and not orderable.
-	if other.Ty.IsNull {
+	if other.Ty.IsNull() {
 		switch op {
 		case "==", "===":
 			return Value{Ref: "0", Ty: TypeBool}, nil
@@ -257,11 +259,11 @@ func (e *Emitter) emitBigIntMixed(op string, left, right Value, pos ast.Pos) (Va
 // bigintOperand returns v as a bigint — itself if already bigint, else an
 // integer number widened and lifted via from_i64.
 func (e *Emitter) bigintOperand(v Value) Value {
-	if v.Ty.IsBigInt {
+	if v.Ty.IsBigInt() {
 		return v
 	}
 	e.ensureBigInt()
-	w := e.coerce(v, TypeI64)
+	w := e.convert(v, TypeI64)
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, w.Ref))
 	return Value{Ref: reg, Ty: BigIntType()}
@@ -275,7 +277,7 @@ func (e *Emitter) bigintOperand(v Value) Value {
 func (e *Emitter) emitBigIntFloatCompare(op string, left, right Value, pos ast.Pos) (Value, error) {
 	e.ensureBigInt()
 	bigintVal, floatVal, bigintIsLeft := left, right, true
-	if !left.Ty.IsBigInt {
+	if !left.Ty.IsBigInt() {
 		bigintVal, floatVal, bigintIsLeft = right, left, false
 	}
 	dRef := floatVal.Ref
@@ -324,7 +326,7 @@ func swapCompareOp(op string) string {
 // bool, float, ptr, and every reference type — the operands that can be lifted
 // to a bigint for an exact cross-type comparison.
 func isIntegerNumberTy(ty Type) bool {
-	if ty.Float || ty.IsBigInt || ty.IsObject || ty.IsArray || ty.IsFunc || ty.IsSymbol {
+	if ty.Float || ty.IsBigInt() || ty.IsObject() || ty.IsArray() || ty.IsFunc() || ty.IsSymbol() {
 		return false
 	}
 	switch ty.IR {
@@ -380,11 +382,11 @@ func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.E
 		if err != nil {
 			return Value{}, err
 		}
-		if rv.Ty.IsBigInt || isStringTy(rv.Ty) {
+		if rv.Ty.IsBigInt() || isStringTy(rv.Ty) {
 			return Value{}, fmt.Errorf("%d:%d: BigInt.toString()'s radix must be a number (2–36)", pos.Line, pos.Col)
 		}
 		// A `number` radix is a double (TDD-00123); coerce truncates it to i64.
-		w := e.coerce(rv, TypeI64)
+		w := e.convert(rv, TypeI64)
 		radixReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", radixReg, w.Ref))
 		radixRef = radixReg
@@ -423,12 +425,12 @@ func (e *Emitter) emitBigIntAsN(which string, args []ast.Expression, pos ast.Pos
 	if !isIntegerNumberTy(bitsVal.Ty) && !bitsVal.Ty.Float {
 		return Value{}, fmt.Errorf("%d:%d: BigInt.%s's first argument (bits) must be a number", pos.Line, pos.Col, which)
 	}
-	bits := e.coerce(bitsVal, TypeI64)
+	bits := e.convert(bitsVal, TypeI64)
 	xVal, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
 	}
-	if !xVal.Ty.IsBigInt {
+	if !xVal.Ty.IsBigInt() {
 		return Value{}, fmt.Errorf("%d:%d: BigInt.%s's second argument must be a bigint", pos.Line, pos.Col, which)
 	}
 	e.ensureBigInt()
@@ -458,11 +460,11 @@ func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Val
 func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 	e.ensureBigInt()
 	switch {
-	case arg.Ty.IsBigInt:
+	case arg.Ty.IsBigInt():
 		return arg, nil
-	case isNullableScalar(arg.Ty) || arg.Ty.IsDynamic:
+	case isNullableScalar(arg.Ty) || arg.Ty.IsDynamic():
 		return e.bigintFromRuntime(arg, pos, true)
-	case arg.Ty.IsNull || arg.Ty.IsUndefined || arg.Ty.Nullable || arg.Ty.IR == "" || arg.Ty.IR == "void":
+	case arg.Ty.IsNull() || arg.Ty.IsUndefined() || arg.Ty.Nullable() || arg.Ty.IR == "" || arg.Ty.IR == "void":
 		// Possibly null or undefined (or only that): decided at run time.
 		boxed, err := e.emitBoxValue(arg)
 		if err != nil {
@@ -487,12 +489,12 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 		}
 		e.ensureExceptionHelpers()
 		errObj := e.buildErrorObj(errorKindIDs["SyntaxError"], msg.Ref, e.internString("SyntaxError"))
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+		e.excThrow(errObj)
 		e.emitTerminator("unreachable")
 		e.emitLabel(okL)
 		return Value{Ref: reg, Ty: BigIntType()}, nil
 	case arg.Ty.IR == "i64" || arg.Ty.IR == "i32" || arg.Ty.IR == "i16" || arg.Ty.IR == "i8" || arg.Ty.IR == "i1":
-		wide := e.coerce(arg, TypeI64)
+		wide := e.convert(arg, TypeI64)
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, wide.Ref))
 		return Value{Ref: reg, Ty: BigIntType()}, nil
@@ -503,7 +505,7 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 		// range guard (< |2^63|, which excludes NaN/Inf since every fcmp against
 		// them is false) precedes the fptosi so it is never out-of-range UB, then
 		// a fptosi→sitofp round-trip confirms integrality.
-		d := e.coerce(arg, TypeF64)
+		d := e.convert(arg, TypeF64)
 		inLo, inHi, inRange := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, 0xC3E0000000000000", inLo, d.Ref))
 		e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 0x43E0000000000000", inHi, d.Ref))
@@ -533,7 +535,7 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 		}
 		e.ensureExceptionHelpers()
 		rangeErr := e.buildErrorObj(errorKindIDs["RangeError"], msg.Ref, e.internString("RangeError"))
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", rangeErr))
+		e.excThrow(rangeErr)
 		e.emitTerminator("unreachable")
 		e.emitLabel(buildL)
 		reg := e.freshReg()
@@ -542,6 +544,37 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 	default:
 		return Value{}, fmt.Errorf("%d:%d: BigInt() accepts an integer number or a string, not this type (a non-integer number is a RangeError in JS)", pos.Line, pos.Col)
 	}
+}
+
+// emitToBigInt is ToBigInt(v) for a box v (a BigInt64Array element store):
+// BigInt() but for a number, which is a TypeError ("Cannot convert 1 to a
+// BigInt"), not converted.
+func (e *Emitter) emitToBigInt(v Value, pos ast.Pos) (Value, error) {
+	e.ensureBigInt()
+	tag, _ := e.emitUnboxTagPayload(v)
+	isInt, isFloat, isNum := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isInt, tag, kmlTagInt))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isFloat, tag, kmlTagFloat))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isNum, isInt, isFloat))
+	numL, okL := e.freshLabel("tobigint.num"), e.freshLabel("tobigint.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNum, numL, okL))
+	e.emitLabel(numL)
+	shown, err := e.emitDynamicToString(v)
+	if err != nil {
+		return Value{}, err
+	}
+	msg, err := e.emitStringConcat(Value{Ref: e.internString("Cannot convert "), Ty: TypePtr}, shown)
+	if err != nil {
+		return Value{}, err
+	}
+	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to a BigInt"), Ty: TypePtr}); err != nil {
+		return Value{}, err
+	}
+	e.ensureExceptionHelpers()
+	e.excThrow(e.buildErrorObj(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError")))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
+	return e.bigintFromRuntime(v, pos, true)
 }
 
 // bigintFromRuntime is BigInt(arg) for a value whose kind is known only at
@@ -655,7 +688,7 @@ func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value
 	}
 	e.ensureExceptionHelpers()
 	errObj := e.buildErrorObj(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError"))
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errObj))
+	e.excThrow(errObj)
 	e.emitTerminator("unreachable")
 	e.emitLabel(doneL)
 	r := e.freshReg()

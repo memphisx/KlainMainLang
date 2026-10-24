@@ -1,6 +1,7 @@
 // The part of Node's `buffer` module (lib/buffer.js) beyond its globals:
 // `Buffer`, `Blob`, `atob` and `btoa` are the globals; this file holds the
-// constants, isUtf8, isAscii, transcode and SlowBuffer.
+// constants, isUtf8, isAscii, transcode and SlowBuffer, and the global
+// Buffer's writable poolSize.
 
 import { NodeTypeError } from './internal_errors';
 
@@ -8,6 +9,9 @@ export const kMaxLength = 9007199254740991;
 export const kStringMaxLength = 536870888;
 export const constants = { MAX_LENGTH: kMaxLength, MAX_STRING_LENGTH: kStringMaxLength };
 export let INSPECT_MAX_BYTES = 50;
+// Buffer.poolSize: the size of Node's preallocated pool, a plain
+// writable number.
+export let poolSize = 65536;
 
 function received(value: any): string {
     if (value === null || value === undefined) return 'Received ' + String(value);
@@ -25,7 +29,7 @@ function bytesOf(input: any): Uint8Array {
         const view: any = input;
         return new Uint8Array(view.buffer as ArrayBuffer, view.byteOffset as number, view.byteLength as number);
     }
-    throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "input" argument must be an instance of ArrayBuffer, Buffer, or TypedArray. ' + received(input));
+    throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "input" argument must be an instance of ArrayBuffer, Buffer, or TypedArray. ' + received(input));
 }
 
 // Whether the bytes are well-formed UTF-8 (no overlong forms, surrogates or

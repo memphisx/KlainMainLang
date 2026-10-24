@@ -189,7 +189,7 @@ func (e *Emitter) staticRegexCaptureCount(pat ast.Expression) (int, bool) {
 // evaluated a single time regardless of how many matches end up being
 // replaced).
 func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (regexReplacer, error) {
-	if e.inferExprType(args[1]).IsFunc {
+	if e.inferExprType(args[1]).IsFunc() {
 		// Real JS invokes the replacer as (match, cap1..capN, offset, string),
 		// where N is the pattern's capture-group count. When the pattern is
 		// statically a regex literal N is known, so seed the callback's
@@ -242,7 +242,7 @@ func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (rege
 			return regexReplacer{}, err
 		}
 	}
-	templateVal = e.coerce(templateVal, TypePtr)
+	templateVal = e.convert(templateVal, TypePtr)
 	return regexReplacer{template: templateVal}, nil
 }
 
@@ -253,12 +253,12 @@ func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (rege
 // internal scan without any single-invocation constraint).
 func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, strVal Value, matchStartReg string) (replPtr, replLen string, err error) {
 	if !replacer.isCallback {
-		p, l := e.emitRegexExpandTemplate(replacer.template, match)
+		p, l := e.emitRegexExpandTemplate(replacer.template, match, strVal, matchStartReg)
 		return p, l, nil
 	}
 
 	matchPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", matchPtr, match.Ref))
+	matchPtr = e.arrayData(match)
 	elem0Gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", elem0Gep, matchPtr))
 	fullMatch := e.freshReg()
@@ -324,248 +324,30 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 			return "", "", err
 		}
 	}
-	resultVal = e.coerce(resultVal, TypePtr)
+	resultVal = e.convert(resultVal, TypePtr)
 	e.ensureStrlen()
 	lenReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", lenReg, resultVal.Ref))
 	return resultVal.Ref, lenReg, nil
 }
 
-// emitRegexExpandTemplate expands $1-$9/$&/$$ backreferences in a literal
-// replacement template against one specific match's already-extracted
-// result array (match) — $`/$' (pre-/post-match text) are deliberately
-// out of scope (a documented V1 narrowing), and $N where N is not a valid
-// capture-group number for this pattern (either not a digit 1-9, or >=
-// the pattern's own capture count) is left as literal text, matching real
-// JS. Single-pass, sized against a safe (over-)estimate of the expanded
-// output's length (the template's own length plus the sum of every
-// group's length — the worst-case bound if every 2-character "$N"
-// sequence in the template expanded to its group's full text) rather than
-// a true two-pass count, since computing that bound only needs one small
-// additional pure loop over match's own elements, cheaper than scanning
-// the template itself twice.
-func (e *Emitter) emitRegexExpandTemplate(templateVal, match Value) (replPtr, replLen string) {
+// emitRegexExpandTemplate expands a replacement template for one match
+// (match: its result array; the match starts at byte matchStartReg of
+// strVal) through __kml_regex_expand, the spec's GetSubstitution.
+func (e *Emitter) emitRegexExpandTemplate(templateVal, match, strVal Value, matchStartReg string) (replPtr, replLen string) {
 	e.ensureStrlen()
-	e.ensureMalloc()
-	e.ensureMemcpy()
-
-	dataPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataPtr, match.Ref))
-	groupCount := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", groupCount, match.Ref))
-
-	// Sum every group's length (a safe upper bound on the expanded output).
-	sumAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", sumAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", sumAlloca))
-	sumIdxAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", sumIdxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", sumIdxAlloca))
-
-	sumCondL := e.freshLabel("regex.repltpl.sumcond")
-	sumBodyL := e.freshLabel("regex.repltpl.sumbody")
-	sumDoneL := e.freshLabel("regex.repltpl.sumdone")
-	e.emitTerminator(fmt.Sprintf("br label %%%s", sumCondL))
-
-	e.emitLabel(sumCondL)
-	sumIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sumIdx, sumIdxAlloca))
-	sumDoneReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", sumDoneReg, sumIdx, groupCount))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sumDoneReg, sumDoneL, sumBodyL))
-
-	e.emitLabel(sumBodyL)
-	sumElemGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", sumElemGep, dataPtr, sumIdx))
-	sumElemRaw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sumElemRaw, sumElemGep))
-	sumElemPtr := e.emitUnmatchedGroupAsEmpty(sumElemRaw)
-	sumElemLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", sumElemLen, sumElemPtr))
-	curSum := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curSum, sumAlloca))
-	newSum := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newSum, curSum, sumElemLen))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newSum, sumAlloca))
-	sumIdxNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", sumIdxNext, sumIdx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sumIdxNext, sumIdxAlloca))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", sumCondL))
-
-	e.emitLabel(sumDoneL)
-	totalGroupLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", totalGroupLen, sumAlloca))
-
-	templateLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", templateLen, templateVal.Ref))
-	upperBound := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", upperBound, templateLen, totalGroupLen))
-	buf := e.emitStringScratchReg(upperBound) // TDD-00120: len set at return
-
-	srcAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", srcAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", srcAlloca))
-	dstAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", dstAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", dstAlloca))
-
-	copyGroup := func(groupIdxReg string) {
-		elemGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", elemGep, dataPtr, groupIdxReg))
-		elemRaw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elemRaw, elemGep))
-		elemPtr := e.emitUnmatchedGroupAsEmpty(elemRaw)
-		elemLen := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", elemLen, elemPtr))
-		curDst := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curDst, dstAlloca))
-		dstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dstGep, buf, curDst))
-		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dstGep, elemPtr, elemLen))
-		newDst := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newDst, curDst, elemLen))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newDst, dstAlloca))
-	}
-	writeLiteralByte := func(byteVal string) {
-		curDst := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curDst, dstAlloca))
-		dstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dstGep, buf, curDst))
-		e.emitInstr(fmt.Sprintf("store i8 %s, ptr %s, align 1", byteVal, dstGep))
-		newDst := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newDst, curDst))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newDst, dstAlloca))
-	}
-	advanceSrcTo := func(newSrcReg string) {
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newSrcReg, srcAlloca))
-	}
-	advanceSrcBy1 := func(fromReg string) {
-		newSrc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newSrc, fromReg))
-		advanceSrcTo(newSrc)
-	}
-
-	scanCondL := e.freshLabel("regex.repltpl.scancond")
-	scanBodyL := e.freshLabel("regex.repltpl.scanbody")
-	scanDoneL := e.freshLabel("regex.repltpl.scandone")
-	e.emitTerminator(fmt.Sprintf("br label %%%s", scanCondL))
-
-	e.emitLabel(scanCondL)
-	srcIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcIdx, srcAlloca))
-	scanDoneReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", scanDoneReg, srcIdx, templateLen))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", scanDoneReg, scanDoneL, scanBodyL))
-
-	e.emitLabel(scanBodyL)
-	chGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", chGep, templateVal.Ref, srcIdx))
-	ch := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", ch, chGep))
-	isDollar := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 36", isDollar, ch))
-	dollarL := e.freshLabel("regex.repltpl.dollar")
-	plainL := e.freshLabel("regex.repltpl.plain")
-	loopBackL := e.freshLabel("regex.repltpl.loopback")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDollar, dollarL, plainL))
-
-	e.emitLabel(plainL)
-	writeLiteralByte(ch)
-	advanceSrcBy1(srcIdx)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", loopBackL))
-
-	e.emitLabel(dollarL)
-	nextIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, srcIdx))
-	hasNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", hasNext, nextIdx, templateLen))
-	hasNextL := e.freshLabel("regex.repltpl.hasnext")
-	noNextL := e.freshLabel("regex.repltpl.nonext")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasNext, hasNextL, noNextL))
-
-	e.emitLabel(noNextL)
-	writeLiteralByte("36")
-	advanceSrcBy1(srcIdx)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", loopBackL))
-
-	e.emitLabel(hasNextL)
-	nextChGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nextChGep, templateVal.Ref, nextIdx))
-	nextCh := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", nextCh, nextChGep))
-
-	isDollarDollar := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 36", isDollarDollar, nextCh))
-	ddL := e.freshLabel("regex.repltpl.dd")
-	checkAmpL := e.freshLabel("regex.repltpl.checkamp")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDollarDollar, ddL, checkAmpL))
-
-	e.emitLabel(ddL)
-	writeLiteralByte("36")
-	advanceSrcBy1(nextIdx)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", loopBackL))
-
-	e.emitLabel(checkAmpL)
-	isAmp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 38", isAmp, nextCh))
-	ampL := e.freshLabel("regex.repltpl.amp")
-	checkDigitL := e.freshLabel("regex.repltpl.checkdigit")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAmp, ampL, checkDigitL))
-
-	e.emitLabel(ampL)
-	copyGroup("0")
-	advanceSrcBy1(nextIdx)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", loopBackL))
-
-	e.emitLabel(checkDigitL)
-	isDigitLowReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sge i8 %s, 49", isDigitLowReg, nextCh)) // >= '1'
-	isDigitHighReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp sle i8 %s, 57", isDigitHighReg, nextCh)) // <= '9'
-	isDigitReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", isDigitReg, isDigitLowReg, isDigitHighReg))
-	digitL := e.freshLabel("regex.repltpl.digit")
-	notSpecialL := e.freshLabel("regex.repltpl.notspecial")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDigitReg, digitL, notSpecialL))
-
-	e.emitLabel(notSpecialL)
-	writeLiteralByte("36")
-	advanceSrcBy1(srcIdx)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", loopBackL))
-
-	e.emitLabel(digitL)
-	digitVal8 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sub i8 %s, 48", digitVal8, nextCh))
-	digitVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", digitVal, digitVal8))
-	validGroup := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", validGroup, digitVal, groupCount))
-	validL := e.freshLabel("regex.repltpl.validgroup")
-	invalidL := e.freshLabel("regex.repltpl.invalidgroup")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", validGroup, validL, invalidL))
-
-	e.emitLabel(invalidL)
-	writeLiteralByte("36")
-	advanceSrcBy1(srcIdx)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", loopBackL))
-
-	e.emitLabel(validL)
-	copyGroup(digitVal)
-	advanceSrcBy1(nextIdx)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", loopBackL))
-
-	e.emitLabel(loopBackL)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", scanCondL))
-
-	e.emitLabel(scanDoneL)
-	finalDst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalDst, dstAlloca))
-	termGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, buf, finalDst))
-	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termGep))
-	e.emitStringSetLen(buf, finalDst) // TDD-00120: exact expanded length
-
-	return buf, finalDst
+	e.ensureRegexExpand()
+	data, n := e.arrayParts(match)
+	g0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", g0, data))
+	l0, mend := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", l0, e.emitUnmatchedGroupAsEmpty(g0)))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", mend, matchStartReg, l0))
+	replPtr, replLen = e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_expand(ptr %s, ptr %s, i64 %s, ptr %s, i64 %s, i64 %s)",
+		replPtr, templateVal.Ref, data, n, strVal.Ref, matchStartReg, mend))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", replLen, replPtr))
+	return replPtr, replLen
 }
 
 // emitRegexReplaceSingleMatch implements the non-global str.replace()
@@ -575,7 +357,7 @@ func (e *Emitter) emitRegexExpandTemplate(templateVal, match Value) (replPtr, re
 func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer regexReplacer) (Value, error) {
 	match, startReg, endReg := e.emitRegexSingleMatchCore(regexVal, strVal)
 	matchPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", matchPtr, match.Ref))
+	matchPtr = e.arrayData(match)
 	isNullReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, matchPtr))
 
@@ -622,7 +404,7 @@ func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer r
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", tailDst, tailSrc, tailLen))
 	termGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, outBuf, outLen))
-	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termGep))
+	e.heapStore("i8", "0", termGep, 1)
 
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", outBuf, resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
@@ -657,13 +439,13 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	byteCount8 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount8, count))
 	starts := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", starts, byteCount8))
+	e.heapMallocInto(starts, byteCount8)
 	ends := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", ends, byteCount8))
+	e.heapMallocInto(ends, byteCount8)
 	replPtrs := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", replPtrs, byteCount8))
+	e.heapMallocInto(replPtrs, byteCount8)
 	replLens := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", replLens, byteCount8))
+	e.heapMallocInto(replLens, byteCount8)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
@@ -689,16 +471,16 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	}
 	startGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", startGep, starts, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startReg, startGep))
+	e.heapStore("i64", startReg, startGep, 8)
 	endGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", endGep, ends, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", endReg, endGep))
+	e.heapStore("i64", endReg, endGep, 8)
 	replPtrGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", replPtrGep, replPtrs, idxVal))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", replPtr, replPtrGep))
+	e.heapStore("ptr", replPtr, replPtrGep, 8)
 	replLenGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", replLenGep, replLens, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", replLenReg, replLenGep))
+	e.heapStore("i64", replLenReg, replLenGep, 8)
 
 	// Advance past a zero-length match so this fill pass iterates in lockstep
 	// with emitRegexCountGlobalMatches's count pass (both share the same
@@ -865,7 +647,7 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", trailDstGep, trailSrcGep, trailingLen))
 	termGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, outBuf, grandTotal))
-	e.emitInstr(fmt.Sprintf("store i8 0, ptr %s, align 1", termGep))
+	e.heapStore("i8", "0", termGep, 1)
 
 	return Value{Ref: outBuf, Ty: TypePtr}, nil
 }
@@ -880,7 +662,7 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 // for a non-literal RegExp variable) between a single-match replace and
 // the same all-matches algorithm replaceAll() always uses.
 func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.Pos, requireGlobal bool) (Value, error) {
-	strVal = e.coerce(strVal, TypePtr)
+	strVal = e.convert(strVal, TypePtr)
 	regexVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -895,7 +677,7 @@ func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.
 
 		e.emitLabel(badL)
 		errReg := e.buildErrorObj(errorKindIDs["TypeError"], e.internString("String.prototype.replaceAll called with a non-global RegExp argument"), e.internString("TypeError"))
-		e.emitInstr(fmt.Sprintf("call void @__kml_throw(ptr %s)", errReg))
+		e.excThrow(errReg)
 		e.emitTerminator("unreachable")
 
 		e.emitLabel(okL)

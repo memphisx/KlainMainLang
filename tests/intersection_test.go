@@ -78,14 +78,14 @@ console.log(v.x)
 `, "5")
 }
 
-// A non-object member (a scalar, which intersects to `never`) is a clean
-// compile error rather than broken codegen.
+// A primitive member makes a branded primitive: an object literal is not
+// one (tsc's TS2322).
 func TestE2EIntersectionNonObjectRejected(t *testing.T) {
 	mustCompileError(t, `
 interface A { x: number }
 const v: A & number = { x: 1 }
 console.log(v.x)
-`, "object type")
+`, "not assignable")
 }
 
 // A field declared with conflicting types across members is rejected under the
@@ -141,16 +141,16 @@ interface A { x: number }
 interface W { p: A & number }
 const w: W = { p: 5 }
 console.log(w.p)
-`, "object type")
+`, "not assignable")
 }
 
-// The same for a non-object intersection as an array element type.
+// An array of branded strings, empty, is valid TypeScript.
 func TestE2EIntersectionArrayElementNonObjectRejected(t *testing.T) {
-	mustCompileError(t, `
+	assertOutput(t, `
 interface A { x: number }
 const xs: (A & string)[] = []
 console.log(xs.length)
-`, "object type")
+`, "0")
 }
 
 // `&` binds tighter than `|`: A & B | C parses as (A & B) | C — a union of
@@ -163,4 +163,19 @@ interface C { c: number }
 const v: A & B | C = { a: 1, b: 2 }
 if ("a" in v) console.log(v.a + v.b); else console.log(v.c)
 `)
+}
+
+// A branded primitive (`string & { __brand }`) holds the primitive itself:
+// its methods, operators and containers are the primitive's.
+func TestE2EIntersectionBrandedPrimitive(t *testing.T) {
+	assertOutput(t, `
+type Id = string & { readonly __brand: "Id" };
+type N = number & { readonly __n: true };
+const mk = (s: string) => s as Id;
+const ids = [mk("a"), mk("b")];
+const rec: { id: Id; n: N } = { id: mk("q"), n: 5 as N };
+const m = new Map<Id, number>();
+m.set(mk("k"), 3);
+console.log(ids.join(","), rec.id.toUpperCase(), rec.n * 2, m.get(mk("k")));
+`, "a,b Q 10 3")
 }

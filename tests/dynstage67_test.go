@@ -214,6 +214,40 @@ console.log(Object.getOwnPropertySymbols(new Proxy(ne, { ownKeys() { return ["y"
 `)
 }
 
+// A Proxy's [[OwnPropertyKeys]] and [[GetOwnProperty]]: its ownKeys and
+// getOwnPropertyDescriptor traps, else its target's, behind Object.keys,
+// getOwnPropertyNames, getOwnPropertyDescriptor, Reflect.ownKeys and object
+// rest, each trap run in the spec's order (ADR-01814).
+func TestE2EProxyOwnKeysAndDescriptors(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var log = [];
+var s = Symbol("s");
+var p = new Proxy({}, {
+  getOwnPropertyDescriptor(_t, k) { log.push("gopd:" + String(k)); return k === "foo" ? { value: 1, enumerable: true, configurable: true } : undefined; },
+  ownKeys() { log.push("ownKeys"); return [s, "foo", "0"]; },
+  get(_t, k) { log.push("get:" + String(k)); return 7; },
+});
+var rk = Reflect.ownKeys(p); console.log(rk.length, rk[0] === s, rk[1], log.join()); log = [];
+console.log(JSON.stringify(Object.keys(p)), log.join()); log = [];
+console.log(JSON.stringify(Object.getOwnPropertyNames(p)), log.join()); log = [];
+var d = Object.getOwnPropertyDescriptor(p, "foo");
+console.log(d.value, d.writable, d.enumerable, d.configurable, log.join()); log = [];
+let { ...r } = p; console.log(JSON.stringify(r), log.join()); log = [];
+let { foo, ...r2 } = p; console.log(foo, JSON.stringify(r2), log.join()); log = [];
+var fw = new Proxy({ a: 1, b: 2 }, {});
+console.log(JSON.stringify(Object.keys(fw)), Reflect.ownKeys(fw).length, Object.getOwnPropertyDescriptor(fw, "b").value);
+let { a, ...rest } = fw; console.log(a, JSON.stringify(rest));
+var nested = new Proxy(new Proxy({ z: 3 }, {}), {});
+console.log(JSON.stringify(Object.keys(nested)));
+var bad = new Proxy({}, { getOwnPropertyDescriptor() { return 1; } });
+try { Object.getOwnPropertyDescriptor(bad, "q"); } catch (e) { console.log(e instanceof TypeError, e.message); }
+var dup = new Proxy({}, { ownKeys() { return ["a", "a"]; } });
+try { Object.keys(dup); } catch (e) { console.log(e instanceof TypeError, e.message); }
+console.log(JSON.stringify(p), JSON.stringify(new Proxy({ a: 1, b: 2 }, { get(t, k) { return k.length; } })));
+console.log(Object.keys(Object.getOwnPropertyDescriptor({ a: 1 }, "a")).map(k => k.length).join());
+`)
+}
+
 // A field named "constructor" (identifier or string) and `arguments` in a
 // field initializer are early SyntaxErrors; `arguments` inside a nested
 // function is not.

@@ -75,7 +75,7 @@ func joinPath(p []string) string {
 // predicate).
 func narrowable(t *Type) bool {
 	return t.Flags&(Union|Unknown|Boolean|Literal|String|Number|BigInt|ESSymbol|Int|Float32) != 0 ||
-		t.Flags&Object != 0 && (t.Kind == Instance || t.Kind == Interface || t.Kind == Anonymous)
+		t.Flags&Object != 0 && (t.Kind == Instance || t.Kind == Interface || t.Kind == Anonymous || t.Kind == Array || t.Kind == Tuple)
 }
 
 // ref is a narrowable reference: a symbol, or a property path on it
@@ -306,8 +306,8 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			if len(r.path) > 0 {
 				return declared, nil // the root was replaced
 			}
-			if declared.Flags&Union == 0 && !c.evolving[r.sym] && !c.evolvingArray[r.sym] && !c.Unanswered(declared) {
-				// Only a union narrows by assignment (tsc's
+			if declared.Flags&Union == 0 && declared.Flags&(Boolean|BooleanLiteral) != Boolean && !c.evolving[r.sym] && !c.evolvingArray[r.sym] && !c.Unanswered(declared) {
+				// Only a union (boolean is true | false) narrows by assignment (tsc's
 				// getTypeAtFlowAssignment): the stored value's type is not
 				// needed, and computing it re-walks every binding it reads.
 				if _, pattern := f.Node.(*ast.Identifier); !pattern {
@@ -410,6 +410,9 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 		}
 		delete(w.onPath, f)
 		t := c.unknownJoin(c.in.union(ts...))
+		if c.foreignBranch(ts, declared) {
+			t = c.reduceDerived(t)
+		}
 		w.memo[f] = flowMemo{t, deps}
 		if len(deps) == 0 && c.cutCount == cuts {
 			// A complete answer: no loop outside f cut it, and no assignment
@@ -418,6 +421,80 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 		}
 		return t, deps
 	}
+}
+
+// foreignBranch reports a branch type that is not a subset of the declared
+// type — one `instanceof` or a type predicate injected (tsc's
+// getTypeAtFlowBranchLabel): the join then reduces subtypes.
+func (c *Checker) foreignBranch(ts []*Type, declared *Type) bool {
+	if declared == nil || c.Unanswered(declared) {
+		return false
+	}
+	in := func(m *Type) bool {
+		if m == declared {
+			return true
+		}
+		if declared.Flags&Union != 0 {
+			for _, d := range declared.Types {
+				if d == m {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for _, t := range ts {
+		if t == nil || c.Unanswered(t) {
+			continue
+		}
+		if t.Flags&Union != 0 {
+			for _, m := range t.Types {
+				if !in(m) {
+					return true
+				}
+			}
+		} else if !in(t) && t.Flags&Never == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// reduceDerived drops a union member that is an instance of a class
+// deriving from another member's: subtype reduction, for the subtypes
+// the checker relates nominally.
+func (c *Checker) reduceDerived(t *Type) *Type {
+	if t.Flags&Union == 0 {
+		return t
+	}
+	derives := func(m, n *Type) bool {
+		if m == n || m.Flags&Object == 0 || m.Kind != Instance || n.Flags&Object == 0 || n.Kind != Instance {
+			return false
+		}
+		for b := m.Base; b != nil; b = b.Base {
+			if b == n {
+				return true
+			}
+		}
+		return false
+	}
+	var keep []*Type
+	for _, m := range t.Types {
+		drop := false
+		for _, n := range t.Types {
+			if derives(m, n) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			keep = append(keep, m)
+		}
+	}
+	if len(keep) == len(t.Types) {
+		return t
+	}
+	return c.in.union(keep...)
 }
 
 // unknownJoin is tsc's rule for unknown's narrowed parts: where branches
@@ -551,12 +628,23 @@ func (c *Checker) assignmentReduced(declared, assigned *Type) *Type {
 	if c.Unanswered(assigned) && declared.Flags&Union != 0 {
 		return assigned // which members the value keeps is unknown, never guessed
 	}
-	if declared.Flags&Union == 0 || c.Unanswered(assigned) || assigned.Flags&(Any|Unknown) != 0 {
+	if c.Unanswered(assigned) || assigned.Flags&(Any|Unknown) != 0 {
+		return declared
+	}
+	// boolean is true | false: `let y = true` is true until reassigned.
+	if declared.Flags&Union == 0 {
+		if declared.Flags&Boolean != 0 && declared.Flags&BooleanLiteral == 0 && assigned.Flags&Union == 0 && assigned.Flags&BooleanLiteral != 0 {
+			return assigned
+		}
 		return declared
 	}
 	var keep []*Type
 	for _, m := range declared.Types {
 		for _, a := range members(assigned) {
+			if m.Flags&Boolean != 0 && m.Flags&BooleanLiteral == 0 && a.Flags&BooleanLiteral != 0 {
+				keep = append(keep, a) // boolean's true or false
+				continue
+			}
 			if assignableMember(a, m) || (a.Flags&Object != 0 && m.Flags&Object != 0 && c.assignableTo(a, m) != no) {
 				keep = append(keep, m)
 				break
@@ -582,7 +670,7 @@ func assignableMember(a, m *Type) bool {
 		if a.Kind == Instance && m.Kind == Instance {
 			return a.Derives(m.Symbol)
 		}
-		return a.Kind == m.Kind
+		return a.Kind == m.Kind || a.Kind == Tuple && m.Kind == Array // a tuple is an array
 	case a.Flags&Void != 0:
 		return m.Flags&Undefined != 0
 	}
@@ -1246,7 +1334,16 @@ func (c *Checker) narrowByInstanceof(t *Type, r ref, e *ast.BinaryExpression, tr
 		}
 		return t
 	}
-	is := func(m *Type) bool { return m.Flags&Object != 0 && m.Kind == Instance && m.Derives(csym) }
+	linked := c.linkedGlobalName(csym)
+	is := func(m *Type) bool {
+		if m.Flags&Object != 0 && m.Kind == Instance && m.Derives(csym) {
+			return true
+		}
+		// The library's interface of the global the class implements
+		// (`URL` in `string | URL`, by `instanceof URL` naming kml_url's
+		// class): one type to tsc.
+		return linked != "" && m.Flags&Object != 0 && m.Kind == Interface && m.Symbol != nil && m.Symbol.Name == linked && c.inLibrary(m.Symbol.Scope)
+	}
 	if truthy {
 		if t.Flags&Unknown != 0 {
 			return inst
@@ -1297,7 +1394,7 @@ func (c *Checker) constructedType(ctor *Type) *Type {
 
 // narrowByIn narrows a union of objects by `"p" in sym`.
 func (c *Checker) narrowByIn(t *Type, r ref, e *ast.BinaryExpression, truthy bool) *Type {
-	key, ok := e.Left.(*ast.StringLiteral)
+	key, ok := literalKey(e.Left)
 	if !ok || !c.refersTo(e.Right, r) {
 		return t
 	}
@@ -1305,7 +1402,7 @@ func (c *Checker) narrowByIn(t *Type, r ref, e *ast.BinaryExpression, truthy boo
 		if m.Flags&Object == 0 {
 			return false // `in` throws on a primitive
 		}
-		p := m.Prop(key.Value)
+		p := m.Prop(key)
 		if p == nil {
 			return !truthy
 		}
@@ -1320,6 +1417,30 @@ func (c *Checker) narrowByPredicate(t *Type, r ref, e *ast.CallExpression, truth
 	if c.unknownGuard(ft, e, r) {
 		return c.unanswered
 	}
+	// An overloaded callee guards by the signature the call resolves to
+	// (`arr.every(isString)` picks every's `this is S[]` overload), with
+	// the type arguments that pick inferred.
+	var picked map[*Type]*Type
+	if ft.Flags&Object != 0 && ft.Kind == Function && len(ft.Overloads) > 0 && !e.Optional {
+		// Picking types the arguments, whose narrowing may reach this
+		// call again (a loop): the inner ask does not narrow.
+		if c.pickingGuard[e] {
+			return t
+		}
+		if c.pickingGuard == nil {
+			c.pickingGuard = map[*ast.CallExpression]bool{}
+		}
+		c.pickingGuard[e] = true
+		sig, m, ok := c.pickOverload(e, ft, true)
+		delete(c.pickingGuard, e)
+		if !ok {
+			return t
+		}
+		ft, picked = sig, m
+		if picked == nil {
+			picked = map[*Type]*Type{}
+		}
+	}
 	if ft.Flags&Object == 0 || ft.Kind != Function || ft.Predicate == nil || ft.Predicate.Asserts || e.Optional {
 		return t
 	}
@@ -1332,9 +1453,14 @@ func (c *Checker) narrowByPredicate(t *Type, r ref, e *ast.CallExpression, truth
 		return c.predicateContainment(t, r, arg, p.Type, truthy)
 	}
 	pt := p.Type
-	if len(ft.TypeParams) > 0 {
+	if picked != nil && len(ft.TypeParams) > 0 {
+		pt = c.instantiate(pt, picked)
+		if hasTypeParam(pt) || c.Unanswered(pt) {
+			return c.unanswered
+		}
+	} else if len(ft.TypeParams) > 0 {
 		// A generic guard: its predicate type is the call's instantiation.
-		pt = c.instantiate(pt, c.inferArgs(e.Args, e.TypeArgs, ft, true))
+		pt = c.instantiate(pt, c.inferArgsRecv(callRecv(e), e.Args, e.TypeArgs, ft, true))
 		if hasTypeParam(pt) || c.Unanswered(pt) {
 			return c.unanswered
 		}
@@ -1346,6 +1472,42 @@ func (c *Checker) narrowByPredicate(t *Type, r ref, e *ast.CallExpression, truth
 		return t
 	}
 	return c.filter(t, func(m *Type) bool { return !c.within(m, pt) })
+}
+
+// effectsType is the type of a call statement's callee as an assertion or
+// a never-returning call sees it (TypeScript's getEffectsSignature): a name
+// in the callee must be declared with an explicit type (TS2775), so a call
+// through an unannotated variable (`const b = s.buffered[n]; b.cb(…)`) has
+// no effect on what flows past it. Reading that variable's initializer
+// would walk back through the loop holding this call.
+func (c *Checker) effectsType(e ast.Expression) *Type {
+	root := e
+	for {
+		m, ok := root.(*ast.MemberExpression)
+		if !ok {
+			break
+		}
+		root = m.Object
+	}
+	if id, ok := root.(*ast.Identifier); ok {
+		if sym, _ := c.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if v, isVar := sym.Declarations[0].Node.(*ast.VarDeclaration); isVar && v.TypeAnnot == nil && !isRequireCall(v.Init) {
+				return c.anyT // no effects signature (a require is an alias)
+			}
+		}
+	}
+	return c.dottedType(e)
+}
+
+// isRequireCall reports `require("m")`, which a JS file's checker reads as
+// an alias of the module.
+func isRequireCall(e ast.Expression) bool {
+	call, ok := e.(*ast.CallExpression)
+	if !ok || len(call.Args) != 1 {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Identifier)
+	return ok && id.Name == "require"
 }
 
 // dottedType is the type of a call's callee as a type guard or assertion
@@ -1421,7 +1583,9 @@ func (c *Checker) dottedType(e ast.Expression) *Type {
 		}
 		return c.anyT // a union of methods is no one guard
 	}
-	return c.unanswered
+	// Any other callee root (a call's result, a literal: `/re/.test(p)`) is no
+	// dotted name, so the call is no guard (getTypeOfDottedName's undefined).
+	return c.anyT
 }
 
 // condMayNarrow reports whether cond could narrow r: it mentions r (or a
@@ -1472,7 +1636,7 @@ func (c *Checker) callMayNarrow(call *ast.CallExpression, r ref) bool {
 		return false
 	}
 	if m, ok := call.Callee.(*ast.MemberExpression); ok && c.mentions(m.Object, r) {
-		ft := c.dottedType(call.Callee)
+		ft := c.effectsType(call.Callee)
 		if c.Unanswered(ft) {
 			return true
 		}
@@ -1619,6 +1783,12 @@ func (c *Checker) within(m, candidate *Type) bool {
 			(m.Kind == Interface || m.Kind == Instance) && c.assignableTo(m, pm) != yes {
 			continue
 		}
+		// Two arrays (or tuples): m's elements must be pm's (a
+		// (string | number)[] is not a string[]).
+		if m.Flags&Object != 0 && pm.Flags&Object != 0 && m != pm &&
+			(m.Kind == Array || m.Kind == Tuple) && c.assignableTo(m, pm) != yes {
+			continue
+		}
 		return true
 	}
 	return false
@@ -1722,7 +1892,7 @@ func (c *Checker) narrowByAssertion(t *Type, r ref, e *ast.CallExpression) *Type
 	if e.Optional {
 		return t
 	}
-	ft := c.dottedType(e.Callee)
+	ft := c.effectsType(e.Callee)
 	if c.unknownGuard(ft, e, r) {
 		return c.unanswered
 	}
@@ -1742,7 +1912,7 @@ func (c *Checker) narrowByAssertion(t *Type, r ref, e *ast.CallExpression) *Type
 	}
 	pt := p.Type
 	if len(ft.TypeParams) > 0 {
-		pt = c.instantiate(pt, c.inferArgs(e.Args, e.TypeArgs, ft, true))
+		pt = c.instantiate(pt, c.inferArgsRecv(callRecv(e), e.Args, e.TypeArgs, ft, true))
 		if hasTypeParam(pt) || c.Unanswered(pt) {
 			if c.refersTo(arg, r) {
 				return c.unanswered
@@ -1903,6 +2073,15 @@ func (c *Checker) accessKey(e ast.Expression) (string, bool) {
 	if k, ok := literalKey(e); ok {
 		return k, true
 	}
+	// A well-known symbol (`o[Symbol.iterator]`) keys the member declared
+	// with it (`[Symbol.iterator]() {…}`), which carries its `@@` name.
+	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional {
+		if s, ok := m.Object.(*ast.Identifier); ok && s.Name == "Symbol" {
+			if sym, _ := c.b.Resolve(s); sym == nil || c.inLibrary(sym.Scope) {
+				return "@@" + m.Property, true
+			}
+		}
+	}
 	id, ok := e.(*ast.Identifier)
 	if !ok {
 		return "", false
@@ -2013,7 +2192,7 @@ func (c *Checker) neverReturning(call *ast.CallExpression) bool {
 	if _, stmt := c.parentOf(call).(*ast.ExpressionStatement); !stmt || call.Optional {
 		return false
 	}
-	ft := c.dottedType(call.Callee)
+	ft := c.effectsType(call.Callee)
 	if c.Unanswered(ft) || ft.Flags&Object == 0 || ft.Kind != Function || len(ft.Overloads) > 0 || ft.Result == nil || ft.Result.Flags&Never == 0 {
 		return false
 	}
@@ -2028,6 +2207,11 @@ func (c *Checker) neverReturning(call *ast.CallExpression) bool {
 
 // namespaceMember is the member symbol `ns.name` denotes, when ns names a
 // namespace (possibly dotted), or nil.
+// NamespaceMember is the symbol a namespace-qualified read names, or nil.
+func (c *Checker) NamespaceMember(e *ast.MemberExpression) *binder.Symbol {
+	return c.namespaceMember(e)
+}
+
 func (c *Checker) namespaceMember(e *ast.MemberExpression) *binder.Symbol {
 	var ns *binder.Symbol
 	switch x := e.Object.(type) {
@@ -2047,7 +2231,18 @@ func (c *Checker) namespaceMember(e *ast.MemberExpression) *binder.Symbol {
 	if scope == nil {
 		return nil
 	}
-	return scope.Symbols.Get(e.Property)
+	if sym := scope.Symbols.Get(e.Property); sym != nil {
+		return sym
+	}
+	// A member the resolver made file-private (`Kind__kml_mod0`), as
+	// qualifiedTypeName finds a type.
+	var found *binder.Symbol
+	scope.Symbols.Each(func(sym *binder.Symbol) {
+		if found == nil && ast.TrimModuleSuffix(sym.Name) == e.Property {
+			found = sym
+		}
+	})
+	return found
 }
 
 // calleeSymbol is the symbol a dotted callee names, when it names one: an
@@ -2422,4 +2617,19 @@ func (c *Checker) derivesFrom(m, target *Type) bool {
 		return false
 	}
 	return walk(m.Symbol)
+}
+
+// linkedGlobalName is the global a builtin module's class implements (the
+// program's GlobalLinks), or "".
+func (c *Checker) linkedGlobalName(csym *binder.Symbol) string {
+	prog, ok := c.b.Module.Node.(*ast.Program)
+	if !ok {
+		return ""
+	}
+	for g, m := range prog.GlobalLinks {
+		if m == csym.Name {
+			return g
+		}
+	}
+	return ""
 }

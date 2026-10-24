@@ -52,15 +52,17 @@ class Utils {
 }
 console.log(new Utils().double(21)); // 42
 
-// Stage 1a: for...of over a class implementing a sentinel next(): T | null
-// iterator method — dispatched structurally at compile time, no runtime
-// Symbol.iterator lookup.
+// for...of over a class: its [Symbol.iterator] generator drains a sentinel
+// next(): T | null method.
 class Range {
   current: number;
   max: number;
   constructor(start: number, max: number) {
     this.current = start;
     this.max = max;
+  }
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
   }
   next(): number | null {
     if (this.current >= this.max) {
@@ -89,6 +91,9 @@ class NodeIter {
   cursor: Node | null;
   constructor(head: Node | null) {
     this.cursor = head;
+  }
+  *[Symbol.iterator]() {
+    for (let v = this.next(); v !== null; v = this.next()) yield v;
   }
   next(): Node | null {
     const n = this.cursor;
@@ -421,7 +426,7 @@ console.log(new Box2().sum()); // 3
 // `#x` also works on `static` fields/methods and on get/set accessors —
 // each independently combining with a feature `#x` itself doesn't change.
 class IdPool {
-  static #next: number;
+  static #next = 0;
   static take(): number {
     IdPool.#next = IdPool.#next + 1;
     return IdPool.#next;

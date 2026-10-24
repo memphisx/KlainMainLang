@@ -110,6 +110,19 @@ declare ptr @__kml_native_process_argv0()
 declare ptr @__kml_native_process_argv(double)`)
 }
 
+// ensureNativeProcessTitle declares processTitle and processSetTitle,
+// defined beside the event loop (loop.c, which has libuv).
+func (e *Emitter) ensureNativeProcessTitle() {
+	if e.fnDecls["__kml_native_process_title"] {
+		return
+	}
+	e.fnDecls["__kml_native_process_title"] = true
+	e.ensureEventLoop()
+	e.ensureStrHeaderRuntime()
+	e.emitGlobal(`declare ptr @__kml_native_process_title()
+declare void @__kml_native_process_set_title(ptr)`)
+}
+
 // ensureNativeProcessExecPath declares processExecPath: the running
 // executable's absolute path.
 func (e *Emitter) ensureNativeProcessExecPath() {

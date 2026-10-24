@@ -27,7 +27,7 @@ function received(value: any): string {
 
 function validateFunction(value: any, name: string): void {
     if (typeof value !== 'function') {
-        throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type function.' + received(value));
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be of type function.' + received(value));
     }
 }
 
@@ -74,7 +74,7 @@ export class AsyncResource {
 
     constructor(type: string, opts?: number | AsyncResourceOptions) {
         if (typeof type !== 'string') {
-            throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "type" argument must be of type string.' + received(type));
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "type" argument must be of type string.' + received(type));
         }
         let trigger = 0;
         if (typeof opts === 'number') trigger = opts;
@@ -136,7 +136,7 @@ export class AsyncLocalStorage<T> {
     constructor(options?: AsyncLocalStorageOptions) {
         if (options !== undefined) {
             if (options === null || typeof options !== 'object') {
-                throw new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options" argument must be of type object.' + received(options));
             }
             this.defaultValue = options.defaultValue;
             if (options.name !== undefined) this.nameValue = '' + options.name;

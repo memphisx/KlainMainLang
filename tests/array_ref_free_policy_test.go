@@ -154,6 +154,9 @@ func buildArrayRefASanAuto(t *testing.T, src string, optMem bool) string {
 	args := []string{"-O1", "-g", "-fno-omit-frame-pointer",
 		"-fsanitize=address", "-fsanitize=undefined", llFile, "-o", binFile}
 	args = appendRuntime(t, em, dir, args)
+	for _, lib := range em.LinkLibs() {
+		args = append(args, llvm.LinkLibFlags(lib)...)
+	}
 	clangSanitized(t, binFile, args)
 	return binFile
 }

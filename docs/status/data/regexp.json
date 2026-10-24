@@ -17,11 +17,11 @@
     },
     {
       "kind": "block",
-      "text": "PCRE2-backed; `--static` linking works (verified on Linux, including a Docker `scratch` container — `docker/Dockerfile.regexp-test`). Full design: [TDD-00035](../tdd/TDD-00035.md) ([ADR-00114](../adr/ADR-00114.md)–[ADR-00120](../adr/ADR-00120.md))."
+      "text": "PCRE2-backed; `--static` linking works (verified on Linux, including a Docker `scratch` container — `docker/Dockerfile.regexp-test`). Full design: [TDD-00035](../tdd/TDD-00035.md) ([ADR-00114](../adr/00/ADR-00114.md)–[ADR-00120](../adr/00/ADR-00120.md))."
     },
     {
       "kind": "block",
-      "text": "Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-00067.md), [ADR-00206](../adr/ADR-00206.md)–[ADR-00208](../adr/ADR-00208.md); verified on Apple Silicon, pcre2 10.47). The whole-program `-regex=<mode>` flag selects fidelity: `ecmascript` (default — `es-unicode` matching plus a source-normalization pass, which rewrites `.` to ECMAScript's exact \"any character except a line terminator\" so it matches `\\x0b`/`\\x0c`/`\\x85` as real JS does), `es-unicode` (`PCRE2_UTF` code-point matching + `NEWLINE_ANY`, no normalization), `es-utf16` (`es-unicode` matching plus true UTF-16 code-unit positions at every user-visible offset — `str.search`'s return, `lastIndex`, a replace callback's `offset` — instead of the byte offsets the rest of the string layer uses), `es-ascii` (the option-level fixes only, byte matching — smallest/fastest for known-ASCII programs), or `pcre` (raw PCRE2/Perl semantics, no ES wrapping — an explicit opt-in for PCRE-only features, *not* a fallback). The `ecmascript` normalization pass covers only the `.` rewrite so far; the remaining sub-items (`\\u{…}`/`\\p{…}`, Unicode `\\w`/`\\s`/`\\b`, Annex-B legacy octal escapes, exact `$`/`m`) are deferred and disclosed in Known limitations below."
+      "text": "Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-00067.md), [ADR-00206](../adr/00/ADR-00206.md)–[ADR-00208](../adr/00/ADR-00208.md); verified on Apple Silicon, pcre2 10.47). The whole-program `-regex=<mode>` flag selects fidelity: `ecmascript` (default — `es-unicode` matching plus a source-normalization pass, which rewrites `.` to ECMAScript's exact \"any character except a line terminator\" so it matches `\\x0b`/`\\x0c`/`\\x85` as real JS does, and UTF-16 code-unit positions at every user-visible offset, as the string layer indexes ([ADR-01826](../adr/01/ADR-01826.md))), `es-unicode` (`PCRE2_UTF` code-point matching + `NEWLINE_ANY`, no normalization, byte offsets), `es-utf16` (`es-unicode` matching with UTF-16 code-unit positions at every user-visible offset — `str.search`'s return, `lastIndex`, a replace callback's `offset` — and no normalization), `es-ascii` (the option-level fixes only, byte matching — smallest/fastest for known-ASCII programs), or `pcre` (raw PCRE2/Perl semantics, no ES wrapping — an explicit opt-in for PCRE-only features, *not* a fallback). The `ecmascript` normalization pass covers only the `.` rewrite so far; the remaining sub-items (`\\u{…}`/`\\p{…}`, Unicode `\\w`/`\\s`/`\\b`, Annex-B legacy octal escapes, exact `$`/`m`) are deferred and disclosed in Known limitations below."
     },
     {
       "kind": "table",
@@ -35,26 +35,33 @@
             "feature": "Construction: `new RegExp(pattern, flags?)`",
             "status": "implemented",
             "notes": [
-              "Validates the *flags* string as real JS does — a duplicate flag (`\"gg\"`) or an unrecognized flag character (`\"z\"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`d` are accepted but their behavior isn't implemented — see the `u`/`d` flags row) ([ADR-00549](../adr/ADR-00549.md))",
+              "Validates the *flags* string as real JS does — a duplicate flag (`\"gg\"`) or an unrecognized flag character (`\"z\"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`d` are accepted but their behavior isn't implemented — see the `u`/`d` flags row) ([ADR-00549](../adr/00/ADR-00549.md))",
               "Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*",
               "A `\\uXXXX`/`\\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md)"
+            ],
+            "decl": [
+              "RegExp"
             ]
           },
           {
             "feature": "Literal syntax: `/pattern/flags`",
             "status": "implemented",
-            "caveats": [
-              "`x in /foo/` mis-lexes the `/` as division (the lexer's regex-vs-division disambiguation gap, since `in` isn't its own token in this lexer) — a small, deliberately-accepted gap"
-            ],
             "notes": [
-              "Desugars to the same construction at parse time — see [ADR-00114](../adr/ADR-00114.md)"
+              "Desugars to the same construction at parse time — see [ADR-00114](../adr/00/ADR-00114.md)"
+            ],
+            "decl": [
+              "syntax"
             ]
           },
           {
             "feature": "`.source` / `.flags`",
             "status": "implemented",
             "notes": [
-              "`.flags` reports the canonical `d,g,i,m,s,u,v,y` order regardless of construction order (`new RegExp(\"x\", \"ig\").flags` is `\"gi\"`), and an empty pattern's `.source` is the spec placeholder `\"(?:)\"` ([ADR-00998](../adr/ADR-00998.md))"
+              "`.flags` reports the canonical `d,g,i,m,s,u,v,y` order regardless of construction order (`new RegExp(\"x\", \"ig\").flags` is `\"gi\"`), and an empty pattern's `.source` is the spec placeholder `\"(?:)\"` ([ADR-00998](../adr/00/ADR-00998.md))"
+            ],
+            "decl": [
+              "RegExp.source",
+              "RegExp.flags"
             ]
           },
           {
@@ -62,91 +69,117 @@
             "status": "implemented",
             "notes": [
               "Decomposed from the flags string once at construction — no method needs to re-parse it"
+            ],
+            "decl": [
+              "RegExp.global",
+              "RegExp.ignoreCase",
+              "RegExp.multiline"
             ]
           },
           {
             "feature": "`.lastIndex`",
             "status": "implemented",
             "notes": [
-              "Mutated by `.exec()`/`.test()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/ADR-00116.md)/[ADR-00117](../adr/ADR-00117.md)/[ADR-00118](../adr/ADR-00118.md)/[ADR-00526](../adr/ADR-00526.md)",
-              "Deliberately untouched by `str.split()`/`str.search()`, matching real JS ([ADR-00119](../adr/ADR-00119.md): `.search()` explicitly saves/restores it; `.split()` never reads or writes it at all)"
+              "Mutated by `.exec()`/`.test()`/global `str.match()`/`str.matchAll()`/`str.replace()`/`str.replaceAll()` (advances on a successful `g`-flagged match, resets to `0` after a failed one) — see [ADR-00116](../adr/00/ADR-00116.md)/[ADR-00117](../adr/00/ADR-00117.md)/[ADR-00118](../adr/00/ADR-00118.md)/[ADR-00526](../adr/00/ADR-00526.md)",
+              "Deliberately untouched by `str.split()`/`str.search()`, matching real JS ([ADR-00119](../adr/00/ADR-00119.md): `.search()` explicitly saves/restores it; `.split()` never reads or writes it at all)"
+            ],
+            "decl": [
+              "RegExp.lastIndex"
             ]
           },
           {
             "feature": "`.test(str)`",
             "status": "implemented",
             "notes": [
-              "A `g`-flagged RegExp reads/advances `.lastIndex` exactly as `.exec()` does, so `while (re.test(s))` steps through every match; a non-global RegExp always matches from offset 0 and never touches `.lastIndex` — see [ADR-00115](../adr/ADR-00115.md)/[ADR-00526](../adr/ADR-00526.md)"
+              "A `g`-flagged RegExp reads/advances `.lastIndex` exactly as `.exec()` does, so `while (re.test(s))` steps through every match; a non-global RegExp always matches from offset 0 and never touches `.lastIndex` — see [ADR-00115](../adr/00/ADR-00115.md)/[ADR-00526](../adr/00/ADR-00526.md)"
+            ],
+            "decl": [
+              "RegExp.test"
             ]
           },
           {
             "feature": "`.exec(str)`",
             "status": "implemented",
             "notes": [
-              "Returns `string[] \\| null` — real, working `m !== null`/`if (m)` checks against the result. See [ADR-00116](../adr/ADR-00116.md)",
+              "Returns `string[] \\| null` — real, working `m !== null`/`if (m)` checks against the result. See [ADR-00116](../adr/00/ADR-00116.md)",
               "All matching methods route through the one compiled PCRE2 handle, so the `-regex` dialect mode and its Known-limitations dialect caveats apply uniformly here and to `.match`/`.matchAll`/`.replace`/`.replaceAll`/`.split`/`.search`",
-              "The result carries `index`, `input` and `groups` (a null-prototype dictionary of the named groups, `undefined` without any), as in Node ([ADR-01316](../adr/ADR-01316.md))"
+              "The result carries `index`, `input` and `groups` (a null-prototype dictionary of the named groups, `undefined` without any), as in Node ([ADR-01316](../adr/01/ADR-01316.md))"
+            ],
+            "decl": [
+              "RegExp.exec"
             ]
           },
           {
             "feature": "`str.match(regexp)`",
             "status": "implemented",
-            "caveats": [
-              "With a regex held in a variable (not a literal), the result has no `index`/`input`/`groups`; a non-global literal's result carries them, as `.exec()`'s does"
-            ],
             "notes": [
-              "Without `g`: identical to `regexp.exec(str)`. With `g`: full-match-only strings, `null` (not `[]`) on zero matches — matches real JS exactly. See [ADR-00117](../adr/ADR-00117.md)"
+              "Without `g`: identical to `regexp.exec(str)`. With `g`: full-match-only strings, `null` (not `[]`) on zero matches — matches real JS exactly. See [ADR-00117](../adr/00/ADR-00117.md)"
+            ],
+            "decl": [
+              "String.match"
             ]
           },
           {
             "feature": "`str.matchAll(regexp)`",
             "status": "implemented",
             "notes": [
-              "A `RegExp String Iterator` over exec-shaped steps (`index`, `input`, `groups`) of a clone of the RegExp, starting at its `lastIndex`; throws `TypeError` without `g` ([ADR-00117](../adr/ADR-00117.md), [ADR-01339](../adr/ADR-01339.md))"
+              "A `RegExp String Iterator` over exec-shaped steps (`index`, `input`, `groups`) of a clone of the RegExp, starting at its `lastIndex`; throws `TypeError` without `g` ([ADR-00117](../adr/00/ADR-00117.md), [ADR-01339](../adr/01/ADR-01339.md))"
+            ],
+            "decl": [
+              "String.matchAll"
             ]
           },
           {
             "feature": "`str.replace(regexp, replacement)` (string or callback)",
             "status": "implemented",
-            "caveats": [
-              "Replacement template supports `$1`-`$9`/`$&`/`$$` only (`` $` ``/`$'` — pre-/post-match text — are out of scope)",
-              "The callback form is invoked with a fixed `(match, offset, string)` — real JS's variadic `...capturedGroups` in the middle isn't supported (a callback's arity is fixed at compile time but a pattern's capture count is only known at runtime; a callback declaring more than 3 parameters is a compile-time error)"
-            ],
             "notes": [
-              "Replaces the first match without `g`, every match with `g`; the callback runs exactly once per match. See [ADR-00118](../adr/ADR-00118.md)"
+              "Replaces the first match without `g`, every match with `g`; the callback runs exactly once per match, with `(match, ...captures, offset, string)`; the template's `$$`, `$&`, `` $` ``, `$'` and `$n`/`$nn` expand as GetSubstitution does. See [ADR-00118](../adr/00/ADR-00118.md), [ADR-01734](../adr/01/ADR-01734.md)"
+            ],
+            "decl": [
+              "String.replace"
             ]
           },
           {
             "feature": "`str.replaceAll(regexp, replacement)` (string or callback)",
             "status": "implemented",
-            "caveats": [
-              "Same replacement narrowing as `.replace()` (`$1`-`$9`/`$&`/`$$` only; fixed `(match, offset, string)` callback)"
-            ],
             "notes": [
-              "Same replacement rules as `.replace()`; requires the `g` flag, throwing `TypeError` otherwise. See [ADR-00118](../adr/ADR-00118.md)"
+              "Same replacement rules as `.replace()`; requires the `g` flag, throwing `TypeError` otherwise. See [ADR-00118](../adr/00/ADR-00118.md)"
+            ],
+            "decl": [
+              "String.replaceAll"
             ]
           },
           {
             "feature": "`str.split(regexp)`",
             "status": "implemented",
             "notes": [
-              "The separator's capture groups are spliced in after each piece, an unmatched one as `undefined` ([ADR-01307](../adr/ADR-01307.md))",
-              "Finds every match regardless of `g` (its own local search loop, like real JS); an empty match splits as `@@split` does ([ADR-01277](../adr/ADR-01277.md))"
+              "The separator's capture groups are spliced in after each piece, an unmatched one as `undefined` ([ADR-01307](../adr/01/ADR-01307.md))",
+              "Finds every match regardless of `g` (its own local search loop, like real JS); an empty match splits as `@@split` does ([ADR-01277](../adr/01/ADR-01277.md))"
+            ],
+            "decl": [
+              "String.split"
             ]
           },
           {
             "feature": "`str.search(regexp)`",
             "status": "implemented",
             "notes": [
-              "A plain-string argument is coerced to a `RegExp` as in real JS — metacharacters are interpreted ([ADR-00548](../adr/ADR-00548.md))",
-              "Always searches from offset 0, restores `.lastIndex` afterward — invisible to later `.exec()`/`.test()` iteration, matching real JS exactly. See [ADR-00119](../adr/ADR-00119.md)"
+              "A plain-string argument is coerced to a `RegExp` as in real JS — metacharacters are interpreted ([ADR-00548](../adr/00/ADR-00548.md))",
+              "Always searches from offset 0, restores `.lastIndex` afterward — invisible to later `.exec()`/`.test()` iteration, matching real JS exactly. See [ADR-00119](../adr/00/ADR-00119.md)"
+            ],
+            "decl": [
+              "String.search"
             ]
           },
           {
             "feature": "`y` (sticky) flag — `.sticky`, anchored matching at `.lastIndex`",
             "status": "implemented",
             "notes": [
-              "Real RegExpBuiltinExec: `lastIndex` is the start offset whenever `global` **or** `sticky` is set, the match is `PCRE2_ANCHORED` there, and `lastIndex` advances/resets exactly as for `g`; flows through `exec`/`test`/`match`/`matchAll`/`replace`/`replaceAll`/`search` ([ADR-01062](../adr/ADR-01062.md))"
+              "Real RegExpBuiltinExec: `lastIndex` is the start offset whenever `global` **or** `sticky` is set, the match is `PCRE2_ANCHORED` there, and `lastIndex` advances/resets exactly as for `g`; flows through `exec`/`test`/`match`/`matchAll`/`replace`/`replaceAll`/`search` ([ADR-01062](../adr/01/ADR-01062.md))"
+            ],
+            "decl": [
+              "RegExp.sticky",
+              "RegExp.lastIndex"
             ]
           },
           {
@@ -165,7 +198,7 @@
     },
     {
       "kind": "block",
-      "text": "- **Dialect-mode caveats** (what diverges from ES, per mode — these residuals exclude the matching rows above from Strict Coverage; [TDD-00067](../tdd/TDD-00067.md)/[ADR-00206](../adr/ADR-00206.md)–[ADR-00208](../adr/ADR-00208.md)):\n  - **`ecmascript` (default) — `$`/`m` over-exclude three control chars.** `$`/`m` use `PCRE2_NEWLINE_ANY` and anchor at `\\x0b`/`\\x0c`/`\\x85`, where ES does not — exact anchoring needs a further `$`-rewrite (deferred). The normalization pass does **not** yet handle `\\u{…}`/`\\p{…}` code-point escapes, ES Unicode `\\w`/`\\s`/`\\b` semantics, Annex-B legacy octal escapes, or the `u`/`v` flags.\n  - **`es-unicode` (opt-in) — `.`/`$`/`m` over-exclude three rare control characters.** The newline convention is `PCRE2_NEWLINE_ANY`, the closest single PCRE2 convention to ES's exact line terminators `\\n \\r \\u2028 \\u2029`, but it additionally treats `\\x0b` (VT), `\\x0c` (FF), and `\\x85` (NEL) as line boundaries — so `.` excludes them and `$`/`m` anchor at them, where ES does not. Use the default `ecmascript` (whose normalization pass fixes `.`) if this matters.\n  - **`es-utf16` — offsets diverge from the byte-indexed string layer, by design.** `str.search`/`lastIndex`/replace-callback `offset` report UTF-16 code units, but `.charCodeAt`/`.length`/`.slice` stay byte-indexed (ADR-00028), so a program that feeds an `es-utf16` RegExp offset into `str.slice(...)` over non-ASCII text gets mismatched positions. This is why `es-utf16` is opt-in and not the default. Matching is identical to `es-unicode`, so every `es-unicode` matching caveat applies to it too.\n  - **`es-ascii` — `.` matches `\\r`.** With no compile context, PCRE2's default newline convention treats only `\\n` as the line end, so `.` matches `\\r` where ES excludes it. Deliberate: `es-ascii` is defined as option-bits-only. Use the default `es-unicode` (which excludes `\\r`) if this matters.\n  - **`pcre` — raw PCRE2/Perl semantics throughout.** The PCRE2-vs-ECMAScript divergences the ES modes correct (`$`/newline, unset backref, `\\uXXXX` throw) all apply by design in this mode; it exists for PCRE-only features and pattern porting, not ES fidelity.\n  - **`es-unicode`/`ecmascript` — `\\w`/`\\s`/`\\b` are not Unicode-aware.** `PCRE2_UCP` is deliberately not enabled: its Unicode-property tables diverge from ECMAScript's (UCP `\\s` matches U+180E, dropped as whitespace by ES in Unicode 6.3), and enabling it *lost* net conformance on `built-ins/RegExp`. So `\\w`/`\\s`/`\\b` match the ASCII/PCRE-default set, not ES's Unicode definitions — the ES Unicode class semantics are deferred ([TDD-00067](../tdd/TDD-00067.md)). Code-point `.` (from `PCRE2_UTF`) is unaffected and works.\n  - **`u`(nicode) flag still not implemented in any mode.** `es-unicode`'s `PCRE2_UTF` gives it code-point matching, but `\\u{…}` code-point escapes, surrogate handling, Unicode `\\p{…}`/class semantics, and strict-syntax validation are Option C — the `u`/`d` flags remain out of scope (see the row above)."
+      "text": "- **Dialect-mode caveats** (what diverges from ES, per mode — these residuals exclude the matching rows above from Strict Coverage; [TDD-00067](../tdd/TDD-00067.md)/[ADR-00206](../adr/00/ADR-00206.md)–[ADR-00208](../adr/00/ADR-00208.md)):\n  - **Every mode — no UTF-16 unit matching without the `u` flag.** PCRE2 matches UTF-8 by code point, so `.` takes a whole astral character (`/^.$/.test('😀')` is true, false in V8) and an empty match never falls between a surrogate pair's halves (`'😀'.replace(/(?:)/g, '-')` is `-😀-`, `-\\ud83d-\\ude00-` in V8).\n  - **`ecmascript` (default) — `$`/`m` over-exclude three control chars.** `$`/`m` use `PCRE2_NEWLINE_ANY` and anchor at `\\x0b`/`\\x0c`/`\\x85`, where ES does not — exact anchoring needs a further `$`-rewrite (deferred). The normalization pass does **not** yet handle `\\u{…}`/`\\p{…}` code-point escapes, ES Unicode `\\w`/`\\s`/`\\b` semantics, Annex-B legacy octal escapes, or the `u` flag; a syntax error PCRE2 reports without a V8 counterpart keeps PCRE2's message (`x{99999999999}`, which V8 accepts, is \"number too big\").\n  - **`es-unicode` (opt-in) — `.`/`$`/`m` over-exclude three rare control characters.** The newline convention is `PCRE2_NEWLINE_ANY`, the closest single PCRE2 convention to ES's exact line terminators `\\n \\r \\u2028 \\u2029`, but it additionally treats `\\x0b` (VT), `\\x0c` (FF), and `\\x85` (NEL) as line boundaries — so `.` excludes them and `$`/`m` anchor at them, where ES does not. Use the default `ecmascript` (whose normalization pass fixes `.`) if this matters.\n  - **`es-unicode`/`es-ascii` — offsets are bytes.** `str.search`/`lastIndex`/a replace callback's `offset` report byte offsets there, while `.length`/`.slice`/`.charCodeAt` index UTF-16 code units, so the two disagree over non-ASCII text. The default and `es-utf16` report code units.\n  - **`es-ascii` — `.` matches `\\r`.** With no compile context, PCRE2's default newline convention treats only `\\n` as the line end, so `.` matches `\\r` where ES excludes it. Deliberate: `es-ascii` is defined as option-bits-only. Use the default `es-unicode` (which excludes `\\r`) if this matters.\n  - **`pcre` — raw PCRE2/Perl semantics throughout.** The PCRE2-vs-ECMAScript divergences the ES modes correct (`$`/newline, unset backref, `\\uXXXX` throw) all apply by design in this mode; it exists for PCRE-only features and pattern porting, not ES fidelity.\n  - **`es-unicode`/`ecmascript` — `\\w`/`\\s`/`\\b` are not Unicode-aware.** `PCRE2_UCP` is deliberately not enabled: its Unicode-property tables diverge from ECMAScript's (UCP `\\s` matches U+180E, dropped as whitespace by ES in Unicode 6.3), and enabling it *lost* net conformance on `built-ins/RegExp`. So `\\w`/`\\s`/`\\b` match the ASCII/PCRE-default set, not ES's Unicode definitions — the ES Unicode class semantics are deferred ([TDD-00067](../tdd/TDD-00067.md)). Code-point `.` (from `PCRE2_UTF`) is unaffected and works.\n  - **`u`(nicode) flag still not implemented in any mode.** `es-unicode`'s `PCRE2_UTF` gives it code-point matching, but `\\u{…}` code-point escapes, surrogate handling, Unicode `\\p{…}`/class semantics, and strict-syntax validation are Option C — the `u`/`d` flags remain out of scope (see the row above)."
     }
   ]
 }

@@ -19,7 +19,8 @@ function pick(a?: string, b?: string): string {
   return s.length > 0 ? s.toUpperCase() : "(none)";
 }
 console.log(pick(), pick(undefined, "b"), pick("a"));
-let [x, y] = [1];
+const one: number[] = [1];
+let [x, y] = one;
 console.log(x, y);
 `)
 }

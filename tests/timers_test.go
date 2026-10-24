@@ -270,3 +270,20 @@ console.log(typeof im, im.hasRef(), im.unref().hasRef())
 `
 	assertOutputImports(t, src, "object number true\nobject true false\nimm\nimmediate\ntimeout\nfired true\nafter true")
 }
+
+// process.nextTick as Node's task_queues.js: validated, run with its
+// arguments in the async context it was queued in, one function value.
+func TestE2ENextTickNodeSemantics(t *testing.T) {
+	assertSameAsNode(t, `
+import { AsyncLocalStorage } from 'node:async_hooks';
+const als = new AsyncLocalStorage<string>();
+Promise.resolve().then(() => console.log('promise'));
+process.nextTick((a: number, b: string) => console.log('tick', a, b), 1, 'x');
+als.run('ctx', () => process.nextTick(() => console.log('store', als.getStore())));
+try { (process as any).nextTick(5); } catch (e: any) { console.log(e.code, e.message); }
+const p: any = process;
+console.log(p.nextTick === process.nextTick, process.nextTick.name, process.nextTick.length);
+console.log(String.raw.name, String.raw.length, String.raw === String.raw);
+console.log('sync');
+`)
+}

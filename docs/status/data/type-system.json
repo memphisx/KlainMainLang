@@ -31,10 +31,10 @@
               "Mixing an explicit integer type with a bare literal promotes to double (`int32 / 2` is `3.5`); use two integer-typed operands for integer division"
             ],
             "notes": [
-              "`number` is a JS-faithful IEEE-754 double — `0.1 + 0.2` is `0.30000000000000004`, `10 / 3` is `3.3333333333333335`, `2 ** -1` is `0.5`, `1 / 0` is `Infinity` (TDD-00123 Stage 1 / [ADR-00377](../adr/ADR-00377.md))",
+              "`number` is a JS-faithful IEEE-754 double — `0.1 + 0.2` is `0.30000000000000004`, `10 / 3` is `3.3333333333333335`, `2 ** -1` is `0.5`, `1 / 0` is `Infinity` (TDD-00123 Stage 1 / [ADR-00377](../adr/00/ADR-00377.md))",
               "A plain `number` past 2^53 loses precision exactly as JS does (`9007199254740993` is `…992`) — inherent to the double model; `int64`/`uint64` give exact 64-bit integers",
               "`/** @type {int8..int64, uint8..uint64, float32, float64} */` overrides per-binding — the integer types are the escape hatch for real integer semantics (integer `/`, exact >2^53, bit-width storage)",
-              "Bitwise `& \\| ^ ~ << >> >>>` use JS 32-bit semantics and their result is a `number` (`(7 & 6) / (7 & 5)` is `1.2`), as are the count/index builtins `.length`/`indexOf`/`lastIndexOf`/`findIndex`/`search`/`charCodeAt`/`push` (`arr.length / other.length` is a float divide) — TDD-00123 Stages 2–3 / [ADR-00379](../adr/ADR-00379.md)"
+              "Bitwise `& \\| ^ ~ << >> >>>` use JS 32-bit semantics and their result is a `number` (`(7 & 6) / (7 & 5)` is `1.2`), as are the count/index builtins `.length`/`indexOf`/`lastIndexOf`/`findIndex`/`search`/`charCodeAt`/`push` (`arr.length / other.length` is a float divide) — TDD-00123 Stages 2–3 / [ADR-00379](../adr/00/ADR-00379.md)"
             ]
           },
           {
@@ -54,7 +54,7 @@
             "status": "implemented",
             "notes": [
               "Sentinel `ptr null`",
-              "Strict `===`/`!==` distinguishes `null` from `undefined` via the static type kind, so `null === undefined` is `false` and a `T | null` or `T | undefined` value compares against the right literal ([ADR-00833](../adr/ADR-00833.md))"
+              "Strict `===`/`!==` distinguishes `null` from `undefined` via the static type kind, so `null === undefined` is `false` and a `T | null` or `T | undefined` value compares against the right literal ([ADR-00833](../adr/00/ADR-00833.md))"
             ],
             "caveats": [
               "A value typed as **both** `T | null | undefined` shares the single `ptr null` sentinel, so it can't tell which nullish kind it holds — it compares per the statically-chosen kind, which can be wrong for the other"
@@ -72,7 +72,7 @@
             "status": "implemented",
             "notes": [
               "`@type {float32\\|float64}`",
-              "Float-to-string is JS-faithful: the shortest decimal that round-trips, per ECMAScript `Number::toString` — `1.1 + 2.2` prints `3.3000000000000003`, integers-valued floats drop the point, and the fixed/exponential switch matches JS's thresholds ([TDD-00080](../tdd/TDD-00080.md)/[ADR-00233](../adr/ADR-00233.md))",
+              "Float-to-string is JS-faithful: the shortest decimal that round-trips, per ECMAScript `Number::toString` — `1.1 + 2.2` prints `3.3000000000000003`, integers-valued floats drop the point, and the fixed/exponential switch matches JS's thresholds ([TDD-00080](../tdd/TDD-00080.md)/[ADR-00233](../adr/00/ADR-00233.md))",
               "`console.log(-0)` prints `0` (this compiler's `console.log` uses `ToString`, and `String(-0)`/`${-0}` are `\"0\"` in JS too); Node's `console.log` shows `-0` only via `util.inspect`, a console-display quirk",
               "A `float32` prints against its widened `double`"
             ]
@@ -80,25 +80,21 @@
           {
             "feature": "`any`",
             "status": "implemented",
-            "caveats": [
-              "`Object.assign` through `any` and `Object.defineProperties` copy and define string keys only, not symbol keys",
-              "A non-array held in `any` (a string, a number, an object) passed where an array is declared throws a TypeError; Node passes the value as it is ([ADR-01361](../adr/ADR-01361.md))"
-            ],
             "notes": [
               "Under `-compat=js`, object operands to `+`/`==` coerce via runtime `ToPrimitive` and loose-`==` is the full JS Abstract Equality ([TDD-00201](../tdd/TDD-00201.md))",
-              "A dynamic array's `String()`/interpolation is the JS comma join (`1,two`), while `console.log` inspects it as `[ 1, 'two' ]` ([ADR-00937](../adr/ADR-00937.md))",
-              "**Single-word NaN-boxed value** ([TDD-00156](../tdd/TDD-00156.md)/[ADR-00628](../adr/ADR-00628.md)): numbers are offset-encoded doubles (int/float merged — >2^53 rounds exactly as JS), undefined/null/true/false small immediates, heap references low-3-bit-kind-tagged raw pointers (Boehm-safe interior pointers). The logical tag model of [TDD-00062](../tdd/TDD-00062.md) decodes from it unchanged",
+              "A dynamic array's `String()`/interpolation is the JS comma join (`1,two`), while `console.log` inspects it as `[ 1, 'two' ]` ([ADR-00937](../adr/00/ADR-00937.md))",
+              "**Single-word NaN-boxed value** ([TDD-00156](../tdd/TDD-00156.md)/[ADR-00628](../adr/00/ADR-00628.md)): numbers are offset-encoded doubles (int/float merged — >2^53 rounds exactly as JS), undefined/null/true/false small immediates, heap references low-3-bit-kind-tagged raw pointers (Boehm-safe interior pointers). The logical tag model of [TDD-00062](../tdd/TDD-00062.md) decodes from it unchanged",
               "Under `-compat=js`: real operator semantics — number fast path, string-concat `+`, ToNumber coercion of numeric strings/booleans/null (`\"6\"*7===42`, `null+1===1`, `undefined+1→NaN`), string/numeric relational, ToBoolean truthiness (`if (x)`, `!x` — both modes), compound assignment incl. dynamic members, and **implicit-`any`**: an unannotated parameter no call site can type (or with disagreeing sites — genuinely polymorphic) boxes and dispatches; an untyped uninitialized `let` is a dynamic `undefined`",
-              "Objects and arrays box by reference — `===` is reference identity, `typeof` is `\"object\"` ([ADR-00008](../adr/ADR-00008.md), [ADR-00176](../adr/ADR-00176.md), [ADR-00177](../adr/ADR-00177.md))",
-              "Strict `===`/`!==` of a dynamic value against the `null`/`undefined` literals compares the runtime NaN-box tag (so a missing property, `getStore()`, or any-held `undefined` correctly `=== undefined` and stays distinct from `null`) rather than the static type kind ([ADR-00855](../adr/ADR-00855.md))",
-              "An `any`/`unknown`-typed **object or class field** (`{ x: any }`, `class C { x: any }`) is a supported NaN-box slot ([TDD-00208](../tdd/TDD-00208.md)/[ADR-00924](../adr/ADR-00924.md)) — cross-type reassignment through the field boxes/dispatches; a null-initialized untyped field takes the same evolving-any widening ([ADR-00923](../adr/ADR-00923.md))",
-              "An `any`-boxed array shares the *live* array header ([TDD-00212](../tdd/TDD-00212.md)): the box holds the `{data,len}` cell the source array mutates through, so a post-box `a.push(x)` is visible through the box, `===` identity is the shared header (stable across a reallocating push), and `typeof` stays `\"object\"` ([ADR-00478](../adr/ADR-00478.md)/[ADR-00938](../adr/ADR-00938.md)). The box also carries an element-kind byte, so a flat boxed array renders its contents: `String()`/interpolation give the comma join (`1,2,3`, [ADR-00936](../adr/ADR-00936.md)) and `console.log` the `util.inspect` bracket form (`[ 1, 2, 3 ]`, [ADR-00937](../adr/ADR-00937.md)); a non-representable element kind still falls back to `[object Array]`",
-              "An object literal bound to a bare `any` becomes a **D1 dynamic object** ([TDD-00155](../tdd/TDD-00155.md) Stage 1, [ADR-00621](../adr/ADR-00621.md)): a real runtime property bag with member/bracket get/set (runtime-computed keys included), dynamic add, `delete`, `in`, `Object.keys`, `for...in` (insertion order), shallow spread merge, nesting, reference `===`, and Node-matching TypeErrors (`Cannot read properties of null (reading 'x')`) on null/undefined access",
-              "An array literal in the same position becomes a **dynamic array** ([TDD-00155](../tdd/TDD-00155.md) Stage 2, [ADR-00622](../adr/ADR-00622.md)) — heterogeneous elements included — with `.length`, index reads/writes (JS extension semantics: holes read `undefined`), `Object.keys`/`for...in` index strings, and join-based toString; untyped `JSON.parse` builds whole trees of these",
-              "A **boxed-element array** — an explicit `any[]`, an inferred heterogeneous literal, or a heterogeneous-usage empty `[]` — stores one NaN box per slot over the normal array machinery (box-on-write / unbox-on-read), so the full array-method surface works: push/index/`length`/`typeof`, `map`/`filter`/`reduce`/`forEach`, `indexOf`/`includes` by value, `concat` (boxing a concrete array's elements), `sort` (lexicographic default / boxed-number comparator), spread, `for...of`, and `JSON.stringify` ([ADR-00887](../adr/ADR-00887.md)/[TDD-00205](../tdd/TDD-00205.md) Stage 2, [TDD-00200](../tdd/TDD-00200.md)). Both lanes accept an `any[]` annotation and an inferred heterogeneous array. A statically-typed object/array *value* boxed into an element is type-erased — deep `JSON.stringify` of it throws (object *literals* avoid this); a concrete array assigned, passed or returned as an `any[]` (or the reverse) is converted in a copy, so the two do not alias",
-              "Dynamic objects carry real **property descriptors** ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/ADR-00629.md)): `Object.defineProperty` (spec create-defaults, non-configurable redefinition rules), `getOwnPropertyDescriptor`/`getOwnPropertyNames`, object-literal `get`/`set` accessors (invoked with the original receiver, inherited-through-the-chain included; JSON/spread call getters), enumerability honored by `Object.keys`/`for...in`/JSON, and real `freeze`/`seal`/`preventExtensions` + `isFrozen`/`isSealed`/`isExtensible` — rejected writes/deletes throw the module-strict JS TypeErrors. Under `-compat=js` an **untyped object literal is a dynamic object** (ad-hoc property add/delete works — TDD-00022's last break shape); strict keeps literals as native static structs",
-              "Dynamic objects carry a real **prototype chain** ([TDD-00155](../tdd/TDD-00155.md) Stage 3, [ADR-00623](../adr/ADR-00623.md)): `Object.create(proto|null)`, `get/setPrototypeOf`, `__proto__` (accessor semantics), the `{ __proto__: base }` literal form; reads and `in` walk the chain, writes/keys/stringify stay own — matching JS",
-              "Under `-compat=js`, **vanilla-JS prototype classes** work end to end ([TDD-00155](../tdd/TDD-00155.md) Stage 4, [ADR-00627](../adr/ADR-00627.md)): function constructors (`new F(...)` → a dynamic object linked to `F.prototype`), prototype methods with a real boxed `this` (tag-12 dynamic-ABI functions; missing args read `undefined`), chain-walking method dispatch with override/inheritance, `Base.call(this, ...)` chaining, and `\"str\" + anyVal` ToString concatenation; `typeof method` → `\"function\"`, a non-function call throws the JS TypeError"
+              "Objects and arrays box by reference — `===` is reference identity, `typeof` is `\"object\"` ([ADR-00008](../adr/00/ADR-00008.md), [ADR-00176](../adr/00/ADR-00176.md), [ADR-00177](../adr/00/ADR-00177.md))",
+              "Strict `===`/`!==` of a dynamic value against the `null`/`undefined` literals compares the runtime NaN-box tag (so a missing property, `getStore()`, or any-held `undefined` correctly `=== undefined` and stays distinct from `null`) rather than the static type kind ([ADR-00855](../adr/00/ADR-00855.md))",
+              "An `any`/`unknown`-typed **object or class field** (`{ x: any }`, `class C { x: any }`) is a supported NaN-box slot ([TDD-00208](../tdd/TDD-00208.md)/[ADR-00924](../adr/00/ADR-00924.md)) — cross-type reassignment through the field boxes/dispatches; a null-initialized untyped field takes the same evolving-any widening ([ADR-00923](../adr/00/ADR-00923.md))",
+              "An `any`-boxed array shares the *live* array header ([TDD-00212](../tdd/TDD-00212.md)): the box holds the `{data,len}` cell the source array mutates through, so a post-box `a.push(x)` is visible through the box, `===` identity is the shared header (stable across a reallocating push), and `typeof` stays `\"object\"` ([ADR-00478](../adr/00/ADR-00478.md)/[ADR-00938](../adr/00/ADR-00938.md)). The box also carries an element-kind byte, so a flat boxed array renders its contents: `String()`/interpolation give the comma join (`1,2,3`, [ADR-00936](../adr/00/ADR-00936.md)) and `console.log` the `util.inspect` bracket form (`[ 1, 2, 3 ]`, [ADR-00937](../adr/00/ADR-00937.md)); a non-representable element kind still falls back to `[object Array]`",
+              "An object literal bound to a bare `any` becomes a **D1 dynamic object** ([TDD-00155](../tdd/TDD-00155.md) Stage 1, [ADR-00621](../adr/00/ADR-00621.md)): a real runtime property bag with member/bracket get/set (runtime-computed keys included), dynamic add, `delete`, `in`, `Object.keys`, `for...in` (insertion order), shallow spread merge, nesting, reference `===`, and Node-matching TypeErrors (`Cannot read properties of null (reading 'x')`) on null/undefined access",
+              "An array literal in the same position becomes a **dynamic array** ([TDD-00155](../tdd/TDD-00155.md) Stage 2, [ADR-00622](../adr/00/ADR-00622.md)) — heterogeneous elements included — with `.length`, index reads/writes (JS extension semantics: holes read `undefined`), `Object.keys`/`for...in` index strings, and join-based toString; untyped `JSON.parse` builds whole trees of these",
+              "A **boxed-element array** — an explicit `any[]`, an inferred heterogeneous literal, or a heterogeneous-usage empty `[]` — stores one NaN box per slot over the normal array machinery (box-on-write / unbox-on-read), so the full array-method surface works: push/index/`length`/`typeof`, `map`/`filter`/`reduce`/`forEach`, `indexOf`/`includes` by value, `concat` (boxing a concrete array's elements), `sort` (lexicographic default / boxed-number comparator), spread, `for...of`, and `JSON.stringify` ([ADR-00887](../adr/00/ADR-00887.md)/[TDD-00205](../tdd/TDD-00205.md) Stage 2, [TDD-00200](../tdd/TDD-00200.md)). Both lanes accept an `any[]` annotation and an inferred heterogeneous array. A statically-typed object/array *value* boxed into an element is type-erased — deep `JSON.stringify` of it throws (object *literals* avoid this); a concrete array assigned, passed or returned as an `any[]` (or the reverse) is converted in a copy, so the two do not alias",
+              "Dynamic objects carry real **property descriptors** ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/00/ADR-00629.md)): `Object.defineProperty` (spec create-defaults, non-configurable redefinition rules), `getOwnPropertyDescriptor`/`getOwnPropertyNames`, object-literal `get`/`set` accessors (invoked with the original receiver, inherited-through-the-chain included; JSON/spread call getters), enumerability honored by `Object.keys`/`for...in`/JSON, and real `freeze`/`seal`/`preventExtensions` + `isFrozen`/`isSealed`/`isExtensible` — rejected writes/deletes throw the module-strict JS TypeErrors. Under `-compat=js` an **untyped object literal is a dynamic object** (ad-hoc property add/delete works — TDD-00022's last break shape); strict keeps literals as native static structs",
+              "Dynamic objects carry a real **prototype chain** ([TDD-00155](../tdd/TDD-00155.md) Stage 3, [ADR-00623](../adr/00/ADR-00623.md)): `Object.create(proto|null)`, `get/setPrototypeOf`, `__proto__` (accessor semantics), the `{ __proto__: base }` literal form; reads and `in` walk the chain, writes/keys/stringify stay own — matching JS",
+              "Under `-compat=js`, **vanilla-JS prototype classes** work end to end ([TDD-00155](../tdd/TDD-00155.md) Stage 4, [ADR-00627](../adr/00/ADR-00627.md)): function constructors (`new F(...)` → a dynamic object linked to `F.prototype`), prototype methods with a real boxed `this` (tag-12 dynamic-ABI functions; missing args read `undefined`), chain-walking method dispatch with override/inheritance, `Base.call(this, ...)` chaining, and `\"str\" + anyVal` ToString concatenation; `typeof method` → `\"function\"`, a non-function call throws the JS TypeError"
             ]
           },
           {
@@ -122,12 +118,12 @@
             "feature": "`symbol`",
             "status": "implemented",
             "caveats": [
-              "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` (own properties, class and object-literal members); `toStringTag`, `hasInstance`, `species` and the rest are values only"
+              "Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive` (own properties, class and object-literal members), `Symbol.species` as a class's static getter (extending Array, a typed array or Promise), and `Symbol.toStringTag` as a class getter; an object literal's `toStringTag` member, `hasInstance` and the rest are values only"
             ],
             "notes": [
               "V1 opaque unique values — `Symbol()`/`Symbol(\"desc\")`, `===`/`!==`, `typeof`, `.description`, `.toString()`",
               "The fixed-shape object model has no dynamic-property-bag mechanism (blocks dynamic keys) and no runtime protocol-dispatch point (blocks the registry) ([TDD-00044](../tdd/TDD-00044.md))",
-              "`Symbol.for(key)` interns per key (shared identity); `Symbol.keyFor(sym)` returns the key, or `undefined` for a symbol not in the registry ([ADR-00488](../adr/ADR-00488.md))"
+              "`Symbol.for(key)` interns per key (shared identity); `Symbol.keyFor(sym)` returns the key, or `undefined` for a symbol not in the registry ([ADR-00488](../adr/00/ADR-00488.md))"
             ]
           },
           {
@@ -137,13 +133,13 @@
               "No `.toLocaleString()` (an `Intl`-shaped gap)"
             ],
             "notes": [
-              "Backend-agnostic `__kml_bigint_*` ABI over an opaque `ptr` handle, selectable via `-bigint=libtommath\\|gmp` (default `libtommath`, public domain; `gmp` LGPL) — each an embedded C file compiled+linked only when a program uses bigint ([TDD-00074](../tdd/TDD-00074.md)/[ADR-00216](../adr/ADR-00216.md))",
+              "Backend-agnostic `__kml_bigint_*` ABI over an opaque `ptr` handle, selectable via `-bigint=libtommath\\|gmp` (default `libtommath`, public domain; `gmp` LGPL) — each an embedded C file compiled+linked only when a program uses bigint ([TDD-00074](../tdd/TDD-00074.md)/[ADR-00216](../adr/00/ADR-00216.md))",
               "`123n`/hex/bin/oct/`_`-separator literals, `+ - * / % ** & \\| ^ ~ << >>`, same-type comparisons **and cross-type comparison with an integer `number`** (`10n < 5`, `10n == 10`, exact), unary `-`/`~`, truthiness (`0n` falsy), `typeof`, `++`/`--`, compound assignment, `.toString([radix])`, params/returns/fields/arrays, `BigInt(int\\|string)`, and the console-`n`-suffix vs `String()`-bare print split all work",
               "Division/modulo by zero throws a catchable `Error` (the same path as the i64 operators)",
-              "`BigInt.asIntN(bits, x)` / `BigInt.asUintN(bits, x)` clamp to the low `bits` bits (two's-complement signed / non-negative), implemented in both bigint backends ([ADR-00584](../adr/ADR-00584.md))",
-              "`Number(bigint)` converts to the nearest `double` (Infinity when out of range), matching JS ([ADR-00586](../adr/ADR-00586.md))",
-              "Mixing a bigint and a number in **arithmetic** is a clean compile error (matches JS's `TypeError`); comparing a bigint with a **float** is a `-compat`-governed behavior ([TDD-00075](../tdd/TDD-00075.md)/[ADR-00217](../adr/ADR-00217.md)): default `strict` rejects it (a likely bug), and `-compat=js` does JS's exact real-number comparison (exact even past 2^53) — a design choice, not a caveat",
-              "`>>>` and `JSON.stringify` on a bigint are clean compile errors, and unary `+` on a bigint throws the spec `TypeError` at run time ([ADR-01057](../adr/ADR-01057.md)) — all TypeErrors in JS"
+              "`BigInt.asIntN(bits, x)` / `BigInt.asUintN(bits, x)` clamp to the low `bits` bits (two's-complement signed / non-negative), implemented in both bigint backends ([ADR-00584](../adr/00/ADR-00584.md))",
+              "`Number(bigint)` converts to the nearest `double` (Infinity when out of range), matching JS ([ADR-00586](../adr/00/ADR-00586.md))",
+              "Mixing a bigint and a number in **arithmetic** is a clean compile error (matches JS's `TypeError`); comparing a bigint with a **float** is a `-compat`-governed behavior ([TDD-00075](../tdd/TDD-00075.md)/[ADR-00217](../adr/00/ADR-00217.md)): default `strict` rejects it (a likely bug), and `-compat=js` does JS's exact real-number comparison (exact even past 2^53) — a design choice, not a caveat",
+              "`>>>` and `JSON.stringify` on a bigint are clean compile errors, and unary `+` on a bigint throws the spec `TypeError` at run time ([ADR-01057](../adr/01/ADR-01057.md)) — all TypeErrors in JS"
             ]
           }
         ]
@@ -169,23 +165,23 @@
             "feature": "Object types (interfaces / inline `{}`)",
             "status": "implemented",
             "notes": [
-              "A literal's fields are coerced against the declared type wherever one is known (variable annotation, function parameter/return/default value, array element type, nested field) — not just the literal's own self-inferred type ([ADR-00077](../adr/ADR-00077.md)/[TDD-00007](../tdd/TDD-00007.md))",
-              "Method signatures `name(params): R` (and `name?(…)`) in an inline `{}` type desugar to function-typed properties; a lone call signature `{ (n: number): string }` desugars to the function type itself; `field?: T` is accepted-but-required, matching interfaces ([ADR-00448](../adr/ADR-00448.md))",
-              "Constructor types `new (params) => R` hold constructors: a class or builtin passed for one constructs through it, and a generic infers `T` from `new () => T` ([ADR-01318](../adr/ADR-01318.md))",
-              "Self- and mutually-referential interfaces and object-shape `type` aliases work (tree/linked-list shapes: `interface N { children: N[]; next: N \\| null }`) — a self-ref field's placeholder snapshot is re-resolved on demand at each drilling access, so `root.children[0].children[0].val` and full list traversal drill correctly ([ADR-00949](../adr/ADR-00949.md))",
-              "`interface C extends A, B` merges simple base names' fields/method signatures (own declarations win); same-name `interface` + `interface` pairs merge too (members union, first wins on a collision — [ADR-00452](../adr/ADR-00452.md), [ADR-00479](../adr/ADR-00479.md))"
+              "A literal's fields are coerced against the declared type wherever one is known (variable annotation, function parameter/return/default value, array element type, nested field) — not just the literal's own self-inferred type ([ADR-00077](../adr/00/ADR-00077.md)/[TDD-00007](../tdd/TDD-00007.md))",
+              "Method signatures `name(params): R` (and `name?(…)`) in an inline `{}` type desugar to function-typed properties; a lone call signature `{ (n: number): string }` desugars to the function type itself; `field?: T` is accepted-but-required, matching interfaces ([ADR-00448](../adr/00/ADR-00448.md))",
+              "Constructor types `new (params) => R` hold constructors: a class or builtin passed for one constructs through it, and a generic infers `T` from `new () => T` ([ADR-01318](../adr/01/ADR-01318.md))",
+              "Self- and mutually-referential interfaces and object-shape `type` aliases work (tree/linked-list shapes: `interface N { children: N[]; next: N \\| null }`) — a self-ref field's placeholder snapshot is re-resolved on demand at each drilling access, so `root.children[0].children[0].val` and full list traversal drill correctly ([ADR-00949](../adr/00/ADR-00949.md))",
+              "`interface C extends A, B` merges simple base names' fields/method signatures (own declarations win); same-name `interface` + `interface` pairs merge too (members union, first wins on a collision — [ADR-00452](../adr/00/ADR-00452.md), [ADR-00479](../adr/00/ADR-00479.md))"
             ],
             "caveats": [
               "A **generic or qualified interface base** (`extends Boxed<number>`, `extends ns.Base`) parses but does not merge — its members stay missing from the derived interface",
-              "A bare call signature is supported only alone (desugars to the function type); mixing it with fields/an index signature is a clean rejection, for both inline `{}` types and interfaces ([ADR-00448](../adr/ADR-00448.md)/[ADR-00455](../adr/ADR-00455.md))",
-              "A same-name `interface` + `class` pair: the class wins as the binding, the interface's extra members ignored ([ADR-00466](../adr/ADR-00466.md))"
+              "A bare call signature is supported only alone (desugars to the function type); mixing it with fields/an index signature is a clean rejection, for both inline `{}` types and interfaces ([ADR-00448](../adr/00/ADR-00448.md)/[ADR-00455](../adr/00/ADR-00455.md))",
+              "A same-name `interface` + `class` pair: the class wins as the binding, the interface's extra members ignored ([ADR-00466](../adr/00/ADR-00466.md))"
             ]
           },
           {
             "feature": "Array types `T[]`",
             "status": "implemented",
             "notes": [
-              "A `{ptr, i64}` (data, length) aggregate as a value; an object field, return value, or parameter carries it by a header pointer to a shared `ArrayHeader` for reference identity/aliasing ([ADR-00940](../adr/ADR-00940.md)/[ADR-00941](../adr/ADR-00941.md))"
+              "A `{ptr, i64}` (data, length) aggregate as a value; an object field, return value, or parameter carries it by a header pointer to a shared `ArrayHeader` for reference identity/aliasing ([ADR-00940](../adr/00/ADR-00940.md)/[ADR-00941](../adr/00/ADR-00941.md))"
             ]
           },
           {
@@ -197,10 +193,10 @@
             "status": "implemented",
             "notes": [
               "Closure struct `{funcPtr, envPtr}`",
-              "A *generic* function type (`<T>(x: T) => T`) parses with its type parameters erased to `any` — generic functions are monomorphized declarations, not first-class values ([ADR-00469](../adr/ADR-00469.md))",
-              "Type predicates (`x is T`) resolve to `boolean` and assertion signatures (`asserts x [is T]`) to `void` — parsed, with the flow-narrowing itself not modeled ([ADR-00474](../adr/ADR-00474.md))",
-              "Generic class methods (`map<U>(f)`) compile via `any`-erasure through these adapters ([ADR-00477](../adr/ADR-00477.md))",
-              "Closure adapters convert at any↔concrete signature boundaries — scalars, strings, arrays, nullable scalars, rest tails, arity narrowing; an *absent* nullable boxed into `any` reads as `undefined`, void→concrete returns pass through ([ADR-00477](../adr/ADR-00477.md)/[ADR-00478](../adr/ADR-00478.md))"
+              "A *generic* function type (`<T>(x: T) => T`) parses with its type parameters erased to `any` — generic functions are monomorphized declarations, not first-class values ([ADR-00469](../adr/00/ADR-00469.md))",
+              "Type predicates (`x is T`) resolve to `boolean` and assertion signatures (`asserts x [is T]`) to `void` — parsed, with the flow-narrowing itself not modeled ([ADR-00474](../adr/00/ADR-00474.md))",
+              "Generic class methods (`map<U>(f)`) compile via `any`-erasure through these adapters ([ADR-00477](../adr/00/ADR-00477.md))",
+              "Closure adapters convert at any↔concrete signature boundaries — scalars, strings, arrays, nullable scalars, rest tails, arity narrowing; an *absent* nullable boxed into `any` reads as `undefined`, void→concrete returns pass through ([ADR-00477](../adr/00/ADR-00477.md)/[ADR-00478](../adr/00/ADR-00478.md))"
             ]
           },
           {
@@ -220,24 +216,24 @@
             "feature": "Union types beyond `T \\| null`",
             "status": "implemented",
             "caveats": [
-              "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (any number of classes and plain object types, at most one headerless host object such as `URL`, or a **discriminated union** ([TDD-00116](../tdd/TDD-00116.md)); [ADR-01219](../adr/ADR-01219.md)), and a `ReadableStream` member ([TDD-00119](../tdd/TDD-00119.md)); two array members of one kind, a `Headers`-like host handle beside another of its kind, number-literal tags, and a non-first-position tag aren't supported",
+              "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (any number of classes and plain object types, at most one headerless host object such as `URL`, or a **discriminated union** ([TDD-00116](../tdd/TDD-00116.md)); [ADR-01219](../adr/01/ADR-01219.md)), and a `ReadableStream` member ([TDD-00119](../tdd/TDD-00119.md)); two array members of one kind, a `Headers`-like host handle beside another of its kind, number-literal tags, and a non-first-position tag aren't supported",
               "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null`/`instanceof`/`in`/a discriminant/a type guard (if/else branches + early return); a field/element, `switch (typeof x)`, and `as` casts aren't narrowed; a conditional expression narrows its branches too; before narrowing, an object union reads only a member all its object members declare ([TDD-00114](../tdd/TDD-00114.md))"
             ],
             "notes": [
-              "Usable at the top level of a var declaration/function param/return, as an **object field** ([TDD-00119](../tdd/TDD-00119.md)) and as an **array element** (`(number \\| string)[]`, a discriminated `(A \\| B)[]`, and `(number \\| undefined)[]` whose absent elements are real `undefined`s) — every write (literal, `push`, `xs[i] = v`) is checked against the member set and boxed ([ADR-01039](../adr/ADR-01039.md))",
-              "Same runtime box as `any`/`unknown` with a checked member set on top ([TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/ADR-00136.md)); a narrowed local unboxes to the concrete member ([ADR-00354](../adr/ADR-00354.md)), an object member to its typed pointer ([ADR-00355](../adr/ADR-00355.md))",
-              "An uninitialized union binding reads as boxed `undefined` (JS `let x;` semantics) until assigned ([ADR-00475](../adr/ADR-00475.md))"
+              "Usable at the top level of a var declaration/function param/return, as an **object field** ([TDD-00119](../tdd/TDD-00119.md)) and as an **array element** (`(number \\| string)[]`, a discriminated `(A \\| B)[]`, and `(number \\| undefined)[]` whose absent elements are real `undefined`s) — every write (literal, `push`, `xs[i] = v`) is checked against the member set and boxed ([ADR-01039](../adr/01/ADR-01039.md))",
+              "Same runtime box as `any`/`unknown` with a checked member set on top ([TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/00/ADR-00136.md)); a narrowed local unboxes to the concrete member ([ADR-00354](../adr/00/ADR-00354.md)), an object member to its typed pointer ([ADR-00355](../adr/00/ADR-00355.md))",
+              "An uninitialized union binding reads as boxed `undefined` (JS `let x;` semantics) until assigned ([ADR-00475](../adr/00/ADR-00475.md))"
             ]
           },
           {
             "feature": "Intersection types",
             "status": "implemented",
             "caveats": [
-              "Object-type members only — a non-object member (scalar/function/array/tuple/union, all `never` in TS), or a generic-with-type-arguments member, is a clean compile error",
+              "Object-type members, or one primitive with object members (a branded primitive, `string & { __brand: \"id\" }`); any other non-object member (a function, array, tuple or union, or two primitives — `never` in TS), or a generic-with-type-arguments member, is a compile error",
               "A field declared with conflicting **non-object** types across members is rejected under `-compat=strict` (default); the `-compat=js` TS-faithful `never`-field is not yet implemented, so a conflict is currently rejected in both modes (same-named **object** fields are recursively intersected instead — `{ x: A } & { x: B }` ⇒ `x: A & B`)"
             ],
             "notes": [
-              "Collapses at `resolveType` into one merged `ObjectType` (member fields concatenated, compatible duplicates deduped) — no runtime tag, unlike a union; reuses all existing object machinery unchanged ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/ADR-00225.md))",
+              "Collapses at `resolveType` into one merged `ObjectType` (member fields concatenated, compatible duplicates deduped) — no runtime tag, unlike a union; reuses all existing object machinery unchanged ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/00/ADR-00225.md))",
               "`&` binds tighter than `\\|` (`A & B \\| C` ≡ `(A & B) \\| C`)",
               "Works as a named interface / inline `{...}` / `type` alias member, and in variable/param/return/field/array-element positions"
             ]
@@ -246,31 +242,30 @@
             "feature": "Tuple types",
             "status": "implemented",
             "caveats": [
-              "No rest/optional elements",
-              "Constant index only — no non-constant index; compound assignment to an element (`t[0] += x`) is a clean rejection",
-              "No array methods (`.map`/`.filter`/…) on a tuple (`.length` works)",
-              "Not supported nested in `any` or a union"
+              "A tuple with an optional or rest element (`[a?: number]`, `[number, ...string[]]`) is stored as `any[]`: its elements read as `any`",
+              "A non-constant index (`t[i]`) reads the element as `any`",
+              "A union holds at most one tuple or array member"
             ],
             "notes": [
-              "Fixed-arity, heterogeneous, positional value stored as a fixed-shape struct ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/ADR-00201.md))",
+              "Fixed-arity, heterogeneous, positional value stored as a fixed-shape struct ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/00/ADR-00201.md))",
               "Supports declaration + tuple literal, constant-index read **and assignment** (`t[0]`, `t[0] = x`), `.length` (compile-time constant), destructuring (`const [a, b] = t`, `for (const [a, b] of tuples)`, nested), tuple parameters/returns/fields, array-shaped rendering (JSON/`String()`/`console.log`)",
-              "`Map`/`Array`/`Object.entries()` return real `[K, V]` tuples"
+              "`Map`/`Array`/`Object.entries()` return real `[K, V]` tuples",
+              "Behaves as an array: non-mutating array methods, spread (into an array or a fixed-arity call), `for...of`, `Array.from`, rest destructuring, compound element assignment, rest parameters of a tuple type, and a tuple member of a union ([ADR-01726](../adr/01/ADR-01726.md))"
             ]
           },
           {
             "feature": "Mapped & utility types",
             "status": "implemented",
             "caveats": [
-              "`Partial`/`Required`/`Readonly` are structural no-ops — the object model already zero-fills omitted fields and does no mutation checking; the visibly-effective utilities are `Pick`/`Omit`/`Record`",
               "Mapped value body handles `T[K]` (homomorphic), a bare `K`, a concrete type (uniform), or `T[K]` wrapped one level in `Array`/`Promise`/`Set`; a `T[K]` nested deeper isn't substituted",
-              "No key remapping (`as`) or modifier-removal (`-?`/`-readonly`); `?`/`readonly` are accepted but near-no-ops",
+              "No key remapping (`as`) — a parse error",
               "String-literal types resolve to `string` — the literal value is not narrowed/enforced",
               "An unrecognized `Name<Args>` (or a malformed `Pick`/`Omit`) is not yet a clean rejection — [TDD-00079](../tdd/TDD-00079.md) Stage 0"
             ],
             "notes": [
-              "`Partial`/`Required`/`Readonly`/`NonNullable`/`Pick`/`Omit`/`Record`, the general mapped form `{ [K in keyof T]: V }`, `keyof`, indexed access `T[K]`, and string-literal types — all evaluated at compile time to concrete object types via the monomorphization seam, no runtime representation ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/ADR-00228.md)–[ADR-00230](../adr/ADR-00230.md))",
-              "Numeric-literal types (`type Dir = -1 | 0 | 1`, `{ retries: 3 }`) parse and resolve to `number` — like string-literal types, the value itself is not narrowed/enforced ([ADR-00459](../adr/ADR-00459.md))",
-              "`Record<string, V>` (open key) is the index-signature dict — bracket read/write, `Object.keys`, `JSON.stringify` all work; literal-union keys keep the fixed shape ([ADR-00485](../adr/ADR-00485.md))"
+              "`Partial`/`Required`/`Readonly`/`NonNullable`/`Pick`/`Omit`/`Record`, the general mapped form `{ [K in keyof T]: V }`, `keyof`, indexed access `T[K]`, and string-literal types — all evaluated at compile time to concrete object types via the monomorphization seam, no runtime representation ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/00/ADR-00228.md)–[ADR-00230](../adr/00/ADR-00230.md))",
+              "Numeric-literal types (`type Dir = -1 | 0 | 1`, `{ retries: 3 }`) parse and resolve to `number` — like string-literal types, the value itself is not narrowed/enforced ([ADR-00459](../adr/00/ADR-00459.md))",
+              "`Record<string, V>` (open key) is the index-signature dict — bracket read/write, `Object.keys`, `JSON.stringify` all work; literal-union keys keep the fixed shape ([ADR-00485](../adr/00/ADR-00485.md))"
             ]
           },
           {
@@ -281,7 +276,7 @@
               "`assignable` is structural width subtyping (objects), element-wise (arrays), IR-equality with numeric leniency (scalars) — not full variance"
             ],
             "notes": [
-              "Evaluated at compile time off the monomorphized (concrete) check type — generic type aliases (`type A<T> = …`), `infer` capture, and the first general structural assignability predicate ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00231](../adr/ADR-00231.md))",
+              "Evaluated at compile time off the monomorphized (concrete) check type — generic type aliases (`type A<T> = …`), `infer` capture, and the first general structural assignability predicate ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00231](../adr/00/ADR-00231.md))",
               "Nested conditionals are right-associative"
             ]
           },
@@ -296,58 +291,58 @@
               "Arithmetic on an erased `T` hits the same \"operator on any/unknown\" rejection as plain `any`"
             ],
             "notes": [
-              "V1 (default): monomorphization — one specialized implementation per distinct combination of concrete types actually used; an object/interface/class type argument mangles structurally (a class by name), so field access/destructuring/`T[]` on a `T`-bound object ride the per-instantiation body ([TDD-00069](../tdd/TDD-00069.md)/[ADR-00352](../adr/ADR-00352.md))",
-              "The type parameters are in scope for the whole instantiation — `T` inside `Promise<T>`, `T[][]`, `Map<string, T>`, `T | null`, a `(x: T) => T` parameter or a body-local annotation substitutes, so `new Promise<T>((resolve) => resolve(v))` in a generic async helper compiles ([ADR-01072](../adr/ADR-01072.md))",
-              "`<T extends X>` constraints are parsed and enforced (structural width subtyping) on functions and classes ([TDD-00113](../tdd/TDD-00113.md)/[ADR-00353](../adr/ADR-00353.md)); an explicit type argument that does not satisfy its constraint is tsc's TS2344, on a call, a `new` and a type reference to an interface, alias or class ([ADR-01317](../adr/ADR-01317.md))",
-              "Covers `function identity<T>(x: T): T`, `interface Box<T>`, `class Box<T>`, and multiple type parameters `<K, V>` ([TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/ADR-00132.md))",
-              "A generic class can't use `extends`/`abstract`/static members ([ADR-00103](../adr/ADR-00103.md)/[TDD-00010](../tdd/TDD-00010.md))",
-              "V2: `/** @erased */` above a generic function compiles its body once (bare-`T` positions become `any`/`unknown`), no name mangling or instantiation blowup ([ADR-00121](../adr/ADR-00121.md))",
-              "Explicit call-site type arguments (`id<string>(x)`, `make<number>()`) pick the instantiation directly, bypassing inference; comparison expressions keep parsing via backtracking ([ADR-00473](../adr/ADR-00473.md))",
-              "A generic arrow, function expression or object-literal method (`<T>(x: T) => x`, `<T,>`, `function <U>(v: U)`) compiles once with its type parameters erased to `any`, as a generic class method's are ([ADR-01151](../adr/ADR-01151.md))"
+              "V1 (default): monomorphization — one specialized implementation per distinct combination of concrete types actually used; an object/interface/class type argument mangles structurally (a class by name), so field access/destructuring/`T[]` on a `T`-bound object ride the per-instantiation body ([TDD-00069](../tdd/TDD-00069.md)/[ADR-00352](../adr/00/ADR-00352.md))",
+              "The type parameters are in scope for the whole instantiation — `T` inside `Promise<T>`, `T[][]`, `Map<string, T>`, `T | null`, a `(x: T) => T` parameter or a body-local annotation substitutes, so `new Promise<T>((resolve) => resolve(v))` in a generic async helper compiles ([ADR-01072](../adr/01/ADR-01072.md))",
+              "`<T extends X>` constraints are parsed and enforced (structural width subtyping) on functions and classes ([TDD-00113](../tdd/TDD-00113.md)/[ADR-00353](../adr/00/ADR-00353.md)); an explicit type argument that does not satisfy its constraint is tsc's TS2344, on a call, a `new` and a type reference to an interface, alias or class ([ADR-01317](../adr/01/ADR-01317.md))",
+              "Covers `function identity<T>(x: T): T`, `interface Box<T>`, `class Box<T>`, and multiple type parameters `<K, V>` ([TDD-00037](../tdd/TDD-00037.md)/[ADR-00132](../adr/00/ADR-00132.md))",
+              "A generic class that extends a class, is extended or is abstract compiles once, its type parameters as `any` (one class object for base and derived, as in JS; a monomorphized layout per type argument is future speed work, [ADR-01733](../adr/01/ADR-01733.md))",
+              "V2: `/** @erased */` above a generic function compiles its body once (bare-`T` positions become `any`/`unknown`), no name mangling or instantiation blowup ([ADR-00121](../adr/00/ADR-00121.md))",
+              "Explicit call-site type arguments (`id<string>(x)`, `make<number>()`) pick the instantiation directly, bypassing inference; comparison expressions keep parsing via backtracking ([ADR-00473](../adr/00/ADR-00473.md))",
+              "A generic arrow, function expression or object-literal method (`<T>(x: T) => x`, `<T,>`, `function <U>(v: U)`) compiles once with its type parameters erased to `any`, as a generic class method's are ([ADR-01151](../adr/01/ADR-01151.md))"
             ]
           },
           {
             "feature": "Index signatures (`{ [k: string]: T }`)",
             "status": "implemented",
             "caveats": [
-              "The class-body form (`class C { [n: number]: T }`) parses and is **dropped** — indexing a class instance keeps its use-site rejection ([ADR-00476](../adr/ADR-00476.md))"
+              "The class-body form (`class C { [n: number]: T }`) parses and is **dropped** — indexing a class instance keeps its use-site rejection ([ADR-00476](../adr/00/ADR-00476.md))"
             ],
             "notes": [
-              "String or number key; the dictionary is the object itself (a static object, an `any` value or another dictionary converted to it is the same object, so writes through either side show on both) — `d[key]` read/write, `in`, `delete`, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; number keys stringify (JS object keys are strings); named properties beside the signature have their declared types; a missing key reads `undefined` ([ADR-01484](../adr/ADR-01484.md), [ADR-01171](../adr/ADR-01171.md), [TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/ADR-00390.md)/[ADR-00461](../adr/ADR-00461.md))",
-              "The type checker models them as tsc does — reads through any key, assignability with implicit index signatures for object literals only, TS2322 for an interface lacking one ([ADR-01160](../adr/ADR-01160.md))"
+              "String or number key; the dictionary is the object itself (a static object, an `any` value or another dictionary converted to it is the same object, so writes through either side show on both) — `d[key]` read/write, `in`, `delete`, an object-literal initializer, and `Object.keys/values/entries` + `for…of` all work; number keys stringify (JS object keys are strings); named properties beside the signature have their declared types; a missing key reads `undefined` ([ADR-01484](../adr/01/ADR-01484.md), [ADR-01171](../adr/01/ADR-01171.md), [TDD-00130](../tdd/TDD-00130.md)/[ADR-00390](../adr/00/ADR-00390.md)/[ADR-00461](../adr/00/ADR-00461.md))",
+              "The type checker models them as tsc does — reads through any key, assignability with implicit index signatures for object literals only, TS2322 for an interface lacking one ([ADR-01160](../adr/01/ADR-01160.md))"
             ]
           },
           {
             "feature": "`typeof` type queries (`type T = typeof x`)",
             "status": "implemented",
             "notes": [
-              "Resolves the referenced value's type (a variable's object/scalar/array type, or a function's type), walking a `typeof a.b` member path — usable as a `type` alias, an inline annotation, or a parameter/return type ([ADR-00389](../adr/ADR-00389.md))",
-              "The checker types a query in its own scope (a `const` gives its literal type, as tsc does); `typeof C` of a class is the class itself as a value ([ADR-01318](../adr/ADR-01318.md))"
+              "Resolves the referenced value's type (a variable's object/scalar/array type, or a function's type), walking a `typeof a.b` member path — usable as a `type` alias, an inline annotation, or a parameter/return type ([ADR-00389](../adr/00/ADR-00389.md))",
+              "The checker types a query in its own scope (a `const` gives its literal type, as tsc does); `typeof C` of a class is the class itself as a value ([ADR-01318](../adr/01/ADR-01318.md))"
             ]
           },
           {
             "feature": "Type assertions (`x as T`, `as const`, `satisfies T`, `<T>x`)",
             "status": "implemented",
             "caveats": [
-              "**Erased, not enforcing** — the assertion is dropped and the value keeps its *own* inferred type, so `as T` does not re-type the expression; a cast the code *relies on* for typing won't take effect (matches TS runtime erasure, not static narrowing/widening — [ADR-00371](../adr/ADR-00371.md)); the general `any as T` question is [TDD-00176](../tdd/TDD-00176.md)"
+              "**Erased, not enforcing** — the assertion is dropped and the value keeps its *own* inferred type, so `as T` does not re-type the expression; a cast the code *relies on* for typing won't take effect (matches TS runtime erasure, not static narrowing/widening — [ADR-00371](../adr/00/ADR-00371.md)); the general `any as T` question is [TDD-00176](../tdd/TDD-00176.md)"
             ],
             "notes": [
-              "Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity; the old-style prefix `<T>expr` form parses in the unary position and is erased identically ([ADR-00451](../adr/ADR-00451.md))",
-              "One carve-out: `as T` directly on `JSON.parse(...)`/`.json()` supplies the projection target under `-compat=strict`, exactly as a declaration annotation would ([ADR-00715](../adr/ADR-00715.md))"
+              "Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity; the old-style prefix `<T>expr` form parses in the unary position and is erased identically ([ADR-00451](../adr/00/ADR-00451.md))",
+              "One carve-out: `as T` directly on `JSON.parse(...)`/`.json()` supplies the projection target under `-compat=strict`, exactly as a declaration annotation would ([ADR-00715](../adr/00/ADR-00715.md))"
             ]
           },
           {
             "feature": "Template literal types (`` `a-${T}` ``)",
             "status": "implemented",
             "caveats": [
-              "**Erased to `string`** — the literal pattern is parsed (no-substitution, multi-substitution, and `[]`-suffixed forms) but resolves to `string`, not narrowed/enforced; the same simplification string-literal types use ([ADR-00561](../adr/ADR-00561.md))"
+              "**Erased to `string`** — the literal pattern is parsed (no-substitution, multi-substitution, and `[]`-suffixed forms) but resolves to `string`, not narrowed/enforced; the same simplification string-literal types use ([ADR-00561](../adr/00/ADR-00561.md))"
             ]
           },
           {
             "feature": "`readonly T[]` array-type modifier",
             "status": "implemented",
             "caveats": [
-              "**Erased, not enforcing** — `readonly number[]` and `readonly [T, U]` parse (in variable/parameter/return/field positions), but the modifier is dropped and mutation is not prevented, the same stance as `Readonly<T>` and the mapped-type `readonly` modifier. The `ReadonlyArray<T>` alias form is not covered ([ADR-00373](../adr/ADR-00373.md))"
+              "**Erased, not enforcing** — `readonly number[]` and `readonly [T, U]` parse (in variable/parameter/return/field positions), but the modifier is dropped and mutation is not prevented, the same stance as `Readonly<T>` and the mapped-type `readonly` modifier. The `ReadonlyArray<T>` alias form is not covered ([ADR-00373](../adr/00/ADR-00373.md))"
             ]
           },
           {
@@ -355,12 +350,12 @@
             "status": "implemented",
             "caveats": [
               "A runtime *use* of a declared binding this compiler doesn't itself provide is an ordinary `undefined variable` error — under whole-program AOT an ambient declaration has no external target to bind to",
-              "`declare class` and the brace-bodied `global`/`module`/`namespace` blocks are parsed and erased (no binding — [ADR-00388](../adr/ADR-00388.md))"
+              "`declare class` and the brace-bodied `global`/`module`/`namespace` blocks are parsed and erased (no binding — [ADR-00388](../adr/00/ADR-00388.md))"
             ],
             "notes": [
-              "`declare var` is a real zero-initialized binding; `declare function` compiles to a throwing 'no implementation' stub (clear runtime error only if called); redeclared signatures collapse last-wins; `declare class/namespace/module/global` stay erased ([ADR-00471](../adr/ADR-00471.md))",
-              "Identifier-named `declare namespace/module X` members are real ambient bindings (vars zero-init and assignable, functions throwing stubs); string-named module and `global` blocks stay erased ([ADR-00474](../adr/ADR-00474.md))",
-              "`declare [const] enum` is a real enum ([ADR-00476](../adr/ADR-00476.md))"
+              "`declare var` is a real zero-initialized binding; `declare function` compiles to a throwing 'no implementation' stub (clear runtime error only if called); redeclared signatures collapse last-wins; `declare class/namespace/module/global` stay erased ([ADR-00471](../adr/00/ADR-00471.md))",
+              "Identifier-named `declare namespace/module X` members are real ambient bindings (vars zero-init and assignable, functions throwing stubs); string-named module and `global` blocks stay erased ([ADR-00474](../adr/00/ADR-00474.md))",
+              "`declare [const] enum` is a real enum ([ADR-00476](../adr/00/ADR-00476.md))"
             ]
           },
           {
@@ -371,10 +366,20 @@
               "A property is checked only on a type whose members the checker knows whole: not on a library global's name (an `interface Element` merges with the library's) or a class merged with an interface",
               "A call is checked only against a function type the checker models whole: calls to generic functions and to the builtin library's undeclared parts are not checked, and a tagged template's call not at all",
               "A function type in a message names its parameters `p0`, `p1`, … where tsc prints their declared names",
-              "`TS2403` (a `var` redeclared with another type) is reported between primitive, literal, union, array and tuple types, not between object types ([ADR-01470](../adr/ADR-01470.md))"
+              "`TS2403` (a `var` redeclared with another type) is reported between primitive, literal, union, array and tuple types, not between object types ([ADR-01470](../adr/01/ADR-01470.md))"
             ],
             "notes": [
-              "The strict lane rejects a program tsc rejects for these errors, with tsc's code, message and position; `-compat=js` compiles it as JavaScript ([ADR-01123](../adr/ADR-01123.md)). Measured against TypeScript 7.0.2's own test baselines, strict by default, every one of the 3,145 reports matches tsc's ([ADR-01122](../adr/ADR-01122.md), [ADR-01124](../adr/ADR-01124.md), [ADR-01125](../adr/ADR-01125.md), [ADR-01126](../adr/ADR-01126.md), [ADR-01128](../adr/ADR-01128.md), [ADR-01156](../adr/ADR-01156.md), [ADR-01157](../adr/ADR-01157.md), [ADR-01158](../adr/ADR-01158.md), [ADR-01160](../adr/ADR-01160.md))"
+              "The strict lane rejects a program tsc rejects for these errors, with tsc's code, message and position; `-compat=js` compiles it as JavaScript ([ADR-01123](../adr/01/ADR-01123.md)). Measured against TypeScript 7.0.2's own test baselines, strict by default, every one of the 3,145 reports matches tsc's ([ADR-01122](../adr/01/ADR-01122.md), [ADR-01124](../adr/01/ADR-01124.md), [ADR-01125](../adr/01/ADR-01125.md), [ADR-01126](../adr/01/ADR-01126.md), [ADR-01128](../adr/01/ADR-01128.md), [ADR-01156](../adr/01/ADR-01156.md), [ADR-01157](../adr/01/ADR-01157.md), [ADR-01158](../adr/01/ADR-01158.md), [ADR-01160](../adr/01/ADR-01160.md))"
+            ]
+          },
+          {
+            "feature": "Unused-declaration checks (`-no-unused-locals`, `-no-unused-parameters`)",
+            "status": "implemented",
+            "caveats": [
+              "A namespace's members are not checked",
+              "A type parameter of a signature written inside a type (`<T>(x: T) => void`, an interface's generic method) is not checked",
+              "A private member read through a computed key whose type is not a string-literal union counts every private member of the class as read",
+              "An unused import is reported at its `import` statement, where tsc points at the name"
             ]
           }
         ]

@@ -45,3 +45,19 @@ server.listen(path, async () => {
 })
 `)
 }
+
+// A Linux abstract socket name ("\0name") binds and connects by its full
+// length, NUL included.
+func TestE2EAbstractUnixSocketHTTP(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("abstract socket names are Linux-only")
+	}
+	assertSameAsNode(t, `
+import * as http from "node:http"
+const server = http.createServer((req, res) => { res.end("ok") })
+server.listen("\0kml-abstract-test", () => {
+  console.log(JSON.stringify(server.address()))
+  http.get({ socketPath: server.address() as string }, (res) => { console.log(res.statusCode); server.close() })
+})
+`)
+}

@@ -143,7 +143,7 @@ static void kfs_fill_stat(const kfs_stat *s, void *out, int64_t size) {
 
 // A string result the item owns.
 static void kfs_result_str(kml_pool_item *it, const char *s) {
-    free(it->res_str);
+    free(it->res_str); /* scratch */
     it->res_str = strdup(s ? s : "");
 }
 
@@ -200,11 +200,11 @@ static int kfs_mkdirp_at(const char *path, int mode, char **first, int parent_of
 #ifdef _WIN32
     if (n == 2 && path[1] == ':') return e;
 #endif
-    char *parent = (char *)malloc(n + 1);
+    char *parent = (char *)malloc(n + 1); /* scratch */
     memcpy(parent, path, n);
     parent[n] = 0;
     int r = kfs_mkdirp_at(parent, mode, first, 1);
-    free(parent);
+    free(parent); /* scratch */
     if (r != 0) return r;
     if (mkdir(path, mode) == 0) {
         if (!*first) *first = strdup(path);
@@ -283,7 +283,7 @@ static int kfs_readdir(kml_pool_item *it) {
     void *d = opendir(it->arg0);
     if (!d) return errno;
     size_t n = 0, cap = 16;
-    kfs_entry *ents = (kfs_entry *)malloc(cap * sizeof *ents);
+    kfs_entry *ents = (kfs_entry *)malloc(cap * sizeof *ents); /* scratch */
     for (;;) {
         errno = 0;
         kfs_dirent *de = readdir(d);
@@ -302,7 +302,7 @@ static int kfs_readdir(kml_pool_item *it) {
         }
         if (n == cap) {
             cap *= 2;
-            ents = (kfs_entry *)realloc(ents, cap * sizeof *ents);
+            ents = (kfs_entry *)realloc(ents, cap * sizeof *ents); /* scratch */
         }
         ents[n].name = strdup(nm);
         ents[n].type = t;
@@ -314,7 +314,7 @@ static int kfs_readdir(kml_pool_item *it) {
 #endif
     size_t len = 1;
     for (size_t i = 0; i < n; i++) len += strlen(ents[i].name) + 2;
-    char *out = (char *)malloc(len);
+    char *out = (char *)malloc(len); /* scratch */
     size_t o = 0;
     for (size_t i = 0; i < n; i++) {
         if (i > 0) out[o++] = '/';
@@ -322,11 +322,11 @@ static int kfs_readdir(kml_pool_item *it) {
         size_t l = strlen(ents[i].name);
         memcpy(out + o, ents[i].name, l);
         o += l;
-        free(ents[i].name);
+        free(ents[i].name); /* scratch */
     }
     out[o] = 0;
-    free(ents);
-    free(it->res_str);
+    free(ents); /* scratch */
+    free(it->res_str); /* scratch */
     it->res_str = out;
     return 0;
 }
@@ -453,15 +453,15 @@ static void work_fs(kml_pool_item *it) {
             char cwd[4096];
             char *ns = getcwd(cwd, sizeof cwd) ? __kml_path_win32_to_namespaced_path(first, cwd, 1) : NULL;
             if (ns) {
-                free(first);
+                free(first); /* scratch */
                 first = strdup(ns);
-                free(ns - 8);
+                kml_free(KML_HEAP_RAW, ns - 8);
             }
 #endif
-            free(it->res_str);
+            free(it->res_str); /* scratch */
             it->res_str = first;
         } else {
-            free(first);
+            free(first); /* scratch */
         }
         break;
     }
@@ -487,20 +487,20 @@ static void work_fs(kml_pool_item *it) {
     case KFS_READLINK: {
         size_t cap = 256;
         for (;;) {
-            char *b = (char *)malloc(cap);
+            char *b = (char *)malloc(cap); /* scratch */
             int64_t n = readlink(it->arg0, b, cap);
             if (n < 0) {
                 e = errno;
-                free(b);
+                free(b); /* scratch */
                 break;
             }
             if ((size_t)n < cap) {
                 b[n] = 0;
-                free(it->res_str);
+                free(it->res_str); /* scratch */
                 it->res_str = b;
                 break;
             }
-            free(b);
+            free(b); /* scratch */
             cap *= 2;
         }
         break;
@@ -510,7 +510,7 @@ static void work_fs(kml_pool_item *it) {
         if (!r) {
             e = errno;
         } else {
-            free(it->res_str);
+            free(it->res_str); /* scratch */
             it->res_str = r;
         }
         break;
@@ -520,9 +520,9 @@ static void work_fs(kml_pool_item *it) {
         char *t = strdup(it->arg0);
         if (!mkdtemp(t)) {
             e = errno;
-            free(t);
+            free(t); /* scratch */
         } else {
-            free(it->res_str);
+            free(it->res_str); /* scratch */
             it->res_str = t;
         }
         break;
@@ -620,9 +620,9 @@ double __kml_native_fs_call(double op, const char *p1, const char *p2, double a,
     kfs_setup(&it, op, p1, p2, a, b, c, d, data, size);
     work_fs(&it);
     native_set_last_string(it.res_str);
-    free(it.arg0);
-    free(it.arg1);
-    free(it.res_str);
+    free(it.arg0); /* scratch */
+    free(it.arg1); /* scratch */
+    free(it.res_str); /* scratch */
     return it.err ? -(double)it.err : it.res;
 }
 

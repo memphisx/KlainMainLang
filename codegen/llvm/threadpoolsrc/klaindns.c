@@ -13,7 +13,7 @@ static void jb_put(kml_jbuf *b, const char *p, size_t n) {
     if (b->n + n + 1 > b->cap) {
         size_t cap = b->cap ? b->cap * 2 : 128;
         while (cap < b->n + n + 1) cap *= 2;
-        b->s = (char *)realloc(b->s, cap);
+        b->s = (char *)realloc(b->s, cap); /* scratch */
         b->cap = cap;
     }
     memcpy(b->s + b->n, p, n);
@@ -129,7 +129,7 @@ static void work_getaddrinfo(kml_pool_item *it) {
     jb_cstr(&b, "]");
     freeaddrinfo(res);
     if (n == 0) {
-        free(b.s);
+        free(b.s); /* scratch */
         it->err = -3007; // UV_EAI_NODATA
         return;
     }

@@ -2,7 +2,7 @@ package tests
 
 import "testing"
 
-// --- URL / URLSearchParams (see docs/adr/ADR-00076.md) ---
+// --- URL / URLSearchParams (see docs/adr/00/ADR-00076.md) ---
 
 func TestE2EURLParts(t *testing.T) {
 	assertOutput(t, `

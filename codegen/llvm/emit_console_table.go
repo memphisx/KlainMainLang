@@ -83,7 +83,7 @@ func (e *Emitter) emitConsoleTable(args []ast.Expression, pos ast.Pos) (Value, e
 		return e.emitConsolePrint(args, 1, "")
 	}
 	argTy := e.inferExprType(args[0])
-	if !argTy.IsArray || argTy.ElemType == nil {
+	if !argTy.IsArray() || argTy.ElemType == nil {
 		return e.emitConsolePrint(args, 1, "")
 	}
 	elemTy := *argTy.ElemType
@@ -108,7 +108,7 @@ func (e *Emitter) emitConsoleTable(args []ast.Expression, pos ast.Pos) (Value, e
 					idx, _, _ := elem.Ty.FieldIndex(f.Name)
 					gep := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, elem.Ty.StructIR(), elem.Ref, idx))
-					if f.Ty.IsArray {
+					if f.Ty.IsArray() {
 						return e.emitInspectField(e.loadArrayFieldValue(gep, f.Ty), 0) // header-ptr slot (TDD-00213 S2)
 					}
 					load := e.freshReg()

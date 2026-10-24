@@ -15,7 +15,6 @@ package llvm
 
 import (
 	"fmt"
-	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -23,7 +22,7 @@ import (
 // hasBodyMixin reports a type with Fetch's Body members (body, bodyUsed,
 // text(), json(), arrayBuffer()): a Response or a Request.
 func hasBodyMixin(t Type) bool {
-	return t.IsResponse || t.IsFetchRequest
+	return t.IsResponse() || t.IsFetchRequest()
 }
 
 // emitFetch implements fetch(url), fetch(url, init), and fetch(request)
@@ -56,7 +55,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 	}
 
 	if len(args) == 1 {
-		if reqTy := e.inferExprType(args[0]); reqTy.IsFetchRequest {
+		if reqTy := e.inferExprType(args[0]); reqTy.IsFetchRequest() {
 			reqVal, err := e.emitExpr(args[0])
 			if err != nil {
 				return Value{}, err
@@ -84,7 +83,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	urlVal = e.coerce(urlVal, TypePtr)
+	urlVal = e.convert(urlVal, TypePtr)
 
 	methodRef, headersRef, bodyRef, signalRef := "null", "null", "null", "null"
 	bodyLen := "-1"
@@ -96,7 +95,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		// An init held in `any` is read member by member at run time;
 		// undefined or null is no init (WebIDL's empty dictionary).
 		dyn := isUnconstrainedDynamic(initVal.Ty)
-		if !initVal.Ty.IsObject && !dyn {
+		if !initVal.Ty.IsObject() && !dyn {
 			return Value{}, fmt.Errorf("%d:%d: fetch's second argument must be an object with an optional method/headers/body field", pos.Line, pos.Col)
 		}
 		dynGet := func(name string) Value {
@@ -107,7 +106,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		// are read only when it is there, and default to none.
 		var slots [5]string
 		var skipL, doneInitL string
-		if initVal.Ty.Nullable || dyn {
+		if initVal.Ty.Nullable() || dyn {
 			for i := range slots {
 				slots[i] = e.freshReg()
 				ir := "ptr"
@@ -136,7 +135,8 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			e.emitLabel(haveL)
 			if !dyn {
 				nn := initVal.Ty
-				nn.Nullable, nn.IsUndefined = false, false
+				nn.setNullable(false)
+				nn.setUndefined(false)
 				initVal = Value{Ref: initVal.Ref, Ty: nn}
 			}
 		}
@@ -144,7 +144,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			// signal: an AbortSignal, or none when undefined/null.
 			if cls, hasSignals := e.abortSignalClass(); hasSignals {
 				sv := dynGet("signal")
-				sig := e.coerce(sv, cls)
+				sig := e.convert(sv, cls)
 				nullish := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp ule i64 %s, %d", nullish, sv.Ref, nbUndefined))
 				sel := e.freshReg()
@@ -172,9 +172,9 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok && !dyn {
 			mv := e.loadFieldValue(initVal, idx, fieldTy)
 			switch {
-			case isStringTy(mv.Ty) && !mv.Ty.IsObject && !mv.Ty.IsArray:
+			case isStringTy(mv.Ty) && !mv.Ty.IsObject() && !mv.Ty.IsArray():
 				methodRef = mv.Ref
-			case mv.Ty.IsDynamic:
+			case mv.Ty.IsDynamic():
 				s, _ := e.emitAnyIntoString(mv, TypePtr)
 				methodRef = s.Ref
 			default:
@@ -219,7 +219,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			has := e.coerce(hasV, TypeBool).Ref
+			has := e.convert(hasV, TypeBool).Ref
 			hasBody, need := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasBody, bodyRef))
 			noCT := e.freshReg()
@@ -328,8 +328,8 @@ func (e *Emitter) emitFetchAsyncCall(urlRef, methodRef, headersRef, bodyRef, sig
 func (e *Emitter) finishFetchPending(pendingReg string) (Value, error) {
 	e.ensureMalloc()
 	slotReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 8)", slotReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pendingReg, slotReg))
+	e.heapMallocInto(slotReg, "8")
+	e.heapStore("ptr", pendingReg, slotReg, 8)
 	return Value{Ref: slotReg, Ty: PromiseOf(ResponseType())}, nil
 }
 
@@ -343,7 +343,7 @@ func (e *Emitter) finishFetchPending(pendingReg string) (Value, error) {
 // an object of another layout behind it reads by name.
 func (e *Emitter) loadFieldValue(objVal Value, idx int, fieldTy Type) Value {
 	var gep string
-	if isRecordView(objVal.Ty) && !objVal.Ty.Nullable && idx < len(objVal.Ty.Fields) {
+	if isRecordView(objVal.Ty) && !objVal.Ty.Nullable() && idx < len(objVal.Ty.Fields) {
 		gep = e.emitRecordGep(objVal.Ref, objVal.Ty, idx, fieldTy, objVal.Ty.Fields[idx].Name)
 	} else {
 		gep = e.freshReg()
@@ -353,7 +353,7 @@ func (e *Emitter) loadFieldValue(objVal Value, idx int, fieldTy Type) Value {
 		// Its { i1, T } storage.
 		return e.loadScalarOrNullableField(gep, fieldTy)
 	}
-	if fieldTy.IsArray {
+	if fieldTy.IsArray() {
 		// Its header-pointer slot (TDD-00213 Stage 2).
 		return e.loadArrayFieldValue(gep, fieldTy)
 	}
@@ -431,16 +431,51 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
 	// TDD-00120: the raw body field is the dual-use curl buffer (also .body /
-	// .arrayBuffer()), with no length header. Hand text()/json() a length-prefixed
-	// copy (strlen-bounded, matching text()'s existing NUL semantics). A
-	// Request without a body has a null one: "".
+	// .arrayBuffer()), with no length header. text()/json() decode all
+	// bodyLength bytes as TextDecoder does: UTF-8, an invalid sequence as
+	// U+FFFD, a leading BOM dropped, an embedded NUL byte kept. A Request
+	// without a body has a null one: "".
 	e.ensureStrHeaderRuntime()
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, r))
 	src := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", src, isNull, e.internString(""), r))
+	lIdx, lTy, hasLen := objVal.Ty.FieldIndex("bodyLength")
+	if !hasLen || lTy.IR != "i64" {
+		rc := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", rc, src))
+		return Value{Ref: rc, Ty: fieldTy}, nil
+	}
+	lGep, raw, n := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lGep, objVal.Ty.StructIR(), objVal.Ref, lIdx))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", raw, lGep))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", n, isNull, raw))
+	// A UTF-8 BOM (EF BB BF) opening the body is not part of the text.
+	long3, b0, b1, b2 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, 3", long3, n))
+	p1, p2 := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 1", p1, src))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 2", p2, src))
+	safe0, safe1, safe2 := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe0, long3, src, e.internString("___")))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe1, long3, p1, e.internString("___")))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe2, long3, p2, e.internString("___")))
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b0, safe0))
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b1, safe1))
+	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b2, safe2))
+	c0, c1, c2, c01, bom := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, -17", c0, b0))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, -69", c1, b1))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, -65", c2, b2))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", c01, c0, c1))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", bom, c01, c2))
+	skip, from, cnt := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 3, i64 0", skip, bom))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", from, src, skip))
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", cnt, n, skip))
+	e.ensureBufferCodecs()
 	rc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", rc, src))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_utf8_str(ptr %s, i64 %s)", rc, from, cnt))
 	return Value{Ref: rc, Ty: fieldTy}, nil
 }
 
@@ -474,12 +509,12 @@ func (e *Emitter) emitResponseDriveToDone(objVal Value) {
 	bIdx, _, _ := objVal.Ty.FieldIndex("body")
 	bGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", bGep, structIR, objVal.Ref, bIdx))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", body, bGep))
+	e.heapStore("ptr", body, bGep, 8)
 	lIdx, _, _ := objVal.Ty.FieldIndex("bodyLength")
 	lGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lGep, structIR, objVal.Ref, lIdx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bodyLen, lGep))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", pGep))
+	e.heapStore("i64", bodyLen, lGep, 8)
+	e.heapStore("ptr", "null", pGep, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 }
@@ -509,11 +544,11 @@ func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, err
 
 	e.ensureMalloc()
 	hdrReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", hdrReg))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenVal.Ref, hdrReg))
+	e.emitArrayBufferHeaderAlloc(hdrReg, 16, false, "malloc")
+	e.heapStore("i64", lenVal.Ref, hdrReg, 8)
 	dataSlot := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bodyVal.Ref, dataSlot))
+	e.heapStore("ptr", bodyVal.Ref, dataSlot, 8)
 
 	return Value{Ref: hdrReg, Ty: ArrayBufferType()}, nil
 }
@@ -528,10 +563,9 @@ func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, err
 // buffered synchronously — emitResponseBody/emitResponseArrayBuffer drive the
 // parked fetch to done — then wrapped in an already-settled task promise, so
 // the observable return type matches WHATWG (`await r.json()`,
-// `r.json().then(...)`, `Promise.all([r.json(), ...])`). The declaration-context
-// json() fast path (emitResponseJSON via emitDeclJSONProjection) still parses
-// straight into the declared type without the promise box — `await` there is
-// stripped before dispatch, so `const p: T = await r.json()` is unaffected.
+// `r.json().then(...)`, `Promise.all([r.json(), ...])`). A declaration's
+// `await r.json()` (emitDeclJSONProjection) parses the body into the
+// declared type through jsonTarget.
 func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jsonTarget ...Type) (Value, error) {
 	var target *Type
 	if len(jsonTarget) == 1 && method == "json" {
@@ -548,23 +582,23 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 
 	// env = { ptr resp, ptr promise }
 	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", env))
+	e.heapMallocInto(env, "16")
 	e0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objVal.Ref, e0))
+	e.heapStore("ptr", objVal.Ref, e0, 8)
 	e1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", q, e1))
+	e.heapStore("ptr", q, e1, 8)
 
 	// closure = { runner, env }
 	clo := e.freshReg()
 	c0 := e.freshReg()
 	c1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 16)", clo))
+	e.heapMallocInto(clo, "16")
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", c0, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", runner, c0))
+	e.heapStore("ptr", runner, c0, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", c1, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, c1))
+	e.heapStore("ptr", env, c1, 8)
 
 	// Register keyed on the Response's in-flight fetch handle. If it's already
 	// done (or null — body previously driven), register settles synchronously.
@@ -606,7 +640,7 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %d", bit, isNB, responseBodyUsed))
 		f2 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = or i64 %s, %s", f2, f, bit))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", f2, fGep))
+		e.heapStore("i64", f2, fGep, 8)
 	}
 	// A `.body` stream already handed out is now the consumed one (a stream
 	// body's is locked by the read itself).
@@ -622,7 +656,7 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 		e.emitLockStreamIf(notStream, sv.Ref)
 	}
 	// A stream body (a constructed Response's) is read to its end first.
-	e.respCollectCalled = e.respCollectCalled || objVal.Ty.IsResponse
+	e.respCollectCalled = e.respCollectCalled || objVal.Ty.IsResponse()
 	fIdx, _, _ := objVal.Ty.FieldIndex("__kml_bodyflags")
 	flags := e.loadFieldValue(objVal, fIdx, TypeI64)
 	sb := e.freshReg()
@@ -632,7 +666,7 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	collectL, regL, joinL := e.freshLabel("resp.collect"), e.freshLabel("resp.register"), e.freshLabel("resp.bodyprom")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStream, collectL, regL))
 	e.emitLabel(collectL)
-	if objVal.Ty.IsResponse { // a Request's body is never a stream
+	if objVal.Ty.IsResponse() { // a Request's body is never a stream
 		e.emitInstr(fmt.Sprintf("call void @__kml_resp_collect(ptr %s, ptr %s, ptr %s)", objVal.Ref, clo, q))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
@@ -714,29 +748,17 @@ func (e *Emitter) ensureZeroCell() {
 // — rejected. Returns the runner name and the promise's inner value type.
 func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos, jsonTarget *Type) (string, Type, error) {
 	respTy := objTy // a Response or a Request
-	var innerTy Type
-	switch method {
-	case "text":
-		_, bodyTy, _ := respTy.FieldIndex("body")
-		innerTy = bodyTy
-	case "json":
-		innerTy = TypeAny
-		if jsonTarget != nil {
-			// `res.json() as T`: the same lazy promise, parsed into T when the body
-			// completes — never a synchronous drive of the transfer (TDD-00223).
-			innerTy = *jsonTarget
-		}
-	case "arrayBuffer":
-		innerTy = ArrayBufferType()
-	default:
+	reader, ok := bodyReaders[method]
+	if !ok {
 		return "", Type{}, fmt.Errorf("%d:%d: unknown Response method '%s'", pos.Line, pos.Col, method)
 	}
+	innerTy := reader.inner(respTy, jsonTarget)
 
 	if e.fetchBodyPromRunner == nil {
 		e.fetchBodyPromRunner = map[string]string{}
 	}
 	key := method
-	if objTy.IsFetchRequest {
+	if objTy.IsFetchRequest() {
 		key += "_req"
 	}
 	name := "@__kml_fetch_bodyprom_run_" + key
@@ -752,14 +774,7 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 	}
 	e.ensureExceptionHelpers()
 
-	savedAllocas := e.allocas
-	savedBody := e.body
-	savedRegCtr := e.regCtr
-	savedBlockDone := e.blockDone
-	e.allocas = strings.Builder{}
-	e.body = strings.Builder{}
-	e.regCtr = 0
-	e.blockDone = false
+	restoreBuilder := e.beginThunkEmit()
 
 	build := func() error {
 		respP := e.freshReg()
@@ -772,42 +787,23 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, qP))
 		objVal := Value{Ref: resp, Ty: respTy}
 
-		jb := e.freshReg()
-		sj := e.freshReg()
-		thr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_push_jmpbuf()", jb))
-		e.emitInstr(fmt.Sprintf("%s = %s", sj, e.setjmpCall(jb)))
-		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", thr, sj))
 		tryL := e.freshLabel("fbp.try")
 		catchL := e.freshLabel("fbp.catch")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", thr, catchL, tryL))
+		e.excEnter(catchL, tryL)
 
 		e.emitLabel(tryL)
-		var val Value
-		var err error
-		switch method {
-		case "text":
-			val, err = e.emitResponseBody(objVal, pos)
-		case "json":
-			body, berr := e.emitResponseBody(objVal, pos)
-			if berr != nil {
-				return berr
-			}
-			val, err = e.emitJSONParseValue(body, innerTy, pos)
-		case "arrayBuffer":
-			val, err = e.emitResponseArrayBuffer(objVal, pos)
-		}
+		val, err := reader.read(e, objVal, innerTy, pos)
 		if err != nil {
 			return err
 		}
-		e.emitInstr("call void @__kml_pop_jmpbuf()")
+		e.excLeave()
 		if jsonTarget != nil {
 			e.storePromiseValue(q, val) // any T, arrays included (two value words)
 		} else {
 			bits := e.promiseBitsOf(val)
 			vSlot := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", vSlot, promiseStructIR, q))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bits, vSlot))
+			e.heapStore("i64", bits, vSlot, 8)
 		}
 		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
 		e.emitTerminator("ret void")
@@ -820,34 +816,10 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 	}
 	buildErr := build()
 	if buildErr == nil {
-		e.functions.WriteString(fmt.Sprintf("\ndefine void %s(ptr %%env) {\nentry:\n", name))
-		e.functions.WriteString(e.allocas.String())
-		e.functions.WriteString(e.body.String())
-		e.functions.WriteString("}\n")
+		e.writeFunc(fmt.Sprintf("void %s(ptr %%env)", name), e.allocas.String()+e.body.String())
 	}
-	e.allocas = savedAllocas
-	e.body = savedBody
-	e.regCtr = savedRegCtr
-	e.blockDone = savedBlockDone
+	restoreBuilder()
 	return name, innerTy, buildErr
-}
-
-// emitResponseJSON is response.json()'s declaration-context analogue of
-// JSON.parse's own special-casing (emit_call.go/emit_objects.go): evaluates
-// objExpr (the Response receiver, any expression — a variable, a chained
-// await, etc.), extracts its body, and parses it into targetTy so
-// `const p: Point = response.json()` deserializes into the declared type
-// instead of defaulting to a plain string.
-func (e *Emitter) emitResponseJSON(objExpr ast.Expression, targetTy Type, pos ast.Pos) (Value, error) {
-	objVal, err := e.emitExpr(objExpr)
-	if err != nil {
-		return Value{}, err
-	}
-	bodyVal, err := e.emitResponseBody(objVal, pos)
-	if err != nil {
-		return Value{}, err
-	}
-	return e.emitJSONParseValue(bodyVal, targetTy, pos)
 }
 
 // The Body mixin's readers on a Response or a fetch Request, reached
@@ -871,9 +843,59 @@ func init() {
 				return e.emitResponseCall(objVal, name, ex.GetPos())
 			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
-				t, _ := e.inferMethodNameType(ex, ex.Callee.(*ast.MemberExpression))
+				if !hasBodyMixin(e.inferExprType(ex.Callee.(*ast.MemberExpression).Object)) {
+					return Type{}
+				}
+				t, _ := e.intrinsicMethodType(bodyMethodTypes, ex)
 				return t
 			},
 		}
+	}
+}
+
+// bodyReader is a Body mixin reader (text, json, arrayBuffer): the value its
+// promise settles to, and how that value is read from a completed body.
+type bodyReader struct {
+	inner func(respTy Type, jsonTarget *Type) Type
+	read  func(e *Emitter, objVal Value, innerTy Type, pos ast.Pos) (Value, error)
+}
+
+var bodyReaders map[string]bodyReader
+
+func init() {
+	bodyReaders = map[string]bodyReader{
+		"text": {
+			inner: func(respTy Type, _ *Type) Type {
+				_, bodyTy, _ := respTy.FieldIndex("body")
+				return bodyTy
+			},
+			read: func(e *Emitter, objVal Value, _ Type, pos ast.Pos) (Value, error) {
+				return e.emitResponseBody(objVal, pos)
+			},
+		},
+		"json": {
+			// `res.json() as T`: the same lazy promise, parsed into T when the
+			// body completes — never a synchronous drive of the transfer
+			// (TDD-00223).
+			inner: func(_ Type, jsonTarget *Type) Type {
+				if jsonTarget != nil {
+					return *jsonTarget
+				}
+				return TypeAny
+			},
+			read: func(e *Emitter, objVal Value, innerTy Type, pos ast.Pos) (Value, error) {
+				body, err := e.emitResponseBody(objVal, pos)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitJSONParseValue(body, innerTy, pos)
+			},
+		},
+		"arrayBuffer": {
+			inner: func(Type, *Type) Type { return ArrayBufferType() },
+			read: func(e *Emitter, objVal Value, _ Type, pos ast.Pos) (Value, error) {
+				return e.emitResponseArrayBuffer(objVal, pos)
+			},
+		},
 	}
 }

@@ -41,6 +41,7 @@ func (e *Emitter) emitRecordForeign(obj string, t Type) string {
 	e.emitLabel(haveL)
 	hdr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, hslot))
+	hdr = e.headerIdentity(hdr)
 	m := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", m, hdr, kmlHdrMagicMask|hostTypeIDFlag))
 	magic := e.freshReg()
@@ -49,6 +50,46 @@ func (e *Emitter) emitRecordForeign(obj string, t Type) string {
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", other, hdr, id))
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", r, magic, other))
+	// A bag is foreign too (its properties are read by name).
+	lo, bag, out := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 4294967295", lo, hdr))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", bag, lo, dynObjMagic))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", out, r, bag))
+	return out
+}
+
+// dynObjMagic is a dynamic bag's header magic, its low 32 bits
+// (runtime_dynobj.go).
+const dynObjMagic = 0x444C4D4B
+
+// emitIsBagPtr is an i1: the non-null pointer obj is a dynamic bag (its
+// header's low 32 bits the bag magic). A structural type's value may be
+// one: an `any` bag converted to it is the bag itself (emitAnyToLayout).
+func (e *Emitter) emitIsBagPtr(obj string) string {
+	h, lo, r := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, obj))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 4294967295", lo, h))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, lo, dynObjMagic))
+	return r
+}
+
+// emitBoxRecordPtr boxes obj, a value of a structural type, as what it is:
+// a bag as a dynamic object, anything else (null included) as a static
+// object.
+func (e *Emitter) emitBoxRecordPtr(obj string) string {
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbTagPtr(obj, kmlTagObject), slot))
+	chkL, bagL, doneL := e.freshLabel("recbox.chk"), e.freshLabel("recbox.bag"), e.freshLabel("recbox.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(obj), doneL, chkL))
+	e.emitLabel(chkL)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitIsBagPtr(obj), bagL, doneL))
+	e.emitLabel(bagL)
+	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbTagPtr(obj, kmlTagDynObject), slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, slot))
 	return r
 }
 
@@ -57,7 +98,7 @@ func recordSlotIR(t Type) string {
 	if isNullableScalar(t) {
 		return nullableScalarStorageIR(t)
 	}
-	if t.IsArray {
+	if t.IsArray() {
 		return "ptr"
 	}
 	return StructFieldIR(t)
@@ -155,6 +196,16 @@ func (e *Emitter) noteRecordFn(kind string, t, fieldTy Type, name string) string
 // with no rows, a foreign header is one no table knows, and the routine
 // throws as the dynamic path does, without pulling the table in.
 func (e *Emitter) emitRecordFnsFinalize() {
+	// A class instance can reach a structural slot along a path that does
+	// not convert it (an initializer stored as is): every class with a
+	// member a view reads has a layout row.
+	for _, r := range e.recordFnList {
+		for _, info := range e.classes {
+			if classHasMember(info, r.member) {
+				e.noteBoxedLayout(info.Ty)
+			}
+		}
+	}
 	rows := len(e.boxedLayouts) > 0
 	for _, r := range e.recordFnList {
 		stable := e.stableHelperBody(r.id)
@@ -163,30 +214,30 @@ func (e *Emitter) emitRecordFnsFinalize() {
 		case !rows:
 			e.emitThrowTypeError("dynamic property access on a statically-typed value is not supported")
 		case r.kind == "read":
-			box := Value{Ref: e.emitNbTagPtr("%obj", kmlTagObject), Ty: TypeAny}
+			box := Value{Ref: e.emitBoxRecordPtr("%obj"), Ty: TypeAny}
 			v, err := e.emitDynAnyMemberGetNamed(box, e.internString(r.member), r.member, ast.Pos{})
 			if err == nil {
 				// A method is read to be called with the object as `this`; a
 				// function typed with its own `this: T` takes the caller's.
-				if (r.fieldTy.IsFunc && !r.fieldTy.FuncThis) || (r.fieldTy.IsDynamic && isNullableFunc(r.fieldTy)) {
+				if (r.fieldTy.IsFunc() && !r.fieldTy.FuncThis) || (r.fieldTy.IsDynamic() && isNullableFunc(r.fieldTy)) {
 					v = e.emitBindDynMethod(v, box)
 				}
 				if isStringDict(r.fieldTy) {
 					v = e.emitBoxedObjToDict(v, r.fieldTy)
 				} else {
-					v = e.coerce(v, r.fieldTy)
+					v = e.convert(v, r.fieldTy)
 				}
 				e.storeScalarOrNullableField("%slot", r.fieldTy, v)
 			}
 		default:
 			var v Value
-			if r.fieldTy.IsArray {
+			if r.fieldTy.IsArray() {
 				v = e.loadArrayFieldValue("%slot", r.fieldTy)
 			} else {
 				v = e.loadScalarOrNullableField("%slot", r.fieldTy)
 			}
 			if boxed, err := e.emitBoxValue(v); err == nil {
-				box := Value{Ref: e.emitNbTagPtr("%obj", kmlTagObject), Ty: TypeAny}
+				box := Value{Ref: e.emitBoxRecordPtr("%obj"), Ty: TypeAny}
 				_, _ = e.emitDynAnyMemberSetNamed(box, e.internString(r.member), r.member, boxed, ast.Pos{})
 			}
 		}
@@ -194,7 +245,7 @@ func (e *Emitter) emitRecordFnsFinalize() {
 		body := e.allocas.String() + e.body.String()
 		restore()
 		stable()
-		e.functions.WriteString(fmt.Sprintf("\ndefine internal void %s(ptr %%obj, ptr %%slot) {\nentry:\n%s}\n", r.name, body))
+		e.writeFunc(fmt.Sprintf("internal void %s(ptr %%obj, ptr %%slot)", r.name), body)
 	}
 	e.recordFnList = nil
 }
@@ -202,7 +253,7 @@ func (e *Emitter) emitRecordFnsFinalize() {
 // isNullableFunc reports an optional method's `F | undefined`.
 func isNullableFunc(t Type) bool {
 	for _, m := range t.UnionMembers {
-		if m.IsFunc {
+		if m.IsFunc() {
 			return true
 		}
 	}
@@ -224,13 +275,13 @@ func (e *Emitter) emitBindDynMethod(fn, this Value) Value {
 	e.emitLabel(bindL)
 	e.ensureDynBound()
 	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", env))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", fn.Ref, env))
+	e.heapMallocInto(env, "24")
+	e.heapStore("i64", fn.Ref, env, 8)
 	ts, cs := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 1", ts, env))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", this.Ref, ts))
+	e.heapStore("i64", this.Ref, ts, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 2", cs, env))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", cs))
+	e.heapStore("i64", "0", cs, 8)
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, fn.Ref))
 	trec := e.emitIntToPtr(pay)
@@ -238,13 +289,13 @@ func (e *Emitter) emitBindDynMethod(fn, this Value) Value {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", tarSlot, trec))
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", ar, tarSlot))
 	rec := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", rec))
-	e.emitInstr(fmt.Sprintf("store ptr @__kml_dyn_bound, ptr %s, align 8", rec))
+	e.heapMallocInto(rec, "24")
+	e.heapStore("ptr", "@__kml_dyn_bound", rec, 8)
 	es, as := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", es, rec))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, es))
+	e.heapStore("ptr", env, es, 8)
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", as, rec))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", ar, as))
+	e.heapStore("i64", ar, as, 8)
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbTagPtr(rec, kmlTagDynFunc), out))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -257,7 +308,7 @@ func (e *Emitter) emitBindDynMethod(fn, this Value) Value {
 // slot of type target: t's layout row (and its subclasses') is generated,
 // unless t has target's own header (a plain object of the same layout).
 func (e *Emitter) noteRecordViewSource(t, target Type) {
-	if !t.IsClass {
+	if !t.IsClass() {
 		if (plainRecordType(t) || emptyRecordType(t)) && e.objHeaderWord(t) != e.objHeaderWord(target) {
 			e.noteBoxedLayout(t)
 		}
@@ -269,6 +320,20 @@ func (e *Emitter) noteRecordViewSource(t, target Type) {
 			e.noteBoxedLayout(info.Ty)
 		}
 	}
+}
+
+// classHasMember reports whether a class's instance has member name: a
+// field, a method or an accessor.
+func classHasMember(info ClassInfo, name string) bool {
+	if _, _, ok := info.Ty.FieldIndex(name); ok {
+		return true
+	}
+	for _, k := range []string{name, accessorMethodName("get", name), accessorMethodName("set", name)} {
+		if _, ok := info.MethodSigs[k]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 // classExtends reports whether class name derives from base.
@@ -390,25 +455,15 @@ rej:
 }`, e.promiseBoxHeader(), wt, promiseStructIR, wt, promiseStructIR, promiseStructIR, kmlTagError))
 }
 
-// emitObjExtensibleFinalize defines @__kml_obj_extensible(obj): whether a
-// property may be added to a static object (not frozen, sealed or
-// prevented from extensions).
+// emitObjExtensibleFinalize declares @__kml_obj_extensible(obj)
+// (collections.c): whether a property may be added to a static object
+// (not frozen, sealed or prevented from extensions).
 func (e *Emitter) emitObjExtensibleFinalize() {
 	if !e.usedObjExtensible {
 		return
 	}
-	if !e.usedFrozenSet {
-		e.emitGlobal("define internal i1 @__kml_obj_extensible(ptr %o) {\nentry:\n  ret i1 true\n}")
-		return
-	}
-	e.emitGlobal(`define internal i1 @__kml_obj_extensible(ptr %o) {
-entry:
-  %set = call ptr @__kml_frozen_set_get()
-  %k = ptrtoint ptr %o to i64
-  %lv = call i64 @__kml_map_num_get(ptr %set, i64 %k)
-  %ok = icmp eq i64 %lv, 0
-  ret i1 %ok
-}`)
+	e.usedCollections = true
+	e.emitGlobal("declare i1 @__kml_obj_extensible(ptr)")
 }
 
 // ensureShapeKeysArray emits @__kml_shape_keys_array(obj): a string[] of a
@@ -448,20 +503,17 @@ func (e *Emitter) emitRecordSplit(v Value, resTy Type, static func(Value) (Value
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, foreign, has))
 	foreign = either
 	slotIR := resTy.IR
-	if resTy.IsArray {
-		slotIR = "{ptr, i64}"
-	}
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, slotIR))
 	dynL, statL, doneL := e.freshLabel("recsplit.dyn"), e.freshLabel("recsplit.static"), e.freshLabel("recsplit.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", foreign, dynL, statL))
 	e.emitLabel(dynL)
 	e.noteBoxedLayout(v.Ty)
-	d, err := dyn(Value{Ref: e.emitNbTagPtr(v.Ref, kmlTagObject), Ty: TypeAny})
+	d, err := dyn(Value{Ref: e.emitBoxRecordPtr(v.Ref), Ty: TypeAny})
 	if err != nil {
 		return Value{}, err
 	}
-	d = e.coerce(d, resTy)
+	d = e.convert(d, resTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", slotIR, d.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(statL)
@@ -469,7 +521,7 @@ func (e *Emitter) emitRecordSplit(v Value, resTy Type, static func(Value) (Value
 	if err != nil {
 		return Value{}, err
 	}
-	st = e.coerce(st, resTy)
+	st = e.convert(st, resTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", slotIR, st.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -494,7 +546,7 @@ func (e *Emitter) emitShapeValuesArray(box Value, withKeys bool) Value {
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, n))
 	data := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", data, bytes))
+	e.heapMallocInto(data, bytes)
 	found := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", found))
 	idx := e.freshReg()
@@ -528,15 +580,15 @@ func (e *Emitter) emitShapeValuesArray(box Value, withKeys bool) Value {
 	if withKeys {
 		entryTy := TupleType([]Type{TypePtr, TypeAny})
 		ent := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %d)", ent, entryTy.StructSize()))
+		e.heapMallocInto(ent, fmt.Sprint(entryTy.StructSize()))
 		ks, vs := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", ks, entryTy.StructIR(), ent))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", k, ks))
+		e.heapStore("ptr", k, ks, 8)
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vs, entryTy.StructIR(), ent))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, vs))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ent, slot))
+		e.heapStore("i64", v, vs, 8)
+		e.heapStore("ptr", ent, slot, 8)
 	} else {
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, slot))
+		e.heapStore("i64", v, slot, 8)
 	}
 	w1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", w1, w))
@@ -550,9 +602,7 @@ func (e *Emitter) emitShapeValuesArray(box Value, withKeys bool) Value {
 	e.emitLabel(endL)
 	cnt := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cnt, wrote))
-	r0, r1 := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, data))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, cnt))
+	r1 := e.newArrayHeader(data, cnt)
 	ty := ArrayOf(TypeAny)
 	if withKeys {
 		ty = ArrayOf(TupleType([]Type{TypePtr, TypeAny}))
@@ -570,8 +620,8 @@ func (e *Emitter) emitShapeValuesArray(box Value, withKeys bool) Value {
 
 // extraCandidate reports a type whose values may carry added properties.
 func extraCandidate(t Type) bool {
-	return hasObjHeader(t) && !t.Nullable && !t.IsError && !t.IsTuple &&
-		(t.IsClass || plainRecordType(t) || emptyRecordType(t))
+	return hasObjHeader(t) && !t.Nullable() && !t.IsError() && !t.IsTuple() &&
+		(t.IsClass() || plainRecordType(t) || emptyRecordType(t))
 }
 
 // emitExtraSplit runs static(v) when the object has no added properties
@@ -586,7 +636,7 @@ func (e *Emitter) emitExtraSplit(v Value, resTy Type, static func(Value) (Value,
 	// A class with subclasses: an instance of one is read at its own
 	// layout. Library code is the same text in every program, so it never
 	// checks (whether a class has subclasses depends on the program).
-	if info, ok := e.classes[v.Ty.ClassName]; ok && v.Ty.IsClass && info.TagID != 0 && len(info.Descendants) > 0 && e.inLib == "" {
+	if info, ok := e.classes[v.Ty.ClassName]; ok && v.Ty.IsClass() && info.TagID != 0 && len(info.Descendants) > 0 && e.inLib == "" {
 		e.usedObjSubclassSplit = true
 		hdr, other, any := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, v.Ref))
@@ -597,16 +647,20 @@ func (e *Emitter) emitExtraSplit(v Value, resTy Type, static func(Value) (Value,
 		has = any
 	}
 	slotIR := resTy.IR
-	if resTy.IsArray {
-		slotIR = "{ptr, i64}"
-	}
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, slotIR))
 	dynL, statL, doneL := e.freshLabel("extra.dyn"), e.freshLabel("extra.static"), e.freshLabel("extra.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, dynL, statL))
 	e.emitLabel(dynL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = %s", r, hookCall(v.Ref)))
+	if resTy.IsArray() {
+		// The hook returns the {data, len} aggregate: a header holds it.
+		agg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = %s", agg, hookCall(v.Ref)))
+		r = e.arrayFromAgg(agg, resTy).Ref
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = %s", r, hookCall(v.Ref)))
+	}
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", slotIR, r, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(statL)
@@ -614,7 +668,7 @@ func (e *Emitter) emitExtraSplit(v Value, resTy Type, static func(Value) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	st = e.coerce(st, resTy)
+	st = e.convert(st, resTy)
 	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", slotIR, st.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -693,7 +747,7 @@ entry:
 // isStringDict reports a string-keyed dictionary type (`Record<string, V>`,
 // `{ [k: string]: V }`).
 func isStringDict(t Type) bool {
-	return t.IsDynamicObject && t.IsMap && t.MapKey != nil && isStringTy(*t.MapKey)
+	return t.IsDynamicObject() && t.IsMap() && t.MapKey != nil && isStringTy(*t.MapKey)
 }
 
 // emitBoxedObjToDict converts a boxed value to the dictionary type target:
@@ -754,8 +808,8 @@ func (e *Emitter) emitBoxedObjToDict(box Value, target Type) Value {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, keepL, nextL))
 	e.emitLabel(keepL)
 	ev := Value{Ref: fv, Ty: TypeAny}
-	if !valTy.IsDynamic {
-		ev = e.coerce(ev, valTy)
+	if !valTy.IsDynamic() {
+		ev = e.convert(ev, valTy)
 	}
 	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", m, k, e.valueToMapVal(ev, valTy)))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
@@ -797,8 +851,8 @@ func (e *Emitter) emitBoxedObjToDict(box Value, target Type) Value {
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bk, kslot))
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", bv, bag, bk))
 	bev := Value{Ref: bv, Ty: TypeAny}
-	if !valTy.IsDynamic {
-		bev = e.coerce(bev, valTy)
+	if !valTy.IsDynamic() {
+		bev = e.convert(bev, valTy)
 	}
 	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", bm, bk, e.valueToMapVal(bev, valTy)))
 	bnx := e.freshReg()

@@ -381,7 +381,7 @@ static int kml_der_put(kml_der *d, const unsigned char *p, size_t n) {
         size_t nc = (d->cap ? d->cap * 2 : 256);
         unsigned char *nb;
         while (nc < d->len + n) nc *= 2;
-        nb = (unsigned char *)realloc(d->buf, nc);
+        nb = (unsigned char *)realloc(d->buf, nc); /* scratch */
         if (!nb) return 0;
         d->buf = nb;
         d->cap = nc;
@@ -416,7 +416,7 @@ static int kml_der_hdr(kml_der *d, unsigned char tag, size_t len) {
 /* tag + length + inner's bytes; inner is freed. */
 static int kncg_der_wrap(kml_der *d, unsigned char tag, kml_der *inner) {
     int ok = kml_der_hdr(d, tag, inner->len) && kml_der_put(d, inner->buf, inner->len);
-    free(inner->buf);
+    free(inner->buf); /* scratch */
     memset(inner, 0, sizeof *inner);
     return ok;
 }
@@ -671,7 +671,7 @@ static void kncg_key_free(kncg_key *k) {
     for (int i = 0; i < 8; i++) {
         if (k->rsa[i]) {
             memset(k->rsa[i], 0, k->rsalen[i]);
-            free(k->rsa[i]);
+            free(k->rsa[i]); /* scratch */
         }
     }
     memset(k, 0, sizeof *k);
@@ -679,8 +679,8 @@ static void kncg_key_free(kncg_key *k) {
 
 static void kncg_rsa_set(kncg_key *k, int i, const unsigned char *p, size_t n) {
     while (n > 0 && p[0] == 0) { p++; n--; }
-    free(k->rsa[i]);
-    k->rsa[i] = (unsigned char *)malloc(n ? n : 1);
+    free(k->rsa[i]); /* scratch */
+    k->rsa[i] = (unsigned char *)malloc(n ? n : 1); /* scratch */
     if (n) memcpy(k->rsa[i], p, n);
     k->rsalen[i] = n;
 }
@@ -701,7 +701,7 @@ static BCRYPT_KEY_HANDLE kncg_rsa_handle(const kncg_key *k, int priv) {
     if (k->type != KK_RSA || !nl || !el) return NULL;
     if (priv && (!k->priv || !pl || !ql)) return NULL;
     size_t total = sizeof(BCRYPT_RSAKEY_BLOB) + el + nl + (priv ? pl + ql : 0);
-    unsigned char *blob = (unsigned char *)calloc(1, total);
+    unsigned char *blob = (unsigned char *)calloc(1, total); /* scratch */
     if (!blob) return NULL;
     BCRYPT_RSAKEY_BLOB *hd = (BCRYPT_RSAKEY_BLOB *)blob;
     hd->Magic = priv ? BCRYPT_RSAPRIVATE_MAGIC : BCRYPT_RSAPUBLIC_MAGIC;
@@ -722,7 +722,7 @@ static BCRYPT_KEY_HANDLE kncg_rsa_handle(const kncg_key *k, int priv) {
                                             &h, blob, (ULONG)total, 0)))
         h = NULL;
     memset(blob, 0, total);
-    free(blob);
+    free(blob); /* scratch */
     return h;
 }
 
@@ -852,7 +852,7 @@ static int kncg_rsa_pkcs1(const kncg_key *k, int priv, kml_der *out) {
     } else {
         ok = kncg_der_uint(&in, k->rsa[KR_N], k->rsalen[KR_N]) && kncg_der_uint(&in, k->rsa[KR_E], k->rsalen[KR_E]);
     }
-    if (!ok) { free(in.buf); return 0; }
+    if (!ok) { free(in.buf); return 0; } /* scratch */
     return kncg_der_wrap(out, 0x30, &in);
 }
 
@@ -870,7 +870,7 @@ static int kncg_algid(const kncg_key *k, kml_der *out) {
     } else {
         ok = kml_der_put(&in, k->type == KK_ED25519 ? kncg_oid_ed25519 : kncg_oid_x25519, 5);
     }
-    if (!ok) { free(in.buf); return 0; }
+    if (!ok) { free(in.buf); return 0; } /* scratch */
     return kncg_der_wrap(out, 0x30, &in);
 }
 
@@ -889,9 +889,9 @@ static int kncg_ec_sec1(const kncg_key *k, int withParams, kml_der *out) {
     kncg_ec_encode(k->curve, k->x, k->y, 4, pt);
     ok = ok && kml_der_put(&bit, &zero, 1) && kml_der_put(&bit, pt, 1 + 2 * cb) && kncg_der_wrap(&ctx, 0x03, &bit) &&
          kncg_der_wrap(&in, 0xa1, &ctx);
-    free(ctx.buf);
-    free(bit.buf);
-    if (!ok) { free(in.buf); return 0; }
+    free(ctx.buf); /* scratch */
+    free(bit.buf); /* scratch */
+    if (!ok) { free(in.buf); return 0; } /* scratch */
     return kncg_der_wrap(out, 0x30, &in);
 }
 
@@ -912,8 +912,8 @@ static int kncg_spki(const kncg_key *k, kml_der *out) {
         }
     }
     ok = ok && kncg_der_wrap(&in, 0x03, &bit);
-    free(bit.buf);
-    if (!ok) { free(in.buf); return 0; }
+    free(bit.buf); /* scratch */
+    if (!ok) { free(in.buf); return 0; } /* scratch */
     return kncg_der_wrap(out, 0x30, &in);
 }
 
@@ -932,8 +932,8 @@ static int kncg_pkcs8(const kncg_key *k, kml_der *out) {
         }
     }
     ok = ok && kncg_der_wrap(&in, 0x04, &body);
-    free(body.buf);
-    if (!ok) { free(in.buf); return 0; }
+    free(body.buf); /* scratch */
+    if (!ok) { free(in.buf); return 0; } /* scratch */
     return kncg_der_wrap(out, 0x30, &in);
 }
 
@@ -1246,11 +1246,11 @@ static int kncg_gen_rsa_key(ll bits, kncg_key *k) {
     if (!BCRYPT_SUCCESS(BCryptGenerateKeyPair(kncg_alg_rsa, &h, (ULONG)bits, 0))) return 0;
     if (BCRYPT_SUCCESS(BCryptFinalizeKeyPair(h, 0)) &&
         BCRYPT_SUCCESS(BCryptExportKey(h, NULL, BCRYPT_RSAFULLPRIVATE_BLOB, NULL, 0, &n, 0))) {
-        unsigned char *blob = (unsigned char *)malloc(n);
+        unsigned char *blob = (unsigned char *)malloc(n); /* scratch */
         if (blob && BCRYPT_SUCCESS(BCryptExportKey(h, NULL, BCRYPT_RSAFULLPRIVATE_BLOB, blob, n, &n, 0)))
             ok = kncg_rsa_from_full(blob, n, k);
         if (blob) memset(blob, 0, n);
-        free(blob);
+        free(blob); /* scratch */
     }
     BCryptDestroyKey(h);
     return ok;
@@ -1286,8 +1286,8 @@ static ll kncg_key_pair_der(const kncg_key *k, unsigned char **pkcs8, long long 
                             long long *spkiLen) {
     kml_der a = {0}, b = {0};
     if (!kncg_pkcs8(k, &a) || !kncg_spki(k, &b)) {
-        free(a.buf);
-        free(b.buf);
+        free(a.buf); /* scratch */
+        free(b.buf); /* scratch */
         return -1;
     }
     *pkcs8 = a.buf;
@@ -1386,7 +1386,7 @@ static long long kncg_alloc(void) {
     for (long long i = 0; i < kncg_cap; i++)
         if (kncg_tab[i].kind == KNCG_FREE) return i;
     long long ncap = kncg_cap ? kncg_cap * 2 : 16;
-    kncg_handle *t = (kncg_handle *)realloc(kncg_tab, (size_t)ncap * sizeof *t);
+    kncg_handle *t = (kncg_handle *)realloc(kncg_tab, (size_t)ncap * sizeof *t); /* scratch */
     if (!t) return -1;
     memset(t + kncg_cap, 0, (size_t)(ncap - kncg_cap) * sizeof *t);
     long long id = kncg_cap;
@@ -1407,7 +1407,7 @@ static void kncg_release(kncg_handle *h) {
     if (h->cipher) {
         if (h->cipher->k) BCryptDestroyKey(h->cipher->k);
         memset(h->cipher, 0, sizeof *h->cipher);
-        free(h->cipher);
+        free(h->cipher); /* scratch */
     }
     memset(h, 0, sizeof *h);
 }
@@ -1521,12 +1521,12 @@ static void kncg_rand_work(void *job, long long *err, double *res) {
     kncg_rand_job *j = (kncg_rand_job *)job;
     *err = (j->len == 0 || kncg_random(j->p, (size_t)j->len)) ? 0 : 1;
     *res = 0;
-    free(j);
+    free(j); /* scratch */
 }
 
 void __kml_native_crypto_random_fill_async(void *data, long long size, double offset, double length, void *inv, void *clo) {
     long long off = (long long)offset, len = (long long)length;
-    kncg_rand_job *j = (kncg_rand_job *)malloc(sizeof *j);
+    kncg_rand_job *j = (kncg_rand_job *)malloc(sizeof *j); /* scratch */
     if (off < 0 || len < 0 || off + len > size) len = 0, off = 0;
     j->p = (unsigned char *)data + off;
     j->len = len;
@@ -1684,16 +1684,16 @@ static long long kncg_scrypt(const unsigned char *pw, size_t pwlen, const unsign
     if (maxmem == 0) maxmem = 1024 * 1024 * 32;
     if (Blen + Vlen > maxmem) { kncg_set_err(KNCG_E_MEMLIMIT); return 1; }
     if (outlen == 0) return 0;
-    unsigned char *B = (unsigned char *)malloc((size_t)Blen);
-    uint32_t *V = (uint32_t *)malloc((size_t)(32 * r * N * 4));
-    uint32_t *XY = (uint32_t *)malloc((size_t)(64 * r * 4));
+    unsigned char *B = (unsigned char *)malloc((size_t)Blen); /* scratch */
+    uint32_t *V = (uint32_t *)malloc((size_t)(32 * r * N * 4)); /* scratch */
+    uint32_t *XY = (uint32_t *)malloc((size_t)(64 * r * 4)); /* scratch */
     long long rc = 1;
     if (B && V && XY && kncg_pbkdf2_run(KD_SHA256, pw, pwlen, salt, saltlen, 1, B, (size_t)Blen) == 0) {
         for (uint64_t i = 0; i < p; i++) kncg_romix(B + 128 * r * i, r, N, V, XY, XY + 32 * r);
         if (kncg_pbkdf2_run(KD_SHA256, pw, pwlen, B, (size_t)Blen, 1, out, outlen) == 0) rc = 0;
     }
     if (B) memset(B, 0, (size_t)Blen);
-    free(B); free(V); free(XY);
+    free(B); free(V); free(XY); /* scratch */
     return rc;
 }
 
@@ -1729,14 +1729,14 @@ static long long kncg_kdf_run(kncg_kdf *k) {
 }
 
 static unsigned char *kncg_dup(const void *p, long long n) {
-    unsigned char *d = (unsigned char *)malloc((size_t)(n > 0 ? n : 1));
+    unsigned char *d = (unsigned char *)malloc((size_t)(n > 0 ? n : 1)); /* scratch */
     if (n > 0) memcpy(d, p, (size_t)n);
     return d;
 }
 
 static kncg_kdf *kncg_kdf_new(double op, void *a, long long alen, void *b, long long blen, void *c, long long clen,
                               double n1, double n2, double n3, double n4, const char *digest, void *out, long long outlen) {
-    kncg_kdf *k = (kncg_kdf *)calloc(1, sizeof *k);
+    kncg_kdf *k = (kncg_kdf *)calloc(1, sizeof *k); /* scratch */
     k->op = (int)op;
     k->a = kncg_dup(a, alen); k->alen = alen;
     k->b = kncg_dup(b, blen); k->blen = blen;
@@ -1749,7 +1749,7 @@ static kncg_kdf *kncg_kdf_new(double op, void *a, long long alen, void *b, long 
 }
 
 static void kncg_kdf_free(kncg_kdf *k) {
-    free(k->a); free(k->b); free(k->c); free(k);
+    free(k->a); free(k->b); free(k->c); free(k); /* scratch */
 }
 
 /* 0 ok, 1 failed, 2 an unknown digest. */
@@ -1873,7 +1873,7 @@ double __kml_native_crypto_cipher_new(const char *alg, void *key, long long keyL
     if (mode == KC_ECB && ivLen != 0) return -3;
     if ((mode == KC_CBC || mode == KC_CTR) && ivLen != 16) return -3;
     if (mode == KC_GCM && ivLen <= 0) return -3;
-    kncg_cipher *c = (kncg_cipher *)calloc(1, sizeof *c);
+    kncg_cipher *c = (kncg_cipher *)calloc(1, sizeof *c); /* scratch */
     if (!c) return -1;
     c->mode = mode;
     c->encrypt = encrypt != 0;
@@ -1912,13 +1912,13 @@ double __kml_native_crypto_cipher_new(const char *alg, void *key, long long keyL
     }
     if (!ok) {
         if (c->k) BCryptDestroyKey(c->k);
-        free(c);
+        free(c); /* scratch */
         return -1;
     }
     long long id = kncg_alloc();
     if (id < 0) {
         BCryptDestroyKey(c->k);
-        free(c);
+        free(c); /* scratch */
         return -1;
     }
     kncg_tab[id].kind = KNCG_CIPHER;
@@ -2126,7 +2126,7 @@ static int kncg_b64val(char c) {
 
 /* base64url, no padding (JWK members); malloc'd. */
 static char *kncg_b64u_encode(const unsigned char *p, size_t n) {
-    char *out = (char *)malloc(n / 3 * 4 + 5);
+    char *out = (char *)malloc(n / 3 * 4 + 5); /* scratch */
     size_t o = 0;
     for (size_t i = 0; i < n; i += 3) {
         unsigned v = (unsigned)p[i] << 16 | (i + 1 < n ? (unsigned)p[i + 1] << 8 : 0) | (i + 2 < n ? p[i + 2] : 0);
@@ -2141,7 +2141,7 @@ static char *kncg_b64u_encode(const unsigned char *p, size_t n) {
 
 static unsigned char *kncg_b64u_decode(const char *s, size_t *outn) {
     size_t n = strlen(s);
-    unsigned char *out = (unsigned char *)malloc(n * 3 / 4 + 3);
+    unsigned char *out = (unsigned char *)malloc(n * 3 / 4 + 3); /* scratch */
     unsigned acc = 0;
     int bits = 0;
     size_t o = 0;
@@ -2149,7 +2149,7 @@ static unsigned char *kncg_b64u_decode(const char *s, size_t *outn) {
         if (s[i] == '=') break;
         int v = kncg_b64val(s[i]);
         if (v < 0) {
-            free(out);
+            free(out); /* scratch */
             return NULL;
         }
         acc = acc << 6 | (unsigned)v;
@@ -2193,7 +2193,7 @@ static unsigned char *kncg_pem_decode(const char *pem, char *label, size_t label
         dek[k] = 0;
         body = blank + 2;
     }
-    unsigned char *out = (unsigned char *)malloc((size_t)(end - body) + 1);
+    unsigned char *out = (unsigned char *)malloc((size_t)(end - body) + 1); /* scratch */
     size_t n = 0;
     unsigned acc = 0;
     int bits = 0;
@@ -2202,7 +2202,7 @@ static unsigned char *kncg_pem_decode(const char *pem, char *label, size_t label
         int v = (*p == '-' || *p == '_') ? -1 : kncg_b64val(*p);
         if (v < 0) {
             if (*p == '\n' || *p == '\r' || *p == ' ' || *p == '\t') continue;
-            free(out);
+            free(out); /* scratch */
             return NULL;
         }
         acc = acc << 6 | (unsigned)v;
@@ -2225,7 +2225,7 @@ static int kncg_cbc_decrypt(int des3, const unsigned char *key, size_t keylen, c
     unsigned char ivc[16];
     ULONG moved = 0;
     size_t bs = des3 ? 8 : 16;
-    unsigned char *buf = (unsigned char *)malloc(n + 16);
+    unsigned char *buf = (unsigned char *)malloc(n + 16); /* scratch */
     if (!buf) return 2;
     kncg_init();
     memcpy(ivc, iv, bs);
@@ -2237,14 +2237,14 @@ static int kncg_cbc_decrypt(int des3, const unsigned char *key, size_t keylen, c
              moved == n;
     if (k) BCryptDestroyKey(k);
     if (!ok) {
-        free(buf);
+        free(buf); /* scratch */
         return 1;
     }
     unsigned char pad = buf[n - 1];
     int bad = pad == 0 || pad > bs;
     for (size_t i = 0; !bad && i < pad; i++) bad = buf[n - 1 - i] != pad;
     if (bad) {
-        free(buf);
+        free(buf); /* scratch */
         return 1;
     }
     *out = buf;
@@ -2521,7 +2521,7 @@ static int kncg_decrypt_body(const char *dek, unsigned char **der, size_t *n, co
         if (rc == 1) kncg_set_err(KNCG_E_BAD_DECRYPT);
         return 0;
     }
-    free(*der);
+    free(*der); /* scratch */
     *der = plain;
     *n = plen;
     return 1;
@@ -2538,14 +2538,14 @@ static int kncg_parse_key(const char *pem, const unsigned char *pass, long long 
     if (!der) return 0;
     if (dek[0] || strcmp(label, "ENCRYPTED PRIVATE KEY") == 0) {
         if (!kncg_decrypt_body(dek, &der, &n, pass, passLen)) {
-            free(der);
+            free(der); /* scratch */
             return 0;
         }
         if (!dek[0]) snprintf(label, sizeof label, "PRIVATE KEY");
     }
     ok = kncg_parse_der(label, der, n, key);
     memset(der, 0, n);
-    free(der);
+    free(der); /* scratch */
     if (!ok) kncg_key_free(key);
     return ok;
 }
@@ -2581,7 +2581,7 @@ static unsigned char *kncg_key_encode(const kncg_key *k, int priv, int type, int
         break;
     }
     if (!ok) {
-        free(d.buf);
+        free(d.buf); /* scratch */
         return NULL;
     }
     if (format == 1) {
@@ -2590,7 +2590,7 @@ static unsigned char *kncg_key_encode(const kncg_key *k, int priv, int type, int
     }
     kncg_pem_append(&out, label, d.buf, d.len);
     memset(d.buf, 0, d.len);
-    free(d.buf);
+    free(d.buf); /* scratch */
     *outn = out.len;
     kml_der_put(&out, (const unsigned char *)"", 1);
     return out.buf;
@@ -2664,11 +2664,11 @@ static char *kncg_keygen_pem(double type, double bits, double exponent, const ch
     }
     kml_der_put(&d, (const unsigned char *)"", 1);
     int ok = spki && pkcs8;
-    free(spki);
-    free(pkcs8);
+    free(spki); /* scratch */
+    free(pkcs8); /* scratch */
     kncg_key_free(&k);
     if (!ok) {
-        free(d.buf);
+        free(d.buf); /* scratch */
         return NULL;
     }
     return (char *)d.buf;
@@ -2677,7 +2677,7 @@ static char *kncg_keygen_pem(double type, double bits, double exponent, const ch
 char *__kml_native_crypto_keygen(double type, double bits, double exponent, const char *curve) {
     char *pem = kncg_keygen_pem(type, bits, exponent, curve);
     char *out = kncg_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -2688,11 +2688,11 @@ static void kncg_keygen_work(void *job, long long *err, double *res) {
     char *pem = kncg_keygen_pem(j->type, j->bits, j->exponent, j->curve);
     *err = pem ? 0 : 1;
     *res = (double)(intptr_t)pem;
-    free(j);
+    free(j); /* scratch */
 }
 
 void __kml_native_crypto_keygen_async(double type, double bits, double exponent, const char *curve, void *inv, void *clo) {
-    kncg_keygen_job *j = (kncg_keygen_job *)calloc(1, sizeof *j);
+    kncg_keygen_job *j = (kncg_keygen_job *)calloc(1, sizeof *j); /* scratch */
     j->type = type; j->bits = bits; j->exponent = exponent;
     snprintf(j->curve, sizeof j->curve, "%s", curve ? curve : "");
     __kml_pool_job(kncg_keygen_work, j, inv, clo);
@@ -2701,7 +2701,7 @@ void __kml_native_crypto_keygen_async(double type, double bits, double exponent,
 char *__kml_native_crypto_keygen_take(double result) {
     char *pem = (char *)(intptr_t)result;
     char *out = kncg_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -2733,16 +2733,16 @@ static int kncg_rsa_raw(const kncg_key *k, int priv, const unsigned char *in, si
     ULONG moved = 0;
     int ok;
     if (inlen > kb) return 0;
-    buf = (unsigned char *)calloc(1, kb);
+    buf = (unsigned char *)calloc(1, kb); /* scratch */
     if (!buf) return 0;
     memcpy(buf + (kb - inlen), in, inlen);
     if (memcmp(buf, k->rsa[KR_N], kb) >= 0) {
-        free(buf);
+        free(buf); /* scratch */
         return 0;
     }
     BCRYPT_KEY_HANDLE h = kncg_rsa_handle(k, priv);
     if (!h) {
-        free(buf);
+        free(buf); /* scratch */
         return 0;
     }
     if (priv)
@@ -2755,7 +2755,7 @@ static int kncg_rsa_raw(const kncg_key *k, int priv, const unsigned char *in, si
     }
     BCryptDestroyKey(h);
     memset(buf, 0, kb);
-    free(buf);
+    free(buf); /* scratch */
     return ok;
 }
 
@@ -2845,7 +2845,7 @@ static int kncg_ecdsa_sign_raw(const kncg_key *k, const unsigned char *hash, siz
 static int kncg_rs_to_der(const unsigned char *rs, size_t half, kml_der *out) {
     kml_der in = {0};
     if (!kncg_der_uint(&in, rs, half) || !kncg_der_uint(&in, rs + half, half)) {
-        free(in.buf);
+        free(in.buf); /* scratch */
         return 0;
     }
     return kncg_der_wrap(out, 0x30, &in);
@@ -2895,14 +2895,14 @@ static double kncg_sign_key(const kncg_key *k, const char *digest, double paddin
             memcpy(out, d.buf, d.len);
             r = (double)d.len;
         }
-        free(d.buf);
+        free(d.buf); /* scratch */
         return r;
     }
     /* RSA */
     size_t kb = k->rsalen[KR_N];
     int bits = kncg_rsa_bits(k);
     int pad = padding < 0 ? KNCG_RSA_PKCS1 : (int)padding;
-    unsigned char *em = (unsigned char *)calloc(1, kb ? kb : 1);
+    unsigned char *em = (unsigned char *)calloc(1, kb ? kb : 1); /* scratch */
     int ok = 0;
     if (!em) return -1;
     if (pad == KNCG_RSA_PKCS1) {
@@ -2929,7 +2929,7 @@ static double kncg_sign_key(const kncg_key *k, const char *digest, double paddin
         }
     }
     memset(em, 0, kb);
-    free(em);
+    free(em); /* scratch */
     return r;
 }
 
@@ -2959,7 +2959,7 @@ static double kncg_verify_key(const kncg_key *k, const char *digest, double padd
     int bits = kncg_rsa_bits(k);
     int pad = padding < 0 ? KNCG_RSA_PKCS1 : (int)padding;
     if (sigLen != (long long)kb) return 0;
-    unsigned char *em = (unsigned char *)calloc(1, kb);
+    unsigned char *em = (unsigned char *)calloc(1, kb); /* scratch */
     double r = 0;
     if (em && kncg_rsa_raw(k, 0, sig, kb, em)) {
         if (pad == KNCG_RSA_PKCS1) {
@@ -2976,7 +2976,7 @@ static double kncg_verify_key(const kncg_key *k, const char *digest, double padd
             r = good && kncg_pss_verify(md, mh, bits, saltLength, em + (kb - emLen), emLen) ? 1 : 0;
         }
     }
-    free(em);
+    free(em); /* scratch */
     return r;
 }
 
@@ -3059,11 +3059,11 @@ static int kncg_decode_key(const unsigned char *data, long long len, int format,
                            long long passLen, kncg_key *k) {
     memset(k, 0, sizeof *k);
     if (format != 1) {
-        char *pem = (char *)malloc((size_t)len + 1);
+        char *pem = (char *)malloc((size_t)len + 1); /* scratch */
         memcpy(pem, data, (size_t)len);
         pem[len] = 0;
         int ok = kncg_parse_key(pem, pass, passLen, k);
-        free(pem);
+        free(pem); /* scratch */
         return ok;
     }
     static const char *const any[] = {"PRIVATE KEY", "PUBLIC KEY", "RSA PRIVATE KEY", "RSA PUBLIC KEY", "EC PRIVATE KEY"};
@@ -3088,7 +3088,7 @@ static int kncg_decode_key(const unsigned char *data, long long len, int format,
         unsigned char *der = kncg_dup(data, len);
         size_t n = (size_t)len;
         int ok = kncg_decrypt_body("", &der, &n, pass, passLen) && kncg_parse_der("PRIVATE KEY", der, n, k);
-        free(der);
+        free(der); /* scratch */
         if (!ok) kncg_key_free(k);
         return ok;
     }
@@ -3107,7 +3107,7 @@ char *__kml_native_crypto_key_parse(void *data, long long len, double format, do
         kncg_key_free(&k);
     }
     char *out = kncg_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -3132,14 +3132,14 @@ double __kml_native_crypto_key_export(const char *pem, double priv, double forma
         r = (double)n;
     }
     memset(buf, 0, n);
-    free(buf);
+    free(buf); /* scratch */
     return r;
 }
 
 /* A big-endian magnitude in decimal. */
 static void kncg_decimal(const unsigned char *p, size_t n, char *out, size_t cap) {
-    unsigned char *v = (unsigned char *)malloc(n ? n : 1);
-    char *digits = (char *)malloc(n * 3 + 2);
+    unsigned char *v = (unsigned char *)malloc(n ? n : 1); /* scratch */
+    char *digits = (char *)malloc(n * 3 + 2); /* scratch */
     size_t nd = 0;
     memcpy(v, p, n);
     for (;;) {
@@ -3157,8 +3157,8 @@ static void kncg_decimal(const unsigned char *p, size_t n, char *out, size_t cap
     size_t o = 0;
     while (nd > 0 && o + 1 < cap) out[o++] = digits[--nd];
     out[o] = 0;
-    free(v);
-    free(digits);
+    free(v); /* scratch */
+    free(digits); /* scratch */
 }
 
 /* asymmetricKeyType and asymmetricKeyDetails, tab-separated: type,
@@ -3191,7 +3191,7 @@ char *__kml_native_crypto_key_info(const char *pem) {
 static void kncg_append(char **buf, size_t *len, const char *key, const char *val) {
     if (!val) return;
     size_t add = strlen(key) + strlen(val) + 2;
-    *buf = (char *)realloc(*buf, *len + add + 1);
+    *buf = (char *)realloc(*buf, *len + add + 1); /* scratch */
     *len += (size_t)snprintf(*buf + *len, add + 1, "%s%s=%s", *len ? "\t" : "", key, val);
 }
 
@@ -3199,7 +3199,7 @@ static void kncg_append_b64u(char **buf, size_t *len, const char *key, const uns
     static const unsigned char zero = 0;
     char *v = n ? kncg_b64u_encode(p, n) : kncg_b64u_encode(&zero, 1);
     kncg_append(buf, len, key, v);
-    free(v);
+    free(v); /* scratch */
 }
 
 /* keyObject.export({ format: 'jwk' }): the members in Node's order,
@@ -3235,7 +3235,7 @@ char *__kml_native_crypto_key_jwk(const char *pem, double priv) {
     }
     kncg_key_free(&k);
     char *out = kncg_str(err ? err : buf ? buf : "");
-    free(buf);
+    free(buf); /* scratch */
     return out;
 }
 
@@ -3262,7 +3262,7 @@ char *__kml_native_crypto_key_from_jwk(double kty, const char *crv, const char *
             ok = b != NULL;
             if (b) {
                 kncg_rsa_set(&k, i, b, bl);
-                free(b);
+                free(b); /* scratch */
             }
         }
         ok = ok && k.rsalen[KR_N] > 0 && k.rsalen[KR_E] > 0;
@@ -3288,8 +3288,8 @@ char *__kml_native_crypto_key_from_jwk(double kty, const char *crv, const char *
                 ok = kncg_ec_pub_from_d(id, k.d, cx, cy) && !memcmp(cx, k.x, cb) && !memcmp(cy, k.y, cb);
             }
         }
-        free(xb); free(yb);
-        if (db) { memset(db, 0, dl); free(db); }
+        free(xb); free(yb); /* scratch */
+        if (db) { memset(db, 0, dl); free(db); } /* scratch */
     } else if ((int)kty == 2) {
         int t = !strcmp(crv, "Ed25519") ? KK_ED25519 : !strcmp(crv, "X25519") ? KK_X25519 : -1;
         const char *src = priv ? d : x;
@@ -3301,13 +3301,13 @@ char *__kml_native_crypto_key_from_jwk(double kty, const char *crv, const char *
             memcpy(k.raw, raw, 32);
             ok = 1;
         }
-        free(raw);
+        free(raw); /* scratch */
     }
 #undef KNCG_OPT
     if (ok) pem = kncg_key_pem(&k, priv);
     kncg_key_free(&k);
     char *out = kncg_str(pem ? pem : "");
-    free(pem);
+    free(pem); /* scratch */
     return out;
 }
 
@@ -3336,7 +3336,7 @@ double __kml_native_crypto_pkey_crypt(double op, const char *pem, void *pass, lo
     }
     size_t kb = k.rsalen[KR_N], hl = kncg_md_len[md], n = 0;
     const unsigned char *in = (const unsigned char *)data;
-    unsigned char *em = (unsigned char *)calloc(1, kb), *res = (unsigned char *)calloc(1, kb);
+    unsigned char *em = (unsigned char *)calloc(1, kb), *res = (unsigned char *)calloc(1, kb); /* scratch */
     int ok = 0;
     if (!em || !res) goto done;
     if (o == 0 || o == 2) {
@@ -3419,8 +3419,8 @@ done:;
             r = (double)n;
         }
     }
-    if (em) { memset(em, 0, kb); free(em); }
-    if (res) { memset(res, 0, kb); free(res); }
+    if (em) { memset(em, 0, kb); free(em); } /* scratch */
+    if (res) { memset(res, 0, kb); free(res); } /* scratch */
     kncg_key_free(&k);
     return r;
 }

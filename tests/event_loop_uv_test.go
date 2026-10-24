@@ -102,7 +102,7 @@ server.listen(0, '127.0.0.1', async () => {
 })
 `)
 	out, err := aboveFdLimit(bin).CombinedOutput()
-	if err != nil || string(out) != "body=hello\n" {
+	if err != nil || dropSanitizerNotes(string(out)) != "body=hello\n" {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
 }

@@ -41,12 +41,11 @@ import _ "embed"
 var finalizationSource string
 
 // FinalizationSource is the FinalizationRegistry runtime's C source, with the
-// -mm and -finalizers mode defines the death signals depend on.
+// -finalizers mode define the death signals depend on (-mm=gc is KML_GC, as
+// for every member).
 func (e *Emitter) FinalizationSource() string {
 	pre := ""
-	if e.isGCMode() {
-		pre = "#define KML_GC 1\n"
-	} else if e.opts.Finalizers == "report" {
+	if !e.isGCMode() && e.opts.Finalizers == "report" {
 		pre = "#define KML_FINREPORT 1\n"
 	}
 	return pre + finalizationSource
@@ -54,18 +53,6 @@ func (e *Emitter) FinalizationSource() string {
 
 // UsesFinRegHelpers reports whether the program links the finalization runtime.
 func (e *Emitter) UsesFinRegHelpers() bool { return e.usedFinRegHelpers }
-
-// ensureGCInvokeFinalizers declares Boehm's GC_invoke_finalizers exactly once
-// (TDD-00163 Stage 3): Boehm only *queues* a dead object's finalizer at
-// collection time and runs the queue lazily from later allocation points, so
-// gc() and the exit flush call it explicitly to make firing observable.
-func (e *Emitter) ensureGCInvokeFinalizers() {
-	if e.declaredGCInvokeFin {
-		return
-	}
-	e.declaredGCInvokeFin = true
-	e.emitGlobal("declare i32 @GC_invoke_finalizers()")
-}
 
 // ensureFinalizationHelpers declares the FinalizationRegistry runtime
 // (finalization.c) once. The manual-mode free hook only exists there.
@@ -75,7 +62,7 @@ func (e *Emitter) ensureFinalizationHelpers() {
 	}
 	e.usedFinRegHelpers = true
 	e.ensureMicrotasks()
-	e.emitGlobal(`declare ptr @__kml_finreg_create(ptr, ptr, ptr)
+	e.emitGlobal(`declare ptr @__kml_finreg_create(ptr, ptr, ptr, i64)
 declare void @__kml_finreg_register(ptr, ptr, i64, ptr, i64, i64)
 declare zeroext i1 @__kml_finreg_unregister(ptr, ptr)`)
 	if !e.isGCMode() {

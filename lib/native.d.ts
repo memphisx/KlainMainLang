@@ -665,6 +665,11 @@ interface KmlNative {
     processArgv0(): string;
     /** @lower __kml_native_process_exec_path */
     processExecPath(): string;
+    // process.title: argv[0] until set.
+    /** @lower __kml_native_process_title */
+    processTitle(): string;
+    /** @lower __kml_native_process_set_title */
+    processSetTitle(title: string): void;
     // The code the program exits with at its end.
     /** @lower __kml_native_process_set_exit_code */
     processSetExitCode(code: number): void;
@@ -775,6 +780,15 @@ interface KmlNative {
     // after a native callback into JavaScript.
     /** @lower __kml_drain_microtasks */
     runMicrotasks(): void;
+    // process.nextTick's queue (lib/node/kml_process_tick.ts): the callback
+    // runs on the tick queue, ahead of the promise jobs.
+    /** @lower __kml_native_next_tick @link microtasks */
+    nextTick(callback: () => void): void;
+    // Error.captureStackTrace's frame lines (lib/node/internal_error_stack.ts):
+    // those below the topmost frame of the function named `name`, or all
+    // for "".
+    /** @lower __kml_native_capture_frames @link frames */
+    captureFrames(name: string): string;
     // Node's timers binding (timerssrc/timers.c, Node's src/timers.cc), for
     // lib/node/internal_timers.ts: processTimers(now) runs when the one
     // timer fires and answers through timersNext; processImmediate runs in
@@ -964,6 +978,50 @@ interface KmlNative {
     syncSelectRun(hasDefault: boolean): number;
     /** @lower __kml_native_sync_select_value @link sync */
     syncSelectValue(index: number): any;
+
+    // klain:http (TDD-00255): its cluster's fork (this process's worker id,
+    // 0 in the primary), the shared close flags (0 close, 1 close all; 2
+    // whether a worker's primary is gone), and the blocking listen's run of
+    // the event loop.
+    /** @lower __kml_native_khttp_fork @link pool */
+    khttpFork(workers: number): number;
+    /** @lower __kml_native_khttp_flag @link pool */
+    khttpFlag(which: number): number;
+    /** @lower __kml_native_khttp_set_flag @link pool */
+    khttpSetFlag(which: number): void;
+    /** @lower __kml_native_khttp_clustered @link pool */
+    khttpClustered(): number;
+    /** @lower __kml_native_run_loop @link pool */
+    runLoop(): void;
+
+    // klain:http's h2o backend (TDD-00255 Stage 2, internal_khttp_h2o.ts):
+    // libh2o on the loop. A request reaches onRequest as an exchange id,
+    // valid until h2o disposes of the request; calls on a gone one do
+    // nothing (a write's callback gets -1).
+    /** @lower __kml_native_khttp_h2o_serve @link h2o */
+    khttpH2oServe(host: string, port: number, onRequest: (exchange: number, unused: number) => void): number;
+    /** @lower __kml_native_khttp_h2o_request @link h2o */
+    khttpH2oRequest(exchange: number): HttpRequest;
+    /** @lower __kml_native_khttp_h2o_req_string @link h2o */
+    khttpH2oReqString(exchange: number, which: number): string;
+    /** @lower __kml_native_khttp_h2o_body_length @link h2o */
+    khttpH2oBodyLength(exchange: number): number;
+    /** @lower __kml_native_khttp_h2o_body @link h2o */
+    khttpH2oBody(exchange: number, buffer: Uint8Array): number;
+    /** @lower __kml_native_khttp_h2o_respond @link h2o */
+    khttpH2oRespond(exchange: number, status: number, headers: string, body: Uint8Array): void;
+    /** @lower __kml_native_khttp_h2o_respond_start @link h2o */
+    khttpH2oRespondStart(exchange: number, status: number, headers: string): void;
+    /** @lower __kml_native_khttp_h2o_respond_write @link h2o */
+    khttpH2oRespondWrite(exchange: number, chunk: Uint8Array, onWritten: (status: number, unused: number) => void): void;
+    /** @lower __kml_native_khttp_h2o_respond_end @link h2o */
+    khttpH2oRespondEnd(exchange: number): void;
+    /** @lower __kml_native_khttp_h2o_abort @link h2o */
+    khttpH2oAbort(exchange: number): void;
+    /** @lower __kml_native_khttp_h2o_close @link h2o */
+    khttpH2oClose(): void;
+    /** @lower __kml_native_khttp_h2o_close_all @link h2o */
+    khttpH2oCloseAll(): void;
 }
 
 declare var __kml_native: KmlNative;

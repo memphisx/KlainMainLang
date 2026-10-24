@@ -50,3 +50,16 @@ console.log(origin.sum());
 
 // Namespace type-member chains: enum members resolve through the qualifier.
 console.log(Geometry.Kind.Tall);
+
+// A namespace read as a value is its object: exported members as properties,
+// a `let` export as its current value.
+namespace Counter {
+    export let hits = 0;
+    export function hit(): void { hits++; }
+    export namespace Limits { export const max = 3; }
+}
+Counter.hit();
+console.log(Object.keys(Counter), Counter.Limits);
+const counter: any = Counter;
+Counter.hit();
+console.log(counter.hits, counter === Counter);

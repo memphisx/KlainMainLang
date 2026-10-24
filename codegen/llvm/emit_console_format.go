@@ -24,7 +24,7 @@ func (e *Emitter) emitUtilFormatArg(verb byte, arg ast.Expression, pos ast.Pos) 
 		if err != nil {
 			return Value{}, err
 		}
-		iv := e.coerce(v, TypeI64)
+		iv := e.convert(v, TypeI64)
 		return e.emitValueToString(iv)
 	case 'd':
 		// %d formats the number as-is — it does NOT truncate a float
@@ -33,14 +33,14 @@ func (e *Emitter) emitUtilFormatArg(verb byte, arg ast.Expression, pos ast.Pos) 
 		if err != nil {
 			return Value{}, err
 		}
-		fv := e.coerce(v, TypeF64)
+		fv := e.convert(v, TypeF64)
 		return e.emitValueToString(fv)
 	case 'f':
 		v, err := e.emitExpr(arg)
 		if err != nil {
 			return Value{}, err
 		}
-		fv := e.coerce(v, TypeF64)
+		fv := e.convert(v, TypeF64)
 		return e.emitValueToString(fv)
 	default: // 's'
 		v, err := e.emitExpr(arg)

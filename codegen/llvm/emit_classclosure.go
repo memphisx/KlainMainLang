@@ -42,7 +42,7 @@ func staticCaptureField(name string) string { return "#__kml_scap_" + name }
 // closureConvertClass rewrites cd, declared in blk, to hold the locals it
 // names in hidden fields, and records the `new` sites that fill them.
 // False (cd untouched) when cd is outside what this conversion expresses.
-func (e *Emitter) closureConvertClass(c *checker.Checker, b *binder.Binding, blk *ast.BlockStatement, cd *ast.ClassDeclaration, hoisted map[ast.Node]bool) bool {
+func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.BlockStatement, cd *ast.ClassDeclaration, hoisted map[ast.Node]bool) bool {
 	caps := classLocalRefs(b, cd, hoisted)
 	if len(caps) == 0 {
 		return false
@@ -163,7 +163,16 @@ func (e *Emitter) closureConvertClass(c *checker.Checker, b *binder.Binding, blk
 						ref = ast.NewMemberExpression(ast.NewIdentifier(cd.Name, id.GetPos()), staticCaptureField(sym.Name), id.GetPos())
 					}
 					if _, cell := cells[sym]; cell {
+						e.lowered(ref) // the cell itself: no expression of the code as written
 						ref = ast.NewMemberExpression(ref, "v", id.GetPos())
+					}
+					e.originate(ref, id)
+					if ty := fieldAnnot(cd, f); ty != nil && ty.Name == "any" && len(ty.Fields) == 0 {
+						// The field holds a box whatever the local's type.
+						if e.boxedCapReads == nil {
+							e.boxedCapReads = map[ast.Expression]bool{}
+						}
+						e.boxedCapReads[ref] = true
 					}
 					return ref
 				}
@@ -302,7 +311,7 @@ func declaredBy(sym *binder.Symbol, n ast.Node) bool {
 
 // captureAnnotation is the hidden field's type: the local's own annotation,
 // else the primitive the checker gives it, else any.
-func (e *Emitter) captureAnnotation(c *checker.Checker, sym *binder.Symbol, refs []classLocalRef) *ast.TypeAnnotation {
+func (e *Emitter) captureAnnotation(c frontView, sym *binder.Symbol, refs []classLocalRef) *ast.TypeAnnotation {
 	for _, d := range sym.Declarations {
 		switch n := d.Node.(type) {
 		case *ast.VarDeclaration:
@@ -561,7 +570,7 @@ func (e *Emitter) emitClassRecord(name string) error {
 		}
 		at := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds i64, ptr %s, i64 %d", at, rec, 2+i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", b.Ref, at))
+		e.heapStore("i64", b.Ref, at, 8)
 	}
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
@@ -574,8 +583,8 @@ func (e *Emitter) emitClassRecord(name string) error {
 			return err
 		}
 		ty := e.classes[name].StaticFieldTypes[cp.field]
-		v = e.coerce(v, ty)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", ty.IR, v.Ref, e.staticFieldWritePtr(name, cp.field), ty.Align()))
+		v = e.convert(v, ty)
+		e.heapStore(storageIR(ty), v.Ref, e.staticFieldWritePtr(name, cp.field), ty.Align())
 	}
 	return nil
 }
@@ -600,7 +609,7 @@ func (e *Emitter) bindRecordCaptures(className string, out map[string]string) (s
 		if _, fty, ok := info.Ty.FieldIndex(cp.field); ok {
 			fieldTy = fty
 		}
-		v := e.coerce(Value{Ref: w, Ty: TypeAny}, fieldTy)
+		v := e.convert(Value{Ref: w, Ty: TypeAny}, fieldTy)
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, StructFieldIR(fieldTy), fieldTy.Align()))
 		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), v.Ref, slot, fieldTy.Align()))
@@ -609,4 +618,18 @@ func (e *Emitter) bindRecordCaptures(className string, out map[string]string) (s
 		out[cp.field] = name
 	}
 	return rec, nil
+}
+
+// fieldAnnot is the annotation of cd's field name, cells unwrapped to their
+// value's.
+func fieldAnnot(cd *ast.ClassDeclaration, name string) *ast.TypeAnnotation {
+	for _, f := range cd.Fields {
+		if f.Name == name && f.Type != nil {
+			if len(f.Type.Fields) == 1 && f.Type.Fields[0].Name == "v" {
+				return f.Type.Fields[0].Type
+			}
+			return f.Type
+		}
+	}
+	return nil
 }

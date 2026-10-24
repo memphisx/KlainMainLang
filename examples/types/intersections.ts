@@ -53,3 +53,14 @@ function connect(cfg: BaseConfig & TimeoutConfig): string {
 	return "retries=" + cfg.retries + " timeout=" + cfg.timeoutMs
 }
 console.log(connect({ retries: 3, timeoutMs: 500 }))  // retries=3 timeout=500
+
+// --- a branded primitive: a string or number tagged by an object member is
+// still that primitive at run time, but tsc keeps the brands apart ---
+type UserId = string & { readonly __brand: "UserId" }
+type Cents = number & { readonly __brand: "Cents" }
+const userId = (s: string) => s as UserId
+const cents = (n: number) => n as Cents
+
+const owner: UserId = userId("u-42")
+const price: Cents = cents(1999)
+console.log(owner.toUpperCase(), (price / 100).toFixed(2))  // U-42 19.99

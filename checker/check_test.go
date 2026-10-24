@@ -38,6 +38,24 @@ func itoa(n int) string {
 func TestCheck(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"let a: number = 'x'", "1:TS2322"},
+		// Syntactic checks: an unused side-effect-free comma operand, and a
+		// condition that is always truthy or falsy (`0`/`1` are exempt).
+		{"var x = (1, 2)\nif (!(1)) {}\nif (1) {}\nfor (var i = 0; undefined;) {}\nwhile (true) {}\nif ({}) {}\nvar v = void x\nvar w = !null && x", "1:TS2695 4:TS2873 6:TS2872 8:TS2873"},
+		{"class A {\n a: number\n b!: number\n c?: number\n d: number | undefined\n e = 1\n g: string\n h: string\n constructor(public q: number) { this.g = \"\"; if (q) { this.h = \"\" } }\n}\nabstract class B { abstract z: number; declare w: number }", "2:TS2564 8:TS2564"},
+		// A defaulted sub-pattern takes its leaves from the default: only
+		// positions an array literal leaves out are implicitly any.
+		{"const a = function ([[y] = []]) {}\nconst b = function ([{ k } = {}]) {}\nconst c = function ([[y2] = [1]]) {}\nconst d = function ({ p: [q] = [2] }) {}\nconst e = function ([[w, v] = [1]]) {}", "1:TS7031 2:TS2339 5:TS7031"},
+		{"function t(): never { throw 1; }\nfunction* g() { yield* t(); }\nfor (const x of t()) {}\nasync function* h() { yield* t(); }", "2:TS2488 3:TS2488 4:TS2504"},
+		{"const o = { get [Symbol.asyncIterator]() { return 1; } };\nasync function* h() { yield* o; }\nfunction* g() { yield* o; }\nfor (const x of o) {}\nconst ok = { *[Symbol.iterator]() { yield 1; } };\nfor (const y of ok) {}\nasync function* k() { yield* ok; }", "2:TS2504 3:TS2488 4:TS2488"},
+		{"var o1 = { [Symbol.iterator]() { return true; } };\nvar o2 = { [Symbol.iterator]() { return { next: 1 }; } };\nvar o4 = { [Symbol.asyncIterator]() { return null; } };\nvar o5 = { [Symbol.iterator]() { throw new Error(); } };\nasync function* a1() { yield* o1; }\nasync function* a2() { yield* o2; }\nasync function* a4() { yield* o4; }\nasync function* a5() { yield* o5; }\nfunction* s1() { yield* o1; }", "5:TS2504 6:TS2504 7:TS2504 8:TS2504 9:TS2488"},
+		{"var o3 = { [Symbol.iterator]() { return { next() { return 1; } }; } };\nasync function* a3() { yield* o3; }\nfor (const x of o3) {}", "2:TS2490"},
+		// A literal's method or function value without a context reaching
+		// the literal: an implicit any (TS7006), as tsc reports.
+		{"const a = { m(x) { return x; } }", "1:TS7006"},
+		{"const c = { inner: { m(y) { return y; } } }\nconst d = [{ m(z) { return z; } }]\nconst e = { k: (w) => w }", "1:TS7006 2:TS7006 3:TS7006"},
+		{"function h() { return { m(v) { return v; } }; }\nlet q: any = { m(u) { return u; } }", "1:TS7006 2:TS7006"},
+		{"const a = [function* (a) { yield a + 1; }]\nconst b: Array<(x: number) => number> = [(x) => x]\nfunction take(fs: ((n: number) => void)[]) {}\ntake([(n) => {}])\nconst c = [[(y) => y]]", "1:TS7006 5:TS7006"},
+		{"const b: { m(x: number): number } = { m(x) { return x; } }\nfunction g(o: { f: (n: number) => void }) {}\ng({ f(n) {} })", ""},
 		{"let b: number\nb = 'y'", "2:TS2322"},
 		{"function f(): number { return 'z' }", "1:TS2322"},
 		{"function g(n: number, s?: string) { return n }\ng('w')", "2:TS2345"},
@@ -47,6 +65,12 @@ func TestCheck(t *testing.T) {
 		{"function g(n: number, s?: string) { return n }\ng()", "2:TS2554"},
 		{"function g(n: number, s?: string) { return n }\ng(1, 'a', 3)", "2:TS2554"},
 		{"function r(a: number, ...b: number[]) { return a }\nr()", "2:TS2555"},
+		// A tuple rest parameter takes one argument per element; a never
+		// one takes none (TS2345 with the rest arguments' tuple).
+		{"function f(...a: [number, string]) {}\nf('x', 'y')\nf(1)\nf(1, 's', 3)\nf(1, 's')", "2:TS2345 3:TS2554 4:TS2554"},
+		{"function g(...a: never) {}\ng()\ng(1)", "2:TS2345 3:TS2345"},
+		{"type Ev = { data: [n: number] }\nfunction e<K>(k: K | keyof Ev, ...a: K extends keyof Ev ? Ev[K] : never) {}\ne('data', 'w')\ne('nope')\ne('data', 1)", "3:TS2345 4:TS2345"},
+		{"function e<K>(k: K, a: K extends 'data' ? 1 : 2) {}\ne('data', 1)", "2:TS2345"},
 		{"const o: { x: number } = { x: 'q' }", "1:TS2322"},
 		{"const v = 'a' - 1", "1:TS2362"},
 		{"const v = 1 * 'b'", "1:TS2363"},
@@ -98,6 +122,11 @@ func TestCheck(t *testing.T) {
 		{"interface SB<T> { size: T }\ninterface St extends SB<number> {}\ndeclare const st: St\nconst s: string = st.size", "4:TS2322"},
 		{"interface A { a: string }\ninterface B { b: string }\ndeclare const a: A\nconst ab: A & B = a", "4:TS2322"},
 		{"declare function o(x?: { a?: number }): void\no({ a: 'x' })", "2:TS2322"},
+		// No union member takes an object lacking its properties, with no
+		// discriminant to defer to; nor does a function returning one.
+		{"interface A { a: number }\ninterface B { b: string }\ninterface R { c: boolean }\ndeclare const r: R\nconst u: A | B = r", "5:TS2322"},
+		{"interface A { a: number }\ninterface B { b: string }\ninterface R { c: boolean }\ndeclare const r: R\nconst f: () => A | B = (): R => r", "5:TS2322"},
+		{"interface A { k: 'a'; a: number }\ninterface B { k: 'b'; b: string }\ndeclare const r: { k: 'a' | 'b'; a: number; b: string }\nconst u: A | B = r", ""},
 		{"declare function r(o?: { encoding?: null; flag?: string } | null): number\ndeclare function r(o: { encoding: 'utf8' | 'hex'; flag?: string } | 'utf8' | 'hex'): string\nconst t2: string = r({ encoding: 'utf8' })", ""},
 		{"let b: number | null = 3\nconst bump = () => { b = b === null ? 1 : b + 1 }", ""},
 		// A type name nothing declares (TS2304); a near miss is tsc's TS2552;
@@ -167,6 +196,7 @@ func TestCheck(t *testing.T) {
 		{"function fB(n: number) { if (n) return fB(n - 1); return 1 }\nconst x: number = fB(2)\nexport {}", ""},
 		{"function f() { return function g(a: number) { return function () { return g }() }(1) }\nexport {}", ""},
 		{"const h = function k(n: number) { return n ? k(n - 1) : \"x\" }\nexport {}", "1:TS7023"},
+		{"var f = function (n: number) { return n === 1 ? n : f(n - 1) * n }\nexport {}", "1:TS7023"},
 		// An object literal's accessors: a getter alone is readonly
 		// (TS2540 on a write), a setter alone its parameter's type.
 		{"const o = { get p() { return 1; } };\no.p = 2;\nexport {}", "2:TS2540"},
@@ -286,6 +316,20 @@ func TestAwaited(t *testing.T) {
 		// makes the overload not fit.
 		{"declare function mk<K, V>(e?: readonly (readonly [K, V])[] | null): Map<K, V>\nconst m = mk([['a', 1]])\nconst s: string = m", "3:TS2322"},
 		{"declare function mk<K, V>(e?: readonly (readonly [K, V])[] | null): Map<K, V>\nconst m: Map<string, number> = mk([['a', 1]])", ""},
+		// A collection's seed is checked: unrelated key types infer the
+		// first (tsc's common supertype), so the next entry fails; a null
+		// value joins its candidates.
+		{"const m = new Map([['a', 1], [2, 'two']])", "1:TS2769"},
+		{"const m = new Map([['a', 1], ['b', null]])\nconst n: Map<string, number | null> = m\nconst s = new Set([1, 'x'])", ""},
+		{"function f<T>(a: T, b: T): T[] { return [a, b] }\nf(1, 'x')", "2:TS2345"},
+		{"function f<T>(a: T, b: T): T { return a }\nf(1, 'x')\nf(1, 2)", "2:TS2345"},
+		// A private method is not writable (TS2803); a rejected operand's
+		// result is tsc's (any for `+`, number for `&`).
+		{"class C { #p() {}\n m() { const a: string = this.#p += 1; const b: string = this.#p &= 1 } }", "2:TS2803 2:TS2365 2:TS2322 2:TS2803 2:TS2362"},
+		// A parameter default reading its own parameter or a later one.
+		{"function a(x = x) {}\nfunction b(x = () => x) {}\nfunction c(x = y, y = 1) {}\nfunction d(x: number = x) {}", "1:TS7022 1:TS2372 3:TS2373 4:TS2372"},
+		// A static private name read off an instance (TS2339).
+		{"class D { static #f() { return 42 } g() { return this.#f() } }", "1:TS2339"},
 		{"interface B<T> { t: T }\ndeclare function f<T extends number>(x: T): B<T>\ndeclare function f(x: string): B<string>\nconst b: B<string> = f('s')", ""},
 		// Return type inference: T of wrap<T>(fn: T): T is take's parameter.
 		{"declare function wrap<T>(fn: T): T\ndeclare function take(cb: (a: string) => void): void\ntake(wrap((x) => { const n: number = x }))", "3:TS2322"},
@@ -490,5 +534,50 @@ func TestStrictCode(t *testing.T) {
 	}
 	if ds := checker.New(binder.BindWith(prog, binder.Options{AnnexB: true})).Check(); len(ds) != 0 {
 		t.Errorf("sloppy script: got %v", ds)
+	}
+}
+
+// TS7053: a string- or number-typed key on a user object type without an
+// index signature (tsc 5.6 --strict); a literal key naming a property, an
+// index signature or an any receiver report nothing.
+func TestComputedKeyImplicitAny(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"class C { m() { return 2; } }\nconst c = new C();\ndeclare const k: string;\nc[k]", "4:TS7053"},
+		{"const o = { a: 1 };\ndeclare const n: number;\no[n]", "3:TS7053"},
+		{"const o = { a: 1 };\no[\"a\"]", ""},
+		{"const o: { [k: string]: number } = {};\ndeclare const k: string;\no[k]", ""},
+		{"declare const o: any;\ndeclare const k: string;\no[k]", ""},
+	} {
+		if got := checkCodes(t, tc.src); got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestEmptyArrayLiteralTarget: `[]` is tsc's never[] against a non-array
+// object type, lacking its members (tsc 5.6 --strict).
+func TestEmptyArrayLiteralTarget(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"interface G { next(): void; done: boolean }\nconst g: G = []", "2:TS2739"},
+		{"class K { k = 1 }\nfunction f(x: [K]) {}\nf([[]])", "3:TS2741"},
+		{"const it: Iterable<number> = []\nconst al: ArrayLike<string> = []", ""},
+	} {
+		if got := checkCodesLib(t, tc.src); got != tc.want {
+			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestAwaitThenable: `await` of a program's thenable is what its then's
+// onfulfilled callback takes; an any callback is TS1320 (tsc 5.6 --strict).
+func TestAwaitThenable(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"const th = { then(resolve: (v: string) => void, reject: any) { resolve('a') } }\nasync function f() { const x: string = await th; return x }", ""},
+		{"const th = { then(resolve: (v: string) => void, reject: any) { resolve('a') } }\nasync function f() { const x: number = await th; return x }", "2:TS2322"},
+		{"const t2 = { then(r: any) { r(1) } }\nasync function g() { const v = await t2; return v }", "2:TS1320"},
+	} {
+		if got := checkCodesLib(t, tc.src); got != tc.want {
+			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)
+		}
 	}
 }

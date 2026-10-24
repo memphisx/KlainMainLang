@@ -81,8 +81,11 @@ type fileInfo struct {
 	selfWorker bool
 	workerCopy *ast.Program
 	exported   map[string]bool
-	index      int               // assigned at first visit; used to build this file's mangled-name suffix (TDD-00041)
-	mangled    map[string]string // original top-level declaration name -> this file's mangled name for it
+	// typeExports is the exported names that are types only (an interface
+	// or type alias): no member of the module's namespace object.
+	typeExports map[string]bool
+	index       int               // assigned at first visit; used to build this file's mangled-name suffix (TDD-00041)
+	mangled     map[string]string // original top-level declaration name -> this file's mangled name for it
 
 	// TDD-00051: re-export bookkeeping. reExportBindings is populated by the
 	// export-name-augmentation pass (before mangleFileDecls runs, so it only
@@ -243,11 +246,12 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		for name, uses := range lib.LoweredFuncUses() {
 			// A file declaring the name itself (lib/node/timers.ts's own
 			// setTimeout) means its own, not the lowered global.
-			// The rest of the uses are member names (`Uint8Array.from`): a
+			// The rest of the uses, and a lone name no global has (a method:
+			// `every`, `push`), are member names (`Uint8Array.from`): a
 			// binding of the same name (`const from = …`) is no shadow.
 			all := true
 			for i, u := range uses {
-				all = all && idents[u] && (i > 0 || !declaresTopLevel(prog, u))
+				all = all && idents[u] && (i > 0 || !lib.GlobalValue(u) || !declaresTopLevel(prog, u))
 			}
 			if all {
 				idents[name] = true
@@ -292,7 +296,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
-		if np := lib.ModuleRoot + "internal_namespaces.ts"; path != np && !strings.HasPrefix(path, lib.ModuleRoot) && (namespaceValueUse(src, idents) || idents["globalThis"] && globalObjectUse(src)) {
+		if np := lib.ModuleRoot + "internal_namespaces.ts"; path != np && !strings.HasPrefix(path, lib.ModuleRoot) && (namespaceValueUse(src, idents) || idents["globalThis"] && globalObjectUse(src) || ctorFunctionCall(src) || undeclaredAssign(path, src) || sloppyThisUse(path, src)) {
 			importTargets[np] = true
 			if err := visit(np, false); err != nil {
 				return err
@@ -321,6 +325,14 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if sp := lib.ModuleRoot + "internal_process_stdio.ts"; path != sp && idents["process"] && (idents["stdin"] || idents["stdout"] || idents["stderr"]) {
 			importTargets[sp] = true
 			if err := visit(sp, false); err != nil {
+				return err
+			}
+		}
+
+		// Buffer.poolSize is internal_buffer.ts's variable.
+		if bp := lib.ModuleRoot + "internal_buffer.ts"; path != bp && idents["Buffer"] && bufferPoolSizeRE.Match(src) && !declaresTopLevel(prog, "Buffer") {
+			importTargets[bp] = true
+			if err := visit(bp, false); err != nil {
 				return err
 			}
 		}
@@ -400,16 +412,6 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 						return err
 					}
 				}
-				// klain:http's request is a Node Readable over its body
-				// stream: `stream`'s Readable.fromWeb makes it.
-				if strings.TrimPrefix(source, "node:") == "klain:http" {
-					if sp, ok := lib.ModulePath("stream"); ok && sp != path {
-						importTargets[sp] = true
-						if err := visit(sp, false); err != nil {
-							return err
-						}
-					}
-				}
 				continue
 			}
 			resolved, err := resolveImportPath(dir, source, klainModulesDir)
@@ -447,7 +449,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				continue
 			}
 			dp := lit.Value
-			if _, isVirtual := virtualBuiltinMarkers[dp]; isVirtual {
+			_, isVirtual := virtualBuiltinMarkers[strings.TrimPrefix(dp, "node:")]
+			if _, isLib := lib.ModulePath(dp); isLib {
+				isVirtual = true // a builtin module written in TypeScript
+			}
+			if isVirtual {
 				return fmt.Errorf("%s: dynamic import('%s') of a built-in module is not supported", path, dp)
 			}
 			resolved, err := resolveImportPath(dir, dp, klainModulesDir)
@@ -479,7 +485,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
-		files[path] = &fileInfo{path: path, src: string(src), prog: prog, isEntry: isEntry, exported: exportedNames(prog), index: files[path].index, selfWorker: selfWorker}
+		files[path] = &fileInfo{path: path, src: string(src), prog: prog, isEntry: isEntry, exported: exportedNames(prog), typeExports: typeExportedNames(prog), index: files[path].index, selfWorker: selfWorker}
 		if !isEntry {
 			order = append(order, path)
 		}
@@ -658,6 +664,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	// same as the old global check did for the same-file case). Must fully
 	// complete for every file before any file's imports are rewritten below
 	// — an importing file needs the *target's* mangled names already computed.
+	var unused []*diag.Diagnostic
 	for _, path := range allPaths {
 		info := files[path]
 		// Redeclaration early errors and the reads the flow graph proves wrong
@@ -671,17 +678,33 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		offsets := diag.Offsets(info.src)
 		ds := append(bound.Diagnostics(offsets), bound.FlowDiagnostics(offsets, !compatJS)...)
 		if len(ds) > 0 {
-			sort.SliceStable(ds, func(i, j int) bool {
-				a, b := ds[i].Pos, ds[j].Pos
-				return a.Line < b.Line || a.Line == b.Line && a.Col < b.Col
+			sortDiags(ds)
+			return nil, diag.Errors(append(unused, diag.As(diag.InFile(diag.Errors(ds), path))...))
+		}
+		// noUnusedLocals/noUnusedParameters read the file as written: its
+		// imports, its exports and its own names, before the merge. Every
+		// file is checked before they are reported, as tsc does.
+		if (opts.NoUnusedLocals || opts.NoUnusedParameters) && !strings.HasPrefix(path, lib.ModuleRoot) {
+			fileUnused := checker.Unused(bound, checker.UnusedOptions{
+				Locals: opts.NoUnusedLocals, Parameters: opts.NoUnusedParameters,
+				Script: !IsModule(info.prog), Exported: info.exported,
 			})
-			return nil, diag.InFile(diag.Errors(ds), path)
+			sortDiags(fileUnused)
+			for _, d := range fileUnused {
+				d.Span.File = path
+				d.Span.Start = offsets(d.Span.Pos.Line, d.Span.Pos.Col)
+				d.Span.End = d.Span.Start
+			}
+			unused = append(unused, fileUnused...)
 		}
 		mangled, err := mangleFileDecls(path, fileKey(path), info.prog, info.index)
 		if err != nil {
 			return nil, err
 		}
 		info.mangled = mangled
+	}
+	if len(unused) > 0 {
+		return nil, diag.Errors(unused)
 	}
 
 	// TDD-00051: now that every file's own `mangled` map is final, resolve
@@ -708,14 +731,20 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	resolvedModules := map[*ast.StringLiteral]string{}
 	builtinImports := map[string]bool{}
 	builtinImportRefs := map[string]ast.BuiltinImportRef{}
+	dynNamespaces := map[string]string{} // a merged import() target: its namespace object's name
 	for _, path := range allPaths {
 		info := files[path]
+		ownLive := mutableExports(info.prog)
 		lookup := make(map[string]string, len(info.mangled))
 		for orig, m := range info.mangled {
 			lookup[orig] = m
 		}
 		ns := map[string]map[string]string{}
-		nsSource := map[string]string{} // a namespace alias's module specifier
+		nsSource := map[string]string{}            // a namespace alias's module specifier
+		nsValues := map[string]map[string]string{} // its value members (the namespace object's)
+		nsLive := map[string]map[string]bool{}     // those that are `let`/`var` bindings
+		nsObjects := map[string]string{}           // a namespace read as a value: its object's name
+		nsPos := map[string]ast.Pos{}              // its import's position
 		builtinMembers := map[string]builtinMemberRef{}
 		// TDD-00165 Stage 3: aliases of a parse-time built-in constructor
 		// (`import { URL as U } from 'url'`) — the rename pass rebuilds `new U(...)`
@@ -963,17 +992,25 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				// through the namespace object — same visibility rule a
 				// named `import { x }` is already held to.
 				members := make(map[string]string, len(target.exported))
+				values := map[string]string{}
+				nsLive[imp.Namespace] = mutableExports(target.prog)
 				for name := range target.exported {
 					members[name], _ = target.publicMangled(name)
+					if !target.typeExports[name] {
+						values[name] = members[name]
+					}
 				}
 				ns[imp.Namespace] = members
 				nsSource[imp.Namespace] = imp.Source
+				nsValues[imp.Namespace] = values
+				nsPos[imp.Namespace] = imp.GetPos()
 			}
 		}
 		var reservedErr error
 		renameFile(info.prog, lookupTable{
 			resolved: resolvedModules,
 			names:    lookup, ns: ns, nsSource: nsSource, builtinMembers: builtinMembers,
+			nsObjects: nsObjects, nsObjectSuffix: fmt.Sprintf("__kml_nsv%d", info.index),
 			typeOnly:         typeOnlyLocals(info.prog),
 			nodeTypes:        info.prog.NodeTypeImports,
 			parseTimeAliases: parseTimeAliases,
@@ -982,6 +1019,23 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		})
 		if reservedErr != nil {
 			return nil, reservedErr
+		}
+		prependNamespaceObjects(info.prog, nsObjects, nsValues, nsLive, nsPos)
+		if dynamicImportTargets[path] && !isolatedDynamicImport {
+			// What its import() resolves to: its namespace object, built
+			// once its top-level has run.
+			vals := map[string]string{}
+			keys := []string{}
+			for name := range info.exported {
+				if !info.typeExports[name] {
+					vals[name], _ = info.publicMangled(name)
+					keys = append(keys, name)
+				}
+			}
+			sort.Strings(keys)
+			name := fmt.Sprintf("__kml_dynns%d", info.index)
+			info.prog.Body = append(info.prog.Body, ast.NewVarDeclaration("const", name, nil, namespaceObject(keys, vals, ownLive, ast.Pos{}), ast.Pos{}))
+			dynNamespaces[path] = name
 		}
 		if info.selfWorker && workerTargets[path] {
 			// The worker's copy: the same source, parsed and renamed as the
@@ -1001,6 +1055,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			renameFile(cp, lookupTable{
 				resolved: resolvedModules,
 				names:    lookup, ns: ns, nsSource: nsSource, builtinMembers: builtinMembers,
+				nsObjects: nsObjects, nsObjectSuffix: fmt.Sprintf("__kml_nsv%d", info.index),
 				typeOnly:         typeOnlyLocals(cp),
 				nodeTypes:        info.prog.NodeTypeImports,
 				parseTimeAliases: parseTimeAliases,
@@ -1010,6 +1065,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			if reservedErr != nil {
 				return nil, reservedErr
 			}
+			prependNamespaceObjects(cp, nsObjects, nsValues, nsLive, nsPos)
 			info.workerCopy = cp
 		}
 	}
@@ -1037,6 +1093,12 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					// A same-file class+interface merge pair shares one
 					// mangled name by design (ADR-00466).
 					if prev.path == path && isClassIfaceMergePair(prev.kind, ref.Kind) {
+						continue
+					}
+					// A type and a value of one name (`interface E` and
+					// `function E`) live in TypeScript's separate type and
+					// value spaces.
+					if prev.path == path && isTypeValuePair(prev.kind, ref.Kind) {
 						continue
 					}
 					// Namespace type members desugar to bare top-level names
@@ -1116,6 +1178,12 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			merged.NodeTypeImports[local] = mod
 		}
 		merged.NamespaceGroups = append(merged.NamespaceGroups, src.NamespaceGroups...)
+		for ns, xs := range src.NamespaceExports {
+			if merged.NamespaceExports == nil {
+				merged.NamespaceExports = map[string][]ast.NamespaceExport{}
+			}
+			merged.NamespaceExports[ns] = append(merged.NamespaceExports[ns], xs...)
+		}
 		for n, ta := range src.ThisParams {
 			if merged.ThisParams == nil {
 				merged.ThisParams = map[ast.Node]*ast.TypeAnnotation{}
@@ -1175,6 +1243,14 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	}
 	merged.Body = appendModule(merged, unwrap(files[entryAbs].prog.Body))
 	mergeNamespaces(files[entryAbs].prog)
+	for _, f := range files {
+		for e := range f.prog.EvalCode {
+			if merged.EvalCode == nil {
+				merged.EvalCode = map[ast.Expression]bool{}
+			}
+			merged.EvalCode[e] = true
+		}
+	}
 	if cp := files[entryAbs].workerCopy; cp != nil {
 		// The entry is also its own worker (`new Worker(__filename)`).
 		_, body := splitWorkerBody(unwrap(cp.Body))
@@ -1212,6 +1288,15 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			stmtFile[st] = path
 		}
 	}
+	merged.StmtFiles = stmtFile
+	// The files Node runs as ES modules: those with module syntax, which
+	// its detection of an untyped file goes by.
+	merged.ESMFiles = map[string]bool{}
+	for path, f := range files {
+		if hasModuleSyntax(f.prog.Body) {
+			merged.ESMFiles[path] = true
+		}
+	}
 	for _, f := range files {
 		if fileImportsKlainSync(f.prog) {
 			merged.UsesKlainSync = true
@@ -1225,6 +1310,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			if !ok || isolatedDynamicImport {
 				continue
 			}
+			node.Namespace = dynNamespaces[node.ResolvedPath]
 			for i := range node.Exports {
 				if m, ok := tf.publicMangled(node.Exports[i].Name); ok {
 					node.Exports[i].Mangled = m
@@ -1312,6 +1398,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 	}
+	ast.AddNamespaceObjects(merged)
 	// The strict lane is TypeScript's: a program tsc rejects for a type
 	// error is rejected here, with tsc's code (TDD-00230 P2.7). The js lane
 	// compiles it as JavaScript.
@@ -1483,6 +1570,14 @@ func isTypeMemberKind(k string) bool {
 	return k == "class" || k == "interface" || k == "type" || k == "enum"
 }
 
+// isTypeValuePair reports a type-only declaration (interface or type alias)
+// paired with a value one (function or variable), in either order.
+func isTypeValuePair(a, b string) bool {
+	typeOnly := func(k string) bool { return k == "interface" || k == "type" }
+	value := func(k string) bool { return k == "function" || k == "var" || k == "let" || k == "const" }
+	return (typeOnly(a) && value(b)) || (value(a) && typeOnly(b))
+}
+
 func isClassIfaceMergePair(a, b string) bool {
 	if a == "interface" && b == "interface" {
 		// interface+interface declaration merging (ADR-00479): the two
@@ -1641,7 +1736,7 @@ func mangleFileDecls(path, key string, prog *ast.Program, fileIdx int) (map[stri
 // scalar/string accessor surface; un-annotated or non-value exports are
 // omitted (the result object simply lacks those fields in V1).
 func parseIslandExports(path string) ([]ast.ImportCallExport, error) {
-	src, err := os.ReadFile(path)
+	src, err := readSource(path)
 	if err != nil {
 		return nil, err
 	}
@@ -1677,6 +1772,97 @@ func parseIslandExports(path string) ([]ast.ImportCallExport, error) {
 // under its own declared name too — matching real ES modules, where
 // `export default function foo() {...}` does not also make `foo` available
 // via `import { foo }`.
+// prependNamespaceObjects declares, at the top of prog, the module namespace
+// object of each namespace import read as a value (`typeof path`, `const p =
+// path`): a frozen object of the module's value exports, keyed in sorted
+// order as Node's module namespace object is.
+func prependNamespaceObjects(prog *ast.Program, objects map[string]string, values map[string]map[string]string, live map[string]map[string]bool, at map[string]ast.Pos) {
+	if len(objects) == 0 {
+		return
+	}
+	locals := make([]string, 0, len(objects))
+	for l := range objects {
+		locals = append(locals, l)
+	}
+	sort.Strings(locals)
+	var decls []ast.Statement
+	for _, l := range locals {
+		vals, pos := values[l], at[l]
+		keys := make([]string, 0, len(vals))
+		for k := range vals {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		freeze := namespaceObject(keys, vals, live[l], pos)
+		decls = append(decls, ast.NewVarDeclaration("const", objects[l], nil, freeze, pos))
+	}
+	prog.Body = append(decls, prog.Body...)
+}
+
+// namespaceObject is a module namespace object: a frozen object of the value
+// exports keys names (vals maps each to its program name), a `let`/`var`
+// export (live) read through an accessor so it stays the binding.
+func namespaceObject(keys []string, vals map[string]string, live map[string]bool, pos ast.Pos) *ast.CallExpression {
+	props := make([]ast.ObjectProperty, 0, len(keys))
+	lit := ast.NewObjectLiteral(nil, pos)
+	for _, k := range keys {
+		if live[k] {
+			get := ast.NewFunctionExpression("", nil, nil, ast.NewBlockStatement([]ast.Statement{ast.NewReturnStatement(ast.NewIdentifier(vals[k], pos), pos)}, pos), false, pos)
+			props = append(props, ast.ObjectProperty{Key: k, Value: get, AccessorKind: "get"})
+			continue
+		}
+		props = append(props, ast.ObjectProperty{Key: k, Value: ast.NewIdentifier(vals[k], pos)})
+	}
+	lit.Properties = props
+	freeze := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Object", pos), "freeze", pos),
+		[]ast.Expression{lit}, pos)
+	// Typed as the frozen literal; built as the namespace object.
+	freeze.Intrinsic = ast.ModuleNamespaceIntrinsic
+	return freeze
+}
+
+// mutableExports is the exported `let`/`var` bindings of prog, by the names
+// they are exported under.
+func mutableExports(prog *ast.Program) map[string]bool {
+	out := map[string]bool{}
+	for _, st := range prog.Body {
+		exp, ok := st.(*ast.ExportDeclaration)
+		if !ok || exp.IsDefault {
+			continue
+		}
+		switch d := exp.Decl.(type) {
+		case *ast.VarDeclaration:
+			if d.Kind != "const" {
+				out[ast.Unmangle(d.Name)] = true
+			}
+		case *ast.VarDeclarationList:
+			for _, v := range d.Decls {
+				if v.Kind != "const" {
+					out[ast.Unmangle(v.Name)] = true
+				}
+			}
+		}
+	}
+	return out
+}
+
+// typeExportedNames is prog's exported interfaces and type aliases.
+func typeExportedNames(prog *ast.Program) map[string]bool {
+	names := map[string]bool{}
+	for _, stmt := range prog.Body {
+		exp, ok := stmt.(*ast.ExportDeclaration)
+		if !ok || exp.IsDefault {
+			continue
+		}
+		for _, ref := range declRefsOf(stmt) {
+			if ref.Kind == "interface" || ref.Kind == "type" {
+				names[ref.Name] = true
+			}
+		}
+	}
+	return names
+}
+
 func exportedNames(prog *ast.Program) map[string]bool {
 	names := map[string]bool{}
 	for _, stmt := range prog.Body {
@@ -1714,6 +1900,7 @@ func resolveImportPath(dir, source, klainModulesDir string) (string, error) {
 		if !strings.HasSuffix(p, ".ts") {
 			p += ".ts"
 		}
+		p = lib.BackendPath(p)
 		if _, ok := lib.ModuleSource(p); ok {
 			return p, nil
 		}
@@ -1835,6 +2022,14 @@ func splitWorkerBody(stmts []ast.Statement) (decls, body []ast.Statement) {
 		}
 	}
 	return decls, body
+}
+
+// sortDiags orders one file's diagnostics by position.
+func sortDiags(ds []*diag.Diagnostic) {
+	sort.SliceStable(ds, func(i, j int) bool {
+		a, b := ds[i].Pos, ds[j].Pos
+		return a.Line < b.Line || a.Line == b.Line && a.Col < b.Col
+	})
 }
 
 // unwrap strips ImportDeclaration nodes and unwraps ExportDeclaration nodes
@@ -1967,8 +2162,9 @@ func defaultImportsAsNamespaces(prog *ast.Program) {
 	prog.Body = body
 }
 
-// rewriteSelfWorker turns `new Worker(__filename)` into a worker of the file
-// itself (its own path as the specifier), and reports whether it did.
+// rewriteSelfWorker turns `new Worker(__filename)`, or the ES-module form
+// `new Worker(new URL(import.meta.url))`, into a worker of the file itself
+// (its own path as the specifier), and reports whether it did.
 func rewriteSelfWorker(prog *ast.Program, path string) bool {
 	self := "./" + filepath.Base(path)
 	found := false
@@ -1977,6 +2173,12 @@ func rewriteSelfWorker(prog *ast.Program, path string) bool {
 			if id, ok := ne.Args[0].(*ast.Identifier); ok && id.Name == "__filename" {
 				ne.Args[0] = ast.NewStringLiteral(self, id.GetPos())
 				found = true
+			}
+			if u, ok := ne.Args[0].(*ast.NewExpression); ok && u.ClassName == "URL" && len(u.Args) == 1 {
+				if m, ok := u.Args[0].(*ast.ImportMetaUrl); ok {
+					ne.Args[0] = ast.NewStringLiteral(self, m.GetPos())
+					found = true
+				}
 			}
 		}
 		return true
@@ -2063,6 +2265,7 @@ func rewriteStaticEval(prog *ast.Program) {
 	if declared {
 		return
 	}
+	inInit := evalCallsInClassInitializers(prog)
 	var rewrite func(ast.Node) ast.Node
 	rewrite = func(n ast.Node) ast.Node {
 		ast.RewriteChildren(n, rewrite)
@@ -2070,6 +2273,7 @@ func rewriteStaticEval(prog *ast.Program) {
 		if !ok || len(call.Args) != 1 || call.Optional {
 			return n
 		}
+		atInit := inInit[call]
 		if id, ok := call.Callee.(*ast.Identifier); !ok || id.Name != "eval" {
 			return n
 		}
@@ -2093,9 +2297,72 @@ func rewriteStaticEval(prog *ast.Program) {
 		if !ok {
 			return n
 		}
-		return rewrite(es.Expr)
+		if atInit && readsOwnArguments(es.Expr) {
+			// A field initializer's or static block's eval code sees no
+			// function's arguments: its SyntaxError, thrown by the call.
+			if th, err := parser.ParseEval(`(() => { throw new SyntaxError("'arguments' is not allowed in class field initializer or static initialization block"); })()`); err == nil {
+				if ts, ok := th.Body[0].(*ast.ExpressionStatement); ok {
+					return ts.Expr
+				}
+			}
+		}
+		if prog.EvalCode == nil {
+			prog.EvalCode = map[ast.Expression]bool{}
+		}
+		out := rewrite(es.Expr).(ast.Expression)
+		prog.EvalCode[out] = true
+		return out
 	}
 	ast.RewriteChildren(prog, rewrite)
+}
+
+// evalCallsInClassInitializers is the set of eval calls in a class field's
+// initializer or static block, through arrow functions only.
+func evalCallsInClassInitializers(prog *ast.Program) map[*ast.CallExpression]bool {
+	out := map[*ast.CallExpression]bool{}
+	collect := func(root ast.Node) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassExpression, *ast.ClassDeclaration:
+				return false // its own arguments, or its own initializers
+			case *ast.CallExpression:
+				if id, ok := x.Callee.(*ast.Identifier); ok && id.Name == "eval" {
+					out[x] = true
+				}
+			}
+			return true
+		})
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if cd, ok := n.(*ast.ClassDeclaration); ok {
+			for _, f := range cd.Fields {
+				if f.Initializer != nil {
+					collect(f.Initializer)
+				}
+			}
+			for _, b := range cd.StaticBlocks {
+				collect(b)
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// readsOwnArguments reports a read of `arguments` in expr outside any
+// function of its own (arrows have none).
+func readsOwnArguments(expr ast.Expression) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassExpression, *ast.ClassDeclaration:
+			return false
+		case *ast.Identifier:
+			found = found || x.Name == "arguments"
+		}
+		return !found
+	})
+	return found
 }
 
 // onlySelfWorker reports whether every worker the file starts is itself.
@@ -2219,8 +2486,9 @@ func companionMangled(files map[string]*fileInfo, spec string) map[string]string
 }
 
 var (
-	processMemberRE = regexp.MustCompile(`\bprocess\s*\??\.\s*([A-Za-z_$][\w$]*)`)
-	processWordRE   = regexp.MustCompile(`(^|[^.\w$])process\b(\s*\??\.)?`)
+	bufferPoolSizeRE = regexp.MustCompile(`\bBuffer\s*\.\s*poolSize\b`)
+	processMemberRE  = regexp.MustCompile(`\bprocess\s*\??\.\s*([A-Za-z_$][\w$]*)`)
+	processWordRE    = regexp.MustCompile(`(^|[^.\w$])process\b(\s*\??\.)?`)
 	// Members lib/node/internal_process_methods.ts implements.
 	processMethods = map[string]bool{
 		"cwd": true, "chdir": true, "uptime": true, "kill": true, "memoryUsage": true,
@@ -2236,7 +2504,7 @@ var (
 		"prependListener": true, "prependOnceListener": true, "emit": true, "listenerCount": true,
 		"listeners": true, "rawListeners": true, "removeAllListeners": true, "setMaxListeners": true,
 		"getMaxListeners": true, "eventNames": true,
-		"send": true, "disconnect": true, "connected": true, "channel": true,
+		"send": true, "disconnect": true, "connected": true, "channel": true, "title": true,
 	}
 )
 
@@ -2487,6 +2755,72 @@ var globalThisRE = regexp.MustCompile(`(^|[^.\w$])globalThis\b(\s*\??\.\s*([A-Za
 
 // globalObjectUse reports whether src may use the global object itself:
 // `globalThis` as a value, or a property of it that no global declares.
+// ctorFunctionCall reports a function declaration both constructed with
+// `new` and called plainly, whose plain call receives globalThis as
+// `this`.
+func ctorFunctionCall(src []byte) bool {
+	if !bytes.Contains(src, []byte("this")) {
+		return false
+	}
+	for _, m := range newCalleeRE.FindAllSubmatch(src, -1) {
+		name := regexp.QuoteMeta(string(m[1]))
+		if !regexp.MustCompile(`\bfunction\s+` + name + `\s*\(`).Match(src) {
+			continue
+		}
+		// Its plain calls: what is left once declarations and `new` are cut.
+		rest := regexp.MustCompile(`\b(?:function|new)\s+\(?\s*`+name+`\b`).ReplaceAll(src, nil)
+		if regexp.MustCompile(`(?:^|[^.\w$])` + name + `\s*\(`).Match(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+var newCalleeRE = regexp.MustCompile(`\bnew\s+\(?\s*([A-Za-z_$][\w$]*)`)
+
+var (
+	assignTargetRE = regexp.MustCompile(`(?:^|[;{}(\n])\s*([A-Za-z_$][\w$]*)\s*(?:[-+*/%&|^]|\*\*|<<|>>>?|&&|\|\||\?\?)?=([^=]|$)`)
+	declaredNameRE = regexp.MustCompile(`\b(?:var|let|const|function\*?|class)\s+([A-Za-z_$][\w$]*)`)
+)
+
+// undeclaredAssign reports a sloppy-mode script (`.js`, `.cjs`) that may
+// assign a name it never declares: in sloppy code that makes a property of
+// the global object. An over-match only links the global object.
+func undeclaredAssign(path string, src []byte) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".js" && ext != ".cjs" {
+		return false
+	}
+	declared := map[string]bool{}
+	for _, m := range declaredNameRE.FindAllSubmatch(src, -1) {
+		declared[string(m[1])] = true
+	}
+	globals := tsGlobalValues()
+	for _, m := range assignTargetRE.FindAllSubmatch(src, -1) {
+		n := string(m[1])
+		if !declared[n] && !globals[n] && n != "this" {
+			return true
+		}
+	}
+	return false
+}
+
+// sloppyThisUse reports whether a script may read a sloppy-mode function's
+// `this`, which is the global object when the call supplies none.
+func sloppyThisUse(path string, src []byte) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".js" && ext != ".cjs" || !thisWordRE.Match(src) || moduleSyntaxRE.Match(src) {
+		return false
+	}
+	t := bytes.TrimLeft(src, " \t\r\n")
+	return !bytes.HasPrefix(t, []byte(`"use strict"`)) && !bytes.HasPrefix(t, []byte(`'use strict'`))
+}
+
+var (
+	thisWordRE     = regexp.MustCompile(`\bthis\b`)
+	moduleSyntaxRE = regexp.MustCompile(`(?m)^\s*(import|export)\b`)
+)
+
 func globalObjectUse(src []byte) bool {
 	declared := tsGlobalValues()
 	for _, m := range globalThisRE.FindAllSubmatch(src, -1) {
@@ -2552,4 +2886,29 @@ func appendModule(merged *ast.Program, stmts []ast.Statement) []ast.Statement {
 		}
 	}
 	return append(merged.Body, stmts...)
+}
+
+// hasModuleSyntax reports whether body has ES module syntax: an import or
+// export, import.meta, or a top-level await.
+func hasModuleSyntax(body []ast.Statement) bool {
+	found := false
+	for _, st := range body {
+		switch st.(type) {
+		case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+			return true
+		}
+		ast.Inspect(st, func(n ast.Node) bool {
+			switch n.(type) {
+			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration:
+				return false
+			case *ast.AwaitExpression, *ast.ImportMetaUrl:
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }

@@ -22,7 +22,9 @@
 package llvm
 
 import (
+	"KlainMainLang/binder"
 	"fmt"
+	"strings"
 
 	"reflect"
 
@@ -89,6 +91,9 @@ func (e *Emitter) inferMemoDefined() {
 // nodes the checker never saw (a binding's initializer, a receiver) re-infer
 // their parts, which compounds with nesting.
 func (e *Emitter) inferExprType(expr ast.Expression) Type {
+	if c, ok := expr.(*ast.CallExpression); ok && (c.Intrinsic == ast.ModuleNamespaceIntrinsic || c.Intrinsic == ast.LiveBindingsIntrinsic) {
+		return TypeAny // a module namespace object (moduleNamespaceRule)
+	}
 	switch expr.(type) {
 	case *ast.CallExpression, *ast.MemberExpression, *ast.Identifier:
 	default:
@@ -121,10 +126,8 @@ func (e *Emitter) inferExprType(expr ast.Expression) Type {
 }
 
 func (e *Emitter) inferExprTypeFull(expr ast.Expression) Type {
-	// A dynamic entry's widened parameter is the box it binds, whatever
-	// the checker types its name (emit_dynentry.go).
-	if id, ok := expr.(*ast.Identifier); ok && e.dynEntryWidenedIdent(id) {
-		return TypeAny
+	if t, ok := e.boxOverride(expr); ok {
+		return t // mirrors emitAnyArgDispatch, emitShadowableRead
 	}
 	// A bound name reads its storage: its representation is the binding's
 	// (whose type the checker gave through its initializer), refined by
@@ -132,31 +135,64 @@ func (e *Emitter) inferExprTypeFull(expr ast.Expression) Type {
 	if id, ok := expr.(*ast.Identifier); ok && e.boundName(id) {
 		return e.inferRefined(expr, e.identStorageType(id))
 	}
+	// A user class's prototype object is a dynamic object (emitClassProto),
+	// whatever the checker types it as.
+	if m, ok := expr.(*ast.MemberExpression); ok && m.Property == "prototype" && e.isClassName(m.Object) {
+		return TypeAny
+	}
 	// A property of a value held boxed is read by the dynamic dispatch, so
 	// its type is that dispatch's, whatever the checker knows of the value
 	// (a js-lane parameter typed from its call sites but stored as `any`).
-	if m, ok := expr.(*ast.MemberExpression); ok && !m.Optional && !e.unboundName(m.Object) {
+	if m, ok := expr.(*ast.MemberExpression); ok && !m.Optional && !e.unboundName(m.Object) && !e.enumName(m.Object) {
 		rt := e.inferExprType(m.Object)
 		if isUnconstrainedDynamic(rt) && rt.DynPropTy == nil {
 			return e.inferRefined(expr, e.structuralMemberType(m))
 		}
 		// A field whose slot the object's layout holds boxed (`{ f:
 		// String.prototype.normalize }`) reads that box.
-		if _, fty, ok := rt.FieldIndex(m.Property); ok && fty.IsDynamic {
+		if _, fty, ok := rt.FieldIndex(m.Property); ok && fty.IsDynamic() {
 			return e.inferRefined(expr, e.structuralMemberType(m))
+		}
+		// An array's or a string's method read as a value is its
+		// prototype's record (emitMember), whatever signature the checker
+		// gives it.
+		for _, class := range []string{valueProtoClass(rt), primMethodClass(rt)} {
+			if _, ok := e.classMethod(class, m.Property); ok && class != "" {
+				return TypeAny
+			}
+		}
+		// A generator's member other than its protocol's is read off its
+		// prototype chain (shape.c).
+		if _, own := generatorMethods[m.Property]; rt.IsGenerator() && !own && e.genProtos {
+			return TypeAny
 		}
 		// A function value's property other than its own (`g.toString`) is
 		// read off the boxed function the same way.
-		if rt.IsFunc {
-			if st := e.structuralMemberType(m); st.IsDynamic {
+		if rt.IsFunc() {
+			if st := e.structuralMemberType(m); st.IsDynamic() {
 				return e.inferRefined(expr, st)
 			}
+		}
+	}
+	// An array's symbol-keyed property is read through its box
+	// (emitIndexUnguarded).
+	if ix, ok := expr.(*ast.IndexExpression); ok && !ix.Optional {
+		if ot := e.inferExprType(ix.Object); ot.IsArray() && !ot.IsDynamic() && !ot.IsFlatArray() && (isWellKnownSymbolExpr(ix.Index) || e.inferExprType(ix.Index).IsSymbol()) {
+			return TypeAny
+		}
+	}
+	if _, isThis := expr.(*ast.ThisExpression); isThis {
+		// A bound `this` reads its binding, as emitThisExpression does,
+		// whatever the checker types it as (an object literal's accessor
+		// binds its synthetic class).
+		if sym, ok := e.lookup("this"); ok {
+			return sym.Ty
 		}
 	}
 	if switchedExprKind(expr) {
 		if o := e.reprOracle(); o != nil {
 			if ty, ok := o.ExprType(expr); ok {
-				if nb, isBuf := expr.(*ast.NewArrayBufferExpression); isBuf && ty.IsArrayBuffer {
+				if nb, isBuf := expr.(*ast.NewArrayBufferExpression); isBuf && ty.IsArrayBuffer() {
 					// A `maxByteLength` option makes the buffer growable: a
 					// fact about this value, not its type.
 					ty.BufferGrowable = nb.MaxByteLength != nil
@@ -181,12 +217,17 @@ func (e *Emitter) inferExprTypeFull(expr ast.Expression) Type {
 			// eval's text; or a checker gap, which the shadow report lists)
 			// is typed from its binding, the dispatch its emission runs, or
 			// its syntax (settledFallbackType).
-			if o := e.reprOracle(); o != nil && o.c.InProgram(expr) {
-				e.shadowSwitchFallback(expr)
+			ft := e.settledFallbackType(expr)
+			if o := e.reprOracle(); o != nil && o.c.InProgram(expr) && !e.loweredNodes[expr] && !virtualModuleMarker(expr) {
+				e.shadowSwitchFallback(expr, ft)
 			}
-			return e.inferRefined(expr, e.settledFallbackType(expr))
+			return e.inferRefined(expr, ft)
 		}
-		e.shadowSwitchFallback(expr)
+		ft := e.inferExprTypeMemo(expr)
+		if o := e.reprOracle(); o != nil && o.c.InProgram(expr) && !e.loweredNodes[expr] && !virtualModuleMarker(expr) {
+			e.shadowSwitchFallback(expr, ft) // a synthesized node is no checker gap
+		}
+		return e.inferRefined(expr, ft)
 	}
 	return e.inferRefined(expr, e.inferExprTypeMemo(expr))
 }
@@ -204,6 +245,8 @@ func (e *Emitter) settledFallbackType(expr ast.Expression) Type {
 		return e.structuralMemberType(x)
 	case *ast.CallExpression:
 		return e.structuralCallType(x)
+	case *ast.IndexExpression:
+		return e.structuralIndexType(x)
 	}
 	return e.syntacticExprType(expr)
 }
@@ -213,7 +256,7 @@ func (e *Emitter) settledFallbackType(expr ast.Expression) Type {
 func (e *Emitter) inferRefined(expr ast.Expression, ty Type) Type {
 	// A union-typed property read the checker narrows (`typeof o.v ===
 	// "object" ? o.v.slice() : …`) reads as that member (mirrors emitMember).
-	if m, ok := expr.(*ast.MemberExpression); ok && ty.IsDynamic && len(ty.UnionMembers) > 0 {
+	if m, ok := expr.(*ast.MemberExpression); ok && ty.IsDynamic() && len(ty.UnionMembers) > 0 {
 		if nt, ok := e.checkerNarrowedUnion(m, ty); ok {
 			ty = nt
 		}
@@ -235,7 +278,7 @@ func (e *Emitter) inferRefined(expr ast.Expression, ty Type) Type {
 	// integer default; the checker's function type is the member's.
 	if m, ok := expr.(*ast.MemberExpression); ok && reprKey(ty) == reprKey(TypeI64) {
 		if o := e.reprOracle(); o != nil {
-			if ct, ok := o.ExprType(m); ok && ct.IsFunc {
+			if ct, ok := o.ExprType(m); ok && ct.IsFunc() {
 				// A method reading `arguments` takes its implicit rest, as its
 				// signature is built (maybeAddArgumentsRestParam).
 				if fd, ok := o.c.MemberDecl(m).(*ast.FunctionDeclaration); ok && fd.Body != nil && !ct.FuncHasRest {
@@ -248,7 +291,7 @@ func (e *Emitter) inferRefined(expr ast.Expression, ty Type) Type {
 			}
 		}
 	}
-	if m, ok := expr.(*ast.MemberExpression); ok && ty.IR == "i64" && !ty.Float && !ty.IsDynamic && !isNullableScalar(ty) && e.builtinCount(m) {
+	if m, ok := expr.(*ast.MemberExpression); ok && ty.IR == "i64" && !ty.Float && !ty.IsDynamic() && !isNullableScalar(ty) && e.builtinCount(m) {
 		ty = TypeF64 // emitExpr's countToNumber
 	}
 	if e.shadowOracle != nil {
@@ -261,17 +304,18 @@ func (e *Emitter) inferRefined(expr ast.Expression, ty Type) Type {
 // `byteLength`, …) of an array, string, collection or buffer: a `number`,
 // which is a double (TDD-00230 P3.3), however the runtime keeps it.
 func (e *Emitter) builtinCount(ex *ast.MemberExpression) bool {
-	switch ex.Property {
-	case "length", "size", "byteLength", "byteOffset", "maxByteLength":
-	default:
+	if !builtinCountNames[ex.Property] {
 		return false
 	}
 	t := e.inferExprTypeMemo(ex.Object)
-	if t.IsDynamic || t.IsClass || (t.IsObject && !t.IsArray) || t.IsDynamicObject {
+	if t.IsDynamic() || t.IsClass() || (t.IsObject() && !t.IsArray()) || t.IsDynamicObject() {
 		return false
 	}
-	return t.IsArray || t.IsTypedArray || t.IsBuffer || t.IsArrayBuffer || t.IsMap || t.IsSet || isStringTy(t)
+	return t.IsArray() || t.IsTypedArray() || t.IsBuffer() || t.IsArrayBuffer() || t.IsMap() || t.IsSet() || isStringTy(t)
 }
+
+// builtinCountNames are the members builtinCount looks at.
+var builtinCountNames = map[string]bool{"length": true, "size": true, "byteLength": true, "byteOffset": true, "maxByteLength": true}
 
 func (e *Emitter) inferExprTypeMemo(expr ast.Expression) Type {
 	// Only the nodes that carry the receiver recursion are memoised.
@@ -334,7 +378,7 @@ func (e *Emitter) syntacticExprType(expr ast.Expression) Type {
 		if ex.OutType != nil {
 			outTy = e.resolveType(ex.OutType)
 		}
-		return Type{IR: "ptr", IsTransformStream: true, StreamChunk: &inTy, StreamOut: &outTy}
+		return Type{IR: "ptr", Host: hostTransformStream, StreamChunk: &inTy, StreamOut: &outTy}
 	case *ast.NewWritableStreamExpression:
 		if ex.ChunkType != nil {
 			return WritableStreamType(e.resolveType(ex.ChunkType))
@@ -368,7 +412,7 @@ func settledExprKind(expr ast.Expression) bool {
 		*ast.NewRegExpExpression, *ast.NewTypedArrayExpression, *ast.NewDateExpression,
 		*ast.NewArrayExpression, *ast.NewReadableStreamExpression, *ast.NewWritableStreamExpression,
 		*ast.NewTransformStreamExpression, *ast.NewRequestExpression,
-		*ast.Identifier, *ast.MemberExpression, *ast.CallExpression:
+		*ast.IndexExpression, *ast.Identifier, *ast.MemberExpression, *ast.CallExpression:
 		return true
 	}
 	return false
@@ -381,11 +425,17 @@ func settledExprKind(expr ast.Expression) bool {
 func switchedExprKind(expr ast.Expression) bool {
 	switch expr.(type) {
 	case *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.TemplateLiteral,
-		*ast.ThisExpression,
+		*ast.ThisExpression, *ast.ConditionalExpression, *ast.UnaryExpression, *ast.UpdateExpression,
+		*ast.SequenceExpression, *ast.SuperExpression, *ast.AsExpression, *ast.NonNullExpression,
+		*ast.YieldExpression, *ast.NewTargetExpression, *ast.AwaitExpression,
+		*ast.NewMapExpression, *ast.NewSetExpression, *ast.NewWeakMapExpression, *ast.NewWeakSetExpression,
+		*ast.NewCompressionStreamExpression, *ast.NewXMLHttpRequestExpression,
+		*ast.TaggedTemplateExpression, *ast.ImportCallExpression,
 		*ast.NewRegExpExpression, *ast.NewTypedArrayExpression, *ast.NewErrorExpression, *ast.NewDateExpression,
 		*ast.NewArrayExpression, *ast.NewReadableStreamExpression, *ast.NewWritableStreamExpression,
 		*ast.NewTransformStreamExpression, *ast.NewRequestExpression, *ast.NewArrayBufferExpression,
-		*ast.Identifier, *ast.MemberExpression, *ast.CallExpression:
+		*ast.ArrayLiteral, *ast.NewExpression, *ast.AssignmentExpression, *ast.BinaryExpression, *ast.IndexExpression, *ast.Identifier, *ast.MemberExpression, *ast.CallExpression,
+		*ast.ArrowFunction, *ast.FunctionExpression, *ast.ObjectLiteral:
 		return true
 	}
 	return false
@@ -394,6 +444,11 @@ func switchedExprKind(expr ast.Expression) bool {
 // reprOracle is the checker's side of inferExprType for the switched
 // kinds, over codegen's own checker (front).
 func (e *Emitter) reprOracle() *frontOracle {
+	if e.foreignThisBody {
+		// A method body compiled for a foreign receiver: the checker typed
+		// its `this` as the class.
+		return nil
+	}
 	if e.frontReprBuilt {
 		return e.frontRepr
 	}
@@ -402,7 +457,16 @@ func (e *Emitter) reprOracle() *frontOracle {
 		return nil // the program is not stored yet: ask again later
 	}
 	e.frontReprBuilt = true
-	o := frontOracle{b: e.frontBinding, c: c, r: e.repr(), q: &oracleQuery{}}.withPromiseCallbacks(e.prog)
+	r := e.repr()
+	b := e.frontBinding
+	r.nodeJS = func(sym *binder.Symbol) bool {
+		if b.Globals == nil {
+			return false
+		}
+		ns := b.Globals.Symbols.Get("NodeJS")
+		return ns != nil && b.NamespaceScope(ns) == sym.Scope
+	}
+	o := frontOracle{b: b, c: c, r: r, q: &oracleQuery{}, storesBusy: map[*ast.Identifier]bool{}, litBusy: map[*ast.ObjectLiteral]bool{}, forOfBusy: map[*ast.ForOfStatement]bool{}}.withPromiseCallbacks(e.prog)
 	e.frontRepr = &o
 	return e.frontRepr
 }
@@ -440,4 +504,12 @@ func constLiteralTree(x ast.Expression) bool {
 		return true
 	}
 	return false
+}
+
+// virtualModuleMarker reports the binding a virtual module's import was
+// renamed to (`Memory__kml_builtin`): its members dispatch by name, and the
+// checker has no declaration for it.
+func virtualModuleMarker(expr ast.Expression) bool {
+	id, ok := expr.(*ast.Identifier)
+	return ok && strings.HasSuffix(id.Name, "_kml_builtin")
 }

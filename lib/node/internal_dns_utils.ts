@@ -21,13 +21,13 @@ export function received(value: any): string {
 }
 
 export function invalidArgType(name: string, expected: string, value: any): Error {
-    return new NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '.' + received(value));
+    return NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "' + name + '" argument must be ' + expected + '.' + received(value));
 }
 
 export function invalidArgValue(name: string, value: any, reason?: string): Error {
     const shown = typeof value === 'string' ? "'" + value + "'" : String(value);
     const kind = name.includes('.') ? 'property' : 'argument';
-    return new NodeTypeError('ERR_INVALID_ARG_VALUE', "The " + kind + " '" + name + "' " + (reason ?? 'is invalid') + '. Received ' + shown);
+    return NodeTypeError('ERR_INVALID_ARG_VALUE', "The " + kind + " '" + name + "' " + (reason ?? 'is invalid') + '. Received ' + shown);
 }
 
 export function missingArgs(names: string[]): Error {
@@ -36,7 +36,7 @@ export function missingArgs(names: string[]): Error {
     if (quoted.length === 1) msg += quoted[0] + ' argument';
     else if (quoted.length === 2) msg += quoted[0] + ' and ' + quoted[1] + ' arguments';
     else msg += quoted.slice(0, -1).join(', ') + ', and ' + quoted[quoted.length - 1] + ' arguments';
-    return new NodeTypeError('ERR_MISSING_ARGS', msg + ' must be specified');
+    return NodeTypeError('ERR_MISSING_ARGS', msg + ' must be specified');
 }
 
 // lib/internal/errors.js's DNSException: a libuv error number (getaddrinfo,
@@ -57,8 +57,7 @@ export class DNSException extends Error {
             name = code;
         }
         super(syscall + ' ' + name + (hostname ? ' ' + hostname : ''));
-        // The layout's errno slot is numeric: a c-ares error leaves it unset.
-        if (errno !== undefined) (this as any).errno = errno;
+        (this as any).errno = errno;
         this.code = name;
         this.syscall = syscall;
         if (hostname) {
@@ -103,7 +102,7 @@ export function validateArray(value: any, name: string): void {
 }
 
 function outOfRange(name: string, range: string, value: any): Error {
-    return new NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + String(value));
+    return NodeRangeError('ERR_OUT_OF_RANGE', 'The value of "' + name + '" is out of range. It must be ' + range + '. Received ' + String(value));
 }
 
 function validateInt32(value: any, name: string, min: number): void {
@@ -122,7 +121,7 @@ export function validateOneOf(value: any, name: string, oneOf: any[]): void {
     if (!oneOf.includes(value)) {
         const allowed = oneOf.map((v) => (typeof v === 'string' ? "'" + v + "'" : String(v))).join(', ');
         const shown = typeof value === 'string' ? "'" + value + "'" : String(value);
-        throw new NodeTypeError('ERR_INVALID_ARG_VALUE',
+        throw NodeTypeError('ERR_INVALID_ARG_VALUE',
             "The " + (name.includes('.') ? 'property' : 'argument') + " '" + name + "' must be one of: " + allowed + '. Received ' + shown);
     }
 }
@@ -131,7 +130,7 @@ export function validatePort(port: any, name: string = 'Port'): void {
     const ok = (typeof port === 'number' || (typeof port === 'string' && port.trim().length !== 0)) &&
         +port === (+port >>> 0) && +port <= 0xFFFF;
     if (!ok) {
-        throw new NodeRangeError('ERR_SOCKET_BAD_PORT', name + ' should be >= 0 and < 65536. Received ' +
+        throw NodeRangeError('ERR_SOCKET_BAD_PORT', name + ' should be >= 0 and < 65536. Received ' +
             (typeof port === 'string' ? "type string ('" + port + "')" : 'type ' + typeof port + ' (' + String(port) + ')') + '.');
     }
 }
@@ -223,13 +222,13 @@ export class ResolverBase {
                 }
             }
 
-            throw new NodeTypeError('ERR_INVALID_IP_ADDRESS', 'Invalid IP address: ' + serv);
+            throw NodeTypeError('ERR_INVALID_IP_ADDRESS', 'Invalid IP address: ' + serv);
         });
 
         const spec = newSet.map((s: any) => s[0] + ' ' + s[1] + ' ' + s[2]).join('\n');
         const errorNumber = __kml_native.dnsChannelSetServers(this._handle, spec);
         if (errorNumber !== 0) {
-            throw new NodeError('ERR_DNS_SET_SERVERS_FAILED', 'c-ares failed to set servers: "' + __kml_native.dnsStrerror(errorNumber) + '" [' + (servers as any[]).join(',') + ']');
+            throw NodeError('ERR_DNS_SET_SERVERS_FAILED', 'c-ares failed to set servers: "' + __kml_native.dnsStrerror(errorNumber) + '" [' + (servers as any[]).join(',') + ']');
         }
     }
 
@@ -240,7 +239,7 @@ export class ResolverBase {
         }
         const r = __kml_native.dnsChannelSetLocal(this._handle, ipv4, ipv6 === undefined ? '' : ipv6);
         if (r !== 0) {
-            throw new NodeTypeError('ERR_INVALID_ARG_VALUE',
+            throw NodeTypeError('ERR_INVALID_ARG_VALUE',
                 r === 1 ? 'Invalid IP address.' : r === 2 ? 'Cannot specify two IPv4 addresses.' : 'Cannot specify two IPv6 addresses.');
         }
     }

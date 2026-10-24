@@ -9,6 +9,52 @@ import (
 // Pos tracks source location.
 type Pos struct{ Line, Col int }
 
+// SourceText is a parsed file's text with the spans of its type syntax,
+// which JavaScript's view of the source (Node's type stripping) blanks.
+type SourceText struct {
+	Src    string
+	Blanks [][2]int
+}
+
+// Slice is the text of [start, end) with its type syntax blanked to spaces
+// (line breaks kept), as Node strips a TypeScript file's types.
+func (t *SourceText) Slice(start, end int) string {
+	if t == nil || start < 0 || end > len(t.Src) || start >= end {
+		return ""
+	}
+	raw := t.Src[start:end]
+	var out []byte
+	for _, b := range t.Blanks {
+		lo, hi := max(b[0], start), min(b[1], end)
+		if lo >= hi {
+			continue
+		}
+		if out == nil {
+			out = []byte(raw)
+		}
+		for i := lo; i < hi; i++ {
+			if out[i-start] != '\n' {
+				out[i-start] = ' '
+			}
+		}
+	}
+	if out == nil {
+		return raw
+	}
+	return string(out)
+}
+
+// SourceRange is a function's or a class's source span in its file: its
+// `toString()` text.
+type SourceRange struct {
+	Text       *SourceText
+	Start, End int
+}
+
+// String is the range's text as JavaScript sees it (its types blanked); ""
+// when the node has none (a synthesized function).
+func (r SourceRange) String() string { return r.Text.Slice(r.Start, r.End) }
+
 // Node is the common interface for all AST nodes.
 type Node interface {
 	nodeMarker()
@@ -35,6 +81,9 @@ type Program struct {
 	// function, as CommonJS allows) to that module's last statement in Body:
 	// the return ends the module's evaluation there.
 	TopLevelReturns map[*ReturnStatement]Statement
+	// EvalCode holds each expression spliced in from a constant
+	// `eval("...")` argument: code TypeScript never type-checks.
+	EvalCode map[Expression]bool
 	// LibExports maps "<module file>:<name>" (`stream:_kmlFromWeb`) to the
 	// merged name of a top-level declaration of a builtin module written in
 	// TypeScript that the program includes, so code generation can call into
@@ -61,6 +110,13 @@ type Program struct {
 	// namespace scope around its members, so a member's body resolves a bare
 	// sibling name to that sibling (TDD-00230 P2.1).
 	NamespaceGroups []NamespaceGroup
+	// NamespaceExports lists, per namespace, the members its object holds
+	// at run time, in the order TypeScript's emit assigns them: exported
+	// values, classes, non-const enums and instantiated nested namespaces.
+	NamespaceExports map[string][]NamespaceExport
+	// NamespaceObjects maps each namespace the program reads as a value to
+	// the hidden constant holding its object (AddNamespaceObjects).
+	NamespaceObjects map[string]string
 	// Assertions records the type assertions the parser erases (`e as
 	// const`, `e satisfies T`, `<T>e`) by the expression they apply to. Codegen sees
 	// the bare expression; the checker reads them (TDD-00230 P2.7).
@@ -100,6 +156,12 @@ type Program struct {
 	// in the strict lane whatever lane the program's own code uses, and a
 	// module's statements run from its init function.
 	LibStatements map[Statement]string
+	// StmtFiles maps each of the merged program's top-level statements to
+	// the path of the file it came from: the file a stack frame of a
+	// function it holds names.
+	StmtFiles map[Statement]string
+	// ESMFiles are the files with ES module syntax (Node's detection).
+	ESMFiles map[string]bool
 	// CallableClasses are the (renamed) classes of the builtin modules
 	// written in TypeScript that Node implements as plain functions
 	// constructing when called without `new` (`http.Server(…)`), marked
@@ -217,6 +279,14 @@ type WorkerModule struct {
 type NamespaceGroup struct {
 	Name    string // dotted for a nested namespace ("A.B")
 	Members []Statement
+}
+
+// NamespaceExport is one property of a namespace's object.
+type NamespaceExport struct {
+	Name string
+	// Mutable marks an exported `let`/`var`, whose property follows its
+	// binding.
+	Mutable bool
 }
 
 func NamespaceMangle(ns, member string) string {
@@ -359,6 +429,9 @@ type VarDeclaration struct {
 	// value-type array layout — elements stored inline (copies), not as
 	// shared pointers. An explicit aliasing-semantics opt-in.
 	ValueArr bool
+	// Definite marks `let x!: T`, a definite assignment assertion: a read
+	// before any assignment is not an error.
+	Definite bool
 	// NamePos is the declared name's position (zero when not recorded),
 	// where TypeScript reports an initializer that does not fit.
 	NamePos Pos
@@ -395,6 +468,11 @@ func NewVarDeclarationList(decls []*VarDeclaration, pos Pos) *VarDeclarationList
 }
 
 type FunctionDeclaration struct {
+	// NewTargetID ties the new.target nodes in its body to it (their FnID);
+	// 0 when it has none.
+	NewTargetID int
+	// Src is its source text (Function.prototype.toString).
+	Src SourceRange
 	// NamePos is the declared name's position (zero when not recorded),
 	// where TypeScript reports a diagnostic about the function itself.
 	NamePos Pos
@@ -735,8 +813,13 @@ func NewLabeledStatement(label string, body Statement, pos Pos) *LabeledStatemen
 
 // DestructProp is one binding in an object destructuring pattern.
 type DestructProp struct {
-	Key   string // field name in the source object
-	Local string // local variable name (= Key when no rename)
+	Key string // field name in the source object
+	// KeyExpr is a runtime computed key (`{ [k]: v }`), evaluated once as
+	// a property key when the pattern reaches it; Key is then unused.
+	KeyExpr Expression
+	Local   string // local variable name (= Key when no rename)
+	// Pos is Local's position (zero when not recorded).
+	Pos Pos
 	// Default is non-nil for `{ key = expr }` (ADR-00158) — only ever
 	// meaningful (checked and evaluated) when Key names a
 	// pointer-backed nullable (`T | null`) field, the only field shape
@@ -763,6 +846,8 @@ type DestructProp struct {
 // element, mirroring DestructProp's shape for the array-position case.
 type ArrayPatternElem struct {
 	Name string // "" = hole (skipped index)
+	// Pos is Name's position (zero when not recorded).
+	Pos Pos
 	// Default is non-nil for `[a = expr]` — fires exactly when this
 	// position is past the source array's actual length (see
 	// unpackArrayPatternInto's own doc comment for why that's the one
@@ -790,8 +875,11 @@ type ArrayPatternElem struct {
 type ArrayDestructuring struct {
 	Kind  string // "let", "const", "var"
 	Elems []ArrayPatternElem
-	Init  Expression
-	pos   Pos
+	// TypeAnnot is the pattern's declared type (`const [a, b]: T = …`),
+	// nil when unannotated.
+	TypeAnnot *TypeAnnotation
+	Init      Expression
+	pos       Pos
 }
 
 func (*ArrayDestructuring) nodeMarker()   {}
@@ -806,8 +894,11 @@ func NewArrayDestructuring(kind string, elems []ArrayPatternElem, init Expressio
 type ObjectDestructuring struct {
 	Kind  string
 	Props []DestructProp
-	Init  Expression
-	pos   Pos
+	// TypeAnnot is the pattern's declared type (`const { a }: T = …`),
+	// nil when unannotated.
+	TypeAnnot *TypeAnnotation
+	Init      Expression
+	pos       Pos
 }
 
 func (*ObjectDestructuring) nodeMarker()   {}
@@ -880,7 +971,9 @@ type NullLiteral struct {
 	// Void marks the undefined a `void` operator yields: the value itself,
 	// never a binding the program named undefined.
 	Void bool
-	pos  Pos
+	// Elision marks an elided array literal element (`[1, , 3]`): a hole.
+	Elision bool
+	pos     Pos
 }
 
 func (*NullLiteral) nodeMarker()   {}
@@ -943,14 +1036,52 @@ func NewIdentifier(name string, pos Pos) *Identifier { return &Identifier{Name: 
 // implicit receiver); used elsewhere it reaches codegen's generic
 // "unknown expression type" fallback, same as ClassDeclaration does today.
 type ThisExpression struct {
-	pos Pos
+	// NewTarget marks the receiver a `new.target` reads (its This).
+	NewTarget bool
+	pos       Pos
 }
+
+// NewTargetExpression is `new.target`. It is bound lexically as `this` is
+// (an arrow sees its enclosing function's), and reads the receiver: This,
+// its child, is that receiver, so the walkers that capture `this` capture
+// it. Ctx says what the enclosing function is.
+type NewTargetExpression struct {
+	This *ThisExpression
+	Ctx  NewTargetContext
+	// FnID is the NewTargetID of the function declaration it belongs to (0
+	// in a function expression), for a prototype constructor's new.target.
+	FnID int
+	pos  Pos
+}
+
+func (*NewTargetExpression) nodeMarker()   {}
+func (*NewTargetExpression) exprMarker()   {}
+func (n *NewTargetExpression) GetPos() Pos { return n.pos }
+
+// NewTargetContext is the function a `new.target` is in.
+type NewTargetContext int
+
+const (
+	// NewTargetFunction: an ordinary function (undefined unless it runs
+	// through `new`).
+	NewTargetFunction NewTargetContext = iota
+	// NewTargetConstructor: a class constructor (the class `new` named).
+	NewTargetConstructor
+	// NewTargetUndefined: a method, accessor, field initializer or static
+	// block, which no `new` runs.
+	NewTargetUndefined
+)
 
 func (*ThisExpression) nodeMarker()   {}
 func (*ThisExpression) exprMarker()   {}
 func (t *ThisExpression) GetPos() Pos { return t.pos }
 
 func NewThisExpression(pos Pos) *ThisExpression { return &ThisExpression{pos: pos} }
+
+// NewNewTargetExpression is `new.target`.
+func NewNewTargetExpression(pos Pos) *NewTargetExpression {
+	return &NewTargetExpression{This: &ThisExpression{NewTarget: true, pos: pos}, pos: pos}
+}
 
 type BinaryExpression struct {
 	Op          string
@@ -1096,6 +1227,15 @@ func NewAssignmentExpression(op string, left, right Expression, pos Pos) *Assign
 	return &AssignmentExpression{Op: op, Left: left, Right: right, pos: pos}
 }
 
+// ModuleNamespaceIntrinsic marks the resolver's `Object.freeze({ … })` of
+// a module's exports: built as its module namespace object.
+const ModuleNamespaceIntrinsic = "ModuleNamespace"
+
+// LiveBindingsIntrinsic marks an `Object.assign(lit)` whose literal's
+// accessors are live bindings (a namespace's exported `let`s): shown and
+// described as the data properties they stand for.
+const LiveBindingsIntrinsic = "LiveBindings"
+
 type CallExpression struct {
 	Callee Expression
 	Args   []Expression
@@ -1228,7 +1368,10 @@ type ObjectProperty struct {
 
 type ObjectLiteral struct {
 	Properties []ObjectProperty
-	pos        Pos
+	// RestTrailingComma marks `{...x,}`: a comma after a final spread, an
+	// early error when the literal is an assignment pattern.
+	RestTrailingComma bool
+	pos               Pos
 }
 
 func (*ObjectLiteral) nodeMarker()   {}
@@ -1269,15 +1412,20 @@ func (o *ObjectLiteral) HasAccessors() bool {
 // Block holds a block body `=> { stmts }`. Exactly one is non-nil.
 type ArrowFunction struct {
 	// TypeParams are a generic arrow's (`<T>(x: T) => x`): erased to any in
-	// its annotations, as a method's are; the type nodes keep them.
-	TypeParams []string
-	Params     []Param
-	RetType    *TypeAnnotation // nil = infer
-	Body       Expression      // non-nil for `=> expr`
-	Block      *BlockStatement // non-nil for `=> { stmts }`
-	IsAsync    bool
-	Pure       bool // `/** @pure */` on the binding (TDD-00128) — see FunctionDeclaration.Pure
-	pos        Pos
+	// its annotations, as a method's are; the type nodes keep them, and
+	// the checker types the arrow as generic over them.
+	TypeParams           []string
+	TypeParamConstraints []*TypeAnnotation // `extends X`, nil when unconstrained
+	TypeParamDefaults    []*TypeAnnotation // `= T`, nil when none
+	Params               []Param
+	RetType              *TypeAnnotation // nil = infer
+	Body                 Expression      // non-nil for `=> expr`
+	Block                *BlockStatement // non-nil for `=> { stmts }`
+	IsAsync              bool
+	Pure                 bool // `/** @pure */` on the binding (TDD-00128) — see FunctionDeclaration.Pure
+	// Src is its source text (Function.prototype.toString).
+	Src SourceRange
+	pos Pos
 }
 
 func (*ArrowFunction) nodeMarker()   {}
@@ -1297,10 +1445,15 @@ func NewArrowFunction(params []Param, retType *TypeAnnotation, body Expression, 
 type FunctionExpression struct {
 	Name    string // "" for anonymous, rejected for named V1
 	NamePos Pos    // the name's position (zero when anonymous)
-	Params  []Param
-	RetType *TypeAnnotation // nil = infer
-	Body    *BlockStatement
-	IsAsync bool
+	// TypeParams are a generic function expression's or method's, erased
+	// to any in its annotations as an arrow's are (ArrowFunction).
+	TypeParams           []string
+	TypeParamConstraints []*TypeAnnotation
+	TypeParamDefaults    []*TypeAnnotation
+	Params               []Param
+	RetType              *TypeAnnotation // nil = infer
+	Body                 *BlockStatement
+	IsAsync              bool
 	// IsGenerator is `function* () {...}` in expression position
 	// (TDD-00096). Only the top-level `const G = function* ...` binding is
 	// supported — rewritten into a named generator declaration pre-emission;
@@ -1310,7 +1463,9 @@ type FunctionExpression struct {
 	// Method marks an object literal's method, getter or setter, whose body
 	// may reference `super.x`.
 	Method bool
-	pos    Pos
+	// Src is its source text (Function.prototype.toString).
+	Src SourceRange
+	pos Pos
 }
 
 func (*FunctionExpression) nodeMarker()   {}
@@ -1429,6 +1584,7 @@ func NewNewSetExpression(elem *TypeAnnotation, init Expression, pos Pos) *NewSet
 type NewWeakMapExpression struct {
 	KeyType *TypeAnnotation
 	ValType *TypeAnnotation
+	Init    Expression // nil = empty; else the [key, value] entries iterable
 	pos     Pos
 }
 
@@ -1436,13 +1592,14 @@ func (*NewWeakMapExpression) nodeMarker()   {}
 func (*NewWeakMapExpression) exprMarker()   {}
 func (n *NewWeakMapExpression) GetPos() Pos { return n.pos }
 
-func NewNewWeakMapExpression(key, val *TypeAnnotation, pos Pos) *NewWeakMapExpression {
-	return &NewWeakMapExpression{KeyType: key, ValType: val, pos: pos}
+func NewNewWeakMapExpression(key, val *TypeAnnotation, init Expression, pos Pos) *NewWeakMapExpression {
+	return &NewWeakMapExpression{KeyType: key, ValType: val, Init: init, pos: pos}
 }
 
 // NewWeakSetExpression — new WeakSet<T>() (TDD-00112).
 type NewWeakSetExpression struct {
 	ElemType *TypeAnnotation
+	Init     Expression // nil = empty; else the values iterable
 	pos      Pos
 }
 
@@ -1450,8 +1607,8 @@ func (*NewWeakSetExpression) nodeMarker()   {}
 func (*NewWeakSetExpression) exprMarker()   {}
 func (n *NewWeakSetExpression) GetPos() Pos { return n.pos }
 
-func NewNewWeakSetExpression(elem *TypeAnnotation, pos Pos) *NewWeakSetExpression {
-	return &NewWeakSetExpression{ElemType: elem, pos: pos}
+func NewNewWeakSetExpression(elem *TypeAnnotation, init Expression, pos Pos) *NewWeakSetExpression {
+	return &NewWeakSetExpression{ElemType: elem, Init: init, pos: pos}
 }
 
 // NewReadableStreamExpression — `new ReadableStream<T>(underlyingSource?,
@@ -1539,6 +1696,7 @@ type EnumMember struct {
 type EnumDeclaration struct {
 	Name    string
 	Const   bool
+	Ambient bool // `declare enum`
 	Members []EnumMember
 	pos     Pos
 }
@@ -1854,14 +2012,35 @@ type InterfaceMethodSig struct {
 // FunctionDeclaration (params/return type/block body); the implicit `this`
 // receiver every one of them has is a codegen-time concern (TDD-00009 Stage
 // 1), not part of this node's shape.
+// ClassTypeParams is a class's type parameter list: names, with each one's
+// `extends` bound and `=` default (nil entries have none).
+type ClassTypeParams struct {
+	Names       []string
+	Constraints []*TypeAnnotation
+	Defaults    []*TypeAnnotation
+}
+
+// DeclaredTypeParams is the class's type parameter list as written, even
+// after code generation erased it.
+func (cd *ClassDeclaration) DeclaredTypeParams() ClassTypeParams {
+	if cd.Declared != nil {
+		return *cd.Declared
+	}
+	return ClassTypeParams{cd.TypeParams, cd.TypeParamConstraints, cd.TypeParamDefaults}
+}
+
 type ClassDeclaration struct {
 	Name                 string
 	TypeParams           []string // e.g. ["T"] for `class Box<T>` — TDD-00010 V1, single param only
 	TypeParamConstraints []*TypeAnnotation
 	TypeParamDefaults    []*TypeAnnotation // `class C<T = any>`: nil entries have none
-	BaseClass            string            // "" if no `extends` clause (TDD-00009 Stage 3)
-	BaseQualified        bool              // `extends mod.Base`: BaseClass is the last segment
-	BaseQualifier        string            // and `mod` the namespace before it
+	// Declared holds the type parameters as written when code generation
+	// erased the class's (eraseTypeOnlyGenerics, eraseInheritingGenerics);
+	// the checker reads them through DeclaredTypeParams. Nil otherwise.
+	Declared      *ClassTypeParams
+	BaseClass     string // "" if no `extends` clause (TDD-00009 Stage 3)
+	BaseQualified bool   // `extends mod.Base`: BaseClass is the last segment
+	BaseQualifier string // and `mod` the namespace before it
 	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
 	// — the sole generic `extends` target this compiler currently supports.
 	BaseTypeArgs []*TypeAnnotation
@@ -1883,7 +2062,13 @@ type ClassDeclaration struct {
 	// decorator, so it is tracked as a unit rather than split across the two
 	// generated methods.
 	AutoAccessors []AutoAccessorSpec
-	pos           Pos
+	// LowerType is `/** @lowerType <layout> */` on the class: C code builds
+	// its instances through the layout the compiler exports under that name
+	// (TDD-00255 Stage 3).
+	LowerType string
+	// Src is its source text (Function.prototype.toString).
+	Src SourceRange
+	pos Pos
 }
 
 // AutoAccessorSpec describes a decorated `accessor x` after desugaring: the
@@ -1929,7 +2114,10 @@ type TypeAliasDeclaration struct {
 	// included (`type A<T = string>`), for the checker.
 	TypeParameters []*TypeParameter
 	Type           *TypeAnnotation
-	pos            Pos
+	// LowerType is a builtin alias's `/** @lowerType <layout> */`, as on an
+	// interface.
+	LowerType string
+	pos       Pos
 }
 
 func (*TypeAliasDeclaration) nodeMarker()   {}
@@ -2095,7 +2283,11 @@ type ImportCallExpression struct {
 	// Only annotated `export const/let/var` bindings of simple type are
 	// included in V1.
 	Exports []ImportCallExport
-	pos     Pos
+	// Namespace is the program name of the target's module namespace object
+	// (bundled and lazy backends): what the import resolves to. "" when the
+	// target is compiled separately (isolated).
+	Namespace string
+	pos       Pos
 }
 
 // ImportCallExport is one annotated value export of a dynamic-import target
@@ -2149,6 +2341,14 @@ type AnnotField struct {
 	Readonly bool
 	// Override marks a class field written with TS's `override` modifier.
 	Override bool
+	// Declare marks a `declare x: T` class field: typed, but no own property
+	// until something assigns it.
+	Declare bool
+	// Definite marks a `x!: T` class field: its initialisation check
+	// (TS2564) is waived.
+	Definite bool
+	// Abstract marks an `abstract x: T` class field: type-only.
+	Abstract bool
 	// Initializer is a class field's `= expr` default (TDD-00063 Stage 1) —
 	// nil when the field has none (a bare `x: T;`) and always nil for every
 	// non-class reuse of this shared type (interface/object-type fields,
@@ -2296,11 +2496,28 @@ type TypeAnnotation struct {
 	// Unexported so the reflective AST walkers never descend into type
 	// syntax through it.
 	node TypeNode
+	// nodeOnly marks a declaration file's annotation, wrapped without
+	// conversion (NodeAnnotation): only its node describes it.
+	nodeOnly bool
 }
 
 // TypeNode returns the parsed type this annotation was converted from, or nil
 // for an annotation code generation synthesised.
 func (ta *TypeAnnotation) TypeNode() TypeNode { return ta.node }
+
+// PeelArrayNode points a copy of an array annotation, peeled to its element,
+// at the element's node: the copy no longer stands for the whole `T[]`.
+func (ta *TypeAnnotation) PeelArrayNode() {
+	if at, ok := ta.node.(*ArrayType); ok {
+		ta.node = at.ElementType
+		return
+	}
+	ta.node = nil
+}
+
+// NodeOnly reports a declaration file's annotation, which carries its parsed
+// type alone: none of the converted fields describe it.
+func (ta *TypeAnnotation) NodeOnly() bool { return ta.nodeOnly }
 
 // ArrayPatternNames is every name an array pattern binds, through nested
 // patterns and a rest element.
@@ -2328,4 +2545,17 @@ func ObjectPatternNames(props []DestructProp) []string {
 		out = append(out, ObjectPatternNames(p.SubObject)...)
 	}
 	return out
+}
+
+// FunctionTypeParams are the type parameters a function-like node declares.
+func FunctionTypeParams(n Node) []string {
+	switch f := n.(type) {
+	case *FunctionDeclaration:
+		return f.TypeParams
+	case *ArrowFunction:
+		return f.TypeParams
+	case *FunctionExpression:
+		return f.TypeParams
+	}
+	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"KlainMainLang/jsdoc"
 	"KlainMainLang/lexer"
 	"fmt"
+	"strings"
 )
 
 // parseAmbientDeclaration parses a `declare ...` ambient declaration and erases
@@ -123,7 +124,11 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 	// without initializers auto-increment exactly like a non-ambient enum.
 	if (p.check(lexer.IDENT) && p.peek().Literal == "enum") ||
 		(p.check(lexer.CONST) && p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "enum") {
-		return p.parseEnumDeclaration()
+		ed, err := p.parseEnumDeclaration()
+		if ed != nil {
+			ed.Ambient = true
+		}
+		return ed, err
 	}
 
 	if p.check(lexer.VAR) || p.check(lexer.LET) || p.check(lexer.CONST) {
@@ -359,6 +364,12 @@ func (p *Parser) parseNamespaceDecl(ambient bool) (ast.Statement, error) {
 		return nil, err
 	}
 	decls, err := p.parseNamespaceBody(nsTok, ns, ambient)
+	if err == nil && !ambient && instantiatedDecls(decls) {
+		// `namespace A.B {…}`: A's object holds B.
+		for i := strings.IndexByte(ns, '.'); i >= 0; i = nextDot(ns, i) {
+			p.exportNS(ns[:i], strings.SplitN(ns[i+1:], ".", 2)[0], false)
+		}
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -392,6 +403,19 @@ func (p *Parser) parseNamespaceName() (string, error) {
 // (dotted for a nested/dotted namespace) and returns the desugared
 // declarations. Nested `namespace`/`module` members recurse with the
 // extended dotted name.
+// exportNS records an exported member of namespace ns, once.
+func (p *Parser) exportNS(ns, name string, mutable bool) {
+	for _, x := range p.nsExports[ns] {
+		if x.Name == name {
+			return
+		}
+	}
+	if p.nsExports == nil {
+		p.nsExports = map[string][]ast.NamespaceExport{}
+	}
+	p.nsExports[ns] = append(p.nsExports[ns], ast.NamespaceExport{Name: name, Mutable: mutable})
+}
+
 func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) ([]ast.Statement, error) {
 	if _, err := p.expect(lexer.LBRACE); err != nil {
 		return nil, err
@@ -489,6 +513,9 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 				return nil, err
 			}
 			p.namespaces[ns][fd.Name] = exported
+			if exported {
+				p.exportNS(ns, fd.Name, false)
+			}
 			fd.Name = ast.NamespaceMangle(ns, fd.Name)
 			decls = append(decls, fd)
 			continue
@@ -536,6 +563,9 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 			switch d := vd.(type) {
 			case *ast.VarDeclaration:
 				p.namespaces[ns][d.Name] = exported
+				if exported {
+					p.exportNS(ns, d.Name, d.Kind != "const")
+				}
 				d.Name = ast.NamespaceMangle(ns, d.Name)
 				decls = append(decls, d)
 			default:
@@ -546,6 +576,9 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 			cd, err := p.parseClassDecl(isAbstract, "")
 			if err != nil {
 				return nil, err
+			}
+			if exported {
+				p.exportNS(ns, cd.Name, false)
 			}
 			decls = append(decls, cd)
 			continue
@@ -564,6 +597,12 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 					subDecls, err := p.parseNamespaceBody(nsTok, ns+"."+sub, ambient)
 					if err != nil {
 						return nil, err
+					}
+					if exported && !ambient && instantiatedDecls(subDecls) {
+						full := ns + "." + sub
+						for i := len(ns); i >= 0; i = nextDot(full, i) {
+							p.exportNS(full[:i], strings.SplitN(full[i+1:], ".", 2)[0], false)
+						}
 					}
 					decls = append(decls, subDecls...)
 					continue
@@ -610,6 +649,9 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 				if err != nil {
 					return nil, err
 				}
+				if exported && !ed.Const {
+					p.exportNS(ns, ed.Name, false)
+				}
 				decls = append(decls, ed)
 				continue
 			}
@@ -637,10 +679,42 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 	return decls, nil
 }
 
+// instantiatedDecls reports whether a nested namespace's desugared members
+// hold a run-time value: anything but interfaces, type aliases, const enums
+// and the empty block an empty namespace leaves.
+func nextDot(s string, i int) int {
+	if j := strings.IndexByte(s[i+1:], '.'); j >= 0 {
+		return i + 1 + j
+	}
+	return -1
+}
+
+func instantiatedDecls(decls []ast.Statement) bool {
+	for _, d := range decls {
+		switch s := d.(type) {
+		case *ast.InterfaceDeclaration, *ast.TypeAliasDeclaration:
+		case *ast.EnumDeclaration:
+			if !s.Const {
+				return true
+			}
+		case *ast.BlockStatement:
+			if len(s.Body) > 0 {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
+}
+
 func (p *Parser) parseLabeledStatement() (*ast.LabeledStatement, error) {
 	tok := p.advance() // label identifier
 	label := tok.Literal
 	if _, err := p.expect(lexer.COLON); err != nil {
+		return nil, err
+	}
+	if err := p.rejectLexicalDecl(); err != nil {
 		return nil, err
 	}
 	body, err := p.parseStatement()
@@ -732,6 +806,17 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 		return nil, err
 	}
 
+	// `let x!: T`: a definite assignment assertion, which needs the
+	// annotation and no initializer.
+	definite := false
+	if kind != "const" && p.check(lexer.NOT) {
+		bang := p.advance()
+		if !p.check(lexer.COLON) {
+			return nil, p.errAt(bang, diag.DefiniteNeedsAnnotation)
+		}
+		definite = true
+	}
+
 	var ta *ast.TypeAnnotation
 	// TS type annotation
 	if p.check(lexer.COLON) {
@@ -784,9 +869,13 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 		return nil, p.errAt(nameTok, diag.ConstMustBeInitialized, nameTok.Literal)
 	}
 
+	if definite && init != nil {
+		return nil, p.errAt(nameTok, diag.DefiniteWithInitializer)
+	}
 	vd := ast.NewVarDeclaration(kind, nameTok.Literal, ta, init, pos)
 	vd.Ambient = p.declarations && init == nil
 	vd.NamePos = posOf(nameTok)
+	vd.Definite = definite
 	return vd, nil
 }
 
@@ -796,6 +885,11 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 // ordinary "name required" check.
 func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.FunctionDeclaration, error) {
 	doc := p.takeDoc()
+	// Its source text begins at `function`, or at the `async` before it.
+	srcStart := p.peek().Pos
+	if isAsync && p.pos > 0 && p.at(p.pos-1).Literal == "async" {
+		srcStart = p.at(p.pos - 1).Pos
+	}
 	p.advance() // 'function'
 	// `function* name() {}` / `async function* name() {}` (TDD-00061) — V1
 	// scope is a top-level/nested function declaration only, so this check
@@ -813,6 +907,7 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 			return nil, err
 		}
 	}
+	p.nextGen = isGenerator
 	fd, err := p.parseFunctionRest(name, isAsync, false, true)
 	if err != nil {
 		return nil, err
@@ -836,6 +931,7 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 		sigTok := p.peek()
 		p.match(lexer.EXPORT)
 		nextAsync := false
+		srcStart = p.peek().Pos
 		if p.isWord(0, "async") && p.peekNth(1).Type == lexer.FUNCTION && p.sameLine(1) {
 			p.advance()
 			nextAsync = true
@@ -852,6 +948,7 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 		if nTok.Literal != name {
 			return nil, p.errAt(nTok, diag.OverloadWrongName, name, nTok.Literal)
 		}
+		p.nextGen = isGen
 		fd, err = p.parseFunctionRest(name, nextAsync, false, true)
 		if err != nil {
 			return nil, err
@@ -859,6 +956,9 @@ func (p *Parser) parseFunctionDecl(isAsync bool, defaultName string) (*ast.Funct
 		fd.IsGenerator = isGen
 	}
 	fd.Overloads = sigs
+	if fd.Src.Text != nil {
+		fd.Src.Start = srcStart
+	}
 	// TDD-00125: type an otherwise-untyped parameter / return from a leading
 	// `@param {T} name` / `@returns {T}`, the "typed JS" workflow. Fills in
 	// only where there is no inline annotation (an inline `: T` wins).
@@ -974,6 +1074,14 @@ func applyJSDocFuncTypes(fd *ast.FunctionDeclaration, doc *jsdoc.Comment) {
 // parameter's annotation is recorded for the checker (Program.ThisParams).
 func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional, overloadOK bool) (*ast.FunctionDeclaration, error) {
 	fd, thisTA, err := p.parseFunctionRestThis(name, isAsync, bodyOptional, overloadOK)
+	if err == nil && fd != nil && isAsync {
+		// An async function's parameter initializers never await.
+		for _, prm := range fd.Params {
+			if aw := paramInitAwait(prm.Default); aw != nil {
+				return nil, errAtPos(aw.GetPos(), diag.AwaitInParamInit)
+			}
+		}
+	}
 	if fd != nil && thisTA != nil {
 		if p.thisParams == nil {
 			p.thisParams = map[ast.Node]*ast.TypeAnnotation{}
@@ -984,6 +1092,18 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional, overloadO
 }
 
 func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overloadOK bool) (*ast.FunctionDeclaration, *ast.TypeAnnotation, error) {
+	// Its parameters and body are a generator's when the caller said so:
+	// `yield` is an expression there, and an identifier in any other
+	// function of sloppy code.
+	savedGen, savedAwait := p.inGen, p.awaitCtx
+	p.inGen, p.nextGen = p.nextGen, false
+	p.awaitCtx = awaitFn
+	if isAsync {
+		p.awaitCtx = awaitAsync
+	}
+	defer func() { p.inGen, p.awaitCtx = savedGen, savedAwait }()
+	memberStart := p.memberStart
+	p.memberStart = -1
 	// Position of whatever comes right after the already-consumed name (a
 	// `<` or the opening `(`) — close enough to the declaration's own
 	// position for error-reporting purposes. Backfilled via SetPos on every
@@ -1016,7 +1136,11 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	if _, err := p.expect(lexer.LPAREN); err != nil {
 		return nil, nil, err
 	}
+	savedParams := p.inGenParams
+	defer func() { p.inGenParams = savedParams }()
+	p.inGenParams = p.inGen // a yield in a generator's parameters is an early error
 	params, err := p.parseParamList()
+	p.inGenParams = false
 	if err != nil {
 		return nil, nil, err
 	}
@@ -1092,6 +1216,10 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	}
 	fd.SetPos(pos)
 	fd.NamePos = namePos
+	fd.Src = p.srcRange(pos)
+	if memberStart >= 0 && fd.Src.Text != nil {
+		fd.Src.Start = memberStart // a method: from its modifiers and name
+	}
 	return fd, thisTA, nil
 }
 
@@ -1294,9 +1422,6 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 		// shared pattern-element grammar every other destructuring position
 		// does, so holes / renames / `...rest` / nesting stay identical.
 		if p.check(lexer.LBRACE) || p.check(lexer.LBRACKET) {
-			if rest {
-				return nil, p.errAt(p.peek(), diag.RestParamPattern)
-			}
 			patTok := p.peek()
 			var arrPat []ast.ArrayPatternElem
 			var objPat []ast.DestructProp
@@ -1324,11 +1449,20 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 			}
 			// An unannotated pattern is typed as an arrow's is: from its
 			// context, its call sites under -compat=js, else an implicit any.
-			if p.check(lexer.ASSIGN) {
-				return nil, p.errAt(p.peek(), diag.DestructuredParamDefault)
+			var pdflt ast.Expression
+			if !rest && p.match(lexer.ASSIGN) {
+				d, err := p.parseAssignment()
+				if err != nil {
+					return nil, err
+				}
+				pdflt = d
 			}
+			// A rest pattern (`...[a, b]`) unpacks the collected array.
 			syntheticName := fmt.Sprintf("__param%d", len(params))
-			params = append(params, ast.Param{Name: syntheticName, Pos: ast.Pos{Line: patTok.Line, Col: patTok.Col}, Type: ta, ArrayPattern: arrPat, ObjectPattern: objPat, Decorators: paramDecorators})
+			params = append(params, ast.Param{Name: syntheticName, Pos: ast.Pos{Line: patTok.Line, Col: patTok.Col}, Type: ta, Rest: rest, ArrayPattern: arrPat, ObjectPattern: objPat, Default: pdflt, Decorators: paramDecorators})
+			if rest {
+				break // rest param must be last
+			}
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -1769,14 +1903,14 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 					if err != nil {
 						return nil, err
 					}
-					local := keyTok.Literal
+					local, localPos := keyTok.Literal, posOf(keyTok)
 					if p.check(lexer.COLON) {
 						p.advance()
 						aliasTok, err := p.expect(lexer.IDENT)
 						if err != nil {
 							return nil, err
 						}
-						local = aliasTok.Literal
+						local, localPos = aliasTok.Literal, posOf(aliasTok)
 					}
 					var dflt ast.Expression
 					if p.match(lexer.ASSIGN) {
@@ -1785,7 +1919,7 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 							return nil, err
 						}
 					}
-					objPattern = append(objPattern, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt})
+					objPattern = append(objPattern, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt, Pos: localPos})
 					if !p.match(lexer.COMMA) {
 						break
 					}
@@ -1843,7 +1977,8 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 // holes / `= default` / `...rest` can't drift between positions.
 func (p *Parser) parseArrayPatternElems() ([]ast.ArrayPatternElem, error) {
 	p.advance() // [
-	var elems []ast.ArrayPatternElem
+	// Non-nil: `[]` is a pattern too.
+	elems := []ast.ArrayPatternElem{}
 	for !p.check(lexer.RBRACKET) && !p.check(lexer.EOF) {
 		if p.check(lexer.ELLIPSIS) {
 			// Rest element (`[a, ...rest]`, ADR-00161) — always last:
@@ -1852,11 +1987,24 @@ func (p *Parser) parseArrayPatternElems() ([]ast.ArrayPatternElem, error) {
 			// clean "expected ], got ," at the closing bracket instead of
 			// silently accepting a real syntax error.
 			p.advance() // consume '...'
+			if p.check(lexer.LBRACKET) || p.check(lexer.LBRACE) {
+				// `[a, ...[b, c]]`: the rest array destructured in turn.
+				elem, err := p.parseNestedPatternElem()
+				if err != nil {
+					return nil, err
+				}
+				if elem.Default != nil {
+					return nil, fmt.Errorf("%d:%d: a rest element cannot have an initializer", elem.Pos.Line, elem.Pos.Col)
+				}
+				elem.Rest = true
+				elems = append(elems, elem)
+				break
+			}
 			nameTok, err := p.expect(lexer.IDENT)
 			if err != nil {
 				return nil, err
 			}
-			elems = append(elems, ast.ArrayPatternElem{Name: nameTok.Literal, Rest: true})
+			elems = append(elems, ast.ArrayPatternElem{Name: nameTok.Literal, Rest: true, Pos: posOf(nameTok)})
 			break
 		}
 		if p.check(lexer.COMMA) {
@@ -1886,7 +2034,7 @@ func (p *Parser) parseArrayPatternElems() ([]ast.ArrayPatternElem, error) {
 					return nil, err
 				}
 			}
-			elems = append(elems, ast.ArrayPatternElem{Name: nameTok.Literal, Default: dflt})
+			elems = append(elems, ast.ArrayPatternElem{Name: nameTok.Literal, Default: dflt, Pos: posOf(nameTok)})
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -1903,7 +2051,7 @@ func (p *Parser) parseArrayPatternElems() ([]ast.ArrayPatternElem, error) {
 // plus an optional `= default` on the whole nested position. The caller has
 // already confirmed the current token is `[` or `{`.
 func (p *Parser) parseNestedPatternElem() (ast.ArrayPatternElem, error) {
-	var elem ast.ArrayPatternElem
+	elem := ast.ArrayPatternElem{Pos: posOf(p.peek())}
 	if p.check(lexer.LBRACKET) {
 		sub, err := p.parseArrayPatternElems()
 		if err != nil {
@@ -1933,7 +2081,8 @@ func (p *Parser) parseNestedPatternElem() (ast.ArrayPatternElem, error) {
 // two positions.
 func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 	p.advance() // {
-	var props []ast.DestructProp
+	// Non-nil: `{}` is still a pattern.
+	props := []ast.DestructProp{}
 	for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
 		// Object rest element `{ ...rest }` (TDD-00065 Stage 3b) — binds every
 		// source field not named by an earlier property. Must be the last
@@ -1945,7 +2094,7 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 			if err != nil {
 				return nil, err
 			}
-			props = append(props, ast.DestructProp{Local: restTok.Literal, Rest: true})
+			props = append(props, ast.DestructProp{Local: restTok.Literal, Rest: true, Pos: posOf(restTok)})
 			if !p.check(lexer.RBRACE) {
 				return nil, p.errAt(p.peek(), diag.RestElementLast, p.peek().Type)
 			}
@@ -1959,28 +2108,46 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 		// clean rejection.
 		if p.check(lexer.LBRACKET) {
 			p.advance() // '['
-			if !p.check(lexer.STRING) && !p.check(lexer.NUMBER) {
-				return nil, p.errAt(p.peek(), diag.ComputedKeyConstant, p.peek().Type)
+			var key string
+			var keyExpr ast.Expression
+			if (p.check(lexer.STRING) || p.check(lexer.NUMBER)) && p.peekNth(1).Type == lexer.RBRACKET {
+				key = p.advance().Literal
+			} else {
+				// A runtime key, evaluated when the pattern reaches it.
+				var err error
+				if keyExpr, err = p.parseAssignment(); err != nil {
+					return nil, err
+				}
 			}
-			ckTok := p.advance()
 			if _, err := p.expect(lexer.RBRACKET); err != nil {
 				return nil, err
 			}
 			if _, err := p.expect(lexer.COLON); err != nil {
 				return nil, p.errAt(p.peek(), diag.ComputedKeyBinding)
 			}
-			aliasTok, err := p.expect(lexer.IDENT)
+			prop := ast.DestructProp{Key: key, KeyExpr: keyExpr}
+			var err error
+			switch {
+			case p.check(lexer.LBRACKET):
+				prop.Pos = posOf(p.peek())
+				prop.SubArray, err = p.parseArrayPatternElems()
+			case p.check(lexer.LBRACE):
+				prop.Pos = posOf(p.peek())
+				prop.SubObject, err = p.parseObjectPatternProps()
+			default:
+				var aliasTok lexer.Token
+				aliasTok, err = p.expect(lexer.IDENT)
+				prop.Local, prop.Pos = aliasTok.Literal, posOf(aliasTok)
+			}
 			if err != nil {
 				return nil, err
 			}
-			var dflt ast.Expression
 			if p.match(lexer.ASSIGN) {
-				dflt, err = p.parseAssignment()
-				if err != nil {
+				if prop.Default, err = p.parseAssignment(); err != nil {
 					return nil, err
 				}
 			}
-			props = append(props, ast.DestructProp{Key: ckTok.Literal, Local: aliasTok.Literal, Default: dflt})
+			props = append(props, prop)
 			if !p.match(lexer.COMMA) {
 				break
 			}
@@ -1998,7 +2165,7 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 		}
 		keyTok := p.advance()
 		nonIdentKey := keyTok.Type != lexer.IDENT
-		local := keyTok.Literal
+		local, localPos := keyTok.Literal, posOf(keyTok)
 		var err error
 		var subArr []ast.ArrayPatternElem
 		var subObj []ast.DestructProp
@@ -2022,7 +2189,7 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 				if err != nil {
 					return nil, err
 				}
-				local = aliasTok.Literal
+				local, localPos = aliasTok.Literal, posOf(aliasTok)
 			}
 		} else if nonIdentKey {
 			return nil, p.errAt(p.peek(), diag.LiteralKeyBinding, keyTok.Literal, p.peek().Type)
@@ -2034,7 +2201,7 @@ func (p *Parser) parseObjectPatternProps() ([]ast.DestructProp, error) {
 				return nil, err
 			}
 		}
-		props = append(props, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt, SubArray: subArr, SubObject: subObj})
+		props = append(props, ast.DestructProp{Key: keyTok.Literal, Local: local, Default: dflt, SubArray: subArr, SubObject: subObj, Pos: localPos})
 		if !p.match(lexer.COMMA) {
 			break
 		}
@@ -2052,6 +2219,12 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 	if err != nil {
 		return nil, err
 	}
+	var ta *ast.TypeAnnotation
+	if p.match(lexer.COLON) {
+		if ta, err = p.parseTypeAnnotation("ts"); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
@@ -2062,7 +2235,9 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 	if err := p.parseSemicolon(); err != nil {
 		return nil, err
 	}
-	return ast.NewArrayDestructuring(tok.Literal, elems, init, pos), nil
+	d := ast.NewArrayDestructuring(tok.Literal, elems, init, pos)
+	d.TypeAnnot = ta
+	return d, nil
 }
 
 func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
@@ -2072,6 +2247,12 @@ func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
 	if err != nil {
 		return nil, err
 	}
+	var ta *ast.TypeAnnotation
+	if p.match(lexer.COLON) {
+		if ta, err = p.parseTypeAnnotation("ts"); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := p.expect(lexer.ASSIGN); err != nil {
 		return nil, err
 	}
@@ -2082,7 +2263,9 @@ func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
 	if err := p.parseSemicolon(); err != nil {
 		return nil, err
 	}
-	return ast.NewObjectDestructuring(tok.Literal, props, init, pos), nil
+	d := ast.NewObjectDestructuring(tok.Literal, props, init, pos)
+	d.TypeAnnot = ta
+	return d, nil
 }
 
 func (p *Parser) parseWhileStatement() (*ast.WhileStatement, error) {
@@ -2120,7 +2303,7 @@ func (p *Parser) parseIfStatement() (*ast.IfStatement, error) {
 	if _, err := p.expect(lexer.RPAREN); err != nil {
 		return nil, err
 	}
-	cons, err := p.parseBlockOrStatement()
+	cons, err := p.parseIfBody()
 	if err != nil {
 		return nil, err
 	}
@@ -2131,7 +2314,7 @@ func (p *Parser) parseIfStatement() (*ast.IfStatement, error) {
 		if p.check(lexer.IF) {
 			alt, err = p.parseIfStatement()
 		} else {
-			alt, err = p.parseBlockOrStatement()
+			alt, err = p.parseIfBody()
 		}
 		if err != nil {
 			return nil, err
@@ -2164,15 +2347,56 @@ func (p *Parser) parseBlock() (*ast.BlockStatement, error) {
 // returning it wrapped in a *BlockStatement either way. This allows
 // braceless bodies in if/while/for/do constructs.
 func (p *Parser) parseBlockOrStatement() (*ast.BlockStatement, error) {
+	return p.parseSingleStatement(false)
+}
+
+// parseIfBody is an if's branch: a plain function declaration is allowed
+// there in sloppy code (Annex B), never as a loop's body.
+func (p *Parser) parseIfBody() (*ast.BlockStatement, error) {
+	return p.parseSingleStatement(true)
+}
+
+func (p *Parser) parseSingleStatement(inIf bool) (*ast.BlockStatement, error) {
 	if p.check(lexer.LBRACE) {
 		return p.parseBlock()
 	}
 	pos := posOf(p.peek())
+	if err := p.rejectLexicalDecl(); err != nil {
+		return nil, err
+	}
+	// A class, generator or async function declaration is never a single
+	// statement.
+	switch tok := p.peek(); {
+	case tok.Type == lexer.CLASS:
+		return nil, p.errAt(tok, diag.DeclInSingleStatement, "class")
+	case tok.Type == lexer.FUNCTION && (p.peekNth(1).Type == lexer.STAR || !inIf):
+		return nil, p.errAt(tok, diag.DeclInSingleStatement, "function")
+	case p.isWord(0, "async") && p.peekNth(1).Type == lexer.FUNCTION && p.sameLine(1):
+		return nil, p.errAt(tok, diag.DeclInSingleStatement, "function")
+	}
 	stmt, err := p.parseStatement()
 	if err != nil {
 		return nil, err
 	}
 	return ast.NewBlockStatement([]ast.Statement{stmt}, pos), nil
+}
+
+// rejectLexicalDecl rejects a let or const declaration as the single
+// statement of an if, a loop or a label: `let [` starts one even across a
+// line break, a `let` followed on its own line by a name or `{` does too,
+// and `const` always does.
+func (p *Parser) rejectLexicalDecl() error {
+	tok := p.peek()
+	switch tok.Type {
+	case lexer.CONST:
+		return p.errAt(tok, diag.DeclInSingleStatement, "const")
+	case lexer.LET:
+		next := p.peekNth(1)
+		if next.Type == lexer.LBRACKET || (next.Flags&lexer.PrecedingLineBreak == 0 && (next.Type == lexer.IDENT || next.Type == lexer.LBRACE)) {
+			return p.errAt(tok, diag.DeclInSingleStatement, "let")
+		}
+	}
+	return nil
 }
 
 func (p *Parser) parseExpressionStatement() (*ast.ExpressionStatement, error) {

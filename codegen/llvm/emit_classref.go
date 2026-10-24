@@ -32,10 +32,16 @@ func (e *Emitter) classRefPtr(mangled string) string {
 	// Named after the class, so a library class's reference has the same
 	// symbol in every program (TDD-00238).
 	name := "@__kml_classref." + llvmSafeSymbol(mangled)
-	esc, length := escapeLLVM(e.classDisplayName(mangled))
-	e.emitGlobal(fmt.Sprintf("%s = private constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\" }, align 8", name, length, length-1, length, esc))
+	display := e.classDisplayName(mangled)
+	esc, length := escapeLLVM(display)
+	e.emitGlobal(fmt.Sprintf("%s = private constant { i64, [%d x i8] } { i64 %d, [%d x i8] c\"%s\" }, align 8", name, length, strHeaderWord(display), length, esc))
 	ref := fmt.Sprintf("getelementptr inbounds ({ i64, [%d x i8] }, ptr %s, i32 0, i32 1)", length, name)
 	e.classRefs[mangled] = ref
+	// Its source text, for String(K), keyed by the reference's payload.
+	if src, ok := e.classSrc[mangled]; ok && src.String() != "" {
+		e.registerFnMeta(ref, e.classDisplayName(mangled), 0, fnKindPlain)
+		e.fnMetaSource(ref, src)
+	}
 	return ref
 }
 
@@ -52,7 +58,7 @@ func (e *Emitter) instanceofNeedsRuntime(right ast.Expression) bool {
 		return true
 	}
 	_, found := e.lookup(id.Name)
-	return found
+	return found || e.generators[id.Name] != nil
 }
 
 // emitDynInstanceOf is `left instanceof right` with right a value: the
@@ -78,6 +84,19 @@ func (e *Emitter) emitDynInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	e.usedDynInstanceof = true
 	res := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dyn_instanceof(i64 %s, i64 %s)", res, lb.Ref, rb.Ref))
+	if e.genProtos {
+		// Against a generator function: its `prototype` on the chain.
+		e.ensureGenProtoRuntime()
+		e.ensureShapeRuntime()
+		e.declareFn("__kml_gen_has_instance", "declare i32 @__kml_gen_has_instance(i64, i64)")
+		gi := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_gen_has_instance(i64 %s, i64 %s)", gi, lb.Ref, rb.Ref))
+		gb := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", gb, gi))
+		either := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, res, gb))
+		res = either
+	}
 	if len(e.classRecords) > 0 {
 		// Against an evaluation's class: the instance's own (TDD-00242).
 		e.ensureClassRec()
@@ -102,11 +121,23 @@ func (e *Emitter) ensureCtorKind() {
 }
 
 // ctorRefTargets are the constructors a reference can name: every Error
-// kind, and every class boxed as a value, as (payload, name) pairs.
+// kind, the builtin constructors `instanceof` decides (`Object`,
+// `Function`, `Map`, …), and every class boxed as a value, as (payload,
+// name) pairs.
 func (e *Emitter) ctorRefTargets() (ptrs, names []string) {
 	var kinds []string
 	for k := range errorKindIDs {
 		kinds = append(kinds, k)
+	}
+	for k := range builtinInstanceofTypes {
+		if _, user := e.classes[k]; !user {
+			kinds = append(kinds, k)
+		}
+	}
+	for _, k := range []string{"Object", "Function", "Symbol"} {
+		if _, user := e.classes[k]; !user {
+			kinds = append(kinds, k)
+		}
 	}
 	sort.Strings(kinds)
 	for _, k := range kinds {
@@ -186,10 +217,10 @@ func (e *Emitter) checkerInstanceType(ex *ast.NewExpression) Type {
 		if t := c.TypeOf(ex); t != nil && t.Symbol != nil {
 			// Through the declaration codegen registered (a local class's
 			// name is made unique), else by name.
-			if ct, ok := e.classRepr(t.Symbol); ok && ct.IsObject && ct.IsClass {
+			if ct, ok := e.classRepr(t.Symbol); ok && ct.IsObject() && ct.IsClass() {
 				return ct
 			}
-			if info, ok := e.classes[t.Symbol.Name]; ok && info.Ty.IsObject {
+			if info, ok := e.classes[t.Symbol.Name]; ok && info.Ty.IsObject() {
 				return info.Ty
 			}
 		}
@@ -249,10 +280,10 @@ func (e *Emitter) emitDynNew(ex *ast.NewExpression, instTy Type) (Value, error) 
 	}
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dyn_construct(i64 %s, ptr %s, i64 %d, ptr %s)", res, kb.Ref, argv, n, e.internString(calleeText(callee)+" is not a constructor")))
 	v := Value{Ref: res, Ty: TypeAny}
-	if instTy.IsDynamic {
+	if instTy.IsDynamic() {
 		return v, nil
 	}
-	return e.coerceChecked(v, instTy, ex.GetPos(), "constructed instance")
+	return e.convertChecked(v, instTy, ex.GetPos(), "constructed instance")
 }
 
 // ctorArity is the number of parameters class c's constructor takes, its
@@ -493,6 +524,11 @@ func (e *Emitter) emitAnyInstanceOfClass(v Value, cls string) (Value, error) {
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, slot))
 	e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
+	// One the class's constructor built, with its layout: not an object
+	// whose chain merely holds the prototype (`Object.create(C.prototype)`).
+	saved := e.brandOnly
+	e.brandOnly = true
+	defer func() { e.brandOnly = saved }()
 	return e.emitInstanceOf(ast.NewBinaryExpression("instanceof", ast.NewIdentifier(name, ast.Pos{}), ast.NewIdentifier(cls, ast.Pos{}), ast.Pos{}))
 }
 
@@ -507,5 +543,16 @@ func (e *Emitter) isClassName(x ast.Expression) bool {
 		return false
 	}
 	_, isClass := e.classes[id.Name]
-	return isClass
+	_, generic := e.genericClasses[id.Name]
+	return isClass || generic
+}
+
+// erasedGenericClass is generic class decl instantiated with every type
+// parameter `any`: the one class JavaScript has, as a value.
+func (e *Emitter) erasedGenericClass(decl *ast.ClassDeclaration) (string, error) {
+	subs := make(map[string]Type, len(decl.TypeParams))
+	for _, tp := range decl.TypeParams {
+		subs[tp] = TypeAny
+	}
+	return e.instantiateGenericClass(decl, subs)
 }

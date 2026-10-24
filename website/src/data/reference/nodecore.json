@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "16/17",
     "loosePct": 94,
-    "strict": "3/17",
+    "strict": "4/17",
     "strictPct": 18
   },
   "lede": "The smaller Node built-ins, grouped here rather than each given a full page. net, tls, http and https are Node's own layering ported to TypeScript — a net.Socket is a Duplex over a native TCP handle, a TLSSocket a Socket whose handle carries a non-blocking OpenSSL session, and http/https build on them — all on one event loop with dgram and dns. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, and vm stays out of scope behind the same blocker as bare eval().",
@@ -209,7 +209,7 @@
       "name": "dns (dns.lookup, dns.resolve4/resolve, dns.promises.lookup)",
       "statusRow": "dns (dns.lookup, dns.resolve4/resolve, dns.promises.lookup)",
       "signature": "dns.lookup(host, [options,] cb); dns.resolve4(host, [{ ttl }], cb); dns.resolveMx(host, cb); new dns.Resolver(options); await dns.promises.lookup(host)",
-      "badge": "caveats",
+      "badge": "exact",
       "description": "Node's own lib/dns.js. lookup and lookupService run getaddrinfo/getnameinfo on the thread pool, as libuv does (all, family, hints, order); the resolve family — resolve4/6 with TTLs, MX, TXT, SRV, NS, CNAME, PTR, SOA, NAPTR, CAA, TLSA, ANY, reverse — is Node's cares_wrap over c-ares: the system's servers, Resolver timeouts, tries, setServers, cancel and setLocalAddress, cares_wrap's record shapes, and Node's error codes (ENOTFOUND, ENODATA, ETIMEOUT, …). dns.promises and dns/promises are the promise forms.",
       "params": [
         {

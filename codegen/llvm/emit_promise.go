@@ -31,22 +31,25 @@ import (
 // isn't a meaningful call in practice).
 func (e *Emitter) promiseArrayElemType(expr ast.Expression, name string, pos ast.Pos) (Type, error) {
 	arrTy := e.inferExprType(expr)
-	if !arrTy.IsArray || arrTy.ElemType == nil {
+	if !arrTy.IsArray() || arrTy.ElemType == nil {
 		return Type{}, fmt.Errorf("%d:%d: %s takes an array of promises", pos.Line, pos.Col, name)
 	}
 	elemTy := *arrTy.ElemType
-	if !elemTy.IsPromise {
+	if !elemTy.IsPromise() {
 		// Plain values: each is Promise.resolve(value) (combinatorMembers).
 		if isUnconstrainedDynamic(elemTy) {
 			return TypeAny, nil
 		}
 		// A union with promise members (`[Promise.resolve("a"), 2]`): each
 		// member awaited, as TypeScript's Awaited<T> over the union.
-		if elemTy.IsDynamic && len(elemTy.UnionMembers) > 0 {
-			return awaitedUnion(elemTy), nil
+		if elemTy.IsDynamic() && len(elemTy.UnionMembers) > 0 {
+			return e.awaitedUnion(elemTy), nil
 		}
 		if sig, ok := e.thenableClass(elemTy); ok {
 			return thenableValueType(sig), nil // adopted through its `then`
+		}
+		if vt, ok := e.promiseSubclassValue(elemTy); ok {
+			return vt, nil // a Promise subclass's instance: its value, awaited
 		}
 		return elemTy, nil
 	}
@@ -61,15 +64,15 @@ func (e *Emitter) promiseArrayElemType(expr ast.Expression, name string, pos ast
 	// the wrong shape (e.g. a `double` slot decoded as a raw `i64`). Faithful TS
 	// widens `never` out of the union, so scan the literal for the first concrete
 	// member and adopt its resolved type instead.
-	if innerTy.IsNever || innerTy.IR == "void" {
+	if innerTy.IsNever() || innerTy.IR == "void" {
 		if lit, ok := expr.(*ast.ArrayLiteral); ok {
 			for _, el := range lit.Elements {
 				et := e.inferExprType(el)
-				if !et.IsPromise || et.PromiseType == nil {
+				if !et.IsPromise() || et.PromiseType == nil {
 					continue
 				}
 				pt := *et.PromiseType
-				if !pt.IsNever && pt.IR != "void" {
+				if !pt.IsNever() && pt.IR != "void" {
 					innerTy = pt
 					break
 				}
@@ -81,14 +84,17 @@ func (e *Emitter) promiseArrayElemType(expr ast.Expression, name string, pos ast
 
 // awaitedUnion is a union's members each awaited (a promise member its
 // value), deduplicated: the one left, else their union.
-func awaitedUnion(u Type) Type {
+func (e *Emitter) awaitedUnion(u Type) Type {
 	var ms []Type
 	seen := map[string]bool{}
 	for _, m := range u.UnionMembers {
-		if m.IsPromise {
+		if vt, ok := e.promiseSubclassValue(m); ok {
+			m = vt // a Promise subclass's instance, awaited
+		}
+		if m.IsPromise() {
 			if m.PromiseType == nil || m.PromiseType.IR == "void" {
 				m = TypeUndefined
-			} else if m.PromiseType.IsNever {
+			} else if m.PromiseType.IsNever() {
 				continue // a rejected member yields no value
 			} else {
 				m = *m.PromiseType
@@ -120,7 +126,7 @@ func awaitedUnion(u Type) Type {
 // __kml_task_await_ready drives the whole scheduler, they overlap.
 func (e *Emitter) promiseArrayIsTask(expr ast.Expression) bool {
 	arrTy := e.inferExprType(expr)
-	if !arrTy.IsArray || arrTy.ElemType == nil {
+	if !arrTy.IsArray() || arrTy.ElemType == nil {
 		return false
 	}
 	el := *arrTy.ElemType
@@ -132,7 +138,7 @@ func (e *Emitter) promiseArrayIsTask(expr ast.Expression) bool {
 	// element type, so also treat any non-Response `Promise<T>` element as a task
 	// promise — its runtime value is a settled/pending task promise, not the old
 	// bare value slot the already-resolved combinator path would misread.
-	return el.IsPromise && (el.PromiseType == nil || !el.PromiseType.IsResponse)
+	return el.IsPromise() && (el.PromiseType == nil || !el.PromiseType.IsResponse())
 }
 
 // emitPromiseLoop emits a Go-side "for i in 0..lenReg" loop (same
@@ -179,24 +185,23 @@ func (e *Emitter) mallocArrayBuffer(lenReg string, elemTy Type) string {
 	bytesReg := e.freshReg()
 	outPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, lenReg, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", outPtr, bytesReg))
+	e.heapMallocInto(outPtr, bytesReg)
 	return outPtr
 }
 
 func (e *Emitter) storeArrayElement(outPtr, idxVal, valRef string, elemTy Type) {
 	gep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, outPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, valRef, gep, elemTy.Align()))
+	e.heapStore(elemTy.IR, valRef, gep, elemTy.Align())
 }
 
 // storeArrayElementValue stores a combinator's resolved element into the result
 // buffer. An array element (`Promise.all<Promise<T[]>[]>` → T[][]) is a header
-// pointer per the reference model (TDD-00213), so box the {ptr,i64} array
-// aggregate into a shared header and store that 8-byte pointer — storing the
-// 16-byte aggregate into the "ptr"-shaped slot is invalid IR. Every other
+// pointer per the reference model (TDD-00213), so store the array's 8-byte
+// header pointer. Every other
 // element type stores its plain value.
 func (e *Emitter) storeArrayElementValue(outPtr, idxVal string, val Value, elemTy Type) {
-	if elemTy.IsArray {
+	if elemTy.IsArray() {
 		e.storeArrayElement(outPtr, idxVal, e.arrayReturnHeader(val), elemTy)
 		return
 	}
@@ -204,10 +209,7 @@ func (e *Emitter) storeArrayElementValue(outPtr, idxVal string, val Value, elemT
 }
 
 func (e *Emitter) wrapArrayAggregate(outPtr, lenReg string, elemTy Type) Value {
-	r0 := e.freshReg()
-	r1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", r0, outPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", r1, r0, lenReg))
+	r1 := e.newArrayHeader(outPtr, lenReg)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}
 }
 
@@ -228,7 +230,7 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Ty
 	if err != nil {
 		return Value{}, err
 	}
-	if val.Ty.IsPromise {
+	if val.Ty.IsPromise() {
 		return val, nil
 	}
 	// A thenable class instance is adopted through its `then`.
@@ -248,7 +250,7 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Ty
 	// as a box and produce garbage (a string value is unaffected: its box IS
 	// the pointer). The async-function return path already boxes to its
 	// declared `Promise<any>`; this brings Promise.resolve to parity.
-	if hint.IsPromise && hint.PromiseType != nil && hint.PromiseType.IsDynamic && !val.Ty.IsDynamic {
+	if hint.IsPromise() && hint.PromiseType != nil && hint.PromiseType.IsDynamic() && !val.Ty.IsDynamic() {
 		boxed, berr := e.emitBoxValue(val)
 		if berr != nil {
 			return Value{}, berr
@@ -308,7 +310,7 @@ func (e *Emitter) emitAllocSettledPromise() string {
 func (e *Emitter) emitSetPromiseState(q string, state int) {
 	rp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, q))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", state, rp))
+	e.heapStore("i64", fmt.Sprint(state), rp, 8)
 }
 
 // buildSettlement mallocs and fills a SettlementType(valueTy) object:
@@ -329,24 +331,23 @@ func (e *Emitter) buildSettlement(settleTy Type, statusStr, valueRef, reasonRef 
 		// slot is now a NaN-boxed `any` (TDD-00169), so store a boxed `undefined`
 		// rather than a null pointer, so JSON omits it and `typeof reason` reads
 		// "undefined".
-		if fieldTy.IsDynamic && ref == "null" {
-			e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, gep))
+		if fieldTy.IsDynamic() && ref == "null" {
+			e.heapStore("i64", fmt.Sprint(nbUndefined), gep, 8)
 			return
 		}
-		if fieldTy.IsArray {
+		if fieldTy.IsArray() {
 			// Array-typed slot holds a header pointer (TDD-00213 Stage 2). The
 			// absent side of a settlement (a rejected result's `value`, a fulfilled
 			// result's array `reason`) passes the literal "null" — store a null
-			// header pointer directly rather than boxing it as a {ptr,i64}
-			// aggregate (`store {ptr,i64} null`, invalid IR).
+			// header pointer directly.
 			if ref == "null" {
-				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", gep))
+				e.heapStore("ptr", "null", gep, 8)
 				return
 			}
 			e.storeArrayFieldHeader(gep, Value{Ref: ref, Ty: fieldTy})
 			return
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(fieldTy), ref, gep, fieldTy.Align()))
+		e.heapStore(StructFieldIR(fieldTy), ref, gep, fieldTy.Align())
 	}
 	storeField("status", statusStr)
 	storeField("value", valueRef)
@@ -377,15 +378,20 @@ func (e *Emitter) emitCombinator(kind, name string, args []ast.Expression, pos a
 	if len(args) != 1 {
 		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 1 argument", pos.Line, pos.Col, name)
 	}
+	// Any other iterable (a Set, a generator, a dynamic value) is read
+	// through the iteration protocol first, as `[...iterable]`.
+	if at := e.inferExprType(args[0]); !at.IsArray() || at.ElemType == nil {
+		args = []ast.Expression{ast.NewArrayLiteral([]ast.Expression{&ast.SpreadElement{Arg: args[0]}}, args[0].GetPos())}
+	}
 	innerTy, err := e.promiseArrayElemType(args[0], name, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
+	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
 	if err != nil {
 		return Value{}, err
 	}
-	members, innerTy := e.combinatorMembers(args[0], ptrReg, lenReg, innerTy)
+	members, innerTy := e.combinatorMembers(args[0], ptrReg, lenReg, innerTy, elemTy)
 	return e.emitAsyncCombinator(kind, members, lenReg, innerTy), nil
 }
 
@@ -393,17 +399,23 @@ func (e *Emitter) emitCombinator(kind, name string, args []ast.Expression, pos a
 // task promises as they are, a raw fetch promise through its bridge, a
 // plain value as a fulfilled promise (the spec's PromiseResolve), a value
 // held in `any` through Promise.resolve of it.
-func (e *Emitter) combinatorMembers(arr ast.Expression, ptrReg, lenReg string, innerTy Type) (string, Type) {
+// elemTy is how the emitted array holds its elements.
+func (e *Emitter) combinatorMembers(arr ast.Expression, ptrReg, lenReg string, innerTy, elemTy Type) (string, Type) {
 	el := innerTy
-	if at := e.inferExprType(arr); at.IsArray && at.ElemType != nil {
+	if at := e.inferExprType(arr); at.IsArray() && at.ElemType != nil {
 		el = *at.ElemType
 	}
+	// `{}[]` is `any[]` to the checker, while a literal of empty objects
+	// holds pointers: the members are read as the array holds them.
+	if el.IsDynamic() && elemTy.IR != "" && !elemTy.IsDynamic() {
+		el = elemTy
+	}
 	switch {
-	case !el.IsPromise:
+	case !el.IsPromise():
 		return e.wrapValueMembers(ptrReg, lenReg, el)
 	case e.promiseArrayIsTask(arr):
 		return ptrReg, innerTy
-	case innerTy.IsResponse:
+	case innerTy.IsResponse():
 		return e.bridgeFetchMembers(ptrReg, lenReg), innerTy
 	}
 	return ptrReg, innerTy
@@ -417,17 +429,17 @@ func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type
 	e.ensureMalloc()
 	// A boxed member (`any`, or a union, which may hold a promise or a
 	// thenable) resolves at run time.
-	dyn := el.IsDynamic && !el.IsArray
+	dyn := el.IsDynamic() && !el.IsArray()
 	sig, thenable := e.thenableClass(el)
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, lenReg))
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", out, bytes))
+	e.heapMallocInto(out, bytes)
 	e.emitPromiseLoop(lenReg, func(idxVal string) {
 		g := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", g, StructFieldIR(el), ptrReg, idxVal))
 		var v Value
-		if el.IsArray {
+		if el.IsArray() {
 			v = e.loadArraySlotAggregate(g, el)
 		} else {
 			r := e.freshReg()
@@ -449,7 +461,7 @@ func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type
 		}
 		d := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", d, out, idxVal))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, d))
+		e.heapStore("ptr", p, d, 8)
 	})
 	if dyn {
 		if isUnconstrainedDynamic(el) {
@@ -471,7 +483,7 @@ func (e *Emitter) bridgeFetchMembers(ptrReg, lenReg string) string {
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, lenReg))
 	arr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 %s)", arr, bytes))
+	e.heapMallocInto(arr, bytes)
 	e.emitPromiseLoop(lenReg, func(idxVal string) {
 		g, slot := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", g, ptrReg, idxVal))
@@ -480,7 +492,26 @@ func (e *Emitter) bridgeFetchMembers(ptrReg, lenReg string) string {
 		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_slot_to_promise(ptr %s)", p, slot))
 		d := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", d, arr, idxVal))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, d))
+		e.heapStore("ptr", p, d, 8)
 	})
 	return arr
+}
+
+// promiseSubclassValue is the value an instance of a class extending
+// Promise settles with: its own carried type, else its base's `Promise<T>`.
+func (e *Emitter) promiseSubclassValue(t Type) (Type, bool) {
+	if !t.IsClass() || t.Nullable() {
+		return Type{}, false
+	}
+	info, ok := e.classes[t.ClassName]
+	if !ok || info.HostBase == nil || !info.HostBase.IsPromise() {
+		return Type{}, false
+	}
+	if t.PromiseType != nil {
+		return *t.PromiseType, true
+	}
+	if info.HostBase.PromiseType != nil {
+		return *info.HostBase.PromiseType, true
+	}
+	return TypeAny, true
 }

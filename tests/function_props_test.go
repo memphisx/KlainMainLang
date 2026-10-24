@@ -316,8 +316,12 @@ function f() {
 }
 console.log(typeof f());
 console.log(function (x, y) { return x * 2 + (y === undefined ? 1 : 0); }(20));
-console.log((function (h) { return h(1); })(x => x + 1));
+console.log((function (h) { return h(1); })((x: number) => x + 1));
 `, "function\n41\n2")
+	// Unannotated, the arrow has no context (its parameter types the
+	// invoked function's): TS7006 in TypeScript, any in JavaScript.
+	mustCompileError(t, "console.log((function (h) { return h(1); })(x => x + 1));\n", "parameter 'x' implicitly has an 'any' type")
+	assertOutputCompatJS(t, "console.log((function (h) { return h(1); })(x => x + 1));\n", "2")
 }
 
 // Number's safe-integer bounds are numbers (doubles) in every lane, and a

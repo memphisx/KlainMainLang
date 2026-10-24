@@ -700,7 +700,7 @@ int kfd_listeners(int *out, int max) {
 void kfd_rr_add_worker(int lfd, unsigned long pid, int chan) {
 	if (!kfd_is(lfd, KFD_SOCKET)) return;
 	kfd_desc *d = KD(lfd);
-	if (!d->rr) d->rr = (kfd_rr *)calloc(1, sizeof(kfd_rr));
+	if (!d->rr) d->rr = (kfd_rr *)calloc(1, sizeof(kfd_rr)); /* scratch */
 	if (!d->rr || d->rr->n >= KFD_RR_MAX) { close(chan); return; }
 	unsigned long nb = 1;
 	if (p_ioctlsocket) p_ioctlsocket(kfd_sock(chan), (long)WS_FIONBIO, &nb); // a wedged worker must not block the primary
@@ -745,9 +745,10 @@ intptr_t __kml_win_poll_socket(int fd) {
 }
 
 // Primary: give connection s to whoever's turn it is. 1 = a worker has it (s is
-// closed here), 0 = it is this process's. A worker whose channel is gone leaves
-// the rotation; one whose channel is full is skipped for this connection.
-static int kfd_rr_dispatch(kfd_desc *d, ws_SOCKET s) {
+// closed here when close_it), 0 = it is this process's. A worker whose channel
+// is gone leaves the rotation; one whose channel is full is skipped for this
+// connection.
+static int kfd_rr_dispatch(kfd_desc *d, ws_SOCKET s, int close_it) {
 	kfd_rr *rr = d->rr;
 	if (!p_WSADuplicateSocketW) return 0;
 	for (int tries = 0; tries <= rr->n; tries++) {
@@ -775,7 +776,7 @@ static int kfd_rr_dispatch(kfd_desc *d, ws_SOCKET s) {
 				p_ioctlsocket(cs, (long)WS_FIONBIO, &nb);
 			}
 			if (n == (int)sizeof info) {
-				p_closesocket(s);
+				if (close_it) p_closesocket(s);
 				return 1;
 			}
 			dead = 1;
@@ -787,47 +788,18 @@ static int kfd_rr_dispatch(kfd_desc *d, ws_SOCKET s) {
 	}
 	return 0;
 }
-// ---- a socket sent over an IPC channel (child_process send(msg, handle)) ----
-// libuv's Windows IPC pipes carry a socket as the WSAPROTOCOL_INFOW that
-// WSADuplicateSocketW makes for the receiving process, framed in the byte
-// stream. The channel here is a loopback socket pair, whose peer pid the
-// socket cannot tell, so each end records it: the parent its child's at spawn,
-// the child its parent's when it adopts the channel.
-static int kfd_ipc_peer[KFD_MAX];
-void __kml_win_ipc_set_peer(int fd, int pid) {
-	if (fd >= 0 && fd < KFD_MAX) kfd_ipc_peer[fd] = pid;
+// Primary: a connection libuv accepted on listener lfd (klainpool.c), dealt
+// round-robin as accept() deals its own. 1 = a worker has it; the caller
+// closes its handle.
+int __kml_win_rr_deal(int lfd, intptr_t s) {
+	if (!kfd_is(lfd, KFD_SOCKET) || !KD(lfd)->rr) return 0;
+	return kfd_rr_dispatch(KD(lfd), (ws_SOCKET)s, 0);
 }
-int __kml_win_ipc_peer(int fd) {
-	return fd >= 0 && fd < KFD_MAX ? kfd_ipc_peer[fd] : 0;
-}
-int __kml_win_ipc_info_size(void) { return (int)sizeof(ws_PROTOCOL_INFOW); }
-// The socket behind fd, duplicated for process pid into info.
-int __kml_win_ipc_dup(int fd, int pid, void *info) {
-	if (!kfd_is(fd, KFD_SOCKET) || !p_WSADuplicateSocketW) { errno = L_EBADF; return -1; }
-	if (p_WSADuplicateSocketW(kfd_sock(fd), (unsigned long)pid, (ws_PROTOCOL_INFOW *)info) != 0) {
-		errno = map_wsa_errno(p_WSAGetLastError());
-		return -1;
-	}
-	// The peer shares the socket now: closing it here drops only this
-	// process's handle, as for an inherited one.
-	KD(fd)->inherited = 1;
-	return 0;
-}
+
 // The errno (Linux numbering) for a Winsock error code, as the socket calls
 // here report it: for a library that hands back the raw code (libcurl's
 // CURLINFO_OS_ERRNO).
 int __kml_win_wsa_errno(int wsa) { return map_wsa_errno(wsa); }
-
-// A socket received as info, under a new fd.
-int __kml_win_ipc_adopt(const void *info) {
-	ws_init();
-	ws_SOCKET s = p_WSASocketW ? p_WSASocketW(-1, -1, -1, (ws_PROTOCOL_INFOW *)info, 0, 0x01 /* WSA_FLAG_OVERLAPPED */) : WS_INVALID;
-	if (s == WS_INVALID) {
-		errno = p_WSAGetLastError ? map_wsa_errno(p_WSAGetLastError()) : L_EBADF;
-		return -1;
-	}
-	return kfd_register((HANDLE)(uintptr_t)s, KFD_SOCKET);
-}
 
 // Worker: the next connection the primary sent. 1 = *out is it, 0 = none yet,
 // -1 = the primary is gone (the caller falls back to accepting for itself).
@@ -867,7 +839,7 @@ int accept(int fd, void *addr, int *len) {
 		}
 		s = p_accept(kfd_sock(fd), addr, len);
 		if (s == WS_INVALID) return set_wsa_errno();
-		if (KD(fd)->rr && kfd_rr_dispatch(KD(fd), s)) continue; // a worker's turn: take the next
+		if (KD(fd)->rr && kfd_rr_dispatch(KD(fd), s, 1)) continue; // a worker's turn: take the next
 		break;
 	}
 	SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
@@ -1265,7 +1237,7 @@ int close(int fd) {
 		if (rr_chan) close(rr_chan);
 		if (rr) {
 			for (int i = 0; i < rr->n; i++) if (rr->w[i].chan) close(rr->w[i].chan);
-			free(rr);
+			free(rr); /* scratch */
 		}
 		if (inherited) {
 			// A child holds this socket too: drop this process's handle only.
@@ -1288,6 +1260,44 @@ int close(int fd) {
 	}
 	memset(&kfd_plain[fd], 0, sizeof kfd_plain[fd]);
 	return _close(fd) == 0 ? 0 : (errno = L_EBADF, -1);
+}
+
+// A socket libuv takes over (klainpool.c's uv_tcp_open): its SOCKET, its
+// slot freed without closing it. -1 when it is not a socket this process
+// alone holds — a descriptor dup'd, a socket shared with a child, or a
+// cluster listener or channel, which the table's own accept and hand-off
+// keep.
+intptr_t __kml_win_fd_release_socket(int fd) {
+	if (!kfd_is(fd, KFD_SOCKET) || KD(fd)->rr || KD(fd)->rr_chan || KD(fd)->inherited || kfd_rr_claimed[fd]) return -1;
+	if (kfd_tab[fd] && kfd_tab[fd]->refs != 1) return -1;
+	ws_SOCKET s = kfd_sock(fd);
+	kfd_slot_release(fd);
+	return (intptr_t)s;
+}
+
+// A listener whose socket libuv owns (klainpool.c keeps its slot as the
+// record worker spawning and the round-robin deal read): the record goes, its
+// hand-off channels closed, the socket left to libuv's close.
+void __kml_win_listener_forget(int fd) {
+	if (!kfd_is(fd, KFD_SOCKET)) return;
+	if (kfd_tab[fd]) {
+		AcquireSRWLockExclusive(&kfd_lock);
+		int last = --kfd_tab[fd]->refs == 0;
+		if (!last) kfd_tab[fd] = NULL;
+		ReleaseSRWLockExclusive(&kfd_lock);
+		if (!last) return;
+	}
+	kfd_rr *rr = KD(fd)->rr;
+	int rr_chan = KD(fd)->rr_chan;
+	KD(fd)->rr = NULL;
+	KD(fd)->rr_chan = 0;
+	kfd_rr_claimed[fd] = 0;
+	kfd_slot_release(fd);
+	if (rr_chan) close(rr_chan);
+	if (rr) {
+		for (int i = 0; i < rr->n; i++) if (rr->w[i].chan) close(rr->w[i].chan);
+		free(rr); /* scratch */
+	}
 }
 
 int fcntl(int fd, int cmd, ...) {
@@ -1381,26 +1391,6 @@ int poll(struct kml_pollfd *fds, unsigned long n, int timeout) {
 		Sleep(left < 0 || left > 5 ? 5 : (DWORD)left);
 	}
 }
-
-// WSAPoll over Winsock SOCKETs a library owns (libcurl's wait outside the
-// event loop, TDD-00252). want/got: 1 readable, 2 writable, 4 error or hang-up.
-int __kml_win_poll_sockets(const intptr_t *socks, const int *want, int *got, int n, int ms) {
-	ws_init();
-	ws_pollfd pf[64];
-	if (n > 64) n = 64;
-	for (int i = 0; i < n; i++) {
-		pf[i].fd = (ws_SOCKET)socks[i];
-		pf[i].events = (short)(((want[i] & 1) ? 0x0300 : 0) | ((want[i] & 2) ? 0x0010 : 0)); // POLLRDNORM|POLLRDBAND, POLLWRNORM
-		pf[i].revents = 0;
-	}
-	int rc = p_WSAPoll(pf, (unsigned long)n, ms);
-	for (int i = 0; i < n; i++) {
-		short r = pf[i].revents;
-		got[i] = ((r & 0x0302) ? 1 : 0) | ((r & 0x0010) ? 2 : 0) | ((r & 0x0003) ? 4 : 0); // 0x2 POLLHUP, 0x1 POLLERR
-	}
-	return rc;
-}
-
 
 // ---- fibers over Win32 Fibers ------------------------------------------------
 // The IR allocates ucontextLayout() bytes per context and stores ss_sp /

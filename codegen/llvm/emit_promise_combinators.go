@@ -30,26 +30,27 @@ func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type)
 	q := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
 
+	c := combinators[kind]
 	outTy := e.combinatorOutElem(kind, innerTy)
 	out := "null"
-	if kind != "race" {
+	if c.finish != nil {
 		out = e.mallocArrayBuffer(lenReg, outTy)
 	}
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 32)", st))
+	e.heapMallocInto(st, "32")
 	field := func(i int) string {
 		g := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, combStateIR, st, i))
 		return g
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", q, field(0)))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", out, field(1)))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, field(2)))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenReg, field(3)))
+	e.heapStore("ptr", q, field(0), 8)
+	e.heapStore("ptr", out, field(1), 8)
+	e.heapStore("i64", lenReg, field(2), 8)
+	e.heapStore("i64", lenReg, field(3), 8)
 
 	// An empty list settles at once: all/allSettled fulfil with [], any
 	// rejects with an AggregateError, race stays pending.
-	if kind != "race" {
+	if c.finish != nil {
 		empty := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, lenReg))
 		emptyL, goL := e.freshLabel("comb.empty"), e.freshLabel("comb.members")
@@ -66,14 +67,14 @@ func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type)
 		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", g, ptrReg, idxVal))
 		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", m, g))
 		env := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @malloc(i64 24)", env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", st, env))
+		e.heapMallocInto(env, "24")
+		e.heapStore("ptr", st, env, 8)
 		ip := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", ip, env))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxVal, ip))
+		e.heapStore("i64", idxVal, ip, 8)
 		mp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", mp, env))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", m, mp))
+		e.heapStore("ptr", m, mp, 8)
 		clo := e.buildBuiltinClosure(runner, env)
 		e.emitAttachPromiseReaction(m, clo)
 	})
@@ -82,54 +83,138 @@ func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type)
 	return Value{Ref: q, Ty: qt}
 }
 
-// combinatorOutElem is the element type of the combinator's collected
-// array: the values (all), the settlement records (allSettled), the
-// rejection reasons (any).
-func (e *Emitter) combinatorOutElem(kind string, innerTy Type) Type {
-	switch kind {
-	case "all":
-		if isVoidTy(innerTy) {
+// combinator is one of the Promise combinators' rules.
+//   - outElem: the element type of its collected array — the values (all),
+//     the settlement records (allSettled), the rejection reasons (any); nil
+//     for race, which collects nothing.
+//   - collects: its result is that array (all, allSettled).
+//   - finish settles q when every member has been seen.
+//   - fulfilled and rejected are a member's reaction, at its label.
+type combinator struct {
+	outElem   func(innerTy Type) Type
+	collects  bool
+	finish    func(e *Emitter, q, out, n string, innerTy Type)
+	fulfilled func(e *Emitter, r *combRun)
+	rejected  func(e *Emitter, r *combRun)
+}
+
+// combRun is a member reaction being generated: the result q, the
+// collected array, the member's index and promise, and the three ways the
+// reaction ends.
+type combRun struct {
+	out, idx, m string
+	innerTy     Type
+	countDown   func()
+	rejectWith  func()
+	resolveWith func()
+}
+
+// combinators are Promise.all, allSettled, race and any (ADR-01193).
+var combinators map[string]*combinator
+
+// fulfilWithArray settles q with the collected array.
+func fulfilWithArray(e *Emitter, q, out, n string, elem Type) {
+	arr := e.wrapArrayAggregate(out, n, elem)
+	e.storePromiseValue(q, arr)
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+}
+
+func init() {
+	voidAsAny := func(t Type) Type {
+		if isVoidTy(t) {
 			return TypeAny // each Promise<void> fulfils with undefined
 		}
-		return innerTy
-	case "allSettled":
-		if isVoidTy(innerTy) {
-			return SettlementType(TypeAny)
-		}
-		return SettlementType(innerTy)
-	case "any":
-		return TypeAny // the rejection reasons, boxed
+		return t
+	}
+	combinators = map[string]*combinator{
+		"all": {
+			outElem:  voidAsAny,
+			collects: true,
+			finish: func(e *Emitter, q, out, n string, innerTy Type) {
+				fulfilWithArray(e, q, out, n, voidAsAny(innerTy))
+			},
+			fulfilled: func(e *Emitter, r *combRun) {
+				if isVoidTy(r.innerTy) {
+					e.storeArrayElementValue(r.out, r.idx, Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, TypeAny)
+				} else {
+					e.storeArrayElementValue(r.out, r.idx, e.loadPromiseValue(r.m, r.innerTy), r.innerTy)
+				}
+				r.countDown()
+			},
+			rejected: func(e *Emitter, r *combRun) { r.rejectWith() },
+		},
+		"allSettled": {
+			outElem:  func(t Type) Type { return SettlementType(voidAsAny(t)) },
+			collects: true,
+			finish: func(e *Emitter, q, out, n string, innerTy Type) {
+				fulfilWithArray(e, q, out, n, SettlementType(voidAsAny(innerTy)))
+			},
+			fulfilled: func(e *Emitter, r *combRun) {
+				settleTy := SettlementType(voidAsAny(r.innerTy))
+				val := Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
+				if !isVoidTy(r.innerTy) {
+					val = e.loadPromiseValue(r.m, r.innerTy)
+				}
+				ok := e.buildSettlement(settleTy, e.internString("fulfilled"), val.Ref, "null")
+				e.storeArrayElement(r.out, r.idx, ok, settleTy)
+				r.countDown()
+			},
+			rejected: func(e *Emitter, r *combRun) {
+				valTy := voidAsAny(r.innerTy)
+				settleTy := SettlementType(valTy)
+				reason := e.emitCaughtToAny(e.loadRejectReasonCaught(r.m))
+				absent := valTy.zeroLiteral()
+				if valTy.IsDynamic() {
+					absent = fmt.Sprint(nbUndefined)
+				}
+				bad := e.buildSettlement(settleTy, e.internString("rejected"), absent, reason.Ref)
+				e.storeArrayElement(r.out, r.idx, bad, settleTy)
+				r.countDown()
+			},
+		},
+		"race": {
+			fulfilled: func(e *Emitter, r *combRun) { r.resolveWith() },
+			rejected:  func(e *Emitter, r *combRun) { r.rejectWith() },
+		},
+		"any": {
+			outElem: func(Type) Type { return TypeAny }, // the rejection reasons, boxed
+			finish: func(e *Emitter, q, out, n string, innerTy Type) {
+				e.ensureExceptionHelpers()
+				agg := e.buildAggregateErrorObj(e.internString("All promises were rejected"), e.internString("AggregateError"), out, n)
+				bits := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bits, agg))
+				e.emitRejectPromise(q, fmt.Sprintf("%d", kmlTagError), false, bits)
+			},
+			fulfilled: func(e *Emitter, r *combRun) { r.resolveWith() },
+			rejected: func(e *Emitter, r *combRun) {
+				// The reason, boxed: AggregateError's `errors` is any[].
+				reason := e.emitCaughtToAny(e.loadRejectReasonCaught(r.m))
+				e.storeArrayElement(r.out, r.idx, reason.Ref, TypeAny)
+				r.countDown()
+			},
+		},
+	}
+}
+
+// combinatorOutElem is the element type of kind's collected array.
+func (e *Emitter) combinatorOutElem(kind string, innerTy Type) Type {
+	if c := combinators[kind]; c.outElem != nil {
+		return c.outElem(innerTy)
 	}
 	return innerTy
 }
 
 // combinatorResultType is the combinator's promise value type.
 func (e *Emitter) combinatorResultType(kind string, innerTy Type) Type {
-	switch kind {
-	case "all":
-		return ArrayOf(e.combinatorOutElem(kind, innerTy))
-	case "allSettled":
+	if combinators[kind].collects {
 		return ArrayOf(e.combinatorOutElem(kind, innerTy))
 	}
 	return innerTy
 }
 
-// combinatorFinish settles q when every member has been seen: all and
-// allSettled fulfil with the collected array; any rejects with an
-// AggregateError of the reasons.
+// combinatorFinish settles q when every member has been seen.
 func (e *Emitter) combinatorFinish(kind, q, out, n string, innerTy Type) {
-	switch kind {
-	case "all", "allSettled":
-		arr := e.wrapArrayAggregate(out, n, e.combinatorOutElem(kind, innerTy))
-		e.storePromiseValue(q, arr)
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
-	case "any":
-		e.ensureExceptionHelpers()
-		agg := e.buildAggregateErrorObj(e.internString("All promises were rejected"), e.internString("AggregateError"), out, n)
-		bits := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bits, agg))
-		e.emitRejectPromise(q, fmt.Sprintf("%d", kmlTagError), false, bits)
-	}
+	combinators[kind].finish(e, q, out, n, innerTy)
 }
 
 // emitCombinatorRunner generates the member reaction `void runner(ptr env)`
@@ -177,7 +262,7 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 		r, r1 := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, remP))
 		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", r1, r))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r1, remP))
+		e.heapStore("i64", r1, remP, 8)
 		zero := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", zero, r1))
 		finL := e.freshLabel("comb.finish")
@@ -198,59 +283,17 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 		e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
 	}
 
-	switch kind {
-	case "all":
-		e.emitLabel(fulL)
-		if isVoidTy(innerTy) {
-			e.storeArrayElementValue(out, idx, Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, TypeAny)
-		} else {
-			e.storeArrayElementValue(out, idx, e.loadPromiseValue(m, innerTy), innerTy)
-		}
-		countDown()
-		e.emitLabel(rejL)
-		rejectWith()
-	case "allSettled":
-		valTy := innerTy
-		if isVoidTy(innerTy) {
-			valTy = TypeAny // a Promise<void> fulfils with undefined
-		}
-		settleTy := SettlementType(valTy)
-		e.emitLabel(fulL)
-		val := Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
-		if !isVoidTy(innerTy) {
-			val = e.loadPromiseValue(m, innerTy)
-		}
-		ok := e.buildSettlement(settleTy, e.internString("fulfilled"), val.Ref, "null")
-		e.storeArrayElement(out, idx, ok, settleTy)
-		countDown()
-		e.emitLabel(rejL)
-		reason := e.emitCaughtToAny(e.loadRejectReasonCaught(m))
-		absent := valTy.zeroLiteral()
-		if valTy.IsDynamic {
-			absent = fmt.Sprint(nbUndefined)
-		}
-		bad := e.buildSettlement(settleTy, e.internString("rejected"), absent, reason.Ref)
-		e.storeArrayElement(out, idx, bad, settleTy)
-		countDown()
-	case "race":
-		e.emitLabel(fulL)
-		resolveWith()
-		e.emitLabel(rejL)
-		rejectWith()
-	case "any":
-		e.emitLabel(fulL)
-		resolveWith()
-		e.emitLabel(rejL)
-		// The reason, boxed: AggregateError's `errors` is any[].
-		reason := e.emitCaughtToAny(e.loadRejectReasonCaught(m))
-		e.storeArrayElement(out, idx, reason.Ref, TypeAny)
-		countDown()
-	}
+	c := combinators[kind]
+	r := &combRun{out: out, idx: idx, m: m, innerTy: innerTy, countDown: countDown, rejectWith: rejectWith, resolveWith: resolveWith}
+	e.emitLabel(fulL)
+	c.fulfilled(e, r)
+	e.emitLabel(rejL)
+	c.rejected(e, r)
 	e.emitLabel(retL)
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf("\ndefine internal void %s(ptr %%env) {\nentry:\n%s}\n", name, body))
+	e.writeFunc(fmt.Sprintf("internal void %s(ptr %%env)", name), body)
 	return name
 }
 
@@ -268,7 +311,16 @@ func init() {
 	} {
 		name, emit := name, emit
 		intrinsics["Promise."+name] = intrinsic{
-			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return emit(e, ex.Args, ex.GetPos()) },
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				args := ex.Args
+				if name != "resolve" && name != "reject" && len(args) == 1 {
+					// A combinator iterates its argument (array_iter_patch.go).
+					if a, ok := e.patchedIterInit(args[0]); ok {
+						args = []ast.Expression{a}
+					}
+				}
+				return emit(e, args, ex.GetPos())
+			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
 				t, _ := e.promiseStaticType(name, ex)
 				return t
