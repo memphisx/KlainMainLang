@@ -40,7 +40,7 @@ func (c CSource) CachedObject(cacheDir string, compileFlags []string) (string, e
 		return "", ErrCObjectUncacheable
 	}
 	h := sha256.New()
-	for _, part := range [][]string{{c.Name, c.Content, runtime.GOOS, win32CompatHeader}, c.CFlags, compileFlags, HostClangArgs()} {
+	for _, part := range [][]string{{c.Name, c.Content, runtime.GOOS, win32CompatHeader, clangIdentity()}, c.CFlags, compileFlags, HostClangArgs()} {
 		for _, s := range part {
 			fmt.Fprintf(h, "%d:%s", len(s), s)
 		}

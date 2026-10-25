@@ -422,6 +422,17 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 	}
 	ents := parseIREntities(ll)
 	defs := map[string]int{}
+	// A function a constructor entry names stays in the program's unit, which
+	// registers it: a module whose @llvm.global_ctors names only a declaration
+	// crashes clang's ASan pass.
+	ctors := map[string]bool{}
+	for _, e := range ents {
+		if e.kind == 'g' && e.name == "llvm.global_ctors" {
+			for _, n := range irNames(e.text, '@') {
+				ctors[n] = true
+			}
+		}
+	}
 	for i := range ents {
 		e := &ents[i]
 		if e.kind == 'f' || e.kind == 'g' {
@@ -433,7 +444,7 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 			// A library definition is hidden in every program, so its unit's
 			// text does not depend on what the program names.
 			e.owner = libOwner(e.name)
-			if e.owner == "" && !islands && e.kind == 'f' {
+			if e.owner == "" && !islands && e.kind == 'f' && !ctors[e.name] {
 				e.owner = autoUnitOwner(*e)
 			}
 			if islandOwner(e.owner) {
@@ -856,7 +867,7 @@ func sortedKeys(m map[string]string) []string {
 // it was already there.
 func cachedUnitObject(cacheDir, k, text string, compileFlags []string) (obj string, hit bool, err error) {
 	h := sha256.New()
-	for _, s := range append(append([]string{text, runtime.GOOS}, compileFlags...), HostClangArgs()...) {
+	for _, s := range append(append([]string{text, runtime.GOOS, clangIdentity()}, compileFlags...), HostClangArgs()...) {
 		fmt.Fprintf(h, "%d:%s", len(s), s)
 	}
 	obj = filepath.Join(cacheDir, "lib-"+k+"-"+hex.EncodeToString(h.Sum(nil)[:10])+".o")
@@ -1013,9 +1024,10 @@ func moveUnitRows(ents []irEntity, defs map[string]int) []irEntity {
 			irEntity{name: tab, kind: 'g', owner: o,
 				text: fmt.Sprintf("@%s = private constant [%d x %s] [%s]", tab, len(rows), rowTy, strings.Join(rows, ", "))},
 			irEntity{name: desc, kind: 'g', owner: o,
-				text: fmt.Sprintf("@%s = private constant { i64, ptr, i64, i64 } { i64 %d, ptr @%s, i64 %d, i64 %s }, section \"%s\", align 8", desc, unitKindFnMeta, tab, len(rows), stride, section)},
+				text: fmt.Sprintf("@%s = private constant { i64, ptr, i64, i64 } { i64 %d, ptr @%s, i64 %d, i64 %s }, section \"%s\", align 8, no_sanitize_address", desc, unitKindFnMeta, tab, len(rows), stride, section)},
 			// Kept by the linker though nothing names it (unitreg.c finds it
-			// by its section).
+			// by its section, walking the descriptors as one array: ASan's
+			// redzones between them would break that, so it leaves them out).
 			irEntity{name: "llvm.used", kind: 'g', owner: o,
 				text: fmt.Sprintf("@llvm.used = appending global [1 x ptr] [ptr @%s], section \"llvm.metadata\"", desc)},
 		)

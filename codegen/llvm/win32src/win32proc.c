@@ -677,10 +677,13 @@ int kill(int pid, int sig) {
 	// TerminateProcess(self) would instead kill the process before the handler
 	// could run. With no handler it falls through to the default terminate.
 	// A process.on() watcher is libuv's uv_signal_t: libuv's own dispatch
-	// delivers it, as uv_kill does for the current process.
+	// delivers it, as uv_kill does for the current process. The dispatch is
+	// internal to libuv: a static libuv.a has it, the DLL's import library
+	// does not, so it is a weak reference (NULL then) and the watcher table
+	// below delivers instead.
 	if ((DWORD)pid == GetCurrentProcessId()) {
-		extern int uv__signal_dispatch(int signum);
-		if ((sig == 2 || sig == 1 || sig == 21 || sig == 28) && uv__signal_dispatch(sig)) return 0;
+		extern int uv__signal_dispatch(int signum) __attribute__((weak));
+		if ((sig == 2 || sig == 1 || sig == 21 || sig == 28) && uv__signal_dispatch && uv__signal_dispatch(sig)) return 0;
 		if (kml_deliver_self_signal(sig)) return 0;
 	}
 	// libuv's uv_kill: SIGTERM, SIGKILL, SIGINT and SIGQUIT terminate the target
