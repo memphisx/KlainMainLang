@@ -128,14 +128,14 @@ func (e *Emitter) builtinProtoClass(id *ast.Identifier) bool {
 	if _, user := e.classes[id.Name]; user || e.isShadowedByLocal(id.Name) {
 		return false
 	}
-	if _, ok := hostProtoClasses[id.Name]; !ok {
+	if _, ok := hostProtoClasses[id.Name]; !ok && !isErrorKindName(id.Name) {
 		return false
 	}
 	c := e.front()
 	if c == nil || !e.isBuiltinGlobal(c, id) {
 		return false
 	}
-	return len(e.hostMembers(id.Name)) > 0
+	return isErrorKindName(id.Name) || len(e.hostMembers(id.Name)) > 0
 }
 
 // protoExtraAccessors are prototype accessors a class's declaration leaves
@@ -193,6 +193,9 @@ func (e *Emitter) emitBuiltinProto(class string) Value {
 func (e *Emitter) emitBuiltinProtoBag(class string) Value {
 	e.ensureDynObj()
 	e.declareFn("__kml_class_proto", "declare ptr @__kml_class_proto(ptr, i64, ptr, ptr, ptr, ptr)")
+	if isErrorKindName(class) {
+		return e.emitErrorProtoBag(class)
+	}
 	slot := "@__kml_proto_obj_" + llvmSafeSymbol(class)
 	if e.protoSlots == nil {
 		e.protoSlots = map[string]bool{}
@@ -264,6 +267,19 @@ func (e *Emitter) emitBuiltinProtoBag(class string) Value {
 		keys = append(keys, e.internString("@@toStringTag"))
 		vals, sets = append(vals, e.emitNbTagPtr(e.internString(class), kmlTagString)), append(sets, "-1")
 	}
+	bag := e.emitProtoBagCall(slot, keys, vals, sets, "null")
+	if class == "Array" {
+		// Array.prototype is itself an Array.
+		e.declareFn("__kml_dynobj_array_exotic", "declare void @__kml_dynobj_array_exotic(ptr)")
+		e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_array_exotic(ptr %s)", bag))
+	}
+	return e.emitDynObjBox(bag)
+}
+
+// emitProtoBagCall makes slot's prototype object once: keys[i] holding
+// vals[i] (a method when sets[i] is -1, else an accessor), its own
+// [[Prototype]] parent (null for Object.prototype).
+func (e *Emitter) emitProtoBagCall(slot string, keys, vals, sets []string, parent string) string {
 	n := len(keys)
 	karr, varr, sarr := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca [%d x ptr], align 8", karr, n))
@@ -279,13 +295,63 @@ func (e *Emitter) emitBuiltinProtoBag(class string) Value {
 		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sets[i], sp))
 	}
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_class_proto(ptr %s, i64 %d, ptr %s, ptr %s, ptr %s, ptr null)", bag, slot, n, karr, varr, sarr))
-	if class == "Array" {
-		// Array.prototype is itself an Array.
-		e.declareFn("__kml_dynobj_array_exotic", "declare void @__kml_dynobj_array_exotic(ptr)")
-		e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_array_exotic(ptr %s)", bag))
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_class_proto(ptr %s, i64 %d, ptr %s, ptr %s, ptr %s, ptr %s)", bag, slot, n, karr, varr, sarr, parent))
+	return bag
+}
+
+// errorProtoToString is Error.prototype.toString (ECMA-262 20.5.3.4).
+const errorProtoToString = "(function toString() {\n" +
+	"\tif (this === null || typeof this !== \"object\" && typeof this !== \"function\") throw new TypeError(\"Error.prototype.toString requires that 'this' be an Object\");\n" +
+	"\tconst n = this.name, m = this.message;\n" +
+	"\tconst name = n === undefined ? \"Error\" : `${n}`, msg = m === undefined ? \"\" : `${m}`;\n" +
+	"\tif (name === \"\") return msg;\n" +
+	"\tif (msg === \"\") return name;\n" +
+	"\treturn name + \": \" + msg;\n" +
+	"})"
+
+// emitErrorProtoBag builds error kind class's prototype object: its name,
+// an empty message and its constructor; Error.prototype also has toString,
+// and every other kind's inherits Error.prototype.
+func (e *Emitter) emitErrorProtoBag(class string) Value {
+	slot := "@__kml_proto_obj_" + llvmSafeSymbol(class)
+	parent := "null"
+	if class != "Error" {
+		pp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pp, e.emitBuiltinProto("Error").Ref))
+		parent = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", parent, pp))
 	}
-	return e.emitDynObjBox(bag)
+	str := func(s string) string { return e.emitNbTagPtr(e.internString(s), kmlTagString) }
+	keys := []string{e.internString("constructor")}
+	vals := []string{e.emitNbTagPtr(e.internString(class), kmlTagFuncRef)}
+	if class != "DOMException" {
+		// A DOMException's name and message are accessors of its instances.
+		keys = append(keys, e.internString("name"), e.internString("message"))
+		vals = append(vals, str(class), str(""))
+	}
+	if class == "Error" {
+		prog, err := parser.Parse(errorProtoToString)
+		if err == nil {
+			err = sema.Prepare(prog)
+		}
+		var v Value
+		if err == nil {
+			fe := prog.Body[0].(*ast.ExpressionStatement).Expr.(*ast.FunctionExpression)
+			v, err = e.emitDynFunctionExpression(fe, ast.Pos{})
+		}
+		if err == nil {
+			v, err = e.emitBoxValue(v)
+		}
+		if err != nil {
+			panic(fmt.Sprintf("Error.prototype.toString: %v", err))
+		}
+		keys, vals = append(keys, e.internString("toString")), append(vals, v.Ref)
+	}
+	sets := make([]string, len(keys))
+	for i := range sets {
+		sets[i] = "-1"
+	}
+	return e.emitDynObjBox(e.emitProtoBagCall(slot, keys, vals, sets, parent))
 }
 
 // hostProtoClasses are the ECMAScript classes whose instances box as host
@@ -462,7 +528,7 @@ func (e *Emitter) emitBuiltinProtoOfFinalize() {
 	// class first (an instance of D is one of its base C too).
 	var users []string
 	for name, info := range e.classes {
-		if info.TagID&kmlHdrIDMask < kmlStableIDBase && !info.Ty.IsDynamic() {
+		if !info.Ty.IsDynamic() && (info.TagID&kmlHdrIDMask < kmlStableIDBase || e.classProtoSlotted(name)) {
 			users = append(users, name)
 		}
 	}
@@ -488,6 +554,28 @@ func (e *Emitter) emitBuiltinProtoOfFinalize() {
 			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitClassProto(cls).Ref))
 			e.emitLabel(nextL)
 		}
+	}
+	if e.usedErrorProto() {
+		// A builtin error: its kind's prototype, by the kind in field 0.
+		f0, flagged, isErr := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %%cell, align 8", f0))
+		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", flagged, f0, errorTypeIDFlag))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isErr, flagged))
+		errL, restL := e.freshLabel("protoof.err"), e.freshLabel("protoof.noterr")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, errL, restL))
+		e.emitLabel(errL)
+		kind := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", kind, f0, errorTypeIDFlag-1))
+		for i, k := range errorKinds {
+			hit, yesL, nextL := e.freshReg(), e.freshLabel("protoof.kind"), e.freshLabel("protoof.kindnext")
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", hit, kind, i))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hit, yesL, nextL))
+			e.emitLabel(yesL)
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitBuiltinProto(k).Ref))
+			e.emitLabel(nextL)
+		}
+		e.emitTerminator("br label %" + restL)
+		e.emitLabel(restL)
 	}
 	name := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_shape_class_name(ptr %%cell)", name))
@@ -970,7 +1058,7 @@ func (e *Emitter) emitTypedArrayProto() string {
 		keys, vals, sets = append(keys, e.internString(p)), append(vals, w), append(sets, "0")
 	}
 	for _, m := range e.hostMembers("Uint8Array") {
-		if !m.method || m.optional {
+		if !m.method || m.optional || !e.protoMethodReachable(m.name) {
 			continue
 		}
 		keys = append(keys, e.internString(m.name))
@@ -1327,15 +1415,44 @@ func valueProtoClass(t Type) string {
 	return ""
 }
 
-// emitClassProto is the user class's prototype object, C.prototype: its own
-// methods' records (shapeMethodRecord, so `C.prototype.m === c.m`), its own
-// accessors and `constructor` (C), in declaration order, its [[Prototype]]
-// its base class's, made on first read.
+// emitClassProto is the user class's prototype object, C.prototype, read
+// through the class's one builder (`__kml_cproto_get_<C>`): a library
+// class's reference row names it alike in every program.
 func (e *Emitter) emitClassProto(className string) Value {
+	fn := "@__kml_cproto_get_" + llvmSafeSymbol(className)
+	if e.protoBuilders == nil {
+		e.protoBuilders = map[string]bool{}
+	}
+	if !e.protoBuilders[fn] {
+		e.protoBuilders[fn] = true
+		savedLib, savedShared, savedLit := e.inLib, e.sharedCode, e.sharedLitUnit
+		e.inLib, e.sharedCode, e.sharedLitUnit = "", 0, ""
+		restore := e.beginDetachedFunc()
+		v := e.emitClassProtoBag(className)
+		e.emitTerminator("ret i64 " + v.Ref)
+		body := e.allocas.String() + e.body.String()
+		restore()
+		e.inLib, e.sharedCode, e.sharedLitUnit = savedLib, savedShared, savedLit
+		e.writeFunc("i64 "+fn+"()", body)
+	}
+	e.declareFn(fn[1:], "declare i64 "+fn+"()")
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s()", r, fn))
+	return Value{Ref: r, Ty: TypeAny}
+}
+
+// emitClassProtoBag builds C.prototype (emitClassProto): its own methods'
+// records (shapeMethodRecord, so `C.prototype.m === c.m`), its own accessors
+// and `constructor` (C), in declaration order, its [[Prototype]] its base
+// class's, made on first read.
+func (e *Emitter) emitClassProtoBag(className string) Value {
 	info := e.classes[className]
 	parent := "null"
 	var pv Value
 	switch {
+	case info.ErrorBaseKind != "" && info.BaseClass == info.ErrorBaseKind:
+		// A class extending an error kind (`extends TypeError`).
+		pv = e.emitBuiltinProto(info.ErrorBaseKind)
 	case info.BaseClass != "":
 		pv = e.emitClassProto(info.BaseClass)
 	case info.HostAnnot != nil && hostProtoClassKnown(info.HostAnnot.Name):
@@ -1441,6 +1558,18 @@ func (e *Emitter) emitClassProto(className string) Value {
 
 // classProtoSlot is the global holding the user class's prototype object
 // (null until emitClassProto first makes it).
+// usedErrorProto reports whether the program made an error kind's
+// prototype object, so an error's prototype can be one of them.
+func (e *Emitter) usedErrorProto() bool {
+	return e.protoBuilders["@__kml_proto_get_Error"]
+}
+
+// classProtoSlotted reports whether the program made className's
+// prototype object (a library class's, read as `K.prototype`).
+func (e *Emitter) classProtoSlotted(className string) bool {
+	return e.protoSlots["@__kml_cproto_obj_"+llvmSafeSymbol(className)]
+}
+
 func (e *Emitter) classProtoSlot(className string) string {
 	slot := "@__kml_cproto_obj_" + llvmSafeSymbol(className)
 	if e.protoSlots == nil {
@@ -1457,7 +1586,7 @@ func (e *Emitter) classProtoSlot(className string) string {
 // prototype object emitBuiltinProto makes.
 func hostProtoClassKnown(name string) bool {
 	_, ok := hostProtoClasses[name]
-	return ok
+	return ok || isErrorKindName(name)
 }
 
 // objProtoMethodSrc is Object.prototype's own methods as values, each the

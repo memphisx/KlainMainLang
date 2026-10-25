@@ -62,6 +62,36 @@ void __kml_unit_register(i64 kind, const void *rows, i64 n, i64 stride) {
     for (i64 i = 0; i < n; i++) kml_unit_put(t, (const char *)rows + i * stride);
 }
 
+// A unit's table registered by the linker instead of a constructor of its
+// own: compiled once and shared by every program, the unit puts one of these
+// in the kml_unitreg section (unitreg.go, moveUnitRows), and this walks the
+// section before main. Mach-O names the section __DATA,__kml_unitreg.
+typedef struct {
+    i64 kind;
+    const void *rows;
+    i64 n;
+    i64 stride;
+} KmlUnitDesc;
+
+#if defined(__APPLE__)
+extern const KmlUnitDesc kml_unitreg_start __asm("section$start$__DATA$__kml_unitreg");
+extern const KmlUnitDesc kml_unitreg_stop __asm("section$end$__DATA$__kml_unitreg");
+#define KML_UNITREG_FIRST (&kml_unitreg_start)
+#define KML_UNITREG_LAST (&kml_unitreg_stop)
+#elif !defined(_WIN32)
+extern const KmlUnitDesc __start_kml_unitreg[] __attribute__((weak, visibility("hidden")));
+extern const KmlUnitDesc __stop_kml_unitreg[] __attribute__((weak, visibility("hidden")));
+#define KML_UNITREG_FIRST __start_kml_unitreg
+#define KML_UNITREG_LAST __stop_kml_unitreg
+#endif
+
+#ifdef KML_UNITREG_FIRST
+__attribute__((constructor)) static void kml_unitreg_sections(void) {
+    for (const KmlUnitDesc *d = KML_UNITREG_FIRST; d && d < KML_UNITREG_LAST; d++)
+        __kml_unit_register(d->kind, d->rows, d->n, d->stride);
+}
+#endif
+
 static int kml_is_rec(const void *p);
 static __thread const void *kml_static_recv;
 

@@ -1622,13 +1622,14 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 			return Value{}, err
 		}
 	}
-	// Unary numeric coercion on a dynamic value (TDD-00076 A2): ToNumber,
-	// negate, re-box.
+	// Unary minus on a dynamic value (TDD-00076 A2): ToNumeric, negated (a
+	// bigint as a bigint), re-boxed.
 	if arg.Ty.IsDynamic() && ex.Op == "-" {
-		d := e.emitAnyToNum(arg)
+		e.ensureDynJSONC()
+		e.declareFn("__kml_any_neg", "declare i64 @__kml_any_neg(i64)")
 		n := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = fneg double %s", n, d))
-		return Value{Ref: e.emitNbEncodeDouble(n), Ty: TypeAny}, nil
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_neg(i64 %s)", n, arg.Ref))
+		return Value{Ref: n, Ty: TypeAny}, nil
 	}
 	reg := e.freshReg()
 	switch ex.Op {

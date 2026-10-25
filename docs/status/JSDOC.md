@@ -6,7 +6,7 @@
 
 **Coverage**: JSDoc tags 20/22 (~91%) · JSDoc type expressions 15/15 (100%).
 
-**Strict Coverage**: JSDoc tags 5/22 (~23%) · JSDoc type expressions 7/15 (~47%). A row counts toward Strict only when its **Caveats** column is empty.
+**Strict Coverage**: JSDoc tags 5/22 (~23%) · JSDoc type expressions 8/15 (~53%). A row counts toward Strict only when its **Caveats** column is empty.
 
 > **On the low Strict figure — expected, not a backlog.** Most tags that stay
 > out of Strict do so because their Caveats read "accepted and erased, not
@@ -67,7 +67,7 @@ Staged roadmap: [TDD-00125](../tdd/TDD-00125.md).
 |---|---|---|---|
 | Bare primitive (`string`, `number`, `boolean`, …) | ✅ | | • Resolved by the same type resolver a TS annotation uses |
 | `T[]` array | ✅ | | • The `[]` suffix is handled by the resolver |
-| Optional param (`T=`, `[name]`) | ✅ | • Recognized at the `@param` name/type level and stripped; the parameter is not yet marked structurally optional beyond an inline `?` | • [TDD-00125](../tdd/TDD-00125.md) Stage 1 |
+| Optional param (`T=`, `[name]`) | ✅ | | • [TDD-00125](../tdd/TDD-00125.md) Stage 1; the parameter is optional, as `name?` makes it ([ADR-01929](../adr/01/ADR-01929.md)) |
 | Varargs/rest (`...T`) | ✅ | • Stripped to the base `T`; the varargs body reads its overflow through a declared `...rest` parameter or the `arguments` object ([ADR-00928](../adr/00/ADR-00928.md)) | • [TDD-00125](../tdd/TDD-00125.md) Stage 1 |
 | Union (`A \| B`) | ✅ | • Inherits the union V1 scope (scalar/object/`ReadableStream` members, narrowing rules — see the Type system page) | • [TDD-00125](../tdd/TDD-00125.md) Stage 4; the JSDoc string is parsed by the real type parser |
 | Nullable (`?T`) | ✅ | • The leading marker (`?number` → `number \| null`); a `?` buried mid-expression is left to the parser | • [TDD-00125](../tdd/TDD-00125.md) Stage 4 |

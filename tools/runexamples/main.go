@@ -28,6 +28,7 @@ type job struct {
 	flags []string
 	label string
 	ok    bool
+	why   string // the compiler's output when it failed
 }
 
 func main() {
@@ -63,11 +64,16 @@ func main() {
 	ok, fail := 0, 0
 	for _, j := range list {
 		fmt.Printf("%-50s", "  "+j.src+j.label)
-		if j.ok && runOne(j.src, *timeout) {
+		why := j.why
+		if j.ok {
+			why = runOne(j.src, *timeout)
+		}
+		if why == "" {
 			fmt.Println("OK")
 			ok++
 		} else {
 			fmt.Println("FAIL")
+			fmt.Println(indent(why))
 			fail++
 		}
 	}
@@ -137,7 +143,11 @@ func compile(bin string, list []*job, n int) {
 			defer wg.Done()
 			for j := range work {
 				cmd := exec.Command(bin, append(append([]string{}, j.flags...), j.src)...)
-				j.ok = cmd.Run() == nil
+				out, err := cmd.CombinedOutput()
+				j.ok = err == nil
+				if err != nil {
+					j.why = strings.TrimRight(fmt.Sprintf("did not compile: %v\n%s", err, out), "\n")
+				}
 			}
 		}()
 	}
@@ -148,28 +158,61 @@ func compile(bin string, list []*job, n int) {
 	wg.Wait()
 }
 
-// runOne runs src's binary with no stdin, its output discarded, killed past
-// the time limit.
-func runOne(src string, limit time.Duration) bool {
+// runOne runs src's binary with no stdin, killed past the time limit, and
+// returns why it failed (its last output with it), "" when it passed.
+func runOne(src string, limit time.Duration) string {
 	out := strings.TrimSuffix(strings.TrimSuffix(src, ".ts"), ".js")
 	if runtime.GOOS == "windows" {
 		out += ".exe"
 	}
+	var log tailBuffer
 	cmd := exec.Command("./" + out)
 	cmd.Env = append(os.Environ(), "PORT="+freePort())
+	cmd.Stdout, cmd.Stderr = &log, &log
 	if err := cmd.Start(); err != nil {
-		return false
+		return err.Error()
 	}
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	select {
 	case err := <-done:
-		return err == nil
+		if err == nil {
+			return ""
+		}
+		return err.Error() + "\n" + log.String()
 	case <-time.After(limit):
 		cmd.Process.Kill()
 		<-done
-		return false
+		return fmt.Sprintf("timed out after %s\n%s", limit, log.String())
 	}
+}
+
+// tailBuffer keeps the last 4 KiB written to it: what a failed example
+// printed last.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if n := len(t.buf); n > 4096 {
+		t.buf = append(t.buf[:0], t.buf[n-4096:]...)
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimRight(string(t.buf), "\n")
+}
+
+// indent prefixes each line of s for the gate's log.
+func indent(s string) string {
+	return "      | " + strings.ReplaceAll(s, "\n", "\n      | ")
 }
 
 // freePort asks the kernel for an unused TCP port and releases it for the

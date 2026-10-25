@@ -899,6 +899,13 @@ func (e *Emitter) emitDynAnyMemberGetInline(objVal Value, keyRef, propName strin
 		// Not its own: Function.prototype's method of that name.
 		inherited := func(dyn bool) string {
 			v := fnVal(dyn)
+			if propName == "constructor" {
+				// Function.prototype.constructor is Function.
+				miss, sel := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", miss, v, nbUndefined))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", sel, miss, e.emitNbTagPtr(e.internString("Function"), kmlTagFuncRef), v))
+				return sel
+			}
 			if isFnProtoMethod(propName) {
 				miss, sel := e.freshReg(), e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", miss, v, nbUndefined))
@@ -2363,7 +2370,7 @@ func (e *Emitter) emitObjectGetPrototypeOf(args []ast.Expression, pos ast.Pos) (
 	if err != nil {
 		return Value{}, err
 	}
-	if !val.Ty.IsDynamic() && (isHostHandle(val.Ty) || headeredHost(val.Ty) || val.Ty.IsPromise() || val.Ty.IsArray() || isForOfStringTy(val.Ty) || val.Ty.IsClass() || val.Ty.IsFunc() || val.Ty.IsGenerator()) {
+	if !val.Ty.IsDynamic() && (isHostHandle(val.Ty) || headeredHost(val.Ty) || val.Ty.IsPromise() || val.Ty.IsArray() || isForOfStringTy(val.Ty) || val.Ty.IsClass() || val.Ty.IsFunc() || val.Ty.IsGenerator() || val.Ty.IsError()) {
 		// A builtin class's instance boxes; its prototype is its class's.
 		if val, err = e.emitBoxValue(val); err != nil {
 			return Value{}, err
@@ -3279,8 +3286,8 @@ func (e *Emitter) emitDictToBag(v Value) (Value, error) {
 const errorGetKeySentinel = "\x01"
 
 // ensureErrorGetKey defines `i64 __kml_error_get_key(i64 box, ptr key)`:
-// a boxed Error's property by run-time key, through the same reads a named
-// access (`err.message`) emits.
+// a boxed Error's property by run-time key, through the same read a named
+// access (`err.message`) calls.
 func (e *Emitter) ensureErrorGetKey(pos ast.Pos) {
 	if e.errorGetKeyDone {
 		return
@@ -3294,6 +3301,11 @@ func (e *Emitter) ensureErrorGetKey(pos ast.Pos) {
 		}
 	}
 	restore := e.beginDetachedFunc()
+	// Each arm calls the key's own read (dynGetHelper, a unit of its own),
+	// not that read's dispatch inlined once per key.
+	savedInline := e.dynGetInline
+	e.dynGetInline = false
+	defer func() { e.dynGetInline = savedInline }()
 	box := Value{Ref: "%box", Ty: TypeAny}
 	for _, n := range names {
 		c, eq := e.freshReg(), e.freshReg()

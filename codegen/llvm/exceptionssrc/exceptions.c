@@ -88,6 +88,14 @@ u8 __kml_caught_tag(int tag, i64 pay) {
     return (u8)tag;
 }
 
+/* util.inspect of a boxed value (dynjson.c); NULL when that file is not
+ * linked. */
+__attribute__((weak)) char *__kml_any_inspect_at(long long v, long long depth) {
+    (void)v; (void)depth;
+    return NULL;
+}
+extern i64 __kml_nb_pack(u8 tag, i64 pay);
+
 /* The message an uncaught throw prints: an Error yields its .message; a
  * string is itself; a number is dtoa'd; booleans, null and undefined their
  * literals; any other value a generic placeholder. NUL-terminated. */
@@ -105,7 +113,12 @@ void *__kml_caught_unc_msg(int tag, i64 pay) {
     case 3: return pay != 0 ? "true" : "false";
     case 4: return "null";
     case 5: return "undefined";
-    default: return "[thrown value]\n";
+    default: {
+        /* Any other value as util.inspect shows it, when dynjson.c (which
+         * a throw of an object links) is in the program. */
+        char *s = __kml_any_inspect_at(__kml_nb_pack((u8)tag, pay), 0);
+        return s ? s : "[thrown value]";
+    }
     }
 }
 

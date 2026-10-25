@@ -246,7 +246,12 @@ func (c *Checker) checkNode(n ast.Node, ret *Type) {
 		}
 	case *ast.UpdateExpression:
 		if c.checkTarget(n.Arg) {
-			c.checkNonNull(n.Arg)
+			if c.checkNonNull(n.Arg) != nil {
+				// `++x` takes a number, a bigint, an enum or any (TS2356).
+				if t := c.TypeOf(n.Arg); !c.Unanswered(t) && plainOperand(t) && !arithmetic(t) {
+					c.report(diag.ArithmeticOperand, n.Arg.GetPos())
+				}
+			}
 		}
 	case *ast.UnaryExpression:
 		switch n.Op {
@@ -525,6 +530,19 @@ func (c *Checker) checkParams(params []ast.Param, fn ast.Node) {
 		}
 		if p.Default != nil && p.Type == nil && (p.ArrayPattern != nil || p.ObjectPattern != nil) && p.Pos.Line > 0 && !c.opts.CompatJS() {
 			c.checkNullishPatternDefault(p)
+			// A computed key on the default's type (a named key is no
+			// error: the pattern types the default's literal).
+			if dt := c.TypeOf(p.Default); !c.Unanswered(dt) && dt.Flags&Object != 0 && dt.Flags&Union == 0 {
+				for _, d := range p.ObjectPattern {
+					if d.KeyExpr != nil && !d.Rest {
+						at := p.Pos
+						if d.Pos.Line > 0 {
+							at = d.Pos
+						}
+						c.checkPatternIndexKey(d.KeyExpr, dt, at)
+					}
+				}
+			}
 		}
 		if p.Default == nil {
 			continue
@@ -1509,12 +1527,16 @@ func (c *Checker) checkPatternProps(props []ast.DestructProp, src *Type, pos ast
 		return
 	}
 	for _, p := range props {
-		if p.Rest || p.KeyExpr != nil || p.Key == "" || objectProto[p.Key] || strings.HasPrefix(p.Key, "__kml_") {
-			continue
-		}
 		at := pos
 		if p.Pos.Line > 0 {
 			at = p.Pos
+		}
+		if p.KeyExpr != nil && !p.Rest {
+			c.checkPatternIndexKey(p.KeyExpr, src, at)
+			continue
+		}
+		if p.Rest || p.Key == "" || objectProto[p.Key] || strings.HasPrefix(p.Key, "__kml_") {
+			continue
 		}
 		if c.arrayLacks(src, p.Key) || c.libLacks(src, p.Key) {
 			c.report(diag.PropertyNotExist, at, p.Key, src)
@@ -1536,6 +1558,30 @@ func (c *Checker) checkPatternProps(props []ast.DestructProp, src *Type, pos ast
 		if p.SubObject != nil {
 			c.checkPatternProps(p.SubObject, prop.Type, at)
 		}
+	}
+}
+
+// checkPatternIndexKey reports a pattern's computed key of type string or
+// number on a user object type with no index signature it matches (TS2537),
+// where an element access reports TS7053.
+func (c *Checker) checkPatternIndexKey(key ast.Expression, src *Type, at ast.Pos) {
+	switch src.Kind {
+	case Anonymous, Interface, Instance:
+	default:
+		return
+	}
+	if nominalOpen(src) || src.Symbol != nil && c.inLibrary(src.Symbol.Scope) || src.StringIndex != nil {
+		return
+	}
+	kt := c.TypeOf(key)
+	if c.Unanswered(kt) || kt.Flags&Union != 0 {
+		return
+	}
+	switch {
+	case kt.Flags&String != 0:
+		c.report(diag.NoMatchingIndexSig, at, src, "string")
+	case kt.Flags&Number != 0 && src.NumberIndex == nil:
+		c.report(diag.NoMatchingIndexSig, at, src, "number")
 	}
 }
 
@@ -2323,8 +2369,13 @@ func (c *Checker) checkOperator(e *ast.BinaryExpression) {
 		c.checkEquality(e, l, r)
 		return
 	case "<", ">", "<=", ">=":
-		c.checkNonNull(e.Left)
-		c.checkNonNull(e.Right)
+		nl, nr := c.checkNonNull(e.Left), c.checkNonNull(e.Right)
+		// A string against a number or bigint is no comparison TypeScript
+		// allows (TS2365); other pairs are left to its comparability rules.
+		if nl != nil && nr != nil && plainOperand(l) && plainOperand(r) &&
+			(isStringLike(l) && arithmetic(r) || arithmetic(l) && isStringLike(r)) {
+			c.report(diag.OperatorNotApplied, e.Left.GetPos(), e.Op, widen(c, l), widen(c, r))
+		}
 		return
 	}
 	c.checkArithmetic(e.Op, e.Op, e.Left, e.Right, l, r)

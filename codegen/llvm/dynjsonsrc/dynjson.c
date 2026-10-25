@@ -1693,13 +1693,25 @@ static long long nb_pack(long long tag, long long pay) {
    a number widens to a double (a JS number IS a double), a string is its own
    pointer, a hole in a string array is undefined. The caller has already
    refused kind < 0. */
+/* A BigInt64Array's (BigUint64Array's) element as a boxed bigint and back
+   (boxsrc/bigintbox.c defines these when the program links the bigint
+   runtime, as any program holding such an array does). */
+__attribute__((weak)) long long __kml_typed_big_box(long long raw, int uns) {
+    return nb_double(uns ? (double)(unsigned long long)raw : (double)raw);
+}
+static double any_elem_tonum(long long word);
+__attribute__((weak)) long long __kml_typed_big_unbox(long long w, int uns) {
+    (void)uns;
+    return (long long)any_elem_tonum(w);
+}
+
 static long long kj_elem_box(const KjBox *b, long long i) {
     char *d = kj_data(b);
     switch (b->kind) {
     case KJ_F64: return nb_double(((double *)d)[i]);
     case KJ_F32: return nb_double((double)((float *)d)[i]);
-    case KJ_I64: return nb_double((double)((long long *)d)[i]);
-    case KJ_U64: return nb_double((double)((unsigned long long *)d)[i]);
+    case KJ_I64: return b->typed ? __kml_typed_big_box(((long long *)d)[i], 0) : nb_double((double)((long long *)d)[i]);
+    case KJ_U64: return b->typed ? __kml_typed_big_box(((long long *)d)[i], 1) : nb_double((double)((unsigned long long *)d)[i]);
     case KJ_I32: return nb_double((double)((int *)d)[i]);
     case KJ_U32: return nb_double((double)((unsigned int *)d)[i]);
     case KJ_I16: return nb_double((double)((short *)d)[i]);
@@ -1967,6 +1979,36 @@ long long __kml_str_get_by_key(const char *s, const char *key) {
 extern long long __kml_toprimitive(long long v, signed char hint);
 extern double __kml_any_tonum(long long v);
 
+/* __kml_boxed_bigint_to_double: a bigint cell's nearest double
+   (boxsrc/bigintbox.c; without the bigint runtime no cell exists). */
+__attribute__((weak)) double __kml_boxed_bigint_to_double(long long pay) {
+    (void)pay;
+    return 0.0 / 0.0;
+}
+
+/* __kml_any_number_conv: Number(w) — ToNumeric of ToPrimitive(w, number),
+   a bigint taken to its nearest double. */
+double __kml_any_number_conv(long long w) {
+    long long p = __kml_toprimitive(w, 0), tag, pay;
+    nb_decode(p, &tag, &pay);
+    if (tag == 6 && is_boxed_bigint(pay)) return __kml_boxed_bigint_to_double(pay);
+    return __kml_any_tonum(p);
+}
+
+/* __kml_boxed_bigint_neg: -x of a bigint cell, boxed (bigintbox.c). */
+__attribute__((weak)) long long __kml_boxed_bigint_neg(long long pay) {
+    (void)pay;
+    return nb_double(0.0 / 0.0);
+}
+
+/* __kml_any_neg: unary minus of w — ToNumeric, a bigint negated as one. */
+long long __kml_any_neg(long long w) {
+    long long p = __kml_toprimitive(w, 0), tag, pay;
+    nb_decode(p, &tag, &pay);
+    if (tag == 6 && is_boxed_bigint(pay)) return __kml_boxed_bigint_neg(pay);
+    return nb_double(-__kml_any_tonum(p));
+}
+
 static double any_elem_tonum(long long word) {
     return __kml_any_tonum(__kml_toprimitive(word, 0));
 }
@@ -2082,13 +2124,30 @@ static int kj_heap_kind(int kind) { return kind <= KJ_BOOL ? KML_HEAP_RAW : KML_
 
 /* kj_store writes the NaN-boxed word w as element i of a box's data d,
    converted to the box's element kind. */
+void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
+
+/* __kml_tonum_nobigint: ToNumber's TypeError for a bigint w (a number-kind
+   TypedArray's element store); any other value returns. */
+void __kml_tonum_nobigint(long long w) {
+    long long tag, pay;
+    nb_decode(w, &tag, &pay);
+    if (tag == 6 && is_boxed_bigint(pay)) {
+        Sb m;
+        sb_init(&m);
+        sb_cstr(&m, "Cannot convert a BigInt value to a number");
+        __kml_throw_nullderef(sb_finish(&m));
+    }
+}
+
 static void kj_store(const KjBox *b, char *d, long long i, long long w) {
+    if (b->typed && b->kind != KJ_I64 && b->kind != KJ_U64 && b->kind >= KJ_F64 && b->kind <= KJ_U8)
+        __kml_tonum_nobigint(w);
     switch (b->kind) {
     case KJ_BOXED: b->unboxer(d, i, w); break;
     case KJ_F64: ((double *)d)[i] = any_elem_tonum(w); break;
     case KJ_F32: ((float *)d)[i] = (float)any_elem_tonum(w); break;
-    case KJ_I64: ((long long *)d)[i] = (long long)any_elem_tonum(w); break;
-    case KJ_U64: ((unsigned long long *)d)[i] = (unsigned long long)any_elem_tonum(w); break;
+    case KJ_I64: ((long long *)d)[i] = b->typed ? __kml_typed_big_unbox(w, 0) : (long long)any_elem_tonum(w); break;
+    case KJ_U64: ((unsigned long long *)d)[i] = b->typed ? (unsigned long long)__kml_typed_big_unbox(w, 1) : (unsigned long long)any_elem_tonum(w); break;
     case KJ_I32: ((int *)d)[i] = (int)(long long)any_elem_tonum(w); break;
     case KJ_U32: ((unsigned int *)d)[i] = (unsigned int)(long long)any_elem_tonum(w); break;
     case KJ_I16: ((short *)d)[i] = (short)(long long)any_elem_tonum(w); break;
@@ -2489,16 +2548,23 @@ double *__kml_any_arraylike_f64(long long word, long long *outLen) {
         KjBox *b = (KjBox *)pay;
         n = kj_len(b);
         buf = (double *)kml_alloc(KML_HEAP_RAW, (size_t)(n > 0 ? n : 1) * sizeof(double));
-        for (long long i = 0; i < n; i++)
-            buf[i] = b->kind < 0 ? (0.0 / 0.0) : any_elem_tonum(kj_elem_box(b, i));
+        for (long long i = 0; i < n; i++) {
+            if (b->kind < 0) { buf[i] = 0.0 / 0.0; continue; }
+            long long w = kj_elem_box(b, i);
+            __kml_tonum_nobigint(w);
+            buf[i] = any_elem_tonum(w);
+        }
         break;
     }
     case 11: {
         char *a = (char *)pay;
         n = arr_len(a);
         buf = (double *)kml_alloc(KML_HEAP_RAW, (size_t)(n > 0 ? n : 1) * sizeof(double));
-        for (long long i = 0; i < n; i++)
-            buf[i] = any_elem_tonum(nb_pack(arr_tag(a, i), arr_pay(a, i)));
+        for (long long i = 0; i < n; i++) {
+            long long w = nb_pack(arr_tag(a, i), arr_pay(a, i));
+            __kml_tonum_nobigint(w);
+            buf[i] = any_elem_tonum(w);
+        }
         break;
     }
     case 2: {
@@ -2615,8 +2681,9 @@ static void kj_elem_render(Sb *b, const KjBox *bx, long long i, int inspect, int
     switch (bx->kind) {
     case KJ_F64: jsNumToStr(b, ((double *)data)[i]); break;
     case KJ_F32: jsNumToStr(b, (double)((float *)data)[i]); break;
-    case KJ_I64: snprintf(tmp, sizeof tmp, "%lld", ((long long *)data)[i]); sb_cstr(b, tmp); break;
-    case KJ_U64: snprintf(tmp, sizeof tmp, "%llu", ((unsigned long long *)data)[i]); sb_cstr(b, tmp); break;
+    /* A BigInt64Array's element inspects with its `n` suffix. */
+    case KJ_I64: snprintf(tmp, sizeof tmp, bx->typed && inspect ? "%lldn" : "%lld", ((long long *)data)[i]); sb_cstr(b, tmp); break;
+    case KJ_U64: snprintf(tmp, sizeof tmp, bx->typed && inspect ? "%llun" : "%llu", ((unsigned long long *)data)[i]); sb_cstr(b, tmp); break;
     case KJ_I32: snprintf(tmp, sizeof tmp, "%d", ((int *)data)[i]); sb_cstr(b, tmp); break;
     case KJ_U32: snprintf(tmp, sizeof tmp, "%u", ((unsigned int *)data)[i]); sb_cstr(b, tmp); break;
     case KJ_I16: snprintf(tmp, sizeof tmp, "%d", (int)((short *)data)[i]); sb_cstr(b, tmp); break;

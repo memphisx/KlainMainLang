@@ -108,6 +108,23 @@ func (c *Comment) ParamType(name string) string {
 	return ""
 }
 
+// ParamOptional reports whether the `@param` of name declares the parameter
+// optional: a bracketed name (`[name]`, `[name=default]`) or a type ending
+// in `=` (`{T=}`), JSDoc's forms of TypeScript's `name?`.
+func (c *Comment) ParamOptional(name string) bool {
+	for _, a := range c.Annotations {
+		if a.Tag != "param" && a.Tag != "arg" && a.Tag != "argument" {
+			continue
+		}
+		if paramName(a.Text) != name {
+			continue
+		}
+		first := strings.TrimSpace(a.Text)
+		return strings.HasPrefix(first, "[") || strings.HasSuffix(strings.TrimSpace(a.Value), "=")
+	}
+	return false
+}
+
 // ReturnType returns the declared type of `@returns`/`@return`, with
 // JSDoc-only decorations stripped, or "" (TDD-00125).
 func (c *Comment) ReturnType() string {

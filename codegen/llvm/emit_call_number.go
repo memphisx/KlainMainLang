@@ -332,8 +332,12 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		// Number(x: any) is ordinary typed TS, so it runs in both lanes:
 		// ToPrimitive(number) then ToNumber (ADR-01057). Checked before the
 		// numeric case: the NaN-box is an i64, so IsInteger() is true for it.
-		prim := e.emitAnyToPrimitive(v.Ref, false)
-		return Value{Ref: e.emitAnyToNum(Value{Ref: prim, Ty: TypeAny}), Ty: TypeF64}, nil
+		// ToNumeric: a bigint becomes its nearest double.
+		e.ensureDynJSONC()
+		e.declareFn("__kml_any_number_conv", "declare double @__kml_any_number_conv(i64)")
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_any_number_conv(i64 %s)", r, v.Ref))
+		return Value{Ref: r, Ty: TypeF64}, nil
 	case isNullableScalar(v.Ty):
 		return e.emitUnaryPlus(v, pos) // absent → 0 (null) / NaN (undefined)
 	case v.Ty.IR == "i1":

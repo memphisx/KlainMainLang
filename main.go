@@ -14,11 +14,17 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 )
 
 func main() {
+	// One compile is short-lived and allocates much garbage: collecting at
+	// 4x the live heap instead of 2x saves time, a compile's heap being small.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(400)
+	}
 	emitLLVM := flag.Bool("emit-llvm", false, "emit LLVM IR and stop")
 	output := flag.String("o", "", "output binary `name` (default: the input name without its extension)")
 	static := flag.Bool("static", false, "a self-contained binary: it depends on nothing the OS does not ship. Linux: fully static (scratch/distroless images). Windows: every library linked in, importing only Windows' own DLLs. Not yet on macOS (TDD-00253)")

@@ -429,3 +429,14 @@ func TestE2EDynamicImportBundledNamespaceObject(t *testing.T) {
 		}
 	})
 }
+
+// The namespace import() gives of a module exporting an untyped `var`
+// under another name: a module namespace object with that export.
+func TestE2EDynamicImportUntypedVarNamespace(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{
+		"fix.js": "var start = 1;\nvar endTime;\nexport { endTime as time }\nendTime = 7;\n",
+		"main.js": `import('./fix.js').then(ns => {
+  console.log(Object.keys(ns).join(","), ns.time, Object.prototype.toString.call(ns));
+});
+`}, "main.js", "time 7 [object Module]")
+}

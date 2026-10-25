@@ -42,17 +42,20 @@ func main() {
 	top := flag.Int("top", 30, "histogram rows")
 	jobs := flag.Int("j", runtime.NumCPU(), "concurrent compiles")
 	fail := flag.Bool("fail", false, "exit 1 when a library function differs or library code names a program-numbered symbol")
-	repeat := flag.Int("repeat", 0, "instead: compile each program this many times and list those whose IR is not the same every time")
+	repeat := flag.Int("repeat", 0, "also compile each program this many times in all and list those whose IR is not the same every time")
 	list := flag.Bool("l", false, "list the differing functions")
 	rt := flag.Bool("runtime", false, "measure the runtime's routines (__kml_*, not content-named) instead of the library's")
 	bySym := flag.String("sym", "", "list the differing functions whose differences name this symbol (numbers folded)")
 	flag.Parse()
-	// name → body → first program that emitted it
+	// name → body → a program that emitted it. Each program's bodies are
+	// merged in as it compiles, so only the distinct ones are kept (most are
+	// the same in every program).
 	bodies := map[string]map[string]string{}
-	if *repeat > 1 {
-		os.Exit(determinism(*bin, flag.Args(), *repeat, *jobs))
-	}
-	irs := make([]map[string]string, len(flag.Args()))
+	var mu sync.Mutex
+	first := make([]map[string]string, len(flag.Args())) // each program's, merged in order
+	// -repeat compiles each program again in the same pass: the drift
+	// check reads the first compile, the determinism check compares the rest.
+	nondet := make([]bool, len(flag.Args()))
 	work := make(chan int)
 	var wg sync.WaitGroup
 	for w := 0; w < *jobs; w++ {
@@ -66,11 +69,37 @@ func main() {
 					fmt.Fprintf(os.Stderr, "%s: %v\n", src, err)
 					os.Exit(1)
 				}
-				if *rt {
-					irs[i] = runtimeFunctions(string(out))
-				} else {
-					irs[i] = libFunctions(string(out))
+				for k := 1; k < *repeat; k++ {
+					again, err := exec.Command(*bin, "-emit-llvm", src).Output()
+					if err != nil || string(again) != string(out) {
+						nondet[i] = true
+						break
+					}
 				}
+				var fns map[string]string
+				if *rt {
+					fns = runtimeFunctions(string(out))
+				} else {
+					fns = libFunctions(string(out))
+				}
+				mu.Lock()
+				// A body already seen is dropped; a new one is copied out of
+				// the program's IR (a substring would keep all of it alive).
+				for name, body := range fns {
+					if _, ok := bodies[name][body]; ok {
+						delete(fns, name)
+					} else {
+						fns[name] = strings.Clone(body)
+					}
+				}
+				first[i] = fns
+				for name, body := range fns {
+					if bodies[name] == nil {
+						bodies[name] = map[string]string{}
+					}
+					bodies[name][body] = ""
+				}
+				mu.Unlock()
 			}
 		}()
 	}
@@ -80,11 +109,8 @@ func main() {
 	close(work)
 	wg.Wait()
 	for i, src := range flag.Args() {
-		for name, body := range irs[i] {
-			if bodies[name] == nil {
-				bodies[name] = map[string]string{}
-			}
-			if _, ok := bodies[name][body]; !ok {
+		for name, body := range first[i] {
+			if bodies[name][body] == "" {
 				bodies[name][body] = src
 			}
 		}
@@ -102,6 +128,13 @@ func main() {
 		}
 		if syms[*bySym] {
 			fmt.Println("  " + name)
+		}
+	}
+	nondeterministic := false
+	for i, bad := range nondet {
+		if bad {
+			fmt.Println("nondeterministic:", flag.Args()[i])
+			nondeterministic = true
 		}
 	}
 	sort.Strings(differing)
@@ -151,7 +184,7 @@ func main() {
 			fmt.Printf("%6d  %s\n", counters[k], k)
 		}
 	}
-	if *fail && (len(differing) > 0 || len(counters) > 0) {
+	if nondeterministic || *fail && (len(differing) > 0 || len(counters) > 0) {
 		os.Exit(1)
 	}
 	if *show != "" {
@@ -244,47 +277,4 @@ func runtimeFunctions(ir string) map[string]string {
 		out[name] = ir[l[0] : l[0]+end]
 	}
 	return out
-}
-
-// determinism compiles each program n times and reports those whose IR (or
-// whose success) differs between compiles; its result is the exit code.
-func determinism(bin string, srcs []string, n, jobs int) int {
-	bad := make([]bool, len(srcs))
-	work := make(chan int)
-	var wg sync.WaitGroup
-	for w := 0; w < jobs; w++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range work {
-				first := ""
-				for k := 0; k < n; k++ {
-					out, err := exec.Command(bin, "-emit-llvm", srcs[i]).Output()
-					got := string(out)
-					if err != nil {
-						got = "error: " + err.Error()
-					}
-					if k == 0 {
-						first = got
-					} else if got != first {
-						bad[i] = true
-						break
-					}
-				}
-			}
-		}()
-	}
-	for i := range srcs {
-		work <- i
-	}
-	close(work)
-	wg.Wait()
-	code := 0
-	for i, b := range bad {
-		if b {
-			fmt.Println("nondeterministic:", srcs[i])
-			code = 1
-		}
-	}
-	return code
 }

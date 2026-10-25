@@ -272,11 +272,11 @@
             "pct": 100
           },
           "strict": {
-            "impl": 7,
+            "impl": 8,
             "total": 15,
-            "pct": 47
+            "pct": 53
           },
-          "caveats": "• `?T` nullable is recognized as a leading marker only (a `?` buried mid-expression is left to the parser); `!T` and `{...T}` varargs are stripped rather than modeled; a `=` optional marker doesn't yet make the parameter structurally optional\u003cbr\u003e• A nested `function(...)` type inside another type isn't rewritten to the arrow form, and an `import(\"./m\").T` qualifier drops to the bare name — resolving only when that module is part of the build ([TDD-00125](../tdd/TDD-00125.md) Stage 4)"
+          "caveats": "• `?T` nullable is recognized as a leading marker only (a `?` buried mid-expression is left to the parser); `!T` and `{...T}` varargs are stripped rather than modeled\u003cbr\u003e• A nested `function(...)` type inside another type isn't rewritten to the arrow form, and an `import(\"./m\").T` qualifier drops to the bare name — resolving only when that module is part of the build ([TDD-00125](../tdd/TDD-00125.md) Stage 4)"
         },
         {
           "category": "Modules",
@@ -365,7 +365,7 @@
             "total": 9,
             "pct": 44
           },
-          "caveats": "• A view over a resizable ArrayBuffer keeps the length it had when made (no length tracking)\u003cbr\u003e• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection\u003cbr\u003e• Buffer encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
+          "caveats": "• A view over a resizable ArrayBuffer keeps the length it had when made (no length tracking)\u003cbr\u003e• Buffer encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
         },
         {
           "category": "Web Crypto",

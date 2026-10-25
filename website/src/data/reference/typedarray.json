@@ -41,12 +41,11 @@
       "statusRow": "BigInt64Array / BigUint64Array",
       "signature": "new BigInt64Array(size | bigint[] | TypedArray)",
       "badge": "caveats",
-      "description": "64-bit typed arrays whose elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision bigint handles — writes require a bigint (a plain number is the spec's TypeError), reads wrap losslessly, so values above 2^53 round-trip exactly. Atomics load/store/RMW/compareExchange work on them, lowered to the same seq_cst i64 atomics.",
+      "description": "64-bit typed arrays whose elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision bigint handles — writes take what ToBigInt does (a bigint or a boolean; a plain number is the spec's TypeError), reads wrap losslessly, so values above 2^53 round-trip exactly. Every %TypedArray%.prototype method (map, filter, reduce, indexOf, sort, join, keys/values/entries, with, …) passes and returns real bigints, also through `any`. Atomics load/store/RMW/compareExchange work on them, lowered to the same seq_cst i64 atomics.",
       "returns": { "type": "BigInt64Array | BigUint64Array", "desc": "A 64-bit typed array." },
       "exampleKey": "typedarrays/typedarrays",
       "snippet": "const bigs = new BigInt64Array(2)\nbigs[0] = 9007199254740993n\nconsole.log(bigs[0])            // 9007199254740993n\nconst ubigs = new BigUint64Array([18446744073709551615n])\nconsole.log(ubigs[0])          // 18446744073709551615n",
       "differences": [
-        "Only an explicit method allow-list is supported — indexing r/w, `.length`/`.byteLength`, `.at`, `.set`, `.subarray`, `.slice`, `.fill`, `.reverse`, for-of, `Atomics.*`; everything else (`.map`/`.filter`/`.reduce`/`.indexOf`/`.sort`/`.join`/iterator objects/…) is a compile-time rejection, never a raw-scalar leak",
         "`Atomics.wait`/`notify` stay `Int32Array`-only"
       ],
       "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.atomics", "typedarray.dataview"],

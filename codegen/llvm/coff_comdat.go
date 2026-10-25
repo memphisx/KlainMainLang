@@ -27,6 +27,11 @@ var (
 // It acts only on a module whose target triple is Windows and is idempotent,
 // so every producer of module text can run it.
 func coffWeakComdats(ll string) string {
+	// Only a Windows target needs it: look for the triple before splitting.
+	if i := strings.Index(ll, "\ntarget triple"); i < 0 && !strings.HasPrefix(ll, "target triple") ||
+		!strings.Contains(firstLineAt(ll, i+1), "windows") {
+		return ll
+	}
 	lines := strings.Split(ll, "\n")
 	triple := -1
 	for i, ln := range lines {
@@ -83,4 +88,13 @@ func withVarComdat(ln string) string {
 		return ln[:loc[0]] + ", comdat" + ln[loc[0]:]
 	}
 	return ln + ", comdat"
+}
+
+// firstLineAt is the line of s starting at i (all of s from 0 when i is 0).
+func firstLineAt(s string, i int) string {
+	s = s[i:]
+	if j := strings.IndexByte(s, '\n'); j >= 0 {
+		return s[:j]
+	}
+	return s
 }

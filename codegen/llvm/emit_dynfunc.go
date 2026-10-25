@@ -19,6 +19,7 @@ package llvm
 import (
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -1858,6 +1859,11 @@ func calleeDisplayName(x ast.Expression) string {
 		return calleeDisplayName(x.Arg)
 	case *ast.CallExpression:
 		return calleeDisplayName(x.Callee) + "(...)"
+	case *ast.StringLiteral:
+		return strconv.Quote(x.Value)
+	}
+	if strings.HasPrefix(fmt.Sprintf("%T", x), "*ast.New") {
+		return "(intermediate value)" // a `new` expression's value
 	}
 	return "value"
 }

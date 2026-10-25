@@ -354,6 +354,9 @@ func (e *Emitter) anyHeldDecl(v *ast.VarDeclaration) bool {
 	if v != nil && e.funcSeeded[v.Name] && e.promotedGlobalDecls[v] {
 		return true // a var sharing a function's name (seedFuncGlobals)
 	}
+	if v != nil && e.jsHeldGlobals[v] {
+		return true // an untyped global a function reads (registerModuleGlobals)
+	}
 	if v != nil && v.TypeAnnot == nil && !v.Ambient {
 		// An unannotated binding of a call the any-argument check boxes.
 		call, ok := v.Init.(*ast.CallExpression)

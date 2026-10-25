@@ -1,8 +1,11 @@
 /* holes.c — an array's holes (TDD-00226): the elements a gap write,
  * `new Array(n)` or an elided literal element left unset. A header's holes
  * word is null while the array is packed; the first hole points it at a
- * bitmap { i64 nwords, u64 bits[nwords] }, one bit per element, set for a
- * hole. An index past the bitmap is no hole, so appending needs no growth. */
+ * bitmap { i64 nwords, i64 tailFrom, i64 tailTo, u64 bits[nwords] }, one
+ * bit per element, set for a hole, and one run of holes [tailFrom, tailTo)
+ * held as its bounds: `length = 4294967295` makes 2^32 holes without
+ * writing their bits. An index past both is no hole, so appending needs no
+ * growth. */
 #include <stdio.h>
 #include <string.h>
 
@@ -15,31 +18,105 @@ typedef struct {
     i64 *holes;
 } Hdr;
 
-/* The bitmap of hdr grown to cover n elements. */
+#define BM_WORDS(bm) ((bm)[0])
+#define BM_T0(bm) ((bm)[1])
+#define BM_T1(bm) ((bm)[2])
+#define BM_BITS(bm) ((u64 *)((bm) + 3))
+/* A run of holes at least this long is held as the bitmap's run. */
+#define BM_RUN_MIN 4096
+
+/* The bitmap of hdr grown to cover n elements' bits. */
 static i64 *holes_cover(Hdr *h, i64 n) {
-    i64 need = (n + 63) / 64, have = h->holes ? h->holes[0] : 0;
-    if (need <= have) return h->holes;
-    i64 *bm = (i64 *)kml_alloc(KML_HEAP_RAW, (size_t)(need + 1) * 8);
-    memset(bm, 0, (size_t)(need + 1) * 8);
-    if (h->holes) memcpy(bm + 1, h->holes + 1, (size_t)have * 8);
-    bm[0] = need;
+    i64 need = (n + 63) / 64, have = h->holes ? BM_WORDS(h->holes) : 0;
+    if (h->holes && need <= have) return h->holes;
+    if (need < have) need = have;
+    i64 *bm = (i64 *)kml_alloc(KML_HEAP_RAW, (size_t)(need + 3) * 8);
+    memset(bm, 0, (size_t)(need + 3) * 8);
+    if (h->holes) {
+        memcpy(BM_BITS(bm), BM_BITS(h->holes), (size_t)have * 8);
+        BM_T0(bm) = BM_T0(h->holes);
+        BM_T1(bm) = BM_T1(h->holes);
+    }
+    BM_WORDS(bm) = need;
     h->holes = bm;
     return bm;
 }
 
+/* Sets (on) or clears bits [from, to) of a bitmap's words, a word at a
+ * time between its partial ends. */
+static void bits_range(u64 *w, i64 from, i64 to, int on) {
+    if (from >= to) return;
+    i64 a = from >> 6, b = (to - 1) >> 6;
+    u64 lo = ~0ULL << (from & 63), hi = ~0ULL >> (63 - ((to - 1) & 63));
+    if (a == b) {
+        if (on) w[a] |= lo & hi; else w[a] &= ~(lo & hi);
+        return;
+    }
+    if (on) w[a] |= lo; else w[a] &= ~lo;
+    if (b > a + 1) memset(w + a + 1, on ? 0xff : 0, (size_t)(b - a - 1) * 8);
+    if (on) w[b] |= hi; else w[b] &= ~hi;
+}
+
+/* Bits [from, to) of hdr set. */
+static void bits_mark(Hdr *h, i64 from, i64 to) {
+    if (from >= to) return;
+    i64 *bm = holes_cover(h, to);
+    bits_range(BM_BITS(bm), from, to, 1);
+}
+
 /* Makes elements [from, to) of hdr holes. */
 void __kml_holes_mark(void *hdr, i64 from, i64 to) {
+    Hdr *h = (Hdr *)hdr;
     if (from >= to) return;
-    i64 *bm = holes_cover((Hdr *)hdr, to);
-    for (i64 i = from; i < to; i++) ((u64 *)(bm + 1))[i >> 6] |= 1ULL << (i & 63);
+    i64 *bm = h->holes ? h->holes : holes_cover(h, 0);
+    i64 t0 = BM_T0(bm), t1 = BM_T1(bm);
+    if (t0 >= t1 && to - from >= BM_RUN_MIN) { /* no run yet: this one */
+        BM_T0(bm) = from;
+        BM_T1(bm) = to;
+        return;
+    }
+    if (t0 < t1 && from <= t1 && to >= t0) { /* touching the run: grow it */
+        BM_T0(bm) = from < t0 ? from : t0;
+        BM_T1(bm) = to > t1 ? to : t1;
+        return;
+    }
+    bits_mark(h, from, to);
+}
+
+/* Makes elements [from, to) of hdr no holes. */
+static void holes_unmark(void *hdr, i64 from, i64 to) {
+    Hdr *h = (Hdr *)hdr;
+    i64 *bm = h->holes;
+    if (!bm || from >= to) return;
+    if (from < 0) from = 0;
+    i64 t0 = BM_T0(bm), t1 = BM_T1(bm);
+    if (t0 < t1 && from < t1 && to > t0) {
+        if (from <= t0 && to >= t1) {
+            BM_T0(bm) = BM_T1(bm) = 0; /* all of it */
+        } else if (from <= t0) {
+            BM_T0(bm) = to; /* its front */
+        } else if (to >= t1) {
+            BM_T1(bm) = from; /* its back */
+        } else {
+            /* Inside: the part before becomes bits, the run goes on after. */
+            bits_mark(h, t0, from);
+            bm = h->holes;
+            BM_T0(bm) = to;
+        }
+    }
+    i64 cap = BM_WORDS(bm) * 64;
+    if (to > cap) to = cap;
+    bits_range(BM_BITS(bm), from, to, 0);
 }
 
 /* Whether element i of hdr's holes bit is set: a hole or an accessor
  * element. */
 static int hole_bit(void *hdr, i64 i) {
     i64 *bm = ((Hdr *)hdr)->holes;
-    if (!bm || i < 0 || (i >> 6) >= bm[0]) return 0;
-    return (((u64 *)(bm + 1))[i >> 6] >> (i & 63)) & 1;
+    if (!bm || i < 0) return 0;
+    if (i >= BM_T0(bm) && i < BM_T1(bm)) return 1;
+    if ((i >> 6) >= BM_WORDS(bm)) return 0;
+    return (BM_BITS(bm)[i >> 6] >> (i & 63)) & 1;
 }
 
 /* An accessor element's slot made to hold its getter's result, as a read
@@ -61,11 +138,7 @@ int __kml_holes_is(void *hdr, i64 i) {
 int __kml_holes_raw(void *hdr, i64 i) { return hole_bit(hdr, i); }
 
 /* Element i of hdr is set: no longer a hole. */
-void __kml_holes_fill(void *hdr, i64 i) {
-    i64 *bm = ((Hdr *)hdr)->holes;
-    if (!bm || i < 0 || (i >> 6) >= bm[0]) return;
-    ((u64 *)(bm + 1))[i >> 6] &= ~(1ULL << (i & 63));
-}
+void __kml_holes_fill(void *hdr, i64 i) { holes_unmark(hdr, i, i + 1); }
 
 /* Elements [from, from+n) of src's holes become those of [at, at+n) of dst. */
 void __kml_holes_copy(void *dst, i64 at, void *src, i64 from, i64 n) {
@@ -85,7 +158,10 @@ i64 __kml_holes_run(void *hdr, i64 i, i64 n) {
 i64 __kml_holes_count(void *hdr, i64 n) {
     i64 *bm = ((Hdr *)hdr)->holes, c = 0;
     if (!bm) return 0;
-    for (i64 i = 0; i < n && (i >> 6) < bm[0]; i++) c += __kml_holes_is(hdr, i);
+    i64 end = BM_WORDS(bm) * 64;
+    if (BM_T0(bm) < BM_T1(bm) && BM_T1(bm) > end) end = BM_T1(bm);
+    if (end > n) end = n;
+    for (i64 i = 0; i < end; i++) c += __kml_holes_is(hdr, i);
     return c;
 }
 
@@ -98,7 +174,7 @@ void __kml_holes_splice(void *hdr, i64 at, i64 removed, i64 inserted, i64 oldLen
     i64 newLen = oldLen - removed + inserted, tail = oldLen - at - removed;
     unsigned char *was = (unsigned char *)kml_alloc(KML_HEAP_RAW, (size_t)(tail > 0 ? tail : 1));
     for (i64 k = 0; k < tail; k++) was[k] = (unsigned char)__kml_holes_is(hdr, at + removed + k);
-    for (i64 i = at; i < oldLen; i++) __kml_holes_fill(hdr, i);
+    holes_unmark(hdr, at, oldLen);
     if (newLen > 0) holes_cover(h, newLen);
     for (i64 k = 0; k < tail; k++)
         if (was[k]) __kml_holes_mark(hdr, at + inserted + k, at + inserted + k + 1);
@@ -108,13 +184,12 @@ void __kml_holes_splice(void *hdr, i64 at, i64 removed, i64 inserted, i64 oldLen
  * holes past n, a longer one gains holes up to n. */
 void __kml_holes_setlen(void *hdr, i64 old, i64 n) {
     if (n > old) { __kml_holes_mark(hdr, old, n); return; }
-    for (i64 i = n; i < old; i++) __kml_holes_fill(hdr, i);
+    holes_unmark(hdr, n, old);
 }
 
 /* Elements [from, to) were all set (fill). */
 void __kml_holes_clear(void *hdr, i64 from, i64 to) {
-    if (!((Hdr *)hdr)->holes) return;
-    for (i64 i = from; i < to; i++) __kml_holes_fill(hdr, i);
+    holes_unmark(hdr, from, to);
 }
 
 /* The n elements were reversed: so are their holes. */
@@ -142,7 +217,7 @@ i64 __kml_holes_compact(void *hdr, i64 esize, i64 n) {
         if (k != i) memcpy(d + k * esize, d + i * esize, (size_t)esize);
         k++;
     }
-    for (i64 i = 0; i < k; i++) __kml_holes_fill(hdr, i);
+    holes_unmark(hdr, 0, k);
     __kml_holes_mark(hdr, k, n);
     return k;
 }

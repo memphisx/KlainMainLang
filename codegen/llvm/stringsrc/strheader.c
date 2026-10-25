@@ -185,6 +185,20 @@ char *__kml_u16_sub(const char *s, i64 a, i64 b) {
  * starting the rest into the pair's four-byte character, in place (s was
  * just built). A string never holds a pair as two surrogates, so equal
  * text is equal bytes. */
+void __kml_wtf8_join(char *s, i64 at);
+
+/* a + b, a new string: a's bytes then b's, a surrogate pair split between
+ * them joined (WTF-8, when b starts with a surrogate's lead byte). What
+ * every string `+` calls. */
+char *__kml_str_concat(const char *a, const char *b) {
+    i64 n1 = __kml_str_len(a), n2 = __kml_str_len(b);
+    char *out = (char *)__kml_str_alloc(n1 + n2);
+    memcpy(out, a, (size_t)n1);
+    memcpy(out + n1, b, (size_t)n2 + 1);
+    if (__builtin_expect((unsigned char)out[n1] == 0xED, 0)) __kml_wtf8_join(out, n1);
+    return out;
+}
+
 void __kml_wtf8_join(char *s, i64 at) {
     unsigned char *p = (unsigned char *)s;
     i64 n = KML_STR_LEN(s);

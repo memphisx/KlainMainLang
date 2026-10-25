@@ -33,10 +33,30 @@
 // kind — a real, documented simplification (not silently pretending to
 // check what it doesn't).
 //
-// `assert.compareArray` is not implemented — lower incidence than
-// sameValue/notSameValue/throws, and needs array element-wise comparison
-// this shim doesn't attempt yet. A call fails to compile, visible as its
-// own bucket in the report.
+// Upstream assert.js's own helpers, which tests and other harness files
+// call (testTypedArray.js, deepEqual.js).
+function isNegativeZero(value: any): boolean {
+    return value === 0 && 1 / value < 0;
+}
+
+function isPrimitive(value: any): boolean {
+    return !value || (typeof value !== 'object' && typeof value !== 'function');
+}
+
+// Upstream's element-wise SameValue comparison of two array-likes (a
+// TypedArray included); compareArray.js is now an empty include.
+function compareArray(a: any, b: any): boolean {
+    if (b.length !== a.length) {
+        return false;
+    }
+    for (let i = 0; i < a.length; i++) {
+        if (!Object.is(b[i], a[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
 // Function + namespace declaration merging (TDD-00095) gives this shim the
 // real upstream shape at last: `assert(x)` (the bare-call form) AND
 // `assert.sameValue(...)` (the namespace form) on one name — the exact TS

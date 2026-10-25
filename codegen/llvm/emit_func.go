@@ -1427,8 +1427,20 @@ func scanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		innerBound["arguments"] = true // its own, not the enclosing function's
 		scanParamDefaultsFV(x.Params, innerBound, result)
 		scanStmtsFV(x.Body.Body, innerBound, result)
+	case *ast.NewExpression:
+		// `new K(…)` reads K as a binding when one is in scope (gatherCaptures
+		// keeps only names it can look up, so a class name drops out).
+		if x.Callee == nil && !x.Qualified && x.ClassName != "" && !bound[x.ClassName] {
+			result[x.ClassName] = true
+		}
+		ast.ForEachChild(expr, func(ch ast.Node) bool {
+			if ce, ok := ch.(ast.Expression); ok {
+				scanExprFV(ce, bound, result)
+			}
+			return true
+		})
 	default:
-		// Any other expression (`new C(…)`, `typeof x`, …): its
+		// Any other expression (`typeof x`, …): its
 		// sub-expressions, through the generated traversal, so a kind the
 		// cases above do not name is still scanned. Literals have none.
 		ast.ForEachChild(expr, func(ch ast.Node) bool {
@@ -3539,6 +3551,23 @@ func (e *Emitter) checkerBodyReturn(block *ast.BlockStatement) (ty Type, ok, ans
 	return r, ok, false // a function: the caller decides
 }
 
+// bodyParams is the parameter list of the function whose body is block.
+func (e *Emitter) bodyParams(block *ast.BlockStatement) []ast.Param {
+	c := e.front()
+	if c == nil {
+		return nil
+	}
+	switch fn := c.ParentOf(block).(type) {
+	case *ast.FunctionDeclaration:
+		return fn.Params
+	case *ast.FunctionExpression:
+		return fn.Params
+	case *ast.ArrowFunction:
+		return fn.Params
+	}
+	return nil
+}
+
 func (e *Emitter) decideReturnType(block *ast.BlockStatement, paramNames []string, paramTypes []Type) (Type, bool) {
 	retExpr := firstReturnExpr(block)
 	if retExpr == nil {
@@ -3547,6 +3576,14 @@ func (e *Emitter) decideReturnType(block *ast.BlockStatement, paramNames []strin
 	e.pushScope()
 	for i, name := range paramNames {
 		e.define(name, Symbol{Ty: paramTypes[i]})
+	}
+	// A destructured parameter's leaves, as its emission binds them.
+	if params := e.bodyParams(block); len(params) == len(paramTypes) {
+		for i, p := range params {
+			if p.ArrayPattern != nil || p.ObjectPattern != nil {
+				e.definePatternParamForInference(p, paramTypes[i], i)
+			}
+		}
 	}
 	defineArgumentsForInference(e, paramNames)
 	// The body's own empty arrays take their pushed elements, as when it
@@ -4004,8 +4041,9 @@ func (e *Emitter) defineNestedVarsForInference(s ast.Statement, nested bool) {
 // defaulting to a number. Non-pattern behavior is therefore unchanged; only the
 // destructured-parameter case gains bindings.
 func (e *Emitter) definePatternParamForInference(p ast.Param, pty Type, i int) {
-	if pty.IsDynamic() && (p.ArrayPattern != nil || p.ObjectPattern != nil) {
-		// A dynamic argument: every leaf is read as `any`.
+	if (pty.IsDynamic() || e.compatJS() && !pty.IsObject() && !pty.IsArray()) && (p.ArrayPattern != nil || p.ObjectPattern != nil) {
+		// A dynamic argument (in JavaScript, any of no known layout):
+		// every leaf is read as `any`.
 		leaves := map[string]bool{}
 		collectArrayPatternNames(p.ArrayPattern, leaves)
 		collectObjectPatternNames(p.ObjectPattern, leaves)

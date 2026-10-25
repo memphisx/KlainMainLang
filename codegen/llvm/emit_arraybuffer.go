@@ -192,12 +192,36 @@ func (e *Emitter) ensureRoundEven() {
 // wrap/trunc path unchanged.
 func (e *Emitter) toTypedArrayElem(v Value, taTy Type, pos ast.Pos) (Value, error) {
 	elemTy := *taTy.ElemType
+	if taTy.BigIntElem && !v.Ty.IsBigInt() && (v.Ty.IsDynamic() || e.compatJS()) {
+		// ToBigInt at run time (boxsrc/bigintbox.c): a bigint, or a boolean
+		// as 0n/1n; a number (JavaScript stores one) is the TypeError.
+		boxed, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureBigInt()
+		e.ensureBoxedBigIntHooks()
+		e.declareFn("__kml_typed_big_unbox", "declare i64 @__kml_typed_big_unbox(i64, i32)")
+		uns := 0
+		if !elemTy.Signed {
+			uns = 1
+		}
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_typed_big_unbox(i64 %s, i32 %d)", r, boxed.Ref, uns))
+		return Value{Ref: r, Ty: elemTy}, nil
+	}
 	if !taTy.BigIntElem && !v.Ty.IsBigInt() && !v.Ty.Float && !v.Ty.IsInteger() && v.Ty.IR != "i1" {
 		// Any other value is stored as its ToNumber (`[192]` → 192), after
 		// ToPrimitive, as JavaScript converts a typed array's elements.
 		boxed, err := e.emitBoxValue(v)
 		if err != nil {
 			return Value{}, err
+		}
+		if boxed.Ty.IsDynamic() && v.Ty.IsDynamic() {
+			// ToNumber throws on a bigint.
+			e.ensureDynJSONC()
+			e.declareFn("__kml_tonum_nobigint", "declare void @__kml_tonum_nobigint(i64)")
+			e.emitInstr(fmt.Sprintf("call void @__kml_tonum_nobigint(i64 %s)", boxed.Ref))
 		}
 		p := e.emitAnyToPrimitiveHint(boxed.Ref, hintNumber)
 		v = Value{Ref: e.emitAnyToNum(Value{Ref: p, Ty: TypeAny}), Ty: TypeF64}
@@ -255,6 +279,21 @@ func (e *Emitter) toTypedArrayElem(v Value, taTy Type, pos ast.Pos) (Value, erro
 	}
 }
 
+// bigIntIntoNumberElem reports whether storing v into an element of obj is
+// JavaScript's ToNumber of a bigint into a number-kind TypedArray, which
+// throws: under -compat=js it emits that TypeError (strict mode leaves the
+// mismatch to the compile-time check, as tsc rejects it).
+func (e *Emitter) bigIntIntoNumberElem(obj ast.Expression, v Value) bool {
+	if !e.compatJS() || !v.Ty.IsBigInt() {
+		return false
+	}
+	if ta := e.inferExprType(obj); !ta.IsTypedArray() || ta.BigIntElem || ta.IsBuffer() {
+		return false
+	}
+	e.emitThrowTypeError("Cannot convert a BigInt value to a number")
+	return true
+}
+
 // wrapTypedArrayLoad converts a raw stored scalar back into the
 // language-level element — the load half of TDD-00101's conversion layer.
 // Only BigIntElem arrays differ from identity: the i64/u64 becomes a
@@ -273,21 +312,14 @@ func (e *Emitter) wrapTypedArrayLoad(raw Value, taTy Type) Value {
 	return Value{Ref: r, Ty: BigIntType()}
 }
 
-// bigIntElemRejectedMethods lists the array methods a BigInt64Array/
-// BigUint64Array does NOT support — a compile-time rejection (see
-// TDD-00101's method policy: the HOF/search/sort/mutator machinery passes
-// raw i64 scalars into callbacks and comparisons, so an unguarded method
-// would silently surface a raw scalar as if it were a bigint). Supported:
-// indexing r/w, .length/.byteLength, .at/.set/.subarray/.slice/.fill/
-// .reverse, for-of, Atomics.*.
+// bigIntElemRejectedMethods are the Array methods no TypedArray has, which
+// the Array machinery would otherwise take on a BigInt64Array/
+// BigUint64Array. Its own callback and search methods are TypeScript
+// (lib/node/kml_typedarray.ts).
 var bigIntElemRejectedMethods = map[string]bool{
-	"map": true, "filter": true, "reduce": true, "reduceRight": true,
-	"forEach": true, "some": true, "every": true, "find": true,
-	"findIndex": true, "findLast": true, "findLastIndex": true,
-	"indexOf": true, "lastIndexOf": true, "includes": true, "join": true, "keys": true, "values": true,
-	"entries": true, "push": true, "pop": true, "shift": true,
+	"push": true, "pop": true, "shift": true,
 	"unshift": true, "splice": true, "toSpliced": true, "concat": true,
-	"flat": true, "flatMap": true, "with": true, "copyWithin": true,
+	"flat": true, "flatMap": true,
 }
 
 // bigIntSortComparatorErr rejects a comparator to a BigInt64Array's sort
@@ -898,7 +930,11 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		args = append([]ast.Expression{as.Expr}, args[1:]...)
 	}
 	srcTy := e.inferExprType(args[0])
-	if dstTy.BigIntElem != srcTy.BigIntElem {
+	// A BigInt64Array takes any array-like, each element ToBigInt'd; an
+	// `any` or non-array one is read as boxes (bigFromAny).
+	bigConv := dstTy.BigIntElem && !srcTy.BigIntElem
+	bigFromAny := bigConv && (srcTy.IsDynamic() || !srcTy.IsArray())
+	if dstTy.BigIntElem != srcTy.BigIntElem && !bigConv {
 		return Value{}, fmt.Errorf("%d:%d: set()'s source and target must both (or neither) be BigInt64Array/BigUint64Array", pos.Line, pos.Col)
 	}
 	dstPtrReg, dstLenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
@@ -940,7 +976,12 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		lenPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenPtr))
 		srcPtrReg = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_f64(i64 %s, ptr %s)", srcPtrReg, srcVal.Ref, lenPtr))
+		if bigFromAny {
+			e.declareFn("__kml_any_arraylike_words", "declare ptr @__kml_any_arraylike_words(i64, ptr)")
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_words(i64 %s, ptr %s)", srcPtrReg, srcVal.Ref, lenPtr))
+		} else {
+			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_arraylike_f64(i64 %s, ptr %s)", srcPtrReg, srcVal.Ref, lenPtr))
+		}
 		srcLenReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", srcLenReg, lenPtr))
 		isNullish := e.freshReg()
@@ -952,6 +993,9 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 		e.emitThrowTypeError("Cannot convert undefined or null to object")
 		e.emitLabel(srcOkL)
 		srcElemTy = TypeF64
+		if bigFromAny {
+			srcElemTy = TypeAny
+		}
 	} else {
 		srcPtrReg, srcLenReg, srcElemTy, err = e.resolveArrayForHOF(args[0], pos)
 		if err != nil {
@@ -1061,11 +1105,19 @@ func (e *Emitter) emitTypedArraySet(mem *ast.MemberExpression, args []ast.Expres
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcGep, srcElemTy.IR, srcPtrReg, idxVal))
 	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", srcElemReg, srcElemTy.IR, srcGep, srcElemTy.Align()))
 	var coerced Value
-	if dstTy.Clamped {
+	if dstTy.Clamped || bigConv {
 		coerced, err = e.toTypedArrayElem(Value{Ref: srcElemReg, Ty: srcElemTy}, dstTy, pos)
 		if err != nil {
 			return Value{}, err
 		}
+	} else if srcElemTy.IsBigInt() {
+		// ToNumber of a bigint throws (tsc rejects the call).
+		if !e.compatJS() {
+			return Value{}, fmt.Errorf("%d:%d: set() of bigint elements into a number TypedArray", pos.Line, pos.Col)
+		}
+		e.emitThrowTypeError("Cannot convert a BigInt value to a number")
+		e.emitLabel(doneL)
+		return Value{Ty: TypeVoid}, nil
 	} else {
 		coerced = e.convert(Value{Ref: srcElemReg, Ty: srcElemTy}, elemTy)
 	}

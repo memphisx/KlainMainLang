@@ -73,7 +73,7 @@ jobs:
           go run ./tools/testshard -shard "${part#shard-}" -shards "$SHARDS" -timeout 40m
 
   examples:
-    name: examples + drift
+    name: examples
     needs: build
     if: inputs.examples
     runs-on: ${{ inputs.os }}
@@ -88,17 +88,33 @@ jobs:
       # -o build: use the downloaded compiler, don't rebuild it.
       - name: Compile and run every example
         run: make -o build examples
-      - name: The builtin library compiles the same everywhere, deterministically
-        run: make -o build drift
       # klain:http's h2o backend has a package only on Linux (libh2o-dev).
       - name: klain:http tests on the h2o backend
         if: inputs.goos == 'linux'
         run: make -o build test-h2o
 
+  # Its own job, beside the examples: on a slow runner the two in one job
+  # outran the job ceiling.
+  drift:
+    name: drift
+    needs: build
+    if: inputs.examples
+    runs-on: ${{ inputs.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/toolchain
+        with: { goos: '${{ inputs.goos }}' }
+      - uses: actions/download-artifact@v8
+        with: { name: 'klainmain-${{ inputs.name }}' }
+      - run: chmod +x ${{ env.BIN }}
+      - name: The builtin library compiles the same everywhere, deterministically
+        run: make -o build drift
+
   gate:
     name: gate
-    needs: [test, examples]
-    if: always() && needs.test.result == 'success' && (needs.examples.result == 'success' || needs.examples.result == 'skipped')
+    needs: [test, examples, drift]
+    if: always() && needs.test.result == 'success' && (needs.examples.result == 'success' || needs.examples.result == 'skipped') && (needs.drift.result == 'success' || needs.drift.result == 'skipped')
     runs-on: ubuntu-latest
     steps:
       - run: |

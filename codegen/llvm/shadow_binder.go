@@ -36,6 +36,9 @@ type frontOracle struct {
 	// maps a `.catch(f)` / `.then(_, f)` handler literal to its receiver.
 	executors  map[ast.Node]*ast.NewExpression
 	onRejected map[ast.Node]ast.Expression
+	// written memoizes writtenIn per scope node, when set: the AST and its
+	// binding do not change while codegen asks.
+	written map[ast.Node]map[*binder.Symbol]bool
 	// anyBound are the function literals initializing an `any` binding:
 	// emitted with the boxed convention, a rest parameter one box.
 	anyBound map[ast.Node]bool
@@ -3721,15 +3724,30 @@ func (o frontOracle) growableBuffer(e ast.Expression, t Type) Type {
 	if !t.IsArrayBuffer() {
 		return t
 	}
+	growable := func(x ast.Expression) bool {
+		nb, isBuf := x.(*ast.NewArrayBufferExpression)
+		return isBuf && nb.MaxByteLength != nil
+	}
 	if id, isID := e.(*ast.Identifier); isID {
-		if sym, _ := o.b.Resolve(id); sym != nil {
-			if v, isV := singleVarDecl(sym); isV && v.TypeAnnot == nil {
-				e = v.Init
+		// A binding every declaration of initializes with a growable buffer
+		// (`var b = new ArrayBuffer(1, {maxByteLength})` declared again).
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) > 0 {
+			all := true
+			for _, d := range sym.Declarations {
+				v, isV := d.Node.(*ast.VarDeclaration)
+				if !isV || v.TypeAnnot != nil || !growable(v.Init) {
+					all = false
+					break
+				}
+			}
+			if all {
+				t.BufferGrowable = true
+				return t
 			}
 		}
 	}
-	if nb, isBuf := e.(*ast.NewArrayBufferExpression); isBuf {
-		t.BufferGrowable = nb.MaxByteLength != nil
+	if _, isBuf := e.(*ast.NewArrayBufferExpression); isBuf {
+		t.BufferGrowable = growable(e)
 	}
 	return t
 }
@@ -5187,6 +5205,7 @@ func (o frontOracle) isGlobalFunc(id *ast.Identifier) bool {
 // withPromiseCallbacks collects the function literals passed as the
 // executor of `new Promise(…)` and as a rejection handler.
 func (o frontOracle) withPromiseCallbacks(prog *ast.Program) frontOracle {
+	o.written = map[ast.Node]map[*binder.Symbol]bool{}
 	o.executors, o.onRejected = map[ast.Node]*ast.NewExpression{}, map[ast.Node]ast.Expression{}
 	o.anyBound = map[ast.Node]bool{}
 	o.inBody = map[ast.Node]bool{}
@@ -7651,11 +7670,23 @@ func (o frontOracle) reassigned(sym *binder.Symbol) bool {
 	if sym.Scope == nil || sym.Scope.Node == nil {
 		return true
 	}
-	found := false
-	ast.Inspect(sym.Scope.Node, func(n ast.Node) bool {
-		if found {
-			return false
+	if o.written != nil {
+		set, ok := o.written[sym.Scope.Node]
+		if !ok {
+			set = o.writtenIn(sym.Scope.Node)
+			o.written[sym.Scope.Node] = set
 		}
+		return set[sym]
+	}
+	return o.writtenIn(sym.Scope.Node)[sym]
+}
+
+// writtenIn is the set of symbols an assignment or update in scope node n
+// writes (by name): what reassigned asks of every symbol of a scope, walked
+// once.
+func (o frontOracle) writtenIn(n ast.Node) map[*binder.Symbol]bool {
+	set := map[*binder.Symbol]bool{}
+	ast.Inspect(n, func(n ast.Node) bool {
 		var target ast.Expression
 		switch x := n.(type) {
 		case *ast.AssignmentExpression:
@@ -7664,13 +7695,13 @@ func (o frontOracle) reassigned(sym *binder.Symbol) bool {
 			target = x.Arg
 		}
 		if id, isID := target.(*ast.Identifier); isID {
-			if s, _ := o.b.Resolve(id); s == sym {
-				found = true
+			if s, _ := o.b.Resolve(id); s != nil {
+				set[s] = true
 			}
 		}
-		return !found
+		return true
 	})
-	return found
+	return set
 }
 
 // libTupleSource reports a call of a builtin library method or function,

@@ -167,6 +167,7 @@ var (
 	ParamForwardReference   = &Message{Code: 2373, Kind: TypeScriptError, Phase: PhaseCheck, Text: "parameter '%s' cannot reference identifier '%s' declared after it"}
 	ImplicitAnyOwnInit      = &Message{Code: 7022, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' implicitly has type 'any' because it does not have a type annotation and is referenced directly or indirectly in its own initializer"}
 	PrivateMethodAssign     = &Message{Code: 2803, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to private method '%s'. Private methods are not writable"}
+	NoMatchingIndexSig      = &Message{Code: 2537, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' has no matching index signature for type '%s'"}
 	PropertyNotExist        = &Message{Code: 2339, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' does not exist on type '%s'"}
 	AssignToConst           = &Message{Code: 2588, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to '%s' because it is a constant"}
 	AssignToFunction        = &Message{Code: 2630, Kind: TypeScriptError, Phase: PhaseCheck, Text: "cannot assign to '%s' because it is a function"}
@@ -185,6 +186,7 @@ var (
 	PropertyMissing         = &Message{Code: 2741, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' is missing in type '%s' but required in type '%s'"}
 	PropertiesMissing       = &Message{Code: 2739, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' is missing the following properties from type '%s': %s"}
 	PropertiesMissingMore   = &Message{Code: 2740, Kind: TypeScriptError, Phase: PhaseCheck, Text: "type '%s' is missing the following properties from type '%s': %s, and %d more"}
+	ArithmeticOperand       = &Message{Code: 2356, Kind: TypeScriptError, Phase: PhaseCheck, Text: "an arithmetic operand must be of type 'any', 'number', 'bigint' or an enum type"}
 	ArithmeticLeft          = &Message{Code: 2362, Kind: TypeScriptError, Phase: PhaseCheck, Text: "the left-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type"}
 	ArithmeticRight         = &Message{Code: 2363, Kind: TypeScriptError, Phase: PhaseCheck, Text: "the right-hand side of an arithmetic operation must be of type 'any', 'number', 'bigint' or an enum type"}
 	OperatorNotApplied      = &Message{Code: 2365, Kind: TypeScriptError, Phase: PhaseCheck, Text: "operator '%s' cannot be applied to types '%s' and '%s'"}

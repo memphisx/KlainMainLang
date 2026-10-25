@@ -46,6 +46,11 @@ type Options struct {
 	// Target is the platform the program is compiled for (--target,
 	// --sysroot, TDD-00146); the zero value is the host.
 	Target Target
+	// EntrySource, when set, is the entry file's text: the resolver reads it
+	// from here instead of from the entry path, which still names the file
+	// (its URL in stack frames). The conformance runner gives every test one
+	// path so that equal functions compile to equal text.
+	EntrySource *string
 }
 
 // Target is a compile target: a clang triple and the sysroot holding its

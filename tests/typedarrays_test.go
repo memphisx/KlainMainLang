@@ -298,8 +298,8 @@ a[0] = 5
 `, "must be a bigint")
 	assertChanCompileError(t, `
 const a = new BigInt64Array(2)
-const m = a.map((x) => x)
-`, "not supported on a BigInt64Array/BigUint64Array")
+a.push(1n)
+`, "no TypedArray does")
 	assertChanCompileError(t, `
 const a = new BigInt64Array([1, 2])
 `, "must be a bigint")
@@ -530,4 +530,44 @@ function g(opaqueData?: NodeJS.ArrayBufferView): void {
 }
 g(new Uint8Array([1, 2, 3])); g(); g(new DataView(new ArrayBuffer(5)));
 `)
+}
+
+// A BigInt64Array's (BigUint64Array's) callback and search methods pass and
+// store bigints, statically typed and through `any` alike.
+func TestE2EBigIntTypedArrayMethods(t *testing.T) {
+	assertSameAsNode(t, `
+const a = new BigInt64Array([3n, 1n, 2n]);
+console.log(a.map((x) => x * 2n), a.filter((x) => x > 1n).join("-"), a.reduce((s, x) => s + x, 0n));
+console.log(a.includes(2n), a.indexOf(1n), a.lastIndexOf(9n), a.find((x) => x < 3n), a.findLastIndex((x) => x > 1n));
+console.log(a.some((x) => x > 2n), a.every((x) => x > 0n), [...a.keys()], [...a.entries()], [...a.values()]);
+console.log(a.with(0, 7n), a.toSorted(), a.copyWithin(0, 1).join(), a.sort());
+const u: any = new BigUint64Array([5n, 6n]);
+console.log(u.map((x: any) => x + 1n), u.includes(6n), u.find((x: any) => x > 5n), u.byteLength, String(u));
+try { u[0] = 1; } catch (e: any) { console.log(e.constructor.name + ": " + e.message); }
+u[1] = true;
+console.log(u[1], new Int8Array([2]).indexOf(2n as any));
+`)
+}
+
+// JavaScript: a BigInt64Array's set() and stores take any value ToBigInt
+// does (a bigint, a boolean), throwing for a number; a number TypedArray's
+// ToNumber throws for a bigint.
+func TestE2EJSBigIntTypedArrayConversions(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+var a = new BigInt64Array(4);
+a.set([1n, 2n], 1);
+var src = [7n, true];
+a.set(src, 2);
+console.log(a);
+try { a.set([1]) } catch (e) { console.log(e.constructor.name + ": " + e.message) }
+function run(C) { try { console.log(new C([1n])) } catch (e) { console.log(e.constructor.name + ": " + e.message) } }
+run(Int8Array); run(BigUint64Array);
+try { new Float64Array(1).set([1n]) } catch (e) { console.log(e.message) }
+var f = new Float32Array(1); try { f[0] = 2n } catch (e) { console.log(e.message) }
+`}, "main.js", `BigInt64Array(4) [ 0n, 1n, 7n, 1n ]
+TypeError: Cannot convert 1 to a BigInt
+TypeError: Cannot convert a BigInt value to a number
+BigUint64Array(1) [ 1n ]
+Cannot convert a BigInt value to a number
+Cannot convert a BigInt value to a number`)
 }

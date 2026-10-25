@@ -237,10 +237,6 @@ func (r *reaper) sweepOnce() {
 	}
 }
 
-// runningTests maps a running test binary's absolute path to the test it
-// runs, for the abort message.
-var runningTests sync.Map
-
 func (r *reaper) run() {
 	defer close(r.done)
 	t := time.NewTicker(r.interval)

@@ -62,10 +62,13 @@ func (e *Emitter) addHookInit(ir string) { e.hookInits = append(e.hookInits, ir)
 // program defines, and the per-program values. Run before the constructor
 // list is finalized.
 func (e *Emitter) emitHookRegistration() {
-	globals, funcs := e.globals.String(), e.functions.String()
+	defined := definedKMLNames(e.globals.String())
+	for n := range definedKMLNames(e.functions.String()) {
+		defined[n] = true
+	}
 	var body strings.Builder
 	for _, name := range hookFuncs {
-		if !definesHook(globals, name) && !definesHook(funcs, name) {
+		if !defined[name] {
 			continue
 		}
 		e.emitGlobal(fmt.Sprintf("@__kml_hookp_%s = external global ptr, align 8", name))
@@ -81,23 +84,29 @@ func (e *Emitter) emitHookRegistration() {
 	e.addCtor("@__kml_hooks_init")
 }
 
-// definesHook reports whether ir defines @__kml_<name>: a line starting
-// "define" that names it. A search per name, not one regexp over the whole
-// program's IR, which ran to a sixth of a small program's compile.
-func definesHook(ir, name string) bool {
-	sym := "@__kml_" + name + "("
-	for i := 0; ; {
-		j := strings.Index(ir[i:], sym)
-		if j < 0 {
-			return false
+// definedKMLNames is the set of names <n> ir defines as @__kml_<n>: a line
+// starting "define" whose first @__kml_ symbol is followed by `(`. One scan
+// of the program's IR for every hook, not a search per hook name.
+func definedKMLNames(ir string) map[string]bool {
+	out := map[string]bool{}
+	for i := 0; i < len(ir); {
+		end := strings.IndexByte(ir[i:], '\n')
+		if end < 0 {
+			end = len(ir)
+		} else {
+			end += i
 		}
-		j += i
-		line := strings.LastIndexByte(ir[:j], '\n') + 1
-		if strings.HasPrefix(ir[line:], "define") {
-			return true
+		if line := ir[i:end]; strings.HasPrefix(line, "define") {
+			if k := strings.Index(line, "@__kml_"); k >= 0 {
+				rest := line[k+len("@__kml_"):]
+				if p := strings.IndexByte(rest, '('); p > 0 {
+					out[rest[:p]] = true
+				}
+			}
 		}
-		i = j + len(sym)
+		i = end + 1
 	}
+	return out
 }
 
 // renameHooks gives the program's copies of the hooks and primitives their

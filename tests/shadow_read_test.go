@@ -46,7 +46,7 @@ console.log(c.n, a.n, c.bump())
 if (typeof c.n === "number") console.log(c.n * 2)
 function twice(x: number): string { return typeof x + (x * 2) }
 a.n = "7"
-console.log(twice(c.n), c.n > "5")
+console.log(twice(c.n), (c.n as any) > "5")
 a.s = 42
 console.log(c.s.length, typeof c.s)
 const plain = { k: 3 }

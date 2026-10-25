@@ -535,3 +535,33 @@ try { throw 5 } catch ({ message, code = "dflt" }: any) { console.log(message, c
 try { throw new TypeError("t") } catch ({ message, name, code = "dflt" }: any) { console.log(message, name, code) }
 `, "undefined undefined undefined\nundefined\nundefined dflt\nt TypeError dflt")
 }
+
+// A caught value indexed by a key (`e["message"]`, `e[k]`) reads like a
+// member of it, whatever was thrown.
+func TestE2ECatchParamIndexedByKey(t *testing.T) {
+	assertSameAsNode(t, `
+try { throw new Error("q") } catch (x: any) { console.log(x["message"], x["name"], x["nope"]) }
+try { throw { a: 1 } } catch (x: any) { const k = "a"; console.log(x[k]) }
+try { throw [5, 6] } catch (x: any) { console.log(x[1], x["length"]) }
+`)
+}
+
+// An uncaught throw of an object that is not an Error reports the value as
+// util.inspect shows it, as Node does.
+func TestE2EUncaughtObjectInspected(t *testing.T) {
+	out, code := compileAndRunExpectExit(t, `
+class T { message: string; constructor(m: string) { this.message = m } }
+console.log("before");
+throw new T("boom");
+`)
+	if code != 1 || out != "before\nT { message: 'boom' }" {
+		t.Fatalf("got exit %d, output %q", code, out)
+	}
+	out, code = compileAndRunExpectExit(t, `
+const o: any = { a: 1, b: "x" };
+throw o;
+`)
+	if code != 1 || out != "{ a: 1, b: 'x' }" {
+		t.Fatalf("got exit %d, output %q", code, out)
+	}
+}

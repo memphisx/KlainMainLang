@@ -881,6 +881,9 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	if err != nil {
 		return Value{}, true, err
 	}
+	if e.bigIntIntoNumberElem(idxEx.Object, val) {
+		return val, true, nil
+	}
 	val, err = e.convertChecked(val, elemTy, idxEx.GetPos(), "array-element assignment")
 	if err != nil {
 		return Value{}, true, err

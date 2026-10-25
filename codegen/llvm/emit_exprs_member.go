@@ -531,6 +531,19 @@ func (e *Emitter) emitIndexBase(ex *ast.IndexExpression) (dataPtrReg, lenReg, id
 		if !ok {
 			return "", "", "", TypeVoid, fmt.Errorf("%d:%d: undefined variable '%s'", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 		}
+		if sym.Ty.Kind == kindCaught {
+			// A caught value (`catch (e: any)`): read through its box, as
+			// `e.message` reads it.
+			v, err := e.emitExpr(id)
+			if err != nil {
+				return "", "", "", TypeVoid, err
+			}
+			b, err := e.emitBoxValue(v)
+			if err != nil {
+				return "", "", "", TypeVoid, err
+			}
+			return "", "", "", TypeVoid, dynIndexBase{b}
+		}
 		if !sym.Ty.IsArray() && !sym.Ty.IsFlatArray() {
 			return "", "", "", TypeVoid, fmt.Errorf("%d:%d: '%s' is not an array", ex.GetPos().Line, ex.GetPos().Col, id.Name)
 		}

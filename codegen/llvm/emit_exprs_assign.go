@@ -540,6 +540,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 		// (invalid IR: "constant expression type mismatch"). ADR-00688. In
 		// `-compat=js` the element type is `any`, which every value coerces into
 		// (boxes), so this only rejects a genuine strict-mode type mismatch.
+		if e.bigIntIntoNumberElem(idxEx.Object, rhs) {
+			return rhs, nil
+		}
 		rhs, err = e.convertChecked(rhs, elemTy, ex.GetPos(), "array-element assignment")
 		if err != nil {
 			return Value{}, err

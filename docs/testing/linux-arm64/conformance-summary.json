@@ -4,17 +4,17 @@
     "node": {
       "lanes": {
         "js": {
-          "pass": 619,
-          "fail": 1967,
-          "skip": 1371,
-          "runnable": 2586,
+          "pass": 764,
+          "fail": 1831,
+          "skip": 1362,
+          "runnable": 2595,
           "total": 3957
         },
         "strict": {
-          "pass": 300,
-          "fail": 2286,
-          "skip": 1371,
-          "runnable": 2586,
+          "pass": 286,
+          "fail": 2309,
+          "skip": 1362,
+          "runnable": 2595,
           "total": 3957
         }
       }
@@ -23,46 +23,47 @@
       "lanes": {
         "js": {
           "overall": {
-            "pass": 11282,
+            "pass": 26258,
             "total": 53578
           },
           "inScope": {
-            "pass": 10927,
+            "pass": 25520,
             "total": 42942
           },
           "pending": {
-            "pass": 571,
+            "pass": 1021,
             "total": 2860
           },
           "byPhase": {
-            "compile": 36518,
-            "neg-accepted": 583,
-            "other": 179,
-            "run-timeout": 11,
-            "runtime": 4947,
-            "strict-reject": 58
+            "clang": 67,
+            "compile": 16850,
+            "neg-accepted": 508,
+            "other": 519,
+            "run-timeout": 3,
+            "runtime": 9365,
+            "strict-reject": 8
           }
         },
         "strict": {
           "overall": {
-            "pass": 8433,
+            "pass": 14213,
             "total": 53578
           },
           "inScope": {
-            "pass": 8217,
+            "pass": 13981,
             "total": 42942
           },
           "pending": {
-            "pass": 472,
+            "pass": 708,
             "total": 2860
           },
           "byPhase": {
-            "compile": 24134,
-            "neg-accepted": 557,
-            "other": 69,
-            "run-timeout": 3,
-            "runtime": 1720,
-            "strict-reject": 18662
+            "clang": 2,
+            "compile": 10884,
+            "neg-accepted": 488,
+            "other": 248,
+            "runtime": 1545,
+            "strict-reject": 26198
           }
         }
       }
@@ -70,17 +71,17 @@
     "ts": {
       "lanes": {
         "js": {
-          "agree": 6751,
+          "agree": 6769,
           "classified": 11247,
-          "falseAccept": 2047,
-          "falseReject": 2449,
+          "falseAccept": 3012,
+          "falseReject": 1466,
           "skipped": 827
         },
         "strict": {
-          "agree": 7021,
+          "agree": 7930,
           "classified": 11247,
-          "falseAccept": 1416,
-          "falseReject": 2810,
+          "falseAccept": 1278,
+          "falseReject": 2039,
           "skipped": 827
         }
       }
@@ -88,26 +89,26 @@
     "wpt": {
       "lanes": {
         "js": {
-          "pass": 42,
-          "fail": 1924,
+          "pass": 82,
+          "fail": 1884,
           "skip": 2241,
           "runnable": 1966,
           "total": 4207,
           "documents": 7077,
-          "html": 66781,
-          "subtestPass": 3147,
-          "subtestTotal": 5313
+          "html": 0,
+          "subtestPass": 3953,
+          "subtestTotal": 10913
         },
         "strict": {
-          "pass": 31,
-          "fail": 1935,
+          "pass": 53,
+          "fail": 1913,
           "skip": 2241,
           "runnable": 1966,
           "total": 4207,
           "documents": 7077,
-          "html": 66781,
-          "subtestPass": 392,
-          "subtestTotal": 644
+          "html": 0,
+          "subtestPass": 448,
+          "subtestTotal": 668
         }
       }
     }

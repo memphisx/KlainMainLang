@@ -24,9 +24,11 @@ import (
 	"regexp"
 	"runtime"
 	"runtime/debug"
+	"runtime/pprof"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"KlainMainLang/codegen/llvm"
@@ -119,6 +121,10 @@ var pendingFeature = map[string]string{
 // pendingOf returns the pending-capability label for a file, or "" when none
 // of its feature tags is pending. First matching tag wins (files rarely carry
 // two pending tags; when they do, either capability would unblock counting).
+// runningTests maps a running test binary's absolute path to the test it
+// runs, for the abort message.
+var runningTests sync.Map
+
 func pendingOf(fm frontmatter) string {
 	for _, ft := range fm.Features {
 		if why, ok := pendingFeature[ft]; ok {
@@ -307,6 +313,15 @@ func main() {
 	if os.Getenv("GOMEMLIMIT") == "" {
 		debug.SetMemoryLimit(1536 << 20)
 	}
+	// Under that limit, collecting at 4x the live heap instead of 2x: the
+	// front end allocates much short-lived garbage, and collecting it at the
+	// default rate was 14% of its time.
+	if os.Getenv("GOGC") == "" {
+		debug.SetGCPercent(400)
+	}
+	// The harness's functions are the same text in every test that
+	// includes them: compiled once, in cached units.
+	llvm.AutoUnitUserFuncs = true
 	corpus := flag.String("corpus", ".test262", "path to a test262 checkout (see fetch.sh)")
 	out := flag.String("out", "", "report output path override for a single-lane run (default: the per-lane folder docs/testing/<lane>/CONFORMANCE-RESULTS.md); ignored under -compat=both")
 	category := flag.String("category", "", "only run files under test/<category> (default: everything, unfiltered)")
@@ -371,7 +386,16 @@ func main() {
 	regexMode := flag.String("regex", "", "RegExp dialect for compiled tests (TDD-00067): ecmascript (default), es-unicode, es-utf16, es-ascii, or pcre — for measuring a specific dialect's conformance")
 	compatFlag := flag.String("compat", "strict", "emitter compat lane: strict (default), js, or both (node suite only) — TDD-00022; the corpora are untyped JS, so the js lane measures the vanilla-JS-compat surface")
 	suite := flag.String("suite", "test262", "which conformance suite to run: test262 (default), node (Node-core pure modules, TDD-00121 Track B), wpt (Web Platform Tests headless slice, TDD-00082 Track 2), or ts (TypeScript acceptance oracle, Track C)")
+	cpuProfile := flag.String("cpuprofile", "", "write the run's CPU profile (the compiler's front end runs in this process) to this file")
 	flag.Parse()
+	if *cpuProfile != "" {
+		f, err := os.Create(*cpuProfile)
+		if err != nil {
+			fatal("creating cpu profile: %v", err)
+		}
+		pprof.StartCPUProfile(f)
+		defer pprof.StopCPUProfile()
+	}
 	regexModeFlag = *regexMode
 
 	// Isolate the per-worker scratch files (w{id}.ll / .bin / embedded C) into a
@@ -564,6 +588,7 @@ func main() {
 			fatal("writing report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "done (lane=%s). report written to %s\n", laneLabel(), outPath)
+		phaseReport()
 		// The triage dumps are per lane: under -compat=both each lane writes its
 		// own file (<path>.strict / <path>.js) — a single file would keep only the
 		// last lane's and lose the other's names for good (the reports cap their
@@ -828,6 +853,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	// clang and program are done.
 	rsv := budget.reserve(compileDefault)
 	defer budget.release(rsv)
+	tCodegen := time.Now()
 	cgCh := make(chan cgOut, 1)
 	go func() {
 		var out cgOut
@@ -848,14 +874,14 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		// declarations (a test's `function truncate()`/`write()`/`stat()` is
 		// otherwise emitted under its bare name and collides with the C
 		// symbol of the same name at link time, mis-bucketed as invalid IR)
-		// and the resolver's early errors. The resolver reads from disk, so
-		// the source is staged as this worker's own file in the workdir.
-		srcFile := filepath.Join(workDir, fmt.Sprintf("w%d.js", workerID))
-		if werr := os.WriteFile(srcFile, []byte(full), 0644); werr != nil {
-			out.err = werr
-			return
+		// and the resolver's early errors. The assembled source is the test
+		// file's own, at its own path: its relative imports find their
+		// _FIXTURE.js files beside it, as in a Test262 host.
+		if os.Getenv("KML_CONF_SRC") != "" {
+			// The assembled source, to reproduce a result with the CLI.
+			_ = os.WriteFile(filepath.Join(workDir, fmt.Sprintf("w%d.js", workerID)), []byte(full), 0644)
 		}
-		prog, perr := resolver.ResolveProgramWithOptions(srcFile, options.Options{Compat: laneCompat})
+		prog, perr := resolver.ResolveProgramWithOptions(path, options.Options{Compat: laneCompat, EntrySource: &full})
 		if perr != nil {
 			out.err = perr
 			return
@@ -915,6 +941,8 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		return res
 	}
 
+	phaseAdd(phaseCodegen, tCodegen)
+	tSplit := time.Now()
 	llFile := filepath.Join(workDir, fmt.Sprintf("w%d.ll", workerID))
 	binFile := filepath.Join(workDir, fmt.Sprintf("w%d.bin", workerID))
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
@@ -970,13 +998,20 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		clangArgs = append(clangArgs, asmPath)
 	}
 
+	phaseAdd(phaseSplit, tSplit)
+	tClang := time.Now()
 	cctx, cancel := context.WithTimeout(context.Background(), clangTimeout)
 	defer cancel()
 	var clangOut bytes.Buffer
 	clangCmd := killableCommand(cctx, "clang", llvm.HostClangExecArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
-	if err := runTracked(clangCmd); err != nil {
+	clangErr := runTracked(clangCmd)
+	phaseAdd(phaseClang, tClang)
+	if ps := clangCmd.ProcessState; ps != nil {
+		clangCPU.Add(int64(ps.UserTime() + ps.SystemTime()))
+	}
+	if err := clangErr; err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			res.Reason = "CLANG_TIMEOUT"
 		} else {
@@ -1019,7 +1054,9 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	runCmd.Stdout = &stdout
 	runCmd.Stderr = &stderr
 	runCmd.Dir = scratchCwd(workDir, fmt.Sprintf("w%d", workerID))
+	tRun := time.Now()
 	runErr := runTracked(runCmd)
+	phaseAdd(phaseRun, tRun)
 
 	negativeRuntime := fm.NegativePhase == "runtime" || fm.NegativePhase == "resolution"
 	exitedZero := runErr == nil
@@ -1044,7 +1081,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 		case strings.Contains(out, asyncFailureMarker):
 			res.Reason = normalizeReason("ASYNC_TEST_FAILURE", lineWith(out, asyncFailureMarker))
 		case !exitedZero:
-			res.Reason = normalizeReason("RUNTIME_NONZERO_EXIT", firstLine(stderr.String()))
+			res.Reason = normalizeReason("RUNTIME_NONZERO_EXIT", runtimeReport(stderr.String()))
 		case !strings.Contains(out, asyncCompleteMarker):
 			res.Reason = "ASYNC_NO_COMPLETION: event loop drained without $DONE()"
 		default:
@@ -1054,7 +1091,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	}
 	res.Pass = exitedZero
 	if !res.Pass {
-		res.Reason = normalizeReason("RUNTIME_NONZERO_EXIT", firstLine(stderr.String()))
+		res.Reason = normalizeReason("RUNTIME_NONZERO_EXIT", runtimeReport(stderr.String()))
 	}
 	return res
 }
@@ -1068,6 +1105,26 @@ func lineWith(s, marker string) string {
 		}
 	}
 	return firstLine(s)
+}
+
+// runtimeReport is the first line of an uncaught-error report, or, when
+// that line opens an inspected object (`Test262Error {`) whose rendering
+// spans lines, the whole object joined onto one line.
+func runtimeReport(s string) string {
+	first := firstLine(s)
+	if !strings.HasSuffix(first, "{") {
+		return first
+	}
+	var b strings.Builder
+	b.WriteString(first)
+	for _, l := range strings.Split(s, "\n")[1:] {
+		b.WriteByte(' ')
+		b.WriteString(strings.TrimSpace(l))
+		if l == "}" {
+			break
+		}
+	}
+	return b.String()
 }
 
 func firstLine(s string) string {
@@ -1426,5 +1483,47 @@ func writeLanePassList(path, lane string, passing []string) {
 	sort.Strings(passing)
 	if err := os.WriteFile(path+"."+lane, []byte(strings.Join(passing, "\n")+"\n"), 0644); err != nil {
 		fatal("writing pass list: %v", err)
+	}
+}
+
+// Per-phase worker time over a run, printed with KML_CONF_TIMES=1: where a
+// file's time goes (front end, unit split, clang and link, the program).
+const (
+	phaseCodegen = iota
+	phaseSplit
+	phaseClang
+	phaseRun
+	phaseCount
+)
+
+var phaseNanos [phaseCount]atomic.Int64
+var phaseFiles [phaseCount]atomic.Int64
+
+// clangCPU is the user and system time of the clang (and linker) processes.
+var clangCPU atomic.Int64
+
+func phaseAdd(p int, since time.Time) {
+	phaseNanos[p].Add(int64(time.Since(since)))
+	phaseFiles[p].Add(1)
+}
+
+func phaseReport() {
+	if os.Getenv("KML_CONF_TIMES") == "" {
+		return
+	}
+	for p, name := range []string{"front end", "split", "clang+link", "run"} {
+		n, d := phaseFiles[p].Load(), time.Duration(phaseNanos[p].Load())
+		per := time.Duration(0)
+		if n > 0 {
+			per = d / time.Duration(n)
+		}
+		fmt.Fprintf(os.Stderr, "phase %-10s %6d files %10s total %8s each\n", name, n, d.Round(time.Second), per.Round(time.Millisecond))
+	}
+	if n := phaseFiles[phaseClang].Load(); n > 0 {
+		d := time.Duration(clangCPU.Load())
+		fmt.Fprintf(os.Stderr, "clang+link CPU   %6d files %10s total %8s each\n", n, d.Round(time.Second), (d / time.Duration(n)).Round(time.Millisecond))
+	}
+	if self, ok := selfCPU(); ok {
+		fmt.Fprintf(os.Stderr, "runner CPU (front end, split, GC) %s\n", self.Round(time.Second))
 	}
 }

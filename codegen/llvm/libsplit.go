@@ -185,6 +185,40 @@ func parseIREntities(ll string) []irEntity {
 	return out
 }
 
+// irNames are the names after each sigil (`@` or `%`) in IR text, as
+// irSymRe matches them: a run of [-a-zA-Z$._0-9], or a quoted name with its
+// quotes. A hand scan: the split reads every definition's references.
+func irNames(text string, sigil byte) []string {
+	var out []string
+	for i := 0; i < len(text); i++ {
+		if text[i] != sigil || i+1 >= len(text) {
+			continue
+		}
+		j := i + 1
+		if text[j] == '"' {
+			k := strings.IndexByte(text[j+1:], '"')
+			if k < 0 {
+				continue
+			}
+			out = append(out, text[j:j+1+k+1])
+			i = j + 1 + k
+			continue
+		}
+		for j < len(text) && irNameByte(text[j]) {
+			j++
+		}
+		if j > i+1 {
+			out = append(out, text[i+1:j])
+			i = j - 1
+		}
+	}
+	return out
+}
+
+func irNameByte(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '$' || c == '.' || c == '_'
+}
+
 func firstSym(ln string) string {
 	if m := irSymRe.FindStringSubmatch(ln); m != nil {
 		return m[1]
@@ -237,12 +271,15 @@ func declOfVis(e irEntity, vis string) (string, error) {
 		if strings.Contains(rhs, "thread_local") {
 			tl = "thread_local "
 		}
+		// The first of the two keywords: an initializer can name a symbol
+		// or hold text with either in it.
 		var ty string
-		for _, kw := range []string{"global ", "constant "} {
-			if i := strings.Index(rhs, kw); i >= 0 {
-				ty = irLeadingType(rhs[i+len(kw):])
-				break
-			}
+		g, c := strings.Index(rhs, "global "), strings.Index(rhs, "constant ")
+		switch {
+		case g >= 0 && (c < 0 || g < c):
+			ty = irLeadingType(rhs[g+len("global "):])
+		case c >= 0:
+			ty = irLeadingType(rhs[c+len("constant "):])
 		}
 		if ty == "" {
 			return "", fmt.Errorf("libsplit: cannot type global @%s", e.name)
@@ -396,6 +433,9 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 			// A library definition is hidden in every program, so its unit's
 			// text does not depend on what the program names.
 			e.owner = libOwner(e.name)
+			if e.owner == "" && !islands && e.kind == 'f' {
+				e.owner = autoUnitOwner(*e)
+			}
 			if islandOwner(e.owner) {
 				// One unit per target's shared library, or the program's.
 				e.owner = ""
@@ -415,6 +455,8 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 		if err := moveIslandHelpers(ents, defs); err != nil {
 			return LibUnits{}, err
 		}
+	} else {
+		ents = moveUnitRows(ents, defs)
 	}
 	var header, types []string
 	decls := map[string]string{}
@@ -462,6 +504,17 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 		body, copied []string
 		reach        []string
 	}
+	// Each definition's references, scanned once: a copied definition is
+	// walked again for every unit that names it.
+	refCache := make([][]string, len(ents))
+	refScanned := make([]bool, len(ents))
+	refsOf := func(i int) []string {
+		if !refScanned[i] {
+			refScanned[i] = true
+			refCache[i] = irNames(ents[i].text, '@')
+		}
+		return refCache[i]
+	}
 	closures := map[string]*closure{}
 	for owner, idxs := range units {
 		c := &closure{}
@@ -471,23 +524,22 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 			c.body = append(c.body, ents[i].text)
 		}
 		seen := map[string]bool{}
-		queue := append([]string{}, c.body...)
+		queue := append([]int{}, idxs...)
 		if owner == "" {
 			// C objects may name a weak_odr helper the program's own IR does
 			// not: the program's unit always carries them.
-			for _, e := range ents {
+			for i, e := range ents {
 				if irLinkage(e) == "weak_odr" && !seen[e.name] {
 					seen[e.name] = true
 					c.copied = append(c.copied, e.text)
-					queue = append(queue, e.text)
+					queue = append(queue, i)
 				}
 			}
 		}
 		for len(queue) > 0 {
-			txt := queue[0]
+			at := queue[0]
 			queue = queue[1:]
-			for _, m := range irSymRe.FindAllStringSubmatch(txt, -1) {
-				sym := m[1]
+			for _, sym := range refsOf(at) {
 				if have[sym] || seen[sym] {
 					continue
 				}
@@ -502,7 +554,7 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 				}
 				if copyable(ents[di]) {
 					c.copied = append(c.copied, ents[di].text)
-					queue = append(queue, ents[di].text)
+					queue = append(queue, di)
 					continue
 				}
 				c.reach = append(c.reach, sym)
@@ -530,7 +582,13 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 		for _, h := range header {
 			b.WriteString(h + "\n")
 		}
-		for _, t := range types {
+		unitTypes := types
+		if autoOwner(owner) {
+			// Only the types it names: the program's others would make its
+			// text, and so its cache key, differ per program.
+			unitTypes = typesNamed(types, append(append([]string{}, c.body...), c.copied...), c.reach, decls, ents, defs)
+		}
+		for _, t := range unitTypes {
 			b.WriteString(t + "\n")
 		}
 		var declared []string
@@ -568,13 +626,89 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 	return out, nil
 }
 
+// autoUnitMinLines is the size from which a program function compiles in a
+// unit of its own, cached by its text: a generated helper (a host
+// constructor's row, a dynamic read) is mostly the same in every program, as
+// is a function of a file many programs include (a test harness's), and its
+// own unit is then compiled once instead of with each program.
+const autoUnitMinLines = 6
+
+// autoUnitOwner is the unit of program function e by its text, or "" when
+// it stays in the program's unit: small, main, the table registration or a
+// module's initializer (whose text is the program's own), the library's, or a user function
+// unless AutoUnitUserFuncs.
+func autoUnitOwner(e irEntity) string {
+	if strings.Count(e.text, "\n") < autoUnitMinLines {
+		return ""
+	}
+	n := e.name
+	if n == "main" || n == "__kml_unit_init" || strings.HasPrefix(n, "__kml_mod") || strings.HasPrefix(n, "__kml_lib_") {
+		return ""
+	}
+	if !strings.HasPrefix(n, "__kml_") && !AutoUnitUserFuncs {
+		return "" // a user function, inlined into its callers in the program's unit
+	}
+	if l := irLinkage(e); l != "" && l != "internal" && l != "private" && l != "external" {
+		return ""
+	}
+	h := sha256.Sum256([]byte(e.text))
+	return "auto_" + hex.EncodeToString(h[:8])
+}
+
+// AutoUnitUserFuncs puts large user functions in cached units too: for a
+// driver compiling many programs that share files (the conformance runner's
+// test harness). Off for the CLI, where a user function stays in the
+// program's unit, which clang can inline it across.
+var AutoUnitUserFuncs bool
+
+func autoOwner(owner string) bool { return strings.HasPrefix(owner, "auto_") }
+
+// typesNamed is the type definitions of types that texts, the reached
+// symbols' declarations, or another type so named refer to.
+func typesNamed(types, texts, reach []string, decls map[string]string, ents []irEntity, defs map[string]int) []string {
+	byName := map[string]string{}
+	for _, t := range types {
+		if i := strings.Index(t, " = type"); i > 0 {
+			byName[strings.TrimPrefix(t[:i], "%")] = t
+		}
+	}
+	for _, sym := range reach {
+		if d, ok := decls[sym]; ok {
+			texts = append(texts, d)
+		} else if di, ok := defs[sym]; ok {
+			if d, err := declOfVis(ents[di], ""); err == nil {
+				texts = append(texts, d)
+			}
+		}
+	}
+	want := map[string]bool{}
+	queue := texts
+	for len(queue) > 0 {
+		t := queue[0]
+		queue = queue[1:]
+		for _, n := range irNames(t, '%') {
+			if def, ok := byName[n]; ok && !want[n] {
+				want[n] = true
+				queue = append(queue, def)
+			}
+		}
+	}
+	var out []string
+	for _, t := range types {
+		if i := strings.Index(t, " = type"); i > 0 && want[strings.TrimPrefix(t[:i], "%")] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
 // moveIslandHelpers gives each program definition only one island's code
 // reaches (a closure, a generated helper) to that island.
 func moveIslandHelpers(ents []irEntity, defs map[string]int) error {
 	refs := func(i int) []int {
 		var out []int
-		for _, m := range irSymRe.FindAllStringSubmatch(ents[i].text, -1) {
-			if di, ok := defs[m[1]]; ok && di != i {
+		for _, n := range irNames(ents[i].text, '@') {
+			if di, ok := defs[n]; ok && di != i {
 				out = append(out, di)
 			}
 		}
@@ -796,4 +930,113 @@ func libKmlDecl(name string) bool {
 		return false
 	}
 	return lib.DeclaredKmlNames()[name[:i]]
+}
+
+// moveUnitRows moves each function-metadata row (unitKindFnMeta) of a
+// function another unit defines into a table in that unit, which the linker
+// registers (a descriptor in the kml_unitreg section, unitreg.c): the rows
+// are the same in every program, and in the program's unit the table was a
+// third of its compile. Not on Windows, whose sections this does not lay
+// out. defs gains the new tables.
+func moveUnitRows(ents []irEntity, defs map[string]int) []irEntity {
+	name := fmt.Sprintf("__kml_unit_rows_%d", unitKindFnMeta)
+	ti, ok := defs[name]
+	if !ok {
+		return ents
+	}
+	// The target: the IR's triple, or the host clang compiles for.
+	goos := runtime.GOOS
+	init := -1
+	for i := range ents {
+		switch {
+		case ents[i].kind == 'f' && ents[i].name == "__kml_unit_init":
+			init = i
+		case ents[i].kind == 'o' && strings.HasPrefix(ents[i].text, "target triple"):
+			switch t := ents[i].text; {
+			case strings.Contains(t, "windows"):
+				goos = "windows"
+			case strings.Contains(t, "apple") || strings.Contains(t, "darwin") || strings.Contains(t, "macos"):
+				goos = "darwin"
+			default:
+				goos = "linux"
+			}
+		}
+	}
+	if goos == "windows" {
+		return ents
+	}
+	section := "kml_unitreg"
+	if goos == "darwin" {
+		section = "__DATA,__kml_unitreg"
+	}
+	text := ents[ti].text
+	// @__kml_unit_rows_4 = private constant [N x TY] [TY {…}, TY {…}]
+	open := strings.Index(text, "] [")
+	x := strings.Index(text, " x ")
+	if init < 0 || open < 0 || x < 0 || x > open || !strings.HasSuffix(text, "]") {
+		return ents
+	}
+	rowTy := text[x+3 : open]
+	elems := splitTopLevel(text[open+3:len(text)-1], ',')
+	byOwner := map[string][]string{}
+	var kept []string
+	for _, el := range elems {
+		el = strings.TrimSpace(el)
+		owner := ""
+		if k := strings.IndexByte(el, '@'); k >= 0 {
+			if names := irNames(el[k:], '@'); len(names) > 0 {
+				if di, ok := defs[names[0]]; ok {
+					owner = ents[di].owner
+				}
+			}
+		}
+		if owner == "" {
+			kept = append(kept, el)
+			continue
+		}
+		byOwner[owner] = append(byOwner[owner], el)
+	}
+	if len(byOwner) == 0 {
+		return ents
+	}
+	stride := fmt.Sprintf("ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64)", rowTy)
+	owners := make([]string, 0, len(byOwner))
+	for o := range byOwner {
+		owners = append(owners, o)
+	}
+	sort.Strings(owners)
+	for _, o := range owners {
+		rows := byOwner[o]
+		tab := name + "." + llvmSafeSymbol(o)
+		desc := "__kml_unitreg." + llvmSafeSymbol(o)
+		ents = append(ents,
+			irEntity{name: tab, kind: 'g', owner: o,
+				text: fmt.Sprintf("@%s = private constant [%d x %s] [%s]", tab, len(rows), rowTy, strings.Join(rows, ", "))},
+			irEntity{name: desc, kind: 'g', owner: o,
+				text: fmt.Sprintf("@%s = private constant { i64, ptr, i64, i64 } { i64 %d, ptr @%s, i64 %d, i64 %s }, section \"%s\", align 8", desc, unitKindFnMeta, tab, len(rows), stride, section)},
+			// Kept by the linker though nothing names it (unitreg.c finds it
+			// by its section).
+			irEntity{name: "llvm.used", kind: 'g', owner: o,
+				text: fmt.Sprintf("@llvm.used = appending global [1 x ptr] [ptr @%s], section \"llvm.metadata\"", desc)},
+		)
+		defs[tab], defs[desc] = len(ents)-3, len(ents)-2
+	}
+	// The program's registration covers only the rows it keeps.
+	marker := fmt.Sprintf("i64 %d, ptr @%s, i64 %d, ", unitKindFnMeta, name, len(elems))
+	if len(kept) > 0 {
+		ents[ti].text = fmt.Sprintf("@%s = private constant [%d x %s] [%s]", name, len(kept), rowTy, strings.Join(kept, ", "))
+		ents[init].text = strings.Replace(ents[init].text, marker, fmt.Sprintf("i64 %d, ptr @%s, i64 %d, ", unitKindFnMeta, name, len(kept)), 1)
+	} else {
+		ents[ti] = irEntity{kind: 'o'}
+		delete(defs, name)
+		lines := strings.Split(ents[init].text, "\n")
+		out := lines[:0]
+		for _, l := range lines {
+			if !strings.Contains(l, marker) {
+				out = append(out, l)
+			}
+		}
+		ents[init].text = strings.Join(out, "\n")
+	}
+	return ents
 }

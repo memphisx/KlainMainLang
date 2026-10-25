@@ -366,6 +366,19 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 		}
 	}
 	if c.MemberDecl(mem) == nil && c.MemberOverloadDecls(mem) == nil {
+		// A BigInt64Array/BigUint64Array codegen holds (a prototype record's
+		// receiver, which the checker does not type): its method's
+		// TypeScript implementation, as its declaration lowers to.
+		if ot := e.inferExprType(mem.Object); ot.BigIntElem && !ot.IsDynamic() && ot.ElemType != nil {
+			kind := "BigInt64Array"
+			if !ot.ElemType.Signed {
+				kind = "BigUint64Array"
+			}
+			if m, linked := e.globalLinks["__kml_"+kind+"_"+mem.Property]; linked {
+				r := ot
+				return &lowering{libFn: m, recv: &r, e: e, ex: ex}, true
+			}
+		}
 		if key, ok := e.reprIntrinsic(mem); ok {
 			return &lowering{intrinsic: key, e: e, ex: ex}, true
 		}

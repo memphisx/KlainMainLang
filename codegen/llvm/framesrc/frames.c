@@ -112,12 +112,28 @@ static int put_frame(char *buf, size_t cap, const char *async, kml_frame *f) {
 
 /* The frame lines of the current stack, each "\n    at name (file:line:col)"
  * or "\n    at file:line:col", at most KML_STACK_LIMIT; null for none. */
+/* The guard page a stack overflow faulted on (stackguard.c): the record of
+ * the call that overflowed may lie in it, unreadable, so a capture starts
+ * above it. */
+static _Thread_local uintptr_t fault_lo, fault_hi;
+
+void __kml_frames_fault_page(uintptr_t lo, uintptr_t hi) {
+    fault_lo = lo;
+    fault_hi = hi;
+}
+
+static int frame_unreadable(const kml_frame *f) {
+    uintptr_t a = (uintptr_t)f;
+    return fault_hi && a + sizeof *f > fault_lo && a < fault_hi;
+}
+
 static char *capture_from(kml_frame *start) {
     char buf[16384];
     size_t n = 0;
     int count = 0, limit = stack_limit();
     kml_frame *last = 0;
-    for (kml_frame *f = start; f && count < limit; f = f->prev) {
+    if (start && frame_unreadable(start)) return 0; /* its chain is unreachable */
+    for (kml_frame *f = start; f && count < limit && !frame_unreadable(f); f = f->prev) {
         last = f;
         if (!f->desc || !f->desc->file) continue;
         int w = put_frame(buf + n, sizeof buf - n, "", f);
@@ -204,6 +220,20 @@ void *__kml_error_stack(void *err) {
 /* A new error's frames, captured where it is made. */
 void __kml_error_capture(void *err) {
     *(void **)((char *)err + KML_ERR_FRAMES) = __kml_frames_capture();
+}
+
+/* A new error's fields (an Error's own, not a subclass's): its kind word,
+ * message and name, every other field unset (null, 0, a cause of
+ * undefined, its name the prototype's, no stack yet), and the frames where
+ * it is made. */
+void __kml_error_init(void *err, i64 kind, void *msg, void *name) {
+    char *o = (char *)err;
+    memset(o + 8, 0, KML_ERR_SIZE - 8);
+    *(i64 *)o = kind;
+    *(void **)(o + KML_ERR_MESSAGE) = msg;
+    *(void **)(o + KML_ERR_NAME) = name;
+    *(i64 *)(o + KML_ERR_CAUSE) = 10; /* undefined */
+    __kml_error_capture(err);
 }
 
 /* A fiber resumed after a switch: its base frame cut from its creator's,

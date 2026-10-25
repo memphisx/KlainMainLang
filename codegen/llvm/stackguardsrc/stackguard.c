@@ -51,6 +51,7 @@
 
 static void (*sg_throw)(const char *);
 static const char *sg_msg;
+void __kml_frames_fault_page(uintptr_t lo, uintptr_t hi); /* frames.c */
 /* Set once the handler is installed: another thread then needs its own
  * alternate stack (__kml_stack_guard_thread). */
 static int sg_on;
@@ -75,6 +76,10 @@ static uintptr_t sg_sp(void *uc) {
 static void sg_handler(int sig, siginfo_t *si, void *uc) {
     uintptr_t a = (uintptr_t)si->si_addr, sp = sg_sp(uc);
     if (sp && a + SG_BELOW >= sp && a < sp + SG_ABOVE) {
+        /* The overflowing call's frame record may sit in the faulting page:
+         * the error's stack trace starts above it. */
+        uintptr_t g = (uintptr_t)getpagesize();
+        __kml_frames_fault_page(a & ~(g - 1), (a & ~(g - 1)) + g);
         if (sg_throw) sg_throw(sg_msg);
         static const char m[] = "RangeError: Maximum call stack size exceeded\n";
         fflush(stdout);

@@ -545,12 +545,14 @@ console.log(y ?? 100);
 // Map.prototype.get "different key types" idiom `var item = {}; item = []`).
 // Strict now rejects the shape divergence cleanly; -compat=js widens the
 // binding to an any-box and runs. ADR-00933.
-func TestE2EArrayIntoObjectSlotRejectedStrict(t *testing.T) {
-	mustCompileError(t, `
+// An array is assignable to `{}` (tsc accepts it): the empty literal's
+// variable holds it.
+func TestE2EArrayIntoEmptyObjectSlot(t *testing.T) {
+	assertSameAsNode(t, `
 let item = {};
 item = [];
 console.log(item);
-`, "cannot assign a array value")
+`)
 }
 
 func TestE2EArrayIntoObjectSlotCompatJS(t *testing.T) {

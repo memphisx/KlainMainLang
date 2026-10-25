@@ -308,3 +308,64 @@ let g = function () { let r = host.make(); let C = r(); return new C(); };
 try { g(); } catch (e) { console.log(e.name); }
 `)
 }
+
+// A sloppy script's assignment to a parameter or a catch binding stores to
+// that binding; one to a name no scope declares makes a global property.
+func TestE2EJSSloppyAssignTargets(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+function f(a, b) { a = 1; b += 2; try { throw 1 } catch (e) { e = 3 } return a + b }
+function g() { zz = 5 }
+g(); console.log(f(0, 1), globalThis.zz, zz)
+`}, "main.js", "4 5 5")
+}
+
+// JavaScript: a class called without `new` throws once its arguments are
+// evaluated; a method the receiver's type has no such member for reads
+// undefined, so its call throws, named as V8 names the callee.
+func TestE2EJSCallThrowsAtRunTime(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+class C { constructor(m) { this.m = m } }
+function f(x) { if (x) throw C("boom"); return 1 }
+console.log(f(0));
+try { f(1) } catch (e) { console.log(e instanceof TypeError, e.message) }
+var m = new ArrayBuffer(2);
+try { m.transferToImmutable(1) } catch (e) { console.log(e.constructor.name + ": " + e.message) }
+try { (new ArrayBuffer(2)).transferToImmutable() } catch (e) { console.log(e.message) }
+try { "s".nope() } catch (e) { console.log(e.message) }
+`}, "main.js", `1
+true Class constructor C cannot be invoked without 'new'
+TypeError: m.transferToImmutable is not a function
+(intermediate value).transferToImmutable is not a function
+"s".nope is not a function`)
+}
+
+// JavaScript: a top-level binding no static type fits (an array of builtin
+// constructors grown by concat) is read from a function; a JSDoc-optional
+// parameter left out is undefined.
+func TestE2EJSUntypedGlobalsAndJSDocOptional(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+var a = [Float32Array, Float64Array];
+var c = a.concat([Int8Array]);
+function t(f, cs) { var ctors = cs || c; ctors.forEach(function (C) { f(C) }); }
+t(function (C) { console.log(C.name) });
+/**
+ * @param {string[]} [xs] - optional
+ */
+function opt(xs) { if (xs) return "truthy " + xs.length; return "undef " + xs; }
+console.log(opt(), opt(["a"]));
+`}, "main.js", `Float32Array
+Float64Array
+Int8Array
+undef undefined truthy 1`)
+}
+
+// Number(x) and -x of an `any` holding a bigint are ToNumeric: the nearest
+// double, and a negated bigint.
+func TestE2EAnyBigIntNumberAndNegate(t *testing.T) {
+	assertSameAsNode(t, `
+const p: any = 3n, q: any = 1n;
+console.log(Number(p), -p, -q, p - q, Number(p - q));
+const a = new BigInt64Array([3n, 1n, 2n]);
+console.log(a.toSorted((x, y) => Number(x - y)), [5n].map((z) => Number(z)));
+`)
+}

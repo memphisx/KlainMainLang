@@ -63,13 +63,12 @@
             "feature": "`BigInt64Array` / `BigUint64Array`",
             "status": "implemented",
             "caveats": [
-              "Only an explicit method allow-list is supported — indexing r/w, `.length`/`.byteLength`, `.at`, `.set`, `.subarray`, `.slice`, `.fill`, `.reverse`, for-of, `Atomics.*`; everything else (`.map`/`.filter`/`.reduce`/`.indexOf`/`.sort`/`.join`/iterator objects/…) is a compile-time rejection, never a raw-scalar leak",
               "`Atomics.wait`/`notify` stay `Int32Array`-only"
             ],
             "notes": [
               "Compound element assignment (`a[0] += 1n`) is supported — the raw element is wrapped to a bigint, the op runs through the bigint runtime, and the result is stored back ([ADR-00592](../adr/00/ADR-00592.md))",
               "`console.log` of a whole array matches Node — the `TypeName(len)` prefix and (for bigint arrays) the per-element `n` suffix ([ADR-00593](../adr/00/ADR-00593.md))",
-              "Elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision `bigint` handles — writes require a bigint (compile error for a plain number, the spec's TypeError), reads (indexing, `.at`, for-of, `Atomics.*` results) wrap losslessly, so > 2^53 values round-trip exactly ([TDD-00101](../tdd/TDD-00101.md)/[ADR-00313](../adr/00/ADR-00313.md))",
+              "Elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision `bigint` handles — writes take what ToBigInt does (a bigint, a boolean; a plain number is a compile error, or the spec's TypeError under `-compat=js`); every %TypedArray%.prototype method, iterator, and `any` access passes and returns real bigints, reads (indexing, `.at`, for-of, `Atomics.*` results) wrap losslessly, so > 2^53 values round-trip exactly ([TDD-00101](../tdd/TDD-00101.md)/[ADR-00313](../adr/00/ADR-00313.md))",
               "`Atomics` load/store/RMW/compareExchange work on them (spec), lowered to the same seq_cst i64 atomics"
             ],
             "decl": [

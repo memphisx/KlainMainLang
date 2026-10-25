@@ -147,6 +147,14 @@ func (e *Emitter) bindHostSelf(cellReg string, h hostLayout) *ast.Identifier {
 func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostMember) {
 	restore := e.beginDetachedFunc()
 	self := e.hostReadSelf("%obj", h)
+	if _, iter := iteratorInterfaces[h.class]; iter {
+		// %IteratorPrototype%[Symbol.iterator]: the iterator itself, which
+		// the declaration's computed key does not name here.
+		miss := e.emitKeyIs("%key", "@@iterator")
+		e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(e.arrayIterMethodRecord("@@iterator"), kmlTagDynFunc)))
+		e.emitLabel(miss)
+	}
 	for _, m := range members {
 		if m.method {
 			// The class's record by name (shared with class.prototype),

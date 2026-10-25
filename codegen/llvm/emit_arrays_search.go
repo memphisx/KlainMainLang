@@ -507,7 +507,9 @@ func (e *Emitter) searchNeedle(needle Value, elemTy Type) Value {
 	if needle.Ty.IsDynamic() && scalarTypeKind(elemTy) != "" {
 		return needle
 	}
-	if searchKind(needle.Ty) != "" && searchKind(elemTy) != "" && searchKind(needle.Ty) != searchKind(elemTy) {
+	// A bigint among numbers (`int8.indexOf(2n)`) is strictly equal to none.
+	bigMismatch := needle.Ty.IsBigInt() && !elemTy.IsBigInt() && searchKind(elemTy) != ""
+	if bigMismatch || searchKind(needle.Ty) != "" && searchKind(elemTy) != "" && searchKind(needle.Ty) != searchKind(elemTy) {
 		if boxed, err := e.emitBoxValue(needle); err == nil {
 			return boxed
 		}

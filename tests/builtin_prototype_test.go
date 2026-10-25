@@ -180,3 +180,38 @@ console.log(new Uint8ClampedArray([9, 0, 250]).toSorted(d))
 const z = new Int16Array([5, -3, 2]); console.log(z.toSorted((a, b) => b - a), new Float32Array([1.5, -2]).toSorted((a, b) => a - b))
 `)
 }
+
+// A builtin constructor held as a value reads the same prototype object a
+// direct read gives, and a library class's instances inherit that object.
+func TestE2EBuiltinCtorRefPrototype(t *testing.T) {
+	assertSameAsNode(t, `const cs: any[] = [Map, Set, WeakMap, Promise, Array, Uint8Array, Function, Object, DataView, ArrayBuffer, Date, RegExp];
+for (const c of cs) console.log(typeof c.prototype, typeof c.prototype.constructor, c.prototype.constructor === c);
+const M: any = Map;
+console.log(M.prototype === Map.prototype, M.prototype.get === Map.prototype.get, Object.getPrototypeOf(new M()) === M.prototype);
+const d = new DataView(new ArrayBuffer(4));
+const D: any = DataView;
+console.log(Object.getPrototypeOf(d) === DataView.prototype, D.prototype === DataView.prototype);
+const f: any = () => 1;
+class K {}
+const k: any = K;
+console.log(f.constructor === Function, f.constructor.name, Function.prototype.constructor === Function, k.constructor === Function);
+`)
+}
+
+// The error kinds' prototype objects: their name, empty message and
+// constructor, Error.prototype's toString, each inheriting Error.prototype,
+// and every error's (a subclass's too) [[Prototype]].
+func TestE2EErrorKindPrototypes(t *testing.T) {
+	assertSameAsNode(t, `const E: any = Error; const T: any = TypeError;
+console.log(typeof Error.prototype, typeof E.prototype, Error.prototype.name, TypeError.prototype.name, JSON.stringify(Error.prototype.message));
+console.log(Object.getPrototypeOf(TypeError.prototype) === Error.prototype, T.prototype === TypeError.prototype, Error.prototype.constructor === Error);
+console.log(Object.getPrototypeOf(new TypeError("bad")) === TypeError.prototype, Object.getPrototypeOf(new Error("x")) === Error.prototype);
+const a: any = new RangeError("r");
+console.log(Object.getPrototypeOf(a) === RangeError.prototype, Error.prototype.toString.call(a));
+console.log(Error.prototype.toString.call({ name: "N", message: "m" }), Error.prototype.toString.call({}), Error.prototype.toString.call({ name: "", message: "only" }));
+try { Error.prototype.toString.call(1 as any); } catch (e) { console.log((e as Error).name); }
+class MyErr extends Error {}
+class Sub extends MyErr {}
+console.log(Object.getPrototypeOf(MyErr.prototype) === Error.prototype, Object.getPrototypeOf(new MyErr("q")) === MyErr.prototype, Object.getPrototypeOf(Sub.prototype) === MyErr.prototype);
+`)
+}

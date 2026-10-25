@@ -268,11 +268,8 @@
           {
             "feature": "Optional param (`T=`, `[name]`)",
             "status": "implemented",
-            "caveats": [
-              "Recognized at the `@param` name/type level and stripped; the parameter is not yet marked structurally optional beyond an inline `?`"
-            ],
             "notes": [
-              "[TDD-00125](../tdd/TDD-00125.md) Stage 1"
+              "[TDD-00125](../tdd/TDD-00125.md) Stage 1; the parameter is optional, as `name?` makes it ([ADR-01929](../adr/01/ADR-01929.md))"
             ]
           },
           {

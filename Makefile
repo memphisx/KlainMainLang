@@ -125,8 +125,7 @@ examples: build
 ## compile is deterministic (TDD-00238 Stage 4; tools/libdrift)
 drift: build
 	@ex=$$($(GO) run ./tools/runexamples -list); \
-	$(GO) run ./tools/libdrift -bin ./$(BINARY) -fail -top 20 $$ex && \
-	$(GO) run ./tools/libdrift -bin ./$(BINARY) -repeat 2 $$ex
+	$(GO) run ./tools/libdrift -bin ./$(BINARY) -fail -top 20 -repeat 2 $$ex
 
 ## apps: build every showcase app (APPS) as a distributable single binary
 ## (--static) and, on Windows, assert it imports no non-system DLL. These are

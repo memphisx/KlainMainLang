@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 )
 
@@ -315,11 +314,11 @@ console.log(sum, A.inc(), B.inc(), new A() instanceof B);
 		if err != nil {
 			t.Fatalf("run %s: %v", n, err)
 		}
-		ru, _ := cmd.ProcessState.SysUsage().(*syscall.Rusage)
-		if ru == nil {
+		rss, ok := maxRSS(cmd.ProcessState)
+		if !ok {
 			t.Skip("no rusage on this platform")
 		}
-		return strings.TrimRight(string(out), "\n"), int64(ru.Maxrss)
+		return strings.TrimRight(string(out), "\n"), rss
 	}
 	gotSmall, small := rss("20000")
 	gotBig, big := rss("400000")

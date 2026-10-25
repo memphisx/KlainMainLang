@@ -211,33 +211,11 @@ func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
 	e.ensureMemcpy()
 	left = e.emitStringNullToLiteral(left)
 	right = e.emitStringNullToLiteral(right)
-	// NOTE (TDD-00120): still strlen-based — a fully binary-safe concat needs
-	// every string producer to carry a length header first (the consumer switch
-	// is gated on 100% producer coverage; see the TDD's Stage-2 notes).
-	n1 := e.freshReg()
-	n2 := e.freshReg()
-	total := e.freshReg()
-	dst := e.freshReg()
-	n2p1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", n1, left.Ref))
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", n2, right.Ref))
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", total, n1, n2))
-	buf := e.emitStringAlloc(total)
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, left.Ref, n1))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", dst, buf, n1))
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", n2p1, n2))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", dst, right.Ref, n2p1))
-	// A right side starting with a surrogate's lead byte may complete a
-	// pair the left side ends with half of (WTF-8 joins them).
-	b0, isEd := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b0, dst))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, -19", isEd, b0))
-	joinL, doneL := e.freshLabel("concat.wtf8"), e.freshLabel("concat.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s, !prof !{!\"branch_weights\", i32 1, i32 1000}", isEd, joinL, doneL))
-	e.emitLabel(joinL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_wtf8_join(ptr %s, i64 %s)", buf, n1))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(doneL)
+	// One runtime call (strheader.c): inline, the lengths, allocation,
+	// copies and surrogate join were 18 instructions and two blocks per `+`.
+	e.ensureStrHeaderRuntime()
+	buf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_concat(ptr %s, ptr %s)", buf, left.Ref, right.Ref))
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 

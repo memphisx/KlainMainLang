@@ -310,6 +310,27 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 			promote(v)
 		}
 	}
+	// JavaScript (-compat=js): an untyped binding a function reads that no
+	// rule above types for a global (`var all = [Int8Array].concat(more)`)
+	// holds its value as `any`, as JavaScript holds every binding: the
+	// declaration stores the box (anyHeldDecl).
+	if e.compatJS() {
+		for _, v := range withFunctions {
+			st := stmtOf[v]
+			if _, done := e.moduleGlobals[v.Name]; done || v.TypeAnnot != nil || v.Init == nil || !read[v.Name] || e.widenedBindings[v.Name] || e.libStmts[st] != "" || e.dynStmts[st] != "" {
+				continue
+			}
+			e.inLib = ""
+			e.forcedGlobalTypes[v] = TypeAny
+			promote(v)
+			if _, ok := e.moduleGlobals[v.Name]; ok {
+				if e.jsHeldGlobals == nil {
+					e.jsHeldGlobals = map[*ast.VarDeclaration]bool{}
+				}
+				e.jsHeldGlobals[v] = true
+			}
+		}
+	}
 	// A library module's statements run in its init function, and a
 	// dynamic-only file's in its import() target's, so every one of their
 	// bindings is a global, typed as its initializer is.
@@ -878,7 +899,7 @@ func (e *Emitter) decideGlobalType(v *ast.VarDeclaration) (Type, bool) {
 		// `-compat=js` (TDD-00022 break shape 4): an untyped object-literal
 		// binding is a D1 dynamic object held in an `any` (the vardecl types
 		// it TypeAny), so it promotes as an `any` global a function reads.
-		if e.compatJS() {
+		if e.compatJS() || len(init.Properties) == 0 {
 			if v.TypeAnnot == nil {
 				return TypeAny, true
 			}
@@ -1693,8 +1714,8 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			// descriptors, accessors all work on it; the boxed-field
 			// arithmetic runs through the TDD-00076 dispatch. strict keeps
 			// the static struct (native-speed fields).
-			if e.compatJS() {
-				ty = TypeAny
+			if e.compatJS() || len(init.Properties) == 0 {
+				ty = TypeAny // an empty one's `{}` holds any value
 			} else {
 				ty = e.inferObjectType(init)
 			}
@@ -1709,6 +1730,9 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			if init.Shared {
 				ty = SharedArrayBufferType()
 			}
+			// `{maxByteLength}` makes it growable (emitBufferGrow), as the
+			// constructor's own value is typed.
+			ty.BufferGrowable = init.MaxByteLength != nil
 		case *ast.NewTypedArrayExpression:
 			ty = TypedArrayType(init.ElemKind)
 		case *ast.NewRegExpExpression:

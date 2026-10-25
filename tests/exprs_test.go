@@ -1404,11 +1404,11 @@ func TestE2EUpdateNonNumericOperandRejected(t *testing.T) {
 	mustCompileError(t, `
 let x = {};
 ++x;
-`, "requires a number or bigint operand")
+`, "an arithmetic operand must be of type 'any', 'number', 'bigint' or an enum type")
 	mustCompileError(t, `
 let s = "x";
 s++;
-`, "requires a number or bigint operand")
+`, "an arithmetic operand must be of type 'any', 'number', 'bigint' or an enum type")
 }
 
 // Unary minus on a string is ToNumber then negation (tsc accepts it).

@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 
 	"KlainMainLang/ast"
 )
@@ -311,29 +312,31 @@ func (e *Emitter) inferFunctionNames(prog *ast.Program) {
 			walk(v.Elem())
 			return
 		case reflect.Struct:
-			switch el := v.Interface().(type) {
-			case ast.ArrayPatternElem:
+			switch v.Type() {
+			case arrayPatternElemType:
+				el := v.Interface().(ast.ArrayPatternElem)
 				if el.Default != nil && el.Name != "" && el.SubArray == nil && el.SubObject == nil {
 					name(el.Default, unmangleTopLevelName(el.Name))
 				}
-			case ast.DestructProp:
+			case destructPropType:
+				el := v.Interface().(ast.DestructProp)
 				if el.Default != nil && el.Local != "" && el.SubArray == nil && el.SubObject == nil {
 					name(el.Default, unmangleTopLevelName(el.Local))
 				}
-			}
-			if v.Type() == reflect.TypeOf(ast.Param{}) {
+			case paramType:
 				p := v.Interface().(ast.Param)
 				if p.Default != nil && p.ArrayPattern == nil && p.ObjectPattern == nil {
 					name(p.Default, p.Name)
 				}
 			}
-			for i := 0; i < v.NumField(); i++ {
-				if v.Type().Field(i).IsExported() {
-					walk(v.Field(i))
-				}
+			for _, i := range exportedRefFields(v.Type()) {
+				walk(v.Field(i))
 			}
 			return
 		case reflect.Slice, reflect.Array:
+			if !mayHoldRef(v.Type().Elem()) {
+				return
+			}
 			for i := 0; i < v.Len(); i++ {
 				walk(v.Index(i))
 			}
@@ -461,6 +464,13 @@ func (e *Emitter) paramDefaultType(p ast.Param) (Type, bool) {
 // literal is the tuple of its widened elements (`[x, y] = [1, "a"]` is
 // [number, string]), held as an array when they are of one kind; an object
 // pattern takes the literal's object type.
+// emptyObjectParam reports an object pattern parameter typed `{}`: an empty
+// pattern, or one defaulting to an empty literal.
+func emptyObjectParam(p ast.Param) bool {
+	lit, ok := p.Default.(*ast.ObjectLiteral)
+	return p.ObjectPattern != nil && (len(p.ObjectPattern) == 0 || ok && len(lit.Properties) == 0)
+}
+
 func (e *Emitter) patternDefaultType(p ast.Param) (Type, bool) {
 	// The checker's type, mapped as the oracle maps it, when it has one.
 	// An object pattern keeps the literal's own layout below: a defaulted
@@ -468,8 +478,8 @@ func (e *Emitter) patternDefaultType(p ast.Param) (Type, bool) {
 	// a layout from `{ a = 1 } = {}` does not hold for a number.
 	if c := e.front(); c != nil {
 		if ct := c.PatternDefaultType(p); !c.Unanswered(ct) {
-			if t, ok := e.repr().of(ct); ok && !t.IsDynamic() {
-				return t, true
+			if t, ok := e.repr().of(ct); ok && (!t.IsDynamic() || emptyObjectParam(p)) {
+				return t, true // `{}` holds any value
 			}
 		}
 	}
@@ -506,4 +516,45 @@ func (e *Emitter) patternDefaultType(p ast.Param) (Type, bool) {
 		}
 	}
 	return Type{}, false
+}
+
+var (
+	arrayPatternElemType = reflect.TypeOf(ast.ArrayPatternElem{})
+	destructPropType     = reflect.TypeOf(ast.DestructProp{})
+	paramType            = reflect.TypeOf(ast.Param{})
+	refFields            sync.Map // reflect.Type → []int
+)
+
+// exportedRefFields is the indices of struct type t's exported fields that
+// can hold a pointer (what a walk over the AST's values descends into),
+// computed once per type.
+func exportedRefFields(t reflect.Type) []int {
+	if f, ok := refFields.Load(t); ok {
+		return f.([]int)
+	}
+	var out []int
+	for i := 0; i < t.NumField(); i++ {
+		if f := t.Field(i); f.IsExported() && mayHoldRef(f.Type) {
+			out = append(out, i)
+		}
+	}
+	refFields.Store(t, out)
+	return out
+}
+
+// mayHoldRef reports whether a value of type t can hold a pointer, an
+// interface, a slice or a map: anything but numbers, booleans and strings
+// (and arrays and structs of only those).
+func mayHoldRef(t reflect.Type) bool {
+	switch t.Kind() {
+	case reflect.Bool, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr,
+		reflect.Float32, reflect.Float64, reflect.Complex64, reflect.Complex128, reflect.String:
+		return false
+	case reflect.Array:
+		return mayHoldRef(t.Elem())
+	case reflect.Struct:
+		return len(exportedRefFields(t)) > 0
+	}
+	return true
 }

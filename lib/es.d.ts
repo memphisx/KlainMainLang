@@ -1963,42 +1963,42 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> 
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
-    /** @intrinsic Array.prototype.copyWithin */
+    /** @lower __kml_BigInt64Array_copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
-    /** @intrinsic Array.prototype.entries */
+    /** @lower __kml_BigInt64Array_entries */
     entries(): ArrayIterator<[number, bigint]>;
-    /** @intrinsic Array.prototype.every */
+    /** @lower __kml_BigInt64Array_every */
     every(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.fill */
     fill(value: bigint, start?: number, end?: number): this;
-    /** @intrinsic Array.prototype.filter */
+    /** @lower __kml_BigInt64Array_filter */
     filter(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => any, thisArg?: any): BigInt64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.find */
+    /** @lower __kml_BigInt64Array_find */
     find(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): bigint | undefined;
-    /** @intrinsic Array.prototype.findIndex */
+    /** @lower __kml_BigInt64Array_findIndex */
     findIndex(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): number;
-    /** @intrinsic Array.prototype.forEach */
+    /** @lower __kml_BigInt64Array_forEach */
     forEach(callbackfn: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => void, thisArg?: any): void;
-    /** @intrinsic Array.prototype.includes */
+    /** @lower __kml_BigInt64Array_includes */
     includes(searchElement: bigint, fromIndex?: number): boolean;
-    /** @intrinsic Array.prototype.indexOf */
+    /** @lower __kml_BigInt64Array_indexOf */
     indexOf(searchElement: bigint, fromIndex?: number): number;
-    /** @intrinsic Array.prototype.join */
+    /** @lower __kml_BigInt64Array_join */
     join(separator?: string): string;
-    /** @intrinsic Array.prototype.keys */
+    /** @lower __kml_BigInt64Array_keys */
     keys(): ArrayIterator<number>;
-    /** @intrinsic Array.prototype.lastIndexOf */
+    /** @lower __kml_BigInt64Array_lastIndexOf */
     lastIndexOf(searchElement: bigint, fromIndex?: number): number;
     readonly length: number;
-    /** @intrinsic Array.prototype.map */
+    /** @lower __kml_BigInt64Array_map */
     map(callbackfn: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => bigint, thisArg?: any): BigInt64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.reduce */
+    /** @lower __kml_BigInt64Array_reduce */
     reduce(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => bigint): bigint;
-    /** @intrinsic Array.prototype.reduce */
+    /** @lower __kml_BigInt64Array_reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => U, initialValue: U): U;
-    /** @intrinsic Array.prototype.reduceRight */
+    /** @lower __kml_BigInt64Array_reduceRight */
     reduceRight(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => bigint): bigint;
-    /** @intrinsic Array.prototype.reduceRight */
+    /** @lower __kml_BigInt64Array_reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigInt64Array<TArrayBuffer>) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
@@ -2006,16 +2006,16 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike> 
     set(array: ArrayLike<bigint>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): BigInt64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.some */
+    /** @lower __kml_BigInt64Array_some */
     some(predicate: (value: bigint, index: number, array: BigInt64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
-    /** @intrinsic Array.prototype.sort */
+    /** @lower __kml_BigInt64Array_sort */
     sort(compareFn?: (a: bigint, b: bigint) => number | bigint): this;
     /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): BigInt64Array<TArrayBuffer>;
     toLocaleString(locales?: string | string[], options?: Intl.NumberFormatOptions): string;
     toString(): string;
     valueOf(): BigInt64Array<TArrayBuffer>;
-    /** @intrinsic Array.prototype.values */
+    /** @lower __kml_BigInt64Array_values */
     values(): ArrayIterator<bigint>;
     [Symbol.iterator](): ArrayIterator<bigint>;
     readonly [Symbol.toStringTag]: "BigInt64Array";
@@ -2042,42 +2042,42 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike>
     readonly buffer: TArrayBuffer;
     readonly byteLength: number;
     readonly byteOffset: number;
-    /** @intrinsic Array.prototype.copyWithin */
+    /** @lower __kml_BigUint64Array_copyWithin */
     copyWithin(target: number, start: number, end?: number): this;
-    /** @intrinsic Array.prototype.entries */
+    /** @lower __kml_BigUint64Array_entries */
     entries(): ArrayIterator<[number, bigint]>;
-    /** @intrinsic Array.prototype.every */
+    /** @lower __kml_BigUint64Array_every */
     every(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
     /** @intrinsic Array.prototype.fill */
     fill(value: bigint, start?: number, end?: number): this;
-    /** @intrinsic Array.prototype.filter */
+    /** @lower __kml_BigUint64Array_filter */
     filter(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => any, thisArg?: any): BigUint64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.find */
+    /** @lower __kml_BigUint64Array_find */
     find(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): bigint | undefined;
-    /** @intrinsic Array.prototype.findIndex */
+    /** @lower __kml_BigUint64Array_findIndex */
     findIndex(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): number;
-    /** @intrinsic Array.prototype.forEach */
+    /** @lower __kml_BigUint64Array_forEach */
     forEach(callbackfn: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => void, thisArg?: any): void;
-    /** @intrinsic Array.prototype.includes */
+    /** @lower __kml_BigUint64Array_includes */
     includes(searchElement: bigint, fromIndex?: number): boolean;
-    /** @intrinsic Array.prototype.indexOf */
+    /** @lower __kml_BigUint64Array_indexOf */
     indexOf(searchElement: bigint, fromIndex?: number): number;
-    /** @intrinsic Array.prototype.join */
+    /** @lower __kml_BigUint64Array_join */
     join(separator?: string): string;
-    /** @intrinsic Array.prototype.keys */
+    /** @lower __kml_BigUint64Array_keys */
     keys(): ArrayIterator<number>;
-    /** @intrinsic Array.prototype.lastIndexOf */
+    /** @lower __kml_BigUint64Array_lastIndexOf */
     lastIndexOf(searchElement: bigint, fromIndex?: number): number;
     readonly length: number;
-    /** @intrinsic Array.prototype.map */
+    /** @lower __kml_BigUint64Array_map */
     map(callbackfn: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => bigint, thisArg?: any): BigUint64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.reduce */
+    /** @lower __kml_BigUint64Array_reduce */
     reduce(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => bigint): bigint;
-    /** @intrinsic Array.prototype.reduce */
+    /** @lower __kml_BigUint64Array_reduce */
     reduce<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => U, initialValue: U): U;
-    /** @intrinsic Array.prototype.reduceRight */
+    /** @lower __kml_BigUint64Array_reduceRight */
     reduceRight(callbackfn: (previousValue: bigint, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => bigint): bigint;
-    /** @intrinsic Array.prototype.reduceRight */
+    /** @lower __kml_BigUint64Array_reduceRight */
     reduceRight<U>(callbackfn: (previousValue: U, currentValue: bigint, currentIndex: number, array: BigUint64Array<TArrayBuffer>) => U, initialValue: U): U;
     /** @intrinsic Array.prototype.reverse */
     reverse(): this;
@@ -2085,16 +2085,16 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike = ArrayBufferLike>
     set(array: ArrayLike<bigint>, offset?: number): void;
     /** @intrinsic Array.prototype.slice */
     slice(start?: number, end?: number): BigUint64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.some */
+    /** @lower __kml_BigUint64Array_some */
     some(predicate: (value: bigint, index: number, array: BigUint64Array<TArrayBuffer>) => boolean, thisArg?: any): boolean;
-    /** @intrinsic Array.prototype.sort */
+    /** @lower __kml_BigUint64Array_sort */
     sort(compareFn?: (a: bigint, b: bigint) => number | bigint): this;
     /** @intrinsic TypedArray.prototype.subarray */
     subarray(begin?: number, end?: number): BigUint64Array<TArrayBuffer>;
     toLocaleString(locales?: string | string[], options?: Intl.NumberFormatOptions): string;
     toString(): string;
     valueOf(): BigUint64Array<TArrayBuffer>;
-    /** @intrinsic Array.prototype.values */
+    /** @lower __kml_BigUint64Array_values */
     values(): ArrayIterator<bigint>;
     [Symbol.iterator](): ArrayIterator<bigint>;
     readonly [Symbol.toStringTag]: "BigUint64Array";
@@ -2706,7 +2706,7 @@ interface Float64Array<TArrayBuffer extends ArrayBufferLike> {
     with(index: number, value: number): Float64Array<ArrayBuffer>;
 }
 interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
-    /** @intrinsic Array.prototype.findLast */
+    /** @lower __kml_BigInt64Array_findLast */
     findLast<S extends bigint>(
         predicate: (
             value: bigint,
@@ -2715,7 +2715,7 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
-    /** @intrinsic Array.prototype.findLast */
+    /** @lower __kml_BigInt64Array_findLast */
     findLast(
         predicate: (
             value: bigint,
@@ -2724,7 +2724,7 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): bigint | undefined;
-    /** @intrinsic Array.prototype.findLastIndex */
+    /** @lower __kml_BigInt64Array_findLastIndex */
     findLastIndex(
         predicate: (
             value: bigint,
@@ -2735,13 +2735,13 @@ interface BigInt64Array<TArrayBuffer extends ArrayBufferLike> {
     ): number;
     /** @intrinsic Array.prototype.toReversed */
     toReversed(): BigInt64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.toSorted */
+    /** @lower __kml_BigInt64Array_toSorted */
     toSorted(compareFn?: (a: bigint, b: bigint) => number): BigInt64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.with */
+    /** @lower __kml_BigInt64Array_with */
     with(index: number, value: bigint): BigInt64Array<ArrayBuffer>;
 }
 interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
-    /** @intrinsic Array.prototype.findLast */
+    /** @lower __kml_BigUint64Array_findLast */
     findLast<S extends bigint>(
         predicate: (
             value: bigint,
@@ -2750,7 +2750,7 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => value is S,
         thisArg?: any,
     ): S | undefined;
-    /** @intrinsic Array.prototype.findLast */
+    /** @lower __kml_BigUint64Array_findLast */
     findLast(
         predicate: (
             value: bigint,
@@ -2759,7 +2759,7 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
         ) => unknown,
         thisArg?: any,
     ): bigint | undefined;
-    /** @intrinsic Array.prototype.findLastIndex */
+    /** @lower __kml_BigUint64Array_findLastIndex */
     findLastIndex(
         predicate: (
             value: bigint,
@@ -2770,9 +2770,9 @@ interface BigUint64Array<TArrayBuffer extends ArrayBufferLike> {
     ): number;
     /** @intrinsic Array.prototype.toReversed */
     toReversed(): BigUint64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.toSorted */
+    /** @lower __kml_BigUint64Array_toSorted */
     toSorted(compareFn?: (a: bigint, b: bigint) => number): BigUint64Array<ArrayBuffer>;
-    /** @intrinsic Array.prototype.with */
+    /** @lower __kml_BigUint64Array_with */
     with(index: number, value: bigint): BigUint64Array<ArrayBuffer>;
 }
 

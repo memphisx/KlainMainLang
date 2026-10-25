@@ -16,6 +16,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -351,7 +352,12 @@ type Emitter struct {
 	// frameDescs are the shadow call stack's descriptors, by name and file;
 	// funcFiles each function's file.
 	frameDescs map[[2]string]string
-	funcFiles  map[ast.Node]string
+	// fileIndexes are the program's files by their place (fileIndex).
+	fileIndexes map[string]int
+	// jsHeldGlobals are the -compat=js globals held as `any` because no
+	// rule types them (registerModuleGlobals).
+	jsHeldGlobals map[*ast.VarDeclaration]bool
+	funcFiles     map[ast.Node]string
 	// identFiles each identifier's file, built when an undeclared name is
 	// assigned (sloppyAt).
 	identFiles map[*ast.Identifier]string
@@ -1052,6 +1058,7 @@ type Emitter struct {
 	// (@__kml_classref_proto, fnproto.go).
 	usedClassRefProto    bool
 	emittedClassRefProto bool // __kml_classref_proto is defined
+	errorLayoutNoted     bool // errorObjType's layout has its type id
 	// tupleArrayCalls memoizes tupleArrayCall's rewrites, so emission and
 	// inference see one call.
 	exactClassSlots         map[string]bool   // a `const x = new C()` binding's slot: x is a C (foreignFieldTags)
@@ -1623,7 +1630,7 @@ func (e *Emitter) updateSymbolInPlace(name string, sym Symbol) bool {
 func (e *Emitter) freshReg() string {
 	n := e.regCtr
 	e.regCtr++
-	r := fmt.Sprintf("%%t%d", n)
+	r := "%t" + strconv.Itoa(n)
 	if len(e.notNullRef) > 0 {
 		delete(e.notNullRef, r) // a name reused in another function
 	}
@@ -1633,12 +1640,12 @@ func (e *Emitter) freshReg() string {
 func (e *Emitter) freshLabel(prefix string) string {
 	n := e.labelCtr
 	e.labelCtr++
-	return fmt.Sprintf("%s.%d", prefix, n)
+	return prefix + "." + strconv.Itoa(n)
 }
 
 // --- Emission helpers ---
 
-func (e *Emitter) emitGlobal(line string) { e.globals.WriteString(withSite(line) + "\n") }
+func (e *Emitter) emitGlobal(line string) { e.writeLine(&e.globals, "", line) }
 func (e *Emitter) emitAlloca(line string) { e.allocas.WriteString("  " + withSite(line) + "\n") }
 
 // emitGuardPanic is the sentinel a codegen invariant guard panics with; it is
@@ -1718,7 +1725,15 @@ func (e *Emitter) emitInstr(line string) {
 		}
 		panic(emitGuardPanic{msg: "unsupported operation: a non-matching value was coerced to an aggregate-typed slot (array/tuple/union) — this construct is not yet supported"})
 	}
-	e.body.WriteString("  " + withSite(line) + "\n")
+	e.writeLine(&e.body, "  ", line)
+}
+
+// writeLine appends indent, line (with its emitting site under KML_IR_SITES)
+// and a newline to b, as three writes: no temporary string per instruction.
+func (e *Emitter) writeLine(b *strings.Builder, indent, line string) {
+	b.WriteString(indent)
+	b.WriteString(withSite(line))
+	b.WriteByte('\n')
 }
 
 // emitTerminator emits a terminator instruction and marks the block as done.
@@ -1729,13 +1744,14 @@ func (e *Emitter) emitTerminator(line string) {
 	if e.frame != "" && strings.HasPrefix(line, "ret ") {
 		e.leaveFrame()
 	}
-	e.body.WriteString("  " + withSite(line) + "\n")
+	e.writeLine(&e.body, "  ", line)
 	e.blockDone = true
 }
 
 // emitLabel starts a new basic block, resetting the terminator flag.
 func (e *Emitter) emitLabel(label string) {
-	e.body.WriteString(label + ":\n")
+	e.body.WriteString(label)
+	e.body.WriteString(":\n")
 	e.blockDone = false
 }
 

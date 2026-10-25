@@ -423,7 +423,13 @@ func (tc Toolchain) Args() []string {
 		// spelling differs from its own (Apple clang 21 for every textual-IR
 		// input; Linux clang 18 normalizes x86_64-unknown-linux-gnu to
 		// x86_64-pc-linux-gnu); the host triple is the intended one.
-		return []string{"-Wno-override-module", noFPContract}
+		args := []string{"-Wno-override-module", noFPContract}
+		// lld links on Linux when installed: several times GNU ld's speed
+		// over a program's cached unit and runtime objects.
+		if runtime.GOOS == "linux" && hostHasLLD() {
+			args = append(args, "-fuse-ld=lld")
+		}
+		return args
 	}
 	args := []string{"--target=x86_64-w64-mingw32", "--sysroot=" + windowsSysroot(), noFPContract}
 	// lld links on Windows when installed: GNU ld's COFF reader takes a
@@ -455,7 +461,10 @@ var emulatedTLS bool
 func SetEmulatedTLS(v bool) { emulatedTLS = v }
 
 // windowsUsesLLD reports whether Windows links with lld (Args).
-func windowsUsesLLD() bool {
+func windowsUsesLLD() bool { return hostHasLLD() }
+
+// hostHasLLD is lldAvailable, looked up once.
+func hostHasLLD() bool {
 	lldOnce.Do(func() { lldFound = lldAvailable() })
 	return lldFound
 }

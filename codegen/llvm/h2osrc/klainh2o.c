@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 #include <uv.h>
 #include <h2o.h>
 
@@ -250,6 +251,28 @@ static void kh_init(void) {
     kh_accept.hosts = kh_config.hosts;
 }
 
+// Bind l to addr. A cluster worker shares the port with its siblings
+// (SO_REUSEPORT, the kernel spreading the accepts), as the default backend's
+// listener does; libuv before 1.49 has no flag for it, so the socket is made
+// here and handed to libuv.
+static int kh_bind(uv_tcp_t *l, const struct sockaddr *addr) {
+    if (!getenv("KML_CLUSTER_WORKER_ID")) return uv_tcp_bind(l, addr, 0);
+    int fd = socket(addr->sa_family, SOCK_STREAM, 0);
+    if (fd < 0) return -errno;
+    int one = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+    socklen_t len = addr->sa_family == AF_INET6 ? sizeof(struct sockaddr_in6) : sizeof(struct sockaddr_in);
+    if (bind(fd, addr, len) != 0) {
+        int e = errno;
+        close(fd);
+        return -e;
+    }
+    int r = uv_tcp_open(l, fd);
+    if (r != 0) close(fd);
+    return r;
+}
+
 // Listen on host:port (every address for ""), each request going to
 // inv(clo, exchange): 0, or the negative errno.
 double __kml_native_khttp_h2o_serve(const char *host, double port, void *inv, void *clo) {
@@ -262,15 +285,15 @@ double __kml_native_khttp_h2o_serve(const char *host, double port, void *inv, vo
     int r;
     if (!host || !*host) {
         uv_ip6_addr("::", (int)port, (struct sockaddr_in6 *)&ss);
-        r = uv_tcp_bind(l, (struct sockaddr *)&ss, 0);
+        r = kh_bind(l, (struct sockaddr *)&ss);
         if (r == UV_EAFNOSUPPORT || r == UV_EADDRNOTAVAIL) {
             uv_ip4_addr("0.0.0.0", (int)port, (struct sockaddr_in *)&ss);
-            r = uv_tcp_bind(l, (struct sockaddr *)&ss, 0);
+            r = kh_bind(l, (struct sockaddr *)&ss);
         }
     } else if (uv_ip4_addr(host, (int)port, (struct sockaddr_in *)&ss) == 0) {
-        r = uv_tcp_bind(l, (struct sockaddr *)&ss, 0);
+        r = kh_bind(l, (struct sockaddr *)&ss);
     } else if (uv_ip6_addr(host, (int)port, (struct sockaddr_in6 *)&ss) == 0) {
-        r = uv_tcp_bind(l, (struct sockaddr *)&ss, 0);
+        r = kh_bind(l, (struct sockaddr *)&ss);
     } else {
         r = UV_EINVAL;
     }

@@ -93,7 +93,7 @@ func TestCheck(t *testing.T) {
 		{"const f = (): void => {}", ""},
 		// A var redeclared with another type (TS2403); the same type, a
 		// for-in key (string) and a for-of element are no error.
-		{"for (var i in [1]) {}\nfor (var i = 0; i < 1; i++) {}", "2:TS2403"},
+		{"for (var i in [1]) {}\nfor (var i = 0; i < 1; i++) {}", "2:TS2403 2:TS2365 2:TS2356"},
 		{"var a = 1\nvar a: string", "2:TS2403"},
 		// `new C(…)` of a class is checked against its constructor: its
 		// parameters, an inherited one, its overload signatures.
@@ -537,6 +537,24 @@ func TestStrictCode(t *testing.T) {
 	}
 }
 
+// TS2537: a destructuring pattern's string- or number-typed computed key on
+// a user object type without a matching index signature (tsc 5.6 --strict),
+// in a declaration and in a parameter's default; a literal key or an index
+// signature reports nothing.
+func TestPatternComputedKeyIndexSig(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"declare const k: string;\nconst e = {};\nconst { [k]: y } = e;", "3:TS2537"},
+		{"declare const k: string;\nfunction g({ [k]: x } = {}) { return x; }", "2:TS2537"},
+		{"declare const n: number;\nconst o = { a: 1 };\nconst { [n]: y } = o;", "3:TS2537"},
+		{"const k = \"a\";\nconst { [k]: y } = { a: 1 };", ""},
+		{"declare const k: string;\nconst o: { [s: string]: number } = {};\nconst { [k]: y } = o;", ""},
+	} {
+		if got := checkCodes(t, tc.src); got != tc.want {
+			t.Errorf("%q: got %q, want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
 // TS7053: a string- or number-typed key on a user object type without an
 // index signature (tsc 5.6 --strict); a literal key naming a property, an
 // index signature or an any receiver report nothing.
@@ -579,5 +597,15 @@ func TestAwaitThenable(t *testing.T) {
 		if got := checkCodesLib(t, tc.src); got != tc.want {
 			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)
 		}
+	}
+}
+
+// An update operand must be any, a number, a bigint or an enum (TS2356),
+// as tsc 5.6 reports it.
+func TestUpdateOperandArithmetic(t *testing.T) {
+	src := "let a = {};\n++a;\nlet s = \"x\";\ns++;\nlet n = 1;\nn++;\nlet b = 1n;\nb--;\nenum E { A }\nlet e = E.A;\ne++;\nlet q: any = {};\nq++;\nlet u: number | string = 1 as number | string;\nu++;\nlet bo = true;\nbo++;\n"
+	got := checkCodes(t, src)
+	if want := "2:TS2356 4:TS2356 15:TS2356 17:TS2356"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

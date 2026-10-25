@@ -1049,6 +1049,9 @@ func applyJSDocFuncTypes(fd *ast.FunctionDeclaration, doc *jsdoc.Comment) {
 		}
 		if t := doc.ParamType(prm.Name); t != "" {
 			prm.Type = jsdocTypeAnnotation(t)
+			if prm.Default == nil && doc.ParamOptional(prm.Name) {
+				prm.Optional = true
+			}
 		}
 	}
 	if fd.ReturnType == nil {

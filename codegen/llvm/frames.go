@@ -102,10 +102,37 @@ func (e *Emitter) frameDesc(name, file string) string {
 			url = "file:///" + filepath.ToSlash(abs) // a Windows drive path
 		}
 	}
-	g := contentSymbol("@__kml_fdesc.", name+"\x00"+url)
+	// Named by the file's place in the program, not its URL: a unit naming
+	// the descriptor keeps the text of a function at the same place in a
+	// file of another path (the conformance runner's harness functions), so
+	// its cached object serves both. The URL stays in the program's unit.
+	g := contentSymbol("@__kml_fdesc.", fmt.Sprintf("%s\x00%d", name, e.fileIndex(file)))
 	e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant { ptr, ptr } { ptr %s, ptr %s }", g, e.internString(name), e.internString(url)))
 	e.frameDescs[key] = g
 	return g
+}
+
+// fileIndex is file's place among the program's files, in the order their
+// statements come.
+func (e *Emitter) fileIndex(file string) int {
+	if e.fileIndexes == nil {
+		e.fileIndexes = map[string]int{}
+		if e.prog != nil {
+			for _, st := range e.prog.Body {
+				if p, ok := e.prog.StmtFiles[st]; ok {
+					if _, seen := e.fileIndexes[p]; !seen {
+						e.fileIndexes[p] = len(e.fileIndexes)
+					}
+				}
+			}
+		}
+	}
+	if i, ok := e.fileIndexes[file]; ok {
+		return i
+	}
+	i := len(e.fileIndexes)
+	e.fileIndexes[file] = i
+	return i
 }
 
 // packPos is a frame position: line << 32 | column.

@@ -213,8 +213,10 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			onStack[path] = false
 		}()
 
-		src, err := readSource(path)
-		if err != nil {
+		var src []byte
+		if path == entryAbs && opts.EntrySource != nil {
+			src = []byte(*opts.EntrySource)
+		} else if src, err = readSource(path); err != nil {
 			return fmt.Errorf("reading %s: %w", path, err)
 		}
 		prog, err := parser.Parse(string(src))
@@ -296,7 +298,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
-		if np := lib.ModuleRoot + "internal_namespaces.ts"; path != np && !strings.HasPrefix(path, lib.ModuleRoot) && (namespaceValueUse(src, idents) || idents["globalThis"] && globalObjectUse(src) || ctorFunctionCall(src) || undeclaredAssign(path, src) || sloppyThisUse(path, src)) {
+		if np := lib.ModuleRoot + "internal_namespaces.ts"; path != np && !strings.HasPrefix(path, lib.ModuleRoot) && (namespaceValueUse(src, idents) || idents["globalThis"] && globalObjectUse(src) || ctorFunctionCall(src) || undeclaredAssign(path, src, prog) || sloppyThisUse(path, src)) {
 			importTargets[np] = true
 			if err := visit(np, false); err != nil {
 				return err
@@ -2762,18 +2764,81 @@ func ctorFunctionCall(src []byte) bool {
 	if !bytes.Contains(src, []byte("this")) {
 		return false
 	}
+	seen := map[string]bool{}
 	for _, m := range newCalleeRE.FindAllSubmatch(src, -1) {
-		name := regexp.QuoteMeta(string(m[1]))
-		if !regexp.MustCompile(`\bfunction\s+` + name + `\s*\(`).Match(src) {
+		name := string(m[1])
+		if seen[name] {
 			continue
 		}
-		// Its plain calls: what is left once declarations and `new` are cut.
-		rest := regexp.MustCompile(`\b(?:function|new)\s+\(?\s*`+name+`\b`).ReplaceAll(src, nil)
-		if regexp.MustCompile(`(?:^|[^.\w$])` + name + `\s*\(`).Match(rest) {
+		seen[name] = true
+		declared, called := scanCtorName(src, name)
+		if declared && called {
 			return true
 		}
 	}
 	return false
+}
+
+// scanCtorName reports, of name's whole-word occurrences in src, whether one
+// is a function declaration's (`function name (`) and whether one is a
+// plain call: `name (`, not after `.`, a word character or `$`, and not a
+// declaration's or a `new`'s (`new name`, `new (name`).
+func scanCtorName(src []byte, name string) (declared, called bool) {
+	word := func(c byte) bool {
+		return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+	}
+	space := func(c byte) bool { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v' }
+	for off := 0; ; {
+		k := bytes.Index(src[off:], []byte(name))
+		if k < 0 {
+			return
+		}
+		i := off + k
+		off = i + 1
+		end := i + len(name)
+		if i > 0 && word(src[i-1]) || end < len(src) && word(src[end]) {
+			continue // not a whole word
+		}
+		a := end
+		for a < len(src) && space(src[a]) {
+			a++
+		}
+		isCall := a < len(src) && src[a] == '('
+		// The keyword before it, across spaces and one `(`.
+		j := i
+		for j > 0 && space(src[j-1]) {
+			j--
+		}
+		gap := j < i
+		paren := false
+		if j > 0 && src[j-1] == '(' {
+			paren = true
+			j--
+			for j > 0 && space(src[j-1]) {
+				j--
+				gap = true
+			}
+		}
+		kw := func(w string) bool {
+			s := j - len(w)
+			return s >= 0 && string(src[s:j]) == w && (s == 0 || !word(src[s-1])) && (gap || paren)
+		}
+		switch {
+		case kw("function"):
+			if !paren && isCall {
+				declared = true
+			}
+			continue
+		case kw("new"):
+			continue
+		}
+		if isCall && (i == 0 || src[i-1] != '.' && src[i-1] != '$' && !word(src[i-1])) {
+			called = true
+		}
+		if declared && called {
+			return
+		}
+	}
 }
 
 var newCalleeRE = regexp.MustCompile(`\bnew\s+\(?\s*([A-Za-z_$][\w$]*)`)
@@ -2783,10 +2848,45 @@ var (
 	declaredNameRE = regexp.MustCompile(`\b(?:var|let|const|function\*?|class)\s+([A-Za-z_$][\w$]*)`)
 )
 
-// undeclaredAssign reports a sloppy-mode script (`.js`, `.cjs`) that may
-// assign a name it never declares: in sloppy code that makes a property of
-// the global object. An over-match only links the global object.
-func undeclaredAssign(path string, src []byte) bool {
+// undeclaredAssign reports a sloppy-mode script (`.js`, `.cjs`) that
+// assigns a name it never declares: in sloppy code that makes a property of
+// the global object. A text scan finds the candidates; the binder confirms
+// one is a store to a name no scope declares (a parameter or a catch
+// binding is declared, which the scan cannot see).
+func undeclaredAssign(path string, src []byte, prog *ast.Program) bool {
+	if !undeclaredAssignText(path, src) {
+		return false
+	}
+	targets := map[*ast.Identifier]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignmentExpression:
+			if id, ok := n.Left.(*ast.Identifier); ok {
+				targets[id] = true
+			}
+		case *ast.UpdateExpression:
+			if id, ok := n.Arg.(*ast.Identifier); ok {
+				targets[id] = true
+			}
+		}
+		return true
+	})
+	b := binder.Bind(prog)
+	globals := tsGlobalValues()
+	for _, id := range b.References() {
+		if !targets[id] && !b.WriteOnly(id) || globals[id.Name] {
+			continue
+		}
+		if sym, ok := b.Resolve(id); ok && sym == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// undeclaredAssignText is undeclaredAssign's text scan: an assignment to a
+// name no var, let, const, function or class declares.
+func undeclaredAssignText(path string, src []byte) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext != ".js" && ext != ".cjs" {
 		return false

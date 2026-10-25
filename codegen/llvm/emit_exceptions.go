@@ -235,70 +235,19 @@ func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size 
 	dataReg := e.freshReg()
 	e.ensureMalloc()
 	e.heapMallocInto(dataReg, fmt.Sprint(size))
-	e.emitStoreObjHeader(dataReg, errorObjType)
+	// The header word is the kind __kml_error_init stores; the layout is
+	// registered once (its key is long to build, and errors are made at
+	// every throw).
+	if !e.errorLayoutNoted {
+		e.errorLayoutNoted = true
+		e.objHeaderWord(errorObjType)
+	}
 
-	kindGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("i64", fmt.Sprint(errorTypeIDStored(kindID)), kindGep, 8)
-
-	msgGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", msgGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", msgPtr, msgGep, 8)
-
-	nameGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", nameGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", namePtr, nameGep, 8)
-
-	// Default the Node error-code trio (code/errcode/errstr) — set only for
-	// errors that carry one (node:sqlite). buildErrorObjWithCode overwrites them.
-	codeGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", "null", codeGep, 8)
-	ecGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", ecGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("double", "0.0", ecGep, 8)
-	esGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", "null", esGep, 8)
-	// Default the fs-error extras (syscall/path) — set only by __kml_fs_throw.
-	scGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 6", scGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", "null", scGep, 8)
-	pGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 7", pGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", "null", pGep, 8)
-	enGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 8", enGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("double", "0.0", enGep, 8)
-	destGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 9", destGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", "null", destGep, 8)
-	causeGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("i64", fmt.Sprint(nbUndefined), causeGep, 8)
-	// The net-error extras address (11) / port (12) default null/0 on every error
-	// that does not set them (only the async net.connect failure path does).
-	addrGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 11", addrGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", "null", addrGep, 8)
-	portGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 12", portGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("double", "0.0", portGep, 8)
-	extraGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 13", extraGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", "null", extraGep, 8)
-	// `name` is the prototype's until assigned on the error itself.
-	nameOwnIdx, _, _ := errorObjType.FieldIndex(errorNameOwnField)
-	nameOwnGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", nameOwnGep, errorObjType.StructIR(), dataReg, nameOwnIdx))
-	e.heapStore("i64", "0", nameOwnGep, 8)
-	// No `stack` until read; the frames where the error is made.
-	stackIdx, _, _ := errorObjType.FieldIndex("stack")
-	stackGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", stackGep, errorObjType.StructIR(), dataReg, stackIdx))
-	e.heapStore("ptr", "null", stackGep, 8)
+	// Its fields, in the runtime (frames.c): the kind word, message and
+	// name, every other field unset, and the frames where it is made.
 	e.ensureFrames()
-	e.emitInstr(fmt.Sprintf("call void @__kml_error_capture(ptr %s)", dataReg))
+	e.declareFn("__kml_error_init", "declare void @__kml_error_init(ptr, i64, ptr, ptr)")
+	e.emitInstr(fmt.Sprintf("call void @__kml_error_init(ptr %s, i64 %d, ptr %s, ptr %s)", dataReg, errorTypeIDStored(kindID), msgPtr, namePtr))
 
 	return dataReg
 }
@@ -635,6 +584,11 @@ func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
 	boxed, err := e.emitBoxValue(val)
 	if err != nil {
 		return err
+	}
+	// An uncaught object prints as util.inspect shows it (dynjson.c's
+	// __kml_any_inspect_at, which exceptions.c reaches when it is linked).
+	if val.Ty.IsDynamic() || val.Ty.IsObject() || val.Ty.IsClass() || val.Ty.IsArray() || val.Ty.IsFunc() {
+		e.ensureDynJSONC()
 	}
 	tag, pay := e.emitUnboxTagPayload(boxed)
 	e.excThrowAny(tag, pay)

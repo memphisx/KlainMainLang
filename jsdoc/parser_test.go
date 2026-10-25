@@ -127,3 +127,17 @@ func TestArgAliases(t *testing.T) {
 		t.Errorf(`@argument alias: got %q, want string`, got)
 	}
 }
+
+func TestParamOptional(t *testing.T) {
+	c := Parse(`
+ * @param {string[]} [xs] - bracketed
+ * @param {number} [n=3] - bracketed with a default
+ * @param {boolean=} flag - the type form
+ * @param {string} s - required
+`)
+	for name, want := range map[string]bool{"xs": true, "n": true, "flag": true, "s": false, "missing": false} {
+		if got := c.ParamOptional(name); got != want {
+			t.Errorf("ParamOptional(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

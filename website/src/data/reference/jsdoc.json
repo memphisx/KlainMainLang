@@ -431,11 +431,8 @@
       "name": "Optional param (T=, [name])",
       "statusRow": "Optional param (T=, [name])",
       "signature": "{T=} | @param {T} [name]",
-      "badge": "caveats",
-      "description": "The optional decoration is recognized at the `@param` name/type level and stripped.",
-      "differences": [
-        "Recognized at the `@param` name/type level and stripped; the parameter is not yet marked structurally optional beyond an inline `?`"
-      ],
+      "badge": "exact",
+      "description": "A bracketed name (`[name]`, `[name=default]`) or a type ending in `=` makes the parameter optional, as `name?` does: a call that leaves it out passes `undefined`.",
       "seeAlso": [
         "jsdoc.param"
       ],

@@ -274,3 +274,17 @@ t('2^50', () => { new Float64Array(1125899906842624); });
 t('2^53-1', () => { new Uint8Array(9007199254740991); });
 `)
 }
+
+// A growable buffer bound inside a function resizes as one bound at the top
+// level does, a `var` declared again included.
+func TestE2EArrayBufferGrowableLocal(t *testing.T) {
+	assertSameAsNode(t, `
+function mk(): number { const x = new ArrayBuffer(1, { maxByteLength: 9 }); x.resize(5); return x.byteLength; }
+function sab(): number { const s = new SharedArrayBuffer(2, { maxByteLength: 8 }); s.grow(6); return s.byteLength + (s.growable ? 100 : 0); }
+console.log(mk(), sab());
+`)
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+function mk(n) { var x = new ArrayBuffer(1, { maxByteLength: 9 }); if (n) { var x = new ArrayBuffer(2, { maxByteLength: 9 }); } x.resize(5); return x.byteLength }
+console.log(mk(1), mk(0));
+`}, "main.js", "5 5")
+}

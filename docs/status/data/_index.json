@@ -130,7 +130,7 @@
         {
           "category": "JSDoc type expressions",
           "pageFile": "JSDOC.md",
-          "caveats": "• `?T` nullable is recognized as a leading marker only (a `?` buried mid-expression is left to the parser); `!T` and `{...T}` varargs are stripped rather than modeled; a `=` optional marker doesn't yet make the parameter structurally optional<br>• A nested `function(...)` type inside another type isn't rewritten to the arrow form, and an `import(\"./m\").T` qualifier drops to the bare name — resolving only when that module is part of the build ([TDD-00125](../tdd/TDD-00125.md) Stage 4)"
+          "caveats": "• `?T` nullable is recognized as a leading marker only (a `?` buried mid-expression is left to the parser); `!T` and `{...T}` varargs are stripped rather than modeled<br>• A nested `function(...)` type inside another type isn't rewritten to the arrow form, and an `import(\"./m\").T` qualifier drops to the bare name — resolving only when that module is part of the build ([TDD-00125](../tdd/TDD-00125.md) Stage 4)"
         },
         {
           "category": "Modules",
@@ -185,7 +185,7 @@
         {
           "category": "Binary data & Typed Arrays",
           "pageFile": "BINARY-DATA-TYPED-ARRAYS.md",
-          "caveats": "• A view over a resizable ArrayBuffer keeps the length it had when made (no length tracking)<br>• BigInt64Array/BigUint64Array support an explicit method allow-list — everything else is a compile-time rejection<br>• Buffer encodings must be string literals<br>• No `Atomics.waitAsync`, no `getFloat16`"
+          "caveats": "• A view over a resizable ArrayBuffer keeps the length it had when made (no length tracking)<br>• Buffer encodings must be string literals<br>• No `Atomics.waitAsync`, no `getFloat16`"
         },
         {
           "category": "Web Crypto",

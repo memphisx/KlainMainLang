@@ -926,12 +926,11 @@ func arrayElemKind(elemTy Type) (int, bool) {
 }
 
 // anyArrayBoxBytes computes an array type's box kind and typed bytes. A
-// BigInt64Array's raw i64 elements are bigint handles at the language boundary,
-// not numbers — the walker would print/convert them wrongly, so the box
-// carries -1 (renders as a named placeholder, refuses element reads).
+// BigInt64Array's (BigUint64Array's) kind is KJ_I64 (KJ_U64) with the typed
+// byte set, whose elements dynjson.c reads and writes as bigints.
 func anyArrayBoxBytes(t Type) (kind, typed int) {
 	kind = -1
-	if t.ElemType != nil && !t.BigIntElem {
+	if t.ElemType != nil {
 		if k, ok := arrayElemKind(*t.ElemType); ok {
 			kind = k
 		}
@@ -958,6 +957,11 @@ func (e *Emitter) boxAnyArray(v Value) string {
 	kind, typed := anyArrayBoxBytes(v.Ty)
 	if typed != anyArrayPlain {
 		e.ensureBoxedViews()
+	}
+	if v.Ty.BigIntElem {
+		// Its elements box as bigints (boxsrc/bigintbox.c).
+		e.ensureBigInt()
+		e.ensureBoxedBigIntHooks()
 	}
 	innerKind, innerTyped := -1, anyArrayPlain
 	if v.Ty.ElemType != nil && v.Ty.ElemType.IsArray() {
@@ -1141,6 +1145,42 @@ func (e *Emitter) emitDynamicRender(v Value, inspect bool) (Value, error) {
 }
 
 func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, error) {
+	// One shared function per (mode, depth), called at each site: inline,
+	// the tag dispatch was ~300 lines of IR per String(x) or `+` on any.
+	fn := "@__kml_dynrender_s"
+	if inspect {
+		fn = fmt.Sprintf("@__kml_dynrender_i%d", depth)
+	}
+	if e.protoBuilders == nil {
+		e.protoBuilders = map[string]bool{}
+	}
+	if !e.protoBuilders[fn] {
+		e.protoBuilders[fn] = true
+		savedLib, savedShared, savedLit := e.inLib, e.sharedCode, e.sharedLitUnit
+		e.inLib, e.sharedCode, e.sharedLitUnit = "", 0, ""
+		restore := e.beginDetachedFunc()
+		r, err := e.emitDynamicRenderInline(Value{Ref: "%v", Ty: TypeAny}, inspect, depth)
+		if err == nil && !e.blockDone {
+			e.emitTerminator("ret ptr " + r.Ref)
+		}
+		body := e.allocas.String() + e.body.String()
+		restore()
+		e.inLib, e.sharedCode, e.sharedLitUnit = savedLib, savedShared, savedLit
+		if err != nil {
+			delete(e.protoBuilders, fn)
+			return Value{}, err
+		}
+		e.writeFunc("ptr "+fn+"(i64 %v)", body)
+	}
+	e.declareFn(fn[1:], "declare ptr "+fn+"(i64)")
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call ptr %s(i64 %s)", r, fn, v.Ref))
+	return Value{Ref: r, Ty: TypePtr}, nil
+}
+
+// emitDynamicRenderInline is emitDynamicRenderAt's dispatch, emitted once
+// into its shared function.
+func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Value, error) {
 	if !inspect {
 		// TDD-00201 Stage 4: a dynamic object stringifies via its own toString /
 		// @@toPrimitive (string hint) rather than the "[object Object]" default —

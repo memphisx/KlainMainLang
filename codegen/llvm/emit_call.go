@@ -1197,6 +1197,21 @@ func (e *Emitter) identifierCallRule(ex *ast.CallExpression) (Value, bool, error
 		if e.callableClasses[id.Name] {
 			return handled(e.emitExpr(ast.NewNewExpression(id.Name, ex.Args, ex.GetPos())))
 		}
+		// A class called without `new`: its arguments are evaluated, then
+		// the call throws, as in JavaScript (the strict lane has refused it
+		// as tsc does).
+		if _, isClass := e.classes[id.Name]; isClass {
+			for _, a := range ex.Args {
+				if sp, ok := a.(*ast.SpreadElement); ok {
+					a = sp.Arg
+				}
+				if _, err := e.emitExpr(a); err != nil {
+					return handled(Value{}, err)
+				}
+			}
+			e.emitThrowTypeError("Class constructor " + e.classDisplayName(id.Name) + " cannot be invoked without 'new'")
+			return handled(Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil)
+		}
 		if e.unresolvedReference(id) {
 			return handled(e.emitNotDefined(id), nil)
 		}
@@ -1326,6 +1341,27 @@ func (e *Emitter) missingMethodRule(ex *ast.CallExpression) (Value, bool, error)
 				return handled(Value{}, err)
 			}
 			return handled(e.emitDynAnyMethodCall(boxed, mem.Property, ex.Args, ex.GetPos()))
+		}
+		// JavaScript (-compat=js): a method the receiver's type does not
+		// declare at all (the builtin library has no such member, as
+		// `ArrayBuffer.prototype.transferToImmutable` in this runtime) reads
+		// undefined, so the call throws once its arguments are evaluated. A
+		// method the library declares but this compiler lacks stays the
+		// diagnostic below.
+		if c := e.front(); e.compatJS() && c != nil && !e.inferExprType(mem.Object).IsDynamic() && c.MemberDecl(mem) == nil && !c.ExpandoMember(mem) {
+			if _, err := e.emitExpr(mem.Object); err != nil {
+				return handled(Value{}, err)
+			}
+			for _, a := range ex.Args {
+				if sp, ok := a.(*ast.SpreadElement); ok {
+					a = sp.Arg
+				}
+				if _, err := e.emitExpr(a); err != nil {
+					return handled(Value{}, err)
+				}
+			}
+			e.emitThrowTypeError(calleeDisplayName(mem) + " is not a function")
+			return handled(Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil)
 		}
 		recv := describeReceiverType(e.inferExprType(mem.Object))
 		// A bare namespace/global identifier receiver (Object.setPrototypeOf,
@@ -2904,7 +2940,7 @@ func (e *Emitter) classReceiverCall(ex *ast.CallExpression, mem *ast.MemberExpre
 // machinery passes raw i64 scalars to callbacks and comparisons.
 func (e *Emitter) bigIntArrayRejectedCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
 	if bigIntElemRejectedMethods[mem.Property] && e.inferExprType(mem.Object).BigIntElem {
-		return handled(Value{}, fmt.Errorf("%d:%d: .%s() is not supported on a BigInt64Array/BigUint64Array (supported: indexing, .length/.byteLength, .at/.set/.subarray/.slice/.fill/.reverse, for-of, Atomics.*)", ex.GetPos().Line, ex.GetPos().Col, mem.Property))
+		return handled(Value{}, fmt.Errorf("%d:%d: a BigInt64Array/BigUint64Array has no .%s() (no TypedArray does)", ex.GetPos().Line, ex.GetPos().Col, mem.Property))
 	}
 	return Value{}, false, nil
 }
@@ -3149,9 +3185,12 @@ func (e *Emitter) moduleNamespaceRule(ex *ast.CallExpression) (Value, bool, erro
 	if err != nil {
 		return Value{}, true, err
 	}
-	bag, err := e.emitStaticObjToBag(v)
-	if err != nil {
-		return Value{}, true, err
+	// An object literal of untyped values is already a dynamic object.
+	bag := v
+	if !v.Ty.IsDynamic() {
+		if bag, err = e.emitStaticObjToBag(v); err != nil {
+			return Value{}, true, err
+		}
 	}
 	e.declareFn("__kml_dynobj_module_ns", "declare void @__kml_dynobj_module_ns(ptr)")
 	e.ensureNanBox()

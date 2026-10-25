@@ -454,9 +454,9 @@ func (e *Emitter) emitClassRefGetRows() {
 	for _, c := range e.classRefClasses(true) {
 		restore := e.beginDetachedFunc()
 		keys := []string{"length"}
-		// A program class's prototype object; a library class's stays in
-		// its own unit.
-		if ci, ok := e.classes[c]; ok && ci.TagID&kmlHdrIDMask < kmlStableIDBase {
+		// The class's prototype object, through its builder: a library
+		// class's row then compiles the same in every program.
+		if _, ok := e.classes[c]; ok {
 			keys = append(keys, "prototype")
 		}
 		statics := e.classStaticKeys(c)
@@ -543,6 +543,9 @@ func (e *Emitter) hostStaticGetter(h string) string {
 	e.hostGetters[h] = ""
 	{
 		keys := e.hostStaticKeys(h)
+		if e.hostProtoReadable(h) {
+			keys = append(keys, hostStatic{name: "prototype"})
+		}
 		if len(keys) == 0 {
 			return ""
 		}
@@ -559,7 +562,9 @@ func (e *Emitter) hostStaticGetter(h string) string {
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isK, kHit, kNext))
 			e.emitLabel(kHit)
 			boxed := fmt.Sprintf("%d", nbUndefined)
-			if ks.fn != nil {
+			if ks.name == "prototype" && !ks.method {
+				boxed = e.hostProtoValue(h).Ref
+			} else if ks.fn != nil {
 				if v, err := e.emitBuiltinValue(ks.fn); err == nil && !e.blockDone {
 					if b, berr := e.emitBoxValue(v); berr == nil {
 						boxed = b.Ref
@@ -607,6 +612,37 @@ func (e *Emitter) registerFnStatics() {
 			e.addUnitRowLit(unitKindFnStatic, "{ i64, ptr }", fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), ptr %s }", h, fn))
 		}
 	}
+}
+
+// hostProtoReadable reports whether builtin constructor h's prototype
+// object reads directly (`Map.prototype`), so its reference's row reads it
+// too (`const M: any = Map; M.prototype`).
+func (e *Emitter) hostProtoReadable(h string) bool {
+	if e.isShadowedByLocal(h) {
+		return false
+	}
+	if _, user := e.classes[h]; user {
+		return false
+	}
+	return isErrorKindName(h) || hostProtoClassKnown(h) && len(e.hostMembers(h)) > 0 || typedKindIndex(h) >= 0 || h == "Function" || h == "Object"
+}
+
+// hostProtoValue is builtin constructor h's prototype object, as
+// hostProtoReadable allows it.
+func (e *Emitter) hostProtoValue(h string) Value {
+	switch {
+	case h == "Function":
+		return e.emitFnProtoBox("")
+	case h == "Object":
+		e.ensureDynObj()
+		e.ensureObjProtoFill()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_object_prototype()", r))
+		return e.emitDynObjBox(r)
+	case typedKindIndex(h) >= 0:
+		return e.emitTypedKindProto(h)
+	}
+	return e.emitBuiltinProto(h)
 }
 
 // hostStatic is one static member of a builtin constructor: its name,
