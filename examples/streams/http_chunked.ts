@@ -4,8 +4,8 @@
 // consumes the chunks incrementally through fetch's streaming Response.body.
 import http from 'klain:http'  // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
-async function consume(): Promise<void> {
-  const res = await fetch("http://127.0.0.1:8087/");
+async function consume(port: number): Promise<void> {
+  const res = await fetch(`http://127.0.0.1:${port}/`);
   const decoder = new TextDecoder();
   let text = "";
   for await (const piece of res.body!) {
@@ -14,11 +14,9 @@ async function consume(): Promise<void> {
   console.log("streamed:", text);
   process.exit(0);
 }
-// http.listen enters the event loop and never returns — schedule the
-// client from a timer that fires inside the loop.
-setTimeout(() => { consume(); }, 50);
-
-http.listen(8087, (req: HttpRequest) => {
+// http.listen enters the event loop and never returns — it starts the client
+// from onListening, with the port the system picked for listen(0).
+http.listen(0, (req: HttpRequest) => {
   let n = 0;
   const body = new ReadableStream<string>({
     pull: async (c) => {
@@ -29,6 +27,6 @@ http.listen(8087, (req: HttpRequest) => {
     }
   });
   return { status: 200, body: body };
-});
+}, { host: "127.0.0.1", onListening: (port: number) => { consume(port); } });
 
 

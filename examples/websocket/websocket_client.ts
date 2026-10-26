@@ -10,11 +10,14 @@
 //   make run FILE=examples/websocket/websocket_server.ts &
 //   make run FILE=examples/websocket/websocket_client.ts
 //
+// The port is $PORT (`make examples` passes a free one), 8083 when unset;
+// pass the port websocket_server.ts printed.
+//
 // Run on its own (as `make examples` does, unattended, with no server
 // actually listening), the connection is refused — reported through
 // onerror and then onclose (code 1006), never a thrown exception.
 
-const ws = new WebSocket('ws://127.0.0.1:8083/')
+const ws = new WebSocket('ws://127.0.0.1:' + (process.env.PORT ?? '8083') + '/')
 console.log('readyState right after construction: ' + ws.readyState)
 
 ws.onopen = () => {
@@ -30,7 +33,7 @@ ws.onclose = (ev) => {
   process.exit(0)
 }
 ws.onerror = () => {
-  console.log('connection failed — is websocket_server.ts running on :8083?')
+  console.log('connection failed — is websocket_server.ts running on that port?')
 }
 
 setTimeout(() => {

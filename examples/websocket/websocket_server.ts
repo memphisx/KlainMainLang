@@ -17,11 +17,11 @@
 // websocket_client.ts in this same directory is one (comment out the
 // setTimeout below first: it self-closes after 300ms for `make examples`'
 // own unattended run, too short a window to switch terminals and connect
-// manually), or:
-//   (Node) node -e "const ws=new (require('ws'))('ws://localhost:8083'); \
+// manually; the port is on its 'listening' line), or:
+//   (Node) node -e "const ws=new (require('ws'))('ws://localhost:<port>'); \
 //     ws.on('open',()=>ws.send('hello')); \
 //     ws.on('message',m=>console.log('got:',m.toString()))"
-//   curl "http://localhost:8083/hello"   # the server still serves plain HTTP too
+//   curl "http://localhost:<port>/hello"   # the server still serves plain HTTP too
 
 import http from 'http'
 import { WebSocketServer, WSConnection } from 'klain:ws'
@@ -49,6 +49,7 @@ setTimeout(() => {
   server.close()
 }, 300)
 
-console.log('listening on :8083 (HTTP + WebSocket upgrade)')
-server.listen(8083)
+server.listen(0, () => {
+  console.log('listening on :' + (server.address() as any).port + ' (HTTP + WebSocket upgrade)')
+})
 console.log('server closed, exiting')

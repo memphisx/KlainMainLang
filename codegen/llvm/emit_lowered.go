@@ -379,6 +379,13 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 				return &lowering{libFn: m, recv: &r, e: e, ex: ex}, true
 			}
 		}
+		// A bigint likewise (BigInt.prototype's record).
+		if ot := e.inferExprType(mem.Object); ot.IsBigInt() && !ot.IsDynamic() {
+			if m, linked := e.globalLinks["__kml_BigInt_"+mem.Property]; linked {
+				r := ot
+				return &lowering{libFn: m, recv: &r, e: e, ex: ex}, true
+			}
+		}
 		if key, ok := e.reprIntrinsic(mem); ok {
 			return &lowering{intrinsic: key, e: e, ex: ex}, true
 		}
@@ -618,7 +625,7 @@ func (e *Emitter) intrinsicApplies(key string, mem *ast.MemberExpression) bool {
 		return objectProtoToStringApplies(ot)
 	case "Object.prototype.hasOwnProperty":
 		ot := e.inferExprType(mem.Object)
-		return ot.IsObject() && !isUnconstrainedDynamic(ot)
+		return ot.IsObject() && !isUnconstrainedDynamic(ot) || isPrimitiveReceiver(ot)
 	case "BigInt.prototype.toString":
 		return e.inferExprType(mem.Object).IsBigInt()
 	}

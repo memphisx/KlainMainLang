@@ -137,7 +137,7 @@ func TestE2EClusterNetServerPolicies(t *testing.T) {
 	for _, policy := range []string{"rr", "none"} {
 		t.Run(policy, func(t *testing.T) {
 			t.Setenv("NODE_CLUSTER_SCHED_POLICY", policy)
-			assertSameAsNodeImports(t, `
+			assertSameAsNodeImports(t, subPort(`
 import cluster from 'cluster'
 import * as net from 'net'
 if (cluster.isPrimary) {
@@ -170,7 +170,7 @@ if (cluster.isPrimary) {
   server.listen(8159, '127.0.0.1')
   process.on('message', (m) => { if (m === 'bye') cluster.worker!.disconnect() })
 }
-`)
+`, 8159, freePort(t)))
 		})
 	}
 }
@@ -179,7 +179,7 @@ if (cluster.isPrimary) {
 // worker; worker.kill() ends it with SIGTERM.
 func TestE2EClusterListeningAndSetupPrimary(t *testing.T) {
 	skipIfLoopbackTrafficFiltered(t)
-	assertSameAsNodeImports(t, `
+	assertSameAsNodeImports(t, subPort(`
 import cluster from 'cluster'
 import http from 'http'
 if (cluster.isPrimary) {
@@ -207,5 +207,5 @@ if (cluster.isPrimary) {
   const server = http.createServer((req, res) => { res.end("hi " + req.url) })
   server.listen(8153, '127.0.0.1')
 }
-`)
+`, 8153, freePort(t)))
 }

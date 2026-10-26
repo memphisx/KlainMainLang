@@ -17,8 +17,8 @@ server.on('close', () => {
   console.log('server close event')
 })
 
-server.listen(8090, () => {
-  console.log('listening on :8090')
+server.listen(0, () => {
+  console.log('listening on :' + (server.address() as any).port)
   // Graceful shutdown: the callback settles once the server has fully drained.
   server.close(() => {
     console.log('server fully closed (callback)')

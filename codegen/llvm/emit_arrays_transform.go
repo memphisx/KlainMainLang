@@ -159,7 +159,13 @@ func (e *Emitter) concatWidensToAny(elemTy Type, args []ast.Expression) bool {
 		return false
 	}
 	for _, arg := range args {
-		if e.inferExprType(arg).IsDynamic() {
+		t := e.inferExprType(arg)
+		if t.IsDynamic() {
+			return true
+		}
+		// An undefined or null appended to scalar elements: only a box
+		// holds it.
+		if (t.IsUndefined() || t.IsNull() || t.IR == "void") && !elemTy.Nullable() && elemTy.IR != "ptr" {
 			return true
 		}
 	}

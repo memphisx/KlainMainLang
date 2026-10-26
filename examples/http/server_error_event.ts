@@ -5,14 +5,13 @@
 // with one, the listener receives the Error and the process keeps running.
 //
 // Here one server binds a port successfully, then a second server tries to bind
-// the same port and its 'error' listener catches the EADDRINUSE. The listener
-// runs synchronously at listen() time.
+// the first one's actual port (listen(0) picked it) and its 'error' listener
+// catches the EADDRINUSE, on the event loop after the failed listen().
 import http from 'http';
 
 const first = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("first");
 });
-first.listen(8422);
 
 const second = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("second");
@@ -24,5 +23,6 @@ second.on('error', (err: NodeJS.ErrnoException) => {
   process.exit(0);
 });
 
-second.listen(8422);
-console.log("unreachable — the bind failure fired the error listener");
+first.listen(0, () => {
+  second.listen((first.address() as any).port);
+});

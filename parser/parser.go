@@ -111,7 +111,11 @@ type Parser struct {
 }
 
 func New(src string) *Parser {
-	return &Parser{lx: lexer.New(src), docAt: -1, noInFrom: -1, memberStart: -1, src: src, text: &ast.SourceText{Src: src}}
+	// TypeScript runs about five bytes a token: sized up front, the token
+	// and lexer-state buffers are not regrown (and copied) as they fill.
+	n := len(src)/5 + 16
+	return &Parser{lx: lexer.New(src), docAt: -1, noInFrom: -1, memberStart: -1, src: src, text: &ast.SourceText{Src: src},
+		tokens: make([]lexer.Token, 0, n), states: make([]lexer.State, 0, n)}
 }
 
 // blank records [start, end) as type syntax.

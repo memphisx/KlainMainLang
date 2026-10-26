@@ -261,6 +261,9 @@ func (e *Emitter) emitTaskRethrowIfRejected(promiseReg string) {
 // nullable scalar, v1 (index 3). An array is its header pointer, so every
 // reader shares the array that settled the promise.
 func (e *Emitter) storePromiseValue(promiseReg string, val Value) {
+	if val.Ty.IR == "void" || val.Ty.IR == "" {
+		return // a Promise<void>'s value: nothing to carry
+	}
 	v0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, promiseReg))
 	if val.Ty.IsArray() {
@@ -288,6 +291,9 @@ func (e *Emitter) storePromiseValue(promiseReg string, val Value) {
 
 // loadPromiseValue reads a value of type ty from promiseReg's v0/v1 fields.
 func (e *Emitter) loadPromiseValue(promiseReg string, ty Type) Value {
+	if ty.IR == "void" || ty.IR == "" {
+		return Value{Ty: TypeVoid} // a Promise<void> carries no value
+	}
 	v0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, promiseReg))
 	if ty.IsArray() {

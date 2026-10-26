@@ -15,17 +15,15 @@ async function tally(req: HttpRequest): Promise<string> {
   return total + " bytes in " + (chunks >= 2 ? "many chunks" : "one chunk");
 }
 
-async function upload(): Promise<void> {
+async function upload(port: number): Promise<void> {
   let payload = "";
   for (let i = 0; i < 20; i = i + 1) {
     payload = payload + payload + "abcdefgh";
   }
-  const res = await fetch("http://127.0.0.1:8089/", { method: "POST", body: payload });
+  const res = await fetch(`http://127.0.0.1:${port}/`, { method: "POST", body: payload });
   console.log("server counted:", await res.text());
   process.exit(0);
 }
-setTimeout(() => { upload(); }, 50);
-
-http.listen(8089, async (req: HttpRequest) => {
+http.listen(0, async (req: HttpRequest) => {
   return { status: 200, body: await tally(req) };
-});
+}, { host: "127.0.0.1", onListening: (port: number) => { upload(port); } });

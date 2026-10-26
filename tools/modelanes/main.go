@@ -12,8 +12,7 @@
 // example at compile time by design (Memory.free under -mm=auto) or cannot
 // build at all on this machine (-mm=gc without libgc) is reported apart from
 // a mismatch. Every build runs concurrently (-j; compiling is most of the
-// time); the binaries then run one at a time, since several start servers on
-// fixed ports. `make mode-lanes` starts the httpbin-lite fixture the fetch
+// time); the binaries then run one at a time. `make mode-lanes` starts the httpbin-lite fixture the fetch
 // examples talk to, as `make examples` does.
 package main
 

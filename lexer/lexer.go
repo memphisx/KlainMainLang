@@ -876,8 +876,14 @@ func (l *Lexer) readRegex(line, col int) (Token, error) {
 	for l.pos < len(l.src) && unicode.IsLetter(l.peek()) {
 		flags.WriteRune(l.advance())
 	}
+	// V8's flag check: each of d g i m s u v y at most once, u and v not
+	// together; anything else is a SyntaxError.
+	fs := flags.String()
+	if strings.ContainsRune(fs, 'u') && strings.ContainsRune(fs, 'v') || !validRegexFlags(fs) {
+		return Token{}, l.errAt(line, col, diag.RegexFlags)
+	}
 	t := l.tok(REGEX, pattern.String(), line, col)
-	t.RegexFlags = flags.String()
+	t.RegexFlags = fs
 	return t, nil
 }
 
@@ -1000,4 +1006,16 @@ func (l *Lexer) readTemplatePart(line, col int) (Token, error) {
 	t := l.tok(TEMPLATE_MIDDLE, seg, line, col)
 	t.Raw = raw
 	return t, nil
+}
+
+// validRegexFlags reports flags drawn from dgimsuvy, none repeated.
+func validRegexFlags(fs string) bool {
+	seen := map[rune]bool{}
+	for _, c := range fs {
+		if !strings.ContainsRune("dgimsuvy", c) || seen[c] {
+			return false
+		}
+		seen[c] = true
+	}
+	return true
 }

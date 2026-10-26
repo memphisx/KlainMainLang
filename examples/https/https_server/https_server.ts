@@ -2,7 +2,7 @@
 // is TLS-handshaked and served by the same (req, res) core as http.createServer,
 // with its socket I/O routed through the TLS shims. The h1-only ALPN means even
 // an h2-capable client negotiates HTTP/1.1. Try it with:
-//   curl -k https://127.0.0.1:8631/hello
+//   curl -k https://127.0.0.1:<port>/hello
 //
 // { cert, key } are PEM strings (as Node's are). A real service reads them with
 // fs.readFileSync; the throwaway self-signed pair below is inline so the example
@@ -18,7 +18,7 @@ const server = https.createServer({ cert: cert, key: key }, (req, res) => {
   res.end("https/1.1: " + req.method + " " + req.url);
 });
 
-server.listen(8631, () => {
+server.listen(0, () => {
   console.log("https server on", (server.address() as AddressInfo).port);
   // Exit shortly after for the example runner; a real service would stay up.
   setTimeout(() => { server.close(); }, 150);

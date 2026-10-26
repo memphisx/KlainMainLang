@@ -12,8 +12,12 @@
 // wrapper; real Request/Headers classes also exist (TDD-00040) — see
 // examples/fetch/fetch_request_headers.ts.
 
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
 // ── a POST with a JSON body ─────────────────────────────────────────────────
-const posted = await fetch('http://127.0.0.1:8765/post', {
+const posted = await fetch(HTTPBIN + '/post', {
     method: 'POST',
     body: JSON.stringify({ hello: 'world' }),
 })
@@ -23,22 +27,22 @@ console.log((await posted.text()).indexOf('"hello":"world"') > -1)  // true — 
 // ── custom headers, sent alongside a GET ────────────────────────────────────
 const headers: Map<string, string> = new Map<string, string>()
 headers.set('X-Example-Header', 'kml-value')
-const withHeaders = await fetch('http://127.0.0.1:8765/headers', { headers: [...headers] })
+const withHeaders = await fetch(HTTPBIN + '/headers', { headers: [...headers] })
 console.log((await withHeaders.text()).indexOf('kml-value') > -1)  // true — the fixture's /headers echoes every request header back
 
 // ── an explicit method with no body still works (e.g. DELETE) ──────────────
-const deleted = await fetch('http://127.0.0.1:8765/delete', { method: 'DELETE' })
+const deleted = await fetch(HTTPBIN + '/delete', { method: 'DELETE' })
 console.log(deleted.status)  // 200
 
 // ── a body needs a method that takes one ────────────────────────────────────
 // (the default method is GET, and a GET or HEAD request cannot carry a body:
 // the fetch rejects with Node's TypeError and nothing is sent)
 try {
-    await fetch('http://127.0.0.1:8765/post', { body: 'raw-body-text' })
+    await fetch(HTTPBIN + '/post', { body: 'raw-body-text' })
 } catch (e) {
     console.log((e as Error).name, (e as Error).message)  // TypeError Request with GET/HEAD method cannot have body.
 }
 
 // ── fetch(url) with no init argument still works exactly as before ─────────
-const plain = await fetch('http://127.0.0.1:8765/get')
+const plain = await fetch(HTTPBIN + '/get')
 console.log(plain.status)  // 200

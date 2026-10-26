@@ -5,7 +5,11 @@
 // fetched response are immutable. Uses the same local fixture server as
 // examples/fetch/fetch.ts — no real network access.
 
-const r = await fetch('http://127.0.0.1:8765/get')
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
+const r = await fetch(HTTPBIN + '/get')
 const h: Headers = r.headers
 
 console.log(r.status)                    // 200

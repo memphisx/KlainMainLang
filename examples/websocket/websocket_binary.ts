@@ -12,8 +12,8 @@
 // round-tripping the raw bytes untouched.
 //
 // Drive it with a real client while it runs (comment out the setTimeout
-// first — it self-closes after 300ms for `make examples`' unattended run):
-//   (Node) node -e "const WS=require('ws'); const ws=new WS('ws://localhost:8087'); \
+// first — it self-closes after 300ms for `make examples`' unattended run; the port is on its 'listening' line):
+//   (Node) node -e "const WS=require('ws'); const ws=new WS('ws://localhost:<port>'); \
 //     ws.on('open',()=>ws.send(Buffer.from([1,0,2,255]))); \
 //     ws.on('message',(m,isBin)=>console.log('got',isBin,[...m]))"
 
@@ -45,6 +45,7 @@ setTimeout(() => {
   server.close()
 }, 300)
 
-console.log('listening on :8087 (binary + text WebSocket echo)')
-server.listen(8087)
+server.listen(0, () => {
+  console.log('listening on :' + (server.address() as any).port + ' (binary + text WebSocket echo)')
+})
 console.log('server closed, exiting')

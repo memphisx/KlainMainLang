@@ -588,6 +588,14 @@ func (e *Emitter) shapeMethodRecord(class *ClassInfo, t Type, m string) string {
 		e.fnMetaSource(fn, decl.Src)
 	}
 	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	if isSyntheticObjLitClass(t) {
+		for lit, name := range e.objLitClasses {
+			if name == t.ClassName {
+				_ = e.emitObjLitBodies(lit, name) // an invalid literal fails where it is emitted
+				break
+			}
+		}
+	}
 	e.emitShapeMethodAdapter(fn, class, t, m, sig)
 	return rec
 }

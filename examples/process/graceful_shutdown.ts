@@ -27,9 +27,7 @@ setTimeout(() => {
   process.kill(process.pid, 2) // 2 = SIGINT
 }, 300)
 
-console.log('listening on :8090')
-
-http.listen(8090, (req: HttpRequest): { status: number; body: string } => {
+http.listen(0, (req: HttpRequest): { status: number; body: string } => {
   requestCount = requestCount + 1
   return { status: 200, body: 'hello' }
-})
+}, { onListening: (port: number) => { console.log('listening on :' + port) } })

@@ -15,7 +15,6 @@ TEST_TIMEOUT ?= 45m
 # apps/ relocation.
 APPS         := apps/klaintop/main.ts apps/files/main.ts apps/todo/main.ts apps/menu/main.ts apps/explorer/main.ts apps/loadtest/main.ts apps/klainconf/main.ts
 HTTPBIN_LITE := .httpbin-lite
-HTTPBIN_LITE_PORT := 8765
 # TDD-00174 Stage A mode knobs: `make examples MM=auto OPTMEM=1` compiles the
 # example corpus in that memory mode / with -optimize-memory, turning the
 # whole corpus into a mode-differential lane (outputs must be identical to a
@@ -112,13 +111,16 @@ EXAMPLES_JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)
 
 examples: build
 	@./$(BINARY) -o $(HTTPBIN_LITE) tools/httpbin-lite/httpbin.ts >/dev/null 2>&1
-	@HTTPBIN_LITE_PORT=$(HTTPBIN_LITE_PORT) ./$(HTTPBIN_LITE) & \
+	@port_file=$$(mktemp); \
+	HTTPBIN_LITE_PORT_FILE=$$port_file ./$(HTTPBIN_LITE) & \
 	fixture_pid=$$!; \
-	trap "kill $$fixture_pid 2>/dev/null" EXIT INT TERM; \
+	trap "kill $$fixture_pid 2>/dev/null; rm -f $$port_file" EXIT INT TERM; \
 	for i in $$(seq 1 50); do \
-		curl -s -o /dev/null http://127.0.0.1:$(HTTPBIN_LITE_PORT)/get && break; \
+		[ -s $$port_file ] && break; \
 		sleep 0.1; \
 	done; \
+	[ -s $$port_file ] || { echo "httpbin-lite did not start"; exit 1; }; \
+	export HTTPBIN_URL=http://127.0.0.1:$$(cat $$port_file); \
 	$(GO) run ./tools/runexamples -bin ./$(BINARY) -j $(EXAMPLES_JOBS) -timeout $(EXAMPLE_TIMEOUT)s -modeflags "$(MODEFLAGS)" -modeflags-nomm "$(MODEFLAGS_NOMM)" $(if $(SHARD),-shard $(SHARD) -shards $(SHARDS))
 
 ## drift: the builtin library compiles the same in every example and every
@@ -237,13 +239,16 @@ conformance-wpt: conformance-fetch
 ## mode-lanes: build and run every example in the default memory mode and under -mm=auto, -mm=auto -optimize-memory and -mm=gc, and fail when an output differs (.modelanes-out/MODE-LANES.md; TDD-00230 P0.3)
 mode-lanes: build
 	@./$(BINARY) -o $(HTTPBIN_LITE) tools/httpbin-lite/httpbin.ts >/dev/null 2>&1
-	@HTTPBIN_LITE_PORT=$(HTTPBIN_LITE_PORT) ./$(HTTPBIN_LITE) & \
+	@port_file=$$(mktemp); \
+	HTTPBIN_LITE_PORT_FILE=$$port_file ./$(HTTPBIN_LITE) & \
 	fixture_pid=$$!; \
-	trap "kill $$fixture_pid 2>/dev/null" EXIT INT TERM; \
+	trap "kill $$fixture_pid 2>/dev/null; rm -f $$port_file" EXIT INT TERM; \
 	for i in $$(seq 1 50); do \
-		curl -s -o /dev/null http://127.0.0.1:$(HTTPBIN_LITE_PORT)/get && break; \
+		[ -s $$port_file ] && break; \
 		sleep 0.1; \
 	done; \
+	[ -s $$port_file ] || { echo "httpbin-lite did not start"; exit 1; }; \
+	export HTTPBIN_URL=http://127.0.0.1:$$(cat $$port_file); \
 	$(GO) run ./tools/modelanes -bin ./$(BINARY) -j $(EXAMPLES_JOBS) -timeout $(EXAMPLE_TIMEOUT)s
 
 ## shadow-report: compile the corpus comparing every old codegen decider with the new front end, and rank the disagreements into .shadow-out/SHADOW-REPORT.md (TDD-00230 P0.2)

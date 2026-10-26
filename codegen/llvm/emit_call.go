@@ -2651,8 +2651,30 @@ func (e *Emitter) emitFuncFieldCall(ex *ast.CallExpression, mem *ast.MemberExpre
 	if err != nil {
 		return Value{}, err
 	}
+	if memVal.Ty.IR != "ptr" {
+		// Read back boxed (a primitive's inherited Object.prototype method,
+		// `"s".hasOwnProperty`): the dynamic method call on the receiver.
+		return e.emitFuncFieldDynCall(ex, mem, mt)
+	}
 	e.callAs = e.memberCallAs(mem)
 	return e.emitClosureCallByPtr(memVal.Ref, memVal.Ty, ex.Args, ex.GetPos())
+}
+
+// emitFuncFieldDynCall calls mem as a method of its boxed receiver, the
+// result converted to mt's return type.
+func (e *Emitter) emitFuncFieldDynCall(ex *ast.CallExpression, mem *ast.MemberExpression, mt Type) (Value, error) {
+	obj, err := e.emitExpr(mem.Object)
+	if err != nil {
+		return Value{}, err
+	}
+	if obj, err = e.emitBoxValue(obj); err != nil {
+		return Value{}, err
+	}
+	v, err := e.emitDynAnyMethodCall(obj, mem.Property, ex.Args, ex.GetPos())
+	if err != nil || mt.FuncRetType == nil || mt.FuncRetType.IR == "void" {
+		return v, err
+	}
+	return e.convert(v, *mt.FuncRetType), nil
 }
 
 // emitFuncFieldCallReceiving is `obj.f(…)` through a function type without
@@ -3105,8 +3127,8 @@ func (e *Emitter) emitByteReceiverCall(ex *ast.CallExpression, mem *ast.MemberEx
 		table = arrayBufferOwnMethods
 	case objTy.IsBuffer():
 		table = bufferOwnMethods
-	case isNumberTy(objTy):
-		table = numberOwnMethods
+	case isNumericScalar(objTy):
+		table = numberOwnMethods // an `any` or an object is not a number
 	}
 	if f, ok := table[mem.Property]; ok {
 		return f(e, ex, mem)

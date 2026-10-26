@@ -423,7 +423,8 @@ export function serve(host: string, port: number, fn: (ex: Exchange, req: HttpRe
     if (id < 0) return id;
     server = id;
     listening = true;
-    return 0;
+    const a = __kml_native.tcpAddress(id, false);
+    return a < 0 ? port : a % 65536;
 }
 
 // The whole response. headers are name, value pairs.

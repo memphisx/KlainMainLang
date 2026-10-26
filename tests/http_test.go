@@ -1570,7 +1570,7 @@ func TestE2EHTTPServerCloseEvent(t *testing.T) {
 import http from 'http'
 const server = http.createServer((req, res) => { res.end('ok') })
 server.on('close', () => { console.log('close event') })
-server.listen(8302, '127.0.0.1', () => {
+server.listen(0, '127.0.0.1', () => {
   console.log('listening')
   server.close(() => { console.log('close cb') })
 })
@@ -1755,7 +1755,7 @@ s2.on('error', (err: NodeJS.ErrnoException) => {
 s2.listen(8317, '127.0.0.1')
 console.log("after listen")
 `
-	out := compileAndRunImports(t, src)
+	out := compileAndRunImports(t, subPort(src, 8317, freePort(t)))
 	if out != "after listen\nerror code=EADDRINUSE" {
 		t.Fatalf("got:\n%q", out)
 	}
@@ -1773,7 +1773,7 @@ const s2 = http.createServer((req, res) => { res.end("b") })
 s2.listen(8318, '127.0.0.1')
 console.log("after listen")
 `
-	out, code := compileAndRunExpectExitImports(t, src)
+	out, code := compileAndRunExpectExitImports(t, subPort(src, 8318, freePort(t)))
 	if code == 0 {
 		t.Fatalf("expected nonzero exit on unhandled bind failure, got 0:\n%q", out)
 	}
@@ -2380,7 +2380,7 @@ server.listen(8198, '127.0.0.1')
 // following curl drive that delivers the response. The program exits 0 on
 // success; a hang trips the context deadline.
 func TestE2EHTTPCreateServerAsyncHandlerInProcessClient(t *testing.T) {
-	bin := buildBinaryImports(t, `
+	src := `
 import http from 'http';
 async function delay(ms: number): Promise<void> {
   return await new Promise<void>((r) => setTimeout(() => r(), ms));
@@ -2400,7 +2400,8 @@ http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) =>
     });
   });
 });
-`)
+`
+	bin := buildBinaryImports(t, subPort(src, 18547, freePort(t)))
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin).Output()
@@ -2993,7 +2994,8 @@ http.listen(8965, (req: HttpRequest): Res => {
   return { status: 200, body: "ok" }
 }, { host: '127.0.0.1', workers: 4 })
 `
-	binFile := buildBinaryImports(t, src)
+	np := freePort(t)
+	binFile := buildBinaryImports(t, subPort(src, 8965, np))
 	cmd := exec.Command(binFile)
 	setProcGroup(cmd)
 	var out bytes.Buffer
@@ -3001,7 +3003,7 @@ http.listen(8965, (req: HttpRequest): Res => {
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
 	}
-	addr := "127.0.0.1:8965"
+	addr := fmt.Sprintf("127.0.0.1:%d", np)
 	t.Cleanup(func() {
 		killProcGroup(cmd)
 		_ = cmd.Wait()
@@ -3362,7 +3364,8 @@ http.listen(8975, (req: HttpRequest): Res => {
 // second listen after it serves in turn (no once-per-program limit).
 func TestE2EHTTPListenSequentialServers(t *testing.T) {
 	skipIfLoopbackTrafficFiltered(t)
-	assertOutputImports(t, `
+	p1, p2 := freePort(t), freePort(t)
+	src := `
 import http from 'klain:http'
 interface Res { status: number; body: string }
 setTimeout(async () => {
@@ -3379,7 +3382,9 @@ setTimeout(async () => {
 }, 20)
 http.listen(8970, (req: HttpRequest): Res => ({ status: 200, body: "b" + req.path }), { host: '127.0.0.1' })
 console.log("second closed")
-`, "first: a/a\nfirst closed\nsecond: b/b\nsecond closed\n")
+`
+	src = subPort(subPort(src, 8969, p1), 8970, p2)
+	assertOutputImports(t, src, "first: a/a\nfirst closed\nsecond: b/b\nsecond closed\n")
 }
 
 // TestE2EHTTPCloseWrongArgCountRejected mirrors
@@ -4616,7 +4621,7 @@ http.listen(port, (req: HttpRequest): Res => {
 }, { host: '127.0.0.1' })
 console.log('closed')
 `
-	assertOutput(t, src, "1.1 answered: hello /one\nclosed")
+	assertOutput(t, subPort(src, 8997, freePort(t)), "1.1 answered: hello /one\nclosed")
 }
 
 // A request body that fills the IncomingMessage's buffer pauses the socket

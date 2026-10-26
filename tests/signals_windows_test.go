@@ -49,10 +49,10 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 fs.writeFileSync(%q, "ready");
-http.listen(8241, (req: HttpRequest): { status: number; body: string } => {
+http.listen(%d, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 }, { host: '127.0.0.1' });
-`, readyPath))
+`, readyPath, freePort(t)))
 	res := runInConPTY(t, bin, 80, 24, 30*time.Second, ctrlCWhenReady(t, readyPath))
 	if res.ExitCode != 0 {
 		t.Errorf("exit code = %d, want 0; output:\n%q", res.ExitCode, res.Output)
@@ -77,10 +77,10 @@ process.on('SIGTERM', () => {
   process.exit(0);
 });
 fs.writeFileSync(%q, "ready");
-http.listen(8242, (req: HttpRequest): { status: number; body: string } => {
+http.listen(%d, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 }, { host: '127.0.0.1' });
-`, readyPath))
+`, readyPath, freePort(t)))
 	res := runInConPTY(t, bin, 80, 24, 30*time.Second, ctrlCWhenReady(t, readyPath))
 	if !strings.Contains(res.Text, "handled:SIGINT") {
 		t.Errorf("SIGINT handler never ran; output:\n%q", res.Output)
@@ -99,10 +99,10 @@ func TestE2ESignalNoHandlerDefaultDispositionConsole(t *testing.T) {
 import http from 'klain:http'
 import fs from 'fs'
 fs.writeFileSync(%q, "ready");
-http.listen(8243, (req: HttpRequest): { status: number; body: string } => {
+http.listen(%d, (req: HttpRequest): { status: number; body: string } => {
   return { status: 200, body: "ok" };
 }, { host: '127.0.0.1' });
-`, readyPath))
+`, readyPath, freePort(t)))
 	res := runInConPTY(t, bin, 80, 24, 30*time.Second, ctrlCWhenReady(t, readyPath))
 	if res.ExitCode == 0 {
 		t.Errorf("process exited 0 after Ctrl+C with no handler; output:\n%q", res.Output)

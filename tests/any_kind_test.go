@@ -369,3 +369,92 @@ const a = new BigInt64Array([3n, 1n, 2n]);
 console.log(a.toSorted((x, y) => Number(x - y)), [5n].map((z) => Number(z)));
 `)
 }
+
+// JavaScript: an accessor-bearing object literal stored into an `any`
+// variable still has its getter bodies emitted (the class's dynamic method
+// adapters call them); Array.prototype.toString on a non-array calls its
+// join, else answers Object.prototype.toString's tag.
+func TestE2EJSObjLitGetterIntoAnyAndArrayToString(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+var o;
+o = { join: function() { return "ohai:" + arguments.length; } };
+console.log(Array.prototype.toString.call(o));
+console.log(Array.prototype.toString.call({}), Array.prototype.toString.call({ join: 17 }));
+o = { get join() { throw 42; } };
+try { Array.prototype.toString.call(o); } catch (e) { console.log("caught", e); }
+console.log(Array.prototype.toString.call([1, [2, 3]]));
+`}, "main.js", "ohai:0\n[object Object] [object Object]\ncaught 42\n1,2,3")
+}
+
+// toLocaleString: an object's is its toString (a user override included);
+// a number's groups digits, typed or through `any`.
+func TestE2EToLocaleStringReceivers(t *testing.T) {
+	assertSameAsNode(t, `
+class P { toString() { return "P!"; } }
+console.log(Object.prototype.toLocaleString(), ({}).toLocaleString(), ({ a: 1 }).toLocaleString(), new P().toLocaleString());
+const n = 1234567.891;
+const q: any = 1234;
+const r: any = {};
+console.log(n.toLocaleString(), (5).toLocaleString(), q.toLocaleString(), r.toLocaleString(), [1, 2].toLocaleString());
+const z: any = 12.5;
+console.log(z.toFixed(3), z.toString(2), z.toPrecision(3));
+`)
+}
+
+// A call returning nothing used as a value: Promise.resolve of it, the
+// combinators over a Promise<void>, an argument, an interpolation.
+func TestE2EVoidCallAsValue(t *testing.T) {
+	assertSameAsNode(t, `
+function f(): void {}
+Promise.resolve(f()).then((v) => console.log("resolve", v));
+const p = Promise.resolve();
+Promise.any([p]).then((v) => console.log("any", v));
+Promise.race([p]).then((v) => console.log("race", v));
+Promise.all([p, p]).then((v) => console.log("all", v));
+Promise.allSettled([p]).then((v) => console.log("settled", v));
+`)
+}
+
+// JavaScript: a function returning nothing called as an argument is
+// undefined there; concat appends undefined and null as themselves.
+func TestE2EJSVoidCallArgumentsAndConcat(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+function f() {}
+console.log("a,b".split(f()), "a,b".indexOf(f()), "aundefinedb".includes(f()), String(f()), ` + "`x${f()}y`" + `);
+console.log([1].concat(f()), [1].concat(undefined), [1].concat(null));
+function g(a) { return typeof a; }
+console.log(g(f()));
+`}, "main.js", "[ 'a,b' ] -1 true undefined xundefinedy\n[ 1, undefined ] [ 1, undefined ] [ 1, null ]\nundefined")
+}
+
+// A primitive's inherited Object.prototype method, and a bigint's own
+// methods through an any.
+func TestE2EPrimitiveReceiverMethods(t *testing.T) {
+	assertSameAsNode(t, `
+let r = "abc";
+console.log(r.hasOwnProperty("p"), r.hasOwnProperty("length"));
+const q: any = 98765n;
+console.log(q.toString(), q.valueOf(), q.toString(16), q.toLocaleString(), typeof q.valueOf());
+console.log(12345n.toLocaleString(), (-1234567n).toLocaleString(), (123n).toLocaleString());
+`)
+}
+
+// JavaScript: a reaction handler using its own arguments object.
+func TestE2EJSThenHandlerWithArguments(t *testing.T) {
+	assertMultiFileOutputPermissive(t, map[string]string{"main.js": `
+"use strict";
+var obj = {};
+Promise.resolve(obj).then(function (arg) { console.log("ok", this, arg === obj, arguments.length); });
+Promise.reject(7).catch(function () { console.log("caught", arguments[0]); return 3; }).then(function (v) { console.log("then", v, arguments.length); });
+Promise.resolve(4).then(function (v) { console.log("num", v, arguments.length); });
+`}, "main.js", "ok undefined true 1\ncaught 7\nnum 4 1\nthen 3 1")
+}
+
+// A regular expression literal's flags are V8's: each of dgimsuvy at most
+// once, u and v not together; anything else is a SyntaxError.
+func TestRegexLiteralFlagsValidated(t *testing.T) {
+	for _, src := range []string{"const a = /x/a;", "const a = /x/gg;", "const a = /x/uv;"} {
+		mustCompileError(t, src, "invalid regular expression flags")
+	}
+	assertSameAsNode(t, `console.log(/x/dgimsy.flags, /x/v.flags);`)
+}

@@ -11,6 +11,7 @@
 // libuv's lists are raw memory, so every handle h2o's state hangs off is held
 // in a table here, which the collector scans.
 
+#include <arpa/inet.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -305,7 +306,11 @@ double __kml_native_khttp_h2o_serve(const char *host, double port, void *inv, vo
     kh_listener = l;
     kh_inv = inv;
     kh_clo = clo;
-    return 0;
+    /* The bound port: the one the system chose for port 0. */
+    struct sockaddr_storage got;
+    int gl = sizeof got;
+    if (uv_tcp_getsockname(l, (struct sockaddr *)&got, &gl) != 0) return port;
+    return got.ss_family == AF_INET6 ? ntohs(((struct sockaddr_in6 *)&got)->sin6_port) : ntohs(((struct sockaddr_in *)&got)->sin_port);
 }
 
 static char *kh_str(const char *s, size_t n) {

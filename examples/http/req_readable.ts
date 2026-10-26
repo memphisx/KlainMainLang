@@ -5,7 +5,7 @@
 // process exits. Runs the same way under Node.js.
 import http from 'http';
 
-http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
+const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   let total = 0;
   let chunks = 0;
   for await (const chunk of req) {
@@ -13,8 +13,10 @@ http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) =>
     chunks = chunks + 1;
   }
   res.end('received ' + total + ' bytes in ' + chunks + ' chunk(s)');
-}).listen(18524, () => {
-  const creq = http.request({ port: 18524, path: '/', method: 'POST' }, (res) => {
+});
+server.listen(0, () => {
+  const port = (server.address() as any).port; // bound port: listen(0) picks a free one
+  const creq = http.request({ port, path: '/', method: 'POST' }, (res) => {
     let body = '';
     res.on('data', (c: string) => { body = body + c; });
     res.on('end', () => {

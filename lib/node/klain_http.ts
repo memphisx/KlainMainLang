@@ -14,6 +14,9 @@ import * as backend from './internal_khttp_backend';
 export interface ListenOptions {
     workers?: number;
     host?: string;
+    // Called once the server is bound, with its port: the one the system
+    // chose when port is 0. In the primary only, before workers fork.
+    onListening?: (port: number) => void;
 }
 
 export interface HttpResponse {
@@ -91,8 +94,9 @@ function closeLocal(): void {
     }
 }
 
-// Serve handler on port (on every address unless opts.host names one) until
-// close(); returns once the server has closed and nothing else holds the loop.
+// Serve handler on port (0 for one the system picks; on every address unless
+// opts.host names one) until close(); returns once the server has closed and
+// nothing else holds the loop.
 export function listen(port: number, fn: (req: HttpRequest) => HttpResponse | Promise<HttpResponse>, opts?: ListenOptions): void {
     if (listening) throw new Error('klain:http is already listening');
     handler = fn;
@@ -107,6 +111,7 @@ export function listen(port: number, fn: (req: HttpRequest) => HttpResponse | Pr
         throw e;
     }
     listening = true;
+    if (opts !== undefined && opts.onListening !== undefined) opts.onListening(r);
     // `workers`: the primary forks after the bind, each process serving
     // the shared socket.
     __kml_native.khttpFork(opts !== undefined && opts.workers !== undefined ? opts.workers : 1);

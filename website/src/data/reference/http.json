@@ -48,12 +48,13 @@
       "id": "http.listen",
       "name": "klain:http — http.listen(port, handler)",
       "statusRow": "`klain:http`'s `http.listen(port, handler)` — bind, accept, dispatch (bespoke)",
-      "signature": "import http from 'klain:http'; http.listen(port: number, handler: (req: HttpRequest) => Res): void",
+      "signature": "import http from 'klain:http'; http.listen(port: number, handler: (req: HttpRequest) => Res, opts?: ListenOptions): void",
       "badge": "exact",
       "description": "This project's own server model, under the explicitly-non-Node klain:http specifier — a handler returns a { status, body, headers } object rather than writing to a res. Each connection is a libuv TCP handle with its own HTTP/1 parser (keep-alive, pipelining, chunked request bodies, Expect: 100-continue), and a client opening with the HTTP/2 preface gets h2c, so a slow connection never blocks the others; it runs on the shared event loop alongside timers, fetch, and the other socket APIs. An async handler is an ordinary promise. listen blocks until http.close(), then the code after it runs; a later listen serves in turn. On Linux, -http-backend=h2o serves the same handlers through libh2o on the same loop; it reads each request body whole before the handler runs, so the default stays the native backend. Not on the Node http namespace: `import http from 'klain:http'`.",
       "params": [
-        { "name": "port", "type": "number", "desc": "Port to bind." },
-        { "name": "handler", "type": "(req: HttpRequest) => Res", "desc": "Returns an object with status / body / optional headers." }
+        { "name": "port", "type": "number", "desc": "Port to bind; 0 for one the system picks." },
+        { "name": "handler", "type": "(req: HttpRequest) => Res", "desc": "Returns an object with status / body / optional headers." },
+        { "name": "opts", "type": "{ host?: string; workers?: number; onListening?: (port: number) => void }", "desc": "host to bind (default every address); workers to fork; onListening, called once bound with the bound port (the chosen one for port 0), in the primary only." }
       ],
       "returns": { "type": "void", "desc": "Blocks until http.close()." },
       "exampleKey": "http/http_server",

@@ -21,8 +21,8 @@ server.on('connection', (socket) => {
   console.log('new connection — total so far: ' + open)
 })
 
-server.listen(8091, () => {
-  console.log('listening on :8091')
+server.listen(0, () => {
+  console.log('listening on :' + (server.address() as any).port)
 })
 
 // Self-close so `make examples` can run this unattended.

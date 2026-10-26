@@ -82,7 +82,11 @@ extern void __kml_gc_tls_unregister(void);
 /* ------------------------------------------------------------------ *
  *  Tunables                                                            *
  * ------------------------------------------------------------------ */
-#define KS_STACK_BYTES (256 * 1024) /* per-goroutine fixed stack */
+/* Per-goroutine fixed stack. A synchronous request (libcurl and the
+ * resolver below it) takes 130-160 KB on arm64 and more on x86-64, which
+ * overflowed 256 KB there; the mapping is lazy, so untouched pages cost
+ * nothing. */
+#define KS_STACK_BYTES (1024 * 1024)
 #define KS_RUNQ_CAP 256 /* per-P local ring capacity */
 #define KS_SEL_MAX 64   /* max cases (and thus distinct channel locks) per select */
 

@@ -169,7 +169,7 @@ server.listen(8953, '127.0.0.1', () => {})
 
 func TestE2ENetConnectClient(t *testing.T) {
 	// Go-side TCP echo server.
-	ln, err := net.Listen("tcp", "127.0.0.1:8971")
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
@@ -198,7 +198,7 @@ sock.on('data', (chunk: Uint8Array) => {
   sock.end()
 })
 `
-	bin := buildBinaryImports(t, src)
+	bin := buildBinaryImports(t, subPort(src, 8971, ln.Addr().(*net.TCPAddr).Port))
 	out, err := exec.Command(bin).CombinedOutput()
 	if err != nil {
 		t.Fatalf("run client: %v\noutput: %s", err, out)

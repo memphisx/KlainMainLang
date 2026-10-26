@@ -136,7 +136,7 @@
    "differences": [
     "Channel ops are synchronous blocking, not await; a value crosses as its 8-byte any word (number/string/object/boolean).",
     "select cases are ch.recvCase(v => ...) / ch.sendCase(x, () => ...) / defaultCase(() => ...), at most 64 per select; a recv handler on a closed, drained channel gets undefined, with no separate closed flag (Go's v, ok) — the for-of range ends on close.",
-    "Fixed goroutine stacks (default 256 KiB, tunable via KLAINSYNC_STACK_KB); true growable/moving stacks are gated on precise stack maps. Blocking-syscall P-handoff is a bounded sysmon rescue-M approximation. send-after-close / double-close abort the process (Go-panic parity); native-only."
+    "Fixed goroutine stacks (default 1 MiB, tunable via KLAINSYNC_STACK_KB); true growable/moving stacks are gated on precise stack maps. Blocking-syscall P-handoff is a bounded sysmon rescue-M approximation. send-after-close / double-close abort the process (Go-panic parity); native-only."
    ],
    "seeAlso": [
     "workers.worker"

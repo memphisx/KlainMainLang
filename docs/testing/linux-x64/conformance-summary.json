@@ -23,11 +23,11 @@
       "lanes": {
         "js": {
           "overall": {
-            "pass": 26351,
+            "pass": 26382,
             "total": 53578
           },
           "inScope": {
-            "pass": 25612,
+            "pass": 25643,
             "total": 42942
           },
           "pending": {
@@ -35,23 +35,22 @@
             "total": 2860
           },
           "byPhase": {
-            "clang": 67,
             "codegen-hang": 1,
-            "compile": 16846,
-            "neg-accepted": 508,
-            "other": 530,
+            "compile": 16834,
+            "neg-accepted": 505,
+            "other": 540,
             "run-timeout": 7,
-            "runtime": 9260,
+            "runtime": 9301,
             "strict-reject": 8
           }
         },
         "strict": {
           "overall": {
-            "pass": 14278,
+            "pass": 14288,
             "total": 53578
           },
           "inScope": {
-            "pass": 14046,
+            "pass": 14056,
             "total": 42942
           },
           "pending": {
@@ -59,12 +58,11 @@
             "total": 2860
           },
           "byPhase": {
-            "clang": 2,
-            "compile": 10880,
-            "neg-accepted": 488,
+            "compile": 10876,
+            "neg-accepted": 485,
             "other": 259,
-            "runtime": 1471,
-            "strict-reject": 26200
+            "runtime": 1472,
+            "strict-reject": 26198
           }
         }
       }
@@ -72,17 +70,17 @@
     "ts": {
       "lanes": {
         "js": {
-          "agree": 6792,
+          "agree": 6771,
           "classified": 11247,
-          "falseAccept": 2958,
-          "falseReject": 1497,
+          "falseAccept": 3010,
+          "falseReject": 1466,
           "skipped": 827
         },
         "strict": {
-          "agree": 7926,
+          "agree": 7934,
           "classified": 11247,
-          "falseAccept": 1277,
-          "falseReject": 2044,
+          "falseAccept": 1276,
+          "falseReject": 2037,
           "skipped": 827
         }
       }

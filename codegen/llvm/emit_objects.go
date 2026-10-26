@@ -2665,6 +2665,18 @@ func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName
 		}
 		return e.emitDynAnyHas(Value{Ref: objVal.Ref, Ty: TypeAny}, keyRef, ownOnly, pos)
 	}
+	// A primitive (a string's indices and length are its own): its box tells.
+	if ownOnly && isPrimitiveReceiver(objVal.Ty) {
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		keyRef, err := e.dynAnyKeyRef(keyExpr, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyHas(box, keyRef, ownOnly, pos)
+	}
 	if box, ok, err := e.ownAccessorBox(objVal); ok || err != nil {
 		if err != nil {
 			return Value{}, err
@@ -3660,4 +3672,13 @@ func (e *Emitter) falsyUnionSpreadType(arg ast.Expression, ty Type) (Type, bool)
 		return Type{}, false
 	}
 	return r, true
+}
+
+// isPrimitiveReceiver reports a string, number, boolean or bigint held
+// unboxed.
+func isPrimitiveReceiver(t Type) bool {
+	if t.IsDynamic() || t.Nullable() || t.IsArray() || t.IsObject() {
+		return false
+	}
+	return isStringTy(t) || t.IsBigInt() || isNumericScalar(t) || t.IR == "i1"
 }

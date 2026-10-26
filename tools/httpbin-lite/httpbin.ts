@@ -13,6 +13,7 @@
 // (`/delay`, `/chunked`) awaits inside the stream's `pull`, so it never blocks
 // the event loop — concurrent requests still overlap.
 
+import fs from "fs";
 import http from "klain:http"; // bespoke handler⇒response server (Node's faithful shape is http.createServer)
 
 interface Res {
@@ -114,12 +115,7 @@ function sseStream(initial: string, hold: boolean): ReadableStream<Uint8Array> {
   });
 }
 
-const portEnv = process.env.HTTPBIN_LITE_PORT;
-const PORT: number = portEnv !== undefined && portEnv !== "" ? parseInt(portEnv, 10) : 8765;
-
-console.error("httpbin-lite (klain) listening on 127.0.0.1:" + PORT);
-
-http.listen(PORT, (req: HttpRequest): Res => {
+function handle(req: HttpRequest): Res {
   const path = req.path;
   const method = req.method;
 
@@ -204,4 +200,15 @@ http.listen(PORT, (req: HttpRequest): Res => {
   }
 
   return { status: 404, body: "not found: " + path, headers: plain() };
+}
+
+// The port the system picks, never a fixed one: HTTPBIN_LITE_PORT_FILE
+// tells the runner which.
+const portFile = process.env.HTTPBIN_LITE_PORT_FILE;
+http.listen(0, handle, {
+  host: "127.0.0.1",
+  onListening: (port: number) => {
+    console.error("httpbin-lite (klain) listening on 127.0.0.1:" + port);
+    if (portFile !== undefined && portFile !== "") fs.writeFileSync(portFile, String(port));
+  },
 });

@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**6792 / 11247 agree with TypeScript (60.4%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
+**6771 / 11247 agree with TypeScript (60.2%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
 
-- **3431** match-accept (both compile clean)
-- **3361** match-reject (both reject)
-- **1497** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **2958** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **3462** match-accept (both compile clean)
+- **3309** match-reject (both reject)
+- **1466** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **3010** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 3554 | 6129 | 58.0% | 1714 | 286 |
-| conformance | 3238 | 5118 | 63.3% | 1244 | 541 |
+| compiler | 3553 | 6129 | 58.0% | 1727 | 286 |
+| conformance | 3218 | 5118 | 62.9% | 1283 | 541 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -128,7 +128,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `ambiguousOverload` | compiler |
 | `amdModuleBundleNoDuplicateDeclarationEmitComments` | compiler |
 | `anonymousClassExpression2` | compiler |
-| … | +2858 more |
+| … | +2910 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -139,11 +139,11 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 107 | REJECTED: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not supported |
 | 58 | REJECTED: cannot find module '%s' (resolved to <path>) |
 | 51 | REJECTED: expected '%s', got IDENT |
-| 39 | REJECTED: unknown class '%s' |
+| 46 | REJECTED: unknown class '%s' |
 | 34 | REJECTED: <path>: '%s' is declared as a class, interface, type or enum in more than one namespace; namespace type members share on… |
 | 34 | REJECTED: expected '%s', got , |
-| 33 | REJECTED: undefined variable '%s' |
 | 32 | REJECTED: a computed class member name must be a constant string or number literal, a well-known symbol, or a const holding one or… |
+| 32 | REJECTED: undefined variable '%s' |
 | 30 | REJECTED: at most one call signature is supported per object type |
 | 30 | REJECTED: expected ;, got IDENT |
 | 25 | REJECTED: class '%s' extends unknown class '%s' |
@@ -153,9 +153,7 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 21 | REJECTED: unexpected token = in expression |
 | 19 | REJECTED: a call signature combined with other interface members is not supported — a callable object value has no runtime shape… |
 | 19 | REJECTED: cannot export '%s': it is not declared at the top level of this file |
-| 19 | REJECTED: internal: emitStaticObjToBag on non-object type i64 |
 | 19 | REJECTED: object has no field '%s' |
-| 18 | REJECTED: a number has no method '%s' |
 | 17 | REJECTED: a call signature combined with other object-type members is not supported — a callable object value has no runtime sha… |
 | 16 | REJECTED: an intersection member must be an object type (a non-object type like number<path> function/an array intersects to `neve… |
 | 16 | REJECTED: undefined function or closure '%s' |
@@ -177,15 +175,16 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 10 | REJECTED: `import b1 = require(...)` is not supported — use an ES import declaration instead |
 | 10 | REJECTED: `import foo = require(...)` is not supported — use an ES import declaration instead |
 | 10 | REJECTED: a spread (...) is only supported inside an array literal or as a single array filling a function's rest parameter (e.g. … |
+| 10 | REJECTED: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtim… |
 | 10 | REJECTED: expected IDENT, got ( |
 | 10 | REJECTED: expected property name, got new |
 | 10 | REJECTED: invalid Unicode escape sequence |
 | 9 | REJECTED: `import y = require(...)` is not supported — use an ES import declaration instead |
 | 9 | REJECTED: a union with two or more array members of one kind is not supported yet |
-| 9 | REJECTED: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtim… |
 | 9 | REJECTED: expected '%s' to close type assertion |
 | 8 | REJECTED: '%s' can't be read on an un-narrowed union — narrow it first (e.g. `if (x.a === ...)` or `typeof`) |
 | 8 | REJECTED: expected IDENT, got await |
+| 8 | REJECTED: field access on non-object (no field '%s') |
 | 7 | REJECTED: expected IDENT, got { |
 | 7 | REJECTED: namespace re-exports ('%s') are not supported yet |
 | 6 | REJECTED: `import ts = require(...)` is not supported — use an ES import declaration instead |
@@ -193,10 +192,11 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 6 | REJECTED: expected '%s', got : |
 | 6 | REJECTED: expected ), got , |
 | 6 | REJECTED: expected IDENT, got } |
-| 6 | REJECTED: field access on non-object (no field '%s') |
 | 6 | REJECTED: getter/setter '%s' on class '%s' disagree on type |
 | 6 | REJECTED: initializer'%s's type — this compiler is a typed subset |
-| … | +236 more distinct reasons |
+| 6 | REJECTED: merging the declarations of '%s' is not yet supported |
+| 6 | REJECTED: unexpected token ) in expression |
+| … | +232 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -209,7 +209,7 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 36 | `members` |
 | 35 | `this` |
 | 24 | `a` |
-| 22 | `foo` |
+| 20 | `foo` |
 | 18 | `>` |
 | 17 | `x` |
 | 16 | `which` |
@@ -252,16 +252,16 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 3 | `C` |
 | 3 | `C2__kml_mod0` |
 | 3 | `D` |
+| 3 | `DateTimeFormat` |
 | 3 | `Foo` |
 | 3 | `Locale` |
+| 3 | `NumberFormat` |
 | 3 | `\\` |
 | 3 | `bar` |
 | 3 | `block` |
 | 3 | `c__kml_mod0` |
-| 3 | `doStuff` |
 | 3 | `func` |
 | 3 | `instance)` |
 | 3 | `m__kml_mod0` |
 | 3 | `number` |
-| 3 | `s type is not a member of parameter ` |
-| … | +307 more distinct blockers |
+| … | +295 more distinct blockers |

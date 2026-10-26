@@ -170,6 +170,7 @@ func (e *Emitter) enterFrameIn(file, name string, pos ast.Pos) {
 	desc := e.frameDesc(name, file)
 	fr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", fr, frameIR))
+	e.emitStackCheck(fr)
 	old := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", old, e.frameSlot("top")))
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", old, fr))
@@ -184,6 +185,31 @@ func (e *Emitter) enterFrameIn(file, name string, pos ast.Pos) {
 	}
 	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fr, e.frameSlot("top")))
 	e.frame, e.frameOld, e.frameFile = fr, old, file
+}
+
+// sgHeadroom is stackguard.c's SG_HEADROOM: the band above the main thread's
+// guard page in which a prologue throws.
+const sgHeadroom = 256 * 1024
+
+// emitStackCheck is the prologue's software stack limit (stackguard.c): a
+// frame at addr within the band above the main thread's guard page throws
+// the RangeError here, in the program's own code, rather than letting a
+// deeper native call fault on the guard. The band is 0 when no guard is
+// installed, and no other stack (a fiber's, another thread's) lies in it.
+func (e *Emitter) emitStackCheck(addr string) {
+	e.declareFn("__kml_sg_band_lo", "@__kml_sg_band_lo = external global i64")
+	e.declareFn("__kml_stack_overflow", "declare void @__kml_stack_overflow()")
+	sp, lo, d, in := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", sp, addr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_sg_band_lo, align 8", lo))
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", d, sp, lo))
+	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %d", in, d, sgHeadroom))
+	overL, okL := e.freshLabel("stack.over"), e.freshLabel("stack.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s, !prof !{!\"branch_weights\", i32 1, i32 1048575}", in, overL, okL))
+	e.emitLabel(overL)
+	e.emitInstr("call void @__kml_stack_overflow()")
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
 }
 
 // setFrameFile re-points the running frame's descriptor at file: a

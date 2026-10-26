@@ -110,6 +110,20 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 // (e.g. a fetch chain's `Response`), so `.then(r => r.status)` works without the
 // caller annotating `r`. An annotated param, or a non-arrow callback, is emitted
 // unchanged.
+// closureOfBoxedHandler is a reaction handler the runner cannot call with
+// the settled value alone — one held boxed (compiled as a dynamic function)
+// or one taking a rest slot (its `arguments`) — as a closure that does: it
+// takes the value as param and calls the handler with it. Any other handler
+// is returned as is.
+func (e *Emitter) closureOfBoxedHandler(v Value, param Type, pos ast.Pos) (Value, error) {
+	if v.Ref == "null" || v.Ty.IR == "ptr" && !(v.Ty.IsFunc() && v.Ty.FuncHasRest) {
+		return v, nil
+	}
+	const arg = "__kml_rxn_arg"
+	call := ast.NewCallExpression(e.bindValue(v, pos), []ast.Expression{ast.NewIdentifier(arg, pos)}, pos)
+	return e.emitArrowFunctionWithHints(ast.NewArrowFunction([]ast.Param{{Name: arg, Pos: pos}}, nil, call, nil, pos), []Type{param})
+}
+
 func (e *Emitter) emitFulfillCallback(arg ast.Expression, valueTy Type) (Value, error) {
 	if valueTy.IR != "void" && valueTy.IR != "" {
 		var v Value
@@ -320,6 +334,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		// so only the arity/argument handling lives here.
 		if len(args) >= 1 && !e.isNonCallableThenArg(args[0]) {
 			v, err := e.emitFulfillCallback(args[0], innerTy)
+			if err == nil {
+				v, err = e.closureOfBoxedHandler(v, innerTy, pos)
+			}
 			if err != nil {
 				return Value{}, err
 			}
@@ -334,6 +351,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		}
 		if len(args) >= 2 && !e.isNonCallableThenArg(args[1]) {
 			v2, err := e.emitRejectCallback(args[1])
+			if err == nil {
+				v2, err = e.closureOfBoxedHandler(v2, TypeCaught, pos)
+			}
 			if err != nil {
 				return Value{}, err
 			}
@@ -352,6 +372,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 			retTy = innerTy
 		} else {
 			v, err := e.emitRejectCallback(args[0])
+			if err == nil {
+				v, err = e.closureOfBoxedHandler(v, TypeCaught, pos)
+			}
 			if err != nil {
 				return Value{}, err
 			}

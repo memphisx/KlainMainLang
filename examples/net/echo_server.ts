@@ -12,8 +12,8 @@ const server = net.createServer((socket) => {
   });
 });
 
-server.listen(9099, () => {
-  console.log('TCP echo server listening on 9099');
+server.listen(0, () => {
+  console.log('TCP echo server listening on', (server.address() as any).port);
 });
 
 setTimeout(() => {

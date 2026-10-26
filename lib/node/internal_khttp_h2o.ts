@@ -68,7 +68,7 @@ export function serve(host: string, port: number, fn: (ex: Exchange, req: HttpRe
     const r = __kml_native.khttpH2oServe(host, port, (id: number, unused: number) => { onExchange(id, fn); });
     if (r < 0) return r;
     listening = true;
-    return 0;
+    return r;
 }
 
 // The whole response. headers are name, value pairs.

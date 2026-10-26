@@ -8,6 +8,10 @@
 // see ADR-00096) instead of a real external website, so this file needs no
 // real network access and gives deterministic results.
 
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
 // ── Headers is case-insensitive, like the real spec ─────────────────────────
 const headers = new Headers()
 headers.set('Content-Type', 'application/json')
@@ -20,7 +24,7 @@ headers.append('X-Trace', 'b')
 console.log(headers.get('x-trace'))  // a, b
 
 // ── Request bundles a URL with method/headers/body ──────────────────────────
-const req = new Request('http://127.0.0.1:8765/post', {
+const req = new Request(HTTPBIN + '/post', {
     method: 'POST',
     headers: headers,
     body: JSON.stringify({ hello: 'world' }),
@@ -38,5 +42,5 @@ console.log((await posted.text()).indexOf('"hello":"world"') > -1)  // true
 // instance directly
 const withHeaders = new Headers()
 withHeaders.set('X-Example-Header', 'kml-value')
-const r = await fetch('http://127.0.0.1:8765/headers', { headers: withHeaders })
+const r = await fetch(HTTPBIN + '/headers', { headers: withHeaders })
 console.log((await r.text()).indexOf('kml-value') > -1)  // true

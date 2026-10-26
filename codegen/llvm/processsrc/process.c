@@ -250,8 +250,11 @@ void __kml_signal_note(int signum) {
     if ((unsigned)signum < 65 && sig_inv[signum]) sig_inv[signum](sig_clo[signum], (double)signum);
 }
 
-int __kml_loop_signal_start(int n);
-void __kml_loop_signal_stop(int n);
+/* loop.c's, linked only with the event loop: a program that links this file
+ * without it never starts a watcher, but the reference must still resolve
+ * where unused code is not dropped before linking (COFF). */
+int __kml_loop_signal_start(int n) __attribute__((weak));
+void __kml_loop_signal_stop(int n) __attribute__((weak));
 
 /* A client dropping mid-write unwinds via write() EPIPE, not a kill. */
 void __kml_ignore_sigpipe(void) { sig_install(13, (void *)1); }
@@ -263,6 +266,7 @@ double __kml_native_signal_start(double signo, void *inv, void *clo) {
     if (n < 1 || n > 64) return -22.0;
     sig_clo[n] = clo;
     sig_inv[n] = (sig_watch_fn)inv;
+    if (!__kml_loop_signal_start) return -22.0;
     return (double)__kml_loop_signal_start(n);
 }
 
@@ -271,6 +275,6 @@ void __kml_native_signal_stop(double signo) {
     int n = (int)signo;
     if (n < 1 || n > 64) return;
     sig_inv[n] = 0;
-    __kml_loop_signal_stop(n);
+    if (__kml_loop_signal_stop) __kml_loop_signal_stop(n);
     if (n == 13) sig_install(13, (void *)1);
 }

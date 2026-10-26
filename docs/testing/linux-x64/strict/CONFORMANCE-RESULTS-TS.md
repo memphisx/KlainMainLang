@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**7926 / 11247 agree with TypeScript (70.5%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
+**7934 / 11247 agree with TypeScript (70.5%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
 
-- **2884** match-accept (both compile clean)
-- **5042** match-reject (both reject)
-- **2044** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **1277** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **2891** match-accept (both compile clean)
+- **5043** match-reject (both reject)
+- **2037** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **1276** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 4210 | 6129 | 68.7% | 785 | 286 |
-| conformance | 3716 | 5118 | 72.6% | 492 | 541 |
+| compiler | 4218 | 6129 | 68.8% | 782 | 286 |
+| conformance | 3716 | 5118 | 72.6% | 494 | 541 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -128,7 +128,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `bundledDtsLateExportRenaming` | compiler |
 | `bundlerOptionsCompat` | conformance |
 | `bundlerSyntaxRestrictions` | conformance |
-| … | +1177 more |
+| … | +1176 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -153,7 +153,7 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 30 | REJECTED: at most one call signature is supported per object type |
 | 30 | REJECTED: expected ;, got IDENT |
 | 26 | REJECTED: undefined variable '%s' |
-| 25 | REJECTED: unknown class '%s' |
+| 26 | REJECTED: unknown class '%s' |
 | 24 | REJECTED: class '%s' extends unknown class '%s' |
 | 22 | REJECTED: '%s' is only valid inside a method or constructor body |
 | 22 | REJECTED: expected {, got ( |
@@ -187,7 +187,6 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 10 | REJECTED: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtim… |
 | 10 | REJECTED: expected IDENT, got ( |
 | 10 | REJECTED: expected property name, got new |
-| 10 | REJECTED: field access on non-object (no field '%s') |
 | 10 | REJECTED: invalid Unicode escape sequence |
 | 10 | REJECTED: undefined label '%s' |
 | 9 | REJECTED: `import y = require(...)` is not supported — use an ES import declaration instead |
@@ -196,7 +195,8 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 8 | REJECTED: '%s' implicitly has type '%s' because it does not have a type annotation |
 | 8 | REJECTED: '%s' is of type '%s' |
 | 8 | REJECTED: expected IDENT, got await |
-| … | +285 more distinct reasons |
+| 8 | REJECTED: field access on non-object (no field '%s') |
+| … | +284 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 

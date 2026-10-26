@@ -230,6 +230,11 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Ty
 	if err != nil {
 		return Value{}, err
 	}
+	if val.Ty.IR == "void" || val.Ty.IR == "" {
+		// `Promise.resolve(f())` of a call returning nothing: evaluated, then
+		// fulfilled with undefined, as Promise.resolve() is.
+		return e.emitPromiseResolve(nil, pos, hint)
+	}
 	if val.Ty.IsPromise() {
 		return val, nil
 	}

@@ -48,6 +48,14 @@
  * default) of the mapping below it, so the guard mapping goes that much
  * lower there. */
 #define SG_LINUX_GAP (256 * 4096)
+/* The main thread's software limit: each user function's prologue checks
+ * its frame against the band [__kml_sg_band_lo, +SG_HEADROOM) just above the
+ * guard page and throws there, from generated code. The guard page is only
+ * the backstop: a native call (libc, libcurl) made by the deepest frame
+ * still has SG_HEADROOM below it, so an overflow is not taken inside it,
+ * where throwing would longjmp out of a held lock (malloc's). */
+#define SG_HEADROOM (256 * 1024)
+uintptr_t __kml_sg_band_lo;
 
 static void (*sg_throw)(const char *);
 static const char *sg_msg;
@@ -90,6 +98,16 @@ static void sg_handler(int sig, siginfo_t *si, void *uc) {
     signal(sig, SIG_DFL);
 }
 
+/* A prologue's frame fell in the band: the RangeError, thrown from the
+ * program's own code. */
+void __kml_stack_overflow(void) {
+    if (sg_throw) sg_throw(sg_msg);
+    static const char m[] = "RangeError: Maximum call stack size exceeded\n";
+    fflush(stdout);
+    write(2, m, sizeof m - 1);
+    _exit(1);
+}
+
 /* A PROT_NONE page SG_MAIN_STACK below the caller's frame (main). On
  * macOS the main stack is mapped in full, so the page is protected in
  * place; on Linux it grows on demand, so an unused page is mapped there,
@@ -102,12 +120,13 @@ static void sg_limit_main(void) {
      * whatever happens to be mapped there, the executable's code included. */
     uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
     if (!pthread_main_np() || sp > top || sp < top - pthread_get_stacksize_np(pthread_self())) return;
-    uintptr_t lim = (sp - SG_MAIN_STACK) & ~(g - 1);
-    mprotect((void *)lim, g, PROT_NONE);
+    uintptr_t lim = (sp - SG_MAIN_STACK - SG_HEADROOM) & ~(g - 1);
+    if (mprotect((void *)lim, g, PROT_NONE) == 0) __kml_sg_band_lo = lim + g;
 #elif defined(MAP_FIXED_NOREPLACE)
-    uintptr_t lim = (sp - SG_MAIN_STACK - SG_LINUX_GAP) & ~(g - 1);
+    uintptr_t lim = (sp - SG_MAIN_STACK - SG_HEADROOM - SG_LINUX_GAP) & ~(g - 1);
     void *p = mmap((void *)lim, g, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
     if (p != MAP_FAILED && p != (void *)lim) munmap(p, g);
+    if (p == (void *)lim) __kml_sg_band_lo = (sp - SG_MAIN_STACK - SG_HEADROOM) & ~(g - 1);
 #else
     (void)g;
     (void)sp;
@@ -212,6 +231,7 @@ void __kml_fiber_stack_free(void *s, size_t n) {
  * null frame: no unwinding through the handler's frames), and the catch
  * re-arms the spent guard page (exceptions.c, __kml_get_thrown_tag). */
 #include <windows.h>
+#include <stdint.h>
 #include <stdio.h>
 
 #define SG_GUARANTEE (64 * 1024)
@@ -233,6 +253,13 @@ static LONG CALLBACK sg_handler(EXCEPTION_POINTERS *ep) {
     WriteFile(GetStdHandle(STD_ERROR_HANDLE), m, sizeof m - 1, &w, NULL);
     ExitProcess(1);
     return EXCEPTION_CONTINUE_SEARCH;
+}
+
+/* Windows reserves its own guarantee below the guard page: no band. */
+uintptr_t __kml_sg_band_lo;
+void __kml_stack_overflow(void) {
+    if (sg_throw) sg_throw(sg_msg);
+    ExitProcess(1);
 }
 
 void __kml_stack_guard_init(void (*throw_fn)(const char *), const char *msg) {

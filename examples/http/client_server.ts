@@ -4,11 +4,13 @@
 // is done, so it never blocks the server. Runs the same way under Node.js.
 import http from 'http';
 
-http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("kalimera from the server");
-}).listen(18521, () => {
-  http.get("http://127.0.0.1:18521/", (res) => {
+});
+server.listen(0, () => {
+  const port = (server.address() as any).port; // bound port: listen(0) picks a free one
+  http.get(`http://127.0.0.1:${port}/`, (res) => {
     let body = "";
     res.on('data', (chunk: string) => { body = body + chunk; });
     res.on('end', () => {
@@ -16,7 +18,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
       console.log("body:", body);
       // Options-object form with method + headers: the request rides the
       // same client; GET stays the default when method is omitted.
-      const req = http.request({ port: 18521, path: "/", method: "HEAD", headers: { "X-Client": "kml" } }, (res2) => {
+      const req = http.request({ port, path: "/", method: "HEAD", headers: { "X-Client": "kml" } }, (res2) => {
         console.log("head status:", res2.statusCode);
         process.exit(0);
       });

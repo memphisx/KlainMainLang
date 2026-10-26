@@ -179,7 +179,7 @@ console.log("sum " + drain(ch));
 // entry, pins the reactor goroutine to its M so it never migrates. Runs with the
 // default multi-M GOMAXPROCS: with only one M the bug cannot occur.
 func TestE2EGoroutineHTTPListenLoadTest(t *testing.T) {
-	bin := buildBinaryImports(t, `
+	bin := buildBinaryImports(t, subPort(`
 import { go, Channel } from 'klain:sync';
 import http from 'klain:http';
 
@@ -201,6 +201,15 @@ go(() => {
   }, { host: '127.0.0.1' });
 });
 
+// The server goroutine binds the port when it gets to run: wait until it
+// answers before the load starts (a request sent earlier is refused).
+for (;;) {
+  const probe = new XMLHttpRequest();
+  probe.open('GET', 'http://127.0.0.1:' + PORT + '/ready', false);
+  try { probe.send(); } catch (e) {}
+  if (probe.status === 200) break;
+}
+
 const reqs = new Channel<number>(256);
 const done = new Channel<number>(0);
 go(() => { for (let i = 0; i < TOTAL; i++) reqs.send(i); reqs.close(); });
@@ -219,7 +228,7 @@ let ok = 0;
 for (let i = 0; i < N; i++) ok = ok + done.receive();
 console.log('ok=' + ok);
 process.exit(0);
-`)
+`, 8213, freePort(t)))
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, bin).Output()

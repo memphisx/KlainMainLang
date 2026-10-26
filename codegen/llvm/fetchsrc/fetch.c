@@ -243,8 +243,8 @@ static void *mk_aggregate(void *msg, void **errs, i64 n) {
 
 extern void *__kml_errno_code(int e);
 extern int __kml_uv_errno(int e);
-extern void *__kml_dynobj_new(void);
-extern void __kml_dynobj_set(void *o, const char *key, i64 v);
+extern void *__kml_dynobj_new(void) __attribute__((weak));
+extern void __kml_dynobj_set(void *o, const char *key, i64 v) __attribute__((weak));
 extern void __kml_error_own_cause(void *op);
 
 static const struct { i64 len; char d[9]; } k_hostname = { KML_STR_ASCII_HDR(8), "hostname" };
@@ -1077,8 +1077,8 @@ void *__kml_fetch_headers_raw(void *pending) {
     return raw ? __kml_str_from_cstr(raw) : __kml_fetch_strs[S_EMPTY];
 }
 
-extern void *__kml_map_str_create(void);
-extern void __kml_map_str_set(void *map, char *key, i64 val);
+extern void *__kml_map_str_create(void) __attribute__((weak));
+extern void __kml_map_str_set(void *map, char *key, i64 val) __attribute__((weak));
 
 static char *str_copy(const char *s, i64 n, _Bool lower) {
     char *out = (char *)__kml_str_alloc(n);

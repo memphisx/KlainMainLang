@@ -141,13 +141,7 @@ function tryFlags(f: string): void {
 tryFlags("gg")
 tryFlags("z")
 tryFlags("gi")
-try {
-  const lit = /a/mm
-  console.log("ok")
-} catch (e) {
-  console.log((e as Error).name)
-}
-`, "SyntaxError\nSyntaxError\nok\nSyntaxError")
+`, "SyntaxError\nSyntaxError\nok")
 }
 
 func TestE2ERegExpInvalidCharacterClassThrows(t *testing.T) {

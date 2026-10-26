@@ -10,6 +10,7 @@ interface Object {
     constructor: Function;
     /** @intrinsic Object.prototype.toString */
     toString(): string;
+    /** @lower __kml_Object_toLocaleString */
     toLocaleString(): string;
     valueOf(): Object;
     /** @intrinsic Object.prototype.hasOwnProperty */
@@ -297,6 +298,7 @@ interface Number {
     toExponential(fractionDigits?: number): string;
     /** @lower __kml_Number_toPrecision @link number */
     toPrecision(precision?: number): string;
+    toLocaleString(locales?: string | string[], options?: any): string;
     /** @intrinsic Number.prototype.valueOf */
     valueOf(): number;
 }
@@ -1259,7 +1261,9 @@ declare var Atomics: Atomics;
 interface BigInt {
     /** @intrinsic BigInt.prototype.toString */
     toString(radix?: number): string;
+    /** @lower __kml_BigInt_toLocaleString */
     toLocaleString(locales?: string | string[], options?: any): string;
+    /** @lower __kml_BigInt_valueOf */
     valueOf(): bigint;
 }
 

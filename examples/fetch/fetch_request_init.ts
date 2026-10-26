@@ -2,7 +2,11 @@
 // as TypeScript types it (ADR-01217). Talks to the local httpbin-lite fixture
 // `make examples` starts (tools/httpbin-lite/).
 
-const BASE = 'http://127.0.0.1:8765'
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
+const BASE = HTTPBIN
 
 async function api(path: string, init?: RequestInit): Promise<string> {
     const res = await fetch(BASE + path, init)

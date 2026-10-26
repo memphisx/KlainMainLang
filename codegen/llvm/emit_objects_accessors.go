@@ -151,62 +151,8 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	info := e.classes[className]
 	ty := info.Ty
 
-	// Validate accessor shapes and emit their bodies once.
-	if e.objLitEmitted == nil {
-		e.objLitEmitted = map[string]bool{}
-	}
-	if !e.objLitEmitted[className] {
-		e.objLitEmitted[className] = true
-		// The last accessor of each kind and name is the one defined.
-		last := map[string]int{}
-		for i, p := range lit.Properties {
-			if p.AccessorKind != "" {
-				last[accessorMethodName(p.AccessorKind, p.Key)] = i
-			}
-		}
-		// Reject the property forms this path doesn't handle, rather than
-		// silently dropping them.
-		for i, p := range lit.Properties {
-			if p.AccessorKind == "" {
-				if p.Key == "" {
-					return Value{}, fmt.Errorf("%d:%d: an object literal that mixes a spread with a getter/setter is not yet supported", pos.Line, pos.Col)
-				}
-				if _, isAssign := p.Value.(*ast.AssignmentExpression); isAssign {
-					return Value{}, fmt.Errorf("%d:%d: shorthand-default '%s' is not valid in a value object literal", pos.Line, pos.Col, p.Key)
-				}
-				continue
-			}
-			fe := p.Value.(*ast.FunctionExpression)
-			if p.AccessorKind == "get" && len(fe.Params) != 0 {
-				return Value{}, fmt.Errorf("%d:%d: a getter ('get %s') takes no parameters", pos.Line, pos.Col, p.Key)
-			}
-			if p.AccessorKind == "set" && len(fe.Params) != 1 {
-				return Value{}, fmt.Errorf("%d:%d: a setter ('set %s') takes exactly one parameter", pos.Line, pos.Col, p.Key)
-			}
-			key := accessorMethodName(p.AccessorKind, p.Key)
-			sig := info.MethodSigs[key]
-			if p.AccessorKind == "get" && sig.RetType.IR == "void" {
-				return Value{}, fmt.Errorf("%d:%d: a getter ('get %s') must return a value", pos.Line, pos.Col, p.Key)
-			}
-			if last[key] != i {
-				continue // replaced by a later one
-			}
-			llvmName := llvmSafeSymbol(className + "_" + key)
-			if err := e.emitClassMember(llvmName, ty, fe.Params, sig, fe.Body, sig.RetType, pos, false, false); err != nil {
-				return Value{}, err
-			}
-		}
-		// A get/set pair must agree on the property type.
-		for _, p := range lit.Properties {
-			if p.AccessorKind == "" {
-				continue
-			}
-			g, gok := info.MethodSigs[accessorMethodName("get", p.Key)]
-			s, sok := info.MethodSigs[accessorMethodName("set", p.Key)]
-			if gok && sok && !convertiblePure(s.ParamTypes[0], g.RetType) {
-				return Value{}, fmt.Errorf("%d:%d: getter and setter for '%s' disagree on its type", pos.Line, pos.Col, p.Key)
-			}
-		}
+	if err := e.emitObjLitBodies(lit, className); err != nil {
+		return Value{}, err
 	}
 
 	// Construct: calloc, stamp the runtime tag, store each data field.
@@ -244,4 +190,74 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	}
 
 	return Value{Ref: dataReg, Ty: ty}, nil
+}
+
+// emitObjLitBodies validates an accessor-bearing literal's properties and
+// emits its synthetic class's accessor bodies, once. The literal's emission
+// calls it, and so does a dynamic adapter for one of the class's methods
+// (shapeMethodRecord): the class can be registered by inference while the
+// literal itself is emitted another way (into an `any`), and the adapter
+// must not call a body nobody emitted.
+func (e *Emitter) emitObjLitBodies(lit *ast.ObjectLiteral, className string) error {
+	pos := lit.GetPos()
+	info := e.classes[className]
+	ty := info.Ty
+	if e.objLitEmitted == nil {
+		e.objLitEmitted = map[string]bool{}
+	}
+	if !e.objLitEmitted[className] {
+		e.objLitEmitted[className] = true
+		// The last accessor of each kind and name is the one defined.
+		last := map[string]int{}
+		for i, p := range lit.Properties {
+			if p.AccessorKind != "" {
+				last[accessorMethodName(p.AccessorKind, p.Key)] = i
+			}
+		}
+		// Reject the property forms this path doesn't handle, rather than
+		// silently dropping them.
+		for i, p := range lit.Properties {
+			if p.AccessorKind == "" {
+				if p.Key == "" {
+					return fmt.Errorf("%d:%d: an object literal that mixes a spread with a getter/setter is not yet supported", pos.Line, pos.Col)
+				}
+				if _, isAssign := p.Value.(*ast.AssignmentExpression); isAssign {
+					return fmt.Errorf("%d:%d: shorthand-default '%s' is not valid in a value object literal", pos.Line, pos.Col, p.Key)
+				}
+				continue
+			}
+			fe := p.Value.(*ast.FunctionExpression)
+			if p.AccessorKind == "get" && len(fe.Params) != 0 {
+				return fmt.Errorf("%d:%d: a getter ('get %s') takes no parameters", pos.Line, pos.Col, p.Key)
+			}
+			if p.AccessorKind == "set" && len(fe.Params) != 1 {
+				return fmt.Errorf("%d:%d: a setter ('set %s') takes exactly one parameter", pos.Line, pos.Col, p.Key)
+			}
+			key := accessorMethodName(p.AccessorKind, p.Key)
+			sig := info.MethodSigs[key]
+			if p.AccessorKind == "get" && sig.RetType.IR == "void" {
+				return fmt.Errorf("%d:%d: a getter ('get %s') must return a value", pos.Line, pos.Col, p.Key)
+			}
+			if last[key] != i {
+				continue // replaced by a later one
+			}
+			llvmName := llvmSafeSymbol(className + "_" + key)
+			if err := e.emitClassMember(llvmName, ty, fe.Params, sig, fe.Body, sig.RetType, pos, false, false); err != nil {
+				return err
+			}
+		}
+		// A get/set pair must agree on the property type.
+		for _, p := range lit.Properties {
+			if p.AccessorKind == "" {
+				continue
+			}
+			g, gok := info.MethodSigs[accessorMethodName("get", p.Key)]
+			s, sok := info.MethodSigs[accessorMethodName("set", p.Key)]
+			if gok && sok && !convertiblePure(s.ParamTypes[0], g.RetType) {
+				return fmt.Errorf("%d:%d: getter and setter for '%s' disagree on its type", pos.Line, pos.Col, p.Key)
+			}
+		}
+	}
+
+	return nil
 }

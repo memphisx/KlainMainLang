@@ -8,6 +8,10 @@
 // (tools/httpbin-lite/, started by `make examples` before this file runs —
 // see ADR-00096) instead of a real external website.
 
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
 const xhr = new XMLHttpRequest()
 let callCount = 0
 xhr.onreadystatechange = () => {
@@ -17,14 +21,14 @@ xhr.onreadystatechange = () => {
 xhr.onload = () => {
     console.log('loaded')
 }
-xhr.open('GET', 'http://127.0.0.1:8765/get')
+xhr.open('GET', HTTPBIN + '/get')
 xhr.send()
 console.log(callCount)   // 2
 console.log(xhr.status)  // 200
 
 // POST with a custom request header and a body
 const posted = new XMLHttpRequest()
-posted.open('POST', 'http://127.0.0.1:8765/post')
+posted.open('POST', HTTPBIN + '/post')
 posted.setRequestHeader('X-Example-Header', 'kml-value')
 posted.send(JSON.stringify({ hello: 'world' }))
 console.log(posted.status)  // 200
@@ -43,7 +47,7 @@ console.log(failed.status)  // 0
 // getResponseHeader is case-insensitive; getAllResponseHeaders returns the
 // full "name: value\r\n" concatenation (keys lowercased).
 const hdrs = new XMLHttpRequest()
-hdrs.open('GET', 'http://127.0.0.1:8765/get')
+hdrs.open('GET', HTTPBIN + '/get')
 hdrs.send()
 console.log(hdrs.getResponseHeader('Content-Type'))  // text/plain; charset=utf-8
 console.log(hdrs.getAllResponseHeaders().indexOf('content-type:') > -1)  // true

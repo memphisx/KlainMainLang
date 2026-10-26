@@ -516,7 +516,8 @@ type Emitter struct {
 	// prog is the whole program AST, retained for `typeof value` resolution
 	// (finding a referenced value's top-level declaration before value scope is
 	// populated).
-	prog *ast.Program
+	prog      *ast.Program
+	voidSites map[ast.Expression]bool // voidValueSites, computed once
 	// constRegexLits maps an unambiguous `const <name> = /regex/` binding to its
 	// regex literal, for resolving a replace()/replaceAll() pattern's static
 	// capture count. constRegexAmbig blacklists names declared more than once

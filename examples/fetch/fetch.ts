@@ -14,25 +14,29 @@
 // method/headers/request body (ADR-00074) are covered separately in
 // examples/fetch/fetch_init.ts.
 
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
 // ── status, ok, and the raw body text ───────────────────────────────────────
-const r = await fetch('http://127.0.0.1:8765/get')
+const r = await fetch(HTTPBIN + '/get')
 console.log(r.status)          // 200
 console.log(r.ok)              // true
 console.log((await r.text()).length > 0)   // true — .text() is a Promise<string>
 
 // ── a 404 still resolves normally — .ok is what distinguishes it ───────────
-const missing = await fetch('http://127.0.0.1:8765/status/404')
+const missing = await fetch(HTTPBIN + '/status/404')
 console.log(missing.status)    // 404
 console.log(missing.ok)        // false
 
 // ── redirects are followed automatically ────────────────────────────────────
-const redirected = await fetch('http://127.0.0.1:8765/redirect-to?url=/get')
+const redirected = await fetch(HTTPBIN + '/redirect-to?url=/get')
 console.log(redirected.status) // 200, not 302 — the redirect was already followed
 
 // ── the body accessors are real Promise<T> (WHATWG) ────────────────────────
 // .text()/.json()/.arrayBuffer() each return a Promise you await — a genuine
 // thenable, so `.then(...)` and Promise.all([...]) work on them too.
-const ipRes = await fetch('http://127.0.0.1:8765/ip')
+const ipRes = await fetch(HTTPBIN + '/ip')
 const ipText: string = await ipRes.text()
 console.log(ipText.length > 0)         // true
 
@@ -41,7 +45,7 @@ console.log(ipText.length > 0)         // true
 // A typed `const x: T = ...` binding parses straight into T, so the projection
 // carries through the await. A body is read once: a second read rejects.
 interface Ip { origin: string }
-const ipAwaited: Ip = await (await fetch('http://127.0.0.1:8765/ip')).json()
+const ipAwaited: Ip = await (await fetch(HTTPBIN + '/ip')).json()
 console.log(ipAwaited.origin.length > 0)  // true
 console.log(ipRes.bodyUsed)               // true
 
@@ -60,6 +64,6 @@ try {
 // server deliberately embeds a null byte in this response (unlike a real
 // random-bytes endpoint, which would only sometimes happen to), so this
 // path is exercised on every run, not just probabilistically.
-const binary = await fetch('http://127.0.0.1:8765/bytes/16')
+const binary = await fetch(HTTPBIN + '/bytes/16')
 const bytes = new Uint8Array(await binary.arrayBuffer())
 console.log(bytes.length)  // 16 — exact, even though byte 5 is 0

@@ -11,10 +11,14 @@
 // unchanged under Node.js (pointed at any upstream).
 import http from 'http'
 
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
 // A may-suspend async fn: it awaits fetch, so a caller that awaits *it* parks
 // on a task-shaped promise rather than on the fetch transfer directly.
 async function proxyGet(path: string): Promise<string> {
-  const r = await fetch('http://127.0.0.1:8765' + path)
+  const r = await fetch(HTTPBIN + path)
   return await r.text()
 }
 
@@ -28,9 +32,10 @@ const server = http.createServer(async (req: http.IncomingMessage, res: http.Ser
   setTimeout(() => { process.exit(0) }, 50)
 })
 
-server.listen(18536, () => {
+server.listen(0, () => {
+  const port = (server.address() as any).port; // bound port: listen(0) picks a free one
   // Drive the front from the same process, on the same event loop.
-  http.get("http://127.0.0.1:18536/", (res) => {
+  http.get(`http://127.0.0.1:${port}/`, (res) => {
     res.on('data', (_chunk: string) => {})
     res.on('end', () => {})
   })

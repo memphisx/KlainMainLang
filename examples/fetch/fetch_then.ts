@@ -5,16 +5,20 @@
 // deferral in its follow-on).
 //
 // Needs a reachable host: `make examples` starts the local httpbin-lite fixture
-// on :8765, same as the other examples/fetch/*.ts files.
+// on a free port, same as the other examples/fetch/*.ts files.
+
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
 
 // A value chain: the unannotated `r` is hinted to Response, so `r.status` works.
-fetch('http://127.0.0.1:8765/get')
+fetch(HTTPBIN + '/get')
   .then((r) => r.status)
   .then((s: number) => { console.log('status ' + s) })      // status 200
 
 // An HTTP 404 is a *fulfilled* Response (per WHATWG) — .then sees it; .finally
 // runs for its side effect and passes the source value through unchanged.
-fetch('http://127.0.0.1:8765/status/404')
+fetch(HTTPBIN + '/status/404')
   .then((r) => { console.log(r.status + ' ok=' + r.ok) })    // 404 ok=false
   .finally(() => { console.log('done checking') })
 

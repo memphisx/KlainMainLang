@@ -315,14 +315,14 @@ void __kml_shape_expando_define(void *obj, const char *key, i64 v, int a) {
 // name. Weak: a program may link this file without dynamic objects.
 #define KML_BAG_MAGIC 0x444C4D4BLL
 static int is_bag(void *o) { return o && (*(i64 *)o & 0xFFFFFFFFLL) == KML_BAG_MAGIC; }
-extern char **__kml_dynobj_keys_enum_c(void *o, i64 *n) __attribute__((weak));
-extern i64 __kml_dynobj_get(void *o, const char *key) __attribute__((weak));
-extern i64 __kml_dynobj_setv(void *o, const char *key, i64 v) __attribute__((weak));
-extern i64 __kml_dynobj_find(void *o, const char *key) __attribute__((weak));
+extern char **__kml_dynobj_keys_enum_c(void *o, i64 *n) __attribute__((weak)) __attribute__((weak));
+extern i64 __kml_dynobj_get(void *o, const char *key) __attribute__((weak)) __attribute__((weak));
+extern i64 __kml_dynobj_setv(void *o, const char *key, i64 v) __attribute__((weak)) __attribute__((weak));
+extern i64 __kml_dynobj_find(void *o, const char *key) __attribute__((weak)) __attribute__((weak));
 
 // __kml_shape_get reads key off obj through its layout, then its added
 // properties. *found is -1 when the object has no shape.
-extern i64 __kml_error_extra_get(void *o, const char *key, int *found);
+extern i64 __kml_error_extra_get(void *o, const char *key, int *found) __attribute__((weak));
 
 // Whether obj is a generator instance, by its layout's toStringTag row: 1
 // for a generator, 2 for an async one, else 0.
@@ -543,7 +543,7 @@ const char *__kml_shape_key(void *obj, i64 i) {
 
 // { ...o } of a boxed static object: its own enumerable fields into a
 // dynamic object.
-extern void __kml_dynobj_set(void *bag, const char *key, i64 value);
+extern void __kml_dynobj_set(void *bag, const char *key, i64 value) __attribute__((weak));
 
 void __kml_shape_spread(void *bag, void *obj) {
     const KmlShape *s = __kml_shape_of(obj);
@@ -562,9 +562,9 @@ void __kml_shape_spread(void *bag, void *obj) {
 // The hooks dynjson.c reads a static object's layout row through. An
 // Error's own enumerable fields beyond its layout (its system fields and
 // extra bag) follow the layout's keys.
-extern i64 __kml_error_nextra(void *o);
-extern const char *__kml_error_extra_key(void *o, i64 i);
-extern i64 __kml_error_extra_get(void *o, const char *key, int *found);
+extern i64 __kml_error_nextra(void *o) __attribute__((weak));
+extern const char *__kml_error_extra_key(void *o, i64 i) __attribute__((weak));
+extern i64 __kml_error_extra_get(void *o, const char *key, int *found) __attribute__((weak));
 
 static int obj_is_error(void *o) { return (*(i64 *)o & KML_HDR_ERROR) != 0; }
 
@@ -683,9 +683,9 @@ void __kml_shape_names_c(void *o, void **out) {
 // descriptor for an own field, undefined otherwise. Object.freeze and
 // Object.seal record a static object's integrity level in the frozen set
 // (1 frozen, 2 sealed, 3 non-extensible).
-extern void *__kml_dynobj_new(void);
-extern void __kml_dynobj_set(void *bag, const char *key, i64 value);
-extern i64 __kml_obj_level(void *o);
+extern void *__kml_dynobj_new(void) __attribute__((weak));
+extern void __kml_dynobj_set(void *bag, const char *key, i64 value) __attribute__((weak));
+extern i64 __kml_obj_level(void *o) __attribute__((weak));
 extern i64 __kml_map_num_get(void *map, i64 key);
 
 // A string value is a pointer past its 8-byte length header.
@@ -786,8 +786,8 @@ i64 __kml_shape_own_desc(void *obj, const char *key) {
 // Object.getOwnPropertySymbols of a boxed value: a static object's
 // symbol-keyed fields, then the symbol keys added to it; a dynamic object's
 // symbol keys. out receives the { data, length } of the symbols.
-extern i64 __kml_dynobj_count(void *bag);
-extern void *__kml_dynobj_key_at(void *bag, i64 i);
+extern i64 __kml_dynobj_count(void *bag) __attribute__((weak));
+extern void *__kml_dynobj_key_at(void *bag, i64 i) __attribute__((weak));
 
 static void *key_symbol(const char *k) {
     void *p = NULL;
@@ -795,12 +795,12 @@ static void *key_symbol(const char *k) {
     return p;
 }
 
-extern _Bool __kml_dynobj_proxy_parts(void *o, void **target, void **handler);
-extern i64 __kml_dynobj_call_trap(void *rec, i64 thisv, i64 argc, i64 *argv);
-extern _Bool __kml_dynobj_flags_test(void *o, i64 mode);
-extern i64 __kml_dynobj_attrs_at(void *o, i64 i);
-extern i64 __kml_dynobj_get(void *o, const char *key);
-extern long long __kml_anyarr_get_by_key(void *box, const char *key);
+extern _Bool __kml_dynobj_proxy_parts(void *o, void **target, void **handler) __attribute__((weak));
+extern i64 __kml_dynobj_call_trap(void *rec, i64 thisv, i64 argc, i64 *argv) __attribute__((weak));
+extern _Bool __kml_dynobj_flags_test(void *o, i64 mode) __attribute__((weak));
+extern i64 __kml_dynobj_attrs_at(void *o, i64 i) __attribute__((weak));
+extern i64 __kml_dynobj_get(void *o, const char *key) __attribute__((weak));
+extern long long __kml_anyarr_get_by_key(void *box, const char *key) __attribute__((weak));
 extern i64 __kml_dynarr_len(void *a);
 extern i64 __kml_dynarr_at(void *a, i64 i);
 
@@ -839,11 +839,11 @@ static int has_key(const char **ks, i64 n, const char *k) {
     return 0;
 }
 
-extern char **__kml_dynobj_keys_c(void *o, i64 *n);
-extern _Bool __kml_key_is_symbol(const char *k);
-extern i64 __kml_dynobj_own_desc(void *o, const char *key);
+extern char **__kml_dynobj_keys_c(void *o, i64 *n) __attribute__((weak));
+extern _Bool __kml_key_is_symbol(const char *k) __attribute__((weak));
+extern i64 __kml_dynobj_own_desc(void *o, const char *key) __attribute__((weak));
 extern unsigned char __kml_any_tobool(i64 v);
-extern _Bool __kml_dynobj_has_chain(void *o, const char *key);
+extern _Bool __kml_dynobj_has_chain(void *o, const char *key) __attribute__((weak));
 extern void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
 
 static int is_proxy(void *bag, void **target, void **handler) {

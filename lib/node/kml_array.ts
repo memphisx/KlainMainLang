@@ -328,6 +328,14 @@ export function __kml_Array_generic_join(o: any, args: any[]): string { // kml:l
     return out;
 }
 
+// Array.prototype.toString: this.join() when join is callable, else
+// Object.prototype.toString's tag.
+export function __kml_Array_generic_toString(o: any, args: any[]): string { // kml:lower Array.prototype
+    const j = o.join;
+    if (typeof j === 'function') return j.call(o);
+    return Object.prototype.toString.call(o);
+}
+
 export function __kml_Array_generic_forEach(o: any, args: any[]): void { // kml:lower Array.prototype
     const len = lengthOf(o);
     const f = args[0];

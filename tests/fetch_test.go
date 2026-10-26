@@ -1196,7 +1196,7 @@ http.get("%s/notfound", (res) => {
 // OWN in-process http.listen server without deadlocking the single event loop
 // (registers a completion reaction the loop fires; previously busy-blocked).
 func TestE2EHTTPClientInProcessRoundTrip(t *testing.T) {
-	assertOutputImports(t, `
+	assertOutputImports(t, subPort(`
 import http from 'http'
 http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.writeHead(200)
@@ -1211,7 +1211,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
     })
   })
 })
-`, "got pong 200")
+`, 18499, freePort(t)), "got pong 200")
 }
 
 // Response.headers (ADR-00490, ADR-01321): the Headers filled from the raw

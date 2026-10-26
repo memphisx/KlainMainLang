@@ -137,7 +137,7 @@ console.log(d(15000));
 // main stack (never on the module coroutine's), the server serves, and the
 // statements after listen — including another await — run once it closes.
 func TestE2EHTTPListenAfterTopLevelAwait(t *testing.T) {
-	assertOutputImports(t, `
+	assertOutputImports(t, subPort(`
 import http from 'klain:http'
 
 interface Res { status: number; body: string }
@@ -158,7 +158,7 @@ http.listen(18431, (req: HttpRequest): Res => {
 console.log("server closed");
 const tail = await Promise.resolve("tail");
 console.log(tail);
-`, "config loaded: hi\nclient got: hi /x\nserver closed\ntail\n")
+`, 18431, freePort(t)), "config loaded: hi\nclient got: hi /x\nserver closed\ntail\n")
 }
 
 // A coroutine parked on a promise nothing can settle does not hold the process

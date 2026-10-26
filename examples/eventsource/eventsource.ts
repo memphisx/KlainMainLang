@@ -9,8 +9,12 @@
 // of a real external SSE feed, so this stays deterministic and
 // offline-capable like every other examples/fetch/*.ts file.
 
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
 // ── readyState / close() ─────────────────────────────────────────────────
-const es = new EventSource('http://127.0.0.1:8765/stream')
+const es = new EventSource(HTTPBIN + '/stream')
 console.log(es.readyState)   // 0 (CONNECTING) — the transfer has only just started
 
 // readyState transitions to OPEN once the server's first bytes actually
@@ -26,7 +30,7 @@ setTimeout(() => {
 // A second, independent EventSource against the same endpoint — the
 // fixture's /stream sends one "data: hello\n\n" record and then holds the
 // connection open, so onopen and onmessage each fire exactly once.
-const messages = new EventSource('http://127.0.0.1:8765/stream')
+const messages = new EventSource(HTTPBIN + '/stream')
 messages.onopen = (ev) => {
   console.log(ev.type)         // open
 }
@@ -41,7 +45,7 @@ messages.onmessage = (ev) => {
 // /stream-named sends one named ("greeting") event followed by one unnamed
 // one — onmessage only ever fires for the unnamed record; the named one
 // only reaches a matching addEventListener registration.
-const named = new EventSource('http://127.0.0.1:8765/stream-named')
+const named = new EventSource(HTTPBIN + '/stream-named')
 let seen = 0
 named.addEventListener('greeting', (ev) => {
   console.log(ev.type)   // greeting
@@ -70,7 +74,7 @@ setTimeout(() => { bad.close() }, 200)
 // /status/404 returns a plain 404 with no body — a response that *arrived*
 // with the wrong shape, not a network failure, so Stage 3 fails the
 // connection permanently instead of scheduling a reconnect.
-const notFound = new EventSource('http://127.0.0.1:8765/status/404')
+const notFound = new EventSource(HTTPBIN + '/status/404')
 setTimeout(() => {
   console.log(notFound.readyState) // 2 (CLOSED) — and stays that way, no retry
 }, 200)
@@ -81,7 +85,7 @@ setTimeout(() => {
 // reconnects after the server-specified delay, replaying the id it saw as
 // a Last-Event-ID request header — the second record proves the replay
 // actually reached the server, not just that some reconnect happened.
-const retrying = new EventSource('http://127.0.0.1:8765/stream-retry')
+const retrying = new EventSource(HTTPBIN + '/stream-retry')
 let retryCount = 0
 retrying.onmessage = (ev) => {
   retryCount = retryCount + 1

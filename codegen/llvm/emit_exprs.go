@@ -28,6 +28,11 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		return v, err
 	}
 	v, err := e.emitExprUnguarded(expr)
+	// A call returning nothing whose result is an argument or interpolation
+	// (`s.split(f())`) is the value undefined there.
+	if err == nil && (v.Ty.IR == "void" || v.Ty.IR == "") && e.voidValueSites()[expr] {
+		v = Value{Ref: "null", Ty: TypeUndefined}
+	}
 	// The base of a member/index/call access: an absent value throws the
 	// TypeError instead of being dereferenced (emit_nullderef.go).
 	if err == nil && len(e.pendingDeref) > 0 {
@@ -766,4 +771,34 @@ func parseJSFloat(v string) (float64, error) {
 		return f, nil
 	}
 	return f, err
+}
+
+// voidValueSites are the call expressions in argument and template
+// interpolation position: their value is used even when they return nothing.
+func (e *Emitter) voidValueSites() map[ast.Expression]bool {
+	if e.voidSites != nil {
+		return e.voidSites
+	}
+	e.voidSites = map[ast.Expression]bool{}
+	mark := func(xs []ast.Expression) {
+		for _, x := range xs {
+			if c, ok := x.(*ast.CallExpression); ok {
+				e.voidSites[c] = true
+			}
+		}
+	}
+	if e.prog != nil {
+		ast.Inspect(e.prog, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpression:
+				mark(x.Args)
+			case *ast.NewExpression:
+				mark(x.Args)
+			case *ast.TemplateLiteral:
+				mark(x.Exprs)
+			}
+			return true
+		})
+	}
+	return e.voidSites
 }

@@ -27,6 +27,7 @@ var (
 	NumericSeparatorLegacy    = syntax(6188, "a numeric separator '_' is not allowed in a legacy octal or non-octal-decimal literal")
 	BigIntDecimalPoint        = syntax(1353, "a BigInt literal cannot contain a decimal point")
 	BigIntExponent            = syntax(1352, "a BigInt literal cannot contain an exponent")
+	RegexFlags                = syntax(1499, "invalid regular expression flags")
 	BigIntLegacyOctal         = syntax(1121, "a BigInt literal cannot use a legacy-octal / non-octal-decimal form")
 	UnterminatedString        = syntax(1002, "unterminated string literal")
 	InvalidHexEscape          = syntax(1125, "invalid hexadecimal escape sequence")

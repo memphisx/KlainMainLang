@@ -790,6 +790,11 @@ func (e *Emitter) emitDynAnyMemberGetInline(objVal Value, keyRef, propName strin
 	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", symBoxed, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(notSymL)
+	// A boxed bigint cell reads as the primitive it is (BigInt.prototype).
+	_, isBig := e.emitBoxedBigIntProbe(payload)
+	bigL, notBigL := e.freshLabel("dynget.bigcell"), e.freshLabel("dynget.notbig")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, bigL, notBigL))
+	e.emitLabel(notBigL)
 	// A static object: its layout's getter (TDD-00230 phase 5).
 	{
 		objp := e.emitIntToPtr(payload)
@@ -956,6 +961,8 @@ func (e *Emitter) emitDynAnyMemberGetInline(objVal Value, keyRef, propName strin
 	primL := e.freshLabel("dynget.prim")
 	errL := e.freshLabel("dynget.err")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isPrim, primL, errL))
+	e.emitLabel(bigL)
+	e.emitTerminator("br label %" + primL)
 	e.emitLabel(primL)
 	if e.primReadKeys == nil {
 		e.primReadKeys = map[string]bool{}

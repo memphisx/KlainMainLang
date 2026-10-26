@@ -666,6 +666,14 @@ func (e *Emitter) valueProtoRecord(class string, m hostMember) string {
 		// The TypedArray's dispatcher (typedDispatchRecord) has checked
 		// the receiver's kind.
 		self = e.bindValue(e.convert(Value{Ref: "%this", Ty: TypeAny}, e.resolveTypeName(class)), pos)
+	} else if class == "Number" || class == "BigInt" {
+		// emitPrimReceiver has checked (or unwrapped) the primitive: the
+		// call is its own method, not this record again through `any`.
+		ty := TypeF64
+		if class == "BigInt" {
+			ty = BigIntType()
+		}
+		self = e.bindValue(e.convert(Value{Ref: recv, Ty: TypeAny}, ty), pos)
 	} else {
 		self = e.bindValue(Value{Ref: recv, Ty: TypeAny}, pos)
 	}
@@ -1750,7 +1758,7 @@ func markObjectIntrinsics(prog *ast.Program) {
 // one of that class's methods so: the boxed bag, or 0.
 func (e *Emitter) emitPrimProtoOfFinalize() {
 	var classes []string
-	for _, class := range []string{"Number", "Boolean"} {
+	for _, class := range []string{"Number", "Boolean", "BigInt"} {
 		for _, m := range e.hostMembers(class) {
 			if m.method && !m.optional && e.primReadKeys[m.name] {
 				classes = append(classes, class)
@@ -1762,9 +1770,24 @@ func (e *Emitter) emitPrimProtoOfFinalize() {
 		return
 	}
 	restore := e.beginDetachedFunc()
-	tag, _ := e.emitUnboxTagPayload(Value{Ref: "%v", Ty: TypeAny})
+	tag, payload := e.emitUnboxTagPayload(Value{Ref: "%v", Ty: TypeAny})
 	for _, class := range classes {
 		hit := e.freshReg()
+		if class == "BigInt" {
+			// An object-tagged box whose cell is a bigint's.
+			isObj := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+			probeL, noL := e.freshLabel("primproto.bigprobe"), e.freshLabel("primproto.notbig")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, probeL, noL))
+			e.emitLabel(probeL)
+			_, isBig := e.emitBoxedBigIntProbe(payload)
+			yesL := e.freshLabel("primproto.yes")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, yesL, noL))
+			e.emitLabel(yesL)
+			e.emitTerminator("ret i64 " + e.emitBuiltinProto(class).Ref)
+			e.emitLabel(noL)
+			continue
+		}
 		if class == "Number" {
 			isI, isF := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isI, tag, kmlTagInt))

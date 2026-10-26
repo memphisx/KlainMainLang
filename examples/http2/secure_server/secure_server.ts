@@ -2,7 +2,7 @@
 // connection whose ALPN negotiated `h2`. A client that negotiated no h2 gets
 // Node's 403 explanation unless `allowHTTP1: true` serves it HTTP/1.1. Try it
 // with:
-//   curl -k --http2 https://127.0.0.1:8630/hello
+//   curl -k --http2 https://127.0.0.1:<port>/hello
 //
 // { cert, key } are PEM strings (as Node's are). A real service reads them with
 // fs.readFileSync; the throwaway self-signed pair below is inline so the example
@@ -18,7 +18,7 @@ const server = http2.createSecureServer({ cert: cert, key: key }, (req, res) => 
   res.end("h2-over-TLS: " + req.method + " " + req.url);
 });
 
-server.listen(8630, () => {
+server.listen(0, () => {
   console.log("http2 secure server on", (server.address() as AddressInfo).port);
   // Exit shortly after for the example runner; a real service would stay up.
   setTimeout(() => { server.close(); }, 150);

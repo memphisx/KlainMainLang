@@ -18,6 +18,10 @@
 // element's own Promise slot — the same array variable can't be fed to a
 // second combinator call afterward. Each section below uses its own array.
 
+// The httpbin-lite fixture `make examples` starts on a free port; run by
+// hand, the public httpbin.org it stands in for.
+const HTTPBIN = process.env.HTTPBIN_URL ?? 'https://httpbin.org'
+
 async function double(n: number): Promise<number> {
     return n * 2
 }
@@ -53,8 +57,8 @@ for (const s of settled) {
 
 // ── real concurrency: N in-flight fetches waited on together ───────────────
 const forFetchAll: Array<Promise<Response>> = []
-forFetchAll.push(fetch('http://127.0.0.1:8765/get'))
-forFetchAll.push(fetch('http://127.0.0.1:8765/status/404'))
+forFetchAll.push(fetch(HTTPBIN + '/get'))
+forFetchAll.push(fetch(HTTPBIN + '/status/404'))
 const responses = await Promise.all(forFetchAll)
 console.log(responses[0].status)    // 200
 console.log(responses[1].status)    // 404
@@ -63,8 +67,8 @@ console.log(responses[1].status)    // 404
 // slow one is listed first in the array, so a passing result here can only
 // mean a real race, not "always the first array element."
 const forFetchRace: Array<Promise<Response>> = []
-forFetchRace.push(fetch('http://127.0.0.1:8765/delay/1'))
-forFetchRace.push(fetch('http://127.0.0.1:8765/get'))
+forFetchRace.push(fetch(HTTPBIN + '/delay/1'))
+forFetchRace.push(fetch(HTTPBIN + '/get'))
 const fastest = await Promise.race(forFetchRace)
 console.log(fastest.status)         // 200 — the fast one wins
 
@@ -72,7 +76,7 @@ console.log(fastest.status)         // 200 — the fast one wins
 // failure — an unreachable host settles "rejected" instead of aborting the
 // whole combinator.
 const forFetchSettled: Array<Promise<Response>> = []
-forFetchSettled.push(fetch('http://127.0.0.1:8765/get'))
+forFetchSettled.push(fetch(HTTPBIN + '/get'))
 forFetchSettled.push(fetch('https://this-domain-absolutely-does-not-exist-12345.invalid/'))
 const fetchSettled = await Promise.allSettled(forFetchSettled)
 console.log(fetchSettled[0].status) // fulfilled

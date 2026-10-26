@@ -1,6 +1,6 @@
 // http.createServer response fidelity (ADR-00691): every response is stamped
 // with an RFC 7231 `Date` header, and HTTP/1.1 connections are persistent by
-// default. A `curl -D - http://127.0.0.1:18641/` against this server shows:
+// default. A `curl -D - http://127.0.0.1:<port>/` against this server shows:
 //
 //   HTTP/1.1 200 OK
 //   Date: Thu, 04 Sep 2026 23:19:21 GMT
@@ -17,10 +17,12 @@
 // exits (a real server omits the self-request and the shutdown timer).
 import http from 'http';
 
-http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
+const server = http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("ok");
-}).listen(18641, () => {
-  http.get("http://127.0.0.1:18641/", (res) => {
+});
+server.listen(0, () => {
+  const port = (server.address() as any).port; // bound port: listen(0) picks a free one
+  http.get(`http://127.0.0.1:${port}/`, (res) => {
     let body = "";
     res.on('data', (chunk: string) => { body = body + chunk; });
     res.on('end', () => {

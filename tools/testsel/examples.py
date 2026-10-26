@@ -83,13 +83,16 @@ def modeflags(f):
 
 fx = os.path.join(out, 'httpbin-lite.exe')
 subprocess.run([a.cli, '-o', fx, 'tools/httpbin-lite/httpbin.ts'], capture_output=True)
-env = dict(os.environ, HTTPBIN_LITE_PORT='8765')
+port_file = os.path.join(out, 'httpbin-lite.port')
+if os.path.exists(port_file):
+    os.remove(port_file)
+env = dict(os.environ, HTTPBIN_LITE_PORT_FILE=port_file)
 fixture = subprocess.Popen([fx], env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 for _ in range(50):
-    try:
-        urllib.request.urlopen('http://127.0.0.1:8765/get', timeout=1); break
-    except Exception:
-        time.sleep(0.1)
+    if os.path.exists(port_file) and os.path.getsize(port_file) > 0:
+        break
+    time.sleep(0.1)
+os.environ['HTTPBIN_URL'] = 'http://127.0.0.1:' + open(port_file).read().strip()
 import re
 only = re.compile(a.only) if a.only else None
 ok = fail = 0

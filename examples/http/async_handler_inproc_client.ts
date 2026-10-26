@@ -16,12 +16,14 @@ async function delay(ms: number): Promise<void> {
   return await new Promise<void>((r) => setTimeout(() => r(), ms))
 }
 
-http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
+const server = http.createServer(async (req: http.IncomingMessage, res: http.ServerResponse) => {
   await delay(20) // yield the connection fiber to the loop, then respond
   res.writeHead(200, { "Content-Type": "text/plain" })
   res.end("kalimera from the server")
-}).listen(18537, () => {
-  http.get("http://127.0.0.1:18537/", (res) => {
+})
+server.listen(0, () => {
+  const port = (server.address() as any).port; // bound port: listen(0) picks a free one
+  http.get(`http://127.0.0.1:${port}/`, (res) => {
     let body = ""
     res.on('data', (chunk: string) => { body = body + chunk })
     res.on('end', () => {
