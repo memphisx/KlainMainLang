@@ -17,6 +17,9 @@ extern int __kml_win_spawn_worker(const char *exe, char **argv);
 extern char *__kml_win_self_exe(void);
 extern void *__kml_win_cluster_flag(void);
 extern void *__argv_ptr;
+// The UCRT has neither; win32shim.c defines both over the wide environment.
+extern int setenv(const char *name, const char *value, int overwrite);
+extern int unsetenv(const char *name);
 #else
 #include <sys/mman.h>
 #endif

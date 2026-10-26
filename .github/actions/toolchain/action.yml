@@ -32,10 +32,19 @@ runs:
       with:
         node-version: '24.19.0'
 
+    # The downloaded .debs are cached: an archive mirror serving at a few
+    # kB/s once ate 31 of a job's 45 minutes in apt-get alone.
+    - name: Linux — cache the downloaded packages
+      if: inputs.goos == 'linux'
+      uses: actions/cache@v4
+      with:
+        path: ~/aptcache
+        key: apt-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('.github/actions/toolchain/action.yml') }}
+
     - name: Linux — clang + curl, gc, tommath, pcre2, ssl, nghttp2, libuv, h2o, sqlite3, gtk3/webkit2gtk
       if: inputs.goos == 'linux'
       shell: bash
-      run: sudo apt-get update && sudo apt-get install -y clang lld libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libuv1-dev libh2o-dev libc-ares-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
+      run: mkdir -p ~/aptcache/partial && sudo apt-get update && sudo apt-get install -y -o Dir::Cache::Archives="$HOME/aptcache" -o Acquire::Retries=5 -o Acquire::http::Timeout=30 clang lld libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev libssl-dev libnghttp2-dev libuv1-dev libh2o-dev libc-ares-dev libsqlite3-dev libgtk-3-dev libwebkit2gtk-4.1-dev
 
     - name: macOS — Homebrew pcre2, tommath, openssl@3, nghttp2, libuv, bdw-gc (keg-only openssl@3 exposed to clang)
       if: inputs.goos == 'darwin'
