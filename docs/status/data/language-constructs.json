@@ -69,6 +69,7 @@
             "status": "implemented",
             "notes": [
               "See [ADR-00010](../adr/00/ADR-00010.md)",
+              "Any labeled statement (a block, `if`, `switch`, `try`) is a `break` target, and stacked labels all name their loop ([ADR-01970](../adr/01/ADR-01970.md))",
               "A `break`/`continue` (labeled or not) inside a nested closure/function expression can only target a loop declared within that closure's own body, not one in an enclosing function — a clean compile-time rejection (`break`/`continue` outside of a loop, or an undefined label), not a silent misparse, matching JS's own no-cross-function-boundary label rule ([ADR-00168](../adr/00/ADR-00168.md))"
             ]
           },
@@ -82,6 +83,9 @@
           {
             "feature": "`throw new Error(msg)`",
             "status": "implemented",
+            "caveats": [
+              "An uncaught error prints its stack alone; Node first prints the throwing source line under a caret, and after the stack the error's own properties and a `Node.js <version>` line"
+            ],
             "notes": [
               "Via `setjmp` / `longjmp`",
               "A built-in error constructor is also a first-class *value* (`assert.throws(TypeError, fn)`, `x === RangeError`): a boxed funcref with exact identity, `typeof` `\"function\"`, native-function stringification ([ADR-00289](../adr/00/ADR-00289.md))"
@@ -299,7 +303,7 @@
               "`typeof value.method` is `\"function\"` for a class instance method and the common built-in string/array methods ([ADR-00607](../adr/00/ADR-00607.md)); a string/array method name outside that curated set falls back to inference (a wrong `\"number\"`)"
             ],
             "notes": [
-              "Compile-time constant; resolved from inferred type. Heap-backed built-in values (a Promise, `Map`/`Set`, a generator instance, `Date`, `null`, …) are `\"object\"`; classes, implemented built-in constructors (`Promise`, `Date`, the error family, …) and implemented global functions (`fetch`, `setTimeout`, …) are `\"function\"`; `Math`/`JSON`/`console` are `\"object\"`; an undeclared name or runtime-absent static (`Promise.try`) is `\"undefined\"`, as in JS ([ADR-00282](../adr/00/ADR-00282.md))",
+              "Compile-time constant; resolved from inferred type. Heap-backed built-in values (a Promise, `Map`/`Set`, a generator instance, `Date`, `null`, …) are `\"object\"`; classes, implemented built-in constructors (`Promise`, `Date`, the error family, …) and implemented global functions (`fetch`, `setTimeout`, …) are `\"function\"`; `Math`/`JSON`/`console` are `\"object\"`; an undeclared name is `\"undefined\"`, as in JS ([ADR-00282](../adr/00/ADR-00282.md))",
               "`typeof value.method` answers `\"function\"` for a class instance method or a common built-in string/array method, while a field, `length`, or an accessor property answers through normal inference (a class getter reads as its return type) ([ADR-00607](../adr/00/ADR-00607.md))"
             ]
           },
@@ -352,7 +356,7 @@
               "`var` is function-scoped (leaks its enclosing block, and re-declarable with the same name); `let`/`const` are block-scoped; `const` rebinding is rejected",
               "Redeclarations are compile errors in every scope, as strict code's early errors: a lexical declaration clashes with any other of its name (`let x; let x`, `let x; var x`, a parameter or a `catch` variable against a `let` in the body, the cross-block `let x; { var x }`), while `var` redeclares freely; under `-compat=js` two plain functions in one block merge (Annex B) — see [ADR-01108](../adr/01/ADR-01108.md)",
               "A `let`/`const`/`class`/`enum` read or written where no path from its declaration reaches, within the same function, is a `cannot access 'x' before initialization` error (including the block-shadowing form, a binding fresh on each loop iteration, and a `switch` case entered around the declaration); a read from a nested function is not checked, since it may run later — see [ADR-01110](../adr/01/ADR-01110.md)",
-              "A typed `let` declared without an initializer and read on a path where no value was stored is TypeScript's `used before being assigned` error (a loop that may not run, a `try` that may throw first, one branch of an `if`); an unannotated `let x;` has an evolving type and is not checked, as in TypeScript; `var` is exempt — hoisted, no TDZ, and a `var` whose declaration can be skipped on the way to a read (`if (c) { var r = 1 } use(r)`, dead code after a `break`) reads a real `undefined`, typed `T | undefined` at run time while tsc keeps the plain `T` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/00/ADR-00213.md)/[ADR-00454](../adr/00/ADR-00454.md)/[ADR-01057](../adr/01/ADR-01057.md))"
+              "A typed `let` declared without an initializer and read on a path where no value was stored is TypeScript's `used before being assigned` error (a loop that may not run, a `try` that may throw first, one branch of an `if`); an unannotated `let x;` has an evolving type and is not checked, as in TypeScript; so is a `var` (typed, or typed by its initializer) whose store can be skipped on the way to a read (`if (c) { var r = 1 } use(r)`), its type holding no `undefined`; under `-compat=js` that read is a real `undefined` ([TDD-00071](../tdd/TDD-00071.md) Stage 2/[ADR-00213](../adr/00/ADR-00213.md)/[ADR-01057](../adr/01/ADR-01057.md)/[ADR-01970](../adr/01/ADR-01970.md))"
             ]
           },
           {
@@ -481,11 +485,9 @@
           {
             "feature": "Destructured function parameters (`function f({ x, y }: T) {}` / `function f([a, b]: T[]) {}`)",
             "status": "implemented",
-            "caveats": [
-              "No combination with `...` or a whole-parameter default value; a pattern param with no annotation and no contextual type (a plain `function f([a, b])`) is still rejected, matching TS's implicit-any error",
-              "A `= default` on a nested position is a clean rejection; per-element defaults follow the same rules as the statement-level destructuring rows"
-            ],
+            "caveats": [],
             "notes": [
+              "A rest (`{ x, ...rest }`, `[h, ...t]`), a whole-parameter default (`{ x, y }: T = { x: 1, y: 2 }`, or a value held in a box, whose getters run), and defaults at nested positions all bind as Node does. Under the strict lane a pattern parameter with no annotation and no contextual type (`function f([a, b])`) is rejected as tsc rejects it (TS7031); the js lane binds it",
               "A **destructured callback parameter** needs no annotation — its type is supplied by contextual typing from the higher-order method's element type: `Object.entries(o).map(([k, v]) => …)`, `pairs.filter(([k, v]) => …)`, `map.entries()`/pair-array `.forEach`/`.reduce`, etc. ([ADR-00854](../adr/00/ADR-00854.md)/[TDD-00199](../tdd/TDD-00199.md))",
               "A **heterogeneous tuple** pattern param binds each position by its own type (`([k, v]: [string, number]) => …`, and the `[string, V]` entry tuples from `Object.entries`/`Map`), not a single uniform element type ([ADR-00854](../adr/00/ADR-00854.md))",
               "Each individual pattern element/field may have its own default (`function f([a = 1]: number[])`, `function f({ x = \"d\" }: T)`)",
@@ -496,10 +498,7 @@
           {
             "feature": "Nested function declarations (`function outer() { function inner() {...}; return inner(); }`)",
             "status": "implemented",
-            "caveats": [
-              "Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors ([TDD-00057](../tdd/TDD-00057.md)/[ADR-00149](../adr/00/ADR-00149.md)); a hoisted call that reads a captured variable declared *between* the call and the declaration is a clean compile error (Node crashes with a runtime TDZ error there — the [TDD-00070](../tdd/TDD-00070.md) posture)",
-              "Two mutually-recursive **capturing** nested siblings (`f` calls `g`, `g` calls `f`, both closing over an enclosing local) are a clean `undefined function or closure` compile error — cross-sibling letrec needs a shared self-capture cell ([ADR-01016](../adr/01/ADR-01016.md)); self-recursion, including unannotated with the recursive call as the first return, works"
-            ],
+            "caveats": [],
             "notes": [
               "Hoisted, forward-referenceable, self-recursive, visible to its own further-nested descendants — including a CAPTURING declaration called or referenced before its declaration statement (letrec hoisting, [ADR-01014](../adr/01/ADR-01014.md))",
               "Captures enclosing locals/parameters by reference ([TDD-00129](../tdd/TDD-00129.md)/[ADR-00386](../adr/00/ADR-00386.md)) including array variables ([ADR-00941](../adr/00/ADR-00941.md)) and C-style/iterator `for` loop variables (per-iteration `let` binding semantics, `var` shared — [ADR-01014](../adr/01/ADR-01014.md)); escapes by name with an inferred closure type ([ADR-01013](../adr/01/ADR-01013.md)); a capturing nested *generator* works in scope and escapes as a first-class constructor closure ([ADR-01014](../adr/01/ADR-01014.md))"
@@ -510,8 +509,7 @@
             "status": "implemented",
             "caveats": [
               "`thisArg` is the receiver only of a function with a `this: T` parameter, declared or from its contextual type ([ADR-01158](../adr/01/ADR-01158.md)); for any other function it is evaluated then ignored, so borrowing a class method against another receiver (`obj.m.call(other)`) is unsupported",
-              "call/apply/bind on a Node module's function (`net.connect.apply(…)`) isn't supported — it isn't a function value; the ECMAScript builtins (`parseInt`, `Math.max`, `encodeURIComponent`, …) are ([ADR-01307](../adr/01/ADR-01307.md))",
-              "`.apply` takes either a literal array (`f.apply(null, [a, b])`) or a runtime array spread into a **rest** parameter (`f.apply(null, arr)` where `f` is `(...xs) => …`); a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection"
+              "call/apply/bind on a Node module's function (`net.connect.apply(…)`) isn't supported — it isn't a function value; the ECMAScript builtins (`parseInt`, `Math.max`, `encodeURIComponent`, …) are ([ADR-01307](../adr/01/ADR-01307.md))"
             ],
             "notes": [
               "On a function held in an `any`, `f.apply(thisArg, arr)`, `f.call(thisArg, …)` and `f(...args, x)` pass the argument list through the dynamic call ABI, any array ([ADR-01172](../adr/01/ADR-01172.md))",
@@ -600,6 +598,16 @@
             ],
             "caveats": [
               "Called with another constructor as `this` (`Promise.withResolvers.call(MyPromise)`) it still builds a plain `Promise`, not an instance of that constructor"
+            ]
+          },
+          {
+            "feature": "`Promise.try`",
+            "status": "implemented",
+            "notes": [
+              "The callback runs synchronously with the extra arguments; its value, an adopted thenable, or its synchronous throw settles the returned promise ([ADR-01970](../adr/01/ADR-01970.md))"
+            ],
+            "caveats": [
+              "Called with another constructor as `this` (`Promise.try.call(MyPromise, f)`) it still builds a plain `Promise`, not an instance of that constructor"
             ]
           },
           {
@@ -781,7 +789,8 @@
             "caveats": [
               "Instance-field initializers (`x = expr`) work, and a class with fields needs **no** explicit constructor — a field nothing assigned yet (`x!: number`) reads `undefined`, as in Node, and the strict lane rejects one with neither `!` nor a definite constructor assignment (TS2564, not yet checked in a generic class), any initializers that exist run in a synthesized constructor ([ADR-00374](../adr/00/ADR-00374.md)); the one remaining rejection is a **derived** class adding fields when its base has a rest-parameter constructor (write an explicit `super(...)`). static field initializers (`static x = 5`) work — lowered to assignments run in declaration order in the class's static-init, ahead of any `static {}` block, with an unannotated one typed by inference ([ADR-00375](../adr/00/ADR-00375.md)). An instance-field initializer lowered into the constructor can currently see the constructor's own parameters (which real JS's separate initializer scope forbids), and an unannotated initializer of an expression shape the compiler doesn't recognize falls back to `i64` ([TDD-00063](../tdd/TDD-00063.md)/[ADR-00180](../adr/00/ADR-00180.md))",
               "A class member keyed by a value computed at run time (a `let`, a parameter, a call, `Symbol.hasInstance`) is a clean rejection; literal names (`'a-b' = 1`, `0() {}`, `[1]`), the well-known symbols `iterator`, `asyncIterator`, `toPrimitive`, `toStringTag`, `dispose` and `asyncDispose`, and a const holding a symbol, string or number are accepted ([TDD-00089](../tdd/TDD-00089.md), [ADR-00278](../adr/00/ADR-00278.md), [ADR-01414](../adr/01/ADR-01414.md), [ADR-01415](../adr/01/ADR-01415.md), [ADR-01420](../adr/01/ADR-01420.md))",
-              "A class that reads a local of its enclosing function from a nested `function` is a clean rejection; an inherited static method called on a subclass reads `this` as the class declaring it; a class expression that reads none is hoisted to one top-level class, so evaluating it twice yields the same class (identity and statics shared, where Node creates a new class per evaluation); `extends <expression>` is out of scope",
+              "A class that reads a local of its enclosing function is a clean rejection when it reads it from a `function` nested in a field initializer or in a derived constructor before its `super()` call, has decorated accessors, or names a `var` binding written after it ([ADR-01981](../adr/01/ADR-01981.md), [ADR-01985](../adr/01/ADR-01985.md)); an inherited static method called on a subclass reads `this` as the class declaring it; a class expression that reads none is hoisted to one top-level class, so evaluating it twice yields the same class (identity and statics shared, where Node creates a new class per evaluation); `extends` takes a name or a call (`extends Mixin(User)`, [ADR-01979](../adr/01/ADR-01979.md)), not another expression",
+              "A class-typed parameter given an `any` that holds a plain object rather than an instance reads the instance layout (a field reads 0)",
               "Class early-error gaps (deferred, no valid program miscompiles): a `super()` call in a method parameter default, field-definition ASI on the same line (`field = 1 method(){}`), and the `#constructor` private-name ban all compile instead of raising the spec's `SyntaxError`"
             ],
             "notes": [
@@ -825,6 +834,10 @@
           {
             "feature": "`class` inheritance (`extends`/`super`)",
             "status": "implemented",
+            "caveats": [
+              "A class whose base can hold a class that names its own function's locals (a class expression closing over them) is a clean rejection; a base of any other run-time value is specialized per class it can hold, a class expression among them lifted to one top-level class ([ADR-01986](../adr/01/ADR-01986.md))",
+              "An instance of a class whose constructor may return another object (or of a class extending one) is held as `any`, so its member reads and method calls are dynamic ([ADR-01980](../adr/01/ADR-01980.md))"
+            ],
             "notes": [
               "[TDD-00009](../tdd/TDD-00009.md) Stage 3 — single inheritance, base-first field layout, `super(args)`/`super.method(args)`, an implicit pass-through constructor when a derived class adds no fields of its own",
               "Dispatch is static (a plain direct call, identical to Stage 1/2) except for a method provably overridden somewhere in the whole program, which goes through a per-tree vtable instead — decided once at compile time via whole-program override analysis, not per call site. See [ADR-00083](../adr/00/ADR-00083.md)",
@@ -868,6 +881,33 @@
             ]
           },
           {
+            "feature": "`class X extends Number` / `String` / `Boolean`",
+            "status": "implemented",
+            "caveats": [],
+            "notes": [
+              "The instance is the primitive's wrapper object ([ADR-01970](../adr/01/ADR-01970.md)): `new X(…)` and `super(…)` take the constructor's argument, the primitive's methods and `length`/index on it, `valueOf`, arithmetic and `String()`, iteration of a String's characters, `instanceof` both ways, `Object.keys`, `JSON.stringify` serializing the primitive, the same through `any`, and `console.log` as Node shows it (`[Number (Money): 12.5] { currency: 'EUR' }`)"
+            ]
+          },
+          {
+            "feature": "`class X extends ArrayBuffer` / `SharedArrayBuffer`",
+            "status": "implemented",
+            "caveats": [],
+            "notes": [
+              "The instance carries the buffer's body ([ADR-01970](../adr/01/ADR-01970.md)): `new X(n, { maxByteLength })` and `super(…)` construct it, `byteLength`, `resize`/`grow`, `resizable`/`maxByteLength`, typed arrays and `DataView`s over it, `slice` making another instance of the class, `instanceof` both ways, `ArrayBuffer.isView` false, the same through `any`, and `console.log` as Node shows it (`B [ArrayBuffer] { [Uint8Contents]: <07 00>, [byteLength]: 2, tag: 1 }`)"
+            ]
+          },
+          {
+            "feature": "`class X extends Function`",
+            "status": "implemented",
+            "caveats": [
+              "The Function constructor compiles only source strings known at compile time: a constructor that computes the strings it passes to `super(…)` (beyond forwarding its parameters), or a construction through a binding holding the class (`const K = Fn; new K(…)`), throws the EvalError a run-time `Function(…)` does, where Node compiles them",
+              "A class with a private member, a `super.x` member access, or a constructor `return` is not lowered and is still a compile error"
+            ],
+            "notes": [
+              "An instance is a callable function the Function constructor builds from the construction's (super call's) arguments ([ADR-01970](../adr/01/ADR-01970.md)): its prototype is the class's, which inherits `Function.prototype`; methods, accessors and fields act on it, `instanceof` both ways, `name`/`length`, `call`/`apply`, and a constructor that skips `super()` throws V8's ReferenceError"
+            ]
+          },
+          {
             "feature": "`class X extends Array` / a typed array",
             "status": "implemented",
             "caveats": [
@@ -896,7 +936,7 @@
               "A class decorator that *returns a replacement constructor* is refused at runtime (a loud throw, not a silent drop) — the static-class model has no constructor-replacement routing yet ([TDD-00161](../tdd/TDD-00161.md) Stage 4b); observe-only class decorators (the registration pattern) run faithfully. A decorator on a generic class is a clean compile-time rejection",
               "Accessor (get/set), static, and generator method decorators, and method decorators on a generic class, are a clean rejection; a method whose parameter/return types can't be marshalled through the decorator ABI (array/nullable/rest parameters) is also rejected",
               "Factory-call decorators (`@dec(...)`) work across placements (the factory runs, its returned function decorates) when the returned decorator is a named function or a typed closure; a returned **`any`-typed closure that captures** the factory's arguments hits the separate dynamic-prototype-method capture limitation — annotate the factory's return type to route it through the typed-closure path",
-              "The standard (TC39) `(value, context)` dialect (`-decorators=standard`, default is experimental) covers class (observe), method, and instance-field decorators (the field initializer + `context.addInitializer` callbacks run per-instance in the constructor), with `context = { kind, name, static, private, addInitializer, metadata }`; getter/setter and `accessor x` auto-field decorators run (a decorated `accessor` desugars to a backing field + generated get/set, and the decorator follows the TC39 `{ get, set, init }` protocol — a returned get/set replaces the accessor, a returned init transforms the backing field's initial value). Static-field decorators are still a clean rejection; TC39 has no parameter decorators. A returned *replacement* that reads typed `this.field` hits the general replacement-`this` limitation below",
+              "The standard (TC39) `(value, context)` dialect (`-decorators=standard`; the default for `-compat=js`, experimental otherwise) covers class (observe), method, and field decorators, instance and static (a static method's replacement is what `C.m` then reads and calls; a static field's initializer transforms its initial value) (the field initializer + `context.addInitializer` callbacks run per-instance in the constructor), with `context = { kind, name, static, private, addInitializer, metadata }`; getter/setter and `accessor x` auto-field decorators run (a decorated `accessor` desugars to a backing field + generated get/set, and the decorator follows the TC39 `{ get, set, init }` protocol — a returned get/set replaces the accessor, a returned init transforms the backing field's initial value). TC39 has no parameter decorators. A returned *replacement* that reads typed `this.field` hits the general replacement-`this` limitation below",
               "A decorator *replacement* function (method, getter, or setter) runs as a dynamic function whose `this` is a boxed receiver, so it cannot do typed `this.field` access on a statically-typed instance — an observe-only decorator (returns the original) is unaffected, and a replacement that doesn't touch typed `this` fields works",
               "A dynamic function (any closure boxed into an `any`/decorator position) now binds its **declared parameter types** (so a typed body like a `(initial: number)` field initializer works) and **captures enclosing locals** (by shared heap cell, into the tag-12 record's env — so factory decorators, wrapping method decorators, and capturing `addInitializer` callbacks all work) ([ADR-00647](../adr/00/ADR-00647.md))",
               "`emitDecoratorMetadata` design types are name-carrying descriptor objects (`{ name: \"Number\" }`, the class name for a class type) — correct for `.name` inspection, but not the real runtime constructors (no first-class class-constructor value), so identity checks fail; `Reflect.metadata` used manually as a decorator factory is rejected; a metadata target must be a real dynamic object (a boxed static class instance is rejected at runtime)"

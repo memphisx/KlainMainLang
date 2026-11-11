@@ -152,7 +152,7 @@ func (u *unusedPass) walk(x ast.Node, scope *binder.Scope, ambient bool) {
 	case *ast.ClassDeclaration:
 		if n.BaseClass != "" {
 			if n.BaseQualified {
-				u.use(lookupName(n.BaseQualifier, scope))
+				u.use(lookupName(strings.Split(n.BaseQualifier, ".")[0], scope))
 			} else {
 				u.use(lookupName(n.BaseClass, scope))
 			}
@@ -269,8 +269,8 @@ func forEachTypeNode(v reflect.Value, fn func(ast.Node)) {
 			return
 		}
 		if v.Type() == typeAnnotationPtr {
-			if ta := v.Interface().(*ast.TypeAnnotation); ta.Source != "jsdoc" && ta.TypeNode() != nil {
-				fn(ta.TypeNode())
+			if ta := v.Interface().(ast.TypeNode); ta != nil && !ast.IsJSDoc(ta) {
+				fn(ta)
 			}
 			return
 		}
@@ -923,7 +923,7 @@ func literalKeys(e ast.Expression, b *binder.Binding) ([]string, bool) {
 	if !ok || len(sym.Declarations) == 0 {
 		return nil, false
 	}
-	var ta *ast.TypeAnnotation
+	var ta ast.TypeNode
 	switch n := sym.Declarations[0].Node.(type) {
 	case *ast.VarDeclaration:
 		ta = n.TypeAnnot
@@ -938,17 +938,25 @@ func literalKeys(e ast.Expression, b *binder.Binding) ([]string, bool) {
 	if ta == nil {
 		return nil, false
 	}
-	var keys []string
-	if ta.IsStringLiteral {
-		keys = append(keys, ta.LiteralValue)
-	} else if len(ta.UnionMembers) == 0 {
+	if ta == nil {
 		return nil, false
 	}
-	for _, m := range ta.UnionMembers {
-		if m == nil || !m.IsStringLiteral {
+	var members []ast.TypeNode
+	switch n := ast.Unparen(ta).(type) {
+	case *ast.UnionType:
+		members = n.Types
+	case *ast.LiteralType:
+		members = []ast.TypeNode{n}
+	default:
+		return nil, false
+	}
+	var keys []string
+	for _, m := range members {
+		lt, ok := ast.Unparen(m).(*ast.LiteralType)
+		if !ok || lt.Kind != "string" {
 			return nil, false
 		}
-		keys = append(keys, m.LiteralValue)
+		keys = append(keys, lt.Value)
 	}
 	return keys, true
 }

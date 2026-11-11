@@ -1,6 +1,9 @@
 package tests
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // --- Spread in call arguments (TDD-00106 / ADR-00335 V1, ADR-00336 V2) ---
 //
@@ -9,8 +12,8 @@ import "testing"
 // V2: any number of spreads freely mixed with positional args, still only
 // within the rest region: f(...a, ...b), f(...a, x, ...b), obj.m(...a); plus
 // spread into the variadic builtins console.log / Math.max / Math.min.
-// Still rejected: a spread into a fixed-arity (rest-less) user function and a
-// spread filling a fixed parameter slot (both need a static-arity split).
+// A spread into fixed parameters is TypeScript's error (TS2556) unless the
+// spread is a tuple; JavaScript (-compat=js) calls through apply.
 
 func TestE2ESpreadIntoRest(t *testing.T) {
 	assertOutput(t, `
@@ -52,8 +55,8 @@ function f(a: number, b: number): number { return a + b }
 const arr = [1, 2]
 f(...arr)
 `)
-	if err == nil {
-		t.Fatal("expected a compile error spreading into a fixed-arity function, got none")
+	if err == nil || !strings.Contains(err.Error(), "a spread argument must either have a tuple type or be passed to a rest parameter") {
+		t.Fatalf("expected TS2556 spreading an array into a fixed-arity function, got %v", err)
 	}
 }
 
@@ -128,17 +131,36 @@ console.log(Acc.sum(...a, 5, ...b))
 `, "110\n15")
 }
 
-// A spread filling a fixed parameter slot (not the rest slot) stays rejected —
-// it would need a runtime split against static arity.
-func TestE2ESpreadIntoFixedSlotRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// A spread of a non-tuple array filling a fixed parameter is TS2556 in the
+// strict lane; JavaScript splits it at run time, each fixed parameter its
+// element (a default past the end), `arguments` the values passed.
+func TestE2ESpreadIntoFixedSlot(t *testing.T) {
+	mustCompileError(t, `
 function f(a: number, b: number, ...rest: number[]): number { return a + b }
 const arr = [1, 2, 3]
 f(...arr)
+`, "a spread argument must either have a tuple type or be passed to a rest parameter")
+	assertSameAsNodeCLIJS(t, `function f(a, b, c = "dflt") { return [a, b, c, arguments.length].join("|"); }
+const xs = [1, 2];
+console.log(f(...xs));
+console.log(f(0, ...xs));
+console.log(f(...[1, 2, 3, 4]));
+console.log(f(...[]));
+function g(a, ...r) { return a + ":" + r.join(","); }
+console.log(g(...[9, 8, 7]), g(...[]), g(...xs, 5));
+function h(x, y) { return x + y; }
+console.log(h(...[3, 4]));
+class P { constructor(a, b = "d") { this.v = [a, b, arguments.length].join("|"); } }
+class Q extends P { constructor(...xs) { super(...xs); } }
+const ys = [1];
+console.log(new P(...ys).v, new P(...[1, 2, 3]).v, new Q(...[4]).v, new Q().v);
+class M { m(a, b) { return a + "," + b + "," + arguments.length; } static s(a) { return a * 2; } }
+console.log(new M().m(...[5, 6, 7]), M.s(...[21]));
+const fn = (a, b) => a - b;
+console.log(fn(...[10, 3]));
+const o = { k(a, b) { return a * b; } };
+console.log(o.k(...[6, 7]));
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a spread filling a fixed parameter slot, got none")
-	}
 }
 
 // V2: spread into the variadic builtins Math.max / Math.min folds the array at
@@ -266,4 +288,72 @@ var iter = gen();
 var item = iter.next();
 item.then(r => console.log(r.value, r.done));
 `)
+}
+
+// Spreading a class instance copies its own data properties at run time,
+// a TypeScript-private one included (it is an own property); methods,
+// accessors and `#` fields stay behind.
+func TestE2EObjectSpreadClassInstance(t *testing.T) {
+	assertOutput(t, `
+class Q { x = 1; m() { return 2 } }
+const e = { ...new Q(), z: 2 }
+console.log(e.x, e.z, Object.keys(e).join(","))
+class R { constructor(public a: string, private b: number) {} #d = 1; get g() { return 1 } }
+const r = { ...new R("a", 1) }
+console.log(JSON.stringify(r), Object.keys(r).join(","))
+class B { b = 1 }
+class D extends B { d = "x" }
+console.log(JSON.stringify({ ...new D() }))
+`, "1 2 x,z\n{\"a\":\"a\",\"b\":1} a,b\n{\"b\":1,\"d\":\"x\"}")
+}
+
+// A readonly tuple (`as const`) spreads into fixed parameters, as a tuple
+// does, and so does `apply` with a tuple.
+func TestE2ESpreadConstTupleIntoFixedArity(t *testing.T) {
+	assertOutput(t, `
+function add(a: number, b: number, c: number) { return a + b + c; }
+const ys = [4, 5, 6] as const;
+console.log(add(...ys));
+const xs = [1, 2, 3];
+console.log(add.apply(undefined, xs as [number, number, number]));
+`, "15\n6")
+}
+
+// JavaScript spreads any iterable into fixed parameters: missing ones are
+// undefined, extras still count in arguments.
+func TestE2ESpreadIntoFixedArityJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function add(a, b, c) { return a + b + c; }
+const xs = [1, 2, 3];
+console.log(add(...xs));
+console.log(add(...[1, 2]));
+console.log(add(0, ...[5, 6, 7, 8]));
+function f(a, b) { return [a, b, arguments.length]; }
+console.log(f(...["x"]));
+console.log(f(...new Set([1, 2, 3])));
+const o = { k: 10, m(a, b) { return this.k + a + b; } };
+console.log(o.m(...[1, 2]));
+class C { constructor() { this.z = 1; } f(a, b) { return this.z + a + (b ?? 0); } }
+console.log(new C().f(...[5]));
+`)
+}
+
+// A spread over optional parameters (which TypeScript accepts) fills each
+// from the spread value's elements, undefined past its end; a rest after
+// them takes the remainder.
+func TestE2ESpreadOverOptionalParams(t *testing.T) {
+	assertOutput(t, `
+function f(a?: number, b?: number) { return [a, b]; }
+const arr = [1, 2, 3];
+console.log(f(...arr));
+function g(a?: number, ...r: number[]) { return [a, r.length]; }
+console.log(g(...arr));
+console.log(f(...new Set([7])));
+class K { greet(p: string, q?: string, r?: string) { return [p, q ?? "-", r ?? "-"].join(" "); } }
+console.log(new K().greet("hi", ...["you"]));
+function h(a?: number, b?: number, c?: number) { return [a, b, c]; }
+console.log(h(...[1], 9), h(...[1], ...[2]));
+function k(a: number, b?: string, c?: boolean) { return [a, b, c]; }
+console.log(k(1, ...["y"]));
+`, "[ 1, 2 ]\n[ 1, 2 ]\n[ 7, undefined ]\nhi you -\n[ 1, 9, undefined ] [ 1, 2, undefined ]\n[ 1, 'y', undefined ]")
 }

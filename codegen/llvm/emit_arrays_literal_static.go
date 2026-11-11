@@ -47,7 +47,7 @@ func constArrayElemOperand(elem ast.Expression, elemTy Type) (string, bool) {
 	}
 	switch ex := elem.(type) {
 	case *ast.StringLiteral:
-		if elemTy.IR != "ptr" || elemTy.IsObject() || elemTy.IsTuple() || elemTy.IsFunc() || elemTy.IsMap() || elemTy.IsSet() || elemTy.IsClass() || elemTy.IsPromise() {
+		if elemTy.IR != irPtr || elemTy.IsObject() || elemTy.IsTuple() || elemTy.IsFunc() || elemTy.IsMap() || elemTy.IsSet() || elemTy.IsClass() || elemTy.IsPromise() {
 			return "", false
 		}
 		return "", true // interned by the caller (needs the emitter)
@@ -170,7 +170,7 @@ func (e *Emitter) newConstGlobal(llTy, init string) string {
 	}
 	if !e.contentDefined[name] {
 		e.contentDefined[name] = true
-		e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant %s %s, align 8", name, llTy, init))
+		e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr"+irGlobalAS+" constant %s %s, align 8", name, llTy, init))
 	}
 	return name
 }
@@ -203,11 +203,9 @@ func (e *Emitter) tryEmitStaticArrayLiteral(lit *ast.ArrayLiteral, elemTy Type) 
 		llTy := fmt.Sprintf("[%d x %s]", n, elemTy.IR)
 		g := e.newConstGlobal(llTy, image)
 		bytes := int64(n) * int64(elemTy.Align())
-		e.ensureMalloc()
-		e.ensureMemcpy()
 		dataReg = e.freshReg()
-		e.heapMallocInto(dataReg, fmt.Sprint(bytes))
-		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", dataReg, g, bytes))
+		e.heapMallocInto(dataReg, elemAllocKind(elemTy), fmt.Sprint(bytes))
+		e.emitInstr(fmt.Sprintf("call void @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %d)", dataReg, g, bytes))
 		return dataReg, true
 	}
 
@@ -247,55 +245,8 @@ func (e *Emitter) tryEmitStaticArrayLiteral(lit *ast.ArrayLiteral, elemTy Type) 
 	flatG := e.newConstGlobal(flatTy, flatImage)
 	lensG := e.newConstGlobal(fmt.Sprintf("[%d x i64]", n), "["+strings.Join(lens, ", ")+"]")
 
-	e.ensureArrLitRows()
 	dataReg = e.freshReg()
-	e.heapMallocInto(dataReg, fmt.Sprint(int64(n)*8))
-	e.emitInstr(fmt.Sprintf("call void @__kml_arr_lit_rows(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d, i64 %d)", dataReg, flatG, lensG, int64(n), int64(rowTy.Align()), e.arrayHeaderWord()))
+	e.heapMallocInto(dataReg, allocElems, fmt.Sprint(int64(n)*8))
+	e.emitInstr(fmt.Sprintf("call void @__kml_arr_lit_rows("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d, i64 %d, i64 %d)", dataReg, flatG, lensG, int64(n), int64(rowTy.Align()), e.arrayHeaderWord()))
 	return dataReg, true
-}
-
-// ensureArrLitRows declares the row-table builder once:
-// __kml_arr_lit_rows(outer, flat, lens, n, elemSize, word) fills outer[i]
-// with a fresh box {data, len} after its header word whose data is a malloc'd copy of the next lens[i]
-// elements of flat — exactly what the general path's boxArrayValue +
-// emitArrayLiteralData produce per row, in a loop.
-func (e *Emitter) ensureArrLitRows() {
-	if e.usedArrLitRows {
-		return
-	}
-	e.usedArrLitRows = true
-	e.ensureMalloc()
-	e.ensureMemcpy()
-	e.emitGlobal(`
-define void @__kml_arr_lit_rows(ptr %outer, ptr %flat, ptr %lens, i64 %n, i64 %esz, i64 %word) {
-entry:
-  br label %cond
-cond:
-  %i = phi i64 [ 0, %entry ], [ %inext, %body ]
-  %off = phi i64 [ 0, %entry ], [ %offnext, %body ]
-  %done = icmp eq i64 %i, %n
-  br i1 %done, label %exit, label %body
-body:
-  %lenp = getelementptr i64, ptr %lens, i64 %i
-  %len = load i64, ptr %lenp, align 8
-  %bytes = mul i64 %len, %esz
-  %data = call ptr @malloc(i64 %bytes)
-  %src = getelementptr i8, ptr %flat, i64 %off
-  call void @memcpy(ptr %data, ptr %src, i64 %bytes)
-  %cell = call ptr @malloc(i64 32)
-  store i64 %word, ptr %cell, align 8
-  %box = getelementptr i8, ptr %cell, i64 8
-  store ptr %data, ptr %box, align 8
-  %boxlen = getelementptr i8, ptr %box, i64 8
-  store i64 %len, ptr %boxlen, align 8
-  %boxholes = getelementptr i8, ptr %box, i64 16
-  store ptr null, ptr %boxholes, align 8
-  %slot = getelementptr ptr, ptr %outer, i64 %i
-  store ptr %box, ptr %slot, align 8
-  %inext = add i64 %i, 1
-  %offnext = add i64 %off, %bytes
-  br label %cond
-exit:
-  ret void
-}`)
 }

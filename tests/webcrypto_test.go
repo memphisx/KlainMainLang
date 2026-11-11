@@ -436,7 +436,7 @@ console.log("randomBytes:", randomBytes(16).length)
 func TestE2ECryptoRandomBytesCallback(t *testing.T) {
 	assertOutputImports(t, `
 import { randomBytes } from 'crypto'
-randomBytes(16, (err: Error, buf: Uint8Array) => {
+randomBytes(16, (err: Error | null, buf: Uint8Array) => {
   console.log("err null:", err === null)
   console.log("len:", buf.length)
 })

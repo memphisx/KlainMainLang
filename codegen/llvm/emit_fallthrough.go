@@ -7,17 +7,6 @@ package llvm
 
 import "KlainMainLang/ast"
 
-// widenIfMayFallOff widens an inferred return type to `T | undefined` when
-// the body can also complete without a `return <value>`. Before ADR-01061 the
-// fall-off path was an `unreachable`, so such a call was UB: clang -O2 turned
-// `function f(a) { a = 1; if (cond) return true }` into an infinite loop.
-func widenIfMayFallOff(block *ast.BlockStatement, inferred Type) Type {
-	if blockMayCompleteNormally(block) || blockHasBareReturn(block) {
-		return undefinedableElem(inferred)
-	}
-	return inferred
-}
-
 // blockMayCompleteNormally reports whether control can reach the end of the
 // block: false only when some statement in it never completes normally
 // (return/throw, an if/else or try/catch whose every arm does not, a

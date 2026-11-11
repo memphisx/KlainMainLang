@@ -92,6 +92,9 @@ export function memoryUsageRss(): number {
     return __kml_native.processMemory(0);
 }
 
+// process.memoryUsage.rss.
+memoryUsage.rss = memoryUsageRss;
+
 // lib/internal/validators.js parseFileMode.
 export function umask(mask?: string | number): number {
     if (mask === undefined) return __kml_native.processUmask(-1);
@@ -135,4 +138,13 @@ export function getgid(): number {
 
 export function getegid(): number {
     return __kml_native.processId(5);
+}
+
+// process.platform and process.arch: the target's, under Node's names.
+export function platform(): NodeJS.Platform {
+    return __kml_native.processPlatform() as NodeJS.Platform;
+}
+
+export function arch(): NodeJS.Architecture {
+    return __kml_native.processArch() as NodeJS.Architecture;
 }

@@ -90,23 +90,23 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 	// a non-Error caught value has no `.errors`, so an empty array.
 	if propName == "errors" {
 		resPtr := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 		errL := e.freshLabel("caught.errs")
 		elseL := e.freshLabel("caught.noerrs")
 		mergeL := e.freshLabel("caught.errsmerge")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, errL, elseL))
 		e.emitLabel(errL)
 		errObj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errObj, pay))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, errObj, pay))
 		arr := e.emitErrorErrorsAccess(errObj)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", arr.Ref, resPtr))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", arr.Ref, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(elseL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.newArrayHeader("null", "0"), resPtr))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.newArrayHeader("null", "0"), resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(mergeL)
 		res := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, resPtr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", res, resPtr))
 		return Value{Ref: res, Ty: ArrayOf(TypeAny)}, nil
 	}
 
@@ -122,17 +122,17 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, errL, elseL))
 		e.emitLabel(errL)
 		errObj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errObj, pay))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, errObj, pay))
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errObj, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, errorObjType.StructIR(), errObj, idx))
 		fld := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", fld, StructFieldIR(fieldTy), gep, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", fld, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 		errEnd := e.freshLabel("caught.errfldend")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", errEnd))
 		e.emitLabel(errEnd)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(elseL)
-		if fieldTy.IR == "ptr" {
+		if fieldTy.IR == irPtr {
 			// Any other value reads the property as `any` does: a string, or
 			// undefined for anything else.
 			got, gerr := e.emitDynAnyMemberGetNamed(e.emitCaughtToAny(v), e.internString(propName), propName, pos)
@@ -146,7 +146,7 @@ func (e *Emitter) emitCaughtMemberGet(v Value, propName string, pos ast.Pos) (Va
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(mergeL)
 			res := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", res, fld, errEnd, other, elseEnd))
+			e.emitInstr(fmt.Sprintf("%s = phi "+irPtr+" [ %s, %%%s ], [ %s, %%%s ]", res, fld, errEnd, other, elseEnd))
 			return Value{Ref: res, Ty: undefinedableElem(fieldTy)}, nil
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
@@ -189,23 +189,23 @@ func (e *Emitter) emitCaughtInstanceOfError(v Value, kindName string, kindID int
 	// errorObjType pointer), so compute the kind only when it is an Error.
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
-	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resPtr))
 	chkL := e.freshLabel("caught.iokind")
 	mergeL := e.freshLabel("caught.iomerge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, chkL, mergeL))
 	e.emitLabel(chkL)
 	errObj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errObj, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, errObj, pay))
 	kgep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kgep, errorObjType.StructIR(), errObj))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", kgep, errorObjType.StructIR(), errObj))
 	kval := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", kval, kgep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", kval, kgep))
 	km := e.errorKindMatch(kval, kindName, kindID)
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", km, resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", km, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", res, resPtr))
 	return Value{Ref: res, Ty: TypeBool}
 }
 
@@ -220,23 +220,23 @@ func (e *Emitter) emitCaughtInstanceOfClassTag(v Value, tagID int64) Value {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isErr, tag, kmlTagError))
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
-	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resPtr))
 	chkL := e.freshLabel("caught.iotag")
 	mergeL := e.freshLabel("caught.iotagmerge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, chkL, mergeL))
 	e.emitLabel(chkL)
 	errObj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errObj, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, errObj, pay))
 	kgep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kgep, errorObjType.StructIR(), errObj))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", kgep, errorObjType.StructIR(), errObj))
 	kval := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", kval, kgep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", kval, kgep))
 	km := e.emitClassIs(kval, errorTypeIDStored(tagID))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", km, resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", km, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", res, resPtr))
 	return Value{Ref: res, Ty: TypeBool}
 }
 
@@ -247,7 +247,7 @@ func (e *Emitter) emitCaughtInstanceOfClassTag(v Value, tagID int64) Value {
 func (e *Emitter) emitCaughtToString(v Value) (Value, error) {
 	tag, pay := e.caughtParts(v)
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	isErr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isErr, tag, kmlTagError))
 	errL := e.freshLabel("caughtstr.err")
@@ -257,12 +257,28 @@ func (e *Emitter) emitCaughtToString(v Value) (Value, error) {
 
 	e.emitLabel(errL)
 	errObj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", errObj, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, errObj, pay))
+	// An Error subclass's instance calls its class's toString, read as
+	// the object it is.
+	f0, low, sub := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f0, errObj))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", low, f0, int64(1)<<48-1))
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, %d", sub, low, errorSubclassTagBase))
+	subL, baseL := e.freshLabel("caughtstr.sub"), e.freshLabel("caughtstr.base")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sub, subL, baseL))
+	e.emitLabel(subL)
+	ss, err := e.emitDynamicToString(Value{Ref: e.emitNbTagPtr(errObj, kmlTagObject), Ty: TypeAny})
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.convert(ss, TypePtr).Ref, resPtr))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(baseL)
 	es, err := e.emitErrorToString(Value{Ref: errObj, Ty: errorObjType})
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", es.Ref, resPtr))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", es.Ref, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(elseL)
@@ -270,12 +286,12 @@ func (e *Emitter) emitCaughtToString(v Value) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ds.Ref, resPtr))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ds.Ref, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", res, resPtr))
 	return Value{Ref: res, Ty: TypePtr}, nil
 }
 
@@ -290,8 +306,65 @@ func (e *Emitter) emitAnyStringOrNull(v Value) string {
 	isStr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, pay))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", r, isStr, p))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", r, isStr, p))
 	return r
+}
+
+// emitCaughtMethodCall is `e.m(…)` on a caught value: the call on the
+// value read as any, so the member runs with it as `this` (an Error's
+// toString, an object's own function).
+func (e *Emitter) emitCaughtMethodCall(ex *ast.CallExpression) (Value, bool, error) {
+	m, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || m.Optional {
+		return Value{}, false, nil
+	}
+	if _, sup := m.Object.(*ast.SuperExpression); sup || !e.typeOfExpr(m.Object).IsCaught() {
+		return Value{}, false, nil
+	}
+	v, err := e.emitExpr(m.Object)
+	if err != nil {
+		return Value{}, true, err
+	}
+	if !v.Ty.IsCaught() {
+		return Value{}, true, internalAt(m.GetPos(), "caught receiver typed %s", v.Ty.IR)
+	}
+	recv := e.bindValue(e.emitCaughtToAny(v), m.GetPos())
+	call := *ex
+	call.Callee = ast.NewMemberExpression(recv, m.Property, m.GetPos())
+	r, err := e.emitCall(&call)
+	return r, true, err
+}
+
+// emitNullishMethodCall emits, in the JavaScript lane, `x.m(...)` on a
+// receiver of type null or undefined: the method's read throws its
+// TypeError, and the call's value (never reached) is an any.
+func (e *Emitter) emitNullishMethodCall(ex *ast.CallExpression) (Value, bool, error) {
+	if !e.compatJS() || ex.Optional {
+		return Value{}, false, nil
+	}
+	m, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || m.Optional {
+		return Value{}, false, nil
+	}
+	bt := e.typeOfExpr(m.Object)
+	// Only a value that is nothing but null or undefined; a reference that
+	// may be undefined (a skippable `var`) is not one.
+	onlyUndef := bt.isKind(kindUndefined)
+	if !bt.IsNull() && !onlyUndef {
+		return Value{}, false, nil
+	}
+	what := "null"
+	if onlyUndef {
+		what = "undefined"
+	}
+	if _, err := e.emitExpr(m.Object); err != nil {
+		return Value{}, true, err
+	}
+	if !e.blockDone {
+		e.emitThrowTypeError("Cannot read properties of " + what + " (reading '" + m.Property + "')")
+	}
+	e.emitLabel(e.freshLabel("nullcall.dead"))
+	return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, true, nil
 }

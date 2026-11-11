@@ -84,6 +84,10 @@ func (c *Checker) enumType(sym *binder.Symbol) *Type {
 func (c *Checker) enumObject(sym *binder.Symbol) *Type {
 	ms := c.enumMembers(sym)
 	if ms == nil {
+		if emptyEnum(sym) {
+			// `enum E {}` is numeric: only the reverse mapping (`E[0]`).
+			return c.in.indexed(nil, nil, c.strT)
+		}
 		return c.unanswered
 	}
 	props := make([]*Property, len(ms))
@@ -92,8 +96,17 @@ func (c *Checker) enumObject(sym *binder.Symbol) *Type {
 		props[i] = &Property{Name: m.Member, Type: m}
 		numeric = numeric || m.Flags&NumberLiteral != 0
 	}
-	if numeric {
-		return c.in.indexed(props, nil, c.strT)
+	if numeric && sym.Flags&binder.ConstEnum == 0 {
+		return c.in.indexed(props, nil, c.strT) // (a const enum has no reverse mapping)
 	}
 	return c.in.object(props)
+}
+
+// emptyEnum reports whether sym is one enum declaration with no members.
+func emptyEnum(sym *binder.Symbol) bool {
+	if len(sym.Declarations) != 1 {
+		return false
+	}
+	ed, ok := sym.Declarations[0].Node.(*ast.EnumDeclaration)
+	return ok && len(ed.Members) == 0
 }

@@ -3,11 +3,15 @@ package ast_test
 import (
 	"bytes"
 	"fmt"
+	goast "go/ast"
+	goparser "go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 
 	"KlainMainLang/ast"
@@ -62,7 +66,7 @@ func reflectWalk(n ast.Node, out *[]ast.Node) {
 			}
 		case reflect.Struct:
 			t := v.Type()
-			if t.Name() == "TypeAnnotation" || t.Name() == "Pos" {
+			if t.Name() == "Pos" {
 				return
 			}
 			for i := 0; i < t.NumField(); i++ {
@@ -76,11 +80,48 @@ func reflectWalk(n ast.Node, out *[]ast.Node) {
 				if t.Name() == "FunctionDeclaration" && f.Name == "Overloads" {
 					continue
 				}
+				if isAnnotationField(t, f) {
+					continue
+				}
 				walk(v.Field(i), t.Name())
 			}
 		}
 	}
 	walk(reflect.ValueOf(n).Elem(), "")
+}
+
+var typeNodeIface = reflect.TypeOf((*ast.TypeNode)(nil)).Elem()
+
+// typeSyntaxStructs is the structs declared in type_nodes.go.
+var typeSyntaxStructs = sync.OnceValue(func() map[string]bool {
+	f, err := goparser.ParseFile(token.NewFileSet(), "type_nodes.go", nil, 0)
+	if err != nil {
+		panic(err)
+	}
+	out := map[string]bool{}
+	for _, d := range f.Decls {
+		if gd, ok := d.(*goast.GenDecl); ok {
+			for _, sp := range gd.Specs {
+				if ts, ok := sp.(*goast.TypeSpec); ok {
+					out[ts.Name.Name] = true
+				}
+			}
+		}
+	}
+	return out
+})
+
+// isAnnotationField reports a declaration's annotation: a TypeNode field (or
+// slice of them) of a struct that is not itself type syntax.
+func isAnnotationField(owner reflect.Type, f reflect.StructField) bool {
+	if typeSyntaxStructs()[owner.Name()] || owner.Name() == "InterfaceDeclaration" && f.Name == "Heritage" {
+		return false
+	}
+	t := f.Type
+	for t.Kind() == reflect.Slice {
+		t = t.Elem()
+	}
+	return t == typeNodeIface
 }
 
 func TestInspectMatchesReflectionOracle(t *testing.T) {
@@ -143,7 +184,8 @@ func sameWalk(t *testing.T, name string, root ast.Node) {
 	}
 }
 
-// typeNodeRoots returns the Node of every TypeAnnotation reachable from n.
+// typeNodeRoots returns every type tree an annotation field holds, reachable
+// from n.
 func typeNodeRoots(n ast.Node) []ast.Node {
 	var roots []ast.Node
 	seen := map[uintptr]bool{}
@@ -151,9 +193,14 @@ func typeNodeRoots(n ast.Node) []ast.Node {
 	walk = func(v reflect.Value) {
 		switch v.Kind() {
 		case reflect.Interface:
-			if !v.IsNil() {
-				walk(v.Elem())
+			if v.IsNil() {
+				return
 			}
+			if tn, ok := v.Interface().(ast.TypeNode); ok && v.Type() == reflect.TypeOf((*ast.TypeNode)(nil)).Elem() {
+				roots = append(roots, tn)
+				return
+			}
+			walk(v.Elem())
 		case reflect.Pointer:
 			if v.IsNil() || seen[v.Pointer()] {
 				return
@@ -165,11 +212,6 @@ func typeNodeRoots(n ast.Node) []ast.Node {
 				walk(v.Index(i))
 			}
 		case reflect.Struct:
-			if v.Type() == reflect.TypeOf(ast.TypeAnnotation{}) && v.CanAddr() {
-				if ta := v.Addr().Interface().(*ast.TypeAnnotation); ta.TypeNode() != nil {
-					roots = append(roots, ta.TypeNode())
-				}
-			}
 			for i := 0; i < v.NumField(); i++ {
 				if v.Type().Field(i).IsExported() {
 					walk(v.Field(i))

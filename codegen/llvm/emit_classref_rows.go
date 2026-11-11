@@ -29,7 +29,7 @@ import (
 // a constructor, 2 an Error constructor); construct(argv, argc) is `new` over
 // boxed arguments; get(key) and set(key, v) read and write a static member.
 // A null routine falls back to the dispatcher's default.
-const ctorRowTy = "{ i64, ptr, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr }"
+const ctorRowTy = "{ i64, " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", " + irPtr + ", " + irPtr + " }"
 
 // ctorRowBytes is ctorRowTy's size, for copying a row (unitregsrc).
 const ctorRowBytes = 80
@@ -96,65 +96,31 @@ func (e *Emitter) emitClassRefFinalize() {
 func (e *Emitter) registerCtorRows() {
 	field := func(fn string) string {
 		if fn == "" {
-			return "ptr null"
+			return irPtr + " null"
 		}
-		return "ptr " + fn
+		return irPtr + " " + fn
 	}
 	for _, p := range e.ctorRowOrder {
 		r := e.ctorRows[p]
-		shown := "ptr null"
+		shown := irPtr + " null"
 		if r.shown != "" {
-			shown = "ptr " + r.shown
+			shown = irPtr + " " + r.shown
 		}
-		e.addUnitRowLit(unitKindCtor, ctorRowTy, fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), %s, %s, %s, %s, %s, i64 %d, %s, %s, %s }",
+		e.addUnitRowLit(unitKindCtor, ctorRowTy, fmt.Sprintf("{ i64 ptrtoint ("+irPtr+" %s to i64), %s, %s, %s, %s, %s, i64 %d, %s, %s, %s }",
 			r.payload, shown, field(r.nstatic), field(r.skey), field(r.sget), field(r.inst), r.kind, field(r.construct), field(r.get), field(r.set)))
 	}
 	e.ctorRows, e.ctorRowOrder = nil, nil
 }
 
-// ctorRefDispatchIR opens a dispatcher taking a boxed reference `i64 %c`:
-// branches to `%no` unless it is a constructor reference, else binds
-// `%<out>` to field idx of its row (def when it has none).
-func ctorRefDispatchIR(idx int, ty, def, out string) string {
-	return fmt.Sprintf("  %%tag = call i8 @__kml_nb_tag(i64 %%c)\n  %%isref = icmp eq i8 %%tag, %d\n  br i1 %%isref, label %%ref, label %%no\nref:\n  %%pay = call i64 @__kml_nb_pay(i64 %%c)\n", kmlTagFuncRef) +
-		unitFieldIR(unitKindCtor, ctorRowTy, "%pay", idx, ty, def, out)
-}
-
-// emitClassRefDispatchers defines the dispatchers over the table.
+// emitClassRefDispatchers: the dispatchers over the table are hostbox.c's
+// (__kml_classref_*, __kml_dyn_instanceof, __kml_ctor_kind); they read the
+// rows through the NaN-box helpers.
 func (e *Emitter) emitClassRefDispatchers() {
-	e.ensureUnitReg()
 	e.ensureNanBox()
-	e.ensureStrcmp()
-	payField := func(idx int, ty, def, out string) string {
-		return "  %key = ptrtoint ptr %p to i64\n" + unitFieldIR(unitKindCtor, ctorRowTy, "%key", idx, ty, def, out)
-	}
-	var b strings.Builder
-	// util.inspect's rendering of a class value, and its static fields.
-	b.WriteString("\ndefine ptr @__kml_classref_shown(ptr %p) {\nentry:\n" + payField(1, "ptr", "null", "s") + "  ret ptr %s\n}\n")
-	b.WriteString("\ndefine i64 @__kml_classref_nstatic(ptr %p) {\nentry:\n" + payField(2, "ptr", "null", "f") +
-		"  %none = icmp eq ptr %f, null\n  br i1 %none, label %no, label %call\ncall:\n  %r = call i64 %f(ptr %p)\n  ret i64 %r\nno:\n  ret i64 0\n}\n")
-	b.WriteString("\ndefine ptr @__kml_classref_skey(ptr %p, i64 %i) {\nentry:\n" + payField(3, "ptr", "null", "f") +
-		"  %none = icmp eq ptr %f, null\n  br i1 %none, label %no, label %call\ncall:\n  %r = call ptr %f(ptr %p, i64 %i)\n  ret ptr %r\nno:\n  ret ptr null\n}\n")
-	fmt.Fprintf(&b, "\ndefine i64 @__kml_classref_sget(ptr %%p, i64 %%i) {\nentry:\n%s  %%none = icmp eq ptr %%f, null\n  br i1 %%none, label %%no, label %%call\ncall:\n  %%r = call i64 %%f(ptr %%p, i64 %%i)\n  ret i64 %%r\nno:\n  ret i64 %d\n}\n", payField(4, "ptr", "null", "f"), nbUndefined)
-	// A static member through a reference; a built-in constructor (an Error
-	// kind) has only its length, 1.
-	fmt.Fprintf(&b, "\ndefine i64 @__kml_classref_get(ptr %%p, ptr %%key0) {\nentry:\n%s  %%none = icmp eq ptr %%f, null\n  br i1 %%none, label %%builtin, label %%call\ncall:\n  %%r = call i64 %%f(ptr %%key0)\n  ret i64 %%r\nbuiltin:\n  %%lc = call i32 @strcmp(ptr %%key0, ptr %s)\n  %%islen = icmp eq i32 %%lc, 0\n  %%bl = select i1 %%islen, i64 %d, i64 %d\n  ret i64 %%bl\n}\n",
-		payField(8, "ptr", "null", "f"), e.internString("length"), int64(math.Float64bits(1))+nbDoubleOffset, nbUndefined)
-	b.WriteString("\ndefine void @__kml_classref_set(ptr %p, ptr %key0, i64 %v) {\nentry:\n" + payField(9, "ptr", "null", "f") +
-		"  %none = icmp eq ptr %f, null\n  br i1 %none, label %no, label %call\ncall:\n  call void %f(ptr %key0, i64 %v)\n  ret void\nno:\n  ret void\n}\n")
-	if e.usedDynInstanceof {
-		b.WriteString("\ndefine i1 @__kml_dyn_instanceof(i64 %v, i64 %c) {\nentry:\n" + ctorRefDispatchIR(5, "ptr", "null", "f") +
-			"  %none = icmp eq ptr %f, null\n  br i1 %none, label %no, label %call\ncall:\n  %r = call i1 %f(i64 %v)\n  ret i1 %r\nno:\n  ret i1 false\n}\n")
-	}
-	if e.usedCtorKind {
-		b.WriteString("\ndefine double @__kml_ctor_kind(i64 %c) {\nentry:\n" + ctorRefDispatchIR(6, "i64", "1", "k") +
-			"  %d = sitofp i64 %k to double\n  ret double %d\nno:\n  ret double 0.0\n}\n")
-	}
-	e.functions.WriteString(b.String())
 }
 
-// emitConstructorOfOnce registers the rows and defines
-// `i64 __kml_constructor_of(ptr o)` once the program reads a constructor;
+// emitConstructorOfOnce registers the rows `i64 __kml_constructor_of(ptr o)`
+// reads once the program reads a constructor;
 // unitreg's finalize calls it again for a read generated late.
 func (e *Emitter) emitConstructorOfOnce() {
 	if !e.usedConstructorOf || e.emittedConstructorOf {
@@ -162,9 +128,7 @@ func (e *Emitter) emitConstructorOfOnce() {
 	}
 	e.emittedConstructorOf = true
 	e.emitConstructorOfRows()
-	e.ensureUnitReg()
-	fmt.Fprintf(&e.functions, "\ndefine i64 @__kml_constructor_of(ptr %%o) {\nentry:\n  %%h = load i64, ptr %%o, align 8\n  %%id = and i64 %%h, %d\n%s  %%none = icmp eq ptr %%f, null\n  br i1 %%none, label %%no, label %%ref\nref:\n  %%pi = ptrtoint ptr %%f to i64\n  %%boxed = or i64 %%pi, %d\n  ret i64 %%boxed\nno:\n  ret i64 %d\n}\n",
-		kmlHdrIDMask, unitFieldIR(unitKindCtorOf, "{ i64, ptr }", "%id", 1, "ptr", "null", "f"), nbFuncRefKind, nbUndefined)
+	// __kml_constructor_of reads them (hostbox.c).
 }
 
 // emitConstructorOfRows registers, per class, the constructor reference
@@ -178,7 +142,7 @@ func (e *Emitter) emitConstructorOfRows() {
 	}
 	sort.Strings(classes)
 	for _, c := range classes {
-		e.addUnitRow(unitKindCtorOf, "{ i64, ptr }", e.classes[c].TagID&kmlHdrIDMask, "ptr "+e.classRefPtr(c))
+		e.addUnitRow(unitKindCtorOf, "{ i64, "+irPtr+" }", e.classes[c].TagID&kmlHdrIDMask, irPtr+" "+e.classRefPtr(c))
 	}
 }
 
@@ -187,6 +151,9 @@ func (e *Emitter) emitConstructorOfRows() {
 func (e *Emitter) classRefClasses(known bool) []string {
 	var classes []string
 	for c := range e.classRefs {
+		if info, ok := e.classes[c]; ok && isSyntheticObjLitClass(info.Ty) && !e.objLitInstances[c] {
+			continue // an accessor literal's class no instance was made of
+		}
 		if _, ok := e.classes[c]; ok || !known {
 			classes = append(classes, c)
 		}
@@ -214,10 +181,15 @@ func (e *Emitter) emitDynInstanceofRows() {
 		restore := e.beginDetachedFunc()
 		vSlot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", vSlot))
-		e.emitInstr(fmt.Sprintf("store i64 %%v, ptr %s, align 8", vSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %%v, "+irPtr+" %s, align 8", vSlot))
 		e.define("__kml_iv", Symbol{Ptr: vSlot, Ty: TypeAny})
 		test := ast.NewBinaryExpression("instanceof", ast.NewIdentifier("__kml_iv", ast.Pos{}), ast.NewIdentifier(names[i], ast.Pos{}), ast.Pos{})
+		// OrdinaryHasInstance: the dispatch calls a class's own
+		// @@hasInstance before reaching this (emitDynInstanceOf), and
+		// Function.prototype[@@hasInstance] reaches it from inside one.
+		e.ordinaryInstanceof = true
 		r, err := e.emitInstanceOf(test)
+		e.ordinaryInstanceof = false
 		if err == nil && !e.blockDone {
 			e.emitTerminator(fmt.Sprintf("ret i1 %s", r.Ref))
 		}
@@ -271,19 +243,19 @@ func (e *Emitter) emitClassRefTable() {
 			return "1"
 		}
 		own := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", own, e.staticOwnPtr(x.class, x.field)))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", own, e.staticOwnPtr(x.class, x.field)))
 		z := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", z, own))
 		return z
 	}
 	// thunk generates one class's routine what with signature sig.
-	thunk := func(what, c, sig string, gen func()) string {
+	thunk := func(what, c, ret, params string, gen func()) string {
 		restore := e.beginDetachedFunc()
 		gen()
 		body := e.allocas.String() + e.body.String()
 		restore()
 		fn := ctorThunk(what, c)
-		fmt.Fprintf(&e.functions, "\ndefine internal %s %s(%s) {\nentry:\n%s}\n", strings.Fields(sig)[0], fn, strings.SplitN(sig, " ", 2)[1], body)
+		e.writeFunc(fmt.Sprintf("internal %s %s(%s)", ret, fn, params), body)
 		return fn
 	}
 	nth := func(es []entry, ret func(x entry) string, retTy string) {
@@ -309,7 +281,7 @@ func (e *Emitter) emitClassRefTable() {
 		es := entries(c)
 		row := e.ctorRowFor(e.classRefs[c])
 		row.shown = e.internString(classShown(e, c))
-		row.nstatic = thunk("nstatic", c, "i64 ptr %p", func() {
+		row.nstatic = thunk("nstatic", c, "i64", irPtr+" %p", func() {
 			n := "0"
 			for _, x := range es {
 				r := e.freshReg()
@@ -318,16 +290,16 @@ func (e *Emitter) emitClassRefTable() {
 			}
 			e.emitTerminator("ret i64 " + n)
 		})
-		row.skey = thunk("skey", c, "ptr ptr %p, i64 %i", func() {
-			nth(es, func(x entry) string { return e.internString(x.field) }, "ptr")
-			e.emitTerminator("ret ptr null")
+		row.skey = thunk("skey", c, irPtr, irPtr+" %p, i64 %i", func() {
+			nth(es, func(x entry) string { return e.internString(x.field) }, irPtr)
+			e.emitTerminator("ret " + irPtr + " null")
 		})
 		// sget loads the field and boxes it with the ordinary emitBoxValue.
-		row.sget = thunk("sget", c, "i64 ptr %p, i64 %i", func() {
+		row.sget = thunk("sget", c, "i64", irPtr+" %p, i64 %i", func() {
 			nth(es, func(x entry) string {
 				ty := e.classes[x.class].StaticFieldTypes[x.field]
 				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, storageIR(ty), e.staticSlotPtr(x.class, x.field)))
+				e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, storageIR(ty), e.staticSlotPtr(x.class, x.field)))
 				if boxed, err := e.emitBoxValue(Value{Ref: r, Ty: ty}); err == nil {
 					return boxed.Ref
 				}
@@ -338,30 +310,37 @@ func (e *Emitter) emitClassRefTable() {
 	}
 
 	// keys: Object.keys of a class, its present static field names.
-	e.ensureMalloc()
-	e.functions.WriteString(`
-define { ptr, i64 } @__kml_classref_keys(ptr %p) {
-entry:
-  %n = call i64 @__kml_classref_nstatic(ptr %p)
-  %bytes = mul i64 %n, 8
-  %arr = call ptr @malloc(i64 %bytes)
-  br label %loop
-loop:
-  %i = phi i64 [ 0, %entry ], [ %inext, %body ]
-  %done = icmp sge i64 %i, %n
-  br i1 %done, label %out, label %body
-body:
-  %k = call ptr @__kml_classref_skey(ptr %p, i64 %i)
-  %slot = getelementptr ptr, ptr %arr, i64 %i
-  store ptr %k, ptr %slot, align 8
-  %inext = add i64 %i, 1
-  br label %loop
-out:
-  %r0 = insertvalue { ptr, i64 } undef, ptr %arr, 0
-  %r1 = insertvalue { ptr, i64 } %r0, i64 %n, 1
-  ret { ptr, i64 } %r1
-}
-`)
+	e.ensureStrHeaderRuntime() // hostbox.c heads an added property's key
+	restore := e.beginDetachedFunc()
+	n, bytes, arr, slot := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_classref_nstatic("+irPtr+" %%p)", n))
+	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, n))
+	e.heapMallocInto(arr, allocElems, bytes)
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", slot))
+	loopL, bodyL, outL := e.freshLabel("keys.loop"), e.freshLabel("keys.body"), e.freshLabel("keys.out")
+	e.emitTerminator("br label %" + loopL)
+	e.emitLabel(loopL)
+	i, done := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, slot))
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", done, i, n))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, outL, bodyL))
+	e.emitLabel(bodyL)
+	k, kp, next := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_skey("+irPtr+" %%p, i64 %s)", k, i))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", kp, arr, i))
+	e.heapStore(irPtr, k, kp, 8)
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, slot))
+	e.emitTerminator("br label %" + loopL)
+	e.emitLabel(outL)
+	r0, r1 := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { "+irPtr+", i64 } undef, "+irPtr+" %s, 0", r0, arr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { "+irPtr+", i64 } %s, i64 %s, 1", r1, r0, n))
+	e.emitTerminator("ret { " + irPtr + ", i64 } " + r1)
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("{ "+irPtr+", i64 } @__kml_classref_keys("+irPtr+" %p)", body)
 }
 
 // emitDynConstructDispatch generates each constructible reference's `i64
@@ -373,36 +352,90 @@ func (e *Emitter) emitDynConstructDispatch() {
 	// any runs its constructor as JavaScript does.
 	classes := e.classRefClasses(true)
 	for _, c := range classes {
+		if b := e.builtinRootBase(c); b != "" && e.ctorParamList(c) == nil {
+			// No constructor of its own up to the builtin it extends: its
+			// arguments reach the builtin's as passed, their count with them.
+			restore := e.beginDetachedFunc()
+			e.emitConstructArgcArms(hostCtorArity(b), func(args []ast.Expression) (Value, error) {
+				e.inCtorArm, e.dynConstructing = true, true
+				defer func() { e.inCtorArm, e.dynConstructing = false, false }()
+				return e.emitNewExpression(ast.NewNewExpression(c, args, ast.Pos{}))
+			}, c)
+			body := e.allocas.String() + e.body.String()
+			restore()
+			fn := ctorThunk("new", c)
+			e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%argv, i64 %%argc)", fn), body)
+			e.ctorRowFor(e.classRefs[c]).construct = fn
+			continue
+		}
 		restore := e.beginDetachedFunc()
 		var args []ast.Expression
-		for i := 0; i < e.ctorArity(c); i++ {
+		// A rest parameter (the constructor's own, or the one reading
+		// `arguments` gains) collects the arguments past the regular ones.
+		regular, rest := e.ctorArity(c), false
+		if ps := e.ctorParamList(c); len(ps) > 0 && ps[len(ps)-1].Rest {
+			regular, rest = regular-1, true
+		}
+		valueRest := false
+		if fn := e.fnBaseRoot(c); fn != "" && e.valueBases[fn] && e.ctorParamList(c) == nil {
+			// No constructor down to a base a value holds: every argument
+			// reaches it.
+			regular, rest, valueRest = 0, true, true
+		}
+		for i := 0; i < regular; i++ {
 			name := fmt.Sprintf("__kml_ca%d", i)
 			slot := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
 			has := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %d, %%argc", has, i))
 			at := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds i64, ptr %%argv, i64 %d", at, i))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds i64, "+irPtr+" %%argv, i64 %d", at, i))
 			// argv is read only when the slot exists.
 			inL, outL, joinL := e.freshLabel("dynnew.arg"), e.freshLabel("dynnew.noarg"), e.freshLabel("dynnew.argd")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, inL, outL))
 			e.emitLabel(inL)
 			ld := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", ld, at))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", ld, slot))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", ld, at))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ld, slot))
 			e.emitTerminator("br label %" + joinL)
 			e.emitLabel(outL)
-			e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+			e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, slot))
 			e.emitTerminator("br label %" + joinL)
 			e.emitLabel(joinL)
 			e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
 			args = append(args, ast.NewIdentifier(name, ast.Pos{}))
 		}
+		if rest {
+			restTy := ArrayOf(TypeAny)
+			if ps := e.ctorParamList(c); !valueRest && ps[len(ps)-1].Type != nil {
+				if rt := e.annotationType(ps[len(ps)-1].Type); rt.IsArray() && rt.ElemType != nil {
+					restTy = rt
+				}
+			}
+			arr := e.emitShapeRestArray(regular, *restTy.ElemType)
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", arr, slot))
+			e.define("__kml_ca_rest", Symbol{Ptr: slot, Ty: restTy})
+			args = append(args, ast.NewSpreadElement(ast.NewIdentifier("__kml_ca_rest", ast.Pos{}), ast.Pos{}))
+		}
+		// A constructor reading `arguments` counts what the dynamic `new`
+		// passed, up to its declared parameters, not the padded slots.
+		capped := e.freshReg()
+		lt := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %%argc, %d", lt, regular))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %%argc, i64 %d", capped, lt, regular))
+		savedOverride := e.argcOverride
+		e.argcOverride = capped
 		e.inCtorArm = true
 		e.dynConstructing = true
 		v, err := e.emitNewExpression(ast.NewNewExpression(c, args, ast.Pos{}))
 		e.dynConstructing = false
 		e.inCtorArm = false
+		e.argcOverride = savedOverride
+		if err != nil {
+			e.thunkErrs = append(e.thunkErrs, c+": "+err.Error())
+		}
 		if err == nil && !e.blockDone {
 			if b, berr := e.emitBoxValue(v); berr == nil {
 				e.emitTerminator(fmt.Sprintf("ret i64 %s", b.Ref))
@@ -414,7 +447,7 @@ func (e *Emitter) emitDynConstructDispatch() {
 		body := e.allocas.String() + e.body.String()
 		restore()
 		fn := ctorThunk("new", c)
-		e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%argv, i64 %%argc)", fn), body)
+		e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%argv, i64 %%argc)", fn), body)
 		e.ctorRowFor(e.classRefs[c]).construct = fn
 	}
 	var hosts []string
@@ -428,7 +461,7 @@ func (e *Emitter) emitDynConstructDispatch() {
 		body := e.allocas.String() + e.body.String()
 		restore()
 		fn := ctorThunk("newhost", h)
-		e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%argv, i64 %%argc)", fn), body)
+		e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%argv, i64 %%argc)", fn), body)
 		e.ctorRowFor(e.internString(h)).construct = fn
 	}
 	// Anything else throws the TypeError msg.
@@ -439,19 +472,23 @@ func (e *Emitter) emitDynConstructDispatch() {
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc("internal i64 @__kml_dyn_construct_fail(ptr %msg)", body)
-	e.ensureUnitReg()
-	e.functions.WriteString("\ndefine i64 @__kml_dyn_construct(i64 %c, ptr %argv, i64 %argc, ptr %msg) {\nentry:\n" + ctorRefDispatchIR(7, "ptr", "null", "f") +
-		"  %none = icmp eq ptr %f, null\n  br i1 %none, label %no, label %call\ncall:\n  %r = call i64 %f(ptr %argv, i64 %argc)\n  ret i64 %r\nno:\n  %t = call i64 @__kml_dyn_construct_fail(ptr %msg)\n  ret i64 %t\n}\n")
+	e.writeFunc("i64 @__kml_dyn_construct_fail("+irPtr+" %msg)", body)
+	e.ensureFnMeta() // fnmeta.c constructs a plain function
+	// __kml_dyn_construct (hostbox.c) calls the row's construct, else
+	// fnmeta.c's, else the fail path above.
 }
 
 // emitClassRefGetRows generates, per class boxed as a value, `i64 (ptr
 // key)`: a static member read through its reference (`K.make`, `K.count`,
 // `K.length`), boxed; undefined for anything else.
 func (e *Emitter) emitClassRefGetRows() {
-	e.ensureStrcmp()
 	e.ensureNanBox()
 	for _, c := range e.classRefClasses(true) {
+		// The statics of the builtin it extends (`BYTES_PER_ELEMENT`), last.
+		inherited := ""
+		if b := e.builtinRootBase(c); b != "" {
+			inherited = e.hostStaticGetter(b)
+		}
 		restore := e.beginDetachedFunc()
 		keys := []string{"length"}
 		// The class's prototype object, through its builder: a library
@@ -470,7 +507,7 @@ func (e *Emitter) emitClassRefGetRows() {
 		for _, k := range keys {
 			kHit, kNext := e.freshLabel("crget.key"), e.freshLabel("crget.nokey")
 			cmp, isK := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %%key, ptr %s)", cmp, e.internString(k)))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp("+irPtr+" %%key, "+irPtr+" %s)", cmp, e.internString(k)))
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isK, cmp))
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isK, kHit, kNext))
 			e.emitLabel(kHit)
@@ -482,16 +519,12 @@ func (e *Emitter) emitClassRefGetRows() {
 				if b, berr := e.emitBoxValue(e.emitClassProto(c)); berr == nil {
 					boxed = b.Ref
 				}
-			} else if k == "length" || k == "name" {
-				// The class's own static member, read directly: a member
-				// read of these on the class would come back through this
-				// row.
-				if v, err := e.emitStaticFieldRead(e.classes[c], c, k, ast.Pos{}); err == nil && !e.blockDone {
-					if b, berr := e.emitBoxValue(v); berr == nil {
-						boxed = b.Ref
-					}
-				}
-			} else if v, err := e.emitExpr(ast.NewMemberExpression(ast.NewIdentifier(c, ast.Pos{}), k, ast.Pos{})); err == nil && !e.blockDone {
+			} else if sigs := e.classes[c].StaticMethodSigs; !hasSig(sigs, k) && !hasSig(sigs, accessorMethodName("get", k)) && hasSig(sigs, accessorMethodName("set", k)) {
+				// A setter-only accessor reads as undefined.
+			} else if v, err := e.emitStaticFieldRead(e.classes[c], c, k, ast.Pos{}); err == nil && !e.blockDone {
+				// The class's own static member, read directly (a member
+				// read of `length` or `name` on the class would come back
+				// through this row).
 				if b, berr := e.emitBoxValue(v); berr == nil {
 					boxed = b.Ref
 				}
@@ -504,11 +537,17 @@ func (e *Emitter) emitClassRefGetRows() {
 			}
 			e.emitLabel(kNext)
 		}
-		e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+		if inherited != "" {
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %%key)", r, inherited))
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", r))
+		} else {
+			e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
+		}
 		body := e.allocas.String() + e.body.String()
 		restore()
 		fn := ctorThunk("get", c)
-		e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%key)", fn), body)
+		e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%key)", fn), body)
 		e.ctorRowFor(e.classRefs[c]).get = fn
 	}
 }
@@ -549,7 +588,6 @@ func (e *Emitter) hostStaticGetter(h string) string {
 		if len(keys) == 0 {
 			return ""
 		}
-		e.ensureStrcmp()
 		e.ensureNanBox()
 		restore := e.beginDetachedFunc()
 		e.inHostRow = h
@@ -557,7 +595,7 @@ func (e *Emitter) hostStaticGetter(h string) string {
 			k := ks.name
 			kHit, kNext := e.freshLabel("hrget.key"), e.freshLabel("hrget.nokey")
 			cmp, isK := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %%key, ptr %s)", cmp, e.internString(k)))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp("+irPtr+" %%key, "+irPtr+" %s)", cmp, e.internString(k)))
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isK, cmp))
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isK, kHit, kNext))
 			e.emitLabel(kHit)
@@ -569,6 +607,10 @@ func (e *Emitter) hostStaticGetter(h string) string {
 					if b, berr := e.emitBoxValue(v); berr == nil {
 						boxed = b.Ref
 					}
+				}
+			} else if lit, isConst := builtinNumberConst(h, k); isConst && !ks.method {
+				if b, berr := e.emitBoxValue(Value{Ref: lit, Ty: TypeF64}); berr == nil {
+					boxed = b.Ref
 				}
 			} else if x := hostStaticValueExpr(e, h, ks); x == nil {
 				// No value form: undefined, as an unimplemented static reads.
@@ -584,7 +626,7 @@ func (e *Emitter) hostStaticGetter(h string) string {
 		}
 		// `length` is the builtin's, 1 for every constructor boxed here.
 		lc, isLen := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %%key, ptr %s)", lc, e.internString("length")))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp("+irPtr+" %%key, "+irPtr+" %s)", lc, e.internString("length")))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isLen, lc))
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %d", r, isLen, int64(math.Float64bits(1))+nbDoubleOffset, nbUndefined))
@@ -592,7 +634,7 @@ func (e *Emitter) hostStaticGetter(h string) string {
 		e.inHostRow = ""
 		body := e.allocas.String() + e.body.String()
 		restore()
-		e.writeHelper("internal", "i64", fn, "ptr %key", body)
+		e.writeHelper("internal", "i64", fn, irPtr+" %key", body)
 	}
 	e.hostGetters[h] = fn
 	return fn
@@ -600,7 +642,7 @@ func (e *Emitter) hostStaticGetter(h string) string {
 
 // registerFnStatics adds, per builtin constructor used as a function value
 // (`Number`), the row __kml_fn_static_get (fnmeta.c) reads its statics
-// through, keyed by the value's identity.
+// through, keyed by the value's prefix word.
 func (e *Emitter) registerFnStatics() {
 	var hdrs []string
 	for h := range e.fnStaticHosts {
@@ -609,7 +651,7 @@ func (e *Emitter) registerFnStatics() {
 	sort.Strings(hdrs)
 	for _, h := range hdrs {
 		if fn := e.hostStaticGetter(e.fnStaticHosts[h]); fn != "" {
-			e.addUnitRowLit(unitKindFnStatic, "{ i64, ptr }", fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), ptr %s }", h, fn))
+			e.addUnitRowLit(unitKindFnStatic, "{ i64, "+irPtr+" }", fmt.Sprintf("{ i64 %d, "+irPtr+" %s }", e.fnWord(e.staticFnOf[h]), fn))
 		}
 	}
 }
@@ -634,10 +676,13 @@ func (e *Emitter) hostProtoValue(h string) Value {
 	case h == "Function":
 		return e.emitFnProtoBox("")
 	case h == "Object":
-		e.ensureDynObj()
+		e.ensureAnyToPrimitive()
+		e.ensureNanBox()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
 		e.ensureObjProtoFill()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_object_prototype()", r))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_object_prototype()", r))
 		return e.emitDynObjBox(r)
 	case typedKindIndex(h) >= 0:
 		return e.emitTypedKindProto(h)
@@ -677,10 +722,10 @@ func (e *Emitter) hostStaticKeys(h string) []hostStatic {
 	var keys []hostStatic
 	for _, d := range sym.Declarations {
 		v, ok := d.Node.(*ast.VarDeclaration)
-		if !ok || v.TypeAnnot == nil || v.TypeAnnot.TypeNode() == nil {
+		if !ok || v.TypeAnnot == nil {
 			continue
 		}
-		t := c.TypeFromNode(v.TypeAnnot.TypeNode(), c.Binding().Module)
+		t := c.TypeFromNode(v.TypeAnnot, c.Binding().Module)
 		if t == nil || c.Unanswered(t) {
 			continue
 		}
@@ -706,35 +751,51 @@ func (e *Emitter) hostStaticKeys(h string) []hostStatic {
 // key, i64 v)`: a static field written through its reference (`K.count =
 // 5`), the boxed value converted to the field's type.
 func (e *Emitter) emitClassRefSetRows() {
-	e.ensureStrcmp()
 	for _, c := range e.classRefClasses(true) {
 		restore := e.beginDetachedFunc()
 		vSlot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", vSlot))
-		e.emitInstr(fmt.Sprintf("store i64 %%v, ptr %s, align 8", vSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %%v, "+irPtr+" %s, align 8", vSlot))
 		e.define("__kml_sv", Symbol{Ptr: vSlot, Ty: TypeAny})
 		for _, k := range e.classStaticKeys(c) {
-			if _, method := e.classes[c].StaticMethodSigs[k]; method {
+			sigs := e.classes[c].StaticMethodSigs
+			if _, method := sigs[k]; method {
 				continue
+			}
+			if _, getter := sigs[accessorMethodName("get", k)]; getter {
+				if _, setter := sigs[accessorMethodName("set", k)]; !setter {
+					continue // a getter-only accessor: nothing to write
+				}
 			}
 			kHit, kNext := e.freshLabel("crset.key"), e.freshLabel("crset.nokey")
 			cmp, isK := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %%key, ptr %s)", cmp, e.internString(k)))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp("+irPtr+" %%key, "+irPtr+" %s)", cmp, e.internString(k)))
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isK, cmp))
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isK, kHit, kNext))
 			e.emitLabel(kHit)
-			assign := ast.NewAssignmentExpression("=", ast.NewMemberExpression(ast.NewIdentifier(c, ast.Pos{}), k, ast.Pos{}), ast.NewIdentifier("__kml_sv", ast.Pos{}), ast.Pos{})
-			_, _ = e.emitExpr(assign)
+			if setter := accessorMethodName("set", k); hasSig(sigs, setter) {
+				// A static setter, run with the value (its declared class's).
+				owner := c
+				if impl := e.classes[c].StaticMethodImplementor[setter]; impl != "" {
+					owner = impl
+				}
+				_, _ = e.emitStaticMethodCall(e.classes[owner], owner, setter, []ast.Expression{ast.NewIdentifier("__kml_sv", ast.Pos{})}, ast.Pos{})
+			} else {
+				assign := ast.NewAssignmentExpression("=", ast.NewMemberExpression(ast.NewIdentifier(c, ast.Pos{}), k, ast.Pos{}), ast.NewIdentifier("__kml_sv", ast.Pos{}), ast.Pos{})
+				_, _ = e.emitExpr(assign)
+			}
 			if !e.blockDone {
-				e.emitTerminator("ret void")
+				e.emitTerminator("ret i1 true")
 			}
 			e.emitLabel(kNext)
 		}
-		e.emitTerminator("ret void")
+		e.emitTerminator("ret i1 false")
 		body := e.allocas.String() + e.body.String()
 		restore()
 		fn := ctorThunk("set", c)
-		e.writeFunc(fmt.Sprintf("internal void %s(ptr %%key, i64 %%v)", fn), body)
+		e.writeFunc(fmt.Sprintf("internal i1 %s("+irPtr+" %%key, i64 %%v)", fn), body)
 		e.ctorRowFor(e.classRefs[c]).set = fn
 	}
 }
+
+func hasSig(sigs map[string]FuncSig, k string) bool { _, ok := sigs[k]; return ok }

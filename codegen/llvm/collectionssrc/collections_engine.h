@@ -122,7 +122,7 @@ KML_INL void kml_set(kml_map *m, i64 key, i64 val, kml_hash_fn hf, kml_eq_fn eq)
     i64 slot, e;
     kml_probe(m, key, hf, eq, &slot, &e);
     if (e >= 0) {
-        m->vals[e] = val;
+        KML_STORE_PTR(&m->vals[e], val);
         return;
     }
     if (m->size >= m->cap) {
@@ -132,8 +132,8 @@ KML_INL void kml_set(kml_map *m, i64 key, i64 val, kml_hash_fn hf, kml_eq_fn eq)
         m->cap = ncap;
     }
     i64 at = m->size;
-    m->keys[at] = key;
-    m->vals[at] = val;
+    KML_STORE_PTR(&m->keys[at], key);
+    KML_STORE_PTR(&m->vals[at], val);
     m->size = at + 1;
     i64 old = m->idx[slot];
     m->idx[slot] = at;

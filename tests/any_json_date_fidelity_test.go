@@ -1,6 +1,9 @@
 package tests
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // Node parity for a class declared in a function, typeof's operand, Date's
 // time and locale strings, array literals stored as any, the constructor and
@@ -564,4 +567,42 @@ console.log(t.k.length, JSON.stringify(t));
 3
 3 {"k":"p\u0000q"}
 `)
+}
+
+// Object statics whose results are held boxed: of a dynamic object, and the
+// ones building a dynamic object.
+func TestE2EObjectStaticsHeldBoxed(t *testing.T) {
+	assertSameAsNode(t, `const a: any = JSON.parse('{"x":1,"y":[2]}');
+console.log(Object.values(a), Object.entries(a), JSON.stringify(a.z), JSON.stringify(a));
+const o = Object.create({ k: 1 }); console.log(o.k, Object.getPrototypeOf(o));
+const d: any = Object.defineProperty({}, "q", { get() { return 5; }, enumerable: true }); console.log(d.q, Object.getOwnPropertyDescriptor(d, "q"));
+console.log(Object.groupBy([1, 2, 3], x => x % 2 ? "odd" : "even"));
+console.log(Object.values({ m: 1 }), JSON.stringify({ n: 2 }));
+`)
+}
+
+// new Request(request, init): the input's url, method, headers and body,
+// the init overriding; a body moved from the input marks it used.
+func TestE2ERequestFromRequest(t *testing.T) {
+	src := `(async () => {
+  const req1 = new Request("https://example.com/", { body: "req1", method: "POST", headers: { "x-a": "1" } });
+  console.log(await req1.text());
+  const req2 = new Request(req1, { body: "req2" });
+  console.log(req2.url, req2.method, req2.headers.get("x-a"), await req2.text());
+  const r3 = new Request("https://example.com/", { body: "b3", method: "PUT" });
+  const r4 = new Request(r3);
+  console.log(r3.bodyUsed, r4.bodyUsed);
+  console.log(r4.method, await r4.text());
+  const g = new Request("https://example.com/");
+  console.log(new Request(g).method, g.bodyUsed);
+  const r5 = new Request("https://example.com/", { body: "b5", method: "POST" });
+  await r5.text();
+  try { new Request(r5); } catch (e) { console.log((e as Error).name); }
+  const r6 = new Request("https://example.com/", { body: "req1", method: "POST" });
+  const r7 = new Request("https://example.com/", r6);
+  console.log(await r7.text());
+})();
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCLIJS(t, strings.ReplaceAll(src, "(e as Error)", "e"))
 }

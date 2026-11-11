@@ -14,7 +14,7 @@ var bigintRelSource string
 // bigintBoxDefines are the constants the boxed-bigint C files share with
 // the emitter.
 func bigintBoxDefines() string {
-	return fmt.Sprintf("#define KML_BIGINT_MAGIC %dLL\n#define KML_NB_DOUBLE_OFFSET %dLL\n", kmlBoxedBigIntMagic, nbDoubleOffset)
+	return fmt.Sprintf("#define KML_BIGINT_MAGIC %dLL\n#ifndef KML_NB_DOUBLE_OFFSET\n#define KML_NB_DOUBLE_OFFSET %dLL\n#endif\n", kmlBoxedBigIntMagic, nbDoubleOffset)
 }
 
 // BigIntBoxSource is the boxed-bigint hooks' C source (boxsrc/bigintbox.c).
@@ -23,15 +23,6 @@ func BigIntBoxSource() string { return bigintBoxSource }
 // BigIntRelSource is the dynamic relational comparison's C source
 // (boxsrc/bigintrel.c).
 func BigIntRelSource() string { return bigintBoxDefines() + bigintRelSource }
-
-// UsesBigIntBoxC reports whether the program links the boxed-bigint hooks:
-// they exist (as C) only with the bigint runtime; without it they are
-// stubs defined in the module.
-func (e *Emitter) UsesBigIntBoxC() bool { return e.usedBigIntBoxHooks && e.UsesBigInt() }
-
-// UsesBigIntRelC reports whether the program links the dynamic relational
-// comparison with a bigint (boxsrc/bigintrel.c).
-func (e *Emitter) UsesBigIntRelC() bool { return e.usedAnyBigIntRel && e.UsesBigInt() }
 
 // emit_bigint_box.go — a bigint held in an `any` (TDD-00229, a slice of
 // TDD-00228's "a handle boxes as a typed heap cell"). A bigint is a bare
@@ -51,13 +42,12 @@ const kmlBoxedBigIntMagic int64 = 0x7FF40000B1616B16
 // emitBoxBigInt boxes a bigint value; a nullable one that is null at runtime
 // boxes as the null (or undefined) sentinel.
 func (e *Emitter) emitBoxBigInt(v Value) Value {
-	e.ensureMalloc()
 	cell := e.freshReg()
-	e.heapMallocInto(cell, "16")
+	e.heapMallocInto(cell, allocHost, "16")
 	e.heapStore("i64", fmt.Sprint(kmlBoxedBigIntMagic), cell, 8)
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", slot, cell))
-	e.heapStore("ptr", v.Ref, slot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", slot, cell))
+	e.heapStore(irPtr, v.Ref, slot, 8)
 	tagged := e.emitNbTagPtr(cell, kmlTagObject)
 	if !v.Ty.Nullable() {
 		return Value{Ref: tagged, Ty: TypeAny}
@@ -67,7 +57,7 @@ func (e *Emitter) emitBoxBigInt(v Value) Value {
 		absent = nbUndefined
 	}
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 	sel := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, absent, tagged))
 	return Value{Ref: sel, Ty: TypeAny}
@@ -79,9 +69,9 @@ func (e *Emitter) emitBoxBigInt(v Value) Value {
 // a single 8-byte field, so field 1 must not be read speculatively).
 func (e *Emitter) emitBoxedBigIntProbe(payloadReg string) (cellPtr, isBig string) {
 	cellPtr = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", cellPtr, payloadReg))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, cellPtr, payloadReg))
 	f0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f0, cellPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f0, cellPtr))
 	isBig = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isBig, f0, kmlBoxedBigIntMagic))
 	return cellPtr, isBig
@@ -90,9 +80,9 @@ func (e *Emitter) emitBoxedBigIntProbe(payloadReg string) (cellPtr, isBig string
 // emitBoxedBigIntLoad reads the bigint out of a probed cell.
 func (e *Emitter) emitBoxedBigIntLoad(cellPtr string) Value {
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", slot, cellPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", slot, cellPtr))
 	b := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", b, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", b, slot))
 	return Value{Ref: b, Ty: BigIntType()}
 }
 
@@ -112,47 +102,11 @@ func (e *Emitter) ensureBoxedBigIntHooks() {
 }
 
 // emitBoxedBigIntHooksFinalize declares the C hooks (boxsrc/bigintbox.c:
-// decimal digits of a cell's bigint, value equality of two cells' bigints)
-// or, without a bigint runtime, defines them as stubs.
+// decimal digits of a cell's bigint, value equality of two cells' bigints;
+// bigintrel.c: a dynamic relational comparison). Without a bigint runtime no
+// cell can exist, and hooks.c's weak defaults answer.
 func (e *Emitter) emitBoxedBigIntHooksFinalize() {
 	if !e.usedBigIntBoxHooks {
 		return
-	}
-	if e.UsesBigInt() {
-		// Defined in boxsrc/bigintbox.c and bigintrel.c.
-		e.emitGlobal(`declare ptr @__kml_boxed_bigint_str(ptr)
-declare zeroext i1 @__kml_boxed_bigint_eq(ptr, ptr)
-declare zeroext i1 @__kml_boxed_bigint_eq_num(ptr, double)`)
-		if e.usedAnyBigIntRel {
-			e.emitGlobal("declare i32 @__kml_any_bigint_rel(i64, i64)")
-		}
-		return
-	}
-	e.emitGlobal(`
-define ptr @__kml_boxed_bigint_str(ptr %cell) {
-entry:
-  ret ptr ` + e.internString("") + `
-}
-
-define i1 @__kml_boxed_bigint_eq(ptr %ca, ptr %cb) {
-entry:
-  ret i1 false
-}
-
-define i1 @__kml_boxed_bigint_eq_num(ptr %cell, double %d) {
-entry:
-  ret i1 false
-}`)
-	e.emitAnyBigIntRel(`define i32 @__kml_any_bigint_rel(i64 %a, i64 %b) {
-entry:
-  ret i32 0
-}`)
-}
-
-// emitAnyBigIntRel defines @__kml_any_bigint_rel when a dynamic relational
-// comparison used it.
-func (e *Emitter) emitAnyBigIntRel(ir string) {
-	if e.usedAnyBigIntRel {
-		e.emitGlobal(ir)
 	}
 }

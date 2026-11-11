@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-// Regression: inferExprType must be linear in expression size. It used to
+// Regression: typeOfExpr must be linear in expression size. It used to
 // re-infer both operands of a binary expression once for the bigint check and
 // again in each operator branch, so a deep left-associative chain like
 // `a + b + c + ...` cost O(2^depth) — enough to peg a core for minutes on a

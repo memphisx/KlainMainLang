@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/parser"
@@ -17,37 +18,92 @@ import (
 // introduces no bindings (so there is no var-hoisting-into-caller-scope or
 // completion-value subtlety to get wrong).
 //
-// Anything outside that subset — a dynamic (non-constant) argument, a string
-// that doesn't parse, or one that parses as statements/declarations rather
-// than a lone expression — is a clean compile-time error, deliberately NOT a
-// runtime throw. A runtime throw would be indistinguishable to the
-// conformance harness's `assert.throws(SyntaxError, () => eval("bad"))` from
-// the SyntaxError it expects (the shim's assert.throws matches any thrown
-// value — this compiler has no first-class error constructors to compare
-// against), which would falsely pass negative tests. A compile error keeps
-// those honestly failing while positive expression-evals genuinely pass. See
+// A string that does not parse throws SyntaxError when the eval runs, as
+// in JavaScript; statements are lowered by the resolver. A dynamic
+// (non-constant) argument is still a compile-time error. See
 // docs/tdd/TDD-00046.md.
 func (e *Emitter) emitStaticEval(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: eval expects exactly 1 argument", pos.Line, pos.Col)
+	if len(args) == 0 || isUndefinedLiteral(e, stripAsAny(args[0])) && len(args) == 1 {
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil // eval(), eval(undefined): undefined
 	}
-	src, ok := staticStringValue(args[0])
+	// Arguments past the first are evaluated, and ignored.
+	for _, a := range args[1:] {
+		if _, err := e.emitExpr(a); err != nil {
+			return Value{}, err
+		}
+	}
+	src, ok := e.evalSource(args[0])
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: eval is only supported with a compile-time-constant string argument; a dynamic eval needs an embedded JS engine", pos.Line, pos.Col)
+		switch t := e.typeOfExpr(args[0]); {
+		case evalReturnsArgument(t):
+			// A value that is not a string is eval's result as it is.
+			v, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitBoxValue(v)
+		case t.IsDynamic():
+			// Its kind is known when it runs: a string would need an
+			// embedded JavaScript engine (the one form this compiler
+			// cannot run), its EvalError; any other value is the result.
+			v, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			boxed, err := e.emitBoxValue(v)
+			if err != nil {
+				return Value{}, err
+			}
+			tag, _ := e.emitUnboxTagPayload(boxed)
+			strL, okL := e.emitTagCheck(tag, kmlTagString, "eval.str")
+			e.emitLabel(strL)
+			e.ensureExceptionHelpers()
+			errObj := e.buildErrorObj(errorKindIDs["EvalError"], e.internString("eval of a string computed at run time is not supported: it needs an embedded JavaScript engine"), e.internString("EvalError"))
+			e.excThrow(errObj)
+			e.emitTerminator("unreachable")
+			e.emitLabel(okL)
+			return boxed, nil
+		}
+		// A string computed at run time: evaluated, then its EvalError.
+		if _, err := e.emitExpr(args[0]); err != nil {
+			return Value{}, err
+		}
+		if !e.blockDone {
+			e.ensureExceptionHelpers()
+			errObj := e.buildErrorObj(errorKindIDs["EvalError"], e.internString("eval of a string computed at run time is not supported: it needs an embedded JavaScript engine"), e.internString("EvalError"))
+			e.excThrow(errObj)
+			e.emitTerminator("unreachable")
+		}
+		e.emitLabel(e.freshLabel("eval.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
 	}
 	prog, err := parser.ParseEval(src)
 	if err != nil {
-		return Value{}, fmt.Errorf("%d:%d: eval of a static string only supports a single expression, and this one did not parse as one: %v", pos.Line, pos.Col, err)
+		// Source that does not parse throws when the eval runs, as in JS.
+		e.emitThrowSyntaxError(evalSyntaxMessage(err))
+		e.emitLabel(e.freshLabel("eval.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
 	}
+	// The resolver lowers eval code of statements (rewriteStaticEval).
 	if len(prog.Body) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: eval of a static string only supports a single expression (got %d statements)", pos.Line, pos.Col, len(prog.Body))
+		return Value{}, fmt.Errorf("internal compiler error: eval code of %d statements reached code generation", len(prog.Body))
 	}
 	exprStmt, ok := prog.Body[0].(*ast.ExpressionStatement)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: eval of a static string only supports a single expression (got a %T)", pos.Line, pos.Col, prog.Body[0])
+		return Value{}, fmt.Errorf("internal compiler error: eval code of a %T reached code generation", prog.Body[0])
 	}
 	// Compile the parsed expression in place — its value is eval's result.
 	return e.emitExpr(exprStmt.Expr)
+}
+
+// evalSyntaxMessage is a parse error's message without its position in
+// the evaluated string.
+func evalSyntaxMessage(err error) string {
+	msg := err.Error()
+	if i := strings.Index(msg, ": "); i > 0 && strings.Count(msg[:i], ":") == 1 {
+		msg = msg[i+2:]
+	}
+	return msg
 }
 
 // staticStringValue returns the compile-time-constant string an expression
@@ -67,21 +123,46 @@ func staticStringValue(expr ast.Expression) (string, bool) {
 	return "", false
 }
 
+// evalSource is the constant source eval's argument denotes: a literal, or
+// a `const` declared once and bound to one (`const s = "1+2"; eval(s)`).
+func (e *Emitter) evalSource(expr ast.Expression) (string, bool) {
+	if src, ok := staticStringValue(expr); ok {
+		return src, true
+	}
+	id, ok := expr.(*ast.Identifier)
+	c := e.front()
+	if !ok || c == nil {
+		return "", false
+	}
+	sym, _ := c.Binding().Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return "", false
+	}
+	vd, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
+	if !ok || vd.Kind != "const" || vd.Init == nil {
+		return "", false
+	}
+	return staticStringValue(vd.Init)
+}
+
 // inferStaticEvalType is emitStaticEval's compile-time-type mirror: a static
 // `eval("<expr>")` produces exactly the value of the single expression the
 // string parses to, so its type is that expression's inferred type. Keeping
 // this in lockstep with emitStaticEval stops the enclosing closure's inferred
 // return type (default i64) from disagreeing with the ptr/object/regexp the
 // body actually returns — `() => eval("/re/")` emitted `ret ptr` inside a
-// `define i64` otherwise (invalid IR). Pure: parsing and inferExprType do no
+// an i64 function otherwise (invalid IR). Pure: parsing and typeOfExpr do no
 // codegen. Returns false when the argument is not a single-expression constant
 // string (emitStaticEval will then raise its own clean compile error).
 func (e *Emitter) inferStaticEvalType(args []ast.Expression) (Type, bool) {
-	if len(args) != 1 {
-		return Type{}, false
+	if len(args) == 0 {
+		return TypeAny, true
 	}
-	src, ok := staticStringValue(args[0])
+	src, ok := e.evalSource(args[0])
 	if !ok {
+		if t := e.typeOfExpr(args[0]); evalReturnsArgument(t) || t.IsDynamic() {
+			return TypeAny, true // emitStaticEval's box of it
+		}
 		return Type{}, false
 	}
 	prog, err := parser.ParseEval(src)
@@ -92,5 +173,17 @@ func (e *Emitter) inferStaticEvalType(args []ast.Expression) (Type, bool) {
 	if !ok {
 		return Type{}, false
 	}
-	return e.inferExprType(exprStmt.Expr), true
+	return e.typeOfExpr(exprStmt.Expr), true
+}
+
+// evalReturnsArgument reports a static type no value of which is a string:
+// eval returns such an argument unchanged.
+func evalReturnsArgument(t Type) bool {
+	if t.IsNull() || t.IsUndefined() {
+		return true
+	}
+	if t.IsDynamic() || t.IR == "void" {
+		return false
+	}
+	return !isPlainStringTy(t.withoutNullable()) && !t.IsStrLiteral()
 }

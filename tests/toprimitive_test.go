@@ -30,7 +30,9 @@ console.log(b % 3);
 }
 
 func TestE2EToPrimitiveValueOfRelational(t *testing.T) {
-	assertOutput(t, `
+	// Comparing an object with a number is a TypeScript type error
+	// (TS2365): -compat=js runs it with JavaScript's ToPrimitive.
+	assertOutputCompatJS(t, `
 const b = { valueOf: function() { return 5; } };
 console.log(b > 4);
 console.log(b < 4);
@@ -196,12 +198,11 @@ console.log(({ valueOf: function() { return 12; } } << 1));
 }
 
 func TestE2EToPrimitiveBitwiseObjectNoPrimitiveRejects(t *testing.T) {
-	// An object with no primitive value (valueOf/toString both return objects)
-	// has no ToInt32 — strict rejects cleanly (TS reports the same), rather than
-	// emitting `trunc i64 <object ptr> to i32`.
-	assertCodegenError(t, `
+	// An object operand of a bitwise operator is TypeScript's TS2363: the
+	// strict lane rejects it.
+	assertCLICompileError(t, false, `
 console.log((1 & { valueOf: function() { return {}; }, toString: function() { return {}; } }));
-`, "without a primitive value")
+`, "the right-hand side of an arithmetic operation must be of type")
 }
 
 // A [Symbol.toPrimitive]() declaring no parameter ignores the hint, as JS
@@ -291,4 +292,20 @@ try { console.log(String(new J())) } catch (e) { console.log((e as Error).constr
 `
 	assertSameAsNode(t, src)
 	assertSameAsNodeCompatJS(t, src)
+}
+
+// A class instance held as any converts with the string hint as Node does:
+// without a toString of its own, Object.prototype's `[object Tag]` ends
+// the ladder before valueOf.
+func TestE2EToPrimitiveStringHintClassInAny(t *testing.T) {
+	t.Parallel()
+	assertSameAsNode(t, `
+class A { valueOf(): any { return 9; } }
+class B { toString(): string { return 'b!'; } valueOf(): any { return 1; } }
+class C {}
+class T { valueOf(): any { return 3; } get [Symbol.toStringTag](): string { return 'T.T'; } }
+class E extends Error {}
+const xs: any[] = [new A(), new B(), new C(), new T(), new E('m')];
+for (const x of xs) console.log(String(x), `+"`${x}`"+`, x + '', +x);
+`)
 }

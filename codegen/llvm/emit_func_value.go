@@ -2,7 +2,7 @@
 // functions: `const g = f`, `apply(f, ...)`, `return f`, etc.
 //
 // A named function's LLVM signature has no leading environment pointer
-// (`define i64 @f(i64 %x)`), but every function *value* in this compiler is
+// (`i64 @f(i64 %x)`), but every function *value* in this compiler is
 // invoked through the closure ABI, which passes the environment first
 // (`call i64 (ptr, i64) %fp(ptr %env, i64 %x)`). So a named function can't be
 // pointed at by a closure header directly. Instead, referencing one by value
@@ -30,11 +30,27 @@ import (
 func funcTypeFromSig(sig FuncSig) Type {
 	ft := FuncType(sig.ParamTypes, sig.RetType)
 	ft.FuncHasRest = sig.HasRest
-	ft.FuncCountsArgs = countsArgs(sig.HasRest, sig.ParamNames)
+	ft.FuncCountsArgs = sigCountsArgs(sig)
 	if len(sig.ParamNames) == len(sig.ParamTypes) && !sig.This {
 		ft.FuncParamNames = sig.ParamNames
 	}
 	ft.FuncThis = sig.This
+	return ft
+}
+
+// overrideFuncType is an overriding method's own signature as a function
+// type, with the parameters it takes absent marked: an adapter from the
+// inherited signature passes those undefined.
+func overrideFuncType(sig FuncSig) Type {
+	ft := funcTypeFromSig(sig)
+	if len(sig.Optional) == len(sig.ParamTypes) && !sig.HasRest {
+		ft.FuncParamOptional = append([]bool(nil), sig.Optional...)
+		for i := range ft.FuncParamOptional {
+			if i < len(sig.Defaults) && sig.Defaults[i] != nil {
+				ft.FuncParamOptional[i] = false // a caller-filled default
+			}
+		}
+	}
 	return ft
 }
 
@@ -50,7 +66,7 @@ func fnValueTrampolineName(mangled string) string {
 // nullable scalars included (their `{ i1, T }` storage shape).
 func paramABITypes(pty Type) []string {
 	if pty.IsArray() {
-		return []string{"ptr", "i64"}
+		return []string{irPtr, "i64"}
 	}
 	return []string{storageIR(pty)}
 }
@@ -66,7 +82,7 @@ func (e *Emitter) ensureFuncValueTrampoline(mangled string, sig FuncSig) string 
 
 	// Build the parameter declaration list (env first) and the forward-argument
 	// list (the same operands, minus env) in lockstep.
-	decls := []string{"ptr %env"}
+	decls := []string{irPtr + " %env"}
 	var fwd []string
 	n := 0
 	for _, pty := range sig.ParamTypes {
@@ -107,14 +123,11 @@ func (e *Emitter) ensureFuncValueTrampoline(mangled string, sig FuncSig) string 
 	}
 	call := fmt.Sprintf("call %s @%s(%s)", ret, llvmSafeSymbol(mangled), strings.Join(fwd, ", "))
 
-	var b strings.Builder
-	b.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n", ret, sym, strings.Join(decls, ", ")))
-	if ret == "void" {
-		b.WriteString("  " + call + "\n  ret void\n}\n")
-	} else {
-		b.WriteString(fmt.Sprintf("  %%r = %s\n  ret %s %%r\n}\n", call, ret))
+	body := "  " + call + "\n  ret void\n"
+	if ret != "void" {
+		body = fmt.Sprintf("  %%r = %s\n  ret %s %%r\n", call, ret)
 	}
-	e.functions.WriteString(b.String())
+	e.writeFunc(fmt.Sprintf("%s %s(%s)", ret, sym, strings.Join(decls, ", ")), body)
 	return sym
 }
 
@@ -144,6 +157,9 @@ func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig, displayName st
 	if e.sloppyFuncs[mangled] {
 		kind |= fnKindSloppy
 	}
+	if fd := e.topFuncDecls[mangled]; !sig.IsAsync && (fd == nil || !fd.IsGenerator && !e.fileIsLib(e.fileOfFunc(fd))) {
+		kind |= fnFlagCtor
+	}
 	e.registerFnMeta(tramp, unmangleTopLevelName(displayName), fnLengthFromSig(sig), kind)
 	if fd := e.topFuncDecls[mangled]; fd != nil {
 		e.fnMetaSource(tramp, fd.Src)
@@ -156,9 +172,7 @@ func (e *Emitter) emitNamedFuncValue(mangled string, sig FuncSig, displayName st
 	if !e.fnValueHeaders[mangled] {
 		e.fnValueHeaders[mangled] = true
 		e.emitNamedDynEntry(mangled, sig, tramp)
-		e.emitGlobal(fmt.Sprintf(
-			"%s = private unnamed_addr constant {ptr, ptr} { ptr %s, ptr null }",
-			sym, tramp))
+		e.emitStaticFnRecord(sym, "private unnamed_addr", "{ "+irPtr+", "+irPtr+" }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null }", tramp), tramp)
 	}
 	return Value{Ref: sym, Ty: funcValueType(sig)}
 }

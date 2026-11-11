@@ -47,8 +47,12 @@ func ours() (*decls, error) {
 				for _, st := range g.Members {
 					if n := declName(st); n != "" {
 						// A namespace's functions and values
-						// (`Reflect.get`), by their dotted names.
+						// (`Reflect.get`), by their dotted names; the
+						// namespace is then a value itself (`WebAssembly`).
 						nsGlobals[g.Name+"."+strings.TrimPrefix(n, ast.NamespaceMangle(g.Name, ""))] = true
+						if _, iface := st.(*ast.InterfaceDeclaration); !iface {
+							nsGlobals[g.Name] = true
+						}
 					}
 					if n, ok := st.(*ast.InterfaceDeclaration); ok {
 						ms := map[string]*member{}
@@ -56,6 +60,19 @@ func ours() (*decls, error) {
 							oursDecl.addMember(ms, m)
 						}
 						oursDecl.ifaces[g.Name+"."+n.Name] = ms
+						// Its `extends` names a sibling of the namespace
+						// (`Process extends ProcessEmitter`) or a global.
+						for _, h := range n.Heritage {
+							if r, ok := h.(*ast.TypeReference); ok && len(r.Qualifier) == 0 {
+								bs := oursDecl.bases[g.Name+"."+n.Name]
+								if bs == nil {
+									bs = map[string]bool{}
+									oursDecl.bases[g.Name+"."+n.Name] = bs
+								}
+								bs[g.Name+"."+r.Name] = true
+								bs[r.Name] = true
+							}
+						}
 					}
 				}
 			}

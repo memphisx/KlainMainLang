@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 
 	"KlainMainLang/diag"
 
@@ -19,19 +20,32 @@ type Binding struct {
 	// refs maps every identifier reference to the symbol it resolves to; an
 	// identifier absent from the map (and listed in globals) names nothing
 	// the program declares.
-	refs    map[*ast.Identifier]*Symbol
-	globals map[*ast.Identifier]bool
+	// Memo holds what passes derive from this binding, for its lifetime: a
+	// process-wide map keyed by it would keep every compile alive.
+	Memo sync.Map
+
+	refs map[*ast.Identifier]*Symbol
+	// declSyms maps each declaring node to the symbol it declares.
+	declSyms map[ast.Node]*Symbol
+	globals  map[*ast.Identifier]bool
 	// undefinedRefs maps an `undefined` literal to the binding of that name
 	// in scope (plain JS lets a function declare one).
 	undefinedRefs map[*ast.NullLiteral]*Symbol
 	// lookupScopes is the scope each unresolved reference was looked up
 	// from.
 	lookupScopes map[ast.Node]*Scope
+	// queryFlow and queryContainer give each `typeof x` the flow node at
+	// it and the function or module it is in, so x reads as narrowed there.
+	queryFlow      map[*ast.TypeQuery]*FlowNode
+	queryContainer map[*ast.TypeQuery]*Scope
 	// typeArgScopes is the scope each explicit type argument of a call or
 	// construction is written in (`new Map<string, T>()` inside `f<T>`).
-	typeArgScopes map[*ast.TypeAnnotation]*Scope
+	typeArgScopes map[ast.TypeNode]*Scope
+	// annotScopes is the scope each declaration annotation is written in.
+	annotScopes map[ast.TypeNode]*Scope
 	// newTargets maps a `new X(…)` to the symbol X resolves to.
 	newTargets map[*ast.NewExpression]*Symbol
+	newCallees map[*ast.NewExpression]*ast.Identifier
 	// qualifiedCallees maps a `new o.p.C(…)` whose qualifier is a variable
 	// to the member expression it constructs through (bound here).
 	qualifiedCallees map[*ast.NewExpression]ast.Expression
@@ -129,27 +143,56 @@ func (b *Binding) Resolve(id *ast.Identifier) (sym *Symbol, ok bool) {
 // when it is the value undefined.
 func (b *Binding) UndefinedRef(n *ast.NullLiteral) *Symbol { return b.undefinedRefs[n] }
 
+// AnnotationScope returns the scope a declaration's annotation (a
+// variable's, parameter's, field's or return type) is written in, or nil.
+func (b *Binding) AnnotationScope(n ast.TypeNode) *Scope { return b.annotScopes[n] }
+
+// EachAnnotation calls fn with every declaration annotation and the scope
+// it is written in.
+func (b *Binding) EachAnnotation(fn func(ast.TypeNode, *Scope)) {
+	for n, sc := range b.annotScopes {
+		fn(n, sc)
+	}
+}
+
 // TypeArgScope returns the scope an explicit type argument of a call or
 // construction is written in, or nil.
-func (b *Binding) TypeArgScope(ta *ast.TypeAnnotation) *Scope { return b.typeArgScopes[ta] }
+func (b *Binding) TypeArgScope(ta ast.TypeNode) *Scope { return b.typeArgScopes[ta] }
 
 // noteTypeArgScopes records the scope n's explicit type arguments are
 // written in.
 func (b *binder) noteTypeArgScopes(n ast.Node) {
-	var tas []*ast.TypeAnnotation
+	var tas []ast.TypeNode
 	switch x := n.(type) {
 	case *ast.CallExpression:
 		tas = x.TypeArgs
 	case *ast.NewExpression:
 		tas = x.TypeArgs
 	case *ast.NewMapExpression:
-		tas = []*ast.TypeAnnotation{x.KeyType, x.ValType}
+		tas = []ast.TypeNode{x.KeyType, x.ValType}
 	case *ast.NewSetExpression:
-		tas = []*ast.TypeAnnotation{x.ElemType}
+		tas = []ast.TypeNode{x.ElemType}
 	}
 	for _, ta := range tas {
 		if ta != nil {
 			b.typeArgScopes[ta] = b.cur
+		}
+	}
+	// An assertion's type (`x as T`, `<T>x`, `x satisfies T`) reads its
+	// names where written: a type parameter in scope.
+	var asserted []ast.TypeNode
+	if x, ok := n.(*ast.AsExpression); ok {
+		asserted = append(asserted, x.TypeAnnot)
+	}
+	if e, ok := n.(ast.Expression); ok && b.Program != nil && b.Program.Assertions != nil {
+		if a, ok := b.Program.Assertions[e]; ok {
+			asserted = append(asserted, a.Cast, a.Satisfies)
+		}
+	}
+	for _, t := range asserted {
+		if t != nil {
+			b.noteTypeScope(t)
+			b.typeQueryScopes(t)
 		}
 	}
 }
@@ -169,6 +212,11 @@ func (b *Binding) StatementScope(st ast.Statement) *Scope { return b.stmtScopes[
 // NewTarget returns the symbol a `new X(…)` constructs, or nil for a name the
 // program does not declare.
 func (b *Binding) NewTarget(n *ast.NewExpression) *Symbol { return b.newTargets[n] }
+
+// NewCallee is the read of the variable a `new v(…)` constructs through,
+// flow-narrowed as any read of it is; nil for a class name or a qualified
+// callee.
+func (b *Binding) NewCallee(n *ast.NewExpression) *ast.Identifier { return b.newCallees[n] }
 
 // QualifiedCallee returns the member expression a `new o.C(…)` whose
 // qualifier o is a variable or a namespace constructs through (the value
@@ -207,6 +255,9 @@ type binder struct {
 	// ambientNS maps a declaration file's namespace members (inside its
 	// `declare module` blocks too) to their namespace, while it is bound.
 	ambientNS map[ast.Statement]*namespace
+	// typeLevel marks a name that is never evaluated (an ambient class's
+	// computed member key): resolved, but no run-time read.
+	typeLevel bool
 	scopes    map[scopeKey]*Scope
 	cur       *Scope
 	// memberOf maps a top-level statement a namespace member desugared to
@@ -321,13 +372,18 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 			Sloppy:              opts.AnnexB,
 			Program:             prog,
 			refs:                map[*ast.Identifier]*Symbol{},
+			declSyms:            map[ast.Node]*Symbol{},
 			undefinedRefs:       map[*ast.NullLiteral]*Symbol{},
 			globals:             map[*ast.Identifier]bool{},
 			lookupScopes:        map[ast.Node]*Scope{},
-			typeArgScopes:       map[*ast.TypeAnnotation]*Scope{},
+			queryFlow:           map[*ast.TypeQuery]*FlowNode{},
+			queryContainer:      map[*ast.TypeQuery]*Scope{},
+			typeArgScopes:       map[ast.TypeNode]*Scope{},
+			annotScopes:         map[ast.TypeNode]*Scope{},
 			opened:              map[ast.Node]*Scope{},
 			stmtScopes:          map[ast.Statement]*Scope{},
 			newTargets:          map[*ast.NewExpression]*Symbol{},
+			newCallees:          map[*ast.NewExpression]*ast.Identifier{},
 			qualifiedCallees:    map[*ast.NewExpression]ast.Expression{},
 			refFlow:             map[*ast.Identifier]*FlowNode{},
 			written:             map[*ast.Identifier]bool{},
@@ -428,7 +484,7 @@ func (b *binder) declareNSAliases(prog *ast.Program) {
 			return s
 		}
 		for _, seg := range strings.Split(dotted, ".") {
-			sym := s.Symbols.Get(seg)
+			sym := getUnsuffixed(s, seg)
 			if sym == nil || b.nsScopes[sym] == nil {
 				return nil
 			}
@@ -444,19 +500,39 @@ func (b *binder) declareNSAliases(prog *ast.Program) {
 		segs := strings.Split(a.Target, ".")
 		var target *Symbol
 		for s := at; s != nil && target == nil; s = s.Parent {
-			target = s.Symbols.Get(segs[0])
+			target = getUnsuffixed(s, segs[0])
 		}
 		for _, seg := range segs[1:] {
 			if target == nil || b.nsScopes[target] == nil {
 				target = nil
 				break
 			}
-			target = b.nsScopes[target].Symbols.Get(seg)
+			target = getUnsuffixed(b.nsScopes[target], seg)
 		}
 		if target != nil {
 			at.Symbols.alias(a.Name, target)
+			if target.Name != a.Name && ast.TrimModuleSuffix(target.Name) == a.Name && at.Symbols.Get(target.Name) == nil {
+				// An alias of its target's own name (`import Key = K.Key`):
+				// the resolver gives its uses the target's file-private name.
+				at.Symbols.alias(target.Name, target)
+			}
 		}
 	}
+}
+
+// getUnsuffixed is scope s's symbol name, under that name or the one the
+// resolver made file-private (`a__kml_mod0`).
+func getUnsuffixed(s *Scope, name string) *Symbol {
+	if sym := s.Symbols.Get(name); sym != nil {
+		return sym
+	}
+	var found *Symbol
+	s.Symbols.Each(func(sym *Symbol) {
+		if found == nil && ast.TrimModuleSuffix(sym.Name) == name {
+			found = sym
+		}
+	})
+	return found
 }
 
 // namespacesOf maps every namespace member statement to its innermost
@@ -564,7 +640,12 @@ func (b *binder) inNamespace(ns *namespace, f func()) {
 		}
 	}
 	b.nsPrefix = ast.NamespaceMangle(ns.name, "")
+	// A namespace body is a flow container of its own, as tsc's: a read
+	// there of a variable declared outside is an outer variable's.
+	savedContainer := b.container
+	b.container = b.cur
 	f()
+	b.container = savedContainer
 	b.nsPrefix = saved
 	for range chain {
 		b.leave()
@@ -599,6 +680,20 @@ func (b *binder) functionScope() *Scope {
 	return s
 }
 
+// noteDecl records the symbol a node declares.
+func (b *binder) noteDecl(node ast.Node, sym *Symbol) {
+	if node != nil && b.declSyms != nil {
+		b.declSyms[node] = sym
+	}
+}
+
+// DeclSymbol is the symbol a declaring node (a variable declaration, a
+// function, a parameter) declares, wherever its scope.
+func (b *Binding) DeclSymbol(node ast.Node) (*Symbol, bool) {
+	sym, ok := b.declSyms[node]
+	return sym, ok
+}
+
 // declare adds a declaration of name to scope s (on the first pass).
 func (b *binder) declare(s *Scope, name string, flags SymbolFlags, kind DeclKind, node ast.Node) *Symbol {
 	if !b.declaring || name == "" {
@@ -608,24 +703,33 @@ func (b *binder) declare(s *Scope, name string, flags SymbolFlags, kind DeclKind
 		name = strings.TrimPrefix(name, b.nsPrefix)
 	}
 	d := Declaration{Node: node, Flags: flags, Kind: kind, Plain: b.plain, Body: b.inBody && s == b.bodyScope}
+	if v, ok := node.(*ast.VarDeclaration); ok && v.ParamScope {
+		d.Body = false // a parameter's eval declared it: the parameters see it
+	}
 	if node != nil {
 		d.Pos = node.GetPos()
 	}
 	if sym := s.Symbols.Get(name); sym != nil && !sym.Implicit {
 		for _, prev := range sym.Declarations {
-			if c := clashes(prev, d, b.annexB); c != NoClash {
+			c := clashes(prev, d, b.annexB)
+			if c == NoClash && s.Kind == BlockScope && prev.Flags == Function && d.Flags == Function && !(prev.Plain && d.Plain) {
+				c = Redeclaration // a block's generator or async function shares no name
+			}
+			if c != NoClash {
 				b.Conflicts = append(b.Conflicts, Conflict{Symbol: sym, Decl: d, Clash: c})
 				break
 			}
 		}
 		sym.Flags |= flags
 		sym.Declarations = append(sym.Declarations, d)
+		b.noteDecl(node, sym)
 		return sym
 	}
 	if prev := s.Symbols.Get(name); prev != nil && prev.Implicit && d.Body {
 		s.ParamArguments = prev
 	}
 	sym := &Symbol{ID: len(b.symbols) + 1, Name: name, Flags: flags, Declarations: []Declaration{d}, Scope: s}
+	b.noteDecl(node, sym)
 	s.Symbols.put(sym)
 	b.symbols = append(b.symbols, sym)
 	return sym
@@ -751,7 +855,9 @@ func (b *binder) visitNode(n ast.Node) {
 			b.refContainer[n] = b.container
 			b.refOrd[n] = b.ord
 			b.refScope[n] = b.cur
-			b.accesses = append(b.accesses, n)
+			if !b.typeLevel {
+				b.accesses = append(b.accesses, n) // a run-time read the flow checks
+			}
 			if b.writing {
 				b.written[n] = true
 				b.assignFlow(sym, false, true)
@@ -767,9 +873,10 @@ func (b *binder) visitNode(n ast.Node) {
 		return
 	case *ast.NewExpression:
 		if !b.declaring && n.Qualified && len(n.QualifierPath) > 0 {
-			// Through a variable, or a namespace (`new Geometry.Point()`):
-			// the member its qualifier names.
-			if root := b.resolveName(n.QualifierPath[0]); root != nil && (root.Flags&Variable != 0 || root.Flags&NamespaceModule != 0) {
+			// Through a variable, a namespace (`new Geometry.Point()`), a
+			// function's expando (`new assert.Assert()`) or a class's static
+			// member: the member its qualifier names.
+			if root := b.resolveName(n.QualifierPath[0]); root != nil && root.Flags&(Variable|NamespaceModule|Function|Alias|Class) != 0 {
 				pos := n.GetPos()
 				var callee ast.Expression = ast.NewIdentifier(n.QualifierPath[0], pos)
 				for _, seg := range n.QualifierPath[1:] {
@@ -784,6 +891,13 @@ func (b *binder) visitNode(n ast.Node) {
 		if !b.declaring {
 			if sym := b.resolveName(n.ClassName); sym != nil {
 				b.newTargets[n] = sym
+				if n.Callee == nil && !n.Qualified && sym.Flags&Class == 0 && sym.Flags&Variable != 0 {
+					// `new v()` of a variable: its read, which flow narrows
+					// (`v` a `typeof K | number` tested a constructor).
+					id := ast.NewIdentifier(n.ClassName, n.GetPos())
+					b.newCallees[n] = id
+					b.visit(id)
+				}
 			} else {
 				b.lookupScopes[n] = b.cur
 			}
@@ -901,9 +1015,36 @@ func (b *binder) visitNode(n ast.Node) {
 		return
 	case *ast.InterfaceDeclaration:
 		b.declare(b.cur, n.Name, Interface, TypeOnly, n)
+		// Its members' annotations name types of this scope (a namespace's
+		// `env: ProcessEnv`).
+		for _, f := range n.Fields {
+			if f.Type != nil {
+				b.noteTypeScope(f.Type)
+			}
+		}
+		for _, m := range n.Methods {
+			if m.Type != nil {
+				b.noteTypeScope(m.Type)
+			}
+			for _, p := range m.Params {
+				if p.Type != nil {
+					b.noteTypeScope(p.Type)
+				}
+			}
+			if m.ReturnType != nil {
+				b.noteTypeScope(m.ReturnType)
+			}
+		}
+		if n.CallSig != nil {
+			b.noteTypeScope(n.CallSig)
+		}
+		if n.IndexSig != nil {
+			b.noteTypeScope(n.IndexSig)
+		}
 		return
 	case *ast.TypeAliasDeclaration:
 		b.declare(b.cur, n.Name, TypeAlias, TypeOnly, n)
+		b.typeQueryScopes(n.Type) // a `typeof x` in it reads x where written
 		return
 	case *ast.ImportDeclaration:
 		for _, sp := range n.Specifiers {
@@ -1044,7 +1185,9 @@ func (b *binder) visitNode(n ast.Node) {
 	case *ast.UpdateExpression:
 		b.visit(n.Arg)
 		if id, ok := n.Arg.(*ast.Identifier); ok && b.flowing() {
+			b.storing = n
 			b.assignFlow(b.refs[id], false, true)
+			b.storing = nil
 		}
 		return
 	case *ast.BinaryExpression:
@@ -1137,13 +1280,24 @@ func (b *binder) visitNode(n ast.Node) {
 			exc = b.newLabel(FlowBranchLabel, pre)
 			b.exceptionTargets = append(b.exceptionTargets, exc)
 		}
+		// An exception can leave the try block anywhere: the catch clause is
+		// entered from the state before it or from any assignment inside it
+		// (tsc's catch exception target).
+		var catchExc *FlowNode
+		if n.Catch != nil && b.flowing() {
+			catchExc = b.newLabel(FlowBranchLabel, pre)
+			b.exceptionTargets = append(b.exceptionTargets, catchExc)
+		}
 		b.visit(n.Body)
+		if catchExc != nil {
+			b.exceptionTargets = b.exceptionTargets[:len(b.exceptionTargets)-1]
+		}
 		after := b.flow
 		if c := n.Catch; c != nil {
-			// An exception can leave the try block anywhere: the catch clause
-			// is entered from the state before it (nothing the block did is
-			// taken as done).
 			b.flow = pre
+			if catchExc != nil {
+				b.flow = finish(catchExc)
+			}
 			b.scopeStartFlow(b.enter(n, 1, CatchScope))
 			b.declare(b.cur, c.Param, FunctionScopedVariable, VarLike, n)
 			for _, name := range objectPatternNames(c.ObjectPattern) {
@@ -1384,9 +1538,12 @@ func (b *binder) class(c *ast.ClassDeclaration) {
 			b.visit(d)
 		}
 		// A computed key (`[kRefed]: T`, TDD-00246) is evaluated where the
-		// class is declared.
+		// class is declared; an ambient class's is never evaluated.
 		if f.Key != nil {
+			saved := b.typeLevel
+			b.typeLevel = saved || c.Ambient || f.Declare
 			b.visit(f.Key)
+			b.typeLevel = saved
 		}
 	}
 	// Field initializers run when an instance is constructed, not where the
@@ -1427,9 +1584,12 @@ func (b *binder) class(c *ast.ClassDeclaration) {
 			b.visit(d)
 		}
 		// A computed key (`[kInspect]() {}`, TDD-00246) is evaluated where
-		// the class is declared.
+		// the class is declared; an ambient class's is never evaluated.
 		if m.Key != nil {
+			saved := b.typeLevel
+			b.typeLevel = saved || c.Ambient
 			b.visit(m.Key)
+			b.typeLevel = saved
 		}
 		if expr {
 			b.exprMethod = m
@@ -1505,6 +1665,8 @@ func objectPatternNames(props []ast.DestructProp) []string {
 // offset in the source; with nil, offsets are left unknown (-1).
 func (b *Binding) Diagnostics(offset func(line, col int) int) []*diag.Diagnostic {
 	var out []*diag.Diagnostic
+	firstReported := map[*Symbol]bool{}
+	reported := map[ast.Node]bool{}
 	for _, c := range b.Conflicts {
 		msg := diag.DuplicateIdentifier
 		switch {
@@ -1515,11 +1677,41 @@ func (b *Binding) Diagnostics(offset func(line, col int) int) []*diag.Diagnostic
 		case c.Decl.Flags&BlockScopedVariable != 0 || c.Symbol.Flags&BlockScopedVariable != 0:
 			msg = diag.RedeclaredBlockScoped
 		}
-		start := -1
-		if offset != nil {
-			start = offset(c.Decl.Pos.Line, c.Decl.Pos.Col)
+		report := func(d Declaration) {
+			if reported[d.Node] {
+				return
+			}
+			reported[d.Node] = true
+			at := d.Pos
+			if vd, ok := d.Node.(*ast.VarDeclaration); ok && vd.NamePos.Line > 0 {
+				at = vd.NamePos // tsc reports at the declared name
+			}
+			start := -1
+			if offset != nil {
+				start = offset(at.Line, at.Col)
+			}
+			out = append(out, diag.New(msg, diag.Span{Pos: diag.Pos{Line: at.Line, Col: at.Col}, Start: start, End: start}, c.Symbol.Name))
 		}
-		out = append(out, diag.New(msg, diag.Span{Pos: diag.Pos{Line: c.Decl.Pos.Line, Col: c.Decl.Pos.Col}, Start: start, End: start}, c.Symbol.Name))
+		if (msg == diag.RedeclaredBlockScoped || msg == diag.DuplicateIdentifier) && len(c.Symbol.Declarations) > 0 && !firstReported[c.Symbol] {
+			// tsc reports each of the clashing declarations, the first
+			// one included (not a catch variable's or an import's, which
+			// it reports otherwise).
+			_, catch := c.Symbol.Declarations[0].Node.(*ast.TryStatement)
+			if first := c.Symbol.Declarations[0]; first.Node != c.Decl.Node && !catch && first.Flags&Alias == 0 {
+				firstReported[c.Symbol] = true
+				report(first)
+			}
+		}
+		if msg == diag.DuplicateFunctionImpl {
+			// Every declaration of the function, its overload
+			// signatures included.
+			for _, d := range c.Symbol.Declarations {
+				if d.Flags&Function != 0 {
+					report(d)
+				}
+			}
+		}
+		report(c.Decl)
 	}
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i].Pos, out[j].Pos
@@ -1618,6 +1810,9 @@ func (b *binder) visitAssignment(n *ast.AssignmentExpression) {
 	b.visit(n.Right)
 	if b.flowing() && b.flow != unreachableFlow && rootIdentifier(n.Left) {
 		b.flow = &FlowNode{Flags: FlowPropertyAssignment, Antecedent: b.flow, Node: n}
+		for _, t := range b.exceptionTargets {
+			addAntecedent(t, b.flow) // a catch can see the store (as a name's)
+		}
 	}
 }
 
@@ -1728,7 +1923,7 @@ func (b *binder) returnsNever(call *ast.CallExpression) bool {
 		if !ok || fd.ReturnType == nil {
 			return false
 		}
-		kw, ok := fd.ReturnType.TypeNode().(*ast.KeywordType)
+		kw, ok := fd.ReturnType.(*ast.KeywordType)
 		if !ok || kw.Keyword != "never" {
 			return false
 		}
@@ -1775,13 +1970,17 @@ func nonNullTest(x ast.Expression) ast.Expression {
 
 // typeQueryScopes records the scope each `typeof x` in annotation ta names
 // its value from: the scope the annotation is written in.
-func (b *binder) typeQueryScopes(ta *ast.TypeAnnotation) {
-	if ta == nil || ta.TypeNode() == nil {
+func (b *binder) typeQueryScopes(ta ast.TypeNode) {
+	if ta == nil {
 		return
 	}
-	ast.Inspect(ta.TypeNode(), func(n ast.Node) bool {
+	b.noteTypeScope(ta)
+	ast.Inspect(ta, func(n ast.Node) bool {
 		if q, ok := n.(*ast.TypeQuery); ok {
 			b.lookupScopes[q] = b.cur
+			if b.flow != nil {
+				b.queryFlow[q], b.queryContainer[q] = b.flow, b.container
+			}
 		}
 		return true
 	})
@@ -1802,4 +2001,22 @@ func renamedPartner(t *Table, name string) *Symbol {
 		return nil
 	}
 	return found
+}
+
+// noteTypeScope records the current scope for type node n and the members
+// of a union, intersection or array it is, each read on its own.
+func (b *binder) noteTypeScope(n ast.TypeNode) {
+	b.annotScopes[n] = b.cur
+	switch x := n.(type) {
+	case *ast.UnionType:
+		for _, m := range x.Types {
+			b.noteTypeScope(m)
+		}
+	case *ast.IntersectionType:
+		for _, m := range x.Types {
+			b.noteTypeScope(m)
+		}
+	case *ast.ArrayType:
+		b.noteTypeScope(x.ElementType)
+	}
 }

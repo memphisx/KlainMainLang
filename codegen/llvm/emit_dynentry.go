@@ -18,7 +18,7 @@ import (
 // dynEntryClass reports a parameter type a dynamic entry widens: a plain
 // user class's instance (its fields at fixed offsets behind a class tag).
 func (e *Emitter) dynEntryClass(p Type) (ClassInfo, bool) {
-	if !p.IsClass() || p.IR != "ptr" || p.IsArray() || p.IsDynamic() || p.ClassName == "" {
+	if !p.IsClass() || p.IR != irPtr || p.IsArray() || p.IsDynamic() || p.ClassName == "" {
 		return ClassInfo{}, false
 	}
 	info, ok := e.classes[p.ClassName]
@@ -48,9 +48,10 @@ func (e *Emitter) dynEntryParams(params []ast.Param, paramTypes []Type) ([]Type,
 	return out, out != nil
 }
 
-// registerDynEntry records alt as the dynamic entry of the function sym.
+// registerDynEntry records alt as the dynamic entry of the function sym,
+// keyed by its prefix word (fnWord).
 func (e *Emitter) registerDynEntry(sym, alt string) {
-	e.addUnitRowLit(unitKindDynEntry, "{ i64, ptr }", fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), ptr %s }", sym, alt))
+	e.addUnitRowLit(unitKindDynEntry, "{ i64, "+irPtr+" }", fmt.Sprintf("{ i64 %d, "+irPtr+" %s }", e.fnWord(sym), alt))
 }
 
 // emitForeignClassArg is whether the boxed argument word is an object that
@@ -64,48 +65,50 @@ func (e *Emitter) emitForeignClassArg(word string, info ClassInfo) string {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isRaw, tag, kmlTagObject))
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", isPtr, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", isPtr, slot))
 	rawL, doneL := e.freshLabel("dynentry.raw"), e.freshLabel("dynentry.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRaw, rawL, doneL))
 	e.emitLabel(rawL)
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, payload))
 	w := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, p))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, p))
 	is := e.emitClassIs(w, info.TagID)
 	not := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", not, is))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", not, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", not, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
 	return r
 }
 
-// emitDynEntryOf is the dynamic entry registered for the code pointer fp,
+// emitDynEntryOf is the dynamic entry registered for the function of
+// closure header hdr (by its prefix word, the object-state bits cleared),
 // or null.
-func (e *Emitter) emitDynEntryOf(fp string) string {
-	e.ensureUnitReg()
-	key, row := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", key, fp))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_unit_find(i64 %d, i64 %s)", row, unitKindDynEntry, key))
+func (e *Emitter) emitDynEntryOf(hdr string) string {
+	wp, w, key, row := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitPrefixWordAddr(wp, hdr)
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, wp))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", key, w, ^kmlHdrStateMask))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_unit_find(i64 %d, i64 %s)", row, unitKindDynEntry, key))
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", slot))
 	none := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", none, row))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", none, row))
 	hitL, doneL := e.freshLabel("dynentry.hit"), e.freshLabel("dynentry.found")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", none, doneL, hitL))
 	e.emitLabel(hitL)
 	ap, a := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", ap, row))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", a, ap))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", a, slot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", ap, row))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", a, ap))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", a, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return r
 }
 

@@ -180,3 +180,25 @@ e.on("msg", (data: string): void => {
 e.emit("msg", "hi");
 `, "got: hi")
 }
+
+// A function expression written as an object literal property's value reads
+// the receiver it is called on as `this`, as a method shorthand does
+// (TypeScript types it as the literal).
+func TestE2ELiteralPropertyFunctionThis(t *testing.T) {
+	assertSameAsNode(t, `const a = { x: 1, f: function () { return this; } };
+console.log(a.f().x);
+const b = { x: 2, [Symbol.iterator]: function () { return this; } };
+console.log(b[Symbol.iterator]().x);
+const c = { n: 3, inc: function (by: number) { this.n += by; return this.n; } };
+console.log(c.inc(4), c.n);
+`)
+}
+
+// A literal method under a computed key returning `this`, called through
+// an element access, returns the literal.
+func TestE2ELiteralComputedKeyMethodThis(t *testing.T) {
+	assertSameAsNode(t, `const b = { x: 2, [Symbol.iterator]: function () { return this; } };
+const r = b[Symbol.iterator]();
+console.log(r.x, r === b);
+`)
+}

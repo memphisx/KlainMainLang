@@ -1,9 +1,8 @@
 package ast
 
 // Type syntax as node kinds. The parser builds these for every type it reads;
-// TypeAnnotationOf (type_convert.go) turns a tree into the TypeAnnotation code
-// generation still consumes, and the annotation keeps a pointer back to the
-// node it came from. The node kinds and field names follow TypeScript's own
+// TypeAnnotationOf (type_convert.go) checks a tree before a declaration
+// keeps it as its annotation. The node kinds and field names follow TypeScript's own
 // (TypeReference, UnionType, TypePredicate, …) so the checker can read them.
 //
 // Every node records where it came from in Range: its first token's line and
@@ -28,6 +27,9 @@ type TypeMember interface {
 type Loc struct {
 	Pos        Pos
 	Start, End int
+	// JSDoc marks the root of a type written in a JSDoc tag, whose
+	// positions are within the tag's text.
+	JSDoc bool
 }
 
 // KeywordType is a keyword type: any, unknown, never, string, number, boolean,
@@ -165,7 +167,15 @@ type PropertySignature struct {
 	// `set x(v: T)`), whose Type is the getter's result or the setter's
 	// parameter type.
 	Accessor string
-	Range    Loc
+	// Lower is a builtin declaration's `/** @lower symbol */`: the function
+	// a read of the property calls, with no arguments, for its value.
+	Lower string
+	// Holder is MethodSignature.Holder.
+	Holder string
+	// Intrinsic is `/** @intrinsic Owner.prototype.name */`: the read is
+	// emitted by the backend's property intrinsic of that name.
+	Intrinsic string
+	Range     Loc
 }
 
 // MethodSignature is `name?<T>(params): R`. Type is nil when the return type
@@ -179,6 +189,9 @@ type MethodSignature struct {
 	// `@link lib` libraries.
 	Lower string
 	Link  []string
+	// Holder is its interface's `/** @lower <link> */`: the member is read
+	// off the object the linked function returns.
+	Holder string
 	// Intrinsic is `/** @intrinsic Owner.name */`: the call is emitted
 	// inline by the backend's intrinsic of that name (TDD-00230 P3.2).
 	Intrinsic      string

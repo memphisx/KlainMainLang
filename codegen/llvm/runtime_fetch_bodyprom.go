@@ -23,22 +23,3 @@ var fetchBodyPromSource string
 
 // FetchBodyPromSource is fetchbodyprom.c, behind kml_layout.h.
 func FetchBodyPromSource() string { return layoutHeader() + fetchBodyPromSource }
-
-// UsesFetchBodyProm reports whether the program links fetchbodyprom.c.
-func (e *Emitter) UsesFetchBodyProm() bool { return e.usedFetchBodyProm }
-
-func (e *Emitter) ensureFetchBodyProm() {
-	if e.usedFetchBodyProm {
-		return
-	}
-	e.usedFetchBodyProm = true
-	e.ensureMalloc()
-	e.ensureRealloc()
-	e.ensureFree()
-	e.ensurePromiseRuntime() // the settle runners settle the body promise
-	e.ensurePromiseSettle()
-
-	e.emitGlobal(`declare void @__kml_fbp_invoke(ptr)
-declare void @__kml_fetch_bodyprom_register(ptr, ptr)
-declare void @__kml_fetch_bodyprom_on_done(ptr)`)
-}

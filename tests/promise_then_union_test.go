@@ -61,3 +61,16 @@ call<void>((fd, done) => { done(null, undefined); }).then(() => console.log("ok"
 call<void>((fd, done) => { done(new Error("bad " + fd), undefined); }).catch(e => console.log("caught", e.message));
 `)
 }
+
+// then() with no callbacks keeps the promise's type: TResult1 defaults to T,
+// also through a chain of thens on a PromiseLike.
+func TestE2EPromiseThenDefaultsChain(t *testing.T) {
+	t.Parallel()
+	assertSameAsNode(t, `
+const p = Promise.resolve(1);
+const q = p.then().then().then();
+q.then((v) => console.log(v + 1));
+const l: PromiseLike<string> = Promise.resolve("a");
+l.then().then((s) => console.log(s.length));
+`)
+}

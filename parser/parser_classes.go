@@ -56,7 +56,7 @@ func unwrapClassDecl(stmt ast.Statement) *ast.ClassDeclaration {
 // the modifier `async` apart from a method literally named `async`.
 func isClassMemberNameStart(tok lexer.Token) bool {
 	switch tok.Type {
-	case lexer.IDENT, lexer.PRIVATE_NAME, lexer.STAR, lexer.STRING, lexer.NUMBER:
+	case lexer.IDENT, lexer.PRIVATE_NAME, lexer.STAR, lexer.STRING, lexer.NUMBER, lexer.LBRACKET:
 		return true
 	}
 	// A reserved word is a valid member name (IdentifierName), so `async throw`
@@ -134,6 +134,10 @@ func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	if me.Property == "dispose" || me.Property == "asyncDispose" {
 		return "@@" + me.Property, true
 	}
+	// static [Symbol.hasInstance](v) — what `v instanceof C` calls.
+	if me.Property == "hasInstance" {
+		return "@@hasInstance", true
+	}
 	return "", false
 }
 
@@ -149,8 +153,10 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	tok := p.advance() // consume 'class'
 	pos := posOf(tok)
 	name := defaultName
+	var namePos ast.Pos
 	if p.check(lexer.IDENT) {
-		name = p.advance().Literal
+		nt := p.advance()
+		name, namePos = nt.Literal, posOf(nt)
 	} else if defaultName == "" {
 		if _, err := p.expect(lexer.IDENT); err != nil {
 			return nil, err
@@ -163,7 +169,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	defer func() { p.thisClass = savedThis }()
 	// Optional `<T>` type-parameter list (TDD-00010 V1).
 	var typeParams []string
-	var typeParamConstraints, typeParamDefaults []*ast.TypeAnnotation
+	var typeParamConstraints, typeParamDefaults []ast.TypeNode
 	if p.check(lexer.LT) {
 		tp, tc, td, err := p.parseTypeParamList(name + "<T>")
 		if err != nil {
@@ -176,7 +182,8 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	var baseClass string
 	baseQualified := false
 	baseQualifier := ""
-	var baseTypeArgs []*ast.TypeAnnotation
+	var baseTypeArgs []ast.TypeNode
+	var baseCall *ast.CallExpression
 	if p.check(lexer.EXTENDS) {
 		p.advance() // extends
 		baseTok, err := p.expect(lexer.IDENT)
@@ -195,9 +202,26 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			if err != nil {
 				return nil, err
 			}
-			baseQualifier = baseClass
+			if baseQualified {
+				baseQualifier += "." + baseClass // `extends A.B.C`: qualifier "A.B"
+			} else {
+				baseQualifier = baseClass
+			}
 			baseClass = segTok.Literal
 			baseQualified = true
+		}
+		// A base written as a call (`extends Mixin(User)`, the mixin
+		// pattern).
+		if p.check(lexer.LPAREN) && !baseQualified {
+			lparen := p.advance()
+			args, err := p.parseArgList()
+			if err != nil {
+				return nil, err
+			}
+			if _, err := p.expect(lexer.RPAREN); err != nil {
+				return nil, err
+			}
+			baseCall = ast.NewCallExpression(ast.NewIdentifier(baseClass, posOf(baseTok)), args, posOf(lparen))
 		}
 		// Generic extends (TDD-00023, TDD-00247): `extends Base<A, B>`
 		// parses any type-argument list; whether the base takes them is
@@ -267,6 +291,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	var fields []ast.AnnotField
 	var ctor *ast.FunctionDeclaration
 	var methods []*ast.FunctionDeclaration
+	var indexSigs []*ast.IndexSignature
 	computedAt := map[ast.Pos]bool{}                   // computed field keys, by position
 	computedFns := map[*ast.FunctionDeclaration]bool{} // methods with a computed key
 	var staticBlocks []*ast.BlockStatement
@@ -393,6 +418,12 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// only when a real member name — or a generator `*` — follows; a bare
 			// `async(` is the method literally named `async`. `*` here is
 			// unambiguous: a generator method.
+			if isStatic {
+				// A static member has no `this` type (TS2526).
+				savedThis := p.thisClass
+				p.thisClass = ""
+				defer func() { p.thisClass = savedThis }()
+			}
 			var isAsyncMethod, isGeneratorMethod bool
 			memberStart := p.peek().Pos // a method's source text begins here
 			if p.isWord(0, "async") && p.sameLine(1) && isClassMemberNameStart(p.peekNth(1)) {
@@ -421,7 +452,8 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			var accessorKind string
 			if !isAsyncMethod && !isGeneratorMethod &&
 				p.peek().Type == lexer.IDENT && (p.peek().Literal == "get" || p.peek().Literal == "set") &&
-				(p.peekNth(1).Type == lexer.IDENT || p.peekNth(1).Type == lexer.PRIVATE_NAME || p.peekNth(1).Type == lexer.LBRACKET) {
+				(p.peekNth(1).Type == lexer.IDENT || p.peekNth(1).Type == lexer.PRIVATE_NAME || p.peekNth(1).Type == lexer.LBRACKET ||
+					p.peekNth(1).Type == lexer.STRING || p.peekNth(1).Type == lexer.NUMBER) {
 				accessorKind = p.peek().Literal
 				p.advance()
 			}
@@ -435,15 +467,21 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// A computed key is never the constructor: `["constructor"]() {}`
 			// is an ordinary method of that name.
 			computedName := false
+			literalName := false // a string or numeric literal name
 			var symKey *ast.Identifier
-			// A class-body index signature (`[n: number]: T;` — ADR-00476) is
-			// parsed and dropped: classes have fixed field layouts (no map
-			// backing), so the signature declares nothing reachable; indexing
-			// still gets its ordinary rejection at the use site. Distinguished
-			// from a computed member name (`[expr]…`) by the `IDENT :` prefix.
+			var runtimeKey ast.Expression // a key evaluated at run time
+			// A class-body index signature (`[n: number]: T;` — ADR-00476):
+			// the instance type's, which the checker reads; it declares no
+			// field. Distinguished from a computed member name (`[expr]…`)
+			// by the `IDENT :` prefix.
 			if p.check(lexer.LBRACKET) && p.peekNth(1).Type == lexer.IDENT && p.peekNth(2).Type == lexer.COLON {
-				if _, err := p.parseIndexSignature("ts"); err != nil {
+				ix, err := p.parseIndexSignatureNode()
+				if err != nil {
 					return err
+				}
+				if !isStatic {
+					ix.Readonly = isReadonly
+					indexSigs = append(indexSigs, ix)
 				}
 				if err := p.parseSemicolon(); err != nil {
 					return err
@@ -479,7 +517,10 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 						name = "\x01@@symf:" + id.Name
 						symKey = id
 					} else {
-						return p.errAt(lb, diag.ComputedClassMemberName)
+						// Evaluated when the class is (lowered by the
+						// resolver; the strict lane rejects it there).
+						name = ast.RuntimeKeyName(ast.Pos{Line: lb.Line, Col: lb.Col})
+						runtimeKey = keyExpr
 					}
 				}
 				memberTok = lexer.Token{Type: lexer.IDENT, Literal: name, Line: lb.Line, Col: lb.Col}
@@ -491,6 +532,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				// constructor, as in JavaScript.
 				lit := p.advance()
 				memberTok = lexer.Token{Type: lexer.IDENT, Literal: propertyKeyText(lit), Line: lit.Line, Col: lit.Col}
+				literalName = true
 			} else if p.check(lexer.PRIVATE_NAME) {
 				memberTok = p.advance()
 				if visibility != "" {
@@ -517,14 +559,29 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					return err
 				}
 			}
-			isCtor := memberTok.Literal == "constructor" && !computedName
+			if (computedName || literalName) && runtimeKey == nil && symKey == nil && len(memberTok.Literal) > 0 && memberTok.Literal[0] == '#' {
+				// A string key spelled like a private name (`["#m"] = 0`)
+				// is an ordinary property: defined under its key at run
+				// time, never the class's private `#m`.
+				at := ast.Pos{Line: memberTok.Line, Col: memberTok.Col}
+				runtimeKey = ast.NewStringLiteral(memberTok.Literal, at)
+				memberTok.Literal = ast.RuntimeKeyName(at)
+			}
+			isCtor := memberTok.Literal == "constructor" && !computedName && !isStatic // (`static constructor() {}` is a method)
 			if accessorKind != "" && isCtor {
 				return p.errAt(memberTok, diag.ConstructorAccessor)
 			}
 			// A static class member named `prototype` is an early SyntaxError, for
 			// a method or a field alike (a non-static `prototype` member is fine).
 			if isStatic && memberTok.Literal == "prototype" {
-				return p.errAt(memberTok, diag.StaticPrototype)
+				if !computedName {
+					return p.errAt(memberTok, diag.StaticPrototype)
+				}
+				// `static ['prototype']`: the definition's TypeError, at run
+				// time.
+				at := ast.Pos{Line: memberTok.Line, Col: memberTok.Col}
+				runtimeKey = ast.NewStringLiteral("prototype", at)
+				memberTok.Literal = ast.RuntimeKeyName(at)
 			}
 
 			// An optional method (`name?(...): T;`): a signature a subclass may
@@ -550,10 +607,16 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				}
 				p.memberStart = memberStart
 				p.nextGen = isGeneratorMethod
-				fn, err := p.parseFunctionRest(memberTok.Literal, isAsyncMethod, isMemberAbstract || isOptionalMethod, !isMemberAbstract && !isOptionalMethod && accessorKind == "")
+				bodiless := isMemberAbstract || isOptionalMethod || p.ambientClass
+				fn, err := p.parseFunctionRest(memberTok.Literal, isAsyncMethod, bodiless, !bodiless && accessorKind == "")
 				p.inCtorParams = false
 				if err != nil {
 					return err
+				}
+				if p.ambientClass {
+					// An ambient class's members are declarations: none has
+					// (or needs) an implementation.
+					fn.IsOverloadSig = false
 				}
 				if fn.Body == nil {
 					// A body-less signature (abstract, optional, an overload):
@@ -565,30 +628,12 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					fn.IsOptional = true
 				}
 				fn.Key = symKey
+				fn.KeyExpr = runtimeKey
 				fn.IsOverride = isOverride
-				// A generic *method* (`map<U>(f): U`) erases its type parameters
-				// to `any` and compiles as a plain method — the ADR-00469 stance,
-				// unblocked by ADR-00477's closure adapter trampolines (the
-				// mistagged-return bug ADR-00475 deferred is fixed; a concrete
-				// callback passed for an `any`-signature parameter now adapts).
-				// A parameter constrained by a plain name (`T extends Stream`)
-				// erases to it instead, keeping its representation. The type
-				// parameters stay for the checker, which reads the type nodes.
+				// A generic *method* (`map<U>(f): U`) compiles as a plain
+				// method, its type parameters erased (the ADR-00469 stance);
+				// the checker reads them from the type nodes.
 				if len(fn.TypeParams) > 0 && !isCtor {
-					to := map[string]string{}
-					for i, tp := range fn.TypeParams {
-						to[tp] = "any"
-						if i < len(fn.TypeParamConstraints) {
-							if c := fn.TypeParamConstraints[i]; c != nil && simpleTypeName(c) {
-								to[tp] = c.Name
-							}
-						}
-					}
-					for i := range fn.Params {
-						ast.EraseTypeParamsTo(fn.Params[i].Type, to)
-					}
-					ast.EraseTypeParamsTo(fn.ReturnType, to)
-					ast.EraseTypeParamsInBody(fn.Body, to)
 					fn.ErasedMethod = true
 				}
 
@@ -611,6 +656,9 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					}
 				}
 				pendingOverload, pendingSigs = "", nil
+				if err := p.accessorArity(accessorKind, fn, memberTok); err != nil {
+					return err
+				}
 				// A class body is always strict mode, so `eval`/`arguments` can
 				// never be a method/constructor parameter name — an early error
 				// unconditionally here, unlike a plain function where it only
@@ -634,13 +682,16 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 				fn.Visibility = visibility
 				fn.AccessorKind = accessorKind
 				if isCtor {
-					if ctor != nil {
+					// An ambient class's constructor overloads (`declare
+					// class C { constructor(s: string); constructor(n:
+					// number); }`) are signatures, not duplicates.
+					if ctor != nil && !(ctor.Body == nil && fn.Body == nil) {
 						return p.errAt(memberTok, diag.DuplicateConstructor, name)
 					}
 					// Desugar TS parameter properties: each modified parameter
 					// becomes a declared field plus a `this.x = x` assignment
-					// prepended to the constructor body (before user statements,
-					// matching TS emit order).
+					// at the start of the constructor body (after a derived
+					// class's super() call), matching TS emit order.
 					var propStmts []ast.Statement
 					for _, prm := range fn.Params {
 						if !prm.IsPropertyParam() {
@@ -654,7 +705,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 							// An unannotated plain parameter defaults to `number`
 							// (registerFunctions' rule); mirror it on the field so
 							// the two stay the same type.
-							ft = &ast.TypeAnnotation{Name: "number"}
+							ft = &ast.KeywordType{Keyword: "number"}
 						}
 						vis := prm.PropVisibility
 						if vis == "public" {
@@ -677,15 +728,54 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 						propStmts = append(propStmts, assign)
 					}
 					if len(propStmts) > 0 && fn.Body != nil {
-						fn.Body.Body = append(propStmts, fn.Body.Body...)
+						// A derived class's go right after its root super()
+						// call, which binds this.
+						at := 0
+						for i, st := range fn.Body.Body {
+							if es, ok := st.(*ast.ExpressionStatement); ok {
+								if c, ok := es.Expr.(*ast.CallExpression); ok {
+									if _, sup := c.Callee.(*ast.SuperExpression); sup {
+										at = i + 1
+										break
+									}
+								}
+							}
+						}
+						body := append(append(append([]ast.Statement{}, fn.Body.Body[:at]...), propStmts...), fn.Body.Body[at:]...)
+						fn.Body.Body = body
 					}
 					fn.Decorators = memberDecorators
+					if ctor != nil {
+						// Every declaration is a visible signature, as an
+						// ambient method's overloads are.
+						sigs := ctor.Overloads
+						if len(sigs) == 0 {
+							first := *ctor
+							sigs = []*ast.FunctionDeclaration{&first}
+						}
+						self := *fn
+						fn.Overloads = append(sigs, &self)
+					}
 					ctor = fn
 				} else {
 					fn.Decorators = memberDecorators
 					fn.CallSite = fn.CallSite || (doc != nil && doc.HasTag("callsite"))
 					if computedName {
 						computedFns[fn] = true
+					}
+					if n := len(methods); p.ambientClass && accessorKind == "" && n > 0 && !computedName {
+						// An ambient method declared again is an overload set:
+						// every declaration is a visible signature.
+						if prev := methods[n-1]; prev.Name == fn.Name && prev.IsStatic == fn.IsStatic && prev.AccessorKind == "" {
+							sigs := prev.Overloads
+							if len(sigs) == 0 {
+								first := *prev
+								sigs = []*ast.FunctionDeclaration{&first}
+							}
+							self := *fn
+							fn.Overloads = append(sigs, &self)
+							methods = methods[:n-1]
+						}
 					}
 					methods = append(methods, fn)
 				}
@@ -707,7 +797,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 			// initializer follows to give the field its type.
 			// A field named `constructor` (an identifier or a string), static
 			// or not, is an early SyntaxError.
-			if isCtor {
+			if memberTok.Literal == "constructor" && !computedName {
 				return p.errAt(memberTok, diag.FieldConstructor)
 			}
 			optionalField := false
@@ -726,7 +816,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					return err
 				}
 			}
-			var ft *ast.TypeAnnotation
+			var ft ast.TypeNode
 			if p.check(lexer.COLON) {
 				p.advance()
 				var err error
@@ -755,7 +845,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 					return p.errAt(lexer.Token{Line: call.GetPos().Line, Col: call.GetPos().Col}, diag.SuperCallOutsideConstructor)
 				}
 			}
-			fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Pos: ast.Pos{Line: memberTok.Line, Col: memberTok.Col}, Key: symKey, Type: ft, Optional: optionalField, Definite: definiteField, Abstract: isMemberAbstract, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly, Override: isOverride, Declare: isDeclare, Decorators: memberDecorators, IsAutoAccessor: isAutoAccessor})
+			fields = append(fields, ast.AnnotField{Name: memberTok.Literal, Pos: ast.Pos{Line: memberTok.Line, Col: memberTok.Col}, Key: symKey, KeyExpr: runtimeKey, Type: ft, Optional: optionalField, Definite: definiteField, Abstract: isMemberAbstract, Initializer: initializer, Static: isStatic, Visibility: visibility, Readonly: isReadonly, Override: isOverride, Declare: isDeclare, Decorators: memberDecorators, IsAutoAccessor: isAutoAccessor, LiteralName: literalName})
 			// a field declaration ends like a statement: `;`, or ASI before `}` /
 			// at a line break (`x = 1 y = 2` on one line is an error, as in JS)
 			if err := p.parseSemicolon(); err != nil {
@@ -817,9 +907,12 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 		return nil, err
 	}
 	decl := ast.NewClassDeclaration(name, baseClass, baseTypeArgs, isAbstract, implementsNames, fields, ctor, methods, staticBlocks, pos)
+	decl.NamePos = namePos
+	decl.IndexSignatures = indexSigs
 	decl.Src = p.srcRange(pos)
 	decl.BaseQualified = baseQualified
 	decl.BaseQualifier = baseQualifier
+	decl.BaseCall = baseCall
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
 	decl.TypeParamDefaults = typeParamDefaults
@@ -846,14 +939,6 @@ func (p *Parser) overloadError(at lexer.Token, pending *string) error {
 	name := *pending
 	*pending = ""
 	return p.errAt(at, diag.OverloadNoImplementation, name)
-}
-
-// simpleTypeName reports whether ta is a bare type name (`Stream`), with no
-// arguments, elements, members or modifiers.
-func simpleTypeName(ta *ast.TypeAnnotation) bool {
-	return ta.Name != "" && ta.ElemType == nil && ta.KeyType == nil && len(ta.TypeArgs) == 0 &&
-		ta.UnionMembers == nil && ta.IntersectionMembers == nil && !ta.IsFuncType && !ta.Nullable &&
-		ta.Name != "any" && ta.Name != "unknown" && ta.Name != "object"
 }
 
 // isInspectCustomKey reports `inspect.custom`, `util.inspect.custom` or
@@ -887,6 +972,20 @@ func isInspectCustomKey(expr ast.Expression) bool {
 // (an early SyntaxError), looking through arrow functions, which have no
 // `arguments` of their own, but not into functions or classes, which do.
 // superCallIn returns a super(...) call in a field initializer, outside a
+// accessorArity is the early error for a getter with parameters or a setter
+// without exactly one plain one.
+func (p *Parser) accessorArity(kind string, fd *ast.FunctionDeclaration, at lexer.Token) error {
+	switch {
+	case kind == "get" && len(fd.Params) > 0:
+		return p.errAt(at, diag.GetterParams)
+	case kind == "set" && len(fd.Params) != 1:
+		return p.errAt(at, diag.SetterArity)
+	case kind == "set" && fd.Params[0].Rest:
+		return p.errAt(at, diag.SetterRest)
+	}
+	return nil
+}
+
 // nested function or class (an arrow shares the initializer's super).
 func superCallIn(init ast.Expression) *ast.CallExpression {
 	var found *ast.CallExpression
@@ -914,7 +1013,32 @@ func argumentsReference(init ast.Node) *ast.Identifier {
 			return false
 		}
 		switch n := n.(type) {
-		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassExpression, *ast.ClassDeclaration:
+		case *ast.ClassExpression, *ast.ClassDeclaration:
+			// A nested class's computed keys are evaluated in this scope.
+			d, _ := n.(*ast.ClassDeclaration)
+			if ce, ok := n.(*ast.ClassExpression); ok {
+				d = ce.Decl
+			}
+			if d != nil {
+				for _, m := range d.Methods {
+					if found == nil && m.KeyExpr != nil {
+						found = argumentsReference(m.KeyExpr)
+					}
+					if found == nil && m.Key != nil && m.Key.Name == "arguments" {
+						found = m.Key
+					}
+				}
+				for _, f := range d.Fields {
+					if found == nil && f.KeyExpr != nil {
+						found = argumentsReference(f.KeyExpr)
+					}
+					if found == nil && f.Key != nil && f.Key.Name == "arguments" {
+						found = f.Key
+					}
+				}
+			}
+			return false
+		case *ast.FunctionExpression, *ast.FunctionDeclaration:
 			return false
 		case *ast.Identifier:
 			if n.Name == "arguments" {

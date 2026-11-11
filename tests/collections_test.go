@@ -677,11 +677,11 @@ console.log(c.scores.size)
 
 // TestE2ETernaryOnChainedMapFieldGet is a regression test for a bug found
 // while implementing ADR-00072 (http.listen's req.query/req.headers):
-// inferExprType's CallExpression case only resolved a Map/Set method call's
+// typeOfExpr's CallExpression case only resolved a Map/Set method call's
 // return type when the receiver was a bare identifier looked up via
 // e.lookup — c.scores.get(...) worked, but a ternary using a *chained*
 // member expression as the receiver (c.scores here, not a plain identifier)
-// had no fallback, so emitConditional's `ty := inferExprType(ex.Consequent)`
+// had no fallback, so emitConditional's `ty := typeOfExpr(ex.Consequent)`
 // silently picked the wrong (zero-value i64/number) type, producing an IR
 // type mismatch ("defined with type 'ptr' but expected 'i64'") the moment
 // clang tried to verify it — i.e. a compile-time crash for any ternary
@@ -1085,7 +1085,7 @@ const a = Object.fromEntries([[1, "x"], [2, "y"]] as [number, string][])
 console.log(a, Object.keys(a))
 const s = Symbol("k")
 const b = Object.fromEntries([[s, 1], ["z", 2]] as [string | symbol, number][])
-console.log(b, b[s])
+console.log(b, (b as any)[s])
 const m = new Map<number, boolean>([[3, true]])
 console.log(Object.fromEntries(m))
 console.log(Object.fromEntries(new Map([[true, 1]]) as any))
@@ -1113,5 +1113,58 @@ ws.add(k1)
 console.log(ws.has(k1), ws.has(k2))
 function mk(objs: object[]) { return new WeakSet(objs) }
 console.log(mk([k1]).has(k1))
+`)
+}
+
+// A nullable scalar key: null and 0 are different keys, through every
+// reader (iteration, forEach, entries, spread, inspect, seeding).
+func TestE2EMapSetNullableScalarKeys(t *testing.T) {
+	got := compileAndRun(t, `const s = new Set<number | null>(); s.add(null); s.add(0); console.log(s.size, s.has(null), s.has(0));
+const m = new Map<number | null, string>(); m.set(null, "n"); m.set(0, "z"); console.log(m.size, m.get(null), m.get(0), [...m.keys()]);
+const it = s.values(); console.log(it.next(), it.next(), it.next());
+for (const k of s) console.log(k === null ? "N" : k);
+s.forEach(v => console.log("fe", v)); console.log(Array.from(m.keys()), [...s].length, s.delete(null), s.has(null), s);
+const s3 = new Set<boolean | undefined>([undefined, false, true, undefined]); console.log(s3, s3.size);
+m.forEach((v, k) => console.log("mfe", k, v)); console.log([...m.entries()], m);
+const ms = new Map<boolean | null, number>([[null, 1], [false, 2]]); for (const [k, v] of ms) console.log(k, v); console.log(ms.get(null), ms.get(false), ms);
+const mn = new Map<number | null, string>([[0, "z"], [null, "n"]]); console.log(mn);
+`)
+	want := "2 true true\n2 n z [ null, 0 ]\n{ value: null, done: false } { value: 0, done: false } { value: undefined, done: true }\nN\n0\nfe null\nfe 0\n[ null, 0 ] 2 true false Set(1) { 0 }\nSet(3) { undefined, false, true } 3\nmfe null n\nmfe 0 z\n[ [ null, 'n' ], [ 0, 'z' ] ] Map(2) { null => 'n', 0 => 'z' }\nnull 1\nfalse 2\n1 2 Map(2) { null => 1, false => 2 }\nMap(2) { 0 => 'z', null => 'n' }"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// A bare `new Map()` / `new Set()` assigned to a typed binding, directly or
+// as a conditional branch, builds the binding's key and value family.
+func TestE2EBareCollectionTakesBindingType(t *testing.T) {
+	src := "let d: Map<string, number> = new Map(); d = new Map(); d.set(\"a\", 1); console.log(d);\nlet m: Map<number, string> | null = null; m = new Map(); m.set(1, \"x\"); console.log(m, m.get(1));\nlet s: Set<number> | undefined; s = new Set(); s.add(NaN); console.log(s, s.has(NaN));\nlet t: Map<string, number> | null | undefined = null; t = new Map(); console.log(t);\nfor (const k of [0, 1, 2]) {\n  const a: Map<number, string> | null | undefined = k === 0 ? null : k === 1 ? undefined : new Map();\n  let b: Set<string> | null = null; b = k === 2 ? new Set() : null;\n  a?.set(NaN, \"n\"); b?.add(\"q\");\n  console.log(a, b, a?.get(NaN));\n}\n"
+	want := "Map(1) { 'a' => 1 }\nMap(1) { 1 => 'x' } x\nSet(1) { NaN } true\nMap(0) {}\nnull null undefined\nundefined null undefined\nMap(1) { NaN => 'n' } Set(1) { 'q' } n"
+	if got := compileAndRun(t, src); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// A number-keyed map of any reads a missing key as undefined, as a
+// string-keyed one does: `=== undefined` holds, and a stored 0 or null is
+// no miss.
+func TestE2EMapNumberKeyAnyMiss(t *testing.T) {
+	t.Parallel()
+	assertSameAsNode(t, `
+const objs: Map<number, any> = new Map<number, any>();
+const k = objs.get(0);
+console.log(k, typeof k, k !== undefined, k === undefined, k == null);
+objs.set(1, 0); objs.set(2, null); objs.set(3, 'x');
+console.log(objs.get(1), objs.get(2), objs.get(3), objs.get(1) === undefined, objs.get(2) === null);
+function cached(h: number): any {
+  const known = objs.get(h);
+  if (known !== undefined) return known;
+  const fn = (a: any): any => a;
+  objs.set(h, fn);
+  return fn;
+}
+console.log(typeof cached(9), cached(9) === cached(9));
+const b: Map<boolean, any> = new Map<boolean, any>();
+console.log(b.get(true) === undefined);
 `)
 }

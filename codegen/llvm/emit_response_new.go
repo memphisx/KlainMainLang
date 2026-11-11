@@ -40,15 +40,16 @@ func isNullBodyArg(x ast.Expression) bool {
 
 func (e *Emitter) emitNewResponse(ex *ast.NewExpression) (Value, error) {
 	pos := ex.GetPos()
-	if len(ex.Args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: new Response takes (body?, init?)", pos.Line, pos.Col)
+	args, err := e.dropArgsPast(ex.Args, 2, pos)
+	if err != nil {
+		return Value{}, err
 	}
 	var bodyArg, initArg ast.Expression
-	if len(ex.Args) > 0 {
-		bodyArg = ex.Args[0]
+	if len(args) > 0 {
+		bodyArg = args[0]
 	}
-	if len(ex.Args) > 1 {
-		initArg = ex.Args[1]
+	if len(args) > 1 {
+		initArg = args[1]
 	}
 	return e.emitResponseCore(bodyArg, initArg, responseShape{}, pos)
 }
@@ -69,9 +70,7 @@ func (e *Emitter) emitResponseCore(bodyArg, initArg ast.Expression, shape respon
 	if isNullBodyArg(initArg) {
 		initArg = nil
 	}
-	e.ensureMalloc()
 	e.ensureStrHeaderRuntime()
-	e.ensureMemcpy()
 
 	// init: { status, statusText, headers }.
 	status := Value{Ref: "200.0", Ty: TypeF64}
@@ -103,12 +102,12 @@ func (e *Emitter) emitResponseCore(bodyArg, initArg ast.Expression, shape respon
 			return Value{}, err
 		}
 		if !iv.Ty.IsObject() {
-			return Value{}, fmt.Errorf("%d:%d: new Response's init must be an object ({ status, statusText, headers })", pos.Line, pos.Col)
+			return e.emitResponseDynamicInit(bodyArg, iv, shape, pos)
 		}
 		tmp := "__kml_resp_init_" + e.freshReg()[1:]
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", iv.Ref, slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", iv.Ref, slot))
 		e.define(tmp, Symbol{Ptr: slot, Ty: iv.Ty})
 		member := func(name string) ast.Expression {
 			if _, _, ok := iv.Ty.FieldIndex(name); !ok {
@@ -169,6 +168,95 @@ func (e *Emitter) emitResponseCore(bodyArg, initArg ast.Expression, shape respon
 	return e.emitResponseBodyAndFinish(bodyArg, status, statusText, headers, shape, pos)
 }
 
+// emitResponseDynamicInit builds a Response whose init is a value of no
+// fixed layout: null or undefined is no init, a primitive is the
+// platform's TypeError, an object's status, statusText and headers are
+// read off it.
+func (e *Emitter) emitResponseDynamicInit(bodyArg ast.Expression, iv Value, shape responseShape, pos ast.Pos) (Value, error) {
+	box, err := e.emitBoxValue(iv)
+	if err != nil {
+		return Value{}, err
+	}
+	if err := e.emitThrowIfPrimitiveInit(box); err != nil {
+		return Value{}, err
+	}
+	tmp := e.bindValue(box, pos)
+	read := func(name string) (Value, string, error) {
+		m := ast.NewMemberExpression(tmp, name, pos)
+		m.Optional = true
+		v, err := e.emitExpr(m)
+		if err != nil {
+			return Value{}, "", err
+		}
+		v = e.convert(v, TypeAny)
+		absent := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", absent, v.Ref, nbUndefined))
+		return v, absent, nil
+	}
+	sv, sAbsent, err := read("status")
+	if err != nil {
+		return Value{}, err
+	}
+	sNum := e.convert(sv, TypeF64)
+	status := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 200.0, double %s", status, sAbsent, sNum.Ref))
+	tv, tAbsent, err := read("statusText")
+	if err != nil {
+		return Value{}, err
+	}
+	tStr, err := e.emitValueToString(tv)
+	if err != nil {
+		return Value{}, err
+	}
+	statusText := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", statusText, tAbsent, e.internString(""), tStr.Ref))
+	hv, hAbsent, err := read("headers")
+	if err != nil {
+		return Value{}, err
+	}
+	statusV := Value{Ref: status, Ty: TypeF64}
+	if shape.status != "" {
+		statusV = Value{Ref: shape.status, Ty: TypeF64}
+	} else {
+		e.emitResponseStatusRange(statusV)
+	}
+	// Headers: the init's when it has them, else a fresh one.
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	withL, freshL, joinL := e.freshLabel("respinit.hdrs"), e.freshLabel("respinit.nohdrs"), e.freshLabel("respinit.hdrsjoin")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hAbsent, freshL, withL))
+	e.emitLabel(withL)
+	h1, err := e.emitNewHeaders(&hv, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", h1.Ref, slot))
+	e.emitTerminator("br label %" + joinL)
+	e.emitLabel(freshL)
+	h2, err := e.emitNewHeaders(nil, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", h2.Ref, slot))
+	e.emitTerminator("br label %" + joinL)
+	e.emitLabel(joinL)
+	hr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hr, slot))
+	headers := Value{Ref: hr, Ty: h2.Ty}
+	if shape.location != "" {
+		loc := e.bindValue(Value{Ref: shape.location, Ty: TypePtr}, pos)
+		if _, err := e.emitHeadersMethod(headers, "set", pos, ast.NewStringLiteral("location", pos), loc); err != nil {
+			return Value{}, err
+		}
+	}
+	if shape.location != "" || shape.typeName == "error" {
+		if err := e.emitHeadersSeal(headers, "immutable", pos); err != nil {
+			return Value{}, err
+		}
+	}
+	return e.emitResponseBodyAndFinish(bodyArg, statusV, Value{Ref: statusText, Ty: TypePtr}, headers, shape, pos)
+}
+
 // emitResponseStatusRange throws init["status"]'s RangeError for a status
 // outside 200–599.
 func (e *Emitter) emitResponseStatusRange(status Value) {
@@ -198,7 +286,7 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 	bodyFlags := responseNullBody
 	if !nullBody {
 		bodyFlags = 0
-		bt := e.inferExprType(bodyArg)
+		bt := e.typeOfExpr(bodyArg)
 		switch {
 		case bt.IsReadableStream():
 			// A stream body: `.body` is that stream; text()/json()/
@@ -215,7 +303,7 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 				bodyFlags |= responseStreamAny
 			}
 			if err := e.ensureResponseStreamCollect(); err != nil {
-				return Value{}, fmt.Errorf("%d:%d: %v", pos.Line, pos.Col, err)
+				return Value{}, internalAt(pos, "%v", err)
 			}
 		case e.isGlobalClassInstance(bt, "URLSearchParams"):
 			sv, err := e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(bodyArg, "toString", pos), nil, pos))
@@ -224,11 +312,17 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 			}
 			bodyRef = sv.Ref
 			l := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, sv.Ref))
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", l, sv.Ref))
 			lenRef = l
 			contentType = "application/x-www-form-urlencoded;charset=UTF-8"
 		default:
 			isBlob := e.isGlobalClassInstance(bt, "Blob")
+			if e.isGlobalClassInstance(bt, "FormData") {
+				// A FormData body is its multipart/form-data encoding: a
+				// Blob whose type carries the boundary.
+				bodyArg = ast.NewCallExpression(ast.NewMemberExpression(bodyArg, "kmlBlob", pos), nil, pos)
+				isBlob = true
+			}
 			if isStringTy(bt) && !bt.IsTypedArray() && !bt.IsArrayBuffer() && !bt.IsClass() {
 				contentType = "text/plain;charset=UTF-8"
 				if shape.contentType != "" {
@@ -255,10 +349,10 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 				blobType = tv
 			}
 			buf := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %s)", buf, size))
-			e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, data, size))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 %s)", buf, size))
+			e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", buf, data, size))
 			end := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", end, buf, size))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", end, buf, size))
 			e.heapStore("i8", "0", end, 1)
 			bodyRef, lenRef = buf, size
 		}
@@ -279,13 +373,12 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 		nbL, nbOkL := e.freshLabel("resp.nullbodystatus"), e.freshLabel("resp.bodyok")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullStatus, nbL, nbOkL))
 		e.emitLabel(nbL)
-		e.ensureSprintf()
 		msg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 64)", msg))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 64)", msg))
 		si := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", si, status.Ref))
-		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", msg, e.internString("Response constructor: Invalid response status code %lld"), si))
-		e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize(ptr %s)", msg))
+		e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", msg, e.internString("Response constructor: Invalid response status code %lld"), si))
+		e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize("+irPtr+" %s)", msg))
 		e.emitThrowTypeErrorValue(msg)
 		e.emitLabel(nbOkL)
 	}
@@ -296,10 +389,10 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 		ctRef := e.internString(contentType)
 		if blobType != "" {
 			l, empty := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, blobType))
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", l, blobType))
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, l))
 			ctRef = e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", ctRef, empty, blobType))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", ctRef, empty, blobType))
 		}
 		if err := e.emitSetHeaderIfAbsent(headers, "content-type", ctRef, pos); err != nil {
 			return Value{}, err
@@ -312,7 +405,7 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 	store := func(name, ir, ref string) {
 		idx, _, _ := respTy.FieldIndex(name)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, respTy.StructIR(), resp, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, respTy.StructIR(), resp, idx))
 		e.heapStore(ir, ref, gep, 8)
 	}
 	okLo, okHi, ok := e.freshReg(), e.freshReg(), e.freshReg()
@@ -321,16 +414,16 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", ok, okLo, okHi))
 	store("status", "double", status.Ref)
 	store("ok", "i1", ok)
-	store("body", "ptr", bodyRef)
+	store("body", irPtr, bodyRef)
 	store("bodyLength", "i64", lenRef)
-	store("__kml_headers", "ptr", headers.Ref)
-	store("__kml_status_text", "ptr", statusText.Ref)
+	store("__kml_headers", irPtr, headers.Ref)
+	store("__kml_status_text", irPtr, statusText.Ref)
 	typeName := shape.typeName
 	if typeName == "" {
 		typeName = "default"
 	}
-	store("__kml_type", "ptr", e.internString(typeName))
-	store("__kml_stream", "ptr", streamRef)
+	store("__kml_type", irPtr, e.internString(typeName))
+	store("__kml_stream", irPtr, streamRef)
 	store("__kml_bodyflags", "i64", fmt.Sprint(bodyFlags))
 	return Value{Ref: resp, Ty: respTy}, nil
 }
@@ -343,8 +436,9 @@ func (e *Emitter) emitResponseStaticJson(args []ast.Expression, pos ast.Pos) (Va
 		}
 		return nil
 	}
-	if len(args) == 0 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: Response.json takes (data, init?)", pos.Line, pos.Col)
+	args, short, err := e.responseFactoryArity(args, "json", pos)
+	if err != nil || short {
+		return Value{Ref: "null", Ty: ResponseType()}, err
 	}
 	text, err := e.emitJSONStringify(args[:1], pos)
 	if err != nil {
@@ -355,13 +449,14 @@ func (e *Emitter) emitResponseStaticJson(args []ast.Expression, pos ast.Pos) (Va
 
 // emitResponseStaticRedirect is Response.redirect(url, status?).
 func (e *Emitter) emitResponseStaticRedirect(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) == 0 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: Response.redirect takes (url, status?)", pos.Line, pos.Col)
+	args, short, err := e.responseFactoryArity(args, "redirect", pos)
+	if err != nil || short {
+		return Value{Ref: "null", Ty: ResponseType()}, err
 	}
 	// The Location is the parsed URL, serialized.
 	urlClass, linked := e.globalClass("URL")
 	if !linked {
-		return Value{}, fmt.Errorf("%d:%d: Response.redirect: the URL class is not linked", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Response.redirect without the URL class linked")
 	}
 	hrefExpr := ast.Expression(ast.NewMemberExpression(ast.NewNewExpression(urlClass.ClassName, []ast.Expression{args[0]}, pos), "href", pos))
 	wrap := &ast.Program{Body: []ast.Statement{ast.NewExpressionStatement(hrefExpr, pos)}}
@@ -395,14 +490,13 @@ func (e *Emitter) emitResponseStaticRedirect(args []ast.Expression, pos ast.Pos)
 	badL, goodL := e.freshLabel("resp.redirect.bad"), e.freshLabel("resp.redirect.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, goodL, badL))
 	e.emitLabel(badL)
-	e.ensureSprintf()
 	e.ensureStrHeaderRuntime()
 	msg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 48)", msg))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 48)", msg))
 	si := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", si, status.Ref))
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", msg, e.internString("Invalid status code %lld"), si))
-	e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize(ptr %s)", msg))
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", msg, e.internString("Invalid status code %lld"), si))
+	e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize("+irPtr+" %s)", msg))
 	e.ensureExceptionHelpers()
 	rangeErr := e.buildErrorObj(errorKindIDs["RangeError"], msg, e.internString("RangeError"))
 	e.excThrow(rangeErr)
@@ -413,8 +507,8 @@ func (e *Emitter) emitResponseStaticRedirect(args []ast.Expression, pos ast.Pos)
 
 // emitResponseStaticError is Response.error().
 func (e *Emitter) emitResponseStaticError(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: Response.error takes no arguments", pos.Line, pos.Col)
+	if _, err := e.dropArgsPast(args, 0, pos); err != nil {
+		return Value{}, err
 	}
 	return e.emitResponseCore(nil, nil, responseShape{status: "0.0", typeName: "error"}, pos)
 }
@@ -430,58 +524,16 @@ func (e *Emitter) ensureResponseStreamCollect() error {
 		return nil
 	}
 	e.respCollectDefined = true
-	e.ensureFetchBodyProm()
-	e.ensurePromiseAdopt()
-	e.ensurePromiseSettle()
-	e.ensureMalloc()
-	e.ensureMemcpy()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureUnhandledRejections()
+	e.ensureNanBox()
 	respTy := ResponseType()
 	field := func(name string) int {
 		idx, _, _ := respTy.FieldIndex(name)
 		return idx
 	}
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_resp_collect_done(ptr %%env) {
-entry:
-  %%resp_p = getelementptr { ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 0
-  %%resp = load ptr, ptr %%resp_p, align 8
-  %%clo_p = getelementptr { ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 1
-  %%clo = load ptr, ptr %%clo_p, align 8
-  %%q_p = getelementptr { ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 2
-  %%q = load ptr, ptr %%q_p, align 8
-  %%p_p = getelementptr { ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 3
-  %%p = load ptr, ptr %%p_p, align 8
-  %%st_p = getelementptr %[1]s, ptr %%p, i32 0, i32 0
-  %%st = load i64, ptr %%st_p, align 8
-  %%ok = icmp eq i64 %%st, 1
-  br i1 %%ok, label %%fill, label %%rej
-fill:
-  ; The bytes: a Uint8Array, its header pointer in v0.
-  %%h_p = getelementptr %[1]s, ptr %%p, i32 0, i32 2
-  %%h_bits = load i64, ptr %%h_p, align 8
-  %%hdr = inttoptr i64 %%h_bits to ptr
-  %%data = load ptr, ptr %%hdr, align 8
-  %%n_p = getelementptr i8, ptr %%hdr, i64 8
-  %%len = load i64, ptr %%n_p, align 8
-  %%n1 = add i64 %%len, 1
-  %%buf = call ptr @malloc(i64 %%n1)
-  %%ign = call ptr @memcpy(ptr %%buf, ptr %%data, i64 %%len)
-  %%end = getelementptr i8, ptr %%buf, i64 %%len
-  store i8 0, ptr %%end, align 1
-  %%b_p = getelementptr %[2]s, ptr %%resp, i32 0, i32 %[3]d
-  store ptr %%buf, ptr %%b_p, align 8
-  %%l_p = getelementptr %[2]s, ptr %%resp, i32 0, i32 %[4]d
-  store i64 %%len, ptr %%l_p, align 8
-  %%f_p = getelementptr %[2]s, ptr %%resp, i32 0, i32 %[5]d
-  %%f = load i64, ptr %%f_p, align 8
-  %%f2 = and i64 %%f, %[6]d
-  store i64 %%f2, ptr %%f_p, align 8
-  call void @__kml_fbp_invoke(ptr %%clo)
-  ret void
-rej:
-  call void @__kml_promise_reject_from(ptr %%q, ptr %%p)
-  ret void
-}`, promiseStructIR, respTy.StructIR(), field("body"), field("bodyLength"), field("__kml_bodyflags"), ^int64(responseStreamBody|responseStreamAny)))
+	e.buildRespCollectDone(respTy, field("body"), field("bodyLength"), field("__kml_bodyflags"))
 
 	restore := e.beginDetachedFunc()
 	defer restore()
@@ -495,7 +547,7 @@ rej:
 	isAny := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isAny, anyBit))
 	pslot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", pslot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", pslot))
 	anyL, u8L, joinL := e.freshLabel("rcol.any"), e.freshLabel("rcol.u8"), e.freshLabel("rcol.join")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAny, anyL, u8L))
 	e.emitLabel(anyL)
@@ -505,38 +557,92 @@ rej:
 	if err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", anyP, pslot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", anyP, pslot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(u8L)
 	u8P, err := e.emitStreamCollectPromise(sv.Ref, TypedArrayType("uint8"), `const c = r.value;`)
 	if err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", u8P, pslot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", u8P, pslot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	pv := Value{Ref: e.freshReg()}
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pv.Ref, pslot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", pv.Ref, pslot))
 	env := e.freshReg()
-	e.heapMallocInto(env, "32")
+	e.heapMallocInto(env, allocClosure, "32")
 	for i, ref := range []string{"%resp", "%clo", "%q", pv.Ref} {
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 %d", g, env, i))
-		e.heapStore("ptr", ref, g, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 %d", g, env, i))
+		e.heapStore(irPtr, ref, g, 8)
 	}
 	clo := e.buildBuiltinClosure("@__kml_resp_collect_done", env)
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_attach(ptr %s, ptr %s)", pv.Ref, clo))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_attach("+irPtr+" %s, "+irPtr+" %s)", pv.Ref, clo))
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
-	e.writeFunc("internal void @__kml_resp_collect(ptr %resp, ptr %clo, ptr %q)", body)
+	e.writeFunc("internal void @__kml_resp_collect("+irPtr+" %resp, "+irPtr+" %clo, "+irPtr+" %q)", body)
 	return nil
+}
+
+// buildRespCollectDone defines @__kml_resp_collect_done(env): env holds
+// {resp, runner closure, q, the bytes promise p}. Fulfilled, p's v0 is the
+// Uint8Array header; its bytes (NUL-terminated) become resp's buffered body,
+// the stream flags are cleared and the runner runs. Rejected, q rejects
+// with p's reason.
+func (e *Emitter) buildRespCollectDone(respTy Type, bodyIdx, lenIdx, flagsIdx int) {
+	restore := e.beginDetachedFunc()
+	envTy := "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + " }"
+	words := make([]string, 4)
+	for i := range words {
+		g, w := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%env, i32 0, i32 %d", g, envTy, i))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", w, g))
+		words[i] = w
+	}
+	resp, clo, q, p := words[0], words[1], words[2], words[3]
+	stP, st, ok := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", stP, promiseStructIR, p))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", st, stP))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", ok, st))
+	fillL, rejL := e.freshLabel("fill"), e.freshLabel("rej")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, fillL, rejL))
+	e.emitLabel(fillL)
+	hP, hBits, hdr, data, nP, n, n1, buf, end := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", hP, promiseStructIR, p))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hBits, hP))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, hdr, hBits))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, hdr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", nP, hdr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, nP))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", n1, n))
+	e.heapMallocInto(buf, allocBytes, n1)
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", buf, data, n))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", end, buf, n))
+	e.heapStore("i8", "0", end, 1)
+	bP, lP, fP, f, f2 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", bP, respTy.StructIR(), resp, bodyIdx))
+	e.heapStore(irPtr, buf, bP, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", lP, respTy.StructIR(), resp, lenIdx))
+	e.heapStore("i64", n, lP, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", fP, respTy.StructIR(), resp, flagsIdx))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f, fP))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", f2, f, ^int64(responseStreamBody|responseStreamAny)))
+	e.heapStore("i64", f2, fP, 8)
+	e.emitInstr(fmt.Sprintf("call void @__kml_fbp_invoke("+irPtr+" %s)", clo))
+	e.emitTerminator("ret void")
+	e.emitLabel(rejL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from("+irPtr+" %s, "+irPtr+" %s)", q, p))
+	e.emitTerminator("ret void")
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("void @__kml_resp_collect_done("+irPtr+" %env)", body)
 }
 
 // emitResponseCollectFinalize defines @__kml_resp_collect as a no-op when a
 // body method is called but no Response ever has a stream body.
 func (e *Emitter) emitResponseCollectFinalize() {
 	if e.respCollectCalled && !e.respCollectDefined {
-		e.emitGlobal("define internal void @__kml_resp_collect(ptr %resp, ptr %clo, ptr %q) {\nentry:\n  ret void\n}")
+		e.writeFunc("internal void @__kml_resp_collect("+irPtr+" %resp, "+irPtr+" %clo, "+irPtr+" %q)", "  ret void\n")
 	}
 }
 
@@ -548,8 +654,8 @@ func (e *Emitter) emitStreamCollectPromise(streamRef string, chunkTy Type, take 
 	defer e.popScope()
 	const src = "__kml_rcol_stream"
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", streamRef, slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", streamRef, slot))
 	e.define(src, Symbol{Ptr: slot, Ty: ReadableStreamType(chunkTy)})
 	chunkTS := "Uint8Array"
 	if chunkTy.IsDynamic() {
@@ -595,4 +701,44 @@ func (e *Emitter) emitStreamCollectPromise(streamRef string, chunkTy Type, take 
 		return "", fmt.Errorf("reading a Response's stream body: %v", err)
 	}
 	return pv.Ref, nil
+}
+
+// responseFactoryArity fits Response.json's or Response.redirect's
+// arguments to (one, two): extras are evaluated and dropped, none throws
+// the platform's TypeError (short is then true).
+func (e *Emitter) responseFactoryArity(args []ast.Expression, name string, pos ast.Pos) ([]ast.Expression, bool, error) {
+	if len(e.passedArgs(args)) > 0 {
+		out, err := e.dropArgsPast(args, 2, pos)
+		return out, false, err
+	}
+	e.emitThrowTypeError("Response." + name + ": 1 argument required, but 0 found.")
+	e.emitLabel(e.freshLabel("resp.arity.dead"))
+	return nil, true, nil
+}
+
+// emitThrowIfPrimitiveInit throws WebIDL's dictionary-conversion TypeError
+// when the boxed init box is a primitive (null and undefined already taken
+// as no init by the caller): "undefined: Expected 7 to be one of: Null,
+// Undefined, Object."
+func (e *Emitter) emitThrowIfPrimitiveInit(box Value) error {
+	tag, _ := e.emitUnboxTagPayload(box)
+	isPrim := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", isPrim, tag, kmlTagBoolean))
+	throwL, okL := e.freshLabel("respinit.prim"), e.freshLabel("respinit.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isPrim, throwL, okL))
+	e.emitLabel(throwL)
+	str, err := e.emitValueToString(box)
+	if err != nil {
+		return err
+	}
+	msg, err := e.emitStringConcat(Value{Ref: e.internString("undefined: Expected "), Ty: TypePtr}, str)
+	if err != nil {
+		return err
+	}
+	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to be one of: Null, Undefined, Object."), Ty: TypePtr}); err != nil {
+		return err
+	}
+	e.emitThrowTypeErrorValue(msg.Ref)
+	e.emitLabel(okL)
+	return nil
 }

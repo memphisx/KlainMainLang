@@ -210,3 +210,12 @@ void __kml_dtoa_exp(char *buf, double v) {
 	while (el > 0) *p++ = ebuf[--el];
 	*p = '\0';
 }
+
+/* Array.prototype.sort's default comparator over doubles: each rendered
+ * as String(x) does, compared as strings. */
+int __kml_cmp_f64_lex(const double *pa, const double *pb) {
+    char ba[32], bb[32];
+    __kml_dtoa(ba, *pa);
+    __kml_dtoa(bb, *pb);
+    return strcmp(ba, bb);
+}

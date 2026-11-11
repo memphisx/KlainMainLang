@@ -28,6 +28,7 @@ func emitIROptimizeMemory(t *testing.T, src string) string {
 	em := llvm.NewEmitter()
 	em.SetOptimizeMemory(true)
 	ir, err := em.EmitProgram(prog)
+	ir = llvm.ShapeIR(ir)
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
@@ -194,7 +195,8 @@ console.log(calc(10))
 	if strings.Contains(ir, "malloc(i64 16)") {
 		t.Errorf("non-escaping closure header/env still malloc'd")
 	}
-	if c := strings.Count(ir, "alloca {ptr, ptr}"); c != 2 {
+	// Each closure's cell: its prefix word, then {fn, env}.
+	if c := strings.Count(ir, "alloca { i64, ptr, ptr }"); c != 2 {
 		t.Errorf("expected 2 header allocas, got %d", c)
 	}
 	if c := strings.Count(ir, "call ptr @malloc(i64 8)"); c != 2 {

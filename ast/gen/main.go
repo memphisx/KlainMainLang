@@ -7,8 +7,9 @@
 // A child is a field whose type is Node or an interface embedding it
 // (Expression, Statement, TypeNode, …), a pointer to a node struct, a helper
 // struct (by value or pointer) that contains children, or a slice of any of
-// those. Excluded: the TypeAnnotation shim (converted from type nodes, which
-// are reached only through its Node field), and the Program fields that alias
+// those. Excluded: a declaration's annotation (a TypeNode field outside the
+// type-node file — type syntax is walked from its own root, not from the
+// statement tree), and the Program fields that alias
 // nodes already in the body or hold separately-walked module bodies
 // (skipFields).
 package main
@@ -26,15 +27,22 @@ import (
 )
 
 // skipTypes are never traversed.
-var skipTypes = map[string]bool{"TypeAnnotation": true, "Pos": true}
+var skipTypes = map[string]bool{"Pos": true}
 
 // skipFields are node fields that are not children: aliases of nodes reached
 // through the body, or bodies of other modules.
 var skipFields = map[string]bool{
-	"Program.DynamicImportNodes":    true, // the same nodes appear in Body
-	"Program.WorkerModules":         true, // separate module bodies, walked explicitly
-	"Program.NamespaceGroups":       true, // the same statements appear in Body
-	"FunctionDeclaration.Overloads": true, // signatures only: no code to walk
+	"Program.DynamicImportNodes":        true, // the same nodes appear in Body
+	"Program.WorkerModules":             true, // separate module bodies, walked explicitly
+	"Program.NamespaceGroups":           true, // the same statements appear in Body
+	"FunctionDeclaration.Overloads":     true, // signatures only: no code to walk
+	"ImportCallExpression.Alternatives": true, // reached through the selection that replaces the call
+}
+
+// typeChildFields are TypeNode fields outside the type-node file that are
+// children: type syntax the statement walk reaches, not an annotation.
+var typeChildFields = map[string]bool{
+	"InterfaceDeclaration.Heritage": true,
 }
 
 type field struct {
@@ -74,6 +82,29 @@ func Generate(srcs ...string) ([]byte, error) {
 	var order []string
 	nodes := map[string]bool{}
 	ifaces := map[string]bool{"Node": true} // interfaces a child may be held in
+	typeNodeFile := ""
+	for _, d := range decls {
+		if gd, ok := d.(*ast.GenDecl); ok {
+			for _, s := range gd.Specs {
+				if ts, ok := s.(*ast.TypeSpec); ok && ts.Name.Name == "TypeNode" {
+					typeNodeFile = fset.Position(ts.Pos()).Filename
+				}
+			}
+		}
+	}
+	// annotation reports a TypeNode field (or slice of them) of a struct
+	// declared outside the type-node file.
+	annotation := func(file string, t ast.Expr) bool {
+		for {
+			at, ok := t.(*ast.ArrayType)
+			if !ok {
+				break
+			}
+			t = at.Elt
+		}
+		id, ok := t.(*ast.Ident)
+		return ok && id.Name == "TypeNode" && file != typeNodeFile
+	}
 	for _, d := range decls {
 		switch d := d.(type) {
 		case *ast.GenDecl:
@@ -97,7 +128,7 @@ func Generate(srcs ...string) ([]byte, error) {
 				var fs []field
 				for _, fl := range st.Fields.List {
 					for _, nm := range fl.Names {
-						if ast.IsExported(nm.Name) {
+						if ast.IsExported(nm.Name) && (typeChildFields[ts.Name.Name+"."+nm.Name] || !annotation(fset.Position(ts.Pos()).Filename, fl.Type)) {
 							fs = append(fs, field{nm.Name, fl.Type})
 						}
 					}

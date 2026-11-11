@@ -74,16 +74,16 @@ func (e *Emitter) emitBoxIsArrayOf(v Value, typed, kinds []int) string {
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, isArr, nonNull))
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", slot))
 	readL, doneL := e.freshLabel("boxarr.read"), e.freshLabel("boxarr.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", both, readL, doneL))
 	e.emitLabel(readL)
 	box := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, box, payload))
 	anyOf := func(field int, want []int) string {
 		gp, b := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, anyArrayBoxTy, box, field))
-		e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b, gp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gp, anyArrayBoxTy, box, field))
+		e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", b, gp))
 		r := "false"
 		for _, w := range want {
 			c, o := e.freshReg(), e.freshReg()
@@ -99,11 +99,11 @@ func (e *Emitter) emitBoxIsArrayOf(v Value, typed, kinds []int) string {
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both2, ok, k))
 		ok = both2
 	}
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", ok, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", ok, slot))
 	e.emitTerminator("br label %" + doneL)
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
 	return r
 }
 
@@ -157,7 +157,7 @@ func (e *Emitter) anyArgMarks(name string, sig FuncSig, args []ast.Expression) (
 		if !has || !anyArgParamFits(pt) {
 			continue
 		}
-		if at := e.inferExprType(a); !isUnconstrainedDynamic(at) && !(anyElemArray(at) && !anyElemArray(pt)) {
+		if at := e.typeOfExpr(a); !isUnconstrainedDynamic(at) && !(anyElemArray(at) && !anyElemArray(pt)) {
 			continue
 		}
 		if nl, isNL := a.(*ast.NullLiteral); isNL && nl.IsUndefined {
@@ -288,7 +288,7 @@ func (e *Emitter) emitAnyArgDispatch(name string, sig FuncSig, args []ast.Expres
 		}
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, slot))
 		tmp := "__kml_anyarg" + strings.TrimPrefix(slot, "%")
 		e.define(tmp, Symbol{Ptr: slot, Ty: TypeAny})
 		id := ast.NewIdentifier(tmp, a.GetPos())
@@ -323,7 +323,7 @@ func (e *Emitter) emitAnyArgDispatch(name string, sig FuncSig, args []ast.Expres
 			} else {
 				v = e.convert(v, retTy)
 			}
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", retTy.IR, v.Ref, res, retTy.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", retTy.IR, v.Ref, res, retTy.Align()))
 		}
 		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 		return nil
@@ -339,7 +339,7 @@ func (e *Emitter) emitAnyArgDispatch(name string, sig FuncSig, args []ast.Expres
 		return Value{Ty: TypeVoid}, true, nil
 	}
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", out, retTy.IR, res, retTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", out, retTy.IR, res, retTy.Align()))
 	return Value{Ref: out, Ty: retTy}, true, nil
 }
 
@@ -351,19 +351,44 @@ func (e *Emitter) emitAnyArgDispatch(name string, sig FuncSig, args []ast.Expres
 // keeps its own kind, as in JavaScript, where an annotation converts
 // nothing.
 func (e *Emitter) anyHeldDecl(v *ast.VarDeclaration) bool {
+	if e.anyHeldEmitting[v] {
+		return true // emitted now, under the `any` annotation it is held by
+	}
 	if v != nil && e.funcSeeded[v.Name] && e.promotedGlobalDecls[v] {
 		return true // a var sharing a function's name (seedFuncGlobals)
 	}
 	if v != nil && e.jsHeldGlobals[v] {
 		return true // an untyped global a function reads (registerModuleGlobals)
 	}
+	if v != nil && v.TypeAnnot == nil && v.Init != nil {
+		// A read through a proxy: its get trap's result, whatever it is.
+		if obj := dynamicReadReceiver(v.Init); obj != nil {
+			if o := e.reprOracle(); o != nil && o.proxyValue(obj) {
+				return true
+			}
+		}
+	}
 	if v != nil && v.TypeAnnot == nil && !v.Ambient {
+		// An object literal's binding whose prototype the program changes
+		// (`Object.setPrototypeOf(o, p)`): an object that has one.
+		if _, lit := v.Init.(*ast.ObjectLiteral); lit && e.protoRetargetedDecls()[v] {
+			return true
+		}
 		// An unannotated binding of a call the any-argument check boxes.
 		call, ok := v.Init.(*ast.CallExpression)
 		return ok && e.anyArgReturnsBox(call)
 	}
 	if v == nil || v.TypeAnnot == nil || v.Ambient || v.Init == nil && !e.anyAssignedDecls()[v] {
 		return false
+	}
+	if v.Init != nil {
+		// A class itself bound to an object type (`const c: { x: number } =
+		// K`): the class's box, so its statics are read and written there.
+		if o := e.reprOracle(); o != nil && o.classValue(v.Init) {
+			if t := e.annotationType(v.TypeAnnot); t.IsObject() && !t.IsClass() && !t.IsDynamic() {
+				return true
+			}
+		}
 	}
 	if r, done := e.anyHeldMemo[v]; done {
 		return r
@@ -372,9 +397,11 @@ func (e *Emitter) anyHeldDecl(v *ast.VarDeclaration) bool {
 		e.anyHeldMemo = map[*ast.VarDeclaration]bool{}
 	}
 	e.anyHeldMemo[v] = false // a cycle through the initializer answers no
-	t := e.resolveType(v.TypeAnnot)
-	r := anyArgParamFits(t) &&
-		(e.anyAssignedDecls()[v] || v.Init != nil && e.boxesInto(e.inferExprType(v.Init), t))
+	t := e.annotationType(v.TypeAnnot)
+	// (A class-typed binding of a box holds the box: it may be a plain
+	// object, with no instance layout to read.)
+	r := (anyArgParamFits(t) || t.IsClass() && !t.IsDynamic()) &&
+		(e.anyAssignedDecls()[v] || v.Init != nil && e.boxesInto(e.typeOfExpr(v.Init), t))
 	e.anyHeldMemo[v] = r
 	return r
 }
@@ -440,4 +467,51 @@ func anyElemArray(t Type) bool {
 // typed (the array the same, its elements kept as they are).
 func (e *Emitter) boxesInto(from, to Type) bool {
 	return isUnconstrainedDynamic(from) || anyElemArray(from) && to.IsArray() && !anyElemArray(to)
+}
+
+// protoRetargetedDecls is every single-declaration binding named as the
+// target or the prototype of Object.setPrototypeOf or
+// Reflect.setPrototypeOf, or the prototype of Object.create: an object in a
+// prototype chain the program builds.
+func (e *Emitter) protoRetargetedDecls() map[*ast.VarDeclaration]bool {
+	if e.protoRetargeted != nil {
+		return e.protoRetargeted
+	}
+	e.protoRetargeted = map[*ast.VarDeclaration]bool{}
+	o := e.reprOracle()
+	if o == nil || e.prog == nil {
+		return e.protoRetargeted
+	}
+	ast.Inspect(e.prog, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpression)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		m, ok := call.Callee.(*ast.MemberExpression)
+		if !ok {
+			return true
+		}
+		ns, ok := m.Object.(*ast.Identifier)
+		if !ok {
+			return true
+		}
+		var named []ast.Expression
+		switch {
+		case m.Property == "setPrototypeOf" && (ns.Name == "Object" || ns.Name == "Reflect") && len(call.Args) >= 2:
+			named = call.Args[:2]
+		case m.Property == "create" && ns.Name == "Object":
+			named = call.Args[:1]
+		}
+		for _, a := range named {
+			if id, ok := a.(*ast.Identifier); ok {
+				if sym, _ := o.b.Resolve(id); sym != nil {
+					if v, ok := singleVarDecl(sym); ok {
+						e.protoRetargeted[v] = true
+					}
+				}
+			}
+		}
+		return true
+	})
+	return e.protoRetargeted
 }

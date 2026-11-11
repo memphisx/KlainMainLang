@@ -53,16 +53,20 @@ import (
 	"KlainMainLang/binder"
 	"KlainMainLang/checker"
 	"KlainMainLang/diag"
+	"KlainMainLang/freevars"
 	"KlainMainLang/lib"
 	"KlainMainLang/options"
 	"bytes"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -181,7 +185,13 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	// files reached via a real import edge so the "a worker entry cannot
 	// also be imported" conflict is detectable after the DFS.
 	importTargets := map[string]bool{}
+	globalObjectNames := map[string]bool{}
+	globalObjectEscapes_, globalObjectSpelled := false, map[string]bool{}
 	workerTargets := map[string]bool{}
+	// A literal eval worker's code, at the virtual path beside the file
+	// creating it that it resolves its own imports from, and back.
+	evalSources := map[string][]byte{}
+	evalKeys := map[string]string{}
 	dynamicImportTargets := map[string]bool{}
 	// userEdges: a file's static (and eagerly merged dynamic) imports of
 	// user files — the graph a worker re-evaluates on its own thread.
@@ -214,7 +224,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		}()
 
 		var src []byte
-		if path == entryAbs && opts.EntrySource != nil {
+		if es, ok := evalSources[path]; ok {
+			src = es
+		} else if path == entryAbs && opts.EntrySource != nil {
 			src = []byte(*opts.EntrySource)
 		} else if src, err = readSource(path); err != nil {
 			return fmt.Errorf("reading %s: %w", path, err)
@@ -223,14 +235,40 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if err != nil {
 			return diag.InFile(err, path)
 		}
+		if err := lowerRequires(prog, path, isEntry, src, klainModulesDir); err != nil {
+			return diag.InFile(err, path)
+		}
 		defaultImportsAsNamespaces(prog)
+		if err := mutableExportsObjects(path, prog, compatJS); err != nil {
+			return diag.InFile(err, path)
+		}
+		if isCommonJS(prog, path, src) {
+			if err := wrapCommonJS(prog, path == entryAbs); err != nil {
+				return diag.InFile(err, path)
+			}
+		}
+		boundGlobal, err := bindNodeGlobal(prog, path, src)
+		if err != nil {
+			return diag.InFile(err, path)
+		}
+		requiresOfCommonJS(prog, func(source string) bool {
+			return commonJSTarget(filepath.Dir(path), source, klainModulesDir)
+		})
 		markAssertCallSites(prog)
 		selfWorker := rewriteSelfWorker(prog, path)
 		if !strings.HasPrefix(path, lib.ModuleRoot) {
-			rewriteFileGlobals(prog, path)
+			_, isEval := evalSources[path]
+			rewriteFileGlobals(prog, path, isEval)
+			evalReassignment(path, prog)
+			reassignedFunctionsAsVars(path, prog, compatJS)
 			rewriteStaticEval(prog)
+			varArgumentsAsBinding(path, prog)
+		}
+		if err := lowerBuiltinDynamicImports(prog); err != nil {
+			return diag.InFile(err, path)
 		}
 		prog.WorkerPaths = workerPaths(prog)
+		prog.WorkerEvals = workerEvals(prog)
 		prog.DynamicImportNodes = dynamicImports(prog)
 		eraseBuiltinTypeImports(prog)
 
@@ -238,6 +276,53 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		// declared here, brings the module in; the name links to its class
 		// after checking (sema).
 		idents := codeIdents(src)
+		if !strings.HasPrefix(path, lib.ModuleRoot) {
+			// The global object carries a native global the program names;
+			// one it reads in a way no name shows carries every one, and
+			// every global module's, as Node's does.
+			if idents["eval"] || functionCtorCallRE.Match(src) {
+				globalObjectEscapes_ = true
+			}
+			if globalObjectEscapes(path, src, prog) {
+				globalObjectEscapes_ = true
+				for _, n := range GlobalObjectNatives {
+					idents[n] = true
+				}
+				for n := range lib.GlobalModuleNames() {
+					idents[n] = true
+				}
+				idents["crypto"] = true
+			} else if ctorFunctionCall(src) || sloppyThisUse(path, src, prog) {
+				// The global object as a function's `this`, read only by
+				// name: the globals those names are.
+				names, _ := thisMemberNames(prog)
+				for n := range names {
+					idents[n] = true
+				}
+			}
+			// A bare name resolves to the builtin without the object; only a
+			// property read can reach it through the object.
+			ast.Inspect(prog, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.MemberExpression:
+					globalObjectSpelled[x.Property] = true
+				case *ast.IndexExpression:
+					if lit, ok := x.Index.(*ast.StringLiteral); ok {
+						globalObjectSpelled[lit.Value] = true
+					}
+				case *ast.CallExpression:
+					if ownKeyCheckTarget(x) != nil {
+						globalObjectSpelled[x.Args[1].(*ast.StringLiteral).Value] = true
+					}
+				}
+				return true
+			})
+			for _, n := range GlobalObjectNatives {
+				if idents[n] && !declaresTopLevel(prog, n) {
+					globalObjectNames[n] = true
+				}
+			}
+		}
 		for native, uses := range lib.NativeGlobalUses {
 			if idents[native] && !declaresTopLevel(prog, native) {
 				for _, u := range uses {
@@ -279,6 +364,24 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
+		// A ReadableStream's async iterator (values(), [Symbol.asyncIterator]()
+		// and a `for await` over a stream held in `any`) is a TypeScript
+		// module's.
+		if rp := lib.ModuleRoot + "internal_rs_iterator.ts"; path != rp && !strings.HasPrefix(path, lib.ModuleRoot) && (idents["ReadableStream"] || idents["body"] || idents["Readable"]) && (idents["values"] || idents["asyncIterator"] || bytes.Contains(src, []byte("for await"))) {
+			importTargets[rp] = true
+			if err := visit(rp, false); err != nil {
+				return err
+			}
+		}
+
+		// A Promise combinator may be given an untyped iterable.
+		if pc := lib.ModuleRoot + "internal_promise_combine.ts"; !strings.HasPrefix(path, lib.ModuleRoot) && idents["Promise"] && (idents["all"] || idents["any"] || idents["race"] || idents["allSettled"]) {
+			importTargets[pc] = true
+			if err := visit(pc, false); err != nil {
+				return err
+			}
+		}
+
 		// JSON.stringify with a replacer, a run-time space, or by value, and
 		// JSON.parse with a reviver or by value, are a TypeScript module's.
 		if jp := lib.ModuleRoot + "internal_json.ts"; path != jp && idents["JSON"] && (idents["stringify"] || idents["parse"]) && jsonAtRunTime(prog) {
@@ -298,10 +401,65 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
-		if np := lib.ModuleRoot + "internal_namespaces.ts"; path != np && !strings.HasPrefix(path, lib.ModuleRoot) && (namespaceValueUse(src, idents) || idents["globalThis"] && globalObjectUse(src) || ctorFunctionCall(src) || undeclaredAssign(path, src, prog) || sloppyThisUse(path, src)) {
-			importTargets[np] = true
-			if err := visit(np, false); err != nil {
-				return err
+		globalized := globalizePatternTargets(path, src, prog)
+		if !strings.HasPrefix(path, lib.ModuleRoot) {
+			uses := namespaceValueUses(src, idents)
+			if globalized || boundGlobal || idents["globalThis"] && globalObjectUse(src) || ctorFunctionCall(src) || undeclaredAssign(path, src, prog) || sloppyThisUse(path, src, prog) {
+				if uses == nil {
+					uses = map[string]bool{}
+				}
+				uses["globalThis"] = true // the global object
+			}
+			if uses["globalThis"] {
+				if globalObjectEscapes_ {
+					fp := lib.ModuleRoot + "internal_global_object_fill.ts"
+					importTargets[fp] = true
+					if err := visit(fp, false); err != nil {
+						return err
+					}
+				} else {
+					if globalObjectSpelled["structuredClone"] {
+						fp := lib.ModuleRoot + "internal_global_clone.ts"
+						importTargets[fp] = true
+						if err := visit(fp, false); err != nil {
+							return err
+						}
+					}
+					// A namespace the program may read off the object by name.
+					for n := range globalObjectSpelled {
+						if _, ok := NamespaceValueNames[n]; ok && n != "globalThis" {
+							uses[n] = true
+						}
+					}
+				}
+			}
+			if uses["globalThis"] && globalObjectNames["fetch"] {
+				fp := lib.ModuleRoot + "internal_global_fetch.ts"
+				importTargets[fp] = true
+				if err := visit(fp, false); err != nil {
+					return err
+				}
+			}
+			// process on the global object is its emitter object, as a
+			// read of `process` as a value is.
+			if uses["globalThis"] && globalObjectNames["process"] {
+				pp := lib.ModuleRoot + "internal_process.ts"
+				importTargets[pp] = true
+				if err := visit(pp, false); err != nil {
+					return err
+				}
+			}
+			names := make([]string, 0, len(uses))
+			for n := range uses {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			for _, n := range names {
+				np := namespaceModule(n)
+				importTargets[np] = true
+				if err := visit(np, false); err != nil {
+					return err
+				}
 			}
 		}
 
@@ -331,52 +489,14 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
-		// Buffer.poolSize is internal_buffer.ts's variable.
-		if bp := lib.ModuleRoot + "internal_buffer.ts"; path != bp && idents["Buffer"] && bufferPoolSizeRE.Match(src) && !declaresTopLevel(prog, "Buffer") {
-			importTargets[bp] = true
-			if err := visit(bp, false); err != nil {
+		// A builtin global's member its declaration links to a module's
+		// export (`@lower module:export`) is that module's; `process` as a
+		// value and process.env are internal_process.ts's and
+		// internal_process_env.ts's.
+		for _, mod := range loweredMemberModules(prog, path, src, idents) {
+			importTargets[mod] = true
+			if err := visit(mod, false); err != nil {
 				return err
-			}
-		}
-
-		// `process`'s emitter members, `process` as a value, and
-		// process.emitWarning are TypeScript modules'.
-		if idents["process"] && !declaresTopLevel(prog, "process") {
-			members, bare := processUses(src)
-			pp := lib.ModuleRoot + "internal_process.ts"
-			if path != pp && (members["emitter"] || (bare && !strings.HasPrefix(path, lib.ModuleRoot))) {
-				importTargets[pp] = true
-				if err := visit(pp, false); err != nil {
-					return err
-				}
-			}
-			mp := lib.ModuleRoot + "internal_process_methods.ts"
-			if path != mp && members["methods"] {
-				importTargets[mp] = true
-				if err := visit(mp, false); err != nil {
-					return err
-				}
-			}
-			hp := lib.ModuleRoot + "internal_process_hrtime.ts"
-			if path != hp && members["hrtime"] {
-				importTargets[hp] = true
-				if err := visit(hp, false); err != nil {
-					return err
-				}
-			}
-			ep := lib.ModuleRoot + "internal_process_env.ts"
-			if path != ep && members["env"] {
-				importTargets[ep] = true
-				if err := visit(ep, false); err != nil {
-					return err
-				}
-			}
-			wp := lib.ModuleRoot + "internal_process_warning.ts"
-			if path != wp && members["emitWarning"] {
-				importTargets[wp] = true
-				if err := visit(wp, false); err != nil {
-					return err
-				}
 			}
 		}
 
@@ -441,10 +561,23 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				return err
 			}
 		}
+		for _, code := range prog.WorkerEvals {
+			sum := sha256.Sum256([]byte(code))
+			vpath := filepath.Join(dir, fmt.Sprintf("[worker eval %x].js", sum[:6]))
+			evalSources[vpath] = []byte(code)
+			evalKeys[vpath] = code
+			workerTargets[vpath] = true
+			if err := visit(vpath, false); err != nil {
+				return err
+			}
+		}
 
 		// Each dynamic `import('...')` literal target: merged over a dynamic
 		// edge (bundled, lazy), or only discovered and validated (isolated,
 		// where it becomes its own program).
+		if !strings.HasPrefix(path, lib.ModuleRoot) {
+			prog.DynamicImportNodes = append(prog.DynamicImportNodes, computedImportAlternatives(prog, path, dir, klainModulesDir)...)
+		}
 		for _, node := range prog.DynamicImportNodes {
 			lit, ok := node.Specifier.(*ast.StringLiteral)
 			if !ok {
@@ -579,10 +712,13 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 			if ef.Source == "" {
 				// A local export list forwards this file's own declarations.
-				declared := map[string]bool{}
+				declared, types := map[string]bool{}, map[string]bool{}
 				for _, st := range info.prog.Body {
 					for _, ref := range declRefsOf(st) {
 						declared[ref.Name] = true
+						if ref.Kind == "interface" || ref.Kind == "type" {
+							types[ref.Name] = true
+						}
 					}
 				}
 				for _, spec := range ef.Specifiers {
@@ -595,6 +731,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 							ef.GetPos().Line, ef.GetPos().Col, spec.Local)
 					}
 					info.exported[spec.Local] = true
+					if spec.TypeOnly || types[spec.Imported] {
+						info.typeExports[spec.Local] = true
+					}
 					info.reExportBindings = append(info.reExportBindings, reExportBinding{
 						local: spec.Local, target: path, remote: spec.Imported,
 					})
@@ -629,6 +768,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 						ef.GetPos().Line, ef.GetPos().Col, spec.Local)
 				}
 				info.exported[spec.Local] = true
+				// A re-exported type is a type here too (not in the module
+				// namespace object).
+				if spec.TypeOnly || target.typeExports[spec.Imported] {
+					info.typeExports[spec.Local] = true
+				}
 				info.reExportBindings = append(info.reExportBindings, reExportBinding{
 					local: spec.Local, target: resolved, remote: spec.Imported,
 				})
@@ -679,6 +823,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		bound := binder.BindWith(info.prog, binder.Options{AnnexB: compatJS})
 		offsets := diag.Offsets(info.src)
 		ds := append(bound.Diagnostics(offsets), bound.FlowDiagnostics(offsets, !compatJS)...)
+		ds = append(ds, reservedMemberDiags(info.prog, offsets)...)
+		ds = append(ds, constructDiags(info.prog, offsets, opts.Decorators)...)
+		if opts.Decorators == "standard" {
+			ds = append(ds, paramDecoratorDiags(info.prog, offsets)...)
+		}
 		if len(ds) > 0 {
 			sortDiags(ds)
 			return nil, diag.Errors(append(unused, diag.As(diag.InFile(diag.Errors(ds), path))...))
@@ -698,6 +847,10 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				d.Span.End = d.Span.Start
 			}
 			unused = append(unused, fileUnused...)
+		}
+		if compatJS {
+			// (A TypeScript file's checker sees each declaration as written.)
+			hoistNestedTopLevelVars(info.prog)
 		}
 		mangled, err := mangleFileDecls(path, fileKey(path), info.prog, info.index)
 		if err != nil {
@@ -734,6 +887,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	builtinImports := map[string]bool{}
 	builtinImportRefs := map[string]ast.BuiltinImportRef{}
 	dynNamespaces := map[string]string{} // a merged import() target: its namespace object's name
+	declaredNsObjects := map[string]bool{}
 	for _, path := range allPaths {
 		info := files[path]
 		ownLive := mutableExports(info.prog)
@@ -746,6 +900,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		nsValues := map[string]map[string]string{} // its value members (the namespace object's)
 		nsLive := map[string]map[string]bool{}     // those that are `let`/`var` bindings
 		nsObjects := map[string]string{}           // a namespace read as a value: its object's name
+		nsShared := map[string]string{}            // the one namespace object of its module
 		nsPos := map[string]ast.Pos{}              // its import's position
 		builtinMembers := map[string]builtinMemberRef{}
 		// TDD-00165 Stage 3: aliases of a parse-time built-in constructor
@@ -796,19 +951,32 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				// API): its exports resolve to the companion's declarations.
 				companion := companionMangled(files, imp.Source)
 				bindNS := func(local string) {
-					lookup[local] = marker
+					if len(funcs) > 0 {
+						lookup[local] = marker // its functions dispatch through the marker
+					}
 					// Through the namespace, the companion's exports are its
 					// declarations and the primary exports are the globals
 					// (`buffer.Buffer` is `Buffer`).
 					members := map[string]string{}
+					values := map[string]string{}
 					for k, v := range companion {
 						members[k] = v
+						if cp, ok := lib.CompanionPath(imp.Source); ok && files[cp] != nil && !files[cp].typeExports[k] {
+							values[k] = v
+						}
 					}
 					for r := range reexports {
 						members[r] = r
+						values[r] = r
 					}
 					ns[marker] = members
 					ns[local] = members
+					if len(funcs) == 0 {
+						// Read as a value: its namespace object.
+						nsSource[local] = imp.Source
+						nsValues[local] = values
+						nsPos[local] = imp.GetPos()
+					}
 				}
 				dupCheck := func(local string) error {
 					if _, dup := lookup[local]; dup {
@@ -1004,15 +1172,17 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				}
 				ns[imp.Namespace] = members
 				nsSource[imp.Namespace] = imp.Source
+				nsShared[imp.Namespace] = fmt.Sprintf("__kml_nsobj%d", target.index)
 				nsValues[imp.Namespace] = values
 				nsPos[imp.Namespace] = imp.GetPos()
 			}
 		}
 		var reservedErr error
 		renameFile(info.prog, lookupTable{
+			compatJS: compatJS,
 			resolved: resolvedModules,
 			names:    lookup, ns: ns, nsSource: nsSource, builtinMembers: builtinMembers,
-			nsObjects: nsObjects, nsObjectSuffix: fmt.Sprintf("__kml_nsv%d", info.index),
+			nsObjects: nsObjects, nsObjectSuffix: fmt.Sprintf("__kml_nsv%d", info.index), nsShared: nsShared,
 			typeOnly:         typeOnlyLocals(info.prog),
 			nodeTypes:        info.prog.NodeTypeImports,
 			parseTimeAliases: parseTimeAliases,
@@ -1022,7 +1192,17 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if reservedErr != nil {
 			return nil, reservedErr
 		}
-		prependNamespaceObjects(info.prog, nsObjects, nsValues, nsLive, nsPos)
+		if !strings.HasPrefix(path, lib.ModuleRoot) {
+			// After the file's names are renamed: a Function body sees the
+			// global scope, never the file's (a module's) own bindings.
+			rewriteFunctionConstructor(info.prog, info.index)
+			rewriteIndirectEval(info.prog, info.index)
+			rewriteObjectLiteralSuper(info.prog, info.index, compatJS)
+			if compatJS {
+				optionalDeletedFields(info.prog)
+			}
+		}
+		prependNamespaceObjects(info.prog, nsObjects, nsValues, nsLive, nsPos, declaredNsObjects)
 		if dynamicImportTargets[path] && !isolatedDynamicImport {
 			// What its import() resolves to: its namespace object, built
 			// once its top-level has run.
@@ -1055,6 +1235,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				return nil, err
 			}
 			renameFile(cp, lookupTable{
+				compatJS: compatJS,
 				resolved: resolvedModules,
 				names:    lookup, ns: ns, nsSource: nsSource, builtinMembers: builtinMembers,
 				nsObjects: nsObjects, nsObjectSuffix: fmt.Sprintf("__kml_nsv%d", info.index),
@@ -1067,7 +1248,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			if reservedErr != nil {
 				return nil, reservedErr
 			}
-			prependNamespaceObjects(cp, nsObjects, nsValues, nsLive, nsPos)
+			prependNamespaceObjects(cp, nsObjects, nsValues, nsLive, nsPos, map[string]bool{})
 			info.workerCopy = cp
 		}
 	}
@@ -1128,9 +1309,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	merged := &ast.Program{ResolvedModules: resolvedModules, BuiltinImports: builtinImports, BuiltinImportRefs: builtinImportRefs, BuiltinMarkers: markers}
 	merged.UsesDynamicImport = len(dynamicImportTargets) > 0
 	if ei, ok := files[entryAbs]; ok {
-		merged.EntryIsModule = IsModule(ei.prog)
+		merged.EntryIsModule = HasModuleSyntax(ei.prog)
 	}
 	merged.EntryPath = entryAbs
+	merged.GlobalObjectNames = globalObjectNames
+	merged.GlobalObjectEscapes, merged.GlobalObjectSpelled = globalObjectEscapes_, globalObjectSpelled
 	// Each builtin module written in TypeScript: its top-level names, for
 	// code generation to call into the library (`stream:_kmlFromWeb`).
 	for path, fi := range files {
@@ -1188,7 +1371,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		}
 		for n, ta := range src.ThisParams {
 			if merged.ThisParams == nil {
-				merged.ThisParams = map[ast.Node]*ast.TypeAnnotation{}
+				merged.ThisParams = map[ast.Node]ast.TypeNode{}
 			}
 			merged.ThisParams[n] = ta
 		}
@@ -1236,7 +1419,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			} else {
 				merged.Body = append(merged.Body, decls...)
 			}
-			merged.WorkerModules = append(merged.WorkerModules, ast.WorkerModule{Path: path, Body: body})
+			key := path
+			if code, isEval := evalKeys[path]; isEval {
+				key = code // the runtime spawns it by its code
+			}
+			merged.WorkerModules = append(merged.WorkerModules, ast.WorkerModule{Path: key, Body: body})
 			mergeNamespaces(files[path].prog)
 			continue
 		}
@@ -1295,7 +1482,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	// its detection of an untyped file goes by.
 	merged.ESMFiles = map[string]bool{}
 	for path, f := range files {
-		if hasModuleSyntax(f.prog.Body) {
+		if ast.HasModuleSyntax(f.prog.Body) {
 			merged.ESMFiles[path] = true
 		}
 	}
@@ -1400,6 +1587,18 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 	}
+	// A class member keyed at run time (`[a + b]() {}`) is defined on the
+	// class once it is (lowerRuntimeClassKeys). TypeScript accepts such a
+	// method or accessor, but not a field (TS1166), which the strict lane
+	// leaves to its error.
+	if err := ast.NameComputedMembers(merged); err != nil {
+		return nil, err
+	}
+	scopePrivateNames(merged)
+	if err := AnnotationChecks(merged, opts.MemMode); err != nil {
+		return nil, err
+	}
+	lowerRuntimeClassKeys(merged, compatJS)
 	ast.AddNamespaceObjects(merged)
 	// The strict lane is TypeScript's: a program tsc rejects for a type
 	// error is rejected here, with tsc's code (TDD-00230 P2.7). The js lane
@@ -1407,17 +1606,40 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	if !compatJS {
 		entry := files[entryAbs].prog
 		script := len(files) == 1 && !IsModule(entry)
-		if err := TypeCheck(merged, func(st ast.Statement) string { return stmtFile[st] }, opts, script); err != nil {
+		srcOf := func(path string) string {
+			if f := files[path]; f != nil && !strings.HasPrefix(path, lib.ModuleRoot) {
+				return f.src
+			}
+			return ""
+		}
+		if err := TypeCheck(merged, func(st ast.Statement) string { return stmtFile[st] }, srcOf, opts, script); err != nil {
 			return nil, err
 		}
+	} else {
+		// The js lane has no type errors, but this compiler's own limits
+		// the checker finds are the same in both lanes.
+		entry := files[entryAbs].prog
+		script := len(files) == 1 && !IsModule(entry)
+		if err := UnsupportedCheck(merged, func(st ast.Statement) string { return stmtFile[st] }, opts, script); err != nil {
+			return nil, err
+		}
+	}
+	// (After the type check: TypeScript sees the class as written.)
+	lowerFunctionSubclasses(merged)
+	lowerClassHeritageTDZ(merged)
+	lowerLateArrowSuperCalls(merged)
+	// (So is a computed import() specifier.)
+	if err := lowerComputedImports(merged, func(st ast.Statement) string { return stmtFile[st] }); err != nil {
+		return nil, err
 	}
 	return merged, nil
 }
 
 // TypeCheck runs the checker over a strict-lane program and returns its
 // type errors, each attributed to the file fileOf names (nil when prog came
-// from one source with no file).
-func TypeCheck(prog *ast.Program, fileOf func(ast.Statement) string, opts options.Options, script bool) error {
+// from one source with no file), less those a comment directive in the
+// file's source (srcOf) covers.
+func TypeCheck(prog *ast.Program, fileOf func(ast.Statement) string, srcOf func(string) string, opts options.Options, script bool) error {
 	if fileOf == nil {
 		fileOf = func(ast.Statement) string { return "" }
 	}
@@ -1426,13 +1648,51 @@ func TypeCheck(prog *ast.Program, fileOf func(ast.Statement) string, opts option
 	if err := ast.NameComputedMembers(prog); err != nil {
 		return err
 	}
+	if err := ast.RuntimeKeyError(prog); err != nil {
+		return err
+	}
 	libProgs, err := lib.Programs()
 	if err != nil {
 		return fmt.Errorf("builtin declarations: %w", err)
 	}
 	c := checker.NewWith(binder.BindWith(prog, binder.Options{Script: script, Lib: libProgs}), opts)
-	if ds := c.CheckFiles(fileOf); len(ds) > 0 {
+	ds := c.CheckFiles(fileOf)
+	if srcOf != nil {
+		var paths []string
+		seen := map[string]bool{}
+		for _, st := range prog.Body {
+			if f := fileOf(st); !seen[f] {
+				seen[f] = true
+				paths = append(paths, f)
+			}
+		}
+		ds = checker.ApplyCommentDirectives(ds, paths, srcOf)
+	}
+	if len(ds) > 0 {
 		return diag.Errors(ds)
+	}
+	return nil
+}
+
+// UnsupportedCheck runs the checker over a js-lane program and returns
+// only the constructs it reports this compiler does not support yet.
+func UnsupportedCheck(prog *ast.Program, fileOf func(ast.Statement) string, opts options.Options, script bool) error {
+	if fileOf == nil {
+		fileOf = func(ast.Statement) string { return "" }
+	}
+	libProgs, err := lib.Programs()
+	if err != nil {
+		return fmt.Errorf("builtin declarations: %w", err)
+	}
+	c := checker.NewWith(binder.BindWith(prog, binder.Options{Script: script, AnnexB: true, Lib: libProgs}), opts)
+	var out []*diag.Diagnostic
+	for _, d := range c.CheckFiles(fileOf) {
+		if d.Message.Kind == diag.Unsupported {
+			out = append(out, d)
+		}
+	}
+	if len(out) > 0 {
+		return diag.Errors(out)
 	}
 	return nil
 }
@@ -1616,6 +1876,9 @@ func declRefsOf(stmt ast.Statement) []declRef {
 	case *ast.EnumDeclaration:
 		return []declRef{{s.Name, "enum", func(n string) { s.Name = n }}}
 	case *ast.ClassDeclaration:
+		if s.Ambient {
+			return nil // a global the environment provides: never renamed
+		}
 		return []declRef{{s.Name, "class", func(n string) { s.Name = n }}}
 	}
 	return nil
@@ -1778,7 +2041,7 @@ func parseIslandExports(path string) ([]ast.ImportCallExport, error) {
 // object of each namespace import read as a value (`typeof path`, `const p =
 // path`): a frozen object of the module's value exports, keyed in sorted
 // order as Node's module namespace object is.
-func prependNamespaceObjects(prog *ast.Program, objects map[string]string, values map[string]map[string]string, live map[string]map[string]bool, at map[string]ast.Pos) {
+func prependNamespaceObjects(prog *ast.Program, objects map[string]string, values map[string]map[string]string, live map[string]map[string]bool, at map[string]ast.Pos, declared map[string]bool) {
 	if len(objects) == 0 {
 		return
 	}
@@ -1789,6 +2052,12 @@ func prependNamespaceObjects(prog *ast.Program, objects map[string]string, value
 	sort.Strings(locals)
 	var decls []ast.Statement
 	for _, l := range locals {
+		// A module has one namespace object: the first file reading it as
+		// a value declares it, the others name that one.
+		if declared[objects[l]] {
+			continue
+		}
+		declared[objects[l]] = true
 		vals, pos := values[l], at[l]
 		keys := make([]string, 0, len(vals))
 		for k := range vals {
@@ -1931,18 +2200,27 @@ func resolveImportPath(dir, source, klainModulesDir string) (string, error) {
 // always returned (even on a miss) so callers can phrase their own
 // not-found error around it.
 func resolveTsFile(dir, rel string) (abs string, found bool, err error) {
-	joined := filepath.Join(dir, rel)
-	if filepath.Ext(joined) == "" {
-		joined += ".ts"
-	}
-	abs, err = filepath.Abs(joined)
+	base, err := filepath.Abs(filepath.Join(dir, rel))
 	if err != nil {
 		return "", false, err
 	}
-	if _, statErr := os.Stat(abs); statErr != nil {
-		return abs, false, nil
+	isFile := func(p string) bool {
+		st, e := os.Stat(p)
+		return e == nil && !st.IsDir()
 	}
-	return abs, true, nil
+	if filepath.Ext(base) != "" {
+		return base, isFile(base), nil
+	}
+	// An extensionless specifier: the file with each extension in turn,
+	// then a directory's index, as Node's CommonJS resolution and tsc's
+	// module resolution look (`./m` → m.ts, m.js; `./d` → d/index.ts).
+	for _, c := range []string{base + ".ts", base + ".js", base + ".mjs", base + ".cjs",
+		filepath.Join(base, "index.ts"), filepath.Join(base, "index.js")} {
+		if isFile(c) {
+			return c, true, nil
+		}
+	}
+	return base + ".ts", false, nil
 }
 
 // klmpmManifest is a klain.json package manifest (TDD-00054 Stage 1) — only
@@ -2059,25 +2337,12 @@ func unwrap(stmts []ast.Statement) []ast.Statement {
 // file declares its own top-level `Worker`, in which case `new Worker` is that
 // class, not a worker thread.
 func workerPaths(prog *ast.Program) []string {
-	for _, st := range prog.Body {
-		switch d := st.(type) {
-		case *ast.ClassDeclaration:
-			if d.Name == "Worker" {
-				return nil
-			}
-		case *ast.VarDeclaration:
-			if d.Name == "Worker" {
-				return nil
-			}
-		case *ast.FunctionDeclaration:
-			if d.Name == "Worker" {
-				return nil
-			}
-		}
+	if declaresOwnWorker(prog) {
+		return nil
 	}
 	var out []string
 	ast.Inspect(prog, func(n ast.Node) bool {
-		if ne, ok := n.(*ast.NewExpression); ok && ne.ClassName == "Worker" && len(ne.Args) > 0 {
+		if ne, ok := n.(*ast.NewExpression); ok && ne.ClassName == "Worker" && len(ne.Args) > 0 && !evalWorker(ne) {
 			if lit, ok := ne.Args[0].(*ast.StringLiteral); ok {
 				out = append(out, lit.Value)
 			}
@@ -2085,6 +2350,88 @@ func workerPaths(prog *ast.Program) []string {
 		return true
 	})
 	return out
+}
+
+// workerEvals returns the code of every `new Worker(code, { eval: true })`
+// in the file whose code is a constant string (constString) (unless the file declares its own Worker).
+func workerEvals(prog *ast.Program) []string {
+	if declaresOwnWorker(prog) {
+		return nil
+	}
+	var out []string
+	ast.Inspect(prog, func(n ast.Node) bool {
+		ne, ok := n.(*ast.NewExpression)
+		if !ok || ne.ClassName != "Worker" || !evalWorker(ne) {
+			return true
+		}
+		if code, ok := constString(ne.Args[0]); ok {
+			out = append(out, code)
+		}
+		return true
+	})
+	return out
+}
+
+// constString is the value of a string literal, a template without
+// substitutions, or a `+` of them.
+func constString(x ast.Expression) (string, bool) {
+	switch c := x.(type) {
+	case *ast.StringLiteral:
+		return c.Value, true
+	case *ast.TemplateLiteral:
+		if len(c.Exprs) == 0 && len(c.Quasis) == 1 {
+			return c.Quasis[0], true
+		}
+	case *ast.BinaryExpression:
+		if c.Op == "+" {
+			l, ok := constString(c.Left)
+			if !ok {
+				return "", false
+			}
+			r, ok := constString(c.Right)
+			return l + r, ok
+		}
+	}
+	return "", false
+}
+
+// declaresOwnWorker reports a file declaring its own top-level Worker: its
+// `new Worker` is that class, not a worker thread.
+func declaresOwnWorker(prog *ast.Program) bool {
+	for _, st := range prog.Body {
+		switch d := st.(type) {
+		case *ast.ClassDeclaration:
+			if d.Name == "Worker" {
+				return true
+			}
+		case *ast.VarDeclaration:
+			if d.Name == "Worker" {
+				return true
+			}
+		case *ast.FunctionDeclaration:
+			if d.Name == "Worker" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// evalWorker reports a `new Worker(code, { eval: true })`.
+func evalWorker(ne *ast.NewExpression) bool {
+	if len(ne.Args) < 2 {
+		return false
+	}
+	opts, ok := ne.Args[1].(*ast.ObjectLiteral)
+	if !ok {
+		return false
+	}
+	for _, p := range opts.Properties {
+		if b, ok := p.Value.(*ast.BooleanLiteral); ok && p.Key == "eval" && b.Value {
+			return true
+		}
+	}
+	return false
 }
 
 // dynamicImports returns the dynamic `import('…')` expressions in the file
@@ -2115,6 +2462,22 @@ func IsModule(prog *ast.Program) bool {
 	return false
 }
 
+// HasModuleSyntax reports an ES module by its own syntax: an import or
+// export the source wrote, not a CommonJS require desugared to an import.
+func HasModuleSyntax(prog *ast.Program) bool {
+	for _, st := range prog.Body {
+		switch s := st.(type) {
+		case *ast.ImportDeclaration:
+			if !s.FromRequire {
+				return true
+			}
+		case *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+			return true
+		}
+	}
+	return false
+}
+
 // readSource reads a program file, or a builtin module written in
 // TypeScript from the compiler's own embedded sources.
 func readSource(path string) ([]byte, error) {
@@ -2131,6 +2494,15 @@ func defaultImportsAsNamespaces(prog *ast.Program) {
 	var body []ast.Statement
 	for _, st := range prog.Body {
 		imp, ok := st.(*ast.ImportDeclaration)
+		if ok && imp.Namespace != "" && imp.FromRequire && !imp.TypeOnly {
+			// `const E = require('events')` binds Node's module.exports,
+			// the module's default export.
+			if p, isLib := lib.ModulePath(imp.Source); isLib && lib.RequireIsDefault(p) {
+				d := ast.NewImportDeclaration([]ast.ImportSpecifier{{Imported: "default", Local: imp.Namespace}}, "", imp.Source, imp.GetPos())
+				body = append(body, d)
+				continue
+			}
+		}
 		if !ok || imp.Namespace != "" {
 			body = append(body, st)
 			continue
@@ -2155,6 +2527,7 @@ func defaultImportsAsNamespaces(prog *ast.Program) {
 		}
 		ns := ast.NewImportDeclaration(nil, local, imp.Source, imp.GetPos())
 		ns.TypeOnly = imp.TypeOnly
+		ns.FromDefault = true
 		body = append(body, ns)
 		if len(named) > 0 {
 			imp.Specifiers = named
@@ -2190,11 +2563,16 @@ func rewriteSelfWorker(prog *ast.Program, path string) bool {
 
 // rewriteFileGlobals turns `__filename` and `__dirname` into the file's own
 // absolute path and directory, as Node's CommonJS module wrapper binds them,
-// unless the file declares a binding of that name itself.
-func rewriteFileGlobals(prog *ast.Program, path string) {
+// unless the file declares a binding of that name itself. An eval worker's
+// are Node's `[worker eval]` and `.`.
+func rewriteFileGlobals(prog *ast.Program, path string, evalWorker bool) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return
+	}
+	dir := filepath.Dir(abs)
+	if evalWorker {
+		abs, dir = "[worker eval]", "."
 	}
 	declared := map[string]bool{}
 	ast.Inspect(prog, func(n ast.Node) bool {
@@ -2218,7 +2596,7 @@ func rewriteFileGlobals(prog *ast.Program, path string) {
 		values["__filename"] = abs
 	}
 	if !declared["__dirname"] {
-		values["__dirname"] = filepath.Dir(abs)
+		values["__dirname"] = dir
 	}
 	if len(values) == 0 {
 		return
@@ -2237,10 +2615,19 @@ func rewriteFileGlobals(prog *ast.Program, path string) {
 	ast.RewriteChildren(prog, rewrite)
 }
 
-// rewriteStaticEval replaces `eval("<expression>")`, its argument a
-// constant string holding one expression, with that expression (TDD-00046's
-// static subset), so the binder and checker see it as the program's own
-// code. A file declaring its own `eval` keeps its calls; any other eval is
+// rewriteStaticEval replaces `eval(src)`, src a constant string, with the
+// code it holds (TDD-00046's static subset), so the binder and checker see
+// it as the program's own code, which tsc never checks (prog.EvalCode):
+//   - one expression is spliced in place, its value eval's result;
+//   - statements run in an arrow function called in place, whose `this`
+//     and `arguments` are the caller's, and whose result is the last
+//     completion value; in sloppy code their `var` and function
+//     declarations are bindings of the caller's function, in strict code
+//     (the caller's, or the source's own directive) the eval's own;
+//   - source that does not parse, as the caller's strictness reads it,
+//     throws SyntaxError when the call runs.
+//
+// A file declaring its own `eval` keeps its calls; a dynamic argument is
 // left to code generation, which rejects it cleanly.
 func rewriteStaticEval(prog *ast.Program) {
 	declared := false
@@ -2268,14 +2655,113 @@ func rewriteStaticEval(prog *ast.Program) {
 		return
 	}
 	inInit := evalCallsInClassInitializers(prog)
-	var rewrite func(ast.Node) ast.Node
-	rewrite = func(n ast.Node) ast.Node {
-		ast.RewriteChildren(n, rewrite)
+	// An eval in a parameter initializer declares into a scope of its own,
+	// between the parameters and the body: the body's declaration of a name
+	// shadows it. paramEval maps each such call to the names its function's
+	// body declares.
+	type paramEvalSite struct {
+		shadowed map[string]bool // what the body declares
+		defaults []ast.Param     // this parameter and those after it
+		params   map[string]bool // every parameter's name
+	}
+	paramEval := map[*ast.CallExpression]paramEvalSite{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		var params []ast.Param
+		var body *ast.BlockStatement
+		switch f := n.(type) {
+		case *ast.FunctionDeclaration:
+			params, body = f.Params, f.Body
+		case *ast.FunctionExpression:
+			params, body = f.Params, f.Body
+		case *ast.ArrowFunction:
+			params, body = f.Params, f.Block
+		default:
+			return true
+		}
+		var names map[string]bool
+		for i, p := range params {
+			if p.Default == nil {
+				continue
+			}
+			rest := params[i:]
+			ast.Inspect(p.Default, func(m ast.Node) bool {
+				switch c := m.(type) {
+				case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+					return false
+				case *ast.CallExpression:
+					if names == nil {
+						names = bodyDeclaredNames(body)
+					}
+					paramEval[c] = paramEvalSite{shadowed: names, defaults: rest, params: paramNames(params)}
+				}
+				return true
+			})
+		}
+		return true
+	})
+	markEval := func(x ast.Expression) {
+		if prog.EvalCode == nil {
+			prog.EvalCode = map[ast.Expression]bool{}
+		}
+		prog.EvalCode[x] = true
+	}
+	throwing := func(ctor, msg string) ast.Expression {
+		th, err := parser.ParseEval("(() => { throw new " + ctor + "(" + strconv.Quote(msg) + "); })()")
+		if err != nil {
+			return nil
+		}
+		ts, _ := th.Body[0].(*ast.ExpressionStatement)
+		if ts == nil {
+			return nil
+		}
+		markEval(ts.Expr)
+		return ts.Expr
+	}
+	// hoists are the names sloppy eval code declares into each caller
+	// function's (or the program's) variables, in first-seen order.
+	hoists := map[ast.Node][]string{}
+	hoisted := map[ast.Node]map[string]bool{}
+	paramScoped := map[string]bool{} // hoisted names a parameter's eval declares
+	type evalScope struct {
+		strict bool
+		vars   ast.Node // the function (or program) whose variables `var` declares
+		// superProp and superCall: the `super` its code may use (a
+		// method's; a derived constructor's call too).
+		superProp, superCall bool
+	}
+	// methods are the class methods and accessors, and ctors the
+	// constructors (true when derived), whose code may use `super`.
+	methods := map[*ast.FunctionDeclaration]bool{}
+	ctors := map[*ast.FunctionDeclaration]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if cd, ok := n.(*ast.ClassDeclaration); ok {
+			for _, m := range cd.Methods {
+				methods[m] = true
+			}
+			if cd.Constructor != nil {
+				ctors[cd.Constructor] = cd.BaseClass != ""
+			}
+		}
+		return true
+	})
+	var rw func(n ast.Node, sc evalScope) ast.Node
+	rwOne := func(n ast.Node, sc evalScope) ast.Node {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration:
+			derived, ctor := ctors[x]
+			sc = evalScope{strict: sc.strict || x.Body != nil && blockIsStrict(x.Body), vars: x, superProp: methods[x] || ctor, superCall: derived}
+		case *ast.FunctionExpression:
+			sc = evalScope{strict: sc.strict || x.Body != nil && blockIsStrict(x.Body), vars: x, superProp: x.Method}
+		case *ast.ArrowFunction:
+			sc = evalScope{strict: sc.strict || x.Block != nil && blockIsStrict(x.Block), vars: x, superProp: sc.superProp, superCall: sc.superCall}
+		case *ast.ClassDeclaration, *ast.ClassExpression:
+			sc.strict = true
+		}
+		ast.RewriteChildren(n, func(ch ast.Node) ast.Node { return rw(ch, sc) })
 		call, ok := n.(*ast.CallExpression)
 		if !ok || len(call.Args) != 1 || call.Optional {
 			return n
 		}
-		atInit := inInit[call]
 		if id, ok := call.Callee.(*ast.Identifier); !ok || id.Name != "eval" {
 			return n
 		}
@@ -2291,31 +2777,846 @@ func rewriteStaticEval(prog *ast.Program) {
 		default:
 			return n
 		}
-		ev, err := parser.ParseEval(src)
-		if err != nil || len(ev.Body) != 1 {
+		parsed := src
+		if sc.strict {
+			parsed = "'use strict';\n" + src
+		}
+		ev, err := parser.ParseEvalIn(parsed, sc.superProp, sc.superCall)
+		if err == nil && evalHasTopLevelReturn(ev) {
+			if t := throwing("SyntaxError", "Illegal return statement"); t != nil {
+				return t
+			}
 			return n
 		}
-		es, ok := ev.Body[0].(*ast.ExpressionStatement)
+		if err != nil {
+			msg := err.Error()
+			if k := strings.Index(msg, ": "); k > 0 && strings.Count(msg[:k], ":") == 1 {
+				msg = msg[k+2:]
+			}
+			if t := throwing("SyntaxError", msg); t != nil {
+				return t
+			}
+			return n
+		}
+		body := ev.Body
+		if sc.strict && len(body) > 0 {
+			body = body[1:] // the directive this prefix added
+		}
+		if len(body) == 1 {
+			if es, ok := body[0].(*ast.ExpressionStatement); ok {
+				if inInit[call] && readsOwnArguments(es.Expr) {
+					// A field initializer's or static block's eval code sees no
+					// function's arguments: its SyntaxError, thrown by the call.
+					if t := throwing("SyntaxError", "'arguments' is not allowed in class field initializer or static initialization block"); t != nil {
+						return t
+					}
+				}
+				out := rw(es.Expr, sc).(ast.Expression)
+				markEval(out)
+				return out
+			}
+		}
+		strict := sc.strict || programIsStrictBody(body)
+		pos := call.GetPos()
+		inner := sc
+		var stmts []ast.Statement
+		if strict {
+			inner = evalScope{strict: true, vars: nil}
+		} else {
+			// The caller's variables: each `var` becomes an assignment to
+			// one, and each function declaration a hoisted assignment.
+			names, funcs, rest := sloppyEvalDecls(body, pos)
+			site, inParams := paramEval[call]
+			if inParams {
+				// A `var` the eval code declares beside a parameter of the
+				// same name: EvalDeclarationInstantiation's SyntaxError.
+				for _, nm := range names {
+					if site.params[nm] {
+						if t := throwing("SyntaxError", "Identifier '"+nm+"' has already been declared"); t != nil {
+							return t
+						}
+					}
+				}
+			}
+			rename := map[string]string{}
+			for _, nm := range names {
+				if inParams && site.shadowed[nm] {
+					// The body's own binding shadows it: a hidden one the
+					// eval code and the later parameters read.
+					rename[nm] = nm + "$kmlpe"
+					nm = rename[nm]
+				}
+				if inParams {
+					paramScoped[nm] = true
+				}
+				if hoisted[sc.vars] == nil {
+					hoisted[sc.vars] = map[string]bool{}
+				}
+				if !hoisted[sc.vars][nm] {
+					hoisted[sc.vars][nm] = true
+					hoists[sc.vars] = append(hoists[sc.vars], nm)
+				}
+			}
+			stmts = append(stmts, funcs...)
+			body = rest
+			if len(rename) > 0 {
+				var ren func(m ast.Node) ast.Node
+				ren = func(m ast.Node) ast.Node {
+					if id, ok := m.(*ast.Identifier); ok && rename[id.Name] != "" {
+						return ast.NewIdentifier(rename[id.Name], id.GetPos())
+					}
+					ast.RewriteChildren(m, ren)
+					return m
+				}
+				for i := range stmts {
+					stmts[i] = ren(stmts[i]).(ast.Statement)
+				}
+				for i := range body {
+					body[i] = ren(body[i]).(ast.Statement)
+				}
+				for i := range site.defaults {
+					if site.defaults[i].Default != nil {
+						site.defaults[i].Default = ren(site.defaults[i].Default).(ast.Expression)
+					}
+				}
+			}
+		}
+		stmts = append(stmts, body...)
+		block := ast.NewBlockStatement(stmts, pos)
+		for i, st := range block.Body {
+			block.Body[i] = rw(st, inner).(ast.Statement)
+		}
+		const cv = "__kml_evalcv"
+		withCompletion(block, cv)
+		block.Body = append([]ast.Statement{ast.NewVarDeclaration("let", cv, &ast.KeywordType{Keyword: "any"}, nil, pos)}, block.Body...)
+		block.Body = append(block.Body, ast.NewReturnStatement(ast.NewIdentifier(cv, pos), pos))
+		fn := ast.NewArrowFunction(nil, nil, nil, block, pos)
+		markEval(fn)
+		return ast.NewCallExpression(fn, nil, pos)
+	}
+	rw = func(n ast.Node, sc evalScope) ast.Node {
+		// `eval(src, more…)`: the arguments after the source are
+		// evaluated, then ignored.
+		if call, ok := n.(*ast.CallExpression); ok && !call.Optional && len(call.Args) > 1 {
+			if id, ok := call.Callee.(*ast.Identifier); ok && id.Name == "eval" {
+				extras := make([]ast.Expression, 0, len(call.Args))
+				for _, a := range call.Args[1:] {
+					x := rw(a, sc).(ast.Expression)
+					if sp, isSpread := x.(*ast.SpreadElement); isSpread {
+						x = ast.NewArrayLiteral([]ast.Expression{x}, sp.GetPos()) // iterated
+					}
+					extras = append(extras, x)
+				}
+				call.Args = call.Args[:1]
+				r := rwOne(n, sc)
+				if r == ast.Node(call) {
+					call.Args = append(call.Args, extras...)
+					return call
+				}
+				return ast.NewSequenceExpression(append(extras, r.(ast.Expression)), call.GetPos())
+			}
+		}
+		return rwOne(n, sc)
+	}
+	ast.RewriteChildren(prog, func(ch ast.Node) ast.Node {
+		return rw(ch, evalScope{strict: programIsStrictBody(prog.Body) || IsModule(prog), vars: prog})
+	})
+	for owner, names := range hoists {
+		var decls []ast.Statement
+		for _, nm := range names {
+			d := ast.NewVarDeclaration("var", nm, &ast.KeywordType{Keyword: "any"}, nil, ast.Pos{})
+			d.ParamScope = paramScoped[nm]
+			decls = append(decls, d)
+		}
+		switch o := owner.(type) {
+		case *ast.Program:
+			o.Body = append(decls, o.Body...)
+		case *ast.FunctionDeclaration:
+			o.Body.Body = append(decls, o.Body.Body...)
+		case *ast.FunctionExpression:
+			o.Body.Body = append(decls, o.Body.Body...)
+		case *ast.ArrowFunction:
+			if o.Block != nil {
+				o.Block.Body = append(decls, o.Block.Body...)
+			}
+		}
+	}
+}
+
+// bodyDeclaredNames are the names a function body binds: its own
+// declarations, and the `var`s of its nested blocks.
+func bodyDeclaredNames(body *ast.BlockStatement) map[string]bool {
+	out := map[string]bool{}
+	if body == nil {
+		return out
+	}
+	for _, st := range body.Body {
+		switch d := st.(type) {
+		case *ast.VarDeclaration:
+			out[d.Name] = true
+		case *ast.VarDeclarationList:
+			for _, v := range d.Decls {
+				out[v.Name] = true
+			}
+		case *ast.FunctionDeclaration:
+			out[d.Name] = true
+		case *ast.ClassDeclaration:
+			out[d.Name] = true
+		}
+	}
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.VarDeclaration:
+			if d.Kind == "var" {
+				out[d.Name] = true
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// blockIsStrict reports a function body whose directive prologue holds
+// "use strict".
+func blockIsStrict(b *ast.BlockStatement) bool { return programIsStrictBody(b.Body) }
+
+// programIsStrictBody reports statements whose directive prologue holds
+// "use strict".
+func programIsStrictBody(body []ast.Statement) bool { return ast.HasUseStrictDirective(body) }
+
+// evalHasTopLevelReturn reports a `return` outside any function in eval
+// code, a SyntaxError there.
+func evalHasTopLevelReturn(prog *ast.Program) bool {
+	found := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.ReturnStatement:
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// sloppyEvalDecls splits sloppy eval code's declarations out: the names
+// its `var`s and function declarations bind in the caller, the function
+// declarations as assignments run first, and the statements with each
+// `var` an assignment of its initializer.
+func sloppyEvalDecls(body []ast.Statement, pos ast.Pos) (names []string, funcs, rest []ast.Statement) {
+	seen := map[string]bool{}
+	add := func(n string) {
+		if !seen[n] {
+			seen[n] = true
+			names = append(names, n)
+		}
+	}
+	for _, st := range body {
+		if fd, ok := st.(*ast.FunctionDeclaration); ok && fd.Body != nil {
+			add(fd.Name)
+			fe := ast.NewFunctionExpression(fd.Name, fd.Params, fd.ReturnType, fd.Body, fd.IsAsync, fd.GetPos())
+			fe.IsGenerator = fd.IsGenerator
+			funcs = append(funcs, ast.NewExpressionStatement(ast.NewAssignmentExpression("=", ast.NewIdentifier(fd.Name, fd.GetPos()), fe, fd.GetPos()), fd.GetPos()))
+			continue
+		}
+		rest = append(rest, st)
+	}
+	// A `var` that is a statement of a list becomes the assignment of its
+	// initializer (a `var` in a loop's header stays the eval's own).
+	assign := func(d *ast.VarDeclaration) ast.Expression {
+		add(d.Name)
+		if d.Init == nil {
+			return nil
+		}
+		return ast.NewAssignmentExpression("=", ast.NewIdentifier(d.Name, d.GetPos()), d.Init, d.GetPos())
+	}
+	var list func([]ast.Statement) []ast.Statement
+	var walk func(ast.Node) ast.Node
+	list = func(sts []ast.Statement) []ast.Statement {
+		var out []ast.Statement
+		for _, st := range sts {
+			switch d := st.(type) {
+			case *ast.VarDeclaration:
+				if d.Kind == "var" && d.Name != "" {
+					if a := assign(d); a != nil {
+						out = append(out, ast.NewExpressionStatement(a, d.GetPos()))
+					}
+					continue
+				}
+			case *ast.VarDeclarationList:
+				allVar := len(d.Decls) > 0
+				for _, v := range d.Decls {
+					allVar = allVar && v.Kind == "var" && v.Name != ""
+				}
+				if allVar {
+					for _, v := range d.Decls {
+						if a := assign(v); a != nil {
+							out = append(out, ast.NewExpressionStatement(a, v.GetPos()))
+						}
+					}
+					continue
+				}
+			}
+			out = append(out, walk(st).(ast.Statement))
+		}
+		return out
+	}
+	walk = func(n ast.Node) ast.Node {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+			return n // their own variables
+		case *ast.BlockStatement:
+			x.Body = list(x.Body)
+			return n
+		}
+		ast.RewriteChildren(n, walk)
+		return n
+	}
+	rest = list(rest)
+	return names, funcs, rest
+}
+
+// withCompletion stores each statement-level expression's value in cv,
+// the eval code's completion value; nested functions keep theirs.
+func withCompletion(n ast.Node, cv string) {
+	fins := 0
+	var rewrite func(ast.Node) ast.Node
+	rewrite = func(n ast.Node) ast.Node {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+			return n
+		case *ast.ExpressionStatement:
+			return ast.NewExpressionStatement(ast.NewAssignmentExpression("=", ast.NewIdentifier(cv, x.GetPos()), x.Expr, x.GetPos()), x.GetPos())
+		case *ast.TryStatement:
+			ast.RewriteChildren(n, rewrite)
+			if f := x.Finally; f != nil {
+				// A finally block completing normally keeps the try's (or
+				// catch's) value; one leaving by break or continue has its
+				// own, else undefined (UpdateEmpty(F, undefined)).
+				pos := f.GetPos()
+				saved := fmt.Sprintf("%s_fin%d", cv, fins)
+				fins++
+				head := []ast.Statement{
+					ast.NewVarDeclaration("let", saved, &ast.KeywordType{Keyword: "any"}, ast.NewIdentifier(cv, pos), pos),
+					ast.NewExpressionStatement(ast.NewAssignmentExpression("=", ast.NewIdentifier(cv, pos), ast.NewNullLiteral(true, pos), pos), pos),
+				}
+				tail := ast.NewExpressionStatement(ast.NewAssignmentExpression("=", ast.NewIdentifier(cv, pos), ast.NewIdentifier(saved, pos), pos), pos)
+				f.Body = append(append(head, f.Body...), tail)
+			}
+			return n
+		}
+		ast.RewriteChildren(n, rewrite)
+		return n
+	}
+	ast.RewriteChildren(n, rewrite)
+}
+
+// rewriteObjectLiteralSuper lowers `super` in an object literal's methods
+// and accessors, and (in JavaScript; tsc rejects it, TS2335) in the members
+// of a class with no base: the literal is
+// bound, each time it is evaluated, to a home object (a base-less class's
+// is Object.prototype's, or Function.prototype's for a static member's),
+// and `super.x` / `super[k]` read the home's prototype's property
+// with the method's `this` as the receiver (Reflect.get); `super.m(...)`
+// calls it on `this`; `super.x = v` stores through the prototype to `this`
+// (Reflect.set), its value v. A `super` the literal's methods do not hold
+// (a class's) is left alone.
+func rewriteObjectLiteralSuper(prog *ast.Program, fileIdx int, compatJS bool) {
+	count := 0
+	any := func() ast.TypeNode { return &ast.KeywordType{Keyword: "any"} }
+	reflect := func(m string, args []ast.Expression, pos ast.Pos) ast.Expression {
+		return ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Reflect", pos), m, pos), args, pos)
+	}
+	var rwFn func(n ast.Node, proto func(ast.Pos) ast.Expression) ast.Node
+	var rw func(n ast.Node) ast.Node
+	// rwFn rewrites one method's body, proto giving the object super reads.
+	rwFn = func(n ast.Node, proto func(ast.Pos) ast.Expression) ast.Node {
+		switch x := n.(type) {
+		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassDeclaration, *ast.ClassExpression:
+			return rw(n) // its own `this`; its literals their own homes
+		case *ast.ObjectLiteral:
+			return rw(n)
+		case *ast.CallExpression:
+			if m, ok := x.Callee.(*ast.MemberExpression); ok {
+				if _, sup := m.Object.(*ast.SuperExpression); sup {
+					for i := range x.Args {
+						x.Args[i] = rwFn(x.Args[i], proto).(ast.Expression)
+					}
+					pos := x.GetPos()
+					proto := proto(pos)
+					fn := reflect("get", []ast.Expression{proto, ast.NewStringLiteral(m.Property, pos), ast.NewThisExpression(pos)}, pos)
+					return ast.NewCallExpression(ast.NewMemberExpression(fn, "call", pos), append([]ast.Expression{ast.NewThisExpression(pos)}, x.Args...), pos)
+				}
+			}
+			if ix, ok := x.Callee.(*ast.IndexExpression); ok {
+				if _, sup := ix.Object.(*ast.SuperExpression); sup {
+					// `super[k](...)`: the method read as `super[k]` is,
+					// called on this.
+					pos := x.GetPos()
+					fn := rwFn(ix, proto).(ast.Expression)
+					for i := range x.Args {
+						x.Args[i] = rwFn(x.Args[i], proto).(ast.Expression)
+					}
+					return ast.NewCallExpression(ast.NewMemberExpression(fn, "call", pos), append([]ast.Expression{ast.NewThisExpression(pos)}, x.Args...), pos)
+				}
+			}
+		case *ast.AssignmentExpression:
+			if key, ok := superKey(x.Left); ok && x.Op != "&&=" && x.Op != "||=" && x.Op != "??=" {
+				pos := x.GetPos()
+				key = rwFn(key, proto).(ast.Expression)
+				rhs := rwFn(x.Right, proto).(ast.Expression)
+				if x.Op == "=" {
+					return superTemplate("((__kml_sk: any, __kml_sp: any, __kml_sv: any) => (Reflect.set(__kml_sp, __kml_sk, __kml_sv, this), __kml_sv))(KEY, PROTO, RHS)", key, proto(pos), rhs, pos)
+				}
+				op := strings.TrimSuffix(x.Op, "=")
+				return superTemplate("((__kml_sk: any, __kml_sp: any) => { const __kml_sr: any = Reflect.get(__kml_sp, __kml_sk, this) "+op+" RHS; Reflect.set(__kml_sp, __kml_sk, __kml_sr, this); return __kml_sr; })(KEY, PROTO)", key, proto(pos), rhs, pos)
+			}
+		case *ast.UnaryExpression:
+			if key, ok := superKey(x.Arg); ok && x.Op == "delete" {
+				// The key is evaluated, never converted; a super reference
+				// cannot be deleted.
+				pos := x.GetPos()
+				key = rwFn(key, proto).(ast.Expression)
+				return superTemplate("((__kml_sk: any): boolean => { throw new ReferenceError(\"Unsupported reference to 'super'\"); })(KEY)", key, nil, nil, pos)
+			}
+		case *ast.UpdateExpression:
+			if key, ok := superKey(x.Arg); ok {
+				pos := x.GetPos()
+				key = rwFn(key, proto).(ast.Expression)
+				ret := "__kml_sold"
+				if x.Prefix {
+					ret = "__kml_snew"
+				}
+				return superTemplate("((__kml_sk: any, __kml_sp: any) => { let __kml_snew: any = Reflect.get(__kml_sp, __kml_sk, this); const __kml_sold: any = __kml_snew"+x.Op+"; Reflect.set(__kml_sp, __kml_sk, __kml_snew, this); return "+ret+"; })(KEY, PROTO)", key, proto(pos), nil, pos)
+			}
+		case *ast.MemberExpression:
+			if _, sup := x.Object.(*ast.SuperExpression); sup {
+				pos := x.GetPos()
+				proto := proto(pos)
+				return reflect("get", []ast.Expression{proto, ast.NewStringLiteral(x.Property, pos), ast.NewThisExpression(pos)}, pos)
+			}
+		case *ast.IndexExpression:
+			if _, sup := x.Object.(*ast.SuperExpression); sup {
+				// The key is evaluated before the home's prototype is read,
+				// and converted to a property key after.
+				pos := x.GetPos()
+				key := rwFn(x.Index, proto).(ast.Expression)
+				proto := proto(pos)
+				get := reflect("get", []ast.Expression{proto, ast.NewIdentifier("__kml_superk", pos), ast.NewThisExpression(pos)}, pos)
+				fn := ast.NewArrowFunction([]ast.Param{{Name: "__kml_superk", Type: any()}}, nil, get, nil, pos)
+				return ast.NewCallExpression(fn, []ast.Expression{key}, pos)
+			}
+		}
+		ast.RewriteChildren(n, func(ch ast.Node) ast.Node { return rwFn(ch, proto) })
+		return n
+	}
+	usesSuper := func(fe *ast.FunctionExpression) bool {
+		found := false
+		visit := func(root ast.Node) {
+			ast.Inspect(root, func(n ast.Node) bool {
+				switch n.(type) {
+				case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassDeclaration, *ast.ClassExpression, *ast.ObjectLiteral:
+					return false
+				case *ast.SuperExpression:
+					found = true
+				}
+				return !found
+			})
+		}
+		visit(fe.Body)
+		for _, p := range fe.Params {
+			if p.Default != nil {
+				visit(p.Default)
+			}
+		}
+		return found
+	}
+	usesSuperDecl := func(fd *ast.FunctionDeclaration) bool {
+		if fd == nil || fd.Body == nil {
+			return false
+		}
+		return usesSuper(&ast.FunctionExpression{Params: fd.Params, Body: fd.Body})
+	}
+	rw = func(n ast.Node) ast.Node {
+		if cd, ok := n.(*ast.ClassDeclaration); ok && cd.BaseClass == "" && compatJS {
+			// A class with no base: an instance member's super is
+			// Object.prototype, a static member's Function.prototype.
+			ast.RewriteChildren(n, rw)
+			protoOf := func(of string) func(ast.Pos) ast.Expression {
+				return func(pos ast.Pos) ast.Expression {
+					return ast.NewMemberExpression(ast.NewIdentifier(of, pos), "prototype", pos)
+				}
+			}
+			members := append([]*ast.FunctionDeclaration{cd.Constructor}, cd.Methods...)
+			for _, m := range members {
+				if !usesSuperDecl(m) {
+					continue
+				}
+				of := "Object"
+				if m.IsStatic {
+					of = "Function"
+				}
+				m.Body = rwFn(m.Body, protoOf(of)).(*ast.BlockStatement)
+				for i := range m.Params {
+					if m.Params[i].Default != nil {
+						m.Params[i].Default = rwFn(m.Params[i].Default, protoOf(of)).(ast.Expression)
+					}
+				}
+			}
+			return n
+		}
+		lit, ok := n.(*ast.ObjectLiteral)
+		if !ok {
+			ast.RewriteChildren(n, rw)
+			return n
+		}
+		var methods []*ast.FunctionExpression
+		for _, p := range lit.Properties {
+			if fe, ok := p.Value.(*ast.FunctionExpression); ok && (fe.Method || p.AccessorKind != "") && fe.Body != nil && usesSuper(fe) {
+				methods = append(methods, fe)
+			}
+		}
+		ast.RewriteChildren(n, rw)
+		if len(methods) == 0 {
+			return n
+		}
+		home := fmt.Sprintf("__kml_home%d_%d", fileIdx, count)
+		count++
+		proto := func(pos ast.Pos) ast.Expression {
+			return ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Object", pos), "getPrototypeOf", pos), []ast.Expression{ast.NewIdentifier(home, pos)}, pos)
+		}
+		for _, fe := range methods {
+			fe.Body = rwFn(fe.Body, proto).(*ast.BlockStatement)
+			for i := range fe.Params {
+				if fe.Params[i].Default != nil {
+					fe.Params[i].Default = rwFn(fe.Params[i].Default, proto).(ast.Expression)
+				}
+			}
+		}
+		// ((home) => (home = literal, home))()
+		pos := lit.GetPos()
+		bind := ast.NewSequenceExpression([]ast.Expression{
+			ast.NewAssignmentExpression("=", ast.NewIdentifier(home, pos), lit, pos),
+			ast.NewIdentifier(home, pos),
+		}, pos)
+		fn := ast.NewArrowFunction([]ast.Param{{Name: home, Type: any()}}, nil, bind, nil, pos)
+		return ast.NewCallExpression(fn, nil, pos)
+	}
+	ast.RewriteChildren(prog, rw)
+}
+
+// superKey is a super property reference's key: `super.x`'s name as a
+// string, `super[k]`'s k.
+func superKey(x ast.Expression) (ast.Expression, bool) {
+	switch t := x.(type) {
+	case *ast.MemberExpression:
+		if _, ok := t.Object.(*ast.SuperExpression); ok {
+			return ast.NewStringLiteral(t.Property, t.GetPos()), true
+		}
+	case *ast.IndexExpression:
+		if _, ok := t.Object.(*ast.SuperExpression); ok {
+			return t.Index, true
+		}
+	}
+	return nil, false
+}
+
+// superTemplate parses src, a super property write's lowering, with the
+// identifiers KEY, PROTO and RHS standing for the given expressions.
+func superTemplate(src string, key, proto, rhs ast.Expression, pos ast.Pos) ast.Expression {
+	ev, err := parser.ParseEval(src)
+	if err != nil || len(ev.Body) != 1 {
+		panic("super lowering template: " + src)
+	}
+	es := ev.Body[0].(*ast.ExpressionStatement)
+	var sub func(ast.Node) ast.Node
+	sub = func(n ast.Node) ast.Node {
+		if id, ok := n.(*ast.Identifier); ok {
+			switch id.Name {
+			case "KEY":
+				return key
+			case "PROTO":
+				return proto
+			case "RHS":
+				return rhs
+			}
+		}
+		ast.RewriteChildren(n, sub)
+		return n
+	}
+	return sub(es.Expr).(ast.Expression)
+}
+
+// rewriteIndirectEval replaces an indirect eval of a constant string,
+// `(0, eval)(src)`, with a call of a program-level function running the
+// code, as the global scope does: its result is the completion value, and
+// in sloppy code its `var` and function declarations are the program's.
+// Source that does not parse throws SyntaxError when the call runs. A file
+// declaring its own `eval` keeps its calls.
+func rewriteIndirectEval(prog *ast.Program, fileIdx int) {
+	declared := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if d, ok := n.(*ast.VarDeclaration); ok && d.Name == "eval" {
+			declared = true
+		}
+		if d, ok := n.(*ast.FunctionDeclaration); ok && d.Name == "eval" {
+			declared = true
+		}
+		return !declared
+	})
+	if declared {
+		return
+	}
+	var factories []ast.Statement
+	var hoists []string
+	seen := map[string]bool{}
+	var rw func(ast.Node) ast.Node
+	rw = func(n ast.Node) ast.Node {
+		ast.RewriteChildren(n, rw)
+		call, ok := n.(*ast.CallExpression)
+		if !ok || len(call.Args) != 1 {
+			return n
+		}
+		// `(0, eval)(…)`, and `eval?.(…)`: an optional call is not a direct
+		// eval either.
+		var lead []ast.Expression // the callee's other operands, run first
+		if id, ok := call.Callee.(*ast.Identifier); !ok || id.Name != "eval" || !call.Optional {
+			seq, ok := call.Callee.(*ast.SequenceExpression)
+			if !ok || len(seq.Exprs) < 2 || call.Optional {
+				return n
+			}
+			if id, ok := seq.Exprs[len(seq.Exprs)-1].(*ast.Identifier); !ok || id.Name != "eval" {
+				return n
+			}
+			lead = append(lead, seq.Exprs[:len(seq.Exprs)-1]...)
+		}
+		src, ok := call.Args[0].(*ast.StringLiteral)
 		if !ok {
 			return n
 		}
-		if atInit && readsOwnArguments(es.Expr) {
-			// A field initializer's or static block's eval code sees no
-			// function's arguments: its SyntaxError, thrown by the call.
-			if th, err := parser.ParseEval(`(() => { throw new SyntaxError("'arguments' is not allowed in class field initializer or static initialization block"); })()`); err == nil {
+		pos := call.GetPos()
+		var body *ast.BlockStatement
+		ev, err := parser.ParseEval(src.Value)
+		if err == nil && evalHasTopLevelReturn(ev) {
+			err = fmt.Errorf("Illegal return statement")
+		}
+		if err != nil {
+			msg := err.Error()
+			if k := strings.Index(msg, ": "); k > 0 && strings.Count(msg[:k], ":") == 1 {
+				msg = msg[k+2:]
+			}
+			th, terr := parser.ParseEval("{ throw new SyntaxError(" + strconv.Quote(msg) + "); }")
+			if terr != nil {
+				return n
+			}
+			body, _ = th.Body[0].(*ast.BlockStatement)
+			if body == nil {
+				return n
+			}
+		} else {
+			stmts := ev.Body
+			if !programIsStrictBody(stmts) {
+				names, funcs, rest := sloppyEvalDecls(stmts, pos)
+				for _, nm := range names {
+					if !seen[nm] {
+						seen[nm] = true
+						hoists = append(hoists, nm)
+					}
+				}
+				stmts = append(funcs, rest...)
+			}
+			body = ast.NewBlockStatement(stmts, pos)
+			const cv = "__kml_evalcv"
+			withCompletion(body, cv)
+			body.Body = append([]ast.Statement{ast.NewVarDeclaration("let", cv, &ast.KeywordType{Keyword: "any"}, nil, pos)}, body.Body...)
+			body.Body = append(body.Body, ast.NewReturnStatement(ast.NewIdentifier(cv, pos), pos))
+		}
+		name := fmt.Sprintf("__kml_ieval%d_%d", fileIdx, len(factories))
+		fp, perr := parser.Parse("function " + name + "(): any {\nreturn (() => {})();\n}")
+		if perr != nil || len(fp.Body) != 1 {
+			return n
+		}
+		fd, _ := fp.Body[0].(*ast.FunctionDeclaration)
+		if fd == nil || fd.Body == nil || len(fd.Body.Body) != 1 {
+			return n
+		}
+		ret, _ := fd.Body.Body[0].(*ast.ReturnStatement)
+		inner, _ := ret.Value.(*ast.CallExpression)
+		arrow, _ := inner.Callee.(*ast.ArrowFunction)
+		if arrow == nil {
+			return n
+		}
+		arrow.Block = body
+		if prog.EvalCode == nil {
+			prog.EvalCode = map[ast.Expression]bool{}
+		}
+		prog.EvalCode[arrow] = true
+		factories = append(factories, fd)
+		// The callee's other operands still run, in order.
+		lead = append(lead, ast.NewCallExpression(ast.NewIdentifier(name, pos), nil, pos))
+		if len(lead) == 1 {
+			return lead[0]
+		}
+		return ast.NewSequenceExpression(lead, pos)
+	}
+	ast.RewriteChildren(prog, rw)
+	if len(factories) == 0 {
+		return
+	}
+	var decls []ast.Statement
+	for _, nm := range hoists {
+		decls = append(decls, ast.NewVarDeclaration("var", nm, &ast.KeywordType{Keyword: "any"}, nil, ast.Pos{}))
+	}
+	prog.Body = append(append(decls, prog.Body...), factories...)
+}
+
+// rewriteFunctionConstructor replaces `Function(p…, body)` and `new
+// Function(p…, body)`, every argument a constant string, with a call of a
+// top-level factory returning the function that source makes (`function
+// anonymous(p…) { body }`), so the binder and checker see it as the
+// program's own code. The factory is top-level, added after the file's
+// names are renamed, because a Function body closes over the global scope,
+// not its caller's or its module's; each call makes a new
+// function, as each Function call does. Source that does not parse throws
+// SyntaxError when the call runs. A file declaring its own `Function`
+// keeps its calls.
+func rewriteFunctionConstructor(prog *ast.Program, fileIdx int) {
+	declared := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.VarDeclaration:
+			declared = declared || d.Name == "Function"
+		case *ast.FunctionDeclaration:
+			declared = declared || d.Name == "Function"
+			for _, p := range d.Params {
+				declared = declared || p.Name == "Function"
+			}
+		case *ast.ClassDeclaration:
+			declared = declared || d.Name == "Function"
+		case *ast.ArrowFunction:
+			for _, p := range d.Params {
+				declared = declared || p.Name == "Function"
+			}
+		case *ast.FunctionExpression:
+			for _, p := range d.Params {
+				declared = declared || p.Name == "Function"
+			}
+		}
+		return !declared
+	})
+	if declared {
+		return
+	}
+	specializeFunctionCtorParams(prog)
+	var factories []ast.Statement
+	var rewrite func(ast.Node) ast.Node
+	rewrite = func(n ast.Node) ast.Node {
+		ast.RewriteChildren(n, rewrite)
+		var args []ast.Expression
+		var pos ast.Pos
+		switch x := n.(type) {
+		case *ast.CallExpression:
+			id, ok := x.Callee.(*ast.Identifier)
+			if !ok || id.Name != "Function" || x.Optional {
+				return n
+			}
+			args, pos = x.Args, x.GetPos()
+		case *ast.NewExpression:
+			if x.Callee != nil || x.Qualified || x.ClassName != "Function" || len(x.TypeArgs) > 0 {
+				return n
+			}
+			args, pos = x.Args, x.GetPos()
+		default:
+			return n
+		}
+		strs := make([]string, len(args))
+		for i, a := range args {
+			switch a := a.(type) {
+			case *ast.StringLiteral:
+				strs[i] = a.Value
+				continue
+			case *ast.TemplateLiteral:
+				if len(a.Exprs) == 0 && len(a.Quasis) == 1 {
+					strs[i] = a.Quasis[0]
+					continue
+				}
+			}
+			// Source known only when the call runs: its arguments are
+			// converted to strings in order, then compiling them would
+			// need an embedded JavaScript engine.
+			th, terr := parser.ParseEval("((...a: any[]): Function => { for (var i = 0; i < a.length; i++) String(a[i]); throw new EvalError(\"Function of a string computed at run time is not supported: it needs an embedded JavaScript engine\"); })()")
+			if terr != nil {
+				return n
+			}
+			ts, ok := th.Body[0].(*ast.ExpressionStatement)
+			if !ok {
+				return n
+			}
+			call := ts.Expr.(*ast.CallExpression)
+			call.Args = args
+			return call
+		}
+		body := ""
+		if len(strs) > 0 {
+			body, strs = strs[len(strs)-1], strs[:len(strs)-1]
+		}
+		name := fmt.Sprintf("__kml_fnctor%d_%d", fileIdx, len(factories))
+		src := "function " + name + "(): Function {\nreturn function anonymous(" + strings.Join(strs, ",") + "\n) {\n" + body + "\n};\n}"
+		fp, err := parser.Parse(src)
+		var fd *ast.FunctionDeclaration
+		if err == nil && len(fp.Body) == 1 {
+			fd, _ = fp.Body[0].(*ast.FunctionDeclaration)
+		}
+		msg := "Invalid or unexpected token"
+		if fd != nil {
+			// A Function's text is script code: import.meta is an early
+			// SyntaxError in it.
+			ast.Inspect(fd, func(n ast.Node) bool {
+				if _, ok := n.(*ast.ImportMetaUrl); ok && fd != nil {
+					fd, msg = nil, "Cannot use 'import.meta' outside a module"
+				}
+				return fd != nil
+			})
+		}
+		if fd == nil {
+			if err != nil {
+				msg = err.Error()
+				if i := strings.Index(msg, ": "); i > 0 && strings.Count(msg[:i], ":") == 1 {
+					msg = msg[i+2:]
+				}
+			}
+			// A `Function`, as tsc types the call.
+			if th, terr := parser.ParseEval("((): Function => { throw new SyntaxError(" + strconv.Quote(msg) + "); })()"); terr == nil {
 				if ts, ok := th.Body[0].(*ast.ExpressionStatement); ok {
 					return ts.Expr
 				}
 			}
+			return n
 		}
-		if prog.EvalCode == nil {
-			prog.EvalCode = map[ast.Expression]bool{}
+		// The function is code TypeScript never checks, and the call is a
+		// `Function`, as tsc types it.
+		if ret, ok := fd.Body.Body[0].(*ast.ReturnStatement); ok && ret.Value != nil {
+			if fe, ok := ret.Value.(*ast.FunctionExpression); ok {
+				// Its parameters are JavaScript's: any value.
+				for i := range fe.Params {
+					if fe.Params[i].Type == nil {
+						fe.Params[i].Type = &ast.KeywordType{Keyword: "any"}
+					}
+				}
+			}
+			if prog.EvalCode == nil {
+				prog.EvalCode = map[ast.Expression]bool{}
+			}
+			prog.EvalCode[ret.Value] = true
 		}
-		out := rewrite(es.Expr).(ast.Expression)
-		prog.EvalCode[out] = true
-		return out
+		factories = append(factories, fd)
+		return ast.NewAsExpression(ast.NewCallExpression(ast.NewIdentifier(name, pos), nil, pos), &ast.TypeReference{Name: "Function"}, pos)
 	}
 	ast.RewriteChildren(prog, rewrite)
+	prog.Body = append(prog.Body, factories...)
 }
 
 // evalCallsInClassInitializers is the set of eval calls in a class field's
@@ -2460,7 +3761,9 @@ func declaresTopLevel(prog *ast.Program, name string) bool {
 				return true
 			}
 			for _, sp := range imp.Specifiers {
-				if sp.Local == name {
+				// `import { Blob } from 'buffer'` names the global itself
+				// (the import is erased), no binding of its own.
+				if sp.Local == name && !(sp.Imported == name && globalReexportModules[imp.Source][name]) {
 					return true
 				}
 			}
@@ -2488,55 +3791,61 @@ func companionMangled(files map[string]*fileInfo, spec string) map[string]string
 }
 
 var (
-	bufferPoolSizeRE = regexp.MustCompile(`\bBuffer\s*\.\s*poolSize\b`)
-	processMemberRE  = regexp.MustCompile(`\bprocess\s*\??\.\s*([A-Za-z_$][\w$]*)`)
-	processWordRE    = regexp.MustCompile(`(^|[^.\w$])process\b(\s*\??\.)?`)
-	// Members lib/node/internal_process_methods.ts implements.
-	processMethods = map[string]bool{
-		"cwd": true, "chdir": true, "uptime": true, "kill": true, "memoryUsage": true,
-		"umask": true, "getuid": true, "geteuid": true, "getgid": true, "getegid": true, "pid": true, "ppid": true,
-	}
-	// Members lib/node/internal_process_env.ts implements.
-	processEnvMembers = map[string]bool{
-		"argv": true, "argv0": true, "execPath": true, "version": true, "versions": true, "exitCode": true,
-		"exit": true, "env": true,
-	}
-	processEmitter = map[string]bool{
-		"on": true, "once": true, "off": true, "addListener": true, "removeListener": true,
-		"prependListener": true, "prependOnceListener": true, "emit": true, "listenerCount": true,
-		"listeners": true, "rawListeners": true, "removeAllListeners": true, "setMaxListeners": true,
-		"getMaxListeners": true, "eventNames": true,
-		"send": true, "disconnect": true, "connected": true, "channel": true, "title": true,
-	}
+	processWordRE = regexp.MustCompile(`(^|[^.\w$])process\b(\s*\??\.)?`)
 )
 
-// processUses reports which of process's TypeScript-implemented members src
-// reads ("emitter" for any of the emitter object's, "emitWarning"), and
-// whether it uses `process` itself as a value.
-func processUses(src []byte) (map[string]bool, bool) {
-	out := map[string]bool{}
-	for _, m := range processMemberRE.FindAllSubmatch(src, -1) {
-		name := string(m[1])
-		if processEmitter[name] {
-			out["emitter"] = true
-		} else if name == "hrtime" {
-			out["hrtime"] = true
-		} else if processMethods[name] {
-			out["methods"] = true
-		} else if processEnvMembers[name] {
-			out["env"] = true
-		} else if name == "emitWarning" {
-			out["emitWarning"] = true
+// globalMemberREs match a read of a builtin global's member, per global.
+var globalMemberREs sync.Map
+
+func globalMemberRE(global string) *regexp.Regexp {
+	if re, ok := globalMemberREs.Load(global); ok {
+		return re.(*regexp.Regexp)
+	}
+	re := regexp.MustCompile(`\b` + regexp.QuoteMeta(global) + `\s*\??\.\s*([A-Za-z_$][\w$]*)`)
+	globalMemberREs.Store(global, re)
+	return re
+}
+
+// loweredMemberModules are the builtin modules the file at path (src, its
+// identifiers idents) needs for the builtin globals' members it reads,
+// sorted: each lowered member's module (lib.LoweredMembers), process's
+// emitter module when it uses `process` as a value or a member no module
+// lowers, and the environment
+// module for process.env.
+func loweredMemberModules(prog *ast.Program, path string, src []byte, idents map[string]bool) []string {
+	need := map[string]bool{}
+	for global, members := range lib.LoweredMembers() {
+		if !idents[global] || declaresTopLevel(prog, global) {
+			continue
+		}
+		for _, m := range globalMemberRE(global).FindAllSubmatch(src, -1) {
+			if mod, ok := members[string(m[1])]; ok {
+				need[mod] = true
+			} else if global == "process" && string(m[1]) != "env" && !strings.HasPrefix(path, lib.ModuleRoot) {
+				// A member no library function lowers (`process.maxTickDepth
+				// = 10`, an own property): the process object's.
+				need[lib.ModuleRoot+"internal_process.ts"] = true
+			}
+			if global == "process" && string(m[1]) == "env" {
+				need[lib.ModuleRoot+"internal_process_env.ts"] = true
+			}
 		}
 	}
-	bare := false
-	for _, m := range processWordRE.FindAllSubmatch(src, -1) {
-		if len(m[2]) == 0 {
-			bare = true
-			break
+	if idents["process"] && !declaresTopLevel(prog, "process") && !strings.HasPrefix(path, lib.ModuleRoot) {
+		for _, m := range processWordRE.FindAllSubmatch(src, -1) {
+			if len(m[2]) == 0 {
+				need[lib.ModuleRoot+"internal_process.ts"] = true
+				break
+			}
 		}
 	}
-	return out, bare
+	delete(need, path)
+	out := make([]string, 0, len(need))
+	for mod := range need {
+		out = append(out, mod)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // assertModules are the specifiers whose ok quotes its call's source.
@@ -2677,33 +3986,61 @@ func StringifyArgsAtRunTime(args []ast.Expression) bool {
 	return false
 }
 
-// NamespaceValueNames are the builtin namespace objects
-// lib/node/internal_namespaces.ts makes when one is read as a value, each
-// with its maker.
+// NamespaceValueNames are the builtin namespace objects a library module
+// makes when one is read as a value: each one's module and maker, as
+// "module:maker" (a module each, so a program compiles only the ones it
+// reads).
 var NamespaceValueNames = map[string]string{
-	"Math": "_kmlMath", "JSON": "_kmlJSON", "console": "_kmlConsole",
-	"Reflect": "_kmlReflect", "Atomics": "_kmlAtomics", "globalThis": "_kmlGlobalThis",
+	"Math": "internal_namespaces:_kmlMath", "JSON": "internal_ns_json:_kmlJSON",
+	"console": "internal_ns_console:_kmlConsole", "Reflect": "internal_ns_reflect:_kmlReflect",
+	"Atomics": "internal_ns_atomics:_kmlAtomics", "globalThis": "internal_global_object:_kmlGlobalThis",
 }
 
-var namespaceWordRE = regexp.MustCompile(`(^|[^.\w$])(Math|JSON|console|Reflect|Atomics)\b(\s*\??\.)?`)
+// namespaceModule is the library module path that makes namespace name's
+// object.
+func namespaceModule(name string) string {
+	mod, _, _ := strings.Cut(NamespaceValueNames[name], ":")
+	return lib.ModuleRoot + mod + ".ts"
+}
 
-// namespaceValueUse reports whether src may read a namespace object as a
-// value: its name not followed by a member access.
-func namespaceValueUse(src []byte, idents map[string]bool) bool {
+var namespaceWordRE = regexp.MustCompile(`(^|[^.\w$])(Math|JSON|console|Reflect|Atomics)\b(\s*\??\.\s*([A-Za-z_$][\w$]*))?`)
+
+// namespaceIfaces are the library interfaces declaring each namespace's
+// members: a read of another member (`Atomics.wake`) is of the object.
+var namespaceIfaces = map[string]string{"Math": "Math", "JSON": "JSON", "console": "Console", "Atomics": "Atomics"}
+
+// namespaceValueUses is each namespace src may read as a value: its name
+// not followed by a member access, a member its library interface lacks,
+// or a write to one of its members (`Math.PI = 20`), which is to the
+// object.
+func namespaceValueUses(src []byte, idents map[string]bool) map[string]bool {
 	any := false
 	for name := range NamespaceValueNames {
 		any = any || idents[name]
 	}
 	if !any {
-		return false
+		return nil
 	}
+	out := map[string]bool{}
 	for _, m := range namespaceWordRE.FindAllSubmatch(src, -1) {
+		name := string(m[2])
 		if len(m[3]) == 0 {
-			return true
+			out[name] = true
+			continue
+		}
+		if iface, ok := namespaceIfaces[name]; ok {
+			if known, has := lib.TSInterfaceHas(iface, string(m[4])); known && !has {
+				out[name] = true
+			}
 		}
 	}
-	return false
+	for _, m := range namespaceMemberWriteRE.FindAllSubmatch(src, -1) {
+		out[string(m[2])] = true
+	}
+	return out
 }
+
+var namespaceMemberWriteRE = regexp.MustCompile(`(^|[^.\w$])(Math|JSON|console|Reflect|Atomics)\s*\.\s*[A-Za-z_$][\w$]*\s*(\*\*|<<|>>>?|&&|\|\||\?\?|[-+*/%&|^])?=([^=]|$)`)
 
 // consoleDirAtRunTime reports whether prog calls console.dir with options
 // only known at run time (DirOptionsAtRunTime).
@@ -2905,15 +4242,163 @@ func undeclaredAssignText(path string, src []byte) bool {
 	return false
 }
 
+// globalizePatternTargets makes each undeclared name a sloppy script's
+// destructuring assignments target the global object's property (`[q] =
+// [5]` creates globalThis.q, as `q = 5` does), reporting whether it did.
+func globalizePatternTargets(path string, src []byte, prog *ast.Program) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".js" && ext != ".cjs" || !patternAssignRE.Match(src) || IsModule(prog) {
+		return false
+	}
+	if t := bytes.TrimLeft(src, " \t\r\n"); bytes.HasPrefix(t, []byte(`"use strict"`)) || bytes.HasPrefix(t, []byte(`'use strict'`)) {
+		return false
+	}
+	targets := map[*ast.Identifier]bool{}
+	var pats []ast.Expression
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if as, ok := n.(*ast.AssignmentExpression); ok && as.Op == "=" {
+			switch as.Left.(type) {
+			case *ast.ArrayLiteral, *ast.ObjectLiteral:
+				patternTargets(as.Left, targets)
+				pats = append(pats, as.Left)
+			}
+		}
+		return true
+	})
+	if len(targets) == 0 {
+		return false
+	}
+	b := binder.Bind(prog)
+	globals := tsGlobalValues()
+	undeclared := map[*ast.Identifier]bool{}
+	for _, id := range b.References() {
+		if targets[id] && !globals[id.Name] {
+			if sym, ok := b.Resolve(id); ok && sym == nil {
+				undeclared[id] = true
+			}
+		}
+	}
+	if len(undeclared) == 0 {
+		return false
+	}
+	var leaf func(x ast.Expression) ast.Expression
+	leaf = func(x ast.Expression) ast.Expression {
+		switch t := x.(type) {
+		case *ast.Identifier:
+			if undeclared[t] {
+				return ast.NewMemberExpression(ast.NewIdentifier("globalThis", t.GetPos()), t.Name, t.GetPos())
+			}
+		case *ast.AssignmentExpression:
+			t.Left = leaf(t.Left)
+		case *ast.SpreadElement:
+			t.Arg = leaf(t.Arg)
+		case *ast.ArrayLiteral:
+			for i := range t.Elements {
+				if t.Elements[i] != nil {
+					t.Elements[i] = leaf(t.Elements[i])
+				}
+			}
+		case *ast.ObjectLiteral:
+			for i := range t.Properties {
+				p := &t.Properties[i]
+				if p.AccessorKind != "" || p.Value == nil {
+					continue
+				}
+				before := p.Value
+				if as, ok := before.(*ast.AssignmentExpression); ok {
+					before = as.Left
+				}
+				p.Value = leaf(p.Value)
+				after := p.Value
+				if as, ok := after.(*ast.AssignmentExpression); ok {
+					after = as.Left
+				}
+				if after != before {
+					p.Shorthand = false
+				}
+			}
+		}
+		return x
+	}
+	for _, p := range pats {
+		leaf(p)
+	}
+	return true
+}
+
+var patternAssignRE = regexp.MustCompile(`[\]}]\s*\)?\s*=[^=>]`)
+
+// patternTargets adds a destructuring assignment pattern's identifier
+// targets to targets.
+func patternTargets(x ast.Expression, targets map[*ast.Identifier]bool) {
+	switch t := x.(type) {
+	case *ast.Identifier:
+		targets[t] = true
+	case *ast.AssignmentExpression:
+		patternTargets(t.Left, targets)
+	case *ast.SpreadElement:
+		patternTargets(t.Arg, targets)
+	case *ast.ArrayLiteral:
+		for _, el := range t.Elements {
+			if el != nil {
+				patternTargets(el, targets)
+			}
+		}
+	case *ast.ObjectLiteral:
+		for _, p := range t.Properties {
+			if p.AccessorKind == "" && p.Value != nil {
+				patternTargets(p.Value, targets)
+			}
+		}
+	}
+}
+
 // sloppyThisUse reports whether a script may read a sloppy-mode function's
 // `this`, which is the global object when the call supplies none.
-func sloppyThisUse(path string, src []byte) bool {
+func sloppyThisUse(path string, src []byte, prog *ast.Program) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext != ".js" && ext != ".cjs" || !thisWordRE.Match(src) || moduleSyntaxRE.Match(src) {
 		return false
 	}
 	t := bytes.TrimLeft(src, " \t\r\n")
-	return !bytes.HasPrefix(t, []byte(`"use strict"`)) && !bytes.HasPrefix(t, []byte(`'use strict'`))
+	if bytes.HasPrefix(t, []byte(`"use strict"`)) || bytes.HasPrefix(t, []byte(`'use strict'`)) {
+		return false
+	}
+	// A `this` read in a function that is sloppy code (no class body, no
+	// "use strict" of its own); an arrow's is its enclosing function's. A
+	// script's top-level `this` is module.exports, and the word in a
+	// comment or a string is no read.
+	found := false
+	var walk func(n ast.Node, inFn bool)
+	walk = func(root ast.Node, inFn bool) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			if n == root {
+				return true
+			}
+			switch x := n.(type) {
+			case *ast.ClassDeclaration, *ast.ClassExpression:
+				return false
+			case *ast.FunctionDeclaration:
+				if x.Body != nil && !ast.HasUseStrictDirective(x.Body.Body) {
+					walk(x, true)
+				}
+				return false
+			case *ast.FunctionExpression:
+				if x.Body != nil && !ast.HasUseStrictDirective(x.Body.Body) {
+					walk(x, true)
+				}
+				return false
+			case *ast.ThisExpression:
+				found = found || inFn
+			}
+			return true
+		})
+	}
+	walk(prog, false)
+	return found
 }
 
 var (
@@ -2953,7 +4438,12 @@ var cryptoWordRE = regexp.MustCompile(`(^|[^.\w$])crypto\b(\s*\??\.\s*(getRandom
 
 // cryptoValueUse reports whether src may read the Web Crypto global as a
 // value (`const c = crypto`), or take one of its methods by value.
+var globalThisCryptoRE = regexp.MustCompile(`globalThis\s*\??\.\s*crypto\b`)
+
 func cryptoValueUse(src []byte) bool {
+	if globalThisCryptoRE.Match(src) {
+		return true // `globalThis.crypto`: the global object's crypto, a value
+	}
 	for _, m := range cryptoWordRE.FindAllSubmatch(src, -1) {
 		bare := len(m[2]) == 0 && len(m[5]) == 0
 		byValue := len(m[2]) > 0 && len(m[4]) == 0
@@ -2988,27 +4478,747 @@ func appendModule(merged *ast.Program, stmts []ast.Statement) []ast.Statement {
 	return append(merged.Body, stmts...)
 }
 
-// hasModuleSyntax reports whether body has ES module syntax: an import or
-// export, import.meta, or a top-level await.
-func hasModuleSyntax(body []ast.Statement) bool {
-	found := false
-	for _, st := range body {
-		switch st.(type) {
-		case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+// optionalDeletedFields makes each class instance field that a `delete`
+// names (`delete o.f`, `delete o["f"]`; every field, for a key computed at
+// run time) an optional one, whose presence is tracked: in JavaScript a
+// field is a configurable own property, which delete removes.
+func optionalDeletedFields(prog *ast.Program) {
+	deleted, all := map[string]bool{}, false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		u, ok := n.(*ast.UnaryExpression)
+		if !ok || u.Op != "delete" {
 			return true
 		}
-		ast.Inspect(st, func(n ast.Node) bool {
-			switch n.(type) {
-			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration:
-				return false
-			case *ast.AwaitExpression, *ast.ImportMetaUrl:
-				found = true
+		switch a := u.Arg.(type) {
+		case *ast.MemberExpression:
+			deleted[a.Property] = true
+		case *ast.IndexExpression:
+			if s, ok := a.Index.(*ast.StringLiteral); ok {
+				deleted[s.Value] = true
+			} else if _, num := a.Index.(*ast.NumberLiteral); !num {
+				all = true
 			}
-			return !found
+		}
+		return true
+	})
+	if len(deleted) == 0 && !all {
+		return
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		cd, ok := n.(*ast.ClassDeclaration)
+		if !ok {
+			return true
+		}
+		for i := range cd.Fields {
+			f := &cd.Fields[i]
+			// (A computed key is named later, possibly a deleted one.)
+			if (all || deleted[f.Name] || f.Key != nil || f.KeyExpr != nil) && !f.Static && !strings.HasPrefix(f.Name, "#") {
+				f.Optional = true
+			}
+		}
+		return true
+	})
+}
+
+// varArgumentsAsBinding makes a sloppy script's `var arguments` in a
+// non-arrow function the function's own arguments binding, as JavaScript
+// does: a bare `var arguments;` keeps the arguments object, and one with
+// an initializer assigns it.
+func varArgumentsAsBinding(path string, prog *ast.Program) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".js" && ext != ".cjs" || IsModule(prog) {
+		return
+	}
+	var inFn func(n ast.Node, fn bool) ast.Node
+	inFn = func(n ast.Node, fn bool) ast.Node {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression:
+			fn = true
+		case *ast.ClassDeclaration, *ast.ClassExpression:
+			fn = false
+		case *ast.VarDeclaration:
+			if fn && x.Kind == "var" && x.Name == "arguments" {
+				return argumentsWrite(x)
+			}
+		case *ast.VarDeclarationList:
+			if !fn || !slices.ContainsFunc(x.Decls, func(d *ast.VarDeclaration) bool { return d.Kind == "var" && d.Name == "arguments" }) {
+				break
+			}
+			// Each in order: the others stay `var` declarations.
+			var out []ast.Statement
+			for _, d := range x.Decls {
+				if d.Kind == "var" && d.Name == "arguments" {
+					out = append(out, argumentsWrite(d))
+				} else {
+					out = append(out, d)
+				}
+			}
+			return ast.NewBlockStatement(out, x.GetPos())
+		}
+		ast.RewriteChildren(n, func(ch ast.Node) ast.Node { return inFn(ch, fn) })
+		return n
+	}
+	for i, st := range prog.Body {
+		prog.Body[i] = inFn(st, false).(ast.Statement)
+	}
+}
+
+// argumentsWrite is a `var arguments` declaration as the write it is to the
+// function's arguments binding: none without an initializer.
+func argumentsWrite(d *ast.VarDeclaration) ast.Statement {
+	if d.Init == nil {
+		return ast.NewBlockStatement(nil, d.GetPos())
+	}
+	as := ast.NewAssignmentExpression("=", ast.NewIdentifier("arguments", d.GetPos()), d.Init, d.GetPos())
+	return ast.NewExpressionStatement(as, d.GetPos())
+}
+
+// lowerClassHeritageTDZ makes a class whose `extends` names itself, or a
+// class declared later in the same statement list, throw JavaScript's
+// ReferenceError where it is evaluated: the heritage reads that class's
+// binding in its dead zone. A class extending one so lowered is
+// unreachable and lowered too. (TypeScript rejects these: TS2449.)
+// lowerLateArrowSuperCalls lowers a `super(…)` inside an arrow that a
+// derived constructor creates after its own unconditional `super(…)`
+// (`super(); this.f = () => super();`): run then, it constructs the base
+// again (its side effects happen) and throws the ReferenceError of a second
+// initialization of `this`.
+func lowerLateArrowSuperCalls(prog *ast.Program) {
+	ast.Inspect(prog, func(n ast.Node) bool {
+		cd, ok := n.(*ast.ClassDeclaration)
+		if !ok || cd.BaseClass == "" || cd.BaseQualified || cd.Constructor == nil || cd.Constructor.Body == nil {
+			return true
+		}
+		body := cd.Constructor.Body.Body
+		first := -1
+		for i, st := range body {
+			if es, ok := st.(*ast.ExpressionStatement); ok {
+				if call, ok := es.Expr.(*ast.CallExpression); ok {
+					if _, ok := call.Callee.(*ast.SuperExpression); ok {
+						first = i
+						break
+					}
+				}
+			}
+		}
+		if first < 0 {
+			return true
+		}
+		var inArrow func(x ast.Node) ast.Node
+		var outside func(x ast.Node) ast.Node
+		inArrow = func(x ast.Node) ast.Node {
+			switch x.(type) {
+			case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassExpression, *ast.ClassDeclaration:
+				return x
+			}
+			ast.RewriteChildren(x, inArrow)
+			call, ok := x.(*ast.CallExpression)
+			if !ok {
+				return x
+			}
+			if _, ok := call.Callee.(*ast.SuperExpression); !ok {
+				return x
+			}
+			pos := call.GetPos()
+			msg := ast.NewNewExpression("ReferenceError", []ast.Expression{ast.NewStringLiteral("Super constructor may only be called once", pos)}, pos)
+			throwFn := ast.NewArrowFunction(nil, nil, nil, ast.NewBlockStatement([]ast.Statement{ast.NewThrowStatement(msg, pos)}, pos), pos)
+			return ast.NewSequenceExpression([]ast.Expression{
+				ast.NewNewExpression(cd.BaseClass, call.Args, pos),
+				ast.NewCallExpression(throwFn, nil, pos),
+			}, pos)
+		}
+		outside = func(x ast.Node) ast.Node {
+			switch x.(type) {
+			case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassExpression, *ast.ClassDeclaration:
+				return x
+			case *ast.ArrowFunction:
+				ast.RewriteChildren(x, inArrow)
+				return x
+			}
+			ast.RewriteChildren(x, outside)
+			return x
+		}
+		for _, st := range body[first+1:] {
+			outside(st)
+		}
+		return true
+	})
+}
+
+func lowerClassHeritageTDZ(prog *ast.Program) {
+	throwTDZ := func(name string, pos ast.Pos) ast.Expression {
+		msg := ast.NewStringLiteral("Cannot access '"+name+"' before initialization", pos)
+		th := ast.NewThrowStatement(ast.NewNewExpression("ReferenceError", []ast.Expression{msg}, pos), pos)
+		fn := ast.NewArrowFunction(nil, nil, nil, ast.NewBlockStatement([]ast.Statement{th}, pos), pos)
+		return ast.NewCallExpression(fn, nil, pos)
+	}
+	list := func(body []ast.Statement) {
+		at := map[string]int{}
+		for i, st := range body {
+			if cd, ok := st.(*ast.ClassDeclaration); ok && cd.Name != "" && !cd.Ambient {
+				at[cd.Name] = i
+			}
+		}
+		lowered := map[string]bool{}
+		for i, st := range body {
+			cd, ok := st.(*ast.ClassDeclaration)
+			if !ok || cd.BaseClass == "" || cd.BaseQualified || cd.Ambient {
+				continue
+			}
+			j, declared := at[cd.BaseClass]
+			if !(declared && j >= i) && !lowered[cd.BaseClass] {
+				continue
+			}
+			lowered[cd.Name] = true
+			pos := cd.GetPos()
+			body[i] = ast.NewVarDeclaration("let", cd.Name, nil, throwTDZ(cd.BaseClass, pos), pos)
+		}
+	}
+	var rw func(n ast.Node) ast.Node
+	rw = func(n ast.Node) ast.Node {
+		ast.RewriteChildren(n, rw)
+		switch x := n.(type) {
+		case *ast.BlockStatement:
+			list(x.Body)
+		case *ast.ClassExpression:
+			// `(class x extends x {})`: its own name is in its dead zone.
+			if d := x.Decl; d != nil && d.Name != "" && d.BaseClass == d.Name && !d.BaseQualified {
+				return throwTDZ(d.Name, x.GetPos())
+			}
+		}
+		return n
+	}
+	ast.RewriteChildren(prog, rw)
+	list(prog.Body)
+}
+
+// evalReassignment lets a sloppy script assign the global `eval`
+// (`eval = f`), its calls then direct evals only while it holds the
+// intrinsic (__kml_evalorig): the value assigned is held in __kml_evalv,
+// and while __kml_evalset (it is another value) a read of `eval` reads it
+// and `eval(args)` calls it; else the call is the direct eval
+// (rewriteStaticEval). A script declaring its own `eval`
+// binds it as any other name.
+func evalReassignment(path string, prog *ast.Program) {
+	ext := strings.ToLower(filepath.Ext(path))
+	if ext != ".js" && ext != ".cjs" || IsModule(prog) || programIsStrictBody(prog.Body) {
+		return
+	}
+	isEval := func(x ast.Expression) bool {
+		id, ok := x.(*ast.Identifier)
+		return ok && id.Name == "eval"
+	}
+	assigned, declared := false, false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignmentExpression:
+			assigned = assigned || x.Op == "=" && isEval(x.Left)
+		case *ast.VarDeclaration:
+			declared = declared || x.Name == "eval"
+		case *ast.FunctionDeclaration:
+			declared = declared || x.Name == "eval" || paramNamed(x.Params, "eval")
+		case *ast.FunctionExpression:
+			declared = declared || paramNamed(x.Params, "eval")
+		case *ast.ArrowFunction:
+			declared = declared || paramNamed(x.Params, "eval")
+		}
+		return true
+	})
+	if !assigned || declared {
+		return
+	}
+	any := func() ast.TypeNode { return &ast.KeywordType{Keyword: "any"} }
+	set := func(pos ast.Pos) ast.Expression { return ast.NewIdentifier("__kml_evalset", pos) }
+	held := func(pos ast.Pos) ast.Expression { return ast.NewIdentifier("__kml_evalv", pos) }
+	simple := func(x ast.Expression) bool {
+		switch x.(type) {
+		case *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral, *ast.NullLiteral:
+			return true
+		}
+		return false
+	}
+	copyLit := func(x ast.Expression) ast.Expression {
+		switch l := x.(type) {
+		case *ast.StringLiteral:
+			c := *l
+			return &c
+		case *ast.NumberLiteral:
+			c := *l
+			return &c
+		case *ast.BooleanLiteral:
+			c := *l
+			return &c
+		case *ast.NullLiteral:
+			c := *l
+			return &c
+		}
+		return x
+	}
+	var rw func(n ast.Node) ast.Node
+	rw = func(n ast.Node) ast.Node {
+		switch x := n.(type) {
+		case *ast.AssignmentExpression:
+			if x.Op == "=" && isEval(x.Left) {
+				pos := x.GetPos()
+				r := rw(x.Right).(ast.Expression)
+				// Assigned the intrinsic back, its calls are direct again.
+				return ast.NewSequenceExpression([]ast.Expression{
+					ast.NewAssignmentExpression("=", held(pos), r, pos),
+					ast.NewAssignmentExpression("=", set(pos), ast.NewBinaryExpression("!==", held(pos), ast.NewIdentifier("__kml_evalorig", pos), pos), pos),
+					held(pos)}, pos)
+			}
+		case *ast.CallExpression:
+			if isEval(x.Callee) && !x.Optional && len(x.Args) > 0 {
+				pos := x.GetPos()
+				for i := range x.Args {
+					x.Args[i] = rw(x.Args[i]).(ast.Expression)
+				}
+				allSimple := true
+				for _, a := range x.Args {
+					if _, sp := a.(*ast.SpreadElement); sp || !simple(a) {
+						allSimple = false
+					}
+				}
+				if allSimple {
+					// The literals twice: one branch runs.
+					args := make([]ast.Expression, len(x.Args))
+					for i, a := range x.Args {
+						args[i] = copyLit(a)
+					}
+					return ast.NewConditionalExpression(set(pos), ast.NewCallExpression(held(pos), args, pos), x, pos)
+				}
+				// Evaluated once, into __kml_evala; a literal source is still
+				// the direct eval's.
+				ea := func() ast.Expression { return ast.NewIdentifier("__kml_evala", pos) }
+				src := ast.Expression(ast.NewIndexExpression(ea(), ast.NewNumberLiteral("0", pos), pos))
+				if simple(x.Args[0]) {
+					src = copyLit(x.Args[0])
+				}
+				direct := ast.NewCallExpression(x.Callee, []ast.Expression{src}, pos)
+				return ast.NewSequenceExpression([]ast.Expression{
+					ast.NewAssignmentExpression("=", ea(), ast.NewArrayLiteral(x.Args, pos), pos),
+					ast.NewConditionalExpression(set(pos),
+						ast.NewCallExpression(held(pos), []ast.Expression{ast.NewSpreadElement(ea(), pos)}, pos),
+						direct, pos)}, pos)
+			}
+		case *ast.Identifier:
+			if x.Name == "eval" {
+				pos := x.GetPos()
+				return ast.NewConditionalExpression(set(pos), held(pos), x, pos)
+			}
+		}
+		ast.RewriteChildren(n, rw)
+		return n
+	}
+	ast.RewriteChildren(prog, rw)
+	pos := ast.Pos{Line: 1, Col: 1}
+	prog.Body = append([]ast.Statement{
+		ast.NewVarDeclaration("var", "__kml_evalv", any(), nil, pos),
+		ast.NewVarDeclaration("var", "__kml_evalset", nil, ast.NewBooleanLiteral(false, pos), pos),
+		ast.NewVarDeclaration("var", "__kml_evala", any(), nil, pos),
+		ast.NewVarDeclaration("var", "__kml_evalorig", any(), ast.NewIdentifier("eval", pos), pos),
+	}, prog.Body...)
+}
+
+func paramNamed(params []ast.Param, name string) bool {
+	for _, p := range params {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+// reassignedFunctionsAsVars binds, in JavaScript, a function declaration
+// whose name the file assigns (`function g() { g = 5 }`) as the variable
+// it is: `var g = function () {…}` (an anonymous expression, so `g` inside
+// names that variable, and `g.name` is inferred), at the front of its body,
+// where a declaration is initialized. TypeScript rejects the assignment
+// (TS2630); -compat=js reads every file as JavaScript.
+func reassignedFunctionsAsVars(path string, prog *ast.Program, compatJS bool) {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".js", ".cjs", ".mjs":
+	default:
+		if !compatJS { // -compat=js compiles any file as JavaScript
+			return
+		}
+	}
+	assigned := map[string]bool{}
+	var target func(x ast.Expression)
+	target = func(x ast.Expression) {
+		switch t := x.(type) {
+		case *ast.Identifier:
+			assigned[t.Name] = true
+		case *ast.AssignmentExpression:
+			target(t.Left)
+		case *ast.SpreadElement:
+			target(t.Arg)
+		case *ast.ArrayLiteral:
+			for _, el := range t.Elements {
+				if el != nil {
+					target(el)
+				}
+			}
+		case *ast.ObjectLiteral:
+			for _, p := range t.Properties {
+				target(p.Value)
+			}
+		}
+	}
+	// A function's own body is not a block of Annex B.3.3.
+	bodies := map[*ast.BlockStatement]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration:
+			bodies[x.Body] = true
+		case *ast.FunctionExpression:
+			bodies[x.Body] = true
+		case *ast.ArrowFunction:
+			if x.Block != nil {
+				bodies[x.Block] = true
+			}
+		}
+		return true
+	})
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.AssignmentExpression:
+			target(x.Left)
+		case *ast.UpdateExpression:
+			target(x.Arg)
+		case *ast.BlockStatement:
+			// A plain function a block declares assigns its name's var when
+			// the block runs (annexBFunctions, Annex B.3.3).
+			if bodies[x] {
+				return true
+			}
+			for _, st := range x.Body {
+				if fd, ok := st.(*ast.FunctionDeclaration); ok && !fd.IsAsync && !fd.IsGenerator {
+					assigned[fd.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	if len(assigned) == 0 {
+		return
+	}
+	convert := func(body []ast.Statement, program bool) []ast.Statement {
+		var hoisted []ast.Statement
+		rest := body[:0:0]
+		for _, st := range body {
+			fd, ok := st.(*ast.FunctionDeclaration)
+			// `export function f` too: an exported variable.
+			ex, exported := st.(*ast.ExportDeclaration)
+			if exported && program && !ex.IsDefault {
+				fd, ok = ex.Decl.(*ast.FunctionDeclaration)
+			}
+			if !ok || !assigned[fd.Name] || fd.Body == nil || fd.Ambient || fd.IsOverloadSig || len(fd.Decorators) > 0 {
+				rest = append(rest, st)
+				continue
+			}
+			fe := ast.NewFunctionExpression("", fd.Params, fd.ReturnType, fd.Body, fd.IsAsync, fd.GetPos())
+			fe.IsGenerator = fd.IsGenerator
+			fe.TypeParams, fe.TypeParamConstraints, fe.TypeParamDefaults = fd.TypeParams, fd.TypeParamConstraints, fd.TypeParamDefaults
+			fe.Src = fd.Src
+			var vd ast.Statement = ast.NewVarDeclaration("var", fd.Name, nil, fe, fd.GetPos())
+			if exported {
+				vd = ast.NewExportDeclaration(vd, false, ex.GetPos())
+			}
+			if f, ok := prog.StmtFiles[st]; ok && program {
+				prog.StmtFiles[vd] = f
+			}
+			hoisted = append(hoisted, vd)
+		}
+		if len(hoisted) == 0 {
+			return body
+		}
+		// After the directive prologue (and a program's imports).
+		i := 0
+		for i < len(rest) {
+			if _, ok := rest[i].(*ast.ImportDeclaration); ok && program {
+				i++
+				continue
+			}
+			if es, ok := rest[i].(*ast.ExpressionStatement); ok {
+				if _, str := es.Expr.(*ast.StringLiteral); str {
+					i++
+					continue
+				}
+			}
+			break
+		}
+		out := append([]ast.Statement{}, rest[:i]...)
+		out = append(out, hoisted...)
+		return append(out, rest[i:]...)
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration:
+			if x.Body != nil {
+				x.Body.Body = convert(x.Body.Body, false)
+			}
+		case *ast.FunctionExpression:
+			if x.Body != nil {
+				x.Body.Body = convert(x.Body.Body, false)
+			}
+		case *ast.ArrowFunction:
+			if x.Block != nil {
+				x.Block.Body = convert(x.Block.Body, false)
+			}
+		}
+		return true
+	})
+	prog.Body = convert(prog.Body, true)
+}
+
+// hoistNestedTopLevelVars declares, at the top of a file, each `var` its
+// top-level code binds inside a block or a loop head (`for (var k of xs)`)
+// that is read outside that statement or from a function: JavaScript's var
+// is the file's own binding, so it is mangled, promoted and shared like a
+// top-level `var k;` (undefined until its declaration runs).
+func hoistNestedTopLevelVars(prog *ast.Program) {
+	direct := map[string]bool{}
+	for _, st := range prog.Body {
+		for _, r := range declRefsOf(st) {
+			direct[r.Name] = true
+		}
+		switch d := st.(type) {
+		case *ast.ArrayDestructuring:
+			freevars.CollectArrayPatternNames(d.Elems, direct)
+		case *ast.ObjectDestructuring:
+			freevars.CollectObjectPatternNames(d.Props, direct)
+		}
+	}
+	var hoisted []ast.Statement
+	for i, st := range prog.Body {
+		switch st.(type) {
+		case *ast.VarDeclaration, *ast.VarDeclarationList, *ast.FunctionDeclaration, *ast.ClassDeclaration,
+			*ast.ArrayDestructuring, *ast.ObjectDestructuring:
+			continue
+		}
+		nested := map[string]bool{}
+		freevars.CollectVarNames([]ast.Statement{st}, nested)
+		for name := range nested {
+			if direct[name] || !readBeyond(prog.Body, i, name) {
+				continue
+			}
+			direct[name] = true
+			v := ast.NewVarDeclaration("var", name, nil, nil, st.GetPos())
+			hoisted = append(hoisted, v)
+			if prog.StmtFiles != nil {
+				if f, ok := prog.StmtFiles[st]; ok {
+					prog.StmtFiles[v] = f
+				}
+			}
+		}
+	}
+	if len(hoisted) > 0 {
+		prog.Body = append(hoisted, prog.Body...)
+	}
+}
+
+// readBeyond reports whether name is referenced outside top-level statement
+// body[at], or from a function inside it.
+func readBeyond(body []ast.Statement, at int, name string) bool {
+	found := false
+	var walk func(n ast.Node, inFn bool)
+	walk = func(n ast.Node, inFn bool) {
+		ast.ForEachChild(n, func(ch ast.Node) bool {
+			if found {
+				return false
+			}
+			in := inFn
+			switch c := ch.(type) {
+			case *ast.ArrowFunction, *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassDeclaration, *ast.ClassExpression:
+				in = true
+			case *ast.Identifier:
+				if c.Name == name && in {
+					found = true
+				}
+			}
+			walk(ch, in)
+			return true
 		})
+	}
+	for i, st := range body {
+		walk(&ast.BlockStatement{Body: []ast.Statement{st}}, i != at)
 		if found {
 			return true
 		}
 	}
 	return false
+}
+
+// functionCtorCallRE matches a call of the Function constructor, whose text
+// can read any global (`Function("return this")()`).
+var functionCtorCallRE = regexp.MustCompile(`\bFunction\s*\(`)
+
+// ownKeyCheckTarget is the object of an own-key check with a literal key
+// (`hasOwnProperty.call(o, "k")`, `Object.hasOwn(o, "k")`), else nil.
+func ownKeyCheckTarget(c *ast.CallExpression) *ast.Identifier {
+	m, ok := c.Callee.(*ast.MemberExpression)
+	if !ok || len(c.Args) != 2 {
+		return nil
+	}
+	if _, lit := c.Args[1].(*ast.StringLiteral); !lit {
+		return nil
+	}
+	check := m.Property == "hasOwn"
+	if o, isM := m.Object.(*ast.MemberExpression); isM && m.Property == "call" && o.Property == "hasOwnProperty" {
+		check = true
+	}
+	if !check {
+		return nil
+	}
+	id, _ := uncast(c.Args[0]).(*ast.Identifier)
+	return id
+}
+
+// GlobalObjectNatives are the globals this compiler implements natively
+// that the global object carries only when a program can read them off it
+// (ast.Program.GlobalObjectNames): each one's code is linked only then.
+var GlobalObjectNatives = []string{
+	"process", "Buffer", "DOMException", "TransformStream", "WritableStream", "ReadableStream",
+	"CompressionStream", "DecompressionStream", "fetch", "Request", "Response", "Crypto", "CryptoKey",
+}
+
+// objectProtoNames are Object.prototype's members: one read off the global
+// object (`globalThis.hasOwnProperty(k)`) observes its other properties.
+var objectProtoNames = map[string]bool{
+	"hasOwnProperty": true, "propertyIsEnumerable": true, "isPrototypeOf": true, "toString": true,
+	"toLocaleString": true, "valueOf": true, "constructor": true, "__proto__": true,
+	"__defineGetter__": true, "__defineSetter__": true, "__lookupGetter__": true, "__lookupSetter__": true,
+}
+
+// uncast is e without its type casts, which do not exist at run time.
+func uncast(e ast.Expression) ast.Expression {
+	for {
+		switch x := e.(type) {
+		case *ast.AsExpression:
+			e = x.Expr
+		case *ast.NonNullExpression:
+			e = x.Arg
+		default:
+			return e
+		}
+	}
+}
+
+// thisMemberNames is the property names a non-class function's `this`
+// is read or written by (`this.x`, `this["x"]`), and escapes whether one
+// is used any other way (passed, returned, indexed by a computed key, or
+// read through an Object.prototype member that observes the rest): only
+// then can the global object such a `this` may be show a property no
+// name in the program spells.
+func thisMemberNames(prog *ast.Program) (names map[string]bool, escapes bool) {
+	names = map[string]bool{}
+	ok := map[*ast.ThisExpression]bool{}
+	var walk func(root ast.Node, inFn bool)
+	walk = func(root ast.Node, inFn bool) {
+		ast.Inspect(root, func(n ast.Node) bool {
+			if escapes {
+				return false
+			}
+			if n == root {
+				return true
+			}
+			switch x := n.(type) {
+			case *ast.ClassDeclaration, *ast.ClassExpression:
+				return false
+			case *ast.FunctionDeclaration:
+				if x.Body != nil {
+					walk(x, true)
+				}
+				return false
+			case *ast.FunctionExpression:
+				if x.Body != nil {
+					walk(x, true)
+				}
+				return false
+			case *ast.MemberExpression:
+				if t, isThis := uncast(x.Object).(*ast.ThisExpression); isThis && inFn && !objectProtoNames[x.Property] {
+					ok[t] = true
+					names[x.Property] = true
+				}
+			case *ast.IndexExpression:
+				if t, isThis := uncast(x.Object).(*ast.ThisExpression); isThis && inFn {
+					if lit, isLit := x.Index.(*ast.StringLiteral); isLit && !objectProtoNames[lit.Value] {
+						ok[t] = true
+						names[lit.Value] = true
+					}
+				}
+			case *ast.ThisExpression:
+				if inFn && !ok[x] {
+					escapes = true
+				}
+			}
+			return true
+		})
+	}
+	walk(prog, false)
+	return names, escapes
+}
+
+// globalObjectEscapes reports whether prog may read the global object's
+// properties by a name it does not write: `globalThis` (or `global`, or a
+// const alias of either) used other than as a member read or write by
+// name, an index by a string literal, or another alias, and the global
+// object as a plain function's or a sloppy script's `this`.
+func globalObjectEscapes(path string, src []byte, prog *ast.Program) bool {
+	if !bytes.Contains(src, []byte("globalThis")) && !bytes.Contains(src, []byte("global")) && !bytes.Contains(src, []byte("this")) {
+		return false
+	}
+	if ctorFunctionCall(src) || sloppyThisUse(path, src, prog) {
+		if _, esc := thisMemberNames(prog); esc {
+			return true
+		}
+	}
+	aliases := map[string]bool{"globalThis": true, "global": true}
+	for changed := true; changed; {
+		changed = false
+		ast.Inspect(prog, func(n ast.Node) bool {
+			if v, ok := n.(*ast.VarDeclaration); ok && v.Kind == "const" && !aliases[v.Name] {
+				if id, ok := v.Init.(*ast.Identifier); ok && aliases[id.Name] {
+					aliases[v.Name] = true
+					changed = true
+				}
+			}
+			return true
+		})
+	}
+	ok := map[*ast.Identifier]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.MemberExpression:
+			if id, isID := uncast(x.Object).(*ast.Identifier); isID && aliases[id.Name] && !objectProtoNames[x.Property] {
+				ok[id] = true
+			}
+		case *ast.IndexExpression:
+			if id, isID := uncast(x.Object).(*ast.Identifier); isID && aliases[id.Name] {
+				if _, lit := x.Index.(*ast.StringLiteral); lit {
+					ok[id] = true
+				}
+			}
+		case *ast.VarDeclaration:
+			if id, isID := x.Init.(*ast.Identifier); isID && x.Kind == "const" && aliases[id.Name] {
+				ok[id] = true
+			}
+		case *ast.CallExpression:
+			// hasOwnProperty.call(globalThis, "k"), Object.hasOwn(globalThis, "k"):
+			// one named key, as `globalThis.k` is.
+			if id := ownKeyCheckTarget(x); id != nil && aliases[id.Name] {
+				ok[id] = true
+			}
+		}
+		return true
+	})
+	escapes := false
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if id, isID := n.(*ast.Identifier); isID && aliases[id.Name] && !ok[id] {
+			escapes = true
+		}
+		return !escapes
+	})
+	return escapes
 }

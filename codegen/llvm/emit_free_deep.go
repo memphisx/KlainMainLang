@@ -53,7 +53,7 @@ func deepFreeEligible(ty Type) bool {
 		return true
 	case isStringTy(ty):
 		return true
-	case ty.IR == "ptr":
+	case ty.IR == irPtr:
 		// Some other pointer-shaped builtin (Date is i64; Response, Blob,
 		// streams, buffers are ptr) — not a JSON-tree shape.
 		return false
@@ -174,11 +174,11 @@ func (e *Emitter) freeSymbolDeep(sym Symbol) error {
 		}
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		d := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, dataSlot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", d, dataSlot))
 		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lenSlot))
-		e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, i64 %s)", fn, d, l))
-		e.heapStore("ptr", "null", dataSlot, 8)
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", l, lenSlot))
+		e.emitInstr(fmt.Sprintf("call void @%s("+irPtr+" %s, i64 %s)", fn, d, l))
+		e.heapStore(irPtr, "null", dataSlot, 8)
 		e.heapStore("i64", "0", lenSlot, 8)
 		return nil
 	}
@@ -187,9 +187,9 @@ func (e *Emitter) freeSymbolDeep(sym Symbol) error {
 		return err
 	}
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, sym.Ptr))
-	e.emitInstr(fmt.Sprintf("call void @%s(ptr %s)", fn, p))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", sym.Ptr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", p, sym.Ptr))
+	e.emitInstr(fmt.Sprintf("call void @%s("+irPtr+" %s)", fn, p))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", sym.Ptr))
 	return nil
 }
 
@@ -222,7 +222,7 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 	doneL := e.freshLabel("dfree.done")
 	bodyL := e.freshLabel("dfree.body")
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %%p, null", isNull))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %%p, null", isNull))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, bodyL))
 	e.emitLabel(bodyL)
 	structIR := ty.StructIR()
@@ -233,7 +233,7 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 			continue
 		}
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%p, i32 0, i32 %d", gep, structIR, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%p, i32 0, i32 %d", gep, structIR, i))
 		if f.Ty.IsArray() {
 			// The field slot now holds a pointer to the array's {data,len} header
 			// (TDD-00213 Stage 2); load the header first, then read data/len from it
@@ -250,38 +250,38 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 			// under -mm=auto (+ -optimize-memory) over the aliasing forms Stages 1-3
 			// introduced (return/capture/field/local aliasing).
 			hdr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, gep))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, gep))
 			hdrNull := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", hdrNull, hdr))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", hdrNull, hdr))
 			doL := e.freshLabel("dfree.arr")
 			skL := e.freshLabel("dfree.arrskip")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hdrNull, skL, doL))
 			e.emitLabel(doL)
 			d := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, hdr))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", d, hdr))
 			lGep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lGep, arrayHeaderTy, hdr))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", lGep, arrayHeaderTy, hdr))
 			l := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lGep))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", l, lGep))
 			fn, err := e.ensureDeepFreeArr(*f.Ty.ElemType)
 			if err != nil {
 				synthErr = err
 				break
 			}
-			e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, i64 %s)", fn, d, l))
+			e.emitInstr(fmt.Sprintf("call void @%s("+irPtr+" %s, i64 %s)", fn, d, l))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", skL))
 			e.emitLabel(skL)
 			continue
 		}
 		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, gep))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", p, gep))
 		if f.Ty.IsObject() {
 			fn, err := e.ensureDeepFree(f.Ty)
 			if err != nil {
 				synthErr = err
 				break
 			}
-			e.emitInstr(fmt.Sprintf("call void @%s(ptr %s)", fn, p))
+			e.emitInstr(fmt.Sprintf("call void @%s("+irPtr+" %s)", fn, p))
 			continue
 		}
 		// String field: __kml_str_free does not null-check internally, and a
@@ -290,12 +290,11 @@ func (e *Emitter) ensureDeepFree(ty Type) (string, error) {
 	}
 	if synthErr == nil {
 		e.emitDeepFreeDeathSignal("%p")
-		e.ensureFree()
-		e.heapFree("%p")
+		e.heapFree(allocObject, "%p")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		e.emitTerminator("ret void")
-		e.writeFunc(fmt.Sprintf("void @%s(ptr %%p)", name), e.allocas.String()+e.body.String())
+		e.writeFunc(fmt.Sprintf("void @%s("+irPtr+" %%p)", name), e.allocas.String()+e.body.String())
 	}
 	e.allocas, e.body, e.regCtr, e.blockDone = savedAllocas, savedBody, savedRegCtr, savedBlockDone
 	e.frame = savedFrame
@@ -332,36 +331,36 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 	doneL := e.freshLabel("dfarr.done")
 	bodyL := e.freshLabel("dfarr.body")
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %%d, null", isNull))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %%d, null", isNull))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, bodyL))
 	e.emitLabel(bodyL)
 
 	if deepFreeElemOwned(elemTy) {
 		idxAlloca := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 		condL := e.freshLabel("dfarr.cond")
 		loopL := e.freshLabel("dfarr.loop")
 		endL := e.freshLabel("dfarr.end")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(condL)
 		i0 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i0, idxAlloca))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i0, idxAlloca))
 		fin := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %%n", fin, i0))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fin, loopL, endL))
 		e.emitLabel(loopL)
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %%d, i64 %s", slot, i0))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %%d, i64 %s", slot, i0))
 		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", p, slot))
 		switch {
 		case elemTy.IsObject():
 			fn, err := e.ensureDeepFree(elemTy)
 			if err != nil {
 				synthErr = err
 			} else {
-				e.emitInstr(fmt.Sprintf("call void @%s(ptr %s)", fn, p))
+				e.emitInstr(fmt.Sprintf("call void @%s("+irPtr+" %s)", fn, p))
 			}
 		case elemTy.IsArray():
 			// Boxed nested-array element (ADR-00061): the slot holds a
@@ -374,22 +373,21 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 				skipL := e.freshLabel("dfarr.boxskip")
 				unboxL := e.freshLabel("dfarr.unbox")
 				bn := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", bn, p))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", bn, p))
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bn, skipL, unboxL))
 				e.emitLabel(unboxL)
 				dGep := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 0", dGep, p))
+				e.emitInstr(fmt.Sprintf("%s = getelementptr {"+irPtr+", i64}, "+irPtr+" %s, i32 0, i32 0", dGep, p))
 				id := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", id, dGep))
+				e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", id, dGep))
 				lGep := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr {ptr, i64}, ptr %s, i32 0, i32 1", lGep, p))
+				e.emitInstr(fmt.Sprintf("%s = getelementptr {"+irPtr+", i64}, "+irPtr+" %s, i32 0, i32 1", lGep, p))
 				il := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", il, lGep))
-				e.emitInstr(fmt.Sprintf("call void @%s(ptr %s, i64 %s)", fn, id, il))
-				e.ensureFree()
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", il, lGep))
+				e.emitInstr(fmt.Sprintf("call void @%s("+irPtr+" %s, i64 %s)", fn, id, il))
 				cell := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", cell, p))
-				e.heapFree(cell)
+				e.emitPrefixWordAddr(cell, p)
+				e.heapFree(allocArray, cell)
 				e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
 				e.emitLabel(skipL)
 			}
@@ -399,18 +397,17 @@ func (e *Emitter) ensureDeepFreeArr(elemTy Type) (string, error) {
 		if synthErr == nil {
 			i1 := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i1, i0))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i1, idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", i1, idxAlloca))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 			e.emitLabel(endL)
 		}
 	}
 	if synthErr == nil {
-		e.ensureFree()
-		e.heapFree("%d")
+		e.heapFree(elemAllocKind(elemTy), "%d")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		e.emitTerminator("ret void")
-		e.writeFunc(fmt.Sprintf("void @%s(ptr %%d, i64 %%n)", name), e.allocas.String()+e.body.String())
+		e.writeFunc(fmt.Sprintf("void @%s("+irPtr+" %%d, i64 %%n)", name), e.allocas.String()+e.body.String())
 	}
 	e.allocas, e.body, e.regCtr, e.blockDone = savedAllocas, savedBody, savedRegCtr, savedBlockDone
 	e.frame = savedFrame
@@ -441,6 +438,6 @@ func (e *Emitter) emitDeepFreeString(p string) {
 func (e *Emitter) emitDeepFreeDeathSignal(ptrRef string) {
 	if e.programUsesFinReg && !e.isGCMode() {
 		e.ensureFinalizationHelpers()
-		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree(ptr %s)", ptrRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree("+irPtr+" %s)", ptrRef))
 	}
 }

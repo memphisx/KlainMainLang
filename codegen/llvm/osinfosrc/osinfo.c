@@ -391,15 +391,84 @@ void __kml_os_loadavg(double *out) {
 	getloadavg(out, 3);
 }
 
-// os.availableParallelism(): the CPUs this process may run on (libuv's
-// sched_getaffinity count on Linux), else the online count.
+#ifdef __linux__
+// The CPUs a cgroup's quota allows, 0 when it sets none: cpu.max for cgroup
+// v2 (`quota period`, or `max period`), cfs_quota_us and cfs_period_us for v1.
+static int64_t cgroup_quota_cpus(const char *dir, int v2) {
+	char path[4400];
+	long long quota = -1, period = 0;
+	FILE *f;
+	if (v2) {
+		snprintf(path, sizeof path, "/sys/fs/cgroup%s/cpu.max", dir);
+		if (!(f = fopen(path, "r"))) return 0;
+		int got = fscanf(f, "%lld %lld", &quota, &period);
+		fclose(f);
+		if (got != 2) return 0;
+	} else {
+		snprintf(path, sizeof path, "/sys/fs/cgroup/cpu%s/cpu.cfs_quota_us", dir);
+		if (!(f = fopen(path, "r"))) return 0;
+		int got = fscanf(f, "%lld", &quota);
+		fclose(f);
+		if (got != 1) return 0;
+		snprintf(path, sizeof path, "/sys/fs/cgroup/cpu%s/cpu.cfs_period_us", dir);
+		if (!(f = fopen(path, "r"))) return 0;
+		got = fscanf(f, "%lld", &period);
+		fclose(f);
+		if (got != 1) return 0;
+	}
+	if (quota <= 0 || period <= 0) return 0;
+	return quota / period > 0 ? quota / period : 1;
+}
+
+// The tightest quota on the way up from this process's own cgroup, 0 when
+// none applies.
+static int64_t cgroup_cpu_limit(void) {
+	FILE *f = fopen("/proc/self/cgroup", "r");
+	if (!f) return 0;
+	char line[4096], dir[4096];
+	int v2 = 0, found = 0;
+	while (fgets(line, sizeof line, f)) {
+		line[strcspn(line, "\n")] = 0;
+		char *controllers = strchr(line, ':');
+		char *cg = controllers ? strchr(controllers + 1, ':') : NULL;
+		if (!cg) continue;
+		*cg++ = 0;
+		controllers++;
+		int isv2 = controllers[0] == 0;
+		int isv1cpu = strstr(controllers, "cpu") != NULL && strstr(controllers, "cpuset") == NULL;
+		if (!isv2 && !isv1cpu) continue;
+		snprintf(dir, sizeof dir, "%s", strcmp(cg, "/") == 0 ? "" : cg);
+		v2 = isv2;
+		found = 1;
+		if (isv1cpu) break;
+	}
+	fclose(f);
+	if (!found) return 0;
+	int64_t limit = 0;
+	for (;;) {
+		int64_t n = cgroup_quota_cpus(dir, v2);
+		if (n > 0 && (limit == 0 || n < limit)) limit = n;
+		char *slash = strrchr(dir, '/');
+		if (!slash) break;
+		*slash = 0;
+	}
+	return limit;
+}
+#endif
+
+// os.availableParallelism(): the CPUs this process may run on, as libuv
+// counts them: on Linux its affinity, capped by its cgroup's CPU quota; else
+// the online count.
 int64_t __kml_os_avail_parallelism(void) {
 #ifdef __linux__
 	cpu_set_t set;
 	CPU_ZERO(&set);
 	if (sched_getaffinity(0, sizeof set, &set) == 0) {
-		int c = CPU_COUNT(&set);
-		if (c > 0) return c;
+		int64_t c = CPU_COUNT(&set);
+		if (c > 0) {
+			int64_t limit = cgroup_cpu_limit();
+			return limit > 0 && limit < c ? limit : c;
+		}
 	}
 #endif
 	long n = sysconf(_SC_NPROCESSORS_ONLN);

@@ -20,6 +20,13 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 	if err != nil {
 		return "", err
 	}
+	if !val.Ty.IsFunc() && !val.Ty.IsDynamic() {
+		// Not a function (JavaScript; strict rejects it): Node's
+		// validateFunction TypeError, from the box.
+		if val, err = e.emitBoxValue(val); err != nil {
+			return "", err
+		}
+	}
 	if val.Ty.IsDynamic() {
 		// A function held in `any` (a timer used as a value receives every
 		// callback so): anything else is Node's validateFunction TypeError.
@@ -32,7 +39,7 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 				return "", err
 			}
 			if arr.Ty.ElemType == nil || !arr.Ty.ElemType.IsDynamic() {
-				return "", fmt.Errorf("%d:%d: %s's arguments must be an any[]", pos.Line, pos.Col, fnName)
+				return "", internalAt(pos, "%s's arguments not an any[]", fnName)
 			}
 			hdr, _ := e.arrayArgFromAggregate(arr)
 			adapted, err := e.emitDynArgsAdapter(val, hdr, pos)
@@ -58,7 +65,7 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 			return "", err
 		}
 		if arr.Ty.ElemType == nil || !arr.Ty.ElemType.IsDynamic() {
-			return "", fmt.Errorf("%d:%d: %s's spread arguments must be an any[]", pos.Line, pos.Col, fnName)
+			return "", internalAt(pos, "%s's spread arguments not an any[]", fnName)
 		}
 		spreadHdr, _ = e.arrayArgFromAggregate(arr)
 		extra = nil
@@ -75,7 +82,7 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 		bound = append(bound, boxed)
 	}
 	if !val.Ty.IsFunc() {
-		return "", fmt.Errorf("%d:%d: %s's first argument must be a function", pos.Line, pos.Col, fnName)
+		return "", internalAt(pos, "%s's callback not a function", fnName)
 	}
 	if spreadHdr != "" {
 		adapted, err := e.emitSpreadArgsAdapter(val, spreadHdr)
@@ -135,8 +142,6 @@ func (e *Emitter) ensureTimerRuntime() {
 		return
 	}
 	e.usedTimers = true
-	e.emitGlobal(`declare i64 @__kml_monotonic_ns()
-declare i64 @__kml_timer_next_deadline_ns()`)
 }
 
 // ensureTimerNatives links Node's timers binding (`@link timers`) and, on
@@ -156,7 +161,6 @@ func (e *Emitter) ensureTimerNatives() {
 // calls it with no arguments, each parameter getting what a missing argument
 // gets, and drops its result.
 func (e *Emitter) emitNoArgAdapter(val Value) (Value, error) {
-	e.ensureMalloc()
 	restore := e.beginThunkEmit()
 	if _, err := e.emitCBCall(Callback{kind: cbClosure, hdrPtr: "%orig", ty: val.Ty}, nil); err != nil {
 		restore()
@@ -165,15 +169,15 @@ func (e *Emitter) emitNoArgAdapter(val Value) (Value, error) {
 	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	name := e.defineContentNamed("@__kml_noarg.", "void", "ptr %orig", body)
+	name := e.defineContentNamed("@__kml_noarg.", "void", irPtr+" %orig", body)
 	clo := e.freshReg()
 	fpP := e.freshReg()
 	epP := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpP, clo))
-	e.heapStore("ptr", name, fpP, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epP, clo))
-	e.heapStore("ptr", val.Ref, epP, 8)
+	e.emitClosureAlloc(clo, "16", name)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", fpP, clo))
+	e.heapStore(irPtr, name, fpP, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", epP, clo))
+	e.heapStore(irPtr, val.Ref, epP, 8)
 	voidTy := TypeVoid
 	ty := val.Ty
 	ty.FuncParams = nil
@@ -187,18 +191,17 @@ func (e *Emitter) emitNoArgAdapter(val Value) (Value, error) {
 // it with the already-evaluated, boxed arguments: its environment holds the
 // callback's closure and then one box per argument.
 func (e *Emitter) emitBoundArgsAdapter(val Value, bound []Value) (Value, error) {
-	e.ensureMalloc()
 	env := e.freshReg()
-	e.heapMallocInto(env, fmt.Sprint(8*(len(bound)+1)))
-	e.heapStore("ptr", val.Ref, env, 8)
+	e.heapMallocInto(env, allocClosure, fmt.Sprint(8*(len(bound)+1)))
+	e.heapStore(irPtr, val.Ref, env, 8)
 	for i, b := range bound {
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", slot, env, i+1))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", slot, env, i+1))
 		e.heapStore("i64", b.Ref, slot, 8)
 	}
 	restore := e.beginThunkEmit()
 	orig := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%env, align 8", orig))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %%env, align 8", orig))
 	cb := Callback{kind: cbClosure, hdrPtr: orig, ty: val.Ty}
 	var args []Value
 	for i := range bound {
@@ -206,9 +209,9 @@ func (e *Emitter) emitBoundArgsAdapter(val Value, bound []Value) (Value, error) 
 			break
 		}
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%env, i64 %d", slot, i+1))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%env, i64 %d", slot, i+1))
 		a := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", a, slot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", a, slot))
 		args = append(args, Value{Ref: a, Ty: TypeAny})
 	}
 	if _, err := e.emitCBCall(cb, args); err != nil {
@@ -218,13 +221,13 @@ func (e *Emitter) emitBoundArgsAdapter(val Value, bound []Value) (Value, error) 
 	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	name := e.defineContentNamed("@__kml_boundargs.", "void", "ptr %env", body)
+	name := e.defineContentNamed("@__kml_boundargs.", "void", irPtr+" %env", body)
 	clo := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.heapStore("ptr", name, clo, 8)
+	e.emitClosureAlloc(clo, "16", name)
+	e.heapStore(irPtr, name, clo, 8)
 	ep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ep, clo))
-	e.heapStore("ptr", env, ep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", ep, clo))
+	e.heapStore(irPtr, env, ep, 8)
 	voidTy := TypeVoid
 	ty := val.Ty
 	ty.FuncParams = nil
@@ -239,26 +242,25 @@ func (e *Emitter) emitBoundArgsAdapter(val Value, bound []Value) (Value, error) 
 // of an any[] of them. Each fixed parameter takes its element (undefined
 // past the end), a rest parameter the elements after them.
 func (e *Emitter) emitSpreadArgsAdapter(val Value, hdr string) (Value, error) {
-	e.ensureMalloc()
 	env := e.freshReg()
-	e.heapMallocInto(env, "16")
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, env))
+	e.heapMallocInto(env, allocClosure, "16")
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", val.Ref, env))
 	hdrSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", hdrSlot, env))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, hdrSlot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 1", hdrSlot, env))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", hdr, hdrSlot))
 	restore := e.beginThunkEmit()
 	orig := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%env, align 8", orig))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %%env, align 8", orig))
 	hp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %%env, i64 1", hp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %%env, i64 1", hp))
 	h := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, hp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", h, hp))
 	data := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, h))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, h))
 	lp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, i64 }, ptr %s, i32 0, i32 1", lp, h))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", i64 }, "+irPtr+" %s, i32 0, i32 1", lp, h))
 	n := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, lp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, lp))
 	cb := Callback{kind: cbClosure, hdrPtr: orig, ty: val.Ty}
 	fixed := len(val.Ty.FuncParams)
 	if cb.hasRest() {
@@ -268,17 +270,17 @@ func (e *Emitter) emitSpreadArgsAdapter(val Value, hdr string) (Value, error) {
 	// touches the array past its end.
 	undef := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", undef))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, undef))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, undef))
 	var args []Value
 	for i := 0; i < fixed; i++ {
 		present := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %d, %s", present, i, n))
 		elem := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", elem, data, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", elem, data, i))
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", slot, present, elem, undef))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", slot, present, elem, undef))
 		a := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", a, slot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", a, slot))
 		args = append(args, Value{Ref: a, Ty: TypeAny})
 	}
 	if cb.hasRest() {
@@ -290,7 +292,7 @@ func (e *Emitter) emitSpreadArgsAdapter(val Value, hdr string) (Value, error) {
 		rlen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", rlen, neg, over))
 		rdata := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", rdata, data, fixed))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", rdata, data, fixed))
 		cb.restArray = &[2]string{e.newArrayHeader(rdata, rlen), rlen}
 	}
 	if _, err := e.emitCBCall(cb, args); err != nil {
@@ -300,13 +302,13 @@ func (e *Emitter) emitSpreadArgsAdapter(val Value, hdr string) (Value, error) {
 	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	name := e.defineContentNamed("@__kml_spreadargs.", "void", "ptr %env", body)
+	name := e.defineContentNamed("@__kml_spreadargs.", "void", irPtr+" %env", body)
 	clo := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", name, clo))
+	e.emitClosureAlloc(clo, "16", name)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", name, clo))
 	ep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ep, clo))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", env, ep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", ep, clo))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", env, ep))
 	voidTy := TypeVoid
 	ty := val.Ty
 	ty.FuncParams = nil
@@ -320,26 +322,25 @@ func (e *Emitter) emitSpreadArgsAdapter(val Value, hdr string) (Value, error) {
 // closure that calls it through the dynamic ABI with the any[] whose header
 // hdr is.
 func (e *Emitter) emitDynArgsAdapter(fn Value, hdr string, pos ast.Pos) (Value, error) {
-	e.ensureMalloc()
 	env := e.freshReg()
-	e.heapMallocInto(env, "16")
+	e.heapMallocInto(env, allocClosure, "16")
 	e.heapStore("i64", fn.Ref, env, 8)
 	hdrSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 1", hdrSlot, env))
-	e.heapStore("ptr", hdr, hdrSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 1", hdrSlot, env))
+	e.heapStore(irPtr, hdr, hdrSlot, 8)
 	restore := e.beginThunkEmit()
 	box := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %%env, align 8", box))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %%env, align 8", box))
 	hp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %%env, i64 1", hp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %%env, i64 1", hp))
 	h := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, hp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", h, hp))
 	data := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, h))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, h))
 	lp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, i64 }, ptr %s, i32 0, i32 1", lp, h))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", i64 }, "+irPtr+" %s, i32 0, i32 1", lp, h))
 	n := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, lp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, lp))
 	undef := Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}
 	if _, err := e.emitDynFnBoxCallN(Value{Ref: box, Ty: TypeAny}, undef, data, n, "callback is not a function", pos); err != nil {
 		restore()
@@ -348,34 +349,33 @@ func (e *Emitter) emitDynArgsAdapter(fn Value, hdr string, pos ast.Pos) (Value, 
 	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	name := e.defineContentNamed("@__kml_dynargs.", "void", "ptr %env", body)
+	name := e.defineContentNamed("@__kml_dynargs.", "void", irPtr+" %env", body)
 	clo := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.heapStore("ptr", name, clo, 8)
+	e.emitClosureAlloc(clo, "16", name)
+	e.heapStore(irPtr, name, clo, 8)
 	ep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ep, clo))
-	e.heapStore("ptr", env, ep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", ep, clo))
+	e.heapStore(irPtr, env, ep, 8)
 	return Value{Ref: clo, Ty: FuncType(nil, TypeVoid)}, nil
 }
 
 func (e *Emitter) emitDiscardReturnAdapter(val Value) Value {
-	e.ensureMalloc()
 	retIR := val.Ty.FuncRetType.LLVMRetType()
-	name := e.defineContentNamed("@__kml_discard_ret.", "void", "ptr %orig", fmt.Sprintf(`  %%fp_p = getelementptr { ptr, ptr }, ptr %%orig, i32 0, i32 0
-  %%fp = load ptr, ptr %%fp_p, align 8
-  %%ep_p = getelementptr { ptr, ptr }, ptr %%orig, i32 0, i32 1
-  %%ep = load ptr, ptr %%ep_p, align 8
-  %%ignored = call %s %%fp(ptr %%ep)
+	name := e.defineContentNamed("@__kml_discard_ret.", "void", irPtr+" %orig", fmt.Sprintf(`  %%fp_p = getelementptr { `+irPtr+`, `+irPtr+` }, `+irPtr+` %%orig, i32 0, i32 0
+  %%fp = load `+irPtr+`, `+irPtr+` %%fp_p, align 8
+  %%ep_p = getelementptr { `+irPtr+`, `+irPtr+` }, `+irPtr+` %%orig, i32 0, i32 1
+  %%ep = load `+irPtr+`, `+irPtr+` %%ep_p, align 8
+  %%ignored = call %s %%fp(`+irPtr+` %%ep)
   ret void
 `, retIR))
 	clo := e.freshReg()
 	fpP := e.freshReg()
 	epP := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpP, clo))
-	e.heapStore("ptr", name, fpP, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epP, clo))
-	e.heapStore("ptr", val.Ref, epP, 8)
+	e.emitClosureAlloc(clo, "16", name)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", fpP, clo))
+	e.heapStore(irPtr, name, fpP, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", epP, clo))
+	e.heapStore(irPtr, val.Ref, epP, 8)
 	voidTy := TypeVoid
 	ty := val.Ty
 	ty.FuncRetType = &voidTy
@@ -395,7 +395,7 @@ func (e *Emitter) emitThrowUnlessFunction(v Value, name string) {
 	e.emitLabel(throwL)
 	e.ensureDynJSONC()
 	suffix := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_received(i64 %s)", suffix, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_received(i64 %s)", suffix, v.Ref))
 	msg, err := e.emitStringConcat(Value{Ref: e.internString("The \"" + name + "\" argument must be of type function."), Ty: TypePtr}, Value{Ref: suffix, Ty: TypePtr})
 	if err == nil {
 		e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)

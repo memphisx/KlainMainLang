@@ -5,8 +5,8 @@
     {
       "section": "TypeScript Core Language",
       "total": {
-        "impl": 372,
-        "total": 377,
+        "impl": 380,
+        "total": 385,
         "pct": 99
       },
       "rows": [
@@ -19,9 +19,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 12,
+            "impl": 11,
             "total": 15,
-            "pct": 80
+            "pct": 73
           },
           "caveats": "• A `for` loop's non-declaration init clause (`for (i = 0, j = 10; ...)`) is a clean rejection (the update clause does take comma-separated expressions — [ADR-00156](../adr/00/ADR-00156.md))\u003cbr\u003e• No ASI restriction on a line break before a postfix `++`/`--`\u003cbr\u003e• `finally` does not run on an early `return`/`break`/`continue` inside an `async`/generator body (it does everywhere else — [ADR-00191](../adr/00/ADR-00191.md))"
         },
@@ -64,9 +64,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 3,
+            "impl": 5,
             "total": 12,
-            "pct": 25
+            "pct": 42
           },
           "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/00/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/00/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); a class method's `arguments` counts the declared parameters a call passed and takes no overflow ([ADR-00464](../adr/00/ADR-00464.md), [ADR-01489](../adr/01/ADR-01489.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/00/ADR-00373.md))\u003cbr\u003e• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/00/ADR-00446.md))\u003cbr\u003e• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/01/ADR-01013.md)/[ADR-01014](../adr/01/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/01/ADR-01016.md))\u003cbr\u003e• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box\u003cnumber\u003e()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/00/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/00/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/00/ADR-00166.md))\u003cbr\u003e• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/00/ADR-00178.md))\u003cbr\u003e• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* bound by a top-level `const G = function* ...` has its element type inferred from yields; in any other position it is a value held as `any` ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/00/ADR-00293.md))"
         },
@@ -79,9 +79,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 7,
+            "impl": 9,
             "total": 12,
-            "pct": 58
+            "pct": 75
           },
           "caveats": "• `number` is a JS-faithful IEEE-754 double (`0.1 + 0.2` → `0.30000000000000004`, `10 / 3` → `3.333…`, `1 / 0` → `Infinity`); the `int8..int64`/`uint8..uint64` types are the integer escape hatch (exact past 2^53 — an `int64`/`uint64` literal is parsed straight to a 64-bit integer; a plain `number` past 2^53 rounds exactly as JS does). Bitwise ops and the count/index builtins (`.length`/`indexOf`/`push`/…) also return a `number`, so `(7 \u0026 6) / (7 \u0026 5)` and `arr.length / other.length` are float divides (TDD-00123 Stages 1–3 / [ADR-00377](../adr/00/ADR-00377.md), [ADR-00379](../adr/00/ADR-00379.md))\u003cbr\u003e• No `bigint` `.toLocaleString`/`asIntN` ([TDD-00074](../tdd/TDD-00074.md))"
         },
@@ -89,14 +89,14 @@
           "category": "Async / Promise",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
           "coverage": {
-            "impl": 10,
-            "total": 10,
+            "impl": 11,
+            "total": 11,
             "pct": 100
           },
           "strict": {
             "impl": 9,
-            "total": 10,
-            "pct": 90
+            "total": 11,
+            "pct": 82
           }
         },
         {
@@ -118,14 +118,14 @@
           "category": "RegExp",
           "pageFile": "REGEXP.md",
           "coverage": {
-            "impl": 14,
-            "total": 15,
-            "pct": 93
+            "impl": 15,
+            "total": 16,
+            "pct": 94
           },
           "strict": {
             "impl": 14,
-            "total": 15,
-            "pct": 93
+            "total": 16,
+            "pct": 88
           },
           "caveats": "• `u`/`d` flags out of scope for V1\u003cbr\u003e• Several other deliberate scope narrowings — see [REGEXP.md](REGEXP.md)'s own Caveats\u003cbr\u003e• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/00/ADR-00166.md))"
         },
@@ -142,7 +142,7 @@
             "total": 37,
             "pct": 92
           },
-          "caveats": "• `.flat(depth?)`/`.flatMap(fn)`: `depth` must be a compile-time constant (or `Infinity`), since this compiler's array element types are static ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/00/ADR-00107.md))\u003cbr\u003e• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators, plus the array-like `{ length: n }` overload ([ADR-00957](../adr/00/ADR-00957.md)) — generators and `thisArg` are not supported ([ADR-00482](../adr/00/ADR-00482.md)/[ADR-00491](../adr/00/ADR-00491.md))"
+          "caveats": "• `.flat(depth)` with a run-time depth gives boxed (`any`) elements\u003cbr\u003e• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators, plus the array-like `{ length: n }` overload ([ADR-00957](../adr/00/ADR-00957.md)) — generators and `thisArg` are not supported ([ADR-00482](../adr/00/ADR-00482.md)/[ADR-00491](../adr/00/ADR-00491.md))"
         },
         {
           "category": "Number / Math",
@@ -197,9 +197,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 10,
+            "impl": 11,
             "total": 12,
-            "pct": 83
+            "pct": 92
           },
           "caveats": "• `console.table()` tabulates only arrays of objects or primitives, with no `columns` filter\u003cbr\u003e• `console.dir`'s `colors` option is ignored"
         },
@@ -207,14 +207,14 @@
           "category": "Global functions \u0026 constants",
           "pageFile": "GLOBAL-FUNCTIONS.md",
           "coverage": {
-            "impl": 20,
-            "total": 21,
-            "pct": 95
+            "impl": 23,
+            "total": 24,
+            "pct": 96
           },
           "strict": {
-            "impl": 17,
-            "total": 21,
-            "pct": 81
+            "impl": 18,
+            "total": 24,
+            "pct": 75
           },
           "caveats": "• `eval` is an opt-in embedded-engine path ([TDD-00046](../tdd/TDD-00046.md)), not started"
         },
@@ -227,24 +227,24 @@
             "pct": 100
           },
           "strict": {
-            "impl": 7,
+            "impl": 8,
             "total": 21,
-            "pct": 33
+            "pct": 38
           },
-          "caveats": "• `expr as T` **narrows a dynamic operand** (`any`/`unknown`) to the asserted concrete type, unboxing the value — so `const n = x as number` types `n` as `number` ([ADR-00929](../adr/00/ADR-00929.md)); a concrete→concrete assertion, `as const`, `satisfies`, and the `readonly T[]` modifier stay **erased** — they don't re-type the expression or enforce immutability ([ADR-00371](../adr/00/ADR-00371.md)/[ADR-00373](../adr/00/ADR-00373.md))\u003cbr\u003e• `typeof` type queries, ambient `declare` declarations, and string index signatures (`{ [k: string]: T }`) are supported ([ADR-00389](../adr/00/ADR-00389.md)/[ADR-00388](../adr/00/ADR-00388.md)/[ADR-00390](../adr/00/ADR-00390.md)); **template literal types** parse but erase to `string` ([ADR-00561](../adr/00/ADR-00561.md))\u003cbr\u003e• Generics support object/interface/class type arguments ([TDD-00069](../tdd/TDD-00069.md)) and `\u003cT extends X\u003e` constraints ([TDD-00113](../tdd/TDD-00113.md)); a *function*'s type arguments are inference-only (no explicit `identity\u003cnumber\u003e(5)`), and Map/Set/Promise/closure type arguments are a clean rejection ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md))\u003cbr\u003e• Union types (beyond `T \\| null`) allow scalar members, object members (one object member, or ≥2 as a discriminated union with a first-position string-literal tag), and a `ReadableStream` member; usable as an **object field** (checked + boxed at construction, [TDD-00119](../tdd/TDD-00119.md)) but not yet as an **array element**; flow narrowing (`typeof`/truthiness/`==null`/`tag===lit`, if-else + early-return) works for a union local or field ([TDD-00043](../tdd/TDD-00043.md)/[TDD-00114](../tdd/TDD-00114.md)/[TDD-00115](../tdd/TDD-00115.md)/[TDD-00116](../tdd/TDD-00116.md))\u003cbr\u003e• Tuple types are fixed-shape structs ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/00/ADR-00201.md))\u003cbr\u003e• Intersection types are object-members-only, with a field conflict rejected rather than the `-compat=js` `never`-field ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/00/ADR-00225.md))\u003cbr\u003e• Mapped \u0026 utility types are evaluated to concrete object types; `Partial`/`Required`/`Readonly` are structural no-ops, no `as` remapping ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/00/ADR-00228.md)–[ADR-00230](../adr/00/ADR-00230.md))\u003cbr\u003e• Conditional types + `infer` evaluate at compile time (monomorphized check type); `infer` is scoped to Array/Promise/bare forms, no function-signature inference ([ADR-00231](../adr/00/ADR-00231.md))"
+          "caveats": "• `expr as T` **narrows a dynamic operand** (`any`/`unknown`) to the asserted concrete type, unboxing the value — so `const n = x as number` types `n` as `number` ([ADR-00929](../adr/00/ADR-00929.md)); a concrete→concrete assertion, `as const`, `satisfies`, and the `readonly T[]` modifier stay **erased** — they don't re-type the expression or enforce immutability ([ADR-00371](../adr/00/ADR-00371.md)/[ADR-00373](../adr/00/ADR-00373.md))\u003cbr\u003e• `typeof` type queries, ambient `declare` declarations, and string index signatures (`{ [k: string]: T }`) are supported ([ADR-00389](../adr/00/ADR-00389.md)/[ADR-00388](../adr/00/ADR-00388.md)/[ADR-00390](../adr/00/ADR-00390.md)); **template literal types** parse but erase to `string` ([ADR-00561](../adr/00/ADR-00561.md))\u003cbr\u003e• Generics support object/interface/class type arguments ([TDD-00069](../tdd/TDD-00069.md)) and `\u003cT extends X\u003e` constraints ([TDD-00113](../tdd/TDD-00113.md)); a *function*'s type arguments are inference-only (no explicit `identity\u003cnumber\u003e(5)`), and Map/Set/Promise/closure type arguments are a clean rejection ([TDD-00010](../tdd/TDD-00010.md), [TDD-00037](../tdd/TDD-00037.md))\u003cbr\u003e• Union types (beyond `T \\| null`) allow scalar members, object members (one object member, or ≥2 as a discriminated union with a first-position string-literal tag), and a `ReadableStream` member; usable as an **object field** (checked + boxed at construction, [TDD-00119](../tdd/TDD-00119.md)) but not yet as an **array element**; flow narrowing (`typeof`/truthiness/`==null`/`tag===lit`, if-else + early-return) works for a union local or field ([TDD-00043](../tdd/TDD-00043.md)/[TDD-00114](../tdd/TDD-00114.md)/[TDD-00115](../tdd/TDD-00115.md)/[TDD-00116](../tdd/TDD-00116.md))\u003cbr\u003e• A tuple read as an object type of its numeric members (`const p: { 0: A; 1: B } = pair`) is a copy, not the same array ([ADR-01977](../adr/01/ADR-01977.md))\u003cbr\u003e• Intersection types are object-members-only, with a field conflict rejected rather than the `-compat=js` `never`-field ([TDD-00078](../tdd/TDD-00078.md)/[ADR-00225](../adr/00/ADR-00225.md))\u003cbr\u003e• Mapped \u0026 utility types are evaluated to concrete object types; `Partial`/`Required`/`Readonly` are structural no-ops, no `as` remapping ([TDD-00079](../tdd/TDD-00079.md)/[ADR-00228](../adr/00/ADR-00228.md)–[ADR-00230](../adr/00/ADR-00230.md))\u003cbr\u003e• Conditional types + `infer` evaluate at compile time (monomorphized check type); `infer` is scoped to Array/Promise/bare forms, no function-signature inference ([ADR-00231](../adr/00/ADR-00231.md))"
         },
         {
           "category": "Classes / OOP",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
           "coverage": {
-            "impl": 25,
-            "total": 25,
+            "impl": 28,
+            "total": 28,
             "pct": 100
           },
           "strict": {
-            "impl": 15,
-            "total": 25,
-            "pct": 60
+            "impl": 16,
+            "total": 28,
+            "pct": 57
           },
           "caveats": "• **Parameter properties** (`constructor(public x: number)`/`private`/`readonly`) declare + assign their field ([ADR-00447](../adr/00/ADR-00447.md); `readonly` is not enforced as immutability), and the **`readonly` *field* modifier** parses too — both recorded, not enforced as immutability ([ADR-00480](../adr/00/ADR-00480.md))\u003cbr\u003e• `class X extends Error` works one level deep ([ADR-00630](../adr/00/ADR-00630.md)); extending an Error *subclass* is a clean rejection, and `.stack` doesn't exist\u003cbr\u003e• Static field initializers (`static x = 5`) work ([ADR-00375](../adr/00/ADR-00375.md)); clean rejections: static/async generator methods, a member keyed by a value computed at run time (a `let`, a call, an interpolation); well-known symbols, a const symbol and a const string or number key are accepted ([TDD-00089](../tdd/TDD-00089.md), [ADR-01414](../adr/01/ADR-01414.md), [ADR-01415](../adr/01/ADR-01415.md)), and a class expression used as a runtime value\u003cbr\u003e• A field initializer can currently see constructor params (real JS's separate initializer scope forbids this — [ADR-00180](../adr/00/ADR-00180.md))\u003cbr\u003e• `#x` private names have no early-error check for `#m`/`static #m` name collision or the `#constructor`-is-banned rule ([ADR-00155](../adr/00/ADR-00155.md))"
         },
@@ -302,8 +302,8 @@
     {
       "section": "Web Platform APIs",
       "total": {
-        "impl": 78,
-        "total": 81,
+        "impl": 80,
+        "total": 83,
         "pct": 96
       },
       "rows": [
@@ -356,16 +356,16 @@
           "category": "Binary data \u0026 Typed Arrays",
           "pageFile": "BINARY-DATA-TYPED-ARRAYS.md",
           "coverage": {
-            "impl": 9,
-            "total": 9,
+            "impl": 10,
+            "total": 10,
             "pct": 100
           },
           "strict": {
-            "impl": 4,
-            "total": 9,
-            "pct": 44
+            "impl": 6,
+            "total": 10,
+            "pct": 60
           },
-          "caveats": "• A view over a resizable ArrayBuffer keeps the length it had when made (no length tracking)\u003cbr\u003e• Buffer encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
+          "caveats": "• Buffer encodings must be string literals\u003cbr\u003e• No `Atomics.waitAsync`, no `getFloat16`"
         },
         {
           "category": "Web Crypto",
@@ -401,14 +401,14 @@
           "category": "Networking (fetch, WebSocket, SSE)",
           "pageFile": "NETWORKING.md",
           "coverage": {
-            "impl": 7,
-            "total": 7,
+            "impl": 8,
+            "total": 8,
             "pct": 100
           },
           "strict": {
             "impl": 2,
-            "total": 7,
-            "pct": 29
+            "total": 8,
+            "pct": 25
           },
           "caveats": "• `WebSocket`: the client offers no `permessage-deflate`, and klain:ws's server `.close()` doesn't await the peer's close frame; both `ws://` and `wss://` work in each direction, binary frames included — the server speaks `wss://` when attached to an `https.createServer` ([TDD-00158](../tdd/TDD-00158.md))\u003cbr\u003e• `XMLHttpRequest` ([TDD-00040](../tdd/TDD-00040.md)) is legacy-synchronous-mode only"
         },
@@ -466,8 +466,8 @@
     {
       "section": "Node.js APIs",
       "total": {
-        "impl": 147,
-        "total": 151,
+        "impl": 149,
+        "total": 153,
         "pct": 97
       },
       "rows": [
@@ -475,14 +475,14 @@
           "category": "File System (fs)",
           "pageFile": "FILE-SYSTEM.md",
           "coverage": {
-            "impl": 19,
-            "total": 21,
-            "pct": 90
+            "impl": 20,
+            "total": 22,
+            "pct": 91
           },
           "strict": {
             "impl": 13,
-            "total": 21,
-            "pct": 62
+            "total": 22,
+            "pct": 59
           },
           "caveats": "• `createWriteStream` still writes inline on the loop thread, and stream chunks are **strings** ([TDD-00186](../tdd/TDD-00186.md)/[TDD-00108](../tdd/TDD-00108.md))\u003cbr\u003e• `readFileSync` returns a Buffer without an encoding; `readFile` (async) is still text-only"
         },
@@ -490,14 +490,14 @@
           "category": "Process / CLI I/O",
           "pageFile": "PROCESS-CLI.md",
           "coverage": {
-            "impl": 34,
-            "total": 34,
+            "impl": 35,
+            "total": 35,
             "pct": 100
           },
           "strict": {
             "impl": 22,
-            "total": 34,
-            "pct": 65
+            "total": 35,
+            "pct": 63
           },
           "caveats": "• An `'uncaughtException'` handler runs then still exits after a synchronous throw (can't resume)\u003cbr\u003e• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons\u003cbr\u003e• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/00/ADR-00791.md))\u003cbr\u003e• `child_process.fork()` is self-fork only — forking a different module stays out"
         },

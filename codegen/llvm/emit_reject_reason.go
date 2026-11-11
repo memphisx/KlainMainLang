@@ -34,7 +34,7 @@ func (e *Emitter) clearDynamicRejectParam(arg ast.Expression) func() {
 	if len(params) != 1 || params[0].Type == nil {
 		return func() {}
 	}
-	if !e.resolveType(params[0].Type).IsDynamic() {
+	if !e.annotationType(params[0].Type).IsDynamic() {
 		return func() {}
 	}
 	saved := params[0].Type
@@ -67,17 +67,17 @@ func (e *Emitter) emitRejectAdapter(userClo Value) Value {
 	fpS := e.freshReg()
 	ep := e.freshReg()
 	epS := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%uclo, i32 0, i32 0", fpS))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpS))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%uclo, i32 0, i32 1", epS))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epS))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%uclo, i32 0, i32 0", fpS))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, fpS))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%uclo, i32 0, i32 1", epS))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ep, epS))
 	// A handler that ignores the reason (`.catch(() => …)`) takes env only; one
 	// that names it gets the caught reason coerced to its declared param type.
-	callArgs := "ptr " + ep
+	callArgs := irPtr + " " + ep
 	if hasParam {
 		reason := Value{Ref: "%reason", Ty: TypeCaught}
 		arg := e.convert(reason, paramTy)
-		callArgs = fmt.Sprintf("ptr %s, %s %s", ep, StructFieldIR(arg.Ty), arg.Ref)
+		callArgs = fmt.Sprintf(irPtr+" %s, %s %s", ep, StructFieldIR(arg.Ty), arg.Ref)
 	}
 	if retIR == "void" {
 		e.emitInstr(fmt.Sprintf("call void %s(%s)", fp, callArgs))
@@ -89,7 +89,7 @@ func (e *Emitter) emitRejectAdapter(userClo Value) Value {
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()
-	fn := e.defineContentNamed("@__kml_reject_adapt.", retIR, "ptr %uclo, { i8, i64 } %reason", body)
+	fn := e.defineContentNamed("@__kml_reject_adapt.", retIR, irPtr+" %uclo, { i8, i64 } %reason", body)
 
 	// Trampoline closure { adaptFn, userClo } — the runner calls adaptFn(userClo,
 	// reason). The param type it advertises is TypeCaught (what the runner passes).
@@ -118,7 +118,7 @@ func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error)
 	if val.Ty.IsError() || isErrSubclass {
 		errPtr := e.convert(val, TypePtr)
 		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", p, errPtr.Ref))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", p, errPtr.Ref))
 		return fmt.Sprintf("%d", kmlTagError), p, nil
 	}
 	boxed, berr := e.emitBoxValue(val)
@@ -139,10 +139,10 @@ func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error)
 // rejects through emitRejectPromise.
 func (e *Emitter) storeRejectReasonI64Tag(prom, tagI64, pay string) {
 	v0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", v0, promiseStructIR, prom))
 	e.heapStore("i64", pay, v0, 8)
 	v1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 3", v1, promiseStructIR, prom))
 	e.heapStore("i64", tagI64, v1, 8)
 }
 
@@ -152,13 +152,13 @@ func (e *Emitter) storeRejectReasonI64Tag(prom, tagI64, pay string) {
 func (e *Emitter) loadRejectReasonCaught(prom string) Value {
 	v0p := e.freshReg()
 	pay := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", v0p, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", pay, v0p))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", v0p, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", pay, v0p))
 	v1p := e.freshReg()
 	tagWide := e.freshReg()
 	tag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", v1p, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", tagWide, v1p))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 3", v1p, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", tagWide, v1p))
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i8", tag, tagWide))
 	return e.emitCaughtAggregate(tag, pay)
 }

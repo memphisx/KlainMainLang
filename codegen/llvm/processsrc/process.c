@@ -59,10 +59,11 @@ extern void *__argv_ptr;
 extern void *__process_argv_ptr;
 extern i64 __process_argv_len;
 
-/* ---- hooks: 0 'exit', 1 'uncaughtException', 2 'unhandledRejection' ---- */
+/* ---- hooks: 0 'exit', 1 'uncaughtException', 2 'unhandledRejection',
+ * 3 a worker's error, 4 'beforeExit' ---- */
 typedef void (*hook_fn)(void *clo, i64 a, i64 b);
-static _Thread_local hook_fn phook_inv[4];
-static _Thread_local void *phook_clo[4];
+static _Thread_local hook_fn phook_inv[5];
+static _Thread_local void *phook_clo[5];
 _Thread_local i64 __kml_process_exit_code;
 static _Thread_local unsigned char exit_ran;
 
@@ -89,6 +90,22 @@ void __kml_run_exit_handlers(i64 code) {
     i64 bits;
     memcpy(&bits, &d, sizeof bits);
     __kml_process_hook_call(0, bits + KML_NB_DOUBLE_OFFSET, KML_NB_UNDEFINED);
+}
+
+/* The process 'beforeExit' event: emitted when the event loop has drained,
+ * with process.exitCode; when its listeners left the loop alive, the loop
+ * runs again and the event is emitted again (Node's SpinEventLoop). run and
+ * alive are the loop's, or null when the program has none. */
+void __kml_run_before_exit(void (*run)(void), _Bool (*alive)(void)) {
+    while (!exit_ran && phook_inv[4]) {
+        double d = (double)__kml_process_exit_code;
+        i64 bits;
+        memcpy(&bits, &d, sizeof bits);
+        __kml_process_hook_call(4, bits + KML_NB_DOUBLE_OFFSET, KML_NB_UNDEFINED);
+        if (!run || !alive || !alive())
+            return;
+        run();
+    }
 }
 
 void __kml_native_process_set_exit_code(double code) { __kml_process_exit_code = (i64)code; }
@@ -209,6 +226,55 @@ char *__kml_execpath(void) {
 }
 
 void *__kml_native_process_exec_path(void) { return __kml_str_from_cstr(__kml_execpath()); }
+
+/* process.platform and process.arch: the target's, under Node's names. */
+void *__kml_native_process_platform(void) {
+#if defined(_WIN32)
+    return __kml_str_from_cstr("win32");
+#elif defined(__ANDROID__)
+    return __kml_str_from_cstr("android");
+#elif defined(__APPLE__)
+    return __kml_str_from_cstr("darwin");
+#elif defined(__linux__)
+    return __kml_str_from_cstr("linux");
+#elif defined(__FreeBSD__)
+    return __kml_str_from_cstr("freebsd");
+#elif defined(__OpenBSD__)
+    return __kml_str_from_cstr("openbsd");
+#elif defined(__NetBSD__)
+    return __kml_str_from_cstr("netbsd");
+#elif defined(__sun)
+    return __kml_str_from_cstr("sunos");
+#elif defined(_AIX)
+    return __kml_str_from_cstr("aix");
+#else
+    return __kml_str_from_cstr("linux");
+#endif
+}
+
+void *__kml_native_process_arch(void) {
+#if defined(__x86_64__) || defined(_M_X64)
+    return __kml_str_from_cstr("x64");
+#elif defined(__i386__) || defined(_M_IX86)
+    return __kml_str_from_cstr("ia32");
+#elif defined(__aarch64__) || defined(_M_ARM64)
+    return __kml_str_from_cstr("arm64");
+#elif defined(__arm__) || defined(_M_ARM)
+    return __kml_str_from_cstr("arm");
+#elif defined(__riscv) && __riscv_xlen == 64
+    return __kml_str_from_cstr("riscv64");
+#elif defined(__loongarch64)
+    return __kml_str_from_cstr("loong64");
+#elif defined(__powerpc64__)
+    return __kml_str_from_cstr("ppc64");
+#elif defined(__s390x__)
+    return __kml_str_from_cstr("s390x");
+#elif defined(__mips__)
+    return __kml_str_from_cstr("mips");
+#else
+    return __kml_str_from_cstr("x64");
+#endif
+}
 
 _Bool __kml_native_env_get(const char *key, void **out) {
     const char *raw = getenv(key);

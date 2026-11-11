@@ -17,10 +17,6 @@ var inspectReduceSource string
 // push/end. main.go compiles it when UsesInspectReduce() is set (libc + libm).
 func InspectReduceSource() string { return inspectReduceSource }
 
-// UsesInspectReduce reports whether a structured inspection reached codegen,
-// so the build knows to compile+link the inspect C file.
-func (e *Emitter) UsesInspectReduce() bool { return e.usedInspectReduce }
-
 // ensureInspectReduce declares the entry-list ABI exactly once and marks the
 // program as needing the C file compiled in.
 func (e *Emitter) ensureInspectReduce() {
@@ -29,17 +25,6 @@ func (e *Emitter) ensureInspectReduce() {
 	}
 	e.usedInspectReduce = true
 	e.requireLink("m") // sqrt/floor in the column grouping
-	e.emitGlobal(`declare ptr @__kml_inspect_begin(i64, i64)`)
-	e.emitGlobal(`declare void @__kml_inspect_push(ptr, ptr)`)
-	e.emitGlobal(`declare void @__kml_inspect_push_more(ptr, i64)`)
-	e.emitGlobal(`declare void @__kml_inspect_push_holes(ptr, i64)`)
-	e.emitGlobal(`declare ptr @__kml_inspect_end(ptr, ptr, ptr, i64, i64, i64, i64)`)
-	e.emitGlobal(`declare i64 @__kml_inspect_push_arr_extras(ptr, ptr, i64)`)
-	e.emitGlobal(`declare ptr @__kml_inspect_quote(ptr)`)
-	e.emitGlobal(`declare ptr @__kml_inspect_key(ptr)`)
-	e.emitGlobal(`declare ptr @__kml_inspect_hex(ptr, i64)`)
-	e.emitGlobal(`declare ptr @__kml_inspect_tagged(ptr, ptr, ptr)`)
-	e.emitGlobal(`declare ptr @__kml_inspect_reindent(ptr, i64)`)
 }
 
 // inspectBegin opens an entry list for a container at nesting depth `depth`;
@@ -48,13 +33,13 @@ func (e *Emitter) ensureInspectReduce() {
 func (e *Emitter) inspectBegin(depth int, nonempty string) string {
 	e.ensureInspectReduce()
 	l := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_begin(i64 %d, i64 %s)", l, depth, nonempty))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_begin(i64 %d, i64 %s)", l, depth, nonempty))
 	return l
 }
 
 // inspectPush appends one rendered entry string.
 func (e *Emitter) inspectPush(list string, entry Value) {
-	e.emitInstr(fmt.Sprintf("call void @__kml_inspect_push(ptr %s, ptr %s)", list, entry.Ref))
+	e.emitInstr(fmt.Sprintf("call void @__kml_inspect_push("+irPtr+" %s, "+irPtr+" %s)", list, entry.Ref))
 }
 
 // inspectEnd lays the entries out between open and close (both IR string
@@ -62,7 +47,7 @@ func (e *Emitter) inspectPush(list string, entry Value) {
 // grouping; numeric right-aligns the columns (a number/bigint array).
 func (e *Emitter) inspectEnd(list, open, close string, depth int, isArray, numeric bool) Value {
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_end(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d, i64 %s, i64 %s)",
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_end("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d, i64 %d, i64 %s, i64 %s)",
 		r, list, open, close, 2*depth, depth, boolI64(isArray), boolI64(numeric)))
 	return Value{Ref: r, Ty: TypePtr}
 }
@@ -71,7 +56,7 @@ func (e *Emitter) inspectEnd(list, open, close string, depth int, isArray, numer
 // register.
 func (e *Emitter) inspectEndNumeric(list, open, close string, depth int, numeric string) Value {
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_end(ptr %s, ptr %s, ptr %s, i64 %d, i64 %d, i64 1, i64 %s)",
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_end("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d, i64 %d, i64 1, i64 %s)",
 		r, list, open, close, 2*depth, depth, numeric))
 	return Value{Ref: r, Ty: TypePtr}
 }

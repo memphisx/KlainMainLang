@@ -31,7 +31,7 @@ import "fmt"
 // plus the match's start/end byte offsets (-1/-1 on no match).
 func (e *Emitter) emitRegexMatchAt(handleReg string, strVal Value, startOffsetReg string) (matchedReg, startReg, endReg string) {
 	matched, start, end, md := e.emitRegexMatchAtData(handleReg, strVal, startOffsetReg)
-	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8("+irPtr+" %s)", md))
 	return matched, start, end
 }
 
@@ -40,10 +40,10 @@ func (e *Emitter) emitRegexMatchAt(handleReg string, strVal Value, startOffsetRe
 func (e *Emitter) emitRegexMatchAtData(handleReg string, strVal Value, startOffsetReg string) (matchedReg, startReg, endReg, matchDataReg string) {
 	e.ensureRegexMatch()
 	matchDataReg = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_match_data_create_from_pattern_8(ptr %s, ptr null)", matchDataReg, handleReg))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @pcre2_match_data_create_from_pattern_8("+irPtr+" %s, "+irPtr+" null)", matchDataReg, handleReg))
 	rcReg := e.freshReg()
 	mctx := e.emitRegexMatchContext()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8(ptr %s, ptr %s, i64 %d, i64 %s, i32 0, ptr %s, ptr %s)",
+	e.emitInstr(fmt.Sprintf("%s = call i32 @pcre2_match_8("+irPtr+" %s, "+irPtr+" %s, i64 %d, i64 %s, i32 0, "+irPtr+" %s, "+irPtr+" %s)",
 		rcReg, handleReg, strVal.Ref, pcre2ZeroTerminated, startOffsetReg, matchDataReg, mctx))
 	e.emitRegexFixOptional(handleReg, matchDataReg, rcReg)
 	matched := e.freshReg()
@@ -61,29 +61,29 @@ func (e *Emitter) emitRegexMatchAtData(handleReg string, strVal Value, startOffs
 
 	e.emitLabel(matchedL)
 	ovecReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_get_ovector_pointer_8(ptr %s)", ovecReg, matchDataReg))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @pcre2_get_ovector_pointer_8("+irPtr+" %s)", ovecReg, matchDataReg))
 	s0Gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 0", s0Gep, ovecReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 0", s0Gep, ovecReg))
 	s0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", s0, s0Gep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", s0, s0Gep))
 	e1Gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 1", e1Gep, ovecReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 1", e1Gep, ovecReg))
 	e1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", e1, e1Gep))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", s0, startSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e1, endSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", e1, e1Gep))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", s0, startSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e1, endSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(nomatchL)
-	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", startSlot))
-	e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", endSlot))
+	e.emitInstr(fmt.Sprintf("store i64 -1, "+irPtr+" %s, align 8", startSlot))
+	e.emitInstr(fmt.Sprintf("store i64 -1, "+irPtr+" %s, align 8", endSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	finalStart := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalStart, startSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalStart, startSlot))
 	finalEnd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalEnd, endSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalEnd, endSlot))
 	return matched, finalStart, finalEnd, matchDataReg
 }
 
@@ -123,10 +123,10 @@ func (e *Emitter) emitRegexSearch(strVal, regexVal Value) Value {
 func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenReg string, onSegment func(gapStartReg, gapEndReg, matchDataReg string)) (finalLastSplitReg string) {
 	searchAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", searchAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", searchAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", searchAlloca))
 	lastSplitAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lastSplitAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lastSplitAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", lastSplitAlloca))
 
 	condL := e.freshLabel("regex.split.cond")
 	bodyL := e.freshLabel("regex.split.body")
@@ -135,7 +135,7 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 
 	e.emitLabel(condL)
 	searchPos := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", searchPos, searchAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", searchPos, searchAlloca))
 	tooFar := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", tooFar, searchPos, subjectLenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tooFar, doneL, bodyL))
@@ -147,7 +147,7 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", matched, checkZeroL, noMatchL))
 
 	e.emitLabel(noMatchL)
-	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8("+irPtr+" %s)", md))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(checkZeroL)
@@ -161,7 +161,7 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	// An empty match splits too (@@split), unless it ends where the last
 	// piece ended or sits at the end of the string.
 	zeroLast := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", zeroLast, lastSplitAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", zeroLast, lastSplitAlloca))
 	atLast := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", atLast, mStart, zeroLast))
 	atEnd := e.freshReg()
@@ -173,37 +173,37 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", noSplit, zeroAdvL, zeroSplitL))
 	e.emitLabel(zeroSplitL)
 	onSegment(zeroLast, mStart, md)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", mStart, lastSplitAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", mStart, lastSplitAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", zeroAdvL))
 	e.emitLabel(zeroAdvL)
-	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8("+irPtr+" %s)", md))
 	// Step past the zero-length match by a whole code point in the UTF-matching
 	// modes (a mid-code-point start offset makes PCRE2_UTF reject the next
 	// match and truncate the scan early), a single byte in the raw-byte modes.
 	zeroAdvWidth := "1"
 	if e.regexModeOpts().utfMatching {
-		e.ensureRegexUTF8Width()
+		e.ensureStrHeaderRuntime()
 		w := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf8_width(ptr %s, i64 %s)", w, strVal.Ref, mStart))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf8_width("+irPtr+" %s, i64 %s)", w, strVal.Ref, mStart))
 		zeroAdvWidth = w
 	}
 	advanced := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", advanced, mStart, zeroAdvWidth))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", advanced, searchAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", advanced, searchAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(realL)
 	lastSplit := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lastSplit, lastSplitAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", lastSplit, lastSplitAlloca))
 	onSegment(lastSplit, mStart, md)
-	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8(ptr %s)", md))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", mEnd, lastSplitAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", mEnd, searchAlloca))
+	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8("+irPtr+" %s)", md))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", mEnd, lastSplitAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", mEnd, searchAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	finalLastSplit := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalLastSplit, lastSplitAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalLastSplit, lastSplitAlloca))
 	return finalLastSplit
 }
 
@@ -212,21 +212,18 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 // regex that never matches returns a single-element array containing
 // the whole subject, matching real JS.
 func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
-	e.ensureStrlen()
-	e.ensureMalloc()
-	e.ensureMemcpy()
 
 	handleReg := e.emitRegexHandleLoad(regexVal)
 	subjectLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", subjectLen, strVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", subjectLen, strVal.Ref))
 
 	// Each split point also contributes the separator's capture groups
 	// (@@split), an unmatched one as undefined.
 	capSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", capSlot))
-	e.emitInstr(fmt.Sprintf("call i32 @pcre2_pattern_info_8(ptr %s, i32 %d, ptr %s)", handleReg, pcre2InfoCaptureCount, capSlot))
+	e.emitInstr(fmt.Sprintf("call i32 @pcre2_pattern_info_8("+irPtr+" %s, i32 %d, "+irPtr+" %s)", handleReg, pcre2InfoCaptureCount, capSlot))
 	cap32 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", cap32, capSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" %s, align 4", cap32, capSlot))
 	nCap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i32 %s to i64", nCap, cap32))
 	perSplit := e.freshReg()
@@ -235,16 +232,16 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	// --- pass 1: count the split points ---
 	countAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", countAlloca))
 	e.emitRegexSplitScan(handleReg, strVal, subjectLen, func(gapStartReg, gapEndReg, _ string) {
 		cur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, countAlloca))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, countAlloca))
 		next := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", next, cur, perSplit))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, countAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, countAlloca))
 	})
 	matchCount := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", matchCount, countAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", matchCount, countAlloca))
 	totalCount := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", totalCount, matchCount)) // + trailing segment
 
@@ -252,35 +249,35 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 	byteCount := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount, totalCount))
 	data := e.freshReg()
-	e.heapMallocInto(data, byteCount)
+	e.heapMallocInto(data, allocElems, byteCount)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	var storeSegment func(startReg, endReg string)
 	storePtr := func(p string) {
 		curIdx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curIdx, idxAlloca))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", curIdx, idxAlloca))
 		dstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", dstGep, data, curIdx))
-		e.heapStore("ptr", p, dstGep, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", dstGep, data, curIdx))
+		e.heapStore(irPtr, p, dstGep, 8)
 		nextIdx := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, curIdx))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", nextIdx, idxAlloca))
 	}
 	// storeCaptures appends groups 1..nCap of a split point's match.
 	storeCaptures := func(md string) {
 		ov := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @pcre2_get_ovector_pointer_8(ptr %s)", ov, md))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @pcre2_get_ovector_pointer_8("+irPtr+" %s)", ov, md))
 		gi := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", gi))
-		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", gi))
+		e.emitInstr(fmt.Sprintf("store i64 1, "+irPtr+" %s, align 8", gi))
 		condL, bodyL, setL, unsetL, nextL, doneL := e.freshLabel("split.cap.cond"), e.freshLabel("split.cap.body"), e.freshLabel("split.cap.set"), e.freshLabel("split.cap.unset"), e.freshLabel("split.cap.next"), e.freshLabel("split.cap.done")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(condL)
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", g, gi))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", g, gi))
 		over := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", over, g, nCap))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", over, doneL, bodyL))
@@ -289,10 +286,10 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 2", i0, g))
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i1, i0))
 		p0, p1, s, en := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", p0, ov, i0))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", s, p0))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", p1, ov, i1))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", en, p1))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", p0, ov, i0))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", s, p0))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", p1, ov, i1))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", en, p1))
 		unset := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -1", unset, s)) // PCRE2_UNSET
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", unset, unsetL, setL))
@@ -305,7 +302,7 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 		e.emitLabel(nextL)
 		gn := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", gn, g))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", gn, gi))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", gn, gi))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(doneL)
 	}
@@ -315,10 +312,10 @@ func (e *Emitter) emitRegexSplit(strVal, regexVal Value) Value {
 		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", segLen, endReg, startReg))
 		buf := e.emitStringAlloc(segLen) // TDD-00120: length-prefixed
 		srcPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", srcPtr, strVal.Ref, startReg))
-		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, srcPtr, segLen))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", srcPtr, strVal.Ref, startReg))
+		e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", buf, srcPtr, segLen))
 		termGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, buf, segLen))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", termGep, buf, segLen))
 		e.heapStore("i8", "0", termGep, 1)
 		storePtr(buf)
 	}

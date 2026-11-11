@@ -46,24 +46,6 @@ func (e *Emitter) classifyAsyncSuspension(prog *ast.Program) {
 	}
 }
 
-// ensureCurrentTaskGlobal declares @__kml_current_task (the running-task pointer,
-// null on the main/scheduler context). Declared by both the task runtime and the
-// fetch runtime so __kml_await_fetch can reference it even in a program that
-// uses fetch without any may-suspend async function (where it stays null).
-func (e *Emitter) ensureCurrentTaskGlobal() {
-	if e.usedCurrentTaskGlobal {
-		return
-	}
-	e.usedCurrentTaskGlobal = true
-	e.emitGlobal("@__kml_current_task = external thread_local global ptr, align 8")
-	// The top-level (no-task) AsyncLocalStorage context-frame head (TDD-00168).
-	// Declared alongside @__kml_current_task so __kml_spawn_task can inherit it
-	// for a task spawned from top-level code, and the ALS accessors can fall
-	// back to it, whether or not the program actually uses AsyncLocalStorage
-	// (it just stays null when unused). See runtime_asynchooks.go.
-	e.emitGlobal("@__kml_root_async_ctx = external thread_local global ptr, align 8")
-}
-
 // awaitsDirectly reports whether n contains an `await` or a `for await…of`
 // that belongs to the enclosing function or module — it never enters a nested
 // function or class (whose awaits are their own), n itself included.

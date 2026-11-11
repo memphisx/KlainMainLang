@@ -5,10 +5,10 @@
   "statusPage": "GLOBAL-FUNCTIONS.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "20/21",
-    "loosePct": 95,
-    "strict": "17/21",
-    "strictPct": 76
+    "loose": "23/24",
+    "loosePct": 96,
+    "strict": "18/24",
+    "strictPct": 75
   },
   "lede": "JavaScript's language-level globals — numeric parsing, type coercion, URI/base64 codecs, and deep cloning — compiled to plain C-stdlib calls with no runtime engine. globalThis.X reads the global X, and globalThis as a value is the global object, holding the builtins and whatever the program sets on it. Dynamic eval is out of scope — it needs the (unstarted) embedded engine, though a compile-time-constant eval(\"<expression>\") does route through this compiler's own parser. Malformed input is rejected where JS rejects it — decodeURI/decodeURIComponent throw URIError and atob enforces forgiving-base64 with QuotaExceededError.",
   "entries": [
@@ -367,6 +367,33 @@
       }
     },
     {
+      "id": "globals.escape",
+      "name": "escape(s) / unescape(s)",
+      "statusRow": "escape(s) / unescape(s)",
+      "signature": "escape(s: string): string; unescape(s: string): string",
+      "badge": "exact",
+      "description": "The legacy Annex B percent-encoding: escape keeps A–Z a–z 0–9 @*_+-./ and writes every other code unit as %XX (below 256) or %uXXXX; unescape decodes both forms and leaves any other % as is.",
+      "params": [
+        {
+          "name": "s",
+          "type": "string",
+          "desc": "The text to encode or decode (converted with ToString)."
+        }
+      ],
+      "returns": {
+        "type": "string",
+        "desc": "The encoded or decoded text."
+      },
+      "exampleKey": "globals/globals",
+      "snippet": "console.log(escape(\"a b€\"))           // a%20b%u20AC\nconsole.log(unescape(\"%41%u20AC\"))  // A€",
+      "seeAlso": [
+        "globals.encodeURIComponent"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/escape"
+      }
+    },
+    {
       "id": "globals.atob",
       "name": "atob(s)",
       "statusRow": "atob(s)",
@@ -441,11 +468,50 @@
       "exampleKey": "structured_clone/structured_clone",
       "snippet": "const clone = structuredClone(original)\nclone.points[0].x = 500\nconsole.log(original.points[0].x) // 0",
       "differences": [
-        "`EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise`/`any`/`unknown` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError`); a `Map`/`Set` with an array/Map/Set key or value element type is also rejected (only scalar/string/object elements clone). A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name."
+        "A value typed `any`/`unknown`, or one holding a class instance, a function or a nested collection, clones by its run-time shape as Node does: a class instance becomes a plain object, and a function, `Promise` or `URL` throws `DataCloneError`. A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name."
       ],
       "seeAlso": [],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/structuredClone"
+      }
+    },
+    {
+      "id": "globals.WebAssembly",
+      "name": "WebAssembly",
+      "statusRow": "WebAssembly (Module/Instance/Memory/Table/Global, compile/instantiate/validate, compileStreaming/instantiateStreaming, the error classes)",
+      "signature": "namespace WebAssembly { class Module; class Instance; class Memory; class Table; class Global; function compile(bytes): Promise<Module>; function instantiate(bytes, imports?): Promise<{ module, instance }>; function validate(bytes): boolean; … }",
+      "badge": "caveats",
+      "description": "Node's WebAssembly JS API, running modules on the wasmtime engine linked into the program. Exports become JS functions (i64 values as BigInt), memories expose an ArrayBuffer (a SharedArrayBuffer when shared), tables and globals read and write as in V8, and imported JS functions can call back into the module or throw through it. compile and instantiate settle in the same task order as V8's, and a Module or shared Memory can be posted to a worker. Compile and link errors carry wasmtime's wording; after memory.grow() the old buffer is not detached. Linking needs the wasmtime C API installed.",
+      "returns": {
+        "type": "Promise<WebAssembly.WebAssemblyInstantiatedSource>",
+        "desc": "From instantiate(bytes): the compiled module and its instance."
+      },
+      "exampleKey": "wasm/wasm",
+      "snippet": "const { instance } = await WebAssembly.instantiate(bytes, { env: { report } })",
+      "seeAlso": [
+        "globals.structuredClone"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/WebAssembly/Reference/JavaScript_interface"
+      }
+    },
+    {
+      "id": "globals.navigator",
+      "name": "navigator",
+      "statusRow": "navigator",
+      "signature": "navigator: Navigator",
+      "badge": "caveats",
+      "description": "Node's navigator: hardwareConcurrency, language/languages from LC_ALL, LC_MESSAGES or LANG (en-US when none is set), platform (MacIntel, Win32, Linux <machine>) and userAgent (Node.js/<major>). Navigator itself cannot be constructed.",
+      "exampleKey": "globals/navigator",
+      "snippet": "console.log(navigator.hardwareConcurrency, navigator.language, navigator.platform)",
+      "differences": [
+        "No navigator.locks (the Web Locks API)."
+      ],
+      "seeAlso": [
+        "globals.queueMicrotask"
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/globals.html#navigator"
       }
     },
     {
@@ -499,7 +565,7 @@
       "statusRow": "eval(s)",
       "signature": "eval(s: string): any",
       "badge": "missing",
-      "description": "General/dynamic eval is unimplemented (it needs the opt-in embedded engine, not started). A narrow static subset does work: a compile-time-constant eval(\"<expression>\") is compiled in place through this compiler's own parser and codegen, no engine. A dynamic string, a statement/declaration, or a reference to a top-level binding is a clean compile error, never a runtime throw.",
+      "description": "Eval of a string computed at run time is unimplemented (it needs the opt-in embedded engine, not started): a direct call with such a string is a compile error, and eval reached as a value throws EvalError for one. A compile-time-constant string is compiled in place through this compiler's own parser and codegen, directly or indirectly ((0, eval)(…), eval?.(…)), statements included: sloppy var and function declarations land in the caller's variables, strict code keeps its own, the completion value is the result, and source that does not parse throws SyntaxError when the eval runs. A value that is not a string is returned unchanged.",
       "params": [
         {
           "name": "s",

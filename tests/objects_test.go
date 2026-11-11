@@ -323,15 +323,19 @@ console.log(target.label)
 }
 
 // Object.assign merging a source whose same-named field has an incompatible
-// type (number target, string source) can't change the target field's type in
-// this typed-object subset — reject cleanly instead of emitting a store of the
-// mismatched value into the target's slot (invalid IR).
+// type into a strict target's typed slot is rejected cleanly (the JavaScript
+// lane and a fresh literal target take the value).
 func TestE2EObjectAssignIncompatibleFieldTypeRejected(t *testing.T) {
 	mustCompileError(t, `
 const target = { a: 1 }
 const result = Object.assign(target, { a: 2 }, { a: "c" })
 console.log(result.a)
-`, "incompatible with the target field")
+`, "a value of another type is not supported yet")
+	assertSameAsNodeCompatJS(t, `
+const target = { a: 1 }
+const result = Object.assign(target, { a: 2 }, { a: "c" })
+console.log(result.a, target.a, result === target)
+`)
 }
 
 // Object.fromEntries with a Symbol or object key (which real JS runs through
@@ -342,7 +346,7 @@ func TestE2EObjectFromEntriesSymbolAndObjectKeys(t *testing.T) {
 	assertSameAsNode(t, `export {}
 const key = Symbol("s")
 const result = Object.fromEntries([[key, 'value']])
-console.log(result, result[key])
+console.log(result, (result as any)[key])
 const okey = { toString() { return 'key' } }
 console.log(Object.fromEntries([[okey, 'value']]))
 `)
@@ -1943,4 +1947,235 @@ enum R { A, B = 5, C }
 console.log(R[5], R[6], R[99] === undefined, Object.keys(R));
 console.log(K);
 `, "0.5 2.5 5 9007199254740992 -1\n8589934592 -1073741825\nx!\nB C true [ '0', '5', '6', 'A', 'B', 'C' ]\n{\n  '1': 'A',\n  A: 1,\n  B: 2.5,\n  '2.5': 'B',\n  C: 9007199254740992,\n  '9007199254740992': 'C',\n  D: -3,\n  '-3': 'D'\n}")
+}
+
+// A destructuring from an object literal reports each property the literal
+// lacks and the pattern gives no default (TS2339), as a declaration and as
+// an assignment; a defaulted one is implied by the pattern.
+func TestE2EDestructureMissingFromLiteralIsTypeError(t *testing.T) {
+	_, err := parseStrict(`
+function f() {
+  var { x, y = 1 } = {};
+  let a: number, b: number;
+  ({ a: a = 1, b } = {});
+  const { p: { q = 2 } } = { p: {} };
+  console.log(x, y, a, b, q);
+}
+f();
+`)
+	if err == nil {
+		t.Fatal("expected type errors")
+	}
+	msg := err.Error()
+	for _, want := range []string{"3:9: property 'x' does not exist on type '{}'", "5:16: property 'b' does not exist on type '{}'"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("missing %q in:\n%s", want, msg)
+		}
+	}
+	for _, not := range []string{"'y'", "'a'", "'q'"} {
+		if strings.Contains(msg, not) {
+			t.Errorf("unexpected %s in:\n%s", not, msg)
+		}
+	}
+}
+
+// Object statics with too few or too many arguments, primitives and
+// functions, as JavaScript runs them; a value an unannotated function
+// returns holds its tuples as the function does.
+func TestE2EObjectStaticsArityJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => { try { console.log(n, JSON.stringify(f())); } catch (e) { console.log(n, e.name, e.message); } };
+t("keys0", () => Object.keys());
+t("keys2", () => Object.keys({ a: 1 }, 2));
+t("vals0", () => Object.values());
+t("vals2", () => Object.values({ a: 1 }, 2));
+t("ent0", () => Object.entries());
+t("ent2", () => Object.entries({ a: 1 }, 2));
+t("frz0", () => Object.freeze());
+t("frz2", () => Object.freeze(5, 1));
+t("frzP", () => Object.freeze("s"));
+t("seal0", () => Object.seal());
+t("sealP", () => Object.seal(3));
+t("has1", () => Object.hasOwn({ a: 1 }));
+t("has3", () => Object.hasOwn({ a: 1 }, "a", 9));
+t("isArr0", () => Array.isArray());
+t("isArr2", () => Array.isArray([], 1));
+t("assignP", () => Object.assign(5, { a: 1 }).a);
+t("assignNull", () => Object.assign(null, {}));
+t("keysFn", () => Object.keys(function f() {}));
+t("arrX", () => typeof Array.zork);
+const g = () => Object.entries({a:1}); const t2 = (f) => { const r = f(); console.log(JSON.stringify(r), r[0][0]); }; t2(g);
+`)
+}
+
+// Indexing a number, boolean or BigInt reads its wrapper's properties
+// (undefined, or a method), and a member some members of a union lack is
+// read through the box.
+func TestE2EPrimitiveIndexAndUnionMemberJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+console.log((5)[0], true[1], (5)["x"], (5)["toFixed"](1));
+const n = 7; console.log(n[0], n["constructor"] === Number);
+const out = []; for (const C of [Map, Set, WeakMap]) { const m = new C([]); out.push(m.size); } console.log(out);
+const xs = [new Map(), new Set()]; console.log(xs.map((x) => x.size + (x.has(1) ? 1 : 0)));
+`)
+}
+
+// Optional and plain property reads on primitives, collections and tuples
+// as JavaScript reads them.
+func TestE2EPrimitiveOptionalMemberJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => { try { console.log(n, f()); } catch (e) { console.log(n, e.name, e.message); } };
+t("optProp", () => { const m = new Map([["a", 1]]); return m?.size; });
+t("optNum", () => { const n = 5; return n?.foo; });
+t("mapIdx", () => { const m = new Map([["a", 1]]); return m[0]; });
+t("lenSym", () => { const s = Symbol("x"); return s.length; });
+t("fieldOnNum", () => { const n = 5; return n.foo; });
+t("bigFld", () => 3n.foo);
+t("tupConst", () => { const p = [1, "a"]; return p[5]; });
+`)
+}
+
+// Object.keys/values/entries of host values (a Map, a Set, a Date, a typed
+// array, a function, a symbol): their own enumerable properties, not their
+// entries; a typed array's values in a plain array.
+func TestE2EObjectEnumerationHostValuesJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+console.log(Object.keys(new Map([[1, 2]])), Object.values(new Map([["a", 1]])), Object.entries(new Set([1])));
+console.log(Object.keys(new Map([["a", 1]])), Object.entries(new Map([["a", 1]])));
+console.log(Object.keys([1, 2]), Object.values(new Uint8Array(2)), Object.entries(() => 1));
+const s = Symbol(); console.log(Object.keys(s), Object.keys(10n), Object.values(new Date(0)));
+console.log(Object.values(new Uint8Array(2)), Object.entries(new Int16Array([5])), Object.keys(new Float64Array(2)), Object.values(Buffer.from("ab")));
+`)
+}
+
+func TestE2EObjectEnumerationHostValues(t *testing.T) {
+	assertSameAsNode(t, `
+const r: Record<string, number> = { a: 1 };
+console.log(Object.values(r), Object.keys(new Map([["a", 1]])), Object.values(new Uint8Array(2)));
+`)
+}
+
+// Object.assign onto a Map, a function, a Date or a primitive's wrapper.
+func TestE2EObjectAssignHostTargets(t *testing.T) {
+	assertSameAsNode(t, `
+const m = Object.assign(new Map(), { a: 1 }); console.log(m.a, m.size);
+console.log(Object.assign(() => 1, { q: 2 }).q);
+const d = Object.assign(new Date(0), { z: 3 }); console.log(d.z, d.getTime());
+`)
+}
+
+func TestE2EObjectAssignPrimitiveTargetJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const n = Object.assign(5, { k: 1 }); console.log(typeof n, n.k);
+const s = Object.assign("ab", { k: 2 }); console.log(typeof s, s.k, s.length);
+`)
+}
+
+// Destructuring an awaited primitive or host value, and a field holding a
+// primitive or host value with a nested pattern.
+func TestE2EDestructureNonObjectSourcesJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+(async () => {
+  const { a } = await 5; console.log(a);
+  const { length } = await "abc"; console.log(length);
+  const { size } = await new Map([[1, 2]]); console.log(size);
+  try { const { b } = await null; } catch (e) { console.log(e.constructor.name); }
+  const { toFixed } = await Promise.resolve(1.5); console.log(typeof toFixed);
+  const o = { a: 5, s: "xy", m: new Map([[1, 2]]), t: [1, 2] };
+  const { a: { toFixed: tf }, s: { length: sl }, m: { size: ms } } = o; console.log(typeof tf, sl, ms);
+  const { s: [c1, c2] } = o; console.log(c1, c2);
+  const { m: [[k, v]] } = o; console.log(k, v);
+  const { t: [x, y] } = o; console.log(x, y);
+  try { const { a: [z] } = o; } catch (e) { console.log(e.constructor.name); }
+})();
+`)
+}
+
+// Bracket reads and writes on host objects (a Map, a function, a Date, a
+// Set) are their own properties.
+func TestE2EHostObjectBracketPropsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const m = new Map(); m["k"] = 1; console.log(m["k"], m[5], m.size);
+const f = () => 1; f["p"] = 2; console.log(f["p"], f["name"]);
+const d = new Date(0); d[0] = "z"; console.log(d[0], d["getTime"] === Date.prototype.getTime);
+const s = new Set([1]); console.log(s["size"], s["has"](1));
+const str = "abc"; let i = 1; console.log(str[i], str[0], str["length"]);
+const p = Promise.resolve(1); console.log(typeof p["then"]);
+const r = /a/g; console.log(r["source"], r["global"]);
+`)
+}
+
+// Builtins called with too few arguments read undefined for the missing
+// ones, as JavaScript does.
+func TestE2EBuiltinMissingArgsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const out = [];
+const t = (k, f) => { try { out.push(k + "=" + String(f())); } catch (e) { out.push(k + "!" + e.constructor.name + ":" + e.message); } };
+t("jp", () => JSON.parse());
+t("str", () => String());
+t("num", () => Number());
+t("pi", () => parseInt());
+t("test", () => /a/.test());
+t("exec", () => /u/.exec());
+t("match", () => "undefined".match());
+t("at", () => [1, 2].at());
+t("cw", () => [1, 2, 3].copyWithin());
+t("dp", () => Date.parse());
+t("gpo", () => Object.getPrototypeOf());
+t("gopn", () => Object.getOwnPropertyNames());
+t("gopd", () => Object.getOwnPropertyDescriptor({ a: 1 }));
+t("spo", () => Object.setPrototypeOf({}));
+t("dps", () => Object.defineProperties({}));
+t("dps2", () => Object.defineProperties({}, { a: { value: 1 } }, 5).a);
+t("isv", () => ArrayBuffer.isView());
+t("hop", () => ({}).hasOwnProperty());
+t("afrom", () => Array.from());
+t("mfe", () => new Map().forEach());
+t("pall", () => Promise.all().catch((e) => e.message) instanceof Promise);
+t("bfrom", () => Buffer.from());
+t("enc", () => new TextEncoder().encode().length);
+t("rown", () => Reflect.ownKeys());
+t("rget", () => Reflect.get({ a: 1 }));
+console.log(out.join("\n"));
+`)
+}
+
+// An object literal passed where a parameter's type does not declare one
+// of its keys (an option a JavaScript caller passes): the key is the
+// object's own property, the call unaffected.
+func TestE2ELiteralUndeclaredOptionKey(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const dgram = require("dgram");
+const s = dgram.createSocket({ type: "udp4", lookup: (h, o, cb) => cb(null, "127.0.0.1", 4) });
+console.log(typeof s.bind);
+s.close();
+function f(o) { return o; }
+const r = f({ z: 0, a: 1, extra: "x" });
+console.log(JSON.stringify(r), Object.keys(r));
+`)
+}
+
+// Destructuring a function declaration's value: properties assigned onto
+// it (the assert module's default export).
+func TestE2EDestructureFunctionValue(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `import assert from "assert";
+const { AssertionError, strictEqual } = assert;
+console.log(typeof AssertionError, typeof strictEqual);
+function f() {}
+f.k = 3;
+const { k, name } = f;
+console.log(k, name);
+`)
+}
+
+// A symbol or computed key on an Error: the error's own property, which
+// Object.prototype.toString reads for its tag. The well-known symbols are
+// all declared (`Symbol.toStringTag`, `Symbol.species`, …).
+func TestE2EErrorSymbolKeyAndWellKnownSymbols(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const err = new Error("foo");
+err[Symbol.toStringTag] = "Foobar";
+console.log(Object.prototype.toString.call(err), err[Symbol.toStringTag]);
+const k = "kk"; err[k] = 1; console.log(err.kk);
+console.log(Object.prototype.toString.call(new Error("x")));
+console.log(typeof Symbol.toPrimitive, Symbol.species.toString(), Symbol.hasInstance.description);
+`)
 }

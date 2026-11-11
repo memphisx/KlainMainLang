@@ -655,3 +655,70 @@ for (var k = 0; k < 2; k++) {
 console.log(a, b, c, d);
 `, "true\n415 939 830 934")
 }
+
+// An unannotated async method of a generic class returns a promise, also
+// when called from a sibling before its own signature is built.
+func TestE2EGenericClassAsyncPrivateMethod(t *testing.T) {
+	assertSameAsNode(t, `class H<R> {
+  r: Map<R, number> | undefined;
+  async #run(v: any) { if (v) return 0; await 0; return 1; }
+  rel(v?: any) { return this.#run(v); }
+}
+new H<string>().rel().then((x) => console.log("rel", x));
+new H<string>().rel("x").then((x) => console.log("rel", x));
+`)
+}
+
+// Promise.withResolvers' resolve takes an object literal of a union result
+// type (IteratorResult): the union nested inside resolve's own parameter.
+func TestE2EWithResolversIteratorResult(t *testing.T) {
+	assertSameAsNode(t, `function f(done: boolean): Promise<IteratorResult<number, undefined>> {
+  const { promise, resolve } = Promise.withResolvers<IteratorResult<number, undefined>>();
+  if (done) resolve({ done: true, value: undefined });
+  else resolve({ value: 5, done: false });
+  return promise;
+}
+f(false).then((r) => console.log(r));
+f(true).then((r) => console.log(r));
+`)
+}
+
+// `o[k]` with k a `keyof O` (not one literal) on a static-shape object reads
+// and writes the named property at run time; a generic `T[K]` is the union of
+// the fields K can name.
+func TestE2EKeyofIndexStaticObject(t *testing.T) {
+	src := "type O = { n: number | null; s: string };\nconst o1: O = { n: null, s: \"x\" };\nconst keys: (keyof O)[] = [\"n\", \"s\"];\nfor (const k of keys) console.log(k, o1[k]);\nfor (const k of keys) console.log(o1[k] === null);\ntype P = { x: number; y: number; z: number };\nconst p: P = { x: 1, y: 2, z: 3 };\nfunction sum(o: P): number { let t = 0; for (const k of Object.keys(o) as (keyof P)[]) t += o[k]; return t; }\nfunction bump(o: P, k: keyof P) { o[k] = o[k] * 10; o[k] += 1; }\nconsole.log(sum(p)); bump(p, \"y\"); console.log(p, p.y + 1);\ntype S = { name: string; tag: string };\nconst s: S = { name: \"a\", tag: \"b\" };\nfunction up(o: S, k: keyof S) { return o[k].toUpperCase(); }\nconsole.log(up(s, \"tag\"), ([\"name\", \"tag\"] as (keyof S)[]).map(k => s[k].length));\nconst dyn: string = \"nope\"; console.log((p as Record<string, number>)[dyn]);\nfunction pluck<T, K extends keyof T>(o: T, k: K): T[K] { return o[k]; }\nconsole.log(pluck(p, \"z\"), pluck(s, \"name\"));\ntype M = { id: number; name: string; tags: string[]; ok: boolean };\nconst m: M = { id: 7, name: \"q\", tags: [\"a\"], ok: true };\nfunction get<T, K extends keyof T>(o: T, k: K): T[K] { return o[k]; }\nconsole.log(get(m, \"id\") + 1, get(m, \"name\").toUpperCase(), get(m, \"tags\").length, get(m, \"ok\") === true);\nfunction set<T, K extends keyof T>(o: T, k: K, v: T[K]) { o[k] = v; }\nset(m, \"id\", 9); set(m, \"name\", \"z\"); set(m, \"tags\", [\"x\", \"y\"]); console.log(m);\nfor (const k of [\"id\", \"name\", \"ok\"] as (keyof M)[]) console.log(k, typeof m[k], m[k]);\n"
+	want := "n null\ns x\ntrue\nfalse\n6\n{ x: 1, y: 21, z: 3 } 22\nB [ 1, 1 ]\nundefined\n3 a\n8 Q 1 true\n{ id: 9, name: 'z', tags: [ 'x', 'y' ], ok: true }\nid number 9\nname string z\nok boolean true"
+	if got := compileAndRun(t, src); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// An arrow typed by a generic signature it does not declare itself (an
+// annotated generic function type, a generic interface method) takes that
+// signature's parameters, the signature's own type parameters included.
+func TestE2EArrowTypedByGenericContextualSignature(t *testing.T) {
+	assertOutput(t, `
+interface Box { map<U>(f: (x: number) => U): U[]; get<T>(k: string): T | undefined }
+const b: Box = { map: (f) => [f(1), f(2)], get: (k) => undefined };
+console.log(b.map((x) => x * 2), b.get<string>("a"));
+const g: <T>(x: T) => T = (x) => x;
+console.log(g(5), g("s"));
+`, "[ 2, 4 ] undefined\n5 s")
+}
+
+// A generic method building its own class from an argument asserted to a
+// type spelled with its parameters (`new Opt(x as [T, ...O])`) builds the
+// instance its result annotation names.
+func TestE2EGenericMethodAssertedInstance(t *testing.T) {
+	assertSameAsNode(t, `class Opt<T> {
+  v: T;
+  constructor(v: T) { this.v = v; }
+  zip<O extends unknown[]>(...o: O): Opt<[T, ...O]> { return new Opt([this.v, ...o] as [T, ...O]); }
+}
+const z = new Opt(1).zip("a", true);
+console.log(z.v, z.v.length, z.v[1]);
+function inner() { const y = new Opt("s").zip(2); console.log(y.v, y.v[0]); }
+inner();
+`)
+}

@@ -69,6 +69,12 @@ func errAt(p ast.Pos, format string, args ...any) error {
 
 // arity checks the argument count is within [lo, hi].
 func arity(e *ast.NewExpression, sig string, lo, hi int) error {
+	if len(e.Args) > hi && len(e.Args) >= lo {
+		// JavaScript evaluates extra arguments and ignores them.
+		if args, ok := dropExtraArgs(e.Args, hi); ok {
+			e.Args = args
+		}
+	}
 	if n := len(e.Args); n < lo || n > hi {
 		switch {
 		case lo == hi && lo == 0:
@@ -89,7 +95,7 @@ func arg(e *ast.NewExpression, i int) ast.Expression {
 	return nil
 }
 
-func typeArg(e *ast.NewExpression, i int) *ast.TypeAnnotation {
+func typeArg(e *ast.NewExpression, i int) ast.TypeNode {
 	if i < len(e.TypeArgs) {
 		return e.TypeArgs[i]
 	}
@@ -194,14 +200,14 @@ func errorKind(kind string) builder {
 			return nil, err
 		}
 		ne := ast.NewNewErrorExpression(kind, arg(e, 0), e.GetPos())
-		// The options bag must be an object literal whose sole member is
-		// `cause` — the one member the runtime error shape carries.
+		// `{ cause: x }` gives the cause directly; any other options
+		// value is read at run time (InstallErrorCause).
 		if opts := arg(e, 1); opts != nil {
-			lit, ok := opts.(*ast.ObjectLiteral)
-			if !ok || len(lit.Properties) != 1 || lit.Properties[0].Key != "cause" || lit.Properties[0].Value == nil {
-				return nil, errAt(e.GetPos(), "new %s's second argument must be a `{ cause: <expr> }` object literal", kind)
+			if lit, ok := opts.(*ast.ObjectLiteral); ok && len(lit.Properties) == 1 && lit.Properties[0].Key == "cause" && lit.Properties[0].KeyExpr == nil && lit.Properties[0].Value != nil && lit.Properties[0].AccessorKind == "" {
+				ne.Cause = lit.Properties[0].Value
+			} else {
+				ne.Options = opts
 			}
-			ne.Cause = lit.Properties[0].Value
 		}
 		return ne, nil
 	}
@@ -245,8 +251,6 @@ func buildDate(e *ast.NewExpression) (ast.Expression, error) {
 		return ast.NewNewDateExpression(nil, e.GetPos()), nil
 	case n == 1:
 		return ast.NewNewDateExpression(e.Args[0], e.GetPos()), nil
-	case n > 7:
-		return nil, errAt(e.GetPos(), "new Date(...) accepts at most 7 arguments (year, month, day, hours, minutes, seconds, milliseconds)")
 	}
 	return ast.NewNewDateExpressionMulti(e.Args, e.GetPos()), nil
 }
@@ -275,18 +279,27 @@ func buildRequest(e *ast.NewExpression) (ast.Expression, error) {
 
 func arrayBuffer(shared bool) builder {
 	return func(e *ast.NewExpression) (ast.Expression, error) {
-		if err := arity(e, e.ClassName+"(byteLength, options?)", 1, 2); err != nil {
+		if err := arity(e, e.ClassName+"(byteLength?, options?)", 0, 2); err != nil {
 			return nil, err
 		}
-		ex := ast.NewNewArrayBufferExpression(e.Args[0], e.GetPos())
+		// No length is ToIndex(undefined): an empty buffer.
+		length := arg(e, 0)
+		if length == nil {
+			length = ast.NewNumberLiteral("0", e.GetPos())
+		}
+		ex := ast.NewNewArrayBufferExpression(length, e.GetPos())
 		ex.Shared = shared
 		// `{maxByteLength: m}` marks the buffer growable (ADR-00494).
 		if opts := arg(e, 1); opts != nil {
-			lit, ok := opts.(*ast.ObjectLiteral)
-			if !ok || len(lit.Properties) != 1 || lit.Properties[0].Key != "maxByteLength" {
-				return nil, errAt(e.GetPos(), "the buffer options literal supports exactly {maxByteLength: n}")
+			if lit, ok := opts.(*ast.ObjectLiteral); ok && len(lit.Properties) == 1 && lit.Properties[0].Key == "maxByteLength" && lit.Properties[0].KeyExpr == nil {
+				ex.MaxByteLength = lit.Properties[0].Value
+			} else {
+				// Any other options value: its maxByteLength, read once at
+				// run time (undefined makes the buffer fixed-length).
+				m := ast.NewMemberExpression(opts, "maxByteLength", opts.GetPos())
+				m.Optional = true
+				ex.MaxByteLength = m
 			}
-			ex.MaxByteLength = lit.Properties[0].Value
 		}
 		return ex, nil
 	}
@@ -306,11 +319,71 @@ func buildRegExp(e *ast.NewExpression) (ast.Expression, error) {
 
 func typedArray(kind string) builder {
 	return func(e *ast.NewExpression) (ast.Expression, error) {
-		if err := arity(e, e.ClassName+"(source, byteOffset?, length?)", 1, 3); err != nil {
+		if err := arity(e, e.ClassName+"(source?, byteOffset?, length?)", 0, 3); err != nil {
 			return nil, err
 		}
-		nta := ast.NewNewTypedArrayExpression(kind, e.Args[0], e.GetPos())
+		// No source: an empty array, as `new Uint8Array(0)`.
+		src := arg(e, 0)
+		if src == nil {
+			src = ast.NewNumberLiteral("0", e.GetPos())
+		}
+		nta := ast.NewNewTypedArrayExpression(kind, src, e.GetPos())
 		nta.ByteOffset, nta.Length = arg(e, 1), arg(e, 2)
 		return nta, nil
 	}
+}
+
+// dropExtraArgs is args cut to keep: extras with no effect dropped, others
+// sequenced after the last kept argument when that one is a value they
+// cannot change (a literal, or a name none of them assigns).
+func dropExtraArgs(args []ast.Expression, keep int) ([]ast.Expression, bool) {
+	extras := args[keep:]
+	pure := true
+	for _, x := range extras {
+		// (a name is kept: reading it may throw a ReferenceError)
+		if _, isID := x.(*ast.Identifier); isID || !inertArg(x) {
+			pure = false
+		}
+	}
+	out := append([]ast.Expression(nil), args[:keep]...)
+	if pure {
+		return out, true
+	}
+	if keep == 0 {
+		return nil, false
+	}
+	last := out[keep-1]
+	if !inertArg(last) {
+		return nil, false
+	}
+	if _, isID := last.(*ast.Identifier); isID {
+		for _, x := range extras {
+			assigns := false
+			ast.Inspect(x, func(n ast.Node) bool {
+				switch n.(type) {
+				case *ast.AssignmentExpression, *ast.UpdateExpression, *ast.CallExpression, *ast.NewExpression:
+					assigns = true
+				}
+				return !assigns
+			})
+			if assigns {
+				return nil, false
+			}
+		}
+	}
+	seq := append([]ast.Expression{}, extras...)
+	out[keep-1] = ast.NewSequenceExpression(append(seq, last), last.GetPos())
+	return out, true
+}
+
+// inertArg reports whether evaluating x has no effect and no dependency
+// on evaluation order: a literal or a name.
+func inertArg(x ast.Expression) bool {
+	switch v := x.(type) {
+	case *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral, *ast.Identifier:
+		return true
+	case *ast.TemplateLiteral:
+		return len(v.Exprs) == 0
+	}
+	return false
 }

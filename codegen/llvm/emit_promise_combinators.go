@@ -18,17 +18,18 @@ import (
 	"KlainMainLang/ast"
 )
 
-const combStateIR = "{ ptr, ptr, i64, i64 }"
+const combStateIR = "{ " + irPtr + ", " + irPtr + ", i64, i64 }"
 
 // emitAsyncCombinator builds the combinator's result for members (ptrReg,
 // lenReg) of Promise<innerTy>.
 func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type) Value {
-	e.ensurePromiseRuntime()
-	e.ensurePromiseSettle()
+	e.ensureExceptionHelpers()
 	e.ensureMicrotasks()
-	e.ensureMalloc()
+	e.ensureUnhandledRejections()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
 
 	c := combinators[kind]
 	outTy := e.combinatorOutElem(kind, innerTy)
@@ -37,14 +38,14 @@ func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type)
 		out = e.mallocArrayBuffer(lenReg, outTy)
 	}
 	st := e.freshReg()
-	e.heapMallocInto(st, "32")
+	e.heapMallocInto(st, allocHost, "32")
 	field := func(i int) string {
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, combStateIR, st, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, combStateIR, st, i))
 		return g
 	}
-	e.heapStore("ptr", q, field(0), 8)
-	e.heapStore("ptr", out, field(1), 8)
+	e.heapStore(irPtr, q, field(0), 8)
+	e.heapStore(irPtr, out, field(1), 8)
 	e.heapStore("i64", lenReg, field(2), 8)
 	e.heapStore("i64", lenReg, field(3), 8)
 
@@ -64,17 +65,17 @@ func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type)
 	runner := e.emitCombinatorRunner(kind, innerTy)
 	e.emitPromiseLoop(lenReg, func(idxVal string) {
 		g, m := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", g, ptrReg, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", m, g))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", g, ptrReg, idxVal))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", m, g))
 		env := e.freshReg()
-		e.heapMallocInto(env, "24")
-		e.heapStore("ptr", st, env, 8)
+		e.heapMallocInto(env, allocClosure, "24")
+		e.heapStore(irPtr, st, env, 8)
 		ip := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", ip, env))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", ip, env))
 		e.heapStore("i64", idxVal, ip, 8)
 		mp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", mp, env))
-		e.heapStore("ptr", m, mp, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", mp, env))
+		e.heapStore(irPtr, m, mp, 8)
 		clo := e.buildBuiltinClosure(runner, env)
 		e.emitAttachPromiseReaction(m, clo)
 	})
@@ -116,7 +117,7 @@ var combinators map[string]*combinator
 func fulfilWithArray(e *Emitter, q, out, n string, elem Type) {
 	arr := e.wrapArrayAggregate(out, n, elem)
 	e.storePromiseValue(q, arr)
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle("+irPtr+" %s, i64 1)", q))
 }
 
 func init() {
@@ -166,6 +167,8 @@ func init() {
 				absent := valTy.zeroLiteral()
 				if valTy.IsDynamic() {
 					absent = fmt.Sprint(nbUndefined)
+				} else if isNullableScalar(valTy) {
+					absent = "null"
 				}
 				bad := e.buildSettlement(settleTy, e.internString("rejected"), absent, reason.Ref)
 				e.storeArrayElement(r.out, r.idx, bad, settleTy)
@@ -182,7 +185,7 @@ func init() {
 				e.ensureExceptionHelpers()
 				agg := e.buildAggregateErrorObj(e.internString("All promises were rejected"), e.internString("AggregateError"), out, n)
 				bits := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bits, agg))
+				e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", bits, agg))
 				e.emitRejectPromise(q, fmt.Sprintf("%d", kmlTagError), false, bits)
 			},
 			fulfilled: func(e *Emitter, r *combRun) { r.resolveWith() },
@@ -224,34 +227,34 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 	name := fmt.Sprintf("@__kml_comb_%s_%d", kind, e.combinatorCtr)
 	restore := e.beginDetachedFunc()
 	st, idx, m := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%env, align 8", st))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %%env, align 8", st))
 	ip, mp := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%env, i64 8", ip))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx, ip))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%env, i64 16", mp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", m, mp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %%env, i64 8", ip))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idx, ip))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %%env, i64 16", mp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", m, mp))
 	field := func(i int) string {
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, combStateIR, st, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, combStateIR, st, i))
 		return g
 	}
 	q, out, n := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, field(0)))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, field(1)))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", q, field(0)))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, field(1)))
 	remP := field(2)
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, field(3)))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, field(3)))
 	// A result already decided ignores later members.
 	qsP, qs := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", qsP, promiseStructIR, q))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", qs, qsP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", qsP, promiseStructIR, q))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", qs, qsP))
 	decided := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", decided, qs))
 	retL, liveL := e.freshLabel("comb.ret"), e.freshLabel("comb.live")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", decided, retL, liveL))
 	e.emitLabel(liveL)
 	msP, ms := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", msP, promiseStructIR, m))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", ms, msP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", msP, promiseStructIR, m))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", ms, msP))
 	rej := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", rej, ms))
 	fulL, rejL := e.freshLabel("comb.fulfilled"), e.freshLabel("comb.rejected")
@@ -260,7 +263,7 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 	// countDown decrements the remaining members and finishes at zero.
 	countDown := func() {
 		r, r1 := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, remP))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, remP))
 		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", r1, r))
 		e.heapStore("i64", r1, remP, 8)
 		zero := e.freshReg()
@@ -273,13 +276,13 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 	}
 	// rejectWith copies the member's reason into q and rejects it.
 	rejectWith := func() {
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from(ptr %s, ptr %s)", q, m))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from("+irPtr+" %s, "+irPtr+" %s)", q, m))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
 	}
 	resolveWith := func() {
 		val := e.loadPromiseValue(m, innerTy)
 		e.storePromiseValue(q, val)
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle("+irPtr+" %s, i64 1)", q))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
 	}
 
@@ -293,7 +296,7 @@ func (e *Emitter) emitCombinatorRunner(kind string, innerTy Type) string {
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal void %s(ptr %%env)", name), body)
+	e.writeFunc(fmt.Sprintf("internal void %s("+irPtr+" %%env)", name), body)
 	return name
 }
 

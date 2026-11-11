@@ -32,3 +32,25 @@ function h({ [k]: x, b } = { b: 2 }) { return [x, b]; }
 console.log(g(), g({ 1: "one" }), h());
 `)
 }
+
+// A literal whose methods return the literal itself, at module level and
+// inside a function: each chained call reads the same layout (the cycle is
+// cut at different depths, one layout either way).
+func TestE2ESelfReturningLiteralChain(t *testing.T) {
+	assertSameAsNode(t, `
+const x = {
+  foo: (t2: string) => x,
+  bar: (t1: number) => x,
+};
+console.log(x.foo("a").foo("b").bar(1) === x);
+function example<T1>() {
+  let y = {
+    foo: <T2>(t2: T2) => y,
+    bar: (t1: T1) => y,
+  };
+  return y;
+}
+const e = example<number>();
+console.log(e.foo("hello").bar(1) === e);
+`)
+}

@@ -20,28 +20,9 @@ import (
 //go:embed wrappersrc/wrapper.c
 var wrapperSource string
 
-// ensureWrapperC links wrapper.c, the wrapper's own-property bag and keys.
-func (e *Emitter) ensureWrapperC() {
-	if e.usedWrapper {
-		return
-	}
-	e.usedWrapper = true
-	e.ensureDynObj()
-	e.ensureHostBoxHooks()
-	e.emitGlobal(`declare i64 @__kml_host_unwrap(i64)
-declare i64 @__kml_wrapper_recv(i64, ptr)
-declare i32 @__kml_wrapper_set(i64, ptr, i64, i32)
-declare i32 @__kml_wrapper_is(i64)
-declare ptr @__kml_wrapper_bag(i64)
-declare ptr @__kml_wrapper_keys_c(i64, i32, ptr)
-declare i32 @__kml_wrapper_has(i64, ptr)
-declare i32 @__kml_wrapper_delete(i64, ptr)
-declare i32 @__kml_str_has_own(ptr, ptr)`)
-}
-
 // primWrapperType is the wrapper object type of the class named name.
 func primWrapperType(name string) Type {
-	return Type{IR: "ptr", Host: hostPrimWrapper, HostTag: name}
+	return Type{IR: irPtr, Host: hostPrimWrapper, HostTag: name}
 }
 
 // isPrimWrapperCtor reports `new Number(…)`, `new String(…)` or `new
@@ -77,17 +58,20 @@ func (e *Emitter) emitNewPrimWrapper(ex *ast.NewExpression) (Value, error) {
 // holding the boxed primitive word, boxed.
 func (e *Emitter) emitBuildWrapper(word, class string) Value {
 	ty := primWrapperType(class)
-	e.ensureMalloc()
-	e.ensureWrapperC()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
+	e.ensureHostBoxHooks()
 	base := e.freshReg()
-	e.heapMallocInto(base, "24")
+	e.heapMallocInto(base, allocHost, "24")
 	e.heapStore("i64", fmt.Sprint(e.hostID(ty)), base, 8)
 	body := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, base))
+	e.emitBodyAddr(body, base)
 	e.heapStore("i64", word, body, 8)
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", bag, base))
-	e.heapStore("ptr", "null", bag, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", bag, base))
+	e.heapStore(irPtr, "null", bag, 8)
 	// It is only ever held boxed.
 	return e.emitBoxHost(Value{Ref: body, Ty: ty})
 }
@@ -95,7 +79,7 @@ func (e *Emitter) emitBuildWrapper(word, class string) Value {
 // emitWrapperValue is the boxed primitive a wrapper's body holds.
 func (e *Emitter) emitWrapperValue(body string) Value {
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, body))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, body))
 	return Value{Ref: r, Ty: TypeAny}
 }
 
@@ -115,20 +99,23 @@ func (e *Emitter) emitInspectWrapper(v Value, depth int) (Value, error) {
 	}
 	// Its own properties follow, as an object's: `[Number: 4] { tag: 'x' }`.
 	bagP := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", bagP, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", bagP, v.Ref))
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", bag, bagP))
-	e.ensureDynObj()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", bag, bagP))
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	cnt := e.freshReg()
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s.Ref, slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", s.Ref, slot))
 	has, some := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, bag))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, bag))
 	propsL, doneL := e.freshLabel("wrap.props"), e.freshLabel("wrap.propsdone")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, propsL, doneL))
 	e.emitLabel(propsL)
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_count(ptr %s)", cnt, bag))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_count("+irPtr+" %s)", cnt, bag))
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", some, cnt))
 	someL := e.freshLabel("wrap.someprops")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", some, someL, doneL))
@@ -145,11 +132,11 @@ func (e *Emitter) emitInspectWrapper(v Value, depth int) (Value, error) {
 	if joined, err = e.emitStringConcat(joined, props); err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", joined.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", joined.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -190,7 +177,11 @@ func (e *Emitter) emitUnwrapPrim(v Value) Value {
 	if !e.wrappersUsed() {
 		return v
 	}
-	e.ensureWrapperC()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
+	e.ensureHostBoxHooks()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_host_unwrap(i64 %s)", r, v.Ref))
 	return Value{Ref: r, Ty: v.Ty}
@@ -205,9 +196,13 @@ func (e *Emitter) emitWrapperRecv(v Value, keyRef string) Value {
 	if !e.wrappersUsed() {
 		return v
 	}
-	e.ensureWrapperC()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
+	e.ensureHostBoxHooks()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_wrapper_recv(i64 %s, ptr %s)", r, v.Ref, keyRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_wrapper_recv(i64 %s, "+irPtr+" %s)", r, v.Ref, keyRef))
 	return Value{Ref: r, Ty: v.Ty}
 }
 
@@ -216,27 +211,27 @@ func (e *Emitter) emitWrapperRecv(v Value, keyRef string) Value {
 // wrapper: it calls through hook, a weak null pointer here that wrapper.c,
 // linked when the program makes one, defines as its routine; v when null.
 func (e *Emitter) emitWrapperHookCall(hook string, v Value, keyRef string) Value {
-	e.declareFn(hook, fmt.Sprintf("@%s = weak global ptr null, align 8", hook))
+	e.declareFn(hook, fmt.Sprintf("@%s = weak"+irGlobalAS+" global "+irPtr+" null, align 8", hook))
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, slot))
 	fp, has := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @%s, align 8", fp, hook))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, fp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @%s, align 8", fp, hook))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, fp))
 	callL, joinL := e.freshLabel("wrap.hook"), e.freshLabel("wrap.join")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, callL, joinL))
 	e.emitLabel(callL)
 	r := e.freshReg()
 	if keyRef != "" {
-		e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, ptr %s)", r, fp, v.Ref, keyRef))
+		e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, "+irPtr+" %s)", r, fp, v.Ref, keyRef))
 	} else {
 		e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s)", r, fp, v.Ref))
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r, slot))
 	e.emitTerminator("br label %" + joinL)
 	e.emitLabel(joinL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, slot))
 	return Value{Ref: out, Ty: v.Ty}
 }
 
@@ -245,13 +240,23 @@ func init() {
 	valueOf := intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			v, err := e.emitExpr(ex.Callee.(*ast.MemberExpression).Object)
+			if err == nil && e.isPrimHostClass(v.Ty) {
+				// An instance of a class extending one: its primitive.
+				body := e.freshReg()
+				e.emitBodyAddr(body, v.Ref)
+				return e.convert(e.emitWrapperValue(body), primWrapperValueType[e.classes[v.Ty.ClassName].HostBase.HostTag]), nil
+			}
 			if err != nil || !isUnconstrainedDynamic(v.Ty) {
 				return v, err
 			}
 			return e.emitUnwrapPrim(v), nil
 		},
 		ty: func(e *Emitter, ex *ast.CallExpression) Type {
-			return e.inferExprType(ex.Callee.(*ast.MemberExpression).Object)
+			t := e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object)
+			if !e.isPrimHostClass(t) {
+				return t
+			}
+			return primWrapperValueType[e.classes[t.ClassName].HostBase.HostTag]
 		},
 	}
 	for _, c := range []string{"Number", "String", "Boolean"} {
@@ -266,7 +271,11 @@ func (e *Emitter) emitWrapperKeys(v Value, all bool, resPtr, doneL string) {
 	if !e.wrappersUsed() {
 		return
 	}
-	e.ensureWrapperC()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
+	e.ensureHostBoxHooks()
 	is, hit := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_is(i64 %s)", is, v.Ref))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", hit, is))
@@ -280,11 +289,11 @@ func (e *Emitter) emitWrapperKeys(v Value, all bool, resPtr, doneL string) {
 		flag = 1
 	}
 	arr, n, a0, a1 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_wrapper_keys_c(i64 %s, i32 %d, ptr %s)", arr, v.Ref, flag, np))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, np))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } undef, ptr %s, 0", a0, arr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { ptr, i64 } %s, i64 %s, 1", a1, a0, n))
-	e.emitInstr(fmt.Sprintf("store { ptr, i64 } %s, ptr %s, align 8", a1, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_wrapper_keys_c(i64 %s, i32 %d, "+irPtr+" %s)", arr, v.Ref, flag, np))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, np))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { "+irPtr+", i64 } undef, "+irPtr+" %s, 0", a0, arr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { "+irPtr+", i64 } %s, i64 %s, 1", a1, a0, n))
+	e.emitInstr(fmt.Sprintf("store { "+irPtr+", i64 } %s, "+irPtr+" %s, align 8", a1, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(contL)
 }
@@ -296,7 +305,7 @@ func (e *Emitter) emitDynPrimValueOf(v Value, pos ast.Pos) (Value, error) {
 	tag, _ := e.emitUnboxTagPayload(v)
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, slot))
 	prim := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagBoolean))
 	objL, doneL := e.freshLabel("valueof.obj"), e.freshLabel("valueof.done")
@@ -309,12 +318,12 @@ func (e *Emitter) emitDynPrimValueOf(v Value, pos ast.Pos) (Value, error) {
 		return Value{}, err
 	}
 	if !e.blockDone {
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.convert(r, TypeAny).Ref, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.convert(r, TypeAny).Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	}
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, slot))
 	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
@@ -336,29 +345,33 @@ func (e *Emitter) emitWrapperDelete(v Value, keyRef string) string {
 // calls it through its weak hook, 0 when there is none.
 func (e *Emitter) emitWrapperSet(v, keyRef, val string, sloppy int) string {
 	if !e.programIndependent() {
-		e.ensureWrapperC()
+		e.ensureAnyToPrimitive()
+		e.ensureNanBox()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
+		e.ensureHostBoxHooks()
 		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_set(i64 %s, ptr %s, i64 %s, i32 %d)", h, v, keyRef, val, sloppy))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_set(i64 %s, "+irPtr+" %s, i64 %s, i32 %d)", h, v, keyRef, val, sloppy))
 		return h
 	}
 	hook := "__kml_wrapper_set_hook"
-	e.declareFn(hook, fmt.Sprintf("@%s = weak global ptr null, align 8", hook))
+	e.declareFn(hook, fmt.Sprintf("@%s = weak"+irGlobalAS+" global "+irPtr+" null, align 8", hook))
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", slot))
-	e.emitInstr(fmt.Sprintf("store i32 0, ptr %s, align 4", slot))
+	e.emitInstr(fmt.Sprintf("store i32 0, "+irPtr+" %s, align 4", slot))
 	fp, has := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @%s, align 8", fp, hook))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, fp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @%s, align 8", fp, hook))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, fp))
 	callL, joinL := e.freshLabel("wrap.sethook"), e.freshLabel("wrap.setjoin")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, callL, joinL))
 	e.emitLabel(callL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 %s(i64 %s, ptr %s, i64 %s, i32 %d)", r, fp, v, keyRef, val, sloppy))
-	e.emitInstr(fmt.Sprintf("store i32 %s, ptr %s, align 4", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = call i32 %s(i64 %s, "+irPtr+" %s, i64 %s, i32 %d)", r, fp, v, keyRef, val, sloppy))
+	e.emitInstr(fmt.Sprintf("store i32 %s, "+irPtr+" %s, align 4", r, slot))
 	e.emitTerminator("br label %" + joinL)
 	e.emitLabel(joinL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" %s, align 4", out, slot))
 	return out
 }
 
@@ -366,28 +379,42 @@ func (e *Emitter) emitWrapperSet(v, keyRef, val string, sloppy int) string {
 // hook in program-independent code, where none answers dflt.
 func (e *Emitter) emitWrapperKeyCall(op string, v Value, keyRef string, dflt int) string {
 	if !e.programIndependent() {
-		e.ensureWrapperC()
+		e.ensureAnyToPrimitive()
+		e.ensureNanBox()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
+		e.ensureHostBoxHooks()
 		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_%s(i64 %s, ptr %s)", h, op, v.Ref, keyRef))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_%s(i64 %s, "+irPtr+" %s)", h, op, v.Ref, keyRef))
 		return h
 	}
 	hook := "__kml_wrapper_" + op + "_hook"
-	e.declareFn(hook, fmt.Sprintf("@%s = weak global ptr null, align 8", hook))
+	e.declareFn(hook, fmt.Sprintf("@%s = weak"+irGlobalAS+" global "+irPtr+" null, align 8", hook))
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", slot))
-	e.emitInstr(fmt.Sprintf("store i32 %d, ptr %s, align 4", dflt, slot))
+	e.emitInstr(fmt.Sprintf("store i32 %d, "+irPtr+" %s, align 4", dflt, slot))
 	fp, has := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @%s, align 8", fp, hook))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, fp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @%s, align 8", fp, hook))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, fp))
 	callL, joinL := e.freshLabel("wrap.hashook"), e.freshLabel("wrap.hasjoin")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, callL, joinL))
 	e.emitLabel(callL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 %s(i64 %s, ptr %s)", r, fp, v.Ref, keyRef))
-	e.emitInstr(fmt.Sprintf("store i32 %s, ptr %s, align 4", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = call i32 %s(i64 %s, "+irPtr+" %s)", r, fp, v.Ref, keyRef))
+	e.emitInstr(fmt.Sprintf("store i32 %s, "+irPtr+" %s, align 4", r, slot))
 	e.emitTerminator("br label %" + joinL)
 	e.emitLabel(joinL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" %s, align 4", out, slot))
 	return out
+}
+
+// isPrimHostClass reports an instance of a class extending Number, String
+// or Boolean.
+func (e *Emitter) isPrimHostClass(t Type) bool {
+	if !t.IsClass() || t.IsDynamic() {
+		return false
+	}
+	info, ok := e.classes[t.ClassName]
+	return ok && info.HostBase != nil && info.HostBase.IsPrimWrapper()
 }

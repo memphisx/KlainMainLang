@@ -11,7 +11,7 @@ package llvm
 
 import _ "embed"
 
-const zctxStructIR = "{ ptr, ptr, i64, i64 }"
+const zctxStructIR = "{ " + irPtr + ", " + irPtr + ", i64, i64 }"
 
 //go:embed streamssrc/zlibstream.c
 var zlibStreamSource string
@@ -19,20 +19,3 @@ var zlibStreamSource string
 // ZlibStreamSource is the Compression/DecompressionStream C source, behind
 // kml_layout.h.
 func ZlibStreamSource() string { return layoutHeader() + zlibStreamSource }
-
-// UsesZlibStream reports whether the program links the zlib stream runtime.
-func (e *Emitter) UsesZlibStream() bool { return e.usedZlibStreamRuntime }
-
-func (e *Emitter) ensureZlibStreamRuntime() {
-	if e.usedZlibStreamRuntime {
-		return
-	}
-	e.usedZlibStreamRuntime = true
-	e.requireLink("z")
-	e.ensureStreamRuntime()
-	e.ensureStreamPipeRuntime() // the %kml.ts sink/pull machinery
-	e.emitGlobal(`declare ptr @__kml_zs_init(i64, i64)
-declare void @__kml_zs_pump(ptr, i32)
-declare ptr @__kml_zs_transform(ptr, i64, i64)
-declare ptr @__kml_zs_flush(ptr)`)
-}

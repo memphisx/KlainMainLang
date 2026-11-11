@@ -21,6 +21,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -119,7 +120,7 @@ func collectFnValueRefs(prog *ast.Program, names map[string]bool) map[string]boo
 // variable, another call's spilled result) evaluates to a pointer and the
 // aggregate is loaded from it.
 func (e *Emitter) emitTupleByValReturn(r *ast.ReturnStatement, retTy Type) error {
-	structIR := retTy.StructIR()
+	structIR := tupleAggIR(retTy)
 	var agg string
 	if lit, ok := r.Value.(*ast.ArrayLiteral); ok && len(lit.Elements) == len(retTy.Fields) && !hasSpreadElem(lit.Elements) {
 		agg = "undef"
@@ -140,11 +141,17 @@ func (e *Emitter) emitTupleByValReturn(r *ast.ReturnStatement, retTy Type) error
 			return err
 		}
 		if !val.Ty.IsTuple() {
-			return fmt.Errorf("%d:%d: expression is not a tuple", r.Value.GetPos().Line, r.Value.GetPos().Col)
+			return internalAt(r.Value.GetPos(), "expression is not a tuple")
 		}
-		loaded := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", loaded, structIR, val.Ref))
-		agg = loaded
+		// The tuple (an array): its elements, as the aggregate's fields.
+		val.Ty.TupleByVal = false
+		agg = "undef"
+		for i := range retTy.Fields {
+			el := e.convert(e.tupleElem(val, i), retTy.Fields[i].Ty)
+			next := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = insertvalue %s %s, %s %s, %d", next, structIR, agg, retTy.Fields[i].Ty.IR, el.Ref, i))
+			agg = next
+		}
 	}
 	if err := e.emitReturnCleanups(); err != nil {
 		return err
@@ -169,13 +176,25 @@ func hasSpreadElem(elems []ast.Expression) bool {
 // callee-allocated tuple — so the allocation count matches the status quo on
 // this path; only the direct-destructure path is allocation-free.
 func (e *Emitter) spillTupleAggregate(aggReg string, tupleTy Type) Value {
-	e.ensureMalloc()
-	structIR := tupleTy.StructIR()
-	heap := e.freshReg()
-	e.emitObjMallocInto(heap, tupleTy)
-	e.heapStore(structIR, aggReg, heap, 8)
+	structIR := tupleAggIR(tupleTy)
 	tupleTy.TupleByVal = false
-	return Value{Ref: heap, Ty: tupleTy}
+	vals := make([]Value, len(tupleTy.Fields))
+	for i, f := range tupleTy.Fields {
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = extractvalue %s %s, %d", r, structIR, aggReg, i))
+		vals[i] = Value{Ref: r, Ty: f.Ty}
+	}
+	return e.tupleOf(vals, tupleTy)
+}
+
+// tupleAggIR is the aggregate a by-value tuple of type t returns: its
+// elements' own types, in order.
+func tupleAggIR(t Type) string {
+	parts := make([]string, len(t.Fields))
+	for i, f := range t.Fields {
+		parts[i] = f.Ty.IR
+	}
+	return "{ " + strings.Join(parts, ", ") + " }"
 }
 
 // unpackTupleAggregate binds an array-destructuring pattern positionally
@@ -183,8 +202,8 @@ func (e *Emitter) spillTupleAggregate(aggReg string, tupleTy Type) Value {
 // all. Eligible tuples carry only plain scalar fields, so nested sub-patterns
 // cannot apply; rest stays the same clean rejection the pointer path gives.
 func (e *Emitter) unpackTupleAggregate(aggReg string, tupleTy Type, elems []ast.ArrayPatternElem, pos ast.Pos) error {
-	if len(elems) > len(tupleTy.Fields) {
-		return fmt.Errorf("%d:%d: destructuring pattern has %d elements but the tuple has only %d", pos.Line, pos.Col, len(elems), len(tupleTy.Fields))
+	if !tuplePatternFits(elems, len(tupleTy.Fields)) {
+		return internalAt(pos, "destructuring pattern of %d elements over a %d-tuple", len(elems), len(tupleTy.Fields))
 	}
 	for _, elem := range elems {
 		if elem.Rest {
@@ -193,10 +212,10 @@ func (e *Emitter) unpackTupleAggregate(aggReg string, tupleTy Type, elems []ast.
 			return e.unpackTuplePatternInto(v.Ref, v.Ty, elems, pos)
 		}
 	}
-	structIR := tupleTy.StructIR()
+	structIR := tupleAggIR(tupleTy)
 	for i, elem := range elems {
 		if elem.SubArray != nil || elem.SubObject != nil {
-			return fmt.Errorf("%d:%d: nested destructuring pattern does not match the tuple element's type", pos.Line, pos.Col)
+			return internalAt(pos, "nested destructuring pattern over a tuple element of another type")
 		}
 		if elem.Name == "" {
 			continue // hole
@@ -206,7 +225,7 @@ func (e *Emitter) unpackTupleAggregate(aggReg string, tupleTy Type, elems []ast.
 		e.emitInstr(fmt.Sprintf("%s = extractvalue %s %s, %d", reg, structIR, aggReg, i))
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, fieldTy.IR, fieldTy.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, reg, slot, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", fieldTy.IR, reg, slot, fieldTy.Align()))
 		e.define(elem.Name, Symbol{Ptr: slot, Ty: fieldTy})
 	}
 	return nil

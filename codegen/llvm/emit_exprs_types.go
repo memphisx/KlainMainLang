@@ -16,9 +16,15 @@ func (e *Emitter) emitTemplateLiteral(tl *ast.TemplateLiteral) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
+		if val.Ty.IsSymbol() {
+			// A symbol has no implicit string: JavaScript's TypeError.
+			e.emitThrowTypeError("Cannot convert a Symbol value to a string")
+			e.emitLabel(e.freshLabel("sym.dead"))
+			return Value{Ref: e.internString(""), Ty: TypePtr}, nil
+		}
 		strVal, err := e.emitValueToString(val)
 		if err != nil {
-			return Value{}, fmt.Errorf("%d:%d: %w", tl.GetPos().Line, tl.GetPos().Col, err)
+			return Value{}, err
 		}
 		acc, err = e.emitStringConcat(acc, strVal)
 		if err != nil {
@@ -68,8 +74,8 @@ func (e *Emitter) emitArgToString(v Value) (Value, error) {
 			word = "undefined"
 		}
 		isNull, r := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, s.Ref))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.internString(word), s.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, s.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isNull, e.internString(word), s.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	if v.Ty.IsUndefined() || v.Ty.IR == "void" {
@@ -81,6 +87,9 @@ func (e *Emitter) emitArgToString(v Value) (Value, error) {
 // emitValueToString converts any value to a null-terminated string ptr.
 // Strings pass through; numbers and bools are formatted via sprintf into a 32-byte scratch buffer.
 func (e *Emitter) emitValueToString(v Value) (Value, error) {
+	if v.Ty.IR == "void" {
+		return Value{Ref: e.internString("undefined"), Ty: TypePtr}, nil // a void call's result
+	}
 	if t, ok := e.asTriStr(v); ok {
 		v = t
 	}
@@ -95,6 +104,14 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		n = e.arrayLen(v)
 		return e.emitBufferEncodeString(p, n, "utf8"), nil
 	}
+	if v.Ty.IsGenerator() && !v.Ty.Nullable() {
+		// Object.prototype.toString over a generator's @@toStringTag.
+		tag := "Generator"
+		if v.Ty.GeneratorIsAsync {
+			tag = "AsyncGenerator"
+		}
+		return Value{Ref: e.internString("[object " + tag + "]"), Ty: TypePtr}, nil
+	}
 	if v.Ty.IsCollIter() {
 		// Object.prototype.toString over the iterator's @@toStringTag.
 		return Value{Ref: e.internString("[object " + collIterName(v.Ty) + "]"), Ty: TypePtr}, nil
@@ -105,7 +122,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		load := func(field string) Value {
 			idx, fty, _ := ty.FieldIndex(field)
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, ty.StructIR(), v.Ref, idx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, ty.StructIR(), v.Ref, idx))
 			return e.loadScalarOrNullableField(gep, fty)
 		}
 		acc, err := e.emitStringConcat(Value{Ref: e.internString("/"), Ty: TypePtr}, load("source"))
@@ -160,8 +177,8 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		// An absent tuple (an omitted `p?: [number, string]` field) is a null
 		// pointer: render its keyword rather than reading through it.
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(absentWord(v.Ty)), slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.internString(absentWord(v.Ty)), slot))
 		presentL := e.freshLabel("tuple.str")
 		doneL := e.freshLabel("tuple.str.done")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(v.Ref), doneL, presentL))
@@ -170,11 +187,11 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", s.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	// An array stringifies to its elements joined by commas (real JS's
@@ -201,18 +218,18 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 			return Value{}, err
 		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, present, payloadStr.Ref, e.internString(absentLiteral(v.Ty))))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, present, payloadStr.Ref, e.internString(absentLiteral(v.Ty))))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	// An absent object, function or Date reference (a `Date[]` element read
 	// is `Date | undefined`) converts to "null" or "undefined"; a present one
 	// as its non-null type does.
-	if v.Ty.IR == "ptr" && v.Ty.Nullable() && (v.Ty.IsObject() || v.Ty.IsFunc() || v.Ty.IsDate()) && !v.Ty.IsArray() && !v.Ty.IsDynamic() {
+	if v.Ty.IR == irPtr && v.Ty.Nullable() && (v.Ty.IsObject() || v.Ty.IsFunc() || v.Ty.IsDate()) && !v.Ty.IsArray() && !v.Ty.IsDynamic() {
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(absentLiteral(v.Ty)), slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.internString(absentLiteral(v.Ty)), slot))
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 		presL, doneL := e.freshLabel("tostr.present"), e.freshLabel("tostr.done")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, presL))
 		e.emitLabel(presL)
@@ -220,11 +237,11 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", str.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", str.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	// A function converts as a function object does: its own
@@ -237,13 +254,13 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		}
 		return e.emitDynamicRender(boxed, false)
 	}
-	if v.Ty.IR == "ptr" && !v.Ty.IsObject() && !v.Ty.IsArray() && !v.Ty.IsFunc() {
+	if v.Ty.IR == irPtr && !v.Ty.IsObject() && !v.Ty.IsArray() && !v.Ty.IsFunc() {
 		// Nullable string: at runtime select "null" string when ptr is null.
 		if v.Ty.Nullable() {
 			isNull := e.freshReg()
 			result := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s",
+			e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s",
 				result, isNull, e.internString(absentLiteral(v.Ty)), v.Ref))
 			return Value{Ref: result, Ty: TypePtr}, nil
 		}
@@ -283,9 +300,9 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 				loadStr := func(field string) string {
 					idx, _, _ := info.Ty.FieldIndex(field)
 					gep := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), v.Ref, idx))
+					e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, info.Ty.StructIR(), v.Ref, idx))
 					r := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, gep))
+					e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, gep))
 					return r
 				}
 				namePtr := loadStr("name")
@@ -304,7 +321,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 				isEmpty := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, msgLen))
 				res := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", res, isEmpty, namePtr, full.Ref))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", res, isEmpty, namePtr, full.Ref))
 				return Value{Ref: res, Ty: TypePtr}, nil
 			}
 		}
@@ -315,7 +332,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 				return e.emitValueToString(e.convert(v, *info.HostBase))
 			}
 			body := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, v.Ref))
+			e.emitBodyAddr(body, v.Ref)
 			return e.emitValueToString(Value{Ref: body, Ty: *info.HostBase})
 		}
 		// No user toString(): Object.prototype.toString's `[object Tag]`, the
@@ -335,16 +352,23 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 			// A class extending a host inherits its host's tag.
 			return Value{Ref: e.internString("[object " + hostTagName(*info.HostBase) + "]"), Ty: TypePtr}, nil
 		}
+		if _, _, ok := canon.FieldIndex("@@toStringTag"); ok && !canon.IsClass() {
+			// An own [Symbol.toStringTag] property: the tag when a string.
+			pos := ast.Pos{}
+			tag := ast.NewMemberExpression(e.bindValue(Value{Ref: v.Ref, Ty: canon}, pos), "@@toStringTag", pos)
+			isStr := ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, tag, pos), ast.NewStringLiteral("string", pos), pos)
+			return e.emitExpr(ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral("[object ", pos),
+				ast.NewConditionalExpression(isStr, tag, ast.NewStringLiteral("Object", pos), pos), pos), ast.NewStringLiteral("]", pos), pos))
+		}
 		return Value{Ref: e.internString("[object Object]"), Ty: TypePtr}, nil
 	}
-	e.ensureSprintf()
 	scratch := e.emitStringScratch(32) // TDD-00120: length-prefixed; finalized below
 	switch {
 	case v.Ty.IR == "i1":
 		truePtr := e.internString("true")
 		falsePtr := e.internString("false")
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, v.Ref, truePtr, falsePtr))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, v.Ref, truePtr, falsePtr))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	case v.Ty.Float:
 		val := v
@@ -355,8 +379,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		}
 		// Shortest round-trip, JS-faithful formatting (TDD-00080) instead of
 		// bare %g's 6-significant-digit truncation.
-		e.ensureDtoa()
-		e.emitInstr(fmt.Sprintf("call void @__kml_dtoa(ptr %s, double %s)", scratch, val.Ref))
+		e.emitInstr(fmt.Sprintf("call void @__kml_dtoa("+irPtr+" %s, double %s)", scratch, val.Ref))
 	case v.Ty.IsInteger():
 		val := v
 		unsigned := !v.Ty.Signed
@@ -378,7 +401,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 			intFmt = "%llu"
 		}
 		fmtPtr := e.internString(intFmt)
-		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", scratch, fmtPtr, val.Ref))
+		e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", scratch, fmtPtr, val.Ref))
 	default:
 		return Value{}, fmt.Errorf("cannot convert type %s to string in template literal", v.Ty.IR)
 	}
@@ -386,17 +409,16 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	return Value{Ref: scratch, Ty: TypePtr}, nil
 }
 
-// declaredArrayType is inferArrayType for a *named binding* whose initializer is
-// an array literal: an empty `[]` consults the usage pre-pass
-// (inferEmptyArrayElemTypes / TDD-00205 Stage 1) for the element type inferred
-// from `name`'s later push/insert/reassign usages, falling back to inferArrayType's
-// blind `number[]` default when the pass found nothing conclusive. A non-empty
-// literal is unaffected (its own elements decide).
+// declaredArrayType is the storage of a named binding whose initializer is an
+// array literal: an empty `[]` (or one holding a box) takes the element type
+// the usage pre-pass (inferEmptyArrayElemTypes, TDD-00205 Stage 1) infers from
+// the name's later push/insert/reassign usages; any other is the literal's own
+// type.
 func (e *Emitter) declaredArrayType(name string, lit *ast.ArrayLiteral) Type {
 	if elem, ok := e.emptyArrayElems[name]; ok && (len(lit.Elements) == 0 || elem.IsDynamic()) {
 		return ArrayOf(elem)
 	}
-	return e.inferArrayType(lit)
+	return e.typeOfExpr(lit)
 }
 
 // inferArrayType picks an element type by looking at the first element of a literal.
@@ -422,12 +444,17 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 	// Spreading an `any`, or holding one, makes the literal `any[]`
 	// (TypeScript's type for it), whatever else it holds.
 	for _, el := range lit.Elements {
-		if sp, ok := el.(*ast.SpreadElement); ok && isUnconstrainedDynamic(e.inferExprType(sp.Arg)) {
+		if sp, ok := el.(*ast.SpreadElement); ok && isUnconstrainedDynamic(e.typeOfExpr(sp.Arg)) {
 			return ArrayOf(TypeAny)
 		}
-		if _, ok := el.(*ast.SpreadElement); !ok && len(lit.Elements) > 1 && isUnconstrainedDynamic(e.inferExprType(el)) {
+		if _, ok := el.(*ast.SpreadElement); !ok && len(lit.Elements) > 1 && isUnconstrainedDynamic(e.typeOfExpr(el)) {
 			return ArrayOf(TypeAny)
 		}
+	}
+	// Promises of `T | null` and `T | null | undefined`: one promise type,
+	// its value holding every absent state (awaitedUnion).
+	if t, ok := e.joinedPromiseElems(lit); ok {
+		return ArrayOf(t)
 	}
 	// Functions of different signatures (`[String, Number]`): one closure
 	// element type would call the others through the wrong signature, so
@@ -437,7 +464,7 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 		if _, ok := el.(*ast.SpreadElement); ok {
 			continue
 		}
-		if t := e.inferExprType(el); t.IsFunc() {
+		if t := e.typeOfExpr(el); t.IsFunc() {
 			k := reprKey(t.withoutNullable())
 			if fnKey != "" && k != fnKey {
 				return ArrayOf(TypeAny)
@@ -456,7 +483,7 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 	// array's kind (tsc's subtype reduction): `[[], ["x"]]` is string[][].
 	if rest, ok := withoutEmptyArrayElems(lit); ok {
 		for _, el := range rest.Elements {
-			if t := e.inferExprType(el); t.IsArray() && !t.IsDynamic() {
+			if t := e.typeOfExpr(el); t.IsArray() && !t.IsDynamic() {
 				return e.inferArrayType(rest)
 			}
 		}
@@ -464,7 +491,7 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 	// A spread tuple contributes its elements (tupleCommonElem).
 	for _, el := range lit.Elements {
 		if sp, ok := el.(*ast.SpreadElement); ok {
-			if t := e.inferExprType(sp.Arg); t.IsTuple() && !t.IsDynamic() {
+			if t := e.typeOfExpr(sp.Arg); t.IsTuple() && !t.IsDynamic() {
 				if ce := tupleCommonElem(t, 0); ce.IsDynamic() {
 					return ArrayOf(TypeAny)
 				} else if el == lit.Elements[0] {
@@ -482,14 +509,14 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 		for _, el := range lit.Elements {
 			var t Type
 			if sp, ok := el.(*ast.SpreadElement); ok {
-				st := e.inferExprType(e.collectionSpreadSource(sp.Arg))
+				st := e.typeOfExpr(e.collectionSpreadSource(sp.Arg))
 				if !st.IsArray() || st.ElemType == nil {
 					known = false
 					break
 				}
 				t = *st.ElemType
 			} else {
-				t = e.inferExprType(el)
+				t = e.typeOfExpr(el)
 			}
 			if t.IR == "" || nullishLiteralType(t) {
 				continue
@@ -500,11 +527,32 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 			return ArrayOf(TypeAny)
 		}
 	}
+	// Only `null` and `undefined` (`[undefined, null]`): TypeScript's
+	// `(null | undefined)[]`, whose elements must keep which absence each
+	// is, so they are boxed.
+	{
+		sawNull, sawUndef, nullish := false, false, true
+		for _, el := range lit.Elements {
+			nl, ok := el.(*ast.NullLiteral)
+			if !ok {
+				nullish = false
+				break
+			}
+			if nl.IsUndefined || nl.Void || nl.Elision {
+				sawUndef = true
+			} else {
+				sawNull = true
+			}
+		}
+		if nullish && sawNull && sawUndef {
+			return ArrayOf(TypeAny)
+		}
+	}
 	first := lit.Elements[0]
 	if sp, ok := first.(*ast.SpreadElement); ok {
 		// Spread of an array — infer from the spread source. Spreading a string
 		// (`[..."abc"]`) yields single-character strings.
-		ty := e.inferExprType(e.collectionSpreadSource(sp.Arg))
+		ty := e.typeOfExpr(e.collectionSpreadSource(sp.Arg))
 		if ty.IsArray() {
 			return ty
 		}
@@ -544,7 +592,7 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 				allConcrete = false
 				break
 			}
-			kinds[elemKindKeyBroad(e.inferExprType(el))] = true
+			kinds[elemKindKeyBroad(e.typeOfExpr(el))] = true
 		}
 		if allConcrete && len(kinds) >= 2 {
 			return ArrayOf(TypeAny)
@@ -557,29 +605,46 @@ func (e *Emitter) inferArrayTypeOf(lit *ast.ArrayLiteral) Type {
 	}
 	// Other kinds mixed (a string and two object shapes): boxed elements,
 	// rather than every element read as the first's type.
-	if mixedKindsBoxed(lit, e.inferExprType) {
+	if mixedKindsBoxed(lit, e.typeOfExpr) {
 		return ArrayOf(TypeAny)
 	}
 	// One kind with null or undefined among it (`[null, { k: 1 }]`): that
 	// kind, possibly absent when it is a reference, as TypeScript's
 	// `({ k: number } | null)[]` — not the first element's `null`.
-	elem := e.inferExprType(first)
+	elem := e.typeOfExpr(first)
 	hasNull, hasUndef := false, false
+	typedAbsent := false
 	for _, el := range lit.Elements {
-		t := e.inferExprType(el)
+		t := e.typeOfExpr(el)
 		if nullishLiteralType(t) {
 			hasNull = hasNull || !t.IsUndefined()
 			hasUndef = hasUndef || t.IsUndefined()
 			continue
 		}
+		// An element that may itself be absent (`[x, y]`, a `T | null` and a
+		// `T | undefined`) contributes its absence too.
+		switch {
+		case t.NullAndUndef():
+			hasNull, hasUndef, typedAbsent = true, true, true
+		case t.Nullable() && !t.IsDynamic() && !t.UncheckedIndex:
+			hasNull = hasNull || !t.IsUndefined()
+			hasUndef = hasUndef || t.IsUndefined()
+			typedAbsent = true
+		}
 		if nullishLiteralType(elem) {
 			elem = t
+		}
+	}
+	if typedAbsent && hasNull && hasUndef && !nullishLiteralType(elem) && !elem.IsArray() {
+		elem = elem.withoutNullable()
+		if threeStateEligible(elem) {
+			return ArrayOf(withNullAndUndef(elem))
 		}
 	}
 	nullish := hasNull || hasUndef
 	switch {
 	case !nullish || nullishLiteralType(elem):
-	case elem.IR == "ptr" && !elem.IsArray():
+	case elem.IR == irPtr && !elem.IsArray():
 		if hasNull && hasUndef && threeStateEligible(elem) {
 			elem = withNullAndUndef(elem)
 			break
@@ -635,7 +700,7 @@ func nullishLiteralType(t Type) bool {
 // header word; ok is false for a uniform literal or one with any other
 // element (a spread, a function, a host object).
 func (e *Emitter) inferMixedArrayElem(lit *ast.ArrayLiteral) (Type, bool) {
-	return mixedArrayElem(lit, e.inferExprType)
+	return mixedArrayElem(lit, e.typeOfExpr)
 }
 
 // mixedArrayElem is inferMixedArrayElem over typeOf, each element's type.
@@ -714,6 +779,9 @@ func mixedArrayElem(lit *ast.ArrayLiteral, typeOf func(ast.Expression) Type) (Ty
 	if len(members) < 2 {
 		return Type{}, false
 	}
+	if merged, ok := mergeTaskPromises(members); ok && !nullable {
+		return merged, true
+	}
 	objects := 0
 	for _, m := range members {
 		if m.IsObject() || m.IsClass() {
@@ -737,7 +805,7 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 	if lit.HasComputedKey() {
 		return e.inferDynamicObjectType(lit)
 	}
-	if e.hasDynamicSpread(lit) || hasProtoKey(lit) {
+	if e.hasDynamicSpread(lit) || hasProtoKey(lit) || lit.HasAccessors() && objLitHasSpread(lit) {
 		return TypeAny
 	}
 	if lit.HasAccessors() {
@@ -759,7 +827,7 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 	}
 	for _, prop := range lit.Properties {
 		if spread, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" {
-			srcTy := e.inferExprType(spread.Arg)
+			srcTy := e.typeOfExpr(spread.Arg)
 			if _, ok := e.falsyUnionSpreadType(spread.Arg, srcTy); ok {
 				// `false | { j }`: the object's fields, each maybe absent,
 				// as the checker types the literal.
@@ -777,7 +845,7 @@ func (e *Emitter) inferObjectType(lit *ast.ObjectLiteral) Type {
 			}
 			continue
 		}
-		ft := e.inferExprType(prop.Value)
+		ft := e.typeOfExpr(prop.Value)
 		if fe, ok := prop.Value.(*ast.FunctionExpression); ok && fe.IsGenerator {
 			// A generator function is held boxed, as a generator method is; a
 			// function that returns a generator (`() => gen()`) is not one.
@@ -809,7 +877,7 @@ func hasProtoKey(lit *ast.ObjectLiteral) bool {
 func (e *Emitter) hasDynamicSpread(lit *ast.ObjectLiteral) bool {
 	for _, prop := range lit.Properties {
 		if spread, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" && prop.KeyExpr == nil {
-			if t := e.inferExprType(spread.Arg); isUnconstrainedDynamic(t) || t.IsArray() || t.IsFunc() || isSyntheticObjLitClass(t) {
+			if t := e.typeOfExpr(spread.Arg); isUnconstrainedDynamic(t) || t.IsArray() || t.IsFunc() || isSyntheticObjLitClass(t) {
 				return true
 			}
 		}
@@ -827,7 +895,7 @@ func (e *Emitter) inferDynamicObjectType(lit *ast.ObjectLiteral) Type {
 		if _, ok := prop.Value.(*ast.SpreadElement); ok || prop.AccessorKind != "" {
 			return TypeAny
 		}
-		t := e.inferExprType(prop.Value)
+		t := e.typeOfExpr(prop.Value)
 		if t.IsDynamic() || t.IsFunc() || t.IR == "" {
 			return TypeAny
 		}
@@ -847,7 +915,7 @@ func (e *Emitter) inferDynamicObjectType(lit *ast.ObjectLiteral) Type {
 // type, purely (no codegen) — whether it's a literal arrow function, a
 // named top-level function reference, or a closure-typed variable, the
 // same three shapes resolveCallback (emit_func.go) resolves at emission
-// time. Used by .map()/.flatMap()'s own inferExprType case: previously
+// time. Used by .map()/.flatMap()'s own typeOfExpr case: previously
 // only a literal arrow function was recognized, so `arr.map(namedFn)`
 // silently fell through to "same type as the receiver" — usually
 // harmless by coincidence (a callback that happens to return the same
@@ -901,16 +969,16 @@ func taskTaggedRet(sig FuncSig) Type {
 // back to TypeF64 (a bare `number`) when the receiver's element type isn't
 // statically known — the correct default now that `number` is a double.
 func (e *Emitter) hofElemHint(recv ast.Expression) Type {
-	if ty := e.inferExprType(recv); ty.IsArray() && ty.ElemType != nil {
+	if ty := e.typeOfExpr(recv); ty.IsArray() && ty.ElemType != nil {
 		return *ty.ElemType
 	}
 	return TypeF64
 }
 
 func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Type, bool) {
-	hintFor := func(i int, pt *ast.TypeAnnotation) Type {
+	hintFor := func(i int, pt ast.TypeNode) Type {
 		if pt != nil {
-			return e.resolveType(pt)
+			return e.annotationType(pt)
 		}
 		if i < len(paramHints) {
 			return paramHints[i]
@@ -920,14 +988,14 @@ func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Ty
 	switch cb := arg.(type) {
 	case *ast.ArrowFunction:
 		if cb.RetType != nil {
-			return e.resolveType(cb.RetType), true
+			return e.annotationType(cb.RetType), true
 		}
 		if cb.Body != nil {
 			e.pushScope()
 			for i, p := range cb.Params {
 				e.definePatternParamForInference(p, hintFor(i, p.Type), i)
 			}
-			rt := e.inferExprType(cb.Body)
+			rt := e.typeOfExpr(cb.Body)
 			e.popScope()
 			return rt, true
 		}
@@ -936,20 +1004,20 @@ func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Ty
 			for i, p := range cb.Params {
 				paramTypes[i] = hintFor(i, p.Type)
 			}
-			if inferred, ok := e.inferUnannotatedReturnTypeParams(cb.Block, cb.Params, paramTypes); ok {
+			if inferred, ok := e.funcBodyReturnTypeParams(cb.Block, cb.Params, paramTypes); ok {
 				return inferred, true
 			}
 		}
 		return TypeF64, true
 	case *ast.FunctionExpression:
 		if cb.RetType != nil {
-			return e.resolveType(cb.RetType), true
+			return e.annotationType(cb.RetType), true
 		}
 		paramTypes := make([]Type, len(cb.Params))
 		for i, p := range cb.Params {
 			paramTypes[i] = hintFor(i, p.Type)
 		}
-		if inferred, ok := e.inferUnannotatedReturnTypeParams(cb.Body, cb.Params, paramTypes); ok {
+		if inferred, ok := e.funcBodyReturnTypeParams(cb.Body, cb.Params, paramTypes); ok {
 			return inferred, true
 		}
 		return TypeVoid, true
@@ -963,7 +1031,7 @@ func (e *Emitter) callbackReturnType(arg ast.Expression, paramHints ...Type) (Ty
 	}
 	// Any other function value: a builtin (`Number`, `Math.sqrt`), a bound
 	// function, a function-typed field.
-	if t := e.inferExprType(arg); t.IsFunc() && t.FuncRetType != nil {
+	if t := e.typeOfExpr(arg); t.IsFunc() && t.FuncRetType != nil {
 		return *t.FuncRetType, true
 	}
 	return Type{}, false
@@ -977,7 +1045,7 @@ func (e *Emitter) inferBuiltPreamble(expr ast.Expression) (Type, bool) {
 	// a dynamic call: a box (emitCall).
 	if call, ok := expr.(*ast.CallExpression); ok {
 		if mem, ok := call.Callee.(*ast.MemberExpression); ok && !mem.Optional {
-			if ot := e.inferExprType(mem.Object); ot.IsObject() && !ot.IsDynamic() && !ot.IsClass() {
+			if ot := e.typeOfExpr(mem.Object); ot.IsObject() && !ot.IsDynamic() && !ot.IsClass() {
 				for _, f := range ot.Fields {
 					if f.Name == mem.Property && isUnconstrainedDynamic(f.Ty) {
 						return TypeAny, true
@@ -1000,7 +1068,7 @@ func (e *Emitter) inferBuiltPreamble(expr ast.Expression) (Type, bool) {
 	// dispatch agrees with codegen.
 	if mem, ok := expr.(*ast.MemberExpression); ok {
 		if unwrapped := e.unwrapGlobalThis(mem); unwrapped != ast.Expression(mem) {
-			return e.inferExprType(unwrapped), true
+			return e.typeOfExpr(unwrapped), true
 		}
 	}
 	if call, ok := expr.(*ast.CallExpression); ok {
@@ -1012,681 +1080,16 @@ func (e *Emitter) inferBuiltPreamble(expr ast.Expression) (Type, bool) {
 			}
 			rewritten := ast.NewCallExpression(unwrapped, call.Args, call.GetPos())
 			rewritten.TypeArgs = call.TypeArgs
-			return e.inferExprType(rewritten), true
+			return e.typeOfExpr(rewritten), true
 		}
 	}
 	return Type{}, false
 }
 
-func (e *Emitter) inferExprTypeUncached(expr ast.Expression) Type {
-	if t, ok := e.inferBuiltPreamble(expr); ok {
-		return t
-	}
-	switch ex := expr.(type) {
-	case *ast.NewTargetExpression:
-		// What emitNewTarget emits: the constructor read from the receiver
-		// in a class constructor, else undefined or the function (any).
-		pos := ex.GetPos()
-		switch ex.Ctx {
-		case ast.NewTargetConstructor:
-			if _, ok := e.lookup("this"); ok {
-				return e.inferExprType(ast.NewMemberExpression(ast.NewThisExpression(pos), "constructor", pos))
-			}
-		case ast.NewTargetFunction:
-			if fn := e.newTargetFunc(); fn != "" && ex.FnID != 0 && ex.FnID == e.newTargetDecl.NewTargetID {
-				if _, ok := e.lookup("this"); ok {
-					return TypeAny
-				}
-			}
-		}
-		return e.inferExprType(ast.NewNullLiteral(true, pos))
-	case *ast.YieldExpression:
-		// A `yield` expression is the value `.next(v)` sends: TNext, `any`
-		// (emitYieldExpression). `yield*` is the inner's return value.
-		if !ex.Delegate {
-			return TypeAny
-		}
-		// Delegating to anything but a generator (an array's iterator, an
-		// object's protocol): the value its done result carries, any.
-		if ex.Argument != nil && !e.inferExprType(ex.Argument).IsGenerator() {
-			return TypeAny
-		}
-	case *ast.AwaitExpression:
-		// Unwrap Promise<T> → T.
-		argTy := e.inferExprType(ex.Argument)
-		if argTy.IsPromise() {
-			if argTy.PromiseType != nil {
-				return *argTy.PromiseType
-			}
-			return TypeVoid
-		}
-		// A thenable class instance: what its `then` fulfills with.
-		if sig, ok := e.thenableClass(argTy); ok {
-			return thenableValueType(sig)
-		}
-		// `await` of a non-thenable is identity — its type is the argument's
-		// own (e.g. Response.text() → string), matching emitAwait's pass-through.
-		return argTy
-	case *ast.IndexExpression:
-		return e.structuralIndexType(ex)
-	case *ast.BinaryExpression:
-		// Infer each operand's type exactly once, up front, and reuse it in
-		// every branch below. Re-calling inferExprType(ex.Left/Right) separately
-		// in the bigint check AND again in each operator branch made inference
-		// cost O(2^depth) on a left-associative chain like `a + b + c + ...`
-		// (each node re-inferred both children, which re-inferred theirs …) —
-		// enough to peg a core for minutes on a deep expression, found as an
-		// in-process hang while running the Test262 corpus. inferExprType does
-		// no codegen and has no side effects, so inferring both operands eagerly
-		// — even for `&&`/`||`/`??`, which may not need the right one — is free;
-		// the bigint check already forced both anyway.
-		lt := e.inferExprType(ex.Left)
-		rt := e.inferExprType(ex.Right)
-		// A dynamic operand makes an arithmetic result dynamic — the runtime
-		// dispatch (TDD-00076 A2) yields a NaN-boxed word (`+` may
-		// concatenate, others produce a boxed number); a comparison stays a
-		// bool. TypeScript allows every operator on `any`.
-		if isUnconstrainedDynamic(lt) || isUnconstrainedDynamic(rt) {
-			switch ex.Op {
-			case "===", "!==", "==", "!=", "<", ">", "<=", ">=":
-				return TypeBool
-			case "+":
-				// With a string side it is concatenation: a string, as
-				// emitBinary's ToString path produces.
-				if isStringTy(lt) || isStringTy(rt) {
-					return TypePtr
-				}
-				return TypeAny
-			case "-", "*", "/", "%", "**":
-				if anyArithIsNumber(ex.Op, lt, rt) {
-					return TypeF64
-				}
-				return TypeAny
-			}
-		}
-		// A mixed concrete scalar pair (`n * "4"`, `true + 1`) also routes
-		// through the runtime dispatch under `-compat=js` — its result is a
-		// boxed dynamic value too.
-		if e.compatJS() {
-			lk, rk := scalarTypeKind(lt), scalarTypeKind(rt)
-			if lk != "" && rk != "" && lk != rk {
-				switch ex.Op {
-				case "<", ">", "<=", ">=":
-					return TypeBool
-				case "+":
-					// `+` with a string side is always concatenation → string
-					// (the pre-existing concat path emits it; only a
-					// string-free mixed pair reaches the dynamic dispatch).
-					if lk == "string" || rk == "string" {
-						return TypePtr
-					}
-					return TypeAny
-				case "-", "*", "/", "%", "**":
-					return TypeAny
-				}
-			}
-		}
-		// Bare null/undefined in arithmetic/relational routes through the runtime
-		// dispatch under -compat=js (null→0, undefined→NaN) — see emitBinary
-		// (ADR-00901). Infer TypeAny / bool so the slot type agrees with the boxed
-		// value emitBinary stores (otherwise `var x = null + undefined` infers a
-		// string/ptr slot and the boxed result is mis-stored). A real-string side
-		// keeps the concat result (string); object/array operands keep their paths.
-		if e.compatJS() {
-			lNullish := (lt.IsNull() || lt.IsUndefined()) && !lt.UncheckedIndex
-			rNullish := (rt.IsNull() || rt.IsUndefined()) && !rt.UncheckedIndex
-			lRealStr := isStringTy(lt) && !lNullish
-			rRealStr := isStringTy(rt) && !rNullish
-			if (lNullish || rNullish) && !lRealStr && !rRealStr &&
-				!lt.IsObject() && !rt.IsObject() && !lt.IsArray() && !rt.IsArray() {
-				switch ex.Op {
-				case "<", ">", "<=", ">=":
-					return TypeBool
-				case "+", "-", "*", "/", "%", "**":
-					return TypeAny
-				}
-			}
-		}
-		// A bigint operand makes an arithmetic/bitwise result a bigint (a
-		// comparison stays a bool) — so `const x = 2n ** 53n + 1n` types as
-		// bigint, not the i64/string the generic cases below would infer.
-		if lt.IsBigInt() || rt.IsBigInt() {
-			switch ex.Op {
-			case "===", "!==", "==", "!=", "<", ">", "<=", ">=":
-				return TypeBool
-			default:
-				return BigIntType()
-			}
-		}
-		switch ex.Op {
-		case "===", "!==", "==", "!=", "<", ">", "<=", ">=", "instanceof", "in":
-			return TypeBool
-		case "+":
-			if isStringTy(lt) || isStringTy(rt) {
-				return TypePtr
-			}
-			// A Date operand concatenates its date string (emitBinary).
-			if lt.IsDate() || rt.IsDate() {
-				return TypePtr
-			}
-			if lt.Float || rt.Float {
-				// Mixed int/float promotes to double — must match
-				// emitBinary's numeric-promotion rule.
-				return TypeF64
-			}
-			return TypeI64
-		case "-":
-			// A Date operand is its time value: a number (emitBinary).
-			if lt.IsDate() || rt.IsDate() {
-				return TypeF64
-			}
-			if lt.Float || rt.Float {
-				return TypeF64
-			}
-			return TypeI64
-		case "*", "/", "%":
-			// Same promotion rule as emitBinary: any float operand makes the
-			// result a double; all-integer stays exact i64.
-			if lt.Float || rt.Float {
-				return TypeF64
-			}
-			return TypeI64
-		case "**":
-			// Exponentiation promotes to float if either operand is float,
-			// otherwise stays this compiler's default i64 `number` — matching
-			// emitBinary's own `**` result type.
-			if lt.Float || rt.Float {
-				return TypeF64
-			}
-			return TypeI64
-		case "&&", "||":
-			// Mirrors emitShortCircuit exactly: the value-preserving type when
-			// there is one, else the bool the emitter falls back to.
-			if ty, ok := andAbsentScalar(ex.Op, lt, rt); ok {
-				return ty
-			}
-			if ty, ok := shortCircuitValueType(ex.Op, lt, rt); ok {
-				return ty
-			}
-			return TypeBool
-		case "??":
-			return nullCoalesceType(lt, rt)
-		case "&", "|", "^", "<<", ">>", ">>>":
-			// JS bitwise/shift ops compute in the 32-bit integer domain but
-			// return a Number (double) — TDD-00123 Stage 2. Must mirror
-			// emitBinary/emitBitShift's sitofp-to-double result.
-			return TypeF64
-		}
-	case *ast.SuperExpression:
-		// `super` is bound in scope typed as the base class (emitClassMember), so
-		// `super.method()` resolves against the base's method table — mirror that
-		// here so a method returning `super.method()` infers the base method's
-		// return type instead of the i64 default (ADR-00906).
-		if sym, ok := e.lookup("super"); ok {
-			if this, ok := e.lookup("this"); ok && !sym.Ty.IsClass() {
-				// A class extending Array: its super's methods are Array's,
-				// run on the instance's body (emitSuperMethodCall).
-				if info, ok := e.classes[this.Ty.ClassName]; ok && info.HostBase != nil && info.HostBase.IsArray() {
-					return *info.HostBase
-				}
-			}
-			return sym.Ty
-		}
-	case *ast.NewExpression:
-		if e.isGlobalObjectCtor(ex.ClassName, ex.Qualified) {
-			return TypeAny // `new Object(…)`: a dynamic object
-		}
-		if e.isPrimWrapperCtor(ex.ClassName, ex.Qualified) {
-			return TypeAny // a wrapper object is held boxed
-		}
-		if target, ok := e.constClassAlias(ex); ok {
-			alias := *ex
-			alias.ClassName = target
-			return e.inferExprType(&alias) // `const K = C; new K(…)`
-		}
-		if instTy, ok := e.dynNewInstanceType(ex); ok {
-			return instTy
-		}
-		// new Promise<T>(executor) → task Promise<T> (TDD-00087).
-		if ex.ClassName == "Promise" {
-			valTy := e.newPromiseValueType(ex)
-			pt := PromiseOf(valTy)
-			pt.PromiseTask = true
-			return pt
-		}
-		// new DynamicLibrary(path) → the node:ffi handle (TDD-00164).
-		if _, user := e.classes[ex.ClassName]; ex.ClassName == "Response" && !user && !ex.Qualified {
-			return ResponseType()
-		}
-		// new FinalizationRegistry<T>(cb) → the registry handle (TDD-00163).
-		if ex.ClassName == "FinalizationRegistry" {
-			held := TypeI64
-			if len(ex.TypeArgs) == 1 && ex.TypeArgs[0] != nil {
-				held = e.resolveType(ex.TypeArgs[0])
-			}
-			if len(ex.Args) == 1 {
-				if cbTy := e.inferExprType(ex.Args[0]); cbTy.IsFunc() && len(cbTy.FuncParams) == 1 {
-					held = cbTy.FuncParams[0]
-				}
-			}
-			return FinalizationRegistryType(held)
-		}
-		if info, ok := e.classes[ex.ClassName]; ok && info.Ty.IsObject() {
-			return info.Ty
-		}
-		// During class registration, a class's own unannotated-field inference
-		// (`p = new C()`) can reference a sibling class whose ClassInfo already
-		// exists in e.classes but whose `.Ty` is not finalized until a later pass
-		// (a zero Type with no fields) — and, for a sibling not yet reached in the
-		// topological pass, is absent entirely. Either way the nominal class type
-		// published into e.interfaces (registerClassNamePlaceholders, then the
-		// provisional in registerClasses) is a real `IsClass` object type that
-		// canonicalizeClassTy re-resolves to its full field shape on demand at
-		// each access. Returning it gives the field C's real object shape instead
-		// of falling through to the zero-Type default, which produced an empty
-		// struct-field IR and a "field access on non-object" on `obj.p.x`.
-		if it, ok := e.interfaces[ex.ClassName]; ok && it.IsClass() {
-			return it
-		}
-		// A vanilla-JS prototype-constructor instance is a dynamic object
-		// (TDD-00155 Stage 4, `-compat=js`); a Proxy is one too (Stage 7).
-		if ex.ClassName == "Proxy" {
-			return TypeAny
-		}
-		if e.jsProtoCtor[ex.ClassName] {
-			return TypeAny
-		}
-		// A generic class (TDD-00010 V1) is never itself in e.classes — ask
-		// genericClassInstanceType for the shape its `new
-		// ClassName<T>(...)` instantiation would have, purely (no IR
-		// emission, no e.classes registration): inferExprType must never
-		// trigger real emission as a side effect of merely asking "what
-		// type is this."
-		if genDecl, ok := e.genericClasses[ex.ClassName]; ok {
-			if targs, ok := e.newTypeArgs(genDecl, ex); ok {
-				subs := e.buildTypeArgSubs(genDecl.TypeParams, targs)
-				if ty, err := e.genericClassInstanceType(genDecl, subs); err == nil {
-					return ty
-				}
-			}
-		}
-	case *ast.TaggedTemplateExpression:
-		// The desugaring emitExpr's own case uses: a tagged template's type is
-		// its tag function's return type (TDD-00059).
-		return e.inferExprType(e.desugarTaggedTemplate(ex))
-	case *ast.NonNullExpression:
-		// `expr!` strips null/undefined from the operand's type (TDD-00187).
-		t := e.inferExprType(ex.Arg)
-		t.setNullable(false)
-		t.setUndefined(false)
-		return t
-	case *ast.AsExpression:
-		if t, ok := e.nullAssertedType(ex); ok {
-			return t // mirrors emitAsExpression
-		}
-		// `expr as T` (ADR-00929): a narrowing from a dynamic operand adopts the
-		// asserted concrete type (`x as number` where `x: any` → number, so the
-		// binding/operand it flows into is typed concretely); every other
-		// assertion stays erased — the operand keeps its own type (ADR-00371).
-		if lit, isLit := ex.Expr.(*ast.ArrayLiteral); isLit && ex.TypeAnnot != nil {
-			if t := e.resolveType(ex.TypeAnnot); t.IsArray() && t.ElemType != nil && (t.ElemType.IsDynamic() || len(lit.Elements) == 0) {
-				return t // mirrors emitAsExpression
-			}
-		}
-		if lit, isLit := ex.Expr.(*ast.ObjectLiteral); isLit && ex.TypeAnnot != nil {
-			if t := e.resolveType(ex.TypeAnnot); t.IsObject() && !t.IsDynamic() && !t.IsClass() && len(t.Fields) > 0 && literalKeysAreFields(lit, t) {
-				return t // mirrors emitAsExpression
-			}
-		}
-		if t, ok := e.tupleAsArray(ex); ok {
-			return t
-		}
-		inner := e.inferExprType(ex.Expr)
-		if !inner.IsDynamic() && inner.IR != "void" && ex.TypeAnnot != nil {
-			t := e.resolveType(ex.TypeAnnot)
-			if isUnconstrainedDynamic(t) {
-				return t // the value boxed (mirrors emitAsExpression)
-			}
-			if e.nativeIfaceMembers[t.RefName] != nil && t.IR == inner.IR && t.StructIR() == inner.StructIR() {
-				t.setNullable(inner.Nullable())
-				return t // an interface over its native layout (mirrors emitAsExpression)
-			}
-		}
-		if inner.IsDynamic() && ex.TypeAnnot != nil && e.keepsBoxedTypedArray(ex) {
-			return inner // mirrors emitAsExpression
-		}
-		if inner.IsDynamic() && ex.TypeAnnot != nil {
-			// A box (any, or a union) asserted to a concrete type unboxes to it
-			// (mirrors emitAsExpression).
-			if isUnconstrainedDynamic(inner) {
-				return e.resolveType(ex.TypeAnnot)
-			}
-			if t := e.resolveType(ex.TypeAnnot); !t.IsDynamic() || isUnconstrainedDynamic(t) {
-				return t // a member, or `any`: the same box, retyped
-			}
-		}
-		return inner
-	case *ast.UnaryExpression:
-		if ex.Op == "delete" {
-			return TypeBool // whether the key is gone (emitUnary)
-		}
-		switch ex.Op {
-		case "typeof":
-			return TypePtr
-		case "!":
-			return TypeBool
-		case "-":
-			// Unary - preserves the operand's numeric type (i64 or float); any
-			// other operand is ToNumber'd to a double (emitUnary).
-			at := e.inferExprType(ex.Arg)
-			if at.IsBigInt() || at.IsDynamic() || at.Float || numericIntRepr(at) {
-				return at
-			}
-			if isNullableScalar(at) {
-				return e.inferExprType(&ast.UnaryExpression{Op: "+", Arg: ex.Arg})
-			}
-			return TypeF64
-		case "+":
-			// Unary + is ToNumber: a numeric operand keeps its type, anything
-			// else (string, boolean, null/undefined, any, object) becomes a
-			// double (mirrors emitUnaryPlus).
-			at := e.inferExprType(ex.Arg)
-			if at.Float || (at.IsInteger() && at.IR != "i1" && !at.IsDynamic() && !isNullableScalar(at)) {
-				return at
-			}
-			return TypeF64
-		case "~":
-			// ToInt32(x) ^ -1 as a Number (emitUnary); a bigint stays one.
-			if at := e.inferExprType(ex.Arg); at.IsBigInt() {
-				return at
-			}
-			return TypeF64
-		}
-	case *ast.ConditionalExpression:
-		// A test narrowing a union local (mirrors emitNarrowedConditional).
-		if cons, alt, ok := e.narrowedCondBranchTypes(ex); ok {
-			return narrowedCondResult(cons, alt)
-		}
-		// `cond ? scalar : null` is `T | null` (ADR-00538) — mirror
-		// emitConditional so an unannotated `const x = b ? 3 : null` gets
-		// nullable-scalar storage rather than a collapsed bare scalar.
-		if nty, ok := ternaryNullableScalarType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
-			return nty
-		}
-		// An array-valued ternary (mirrors emitConditionalArray).
-		if aty, ok := e.conditionalArrayType(ex); ok {
-			return aty
-		}
-		// A dynamic branch makes the whole ternary `any` (mirrors
-		// emitConditionalAny).
-		if e.inferExprType(ex.Consequent).IsDynamic() || e.inferExprType(ex.Alternate).IsDynamic() {
-			return TypeAny
-		}
-		// Scalar branches of different kinds are their union (mirrors
-		// emitConditional).
-		if uTy, ok := ternaryUnion(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
-			return uTy
-		}
-		if nty, ok := ternaryNullablePointerType(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)); ok {
-			return nty
-		}
-		if ternaryMixed(e.inferExprType(ex.Consequent), e.inferExprType(ex.Alternate)) {
-			return TypeAny // mirrors emitConditional's boxed union
-		}
-		return e.inferExprType(ex.Consequent)
-	case *ast.SequenceExpression:
-		// The comma operator's value (and type) is its last operand's.
-		if len(ex.Exprs) > 0 {
-			return e.inferExprType(ex.Exprs[len(ex.Exprs)-1])
-		}
-		return TypeI64
-	case *ast.NewCompressionStreamExpression:
-		return compressionStreamType(ex.Decompress)
-	case *ast.NewMapExpression:
-		// Mirrors emitNewMapValue's K/V resolution (mapKVTypes): explicit
-		// `<K, V>` wins, else infer from an initial `[K, V][]` entries array,
-		// else the string-key/number-value defaults.
-		keyTy, valTy := e.mapKVTypes(ex.KeyType, ex.ValType, ex.Init)
-		return MapType(keyTy, valTy)
-	case *ast.NewSetExpression:
-		// Mirrors emitNewSetValue's shape without emitting the initializer.
-		// Without type arguments the element is the checker's (an iterator
-		// over the set reads it), else the string default.
-		elemTy := TypePtr
-		if ex.ElemType != nil {
-			elemTy = e.resolveType(ex.ElemType)
-		} else if c := e.front(); c != nil && ex.Init != nil {
-			if ct := c.TypeOf(ex); !c.Unanswered(ct) {
-				if rt, ok := e.repr().of(ct); ok && rt.IsSet() && rt.MapKey != nil {
-					elemTy = *rt.MapKey
-				}
-			}
-		}
-		return SetType(elemTy)
-	case *ast.NewWeakMapExpression:
-		keyTy, valTy := e.weakMapKV(ex, nil)
-		return WeakMapType(keyTy, valTy)
-	case *ast.NewWeakSetExpression:
-		return WeakSetType(e.weakSetElem(ex))
-	case *ast.NewErrorExpression:
-		return errorObjType
-	case *ast.ImportCallExpression:
-		// A dynamic import yields Promise<{ ...exports }>, a task promise.
-		pt := PromiseOf(e.importCallResultObjectType(ex))
-		pt.PromiseTask = true
-		return pt
-	case *ast.NewArrayBufferExpression:
-		ty := ArrayBufferType()
-		if ex.Shared {
-			ty = SharedArrayBufferType()
-		}
-		ty.BufferGrowable = ex.MaxByteLength != nil
-		return ty
-	case *ast.NewXMLHttpRequestExpression:
-		return XMLHttpRequestType()
-	case *ast.ObjectLiteral:
-		// Bare literals are dynamic under `-compat=js` (matching emitExpr's
-		// routing); hint-typed contexts never consult this default.
-		if e.compatJS() {
-			return TypeAny
-		}
-		return e.inferObjectType(ex)
-	case *ast.ArrayLiteral:
-		// TDD-00028: inferExprType previously had no case for a bare array
-		// literal at all (falling through to the final TypeI64 default) —
-		// harmless while array literals could only ever appear in
-		// var-decl position (var-decl's own inference went through
-		// inferArrayType directly, never through here), but a real gap now
-		// that a literal can appear as a general sub-expression: without
-		// this, inferArrayType's own first-element inference couldn't tell
-		// a nested array-literal element apart from any other unresolvable
-		// expression, silently mistyping it as i64 instead of correctly
-		// recognizing (and then, since real array-of-arrays storage isn't
-		// supported yet, cleanly rejecting) it as array-typed. See
-		// emitArrayLiteralAggregate's nested-array guard.
-		return e.inferArrayType(ex)
-	case *ast.ArrowFunction:
-		params := make([]Type, len(ex.Params))
-		for i, p := range ex.Params {
-			if p.Rest && p.Type == nil {
-				// Same default rest-element type emitArrowFunctionWithHints
-				// (emit_func.go) and buildFunctionSig (emitter.go) already
-				// give an unannotated rest param — this duplicate
-				// computation (see the comment on the return-type mirror
-				// below) needs to agree, not fall into the bare-scalar
-				// unannotated-param default just below.
-				params[i] = untypedRestType()
-			} else if dt, ok := e.paramDefaultType(p); ok {
-				params[i] = dt // mirrors emitArrowFunctionWithHints
-			} else if ct, ok := e.checkerContextualParam(ex, i); p.Type == nil && ok {
-				params[i] = ct
-			} else if st, ok := e.jsSiteParam(ex, i); p.Type == nil && ok {
-				params[i] = st // its call sites' type (-compat=js)
-			} else if p.Type == nil && e.front() != nil {
-				params[i] = TypeAny // an implicit any (mirrors emitArrowFunctionWithHints)
-			} else if p.Type == nil {
-				params[i] = TypeI64
-				params[i].Inferred = true // no annotation — see docs/adr/00/ADR-00042.md
-			} else {
-				params[i] = e.resolveType(p.Type)
-			}
-			// Optional `x?: T` → `T | undefined`, matching the closure's actual
-			// emitted parameter ABI (emit_func.go) so a `const f = …` symbol's
-			// type agrees with the body — the same reason FuncHasRest is mirrored
-			// here (TDD-00187).
-			params[i] = optionalParamType(p, params[i])
-		}
-		var ret Type
-		if ex.RetType != nil {
-			ret = e.resolveType(ex.RetType)
-		} else if ex.Body != nil {
-			// The body is typed with its parameters in scope: `(s: string) =>
-			// s.length` / `=> s[0]` are a number / a string only once `s` is
-			// known — unresolved, they fell to the i64 default while the closure
-			// itself was emitted returning double / ptr.
-			e.pushScope()
-			for i, p := range ex.Params {
-				e.definePatternParamForInference(p, params[i], i)
-			}
-			ret = e.inferExprType(ex.Body)
-			e.popScope()
-		} else if hasReturn(ex.Block) {
-			// Same best-effort inference emitArrowFunctionWithHints uses when
-			// actually emitting this closure — this duplicate exists because
-			// inferExprType has to answer "what type is this arrow function"
-			// before any closure value exists yet (e.g. right when a `const`
-			// binding to it is being declared). The two computations used to
-			// disagree (this one unconditionally defaulted to TypeI64
-			// regardless of what was returned), which silently mistyped the
-			// variable itself even though the actual closure body was
-			// correctly built to return an object/array/Date — a real bug,
-			// not just a missed optimization, since callers trust this type.
-			paramNames := make([]string, len(ex.Params))
-			for i, p := range ex.Params {
-				paramNames[i] = p.Name
-			}
-			if inferred, ok := e.inferUnannotatedReturnType(ex.Block, paramNames, e.bodyParamTypes(ex.Params, params)); ok {
-				ret = inferred
-			} else if firstReturnExpr(ex.Block) == nil {
-				ret = TypeVoid // every return is bare (mirrors emitArrowFunctionWithHints)
-			} else {
-				ret = TypeF64
-			}
-		} else if blockAlwaysDiverges(ex.Block) {
-			ret = TypeNever // block-body arrow that only throws (ADR-00869)
-		} else {
-			ret = TypeVoid
-		}
-		fty := FuncType(params, asyncClosureRetType(ex.IsAsync, ret))
-		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
-			fty.FuncHasRest = true
-		}
-		setFuncParamDefaults(&fty, ex.Params)
-		return fty
-	case *ast.FunctionExpression:
-		// A generator expression is a boxed constructor closure (mirrors
-		// emitGeneratorExpressionValue).
-		if ex.IsGenerator {
-			return TypeAny
-		}
-		// Same type-inference as ArrowFunction above — a function expression
-		// is a block-only closure whose type is determined by param/return
-		// types and captures. Params use the same resolver; unlike arrows,
-		// function expressions never have expression bodies (Body is always
-		// a BlockStatement, never an Expression).
-		// Mirror emitFunctionExpression's implicit `arguments` rest (TDD-00210)
-		// so the inferred type's arity matches the emitted function's.
-		ex.Params = maybeAddArgumentsRestParams(ex.Params, ex.Body.Body)
-		thisTaking := e.maybeAddThisParamExpr(ex)
-		if !thisTaking && e.compatJS() && !ex.IsAsync && usesOwnThis(ex.Body.Body) && hasArgumentsRestParamSlice(ex.Params) {
-			return TypeAny // stays dynamic (mirrors emitFunctionExpression)
-		}
-		params := make([]Type, len(ex.Params))
-		for i, p := range ex.Params {
-			if p.Rest && p.Name == argumentsRestParam {
-				params[i] = ArrayOf(TypeAny) // implicit `arguments` rest (TDD-00210)
-			} else if p.Rest && p.Type == nil {
-				params[i] = untypedRestType()
-			} else if dt, ok := e.paramDefaultType(p); ok && p.Type == nil {
-				params[i] = dt
-			} else if ct, ok := e.checkerContextualParam(ex, i); p.Type == nil && ok {
-				params[i] = ct // mirrors emitFunctionExpression
-			} else if st, ok := e.jsSiteParam(ex, i); p.Type == nil && ok {
-				params[i] = st // its call sites' type (-compat=js)
-			} else if p.Type == nil && e.front() != nil {
-				params[i] = TypeAny // an implicit any (mirrors emitFunctionExpression)
-			} else if p.Type == nil {
-				params[i] = TypeI64
-				params[i].Inferred = true
-			} else {
-				params[i] = e.resolveType(p.Type)
-			}
-			// Optional `x?: T` → `T | undefined` — mirror of the arrow case above.
-			params[i] = optionalParamType(p, params[i])
-		}
-		var ret Type
-		if ex.RetType == nil && hasReturn(ex.Body) {
-			defer e.bindSelfForInference(ex, params)()
-		}
-		if ex.RetType != nil {
-			ret = e.resolveType(ex.RetType)
-		} else if hasReturn(ex.Body) {
-			paramNames := make([]string, len(ex.Params))
-			for i, p := range ex.Params {
-				paramNames[i] = p.Name
-			}
-			if inferred, ok := e.inferUnannotatedReturnType(ex.Body, paramNames, e.bodyParamTypes(ex.Params, params)); ok {
-				ret = inferred
-			} else if firstReturnExpr(ex.Body) == nil {
-				ret = TypeVoid // every return is bare (mirrors emitFunctionExpression)
-			} else {
-				ret = TypeF64
-			}
-		} else if blockAlwaysDiverges(ex.Body) {
-			ret = TypeNever // function expression that only throws (ADR-00869)
-		} else {
-			ret = TypeVoid
-		}
-		fty := FuncType(params, asyncClosureRetType(ex.IsAsync, ret))
-		if len(ex.Params) > 0 && ex.Params[len(ex.Params)-1].Rest {
-			fty.FuncHasRest = true
-		}
-		fty.FuncThis = thisTaking
-		setFuncParamDefaults(&fty, ex.Params)
-		// Reading `arguments`, a call stores its count (emitFuncValue).
-		fty.FuncCountsArgs = fty.FuncHasRest && ex.Params[len(ex.Params)-1].Name == argumentsRestParam
-		return fty
-	case *ast.UpdateExpression:
-		// `x++`/`--x` yield the stepped number (or bigint); a dynamic or
-		// nullable-scalar operand goes through ToNumeric first, so the result
-		// is a plain `number` (ADR-01061).
-		t := e.inferExprType(ex.Arg)
-		if t.IsBigInt() || (!t.IsDynamic() && !t.Nullable() && (t.Float || t.IsInteger())) {
-			return t
-		}
-		return TypeF64
-	case *ast.AssignmentExpression:
-		// A destructuring assignment's value is its right-hand side; the
-		// object destructuring path holds a dynamic or computed-key source
-		// boxed (emitDynDestructAssign).
-		if ol, ok := ex.Left.(*ast.ObjectLiteral); ok && ex.Op == "=" {
-			rt := e.inferExprType(ex.Right)
-			if isUnconstrainedDynamic(rt) || ol.HasComputedKey() {
-				return TypeAny
-			}
-			return rt
-		}
-		// An assignment's value is the value stored: the target's type
-		// (`b += c` on a string `b` is a string).
-		return e.inferExprType(ex.Left)
-	}
-	return TypeI64
-}
-
 // isPlainStringTy reports whether ty is a genuine string — not an object,
 // array, closure, or any other ptr-backed builtin marker type (Map/Set/
 // ArrayBuffer/TextEncoder/TextDecoder/Promise all share
-// string's bare IR=="ptr" shape with none of the other flags isStringTy
+// string's bare IR==irPtr shape with none of the other flags isStringTy
 // already excludes, so isStringTy alone isn't precise enough here). Used
 // only by toBool: a string is the one JS primitive whose truthiness
 // depends on its content (empty string is falsy) rather than "is this
@@ -1785,9 +1188,9 @@ func (e *Emitter) toBool(v Value) Value {
 		// null, so the generic ptr!=null path below would wrongly call 0n truthy.
 		e.ensureBigInt()
 		zero := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 0)", zero))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_i64(i64 0)", zero))
 		cmpReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp(ptr %s, ptr %s)", cmpReg, v.Ref, zero))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp("+irPtr+" %s, "+irPtr+" %s)", cmpReg, v.Ref, zero))
 		reg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", reg, cmpReg))
 		return Value{Ref: reg, Ty: TypeBool}
@@ -1813,8 +1216,8 @@ func (e *Emitter) toBool(v Value) Value {
 		// "unordered," so this correctly evaluates false for NaN, matching
 		// real JS's Boolean(NaN) === false.
 		e.emitInstr(fmt.Sprintf("%s = fcmp one %s %s, 0.0", reg, v.Ty.IR, v.Ref))
-	case v.Ty.IR == "ptr":
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", reg, v.Ref))
+	case v.Ty.IR == irPtr:
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", reg, v.Ref))
 	default:
 		e.emitInstr(fmt.Sprintf("%s = icmp ne %s %s, 0", reg, v.Ty.IR, v.Ref))
 	}
@@ -1827,7 +1230,7 @@ func (e *Emitter) toBool(v Value) Value {
 // empty string, truthy for anything else.
 func (e *Emitter) emitStringTruthiness(v Value) Value {
 	isNullReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNullReg, v.Ref))
 
 	nullL := e.freshLabel("strbool.null")
 	checkL := e.freshLabel("strbool.check")
@@ -1838,25 +1241,25 @@ func (e *Emitter) emitStringTruthiness(v Value) Value {
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resultSlot))
 
 	e.emitLabel(nullL)
-	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resultSlot))
+	e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(checkL)
 	firstByte := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", firstByte, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", firstByte, v.Ref))
 	nonEmptyReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", nonEmptyReg, firstByte))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", nonEmptyReg, resultSlot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", nonEmptyReg, resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resultSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", result, resultSlot))
 	return Value{Ref: result, Ty: TypeBool}
 }
 
 // inferCollectionCallType is the result type of a method call on a Map, Set,
-// WeakRef or URLSearchParams receiver, shared by inferExprType and the
+// WeakRef or URLSearchParams receiver, shared by typeOfExpr and the
 // collection intrinsics' declarations.
 func (e *Emitter) inferCollectionCallType(ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
 	objTy, haveObjTy := Type{}, false
@@ -1866,7 +1269,7 @@ func (e *Emitter) inferCollectionCallType(ex *ast.CallExpression, mem *ast.Membe
 		}
 	}
 	if !haveObjTy {
-		objTy = e.inferExprType(mem.Object)
+		objTy = e.typeOfExpr(mem.Object)
 	}
 	var table map[string]collTypeFn
 	switch {
@@ -1904,7 +1307,7 @@ var objectStaticTypes map[string]callTypeFn
 func init() {
 	firstArg := func(e *Emitter, ex *ast.CallExpression) (Type, bool) {
 		if len(ex.Args) >= 1 {
-			return e.inferExprType(ex.Args[0]), true
+			return e.typeOfExpr(ex.Args[0]), true
 		}
 		return Type{}, false
 	}
@@ -1927,6 +1330,15 @@ func init() {
 		// A dynamic object (a Map<string,V>-backed value, TDD-00012),
 		// V from the [string, V][] entries' tuple field 1.
 		"fromEntries": func(e *Emitter, ex *ast.CallExpression) (Type, bool) {
+			// The checker's `{ [k: string]: T }` (tsc's first overload): held
+			// as an annotated binding of that type holds it.
+			if c := e.front(); c != nil {
+				if ct := c.TypeOf(ex); !c.Unanswered(ct) && ct.StringIndex != nil {
+					if t, ok := e.repr().of(ct); ok && t.IsDynamic() {
+						return t, true
+					}
+				}
+			}
 			valTy := TypeI64
 			if len(ex.Args) >= 1 {
 				if e.fromEntriesKeyed(ex.Args[0]) {
@@ -1935,14 +1347,19 @@ func init() {
 				valTy, _ = e.fromEntriesTypes(ex.Args[0])
 			}
 			keyTy := TypePtr
-			return Type{IR: "ptr", Host: hostDynamicObject, MapKey: &keyTy, MapVal: &valTy}, true
+			return Type{IR: irPtr, Host: hostDynamicObject, MapKey: &keyTy, MapVal: &valTy}, true
 		},
 		"assign": func(e *Emitter, ex *ast.CallExpression) (Type, bool) {
+			if len(ex.Args) == 1 {
+				// `Object.assign(target)` matches only tsc's `(target:
+				// object, ...sources: any[]): any` overload: the target, boxed.
+				return TypeAny, true
+			}
 			if e.dynamicAssign(ex.Args) {
 				return TypeAny, true // mirrors emitObjectAssign
 			}
 			if lit, ok := assignAsSpread(ex.Args); ok {
-				return e.inferExprType(lit), true // mirrors emitObjectAssign
+				return e.typeOfExpr(lit), true // mirrors emitObjectAssign
 			}
 			return firstArg(e, ex)
 		},
@@ -1969,7 +1386,7 @@ const (
 func objectEnumType(which objEnum) callTypeFn {
 	return func(e *Emitter, ex *ast.CallExpression) (Type, bool) {
 		if len(ex.Args) >= 1 {
-			argTy := e.inferExprType(ex.Args[0])
+			argTy := e.typeOfExpr(ex.Args[0])
 			if isUnconstrainedDynamic(argTy) && which != objKeys {
 				return TypeAny, true
 			}
@@ -1993,7 +1410,7 @@ func objectEnumType(which objEnum) callTypeFn {
 		}
 		valTy, homogeneous := TypeAny, false
 		if len(ex.Args) >= 1 {
-			if argTy := e.inferExprType(ex.Args[0]); argTy.IsObject() && !isRecordView(argTy) {
+			if argTy := e.typeOfExpr(ex.Args[0]); argTy.IsObject() && !isRecordView(argTy) {
 				if vt, ok := homogeneousFieldType(presentFieldTypes(argTy.VisibleFields())); ok {
 					valTy, homogeneous = vt, true
 				}
@@ -2047,7 +1464,7 @@ func init() {
 			if len(ex.Args) == 0 {
 				return taskPromise(TypeVoid), true
 			}
-			argTy := e.inferExprType(ex.Args[0])
+			argTy := e.typeOfExpr(ex.Args[0])
 			if argTy.IsPromise() {
 				return argTy, true
 			}
@@ -2083,7 +1500,7 @@ func init() {
 		"of": func(e *Emitter, _ string, ex *ast.CallExpression) (Type, bool) {
 			// The array literal of its arguments (emitArrayOf); none: unknown[].
 			if len(ex.Args) > 0 {
-				return e.inferExprType(ast.NewArrayLiteral(ex.Args, ex.GetPos())), true
+				return e.typeOfExpr(ast.NewArrayLiteral(ex.Args, ex.GetPos())), true
 			}
 			return ArrayOf(TypeAny), true
 		},
@@ -2099,10 +1516,10 @@ func init() {
 				mapCall := ast.NewCallExpression(
 					ast.NewMemberExpression(fromCall, "map", ex.GetPos()),
 					ex.Args[1:2], ex.GetPos())
-				return e.inferExprType(mapCall), true
+				return e.typeOfExpr(mapCall), true
 			}
 			if len(ex.Args) == 1 {
-				argTy := e.inferExprType(ex.Args[0])
+				argTy := e.typeOfExpr(ex.Args[0])
 				if argTy.IsArray() {
 					return ArrayOf(*argTy.ElemType), true
 				}
@@ -2163,7 +1580,7 @@ func init() {
 // streamCallType is the result type of a stream, reader, writer or
 // controller method call (emitStreamMethodCall, emitWStreamMethodCall).
 func (e *Emitter) streamCallType(ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-	objTy := e.inferExprType(mem.Object)
+	objTy := e.typeOfExpr(mem.Object)
 	if !(objTy.IsReadableStream() || objTy.IsStreamReader() || objTy.IsRSController() || objTy.IsWritableStream() || objTy.IsStreamWriter() || objTy.IsWSController()) {
 		return Type{}, false
 	}
@@ -2173,76 +1590,94 @@ func (e *Emitter) streamCallType(ex *ast.CallExpression, mem *ast.MemberExpressi
 	return e.intrinsicMethodType(streamMethodTypes, ex)
 }
 
+// promiseSettleTypes are the types of `p.then/catch/finally(…)` on a
+// promise, by method: a task Promise<U>, U the value the returned promise
+// settles to (TDD-00083 Stage 3 + value-chaining, ADR-00248) — the
+// callback's return type for then/catch, the source's own inner type for
+// finally (pass-through).
+var promiseSettleTypes map[string]func(e *Emitter, ex *ast.CallExpression, src Type) Type
+
+func init() {
+	promiseSettleTypes = map[string]func(e *Emitter, ex *ast.CallExpression, src Type) Type{
+		"then": func(e *Emitter, ex *ast.CallExpression, src Type) Type {
+			fArg := -1
+			if len(ex.Args) >= 1 && !e.isNonCallableThenArg(ex.Args[0]) {
+				fArg = 0
+			}
+			return e.promiseCallbackSettle(ex, src, fArg, 1, false)
+		},
+		"catch": func(e *Emitter, ex *ast.CallExpression, src Type) Type {
+			return e.promiseCallbackSettle(ex, src, -1, 0, true)
+		},
+		"finally": func(_ *Emitter, _ *ast.CallExpression, src Type) Type {
+			if src.PromiseType != nil {
+				return *src.PromiseType
+			}
+			return TypeVoid
+		},
+	}
+}
+
 // promiseThenType is the type of `p.then/catch/finally(…)` on a promise.
 func (e *Emitter) promiseThenType(ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-	// .then/.catch/.finally on a promise return a task Promise<U> where U
-	// is the value the returned promise settles to (TDD-00083 Stage 3 +
-	// value-chaining, ADR-00248): the callback's return type for then/catch,
-	// the source's own inner type for finally (pass-through).
-	if mem.Property == "then" || mem.Property == "catch" || mem.Property == "finally" {
-		if srcTy := e.inferExprType(mem.Object); srcTy.IsPromise() {
-			retTy := TypeVoid
-			switch mem.Property {
-			case "then", "catch":
-				// The fulfilled path settles to the fulfilment callback's
-				// result (the source value when there is none) and the
-				// rejected path to the rejection callback's (parameter: the
-				// caught reason); Q holds their union boxed when they differ,
-				// as emitPromiseThen builds it.
-				fArg, rArg := -1, 1
-				if mem.Property == "catch" {
-					fArg, rArg = -1, 0
-				} else if len(ex.Args) >= 1 && !e.isNonCallableThenArg(ex.Args[0]) {
-					fArg = 0
-				}
-				if fArg < 0 {
-					if srcTy.PromiseType != nil {
-						retTy = *srcTy.PromiseType
-					}
-				} else {
-					var hints []Type
-					if srcTy.PromiseType != nil {
-						hints = []Type{*srcTy.PromiseType}
-					}
-					if t, ok := e.callbackReturnType(ex.Args[0], hints...); ok {
-						retTy = t
-					}
-				}
-				if len(ex.Args) > rArg && !e.isNonCallableThenArg(ex.Args[rArg]) {
-					if rTy, ok := e.callbackReturnType(ex.Args[rArg], TypeCaught); ok {
-						if thenPathsDiffer(retTy, rTy) {
-							retTy = TypeAny
-						} else if mem.Property == "catch" {
-							retTy = rTy
-						}
-					}
-				}
-				// A callback returning a thenable class instance resolves the
-				// chain through its `then` (emitPromiseThen's thenableCallback).
-				if sig, ok := e.thenableClass(retTy); ok {
-					retTy = thenableValueType(sig)
-				}
-				// A callback that returns a promise resolves the chain with it
-				// (flattening): the result is Promise<U>, never Promise<Promise<U>>
-				// — this must agree with what emitPromiseThen builds.
-				if retTy.IsPromise() {
-					if retTy.PromiseType != nil {
-						retTy = *retTy.PromiseType
-					} else {
-						retTy = TypeVoid
-					}
-				}
-			case "finally":
-				if srcTy.PromiseType != nil {
-					retTy = *srcTy.PromiseType
-				}
-			}
-			vt := PromiseOf(retTy)
-			vt.PromiseTask = true
-			return vt, true
+	settle, ok := promiseSettleTypes[mem.Property]
+	if !ok {
+		return Type{}, false
+	}
+	srcTy := e.typeOfExpr(mem.Object)
+	if !srcTy.IsPromise() {
+		return Type{}, false
+	}
+	vt := PromiseOf(settle(e, ex, srcTy))
+	vt.PromiseTask = true
+	return vt, true
+}
+
+// promiseCallbackSettle is what then/catch settle to: the fulfilled path
+// to the fulfilment callback's result (argument fArg; the source value
+// when there is none, fArg < 0) and the rejected path to the rejection
+// callback's (argument rArg; parameter: the caught reason). Q holds their
+// union boxed when they differ, as emitPromiseThen builds it.
+func (e *Emitter) promiseCallbackSettle(ex *ast.CallExpression, srcTy Type, fArg, rArg int, isCatch bool) Type {
+	retTy := TypeVoid
+	if fArg < 0 {
+		if srcTy.PromiseType != nil {
+			retTy = *srcTy.PromiseType
+		}
+	} else {
+		var hints []Type
+		if srcTy.PromiseType != nil {
+			hints = []Type{*srcTy.PromiseType}
+		}
+		if t, ok := e.callbackReturnType(ex.Args[fArg], hints...); ok {
+			retTy = t
 		}
 	}
-	return Type{}, false
+	if len(ex.Args) > rArg && !e.isNonCallableThenArg(ex.Args[rArg]) {
+		if rTy, ok := e.callbackReturnType(ex.Args[rArg], TypeCaught); ok {
+			if thenPathsDiffer(retTy, rTy) {
+				retTy = TypeAny
+			} else if isCatch {
+				retTy = rTy
+			}
+		}
+	}
+	// A callback returning a thenable class instance resolves the chain
+	// through its `then` (emitPromiseThen's thenableCallback).
+	if sig, ok := e.thenableClass(retTy); ok {
+		retTy = thenableValueType(sig)
+	}
+	// A callback that returns a promise resolves the chain with it
+	// (flattening): the result is Promise<U>, never Promise<Promise<U>> —
+	// this must agree with what emitPromiseThen builds.
+	if retTy.IsPromise() {
+		if retTy.PromiseType != nil {
+			retTy = *retTy.PromiseType
+		} else {
+			retTy = TypeVoid
+		}
+	}
+	return retTy
 }
 
 // anyArithIsNumber reports whether an arithmetic operator between an `any`
@@ -2298,7 +1733,7 @@ func (e *Emitter) boundFuncValueType(objTy Type, nargs int) (Type, bool) {
 	}
 	boundCount := bindBoundCount(objTy, nargs)
 	if boundCount > len(objTy.FuncParams) {
-		return Type{}, false
+		return TypeAny, true // bound through the function object (emitFunctionBind)
 	}
 	ret := TypeVoid
 	if objTy.FuncRetType != nil {
@@ -2394,7 +1829,7 @@ func (e *Emitter) enumName(x ast.Expression) bool {
 
 func (e *Emitter) identStorageType(id *ast.Identifier) Type {
 	if call, ok := e.tsSubtleAlias(id); ok {
-		return e.inferExprType(call)
+		return e.typeOfExpr(call)
 	}
 	if _, isEnum := e.enumObjects[id.Name]; isEnum {
 		if _, ok := e.lookup(id.Name); !ok {
@@ -2423,7 +1858,7 @@ func (e *Emitter) identStorageType(id *ast.Identifier) Type {
 		if t, ok := e.checkerNarrowed(id, sym.Ty); ok && !sym.Ty.IsArray() && !sym.isNullableScalarLocal() {
 			return t
 		}
-		if isNullableScalar(sym.Ty) && (sym.NarrowedNonNull && sym.isNullableScalarLocal() || e.checkerPresent(id, sym.Ty)) {
+		if isNullableScalar(sym.Ty) && e.checkerPresent(id, sym.Ty) {
 			return sym.Ty.withoutNullable() // the payload emitIdent reads
 		}
 		if e.checkerPresentRef(id, sym.Ty) || e.assignedString(id, sym.Ty) {
@@ -2507,7 +1942,7 @@ func (e *Emitter) identStorageType(id *ast.Identifier) Type {
 			if ty, ok := r.of(t); ok && ty.IR != "" && ty.IR != "void" {
 				// `const b = a[i]` holds the element read's absence, as
 				// its declaration binds it.
-				if arr, typed := (frontOracle{b: e.frontBinding, c: c, r: r, storesBusy: map[*ast.Identifier]bool{}, litBusy: map[*ast.ObjectLiteral]bool{}, forOfBusy: map[*ast.ForOfStatement]bool{}}).elementRead(id); arr.IsArray() && !typed {
+				if arr, typed := (frontOracle{b: e.frontBinding, c: c, r: r, storesBusy: map[*ast.Identifier]bool{}, litBusy: map[*ast.ObjectLiteral]bool{}, storageBusy: map[*ast.ObjectLiteral]bool{}, returnsBusy: map[*ast.ObjectLiteral]bool{}, dynInit: map[*ast.VarDeclaration]bool{}, fnReads: map[string]bool{}, forOfBusy: map[*ast.ForOfStatement]bool{}}).elementRead(id); arr.IsArray() && !typed {
 					ty = indexReadType(ty)
 				}
 				if isNullableScalar(ty) && e.checkerPresent(id, ty) || e.checkerPresentRef(id, ty) {
@@ -2525,7 +1960,7 @@ func (e *Emitter) identStorageType(id *ast.Identifier) Type {
 // (GenTy, per function), a generator's next/throw/return result, and an
 // Array, Map or Set iterator's own methods (emitCollIterCall).
 // generatorValueRepr is the value of a generator function named by id
-// (inferExprType's generator branch).
+// (typeOfExpr's generator branch).
 func (e *Emitter) generatorValueRepr(id *ast.Identifier) (Type, bool) {
 	if info, found := e.lookupGenerator(id.Name); found {
 		return generatorValueType(info), true
@@ -2562,19 +1997,25 @@ func (e *Emitter) codegenCallRepr(ex *ast.CallExpression) (Type, bool) {
 		// A method of a value held boxed runs through the dynamic dispatch:
 		// its result is what that dispatch returns, whatever the checker
 		// knows of the value (a lib iterator helper's `toArray()`).
-		if rt := e.inferExprType(callee.Object); isUnconstrainedDynamic(rt) && rt.DynPropTy == nil {
-			return e.structuralCallType(ex), true
+		if rt := e.typeOfExpr(callee.Object); isUnconstrainedDynamic(rt) && rt.DynPropTy == nil {
+			return e.builtCallType(ex), true
 		}
-		objTy := e.inferExprType(callee.Object)
-		var f func(objTy Type) Type
-		switch {
-		case objTy.IsGenerator():
-			f = generatorMethodTypes[callee.Property]
-		case objTy.IsCollIter():
-			f = collIterMethodTypes[callee.Property]
-		}
-		if f != nil {
-			return f(objTy), true
+		objTy := e.typeOfExpr(callee.Object)
+		// A generator's or builtin iterator's own method: the result its
+		// lowering lays out.
+		if objTy.IsGenerator() || objTy.IsCollIter() {
+			if l, ok := e.loweredCallDecl(ex); ok {
+				if t := l.resultType(); t.IR != "" {
+					// A boxed result the checker types as a primitive (an
+					// iterator helper's `reduce(fn, 0)`) is unboxed to it.
+					if isUnconstrainedDynamic(t) && t.DynPropTy == nil {
+						if pt, ok := e.checkerPrimitive(ex); ok {
+							return pt, true
+						}
+					}
+					return t, true
+				}
+			}
 		}
 		// A program class's method whose emitted result is boxed (a method
 		// returning a method value) returns the box, as a function's does.
@@ -2597,6 +2038,9 @@ func (e *Emitter) codegenCallRepr(ex *ast.CallExpression) (Type, bool) {
 		}
 	case *ast.IndexExpression:
 		// `x[Symbol.iterator]()`: the method call it is.
+		if obj := e.generatorSelfIterator(ex); obj != nil {
+			return e.typeOfExpr(obj), true
+		}
 		if r, ok := e.builtinIteratorCall(ex); ok {
 			if t, ok := e.codegenCallRepr(r); ok {
 				return t, true
@@ -2611,31 +2055,6 @@ func (e *Emitter) codegenCallRepr(ex *ast.CallExpression) (Type, bool) {
 func (e *Emitter) builtinNumericConst(ex *ast.MemberExpression) bool {
 	id, ok := ex.Object.(*ast.Identifier)
 	return ok && numericBuiltinConst(ex) && !e.isShadowedByLocal(id.Name)
-}
-
-// generatorMethodTypes are a generator's next/throw/return results: the
-// {value, done} result, a promise of it for an async generator
-// (TDD-00085/00086).
-var generatorMethodTypes map[string]func(objTy Type) Type
-
-// collIterMethodTypes are a builtin collection iterator's next and the lib
-// helpers' results compiled here.
-var collIterMethodTypes = map[string]func(objTy Type) Type{
-	"next":    collIterResultType,
-	"toArray": func(objTy Type) Type { return ArrayOf(collIterElemType(objTy)) },
-	"reduce":  func(Type) Type { return TypeAny }, // the lib's Iterator.prototype.reduce
-}
-
-func init() {
-	step := func(objTy Type) Type {
-		if !objTy.GeneratorIsAsync {
-			return genUserResultType(*objTy.GeneratorElemType)
-		}
-		pt := PromiseOf(asyncGenResultType(*objTy.GeneratorElemType))
-		pt.PromiseTask = true
-		return pt
-	}
-	generatorMethodTypes = map[string]func(objTy Type) Type{"next": step, "throw": step, "return": step}
 }
 
 // emitArrayValueToString is an array's elements joined by commas (String(a),
@@ -2655,39 +2074,42 @@ func (e *Emitter) emitArrayValueToString(v Value) (Value, error) {
 	// picks "undefined" (IsUndefined) over "null".
 	if v.Ty.Nullable() {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s",
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s",
 			r, e.emitArrayIsAbsent(v), e.internString(absentLiteral(v.Ty)), joined.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	return joined, nil
 }
 
-// structuralIndexType is an index read's type from the receiver's
+// builtIndexType is an index read's type from the receiver's
 // representation and the dispatch emitIndex runs.
-func (e *Emitter) structuralIndexType(ex *ast.IndexExpression) Type {
+func (e *Emitter) builtIndexType(ex *ast.IndexExpression) Type {
 	// A namespace's enum indexed — must match emitIndexUnguarded.
 	if bare := e.stripNSTypeQualifier(ex.Object); bare != nil {
 		plain := *ex
 		plain.Object = bare
-		return e.structuralIndexType(&plain)
+		return e.builtIndexType(&plain)
 	}
 	if m, ok := e.builtinLiteralMember(ex); ok {
-		return e.inferExprType(m) // emitIndex reads it as the member
+		return e.typeOfExpr(m) // emitIndex reads it as the member
+	}
+	if m, ok := e.primitiveLiteralMember(ex); ok {
+		return e.typeOfExpr(m)
 	}
 	// `a?.[k]` is `ElemType | undefined` behind a pointer receiver — mirror
 	// emitOptionalIndex.
 	if ex.Optional {
 		plain := *ex
 		plain.Optional = false
-		inner := e.inferExprType(&plain)
-		if !optionalIndexGuards(e.inferExprType(ex.Object)) {
+		inner := e.typeOfExpr(&plain)
+		if !optionalIndexGuards(e.typeOfExpr(ex.Object)) {
 			return inner
 		}
 		return optionalCallResultType(optCalleeValue, inner)
 	}
 	// process.env[key] (mirrors emitIndex).
 	if r, ok := e.processEnvIndexRewrite(ex); ok {
-		return e.inferExprType(r)
+		return e.typeOfExpr(r)
 	}
 	if e.classDynIndex(ex) {
 		if pt, ok := e.checkerPrimitive(ex); ok {
@@ -2695,7 +2117,7 @@ func (e *Emitter) structuralIndexType(ex *ast.IndexExpression) Type {
 		}
 		return TypeAny
 	}
-	objTy := e.inferExprType(ex.Object)
+	objTy := e.typeOfExpr(ex.Object)
 	// A bracket read off a bare any/unknown base is itself dynamic
 	// (TDD-00155): the runtime tag dispatch yields another box — unless
 	// the base is an index-signature view (DynPropTy).
@@ -2771,7 +2193,7 @@ func (e *Emitter) structuralIndexType(ex *ast.IndexExpression) Type {
 func nullCoalesceType(lt, rt Type) Type {
 	// Operands of different scalar kinds yield their union — mirror
 	// emitNullCoalesce / emitNullCoalesceScalar.
-	if !lt.IsNull() && !lt.IsDynamic() && (isNullableScalar(lt) || (lt.IR == "ptr" && !lt.IsArray())) {
+	if !lt.IsNull() && !lt.IsDynamic() && (isNullableScalar(lt) || (lt.IR == irPtr && !lt.IsArray())) {
 		if uTy, ok := nullCoalesceUnion(lt.withoutNullable(), rt); ok {
 			return uTy
 		}
@@ -2788,13 +2210,13 @@ func nullCoalesceType(lt, rt Type) Type {
 	if nullCoalesceMixed(lt, rt) {
 		return TypeAny // mirrors emitNullCoalesce's boxed union
 	}
-	if lt.IR == "ptr" && !lt.IsArray() && !lt.IsNull() {
+	if lt.IR == irPtr && !lt.IsArray() && !lt.IsNull() {
 		return nullCoalescePtrResult(lt, rt)
 	}
 	if lt.IsArray() {
 		return nullCoalesceArrayResult(lt, rt) // mirrors emitNullCoalesceArray
 	}
-	if lt.IR == "ptr" {
+	if lt.IR == irPtr {
 		return rt
 	}
 	// A nullable-scalar left operand unwraps: `??`'s result is the
@@ -2862,4 +2284,35 @@ func hasSpread(lit *ast.ArrayLiteral) bool {
 		}
 	}
 	return false
+}
+
+// joinedPromiseElems is the one promise type of a literal whose elements are
+// promises of a nullable scalar that differ only in its absent states.
+func (e *Emitter) joinedPromiseElems(lit *ast.ArrayLiteral) (Type, bool) {
+	var out Type
+	joined := false
+	for i, el := range lit.Elements {
+		if _, ok := el.(*ast.SpreadElement); ok {
+			return Type{}, false
+		}
+		t := e.typeOfExpr(el)
+		if !t.IsPromise() || t.PromiseType == nil || !isNullableScalar(*t.PromiseType) {
+			return Type{}, false
+		}
+		if i == 0 {
+			out = t
+			continue
+		}
+		if reprKey(t) == reprKey(out) {
+			continue
+		}
+		if _, ok := sameButAbsence([]Type{*out.PromiseType}, *t.PromiseType); !ok {
+			return Type{}, false
+		}
+		pt := *out.PromiseType
+		pt.Absent = joinAbsence(pt.Absent, t.PromiseType.Absent)
+		out.PromiseType = &pt
+		joined = true
+	}
+	return out, joined
 }

@@ -51,7 +51,7 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		if _, isAssign := p.Value.(*ast.AssignmentExpression); isAssign {
 			continue // shorthand-default is not a data field (rejected at emit)
 		}
-		fty := e.inferExprType(p.Value)
+		fty := e.typeOfExpr(p.Value)
 		if idx, ok := seen[p.Key]; ok {
 			ownFields[idx].Ty = fty
 			continue
@@ -60,6 +60,12 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		ownFields = append(ownFields, Field{Name: p.Key, Ty: fty})
 	}
 
+	// Typing a field can ask for this literal's class again (a method
+	// returning `this`): that nested ask registered it, and it is the one
+	// class of the literal.
+	if name, ok := e.objLitClasses[lit]; ok {
+		return name
+	}
 	e.objLitClassCtr++
 	className := fmt.Sprintf("__kml_objlit_%d", e.objLitClassCtr)
 	ty := ClassType(className, nil, ownFields, false)
@@ -110,8 +116,11 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		e.popScope()
 		if p.AccessorKind == "set" {
 			sig.RetType = TypeVoid
-		} else if sig.RetType.IR == "void" && e.compatJS() {
-			sig.RetType = TypeAny // a getter falling off its end: undefined
+		} else if sig.RetType.IR == "void" {
+			// A getter falling off its end, or one that only throws (the
+			// checker reports a getter TypeScript requires to return):
+			// undefined.
+			sig.RetType = TypeAny
 		}
 		// A later accessor of the same kind and name replaces the earlier,
 		// as a later property definition does.
@@ -154,14 +163,17 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	if err := e.emitObjLitBodies(lit, className); err != nil {
 		return Value{}, err
 	}
+	if e.objLitInstances == nil {
+		e.objLitInstances = map[string]bool{}
+	}
+	e.objLitInstances[className] = true
 
 	// Construct: calloc, stamp the runtime tag, store each data field.
-	e.ensureCalloc()
 	dataReg := e.freshReg()
 	e.emitObjAllocInto(dataReg, ty)
 	structIR := ty.StructIR()
 	tagGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, structIR, dataReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", tagGep, structIR, dataReg))
 	valTag := info.TagID
 	if info.IsErrorSubclass { // error type-id flag, matching class construction (TDD-00222)
 		valTag = errorTypeIDStored(valTag)
@@ -173,17 +185,17 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 			continue
 		}
 		if _, isAssign := p.Value.(*ast.AssignmentExpression); isAssign {
-			return Value{}, fmt.Errorf("%d:%d: shorthand-default '%s' is not valid in a value object literal", pos.Line, pos.Col, p.Key)
+			return Value{}, internalAt(pos, "shorthand-default '%s' is not valid in a value object literal", p.Key)
 		}
 		idx, fieldTy, ok := ty.FieldIndex(p.Key)
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, p.Key)
+			return Value{}, internalAt(pos, "object has no field '%s'", p.Key)
 		}
-		if !convertiblePure(e.inferExprType(p.Value), fieldTy) {
-			return Value{}, fmt.Errorf("%d:%d: field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", pos.Line, pos.Col, p.Key)
+		if !convertiblePure(e.typeOfExpr(p.Value), fieldTy) {
+			return Value{}, internalAt(pos, "field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", p.Key)
 		}
 		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
 		if err := e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, p.Value); err != nil {
 			return Value{}, err
 		}
@@ -205,8 +217,13 @@ func (e *Emitter) emitObjLitBodies(lit *ast.ObjectLiteral, className string) err
 	if e.objLitEmitted == nil {
 		e.objLitEmitted = map[string]bool{}
 	}
+	// The bodies are emitted once each, and only where they emit: one a
+	// prototype builder reaches before the literal's own scope does
+	// (shapeMethodRecord) fails on the enclosing locals it reads, and the
+	// literal's emission then emits it where they resolve.
 	if !e.objLitEmitted[className] {
 		e.objLitEmitted[className] = true
+		defer delete(e.objLitEmitted, className)
 		// The last accessor of each kind and name is the one defined.
 		last := map[string]int{}
 		for i, p := range lit.Properties {
@@ -219,43 +236,38 @@ func (e *Emitter) emitObjLitBodies(lit *ast.ObjectLiteral, className string) err
 		for i, p := range lit.Properties {
 			if p.AccessorKind == "" {
 				if p.Key == "" {
-					return fmt.Errorf("%d:%d: an object literal that mixes a spread with a getter/setter is not yet supported", pos.Line, pos.Col)
+					return internalAt(pos, "an accessor literal with a spread (the dynamic literal's)")
 				}
 				if _, isAssign := p.Value.(*ast.AssignmentExpression); isAssign {
-					return fmt.Errorf("%d:%d: shorthand-default '%s' is not valid in a value object literal", pos.Line, pos.Col, p.Key)
+					return internalAt(pos, "shorthand-default '%s' is not valid in a value object literal", p.Key)
 				}
 				continue
 			}
 			fe := p.Value.(*ast.FunctionExpression)
 			if p.AccessorKind == "get" && len(fe.Params) != 0 {
-				return fmt.Errorf("%d:%d: a getter ('get %s') takes no parameters", pos.Line, pos.Col, p.Key)
+				return internalAt(pos, "a getter ('get %s') takes no parameters", p.Key)
 			}
 			if p.AccessorKind == "set" && len(fe.Params) != 1 {
-				return fmt.Errorf("%d:%d: a setter ('set %s') takes exactly one parameter", pos.Line, pos.Col, p.Key)
+				return internalAt(pos, "a setter ('set %s') takes exactly one parameter", p.Key)
 			}
 			key := accessorMethodName(p.AccessorKind, p.Key)
 			sig := info.MethodSigs[key]
-			if p.AccessorKind == "get" && sig.RetType.IR == "void" {
-				return fmt.Errorf("%d:%d: a getter ('get %s') must return a value", pos.Line, pos.Col, p.Key)
-			}
 			if last[key] != i {
 				continue // replaced by a later one
 			}
 			llvmName := llvmSafeSymbol(className + "_" + key)
-			if err := e.emitClassMember(llvmName, ty, fe.Params, sig, fe.Body, sig.RetType, pos, false, false); err != nil {
-				return err
-			}
-		}
-		// A get/set pair must agree on the property type.
-		for _, p := range lit.Properties {
-			if p.AccessorKind == "" {
+			if e.objLitEmitted[llvmName] {
 				continue
 			}
-			g, gok := info.MethodSigs[accessorMethodName("get", p.Key)]
-			s, sok := info.MethodSigs[accessorMethodName("set", p.Key)]
-			if gok && sok && !convertiblePure(s.ParamTypes[0], g.RetType) {
-				return fmt.Errorf("%d:%d: getter and setter for '%s' disagree on its type", pos.Line, pos.Col, p.Key)
+			// Its own function, whatever function is open where this runs
+			// (a prototype builder reaching it through shapeMethodRecord).
+			restore := e.beginDetachedFunc()
+			err := e.emitClassMember(llvmName, ty, fe.Params, sig, fe.Body, sig.RetType, pos, false, false)
+			restore()
+			if err != nil {
+				return err
 			}
+			e.objLitEmitted[llvmName] = true
 		}
 	}
 

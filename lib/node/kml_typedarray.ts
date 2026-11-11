@@ -170,21 +170,23 @@ function bigCompare(cmp: any, a: bigint, b: bigint): number {
 
 export function __kml_BigInt64Array_forEach(o: BigInt64Array, f: any, thisArg?: any): void { // kml:lower forEach
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) f.call(thisArg, o[i], i, o);
+    const len = o.length;
+    for (let i = 0; i < len; i++) f.call(thisArg, i < o.length ? o[i] : undefined, i, o);
 }
 
 export function __kml_BigInt64Array_map(o: BigInt64Array, f: any, thisArg?: any): BigInt64Array { // kml:lower map
     requireCallable(f);
     const r = new BigInt64Array(o.length);
-    for (let i = 0; i < o.length; i++) r[i] = toBigInt(f.call(thisArg, o[i], i, o));
+    for (let i = 0; i < r.length; i++) r[i] = toBigInt(f.call(thisArg, i < o.length ? o[i] : undefined, i, o));
     return r;
 }
 
 export function __kml_BigInt64Array_filter(o: BigInt64Array, f: any, thisArg?: any): BigInt64Array { // kml:lower filter
     requireCallable(f);
-    const kept: bigint[] = [];
-    for (let i = 0; i < o.length; i++) {
-        const v: bigint = o[i];
+    const kept: any[] = [];
+    const len = o.length;
+    for (let i = 0; i < len; i++) {
+        const v: any = i < o.length ? o[i] : undefined;
         if (f.call(thisArg, v, i, o)) kept.push(v);
     }
     const r = new BigInt64Array(kept.length);
@@ -194,20 +196,23 @@ export function __kml_BigInt64Array_filter(o: BigInt64Array, f: any, thisArg?: a
 
 export function __kml_BigInt64Array_some(o: BigInt64Array, f: any, thisArg?: any): boolean { // kml:lower some
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) if (f.call(thisArg, o[i], i, o)) return true;
+    const len = o.length;
+    for (let i = 0; i < len; i++) if (f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return true;
     return false;
 }
 
 export function __kml_BigInt64Array_every(o: BigInt64Array, f: any, thisArg?: any): boolean { // kml:lower every
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) if (!f.call(thisArg, o[i], i, o)) return false;
+    const len = o.length;
+    for (let i = 0; i < len; i++) if (!f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return false;
     return true;
 }
 
 export function __kml_BigInt64Array_find(o: BigInt64Array, f: any, thisArg?: any): any { // kml:lower find
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) {
-        const v: bigint = o[i];
+    const len = o.length;
+    for (let i = 0; i < len; i++) {
+        const v: any = i < o.length ? o[i] : undefined;
         if (f.call(thisArg, v, i, o)) return v;
     }
     return undefined;
@@ -215,14 +220,15 @@ export function __kml_BigInt64Array_find(o: BigInt64Array, f: any, thisArg?: any
 
 export function __kml_BigInt64Array_findIndex(o: BigInt64Array, f: any, thisArg?: any): number { // kml:lower findIndex
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) if (f.call(thisArg, o[i], i, o)) return i;
+    const len = o.length;
+    for (let i = 0; i < len; i++) if (f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return i;
     return -1;
 }
 
 export function __kml_BigInt64Array_findLast(o: BigInt64Array, f: any, thisArg?: any): any { // kml:lower findLast
     requireCallable(f);
     for (let i = o.length - 1; i >= 0; i--) {
-        const v: bigint = o[i];
+        const v: any = i < o.length ? o[i] : undefined;
         if (f.call(thisArg, v, i, o)) return v;
     }
     return undefined;
@@ -230,7 +236,7 @@ export function __kml_BigInt64Array_findLast(o: BigInt64Array, f: any, thisArg?:
 
 export function __kml_BigInt64Array_findLastIndex(o: BigInt64Array, f: any, thisArg?: any): number { // kml:lower findLastIndex
     requireCallable(f);
-    for (let i = o.length - 1; i >= 0; i--) if (f.call(thisArg, o[i], i, o)) return i;
+    for (let i = o.length - 1; i >= 0; i--) if (f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return i;
     return -1;
 }
 
@@ -244,7 +250,8 @@ export function __kml_BigInt64Array_reduce(o: BigInt64Array, f: any, ...init: an
         acc = o[0];
         k = 1;
     }
-    for (; k < o.length; k++) acc = f(acc, o[k], k, o);
+    const len = o.length;
+    for (; k < len; k++) acc = f(acc, k < o.length ? o[k] : undefined, k, o);
     return acc;
 }
 
@@ -258,32 +265,43 @@ export function __kml_BigInt64Array_reduceRight(o: BigInt64Array, f: any, ...ini
         acc = o[k];
         k--;
     }
-    for (; k >= 0; k--) acc = f(acc, o[k], k, o);
+    for (; k >= 0; k--) acc = f(acc, k < o.length ? o[k] : undefined, k, o);
     return acc;
 }
 
 export function __kml_BigInt64Array_indexOf(o: BigInt64Array, x: any, fromIndex?: any): number { // kml:lower indexOf
+    const len = o.length;
+    if (len === 0) return -1;
+    const k = relIndex(fromIndex, len, 0);
     if (typeof x !== 'bigint') return -1;
-    for (let i = relIndex(fromIndex, o.length, 0); i < o.length; i++) if (o[i] === x) return i;
+    for (let i = k; i < len; i++) if (i < o.length && o[i] === x) return i;
     return -1;
 }
 
 export function __kml_BigInt64Array_lastIndexOf(o: BigInt64Array, x: any, ...from: any[]): number { // kml:lower lastIndexOf
     const len = o.length;
-    if (len === 0 || typeof x !== 'bigint') return -1;
+    if (len === 0) return -1;
     let n = len - 1;
     if (from.length > 0) {
         let f = Math.trunc(Number(from[0]));
         if (f !== f) f = 0;
         n = f >= 0 ? Math.min(f, len - 1) : len + f;
     }
-    for (let i = n; i >= 0; i--) if (o[i] === x) return i;
+    if (typeof x !== 'bigint') return -1;
+    for (let i = n; i >= 0; i--) if (i < o.length && o[i] === x) return i;
     return -1;
 }
 
 export function __kml_BigInt64Array_includes(o: BigInt64Array, x: any, fromIndex?: any): boolean { // kml:lower includes
-    if (typeof x !== 'bigint') return false;
-    for (let i = relIndex(fromIndex, o.length, 0); i < o.length; i++) if (o[i] === x) return true;
+    const len = o.length;
+    if (len === 0) return false;
+    const k = relIndex(fromIndex, len, 0);
+    for (let i = k; i < len; i++) {
+        // (Past a length fromIndex's coercion shrank, the element is undefined.)
+        if (i >= o.length) {
+            if (x === undefined) return true;
+        } else if (o[i] === x) return true;
+    }
     return false;
 }
 
@@ -367,21 +385,23 @@ export function __kml_BigInt64Array_toSorted(o: BigInt64Array, cmp?: any): BigIn
 
 export function __kml_BigUint64Array_forEach(o: BigUint64Array, f: any, thisArg?: any): void { // kml:lower forEach
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) f.call(thisArg, o[i], i, o);
+    const len = o.length;
+    for (let i = 0; i < len; i++) f.call(thisArg, i < o.length ? o[i] : undefined, i, o);
 }
 
 export function __kml_BigUint64Array_map(o: BigUint64Array, f: any, thisArg?: any): BigUint64Array { // kml:lower map
     requireCallable(f);
     const r = new BigUint64Array(o.length);
-    for (let i = 0; i < o.length; i++) r[i] = toBigInt(f.call(thisArg, o[i], i, o));
+    for (let i = 0; i < r.length; i++) r[i] = toBigInt(f.call(thisArg, i < o.length ? o[i] : undefined, i, o));
     return r;
 }
 
 export function __kml_BigUint64Array_filter(o: BigUint64Array, f: any, thisArg?: any): BigUint64Array { // kml:lower filter
     requireCallable(f);
-    const kept: bigint[] = [];
-    for (let i = 0; i < o.length; i++) {
-        const v: bigint = o[i];
+    const kept: any[] = [];
+    const len = o.length;
+    for (let i = 0; i < len; i++) {
+        const v: any = i < o.length ? o[i] : undefined;
         if (f.call(thisArg, v, i, o)) kept.push(v);
     }
     const r = new BigUint64Array(kept.length);
@@ -391,20 +411,23 @@ export function __kml_BigUint64Array_filter(o: BigUint64Array, f: any, thisArg?:
 
 export function __kml_BigUint64Array_some(o: BigUint64Array, f: any, thisArg?: any): boolean { // kml:lower some
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) if (f.call(thisArg, o[i], i, o)) return true;
+    const len = o.length;
+    for (let i = 0; i < len; i++) if (f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return true;
     return false;
 }
 
 export function __kml_BigUint64Array_every(o: BigUint64Array, f: any, thisArg?: any): boolean { // kml:lower every
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) if (!f.call(thisArg, o[i], i, o)) return false;
+    const len = o.length;
+    for (let i = 0; i < len; i++) if (!f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return false;
     return true;
 }
 
 export function __kml_BigUint64Array_find(o: BigUint64Array, f: any, thisArg?: any): any { // kml:lower find
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) {
-        const v: bigint = o[i];
+    const len = o.length;
+    for (let i = 0; i < len; i++) {
+        const v: any = i < o.length ? o[i] : undefined;
         if (f.call(thisArg, v, i, o)) return v;
     }
     return undefined;
@@ -412,14 +435,15 @@ export function __kml_BigUint64Array_find(o: BigUint64Array, f: any, thisArg?: a
 
 export function __kml_BigUint64Array_findIndex(o: BigUint64Array, f: any, thisArg?: any): number { // kml:lower findIndex
     requireCallable(f);
-    for (let i = 0; i < o.length; i++) if (f.call(thisArg, o[i], i, o)) return i;
+    const len = o.length;
+    for (let i = 0; i < len; i++) if (f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return i;
     return -1;
 }
 
 export function __kml_BigUint64Array_findLast(o: BigUint64Array, f: any, thisArg?: any): any { // kml:lower findLast
     requireCallable(f);
     for (let i = o.length - 1; i >= 0; i--) {
-        const v: bigint = o[i];
+        const v: any = i < o.length ? o[i] : undefined;
         if (f.call(thisArg, v, i, o)) return v;
     }
     return undefined;
@@ -427,7 +451,7 @@ export function __kml_BigUint64Array_findLast(o: BigUint64Array, f: any, thisArg
 
 export function __kml_BigUint64Array_findLastIndex(o: BigUint64Array, f: any, thisArg?: any): number { // kml:lower findLastIndex
     requireCallable(f);
-    for (let i = o.length - 1; i >= 0; i--) if (f.call(thisArg, o[i], i, o)) return i;
+    for (let i = o.length - 1; i >= 0; i--) if (f.call(thisArg, i < o.length ? o[i] : undefined, i, o)) return i;
     return -1;
 }
 
@@ -441,7 +465,8 @@ export function __kml_BigUint64Array_reduce(o: BigUint64Array, f: any, ...init: 
         acc = o[0];
         k = 1;
     }
-    for (; k < o.length; k++) acc = f(acc, o[k], k, o);
+    const len = o.length;
+    for (; k < len; k++) acc = f(acc, k < o.length ? o[k] : undefined, k, o);
     return acc;
 }
 
@@ -455,32 +480,43 @@ export function __kml_BigUint64Array_reduceRight(o: BigUint64Array, f: any, ...i
         acc = o[k];
         k--;
     }
-    for (; k >= 0; k--) acc = f(acc, o[k], k, o);
+    for (; k >= 0; k--) acc = f(acc, k < o.length ? o[k] : undefined, k, o);
     return acc;
 }
 
 export function __kml_BigUint64Array_indexOf(o: BigUint64Array, x: any, fromIndex?: any): number { // kml:lower indexOf
+    const len = o.length;
+    if (len === 0) return -1;
+    const k = relIndex(fromIndex, len, 0);
     if (typeof x !== 'bigint') return -1;
-    for (let i = relIndex(fromIndex, o.length, 0); i < o.length; i++) if (o[i] === x) return i;
+    for (let i = k; i < len; i++) if (i < o.length && o[i] === x) return i;
     return -1;
 }
 
 export function __kml_BigUint64Array_lastIndexOf(o: BigUint64Array, x: any, ...from: any[]): number { // kml:lower lastIndexOf
     const len = o.length;
-    if (len === 0 || typeof x !== 'bigint') return -1;
+    if (len === 0) return -1;
     let n = len - 1;
     if (from.length > 0) {
         let f = Math.trunc(Number(from[0]));
         if (f !== f) f = 0;
         n = f >= 0 ? Math.min(f, len - 1) : len + f;
     }
-    for (let i = n; i >= 0; i--) if (o[i] === x) return i;
+    if (typeof x !== 'bigint') return -1;
+    for (let i = n; i >= 0; i--) if (i < o.length && o[i] === x) return i;
     return -1;
 }
 
 export function __kml_BigUint64Array_includes(o: BigUint64Array, x: any, fromIndex?: any): boolean { // kml:lower includes
-    if (typeof x !== 'bigint') return false;
-    for (let i = relIndex(fromIndex, o.length, 0); i < o.length; i++) if (o[i] === x) return true;
+    const len = o.length;
+    if (len === 0) return false;
+    const k = relIndex(fromIndex, len, 0);
+    for (let i = k; i < len; i++) {
+        // (Past a length fromIndex's coercion shrank, the element is undefined.)
+        if (i >= o.length) {
+            if (x === undefined) return true;
+        } else if (o[i] === x) return true;
+    }
     return false;
 }
 
@@ -560,4 +596,156 @@ export function __kml_BigUint64Array_toSorted(o: BigUint64Array, cmp?: any): Big
     const r = new BigUint64Array(o.length);
     for (let i = 0; i < o.length; i++) r[i] = o[i];
     return __kml_BigUint64Array_sort(r, cmp);
+}
+
+// %TypedArray%.prototype.toLocaleString: each element's toLocaleString
+// (its prototype's, which the program may replace), joined by ",".
+export function __kml_Int8Array_toLocaleString(o: Int8Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Uint8Array_toLocaleString(o: Uint8Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Uint8ClampedArray_toLocaleString(o: Uint8ClampedArray, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Int16Array_toLocaleString(o: Int16Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Uint16Array_toLocaleString(o: Uint16Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Int32Array_toLocaleString(o: Int32Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Uint32Array_toLocaleString(o: Uint32Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Float32Array_toLocaleString(o: Float32Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_Float64Array_toLocaleString(o: Float64Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_BigInt64Array_toLocaleString(o: BigInt64Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (BigInt.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+export function __kml_BigUint64Array_toLocaleString(o: BigUint64Array, locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        // (Through the prototype's property: a program may replace it.)
+        const f: any = (Number.prototype as any).toLocaleString;
+        s += String(f.call(o[i]));
+    }
+    return s;
+}
+
+// %TypedArray%: the abstract constructor every TypedArray kind's
+// constructor inherits from, its prototype the kinds' shared one. Made on
+// first reach.
+let typedArrayCtor: any = undefined;
+function typedArrayIntrinsic(proto: any): any {
+    if (typedArrayCtor === undefined) {
+        const f: any = function TypedArray(): any {
+            throw new TypeError('Abstract class TypedArray not directly constructable');
+        };
+        Object.defineProperty(f, 'prototype', { value: proto, writable: false, enumerable: false, configurable: false });
+        Object.defineProperty(proto, 'constructor', { value: f, writable: true, enumerable: false, configurable: true });
+        typedArrayCtor = f;
+    }
+    return typedArrayCtor;
+}
+
+// Object.getPrototypeOf(v) of a function v, whose prototype otherwise is d:
+// %TypedArray% for a TypedArray kind's constructor. taProto is the kinds'
+// shared prototype (its methods are the program's).
+export function __kml_TypedArray_protoOf(v: any, d: any, taProto: any): any { // kml:lower getPrototypeOf
+    if (v === Int8Array || v === Uint8Array || v === Uint8ClampedArray || v === Int16Array || v === Uint16Array ||
+        v === Int32Array || v === Uint32Array || v === Float32Array || v === Float64Array ||
+        v === BigInt64Array || v === BigUint64Array) {
+        return typedArrayIntrinsic(taProto);
+    }
+    return d;
 }

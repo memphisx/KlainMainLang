@@ -19,7 +19,7 @@ extern i64 __kml_dynobj_count(void *o);
 extern void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
 extern _Bool __kml_dynobj_delete(void *o, const char *key);
 
-enum { W_NONE, W_NUMBER, W_STRING, W_BOOLEAN };
+enum { W_NONE, W_NUMBER, W_STRING, W_BOOLEAN, W_BIGINT, W_SYMBOL };
 
 /* Which wrapper v boxes, or W_NONE. */
 static int wkind(i64 v) {
@@ -28,6 +28,8 @@ static int wkind(i64 v) {
     if (!strcmp(n, "Number")) return W_NUMBER;
     if (!strcmp(n, "String")) return W_STRING;
     if (!strcmp(n, "Boolean")) return W_BOOLEAN;
+    if (!strcmp(n, "BigInt")) return W_BIGINT;
+    if (!strcmp(n, "Symbol")) return W_SYMBOL;
     return W_NONE;
 }
 

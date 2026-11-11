@@ -6,8 +6,10 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -810,34 +812,38 @@ main2()
 // the feature under test — which would have made the threshold below flaky
 // (or falsely failing) for the wrong reason.
 func TestE2EPromiseAllFetchesRunConcurrently(t *testing.T) {
-	srv := newFetchTestServer(t)
+	// The upstream answers neither request until both have arrived (or 20 s
+	// passed): run one after the other, the first is answered "alone".
+	var mu sync.Mutex
+	arrived := 0
+	both := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/pair", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		if arrived++; arrived == 2 {
+			close(both)
+		}
+		mu.Unlock()
+		select {
+		case <-both:
+			fmt.Fprint(w, "together")
+		case <-time.After(20 * time.Second):
+			fmt.Fprint(w, "alone")
+		}
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
 	src := fmt.Sprintf(`
-const t0 = Date.now()
 async function main2(): Promise<void> {
     const ps: Array<Promise<Response>> = []
-    ps.push(fetch("%s/slow"))
-    ps.push(fetch("%s/slow"))
+    ps.push(fetch("%s/pair"))
+    ps.push(fetch("%s/pair"))
     const responses = await Promise.all(ps)
-    console.log(responses.length)
-    // Timed where the wait ends. main2() is not awaited, so a line printed
-    // after the call runs *before* the fetches finish — as in Node — and
-    // would measure nothing.
-    console.log(Date.now() - t0)
+    for (const r of responses) console.log(await r.text())
 }
 main2()
 `, srv.URL, srv.URL)
-	out := compileAndRun(t, src)
-	lines := strings.Split(out, "\n")
-	if len(lines) != 2 || lines[0] != "2" {
-		t.Fatalf("unexpected output: %q", out)
-	}
-	elapsedMs, err := strconv.Atoi(lines[1])
-	if err != nil {
-		t.Fatalf("parsing elapsed ms from %q: %v", lines[1], err)
-	}
-	if elapsedMs >= 500 {
-		t.Errorf("two concurrent /slow (300ms) fetches via Promise.all took %dms — expected well under 600ms if they ran concurrently rather than serially (concurrency is broken)", elapsedMs)
-	}
+	assertOutput(t, src, "together\ntogether")
 }
 
 // --- Response.arrayBuffer() (ADR-00094): embedded-null-byte-safe bodies ---
@@ -1015,20 +1021,29 @@ console.log("sync")
 // elapsed time measured across the sync tail must be well under the server's
 // response delay — with the old synchronous drive it was ≥ the delay.
 func TestE2EFetchThenDoesNotBlockSyncScript(t *testing.T) {
+	// The upstream holds /slow until the script's synchronous tail has written
+	// its marker file (or 20 s passed): a fetch that blocked the script until
+	// the response came would read "timeout".
+	marker := filepath.Join(t.TempDir(), "sync-ran")
 	mux := http.NewServeMux()
 	mux.HandleFunc("/slow", func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(400 * time.Millisecond)
-		fmt.Fprint(w, "late")
+		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+			if _, err := os.Stat(marker); err == nil {
+				fmt.Fprint(w, "released")
+				return
+			}
+		}
+		fmt.Fprint(w, "timeout")
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	src := fmt.Sprintf(`
-const t0 = Date.now()
-fetch("%s/slow").then((r) => { console.log("status " + r.status) })
-const elapsed = Date.now() - t0
-console.log(elapsed < 300 ? "sync ran immediately" : "sync was blocked")
-`, srv.URL)
-	assertOutput(t, src, "sync ran immediately\nstatus 200")
+import { writeFileSync } from 'node:fs'
+fetch("%s/slow").then(async (r) => { console.log("status " + r.status + " " + await r.text()) })
+writeFileSync(%q, "x")
+console.log("sync ran")
+`, srv.URL, marker)
+	assertOutputImports(t, src, "sync ran\nstatus 200 released")
 }
 
 // A fetch promise stays a reusable value across the .then bridge: attaching a

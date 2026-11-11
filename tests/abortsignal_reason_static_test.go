@@ -117,3 +117,17 @@ console.log(String(c.signal.reason))
 console.log(c.signal.reason instanceof HaltErr)
 `, "halt\nHaltErr\nHaltErr: halt\ntrue")
 }
+
+// AbortSignal.any's argument is WebIDL's sequence<AbortSignal>: any
+// iterable object of signals, anything else Node's ERR_INVALID_ARG_TYPE.
+func TestE2EAbortSignalAnyValidation(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `for (const a of [[], [null], [undefined], [5], [[1]], ["ab"]]) {
+  try { AbortSignal.any(...a); console.log("ok"); } catch (e) { console.log(e.code, e.name, e.message); }
+}
+const c = new AbortController();
+const s = AbortSignal.any([c.signal, new AbortController().signal]);
+c.abort("why");
+console.log(s.aborted, s.reason);
+console.log(AbortSignal.any(new Set([c.signal])).aborted);
+`)
+}

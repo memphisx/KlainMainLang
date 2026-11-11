@@ -550,17 +550,41 @@ console.log("unreachable")
 }
 
 func TestE2EProcessUncaughtException(t *testing.T) {
-	// The handler runs (skipping the default stack print); the process
-	// still exits 1 (this exception model has already unwound to the top).
+	// The handler runs (skipping the default stack print); the rest of the
+	// module is abandoned, the event loop still runs, and the process exits
+	// with process.exitCode, as in Node.
 	out, code := compileAndRunExpectExit(t, `
 process.on('uncaughtException', (err) => { console.log("caught:" + err.message) })
+process.on('exit', (c) => { console.log("exit:" + c) })
+setTimeout(() => console.log("timer"), 1)
 throw new Error("boom")
 `)
-	if got := strings.TrimSpace(out); got != "caught:boom" {
-		t.Errorf("output: got %q, want %q", got, "caught:boom")
+	if got, want := strings.TrimSpace(out), "caught:boom\ntimer\nexit:0"; got != want {
+		t.Errorf("output: got %q, want %q", got, want)
 	}
-	if code != 1 {
-		t.Errorf("exit code: got %d, want 1", code)
+	if code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
+	}
+}
+
+// A throw out of a timer or immediate callback that an 'uncaughtException'
+// listener handles leaves the loop running: the remaining due timers and
+// immediates still fire, as Node's RunTimers retries processTimers.
+func TestE2EProcessUncaughtExceptionLoopGoesOn(t *testing.T) {
+	out, code := compileAndRunExpectExit(t, `
+process.on('uncaughtException', (e) => console.log("c " + (e as Error).message))
+setImmediate(() => { throw new Error("i1") })
+setImmediate(() => console.log("i2"))
+setTimeout(() => { throw new Error("t1") }, 0)
+setTimeout(() => console.log("t2"), 0)
+setTimeout(() => console.log("t3"), 3)
+process.on('exit', (c) => console.log("exit " + c))
+`)
+	if got, want := strings.TrimSpace(out), "c i1\ni2\nc t1\nt2\nt3\nexit 0"; got != want {
+		t.Errorf("output: got %q, want %q", got, want)
+	}
+	if code != 0 {
+		t.Errorf("exit code: got %d, want 0", code)
 	}
 }
 
@@ -653,9 +677,9 @@ process.emitWarning("m3", { code: "C1" });
 }
 
 // TDD-00136: process.version / process.versions report the pinned Node
-// compatibility baseline (v22.11.0) plus this compiler's own klain version;
-// versions.node/v8 match that Node release verbatim, no fabricated bundled-lib
-// versions.
+// compatibility baseline (v22.11.0), the linked libuv's version and this
+// compiler's own klain version; versions.node/v8 match that Node release
+// verbatim, no fabricated bundled-lib versions.
 func TestE2EProcessVersion(t *testing.T) {
 	assertOutput(t, `console.log(process.version)`, "v22.11.0")
 }
@@ -663,14 +687,15 @@ func TestE2EProcessVersion(t *testing.T) {
 func TestE2EProcessVersionsObject(t *testing.T) {
 	// versions.klain is whatever the compiler was stamped with (the release
 	// tag in CI, a git describe under `make build`, 0.0.0-dev for a bare
-	// `go build`), so the expectation reads the variable, never a literal.
+	// `go build`), so the expectation reads the variable, never a literal;
+	// uv is the machine's libuv.
 	k := llvm.KlainVersion
 	assertOutput(t, `
 console.log(process.versions.node);
 console.log(process.versions.v8);
 console.log(process.versions.klain);
-console.log(JSON.stringify(process.versions));
-`, "22.11.0\n12.4.254.21-node.21\n"+k+"\n{\"node\":\"22.11.0\",\"v8\":\"12.4.254.21-node.21\",\"klain\":\""+k+"\"}")
+console.log(Object.keys(process.versions).join(), typeof process.versions.uv);
+`, "22.11.0\n12.4.254.21-node.21\n"+k+"\nnode,v8,uv,klain string")
 }
 
 // TDD-00131: process.on('warning', h) fires h with the warning as an Error
@@ -696,7 +721,7 @@ console.log(!process.stdin.isTTY)
 
 func TestE2EProcessGetUIDFamily(t *testing.T) {
 	if runtime.GOOS == "windows" {
-		t.Skip("process.getuid family does not exist in Node on Windows; the compiler rejects it there")
+		t.Skip("process.getuid family does not exist in Node on Windows; a call throws there")
 	}
 	// POSIX credential reads (ADR-00428) — non-negative numbers, and the
 	// effective ids match the real ones under a normal (non-setuid) run.
@@ -721,6 +746,18 @@ console.log("guarded")
 let n = 0
 try { process.getgid(n++) } catch (e) { console.log(e instanceof TypeError, e.message, n) }
 `, "guarded\ntrue process.getgid is not a function 1")
+}
+
+// Typed code is the same: the call throws when it is reached.
+func TestE2EProcessGetUIDWindowsTypeError(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("the process.getuid family exists on POSIX")
+	}
+	assertOutput(t, `
+if (process.platform !== 'win32') console.log(process.getuid())
+console.log("guarded")
+try { process.getgid() } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+`, "guarded\ntrue process.getgid is not a function")
 }
 
 // --- process.env / argv absence as real `string | undefined` (TDD-00187 Stage 3) ---
@@ -792,7 +829,9 @@ setTimeout(() => console.log('done'), 50);
 	if stdout.String() != want {
 		t.Fatalf("stdout = %q, want %q", stdout.String(), want)
 	}
-	if !regexp.MustCompile(`^\(node:\d+\) \[X1\] MyWarning: careful\n$`).MatchString(stderr.String()) {
+	// Node's report, with its one-time hint naming the program
+	// (path.basename(process.argv0)).
+	if !regexp.MustCompile("^\\(node:\\d+\\) \\[X1\\] MyWarning: careful\n\\(Use `[^ `]+ --trace-warnings \\.\\.\\.` to show where the warning was created\\)\n$").MatchString(stderr.String()) {
 		t.Fatalf("stderr = %q", stderr.String())
 	}
 }
@@ -817,6 +856,14 @@ process.title = "renamed";
 const p: any = process;
 console.log(first.length > 0, process.title, p.title);
 `, "true renamed renamed\n")
+}
+
+// The unset title is a string the program owns (argv[0] copied, with its
+// length), and a string read off the process spreads into its characters.
+func TestE2EProcessTitleDefaultIsAString(t *testing.T) {
+	assertOutput(t, `const t = process.title;
+console.log(t.length === t.split("").length, [...process.title].join("") === t, t.endsWith("prog"));
+`, "true true true\n")
 }
 
 // cluster.worker.process in a worker is the process itself.
@@ -852,4 +899,21 @@ o.write('o\n');
 f();
 console.log(fd, typeof process.stdout.columns, typeof o.write);
 `, "o\nundefined\n1 undefined function") // e.write goes to stderr
+}
+
+// process.getActiveResourcesInfo: the loop's referenced handles by Node's
+// wrap names, then the referenced Timeouts and Immediates.
+func TestE2EProcessGetActiveResourcesInfo(t *testing.T) {
+	// (Node's console makes the stdout and stderr streams, whose pipe
+	// wraps it lists; this console writes without them.)
+	assertSameAsNodeCLIJS(t, `const info = () => process.getActiveResourcesInfo().filter((n) => n !== "PipeWrap" && n !== "TTYWrap");
+console.log(info());
+const a = setTimeout(() => {}, 10); setImmediate(() => {}); const t = setTimeout(() => {}, 5); t.unref();
+console.log(info());
+const n = require("net").createServer().listen(0, () => { console.log(info().sort()); n.close(); clearTimeout(a); });
+`)
+	assertSameAsNode(t, `console.log(process.getActiveResourcesInfo().filter((type) => type === "Timeout").length);
+setTimeout(() => {}, 1);
+console.log(process.getActiveResourcesInfo().filter((type) => type === "Timeout").length);
+`)
 }

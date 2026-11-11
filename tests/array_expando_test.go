@@ -196,3 +196,43 @@ var desc = Object.getOwnPropertyDescriptor(obj, "prop");
 console.log(obj.hasOwnProperty("prop"), obj.prop, desc.get === getFunc);
 `)
 }
+
+// Object.defineProperty with an accessor on a declared field of a typed
+// object, class instance and structural parameter (ADR-01984).
+func TestE2EAccessorOnDeclaredField(t *testing.T) {
+	assertSameAsNode(t, `export {};
+const o = { a: 1, b: 2 };
+let n = 0;
+Object.defineProperty(o, "a", { get() { n++; return 10; }, set(v: number) { n += v; }, enumerable: true });
+o.a = 5;
+console.log(o.a, o.a, n, o.b, Object.keys(o), JSON.stringify(o));
+class C { x = 1; m() { return this.x + 1; } }
+const c = new C();
+let k = 0;
+Object.defineProperty(c, "x", { get() { k++; return 7; }, set(v: number) { k += v; }, configurable: true });
+c.x = 3;
+console.log(c.x, c.m(), k, c instanceof C, Object.keys(c));
+type P = { a: number; b: number; tag: { s: string } };
+const log: string[] = [];
+function f(p: P) {
+  let v = 10;
+  Object.defineProperty(p, "a", { get() { log.push("g"); return v; }, set(x: number) { log.push("s" + x); v = x; }, enumerable: true, configurable: true });
+  Object.defineProperty(p, "tag", { get: () => ({ s: "got" }) });
+  p.a += 1;
+  p.a++;
+  return [p.a, p.tag.s];
+}
+const p: P = { a: 1, b: 2, tag: { s: "x" } };
+console.log(f(p), log.join(","), p);
+function g(q: P) {
+  Object.defineProperty(q, "b", { get: () => 5 });
+  try { q.b = 9; } catch (e) { console.log((e as Error).message); }
+  return q.b;
+}
+console.log(g({ a: 0, b: 1, tag: { s: "" } }));
+class D { y = 1 }
+const d: any = new D();
+Object.defineProperty(d, "y", { value: 3 });
+console.log(d.y);
+`)
+}

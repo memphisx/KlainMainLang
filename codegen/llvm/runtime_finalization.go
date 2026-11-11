@@ -22,7 +22,7 @@
 //
 // Registration cells live on one process-global (per-thread) singly linked
 // list; each cell is { ptr next, ptr registry, ptr target, i64 held,
-// ptr token, i64 line, i64 col, i64 dead, ptr gcNext } (72 bytes, all
+// ptr token, i64 line, i64 col, i64 dead, ptr gcNext, ptr pendNext } (80 bytes, all
 // naturally aligned 8-byte fields). `dead` marks unregistered/already-fired
 // cells (cells are never unlinked — same never-compact reasoning as the
 // timer queue's -1 sentinel). Under gc, `target` is left null (a scanned
@@ -51,9 +51,6 @@ func (e *Emitter) FinalizationSource() string {
 	return pre + finalizationSource
 }
 
-// UsesFinRegHelpers reports whether the program links the finalization runtime.
-func (e *Emitter) UsesFinRegHelpers() bool { return e.usedFinRegHelpers }
-
 // ensureFinalizationHelpers declares the FinalizationRegistry runtime
 // (finalization.c) once. The manual-mode free hook only exists there.
 func (e *Emitter) ensureFinalizationHelpers() {
@@ -62,10 +59,4 @@ func (e *Emitter) ensureFinalizationHelpers() {
 	}
 	e.usedFinRegHelpers = true
 	e.ensureMicrotasks()
-	e.emitGlobal(`declare ptr @__kml_finreg_create(ptr, ptr, ptr, i64)
-declare void @__kml_finreg_register(ptr, ptr, i64, ptr, i64, i64)
-declare zeroext i1 @__kml_finreg_unregister(ptr, ptr)`)
-	if !e.isGCMode() {
-		e.emitGlobal("declare void @__kml_finreg_onfree(ptr)")
-	}
 }

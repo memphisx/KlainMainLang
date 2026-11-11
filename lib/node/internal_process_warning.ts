@@ -5,9 +5,6 @@
 // (internal_process.ts), the default listener is the only one there can be,
 // so the warning goes to it directly. This module imports nothing, so
 // `events` itself can emit warnings.
-//
-// The `(Use \`node --trace-warnings ...\`)` hint Node prints once is left
-// out: a compiled program has no --trace-warnings flag to point to.
 
 import { NodeTypeError } from './internal_errors';
 
@@ -28,6 +25,13 @@ function validateString(value: any, name: string): void {
 }
 
 let sink: ((warning: any) => void) | null = null;
+// The process object once something made it: its noDeprecation and
+// trace flags a program may set. Before that, none can be set.
+let proc: any = null;
+
+export function _kmlSetWarningProcess(p: any): void {
+    proc = p;
+}
 
 // The process emitter's 'warning' emit, once it exists.
 export function _kmlSetWarningSink(fn: (warning: any) => void): void {
@@ -38,14 +42,36 @@ function writeOut(message: string): void {
     console.error(message);
 }
 
+let traceWarningHelperShown = false;
+
+// The program's name as Node's path.basename(process.argv0, '.exe').
+function argv0Name(): string {
+    const a: any = process.argv0;
+    let n = typeof a === 'string' && a !== '' ? a : 'node';
+    const cut = Math.max(n.lastIndexOf('/'), n.lastIndexOf('\\'));
+    if (cut >= 0) n = n.slice(cut + 1);
+    if (n.endsWith('.exe') && n.length > 4) n = n.slice(0, -4);
+    return n;
+}
+
 // Node's onWarning: the default 'warning' listener.
 export function _kmlOnWarning(warning: any): void {
     if (!(warning instanceof Error)) return;
     const w: any = warning;
+    const p: any = proc !== null ? proc : {};
+    const isDeprecation = w.name === 'DeprecationWarning';
+    if (isDeprecation && p.noDeprecation) return;
+    const trace = p.traceProcessWarnings || (isDeprecation && p.traceDeprecation);
     let msg = '(node:' + process.pid + ') ';
     if (w.code) msg += '[' + w.code + '] ';
-    msg += String(warning);
+    if (trace && w.stack) msg += w.stack;
+    else msg += String(warning);
     if (typeof w.detail === 'string') msg += '\n' + w.detail;
+    if (!trace && !traceWarningHelperShown) {
+        const flag = isDeprecation ? '--trace-deprecation' : '--trace-warnings';
+        msg += '\n(Use `' + argv0Name() + ' ' + flag + ' ...` to show where the warning was created)';
+        traceWarningHelperShown = true;
+    }
     writeOut(msg);
 }
 

@@ -205,3 +205,97 @@ const L: any = T;
 console.log(L.next(), L.v);
 `)
 }
+
+// A class naming its function's locals: generic, constructed inside a
+// closure, and declared in a loop body over the loop's own binding
+// (ADR-01981).
+func TestE2ELocalClassClosureLoopsGenericsArrows(t *testing.T) {
+	assertSameAsNode(t, `function h(b: number) {
+  class Box<T> { v: T; constructor(v: T) { this.v = v; } get() { return [this.v, b]; } map<U>(f: (x: T) => U) { return new Box(f(this.v)); } }
+  const x = new Box("s"); const y = x.map(s => s.length);
+  const g = () => new Box(true).get();
+  return [x.get(), y.get(), g()];
+}
+console.log(h(3), h(4));
+function k(b: number) { class D { f() { return b; } } const g = () => new D().f(); return g(); }
+console.log(k(5), k(6));
+const out: number[] = [];
+const fs: (() => number)[] = [];
+for (let i = 0; i < 3; i++) { class D { f() { return i; } } out.push(new D().f()); fs.push(() => new D().f() * 10); }
+for (const x of [4, 5]) { class E { f() { return x; } } fs.push(() => new E().f()); }
+const ks: (() => string)[] = [];
+for (const key in { a: 1, b: 2 }) { class F { f() { return key; } } ks.push(() => new F().f()); }
+console.log(out, fs.map(f => f()), ks.map(f => f()));
+`)
+}
+
+// A derived constructor's nested function reads a local after super()
+// (ADR-01985).
+func TestE2ELocalClassDerivedCtorNestedFunction(t *testing.T) {
+	assertSameAsNode(t, `export {};
+class B { n: number; constructor(n: number) { this.n = n; } }
+function mk(tag: string) {
+  class D extends B {
+    f: () => string;
+    constructor() {
+      super(1);
+      this.f = function () { return tag + "!"; };
+    }
+  }
+  return new D();
+}
+console.log(mk("a").f(), mk("b").f(), mk("c").n);
+`)
+}
+
+// A catch binding and destructured bindings written after the local class
+// that reads them are shared through cells (ADR-01985).
+func TestE2ELocalClassCatchAndDestructuredCells(t *testing.T) {
+	assertSameAsNode(t, `export {};
+function f() {
+  try { throw new Error("x"); } catch (err) {
+    class C { m() { return String(err); } }
+    const c = new C();
+    err = "changed";
+    console.log(c.m());
+  }
+}
+f();
+function g(o: { a: number }, p: [number, string]) {
+  let { a } = o;
+  let [n, s] = p;
+  class C { m() { return s + n + a; } }
+  const c = new C();
+  a = 5; n = 9; s = "z";
+  return c.m();
+}
+console.log(g({ a: 1 }, [2, "q"]));
+`)
+}
+
+// A `for (let …)` variable the body writes, read by a local class: a cell
+// per iteration, written back before the update clause (ADR-01985).
+func TestE2ELocalClassLoopVariableCell(t *testing.T) {
+	assertSameAsNode(t, `export {};
+function run() {
+  const got: string[] = [];
+  outer: for (let i = 0; i < 10; i++) {
+    class C { m() { return "c" + i; } }
+    const c = new C();
+    if (i === 1) { i += 2; continue; }
+    for (let j = 0; j < 2; j++) { if (j === 1) continue; if (i === 6) { i++; continue outer; } }
+    const f = () => i;
+    i++;
+    got.push(c.m() + ":" + f());
+    if (i > 7) break;
+  }
+  return got.join(" ");
+}
+console.log(run());
+for (let k = 0; k < 4; k++) { class D { g() { return k; } } const d = new D(); k++; if (k === 3) continue; console.log(d.g()); }
+const fs: (() => string)[] = [];
+for (let x of [1, 2, 3]) { class C { m() { return "x" + x; } } const c = new C(); x *= 10; fs.push(() => c.m()); }
+for (let k in { a: 1, b: 2 }) { class D { g() { return k; } } const d = new D(); k = k + "!"; fs.push(() => d.g()); }
+console.log(fs.map(f => f()).join(" "));
+`)
+}

@@ -38,15 +38,13 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	}
 	searchVal = e.convert(searchVal, TypePtr)
 
-	e.ensureMalloc()
-	e.ensureMemcpy()
 	e.ensureStrHeaderRuntime() // memmem + __kml_str_alloc + __kml_str_len
 
 	sLen := e.emitStrLenHeader(objVal.Ref)
 	searchLen := e.emitStrLenHeader(searchVal.Ref)
 
 	resultSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resultSlot))
 
 	// An empty search matches at every UTF-16 position (replaceAll) or at
 	// the start (replace): the replacer's result goes before each unit, and
@@ -67,15 +65,15 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 			last = units
 		}
 		accSlot, kSlot := e.freshReg(), e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accSlot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", accSlot))
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", kSlot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), accSlot))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", kSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.internString(""), accSlot))
+		e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", kSlot))
 		condL, bodyL, unitL, nextL, doneL := e.freshLabel("strrepcb.e.cond"), e.freshLabel("strrepcb.e.body"), e.freshLabel("strrepcb.e.unit"), e.freshLabel("strrepcb.e.next"), e.freshLabel("strrepcb.e.done")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(condL)
 		k, more := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", k, kSlot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", k, kSlot))
 		e.emitInstr(fmt.Sprintf("%s = icmp sle i64 %s, %s", more, k, last))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
 		e.emitLabel(bodyL)
@@ -83,14 +81,16 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 		if err != nil {
 			return Value{}, err
 		}
-		r = e.convert(r, TypePtr)
+		if r, err = e.replacerResultString(r); err != nil {
+			return Value{}, err
+		}
 		acc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", acc, accSlot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", acc, accSlot))
 		withR, err := e.emitStringConcat(Value{Ref: acc, Ty: TypePtr}, r)
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", withR.Ref, accSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", withR.Ref, accSlot))
 		inside := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", inside, k, units))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inside, unitL, nextL))
@@ -98,26 +98,26 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 		k1, unit := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", k1, k))
 		if all {
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_u16_sub(ptr %s, i64 %s, i64 %s)", unit, objVal.Ref, k, k1))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_u16_sub("+irPtr+" %s, i64 %s, i64 %s)", unit, objVal.Ref, k, k1))
 		} else {
 			// replace: the whole subject follows the one insertion.
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_u16_sub(ptr %s, i64 %s, i64 %s)", unit, objVal.Ref, k, units))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_u16_sub("+irPtr+" %s, i64 %s, i64 %s)", unit, objVal.Ref, k, units))
 		}
 		withU, err := e.emitStringConcat(withR, Value{Ref: unit, Ty: TypePtr})
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", withU.Ref, accSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", withU.Ref, accSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
 		e.emitLabel(nextL)
 		k2 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", k2, k))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", k2, kSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", k2, kSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(doneL)
 		res := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", res, accSlot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", res, resultSlot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", res, accSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", res, resultSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	}
 
@@ -137,20 +137,20 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	byteCount8 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount8, count))
 	starts := e.freshReg()
-	e.heapMallocInto(starts, byteCount8)
+	e.heapMallocInto(starts, allocBytes, byteCount8)
 	replPtrs := e.freshReg()
-	e.heapMallocInto(replPtrs, byteCount8)
+	e.heapMallocInto(replPtrs, allocElems, byteCount8)
 	replLens := e.freshReg()
-	e.heapMallocInto(replLens, byteCount8)
+	e.heapMallocInto(replLens, allocBytes, byteCount8)
 
 	// --- pass 2: fill (callback runs exactly once per match) ---
 	// A running cursor into the subject and the running match index.
 	curAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", curAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objVal.Ref, curAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", curAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", objVal.Ref, curAlloca))
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	fillCondL := e.freshLabel("strrepcb.fillcond")
 	fillBodyL := e.freshLabel("strrepcb.fillbody")
@@ -159,39 +159,39 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 
 	e.emitLabel(fillCondL)
 	idxVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	fillDoneReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", fillDoneReg, idxVal, count))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fillDoneReg, fillDoneL, fillBodyL))
 
 	e.emitLabel(fillBodyL)
 	curPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, curAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", curPtr, curAlloca))
 	// Remaining bytes from the cursor to the end of the subject.
 	curInt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", curInt, curPtr))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", curInt, curPtr))
 	baseInt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", baseInt, objVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", baseInt, objVal.Ref))
 	consumed := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", consumed, curInt, baseInt))
 	remaining := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", remaining, sLen, consumed))
 	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @memmem(ptr %s, i64 %s, ptr %s, i64 %s)", found, curPtr, remaining, searchVal.Ref, searchLen))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @memmem("+irPtr+" %s, i64 %s, "+irPtr+" %s, i64 %s)", found, curPtr, remaining, searchVal.Ref, searchLen))
 	foundInt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", foundInt, found))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", foundInt, found))
 	startOff := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", startOff, foundInt, baseInt))
 
 	// Record the start offset.
 	startGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", startGep, starts, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", startGep, starts, idxVal))
 	e.heapStore("i64", startOff, startGep, 8)
 
 	// Invoke the callback with (match, offset, string). The matched substring
 	// is exactly the literal search string; offset is its UTF-16 index.
 	u16Off := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_u16_index(ptr %s, i64 %s)", u16Off, objVal.Ref, startOff))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_u16_index("+irPtr+" %s, i64 %s)", u16Off, objVal.Ref, startOff))
 	cbArgs := []Value{
 		{Ref: searchVal.Ref, Ty: TypePtr},
 		{Ref: u16Off, Ty: TypeI64},
@@ -201,34 +201,36 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	if err != nil {
 		return Value{}, err
 	}
-	resultVal = e.convert(resultVal, TypePtr)
+	if resultVal, err = e.replacerResultString(resultVal); err != nil {
+		return Value{}, err
+	}
 	replLen := e.emitStrLenHeader(resultVal.Ref)
 
 	replPtrGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", replPtrGep, replPtrs, idxVal))
-	e.heapStore("ptr", resultVal.Ref, replPtrGep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", replPtrGep, replPtrs, idxVal))
+	e.heapStore(irPtr, resultVal.Ref, replPtrGep, 8)
 	replLenGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", replLenGep, replLens, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", replLenGep, replLens, idxVal))
 	e.heapStore("i64", replLen, replLenGep, 8)
 
 	// Advance the cursor past this match.
 	nextPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nextPtr, found, searchLen))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nextPtr, curAlloca))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", nextPtr, found, searchLen))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nextPtr, curAlloca))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", fillCondL))
 
 	// --- pass 3: pure — sum lengths, then build the output ---
 	e.emitLabel(fillDoneL)
 	outBuf := e.emitStringLiteralBuildOutput(objVal.Ref, sLen, searchLen, count, starts, replPtrs, replLens)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", outBuf, resultSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", outBuf, resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	final := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", final, resultSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", final, resultSlot))
 	return Value{Ref: final, Ty: TypePtr}, nil
 }
 
@@ -237,11 +239,11 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 // invocation).
 func (e *Emitter) emitStringLiteralCountMatches(sRef, sLen, searchRef, searchLen string) string {
 	curAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", curAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sRef, curAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", curAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", sRef, curAlloca))
 	cntAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", cntAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", cntAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", cntAlloca))
 
 	condL := e.freshLabel("strrepcb.cntcond")
 	bodyL := e.freshLabel("strrepcb.cntbody")
@@ -250,35 +252,35 @@ func (e *Emitter) emitStringLiteralCountMatches(sRef, sLen, searchRef, searchLen
 
 	e.emitLabel(condL)
 	curPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, curAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", curPtr, curAlloca))
 	curInt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", curInt, curPtr))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", curInt, curPtr))
 	baseInt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", baseInt, sRef))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", baseInt, sRef))
 	consumed := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", consumed, curInt, baseInt))
 	remaining := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", remaining, sLen, consumed))
 	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @memmem(ptr %s, i64 %s, ptr %s, i64 %s)", found, curPtr, remaining, searchRef, searchLen))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @memmem("+irPtr+" %s, i64 %s, "+irPtr+" %s, i64 %s)", found, curPtr, remaining, searchRef, searchLen))
 	hasReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasReg, found))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasReg, found))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasReg, bodyL, doneL))
 
 	e.emitLabel(bodyL)
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, cntAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, cntAlloca))
 	cur1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", cur1, cur))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cur1, cntAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", cur1, cntAlloca))
 	nextPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nextPtr, found, searchLen))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nextPtr, curAlloca))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", nextPtr, found, searchLen))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nextPtr, curAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	count := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, cntAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", count, cntAlloca))
 	return count
 }
 
@@ -296,10 +298,10 @@ func (e *Emitter) emitStringLiteralBuildOutput(sRef, sLen, searchLen, count, sta
 
 	totalAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", totalAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", base, totalAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", base, totalAlloca))
 	sumIdxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", sumIdxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", sumIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", sumIdxAlloca))
 
 	sumCondL := e.freshLabel("strrepcb.sumcond")
 	sumBodyL := e.freshLabel("strrepcb.sumbody")
@@ -308,42 +310,42 @@ func (e *Emitter) emitStringLiteralBuildOutput(sRef, sLen, searchLen, count, sta
 
 	e.emitLabel(sumCondL)
 	sumIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sumIdx, sumIdxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sumIdx, sumIdxAlloca))
 	sumDoneReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", sumDoneReg, sumIdx, count))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sumDoneReg, sumDoneL, sumBodyL))
 
 	e.emitLabel(sumBodyL)
 	sumReplLenGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", sumReplLenGep, replLens, sumIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", sumReplLenGep, replLens, sumIdx))
 	sumReplLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sumReplLen, sumReplLenGep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sumReplLen, sumReplLenGep))
 	curTotal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curTotal, totalAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", curTotal, totalAlloca))
 	newTotal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newTotal, curTotal, sumReplLen))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newTotal, totalAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", newTotal, totalAlloca))
 	sumIdxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", sumIdxNext, sumIdx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sumIdxNext, sumIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sumIdxNext, sumIdxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", sumCondL))
 
 	e.emitLabel(sumDoneL)
 	grandTotal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", grandTotal, totalAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", grandTotal, totalAlloca))
 	outBuf := e.emitStringAlloc(grandTotal)
 
 	// Copy loop: for each match, copy the gap (subject[lastPos..start]) then
 	// the replacement; finally the trailing subject after the last match.
 	lastPosAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lastPosAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", lastPosAlloca))
 	dstAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", dstAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", dstAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", dstAlloca))
 	copyIdxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", copyIdxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", copyIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", copyIdxAlloca))
 
 	copyCondL := e.freshLabel("strrepcb.copycond")
 	copyBodyL := e.freshLabel("strrepcb.copybody")
@@ -352,69 +354,69 @@ func (e *Emitter) emitStringLiteralBuildOutput(sRef, sLen, searchLen, count, sta
 
 	e.emitLabel(copyCondL)
 	copyIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyIdx, copyIdxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyIdx, copyIdxAlloca))
 	copyDoneReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", copyDoneReg, copyIdx, count))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", copyDoneReg, copyDoneL, copyBodyL))
 
 	e.emitLabel(copyBodyL)
 	copyStartGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", copyStartGep, starts, copyIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", copyStartGep, starts, copyIdx))
 	copyStart := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyStart, copyStartGep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyStart, copyStartGep))
 	copyCurLastPos := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyCurLastPos, lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyCurLastPos, lastPosAlloca))
 	copyGapLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", copyGapLen, copyStart, copyCurLastPos))
 	copyCurDst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyCurDst, dstAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyCurDst, dstAlloca))
 	gapDstGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", gapDstGep, outBuf, copyCurDst))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", gapDstGep, outBuf, copyCurDst))
 	gapSrcGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", gapSrcGep, sRef, copyCurLastPos))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", gapDstGep, gapSrcGep, copyGapLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", gapSrcGep, sRef, copyCurLastPos))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", gapDstGep, gapSrcGep, copyGapLen))
 	dstAfterGap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", dstAfterGap, copyCurDst, copyGapLen))
 
 	copyReplPtrGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", copyReplPtrGep, replPtrs, copyIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", copyReplPtrGep, replPtrs, copyIdx))
 	copyReplPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", copyReplPtr, copyReplPtrGep))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", copyReplPtr, copyReplPtrGep))
 	copyReplLenGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", copyReplLenGep, replLens, copyIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", copyReplLenGep, replLens, copyIdx))
 	copyReplLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyReplLen, copyReplLenGep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyReplLen, copyReplLenGep))
 	replDstGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", replDstGep, outBuf, dstAfterGap))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", replDstGep, copyReplPtr, copyReplLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", replDstGep, outBuf, dstAfterGap))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", replDstGep, copyReplPtr, copyReplLen))
 	dstAfterRepl := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", dstAfterRepl, dstAfterGap, copyReplLen))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", dstAfterRepl, dstAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", dstAfterRepl, dstAlloca))
 
 	// lastPos = start + searchLen (past the matched literal).
 	newLastPos := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newLastPos, copyStart, searchLen))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newLastPos, lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", newLastPos, lastPosAlloca))
 
 	copyIdxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", copyIdxNext, copyIdx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", copyIdxNext, copyIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", copyIdxNext, copyIdxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", copyCondL))
 
 	e.emitLabel(copyDoneL)
 	finalLastPos := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalLastPos, lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalLastPos, lastPosAlloca))
 	finalDst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalDst, dstAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalDst, dstAlloca))
 	trailingLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", trailingLen, sLen, finalLastPos))
 	trailDstGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", trailDstGep, outBuf, finalDst))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", trailDstGep, outBuf, finalDst))
 	trailSrcGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", trailSrcGep, sRef, finalLastPos))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", trailDstGep, trailSrcGep, trailingLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", trailSrcGep, sRef, finalLastPos))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", trailDstGep, trailSrcGep, trailingLen))
 	termGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, outBuf, grandTotal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", termGep, outBuf, grandTotal))
 	e.heapStore("i8", "0", termGep, 1)
 
 	return outBuf

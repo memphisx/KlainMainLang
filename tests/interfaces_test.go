@@ -34,13 +34,15 @@ console.log(render((n: number): string => "r" + String(n), 4));
 `, "r4")
 }
 
-func TestE2ECallableInterfaceMixedIsError(t *testing.T) {
-	_, err := parseAndCompile(`
-interface Bad { (n: number): string; x: number; }
+// An interface with a call signature beside its members types a function
+// object carrying them.
+func TestE2ECallableInterfaceWithMembers(t *testing.T) {
+	assertSameAsNode(t, `interface Fmt { (n: number): string; prefix: string }
+const f = Object.assign((n: number) => f.prefix + n, { prefix: "#" }) as Fmt;
+console.log(f(3), f.prefix);
+f.prefix = "$";
+console.log(f(4));
 `)
-	if err == nil {
-		t.Fatal("expected a parse error for a call signature mixed with other interface members")
-	}
 }
 
 func TestE2EClassInterfaceDeclarationMerging(t *testing.T) {
@@ -180,4 +182,25 @@ console.log(n);
 type Cons = { tail: Cons | null; head: number };
 const bad: Cons = { tail: { tail: null, head: "x" }, head: 1 };
 `, "type 'string' is not assignable to type 'number'")
+}
+
+func TestE2EInterfaceExtendingOnlyAnArray(t *testing.T) {
+	// An interface adding nothing to the array type it extends is that
+	// array, as is an iterator annotated by its interface name.
+	assertSameAsNode(t, `
+interface Ticks extends ReadonlyArray<number> {}
+interface Names extends Array<string> {}
+const t: Ticks = [1, 2, 3];
+const n: Names = ["a"];
+n.push("b");
+console.log(t.length, t[1], t.map(x => x * 2), n.join("+"));
+const m = new Map<string, number>([["a", 1], ["b", 2]]);
+function first(it: MapIterator<[string, number]>): [string, number] | undefined {
+  const r = it.next();
+  return r.done ? undefined : r.value;
+}
+console.log(first(m.entries()));
+const vi: SetIterator<number> = new Set([4, 5]).values();
+for (const v of vi) console.log(v);
+`)
 }

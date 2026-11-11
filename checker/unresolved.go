@@ -29,18 +29,25 @@ func (c *Checker) jsUndeclaredName(name string, scope *binder.Scope) bool {
 		return false
 	}
 	src := sourceName(name)
-	return !intrinsicNames[src] && !c.b.Program.BuiltinImports[src] && !c.nsAlias(src) && !c.ambientName(src) && !lib.KnownGlobal(src)
+	if intrinsicNames[src] || c.b.Program.BuiltinImports[src] || c.nsAlias(src) || c.ambientName(src) {
+		return false
+	}
+	// A global only TypeScript's library declares, which this compiler's
+	// library does not bind (`WebAssembly`), is as undeclared at run time.
+	return !lib.KnownGlobal(src) || c.b.Globals != nil && lookupName(src, c.b.Globals) == nil
 }
 
 func (c *Checker) unresolvedValue(name string, at ast.Node, pos ast.Pos, scope *binder.Scope) {
-	if c.opts.CompatJS() || strings.HasSuffix(name, "_kml_builtin") || strings.HasPrefix(name, "__kml") {
+	if c.opts.CompatJS() || strings.HasSuffix(name, "_kml_builtin") || strings.HasPrefix(name, "__kml") || c.inEvalCode(at) {
 		return
 	}
 	if strings.HasPrefix(name, "#") {
 		return // `#x in o`'s private name: the class's, checked by codegen
 	}
 	src := sourceName(name)
-	if intrinsicNames[src] || c.b.Program.BuiltinImports[src] || c.nsAlias(src) || c.ambientName(src) {
+	// `arguments` no function binds (an arrow's at the top level) is
+	// unresolved, as tsc reports it (TS2304).
+	if intrinsicNames[src] && src != "arguments" || c.b.Program.BuiltinImports[src] || c.nsAlias(src) || c.ambientName(src) {
 		return
 	}
 	if lib.KnownGlobal(src) {

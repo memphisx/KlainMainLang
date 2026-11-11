@@ -16,63 +16,10 @@ var processSource string
 // ProcessSource is the process runtime's C source.
 func ProcessSource() string { return processSource }
 
-// processNativeKeys are the fnDecls entries (runtime_process_native.go,
-// ensureNativeSignal) whose use links process.c.
-var processNativeKeys = []string{
-	"__kml_native_process_cwd", "__kml_native_process_chdir", "__kml_native_process_uptime",
-	"__kml_native_process_hrtime", "__kml_native_kill_pid", "__kml_native_process_memory",
-	"__kml_native_process_umask", "__kml_native_process_id", "__kml_native_process_argc",
-	"__kml_native_process_exec_path", "__kml_native_process_set_exit_code", "__kml_native_env_get",
-	"__kml_native_signal_start", "__kml_process_hook_call",
-}
-
-// UsesProcessRuntime reports whether the program links process.c.
-func (e *Emitter) UsesProcessRuntime() bool {
-	if e.usedProcessLifecycle || e.usedProcessUptime || e.usedProcessCwd || e.usedExecPath ||
-		e.usedGetpid || e.usedSigpipeIgnored || e.usedSignalHandler {
-		return true
-	}
-	for _, k := range processNativeKeys {
-		if e.fnDecls[k] {
-			return true
-		}
-	}
-	return false
-}
-
 // ProcessCFlags pass process.c the NaN-box constants; it is compiled the
 // same way for every program (DeadStripFlags).
 func (e *Emitter) ProcessCFlags() []string {
 	return append([]string{"-DKML_NB_UNDEFINED=" + strconv.Itoa(nbUndefined) + "LL", "-DKML_NB_DOUBLE_OFFSET=" + strconv.FormatInt(nbDoubleOffset, 10) + "LL"}, DeadStripFlags(e.exportsRuntime())...)
-}
-
-// nodePlatformName maps the Go compiler's own runtime.GOOS to the string
-// Node's process.platform would report on that host — a pure compile-time
-// mapping, no runtime code at all, following the same "check the Go
-// compiler's own OS, since it also runs clang moments later" reasoning as
-// errnoAccessor/monotonicClockID.
-
-func (e *Emitter) nodePlatformName() string {
-	switch e.opts.Target.OS() {
-	case "windows":
-		return "win32"
-	default:
-		return e.opts.Target.OS() // "darwin", "linux", "freebsd", etc. already match Node's own strings
-	}
-}
-
-// nodeArchName maps Go's GOARCH to Node's process.arch strings (amd64 → x64,
-// 386 → ia32); arm64/arm/ppc64/s390x already match. This compiler builds for
-// the host arch, so the value is a compile-time constant.
-func (e *Emitter) nodeArchName() string {
-	switch e.opts.Target.Arch() {
-	case "amd64":
-		return "x64"
-	case "386":
-		return "ia32"
-	default:
-		return e.opts.Target.Arch() // "arm64", "arm", "ppc64", "s390x", ... already match Node
-	}
 }
 
 // ensureProcessUptime declares @__kml_proc_uptime_init (called once at main
@@ -83,8 +30,7 @@ func (e *Emitter) ensureProcessUptime() {
 		return
 	}
 	e.usedProcessUptime = true
-	e.emitGlobal(`declare void @__kml_proc_uptime_init()
-declare double @__kml_process_uptime()`)
+	e.emitGlobal(`declare void @__kml_proc_uptime_init()`)
 }
 
 // emitProcessLifecycleRuntime emits the process-lifecycle globals and the two
@@ -105,10 +51,9 @@ func (e *Emitter) emitProcessLifecycleRuntime() {
 	}
 	e.fnDecls["__kml_process_uncaught"] = true
 	e.ensureProcessHooks()
-	e.emitGlobal(`@__kml_process_exit_code = external thread_local global i64, align 8
-declare void @__kml_run_exit_handlers(i64)`)
 	restore := e.beginDetachedFunc()
-	box := e.emitCaughtToAny(Value{Ref: "%rec", Ty: TypeCaught})
+	rec := e.emitCaughtRecord("%tag", "%pay")
+	box := e.emitCaughtToAny(Value{Ref: rec, Ty: TypeCaught})
 	origin := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %%rejection, i64 %s, i64 %s", origin, e.emitNbEncodeDouble("1.0"), e.emitNbEncodeDouble("0.0")))
 	has := e.freshReg()
@@ -116,13 +61,16 @@ declare void @__kml_run_exit_handlers(i64)`)
 	e.emitInstr(fmt.Sprintf("ret i1 %s", has))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.functions.WriteString(fmt.Sprintf(`
-define i1 @__kml_process_uncaught(i8 %%tag, i64 %%pay, i1 %%rejection) {
-entry:
-  %%rec0 = insertvalue { i8, i64 } undef, i8 %%tag, 0
-  %%rec = insertvalue { i8, i64 } %%rec0, i64 %%pay, 1
-%s}
-`, body))
+	e.writeFunc("i1 @__kml_process_uncaught(i8 %tag, i64 %pay, i1 %rejection)", body)
+}
+
+// emitCaughtRecord is the { i8 tag, i64 payload } caught-value aggregate
+// built from its two words.
+func (e *Emitter) emitCaughtRecord(tag, pay string) string {
+	r0, r := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } undef, i8 %s, 0", r0, tag))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { i8, i64 } %s, i64 %s, 1", r, r0, pay))
+	return r
 }
 
 // ensureProcessHooks defines the runtime's hooks for the process events it
@@ -136,79 +84,5 @@ func (e *Emitter) ensureProcessHooks() {
 	}
 	e.fnDecls["__kml_process_hook_call"] = true
 	e.usedProcessLifecycle = true
-	e.emitGlobal(`declare zeroext i1 @__kml_process_hook_call(i32, i64, i64)
-declare void @__kml_native_process_hook(double, ptr, ptr)
-declare void @__kml_native_process_unhook(double)`)
-}
-
-// ensureProcessCwd declares __kml_process_cwd: the current working directory
-// via POSIX getcwd(NULL, 0) — the glibc/BSD extension where a NULL buffer
-// tells getcwd to malloc a buffer sized exactly as needed itself, avoiding
-// the usual "grow a fixed buffer until it fits" loop entirely. Verified
-// directly (not assumed) that this auto-allocating form is supported on
-// both platforms this compiler targets before relying on it.
-func (e *Emitter) ensureProcessCwd() {
-	if e.usedProcessCwd {
-		return
-	}
-	e.usedProcessCwd = true
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal("declare ptr @__kml_process_cwd()")
-}
-
-// ensureGetpid declares __kml_getpid: the current process ID via POSIX
-// getpid(), sign-extended from the C int it actually returns to this
-// compiler's i64 number representation.
-// ensureExecPath emits `ptr @__kml_execpath()` returning the absolute,
-// symlink-resolved path of the running executable — what Node's
-// process.execPath guarantees (always absolute), which a raw argv[0] (possibly
-// `./bin` or a bare PATH name) is not. Platform-specific, host-only (this
-// compiler doesn't cross-compile): macOS uses `_NSGetExecutablePath` +
-// `realpath`, Linux reads `/proc/self/exe`.
-func (e *Emitter) ensureExecPath() {
-	if e.usedExecPath {
-		return
-	}
-	e.usedExecPath = true
-	// A program that reads process.execPath can spawn itself. Guard against the
-	// interpreter-flag self-fork bomb (see ensureNodeInterpFlagGuard).
-	e.ensureNodeInterpFlagGuard()
-	e.emitGlobal("declare ptr @__kml_execpath()")
-}
-
-func (e *Emitter) ensureGetpid() {
-	if e.usedGetpid {
-		return
-	}
-	e.usedGetpid = true
-	// The cluster fork region reads getpid() directly.
-	e.emitGlobal("declare i32 @getpid()")
-	e.emitGlobal("declare i64 @__kml_getpid()")
-}
-
-// ensureSignalHandlerRuntime links process.c's signal watchers (TDD-00019;
-// the process emitter starts one per signal). On POSIX a watcher runs from
-// its uv_signal_t callback; on Windows a signal only marks itself pending
-// and runs from the top of the event loop's next pass, never from signal
-// context.
-func (e *Emitter) ensureSignalHandlerRuntime() {
-	e.usedSignalHandler = true
-}
-
-// ensureNativeSignal defines lib/native.d.ts's signalStart and signalStop:
-// Node's signal_wrap. A watcher is an unref'd uv_signal_t on the event loop
-// (loop.c), so a watcher never holds the loop open; stopping restores the
-// default disposition (SIGPIPE's is ignored, as this runtime ignores it). A
-// signal the host refuses (SIGKILL, SIGSTOP; on Windows a number above
-// SIGWINCH) is -EINVAL. On Windows libuv delivers SIGINT, SIGHUP, SIGBREAK
-// and SIGWINCH; a watcher for another is accepted and never runs.
-func (e *Emitter) ensureNativeSignal() {
-	if e.fnDecls["__kml_native_signal_start"] {
-		return
-	}
-	e.fnDecls["__kml_native_signal_start"] = true
-	e.ensureSignalHandlerRuntime()
-	e.ensureEventLoop() // loop.c holds the uv_signal_t handles
-	e.emitGlobal(`declare double @__kml_native_signal_start(double, ptr, ptr)
-declare void @__kml_native_signal_stop(double)`)
+	e.emitGlobal(`declare zeroext i1 @__kml_process_hook_call(i32, i64, i64)`)
 }

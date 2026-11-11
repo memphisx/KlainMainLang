@@ -1973,3 +1973,61 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01927](01/ADR-01927.md) | namespace objects and live bindings | `Implements [TDD-00230](../tdd/TDD-00230.md)` (faithful namespace and module semantics found while closing oracle rows) |
 | [01928](01/ADR-01928.md) | oracle rows — element joins, settled results, skipped `var`s, capture cells, dictionaries | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P3.3 shadow buckets) |
 | [01929](01/ADR-01929.md) | checker — collection seeds, leftmost primitive inference, static private names, `arguments` in defaults | `Implements [TDD-00230](../tdd/TDD-00230.md)` (P2 checker fidelity, found by the P3.3 shadow) |
+| [01930](01/ADR-01930.md) | A function body's pre-pass state moves into its context; the module output is one object | Extends [ADR-01674](01/ADR-01674.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01931](01/ADR-01931.md) | The runtime on libuv is complete; the event-loop test asserts no tick count | Implements [TDD-00244](../tdd/TDD-00244.md), Extends [ADR-01685](01/ADR-01685.md) |
+| [01932](01/ADR-01932.md) | Equality, the key lists, Object.entries, the sort comparators and the Symbol registry leave IR text | Implements [TDD-00240](../tdd/TDD-00240.md), Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01933](01/ADR-01933.md) | More runtime leaves IR text; the stream iterator and console.table move to TypeScript | Implements [TDD-00240](../tdd/TDD-00240.md), Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01932](01/ADR-01932.md) |
+| [01934](01/ADR-01934.md) | The last IR `define` text leaves Go; a `function` owns its `prototype` | Implements [TDD-00240](../tdd/TDD-00240.md), Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01933](01/ADR-01933.md) |
+| [01935](01/ADR-01935.md) | Runtime files without libraries are linked by the symbols a program names | Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01934](01/ADR-01934.md) |
+| [01936](01/ADR-01936.md) | The program declares what it calls from its call sites | Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01935](01/ADR-01935.md) |
+| [01937](01/ADR-01937.md) | Runtime files with libraries are linked by symbol too; CompressionStream takes any BufferSource | Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01935](01/ADR-01935.md), Extends [ADR-01936](01/ADR-01936.md) |
+| [01938](01/ADR-01938.md) | `-g` debug and `-lto` link-time-optimized builds of the program and its runtime | Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01937](01/ADR-01937.md) |
+| [01939](01/ADR-01939.md) | One string allocator, allocator-reported array capacity, an identity-hash seam, and Proxy over any object | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01940](01/ADR-01940.md) | Function values carry their id in a prefix word, retiring the code-pointer side table | Implements [TDD-00230](../tdd/TDD-00230.md), Supersedes part of [ADR-01093](01/ADR-01093.md) |
+| [01941](01/ADR-01941.md) | The dynamic object's header joins the shared scheme and reserves a shape word | Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01939](01/ADR-01939.md) |
+| [01942](01/ADR-01942.md) | structuredClone clones a statically typed value it cannot copy statically at run time | Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01266](01/ADR-01266.md), Extends [ADR-00574](00/ADR-00574.md) |
+| [01943](01/ADR-01943.md) | Each object layout gets a row with its size and pointer map, and -mm=gc allocates through it | Implements [TDD-00230](../tdd/TDD-00230.md), Extends [ADR-01941](01/ADR-01941.md) |
+| [01944](01/ADR-01944.md) | JSON.stringify's walk path grows with the walk | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01945](01/ADR-01945.md) | A second super() throws; super.constructor is the base class | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01946](01/ADR-01946.md) | Side tables keyed by identity | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01947](01/ADR-01947.md) | Nullable scalar keys of a Map or Set | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01948](01/ADR-01948.md) | Top-level pattern globals; null and undefined kept apart | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01949](01/ADR-01949.md) | Computed `keyof` reads on objects; nested generic functions | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01950](01/ADR-01950.md) | Every pointer kind keeps null and undefined apart; absent sort comparators | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01951](01/ADR-01951.md) | `x?.[i]` short-circuits on a boxed receiver | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01952](01/ADR-01952.md) | Null and union narrowing come from the checker alone | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01953](01/ADR-01953.md) | The checker's answers and the program's analysis facts leave the Emitter | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.5) |
+| [01954](01/ADR-01954.md) | A callback to a generic call is checked against the inferred instantiation | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7) |
+| [01955](01/ADR-01955.md) | A generator's parameter is not the generator | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3) |
+| [01956](01/ADR-01956.md) | Runtime Event matches the DOM Event, and dynamic `new` counts its arguments | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3) |
+| [01957](01/ADR-01957.md) | A symbol type computed across an open cycle cut is not cached | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3) |
+| [01958](01/ADR-01958.md) | Iterator and generator bindings keep codegen's layouts in the front end | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3) |
+| [01959](01/ADR-01959.md) | Object spreads carry index signatures as tsc's do | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3) |
+| [01960](01/ADR-01960.md) | A binding initialized `null` is null where it is compared | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3) |
+| [01961](01/ADR-01961.md) | The front end drops its overload-implementation rule for top-level bindings | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3); revises [ADR-01925](01/ADR-01925.md) |
+| [01962](01/ADR-01962.md) | The checker types nested generic functions before codegen erases them | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3) |
+| [01963](01/ADR-01963.md) | The front end answers synthesized declarations, generic function types and constrained callbacks | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3, P3.3); follows [ADR-01961](01/ADR-01961.md) |
+| [01964](01/ADR-01964.md) | A contextual tuple return is the arrow's result | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3) |
+| [01965](01/ADR-01965.md) | A function expression's return type is deferred past the binding it reads | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.3, P3.3); follows [ADR-01963](01/ADR-01963.md) |
+| [01966](01/ADR-01966.md) | The E2E programs' top-level bindings agree with the front end | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3); follows [ADR-01965](01/ADR-01965.md) |
+| [01967](01/ADR-01967.md) | Top-level bindings take the front end's type; unread ones stay locals | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3); follows [ADR-01966](01/ADR-01966.md) |
+| [01968](01/ADR-01968.md) | The E2E shadow rows name their program; oracle and inference gaps closed | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3); follows [ADR-01967](01/ADR-01967.md) |
+| [01969](01/ADR-01969.md) | Generic class members, rest type parameters and other checker gaps the shadow rows named | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3); follows [ADR-01968](01/ADR-01968.md) |
+| [01970](01/ADR-01970.md) | Promise.try, Awaited<T> in generic bodies, instance spreads and other shadow-unit gaps | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3); follows [ADR-01969](01/ADR-01969.md) |
+| [01971](01/ADR-01971.md) | A function reads a let/const declared after it through a shared cell | Extends [ADR-01014](01/ADR-01014.md); found while implementing [TDD-00230](../tdd/TDD-00230.md) (P3.3) |
+| [01972](01/ADR-01972.md) | fs.opendir and Dir | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3); extends [ADR-01298](01/ADR-01298.md) |
+| [01973](01/ADR-01973.md) | Global object links only the globals a program can read | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01970](01/ADR-01970.md) |
+| [01974](01/ADR-01974.md) | The WebAssembly JS API on wasmtime | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01973](01/ADR-01973.md) |
+| [01975](01/ADR-01975.md) | Top-level patterns, the empty-string key, process on globalThis | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01974](01/ADR-01974.md) |
+| [01976](01/ADR-01976.md) | Inference widens only fresh literals | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01975](01/ADR-01975.md) |
+| [01977](01/ADR-01977.md) | A tuple is an array | Implements [TDD-00230](../tdd/TDD-00230.md) (P3.3, one representation per type); follows [ADR-01976](01/ADR-01976.md); revises [ADR-00201](00/ADR-00201.md) |
+| [01978](01/ADR-01978.md) | A generic method's own-class instance, and tuple type arguments | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01977](01/ADR-01977.md) |
+| [01979](01/ADR-01979.md) | Mixins | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7); follows [ADR-01978](01/ADR-01978.md) |
+| [01980](01/ADR-01980.md) | A constructor returning another object | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7); follows [ADR-01979](01/ADR-01979.md) |
+| [01981](01/ADR-01981.md) | Local classes in loops, closures and generics | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7); follows [ADR-01980](01/ADR-01980.md) |
+| [01982](01/ADR-01982.md) | Void async returns and array-instance intersections | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7); follows [ADR-01981](01/ADR-01981.md) |
+| [01983](01/ADR-01983.md) | Array and function members of an intersection | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7); follows [ADR-01982](01/ADR-01982.md) |
+| [01984](01/ADR-01984.md) | Accessors on declared fields | Implements [TDD-00230](../tdd/TDD-00230.md) (P2.7); follows [ADR-01983](01/ADR-01983.md) |
+| [01985](01/ADR-01985.md) | Narrowed unions at calls, `new` and void ternaries | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01984](01/ADR-01984.md) |
+| [01986](01/ADR-01986.md) | Classes whose base is a run-time value | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01979](01/ADR-01979.md) |
+| [01987](01/ADR-01987.md) | Boxed receivers, empty-array properties and Buffer keys | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01986](01/ADR-01986.md) |

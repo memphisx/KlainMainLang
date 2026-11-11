@@ -115,7 +115,9 @@ static DWORD WINAPI port_wait(LPVOID p) {
  * else watches the island's loop. */
 void __kml_dynimport_watch(void *handle, void *prom, kml_settle_fn settle, kml_poll_fn state,
                            kml_poll_fn poll, kml_err_fn err, kml_poll_fn deadline, kml_poll_fn backend) {
-    i64 st = state();
+    /* An island without a top-level await exports no state: its init ran
+     * the module to completion. */
+    i64 st = state ? state() : 1;
     if (st != 0) { settle_from(handle, prom, settle, err, st); return; }
     Watch *w = (Watch *)calloc(1, sizeof *w); /* scratch: one per pending island, kept: a handle may still fire */
     *w = (Watch){handle, prom, settle, poll, err, deadline, 0, 0, 0, 1};

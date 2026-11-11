@@ -7,7 +7,8 @@
 // names one of the classes without declaring it imports this module.
 
 import { inspect } from './internal_util_inspect';
-import { NodeTypeError, missingArgs } from './internal_errors';
+import { NodeTypeError, missingArgs, receivedSuffix } from './internal_errors';
+import { Blob, _kmlStoreDataObject, _kmlRevokeDataObject } from './kml_blob';
 
 // ---- infra (https://infra.spec.whatwg.org/) ----
 
@@ -1530,8 +1531,11 @@ export class URLSearchParams {
 
 // ---- URL ----
 
+// Node throws it from its URL binding (THROW_ERR_INVALID_URL): the code is
+// a property only, its stack and toString the plain `TypeError: Invalid URL`.
 function invalidURL(input: string, base?: string): NodeTypeError {
-    const err: any = NodeTypeError('ERR_INVALID_URL', 'Invalid URL');
+    const err: any = new TypeError('Invalid URL');
+    err.code = 'ERR_INVALID_URL';
     err.input = input;
     if (base !== undefined) err.base = base;
     return err;
@@ -1575,6 +1579,27 @@ export class URL {
             if (parsedBase === null) return false;
         }
         return basicURLParse(`${input}`, parsedBase) !== null;
+    }
+
+    // An object URL naming a Blob: `blob:nodedata:<uuid>`, until revoked.
+    static createObjectURL(obj: any): string {
+        if (!(obj instanceof Blob)) {
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "obj" argument must be an instance of Blob.' + receivedSuffix(obj));
+        }
+        const id = globalThis.crypto.randomUUID();
+        _kmlStoreDataObject(id, obj);
+        return `blob:nodedata:${id}`;
+    }
+
+    static revokeObjectURL(url: string): void {
+        if (arguments.length === 0) throw missingArgs('url');
+        const text = `${url}`;
+        try {
+            const split = new URL(text).pathname.split(':');
+            if (split.length === 2) _kmlRevokeDataObject(split[1]);
+        } catch (e) {
+            // Not an object URL: nothing to revoke.
+        }
     }
 
     // Called by URLSearchParams when it changes (internal).

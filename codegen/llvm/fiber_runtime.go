@@ -10,7 +10,7 @@ const fiberStackBytes = 1024 * 1024
 // isPlainStringType reports whether t is a string, not any other pointer-
 // represented type (array, Map/Set, closure, Promise, Date, class instance…).
 func isPlainStringType(t Type) bool {
-	return t.IR == "ptr" && !t.IsArray() && !t.IsObject() && !t.IsMap() && !t.IsSet() &&
+	return t.IR == irPtr && !t.IsArray() && !t.IsObject() && !t.IsMap() && !t.IsSet() &&
 		!t.IsFunc() && !t.IsDynamic() && !t.IsPromise() && !t.IsDate() && !t.IsResponse() &&
 		!t.IsClass() && !t.IsNull() && !t.IsUndefined()
 }
@@ -42,16 +42,4 @@ func (e *Emitter) ucontextLayout() (size, ssSpOff, ssSizeOff, ucLinkOff int64) {
 		return 4560, 16, 32, 8
 	}
 	return 968, 16, 32, 8 // amd64 and other 64-bit Linux targets
-}
-
-// ensureFiberRuntime declares the ucontext calls once.
-func (e *Emitter) ensureFiberRuntime() {
-	if e.usedFiber {
-		return
-	}
-	e.usedFiber = true
-	e.emitGlobal("declare void @getcontext(ptr noundef)")
-	e.emitGlobal("declare void @makecontext(ptr noundef, ptr noundef, i32 noundef, ...)")
-	e.emitGlobal("declare i32 @swapcontext(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare void @__kml_swapcontext_kept(ptr, ptr)")
 }

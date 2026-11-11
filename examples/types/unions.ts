@@ -1,11 +1,8 @@
 // General union types beyond T | null (TDD-00043) — string | number | boolean
 // combinations, including with null/undefined, at the same runtime-tagged
 // { i8, i64 } box any/unknown already use, but statically restricted to the
-// declared member set at every assignment/call/return boundary. V1 scope:
-// scalar members only (number/string/boolean/null/undefined) — a union
-// nested inside an array element or object field, or a member that's itself
-// an interface/array, is not yet supported and gives a clean compile-time
-// error instead. See docs/status/TYPE-SYSTEM.md.
+// declared member set at every assignment/call/return boundary. Unions of
+// arrays, tuples and host objects are in union_arrays.ts.
 
 // --- declare, print, typeof, reassign across members ---
 let x: string | number = "hello"

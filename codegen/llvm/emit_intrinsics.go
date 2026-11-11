@@ -18,9 +18,58 @@ import (
 type intrinsic struct {
 	emit func(e *Emitter, ex *ast.CallExpression) (Value, error)
 	ty   func(e *Emitter, ex *ast.CallExpression) Type
+	// applies, when set, reports whether the intrinsic takes a call on
+	// mem's receiver as codegen holds it (intrinsicApplies).
+	applies func(e *Emitter, mem *ast.MemberExpression) bool
+	// dyn, when set, is the body of the method as a dynamic function (read
+	// off a receiver held boxed): the call on self, the receiver held as
+	// selfTy, its arguments the function's own (dynThunkArg).
+	dyn func(e *Emitter, self string, selfTy Type) (Value, error)
+	// held, when set, is the representation the lane holds a call's result
+	// in when it differs from the lib's result type (frontOracle).
+	held func(o frontOracle, call *ast.CallExpression) (Type, bool)
 }
 
 var intrinsics = map[string]intrinsic{}
+
+// arrayFixedArity are the array intrinsics taking a fixed count of
+// arguments.
+var arrayFixedArity = map[string]int{"at": 1, "with": 2,
+	// (a missing callback is undefined: "undefined is not a function")
+	"map": 1, "filter": 1, "find": 1, "findIndex": 1, "findLast": 1, "findLastIndex": 1,
+	"some": 1, "every": 1, "forEach": 1, "flatMap": 1, "reduce": 1, "reduceRight": 1,
+	// (a missing search item is undefined)
+	"indexOf": 1, "lastIndexOf": 1, "includes": 1}
+
+// arrayCallbackMethods are the array methods taking (callback, thisArg).
+var arrayCallbackMethods = map[string]bool{"map": true, "filter": true, "find": true, "findIndex": true,
+	"findLast": true, "findLastIndex": true, "some": true, "every": true, "forEach": true, "flatMap": true}
+
+// arrayMaxArgs are the argument counts array methods read; JavaScript
+// evaluates and ignores the rest.
+var arrayMaxArgs = map[string]int{"reduce": 2, "reduceRight": 2, "indexOf": 2, "lastIndexOf": 2,
+	"includes": 2, "at": 1, "flat": 1, "join": 1, "sort": 1, "toSorted": 1, "slice": 2,
+	"keys": 0, "values": 0, "entries": 0, "reverse": 0, "toReversed": 0, "fill": 3,
+	"copyWithin": 3, "with": 2, "pop": 0, "shift": 0, "toString": 0}
+
+// arrayExtraArgs splits a call's arguments into those the method reads
+// and those it ignores: past its count, and an arrow callback's thisArg
+// (an arrow's this is lexical).
+func arrayExtraArgs(name string, args []ast.Expression) (kept, extra []ast.Expression) {
+	n, ok := arrayMaxArgs[name]
+	if arrayCallbackMethods[name] {
+		n, ok = 2, true
+		if len(args) > 0 {
+			if _, arrow := args[0].(*ast.ArrowFunction); arrow {
+				n = 1
+			}
+		}
+	}
+	if !ok || len(args) <= n {
+		return args, nil
+	}
+	return args[:n], args[n:]
+}
 
 // arrayIntrinsics are the array methods with their own inline loops, the
 // same emitters for a plain array, a typed array and a Buffer.
@@ -84,6 +133,29 @@ var stringIntrinsics = map[string]func(e *Emitter, mem *ast.MemberExpression, ar
 // returnsReceiver are the array methods whose result is their receiver.
 var returnsReceiver = map[string]bool{"fill": true, "sort": true, "reverse": true, "copyWithin": true}
 
+// genMethodCall is the synthesized call gen.name(args…) of a generator's
+// protocol, lowered as its intrinsic: no declaration reaches it.
+func genMethodCall(gen ast.Expression, name string, pos ast.Pos, args ...ast.Expression) *ast.CallExpression {
+	c := ast.NewCallExpression(ast.NewMemberExpression(gen, name, pos), args, pos)
+	c.Intrinsic = "Generator.prototype." + name
+	return c
+}
+
+// collMethodCall is the synthesized call recv.name(args…) of a collection
+// held as ty, lowered as its owner's intrinsic: no declaration reaches it.
+func collMethodCall(recv ast.Expression, ty Type, name string, args []ast.Expression, pos ast.Pos) *ast.CallExpression {
+	owner := "Set"
+	if ty.IsMap() {
+		owner = "Map"
+	}
+	if ty.Weak {
+		owner = "Weak" + owner
+	}
+	c := ast.NewCallExpression(ast.NewMemberExpression(recv, name, pos), args, pos)
+	c.Intrinsic = owner + ".prototype." + name
+	return c
+}
+
 // collectionIntrinsics are the Map, Set, WeakMap and WeakSet methods, by
 // owner: each emits through the collection's own runtime.
 var collectionIntrinsics = map[string][]string{
@@ -126,6 +198,27 @@ func (e *Emitter) emitCollectionIntrinsic(ex *ast.CallExpression) (Value, error)
 		return e.emitMapCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
 	}
 	return e.emitSetCall(ty, ptr, mem.Property, ex.Args, ex.GetPos())
+}
+
+// asMethod is a call of the method an intrinsic names: another member
+// declared as that method (`s[Symbol.iterator]()`, Set's `values`) calls
+// it by its own name.
+func asMethod(ex *ast.CallExpression, name string) *ast.CallExpression {
+	mem := ex.Callee.(*ast.MemberExpression)
+	if mem.Property == name {
+		return ex
+	}
+	m := *mem
+	m.Property = name
+	c := *ex
+	c.Callee = &m
+	return &c
+}
+
+func stringIteratorCall(ex *ast.CallExpression) *ast.CallExpression {
+	pos := ex.GetPos()
+	chars := ast.NewArrayLiteral([]ast.Expression{ast.NewSpreadElement(ex.Callee.(*ast.MemberExpression).Object, pos)}, pos)
+	return ast.NewCallExpression(ast.NewMemberExpression(chars, "values", pos), nil, pos)
 }
 
 // emitDateIntrinsic is a Date method call: a setter rewrites the date's
@@ -187,9 +280,14 @@ func init() {
 			ty: tableTy(bufferMethodTypes),
 		}
 	}
-	for _, name := range []string{"then", "catch", "finally"} {
+	for name, dyn := range map[string]func(e *Emitter, self string, selfTy Type) (Value, error){
+		"then":    (*Emitter).promiseDynThen,
+		"catch":   (*Emitter).promiseDynCatch,
+		"finally": (*Emitter).promiseDynFinally,
+	} {
 		name := name
 		intrinsics["Promise.prototype."+name] = intrinsic{
+			dyn: dyn,
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 				return e.emitPromiseThen(ex.Callee.(*ast.MemberExpression).Object, name, ex.Args, ex.GetPos())
 			},
@@ -209,7 +307,19 @@ func init() {
 				if name == "fill" {
 					return e.emitBufferFill(mem, ex.Args, ex.GetPos())
 				}
-				if len(ex.Args) >= 1 && isStringTy(e.inferExprType(ex.Args[0])) {
+				if len(ex.Args) == 0 || e.omittedArg(ex.Args[0]) || isUndefinedLiteral(e, stripAsAny(ex.Args[0])) {
+					// Node's argument check: undefined is no value to find.
+					if _, err := e.emitExpr(mem.Object); err != nil {
+						return Value{}, err
+					}
+					e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", e.internString(`The "value" argument must be one of type number or string or an instance of Buffer or Uint8Array. Received undefined`))
+					e.emitLabel(e.freshLabel("bufsearch.dead"))
+					if name == "includes" {
+						return Value{Ref: "false", Ty: TypeBool}, nil
+					}
+					return Value{Ref: "-1.0", Ty: TypeF64}, nil
+				}
+				if len(ex.Args) >= 1 && isStringTy(e.typeOfExpr(ex.Args[0])) {
 					return e.emitBufferStringSearch(mem, name, ex.Args, ex.GetPos())
 				}
 				return arrayIntrinsics[name](e, mem, ex.Args, ex.GetPos())
@@ -252,9 +362,13 @@ func init() {
 	}
 	for owner, names := range collectionIntrinsics {
 		for _, name := range names {
+			name := name
 			intrinsics[owner+".prototype."+name] = intrinsic{
-				emit: (*Emitter).emitCollectionIntrinsic,
+				emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+					return e.emitCollectionIntrinsic(asMethod(ex, name))
+				},
 				ty: func(e *Emitter, ex *ast.CallExpression) Type {
+					ex = asMethod(ex, name)
 					if t, ok := e.inferCollectionCallType(ex, ex.Callee.(*ast.MemberExpression)); ok {
 						return t
 					}
@@ -281,6 +395,46 @@ func init() {
 		name, emit := name, emit
 		intrinsics["Array.prototype."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				ex = e.dropIgnoredArgs(asMethod(ex, name))
+				if mem, ok := ex.Callee.(*ast.MemberExpression); ok && name == "with" && e.compatJS() && len(ex.Args) < 2 {
+					if rt := e.typeOfExpr(mem.Object); rt.IsArray() && rt.ElemType != nil && !rt.ElemType.IsDynamic() {
+						// `a.with(i)` sets undefined, which a typed array's
+						// elements can't hold: the copy is an any[].
+						av, err := e.emitExpr(mem.Object)
+						if err != nil {
+							return Value{}, err
+						}
+						box, err := e.emitBoxValue(av)
+						if err != nil {
+							return Value{}, err
+						}
+						return e.emitDynArrayMethodCall(box, name, ex.Args, ex.GetPos())
+					}
+				}
+				if n := arrayFixedArity[name]; e.compatJS() && len(ex.Args) < n {
+					// An omitted argument: undefined, as JavaScript passes it.
+					padded := *ex
+					padded.Args = append([]ast.Expression(nil), ex.Args...)
+					for len(padded.Args) < n {
+						padded.Args = append(padded.Args, ast.NewNullLiteral(true, ex.GetPos()))
+					}
+					ex = &padded
+				}
+				if kept, extra := arrayExtraArgs(name, ex.Args); len(extra) > 0 {
+					// Arguments the method ignores (an arrow callback's
+					// thisArg, those past its own count) are evaluated only.
+					for _, x := range extra {
+						if _, err := e.emitExpr(x); err != nil {
+							return Value{}, err
+						}
+					}
+					trimmed := *ex
+					trimmed.Args = kept
+					ex = &trimmed
+				}
+				if c, ok := e.tupleArrayCall(ex); ok {
+					return e.emitCall(c)
+				}
 				mem := ex.Callee.(*ast.MemberExpression)
 				if v, ok, err := e.emitArrayOverrideDispatch(mem, name, ex, emit); ok || err != nil {
 					return v, err
@@ -288,6 +442,25 @@ func init() {
 				if args, ok := e.nonCallableCallback(name, ex.Args); ok {
 					// `[].reduce(null)`: the checked dynamic path, which
 					// throws "null is not a function" before iterating.
+					if hofThisArg[name] && len(args) > 1 {
+						// The receiver, the callback and thisArg evaluated
+						// in order; thisArg then plays no part.
+						recv, err := e.receiverTemp(mem.Object)
+						if err != nil {
+							return Value{}, err
+						}
+						cb, err := e.receiverTemp(args[0])
+						if err != nil {
+							return Value{}, err
+						}
+						for _, x := range args[1:] {
+							if _, err := e.emitExpr(x); err != nil {
+								return Value{}, err
+							}
+						}
+						mem = ast.NewMemberExpression(recv, mem.Property, mem.GetPos())
+						args = []ast.Expression{cb}
+					}
 					return emit(e, mem, args, ex.GetPos())
 				}
 				if hofThisArg[name] && len(ex.Args) == 2 {
@@ -306,13 +479,17 @@ func init() {
 				if err == nil && returnsReceiver[name] && v.Ty.IsArray() {
 					// The method returns its receiver: a typed array or a
 					// Buffer stays one (a boxed `fill()` result is a view).
-					if rt := e.inferExprType(mem.Object); rt.IsTypedArray() || rt.IsBuffer() {
+					if rt := e.typeOfExpr(mem.Object); rt.IsTypedArray() || rt.IsBuffer() {
 						v.Ty = rt
 					}
 				}
 				return v, err
 			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				ex = asMethod(ex, name)
+				if c, ok := e.tupleArrayCall(ex); ok {
+					return e.typeOfExpr(c)
+				}
 				if name == "forEach" {
 					return TypeVoid
 				}
@@ -335,6 +512,11 @@ func init() {
 		"isFinite": {func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			return e.emitNumberIsFinite(ex.Args, ex.GetPos(), true)
 		}, TypeBool},
+		// eval as a value (an indirect call): its argument's kind is known
+		// when it runs (emitStaticEval).
+		"eval": {func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			return e.emitStaticEval(ex.Args, ex.GetPos())
+		}, TypeAny},
 	} {
 		ty := v.ty
 		intrinsics[name] = intrinsic{emit: v.emit, ty: func(*Emitter, *ast.CallExpression) Type { return ty }}
@@ -343,16 +525,22 @@ func init() {
 		sym    string
 		ensure func(e *Emitter)
 	}{
-		"btoa":               {"@__kml_btoa", (*Emitter).ensureBase64Encode},
-		"atob":               {"@__kml_atob", (*Emitter).ensureBase64Decode},
-		"encodeURIComponent": {"@__kml_encode_uri_component", (*Emitter).ensureEncodeURIComponent},
-		"decodeURIComponent": {"@__kml_decode_uri_component_strict", (*Emitter).ensureDecodeURIComponentStrict},
-		"encodeURI":          {"@__kml_encode_uri", (*Emitter).ensureEncodeURI},
-		"decodeURI":          {"@__kml_decode_uri_strict", (*Emitter).ensureDecodeURIStrict},
+		"btoa":               {"@__kml_btoa", func(e *Emitter) { e.ensureStrHeaderRuntime() }},
+		"atob":               {"@__kml_atob", func(e *Emitter) { e.ensureExceptionHelpers(); e.ensureStrHeaderRuntime() }},
+		"encodeURIComponent": {"@__kml_encode_uri_component", (*Emitter).ensurePercentEncode},
+		"decodeURIComponent": {"@__kml_decode_uri_component_strict", (*Emitter).ensurePercentDecode},
+		"encodeURI":          {"@__kml_encode_uri", (*Emitter).ensurePercentEncode},
+		"decodeURI":          {"@__kml_decode_uri_strict", (*Emitter).ensurePercentDecode},
 	} {
 		name, v := name, v
 		intrinsics[name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				if (name == "atob" || name == "btoa") && len(ex.Args) > 0 && e.omittedArg(ex.Args[0]) {
+					// Node's own arity check: ERR_MISSING_ARGS.
+					e.emitThrowCoded("TypeError", "ERR_MISSING_ARGS", e.internString(`The "input" argument must be specified`))
+					e.emitLabel(e.freshLabel(name + ".dead"))
+					return Value{Ref: e.internString(""), Ty: TypePtr}, nil
+				}
 				return e.emitStringToStringBuiltin(ex.Args, ex.GetPos(), name, v.sym, func() { v.ensure(e) })
 			},
 			ty: func(*Emitter, *ast.CallExpression) Type { return TypePtr },
@@ -393,7 +581,7 @@ func init() {
 			// A dynamic argument stringifies through the dynamic walker,
 			// whose result is `any` (string or undefined — TDD-00155 Stage
 			// 2); every static path returns string.
-			if len(ex.Args) >= 1 && isUnconstrainedDynamic(e.inferExprType(ex.Args[0])) || resolver.StringifyArgsAtRunTime(ex.Args) {
+			if len(ex.Args) >= 1 && isUnconstrainedDynamic(e.typeOfExpr(ex.Args[0])) || resolver.StringifyArgsAtRunTime(ex.Args) {
 				return TypeAny
 			}
 			return TypePtr
@@ -441,7 +629,7 @@ func init() {
 	intrinsics["ArrayBuffer.isView"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			if len(ex.Args) != 1 {
-				return Value{}, fmt.Errorf("%d:%d: ArrayBuffer.isView takes 1 argument", ex.GetPos().Line, ex.GetPos().Col)
+				return Value{}, internalAt(ex.GetPos(), "ArrayBuffer.isView arity")
 			}
 			return e.emitArrayBufferIsView(ex.Args[0])
 		},
@@ -514,7 +702,6 @@ func init() {
 			v, err := e.emitConsolePrint(ex.Args, 2, prefix)
 			if err == nil {
 				// Then the frames, as Node's console.trace prints them.
-				e.ensureFrames()
 				e.declareFn("__kml_trace_frames", "declare void @__kml_trace_frames()")
 				e.emitInstr("call void @__kml_trace_frames()")
 			}
@@ -545,9 +732,6 @@ func init() {
 		"groupEnd": func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			return e.emitConsoleGroupEnd(ex.Args, ex.GetPos())
 		},
-		"table": func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-			return e.emitConsoleTable(ex.Args, ex.GetPos())
-		},
 	} {
 		// Every console method returns void.
 		intrinsics["console."+name] = intrinsic{emit: emit, ty: func(*Emitter, *ast.CallExpression) Type { return TypeVoid }}
@@ -556,6 +740,91 @@ func init() {
 	intrinsics["fetch"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) { return e.emitFetch(ex.Args, ex.GetPos()) },
 		ty:   func(*Emitter, *ast.CallExpression) Type { return PromiseOf(ResponseType()) },
+	}
+	// A string's iterator, over its code points: its spread's.
+	intrinsics["String.prototype[Symbol.iterator]"] = intrinsic{
+		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			return e.emitCall(stringIteratorCall(ex))
+		},
+		ty: func(e *Emitter, ex *ast.CallExpression) Type {
+			return e.typeOfExpr(stringIteratorCall(ex))
+		},
+	}
+	// `Object(v)` called as a function.
+	intrinsics["Object"] = intrinsic{
+		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			return e.emitObjectCtor(ex.Args, ex.GetPos())
+		},
+		ty: func(*Emitter, *ast.CallExpression) Type { return TypeAny },
+	}
+	// ArrayBuffer's own methods (a SharedArrayBuffer's grow and slice too).
+	for _, name := range []string{"grow", "resize", "slice"} {
+		name := name
+		intrinsics["ArrayBuffer.prototype."+name] = intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				mem := ex.Callee.(*ast.MemberExpression)
+				if t := e.typeOfExpr(mem.Object); t.IsClass() && !t.IsDynamic() {
+					if info, ok := e.classes[t.ClassName]; ok && info.HostBase != nil && info.HostBase.IsArrayBuffer() {
+						// An instance of a class extending ArrayBuffer.
+						inst, err := e.emitExpr(mem.Object)
+						if err != nil {
+							return Value{}, err
+						}
+						return e.emitHostBaseCall(inst, *info.HostBase, name, ex.Args, ex.GetPos())
+					}
+				}
+				if name == "slice" {
+					return e.emitArrayBufferSlice(mem, ex.Args, ex.GetPos())
+				}
+				objVal, err := e.emitExpr(mem.Object)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitBufferGrow(objVal, ex.Args, ex.GetPos(), name == "resize")
+			},
+			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				if name == "slice" {
+					return e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object)
+				}
+				return TypeVoid
+			},
+		}
+	}
+	intrinsics["Number.prototype.toLocaleString"] = intrinsic{
+		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			return e.emitNumberToLocaleString(ex.Callee.(*ast.MemberExpression), ex.Args, ex.GetPos())
+		},
+		ty: func(*Emitter, *ast.CallExpression) Type { return TypePtr },
+	}
+	// A generator's protocol (an async generator's too, TDD-00085).
+	for name, dyn := range map[string]func(e *Emitter, gen string, genTy Type) (Value, error){
+		"next":   (*Emitter).genDynNext,
+		"return": (*Emitter).genDynReturn,
+		"throw":  (*Emitter).genDynThrow,
+	} {
+		intrinsics["Generator.prototype."+name] = intrinsic{
+			dyn: dyn,
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				mem := ex.Callee.(*ast.MemberExpression)
+				return e.emitGeneratorUserCall(mem, e.typeOfExpr(mem.Object), ex.Args, ex.GetPos())
+			},
+			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				gt := e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object)
+				res := genUserResultType(*gt.GeneratorElemType)
+				if gt.GeneratorIsAsync {
+					pt := PromiseOf(res)
+					pt.PromiseTask = true
+					return pt
+				}
+				return res
+			},
+		}
+	}
+	intrinsics["gc"] = intrinsic{
+		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			return e.emitGlobalGC(ex.Args, ex.GetPos())
+		},
+		ty: void,
 	}
 	intrinsics["queueMicrotask"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
@@ -601,7 +870,7 @@ func init() {
 		},
 		ty: func(e *Emitter, ex *ast.CallExpression) Type {
 			if len(ex.Args) == 1 {
-				return e.inferExprType(ex.Args[0])
+				return e.typeOfExpr(ex.Args[0])
 			}
 			return TypeAny
 		},
@@ -617,8 +886,8 @@ func init() {
 			return e.emitStructuredClone(ex.Args, ex.GetPos())
 		},
 		ty: func(e *Emitter, ex *ast.CallExpression) Type {
-			if len(ex.Args) == 1 && !e.clonesAtRunTime(ex.Args[0]) {
-				return e.inferExprType(ex.Args[0])
+			if len(ex.Args) >= 1 && !e.clonesAtRuntimeOrUncopied(ex.Args[0]) {
+				return e.typeOfExpr(ex.Args[0])
 			}
 			return TypeAny
 		},
@@ -638,12 +907,13 @@ func init() {
 			return e.emitReadableStreamFrom(ex.Args, ex.GetPos())
 		},
 		ty: func(e *Emitter, ex *ast.CallExpression) Type {
-			if len(ex.Args) == 1 {
-				if argTy := e.inferExprType(ex.Args[0]); argTy.IsArray() {
+			if len(ex.Args) >= 1 {
+				if argTy := e.typeOfExpr(ex.Args[0]); argTy.IsArray() {
 					return ReadableStreamType(*argTy.ElemType)
 				}
 			}
-			return ReadableStreamType(TypeAny) // rejected by the emitter
+			// Over any other iterable: the stream the runtime builds, boxed.
+			return TypeAny
 		},
 	}
 	responseStatics := map[string]func(*Emitter, []ast.Expression, ast.Pos) (Value, error){
@@ -667,7 +937,7 @@ func init() {
 				v, err := e.emitObjectStatic(prop, ex)
 				if err == errNotObjectStatic {
 					pos := ex.GetPos()
-					return Value{}, fmt.Errorf("%d:%d: Object.%s does not support this argument's type", pos.Line, pos.Col, prop)
+					return Value{}, internalAt(pos, "Object.%s has no emitter", prop)
 				}
 				return v, err
 			},
@@ -707,6 +977,16 @@ type builtinFn struct {
 
 // builtinRef reports the builtin function an expression names by value.
 func (e *Emitter) builtinRef(x ast.Expression) (*builtinFn, bool) {
+	return e.builtinRefAs(x, false)
+}
+
+// builtinCallbackRef is builtinRef for a callback argument (`.map(Object)`),
+// which calls the builtin: Object too is its call's function value there.
+func (e *Emitter) builtinCallbackRef(x ast.Expression) (*builtinFn, bool) {
+	return e.builtinRefAs(x, true)
+}
+
+func (e *Emitter) builtinRefAs(x ast.Expression, callback bool) (*builtinFn, bool) {
 	// A cheap syntactic filter first: this runs for every expression inferred.
 	switch x := x.(type) {
 	case *ast.Identifier:
@@ -752,6 +1032,9 @@ func (e *Emitter) builtinRef(x ast.Expression) (*builtinFn, bool) {
 			return nil, false
 		}
 		sym, _ := c.Binding().Resolve(x)
+		if sym == nil && e.builtinIdents[x] && c.Binding().Globals != nil {
+			sym = c.Binding().Globals.Symbols.Get(x.Name) // a global codegen reads
+		}
 		if sym == nil {
 			return nil, false
 		}
@@ -767,6 +1050,12 @@ func (e *Emitter) builtinRef(x ast.Expression) (*builtinFn, bool) {
 				if key = callSignatureIntrinsic(t); key != "" {
 					callSig = t.Calls[len(t.Calls)-1]
 				}
+			}
+			if key == "Object" && !callback {
+				// Object is its constructor record, the value every
+				// object's `constructor` reads, not a function value of
+				// its call.
+				return nil, false
 			}
 		}
 	case *ast.MemberExpression:
@@ -796,7 +1085,7 @@ func (e *Emitter) builtinRef(x ast.Expression) (*builtinFn, bool) {
 		}
 		if strings.HasPrefix(key, "crypto.") {
 			// Crypto's methods check their receiver: by value they are the
-			// Crypto object's own (lib/node/internal_namespaces.ts).
+			// Crypto object's own (lib/node/internal_crypto_global.ts).
 			if _, ok := e.libExports["internal_crypto_global:_kmlCrypto"]; ok {
 				return nil, false
 			}
@@ -877,7 +1166,7 @@ func (e *Emitter) builtinCtorValue(name string) (Value, bool, error) {
 		return Value{}, false, nil
 	}
 	key := callSignatureIntrinsic(t)
-	if key == "" {
+	if key == "" || key == "Object" { // Object's value is its record
 		return Value{}, false, nil
 	}
 	b, ok := intrinsicBuiltin(key, t.Calls[len(t.Calls)-1])
@@ -958,12 +1247,12 @@ func (e *Emitter) ensureBuiltinFunc(b *builtinFn) (string, FuncSig, error) {
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(ty)))
 		if ty.IsArray() {
 			// An array (the rest) arrives as its header and length.
-			decls = append(decls, fmt.Sprintf("ptr %%a%d", n), fmt.Sprintf("i64 %%a%d", n+1))
-			e.emitInstr(fmt.Sprintf("store ptr %%a%d, ptr %s, align 8", n, slot))
+			decls = append(decls, fmt.Sprintf(irPtr+" %%a%d", n), fmt.Sprintf("i64 %%a%d", n+1))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %%a%d, "+irPtr+" %s, align 8", n, slot))
 			n += 2
 		} else {
 			decls = append(decls, fmt.Sprintf("%s %%a%d", storageIR(ty), n))
-			e.emitInstr(fmt.Sprintf("store %s %%a%d, ptr %s, align 8", storageIR(ty), n, slot))
+			e.emitInstr(fmt.Sprintf("store %s %%a%d, "+irPtr+" %s, align 8", storageIR(ty), n, slot))
 			n++
 		}
 		e.define(name, Symbol{Ptr: slot, Ty: ty})
@@ -983,7 +1272,7 @@ func (e *Emitter) ensureBuiltinFunc(b *builtinFn) (string, FuncSig, error) {
 		case v.Ty.IsArray():
 			// An array returns its shared header (`Array.of`).
 			hdr, _ := e.arrayArgFromAggregate(v)
-			e.emitTerminator(fmt.Sprintf("ret ptr %s", hdr))
+			e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", hdr))
 		default:
 			e.emitTerminator(fmt.Sprintf("ret %s %s", v.Ty.LLVMRetType(), v.Ref))
 		}
@@ -1007,7 +1296,11 @@ func (e *Emitter) emitBuiltinValue(b *builtinFn) (Value, error) {
 		return Value{}, err
 	}
 	if n, ok := intrinsicSpecLength[b.key]; ok {
-		e.registerFnMeta(fnValueTrampolineName(mangled), b.name, n, fnKindOf(false, false))
+		kind := fnKindOf(false, false)
+		if b.ctor != "" {
+			kind |= fnFlagConstructs
+		}
+		e.registerFnMeta(fnValueTrampolineName(mangled), b.name, n, kind)
 	}
 	if b.ctor != "" {
 		if e.fnStaticHosts == nil {
@@ -1049,7 +1342,7 @@ func (e *Emitter) atomicsResultType(method string, ex *ast.CallExpression) Type 
 		return t
 	}
 	if len(ex.Args) > 0 {
-		if taTy := e.inferExprType(ex.Args[0]); taTy.IsTypedArray() && taTy.ElemType != nil {
+		if taTy := e.typeOfExpr(ex.Args[0]); taTy.IsTypedArray() && taTy.ElemType != nil {
 			if taTy.BigIntElem {
 				return BigIntType()
 			}
@@ -1072,7 +1365,7 @@ var atomicsFixedTypes = map[string]Type{
 // null, no argument included) is a number, a double.
 func (e *Emitter) numberConvType(ex *ast.CallExpression) Type {
 	if len(ex.Args) == 1 {
-		argTy := e.inferExprType(ex.Args[0])
+		argTy := e.typeOfExpr(ex.Args[0])
 		if _, isNull := ex.Args[0].(*ast.NullLiteral); isNull {
 			return TypeF64 // 0, or NaN for undefined
 		}
@@ -1097,21 +1390,45 @@ func init() {
 			return e.emitObjectProtoToString(ex.Callee.(*ast.MemberExpression).Object)
 		},
 		ty: func(*Emitter, *ast.CallExpression) Type { return TypePtr },
+		applies: func(e *Emitter, mem *ast.MemberExpression) bool {
+			ot := e.typeOfExpr(mem.Object)
+			if isNumberTy(ot) && ot.IR != "i1" {
+				// A number reaches Object's toString only through a
+				// declaration that names it, or as a union with a boolean
+				// (whose members TypeScript requires to take no argument);
+				// an undeclared one takes Number.prototype.toString(radix)'s
+				// lowering.
+				c := e.front()
+				if c == nil || isUnconstrainedDynamic(ot) {
+					return false
+				}
+				t := c.TypeOf(mem.Object)
+				return c.MemberDecl(mem) != nil || !c.Unanswered(t) && t.Flags&checker.Union != 0
+			}
+			return objectProtoToStringApplies(ot)
+		},
 	}
 	intrinsics["Object.prototype.hasOwnProperty"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			if len(ex.Args) != 1 {
-				return Value{}, fmt.Errorf("%d:%d: hasOwnProperty takes 1 argument", ex.GetPos().Line, ex.GetPos().Col)
+				return Value{}, internalAt(ex.GetPos(), "hasOwnProperty arity")
 			}
 			return e.emitHasOwnProperty(ex.Callee.(*ast.MemberExpression).Object, ex.Args[0], "hasOwnProperty", true, ex.GetPos())
 		},
 		ty: func(*Emitter, *ast.CallExpression) Type { return TypeBool },
+		applies: func(e *Emitter, mem *ast.MemberExpression) bool {
+			ot := e.typeOfExpr(mem.Object)
+			return ot.IsObject() && !isUnconstrainedDynamic(ot) || isPrimitiveReceiver(ot)
+		},
 	}
 	intrinsics["BigInt.prototype.toString"] = intrinsic{
 		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			return e.emitBigIntToStringMethod(ex.Callee.(*ast.MemberExpression).Object, ex.Args, ex.GetPos())
 		},
 		ty: func(*Emitter, *ast.CallExpression) Type { return TypePtr },
+		applies: func(e *Emitter, mem *ast.MemberExpression) bool {
+			return e.typeOfExpr(mem.Object).IsBigInt()
+		},
 	}
 }
 
@@ -1134,7 +1451,7 @@ func objectProtoToStringApplies(ty Type) bool {
 // RegExp's source, a number or boolean's String(x), a string itself, and
 // an object's "[object Object]".
 func (e *Emitter) emitObjectProtoToString(recv ast.Expression) (Value, error) {
-	ty := e.inferExprType(recv)
+	ty := e.typeOfExpr(recv)
 	v, err := e.emitExpr(recv)
 	if err != nil {
 		return Value{}, err
@@ -1172,7 +1489,12 @@ func init() {
 				mem := ex.Callee.(*ast.MemberExpression)
 				return e.emitFinalizationRegistryMethod(mem.Object, mem.Property, ex.Args, ex.GetPos())
 			},
-			ty: none,
+			ty: func(*Emitter, *ast.CallExpression) Type {
+				if name == "register" {
+					return TypeUndefined // register() evaluates to `undefined`
+				}
+				return TypeBool
+			},
 		}
 	}
 }
@@ -1201,8 +1523,23 @@ func (e *Emitter) hofWithThisArg(mem *ast.MemberExpression, args []ast.Expressio
 	if err != nil {
 		return nil, nil, err
 	}
-	bound := ast.NewCallExpression(ast.NewMemberExpression(args[0], "bind", pos), []ast.Expression{args[1]}, pos)
 	m := ast.NewMemberExpression(recv, mem.Property, mem.GetPos())
+	if t := e.typeOfExpr(args[0]); t.IsDynamic() || t.IR == "" {
+		// A callback that may be no function: bound only when it is one,
+		// so the method's own check throws "… is not a function".
+		cb, err := e.receiverTemp(args[0])
+		if err != nil {
+			return nil, nil, err
+		}
+		this, err := e.receiverTemp(args[1])
+		if err != nil {
+			return nil, nil, err
+		}
+		isFn := ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, cb, pos), ast.NewStringLiteral("function", pos), pos)
+		bound := ast.NewCallExpression(ast.NewMemberExpression(cb, "bind", pos), []ast.Expression{this}, pos)
+		return m, []ast.Expression{ast.NewConditionalExpression(isFn, ast.NewAsExpression(bound, ast.AnyAnnotation("ts"), pos), cb, pos)}, nil
+	}
+	bound := ast.NewCallExpression(ast.NewMemberExpression(args[0], "bind", pos), []ast.Expression{args[1]}, pos)
 	return m, []ast.Expression{bound}, nil
 }
 
@@ -1213,10 +1550,10 @@ func (e *Emitter) nonCallableCallback(name string, args []ast.Expression) ([]ast
 	if (!hofThisArg[name] && name != "reduce" && name != "reduceRight") || len(args) == 0 {
 		return nil, false
 	}
-	t := e.inferExprType(args[0])
+	t := e.typeOfExpr(args[0])
 	if t.IsFunc() || t.IsDynamic() || t.IR == "" {
 		return nil, false
 	}
-	out := append([]ast.Expression{ast.NewAsExpression(args[0], &ast.TypeAnnotation{Name: "any"}, args[0].GetPos())}, args[1:]...)
+	out := append([]ast.Expression{ast.NewAsExpression(args[0], ast.AnyAnnotation("ts"), args[0].GetPos())}, args[1:]...)
 	return out, true
 }

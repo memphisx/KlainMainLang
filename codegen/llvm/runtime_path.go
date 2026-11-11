@@ -10,6 +10,3 @@ var pathSource string
 
 // PathSource is the posix path normalizer's C source.
 func PathSource() string { return pathSource }
-
-// UsesPathNormalize reports whether the program links the path normalizer.
-func (e *Emitter) UsesPathNormalize() bool { return e.usedPathNormalize }

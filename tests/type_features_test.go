@@ -798,6 +798,8 @@ func TestOutOfScopeTypeNameIsTS2304(t *testing.T) {
 func TestUnknownBuiltinMemberIsTS2339(t *testing.T) {
 	for src, want := range map[string]string{
 		"import * as fs from 'fs'; fs.nopeSync();":                                       `does not exist on type 'typeof import("fs")'`,
+		"import http from 'http'; http.listen(0);":                                       `does not exist on type 'typeof import("http")'`,
+		"import * as https from 'https'; https.nope();":                                  `does not exist on type 'typeof import("https")'`,
 		"import { EventEmitter } from 'events'; const e = new EventEmitter(); e.nope();": "property 'nope' does not exist",
 		// Interfaces only @types/node declares, and a builtin constructor's
 		// statics.
@@ -1081,7 +1083,9 @@ console.log(a, r2.a);
 var y; var z = y = "s"; console.log(z, y);
 var p = null; [p] = [7]; console.log(p);
 `
-	assertSameAsNode(t, src)
+	// (A key the source lacks, `d = 9`, and a computed one are tsc's
+	// TS2339 and TS2537: JavaScript only.)
+	assertSameAsNode(t, strings.Replace(src, "({ a, b: { c }, d = 9, [k]: b } = o);", "({ a, b: { c } } = o); d = 9; b = o.kk;", 1))
 	assertSameAsNodeCompatJS(t, src)
 }
 
@@ -1130,4 +1134,41 @@ func TestE2EStrictEmitterRejectsUnconvertibleArgs(t *testing.T) {
 			t.Errorf("%q: want a type-mismatch error, got %v", src, err)
 		}
 	}
+}
+
+func TestE2EDestructuringAssignMemberTargets(t *testing.T) {
+	// A destructuring assignment stores to member and index targets, with
+	// defaults, from a tuple as from an array or object.
+	assertSameAsNode(t, `class P {
+  x = 0;
+  y = "";
+  set(src: [number, string]) { [this.x, this.y] = src; return this; }
+  fromObj(src: { a: number; b?: string }) { ({ a: this.x, b: this.y = "dflt" } = src); return this; }
+}
+const p = new P().set([3, "three"]);
+console.log(p.x, p.y);
+p.fromObj({ a: 9 });
+console.log(p.x, p.y);
+p.fromObj({ a: 1, b: "bee" });
+console.log(p.x, p.y);
+const grid: number[][] = [[0, 0], [0, 0]];
+let i = 0;
+[grid[i][0], grid[i + 1][1]] = [4, 8];
+console.log(JSON.stringify(grid));
+const rec: Record<string, number> = {};
+[rec["k1"], rec.k2 = 22] = [11];
+console.log(JSON.stringify(rec));
+const nested = { inner: { v: 0 } };
+({ q: nested.inner.v } = { q: 42 });
+console.log(nested.inner.v);
+let a = 1, b = 2;
+[a, b] = [b, a];
+console.log(a, b);
+const o2 = { a: 0, b: "" };
+const arr2 = [0, 0];
+({ a: o2.a, b: o2.b } = { a: 1, b: "x" });
+[arr2[0], arr2[1]] = [5, 6];
+[o2.a, o2.b] = [7, "y"];
+console.log(o2.a, o2.b, arr2.join(","));
+`)
 }

@@ -17,7 +17,7 @@
 
 import { EventEmitter } from 'events';
 import { Channel } from './internal_child_process_channel';
-import { _kmlOnWarning, _kmlSetWarningSink } from './internal_process_warning';
+import { _kmlOnWarning, _kmlSetWarningSink, _kmlSetWarningProcess } from './internal_process_warning';
 import * as methods from './internal_process_methods';
 import * as penv from './internal_process_env';
 import * as phr from './internal_process_hrtime';
@@ -27,6 +27,7 @@ import { NodeError } from './internal_errors';
 const kExit = 0;
 const kUncaughtException = 1;
 const kUnhandledRejection = 2;
+const kBeforeExit = 4;
 
 // ErrnoException: `${syscall} ${code}`, with errno, code, syscall.
 function errnoException(errnoIn: number, syscall: string): Error {
@@ -150,14 +151,10 @@ export function _kmlProcess(): any {
     p.cwd = methods.cwd;
     p.chdir = methods.chdir;
     p.uptime = methods.uptime;
-    const hrtime: any = phr.hrtime;
-    hrtime.bigint = phr.hrtimeBigint;
-    p.hrtime = hrtime;
+    p.hrtime = phr.hrtime;
     p.kill = methods.kill;
     p.nextTick = __kml_process_nextTick;
-    const memoryUsage: any = methods.memoryUsage;
-    memoryUsage.rss = methods.memoryUsageRss;
-    p.memoryUsage = memoryUsage;
+    p.memoryUsage = methods.memoryUsage;
     p.umask = methods.umask;
     p.argv = penv.argv();
     p.argv0 = penv.argv0();
@@ -189,6 +186,10 @@ export function _kmlProcess(): any {
     p.on('removeListener', stopListeningIfLifecycle);
     p.on('warning', _kmlOnWarning);
     _kmlSetWarningSink((warning: any) => { p.emit('warning', warning); });
+    _kmlSetWarningProcess(p);
+    __kml_native.processHook(kBeforeExit, (code: any, unused: any) => {
+        p.emit('beforeExit', code);
+    });
     __kml_native.processHook(kExit, (code: any, unused: any) => {
         p._exiting = true;
         p.emit('exit', code);

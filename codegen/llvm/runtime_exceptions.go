@@ -1,6 +1,9 @@
 package llvm
 
-import _ "embed"
+import (
+	_ "embed"
+	"fmt"
+)
 
 //go:embed jmpstacksrc/jmpstack.c
 var jmpStackSource string
@@ -15,16 +18,15 @@ var exceptionsSource string
 // behind kml_layout.h.
 func ExceptionsSource() string { return layoutHeader() + exceptionsSource }
 
-// UsesExceptions reports whether the program links the throw-path runtime.
-func (e *Emitter) UsesExceptions() bool { return e.usedExceptionHelpers }
-
 // ExceptionsCFlags is exceptions.c's mode define: on a program with Workers
 // the uncaught path ends the thread (@__kml_thread_exit), not the process.
 func (e *Emitter) ExceptionsCFlags() []string {
-	if e.hasWorkers {
-		return []string{"-DKML_WORKERS=1"}
+	flags := []string{
+		fmt.Sprintf("-DKML_KIND_TYPEERR=%dLL", errorTypeIDStored(errorKindIDs["TypeError"])),
+		fmt.Sprintf("-DKML_KIND_RANGEERR=%dLL", errorTypeIDStored(errorKindIDs["RangeError"])),
+		fmt.Sprintf("-DKML_NB_UNDEFINED=%dLL", nbUndefined),
 	}
-	return nil
+	return flags
 }
 
 // ensureExceptionHelpers declares the throw path (exceptionssrc/exceptions.c:
@@ -35,8 +37,6 @@ func (e *Emitter) ensureExceptionHelpers() {
 		return
 	}
 	e.usedExceptionHelpers = true
-	e.ensurePrintf()
-	e.ensureMalloc()
 
 	// The setjmp buffers try frames unwind through (jmpstacksrc/jmpstack.c,
 	// TDD-00240): __kml_cur_jmp_stk is the current stack (null: the thread's
@@ -44,33 +44,15 @@ func (e *Emitter) ensureExceptionHelpers() {
 	// suspended bodies never overwrite each other's longjmp targets
 	// (TDD-00083 Stage 2); __kml_jmp_top is its depth.
 	e.usedJmpStack = true
-	e.emitGlobal(`@__kml_cur_jmp_stk = external thread_local global ptr, align 8
-@__kml_jmp_top = external thread_local global i32, align 4
-declare ptr @__kml_push_jmpbuf()
-declare void @__kml_pop_jmpbuf()
-declare ptr @__kml_jmp_unwind_slot()
-declare ptr @__kml_jmp_stack_new()
-declare void @__kml_jmp_stack_free(ptr)`)
 	if e.opts.Target.OS() == "windows" {
-		e.emitGlobal(`declare i32 @_setjmp(ptr, ptr) returns_twice`)
+		e.emitGlobal(`declare i32 @_setjmp(` + irPtr + `, ` + irPtr + `) returns_twice`)
 	} else {
-		e.emitGlobal(`declare i32 @setjmp(ptr) returns_twice`)
+		e.emitGlobal(`declare i32 @setjmp(` + irPtr + `) returns_twice`)
 	}
-	e.emitGlobal(`declare void @longjmp(ptr, i32) noreturn`)
-	e.ensureExit()
-	e.ensureDtoa() // the uncaught printer dtoa's a thrown number
+	e.emitGlobal(`declare void @longjmp(` + irPtr + `, i32) noreturn`)
 
 	// The unpacked thrown record (TDD-00202): the catch binding loads the tag
 	// and payload to reconstruct the caught value.
-	e.emitGlobal(`declare ptr @__kml_get_thrown()
-declare i8 @__kml_get_thrown_tag()
-declare i64 @__kml_get_thrown_pay()
-declare void @__kml_throw(ptr)
-declare void @__kml_throw_any(i8, i64)
-declare i8 @__kml_caught_tag(i8, i64)
-declare ptr @__kml_caught_unc_msg(i8, i64)
-declare void @__kml_print_uncaught(i8, i64)
-declare zeroext i1 @__kml_process_uncaught_guarded(i8, i64, i1)`)
 }
 
 // setjmpCall returns the IR call that saves a catch frame into buf. On
@@ -82,7 +64,7 @@ declare zeroext i1 @__kml_process_uncaught_guarded(i8, i64, i1)`)
 // (TDD-00177 Stage 0). Elsewhere it is the libc symbol as before.
 func (e *Emitter) setjmpCall(buf string) string {
 	if e.opts.Target.OS() == "windows" {
-		return "call i32 @_setjmp(ptr " + buf + ", ptr null)"
+		return "call i32 @_setjmp(" + irPtr + " " + buf + ", " + irPtr + " null)"
 	}
-	return "call i32 @setjmp(ptr " + buf + ")"
+	return "call i32 @setjmp(" + irPtr + " " + buf + ")"
 }

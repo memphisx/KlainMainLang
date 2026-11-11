@@ -19,7 +19,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
-	"strings"
 )
 
 // derefGuard is the pending guard registered for one base expression node.
@@ -31,72 +30,17 @@ type derefGuard struct {
 	setting bool
 }
 
-// ensureNullDerefThrow defines @__kml_throw_nullderef(ptr msg): build a
-// TypeError around the (compile-time interned) message and throw it. Out of
-// line so a guarded access costs one compare-and-branch at the site.
-func (e *Emitter) ensureNullDerefThrow() {
-	if e.usedNullDerefThrow {
+// ensureErrorNames hands exceptions.c the program's interned "TypeError"
+// and "RangeError" (an error's name is compared by address).
+func (e *Emitter) ensureErrorNames() {
+	if e.fnDecls["__kml_error_names"] {
 		return
 	}
-	e.usedNullDerefThrow = true
+	e.fnDecls["__kml_error_names"] = true
 	e.ensureExceptionHelpers()
-	e.ensureMalloc()
-	e.ensureMemset()
-	sir := errorObjType.StructIR()
-	kindIdx, _, _ := errorObjType.FieldIndex(ClassTagField)
-	msgIdx, _, _ := errorObjType.FieldIndex("message")
-	nameIdx, _, _ := errorObjType.FieldIndex("name")
-	causeIdx, _, _ := errorObjType.FieldIndex("cause")
-	name := e.internString("TypeError")
-	var b strings.Builder
-	b.WriteString("define void @__kml_throw_nullderef(ptr %msg) cold noreturn {\nentry:\n")
-	// malloc+memset rather than the zeroing allocator: -optimize-memory's tests
-	// count that allocator's call sites to prove an instance left the heap.
-	fmt.Fprintf(&b, "  %%o = call ptr @malloc(i64 %d)\n", errorObjType.StructSize())
-	fmt.Fprintf(&b, "  call ptr @memset(ptr %%o, i32 0, i64 %d)\n", errorObjType.StructSize())
-	fmt.Fprintf(&b, "  %%k = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, kindIdx)
-	fmt.Fprintf(&b, "  store i64 %d, ptr %%k, align 8\n", errorTypeIDStored(errorKindIDs["TypeError"]))
-	fmt.Fprintf(&b, "  %%m = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, msgIdx)
-	b.WriteString("  store ptr %msg, ptr %m, align 8\n")
-	fmt.Fprintf(&b, "  %%n = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, nameIdx)
-	fmt.Fprintf(&b, "  store ptr %s, ptr %%n, align 8\n", name)
-	fmt.Fprintf(&b, "  %%c = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, causeIdx)
-	fmt.Fprintf(&b, "  store i64 %d, ptr %%c, align 8\n", nbUndefined)
-	b.WriteString("  call void @__kml_throw(ptr %o)\n  unreachable\n}")
-	e.emitGlobal(b.String())
-}
-
-// ensureRangeErrorThrow defines @__kml_throw_range_error(ptr msg): throw a
-// RangeError with the (headered) message — the C runtime's way to raise one
-// (string.c's "Invalid string length").
-func (e *Emitter) ensureRangeErrorThrow() {
-	if e.usedRangeErrorThrow {
-		return
-	}
-	e.usedRangeErrorThrow = true
-	e.ensureExceptionHelpers()
-	e.ensureMalloc()
-	e.ensureMemset()
-	sir := errorObjType.StructIR()
-	kindIdx, _, _ := errorObjType.FieldIndex(ClassTagField)
-	msgIdx, _, _ := errorObjType.FieldIndex("message")
-	nameIdx, _, _ := errorObjType.FieldIndex("name")
-	causeIdx, _, _ := errorObjType.FieldIndex("cause")
-	name := e.internString("RangeError")
-	var b strings.Builder
-	b.WriteString("define void @__kml_throw_range_error(ptr %msg) cold noreturn {\nentry:\n")
-	fmt.Fprintf(&b, "  %%o = call ptr @malloc(i64 %d)\n", errorObjType.StructSize())
-	fmt.Fprintf(&b, "  call ptr @memset(ptr %%o, i32 0, i64 %d)\n", errorObjType.StructSize())
-	fmt.Fprintf(&b, "  %%k = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, kindIdx)
-	fmt.Fprintf(&b, "  store i64 %d, ptr %%k, align 8\n", errorTypeIDStored(errorKindIDs["RangeError"]))
-	fmt.Fprintf(&b, "  %%m = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, msgIdx)
-	b.WriteString("  store ptr %msg, ptr %m, align 8\n")
-	fmt.Fprintf(&b, "  %%n = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, nameIdx)
-	fmt.Fprintf(&b, "  store ptr %s, ptr %%n, align 8\n", name)
-	fmt.Fprintf(&b, "  %%c = getelementptr %s, ptr %%o, i32 0, i32 %d\n", sir, causeIdx)
-	fmt.Fprintf(&b, "  store i64 %d, ptr %%c, align 8\n", nbUndefined)
-	b.WriteString("  call void @__kml_throw(ptr %o)\n  unreachable\n}")
-	e.emitGlobal(b.String())
+	e.addHookInit(fmt.Sprintf("  store "+irPtr+" %s, "+irPtr+" @__kml_error_names, align 8\n", e.internString("TypeError")))
+	slot := "getelementptr inbounds ([2 x " + irPtr + "], " + irPtr + " @__kml_error_names, i64 0, i64 1)"
+	e.addHookInit(fmt.Sprintf("  store "+irPtr+" %s, "+irPtr+" %s, align 8\n", e.internString("RangeError"), slot))
 }
 
 // derefGuardable reports whether an absent value of type ty is observable as a
@@ -119,7 +63,7 @@ func derefGuardable(ty Type) bool {
 	if triStr(ty) {
 		return true // undefined, or null as nullRef (TDD-00257)
 	}
-	return ty.IR == "ptr" && ty.IsObject() && !ty.IsArray() && !ty.IsFlatArray() && !ty.IsTuple()
+	return ty.IR == irPtr && ty.IsObject() && !ty.IsArray() && !ty.IsFlatArray() && !ty.IsTuple()
 }
 
 // absentWord is how JS names the absent base in the message: a `T | null`
@@ -147,15 +91,15 @@ func (e *Emitter) emitNullDerefGuard(v Value, g derefGuard) error {
 		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", absent, present))
 	case v.Ty.IsArray() || v.Ty.IsFlatArray():
 		// An absent array is a null header.
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", absent, v.Ref))
 	case triStr(v.Ty):
 		// nullRef is null, the null pointer undefined (TDD-00257).
 		if err := e.emitDerefThrowIf(e.isNullRef(v.Ref), "null", g); err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.Ref))
-	case v.Ty.IR == "ptr":
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", absent, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", absent, v.Ref))
+	case v.Ty.IR == irPtr:
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", absent, v.Ref))
 	case isF64Slot(v.Ty):
 		b := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, v.Ref))
@@ -175,7 +119,7 @@ func (e *Emitter) emitDerefThrowIf(absent, word string, g derefGuard) error {
 		verb, gerund = "set", "setting"
 	}
 	head := fmt.Sprintf("Cannot %s properties of %s (%s '", verb, word, gerund)
-	e.ensureNullDerefThrow()
+	e.ensureErrorNames()
 	throwL := e.freshLabel("nullderef.throw")
 	okL := e.freshLabel("nullderef.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, throwL, okL))
@@ -197,7 +141,7 @@ func (e *Emitter) emitDerefThrowIf(absent, word string, g derefGuard) error {
 		}
 		msg = full.Ref
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_throw_nullderef(ptr %s)", msg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_throw_nullderef("+irPtr+" %s)", msg))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
 	return nil

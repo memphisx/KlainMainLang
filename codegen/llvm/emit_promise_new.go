@@ -20,40 +20,19 @@ var promiseSettleSource string
 // PromiseSettleSource is settle.c, behind kml_layout.h.
 func PromiseSettleSource() string { return layoutHeader() + promiseSettleSource }
 
-// UsesPromiseSettle reports whether the program links settle.c.
-func (e *Emitter) UsesPromiseSettle() bool { return e.usedPromiseSettle }
-
-// ensurePromiseSettle declares @__kml_promise_settle(ptr %p, i64 %state): settle a
-// bare promise (state 1 fulfilled / 2 rejected — the value is already in v0/v1),
-// waking a parked awaiter and enqueuing its reactions. The first settle wins; a
-// later resolve/reject is a no-op. Factored from __kml_task_finish's body, which
-// only settles a promise derived from a task.
-func (e *Emitter) ensurePromiseSettle() {
-	if e.usedPromiseSettle {
-		return
-	}
-	e.usedPromiseSettle = true
-	e.ensurePromiseRuntime()
-	e.ensureMicrotasks() // @__kml_promise_drain_reactions
-	e.ensureNanBox()     // @__kml_promise_reject_box
-	e.emitGlobal(`declare void @__kml_promise_settle(ptr, i64)
-declare void @__kml_promise_reject_with(ptr, i64, i64)
-declare void @__kml_promise_reject_err(ptr, i64)
-declare void @__kml_promise_reject_from(ptr, ptr)
-declare void @__kml_promise_reject_box(ptr, i64)
-declare void @__kml_promise_settle_later(ptr)`)
-}
-
 // emitRejectPromise rejects promise q with the caught value (tag, an i8 or
 // i64 register or literal; pay, i64): the one rejection writer.
 func (e *Emitter) emitRejectPromise(q, tag string, tagIsI8 bool, pay string) {
-	e.ensurePromiseSettle()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
+	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
 	if tagIsI8 {
 		w := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", w, tag))
 		tag = w
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_with(ptr %s, i64 %s, i64 %s)", q, tag, pay))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_with("+irPtr+" %s, i64 %s, i64 %s)", q, tag, pay))
 }
 
 // emitNewPromise implements `new Promise<T>((resolve, reject) => …)`. It allocates
@@ -63,8 +42,38 @@ func (e *Emitter) emitRejectPromise(q, tag string, tagIsI8 bool, pay string) {
 // a later callback, e.g. setTimeout) — either way the promise is a real task
 // promise awaitable / chainable like any other.
 func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
+	if len(ex.Args) == 0 && e.compatJS() {
+		// No executor: the constructor's TypeError (the checker reports
+		// TS2554 in the strict lane).
+		e.emitThrowTypeError("Promise resolver undefined is not a function")
+		e.emitLabel(e.freshLabel("promise.noexec.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
+	if len(ex.Args) > 1 {
+		// Arguments past the executor are evaluated, and ignored, before
+		// the executor runs. A function literal's evaluation is only its
+		// closure's creation, so it is emitted where the executor needs it;
+		// any other executor is evaluated first, into a binding.
+		ex2 := *ex
+		ex2.Args = ex.Args[:1]
+		switch ex.Args[0].(type) {
+		case *ast.ArrowFunction, *ast.FunctionExpression:
+		default:
+			v, err := e.emitExpr(ex.Args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			ex2.Args = []ast.Expression{e.bindValue(v, ex.GetPos())}
+		}
+		for _, x := range ex.Args[1:] {
+			if _, err := e.emitExpr(x); err != nil {
+				return Value{}, err
+			}
+		}
+		return e.emitNewPromise(&ex2)
+	}
 	if len(ex.Args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: new Promise expects a single executor argument", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, internalAt(ex.GetPos(), "new Promise without an executor")
 	}
 
 	valTy := e.newPromiseValueType(ex)
@@ -72,13 +81,14 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 		e.promiseValue = map[*ast.NewExpression]Type{}
 	}
 	e.promiseValue[ex] = valTy
+	e.ensureMicrotasks()
 
-	e.ensurePromiseSettle()
+	e.ensureNanBox()
 	e.ensureExceptionHelpers()
-	e.ensureMalloc()
+	e.ensureUnhandledRejections()
 
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", p))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", p))
 	return e.emitPromiseExecutor(p, valTy, ex.Args[0], ex.GetPos())
 }
 
@@ -87,9 +97,10 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 // `new Promise(exec)`'s, or the body of an instance of a class extending
 // Promise (TDD-00247).
 func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensurePromiseSettle()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
 	e.ensureExceptionHelpers()
-	e.ensureMalloc()
+	e.ensureUnhandledRejections()
 
 	// Per-site resolve/reject settle functions + their closure headers over p.
 	resolveFn := e.emitResolveThunk(valTy)
@@ -126,19 +137,58 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 	// the call below works regardless.
 	var execVal Value
 	var err error
+	// Hints stop at a rest parameter: it collects the arguments past it.
+	hints := func(ps []ast.Param) []Type {
+		h := []Type{resolveTy, rejectTy}
+		for i, p := range ps {
+			if p.Rest && i < len(h) {
+				return h[:i]
+			}
+		}
+		return h
+	}
+	restExec := false
 	switch fn := exec.(type) {
 	case *ast.ArrowFunction:
-		execVal, err = e.emitArrowFunctionWithHints(fn, []Type{resolveTy, rejectTy})
+		restExec = len(hints(fn.Params)) < 2
 	case *ast.FunctionExpression:
-		execVal, err = e.emitFunctionExpression(fn, []Type{resolveTy, rejectTy})
+		restExec = len(hints(fn.Params)) < 2
+	}
+	switch fn := exec.(type) {
+	case *ast.ArrowFunction:
+		if restExec {
+			execVal, err = e.emitExpr(exec)
+			break
+		}
+		execVal, err = e.emitArrowFunctionWithHints(fn, hints(fn.Params))
+	case *ast.FunctionExpression:
+		if restExec {
+			execVal, err = e.emitExpr(exec)
+			break
+		}
+		execVal, err = e.emitFunctionExpression(fn, hints(fn.Params))
 	default:
 		execVal, err = e.emitExpr(exec)
 		if err == nil && !execVal.Ty.IsFunc() {
-			return Value{}, fmt.Errorf("%d:%d: new Promise's executor must be a function (arrow, function expression, or a closure-typed value)", pos.Line, pos.Col)
+			// Not a function (JavaScript; or a box holding one): the
+			// constructor's TypeError naming it, unless it is one.
+			execVal, err = e.promiseExecutorFromValue(execVal, FuncType([]Type{resolveTy, rejectTy}, TypeVoid))
 		}
 	}
 	if err != nil {
 		return Value{}, err
+	}
+	if execVal.Ty.IsFunc() && (execVal.Ty.FuncHasRest || len(execVal.Ty.FuncParams) > 2) {
+		// The runtime passes the two resolving functions alone: an
+		// executor with a rest parameter (its `arguments`, too) is called
+		// through an adapter, as any call of it packs the rest.
+		f := e.bindValue(execVal, pos)
+		res, rej := "__kml_exec_res", "__kml_exec_rej"
+		call := ast.NewCallExpression(f, []ast.Expression{ast.NewIdentifier(res, pos), ast.NewIdentifier(rej, pos)}, pos)
+		ad := ast.NewArrowFunction([]ast.Param{{Name: res}, {Name: rej}}, nil, call, nil, pos)
+		if execVal, err = e.emitArrowFunctionWithHints(ad, []Type{resolveTy, rejectTy}); err != nil {
+			return Value{}, err
+		}
 	}
 
 	// An executor held as a value takes its resolving functions at the
@@ -150,7 +200,7 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 		v := e.convert(Value{Ref: ref, Ty: from}, to)
 		if v.Ty.IR == "i64" {
 			p := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, v.Ref))
 			return p
 		}
 		return v.Ref
@@ -162,27 +212,12 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 		resolveClo = adapt(resolveClo, resolveTy, ps[0])
 	}
 	// A throw from the executor rejects the promise (settle.c).
-	e.declareFn("__kml_promise_run_executor", "declare void @__kml_promise_run_executor(ptr, ptr, ptr, ptr)")
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_run_executor(ptr %s, ptr %s, ptr %s, ptr %s)", execVal.Ref, resolveClo, rejectClo, p))
+	e.declareFn("__kml_promise_run_executor", "declare void @__kml_promise_run_executor("+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_run_executor("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", execVal.Ref, resolveClo, rejectClo, p))
 
 	pt := PromiseOf(valTy)
 	pt.PromiseTask = true
 	return Value{Ref: p, Ty: pt}, nil
-}
-
-// ensurePromiseAdoptRunner emits @__kml_promise_adopt_runner(ptr %env) once — the
-// microtask that performs thenable adoption (TDD-00091). Its env is a { ptr src,
-// ptr tgt } pair: when the adopted source promise settles, this copies the
-// source's settlement (state + value/reason bits) into the target and settles it,
-// so `resolve(src)` makes the outer promise mirror `src`. First-settle-wins on the
-// target is honored (a prior resolve/reject already having settled it wins).
-func (e *Emitter) ensurePromiseAdoptRunner() {
-	if e.usedPromiseAdoptRunner {
-		return
-	}
-	e.usedPromiseAdoptRunner = true
-	e.ensurePromiseSettle()
-	e.emitGlobal("declare void @__kml_promise_adopt_runner(ptr)")
 }
 
 // emitPromiseAdopt implements `resolve(srcPromise)` thenable adoption (TDD-00091):
@@ -192,37 +227,39 @@ func (e *Emitter) ensurePromiseAdoptRunner() {
 // reaction list and fires when the source settles — the same reaction/microtask
 // mechanism `.then` uses, so ordering matches JS (adoption is a microtask tick).
 func (e *Emitter) emitPromiseAdopt(tgtRef, srcRef string) {
-	e.ensurePromiseAdoptRunner()
 	e.ensureMicrotasks()
-	e.ensureMalloc()
+	e.ensureNanBox()
+	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
+	e.ensureMicrotasks()
 
 	// env = { src, tgt }
 	env := e.freshReg()
 	envSrc := e.freshReg()
 	envTgt := e.freshReg()
-	e.heapMallocInto(env, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", envSrc, env))
-	e.heapStore("ptr", srcRef, envSrc, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", envTgt, env))
-	e.heapStore("ptr", tgtRef, envTgt, 8)
+	e.heapMallocInto(env, allocClosure, "16")
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", envSrc, env))
+	e.heapStore(irPtr, srcRef, envSrc, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", envTgt, env))
+	e.heapStore(irPtr, tgtRef, envTgt, 8)
 
 	// closure = { adopt_runner, env }
 	clo := e.freshReg()
 	cfp := e.freshReg()
 	cep := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
-	e.heapStore("ptr", "@__kml_promise_adopt_runner", cfp, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
-	e.heapStore("ptr", env, cep, 8)
+	e.emitClosureAlloc(clo, "16", "@__kml_promise_adopt_runner")
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", cfp, clo))
+	e.heapStore(irPtr, "@__kml_promise_adopt_runner", cfp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", cep, clo))
+	e.heapStore(irPtr, env, cep, 8)
 
 	// If src already settled → enqueue now; else attach a reaction node onto
 	// src.reactions (the same pattern emitPromiseThen uses).
 	e.emitMarkPromiseHandled(srcRef)
 	res := e.freshReg()
 	resP := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, srcRef))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", res, resP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", resP, promiseStructIR, srcRef))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", res, resP))
 	settled := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", settled, res))
 	nowL := e.freshLabel("adopt.now")
@@ -230,7 +267,7 @@ func (e *Emitter) emitPromiseAdopt(tgtRef, srcRef string) {
 	doneL := e.freshLabel("adopt.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", settled, nowL, laterL))
 	e.emitLabel(nowL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", clo))
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", clo))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(laterL)
 	node := e.freshReg()
@@ -238,14 +275,14 @@ func (e *Emitter) emitPromiseAdopt(tgtRef, srcRef string) {
 	oldHead := e.freshReg()
 	nodeClo := e.freshReg()
 	nodeNext := e.freshReg()
-	e.heapMallocInto(node, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, srcRef))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, rxP))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", nodeClo, node))
-	e.heapStore("ptr", clo, nodeClo, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", nodeNext, node))
-	e.heapStore("ptr", oldHead, nodeNext, 8)
-	e.heapStore("ptr", node, rxP, 8)
+	e.heapMallocInto(node, allocHost, "16")
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 4", rxP, promiseStructIR, srcRef))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", oldHead, rxP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", nodeClo, node))
+	e.heapStore(irPtr, clo, nodeClo, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", nodeNext, node))
+	e.heapStore(irPtr, oldHead, nodeNext, 8)
+	e.heapStore(irPtr, node, rxP, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 }
@@ -258,11 +295,11 @@ func (e *Emitter) buildBuiltinClosure(fn, envPtr string) string {
 	hdr := e.freshReg()
 	fpp := e.freshReg()
 	epp := e.freshReg()
-	e.heapMallocInto(hdr, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, hdr))
-	e.heapStore("ptr", fn, fpp, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, hdr))
-	e.heapStore("ptr", envPtr, epp, 8)
+	e.emitClosureAlloc(hdr, "16", fn)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", fpp, hdr))
+	e.heapStore(irPtr, fn, fpp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", epp, hdr))
+	e.heapStore(irPtr, envPtr, epp, 8)
 	return hdr
 }
 
@@ -292,22 +329,22 @@ func (e *Emitter) emitResolveThunk(valTy Type) string {
 		if isUnconstrainedDynamic(valTy) {
 			// resolve(x) with a promise adopts it.
 			e.ensurePromiseResolveAny()
-			e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %%p, i64 %s)", v.Ref))
+			e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %%p, i64 %s)", v.Ref))
 			e.emitTerminator("ret void")
 		} else {
 			e.storePromiseValue("%p", v)
 		}
 	}
 	if !e.blockDone {
-		e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 1)")
+		e.emitInstr("call void @__kml_promise_settle(" + irPtr + " %p, i64 1)")
 		e.emitInstr("ret void")
 	}
-	params := "ptr %p"
+	params := irPtr + " %p"
 	if !isVoid {
 		if valTy.IsArray() {
-			params = "ptr %p, ptr %vptr, i64 %vlen"
+			params = irPtr + " %p, " + irPtr + " %vptr, i64 %vlen"
 		} else {
-			params = fmt.Sprintf("ptr %%p, %s %%v", StructFieldIR(valTy))
+			params = fmt.Sprintf(irPtr+" %%p, %s %%v", StructFieldIR(valTy))
 		}
 	}
 	return e.defineContentNamed("@__kml_promise_resolve.", "void", params, e.allocas.String()+e.body.String())
@@ -328,7 +365,7 @@ func (e *Emitter) emitRejectThunk() string {
 	e.emitInstr(fmt.Sprintf("%s = extractvalue { i8, i64 } %%err, 1", pay))
 	e.emitRejectPromise("%p", tag, true, pay)
 	e.emitInstr("ret void")
-	return e.defineContentNamed("@__kml_promise_reject.", "void", "ptr %p, { i8, i64 } %err", e.allocas.String()+e.body.String())
+	return e.defineContentNamed("@__kml_promise_reject.", "void", irPtr+" %p, { i8, i64 } %err", e.allocas.String()+e.body.String())
 }
 
 // emitThunkAlreadySettledGuard emits an early `ret void` when %p is already
@@ -338,8 +375,8 @@ func (e *Emitter) emitThunkAlreadySettledGuard() {
 	cur := e.freshReg()
 	settled := e.freshReg()
 	storeL := e.freshLabel("thunk.store")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%p, i32 0, i32 0", sp, promiseStructIR))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, sp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%p, i32 0, i32 0", sp, promiseStructIR))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, sp))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", settled, cur))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%thunk.ret, label %%%s", settled, storeL))
 	e.emitLabel("thunk.ret")
@@ -362,7 +399,7 @@ func (e *Emitter) beginThunkEmit() func() {
 // value an untyped promise resolves with.
 func (e *Emitter) newPromiseValueType(ex *ast.NewExpression) Type {
 	if len(ex.TypeArgs) == 1 {
-		return e.resolveType(ex.TypeArgs[0])
+		return e.annotationType(ex.TypeArgs[0])
 	}
 	if c := e.front(); c != nil {
 		t := c.TypeOf(ex)
@@ -373,4 +410,48 @@ func (e *Emitter) newPromiseValueType(ex *ast.NewExpression) Type {
 		}
 	}
 	return TypeAny
+}
+
+// promiseExecutorFromValue is new Promise's executor held as a non-closure
+// value v: the closure a box holds, or the constructor's TypeError
+// (`Promise resolver 5 is not a function`).
+func (e *Emitter) promiseExecutorFromValue(v Value, fnTy Type) (Value, error) {
+	box := v
+	if !v.Ty.IsDynamic() {
+		b, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		box = b
+	}
+	ty, err := e.emitDynamicTypeof(box)
+	if err != nil {
+		return Value{}, err
+	}
+	isFn := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isFn, ty.Ref, e.internString("function")))
+	badL, okL := e.freshLabel("promise.exec.bad"), e.freshLabel("promise.exec.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFn, okL, badL))
+	e.emitLabel(badL)
+	text, err := e.emitV8ValueText(box)
+	if err != nil {
+		return Value{}, err
+	}
+	m1, err := e.emitStringConcat(Value{Ref: e.internString("Promise resolver "), Ty: TypePtr}, text)
+	if err != nil {
+		return Value{}, err
+	}
+	msg, err := e.emitStringConcat(m1, Value{Ref: e.internString(" is not a function"), Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureExceptionHelpers()
+	e.excThrow(e.buildErrorObj(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError")))
+	e.emitTerminator("unreachable")
+	e.emitLabel(okL)
+	if !v.Ty.IsDynamic() {
+		// A static non-function never is one: the closure is never read.
+		return Value{Ref: "zeroinitializer", Ty: fnTy}, nil
+	}
+	return e.convert(box, fnTy), nil
 }

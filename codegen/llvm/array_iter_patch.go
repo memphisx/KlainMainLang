@@ -66,10 +66,10 @@ func (e *Emitter) emitPatchedArrayElems(hdr, ptr, length string, arrTy, elemTy T
 		hdr = e.newArrayHeader(ptr, length)
 	}
 	pSlot, lSlot := e.freshReg(), e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", pSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", pSlot))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lSlot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ptr, pSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", length, lSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ptr, pSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", length, lSlot))
 	patchL, joinL := e.freshLabel("arriter.patched"), e.freshLabel("arriter.join")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayIterPatched(), patchL, joinL))
 	e.emitLabel(patchL)
@@ -85,13 +85,13 @@ func (e *Emitter) emitPatchedArrayElems(hdr, ptr, length string, arrTy, elemTy T
 		}
 		p2, l2 = e.arrayData(conv), e.arrayLen(conv)
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p2, pSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l2, lSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", p2, pSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", l2, lSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	outP, outL := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", outP, pSlot))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", outL, lSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", outP, pSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", outL, lSlot))
 	return outP, outL, nil
 }
 
@@ -131,6 +131,9 @@ func (e *Emitter) emitIterMethodOf(v, m Value) Value {
 // property path as written); "" when V8 describes the value instead (a
 // destructured property or parameter: emitThrowNotIterableValue).
 func (e *Emitter) notIterableMessage(src ast.Expression) string {
+	if id, ok := src.(*ast.Identifier); ok && strings.HasPrefix(id.Name, "__kml_") {
+		return "" // a compiler temporary (a constructor's argument): the value
+	}
 	if s, ok := e.v8ExprText(src); ok {
 		return s + " is not iterable"
 	}
@@ -138,6 +141,32 @@ func (e *Emitter) notIterableMessage(src ast.Expression) string {
 		return e.iterableDisplayName(src) + " is not iterable"
 	}
 	return ""
+}
+
+// isCallSpreadArg reports x is spread into a call or `new` (`f(...x)`).
+func (e *Emitter) isCallSpreadArg(x ast.Expression) bool {
+	if e.callSpreadArgs == nil {
+		e.callSpreadArgs = map[ast.Expression]bool{}
+		if e.prog != nil {
+			mark := func(args []ast.Expression) {
+				for _, a := range args {
+					if sp, ok := a.(*ast.SpreadElement); ok {
+						e.callSpreadArgs[sp.Arg] = true
+					}
+				}
+			}
+			ast.Inspect(e.prog, func(n ast.Node) bool {
+				switch c := n.(type) {
+				case *ast.CallExpression:
+					mark(c.Args)
+				case *ast.NewExpression:
+					mark(c.Args)
+				}
+				return true
+			})
+		}
+	}
+	return e.callSpreadArgs[x]
 }
 
 // v8ExprText renders x as V8's call printer does for a "not iterable"
@@ -208,11 +237,11 @@ func (e *Emitter) jsNonIterable(x ast.Expression) bool {
 	if !e.compatJS() {
 		return false
 	}
-	t := e.inferExprType(x)
+	t := e.typeOfExpr(x)
 	if t.IsDynamic() || t.IsArray() || t.IsTuple() || isStringTy(t) || t.IsObject() || t.IsClass() || t.IsMap() || t.IsSet() || t.IsGenerator() || t.IsCollIter() {
 		return false
 	}
-	return t.IR != "" && t.IR != "ptr"
+	return t.IR != "" && t.IR != irPtr
 }
 
 // emitThrowNotIterableValue throws V8's generic "not iterable" TypeError,
@@ -231,11 +260,14 @@ func (e *Emitter) emitThrowNotIterableValue(v Value) error {
 	prim := ast.NewBinaryExpression("&&",
 		ast.NewBinaryExpression("!==", mid(), str("object"), pos),
 		ast.NewBinaryExpression("!==", mid(), str("function"), pos), pos)
-	describe := set(ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", mid(), str(" "), pos), id, pos))
+	// (V8 names a symbol or a bigint by its type alone.)
+	typeOnly := ast.NewBinaryExpression("||", ast.NewBinaryExpression("===", mid(), str("symbol"), pos), ast.NewBinaryExpression("===", mid(), str("bigint"), pos), pos)
+	describe := ast.NewIfStatement(typeOnly, block(ast.NewExpressionStatement(ast.NewNullLiteral(true, pos), pos)),
+		set(ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", mid(), str(" "), pos), id, pos)), pos)
 	stmts := []ast.Statement{
-		ast.NewVarDeclaration("let", m, &ast.TypeAnnotation{Name: "string", Source: "ts"}, ast.NewUnaryExpression("typeof", true, id, pos), pos),
+		ast.NewVarDeclaration("let", m, nameAnnotation("string"), ast.NewUnaryExpression("typeof", true, id, pos), pos),
 		ast.NewIfStatement(ast.NewBinaryExpression("===", id, ast.NewNullLiteral(true, pos), pos), block(set(str("undefined"))),
-			ast.NewIfStatement(ast.NewBinaryExpression("===", id, ast.NewNullLiteral(false, pos), pos), block(set(str("null"))),
+			ast.NewIfStatement(ast.NewBinaryExpression("===", id, ast.NewNullLiteral(false, pos), pos), block(set(str("object null"))),
 				ast.NewIfStatement(prim, block(describe), nil, pos), pos), pos),
 	}
 	e.pushScope()
@@ -273,7 +305,7 @@ func (e *Emitter) iterableCtorArg(ex *ast.NewExpression) (*ast.NewExpression, bo
 		return nil, false
 	}
 	arg := ex.Args[0]
-	t := e.inferExprType(arg)
+	t := e.typeOfExpr(arg)
 	if !(t.IsArray() || t.IsTuple()) || t.IsDynamic() || t.IsTypedArray() || t.IsFlatArray() {
 		return nil, false
 	}
@@ -292,19 +324,8 @@ func (e *Emitter) emitMapSeedLoop(mapPtr string, entries ast.Expression, keyTy, 
 	at := func(i string) ast.Expression {
 		return ast.NewIndexExpression(ast.NewIdentifier(item, pos), ast.NewNumberLiteral(i, pos), pos)
 	}
-	call := ast.NewCallExpression(ast.NewMemberExpression(target, "set", pos), []ast.Expression{at("0"), at("1")}, pos)
-	// A value that is not an object is not an entry (Map's TypeError).
-	id := ast.NewIdentifier(item, pos)
-	typeOf := ast.NewUnaryExpression("typeof", true, id, pos)
-	notObj := ast.NewBinaryExpression("||",
-		ast.NewBinaryExpression("===", id, ast.NewNullLiteral(false, pos), pos),
-		ast.NewBinaryExpression("&&",
-			ast.NewBinaryExpression("!==", typeOf, ast.NewStringLiteral("object", pos), pos),
-			ast.NewBinaryExpression("!==", typeOf, ast.NewStringLiteral("function", pos), pos), pos), pos)
-	msg := ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral("Iterator value ", pos), id, pos),
-		ast.NewStringLiteral(" is not an entry object", pos), pos)
-	check := ast.NewIfStatement(notObj, ast.NewBlockStatement([]ast.Statement{
-		ast.NewThrowStatement(ast.NewNewErrorExpression("TypeError", msg, pos), pos)}, pos), nil, pos)
+	call := collMethodCall(target, MapType(keyTy, valTy), "set", []ast.Expression{at("0"), at("1")}, pos)
+	check := entryObjectCheck(item, pos)
 	src := ast.NewAsExpression(entries, ast.AnyAnnotation(""), entries.GetPos())
 	loop := ast.NewForOfStatement("const", item, src, ast.NewBlockStatement([]ast.Statement{check, ast.NewExpressionStatement(call, pos)}, pos), pos)
 	return e.emitStmt(loop)
@@ -322,10 +343,41 @@ func (e *Emitter) patchedIterInit(init ast.Expression) (ast.Expression, bool) {
 			return init, false // already spread
 		}
 	}
-	t := e.inferExprType(init)
+	t := e.typeOfExpr(init)
 	if !(t.IsArray() || t.IsTuple()) || t.IsDynamic() || t.IsTypedArray() || t.IsFlatArray() {
 		return init, false
 	}
 	e.spreadArgs[init] = true
 	return ast.NewArrayLiteral([]ast.Expression{&ast.SpreadElement{Arg: init}}, init.GetPos()), true
+}
+
+// isNeverIterable reports a static type no value of which is iterable: a
+// number, boolean, symbol or bigint, null or undefined (a string is).
+func isNeverIterable(t Type) bool {
+	if t.IsDynamic() || t.Nullable() && !t.IsNull() && !t.IsUndefined() {
+		return false
+	}
+	if (t.IsSymbol() || t.IsBigInt()) && !t.IsClass() {
+		return true
+	}
+	if t.IsArray() || t.IsObject() || t.IsClass() || t.IsFunc() || isStringTy(t) || t.IR == "" {
+		return false
+	}
+	return t.IsNull() || t.IsUndefined() || t.IR == "i1" || t.IR == "double" && t.Float && !t.Nullable() || t.IR == "i64" && !t.Nullable() && t.Kind == TypeI64.Kind
+}
+
+// entryObjectCheck throws Map's TypeError when the iterated value named
+// item is not an object (not an entry).
+func entryObjectCheck(item string, pos ast.Pos) ast.Statement {
+	id := ast.NewIdentifier(item, pos)
+	typeOf := ast.NewUnaryExpression("typeof", true, id, pos)
+	notObj := ast.NewBinaryExpression("||",
+		ast.NewBinaryExpression("===", id, ast.NewNullLiteral(false, pos), pos),
+		ast.NewBinaryExpression("&&",
+			ast.NewBinaryExpression("!==", typeOf, ast.NewStringLiteral("object", pos), pos),
+			ast.NewBinaryExpression("!==", typeOf, ast.NewStringLiteral("function", pos), pos), pos), pos)
+	msg := ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral("Iterator value ", pos), id, pos),
+		ast.NewStringLiteral(" is not an entry object", pos), pos)
+	return ast.NewIfStatement(notObj, ast.NewBlockStatement([]ast.Statement{
+		ast.NewThrowStatement(ast.NewNewErrorExpression("TypeError", msg, pos), pos)}, pos), nil, pos)
 }

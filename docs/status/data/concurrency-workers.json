@@ -27,7 +27,7 @@
             "feature": "`Worker`",
             "status": "implemented",
             "caveats": [
-              "A worker's file is one of the program's own modules, compiled in: `new Worker` takes a path literal (resolved relative to the file it is written in, where Node resolves it against the working directory) or `__filename`; a computed path or `eval: true` code fails at `new Worker` (a genuine impossibility of native compilation)",
+              "A worker's file is one of the program's own modules, compiled in: `new Worker` takes a path literal (resolved relative to the file it is written in, where Node resolves it against the working directory) or `__filename`; `eval: true` code must be a constant string (a literal, or a `+` of literals), compiled in as a module whose `require`s resolve against the file's directory, where Node's resolve against the working directory; a computed path or computed `eval: true` code fails at `new Worker` (a genuine impossibility of native compilation)",
               "`terminate()` takes effect at the worker's next event-loop turn: a worker busy in synchronous code runs on until it yields, where Node interrupts it",
               "A transferred `ArrayBuffer` is copied, not detached: the sender's stays usable",
               "A worker shares `process.env` with its parent (Node gives it a copy) and writes its `stdout`/`stderr` directly; the `stdin`/`stdout`/`stderr`/`env`/`resourceLimits`/`argv`/`execArgv` options, `worker.stdout`/`stdin`/`stderr` and `getHeapSnapshot()` are not ported",

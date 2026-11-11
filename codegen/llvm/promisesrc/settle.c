@@ -97,7 +97,7 @@ extern void __kml_microtask_enqueue(void *);
 static void settle_later_tramp(void *p) { __kml_promise_settle(p, 1); }
 
 void __kml_promise_settle_later(void *p) {
-    void **cl = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    void **cl = (void **)kml_closure_alloc(2 * sizeof(void *));
     cl[0] = (void *)settle_later_tramp;
     cl[1] = p;
     __kml_microtask_enqueue(cl);

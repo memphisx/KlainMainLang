@@ -2,7 +2,6 @@ package llvm
 
 import (
 	"reflect"
-	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -34,8 +33,8 @@ func (e *Emitter) eraseTypeOnlyGenerics(prog *ast.Program) {
 				if v.IsNil() {
 					return
 				}
-				if ta, ok := v.Interface().(*ast.TypeAnnotation); ok && ta != nil && len(ta.Qualifier) == 0 && params[ta.Name] {
-					used = true
+				if ta, ok := v.Interface().(ast.TypeNode); ok && ta != nil {
+					used = namesTypeParam(ta, params)
 					return
 				}
 				if fd, ok := v.Interface().(*ast.FunctionDeclaration); ok && fd != nil && fd.IsOverloadSig {
@@ -100,7 +99,6 @@ func (e *Emitter) eraseInheritingGenerics(prog *ast.Program) {
 		declared := cd.DeclaredTypeParams()
 		cd.Declared = &declared
 		cd.TypeParams, cd.TypeParamConstraints, cd.TypeParamDefaults = nil, nil, nil
-		eraseTypeParams(reflect.ValueOf(cd), params)
 		if e.typeOnlyGenerics == nil {
 			e.typeOnlyGenerics = map[string]bool{}
 		}
@@ -108,55 +106,16 @@ func (e *Emitter) eraseInheritingGenerics(prog *ast.Program) {
 	}
 }
 
-// eraseTypeParams rewrites every annotation naming one of params (bare, or
-// with array brackets) to any, except inside a function declaring a type
-// parameter of the same name.
-func eraseTypeParams(v reflect.Value, params map[string]bool) {
-	if !v.IsValid() {
-		return
+// namesTypeParam reports whether the type node n names one of params.
+func namesTypeParam(n ast.TypeNode, params map[string]bool) bool {
+	found := false
+	if n != nil {
+		ast.Inspect(n, func(x ast.Node) bool {
+			if r, ok := x.(*ast.TypeReference); ok && len(r.Qualifier) == 0 && params[r.Name] {
+				found = true
+			}
+			return !found
+		})
 	}
-	switch v.Kind() {
-	case reflect.Ptr, reflect.Interface:
-		if v.IsNil() {
-			return
-		}
-		if ta, ok := v.Interface().(*ast.TypeAnnotation); ok && len(ta.Qualifier) == 0 {
-			root := ta.Name
-			for strings.HasSuffix(root, "[]") {
-				root = strings.TrimSuffix(root, "[]")
-			}
-			if params[root] && len(ta.TypeArgs) == 0 {
-				ta.Name = "any" + ta.Name[len(root):]
-			}
-		}
-		if fd, ok := v.Interface().(*ast.FunctionDeclaration); ok && len(fd.TypeParams) > 0 {
-			inner := params
-			shadow := false
-			for _, p := range fd.TypeParams {
-				shadow = shadow || params[p]
-			}
-			if shadow {
-				inner = map[string]bool{}
-				for k := range params {
-					inner[k] = true
-				}
-				for _, p := range fd.TypeParams {
-					delete(inner, p)
-				}
-			}
-			eraseTypeParams(v.Elem(), inner)
-			return
-		}
-		eraseTypeParams(v.Elem(), params)
-	case reflect.Struct:
-		for i := 0; i < v.NumField(); i++ {
-			if v.Type().Field(i).IsExported() {
-				eraseTypeParams(v.Field(i), params)
-			}
-		}
-	case reflect.Slice, reflect.Array:
-		for i := 0; i < v.Len(); i++ {
-			eraseTypeParams(v.Index(i), params)
-		}
-	}
+	return found
 }

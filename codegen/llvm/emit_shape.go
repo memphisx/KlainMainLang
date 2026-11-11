@@ -23,13 +23,16 @@ var shapeSource string
 // ShapeSource returns the C runtime that looks a layout up by header.
 func ShapeSource() string { return layoutHeader() + shapeSource }
 
+//go:embed shapesrc/objextra.c
+var objExtraSource string
+
+// ObjExtraSource is the added-property reads of a static object
+// (emitObjExtraFinalize).
+func ObjExtraSource() string { return layoutHeader() + objExtraSource }
+
 // ShapeCFlags: shape.c is compiled the same way for every program; the
 // link drops the parts a program does not use (DeadStripFlags).
 func (e *Emitter) ShapeCFlags() []string { return DeadStripFlags(e.exportsRuntime()) }
-
-// UsesShapes reports whether the program reads a static object's shape at
-// run time (the layout table and shape.c are then linked in).
-func (e *Emitter) UsesShapes() bool { return e.usedShapeRuntime }
 
 // ensureShapeRuntime declares the shape.c entry points and marks the program
 // as needing the layout table.
@@ -39,16 +42,6 @@ func (e *Emitter) ensureShapeRuntime() {
 	}
 	e.usedShapeRuntime = true
 	e.ensureNanBox()
-	e.ensureUnitReg() // shape.c finds rows in the registered tables
-	e.emitGlobal("declare i64 @__kml_shape_get(ptr, ptr, ptr)")
-	e.emitGlobal("declare i32 @__kml_shape_set(ptr, ptr, i64)")
-	e.emitGlobal("declare ptr @__kml_shape_class_name(ptr)")
-	e.emitGlobal("declare i64 @__kml_shape_nkeys(ptr)")
-	e.emitGlobal("declare ptr @__kml_shape_key(ptr, i64)")
-	e.emitGlobal("declare void @__kml_shape_expando_set(ptr, ptr, i64)")
-	e.emitGlobal("declare i64 @__kml_shape_expando_count(ptr)")
-	e.emitGlobal("declare i32 @__kml_shape_expando_delete(ptr, ptr)")
-	e.emitGlobal("declare i32 @__kml_shape_expando_has(ptr, ptr)")
 }
 
 // jsMemberWritten reports whether the program assigns a property of this
@@ -87,9 +80,9 @@ func (e *Emitter) emitShapeGet(objPtr, keyRef string) (val, found string) {
 	fslot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", fslot))
 	val = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_shape_get(ptr %s, ptr %s, ptr %s)", val, objPtr, keyRef, fslot))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_shape_get("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", val, objPtr, keyRef, fslot))
 	found = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s, align 4", found, fslot))
+	e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" %s, align 4", found, fslot))
 	return val, found
 }
 
@@ -159,7 +152,56 @@ func (e *Emitter) emitShapeFinalize() {
 }
 
 // shapeRowTy is a KmlShape row (shapesrc/shape.c).
-const shapeRowTy = "{ i64, ptr, ptr, ptr, i64, ptr, ptr }"
+const shapeRowTy = "{ i64, " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", i64, " + irPtr + ", i64 }"
+
+// noShapeOrder is a shape row's key-order tail for a layout without an
+// order slot.
+const noShapeOrder = ", i64 -1, " + irPtr + " null, i64 0, " + irPtr + " null"
+
+// shapeOrder is a shape row's key-order tail: the order slot's byte offset,
+// the layout's key sequence and integer-key mask (keyOrderSeq), and each
+// listed key's presence bit (-1 for none), so the runtime lists an
+// object's keys in its own order (keyorder.c).
+func (e *Emitter) shapeOrder(id int64, ty Type, keys []Field) string {
+	oi := ty.orderIndex()
+	offs, _ := irStructOffsets(ty.StructIR())
+	if oi < 0 || oi >= len(offs) {
+		return e.shapeBitsOnly(id, ty, keys)
+	}
+	seq, ints := e.keyOrderSeq(ty)
+	return fmt.Sprintf(", i64 %d, "+irPtr+" %s, i64 %d, "+irPtr+" %s", offs[oi], seq, ints, e.shapeBits(id, ty, keys))
+}
+
+// shapeBitsOnly is the key-order tail of a layout without an order slot:
+// its presence table still says each key's bit, when it has a word.
+func (e *Emitter) shapeBitsOnly(id int64, ty Type, keys []Field) string {
+	if ty.presenceIndex() < 0 {
+		return noShapeOrder
+	}
+	return ", i64 -1, " + irPtr + " null, i64 0, " + irPtr + " " + e.shapeBits(id, ty, keys)
+}
+
+// shapeBits is a layout's per-key presence table: each listed key's
+// presence bit (-1 for none), then whether that bit marks the key's
+// absence (a required field's) rather than its presence.
+func (e *Emitter) shapeBits(id int64, ty Type, keys []Field) string {
+	bits := make([]string, 2*len(keys))
+	absent := ty.absentMask()
+	for i, f := range keys {
+		b := ty.presenceBit(f.Name)
+		bits[i] = fmt.Sprintf("i8 %d", b)
+		bits[len(keys)+i] = "i8 0"
+		if b >= 0 && absent>>uint(b)&1 != 0 {
+			bits[len(keys)+i] = "i8 1"
+		}
+	}
+	if len(bits) == 0 {
+		return "null"
+	}
+	bitsName := fmt.Sprintf("@__kml_shape_bits_%d", id)
+	e.emitGlobal(fmt.Sprintf("%s ="+irGlobalAS+" constant [%d x i8] [%s]", bitsName, len(bits), strings.Join(bits, ", ")))
+	return bitsName
+}
 
 // shapeKeys are a layout's own enumerable keys, in declaration order.
 func shapeKeys(t Type) []Field {
@@ -203,39 +245,58 @@ func (e *Emitter) emitShapeRow(id int64, l shapeLayout) string {
 	}
 	keyRefs := make([]string, len(keys))
 	for i, f := range keys {
-		keyRefs[i] = "ptr " + e.internString(f.Name)
+		keyRefs[i] = irPtr + " " + e.internString(f.Name)
 	}
 	keysName := fmt.Sprintf("@__kml_shape_keys_%d", id)
-	e.emitGlobal(fmt.Sprintf("%s = constant [%d x ptr] [%s]", keysName, len(keys), strings.Join(keyRefs, ", ")))
-	name := "ptr null"
+	e.emitGlobal(fmt.Sprintf("%s ="+irGlobalAS+" constant [%d x "+irPtr+"] [%s]", keysName, len(keys), strings.Join(keyRefs, ", ")))
+	name := irPtr + " null"
 	if l.class != nil && !isSyntheticObjLitClass(l.ty) {
-		name = "ptr " + e.internString(classSourceName(l.ty.ClassName))
+		name = irPtr + " " + e.internString(classSourceName(l.ty.ClassName))
 	}
 	if l.ty.IsGenerator() {
 		// An Object whose prototype's Symbol.toStringTag is "Generator"
 		// ("AsyncGenerator"): `Object [Generator] {}`, `[object Generator]`.
-		name = "ptr " + e.internString("Object")
+		name = irPtr + " " + e.internString("Object")
 		thunk := "__kml_generator_tag" // shape.c
 		if l.ty.GeneratorIsAsync {
 			thunk = "__kml_async_generator_tag"
 		}
-		e.declareFn(thunk, fmt.Sprintf("declare ptr @%s(ptr)", thunk))
-		e.addUnitRow(unitKindToStringTag, "{ i64, ptr }", id, "ptr @"+thunk)
+		e.declareFn(thunk, fmt.Sprintf("declare "+irPtr+" @%s("+irPtr+")", thunk))
+		e.addUnitRow(unitKindToStringTag, "{ i64, "+irPtr+" }", id, irPtr+" @"+thunk)
 	}
 	// Each symbol-keyed field's symbol, through the global holding it.
 	syms := "null"
 	symRefs := make([]string, len(keys))
 	for i, f := range keys {
-		symRefs[i] = "ptr null"
+		symRefs[i] = irPtr + " null"
 		if g, ok := e.symbolFieldGlobal(f.Name); ok {
-			symRefs[i] = "ptr " + g
+			symRefs[i] = irPtr + " " + g
 			syms = fmt.Sprintf("@__kml_shape_syms_%d", id)
 		}
 	}
 	if syms != "null" {
-		e.emitGlobal(fmt.Sprintf("%s = constant [%d x ptr] [%s]", syms, len(keys), strings.Join(symRefs, ", ")))
+		e.emitGlobal(fmt.Sprintf("%s ="+irGlobalAS+" constant [%d x "+irPtr+"] [%s]", syms, len(keys), strings.Join(symRefs, ", ")))
 	}
-	return fmt.Sprintf("%d|%s { i64 %d, %s, ptr %s, ptr %s, i64 %d, ptr %s, ptr %s }", id, shapeRowTy, id, name, getName, setName, len(keys), keysName, syms)
+	order := noShapeOrder
+	if l.class == nil || l.class.OwnKeyOrder == nil && !l.class.IsErrorSubclass {
+		order = e.shapeOrder(id, l.ty, keys)
+	} else {
+		order = e.shapeBitsOnly(id, l.ty, keys)
+	}
+	return fmt.Sprintf("%d|%s { i64 %d, %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d, "+irPtr+" %s, "+irPtr+" %s%s, i64 %d }", id, shapeRowTy, id, name, getName, setName, len(keys), keysName, syms, order, presenceOffset(l.ty))
+}
+
+// presenceOffset is the byte offset of ty's presence word, -1 for none.
+func presenceOffset(ty Type) int64 {
+	pi := ty.presenceIndex()
+	if pi < 0 {
+		return -1
+	}
+	offs, _ := irStructOffsets(ty.StructIR())
+	if pi >= len(offs) {
+		return -1
+	}
+	return int64(offs[pi])
 }
 
 // classSourceName is a class's name as the source wrote it: a generic
@@ -250,18 +311,17 @@ func classSourceName(name string) string {
 // emitKeyIs branches on `strcmp(key, name) == 0`, leaving the hit block
 // current; the returned label is the miss block, to resume at.
 func (e *Emitter) emitKeyIs(keyReg, name string) (miss string) {
-	e.ensureStrcmp()
 	c := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp(ptr %s, ptr %s)", c, keyReg, e.internString(name)))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp("+irPtr+" %s, "+irPtr+" %s)", c, keyReg, e.internString(name)))
 	eq := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", eq, c))
 	// A symbol-keyed field (TDD-00246) is also the property of its symbol's
 	// own run-time key, `obj[k]` through a dynamic value.
 	if g, ok := e.symbolFieldGlobal(name); ok {
-		e.declareFn("__kml_key_is_sym", "declare zeroext i1 @__kml_key_is_sym(ptr, ptr)")
+		e.declareFn("__kml_key_is_sym", "declare zeroext i1 @__kml_key_is_sym("+irPtr+", "+irPtr+")")
 		sym, is, both := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sym, g))
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_key_is_sym(ptr %s, ptr %s)", is, keyReg, sym))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", sym, g))
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_key_is_sym("+irPtr+" %s, "+irPtr+" %s)", is, keyReg, sym))
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", both, eq, is))
 		eq = both
 	}
@@ -287,8 +347,9 @@ func (e *Emitter) emitShapeGetter(name string, t Type, keys []Field, class *Clas
 	}
 	for _, f := range keys {
 		miss := e.emitKeyIs("%key", f.Name)
-		if jsonFieldSkippable(f.Ty) {
-			// An omitted optional field is not a property (found stays 0).
+		if fieldMayBeAbsent(f) || isSettlementType(t) && (f.Name == "value" || f.Name == "reason") {
+			// An omitted optional field is not a property (found stays 0);
+			// nor is a deleted one, nor an allSettled record's other side.
 			present, v := e.emitFieldPresent("%obj", t, f)
 			hasL, absL := e.freshLabel("shape.present"), e.freshLabel("shape.absent")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, hasL, absL))
@@ -301,7 +362,7 @@ func (e *Emitter) emitShapeGetter(name string, t Type, keys []Field, class *Clas
 		}
 		idx, fty, _ := t.FieldIndex(f.Name)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%obj, i32 0, i32 %d", gep, structIR, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%obj, i32 0, i32 %d", gep, structIR, idx))
 		ret(e.loadScalarOrNullableField(gep, fty), shapeOwn)
 		e.emitLabel(miss)
 	}
@@ -393,10 +454,10 @@ func (e *Emitter) emitShapeGetter(name string, t Type, keys []Field, class *Clas
 			}
 		}
 		hdr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%obj, i64 8", hdr))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %%obj, i64 8", hdr))
 		boxed := e.emitBoxArrayPlain(e.arrayValueFromHeaderReg(hdr, *class.HostBase))
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, ptr %%key)", r, e.dynGetHelper("", ast.Pos{}), boxed))
+		e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, "+irPtr+" %%key)", r, e.dynGetHelper("", ast.Pos{}), boxed))
 		isUndef, found := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, r, nbUndefined))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 %d, i32 %d", found, isUndef, shapeAbsent, shapeMember))
@@ -407,14 +468,14 @@ func (e *Emitter) emitShapeGetter(name string, t Type, keys []Field, class *Clas
 		// (the instance stands in for a host cell, its body at +8).
 		hostGet = fmt.Sprintf("@__kml_shape_get_hsub_%d", class.TagID&kmlHdrIDMask)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %%obj, ptr %%key, ptr %%found)", r, hostGet))
+		e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %%obj, "+irPtr+" %%key, "+irPtr+" %%found)", r, hostGet))
 		e.emitTerminator(fmt.Sprintf("ret i64 %s", r))
 	} else {
 		e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%obj, ptr %%key, ptr %%found)", name), body)
+	e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%obj, "+irPtr+" %%key, "+irPtr+" %%found)", name), body)
 	if hostGet != "" {
 		h := hostLayout{id: e.hostID(*class.HostBase), class: hostClassName(*class.HostBase), ty: *class.HostBase}
 		e.emitHostShapeGetter(hostGet, h, e.hostMembers(h.class))
@@ -429,7 +490,7 @@ func (e *Emitter) emitShapeSetter(name string, t Type, keys []Field, class *Clas
 		miss := e.emitKeyIs("%key", f.Name)
 		idx, fty, _ := t.FieldIndex(f.Name)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%obj, i32 0, i32 %d", gep, structIR, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%obj, i32 0, i32 %d", gep, structIR, idx))
 		var v Value
 		switch {
 		case fty.IsDynamic():
@@ -481,7 +542,7 @@ func (e *Emitter) emitShapeSetter(name string, t Type, keys []Field, class *Clas
 			} else {
 				slot = e.freshReg()
 				e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(pty)))
-				e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(pty), av.Ref, slot))
+				e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", storageIR(pty), av.Ref, slot))
 			}
 			e.define("__kml_shape_arg", Symbol{Ptr: slot, Ty: pty})
 			if _, err := e.emitClassCall(t, self, m, []ast.Expression{ast.NewIdentifier("__kml_shape_arg", ast.Pos{})}, ast.Pos{}, false); err != nil {
@@ -495,7 +556,7 @@ func (e *Emitter) emitShapeSetter(name string, t Type, keys []Field, class *Clas
 	e.emitTerminator("ret i32 0")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal i32 %s(ptr %%obj, ptr %%key, i64 %%value)", name), body)
+	e.writeFunc(fmt.Sprintf("internal i32 %s("+irPtr+" %%obj, "+irPtr+" %%key, i64 %%value)", name), body)
 }
 
 // shapeMethodNames lists a class's methods and accessors in a stable order.
@@ -559,6 +620,9 @@ func (e *Emitter) shapeMethodRecord(class *ClassInfo, t Type, m string) string {
 	}
 	defer e.stableHelperBody(class.TagID)()
 	sig := class.MethodSigs[m]
+	if own, ok := class.OverrideSigs[m]; ok {
+		sig = own // an override's own parameters (emitShapeMethodAdapter)
+	}
 	base := fmt.Sprintf("__kml_shape_m_%s_%s", llvmSafeSymbol(t.ClassName), llvmSafeSymbol(m))
 	// A library class's adapters are named by its stable id, so they are
 	// compiled in that id's own unit with its shape row (libOwner).
@@ -587,11 +651,13 @@ func (e *Emitter) shapeMethodRecord(class *ClassInfo, t Type, m string) string {
 	if decl := class.Methods[m]; decl != nil {
 		e.fnMetaSource(fn, decl.Src)
 	}
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 	if isSyntheticObjLitClass(t) {
 		for lit, name := range e.objLitClasses {
 			if name == t.ClassName {
-				_ = e.emitObjLitBodies(lit, name) // an invalid literal fails where it is emitted
+				// Out of the literal's scope a body reading its locals fails
+				// here; the literal's own emission emits it (emitObjLitBodies).
+				_ = e.emitObjLitBodies(lit, name)
 				break
 			}
 		}
@@ -612,7 +678,7 @@ func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m 
 	// layout: the body runs on it as an `any` (emitForeignReceiverCall), or,
 	// for one that compiles no such way (`super`, `#private`), a TypeError.
 	// A library class's method checks its receiver itself, with Node's own
-	// error (ERR_INVALID_THIS).
+	// error (ERR_INVALID_THIS): a foreign receiver reaches it as null.
 	// A body that never reads its receiver runs on any: its self is null.
 	recvOK := ""
 	if class.TagID&kmlHdrIDMask < kmlStableIDBase {
@@ -628,14 +694,18 @@ func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m 
 			}
 			e.emitLabel(goodL)
 		}
+	} else if ok, err := e.emitAnyInstanceOfClass(Value{Ref: "%this", Ty: TypeAny}, t.ClassName); err == nil {
+		// The library method's own check (`this instanceof C`, a null
+		// test on a C-typed receiver) sees a foreign receiver as none.
+		recvOK = ok.Ref
 	}
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 	selfPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", selfPtr, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, selfPtr, pay))
 	if recvOK != "" {
 		sel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, recvOK, selfPtr))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", sel, recvOK, selfPtr))
 		selfPtr = sel
 	}
 	self := Value{Ref: selfPtr, Ty: t}
@@ -650,9 +720,9 @@ func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m 
 		have := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
 		slotp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", slotp, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", slotp, i))
 		loaded := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loaded, slotp))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loaded, slotp))
 		word := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
 		var av Value
@@ -677,7 +747,7 @@ func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m 
 		} else {
 			slot = e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(pty)))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(pty), av.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", storageIR(pty), av.Ref, slot))
 		}
 		name := fmt.Sprintf("__kml_shape_a%d", i)
 		e.define(name, Symbol{Ptr: slot, Ty: pty})
@@ -691,8 +761,8 @@ func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m 
 		}
 		rest := e.emitShapeRestArray(regular, elemTy)
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rest, slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", rest, slot))
 		e.define("__kml_shape_rest", Symbol{Ptr: slot, Ty: restTy})
 		args = append(args, ast.NewSpreadElement(ast.NewIdentifier("__kml_shape_rest", pos), pos))
 	}
@@ -722,7 +792,12 @@ func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m 
 		if md := class.Methods[m]; md != nil && md.Body == nil && !md.IsOptional {
 			abstract = true
 		}
+		if own, ok := class.OverrideSigs[m]; ok && class.MethodImplementor[m] == t.ClassName {
+			// An override under its own signature: its own body.
+			e.ovrCall = &ovrCallReq{sig: own, target: llvmSafeSymbol(t.ClassName+"_"+m) + "__kml_ovr"}
+		}
 		v, err := e.emitClassCall(t, self, m, callArgs, pos, !abstract)
+		e.ovrCall = nil
 		if err != nil {
 			e.emitThrowTypeError("the method '" + m + "' can't be called through a dynamic value")
 			return
@@ -769,13 +844,12 @@ func (e *Emitter) shapeFinishAdapter(fn string, restore func()) {
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%env, i64 %%this, i64 %%argc, ptr %%argv)", fn), body)
+	e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%env, i64 %%this, i64 %%argc, "+irPtr+" %%argv)", fn), body)
 }
 
 // emitShapeRestArray gathers argv[from:] (unboxed to elemTy) into an array
 // header, the rest parameter's value.
 func (e *Emitter) emitShapeRestArray(from int, elemTy Type) string {
-	e.ensureMalloc()
 	nRest := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %%argc, %d", nRest, from))
 	neg := e.freshReg()
@@ -785,17 +859,17 @@ func (e *Emitter) emitShapeRestArray(from int, elemTy Type) string {
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, n, elemTy.Align()))
 	data := e.freshReg()
-	e.heapMallocInto(data, bytes)
+	e.heapMallocInto(data, elemAllocKind(elemTy), bytes)
 	jPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", jPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", jPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", jPtr))
 	condL := e.freshLabel("shrest.cond")
 	bodyL := e.freshLabel("shrest.body")
 	doneL := e.freshLabel("shrest.done")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	j := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", j, jPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", j, jPtr))
 	more := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, j, n))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
@@ -803,19 +877,19 @@ func (e *Emitter) emitShapeRestArray(from int, elemTy Type) string {
 	src := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", src, j, from))
 	sp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %s", sp, src))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %s", sp, src))
 	w := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, sp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, sp))
 	ev := Value{Ref: w, Ty: elemTy}
 	if !elemTy.IsDynamic() {
 		ev = e.emitUnboxBoxToType(w, elemTy)
 	}
 	dst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dst, elemTy.IR, data, j))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", dst, elemTy.IR, data, j))
 	e.heapStore(elemTy.IR, ev.Ref, dst, elemTy.Align())
 	jn := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", jn, j))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", jn, jPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", jn, jPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(doneL)
 	return e.newArrayHeader(data, n)
@@ -894,9 +968,70 @@ func (e *Emitter) emitGeneratorMembers(genTy Type) {
 	}
 }
 
+// dynThunkArg is argument i of the dynamic function being emitted, boxed:
+// undefined when it was not passed.
+func (e *Emitter) dynThunkArg(i int) Value {
+	have := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
+	p := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", p, i))
+	w := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, p))
+	word := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, w, nbUndefined))
+	return Value{Ref: word, Ty: TypeAny}
+}
+
+// genDynNext, genDynReturn and genDynThrow are a generator's protocol as
+// dynamic functions: the step, its result as the program reads it.
+func (e *Emitter) genDynNext(gen string, genTy Type) (Value, error) {
+	// The sent value is the `yield` expression's (TNext), passed boxed.
+	e.ensureGeneratorRuntime()
+	sent := e.dynThunkArg(0)
+	if genTy.GeneratorIsAsync {
+		return e.emitAsyncGeneratorNextCore(gen, genTy, sent), nil
+	}
+	res := e.emitSyncGeneratorNextCore(gen, genTy, sent)
+	if e.blockDone {
+		return res, nil
+	}
+	return e.emitUserGenResult(gen, genTy, res), nil
+}
+
+func (e *Emitter) genDynReturn(gen string, genTy Type) (Value, error) {
+	elemTy := TypeAny
+	if genTy.GeneratorElemType != nil {
+		elemTy = *genTy.GeneratorElemType
+	}
+	rv := e.dynThunkArg(0)
+	if !elemTy.IsDynamic() {
+		rv = e.unboxArgToParam(rv.Ref, elemTy)
+	}
+	res, err := e.emitGeneratorReturnByValue(gen, genTy, rv, false, ast.Pos{})
+	if err != nil || genTy.GeneratorIsAsync || e.blockDone {
+		return res, err
+	}
+	return e.emitUserGenResult(gen, genTy, res), nil
+}
+
+func (e *Emitter) genDynThrow(gen string, genTy Type) (Value, error) {
+	errPtr, err := e.thrownCellOf(e.dynThunkArg(0))
+	if err != nil {
+		return Value{}, err
+	}
+	res, err := e.emitGeneratorThrowByValue(gen, genTy, errPtr, ast.Pos{})
+	if err != nil || genTy.GeneratorIsAsync || e.blockDone {
+		return res, err
+	}
+	return e.emitUserGenResult(gen, genTy, res), nil
+}
+
 // generatorMethodRecord is the dynamic-function record for method m of
 // generators of type genTy.
 func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
+	// One record per layout, which every Generator<T> shares: it passes
+	// the yield slot's box through, whatever T a caller saw.
+	genTy = GeneratorType(TypeAny, genTy.GeneratorIsAsync)
 	id := e.objHeaderWord(genTy) & kmlHdrIDMask
 	key := fmt.Sprintf("gen%d.%s", id, m)
 	if e.shapeMethodRecs == nil {
@@ -917,74 +1052,22 @@ func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
 		arity = n
 	}
 	e.registerFnMeta(fn, m, arity, fnKindPlain)
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 
 	restore := e.beginDetachedFunc()
-	pos := ast.Pos{}
 	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 	gen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", gen, pay))
-	elemTy := TypeAny
-	if genTy.GeneratorElemType != nil {
-		elemTy = *genTy.GeneratorElemType
-	}
-	arg := func() Value {
-		have := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, 0", have))
-		w := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %%argv, align 8", w))
-		word := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, w, nbUndefined))
-		if elemTy.IsDynamic() {
-			return Value{Ref: word, Ty: elemTy}
-		}
-		return e.unboxArgToParam(word, elemTy)
-	}
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, gen, pay))
 	var res Value
 	var err error
-	switch m {
-	case "next":
-		// The sent value is the `yield` expression's (TNext), passed boxed.
-		e.ensureGeneratorRuntime()
-		have := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, 0", have))
-		w := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %%argv, align 8", w))
-		word := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, w, nbUndefined))
-		sent := Value{Ref: word, Ty: TypeAny}
-		if genTy.GeneratorIsAsync {
-			res = e.emitAsyncGeneratorNextCore(gen, genTy, sent)
-		} else {
-			res = e.emitSyncGeneratorNextCore(gen, genTy, sent)
-		}
-	case "return":
-		res, err = e.emitGeneratorReturnByValue(gen, genTy, arg(), pos)
-	case "throw":
-		have := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, 0", have))
-		w := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %%argv, align 8", w))
-		word := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, w, nbUndefined))
-		var errPtr string
-		errPtr, err = e.thrownCellOf(Value{Ref: word, Ty: TypeAny})
-		if err == nil {
-			res, err = e.emitGeneratorThrowByValue(gen, genTy, errPtr, pos)
-		}
-	default:
-		if _, helper := iteratorHelperArity[m]; helper {
-			res, err = e.emitIteratorHelperCall(m)
-			break
-		}
-		e.emitTerminator("ret i64 %this")
-	}
-	// A sync step's result as a program reads it: value undefined once done
-	// without a return value.
-	if !e.blockDone && err == nil && !genTy.GeneratorIsAsync && (m == "next" || m == "return" || m == "throw") {
-		res = e.emitUserGenResult(gen, genTy, res)
+	if in, ok := intrinsics["Generator.prototype."+m]; ok && in.dyn != nil {
+		res, err = in.dyn(e, gen, genTy)
+	} else if _, helper := iteratorHelperArity[m]; helper {
+		res, err = e.emitIteratorHelperCall(m)
+	} else {
+		e.emitTerminator("ret i64 %this") // [Symbol.iterator]: itself
 	}
 	if !e.blockDone {
 		if err != nil {
@@ -997,7 +1080,7 @@ func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
 	}
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%env, i64 %%this, i64 %%argc, ptr %%argv)", fn), body)
+	e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%env, i64 %%this, i64 %%argc, "+irPtr+" %%argv)", fn), body)
 	return rec
 }
 
@@ -1009,7 +1092,7 @@ func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
 func (e *Emitter) emitAnyToLayout(v Value, t Type) string {
 	fn := e.anyToLayoutFn(t)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr %s(i64 %s)", r, fn, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s(i64 %s)", r, fn, v.Ref))
 	return r
 }
 
@@ -1041,7 +1124,7 @@ func (e *Emitter) anyToLayoutFn(t Type) string {
 	chkL := e.freshLabel("a2l.chk")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nullish, nilL, chkL))
 	e.emitLabel(nilL)
-	e.emitTerminator("ret ptr null")
+	e.emitTerminator("ret " + irPtr + " null")
 	e.emitLabel(chkL)
 	if isRecordView(t) {
 		// A bag is the structural value itself, read by name through the
@@ -1051,27 +1134,28 @@ func (e *Emitter) anyToLayoutFn(t Type) string {
 		bagL, nbagL := e.freshLabel("a2l.bag"), e.freshLabel("a2l.nbag")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, bagL, nbagL))
 		e.emitLabel(bagL)
-		e.emitTerminator(fmt.Sprintf("ret ptr %s", e.emitIntToPtr(payload)))
+		e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", e.emitIntToPtr(payload)))
 		e.emitLabel(nbagL)
 	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, copyL))
 	e.emitLabel(objL)
 	op := e.emitIntToPtr(payload)
 	h := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, op))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, op))
 	same := e.freshReg()
 	if isRecordView(t) {
-		// Any static object (a header with the magic): a structural type
-		// reads another layout through the checked view (TDD-00233).
+		// Any static object (a header with the magic, a host's box
+		// included): a structural type reads another layout through the
+		// checked view (TDD-00233).
 		m := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", m, h, kmlHdrMagicMask|hostTypeIDFlag))
+		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", m, h, kmlHdrMagicMask))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", same, m, kmlHdrMagic))
 	} else {
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", same, h, id))
 	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", same, sameL, copyL))
 	e.emitLabel(sameL)
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", op))
+	e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", op))
 	e.emitLabel(copyL)
 	obj := e.emitObjAlloc(t)
 	structIR := t.StructIR()
@@ -1079,7 +1163,7 @@ func (e *Emitter) anyToLayoutFn(t Type) string {
 		fv, _ := e.emitAnyMemberOrUndefined(v, f.Name)
 		idx, fty, _ := t.FieldIndex(f.Name)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, structIR, obj, idx))
 		var cv Value
 		switch {
 		case fty.IsDynamic():
@@ -1103,7 +1187,7 @@ func (e *Emitter) anyToLayoutFn(t Type) string {
 			if has, err := e.emitDynAnyHas(v, e.internString(f.Name), true, ast.Pos{}); err == nil {
 				wg := e.presenceWordGep(obj, t)
 				w, z, sh, n := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, wg))
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, wg))
 				hr := has.Ref
 				if t.absentMask()>>uint(bit)&1 != 0 {
 					hr = e.freshReg() // a required field's bit marks its absence
@@ -1118,10 +1202,10 @@ func (e *Emitter) anyToLayoutFn(t Type) string {
 			e.emitLabel(nextL)
 		}
 	}
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", obj))
+	e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", obj))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal ptr %s(i64 %%v)", fn), body)
+	e.writeFunc(fmt.Sprintf("internal "+irPtr+" %s(i64 %%v)", fn), body)
 	return fn
 }
 
@@ -1154,6 +1238,54 @@ func (e *Emitter) arrayValuesRecord() string {
 	return e.arrayIterMethodRecord("values")
 }
 
+// arrayIterDynNext is ArrayIterator.prototype.next on an iterator held
+// boxed (self, an arrayIterType): the next index of the array-like it
+// walks, read through its dynamic members.
+func (e *Emitter) arrayIterDynNext(self string, itTy Type) (Value, error) {
+	e.ensureNanBox()
+	pay := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, self))
+	it := e.emitIntToPtr(pay)
+	ap := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", ap, itTy.StructIR(), it))
+	arr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", arr, ap))
+	ip := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", ip, itTy.StructIR(), it))
+	idx := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idx, ip))
+	lv, _ := e.emitDynAnyMemberGetNamed(Value{Ref: arr, Ty: TypeAny}, e.internString("length"), "length", ast.Pos{})
+	n := e.convert(Value{Ref: e.emitAnyToNum(lv), Ty: TypeF64}, TypeI64)
+	more := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, idx, n.Ref))
+	resTy := iterResultType()
+	res := e.emitObjAlloc(resTy)
+	vp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", vp, resTy.StructIR(), res))
+	dp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", dp, resTy.StructIR(), res))
+	haveL, endL := e.freshLabel("arriter.have"), e.freshLabel("arriter.end")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, haveL, endL))
+	e.emitLabel(haveL)
+	k := e.emitStringScratch(24)
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", k, e.internString("%lld"), idx))
+	e.emitStringFinalizeLen(k)
+	ev, _ := e.emitDynAnyMemberGet(Value{Ref: arr, Ty: TypeAny}, k, ast.Pos{})
+	e.heapStore("i64", ev.Ref, vp, 8)
+	e.heapStore("i1", "false", dp, 1)
+	ni := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", ni, idx))
+	e.heapStore("i64", ni, ip, 8)
+	doneL := e.freshLabel("arriter.done")
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(endL)
+	e.heapStore("i64", fmt.Sprint(nbUndefined), vp, 8)
+	e.heapStore("i1", "true", dp, 1)
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	return e.emitBoxValue(Value{Ref: res, Ty: resTy})
+}
+
 // arrayIterMethodRecord builds the dynamic-function records of the array
 // iterator protocol: "values" (on the array: a fresh iterator), "next" /
 // "@@iterator" (on the iterator), and "hostValues" (an iterable host box's
@@ -1175,7 +1307,7 @@ func (e *Emitter) arrayIterMethodRecord(m string) string {
 	}
 	arity := iteratorHelperArity[m]
 	e.registerFnMeta(fn, name, arity, fnKindPlain)
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 	restore := e.beginDetachedFunc()
 	itTy := arrayIterType()
 	if _, helper := iteratorHelperArity[m]; helper {
@@ -1185,11 +1317,35 @@ func (e *Emitter) arrayIterMethodRecord(m string) string {
 			e.emitTerminator(fmt.Sprintf("ret i64 %s", res.Ref))
 		}
 	}
-	switch m {
-	case "values", "hostValues", "stringValues":
-		src := "%this"
-		if m == "values" {
-			// CreateArrayIterator(ToObject(this)).
+	if body, ok := arrayIterRecords[m]; ok {
+		body(e, itTy)
+	}
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%env, i64 %%this, i64 %%argc, "+irPtr+" %%argv)", fn), body)
+	return rec
+}
+
+// arrayIterRecords are the bodies of the Array Iterator methods read off a
+// boxed receiver (arrayIterMethodRecord), each ending in its return.
+var arrayIterRecords map[string]func(e *Emitter, itTy Type)
+
+func init() {
+	// iter is CreateArrayIterator over the box src makes from %this.
+	iter := func(src func(e *Emitter) string) func(e *Emitter, itTy Type) {
+		return func(e *Emitter, itTy Type) {
+			v := src(e)
+			obj := e.emitObjAlloc(itTy)
+			a := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", a, itTy.StructIR(), obj))
+			e.heapStore("i64", v, a, 8)
+			bv, _ := e.emitBoxValue(Value{Ref: obj, Ty: itTy})
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", bv.Ref))
+		}
+	}
+	arrayIterRecords = map[string]func(e *Emitter, itTy Type){
+		// CreateArrayIterator(ToObject(this)).
+		"values": iter(func(e *Emitter) string {
 			tag, _ := e.emitUnboxTagPayload(Value{Ref: "%this", Ty: TypeAny})
 			isNull, isUndef, nullish := e.freshReg(), e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
@@ -1200,102 +1356,27 @@ func (e *Emitter) arrayIterMethodRecord(m string) string {
 			e.emitLabel(throwL)
 			e.emitThrowTypeError("Array.prototype.values called on null or undefined")
 			e.emitLabel(okL)
-		}
-		switch m {
-		case "hostValues":
-			src = e.emitHostIterValue("%this")
-		case "stringValues":
-			// A string's iterator walks its code points.
+			return "%this"
+		}),
+		"hostValues": iter(func(e *Emitter) string { return e.emitHostIterValue("%this") }),
+		// A string's iterator walks its code points.
+		"stringValues": iter(func(e *Emitter) string {
 			e.ensureNanBox()
 			pay := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 			chars := e.emitStringToCharArray(Value{Ref: e.emitIntToPtr(pay), Ty: TypePtr})
 			bv, _ := e.emitBoxValue(chars)
-			src = bv.Ref
-		}
-		obj := e.emitObjAlloc(itTy)
-		a := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", a, itTy.StructIR(), obj))
-		e.heapStore("i64", src, a, 8)
-		bv, _ := e.emitBoxValue(Value{Ref: obj, Ty: itTy})
-		e.emitTerminator(fmt.Sprintf("ret i64 %s", bv.Ref))
-	case "@@iterator":
-		e.emitTerminator("ret i64 %this")
-	case "next":
-		e.ensureNanBox()
-		e.ensureSprintf()
-		e.ensureMalloc()
-		pay := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
-		it := e.emitIntToPtr(pay)
-		ap := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", ap, itTy.StructIR(), it))
-		arr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", arr, ap))
-		ip := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", ip, itTy.StructIR(), it))
-		idx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx, ip))
-		lv, _ := e.emitDynAnyMemberGetNamed(Value{Ref: arr, Ty: TypeAny}, e.internString("length"), "length", ast.Pos{})
-		n := e.convert(Value{Ref: e.emitAnyToNum(lv), Ty: TypeF64}, TypeI64)
-		more := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, idx, n.Ref))
-		resTy := iterResultType()
-		res := e.emitObjAlloc(resTy)
-		vp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vp, resTy.StructIR(), res))
-		dp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", dp, resTy.StructIR(), res))
-		haveL, endL := e.freshLabel("arriter.have"), e.freshLabel("arriter.end")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, haveL, endL))
-		e.emitLabel(haveL)
-		k := e.freshReg()
-		e.heapMallocInto(k, "24")
-		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", k, e.internString("%lld"), idx))
-		ev, _ := e.emitDynAnyMemberGet(Value{Ref: arr, Ty: TypeAny}, k, ast.Pos{})
-		e.heapStore("i64", ev.Ref, vp, 8)
-		e.heapStore("i1", "false", dp, 1)
-		ni := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", ni, idx))
-		e.heapStore("i64", ni, ip, 8)
-		b1, _ := e.emitBoxValue(Value{Ref: res, Ty: resTy})
-		e.emitTerminator(fmt.Sprintf("ret i64 %s", b1.Ref))
-		e.emitLabel(endL)
-		e.heapStore("i64", fmt.Sprint(nbUndefined), vp, 8)
-		e.heapStore("i1", "true", dp, 1)
-		b2, _ := e.emitBoxValue(Value{Ref: res, Ty: resTy})
-		e.emitTerminator(fmt.Sprintf("ret i64 %s", b2.Ref))
+			return bv.Ref
+		}),
+		"@@iterator": func(e *Emitter, _ Type) { e.emitTerminator("ret i64 %this") },
+		"next": func(e *Emitter, itTy Type) {
+			if v, err := intrinsics["ArrayIterator.prototype.next"].dyn(e, "%this", itTy); err != nil {
+				e.emitThrowTypeError("the iterator method 'next' can't be called through a dynamic value")
+			} else {
+				e.emitTerminator(fmt.Sprintf("ret i64 %s", v.Ref))
+			}
+		},
 	}
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%env, i64 %%this, i64 %%argc, ptr %%argv)", fn), body)
-	return rec
-}
-
-// ensureShapeSpread emits @__kml_shape_spread(bag, obj): copy a static
-// object's own enumerable fields into a dynamic object (`{ ...o }` where o is
-// a boxed static object). No-op for an object with no shape.
-func (e *Emitter) ensureShapeSpread() {
-	if e.usedShapeSpread {
-		return
-	}
-	e.usedShapeSpread = true
-	e.ensureShapeRuntime()
-	e.ensureDynObj()
-	e.emitGlobal("declare void @__kml_shape_spread(ptr, ptr)")
-}
-
-// ensureShapeDesc declares @__kml_shape_own_desc(obj, key): a boxed static
-// object's own-property descriptor, or undefined.
-func (e *Emitter) ensureShapeDesc() {
-	if e.usedShapeDesc {
-		return
-	}
-	e.usedShapeDesc = true
-	e.ensureShapeRuntime()
-	e.ensureDynObj()
-	e.usedCollections = true // the integrity level (collections.c)
-	e.emitGlobal("declare i64 @__kml_shape_own_desc(ptr, ptr)")
 }
 
 // emitBoxFits is an i1: whether the boxed word holds a value of the scalar
@@ -1380,7 +1461,7 @@ func (e *Emitter) emitIteratorHelperCall(m string) (Value, error) {
 	bind := func(name, word string) ast.Expression {
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", word, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", word, slot))
 		e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
 		return ast.NewIdentifier(name, ast.Pos{})
 	}
@@ -1388,11 +1469,11 @@ func (e *Emitter) emitIteratorHelperCall(m string) (Value, error) {
 		have := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", gep, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", gep, i))
 		safe := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %%argv", safe, have, gep))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %%argv", safe, have, gep))
 		w := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, safe))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, safe))
 		word := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, w, nbUndefined))
 		return word
@@ -1433,12 +1514,12 @@ func (e *Emitter) emitIteratorHelperCall(m string) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, out))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, out))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	}
 	e.emitLabel(joinL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, out))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, out))
 	return Value{Ref: r, Ty: TypeAny}, nil
 }
 
@@ -1462,20 +1543,20 @@ func (e *Emitter) promiseSubclassMethodRecord(class *ClassInfo, t Type, m string
 		arity = 1
 	}
 	e.registerFnMeta(fn, m, arity, fnKindPlain)
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 	restore := e.beginDetachedFunc()
 	pos := ast.Pos{}
 	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 	self := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", self, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, self, pay))
 	var args []ast.Expression
 	for i := 0; i < arity; i++ {
 		have, slotp, loaded, word := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", slotp, i))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loaded, slotp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", slotp, i))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loaded, slotp))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
 		args = append(args, e.bindValue(Value{Ref: word, Ty: TypeAny}, pos))
 	}
@@ -1548,19 +1629,19 @@ func (e *Emitter) arraySubclassMethodRecord(class *ClassInfo, t Type, m string) 
 	e.shapeMethodRecs[key] = rec
 	ar := arraySpeciesArity[m]
 	e.registerFnMeta(fn, m, ar.length, fnKindPlain)
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, ar.length))
+	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, ar.length), fn)
 	restore := e.beginDetachedFunc()
 	pos := ast.Pos{}
 	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 	self := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", self, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, self, pay))
 	arg := func(i int) ast.Expression {
 		have, slotp, loaded, word := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", slotp, i))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loaded, slotp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", slotp, i))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loaded, slotp))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
 		return e.bindValue(Value{Ref: word, Ty: TypeAny}, pos)
 	}
@@ -1676,13 +1757,15 @@ func (e *Emitter) emitForeignReceiverCall(class *ClassInfo, m string) bool {
 	if n := len(own); n > 0 && own[n-1].Rest && own[n-1].Name == argumentsRestParam {
 		own = own[:n-1]
 	}
-	params := append([]ast.Param{{Name: "this", Type: &ast.TypeAnnotation{Name: "any", Source: "ts"}}}, own...)
+	params := append([]ast.Param{{Name: "this", Type: ast.AnyAnnotation("ts")}}, own...)
 
 	fe := &ast.FunctionExpression{Params: params, RetType: decl.ReturnType, Body: decl.Body, IsGenerator: decl.IsGenerator, IsAsync: decl.IsAsync}
 	fe.Src = decl.Src
-	e.foreignThisBody, e.foreignClass = true, class
-	fn, err := e.emitFunctionExpression(fe, nil)
-	e.foreignThisBody, e.foreignClass = false, nil
+	e.foreignThisBody, e.foreignClass, e.foreignBody = true, class, fe
+	var fn Value
+	var err error
+	e.withTypeParamScope(class.TypeSubs, func() { fn, err = e.emitFunctionExpression(fe, nil) })
+	e.foreignThisBody, e.foreignClass, e.foreignBody = false, nil, nil
 	if err != nil || !(fn.Ty.IsFunc() || fn.Ty.IsDynamic() && decl.IsGenerator) {
 		undo()
 		return false
@@ -1695,7 +1778,7 @@ func (e *Emitter) emitForeignReceiverCall(class *ClassInfo, m string) bool {
 			e.emitInstr(fmt.Sprintf("%s = sub i64 %%argc, %d", n, i))
 			e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", pos0, n))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", nn, pos0, n))
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", from, i))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", from, i))
 			data := e.emitArrayCopy(from, nn, TypeAny)
 			rest := Value{Ref: e.newArrayHeader(data, nn), Ty: ArrayOf(TypeAny)}
 			args = append(args, ast.NewSpreadElement(e.bindValue(rest, pos), pos))
@@ -1703,8 +1786,8 @@ func (e *Emitter) emitForeignReceiverCall(class *ClassInfo, m string) bool {
 		}
 		have, slotp, loaded, word := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", slotp, i))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loaded, slotp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", slotp, i))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loaded, slotp))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
 		args = append(args, e.bindValue(Value{Ref: word, Ty: TypeAny}, pos))
 	}
@@ -1736,14 +1819,14 @@ func (e *Emitter) emitForeignReceiverCall(class *ClassInfo, m string) bool {
 // write stores the field: a value of another kind written through `any`
 // earlier must not go on hiding it. The hook is null until a shadow exists.
 func (e *Emitter) emitUnshadow(obj, key string) {
-	e.declareFn("__kml_unshadow_hook", "@__kml_unshadow_hook = weak global ptr null, align 8")
+	e.declareFn("__kml_unshadow_hook", "@__kml_unshadow_hook = weak"+irGlobalAS+" global "+irPtr+" null, align 8")
 	fp, has := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_unshadow_hook, align 8", fp))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, fp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_unshadow_hook, align 8", fp))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, fp))
 	callL, joinL := e.freshLabel("unshadow"), e.freshLabel("unshadow.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, callL, joinL))
 	e.emitLabel(callL)
-	e.emitInstr(fmt.Sprintf("call void %s(ptr %s, ptr %s)", fp, obj, e.internString(key)))
+	e.emitInstr(fmt.Sprintf("call void %s("+irPtr+" %s, "+irPtr+" %s)", fp, obj, e.internString(key)))
 	e.emitTerminator("br label %" + joinL)
 	e.emitLabel(joinL)
 }
@@ -1793,7 +1876,7 @@ func (e *Emitter) emitForeignPrivate(ex ast.Expression) (v Value, handled bool, 
 		if isMember(name) {
 			return "Receiver must be an instance of class " + e.classDisplayName(class.Ty.ClassName)
 		}
-		return "Cannot read private member " + name + " from an object whose class did not declare it"
+		return "Cannot read private member " + ast.PrivateDisplay(name) + " from an object whose class did not declare it"
 	}
 	throw := func(msg string) (Value, bool, error) {
 		e.emitThrowTypeError(msg)
@@ -1824,7 +1907,7 @@ func (e *Emitter) emitForeignPrivate(ex ast.Expression) (v Value, handled bool, 
 			if isMember(name) {
 				return throw("Receiver must be an instance of class " + e.classDisplayName(class.Ty.ClassName))
 			}
-			return throw("Cannot write private member " + name + " to an object whose class did not declare it")
+			return throw("Cannot write private member " + ast.PrivateDisplay(name) + " to an object whose class did not declare it")
 		}
 	}
 	return Value{}, false, nil

@@ -37,6 +37,22 @@ function relative(i: number, size: number): number {
     return n < 0 ? Math.max(size + n, 0) : Math.min(n, size);
 }
 
+// The object URLs' store (Node's blob binding storeDataObject /
+// getDataObject / revokeObjectURL): each id's Blob.
+const dataObjects = new Map<string, Blob>();
+
+export function _kmlStoreDataObject(id: string, blob: Blob): void {
+    dataObjects.set(id, blob);
+}
+
+export function _kmlGetDataObject(id: string): Blob | undefined {
+    return dataObjects.get(id);
+}
+
+export function _kmlRevokeDataObject(id: string): void {
+    dataObjects.delete(id);
+}
+
 export class Blob {
     #parts: Uint8Array[];
     #size: number;
@@ -132,5 +148,39 @@ export class Blob {
 
     get [Symbol.toStringTag](): string {
         return 'Blob';
+    }
+}
+
+// File — a global — as Node has it (lib/internal/file.js): a Blob with a
+// name and a last-modified time, which FormData makes of a Blob entry.
+export class File extends Blob {
+    #name: string;
+    #lastModified: number;
+
+    constructor(fileBits: any, fileName: any, options: any = {}) {
+        if (arguments.length < 2) {
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "fileBits" and "fileName" arguments must be specified');
+        }
+        super(fileBits, options);
+        this.#name = String(fileName);
+        const lm = options === null || options === undefined ? undefined : options.lastModified;
+        this.#lastModified = lm === undefined ? Date.now() : Number(lm);
+    }
+
+    get name(): string {
+        return this.#name;
+    }
+
+    get lastModified(): number {
+        return this.#lastModified;
+    }
+
+    [inspect.custom](depth: number, options: any): string {
+        if (depth < 0) return '[File]';
+        return 'File ' + inspect({ size: this.size, type: this.type, name: this.#name, lastModified: this.#lastModified }, options);
+    }
+
+    get [Symbol.toStringTag](): string {
+        return 'File';
     }
 }

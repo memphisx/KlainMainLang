@@ -5,19 +5,25 @@ import (
 	"testing"
 
 	"KlainMainLang/codegen/llvm"
+	"KlainMainLang/options"
 	"KlainMainLang/parser"
+	"KlainMainLang/resolver"
 )
 
 // TDD-00209: --no-any bans the any/unknown escape hatch (strict lane only).
-// These compile with SetNoAny(true) and assert the outcome.
+// These check and compile with NoAny set and assert the outcome.
 
 func compileNoAny(src string) error {
 	prog, err := parser.Parse(src)
 	if err != nil {
 		return err
 	}
+	opts := options.Options{NoAny: true}
+	if err := resolver.TypeCheck(prog, nil, nil, opts, !resolver.IsModule(prog)); err != nil {
+		return err
+	}
 	em := llvm.NewEmitter()
-	em.SetNoAny(true)
+	em.SetOptions(opts)
 	_, err = em.EmitProgram(prog)
 	return err
 }
@@ -29,7 +35,7 @@ func mustNoAnyReject(t *testing.T, src string) {
 		t.Fatalf("expected --no-any to reject, but it compiled:\n%s", src)
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "banned") && !strings.Contains(msg, "a ptr") && !strings.Contains(msg, "inferred as 'any'") {
+	if !strings.Contains(msg, "banned under --no-any") && !strings.Contains(msg, "inferred as 'any' under --no-any") {
 		t.Fatalf("expected a --no-any / cross-type rejection, got: %v", err)
 	}
 }

@@ -4,8 +4,8 @@
   "kind": "language",
   "statusPage": "REGEXP.md",
   "coversRows": "all",
-  "coverage": { "loose": "14/15", "loosePct": 93, "strict": "14/15", "strictPct": 93 },
-  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; `exec` results carry `index`, `input` and `groups`, and so does each step of `matchAll`'s iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, and the `u`/`d` flags are out of scope for V1 (`y`/sticky is implemented).",
+  "coverage": { "loose": "15/16", "loosePct": 94, "strict": "14/16", "strictPct": 88 },
+  "lede": "PCRE2 under the hood, but aligned to the ECMAScript dialect by default so the everyday edge cases (`$` at the true end, an unset backreference matching empty, `\\uXXXX` escapes) behave as real JS does. The recurring divergences are structural: strings are byte-indexed, so match offsets are byte positions unless you opt into `-regex=es-utf16`; `exec` results carry `index`, `input` and `groups`, and so does each step of `matchAll`'s iterator. The whole-program `-regex=<mode>` flag trades fidelity for speed across five modes, the `u` flag matches by code point, and the `d` flag's `.indices` is still missing.",
   "entries": [
     {
       "id": "regexp.construction",
@@ -209,14 +209,29 @@
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/sticky" }
     },
     {
-      "id": "regexp.ud",
-      "name": "u / d flags",
-      "statusRow": "u / d flags",
-      "signature": "// not supported",
-      "badge": "missing",
-      "description": "The u (unicode) and d (indices) flags are deferred for the whole feature's V1. \\u{…} code-point escapes, surrogate handling, Unicode \\p{…}/class semantics, and strict-syntax validation are a later option.",
+      "id": "regexp.u",
+      "name": "u flag",
+      "statusRow": "`u` flag — `.unicode`, code-point matching, `\\u{…}` and `\\p{…}`",
+      "signature": "/\\u{1F600}|\\p{L}+/u",
+      "badge": "caveats",
+      "description": "Matches by code point: \\u{…} and a surrogate-pair escape name one code point, in a class too, \\p{…}/\\P{…} name Unicode properties, and .unicode reads the flag. An escape the u grammar has no production for (\\-, \\a, \\x4) and a class range with a class escape at either end ([\\d-a]) throw a SyntaxError with V8's message.",
+      "snippet": "console.log(/\\u{1F600}/u.test(\"a😀b\"), \"héllo wörld\".match(/\\p{L}+/gu));",
+      "differences": [
+        "\\w and \\b under iu stay ASCII: /\\w/iu.test('ſ') is false, true in V8.",
+        "An escaped lone surrogate (\\uD83D, \\u{D83D}) matches nothing."
+      ],
       "seeAlso": ["regexp.construction", "regexp.boolFlags", "regexp.sticky"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/unicode" }
+    },
+    {
+      "id": "regexp.d",
+      "name": "d flag",
+      "statusRow": "`d` flag — `.hasIndices`, a match's `.indices`",
+      "signature": "// not supported",
+      "badge": "missing",
+      "description": ".hasIndices reads the flag; a match result has no .indices yet.",
+      "seeAlso": ["regexp.u", "regexp.sticky"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp/hasIndices" }
     }
   ]
 }

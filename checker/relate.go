@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"KlainMainLang/ast"
 	"KlainMainLang/binder"
 )
 
@@ -36,6 +37,11 @@ type relation struct {
 	// Check leaves both maybe: TypeScript reports them as TS2741 and TS2559,
 	// not TS2322.
 	missingIsNo bool
+	// bivariant relates a signature's parameters both ways: the target is
+	// a method (tsc's strictFunctionTypes exempts method and constructor
+	// declarations). It holds for that one signature, not its parameters'
+	// own types.
+	bivariant bool
 }
 
 // assignableTo is TypeScript's assignability of s to t, under --strict, for
@@ -72,10 +78,27 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 		c.relMemo = map[relKey]ternary{}
 		c.relActive = map[relKey]bool{}
 	}
+	// A generic type reached again inside its own expansion (`Foo<T>`
+	// holding `Foo<(arg: T) => void>`): tsc relates such a reference by the
+	// variance it is still measuring, which takes it as related.
+	id := recursionIdentity(s) + "|" + recursionIdentity(t)
+	if id != "|" && c.relIdent[id] > 0 {
+		c.relAssumed++
+		return maybe
+	}
+	if c.relIdent == nil {
+		c.relIdent = map[string]int{}
+	}
 	before := c.relAssumed
 	c.relActive[k] = true
+	if id != "|" {
+		c.relIdent[id]++
+	}
 	r := c.relateUncached(s, t, rel, depth)
 	delete(c.relActive, k)
+	if id != "|" {
+		c.relIdent[id]--
+	}
 	if c.relAssumed == before && depth <= 20 {
 		c.relMemo[k] = r
 	}
@@ -84,13 +107,30 @@ func (c *Checker) relate(s, t *Type, rel relation, depth int) ternary {
 
 func (c *Checker) relateUncached(s, t *Type, rel relation, depth int) ternary {
 	switch {
+	case s != nil && t != nil && s.Flags&Deferred != 0 && t.Flags&Deferred != 0 && depth <= 20:
+		return c.relateConditionals(s, t, rel, depth)
+	case s != nil && t != nil && t.Flags&Deferred != 0 && (s == t || s.Flags&Never != 0 && s.Flags&Union == 0 && !c.Unanswered(s)):
+		return yes // never goes anywhere, a deferred type to itself
+	case s != nil && t != nil && s.Flags&Deferred != 0 && t.Flags&Deferred == 0 && !c.Unanswered(t) && !hasTypeParam(t) && depth <= 20:
+		return c.relateConditionalSource(s, t, rel, depth)
 	case s == nil || t == nil || c.Unanswered(s) || c.Unanswered(t) || depth > 20,
 		s.Flags&Deferred != 0 || t.Flags&Deferred != 0:
 		return maybe
 	case s == t:
 		return yes
+	case s.Flags&TypeParam != 0 && s.narrowOf != nil && (s.narrowOf == t || t.narrowOf == s.narrowOf && c.relate(s.Constraint, t.Constraint, rel, depth+1) == yes):
+		return yes // `T & string` is a T
 	case t.Flags&(Any|Unknown) != 0, s.Flags&(Any|Never) != 0:
 		return yes
+	case s.Flags&TypeParam != 0 && t.Flags&TypeParam == 0 && s != c.thisT && !hasTypeParam(t) && !c.unionHolds(t, s):
+		// A parameter goes where its constraint goes (unknown when it has
+		// none), and only there when the target is concrete (tsc relates a
+		// type parameter by its constraint).
+		k := s.Constraint
+		if k == nil {
+			k = c.unknownT
+		}
+		return c.relate(k, t, rel, depth+1)
 	case s.Flags&TypeParam != 0 && s.Constraint != nil && t.Flags&TypeParam == 0:
 		// A constrained parameter goes where its constraint goes.
 		if c.relate(s.Constraint, t, rel, depth+1) == yes {
@@ -109,6 +149,12 @@ func (c *Checker) relateUncached(s, t *Type, rel relation, depth int) ternary {
 		// A branded primitive takes only a value carrying its brand: the
 		// intersection's every member must hold.
 		if s.Brand == nil {
+			if c.weakType(t.Brand) && s.Flags&(Nullish|Object) == 0 {
+				// A brand of only optional members holds of any value of
+				// the base (an intersection's member skips the weak type
+				// check): `"x"` is a `string & { tag?: T }`.
+				return c.relate(s, t.BrandBase, rel, depth+1)
+			}
 			return no // a plain primitive lacks the brand; an object is no primitive
 		}
 		return all(c.relate(s.BrandBase, t.BrandBase, rel, depth+1), c.relate(s.Brand, t.Brand, rel, depth+1))
@@ -403,6 +449,44 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 	}
 	switch t.Kind {
 	case Array:
+		if t.Head != nil {
+			// A rest tuple: each leading position the source must hold,
+			// then its rest, element by element.
+			out := yes
+			step := func(a, b *Type) bool {
+				r := c.relate(a, b, rel, depth+1)
+				out = all(out, r)
+				return r != no
+			}
+			switch {
+			case s.Kind == Array && s.Head != nil:
+				if len(s.Head) < len(t.Head) {
+					return no
+				}
+				for i, h := range s.Head {
+					if !step(h, t.elemAt(i)) {
+						return no
+					}
+				}
+				if !step(s.RestElem, t.RestElem) {
+					return no
+				}
+				return out
+			case s.Kind == Tuple:
+				if s.minLen() < len(t.Head) {
+					return no
+				}
+				for i, e := range s.Elems {
+					if !step(e, t.elemAt(i)) {
+						return no
+					}
+				}
+				return out
+			case s.Kind == Array, s.Kind == Function:
+				return no // an array may hold fewer elements than the head
+			}
+			return maybe
+		}
 		switch s.Kind {
 		case Array:
 			return c.relate(s.Elem, t.Elem, rel, depth+1)
@@ -452,9 +536,19 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			return out
 		case Array, Function:
 			return no
+		case Interface, Instance:
+			// As for an array target: a class or interface without
+			// `length` (a Generator, a Set), or a readonly one without
+			// `push`, is no tuple.
+			if len(s.Props) > 0 && s.Prop("length") == nil && (!s.partial || c.libLacks(s, "length")) {
+				return no
+			}
+			if len(s.Props) > 0 && s.Prop("push") == nil && s.Prop("length") != nil {
+				return no
+			}
 		case Anonymous:
-			if s.Prop("length") == nil {
-				return no // an object literal type without one is no tuple
+			if s.Prop("length") == nil || s.Prop("push") == nil {
+				return no // an object literal type without them is no tuple
 			}
 		}
 		return maybe
@@ -478,7 +572,7 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			if sp == nil || sp.Asserts || sp.Index != tp.Index {
 				return no
 			}
-			if sp.Type != nil && tp.Type != nil && c.relate(sp.Type, tp.Type, rel, depth+1) == no {
+			if sp.Type != nil && tp.Type != nil && !c.generic(tp.Type) && c.relate(sp.Type, tp.Type, rel, depth+1) == no {
 				return no
 			}
 		}
@@ -495,6 +589,16 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 				}
 			}
 			return out
+		}
+		if len(s.Overloads) == 0 && len(t.Overloads) == 0 && len(s.TypeParams) > 0 && len(s.TypeParams) == len(t.TypeParams) {
+			// Two generic signatures: the source's type parameters as the
+			// target's (tsc's compareSignaturesRelated over the target's
+			// canonical signature), then related as plain ones.
+			m := map[*Type]*Type{}
+			for i, tp := range s.TypeParams {
+				m[tp] = t.TypeParams[i]
+			}
+			return c.relate(c.plainSignature(s, m), c.plainSignature(t, nil), rel, depth+1)
 		}
 		if len(s.Overloads) > 0 || len(t.Overloads) > 0 || len(s.TypeParams) > 0 || len(t.TypeParams) > 0 {
 			return maybe
@@ -520,25 +624,28 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 			return no
 		}
 		out := yes
+		bivariant := rel.bivariant || t.method || c.bivariantArgs > 0
+		rel.bivariant = false
 		for i := range s.Params {
 			if i >= len(t.Params) {
 				break
 			}
-			// Parameters are compared both ways (strictFunctionTypes holds
-			// for function types; method parameters are bivariant).
+			// A function type's parameters are contravariant
+			// (strictFunctionTypes); a method's are compared both ways.
 			if r := c.relate(t.Params[i], s.Params[i], rel, depth+1); r != yes {
-				if c.relate(s.Params[i], t.Params[i], rel, depth+1) == no && r == no {
+				back := c.relate(s.Params[i], t.Params[i], rel, depth+1)
+				if r == no && (!bivariant || back == no) {
 					return no
 				}
 				out = all(out, maybe)
 			}
 		}
-		if t.Result.Flags&Void != 0 {
-			return out
+		if t.Ret().Flags&(Void|Any) != 0 {
+			return out // the source's result unread, as tsc's compareSignaturesRelated
 		}
-		return all(out, c.relate(s.Result, t.Result, rel, depth+1))
+		return all(out, c.relate(s.Ret(), t.Ret(), rel, depth+1))
 	case Anonymous, Interface, Instance:
-		if s.Kind == Instance && t.Kind == Instance && s.Derives(t.Symbol) {
+		if s.Kind == Instance && t.Kind == Instance && s.Derives(t.Symbol) && !t.refined {
 			return yes
 		}
 		if s.Kind == Function || s.Kind == Array || s.Kind == Tuple {
@@ -581,6 +688,22 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 				// required property it lacks is a mismatch.
 				if at := c.apparentType(s); at != nil {
 					for _, tp := range t.Props {
+						// A tuple's elements are its numeric members ("0", "1").
+						if i, err := strconv.Atoi(tp.Name); err == nil && i >= 0 && strconv.Itoa(i) == tp.Name {
+							var el *Type
+							switch {
+							case s.Kind == Tuple && i < len(s.Elems):
+								el = s.Elems[i]
+							case s.Kind == Array && i < len(s.Head):
+								el = s.Head[i]
+							}
+							if el != nil {
+								if c.relate(el, tp.Type, rel, depth+1) == no {
+									return no
+								}
+								continue
+							}
+						}
 						// Object.prototype's members are every array's too.
 						if !tp.Optional && at.Prop(tp.Name) == nil && c.objectMember(tp.Name) == nil {
 							return no
@@ -614,9 +737,15 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 		// A target's construct signature (`typeof A`) needs a source
 		// construct signature that fits it.
 		if len(t.Constructs) == 1 && len(s.Constructs) == 1 && (s.Kind == Anonymous || s.Kind == Interface) {
-			if c.relate(s.Constructs[0], t.Constructs[0], rel, depth+1) == no {
+			// A class constructor's parameters are bivariant, as a
+			// method's are (strictFunctionTypes exempts both).
+			crel := rel
+			crel.bivariant = crel.bivariant || classDeclared(t)
+			cr := c.relate(s.Constructs[0], t.Constructs[0], crel, depth+1)
+			if cr == no {
 				return no
 			}
+			r = all(r, cr) // a construct signature that only may fit: so may the value
 		}
 		return all(r, c.indexesFit(s, t, rel, depth))
 	}
@@ -677,7 +806,13 @@ func (c *Checker) indexesFit(s, t *Type, rel relation, depth int) ternary {
 			}
 			pt := p.Type
 			if p.Optional {
-				pt = c.withoutMissing(pt)
+				// tsc's getNonMissingTypeOfSymbol: without
+				// exactOptionalPropertyTypes the missing type is undefined,
+				// so an optional property's undefined is not related.
+				pt = c.NonUndefined(c.withoutMissing(pt))
+				if pt.Flags&Never != 0 {
+					continue
+				}
 			}
 			r := c.relate(pt, ti, rel, depth+1)
 			if r == no {
@@ -729,13 +864,27 @@ func (c *Checker) propsFit(s, t *Type, rel relation, depth int) ternary {
 			}
 			return maybe // a missing property: TS2741, not reported yet
 		}
-		r := c.relate(sp.Type, tp.Type, rel, depth+1)
+		prel := rel
+		prel.bivariant = methodDecl(tp)
+		r := c.relate(sp.Type, tp.Type, prel, depth+1)
 		if r == no {
 			return no
 		}
 		out = all(out, r)
 	}
 	return out
+}
+
+// methodDecl reports a member declared as a method (a method signature, a
+// class's method): its parameters are bivariant.
+func methodDecl(p *Property) bool {
+	switch d := p.Decl.(type) {
+	case *ast.MethodSignature:
+		return true
+	case *ast.FunctionDeclaration:
+		return d.AccessorKind == "" && !p.Field
+	}
+	return false
 }
 
 // objectMember is the member of the Object interface named name that every
@@ -893,10 +1042,10 @@ func (c *Checker) relateRestSignatures(s, t *Type, rel relation, depth int) tern
 			out = all(out, maybe)
 		}
 	}
-	if t.Result.Flags&Void != 0 {
-		return out
+	if t.Ret().Flags&(Void|Any) != 0 {
+		return out // the source's result unread, as tsc's compareSignaturesRelated
 	}
-	return all(out, c.relate(s.Result, t.Result, rel, depth+1))
+	return all(out, c.relate(s.Ret(), t.Ret(), rel, depth+1))
 }
 
 // unionHasArray reports whether a union has an array or tuple member.
@@ -926,4 +1075,239 @@ func widenedAgainstLiterals(el, t *Type) bool {
 		}
 	}
 	return false
+}
+
+// recursionIdentity is what a generic type's instantiations share: an
+// interface's symbol, or an anonymous object type's member names (an
+// alias's expansion); empty for any other type.
+func recursionIdentity(t *Type) string {
+	switch {
+	case t.Kind == Interface && t.Symbol != nil && len(t.TypeArgs) > 0:
+		return "S" + strconv.Itoa(t.Symbol.ID)
+	case t.Kind == Anonymous && len(t.Props) > 0 && t.ClassOf == nil:
+		names := make([]string, len(t.Props))
+		for i, p := range t.Props {
+			names[i] = p.Name
+		}
+		return "A" + strings.Join(names, ",")
+	}
+	return ""
+}
+
+// classDeclared reports a class's value type (`typeof A`), whose
+// construct signature a constructor declaration declares.
+func classDeclared(t *Type) bool { return t.ClassOf != nil }
+
+// plainSignature is generic signature sig with m applied and no type
+// parameters of its own.
+func (c *Checker) plainSignature(sig *Type, m map[*Type]*Type) *Type {
+	params := make([]*Type, len(sig.Params))
+	for i, p := range sig.Params {
+		params[i] = c.instantiate(p, m)
+	}
+	var pred *Predicate
+	if sig.Predicate != nil {
+		pc := *sig.Predicate
+		if pc.Type != nil {
+			pc.Type = c.instantiate(pc.Type, m)
+		}
+		pred = &pc
+	}
+	return c.in.function(params, sig.optionals, sig.restParam, c.instantiate(sig.Ret(), m), pred, nil)
+}
+
+// relateConditionals relates two deferred conditional types as tsc does:
+// `S1 extends U1 ? X1 : Y1` to `S2 extends U2 ? X2 : Y2` when one check type
+// relates to the other, U1 and U2 are identical (interned alike), and the
+// branches relate; maybe for any other deferred pair.
+func (c *Checker) relateConditionals(s, t *Type, rel relation, depth int) ternary {
+	sn, ok1 := s.deferNode.(*ast.ConditionalType)
+	tn, ok2 := t.deferNode.(*ast.ConditionalType)
+	if !ok1 || !ok2 {
+		return maybe
+	}
+	if hasInferNode(sn.ExtendsType) || hasInferNode(tn.ExtendsType) {
+		return maybe
+	}
+	sc, se, sx, sy := c.deferredPart(s, sn.CheckType), c.deferredPart(s, sn.ExtendsType), c.deferredPart(s, sn.TrueType), c.deferredPart(s, sn.FalseType)
+	tc, te, tx, ty := c.deferredPart(t, tn.CheckType), c.deferredPart(t, tn.ExtendsType), c.deferredPart(t, tn.TrueType), c.deferredPart(t, tn.FalseType)
+	for _, x := range []*Type{sc, se, sx, sy, tc, te, tx, ty} {
+		if c.Unanswered(x) {
+			return maybe
+		}
+	}
+	// Both branches going to the target take the conditional there (tsc's
+	// default constraint of a source conditional).
+	if c.relate(sx, t, rel, depth+1) == yes && c.relate(sy, t, rel, depth+1) == yes {
+		return yes
+	}
+	if se != te {
+		if c.generic(se) || c.generic(te) {
+			return maybe
+		}
+		return no
+	}
+	if sc != tc && c.relate(sc, tc, rel, depth+1) != yes && c.relate(tc, sc, rel, depth+1) != yes {
+		return maybe
+	}
+	return all(c.relate(sx, tx, rel, depth+1), c.relate(sy, ty, rel, depth+1))
+}
+
+// deferredPart types part, a node inside deferred type t's own, with t's
+// bindings.
+func (c *Checker) deferredPart(t *Type, part ast.TypeNode) *Type {
+	savedEnv, savedSubsts := c.env, c.substs
+	c.env, c.substs = []map[string]*Type{t.deferEnv}, []map[*Type]*Type{t.deferSubst}
+	r := c.typeFromNode(part, t.deferScope)
+	c.env, c.substs = savedEnv, savedSubsts
+	return r
+}
+
+// hasInferNode reports an `infer` declaration in n.
+func hasInferNode(n ast.TypeNode) bool {
+	found := false
+	collectInfers(n, func(*ast.InferType) { found = true })
+	return found
+}
+
+// unionHolds reports whether union t has m itself as a member.
+func (c *Checker) unionHolds(t, m *Type) bool {
+	if t.Flags&Union == 0 {
+		return false
+	}
+	for _, x := range t.Types {
+		if x == m {
+			return true
+		}
+	}
+	return false
+}
+
+// relateConditionalSource relates a deferred conditional source to a
+// concrete target through its branches (tsc's default constraint of a
+// conditional type, the union of its branches), when neither branch
+// mentions a type parameter; otherwise maybe.
+func (c *Checker) relateConditionalSource(s, t *Type, rel relation, depth int) ternary {
+	sn, ok := s.deferNode.(*ast.ConditionalType)
+	if !ok || hasInferNode(sn.ExtendsType) {
+		if _, isCond := s.deferNode.(*ast.ConditionalType); !isCond {
+			if b := c.baseConstraint(s, 0); b != nil {
+				return c.relate(b, t, rel, depth+1)
+			}
+		}
+		return maybe
+	}
+	if d := c.distributiveConstraint(s, sn); d != nil && c.relate(d, t, rel, depth+1) == yes {
+		// (tsc relates it first, then falls back to the branches)
+		return yes
+	}
+	x, y := c.deferredPart(s, sn.TrueType), c.deferredPart(s, sn.FalseType)
+	if c.Unanswered(x) || c.Unanswered(y) || hasTypeParam(x) || hasTypeParam(y) || x.Flags&Deferred != 0 || y.Flags&Deferred != 0 {
+		// A generic source goes where its constraint goes (tsc's
+		// getBaseConstraintOfType).
+		if b := c.baseConstraint(s, 0); b != nil {
+			return c.relate(b, t, rel, depth+1)
+		}
+		return maybe
+	}
+	return c.relate(c.in.union(x, y), t, rel, depth+1)
+}
+
+// distributiveConstraint is distributive conditional t of its check
+// type's constraint (`IsArray<T>`, `T extends unknown[]`, is at most
+// `true`) when that is concrete: tsc's
+// getConstraintOfDistributiveConditionalType. Nil otherwise.
+func (c *Checker) distributiveConstraint(t *Type, n *ast.ConditionalType) *Type {
+	if _, naked := n.CheckType.(*ast.TypeReference); !naked {
+		return nil
+	}
+	ct := c.deferredPart(t, n.CheckType)
+	if ct.Flags&TypeParam == 0 || ct.Flags&Union != 0 || ct.Constraint == nil || c.Unanswered(ct.Constraint) || c.generic(ct.Constraint) {
+		return nil
+	}
+	if r := c.instantiate(t, map[*Type]*Type{ct: ct.Constraint}); r != nil && !c.Unanswered(r) && !c.generic(r) {
+		return r
+	}
+	return nil
+}
+
+// baseConstraint is the concrete type generic t is at most: a type
+// parameter's constraint (unknown without one), `keyof` any type's
+// `string | number | symbol`, a conditional's branches' (its check type's in
+// the true branch narrowed to the extends type), an unconstrained object's
+// indexed access unknown. Nil when not known so.
+func (c *Checker) baseConstraint(t *Type, depth int) *Type {
+	if depth > 8 || t == nil || c.Unanswered(t) {
+		return nil
+	}
+	if !c.generic(t) {
+		return t
+	}
+	switch {
+	case t.Flags&Union != 0:
+		var ms []*Type
+		for _, m := range t.Types {
+			b := c.baseConstraint(m, depth+1)
+			if b == nil {
+				return nil
+			}
+			ms = append(ms, b)
+		}
+		return c.in.union(ms...)
+	case t.Flags&TypeParam != 0:
+		if t == c.thisT {
+			return nil
+		}
+		if t.Constraint == nil {
+			return c.unknownT
+		}
+		return c.baseConstraint(t.Constraint, depth+1)
+	case t.Flags&Deferred == 0:
+		return nil
+	}
+	switch n := t.deferNode.(type) {
+	case *ast.TypeOperator:
+		if n.Operator == "keyof" {
+			return c.in.union(c.strT, c.numT, c.symT)
+		}
+	case *ast.TupleType:
+		// A variadic tuple (`[...A, L]`): an array, whatever is spread in.
+		return c.in.array(c.unknownT)
+	case *ast.IndexedAccessType:
+		if o := c.deferredPart(t, n.ObjectType); o.Flags&TypeParam != 0 && o.Constraint == nil && o != c.thisT {
+			return c.unknownT
+		}
+	case *ast.ConditionalType:
+		if r := c.distributiveConstraint(t, n); r != nil {
+			return r
+		}
+		if hasInferNode(n.ExtendsType) {
+			return nil
+		}
+		x := c.baseConstraint(c.deferredPart(t, n.TrueType), depth+1)
+		y := c.baseConstraint(c.deferredPart(t, n.FalseType), depth+1)
+		if x == nil || y == nil {
+			return nil
+		}
+		if ct, tt := c.deferredPart(t, n.CheckType), c.deferredPart(t, n.TrueType); ct == tt {
+			// `T extends U ? T : …`: what of T's constraint is a U.
+			u := c.deferredPart(t, n.ExtendsType)
+			if c.Unanswered(u) || c.generic(u) {
+				return nil
+			}
+			var kept []*Type
+			for _, m := range members(x) {
+				if c.assignableTo(m, u) == yes {
+					kept = append(kept, m)
+				}
+			}
+			if len(kept) == 0 {
+				x = c.neverT
+			} else {
+				x = c.in.union(kept...)
+			}
+		}
+		return c.in.union(x, y)
+	}
+	return nil
 }

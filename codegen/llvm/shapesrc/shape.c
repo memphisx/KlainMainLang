@@ -32,6 +32,15 @@ typedef struct KmlShape {
     i64 nkeys;
     const char *const *keys;
     void **const *syms;
+    // The key order of an object with an order slot (keyorder.c): the
+    // slot's byte offset (-1 for none), the layout's key sequence and
+    // integer-key mask, and each key's presence bit.
+    i64 order_off;
+    const unsigned char *seq;
+    i64 ints;
+    const signed char *bits;
+    // The byte offset of the presence word (-1 for none).
+    i64 presence_off;
 } KmlShape;
 
 // The registered tables (unitreg.c); kind 3 holds KmlShape rows.
@@ -61,6 +70,15 @@ _Bool __kml_key_is_sym(const char *key, void *sym) {
     char want[40];
     snprintf(want, sizeof want, "\x01@@sym:%p", sym);
     return strcmp(key, want) == 0;
+}
+
+extern _Bool __kml_key_is_symbol(const char *k) __attribute__((weak));
+
+// Whether layout or property key k is a symbol's: a symbol's own run-time
+// key ("\x01…") or a well-known symbol's member ("@@iterator").
+static int key_is_symbol_named(const char *k) {
+    if (k[0] == 1) return 1;
+    return k[0] == '@' && k[1] == '@' && __kml_key_is_symbol && __kml_key_is_symbol(k);
 }
 
 // The symbol a symbol-keyed field's layout key names (TDD-00246), or NULL.
@@ -93,7 +111,16 @@ typedef struct Expando {
     // is a {getter, setter, owner} triple: two function records (either
     // may be null) and the boxed owner, the receiver when none is given.
     unsigned char *attrs;
+    // The prototype the object was given (Object.setPrototypeOf, a
+    // constructor's newTarget) in place of its class's: a dynamic
+    // object, or null; meaningful while the header has KML_HDR_PROTO_SET.
+    void *proto;
+    // An array's (keyed by its header, which has no flag bits to spare):
+    // proto holds the prototype it was given.
+    int proto_given;
 } Expando;
+
+#define KML_HDR_PROTO_SET (1LL << 61)
 
 #define XA_W 1
 #define XA_E 2
@@ -134,7 +161,7 @@ static Expando *expando_find(void *obj, int create) {
             if (!old[i].obj) continue;
             size_t j = expando_hash(old[i].obj, expando_cap);
             while (expandos[j].obj) j = (j + 1) & (size_t)(expando_cap - 1);
-            expandos[j] = old[i];
+            KML_STORE_PTR(&expandos[j], old[i]);
         }
         kml_free(KML_HEAP_WORDS, old);
     }
@@ -159,6 +186,35 @@ static i64 expando_index(const Expando *x, const char *key) {
 i64 __kml_shape_expando_count(void *obj) {
     const Expando *x = expando_find(obj, 0);
     return x ? x->n : 0;
+}
+
+extern i64 __kml_obj_level(void *o) __attribute__((weak));
+extern void __kml_obj_set_level(void *o, i64 lvl) __attribute__((weak));
+
+// A boxed host value (a Map, a Date): its header carries the host flag
+// (objheader.go bit 49) and the integrity level, its own added properties
+// are its expandos.
+static int host_header(void *o) { return o && ((*(const i64 *)o >> 49) & 1); }
+
+// __kml_host_prevent raises a host value's level: mode 0 preventExtensions,
+// 1 seal, 2 freeze. Whether o is a host value.
+_Bool __kml_host_prevent(void *o, i64 mode) {
+    if (!host_header(o) || !__kml_obj_set_level) return 0;
+    __kml_obj_set_level(o, mode == 2 ? 1 : mode == 1 ? 2 : 3);
+    return 1;
+}
+
+// __kml_host_level_test answers isExtensible (mode 0), isSealed (1) or
+// isFrozen (2) of a host value into *out: whether o is one. A
+// non-extensible one without added properties is sealed and frozen too.
+_Bool __kml_host_level_test(void *o, i64 mode, _Bool *out) {
+    if (!host_header(o) || !__kml_obj_level) return 0;
+    i64 lvl = __kml_obj_level(o);
+    if (mode == 0) *out = lvl == 0;
+    else if (lvl == 0) *out = 0;
+    else if (lvl == 1 || __kml_shape_expando_count(o) == 0) *out = 1;
+    else *out = mode == 1 && lvl == 2;
+    return 1;
 }
 
 // __kml_shape_expando_has: whether key was added to obj as its own
@@ -231,7 +287,7 @@ int __kml_shape_expando_put(void *obj, const char *key, i64 v, i64 recv) {
         return 0;
     }
     if (!(a & XA_W)) return 1;
-    x->vals[i] = v;
+    KML_STORE_PTR(&x->vals[i], v);
     return 0;
 }
 
@@ -251,12 +307,19 @@ void (*__kml_unshadow_hook)(void *, const char *) = 0;
 // writes through `any` reads its shadow, when obj has one.
 int (*__kml_shadow_get_hook)(void *, const char *, i64 *) = 0;
 
+// Set with __kml_unshadow_hook: a static write of a field an accessor may
+// be defined on runs its setter instead, when obj has one (1).
+int (*__kml_shadow_set_hook)(void *, const char *, i64) = 0;
+
+static int shadow_get(void *obj, const char *key, i64 *out);
+static int shadow_set(void *obj, const char *key, i64 v);
+
 // __kml_shape_expando_set adds (or overwrites) property key of obj.
 void __kml_shape_expando_set(void *obj, const char *key, i64 value) {
     Expando *x = expando_find(obj, 1);
     i64 i = expando_index(x, key);
     if (i >= 0) {
-        x->vals[i] = value;
+        KML_STORE_PTR(&x->vals[i], value);
         return;
     }
     if (x->n == x->cap) {
@@ -270,15 +333,30 @@ void __kml_shape_expando_set(void *obj, const char *key, i64 value) {
     size_t len = strlen(key);
     char *base = kml_alloc(KML_HEAP_RAW, len + 9);
     *(i64 *)base = (i64)len;
-    x->keys[x->n] = base + 8;
-    memcpy(x->keys[x->n], key, len + 1);
-    x->vals[x->n] = value;
+    KML_STORE_PTR(&x->keys[x->n], base + 8);
+    kml_copy(KML_HEAP_RAW, x->keys[x->n], key, len + 1);
+    KML_STORE_PTR(&x->vals[x->n], value);
     x->n++;
     const KmlShape *s = __kml_shape_of(obj);
     if (s && shadows_field(s, key)) {
         __kml_unshadow_hook = unshadow;
-        __kml_shadow_get_hook = __kml_shape_expando_get;
+        __kml_shadow_get_hook = shadow_get;
+        __kml_shadow_set_hook = shadow_set;
     }
+}
+
+// shadow_get is a static read's shadow: its value, or an accessor's
+// getter's result.
+static int shadow_get(void *obj, const char *key, i64 *out) { return __kml_shape_expando_get_recv(obj, key, 0, out); }
+
+// shadow_set runs the setter of an accessor shadowing field key (1);
+// anything else is the static write's to do (0).
+static int shadow_set(void *obj, const char *key, i64 v) {
+    const Expando *x = expando_find(obj, 0);
+    i64 i = expando_index(x, key);
+    if (i < 0 || !(xattrs(x, i) & XA_ACC)) return 0;
+    __kml_shape_expando_put(obj, key, v, 0);
+    return 1;
 }
 
 // __kml_shape_expando_delete removes property key of obj; 1 when it was
@@ -288,12 +366,35 @@ int __kml_shape_expando_delete(void *obj, const char *key) {
     i64 i = expando_index(x, key);
     if (i < 0) return 0;
     for (i64 k = i + 1; k < x->n; k++) {
-        x->keys[k - 1] = x->keys[k];
-        x->vals[k - 1] = x->vals[k];
+        KML_STORE_PTR(&x->keys[k - 1], x->keys[k]);
+        KML_STORE_PTR(&x->vals[k - 1], x->vals[k]);
         if (x->attrs) x->attrs[k - 1] = x->attrs[k];
     }
     x->n--;
     return 1;
+}
+
+// __kml_shape_delete_field removes obj's own layout key `key` when its
+// layout tracks the key's presence (bits[nkeys + j] says the bit marks a
+// required field's absence): 1 when deleted, 0 for no such key, -1 for a
+// key whose presence is not tracked.
+int __kml_shape_delete_field(void *obj, const char *key) {
+    const KmlShape *s = __kml_shape_of(obj);
+    if (!s || s->presence_off < 0 || !s->bits || !key) return 0;
+    for (i64 j = 0; j < s->nkeys; j++) {
+        if (!s->keys[j] || strcmp(s->keys[j], key) != 0) continue;
+        int bit = s->bits[j];
+        if (bit < 0) return -1;
+        unsigned long long *w = (unsigned long long *)((char *)obj + s->presence_off);
+        if (s->bits[s->nkeys + j]) {
+            *w |= 1ULL << bit;
+        } else {
+            *w &= ~(1ULL << bit);
+            if (s->set) s->set(obj, key, KML_NB_UNDEFINED);
+        }
+        return 1;
+    }
+    return 0;
 }
 
 // __kml_shape_expando_define adds (or replaces) property key of obj with
@@ -313,8 +414,7 @@ void __kml_shape_expando_define(void *obj, const char *key, i64 v, int a) {
 // A dynamic bag where a static object was expected: a structural type's
 // value converted from any is the bag itself (emitAnyToLayout), read by
 // name. Weak: a program may link this file without dynamic objects.
-#define KML_BAG_MAGIC 0x444C4D4BLL
-static int is_bag(void *o) { return o && (*(i64 *)o & 0xFFFFFFFFLL) == KML_BAG_MAGIC; }
+static int is_bag(void *o) { return o && KML_IS_BAG_WORD(*(i64 *)o); }
 extern char **__kml_dynobj_keys_enum_c(void *o, i64 *n) __attribute__((weak)) __attribute__((weak));
 extern i64 __kml_dynobj_get(void *o, const char *key) __attribute__((weak)) __attribute__((weak));
 extern i64 __kml_dynobj_setv(void *o, const char *key, i64 v) __attribute__((weak)) __attribute__((weak));
@@ -355,6 +455,84 @@ i64 __kml_shape_generator_proto(void *obj, int kind) {
     return root ? ((i64)(intptr_t)root | 5) : 0;
 }
 
+extern void *__kml_dynobj_get_proto(void *o);
+extern int __kml_is_class_proto(void *o);
+extern i64 __kml_dynobj_find(void *o, const char *key);
+extern i64 __kml_dynobj_get_recv(void *o, const char *key, i64 recv);
+extern int __kml_shape_has_field(void *obj, const char *key);
+
+// __kml_shape_set_proto gives a class instance proto (a dynamic object,
+// or null) as its prototype, in place of its class's.
+void __kml_shape_set_proto(void *obj, void *proto) {
+    Expando *x = expando_find(obj, 1);
+    KML_STORE_PTR(&x->proto, proto);
+    *(i64 *)obj |= KML_HDR_PROTO_SET;
+}
+
+// __kml_array_set_proto gives the array whose header is hdr proto (a
+// dynamic object, or null) as its prototype, in place of its builtin's.
+void __kml_array_set_proto(void *hdr, void *proto) {
+    Expando *x = expando_find(hdr, 1);
+    KML_STORE_PTR(&x->proto, proto);
+    x->proto_given = 1;
+}
+
+// __kml_array_proto_set reports whether the array whose header is hdr was
+// given a prototype, storing it (null for a null prototype) in *proto.
+int __kml_array_proto_set(void *hdr, void **proto) {
+    const Expando *x = hdr ? expando_find(hdr, 0) : NULL;
+    if (!x || !x->proto_given) return 0;
+    *proto = x->proto;
+    return 1;
+}
+
+// __kml_array_chain_has: whether target is on the chain of the prototype
+// the array whose header is hdr was given (`u8 instanceof T` after
+// Object.setPrototypeOf(u8, T.prototype)).
+i64 __kml_array_chain_has(void *hdr, void *target) {
+    void *p;
+    if (!target || !__kml_array_proto_set(hdr, &p)) return 0;
+    for (; p; p = is_bag(p) ? __kml_dynobj_get_proto(p) : NULL)
+        if (p == target) return 1;
+    return 0;
+}
+
+// A prototype a constructor's newTarget left for the next instance made
+// (Reflect.construct): taken right after its header is written, before its
+// constructor runs.
+int __kml_pending_proto_set;
+void *__kml_pending_proto;
+
+void __kml_shape_take_pending(void *obj) {
+    if (!__kml_pending_proto_set) return;
+    __kml_pending_proto_set = 0;
+    __kml_shape_set_proto(obj, __kml_pending_proto);
+}
+
+// __kml_shape_proto_set reports whether obj's prototype was replaced,
+// storing it (null for a null prototype) in *proto.
+int __kml_shape_proto_set(void *obj, void **proto) {
+    if (!obj || !(*(i64 *)obj & KML_HDR_PROTO_SET)) return 0;
+    const Expando *x = expando_find(obj, 0);
+    *proto = x ? x->proto : NULL;
+    return 1;
+}
+
+// __kml_shape_method_shadowed reports whether a call of method key on obj
+// must not take its class's method: obj has an own property of that name,
+// or a prototype it was given resolves the name before its class's
+// prototype does.
+int __kml_shape_method_shadowed(void *obj, const char *key) {
+    const Expando *x = expando_find(obj, 0);
+    if (expando_index(x, key) >= 0) return 1;
+    if (!(*(i64 *)obj & KML_HDR_PROTO_SET)) return 0;
+    for (void *p = x ? x->proto : NULL; p && is_bag(p); p = __kml_dynobj_get_proto(p)) {
+        if (__kml_is_class_proto(p)) return 0;
+        if (__kml_dynobj_find(p, key) >= 0) return 1;
+    }
+    return 1; /* a chain without its class's prototype: none of its methods */
+}
+
 i64 __kml_shape_get(void *obj, const char *key, int *found) {
     if (is_bag(obj)) {
         i64 v = __kml_dynobj_get(obj, key);
@@ -379,6 +557,14 @@ i64 __kml_shape_get(void *obj, const char *key, int *found) {
         if (xattrs(x, i) & XA_ACC) __kml_shape_expando_get_recv(obj, key, 0, &v); /* its getter */
         return v;
     }
+    if (*(i64 *)obj & KML_HDR_PROTO_SET && !__kml_shape_has_field(obj, key)) {
+        // A member, not a field: the prototype it was given has it, or
+        // nothing does (the class's own members no longer answer).
+        void *p = x ? x->proto : NULL;
+        *found = 1;
+        if (!p || !is_bag(p)) return KML_NB_UNDEFINED;
+        return __kml_dynobj_get_recv(p, key, (i64)(intptr_t)obj | 1);
+    }
     i64 v = s->get(obj, key, found);
     if (*found) return v;
     // A generator's member its layout lacks is its prototype chain's.
@@ -395,11 +581,19 @@ i64 __kml_shape_get(void *obj, const char *key, int *found) {
 
 // __kml_shape_set writes key on obj; -1 when the object has no shape. An
 // added property is overwritten (1); a key that is neither a field nor an
-// added property is 0 (the caller adds it when the object is extensible).
+// added property is 0 (the caller adds it when the object is extensible);
+// an accessor with only a getter refuses the write (4), as does a
+// read-only added property (5).
 int __kml_shape_set(void *obj, const char *key, i64 value) {
     if (is_bag(obj)) return __kml_dynobj_setv(obj, key, value) == 0 ? 1 : 0;
     const KmlShape *s = __kml_shape_of(obj);
     if (!s) return -1;
+    // A field made an accessor (Object.defineProperty): its setter runs.
+    if (expando_cap) {
+        const Expando *x = expando_find(obj, 0);
+        i64 i = expando_index(x, key);
+        if (i >= 0 && (xattrs(x, i) & XA_ACC)) return __kml_shape_expando_put(obj, key, value, 0) == 0 ? 1 : 4; /* 4: only a getter */
+    }
     int r = s->set(obj, key, value);
     if (r == 1) {
         // Stored in the field: a shadow of it (an earlier value of another
@@ -408,8 +602,11 @@ int __kml_shape_set(void *obj, const char *key, i64 value) {
         return 1;
     }
     if (r != 0) return r;
-    // An added property: a setter runs, a read-only one keeps its value.
-    if (__kml_shape_expando_put(obj, key, value, 0) >= 0) return 1;
+    // An added property: a setter runs; a read-only one keeps its value
+    // (5: refused, a strict write's TypeError).
+    int p = __kml_shape_expando_put(obj, key, value, 0);
+    if (p == 1) return 5;
+    if (p >= 0) return 1;
     return 0;
 }
 
@@ -520,6 +717,30 @@ i64 __kml_shape_nkeys(void *obj) {
     return n;
 }
 
+extern i64 __kml_keyorder_perm(const unsigned char *order, const unsigned char *seq, i64 ints, i64 present, unsigned char *out) __attribute__((weak));
+
+// The layout key listed at position i of obj's own order: i itself, unless
+// obj's order slot holds an order block (a literal written in another
+// order than its layout's).
+static i64 ordered_key(const KmlShape *s, void *obj, i64 i) {
+    if (s->order_off < 0 || !s->bits || !__kml_keyorder_perm) return i;
+    const unsigned char *order = *(const unsigned char **)((char *)obj + s->order_off);
+    if (!order) return i;
+    unsigned char out[64];
+    i64 n = __kml_keyorder_perm(order, s->seq, s->ints, -1, out);
+    i64 at = 0;
+    for (i64 k = 0; k < n; k++)
+        for (i64 j = 0; j < s->nkeys; j++)
+            if (s->bits[j] == out[k]) {
+                if (at++ == i) return j;
+                break;
+            }
+    // Keys without a presence bit follow, in the layout's order.
+    for (i64 j = 0; j < s->nkeys; j++)
+        if (s->bits[j] < 0 && at++ == i) return j;
+    return i;
+}
+
 const char *__kml_shape_key(void *obj, i64 i) {
     if (is_bag(obj)) {
         i64 n = 0;
@@ -530,7 +751,7 @@ const char *__kml_shape_key(void *obj, i64 i) {
     }
     const KmlShape *s = __kml_shape_of(obj);
     if (!s || i < 0) return NULL;
-    if (i < s->nkeys) return s->keys[i];
+    if (i < s->nkeys) return s->keys[ordered_key(s, obj, i)];
     const Expando *x = expando_find(obj, 0);
     i -= s->nkeys;
     for (i64 k = 0; x && k < x->n; k++) {
@@ -566,6 +787,8 @@ extern i64 __kml_error_nextra(void *o) __attribute__((weak));
 extern const char *__kml_error_extra_key(void *o, i64 i) __attribute__((weak));
 extern i64 __kml_error_extra_get(void *o, const char *key, int *found) __attribute__((weak));
 
+extern i64 __kml_pattr_attrs(void *obj, const char *name) __attribute__((weak));
+
 static int obj_is_error(void *o) { return (*(i64 *)o & KML_HDR_ERROR) != 0; }
 
 // An Error's own name, once assigned on it: its index among the layout's
@@ -574,6 +797,8 @@ static int obj_is_error(void *o) { return (*(i64 *)o & KML_HDR_ERROR) != 0; }
 static i64 error_name_pos(void *o, i64 base) {
     if (!obj_is_error(o)) return -1;
     i64 p = *(i64 *)((char *)o + KML_ERR_NAME_OWN) - 1;
+    // Object.defineProperty made it non-enumerable (propattr.c's bit 2).
+    if (p >= 0 && __kml_pattr_attrs && (__kml_pattr_attrs(o, "name") & 2)) return -1;
     return p > base ? base : p;
 }
 
@@ -635,9 +860,9 @@ void __kml_shape_keys_array_c(void *o, void **out) {
         const char *k = __kml_obj_key(o, i);
         /* A symbol's key ("\x01…": a symbol-keyed field or property) is
            no string key. */
-        if (k && k[0] != 1 && __kml_obj_has(o, k)) data[w++] = k;
+        if (k && !key_is_symbol_named(k) && __kml_obj_has(o, k)) KML_STORE_PTR(&data[w++], k);
     }
-    out[0] = data;
+    KML_STORE_PTR(&out[0], data);
     out[1] = (void *)(size_t)w;
 }
 
@@ -671,11 +896,11 @@ void __kml_shape_names_c(void *o, void **out) {
     data = kml_realloc(KML_HEAP_WORDS, data, (size_t)(n + x->n) * 8 + 8);
     for (i64 i = 0; i < n; i++) {
         i64 xi = expando_index(x, data[i]);
-        if (xi < 0 || shadows_field(s, data[i])) data[w++] = data[i];
+        if (xi < 0 || shadows_field(s, data[i])) KML_STORE_PTR(&data[w++], data[i]);
     }
     for (i64 i = 0; i < x->n; i++)
-        if (x->keys[i][0] != 1 && !shadows_field(s, x->keys[i])) data[w++] = x->keys[i];
-    out[0] = data;
+        if (!key_is_symbol_named(x->keys[i]) && !shadows_field(s, x->keys[i])) KML_STORE_PTR(&data[w++], x->keys[i]);
+    KML_STORE_PTR(&out[0], data);
     out[1] = (void *)(size_t)w;
 }
 
@@ -738,6 +963,34 @@ int __kml_obj_accessor(void *obj, const char *key) {
     return (g == 1) | (s == 1) << 1;
 }
 
+extern char *__kml_str_index(const char *s, i64 i);
+
+/* [[GetOwnProperty]] of a primitive string's String object: an index below
+ * its UTF-16 length is that unit, read-only, enumerable; length is its
+ * length, neither writable nor enumerable; any other key is undefined. */
+i64 __kml_str_own_desc(const char *s, const char *key) {
+    i64 n = kml_str_u16len(s);
+    i64 v;
+    int en;
+    if (!strcmp(key, "length")) {
+        union { double d; unsigned long long u; } b = {(double)n};
+        v = (i64)(b.u + (unsigned long long)KML_NB_DOUBLE_OFFSET);
+        en = 0;
+    } else {
+        char *end;
+        long long i = strtoll(key, &end, 10);
+        if (*key == 0 || *end != 0 || i < 0 || i >= n || (key[0] == '0' && key[1] != 0) || key[0] == '+' || key[0] == '-') return KML_NB_UNDEFINED;
+        v = (i64)(unsigned long long)__kml_str_index(s, i);
+        en = 1;
+    }
+    void *d = __kml_dynobj_new();
+    __kml_dynobj_set(d, desc_value.s_, v);
+    __kml_dynobj_set(d, desc_writable.s_, KML_NB_FALSE);
+    __kml_dynobj_set(d, desc_enumerable.s_, en ? KML_NB_TRUE : KML_NB_FALSE);
+    __kml_dynobj_set(d, desc_configurable.s_, KML_NB_FALSE);
+    return (i64)d | 5;
+}
+
 i64 __kml_shape_own_desc(void *obj, const char *key) {
     const Expando *x = expando_find(obj, 0);
     i64 xi = expando_index(x, key);
@@ -797,6 +1050,7 @@ static void *key_symbol(const char *k) {
 
 extern _Bool __kml_dynobj_proxy_parts(void *o, void **target, void **handler) __attribute__((weak));
 extern i64 __kml_dynobj_call_trap(void *rec, i64 thisv, i64 argc, i64 *argv) __attribute__((weak));
+extern i64 __kml_dynobj_proxy_tbox(void *o) __attribute__((weak));
 extern _Bool __kml_dynobj_flags_test(void *o, i64 mode) __attribute__((weak));
 extern i64 __kml_dynobj_attrs_at(void *o, i64 i) __attribute__((weak));
 extern i64 __kml_dynobj_get(void *o, const char *key) __attribute__((weak));
@@ -840,7 +1094,6 @@ static int has_key(const char **ks, i64 n, const char *k) {
 }
 
 extern char **__kml_dynobj_keys_c(void *o, i64 *n) __attribute__((weak));
-extern _Bool __kml_key_is_symbol(const char *k) __attribute__((weak));
 extern i64 __kml_dynobj_own_desc(void *o, const char *key) __attribute__((weak));
 extern unsigned char __kml_any_tobool(i64 v);
 extern _Bool __kml_dynobj_has_chain(void *o, const char *key) __attribute__((weak));
@@ -861,7 +1114,7 @@ static i64 array_like_len(unsigned long long r) {
     unsigned long long lw = (unsigned long long)__kml_anyarr_get_by_key(arr, key_length.s_);
     double d;
     lw -= 1ULL << 49;
-    memcpy(&d, &lw, 8);
+    memcpy(&d, &lw, 8); /* scratch */
     return (i64)d;
 }
 static i64 array_like_at(unsigned long long r, i64 i) {
@@ -881,6 +1134,11 @@ static i64 array_like_at(unsigned long long r, i64 i) {
 // *n_out set.
 const char *__kml_proxy_own_keys(void *px, const char ***ks_out, i64 *n_out) {
     void *target, *handler;
+    if (!px) { /* a target that is no dynamic object (an array): none here */
+        *ks_out = 0;
+        *n_out = 0;
+        return 0;
+    }
     if (!is_proxy(px, &target, &handler)) {
         i64 m;
         char **names = __kml_dynobj_keys_c(px, &m);
@@ -890,7 +1148,7 @@ const char *__kml_proxy_own_keys(void *px, const char ***ks_out, i64 *n_out) {
         for (i64 i = 0; i < m; i++) ks[n++] = names[i];
         for (i64 i = 0; i < c; i++) {
             const char *k = (const char *)__kml_dynobj_key_at(px, i);
-            if (__kml_key_is_symbol(k)) ks[n++] = k;
+            if (__kml_key_is_symbol(k)) KML_STORE_PTR(&ks[n++], k);
         }
         *ks_out = ks;
         *n_out = n;
@@ -899,7 +1157,7 @@ const char *__kml_proxy_own_keys(void *px, const char ***ks_out, i64 *n_out) {
     i64 trap = __kml_dynobj_get(handler, key_ownKeys.s_);
     unsigned long long tw = (unsigned long long)trap;
     if (tw < 65536 || tw >= (1ULL << 49) || (tw & 7) != 7) return __kml_proxy_own_keys(target, ks_out, n_out);
-    i64 argv[1] = {(i64)target | 5};
+    i64 argv[1] = {__kml_dynobj_proxy_tbox(px)};
     unsigned long long r = (unsigned long long)__kml_dynobj_call_trap((void *)(tw & ~7ULL), (i64)handler | 5, 1, argv);
     if (!is_array_like(r)) return err_nonobj.s_;
     i64 n = array_like_len(r);
@@ -908,10 +1166,13 @@ const char *__kml_proxy_own_keys(void *px, const char ***ks_out, i64 *n_out) {
         const char *k = trap_key(array_like_at(r, i));
         if (!k) return err_badkey.s_;
         if (has_key(ks, i, k)) return err_dup.s_;
-        ks[i] = k;
+        KML_STORE_PTR(&ks[i], k);
     }
-    _Bool extensible = __kml_dynobj_flags_test(target, 0);
-    i64 tc = __kml_dynobj_count(target);
+    /* The invariants against the target's own keys; a target that is no
+     * dynamic object (an extensible array, a static object) has none to
+     * hold here. */
+    _Bool extensible = target ? __kml_dynobj_flags_test(target, 0) : 1;
+    i64 tc = target ? __kml_dynobj_count(target) : 0;
     for (i64 i = 0; i < tc; i++) {
         const char *k = (const char *)__kml_dynobj_key_at(target, i);
         int configurable = (__kml_dynobj_attrs_at(target, i) & 4) != 0;
@@ -980,7 +1241,7 @@ void *__kml_proxy_define(void *bag, const char *key, void *desc) {
             continue;
         }
         void *sym = key_symbol(key);
-        i64 argv[3] = {(i64)target | 5, sym ? (i64)sym | 1 : (i64)key, (i64)desc | 5};
+        i64 argv[3] = {__kml_dynobj_proxy_tbox(bag), sym ? (i64)sym | 1 : (i64)key, (i64)desc | 5};
         i64 r = __kml_dynobj_call_trap((void *)(tw & ~7ULL), (i64)handler | 5, 3, argv);
         if (!(__kml_any_tobool(r) & 1)) {
             const char *k = sym ? "Symbol()" : key;
@@ -1001,12 +1262,13 @@ void *__kml_proxy_define(void *bag, const char *key, void *desc) {
 // its target's. Undefined for no such property.
 i64 __kml_proxy_own_desc(void *px, const char *key) {
     void *target, *handler;
+    if (!px) return 10; /* a target that is no dynamic object */
     if (!is_proxy(px, &target, &handler)) return __kml_dynobj_own_desc(px, key);
     i64 trap = __kml_dynobj_get(handler, key_gopd.s_);
     unsigned long long tw = (unsigned long long)trap;
     if (tw < 65536 || tw >= (1ULL << 49) || (tw & 7) != 7) return __kml_proxy_own_desc(target, key);
     void *sym = key_symbol(key);
-    i64 argv[2] = {(i64)target | 5, sym ? (i64)sym | 1 : (i64)key};
+    i64 argv[2] = {__kml_dynobj_proxy_tbox(px), sym ? (i64)sym | 1 : (i64)key};
     i64 r = __kml_dynobj_call_trap((void *)(tw & ~7ULL), (i64)handler | 5, 2, argv);
     unsigned long long rv = (unsigned long long)r;
     if (rv == KML_NB_UNDEFINED) return KML_NB_UNDEFINED;
@@ -1070,9 +1332,9 @@ const char *__kml_own_symbols_checked(i64 boxed, void **out) {
     i64 m = 0;
     for (i64 i = 0; i < n; i++) {
         void *sym = key_symbol(ks[i]);
-        if (sym) data[m++] = sym;
+        if (sym) KML_STORE_PTR(&data[m++], sym);
     }
-    out[0] = data;
+    KML_STORE_PTR(&out[0], data);
     out[1] = (void *)(size_t)m;
     return NULL;
 }
@@ -1095,7 +1357,7 @@ i64 __kml_proxy_obj_rest(i64 src, i64 excl) {
         size_t len = strlen(err);
         char *base = kml_alloc(KML_HEAP_RAW, len + 9);
         *(i64 *)base = (i64)len;
-        memcpy(base + 8, err, len + 1);
+        kml_copy(KML_HEAP_RAW, base + 8, err, len + 1);
         __kml_throw_nullderef(base + 8);
     }
     i64 ne = is_array_like((unsigned long long)excl) ? array_like_len((unsigned long long)excl) : 0;
@@ -1126,9 +1388,9 @@ int __kml_proxy_reflect_own_keys(i64 boxed, void **out, const char **err) {
     i64 *data = kml_alloc(KML_HEAP_WORDS, (size_t)(n ? n : 1) * sizeof(i64));
     for (i64 i = 0; i < n; i++) {
         void *sym = key_symbol(ks[i]);
-        data[i] = sym ? (i64)((size_t)sym | 1) : (i64)(size_t)ks[i];
+        KML_STORE_PTR(&data[i], sym ? (i64)((size_t)sym | 1) : (i64)(size_t)ks[i]);
     }
-    out[0] = data;
+    KML_STORE_PTR(&out[0], data);
     out[1] = (void *)(size_t)n;
     return 1;
 }
@@ -1143,7 +1405,7 @@ static void own_symbols(i64 boxed, void **out, int enum_only) {
             cap = cap ? cap * 2 : 4;                                \
             data = kml_realloc(KML_HEAP_WORDS, data, (size_t)cap * sizeof(void *));     \
         }                                                           \
-        data[n++] = (p);                                            \
+        KML_STORE_PTR(&data[n++], (p));                                            \
     } while (0)
     if (v >= 65536 && v < (1ULL << 49)) {
         void *p = (void *)(v & ~7ULL);
@@ -1151,7 +1413,8 @@ static void own_symbols(i64 boxed, void **out, int enum_only) {
             const KmlShape *s = __kml_shape_of(p);
             if (s && s->syms)
                 for (i64 i = 0; i < s->nkeys; i++)
-                    if (s->syms[i]) PUSH(*s->syms[i]);
+                    /* (a deleted field's key is no own property) */
+                    if (s->syms[i] && __kml_obj_has(p, s->keys[i])) PUSH(*s->syms[i]);
             const Expando *x = expando_find(p, 0);
             for (i64 i = 0; x && i < x->n; i++) {
                 void *sym = key_symbol(x->keys[i]);
@@ -1176,7 +1439,7 @@ static void own_symbols(i64 boxed, void **out, int enum_only) {
         }
     }
 #undef PUSH
-    out[0] = data;
+    KML_STORE_PTR(&out[0], data);
     out[1] = (void *)(size_t)n;
 }
 
@@ -1196,6 +1459,6 @@ void __kml_own_keys_c(void **names, i64 names_len, void **syms, i64 syms_len, vo
     i64 *data = kml_alloc(KML_HEAP_WORDS, (size_t)(n ? n : 1) * sizeof(i64));
     for (i64 i = 0; i < names_len; i++) data[i] = (i64)(size_t)names[i];
     for (i64 i = 0; i < syms_len; i++) data[names_len + i] = (i64)((size_t)syms[i] | 1);
-    out[0] = data;
+    KML_STORE_PTR(&out[0], data);
     out[1] = (void *)(size_t)n;
 }

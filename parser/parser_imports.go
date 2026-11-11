@@ -21,6 +21,15 @@ func (p *Parser) parseImportDeclaration() (*ast.ImportDeclaration, error) {
 	tok := p.advance() // 'import'
 	pos := posOf(tok)
 
+	// `import "./x"`: the module run for its effects, no binding.
+	if p.check(lexer.STRING) {
+		srcTok := p.advance()
+		if err := p.parseSemicolon(); err != nil {
+			return nil, err
+		}
+		return ast.NewImportDeclaration(nil, "", srcTok.Literal, pos), nil
+	}
+
 	var specs []ast.ImportSpecifier
 	var namespace string
 	// `import type { A }`, `import type * as ns`, `import type D from`; but
@@ -394,12 +403,17 @@ func (p *Parser) parseImportExpr() (ast.Expression, error) {
 			return nil, p.errAt(p.peek(), diag.ExpectedImportMeta)
 		}
 		p.advance() // 'meta'
-		if !p.check(lexer.DOT) || !(p.peekNth(1).Type == lexer.IDENT && p.peekNth(1).Literal == "url") {
-			return nil, p.errAt(p.peek(), diag.ImportMetaOnlyURL)
+		// Node's own members are the file's path: `url`, `dirname`,
+		// `filename`; any other member is read off the object.
+		if p.check(lexer.DOT) && p.peekNth(1).Type == lexer.IDENT {
+			switch f := p.peekNth(1).Literal; f {
+			case "url", "dirname", "filename":
+				p.advance() // '.'
+				p.advance() // the member
+				return ast.NewImportMeta(pos, f), nil
+			}
 		}
-		p.advance() // '.'
-		p.advance() // 'url'
-		return ast.NewImportMetaUrl(pos), nil
+		return ast.NewImportMeta(pos, ""), nil
 	case p.check(lexer.LPAREN):
 		// Dynamic import(specifier) (TDD-00055/TDD-00056). The specifier stays a
 		// general expression here; the resolver enforces string-literal-only and

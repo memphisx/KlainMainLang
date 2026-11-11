@@ -240,6 +240,16 @@ func DefaultIsNamespace(path string) bool {
 	return ok && strings.Contains(string(src), "kml:default-namespace")
 }
 
+// RequireIsDefault reports a builtin module whose module.exports in Node
+// is its default export (`events`'s EventEmitter, `assert`'s assert): a
+// `require` of it binds that value, not a namespace.
+func RequireIsDefault(path string) bool {
+	src, ok := ModuleSource(path)
+	return ok && !DefaultIsNamespace(path) && exportDefaultDecl.Match(src)
+}
+
+var exportDefaultDecl = regexp.MustCompile(`(?m)^export default [A-Za-z_$][A-Za-z0-9_$]*;`)
+
 var (
 	tsTypeNamesOnce sync.Once
 	tsTypeNames     map[string]bool
@@ -317,12 +327,14 @@ func LoweredFuncUses() map[string][]string {
 // constructs itself, by an identifier whose use can need them, so a program
 // naming the identifier brings them in: Request, Response and fetch hold
 // their headers in a Headers, a Response body and a fetch body are read
-// through a Blob, and Response.redirect parses its URL with the URL class.
+// through a Blob, a Request always has an AbortSignal, and Response.redirect
+// parses its URL with the URL class.
 var NativeGlobalUses = map[string][]string{
-	"Request":  {"Headers"},
+	"Request":  {"Headers", "AbortSignal"},
 	"Response": {"Headers", "Blob"},
 	"fetch":    {"Headers", "Blob"},
 	"redirect": {"URL"},
+	"formData": {"FormData", "Blob"},
 	"subtle":   {"SubtleCrypto"},
 }
 

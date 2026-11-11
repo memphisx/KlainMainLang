@@ -482,9 +482,10 @@ interface KmlNative {
     ffiCopyIn(addr: number, out: Uint8Array): void;
     /** @lower __kml_native_ffi_copy_out @link ffi */
     ffiCopyOut(src: Uint8Array, addr: number): void;
-    // len bytes at addr as a Buffer (or an ArrayBuffer) sharing them.
+    // len bytes at addr as a Buffer (kind 0), an ArrayBuffer (1) or a
+    // SharedArrayBuffer (2) sharing them.
     /** @lower __kml_native_ffi_view */
-    ffiView(addr: number, len: number, arrayBuffer: boolean): any;
+    ffiView(addr: number, len: number, kind: number): any;
     // A terminal handle's raw (true) or normal mode: 0, or -errno.
     /** @lower __kml_native_tty_set_raw_mode @link pool */
     ttySetRawMode(handle: number, raw: boolean): number;
@@ -517,6 +518,9 @@ interface KmlNative {
     // when their keys are equal ("" for a primitive).
     /** @lower __kml_proto_key @link inspect */
     protoKey(value: any): string;
+    // Whether value is a Proxy.
+    /** @lower __kml_is_proxy @link inspect */
+    isProxy(value: any): boolean;
     // A TypedArray's bytes, copied into out (as many as fit): the count
     // copied, 0 for any other value.
     // A weak link to an object (or an unregistered symbol) held in `any`
@@ -531,6 +535,18 @@ interface KmlNative {
     // in's bytes copied into a TypedArray held in `any` (as many as fit).
     /** @lower __kml_typed_set_bytes @link inspect */
     typedBytesBack(bytes: Uint8Array, value: any): number;
+
+    // A web stream's async iterator's buffered fast path (streams.c): whether
+    // the stream is readable with a chunk queued, and that chunk taken as
+    // read() would take it, boxed.
+    /** @lower __kml_native_rs_has_queued @link streams */
+    rsHasQueued(stream: ReadableStream<any>): boolean;
+    /** @lower __kml_native_rs_take_queued @link streams */
+    rsTakeQueued(stream: ReadableStream<any>): any;
+    // A read whose request is a callback, run when the chunk (kind 0), the
+    // end (1) or the error (2) arrives: at once when one already has.
+    /** @lower __kml_native_rs_read_request @link streams */
+    rsReadRequest(stream: ReadableStream<any>, onSettle: (kind: number, value: any) => void): void;
 
     // node:crypto over libcrypto (cryptosrc/crypto_openssl.c). A hash, HMAC
     // or cipher is an id; a pooled form calls back (status, result).
@@ -665,6 +681,11 @@ interface KmlNative {
     processArgv0(): string;
     /** @lower __kml_native_process_exec_path */
     processExecPath(): string;
+    // process.platform and process.arch: the target's.
+    /** @lower __kml_native_process_platform */
+    processPlatform(): string;
+    /** @lower __kml_native_process_arch */
+    processArch(): string;
     // process.title: argv[0] until set.
     /** @lower __kml_native_process_title */
     processTitle(): string;
@@ -681,6 +702,9 @@ interface KmlNative {
     // 0 process.version, 1 node, 2 v8, 3 klain.
     /** @lower __kml_native_process_version */
     processVersion(which: number): string;
+    // process.versions.uv.
+    /** @lower __kml_native_process_uv_version */
+    processUvVersion(): string;
     /** @lower __kml_native_env_get */
     envGet(key: string): string | undefined;
     /** @lower __kml_native_env_set */
@@ -808,6 +832,11 @@ interface KmlNative {
     immediateToggleRef(on: number): void;
     /** @lower __kml_native_immediate_count @link timers */
     immediateCount(n: number): void;
+    // The loop's referenced open handles, by Node's wrap names
+    // (TCPSocketWrap, TTYWrap, …), comma-separated; the runtime's own
+    // timer and phase handles are not among them.
+    /** @lower __kml_native_active_handles @link timers */
+    activeHandlesInfo(): string;
     // An nghttp2 session (http2src/h2node.c), Node's node_http2.cc: fed the
     // bytes its socket reads (h2Feed), drained of the bytes to write
     // (h2Flush, then h2Take). The frames it receives queue events h2Next
@@ -1022,6 +1051,105 @@ interface KmlNative {
     khttpH2oClose(): void;
     /** @lower __kml_native_khttp_h2o_close_all @link h2o */
     khttpH2oCloseAll(): void;
+
+    // WebAssembly (klainwasm.c, over the kml_wasm_* engine interface). A
+    // module is an id every thread reads; an extern (function, memory,
+    // table, global) or instance an id of the thread that made it. A value
+    // crosses as a kind (0 i32, 1 i64, 2 f32, 3 f64, 4 externref, 5 funcref,
+    // 6 v128) and a number, an i64 as its decimal string: arguments are
+    // pushed with wasmArg first, results read with wasmResult* after.
+    /** @lower __kml_native_wasm_compile @link wasm */
+    wasmCompile(bytes: Uint8Array): number;
+    /** @lower __kml_native_wasm_validate @link wasm */
+    wasmValidate(bytes: Uint8Array): boolean;
+    /** @lower __kml_native_wasm_error @link wasm */
+    wasmError(): string;
+    // A module's i-th import or export: its kind (0 function, 1 global, 2
+    // table, 3 memory, 4 tag) or -1 past the last; its module (0), name (1)
+    // and type (2) as wasmDesc.
+    /** @lower __kml_native_wasm_import @link wasm */
+    wasmImport(mod: number, i: number): number;
+    /** @lower __kml_native_wasm_export @link wasm */
+    wasmExport(mod: number, i: number): number;
+    /** @lower __kml_native_wasm_desc @link wasm */
+    wasmDesc(which: number): string;
+    /** @lower __kml_native_wasm_extern_kind @link wasm */
+    wasmExternKind(h: number): number;
+    /** @lower __kml_native_wasm_extern_type @link wasm */
+    wasmExternType(h: number): string;
+    /** @lower __kml_native_wasm_arg @link wasm */
+    wasmArg(kind: number, num: number, dec: string): void;
+    // Call function h: 0 (nresults results), 1 a trap, 3 a stack overflow,
+    // 5 another failure (wasmError), 2 the JS function it called threw.
+    /** @lower __kml_native_wasm_call @link wasm */
+    wasmCall(h: number, nresults: number): number;
+    /** @lower __kml_native_wasm_result_kind @link wasm */
+    wasmResultKind(i: number): number;
+    /** @lower __kml_native_wasm_result_num @link wasm */
+    wasmResultNum(i: number): number;
+    /** @lower __kml_native_wasm_result_dec @link wasm */
+    wasmResultDec(i: number): string;
+    // The function every host function's call runs: (its id, its argument
+    // count), reading wasmHostArg*, setting wasmHostResult or wasmHostThrow.
+    /** @lower __kml_native_wasm_set_host @link wasm */
+    wasmSetHost(onCall: (id: number, nargs: number) => void): void;
+    /** @lower __kml_native_wasm_host_func @link wasm */
+    wasmHostFunc(type: string, id: number): number;
+    /** @lower __kml_native_wasm_host_arg_kind @link wasm */
+    wasmHostArgKind(i: number): number;
+    /** @lower __kml_native_wasm_host_arg_num @link wasm */
+    wasmHostArgNum(i: number): number;
+    /** @lower __kml_native_wasm_host_arg_dec @link wasm */
+    wasmHostArgDec(i: number): string;
+    // The host call's i-th result's kind; its result count for i = -1.
+    /** @lower __kml_native_wasm_host_result_kind @link wasm */
+    wasmHostResultKind(i: number): number;
+    /** @lower __kml_native_wasm_host_result @link wasm */
+    wasmHostResult(i: number, num: number, dec: string): void;
+    /** @lower __kml_native_wasm_host_throw @link wasm */
+    wasmHostThrow(): void;
+    // An externref slot the engine let go of, or 0.
+    /** @lower __kml_native_wasm_released @link wasm */
+    wasmReleased(): number;
+    /** @lower __kml_native_wasm_inst_import @link wasm */
+    wasmInstImport(h: number): void;
+    // An instance of mod with the pushed imports: its id, or -(outcome):
+    // -4 link, -1 trap, -3 stack overflow, -2 a JS call threw, -5 other.
+    /** @lower __kml_native_wasm_instantiate @link wasm */
+    wasmInstantiate(mod: number): number;
+    /** @lower __kml_native_wasm_inst_export @link wasm */
+    wasmInstExport(inst: number, i: number): number;
+    /** @lower __kml_native_wasm_memory_new @link wasm */
+    wasmMemoryNew(initial: number, maximum: number, shared: boolean): number;
+    /** @lower __kml_native_wasm_memory_addr @link wasm */
+    wasmMemoryAddr(h: number): number;
+    /** @lower __kml_native_wasm_memory_bytes @link wasm */
+    wasmMemoryBytes(h: number): number;
+    /** @lower __kml_native_wasm_memory_shared @link wasm */
+    wasmMemoryShared(h: number): boolean;
+    // A shared memory's handle for another thread (wasmMemoryAdopt there).
+    /** @lower __kml_native_wasm_memory_share @link wasm */
+    wasmMemoryShare(h: number): number;
+    /** @lower __kml_native_wasm_memory_adopt @link wasm */
+    wasmMemoryAdopt(token: number): number;
+    /** @lower __kml_native_wasm_memory_grow @link wasm */
+    wasmMemoryGrow(h: number, delta: number): number;
+    /** @lower __kml_native_wasm_global_new @link wasm */
+    wasmGlobalNew(kind: number, mutable: boolean): number;
+    /** @lower __kml_native_wasm_global_get @link wasm */
+    wasmGlobalGet(h: number): void;
+    /** @lower __kml_native_wasm_global_set @link wasm */
+    wasmGlobalSet(h: number): number;
+    /** @lower __kml_native_wasm_table_new @link wasm */
+    wasmTableNew(kind: number, initial: number, maximum: number): number;
+    /** @lower __kml_native_wasm_table_size @link wasm */
+    wasmTableSize(h: number): number;
+    /** @lower __kml_native_wasm_table_get @link wasm */
+    wasmTableGet(h: number, i: number): number;
+    /** @lower __kml_native_wasm_table_set @link wasm */
+    wasmTableSet(h: number, i: number): number;
+    /** @lower __kml_native_wasm_table_grow @link wasm */
+    wasmTableGrow(h: number, delta: number): number;
 }
 
 declare var __kml_native: KmlNative;

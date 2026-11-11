@@ -50,8 +50,8 @@ type Parser struct {
 	assertions map[ast.Expression]ast.Assertion
 	// thisParam is the last parameter list's `this: T`; thisParams keeps
 	// each function's.
-	thisParam  *ast.TypeAnnotation
-	thisParams map[ast.Node]*ast.TypeAnnotation
+	thisParam  ast.TypeNode
+	thisParams map[ast.Node]ast.TypeNode
 	pos        int
 	// docAt is the token index whose Doc was last loaded into pendingDoc.
 	docAt      int
@@ -72,9 +72,14 @@ type Parser struct {
 	typeParamNames map[string]bool
 	// evalCode marks a direct eval's source (ParseEval).
 	evalCode bool
+	// evalSuper is the `super` a direct eval's code may use: its caller's
+	// (ParseEvalIn).
+	evalSuper superContext
 	// modules keeps a declaration file's ambient module blocks
 	// (ParseLibrary).
 	modules bool
+	// ambientClass is set while a `declare class` body is parsed.
+	ambientClass bool
 	// noInFrom is the token index a `for` initializer starts at while it is
 	// parsed (-1 otherwise): there, a relational `in` outside any bracket
 	// ends the expression (the grammar's [~In]).
@@ -177,9 +182,32 @@ func Parse(src string) (*ast.Program, error) {
 // ParseEval parses the source of a direct eval: code that sees the names
 // its call site sees, such as an enclosing class's private names.
 func ParseEval(src string) (*ast.Program, error) {
+	return ParseEvalIn(src, false, false)
+}
+
+// ParseEvalIn is ParseEval for code run where `super` is valid: in a
+// method or accessor (superProperty), and in a derived class's
+// constructor (superCall too).
+func ParseEvalIn(src string, superProperty, superCall bool) (*ast.Program, error) {
 	p := New(src)
 	p.evalCode = true
-	return p.ParseProgram()
+	p.evalSuper = superContext{property: superProperty, call: superCall}
+	prog, err := p.ParseProgram()
+	if err != nil {
+		return prog, err
+	}
+	// Eval code is a Script: a module declaration is V8's SyntaxError.
+	for _, st := range prog.Body {
+		switch st.(type) {
+		case *ast.ImportDeclaration:
+			pos := st.GetPos()
+			return nil, fmt.Errorf("%d:%d: Cannot use import statement outside a module", pos.Line, pos.Col)
+		case *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+			pos := st.GetPos()
+			return nil, fmt.Errorf("%d:%d: Unexpected token 'export'", pos.Line, pos.Col)
+		}
+	}
+	return prog, nil
 }
 
 // ParseLibrary parses one of this compiler's own declaration files
@@ -389,7 +417,7 @@ func (p *Parser) expectGT(context string) error {
 // the caller has already checked the current token is '<'. A type parameter may
 // carry a `extends X` constraint (TDD-00113) and a `= T` default; the returned
 // constraints and defaults are positionally aligned with names (nil: none).
-func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnotation, []*ast.TypeAnnotation, error) {
+func (p *Parser) parseTypeParamList(context string) ([]string, []ast.TypeNode, []ast.TypeNode, error) {
 	// Type syntax: blanked in the source text, as type stripping does.
 	ltStart := p.peek().Pos
 	defer func() {
@@ -399,7 +427,7 @@ func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnota
 	}()
 	p.advance() // consume '<'
 	var names []string
-	var constraints, defaults []*ast.TypeAnnotation
+	var constraints, defaults []ast.TypeNode
 	for {
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
@@ -407,7 +435,7 @@ func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnota
 		}
 		names = append(names, nameTok.Literal)
 		p.declareTypeParam(nameTok.Literal)
-		var constraint *ast.TypeAnnotation
+		var constraint ast.TypeNode
 		if p.check(lexer.EXTENDS) {
 			p.advance() // consume 'extends'
 			constraint, err = p.parseTypeAnnotation("ts")
@@ -416,7 +444,7 @@ func (p *Parser) parseTypeParamList(context string) ([]string, []*ast.TypeAnnota
 			}
 		}
 		constraints = append(constraints, constraint)
-		var def *ast.TypeAnnotation
+		var def ast.TypeNode
 		if p.match(lexer.ASSIGN) {
 			// A default (`<T = string>`): the type a missing type argument
 			// takes.
@@ -607,7 +635,7 @@ func (p *Parser) synthTypedef(d jsdoc.TypedefDecl, pos ast.Pos) ast.Statement {
 	if d.Name == "" {
 		return nil
 	}
-	var ta *ast.TypeAnnotation
+	var ta ast.TypeNode
 	// An object or callback typedef is spelled as the TypeScript type it
 	// declares and parsed as one, so it carries a type node as every other
 	// JSDoc type does; the structural form below is the fallback.
@@ -618,27 +646,10 @@ func (p *Parser) synthTypedef(d jsdoc.TypedefDecl, pos ast.Pos) ast.Statement {
 	case ta != nil:
 	case d.Kind == "alias":
 		ta = jsdocTypeAnnotation(d.Base)
-	case d.Kind == "object":
-		fields := make([]ast.AnnotField, 0, len(d.Fields))
-		for _, f := range d.Fields {
-			fields = append(fields, ast.AnnotField{Name: f.Name, Type: jsdocTypeAnnotation(f.Type)})
-		}
-		ta = &ast.TypeAnnotation{Source: "jsdoc", Fields: fields}
-	case d.Kind == "callback":
-		params := make([]ast.TypeAnnotation, 0, len(d.Fields))
-		for _, f := range d.Fields {
-			params = append(params, *jsdocTypeAnnotation(f.Type))
-		}
-		ret := jsdocTypeAnnotation(d.Return)
-		if ret == nil {
-			ret = &ast.TypeAnnotation{Name: "void", Source: "jsdoc"}
-		}
-		ta = &ast.TypeAnnotation{
-			Source:      "jsdoc",
-			IsFuncType:  true,
-			FuncParams:  params,
-			FuncRetType: ret,
-		}
+	case d.Kind == "object" || d.Kind == "callback":
+		// A shape whose spelling does not parse: any, as in a JavaScript
+		// file.
+		ta = ast.NodeAnnotation(&ast.KeywordType{Keyword: "any"}, "jsdoc")
 	default:
 		return nil
 	}
@@ -648,7 +659,7 @@ func (p *Parser) synthTypedef(d jsdoc.TypedefDecl, pos ast.Pos) ast.Statement {
 // --- Program ---
 
 func (p *Parser) ParseProgram() (*ast.Program, error) {
-	prog := &ast.Program{}
+	prog := &ast.Program{Text: p.text}
 	p.parseStatementList(ctxSourceElements, func(stmt ast.Statement) error {
 		// Desugar a top-level static `require('<literal>')` into the equivalent
 		// import declaration so the resolver/codegen handle it unchanged. Only
@@ -706,13 +717,13 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 			return nil, err
 		}
 	}
-	if err := labelErrors(prog, nil); err != nil {
+	if err := labelErrors(prog, jumpScope{}); err != nil {
 		return nil, err
 	}
 	if err := coverInitErrors(prog, false); err != nil {
 		return nil, err
 	}
-	if err := superErrors(prog, superContext{}); err != nil {
+	if err := superErrors(prog, p.evalSuper); err != nil {
 		return nil, err
 	}
 	if isModuleProgram(prog) {
@@ -735,6 +746,7 @@ func (p *Parser) ParseProgram() (*ast.Program, error) {
 	} else if err := strictRegionErrors(prog); err != nil {
 		return nil, err
 	}
+	ast.LowerBaseCalls(prog)
 	return prog, nil
 }
 
@@ -860,7 +872,18 @@ func yieldOutsideGenerator(n ast.Node, inGenerator bool) error {
 	case *ast.FunctionDeclaration:
 		// A method's decorators run where the class is defined, not in it.
 		outer := map[ast.Node]bool{}
+		// So does a computed key (`[yield 9]() {}`).
+		keys := []ast.Node{}
 		for _, d := range x.Decorators {
+			keys = append(keys, d)
+		}
+		if x.Key != nil {
+			keys = append(keys, x.Key)
+		}
+		if x.KeyExpr != nil {
+			keys = append(keys, x.KeyExpr)
+		}
+		for _, d := range keys {
 			if err := yieldOutsideGenerator(d, inGenerator); err != nil {
 				return err
 			}
@@ -878,6 +901,24 @@ func yieldOutsideGenerator(n ast.Node, inGenerator bool) error {
 		inGenerator = x.IsGenerator
 	case *ast.ArrowFunction:
 		inGenerator = false
+	case *ast.ClassDeclaration:
+		// A static block is no generator's body, whatever encloses the
+		// class.
+		static := map[ast.Node]bool{}
+		for _, b := range x.StaticBlocks {
+			if err := yieldOutsideGenerator(b, false); err != nil {
+				return err
+			}
+			static[b] = true
+		}
+		var err error
+		ast.ForEachChild(n, func(ch ast.Node) bool {
+			if err == nil && !static[ch] {
+				err = yieldOutsideGenerator(ch, inGenerator)
+			}
+			return err == nil
+		})
+		return err
 	}
 	var err error
 	ast.ForEachChild(n, func(ch ast.Node) bool {
@@ -987,8 +1028,19 @@ func awaitOutsideAsync(n ast.Node, inAsync bool) error {
 		}
 	case *ast.FunctionDeclaration:
 		// A method's decorators run where the class is defined, not in it.
+		// So does a computed key (`[await 9]() {}`).
 		outer := map[ast.Node]bool{}
+		keys := []ast.Node{}
 		for _, d := range x.Decorators {
+			keys = append(keys, d)
+		}
+		if x.Key != nil {
+			keys = append(keys, x.Key)
+		}
+		if x.KeyExpr != nil {
+			keys = append(keys, x.KeyExpr)
+		}
+		for _, d := range keys {
 			if err := awaitOutsideAsync(d, inAsync); err != nil {
 				return err
 			}
@@ -1082,12 +1134,8 @@ func privateNameErrors(n ast.Node, scopes []map[string]bool) error {
 // opens with a "use strict" directive, or is a module (it imports or
 // exports).
 func programIsStrict(prog *ast.Program) bool {
-	if len(prog.Body) > 0 {
-		if es, ok := prog.Body[0].(*ast.ExpressionStatement); ok {
-			if sl, ok := es.Expr.(*ast.StringLiteral); ok && sl.Value == "use strict" {
-				return true
-			}
-		}
+	if ast.HasUseStrictDirective(prog.Body) {
+		return true
 	}
 	for _, st := range prog.Body {
 		switch st.(type) {
@@ -1175,28 +1223,74 @@ func strictParamNames(params []ast.Param, pos ast.Pos) error {
 	return nil
 }
 
-// labelErrors is the early error of a `break` or `continue` naming a label
-// no enclosing statement of the same function has. labels are the
-// enclosing labels; a function starts with none.
-func labelErrors(n ast.Node, labels []string) error {
+// jumpScope is what a `break` or `continue` can reach: the enclosing
+// labels, loop and switch of its function, and whether it is in one.
+type jumpScope struct {
+	labels      []string
+	loopLabels  []string // the labels naming an iteration statement
+	loop, swtch bool
+	inFunction  bool
+}
+
+// labelsLoop reports whether a labeled statement's body is an iteration
+// statement, through any further labels.
+func labelsLoop(st ast.Statement) bool {
+	for {
+		switch x := st.(type) {
+		case *ast.LabeledStatement:
+			st = x.Body
+		case *ast.ForStatement, *ast.ForInStatement, *ast.ForOfStatement, *ast.WhileStatement, *ast.DoWhileStatement:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+// labelErrors is the early error of a `break` or `continue` with nothing
+// to jump to: a label no enclosing statement of its function has, or no
+// enclosing loop (or switch, for `break`). A function starts afresh.
+func labelErrors(n ast.Node, sc jumpScope) error {
 	switch x := n.(type) {
-	case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration:
-		labels = nil
+	case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+		sc = jumpScope{inFunction: true}
 	case *ast.LabeledStatement:
-		labels = append(labels[:len(labels):len(labels)], x.Label)
+		sc.labels = append(sc.labels[:len(sc.labels):len(sc.labels)], x.Label)
+		if labelsLoop(x.Body) {
+			sc.loopLabels = append(sc.loopLabels[:len(sc.loopLabels):len(sc.loopLabels)], x.Label)
+		}
+	case *ast.ForStatement, *ast.ForInStatement, *ast.ForOfStatement, *ast.WhileStatement, *ast.DoWhileStatement:
+		sc.loop = true
+	case *ast.SwitchStatement:
+		sc.swtch = true
 	case *ast.BreakStatement:
-		if x.Label != "" && !slices.Contains(labels, x.Label) {
+		if x.Label != "" && !slices.Contains(sc.labels, x.Label) {
 			return errAtPos(x.GetPos(), diag.UndefinedLabel, "break", x.Label)
 		}
+		if x.Label == "" && !sc.loop && !sc.swtch {
+			if sc.inFunction {
+				return errAtPos(x.GetPos(), diag.JumpCrossesFunction)
+			}
+			return errAtPos(x.GetPos(), diag.BreakOutsideLoop)
+		}
 	case *ast.ContinueStatement:
-		if x.Label != "" && !slices.Contains(labels, x.Label) {
+		if x.Label != "" && !slices.Contains(sc.labels, x.Label) {
 			return errAtPos(x.GetPos(), diag.UndefinedLabel, "continue", x.Label)
+		}
+		if x.Label != "" && !slices.Contains(sc.loopLabels, x.Label) {
+			return errAtPos(x.GetPos(), diag.ContinueNonLoopLabel)
+		}
+		if x.Label == "" && !sc.loop {
+			if sc.inFunction {
+				return errAtPos(x.GetPos(), diag.JumpCrossesFunction)
+			}
+			return errAtPos(x.GetPos(), diag.ContinueOutsideLoop)
 		}
 	}
 	var err error
 	ast.ForEachChild(n, func(ch ast.Node) bool {
 		if err == nil {
-			err = labelErrors(ch, labels)
+			err = labelErrors(ch, sc)
 		}
 		return err == nil
 	})

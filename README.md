@@ -39,6 +39,7 @@ Releases follow [Semantic Versioning](https://semver.org/), applied automaticall
 - **libuv**, needed by every program with an event loop (timers with promises, `fetch`, servers, child processes, fs.watch, Workers): the loop runs on libuv, as Node's does (`brew install libuv` / `apt-get install libuv1-dev` / `apk add libuv-dev`). A program with no asynchronous work never links it. See [docs/tdd/TDD-00244.md](docs/tdd/TDD-00244.md)
 - **c-ares**, needed by a program using the `dns` module: its resolver is Node's, over c-ares (`brew install c-ares` / `apt-get install libc-ares-dev` / `apk add c-ares-dev`).
 - **libnghttp2**, needed by a program that serves HTTP/2: `http2`, and `klain:http`'s `listen` on its default `native` backend, which accepts cleartext HTTP/2 (h2c) beside HTTP/1.1 (`brew install nghttp2` / `apt-get install libnghttp2-dev` / `apk add nghttp2-dev`). A program serving neither never links it. See [docs/tdd/TDD-00111.md](docs/tdd/TDD-00111.md)
+- the **wasmtime C API**, needed only by a program using `WebAssembly`: its modules compile and run on wasmtime (`brew install wasmtime` on macOS; on Linux and Windows the `wasmtime-v<version>-<arch>-c-api` archive from wasmtime's releases, unpacked into `/usr/local` or anywhere `WASMTIME_DIR` names). A program without `WebAssembly` never links it.
 - **libh2o** (the libuv build), needed only for `klain:http` with `-http-backend=h2o` (`apt-get install libh2o-dev`; no macOS or MSYS2 package, so those keep the default `native` backend). See [docs/tdd/TDD-00255.md](docs/tdd/TDD-00255.md)
 - a **system webview**, needed only if the compiled program constructs a `Webview` (`import { Webview } from 'klain:webview'`) — the desktop-window module compiles a vendored C++ binding over the OS browser engine. **macOS needs nothing** (WebKit.framework ships with the OS). Linux needs the WebKitGTK dev packages at build time (`apt-get install libgtk-4-dev libwebkitgtk-6.0-dev`, or the older `libgtk-3-dev libwebkit2gtk-4.1-dev`; Fedora: `gtk4-devel webkitgtk6.0-devel`) and the matching shared libs at run time. Windows needs only the WebView2 SDK header at build time (`pacman -S mingw-w64-ucrt-x86_64-webview2-loader`); it renders with the Edge WebView2 runtime that is part of Windows 10/11, and nothing ships beside the app. Same conditional-linking convention: a program without a `Webview` never links it. `new Webview({ serve: embedDir('./dist') })` (`embedDir` from `klain:assets`) embeds a built SPA/SSG directory into the binary and serves it from an in-binary static server — a single-file desktop app with no external `dist/`. See [docs/status/DESKTOP-WEBVIEW.md](docs/status/DESKTOP-WEBVIEW.md)
 
@@ -123,7 +124,7 @@ make ir FILE=examples/basics/basics.ts
 | `make fuzz-all` | Run every fuzz target |
 | `make conformance-fetch` | Clone/update the pinned Test262 corpus into `.test262/` (idempotent, gitignored — see [Test262 conformance](#test262-conformance)) |
 | `make conformance` | Regenerate the Test262 reports against the full corpus, both compat lanes, into `docs/testing/strict/` and `docs/testing/js/` (fetches first if needed) |
-| `make shadow-report` | Compile the corpus comparing each old codegen type decider with the new front end, and rank the disagreements into `.shadow-out/SHADOW-REPORT.md` (see [Comparing the old and new front end](#comparing-the-old-and-new-front-end)) |
+| `make shadow-report` | Compile the corpus comparing each old codegen type decider with the new front end, rank the disagreements into `.shadow-out/SHADOW-REPORT.md`, and fail on a regression since the previous run (see [Comparing the old and new front end](#comparing-the-old-and-new-front-end)) |
 | `make clean` | Remove compiler binary and compiled example artifacts |
 
 ### Keeping test writes off the SSD
@@ -153,7 +154,7 @@ Set **`KML_IR_SITES=1`** and every line the compiler emits carries a `; @site fi
 
 ### Comparing the old and new front end
 
-While the compiler moves to a binder and checker, codegen still decides types itself in a few places: `inferExprType`, `resolveType`, `reliableGlobalType` and `inferUnannotatedReturnType`. With **`KML_SHADOW=<file>`** set and a new pass registered, each of those answers is also asked of the new pass, and every disagreement is appended to the file as a JSON line: the decider, the node kind and position, both answers, and the fields that differ. `make shadow-report` does this for the whole corpus and ranks the result into `.shadow-out/SHADOW-REPORT.md`. A decider is replaced by the new pass once its rows are gone. Asking changes nothing in the emitted IR, and with the variable unset nothing is asked.
+While the compiler moves to a binder and checker, codegen still decides types itself in a few places: `inferExprType`, `resolveType`, `reliableGlobalType` and `inferUnannotatedReturnType`. With **`KML_SHADOW=<file>`** set and a new pass registered, each of those answers is also asked of the new pass, and every disagreement is appended to the file as a JSON line: the decider, the node kind and position, both answers, and the fields that differ. `make shadow-report` does this for the whole corpus (the examples, tools and apps, Test262's language tests, and, when fetched, every Node and WPT conformance program as the conformance runner assembles it, in both lanes) and ranks the result into `.shadow-out/SHADOW-REPORT.md`, with each codegen rejection of a program the checker accepted. Each run keeps every unit's outcome in `.shadow-out/units.tsv` and fails when a unit clean in the previous run has a finding now; `go run ./tools/shadow -reuse` ranks an existing run again without compiling. A decider is replaced by the new pass once its rows are gone. Asking changes nothing in the emitted IR, and with the variable unset nothing is asked.
 
 ### Running a slice of the suite
 
@@ -169,6 +170,19 @@ klainmain [flags] <file.ts>
   --emit-llvm   Emit LLVM IR to stdout and stop (do not compile)
   
   -o <name>     Output binary name (default: input path without .ts)
+  
+  -lto          Link-time optimization (ThinLTO): the program, its builtin
+                library and its runtime compile to LLVM bitcode and are
+                optimized together at the link (through lld on Linux when
+                installed). Slower to compile; the bitcode objects cache
+                apart from the native ones. Same behavior either way.
+  
+  -g            Debug build: the program and its runtime compiled with
+                -g -O0 for a debugger (lldb/gdb). The runtime's C carries
+                line info against sources kept beside its cached objects;
+                on macOS a <name>.dSYM is written beside the binary. The
+                generated program code itself has no source-level line
+                info yet. Debug objects cache apart from optimized ones.
   
   --static      Statically link the output binary, for a scratch/distroless
                 Docker image with nothing else in it. Linux only: run
@@ -267,9 +281,10 @@ klainmain [flags] <file.ts>
                 90000 is TypeScript's for the same condition.
 
   -decorators <d>
-                Decorator dialect: experimental (default — the legacy
-                TypeScript/reflect-metadata semantics) or standard (the
-                TC39 Stage-3 dialect).
+                Decorator dialect: experimental (the legacy
+                TypeScript/reflect-metadata semantics; the default for
+                TypeScript) or standard (the TC39 Stage-3 dialect; the
+                default with -compat=js).
 
   -emit-decorator-metadata
                 Under -decorators=experimental, emit design:type/paramtypes/
@@ -312,9 +327,11 @@ klainmain [flags] <file.ts>
 
   --target <t>  Cross-compile for another platform instead of the host: a clang
                 triple (e.g. aarch64-linux-gnu) or a preset — sfos-aarch64
-                (Sailfish OS on 64-bit ARM). Requires --sysroot. Cross-arch on
-                the same OS works, as does macOS -> Linux (the target's OS/arch
-                is threaded through codegen); other cross-OS pairs are rejected.
+                (Sailfish OS on 64-bit ARM). 64-bit targets only: a 32-bit
+                triple (wasm32, i686, armv7) is refused. Requires --sysroot.
+                Cross-arch on the same OS works, as does macOS -> Linux (the
+                target's OS/arch is threaded through codegen); other cross-OS
+                pairs are rejected.
                 A cross-arch link needs lld on PATH. See "Cross-compiling for
                 Sailfish OS" below.
 
@@ -400,10 +417,11 @@ runs on Sailfish by branching on `process.platform` — reading `/proc` on Linux
 (portable across glibc/BusyBox) and BSD `ps` on macOS — the "write once, run
 everywhere, no runtime" pattern the docs-site guide walks through. **aarch64
 first** — it's what current devices ship, so it's where the initial support and
-the on-device verification went. Sailfish also runs on 32-bit ARM (`armv7hl`, the
-earlier hardware) and on x86/x86_64 (the Jolla Tablet and the community Intel
-ports); the `--target` machinery is generic, so those are a natural next step
-rather than a boundary — happy to prioritize one if you're building for it.
+the on-device verification went. Sailfish also runs on x86_64 (the community Intel
+ports); the `--target` machinery is generic, so that is a natural next step
+rather than a boundary. Its 32-bit builds (`armv7hl` for the earlier ARM
+hardware, and 32-bit x86) wait for 32-bit layouts: every value is laid out for
+64-bit words today, so `--target` refuses a 32-bit triple.
 
 **Build host.** A Linux host is the simplest — an arm64 Linux container runs
 natively on Apple Silicon, and `rpmbuild` for `-package=rpm` is available there.
@@ -472,7 +490,7 @@ Makefile            Build, test, and example targets
 
 1. **Lex**: `lexer.Tokenize` produces a flat token slice.
 2. **Parse**: `parser.Parse` builds an AST; expressions use Pratt-style precedence climbing.
-3. **Emit**: `llvm.NewEmitter().EmitProgram` walks the AST and writes LLVM IR text. The load-bearing tricks:
+3. **Emit**: `llvm.NewEmitter().EmitProgram` walks the AST and writes LLVM IR text. The tricks the rest depends on:
    - Two-builder pattern: `allocas` (entry-block allocas) and `body` (everything else), merged at function end.
    - `freshReg()` / `freshLabel()` mint unique SSA names; nothing is ever hand-numbered.
    - A scope stack for symbol resolution, plus a two-pass setup so functions can forward-reference each other.

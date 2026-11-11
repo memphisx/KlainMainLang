@@ -14,6 +14,7 @@ extern i64 __kml_dynobj_get(void *bag, const void *key);
 extern int strcmp(const char *a, const char *b);
 extern void *__kml_dynobj_new(void);
 extern void __kml_dynobj_set(void *o, const char *key, i64 v);
+extern void __kml_dynobj_set_attrs(void *o, const char *key, i64 v, i64 attrs);
 extern i64 __kml_dynobj_find(void *o, const char *key);
 extern i64 __kml_dynobj_attrs_at(void *o, i64 i);
 extern i64 __kml_dynobj_rawtag_at(void *o, i64 i);
@@ -141,6 +142,15 @@ void __kml_error_own_cause(void *op) {
     void **bagp = (void **)(o + KML_ERR_EXTRA);
     if (!*bagp) *bagp = __kml_dynobj_new();
     __kml_dynobj_set(*bagp, k_cause.d, *(i64 *)(o + KML_ERR_CAUSE));
+}
+
+/* Sets key on an Error as a non-enumerable own data property (an
+ * AggregateError subclass's `errors`), in its extra bag. */
+void __kml_error_set_hidden(void *op, const char *key, i64 v) {
+    char *o = (char *)op;
+    void **bagp = (void **)(o + KML_ERR_EXTRA);
+    if (!*bagp) *bagp = __kml_dynobj_new();
+    __kml_dynobj_set_attrs(*bagp, key, v, 1 | 4); /* writable, configurable */
 }
 
 /* Whether an Error's own key is enumerable now: an entry of its extra bag

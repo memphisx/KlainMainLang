@@ -69,9 +69,10 @@ function noop(): void {}
 function wrapCounted(fn: any, check: CallCheck): any {
     track(check);
     const f: any = fn;
-    const wrapped = (...args: any[]): any => {
+    // Node's: the call's receiver passes through.
+    const wrapped = function (this: any, ...args: any[]): any {
         check.actual++;
-        return f(...args);
+        return f.apply(this, args);
     };
     return wrapped;
 }
@@ -124,10 +125,29 @@ export function mustSucceed(fn?: (...args: any[]) => any, exact?: number): (...a
     return wrapCounted(body, check);
 }
 
+// The program's frame that called the caller of callSite: `script:line`,
+// as test/common's getCallSite()[1] names it; '' when the stack has none.
+function callSite(): string {
+    const lines = String(new Error().stack).split('\n');
+    for (let i = 1; i < lines.length; i++) {
+        let loc = lines[i].trim();
+        if (!loc.startsWith('at ')) continue;
+        loc = loc.slice(3);
+        const open = loc.lastIndexOf('(');
+        if (open >= 0 && loc.endsWith(')')) loc = loc.slice(open + 1, loc.length - 1);
+        if (loc.includes('/__kml_lib/')) continue;
+        const col = loc.lastIndexOf(':');
+        return col > 0 ? loc.slice(0, col) : loc;
+    }
+    return '';
+}
+
 export function mustNotCall(msg?: string): (...args: any[]) => any {
+    const site = callSite();
     return (...args: any[]): any => {
         const argsInfo = args.length > 0 ? '\ncalled with arguments: ' + args.map((a: any) => inspect(a)).join(', ') : '';
-        assert.fail((msg === undefined ? 'function should not have been called' : msg) + argsInfo);
+        const at = site === '' ? '' : ' at ' + site;
+        assert.fail((msg === undefined ? 'function should not have been called' : msg) + at + argsInfo);
     };
 }
 

@@ -7,7 +7,7 @@ import (
 
 func (e *Emitter) emitArrayJoin(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 1 {
-		return Value{}, fmt.Errorf("%d:%d: join takes 0 or 1 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: join takes 0 or 1 arguments")
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
@@ -62,11 +62,11 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 	sepVal = e.emitStringNullToLiteral(sepVal)
 	partsBytes, parts := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = shl i64 %s, 3", partsBytes, lenReg))
-	e.heapMallocInto(parts, partsBytes)
+	e.heapMallocInto(parts, allocElems, partsBytes)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("join.cond")
 	bodyL := e.freshLabel("join.body")
@@ -77,20 +77,20 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	inGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(inGep, elemTy)
 	var elemStrVal Value
-	if elemVal.Ty.IR == "ptr" && !elemVal.Ty.IsDynamic() && !elemVal.Ty.IsArray() {
+	if elemVal.Ty.IR == irPtr && !elemVal.Ty.IsDynamic() && !elemVal.Ty.IsArray() {
 		// A null or undefined element (a null reference) joins as "".
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(""), slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.internString(""), slot))
 		isNull := e.isAbsentPtr(elemVal.Ref, elemVal.Ty) // three-state null too
 		convL, joinL := e.freshLabel("join.conv"), e.freshLabel("join.str")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, joinL, convL))
@@ -99,11 +99,11 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", conv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", conv.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 		e.emitLabel(joinL)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 		elemStrVal = Value{Ref: r, Ty: TypePtr}
 	} else {
 		var err error
@@ -124,33 +124,35 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 			present, _ := e.nullableScalarAggParts(elemVal)
 			absent = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", absent, present))
+		case elemVal.Ty.IsArray() && elemVal.Ty.Nullable():
+			absent = e.isAbsentPtr(elemVal.Ref, elemVal.Ty) // the null header or the null cell
 		}
 		if absent != "" {
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, absent, e.internString(""), elemStrVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, absent, e.internString(""), elemStrVal.Ref))
 			elemStrVal = Value{Ref: r, Ty: TypePtr}
 		}
 	}
 	if holesHdr != "" {
 		hole, r := e.emitHoleTest(holesHdr, idxVal), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, hole, e.internString(""), elemStrVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, hole, e.internString(""), elemStrVal.Ref))
 		elemStrVal = Value{Ref: r, Ty: TypePtr}
 	}
 	partSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", partSlot, parts, idxVal))
-	e.heapStore("ptr", e.emitStringNullToLiteral(elemStrVal).Ref, partSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", partSlot, parts, idxVal))
+	e.heapStore(irPtr, e.emitStringNullToLiteral(elemStrVal).Ref, partSlot, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_join(ptr %s, i64 %s, ptr %s)", result, parts, lenReg, sepVal.Ref))
-	e.heapFree(parts)
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_join("+irPtr+" %s, i64 %s, "+irPtr+" %s)", result, parts, lenReg, sepVal.Ref))
+	e.heapFree(allocElems, parts)
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
@@ -158,9 +160,9 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 // Sorts in-place, stably (__kml_stable_sort), and returns the same array (ptr+len aggregate).
 func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 1 {
-		return Value{}, fmt.Errorf("%d:%d: sort takes 0 or 1 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: sort takes 0 or 1 arguments")
 	}
-	if err := bigIntSortComparatorErr(e.inferExprType(mem.Object), "sort", args, pos); err != nil {
+	if err := bigIntSortComparatorErr(e.typeOfExpr(mem.Object), "sort", args, pos); err != nil {
 		return Value{}, err
 	}
 
@@ -173,12 +175,11 @@ func (e *Emitter) emitArraySort(mem *ast.MemberExpression, args []ast.Expression
 	sortLen := lenReg
 	if hh := e.hofHolesHeader(mem.Object, hdr); hh != "" {
 		// The set elements are sorted; the holes go last, as Node leaves them.
-		e.ensureHoles()
 		sortLen = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_compact(ptr %s, i64 %d, i64 %s)", sortLen, hh, elemTy.Align(), lenReg))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_compact("+irPtr+" %s, i64 %d, i64 %s)", sortLen, hh, elemTy.Align(), lenReg))
 		e.emitFillHoles(ptrReg, sortLen, lenReg, elemTy)
 	}
-	if err := e.emitQsortCall(ptrReg, sortLen, elemTy, args, e.inferExprType(mem.Object).IsTypedArray(), pos); err != nil {
+	if err := e.emitQsortCall(ptrReg, sortLen, elemTy, args, e.typeOfExpr(mem.Object).IsTypedArray(), pos); err != nil {
 		return Value{}, err
 	}
 
@@ -241,11 +242,68 @@ func sortResultKind(t Type) int {
 // A TypedArray's (typed) default order is numeric, -0 before +0 and NaN
 // last (TypedArray.prototype.sort), over its elements' own width.
 func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.Expression, typed bool, pos ast.Pos) error {
-	e.ensureQsort()
+	e.ensureStrHeaderRuntime()
+
+	// An undefined comparator sorts in the default order; null throws, as
+	// any non-function does. A comparator that may be either is decided at
+	// run time.
+	if len(args) == 1 {
+		// A cast only changes the static type: `c as unknown as undefined`
+		// is still c's value.
+		for {
+			as, ok := args[0].(*ast.AsExpression)
+			if !ok {
+				break
+			}
+			args = []ast.Expression{as.Expr}
+		}
+		if ut := e.typeOfExpr(args[0]); ut.IsNull() && ut.IsUndefined() || ut.IR == "void" {
+			if _, err := e.emitExpr(args[0]); err != nil {
+				return err
+			}
+			return e.emitQsortCall(ptrReg, lenReg, elemTy, nil, typed, pos)
+		}
+		if ct := e.typeOfExpr(args[0]); ct.IsFunc() && (ct.Nullable() || ct.NullAndUndef()) {
+			cv, err := e.emitExpr(args[0])
+			if err != nil {
+				return err
+			}
+			present := ct
+			present.setNullable(false)
+			present.setUndefined(false)
+			present.setNullAndUndef(false)
+			bound := e.bindValue(Value{Ref: cv.Ref, Ty: present}, pos)
+			absentL, presentL, doneL := e.freshLabel("sort.nocmp"), e.freshLabel("sort.cmp"), e.freshLabel("sort.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.isAbsentPtr(cv.Ref, ct), absentL, presentL))
+			e.emitLabel(absentL)
+			if ct.NullAndUndef() || ct.Nullable() && !ct.IsUndefined() {
+				nullL, undefL := e.freshLabel("sort.nullcmp"), e.freshLabel("sort.undefcmp")
+				isNull := "true" // a `F | null` comparator's absence is null
+				if ct.NullAndUndef() {
+					isNull = e.isNullRef(cv.Ref)
+				}
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, undefL))
+				e.emitLabel(nullL)
+				e.emitInternalThrowKind("TypeError", e.internString("The comparison function must be either a function or undefined: null"))
+				e.emitLabel(undefL)
+			}
+			if err := e.emitQsortCall(ptrReg, lenReg, elemTy, nil, typed, pos); err != nil {
+				return err
+			}
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(presentL)
+			if err := e.emitQsortCall(ptrReg, lenReg, elemTy, []ast.Expression{bound}, typed, pos); err != nil {
+				return err
+			}
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			return nil
+		}
+	}
 
 	var cmpFnRef string
 
-	if len(args) == 0 && !elemTy.IsDynamic() && elemTy.IR == "ptr" && !isForOfStringTy(elemTy.withoutNullable()) {
+	if len(args) == 0 && !elemTy.IsDynamic() && elemTy.IR == irPtr && !isForOfStringTy(elemTy.withoutNullable()) {
 		// An object array's (a class's, a Date's, …) default order is its
 		// elements' strings
 		// (SortCompare: ToString each side once per comparison), so a
@@ -262,11 +320,11 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		}
 		if suffix != "" {
 			cmpFnRef = "@__kml_cmp_typed_" + suffix
-			e.usedCollections = true
-			e.declareFn(cmpFnRef[1:], fmt.Sprintf("declare i32 %s(ptr, ptr)", cmpFnRef))
+			e.declareFn(cmpFnRef[1:], fmt.Sprintf("declare i32 %s("+irPtr+", "+irPtr+")", cmpFnRef))
 		}
 	}
 	if cmpFnRef != "" {
+		// A typed array's own comparator (collections.c).
 	} else if len(args) == 0 {
 		// Default (no-comparator) sort is JS-faithful: every element is
 		// converted to a string and compared lexicographically, even numbers
@@ -279,13 +337,11 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 			e.ensureSortCmpAnyLex()
 			cmpFnRef = "@__kml_cmp_any_lex"
 		case elemTy.Float:
-			e.ensureSortCmpF64Lex()
 			cmpFnRef = "@__kml_cmp_f64_lex"
 		case isStringTy(elemTy):
-			e.ensureSortCmpStr()
+			e.ensureStrHeaderRuntime()
 			cmpFnRef = "@__kml_cmp_str"
 		default:
-			e.ensureSortCmpI64Lex()
 			cmpFnRef = "@__kml_cmp_i64_lex"
 		}
 	} else {
@@ -295,12 +351,36 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 			return err2
 		}
 		if cb.kind != cbClosure {
-			return fmt.Errorf("%d:%d: sort comparator must be an arrow function or closure", pos.Line, pos.Col)
+			// Another function value (a declaration, a bound function): the
+			// comparator, evaluated once, called by a closure over it.
+			fv, err := e.emitExpr(args[0])
+			if err != nil {
+				return err
+			}
+			fn := e.bindValue(fv, pos)
+			wrap := ast.NewArrowFunction([]ast.Param{{Name: "__kml_ca"}, {Name: "__kml_cb"}}, nil,
+				ast.NewCallExpression(fn, []ast.Expression{ast.NewIdentifier("__kml_ca", pos), ast.NewIdentifier("__kml_cb", pos)}, pos), nil, pos)
+			if cb, err2 = e.resolveCallbackWithHints(wrap, []Type{elemTy, elemTy}); err2 != nil {
+				return err2
+			}
+			if cb.kind != cbClosure {
+				return internalAt(pos, "sort comparator closure")
+			}
 		}
 
-		e.ensureSortClosGlobal()
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sort_clos, align 8", cb.hdrPtr))
-		e.emitInstr(fmt.Sprintf("store i32 %d, ptr @__kml_sort_res, align 4", sortResultKind(cb.retType())))
+		if ps := cb.paramTypes(); len(ps) > 0 && ps[0].IsDynamic() && !elemTy.IsDynamic() && elemTy.IR != "float" && elemTy.IR != "i1" && elemTy.IR != "i8" && elemTy.IR != "i16" && elemTy.IR != "i32" {
+			// A comparator over boxes (`any` parameters) sorting unboxed
+			// elements: adapted to take them as the trampoline passes them.
+			ft := cb.ty
+			ft.FuncParams = []Type{elemTy, elemTy}
+			if len(ps) == 1 {
+				ft.FuncParams = ft.FuncParams[:1]
+			}
+			cb.hdrPtr = e.convert(Value{Ref: cb.hdrPtr, Ty: cb.ty}, ft).Ref
+			cb.ty = ft
+		}
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_sort_clos, align 8", cb.hdrPtr))
+		e.emitInstr(fmt.Sprintf("store i32 %d, "+irPtr+" @__kml_sort_res, align 4", sortResultKind(cb.retType())))
 
 		switch {
 		case elemTy.IR == "float" || elemTy.IR == "i1" || elemTy.IR == "i8" || elemTy.IR == "i16" || elemTy.IR == "i32":
@@ -322,27 +402,21 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 				ft := cb.ty
 				ft.FuncParams = []Type{TypeF64, TypeF64}
 				ad := e.convert(Value{Ref: cb.hdrPtr, Ty: cb.ty}, ft)
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sort_clos, align 8", ad.Ref))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_sort_clos, align 8", ad.Ref))
 				name += "_d"
 			}
-			e.ensureSortClosGlobal()
-			e.usedCollections = true
 			cmpFnRef = "@__kml_sort_tramp_" + name
-			e.declareFn(cmpFnRef[1:], fmt.Sprintf("declare i32 %s(ptr, ptr)", cmpFnRef))
+			e.declareFn(cmpFnRef[1:], fmt.Sprintf("declare i32 %s("+irPtr+", "+irPtr+")", cmpFnRef))
 		case elemTy.IsDynamic():
 			// Boxed-element array (`any[]`): the closure takes/returns boxed
 			// `any`; the trampoline reduces the boxed-number result to a sign.
-			e.ensureSortTrampolineAny()
 			cmpFnRef = "@__kml_sort_tramp_any"
 		case elemTy.Float:
-			e.ensureSortTrampolineF64()
 			cmpFnRef = "@__kml_sort_tramp_f64"
 		case isStringTy(elemTy):
-			e.ensureSortTrampolineStr()
 			cmpFnRef = "@__kml_sort_tramp_str"
 		case elemTy.IsArray():
 			// An array of arrays: header pointers, each passed with its length.
-			e.ensureSortTrampolineArr()
 			cmpFnRef = "@__kml_sort_tramp_arr"
 		case elemTy.IsObject() || elemTy.IsClass():
 			// An object/class comparator (`(a, b) => a.k - b.k`) returns a
@@ -350,10 +424,8 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 			// as i64 and truncate to garbage, making the sort a silent no-op
 			// (ADR-00681). The obj trampoline loads ptr elements and reads a
 			// double result, like the string one.
-			e.ensureSortTrampolineObj()
 			cmpFnRef = "@__kml_sort_tramp_obj"
 		default:
-			e.ensureSortTrampolineI64()
 			cmpFnRef = "@__kml_sort_tramp_i64"
 		}
 	}
@@ -371,18 +443,18 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 
 	if elemTy.IsDynamic() {
 		// undefined elements go last, unsorted and never compared.
-		e.emitInstr(fmt.Sprintf("call void @__kml_sort_any(ptr %s, i64 %s, ptr %s)", ptrReg, lenReg, cmpFnRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_sort_any("+irPtr+" %s, i64 %s, "+irPtr+" %s)", ptrReg, lenReg, cmpFnRef))
 		return nil
 	}
-	if elemTy.IR == "ptr" {
+	if elemTy.IR == irPtr {
 		// A string or object array: its undefined (a null pointer) goes last
 		// the same way; its null (nullRef) is compared, as "null" by the
 		// default string sort.
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_sort_nullref, align 8", e.nullRef()))
-		e.emitInstr(fmt.Sprintf("call void @__kml_sort_ptr(ptr %s, i64 %s, ptr %s)", ptrReg, lenReg, cmpFnRef))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_sort_nullref, align 8", e.nullRef()))
+		e.emitInstr(fmt.Sprintf("call void @__kml_sort_ptr("+irPtr+" %s, i64 %s, "+irPtr+" %s)", ptrReg, lenReg, cmpFnRef))
 		return nil
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_stable_sort(ptr %s, i64 %s, i64 %d, ptr %s)", ptrReg, lenReg, elemSize, cmpFnRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_stable_sort("+irPtr+" %s, i64 %s, i64 %d, "+irPtr+" %s)", ptrReg, lenReg, elemSize, cmpFnRef))
 	return nil
 }
 
@@ -390,17 +462,17 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 // .sort(), but sorts a fresh copy and leaves arr untouched.
 func (e *Emitter) emitArrayToSorted(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 1 {
-		return Value{}, fmt.Errorf("%d:%d: toSorted takes 0 or 1 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: toSorted takes 0 or 1 arguments")
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	if err := bigIntSortComparatorErr(e.inferExprType(mem.Object), "toSorted", args, pos); err != nil {
+	if err := bigIntSortComparatorErr(e.typeOfExpr(mem.Object), "toSorted", args, pos); err != nil {
 		return Value{}, err
 	}
 	newPtr := e.emitArrayCopy(ptrReg, lenReg, elemTy)
-	if err := e.emitQsortCall(newPtr, lenReg, elemTy, args, e.inferExprType(mem.Object).IsTypedArray(), pos); err != nil {
+	if err := e.emitQsortCall(newPtr, lenReg, elemTy, args, e.typeOfExpr(mem.Object).IsTypedArray(), pos); err != nil {
 		return Value{}, err
 	}
 	r1 := e.newArrayHeader(newPtr, lenReg)
@@ -414,15 +486,13 @@ func (e *Emitter) emitArrayToSorted(mem *ast.MemberExpression, args []ast.Expres
 
 func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: slice takes 0 to 2 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: slice takes 0 to 2 arguments")
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
 	hdr = e.hofHolesHeader(mem.Object, hdr)
-	e.ensureMalloc()
-	e.ensureMemcpy()
 
 	// Zero-arg slice() is a full shallow copy: start = 0.
 	startN := "0"
@@ -457,11 +527,11 @@ func (e *Emitter) emitArraySlice(mem *ast.MemberExpression, args []ast.Expressio
 	byteCount := e.freshReg()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, sliceLen, elemTy.Align()))
-	e.heapMallocInto(newPtr, byteCount)
+	e.heapMallocInto(newPtr, elemAllocKind(elemTy), byteCount)
 
 	srcGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcGep, elemTy.IR, ptrReg, startN))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, srcGep, byteCount))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", srcGep, elemTy.IR, ptrReg, startN))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", newPtr, srcGep, byteCount))
 
 	r1 := e.newArrayHeader(newPtr, sliceLen)
 	e.emitHolesCopy(r1, "0", hdr, startN, sliceLen)
@@ -496,7 +566,7 @@ func (e *Emitter) emitEndIndex(arg ast.Expression, lenReg string) (string, error
 // TDD-00101), any other's an array of elemTy.
 func (e *Emitter) copyResultType(recv ast.Expression, elemTy Type) Type {
 	ty := ArrayOf(elemTy)
-	recvTy := e.inferExprType(recv)
+	recvTy := e.typeOfExpr(recv)
 	ty.setHost(hostTypedArray, recvTy.IsTypedArray())
 	ty.BigIntElem = recvTy.BigIntElem
 	ty.Clamped = recvTy.Clamped

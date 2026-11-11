@@ -26,6 +26,7 @@
  *                    log,log1p,log2,log10,sin,sinh,tan,tanh}(double)
  *   double __kml_fd_atan2(double y, double x)
  *   double __kml_fd_pow(double x, double y)
+ *   double __kml_hypot(const double *xs, long long n)
  */
 /*
  * fdlibm results depend on every rounding step, so FMA contraction changes
@@ -2961,3 +2962,28 @@ KFD_EXPORT1(tan)
 KFD_EXPORT1(tanh)
 double __kml_fd_atan2(double y, double x) { return kfd_atan2(y, x); }
 double __kml_fd_pow(double x, double y) { return kfd_pow(x, y); }
+
+/* Math.hypot over n operands, as V8's MathHypot: an infinite operand wins,
+ * then a NaN one; otherwise sqrt(sum((|x|/max)^2)) * max, summed with Kahan
+ * compensation. */
+double __kml_hypot(const double *xs, long long n) {
+    double max = 0.0;
+    int nan = 0;
+    for (long long i = 0; i < n; i++) {
+        double ax = fabs(xs[i]);
+        if (ax != ax) nan = 1;
+        else if (ax > max) max = ax;
+    }
+    if (max == INFINITY) return INFINITY;
+    if (nan) return NAN;
+    if (max == 0.0) return 0.0;
+    double acc = 0.0, comp = 0.0;
+    for (long long i = 0; i < n; i++) {
+        double s = fabs(xs[i]) / max;
+        double summand = s * s - comp;
+        double pre = acc + summand;
+        comp = (pre - acc) - summand;
+        acc = pre;
+    }
+    return sqrt(acc) * max;
+}

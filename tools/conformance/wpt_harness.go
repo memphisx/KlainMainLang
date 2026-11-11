@@ -95,10 +95,17 @@ function test(fn: (t: __WptT) => void, name: string = ""): void {
   t.finish();
 }
 
-function async_test(fn: (t: __WptT) => void, name: string = ""): void {
+// testharness.js's two forms, each returning the test: async_test(fn,
+// name?, properties?) runs fn with it, async_test(name, properties?) leaves
+// it to the file's own t.step_func/t.done.
+function async_test(fn: (t: __WptT) => void, name?: string, properties?: any): __WptT;
+function async_test(name: string, properties?: any): __WptT;
+function async_test(a: any, b: any = "", c: any = null): __WptT {
   __wpt_pending = __wpt_pending + 1;
-  const t: __WptT = new __WptT(name);
-  try { fn(t); } catch (e) { t.markFail(e); t.finish(); }
+  if (typeof a !== "function") return new __WptT(String(a));
+  const t: __WptT = new __WptT(String(b));
+  try { a(t); } catch (e) { t.markFail(e); t.finish(); }
+  return t;
 }
 
 function promise_test(fn: (t: __WptT) => any, name: string = ""): void {

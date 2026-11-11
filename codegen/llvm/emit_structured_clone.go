@@ -29,15 +29,32 @@ import (
 // options) function. The options are evaluated, as Node does, before the
 // clone; a transferred ArrayBuffer is copied, not detached.
 func (e *Emitter) emitStructuredClone(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) == 0 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: structuredClone takes a value and an optional options argument", pos.Line, pos.Col)
+	if len(args) == 0 {
+		// Node's own (doubled) wording.
+		e.emitThrowCoded("TypeError", "ERR_MISSING_ARGS", e.internString(`The "The value argument must be specified" argument must be specified`))
+		e.emitLabel(e.freshLabel("clone.noarg.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
+	if len(args) > 2 {
+		// Arguments past the options are evaluated, then ignored.
+		for _, a := range args[2:] {
+			if _, err := e.emitExpr(a); err != nil {
+				return Value{}, err
+			}
+		}
+		args = args[:2]
 	}
 	// A value whose shape is only known at run time is cloned by
-	// lib/node/internal_structured_clone.ts.
-	if e.clonesAtRunTime(args[0]) {
-		if m, ok := e.libExports["internal_structured_clone:structuredCloneAny"]; ok {
-			return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), args, pos))
+	// lib/node/internal_structured_clone.ts, as is one holding anything the
+	// static clone does not copy (a class instance, a nested collection, a
+	// function): there it clones as Node clones it, or throws Node's
+	// DataCloneError.
+	if e.clonesAtRuntimeOrUncopied(args[0]) {
+		m, ok := e.libExports["internal_structured_clone:structuredCloneAny"]
+		if !ok {
+			return Value{}, internalAt(pos, "structuredClone's run-time clone is not linked")
 		}
+		return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), args, pos))
 	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
@@ -55,10 +72,50 @@ func (e *Emitter) emitStructuredClone(args []ast.Expression, pos ast.Pos) (Value
 // run-time shape: arg is typed any/unknown, or asserted to be (`x as any`,
 // an assertion inference otherwise sees through).
 func (e *Emitter) clonesAtRunTime(arg ast.Expression) bool {
-	if as, ok := arg.(*ast.AsExpression); ok && as.TypeAnnot != nil && isUnconstrainedDynamic(e.resolveType(as.TypeAnnot)) {
+	if as, ok := arg.(*ast.AsExpression); ok && as.TypeAnnot != nil && isUnconstrainedDynamic(e.annotationType(as.TypeAnnot)) {
 		return true
 	}
-	return e.inferExprType(arg).IsDynamic()
+	return e.typeOfExpr(arg).IsDynamic()
+}
+
+// clonesAtRuntimeOrUncopied reports whether structuredClone(arg) runs the
+// run-time clone: arg's shape is only known at run time, or its type holds
+// something the static clone does not copy. Its result is then `any`.
+func (e *Emitter) clonesAtRuntimeOrUncopied(arg ast.Expression) bool {
+	return e.clonesAtRunTime(arg) || !e.staticCloneable(e.typeOfExpr(arg), map[string]bool{})
+}
+
+// staticCloneable reports whether emitDeepClone copies a value of type ty,
+// through every element and field (seen breaks a recursive type).
+func (e *Emitter) staticCloneable(ty Type, seen map[string]bool) bool {
+	if e.structuredCloneUnsupportedKind(ty) != "" {
+		return false
+	}
+	key := ty.StructIR() + "|" + ty.IR
+	if ty.IsObject() && !ty.IsError() {
+		if seen[key] {
+			return true
+		}
+		seen[key] = true
+	}
+	switch {
+	case ty.IsError() || ty.IsArrayBuffer() || ty.IsDate():
+		return true
+	case ty.IsArray():
+		return ty.ElemType == nil || e.staticCloneable(*ty.ElemType, seen)
+	case ty.IsMap():
+		return e.cloneableCollectionElem(*ty.MapKey) && e.cloneableCollectionElem(*ty.MapVal) &&
+			e.staticCloneable(*ty.MapKey, seen) && e.staticCloneable(*ty.MapVal, seen)
+	case ty.IsSet():
+		return e.cloneableCollectionElem(*ty.MapKey) && e.staticCloneable(*ty.MapKey, seen)
+	case ty.IsObject():
+		for _, f := range ty.VisibleFields() {
+			if _, ft, ok := ty.FieldIndex(f.Name); ok && !e.staticCloneable(ft, seen) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // structuredCloneUnsupportedKind names the first reference-like flag it
@@ -111,7 +168,7 @@ func (e *Emitter) structuredCloneUnsupportedKind(ty Type) string {
 // recurse; everything else with reference/identity semantics is rejected.
 func (e *Emitter) emitDeepClone(val Value, ty Type, pos ast.Pos) (Value, error) {
 	if kind := e.structuredCloneUnsupportedKind(ty); kind != "" {
-		return Value{}, fmt.Errorf("%d:%d: structuredClone does not yet support %s values", pos.Line, pos.Col, kind)
+		return Value{}, internalAt(pos, "static structuredClone of %s", kind)
 	}
 	switch {
 	case ty.IsError():
@@ -148,18 +205,17 @@ func (e *Emitter) emitDeepClone(val Value, ty Type, pos ast.Pos) (Value, error) 
 // preserves, is copied exactly). message/name are immutable strings, so copying
 // the pointers is a correct deep copy.
 func (e *Emitter) emitDeepCloneError(val Value, ty Type) (Value, error) {
-	e.ensureCalloc()
 	dst := e.freshReg()
-	e.heapCallocInto(dst, "1", fmt.Sprint(aggregateErrorStructSize()))
+	e.heapCallocInto(dst, allocObject, "1", fmt.Sprint(aggregateErrorStructSize()))
 	structIR := errorObjType.StructIR()
 	for _, name := range []string{ClassTagField, "message", "name"} {
 		idx, fieldTy, _ := errorObjType.FieldIndex(name)
 		sgep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sgep, structIR, val.Ref, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", sgep, structIR, val.Ref, idx))
 		fv := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", fv, fieldTy.IR, sgep, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", fv, fieldTy.IR, sgep, fieldTy.Align()))
 		dgep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dgep, structIR, dst, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", dgep, structIR, dst, idx))
 		e.heapStore(fieldTy.IR, fv, dgep, fieldTy.Align())
 	}
 	return Value{Ref: dst, Ty: ty}, nil
@@ -173,22 +229,19 @@ func (e *Emitter) emitDeepCloneArrayBuffer(val Value) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureCalloc()
-	e.ensureMalloc()
-	e.ensureMemcpy()
 	newData := e.freshReg()
 	newHdr := e.freshReg()
-	e.heapCallocInto(newData, lenVal.Ref, "1")
+	e.heapCallocInto(newData, allocBytes, lenVal.Ref, "1")
 	e.emitArrayBufferHeaderAlloc(newHdr, 16, false, "malloc")
 	srcDataSlot := e.freshReg()
 	srcData := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", srcDataSlot, val.Ref))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", srcData, srcDataSlot))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newData, srcData, lenVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", srcDataSlot, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", srcData, srcDataSlot))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", newData, srcData, lenVal.Ref))
 	e.heapStore("i64", lenVal.Ref, newHdr, 8)
 	newDataSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", newDataSlot, newHdr))
-	e.heapStore("ptr", newData, newDataSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", newDataSlot, newHdr))
+	e.heapStore(irPtr, newData, newDataSlot, 8)
 	return Value{Ref: newHdr, Ty: ArrayBufferType()}, nil
 }
 
@@ -206,15 +259,14 @@ func (e *Emitter) emitDeepCloneArray(val Value, ty Type, pos ast.Pos) (Value, er
 	ptrReg = e.arrayData(val)
 	lenReg = e.arrayLen(val)
 
-	e.ensureMalloc()
 	byteCount := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, lenReg, elemTy.Align()))
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, byteCount)
+	e.heapMallocInto(dataReg, elemAllocKind(elemTy), byteCount)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("clone.arr.cond")
 	bodyL := e.freshLabel("clone.arr.body")
@@ -224,24 +276,24 @@ func (e *Emitter) emitDeepCloneArray(val Value, ty Type, pos ast.Pos) (Value, er
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	srcGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcGep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", srcGep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(srcGep, elemTy)
 	clonedElem, err := e.emitDeepClone(elemVal, elemTy, pos)
 	if err != nil {
 		return Value{}, err
 	}
 	dstGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstGep, elemTy.IR, dataReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", dstGep, elemTy.IR, dataReg, idxVal))
 	e.storeArrayElem(dstGep, elemTy, clonedElem)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -255,7 +307,6 @@ func (e *Emitter) emitDeepCloneArray(val Value, ty Type, pos ast.Pos) (Value, er
 // (`{...obj}`) copy loop already uses, extended with a recursive clone step
 // per field instead of a flat load-then-store.
 func (e *Emitter) emitDeepCloneObject(val Value, ty Type, pos ast.Pos) (Value, error) {
-	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitObjMallocInto(dataReg, ty)
 	structIR := ty.StructIR()
@@ -263,7 +314,7 @@ func (e *Emitter) emitDeepCloneObject(val Value, ty Type, pos ast.Pos) (Value, e
 	for _, f := range ty.VisibleFields() {
 		idx, fieldTy, _ := ty.FieldIndex(f.Name)
 		srcGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, structIR, val.Ref, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", srcGep, structIR, val.Ref, idx))
 		// An array field slot holds a header pointer (TDD-00213 Stage 2): load
 		// the array, deep-clone it (a fresh array), and store back as a new
 		// header — the clone is a distinct object, exactly as structuredClone wants.
@@ -272,7 +323,7 @@ func (e *Emitter) emitDeepCloneObject(val Value, ty Type, pos ast.Pos) (Value, e
 			fieldVal = e.loadArrayFieldValue(srcGep, fieldTy)
 		} else {
 			loadReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(fieldTy), srcGep, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", loadReg, StructFieldIR(fieldTy), srcGep, fieldTy.Align()))
 			fieldVal = Value{Ref: loadReg, Ty: fieldTy}
 		}
 
@@ -282,7 +333,7 @@ func (e *Emitter) emitDeepCloneObject(val Value, ty Type, pos ast.Pos) (Value, e
 		}
 
 		dstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dstGep, structIR, dataReg, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", dstGep, structIR, dataReg, idx))
 		if fieldTy.IsArray() {
 			e.storeArrayFieldHeader(dstGep, cloned)
 		} else {
@@ -309,7 +360,7 @@ func (e *Emitter) cloneableCollectionElem(ty Type) bool {
 func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, error) {
 	keyTy, valTy := *ty.MapKey, *ty.MapVal
 	if !e.cloneableCollectionElem(keyTy) || !e.cloneableCollectionElem(valTy) {
-		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Map with an array/Map/Set key or value type is not supported", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "static structuredClone of a Map with a collection key or value")
 	}
 	suffix, keyIR := mapRuntime(keyTy)
 	newMap := e.emitMapOrSetCreate(ty)
@@ -317,7 +368,7 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 	condL := e.freshLabel("clone.map.cond")
 	bodyL := e.freshLabel("clone.map.body")
 	doneL := e.freshLabel("clone.map.done")
@@ -326,17 +377,17 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, keysLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	kGep, kElem := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", kElem, keyTy.IR, kGep, keyTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", kElem, keyTy.IR, kGep, keyTy.Align()))
 	vGep, vElem := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vElem, valTy.IR, vGep, valTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", vElem, valTy.IR, vGep, valTy.Align()))
 
 	clonedKey, err := e.emitDeepClone(Value{Ref: kElem, Ty: keyTy}, keyTy, pos)
 	if err != nil {
@@ -351,10 +402,10 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 		return Value{}, err
 	}
 	vRef := e.valueToMapVal(clonedVal, valTy)
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 %s)", suffix, newMap, keyIR, kRef, vRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set("+irPtr+" %s, %s %s, i64 %s)", suffix, newMap, keyIR, kRef, vRef))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -366,7 +417,7 @@ func (e *Emitter) emitDeepCloneMap(val Value, ty Type, pos ast.Pos) (Value, erro
 func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, error) {
 	elemTy := *ty.MapKey
 	if !e.cloneableCollectionElem(elemTy) {
-		return Value{}, fmt.Errorf("%d:%d: structuredClone of a Set with an array/Map/Set element type is not supported", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "static structuredClone of a Set with a collection element")
 	}
 	setSuffix, _ := mapRuntime(elemTy)
 	newSet := e.emitMapOrSetCreate(ty)
@@ -374,7 +425,7 @@ func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, erro
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 	condL := e.freshLabel("clone.set.cond")
 	bodyL := e.freshLabel("clone.set.body")
 	doneL := e.freshLabel("clone.set.done")
@@ -383,14 +434,14 @@ func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, erro
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, keysLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	eGep, eElem := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", eGep, elemTy.IR, keysPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", eElem, elemTy.IR, eGep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", eGep, elemTy.IR, keysPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", eElem, elemTy.IR, eGep, elemTy.Align()))
 	clonedElem, err := e.emitDeepClone(Value{Ref: eElem, Ty: elemTy}, elemTy, pos)
 	if err != nil {
 		return Value{}, err
@@ -400,10 +451,10 @@ func (e *Emitter) emitDeepCloneSet(val Value, ty Type, pos ast.Pos) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 0)", setSuffix, newSet, setKeyIR, kRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set("+irPtr+" %s, %s %s, i64 0)", setSuffix, newSet, setKeyIR, kRef))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)

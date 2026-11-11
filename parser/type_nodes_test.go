@@ -148,7 +148,7 @@ func showType(n ast.Node) string {
 }
 
 // declType parses `let v: <typ>;` and returns the annotation.
-func declType(t *testing.T, typ string) *ast.TypeAnnotation {
+func declType(t *testing.T, typ string) ast.TypeNode {
 	t.Helper()
 	prog, err := parser.Parse("let v: " + typ + ";")
 	if err != nil {
@@ -183,7 +183,7 @@ func TestTypeNodeShapes(t *testing.T) {
 		{"\"n\" | -1 | true", "union(string:n, number:-1, boolean:true)"},
 	} {
 		ta := declType(t, c.typ)
-		if got := showType(ta.TypeNode()); got != c.want {
+		if got := showType(ta); got != c.want {
 			t.Errorf("%s:\n got  %s\n want %s", c.typ, got, c.want)
 		}
 	}
@@ -201,14 +201,14 @@ func TestTypePredicateNodes(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", src, err)
 		}
-		var ret *ast.TypeAnnotation
+		var ret ast.TypeNode
 		switch d := prog.Body[0].(type) {
 		case *ast.FunctionDeclaration:
 			ret = d.ReturnType
 		case *ast.ClassDeclaration:
 			ret = d.Methods[0].ReturnType
 		}
-		if got := showType(ret.TypeNode()); got != want {
+		if got := showType(ret); got != want {
 			t.Errorf("%s: got %s, want %s", src, got, want)
 		}
 	}
@@ -223,7 +223,7 @@ func TestTypeNodeRangesAndBackPointers(t *testing.T) {
 		t.Fatal(err)
 	}
 	ta := prog.Body[0].(*ast.VarDeclaration).TypeAnnot
-	u := ta.TypeNode().(*ast.UnionType)
+	u := ta.(*ast.UnionType)
 	if r := u.Range; src[r.Start:r.End] != "Map<string, (x: number) => void>[] | null" || r.Pos != (ast.Pos{Line: 1, Col: 8}) {
 		t.Errorf("union range %+v = %q", r, src[r.Start:r.End])
 	}
@@ -233,24 +233,17 @@ func TestTypeNodeRangesAndBackPointers(t *testing.T) {
 	if r := fn.Range; src[r.Start:r.End] != "(x: number) => void" {
 		t.Errorf("function type range %q", src[r.Start:r.End])
 	}
-	if !ta.Nullable || ta.ElemType == nil || ta.ElemType.Name != "Map" {
-		t.Fatalf("annotation %+v", ta)
-	}
-	if ta.ElemType.TypeNode() != ref || ta.ElemType.ElemType.TypeNode() != fn {
-		t.Errorf("sub-annotations do not point at their nodes")
-	}
 }
 
 // Shapes the annotation model can't represent are rejected by the
 // conversion, with the message and position the parser used to give.
 func TestTypeConversionErrors(t *testing.T) {
 	for typ, want := range map[string]string{
-		"{ [k: boolean]: number }":           "1:14: only a string or number index signature",
-		"{ (n: number): string; a: number }": "1:8: a call signature combined with other object-type members",
-		"Promise<A, B>":                      "1:17: expected '>' to close Promise<T>",
-		"Map<string>":                        "expected ',' in Map<K,V>",
-		"Map<A, B, C>":                       "1:16: expected '>' to close Map<K,V>",
-		"<T>string":                          "expected a function type after a type parameter list",
+		"{ [k: boolean]: number }": "1:14: only a string or number index signature",
+		"Promise<A, B>":            "1:17: expected '>' to close Promise<T>",
+		"Map<string>":              "expected ',' in Map<K,V>",
+		"Map<A, B, C>":             "1:16: expected '>' to close Map<K,V>",
+		"<T>string":                "expected a function type after a type parameter list",
 	} {
 		_, err := parser.Parse("let v: " + typ + ";")
 		if err == nil || !strings.Contains(err.Error(), want) {

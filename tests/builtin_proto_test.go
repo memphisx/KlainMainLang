@@ -346,3 +346,35 @@ console.log(Boolean.prototype.valueOf.call(Object(true)), Number.prototype.toFix
 try { Boolean.prototype.valueOf.call({}); } catch (e) { console.log((e as Error).message); }
 `)
 }
+
+// A static object or class instance reads, calls and extracts the members
+// it inherits from Object.prototype, directly or boxed in `any`.
+func TestE2EInheritedObjectPrototypeMembers(t *testing.T) {
+	assertSameAsNode(t, `console.log(({}).constructor === Object, typeof ({}).toString);
+const q = { a: 1 };
+const z: any = q;
+console.log(typeof z.toString, typeof z.isPrototypeOf, z.hasOwnProperty("a"), z.hasOwnProperty("b"), z.toString());
+const p = { x: 1, y: "s" };
+console.log(p.isPrototypeOf({}), p.valueOf() === p, p.propertyIsEnumerable("y"), p.toLocaleString());
+class C { a = 1; }
+const c = new C();
+console.log(c.hasOwnProperty("a"), c.isPrototypeOf(c), C.prototype.isPrototypeOf(c));
+const f = p.hasOwnProperty;
+console.log(typeof f, f.call(p, "y"));
+`)
+}
+
+// A typed array's keys(), values(), entries() and [Symbol.iterator]() are
+// live Array Iterators, as is every builtin iterable's [Symbol.iterator]().
+func TestE2ETypedArrayAndBuiltinIterators(t *testing.T) {
+	assertSameAsNode(t, `{ const t = new Int8Array([3, -4, 5]);
+console.log(t.values().next(), [...t.keys()], [...t.entries()], [...t[Symbol.iterator]()]);
+const s = t.subarray(1); const it = s.values(); console.log(it.next(), it.next(), it.next()); }
+{ const f = new Float64Array([1.5, 2]); console.log([...f.values()], f.entries().next()); }
+{ const b = Buffer.from("hi"); console.log([...b.values()], b.keys().next()); }
+{ const g = new BigInt64Array([1n, -2n]); console.log([...g.values()], g[Symbol.iterator]().next(), [...g.entries()]); }
+{ const t = new Int8Array(2); const i = t.values(); t[1] = 9; console.log([...i]); }
+{ const s = new Set([1, 2]); const m = new Map([["a", 1]]); console.log(s[Symbol.iterator]().next(), m[Symbol.iterator]().next()); }
+{ console.log([..."hé"[Symbol.iterator]()]); const r: readonly number[] = [5]; console.log(r[Symbol.iterator]().next()); }
+`)
+}

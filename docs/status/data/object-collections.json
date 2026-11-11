@@ -119,10 +119,10 @@
             ]
           },
           {
-            "feature": "`Object.defineProperty` / `getOwnPropertyDescriptor` / `getOwnPropertyNames` / accessors",
+            "feature": "`Object.defineProperty` / `getOwnPropertyDescriptor` / `getOwnPropertyDescriptors` / `getOwnPropertyNames` / accessors",
             "status": "implemented",
             "caveats": [
-              "An accessor descriptor on a declared field of a statically typed object is a compile error"
+              "An accessor defined on a declared field under a key known only at run time (`Object.defineProperty(o, k, { get })`) is not seen by the field's typed reads and writes, which read and store the field ([ADR-01984](../adr/01/ADR-01984.md))"
             ],
             "notes": [
               "Real property descriptors ([TDD-00155](../tdd/TDD-00155.md) Stage 5, [ADR-00629](../adr/00/ADR-00629.md)): spec create-defaults (absent attributes are false), non-configurable redefinition rules, data and accessor descriptor forms. Object-literal `get`/`set` compile to dynamic-ABI functions invoked with the original receiver (inherited getters through the prototype chain included); `Object.keys`/`for...in`/`JSON.stringify` honor enumerability (stringify and spread invoke getters); rejected writes/deletes throw module-strict JS TypeErrors",
@@ -155,7 +155,7 @@
             "feature": "`Reflect.get/set/has/deleteProperty/ownKeys/getPrototypeOf/setPrototypeOf/isExtensible/preventExtensions/defineProperty` + `defineMetadata`/`getMetadata`/`hasMetadata`",
             "status": "implemented",
             "caveats": [
-              "`Reflect.construct` with a `newTarget` other than the target throws a TypeError rather than constructing with that prototype",
+              "`Reflect.construct` of a builtin target (`Date`, `Map`, …) with a `newTarget` other than the target leaves the instance its builtin's prototype",
               "The metadata API (`defineMetadata`/`getMetadata`/`getOwnMetadata`/`hasMetadata`/`hasOwnMetadata`, TDD-00161 Stage 3) stores on a dynamic-object target and does not walk the prototype chain (so `get` == `getOwn`); `Reflect.metadata` as a decorator factory is rejected",
               "Every form requires a dynamic (`any`-typed, or `-compat=js`) target: a statically-typed object operand is a clean compile-time rejection (strict mode does not widen a typed struct to a bag, [ADR-00630](../adr/00/ADR-00630.md)), including `get`/`has`"
             ],

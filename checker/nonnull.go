@@ -112,7 +112,23 @@ func (c *Checker) checkCallee(e ast.Expression) {
 	if nt, ok := c.chainReceiver(e); ok {
 		t = nt // a callee continuing an optional chain
 	}
-	if c.Unanswered(t) || t.Flags&Union == 0 {
+	if !c.Unanswered(t) && t.Flags&Union == 0 {
+		// A callee that is only null or undefined (`null()`, a binding
+		// holding it).
+		switch e.(type) {
+		case *ast.NullLiteral, *ast.Identifier:
+		default:
+			return
+		}
+		switch {
+		case t.Flags&Null != 0:
+			c.report(diag.InvokePossiblyNull, startOf(e))
+		case t.Flags&Undefined != 0:
+			c.report(diag.InvokePossiblyUndef, startOf(e))
+		}
+		return
+	}
+	if c.Unanswered(t) {
 		return
 	}
 	var f nullFacts
@@ -154,9 +170,8 @@ func entityName(e ast.Expression) (string, bool) {
 			return "undefined", true
 		}
 	case *ast.MemberExpression:
-		if e.Optional || e.ChainEnd {
-			return "", false
-		}
+		// (an optional chain is named without its `?.`, as tsc's
+		// entityNameToString prints one)
 		if base, ok := entityName(e.Object); ok {
 			return base + "." + e.Property, true
 		}

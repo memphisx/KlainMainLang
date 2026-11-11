@@ -13,11 +13,10 @@ import (
 // decorators spec prescribes, reusing the ordinary call machinery by
 // synthesizing an `ast.CallExpression` whose callee is the decorator
 // expression and whose arguments are the spec's `(target, key[, index])`.
-// A single per-class `target` object (a D1 dynamic object) stands in for the
-// prototype, created once and shared across the class's decorators so a
-// decorator that stashes data on `target` and another that reads it back see
-// the same object identity. Return values are discarded — which is spec-exact
-// for property and parameter decorators (their return is always ignored).
+// A member decorator's target is the class's prototype (the class for a
+// static member), a class decorator's the class. Return values are
+// discarded — which is spec-exact for property and parameter decorators
+// (their return is always ignored).
 //
 // Decorators on one element apply bottom-up (the decorator nearest the
 // declaration first), so each element's Decorators slice — stored top-first —
@@ -34,26 +33,35 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 	}
 	pos := cd.GetPos()
 
-	// One shared per-class target object, bound to a synthetic local the
-	// synthesized decorator calls reference as their first argument.
-	e.ensureDynObj()
-	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
-	boxed := e.emitNbTagPtr(bag, kmlTagDynObject)
-	targetSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", targetSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed, targetSlot))
-	// A per-class synthetic binding name — decorator applications for several
-	// classes emit into the same top-level scope, so the target of one must not
-	// shadow another's.
-	targetName := "__kml_dec_target$" + cd.Name
-	e.define(targetName, Symbol{Ptr: targetSlot, Ty: TypeAny})
-	targetExpr := func() ast.Expression { return ast.NewIdentifier(targetName, pos) }
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 
 	// emitDecoratorMetadata: define design:type/paramtypes/returntype on the
 	// target before any user decorator runs, so a user decorator can read it
 	// (TDD-00161 Stage 3). No-op unless the flag is set.
-	e.emitClassMemberDesignMetadata(bag, cd, pos)
+	// A member decorator is given the class's prototype (an instance
+	// member's) or the class (a static one's), as TypeScript's __decorate
+	// passes them; their design:* metadata is defined on the same objects.
+	classExpr := func() ast.Expression { return ast.NewIdentifier(cd.Name, pos) }
+	memberTarget := func(static bool) ast.Expression {
+		if static {
+			return classExpr()
+		}
+		return ast.NewMemberExpression(classExpr(), "prototype", pos)
+	}
+	if e.opts.EmitDecoratorMetadata {
+		protoBag, err := e.reflectMetaTargetBag(memberTarget(false), pos)
+		if err != nil {
+			return err
+		}
+		classBag, err := e.reflectMetaTargetBag(classExpr(), pos)
+		if err != nil {
+			return err
+		}
+		e.emitClassMemberDesignMetadata(protoBag, classBag, cd, pos)
+	}
 
 	apply := func(dec ast.Expression, args []ast.Expression) error {
 		call := ast.NewCallExpression(dec, args, dec.GetPos())
@@ -65,7 +73,7 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 	for _, f := range cd.Fields {
 		for i := len(f.Decorators) - 1; i >= 0; i-- {
 			if err := apply(f.Decorators[i], []ast.Expression{
-				targetExpr(),
+				memberTarget(f.Static),
 				ast.NewStringLiteral(f.Name, pos),
 			}); err != nil {
 				return err
@@ -75,11 +83,11 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 
 	// Parameter decorators: dec(target, key, parameterIndex). key is the method
 	// name, or `undefined` for a constructor parameter (matching TS).
-	applyParamDecorators := func(params []ast.Param, key ast.Expression) error {
+	applyParamDecorators := func(params []ast.Param, key ast.Expression, target func() ast.Expression) error {
 		for idx, prm := range params {
 			for i := len(prm.Decorators) - 1; i >= 0; i-- {
 				if err := apply(prm.Decorators[i], []ast.Expression{
-					targetExpr(),
+					target(),
 					key,
 					ast.NewNumberLiteral(fmt.Sprintf("%d", idx), pos),
 				}); err != nil {
@@ -90,12 +98,13 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 		return nil
 	}
 	if cd.Constructor != nil {
-		if err := applyParamDecorators(cd.Constructor.Params, ast.NewNullLiteral(true, pos)); err != nil {
+		if err := applyParamDecorators(cd.Constructor.Params, ast.NewNullLiteral(true, pos), classExpr); err != nil {
 			return err
 		}
 	}
 	for _, m := range cd.Methods {
-		if err := applyParamDecorators(m.Params, ast.NewStringLiteral(m.Name, pos)); err != nil {
+		static := m.IsStatic
+		if err := applyParamDecorators(m.Params, ast.NewStringLiteral(m.Name, pos), func() ast.Expression { return memberTarget(static) }); err != nil {
 			return err
 		}
 	}
@@ -119,15 +128,15 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 		}
 		// Default the slot to the original method, so an observe-only decorator
 		// (no replacement) leaves dispatch on the real implementation.
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxedMethod.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", boxedMethod.Ref, slot))
 
 		// Build the property descriptor { value, writable, enumerable,
 		// configurable } as a dynamic object, bound to a synthetic local.
 		descBag := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", descBag))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", descBag))
 		descField := func(name string, boxRef string) {
 			st := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv(ptr %s, ptr %s, i64 %s)", st, descBag, e.internString(name), boxRef))
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv("+irPtr+" %s, "+irPtr+" %s, i64 %s)", st, descBag, e.internString(name), boxRef))
 		}
 		descField("value", boxedMethod.Ref)
 		descField("writable", fmt.Sprintf("%d", nbTrue))
@@ -136,13 +145,13 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 		descBox := e.emitNbTagPtr(descBag, kmlTagDynObject)
 		descAlloca := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", descAlloca))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", descBox, descAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", descBox, descAlloca))
 		descName := "__kml_dec_desc$" + cd.Name + "$" + m.Name
 		e.define(descName, Symbol{Ptr: descAlloca, Ty: TypeAny})
 
 		for i := len(m.Decorators) - 1; i >= 0; i-- {
 			ret, err := applyGet(m.Decorators[i], []ast.Expression{
-				targetExpr(),
+				memberTarget(m.IsStatic),
 				ast.NewStringLiteral(m.Name, pos),
 				ast.NewIdentifier(descName, pos),
 			})
@@ -161,33 +170,34 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 				isObj := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagDynObject))
 				cur := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, descAlloca))
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, descAlloca))
 				sel := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", sel, isObj, boxedRet.Ref, cur))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sel, descAlloca))
+				e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sel, descAlloca))
 			}
 		}
 
 		// slot = effective descriptor's `value`.
 		finalDesc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalDesc, descAlloca))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalDesc, descAlloca))
 		valBox, err := e.emitDynAnyMemberGet(Value{Ref: finalDesc, Ty: TypeAny}, e.internString("value"), pos)
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", valBox.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", valBox.Ref, slot))
 	}
 
 	// Class decorators (Stage 4): dec(constructor). Applied last (after member
-	// decorators, matching TS's __decorate ordering) and bottom-up. The
-	// per-class target stands in for the constructor. Observe-only decorators
+	// decorators, matching TS's __decorate ordering) and bottom-up, each
+	// given the class. Observe-only decorators
 	// (the registration pattern) run faithfully; a decorator that *returns* a
 	// replacement constructor is refused at runtime — the static-class model has
 	// no constructor-replacement routing yet (Stage 4b) — rather than silently
 	// dropping the replacement.
 	if len(cd.TypeParams) == 0 {
+		// A class decorator is given the class itself.
 		for i := len(cd.Decorators) - 1; i >= 0; i-- {
-			ret, err := applyGet(cd.Decorators[i], []ast.Expression{targetExpr()})
+			ret, err := applyGet(cd.Decorators[i], []ast.Expression{classExpr()})
 			if err != nil {
 				return err
 			}
@@ -196,8 +206,18 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 				if err != nil {
 					return err
 				}
-				isRepl := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", isRepl, boxedRet.Ref, nbUndefined))
+				// The class itself back is no replacement.
+				tv, err := e.emitExpr(classExpr())
+				if err != nil {
+					return err
+				}
+				if tv, err = e.emitBoxValue(tv); err != nil {
+					return err
+				}
+				notUndef, notSelf, isRepl := e.freshReg(), e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", notUndef, boxedRet.Ref, nbUndefined))
+				e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %s", notSelf, boxedRet.Ref, tv.Ref))
+				e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", isRepl, notUndef, notSelf))
 				replL := e.freshLabel("clsdec.repl")
 				contL := e.freshLabel("clsdec.cont")
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRepl, replL, contL))
@@ -328,19 +348,11 @@ func classHasStandardDecorators(cd *ast.ClassDeclaration) bool {
 // concrete parameter types, calls the static `@<Implementor>_<method>`, and
 // boxes the result. Mirrors emitDynClosureAdapter's shape; the difference is
 // the receiver comes from the tag-12 call's `%p_this` word rather than a bound
-// closure env. Rejects a method whose signature the adapter can't marshal
-// (array/nullable/rest parameters) — a clean compile-time error.
+// closure env. An array parameter takes its (ptr, len) pair, an optional
+// scalar its presence, a rest the surplus words.
 func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos) (Value, error) {
 	info := e.classes[className]
 	sig := info.MethodSigs[methodName]
-	for _, pty := range sig.ParamTypes {
-		if pty.IsArray() || isNullableScalar(pty) {
-			return Value{}, fmt.Errorf("%d:%d: a method decorator on '%s.%s' is not supported yet — its parameter types can't be marshalled through the decorator ABI", pos.Line, pos.Col, className, methodName)
-		}
-	}
-	if sig.HasRest {
-		return Value{}, fmt.Errorf("%d:%d: a method decorator on '%s.%s' (rest parameter) is not supported yet", pos.Line, pos.Col, className, methodName)
-	}
 	llvmName := llvmSafeSymbol(info.MethodImplementor[methodName] + "_" + methodName)
 	fnName := fmt.Sprintf("@__kml_methadapt_%s", llvmSafeSymbol(className+"_"+methodName))
 
@@ -349,17 +361,37 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 	// Receiver: unbox %p_this (a boxed class instance) to the raw instance ptr.
 	_, thisPay := e.emitUnboxTagPayload(Value{Ref: "%p_this", Ty: TypeAny})
 	thisPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", thisPtr, thisPay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, thisPtr, thisPay))
 
-	argParts := []string{"ptr " + thisPtr}
+	argParts := []string{irPtr + " " + thisPtr}
 	for i, pty := range sig.ParamTypes {
-		word := e.emitArgWord(i)
-		if pty.IsDynamic() {
-			argParts = append(argParts, "i64 "+word)
+		if sig.HasRest && i == len(sig.ParamTypes)-1 {
+			// The rest gathers the surplus argv words into its (ptr, len)
+			// array pair, each unboxed to the element type.
+			elemTy := TypeI64
+			if pty.ElemType != nil {
+				elemTy = *pty.ElemType
+			}
+			hdr, n := e.emitArgvRestArray(i, elemTy)
+			argParts = append(argParts, irPtr+" "+hdr, "i64 "+n)
 			continue
 		}
-		uv := e.emitUnboxBoxToType(word, pty)
-		argParts = append(argParts, fmt.Sprintf("%s %s", pty.IR, uv.Ref))
+		word := e.emitArgWord(i)
+		switch {
+		case pty.IsDynamic():
+			argParts = append(argParts, "i64 "+word)
+		case pty.IsArray():
+			// An array parameter's ABI is its header pointer and length.
+			header, n := e.arrayArgFromAggregate(e.emitUnboxBoxToType(word, pty))
+			argParts = append(argParts, irPtr+" "+header, "i64 "+n)
+		case isNullableScalar(pty):
+			// An optional scalar: undefined (an omitted argument) is absent.
+			uv := e.convert(Value{Ref: word, Ty: TypeAny}, pty)
+			argParts = append(argParts, fmt.Sprintf("%s %s", nullableScalarStorageIR(pty), uv.Ref))
+		default:
+			uv := e.emitUnboxBoxToType(word, pty)
+			argParts = append(argParts, fmt.Sprintf("%s %s", pty.IR, uv.Ref))
+		}
 	}
 
 	retTy := sig.RetType
@@ -384,22 +416,21 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 		}
 	}
 
-	e.writeFunc(fmt.Sprintf("i64 %s(ptr %%env, i64 %%p_this, i64 %%p_argc, ptr %%p_argv)", fnName), e.allocas.String()+e.body.String())
+	e.writeFunc(fmt.Sprintf("i64 %s("+irPtr+" %%env, i64 %%p_this, i64 %%p_argc, "+irPtr+" %%p_argv)", fnName), e.allocas.String()+e.body.String())
 
 	restoreFn()
 	if boxFailed {
-		return Value{}, fmt.Errorf("%d:%d: a method decorator on '%s.%s' is not supported yet — its return type can't be boxed", pos.Line, pos.Col, className, methodName)
+		return Value{}, internalAt(pos, "method decorator adapter for '%s.%s': its result unboxable", className, methodName)
 	}
 
-	e.ensureMalloc()
 	rec := e.freshReg()
-	e.heapMallocInto(rec, "24")
-	e.heapStore("ptr", fnName, rec, 8)
+	e.emitClosureAlloc(rec, "24", fnName)
+	e.heapStore(irPtr, fnName, rec, 8)
 	envSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
-	e.heapStore("ptr", "null", envSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", envSlot, rec))
+	e.heapStore(irPtr, "null", envSlot, 8)
 	aritySlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", aritySlot, rec))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", aritySlot, rec))
 	e.heapStore("i64", fmt.Sprint(len(sig.ParamTypes)), aritySlot, 8)
 	return Value{Ref: e.emitNbTagPtr(rec, kmlTagDynFunc), Ty: TypeAny}, nil
 }
@@ -428,26 +459,26 @@ func (e *Emitter) emitDecoratedMethodCall(objTy Type, thisVal Value, methodName 
 			return Value{}, err
 		}
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", gep, argv, i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, gep))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", gep, argv, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", boxed.Ref, gep))
 	}
 	fnBox := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fnBox, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", fnBox, slot))
 	_, payload := e.emitUnboxTagPayload(Value{Ref: fnBox, Ty: TypeAny})
 	rec := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rec, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rec, payload))
 	fp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, rec))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, rec))
 	envSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", envSlot, rec))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", envSlot, rec))
 	env := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", env, envSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", env, envSlot))
 	recvBox, err := e.emitBoxValue(thisVal)
 	if err != nil {
 		return Value{}, err
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s, i64 %s, i64 %d, ptr %s)", r, fp, env, recvBox.Ref, n, argv))
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %s, i64 %s, i64 %d, "+irPtr+" %s)", r, fp, env, recvBox.Ref, n, argv))
 	if sig.RetType.IR == "void" || sig.RetType.IR == "" {
 		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeVoid}, nil
 	}

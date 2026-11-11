@@ -387,7 +387,17 @@ func main() {
 	compatFlag := flag.String("compat", "strict", "emitter compat lane: strict (default), js, or both (node suite only) — TDD-00022; the corpora are untyped JS, so the js lane measures the vanilla-JS-compat surface")
 	suite := flag.String("suite", "test262", "which conformance suite to run: test262 (default), node (Node-core pure modules, TDD-00121 Track B), wpt (Web Platform Tests headless slice, TDD-00082 Track 2), or ts (TypeScript acceptance oracle, Track C)")
 	cpuProfile := flag.String("cpuprofile", "", "write the run's CPU profile (the compiler's front end runs in this process) to this file")
+	flag.StringVar(&dumpManifest, "dump-manifest", "", "node and wpt suites: write each test's assembled program beside its shims and list it in this manifest (program, lane, test per line) for the shadow report, compiling nothing")
+	tsCase := flag.String("ts-case", "", "internal: run the front end over this one TS case and print its verdict (the ts suite's worker process)")
+	tsDir := flag.String("ts-dir", "", "internal: the -ts-case worker's scratch directory")
 	flag.Parse()
+	if *tsCase != "" {
+		if *compatFlag == "js" {
+			laneCompat = "js"
+		}
+		tsChild(*tsCase, *tsDir)
+		return
+	}
 	if *cpuProfile != "" {
 		f, err := os.Create(*cpuProfile)
 		if err != nil {
@@ -439,6 +449,7 @@ func main() {
 	// took it the job refused this process an allocation, which Go cannot
 	// survive. Elsewhere the cap bounds the programs only, so a share of the
 	// memory the OS can still hand out.
+	setFrontEndSlots(*workers)
 	if runtime.GOOS == "windows" && *memCapMB > 0 {
 		setBudget(int64(*memCapMB) << 20 / 2)
 	} else if avail := availableCommitBytes(); avail > 0 {
@@ -479,7 +490,7 @@ func main() {
 		runWPTSuite(*workDir, *perFileTimeout, *workers, *compatFlag, *passList)
 		return
 	case "ts":
-		runTSSuite(*workDir, *perFileTimeout, *compatFlag, *passList)
+		runTSSuite(*workDir, *perFileTimeout, *workers, *compatFlag, *passList)
 		return
 	default:
 		fatal("unknown -suite %q (want test262, node, wpt, or ts)", *suite)
@@ -855,7 +866,9 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	defer budget.release(rsv)
 	tCodegen := time.Now()
 	cgCh := make(chan cgOut, 1)
+	acquireFrontEnd()
 	go func() {
+		defer releaseFrontEnd()
 		var out cgOut
 		defer func() {
 			if r := recover(); r != nil {
@@ -886,10 +899,20 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 			out.err = perr
 			return
 		}
+		if prog.GlobalObjectEscapes {
+			acquireHeavy() // heavyBytes (budget.go)
+			defer releaseHeavy()
+		}
 		em := llvm.NewEmitter()
 		em.SetRegexMode(regexModeFlag)
 		em.SetCompatMode(laneCompat)
 		out.ir, out.err = em.EmitProgram(prog)
+		if os.Getenv("KML_CONF_BIG") != "" {
+			// A compile's size and the heap it left, to name a run's heaviest.
+			var m runtime.MemStats
+			runtime.ReadMemStats(&m)
+			fmt.Fprintf(os.Stderr, "big: %s ir=%dMB heapsys=%dMB escapes=%v\n", path, len(out.ir)>>20, (m.HeapSys-m.HeapReleased)>>20, prog.GlobalObjectEscapes)
+		}
 		if out.err == nil {
 			out.linkLibs = em.LinkLibs()
 			out.cSources, out.err = em.EmbeddedCSources()

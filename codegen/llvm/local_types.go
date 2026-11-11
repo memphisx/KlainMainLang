@@ -3,7 +3,6 @@ package llvm
 import (
 	"reflect"
 	"strconv"
-	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -30,11 +29,10 @@ func hoistLocalTypes(prog *ast.Program) {
 			}
 			seen[v.Pointer()] = true
 			if b, ok := v.Interface().(*ast.BlockStatement); ok {
-				inner := len(hoisted)
 				for _, st := range b.Body {
 					visit(reflect.ValueOf(st), seen)
 				}
-				hoistBlockTypes(b, &n, &hoisted, inner)
+				hoistBlockTypes(b, &n, &hoisted)
 				return
 			}
 			visit(v.Elem(), seen)
@@ -63,10 +61,9 @@ func hoistLocalTypes(prog *ast.Program) {
 	}
 }
 
-// hoistBlockTypes renames and removes b's own type declarations, rewriting
-// the annotations in b, and in the declarations hoisted from inside it
-// (those from index inner on), that name them.
-func hoistBlockTypes(b *ast.BlockStatement, n *int, hoisted *[]ast.Statement, inner int) {
+// hoistBlockTypes renames and removes b's own type declarations (the
+// checker resolves the annotations naming them by scope).
+func hoistBlockTypes(b *ast.BlockStatement, n *int, hoisted *[]ast.Statement) {
 	renames := map[string]string{}
 	kept := b.Body[:0:0]
 	for _, st := range b.Body {
@@ -91,59 +88,8 @@ func hoistBlockTypes(b *ast.BlockStatement, n *int, hoisted *[]ast.Statement, in
 		}
 		kept = append(kept, st)
 	}
-	if len(renames) == 0 {
-		return
-	}
-	b.Body = kept
-	rename := func(ta *ast.TypeAnnotation) {
-		if len(ta.Qualifier) > 0 {
-			return
-		}
-		base := strings.TrimRight(ta.Name, "[]")
-		if nu, ok := renames[base]; ok {
-			ta.Name = nu + ta.Name[len(base):]
-		}
-	}
-	seen := map[uintptr]bool{}
-	var walk func(v reflect.Value)
-	walk = func(v reflect.Value) {
-		switch v.Kind() {
-		case reflect.Pointer:
-			if v.IsNil() || seen[v.Pointer()] {
-				return
-			}
-			seen[v.Pointer()] = true
-			if ta, ok := v.Interface().(*ast.TypeAnnotation); ok {
-				rename(ta)
-			}
-			walk(v.Elem())
-		case reflect.Interface:
-			if !v.IsNil() {
-				walk(v.Elem())
-			}
-		case reflect.Struct:
-			if v.CanAddr() {
-				if ta, ok := v.Addr().Interface().(*ast.TypeAnnotation); ok && !seen[v.Addr().Pointer()] {
-					seen[v.Addr().Pointer()] = true
-					rename(ta)
-				}
-			}
-			for i := 0; i < v.NumField(); i++ {
-				if v.Type().Field(i).IsExported() {
-					walk(v.Field(i))
-				}
-			}
-		case reflect.Slice:
-			for i := 0; i < v.Len(); i++ {
-				walk(v.Index(i))
-			}
-		}
-	}
-	for _, st := range b.Body {
-		walk(reflect.ValueOf(st))
-	}
-	for _, st := range (*hoisted)[inner:] {
-		walk(reflect.ValueOf(st))
+	if len(renames) > 0 {
+		b.Body = kept
 	}
 }
 
@@ -169,7 +115,10 @@ func (e *Emitter) normalizeRestParams(prog *ast.Program) {
 		case reflect.Struct:
 			if p, ok := v.Addr().Interface().(*ast.Param); ok && v.CanAddr() {
 				if p.Rest && p.Type != nil && !e.restAnnotationIsArray(p.Type) {
-					p.Type = ast.WithAnyArrayStorage(p.Type)
+					if e.anyArrayStorage == nil {
+						e.anyArrayStorage = map[ast.TypeNode]bool{}
+					}
+					e.anyArrayStorage[p.Type] = true
 				}
 			}
 			for i := 0; i < v.NumField(); i++ {
@@ -188,17 +137,22 @@ func (e *Emitter) normalizeRestParams(prog *ast.Program) {
 
 // restAnnotationIsArray reports whether a rest parameter's annotation is an
 // array type, spelled (`T[]`, `Array<T>`) or through an alias.
-func (e *Emitter) restAnnotationIsArray(ta *ast.TypeAnnotation) bool {
-	if ta.ElemType != nil || strings.HasSuffix(ta.Name, "[]") {
-		return true
-	}
-	if ta.TupleElems != nil || ta.EmptyTuple || ta.Name == "" || ta.Name == "never" {
+func (e *Emitter) restAnnotationIsArray(ta ast.TypeNode) bool {
+	n := ta
+	if n == nil {
 		return false
 	}
-	_, named := e.interfaces[ta.Name]
-	_, generic := e.genericTypeAliases[ta.Name]
-	if named || generic {
-		return e.resolveType(ta).IsArray()
+	switch x := ast.Unparen(n).(type) {
+	case *ast.ArrayType:
+		return true
+	case *ast.TupleType:
+		return false
+	case *ast.KeywordType:
+		return false
+	case *ast.TypeReference:
+		if x.Name == "Array" && len(x.Qualifier) == 0 {
+			return true
+		}
 	}
-	return false
+	return e.annotationType(ta).IsArray()
 }

@@ -40,3 +40,14 @@ console.count(l);
 		t.Errorf("countReset(5) should warn and leave the count:\n%s", s)
 	}
 }
+
+// console.table as Node lays it out: nested arrays, a Map, a Set, a
+// properties filter, and index columns in key order.
+func TestE2EConsoleTableNodeLayout(t *testing.T) {
+	assertSameAsNode(t, `console.table([[1, 2], [3, 4, 5]]);
+console.table(new Map<string, any>([["a", { x: 1 }], ["b", { y: 2 }]]));
+console.table(new Set([1, "two"]));
+console.table([{ a: 1, b: 2 }, { a: 3, c: 4 }], ["a"]);
+console.table({ 2: { v: 1 }, 1: { v: 2 }, z: { w: 3 } });
+`)
+}

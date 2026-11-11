@@ -7,7 +7,7 @@ import (
 
 // ADR-01065: a closure whose block body can fall off the end returns
 // `T | undefined` on every path that emits it — the arrow/function-expression
-// emitter, the HOF callback typing and inferExprType now agree (they used to
+// emitter, the HOF callback typing and typeOfExpr now agree (they used to
 // disagree, so an indirect call read a `{ i1, T }` from a define returning a
 // bare T). A `T | undefined` value also travels through a promise (payload in
 // v0, presence in v1) and an async function's unwritten result slot is
@@ -90,7 +90,7 @@ func TestFallOffClosureAgainstDeclaredTypeRejected(t *testing.T) {
 		}
 		// The checker rejects what it types (a closure returning
 		// `number | undefined` where `number` is declared), codegen the rest.
-		if !strings.Contains(err.Error(), "falls off the end") && !strings.Contains(err.Error(), "is not assignable to") {
+		if !strings.Contains(err.Error(), "falls off the end") && !strings.Contains(err.Error(), "is not assignable to") && !strings.Contains(err.Error(), "no overload matches this call") {
 			t.Errorf("unexpected error for:\n%s\n%v", src, err)
 		}
 	}

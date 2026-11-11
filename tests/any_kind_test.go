@@ -458,3 +458,17 @@ func TestRegexLiteralFlagsValidated(t *testing.T) {
 	}
 	assertSameAsNode(t, `console.log(/x/dgimsy.flags, /x/v.flags);`)
 }
+
+// A JSDoc tag naming a generic bare (`{Promise}`, `{Map}`): its type
+// arguments any, as tsc reads a JavaScript file.
+func TestE2EJSDocBareGeneric(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `/** @return {Promise} */
+async function f() { return 3; }
+f().then((v) => console.log(v));
+/** @param {Map} m */
+function g(m) { return m.size; }
+console.log(g(new Map([[1, 2]])));
+const d = new TextDecoder();
+console.log(d.decode(new Uint8Array([104, 105])));
+`)
+}

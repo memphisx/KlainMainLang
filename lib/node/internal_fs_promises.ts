@@ -7,7 +7,9 @@ import {
     realpath as realpathCb, rename as renameCb, rm as rmCb, rmdir as rmdirCb, stat as statCb,
     statfs as statfsCb, symlink as symlinkCb, truncate as truncateCb, unlink as unlinkCb, utimes as utimesCb,
     writeFile as writeFileCb, Stats, Dirent, constants, _kmlOpenFileHandle, _kmlFileHandle,
+    opendir as opendirCb, Dir,
 } from './internal_fs';
+import type { OpenDirOptions } from './internal_fs';
 import type {
     PathLike, TimeLike, Mode, ObjectEncodingOptions, EncodingOption, WriteFileOptions, RmOptions,
     RmDirOptions, MakeDirectoryOptions, StatOptions, StatFsOptions,
@@ -88,6 +90,10 @@ export function readdir(path: PathLike, options: { encoding: 'buffer'; withFileT
 export function readdir(path: PathLike, options: ObjectEncodingOptions & { withFileTypes: true; recursive?: boolean | undefined }): Promise<Dirent[]>;
 export function readdir(path: any, options?: any): Promise<any> {
     return settle<any>((cb) => { readdirCb(path, options, cb); });
+}
+
+export async function opendir(path: PathLike, options?: OpenDirOptions): Promise<Dir> {
+    return settle<Dir>((cb) => { opendirCb(path, options ?? {}, cb); });
 }
 
 export function stat(path: PathLike, opts?: StatOptions & { bigint?: false | undefined }): Promise<Stats> {

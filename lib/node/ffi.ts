@@ -479,7 +479,7 @@ function lengthOf(length: any): number {
 export function toBuffer(pointer: bigint, length: number | bigint, copy?: boolean): Buffer {
     const a = addressOf(pointer);
     const n = lengthOf(length);
-    if (copy === false) return __kml_native.ffiView(a, n, false);
+    if (copy === false) return __kml_native.ffiView(a, n, 0);
     const out = Buffer.alloc(n);
     __kml_native.ffiCopyIn(a, out);
     return out;
@@ -488,7 +488,7 @@ export function toBuffer(pointer: bigint, length: number | bigint, copy?: boolea
 export function toArrayBuffer(pointer: bigint, length: number | bigint, copy?: boolean): ArrayBuffer {
     const a = addressOf(pointer);
     const n = lengthOf(length);
-    if (copy === false) return __kml_native.ffiView(a, n, true);
+    if (copy === false) return __kml_native.ffiView(a, n, 1);
     const ab = new ArrayBuffer(n);
     __kml_native.ffiCopyIn(a, new Uint8Array(ab));
     return ab;

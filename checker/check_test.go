@@ -45,6 +45,19 @@ func TestCheck(t *testing.T) {
 		// A defaulted sub-pattern takes its leaves from the default: only
 		// positions an array literal leaves out are implicitly any.
 		{"const a = function ([[y] = []]) {}\nconst b = function ([{ k } = {}]) {}\nconst c = function ([[y2] = [1]]) {}\nconst d = function ({ p: [q] = [2] }) {}\nconst e = function ([[w, v] = [1]]) {}", "1:TS7031 2:TS2339 5:TS7031"},
+		// A nested pattern of a parameter whose literal default holds null
+		// or undefined there; an assignment pattern's key the source lacks.
+		{"function f([[x]] = [null]) {}\nfunction h([{ x }] = [null]) {}\nfunction k([a, [x]] = [1, undefined]) {}\nfunction ok([[x]] = [[1]]) {}", "1:TS2488 2:TS2339 3:TS2488"},
+		{"var vals = { x: 3 };\nlet z: any, x: any;\n({ z } = vals);\n({ x } = vals);\n({ y: z } = vals);", "3:TS2339 5:TS2339"},
+		// A union member without the property (null, a closed object type)
+		// fails the destructuring; one with it in every member does not.
+		{"declare const u: { port: number } | null;\nconst { port } = u;\ndeclare const v: { a: number } | { b: string };\nconst { a } = v;\ndeclare const w: { a: number } | { a: string };\nconst { a: a2 } = w;", "2:TS2339 4:TS2339"},
+		{"if (true >= \"1\") {}\nfunction a(s: symbol) { 3n > s; }\ndeclare const s: symbol;\nfunction b() { s + ''; }\nfunction c() { \"x\" in true; }\nfunction M() {}\nM.prop = 1;\nif (delete M.prop) {}\nif (({} >= function () { return 1; })) {}\nif (1 < 2n) {}", "1:TS2365 2:TS2469 4:TS2469 5:TS2322 8:TS2790"},
+		{"interface XC { (): symbol }\ndeclare const X: XC;\nclass S1 extends X {}\nclass B {}\nclass C extends B {}", "3:TS2507"},
+		{"try {} catch ([a]) {}\ntry {} catch (e: Error) {}\ntry {} catch ([b]: any) {}\ntry {} catch (e: unknown) {}", "1:TS2488 2:TS1196"},
+		{"var o = new (function () {\n  return this;\n});", "1:TS7009 2:TS2683"},
+		{"for (let [[x]] of [[null]]) {}\nasync function f() { for await (const [[y]] of [[null]]) {} }\nconst a: number[][] = [[1]];\nfor (const [[z]] of [a]) {}", "1:TS2488 2:TS2488"},
+		{"const [[a]] = [null];\nconst [[b]] = [undefined];\nconst t: [null, number] = [null, 1];\nconst [[c2]] = t;\nconst [[d] = [1]] = [undefined];\nconst [[e2]] = [[1]];", "1:TS2488 2:TS2488 4:TS2488"},
 		{"function t(): never { throw 1; }\nfunction* g() { yield* t(); }\nfor (const x of t()) {}\nasync function* h() { yield* t(); }", "2:TS2488 3:TS2488 4:TS2504"},
 		{"const o = { get [Symbol.asyncIterator]() { return 1; } };\nasync function* h() { yield* o; }\nfunction* g() { yield* o; }\nfor (const x of o) {}\nconst ok = { *[Symbol.iterator]() { yield 1; } };\nfor (const y of ok) {}\nasync function* k() { yield* ok; }", "2:TS2504 3:TS2488 4:TS2488"},
 		{"var o1 = { [Symbol.iterator]() { return true; } };\nvar o2 = { [Symbol.iterator]() { return { next: 1 }; } };\nvar o4 = { [Symbol.asyncIterator]() { return null; } };\nvar o5 = { [Symbol.iterator]() { throw new Error(); } };\nasync function* a1() { yield* o1; }\nasync function* a2() { yield* o2; }\nasync function* a4() { yield* o4; }\nasync function* a5() { yield* o5; }\nfunction* s1() { yield* o1; }", "5:TS2504 6:TS2504 7:TS2504 8:TS2504 9:TS2488"},
@@ -144,6 +157,24 @@ func TestCheck(t *testing.T) {
 		{"const o = { missing }", "1:TS18004"},
 		{"const n = number", "1:TS2693"},
 		{"declare function f(x: string): string\nf<number>('a')", "2:TS2558"},
+		{"class P<K, V> { constructor(a: K) {} }\nnew P<number>(1)", "2:TS2558"},
+		{"const f = (a: number) => arguments.length", "1:TS2304"},
+		// A function expression no context gives a `this` (one a function
+		// returns) reads an implicit-any `this`; a tagged template passes its
+		// template object and substitutions, counted as a call's.
+		{"var fn = function () { return function () { return this } }", "1:TS2683"},
+		{"function tag() { return 1 }\ntag`x`", "2:TS2554"},
+		{"function tag(s: TemplateStringsArray, ...v: number[]) { return 1 }\ntag`x${1}`", ""},
+		{"function id(s: readonly string[]) { return 1 }\nid`a${1}b`", "2:TS2554"},
+		{"function f(a: number, b: number) { return a + b }\nconst arr = [1, 2]\nf(...arr)", "3:TS2556"},
+		{"function f(a?: number) { return a }\nconst arr = [1, 2]\nf(...arr)", ""},
+		{"function f(a: number, ...r: number[]) { return a }\nconst arr = [1, 2]\nf(1, ...arr)", ""},
+		{"function f(a: number, b: number) { return a + b }\nconst t: [number, number] = [1, 2]\nf(...t)", ""},
+		{"Math.max(...[1, 2])", ""},
+		{"declare function k(a: number, b: string): void\ntype F = (...p: [number, string]) => void\nconst h: F = (...p) => k(...p)", ""},
+		{"function g() { const h = () => arguments.length; return h() }", ""},
+		{"class D<A, B = string> { constructor(a: A) {} }\nnew D<number, string, boolean>(1)", "2:TS2558"},
+		{"class D<A, B = string> { constructor(a: A) {} }\nnew D<number>(1); new D(1)", ""},
 		{"class B { constructor(a: number) {} }\nclass D extends B { constructor() { super<number>(0) } }", "2:TS2754"},
 		// Accessibility (codes from tsc 7.0.2): private, protected, a
 		// protected member through another class's instance, a parent's
@@ -187,6 +218,8 @@ func TestCheck(t *testing.T) {
 		{"class C { constructor(public p?: number) {} }\nconst c: number | undefined = new C().p", ""},
 		// Properties (tsc 5.6: TS2339, TS2741, TS2353, TS2739, TS2740).
 		{"interface P { x: number; y: string }\ndeclare const p: P\np.z", "3:TS2339"},
+		{"class A { static y = 1 }\nA.zz\nA.y; A.prototype; A.hasOwnProperty('y')", "2:TS2339"},
+		{"class B { static q = 1 }\nclass C extends B {}\nC.q\nnamespace D {}\nclass D {}\nD.r", ""},
 		{"let l: number[] | null = null\nif (l) { l.map }", "2:TS2339"},
 		{"let a: number[] | null = null\na = null\na!.length\nexport {}", ""},
 		{"declare const e: Error\nif (e instanceof TypeError) {} else { e.message }", ""},
@@ -247,6 +280,9 @@ func TestCheck(t *testing.T) {
 		{"declare function all2<T>(v: T[]): T[]\nconst q: string[] = all2([1])", "2:TS2322"},
 		{"interface Box<T> { v: T }\ndeclare function box<T>(v: T): Box<T>\nconst b: Box<'a' | 'b'> = box('a')", ""},
 		{"declare function all2<T>(v: T[]): T[]\nconst q: number[] = all2([1])", ""},
+		// Inference widens only fresh literals: a declared type's stay.
+		{"interface Box<U> { v: U }\ndeclare function f<U>(a: (e: 0 | 1) => U): Box<U>\nconst b = f((q: 0 | 1) => q)\nconst b2: Box<0 | 1> = b\nconst w = f(() => 0)\nconst w2: Box<0> = w", "6:TS2322"},
+		{"interface Box<U> { v: U }\ndeclare function g<U>(a: U): Box<U>\ndeclare const k: 'x' | 'y'\nconst c = g(k)\nconst c2: Box<'x' | 'y'> = c\nconst d = g('x')\nconst d2: Box<'x'> = d", "7:TS2322"},
 		// Overloads declared without bodies are not checked by the first one.
 		{"declare function o(a: number): void\ndeclare function o(a: number, b: number): void\no(1, 2)", ""},
 	} {
@@ -275,6 +311,23 @@ func checkCodesLib(t *testing.T, src string) string {
 	return strings.Join(out, " ")
 }
 
+// TestUntypedFunctionCalls: a value typed Function itself (or a union with
+// one) is called and constructed untyped, as any; each expectation from tsc
+// 5.9 --strict.
+func TestUntypedFunctionCalls(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"declare const f: Function\nconst a: number = new f(\"a\")\nconst b: number = f(\"a\")", "2:TS2351"},
+		{"declare const g: Function | (() => string)\nconst c: number = g()\ndeclare const h: Function | FunctionConstructor\nconst d: number = h()", ""},
+		{"declare const u: Function | FunctionConstructor\nconst m: number = new u(\"a\")", "2:TS7009"},
+		{"declare const a: FunctionConstructor\ndeclare const b: Function\nconst xs = [a, b]\nconst t: number = xs", "4:TS2322"},
+		{"const GF = (function* () {}).constructor\nfor (const ctor of [Function, GF]) { const n: number = new ctor(\"a\") }", "2:TS7009"},
+	} {
+		if got := checkCodesLib(t, tc.src); got != tc.want {
+			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
 // TestInferredPredicates: TypeScript 5.5's inferred type predicates, the
 // type-guard overload of Array.filter, and a primitive narrowed to never;
 // each expectation from tsc 5.6 --strict.
@@ -289,6 +342,10 @@ func TestInferredPredicates(t *testing.T) {
 		{"declare const q: string[]\nconst r: string[] = q.filter(j => j !== \"x\")", ""},
 		{"declare let s: string\nif (typeof s !== \"string\") { const n: never = s }", ""},
 		{"const h: (x: number | null) => x is number = (x: number | null) => true", "1:TS2322"},
+		// Each instantiation of filter constrains its own S: a string[]
+		// filtered first does not make the next one's S extend string.
+		{"declare const q: string[]\nconst r: string[] = q.filter(j => j !== \"x\")\ndeclare const a: (number | null)[]\nconst b: null[] = a.filter(x => x === null)\nconst c: number[] = a.filter(x => x !== null)", ""},
+		{"declare const q: string[]\nconst r: string[] = q.filter(j => j !== \"x\")\ndeclare const a: (number | null)[]\nconst b: string = a.filter(x => x === null)", "4:TS2322"},
 	} {
 		if got := checkCodesLib(t, tc.src); got != tc.want {
 			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)
@@ -307,6 +364,12 @@ func TestAwaited(t *testing.T) {
 		{"async function g(p: Promise<number>) { const n: number = await p; const m: number = await 3 }", ""},
 		{"interface Obj { key: \"value\" }\nasync function g() { const o: Obj = await { key: \"value\" } }", ""},
 		{"async function g() { const v = await Promise.resolve(41); return v + 1 }", ""},
+		// `then` with no handler keeps the value (`TResult1 = T` of this
+		// promise's T, whichever promise was typed first); a contextual
+		// type infers into `TResult1 | TResult2`.
+		{"const a = Promise.resolve(\"s\").then(undefined)\nconst q: string = Promise.resolve(4).then(undefined)\nconst w: Promise<string> = Promise.resolve(4).then(undefined)", "2:TS2322"},
+		{"declare function t2<A = number, B = never>(f?: ((v: number) => A) | null): A | B\nconst z2: string = t2()", ""},
+		{"const p = Promise.resolve(4).then(undefined, null).then(v => { const s: string = v })", "1:TS2322"},
 		// A generic construct signature's result is instantiated (`new
 		// Promise<number>(…)` is a Promise<number>, not a Promise<T>).
 		{"interface PC { new <T>(x: T): Promise<T> }\ndeclare var Q: PC\nconst p = new Q<number>(1)\nconst s: string = p", "4:TS2322"},
@@ -328,8 +391,12 @@ func TestAwaited(t *testing.T) {
 		{"class C { #p() {}\n m() { const a: string = this.#p += 1; const b: string = this.#p &= 1 } }", "2:TS2803 2:TS2365 2:TS2322 2:TS2803 2:TS2362"},
 		// A parameter default reading its own parameter or a later one.
 		{"function a(x = x) {}\nfunction b(x = () => x) {}\nfunction c(x = y, y = 1) {}\nfunction d(x: number = x) {}", "1:TS7022 1:TS2372 3:TS2373 4:TS2372"},
+		{"interface I<T> { owner: T }\nvar foo = { one: {} as I<typeof foo> };\nvar bar = { f: () => ({} as I<typeof bar>) };", "2:TS7022"},
 		// A static private name read off an instance (TS2339).
 		{"class D { static #f() { return 42 } g() { return this.#f() } }", "1:TS2339"},
+		// … and an instance one read off the class (a static method's this).
+		{"class D { #f() { return 42 } static g() { return this.#f() } }", "1:TS2339"},
+		{"const E = class { #v = 1; static g() { return this.#v } }", "1:TS2339"},
 		{"interface B<T> { t: T }\ndeclare function f<T extends number>(x: T): B<T>\ndeclare function f(x: string): B<string>\nconst b: B<string> = f('s')", ""},
 		// Return type inference: T of wrap<T>(fn: T): T is take's parameter.
 		{"declare function wrap<T>(fn: T): T\ndeclare function take(cb: (a: string) => void): void\ntake(wrap((x) => { const n: number = x }))", "3:TS2322"},
@@ -415,6 +482,30 @@ func TestBuiltinNewContext(t *testing.T) {
 		// contextual type to wait for.
 		{"declare const o: any[]\nconst n: number = o.map((v) => 'x' + v).join(', ')\nexport {}", "2:TS2322"},
 		{"declare const o: number[]\nconst n: number = o.map((v) => 'x' + v)[0]\nexport {}", "2:TS2322"},
+		// A method on a union of arrays whose members' signatures do not
+		// combine is the method of an array of the union's elements (tsc
+		// 5.2 on).
+		{"declare const y: string[] | number[]\nconst m: boolean = y.map((v: string | number) => 1)\nconst f: boolean = y.filter((v: string | number) => !!v)\nexport {}", "2:TS2322 3:TS2322"},
+		// An annotated callback parameter takes the callback's argument
+		// contravariantly: `p: number` does not fit `previousValue: string
+		// | number`, so reduce's `<U>` overload is the one called.
+		// A callback whose parameters are all annotated leaves nothing to
+		// the context: the result's mismatch is reported.
+		{"declare function id<U>(f: () => U): U[]\nconst m: string = id(() => 1)\nexport {}", "2:TS2322"},
+		// strictFunctionTypes: a function type's parameters are
+		// contravariant, a method's bivariant; a callback whose result does
+		// not fit is reported as the parameters' (TS2328).
+		{"const f: (e: Error | null) => void = (e: Error) => {}\ndeclare function rb(cb: (err: number | null) => void): void\nrb((err: number) => {})\ninterface I { m(x: number | string): void }\nconst o: I = { m(x: number) {} }\nclass A { m(x: number | string) {} }\nclass B extends A { m(x: number) {} }\nexport {}", "1:TS2322 3:TS2345"},
+		{"interface Animal { a: string }\ninterface Dog extends Animal { d: string }\ndeclare let fc1: (f: (x: Animal) => Animal) => void\ndeclare let fc2: (f: (x: Dog) => Dog) => void\nfc1 = fc2\nfc2 = fc1\nexport {}", "5:TS2328 6:TS2322"},
+		// A class constructor's parameters are bivariant (`typeof A`), a
+		// constructor type's are not.
+		{"class A { constructor(n?: string) {} }\nclass C extends A { constructor(s: string) { super(s); } }\nlet ok: typeof A = C\nconst g: new (n?: string) => A = C\nexport {}", "4:TS2322"},
+		// A generic reached again in its own expansion is related by its
+		// measured variance: covariant here.
+		{"interface Foo1<T> { x: T; y: Foo1<(arg: T) => void> }\ndeclare const f10: Foo1<string>\nconst f12: Foo1<unknown> = f10\ninterface Foo2<T> { x: T; y: { x: (arg: T) => void, y: Foo2<(arg: T) => void> } }\ndeclare const f20: Foo2<string>\nconst f22: Foo2<unknown> = f20\nexport {}", "6:TS2322"},
+		// A union of tuples discriminates by a literal element.
+		{"type C = [\"aa\", number] | [\"bb\", string]\nfunction k(c: C) { if (c[0] === \"aa\") { const q: number = c[1] } else { const r: string = c[1] } }\nexport {}", ""},
+		{"declare const z: (string | number)[]\nconst r: number = z.reduce((p: number, c: string | number) => p + 1, 0)\nexport {}", ""},
 		// An interface with one call signature is a contextual signature
 		// (TransformerTransformCallback); a `T | undefined` object context
 		// types its properties.
@@ -606,6 +697,49 @@ func TestUpdateOperandArithmetic(t *testing.T) {
 	src := "let a = {};\n++a;\nlet s = \"x\";\ns++;\nlet n = 1;\nn++;\nlet b = 1n;\nb--;\nenum E { A }\nlet e = E.A;\ne++;\nlet q: any = {};\nq++;\nlet u: number | string = 1 as number | string;\nu++;\nlet bo = true;\nbo++;\n"
 	got := checkCodes(t, src)
 	if want := "2:TS2356 4:TS2356 15:TS2356 17:TS2356"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Cycles tsc never meets, each with no TS7023: a signature's parameters
+// read through `typeof` without its result, a self-call among the returns,
+// a call outside them, parameter defaults, a `typeof` in a type literal.
+func TestNoReturnCycle(t *testing.T) {
+	for _, src := range []string{
+		"function foo(arg: Parameters<typeof bar>[0]) {\n    return arg;\n}\nfunction bar(arg: string) {\n    return foo(arg);\n}\n",
+		"const fn1 = () => {\n  if (Math.random() > 0.5) {\n    return fn1()\n  }\n  return 0\n}\n",
+		"async function rec2() {\n  if (Math.random() < 0.5) {\n    return await rec2();\n  }\n  return \"hello\";\n}\n",
+		"function f(x: number) {\n    var z = f(x);\n    return x;\n}\n",
+		"function foo(a = bar()) { }\nfunction bar(a = foo()) {\n}\n",
+		"const f1 = function self(a: string) {\n  self(\"\");\n};\n",
+		"function foo<T>() {\n    var z = foo<typeof y>();\n    var y: {\n        y2: typeof z\n    } = null!;\n    return y;\n}\n",
+	} {
+		if got := checkCodesLib(t, src); got != "" {
+			t.Errorf("%s: got %s, want none", src, got)
+		}
+	}
+	if got := checkCodesLib(t, "function g(n: number) {\n  return g(n) + 1;\n}\n"); got != "1:TS7023" {
+		t.Errorf("a real cycle: got %q, want 1:TS7023", got)
+	}
+}
+
+// TestSymbolInTemplate: a symbol (or a union with one) in a template
+// literal has no implicit string (tsc 5.9 --strict: TS2731).
+func TestSymbolInTemplate(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"const a = Symbol(\"x\");\nconst s: symbol = a;\nconst u: symbol | number = 1;\nconsole.log(`${a}`);\nconsole.log(`${s}`);\nconsole.log(`${u}`, `${String(a)}`);\nfunction f(v: symbol | string) { return `${v}`; }", "4:TS2731 5:TS2731 7:TS2731"},
+	} {
+		if got := checkCodesLib(t, tc.src); got != tc.want {
+			t.Errorf("%s:\n got  %q\n want %q", tc.src, got, tc.want)
+		}
+	}
+}
+
+// A tuple target takes no Generator, Set or object without the array
+// members, even with every element optional (tsc 5.9 --strict).
+func TestTupleTargetFromNonArray(t *testing.T) {
+	src := "function* g() { yield; }\nconst t: [any?] = g();\ndeclare const s: Set<number>;\nconst v: [any?] = s;\nconst w: [any?] = { length: 0 };\nconst ok: [any?] = [1];\nfunction m([,]) {}\nm(g());"
+	if got, want := checkCodesLib(t, src), "2:TS2322 4:TS2322 5:TS2322 8:TS2345"; got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }

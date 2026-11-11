@@ -287,3 +287,20 @@ console.log(String.raw.name, String.raw.length, String.raw === String.raw);
 console.log('sync');
 `)
 }
+
+// A timer handle annotated through the timer function's type
+// (`ReturnType<typeof setTimeout>`) or by name (`NodeJS.Timeout`) is the
+// Timeout object, its type found from the declaration, not the name.
+func TestE2ETimerHandleAnnotations(t *testing.T) {
+	assertSameAsNode(t, `
+let t: ReturnType<typeof setTimeout> | undefined = setTimeout(() => console.log('fired'), 5);
+const i: ReturnType<typeof setImmediate> = setImmediate(() => {
+  console.log('imm');
+  // Both 1 ms, from one callback: they fire in the order they were set.
+  t = setTimeout(() => console.log('again'), 1);
+  const n: NodeJS.Timeout = setInterval(() => { console.log('iv'); clearInterval(n); }, 1);
+});
+console.log(typeof t, t!.hasRef(), i.hasRef());
+clearTimeout(t);
+`)
+}

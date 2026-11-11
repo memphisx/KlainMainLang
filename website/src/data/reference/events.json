@@ -8,7 +8,7 @@
     "loose": "9/9",
     "loosePct": 100,
     "strict": "8/9",
-    "strictPct": 78
+    "strictPct": 89
   },
   "lede": "Node's classic EventEmitter, imported from events (it is no global), not the WHATWG EventTarget/Event trio. With no type argument every event takes any arguments, @types/node's default event map; a type argument is an event map of argument tuples. The on/once/emit/off surface is compiled by the compiler rather than a registered class, so instanceof answers as a compile-time constant, and every listener is held as a dynamic function. A subclass can still override any of those methods (the override wins at every call site, and super.<method>(...) reaches the built-in).",
   "entries": [

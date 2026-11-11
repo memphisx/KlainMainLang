@@ -17,7 +17,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the module wor
 | `process` | ✅ | • Ambient global (no import needed) → [Process & CLI](PROCESS-CLI.md) |
 | `child_process` | ✅ | • → [Process & CLI](PROCESS-CLI.md) |
 | `readline` | ✅ | • → [Process & CLI](PROCESS-CLI.md) |
-| `console` | ✅ | • Ambient global (no import needed) → [console](CONSOLE.md) |
+| `console` | ✅ | • Ambient global (no import needed) → [console](CONSOLE.md)<br>• `import { Console } from 'console'`: a Console writing to the streams given (`stdout`, `stderr`, `ignoreErrors`, `inspectOptions`, `groupIndentation`), its methods bound; the module's default export is the global console |
 | `assert` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `querystring` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
 | `util` | ✅ | • → [Other Node core modules](NODE-CORE-MODULES.md) |
@@ -47,7 +47,7 @@ The primary export of each is a spec-identical re-export of an ambient global, a
 
 | Module | Status | Caveats | Notes |
 |---|---|---|---|
-| `buffer` (`Buffer`) | ✅ | • `File` and `resolveObjectURL` are not exported (no `File` global, no object-URL registry) | • A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)<br>• The module's own exports are TypeScript (`lib/node/internal_buffer.ts`, [ADR-01281](../adr/01/ADR-01281.md)): `constants`, `kMaxLength`, `kStringMaxLength`, `INSPECT_MAX_BYTES`, `isUtf8`, `isAscii`, `transcode`, `SlowBuffer`; namespace and default imports reach them and the globals |
+| `buffer` (`Buffer`) | ✅ | | • A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`File`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)<br>• The module's own exports are TypeScript (`lib/node/internal_buffer.ts`, [ADR-01281](../adr/01/ADR-01281.md)): `constants`, `kMaxLength`, `kStringMaxLength`, `INSPECT_MAX_BYTES`, `isUtf8`, `isAscii`, `transcode`, `SlowBuffer`, `resolveObjectURL`; namespace and default imports reach them and the globals, also read as a value |
 | `timers` | ✅ | • The module's timer functions wrap the globals rather than being them: `timers.setTimeout === setTimeout` is `false` (Node: `true`) | • Written in TypeScript (`lib/node/timers.ts`, [ADR-01280](../adr/01/ADR-01280.md)): named, aliased, default and namespace imports from 'timers'/'node:timers'; extra arguments reach the callback, `clear*` ignore `undefined`/`null`, and `timers.promises` is `timers/promises` → [Timers](TIMERS.md) |
 | `url` | ✅ | • Lenient relative parsing deferred | • Node's `url` module in TypeScript (`lib/node/url.ts`): `URL`/`URLSearchParams` (the globals' classes), the legacy `parse`/`format`/`resolve`/`resolveObject`/`Url`, `fileURLToPath`/`pathToFileURL`/`urlToHttpOptions`/`domainToASCII`/`domainToUnicode`; named, namespace and default imports → [URL](URL.md) |
 | `perf_hooks` | ✅ | • Histograms keep exact samples (not HDR); `eventLoopUtilization`/`nodeTiming` missing | • Written in TypeScript (`lib/node/perf_hooks.ts`, [ADR-01265](../adr/01/ADR-01265.md)): `performance`, the entry classes, `PerformanceObserver`, `createHistogram`, `monitorEventLoopDelay` → [Performance & Timing](PERFORMANCE-TIMING.md) |
@@ -59,7 +59,7 @@ Modules that fit the compiler's model and would add value — ranked and pulled 
 | Module | Status | Notes |
 |---|---|---|
 | `string_decoder` | ✅ | • Node's `StringDecoder`, ported to TypeScript: `write` holds back a character split across Buffers (UTF-8, UTF-16LE, base64) and `end` flushes it (a partial UTF-8 character as U+FFFD); other encodings decode each Buffer whole |
-| `util/types` | ✅ | • The type predicates `util.types` carries (`lib/node/util_types.ts`, [ADR-01289](../adr/01/ADR-01289.md)); the boxed-primitive, external, proxy and module-namespace ones are always false, as no such value exists here |
+| `util/types` | ✅ | • The type predicates `util.types` carries (`lib/node/util_types.ts`, [ADR-01289](../adr/01/ADR-01289.md)); `isExternal` is always false, as no such value exists here |
 | `assert/strict` | ✅ | • `assert.strict`: `equal` is `strictEqual`, and so on (`lib/node/assert_strict.ts`, [ADR-01288](../adr/01/ADR-01288.md)) |
 | `dns/promises` | ✅ | • `dns.promises`'s module: `lookup`, `lookupService`, the `resolve*` family, `reverse`, `Resolver`, `getServers`/`setServers` ([ADR-01294](../adr/01/ADR-01294.md)) |
 | `readline/promises` | ✅ | • `createInterface` and an `Interface` whose `question` returns a promise (with an `AbortSignal`); `Readline` queues cursor moves and clears until `commit()` → [Process & CLI](PROCESS-CLI.md) |
@@ -83,7 +83,7 @@ These depend on a live JavaScript engine, a runtime module loader, or V8 interna
 | `repl` | ❌ | • No interactive runtime evaluator (needs a live JS engine) |
 | `inspector` | ❌ | • No V8 inspector protocol — real Node also skips these files when the inspector is compiled out ([NODE-GAP-ANALYSIS](../testing/NODE-GAP-ANALYSIS.md)) |
 | `v8` | ❌ | • No V8 engine — heap statistics/serialize/flags have no meaning in native output (~18 conformance files reference it) |
-| `wasi` | ❌ | • No WebAssembly runtime; a WASM *target* is a separate direction, not a hosted `wasi` module |
+| `wasi` | ❌ | • The `WebAssembly` JS API runs modules on wasmtime ([Global functions](GLOBAL-FUNCTIONS.md)), but `node:wasi` (a WASI host for them) is not ported |
 | `trace_events` | ❌ | • No V8 trace-event subsystem |
 | `punycode` | ❌ | • Deprecated in Node (userland module) |
 | `sys` | ❌ | • Deprecated alias of `util` |

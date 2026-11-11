@@ -4,9 +4,11 @@ package llvm
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/binder"
 	"KlainMainLang/checker"
 )
 
@@ -25,10 +27,14 @@ func (e *Emitter) lowerSymbolFields(prog *ast.Program) error {
 	if err := ast.NameComputedMembers(prog); err != nil {
 		return err
 	}
+	if err := ast.RuntimeKeyError(prog); err != nil {
+		return err
+	}
 	e.lowerConstLiteralKeys(prog)
 	// The class each symbol-keyed member is declared on, by key, and each
 	// class's base.
-	fields := map[string]map[string]string{}
+	// (statics, the class's own members, apart from its instances'.)
+	fields, statics := map[string]map[string]string{}, map[string]map[string]string{}
 	bases := map[string]string{}
 	ast.Inspect(prog, func(n ast.Node) bool {
 		c, ok := n.(*ast.ClassDeclaration)
@@ -36,46 +42,53 @@ func (e *Emitter) lowerSymbolFields(prog *ast.Program) error {
 			return true
 		}
 		bases[c.Name] = c.BaseClass
-		add := func(key *ast.Identifier, name string) {
-			if fields[c.Name] == nil {
-				fields[c.Name] = map[string]string{}
+		add := func(key *ast.Identifier, name string, static bool) {
+			m := fields
+			if static {
+				m = statics
 			}
-			fields[c.Name][key.Name] = name
+			if m[c.Name] == nil {
+				m[c.Name] = map[string]string{}
+			}
+			m[c.Name][key.Name] = name
 		}
 		for _, m := range c.Methods {
 			if m.Key != nil {
-				add(m.Key, m.Name)
+				add(m.Key, m.Name, m.IsStatic)
 			}
 		}
 		for _, f := range c.Fields {
 			if f.Key != nil {
-				add(f.Key, f.Name)
+				add(f.Key, f.Name, f.Static)
 			}
 		}
 		return true
 	})
-	if len(fields) == 0 {
+	if len(fields) == 0 && len(statics) == 0 {
 		return nil
 	}
 	keys := map[string]bool{}
-	for _, m := range fields {
-		for k := range m {
-			keys[k] = true
+	for _, ms := range []map[string]map[string]string{fields, statics} {
+		for _, m := range ms {
+			for k := range m {
+				keys[k] = true
+			}
 		}
 	}
 	c := e.front()
 	if c == nil {
 		return nil
 	}
-	fieldOf := func(class, key string) (string, bool) {
+	memberOf := func(ms map[string]map[string]string, class, key string) (string, bool) {
 		for seen := 0; class != "" && seen < 64; seen++ {
-			if f, ok := fields[class][key]; ok {
+			if f, ok := ms[class][key]; ok {
 				return f, true
 			}
 			class = bases[class]
 		}
 		return "", false
 	}
+	fieldOf := func(class, key string) (string, bool) { return memberOf(fields, class, key) }
 	// The class being rewritten: `super[k]` is its base's member.
 	class := ""
 	var rewrite func(ast.Node) ast.Node
@@ -101,6 +114,17 @@ func (e *Emitter) lowerSymbolFields(prog *ast.Program) error {
 				return ast.NewMemberExpression(ie.Object, f, ie.GetPos())
 			}
 			return n
+		}
+		if cid, ok := ie.Object.(*ast.Identifier); ok {
+			if _, isClass := bases[cid.Name]; isClass {
+				if sym, _ := c.Binding().Resolve(cid); sym != nil && sym.Flags&binder.Class != 0 {
+					// `C[k]`: the class's own (static) member.
+					if f, ok := memberOf(statics, cid.Name, id.Name); ok {
+						return ast.NewMemberExpression(ie.Object, f, ie.GetPos())
+					}
+					return n
+				}
+			}
 		}
 		t := c.TypeOf(ie.Object)
 		if c.Unanswered(t) || t.Symbol == nil {
@@ -176,17 +200,29 @@ func literalIndexKey(e ast.Expression) (string, bool) {
 func symbolFields(t Type) []Field {
 	var out []Field
 	for _, f := range t.UserFields() {
-		if strings.HasPrefix(f.Name, symbolFieldPrefix) {
+		if isSymbolFieldName(f.Name) {
 			out = append(out, f)
 		}
 	}
 	return out
 }
 
+// isSymbolFieldName reports a field keyed by a symbol: a declared one's
+// (symbolFieldPrefix) or a well-known one's (`@@iterator`).
+func isSymbolFieldName(name string) bool {
+	if wk, ok := strings.CutPrefix(name, "@@"); ok {
+		return slices.Contains(wellKnownMemberKeys, wk)
+	}
+	return strings.HasPrefix(name, symbolFieldPrefix)
+}
+
 // symbolFieldDisplay is how util.inspect names a field: a symbol-keyed
 // one as `Symbol(description)`, an identifier bare, any other key quoted
 // (`'2'`, `'a-b'`).
 func symbolFieldDisplay(name string) string {
+	if wk, ok := strings.CutPrefix(name, "@@"); ok && slices.Contains(wellKnownMemberKeys, wk) {
+		return "Symbol(Symbol." + wk + ")"
+	}
 	rest, ok := strings.CutPrefix(name, symbolFieldPrefix)
 	if !ok {
 		if isInspectIdent(name) {
@@ -201,6 +237,19 @@ func symbolFieldDisplay(name string) string {
 // symbolFieldGlobal is the module global holding the symbol a
 // symbol-keyed field's name was made from, when the const is one.
 func (e *Emitter) symbolFieldGlobal(name string) (string, bool) {
+	if wk, ok := strings.CutPrefix(name, "@@"); ok && slices.Contains(wellKnownMemberKeys, wk) {
+		// A well-known symbol's member (`[Symbol.iterator]`): a constant
+		// holding the symbol.
+		g := "@__kml_wksym_slot_" + wk
+		if !e.wkSymbolSlots[wk] {
+			if e.wkSymbolSlots == nil {
+				e.wkSymbolSlots = map[string]bool{}
+			}
+			e.wkSymbolSlots[wk] = true
+			e.emitGlobal(fmt.Sprintf("%s = internal"+irGlobalAS+" constant "+irPtr+" %s, align 8", g, e.wellKnownSymbol(wk)))
+		}
+		return g, true
+	}
 	rest, ok := strings.CutPrefix(name, symbolFieldPrefix)
 	if !ok {
 		return "", false
@@ -221,7 +270,7 @@ func (e *Emitter) symbolFieldGlobal(name string) (string, bool) {
 func (e *Emitter) fieldPropertyKey(name string) string {
 	if g, ok := e.symbolFieldGlobal(name); ok {
 		sym := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sym, g))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", sym, g))
 		return e.emitSymbolPropertyKey(Value{Ref: sym, Ty: SymbolType()})
 	}
 	return e.internString(name)

@@ -22,14 +22,14 @@ const (
 func (e *Emitter) liveMapIterable(expr ast.Expression) (coll ast.Expression, ty Type, kind mapIterKind, ok bool) {
 	if call, isCall := expr.(*ast.CallExpression); isCall && len(call.Args) == 0 {
 		if me, isMember := call.Callee.(*ast.MemberExpression); isMember {
-			if t := e.inferExprType(me.Object); mapIterable(t) {
+			if t := e.typeOfExpr(me.Object); mapIterable(t) {
 				if k, isIter := collIterMethod(me.Property); isIter {
 					return me.Object, t, k, true
 				}
 			}
 		}
 	}
-	t := e.inferExprType(expr)
+	t := e.typeOfExpr(expr)
 	switch {
 	case t.IsCollIter():
 		return expr, t, t.IterKind, true
@@ -80,6 +80,11 @@ func collIterElemType(t Type) Type {
 // iterator is done, so a scalar value is `T | undefined`.
 func collIterResultType(t Type) Type {
 	elem := collIterElemType(t)
+	if isNullableScalar(elem) && !elem.IsUndefined() {
+		// A null element and the done value (undefined) are both absent:
+		// the value is three-state.
+		return genNextResultType(withNullAndUndef(elem))
+	}
 	if isNullableScalarMapValue(elem) {
 		elem.setNullable(true)
 		elem.setUndefined(true)
@@ -91,10 +96,9 @@ func collIterResultType(t Type) Type {
 // iterators, whose position the map's removals adjust.
 func (e *Emitter) emitMapIterOpen(ty Type, mapPtr string, kind mapIterKind) Value {
 	mapPtr = e.mapViewPtr(ty, mapPtr) // through a view, its own layout's entries (TDD-00258)
-	e.ensureMapIters()
 	node := e.freshReg()
 	it := CollIterType(ty, kind)
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_iter_open(ptr %s, i64 %d)", node, mapPtr, e.hostHeaderWord(it)))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_iter_open("+irPtr+" %s, i64 %d)", node, mapPtr, e.hostHeaderWord(it)))
 	return Value{Ref: node, Ty: it}
 }
 
@@ -126,34 +130,34 @@ func (e *Emitter) emitCollIterStep(node string, srcTy Type, kind mapIterKind, el
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", elemSlot, StructFieldIR(elemTy)))
 	moreSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", moreSlot))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", moreSlot))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", moreSlot))
 	mp, mapPtr, isNull := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", mp, node))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, mp))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", mp, node))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", mapPtr, mp))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, mapPtr))
 	chkL, hasL, endL, doneL := e.freshLabel("iter.chk"), e.freshLabel("iter.has"), e.freshLabel("iter.end"), e.freshLabel("iter.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, chkL))
 	e.emitLabel(chkL)
 	pp, pos, size, lt := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", pp, node))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", pos, pp))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", size, e.collIterSizeSlot(mapPtr, srcTy)))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", pp, node))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", pos, pp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", size, e.collIterSizeSlot(mapPtr, srcTy)))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", lt, pos, size))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", lt, hasL, endL))
 	e.emitLabel(hasL)
 	raw := e.emitCollIterElemRaw(mapPtr, pos, srcTy, kind)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(elemTy), raw.Ref, elemSlot))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", StructFieldIR(elemTy), raw.Ref, elemSlot))
 	nx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nx, pos))
 	e.heapStore("i64", nx, pp, 8)
-	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", moreSlot))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", moreSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(endL)
 	e.emitCollIterClose(node, srcTy)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	more = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", more, moreSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", more, moreSlot))
 	return more, elemSlot
 }
 
@@ -166,10 +170,17 @@ func (e *Emitter) emitCollIterNext(it Value) Value {
 	e.emitObjMallocInto(res, resTy)
 	vIdx, vTy, _ := resTy.FieldIndex("value")
 	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resTy.StructIR(), res, vIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", vGep, resTy.StructIR(), res, vIdx))
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(elemTy), slot))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", raw, StructFieldIR(elemTy), slot))
 	switch {
+	case isNullableScalar(elemTy) && isNullableScalar(vTy):
+		// The element is already a presence aggregate: absent (undefined)
+		// when done.
+		tri := e.toThreeState(Value{Ref: raw, Ty: elemTy}, vTy).Ref
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s zeroinitializer", sel, more, StructFieldIR(vTy), tri, StructFieldIR(vTy)))
+		e.heapStore(StructFieldIR(vTy), sel, vGep, 8)
 	case isNullableScalar(vTy):
 		e.heapStore(StructFieldIR(vTy), e.makeNullableScalarAgg(vTy, more, raw), vGep, 8)
 	default:
@@ -179,7 +190,7 @@ func (e *Emitter) emitCollIterNext(it Value) Value {
 		switch {
 		case elemTy.IsDynamic():
 			absent = fmt.Sprintf("%d", nbUndefined)
-		case ir != "ptr":
+		case ir != irPtr:
 			absent = zeroRef(elemTy)
 		}
 		sel := e.freshReg()
@@ -188,7 +199,7 @@ func (e *Emitter) emitCollIterNext(it Value) Value {
 	}
 	dIdx, _, _ := resTy.FieldIndex("done")
 	dGep, done := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resTy.StructIR(), res, dIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", dGep, resTy.StructIR(), res, dIdx))
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", done, more))
 	e.heapStore("i1", done, dGep, 1)
 	return Value{Ref: res, Ty: resTy}
@@ -198,14 +209,13 @@ func (e *Emitter) emitCollIterNext(it Value) Value {
 // elements into an array (spread, Array.from, toArray()).
 func (e *Emitter) emitCollIterDrain(it Value) Value {
 	elemTy := collIterElemType(it.Ty)
-	e.ensureRealloc()
 	buf, n, capS := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", buf))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", buf))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", n))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", capS))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", buf))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", n))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", capS))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", buf))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", n))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", capS))
 	loopL, growL, putL, endL := e.freshLabel("drain.loop"), e.freshLabel("drain.grow"), e.freshLabel("drain.put"), e.freshLabel("drain.end")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
 	e.emitLabel(loopL)
@@ -214,8 +224,8 @@ func (e *Emitter) emitCollIterDrain(it Value) Value {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
 	e.emitLabel(bodyL)
 	cur, cp, full := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, n))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cp, capS))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, n))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cp, capS))
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", full, cur, cp))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", full, growL, putL))
 	e.emitLabel(growL)
@@ -226,25 +236,31 @@ func (e *Emitter) emitCollIterDrain(it Value) Value {
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 8, i64 %s", nc, isZero, dbl))
 	// 16 bytes a slot covers every element layout, a { i1, T } one included.
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 16", bytes, nc))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ob, buf))
-	e.heapReallocInto(nb, ob, bytes)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nb, buf))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nc, capS))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ob, buf))
+	e.heapReallocInto(nb, allocElems, ob, bytes)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nb, buf))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", nc, capS))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", putL))
 	e.emitLabel(putL)
 	b, i, raw := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", b, buf))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, n))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(elemTy), slot))
-	e.storeArrayElement(b, i, raw, elemTy)
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", b, buf))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, n))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", raw, StructFieldIR(elemTy), slot))
+	// The array stores its element type (a nullable scalar as a box).
+	if st := arrayElemType(elemTy); isNullableScalar(elemTy) {
+		raw = e.convert(Value{Ref: raw, Ty: elemTy}, st).Ref
+		e.storeArrayElement(b, i, raw, st)
+	} else {
+		e.storeArrayElement(b, i, raw, elemTy)
+	}
 	i1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i1, i))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i1, n))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", i1, n))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
 	e.emitLabel(endL)
 	fb, fl, r1 := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fb, buf))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fl, n))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fb, buf))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", fl, n))
 	r1 = e.newArrayHeader(fb, fl)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}
 }
@@ -270,24 +286,24 @@ func mapIterTypes(t Type) (keyTy, valTy Type) {
 // field holds it: an array key is its header pointer.
 func (e *Emitter) emitMapKeyRaw(mapPtr, pos string, keyTy Type) Value {
 	kp, ka, gep := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", kp, mapPtr))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ka, kp))
-	if isReferenceKeyTy(keyTy) || keyTy.IsBigInt() {
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", kp, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ka, kp))
+	if boxedKeyTy(keyTy) {
 		box := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", gep, ka, pos))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, gep))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", gep, ka, pos))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", box, gep))
 		return Value{Ref: e.mapKeyFromSlot(box, keyTy), Ty: keyTy}
 	}
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, keyTy.IR, ka, pos))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, keyTy.IR, ka, pos))
 	return e.loadArrayElem(gep, keyTy)
 }
 
 // emitMapValAt loads entry pos's value from the map's dense value array.
 func (e *Emitter) emitMapValAt(mapPtr, pos string, valTy Type) Value {
 	vp, va, gep := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 24", vp, mapPtr))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", va, vp))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, valTy.IR, va, pos))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 24", vp, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", va, vp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, valTy.IR, va, pos))
 	return e.loadArrayElem(gep, valTy)
 }
 
@@ -305,21 +321,13 @@ func (e *Emitter) emitMapEntryAt(mapPtr, pos string, keyTy, valTy Type, isSet bo
 		}
 	}
 	entryTy := TupleType([]Type{keyTy, valTy})
-	e.ensureMalloc()
-	entry := e.freshReg()
-	e.heapMallocInto(entry, fmt.Sprint(entryTy.StructSize()))
-	for i, f := range []Value{k, v} {
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, entryTy.StructIR(), entry, i))
-		e.heapStore(StructFieldIR(f.Ty), f.Ref, slot, f.Ty.Align())
-	}
-	return Value{Ref: entry, Ty: entryTy}
+	return e.tupleOf([]Value{k, v}, entryTy)
 }
 
 // emitForOfMapLive walks a Map or Set live, as its iterator does in
 // JavaScript: an entry added during the loop is visited, a deleted one is
 // not, and clear() ends the walk. The loop steps an iterator node on the
-// map's list (ensureMapIters), whose position the map's removals adjust; a
+// map's list, whose position the map's removals adjust; a
 // step advances the position before the body runs, so deleting the current
 // entry does not skip the next. A loop over the collection or a fresh
 // keys()/values()/entries() owns its node and closes it however the loop is
@@ -330,15 +338,23 @@ func (e *Emitter) emitForOfMapLive(s *ast.ForOfStatement, coll ast.Expression, c
 	if err != nil {
 		return err
 	}
+	if !collVal.Ty.IsCollIter() && collVal.Ty.IsDynamic() {
+		// An iterator held boxed (matchAll of a value boxed): stepped by
+		// the iteration protocol.
+		return e.emitForOfAnyValue(s, collVal, condL, bodyL, incL, endL)
+	}
 	it := collVal
 	if !collTy.IsCollIter() {
 		it = e.emitMapIterOpen(collTy, collVal.Ref, kind)
 		closeNode := func() {
-			e.emitInstr(fmt.Sprintf("call void @__kml_map_iter_close(ptr %s)", it.Ref))
+			e.emitInstr(fmt.Sprintf("call void @__kml_map_iter_close("+irPtr+" %s)", it.Ref))
 		}
 		e.pendingFinallys = append(e.pendingFinallys, pendingExit{native: closeNode})
 		defer func() { e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1] }()
 		defer closeNode()
+		// This loop's own break and continue stay inside the close: a
+		// continue keeps walking, and endL closes after a break.
+		e.loopTargetsInside(endL, incL)
 	}
 	elemTy := collIterElemType(it.Ty)
 	varPtr, bindTy := e.defineForOfVar(s, elemTy, Type{})
@@ -351,13 +367,13 @@ func (e *Emitter) emitForOfMapLive(s *ast.ForOfStatement, coll ast.Expression, c
 
 	e.emitLabel(bodyL)
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", raw, StructFieldIR(elemTy), slot))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", raw, StructFieldIR(elemTy), slot))
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
 	switch {
 	case elemTy.IsArray() && !isPattern:
 		// The loop variable aliases the stored array: its slot takes the
 		// header the map holds.
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", raw, varPtr))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", raw, varPtr))
 	default:
 		elem := Value{Ref: raw, Ty: elemTy}
 		if elemTy.IsArray() {
@@ -381,41 +397,98 @@ func (e *Emitter) emitForOfMapLive(s *ast.ForOfStatement, coll ast.Expression, c
 // (field at off: 16 the keys, 24 the values).
 func (e *Emitter) emitMapSlotHeader(mapPtr string, off int, pos string, ty Type) Value {
 	fp, fa, gep, h := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", fp, mapPtr, off))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fa, fp))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", gep, fa, pos))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, gep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", fp, mapPtr, off))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fa, fp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", gep, fa, pos))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", h, gep))
 	return Value{Ref: h, Ty: ty}
 }
 
-// emitCollIterCall is a method call on an Array, Map or Set iterator: next(),
-// toArray() (ES2025's iterator helper) and [Symbol.iterator]'s self.
-func (e *Emitter) emitCollIterCall(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if _, helper := iteratorHelperArity[mem.Property]; helper {
-		// An Iterator.prototype helper reached without its declaration (a
-		// host adapter's synthesized call): its TypeScript function, the
-		// receiver first.
-		if fn, ok := e.globalLinks["__kml_Iterator_"+mem.Property]; ok {
-			return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(fn, pos), append([]ast.Expression{mem.Object}, args...), pos))
+// The Array, Map, Set and RegExp-string iterators' own methods: next()
+// and toArray() inline, and an Iterator.prototype helper reached without
+// its declaration (a host adapter's synthesized call) as its TypeScript
+// function, the receiver first.
+func init() {
+	for _, owner := range collIterOwners {
+		owner := owner
+		ownerReprs[owner] = func(t Type) bool {
+			return t.IsCollIter() && !t.IsDynamic() && t.IterSrc != nil && collIterOwner(t) == owner
 		}
-	}
-	it, err := e.emitExpr(mem.Object)
-	if err != nil {
-		return Value{}, err
-	}
-	switch mem.Property {
-	case "next":
-		// A Map iterator's next ignores its argument; evaluate it for effects.
-		for _, a := range args {
-			if _, err := e.emitExpr(a); err != nil {
-				return Value{}, err
+		intrinsics[owner+".prototype.next"] = intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				it, err := e.emitExpr(ex.Callee.(*ast.MemberExpression).Object)
+				if err != nil {
+					return Value{}, err
+				}
+				// A Map iterator's next ignores its argument; evaluate it for effects.
+				for _, a := range ex.Args {
+					if _, err := e.emitExpr(a); err != nil {
+						return Value{}, err
+					}
+				}
+				return e.emitCollIterNext(it), nil
+			},
+			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				return collIterResultType(e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object))
+			},
+		}
+		if owner == "ArrayIterator" {
+			in := intrinsics[owner+".prototype.next"]
+			in.dyn = (*Emitter).arrayIterDynNext
+			intrinsics[owner+".prototype.next"] = in
+		}
+		for helper := range iteratorHelperArity {
+			helper := helper
+			intrinsics[owner+".prototype."+helper] = intrinsic{
+				emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+					if call, ok := e.iteratorHelperCall(ex); ok {
+						return e.emitExpr(call)
+					}
+					it, err := e.emitExpr(ex.Callee.(*ast.MemberExpression).Object)
+					if err != nil {
+						return Value{}, err
+					}
+					if helper != "toArray" {
+						return Value{}, internalAt(ex.GetPos(), "%s helper '%s' not rewritten", collIterName(it.Ty), helper)
+					}
+					return e.emitCollIterDrain(it), nil
+				},
+				ty: func(e *Emitter, ex *ast.CallExpression) Type {
+					if call, ok := e.iteratorHelperCall(ex); ok {
+						return e.typeOfExpr(call)
+					}
+					return ArrayOf(collIterElemType(e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object)))
+				},
 			}
 		}
-		return e.emitCollIterNext(it), nil
-	case "toArray":
-		return e.emitCollIterDrain(it), nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: %s has no method '%s'", pos.Line, pos.Col, collIterName(it.Ty), mem.Property)
+}
+
+// collIterOwners are the declarations of the iterators a collIter holds.
+var collIterOwners = []string{"ArrayIterator", "MapIterator", "SetIterator", "RegExpStringIterator"}
+
+// collIterOwner is the declaration whose methods an iterator held as t has.
+func collIterOwner(t Type) string {
+	switch src := t.IterSrc; {
+	case t.IterRegExp:
+		return "RegExpStringIterator"
+	case src != nil && src.IsSet():
+		return "SetIterator"
+	case src != nil && src.IsMap():
+		return "MapIterator"
+	}
+	return "ArrayIterator"
+}
+
+// iteratorHelperCall is ex, an Iterator.prototype helper's call on an
+// iterator, as a call of its TypeScript function, when the program links it.
+func (e *Emitter) iteratorHelperCall(ex *ast.CallExpression) (ast.Expression, bool) {
+	mem := ex.Callee.(*ast.MemberExpression)
+	fn, ok := e.globalLinks["__kml_Iterator_"+mem.Property]
+	if !ok {
+		return nil, false
+	}
+	return ast.NewCallExpression(ast.NewIdentifier(fn, ex.GetPos()), append([]ast.Expression{mem.Object}, ex.Args...), ex.GetPos()), true
 }
 
 // collIterName is the iterator's class as console.log names it.
@@ -459,28 +532,28 @@ func (e *Emitter) emitInspectCollIter(v Value, depth int) (Value, error) {
 	}
 	srcTy, kind := *v.Ty.IterSrc, v.Ty.IterKind
 	mp, mapPtr, isNull := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", mp, v.Ref))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", mapPtr, mp))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", mp, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", mapPtr, mp))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, mapPtr))
 	countSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countSlot))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", countSlot))
 	liveL, doneL := e.freshLabel("inspiter.live"), e.freshLabel("inspiter.count")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, liveL))
 	e.emitLabel(liveL)
 	pp, pos, size, rem := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", pp, v.Ref))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", pos, pp))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", size, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", pp, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", pos, pp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", size, mapPtr))
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", rem, size, pos))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", rem, countSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", rem, countSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	count, spp, start := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, countSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", count, countSlot))
 	// When the iterator is closed the count is 0 and render never runs.
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", spp, v.Ref))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", start, spp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", spp, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", start, spp))
 	elemTy := collIterElemType(v.Ty)
 	render := func(idx string) (Value, error) {
 		at := e.freshReg()
@@ -499,7 +572,7 @@ func (e *Emitter) emitInspectCollIter(v Value, depth int) (Value, error) {
 	}
 	empty, res := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, count))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", res, empty, e.internString("["+name+"] {  }"), body.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", res, empty, e.internString("["+name+"] {  }"), body.Ref))
 	return Value{Ref: res, Ty: TypePtr}, nil
 }
 
@@ -510,7 +583,7 @@ func (e *Emitter) collIterSizeSlot(src string, srcTy Type) string {
 		return src
 	}
 	lp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", lp, src))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", lp, src))
 	return lp
 }
 
@@ -518,18 +591,18 @@ func (e *Emitter) collIterSizeSlot(src string, srcTy Type) string {
 // an array one drops its array.
 func (e *Emitter) emitCollIterClose(node string, srcTy Type) {
 	if !srcTy.IsArray() {
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_iter_close(ptr %s)", node))
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_iter_close("+irPtr+" %s)", node))
 		return
 	}
 	sp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", sp, node))
-	e.heapStore("ptr", "null", sp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", sp, node))
+	e.heapStore(irPtr, "null", sp, 8)
 }
 
 // arrayIterable reports whether t is an ordinary array, whose keys(),
 // values() and entries() give an Array Iterator over its header.
 func arrayIterable(t Type) bool {
-	return t.IsArray() && t.ElemType != nil && !t.IsTypedArray() && !t.IsFlatArray() && !t.IsDynamic() && !t.IsTuple()
+	return t.IsArray() && t.ElemType != nil && !t.BigIntElem && !t.IsFlatArray() && !t.IsDynamic() && !t.IsTuple()
 }
 
 // emitArrayIterOpen is an Array Iterator: an unregistered {next, pos,
@@ -547,20 +620,19 @@ func (e *Emitter) emitArrayIterOpen(arr ast.Expression, kind mapIterKind) (Value
 // matchAll's RegExp String Iterator, which walks its steps the same way.
 func (e *Emitter) emitArrayIterOpenValue(v Value, kind mapIterKind, regexp bool) Value {
 	header := e.arrayReturnHeader(v)
-	e.ensureMalloc()
 	ty := CollIterType(v.Ty, kind)
 	ty.IterRegExp = regexp
 	// Its host header word precedes the node.
 	base, node := e.freshReg(), e.freshReg()
-	e.heapMallocInto(base, "32")
+	e.heapMallocInto(base, allocHost, "32")
 	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", node, base))
-	e.heapStore("ptr", "null", node, 8)
+	e.emitBodyAddr(node, base)
+	e.heapStore(irPtr, "null", node, 8)
 	pp, sp := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", pp, node))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", pp, node))
 	e.heapStore("i64", "0", pp, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", sp, node))
-	e.heapStore("ptr", header, sp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", sp, node))
+	e.heapStore(irPtr, header, sp, 8)
 	return Value{Ref: node, Ty: ty}
 }
 
@@ -572,12 +644,12 @@ func (e *Emitter) emitArrayIterElemRaw(header, pos string, srcTy Type, kind mapI
 	}
 	elemTy := *srcTy.ElemType
 	data, gep := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, header))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, data, pos))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, header))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, data, pos))
 	var elem Value
 	if elemTy.IsArray() {
 		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, gep))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", h, gep))
 		elem = Value{Ref: h, Ty: elemTy}
 	} else {
 		elem = e.loadArrayElem(gep, elemTy)
@@ -586,13 +658,64 @@ func (e *Emitter) emitArrayIterElemRaw(header, pos string, srcTy Type, kind mapI
 		return elem
 	}
 	entryTy := TupleType([]Type{TypeI64, elemTy})
-	e.ensureMalloc()
-	entry := e.freshReg()
-	e.heapMallocInto(entry, fmt.Sprint(entryTy.StructSize()))
-	for i, f := range []Value{{Ref: pos, Ty: TypeI64}, elem} {
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, entryTy.StructIR(), entry, i))
-		e.heapStore(StructFieldIR(f.Ty), f.Ref, slot, f.Ty.Align())
+	return e.tupleOf([]Value{{Ref: pos, Ty: TypeI64}, elem}, entryTy)
+}
+
+// consoleTableIterRule is console.table of a Map or Set iterator: the
+// entries it has yet to yield, read from a copy at its position so it is
+// not consumed (V8's previewEntries), tabulated by the library's
+// tableIterPreview.
+func (e *Emitter) consoleTableIterRule(ex *ast.CallExpression) (Value, bool, error) {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || mem.Property != "table" || len(ex.Args) != 1 {
+		return Value{}, false, nil
 	}
-	return Value{Ref: entry, Ty: entryTy}
+	if id, ok := mem.Object.(*ast.Identifier); !ok || id.Name != "console" || e.isShadowedByLocal("console") {
+		return Value{}, false, nil
+	}
+	ty := e.typeOfExpr(ex.Args[0])
+	if ty.Host != hostCollIter || ty.IterSrc == nil || ty.IterSrc.IsArray() || ty.IterRegExp {
+		return Value{}, false, nil
+	}
+	fn, ok := e.libExports["internal_console_table:tableIterPreview"]
+	if !ok {
+		return Value{}, false, nil
+	}
+	v, err := e.emitExpr(ex.Args[0])
+	if err != nil {
+		return handled(Value{}, err)
+	}
+	// A closed iterator (null map) previews nothing: itself.
+	mp, mapPtr, isNull := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", mp, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", mapPtr, mp))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, mapPtr))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v.Ref, slot))
+	openL, joinL := e.freshLabel("tblit.open"), e.freshLabel("tblit.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, joinL, openL))
+	e.emitLabel(openL)
+	clone, pp, pos, cp := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_iter_open("+irPtr+" %s, i64 %d)", clone, mapPtr, e.hostHeaderWord(ty)))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", pp, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", pos, pp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", cp, clone))
+	e.heapStore("i64", pos, cp, 8)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", clone, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	pos0 := ex.GetPos()
+	name := "__kml_table_iter" + slot[1:]
+	e.define(name, Symbol{Ptr: slot, Ty: ty})
+	mode := "0"
+	switch {
+	case ty.IterKind == mapIterEntries && ty.IterSrc.IsSet():
+		mode = "2"
+	case ty.IterKind == mapIterEntries:
+		mode = "1"
+	}
+	entries := ast.NewArrayLiteral([]ast.Expression{ast.NewSpreadElement(ast.NewIdentifier(name, pos0), pos0)}, pos0)
+	call := ast.NewCallExpression(ast.NewIdentifier(fn, pos0), []ast.Expression{entries, ast.NewNumberLiteral(mode, pos0)}, pos0)
+	return handled(e.emitExpr(call))
 }

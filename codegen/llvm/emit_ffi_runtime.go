@@ -69,47 +69,64 @@ func (e *Emitter) ensureFFINatives() {
 // runtimeSymbols table itself is reachable from.
 func init() { runtimeSymbols["__kml_native_ffi_view"] = (*Emitter).ensureNativeFFIView }
 
-// ensureNativeFFIView defines @__kml_native_ffi_view(addr, len, arrayBuffer):
-// len bytes of foreign memory at addr as a Buffer, or an ArrayBuffer, that
-// shares them (Node's toBuffer/toArrayBuffer without a copy), boxed.
+// ensureNativeFFIView defines @__kml_native_ffi_view(addr, len, kind): len
+// bytes of foreign memory at addr as a Buffer (kind 0), an ArrayBuffer (1)
+// or a SharedArrayBuffer (2, a shared WebAssembly memory's) that shares
+// them (Node's toBuffer/toArrayBuffer without a copy), boxed.
 func (e *Emitter) ensureNativeFFIView() {
 	if e.fnDecls["__kml_native_ffi_view"] {
 		return
 	}
 	e.fnDecls["__kml_native_ffi_view"] = true
-	e.ensureMalloc()
 	restore := e.beginDetachedFunc()
 	addr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fptoui double %%addr to i64", addr))
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, addr))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, addr))
 	n := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fptosi double %%len to i64", n))
-	abL, bufL := e.freshLabel("ffiview.ab"), e.freshLabel("ffiview.buf")
-	e.emitTerminator(fmt.Sprintf("br i1 %%ab, label %%%s, label %%%s", abL, bufL))
+	abL, bufL, kindL := e.freshLabel("ffiview.ab"), e.freshLabel("ffiview.buf"), e.freshLabel("ffiview.kind")
+	sabL := e.freshLabel("ffiview.sab")
+	kind := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fptosi double %%kind to i64", kind))
+	isBuf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isBuf, kind))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBuf, bufL, kindL))
+	e.emitLabel(kindL)
+	isAB := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", isAB, kind))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAB, abL, sabL))
 	e.emitLabel(bufL)
 	bv, err := e.emitBoxValue(e.bufferAggregate(p, n))
 	if err != nil {
 		panic(err)
 	}
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", bv.Ref))
-	e.emitLabel(abL)
-	hdr := e.freshReg()
-	e.emitArrayBufferHeaderAlloc(hdr, 16, false, "malloc")
-	lg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 0", lg, hdr))
-	e.heapStore("i64", n, lg, 8)
-	dg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dg, hdr))
-	e.heapStore("ptr", p, dg, 8)
-	av, err := e.emitBoxValue(Value{Ref: hdr, Ty: ArrayBufferType()})
-	if err != nil {
-		panic(err)
+	for _, shared := range []bool{false, true} {
+		ty := ArrayBufferType()
+		if shared {
+			ty = SharedArrayBufferType()
+			e.emitLabel(sabL)
+		} else {
+			e.emitLabel(abL)
+		}
+		hdr := e.freshReg()
+		e.emitArrayBufferHeaderAlloc(hdr, 16, shared, "malloc")
+		lg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", lg, hdr))
+		e.heapStore("i64", n, lg, 8)
+		dg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", dg, hdr))
+		e.heapStore(irPtr, p, dg, 8)
+		av, err := e.emitBoxValue(Value{Ref: hdr, Ty: ty})
+		if err != nil {
+			panic(err)
+		}
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", av.Ref))
 	}
-	e.emitTerminator(fmt.Sprintf("ret i64 %s", av.Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc("i64 @__kml_native_ffi_view(double %addr, double %len, i1 %ab)", body)
+	e.writeFunc("i64 @__kml_native_ffi_view(double %addr, double %len, double %kind)", body)
 }
 
 // UsesFFIRegistry reports whether the registry or the order container must

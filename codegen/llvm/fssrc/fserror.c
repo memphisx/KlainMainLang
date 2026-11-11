@@ -16,9 +16,10 @@ extern void __kml_throw(void *err);
 extern void *__kml_errno_code(int e);
 extern void *__kml_errno_desc(int e);
 extern int __kml_uv_errno(int e);
-/* The IR wrapper over __kml_fs_error_new_named: it supplies the error's
- * name string, one symbol per constructor name compared by address. */
-extern void *__kml_fs_error_new(int e, const char *syscall, const char *path, const char *dest);
+/* The program's interned "Error" (hooks.c), an error's name compared by
+ * address. */
+extern void *__kml_error_name;
+void *__kml_fs_error_new(int e, const char *syscall, const char *path, const char *dest);
 
 #define PUT(o, off, T, v) (*(T *)((char *)(o) + (off)) = (v))
 
@@ -101,4 +102,9 @@ void __kml_fs_throw2(void *opdesc, const char *syscall, const char *path, const 
 
 void __kml_fs_throw(void *opdesc, const char *syscall, const char *path) {
     __kml_fs_throw2(opdesc, syscall, path, 0);
+}
+
+/* The Error for errno e: __kml_fs_error_new_named under the name "Error". */
+void *__kml_fs_error_new(int e, const char *syscall, const char *path, const char *dest) {
+    return __kml_fs_error_new_named(e, syscall, path, dest, __kml_error_name);
 }

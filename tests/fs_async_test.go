@@ -455,3 +455,52 @@ fs.unlinkSync(p)
 `, `ERR_INVALID_ARG_TYPE The "path" argument must be of type string or an instance of Buffer or URL. Received type number (123)
 hello world`)
 }
+
+// fs.opendir / opendirSync / fs.promises.opendir and Dir: batched reads in
+// both forms, recursion, async iteration closing the handle, the closed and
+// concurrent-operation errors and their timing, the option validation, and
+// an opendir error naming no path, as Node's do.
+func TestE2EFsOpendirDir(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCompatJS(t, `
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kml-dir-'));
+for (const p of ['sub', 'sub/deep']) fs.mkdirSync(path.join(root, p));
+for (const p of ['a', 'b', 'sub/c', 'sub/deep/d']) fs.writeFileSync(path.join(root, p), '');
+const rel = (e) => path.relative(root, path.join(e.parentPath, e.name)) + ':' + e.isDirectory();
+const d = fs.opendirSync(root, { bufferSize: 1 });
+console.log(d.path === root, Object.keys(d), typeof d[Symbol.asyncIterator]);
+const names = []; let e; while ((e = d.readSync()) !== null) names.push(rel(e));
+console.log(names.sort());
+d.closeSync();
+try { d.readSync() } catch (x) { console.log(x.code, x.message) }
+try { d.closeSync() } catch (x) { console.log(x.code, x.message) }
+try { d.read(() => {}) } catch (x) { console.log('read closed', x.code) }
+d.close().catch(x => console.log('close p', x.code));
+d.close((x) => console.log('close cb', x.code));
+d.read().catch(x => console.log('read p', x.code));
+const r = fs.opendirSync(root, { recursive: true }); const all = []; while ((e = r.readSync()) !== null) all.push(rel(e)); r.closeSync(); console.log(all.sort());
+fs.opendir(root, (err, dd) => {
+  dd.read((err, x) => {
+    console.log('cb read', err, typeof x.name);
+    try { dd.readSync() } catch (y) { console.log(y.code, y.message) }
+    dd.close(err => console.log('closed', err));
+  });
+  try { dd.readSync() } catch (y) { console.log('during', y.code) }
+});
+(async () => {
+  const dd = await fs.promises.opendir(root, { recursive: true });
+  const xs = []; for await (const x of dd) xs.push(x.name);
+  console.log('iter', xs.sort());
+  try { dd.closeSync() } catch (y) { console.log('after iter', y.code) }
+})();
+try { fs.opendirSync(path.join(root, 'nope')) } catch (x) { console.log(x.code, x.syscall, x.message, x.path) }
+try { fs.opendirSync(root, { bufferSize: 0 }) } catch (x) { console.log(x.code, x.message) }
+try { fs.opendir(root) } catch (x) { console.log(x.code, x.message) }
+fs.opendir(path.join(root, 'nope'), (err) => console.log('cb err', err.code, err.syscall));
+const dd = fs.opendirSync(root); dd[Symbol.dispose](); try { dd.readSync() } catch (y) { console.log('disposed', y.code) }
+process.on('exit', () => fs.rmSync(root, { recursive: true }));
+`)
+}

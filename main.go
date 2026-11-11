@@ -40,10 +40,12 @@ func main() {
 	appLicense := flag.String("app-license", "Proprietary", "license `identifier` for -package=rpm (the RPM License: tag), e.g. GPLv3+, MIT, BSD. Defaults to Proprietary")
 	emitWindowDTS := flag.Bool("emit-window-dts", false, "for a klain:webview program, also write a <output>.window.d.ts declaring the window.* functions its typed bindings expose, so the page-side code gets autocomplete/typechecking on them")
 	emitDecoratorMetadata := flag.Bool("emit-decorator-metadata", false, "with experimental decorators, emit design:type/design:paramtypes/design:returntype reflection metadata for decorated members (readable via Reflect.getMetadata) — mirrors TypeScript's emitDecoratorMetadata")
-	decorators := flag.String("decorators", "experimental", "decorator dialect: experimental (legacy (target, key, descriptor), the default) or standard (TC39 (value, context))")
+	decorators := flag.String("decorators", "experimental", "decorator dialect: experimental (legacy (target, key, descriptor), the default for TypeScript) or standard (TC39 (value, context), the default with -compat=js)")
+	ltoBuild := flag.Bool("lto", false, "link-time optimization: the program, its library and its runtime compile to LLVM bitcode and optimize together at the link (ThinLTO); the bitcode objects cache apart from the native ones")
+	debugBuild := flag.Bool("g", false, "debug build: the program and its runtime compiled with -g -O0 (debug info, no optimization) for a debugger; the runtime objects cache apart from the optimized ones")
 	optimizeMemory := flag.Bool("optimize-memory", false, "allocation optimizations with no semantic change: stack-allocate object literals the escape analysis proves never outlive their block, instead of heap-allocating them (less allocator pressure, better cache locality). Off by default while the analysis matures")
 	finalizers := flag.String("finalizers", "off", "FinalizationRegistry exit `diagnostics`: off (default) or report — under -mm=manual, print one line per registration still live at exit (its target was never freed — a labeled leak) before running its cleanup callback")
-	target := flag.String("target", "", "cross-compile for another platform instead of the host. Either a full clang `triple` (e.g. aarch64-linux-gnu) or a preset name: sfos-aarch64 (Sailfish OS on 64-bit ARM → aarch64-linux-gnu). Requires --sysroot pointing at the target's root filesystem. The emitted IR and the whole embedded C runtime are built for the target; a genuine cross-arch link needs lld on PATH (used automatically when present). Default (empty): build for the host")
+	target := flag.String("target", "", "cross-compile for another platform instead of the host. Either a full clang `triple` (e.g. aarch64-linux-gnu) or a preset name: sfos-aarch64 (Sailfish OS on 64-bit ARM → aarch64-linux-gnu). A 64-bit target only: a 32-bit triple (wasm32, i686, armv7) is refused. Requires --sysroot pointing at the target's root filesystem. The emitted IR and the whole embedded C runtime are built for the target; a genuine cross-arch link needs lld on PATH (used automatically when present). Default (empty): build for the host")
 	sysroot := flag.String("sysroot", "", "for --target: `path` to the target platform's root filesystem (its /usr/include headers and /usr/lib libraries), passed to clang as --sysroot. Required whenever --target is set")
 	noAny := flag.Bool("no-any", false, "ban the any/unknown dynamic escape hatch: every explicit any/unknown annotation (and evolving-any from an untyped null-initialized binding) becomes a compile error, so the produced binary is provably fully static — no NaN-boxing, no runtime type tags. A separate opt-in on top of strict, not a compat mode. Ignored (with a warning) under -compat=js")
 	noUnusedLocals := flag.Bool("no-unused-locals", false, "report a local variable, function, class, enum, interface, type alias or import that nothing reads (TypeScript's noUnusedLocals). Ignored (with a warning) under -compat=js")
@@ -131,6 +133,9 @@ func main() {
 			triple = resolved
 		}
 		crossTriple = triple
+		if target32Bit(triple) {
+			fatal("--target=%s is a 32-bit target: values are laid out for 64-bit words only, so its programs would be miscompiled. Build for a 64-bit target (x86_64, aarch64)", *target)
+		}
 		if *sysroot == "" {
 			fatal("--target=%s requires --sysroot=<path>: point it at the target platform's root filesystem (the tree holding its /usr/include and /usr/lib). Extract one from the target's SDK or a matching container image", *target)
 		}
@@ -241,6 +246,13 @@ func main() {
 		fatal("unrecognized -diagnostics value %q — must be one of: text (default), json", *diagFormat)
 	}
 
+	// JavaScript has only the standard dialect: -compat=js takes it unless
+	// the flag says otherwise.
+	decoratorsSet := false
+	flag.Visit(func(f *flag.Flag) { decoratorsSet = decoratorsSet || f.Name == "decorators" })
+	if !decoratorsSet && *compat == "js" {
+		*decorators = "standard"
+	}
 	switch *decorators {
 	case "experimental", "standard":
 		// ok
@@ -337,7 +349,23 @@ func main() {
 		outBin += llvm.HostExeSuffix()
 	}
 
-	clangArgs := []string{"-O2", llFile}
+	// The code-generation flags of every compile: optimized, or the -g
+	// debug variant.
+	codeFlags := []string{"-O2"}
+	if *debugBuild {
+		codeFlags = []string{"-g", "-O0"}
+	}
+	if *ltoBuild {
+		codeFlags = append(codeFlags, "-flto=thin")
+	}
+	clangArgs := append(append([]string{}, codeFlags...), llFile)
+	if *ltoBuild && runtime.GOOS != "darwin" && opts.Target.Triple == "" {
+		// The system linker reads bitcode only through a plugin; lld reads
+		// it itself.
+		if _, err := exec.LookPath("ld.lld"); err == nil {
+			clangArgs = append(clangArgs, "-fuse-ld=lld")
+		}
+	}
 	if em.UsesWorkers() {
 		// Worker threads (worker_threads): the first and only pthread
 		// dependency; -pthread covers both compile and link phases.
@@ -391,7 +419,7 @@ func main() {
 	// its unit is compiled once into the object cache (TDD-00238 Stage 4).
 	// A module object holds the whole module: the link drops what the
 	// program does not reach.
-	libFlags, strip := []string{"-O2"}, "-Wl,-dead_strip"
+	libFlags, strip := append([]string{}, codeFlags...), "-Wl,-dead_strip"
 	if runtime.GOOS != "darwin" {
 		libFlags, strip = append(libFlags, "-ffunction-sections", "-fdata-sections"), "-Wl,--gc-sections"
 	}
@@ -434,7 +462,7 @@ func main() {
 	}
 	for _, cs := range cSources {
 		if objCache != "" {
-			if obj, err := cs.CachedObject(objCache, []string{"-O2"}); err == nil {
+			if obj, err := cs.CachedObject(objCache, codeFlags); err == nil {
 				clangArgs = append(clangArgs, obj)
 				// the object is compiled: its -I/-D flags are not the link's
 				for _, f := range cs.CFlags {
@@ -508,8 +536,25 @@ func main() {
 		}
 		clangArgs = append(clangArgs, "-Wl,-rpath,"+harbourRpathDir("harbour-"+appSlug(nm)))
 	}
-	if err := em.Toolchain().RunLink(clangArgs...); err != nil {
+	if *debugBuild && runtime.GOOS == "darwin" && opts.Target.Triple == "" {
+		// macOS leaves debug info in the objects (dsymutil gathers it after
+		// the link): the program's own must outlive the link, not be the
+		// driver's temporary. Compiled here, after the library split
+		// rewrote the program's unit.
+		objFile := interBase + ".o"
+		if out, err := em.Toolchain().Command(append(append([]string{}, codeFlags...), "-c", llFile, "-o", objFile)...).CombinedOutput(); err != nil {
+			fatal("clang: %v\n%s", err, out)
+		}
+		clangArgs[len(codeFlags)] = objFile
+	}
+	if err := em.Toolchain().RunLink(dedupLibFlags(clangArgs)...); err != nil {
 		fatal("clang: %v", err)
+	}
+	// Gather the objects' debug info beside the binary (<bin>.dSYM).
+	if *debugBuild && runtime.GOOS == "darwin" && opts.Target.Triple == "" {
+		if out, err := exec.Command("dsymutil", outBin).CombinedOutput(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: dsymutil: %v %s\n", err, out)
+		}
 	}
 
 	fmt.Fprintf(os.Stderr, "compiled: %s\n", outBin)
@@ -571,7 +616,7 @@ func main() {
 			soPath := filepath.Join(islandDir, hash+soExt)
 			// The island's runtime is its own: hidden, so the link drops the
 			// functions it never reaches, with their references.
-			iArgs := append([]string{"-O2", "-shared", "-fPIC", illFile, "-o", soPath}, llvm.DeadStripFlags(false)...)
+			iArgs := append(append(append([]string{}, codeFlags...), "-shared", "-fPIC", illFile, "-o", soPath), llvm.DeadStripFlags(false)...)
 			if iem.UsesWorkers() {
 				iArgs = append(iArgs, llvm.WorkerPthreadLinkFlags()...)
 			}
@@ -798,6 +843,20 @@ func targetOSFromTriple(triple string) string {
 	}
 }
 
+// target32Bit reports a triple whose pointers are 32 bits wide.
+func target32Bit(triple string) bool {
+	arch := strings.ToLower(strings.SplitN(triple, "-", 2)[0])
+	switch {
+	case arch == "wasm32", arch == "i386", arch == "i486", arch == "i586", arch == "i686", arch == "x86",
+		arch == "riscv32", arch == "mips", arch == "mipsel", arch == "powerpc", arch == "ppc", arch == "sparc", arch == "xtensa":
+		return true
+	case strings.HasPrefix(arch, "arm") && !strings.HasPrefix(arch, "arm64"), strings.HasPrefix(arch, "thumb"):
+		// 64-bit ARM is spelled aarch64 or arm64; every other arm is AArch32.
+		return true
+	}
+	return false
+}
+
 // wrapText greedily word-wraps s into lines no wider than width columns, for the
 // flag help. Width is measured in bytes, so a line with multi-byte runes (the
 // — and → in some descriptions) wraps a touch early — harmless for help text.
@@ -855,4 +914,24 @@ func sortedIslandHashes(m map[string][]string) []string {
 // library links against on Windows (TDD-00254).
 func lazyImplib(outBin string) string {
 	return filepath.Join(outBin+".d", "program.lib")
+}
+
+// dedupLibFlags drops each earlier copy of a repeated `-l<lib>` flag (two
+// runtime units both linking libcrypto), keeping the last: an archive is
+// searched where it is last listed, after every object that needs it.
+func dedupLibFlags(args []string) []string {
+	last := map[string]int{}
+	for i, a := range args {
+		if strings.HasPrefix(a, "-l") && len(a) > 2 {
+			last[a] = i
+		}
+	}
+	out := make([]string, 0, len(args))
+	for i, a := range args {
+		if j, isLib := last[a]; isLib && j != i {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
 }

@@ -8,12 +8,13 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/binder"
+	"KlainMainLang/lib"
 	"KlainMainLang/resolver"
 	"KlainMainLang/sema"
 	"fmt"
 	"math"
 	"math/big"
-	"sort"
 	"strconv"
 	"strings"
 )
@@ -23,6 +24,9 @@ func (e *Emitter) emitExpr(expr ast.Expression) (Value, error) {
 		saved := e.sloppyWrite
 		e.sloppyWrite = sloppy
 		defer func() { e.sloppyWrite = saved }()
+	}
+	if v, handled, err := e.emitOverridePrivate(expr); handled {
+		return v, err
 	}
 	if v, handled, err := e.emitForeignPrivate(expr); handled {
 		return v, err
@@ -84,18 +88,18 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitAssign(ex)
 	case *ast.CallExpression:
 		v, err := e.emitCall(ex)
-		if err == nil && v.Ty.IsTuple() && !v.Ty.IsArray() {
+		if err == nil && v.Ty.IsTuple() {
 			// A tuple where inference reads the call as an array (a builtin
 			// declared through a callable interface): its elements, as every
 			// consumer expects.
-			if at := e.inferExprType(ex); at.IsArray() && !at.IsTuple() {
+			if at := e.typeOfExpr(ex); at.IsArray() && !at.IsTuple() {
 				v = e.convert(v, at)
 			}
 		}
 		if err == nil && isUnconstrainedDynamic(v.Ty) && v.Ty.DynPropTy == nil && !e.exprHoldsBox(ex) {
 			// A call answered `any` (an implementation signature behind
 			// overloads) whose overload the checker resolves to a primitive:
-			// that primitive, mirroring inferExprType.
+			// that primitive, mirroring typeOfExpr.
 			if pt, ok := e.checkerPrimitive(ex); ok {
 				return e.convert(v, pt), nil
 			}
@@ -107,7 +111,6 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		return e.emitIndex(ex)
 	case *ast.MemberExpression:
 		if e.isStackTraceLimit(ex) {
-			e.ensureFrames()
 			e.declareFn("__kml_stack_limit_get", "declare double @__kml_stack_limit_get()")
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call double @__kml_stack_limit_get()", r))
@@ -120,14 +123,14 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		v, err := e.emitMember(ex)
 		done()
 		if err == nil && e.checkerPresentRef(ex, v.Ty) {
-			v.Ty = v.Ty.withoutNullable() // flow proves it present (inferExprType)
+			v.Ty = v.Ty.withoutNullable() // flow proves it present (typeOfExpr)
 		}
 		if err == nil && !v.Ty.IsDynamic() && !isNullableScalar(v.Ty) && e.builtinCount(ex) {
-			v = e.countToNumber(v) // a number, as every JS count is (inferExprType)
+			v = e.countToNumber(v) // a number, as every JS count is (typeOfExpr)
 		}
 		return v, err
 	case *ast.SpreadElement:
-		return Value{}, fmt.Errorf("%d:%d: a spread (...) is only supported inside an array literal or as a single array filling a function's rest parameter (e.g. f(...arr)) — not here", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, internalAt(ex.GetPos(), "a spread (...) is only supported inside an array literal or as a single array filling a function's rest parameter (e.g. f(...arr)) — not here")
 	case *ast.ArrayLiteral:
 		// No target-type hint available in this bare-dispatch path — falls
 		// back to inferArrayType's first-element inference (unchanged
@@ -146,13 +149,17 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		// A redeclared top-level `var m = new Map()` passes the promoted
 		// binding's K/V down (emitVarRedeclaration, ADR-01061).
 		if h := e.newCollectionHint; h != nil && h.IsMap() && h.MapKey != nil && h.MapVal != nil {
-			e.newCollectionHint = nil
+			if !e.newCollectionHintSticky {
+				e.newCollectionHint = nil
+			}
 			return e.emitNewMapValueTyped(ex, *h.MapKey, *h.MapVal)
 		}
 		return e.emitNewMapValue(ex)
 	case *ast.NewSetExpression:
 		if h := e.newCollectionHint; h != nil && h.IsSet() && h.MapKey != nil {
-			e.newCollectionHint = nil
+			if !e.newCollectionHintSticky {
+				e.newCollectionHint = nil
+			}
 			return e.emitNewSetValueTyped(ex, h.MapKey)
 		}
 		return e.emitNewSetValue(ex)
@@ -220,10 +227,20 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		// The parser rejects a `yield` outside any generator body (TS1163);
 		// this is the backstop for a generator form codegen lowers apart.
 		if e.currentGenerator == nil {
-			return Value{}, fmt.Errorf("%d:%d: 'yield' is only valid inside a generator function body", ex.GetPos().Line, ex.GetPos().Col)
+			return Value{}, internalAt(ex.GetPos(), "'yield' is only valid inside a generator function body")
 		}
 		return e.emitYieldExpression(ex)
 	case *ast.ThisExpression:
+		if _, bound := e.lookup("this"); !bound {
+			if v, ok := e.emitModuleThis(ex); ok {
+				return v, nil
+			}
+		}
+		if ex.Capture {
+			saved := e.thisInitSlot
+			e.thisInitSlot = ""
+			defer func() { e.thisInitSlot = saved }()
+		}
 		return e.emitThisExpression(ex.GetPos())
 	case *ast.NewTargetExpression:
 		return e.emitNewTarget(ex)
@@ -252,7 +269,7 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		// Every class expression that captures no enclosing local was hoisted
 		// to a top-level class before emission (emit_classexpr.go); this one
 		// reads a local of the function it is written in.
-		return Value{}, fmt.Errorf("%d:%d: a class expression that uses '%s', a local of its enclosing function, is not supported", ex.GetPos().Line, ex.GetPos().Col, e.classExprCaptures[ex])
+		return Value{}, internalAt(ex.GetPos(), "a class expression that uses '%s', a local of its enclosing function, is not supported", e.classExprCaptures[ex])
 	}
 	return Value{}, fmt.Errorf("unknown expression type %T", expr)
 }
@@ -360,6 +377,13 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		return e.emitExpr(call)
 	}
 	sym, ok := e.lookup(id.Name)
+	if ok && e.unresolvedReference(id) {
+		// A name no scope around this read declares, though a binding of
+		// it is still in emission's scope (a closed block's `let`, read by
+		// a function expression after it): the global read it is.
+		e.shadowReference(id, false)
+		return e.emitGlobalPropertyRead(id)
+	}
 	if hidden, isEnum := e.enumObjects[id.Name]; isEnum && !ok {
 		return e.emitIdent(ast.NewIdentifier(hidden, id.GetPos())) // the enum as a value
 	}
@@ -375,6 +399,12 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		e.emitTerminator("unreachable")
 		e.emitLabel(e.freshLabel("undef.dead"))
 		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
+	if ok && sym.ForwardFlag > 0 {
+		e.emitForwardCheck(sym, id.Name)
+	}
+	if ok {
+		e.emitModuleTDZCheck(id.Name)
 	}
 	if ok && sym.TDZ {
 		// A parameter read by an earlier parameter's default (`(x = y, y)`):
@@ -462,7 +492,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 			if rec, ok := e.lookup(id.Name + classRecSuffix); ok {
 				// This evaluation's class (TDD-00242).
 				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, rec.Ptr))
+				e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, rec.Ptr))
 				return Value{Ref: e.emitNbTagPtr(r, kmlTagFuncRef), Ty: TypeAny}, nil
 			}
 			return e.emitClassRef(id.Name), nil
@@ -482,7 +512,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// name the module instead of the internal marker.
 		if mod, ok := strings.CutSuffix(id.Name, "__kml_builtin"); ok {
 			e.shadowReference(id, true)
-			return Value{}, fmt.Errorf("%d:%d: this usage of the built-in '%s' module is not supported", id.GetPos().Line, id.GetPos().Col, mod)
+			return Value{}, internalAt(id.GetPos(), "this usage of the built-in '%s' module is not supported", mod)
 		}
 		// TDD-00129 Stage 2: a capturing nested function declaration referenced
 		// (in value position) before its declaration statement hoists — emit it
@@ -498,14 +528,14 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// a constructor reference carrying its name, as the Error kinds'.
 		if sema.IsBuiltinConstructor(id.Name) || id.Name == "Promise" || (id.Name == "Object" || id.Name == "Function" || e.isLibConstructorValue(id)) && e.isGlobalName(id) {
 			if e.inHostRow == id.Name {
-				return Value{}, fmt.Errorf("%d:%d: %s's static is read through its own reference", id.GetPos().Line, id.GetPos().Col, id.Name)
+				return Value{}, internalAt(id.GetPos(), "%s's static is read through its own reference", id.Name)
 			}
 			e.shadowReference(id, false)
 			e.noteHostRef(id.Name)
 			return Value{Ref: e.emitNbTagPtr(e.internString(id.Name), kmlTagFuncRef), Ty: TypeAny}, nil
 		}
 		// `Math`, `JSON`, `console`, `Reflect`, `Atomics` as a value: the
-		// object lib/node/internal_namespaces.ts makes.
+		// object its library module makes (resolver.NamespaceValueNames).
 		if key, ok := namespaceValueExport(id.Name); ok && (e.isGlobalName(id) || id.Name == "globalThis" && !e.isShadowedByLocal(id.Name)) {
 			if m, ok := e.libExports[key]; ok {
 				e.shadowReference(id, false)
@@ -547,7 +577,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 			return e.emitGlobalPropertyRead(id)
 		}
 		e.shadowReference(id, false)
-		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", id.GetPos().Line, id.GetPos().Col, id.Name)
+		return Value{}, internalAt(id.GetPos(), "undefined variable '%s'", id.Name)
 	}
 	e.shadowReference(id, true)
 	if sym.NarrowedTo != nil {
@@ -555,7 +585,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// { i8, i64 } box and unbox it to the concrete narrowed type, so the
 		// value reads as a real string/number/boolean (or a smaller union).
 		box := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", box, sym.Ptr))
 		return e.emitUnboxBoxToType(box, e.flowNarrowedTy(id, sym)), nil
 	}
 	if sym.Ty.IsArray() {
@@ -567,21 +597,21 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// at run time (a callback's data argument on error, through `any`),
 		// which prints and boxes as undefined.
 		hdr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, sym.Ptr))
 		return Value{Ref: hdr, Ty: sym.Ty}, nil
 	}
 	if sym.isNullableScalarLocal() {
 		// A nullable scalar is stored as { i1 present, T value } and reads
 		// as that aggregate, like any nullable value; a read flow analysis
 		// proved present is the bare payload.
-		if sym.NarrowedNonNull || e.checkerPresent(id, sym.Ty) {
+		if e.checkerPresent(id, sym.Ty) {
 			payload := e.loadNullableScalarPayload(sym.Ptr, sym.Ty)
 			return Value{Ref: payload, Ty: sym.Ty.withoutNullable()}, nil
 		}
 		return e.loadNullableScalarAgg(sym.Ptr, sym.Ty), nil
 	}
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", reg, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
 	if isNullableScalar(sym.Ty) && e.checkerPresent(id, sym.Ty) {
 		// A `T | undefined` parameter read where flow proves it present.
 		return e.convert(Value{Ref: reg, Ty: sym.Ty}, sym.Ty.withoutNullable()), nil
@@ -590,7 +620,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// A Map, Set or RegExp the checker narrows to a class extending it
 		// (TDD-00247): the instance starts at the word before its body.
 		inst := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", inst, reg))
+		e.emitPrefixWordAddr(inst, reg)
 		return Value{Ref: inst, Ty: info.Ty}, nil
 	}
 	if t, ok := e.checkerNarrowed(id, sym.Ty); ok {
@@ -612,7 +642,7 @@ func newArrayElemType(e *Emitter, na *ast.NewArrayExpression) Type {
 	if na.ElemType == nil {
 		return TypeAny
 	}
-	return e.resolveType(na.ElemType)
+	return e.annotationType(na.ElemType)
 }
 
 // flowNarrowedTy is the type a flow-narrowed union local reads as: its
@@ -632,6 +662,9 @@ func (e *Emitter) flowNarrowedTy(id *ast.Identifier, sym Symbol) Type {
 // isGlobalName reports whether id names the builtin global of its name, not
 // a binding of the program's.
 func (e *Emitter) isGlobalName(id *ast.Identifier) bool {
+	if e.builtinIdents[id] {
+		return true
+	}
 	c := e.front()
 	return c != nil && e.isBuiltinGlobal(c, id)
 }
@@ -642,8 +675,8 @@ func (e *Emitter) isGlobalName(id *ast.Identifier) bool {
 // (`Worker`, `self`, `Histogram`, `IteratorHelper`, `ErrorEvent`,
 // `EventSource`) are no property of Node's globalThis.
 var globalOnGlobalThis = map[string]bool{
-	"performance":  true,
-	"SubtleCrypto": false, "Blob": false, "DataView": false, "TextEncoder": false,
+	"performance": true, "navigator": true, "Navigator": false, "FormData": false, "File": false,
+	"SubtleCrypto": false, "Blob": false, "DataView": false, "TextEncoder": false, "TextEncoderStream": false, "TextDecoderStream": false,
 	"TextDecoder": false, "Event": false, "CustomEvent": false, "EventTarget": false,
 	"AbortSignal": false, "AbortController": false, "MessageEvent": false,
 	"CloseEvent": false, "Headers": false, "URLSearchParams": false, "URL": false,
@@ -656,31 +689,137 @@ var globalOnGlobalThis = map[string]bool{
 
 // emitGlobalThisLinks puts the program's global-module globals on the
 // global object before `globalThis` is read as a value
-// (internal_namespaces.ts _kmlGlobalThisLink): the modules are in the program
+// (internal_global_object.ts _kmlGlobalThisLink): the modules are in the program
 // only when it names them, so the object cannot list them itself.
 func (e *Emitter) emitGlobalThisLinks(pos ast.Pos) error {
-	link, ok := e.libExports["internal_namespaces:_kmlGlobalThisLink"]
+	link, ok := e.libExports["internal_global_object:_kmlGlobalThisLink"]
 	if !ok {
 		return nil
 	}
-	names := make([]string, 0, len(e.globalLinks))
-	for name := range e.globalLinks {
-		if _, on := globalOnGlobalThis[name]; on {
-			names = append(names, name)
-		}
+	if err := e.emitGlobalThisBuiltins(link, pos); err != nil {
+		return err
 	}
-	sort.Strings(names)
-	for _, name := range names {
-		args := []ast.Expression{
-			ast.NewStringLiteral(name, pos),
-			ast.NewIdentifier(e.globalLinks[name], pos),
-			ast.NewBooleanLiteral(globalOnGlobalThis[name], pos),
+	// In Node's own property order, so the object enumerates as Node's.
+	for _, name := range globalObjectOrder {
+		var value ast.Expression
+		enumerable := false
+		switch {
+		case name == "crypto":
+			// The Web Crypto object a read of the name makes, when the
+			// program has it.
+			mk, ok := e.libExports["internal_crypto_global:_kmlCrypto"]
+			if !ok {
+				continue
+			}
+			value, enumerable = ast.NewCallExpression(ast.NewIdentifier(mk, pos), nil, pos), true
+		case e.globalLinks[name] != "":
+			on, isOn := globalOnGlobalThis[name]
+			if !isOn {
+				continue
+			}
+			value, enumerable = ast.NewIdentifier(e.globalLinks[name], pos), on
+		case name == "fetch":
+			mk, ok := e.libExports["internal_global_fetch:_kmlGlobalFetch"]
+			if !ok {
+				continue
+			}
+			value, enumerable = ast.NewCallExpression(ast.NewIdentifier(mk, pos), nil, pos), true
+		case e.prog != nil && e.prog.GlobalObjectNames[name]:
+			value = e.builtinIdent(name, pos) // the global itself
+		default:
+			continue
 		}
+		args := []ast.Expression{ast.NewStringLiteral(name, pos), value, ast.NewBooleanLiteral(enumerable, pos)}
 		if _, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(link, pos), args, pos)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (e *Emitter) isBuiltinRef(x ast.Expression) bool {
+	_, ok := e.builtinRef(x)
+	return ok
+}
+
+// emitGlobalThisBuiltins gives the global object its builtins: all of them
+// for a program that can see ones it does not name, else the ones it spells
+// (no other is observable, and each is a constructor's whole surface).
+func (e *Emitter) emitGlobalThisBuiltins(link string, pos ast.Pos) error {
+	if e.prog == nil || e.prog.GlobalObjectEscapes {
+		if fill, ok := e.libExports["internal_global_object_fill:_kmlGlobalThisFill"]; ok {
+			_, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(fill, pos), nil, pos))
+			return err
+		}
+		return nil
+	}
+	for _, b := range globalObjectBuiltins {
+		if !e.prog.GlobalObjectSpelled[b.name] {
+			continue
+		}
+		var value ast.Expression
+		if key, ok := namespaceValueExport(b.name); ok {
+			mk, ok := e.libExports[key]
+			if !ok {
+				continue
+			}
+			value = ast.NewCallExpression(ast.NewIdentifier(mk, pos), nil, pos)
+		} else if b.name == "structuredClone" {
+			mk, ok := e.libExports["internal_global_clone:_kmlGlobalStructuredClone"]
+			if !ok {
+				continue
+			}
+			value = ast.NewIdentifier(mk, pos)
+		} else if m := ast.NewMemberExpression(ast.NewIdentifier("globalThis", pos), b.name, pos); e.isBuiltinRef(m) {
+			value = m // an intrinsic function's value, as `globalThis.isNaN` reads
+		} else {
+			value = e.builtinIdent(b.name, pos)
+		}
+		args := []ast.Expression{ast.NewStringLiteral(b.name, pos), value, ast.NewBooleanLiteral(b.enumerable, pos)}
+		if _, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(link, pos), args, pos)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// globalObjectBuiltins are the properties _kmlGlobalThisFill sets.
+var globalObjectBuiltins = func() []struct {
+	name       string
+	enumerable bool
+} {
+	var out []struct {
+		name       string
+		enumerable bool
+	}
+	for _, n := range strings.Fields("clearImmediate setImmediate clearInterval clearTimeout setInterval setTimeout queueMicrotask structuredClone atob btoa") {
+		out = append(out, struct {
+			name       string
+			enumerable bool
+		}{n, true})
+	}
+	for _, n := range strings.Fields("Math JSON Reflect Atomics console Object Function Array Number String Boolean Symbol BigInt Date RegExp Error TypeError RangeError SyntaxError ReferenceError Promise Map Set WeakMap WeakSet ArrayBuffer Uint8Array parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI AggregateError EvalError URIError Int8Array Uint8ClampedArray Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array BigInt64Array BigUint64Array SharedArrayBuffer Proxy FinalizationRegistry escape unescape") {
+		out = append(out, struct {
+			name       string
+			enumerable bool
+		}{n, false})
+	}
+	return out
+}()
+
+// globalObjectOrder is the order of Node's global object's own properties
+// that a program's code puts on it (emitGlobalThisLinks): the global
+// modules' globals, the native ones (resolver.GlobalObjectNatives) and
+// crypto.
+var globalObjectOrder = []string{
+	"process", "Buffer", "URL", "URLSearchParams", "DOMException", "AbortController", "AbortSignal",
+	"Event", "EventTarget", "CustomEvent", "TextEncoder", "TextDecoder", "TransformStream",
+	"WritableStream", "ReadableStream", "TextEncoderStream", "TextDecoderStream",
+	"CompressionStream", "DecompressionStream", "BroadcastChannel", "MessageChannel", "MessagePort",
+	"Blob", "File", "Performance", "PerformanceEntry", "PerformanceMark", "PerformanceMeasure",
+	"PerformanceObserver", "PerformanceObserverEntryList", "performance", "URLPattern", "fetch",
+	"FormData", "Headers", "Request", "Response", "MessageEvent", "CloseEvent", "WebSocket",
+	"crypto", "Crypto", "CryptoKey", "SubtleCrypto", "WeakRef", "DataView", "Navigator", "navigator",
 }
 
 // namespaceValueExport is the library export that makes the global object
@@ -689,8 +828,8 @@ func namespaceValueExport(name string) (string, bool) {
 	if name == "crypto" {
 		return "internal_crypto_global:_kmlCrypto", true
 	}
-	maker, ok := resolver.NamespaceValueNames[name]
-	return "internal_namespaces:" + maker, ok
+	key, ok := resolver.NamespaceValueNames[name]
+	return key, ok
 }
 
 // isLibConstructorValue reports a library global declared as a constructor
@@ -698,7 +837,13 @@ func namespaceValueExport(name string) (string, bool) {
 // its own as a value: it is boxed as a constructor reference.
 func (e *Emitter) isLibConstructorValue(id *ast.Identifier) bool {
 	c := e.front()
-	return c != nil && isConstructorValue(c.TypeOf(id))
+	if c == nil {
+		return false
+	}
+	if e.builtinIdents[id] {
+		return isConstructorValue(c.GlobalValueType(id.Name)) // a global codegen reads (`globalThis.Buffer`)
+	}
+	return isConstructorValue(c.TypeOf(id))
 }
 
 // globalNumberConsts are the global number constants, as IR double bits.
@@ -708,12 +853,36 @@ var globalNumberConsts = map[string]string{"NaN": "0x7FF8000000000000", "Infinit
 // binder looked up and found no declaration for (it reads a global no
 // program or library declares).
 func (e *Emitter) unresolvedReference(id *ast.Identifier) bool {
-	if !e.compatJS() {
-		return false
-	}
 	c := e.front()
 	if c == nil {
 		return false
+	}
+	if !e.compatJS() && !c.InEvalCode(id) {
+		// TypeScript: a name only an ambient declaration gives (`declare
+		// class C`), which the environment must provide.
+		sym, _ := c.Binding().Resolve(id)
+		if sym != nil && sym.Flags&binder.Value != 0 {
+			return false
+		}
+		if sym == nil && c.AmbientName(id.Name) {
+			return true
+		}
+		// A global TypeScript's library declares (tsc resolves it) that
+		// this compiler's library does not provide as a value
+		// (`IntersectionObserver`, `WebAssembly`, `FormData`, declared only
+		// as an interface): read as JavaScript reads an undeclared name.
+		b := c.Binding()
+		if _, ns := namespaceValueExport(id.Name); ns {
+			return false
+		}
+		if !lib.GlobalValue(id.Name) || b.LookupScope(id) == nil {
+			return false
+		}
+		if b.Globals == nil {
+			return true
+		}
+		g := b.Globals.Symbols.Get(id.Name)
+		return g == nil || g.Flags&binder.Value == 0
 	}
 	b := c.Binding()
 	if _, ns := namespaceValueExport(id.Name); ns {
@@ -801,4 +970,14 @@ func (e *Emitter) voidValueSites() map[ast.Expression]bool {
 		})
 	}
 	return e.voidSites
+}
+
+// builtinIdent is an identifier naming the builtin global name.
+func (e *Emitter) builtinIdent(name string, pos ast.Pos) *ast.Identifier {
+	id := ast.NewIdentifier(name, pos)
+	if e.builtinIdents == nil {
+		e.builtinIdents = map[*ast.Identifier]bool{}
+	}
+	e.builtinIdents[id] = true
+	return id
 }

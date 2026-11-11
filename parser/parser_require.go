@@ -38,7 +38,9 @@ func (p *Parser) desugarRequire(stmt ast.Statement) (ast.Statement, error) {
 		if dynamic {
 			return nil, requireDynamicErr(s.GetPos())
 		}
-		return ast.NewImportDeclaration(nil, s.Name, src, s.GetPos()), nil
+		imp := ast.NewImportDeclaration(nil, s.Name, src, s.GetPos())
+		imp.FromRequire = true
+		return imp, nil
 
 	case *ast.ObjectDestructuring:
 		src, matched, dynamic := requireCall(s.Init)
@@ -51,11 +53,16 @@ func (p *Parser) desugarRequire(stmt ast.Statement) (ast.Statement, error) {
 		specs := make([]ast.ImportSpecifier, 0, len(s.Props))
 		for _, prop := range s.Props {
 			if prop.Default != nil || prop.SubArray != nil || prop.SubObject != nil || prop.Rest {
-				return nil, errAtPos(s.GetPos(), diag.RequireDestructure)
+				// A pattern an import cannot bind: an ordinary
+				// destructuring of the module the resolver links for the
+				// require (lowerRequires).
+				return stmt, nil
 			}
 			specs = append(specs, ast.ImportSpecifier{Imported: prop.Key, Local: prop.Local})
 		}
-		return ast.NewImportDeclaration(specs, "", src, s.GetPos()), nil
+		imp := ast.NewImportDeclaration(specs, "", src, s.GetPos())
+		imp.FromRequire = true
+		return imp, nil
 
 	case *ast.ExpressionStatement:
 		src, matched, dynamic := requireCall(s.Expr)

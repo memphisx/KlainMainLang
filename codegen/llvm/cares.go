@@ -17,20 +17,13 @@ var caresSource string
 // CaresSource returns the resolver's C runtime.
 func CaresSource() string { return caresSource }
 
-// ensureCaresNatives compiles the resolver's c-ares natives and links
-// libcares: the `@link cares` of lib/native.d.ts. Its completions go
-// through the pool's.
+// ensureCaresNatives is the `@link cares` of lib/native.d.ts: the resolver's
+// c-ares unit is linked by the symbols it names (a library unit); its
+// completions go through the pool's.
 func (e *Emitter) ensureCaresNatives() {
-	e.ensureNativePool()
-	if e.usedCaresNatives {
-		return
-	}
-	e.usedCaresNatives = true
-	if e.opts.Target.OS() == "windows" {
-		e.requireLink("cares")
-		e.requireLink("iphlpapi")
-		e.requireLink("ws2_32")
-	}
+	e.ensureMicrotasks()
+	e.ensureStrHeaderRuntime()
+	e.ensureThreadPool()
 }
 
 // CaresFlags returns the resolver unit's cflags and link flags: c-ares'

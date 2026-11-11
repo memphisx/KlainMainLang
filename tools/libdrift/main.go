@@ -32,8 +32,10 @@ var (
 	// A program-numbered symbol (`@__kml_x_12`): fine in the program's own
 	// code, a hazard in the library's, which must not depend on numbering.
 	counterRe = regexp.MustCompile(`@"?[A-Za-z_][\w.]*?_\d+\b`)
-	// A literal named by its library position (`@__closure.node_fs.12_7`).
-	posRe = regexp.MustCompile(`\.node_\w+\.(\w+\.)?\d+_\d+|^@pcre2_`)
+	// A literal named by its library position (`@__closure.node_fs.12_7`),
+	// or a private name numbered within its library module's own classes
+	// (`#pairs__kml_ps16node_kml_headers_2`, the resolver's private scopes).
+	posRe = regexp.MustCompile(`\.node_\w+\.(\w+\.)?\d+_\d+|^@pcre2_|__kml_ps\d+(?:node|shared)_\w+_\d+$`)
 )
 
 func main() {

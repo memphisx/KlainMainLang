@@ -108,7 +108,7 @@ export class TextEncoder {
         return 'utf-8';
     }
 
-    encode(input: string = ''): Uint8Array {
+    encode(input: string = ''): Uint8Array<ArrayBuffer> {
         const b = Buffer.from(String(input), 'utf8');
         const out = new Uint8Array(b.length);
         out.set(b, 0);
@@ -313,4 +313,83 @@ function userDefined(bytes: Uint8Array): string {
         s += String.fromCodePoint(b < 0x80 ? b : 0xf700 + b);
     }
     return s;
+}
+
+// TextEncoderStream and TextDecoderStream, as Node builds them
+// (lib/internal/webstreams/encoding.js): a TransformStream around a
+// TextEncoder or a streaming TextDecoder.
+export class TextEncoderStream {
+    #pendingHighSurrogate: string | null = null;
+    #handle = new TextEncoder();
+    #transform: TransformStream<any, Uint8Array>;
+
+    constructor() {
+        this.#transform = new TransformStream<any, Uint8Array>({
+            transform: (chunk: any, controller) => {
+                // The Encoding Standard's "encode and enqueue a chunk": a
+                // surrogate pair split across chunks is joined, a lone half
+                // is U+FFFD.
+                const s = `${chunk}`;
+                let out = '';
+                for (let i = 0; i < s.length; i++) {
+                    const item = s[i];
+                    const cp = s.charCodeAt(i);
+                    if (this.#pendingHighSurrogate !== null) {
+                        const high = this.#pendingHighSurrogate;
+                        this.#pendingHighSurrogate = null;
+                        if (0xDC00 <= cp && cp <= 0xDFFF) {
+                            out += high + item;
+                            continue;
+                        }
+                        out += '�';
+                    }
+                    if (0xD800 <= cp && cp <= 0xDBFF) {
+                        this.#pendingHighSurrogate = item;
+                        continue;
+                    }
+                    if (0xDC00 <= cp && cp <= 0xDFFF) {
+                        out += '�';
+                        continue;
+                    }
+                    out += item;
+                }
+                if (out.length > 0) controller.enqueue(this.#handle.encode(out));
+            },
+            flush: (controller) => {
+                if (this.#pendingHighSurrogate !== null) {
+                    controller.enqueue(new Uint8Array([0xEF, 0xBF, 0xBD]));
+                }
+            },
+        });
+    }
+
+    get encoding(): string { return 'utf-8'; }
+    get readable(): ReadableStream<Uint8Array> { return this.#transform.readable; }
+    get writable(): WritableStream<any> { return this.#transform.writable; }
+}
+
+export class TextDecoderStream {
+    #handle: TextDecoder;
+    #transform: TransformStream<any, string>;
+
+    constructor(encoding: string = 'utf-8', options: TextDecoderOptions = {}) {
+        this.#handle = new TextDecoder(encoding, options);
+        this.#transform = new TransformStream<any, string>({
+            transform: (chunk: any, controller) => {
+                const value = this.#handle.decode(chunk, { stream: true });
+                if (value.length > 0) controller.enqueue(value);
+            },
+            flush: (controller) => {
+                const value = this.#handle.decode();
+                if (value.length > 0) controller.enqueue(value);
+                controller.terminate();
+            },
+        });
+    }
+
+    get encoding(): string { return this.#handle.encoding; }
+    get fatal(): boolean { return this.#handle.fatal; }
+    get ignoreBOM(): boolean { return this.#handle.ignoreBOM; }
+    get readable(): ReadableStream<string> { return this.#transform.readable; }
+    get writable(): WritableStream<any> { return this.#transform.writable; }
 }

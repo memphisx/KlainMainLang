@@ -5,10 +5,10 @@
   "statusPage": "FILE-SYSTEM.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "19/21",
-    "loosePct": 90,
-    "strict": "13/21",
-    "strictPct": 52
+    "loose": "20/22",
+    "loosePct": 91,
+    "strict": "13/22",
+    "strictPct": 59
   },
   "lede": "Node's fs, ported from lib/fs.js to TypeScript: the synchronous functions, their callback and promise forms, FileHandle, the file streams and fs.watch. Each operation is one native request — on the calling thread for a *Sync function, on the thread pool with the callback on the event loop otherwise — as libuv's are.",
   "entries": [
@@ -273,9 +273,25 @@
       }
     },
     {
+      "id": "fs.opendir",
+      "name": "fs.opendir / opendirSync / fs.promises.opendir → Dir",
+      "statusRow": "fs.opendir / opendirSync / fs.promises.opendir → Dir",
+      "signature": "opendirSync(path: PathLike, options?: { encoding?, bufferSize?, recursive? }): Dir",
+      "badge": "caveats",
+      "description": "A directory handle read a batch of entries at a time (bufferSize, 32 by default), in the order the system gives them. readSync() returns one Dirent or null at the end; read() and the callback form are asynchronous; a Dir is async-iterable and closes itself when the loop ends. recursive: true descends into each subdirectory as its entry is read.",
+      "snippet": "const dir = fs.opendirSync('.')\nfor (let e = dir.readSync(); e !== null; e = dir.readSync()) console.log(e.name)\ndir.closeSync()\n\nfor await (const e of await fs.promises.opendir('src', { recursive: true })) console.log(e.parentPath, e.name)",
+      "differences": [
+        "`Dir.prototype[Symbol.asyncIterator]` is a method returning `entries()`, not `entries` itself.",
+        "An unclosed handle is not closed on garbage collection."
+      ],
+      "spec": {
+        "mdn": "https://nodejs.org/api/fs.html#fsopendirpath-options-callback"
+      }
+    },
+    {
       "id": "fs.notported",
-      "name": "fs.cp / opendir / glob / watchFile / openAsBlob / lchmod",
-      "statusRow": "fs.cp / opendir → Dir / glob / watchFile / openAsBlob / lchmod",
+      "name": "fs.cp / glob / watchFile / openAsBlob / lchmod",
+      "statusRow": "fs.cp / glob / watchFile / openAsBlob / lchmod",
       "signature": "// not supported yet",
       "badge": "missing",
       "description": "Not ported yet.",
@@ -286,8 +302,8 @@
     },
     {
       "id": "fs.fileapi",
-      "name": "File / FileReader / FileSystemFileHandle",
-      "statusRow": "File / FileReader / FileSystemFileHandle (browser-flavored File API)",
+      "name": "FileReader / FileSystemFileHandle",
+      "statusRow": "FileReader / FileSystemFileHandle (browser-flavored File API)",
       "signature": "// not supported",
       "badge": "missing",
       "description": "The browser-flavored File API is not planned — these model browser sandbox/permission concepts this compiler has no equivalent for. A native CLI/microservice program has direct filesystem access via the fs functions above instead.",

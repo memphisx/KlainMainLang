@@ -87,14 +87,27 @@ type Type struct {
 	// Types are a union's members, ordered by ID.
 	Types []*Type
 	// The object payload.
-	Kind    ObjectKind
-	Elem    *Type          // Array
-	Elems   []*Type        // Tuple
-	Props   []*Property    // Anonymous, Instance, Interface
-	Params  []*Type        // Function
-	Result  *Type          // Function
-	Symbol  *binder.Symbol // Instance, Interface: the declaring symbol
-	ClassOf *binder.Symbol // Anonymous: a class value's class (`typeof C`)
+	Kind  ObjectKind
+	Elem  *Type   // Array
+	Elems []*Type // Tuple
+	// Head and RestElem make an Array a tuple with a trailing rest
+	// element (`[string, ...number[]]`): its fixed leading elements, then
+	// any number of RestElem. Elem is the union of them all, so a reader
+	// that knows only arrays sees an array of that union.
+	Head     []*Type
+	RestElem *Type
+	Props    []*Property // Anonymous, Instance, Interface
+	Params   []*Type     // Function
+	result   *Type       // Function: read through Ret
+	// lazyResult computes a deferred result on its first read (a function
+	// expression's return type, which TypeScript resolves when asked).
+	lazyResult func() (*Type, bool)
+	// cycleResult is a deferred result read while it is being computed
+	// (`const g = () => g()`): tsc's any, TS7023 reported.
+	cycleResult func() *Type
+	computing   bool
+	Symbol      *binder.Symbol // Instance, Interface: the declaring symbol
+	ClassOf     *binder.Symbol // Anonymous: a class value's class (`typeof C`)
 	// ParamNames are a Function's declared parameter names, for display only:
 	// relations ignore them.
 	ParamNames []string
@@ -109,6 +122,14 @@ type Type struct {
 	Opt int
 	// Labels are a labelled tuple's element names (`[x: number]`), or nil.
 	Labels []string
+	// ModuleNamespace marks a module's namespace object, built by the
+	// resolver as a frozen literal of the module's exports.
+	ModuleNamespace bool
+	// ImportCall is the dynamic `import()` an object of a module's exports
+	// is the result of (one compiled separately, whose layout is its own).
+	ImportCall *ast.ImportCallExpression
+	// Intersects are the object members an intersection's type merges.
+	Intersects []*Type
 	// Brand and BrandBase describe a branded primitive (`string & {
 	// __brand: "id" }`, an intersection of a primitive with object types):
 	// the type carries its primitive's flags, BrandBase is that primitive and
@@ -128,6 +149,9 @@ type Type struct {
 	Default    *Type  // TypeParam: its `= T` default, or nil
 	optionals  []bool // Function: optional parameters
 	restParam  bool   // Function: the last parameter is a rest
+	// method marks a method's signature (a method signature, a class
+	// method): its parameters are bivariant (strictFunctionTypes exempts it).
+	method bool
 	// Calls and Constructs are an interface's call and construct
 	// signatures (function types), in declaration order: `Number(x)`,
 	// `new Map()`.
@@ -148,6 +172,27 @@ type Type struct {
 	deferScope *binder.Scope
 	deferEnv   map[string]*Type
 	deferSubst map[*Type]*Type
+	// deferAlias and deferAliasArgs name the alias instance a deferred type
+	// is the body of (`Extract<keyof T, string>`), for display.
+	deferAlias     string
+	deferAliasArgs []*Type
+	// deferParams are the type parameters the deferred node names through
+	// its scope rather than its env (`{ [K in C]: S[K] }` in a signature).
+	deferParams []*Type
+	// selfRef marks a stand-in that contains itself (a recursive alias's
+	// `T | Box<R<T>>`); walking is set while a walker is inside it, so a
+	// walk reaching it again stops.
+	selfRef, walking bool
+	// freeWalk is set while hasFreeTypeParam is inside the type, so one
+	// holding itself is searched once.
+	freeWalk bool
+	// narrowOf is the type parameter a narrowed one stands for: `T &
+	// string` (tsc's intersection a type guard gives a type parameter) is
+	// T's copy constrained to string, related to T as itself.
+	narrowOf *Type
+	// refined marks a class instance an intersection added literal members
+	// to (refinedInstance): no longer every instance of its class.
+	refined bool
 }
 
 // Predicate is a function's type predicate: a true result means its
@@ -173,11 +218,61 @@ type Property struct {
 	Visibility, WriteVisibility string
 	Owner                       *binder.Symbol
 	Field                       bool // a class's instance field
+	// Written marks a type literal's property signature (`{ a: T }`), as
+	// against an object literal value's or a normalization's member.
+	Written bool
 	// Decl is the member's declaration (a method signature, a property
 	// signature, a class member), when it has one; Decls are an overloaded
 	// method's, one per overload in order.
 	Decl  ast.Node
 	Decls []ast.Node
+}
+
+// DeferredTypeParams are the type parameters a deferred type's evaluation
+// waits on: those its type-parameter names are bound to, sorted by ID.
+func (t *Type) DeferredTypeParams() []*Type {
+	if t == nil || t.Flags&Deferred == 0 {
+		return nil
+	}
+	var out []*Type
+	seen := map[*Type]bool{}
+	walked := map[*Type]bool{t: true}
+	var add func(v *Type)
+	var bindings func(d *Type)
+	add = func(v *Type) {
+		switch {
+		case v == nil || walked[v]:
+		case v.Flags&TypeParam != 0:
+			if !seen[v] {
+				seen[v] = true
+				out = append(out, v)
+			}
+		case v.Flags&Deferred != 0:
+			// A binding to another deferred type (`C1<C2<T>>`'s argument):
+			// the parameters that one reads.
+			walked[v] = true
+			bindings(v)
+		case v.Flags&Union != 0:
+			walked[v] = true
+			for _, m := range v.Types {
+				add(m)
+			}
+		}
+	}
+	bindings = func(d *Type) {
+		for _, v := range d.deferEnv {
+			add(v)
+		}
+		for _, v := range d.deferSubst {
+			add(v)
+		}
+		for _, v := range d.deferParams {
+			add(v)
+		}
+	}
+	bindings(t)
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 // IsMissing reports whether t is the type of an omitted optional property
@@ -219,17 +314,29 @@ func (t *Type) RecursiveAlias() bool {
 	return t.Flags&Object != 0 && t.Kind == Anonymous && t.Symbol != nil && t.Symbol.Flags&binder.TypeAlias != 0
 }
 
-func (t *Type) String() string {
+func (t *Type) String() string { return t.str(map[*Type]bool{}) }
+
+// str is String, seen the types being printed around t: a type that
+// contains itself (`const f = () => f`, `() => ...`) prints as tsc does.
+func (t *Type) str(seen map[*Type]bool) string {
+	if seen[t] {
+		return "..."
+	}
+	seen[t] = true
+	defer delete(seen, t)
 	if t.Brand != nil {
-		return t.BrandBase.String() + " & " + t.Brand.String()
+		return t.BrandBase.str(seen) + " & " + t.Brand.str(seen)
 	}
 	if t.ClassOf != nil {
 		return "typeof " + symbolName(t.ClassOf)
 	}
+	if t.Kind == Anonymous && t.Value == "globalThis" {
+		return "typeof globalThis"
+	}
 	// A constructor type: an object whose one member is a construct
 	// signature.
 	if t.Kind == Anonymous && len(t.Props) == 0 && len(t.Calls) == 0 && len(t.Constructs) == 1 && t.StringIndex == nil && t.NumberIndex == nil {
-		return "new " + t.Constructs[0].String()
+		return "new " + t.Constructs[0].str(seen)
 	}
 	switch {
 	case t.Flags&Any != 0:
@@ -272,8 +379,15 @@ func (t *Type) String() string {
 	case t.Flags&Float32 != 0:
 		return "float32"
 	case t.Flags&Deferred != 0:
-		return "unknown"
+		return t.deferredStr(seen)
 	case t.Flags&TypeParam != 0:
+		if t.narrowOf != nil {
+			k := t.Constraint.str(seen)
+			if t.Constraint.Flags&Union != 0 {
+				k = "(" + k + ")"
+			}
+			return t.narrowOf.str(seen) + " & " + k
+		}
 		if t.Symbol == nil {
 			return t.Value // a class's or interface's type parameter
 		}
@@ -282,16 +396,16 @@ func (t *Type) String() string {
 		// TypeScript prints null and undefined last, and a whole enum by its
 		// name.
 		var parts, tail []string
-		seen := map[*binder.Symbol]int{}
+		members := map[*binder.Symbol]int{}
 		for _, m := range t.Types {
 			if m.Member != "" {
-				seen[m.Symbol]++
+				members[m.Symbol]++
 			}
 		}
 		named := map[*binder.Symbol]bool{}
 		undef := false
 		for _, m := range t.Types {
-			if m.Member != "" && seen[m.Symbol] == m.EnumSize {
+			if m.Member != "" && members[m.Symbol] == m.EnumSize {
 				if !named[m.Symbol] {
 					named[m.Symbol] = true
 					parts = append(parts, symbolName(m.Symbol))
@@ -305,23 +419,36 @@ func (t *Type) String() string {
 					tail = append(tail, "undefined")
 				}
 			} else if m.Flags&Null != 0 {
-				tail = append(tail, m.String())
+				tail = append(tail, m.str(seen))
+			} else if ms := m.str(seen); m.Flags&Object != 0 && m.Kind == Function && strings.Contains(ms, "=> ") && !strings.HasPrefix(ms, "{") {
+				parts = append(parts, "("+ms+")") // `(() => number) | null`
 			} else {
-				parts = append(parts, m.String())
+				parts = append(parts, ms)
 			}
 		}
 		return strings.Join(append(parts, tail...), " | ")
 	}
 	switch t.Kind {
 	case Array:
-		if t.Elem.Flags&Union != 0 || t.Elem.Flags&Object != 0 && t.Elem.Kind == Function {
-			return "(" + t.Elem.String() + ")[]" // tsc's parentheses: `(string | symbol)[]`
+		if t.Head != nil {
+			parts := make([]string, 0, len(t.Head)+1)
+			for _, h := range t.Head {
+				parts = append(parts, h.str(seen))
+			}
+			r := t.RestElem.str(seen) + "[]"
+			if t.RestElem.Flags&Union != 0 || t.RestElem.Flags&Object != 0 && t.RestElem.Kind == Function {
+				r = "(" + t.RestElem.str(seen) + ")[]"
+			}
+			return "[" + strings.Join(append(parts, "..."+r), ", ") + "]"
 		}
-		return t.Elem.String() + "[]"
+		if t.Elem.Flags&Union != 0 || t.Elem.Flags&Object != 0 && t.Elem.Kind == Function {
+			return "(" + t.Elem.str(seen) + ")[]" // tsc's parentheses: `(string | symbol)[]`
+		}
+		return t.Elem.str(seen) + "[]"
 	case Tuple:
 		parts := make([]string, len(t.Elems))
 		for i, e := range t.Elems {
-			parts[i] = e.String()
+			parts[i] = e.str(seen)
 			switch {
 			case t.Labels != nil && i >= t.minLen():
 				parts[i] = t.Labels[i] + "?: " + parts[i]
@@ -340,7 +467,7 @@ func (t *Type) String() string {
 			// As tsc prints an overloaded function: its call signatures.
 			sigs := make([]string, len(t.Overloads))
 			for i, s := range t.Overloads {
-				str := s.String()
+				str := s.str(seen)
 				if j := strings.Index(str, ") => "); j >= 0 {
 					str = str[:j+1] + ": " + str[j+5:]
 				}
@@ -360,16 +487,16 @@ func (t *Type) String() string {
 			case i < len(t.optionals) && t.optionals[i]:
 				name += "?"
 			}
-			parts[i] = name + ": " + p.String()
+			parts[i] = name + ": " + p.str(seen)
 		}
 		if t.ThisType != nil {
-			parts = append([]string{"this: " + t.ThisType.String()}, parts...)
+			parts = append([]string{"this: " + t.ThisType.str(seen)}, parts...)
 		}
 		generic := ""
 		if len(t.TypeParams) > 0 {
 			names := make([]string, len(t.TypeParams))
 			for i, tp := range t.TypeParams {
-				names[i] = tp.String()
+				names[i] = tp.str(seen)
 			}
 			generic = "<" + strings.Join(names, ", ") + ">"
 		}
@@ -382,24 +509,32 @@ func (t *Type) String() string {
 				s = "this"
 			}
 			if p.Type != nil {
-				s += " is " + p.Type.String()
+				s += " is " + p.Type.str(seen)
 			}
 			if p.Asserts {
 				s = "asserts " + s
 			}
 			return generic + "(" + strings.Join(parts, ", ") + ") => " + s
 		}
-		return generic + "(" + strings.Join(parts, ", ") + ") => " + t.Result.String()
+		return generic + "(" + strings.Join(parts, ", ") + ") => " + t.Ret().str(seen)
 	case Anonymous:
 		if t.RecursiveAlias() {
-			return symbolName(t.Symbol) // a recursive alias's literal
+			// A recursive alias's literal, by its alias.
+			if len(t.TypeArgs) == 0 {
+				return symbolName(t.Symbol)
+			}
+			args := make([]string, len(t.TypeArgs))
+			for i, a := range t.TypeArgs {
+				args[i] = a.str(seen)
+			}
+			return symbolName(t.Symbol) + "<" + strings.Join(args, ", ") + ">"
 		}
 	case Instance, Interface:
 		if t.Symbol != nil {
 			if len(t.TypeArgs) > 0 {
 				args := make([]string, len(t.TypeArgs))
 				for i, a := range t.TypeArgs {
-					args[i] = a.String()
+					args[i] = a.str(seen)
 				}
 				return symbolName(t.Symbol) + "<" + strings.Join(args, ", ") + ">"
 			}
@@ -408,10 +543,10 @@ func (t *Type) String() string {
 	}
 	var idx []string
 	if t.StringIndex != nil {
-		idx = append(idx, "[x: string]: "+t.StringIndex.String()+";")
+		idx = append(idx, "[x: string]: "+t.StringIndex.str(seen)+";")
 	}
 	if t.NumberIndex != nil {
-		idx = append(idx, "[x: number]: "+t.NumberIndex.String()+";")
+		idx = append(idx, "[x: number]: "+t.NumberIndex.str(seen)+";")
 	}
 	if len(t.Props) == 0 && len(idx) == 0 {
 		return "{}"
@@ -426,7 +561,7 @@ func (t *Type) String() string {
 		if p.Readonly {
 			ro = "readonly "
 		}
-		parts[i] = ro + memberDisplayName(p.Name) + opt + ": " + p.Type.String() + ";"
+		parts[i] = ro + memberDisplayName(p.Name) + opt + ": " + p.Type.str(seen) + ";"
 	}
 	return "{ " + strings.Join(append(idx, parts...), " ") + " }" // tsc: `{ x: number; y: string; }`
 }
@@ -511,6 +646,25 @@ func (in *interner) tupleLabelled(elems []*Type, opt int, labels []string) *Type
 	})
 }
 
+// tupleRest is the tuple `[...head, ...rest[]]`.
+func (in *interner) tupleRest(head []*Type, rest *Type) *Type {
+	if len(head) == 0 {
+		return in.array(rest)
+	}
+	elem := in.union(append(append([]*Type(nil), head...), rest)...)
+	return in.intern("r"+ids(head)+"|"+strconv.Itoa(rest.ID), func() *Type {
+		return &Type{Flags: Object, Kind: Array, Elem: elem, Head: head, RestElem: rest}
+	})
+}
+
+// elemAt is the type a rest tuple holds at index i.
+func (t *Type) elemAt(i int) *Type {
+	if i < len(t.Head) {
+		return t.Head[i]
+	}
+	return t.RestElem
+}
+
 // minLen is how many elements a tuple requires.
 func (t *Type) minLen() int { return len(t.Elems) - t.Opt }
 
@@ -532,7 +686,31 @@ func (in *interner) function(params []*Type, optionals []bool, rest bool, result
 		}
 	}
 	return in.intern(key, func() *Type {
-		return &Type{Flags: Object, Kind: Function, Params: params, Result: result, Predicate: pred, TypeParams: typeParams, optionals: optionals, restParam: rest}
+		return &Type{Flags: Object, Kind: Function, Params: params, result: result, Predicate: pred, TypeParams: typeParams, optionals: optionals, restParam: rest}
+	})
+}
+
+// narrowedParam is type parameter tp narrowed to k (`T & string`).
+func (in *interner) narrowedParam(tp, k *Type) *Type {
+	if tp.narrowOf != nil {
+		tp = tp.narrowOf
+	}
+	return in.intern("N"+strconv.Itoa(tp.ID)+":"+strconv.Itoa(k.ID), func() *Type {
+		c := *tp
+		c.Constraint, c.narrowOf = k, tp
+		return &c
+	})
+}
+
+// asMethod is signature fn declared as a method.
+func (in *interner) asMethod(fn *Type) *Type {
+	if fn == nil || fn.Flags&Object == 0 || fn.Kind != Function || fn.method {
+		return fn
+	}
+	return in.intern("M"+strconv.Itoa(fn.ID), func() *Type {
+		c := *fn
+		c.method = true
+		return &c
 	})
 }
 
@@ -553,7 +731,7 @@ func (in *interner) withParamNames(fn *Type, names []string) *Type {
 func (in *interner) withResult(fn, r *Type) *Type {
 	return in.intern("r"+strconv.Itoa(fn.ID)+":"+strconv.Itoa(r.ID), func() *Type {
 		c := *fn
-		c.Result = r
+		c.result, c.lazyResult = r, nil
 		return &c
 	})
 }
@@ -643,12 +821,12 @@ func (in *interner) classValue(o, ctor *Type, sym *binder.Symbol) *Type {
 
 // object interns an anonymous object type by its properties' names, types
 // and optionality, in declaration order.
-func (in *interner) object(props []*Property) *Type { return in.objectOf(props, false, false) }
+func (in *interner) object(props []*Property) *Type { return in.objectOf(props, false, false, nil) }
 
 // objectOf is object, with partial a type whose member list is not whole (an
 // intersection with a builtin interface), with intersection one an
-// intersection built.
-func (in *interner) objectOf(props []*Property, partial, intersection bool) *Type {
+// intersection of members built.
+func (in *interner) objectOf(props []*Property, partial, intersection bool, members []*Type) *Type {
 	var b strings.Builder
 	b.WriteString("o")
 	if partial {
@@ -656,6 +834,10 @@ func (in *interner) objectOf(props []*Property, partial, intersection bool) *Typ
 	}
 	if intersection {
 		b.WriteByte(2)
+		for _, m := range members {
+			b.WriteString(strconv.Itoa(m.ID))
+			b.WriteByte(',')
+		}
 	}
 	for _, p := range props {
 		b.WriteString(p.Name)
@@ -676,7 +858,7 @@ func (in *interner) objectOf(props []*Property, partial, intersection bool) *Typ
 		b.WriteByte(';')
 	}
 	return in.intern(b.String(), func() *Type {
-		return &Type{Flags: Object, Kind: Anonymous, Props: props, partial: partial, intersection: intersection}
+		return &Type{Flags: Object, Kind: Anonymous, Props: props, partial: partial, intersection: intersection, Intersects: members}
 	})
 }
 
@@ -863,3 +1045,58 @@ func acceptsVoid(t *Type) bool {
 
 // OptionalParam reports whether a function type's parameter i is optional.
 func (t *Type) OptionalParam(i int) bool { return i < len(t.optionals) && t.optionals[i] }
+
+// Ret is a Function's result type, computed on first read when deferred.
+func (t *Type) Ret() *Type {
+	if t.computing && t.cycleResult != nil {
+		return t.cycleResult()
+	}
+	if t.lazyResult != nil {
+		f := t.lazyResult
+		t.lazyResult = nil
+		t.computing = true
+		r, done := f()
+		t.computing = false
+		if !done {
+			// Asked again inside the cycle that deferred it: try again later.
+			t.lazyResult = f
+		}
+		t.result = r
+	}
+	return t.result
+}
+
+// WithoutResult is a copy of signature t with no result, for a caller that
+// fills one in itself.
+func (t *Type) WithoutResult() *Type {
+	c := *t
+	c.result, c.lazyResult = nil, nil
+	return &c
+}
+
+// deferred is a fresh copy of signature fn whose result f computes on its
+// first read that f reports done.
+func (in *interner) deferred(fn *Type, f func() (*Type, bool), cycle func() *Type) *Type {
+	c := *fn
+	c.result, c.lazyResult, c.cycleResult = nil, f, cycle
+	in.next++
+	c.ID = in.next
+	return &c
+}
+
+// enterSelf reports whether a walk may enter t: false when t is a
+// self-containing stand-in the walk is already inside. leave undoes it.
+func (t *Type) enterSelf() (ok bool, leave func()) {
+	if !t.selfRef {
+		return true, func() {}
+	}
+	if t.walking {
+		return false, func() {}
+	}
+	t.walking = true
+	return true, func() { t.walking = false }
+}
+
+// SelfReferential reports a type that contains itself (a recursive
+// alias's union, `T | Box<R<T>>`).
+func (t *Type) SelfReferential() bool { return t != nil && t.selfRef }

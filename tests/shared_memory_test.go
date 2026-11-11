@@ -216,18 +216,21 @@ setTimeout(() => { ch.port1.postMessage("over the wall"); }, 100);
 	}, "main.ts", "main got: echo: over the wall")
 }
 
+// A float TypedArray is no integer one: V8's TypeError at run time.
 func TestE2EAtomicsRejectsFloatTypedArray(t *testing.T) {
-	assertChanCompileError(t, `
+	assertSameAsNodeCompatJS(t, `
 const f = new Float64Array(4);
-Atomics.add(f, 0, 1);
-`, "integer TypedArray")
+try { Atomics.add(f, 0, 1); } catch (e) { console.log(e.name, e.message); }
+`)
 }
 
+// Atomics.wait over a TypedArray that is no Int32Array or BigInt64Array:
+// V8's TypeError at run time.
 func TestE2EAtomicsWaitRequiresInt32Array(t *testing.T) {
-	assertChanCompileError(t, `
+	assertSameAsNodeCompatJS(t, `
 const ta = new Uint8Array(4);
-Atomics.wait(ta, 0, 0);
-`, "Int32Array")
+try { Atomics.wait(ta, 0, 0); } catch (e) { console.log(e.name, e.message); }
+`)
 }
 
 // The free-variable-scanner fix found while wiring SharedArrayBuffer views

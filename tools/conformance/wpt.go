@@ -342,7 +342,7 @@ func runWPTSuite(workDir string, timeout time.Duration, workers int, compat stri
 		if err := writeWPTReport(out, results, stats); err != nil {
 			fatal("writing WPT report: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "WPT suite (lane=%s): %d files, report written to %s\n", laneLabel(), len(results), out)
+		fmt.Fprintf(os.Stderr, "WPT suite (lane=%s): %d files, %s\n", laneLabel(), len(results), reportOrDump(out))
 		var passing []string
 		for _, r := range results {
 			if r.Status == "PASS" {
@@ -455,6 +455,7 @@ func runOneWPT(path, workDir string, workerID int, timeout time.Duration) (res w
 	// The compiled binary runs with its cwd set to the test file's directory so a
 	// `fetch("resources/x.json")` — rewritten by wptFetchShim to a relative
 	// fs.readFileSync — resolves against the file's own resources/ dir.
+	noteDumpUnit(fmt.Sprintf("wpt%d", workerID), path)
 	ok, reason, stdout, _ := compileAndRunInDir(src, workDir, fmt.Sprintf("wpt%d", workerID), timeout, filepath.Dir(path), "parallel")
 	if sp, sf, found := parseWPTSubtests(stdout); found {
 		res.SubPass, res.SubFail, res.Ran = sp, sf, true
@@ -469,6 +470,9 @@ func runOneWPT(path, workDir string, workerID int, timeout time.Duration) (res w
 }
 
 func writeWPTReport(path string, all []wptResult, stats wptCorpusStats) error {
+	if dumpManifest != "" {
+		return nil // dump mode writes no report
+	}
 	var b strings.Builder
 	b.WriteString("# Web Platform Tests conformance results\n\n")
 	b.WriteString(reportLaneHeader())

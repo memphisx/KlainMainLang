@@ -28,16 +28,18 @@ extern _Thread_local int __kml_jmp_top;
  * emitted with the program. */
 extern u8 __kml_process_uncaught(u8 tag, i64 pay, _Bool rejection);
 extern void __kml_run_exit_handlers(i64 code);
+extern void __kml_run_before_exit(void (*run)(void), _Bool (*alive)(void));
+extern _Thread_local i64 __kml_process_exit_code;
+/* The event loop (loop.c); a program without one has nothing to run. */
+__attribute__((weak)) void __kml_event_loop_run(void) {}
+__attribute__((weak)) _Bool __kml_event_loop_alive(void) { return 0; }
 
-#ifdef KML_WORKERS
-/* Emitted with the Worker runtime, so named only with Workers (TDD-00251). */
+/* hooks.c's: on a worker thread an uncaught error goes to the parent's
+ * 'error' listener and ends only that thread; without Workers, a no-op. */
 extern void __kml_worker_uncaught(u8 tag, i64 pay);
 /* process.exit's end: the thread on a worker, the process elsewhere. */
-extern void __kml_thread_exit(int code) __attribute__((noreturn));
+__attribute__((weak, noreturn)) void __kml_thread_exit(int code) { exit(code); }
 #define KML_EXIT(c) __kml_thread_exit(c)
-#else
-#define KML_EXIT(c) exit(c)
-#endif
 
 _Thread_local void *__kml_thrown;
 static _Thread_local u8 thrown_tag = KML_TAG_ERROR;
@@ -171,19 +173,19 @@ void __kml_throw_any(int tag, i64 pay) {
             __kml_print_uncaught(t, pay);
             KML_EXIT(7);
         }
-        /* The process 'uncaughtException' event: if a listener runs the
-         * default print is skipped, but we still exit (the stack has
-         * unwound to the top-level catch-all). Emits 'exit' on the way out,
-         * like Node. */
+        /* The process 'uncaughtException' event: when a listener handles
+         * it, the rest of the module is abandoned but the program goes on
+         * as Node's does: the event loop runs, then 'beforeExit' and 'exit',
+         * and it exits with process.exitCode. */
         if (__kml_process_uncaught_guarded(t, pay, 0)) {
-            __kml_run_exit_handlers(1);
-            KML_EXIT(1);
+            __kml_event_loop_run();
+            __kml_run_before_exit(__kml_event_loop_run, __kml_event_loop_alive);
+            __kml_run_exit_handlers(__kml_process_exit_code);
+            KML_EXIT((int)__kml_process_exit_code);
         }
-#ifdef KML_WORKERS
         /* On a worker thread this does not return: the error goes to the
          * parent's 'error' listener and only that thread ends. */
         __kml_worker_uncaught(t, pay);
-#endif
         __kml_print_uncaught(t, pay);
         KML_EXIT(1);
     }
@@ -193,3 +195,56 @@ void __kml_throw_any(int tag, i64 pay) {
 /* The Error-object shim kept for the internal throw sites (assert/fs/
  * encoding/...) and every `throw new Error(...)`. */
 void __kml_throw(void *errObj) { __kml_throw_any(KML_TAG_ERROR, (i64)errObj); }
+
+/* Node's MakeCallback for a loop callback (timers, immediates): a throw it
+ * does not catch goes to 'uncaughtException', and when a listener handles it
+ * the loop goes on (the result is 1); unhandled, it ends the program as at
+ * top level. */
+#ifdef _WIN32
+extern int _setjmp(void *, void *) __attribute__((returns_twice));
+#define KML_SETJMP(b) _setjmp((b), 0)
+#else
+extern int setjmp(void *) __attribute__((returns_twice));
+#define KML_SETJMP(b) setjmp(b)
+#endif
+extern void *__kml_push_jmpbuf(void);
+extern void __kml_pop_jmpbuf(void);
+
+_Bool __kml_make_callback(void (*inv)(void *, double, double), void *clo, double a, double b) {
+    void *jb = __kml_push_jmpbuf();
+    if (KML_SETJMP(jb) != 0) {
+        u8 t = thrown_tag;
+        i64 pay = thrown_pay;
+        if (in_uncaught) {
+            __kml_print_uncaught(t, pay);
+            KML_EXIT(7);
+        }
+        if (__kml_process_uncaught_guarded(t, pay, 0))
+            return 1;
+        __kml_worker_uncaught(t, pay);
+        __kml_print_uncaught(t, pay);
+        KML_EXIT(1);
+    }
+    inv(clo, a, b);
+    __kml_pop_jmpbuf();
+    return 0;
+}
+
+/* The runtime's own TypeError (a null dereference, ToPrimitive's failure)
+ * and RangeError (string.c's "Invalid string length"), around a headered
+ * message. The names are the program's interned strings (hooks.c), compared
+ * by address. */
+extern void *__kml_error_names[2];
+
+static __attribute__((noreturn, cold)) void throw_kind(i64 kind, void *name, const char *msg) {
+    void *o = kml_calloc(KML_HEAP_WORDS, 1, KML_ERROR_SIZE);
+    F(o, KML_ERROR_KIND, i64) = kind;
+    F(o, KML_ERR_MESSAGE, const char *) = msg;
+    F(o, KML_ERR_NAME, void *) = name;
+    F(o, KML_ERR_CAUSE, i64) = KML_NB_UNDEFINED;
+    __kml_throw(o);
+    __builtin_unreachable();
+}
+
+void __kml_throw_nullderef(const char *msg) { throw_kind(KML_KIND_TYPEERR, __kml_error_names[0], msg); }
+void __kml_throw_range_error(const char *msg) { throw_kind(KML_KIND_RANGEERR, __kml_error_names[1], msg); }

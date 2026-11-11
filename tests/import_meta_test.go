@@ -114,15 +114,6 @@ console.log(libUrl())
 	}
 }
 
-func TestE2EImportMetaBareRejected(t *testing.T) {
-	_, err := resolveMultiFile(t, map[string]string{
-		"main.ts": `console.log(import.meta)`,
-	}, "main.ts")
-	if err == nil {
-		t.Fatal("expected a compile error for bare 'import.meta' (no '.url'), got none")
-	}
-}
-
 func TestE2EImportMetaOtherMemberRejected(t *testing.T) {
 	_, err := resolveMultiFile(t, map[string]string{
 		"main.ts": `console.log(import.meta.resolve)`,

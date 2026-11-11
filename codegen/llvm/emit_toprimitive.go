@@ -57,6 +57,12 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		if info, ok := e.classes[canon.ClassName]; ok {
 			for _, name := range order {
 				sig, ok := info.MethodSigs[name]
+				if !ok && info.HostBase != nil && info.HostBase.IsPrimWrapper() && (name == "valueOf" || name == "toString") {
+					// Number's (String's, Boolean's): the wrapped primitive.
+					body := e.freshReg()
+					e.emitBodyAddr(body, v.Ref)
+					return e.emitWrapperValue(body), true, nil
+				}
 				if !ok {
 					if name == "toString" && hint == "string" {
 						return Value{}, false, nil // Object.prototype.toString
@@ -113,9 +119,9 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		}
 		if name != "@@toPrimitive" && !isPrimitiveResultTy(retTy) && retTy.IR != "void" && !retTy.IsUndefined() {
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
 			closure := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 			if _, err := e.emitClosureCallByPtr(closure, fieldTy, nil, ast.Pos{}); err != nil {
 				return Value{}, false, err
 			}
@@ -131,9 +137,9 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		// `double` was expected.
 		if name != "@@toPrimitive" && (retTy.IR == "void" || retTy.IsUndefined()) {
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
 			closure := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 			if _, err := e.emitClosureCallByPtr(closure, fieldTy, nil, ast.Pos{}); err != nil {
 				return Value{}, false, err
 			}
@@ -152,9 +158,9 @@ func (e *Emitter) emitObjectToPrimitive(v Value, hint string) (Value, bool, erro
 		// @@toPrimitive method receives the hint string; valueOf/toString take
 		// no argument.
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, v.Ty.StructIR(), v.Ref, idx))
 		closure := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", closure, StructFieldIR(fieldTy), gep, fieldTy.Align()))
 		var args []ast.Expression
 		if name == "@@toPrimitive" && len(fieldTy.FuncParams) > 0 {
 			args = []ast.Expression{ast.NewStringLiteral(hint, ast.Pos{})}

@@ -16,10 +16,6 @@ package llvm
 // sidesteps every one of those differences by construction, on both dev
 // machines, with no per-platform IR.
 
-// UsesTtyShim reports whether the program used any terminal-control primitive,
-// so the CLI driver links the embedded C shim (EmbeddedCSources).
-func (e *Emitter) UsesTtyShim() bool { return e.usedTtyRead }
-
 // ensureTtyRead compiles the tty shim in: klain:tty's `@link tty`
 // (lib/native.d.ts).
 func (e *Emitter) ensureTtyRead() { e.usedTtyRead = true }

@@ -25,7 +25,7 @@ void __kml_promise_defer_step(void *envp) {
 /* Settle q with state after hops more microtasks. */
 void __kml_promise_defer_settle(void *q, i64 state, i64 hops) {
     defer_env *env = kml_alloc(KML_HEAP_WORDS, sizeof *env);
-    void **clo = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    void **clo = kml_closure_alloc(2 * sizeof(void *));
     env->q = q;
     env->state = state;
     env->hops = hops;

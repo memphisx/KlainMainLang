@@ -3,6 +3,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"regexp"
 )
 
 // emit_regexp_replace.go — str.replace(regexp, replacement)/
@@ -33,8 +34,10 @@ type regexReplacer struct {
 	// known (an inline regex literal, or an identifier bound to a `const`
 	// regex literal); capturesKnown records whether it is. When known, a
 	// callback is invoked with the real JS argument shape
-	// (match, cap1..capN, offset, string); when not, it falls back to the
-	// (match, offset, string) narrowing (capture groups unavailable).
+	// (match, cap1..capN, offset, string[, groups]); when not, each argument
+	// past the match is chosen per match at run time. named records a
+	// known pattern's named groups (the groups argument).
+	named         bool
 	nCaptures     int
 	capturesKnown bool
 }
@@ -189,7 +192,7 @@ func (e *Emitter) staticRegexCaptureCount(pat ast.Expression) (int, bool) {
 // evaluated a single time regardless of how many matches end up being
 // replaced).
 func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (regexReplacer, error) {
-	if e.inferExprType(args[1]).IsFunc() {
+	if e.typeOfExpr(args[1]).IsFunc() {
 		// Real JS invokes the replacer as (match, cap1..capN, offset, string),
 		// where N is the pattern's capture-group count. When the pattern is
 		// statically a regex literal N is known, so seed the callback's
@@ -215,19 +218,24 @@ func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (rege
 			hints = append(hints, TypeF64, TypePtr) // offset, whole string
 			maxArity = nCap + 3
 		} else {
-			hints = []Type{TypePtr, TypeF64, TypePtr}
+			// The capture count is known only per match: every argument
+			// past the match is chosen at run time (a capture, the offset,
+			// the string), so each is `any`.
+			hints = []Type{TypePtr}
 		}
+		for i := 0; i < 8; i++ {
+			hints = append(hints, TypeAny) // past the string: undefined
+		}
+		_ = maxArity
 		cb, err := e.resolveCallbackWithHints(args[1], hints)
 		if err != nil {
 			return regexReplacer{}, err
 		}
-		if cb.arity() > maxArity {
-			if known {
-				return regexReplacer{}, fmt.Errorf("%d:%d: a replace()/replaceAll() callback for this pattern supports at most %d parameters (match, %d capture group(s), offset, string)", pos.Line, pos.Col, maxArity, nCap)
-			}
-			return regexReplacer{}, fmt.Errorf("%d:%d: a replace()/replaceAll() callback over a non-literal pattern supports at most 3 parameters (match, offset, string) — capture groups are passed positionally only when the pattern's capture count is statically known (an inline regex literal or a `const`-bound one)", pos.Line, pos.Col)
+		named := false
+		if known {
+			named = e.staticRegexNamed(args[0])
 		}
-		return regexReplacer{isCallback: true, cb: cb, nCaptures: nCap, capturesKnown: known}, nil
+		return regexReplacer{isCallback: true, cb: cb, nCaptures: nCap, capturesKnown: known, named: named}, nil
 	}
 	templateVal, err := e.emitExpr(args[1])
 	if err != nil {
@@ -251,7 +259,7 @@ func (e *Emitter) resolveRegexReplacer(args []ast.Expression, pos ast.Pos) (rege
 // side effect, must never be re-run) or by expanding a literal template's
 // backreferences (pure, emitRegexExpandTemplate is free to do its own
 // internal scan without any single-invocation constraint).
-func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, strVal Value, matchStartReg string) (replPtr, replLen string, err error) {
+func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, strVal Value, matchStartReg, groupsReg string) (replPtr, replLen string, err error) {
 	if !replacer.isCallback {
 		p, l := e.emitRegexExpandTemplate(replacer.template, match, strVal, matchStartReg)
 		return p, l, nil
@@ -260,9 +268,9 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 	matchPtr := e.freshReg()
 	matchPtr = e.arrayData(match)
 	elem0Gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 0", elem0Gep, matchPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 0", elem0Gep, matchPtr))
 	fullMatch := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fullMatch, elem0Gep))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fullMatch, elem0Gep))
 
 	// offset is user-visible, so reported in the mode's index space (UTF-16
 	// code units for es-utf16, identity elsewhere); built lazily since a
@@ -270,16 +278,30 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 	offsetArg := func() Value {
 		return Value{Ref: e.regexByteToUTF16(strVal.Ref, matchStartReg), Ty: TypeI64}
 	}
+	// The named groups' object (exec's `groups`), or undefined when the
+	// pattern has none: the argument after the string.
+	groupsArg := func() (string, error) {
+		if groupsReg == "" {
+			return fmt.Sprint(nbUndefined), nil
+		}
+		gb, err := e.emitBoxValue(Value{Ref: groupsReg, Ty: execMembers["groups"].ty()})
+		if err != nil {
+			return "", err
+		}
+		none, r := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", none, groupsReg))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", r, none, nbUndefined, gb.Ref))
+		return r, nil
+	}
 	arity := replacer.cb.arity()
 	// An `arguments`-reading replacer collects every argument through its
 	// implicit rest (TDD-00210), so pass the full JS sequence rather than
 	// truncating to the declared fixed arity: (match, cap1..capN, offset,
 	// string) when captures are known, else (match, offset, string).
-	if replacer.cb.hasRest() {
-		if replacer.capturesKnown {
-			arity = 1 + replacer.nCaptures + 2
-		} else {
-			arity = 3
+	if replacer.cb.hasRest() && replacer.capturesKnown {
+		arity = 1 + replacer.nCaptures + 2
+		if replacer.named {
+			arity++
 		}
 	}
 
@@ -291,9 +313,9 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 	if replacer.capturesKnown {
 		for i := 1; i <= replacer.nCaptures && len(cbArgs) < arity; i++ {
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", gep, matchPtr, i))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %d", gep, matchPtr, i))
 			capReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", capReg, gep))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", capReg, gep))
 			cbArgs = append(cbArgs, Value{Ref: capReg, Ty: undefinedableElem(TypePtr)}) // null: an unmatched group
 		}
 		if len(cbArgs) < arity {
@@ -302,13 +324,121 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 		if len(cbArgs) < arity {
 			cbArgs = append(cbArgs, strVal)
 		}
-	} else {
-		if arity >= 2 {
-			cbArgs = append(cbArgs, offsetArg())
+		if len(cbArgs) < arity {
+			g, err := groupsArg()
+			if err != nil {
+				return "", "", err
+			}
+			cbArgs = append(cbArgs, Value{Ref: g, Ty: TypeAny})
 		}
-		if arity >= 3 {
-			cbArgs = append(cbArgs, strVal)
+	} else if arity >= 2 || replacer.cb.hasRest() {
+		// Position k (1-based past the match) is capture k while k <= n
+		// (n = this match's capture count), then the offset, then the
+		// string; a rest parameter collects every one of them.
+		_, mlen := e.arrayParts(match)
+		n := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", n, mlen))
+		off, err := e.emitBoxValue(Value{Ref: e.convert(offsetArg(), TypeF64).Ref, Ty: TypeF64})
+		if err != nil {
+			return "", "", err
 		}
+		str, err := e.emitBoxValue(strVal)
+		if err != nil {
+			return "", "", err
+		}
+		grp, err := groupsArg()
+		if err != nil {
+			return "", "", err
+		}
+		hasGrp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", hasGrp, grp, nbUndefined))
+		argAt := func(k string) (string, error) {
+			isCap, at := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp sle i64 %s, %s", isCap, k, n))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", at, isCap, k))
+			gep, capReg := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", gep, matchPtr, at))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", capReg, gep))
+			capBox, err := e.emitBoxValue(Value{Ref: capReg, Ty: undefinedableElem(TypePtr)})
+			if err != nil {
+				return "", err
+			}
+			kn, isOff, isStr := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", kn, k, n))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", isOff, kn))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", isStr, kn))
+			v1, v2, v3 := e.freshReg(), e.freshReg(), e.freshReg()
+			isGrp, grpOr := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 3", isGrp, kn))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", grpOr, isGrp, grp, nbUndefined))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", v1, isStr, str.Ref, grpOr))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", v2, isOff, off.Ref, v1))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", v3, isCap, capBox.Ref, v2))
+			return v3, nil
+		}
+		fixed := arity
+		if replacer.cb.hasRest() {
+			fixed = len(replacer.cb.paramTypes()) - 1
+		}
+		for k := 1; k < fixed; k++ {
+			v, err := argAt(fmt.Sprint(k))
+			if err != nil {
+				return "", "", err
+			}
+			cbArgs = append(cbArgs, Value{Ref: v, Ty: TypeAny})
+		}
+		if replacer.cb.hasRest() {
+			// The rest: positions fixed .. n+2, their count known per match
+			// (position 0, the match, too when no parameter is fixed).
+			cbArgs = cbArgs[:min(len(cbArgs), max(fixed, 0))]
+			for len(cbArgs) < fixed {
+				cbArgs = append(cbArgs, Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny})
+			}
+			total, cnt, pos := e.freshReg(), e.freshReg(), e.freshReg()
+			total0, gz := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 3", total0, n))
+			e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", gz, hasGrp))
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", total, total0, gz))
+			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", cnt, total, fixed))
+			e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", pos, cnt))
+			rlen := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", rlen, pos, cnt))
+			bytes := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, rlen))
+			data := e.freshReg()
+			e.heapMallocInto(data, allocElems, bytes)
+			idx := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+			e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idx))
+			condL, bodyL, doneL := e.freshLabel("replrest.cond"), e.freshLabel("replrest.body"), e.freshLabel("replrest.done")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+			e.emitLabel(condL)
+			i, more := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, idx))
+			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, rlen))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
+			e.emitLabel(bodyL)
+			k := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", k, i, fixed))
+			v, err := argAt(k)
+			if err != nil {
+				return "", "", err
+			}
+			slot, next := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", slot, data, i))
+			e.heapStore("i64", v, slot, 8)
+			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, idx))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+			e.emitLabel(doneL)
+			cb := replacer.cb
+			cb.restArray = &[2]string{e.newArrayHeader(data, rlen), rlen}
+			replacer.cb = cb
+			arity = len(cbArgs)
+		}
+	}
+	for len(cbArgs) < arity {
+		cbArgs = append(cbArgs, Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny})
 	}
 	resultVal, err := e.emitCBCall(replacer.cb, cbArgs)
 	if err != nil {
@@ -319,15 +449,11 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 	// to `ptr` would reinterpret the double/integer bits as a pointer and hand
 	// them to strlen (invalid IR), the same hazard the literal-template path
 	// guards against above.
-	if !isStringTy(resultVal.Ty) {
-		if resultVal, err = e.emitArgToString(resultVal); err != nil {
-			return "", "", err
-		}
+	if resultVal, err = e.replacerResultString(resultVal); err != nil {
+		return "", "", err
 	}
-	resultVal = e.convert(resultVal, TypePtr)
-	e.ensureStrlen()
 	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", lenReg, resultVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", lenReg, resultVal.Ref))
 	return resultVal.Ref, lenReg, nil
 }
 
@@ -335,18 +461,17 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 // (match: its result array; the match starts at byte matchStartReg of
 // strVal) through __kml_regex_expand, the spec's GetSubstitution.
 func (e *Emitter) emitRegexExpandTemplate(templateVal, match, strVal Value, matchStartReg string) (replPtr, replLen string) {
-	e.ensureStrlen()
-	e.ensureRegexExpand()
+	e.ensureStrHeaderRuntime()
 	data, n := e.arrayParts(match)
 	g0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", g0, data))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", g0, data))
 	l0, mend := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", l0, e.emitUnmatchedGroupAsEmpty(g0)))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", l0, e.emitUnmatchedGroupAsEmpty(g0)))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", mend, matchStartReg, l0))
 	replPtr, replLen = e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_regex_expand(ptr %s, ptr %s, i64 %s, ptr %s, i64 %s, i64 %s)",
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_regex_expand("+irPtr+" %s, "+irPtr+" %s, i64 %s, "+irPtr+" %s, i64 %s, i64 %s)",
 		replPtr, templateVal.Ref, data, n, strVal.Ref, matchStartReg, mend))
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", replLen, replPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", replLen, replPtr))
 	return replPtr, replLen
 }
 
@@ -355,11 +480,11 @@ func (e *Emitter) emitRegexExpandTemplate(templateVal, match, strVal Value, matc
 // %Symbol.replace% algorithm exactly (a single RegExpExec call). No match
 // returns the original subject string unchanged.
 func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer regexReplacer) (Value, error) {
-	match, startReg, endReg := e.emitRegexSingleMatchCore(regexVal, strVal)
+	match, startReg, endReg, groupsReg := e.emitRegexMatch(regexVal, strVal, replacer.isCallback)
 	matchPtr := e.freshReg()
 	matchPtr = e.arrayData(match)
 	isNullReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, matchPtr))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNullReg, matchPtr))
 
 	noMatchL := e.freshLabel("regex.replace1.nomatch")
 	matchedL := e.freshLabel("regex.replace1.matched")
@@ -367,22 +492,19 @@ func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer r
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullReg, noMatchL, matchedL))
 
 	resultSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resultSlot))
 
 	e.emitLabel(noMatchL)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", strVal.Ref, resultSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", strVal.Ref, resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(matchedL)
-	replPtr, replLenReg, err := e.emitRegexComputeOneReplacement(replacer, match, strVal, startReg)
+	replPtr, replLenReg, err := e.emitRegexComputeOneReplacement(replacer, match, strVal, startReg, groupsReg)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureStrlen()
-	e.ensureMalloc()
-	e.ensureMemcpy()
 	subjectLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", subjectLen, strVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", subjectLen, strVal.Ref))
 	tailLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tailLen, subjectLen, endReg))
 	prefixPlusRepl := e.freshReg()
@@ -391,27 +513,27 @@ func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer r
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", outLen, prefixPlusRepl, tailLen))
 	outBuf := e.emitStringAlloc(outLen) // TDD-00120: length-prefixed
 
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", outBuf, strVal.Ref, startReg))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", outBuf, strVal.Ref, startReg))
 	replDst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", replDst, outBuf, startReg))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", replDst, replPtr, replLenReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", replDst, outBuf, startReg))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", replDst, replPtr, replLenReg))
 	tailDstOff := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", tailDstOff, startReg, replLenReg))
 	tailDst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", tailDst, outBuf, tailDstOff))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", tailDst, outBuf, tailDstOff))
 	tailSrc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", tailSrc, strVal.Ref, endReg))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", tailDst, tailSrc, tailLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", tailSrc, strVal.Ref, endReg))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", tailDst, tailSrc, tailLen))
 	termGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, outBuf, outLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", termGep, outBuf, outLen))
 	e.heapStore("i8", "0", termGep, 1)
 
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", outBuf, resultSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", outBuf, resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	final := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", final, resultSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", final, resultSlot))
 	return Value{Ref: final, Ty: TypePtr}, nil
 }
 
@@ -430,26 +552,23 @@ func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer r
 // by copying each gap-then-replacement segment, plus the trailing gap
 // after the last match.
 func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer regexReplacer) (Value, error) {
-	e.ensureStrlen()
-	e.ensureMalloc()
-	e.ensureMemcpy()
 
 	count := e.emitRegexCountGlobalMatches(regexVal, strVal)
 
 	byteCount8 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount8, count))
 	starts := e.freshReg()
-	e.heapMallocInto(starts, byteCount8)
+	e.heapMallocInto(starts, allocBytes, byteCount8)
 	ends := e.freshReg()
-	e.heapMallocInto(ends, byteCount8)
+	e.heapMallocInto(ends, allocBytes, byteCount8)
 	replPtrs := e.freshReg()
-	e.heapMallocInto(replPtrs, byteCount8)
+	e.heapMallocInto(replPtrs, allocElems, byteCount8)
 	replLens := e.freshReg()
-	e.heapMallocInto(replLens, byteCount8)
+	e.heapMallocInto(replLens, allocBytes, byteCount8)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	fillCondL := e.freshLabel("regex.replaceall.fillcond")
 	fillBodyL := e.freshLabel("regex.replaceall.fillbody")
@@ -458,28 +577,28 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 
 	e.emitLabel(fillCondL)
 	idxVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	fillDoneReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", fillDoneReg, idxVal, count))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fillDoneReg, fillDoneL, fillBodyL))
 
 	e.emitLabel(fillBodyL)
-	match, startReg, endReg := e.emitRegexSingleMatchCore(regexVal, strVal)
-	replPtr, replLenReg, err := e.emitRegexComputeOneReplacement(replacer, match, strVal, startReg)
+	match, startReg, endReg, groupsReg := e.emitRegexMatch(regexVal, strVal, replacer.isCallback)
+	replPtr, replLenReg, err := e.emitRegexComputeOneReplacement(replacer, match, strVal, startReg, groupsReg)
 	if err != nil {
 		return Value{}, err
 	}
 	startGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", startGep, starts, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", startGep, starts, idxVal))
 	e.heapStore("i64", startReg, startGep, 8)
 	endGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", endGep, ends, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", endGep, ends, idxVal))
 	e.heapStore("i64", endReg, endGep, 8)
 	replPtrGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", replPtrGep, replPtrs, idxVal))
-	e.heapStore("ptr", replPtr, replPtrGep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", replPtrGep, replPtrs, idxVal))
+	e.heapStore(irPtr, replPtr, replPtrGep, 8)
 	replLenGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", replLenGep, replLens, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", replLenGep, replLens, idxVal))
 	e.heapStore("i64", replLenReg, replLenGep, 8)
 
 	// Advance past a zero-length match so this fill pass iterates in lockstep
@@ -490,7 +609,7 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", fillCondL))
 
 	// --- pass 3: pure — sum lengths, then build the output string ---
@@ -502,17 +621,17 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	// start offset of its next exec()/test().
 	e.emitRegexStoreLastIndex(regexVal, "0")
 	subjectLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", subjectLen, strVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", subjectLen, strVal.Ref))
 
 	totalAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", totalAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", totalAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", totalAlloca))
 	lastPosAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lastPosAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", lastPosAlloca))
 	sumIdxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", sumIdxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", sumIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", sumIdxAlloca))
 
 	sumCondL := e.freshLabel("regex.replaceall.sumcond")
 	sumBodyL := e.freshLabel("regex.replaceall.sumbody")
@@ -521,48 +640,48 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 
 	e.emitLabel(sumCondL)
 	sumIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sumIdx, sumIdxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sumIdx, sumIdxAlloca))
 	sumDoneReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", sumDoneReg, sumIdx, count))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sumDoneReg, sumDoneL, sumBodyL))
 
 	e.emitLabel(sumBodyL)
 	sumStartGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", sumStartGep, starts, sumIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", sumStartGep, starts, sumIdx))
 	sumStart := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sumStart, sumStartGep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sumStart, sumStartGep))
 	sumReplLenGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", sumReplLenGep, replLens, sumIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", sumReplLenGep, replLens, sumIdx))
 	sumReplLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sumReplLen, sumReplLenGep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sumReplLen, sumReplLenGep))
 	curLastPos := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLastPos, lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", curLastPos, lastPosAlloca))
 	gapLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", gapLen, sumStart, curLastPos))
 	curTotal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curTotal, totalAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", curTotal, totalAlloca))
 	totalPlusGap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", totalPlusGap, curTotal, gapLen))
 	newTotal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newTotal, totalPlusGap, sumReplLen))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newTotal, totalAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", newTotal, totalAlloca))
 	sumEndGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", sumEndGep, ends, sumIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", sumEndGep, ends, sumIdx))
 	sumEnd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sumEnd, sumEndGep))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sumEnd, lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sumEnd, sumEndGep))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sumEnd, lastPosAlloca))
 	sumIdxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", sumIdxNext, sumIdx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sumIdxNext, sumIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sumIdxNext, sumIdxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", sumCondL))
 
 	e.emitLabel(sumDoneL)
 	finalLastPos := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalLastPos, lastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalLastPos, lastPosAlloca))
 	trailingLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", trailingLen, subjectLen, finalLastPos))
 	preTrailingTotal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", preTrailingTotal, totalAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", preTrailingTotal, totalAlloca))
 	grandTotal := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", grandTotal, preTrailingTotal, trailingLen))
 	outBuf := e.emitStringAlloc(grandTotal) // TDD-00120: length-prefixed
@@ -570,13 +689,13 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	// Copy loop: gap-then-replacement per match, then the trailing gap.
 	copyLastPosAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", copyLastPosAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", copyLastPosAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", copyLastPosAlloca))
 	copyDstAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", copyDstAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", copyDstAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", copyDstAlloca))
 	copyIdxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", copyIdxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", copyIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", copyIdxAlloca))
 
 	copyCondL := e.freshLabel("regex.replaceall.copycond")
 	copyBodyL := e.freshLabel("regex.replaceall.copybody")
@@ -585,68 +704,68 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 
 	e.emitLabel(copyCondL)
 	copyIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyIdx, copyIdxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyIdx, copyIdxAlloca))
 	copyDoneReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", copyDoneReg, copyIdx, count))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", copyDoneReg, copyDoneL, copyBodyL))
 
 	e.emitLabel(copyBodyL)
 	copyStartGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", copyStartGep, starts, copyIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", copyStartGep, starts, copyIdx))
 	copyStart := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyStart, copyStartGep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyStart, copyStartGep))
 	copyCurLastPos := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyCurLastPos, copyLastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyCurLastPos, copyLastPosAlloca))
 	copyGapLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", copyGapLen, copyStart, copyCurLastPos))
 	copyCurDst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyCurDst, copyDstAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyCurDst, copyDstAlloca))
 	gapDstGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", gapDstGep, outBuf, copyCurDst))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", gapDstGep, outBuf, copyCurDst))
 	gapSrcGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", gapSrcGep, strVal.Ref, copyCurLastPos))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", gapDstGep, gapSrcGep, copyGapLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", gapSrcGep, strVal.Ref, copyCurLastPos))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", gapDstGep, gapSrcGep, copyGapLen))
 	dstAfterGap := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", dstAfterGap, copyCurDst, copyGapLen))
 
 	copyReplPtrGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", copyReplPtrGep, replPtrs, copyIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", copyReplPtrGep, replPtrs, copyIdx))
 	copyReplPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", copyReplPtr, copyReplPtrGep))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", copyReplPtr, copyReplPtrGep))
 	copyReplLenGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", copyReplLenGep, replLens, copyIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", copyReplLenGep, replLens, copyIdx))
 	copyReplLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyReplLen, copyReplLenGep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyReplLen, copyReplLenGep))
 	replDstGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", replDstGep, outBuf, dstAfterGap))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", replDstGep, copyReplPtr, copyReplLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", replDstGep, outBuf, dstAfterGap))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", replDstGep, copyReplPtr, copyReplLen))
 	dstAfterRepl := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", dstAfterRepl, dstAfterGap, copyReplLen))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", dstAfterRepl, copyDstAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", dstAfterRepl, copyDstAlloca))
 
 	copyEndGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", copyEndGep, ends, copyIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", copyEndGep, ends, copyIdx))
 	copyEnd := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", copyEnd, copyEndGep))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", copyEnd, copyLastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", copyEnd, copyEndGep))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", copyEnd, copyLastPosAlloca))
 
 	copyIdxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", copyIdxNext, copyIdx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", copyIdxNext, copyIdxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", copyIdxNext, copyIdxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", copyCondL))
 
 	e.emitLabel(copyDoneL)
 	finalCopyLastPos := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalCopyLastPos, copyLastPosAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalCopyLastPos, copyLastPosAlloca))
 	finalCopyDst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalCopyDst, copyDstAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalCopyDst, copyDstAlloca))
 	trailDstGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", trailDstGep, outBuf, finalCopyDst))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", trailDstGep, outBuf, finalCopyDst))
 	trailSrcGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", trailSrcGep, strVal.Ref, finalCopyLastPos))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", trailDstGep, trailSrcGep, trailingLen))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", trailSrcGep, strVal.Ref, finalCopyLastPos))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", trailDstGep, trailSrcGep, trailingLen))
 	termGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", termGep, outBuf, grandTotal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", termGep, outBuf, grandTotal))
 	e.heapStore("i8", "0", termGep, 1)
 
 	return Value{Ref: outBuf, Ty: TypePtr}, nil
@@ -693,7 +812,7 @@ func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.
 	}
 
 	resultSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resultSlot))
 
 	allL := e.freshLabel("regex.replace.all")
 	singleL := e.freshLabel("regex.replace.single")
@@ -705,7 +824,7 @@ func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", singleResult.Ref, resultSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", singleResult.Ref, resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(allL)
@@ -713,12 +832,12 @@ func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", allResult.Ref, resultSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", allResult.Ref, resultSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	final := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", final, resultSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", final, resultSlot))
 	return Value{Ref: final, Ty: TypePtr}, nil
 }
 
@@ -726,7 +845,50 @@ func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.
 // template: an unmatched group (null, undefined) splices as "".
 func (e *Emitter) emitUnmatchedGroupAsEmpty(p string) string {
 	isNull, r := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, p))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.internString(""), p))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, p))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isNull, e.internString(""), p))
 	return r
+}
+
+// staticRegexNamed reports a statically known pattern with a named group
+// (`(?<name>…)`, not a lookbehind).
+func (e *Emitter) staticRegexNamed(pat ast.Expression) bool {
+	var lit *ast.NewRegExpExpression
+	switch p := pat.(type) {
+	case *ast.NewRegExpExpression:
+		lit = p
+	case *ast.Identifier:
+		lit, _ = e.constRegexLiteral(p.Name)
+	}
+	if lit == nil {
+		return false
+	}
+	sl, ok := lit.Pattern.(*ast.StringLiteral)
+	return ok && namedGroupRe.MatchString(sl.Value)
+}
+
+var namedGroupRe = regexp.MustCompile(`(^|[^\\])\(\?<[^=!]`)
+
+// replacerResultString is a replace callback's result ToString'd: a string
+// as is; undefined (a path falling off the end), null or another type as
+// its text (`() => {}` splices "undefined").
+func (e *Emitter) replacerResultString(v Value) (Value, error) {
+	if isStringTy(v.Ty) && !v.Ty.Nullable() && !v.Ty.IsUndefined() && !v.Ty.IsNull() && !v.Ty.IsDynamic() {
+		return e.convert(v, TypePtr), nil
+	}
+	if v.Ty.IR == "" || v.Ty.IR == "void" {
+		return Value{Ref: e.internString("undefined"), Ty: TypePtr}, nil
+	}
+	if !v.Ty.IsDynamic() {
+		b, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		v = b
+	}
+	r, err := e.emitDynamicToString(v)
+	if err != nil {
+		return Value{}, err
+	}
+	return e.convert(r, TypePtr), nil
 }

@@ -18,14 +18,14 @@ import (
 // the representation codegen uses. ok=false means the new pass has no answer
 // there yet, and nothing is recorded.
 type ShadowOracle interface {
-	// ExprType answers inferExprType.
+	// ExprType answers typeOfExpr.
 	ExprType(expr ast.Expression) (Type, bool)
-	// AnnotationType answers resolveType.
-	AnnotationType(ta *ast.TypeAnnotation) (Type, bool)
-	// GlobalType answers reliableGlobalType: the storage type of a top-level
+	// AnnotationType answers annotationType.
+	AnnotationType(ta ast.TypeNode) (Type, bool)
+	// GlobalType answers the module-global pre-pass: the storage type of a top-level
 	// declaration, or promotable=false when it stays a local.
 	GlobalType(v *ast.VarDeclaration) (ty Type, promotable bool, ok bool)
-	// ReturnType answers inferUnannotatedReturnType for a function body.
+	// ReturnType answers funcBodyReturnType for a function body.
 	ReturnType(body *ast.BlockStatement) (ty Type, hasValue bool, ok bool)
 	// Reference answers emitIdent's name resolution: whether the identifier
 	// is bound by a declaration in the program (or names a global).
@@ -53,6 +53,11 @@ func (e *Emitter) startShadow(prog *ast.Program) (func(), error) {
 		return func() {}, err
 	}
 	e.shadowOracle, e.shadowRec = NewShadowOracle(prog, e.opts, e.repr()), rec
+	src := ""
+	if prog.Text != nil {
+		src = prog.Text.Src
+	}
+	rec.KeepEntry(prog.EntryPath, src)
 	return func() {
 		// One tally record per decider and node kind: how often it was asked,
 		// so the report can show where the two agree.
@@ -118,7 +123,7 @@ func nodeKind(n ast.Node) string {
 	return strings.TrimPrefix(fmt.Sprintf("%T", n), "*ast.")
 }
 
-// shadowExprType is the inferExprType hook.
+// shadowExprType is the typeOfExpr hook.
 func (e *Emitter) shadowExprType(expr ast.Expression, old Type) {
 	if e.analysisDepth > 0 {
 		// An analysis pre-pass asks before the bindings it reads are in
@@ -139,51 +144,65 @@ func (e *Emitter) shadowExprType(expr ast.Expression, old Type) {
 			}
 		}
 	}
-	if neu, ok := e.shadowOracle.ExprType(expr); ok {
-		e.shadowCompare("inferExprType", expr, old, true, neu, true)
-	}
-}
-
-// shadowAnnotationType is the resolveType hook. An annotation codegen
-// synthesised has no node, and is not compared.
-func (e *Emitter) shadowAnnotationType(ta *ast.TypeAnnotation, old Type) {
-	n := ta.TypeNode()
-	if n == nil {
+	if e.shadowAsking > 0 {
+		// Asked by the oracle itself, through a hook that reads codegen's
+		// inference: comparing there would ask the oracle again, without end.
 		return
 	}
-	if neu, ok := e.shadowOracle.AnnotationType(ta); ok {
-		e.shadowCompare("resolveType", n, old, true, neu, true)
+	e.shadowAsking++
+	neu, ok := e.shadowOracle.ExprType(expr)
+	e.shadowAsking--
+	if ok {
+		e.shadowCompare("typeOfExpr", expr, old, true, neu, true)
 	}
 }
 
-// shadowGlobalType is the reliableGlobalType hook.
+// shadowGlobalType is the module-global decision's hook: a forced type
+// (codegen's own) or the checker's, against the checker's.
 func (e *Emitter) shadowGlobalType(v *ast.VarDeclaration, old Type, oldOK bool) {
 	if neu, promotable, ok := e.shadowOracle.GlobalType(v); ok {
-		e.shadowCompare("reliableGlobalType", v, old, oldOK, neu, promotable)
+		// A library, dynamic-only or worker module's binding is a global
+		// whatever the oracle says (registerModuleGlobals' initFnDecls).
+		if !promotable && e.initFnDecls[v] && neu.IR == "" {
+			return // typed by registerModuleGlobals' own pass
+		}
+		e.shadowCompare("globalType", v, old, oldOK, neu, promotable || e.initFnDecls[v])
 	}
 }
 
-// shadowReturnType is the inferUnannotatedReturnType hook.
-//
-// It runs only where codegen fell back to the old inference, so every call
-// is a row: an answer the checker gives but codegen cannot use, or none.
-func (e *Emitter) shadowReturnType(body *ast.BlockStatement, old Type, oldOK bool) {
-	if e.foreignThisBody {
-		// A method body compiled for any receiver (its shape record), as
-		// shadowExprType: emission never asks the checker there.
+// shadowLocalGlobalType is the hook for a top-level declaration that stays
+// a main() local: the type its local stores, against the checker's answer
+// for it as a global. A switch to the checker's answer would promote it.
+func (e *Emitter) shadowLocalGlobalType(v *ast.VarDeclaration, declTy Type) {
+	if e.shadowOracle == nil || e.promotedGlobalDecls[v] || e.analysisDepth > 0 || e.foreignThisBody {
 		return
 	}
-	neu, hasValue, ok := e.shadowOracle.ReturnType(body)
-	if !ok {
-		pos := body.GetPos()
-		e.shadowRec.Record(shadow.Disagreement{
-			Module:  e.inLib,
-			Decider: "inferUnannotatedReturnType", Kind: nodeKind(body), Line: pos.Line, Col: pos.Col,
-			Old: reprKey(old), New: "unanswered", Fields: []string{"unanswered"},
-		})
+	if !e.shadowTopDecls[v] {
+		// A function's own local: the type it stores, against the
+		// checker's for its declaration (the declaration switch-over). An
+		// annotated one is its annotation's type.
+		if v.TypeAnnot != nil && !e.anyHeldEmitting[v] {
+			return
+		}
+		if o := e.reprOracle(); o == nil || !o.c.InProgram(v) {
+			return
+		}
+		if neu, ok := e.reprOracle().LocalType(v); ok {
+			// A `var` its scope may skip holds undefined until it runs.
+			// (emitVarDeclBody's widening of a reference or a scalar slot.)
+			if v.Kind == "var" && e.hoistedVarMaySkip() && (neu.IsArray() || neu.IsObject() || neu.IsDynamicObject() || !neu.IsDynamic() && neu.IR != "void") {
+				neu = indexReadType(neu)
+			}
+			e.shadowCompare("localDeclType", v, declTy, true, neu, true)
+		}
 		return
 	}
-	e.shadowCompare("inferUnannotatedReturnType", body, old, oldOK, neu, hasValue)
+	if _, global := e.moduleGlobals[v.Name]; global {
+		return
+	}
+	if neu, promotable, ok := e.shadowOracle.GlobalType(v); ok && promotable {
+		e.shadowCompare("localGlobalType", v, declTy, true, neu, true)
+	}
 }
 
 // shadowReference is emitIdent's hook: declared is codegen's answer to
@@ -343,7 +362,7 @@ func writeKey(b *strings.Builder, v reflect.Value, depth int) {
 // merged into its fields), a named structural type's re-resolution handle
 // (RefName: the same fields under its interface's name) or a string
 // literal's value, not for the value's representation.
-var metadataField = map[string]bool{"FuncParamNames": true, "FuncParamOptional": true, "Inferred": true, "IntersectionMembers": true, "RefName": true,
+var metadataField = map[string]bool{"FuncParamNames": true, "FuncParamOptional": true, "Inferred": true, "RefName": true,
 	// A string literal type is a string at run time; its value is the
 	// compile-time knowledge a discriminant reads.
 	"IsStrLiteral": true, "LitValue": true}
@@ -387,7 +406,7 @@ type shadowNode struct {
 // analysisPass marks an analysis pre-pass (escape and purity checks, the
 // empty-container and widened-binding inference, the JavaScript call-site
 // parameter collection) until the returned func
-// runs: inferExprType there is not compared (shadowExprType).
+// runs: typeOfExpr there is not compared (shadowExprType).
 func (e *Emitter) analysisPass() func() {
 	e.analysisDepth++
 	return func() { e.analysisDepth-- }
@@ -404,7 +423,7 @@ func intPromoted(old, neu Type) bool {
 }
 
 // shadowSwitchFallback records a switched expression kind the checker
-// left unanswered, answered by its fallback (settledExprKind).
+// left unanswered, answered by its fallback (builtNodeType).
 func (e *Emitter) shadowSwitchFallback(expr ast.Expression, fallback Type) {
 	if e.shadowRec == nil || e.analysisDepth > 0 {
 		return // an analysis pre-pass asks before its bindings are in scope
@@ -414,5 +433,33 @@ func (e *Emitter) shadowSwitchFallback(expr ast.Expression, fallback Type) {
 		Module:  e.inLib,
 		Decider: "switchFallback", Kind: nodeKind(expr), Line: pos.Line, Col: pos.Col,
 		Old: reprKey(fallback), New: "unanswered", Fields: []string{"unanswered"},
+	})
+}
+
+// shadowAnnotationFallback records an annotation the oracle left
+// unanswered (an internal compiler error, typeGap).
+func (e *Emitter) shadowAnnotationFallback(ta ast.TypeNode, fallback Type) {
+	if e.shadowRec == nil || e.analysisDepth > 0 {
+		return
+	}
+	pos := ta.GetLoc().Pos
+	e.shadowRec.Record(shadow.Disagreement{
+		Module:  e.inLib,
+		Decider: "annotationFallback", Kind: nodeKind(ta), Line: pos.Line, Col: pos.Col,
+		Old: reprKey(fallback), New: "unanswered", Fields: []string{"unanswered"},
+	})
+}
+
+// shadowGlobalFallback records a top-level declaration the front end left
+// unanswered, which stays a local.
+func (e *Emitter) shadowGlobalFallback(v *ast.VarDeclaration) {
+	if e.shadowRec == nil || e.analysisDepth > 0 {
+		return
+	}
+	pos := v.GetPos()
+	e.shadowRec.Record(shadow.Disagreement{
+		Module:  e.inLib,
+		Decider: "globalFallback", Kind: "VarDeclaration", Line: pos.Line, Col: pos.Col,
+		Old: "none", New: "unanswered", Fields: []string{"unanswered"},
 	})
 }

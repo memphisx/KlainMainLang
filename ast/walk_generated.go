@@ -33,6 +33,9 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		if n.Key != nil && !visit(n.Key) {
 			return false
 		}
+		if present(n.KeyExpr) && !visit(n.KeyExpr) {
+			return false
+		}
 		for i := range n.Params {
 			if !visitParam(&n.Params[i], visit) {
 				return false
@@ -363,6 +366,9 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		if present(n.Cause) && !visit(n.Cause) {
 			return false
 		}
+		if present(n.Options) && !visit(n.Options) {
+			return false
+		}
 	case *NewDateExpression:
 		if present(n.Millis) && !visit(n.Millis) {
 			return false
@@ -439,8 +445,16 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 			}
 		}
 	case *ClassDeclaration:
+		if n.BaseCall != nil && !visit(n.BaseCall) {
+			return false
+		}
 		for i := range n.Fields {
 			if !visitAnnotField(&n.Fields[i], visit) {
+				return false
+			}
+		}
+		for i := range n.IndexSignatures {
+			if n.IndexSignatures[i] != nil && !visit(n.IndexSignatures[i]) {
 				return false
 			}
 		}
@@ -721,6 +735,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 	case *FunctionDeclaration:
 		if n.Key != nil {
 			n.Key = rewrite(n.Key).(*Identifier)
+		}
+		if present(n.KeyExpr) {
+			n.KeyExpr = rewrite(n.KeyExpr).(Expression)
 		}
 		for i := range n.Params {
 			rewriteParam(&n.Params[i], rewrite)
@@ -1032,6 +1049,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 		if present(n.Cause) {
 			n.Cause = rewrite(n.Cause).(Expression)
 		}
+		if present(n.Options) {
+			n.Options = rewrite(n.Options).(Expression)
+		}
 	case *NewDateExpression:
 		if present(n.Millis) {
 			n.Millis = rewrite(n.Millis).(Expression)
@@ -1104,8 +1124,16 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 			}
 		}
 	case *ClassDeclaration:
+		if n.BaseCall != nil {
+			n.BaseCall = rewrite(n.BaseCall).(*CallExpression)
+		}
 		for i := range n.Fields {
 			rewriteAnnotField(&n.Fields[i], rewrite)
+		}
+		for i := range n.IndexSignatures {
+			if n.IndexSignatures[i] != nil {
+				n.IndexSignatures[i] = rewrite(n.IndexSignatures[i]).(*IndexSignature)
+			}
 		}
 		if n.Constructor != nil {
 			n.Constructor = rewrite(n.Constructor).(*FunctionDeclaration)
@@ -1354,6 +1382,9 @@ func rewriteAnnotField(x *AnnotField, rewrite func(Node) Node) {
 	if x.Key != nil {
 		x.Key = rewrite(x.Key).(*Identifier)
 	}
+	if present(x.KeyExpr) {
+		x.KeyExpr = rewrite(x.KeyExpr).(Expression)
+	}
 	if present(x.Initializer) {
 		x.Initializer = rewrite(x.Initializer).(Expression)
 	}
@@ -1366,6 +1397,9 @@ func rewriteAnnotField(x *AnnotField, rewrite func(Node) Node) {
 
 func visitAnnotField(x *AnnotField, visit func(Node) bool) bool {
 	if x.Key != nil && !visit(x.Key) {
+		return false
+	}
+	if present(x.KeyExpr) && !visit(x.KeyExpr) {
 		return false
 	}
 	if present(x.Initializer) && !visit(x.Initializer) {

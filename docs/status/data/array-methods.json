@@ -273,7 +273,7 @@
             "feature": "`.flat(depth?)`",
             "status": "implemented",
             "caveats": [
-              "`depth` must be a compile-time constant integer or `Infinity` — this compiler's arrays have a fixed nesting depth at the type level, so the result's element type has to be known at compile time ([TDD-00029](../tdd/TDD-00029.md)/[ADR-00107](../adr/00/ADR-00107.md))"
+              "A `depth` known only at run time gives boxed (`any`) elements"
             ],
             "notes": [
               "`depth` defaults to 1, matching real JS",

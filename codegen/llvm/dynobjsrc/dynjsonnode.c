@@ -26,7 +26,7 @@ extern void __kml_dynobj_set(void *o, const char *key, i64 v);
 static i64 nb_double(double d) {
     unsigned long long bits;
     if (d != d) bits = 0x7FF8000000000000ULL;
-    else memcpy(&bits, &d, 8);
+    else memcpy(&bits, &d, 8); /* scratch */
     return (i64)(bits + (1ULL << 49));
 }
 

@@ -541,3 +541,18 @@ console.log(f(NaN), f(2020), f(2020, 5), f(2020, undefined), f("2020", "3", "4")
 console.log([2020, 2021].map((y) => f(y)));
 `)
 }
+
+// `new Date(...xs)` and a Date subclass's `super(...args)`: the argument
+// count is known at run time.
+func TestE2EDateSpreadConstruct(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const a = [2016, 1, 2];
+console.log(new Date(...a).getFullYear());
+class MyDate extends Date {
+  constructor(...args) { super(...args); this.tag = 1; }
+}
+const d = new MyDate("2016");
+console.log(d.getUTCFullYear(), d instanceof Date, d.tag);
+const e = new MyDate(2020, 0, 1);
+console.log(e.getFullYear(), e.getMonth());
+`)
+}

@@ -9,6 +9,7 @@ package tests
 // frees actually happen (mirroring TestE2EGCModeBoundsMemory).
 
 import (
+	"KlainMainLang/options"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -30,9 +31,11 @@ func emitAutoImports(t *testing.T, src string) (string, error) {
 	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
 		t.Fatalf("write source: %v", err)
 	}
-	prog, err := resolver.ResolveProgram(srcFile)
+	// Resolved for -mm=auto, as the CLI does: the front end rejects what
+	// that mode forbids.
+	prog, err := resolver.ResolveProgramWithOptions(srcFile, options.Options{MemMode: "auto"})
 	if err != nil {
-		t.Fatalf("resolve: %v", err)
+		return "", err
 	}
 	em := llvm.NewEmitter()
 	em.SetMemMode("auto")

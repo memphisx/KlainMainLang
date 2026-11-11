@@ -26,57 +26,8 @@ var dynArrSource string
 // DynArrSource is the dynamic-array runtime's C source.
 func DynArrSource() string { return dynArrSource }
 
-// UsesDynArr reports whether the program links the dynamic-array runtime.
-func (e *Emitter) UsesDynArr() bool { return e.usedDynArr }
-
 //go:embed dynobjsrc/dynjsonnode.c
 var dynJSONNodeSource string
 
 // DynJSONNodeSource is the JSON-tree -> dynamic-value converter's C source.
 func DynJSONNodeSource() string { return dynJSONNodeSource }
-
-// UsesDynJSONNode reports whether the program links the converter.
-func (e *Emitter) UsesDynJSONNode() bool { return e.usedDynJSONFromNode }
-
-func (e *Emitter) ensureDynArr() {
-	if e.usedDynArr {
-		return
-	}
-	e.usedDynArr = true
-	e.ensureNanBox()
-	e.ensureShapeRuntime() // an array's added properties live in shape.c
-	e.ensureMalloc()
-	e.ensureRealloc()
-	e.ensureStrcmp()
-	e.ensureStrtoll()
-	e.ensureSprintf()
-	e.ensureStrlen()
-	e.emitGlobal(`declare ptr @__kml_dynarr_new(i64)
-declare i64 @__kml_dynarr_len(ptr)
-declare void @__kml_dynarr_grow(ptr, i64)
-declare void @__kml_dynarr_push(ptr, i64)
-declare void @__kml_dynarr_store(ptr, i64, i64)
-declare i64 @__kml_dynarr_at(ptr, i64)
-declare void @__kml_dynarr_put(ptr, i64, i64)
-declare i64 @__kml_dynarr_index(ptr)
-declare i64 @__kml_dynarr_get_by_key(ptr, ptr)
-declare i32 @__kml_dynarr_set_by_key(ptr, ptr, i64)
-declare ptr @__kml_dynarr_keys_c(ptr, ptr)
-declare ptr @__kml_index_keys_c(i64)`)
-}
-
-// ensureDynJSONFromNode declares the recursive KmlJsonNode -> dynamic-value
-// converter behind untyped JSON.parse (TDD-00155 Stage 2); it lives in
-// dynobjsrc/dynjsonnode.c.
-func (e *Emitter) ensureDynJSONFromNode() {
-	if e.usedDynJSONFromNode {
-		return
-	}
-	e.usedDynJSONFromNode = true
-	e.ensureJSONParseTree()
-	e.ensureDynObj()
-	e.ensureDynArr()
-	e.emitGlobal(`declare ptr @__kml_json_key(ptr, i64)`)
-	e.emitGlobal(`declare ptr @__kml_json_val(ptr, i64)`)
-	e.emitGlobal(`declare i64 @__kml_dynjson_from_node(ptr)`)
-}

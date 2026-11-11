@@ -14,7 +14,6 @@ import (
 // emitAsyncPrologue mallocs the promise slot in the entry block (e.allocas) and
 // stores its pointer in e.coroHdl.  Called before the function body is emitted.
 func (e *Emitter) emitAsyncPrologue() {
-	e.ensureMalloc()
 	size := int64(8) // default: enough for i64 / ptr
 	if e.currentPromiseTy.IR != "void" && e.currentPromiseTy.IR != "" {
 		// Array-typed promises store a header pointer (8 bytes) — see
@@ -29,9 +28,8 @@ func (e *Emitter) emitAsyncPrologue() {
 	// Zeroed: a body that falls off the end never writes the slot, and the
 	// epilogue reads it as the fulfilment value — zero is `undefined` for a
 	// `T | undefined` result (absent presence bit), 0/null otherwise (ADR-01065).
-	e.ensureCalloc()
 	frameReg := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", frameReg, size))
+	e.emitAlloca(fmt.Sprintf("%s = call "+irPtr+" @calloc(i64 1, i64 %d)", frameReg, size))
 	e.coroHdl = frameReg
 }
 
@@ -64,19 +62,19 @@ func asyncSlotSize(pty Type) int64 {
 // setjmp + a 40-byte promise. Used only when !taskBody (a may-suspend body keeps
 // emitAsyncPrologue + emitTaskEpilogue).
 func (e *Emitter) emitSettledAsyncPrologue() {
-	e.ensurePromiseRuntime()
-	e.ensureMalloc()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureUnhandledRejections()
 
 	// coroHdl slot for the body's return value (the return machinery stores here).
 	// Zeroed for the fall-off path — see emitAsyncPrologue.
-	e.ensureCalloc()
 	frameReg := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = call ptr @calloc(i64 1, i64 %d)", frameReg, asyncSlotSize(e.currentPromiseTy)))
+	e.emitAlloca(fmt.Sprintf("%s = call "+irPtr+" @calloc(i64 1, i64 %d)", frameReg, asyncSlotSize(e.currentPromiseTy)))
 	e.coroHdl = frameReg
 
 	// The settled task promise this function returns.
 	prom := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
+	e.emitAlloca(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", prom))
 	e.asyncPromiseReg = prom
 	e.asyncAdoptSlot = adoptSlotPending
 
@@ -98,7 +96,7 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	prom := e.asyncPromiseReg
 	setResolved := func(state int) {
 		rp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", rp, promiseStructIR, prom))
 		e.heapStore("i64", fmt.Sprint(state), rp, 8)
 	}
 
@@ -110,12 +108,12 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 		// A returned promise: this one adopts its state (spec timing).
 		fulfillL, adoptL := e.freshLabel("async.fulfill"), e.freshLabel("async.adopt")
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, h))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, h))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, fulfillL, adoptL))
 		e.emitLabel(adoptL)
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_adopt(ptr %s, ptr %s)", prom, h))
-		e.heapFree(e.coroHdl)
-		e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_adopt("+irPtr+" %s, "+irPtr+" %s)", prom, h))
+		e.heapFree(allocHost, e.coroHdl)
+		e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", prom))
 		e.emitLabel(fulfillL)
 	}
 	pty := e.currentPromiseTy
@@ -124,8 +122,8 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 		// adopts (an async function resolves its promise with its result).
 		e.ensurePromiseResolveAny()
 		valReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", valReg, e.coroHdl))
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", prom, valReg))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", valReg, e.coroHdl))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", prom, valReg))
 	} else {
 		if pty.IR != "void" && pty.IR != "" {
 			if pty.IsArray() {
@@ -134,14 +132,14 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 				e.storePromiseValue(prom, e.loadArraySlotAggregate(e.coroHdl, pty))
 			} else {
 				valReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
+				e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", valReg, StructFieldIR(pty), e.coroHdl, pty.Align()))
 				e.storePromiseValue(prom, Value{Ref: valReg, Ty: pty})
 			}
 		}
 		setResolved(1)
 	}
-	e.heapFree(e.coroHdl)
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
+	e.heapFree(allocHost, e.coroHdl)
+	e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", prom))
 
 	// --- throw caught: reject ---
 	// Reject with the real thrown value, carried as a caught-value (tag, payload)
@@ -157,9 +155,9 @@ func (e *Emitter) emitSettledAsyncEpilogue() {
 	e.storeRejectReasonI64Tag(prom, tagW, payR)
 	setResolved(2)
 	e.ensureUnhandledRejections()
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_note_rejected(ptr %s)", prom))
-	e.heapFree(e.coroHdl)
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", prom))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_note_rejected("+irPtr+" %s)", prom))
+	e.heapFree(allocHost, e.coroHdl)
+	e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", prom))
 }
 
 // buildResponseWithPending is the TDD-00097 Stage 4 core: a Response that
@@ -174,14 +172,13 @@ func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef str
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", ok, okLow, okHigh))
 
 	respTy := ResponseType()
-	e.ensureMalloc()
 	respReg := e.freshReg()
 	e.emitObjAllocInto(respReg, respTy)
 	structIR := respTy.StructIR()
 	storeField := func(name, ir, ref string, align int) {
 		idx, _, _ := respTy.FieldIndex(name)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, respReg, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, structIR, respReg, idx))
 		e.heapStore(ir, ref, gep, align)
 	}
 	// status is a `number` (float64) field (TDD-00123); the runtime hands an i64.
@@ -189,9 +186,9 @@ func (e *Emitter) buildResponseWithPending(status, body, bodyLen, pendingRef str
 	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", statusF, status))
 	storeField("status", "double", statusF, 8)
 	storeField("ok", "i1", ok, 1)
-	storeField("body", "ptr", body, 8)
+	storeField("body", irPtr, body, 8)
 	storeField("bodyLength", "i64", bodyLen, 8)
-	storeField("__kml_pending", "ptr", pendingRef, 8)
+	storeField("__kml_pending", irPtr, pendingRef, 8)
 
 	return Value{Ref: respReg, Ty: respTy}
 }
@@ -223,7 +220,18 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// park-and-resume-as-microtask is that tick (TDD-00088). Outside a task
 	// context (an async generator's fiber has no current task to park) the
 	// plain identity return stands.
-	argTy := e.inferExprType(ex.Argument)
+	argTy := e.typeOfExpr(ex.Argument)
+	// An object whose `then` is a dynamic function value (an overloaded
+	// `then`): adopted at run time, as an awaited `any` is.
+	if t := hdlVal.Ty; t.IsObject() && !t.IsClass() && !t.IsDynamic() && !t.IsPromise() && !t.Nullable() {
+		if _, ft, ok := t.FieldIndex("then"); ok && ft.IsDynamic() {
+			box, err := e.emitBoxValue(hdlVal)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitAwaitAny(box)
+		}
+	}
 	// A thenable class instance is adopted through its `then`.
 	if sig, ok := e.thenableClass(hdlVal.Ty); ok && (e.isAsync || e.inModuleTask || e.currentGenerator != nil) {
 		pv, err := e.emitThenableToPromise(hdlVal, sig, ex.GetPos())
@@ -231,6 +239,13 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 			return Value{}, err
 		}
 		hdlVal, argTy = pv, pv.Ty
+	}
+	if hdlVal.Ty.IsPromise() && hdlVal.Ty.PromiseTask && !hdlVal.Ty.IsClass() && (e.isAsync || e.inModuleTask) && e.currentGenerator == nil && e.anyPromiseClass() {
+		pv, err := e.emitAwaitSubclassPromise(hdlVal, ex.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		hdlVal = pv
 	}
 	// A dynamic value may hold a promise: await it, or the value itself
 	// (whatever promise inference expected: the box is what was emitted).
@@ -240,16 +255,18 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	if !hdlVal.Ty.IsPromise() && !argTy.IsPromise() {
 		inAsyncGenBody := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
 		if ((e.isAsync || e.inModuleTask) && e.currentGenerator == nil && e.hasMaySuspend) || inAsyncGenBody {
-			e.ensurePromiseRuntime()
+			e.ensureExceptionHelpers()
+			e.ensureMicrotasks()
+			e.ensureUnhandledRejections()
 			prom := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", prom))
 			if hdlVal.Ty.IR != "void" && hdlVal.Ty.IR != "" {
 				e.storePromiseValue(prom, hdlVal)
 			}
 			// A fresh promise has no reactions/waiter yet, so a raw fulfilled
 			// store (no settle-drain) is safe here.
 			rp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", rp, promiseStructIR, prom))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", rp, promiseStructIR, prom))
 			e.heapStore("i64", "1", rp, 8)
 			return e.emitAwaitTaskPromise(prom, hdlVal.Ty)
 		}
@@ -260,9 +277,8 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 		return hdlVal, nil
 	}
 
-	if hdlVal.Ty.IR != "ptr" {
-		return Value{}, fmt.Errorf("%d:%d: await requires a Promise value",
-			ex.GetPos().Line, ex.GetPos().Col)
+	if hdlVal.Ty.IR != irPtr {
+		return Value{}, internalAt(ex.GetPos(), "await of %s reached the promise path", hdlVal.Ty.IR)
 	}
 
 	// Determine the unwrapped type (T in Promise<T>).
@@ -292,14 +308,14 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 			absent = nbUndefined
 		}
 		isNull, sel := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, hdlVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, hdlVal.Ref))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, absent, bv.Ref))
 		v, err := e.emitAwaitAny(Value{Ref: sel, Ty: TypeAny})
 		if err != nil || promiseTy.IsDynamic() || promiseTy.IR == "void" || promiseTy.IR == "" {
 			return v, err
 		}
 		target := promiseTy
-		if target.IR == "ptr" {
+		if target.IR == irPtr {
 			target.setNullable(true)
 			target.setUndefined(hdlVal.Ty.IsUndefined())
 		}
@@ -308,8 +324,6 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	if hdlVal.Ty.PromiseTask {
 		return e.emitAwaitTaskPromise(hdlVal.Ref, promiseTy)
 	}
-
-	e.ensureFree()
 
 	if promiseTy.IR == "void" || promiseTy.IR == "" {
 		// Promise<void>: nothing to read. The slot is not freed — a Promise is a
@@ -329,7 +343,7 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	}
 	resultReg := e.freshReg()
 	align := promiseTy.Align()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d",
 		resultReg, StructFieldIR(promiseTy), hdlVal.Ref, align))
 	// The slot is not freed — a Promise is a reusable value (see
 	// emitAwaitTaskPromise); it leaks in manual mode, collected under `-mm=gc`.
@@ -360,15 +374,15 @@ func (e *Emitter) emitAwaitFetchSlot(slotRef string) Value {
 		}
 	}
 	e.ensureFetchAsync()
-	e.ensureAwaitFetchHeaders()
+	e.ensureMicrotasks()
 	pendingPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingPtr, slotRef))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", pendingPtr, slotRef))
 	// Resolve at headers-complete (TDD-00097 Stage 4): the Response is built
 	// with the status and its pending handle; the body is read lazily —
 	// .text()/.json()/.arrayBuffer() drive the transfer to completion,
 	// .body streams the rest as it arrives.
 	status := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_await_fetch_headers(ptr %s)", status, pendingPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_await_fetch_headers("+irPtr+" %s)", status, pendingPtr))
 	return e.buildResponseWithPending(status, "null", "0", pendingPtr)
 }
 
@@ -397,8 +411,15 @@ func (e *Emitter) emitAwaitPromiseElem(elemRef string, elemTy Type) (Value, erro
 // (`return <promise>` from an async fn — ADR-00265). The caller parks: a
 // coroutine through the scheduler, an async generator's step on the promise.
 func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, error) {
-	e.ensureFree()
 	e.ensureExceptionHelpers()
+	e.ensureTaskRuntime() // __kml_promise_own_ctor
+	e.declareFn("__kml_promise_own_ctor", "declare void @__kml_promise_own_ctor("+irPtr+")")
+	if !e.ownCtorAfterAwait {
+		// PromiseResolve's Get of the promise's `constructor`: an own one
+		// on its box runs (its getter may throw here).
+		e.declareFn("__kml_promise_own_ctor", "declare void @__kml_promise_own_ctor("+irPtr+")")
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_own_ctor("+irPtr+" %s)", hdlRef))
+	}
 	if e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync {
 		// Inside an async generator's body (the fiber): park the step on the
 		// promise — the step's q stays pending, the consumer's script continues,
@@ -406,7 +427,7 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 		e.emitAsyncGenAwaitParkUntilSettled(hdlRef)
 	} else if e.hasMaySuspend {
 		e.ensureTaskRuntime()
-		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", hdlRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready("+irPtr+" %s)", hdlRef))
 	} else {
 		// programMayWait sets hasMaySuspend for every program with an await
 		// or an async-return flattening, so nothing reaches here.
@@ -416,8 +437,8 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 	// awaiter, so `try { await f() } catch` works (TDD-00083 Stage 2).
 	resReg := e.freshReg()
 	resP := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, hdlRef))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", resReg, resP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", resP, promiseStructIR, hdlRef))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", resReg, resP))
 	rej := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", rej, resReg))
 	rejL := e.freshLabel("await.reject")
@@ -460,12 +481,15 @@ func (e *Emitter) asyncReturnAdopt(h string) bool {
 		return false
 	case adoptSlotPending:
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitAlloca(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitAlloca(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", slot))
 		e.asyncAdoptSlot = slot
 	}
-	e.ensurePromiseAdopt()
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h, e.asyncAdoptSlot))
+	e.ensureMicrotasks()
+	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
+	e.ensureNanBox()
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", h, e.asyncAdoptSlot))
 	return true
 }
 
@@ -476,6 +500,64 @@ func (e *Emitter) emitAdoptedResult() (string, bool) {
 		return "", false
 	}
 	h := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", h, e.asyncAdoptSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", h, e.asyncAdoptSlot))
 	return h, true
+}
+
+// emitAwaitSubclassPromise is the promise an `await` of typed promise
+// hdlVal waits on: hdlVal itself, or, when it is an instance of a class
+// extending Promise (its body flagged promiseFlagSubclass), the promise
+// PromiseResolve makes for a constructor other than %Promise% — settled
+// from a job calling the value's `then` (NewPromiseResolveThenableJob).
+func (e *Emitter) emitAwaitSubclassPromise(hdlVal Value, pos ast.Pos) (Value, error) {
+	fp, fl, m, isSub := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", fp, hdlVal.Ref, promiseFlagsSlot*8))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", fl, fp))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", m, fl, promiseFlagSubclass))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isSub, m))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", hdlVal.Ref, slot))
+	subL, doneL := e.freshLabel("await.sub"), e.freshLabel("await.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isSub, subL, doneL))
+	e.emitLabel(subL)
+	el := TypeAny
+	if hdlVal.Ty.PromiseType != nil {
+		el = *hdlVal.Ty.PromiseType
+	}
+	adopt := func(v Value, el Type, boxed bool) error {
+		sig := FuncSig{ParamTypes: []Type{FuncType([]Type{el}, TypeAny), FuncType([]Type{TypeCaught}, TypeAny)}, RetType: v.Ty}
+		pv, err := e.emitThenableToPromise(v, sig, pos)
+		if err != nil {
+			return err
+		}
+		if boxed {
+			e.emitBodyFlag(pv.Ref, promiseFlagBoxedValue) // read as hdlVal's type (loadPromiseValue)
+		}
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", pv.Ref, slot))
+		e.emitTerminator("br label %" + doneL)
+		return nil
+	}
+	if !el.IsDynamic() && e.anyErasedPromiseHost() {
+		// An erased subclass's body holds a box: adopted as a Promise<any>.
+		bm, isBox := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", bm, fl, promiseFlagBoxedValue))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isBox, bm))
+		boxL, typedL := e.freshLabel("await.subbox"), e.freshLabel("await.subtyped")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBox, boxL, typedL))
+		e.emitLabel(boxL)
+		at := hdlVal.Ty
+		at.PromiseType = &TypeAny
+		if err := adopt(Value{Ref: hdlVal.Ref, Ty: at}, TypeAny, true); err != nil {
+			return Value{}, err
+		}
+		e.emitLabel(typedL)
+	}
+	if err := adopt(hdlVal, el, false); err != nil {
+		return Value{}, err
+	}
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
+	return Value{Ref: r, Ty: hdlVal.Ty}, nil
 }

@@ -30,9 +30,9 @@ func init() {
 	locked := func(structIR string, idx int) func(e *Emitter, ptr string) Value {
 		return func(e *Emitter, ptr string) Value {
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, ptr, idx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, structIR, ptr, idx))
 			f := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f, gep))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f, gep))
 			bit := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = and i64 %s, 32", bit, f))
 			b := e.freshReg()
@@ -45,11 +45,11 @@ func init() {
 	desired := func(fn, structIR string) func(e *Emitter, ptr string) Value {
 		return func(e *Emitter, ptr string) Value {
 			d := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call double @%s(ptr %s)", d, fn, ptr))
+			e.emitInstr(fmt.Sprintf("%s = call double @%s("+irPtr+" %s)", d, fn, ptr))
 			stGep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", stGep, structIR, ptr))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", stGep, structIR, ptr))
 			st := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, stGep))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", st, stGep))
 			present := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 2", present, st))
 			nty := nullableNumber()
@@ -61,9 +61,9 @@ func init() {
 	promiseAt := func(structIR string, idx int) func(e *Emitter, ptr string) Value {
 		return func(e *Emitter, ptr string) Value {
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, ptr, idx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, structIR, ptr, idx))
 			p := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", p, gep))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", p, gep))
 			return Value{Ref: p, Ty: taskPromise(TypeVoid)}
 		}
 	}
@@ -124,9 +124,18 @@ func (e *Emitter) emitStreamProp(ex *ast.MemberExpression, writable bool) (Value
 		return Value{}, err
 	}
 	if writable {
-		e.ensureWStreamRuntime()
+		e.ensurePromiseAddReaction()
+		e.ensureMicrotasks()
+		e.ensureNanBox()
+		e.ensureExceptionHelpers()
+		e.ensureUnhandledRejections()
 	} else {
-		e.ensureStreamRuntime()
+		e.ensureExceptionHelpers()
+		e.ensureMicrotasks()
+		e.ensureNanBox()
+		e.ensurePromiseAddReaction()
+		e.ensureShapeRuntime()
+		e.ensureUnhandledRejections()
 	}
 	if p, ok := streamPropFor(ex.Property, ty); ok && p.writable == writable {
 		if !ty.IsStreamReader() && !ty.IsStreamWriter() {
@@ -138,7 +147,7 @@ func (e *Emitter) emitStreamProp(ex *ast.MemberExpression, writable bool) (Value
 	if writable {
 		what = "writable stream"
 	}
-	return Value{}, fmt.Errorf("%d:%d: property '%s' is not available on this %s value", ex.GetPos().Line, ex.GetPos().Col, ex.Property, what)
+	return Value{}, internalAt(ex.GetPos(), "property '%s' of a %s has no reader", ex.Property, what)
 }
 
 // emitHandleProp reads property name of a reader or writer: its stream's
@@ -147,7 +156,7 @@ func (e *Emitter) emitStreamProp(ex *ast.MemberExpression, writable bool) (Value
 func (e *Emitter) emitHandleProp(name string, p streamProp, handle, ptr string) (Value, error) {
 	if name == "desiredSize" {
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, ptr))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, ptr))
 		relL, okL := e.freshLabel("writer.released"), e.freshLabel("writer.bound")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, relL, okL))
 		e.emitLabel(relL)

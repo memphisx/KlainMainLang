@@ -132,6 +132,10 @@ export interface SocketConstructorOpts {
     noDelay?: boolean;
     keepAlive?: boolean;
     keepAliveInitialDelay?: number;
+    // The stream buffering options Node's Socket hands to its Duplex.
+    highWaterMark?: number;
+    readableHighWaterMark?: number;
+    writableHighWaterMark?: number;
 }
 
 // Node's TcpSocketConnectOpts | IpcSocketConnectOpts as one shape: `port`
@@ -148,6 +152,9 @@ export interface NetConnectOpts {
     allowHalfOpen?: boolean;
     autoSelectFamily?: boolean;
     autoSelectFamilyAttemptTimeout?: number;
+    highWaterMark?: number;
+    readableHighWaterMark?: number;
+    writableHighWaterMark?: number;
 }
 
 // Node's happy-eyeballs defaults (net.getDefaultAutoSelectFamily and its
@@ -205,6 +212,9 @@ export class Socket extends Duplex {
             readable: options?.readable !== false,
             writable: options?.writable !== false,
         };
+        if (options?.highWaterMark !== undefined) dopts.highWaterMark = options.highWaterMark;
+        if (options?.readableHighWaterMark !== undefined) dopts.readableHighWaterMark = options.readableHighWaterMark;
+        if (options?.writableHighWaterMark !== undefined) dopts.writableHighWaterMark = options.writableHighWaterMark;
         super(dopts);
         this.noDelayWanted = options?.noDelay === true;
         this.keepAliveWanted = options?.keepAlive === true;
@@ -1084,16 +1094,19 @@ export function createServer(options?: ServerOpts | ((socket: Socket) => void), 
 
 export function connect(options: NetConnectOpts, connectionListener?: () => void): Socket;
 export function connect(port: number, host?: string, connectionListener?: () => void): Socket;
+export function connect(port: number, connectionListener?: () => void): Socket;
 export function connect(path: string, connectionListener?: () => void): Socket;
 export function connect(arg0: NetConnectOpts | number | string, arg1?: string | Listener, arg2?: Listener): Socket {
     const [options, cb] = normalizeArgs(arg0, arg1, arg2);
-    const socket = new Socket();
+    // Node's connect hands its options to the Socket (its buffering).
+    const socket = new Socket({ allowHalfOpen: options.allowHalfOpen, highWaterMark: options.highWaterMark, readableHighWaterMark: options.readableHighWaterMark, writableHighWaterMark: options.writableHighWaterMark });
     if (options.timeout) socket.setTimeout(options.timeout);
     return cb !== null ? socket.connect(options, cb) : socket.connect(options);
 }
 
 export function createConnection(options: NetConnectOpts, connectionListener?: () => void): Socket;
 export function createConnection(port: number, host?: string, connectionListener?: () => void): Socket;
+export function createConnection(port: number, connectionListener?: () => void): Socket;
 export function createConnection(path: string, connectionListener?: () => void): Socket;
 export function createConnection(arg0: NetConnectOpts | number | string, arg1?: string | Listener, arg2?: Listener): Socket {
     if (typeof arg0 === 'string') {
@@ -1101,7 +1114,7 @@ export function createConnection(arg0: NetConnectOpts | number | string, arg1?: 
     }
     if (typeof arg0 === 'number') {
         if (typeof arg1 === 'string') return arg2 !== undefined ? connect(arg0, arg1, arg2) : connect(arg0, arg1);
-        return arg1 !== undefined ? connect(arg0, undefined, arg1) : connect(arg0);
+        return typeof arg1 === 'function' ? connect(arg0, arg1) : connect(arg0);
     }
     return typeof arg1 === 'function' ? connect(arg0, arg1) : connect(arg0);
 }

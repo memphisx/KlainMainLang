@@ -17,32 +17,6 @@ import (
 //go:embed holessrc/holes.c
 var holesSource string
 
-func (e *Emitter) ensureHoles() {
-	if e.usedHoles {
-		return
-	}
-	e.usedHoles = true
-	e.emitGlobal(`declare void @__kml_holes_mark(ptr, i64, i64)
-declare i32 @__kml_holes_is(ptr, i64)
-declare void @__kml_holes_fill(ptr, i64)
-declare i64 @__kml_holes_count(ptr, i64)
-declare i64 @__kml_holes_run(ptr, i64, i64)
-declare void @__kml_holes_copy(ptr, i64, ptr, i64, i64)
-declare void @__kml_holes_splice(ptr, i64, i64, i64, i64)
-declare void @__kml_holes_setlen(ptr, i64, i64)
-declare void @__kml_holes_clear(ptr, i64, i64)
-declare void @__kml_holes_reverse(ptr, i64)
-declare i64 @__kml_holes_compact(ptr, i64, i64)
-declare i64 @__kml_holes_seed(ptr, i64, i32)
-declare void @__kml_holes_move(ptr, i64, i64, i64)
-declare i64 @__kml_holes_elem(ptr, i64)
-declare i32 @__kml_holes_own(ptr, i64)
-declare i32 @__kml_holes_elem_set(ptr, i64, i64)
-declare ptr @__kml_holes_acc_label(ptr, i64)
-declare i64 @__kml_holes_prop(ptr, i64)
-declare void @__kml_holes_prop_set(ptr, i64, i64)`)
-}
-
 // holesUsed reports whether the program can make a hole: an element
 // assignment (which may write past the end), `new Array(…)` / `Array(…)`, or
 // an elided literal element.
@@ -110,51 +84,48 @@ func (e *Emitter) emitElisionHoles(hdr string, lit *ast.ArrayLiteral) {
 // emitHolesWord is the holes word of the array header hdr.
 func (e *Emitter) emitHolesWord(hdr string) string {
 	hp, w := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", hp, hdr, arrayHolesOff))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", w, hp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", hp, hdr, arrayHolesOff))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", w, hp))
 	return w
 }
 
 // emitHoleTest is an i1: element idx of the array header hdr is a hole. A
 // packed array pays one load and branch.
 func (e *Emitter) emitHoleTest(hdr, idx string) string {
-	e.ensureHoles()
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", slot))
 	holey := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", holey, e.emitHolesWord(hdr)))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", holey, e.emitHolesWord(hdr)))
 	chkL, doneL := e.freshLabel("hole.chk"), e.freshLabel("hole.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", holey, chkL, doneL))
 	e.emitLabel(chkL)
 	r, b := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_holes_is(ptr %s, i64 %s)", r, hdr, idx))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_holes_is("+irPtr+" %s, i64 %s)", r, hdr, idx))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", b, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", b, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", out, slot))
 	return out
 }
 
 // emitHoleFill marks element idx of the array header hdr set.
 func (e *Emitter) emitHoleFill(hdr, idx string) {
-	e.ensureHoles()
 	holey := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", holey, e.emitHolesWord(hdr)))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", holey, e.emitHolesWord(hdr)))
 	fillL, doneL := e.freshLabel("hole.fill"), e.freshLabel("hole.filled")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", holey, fillL, doneL))
 	e.emitLabel(fillL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_holes_fill(ptr %s, i64 %s)", hdr, idx))
+	e.emitInstr(fmt.Sprintf("call void @__kml_holes_fill("+irPtr+" %s, i64 %s)", hdr, idx))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 }
 
 // emitHolesMark makes elements [from, to) of the array header hdr holes.
 func (e *Emitter) emitHolesMark(hdr, from, to string) {
-	e.ensureHoles()
-	e.emitInstr(fmt.Sprintf("call void @__kml_holes_mark(ptr %s, i64 %s, i64 %s)", hdr, from, to))
+	e.emitInstr(fmt.Sprintf("call void @__kml_holes_mark("+irPtr+" %s, i64 %s, i64 %s)", hdr, from, to))
 }
 
 // hofHolesHeader is the header a walk over objExpr's elements tests for
@@ -164,7 +135,7 @@ func (e *Emitter) hofHolesHeader(objExpr ast.Expression, hdr string) string {
 	if hdr == "" || !e.holesUsed() {
 		return ""
 	}
-	if t := e.inferExprType(objExpr); t.IsTypedArray() || t.IsFlatArray() || t.ExecArray || !t.IsArray() {
+	if t := e.typeOfExpr(objExpr); t.IsTypedArray() || t.IsFlatArray() || t.ExecArray || !t.IsArray() {
 		return ""
 	}
 	return hdr
@@ -183,7 +154,7 @@ func (e *Emitter) emitHoleSkip(hdr, idx, idxSlot string, step int, condL string)
 	e.emitLabel(skipL)
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", next, idx, step))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idxSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, idxSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(goL)
 }
@@ -195,8 +166,7 @@ func (e *Emitter) emitHolesCopy(dst, at, src, from, n string) {
 	if src == "" {
 		return
 	}
-	e.ensureHoles()
-	e.emitInstr(fmt.Sprintf("call void @__kml_holes_copy(ptr %s, i64 %s, ptr %s, i64 %s, i64 %s)", dst, at, src, from, n))
+	e.emitInstr(fmt.Sprintf("call void @__kml_holes_copy("+irPtr+" %s, i64 %s, "+irPtr+" %s, i64 %s, i64 %s)", dst, at, src, from, n))
 }
 
 // emitIsUndefinedValue is an i1: v is undefined (the value a hole reads as).
@@ -240,30 +210,29 @@ func (e *Emitter) emitFillHoles(data, from, to string, elemTy Type) {
 		word = "0x7FF8000000000000"
 	}
 	if word == "" {
-		e.ensureMemset()
 		at, n, bytes := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", at, elemTy.IR, data, from))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", at, elemTy.IR, data, from))
 		e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", n, to, from))
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, n, elemTy.Align()))
-		e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 0, i64 %s)", at, bytes))
+		e.emitInstr(fmt.Sprintf("call "+irPtr+" @memset("+irPtr+" %s, i32 0, i64 %s)", at, bytes))
 		return
 	}
 	idx := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", from, idx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", from, idx))
 	condL, bodyL, doneL := e.freshLabel("holefill.cond"), e.freshLabel("holefill.body"), e.freshLabel("holefill.done")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	i, more := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, idx))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, to))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
 	e.emitLabel(bodyL)
 	slot, next := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, elemTy.IR, data, i))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", slot, elemTy.IR, data, i))
 	e.heapStore(elemTy.IR, word, slot, 8)
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, idx))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(doneL)
 }
@@ -275,8 +244,7 @@ func (e *Emitter) emitHolesCall(fn, hdr string, args ...string) {
 	if !e.holesUsed() || hdr == "" {
 		return
 	}
-	e.ensureHoles()
-	parts := []string{"ptr " + hdr}
+	parts := []string{irPtr + " " + hdr}
 	for _, a := range args {
 		parts = append(parts, "i64 "+a)
 	}
@@ -302,18 +270,29 @@ func (e *Emitter) emitArrayElementDelete(idx *ast.IndexExpression) (Value, error
 	if hdr == "" {
 		return Value{Ref: "true", Ty: TypeBool}, nil
 	}
+	res := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", res))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", res))
 	inb := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %s", inb, iv.Ref, lenReg))
-	delL, doneL := e.freshLabel("arrdel.hole"), e.freshLabel("arrdel.done")
+	delL, doneL, refusedL := e.freshLabel("arrdel.hole"), e.freshLabel("arrdel.done"), e.freshLabel("arrdel.refused")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inb, delL, doneL))
 	e.emitLabel(delL)
+	// A frozen or sealed array's element is not configurable: strict code
+	// throws, sloppy code's delete is false.
+	e.emitArrayWriteGuard(hdr, arrOpDelete, iv.Ref, refusedL)
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, iv.Ref))
 	e.emitFillHoles(ptrReg, iv.Ref, next, elemTy)
 	e.emitHolesMark(hdr, iv.Ref, next)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(refusedL)
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
-	return Value{Ref: "true", Ty: TypeBool}, nil
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, res))
+	return Value{Ref: r, Ty: TypeBool}, nil
 }
 
 // emitArrayHas is `k in xs` / `xs.hasOwnProperty(k)` / `Object.hasOwn(xs, k)`
@@ -339,13 +318,13 @@ func (e *Emitter) emitArrayHas(arr Value, keyExpr ast.Expression, ownOnly bool) 
 			// header.
 			e.ensureShapeRuntime()
 			has, r := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_expando_has(ptr %s, ptr %s)", has, e.absentSafeArrayHeader(arr.Ref), e.internString(lit.Value)))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_expando_has("+irPtr+" %s, "+irPtr+" %s)", has, e.absentSafeArrayHeader(arr.Ref), e.internString(lit.Value)))
 			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", r, has))
 			return Value{Ref: r, Ty: TypeBool}, true, nil
 		}
 		idx = fmt.Sprint(n)
 	} else {
-		kt := e.inferExprType(keyExpr)
+		kt := e.typeOfExpr(keyExpr)
 		if isStringTy(kt) || kt.IsDynamic() || !(kt.IsInteger() || kt.Float) {
 			return Value{}, false, nil
 		}
@@ -366,20 +345,19 @@ func (e *Emitter) emitArrayHas(arr Value, keyExpr ast.Expression, ownOnly bool) 
 	}
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", slot))
 	chkL, doneL := e.freshLabel("arrhas.chk"), e.freshLabel("arrhas.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", inb, chkL, doneL))
 	e.emitLabel(chkL)
 	// set, or an accessor element
-	e.ensureHoles()
 	hr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_holes_own(ptr %s, i64 %s)", hr, e.absentSafeArrayHeader(arr.Ref), idx))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_holes_own("+irPtr+" %s, i64 %s)", hr, e.absentSafeArrayHeader(arr.Ref), idx))
 	own := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", own, hr))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", own, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", own, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
 	return Value{Ref: r, Ty: TypeBool}, true, nil
 }

@@ -40,7 +40,10 @@ func init() {
 		method, emit, ty := name, emit, reflectIntrinsics[name]
 		intrinsics["Reflect."+method] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				e.ensureDynObj()
+				e.ensureAnyToPrimitive()
+				e.ensureNanBox()
+				e.ensureErrorNames()
+				e.ensureStrHeaderRuntime()
 				return emit(e, method, ex.Args, ex.GetPos())
 			},
 			ty: func(*Emitter, *ast.CallExpression) Type { return ty },
@@ -51,7 +54,7 @@ func init() {
 // reflectNeed checks a Reflect function's argument count.
 func reflectNeed(method string, args []ast.Expression, pos ast.Pos, n int) error {
 	if len(args) != n {
-		return fmt.Errorf("%d:%d: Reflect.%s takes %d argument(s)", pos.Line, pos.Col, method, n)
+		return internalAt(pos, "Reflect.%s given %d arguments past the lowered call's fit (%d)", method, len(args), n)
 	}
 	return nil
 }
@@ -88,25 +91,79 @@ func (e *Emitter) emitReflectApply(method string, args []ast.Expression, pos ast
 
 func (e *Emitter) emitReflectGet(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 2 && len(args) != 3 {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.get takes 2 or 3 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Reflect.get arity")
 	}
 	v, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
 	}
 	if !v.Ty.IsDynamic() {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.get requires a dynamic (any-typed) object", pos.Line, pos.Col)
+		if scalarTypeKind(v.Ty) != "" || isStringTy(v.Ty) || v.Ty.IsUndefined() || v.Ty.IsNull() || v.Ty.Nullable() {
+			// A primitive (or possibly one): checked at run time.
+			if v, err = e.emitBoxValue(v); err != nil {
+				return Value{}, err
+			}
+		} else if len(args) == 2 {
+			// An object of a static type: its property, read as `o[k]`
+			// reads it, boxed as Reflect.get's result.
+			r, err := e.emitExpr(ast.NewIndexExpression(e.bindValue(v, args[0].GetPos()), args[1], pos))
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitBoxValue(r)
+		} else if v, err = e.emitBoxValue(v); err != nil {
+			return Value{}, err
+		}
+	}
+	if err := e.emitRequireObject(v, "Reflect.get called on non-object"); err != nil {
+		return Value{}, err
 	}
 	keyRef, err := e.dynAnyKeyRef(args[1], pos)
 	if err != nil {
 		return Value{}, err
 	}
-	return e.emitDynAnyMemberGet(v, keyRef, pos)
+	if len(args) == 2 {
+		return e.emitDynAnyMemberGet(v, keyRef, pos)
+	}
+	// A receiver: a dynamic object's getter runs with it as this.
+	rv, err := e.emitExprWithObjectHint(args[2], TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	recv, err := e.emitBoxValue(rv)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureNanBox()
+	tag, payload := e.emitUnboxTagPayload(v)
+	isBag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
+	res := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
+	bagL, otherL, doneL := e.freshLabel("rget.bag"), e.freshLabel("rget.other"), e.freshLabel("rget.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, bagL, otherL))
+	e.emitLabel(bagL)
+	e.declareFn("__kml_dynobj_get_recv", "declare i64 @__kml_dynobj_get_recv("+irPtr+", "+irPtr+", i64)")
+	g := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get_recv("+irPtr+" %s, "+irPtr+" %s, i64 %s)", g, e.emitIntToPtr(payload), keyRef, recv.Ref))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", g, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(otherL)
+	o, err := e.emitDynAnyMemberGet(v, keyRef, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", o.Ref, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, res))
+	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
 func (e *Emitter) emitReflectSet(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 3 && len(args) != 4 {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.set takes 3 or 4 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Reflect.set given %d arguments past the lowered call's fit", len(args))
 	}
 	bag, err := e.reflectArgBag(args, pos, 0, "Reflect.set")
 	if err != nil {
@@ -124,11 +181,42 @@ func (e *Emitter) emitReflectSet(method string, args []ast.Expression, pos ast.P
 	if err != nil {
 		return Value{}, err
 	}
+	if len(args) == 3 {
+		status := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv("+irPtr+" %s, "+irPtr+" %s, i64 %s)", status, bag, keyRef, boxed.Ref))
+		ok := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", ok, status))
+		return Value{Ref: ok, Ty: TypeBool}, nil
+	}
+	// A receiver: a setter on the target's chain runs with it as this,
+	// else the value lands on it.
+	rv, err := e.emitExprWithObjectHint(args[3], TypeAny)
+	if err != nil {
+		return Value{}, err
+	}
+	recv, err := e.emitBoxValue(rv)
+	if err != nil {
+		return Value{}, err
+	}
+	e.declareFn("__kml_dynobj_setv_recv", "declare i64 @__kml_dynobj_setv_recv("+irPtr+", "+irPtr+", i64, i64)")
 	status := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv(ptr %s, ptr %s, i64 %s)", status, bag, keyRef, boxed.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv_recv("+irPtr+" %s, "+irPtr+" %s, i64 %s, i64 %s)", status, bag, keyRef, boxed.Ref, recv.Ref))
+	plain := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 4", plain, status))
+	plainL, doneL := e.freshLabel("rset.plain"), e.freshLabel("rset.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", plain, plainL, doneL))
+	e.emitLabel(plainL)
+	// Another kind of receiver (a class instance): an ordinary store to it.
+	if _, err := e.emitDynAnyMemberSet(recv, keyRef, boxed, pos); err != nil {
+		return Value{}, err
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
 	ok := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", ok, status))
-	return Value{Ref: ok, Ty: TypeBool}, nil
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i64 %s, 0", ok, status))
+	ok4 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok4, ok, plain))
+	return Value{Ref: ok4, Ty: TypeBool}, nil
 }
 
 func (e *Emitter) emitReflectHas(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
@@ -139,8 +227,18 @@ func (e *Emitter) emitReflectHas(method string, args []ast.Expression, pos ast.P
 	if err != nil {
 		return Value{}, err
 	}
+	if !v.Ty.IsDynamic() && !(scalarTypeKind(v.Ty) != "" || isStringTy(v.Ty) || v.Ty.IsUndefined() || v.Ty.IsNull() || v.Ty.Nullable()) {
+		// An object of a static type: `k in o`, its prototype's keys
+		// included.
+		return e.emitExpr(ast.NewBinaryExpression("in", args[1], e.bindValue(v, args[0].GetPos()), pos))
+	}
 	if !v.Ty.IsDynamic() {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.has requires a dynamic (any-typed) object", pos.Line, pos.Col)
+		if v, err = e.emitBoxValue(v); err != nil {
+			return Value{}, err
+		}
+	}
+	if err := e.emitRequireObject(v, "Reflect.has called on non-object"); err != nil {
+		return Value{}, err
 	}
 	keyRef, err := e.dynAnyKeyRef(args[1], pos)
 	if err != nil {
@@ -162,7 +260,7 @@ func (e *Emitter) emitReflectDeleteProperty(method string, args []ast.Expression
 		return Value{}, err
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_delete(ptr %s, ptr %s)", r, bag, keyRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_delete("+irPtr+" %s, "+irPtr+" %s)", r, bag, keyRef))
 	return Value{Ref: r, Ty: TypeBool}, nil
 }
 
@@ -170,7 +268,7 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 	// Reflect.construct(C, args): `new C(...args)` through the run-time
 	// constructor dispatch.
 	if len(args) != 2 && len(args) != 3 {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.construct takes 2 or 3 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Reflect.construct given %d arguments past the lowered call's fit", len(args))
 	}
 	cv, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
@@ -180,11 +278,31 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 	if err != nil {
 		return Value{}, err
 	}
+	{
+		// A primitive target is no constructor: its TypeError comes before
+		// the arguments list is read.
+		tag, _ := e.emitUnboxTagPayload(cb)
+		prim, primL, objL := e.freshReg(), e.freshLabel("refl.ctor.prim"), e.freshLabel("refl.ctor.obj")
+		e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagUndefined))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", prim, primL, objL))
+		e.emitLabel(primL)
+		shown, err := e.emitDynamicInspect(cb)
+		if err != nil {
+			return Value{}, err
+		}
+		msg, err := e.emitStringConcat(shown, Value{Ref: e.internString(" is not a constructor"), Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureExceptionHelpers()
+		e.emitInternalThrowKind("TypeError", msg.Ref)
+		e.emitLabel(objL)
+	}
+	pending := false
 	if len(args) == 3 {
-		// A newTarget other than the target itself (or undefined) would
-		// give the instance another constructor's prototype, which a
-		// class instance here cannot take: a TypeError, never a silent
-		// instance of the target.
+		// A newTarget other than the target itself: the instance takes
+		// newTarget.prototype (when that is an object) before the
+		// constructor runs (shapesrc/shape.c's pending prototype).
 		nv, err := e.emitExprWithObjectHint(args[2], TypeAny)
 		if err != nil {
 			return Value{}, err
@@ -193,16 +311,54 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureAnyEq()
+		e.ensureBoxedBigIntHooks()
+		e.ensureFnMeta()
 		undef, same, ok := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, nb.Ref, nbUndefined))
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", same, nb.Ref, cb.Ref))
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok, undef, same))
-		okL, badL := e.freshLabel("refl.nt.ok"), e.freshLabel("refl.nt.bad")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, badL))
-		e.emitLabel(badL)
-		e.emitThrowTypeError("Reflect.construct with a newTarget other than the target is not supported")
+		okL, otherL := e.freshLabel("refl.nt.same"), e.freshLabel("refl.nt.other")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, otherL))
+		e.emitLabel(otherL)
+		ctorOK := e.freshReg()
+		e.declareFn("__kml_is_constructor", "declare i64 @__kml_is_constructor(i64)")
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_is_constructor(i64 %s)", ctorOK, nb.Ref))
+		isCtor := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isCtor, ctorOK))
+		ntL, ntBadL := e.freshLabel("refl.nt.ctor"), e.freshLabel("refl.nt.notctor")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isCtor, ntL, ntBadL))
+		e.emitLabel(ntBadL)
+		shownNT, err := e.emitDynamicToString(nb)
+		if err != nil {
+			return Value{}, err
+		}
+		ntMsg, err := e.emitStringConcat(shownNT, Value{Ref: e.internString(" is not a constructor"), Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		e.ensureExceptionHelpers()
+		e.emitInternalThrowKind("TypeError", ntMsg.Ref)
+		e.emitLabel(ntL)
+		proto, err := e.emitDynAnyMemberGet(nb, e.internString("prototype"), pos)
+		if err != nil {
+			return Value{}, err
+		}
+		pp, isObj, err := e.emitDynProtoOperand(proto, false)
+		if err != nil {
+			return Value{}, err
+		}
+		nonNull, take := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", nonNull, pp))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", take, isObj, nonNull))
+		setL := e.freshLabel("refl.nt.set")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", take, setL, okL))
+		e.emitLabel(setL)
+		e.ensureShapeRuntime()
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_pending_proto, align 8", pp))
+		e.emitInstr("store i32 1, " + irPtr + " @__kml_pending_proto_set, align 4")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", okL))
 		e.emitLabel(okL)
+		pending = true
 	}
 	argv, n, err := e.emitDynArgv([]ast.Expression{ast.NewSpreadElement(args[1], args[1].GetPos())}, pos)
 	if err != nil {
@@ -211,7 +367,12 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 	e.ensureNanBox()
 	e.usedDynConstruct = true
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dyn_construct(i64 %s, ptr %s, i64 %s, ptr %s)", r, cb.Ref, argv, n, e.internString("Reflect.construct target is not a constructor")))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dyn_construct(i64 %s, "+irPtr+" %s, i64 %s, "+irPtr+" %s)", r, cb.Ref, argv, n, e.internString("Reflect.construct target is not a constructor")))
+	if pending {
+		// A target that made no instance of a class (a builtin's) leaves
+		// nothing pending for the next one.
+		e.emitInstr("store i32 0, " + irPtr + " @__kml_pending_proto_set, align 4")
+	}
 	return Value{Ref: r, Ty: TypeAny}, nil
 }
 
@@ -254,7 +415,7 @@ func (e *Emitter) emitReflectSetPrototypeOf(method string, args []ast.Expression
 	}
 	_ = okReg
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_set_proto(ptr %s, ptr %s)", r, bag, protoReg))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_set_proto("+irPtr+" %s, "+irPtr+" %s)", r, bag, protoReg))
 	return Value{Ref: r, Ty: TypeBool}, nil
 }
 
@@ -295,7 +456,7 @@ func (e *Emitter) emitReflectDefineProperty(method string, args []ast.Expression
 func (e *Emitter) emitReflectDefineMetadata(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	// Reflect.defineMetadata(metadataKey, metadataValue, target[, propertyKey])
 	if len(args) != 3 && len(args) != 4 {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.defineMetadata takes 3 or 4 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Reflect.defineMetadata given %d arguments past the lowered call's fit", len(args))
 	}
 	metaKeyRef, err := e.dynAnyKeyRef(args[0], pos)
 	if err != nil {
@@ -324,7 +485,7 @@ func (e *Emitter) emitReflectDefineMetadata(method string, args []ast.Expression
 func (e *Emitter) emitReflectGetMetadata(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	// V1 does not walk the prototype chain, so getMetadata == getOwnMetadata.
 	if len(args) != 2 && len(args) != 3 {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.%s takes 2 or 3 arguments", pos.Line, pos.Col, method)
+		return Value{}, internalAt(pos, "Reflect.%s given %d arguments past the lowered call's fit", method, len(args))
 	}
 	metaKeyRef, err := e.dynAnyKeyRef(args[0], pos)
 	if err != nil {
@@ -343,7 +504,7 @@ func (e *Emitter) emitReflectGetMetadata(method string, args []ast.Expression, p
 
 func (e *Emitter) emitReflectHasMetadata(method string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 2 && len(args) != 3 {
-		return Value{}, fmt.Errorf("%d:%d: Reflect.%s takes 2 or 3 arguments", pos.Line, pos.Col, method)
+		return Value{}, internalAt(pos, "Reflect.%s given %d arguments past the lowered call's fit", method, len(args))
 	}
 	metaKeyRef, err := e.dynAnyKeyRef(args[0], pos)
 	if err != nil {
@@ -367,7 +528,11 @@ func (e *Emitter) emitReflectMetadata(method string, args []ast.Expression, pos 
 	// Reflect.metadata(key, value) returns a decorator; used manually it
 	// hits the same returned-value-call gap factory decorators do. The
 	// compiler-emitted design:* metadata does not go through it.
-	return Value{}, fmt.Errorf("%d:%d: Reflect.metadata (used as a decorator factory) is not supported yet — define metadata directly with Reflect.defineMetadata, or use -emit-decorator-metadata for design:* metadata", pos.Line, pos.Col)
+	m, linked := e.lowerLink("__kml_Reflect_metadata")
+	if !linked {
+		return Value{}, internalAt(pos, "Reflect.metadata's library function is not linked")
+	}
+	return e.emitExpr(ast.NewCallExpression(&ast.Identifier{Name: m}, args, pos))
 }
 
 // reflectMetaTargetBag resolves a Reflect metadata `target` argument to the raw
@@ -378,67 +543,188 @@ func (e *Emitter) reflectMetaTargetBag(arg ast.Expression, pos ast.Pos) (string,
 	if err != nil {
 		return "", err
 	}
-	if !v.Ty.IsDynamic() {
-		return "", fmt.Errorf("%d:%d: a Reflect metadata target must be a dynamic (any-typed) object", pos.Line, pos.Col)
+	if v, err = e.emitBoxValue(v); err != nil {
+		return "", err
 	}
-	// The metadata store is a D1 bag operation — the runtime value must be an
-	// actual tag-10 dynamic object, not a boxed static class instance (tag 6),
-	// whose pointer these bag functions would corrupt. Throw a clear TypeError
-	// rather than segfault on misuse.
+	// A dynamic object keeps its metadata in its own bag; any other object
+	// (a class, a static object, a function) in one its identity keys. A
+	// primitive target is reflect-metadata's TypeError.
 	tag, pay := e.emitUnboxTagPayload(v)
-	okL, badL := e.emitTagCheck(tag, kmlTagDynObject, "meta.tgt")
+	res := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", res))
+	dynL, notDynL := e.emitTagCheck(tag, kmlTagDynObject, "meta.tgt")
 	contL := e.freshLabel("meta.tgt.cont")
-	e.emitLabel(okL)
+	e.emitLabel(dynL)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.emitIntToPtr(pay), res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
-	e.emitLabel(badL)
-	e.emitThrowTypeError("Reflect metadata target must be a plain object")
+	e.emitLabel(notDynL)
+	prim, primL, objL := e.freshReg(), e.freshLabel("meta.tgt.prim"), e.freshLabel("meta.tgt.obj")
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagUndefined))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", prim, primL, objL))
+	e.emitLabel(primL)
+	e.emitThrowTypeError("")
+	e.emitLabel(objL)
+	// A function's identity is its property bag (each boxing of it is a new
+	// record).
+	key := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", key))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", pay, key))
+	fnL, keyL := e.emitTagCheck(tag, kmlTagDynFunc, "meta.tgt.fn")
+	e.emitLabel(fnL)
+	fbag := e.emitFnBagOf(pay)
+	fk := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", fk, fbag))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", fk, key))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", keyL))
+	e.emitLabel(keyL)
+	pay = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", pay, key))
+	e.declareFn("__kml_meta_bag_of", "declare "+irPtr+" @__kml_meta_bag_of(i64, i64, i64)")
+	tag64, side := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", tag64, tag))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_meta_bag_of(i64 %s, i64 %s, i64 1)", side, tag64, pay))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", side, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
 	e.emitLabel(contL)
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", bag, pay))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", bag, res))
 	return bag, nil
 }
 
 // reflectMetaPropKey returns the interned key ref for a metadata property key
 // argument at index i, or the constructor sentinel when the argument is absent.
 func (e *Emitter) reflectMetaPropKey(args []ast.Expression, i int, pos ast.Pos) (string, error) {
-	if i < len(args) {
-		return e.dynAnyKeyRef(args[i], pos)
+	if i >= len(args) || isUndefinedLiteral(e, stripAsAny(args[i])) {
+		return e.internString(metaCtorKey), nil
 	}
-	return e.internString(metaCtorKey), nil
+	// An undefined key (an optional parameter passed on) is the target's
+	// own metadata, as an absent one is.
+	v, err := e.emitExprWithObjectHint(args[i], TypeAny)
+	if err != nil {
+		return "", err
+	}
+	box, err := e.emitBoxValue(v)
+	if err != nil {
+		return "", err
+	}
+	key, err := e.dynAnyKeyRef(e.bindValue(box, pos), pos)
+	if err != nil {
+		return "", err
+	}
+	undef, r := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, box.Ref, nbUndefined))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, undef, e.internString(metaCtorKey), key))
+	return r, nil
 }
 
 // emitNewProxy implements `new Proxy(target, handler)` (TDD-00155 Stage 7):
-// a special bag header — PROXY flag, target where a bag keeps its proto,
-// handler where it keeps its props, zero count — that the runtime property
-// entry points trap on. `typeof` answers "object" (it is a tag-10 value).
+// a special bag header — PROXY flag, the target's bag (null for a target
+// that is no dynamic object) where a bag keeps its proto, handler where it
+// keeps its props, zero count, the target boxed in the cap word — that the
+// runtime property entry points trap on. Any object is a target; a
+// primitive is Node's TypeError. `typeof` answers "object" (it is a tag-10
+// value).
 func (e *Emitter) emitNewProxy(ex *ast.NewExpression) (Value, error) {
 	if len(ex.Args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: new Proxy takes 2 arguments (target, handler)", ex.GetPos().Line, ex.GetPos().Col)
+		// A missing argument is undefined (the TypeError below), one past
+		// the handler evaluated and ignored.
+		fitted, err := e.fitArgs(ex.Args, 2, ex.GetPos())
+		if err != nil {
+			return Value{}, err
+		}
+		c := *ex
+		c.Args = fitted
+		ex = &c
 	}
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	// A Proxy's [[OwnPropertyKeys]]/[[GetOwnProperty]] live in shape.c,
 	// which reads an ownKeys result through the array runtimes.
 	e.ensureShapeRuntime()
 	e.ensureDynJSONC()
-	e.ensureDynArr()
-	target, err := e.emitDynBagOrThrow(ex.Args[0], "Proxy target", ex.GetPos())
+	tv, err := e.emitExprWithObjectHint(ex.Args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
 	}
-	handler, err := e.emitDynBagOrThrow(ex.Args[1], "Proxy handler", ex.GetPos())
+	if !tv.Ty.IsDynamic() {
+		if tv, err = e.emitBoxValue(tv); err != nil {
+			return Value{}, err
+		}
+	}
+	tag, payload := e.emitUnboxTagPayload(tv)
+	prim, objL := e.freshReg(), e.freshLabel("proxy.obj")
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagUndefined))
+	primL := e.freshLabel("proxy.prim")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", prim, primL, objL))
+	e.emitLabel(primL)
+	e.emitThrowTypeError("Cannot create proxy with a non-object as target or handler")
+	e.emitLabel(objL)
+	isBag, bagP, target := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, bagP, payload))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", target, isBag, bagP))
+	e.ensureProxyTargetHooks()
+	hv, err := e.emitExprWithObjectHint(ex.Args[1], TypeAny)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureCalloc()
+	if !hv.Ty.IsDynamic() && hv.Ty.IsObject() && !hostCellObject(hv.Ty) && !hv.Ty.IsDynamicObject() {
+		// A typed handler: its traps are read by key, from its bag copy.
+		if hv, err = e.emitStaticObjToBag(hv); err != nil {
+			return Value{}, err
+		}
+	}
+	if hv, err = e.emitBoxValue(hv); err != nil {
+		return Value{}, err
+	}
+	htag, _ := e.emitUnboxTagPayload(hv)
+	hprim, hobjL, hprimL := e.freshReg(), e.freshLabel("proxy.hobj"), e.freshLabel("proxy.hprim")
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", hprim, htag, kmlTagUndefined))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hprim, hprimL, hobjL))
+	e.emitLabel(hprimL)
+	e.emitThrowTypeError("Cannot create proxy with a non-object as target or handler")
+	e.emitLabel(hobjL)
+	handler, _, err := e.emitDynOwnBagOf(hv, "Proxy handler", false, ex.GetPos())
+	if err != nil {
+		return Value{}, err
+	}
 	hdr := e.freshReg()
-	e.heapCallocInto(hdr, "1", "40")
-	// magic | PROXY (1<<33)
-	e.heapStore("i64", fmt.Sprint(1145867595|int64(1)<<33), hdr, 8)
+	e.heapCallocInto(hdr, allocHost, "1", "56") // a whole Bag
+	e.heapStore("i64", fmt.Sprint(kmlBagHdr|kmlBagFlagProxy), hdr, 8)
 	tSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", tSlot, hdr))
-	e.heapStore("ptr", target, tSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", tSlot, hdr))
+	e.heapStore(irPtr, target, tSlot, 8)
 	hSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 16", hSlot, hdr))
-	e.heapStore("ptr", handler, hSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 16", hSlot, hdr))
+	e.heapStore(irPtr, handler, hSlot, 8)
+	bSlot := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 32", bSlot, hdr))
+	e.heapStore("i64", tv.Ref, bSlot, 8)
 	return e.emitDynObjBox(hdr), nil
+}
+
+// ensureProxyTargetHooks defines the hooks dynobj.c reaches a Proxy's
+// non-bag target through: __kml_proxy_tget(target, key) and
+// __kml_proxy_tset(target, key, v), the program's own any get and set.
+func (e *Emitter) ensureProxyTargetHooks() {
+	if e.fnDecls["__kml_proxy_tget"] {
+		return
+	}
+	e.fnDecls["__kml_proxy_tget"] = true
+	get, set := e.dynGetHelper("", ast.Pos{}), e.dynSetHelper("", ast.Pos{})
+	restore := e.beginDetachedFunc()
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %%v, "+irPtr+" %%key)", r, get))
+	e.emitTerminator("ret i64 " + r)
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("i64 @__kml_proxy_tget(i64 %v, "+irPtr+" %key)", body)
+	restore = e.beginDetachedFunc()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %%v, "+irPtr+" %%key, i64 %%x)", e.freshReg(), set))
+	e.emitTerminator("ret i64 0")
+	body = e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("i64 @__kml_proxy_tset(i64 %v, "+irPtr+" %key, i64 %x)", body)
 }

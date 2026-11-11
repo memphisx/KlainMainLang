@@ -44,15 +44,6 @@ func PromiseFinallySource() string { return layoutHeader() + promiseFinallySourc
 // FetchDriveSource is fetchdrive.c, behind kml_layout.h.
 func FetchDriveSource() string { return layoutHeader() + fetchDriveSource }
 
-// UsesPromiseDefer reports whether the program links defer.c.
-func (e *Emitter) UsesPromiseDefer() bool { return e.fnDecls["__kml_promise_defer_settle"] }
-
-// UsesPromiseFinally reports whether the program links finally.c.
-func (e *Emitter) UsesPromiseFinally() bool { return e.fnDecls["__kml_promise_finally_wait"] }
-
-// UsesFetchDrive reports whether the program links fetchdrive.c.
-func (e *Emitter) UsesFetchDrive() bool { return e.usedFetchDriveRunner }
-
 // emitRejectCallback emits a `.catch`/onRejected callback, hinting an
 // arrow-function parameter to the shared error object shape so `e.message`/
 // `e.name` (and `AggregateError`'s `.errors`) work inside it without the caller
@@ -116,7 +107,7 @@ func (e *Emitter) emitRejectCallback(arg ast.Expression) (Value, error) {
 // takes the value as param and calls the handler with it. Any other handler
 // is returned as is.
 func (e *Emitter) closureOfBoxedHandler(v Value, param Type, pos ast.Pos) (Value, error) {
-	if v.Ref == "null" || v.Ty.IR == "ptr" && !(v.Ty.IsFunc() && v.Ty.FuncHasRest) {
+	if v.Ref == "null" || v.Ty.IR == irPtr && !(v.Ty.IsFunc() && v.Ty.FuncHasRest) {
 		return v, nil
 	}
 	const arg = "__kml_rxn_arg"
@@ -240,8 +231,133 @@ func (e *Emitter) isNonCallableThenArg(arg ast.Expression) bool {
 	if id, ok := arg.(*ast.Identifier); ok && id.Name == "undefined" && !e.isShadowedByLocal(id.Name) {
 		return true
 	}
-	t := e.inferExprType(arg)
+	t := e.typeOfExpr(arg)
 	return !t.IsFunc() && !t.IsDynamic()
+}
+
+// promiseReactions are the reactions a then/catch/finally registers: the
+// callbacks as closure pointers ("null" when absent) and the type the
+// returned promise Q settles to.
+type promiseReactions struct {
+	onF, onR, onFin string
+	fVal, rVal      Value
+	rTy             Type
+	hasR, finAwait  bool
+	retTy           Type
+}
+
+// promiseReactionSetups are the Promise.prototype methods' reactions.
+var promiseReactionSetups map[string]func(e *Emitter, r *promiseReactions, args []ast.Expression, innerTy Type, pos ast.Pos) error
+
+func init() {
+	promiseReactionSetups = map[string]func(e *Emitter, r *promiseReactions, args []ast.Expression, innerTy Type, pos ast.Pos) error{
+		"then":    (*Emitter).promiseThenReactions,
+		"catch":   (*Emitter).promiseCatchReactions,
+		"finally": (*Emitter).promiseFinallyReactions,
+	}
+}
+
+// promiseThenReactions is Promise.prototype.then's: onFulfilled
+// (args[0]) and onRejected (args[1]), a missing/`undefined`/`null`
+// onFulfilled a pass-through.
+func (e *Emitter) promiseThenReactions(r *promiseReactions, args []ast.Expression, innerTy Type, pos ast.Pos) error {
+	// JS treats a missing/`undefined`/`null` onFulfilled as a pass-through
+	// (`p.then().then(g)` hands g the source value; `p.then(undefined, r.onR)`
+	// is the .catch shape) — the runner already has the pass-through block,
+	// so only the arity/argument handling lives here.
+	if len(args) >= 1 && !e.isNonCallableThenArg(args[0]) {
+		v, err := e.emitFulfillCallback(args[0], innerTy)
+		if err == nil {
+			v, err = e.closureOfBoxedHandler(v, innerTy, pos)
+		}
+		if err != nil {
+			return err
+		}
+		r.onF, r.fVal = v.Ref, v
+		if t, ok := emittedCallbackReturn(v); ok {
+			r.retTy = t
+		} else if t, ok := e.callbackReturnType(args[0], innerTy); ok {
+			r.retTy = t
+		}
+	} else {
+		r.retTy = innerTy // pass-through keeps the source value type
+	}
+	if len(args) >= 2 && !e.isNonCallableThenArg(args[1]) {
+		v2, err := e.emitRejectCallback(args[1])
+		if err == nil {
+			v2, err = e.closureOfBoxedHandler(v2, TypeCaught, pos)
+		}
+		if err != nil {
+			return err
+		}
+		r.onR, r.rVal = v2.Ref, v2
+		if r.rTy, r.hasR = emittedCallbackReturn(v2); !r.hasR {
+			r.rTy, r.hasR = e.callbackReturnType(args[1], TypeCaught)
+		}
+	}
+	return nil
+}
+
+// promiseCatchReactions is Promise.prototype.catch's: onRejected
+// (args[0]), the fulfilled path passing the source value through.
+func (e *Emitter) promiseCatchReactions(r *promiseReactions, args []ast.Expression, innerTy Type, pos ast.Pos) error {
+	args, err := e.fitArgs(args, 1, pos) // (a missing argument is undefined)
+	if err != nil {
+		return err
+	}
+	// A non-callable onRejected (`p.catch(undefined)`, `p.catch(3)`) is
+	// treated as undefined: the rejection propagates through unhandled.
+	if e.isNonCallableThenArg(args[0]) {
+		r.retTy = innerTy
+	} else {
+		v, err := e.emitRejectCallback(args[0])
+		if err == nil {
+			v, err = e.closureOfBoxedHandler(v, TypeCaught, pos)
+		}
+		if err != nil {
+			return err
+		}
+		r.onR, r.rVal = v.Ref, v
+		r.retTy = innerTy // the fulfilled path passes the source value through
+		if r.rTy, r.hasR = emittedCallbackReturn(v); !r.hasR {
+			r.rTy, r.hasR = e.callbackReturnType(args[0], TypeCaught)
+		}
+		if r.hasR && !thenPathsDiffer(r.retTy, r.rTy) {
+			r.retTy = r.rTy
+		}
+	}
+	return nil
+}
+
+// promiseFinallyReactions is Promise.prototype.finally's: onFinally
+// (args[0]), called with no arguments on either path.
+func (e *Emitter) promiseFinallyReactions(r *promiseReactions, args []ast.Expression, innerTy Type, pos ast.Pos) error {
+	args, err := e.fitArgs(args, 1, pos) // (a missing argument is undefined)
+	if err != nil {
+		return err
+	}
+	v, err := e.emitExpr(args[0])
+	if err != nil {
+		return err
+	}
+	if v.Ty.IsFunc() && len(v.Ty.FuncParams) > 0 {
+		// onFinally is called with no arguments: a function taking some
+		// (its own `arguments` included) is called so, from a closure
+		// taking none.
+		call := ast.NewCallExpression(e.bindValue(v, pos), nil, pos)
+		if v, err = e.emitExpr(ast.NewArrowFunction(nil, nil, call, nil, pos)); err != nil {
+			return err
+		}
+	}
+	r.onFin = v.Ref
+	r.retTy = innerTy // finally passes the source value through unchanged
+	// An onFinally returning a promise is waited for (and its rejection
+	// taken), as the spec's thenFinally does.
+	if v.Ty.IsFunc() && v.Ty.FuncRetType != nil && v.Ty.FuncRetType.IsPromise() {
+		rt := *v.Ty.FuncRetType
+		r.finAwait = rt.PromiseTask || rt.PromiseType == nil || !rt.PromiseType.IsResponse()
+	}
+	return nil
 }
 
 // emitPromiseThen handles a `.then`/`.catch`/`.finally` call on a Promise value.
@@ -263,7 +379,7 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		if pVal.Ty.IsDynamic() && into == "" {
 			return e.emitDynAnyMethodCall(pVal, kind, args, pos)
 		}
-		return Value{}, fmt.Errorf("%d:%d: .%s is only supported on a Promise", pos.Line, pos.Col, kind)
+		return Value{}, internalAt(pos, ".%s on a non-promise (a class or object then dispatches as a method)", kind)
 	}
 	// A raw fetch()'s Promise<Response> is a still-pending fetch handle, not a
 	// task-shaped promise. Bridge it to a *pending* task promise whose settle
@@ -278,13 +394,16 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		pVal = e.emitFetchHandleToPendingPromise(pVal.Ref)
 	}
 	if !pVal.Ty.PromiseTask {
-		return Value{}, fmt.Errorf("%d:%d: .%s is currently supported only on a promise from a may-suspend async function or a fetch (TDD-00083 Stage 3)", pos.Line, pos.Col, kind)
+		return Value{}, internalAt(pos, ".%s on a promise that is not task-shaped", kind)
+	}
+	if into == "" && !e.erasedThenSplit && pVal.Ty.PromiseType != nil && !pVal.Ty.PromiseType.IsDynamic() && !pVal.Ty.IsClass() && e.anyErasedPromiseHost() {
+		return e.emitErasedThenSplit(pVal, kind, args, pos)
 	}
 	// An onFulfilled literal taking `any` receives an array value boxed
 	// as `any` holds it (`{}[]`'s pointers, read as `any[]`). Only a literal: a
 	// passed function's first parameter may be a rest (`console.log`).
 	if kind == "then" && len(args) >= 1 && anyAnnotatedFirstParam(args[0]) {
-		if ft := e.inferExprType(args[0]); ft.IsFunc() && len(ft.FuncParams) > 0 && ft.FuncParams[0].IsDynamic() {
+		if ft := e.typeOfExpr(args[0]); ft.IsFunc() && len(ft.FuncParams) > 0 && ft.FuncParams[0].IsDynamic() {
 			if want := PromiseOf(ft.FuncParams[0]); promiseElemsNeedConvert(pVal.Ty, want) {
 				pVal = e.convert(pVal, want)
 			}
@@ -296,7 +415,9 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	}
 	// Only the promise + microtask machinery is needed here; the fiber scheduler
 	// (if the program has may-suspend fns) is pulled in by those fns themselves.
-	e.ensurePromiseRuntime()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureUnhandledRejections()
 	e.ensureMicrotasks()
 
 	// Evaluate callbacks into closure pointers ("null" when absent) and decide the
@@ -326,93 +447,11 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		}
 		args[i] = w
 	}
-	switch kind {
-	case "then":
-		// JS treats a missing/`undefined`/`null` onFulfilled as a pass-through
-		// (`p.then().then(g)` hands g the source value; `p.then(undefined, onR)`
-		// is the .catch shape) — the runner already has the pass-through block,
-		// so only the arity/argument handling lives here.
-		if len(args) >= 1 && !e.isNonCallableThenArg(args[0]) {
-			v, err := e.emitFulfillCallback(args[0], innerTy)
-			if err == nil {
-				v, err = e.closureOfBoxedHandler(v, innerTy, pos)
-			}
-			if err != nil {
-				return Value{}, err
-			}
-			onF, fVal = v.Ref, v
-			if t, ok := emittedCallbackReturn(v); ok {
-				retTy = t
-			} else if t, ok := e.callbackReturnType(args[0], innerTy); ok {
-				retTy = t
-			}
-		} else {
-			retTy = innerTy // pass-through keeps the source value type
-		}
-		if len(args) >= 2 && !e.isNonCallableThenArg(args[1]) {
-			v2, err := e.emitRejectCallback(args[1])
-			if err == nil {
-				v2, err = e.closureOfBoxedHandler(v2, TypeCaught, pos)
-			}
-			if err != nil {
-				return Value{}, err
-			}
-			onR, rVal = v2.Ref, v2
-			if rTy, hasR = emittedCallbackReturn(v2); !hasR {
-				rTy, hasR = e.callbackReturnType(args[1], TypeCaught)
-			}
-		}
-	case "catch":
-		if len(args) < 1 {
-			return Value{}, fmt.Errorf("%d:%d: catch expects 1 argument", pos.Line, pos.Col)
-		}
-		// A non-callable onRejected (`p.catch(undefined)`, `p.catch(3)`) is
-		// treated as undefined: the rejection propagates through unhandled.
-		if e.isNonCallableThenArg(args[0]) {
-			retTy = innerTy
-		} else {
-			v, err := e.emitRejectCallback(args[0])
-			if err == nil {
-				v, err = e.closureOfBoxedHandler(v, TypeCaught, pos)
-			}
-			if err != nil {
-				return Value{}, err
-			}
-			onR, rVal = v.Ref, v
-			retTy = innerTy // the fulfilled path passes the source value through
-			if rTy, hasR = emittedCallbackReturn(v); !hasR {
-				rTy, hasR = e.callbackReturnType(args[0], TypeCaught)
-			}
-			if hasR && !thenPathsDiffer(retTy, rTy) {
-				retTy = rTy
-			}
-		}
-	case "finally":
-		if len(args) < 1 {
-			return Value{}, fmt.Errorf("%d:%d: finally expects 1 argument", pos.Line, pos.Col)
-		}
-		v, err := e.emitExpr(args[0])
-		if err != nil {
-			return Value{}, err
-		}
-		if v.Ty.IsFunc() && len(v.Ty.FuncParams) > 0 {
-			// onFinally is called with no arguments: a function taking some
-			// (its own `arguments` included) is called so, from a closure
-			// taking none.
-			call := ast.NewCallExpression(e.bindValue(v, pos), nil, pos)
-			if v, err = e.emitExpr(ast.NewArrowFunction(nil, nil, call, nil, pos)); err != nil {
-				return Value{}, err
-			}
-		}
-		onFin = v.Ref
-		retTy = innerTy // finally passes the source value through unchanged
-		// An onFinally returning a promise is waited for (and its rejection
-		// taken), as the spec's thenFinally does.
-		if v.Ty.IsFunc() && v.Ty.FuncRetType != nil && v.Ty.FuncRetType.IsPromise() {
-			rt := *v.Ty.FuncRetType
-			finAwait = rt.PromiseTask || rt.PromiseType == nil || !rt.PromiseType.IsResponse()
-		}
+	r := promiseReactions{onF: onF, onR: onR, onFin: onFin, retTy: retTy}
+	if err := promiseReactionSetups[kind](e, &r, args, innerTy, pos); err != nil {
+		return Value{}, err
 	}
+	onF, onR, onFin, fVal, rVal, rTy, hasR, finAwait, retTy = r.onF, r.onR, r.onFin, r.fVal, r.rVal, r.rTy, r.hasR, r.finAwait, r.retTy
 
 	// Q settles to the fulfilled path's value or the rejection handler's: TS
 	// types it as their union, which Q holds boxed when the two differ. A
@@ -428,7 +467,7 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		f, okF := e.closureReturningAny(fVal)
 		r, okR := e.closureReturningAny(rVal)
 		if !okF || !okR {
-			return Value{}, fmt.Errorf("%d:%d: .%s whose handlers settle to different types is not supported for these handler types", pos.Line, pos.Col, kind)
+			return Value{}, internalAt(pos, ".%s handlers not adaptable to an any-returning closure", kind)
 		}
 		onF, onR, retTy = f.Ref, r.Ref, TypeAny
 	}
@@ -442,9 +481,17 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		adopt = 1
 		if !retTy.PromiseTask && retTy.PromiseType != nil && retTy.PromiseType.IsResponse() && !retTy.PromiseResolved {
 			adopt = 2
-			e.ensureFetchSlotToPromise()
+			e.ensureFetchAsync()
+			e.ensureMicrotasks()
+			e.ensureExceptionHelpers()
+			e.ensureUnhandledRejections()
+			e.ensureNanBox()
+			e.ensureTaskRuntime()
 		}
-		e.ensurePromiseAdopt()
+		e.ensureMicrotasks()
+		e.ensureExceptionHelpers()
+		e.ensureUnhandledRejections()
+		e.ensureNanBox()
 	}
 
 	// Q: the returned promise, allocated *pending* so a chained `.then` attaches a
@@ -452,16 +499,16 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	q := into
 	if q == "" {
 		q = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
 	}
 
 	// env = { ptr p, ptr onF, ptr onR, ptr onFin, ptr q, ptr runner }
 	env := e.freshReg()
-	e.heapMallocInto(env, "48")
+	e.heapMallocInto(env, allocClosure, "48")
 	storeEnv := func(idx int, ref string) {
 		gp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %s, i32 0, i32 %d", gp, env, idx))
-		e.heapStore("ptr", ref, gp, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 %d", gp, env, idx))
+		e.heapStore(irPtr, ref, gp, 8)
 	}
 	storeEnv(0, pVal.Ref)
 	storeEnv(1, onF)
@@ -473,8 +520,8 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	// The reaction runs the runner under __kml_then_guard, which rejects Q
 	// when a handler throws.
 	runnerSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 5", runnerSlot, env))
-	e.heapStore("ptr", runner, runnerSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 5", runnerSlot, env))
+	e.heapStore(irPtr, runner, runnerSlot, 8)
 	if adopt != 0 {
 		// Q's value type is what the returned promise resolves to.
 		if retTy.PromiseType != nil {
@@ -488,11 +535,11 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	clo := e.freshReg()
 	cfp := e.freshReg()
 	cep := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", cfp, clo))
-	e.heapStore("ptr", "@__kml_then_guard", cfp, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", cep, clo))
-	e.heapStore("ptr", env, cep, 8)
+	e.emitClosureAlloc(clo, "16", "@__kml_then_guard")
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", cfp, clo))
+	e.heapStore(irPtr, "@__kml_then_guard", cfp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", cep, clo))
+	e.heapStore(irPtr, env, cep, 8)
 
 	e.emitAttachPromiseReaction(pVal.Ref, clo)
 
@@ -515,8 +562,8 @@ func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 	}
 	res := e.freshReg()
 	resP := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", resP, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", res, resP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", resP, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", res, resP))
 	settled := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", settled, res))
 	nowL := e.freshLabel("then.now")
@@ -524,7 +571,7 @@ func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 	doneL := e.freshLabel("then.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", settled, nowL, laterL))
 	e.emitLabel(nowL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", clo))
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", clo))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(laterL)
 	// node = { closure, next = p.reactions }; p.reactions = node
@@ -533,43 +580,16 @@ func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 	oldHead := e.freshReg()
 	nodeClo := e.freshReg()
 	nodeNext := e.freshReg()
-	e.heapMallocInto(node, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", rxP, promiseStructIR, prom))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", oldHead, rxP))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", nodeClo, node))
-	e.heapStore("ptr", clo, nodeClo, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", nodeNext, node))
-	e.heapStore("ptr", oldHead, nodeNext, 8)
-	e.heapStore("ptr", node, rxP, 8)
+	e.heapMallocInto(node, allocHost, "16")
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 4", rxP, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", oldHead, rxP))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", nodeClo, node))
+	e.heapStore(irPtr, clo, nodeClo, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", nodeNext, node))
+	e.heapStore(irPtr, oldHead, nodeNext, 8)
+	e.heapStore(irPtr, node, rxP, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
-}
-
-// ensureFetchDriveRunner declares @__kml_fetch_drive_run(ptr %env) exactly once —
-// the deferred microtask step that bridges a raw fetch handle to a task promise.
-// env = { ptr slot, ptr prom }: it drives the fetch (`__kml_await_fetch`, the
-// same drive `await` uses), builds the Response, stores it into prom's value
-// slot, and settles prom fulfilled via __kml_promise_settle (so reactions
-// attached while pending fire, and a parked awaiter wakes). A transport-level
-// failure (which `__kml_await_fetch` throws) is caught via setjmp and settles
-// prom *rejected* — `fetch(u).catch(e => …)` recovers it; an HTTP 4xx/5xx is a
-// fulfilled Response, per WHATWG. The fetch slot is NOT freed: a fetch
-// Promise<Response> is a reusable value (TDD-00090) — `const p = fetch(u);
-// p.then(f); await p` must still read a live slot.
-func (e *Emitter) ensureFetchDriveRunner() {
-	if e.usedFetchDriveRunner {
-		return
-	}
-	e.usedFetchDriveRunner = true
-	e.ensurePromiseRuntime()
-	e.ensureFetchAsync()
-	e.ensureAwaitFetchHeaders()
-	e.ensureExceptionHelpers()
-	e.ensureMalloc()
-	e.ensurePromiseSettle()
-	e.ensureCalloc()
-
-	e.emitGlobal("declare void @__kml_fetch_drive_run(ptr)")
 }
 
 // emitFetchHandleToPendingPromise bridges a raw fetch()'s Promise<Response>
@@ -582,9 +602,14 @@ func (e *Emitter) ensureFetchDriveRunner() {
 func (e *Emitter) emitFetchHandleToPendingPromise(slotRef string) Value {
 	// The bridge runs as a coroutine that parks on the fetch (TDD-00223 §3) —
 	// see runtime_promise_adopt.go.
-	e.ensureFetchSlotToPromise()
+	e.ensureFetchAsync()
+	e.ensureMicrotasks()
+	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
+	e.ensureNanBox()
+	e.ensureTaskRuntime()
 	prom := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_slot_to_promise(ptr %s)", prom, slotRef))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_slot_to_promise("+irPtr+" %s)", prom, slotRef))
 	rt := PromiseOf(ResponseType())
 	rt.PromiseTask = true
 	return Value{Ref: prom, Ty: rt}
@@ -609,8 +634,8 @@ func thenValLoadIR(ty Type) (load, argIR string) {
 	switch ty.IR {
 	case "void", "":
 		return "", ""
-	case "ptr":
-		return "  %val = inttoptr i64 %v0 to ptr\n", "ptr"
+	case irPtr:
+		return "  %val = inttoptr i64 %v0 to " + irPtr + "\n", irPtr
 	case "i64":
 		return "  %val = add i64 %v0, 0\n", "i64"
 	case "double":
@@ -625,19 +650,19 @@ func thenValLoadIR(ty Type) (load, argIR string) {
 // fulfilled (res = 1). For a void result it stores 0 (undefined). The sfx keeps
 // SSA names unique across the two call blocks (fulfill vs reject) of one runner.
 func thenStoreResultIR(retTy Type, sfx string) (produce func(callExpr string) string, storeAndSettle string) {
-	settle := `  %qres` + sfx + ` = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 0
-  store i64 1, ptr %qres` + sfx + `, align 8
+	settle := `  %qres` + sfx + ` = getelementptr ` + promiseStructIR + `, ` + irPtr + ` %q, i32 0, i32 0
+  store i64 1, ` + irPtr + ` %qres` + sfx + `, align 8
 `
-	v0slot := `  %qv0` + sfx + ` = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 2
+	v0slot := `  %qv0` + sfx + ` = getelementptr ` + promiseStructIR + `, ` + irPtr + ` %q, i32 0, i32 2
 `
-	// An array result is checked before the IR switch: an array's IR is "ptr"
+	// An array result is checked before the IR switch: an array's IR is irPtr
 	// (the header-pointer model), so it would otherwise fall into the `case
-	// "ptr"` scalar-pointer arm. The callback returns a header pointer (`ret ptr`,
+	// irPtr` scalar-pointer arm. The callback returns a header pointer (`ret ptr`,
 	// TDD-00213 Stage 3), which v0 holds as loadPromiseValue reads it back.
 	if retTy.IsArray() {
 		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
-			"  %rvpi" + sfx + " = ptrtoint ptr %rv" + sfx + " to i64\n" + v0slot +
-				"  store i64 %rvpi" + sfx + ", ptr %qv0" + sfx + ", align 8\n" + settle
+			"  %rvpi" + sfx + " = ptrtoint " + irPtr + " %rv" + sfx + " to i64\n" + v0slot +
+				"  store i64 %rvpi" + sfx + ", " + irPtr + " %qv0" + sfx + ", align 8\n" + settle
 	}
 	// A nullable-scalar result: payload bits → v0, presence → v1 (ADR-01065).
 	if isNullableScalar(retTy) {
@@ -652,29 +677,29 @@ func thenStoreResultIR(retTy Type, sfx string) (produce func(callExpr string) st
 					"  %rv" + sfx + " = extractvalue " + agg + " %rvagg" + sfx + ", 1\n"
 			},
 			"  %rvpri" + sfx + " = zext i1 %rvpr" + sfx + " to i64\n" +
-				"  %qv1n" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
-				"  store i64 %rvpri" + sfx + ", ptr %qv1n" + sfx + ", align 8\n" + baseStore
+				"  %qv1n" + sfx + " = getelementptr " + promiseStructIR + ", " + irPtr + " %q, i32 0, i32 3\n" +
+				"  store i64 %rvpri" + sfx + ", " + irPtr + " %qv1n" + sfx + ", align 8\n" + baseStore
 	}
 	switch retTy.IR {
 	case "void", "":
 		return func(callExpr string) string { return "  " + callExpr + "\n" },
-			v0slot + "  store i64 0, ptr %qv0" + sfx + ", align 8\n" + settle
+			v0slot + "  store i64 0, " + irPtr + " %qv0" + sfx + ", align 8\n" + settle
 	case "i64":
 		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
-			v0slot + "  store i64 %rv" + sfx + ", ptr %qv0" + sfx + ", align 8\n" + settle
-	case "ptr":
+			v0slot + "  store i64 %rv" + sfx + ", " + irPtr + " %qv0" + sfx + ", align 8\n" + settle
+	case irPtr:
 		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
-			"  %rvb" + sfx + " = ptrtoint ptr %rv" + sfx + " to i64\n" + v0slot +
-				"  store i64 %rvb" + sfx + ", ptr %qv0" + sfx + ", align 8\n" + settle
+			"  %rvb" + sfx + " = ptrtoint " + irPtr + " %rv" + sfx + " to i64\n" + v0slot +
+				"  store i64 %rvb" + sfx + ", " + irPtr + " %qv0" + sfx + ", align 8\n" + settle
 	case "double":
 		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
 			"  %rvb" + sfx + " = bitcast double %rv" + sfx + " to i64\n" + v0slot +
-				"  store i64 %rvb" + sfx + ", ptr %qv0" + sfx + ", align 8\n" + settle
+				"  store i64 %rvb" + sfx + ", " + irPtr + " %qv0" + sfx + ", align 8\n" + settle
 	default:
 		// small ints (i1/i8/i16/i32)
 		return func(callExpr string) string { return "  %rv" + sfx + " = " + callExpr + "\n" },
 			"  %rvb" + sfx + " = zext " + retTy.IR + " %rv" + sfx + " to i64\n" + v0slot +
-				"  store i64 %rvb" + sfx + ", ptr %qv0" + sfx + ", align 8\n" + settle
+				"  store i64 %rvb" + sfx + ", " + irPtr + " %qv0" + sfx + ", align 8\n" + settle
 	}
 }
 
@@ -682,15 +707,15 @@ func thenStoreResultIR(retTy Type, sfx string) (produce func(callExpr string) st
 // into Q — used by finally and by a missing fulfillment callback. sfx keeps the
 // temporaries unique across the two blocks that pass through.
 func thenPassThroughIR(sfx string) string {
-	return "  %pv0" + sfx + " = load i64, ptr %v0_p, align 8\n" +
-		"  %pv1_p" + sfx + " = getelementptr " + promiseStructIR + ", ptr %p, i32 0, i32 3\n" +
-		"  %pv1" + sfx + " = load i64, ptr %pv1_p" + sfx + ", align 8\n" +
-		"  %qv0pt" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 2\n" +
-		"  store i64 %pv0" + sfx + ", ptr %qv0pt" + sfx + ", align 8\n" +
-		"  %qv1pt" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
-		"  store i64 %pv1" + sfx + ", ptr %qv1pt" + sfx + ", align 8\n" +
-		"  %qrespt" + sfx + " = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 0\n" +
-		"  store i64 %res, ptr %qrespt" + sfx + ", align 8\n"
+	return "  %pv0" + sfx + " = load i64, " + irPtr + " %v0_p, align 8\n" +
+		"  %pv1_p" + sfx + " = getelementptr " + promiseStructIR + ", " + irPtr + " %p, i32 0, i32 3\n" +
+		"  %pv1" + sfx + " = load i64, " + irPtr + " %pv1_p" + sfx + ", align 8\n" +
+		"  %qv0pt" + sfx + " = getelementptr " + promiseStructIR + ", " + irPtr + " %q, i32 0, i32 2\n" +
+		"  store i64 %pv0" + sfx + ", " + irPtr + " %qv0pt" + sfx + ", align 8\n" +
+		"  %qv1pt" + sfx + " = getelementptr " + promiseStructIR + ", " + irPtr + " %q, i32 0, i32 3\n" +
+		"  store i64 %pv1" + sfx + ", " + irPtr + " %qv1pt" + sfx + ", align 8\n" +
+		"  %qrespt" + sfx + " = getelementptr " + promiseStructIR + ", " + irPtr + " %q, i32 0, i32 0\n" +
+		"  store i64 %res, " + irPtr + " %qrespt" + sfx + ", align 8\n"
 }
 
 // emitThenRunner emits a reaction runner and returns its symbol; call sites
@@ -708,25 +733,25 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	// Fulfillment callback call expression (onF). A void source passes
 	// undefined (its `any` box): a callback of no parameters ignores it, one
 	// of other types is adapted from `any` (emitFulfillCallback).
-	loadFClosure := "  %ffp_p = getelementptr { ptr, ptr }, ptr %onF, i32 0, i32 0\n" +
-		"  %ffp = load ptr, ptr %ffp_p, align 8\n" +
-		"  %fep_p = getelementptr { ptr, ptr }, ptr %onF, i32 0, i32 1\n" +
-		"  %fep = load ptr, ptr %fep_p, align 8\n"
+	loadFClosure := "  %ffp_p = getelementptr { " + irPtr + ", " + irPtr + " }, " + irPtr + " %onF, i32 0, i32 0\n" +
+		"  %ffp = load " + irPtr + ", " + irPtr + " %ffp_p, align 8\n" +
+		"  %fep_p = getelementptr { " + irPtr + ", " + irPtr + " }, " + irPtr + " %onF, i32 0, i32 1\n" +
+		"  %fep = load " + irPtr + ", " + irPtr + " %fep_p, align 8\n"
 	var fCall string
 	switch {
 	case argIR == "":
-		fCall = loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, i64 %d)", thenCallRetIR(retTy), nbUndefined))
+		fCall = loadFClosure + produceF(fmt.Sprintf("call %s %%ffp("+irPtr+" %%fep, i64 %d)", thenCallRetIR(retTy), nbUndefined))
 	case argTy.IsArray():
 		// An array callback argument is passed by the two-slot array-param ABI
 		// (`ptr <header>, i64 <len>` — bindArrayParam): v0 holds the header
 		// of the array that settled the source promise (storePromiseValue), so
 		// the callback shares it.
-		arrValLoad := "  %ahdr = inttoptr i64 %v0 to ptr\n" +
-			"  %alenp = getelementptr { ptr, i64 }, ptr %ahdr, i32 0, i32 1\n" +
-			"  %alen = load i64, ptr %alenp, align 8\n"
-		fCall = arrValLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, ptr %%ahdr, i64 %%alen)", thenCallRetIR(retTy)))
+		arrValLoad := "  %ahdr = inttoptr i64 %v0 to " + irPtr + "\n" +
+			"  %alenp = getelementptr { " + irPtr + ", i64 }, " + irPtr + " %ahdr, i32 0, i32 1\n" +
+			"  %alen = load i64, " + irPtr + " %alenp, align 8\n"
+		fCall = arrValLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp("+irPtr+" %%fep, "+irPtr+" %%ahdr, i64 %%alen)", thenCallRetIR(retTy)))
 	default:
-		fCall = valLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp(ptr %%fep, %s %%val)", thenCallRetIR(retTy), argIR))
+		fCall = valLoad + loadFClosure + produceF(fmt.Sprintf("call %s %%ffp("+irPtr+" %%fep, %s %%val)", thenCallRetIR(retTy), argIR))
 	}
 
 	// Rejection callback call (onR) — the reason is a caught value { i8 tag, i64
@@ -735,39 +760,45 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	rCall := "  %errtag = trunc i64 %v1 to i8\n" +
 		"  %erragg0 = insertvalue { i8, i64 } undef, i8 %errtag, 0\n" +
 		"  %erragg = insertvalue { i8, i64 } %erragg0, i64 %v0, 1\n" +
-		"  %rfp_p = getelementptr { ptr, ptr }, ptr %onR, i32 0, i32 0\n" +
-		"  %rfp = load ptr, ptr %rfp_p, align 8\n" +
-		"  %rep_p = getelementptr { ptr, ptr }, ptr %onR, i32 0, i32 1\n" +
-		"  %rep = load ptr, ptr %rep_p, align 8\n" +
-		produceR(fmt.Sprintf("call %s %%rfp(ptr %%rep, { i8, i64 } %%erragg)", thenCallRetIR(retTy)))
+		"  %rfp_p = getelementptr { " + irPtr + ", " + irPtr + " }, " + irPtr + " %onR, i32 0, i32 0\n" +
+		"  %rfp = load " + irPtr + ", " + irPtr + " %rfp_p, align 8\n" +
+		"  %rep_p = getelementptr { " + irPtr + ", " + irPtr + " }, " + irPtr + " %onR, i32 0, i32 1\n" +
+		"  %rep = load " + irPtr + ", " + irPtr + " %rep_p, align 8\n" +
+		produceR(fmt.Sprintf("call %s %%rfp("+irPtr+" %%rep, { i8, i64 } %%erragg)", thenCallRetIR(retTy)))
 
 	// Pass-through blocks (finally, and a missing fulfillment callback).
 	// finally's result settles two microtasks after its callback, as Node's
 	// does: its thenFinally resolves Q with PromiseResolve(onFinally()).then(
 	// () => value) — a reaction, then the adoption of that promise.
-	e.ensurePromiseDeferSettle()
-	finCall := "  call void (ptr) %finfp(ptr %finep)\n"
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
+	e.ensureUnhandledRejections()
+	finCall := "  call void (" + irPtr + ") %finfp(" + irPtr + " %finep)\n"
 	if finAwait {
-		e.ensurePromiseFinallyWait()
-		finCall = "  %finr = call ptr (ptr) %finfp(ptr %finep)\n" +
-			"  call void @__kml_promise_finally_wait(ptr %finr, ptr %q, i64 %res, i64 %v0, i64 %v1)\n  ret void\n"
+		e.ensureMicrotasks()
+		e.ensureExceptionHelpers()
+		e.ensureUnhandledRejections()
+		e.ensureNanBox()
+		finCall = "  %finr = call " + irPtr + " (" + irPtr + ") %finfp(" + irPtr + " %finep)\n" +
+			"  call void @__kml_promise_finally_wait(" + irPtr + " %finr, " + irPtr + " %q, i64 %res, i64 %v0, i64 %v1)\n  ret void\n"
 	}
-	passThroughD := "  %qv0fd = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 2\n" +
-		"  store i64 %v0, ptr %qv0fd, align 8\n" +
-		"  %qv1fd = getelementptr " + promiseStructIR + ", ptr %q, i32 0, i32 3\n" +
-		"  store i64 %v1, ptr %qv1fd, align 8\n" +
-		"  call void @__kml_promise_defer_settle(ptr %q, i64 %res, i64 2)\n  ret void\n"
+	passThroughD := "  %qv0fd = getelementptr " + promiseStructIR + ", " + irPtr + " %q, i32 0, i32 2\n" +
+		"  store i64 %v0, " + irPtr + " %qv0fd, align 8\n" +
+		"  %qv1fd = getelementptr " + promiseStructIR + ", " + irPtr + " %q, i32 0, i32 3\n" +
+		"  store i64 %v1, " + irPtr + " %qv1fd, align 8\n" +
+		"  call void @__kml_promise_defer_settle(" + irPtr + " %q, i64 %res, i64 2)\n  ret void\n"
 	passThroughF := thenPassThroughIR("pf")
 	// Propagate a rejection (no onR): Q rejects with the same reason — both the
 	// payload (v0) and the tag (v1) carry over (TDD-00207).
-	propReject := `  %qv0_pr = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 2
-  store i64 %v0, ptr %qv0_pr, align 8
-  %qv1_pr = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 3
-  store i64 %v1, ptr %qv1_pr, align 8
-  %qres_pr = getelementptr ` + promiseStructIR + `, ptr %q, i32 0, i32 0
-  store i64 2, ptr %qres_pr, align 8
+	propReject := `  %qv0_pr = getelementptr ` + promiseStructIR + `, ` + irPtr + ` %q, i32 0, i32 2
+  store i64 %v0, ` + irPtr + ` %qv0_pr, align 8
+  %qv1_pr = getelementptr ` + promiseStructIR + `, ` + irPtr + ` %q, i32 0, i32 3
+  store i64 %v1, ` + irPtr + ` %qv1_pr, align 8
+  %qres_pr = getelementptr ` + promiseStructIR + `, ` + irPtr + ` %q, i32 0, i32 0
+  store i64 2, ` + irPtr + ` %qres_pr, align 8
 `
-	drainRet := "  call void @__kml_promise_drain_reactions(ptr %q)\n  ret void\n"
+	drainRet := "  call void @__kml_promise_drain_reactions(" + irPtr + " %q)\n  ret void\n"
 	// The callback branches either settle Q with the returned value and drain, or
 	// — when the callback returned a promise — hand Q to the adoption job and
 	// leave it pending (draining a pending promise would fire its reactions early).
@@ -778,7 +809,7 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	cbTail := func(storeSettle, sfx string) string {
 		if dynRet {
 			// A dynamic result may hold a promise: resolve Q with it (adopting).
-			return "  call void @__kml_promise_resolve_any(ptr %q, i64 %rv" + sfx + ")\n  ret void\n"
+			return "  call void @__kml_promise_resolve_any(" + irPtr + " %q, i64 %rv" + sfx + ")\n  ret void\n"
 		}
 		if adopt == 0 {
 			return storeSettle + drainRet
@@ -786,72 +817,59 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 		h := "%rv" + sfx
 		pre := ""
 		if adopt == 2 {
-			pre = "  %rvp" + sfx + " = call ptr @__kml_fetch_slot_to_promise(ptr %rv" + sfx + ")\n"
+			pre = "  %rvp" + sfx + " = call " + irPtr + " @__kml_fetch_slot_to_promise(" + irPtr + " %rv" + sfx + ")\n"
 			h = "%rvp" + sfx
 		}
-		return pre + "  call void @__kml_promise_adopt(ptr %q, ptr " + h + ")\n  ret void\n"
+		return pre + "  call void @__kml_promise_adopt(" + irPtr + " %q, " + irPtr + " " + h + ")\n  ret void\n"
 	}
 
-	// Named by its text (the name left out), as defineContentNamed names.
-	const self = "@__kml_then_run"
-	text := fmt.Sprintf(`
-define void %s(ptr %%env) {
-entry:
-  %%p_p = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 0
-  %%p = load ptr, ptr %%p_p, align 8
-  %%onF_p = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 1
-  %%onF = load ptr, ptr %%onF_p, align 8
-  %%onR_p = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 2
-  %%onR = load ptr, ptr %%onR_p, align 8
-  %%onFin_p = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 3
-  %%onFin = load ptr, ptr %%onFin_p, align 8
-  %%q_p = getelementptr { ptr, ptr, ptr, ptr, ptr }, ptr %%env, i32 0, i32 4
-  %%q = load ptr, ptr %%q_p, align 8
-  %%res_p = getelementptr %s, ptr %%p, i32 0, i32 0
-  %%res = load i64, ptr %%res_p, align 8
-  %%v0_p = getelementptr %s, ptr %%p, i32 0, i32 2
-  %%v0 = load i64, ptr %%v0_p, align 8
-  %%v1_p = getelementptr %s, ptr %%p, i32 0, i32 3
-  %%v1 = load i64, ptr %%v1_p, align 8
-  %%hasFin = icmp ne ptr %%onFin, null
+	body := fmt.Sprintf(`  %%p_p = getelementptr { `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+` }, `+irPtr+` %%env, i32 0, i32 0
+  %%p = load `+irPtr+`, `+irPtr+` %%p_p, align 8
+  %%onF_p = getelementptr { `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+` }, `+irPtr+` %%env, i32 0, i32 1
+  %%onF = load `+irPtr+`, `+irPtr+` %%onF_p, align 8
+  %%onR_p = getelementptr { `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+` }, `+irPtr+` %%env, i32 0, i32 2
+  %%onR = load `+irPtr+`, `+irPtr+` %%onR_p, align 8
+  %%onFin_p = getelementptr { `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+` }, `+irPtr+` %%env, i32 0, i32 3
+  %%onFin = load `+irPtr+`, `+irPtr+` %%onFin_p, align 8
+  %%q_p = getelementptr { `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+`, `+irPtr+` }, `+irPtr+` %%env, i32 0, i32 4
+  %%q = load `+irPtr+`, `+irPtr+` %%q_p, align 8
+  %%res_p = getelementptr %s, `+irPtr+` %%p, i32 0, i32 0
+  %%res = load i64, `+irPtr+` %%res_p, align 8
+  %%v0_p = getelementptr %s, `+irPtr+` %%p, i32 0, i32 2
+  %%v0 = load i64, `+irPtr+` %%v0_p, align 8
+  %%v1_p = getelementptr %s, `+irPtr+` %%p, i32 0, i32 3
+  %%v1 = load i64, `+irPtr+` %%v1_p, align 8
+  %%hasFin = icmp ne `+irPtr+` %%onFin, null
   br i1 %%hasFin, label %%dofin, label %%branch
 dofin:
-  %%finfp_p = getelementptr { ptr, ptr }, ptr %%onFin, i32 0, i32 0
-  %%finfp = load ptr, ptr %%finfp_p, align 8
-  %%finep_p = getelementptr { ptr, ptr }, ptr %%onFin, i32 0, i32 1
-  %%finep = load ptr, ptr %%finep_p, align 8
+  %%finfp_p = getelementptr { `+irPtr+`, `+irPtr+` }, `+irPtr+` %%onFin, i32 0, i32 0
+  %%finfp = load `+irPtr+`, `+irPtr+` %%finfp_p, align 8
+  %%finep_p = getelementptr { `+irPtr+`, `+irPtr+` }, `+irPtr+` %%onFin, i32 0, i32 1
+  %%finep = load `+irPtr+`, `+irPtr+` %%finep_p, align 8
 %s%s
 branch:
   %%isful = icmp eq i64 %%res, 1
   br i1 %%isful, label %%ful, label %%rej
 ful:
-  %%hasF = icmp ne ptr %%onF, null
+  %%hasF = icmp ne `+irPtr+` %%onF, null
   br i1 %%hasF, label %%callF, label %%passF
 callF:
 %s%s
 passF:
 %s%s
 rej:
-  %%hasR = icmp ne ptr %%onR, null
+  %%hasR = icmp ne `+irPtr+` %%onR, null
   br i1 %%hasR, label %%callR, label %%propR
 callR:
 %s%s
 propR:
-%s%s
-}`, self, promiseStructIR, promiseStructIR, promiseStructIR,
+%s%s`, promiseStructIR, promiseStructIR, promiseStructIR,
 		finCall, passThroughD,
 		fCall, cbTail(storeSettleF, "f"),
 		passThroughF, drainRet,
 		rCall, cbTail(storeSettleR, "r"),
 		propReject, drainRet)
-	name := contentSymbol(self+".", text)
-	if e.contentDefined == nil {
-		e.contentDefined = map[string]bool{}
-	}
-	if !e.contentDefined[name] {
-		e.contentDefined[name] = true
-		e.emitGlobal(strings.Replace(text, "define void "+self+"(", "define linkonce_odr hidden void "+name+"(", 1))
-	}
+	name := e.defineContentNamed("@__kml_then_run.", "void", irPtr+" %env", body)
 	return name
 }
 
@@ -864,7 +882,7 @@ func thenCallRetIR(retTy Type) string {
 	if retTy.IsArray() {
 		// An array is returned by the header-pointer ABI (`ret ptr`, TDD-00213
 		// Stage 3).
-		return "ptr"
+		return irPtr
 	}
 	if isNullableScalar(retTy) {
 		return nullableScalarStorageIR(retTy)
@@ -872,40 +890,15 @@ func thenCallRetIR(retTy Type) string {
 	return retTy.IR
 }
 
-// ensurePromiseDeferSettle declares @__kml_promise_defer_settle(q, state,
-// hops): settle q with state after hops more microtasks.
-func (e *Emitter) ensurePromiseDeferSettle() {
-	if e.fnDecls["__kml_promise_defer_settle"] {
-		return
-	}
-	e.fnDecls["__kml_promise_defer_settle"] = true
-	e.ensurePromiseSettle()
-	e.ensureMicrotasks()
-	e.ensureMalloc()
-	e.ensureExceptionHelpers()
-	e.emitGlobal(`declare void @__kml_promise_defer_settle(ptr, i64, i64)
-declare void @__kml_promise_defer_step(ptr)
-declare void @__kml_then_guard(ptr)`)
-}
-
-// ensurePromiseFinallyWait declares @__kml_promise_finally_wait(r, q, res,
-// v0, v1): once onFinally's promise r settles, q takes r's rejection, or
-// else the source's settlement (res, v0, v1) — one microtask after r's
-// reaction, as the spec's adoption of `r.then(() => value)` does.
-func (e *Emitter) ensurePromiseFinallyWait() {
-	if e.fnDecls["__kml_promise_finally_wait"] {
-		return
-	}
-	e.fnDecls["__kml_promise_finally_wait"] = true
-	e.ensurePromiseDeferSettle()
-	e.ensurePromiseAdopt() // @__kml_promise_attach
-	e.emitGlobal(`declare void @__kml_promise_finally_wait(ptr, ptr, i64, i64, i64)`)
-}
-
 // thenPathsDiffer reports whether a then/catch's fulfilled and rejected paths
 // settle to values Q cannot hold in one representation. A promise-returning
 // handler (flattened by adoption) keeps its own handling.
 func thenPathsDiffer(a, b Type) bool {
+	if a.IsPromise() != b.IsPromise() {
+		// One path's promise is adopted, the other's value is not: Q holds
+		// either boxed, resolved at run time (adopting a promise).
+		return true
+	}
 	if a.IsPromise() || b.IsPromise() {
 		return false
 	}
@@ -949,7 +942,7 @@ func (e *Emitter) thenCallbackFromAny(v Value, param Type) (Value, bool) {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isRef, tag, kmlTagFuncRef))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynFunc))
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isFn, isRef, isDyn))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", out, isFn, c.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", out, isFn, c.Ref))
 	return Value{Ref: out, Ty: c.Ty}, true
 }
 
@@ -976,5 +969,46 @@ func anyAnnotatedFirstParam(x ast.Expression) bool {
 	case *ast.FunctionExpression:
 		ps = f.Params
 	}
-	return len(ps) > 0 && !ps[0].Rest && ps[0].Type != nil && ps[0].Type.Name == "any"
+	return len(ps) > 0 && !ps[0].Rest && annotIs(ps[0].Type, "any")
+}
+
+// emitErasedThenSplit is a reaction on a typed promise that may be the body
+// of an erased Promise subclass (`class P<T> extends Promise<T>`) held as a
+// typed Promise: its flag says the value is boxed, and that branch reacts
+// as on a Promise<any>, the callbacks converting it.
+func (e *Emitter) emitErasedThenSplit(pVal Value, kind string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	fp, fl, m, isBox := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", fp, pVal.Ref, promiseFlagsSlot*8))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", fl, fp))
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", m, fl, promiseFlagBoxedValue))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isBox, m))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	boxL, rawL, doneL := e.freshLabel("ethen.box"), e.freshLabel("ethen.raw"), e.freshLabel("ethen.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBox, boxL, rawL))
+	e.erasedThenSplit = true
+	defer func() { e.erasedThenSplit = false }()
+	e.emitLabel(rawL)
+	raw, err := e.emitPromiseThen(e.bindValue(pVal, pos), kind, args, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", raw.Ref, slot))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(boxL)
+	bt := pVal.Ty
+	bt.PromiseType = &TypeAny
+	boxed, err := e.emitPromiseThen(e.bindValue(Value{Ref: pVal.Ref, Ty: bt}, pos), kind, args, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if reprKey(raw.Ty) != reprKey(boxed.Ty) {
+		boxed = e.convert(boxed, raw.Ty)
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", boxed.Ref, slot))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
+	return Value{Ref: r, Ty: raw.Ty}, nil
 }

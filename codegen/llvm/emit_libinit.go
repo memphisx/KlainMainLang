@@ -27,13 +27,13 @@ func (e *Emitter) libModuleInit(key string) (string, error) {
 	restore := e.beginDetachedFunc()
 	e.scopes[0].top = true
 	ran := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s", ran, done))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s", ran, done))
 	skipL, runL := e.freshLabel("lib.ran"), e.freshLabel("lib.run")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ran, skipL, runL))
 	e.emitLabel(skipL)
 	e.emitTerminator("ret void")
 	e.emitLabel(runL)
-	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s", done))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s", done))
 	savedInLib, savedWorker := e.inLib, e.currentWorkerMod
 	e.inLib, e.currentWorkerMod = key, ""
 	var err error

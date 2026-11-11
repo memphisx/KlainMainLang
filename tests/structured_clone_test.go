@@ -126,18 +126,17 @@ console.log(s.size, c.size, c.has(1), c.has(4))
 `, "3 4 true true")
 }
 
-func TestE2EStructuredCloneClassInstanceIsError(t *testing.T) {
-	_, err := parseAndCompile(`
+// A class instance clones to a plain object of its own fields, as Node's
+// does: the prototype is not carried.
+func TestE2EStructuredCloneClassInstance(t *testing.T) {
+	assertSameAsNode(t, `
 class Foo {
   x: number = 1
+  m() { return 2 }
 }
-const f = new Foo()
-const clone = structuredClone(f)
-console.log(clone.x)
+const clone = structuredClone(new Foo())
+console.log(clone, clone.x, clone instanceof Foo, Object.getPrototypeOf(clone) === Object.prototype)
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for structuredClone(class instance) — not yet supported")
-	}
 }
 
 // structuredClone of a value typed any/unknown clones by its run-time shape
@@ -179,4 +178,30 @@ const b = structuredClone((order += "v", o), (order += "o", { transfer: [] }))
 const c = structuredClone({ y: 1 }, undefined)
 console.log(typeof sc, a, b, b !== o, c, order)
 `)
+}
+
+// ADR-01942: a statically typed value the static clone does not copy (a
+// class instance, a nested collection, a function) runs the run-time clone.
+func TestE2EStructuredCloneStaticRunTime(t *testing.T) {
+	assertOutput(t, `
+class P { x = 1; y: number[] = [2, 3]; m() { return 1; } }
+const p = new P();
+const c = structuredClone(p);
+console.log(c, c instanceof P, c.x, c.y);
+const mm = new Map<string, number[]>([["a", [1]]]);
+const m2 = structuredClone(mm); console.log(m2, m2.get("a") === mm.get("a"));
+const ss = new Set<Map<string, number>>([new Map([["k", 1]])]); console.log(structuredClone(ss));
+try { structuredClone(() => 1); } catch (e: any) { console.log(e.name, e.message); }
+try { structuredClone(Promise.resolve(1)); } catch (e: any) { console.log(e.name, e.message); }
+`, "{ x: 1, y: [ 2, 3 ] } false 1 [ 2, 3 ]\nMap(1) { 'a' => [ 1 ] } false\nSet(1) { Map(1) { 'k' => 1 } }\nDataCloneError () => 1 could not be cloned.\nDataCloneError #<Promise> could not be cloned.")
+}
+
+// A Set of Maps reads its elements back as Maps.
+func TestE2ESetOfMapElements(t *testing.T) {
+	assertOutput(t, `
+const m = new Map([["k", 1]]);
+const s = new Set<Map<string, number>>();
+s.add(m);
+for (const v of s) console.log(v.size, v === m, v);
+`, "1 true Map(1) { 'k' => 1 }")
 }

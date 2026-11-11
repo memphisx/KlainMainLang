@@ -16,14 +16,24 @@ import (
 // described "42"); an absent or undefined one leaves the description
 // undefined (a null pointer), which toString renders as `Symbol()`.
 func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) > 1 {
-		return Value{}, fmt.Errorf("%d:%d: Symbol() takes at most 1 argument (an optional description)", pos.Line, pos.Col)
+	// Arguments past the description are evaluated, then ignored, before
+	// the description converts.
+	extra := func() error {
+		for _, a := range args[1:] {
+			if _, err := e.emitExpr(a); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	descPtr := "null"
-	if len(args) == 1 {
+	if len(args) >= 1 {
 		if nl, ok := args[0].(*ast.NullLiteral); !ok || !nl.IsUndefined {
 			val, err := e.emitExpr(args[0])
 			if err != nil {
+				return Value{}, err
+			}
+			if err := extra(); err != nil {
 				return Value{}, err
 			}
 			switch {
@@ -36,9 +46,9 @@ func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Val
 					return Value{}, err
 				}
 				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, undef, str.Ref))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", r, undef, str.Ref))
 				descPtr = r
-			case val.Ty.IR == "ptr" && !val.Ty.IsObject() && !val.Ty.IsArray() && !val.Ty.IsFunc() && !val.Ty.IsSymbol():
+			case val.Ty.IR == irPtr && !val.Ty.IsObject() && !val.Ty.IsArray() && !val.Ty.IsFunc() && !val.Ty.IsSymbol():
 				descPtr = val.Ref // a string (null when `string | undefined` is undefined)
 			default:
 				str, err := e.emitValueToString(val)
@@ -47,17 +57,18 @@ func (e *Emitter) emitSymbolConstructor(args []ast.Expression, pos ast.Pos) (Val
 				}
 				descPtr = str.Ref
 			}
+		} else if err := extra(); err != nil {
+			return Value{}, err
 		}
 	}
 
 	ty := SymbolType()
-	e.ensureMalloc()
 	dataReg := e.freshReg()
 	e.emitObjMallocInto(dataReg, ty)
 	e.heapStore("i64", fmt.Sprint(symbolTypeIDFlag), dataReg, 8)
 	idx, fieldTy, _ := ty.FieldIndex("description")
 	gepReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, ty.StructIR(), dataReg, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, ty.StructIR(), dataReg, idx))
 	e.heapStore(StructFieldIR(fieldTy), descPtr, gepReg, fieldTy.Align())
 	return Value{Ref: dataReg, Ty: ty}, nil
 }
@@ -75,9 +86,9 @@ const symbolTypeIDFlag = 1 << 47
 // under a kmlTagObject tag check.
 func (e *Emitter) emitBoxedSymbolProbe(payloadReg string) (objPtr, isSym string) {
 	objPtr = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payloadReg))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, objPtr, payloadReg))
 	f0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f0, objPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f0, objPtr))
 	flagged := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", flagged, f0, symbolTypeIDFlag))
 	isSym = e.freshReg()
@@ -94,14 +105,14 @@ func (e *Emitter) emitSymbolToString(val Value) (Value, error) {
 	ty := SymbolType()
 	idx, fieldTy, _ := ty.FieldIndex("description")
 	gepReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, ty.StructIR(), val.Ref, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, ty.StructIR(), val.Ref, idx))
 	descReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", descReg, fieldTy.IR, gepReg, fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", descReg, fieldTy.IR, gepReg, fieldTy.Align()))
 
 	prefix := Value{Ref: e.internString("Symbol("), Ty: TypePtr}
 	none, shown := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", none, descReg))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", shown, none, e.internString(""), descReg))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", none, descReg))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", shown, none, e.internString(""), descReg))
 	descVal := Value{Ref: shown, Ty: TypePtr}
 	suffix := Value{Ref: e.internString(")"), Ty: TypePtr}
 	acc, err := e.emitStringConcat(prefix, descVal)
@@ -111,75 +122,18 @@ func (e *Emitter) emitSymbolToString(val Value) (Value, error) {
 	return e.emitStringConcat(acc, suffix)
 }
 
-// ensureSymbolRegistry emits the global Symbol.for registry (ADR-00488):
-// a lazily-created string-keyed map from key to the shared Symbol pointer.
+// ensureSymbolRegistry declares the Symbol.for registry (ADR-00488,
+// collectionssrc/collections.c): a lazily created string-keyed map from key
+// to the shared Symbol.
 func (e *Emitter) ensureSymbolRegistry() {
 	if e.usedSymbolRegistry {
 		return
 	}
 	e.usedSymbolRegistry = true
 	e.ensureMapStrHelpers()
-	e.ensureMalloc()
-	ty := SymbolType()
-	idx, _, _ := ty.FieldIndex("description")
-	e.emitGlobal("@__kml_sym_registry = internal " + e.isolateTLS() + "global ptr null, align 8")
-	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_symbol_for(ptr %%key) {
-entry:
-  %%reg0 = load ptr, ptr @__kml_sym_registry, align 8
-  %%isnull = icmp eq ptr %%reg0, null
-  br i1 %%isnull, label %%mk, label %%have
-mk:
-  %%fresh = call ptr @__kml_map_str_create()
-  store ptr %%fresh, ptr @__kml_sym_registry, align 8
-  br label %%have
-have:
-  %%reg = load ptr, ptr @__kml_sym_registry, align 8
-  %%raw = call i64 @__kml_map_str_get(ptr %%reg, ptr %%key)
-  %%hit = icmp ne i64 %%raw, 0
-  br i1 %%hit, label %%found, label %%create
-found:
-  %%p = inttoptr i64 %%raw to ptr
-  ret ptr %%p
-create:
-  %%sym = call ptr @malloc(i64 %d)
-  store i64 %d, ptr %%sym, align 8
-  %%dgep = getelementptr %s, ptr %%sym, i32 0, i32 %d
-  store ptr %%key, ptr %%dgep, align 8
-  %%si = ptrtoint ptr %%sym to i64
-  call void @__kml_map_str_set(ptr %%reg, ptr %%key, i64 %%si)
-  ret ptr %%sym
-}`, ty.StructSize(), symbolTypeIDFlag, ty.StructIR(), idx))
-	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_symbol_keyfor(ptr %%sym) {
-entry:
-  %%reg = load ptr, ptr @__kml_sym_registry, align 8
-  %%isnull = icmp eq ptr %%reg, null
-  br i1 %%isnull, label %%miss, label %%scan
-scan:
-  %%keys = call {ptr, i64} @__kml_map_str_keys(ptr %%reg)
-  %%kp = extractvalue {ptr, i64} %%keys, 0
-  %%kl = extractvalue {ptr, i64} %%keys, 1
-  br label %%cond
-cond:
-  %%i = phi i64 [ 0, %%scan ], [ %%in, %%next ]
-  %%more = icmp slt i64 %%i, %%kl
-  br i1 %%more, label %%body, label %%miss
-body:
-  %%kg = getelementptr ptr, ptr %%kp, i64 %%i
-  %%k = load ptr, ptr %%kg, align 8
-  %%raw = call i64 @__kml_map_str_get(ptr %%reg, ptr %%k)
-  %%p = inttoptr i64 %%raw to ptr
-  %%same = icmp eq ptr %%p, %%sym
-  br i1 %%same, label %%hit, label %%next
-hit:
-  ret ptr %%k
-next:
-  %%in = add i64 %%i, 1
-  br label %%cond
-miss:
-  ret ptr null
-}`))
+	if ty := SymbolType(); ty.StructSize() != 16 {
+		panic("collections.c's Symbol.for builds a 16-byte Symbol")
+	}
 }
 
 // emitSymbolStaticFor is Symbol.for(key) (ADR-00488). Symbols from the
@@ -187,18 +141,38 @@ miss:
 // Symbol.for("a").
 func (e *Emitter) emitSymbolStaticFor(args []ast.Expression, pos ast.Pos) (Value, error) {
 	e.ensureSymbolRegistry()
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Symbol.for takes exactly 1 string key", pos.Line, pos.Col)
+	if len(args) == 0 {
+		args = []ast.Expression{ast.NewNullLiteral(true, pos)} // Symbol.for(undefined)
 	}
 	kv, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
-	if kv.Ty.IR != "ptr" || kv.Ty.IsObject() || kv.Ty.IsSymbol() {
-		return Value{}, fmt.Errorf("%d:%d: Symbol.for's key must be a string", pos.Line, pos.Col)
+	for _, x := range args[1:] {
+		if _, err := e.emitExpr(x); err != nil {
+			return Value{}, err
+		}
 	}
+	// The key is ToString(key): `Symbol.for(5)` is "5"'s, a symbol key a
+	// TypeError.
+	if !isStringTy(kv.Ty) || kv.Ty.IsObject() || kv.Ty.IsSymbol() || kv.Ty.Nullable() || kv.Ty.IsDynamic() {
+		if kv.Ty.IR == "" || kv.Ty.IR == "void" {
+			kv = Value{Ref: e.internString("undefined"), Ty: TypePtr}
+		} else {
+			if !kv.Ty.IsDynamic() {
+				if kv, err = e.emitBoxValue(kv); err != nil {
+					return Value{}, err
+				}
+			}
+			e.emitAnySymbolGuard(kv.Ref, true)
+			if kv, err = e.emitDynamicToString(kv); err != nil {
+				return Value{}, err
+			}
+		}
+	}
+	kv = e.convert(kv, TypePtr)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_for(ptr %s)", r, kv.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_symbol_for("+irPtr+" %s)", r, kv.Ref))
 	return Value{Ref: r, Ty: SymbolType()}, nil
 }
 
@@ -207,17 +181,32 @@ func (e *Emitter) emitSymbolStaticFor(args []ast.Expression, pos ast.Pos) (Value
 func (e *Emitter) emitSymbolStaticKeyFor(args []ast.Expression, pos ast.Pos) (Value, error) {
 	e.ensureSymbolRegistry()
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Symbol.keyFor takes exactly 1 symbol", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Symbol.keyFor arity")
 	}
 	sv, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	if !sv.Ty.IsSymbol() {
-		return Value{}, fmt.Errorf("%d:%d: Symbol.keyFor's argument must be a symbol", pos.Line, pos.Col)
+		// V8's TypeError, naming the value: `undefined is not a symbol`.
+		boxed, err := e.emitBoxValue(sv)
+		if err != nil {
+			return Value{}, err
+		}
+		desc, err := e.emitValueToString(boxed)
+		if err != nil {
+			return Value{}, err
+		}
+		msg, err := e.emitStringConcat(desc, Value{Ref: e.internString(" is not a symbol"), Ty: TypePtr})
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitThrowTypeErrorValue(msg.Ref)
+		e.emitLabel(e.freshLabel("keyfor.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_symbol_keyfor(ptr %s)", r, sv.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_symbol_keyfor("+irPtr+" %s)", r, sv.Ref))
 	nt := TypePtr // string | undefined: a symbol not in the registry
 	nt.setNullable(true)
 	nt.setUndefined(true)
@@ -244,7 +233,7 @@ func (e *Emitter) wellKnownSymbol(name string) string {
 	if !e.wkSymbols[name] {
 		e.wkSymbols[name] = true
 		ty := SymbolType()
-		e.emitGlobal(fmt.Sprintf("%s = internal global %s { i64 %d, ptr %s }, align 8", g, ty.StructIR(), symbolTypeIDFlag, e.internString("Symbol."+name)))
+		e.emitGlobal(fmt.Sprintf("%s = internal"+irGlobalAS+" global %s { i64 %d, "+irPtr+" %s }, align 8", g, ty.StructIR(), symbolTypeIDFlag, e.internString("Symbol."+name)))
 	}
 	return g
 }

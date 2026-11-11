@@ -142,6 +142,15 @@ void *__kml_obj_tostring_tag(void *o) {
     return row ? ((void *(*)(void *))row[1])(o) : NULL;
 }
 
+// __kml_obj_prim is the boxed primitive an instance of a class extending
+// Number, String or Boolean wraps (its first body word), 0 for any other
+// object.
+#define KML_UNIT_PRIM_CLASS 12
+
+i64 __kml_obj_prim(void *o) {
+    return __kml_unit_find(KML_UNIT_PRIM_CLASS, *(const i64 *)o & KML_ID_MASK) ? ((const i64 *)o)[1] : 0;
+}
+
 void *__kml_obj_inspect_custom(void *o, i64 depth) {
     const void *const *row = (const void *const *)__kml_unit_find(KML_UNIT_INSPECT_CUSTOM, *(const i64 *)o & KML_ID_MASK);
     return row ? ((void *(*)(void *, i64))row[1])(o, depth) : NULL;
@@ -221,7 +230,7 @@ static void kw_sweep(KwTab *t) {
 
 static KwCell *kw_find(KwTab *t, const void *k) {
     if (!t->cap) return NULL;
-    KwCell **pp = &t->b[kml_unit_hash((i64)k) & (t->cap - 1)];
+    KwCell **pp = &t->b[kml_unit_hash(kml_id_hash(k)) & (t->cap - 1)];
     kw_unlink_dead(t, pp);
     for (KwCell *c = *pp; c; c = c->next)
         if (*c->link == k) return c;
@@ -239,7 +248,7 @@ static void kw_put(KwTab *t, const void *k, void *v) {
         for (i64 i = 0; i < t->cap; i++)
             for (KwCell *x = t->b[i], *nx; x; x = nx) {
                 nx = x->next;
-                KwCell **h = &nb[kml_unit_hash((i64)~x->hidden) & (cap - 1)];
+                KwCell **h = &nb[kml_unit_hash(kml_id_hash((const void *)~x->hidden)) & (cap - 1)];
                 x->next = *h;
                 *h = x;
             }
@@ -254,7 +263,7 @@ static void kw_put(KwTab *t, const void *k, void *v) {
     c->link = kw_link(k);
     c->hidden = ~(uintptr_t)k;
     c->val = v;
-    KwCell **h = &t->b[kml_unit_hash((i64)k) & (t->cap - 1)];
+    KwCell **h = &t->b[kml_unit_hash(kml_id_hash(k)) & (t->cap - 1)];
     c->next = *h;
     *h = c;
     t->n++;

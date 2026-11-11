@@ -23,7 +23,7 @@ func (e *Emitter) ensureStringC() {
 		return
 	}
 	e.usedStringC = true
-	e.ensureRangeErrorThrow()
+	e.ensureErrorNames()
 	// The runtime builds exec()'s groups dictionary through the map and
 	// string runtimes (__kml_regex_groups), so they are always present
 	// beside it.

@@ -74,9 +74,7 @@ func (e *Emitter) numberPredicateResult(r Value, present string, absent bool) Va
 }
 
 func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Number.isInteger expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, present, _, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -86,7 +84,6 @@ func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value
 	if isNum == "0" {
 		return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, false), nil
 	}
-	e.ensureMathFuncs()
 	floored := e.freshReg()
 	isWhole := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @floor(double %s)", floored, val.Ref))
@@ -111,9 +108,7 @@ func (e *Emitter) emitNumberIsInteger(args []ast.Expression, pos ast.Pos) (Value
 // differ on an absent value — `isNaN(undefined)` is true, `Number.isNaN(undefined)`
 // false, and both are false for `null` (ToNumber(null) is 0).
 func (e *Emitter) emitNumberIsNaN(args []ast.Expression, pos ast.Pos, global bool) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: isNaN expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, present, absentIsUndefined, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -172,9 +167,7 @@ func toNumberCanBeNaN(ty Type) bool {
 // global: see emitNumberIsNaN. `isFinite(null)` is true (ToNumber(null) is 0),
 // `isFinite(undefined)` false; `Number.isFinite` is false for both.
 func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos, global bool) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: isFinite expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, present, absentIsUndefined, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -217,9 +210,7 @@ func (e *Emitter) emitNumberIsFinite(args []ast.Expression, pos ast.Pos, global 
 }
 
 func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Number.isSafeInteger expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, present, _, err := e.emitNumberPredicateOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -231,7 +222,6 @@ func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (V
 		if isNum == "0" {
 			return e.numberPredicateResult(Value{Ref: "0", Ty: TypeBool}, present, false), nil
 		}
-		e.ensureMathFuncs()
 		fl, whole, ab, inRange, r1 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call double @floor(double %s)", fl, num.Ref))
 		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", whole, num.Ref, fl))
@@ -251,7 +241,6 @@ func (e *Emitter) emitNumberIsSafeInteger(args []ast.Expression, pos ast.Pos) (V
 		e.emitInstr(fmt.Sprintf("%s = icmp sle i64 %s, %s", r, absVal, maxSafe))
 		return e.numberPredicateResult(Value{Ref: r, Ty: TypeBool}, present, false), nil
 	}
-	e.ensureMathFuncs()
 	floored := e.freshReg()
 	isInt := e.freshReg()
 	absVal := e.freshReg()
@@ -275,7 +264,7 @@ func (e *Emitter) emitGlobalStringConv(args []ast.Expression, pos ast.Pos) (Valu
 		return Value{Ref: e.internString(""), Ty: TypePtr}, nil
 	}
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: String() takes at most 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "String() with more than one argument (the call is trimmed to the declared arity)")
 	}
 	v, err := e.emitPreserveNullableOperand(args[0])
 	if err != nil {
@@ -294,7 +283,7 @@ func (e *Emitter) emitGlobalBooleanConv(args []ast.Expression, pos ast.Pos) (Val
 		return Value{Ref: "0", Ty: TypeBool}, nil
 	}
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Boolean() takes at most 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Boolean() with more than one argument (the call is trimmed to the declared arity)")
 	}
 	v, err := e.emitExpr(args[0])
 	if err != nil {
@@ -312,7 +301,7 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		return Value{Ref: "0.0", Ty: TypeF64}, nil
 	}
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Number() takes at most 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Number() with more than one argument (the call is trimmed to the declared arity)")
 	}
 	if nl, isNull := args[0].(*ast.NullLiteral); isNull {
 		// Number(null) is 0, but Number(undefined) is NaN (JS).
@@ -352,12 +341,11 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 		// Number(bigint) → the nearest double (Infinity when out of range), like JS.
 		e.ensureBigInt()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @__kml_bigint_to_double(ptr %s)", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_bigint_to_double("+irPtr+" %s)", r, v.Ref))
 		return Value{Ref: r, Ty: TypeF64}, nil
 	case isStringTy(v.Ty):
-		e.ensureToNumber()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number(ptr %s)", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number("+irPtr+" %s)", r, v.Ref))
 		return Value{Ref: r, Ty: TypeF64}, nil
 	}
 	// Everything else (null/undefined-typed values, nullable scalars, objects,
@@ -367,9 +355,8 @@ func (e *Emitter) emitGlobalNumberConv(args []ast.Expression, pos ast.Pos) (Valu
 
 func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: parseInt expects 1 or 2 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "parseInt arity (the call is trimmed and padded to the declared arity)")
 	}
-	e.ensureStrtoll()
 	strVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -396,9 +383,8 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		var r32 Value
 		switch {
 		case isStringTy(rv.Ty):
-			e.ensureToNumber()
 			d := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number(ptr %s)", d, rv.Ref))
+			e.emitInstr(fmt.Sprintf("%s = call double @__kml_to_number("+irPtr+" %s)", d, rv.Ref))
 			r32 = e.convert(Value{Ref: d, Ty: TypeF64}, TypeI32)
 		case rv.Ty.IsDynamic():
 			r32 = e.convert(Value{Ref: e.emitAnyToNum(rv), Ty: TypeF64}, TypeI32)
@@ -408,9 +394,8 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		// Spec: a radix of 0 (also NaN or absent) auto-detects; outside 2..36
 		// the result is NaN. libc differs here (glibc's strtoll parses base 1
 		// as 0), so both are settled before strtoll sees the base.
-		e.ensureParseIntBase()
 		auto, isZero := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_parseint_base(ptr %s)", auto, strVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_parseint_base("+irPtr+" %s)", auto, strVal.Ref))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isZero, r32.Ref))
 		radixRef = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i32 %s, i32 %s", radixRef, isZero, auto, r32.Ref))
@@ -427,9 +412,8 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 		// prefix and base 10 otherwise (no octal auto-detect) — computed at
 		// runtime since the string is a runtime value. strtoll accepts the
 		// "0x" prefix under base 16, so the value flows straight through.
-		e.ensureParseIntBase()
 		rr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_parseint_base(ptr %s)", rr, strVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_parseint_base("+irPtr+" %s)", rr, strVal.Ref))
 		radixRef = rr
 		autoRadixReg = rr
 	}
@@ -439,20 +423,20 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 	// apart — it stays at the start of the string exactly when no digits
 	// were consumed (strtoll itself skips leading whitespace, same as JS).
 	endSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", endSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", endSlot))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strtoll(ptr %s, ptr %s, i32 %s)", r, strVal.Ref, endSlot, radixRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strtoll("+irPtr+" %s, "+irPtr+" %s, i32 %s)", r, strVal.Ref, endSlot, radixRef))
 	endPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", endPtr, endSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", endPtr, endSlot))
 	noDigits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", noDigits, endPtr, strVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", noDigits, endPtr, strVal.Ref))
 	if autoRadixReg != "" {
 		// Auto-detected base 16 ("0x"/"0X" prefix) with no hex digit after the
 		// prefix ("0x", "0x ") — strtoll consumes just the leading "0" and
 		// stops on the 'x'/'X', so endptr lands on it. Real JS's parseInt("0x")
 		// is NaN, not 0; fold that into the no-digits condition.
 		endChar := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", endChar, endPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", endChar, endPtr))
 		isX := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, 120", isX, endChar))
 		isBigX := e.freshReg()
@@ -480,10 +464,7 @@ func (e *Emitter) emitParseInt(args []ast.Expression, pos ast.Pos) (Value, error
 }
 
 func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: parseFloat expects 1 argument", pos.Line, pos.Col)
-	}
-	e.ensureStrtodParseFloat()
+	args = fitArgs(args, 1)
 	strVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -501,13 +482,13 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 	// word "Infinity" and a numeric overflow like "1e999" still parse to
 	// Infinity as real JS does.
 	endSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", endSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", endSlot))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @__kml_strtod_parsefloat(ptr %s, ptr %s)", r, strVal.Ref, endSlot))
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_strtod_parsefloat("+irPtr+" %s, "+irPtr+" %s)", r, strVal.Ref, endSlot))
 	endPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", endPtr, endSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", endPtr, endSlot))
 	noDigits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", noDigits, endPtr, strVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", noDigits, endPtr, strVal.Ref))
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0x7FF8000000000000, double %s", result, noDigits, r))
 	return Value{Ref: result, Ty: TypeF64}, nil
@@ -520,12 +501,12 @@ func (e *Emitter) emitParseFloat(args []ast.Expression, pos ast.Pos) (Value, err
 // undefined behaviour that LLVM lowers to a crash on Linux and a self-loop
 // on Windows (found by Test262's parseInt(null) case on the Windows port).
 func (e *Emitter) nullSafeParseInput(v Value) Value {
-	if v.Ty.IR != "ptr" {
+	if v.Ty.IR != irPtr {
 		return v
 	}
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 	safe := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString("null"), v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", safe, isNull, e.internString("null"), v.Ref))
 	return Value{Ref: safe, Ty: v.Ty}
 }

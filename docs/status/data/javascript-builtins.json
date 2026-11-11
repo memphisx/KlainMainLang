@@ -21,7 +21,7 @@
         "countsTowardParity": false,
         "rows": [
           {
-            "feature": "`Object` (literals, `keys`/`values`/`entries`/`assign`/`freeze`/`seal`/`fromEntries`/`hasOwn`/`groupBy`/`create`/`defineProperty`/`defineProperties`/`getOwnPropertyDescriptor`/`get`·`setPrototypeOf`/`is`)",
+            "feature": "`Object` (literals, `keys`/`values`/`entries`/`assign`/`freeze`/`seal`/`fromEntries`/`hasOwn`/`groupBy`/`create`/`defineProperty`/`defineProperties`/`getOwnPropertyDescriptor`/`getOwnPropertyDescriptors`/`get`·`setPrototypeOf`/`is`)",
             "status": "implemented",
             "notes": [
               "→ [Object, Map & Set](OBJECT-COLLECTIONS.md)"
@@ -40,6 +40,7 @@
               "ObjectConstructor.defineProperty",
               "ObjectConstructor.defineProperties",
               "ObjectConstructor.getOwnPropertyDescriptor",
+              "ObjectConstructor.getOwnPropertyDescriptors",
               "ObjectConstructor.getPrototypeOf",
               "ObjectConstructor.setPrototypeOf",
               "ObjectConstructor.is"
@@ -225,7 +226,7 @@
             "caveats": [
               "`captureStackTrace`'s `constructorOpt` is matched by the function's name, not its identity",
               "V8's builtin frames (`at Array.map (<anonymous>)`) are not shown",
-              "The uncaught-exception report leaves out Node's source excerpt and `Node.js vX` line",
+              "The uncaught-exception report leaves out Node's source excerpt, `Node.js vX` line and the error's own properties (`{ code: 'ENOENT', … }`)",
               "`Error.prepareStackTrace` is not supported"
             ],
             "decl": [
@@ -243,8 +244,8 @@
               "`console.log(err)` shows the options' cause after the own properties as `[cause]: …`, as util.inspect does ([ADR-01418](../adr/01/ADR-01418.md))"
             ],
             "caveats": [
-              "The error-options second argument must be a `{ cause: <expr> }` object **literal** — a variable/computed options bag is a clean rejection ([ADR-01007](../adr/01/ADR-01007.md)); `AggregateError` takes no options (its `.cause` reads `undefined`)",
-              "`console.log(err)` leaves out the `[cause]: undefined` line of an error made with `{ cause: undefined }`"
+              "`AggregateError` takes no options (its `.cause` reads `undefined`)",
+              "An error made with `{ cause: undefined }` has no `cause` property: `'cause' in err` is false, and `console.log(err)` leaves out its `[cause]: undefined` line"
             ],
             "decl": [
               "Error",
@@ -504,7 +505,7 @@
             "notes": [
               "Mode-dependent timing, one API ([TDD-00163](../tdd/TDD-00163.md)/[ADR-00701](../adr/00/ADR-00701.md)): `-mm=manual` fires deterministically at `Memory.free(target)` plus an exit flush for survivors; `-mm=gc` fires via a real Boehm finalizer (observable after `gc()`); `-mm=auto`'s compiler-inserted frees are the same death signal — a registered target's cleanup fires deterministically at its scope exit ([ADR-00703](../adr/00/ADR-00703.md)), and the same exemption serves explicit `@free`/`@owned` in manual mode. Callbacks run on the microtask drain points, never synchronously at the death site",
               "`-finalizers=report` prints one labeled leak line per registration never freed at exit (held value + `register()` call site) — the manual-memory leak detector",
-              "`register`/`unregister` with tokens; `-compat=js` dynamic-object targets unbox like WeakMap keys; `held === target` is a compile error when statically obvious"
+              "`register`/`unregister` with tokens; targets and tokens held boxed unbox like WeakMap keys, a primitive throws Node's TypeError at run time; `held === target` is a compile error when statically obvious"
             ],
             "decl": [
               "FinalizationRegistry"
@@ -540,7 +541,7 @@
             "feature": "`Array`",
             "status": "implemented",
             "caveats": [
-              "length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers); `.flat(depth)` needs a constant depth → [Array methods](ARRAY-METHODS.md)"
+              "length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers) → [Array methods](ARRAY-METHODS.md)"
             ],
             "decl": [
               "Array"
@@ -550,8 +551,7 @@
             "feature": "`Object` / dynamic model",
             "status": "implemented",
             "caveats": [
-              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype) → [Object, Map & Set](OBJECT-COLLECTIONS.md)",
-              "a bigint or a symbol has no wrapper object: `Object(1n)` / `Object(sym)` is a compile error for a typed value and returns the primitive itself for an `any`"
+              "prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype) → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
             ],
             "decl": [
               "Object"
@@ -636,7 +636,7 @@
             "feature": "TypedArrays / `ArrayBuffer`",
             "status": "implemented",
             "caveats": [
-              "`resize`/`grow` need `{maxByteLength}`; views don't length-track resize → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
+              "`resize`/`grow` need `{maxByteLength}` → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)"
             ],
             "decl": [
               "ArrayBuffer",
@@ -717,7 +717,7 @@
             "feature": "`eval`",
             "status": "implemented",
             "caveats": [
-              "general/dynamic eval **missing**; only a compile-time-constant `eval(\"<expression>\")` static subset works → [Global functions](GLOBAL-FUNCTIONS.md)"
+              "eval of a string computed at run time **missing** (needs an embedded engine); compile-time-constant strings, statements included, work → [Global functions](GLOBAL-FUNCTIONS.md)"
             ],
             "decl": [
               "eval"
@@ -784,7 +784,7 @@
             "feature": "`Reflect.construct`",
             "status": "implemented",
             "caveats": [
-              "a `newTarget` other than the target throws a TypeError rather than constructing with that prototype → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
+              "With a builtin target (`Date`, `Map`, …), a `newTarget` other than the target leaves the instance its builtin's prototype → [Object, Map & Set](OBJECT-COLLECTIONS.md)"
             ],
             "notes": [
               "Through the run-time constructor dispatch ([ADR-01333](../adr/01/ADR-01333.md))"
@@ -820,7 +820,7 @@
             "feature": "`Intl.*` (Collator/NumberFormat/DateTimeFormat/…)",
             "status": "missing",
             "notes": [
-              "No locale/ICU infrastructure — a bare `Intl` reference is an undefined-variable compile error; the reason `bigint.toLocaleString`/`Date.toLocale*` are gaps (`localeCompare` collates by generated ICU root-order tables instead, [ADR-01827](../adr/01/ADR-01827.md)). `Number.prototype.toLocaleString()` implements the **no-argument** en-US default (thousands grouping + max 3 fraction digits, [ADR-00847](../adr/00/ADR-00847.md)); a locale/options argument is a clean rejection"
+              "No locale/ICU infrastructure — a bare `Intl` reference is an undefined-variable compile error; the reason `Date.toLocale*` with locale arguments is a gap (`localeCompare` collates by generated ICU root-order tables instead, [ADR-01827](../adr/01/ADR-01827.md)). `Number.prototype.toLocaleString()` implements the **no-argument** en-US default (thousands grouping + max 3 fraction digits, [ADR-00847](../adr/00/ADR-00847.md)); a locale/options argument is a clean rejection"
             ]
           },
           {
@@ -841,7 +841,7 @@
             "feature": "Full `Proxy` trap set (`apply`/`construct`/`defineProperty`/`getPrototypeOf`/…)",
             "status": "missing",
             "notes": [
-              "Limited to the 6 dynamic-object traps; the rest have no interception point in the fixed-shape model"
+              "The dynamic-object traps and `apply` (a Proxy of a function is callable and `typeof` `\"function\"`) are honored; `construct`, `defineProperty`, `isExtensible`, `preventExtensions` and `setPrototypeOf` are not, having no interception point in the fixed-shape model"
             ]
           },
           {

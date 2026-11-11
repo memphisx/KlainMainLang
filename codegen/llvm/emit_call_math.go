@@ -17,7 +17,7 @@ func init() {
 	}
 	// An integer argument stays an i64, a float one a double.
 	rounding := func(e *Emitter, ex *ast.CallExpression) Type {
-		if len(ex.Args) == 1 && e.inferExprType(ex.Args[0]).Float {
+		if len(ex.Args) == 1 && e.typeOfExpr(ex.Args[0]).Float {
 			return TypeF64
 		}
 		return TypeI64
@@ -46,7 +46,7 @@ func init() {
 		"sign":  {emit: argsEmit((*Emitter).emitMathSign), ty: rounding},
 		"abs": {emit: argsEmit((*Emitter).emitMathAbs), ty: func(e *Emitter, ex *ast.CallExpression) Type {
 			if len(ex.Args) == 1 {
-				return e.inferExprType(ex.Args[0])
+				return e.typeOfExpr(ex.Args[0])
 			}
 			return TypeF64
 		}},
@@ -55,9 +55,8 @@ func init() {
 		// give exactly 3). @__kml_cbrt is the deterministic fdlibm algorithm.
 		"cbrt": {emit: argsEmit((*Emitter).emitMathCbrt), ty: fixed(TypeF64)},
 		// __kml_js_pow: libm pow plus the JS deviation — |base| exactly 1
-		// with an infinite exponent is NaN (ensureJsPow).
+		// with an infinite exponent is NaN.
 		"pow": {emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-			e.ensureJsPow()
 			return e.emitMathBinaryFloat("__kml_js_pow", ex.Args, ex.GetPos())
 		}, ty: fixed(TypeF64)},
 		"hypot":  {emit: argsEmit((*Emitter).emitMathHypot), ty: fixed(TypeF64)},
@@ -82,13 +81,13 @@ func mathMinMaxType(e *Emitter, ex *ast.CallExpression) Type {
 	}
 	for _, a := range ex.Args {
 		if sp, ok := a.(*ast.SpreadElement); ok {
-			at := e.inferExprType(sp.Arg)
+			at := e.typeOfExpr(sp.Arg)
 			if at.ElemType != nil && at.ElemType.Float {
 				return TypeF64
 			}
 			continue
 		}
-		if e.inferExprType(a).Float {
+		if e.typeOfExpr(a).Float {
 			return TypeF64
 		}
 	}
@@ -119,9 +118,7 @@ func (e *Emitter) emitMathOperand(arg ast.Expression) (Value, error) {
 }
 
 func (e *Emitter) emitMathClz32(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Math.clz32 expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -129,7 +126,6 @@ func (e *Emitter) emitMathClz32(args []ast.Expression, pos ast.Pos) (Value, erro
 	i64Val := e.convert(val, TypeI64)
 	trunc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", trunc, i64Val.Ref))
-	e.ensureCtlz32()
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @llvm.ctlz.i32(i32 %s, i1 false)", result, trunc))
 	ext := e.freshReg()
@@ -140,9 +136,7 @@ func (e *Emitter) emitMathClz32(args []ast.Expression, pos ast.Pos) (Value, erro
 // emitMathFround rounds a double to the nearest float32-representable value,
 // returned widened back to double — a plain fptrunc/fpext round-trip.
 func (e *Emitter) emitMathFround(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Math.fround expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -159,9 +153,7 @@ func (e *Emitter) emitMathFround(args []ast.Expression, pos ast.Pos) (Value, err
 // (real JS semantics — plain `a * b` uses double precision and loses exact
 // integer results past 2^53; imul is exactly the escape hatch for that).
 func (e *Emitter) emitMathImul(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: Math.imul expects 2 arguments", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 2)
 	aVal, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -182,9 +174,7 @@ func (e *Emitter) emitMathImul(args []ast.Expression, pos ast.Pos) (Value, error
 }
 
 func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Math.%s expects 1 argument", pos.Line, pos.Col, fn)
-	}
+	args = fitArgs(args, 1)
 	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -199,7 +189,6 @@ func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (
 	// double prints without a fraction (TDD-00080's shortest-round-trip
 	// formatter), so Math.floor(2.9) still displays as `2`.
 	fval := e.convert(val, TypeF64)
-	e.ensureMathFuncs()
 	rounded := e.freshReg()
 	if fn == "round" {
 		// JS Math.round is floor(x + 0.5) — ties round toward +Infinity
@@ -224,15 +213,12 @@ func (e *Emitter) emitMathRound(fn string, args []ast.Expression, pos ast.Pos) (
 }
 
 func (e *Emitter) emitMathAbs(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Math.abs expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	if val.Ty.Float {
-		e.ensureMathFuncs()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call double @fabs(double %s)", r, val.Ref))
 		return Value{Ref: r, Ty: TypeF64}, nil
@@ -247,27 +233,22 @@ func (e *Emitter) emitMathAbs(args []ast.Expression, pos ast.Pos) (Value, error)
 	return Value{Ref: r, Ty: TypeI64}, nil
 }
 
-// emitMathCbrt routes Math.cbrt through @__kml_cbrt (ensureCbrt), the
+// emitMathCbrt routes Math.cbrt through @__kml_cbrt, the
 // correctly-rounded fdlibm implementation, instead of the platform libm cbrt.
 func (e *Emitter) emitMathCbrt(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Math.cbrt expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
 	}
 	fval := e.convert(val, TypeF64)
-	e.ensureCbrt()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_cbrt(double %s)", r, fval.Ref))
 	return Value{Ref: r, Ty: TypeF64}, nil
 }
 
 func (e *Emitter) emitMathBinaryFloat(fn string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: Math.%s expects 2 arguments", pos.Line, pos.Col, fn)
-	}
+	args = fitArgs(args, 2)
 	v1, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -278,7 +259,6 @@ func (e *Emitter) emitMathBinaryFloat(fn string, args []ast.Expression, pos ast.
 	}
 	f1 := e.convert(v1, TypeF64)
 	f2 := e.convert(v2, TypeF64)
-	e.ensureMathFuncs()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @%s(double %s, double %s)", r, fn, f1.Ref, f2.Ref))
 	return Value{Ref: r, Ty: TypeF64}, nil
@@ -324,7 +304,6 @@ func (e *Emitter) emitMathMinMax(fn string, args []ast.Expression, pos ast.Pos) 
 		// silently *dropped* NaN — the ordered compare is false for it —
 		// and this is also what a mixed Math.min(1, someDouble) used to get
 		// wrong by coercing the double into the first operand's i64 type.)
-		e.ensureFloatMinMaxIntrinsics()
 		intrinsic := "llvm.minimum.f64"
 		if fn == "max" {
 			intrinsic = "llvm.maximum.f64"
@@ -381,9 +360,6 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 			if err != nil {
 				return Value{}, err
 			}
-			if elemTy.IsArray() || elemTy.IsObject() {
-				return Value{}, fmt.Errorf("%d:%d: Math.%s cannot spread an array of arrays or objects", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col, fn)
-			}
 			if elemTy.Float || elemTy.IsDynamic() || !isNumberTy(elemTy) {
 				anyFloat = true // an `any`/string element ToNumbers to a double
 			}
@@ -417,15 +393,12 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 	default:
 		seed = "9223372036854775807" // INT64_MAX
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", resTy.IR, seed, acc))
-	if anyFloat {
-		e.ensureFloatMinMaxIntrinsics()
-	}
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", resTy.IR, seed, acc))
 
 	// combine folds one already-result-typed value into the accumulator.
 	combine := func(nextRef string) {
 		cur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", cur, resTy.IR, acc))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", cur, resTy.IR, acc))
 		r := e.freshReg()
 		if anyFloat {
 			intrinsic := "llvm.minimum.f64"
@@ -443,7 +416,7 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 			e.emitInstr(fmt.Sprintf("%s = %s i64 %s, %s", cmp, op, cur, nextRef))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, cmp, cur, nextRef))
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", resTy.IR, r, acc))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", resTy.IR, r, acc))
 	}
 
 	for _, it := range items {
@@ -455,7 +428,7 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 		// Loop over the spread array, folding each element into the accumulator.
 		idxAlloca := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 		condL := e.freshLabel("mm.cond")
 		bodyL := e.freshLabel("mm.body")
 		doneL := e.freshLabel("mm.done")
@@ -463,15 +436,24 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 		e.emitLabel(condL)
 		idxVal := e.freshReg()
 		done := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, it.length))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 		e.emitLabel(bodyL)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, it.elemTy.IR, it.ptr, idxVal))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, it.elemTy.IR, it.ptr, idxVal))
 		elem := e.loadArrayElem(gep, it.elemTy)
 		if isNullableScalar(elem.Ty) {
 			elem = e.nullableScalarPayloadOf(elem)
+		}
+		if elem.Ty.IsArray() || elem.Ty.IsObject() || elem.Ty.IsClass() {
+			// An array or object element is ToNumber'd through
+			// ToPrimitive (`[5]` is 5, a valueOf its result).
+			b, err := e.emitBoxValue(elem)
+			if err != nil {
+				return Value{}, err
+			}
+			elem = b
 		}
 		if elem.Ty.IsDynamic() || !isNumberTy(elem.Ty) {
 			nv, err := e.emitUnaryPlus(elem, pos)
@@ -484,20 +466,18 @@ func (e *Emitter) emitMathMinMaxSpread(fn string, args []ast.Expression, pos ast
 		combine(ev.Ref)
 		idxNext := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(doneL)
 	}
 
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", result, resTy.IR, acc))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", result, resTy.IR, acc))
 	return Value{Ref: result, Ty: resTy}, nil
 }
 
 func (e *Emitter) emitMathSign(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Math.sign expects 1 argument", pos.Line, pos.Col)
-	}
+	args = fitArgs(args, 1)
 	val, err := e.emitMathOperand(args[0])
 	if err != nil {
 		return Value{}, err
@@ -536,20 +516,18 @@ func (e *Emitter) emitMathRandom(_ ast.Pos) (Value, error) {
 		// rand_s() — UCRT, backed by the system CSPRNG (RtlGenRandom), no seeding.
 		// The C89 fallback below is unusable here: UCRT RAND_MAX is 32767, so
 		// rand()/2147483647 never exceeds ~1.5e-5.
-		e.ensureRandS()
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", slot))
 		raw := e.freshReg()
 		asFloat := e.freshReg()
 		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("call i32 @rand_s(ptr %s)", slot))
-		e.emitInstr(fmt.Sprintf("%s = load i32, ptr %s", raw, slot))
+		e.emitInstr(fmt.Sprintf("call i32 @rand_s("+irPtr+" %s)", slot))
+		e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" %s", raw, slot))
 		e.emitInstr(fmt.Sprintf("%s = uitofp i32 %s to double", asFloat, raw))
 		e.emitInstr(fmt.Sprintf("%s = fdiv double %s, 4294967296.0", result, asFloat))
 		return Value{Ref: result, Ty: TypeF64}, nil
 	case "darwin", "freebsd", "openbsd", "netbsd", "dragonfly":
 		// arc4random() — cryptographic quality, no seeding required (BSD/macOS).
-		e.ensureArc4Random()
 		raw := e.freshReg()
 		asFloat := e.freshReg()
 		result := e.freshReg()
@@ -559,7 +537,6 @@ func (e *Emitter) emitMathRandom(_ ast.Pos) (Value, error) {
 		return Value{Ref: result, Ty: TypeF64}, nil
 	default:
 		// Portable fallback: a helper defined entirely in IR using C89 rand()/srand()/time().
-		e.ensureRandRandom()
 		result := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call double @__klain_math_random()", result))
 		return Value{Ref: result, Ty: TypeF64}, nil
@@ -587,35 +564,34 @@ func (e *Emitter) emitNumberArgsBuffer(args []ast.Expression, pos ast.Pos) (stri
 		if err != nil {
 			return "", "", err
 		}
-		e.ensureMalloc()
 		bytes := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, length))
 		codes, n = e.freshReg(), length
-		e.heapMallocInto(codes, bytes)
+		e.heapMallocInto(codes, allocBytes, bytes)
 		idx := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idx))
+		e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idx))
 		condL, bodyL, doneL := e.freshLabel("fromcodes.cond"), e.freshLabel("fromcodes.body"), e.freshLabel("fromcodes.done")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(condL)
 		i, done := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, idx))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, idx))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, i, length))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 		e.emitLabel(bodyL)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptr, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, ptr, i))
 		v, err := toCode(e.loadArrayElem(gep, elemTy), pos)
 		if err != nil {
 			return "", "", err
 		}
 		d := e.convert(v, TypeF64)
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr double, ptr %s, i64 %s", slot, codes, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr double, "+irPtr+" %s, i64 %s", slot, codes, i))
 		e.heapStore("double", d.Ref, slot, 8)
 		next := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idx))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, idx))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(doneL)
 	} else {
@@ -631,8 +607,8 @@ func (e *Emitter) emitNumberArgsBuffer(args []ast.Expression, pos ast.Pos) (stri
 			}
 			d := e.convert(val, TypeF64)
 			slot := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr [%s x double], ptr %s, i64 0, i64 %d", slot, n, codes, i))
-			e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", d.Ref, slot))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr [%s x double], "+irPtr+" %s, i64 0, i64 %d", slot, n, codes, i))
+			e.emitInstr(fmt.Sprintf("store double %s, "+irPtr+" %s, align 8", d.Ref, slot))
 		}
 	}
 	return codes, n, nil
@@ -649,76 +625,30 @@ func (e *Emitter) emitMathHypot(args []ast.Expression, pos ast.Pos) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureHypot()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call double @__kml_hypot(ptr %s, i64 %s)", r, codes, n))
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_hypot("+irPtr+" %s, i64 %s)", r, codes, n))
 	return Value{Ref: r, Ty: TypeF64}, nil
 }
 
-// ensureHypot defines @__kml_hypot(xs, n): an infinite operand wins, then a
-// NaN one; otherwise sqrt(Σ(|x|/max)²)·max with Kahan compensation.
-func (e *Emitter) ensureHypot() {
-	if e.usedHypot {
-		return
+// fitArgs is a builtin's n arguments as a call passes them: a missing one
+// is undefined, and arguments past n are still evaluated, after the last
+// kept one (`(t => (extra…, t))(last)`), as the call evaluates them all.
+func fitArgs(args []ast.Expression, n int) []ast.Expression {
+	out := make([]ast.Expression, n)
+	for i := range out {
+		if i < len(args) {
+			out[i] = args[i]
+		} else {
+			out[i] = &ast.NullLiteral{IsUndefined: true}
+		}
 	}
-	e.usedHypot = true
-	e.ensureMathFuncs()
-	e.emitGlobal(`define double @__kml_hypot(ptr %xs, i64 %n) {
-entry:
-  br label %scan
-scan:
-  %i = phi i64 [ 0, %entry ], [ %i1, %scanbody ]
-  %max = phi double [ 0.0, %entry ], [ %max1, %scanbody ]
-  %nan = phi i1 [ false, %entry ], [ %nan1, %scanbody ]
-  %sdone = icmp eq i64 %i, %n
-  br i1 %sdone, label %decide, label %scanbody
-scanbody:
-  %p = getelementptr double, ptr %xs, i64 %i
-  %x = load double, ptr %p, align 8
-  %ax = call double @llvm.fabs.f64(double %x)
-  %isnan = fcmp uno double %ax, %ax
-  %nan1 = or i1 %nan, %isnan
-  %gt = fcmp ogt double %ax, %max
-  %max1 = select i1 %gt, double %ax, double %max
-  %i1 = add i64 %i, 1
-  br label %scan
-decide:
-  %isinf = fcmp oeq double %max, 0x7FF0000000000000
-  br i1 %isinf, label %retinf, label %chknan
-retinf:
-  ret double 0x7FF0000000000000
-chknan:
-  br i1 %nan, label %retnan, label %chkzero
-retnan:
-  ret double 0x7FF8000000000000
-chkzero:
-  %zero = fcmp oeq double %max, 0.0
-  br i1 %zero, label %retzero, label %sum
-retzero:
-  ret double 0.0
-sum:
-  %j = phi i64 [ 0, %chkzero ], [ %j1, %sumbody ]
-  %acc = phi double [ 0.0, %chkzero ], [ %pre, %sumbody ]
-  %comp = phi double [ 0.0, %chkzero ], [ %comp1, %sumbody ]
-  %jdone = icmp eq i64 %j, %n
-  br i1 %jdone, label %done, label %sumbody
-sumbody:
-  %q = getelementptr double, ptr %xs, i64 %j
-  %y = load double, ptr %q, align 8
-  %ay = call double @llvm.fabs.f64(double %y)
-  %s = fdiv double %ay, %max
-  %sq = fmul double %s, %s
-  %summand = fsub double %sq, %comp
-  %pre = fadd double %acc, %summand
-  %d = fsub double %pre, %acc
-  %comp1 = fsub double %d, %summand
-  %j1 = add i64 %j, 1
-  br label %sum
-done:
-  %rt = call double @llvm.sqrt.f64(double %acc)
-  %res = fmul double %rt, %max
-  ret double %res
-}
-declare double @llvm.fabs.f64(double)
-declare double @llvm.sqrt.f64(double)`)
+	if len(args) <= n || n == 0 {
+		return out
+	}
+	pos := args[n-1].GetPos()
+	seq := append(append([]ast.Expression{}, args[n:]...), ast.NewIdentifier("__kml_fit", pos))
+	body := ast.NewSequenceExpression(seq, pos)
+	fn := ast.NewArrowFunction([]ast.Param{{Name: "__kml_fit"}}, nil, body, nil, pos)
+	out[n-1] = ast.NewCallExpression(fn, []ast.Expression{args[n-1]}, pos)
+	return out
 }

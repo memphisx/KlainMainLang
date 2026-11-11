@@ -34,7 +34,7 @@ func addLowerTypeInit(cd *ast.ClassDeclaration) error {
 	}
 	pos := cd.GetPos()
 	if cd.BaseClass != "" || len(cd.TypeParams) > 0 {
-		return fmt.Errorf("%d:%d: a @lowerType class cannot extend another or be generic", pos.Line, pos.Col)
+		return internalAt(pos, "@lowerType class %s extends or is generic", cd.Name)
 	}
 	for _, m := range cd.Methods {
 		if m.Name == lowerTypeInitMethod {
@@ -57,16 +57,16 @@ func (e *Emitter) emitLowerTypeLayout(cd *ast.ClassDeclaration, className string
 	}
 	e.lowerTypeClasses[className] = cd
 	p := "@__kml_lt_" + layout + "_"
-	e.emitGlobal(fmt.Sprintf("%ssize = weak_odr constant i64 %d, align 8", p, info.Ty.StructSize()))
-	e.emitGlobal(fmt.Sprintf("%stag = weak_odr constant i64 %d, align 8", p, info.TagID))
+	e.emitGlobal(fmt.Sprintf("%ssize = weak_odr"+irGlobalAS+" constant i64 %d, align 8", p, info.Ty.StructSize()))
+	e.emitGlobal(fmt.Sprintf("%stag = weak_odr"+irGlobalAS+" constant i64 %d, align 8", p, info.TagID))
 	// The method table, for a class whose tree overrides a method: its
 	// pointer and where it goes (0 for none, field 0 being the header).
 	if info.Ty.HasVTable {
-		e.emitGlobal(fmt.Sprintf("%svtable = weak_odr constant ptr @%s_vtable, align 8", p, className))
-		e.emitGlobal(fmt.Sprintf("%svtable_at = weak_odr constant i64 %d, align 8", p, info.Ty.FieldOffset(info.Ty.VTableIndex())))
+		e.emitGlobal(fmt.Sprintf("%svtable = weak_odr"+irGlobalAS+" constant "+irPtr+" @%s_vtable, align 8", p, className))
+		e.emitGlobal(fmt.Sprintf("%svtable_at = weak_odr"+irGlobalAS+" constant i64 %d, align 8", p, info.Ty.FieldOffset(info.Ty.VTableIndex())))
 	} else {
-		e.emitGlobal(fmt.Sprintf("%svtable = weak_odr constant ptr null, align 8", p))
-		e.emitGlobal(fmt.Sprintf("%svtable_at = weak_odr constant i64 0, align 8", p))
+		e.emitGlobal(fmt.Sprintf("%svtable = weak_odr"+irGlobalAS+" constant "+irPtr+" null, align 8", p))
+		e.emitGlobal(fmt.Sprintf("%svtable_at = weak_odr"+irGlobalAS+" constant i64 0, align 8", p))
 	}
 	for i, f := range info.Ty.Fields {
 		if i == 0 || f.Name == ClassVTableField || strings.HasPrefix(f.Name, "__kml_") {
@@ -76,9 +76,9 @@ func (e *Emitter) emitLowerTypeLayout(cd *ast.ClassDeclaration, className string
 		if strings.HasPrefix(name, "#") {
 			name = "priv_" + name[1:]
 		}
-		e.emitGlobal(fmt.Sprintf("%s%s = weak_odr constant i64 %d, align 8", p, name, info.Ty.FieldOffset(i)))
+		e.emitGlobal(fmt.Sprintf("%s%s = weak_odr"+irGlobalAS+" constant i64 %d, align 8", p, name, info.Ty.FieldOffset(i)))
 	}
-	e.emitGlobal(fmt.Sprintf("%sinit = weak_odr constant ptr @%s_%s, align 8", p, info.MethodImplementor[lowerTypeInitMethod], lowerTypeInitMethod))
+	e.emitGlobal(fmt.Sprintf("%sinit = weak_odr"+irGlobalAS+" constant "+irPtr+" @%s_%s, align 8", p, info.MethodImplementor[lowerTypeInitMethod], lowerTypeInitMethod))
 }
 
 // lowerTypeClassRepr is a @lowerType class's instance type, for an entry

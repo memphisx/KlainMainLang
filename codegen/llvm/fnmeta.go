@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,15 @@ const (
 	fnFlagThroughBox = 0x400
 	// fnFlagBoundBox: a dynamic bound function (@__kml_dyn_bound).
 	fnFlagBoundBox = 0x800
+	// fnFlagCtor: a `function` (not an arrow, method, async function or
+	// generator), which owns a `prototype` object.
+	fnFlagCtor = 0x2000
+	// fnFlagObjectProto: Function.prototype itself, whose prototype is
+	// Object.prototype (inspect shows `[Function (anonymous)] Object`).
+	fnFlagObjectProto = 0x4000
+	// fnFlagConstructs: a builtin constructor's value, which IsConstructor
+	// answers true for (`class C extends Symbol` is valid heritage).
+	fnFlagConstructs = 0x8000
 )
 
 type fnMetaEntry struct {
@@ -55,6 +65,7 @@ type fnMetaEntry struct {
 	name   string
 	length int
 	kind   int
+	class  bool   // a class's source text, keyed by its reference (registerClassSrc)
 	src    string // its source text (Function.prototype.toString), "" for none
 	island string // the dynamic-only file it was registered in (unitRow.island)
 }
@@ -97,7 +108,73 @@ func (e *Emitter) registerFnMeta(sym, name string, length, kind int) {
 	if path, ok := lib.LoweredFuncUses()[name]; ok && len(path) > 0 {
 		name = path[len(path)-1]
 	}
+	if _, ok := e.fnWords[fnSymOf(sym)]; !ok {
+		if e.fnWords == nil {
+			e.fnWords = map[string]int64{}
+		}
+		// A library function's id is the same in every program, as its
+		// unit's text is, and so is a helper named by its content's hash
+		// (an adapter a library unit allocates); the program's are numbered.
+		id := int64(0)
+		if stableFnSym(fnSymOf(sym)) {
+			id = e.stableTypeID("fn:" + fnSymOf(sym))
+		} else {
+			id = e.allocTypeID()
+		}
+		e.fnWords[fnSymOf(sym)] = id | kmlHdrClosure
+	}
 	e.fnMetas = append(e.fnMetas, fnMetaEntry{sym: sym, name: name, length: length, kind: kind, island: e.curDynFile})
+}
+
+// castFnSym matches a function symbol's address cast to irPtr.
+var castFnSym = regexp.MustCompile(`^addrspacecast \(ptr (@[^ ]+) to ` + regexp.QuoteMeta(irPtr) + `\)$`)
+
+// contentHashedSym matches a generated helper named by its text's hash.
+var contentHashedSym = regexp.MustCompile(`^__kml_[A-Za-z0-9_]+\.[0-9a-f]{16}$`)
+
+// stableFnSym reports a function whose code is the same in every program:
+// a library function, a generator constructor over one, a helper named by
+// its content's hash, or a fixed runtime function.
+func stableFnSym(sym string) bool {
+	name := strings.TrimPrefix(sym, "@")
+	if name == "__kml_dyn_bound" || contentHashedSym.MatchString(name) {
+		return true
+	}
+	return libOwner(name) != "" || libGenCtorSym.MatchString(name) || libClosureSym.MatchString(name)
+}
+
+// libClosureSym matches a closure a library module's function creates
+// (named for its module and source position, the same in every program).
+var libClosureSym = regexp.MustCompile(`^__closure\.(?:node|shared)_[A-Za-z0-9_]+\.`)
+
+// libGenCtorSym matches the constructor of a library module's generator.
+var libGenCtorSym = regexp.MustCompile(`^__kml_genctor(?:__generator_method)?\.(?:node|shared)_[A-Za-z0-9_]+\.\d`)
+
+// fnSymOf is the function symbol a code reference names: a code pointer
+// cast into the managed address space is its symbol's.
+func fnSymOf(ref string) string {
+	if m := castFnSym.FindStringSubmatch(ref); m != nil {
+		return m[1]
+	}
+	return ref
+}
+
+// fnWord is the prefix word of a function value whose code is sym: its
+// registered id, else (a runtime-internal callable, the same in every
+// program) id 0, anonymous.
+func (e *Emitter) fnWord(sym string) int64 {
+	if w, ok := e.fnWords[fnSymOf(sym)]; ok {
+		return w
+	}
+	return kmlHdrMagic | kmlHdrClosure
+}
+
+// registerClassSrc records class reference ref's source text (String(K)),
+// keyed by the reference.
+func (e *Emitter) registerClassSrc(ref, name string, src ast.SourceRange) {
+	if text := src.String(); text != "" {
+		e.fnMetas = append(e.fnMetas, fnMetaEntry{sym: ref, name: name, class: true, src: text, island: e.curDynFile})
+	}
 }
 
 // fnLengthFromParams is Function.prototype.length: the parameters before the
@@ -152,43 +229,24 @@ func (e *Emitter) ensureFnMeta() {
 	}
 	e.usedFnMeta = true
 	e.ensureStrHeaderRuntime() // fnmeta.c builds its results with __kml_str_from_cstr
-	e.ensureDynObj()           // and a function's property bag with dynobj.c
-	e.emitGlobal("declare ptr @__kml_fn_inspect_hdr(ptr)")
-	e.emitGlobal("declare ptr @__kml_fn_inspect_dyn(ptr, i64)")
-	e.emitGlobal("declare ptr @__kml_fn_name_hdr(ptr)")
-	e.emitGlobal("declare i64 @__kml_fn_length_hdr(ptr)")
-	e.emitGlobal("declare ptr @__kml_fn_name_dyn(ptr)")
-	e.emitGlobal("declare ptr @__kml_fn_tostring_dyn(ptr)")
-	e.emitGlobal("declare i64 @__kml_fn_static_get(ptr, ptr)")
-	e.emitGlobal("declare i64 @__kml_fn_length_dyn(ptr)")
-	e.emitGlobal("declare ptr @__kml_fn_props_dyn(ptr)")
-	e.emitGlobal("declare ptr @__kml_fn_props_dyn_make(ptr, ptr, ptr, ptr)")
-	e.emitGlobal("declare i1 @__kml_fn_has_builtin(ptr, i1)")
-	e.emitGlobal("declare i1 @__kml_fn_has_proto_member(ptr)")
-	e.emitGlobal("declare i1 @__kml_array_has_key(i64, ptr, i1, i64)")
-	e.emitGlobal("declare i64 @__kml_fn_thunk_box(ptr, ptr)")
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 }
 
 // emitFnPropsBag returns the own-property bag of a boxed function's record
 // (a tag-12 payload pointer), creating it on first use.
 func (e *Emitter) emitFnPropsBag(rec string) string {
 	e.ensureFnMeta()
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	e.ensureDynJSONC() // a function with properties renders them through the object inspector
-	e.ensureFnBagSeed()
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_props_dyn_make(ptr %s, ptr @__kml_dynobj_new, ptr @__kml_dynobj_get, ptr @__kml_fn_bag_seed)", bag, rec))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_props_dyn_make("+irPtr+" %s, "+irPtr+" @__kml_dynobj_new, "+irPtr+" @__kml_dynobj_get, "+irPtr+" @__kml_fn_bag_seed)", bag, rec))
 	return bag
-}
-
-// ensureFnBagSeed declares @__kml_fn_bag_seed(bag, rec) (fnmeta.c): a
-// function's new property bag starts with its own `length` and `name`.
-func (e *Emitter) ensureFnBagSeed() {
-	if e.fnDecls["__kml_fn_bag_seed"] {
-		return
-	}
-	e.fnDecls["__kml_fn_bag_seed"] = true
-	e.emitGlobal("declare void @__kml_fn_bag_seed(ptr, ptr)")
 }
 
 // FnMetaCFlags passes the NaN-box double offset and the configurable
@@ -202,9 +260,6 @@ func (e *Emitter) FnMetaCFlags() []string {
 	}
 }
 
-// UsesFnMeta reports whether fnmeta.c must be linked.
-func (e *Emitter) UsesFnMeta() bool { return e.usedFnMeta }
-
 // emitFnMetaFinalize registers the code-pointer → metadata rows fnmeta.c
 // looks up.
 // Only a program that reached ensureFnMeta pays for it.
@@ -212,17 +267,20 @@ func (e *Emitter) emitFnMetaFinalize() {
 	if !e.usedFnMeta {
 		return
 	}
-	// Registered rows keyed by the code pointer (unitreg.go); fnmeta.c
-	// finds a function's row there. The registry links even with no rows.
-	e.ensureUnitReg()
+	// Registered rows keyed by the function's prefix word (unitreg.go);
+	// fnmeta.c finds a function's row there. The registry links even with no rows.
 	for _, m := range e.fnMetas {
 		src := "null"
 		if m.src != "" {
 			src = e.internString(m.src)
 		}
 		e.curDynFile = m.island
-		e.addUnitRowLit(unitKindFnMeta, "{ i64, ptr, i64, i64, ptr }", fmt.Sprintf("{ i64 ptrtoint (ptr %s to i64), ptr %s, i64 %d, i64 %d, ptr %s }",
-			m.sym, e.internString(m.name), m.length, m.kind, src))
+		kind, key := unitKindFnMeta, fmt.Sprint(e.fnWord(m.sym))
+		if m.class {
+			kind, key = unitKindClassSrc, "ptrtoint ("+irPtr+" "+m.sym+" to i64)"
+		}
+		e.addUnitRowLit(kind, "{ i64, "+irPtr+", i64, i64, "+irPtr+" }", fmt.Sprintf("{ i64 %s, "+irPtr+" %s, i64 %d, i64 %d, "+irPtr+" %s }",
+			key, e.internString(m.name), m.length, m.kind, src))
 		e.curDynFile = ""
 	}
 }
@@ -299,6 +357,9 @@ func (e *Emitter) inferFunctionNames(prog *ast.Program) {
 							if fe, ok := p.Value.(*ast.FunctionExpression); ok {
 								e.objLitMethods[fe] = true
 							}
+						} else if p.KeyExpr == nil && p.Key != "" {
+							// An accessor's name has its kind's prefix.
+							name(p.Value, p.AccessorKind+" "+p.Key)
 						}
 					}
 				case *ast.ClassDeclaration:
@@ -368,16 +429,16 @@ func (e *Emitter) emitInspectFunc(v Value) Value {
 	e.ensureFnMeta()
 	if !v.Ty.Nullable() && !v.Ty.IsUndefined() {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_inspect_hdr(ptr %s)", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_inspect_hdr("+irPtr+" %s)", r, v.Ref))
 		return Value{Ref: r, Ty: TypePtr}
 	}
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 	res, _ := e.emitStrBranch(isNull,
-		func() (string, error) { return e.internString("undefined"), nil },
+		func() (string, error) { return e.internString(absentLiteral(v.Ty)), nil },
 		func() (string, error) {
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_inspect_hdr(ptr %s)", r, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_inspect_hdr("+irPtr+" %s)", r, v.Ref))
 			return r, nil
 		})
 	return Value{Ref: res, Ty: TypePtr}
@@ -386,7 +447,7 @@ func (e *Emitter) emitInspectFunc(v Value) Value {
 // emitIntToPtr reinterprets an i64 payload register as a pointer.
 func (e *Emitter) emitIntToPtr(i64Reg string) string {
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, i64Reg))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, i64Reg))
 	return p
 }
 
@@ -471,6 +532,16 @@ func emptyObjectParam(p ast.Param) bool {
 	return p.ObjectPattern != nil && (len(p.ObjectPattern) == 0 || ok && len(lit.Properties) == 0)
 }
 
+// literalDefault reports a parameter defaulted to an object or array
+// literal, whose own layout patternDefaultType builds.
+func literalDefault(p ast.Param) bool {
+	switch p.Default.(type) {
+	case *ast.ObjectLiteral, *ast.ArrayLiteral:
+		return true
+	}
+	return false
+}
+
 func (e *Emitter) patternDefaultType(p ast.Param) (Type, bool) {
 	// The checker's type, mapped as the oracle maps it, when it has one.
 	// An object pattern keeps the literal's own layout below: a defaulted
@@ -478,8 +549,11 @@ func (e *Emitter) patternDefaultType(p ast.Param) (Type, bool) {
 	// a layout from `{ a = 1 } = {}` does not hold for a number.
 	if c := e.front(); c != nil {
 		if ct := c.PatternDefaultType(p); !c.Unanswered(ct) {
-			if t, ok := e.repr().of(ct); ok && (!t.IsDynamic() || emptyObjectParam(p)) {
-				return t, true // `{}` holds any value
+			// `{}` holds any value; so does a box a default that is no
+			// literal has (`{ x } = obj` of an object typed `{}`), whose
+			// pattern reads by key.
+			if t, ok := e.repr().of(ct); ok && (!t.IsDynamic() || emptyObjectParam(p) || !literalDefault(p)) {
+				return t, true
 			}
 		}
 	}
@@ -493,7 +567,7 @@ func (e *Emitter) patternDefaultType(p ast.Param) (Type, bool) {
 			if _, spread := x.(*ast.SpreadElement); spread {
 				return Type{}, false
 			}
-			et := e.inferExprType(x)
+			et := e.typeOfExpr(x)
 			if et.IsStrLiteral() {
 				et = TypePtr
 			}

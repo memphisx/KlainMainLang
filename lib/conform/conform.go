@@ -268,12 +268,16 @@ func MemberLines(tsLib, typesNode string) ([]string, error) {
 	for n := range ours.ifaces {
 		visit(n)
 	}
-	// A namespace's interface (`NodeJS.Process`) is listed by its dotted
-	// name, with the members and bases of @types/node's declarations of
-	// its last name.
+	// A `NodeJS` namespace interface (`NodeJS.Process`) is listed by its
+	// dotted name, with the members and bases of @types/node's declarations
+	// of its last name. Another namespace's interface of the same last name
+	// (`WebAssembly.Module`) is not Node's.
 	qualified := map[string]string{}
 	for _, p := range progs {
 		for _, g := range p.NamespaceGroups {
+			if g.Name != "NodeJS" {
+				continue
+			}
 			for _, st := range g.Members {
 				it, ok := st.(*ast.InterfaceDeclaration)
 				if !ok {
@@ -372,7 +376,7 @@ func Diff(tsLib string, allowed map[string]bool) (problems, review []string, err
 		for _, mn := range mnames {
 			om := ours.ifaces[in][mn]
 			key := in + "." + mn
-			t := tm[mn]
+			t := ts.inherited(in, mn, map[string]bool{})
 			switch {
 			case t == nil:
 				report(key, "not a member of TypeScript's "+in)
@@ -388,4 +392,22 @@ func Diff(tsLib string, allowed map[string]bool) (problems, review []string, err
 		}
 	}
 	return problems, review, nil
+}
+
+// inherited is interface n's member m, its own or one an interface it
+// extends declares (TypeScript's Navigator has NavigatorID's platform).
+func (d *decls) inherited(n, m string, seen map[string]bool) *member {
+	if seen[n] {
+		return nil
+	}
+	seen[n] = true
+	if t := d.ifaces[n][m]; t != nil {
+		return t
+	}
+	for b := range d.bases[n] {
+		if t := d.inherited(b, m, seen); t != nil {
+			return t
+		}
+	}
+	return nil
 }

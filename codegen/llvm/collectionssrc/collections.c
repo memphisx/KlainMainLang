@@ -56,8 +56,8 @@ void __kml_map_clear(kml_map *m) {
  * past it steps back. The caller has tombstoned its own slot. */
 void __kml_map_remove_at(kml_map *m, i64 idx) {
     i64 last = m->size - 1, n = last - idx;
-    memmove(m->keys + idx, m->keys + idx + 1, (size_t)n * 8);
-    memmove(m->vals + idx, m->vals + idx + 1, (size_t)n * 8);
+    kml_copy(KML_HEAP_WORDS, m->keys + idx, m->keys + idx + 1, (size_t)n * 8);
+    kml_copy(KML_HEAP_WORDS, m->vals + idx, m->vals + idx + 1, (size_t)n * 8);
     m->size = last;
     if (n > 0)
         for (i64 s = 0; s < m->idxcap; s++)
@@ -71,14 +71,14 @@ void __kml_map_remove_at(kml_map *m, i64 idx) {
 void *__kml_map_copy_keys(kml_map *m) {
     size_t b = (size_t)m->size * 8;
     void *a = kml_alloc(KML_HEAP_WORDS, b);
-    memcpy(a, m->keys, b);
+    kml_copy(KML_HEAP_WORDS, a, m->keys, b);
     return a;
 }
 
 void *__kml_map_copy_vals(kml_map *m) {
     size_t b = (size_t)m->size * 8;
     void *a = kml_alloc(KML_HEAP_WORDS, b);
-    memcpy(a, m->vals, b);
+    kml_copy(KML_HEAP_WORDS, a, m->vals, b);
     return a;
 }
 
@@ -323,51 +323,82 @@ void __kml_obj_set_level(void *o, i64 lvl) {
 /* Whether a property may be added to the static object o. */
 _Bool __kml_obj_extensible(void *o) { return __kml_obj_level(o) == 0; }
 
-/* An object without a header word (a RegExp's host record) keeps its level
- * in a side table keyed by address: open addressing, grown at half full.
- * Under -mm=gc the table is pinned, as pattr_map is. */
-static _Thread_local struct { i64 n, cap; i64 *slots; } side_lv;
+/* A side table maps an object to one word: open addressing, grown at half
+ * full, hashed through the object's identity hash and compared by pointer,
+ * so nothing depends on the address beyond identity. Under -mm=gc a table
+ * is pinned: never collected, still scanned.
+ *
+ * side_lv: the level of an object without a header word (a RegExp's host
+ * record). side_pattr: an object's property-attribute record (propattr.c). */
+typedef struct { i64 n, cap; i64 *slots; } kml_side;
+static _Thread_local kml_side side_lv, side_pattr, side_meta;
 
-static i64 *side_slot(void *o, int create) {
-    if (!side_lv.cap) {
+static i64 *side_alloc_slots(i64 cap) {
+#ifdef KML_GC
+    return (i64 *)kml_gc_alloc_pinned(sizeof(i64) * 2 * cap);
+#else
+    i64 *s = (i64 *)kml_alloc(KML_HEAP_WORDS, sizeof(i64) * 2 * cap);
+    memset(s, 0, sizeof(i64) * 2 * cap);
+    return s;
+#endif
+}
+
+static i64 *side_slot_in(kml_side *t, void *o, int create) {
+    if (!t->cap) {
         if (!create) return 0;
-        side_lv.cap = 64;
-#ifdef KML_GC
-        side_lv.slots = (i64 *)kml_gc_alloc_pinned(sizeof(i64) * 2 * 64);
-#else
-        side_lv.slots = (i64 *)kml_alloc(KML_HEAP_WORDS, sizeof(i64) * 2 * 64);
-        memset(side_lv.slots, 0, sizeof(i64) * 2 * 64);
-#endif
+        t->cap = 64;
+        t->slots = side_alloc_slots(64);
     }
-    if (create && side_lv.n * 2 >= side_lv.cap) {
-        i64 oc = side_lv.cap, *old = side_lv.slots;
-        side_lv.cap = oc * 2;
-#ifdef KML_GC
-        side_lv.slots = (i64 *)kml_gc_alloc_pinned(sizeof(i64) * 2 * side_lv.cap);
-#else
-        side_lv.slots = (i64 *)kml_alloc(KML_HEAP_WORDS, sizeof(i64) * 2 * side_lv.cap);
-        memset(side_lv.slots, 0, sizeof(i64) * 2 * side_lv.cap);
-#endif
-        side_lv.n = 0;
+    if (create && t->n * 2 >= t->cap) {
+        i64 oc = t->cap, *old = t->slots;
+        t->cap = oc * 2;
+        t->slots = side_alloc_slots(t->cap);
+        t->n = 0;
         for (i64 i = 0; i < oc; i++) {
             if (old[2 * i]) {
-                *side_slot((void *)old[2 * i], 1) = old[2 * i + 1];
+                *side_slot_in(t, (void *)old[2 * i], 1) = old[2 * i + 1];
             }
         }
 #ifndef KML_GC
         kml_free(KML_HEAP_WORDS, old);
 #endif
     }
-    unsigned long long h = ((unsigned long long)o >> 3) * 0x9E3779B97F4A7C15ULL;
-    for (i64 i = (i64)(h & (unsigned long long)(side_lv.cap - 1));; i = (i + 1) & (side_lv.cap - 1)) {
-        if (side_lv.slots[2 * i] == (i64)o) return &side_lv.slots[2 * i + 1];
-        if (!side_lv.slots[2 * i]) {
+    unsigned long long h = ((unsigned long long)kml_id_hash(o) >> 3) * 0x9E3779B97F4A7C15ULL;
+    for (i64 i = (i64)(h & (unsigned long long)(t->cap - 1));; i = (i + 1) & (t->cap - 1)) {
+        if (t->slots[2 * i] == (i64)o) return &t->slots[2 * i + 1];
+        if (!t->slots[2 * i]) {
             if (!create) return 0;
-            side_lv.slots[2 * i] = (i64)o;
-            side_lv.n++;
-            return &side_lv.slots[2 * i + 1];
+            KML_STORE_PTR(&t->slots[2 * i], (i64)o);
+            t->n++;
+            return &t->slots[2 * i + 1];
         }
     }
+}
+
+static i64 *side_slot(void *o, int create) { return side_slot_in(&side_lv, o, create); }
+
+/* The property-attribute record of obj (0 when it has none), and setting
+ * it. */
+void *__kml_pattr_rec_get(void *obj) {
+    i64 *s = obj ? side_slot_in(&side_pattr, obj, 0) : 0;
+    return s ? (void *)*s : 0;
+}
+
+void __kml_pattr_rec_set(void *obj, void *rec) {
+    if (obj) KML_STORE_PTR(side_slot_in(&side_pattr, obj, 1), (i64)rec);
+}
+
+extern void *__kml_dynobj_new(void) __attribute__((weak));
+
+/* The Reflect metadata bag of an object that is no dynamic object (a
+ * class, a static object, a function), keyed by its identity: its box's
+ * tag and payload. Made on first need when make is set; 0 otherwise. */
+void *__kml_meta_bag_of(i64 tag, i64 pay, i64 make) {
+    void *key = (void *)(((unsigned long long)pay << 4) | (unsigned long long)(tag & 15));
+    i64 *s = side_slot_in(&side_meta, key, (int)make);
+    if (!s) return 0;
+    if (!*s && make && __kml_dynobj_new) KML_STORE_PTR(s, (i64)__kml_dynobj_new());
+    return (void *)*s;
 }
 
 i64 __kml_side_level(void *o) {
@@ -381,27 +412,6 @@ void __kml_side_set_level(void *o, i64 lvl) {
     if (!o) return;
     i64 *s = side_slot(o, 1);
     if (*s == 0 || lvl < *s) *s = lvl;
-}
-
-/* The property-attribute records (propattrsrc/propattr.c), keyed by object
- * address, created on first use. Boehm does not scan thread-local storage
- * as a root, so under -mm=gc the header is allocated pinned: never
- * collected, still scanned, so it keeps its arrays reachable. */
-static _Thread_local kml_map *pattr_map;
-
-void *__kml_pattr_map_get(void) {
-    if (!pattr_map) {
-#ifdef KML_GC
-        i64 *base = (i64 *)kml_gc_alloc_pinned(sizeof(i64) + sizeof(kml_map));
-        base[0] = 0;
-        kml_map *h = (kml_map *)(base + 1);
-#else
-        kml_map *h = kml_map_alloc(0);
-#endif
-        kml_map_init(h);
-        pattr_map = h;
-    }
-    return pattr_map;
 }
 
 /* Frees a Map/Set's own allocations: its keys, values and index arrays and
@@ -420,3 +430,29 @@ i64 __kml_map_header(kml_map *m) { return ((i64 *)m)[-1]; }
 /* Initializes a Map/Set body inside a class instance that extends Map or Set
  * (TDD-00247): the instance's tag word is the header before it. */
 void __kml_map_init_at(kml_map *m) { kml_map_init(m); }
+
+/* The Symbol.for registry (ADR-00488): key -> the shared Symbol, one per
+ * thread as each Worker is its own realm. A Symbol is { type-id word,
+ * description } (SymbolType). */
+static _Thread_local void *kml_sym_registry;
+
+void *__kml_symbol_for(const char *key) {
+    if (!kml_sym_registry) kml_sym_registry = __kml_map_str_create();
+    i64 hit = __kml_map_str_get(kml_sym_registry, key);
+    if (hit) return (void *)hit;
+    i64 *sym = (i64 *)kml_alloc(KML_HEAP_WORDS, 16);
+    sym[0] = KML_SYMBOL_TYPEID;
+    ((const char **)sym)[1] = key;
+    __kml_map_str_set(kml_sym_registry, key, (i64)sym);
+    return sym;
+}
+
+/* Symbol.keyFor: the registry key of sym, or null when sym is not a
+ * registered Symbol. */
+const char *__kml_symbol_keyfor(void *sym) {
+    kml_map *m = (kml_map *)kml_sym_registry;
+    if (!m) return 0;
+    for (i64 i = 0; i < m->size; i++)
+        if ((void *)m->vals[i] == sym) return (const char *)m->keys[i];
+    return 0;
+}

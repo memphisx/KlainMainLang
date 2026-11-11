@@ -2,6 +2,7 @@ package checker_test
 
 import (
 	"KlainMainLang/lib"
+	"strings"
 	"testing"
 
 	"KlainMainLang/ast"
@@ -73,6 +74,10 @@ func TestTypeOf(t *testing.T) {
 		{"declare var Box: { new <T>(v: T): { v: T } }\nconst b = new Box(new Box(1))\nb", "{ v: { v: number; }; }"},
 		// A function read inside its own return: itself, with an any result.
 		{"function f(a: number) { return f; }\nf", "(a: number) => (a: number) => any"},
+		// An element of a union of arrays: each member's element, joined.
+		{"declare const y: number[] | string[][]\ny[0]", "number | string[]"},
+		// A spread of one: what each member yields.
+		{"declare const y: string[] | number[]\nconst s = [...y]\ns", "(string | number)[]"},
 		{"0x10", "16"},
 		// An empty element is never[], which the element type's subtype
 		// reduction drops beside another array.
@@ -338,6 +343,22 @@ func TestConditionalOverGenericSignature(t *testing.T) {
 	}
 }
 
+// An `infer` inside a constructor type or a type literal's signature binds
+// (`InstanceType<typeof C>`, `ConstructorParameters`).
+func TestInferInConstructorType(t *testing.T) {
+	for _, tc := range []struct{ src, want string }{
+		{"declare const q: (new () => string) extends new () => infer R ? R : 0;\nq", "string"},
+		{"class Plain { v = 2; }\ndeclare const p: InstanceType<typeof Plain>;\np", "Plain"},
+		{"const Money = class { cents = 1; };\ndeclare const p: InstanceType<typeof Money>;\np", "Money"},
+		{"class P { constructor(a: number, b: string) {} }\ndeclare const p: ConstructorParameters<typeof P>;\np", "[number, string]"},
+		{"class Plain { v = 2; }\ndeclare const q: (typeof Plain) extends { new (): infer R } ? R : 0;\nq", "Plain"},
+	} {
+		if got := typeOfLastLib(t, tc.src); got != tc.want {
+			t.Errorf("%q: got %s, want %s", tc.src, got, tc.want)
+		}
+	}
+}
+
 // A member read on a receiver that may be null or undefined is typed from
 // the non-nullable receiver, as tsc does after reporting the access.
 func TestMemberOfPossiblyAbsentReceiver(t *testing.T) {
@@ -390,7 +411,7 @@ func TestPatternParameterFromDefault(t *testing.T) {
 func TestSelfReferencingParameterDefault(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"let x = 0;\nconst f = (x = x) => { };\nf", "(x?: any) => void"},
-		{"const g = (y = 1, z = () => y) => y;\ng", "(y?: number | undefined, z?: () => number | undefined) => number"},
+		{"const g = (y = 1, z = () => y) => y;\ng", "(y?: number | undefined, z?: (() => number) | undefined) => number"},
 	} {
 		if got := typeOfLast(t, tc.src); got != tc.want {
 			t.Errorf("%q: got %s, want %s", tc.src, got, tc.want)
@@ -531,6 +552,188 @@ func TestStringNumberIndex(t *testing.T) {
 	for _, s := range []string{"\"lol\"[1]", "declare const s: string;\ns[1]", "var C = class { x = \"lol\"[1] };\nnew C().x"} {
 		if got := typeOfLastLib(t, s); got != "string" {
 			t.Errorf("%q: got %s, want string", s, got)
+		}
+	}
+}
+
+// Inferring from one generic method signature to another pairs overloads
+// from the last, through the source's base and the target's erased
+// signature: neither's own type parameters leak into the candidates, as
+// tsc's inferFromSignatures.
+func TestInferFromGenericOverloadedSignatures(t *testing.T) {
+	const decl = `interface Deferred<T> {
+  then<U>(ok?: (value: T) => Deferred<U>, err?: (e: any) => Deferred<U>, prog?: (p: any) => void): Deferred<U>;
+  then<U>(ok?: (value: T) => Deferred<U>, err?: (e: any) => U, prog?: (p: any) => void): Deferred<U>;
+  then<U>(ok?: (value: T) => U, err?: (e: any) => Deferred<U>, prog?: (p: any) => void): Deferred<U>;
+  then<U>(ok?: (value: T) => U, err?: (e: any) => U, prog?: (p: any) => void): Deferred<U>;
+}
+interface Thenable<T> {
+  then<U>(ok?: (value: T) => U, err?: (e: any) => U, prog?: (p: any) => void): Thenable<U>;
+}
+declare function tf(): Thenable<number>;
+declare function tfD(): Deferred<number>;
+declare const r1: Thenable<number>; declare const s1: Deferred<number>;
+`
+	for _, c := range []struct{ expr, want string }{
+		{"r1.then(tf, tf, tf).then(tf, tf, tf)", "Thenable<Thenable<number>>"},
+		{"s1.then(tfD, tf, tf)", "Deferred<number>"},
+		{"s1.then(tfD, tf, tf).then(tf, tf, tf)", "Deferred<number>"},
+		{"s1.then(tf, tf, tf)", "Deferred<number>"},
+	} {
+		if got := typeOfLastLib(t, decl+c.expr); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.expr, got, c.want)
+		}
+	}
+	// With a `done` member a Thenable is no Deferred: the overload whose U
+	// candidates are number and Thenable<number> fails (tsc takes the
+	// leftmost, number, not their union), and the last one's common
+	// supertype, Thenable<number>, wins.
+	withDone := strings.Replace(decl, "  then<U>(ok?: (value: T) => U, err?: (e: any) => U, prog?: (p: any) => void): Deferred<U>;\n",
+		"  then<U>(ok?: (value: T) => U, err?: (e: any) => U, prog?: (p: any) => void): Deferred<U>;\n  done<U>(ok?: (value: T) => any, err?: (e: any) => any, prog?: (p: any) => void): void;\n", 1)
+	for _, expr := range []string{"s1.then(tfD, tf, tf)", "s1.then(tfD, tf, tf).then(tf, tf, tf)"} {
+		if got := typeOfLastLib(t, withDone+expr); got != "Deferred<Thenable<number>>" {
+			t.Errorf("with done, %s: got %s, want Deferred<Thenable<number>>", expr, got)
+		}
+	}
+}
+
+// An overload whose rest parameter is a type parameter (`...args: TArgs`)
+// binds the inferred tuple's elements to the arguments it collects.
+func TestOverloadRestTypeParam(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"const a: number[] = [];\nsetTimeout((q: number[]) => { q.push(6); }, 1, a)", "Timeout"},
+		{"setInterval((x: string) => { console.log(x) }, 2, \"y\")", "Timeout"},
+		{"setImmediate((q: number) => {}, 5)", "Immediate"},
+		{"setTimeout(() => {}, 1)", "Timeout"},
+	} {
+		if got := typeOfLastLib(t, c.src); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.src, got, c.want)
+		}
+	}
+}
+
+// An element access by a union of literal keys (`k: keyof S`) reads each
+// key's property, joined.
+func TestIndexByLiteralKeyUnion(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"type S = { name: string; tag: string };\ndeclare const o: S; declare const k: keyof S;\no[k]", "string"},
+		{"type O = { n: number | null; s: string };\ndeclare const o: O; declare const k: keyof O;\no[k]", "string | number | null"},
+		{"type M = { id: number; name: string };\nconst m: M = { id: 7, name: 'q' };\nfunction get<T, K extends keyof T>(o: T, k: K): T[K] { return o[k]; }\nget(m, 'id')", "number"},
+		{"const r2 = /a/g;\n[...'1a2b3'.matchAll(r2)]", "RegExpExecArray[]"},
+	} {
+		if got := typeOfLastLib(t, c.src); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.src, got, c.want)
+		}
+	}
+}
+
+// `globalThis` is the global object: a global read through it is the
+// global's type, any other property tsc's error type.
+func TestGlobalThisType(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"globalThis", "typeof globalThis"},
+		{"globalThis.zz", "any"},
+		{"const g = globalThis; g.setTimeout(() => {}, 1)", "Timeout"},
+		{"const g = globalThis; g.nope", "any"},
+	} {
+		if got := typeOfLastLib(t, c.src); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.src, got, c.want)
+		}
+	}
+}
+
+// A destructured name an object literal's type has no property for: tsc's
+// error type (TS2339), which a default joins as any.
+func TestDestructuredMissingProperty(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"const { t = 1 } = { k: 4 };\nt", "any"},
+		{"const { k = 1 } = { k: 4 };\nk", "number"},
+	} {
+		if got := typeOfLastLib(t, c.src); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.src, got, c.want)
+		}
+	}
+}
+
+// A const alias of a function (`export default strict`) carries the
+// function's expando properties.
+func TestExpandoThroughAlias(t *testing.T) {
+	src := "function s(v: unknown): void {}\ns.twice = (a: number) => a * 2;\nconst d = s;\nd.twice(1)"
+	if got := typeOfLastLib(t, src); got != "number" {
+		t.Errorf("got %s, want number", got)
+	}
+}
+
+// A function literal whose own return reads it: a type containing itself
+// prints as tsc prints it, and one asking for its own result is any there
+// (TS7023).
+func TestSelfReferentialFunctionLiteral(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"const f = () => f;\nf", "() => ..."},
+		{"const g = () => g();\ng", "() => any"},
+	} {
+		if got := typeOfLastLib(t, c.src); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.src, got, c.want)
+		}
+	}
+}
+
+// Spreading a class instance copies its public data properties, as tsc's
+// getSpreadType: no method, accessor, private, protected or `#` member.
+func TestInstanceSpread(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"class R { constructor(public a: string, private b: number, protected c = 1) {} #d = 1; m() {} get g() { return 1 } }\n({ ...new R('a', 1) })", "{ a: string; }"},
+		{"class B { b = 1 }\nclass D extends B { d = 'x' }\n({ ...new D() })", "{ b: number; d: string; }"},
+	} {
+		if got := typeOfLastLib(t, c.src); got != c.want {
+			t.Errorf("%s: got %s, want %s", c.src, got, c.want)
+		}
+	}
+}
+
+// A generic's object literal holding methods that return it instantiates
+// once per call, its nested generic methods kept generic, as tsc has it.
+func TestSelfReferentialGenericLiteral(t *testing.T) {
+	src := "function example<T1>() {\n  let x = {\n    foo: <T2>(t2: T2) => x,\n    bar: (t1: T1) => x,\n  };\n  return x;\n}\n"
+	got := typeOfLastLib(t, src+"example<number>().foo('hello').bar")
+	if !strings.HasPrefix(got, "(t1: number) => { foo: (t2: string) => { foo: <T2>(t2: T2) =>") {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// An array's well-known symbol member is Array<T>'s, not an element.
+func TestArraySymbolIteratorMember(t *testing.T) {
+	if got := typeOfLastLib(t, "function g() { return [5][Symbol.iterator](); }\ng()"); got != "ArrayIterator<number>" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// A method whose result reads a static whose own result builds the
+// instance (`meth() { return K.s() }`, `static s() { return new K().e }`)
+// is typed on demand, as tsc resolves members.
+func TestTypeOfCyclicClassMembers(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"class K {\n e: Error = new Error('x');\n static s() { return new K().e; }\n meth() { return K.s(); }\n}\nK.s();\nnew K().meth()", "Error"},
+		{"class K {\n e = 'x';\n static s() { return new K().e; }\n meth() { return K.s(); }\n}\nK;\nnew K().meth()", "string"},
+		{"class K {\n e: string = 'x';\n static s() { return new K().e; }\n meth() { return K.s(); }\n}\nK;\nnew K().meth()", "string"},
+		{"class K {\n e: string = 'x';\n static s() { return new K().e; }\n meth() { return K.s(); }\n}\nnew K().meth()", "string"},
+	} {
+		prog, err := parser.Parse(c.src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		libProgs, err := lib.Programs()
+		if err != nil {
+			t.Fatal(err)
+		}
+		ch := checker.New(binder.BindWith(prog, binder.Options{Lib: libProgs}))
+		// The class value first, as a compile asks: its statics build the instance.
+		for _, st := range prog.Body[1 : len(prog.Body)-1] {
+			ch.TypeOf(st.(*ast.ExpressionStatement).Expr)
+		}
+		got := ch.TypeOf(prog.Body[len(prog.Body)-1].(*ast.ExpressionStatement).Expr)
+		if ch.Unanswered(got) || got.String() != c.want {
+			t.Errorf("%s: got %s, want %s", c.src, got, c.want)
 		}
 	}
 }

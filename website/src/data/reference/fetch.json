@@ -18,7 +18,7 @@
       "statusRow": "fetch(url) / fetch(url, init) / fetch(request)",
       "signature": "fetch(url: string | Request, init?: RequestInit): Promise<Response>",
       "badge": "caveats",
-      "description": "Issues an HTTP request and resolves when the response headers arrive; the body is read lazily. Genuinely non-blocking — awaited inside an http.listen handler it yields to the event loop, so a slow upstream call doesn't stall other connections. A network-level failure (DNS, connection refused, TLS, timeout) throws; a non-2xx HTTP status still resolves normally — .ok distinguishes it, matching real fetch.",
+      "description": "Issues an HTTP request and resolves when the response headers arrive; the body is read lazily. Genuinely non-blocking — awaited inside an http.listen handler it yields to the event loop, so a slow upstream call doesn't stall other connections. A network-level failure (DNS, connection refused, TLS, timeout) throws; a non-2xx HTTP status still resolves normally — .ok distinguishes it, matching real fetch. A data: URL is answered without a transfer, with its MIME type and decoded bytes.",
       "params": [
         {
           "name": "url",
@@ -138,6 +138,27 @@
       }
     },
     {
+      "id": "fetch.response.bytes",
+      "name": "Response.bytes() / .blob()",
+      "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
+      "signature": "bytes(): Promise<Uint8Array>; blob(): Promise<Blob>",
+      "badge": "exact",
+      "description": "Read the body to completion: bytes() resolves to a Uint8Array over its bytes, blob() to a Blob typed by the Content-Type header (\"\" without one). A fetched response's headers, status text and URL stay readable after its body is.",
+      "returns": {
+        "type": "Promise<Uint8Array> | Promise<Blob>",
+        "desc": "The body's bytes."
+      },
+      "exampleKey": "fetch/fetch",
+      "snippet": "const r = await fetch('data:image/png;base64,AAEC')\nconst b = await r.blob()\nconsole.log(b.size, b.type)   // 3 image/png",
+      "seeAlso": [
+        "fetch.response.arrayBuffer",
+        "fetch.response.text"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Response/bytes"
+      }
+    },
+    {
       "id": "fetch.response.body",
       "name": "Response.body",
       "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
@@ -192,12 +213,27 @@
       }
     },
     {
+      "id": "fetch.formdata",
+      "name": "FormData",
+      "statusRow": "FormData",
+      "signature": "new FormData()",
+      "badge": "caveats",
+      "description": "undici's FormData: append/set (a Blob entry becomes a File, named by the third argument or \"blob\"), get/getAll/has/delete, entries/keys/values/forEach and iteration in insertion order. As a fetch, Request or Response body it is sent multipart/form-data with a generated boundary in the Content-Type; formData() on a Response or Request parses multipart/form-data or application/x-www-form-urlencoded.",
+      "exampleKey": "blob/form_data",
+      "snippet": "const form = new FormData()\nform.append('city', 'Thessaloniki')\nform.append('report', new File(['{}'], 'report.json', { type: 'application/json' }))\nconst back = await new Request('http://localhost/', { method: 'POST', body: form }).formData()",
+      "differences": [
+        "formData() reads a multipart part's quoted name/filename parameters only: an RFC 5987 filename*= is not decoded."
+      ],
+      "seeAlso": ["fetch.request", "typedarray.file"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/FormData" }
+    },
+    {
       "id": "fetch.request",
       "name": "new Request(url, init?)",
       "statusRow": "Request / Headers objects",
       "signature": "new Request(url: string, init?: RequestInit): Request",
       "badge": "caveats",
-      "description": "A real Request class bundling a URL with method/headers/body: .url/.method/.headers, and Fetch's Body members (.body as a ReadableStream, bodyUsed, text()/json()/arrayBuffer()). method defaults to \"GET\" (standard methods case-normalized), headers to an empty Headers, body to null; a string body implies text/plain;charset=UTF-8, and a GET/HEAD request with a body is a TypeError. Works as fetch's sole argument, or supply a plain-object init to fetch directly.",
+      "description": "A real Request class bundling a URL with method/headers/body: .url/.method/.headers, and Fetch's Body members (.body as a ReadableStream, bodyUsed, text()/json()/arrayBuffer()). method defaults to \"GET\" (standard methods case-normalized), headers to an empty Headers, body to null; a string body implies text/plain;charset=UTF-8, and a GET/HEAD request with a body is a TypeError. It also carries cache, credentials, mode, redirect, referrer, referrerPolicy, integrity and keepalive, each checked as undici checks it, and a signal that follows the init's. Works as fetch's sole argument (its bytes sent, its signal honored), or supply a plain-object init to fetch directly.",
       "params": [
         {
           "name": "url",
@@ -222,7 +258,10 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Request/Request"
-      }
+      },
+      "differences": [
+        "No clone(): a compile error."
+      ]
     },
     {
       "id": "fetch.headers",

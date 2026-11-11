@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 12/12 (100%) · **Strict Coverage**: 10/12 (~83%).
+**Coverage**: 12/12 (100%) · **Strict Coverage**: 11/12 (~92%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -17,7 +17,7 @@ Format: [Status page format](README.md#status-page-format).
 | `console.debug(...)` | ✅ | | |
 | `console.trace(...)` | ✅ | | • `Trace: <message>`, then the program's frames as Node prints them, from the shadow call stack. See [ADR-00166](../adr/00/ADR-00166.md), [ADR-01678](../adr/01/ADR-01678.md). |
 | `console.assert(cond, msg)` | ✅ | | |
-| `console.table()` | ✅ | • An array of objects (columns = the shared fields) or an array of primitives (a single `Values` column) is tabulated; a `columns` filter argument, a plain-object argument, and an array-of-arrays shape aren't tabulated (they fall back to `console.log`, as a non-tabular value does) | • Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/00/ADR-00560.md)) |
+| `console.table()` | ✅ | | • Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/00/ADR-00560.md))<br>• Node's own algorithm, written in TypeScript: arrays, arrays of arrays, plain objects, Map, Set, a `properties` filter, and index keys in key order ([ADR-01933](../adr/01/ADR-01933.md)) |
 | `console.time()` / `.timeEnd()` | ✅ | | • Per-label backing `Map<string, number>` — distinct labels track independent timers, matching real Node. See [ADR-00029](../adr/00/ADR-00029.md), [ADR-00544](../adr/00/ADR-00544.md). |
 | `console.count()` / `.countReset()` | ✅ | | • Backed by a real `Map<string, number>`, one count per label; a label is converted with ToString, as Node's `${label}`, and `countReset` of a label with no count is Node's process warning ([ADR-00029](../adr/00/ADR-00029.md), [ADR-01477](../adr/01/ADR-01477.md), [ADR-01495](../adr/01/ADR-01495.md)). |
 | `console.group()` / `.groupEnd()` | ✅ | | • Indents every subsequent `console.*` line by two spaces per nesting level; an unbalanced extra `groupEnd()` floors at depth 0 rather than going negative. See [ADR-00029](../adr/00/ADR-00029.md).<br>• `console.group(...label)` takes variadic label args, formatted like `console.log`; `console.groupCollapsed` is the terminal-identical alias (a browser devtools console would render it collapsed) ([ADR-00792](../adr/00/ADR-00792.md)) |

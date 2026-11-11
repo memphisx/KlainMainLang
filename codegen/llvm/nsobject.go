@@ -19,27 +19,43 @@ func (e *Emitter) wholeNamespace(expr ast.Expression) string {
 	return ""
 }
 
-// liveBindingsRule builds the object of an `Object.assign(lit)` marked
+func init() {
+	intrinsics[ast.ModuleNamespaceIntrinsic] = intrinsic{emit: (*Emitter).emitModuleNamespace, ty: anyResult}
+	intrinsics[ast.LiveBindingsIntrinsic] = intrinsic{emit: (*Emitter).emitLiveBindings, ty: anyResult}
+}
+
+// anyResult types a call whose value is a box.
+func anyResult(*Emitter, *ast.CallExpression) Type { return TypeAny }
+
+// plainCall is ex as the plain call it was synthesized from: a shape its
+// intrinsic does not take.
+func plainCall(ex *ast.CallExpression) *ast.CallExpression {
+	c := *ex
+	c.Intrinsic = ""
+	return &c
+}
+
+// emitLiveBindings builds the object of an `Object.assign(lit)` marked
 // LiveBindings: the literal as a dynamic object, its accessors live
 // bindings.
-func (e *Emitter) liveBindingsRule(ex *ast.CallExpression) (Value, bool, error) {
-	if ex.Intrinsic != ast.LiveBindingsIntrinsic || len(ex.Args) != 1 {
-		return Value{}, false, nil
+func (e *Emitter) emitLiveBindings(ex *ast.CallExpression) (Value, error) {
+	var lit *ast.ObjectLiteral
+	if len(ex.Args) == 1 {
+		lit, _ = ex.Args[0].(*ast.ObjectLiteral)
 	}
-	lit, isLit := ex.Args[0].(*ast.ObjectLiteral)
-	if !isLit {
-		return Value{}, false, nil
+	if lit == nil {
+		return e.emitCall(plainCall(ex))
 	}
 	bag, err := e.emitDynObjLiteral(lit)
 	if err != nil {
-		return Value{}, true, err
+		return Value{}, err
 	}
-	e.declareFn("__kml_dynobj_mark_live", "declare void @__kml_dynobj_mark_live(ptr)")
+	e.declareFn("__kml_dynobj_mark_live", "declare void @__kml_dynobj_mark_live("+irPtr+")")
 	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, bag.Ref))
-	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_mark_live(ptr %s)", e.emitIntToPtr(pay)))
-	return bag, true, nil
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_mark_live("+irPtr+" %s)", e.emitIntToPtr(pay)))
+	return bag, nil
 }
 
 // emitNSObject reads namespace ns's object.

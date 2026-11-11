@@ -27,3 +27,16 @@ const r = new R<number>(); r.push(3)
 console.log(r, r.map(x => String(x)), r.map(x => x) instanceof R)
 `)
 }
+
+// An erased generic Promise subclass's constructor callback types (`(v: T)
+// => void` inside the executor's annotation) erase too: each
+// instantiation resolves its own value.
+func TestE2EGenericPromiseSubclassCtorCallback(t *testing.T) {
+	assertSameAsNode(t, `
+class Q<T> extends Promise<T> { constructor(ex: (res: (v: T) => void, rej: (e: unknown) => void) => void) { super(ex); } }
+const q = new Q<number>((r) => r(1.5));
+q.then((v) => console.log("q", v, v + 0.25));
+const qs = new Q<string>((r) => r("hi"));
+qs.then((v) => console.log("qs", v, v.length));
+`)
+}

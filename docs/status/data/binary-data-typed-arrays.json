@@ -30,8 +30,7 @@
               "`new ArrayBuffer(byteLength, {maxByteLength}?)` — a fixed-length (or resizable — `.resizable`/`.maxByteLength`/`.resize(n)`, [ADR-00494](../adr/00/ADR-00494.md)), zero-initialized (`calloc`'d) raw byte buffer, plus `.byteLength` and `.slice(start?, end?)` (a copy, with array-slice negative-index/clamping rules — [ADR-00312](../adr/00/ADR-00312.md)). A general expression (works anywhere), like the TypedArrays below. See [ADR-00078](../adr/00/ADR-00078.md)/[TDD-00018](../tdd/TDD-00018.md)"
             ],
             "caveats": [
-              "`resize(n)` still requires the `{maxByteLength}` construction option — compile-time rejection otherwise ([ADR-00494](../adr/00/ADR-00494.md), [ADR-00564](../adr/00/ADR-00564.md))",
-              "A TypedArray view captures its length at construction and does not length-track a later `resize` — re-`new` the view after resizing (spec auto-tracks a no-explicit-length view)"
+              "`resize(n)` still requires the `{maxByteLength}` construction option — compile-time rejection otherwise ([ADR-00494](../adr/00/ADR-00494.md), [ADR-00564](../adr/00/ADR-00564.md))"
             ],
             "decl": [
               "ArrayBuffer"
@@ -62,9 +61,6 @@
           {
             "feature": "`BigInt64Array` / `BigUint64Array`",
             "status": "implemented",
-            "caveats": [
-              "`Atomics.wait`/`notify` stay `Int32Array`-only"
-            ],
             "notes": [
               "Compound element assignment (`a[0] += 1n`) is supported — the raw element is wrapped to a bigint, the op runs through the bigint runtime, and the result is stored back ([ADR-00592](../adr/00/ADR-00592.md))",
               "`console.log` of a whole array matches Node — the `TypeName(len)` prefix and (for bigint arrays) the per-element `n` suffix ([ADR-00593](../adr/00/ADR-00593.md))",
@@ -110,6 +106,17 @@
             ]
           },
           {
+            "feature": "`File`",
+            "status": "implemented",
+            "notes": [
+              "`new File(bits, name, { type, lastModified }?)`: a `Blob` with `.name` and `.lastModified` (now by default), Node's missing-argument TypeError, inspect output and `[object File]`; also `require('buffer').File`",
+              "A TypeScript class beside `Blob` (`lib/node/kml_blob.ts`)"
+            ],
+            "decl": [
+              "File"
+            ]
+          },
+          {
             "feature": "`SharedArrayBuffer`",
             "status": "implemented",
             "caveats": [
@@ -128,13 +135,11 @@
             "feature": "`Atomics`",
             "status": "implemented",
             "caveats": [
-              "`wait` blocks the whole calling thread (event loop and fibers included) — allowed on the main thread (Node posture); no `waitAsync`",
-              "`wait`/`notify` are `Int32Array`-only (spec minus the BigInt64 half)",
-              "Index is bounds-unchecked, matching ordinary TypedArray indexing"
+              "`wait` blocks the whole calling thread (event loop and fibers included) — allowed on the main thread (Node posture); no `waitAsync`"
             ],
             "notes": [
-              "`load`/`store`/`add`/`sub`/`and`/`or`/`xor`/`exchange`/`compareExchange` on any integer TypedArray **including `BigInt64Array`/`BigUint64Array`** (bigint operands/results — [ADR-00313](../adr/00/ADR-00313.md)), lowered directly to seq_cst LLVM atomics; float TypedArrays are a compile-time rejection ([TDD-00099](../tdd/TDD-00099.md), [ADR-00308](../adr/00/ADR-00308.md))",
-              "`wait(ta, i, expected, timeoutMs?)` returns the spec's `\"ok\"`/`\"not-equal\"`/`\"timed-out\"`; `notify(ta, i, count?)` returns the wake count — implemented as a portable futex substitute (process-wide pthread mutex/cond + address-keyed waiter list; macOS has no futex syscall)",
+              "`load`/`store`/`add`/`sub`/`and`/`or`/`xor`/`exchange`/`compareExchange` on any integer TypedArray **including `BigInt64Array`/`BigUint64Array`** (bigint operands/results — [ADR-00313](../adr/00/ADR-00313.md)), lowered directly to seq_cst LLVM atomics; a float or non-array receiver throws V8's TypeError, decided at run time for one held in `any`, and an out-of-range index throws `RangeError: Invalid atomic access index` ([TDD-00099](../tdd/TDD-00099.md), [ADR-00308](../adr/00/ADR-00308.md))",
+              "`wait(ta, i, expected, timeoutMs?)` (an `Int32Array` or `BigInt64Array`) returns the spec's `\"ok\"`/`\"not-equal\"`/`\"timed-out\"`; `notify(ta, i, count?)` returns the wake count — implemented as a portable futex substitute (process-wide pthread mutex/cond + address-keyed waiter list; macOS has no futex syscall)",
               "`Atomics.isLockFree(n)` — true for 1/2/4/8 ([ADR-00312](../adr/00/ADR-00312.md))"
             ],
             "decl": [
@@ -149,6 +154,7 @@
             ],
             "notes": [
               "`Buffer.from(arrayBuffer[, byteOffset, length])` is a view of the buffer's bytes, as Node's ([ADR-01365](../adr/01/ADR-01365.md))",
+              "The deprecated `Buffer(…)` / `new Buffer(…)`: `Buffer.alloc` for a number, `Buffer.from` otherwise, warning DEP0005 once",
               "A Buffer IS a `Uint8Array` — indexing, `.length`, `.slice`/`.subarray`, numeric `.fill`/`.indexOf`/`.includes`, HOFs, for-of, `.set`, `.byteLength`, and `fs.writeFileSync(buffer)` all shared with the TypedArray machinery; `Buffer.from(...)`/`.alloc(...)` are **general expressions** (call syntax, no vardecl restriction) ([TDD-00103](../tdd/TDD-00103.md)/[ADR-00315](../adr/00/ADR-00315.md), superseding [ADR-00094](../adr/00/ADR-00094.md)'s \"no Buffer class\" half — fetch/fs still return WHATWG types)",
               "Codecs both directions: utf8, hex, base64, base64url (unpadded, per Node), latin1/binary/ascii — via an embedded libc-only C runtime, compiled in only when used",
               "An encoding named at run time dispatches in C, case-insensitively; an unknown one throws `ERR_UNKNOWN_ENCODING`. `Buffer.byteLength` follows Node's per-encoding formula ([ADR-01169](../adr/01/ADR-01169.md))",

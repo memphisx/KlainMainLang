@@ -71,7 +71,7 @@ console.log(keys.includes("KML_ENUM_A"), keys.includes("KML_ENUM_B"), keys.lengt
 let seen = 0
 for (const k in process.env) { if (k.startsWith("KML_ENUM_")) seen++ }
 console.log(seen)
-const copy = { ...process.env, KML_ENUM_C: "3" }
+const copy: NodeJS.ProcessEnv = { ...process.env, KML_ENUM_C: "3" }
 console.log(copy.KML_ENUM_A, copy.KML_ENUM_B, copy.KML_ENUM_C)
 const env = process.env
 console.log(env.KML_ENUM_B, env["KML_ENUM_A"], env.KML_ENUM_MISSING)

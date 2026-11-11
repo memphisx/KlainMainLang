@@ -70,7 +70,7 @@ func (c *Checker) callSiteParam(fn ast.Node, i int) *Type {
 		return r
 	}
 	if t.busy[key] {
-		return c.unanswered // the argument depends on the parameter itself
+		return c.anyT // the argument depends on the parameter itself
 	}
 	t.busy[key] = true
 	sites, known := c.sitesOf(fn)
@@ -80,12 +80,16 @@ func (c *Checker) callSiteParam(fn ast.Node, i int) *Type {
 		// codegen compiles a function some caller tags with.
 		r = c.anyT
 	} else if known {
-		r = c.inferFromSites(sites, i)
-	} else if c.isMethod(fn) || c.isReturnedFunction(fn) || c.isFieldInit(fn) || c.isAssignedValue(fn) || c.isMemberReceiver(fn) || c.isArrayElement(fn) || c.isTemplateTag(fn) {
+		r = c.inferFromSites(fn, sites, i)
+	} else if c.isMethod(fn) || c.isReturnedFunction(fn) || c.isFieldInit(fn) || c.isAssignedValue(fn) || c.isMemberReceiver(fn) || c.isArrayElement(fn) || c.isTemplateTag(fn) || c.isUntypedCallArg(fn) {
 		// Its receiver, whoever takes the returned function, whoever reads
 		// the field, the member read off it (`.call(…)`, `.apply(…)`), or
 		// whoever reads the array it is an element of decides the call:
 		// any, as checkJs gives.
+		r = c.anyT
+	} else if c.isOperandFunction(fn) {
+		// A function only operated on (`typeof (a => 1)`, `Object.keys(
+		// function (a) {})`): nothing calls it, any as checkJs gives.
 		r = c.anyT
 	}
 	delete(t.busy, key)
@@ -93,8 +97,10 @@ func (c *Checker) callSiteParam(fn ast.Node, i int) *Type {
 	return r
 }
 
-func (c *Checker) inferFromSites(sites [][]ast.Expression, i int) *Type {
+func (c *Checker) inferFromSites(fn ast.Node, sites [][]ast.Expression, i int) *Type {
 	var first *Type
+	sensitive := false // a site passes a value typed only by its context
+	self := c.paramSymbol(fn, i)
 	for _, args := range sites {
 		if i >= len(args) {
 			spread := false
@@ -108,7 +114,17 @@ func (c *Checker) inferFromSites(sites [][]ast.Expression, i int) *Type {
 			}
 			continue
 		}
+		if isEmptyArrayLiteral(args[i]) {
+			continue // (`[]` takes its type from the other sites)
+		}
 		if contextSensitive(args[i]) {
+			sensitive = true
+			continue
+		}
+		if self != nil && c.reads(args[i], self) {
+			// A recursive call passing what it computes from the parameter
+			// (`fact(n - 1)`): its type is the parameter's own, which the
+			// other sites decide, whichever query first reaches it.
 			continue
 		}
 		at := c.TypeOf(args[i])
@@ -132,7 +148,10 @@ func (c *Checker) inferFromSites(sites [][]ast.Expression, i int) *Type {
 			return c.anyT // a polymorphic parameter
 		}
 	}
-	if first == nil {
+	if first == nil || sensitive {
+		// No site typed it, or one passes a function (or a literal holding
+		// one) whose type only its context gives: that value may differ from
+		// the typed sites' (`take(() => 1); take((n) => n)`), so any.
 		return c.anyT
 	}
 	return first
@@ -233,6 +252,22 @@ func (c *Checker) isAssignedValue(fn ast.Node) bool {
 	}
 	a, ok := c.parentOf(fn).(*ast.AssignmentExpression)
 	return ok && a.Op == "=" && ast.Node(a.Right) == fn
+}
+
+// isUntypedCallArg reports a function literal passed to a callee the
+// checker has no type for (a member one union member lacks: `x.forEach(…)`
+// on `number | number[]`): the callee calls it, any as checkJs gives.
+func (c *Checker) isUntypedCallArg(fn ast.Node) bool {
+	switch fn.(type) {
+	case *ast.FunctionExpression, *ast.ArrowFunction:
+	default:
+		return false
+	}
+	call, ok := c.parentOf(fn).(*ast.CallExpression)
+	if !ok || ast.Node(call.Callee) == fn {
+		return false
+	}
+	return c.Unanswered(c.TypeOf(call.Callee))
 }
 
 // isArrayElement reports a function literal written as an array literal's
@@ -491,4 +526,123 @@ func (c *Checker) jsMethodAssignedMember(m *Type, name string) *Type {
 		return c.in.union(ts...)
 	}
 	return nil
+}
+
+// paramSymbol is the symbol of fn's parameter i, nil for a pattern or rest.
+func (c *Checker) paramSymbol(fn ast.Node, i int) *binder.Symbol {
+	ps, _ := funcParams(fn)
+	if i >= len(ps) || ps[i].Name == "" || ps[i].Rest {
+		return nil
+	}
+	scope := c.b.ScopeOf(fn)
+	if scope == nil {
+		return nil
+	}
+	return scope.Symbols.Get(ps[i].Name)
+}
+
+// reads reports whether e reads sym.
+func (c *Checker) reads(e ast.Expression, sym *binder.Symbol) bool {
+	found := false
+	ast.Inspect(e, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Identifier); ok {
+			if s, _ := c.b.Resolve(id); s == sym {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// hoistedVarRead reports, in JavaScript, a read of an unannotated `var`
+// that may run before the declaration stores into it: a path from the
+// function's entry that skips every store, or a closure that exists before
+// the declaration runs (a function declaration, or one written before it).
+// The value read there is undefined; tsc (which reports the first form,
+// TS2454) types it as the declared type alone.
+func (c *Checker) hoistedVarRead(id *ast.Identifier, sym *binder.Symbol) bool {
+	if !c.opts.CompatJS() || len(sym.Declarations) != 1 {
+		return false
+	}
+	d, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
+	if !ok || d.Kind != "var" || d.TypeAnnot != nil || c.ownInitializerRead(id, sym) {
+		return false
+	}
+	if c.b.UnassignedVarRead(id, func(*binder.FlowNode) bool { return false }) {
+		return true
+	}
+	home := c.enclosingFn(d)
+	var outer ast.Node // the outermost function holding id below home
+	for cur := c.parentOf(id); cur != nil && cur != home; cur = c.parentOf(cur) {
+		switch cur.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction:
+			outer = cur
+		}
+	}
+	if outer == nil {
+		return false
+	}
+	switch c.parentOf(outer).(type) {
+	case *ast.ClassDeclaration, *ast.ClassExpression:
+		// A method runs once its class is evaluated, in order.
+		outer = c.parentOf(outer)
+	default:
+		if _, decl := outer.(*ast.FunctionDeclaration); decl {
+			return true
+		}
+	}
+	p, dp := outer.GetPos(), d.GetPos()
+	return p.Line < dp.Line || p.Line == dp.Line && p.Col < dp.Col
+}
+
+// enclosingFn is the function holding n, or nil at the top level.
+func (c *Checker) enclosingFn(n ast.Node) ast.Node {
+	for cur := c.parentOf(n); cur != nil; cur = c.parentOf(cur) {
+		switch cur.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction:
+			return cur
+		}
+	}
+	return nil
+}
+
+// namespaceObjects are the builtin globals that are plain objects, neither
+// callable nor constructible.
+var namespaceObjects = map[string]bool{"Math": true, "JSON": true, "Reflect": true, "Atomics": true, "console": true, "globalThis": true}
+
+// namespaceObjectRef reports x naming one of the namespaceObjects, the
+// library's own global (no declaration of the program's shadows it).
+func (c *Checker) namespaceObjectRef(x ast.Expression) bool {
+	id, ok := x.(*ast.Identifier)
+	if !ok || !namespaceObjects[id.Name] || c.b.Globals == nil {
+		return false
+	}
+	sym, _ := c.b.Resolve(id)
+	return sym != nil && sym == c.b.Globals.Symbols.Get(id.Name)
+}
+
+// namespaceObjectNew is namespaceObjectRef for `new X(…)`.
+func (c *Checker) namespaceObjectNew(n *ast.NewExpression) bool {
+	if n.Callee != nil || n.Qualified || !namespaceObjects[n.ClassName] || c.b.Globals == nil {
+		return false
+	}
+	sym := c.b.NewTarget(n)
+	return sym != nil && sym == c.b.Globals.Symbols.Get(n.ClassName)
+}
+
+// isOperandFunction reports a function literal no binding holds: an operand
+// of an operator, or an argument (its callee typed or not).
+func (c *Checker) isOperandFunction(fn ast.Node) bool {
+	switch x := c.parentOf(fn).(type) {
+	case *ast.UnaryExpression, *ast.BinaryExpression, *ast.ExpressionStatement, *ast.TemplateLiteral:
+		return true
+	case *ast.CallExpression:
+		return ast.Node(x.Callee) != fn
+	case *ast.ConditionalExpression:
+		// A branch's function flows on with the conditional's value: no
+		// call site of its own types its parameters.
+		return ast.Node(x.Test) != fn
+	}
+	return false
 }

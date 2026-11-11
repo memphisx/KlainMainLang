@@ -34,6 +34,9 @@ extern long long __kml_promise_inspect_parts(void *o, long long *out);
 extern char *__kml_error_inspect(void *o);
 extern char *__kml_obj_inspect_custom(void *o, long long depth);
 extern char *__kml_obj_tostring_tag(void *o);
+/* An instance of a class extending Number, String or Boolean: its boxed
+   primitive; 0 otherwise (unitreg.c). */
+extern long long __kml_obj_prim(void *o);
 /* A boxed bigint is a { magic, bigint* } cell (emit_bigint_box.go); its
    digits come from an IR hook that exists whether or not the program links
    the bigint runtime (TDD-00229). */
@@ -195,7 +198,7 @@ static void sb_ch(Sb *b, char c) {
 
 static void sb_raw(Sb *b, const char *s, long long n) {
     sb_need(b, n);
-    memcpy(b->d + b->len, s, (size_t)n);
+    kml_copy(KML_HEAP_RAW, b->d + b->len, s, (size_t)n);
     b->len += n;
 }
 
@@ -206,7 +209,7 @@ static void sb_cstr(Sb *b, const char *s) { sb_raw(b, s, (long long)strlen(s)); 
 static char *sb_finish(Sb *b) {
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)(8 + b->len + 1));
     *(long long *)base = b->len;
-    memcpy(base + 8, b->d, (size_t)b->len);
+    kml_copy(KML_HEAP_RAW, base + 8, b->d, (size_t)b->len);
     base[8 + b->len] = 0;
     free(b->d); /* scratch */
     return base + 8;
@@ -264,7 +267,7 @@ static void sb_number(Sb *b, long long tag, long long pay) {
         return;
     }
     double d;
-    memcpy(&d, &pay, 8);
+    memcpy(&d, &pay, 8); /* scratch */
     if (d != d || d > 1.7976931348623157e308 || d < -1.7976931348623157e308) {
         sb_cstr(b, "null"); /* JSON: NaN/Infinity serialize as null */
         return;
@@ -286,12 +289,43 @@ static void sb_indent(Sb *b, const char *indent, int depth) {
     for (int i = 0; i < depth + kj_json_base; i++) sb_cstr(b, indent);
 }
 
-/* The walk's path, for a cycle's message: kj_pkey[d] / kj_pidx[d] is the key
-   (or array index, kj_pkey NULL) the value at depth d was reached under, and
-   kj_ptag[d] the kind of parents[d]. */
-static _Thread_local const char *kj_pkey[KML_DYN_MAX_DEPTH + 1];
-static _Thread_local long long kj_pidx[KML_DYN_MAX_DEPTH + 1];
-static _Thread_local int kj_ptag[KML_DYN_MAX_DEPTH + 1];
+/* The walk's path, as deep as the walk goes (a cycle test and a cycle's
+   message): at depth d, par is the object entered, tag its kind, and key /
+   idx the key (or array index, key NULL) its value was reached under. A
+   walk's depth d is slot kj_base + d: a walk a toJSON starts within another
+   one takes the slots past the outer walk's (kj_used). Always indexed
+   through kjp, which grows. */
+static _Thread_local struct {
+    void **par;
+    const char **key;
+    long long *idx;
+    int *tag;
+    long long cap;
+} kjp;
+static _Thread_local long long kj_base, kj_used;
+/* The frame of the innermost walk running: a walk entered from deeper in
+   the stack runs within it; one entered from no deeper finds it gone (it
+   threw out of a toJSON) and starts the path afresh. */
+static _Thread_local char *kj_walk_frame;
+
+static void kjp_reserve(long long n) {
+    if (n <= kjp.cap) return;
+    long long cap = kjp.cap ? kjp.cap : 256;
+    while (cap < n) cap *= 2;
+    kjp.par = (void **)realloc(kjp.par, (size_t)cap * sizeof *kjp.par);       /* scratch */
+    kjp.key = (const char **)realloc(kjp.key, (size_t)cap * sizeof *kjp.key); /* scratch */
+    kjp.idx = (long long *)realloc(kjp.idx, (size_t)cap * sizeof *kjp.idx);  /* scratch */
+    kjp.tag = (int *)realloc(kjp.tag, (size_t)cap * sizeof *kjp.tag);         /* scratch */
+    kjp.cap = cap;
+}
+
+/* Slot d of the current walk, reserved and counted as used. */
+static long long kj_slot(int d) {
+    long long i = kj_base + d;
+    kjp_reserve(i + 1);
+    if (i + 1 > kj_used) kj_used = i + 1;
+    return i;
+}
 static _Thread_local char *kj_circ_msg;
 /* kj_tojson_done: the depth whose value is a toJSON result (-1 for none). */
 static _Thread_local int kj_tojson_done = -1;
@@ -321,19 +355,20 @@ static long long kj_tojson(long long tag, long long pay, long long w, const char
 }
 
 static void kj_key(int d, const char *k, long long i) {
-    if (d > KML_DYN_MAX_DEPTH) return;
-    kj_pkey[d] = k;
-    kj_pidx[d] = i;
+    long long s = kj_slot(d);
+    kjp.key[s] = k;
+    kjp.idx[s] = i;
 }
 
 static const char *kj_typed_name_of(const void *box);
-static void kj_ctor_name(Sb *m, int d, void **parents) {
+static void kj_ctor_name(Sb *m, int d) {
     const char *name = "Object";
-    switch (kj_ptag[d]) {
+    long long s = kj_slot(d);
+    switch (kjp.tag[s]) {
     case 11: name = "Array"; break;
-    case 7: name = kj_typed_name_of(parents[d]); break;
+    case 7: name = kj_typed_name_of(kjp.par[s]); break;
     case 6: {
-        const char *n = __kml_obj_name(parents[d]);
+        const char *n = __kml_obj_name(kjp.par[s]);
         if (n && n[0]) name = n;
         break;
     }
@@ -345,37 +380,38 @@ static void kj_ctor_name(Sb *m, int d, void **parents) {
 
 static void kj_key_text(Sb *m, int d) {
     char tmp[32];
-    if (kj_pkey[d] == NULL) {
-        snprintf(tmp, sizeof tmp, "index %lld", kj_pidx[d]);
+    long long s = kj_slot(d);
+    if (kjp.key[s] == NULL) {
+        snprintf(tmp, sizeof tmp, "index %lld", kjp.idx[s]);
         sb_cstr(m, tmp);
         return;
     }
     sb_cstr(m, "property '");
-    sb_cstr(m, kj_pkey[d]);
+    sb_cstr(m, kjp.key[s]);
     sb_ch(m, '\'');
 }
 
-static void kj_line(Sb *m, int d, void **parents) {
+static void kj_line(Sb *m, int d) {
     sb_cstr(m, "\n    |     ");
     kj_key_text(m, d);
     sb_cstr(m, " -> object with constructor ");
-    kj_ctor_name(m, d, parents);
+    kj_ctor_name(m, d);
 }
 
 /* V8's JsonStringifier::ConstructCircularStructureErrorMessage: the cycle
    from its start, the first two links after it, `...` for the elided middle,
    the last, and the key that closes it. */
-static void kj_circular(void **parents, int start, int depth) {
+static void kj_circular(int start, int depth) {
     Sb m;
     sb_init(&m);
     sb_cstr(&m, "Converting circular structure to JSON\n    --> starting at object with constructor ");
-    kj_ctor_name(&m, start, parents);
+    kj_ctor_name(&m, start);
     int i = start + 1;
     int prefix_end = depth < i + 2 ? depth : i + 2;
-    for (; i < prefix_end; i++) kj_line(&m, i, parents);
+    for (; i < prefix_end; i++) kj_line(&m, i);
     if (depth > i + 1) sb_cstr(&m, "\n    |     ...");
     if (i < depth - 1) i = depth - 1;
-    for (; i < depth; i++) kj_line(&m, i, parents);
+    for (; i < depth; i++) kj_line(&m, i);
     sb_cstr(&m, "\n    --- ");
     kj_key_text(&m, depth);
     sb_cstr(&m, " closes the circle");
@@ -387,21 +423,17 @@ char *__kml_dynjson_circ_msg(void) { return kj_circ_msg; }
 
 /* kj_enter puts object p (of kind tag) on the walk's path at depth: 0 with
    err 1 on a cycle (or a path past the depth limit). */
-static int kj_enter(void *p, int tag, void **parents, int depth, int *err) {
-    if (depth >= KML_DYN_MAX_DEPTH) {
-        *err = 1;
-        kj_circ_msg = NULL;
-        return 0;
-    }
+static int kj_enter(void *p, int tag, int depth, int *err) {
+    long long s = kj_slot(depth);
     for (int i = 0; i < depth; i++) {
-        if (parents[i] == p) {
+        if (kjp.par[kj_base + i] == p) {
             *err = 1;
-            kj_circular(parents, i, depth);
+            kj_circular(i, depth);
             return 0;
         }
     }
-    parents[depth] = p;
-    kj_ptag[depth] = tag;
+    kjp.par[s] = p;
+    kjp.tag[s] = tag;
     return 1;
 }
 
@@ -410,13 +442,13 @@ static int kj_enter(void *p, int tag, void **parents, int depth, int *err) {
    funcRef in an object position). `indent` is the pretty-print unit (one
    level) or NULL/"" for compact output byte-identical to the pre-pretty path. */
 static int stringify_val(Sb *b, long long tag, long long pay,
-                         const char *indent, void **parents, int depth, int *err);
+                         const char *indent, int depth, int *err);
 
 /* stringify_static serializes a static object through its layout row: each
    key in declaration order, its value read by name. */
 static int stringify_static(Sb *b, void *o, long long n, const char *indent,
-                            void **parents, int depth, int *err) {
-    if (!kj_enter(o, 6, parents, depth, err)) return 0;
+                            int depth, int *err) {
+    if (!kj_enter(o, 6, depth, err)) return 0;
     int pretty = indent && indent[0];
     int wrote = 0;
     sb_ch(b, '{');
@@ -428,7 +460,7 @@ static int stringify_static(Sb *b, void *o, long long n, const char *indent,
         kj_key(depth + 1, k, 0);
         Sb probe;
         sb_init(&probe);
-        int ok = stringify_val(&probe, etag, epay, indent, parents, depth + 1, err);
+        int ok = stringify_val(&probe, etag, epay, indent, depth + 1, err);
         if (*err) {
             free(probe.d); /* scratch */
             return 0;
@@ -449,15 +481,16 @@ static int stringify_static(Sb *b, void *o, long long n, const char *indent,
 }
 
 static int stringify_val(Sb *b, long long tag, long long pay,
-                         const char *indent, void **parents, int depth, int *err) {
+                         const char *indent, int depth, int *err) {
     /* An object's own or inherited toJSON(key) replaces it (a host box's —
        a Date's — is its tojson row, below). */
     if (kj_tojson_done != depth && (tag == 10 || (tag == 6 && pay && !is_host_box(pay) &&
                                                  !(*(long long *)pay & (1LL << 48))))) {
         char idx[32];
-        const char *key = depth <= KML_DYN_MAX_DEPTH ? kj_pkey[depth] : "";
+        long long ks = kj_slot(depth);
+        const char *key = kjp.key[ks];
         if (!key) {
-            snprintf(idx, sizeof idx, "%lld", kj_pidx[depth]);
+            snprintf(idx, sizeof idx, "%lld", kjp.idx[ks]);
             key = idx;
         }
         long long w = nb_pack(tag, pay);
@@ -469,9 +502,18 @@ static int stringify_val(Sb *b, long long tag, long long pay,
                as it is (its own properties still get theirs). */
             int saved = kj_tojson_done;
             kj_tojson_done = depth;
-            int ok = stringify_val(b, rt, rp, indent, parents, depth, err);
+            int ok = stringify_val(b, rt, rp, indent, depth, err);
             kj_tojson_done = saved;
             return ok;
+        }
+    }
+    if (tag == 6 && pay && !is_host_box(pay)) {
+        /* An instance of a class extending Number (String, Boolean) too. */
+        long long w = __kml_obj_prim((void *)pay);
+        if (w) {
+            long long ut, up;
+            nb_decode(w, &ut, &up);
+            return stringify_val(b, ut, up, indent, depth, err);
         }
     }
     if (tag == 6 && is_host_box(pay)) {
@@ -480,7 +522,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         if (u != w) {
             long long ut, up;
             nb_decode(u, &ut, &up);
-            return stringify_val(b, ut, up, indent, parents, depth, err);
+            return stringify_val(b, ut, up, indent, depth, err);
         }
     }
     switch (tag) {
@@ -521,7 +563,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
                 sb_cstr(b, "{}");
                 return 1;
             }
-            return stringify_static(b, (void *)pay, en, indent, parents, depth, err);
+            return stringify_static(b, (void *)pay, en, indent, depth, err);
         }
         if (is_host_box(pay)) {
             char *js = __kml_host_tojson((void *)pay);
@@ -534,7 +576,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
            (KlainMainLang TDD-00233); a host box has none. */
         long long sn = pay && !is_host_box(pay) ? __kml_obj_nkeys((void *)pay) : (is_host_box(pay) ? 0 : -1);
         if (sn >= 0)
-            return stringify_static(b, (void *)pay, sn, indent, parents, depth, err);
+            return stringify_static(b, (void *)pay, sn, indent, depth, err);
         *err = 2;
         return 0;
     }
@@ -572,7 +614,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
             sb_ch(b, '}');
             return 1;
         }
-        if (!kj_enter((void *)pay, 7, parents, depth, err)) return 0;
+        if (!kj_enter((void *)pay, 7, depth, err)) return 0;
         /* An Arguments object is an object of its index keys too, an
            undefined value's key left out. */
         int obj7 = typed || kj_is_args((const struct KjBoxS *)pay);
@@ -590,7 +632,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
                 sb_json_bytes(b, key, (long long)strlen(key));
                 sb_cstr(b, pretty7 ? ": " : ":");
             }
-            if (!stringify_val(b, etag, epay, indent, parents, depth + 1, err)) {
+            if (!stringify_val(b, etag, epay, indent, depth + 1, err)) {
                 if (*err) return 0;
                 sb_cstr(b, "null"); /* an undefined element → null */
             }
@@ -606,7 +648,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         *err = 2; /* funcRef/stream: no runtime shape to walk */
         return 0;
     }
-    if (!kj_enter((void *)pay, (int)tag, parents, depth, err)) return 0;
+    if (!kj_enter((void *)pay, (int)tag, depth, err)) return 0;
     int pretty = indent && indent[0];
     if (tag == 11) {
         char *a = (char *)pay;
@@ -616,7 +658,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
             kj_key(depth + 1, NULL, i);
             if (i) sb_ch(b, ',');
             if (pretty) sb_indent(b, indent, depth + 1);
-            if (!stringify_val(b, arr_tag(a, i), arr_pay(a, i), indent, parents, depth + 1, err)) {
+            if (!stringify_val(b, arr_tag(a, i), arr_pay(a, i), indent, depth + 1, err)) {
                 if (*err) return 0;
                 sb_cstr(b, "null"); /* array holes/undefined → null */
             }
@@ -626,7 +668,14 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         return 1;
     }
     char *o = (char *)pay;
-    if (*(long long *)o & (1LL << 33)) {
+    if ((*(long long *)o & KML_BAG_PROXY) && !*(char **)(o + 8)) {
+        /* A Proxy whose target is no dynamic object (an array): the
+           target as itself, as IsArray sees through a Proxy. */
+        long long ttag, tpay;
+        nb_decode(((long long *)o)[4], &ttag, &tpay);
+        return stringify_val(b, ttag, tpay, indent, depth, err);
+    }
+    if (*(long long *)o & KML_BAG_PROXY) {
         /* A Proxy: its enumerable own keys ([[OwnPropertyKeys]] and
            [[GetOwnProperty]], its traps), each value through [[Get]]. */
         long long kn;
@@ -639,7 +688,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
             kj_key(depth + 1, keys[i], 0);
             Sb probe;
             sb_init(&probe);
-            int ok = stringify_val(&probe, etag, epay, indent, parents, depth + 1, err);
+            int ok = stringify_val(&probe, etag, epay, indent, depth + 1, err);
             if (*err) {
                 free(probe.d); /* scratch */
                 return 0;
@@ -658,7 +707,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         sb_ch(b, '}');
         return 1;
     }
-    if (*(long long *)o & (1LL << 35)) {
+    if (*(long long *)o & KML_BAG_ARRAY) {
         /* Array.prototype: an empty Array. */
         sb_cstr(b, "[]");
         return 1;
@@ -693,7 +742,7 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         kj_key(depth + 1, obj_key(o, i), 0);
         Sb probe; /* value may be skippable — write to a probe first */
         sb_init(&probe);
-        int ok = stringify_val(&probe, etag, epay, indent, parents, depth + 1, err);
+        int ok = stringify_val(&probe, etag, epay, indent, depth + 1, err);
         if (*err) {
             free(probe.d); /* scratch */
             free(order); /* scratch */
@@ -724,15 +773,24 @@ static int stringify_val(Sb *b, long long tag, long long pay,
    err: 1 = circular structure, 2 = statically-typed value in the tree. */
 char *__kml_dynjson_stringify_at(long long tag, long long pay,
                                  const char *indent, long long base, int *err) {
-    void *parents[KML_DYN_MAX_DEPTH];
     *err = 0;
+    /* This walk's path starts past any walk it runs within (a toJSON's). */
+    char here;
+    if (!kj_walk_frame || &here >= kj_walk_frame) kj_base = kj_used = 0;
+    long long saved_base = kj_base, saved_used = kj_used;
+    char *saved_frame = kj_walk_frame;
+    kj_base = kj_used;
+    kj_walk_frame = &here;
     Sb b;
     sb_init(&b);
     int saved = kj_json_base;
     kj_json_base = (int)base;
     kj_key(0, "", 0);
-    int ok = stringify_val(&b, tag, pay, indent, parents, 0, err);
+    int ok = stringify_val(&b, tag, pay, indent, 0, err);
     kj_json_base = saved;
+    kj_base = saved_base;
+    kj_used = saved_used;
+    kj_walk_frame = saved_frame;
     if (*err || !ok) {
         free(b.d); /* scratch */
         return NULL;
@@ -772,7 +830,7 @@ static void join_val(Sb *b, long long tag, long long pay, int depth) {
         break;
     case 1: {
         double d;
-        memcpy(&d, &pay, 8);
+        memcpy(&d, &pay, 8); /* scratch */
         __kml_dtoa(tmp, d);
         sb_cstr(b, tmp);
         break;
@@ -911,9 +969,20 @@ static const char *ctor_name(char *o) {
     return NULL;
 }
 
+char *__kml_any_inspect_at(long long v, long long depth);
 static void inspect_obj(Sb *b, char *o, int depth) {
-    /* A Proxy header (flag 1<<33) forwards to its target, as JSON does. */
-    while (*(long long *)o & (1LL << 33)) o = *(char **)(o + 8);
+    /* A Proxy header (KML_BAG_PROXY) forwards to its target, as JSON does;
+       a target that is no dynamic object (an array) renders as itself. */
+    while (*(long long *)o & KML_BAG_PROXY) {
+        char *t = *(char **)(o + 8);
+        if (!t) {
+            char *s = __kml_any_inspect_at(((long long *)o)[4], depth);
+            sb_cstr(b, s);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(s));
+            return;
+        }
+        o = t;
+    }
     long long n = obj_count(o);
     long long *order = (n > 0) ? (long long *)malloc((size_t)n * sizeof(long long)) : NULL; /* scratch */
     if (order) n = es_order(o, n, order);
@@ -922,10 +991,10 @@ static void inspect_obj(Sb *b, char *o, int depth) {
         long long i = order ? order[oi] : oi;
         if (obj_attrs(o, i) & 2) visible++;
     }
-    /* A null-prototype object (flag 1<<34) is prefixed the way util.inspect
+    /* A null-prototype object (KML_BAG_NULLPROTO) is prefixed the way util.inspect
        does; past the depth cap it collapses to the bare tag. Node prints an
        empty object as `{}` even past the depth cap. */
-    int nullproto = (*(long long *)o & (1LL << 34)) != 0;
+    int nullproto = (*(long long *)o & KML_BAG_NULLPROTO) != 0;
     /* A Symbol.toStringTag names the object: `Object [Math] {}`. */
     /* Not when the tag is an own enumerable property, which the entries
        already show (util.inspect's rule). */
@@ -933,11 +1002,11 @@ static void inspect_obj(Sb *b, char *o, int depth) {
     for (long long i = 0; stag && i < obj_count(o); i++)
         if (strcmp(obj_key(o, i), "@@toStringTag") == 0 && (obj_attrs(o, i) & 2)) stag = NULL;
     char open[128];
-    if (*(long long *)o & (1LL << 35)) {
+    if (*(long long *)o & KML_BAG_ARRAY) {
         /* Array.prototype: an Array whose constructor is not its own. */
         if (visible == 0) { free(order); sb_cstr(b, "Object(0) []"); return; } /* scratch */
     }
-    if (*(long long *)o & (1LL << 36)) snprintf(open, sizeof open, "[Module: null prototype] {");
+    if (*(long long *)o & KML_BAG_MODULE) snprintf(open, sizeof open, "[Module: null prototype] {");
     else if (stag) snprintf(open, sizeof open, "%s [%s] {", nullproto ? "[Object: null prototype]" : "Object", stag);
     else if (!nullproto && ctor_name(o)) snprintf(open, sizeof open, "%.100s {", ctor_name(o));
     else snprintf(open, sizeof open, "%s", nullproto ? "[Object: null prototype] {" : "{");
@@ -981,7 +1050,7 @@ static void inspect_obj(Sb *b, char *o, int depth) {
        80-column single-line budget exactly as Node's braces[0] does. */
     char *out = __kml_inspect_end(list, open, "}", 2 * depth, depth, 0, 0);
     sb_cstr(b, out);
-    kml_free(KML_HEAP_RAW, out - 8);
+    kml_free(KML_HEAP_RAW, KML_PREFIX(out));
 }
 
 char *__kml_dynobj_inspect_at(char *o, long long depth) {
@@ -1047,7 +1116,7 @@ static void push_arr_extras(void *list, void *owner, int depth) {
             } else {
                 char *q = __kml_inspect_quote(k);
                 sb_cstr(&eb, q);
-                kml_free(KML_HEAP_RAW, q - 8);
+                kml_free(KML_HEAP_RAW, KML_PREFIX(q));
             }
             sb_cstr(&eb, ": ");
             long long w = 10, etag, epay;
@@ -1103,7 +1172,7 @@ static void inspect_arr(Sb *b, char *a, int depth) {
     }
     char *out = __kml_inspect_end(list, "[", "]", 2 * depth, depth, 1, numeric);
     sb_cstr(b, out);
-    kml_free(KML_HEAP_RAW, out - 8);
+    kml_free(KML_HEAP_RAW, KML_PREFIX(out));
 }
 
 /* inspect_static renders a static object through its layout row as
@@ -1157,7 +1226,7 @@ static void inspect_static(Sb *b, void *o, long long n, int depth) {
         } else {
             char *q = __kml_inspect_quote(k);
             sb_cstr(&eb, q);
-            kml_free(KML_HEAP_RAW, q - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(q));
         }
         sb_cstr(&eb, ": ");
         int acc = __kml_obj_accessor(o, k);
@@ -1173,7 +1242,7 @@ static void inspect_static(Sb *b, void *o, long long n, int depth) {
     }
     char *out = __kml_inspect_end(list, open, "}", 2 * depth, depth, 0, 0);
     sb_cstr(b, out);
-    kml_free(KML_HEAP_RAW, out - 8);
+    kml_free(KML_HEAP_RAW, KML_PREFIX(out));
 }
 
 /* An Error as util.inspect shows it, without the stack's frames: the
@@ -1272,7 +1341,7 @@ static void inspect_error(Sb *b, void *o, int depth) {
         } else {
             char *q = __kml_inspect_quote(k);
             sb_cstr(b, q);
-            kml_free(KML_HEAP_RAW, q - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(q));
         }
         sb_cstr(b, ": ");
         long long etag, epay;
@@ -1307,7 +1376,7 @@ static void inspect_error(Sb *b, void *o, int depth) {
             }
             char *out = __kml_inspect_end(list, "[", "]", 2 * (depth + 1), depth + 1, 1, 0);
             sb_cstr(b, out);
-            kml_free(KML_HEAP_RAW, out - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(out));
         }
     }
     sb_ch(b, '\n');
@@ -1343,7 +1412,7 @@ static int inspect_classref(Sb *b, void *pay, int depth) {
         } else {
             char *q = __kml_inspect_quote(k);
             sb_cstr(&eb, q);
-            kml_free(KML_HEAP_RAW, q - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(q));
         }
         sb_cstr(&eb, ": ");
         long long etag, epay;
@@ -1357,9 +1426,9 @@ static int inspect_classref(Sb *b, void *pay, int depth) {
     sb_cstr(&ob, " {");
     char *open = sb_finish(&ob);
     char *out = __kml_inspect_end(list, open, "}", 2 * depth, depth, 0, 0);
-    kml_free(KML_HEAP_RAW, open - 8);
+    kml_free(KML_HEAP_RAW, KML_PREFIX(open));
     sb_cstr(b, out);
-    kml_free(KML_HEAP_RAW, out - 8);
+    kml_free(KML_HEAP_RAW, KML_PREFIX(out));
     return 1;
 }
 
@@ -1402,7 +1471,7 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
         break;
     case 1: {
         double d;
-        memcpy(&d, &pay, 8);
+        memcpy(&d, &pay, 8); /* scratch */
         if (d == 0 && signbit(d)) {
             sb_cstr(b, "-0"); /* util.inspect shows the sign */
             break;
@@ -1414,7 +1483,7 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
     case 2: {
         char *q = __kml_inspect_quote((const char *)pay);
         sb_cstr(b, q);
-        kml_free(KML_HEAP_RAW, q - 8);
+        kml_free(KML_HEAP_RAW, KML_PREFIX(q));
         break;
     }
     case 3:
@@ -1436,6 +1505,12 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
         if (is_boxed_bigint(pay)) {
             sb_cstr(b, __kml_boxed_bigint_str((void *)pay));
             sb_ch(b, 'n');
+        } else if (pay && (*(const long long *)pay & (1LL << 47))) {
+            /* A symbol (its header's symbol bit): Symbol(description). */
+            const char *desc = *(const char **)((char *)pay + 8);
+            sb_cstr(b, "Symbol(");
+            sb_cstr(b, desc ? desc : "");
+            sb_ch(b, ')');
         } else if (is_host_box(pay)) {
             char *hs = __kml_host_inspect((void *)pay, depth);
             sb_cstr(b, hs);
@@ -1460,7 +1535,7 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
                 __kml_inspect_push(list, sb_finish(&eb));
                 char *out = __kml_inspect_end(list, "Promise {", "}", 2 * depth, depth, 0, 0);
                 sb_cstr(b, out);
-                kml_free(KML_HEAP_RAW, out - 8);
+                kml_free(KML_HEAP_RAW, KML_PREFIX(out));
             }
         } else {
             long long sn = pay ? __kml_obj_nkeys((void *)pay) : -1;
@@ -1479,7 +1554,7 @@ static void inspect_val(Sb *b, long long tag, long long pay, int depth) {
         {
             char *fs = __kml_fn_inspect_dyn((void **)pay, depth);
             sb_cstr(b, fs);
-            kml_free(KML_HEAP_RAW, fs - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(fs));
         }
         break;
     case 7:
@@ -1667,13 +1742,13 @@ const char *__kml_anyarr_class_name(void *box) {
 static long long nb_double(double d) {
     unsigned long long bits;
     if (d != d) bits = 0x7FF8000000000000ULL;
-    else memcpy(&bits, &d, 8);
+    else memcpy(&bits, &d, 8); /* scratch */
     return (long long)(bits + (1ULL << 49));
 }
 static long long nb_pack(long long tag, long long pay) {
     switch (tag) {
     case 0: return nb_double((double)pay);
-    case 1: { double d; memcpy(&d, &pay, 8); return nb_double(d); }
+    case 1: { double d; memcpy(&d, &pay, 8); return nb_double(d); } /* scratch */
     case 3: return pay ? 7 : 6;
     case 4: return 2;
     case 5: return 10;
@@ -1780,7 +1855,7 @@ static void kj_words_push(kj_words *w, long long v) {
         w->cap = w->cap ? w->cap * 2 : 8;
         w->d = (long long *)kml_realloc(KML_HEAP_WORDS, w->d, (size_t)w->cap * 8);
     }
-    w->d[w->n++] = v;
+    KML_STORE_PTR(&w->d[w->n++], v);
 }
 
 static void kj_flat_into(kj_words *w, long long word, long long depth) {
@@ -1839,13 +1914,13 @@ char **__kml_anyarr_keys_c(void *box, long long *n) {
             int at = __kml_shape_expando_attrs(b->hdr, base + 8);
             if (at < 0 || !(at & 2)) continue;
         }
-        arr[k++] = base + 8;
+        KML_STORE_PTR(&arr[k++], base + 8);
     }
     /* then the properties added to it, a symbol's and an element's excepted */
     for (long long i = 0; i < extra; i++) {
         const char *key = __kml_shape_expando_key(b->hdr, i);
         unsigned long long ix;
-        if (strncmp(key, "\x01@@sym:", 7) != 0 && !es_is_index(key, &ix) && (__kml_shape_expando_attrs(b->hdr, key) & 2)) arr[k++] = (char *)key;
+        if (strncmp(key, "\x01@@sym:", 7) != 0 && !es_is_index(key, &ix) && (__kml_shape_expando_attrs(b->hdr, key) & 2)) KML_STORE_PTR(&arr[k++], (char *)key);
     }
     *n = k;
     return arr;
@@ -1873,10 +1948,8 @@ static int kj_typed_esize(const KjBox *b) {
 }
 
 void *__kml_template_raw(void *cooked);
-#ifdef KML_VIEWS
 long long __kml_view_offset(void *data);
 long long __kml_view_buffer_any(void *data, long long len);
-#endif
 
 /* Array.prototype's method named key, as an array's property read finds it:
    generated when the program reads one as a value; this weak default
@@ -1891,21 +1964,21 @@ extern void __kml_shape_expando_set(void *obj, const char *key, long long value)
 extern int __kml_shape_expando_delete(void *obj, const char *key);
 extern int __kml_shape_expando_get_recv(void *obj, const char *key, long long recv, long long *out);
 extern int __kml_shape_expando_put(void *obj, const char *key, long long v, long long recv);
+extern int __kml_array_proto_set(void *hdr, void **proto);
+extern long long __kml_dynobj_get_recv(void *o, const char *key, long long recv);
 
 long long __kml_anyarr_get_by_key(void *box, const char *key) {
     KjBox *b = (KjBox *)box;
     if (strcmp(key, "length") == 0) return nb_double((double)kj_len(b));
     if (b->typed && strcmp(key, "byteLength") == 0) return nb_double((double)(kj_len(b) * kj_typed_esize(b)));
     if (b->typed && strcmp(key, "BYTES_PER_ELEMENT") == 0) return nb_double((double)kj_typed_esize(b));
-#ifdef KML_VIEWS
     if (b->typed && strcmp(key, "byteOffset") == 0) return nb_double((double)__kml_view_offset(kj_data(b)));
     if (b->typed && strcmp(key, "buffer") == 0) return __kml_view_buffer_any(kj_data(b), kj_len(b) * kj_typed_esize(b));
-#endif
     if (!b->typed && b->kind == KJ_STRING && strcmp(key, "raw") == 0) {
         void *raw = __kml_template_raw(b->hdr);
         if (!raw) return 10;
         KjBox *rb = (KjBox *)kml_calloc(KML_HEAP_WORDS, 1, sizeof *rb);
-        rb->hdr = (char *)raw;
+        KML_STORE_PTR(&rb->hdr, (char *)raw);
         rb->kind = KJ_STRING;
         return nb_pack(7, (long long)rb);
     }
@@ -1914,6 +1987,10 @@ long long __kml_anyarr_get_by_key(void *box, const char *key) {
         /* an own property added to the array (keyed by its header) */
         long long v;
         if (__kml_shape_expando_get_recv(b->hdr, key, (long long)b | 2, &v)) return v;
+        void *given;
+        if (__kml_array_proto_set(b->hdr, &given))
+            /* a prototype it was given in place of its builtin's */
+            return given ? __kml_dynobj_get_recv(given, key, (long long)b | 2) : 10;
         if (!b->typed && __kml_array_iter_override(key, &v)) return v;
         return b->typed ? (b->typed == 3 ? 10 : __kml_typed_proto_get(key)) : __kml_array_proto_get(key);
     }
@@ -2032,7 +2109,7 @@ double __kml_typed_copy_bytes(long long word, unsigned char *out, long long out_
     if (!b->typed || b->kind < 0) return 0;
     long long n = kj_len(b) * kj_typed_esize(b);
     if (n > out_len) n = out_len;
-    if (n > 0) memcpy(out, kj_data(b), (size_t)n);
+    if (n > 0) kml_copy(KML_HEAP_RAW, out, kj_data(b), (size_t)n);
     return (double)n;
 }
 
@@ -2047,7 +2124,7 @@ double __kml_typed_set_bytes(unsigned char *in, long long in_len, long long word
     if (!b->typed || b->kind < 0) return 0;
     long long n = kj_len(b) * kj_typed_esize(b);
     if (n > in_len) n = in_len;
-    if (n > 0) memcpy(kj_data(b), in, (size_t)n);
+    if (n > 0) kml_copy(KML_HEAP_RAW, kj_data(b), in, (size_t)n);
     return (double)n;
 }
 
@@ -2155,12 +2232,12 @@ static void kj_store(const KjBox *b, char *d, long long i, long long w) {
     case KJ_I8: ((signed char *)d)[i] = (signed char)(long long)any_elem_tonum(w); break;
     case KJ_U8: ((unsigned char *)d)[i] = (unsigned char)(long long)any_elem_tonum(w); break;
     case KJ_BOOL: ((signed char *)d)[i] = w == 7; break;
-    case KJ_STRING: ((char **)d)[i] = anyarr_str(w); break;
-    case KJ_ANY: ((long long *)d)[i] = w; break;
+    case KJ_STRING: KML_STORE_PTR(&((char **)d)[i], anyarr_str(w)); break;
+    case KJ_ANY: KML_STORE_PTR(&((long long *)d)[i], w); break;
     case KJ_ARRAY: {
         long long t, p;
         nb_decode(w, &t, &p);
-        ((char **)d)[i] = t == 7 ? ((KjBox *)p)->hdr : NULL;
+        KML_STORE_PTR(&((char **)d)[i], t == 7 ? ((KjBox *)p)->hdr : NULL);
         break;
     }
     }
@@ -2192,7 +2269,7 @@ void __kml_anyarr_sync(long long word, char *hdr) {
     int width = b->kind == KJ_BOXED ? b->esize : kj_width[b->kind];
     char *d = (char *)kml_calloc(kj_heap_kind(b->kind), (size_t)(n > 0 ? n : 1), (size_t)width);
     for (long long i = 0; i < n; i++) kj_store(b, d, i, src[i]);
-    *(char **)b->hdr = d;
+    KML_STORE_PTR((char **)b->hdr, d);
     *(long long *)(b->hdr + 8) = n;
 }
 
@@ -2219,7 +2296,7 @@ static void kj_set_len(KjBox *b, long long m) {
         if (n > 0) kml_copy(kj_heap_kind(b->kind), d, kj_data(b), (size_t)(n * width));
         if (b->kind == KJ_ANY)
             for (long long i = n; i < m; i++) ((long long *)d)[i] = 10;
-        *(char **)b->hdr = d;
+        KML_STORE_PTR((char **)b->hdr, d);
     }
     *(long long *)(b->hdr + 8) = m;
     __kml_holes_setlen(b->hdr, n, m);
@@ -2264,7 +2341,7 @@ int __kml_anyarr_set_by_key(void *box, const char *key, long long w) {
         if (n > 0) kml_copy(kj_heap_kind(b->kind), d, kj_data(b), (size_t)(n * width));
         if (b->kind == KJ_ANY)
             for (long long i = n; i < m; i++) ((long long *)d)[i] = 10;
-        *(char **)b->hdr = d;
+        KML_STORE_PTR((char **)b->hdr, d);
         *(long long *)(b->hdr + 8) = m;
         if ((long long)idx > n) __kml_holes_mark(b->hdr, n, (long long)idx);
     }
@@ -2318,6 +2395,12 @@ static int arr_owner(long long word, void **owner, KjBox **box) {
 
 /* The owner of a static object's (tag 6) added properties: the object;
    NULL for any other value. */
+extern long long __kml_pattr_attrs(void *obj, const char *name) __attribute__((weak));
+extern long long __kml_shape_get(void *obj, const char *key, int *found);
+extern int __kml_shape_set(void *obj, const char *key, long long value);
+extern _Bool __kml_Object_is(long long a, long long b);
+extern long long __kml_pattr_define(void *obj, const char *name, long long has, long long val, long long existed, long long same) __attribute__((weak));
+
 static void *obj_owner(long long word) {
     long long tag, pay;
     nb_decode(word, &tag, &pay);
@@ -2333,7 +2416,8 @@ static void *fn_rec(long long w) {
 /* 0: not an array; 1: defined; 2: a non-configurable property refused the
    change (TypeError "Cannot redefine property"); 3: an accessor on an
    element, which an array's element storage cannot hold; 4: a length of
-   no valid array length (RangeError "Invalid array length"). */
+   no valid array length (RangeError "Invalid array length"); 5: an index
+   past a typed array's length (TypeError "Invalid typed array index"). */
 static int elem_acc_any; /* set once an accessor element exists */
 
 int __kml_anyarr_defprop(long long word, const char *key, void *desc) {
@@ -2341,17 +2425,51 @@ int __kml_anyarr_defprop(long long word, const char *key, void *desc) {
     KjBox *b;
     int isArr = arr_owner(word, &owner, &b);
     if (!isArr) {
-        /* A static object's property beside its layout (a field keeps its
-           own path) */
+        /* A static object's property beside its layout */
         owner = obj_owner(word);
-        if (!owner || __kml_shape_has_field(owner, key)) return 0;
+        if (!owner) return 0;
     }
     long long v = __kml_dynobj_get(desc, "value"), wr = __kml_dynobj_get(desc, "writable");
     long long en = __kml_dynobj_get(desc, "enumerable"), co = __kml_dynobj_get(desc, "configurable");
     long long g = __kml_dynobj_get(desc, "get"), s = __kml_dynobj_get(desc, "set");
     int acc = g != 10 || s != 10;
+    if (!isArr && __kml_shape_has_field(owner, key) && __kml_shape_expando_attrs(owner, key) < 0) {
+        /* A declared field: its attributes are in the object's record. */
+        long long cur = __kml_pattr_attrs ? __kml_pattr_attrs(owner, key) : 0;
+        if (acc) {
+            /* Made an accessor: an added property shadowing the field, which
+               reads and writes through any find first. A non-configurable
+               field may not become one. */
+            if (cur & 4) return 2;
+            int na = ((en != 10 ? __kml_any_tobool(en) : !(cur & 2)) ? 2 : 0) |
+                     ((co != 10 ? __kml_any_tobool(co) : 1) ? 4 : 0);
+            void **pair = (void **)kml_alloc(KML_HEAP_WORDS, 3 * sizeof(void *));
+            KML_STORE_PTR(&pair[0], fn_rec(g));
+            KML_STORE_PTR(&pair[1], fn_rec(s));
+            KML_STORE_PTR(&pair[2], (void *)word);
+            __kml_shape_expando_define(owner, key, (long long)pair, na | 8);
+            return 1;
+        }
+        if (!__kml_pattr_define) return 0;
+        long long has = (wr != 10 ? 1 : 0) | (en != 10 ? 2 : 0) | (co != 10 ? 4 : 0);
+        long long val = (wr != 10 && __kml_any_tobool(wr) ? 1 : 0) | (en != 10 && __kml_any_tobool(en) ? 2 : 0) |
+                        (co != 10 && __kml_any_tobool(co) ? 4 : 0);
+        int found = 0;
+        long long now = __kml_shape_get(owner, key, &found);
+        if (__kml_pattr_define(owner, key, has, val, 1, v == 10 || __kml_Object_is(now, v))) return 2;
+        if (v != 10) __kml_shape_set(owner, key, v);
+        return 1;
+    }
     unsigned long long idx;
     int isIdx = isArr && es_is_index(key, &idx);
+    if (isIdx && b && b->typed) {
+        /* A typed array's element ([[DefineOwnProperty]] §10.4.5.3): an
+           index past its length is invalid; an element is configurable,
+           enumerable, writable data, and stays so. */
+        if ((long long)idx >= kj_len(b)) return 5;
+        if (acc || co != 10 && !__kml_any_tobool(co) || en != 10 && !__kml_any_tobool(en) ||
+            wr != 10 && !__kml_any_tobool(wr)) return 2;
+    }
     int a = __kml_shape_expando_attrs(owner, key);
     if (isArr && strcmp(key, "length") == 0 || isIdx && (b && b->typed || !acc && a < 0)) {
         if (acc) return 3;
@@ -2388,9 +2506,9 @@ int __kml_anyarr_defprop(long long word, const char *key, void *desc) {
         int na = (en != 10 && __kml_any_tobool(en) ? 2 : 0) | (co != 10 && __kml_any_tobool(co) ? 4 : 0);
         if (acc) {
             void **pair = (void **)kml_alloc(KML_HEAP_WORDS, 3 * sizeof(void *));
-            pair[0] = fn_rec(g);
-            pair[1] = fn_rec(s);
-            pair[2] = (void *)word;
+            KML_STORE_PTR(&pair[0], fn_rec(g));
+            KML_STORE_PTR(&pair[1], fn_rec(s));
+            KML_STORE_PTR(&pair[2], (void *)word);
             __kml_shape_expando_define(owner, key, (long long)pair, na | 8);
         } else {
             __kml_shape_expando_define(owner, key, v, na | (wr != 10 && __kml_any_tobool(wr) ? 1 : 0));
@@ -2414,9 +2532,9 @@ int __kml_anyarr_defprop(long long word, const char *key, void *desc) {
     if (acc) {
         void **old = wasAcc ? (void **)__kml_shape_expando_raw(owner, key) : NULL;
         void **pair = (void **)kml_alloc(KML_HEAP_WORDS, 3 * sizeof(void *));
-        pair[0] = g != 10 ? fn_rec(g) : old ? old[0] : NULL;
-        pair[1] = s != 10 ? fn_rec(s) : old ? old[1] : NULL;
-        pair[2] = (void *)word;
+        KML_STORE_PTR(&pair[0], g != 10 ? fn_rec(g) : old ? old[0] : NULL);
+        KML_STORE_PTR(&pair[1], s != 10 ? fn_rec(s) : old ? old[1] : NULL);
+        KML_STORE_PTR(&pair[2], (void *)word);
         __kml_shape_expando_define(owner, key, (long long)pair, na | 8);
     } else if (dataDesc) {
         long long nv = v != 10 ? v : wasAcc ? 10 : __kml_shape_expando_raw(owner, key);
@@ -2448,16 +2566,16 @@ char **__kml_anyarr_names_c(long long word, long long *n) {
         char *base = (char *)kml_alloc(KML_HEAP_RAW, 32);
         *(long long *)base = snprintf(base + 8, 24, "%lld", i);
         if ((b ? !b->typed && __kml_holes_is(owner, i) : __kml_dynarr_is_hole(owner, i)) && __kml_shape_expando_attrs(owner, base + 8) < 0) continue;
-        arr[k++] = base + 8;
+        KML_STORE_PTR(&arr[k++], base + 8);
     }
     if (!b || !b->typed) {
         static struct { long long n; char s[8]; } lenkey = {KML_STR_ASCII_HDR(6), "length"};
-        arr[k++] = lenkey.s;
+        KML_STORE_PTR(&arr[k++], lenkey.s);
     }
     for (long long i = 0; i < extra; i++) {
         const char *key = __kml_shape_expando_key(owner, i);
         unsigned long long ix;
-        if (strncmp(key, "\x01@@sym:", 7) != 0 && !es_is_index(key, &ix)) arr[k++] = (char *)key;
+        if (strncmp(key, "\x01@@sym:", 7) != 0 && !es_is_index(key, &ix)) KML_STORE_PTR(&arr[k++], (char *)key);
     }
     *n = k;
     return arr;
@@ -2615,7 +2733,7 @@ long long *__kml_any_arraylike_words(long long word, long long *outLen) {
         n = kj_len(b);
         buf = (long long *)kml_alloc(KML_HEAP_RAW, (size_t)(n > 0 ? n : 1) * sizeof(long long));
         for (long long i = 0; i < n; i++)
-            buf[i] = b->kind < 0 ? nb_pack(5, 0) : kj_elem_box(b, i);
+            KML_STORE_PTR(&buf[i], b->kind < 0 ? nb_pack(5, 0) : kj_elem_box(b, i));
         break;
     }
     case 11: {
@@ -2623,7 +2741,7 @@ long long *__kml_any_arraylike_words(long long word, long long *outLen) {
         n = arr_len(a);
         buf = (long long *)kml_alloc(KML_HEAP_RAW, (size_t)(n > 0 ? n : 1) * sizeof(long long));
         for (long long i = 0; i < n; i++)
-            buf[i] = nb_pack(arr_tag(a, i), arr_pay(a, i));
+            KML_STORE_PTR(&buf[i], nb_pack(arr_tag(a, i), arr_pay(a, i)));
         break;
     }
     case 2: {
@@ -2635,7 +2753,7 @@ long long *__kml_any_arraylike_words(long long word, long long *outLen) {
             *(long long *)one = 1;
             one[8] = str[i];
             one[9] = 0;
-            buf[i] = nb_pack(2, (long long)(one + 8));
+            KML_STORE_PTR(&buf[i], nb_pack(2, (long long)(one + 8)));
         }
         break;
     }
@@ -2649,7 +2767,7 @@ long long *__kml_any_arraylike_words(long long word, long long *outLen) {
         char key[32];
         for (long long i = 0; i < n; i++) {
             snprintf(key, sizeof key, "%lld", i);
-            buf[i] = __kml_dynobj_get(o, key);
+            KML_STORE_PTR(&buf[i], __kml_dynobj_get(o, key));
         }
         break;
     }
@@ -2694,7 +2812,7 @@ static void kj_elem_render(Sb *b, const KjBox *bx, long long i, int inspect, int
     case KJ_STRING: {
         char *s = ((char **)data)[i];
         if (inspect) {
-            if (s) { char *q = __kml_inspect_quote(s); sb_cstr(b, q); kml_free(KML_HEAP_RAW, q - 8); }
+            if (s) { char *q = __kml_inspect_quote(s); sb_cstr(b, q); kml_free(KML_HEAP_RAW, KML_PREFIX(q)); }
             else sb_cstr(b, "''");
         } else if (s) sb_cstr(b, s); /* a null element joins as empty */
         break;
@@ -2795,7 +2913,7 @@ static void kj_inspect(Sb *b, const KjBox *bx, int depth) {
         }
         char *out = __kml_inspect_end(list, "[Arguments] {", "}", 2 * depth, depth, 0, 0);
         sb_cstr(b, out);
-        kml_free(KML_HEAP_RAW, out - 8);
+        kml_free(KML_HEAP_RAW, KML_PREFIX(out));
         return;
     }
     if (bx->typed == 3) {
@@ -2869,7 +2987,7 @@ static void kj_inspect(Sb *b, const KjBox *bx, int depth) {
     }
     char *out = __kml_inspect_end(list, open, "]", 2 * depth, depth, 1, numeric);
     sb_cstr(b, out);
-    kml_free(KML_HEAP_RAW, out - 8);
+    kml_free(KML_HEAP_RAW, KML_PREFIX(out));
 }
 
 char *__kml_array_inspect_at(void *box, long long depth) {
@@ -2886,6 +3004,13 @@ char *__kml_array_inspect(void *box) { return __kml_array_inspect_at(box, 0); }
    an error's kind or Error subclass (`Error:<id>`), `Function`, `Promise`,
    `BigInt`, or a dynamic object's own prototype (`P:<address>`). A
    primitive's key is empty. */
+/* Whether word is a Proxy (util.types.isProxy). */
+_Bool __kml_is_proxy(long long word) {
+    long long tag, pay;
+    nb_decode(word, &tag, &pay);
+    return tag == 10 && pay && (*(long long *)pay & KML_BAG_PROXY) != 0;
+}
+
 char *__kml_proto_key(long long word) {
     long long tag, pay;
     nb_decode(word, &tag, &pay);
@@ -2905,7 +3030,7 @@ char *__kml_proto_key(long long word) {
     case 10: {
         char *o = (char *)pay;
         void *proto = __kml_dynobj_get_proto(o);
-        if (*(long long *)o & (1LL << 34)) k = "null";
+        if (*(long long *)o & KML_BAG_NULLPROTO) k = "null";
         else if (!proto) k = "Object";
         else { snprintf(buf, sizeof buf, "P:%p", proto); k = buf; }
         break;
@@ -2935,7 +3060,7 @@ char *__kml_proto_key(long long word) {
     long long n = (long long)strlen(k);
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
-    memcpy(base + 8, k, (size_t)n + 1);
+    kml_copy(KML_HEAP_RAW, base + 8, k, (size_t)n + 1);
     return base + 8;
 }
 
@@ -2954,8 +3079,8 @@ char *__kml_received(long long word) {
             /* A long string: its first 25 characters and "...", inspected. */
             cut = (char *)kml_alloc(KML_HEAP_RAW, 8 + 25 + 3 + 1);
             *(long long *)cut = 28;
-            memcpy(cut + 8, (char *)pay, 25);
-            memcpy(cut + 8 + 25, "...", 4);
+            kml_copy(KML_HEAP_RAW, cut + 8, (char *)pay, 25);
+            kml_copy(KML_HEAP_RAW, cut + 8 + 25, "...", 4);
             shownWord = (long long)(cut + 8);
         }
         char *shown = __kml_inspect_opts(shownWord, 2, 3, 0, 80, 100, 1);
@@ -2978,16 +3103,16 @@ char *__kml_received(long long word) {
             else if (strcmp(pk, "null") == 0) name = NULL;
             if (name) snprintf(buf, sizeof buf, " Received an instance of %s", name);
             else snprintf(buf, sizeof buf, " Received %s", shown);
-            kml_free(KML_HEAP_RAW, pk - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(pk));
         } else {
             snprintf(buf, sizeof buf, " Received type %s (%s)", type, shown);
         }
-        kml_free(KML_HEAP_RAW, shown - 8);
+        kml_free(KML_HEAP_RAW, KML_PREFIX(shown));
     }
     long long n = (long long)strlen(buf);
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
-    memcpy(base + 8, buf, (size_t)n + 1);
+    kml_copy(KML_HEAP_RAW, base + 8, buf, (size_t)n + 1);
     return base + 8;
 }
 
@@ -3011,7 +3136,7 @@ char *__kml_object_tostring(long long word) {
         char *pk = __kml_proto_key(word);
         k = strcmp(pk, "Buffer") == 0 ? "Uint8Array" : pk;
         snprintf(buf, sizeof buf, "[object %s]", k);
-        kml_free(KML_HEAP_RAW, pk - 8);
+        kml_free(KML_HEAP_RAW, KML_PREFIX(pk));
         k = NULL;
         break;
     }
@@ -3021,10 +3146,22 @@ char *__kml_object_tostring(long long word) {
             snprintf(buf, sizeof buf, "%s", t);
             k = NULL;
         } else if (is_boxed_bigint(pay)) k = "BigInt";
-        else if (pay && (*(long long *)pay & (1LL << 48))) k = "Error";
-        else {
+        else if (pay && (*(long long *)pay & (1LL << 48)) && !__kml_obj_has((void *)pay, "@@toStringTag")) k = "Error";
+        else if (pay && (*(long long *)pay & (1LL << 48))) {
+            /* An error's own [Symbol.toStringTag], when a string. */
+            long long tt, tp;
+            nb_decode(__kml_obj_get((void *)pay, "@@toStringTag"), &tt, &tp);
+            if (tt == 2) { snprintf(buf, sizeof buf, "[object %s]", (char *)tp); k = NULL; }
+            else k = "Error";
+        } else {
             long long pv = 0;
             char *t = pay ? __kml_obj_tostring_tag((void *)pay) : NULL;
+            if (!t && pay && __kml_obj_has((void *)pay, "@@toStringTag")) {
+                /* An own [Symbol.toStringTag] property, when a string. */
+                long long tt, tp;
+                nb_decode(__kml_obj_get((void *)pay, "@@toStringTag"), &tt, &tp);
+                if (tt == 2) t = (char *)tp;
+            }
             if (t) {
                 snprintf(buf, sizeof buf, "[object %s]", t);
                 k = NULL;
@@ -3034,8 +3171,8 @@ char *__kml_object_tostring(long long word) {
     case 10: {
         const char *t = dyn_tag((char *)pay);
         if (t) k = t;
-        else if (*(long long *)pay & (1LL << 35)) k = "Array";
-        else if (*(long long *)pay & (1LL << 36)) k = "Module";
+        else if (*(long long *)pay & KML_BAG_ARRAY) k = "Array";
+        else if (*(long long *)pay & KML_BAG_MODULE) k = "Module";
         break;
     }
     case 13: k = "Error"; break;
@@ -3044,7 +3181,7 @@ char *__kml_object_tostring(long long word) {
     long long n = (long long)strlen(buf);
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
-    memcpy(base + 8, buf, (size_t)n + 1);
+    kml_copy(KML_HEAP_RAW, base + 8, buf, (size_t)n + 1);
     return base + 8;
 }
 
@@ -3061,7 +3198,7 @@ char *__kml_error_ctor_name(long long word) {
     long long n = (long long)strlen(k);
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
-    memcpy(base + 8, k, (size_t)n + 1);
+    kml_copy(KML_HEAP_RAW, base + 8, k, (size_t)n + 1);
     return base + 8;
 }
 
@@ -3130,6 +3267,15 @@ void __kml_require_callable(long long word, const char *type) {
     __kml_throw_nullderef(sb_finish(&b));
 }
 
+/* A value that must be an object (a Reflect method's target): msg as a
+   TypeError unless typeof is "object" (and not null) or "function". */
+void __kml_require_object(long long word, const char *type, const char *msg) {
+    long long tag, pay;
+    nb_decode(word, &tag, &pay);
+    if (strcmp(type, "function") == 0 || (strcmp(type, "object") == 0 && tag != 4)) return;
+    __kml_throw_nullderef(msg);
+}
+
 /* A rejected write or delete on a dynamic object o, in V8's words: code 1 a
    read-only property, 2 an addition to a non-extensible object, 3 a
    getter-only accessor, 4 a non-configurable delete. The object reads as
@@ -3141,8 +3287,8 @@ void __kml_dyn_set_throw(char *o, const char *key, long long code) {
     long long flags = *(long long *)o;
     char desc[128];
     const char *cn = ctor_name(o);
-    if (flags & (1LL << 36)) snprintf(desc, sizeof desc, "[object Module]");
-    else if (flags & (1LL << 34)) snprintf(desc, sizeof desc, "[object Object]");
+    if (flags & KML_BAG_MODULE) snprintf(desc, sizeof desc, "[object Module]");
+    else if (flags & KML_BAG_NULLPROTO) snprintf(desc, sizeof desc, "[object Object]");
     else snprintf(desc, sizeof desc, "#<%.100s>", cn ? cn : "Object");
     set_throw(desc, key, code);
 }

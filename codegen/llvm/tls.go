@@ -14,9 +14,6 @@ var tlsHandleSource string
 // TCP handles (the `tls` module written in TypeScript).
 func TLSHandleSource() string { return tlsHandleSource }
 
-// UsesTLSHandles reports whether the program's TypeScript uses them.
-func (e *Emitter) UsesTLSHandles() bool { return e.usedTLSHandles }
-
 // LocateTLS returns the clang cflags/libs to compile and link tlshandle.c:
 // the OpenSSL crypto discovery (headers + -L + -lcrypto) plus -lssl.
 func LocateTLS() (cflags, libs []string) {

@@ -36,13 +36,50 @@ type namedLabel struct {
 // push+defer-pop pattern. A no-op (returns a no-op cleanup) when there's no
 // pending label, so it's always safe to call unconditionally.
 func (e *Emitter) pushPendingLabel(breakL, continueL string) func() {
-	if e.pendingLabel == "" {
+	names := e.pendingLabels
+	if len(names) == 0 {
 		return func() {}
 	}
-	name := e.pendingLabel
-	e.pendingLabel = ""
-	e.namedLabelStack = append(e.namedLabelStack, namedLabel{name: name, breakL: breakL, continueL: continueL, finallyDepth: len(e.pendingFinallys), freeScope: len(e.scopes)})
-	return func() { e.namedLabelStack = e.namedLabelStack[:len(e.namedLabelStack)-1] }
+	e.pendingLabels = nil
+	for _, name := range names {
+		e.namedLabelStack = append(e.namedLabelStack, namedLabel{name: name, breakL: breakL, continueL: continueL, finallyDepth: len(e.pendingFinallys), freeScope: len(e.scopes)})
+	}
+	return func() { e.namedLabelStack = e.namedLabelStack[:len(e.namedLabelStack)-len(names)] }
+}
+
+// emitLabeled is `name: body`. Any labeled statement is a `break name`
+// target, ending after it (a block, an if, a switch, another label); a
+// loop's labels also name its `continue`, bound when the loop starts.
+func (e *Emitter) emitLabeled(s *ast.LabeledStatement) error {
+	names := []string{s.Label}
+	body := s.Body
+	for {
+		inner, ok := body.(*ast.LabeledStatement)
+		if !ok {
+			break
+		}
+		names = append(names, inner.Label)
+		body = inner.Body
+	}
+	endL := e.freshLabel("labeled.end")
+	for _, name := range names {
+		e.namedLabelStack = append(e.namedLabelStack, namedLabel{name: name, breakL: endL, finallyDepth: len(e.pendingFinallys), freeScope: len(e.scopes)})
+	}
+	switch body.(type) {
+	case *ast.WhileStatement, *ast.DoWhileStatement, *ast.ForStatement, *ast.ForInStatement, *ast.ForOfStatement:
+		e.pendingLabels = names
+	}
+	err := e.emitStmt(body)
+	e.pendingLabels = nil
+	e.namedLabelStack = e.namedLabelStack[:len(e.namedLabelStack)-len(names)]
+	if err != nil {
+		return err
+	}
+	if !e.blockDone {
+		e.emitTerminator("br label %" + endL)
+	}
+	e.emitLabel(endL)
+	return nil
 }
 
 // lookupNamedLabel searches namedLabelStack innermost-first for name.
@@ -125,6 +162,9 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	}
 	switch s := stmt.(type) {
 	case *ast.VarDeclaration:
+		if e.paramScopeDone[s] {
+			return nil // bound before the parameter defaults
+		}
 		if done, err := e.emitVarRedeclaration(s); done || err != nil {
 			return err
 		}
@@ -174,38 +214,48 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 				// resolved now (not at pre-scan time) and recorded on the shared
 				// GeneratorInfo the g() call site reads to build the instance's env.
 				if entry.Gen != nil {
-					caps := e.gatherGeneratorCaptures(s)
-					for _, c := range caps {
-						if c.Ty.IsArray() {
-							return fmt.Errorf("%d:%d: a nested generator capturing an array variable ('%s') is not yet supported", s.GetPos().Line, s.GetPos().Col, c.Name)
-						}
-					}
-					if len(caps) > 0 && readsOwnValue(s) {
-						return e.emitSelfCapturingNestedGenerator(s, entry.Gen, caps)
-					}
-					entry.Gen.Captures = caps
-					return e.emitGeneratorFunctionDecl(s, entry.Gen)
+					return e.emitNestedGeneratorDecl(s, entry.Gen)
 				}
 				return e.emitFunctionDeclAs(s, entry.Mangled, entry.Sig)
 			}
 		}
-		return fmt.Errorf("%d:%d: nested function declarations are only supported directly in an enclosing function's own body (not inside a further if/for/while/switch block)", s.GetPos().Line, s.GetPos().Col)
+		return internalAt(s.GetPos(), "nested function declarations are only supported directly in an enclosing function's own body (not inside a further if/for/while/switch block)")
 	case *ast.ReturnStatement:
 		return e.emitReturn(s)
 	case *ast.ForStatement:
 		return e.emitFor(s)
 	case *ast.ForOfStatement:
+		if s.Kind == "var" && s.VarName != "" && s.ArrayPattern == nil && s.ObjectPattern == nil && e.forHeadNamesBinding(s.VarName) {
+			return e.emitForHeadIntoEarlyVar(&s.Kind, &s.VarName, &s.Body, func() error { return e.emitStmt(s) })
+		}
 		if s.Kind == "var" && s.VarName != "" && s.ArrayPattern == nil && s.ObjectPattern == nil {
-			if t := e.inferExprType(s.Iterable); isPlainStringTy(t) && !t.Nullable() || t.IsArray() && t.ElemType != nil {
+			if t := e.typeOfExpr(s.Iterable); isPlainStringTy(t) && !t.Nullable() || t.IsArray() && t.ElemType != nil {
 				elem := TypePtr
 				if t.IsArray() {
 					elem = *t.ElemType
 				}
+				if s.Await && elem.IsPromise() {
+					// `for await`: each element awaited.
+					if pt := elem.PromiseType; pt != nil {
+						elem = *pt
+					} else {
+						elem = TypeAny
+					}
+				}
 				return e.emitForVarOuter(s.VarName, elem, s.Body, func() error { return e.emitForOf(s) })
 			}
 		}
+		if s.Kind == "const" && s.VarName != "" {
+			defer e.constLoopVar(s.VarName)()
+		}
 		return e.emitForOf(s)
 	case *ast.ForInStatement:
+		if s.Kind == "var" && s.VarName != "" && e.forHeadNamesBinding(s.VarName) {
+			return e.emitForHeadIntoEarlyVar(&s.Kind, &s.VarName, &s.Body, func() error { return e.emitStmt(s) })
+		}
+		if s.Kind == "const" && s.VarName != "" {
+			defer e.constLoopVar(s.VarName)()
+		}
 		if s.Kind == "var" && s.VarName != "" {
 			return e.emitForVarOuter(s.VarName, TypePtr, s.Body, func() error { return e.emitForIn(s) })
 		}
@@ -215,10 +265,7 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	case *ast.DoWhileStatement:
 		return e.emitDoWhile(s)
 	case *ast.LabeledStatement:
-		e.pendingLabel = s.Label
-		err := e.emitStmt(s.Body)
-		e.pendingLabel = "" // clear even if Body never consumed it (non-loop label)
-		return err
+		return e.emitLabeled(s)
 	case *ast.IfStatement:
 		return e.emitIf(s)
 	case *ast.SwitchStatement:
@@ -228,11 +275,27 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 	case *ast.ContinueStatement:
 		return e.emitContinue(s)
 	case *ast.ArrayDestructuring:
-		return e.emitArrayDestructuring(s)
+		if err := e.emitArrayDestructuring(s); err != nil {
+			return err
+		}
+		if err := e.patternForwardFill(s); err != nil {
+			return err
+		}
+		return e.bindPatternGlobals(s)
 	case *ast.ObjectDestructuring:
-		return e.emitObjectDestructuring(s)
+		if err := e.emitObjectDestructuring(s); err != nil {
+			return err
+		}
+		if err := e.patternForwardFill(s); err != nil {
+			return err
+		}
+		return e.bindPatternGlobals(s)
 	case *ast.BlockStatement:
 		e.pushScope()
+		// Its function declarations are made at its entry, each after the
+		// siblings it names, as a function body's are.
+		e.hoistFunctionDecls(s.Body)
+		defer e.blockForwardClosures(s.Body)()
 		// TDD-00152: a lexical block is its own scope for nested function
 		// declarations — pre-scan this block's own statements so a `function`
 		// declared inside an `if`/`for`/`while`/bare block (one or more blocks
@@ -271,10 +334,29 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 		// module state declared before the class must see it initialized —
 		// and, for a class declared in a function, its statics' re-run.
 		if why, ok := e.classCaptureRejects[s]; ok {
-			return fmt.Errorf("%d:%d: class '%s' names '%s', a local of its function, and %s; not supported yet", s.GetPos().Line, s.GetPos().Col, s.Name, why[0], why[1])
+			return unsupportedAt(s.GetPos(), "class '%s' naming '%s', a local of its function, when the class %s", s.Name, why[0], why[1])
+		}
+		if base, ok := e.undeclaredBases[s.Name]; ok && !e.blockHoisted[s] {
+			// The heritage names nothing declared: its read throws.
+			if _, err := e.emitGlobalPropertyRead(ast.NewIdentifier(base, s.GetPos())); err != nil {
+				return err
+			}
+		}
+		if e.valueBases[s.BaseClass] && !s.BaseQualified && !e.blockHoisted[s] {
+			if err := e.emitClassHeritage(s); err != nil {
+				return err
+			}
 		}
 		if e.classRecordSites[s] {
 			if err := e.emitClassRecord(s.Name); err != nil {
+				return err
+			}
+		}
+		// Decorators apply before the static fields initialize (the TC39
+		// order); a decorated static field's initializers then transform
+		// its initial value.
+		if e.standardDecorators() {
+			if err := e.emitClassDecoratorApplications(s); err != nil {
 				return err
 			}
 		}
@@ -284,6 +366,9 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 			e.emitInstr(fmt.Sprintf("call void @%s_staticinit()", s.Name))
 		}
 		e.emitClassReeval(s)
+		if e.standardDecorators() {
+			return e.emitStaticFieldInitializers(s)
+		}
 		return e.emitClassDecoratorApplications(s)
 	case *ast.ThrowStatement:
 		return e.emitThrow(s)
@@ -309,12 +394,12 @@ func (e *Emitter) emitValuelessRet() {
 	case rt.IsTuple() && rt.TupleByVal:
 		// The aggregate's zero, matching the signature (a plain `ret ptr null`
 		// would be an IR type mismatch against the aggregate return).
-		e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", rt.StructIR()))
+		e.emitTerminator(fmt.Sprintf("ret %s zeroinitializer", tupleAggIR(rt)))
 	case rt.IsDynamic():
 		e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 	case rt.IsArray():
 		// Arrays return a header pointer (LLVMRetType); null is the absent array.
-		e.emitTerminator("ret ptr null")
+		e.emitTerminator("ret " + irPtr + " null")
 	default:
 		// zeroRef gives the type-correct zero (0.0 for a float `number`,
 		// null for a ptr, false for i1) — a bare `ret double 0` is invalid IR.
@@ -372,7 +457,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			// `return [a, b]` emits as an ARRAY literal (a header pointer)
 			// and the store into the ptr result slot is invalid IR.
 			valueExpr := r.Value
-			rt := e.inferExprType(r.Value)
+			rt := e.typeOfExpr(r.Value)
 			// A promise or any other value held in an `any` result is stored
 			// as it is: the epilogue resolves with it
 			// (__kml_promise_resolve_any), adopting a promise or thenable as
@@ -425,24 +510,24 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 				box := Value{Ref: val.Ref, Ty: TypeAny}
 				slot := e.freshReg()
 				e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", box.Ref, slot))
+				e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", box.Ref, slot))
 				w, isP := e.emitPromiseWrapperOrNull(box), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isP, w))
+				e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isP, w))
 				promL, joinL := e.freshLabel("ret.promise"), e.freshLabel("ret.join")
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isP, promL, joinL))
 				e.emitLabel(promL)
 				// Wait without the await's throw: a rejection settles this
 				// function's promise past its own try blocks (the return
 				// leaves them first), as adoption does.
-				src := e.emitWrapperField(w, 1, "ptr")
+				src := e.emitWrapperField(w, 1, irPtr)
 				e.ensureTaskRuntime()
-				e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready(ptr %s)", src))
+				e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready("+irPtr+" %s)", src))
 				if _, err := e.emitAwaitAny(Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}); err != nil {
 					return err
 				}
 				stP, st := e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", stP, promiseStructIR, src))
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, stP))
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", stP, promiseStructIR, src))
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", st, stP))
 				rej, rejL, okL := e.freshReg(), e.freshLabel("ret.reject"), e.freshLabel("ret.ok")
 				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", rej, st))
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rej, rejL, okL))
@@ -454,20 +539,20 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 				e.excThrowAny(rtag, rpay)
 				e.emitTerminator("unreachable")
 				e.emitLabel(okL)
-				boxer, got := e.emitWrapperField(w, 2, "ptr"), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", got, boxer, src))
-				e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", got, slot))
+				boxer, got := e.emitWrapperField(w, 2, irPtr), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %s)", got, boxer, src))
+				e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", got, slot))
 				e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 				e.emitLabel(joinL)
 				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, slot))
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, slot))
 				val = Value{Ref: r, Ty: TypeAny}
 			}
 			val = e.convert(val, e.currentPromiseTy)
 			if e.asyncAdoptSlot != "" && e.asyncAdoptSlot != adoptSlotPending {
 				// A value replaces a promise an earlier `return` left (one
 				// in a `finally`).
-				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", e.asyncAdoptSlot))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", e.asyncAdoptSlot))
 			}
 			if e.currentPromiseTy.IsArray() {
 				// The async return-value slot holds a header pointer (TDD-00213
@@ -476,6 +561,16 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			} else {
 				align := e.currentPromiseTy.Align()
 				e.heapStore(StructFieldIR(e.currentPromiseTy), val.Ref, e.coroHdl, align)
+			}
+		}
+		if r.Value != nil && (e.currentPromiseTy.IR == "void" || e.currentPromiseTy.IR == "") {
+			// `return f()` in a `Promise<void>` function: the value is
+			// undefined, the call still runs.
+			if _, err := e.emitExpr(r.Value); err != nil {
+				return err
+			}
+			if e.blockDone {
+				return nil
 			}
 		}
 		// Run any enclosing `finally` blocks before settling — the return value
@@ -496,6 +591,10 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	// (yields `this`); returning an object overrides the instance (return-override,
 	// not expressible under this void ABI — a documented limitation); returning a
 	// primitive is IGNORED in a base class but a TypeError in a DERIVED class.
+	if e.currentCtorClass != "" && r.Value == nil {
+		e.emitThisBoundCheck() // returning before super() bound `this`
+		e.emitOverrideThisReturn()
+	}
 	if e.currentCtorClass != "" && r.Value != nil {
 		// A cast changes the static type, not the value returned: classify the
 		// operand (`return 5 as any` returns a primitive).
@@ -503,15 +602,30 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		for as, ok := operand.(*ast.AsExpression); ok; as, ok = operand.(*ast.AsExpression) {
 			operand = as.Expr
 		}
-		vt := e.inferExprType(operand)
+		vt := e.typeOfExpr(operand)
 		// Evaluate the expression for its side effects regardless of how its value
 		// is treated (real JS runs the operand before the return-type check).
-		if _, err := e.emitExpr(r.Value); err != nil {
+		rv, err := e.emitExpr(r.Value)
+		if err != nil {
 			return err
 		}
+		cls := e.currentCtorClass
 		switch {
+		case vt.IsClass() && rv.Ty.IR == irPtr && (vt.ClassName == cls || e.classDerives(vt.ClassName, cls)):
+			// An instance of the class (or of a subclass) overrides the
+			// allocated one: it goes in the override slot the `new` site
+			// reads (ctorMayOverride). A null one is no override, as in JS.
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_ctor_ret, align 8", rv.Ref))
+			if err := e.emitReturnCleanups(); err != nil {
+				return err
+			}
+			e.emitTerminator("ret void")
+			return nil
 		case vt.IsUndefined() || vt.IR == "void":
-			// `return undefined;` → ordinary constructor return (yields `this`).
+			// `return undefined;` → ordinary constructor return (yields `this`),
+			// once super() bound it.
+			e.emitThisBoundCheck()
+			e.emitOverrideThisReturn()
 		case vt.IsSymbol():
 			// A Symbol is a primitive (it reuses the object IR representation, so
 			// it must be tested before the object branch below).
@@ -519,8 +633,22 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 				e.emitThrowTypeError("Derived constructors may only return object or undefined")
 				return nil
 			}
+		case (e.compatJS() || e.foreignCtorName(cls)) && (vt.IsDynamic() || vt.IsObject() || vt.IsArray() || vt.IsClass() || vt.Host != hostNone || vt.IR == irPtr && !isStringTy(vt) && !vt.IsBigInt() && !vt.IsNull()):
+			// Another object overrides the instance (a `new` of the class is
+			// typed any): boxed, in the slot the `new` site reads. A boxed
+			// null or undefined is no override.
+			b, err := e.emitBoxValue(rv)
+			if err != nil {
+				return err
+			}
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" @__kml_ctor_ret_any, align 8", b.Ref))
+			if err := e.emitReturnCleanups(); err != nil {
+				return err
+			}
+			e.emitTerminator("ret void")
+			return nil
 		case vt.IsObject() || vt.IsArray() || vt.IsDynamic():
-			return fmt.Errorf("%d:%d: returning an object from a constructor (return-override of the instance) is not supported — the constructor yields the allocated instance directly", r.GetPos().Line, r.GetPos().Col)
+			return internalAt(r.GetPos(), "returning an object from a constructor (return-override of the instance) is not supported — the constructor yields the allocated instance directly")
 		default:
 			// A primitive value. Derived constructor: TypeError (spec step 13.c).
 			// Base constructor: the value is ignored, a normal return.
@@ -607,16 +735,18 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 			arrVal = conv
 		}
 		if !arrVal.Ty.IsArray() && !arrVal.Ty.IsNull() {
-			return fmt.Errorf("%d:%d: expression is not an array", r.Value.GetPos().Line, r.Value.GetPos().Col)
+			return internalAt(r.Value.GetPos(), "expression is not an array")
 		}
 		header := "null" // `return null` / `return undefined` from a `T[] | null` function
 		if arrVal.Ty.IsArray() {
 			header = e.arrayReturnHeader(arrVal)
+		} else if e.currentRetType.NullAndUndef() && !arrVal.Ty.IsUndefined() {
+			header = e.nullRef() // a three-state array's null
 		}
 		if err := e.emitReturnCleanups(); err != nil {
 			return err
 		}
-		e.emitTerminator(fmt.Sprintf("ret ptr %s", header))
+		e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", header))
 		return nil
 	}
 
@@ -632,7 +762,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 		// dynamic-typed return needs the same explicit emitBoxValue call
 		// emitVarDecl/emitAssign/call-argument-passing already use for it.
 		if e.currentRetType.UnionMembers != nil && !unionAllowsAssignmentFrom(e.currentRetType, val.Ty) {
-			return fmt.Errorf("%d:%d: return value's type is not a member of the declared union return type", r.Value.GetPos().Line, r.Value.GetPos().Col)
+			return internalAt(r.Value.GetPos(), "return value's type is not a member of the declared union return type")
 		}
 		val, err = e.emitBoxValueWidened(val, r.Value)
 		if err != nil {
@@ -695,6 +825,7 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	if len(loopVars) > 0 && s.Body != nil {
 		free := map[string]bool{}
 		capScanStmts([]ast.Statement{s.Body}, loopVars, free)
+		e.addClassCaptureReads(free) // `() => new D()`, D reading the variable
 		for name := range loopVars {
 			if free[name] {
 				capturedLoop = append(capturedLoop, name)
@@ -742,7 +873,6 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	}
 	var iterCells []perIterCell
 	if len(capturedLoop) > 0 {
-		e.ensureMalloc()
 		e.pushScope()
 		for _, name := range capturedLoop {
 			sym, ok := e.lookup(name)
@@ -755,9 +885,9 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 				sir, size = nullableScalarStorageIR(sym.Ty), 16
 			}
 			cell := e.freshReg()
-			e.heapMallocInto(cell, fmt.Sprint(size))
+			e.heapMallocInto(cell, allocCell, fmt.Sprint(size))
 			cur := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, sir, sym.Ptr, sym.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", cur, sir, sym.Ptr, sym.Ty.Align()))
 			e.heapStore(sir, cur, cell, sym.Ty.Align())
 			e.define(name, Symbol{Ptr: cell, Ty: sym.Ty, Boxed: true, IsConst: sym.IsConst})
 			iterCells = append(iterCells, perIterCell{workPtr: sym.Ptr, cell: cell, ty: sym.Ty, ir: sir})
@@ -774,7 +904,7 @@ func (e *Emitter) emitFor(s *ast.ForStatement) error {
 	e.emitLabel(incL)
 	for _, c := range iterCells {
 		fin := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", fin, c.ir, c.cell, c.ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", fin, c.ir, c.cell, c.ty.Align()))
 		e.heapStore(c.ir, fin, c.workPtr, c.ty.Align())
 	}
 	for _, upd := range s.Update {
@@ -833,6 +963,17 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 		}
 		return nil
 	}
+	if v, ok := e.instantiationGuard(s.Test); ok {
+		// A guard this instantiation decides (`x instanceof C` of a T
+		// bound to string): only the branch that runs is emitted.
+		if v {
+			return e.emitStmt(s.Consequent)
+		}
+		if s.Alternate != nil {
+			return e.emitStmt(s.Alternate)
+		}
+		return nil
+	}
 	thenL := e.freshLabel("if.then")
 	endL := e.freshLabel("if.end")
 	elseL := endL
@@ -849,9 +990,6 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 
 	e.emitLabel(thenL)
 	e.pushScope()
-	// Flow narrowing (TDD-00064 Stage 2): a nullable-scalar local proven
-	// present by the guard is treated as definitely-T inside the branch.
-	e.applyBranchNarrowing(s.Test, true)
 	e.applyUnionBranchNarrowing(s.Test, true)
 	if err := e.emitStmt(s.Consequent); err != nil {
 		return err
@@ -863,7 +1001,6 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 	if s.Alternate != nil {
 		e.emitLabel(elseL)
 		e.pushScope()
-		e.applyBranchNarrowing(s.Test, false)
 		e.applyUnionBranchNarrowing(s.Test, false)
 		if err := e.emitStmt(s.Alternate); err != nil {
 			return err
@@ -876,15 +1013,75 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 	// Early-exit narrowing: `if (x === null) return/throw/break/continue;` (no
 	// else) leaves x proven present for the remainder of the enclosing scope.
 	if thenExits && s.Alternate == nil {
-		if name, nonNullWhenTrue, ok := e.narrowingFromCondition(s.Test); ok && !nonNullWhenTrue {
-			e.narrowNonNullInCurrentScope(name)
-		}
 		// Union early-exit narrowing (TDD-00114): when the guard's true branch
 		// always exits, the code below runs only in its false branch, so narrow
 		// the union to that branch's type in the current (enclosing) scope.
 		e.applyUnionBranchNarrowing(s.Test, false)
 	}
 	return nil
+}
+
+// instantiationGuard is the value of a type guard on a reference declared
+// of a type parameter that this instantiation binds to a primitive: `x
+// instanceof C` is false, `typeof x === "number"` is whether the binding
+// is one. ok is false for any other test, which runs.
+func (e *Emitter) instantiationGuard(test ast.Expression) (value, ok bool) {
+	c := e.front()
+	if c == nil {
+		return false, false
+	}
+	// tag is the typeof of reference x's value here, "" when not known.
+	tag := func(x ast.Expression) string {
+		if _, isID := x.(*ast.Identifier); !isID {
+			return ""
+		}
+		st := c.StorageTypeOf(x)
+		if st == nil || st.Flags&checker.TypeParam == 0 || st.Flags&checker.Union != 0 {
+			return ""
+		}
+		t := e.typeOfExpr(x)
+		switch {
+		case t.IsDynamic() || t.Kind != 0 || t.Host != 0:
+			return ""
+		case t.IR == "i1":
+			return "boolean"
+		case t.IR != irPtr && t.IR != "void":
+			return "number"
+		case isPlainStringType(t):
+			return "string"
+		}
+		return ""
+	}
+	switch x := test.(type) {
+	case *ast.UnaryExpression:
+		if x.Op == "!" {
+			if v, ok := e.instantiationGuard(x.Arg); ok {
+				return !v, true
+			}
+		}
+	case *ast.BinaryExpression:
+		equality := x.Op == "===" || x.Op == "!==" || x.Op == "==" || x.Op == "!="
+		switch {
+		case x.Op == "instanceof":
+			if tag(x.Left) != "" {
+				return false, true // a primitive is no instance
+			}
+		case equality:
+			u, lit := x.Left, x.Right
+			if _, isU := u.(*ast.UnaryExpression); !isU {
+				u, lit = x.Right, x.Left
+			}
+			ue, isU := u.(*ast.UnaryExpression)
+			sl, isS := lit.(*ast.StringLiteral)
+			if !isU || ue.Op != "typeof" || !isS {
+				return false, false
+			}
+			if t := tag(ue.Arg); t != "" {
+				return (t == sl.Value) == (x.Op == "===" || x.Op == "=="), true
+			}
+		}
+	}
+	return false, false
 }
 
 // splitArrayAggregate stores an array value's data and length into fresh
@@ -894,14 +1091,14 @@ func (e *Emitter) emitIf(s *ast.IfStatement) error {
 func (e *Emitter) splitArrayAggregate(arrVal Value) (dataPtrAlloca, lenAlloca string) {
 	dataPtrAlloca = e.freshReg()
 	lenAlloca = e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", dataPtrAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", dataPtrAlloca))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
 	dataEx := e.freshReg()
 	lenEx := e.freshReg()
 	dataEx = e.arrayData(arrVal)
 	lenEx = e.arrayLen(arrVal)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataEx, dataPtrAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenEx, lenAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", dataEx, dataPtrAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", lenEx, lenAlloca))
 	return dataPtrAlloca, lenAlloca
 }
 
@@ -916,14 +1113,17 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	}
 	// `xs!` is erased at run time: iterating it is iterating xs, whose
 	// absence is Node's "xs is not iterable".
-	if nn, ok := s.Iterable.(*ast.NonNullExpression); ok && e.inferExprType(nn.Arg).IsArray() {
+	if nn, ok := s.Iterable.(*ast.NonNullExpression); ok && e.typeOfExpr(nn.Arg).IsArray() {
 		saved := s.Iterable
 		s.Iterable = nn.Arg
 		defer func() { s.Iterable = saved }()
 		return e.emitForOf(s)
 	}
+	// A typed array out of bounds of its resizable buffer throws as its
+	// values() does.
+	e.emitTypedArrayBoundsCheck(s.Iterable, "values")
 	// A tuple iterates as an array of its elements (tupleAsArray).
-	if t := e.inferExprType(s.Iterable); t.IsTuple() && !t.IsDynamic() {
+	if t := e.typeOfExpr(s.Iterable); t.IsTuple() && !t.IsDynamic() {
 		saved := s.Iterable
 		s.Iterable = ast.NewAsExpression(saved, ast.AnyArrayAnnotation(""), saved.GetPos())
 		defer func() { s.Iterable = saved }()
@@ -932,7 +1132,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// An array, once the program may replace Array.prototype[Symbol.iterator],
 	// iterates as an `any` does: through the property as it is then.
 	// (So does a js-lane value of no iterable type, which throws.)
-	if t := e.inferExprType(s.Iterable); (t.IsArray() && !t.IsDynamic() && !t.IsTypedArray() && !s.Await && e.arrayIterPatchable()) || e.jsNonIterable(s.Iterable) {
+	if t := e.typeOfExpr(s.Iterable); (t.IsArray() && !t.IsDynamic() && !t.IsTypedArray() && !s.Await && e.arrayIterPatchable()) || e.jsNonIterable(s.Iterable) {
 		saved := s.Iterable
 		s.Iterable = ast.NewAsExpression(saved, ast.AnyAnnotation(""), saved.GetPos())
 		defer func() { s.Iterable = saved }()
@@ -985,20 +1185,21 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// generator instance is evaluated exactly once here and bound to a synthetic
 	// name the synthesized `.return()` references; emitForOfGenerator reuses it.
 	if !s.Await {
-		if objTy := e.inferExprType(s.Iterable); objTy.IsGenerator() && !objTy.GeneratorIsAsync {
+		if objTy := e.typeOfExpr(s.Iterable); objTy.IsGenerator() && !objTy.GeneratorIsAsync {
 			genVal, err := e.emitExpr(s.Iterable)
 			if err != nil {
 				return err
 			}
+			if genVal.Ty.IR != objTy.IR {
+				genVal = e.convert(genVal, objTy) // a dynamic call's instance
+			}
 			slot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", genVal.Ref, slot))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", genVal.Ref, slot))
 			gname := fmt.Sprintf("__kml_forof_gen_%s", e.freshReg()[1:])
 			e.define(gname, Symbol{Ptr: slot, Ty: objTy})
 			closeStmt := ast.NewExpressionStatement(
-				ast.NewCallExpression(
-					ast.NewMemberExpression(ast.NewIdentifier(gname, s.GetPos()), "return", s.GetPos()),
-					nil, s.GetPos()),
+				genMethodCall(ast.NewIdentifier(gname, s.GetPos()), "return", s.GetPos()),
 				s.GetPos())
 			e.pendingFinallys = append(e.pendingFinallys, pendingExit{body: []ast.Statement{closeStmt}})
 			defer func() { e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1] }()
@@ -1019,11 +1220,14 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// returning an iterator with `async next(): Promise<{value,done}>` — is the
 	// second accepted shape (TDD-00089). Any other iterable is a clean rejection.
 	if s.Await {
-		objTy := e.inferExprType(s.Iterable)
+		objTy := e.typeOfExpr(s.Iterable)
 		if objTy.IsGenerator() {
 			genVal, err := e.emitExpr(s.Iterable)
 			if err != nil {
 				return err
+			}
+			if genVal.Ty.IR != objTy.IR {
+				genVal = e.convert(genVal, objTy) // a dynamic call's instance
 			}
 			if objTy.GeneratorIsAsync {
 				return e.emitForAwaitOfGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
@@ -1034,6 +1238,18 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		}
 		// A ReadableStream (or an already-obtained reader) in `for await`
 		// (TDD-00097 Stage 1): read chunk-at-a-time, awaiting each read().
+		if objTy.IsReadableStream() {
+			// Its [Symbol.asyncIterator](), values(): Node's iterator, whose
+			// return() an early exit calls (cancelling the stream).
+			call := ast.NewCallExpression(ast.NewMemberExpression(s.Iterable, "values", s.Iterable.GetPos()), nil, s.Iterable.GetPos())
+			if itTy := e.typeOfExpr(call); itTy.IsClass() {
+				itVal, err := e.emitExpr(call)
+				if err != nil {
+					return err
+				}
+				return e.emitForOfAnyValue(s, itVal, condL, bodyL, incL, endL)
+			}
+		}
 		if objTy.IsReadableStream() || objTy.IsStreamReader() {
 			streamVal, err := e.emitExpr(s.Iterable)
 			if err != nil {
@@ -1088,10 +1304,10 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			if id, ok := s.Iterable.(*ast.Identifier); ok {
 				iterSym, found := e.lookup(id.Name)
 				if !found {
-					return fmt.Errorf("%d:%d: undefined variable '%s'", s.GetPos().Line, s.GetPos().Col, id.Name)
+					return internalAt(s.GetPos(), "undefined variable '%s'", id.Name)
 				}
 				loaded := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", loaded, iterSym.Ptr))
+				e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", loaded, iterSym.Ptr))
 				mapPtr = loaded
 			} else {
 				iterableVal, err := e.emitExpr(s.Iterable)
@@ -1129,14 +1345,26 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 		if isUnconstrainedDynamic(objTy) {
 			return e.emitForOfAny(s, condL, bodyL, incL, endL)
 		}
-		return fmt.Errorf("%d:%d: 'for await...of' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or a Set (TDD-00089/TDD-00092)", s.GetPos().Line, s.GetPos().Col)
+		// Any other value the protocol can reach (an iterator a library
+		// function returns, typed by its interface): boxed, the run-time
+		// protocol.
+		if objTy.IR != "" && objTy.IR != "void" {
+			v, err := e.emitExpr(s.Iterable)
+			if err != nil {
+				return err
+			}
+			if boxed, err := e.emitBoxValue(v); err == nil {
+				return e.emitForOfAnyValue(s, boxed, condL, bodyL, incL, endL)
+			}
+		}
+		return internalAt(s.GetPos(), "'for await...of' requires an async generator, a sync generator, a class with a [Symbol.asyncIterator]() method, an array, a Map, or a Set (TDD-00089/TDD-00092)")
 	}
 
 	// A `/** @value */` flat array (TDD-00134 Stage 2): iterate by struct
 	// stride, binding each element's interior pointer (a view).
-	if objTy := e.inferExprType(s.Iterable); objTy.IsFlatArray() {
+	if objTy := e.typeOfExpr(s.Iterable); objTy.IsFlatArray() {
 		if _, ok := s.Iterable.(*ast.Identifier); !ok {
-			return fmt.Errorf("%d:%d: for...of over a @value array requires a named array variable", s.GetPos().Line, s.GetPos().Col)
+			return internalAt(s.GetPos(), "@value array use the resolver admits")
 		}
 		return e.emitForOfFlatArray(s, objTy, condL, bodyL, incL, endL)
 	}
@@ -1154,13 +1382,13 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// independent loop-emission code.
 	// An object literal (a static struct) with a `[Symbol.iterator]` member —
 	// same desugar and dispatch as the for-await object case, sync flavor.
-	if objTy := e.inferExprType(s.Iterable); objTy.IsObject() {
+	if objTy := e.typeOfExpr(s.Iterable); objTy.IsObject() {
 		if _, _, ok := objTy.FieldIndex(syncIteratorMethodName); ok {
 			return e.emitForOfObjectSymbolIterable(s, objTy, syncIteratorMethodName, false, condL, bodyL, incL, endL)
 		}
 	}
 
-	if objTy := e.inferExprType(s.Iterable); objTy.IsClass() {
+	if objTy := e.typeOfExpr(s.Iterable); objTy.IsClass() {
 		if info, ok := e.classes[objTy.ClassName]; ok {
 			// A `[Symbol.iterator]()` method (desugared to `@@iterator`) wins
 			// over the structural `next(): T | null` shape — the spec's real
@@ -1200,7 +1428,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// may itself be a `gen(...)` call, which must not run again per
 	// iteration) and handed to emitForOfGenerator, which drives it via
 	// repeated .next() calls against that same instance.
-	if objTy := e.inferExprType(s.Iterable); objTy.IsGenerator() {
+	if objTy := e.typeOfExpr(s.Iterable); objTy.IsGenerator() {
 		genVal, err := e.emitExpr(s.Iterable)
 		if err != nil {
 			return err
@@ -1215,7 +1443,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 
 	// A bare any/unknown iterable (a D1 dynamic array, or a static array boxed
 	// into `any`) iterates by its runtime `length` and index reads (ADR-01077).
-	if objTy := e.inferExprType(s.Iterable); isUnconstrainedDynamic(objTy) {
+	if objTy := e.typeOfExpr(s.Iterable); isUnconstrainedDynamic(objTy) || unionOfIndexables(objTy) {
 		return e.emitForOfAny(s, condL, bodyL, incL, endL)
 	}
 
@@ -1229,7 +1457,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	// but binds the loop variable as a bigint handle (wrapped per element).
 	var iterTaTy Type
 
-	if strTy := e.inferExprType(s.Iterable); isForOfStringTy(strTy) {
+	if strTy := e.typeOfExpr(s.Iterable); isForOfStringTy(strTy) {
 		// A string iterates its code points (ADR-01188). Materialize them as
 		// an array and drive the shared array-iteration loop below.
 		sv, err := e.emitExpr(s.Iterable)
@@ -1254,7 +1482,7 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			dataPtrAlloca, lenAlloca = e.arrayDataLenSlots(iterSym)
 			elemTy = *iterSym.Ty.ElemType
 		default:
-			return fmt.Errorf("%d:%d: '%s' is not an array, Map, Set, generator, or a class with a next(): T | null method", s.GetPos().Line, s.GetPos().Col, id.Name)
+			return internalAt(s.GetPos(), "'%s' is not an array, Map, Set, generator, or a class with a next(): T | null method", id.Name)
 		}
 	} else {
 		arrVal, err := e.emitExpr(s.Iterable)
@@ -1268,14 +1496,14 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			elemTy = *arrVal.Ty.ElemType
 			dataPtrAlloca, lenAlloca = e.splitArrayAggregate(arrVal)
 		default:
-			return fmt.Errorf("%d:%d: for...of requires an array, Map, Set, generator, or class-with-next() value", s.GetPos().Line, s.GetPos().Col)
+			return internalAt(s.GetPos(), "for...of requires an array, Map, Set, generator, or class-with-next() value")
 		}
 	}
 
 	// Internal index counter (not user-visible).
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxPtr))
 
 	// Loop variable. An array-typed element (nested array, TDD-00029) needs
 	// the named-array representation (a slot holding the header) instead of
@@ -1296,8 +1524,8 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	idxVal := e.freshReg()
 	lenVal := e.freshReg()
 	condReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxPtr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenVal, lenAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", lenVal, lenAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", condReg, idxVal, lenVal))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
 
@@ -1305,15 +1533,15 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	dataPtr := e.freshReg()
 	idxVal2 := e.freshReg()
 	gepReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataPtrAlloca))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal2, idxPtr))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, dataPtr, idxVal2))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", dataPtr, dataPtrAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal2, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gepReg, elemTy.IR, dataPtr, idxVal2))
 	if elemTy.IsArray() && !elemTy.Inline && s.ArrayPattern == nil && s.ObjectPattern == nil {
 		// The loop variable aliases the element: its slot takes the header
 		// the outer array holds, so a push through it reaches the element.
 		header := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, gepReg))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, varPtr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", header, gepReg))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", header, varPtr))
 	} else if err := e.bindForOfElem(s, e.loadArrayElem(gepReg, elemTy), elemTy, bindTy, varPtr, iterTaTy); err != nil {
 		return err
 	}
@@ -1326,9 +1554,9 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	e.emitLabel(incL)
 	idxVal3 := e.freshReg()
 	newIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal3, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal3, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newIdx, idxVal3))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newIdx, idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", newIdx, idxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(endL)
@@ -1352,12 +1580,12 @@ func (e *Emitter) defineForOfVar(s *ast.ForOfStatement, elemTy, iterTaTy Type) (
 	} else if elemTy.IsArray() {
 		// Object-reference model (TDD-00127): a stable slot holding a pointer to
 		// the current element's {data, len} header, rebuilt each iteration.
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", varPtr))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: elemTy})
 	} else if cell, ok := e.boxLoopVar(s.Kind, s.VarName, bindTy); ok {
 		varPtr = cell
 	} else {
-		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, bindTy.IR, bindTy.Align()))
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", varPtr, storageIR(bindTy)))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: bindTy})
 	}
 
@@ -1403,7 +1631,7 @@ func (e *Emitter) bindForOfElem(s *ast.ForOfStatement, elemVal Value, elemTy, bi
 		// object with [Symbol.iterator]): destructured as `let [a] = elem`.
 		if !elemTy.IsArray() || elemTy.ElemType == nil {
 			if elemTy.IR == "" || elemTy.IR == "void" {
-				return fmt.Errorf("%d:%d: cannot array-destructure a for-of element of non-array type", s.GetPos().Line, s.GetPos().Col)
+				return internalAt(s.GetPos(), "cannot array-destructure a for-of element of non-array type")
 			}
 			tmp := e.bindValue(elemVal, s.GetPos())
 			return e.emitArrayDestructuring(ast.NewArrayDestructuring("let", s.ArrayPattern, tmp, s.GetPos()))
@@ -1419,12 +1647,16 @@ func (e *Emitter) bindForOfElem(s *ast.ForOfStatement, elemVal Value, elemTy, bi
 		// Point the loop variable's slot at this element's header
 		// (object-reference model, TDD-00127).
 		elemHeader := e.boxArrayValue(elemVal)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemHeader, varPtr))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", elemHeader, varPtr))
 	default:
 		if iterTaTy.BigIntElem {
 			elemVal = e.wrapTypedArrayLoad(elemVal, iterTaTy)
 		}
-		e.heapStore(bindTy.IR, elemVal.Ref, varPtr, bindTy.Align())
+		if isNullableScalar(bindTy) {
+			e.heapStore(storageIR(bindTy), elemVal.Ref, varPtr, 8)
+		} else {
+			e.heapStore(bindTy.IR, elemVal.Ref, varPtr, bindTy.Align())
+		}
 	}
 
 	return nil
@@ -1480,7 +1712,6 @@ func (e *Emitter) beginLoopIteration(kind string, names map[string]bool, body *a
 		return func() {}
 	}
 	sort.Strings(captured)
-	e.ensureMalloc()
 	e.pushScope()
 	for _, name := range captured {
 		sym, ok := e.lookup(name)
@@ -1488,9 +1719,9 @@ func (e *Emitter) beginLoopIteration(kind string, names map[string]bool, body *a
 			continue // an array binding keeps its header slot
 		}
 		cell := e.freshReg()
-		e.heapMallocInto(cell, fmt.Sprint(sym.Ty.Align()))
+		e.heapMallocInto(cell, allocCell, fmt.Sprint(sym.Ty.Align()))
 		cur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", cur, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", cur, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
 		e.heapStore(sym.Ty.IR, cur, cell, sym.Ty.Align())
 		sym.Ptr, sym.Boxed = cell, true
 		e.define(name, sym)
@@ -1523,6 +1754,25 @@ func (e *Emitter) pushContinueTarget(label string) func() {
 		e.continueStack = e.continueStack[:len(e.continueStack)-1]
 		e.continueFinallyDepth = e.continueFinallyDepth[:len(e.continueFinallyDepth)-1]
 		e.continueFreeScope = e.continueFreeScope[:len(e.continueFreeScope)-1]
+	}
+}
+
+// loopTargetsInside moves the innermost loop's break (endL) and continue
+// (incL) targets, and the labels naming them, to the current pending-finally
+// depth: a cleanup the loop registered after its targets (an iterator's
+// close) is not run by its own break or continue.
+func (e *Emitter) loopTargetsInside(endL, incL string) {
+	d := len(e.pendingFinallys)
+	if n := len(e.breakStack); n > 0 && e.breakStack[n-1] == endL {
+		e.breakFinallyDepth[n-1] = d
+	}
+	if n := len(e.continueStack); n > 0 && e.continueStack[n-1] == incL {
+		e.continueFinallyDepth[n-1] = d
+	}
+	for i := range e.namedLabelStack {
+		if e.namedLabelStack[i].breakL == endL && e.namedLabelStack[i].continueL == incL {
+			e.namedLabelStack[i].finallyDepth = d
+		}
 	}
 }
 
@@ -1561,7 +1811,7 @@ func (e *Emitter) emitBreak(s *ast.BreakStatement) error {
 	if s.Label != "" {
 		lbl, ok := e.lookupNamedLabel(s.Label)
 		if !ok {
-			return fmt.Errorf("%d:%d: undefined label '%s'", s.GetPos().Line, s.GetPos().Col, s.Label)
+			return internalAt(s.GetPos(), "undefined label '%s'", s.Label)
 		}
 		if err := e.emitFinallysToDepth(lbl.finallyDepth); err != nil {
 			return err
@@ -1585,10 +1835,10 @@ func (e *Emitter) emitContinue(s *ast.ContinueStatement) error {
 	if s.Label != "" {
 		lbl, ok := e.lookupNamedLabel(s.Label)
 		if !ok {
-			return fmt.Errorf("%d:%d: undefined label '%s'", s.GetPos().Line, s.GetPos().Col, s.Label)
+			return internalAt(s.GetPos(), "undefined label '%s'", s.Label)
 		}
 		if lbl.continueL == "" {
-			return fmt.Errorf("%d:%d: label '%s' does not label a loop; continue does not apply", s.GetPos().Line, s.GetPos().Col, s.Label)
+			return internalAt(s.GetPos(), "label '%s' does not label a loop; continue does not apply", s.Label)
 		}
 		if err := e.emitFinallysToDepth(lbl.finallyDepth); err != nil {
 			return err
@@ -1685,7 +1935,7 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 			failTarget = endL
 		}
 
-		if !e.switchFastCompare(disc.Ty, e.inferExprType(c.Test)) {
+		if !e.switchFastCompare(disc.Ty, e.typeOfExpr(c.Test)) {
 			// Any other pairing (`switch (null) { case 0: }`, a union or `any`
 			// discriminant, mixed kinds) matches exactly as `===` does.
 			if discID == nil {
@@ -1768,12 +2018,12 @@ func (e *Emitter) bindSwitchDiscriminant(disc Value, pos ast.Pos) *ast.Identifie
 	e.switchDiscCount++
 	slot := e.freshReg()
 	if disc.Ty.IR == "void" {
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", slot))
 		e.define(name, Symbol{Ptr: slot, Ty: TypeUndefined, IsConst: true})
 	} else {
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, disc.Ty.IR, disc.Ty.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", disc.Ty.IR, disc.Ref, slot, disc.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", disc.Ty.IR, disc.Ref, slot, disc.Ty.Align()))
 		e.define(name, Symbol{Ptr: slot, Ty: disc.Ty, IsConst: true})
 	}
 	return ast.NewIdentifier(name, pos)
@@ -1832,7 +2082,7 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	// object's static field-name list (a compile-time constant), never its
 	// runtime value/pointer, so this works for any object-typed expression,
 	// not just a named variable — e.g. `for (const k in c.point)`.
-	objTy := e.inferExprType(s.Object)
+	objTy := e.typeOfExpr(s.Object)
 	var keysVal Value
 	if isUnconstrainedDynamic(objTy) {
 		// A bare any/unknown object iterates its D1 dynamic-object keys at
@@ -1840,6 +2090,13 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 		objVal, err := e.emitExpr(s.Object)
 		if err != nil {
 			return err
+		}
+		if !isUnconstrainedDynamic(objVal.Ty) {
+			// A value of a static layout under an any type (a generic
+			// instance's parameter): its box.
+			if objVal, err = e.emitBoxValue(objVal); err != nil {
+				return err
+			}
 		}
 		e.dynKeysForIn = true
 		keysVal, err = e.emitDynAnyKeys(objVal, s.GetPos())
@@ -1869,65 +2126,80 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	} else {
 		fields := objTy.VisibleFields()
 		if !objTy.IsObject() || (!objTy.IsClass() && len(fields) == 0) {
-			return fmt.Errorf("%d:%d: for...in requires an object with known fields", s.GetPos().Line, s.GetPos().Col)
-		}
-		// Build a compile-time string[] of field names (ES enumeration order — Node
-		// key order) and materialise it at runtime. An object with optional
-		// fields lists only the present ones, as Object.keys does (ADR-01066).
-		ordered := esOrderedFields(fields)
-		var err error
-		switch {
-		case isRecordView(objTy) && !objTy.Nullable():
-			// Another layout behind a structural type: the object's own keys
-			// (TDD-00233).
-			objVal, oerr := e.emitExpr(s.Object)
-			if oerr != nil {
-				return oerr
+			// Any other value (a function, a class, a primitive): its
+			// enumerable keys at run time, through its box.
+			objVal, err := e.emitExpr(s.Object)
+			if err != nil {
+				return err
 			}
-			keysVal, err = e.emitRecordSplit(objVal, ArrayOf(TypePtr), func(v Value) (Value, error) {
-				if keysAtRuntime(v.Ty, ordered) {
-					return e.emitObjectPresentFieldNames(v, ordered)
+			if objVal, err = e.emitBoxValue(objVal); err != nil {
+				return err
+			}
+			e.dynKeysForIn = true
+			keysVal, err = e.emitDynAnyKeys(objVal, s.GetPos())
+			e.dynKeysForIn = false
+			if err != nil {
+				return err
+			}
+		} else {
+			// Build a compile-time string[] of field names (ES enumeration order — Node
+			// key order) and materialise it at runtime. An object with optional
+			// fields lists only the present ones, as Object.keys does (ADR-01066).
+			ordered := esOrderedFields(fields)
+			var err error
+			switch {
+			case isRecordView(objTy) && !objTy.Nullable():
+				// Another layout behind a structural type: the object's own keys
+				// (TDD-00233).
+				objVal, oerr := e.emitExpr(s.Object)
+				if oerr != nil {
+					return oerr
 				}
-				return e.emitObjectFieldNames(ordered, s.GetPos())
-			}, func(box Value) (Value, error) { return e.emitDynAnyKeys(box, s.GetPos()) })
-		case keysAtRuntime(objTy, ordered):
-			objVal, oerr := e.emitExpr(s.Object)
-			if oerr != nil {
-				return oerr
+				keysVal, err = e.emitRecordSplit(objVal, ArrayOf(TypePtr), func(v Value) (Value, error) {
+					if keysAtRuntime(v.Ty, ordered) {
+						return e.emitObjectPresentFieldNames(v, ordered)
+					}
+					return e.emitObjectFieldNames(ordered, s.GetPos())
+				}, func(box Value) (Value, error) { return e.emitDynAnyKeys(box, s.GetPos()) })
+			case keysAtRuntime(objTy, ordered):
+				objVal, oerr := e.emitExpr(s.Object)
+				if oerr != nil {
+					return oerr
+				}
+				keysVal, err = e.emitObjectPresentFieldNames(objVal, ordered)
+			default:
+				keysVal, err = e.emitObjectFieldNames(ordered, s.GetPos())
 			}
-			keysVal, err = e.emitObjectPresentFieldNames(objVal, ordered)
-		default:
-			keysVal, err = e.emitObjectFieldNames(ordered, s.GetPos())
-		}
-		if err != nil {
-			return err
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	// Cache the array's data/len into allocas so the loop can read them.
 	dataPtrAlloca := e.freshReg()
 	lenAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", dataPtrAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", dataPtrAlloca))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenAlloca))
 
 	dataExtract := e.freshReg()
 	lenExtract := e.freshReg()
 	dataExtract = e.arrayData(keysVal)
 	lenExtract = e.arrayLen(keysVal)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataExtract, dataPtrAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lenExtract, lenAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", dataExtract, dataPtrAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", lenExtract, lenAlloca))
 
 	// Index counter.
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxPtr))
 
 	// Loop variable (key: string/ptr).
 	varPtr := e.freshReg()
 	if cell, ok := e.boxLoopVar(s.Kind, s.VarName, TypePtr); ok {
 		varPtr = cell
 	} else {
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", varPtr))
 		e.define(s.VarName, Symbol{Ptr: varPtr, Ty: TypePtr})
 	}
 
@@ -1938,8 +2210,8 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	idxVal := e.freshReg()
 	lenVal := e.freshReg()
 	condReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxPtr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenVal, lenAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", lenVal, lenAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", condReg, idxVal, lenVal))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
 
@@ -1948,11 +2220,11 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	idxVal2 := e.freshReg()
 	gepReg := e.freshReg()
 	elemVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataPtrAlloca))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal2, idxPtr))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", gepReg, dataPtr, idxVal2))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", elemVal, gepReg))
-	e.heapStore("ptr", elemVal, varPtr, 8)
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", dataPtr, dataPtrAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal2, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", gepReg, dataPtr, idxVal2))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", elemVal, gepReg))
+	e.heapStore(irPtr, elemVal, varPtr, 8)
 
 	if err := e.emitForInBody(s); err != nil {
 		return err
@@ -1962,9 +2234,9 @@ func (e *Emitter) emitForIn(s *ast.ForInStatement) error {
 	e.emitLabel(incL)
 	idxVal3 := e.freshReg()
 	newIdx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal3, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal3, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", newIdx, idxVal3))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", newIdx, idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", newIdx, idxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(endL)
@@ -1995,7 +2267,7 @@ func (e *Emitter) isMainThreadTest(test ast.Expression) (bool, bool) {
 // after the loop. Where name is bound already (a top-level `var`, an
 // earlier declaration), the loop alone.
 func (e *Emitter) emitForVarOuter(name string, elem Type, body *ast.BlockStatement, emitLoop func() error) error {
-	if _, bound := e.lookup(name); bound || body == nil || elem.IsDynamic() || elem.IR == "void" || elem.IR == "" {
+	if _, bound := e.varRedeclarationTarget(name); bound || body == nil || elem.IsDynamic() || elem.IR == "void" || elem.IR == "" {
 		return emitLoop()
 	}
 	pos := body.GetPos()
@@ -2018,6 +2290,40 @@ func (e *Emitter) emitForVarOuter(name string, elem Type, body *ast.BlockStateme
 	return nil
 }
 
+// forHeadNamesBinding reports a `for (var x in/of …)` head whose x already
+// has a function-scope binding to store into: one read before the loop
+// (earlyVars), or an earlier `var x` of this function or the program
+// (varRedeclarationTarget).
+func (e *Emitter) forHeadNamesBinding(name string) bool {
+	if e.earlyVars[name] != nil {
+		return true
+	}
+	_, ok := e.varRedeclarationTarget(name)
+	return ok
+}
+
+// emitForHeadIntoEarlyVar emits a `for (var x in/of …)` loop whose x is read
+// before the loop (earlyVars, a nested function's capture among them): each
+// iteration's value is bound to a fresh loop constant and stored into x's
+// function-scope slot, so every reader sees the one binding.
+func (e *Emitter) emitForHeadIntoEarlyVar(kind, name *string, body **ast.BlockStatement, emit func() error) error {
+	pos := ast.Pos{}
+	if *body != nil {
+		pos = (*body).GetPos()
+	}
+	v, tmp := *name, *name+"__kml_forhead"
+	assign := ast.NewExpressionStatement(ast.NewAssignmentExpression("=", ast.NewIdentifier(v, pos), ast.NewIdentifier(tmp, pos), pos), pos)
+	savedKind, savedBody := *kind, *body
+	var stmts []ast.Statement
+	if savedBody != nil {
+		stmts = savedBody.Body
+	}
+	nb := ast.NewBlockStatement(append([]ast.Statement{assign}, stmts...), pos)
+	*kind, *name, *body = "const", tmp, nb
+	defer func() { *kind, *name, *body = savedKind, v, savedBody }()
+	return emit()
+}
+
 // isStaticCompanion reports a class synthesized to hold a generic class's
 // statics: it initializes at the generic declaration's site.
 func (e *Emitter) isStaticCompanion(cd *ast.ClassDeclaration) bool {
@@ -2037,4 +2343,28 @@ func unionHoldsPromise(t Type) bool {
 		}
 	}
 	return false
+}
+
+// unionOfIndexables reports a union whose every member iterates by its
+// length and index reads (arrays, tuples, strings): its box iterates as
+// an `any` holding one of them does.
+func unionOfIndexables(t Type) bool {
+	if !t.IsDynamic() || len(t.UnionMembers) < 2 {
+		return false
+	}
+	for _, m := range t.UnionMembers {
+		if !m.IsArray() && !m.IsTuple() && scalarTypeKind(m) != "string" {
+			return false
+		}
+	}
+	return true
+}
+
+// constLoopVar marks a `const` for-in/for-of loop's variable: its first
+// definition (the loop's own, before the body's) binds it constant, so a
+// write throws "Assignment to constant variable." as JavaScript's does.
+func (e *Emitter) constLoopVar(name string) func() {
+	saved := e.pendingConstLoop
+	e.pendingConstLoop = name
+	return func() { e.pendingConstLoop = saved }
 }

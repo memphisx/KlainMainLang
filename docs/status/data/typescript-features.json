@@ -172,7 +172,7 @@
             "feature": "Type assertions — `as T` / `as const` / `satisfies` / `<T>x`",
             "status": "implemented",
             "caveats": [
-              "**Erased, not enforcing** — the value keeps its inferred type; a cast relied on for re-typing does not take effect (matches TS runtime erasure, not static narrowing) → [Type system](TYPE-SYSTEM.md)"
+              "An assertion to a type of another kind through `unknown`/`any` converts the value (`NaN` for a string asserted a number), where Node keeps it → [Type system](TYPE-SYSTEM.md)"
             ]
           },
           {
@@ -284,9 +284,9 @@
           },
           {
             "feature": "Spread into fixed-arity functions / uncommon variadic builtins (`f(...arr)`, `Math.hypot(...a)`)",
-            "status": "missing",
+            "status": "implemented",
             "notes": [
-              "Clean compile error (TDD-00106)"
+              "A tuple (readonly included) fills fixed parameters by position; an array over optional parameters fills each from its elements, undefined past the end; an array into required parameters is TS2556, as in tsc; under `-compat=js` any iterable spreads, through `apply` ([ADR-01970](../adr/01/ADR-01970.md))"
             ]
           },
           {

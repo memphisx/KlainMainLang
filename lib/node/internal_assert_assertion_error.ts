@@ -303,12 +303,20 @@ export class AssertionError extends Error {
         const operator: string = o.operator;
         super(buildMessage(o.message, o.actual, o.expected, operator, diff));
         this.generatedMessage = !o.message;
+        // Node's: the stack is taken while the name carries the code, then
+        // the (non-enumerable) name is set back.
+        Object.defineProperty(this, 'name', { value: 'AssertionError [ERR_ASSERTION]', enumerable: false, writable: true, configurable: true });
         this.code = 'ERR_ASSERTION';
         this.actual = o.actual;
         this.expected = o.expected;
         this.operator = operator;
-        this.name = 'AssertionError';
         this.diff = diff;
+        const head = 'Error: ' + this.message;
+        const stack: any = this.stack;
+        if (typeof stack === 'string' && stack.startsWith(head)) {
+            Object.defineProperty(this, 'stack', { value: 'AssertionError [ERR_ASSERTION]: ' + this.message + stack.slice(head.length), writable: true, enumerable: false, configurable: true });
+        }
+        this.name = 'AssertionError';
     }
 
     toString(): string {

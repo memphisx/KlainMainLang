@@ -689,3 +689,12 @@ void __kml_sort_ptr(void **base, long long n, kml_sort_cmp cmp) {
         base[i] = 0;
     __kml_stable_sort(base, k, sizeof(void *), cmp);
 }
+
+/* A closure's own two allocations: its {fn, env} header and, if it
+ * captured anything, the environment. The captured-variable cells the
+ * environment points to are shared with the enclosing scope and other
+ * closures (ADR-00001), so they are not freed here. */
+void __kml_closure_free(void **hdr) {
+    if (hdr[1]) kml_free(KML_HEAP_WORDS, hdr[1]);
+    kml_free(KML_HEAP_WORDS, (char *)hdr - KML_PREFIX_OFF);
+}

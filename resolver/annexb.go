@@ -155,10 +155,18 @@ func blockStmts(body []ast.Statement, outer []map[string]bool, blocked func(stri
 	hoist *[]string, hoisted, declared map[string]bool, stmt func(ast.Statement, []map[string]bool)) []ast.Statement {
 	here := lexicalNames(body)
 	inner := append(append([]map[string]bool{}, outer...), here)
+	// A name a generator or async function here also declares is an early
+	// error the binder reports; it keeps its block declarations.
+	special := map[string]bool{}
+	for _, st := range body {
+		if fd, ok := st.(*ast.FunctionDeclaration); ok && (fd.IsAsync || fd.IsGenerator) {
+			special[fd.Name] = true
+		}
+	}
 	var assigns, rest []ast.Statement
 	for _, st := range body {
 		fd, ok := st.(*ast.FunctionDeclaration)
-		if !ok || fd.IsAsync || fd.IsGenerator || fd.Body == nil || len(fd.TypeParams) > 0 || blocked(fd.Name, outer) {
+		if !ok || fd.IsAsync || fd.IsGenerator || fd.Body == nil || len(fd.TypeParams) > 0 || special[fd.Name] || blocked(fd.Name, outer) {
 			stmt(st, inner)
 			rest = append(rest, st)
 			continue

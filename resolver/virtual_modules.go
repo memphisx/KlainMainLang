@@ -34,13 +34,8 @@ import (
 // file-to-file imports, so shadowing "just works" for free.
 var virtualBuiltinMarkers = map[string]string{
 	"child_process": "childprocess__kml_builtin",
-	"http":          "http__kml_builtin",
-	// https shares the libcurl-backed client (get/request speak TLS for free);
-	// https.createServer is a clean codegen rejection until the http accept
-	// loop is TLS-wrapped.
-	"https":      "https__kml_builtin",
-	"stream/web": "streamweb__kml_builtin",
-	"memory":     "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
+	"stream/web":    "streamweb__kml_builtin",
+	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00165: Web-global-backed Node modules. Their primary exports are
 	// spec-identical re-exports of an ambient global (`URL`, `setTimeout`,
 	// `performance`, `Buffer`, `EventEmitter`), so a same-name import is
@@ -74,7 +69,7 @@ func firstKey(set map[string]bool) string {
 // NOT listed — they have no same-named global and are separate future surface,
 // so they keep the standard "no exported member" rejection.
 var globalReexportModules = map[string]map[string]bool{
-	"buffer": {"Buffer": true, "Blob": true, "atob": true, "btoa": true},
+	"buffer": {"Buffer": true, "Blob": true, "File": true, "atob": true, "btoa": true},
 }
 
 // moduleFunctionMembers (TDD-00165 Stage 4) are the *module-only* function
@@ -105,15 +100,8 @@ var parseTimeReexports = map[string]bool{}
 // dispatch tables live in Go source, not data.
 var virtualModuleMembers = map[string]map[string]bool{
 	"child_process": {"spawn": true, "exec": true, "execFile": true, "fork": true, "spawnSync": true, "execSync": true, "execFileSync": true},
-	// The Node `http` namespace exposes only Node-real members. The bespoke
-	// `listen`/`close`/`closeAllConnections` module-level functions (Node has
-	// these as `Server` methods, not `http.*` functions) live solely under
-	// `klain:http` now (TDD-00158 follow-up / ADR-00635) — importing them from
-	// `http` is a clean "no export" rejection pointing there.
-	"http":       {"get": true, "request": true, "createServer": true, "Agent": true},
-	"klain:sync": {"go": true, "Channel": true, "select": true, "defaultCase": true},
-	"memory":     {"free": true},
-	"https":      {"get": true, "request": true, "Agent": true},
+	"klain:sync":    {"go": true, "Channel": true, "select": true, "defaultCase": true},
+	"memory":        {"free": true},
 	// stream/web re-exports the WHATWG stream classes that already exist as
 	// parse-time constructors — the names bind as identity.
 	"stream/web": {

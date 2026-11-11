@@ -23,7 +23,7 @@ while (obj?.a) {
 console.log(count);
 
 let hits = 0;
-const maybe: { flag: boolean } | null = null;
+const maybe = null as { flag: boolean } | null;
 if (maybe?.flag) {
   hits = 99;
 }

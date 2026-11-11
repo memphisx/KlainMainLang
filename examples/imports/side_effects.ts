@@ -6,6 +6,7 @@
 // — see TDD-00052's Design section for why a cycle can't get the same
 // freedom safely.)
 
+import './side_effects_setup' // effect-only form: runs it once, binds nothing
 import { ready } from './side_effects_setup'
 
 console.log("main: ready = " + ready())

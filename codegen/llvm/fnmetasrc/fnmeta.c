@@ -1,11 +1,12 @@
 /* fnmeta.c — the object side of function values (TDD-00229 Stage A).
  *
  * A function value is a closure header {fnptr, env} (static ABI) or a boxed
- * dynamic record {fnptr, env, arity} (tag 12, dyn ABI). Its name, length and
- * kind live in rows each compiled unit registers (unitreg.c), keyed by the
- * code pointer (fnmeta.go). An unregistered code pointer is an anonymous
- * plain function — every runtime-internal callable (a promise resolver, a
- * stream callback) lands there, which is how Node renders those too. */
+ * dynamic record {fnptr, env, arity} (tag 12, dyn ABI), either one after its
+ * prefix word: the header magic, the closure flag and the function's id
+ * (objheader.go). Its name, length and kind live in rows each compiled unit
+ * registers (unitreg.c), keyed by that word (fnmeta.go). Id 0 is an
+ * anonymous plain function — every runtime-internal callable (a promise
+ * resolver, a stream callback) is one, which is how Node renders those too. */
 
 #include <stdint.h>
 #include <stdio.h>
@@ -22,6 +23,13 @@ typedef struct {
 
 extern const void *__kml_unit_find(long long kind, long long id);
 #define KML_UNIT_FNMETA 4
+#define KML_UNIT_CLASSSRC 10
+/* The prefix word's closure flag and the object-state bits a row key
+ * leaves out (objheader.go). */
+#define FN_HDR_MAGIC (0x4B4DLL << 32)
+#define FN_HDR_MAGIC_MASK (0x7FFFLL << 32)
+#define FN_HDR_CLOSURE (1LL << 54)
+#define FN_HDR_STATE (7LL << 51)
 
 enum {
     FN_PLAIN = 0,
@@ -34,12 +42,10 @@ enum {
     FN_THROUGH_BOX = 0x400, /* env = { tag, box }: a dynamic function's closure thunk */
     FN_BOUND_BOX = 0x800,   /* env = { target box, this, n, bound… }: a dynamic bound function */
     FN_SLOPPY = 0x1000,     /* a sloppy (plain `function`) function: own caller/arguments */
+    FN_CTOR = 0x2000,       /* a `function` (no arrow/method/async/generator): owns `prototype` */
+    FN_OBJECT_PROTO = 0x4000, /* Function.prototype itself: its prototype is Object.prototype */
+    FN_CONSTRUCTS = 0x8000, /* a builtin constructor (`Symbol`, `String`): IsConstructor */
 };
-
-/* An extended record (a node:ffi bound function, TDD-00229) flags its arity
- * word and carries its own name and own-property bag:
- * { fnptr, env, arity | FN_EXT, char *name, void *props }. */
-#define FN_EXT (1LL << 62)
 
 /* Dynamic-object runtime (dynobjsrc/dynobj.c), always linked with this file. */
 extern long long __kml_dynobj_find(void *o, const char *key);
@@ -75,8 +81,14 @@ void __kml_fn_bag_seed(void *bag, void **rec) { fn_seed(bag, rec); }
 /* Nested bind/adapter chains are short; the bound bounds a malformed cycle. */
 #define FN_MAX_DEPTH 64
 
-static const KmlFnMeta *fn_find(void *fn) {
-    return fn ? (const KmlFnMeta *)__kml_unit_find(KML_UNIT_FNMETA, (long long)(intptr_t)fn) : NULL;
+/* A function value's row, by its prefix word; NULL for an anonymous one. */
+static const KmlFnMeta *fn_find(void **obj) {
+    if (!obj) return NULL;
+    long long w = ((long long *)obj)[-1];
+    if ((w & (FN_HDR_MAGIC_MASK | FN_HDR_CLOSURE)) != (FN_HDR_MAGIC | FN_HDR_CLOSURE)) return NULL;
+    w &= ~FN_HDR_STATE;
+    if ((w & 0xFFFFFFFFLL) == 0) return NULL;
+    return (const KmlFnMeta *)__kml_unit_find(KML_UNIT_FNMETA, w);
 }
 
 /* Resolved view of one function value. */
@@ -85,6 +97,9 @@ typedef struct {
     long long length;
     int kind; /* FN_PLAIN..FN_CLASS */
     int sloppy; /* FN_SLOPPY: its caller/arguments read, not throw */
+    int ctor;   /* FN_CTOR: it owns a `prototype` object */
+    int objproto; /* FN_OBJECT_PROTO */
+    int constructs; /* IsConstructor: a `function`, a class, or one bound */
     const char *src; /* its source text, NULL for a native or bound one */
 } FnView;
 
@@ -95,9 +110,11 @@ static void fn_view_dyn_at(void **rec, FnView *v, int depth);
  * tag bits). */
 static void **fn_box_rec(long long box) { return (void **)(uintptr_t)(box & ~7LL); }
 
-static void fn_view_code(void *fn, void *env, FnView *out, int depth) {
-    const KmlFnMeta *m = depth < FN_MAX_DEPTH && fn ? fn_find(fn) : NULL;
+static void fn_view_code(void **obj, FnView *out, int depth) {
+    void *env = obj ? obj[1] : NULL;
+    const KmlFnMeta *m = depth < FN_MAX_DEPTH ? fn_find(obj) : NULL;
     out->src = NULL;
+    out->sloppy = out->ctor = out->objproto = out->constructs = 0;
     if (!m) {
         out->name[0] = 0;
         out->length = 0;
@@ -128,6 +145,7 @@ static void fn_view_code(void *fn, void *env, FnView *out, int depth) {
         /* m->length holds a trampoline's bound-argument count. */
         out->length = target.length > bound ? target.length - bound : 0;
         out->kind = target.kind == FN_CLASS ? FN_PLAIN : target.kind;
+        out->constructs = target.constructs;
         out->sloppy = 0;
         out->src = NULL;
         return;
@@ -139,18 +157,22 @@ static void fn_view_code(void *fn, void *env, FnView *out, int depth) {
     out->length = m->length;
     out->kind = (int)(m->kind & 0xff);
     out->sloppy = (m->kind & FN_SLOPPY) != 0;
+    out->ctor = (m->kind & FN_CTOR) != 0;
+    out->objproto = (m->kind & FN_OBJECT_PROTO) != 0;
+    out->constructs = out->ctor || out->kind == FN_CLASS || (m->kind & FN_CONSTRUCTS) != 0;
     out->src = m->src;
 }
 
 static void fn_view_hdr(void **hdr, FnView *out, int depth) {
     if (!hdr) {
         out->src = NULL;
+        out->sloppy = out->ctor = out->objproto = out->constructs = 0;
         out->name[0] = 0;
         out->length = 0;
         out->kind = FN_PLAIN;
         return;
     }
-    fn_view_code(hdr[0], hdr[1], out, depth);
+    fn_view_code(hdr, out, depth);
 }
 
 static char *kml_str(const char *s, size_t n) {
@@ -180,6 +202,9 @@ static char *fn_render(const FnView *v) {
     else
         n = v->name[0] ? snprintf(buf, sizeof buf, "[%s: %s]", tag, v->name)
                        : snprintf(buf, sizeof buf, "[%s (anonymous)]", tag);
+    /* Node names the constructor when it is not the tag's: Object for
+     * Function.prototype. */
+    if (v->objproto && n > 0 && (size_t)n < sizeof buf - 8) n += snprintf(buf + n, sizeof buf - (size_t)n, " Object");
     if (n < 0) n = 0;
     if ((size_t)n >= sizeof buf) n = (int)sizeof buf - 1;
     return kml_str(buf, (size_t)n);
@@ -191,11 +216,12 @@ void *__kml_fn_identity_dyn(void **rec);
  * …)`): one dynamic-object bag per function identity — the closure header,
  * which every boxing of one function leads back to (__kml_fn_identity_dyn) —
  * in a table the program's lifetime keeps, as a function with properties is
- * rare. An extended record carries its own bag. The table lives in static
+ * rare. The table lives in static
  * data (a -mm=gc root) and is locked for workers. */
 typedef struct {
     void *id;
     void *bag;
+    void **rec; /* the function value the bag was made for */
 } FnPropsEnt;
 static FnPropsEnt *fn_props_tab;
 static long long fn_props_n, fn_props_cap;
@@ -241,6 +267,7 @@ static void *fn_props_make(void *id, void *(*mk)(void), void (*seed)(void *, voi
     }
     fn_props_tab[fn_props_n].id = id;
     fn_props_tab[fn_props_n].bag = fresh;
+    fn_props_tab[fn_props_n].rec = rec;
     fn_props_n++;
     fn_props_release();
     return fresh;
@@ -255,9 +282,25 @@ long long __kml_fn_caller_get(void **rec, int arguments);
 long long __kml_fn_static_get(void **rec, const char *key) {
     if (key && (strcmp(key, "caller") == 0 || strcmp(key, "arguments") == 0))
         return __kml_fn_caller_get(rec, key[0] == 'a');
-    const long long *row = (const long long *)__kml_unit_find(KML_UNIT_FNSTATIC, (long long)(intptr_t)__kml_fn_identity_dyn(rec));
+    long long *id = (long long *)__kml_fn_identity_dyn(rec);
+    const long long *row = id ? (const long long *)__kml_unit_find(KML_UNIT_FNSTATIC, id[-1] & ~FN_HDR_STATE) : NULL;
     if (!row) return 10; /* undefined */
     return ((long long (*)(const char *))(intptr_t)row[1])(key);
+}
+
+/* The function a property bag belongs to, boxed (its record, tag 12), or
+ * 0 for a bag that is no function's: a function standing as an object's
+ * prototype is that object's prototype by its identity. */
+long long __kml_fn_bag_owner(void *bag) {
+    long long out = 0;
+    fn_props_acquire();
+    for (long long i = 0; i < fn_props_n; i++)
+        if (fn_props_tab[i].bag == bag) {
+            out = (long long)(uintptr_t)fn_props_tab[i].rec | 7;
+            break;
+        }
+    fn_props_release();
+    return out;
 }
 
 /* The bag of a boxed function's record, or NULL when it has none. A
@@ -266,13 +309,12 @@ static void fn_view_dyn(void **rec, FnView *v);
 extern void *__kml_dynobj_new(void);
 void *__kml_fn_props_dyn(void **rec) {
     if (!rec) return NULL;
-    if ((long long)rec[2] & FN_EXT) return rec[4];
     void *id = __kml_fn_identity_dyn(rec);
     void *bag = fn_props_lookup(id);
     if (bag) return bag;
     FnView fv;
     fn_view_dyn(rec, &fv);
-    if (fv.kind == FN_GEN || fv.kind == FN_ASYNCGEN) return fn_props_make(id, __kml_dynobj_new, __kml_fn_bag_seed, rec);
+    if (fv.kind == FN_GEN || fv.kind == FN_ASYNCGEN || fv.ctor) return fn_props_make(id, __kml_dynobj_new, __kml_fn_bag_seed, rec);
     return NULL;
 }
 
@@ -286,14 +328,6 @@ static long long (*fn_bag_get)(void *, const char *);
 void *__kml_fn_props_dyn_make(void **rec, void *(*mk)(void), long long (*get)(void *, const char *),
                               void (*seed)(void *, void **)) {
     fn_bag_get = get;
-    if ((long long)rec[2] & FN_EXT) {
-        if (!rec[4]) {
-            void *fresh = mk();
-            seed(fresh, rec);
-            rec[4] = fresh;
-        }
-        return rec[4];
-    }
     return fn_props_make(__kml_fn_identity_dyn(rec), mk, seed, rec);
 }
 
@@ -392,7 +426,7 @@ static char *fn_render_props(const FnView *v, void *bag, long long depth) {
     if (bag) {
         char *props = __kml_fn_props_inspect(bag, depth);
         if (props && props[0] && strcmp(props, "{}") != 0) {
-            kml_free(KML_HEAP_RAW, props - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(props));
             if (depth > 2) return kml_str("[Function]", 10);
             props = __kml_fn_props_inspect(bag, depth);
             char *head = fn_render(v);
@@ -403,11 +437,11 @@ static char *fn_render_props(const FnView *v, void *bag, long long depth) {
             memcpy(buf + hn + 1, props, pn);
             char *out = kml_str(buf, hn + 1 + pn);
             free(buf); /* scratch */
-            kml_free(KML_HEAP_RAW, head - 8);
-            kml_free(KML_HEAP_RAW, props - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(head));
+            kml_free(KML_HEAP_RAW, KML_PREFIX(props));
             return out;
         }
-        if (props && props[0]) kml_free(KML_HEAP_RAW, props - 8);
+        if (props && props[0]) kml_free(KML_HEAP_RAW, KML_PREFIX(props));
     }
     return fn_render(v);
 }
@@ -445,7 +479,7 @@ static void *fn_hdr_bag(void **hdr) {
     for (int depth = 0; hdr && depth < FN_MAX_DEPTH; depth++) {
         void *bag = fn_props_lookup(hdr);
         if (bag) return bag;
-        const KmlFnMeta *m = hdr[0] ? fn_find(hdr[0]) : NULL;
+        const KmlFnMeta *m = fn_find(hdr);
         if (!m || !hdr[1]) return NULL;
         if (m->kind & FN_THROUGH_ENV) {
             hdr = (void **)hdr[1];
@@ -481,27 +515,15 @@ long long __kml_fn_length_hdr(void **hdr) {
     return v.length;
 }
 
-/* A tag-12 record {fnptr, env, arity}: its code pointer is either a natively
- * dynamic function (registered under its own name) or an adapter whose env is
- * the adapted closure header (registered FN_THROUGH_ENV); an extended record
- * names itself. */
+/* A tag-12 record {fnptr, env, arity}: a natively dynamic function
+ * (registered under its own id) or an adapter whose env is the adapted
+ * closure header (registered FN_THROUGH_ENV). */
 static void fn_view_dyn_at(void **rec, FnView *v, int depth) {
     if (!rec) {
         fn_view_hdr(NULL, v, 0);
         return;
     }
-    long long arity = (long long)rec[2];
-    if (arity & FN_EXT) {
-        const char *name = (const char *)rec[3];
-        size_t n = name ? strlen(name) : 0;
-        if (n > sizeof v->name - 1) n = sizeof v->name - 1;
-        memcpy(v->name, name ? name : "", n);
-        v->name[n] = 0;
-        v->length = arity & ~FN_EXT;
-        v->kind = FN_PLAIN;
-        return;
-    }
-    fn_view_code(rec[0], rec[1], v, depth);
+    fn_view_code(rec, v, depth);
 }
 
 static void fn_view_dyn(void **rec, FnView *v) { fn_view_dyn_at(rec, v, 0); }
@@ -555,7 +577,7 @@ char *__kml_fn_tostring_dyn(void **rec) {
 /* String(K) of a constructor reference (its payload, the constructor's
  * name): a class's source text, else the native-function form. */
 char *__kml_classref_tostring(const char *name) {
-    const KmlFnMeta *m = fn_find((void *)name);
+    const KmlFnMeta *m = name ? (const KmlFnMeta *)__kml_unit_find(KML_UNIT_CLASSSRC, (long long)(intptr_t)name) : NULL;
     if (m && m->src) return kml_str(m->src, strlen(m->src));
     char buf[600];
     int n = snprintf(buf, sizeof buf, "function %s() { [native code] }", name ? name : "");
@@ -578,26 +600,21 @@ long long __kml_fn_length_dyn(void **rec) {
  * that compare equal. */
 void *__kml_fn_identity_dyn(void **rec) {
     if (!rec) return NULL;
-    void *fn = rec[0];
-    void **env = (void **)rec[1];
-    void *id = rec;
-    for (int depth = 0; depth < FN_MAX_DEPTH && fn && env; depth++) {
-        const KmlFnMeta *m = fn_find(fn);
+    void **cur = rec;
+    for (int depth = 0; depth < FN_MAX_DEPTH && cur[0] && cur[1]; depth++) {
+        void **env = (void **)cur[1];
+        const KmlFnMeta *m = fn_find(cur);
         if (m && (m->kind & FN_THROUGH_BOX)) {
             /* A thunk of a function unboxed from `any`: that function. */
             void **inner = fn_box_rec(((long long *)env)[1]);
             if (!inner) break;
-            id = inner;
-            fn = inner[0];
-            env = (void **)inner[1];
+            cur = inner;
             continue;
         }
         if (!m || !(m->kind & FN_THROUGH_ENV)) break;
-        id = env;
-        fn = env[0];
-        env = (void **)env[1];
+        cur = env;
     }
-    return id;
+    return cur;
 }
 
 /* The identity of a closure header for `===`: an adapter's (through its
@@ -615,7 +632,7 @@ long long __kml_fn_thunk_box(void **hdr, const void *d2sTag) {
     for (int depth = 0; hdr && depth < FN_MAX_DEPTH; depth++) {
         void **env = (void **)hdr[1];
         if (env && env[0] == d2sTag) return ((long long *)env)[1];
-        const KmlFnMeta *m = hdr[0] ? fn_find(hdr[0]) : NULL;
+        const KmlFnMeta *m = fn_find(hdr);
         if (!m || !(m->kind & FN_THROUGH_ENV)) return 0;
         hdr = env;
     }
@@ -740,11 +757,26 @@ static void gen_seed_for(void *bag, void **rec) {
     gen_define(bag, "prototype", GEN_BOX_BAG(p), 1 /* writable */);
 }
 
+/* A constructor function's own `prototype`: a fresh object whose
+ * non-enumerable `constructor` is the function (its record: a record is
+ * its own identity). */
+static void ctor_seed_for(void *bag, void **rec) {
+    void *p = __kml_dynobj_new();
+    __kml_dynobj_set_proto(p, __kml_object_prototype());
+    gen_define(p, "constructor", (long long)(uintptr_t)rec | 7, 1 | KML_DYN_ATTR_CONFIGURABLE);
+    gen_define(bag, "prototype", GEN_BOX_BAG(p), 1 /* writable */);
+}
+
+/* The property bag of a boxed function's record, made on first use: the
+ * object Object.freeze/seal/preventExtensions and their tests act on. */
+void *__kml_fn_bag_of(void **rec) {
+    return fn_props_make(__kml_fn_identity_dyn(rec), __kml_dynobj_new, __kml_fn_bag_seed, rec);
+}
+
 /* The property bag of the generator function a closure header is the value
  * of, made (seeded with its `prototype`) on first use. */
 void *__kml_gen_fn_bag(void **hdr) {
-    void *rec[3] = {hdr[0], hdr[1], 0};
-    return fn_props_make(__kml_fn_identity_dyn((void **)hdr), __kml_dynobj_new, __kml_fn_bag_seed, rec);
+    return fn_props_make(__kml_fn_identity_dyn((void **)hdr), __kml_dynobj_new, __kml_fn_bag_seed, hdr);
 }
 
 /* The prototype an instance of a generator function takes: the function's
@@ -762,30 +794,76 @@ long long __kml_gen_instance_proto(void *bag, int async) {
 }
 
 extern void *__kml_dynobj_get_proto(void *o);
+extern long long __kml_dynobj_proto_box(void *o);
 extern int __kml_shape_generator_kind(void *obj);
 extern long long __kml_shape_generator_proto(void *obj, int kind);
 
-/* OrdinaryHasInstance(c, v) for c a generator function: whether c's
+/* `f instanceof Function` for f a function record: whether
+ * Function.prototype (fnproto, its record) is on f's chain. A function
+ * whose prototype was never set (or a link that is such a function) has
+ * it; a chain Object.setPrototypeOf rerouted elsewhere may not. */
+extern long long __kml_fn_bag_owner(void *bag);
+int __kml_fn_is_function_inst(void **rec, void **fnproto) {
+    void *cur = fn_props_lookup(__kml_fn_identity_dyn(rec));
+    for (int hops = 0; cur && hops < 100000; hops++) {
+        long long pb = __kml_dynobj_proto_box(cur);
+        if (!pb) return __kml_fn_bag_owner(cur) != 0; /* unset: Function.prototype, or Object.prototype's end */
+        if (pb == 2) return 0;                         /* null */
+        if ((pb & 7) == 7 && (unsigned long long)pb >= 65536) {
+            void **link = (void **)(uintptr_t)(pb & ~7LL);
+            if (link == fnproto) return 1;
+            cur = fn_props_lookup(__kml_fn_identity_dyn(link));
+            if (!cur) return 1;
+            continue;
+        }
+        cur = (void *)(uintptr_t)(pb & ~7LL);
+    }
+    return 1;
+}
+
+/* OrdinaryHasInstance(c, v) for c a generator or constructor function: whether c's
  * `prototype` is on v's prototype chain (a generator instance's first
  * link is the prototype it took when made). 0 for any other c. */
+extern int __kml_shape_proto_set(void *obj, void **proto);
+extern int __kml_array_proto_set(void *hdr, void **proto);
 int __kml_gen_has_instance(long long v, long long c) {
     unsigned long long cw = (unsigned long long)c, vw = (unsigned long long)v;
     if (cw < 65536 || cw >= (1ULL << 49) || (cw & 7) != 7) return 0;
     void **rec = (void **)(uintptr_t)(cw & ~7ULL);
     FnView fv;
     fn_view_dyn(rec, &fv);
-    if (fv.kind != FN_GEN && fv.kind != FN_ASYNCGEN) return 0;
+    if (fv.kind != FN_GEN && fv.kind != FN_ASYNCGEN && !fv.ctor) return 0;
     void *bag = __kml_fn_props_dyn(rec);
     long long p = bag ? __kml_dynobj_get(bag, "prototype") : 10;
     if (!GEN_IS_BAG(p) || vw < 65536 || vw >= (1ULL << 49)) return 0;
     void *target = (void *)(uintptr_t)(p & ~7LL), *o = (void *)(uintptr_t)(vw & ~7ULL), *cur = NULL;
-    if ((vw & 7) == 1) {
+    void *given = NULL;
+    if ((vw & 7) == 1 && __kml_shape_proto_set(o, &given)) {
+        /* A class instance given another prototype: that chain. */
+        cur = given;
+    } else if ((vw & 7) == 1) {
         int k = __kml_shape_generator_kind(o);
         long long first = k ? __kml_shape_generator_proto(o, k) : 0;
         if (!GEN_IS_BAG(first)) return 0;
         cur = (void *)(uintptr_t)(first & ~7LL);
     } else if ((vw & 7) == 5)
         cur = __kml_dynobj_get_proto(o);
+    else if ((vw & 7) == 2) {
+        /* An array box (its header first): a prototype it was given. */
+        if (!__kml_array_proto_set(*(void **)o, &given)) return 0;
+        cur = given;
+    }
+    else if ((vw & 7) == 7) {
+        /* A function: the prototype Object.setPrototypeOf gave it (its
+         * bag's), else Function.prototype's bag. */
+        void *own = fn_props_lookup(__kml_fn_identity_dyn((void **)o));
+        long long set = own ? __kml_dynobj_proto_box(own) : 0;
+        if (GEN_IS_BAG(set)) cur = (void *)(uintptr_t)(set & ~7LL);
+        else if ((set & 7) == 7 && (unsigned long long)set >= 65536) {
+            void *fb = fn_props_lookup(__kml_fn_identity_dyn((void **)(uintptr_t)(set & ~7LL)));
+            cur = fb;
+        }
+    }
     for (int hops = 0; cur && hops < 100000; hops++) {
         if (cur == target) return 1;
         void *next = __kml_dynobj_get_proto(cur);
@@ -803,10 +881,26 @@ long long __kml_genfn_proto_parent(void *bag, long long fnProto, long long proto
 
 /* A function's prototype: %GeneratorFunction.prototype% for a generator
  * function, else Function.prototype (fnProto). */
+__attribute__((weak)) long long __kml_classref_of_extra(void *bag) { (void)bag; return 0; }
 long long __kml_fn_proto_of(void **rec, long long fnProto) {
+    /* One set by Object.setPrototypeOf: its bag's. */
+    void *bag = rec ? fn_props_lookup(__kml_fn_identity_dyn(rec)) : NULL;
+    long long set = bag ? __kml_dynobj_proto_box(bag) : 0;
+    if (set && GEN_IS_BAG(set)) {
+        /* A constructor reference's extra bag stands for the reference. */
+        long long ref = __kml_classref_of_extra((void *)(uintptr_t)(set & ~7LL));
+        if (ref) return ref;
+    }
+    if (set) return set;
     FnView fv;
     fn_view_dyn(rec, &fv);
     if (fv.kind == FN_GEN || fv.kind == FN_ASYNCGEN) return __kml_genfn_proto(fv.kind == FN_ASYNCGEN, fnProto);
+    if (fv.objproto) {
+        /* Function.prototype itself: Object.prototype, its bag's seed. */
+        void *own = fn_props_make(__kml_fn_identity_dyn(rec), __kml_dynobj_new, __kml_fn_bag_seed, rec);
+        long long p = own ? __kml_dynobj_proto_box(own) : 0;
+        if (p) return p;
+    }
     return fnProto;
 }
 
@@ -816,10 +910,95 @@ long long __kml_fn_proto_of(void **rec, long long fnProto) {
 static void fn_seed(void *bag, void **rec) {
     FnView fv;
     fn_view_dyn(rec, &fv);
+    if (fv.objproto) __kml_dynobj_set_proto(bag, __kml_object_prototype());
     double len = (double)fv.length;
     long long lenbits;
     memcpy(&lenbits, &len, 8);
     gen_define(bag, "length", lenbits + KML_NB_DOUBLE_OFFSET, KML_DYN_ATTR_CONFIGURABLE);
     gen_define(bag, "name", (long long)(uintptr_t)kml_str(fv.name, strlen(fv.name)), KML_DYN_ATTR_CONFIGURABLE);
+    /* A sloppy function's own `arguments` and `caller`: read-only, null
+     * outside a call. */
+    if (fv.sloppy) {
+        gen_define(bag, "arguments", KML_NB_NULL, 0);
+        gen_define(bag, "caller", KML_NB_NULL, 0);
+    }
     if (fv.kind == FN_GEN || fv.kind == FN_ASYNCGEN) gen_seed_for(bag, rec);
+    else if (fv.ctor) ctor_seed_for(bag, rec);
+}
+
+/* F.prototype of a function declared in the program (emit_protoclass.go):
+ * the object its bag's `prototype` holds, made on first use. A `prototype`
+ * reassigned to a non-object leaves new instances a fresh bag. */
+void *__kml_fn_ctor_proto(long long fnbox) {
+    void *bag = __kml_fn_props_dyn(fn_box_rec(fnbox));
+    long long p = bag ? __kml_dynobj_get(bag, "prototype") : 10;
+    return GEN_IS_BAG(p) ? (void *)(uintptr_t)(p & ~7LL) : __kml_dynobj_new();
+}
+
+/* `new c(...argv)` through `any` for c a constructor function (the
+ * classes' own rows answer first): a fresh object inheriting c.prototype is
+ * `this`, and the call's result replaces it when that is an object. 0 when
+ * c is no constructor function. */
+extern long long __kml_ctor_this(void *proto);
+extern int __kml_pending_proto_set;
+extern void *__kml_pending_proto;
+long long __kml_dyn_construct_fn(long long c, long long *argv, long long argc) {
+    unsigned long long u = (unsigned long long)c;
+    if (u < 65536 || u >= (1ULL << 49) || (u & 7) != 7) return 0;
+    void **rec = fn_box_rec(c);
+    FnView fv;
+    fn_view_dyn(rec, &fv);
+    if (!fv.ctor) return 0;
+    void *proto = __kml_fn_ctor_proto(c);
+    if (__kml_pending_proto_set) {
+        /* Reflect.construct's newTarget: its prototype, not c's. */
+        __kml_pending_proto_set = 0;
+        proto = __kml_pending_proto;
+    }
+    long long thisv = __kml_ctor_this(proto);
+    long long (*fp)(void *, long long, long long, long long *) = (long long (*)(void *, long long, long long, long long *))rec[0];
+    long long r = fp(rec[1], thisv, argc, argv);
+    unsigned long long ru = (unsigned long long)r;
+    if (ru >= 65536 && ru < (1ULL << 49) && (ru & 7) != 0) return r;
+    return thisv;
+}
+
+/* IsConstructor(v), for a class's heritage (`class C extends v`): a class
+ * of the program (its constructor row), a plain `function`, or a function
+ * bound from one. An arrow, a method, an async or generator function, and
+ * anything not a function are not. */
+extern unsigned char __kml_nb_tag(long long w);
+extern long long __kml_nb_pay(long long w);
+long long __kml_is_constructor(long long v) {
+    if (__kml_nb_tag(v) == 8) /* a reference to a class or function of the program */
+        return __kml_unit_find(5 /* KML_UNIT_CTOR */, __kml_nb_pay(v)) != NULL;
+    unsigned long long u = (unsigned long long)v;
+    if (u < 65536 || u >= (1ULL << 49) || (u & 7) != 7) return 0;
+    FnView fv;
+    fn_view_dyn(fn_box_rec(v), &fv);
+    return fv.constructs;
+}
+
+/* A bound function's env { target, this, n, bound[n] } (dynobj.c's
+ * __kml_dyn_bound), or NULL for any other value: `new` of a bound function
+ * constructs its target with the bound arguments first. */
+extern long long __kml_dyn_bound(long long *env, long long callThis, long long argc, long long *argv);
+long long *__kml_fn_bound_env(long long c) {
+    unsigned long long u = (unsigned long long)c;
+    if (u < 65536 || u >= (1ULL << 49) || (u & 7) != 7) return 0;
+    void **rec = fn_box_rec(c);
+    return rec && rec[0] == (void *)__kml_dyn_bound ? (long long *)rec[1] : 0;
+}
+
+/* Whether a class's heritage value v is a constructor function of the
+ * program (`function F() {}`), which `super(...)` runs on the instance; any
+ * other constructor (a builtin's, a class held in a value, a bound one)
+ * constructs, and its result is `this`. */
+long long __kml_is_plain_ctor_fn(long long v) {
+    if (__kml_fn_bound_env(v)) return 0;
+    unsigned long long u = (unsigned long long)v;
+    if (u < 65536 || u >= (1ULL << 49) || (u & 7) != 7) return 0;
+    FnView fv;
+    fn_view_dyn(fn_box_rec(v), &fv);
+    return fv.ctor && fv.kind != FN_CLASS && fv.src != NULL; /* not a native one */
 }

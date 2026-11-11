@@ -67,6 +67,46 @@ char *__kml_bigint_to_str(void *a, int radix) {
 	return mpz_get_str(NULL, radix, (mpz_srcptr)a); /* GMP mallocs the result */
 }
 
+/* Node's buffer range check for writeBig(U)Int64*: NULL when a fits the
+ * 64-bit range, else the ERR_OUT_OF_RANGE message, Received in Node's
+ * underscore-grouped form (addNumericalSeparator). */
+char *__kml_bigint_range_msg(void *a, int is_signed) {
+	char *d = __kml_bigint_to_str(a, 10);
+	const char *lo = is_signed ? "-9223372036854775808" : "0";
+	const char *hi = is_signed ? "9223372036854775807" : "18446744073709551615";
+	int neg = d[0] == '-';
+	const char *mag = d + neg;
+	size_t n = strlen(mag);
+	/* Compare magnitudes as decimal strings. */
+	const char *bound = neg ? lo + (lo[0] == '-') : hi;
+	int fits;
+	if (neg && !is_signed) {
+		fits = 0;
+	} else {
+		size_t bn = strlen(bound);
+		fits = n < bn || (n == bn && strcmp(mag, bound) <= 0);
+	}
+	if (fits) {
+		free(d); /* scratch: the digit string */
+		return NULL;
+	}
+	/* Group by threes from the right, as Node does past four digits. */
+	char grouped[512];
+	size_t gi = 0;
+	if (neg) grouped[gi++] = '-';
+	for (size_t i = 0; i < n && gi < sizeof(grouped) - 4; i++) {
+		if (i > 0 && (n - i) % 3 == 0 && n >= 4) grouped[gi++] = '_';
+		grouped[gi++] = mag[i];
+	}
+	grouped[gi] = 0;
+	free(d); /* scratch: the digit string */
+	const char *range = is_signed ? ">= -(2n ** 63n) and < 2n ** 63n" : ">= 0n and < 2n ** 64n";
+	/* The caller copies it into a string at once. */
+	static _Thread_local char m[768];
+	snprintf(m, sizeof(m), "The value of \"value\" is out of range. It must be %s. Received %sn", range, grouped);
+	return m;
+}
+
 #define BI_BINOP(name, call)                          \
 	void *name(void *a, void *b) {                     \
 		mpz_ptr r = bi_new();                          \
@@ -116,20 +156,19 @@ void *__kml_bigint_not(void *a) {
 	return r;
 }
 
-void *__kml_bigint_shl(void *a, void *b) {
-	unsigned long n = (unsigned long)mpz_get_si((mpz_srcptr)b);
+/* a << n: a negative count shifts right. */
+static void *bi_shift(mpz_srcptr a, long n) {
 	mpz_ptr r = bi_new();
-	mpz_mul_2exp(r, (mpz_srcptr)a, n);
+	if (n >= 0) mpz_mul_2exp(r, a, (unsigned long)n);
+	else mpz_fdiv_q_2exp(r, a, (unsigned long)-n); /* floor: sign-propagating */
 	return r;
 }
 
-/* Floor division by 2^n == arithmetic (sign-propagating) right shift, JS `>>`. */
-void *__kml_bigint_shr(void *a, void *b) {
-	unsigned long n = (unsigned long)mpz_get_si((mpz_srcptr)b);
-	mpz_ptr r = bi_new();
-	mpz_fdiv_q_2exp(r, (mpz_srcptr)a, n);
-	return r;
-}
+void *__kml_bigint_shl(void *a, void *b) { return bi_shift((mpz_srcptr)a, mpz_get_si((mpz_srcptr)b)); }
+
+/* Floor division by 2^n == arithmetic (sign-propagating) right shift, JS `>>`;
+ * a negative count shifts left. */
+void *__kml_bigint_shr(void *a, void *b) { return bi_shift((mpz_srcptr)a, -mpz_get_si((mpz_srcptr)b)); }
 
 /* BigInt.asUintN(bits, x): x modulo 2^bits, taken non-negative (the low `bits`
  * bits). mpz_fdiv_r_2exp yields a non-negative remainder. */

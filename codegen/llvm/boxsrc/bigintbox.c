@@ -8,6 +8,7 @@
 extern void *__kml_bigint_to_str(void *b, int base);
 extern void *__kml_str_from_cstr(void *s);
 extern int __kml_bigint_cmp(void *a, void *b);
+extern void *__kml_bigint_parse(const char *s);
 extern int __kml_bigint_cmp_double(void *a, double d);
 extern double __kml_bigint_to_double(void *b);
 extern void *__kml_bigint_neg(void *b);
@@ -28,6 +29,13 @@ _Bool __kml_boxed_bigint_eq(void *ca, void *cb) {
 _Bool __kml_boxed_bigint_eq_num(void *cell, double d) {
     if (d != d) return 0;
     return __kml_bigint_cmp_double(cell_big(cell), d) == 0;
+}
+
+/* Whether a cell's bigint equals a string's StringToBigInt (false when the
+ * string is no bigint literal). */
+_Bool __kml_boxed_bigint_eq_str(void *cell, const char *s) {
+    void *b = __kml_bigint_parse(s);
+    return b && __kml_bigint_cmp(cell_big(cell), b) == 0;
 }
 
 /* A cell's bigint as the nearest double (Number(x) of an `any`). */
@@ -87,7 +95,7 @@ long long __kml_typed_big_unbox(long long w, int uns) {
     if (n) __builtin_memcpy(msg + a, shown, n);
     __builtin_memcpy(msg + a + n, post, c + 1);
     void *str = __kml_str_from_cstr(msg);
-    free(msg);
+    free(msg); /* scratch */
     __kml_throw_nullderef((const char *)str);
     return 0;
 }

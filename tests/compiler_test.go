@@ -2,6 +2,7 @@ package tests
 
 import (
 	"KlainMainLang/options"
+	"KlainMainLang/shadow"
 	"errors"
 	"os"
 	"os/exec"
@@ -35,7 +36,15 @@ func parseAndCompile(src string) (string, error) {
 // program TypeScript rejects is a compile error here too (TDD-00230 P2.7).
 var declaresTopLevelMain = regexp.MustCompile(`(?m)^(?:export\s+)?(?:async\s+)?(?:function\*?|const|let|var|class)\s+main\b`)
 
+// declaresNamespace matches a `namespace` (or `module`) declaration.
+var declaresNamespace = regexp.MustCompile(`(?m)(^|[;{}]\s*)(export\s+)?(declare\s+)?(namespace|module)\s+[A-Za-z_$]`)
+
 func parseStrict(src string) (*ast.Program, error) {
+	return parseStrictDialect(src, "experimental")
+}
+
+// parseStrictDialect is parseStrict under a decorator dialect.
+func parseStrictDialect(src, dialect string) (*ast.Program, error) {
 	// A program naming a global a global module implements (TDD-00232) is
 	// resolved, as the CLI resolves every program: the module joins it.
 	// So is one declaring a top-level `main`: the resolver renames the
@@ -45,7 +54,7 @@ func parseStrict(src string) (*ast.Program, error) {
 		if err != nil {
 			return nil, err
 		}
-		defer os.RemoveAll(d)
+		defer removeUnlessKept(d)
 		f := filepath.Join(d, "main.ts")
 		if err := os.WriteFile(f, []byte(src), 0644); err != nil {
 			return nil, err
@@ -56,7 +65,13 @@ func parseStrict(src string) (*ast.Program, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := resolver.TypeCheck(prog, nil, options.Options{}, !resolver.IsModule(prog)); err != nil {
+	if err := resolver.TypeCheck(prog, nil, func(string) string { return src }, options.Options{}, !resolver.IsModule(prog)); err != nil {
+		return nil, err
+	}
+	if err := resolver.ConstructChecks(prog, src, dialect); err != nil {
+		return nil, err
+	}
+	if err := resolver.AnnotationChecks(prog, ""); err != nil {
 		return nil, err
 	}
 	return prog, nil
@@ -65,14 +80,25 @@ func parseStrict(src string) (*ast.Program, error) {
 // parseCompatJS parses src for the -compat=js lane, resolving it (as the
 // CLI does) when it names a global module.
 func parseCompatJS(src string) (*ast.Program, error) {
-	if !namesGlobalModule(src) {
-		return parser.Parse(src)
+	// (A namespace read as a value needs the object the resolver builds.)
+	if !namesGlobalModule(src) && !declaresNamespace.MatchString(src) {
+		prog, err := parser.Parse(src)
+		if err != nil {
+			return nil, err
+		}
+		if err := resolver.ConstructChecks(prog, src, "standard"); err != nil {
+			return nil, err
+		}
+		if err := resolver.AnnotationChecks(prog, ""); err != nil {
+			return nil, err
+		}
+		return prog, nil
 	}
 	d, err := os.MkdirTemp("", "kmlglobal")
 	if err != nil {
 		return nil, err
 	}
-	defer os.RemoveAll(d)
+	defer removeUnlessKept(d)
 	f := filepath.Join(d, "main.ts")
 	if err := os.WriteFile(f, []byte(src), 0644); err != nil {
 		return nil, err
@@ -86,8 +112,18 @@ func parseCompatJS(src string) (*ast.Program, error) {
 // importRE matches an import declaration, which only the resolver binds.
 var importRE = regexp.MustCompile(`(?m)^\s*import\s`)
 
+var (
+	rsIterNameRE = regexp.MustCompile(`\b(ReadableStream|body|Readable)\b`)
+	rsIterUseRE  = regexp.MustCompile(`\b(values|asyncIterator)\b`)
+)
+
 func namesGlobalModule(src string) bool {
 	if processRE.MatchString(src) || importRE.MatchString(src) {
+		return true
+	}
+	// A stream iterated asynchronously: the resolver adds its iterator
+	// module (resolver.go's rule for internal_rs_iterator).
+	if rsIterNameRE.MatchString(src) && (rsIterUseRE.MatchString(src) || strings.Contains(src, "for await")) {
 		return true
 	}
 	for name := range lib.NativeGlobalUses {
@@ -1097,7 +1133,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 	if _, err := exec.LookPath("clang"); err != nil {
 		t.Skip("clang not found in PATH")
 	}
-	prog, err := parseStrict(src)
+	prog, err := parseStrictDialect(src, "standard")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -1131,7 +1167,7 @@ func assertOutputStandardDecorators(t *testing.T, src, want string) {
 // compileStandardDecorators compiles src under -decorators=standard and returns
 // any codegen error (for rejection tests).
 func compileStandardDecorators(src string) error {
-	prog, err := parseStrict(src)
+	prog, err := parseStrictDialect(src, "standard")
 	if err != nil {
 		return err
 	}
@@ -1422,6 +1458,80 @@ func assertSameAsNodeImports(t *testing.T, src string) {
 	compareLines(t, ours, theirs)
 }
 
+// assertSameAsNodeCLIJS compiles src as a .js file through the whole
+// pipeline (the CLI under -compat=js, its resolver rewrites included) and
+// compares its output with Node's.
+func assertSameAsNodeCLIJS(t *testing.T, src string) {
+	t.Helper()
+	theirs := runNodeTS(t, src)
+	bin := buildCLI(t)
+	dir := tempDir(t)
+	file := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
+	if b, err := exec.Command(bin, "-compat=js", "-o", out, file).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, b)
+	}
+	raw, err := exec.Command(out).Output()
+	if err != nil {
+		t.Fatalf("run: %v%s", err, exitStderr(err))
+	}
+	if ours := strings.TrimRight(string(raw), "\n"); ours != theirs {
+		t.Fatalf("output differs from node:\n--- ours ---\n%s\n--- node ---\n%s", ours, theirs)
+	}
+}
+
+// assertOutputCLIJS compiles src through the CLI as main.js under
+// -compat=js and requires its output to be want: for behavior Node's own
+// differs from by design (code built from a string at run time).
+func assertOutputCLIJS(t *testing.T, src, want string) {
+	t.Helper()
+	bin := buildCLI(t)
+	dir := tempDir(t)
+	file := filepath.Join(dir, "main.js")
+	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
+	if b, err := exec.Command(bin, "-compat=js", "-o", out, file).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, b)
+	}
+	raw, err := exec.Command(out).Output()
+	if err != nil {
+		t.Fatalf("run: %v%s", err, exitStderr(err))
+	}
+	if ours := strings.TrimRight(string(raw), "\n"); ours != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", ours, want)
+	}
+}
+
+// assertCLICompileError compiles src through the CLI, as main.ts or (with
+// js) main.js under -compat=js, and requires it to fail with a message
+// containing want.
+func assertCLICompileError(t *testing.T, js bool, src, want string) {
+	t.Helper()
+	bin := buildCLI(t)
+	dir := tempDir(t)
+	name, args := "main.ts", []string{}
+	if js {
+		name, args = "main.js", []string{"-compat=js"}
+	}
+	file := filepath.Join(dir, name)
+	if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	args = append(args, "-o", filepath.Join(dir, "prog"+llvm.HostExeSuffix()), file)
+	b, err := exec.Command(bin, args...).CombinedOutput()
+	if err == nil {
+		t.Fatalf("compiled, want an error containing %q", want)
+	}
+	if !strings.Contains(string(b), want) {
+		t.Fatalf("error %q does not contain %q", b, want)
+	}
+}
+
 // assertSameAsNodeCompatJS is assertSameAsNode under -compat=js.
 func assertSameAsNodeCompatJS(t *testing.T, src string) {
 	t.Helper()
@@ -1646,4 +1756,12 @@ func dropSanitizerNotes(out string) string {
 		}
 	}
 	return strings.Join(kept, "\n")
+}
+
+// removeUnlessKept removes a resolved program's temporary directory, except
+// in a shadow run keeping its units: the compile reads the entry later.
+func removeUnlessKept(d string) {
+	if os.Getenv(shadow.EnvKeep) == "" {
+		os.RemoveAll(d)
+	}
 }

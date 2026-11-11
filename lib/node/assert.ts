@@ -10,6 +10,8 @@ import { isDeepEqual, isDeepStrictEqual, isPartialStrictEqual } from './internal
 import { NodeTypeError } from './internal_errors';
 
 export { AssertionError } from './internal_assert_assertion_error';
+import { CallTracker } from './internal_assert_calltracker';
+export { CallTracker } from './internal_assert_calltracker';
 
 // A TypeError carrying Node's error code.
 // The TypeError message Node's ERR_INVALID_ARG_TYPE formats for a value.
@@ -783,6 +785,7 @@ strict.ifError = ifError;
 strict.AssertionError = AssertionError;
 strict.strict = strict;
 strict.Assert = Assert;
+strict.CallTracker = CallTracker;
 
 ok.ok = ok;
 ok.fail = fail;
@@ -805,5 +808,6 @@ ok.ifError = ifError;
 ok.AssertionError = AssertionError;
 ok.strict = strict;
 ok.Assert = Assert;
+ok.CallTracker = CallTracker;
 
 export default ok;

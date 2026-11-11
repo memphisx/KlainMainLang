@@ -55,11 +55,11 @@ const errorSubclassTagBase = 1000
 // former "renders [object Object]" caveat on allSettled/AbortSignal reasons).
 func (e *Emitter) emitBoxedErrorProbe(payloadReg string) (objPtr, isErr string) {
 	objPtr = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payloadReg))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, objPtr, payloadReg))
 	f0Gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", f0Gep, errorObjType.StructIR(), objPtr))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", f0Gep, errorObjType.StructIR(), objPtr))
 	f0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f0, f0Gep))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f0, f0Gep))
 	flagged := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", flagged, f0, errorTypeIDFlag))
 	isErr = e.freshReg()
@@ -88,7 +88,7 @@ var errorKinds = []string{"Error", "TypeError", "RangeError", "SyntaxError", "Ev
 // on another error.
 func aggregateErrorStructIR() string {
 	ir := errorObjType.StructIR()
-	return ir[:len(ir)-2] + ", ptr, i64 }"
+	return ir[:len(ir)-2] + ", " + irPtr + ", i64 }"
 }
 
 // aggregateErrorsIdx is the errors array's field in aggregateErrorStructIR,
@@ -233,8 +233,7 @@ func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size 
 	e.ensureExceptionHelpers()
 
 	dataReg := e.freshReg()
-	e.ensureMalloc()
-	e.heapMallocInto(dataReg, fmt.Sprint(size))
+	e.heapMallocInto(dataReg, allocObject, fmt.Sprint(size))
 	// The header word is the kind __kml_error_init stores; the layout is
 	// registered once (its key is long to build, and errors are made at
 	// every throw).
@@ -245,9 +244,8 @@ func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size 
 
 	// Its fields, in the runtime (frames.c): the kind word, message and
 	// name, every other field unset, and the frames where it is made.
-	e.ensureFrames()
-	e.declareFn("__kml_error_init", "declare void @__kml_error_init(ptr, i64, ptr, ptr)")
-	e.emitInstr(fmt.Sprintf("call void @__kml_error_init(ptr %s, i64 %d, ptr %s, ptr %s)", dataReg, errorTypeIDStored(kindID), msgPtr, namePtr))
+	e.declareFn("__kml_error_init", "declare void @__kml_error_init("+irPtr+", i64, "+irPtr+", "+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @__kml_error_init("+irPtr+" %s, i64 %d, "+irPtr+" %s, "+irPtr+" %s)", dataReg, errorTypeIDStored(kindID), msgPtr, namePtr))
 
 	return dataReg
 }
@@ -257,15 +255,57 @@ func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size 
 // `name + ": " + message` (name is the kind name, always set). errVal is the
 // error object pointer.
 func (e *Emitter) emitErrorToString(errVal Value) (Value, error) {
-	e.ensureStrlen()
+	if !e.inErrorOwnToString && errVal.Ty.IR == irPtr {
+		// ToString calls the error's own toString when it has one (Node's
+		// coded errors define one); Error.prototype's otherwise.
+		e.declareFn("__kml_error_extra_get", "declare i64 @__kml_error_extra_get("+irPtr+", "+irPtr+", "+irPtr+")")
+		fnd := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", fnd))
+		e.emitInstr(fmt.Sprintf("store i32 0, "+irPtr+" %s, align 4", fnd))
+		e.emitInstr(fmt.Sprintf("call i64 @__kml_error_extra_get("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", errVal.Ref, e.internString("toString"), fnd))
+		fv, has := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" %s, align 4", fv, fnd))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 1", has, fv))
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		ownL, natL, endL := e.freshLabel("errts.own"), e.freshLabel("errts.native"), e.freshLabel("errts.end")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, ownL, natL))
+		e.emitLabel(ownL)
+		e.inErrorOwnToString = true
+		box, err := e.emitBoxValue(errVal)
+		var own Value
+		if err == nil {
+			own, err = e.emitDynamicToString(box)
+		}
+		e.inErrorOwnToString = false
+		if err != nil {
+			return Value{}, err
+		}
+		own = e.convert(own, TypePtr)
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", own.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
+		e.emitLabel(natL)
+		e.inErrorOwnToString = true
+		nat, err := e.emitErrorToString(errVal)
+		e.inErrorOwnToString = false
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nat.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
+		e.emitLabel(endL)
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", res, slot))
+		return Value{Ref: res, Ty: TypePtr}, nil
+	}
 	nameGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", nameGep, errorObjType.StructIR(), errVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", nameGep, errorObjType.StructIR(), errVal.Ref))
 	namePtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", namePtr, nameGep))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", namePtr, nameGep))
 	msgGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", msgGep, errorObjType.StructIR(), errVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", msgGep, errorObjType.StructIR(), errVal.Ref))
 	msgPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", msgPtr, msgGep))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", msgPtr, msgGep))
 
 	nameVal := Value{Ref: namePtr, Ty: TypePtr}
 	// name + ": " + message
@@ -279,11 +319,11 @@ func (e *Emitter) emitErrorToString(errVal Value) (Value, error) {
 	}
 	// Empty message → just the name (JS's Error.prototype.toString rule).
 	msgLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", msgLen, msgPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", msgLen, msgPtr))
 	empty := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, msgLen))
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", res, empty, namePtr, full.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", res, empty, namePtr, full.Ref))
 	return Value{Ref: res, Ty: TypePtr}, nil
 }
 
@@ -293,14 +333,14 @@ func (e *Emitter) emitErrorToString(errVal Value) (Value, error) {
 func (e *Emitter) buildErrorObjWithCode(kindID int64, msgPtr, namePtr, codePtr, errcodeD, errstrPtr string) string {
 	dataReg := e.buildErrorObj(kindID, msgPtr, namePtr)
 	codeGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", codePtr, codeGep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), dataReg))
+	e.heapStore(irPtr, codePtr, codeGep, 8)
 	ecGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 4", ecGep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 4", ecGep, errorObjType.StructIR(), dataReg))
 	e.heapStore("double", errcodeD, ecGep, 8)
 	esGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
-	e.heapStore("ptr", errstrPtr, esGep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 5", esGep, errorObjType.StructIR(), dataReg))
+	e.heapStore(irPtr, errstrPtr, esGep, 8)
 	return dataReg
 }
 
@@ -311,7 +351,6 @@ func (e *Emitter) buildErrorObjWithCode(kindID int64, msgPtr, namePtr, codePtr, 
 // error type) — `.errors` reads the trailing fields via a kind guard.
 func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string) string {
 	e.ensureExceptionHelpers()
-	e.ensureMalloc()
 	kindID := errorKindIDs["AggregateError"]
 	// Allocate and default-fill through buildErrorObj (full errorObjType size,
 	// so a stray shared-field read — code/cause/… — is bounds-safe and
@@ -319,10 +358,10 @@ func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string
 	data := e.buildErrorObjSized(kindID, msgPtr, namePtr, aggregateErrorStructSize())
 	store := func(idx int, ty, ref string) {
 		gp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gp, aggregateErrorStructIR(), data, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gp, aggregateErrorStructIR(), data, idx))
 		e.heapStore(ty, ref, gp, 8)
 	}
-	store(aggregateErrorsIdx(), "ptr", dataPtr)
+	store(aggregateErrorsIdx(), irPtr, dataPtr)
 	store(aggregateErrorsIdx()+1, "i64", lenRef)
 	return data
 }
@@ -379,7 +418,7 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 	// "Error"), unlike the fixed-name kinds whose name is the kind itself.
 	namePtr := e.internString(ne.Kind)
 	if ne.Kind == "DOMException" && ne.Name != nil && ne.Cause == nil {
-		if nt := e.inferExprType(ne.Name); nt.IsObject() || nt.IsDynamicObject() || isUnconstrainedDynamic(nt) {
+		if nt := e.typeOfExpr(ne.Name); nt.IsObject() || nt.IsDynamicObject() || isUnconstrainedDynamic(nt) {
 			// An options object held in a value: its name and cause.
 			opts := ne.Name
 			if _, ok := opts.(*ast.Identifier); ok {
@@ -415,8 +454,13 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 			return Value{}, err
 		}
 		causeGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
 		e.heapStore("i64", boxed.Ref, causeGep, 8)
+	}
+	if ne.Options != nil {
+		if err := e.emitErrorOptionsCause(ne.Options, dataReg, ne.GetPos()); err != nil {
+			return Value{}, err
+		}
 	}
 	return Value{Ref: dataReg, Ty: errorObjType}, nil
 }
@@ -435,10 +479,9 @@ func (e *Emitter) emitNewAggregateError(ne *ast.NewErrorExpression) (Value, erro
 		}
 		// `errors` is any[]: each element is held boxed.
 		if !isUnconstrainedDynamic(elemTy) {
-			e.ensureMalloc()
 			bytes, out := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, l))
-			e.heapMallocInto(out, bytes)
+			e.heapMallocInto(out, allocElems, bytes)
 			if err := e.emitSpreadBoxLoop(p, l, elemTy, out); err != nil {
 				return Value{}, err
 			}
@@ -470,8 +513,8 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	kp := e.freshReg()
 	k := e.freshReg()
 	isAgg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kp, errorObjType.StructIR(), errPtr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", k, kp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", kp, errorObjType.StructIR(), errPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", k, kp))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isAgg, e.headerIdentity(k), errorTypeIDStored(aggID)))
 	aggL := e.freshLabel("aggerr.errors")
 	emptyL := e.freshLabel("aggerr.empty")
@@ -483,20 +526,43 @@ func (e *Emitter) emitErrorErrorsAccess(errPtr string) Value {
 	d := e.freshReg()
 	lp := e.freshReg()
 	l := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dp, aggregateErrorStructIR(), errPtr, aggregateErrorsIdx()))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, dp))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lp, aggregateErrorStructIR(), errPtr, aggregateErrorsIdx()+1))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", dp, aggregateErrorStructIR(), errPtr, aggregateErrorsIdx()))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", d, dp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", lp, aggregateErrorStructIR(), errPtr, aggregateErrorsIdx()+1))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", l, lp))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(emptyL)
+	// Another error's own `errors` (an AggregateError subclass's): its
+	// extra bag's, when an array.
+	e.declareFn("__kml_error_extra_get", "declare i64 @__kml_error_extra_get("+irPtr+", "+irPtr+", "+irPtr+")")
+	fnd := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", fnd))
+	e.emitInstr(fmt.Sprintf("store i32 0, "+irPtr+" %s, align 4", fnd))
+	xv := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_error_extra_get("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", xv, errPtr, e.internString("errors"), fnd))
+	xtag, _ := e.emitUnboxTagPayload(Value{Ref: xv, Ty: TypeAny})
+	isArr, isDyn, either := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, xtag, kmlTagArray))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, xtag, kmlTagDynArray))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, isArr, isDyn))
+	bagL, noneL := e.freshLabel("aggerr.bag"), e.freshLabel("aggerr.none")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, bagL, noneL))
+	e.emitLabel(bagL)
+	xa := e.convert(Value{Ref: xv, Ty: TypeAny}, ArrayOf(TypeAny))
+	bd, bl := e.arrayData(xa), e.arrayLen(xa)
+	bagEnd := e.freshLabel("aggerr.bagend")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", bagEnd))
+	e.emitLabel(bagEnd)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+	e.emitLabel(noneL)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	data := e.freshReg()
 	length := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ null, %%%s ]", data, d, aggL, emptyL))
-	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ 0, %%%s ]", length, l, aggL, emptyL))
+	e.emitInstr(fmt.Sprintf("%s = phi "+irPtr+" [ %s, %%%s ], [ %s, %%%s ], [ null, %%%s ]", data, d, aggL, bd, bagEnd, noneL))
+	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %s, %%%s ], [ 0, %%%s ]", length, l, aggL, bl, bagEnd, noneL))
 	a1 := e.newArrayHeader(data, length)
 	return Value{Ref: a1, Ty: ArrayOf(TypeAny)}
 }
@@ -515,7 +581,7 @@ func (e *Emitter) errorPtrFromValue(val Value) (string, error) {
 	if isUnconstrainedDynamic(val.Ty) {
 		tag, payload := e.emitUnboxTagPayload(val)
 		res := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", res))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", res))
 		isObj := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
 		probeL, wrapL, doneL := e.freshLabel("errval.probe"), e.freshLabel("errval.wrap"), e.freshLabel("errval.done")
@@ -525,7 +591,7 @@ func (e *Emitter) errorPtrFromValue(val Value) (string, error) {
 		keepL := e.freshLabel("errval.keep")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isErr, keepL, wrapL))
 		e.emitLabel(keepL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", objPtr, res))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", objPtr, res))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(wrapL)
 		strVal, err := e.emitValueToString(val)
@@ -533,11 +599,11 @@ func (e *Emitter) errorPtrFromValue(val Value) (string, error) {
 			return "", err
 		}
 		w := e.buildErrorObj(0, strVal.Ref, e.internString("Error"))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", w, res))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", w, res))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, res))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, res))
 		return out, nil
 	}
 	strVal, err := e.emitValueToString(val)
@@ -652,15 +718,15 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", pendSlot))
 		e.emitAlloca(fmt.Sprintf("%s = alloca i8, align 1", tagSlot))
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", paySlot))
-		e.emitInstr(fmt.Sprintf("store volatile i1 false, ptr %s, align 1", pendSlot))
+		e.emitInstr(fmt.Sprintf("store volatile i1 false, "+irPtr+" %s, align 1", pendSlot))
 	}
 	recordPending := func() {
 		tag, pay := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_get_thrown_tag()", tag))
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_get_thrown_pay()", pay))
-		e.emitInstr(fmt.Sprintf("store volatile i8 %s, ptr %s, align 1", tag, tagSlot))
-		e.emitInstr(fmt.Sprintf("store volatile i64 %s, ptr %s, align 8", pay, paySlot))
-		e.emitInstr(fmt.Sprintf("store volatile i1 true, ptr %s, align 1", pendSlot))
+		e.emitInstr(fmt.Sprintf("store volatile i8 %s, "+irPtr+" %s, align 1", tag, tagSlot))
+		e.emitInstr(fmt.Sprintf("store volatile i64 %s, "+irPtr+" %s, align 8", pay, paySlot))
+		e.emitInstr(fmt.Sprintf("store volatile i1 true, "+irPtr+" %s, align 1", pendSlot))
 	}
 
 	// Push a jmpbuf slot and call setjmp.
@@ -733,13 +799,13 @@ func (e *Emitter) emitTry(s *ast.TryStatement) error {
 		e.popScope()
 		if !e.blockDone {
 			pend := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load volatile i1, ptr %s, align 1", pend, pendSlot))
+			e.emitInstr(fmt.Sprintf("%s = load volatile i1, "+irPtr+" %s, align 1", pend, pendSlot))
 			rethrowL, doneL := e.freshLabel("try.rethrow"), e.freshLabel("try.done")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", pend, rethrowL, doneL))
 			e.emitLabel(rethrowL)
 			tag, pay := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load volatile i8, ptr %s, align 1", tag, tagSlot))
-			e.emitInstr(fmt.Sprintf("%s = load volatile i64, ptr %s, align 8", pay, paySlot))
+			e.emitInstr(fmt.Sprintf("%s = load volatile i8, "+irPtr+" %s, align 1", tag, tagSlot))
+			e.emitInstr(fmt.Sprintf("%s = load volatile i64, "+irPtr+" %s, align 8", pay, paySlot))
 			e.excThrowAny(tag, pay)
 			e.emitTerminator("unreachable")
 			e.emitLabel(doneL)
@@ -765,7 +831,7 @@ func (e *Emitter) emitCatchBody(s *ast.TryStatement) error {
 		agg := e.emitCaughtAggregate(tagR, payR)
 		varPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca { i8, i64 }, align 8", varPtr))
-		e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, ptr %s, align 8", agg.Ref, varPtr))
+		e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, "+irPtr+" %s, align 8", agg.Ref, varPtr))
 		e.define(s.Catch.Param, Symbol{Ptr: varPtr, Ty: TypeCaught})
 	} else if len(s.Catch.ObjectPattern) > 0 && flatCatchPattern(s.Catch.ObjectPattern) {
 		// Destructured catch binding (`catch ({ message, name }: any)`): each
@@ -780,7 +846,7 @@ func (e *Emitter) emitCatchBody(s *ast.TryStatement) error {
 		agg := e.emitCaughtAggregate(tagR, payR)
 		varPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca { i8, i64 }, align 8", varPtr))
-		e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, ptr %s, align 8", agg.Ref, varPtr))
+		e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, "+irPtr+" %s, align 8", agg.Ref, varPtr))
 		e.define(hidden, Symbol{Ptr: varPtr, Ty: TypeCaught})
 		pos := s.Catch.Pos
 		for _, p := range s.Catch.ObjectPattern {
@@ -805,10 +871,10 @@ func (e *Emitter) emitCatchBody(s *ast.TryStatement) error {
 		isErr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isErr, tagR, kmlTagError))
 		realPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_get_thrown()", realPtr))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_get_thrown()", realPtr))
 		emptyErr := e.buildErrorObj(0, e.internString(""), e.internString("Error"))
 		errPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", errPtr, isErr, realPtr, emptyErr))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", errPtr, isErr, realPtr, emptyErr))
 		if err := e.unpackObjectPatternInto(errPtr, errorObjType, s.Catch.ObjectPattern, s.Catch.Pos); err != nil {
 			return err
 		}
@@ -848,7 +914,7 @@ func (e *Emitter) emitErrorMessage(v Value) (string, error) {
 			return "", err
 		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isU, e.internString(""), s.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isU, e.internString(""), s.Ref))
 		return r, nil
 	case isStringTy(v.Ty) && v.Ty.Nullable():
 		// An absent `string | undefined` is undefined; a `string | null` null.
@@ -857,7 +923,7 @@ func (e *Emitter) emitErrorMessage(v Value) (string, error) {
 			absent = ""
 		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.ptrIsNull(v.Ref), e.internString(absent), v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, e.ptrIsNull(v.Ref), e.internString(absent), v.Ref))
 		return r, nil
 	case isStringTy(v.Ty):
 		return v.Ref, nil
@@ -875,8 +941,62 @@ func (e *Emitter) emitThrowCoded(kind, code, msgPtr string) {
 	e.ensureExceptionHelpers()
 	errReg := e.buildErrorObj(errorKindIDs[kind], msgPtr, e.internString(kind))
 	codeGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), errReg))
-	e.heapStore("ptr", e.internString(code), codeGep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), errReg))
+	e.heapStore(irPtr, e.internString(code), codeGep, 8)
 	e.excThrow(errReg)
 	e.emitTerminator("unreachable")
+}
+
+// emitErrorOptionsCause installs an error's cause from an options value
+// (InstallErrorCause): an object having a `cause` property, own or
+// inherited, gives the error that property's value; anything else, none.
+func (e *Emitter) emitErrorOptionsCause(opts ast.Expression, dataReg string, pos ast.Pos) error {
+	v, err := e.emitExpr(opts)
+	if err != nil {
+		return err
+	}
+	boxed, err := e.emitBoxValue(v)
+	if err != nil {
+		return err
+	}
+	boxed = Value{Ref: boxed.Ref, Ty: TypeAny}
+	key := e.internString("cause")
+	// An object: any tag past undefined but a boxed bigint or symbol.
+	tag, payload := e.emitUnboxTagPayload(boxed)
+	isObjTag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ugt i8 %s, %d", isObjTag, tag, kmlTagUndefined))
+	tagL, doneL := e.freshLabel("errcause.tag"), e.freshLabel("errcause.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObjTag, tagL, doneL))
+	e.emitLabel(tagL)
+	_, isBig := e.emitBoxedBigIntProbe(payload)
+	_, isSym := e.emitBoxedSymbolProbe(payload)
+	prim, boxedObj := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", prim, isBig, isSym))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", boxedObj, tag, kmlTagObject))
+	notObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", notObj, boxedObj, prim))
+	objL := e.freshLabel("errcause.obj")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", notObj, doneL, objL))
+	e.emitLabel(objL)
+	has, err := e.emitDynAnyHas(boxed, key, false, pos)
+	if err != nil {
+		return err
+	}
+	getL := e.freshLabel("errcause.get")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has.Ref, getL, doneL))
+	e.emitLabel(getL)
+	cause, err := e.emitDynAnyMemberGetNamed(boxed, key, "cause", pos)
+	if err != nil {
+		return err
+	}
+	cb, err := e.emitBoxValue(cause)
+	if err != nil {
+		return err
+	}
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 10", gep, errorObjType.StructIR(), dataReg))
+	e.heapStore("i64", cb.Ref, gep, 8)
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	return nil
 }

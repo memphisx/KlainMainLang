@@ -21,31 +21,32 @@ func (e *Emitter) ensureBigInt() {
 	}
 	e.declaredBigInt = true
 	for _, d := range []string{
-		"declare ptr @__kml_bigint_from_str(ptr, i64, i32)",
-		"declare ptr @__kml_bigint_parse(ptr)",
-		"declare ptr @__kml_bigint_from_i64(i64)",
-		"declare i64 @__kml_bigint_to_i64(ptr)",
-		"declare ptr @__kml_bigint_from_u64(i64)",
-		"declare i64 @__kml_bigint_to_u64(ptr)",
-		"declare ptr @__kml_bigint_to_str(ptr, i32)",
-		"declare ptr @__kml_bigint_add(ptr, ptr)",
-		"declare ptr @__kml_bigint_sub(ptr, ptr)",
-		"declare ptr @__kml_bigint_mul(ptr, ptr)",
-		"declare ptr @__kml_bigint_tdiv(ptr, ptr)",
-		"declare ptr @__kml_bigint_mod(ptr, ptr)",
-		"declare ptr @__kml_bigint_pow(ptr, ptr)",
-		"declare ptr @__kml_bigint_and(ptr, ptr)",
-		"declare ptr @__kml_bigint_or(ptr, ptr)",
-		"declare ptr @__kml_bigint_xor(ptr, ptr)",
-		"declare ptr @__kml_bigint_shl(ptr, ptr)",
-		"declare ptr @__kml_bigint_shr(ptr, ptr)",
-		"declare ptr @__kml_bigint_neg(ptr)",
-		"declare ptr @__kml_bigint_not(ptr)",
-		"declare i32 @__kml_bigint_cmp(ptr, ptr)",
-		"declare i32 @__kml_bigint_cmp_double(ptr, double)",
-		"declare ptr @__kml_bigint_as_intn(i64, ptr)",
-		"declare ptr @__kml_bigint_as_uintn(i64, ptr)",
-		"declare double @__kml_bigint_to_double(ptr)",
+		"declare " + irPtr + " @__kml_bigint_from_str(" + irPtr + ", i64, i32)",
+		"declare " + irPtr + " @__kml_bigint_parse(" + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_from_i64(i64)",
+		"declare i64 @__kml_bigint_to_i64(" + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_from_u64(i64)",
+		"declare i64 @__kml_bigint_to_u64(" + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_range_msg(" + irPtr + ", i32)",
+		"declare " + irPtr + " @__kml_bigint_to_str(" + irPtr + ", i32)",
+		"declare " + irPtr + " @__kml_bigint_add(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_sub(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_mul(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_tdiv(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_mod(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_pow(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_and(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_or(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_xor(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_shl(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_shr(" + irPtr + ", " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_neg(" + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_not(" + irPtr + ")",
+		"declare i32 @__kml_bigint_cmp(" + irPtr + ", " + irPtr + ")",
+		"declare i32 @__kml_bigint_cmp_double(" + irPtr + ", double)",
+		"declare " + irPtr + " @__kml_bigint_as_intn(i64, " + irPtr + ")",
+		"declare " + irPtr + " @__kml_bigint_as_uintn(i64, " + irPtr + ")",
+		"declare double @__kml_bigint_to_double(" + irPtr + ")",
 	} {
 		e.emitGlobal(d)
 	}
@@ -68,7 +69,7 @@ func (e *Emitter) emitBigIntLiteral(lit *ast.NumberLiteral) (Value, error) {
 	}
 	strPtr := e.internString(digits)
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_str(ptr %s, i64 %d, i32 %d)", reg, strPtr, len(digits), radix))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_str("+irPtr+" %s, i64 %d, i32 %d)", reg, strPtr, len(digits), radix))
 	return Value{Ref: reg, Ty: BigIntType()}, nil
 }
 
@@ -90,7 +91,7 @@ func (e *Emitter) emitBigIntToString(val Value, suffix bool) (Value, error) {
 		bare.Ty.setNullable(false)
 		bare.Ty.setUndefined(false)
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, val.Ref))
 		res, err := e.emitStrBranch(isNull,
 			func() (string, error) { return e.internString(absent), nil },
 			func() (string, error) {
@@ -103,9 +104,9 @@ func (e *Emitter) emitBigIntToString(val Value, suffix bool) (Value, error) {
 		return Value{Ref: res, Ty: TypePtr}, nil
 	}
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_to_str(ptr %s, i32 10)", raw, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_to_str("+irPtr+" %s, i32 10)", raw, val.Ref))
 	reg := e.freshReg() // TDD-00120: header-copy the foreign bigint digit string
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", reg, raw))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", reg, raw))
 	s := Value{Ref: reg, Ty: TypePtr}
 	if !suffix {
 		return s, nil
@@ -122,6 +123,12 @@ func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (V
 	// index-signature key) may hold no bigint at run time: JS orders
 	// `undefined` against a bigint as false, finds it unequal, and throws on
 	// arithmetic — never hand the null to the bigint runtime (TDD-00229).
+	if op == ">>>" {
+		// No unsigned shift on BigInt.
+		e.emitThrowTypeError("BigInts have no unsigned right shift, use >> instead")
+		e.emitLabel(e.freshLabel("dead")) // the caller goes on emitting
+		return Value{Ref: "null", Ty: BigIntType()}, nil
+	}
 	lN := left.Ty.Nullable() || left.Ty.IsUndefined()
 	rN := right.Ty.Nullable() || right.Ty.IsUndefined()
 	if lN || rN {
@@ -130,7 +137,7 @@ func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (V
 				return "true"
 			}
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", r, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", r, v.Ref))
 			return r
 		}
 		lp, rp := present(left, lN), present(right, rN)
@@ -173,7 +180,7 @@ func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (V
 		}
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", absentRes, slot))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", absentRes, slot))
 		cmpL := e.freshLabel("bigint.cmp")
 		doneL := e.freshLabel("bigint.cmpdone")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", both, cmpL, doneL))
@@ -182,30 +189,30 @@ func (e *Emitter) emitBigIntBinary(op string, left, right Value, pos ast.Pos) (V
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", r.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", r.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", out, slot))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", out, slot))
 		return Value{Ref: out, Ty: TypeBool}, nil
 	}
 	if fn, ok := bigIntBinFn[op]; ok {
 		if op == "/" || op == "%" {
 			e.emitBigIntDivZeroGuard(right)
 		}
+		if op == "**" {
+			e.emitBigIntNegExponentGuard(right)
+		}
 		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_%s(ptr %s, ptr %s)", reg, fn, left.Ref, right.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_%s("+irPtr+" %s, "+irPtr+" %s)", reg, fn, left.Ref, right.Ref))
 		return Value{Ref: reg, Ty: BigIntType()}, nil
-	}
-	if op == ">>>" {
-		return Value{}, fmt.Errorf("%d:%d: unsigned right shift (>>>) is not defined on BigInt (a TypeError in JS)", pos.Line, pos.Col)
 	}
 	pred, ok := bigIntCmpPred[op]
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported on BigInt", pos.Line, pos.Col, op)
+		return Value{}, internalAt(pos, "BigInt operator '%s' past the operator dispatch", op)
 	}
 	cmpReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp(ptr %s, ptr %s)", cmpReg, left.Ref, right.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp("+irPtr+" %s, "+irPtr+" %s)", cmpReg, left.Ref, right.Ref))
 	reg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp %s i32 %s, 0", reg, pred, cmpReg))
 	return Value{Ref: reg, Ty: TypeBool}, nil
@@ -231,7 +238,14 @@ func (e *Emitter) emitBigIntMixed(op string, left, right Value, pos ast.Pos) (Va
 		case "!=", "!==":
 			return Value{Ref: "1", Ty: TypeBool}, nil
 		default:
-			return Value{}, fmt.Errorf("%d:%d: a bigint cannot be ordered against null/undefined with '%s'", pos.Line, pos.Col, op)
+			if relationalOps[op] {
+				// Ordered as numbers: null is 0, undefined NaN.
+				return e.emitBigIntBoxedBinary(op, left, right, pos)
+			}
+			// Arithmetic: a TypeError.
+			e.emitThrowTypeError("Cannot mix BigInt and other types, use explicit conversions")
+			e.emitLabel(e.freshLabel("dead")) // the caller goes on emitting
+			return Value{Ref: "null", Ty: BigIntType()}, nil
 		}
 	}
 	switch op {
@@ -247,13 +261,64 @@ func (e *Emitter) emitBigIntMixed(op string, left, right Value, pos ast.Pos) (Va
 			// same path -compat=js already used for a float operand.
 			return e.emitBigIntFloatCompare(op, left, right, pos)
 		}
+		if !isIntegerNumberTy(other.Ty) && e.compatJS() {
+			// A string, a boolean, an object or a symbol: JavaScript's
+			// comparison over the two boxes (a string's StringToBigInt, an
+			// object's primitive).
+			lb, err := e.emitBoxValue(left)
+			if err != nil {
+				return Value{}, err
+			}
+			rb, err := e.emitBoxValue(right)
+			if err != nil {
+				return Value{}, err
+			}
+			if op == "==" || op == "!=" {
+				return e.emitAnyLooseEquals(lb, rb, op == "!=")
+			}
+			return e.emitAnyBinary(op, lb, rb, pos)
+		}
 		if !isIntegerNumberTy(other.Ty) {
-			return Value{}, fmt.Errorf("%d:%d: a bigint can only be compared with another bigint or a number, not this type", pos.Line, pos.Col)
+			if op == "==" || op == "!=" {
+				lb, err := e.emitBoxValue(left)
+				if err != nil {
+					return Value{}, err
+				}
+				rb, err := e.emitBoxValue(right)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitAnyLooseEquals(lb, rb, op == "!=")
+			}
+			return e.emitBigIntBoxedBinary(op, left, right, pos)
 		}
 		return e.emitBigIntBinary(op, e.bigintOperand(left), e.bigintOperand(right), pos)
 	default:
-		return Value{}, fmt.Errorf("%d:%d: cannot mix BigInt and other types in operator '%s' — arithmetic between a bigint and a number is a TypeError in JS; convert explicitly with BigInt(x)/Number(x)", pos.Line, pos.Col, op)
+		// Arithmetic with a bigint and another type: JavaScript's operator
+		// over the two boxes, which throws its TypeError (or, for `+` with a
+		// string, concatenates). A program tsc rejects never reaches here.
+		if t := other.Ty; !t.IsDynamic() && !t.Nullable() && isNumberTy(t) && (t.IR == "i1" || t.IR == "i64" || t.IR == "double" || t.IR == "i32") {
+			// A number or boolean is no bigint after ToPrimitive either.
+			e.emitThrowTypeError("Cannot mix BigInt and other types, use explicit conversions")
+			e.emitLabel(e.freshLabel("dead")) // the caller goes on emitting
+			return Value{Ref: "null", Ty: BigIntType()}, nil
+		}
+		return e.emitBigIntBoxedBinary(op, left, right, pos)
 	}
+}
+
+// emitBigIntBoxedBinary is op over left and right boxed: the dynamic
+// operator's own result or TypeError.
+func (e *Emitter) emitBigIntBoxedBinary(op string, left, right Value, pos ast.Pos) (Value, error) {
+	lb, err := e.emitBoxValue(left)
+	if err != nil {
+		return Value{}, err
+	}
+	rb, err := e.emitBoxValue(right)
+	if err != nil {
+		return Value{}, err
+	}
+	return e.emitAnyBinary(op, lb, rb, pos)
 }
 
 // bigintOperand returns v as a bigint — itself if already bigint, else an
@@ -265,7 +330,7 @@ func (e *Emitter) bigintOperand(v Value) Value {
 	e.ensureBigInt()
 	w := e.convert(v, TypeI64)
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, w.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_i64(i64 %s)", reg, w.Ref))
 	return Value{Ref: reg, Ty: BigIntType()}
 }
 
@@ -287,7 +352,7 @@ func (e *Emitter) emitBigIntFloatCompare(op string, left, right Value, pos ast.P
 		dRef = dr
 	}
 	cmpReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp_double(ptr %s, double %s)", cmpReg, bigintVal.Ref, dRef))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp_double("+irPtr+" %s, double %s)", cmpReg, bigintVal.Ref, dRef))
 	effOp := op
 	if !bigintIsLeft {
 		effOp = swapCompareOp(op)
@@ -351,16 +416,32 @@ var bigIntCmpPred = map[string]string{
 // replaces V1's process-abort with a value a `try`/`catch` can see.
 func (e *Emitter) emitBigIntDivZeroGuard(right Value) {
 	zero := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 0)", zero))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_i64(i64 0)", zero))
 	cmpReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp(ptr %s, ptr %s)", cmpReg, right.Ref, zero))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp("+irPtr+" %s, "+irPtr+" %s)", cmpReg, right.Ref, zero))
 	isZero := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isZero, cmpReg))
 	zeroL := e.freshLabel("bigint.div.zero")
 	okL := e.freshLabel("bigint.div.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isZero, zeroL, okL))
 	e.emitLabel(zeroL)
-	e.emitInternalThrow(e.internString("Division by zero"))
+	e.emitThrowRangeError("Division by zero")
+	e.emitLabel(okL)
+}
+
+// emitBigIntNegExponentGuard throws the RangeError a negative bigint
+// exponent is (V8's own message for it).
+func (e *Emitter) emitBigIntNegExponentGuard(right Value) {
+	zero := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_i64(i64 0)", zero))
+	cmpReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_bigint_cmp("+irPtr+" %s, "+irPtr+" %s)", cmpReg, right.Ref, zero))
+	neg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i32 %s, 0", neg, cmpReg))
+	negL, okL := e.freshLabel("bigint.pow.neg"), e.freshLabel("bigint.pow.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", neg, negL, okL))
+	e.emitLabel(negL)
+	e.emitThrowRangeError("undefined must be positive")
 	e.emitLabel(okL)
 }
 
@@ -368,13 +449,17 @@ func (e *Emitter) emitBigIntDivZeroGuard(right Value) {
 // on a bigint receiver — bare digits in the given base (default 10), no `n`
 // suffix, matching JS. Reuses the ABI's radix-aware to_str.
 func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) > 1 {
-		return Value{}, fmt.Errorf("%d:%d: BigInt.toString() takes at most one argument (a radix)", pos.Line, pos.Col)
-	}
 	recv, err := e.emitExpr(recvExpr)
 	if err != nil {
 		return Value{}, err
 	}
+	// Arguments past the radix are evaluated and ignored.
+	for _, x := range args[min(len(args), 1):] {
+		if _, err := e.emitExpr(x); err != nil {
+			return Value{}, err
+		}
+	}
+	args = args[:min(len(args), 1)]
 	e.ensureBigInt()
 	radixRef := "10"
 	if len(args) == 1 {
@@ -382,20 +467,45 @@ func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.E
 		if err != nil {
 			return Value{}, err
 		}
-		if rv.Ty.IsBigInt() || isStringTy(rv.Ty) {
-			return Value{}, fmt.Errorf("%d:%d: BigInt.toString()'s radix must be a number (2–36)", pos.Line, pos.Col)
+		// ToIntegerOrInfinity of the radix (`"16"` is 16, undefined is 10);
+		// outside 2–36 is a RangeError.
+		var d string
+		switch {
+		case rv.Ty.IsUndefined() && !rv.Ty.IsDynamic():
+			d = "10.0"
+		case isSafeNumericArg(rv.Ty) && !rv.Ty.IsBigInt():
+			d = e.convert(rv, TypeF64).Ref
+		default:
+			boxed, err := e.emitBoxValue(rv)
+			if err != nil {
+				return Value{}, err
+			}
+			n := e.emitAnyToNum(boxed)
+			isU := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, boxed.Ref, nbUndefined))
+			d = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 10.0, double %s", d, isU, n))
 		}
-		// A `number` radix is a double (TDD-00123); coerce truncates it to i64.
-		w := e.convert(rv, TypeI64)
+		lo, hi, ok := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, 2.0", lo, d))
+		e.emitInstr(fmt.Sprintf("%s = fcmp olt double %s, 37.0", hi, d))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", ok, lo, hi))
+		badL, okL := e.freshLabel("bigint.radix.bad"), e.freshLabel("bigint.radix.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, badL))
+		e.emitLabel(badL)
+		e.ensureExceptionHelpers()
+		e.excThrow(e.buildErrorObj(errorKindIDs["RangeError"], e.internString("toString() radix argument must be between 2 and 36"), e.internString("RangeError")))
+		e.emitTerminator("unreachable")
+		e.emitLabel(okL)
 		radixReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", radixReg, w.Ref))
+		e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i32", radixReg, d))
 		radixRef = radixReg
 	}
 	e.ensureStrHeaderRuntime()
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_to_str(ptr %s, i32 %s)", raw, recv.Ref, radixRef))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_to_str("+irPtr+" %s, i32 %s)", raw, recv.Ref, radixRef))
 	reg := e.freshReg() // TDD-00120: header-copy the foreign bigint digit string
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", reg, raw))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", reg, raw))
 	return Value{Ref: reg, Ty: TypePtr}, nil
 }
 
@@ -403,7 +513,7 @@ func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.E
 func (e *Emitter) emitBigIntUnary(fn string, val Value) Value {
 	e.ensureBigInt()
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_%s(ptr %s)", reg, fn, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_%s("+irPtr+" %s)", reg, fn, val.Ref))
 	return Value{Ref: reg, Ty: BigIntType()}
 }
 
@@ -415,23 +525,35 @@ func (e *Emitter) emitBigIntUnary(fn string, val Value) Value {
 // (asIntN) or non-negative (asUintN). `bits` is a non-negative integer; `x`
 // must be a bigint.
 func (e *Emitter) emitBigIntAsN(which string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: BigInt.%s takes exactly 2 arguments (bits, bigint)", pos.Line, pos.Col, which)
+	for len(args) < 2 {
+		args = append(append([]ast.Expression(nil), args...), ast.NewNullLiteral(true, pos))
 	}
-	bitsVal, err := e.emitExpr(args[0])
+	bitsExpr := args[0]
+	if t := e.typeOfExpr(bitsExpr); !isIntegerNumberTy(t) && !t.Float {
+		// ToIndex(bits): ToNumber, NaN as 0, truncated.
+		num := ast.NewCallExpression(ast.NewIdentifier("Number", pos), []ast.Expression{ast.NewAsExpression(bitsExpr, ast.AnyAnnotation("ts"), pos)}, pos)
+		bitsExpr = ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Math", pos), "trunc", pos),
+			[]ast.Expression{ast.NewBinaryExpression("||", num, ast.NewNumberLiteral("0", pos), pos)}, pos)
+	}
+	bitsVal, err := e.emitExpr(bitsExpr)
 	if err != nil {
 		return Value{}, err
 	}
-	if !isIntegerNumberTy(bitsVal.Ty) && !bitsVal.Ty.Float {
-		return Value{}, fmt.Errorf("%d:%d: BigInt.%s's first argument (bits) must be a number", pos.Line, pos.Col, which)
-	}
 	bits := e.convert(bitsVal, TypeI64)
+	for _, a := range args[2:] {
+		if _, err := e.emitExpr(a); err != nil {
+			return Value{}, err
+		}
+	}
 	xVal, err := e.emitExpr(args[1])
 	if err != nil {
 		return Value{}, err
 	}
 	if !xVal.Ty.IsBigInt() {
-		return Value{}, fmt.Errorf("%d:%d: BigInt.%s's second argument must be a bigint", pos.Line, pos.Col, which)
+		// ToBigInt(x): undefined, a number, a non-integer string throw.
+		if xVal, err = e.bigintFromToBigInt(xVal, pos); err != nil {
+			return Value{}, err
+		}
 	}
 	e.ensureBigInt()
 	fn := "__kml_bigint_as_intn"
@@ -439,13 +561,13 @@ func (e *Emitter) emitBigIntAsN(which string, args []ast.Expression, pos ast.Pos
 		fn = "__kml_bigint_as_uintn"
 	}
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @%s(i64 %s, ptr %s)", reg, fn, bits.Ref, xVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @%s(i64 %s, "+irPtr+" %s)", reg, fn, bits.Ref, xVal.Ref))
 	return Value{Ref: reg, Ty: BigIntType()}, nil
 }
 
 func (e *Emitter) emitBigIntConstructor(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: BigInt() takes exactly one argument", pos.Line, pos.Col)
+	if len(args) == 0 {
+		args = []ast.Expression{ast.NewNullLiteral(true, pos)} // BigInt(undefined)
 	}
 	arg, err := e.emitExpr(args[0])
 	if err != nil {
@@ -474,9 +596,9 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 	case isStringTy(arg.Ty):
 		// StringToBigInt: a string that is no integer is a SyntaxError.
 		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_parse(ptr %s)", reg, arg.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_parse("+irPtr+" %s)", reg, arg.Ref))
 		bad := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", bad, reg))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", bad, reg))
 		badL, okL := e.freshLabel("bigint.str.bad"), e.freshLabel("bigint.str.ok")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
 		e.emitLabel(badL)
@@ -496,7 +618,7 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 	case arg.Ty.IR == "i64" || arg.Ty.IR == "i32" || arg.Ty.IR == "i16" || arg.Ty.IR == "i8" || arg.Ty.IR == "i1":
 		wide := e.convert(arg, TypeI64)
 		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, wide.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_i64(i64 %s)", reg, wide.Ref))
 		return Value{Ref: reg, Ty: BigIntType()}, nil
 	case arg.Ty.Float:
 		// `number` is a double (TDD-00123). BigInt(x) converts an integer-valued,
@@ -539,10 +661,16 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 		e.emitTerminator("unreachable")
 		e.emitLabel(buildL)
 		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_bigint_from_i64(i64 %s)", reg, iReg))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_i64(i64 %s)", reg, iReg))
 		return Value{Ref: reg, Ty: BigIntType()}, nil
 	default:
-		return Value{}, fmt.Errorf("%d:%d: BigInt() accepts an integer number or a string, not this type (a non-integer number is a RangeError in JS)", pos.Line, pos.Col)
+		// An object (an array, a function, a class instance): ToPrimitive,
+		// then ToBigInt, through its box.
+		boxed, err := e.emitBoxValue(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.bigintFromRuntime(boxed, pos, true)
 	}
 }
 
@@ -584,7 +712,7 @@ func (e *Emitter) emitToBigInt(v Value, pos ast.Pos) (Value, error) {
 // result, which is dispatched again without the object case.
 func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value, error) {
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	doneL := e.freshLabel("bigint.rt.done")
 	throwL := e.freshLabel("bigint.rt.absent")
 	convert := func(v Value) error {
@@ -592,7 +720,7 @@ func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", r.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		return nil
 	}
@@ -655,7 +783,7 @@ func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, loadL, other))
 		e.emitLabel(loadL)
 		b := e.emitBoxedBigIntLoad(cell)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", b.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", b.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		if objects {
 			// `{ valueOf() { return 44 } }`, `[Symbol.toPrimitive]`: its
@@ -666,7 +794,7 @@ func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value
 			if err != nil {
 				return Value{}, err
 			}
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pv.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", pv.Ref, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		}
 	}
@@ -692,6 +820,32 @@ func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value
 	e.emitTerminator("unreachable")
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return Value{Ref: r, Ty: BigIntType()}, nil
+}
+
+// bigintFromToBigInt is ECMA-262's ToBigInt of an evaluated value: BigInt()'s
+// conversion, except that a number is a TypeError (`Cannot convert 5 to a
+// BigInt`).
+func (e *Emitter) bigintFromToBigInt(v Value, pos ast.Pos) (Value, error) {
+	if v.Ty.Float || isIntegerNumberTy(v.Ty) && v.Ty.IR != "i1" {
+		desc, err := e.emitValueToString(v)
+		if err != nil {
+			return Value{}, err
+		}
+		msg, err := e.emitStringConcat(Value{Ref: e.internString("Cannot convert "), Ty: TypePtr}, desc)
+		if err != nil {
+			return Value{}, err
+		}
+		if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to a BigInt"), Ty: TypePtr}); err != nil {
+			return Value{}, err
+		}
+		e.emitThrowTypeErrorValue(msg.Ref)
+		e.emitLabel(e.freshLabel("tobigint.dead"))
+		e.ensureBigInt()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_from_i64(i64 0)", r))
+		return Value{Ref: r, Ty: BigIntType()}, nil
+	}
+	return e.bigintFromValue(v, pos)
 }

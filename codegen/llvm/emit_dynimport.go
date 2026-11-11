@@ -10,7 +10,6 @@ import (
 	_ "embed"
 	"fmt"
 	"hash/fnv"
-	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -36,23 +35,10 @@ var dynImportShimSource string
 // only under -dynamic-import=lazy when the program uses import().
 func DynImportShimSource() string { return dynImportShimSource }
 
-// ensureDynImportShim declares the dlopen shim's entry point once. The C source
-// itself is contributed by EmbeddedCSources when -dynamic-import=lazy is used.
-func (e *Emitter) ensureDynImportShim() {
-	if e.dynImportShimDeclared {
-		return
-	}
-	e.dynImportShimDeclared = true
-	e.emitGlobal("declare ptr @__kml_dynimport_load(ptr)")
-	e.emitGlobal("declare ptr @__kml_dynimport_sym(ptr, ptr)")
-	e.emitGlobal("declare ptr @__kml_dynimport_sym_opt(ptr, ptr)")
-	e.emitGlobal("declare ptr @__kml_dynimport_open(ptr)")
-}
-
 // importCallResultObjectType computes the fixed-shape object type a lazy
 // dynamic import yields: one field per annotated scalar/string export of the
 // target (matching the island's accessor surface). Shared by emitImportCall
-// (to build the object) and inferExprType (so `const m = await import(...)`
+// (to build the object) and typeOfExpr (so `const m = await import(...)`
 // types correctly).
 func (e *Emitter) importCallResultObjectType(ex *ast.ImportCallExpression) Type {
 	if ex.Namespace != "" {
@@ -60,7 +46,7 @@ func (e *Emitter) importCallResultObjectType(ex *ast.ImportCallExpression) Type 
 	}
 	var fields []Field
 	for _, exp := range ex.Exports {
-		ty := e.resolveType(exp.TypeAnnot)
+		ty := e.annotationType(exp.TypeAnnot)
 		if ty.IsArray() || ty.IsObject() || ty.IsClass() {
 			continue
 		}
@@ -69,21 +55,20 @@ func (e *Emitter) importCallResultObjectType(ex *ast.ImportCallExpression) Type 
 	return ObjectType(fields)
 }
 
-// emitImportCall lowers a dynamic `import(specifier)` expression. The specifier
-// must be a string literal (this compiler resolves every import at compile
-// time); a non-literal is a clean, specific error rather than a silent gap.
+// emitImportCall lowers a dynamic `import(specifier)` expression of a string
+// literal (the resolver lowers a computed one to its candidates).
 func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 	e.usesDynamicImport = true
 
 	lit, ok := ex.Specifier.(*ast.StringLiteral)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: dynamic import() requires a string-literal specifier — this compiler resolves all imports at compile time, so a runtime-computed specifier cannot be loaded", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, internalAt(ex.GetPos(), "computed import() specifier not lowered")
 	}
 
 	switch e.opts.DynamicImport {
 	case "isolated":
 		if ex.ResolvedPath == "" {
-			return Value{}, fmt.Errorf("%d:%d: dynamic import('%s'): unresolved target (internal: resolver did not annotate the path)", ex.GetPos().Line, ex.GetPos().Col, lit.Value)
+			return Value{}, internalAt(ex.GetPos(), "dynamic import('%s'): unresolved target (internal: resolver did not annotate the path)", lit.Value)
 		}
 		// Load + run-once the island via the dlopen shim, keyed by the stable
 		// hash of the target's absolute path (computed identically here and in
@@ -92,29 +77,28 @@ func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 		// top-level await, after which the island's module task is driven by
 		// this program's event loop through the island's poll export and the
 		// import() promise settles when the island's module promise does.
-		e.ensureDynImportShim()
-		e.ensureDynImportWatch()
+		e.ensureEventLoop()
+		e.ensureExceptionHelpers()
+		e.ensureMicrotasks()
+		e.ensureUnhandledRejections()
+		e.ensureNanBox()
+		e.ensureTimerRuntime()
 		hash := IslandHash(ex.ResolvedPath)
 		handle := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_load(ptr %s)", handle, e.internString(hash)))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynimport_load("+irPtr+" %s)", handle, e.internString(hash)))
 		objTy := e.importCallResultObjectType(ex)
 		settleFn := e.emitImportSettleFn(hash, objTy)
-		sym := func(suffix string) string {
-			fp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym(ptr %s, ptr %s)", fp, handle, e.internString("__kml_dynmod_"+hash+"_"+suffix)))
-			return fp
-		}
 		// island.c's exports, by fixed names in the island's own library; an
 		// island without a top-level await has none and is never polled.
 		fixed := func(suffix string) string {
 			fp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym_opt(ptr %s, ptr %s)", fp, handle, e.internString("__kml_island_"+suffix)))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynimport_sym_opt("+irPtr+" %s, "+irPtr+" %s)", fp, handle, e.internString("__kml_island_"+suffix)))
 			return fp
 		}
-		stateFn, pollFn, errFn, dlFn, beFn := sym("state"), fixed("poll"), sym("error"), sym("next_deadline_ns"), fixed("backend")
+		stateFn, pollFn, errFn, dlFn, beFn := fixed("state"), fixed("poll"), fixed("error"), fixed("next_deadline_ns"), fixed("backend")
 		prom := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
-		e.emitInstr(fmt.Sprintf("call void @__kml_dynimport_watch(ptr %s, ptr %s, ptr @%s, ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)",
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", prom))
+		e.emitInstr(fmt.Sprintf("call void @__kml_dynimport_watch("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" @%s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)",
 			handle, prom, settleFn, stateFn, pollFn, errFn, dlFn, beFn))
 		promTy := PromiseOf(objTy)
 		promTy.PromiseTask = true
@@ -122,45 +106,4 @@ func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 	default: // "bundled", "lazy"
 		return e.emitBundledImport(ex)
 	}
-}
-
-// emitIslandTaskGlue appends the island exports the importer's loop drives an
-// island with a top-level await through (TDD-00225): `_state` (the module
-// promise's state word — 0 pending / 1 fulfilled / 2 rejected; 1 for an island
-// without a top-level await, whose init ran it to completion),
-// `_next_deadline_ns` (the island's earliest pending timer on the shared
-// monotonic clock, 0 for none) and `_error` (the rejection value). Written into
-// the final module text, so every runtime piece it references was ensured
-// earlier (emitter.go, where islandTask is decided). The poll and the loop's
-// backend are islandsrc/island.c's.
-func (e *Emitter) emitIslandTaskGlue(out *strings.Builder) {
-	h := e.islandHash
-	if !e.moduleTask {
-		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_state() {\nentry:\n  ret i64 1\n}\n", h)
-		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  ret i64 0\n}\n", h)
-		fmt.Fprintf(out, "define ptr @__kml_dynmod_%s_error() {\nentry:\n  ret ptr null\n}\n", h)
-		return
-	}
-	fmt.Fprintf(out, `define i64 @__kml_dynmod_%s_state() {
-entry:
-  %%p = load ptr, ptr @__kml_module_promise, align 8
-  %%st_p = getelementptr %s, ptr %%p, i32 0, i32 0
-  %%st = load i64, ptr %%st_p, align 8
-  ret i64 %%st
-}
-define ptr @__kml_dynmod_%s_error() {
-entry:
-  %%p = load ptr, ptr @__kml_module_promise, align 8
-  %%v0_p = getelementptr %s, ptr %%p, i32 0, i32 2
-  %%v0 = load i64, ptr %%v0_p, align 8
-  %%err = inttoptr i64 %%v0 to ptr
-  ret ptr %%err
-}
-`, h, promiseStructIR, h, promiseStructIR)
-	if !e.usedTimers {
-		fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  ret i64 0\n}\n", h)
-		return
-	}
-	// The earliest pending entry of the timer queue (timers.c).
-	fmt.Fprintf(out, "define i64 @__kml_dynmod_%s_next_deadline_ns() {\nentry:\n  %%d = call i64 @__kml_timer_next_deadline_ns()\n  ret i64 %%d\n}\n", h)
 }

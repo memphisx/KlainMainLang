@@ -19,10 +19,6 @@ func (e *Emitter) ensureFFIDl() {
 		e.requireLink("dl")
 	}
 	e.ensureStrHeaderRuntime() // __kml_str_from_cstr for dlerror()/string returns
-	e.emitGlobal("declare ptr @dlopen(ptr noundef, i32 noundef)")
-	e.emitGlobal("declare ptr @dlsym(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i32 @dlclose(ptr noundef)")
-	e.emitGlobal("declare ptr @dlerror()")
 }
 
 // FFIWinDlShimSource is the Windows implementation of the four libdl symbols

@@ -590,13 +590,13 @@ console.log("cat dog cat".replaceAll(/cat/g, (m: string) => "CAT"))
 `, "CAT dog CAT")
 }
 
-func TestE2EStringReplaceCallbackRejectsTooManyParams(t *testing.T) {
-	_, err := parseAndCompile(`
-console.log("x".replace(/x/, (a: string, b: number, c: string, d: string) => "y"))
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a replace() callback declaring more than 3 parameters")
-	}
+func TestE2EStringReplaceCallbackExtraParams(t *testing.T) {
+	// A replacer declaring more parameters than the match supplies reads
+	// undefined for the rest, as JavaScript calls it.
+	assertOutput(t, `
+console.log("x".replace(/x/, (a: string, b: number, c: string, d: string) => "y" + b + c + d))
+console.log("ab".replace(/(a)/, (m: string, g: string, o: number, s: string, extra: any) => [m, g, o, s, extra].join("|")))
+`, "y0xundefined\na|a|0|ab|b")
 }
 
 // --- Stage 5: str.split(regexp), str.search(regexp) ---
@@ -928,5 +928,84 @@ console.log("abab".replaceAll(p, (m: string) => m.toUpperCase()), "abab".replace
 console.log(typeof u, u, arr);
 function mk(src: string, flags?: string): RegExp { return new RegExp(src, flags); }
 console.log(mk("x", "gi").flags, mk("y").flags);
+`)
+}
+
+// Under u, `\u{…}` and a surrogate-pair escape name one code point,
+// in a class too; a metacharacter's code point stays literal.
+func TestE2ERegExpUnicodeCodePointEscapes(t *testing.T) {
+	assertOutput(t, `
+console.log(/\u{1F600}/u.test("a😀b"), /\u{41}/u.test("A"), "x😀y".replace(/\u{1F600}/gu, "!"));
+console.log(/[\u{1F600}-\u{1F64F}]/u.test("🙂"), /^😀$/u.test("😀"), new RegExp("\\u{1F600}", "u").test("😀"));
+console.log(/a\u{2E}b/u.test("axb"), /a\u{2E}b/u.test("a.b"), /é\u{E9}/u.test("éé"), /\u{2}/.test("uu"));
+`, "true true x!y\ntrue true true\nfalse true true true")
+}
+
+// `unicode`, `unicodeSets` and `hasIndices` read their flags.
+func TestE2ERegExpUnicodeFlagGetters(t *testing.T) {
+	assertOutput(t, `
+const a = /x/u, b = /x/v, c = /x/dg, d = /x/;
+console.log(a.unicode, a.unicodeSets, b.unicode, b.unicodeSets, c.hasIndices, d.unicode, d.hasIndices);
+`, "true false false true true false false")
+}
+
+// Under u, an escape the grammar has no production for is a SyntaxError.
+func TestE2ERegExpUnicodeEscapeValidation(t *testing.T) {
+	assertSameAsNode(t, `
+for (const p of ["\\-", "[\\-]", "\\a", "\\/", "\\c1", "[\\b]", "\\k", "\\8", "\\0", "\\00", "\\x4", "\\u12", "\\p", "\\q",
+  "[\\1]", "(a)\\1", "(a)\\2", "\\1", "[\\B]", "[\\k]", "(?<n>a)\\k<n>", "[\\p{L}]", "\\_", "\\]", "\\c", "\\u{1F600}", "\\cA",
+  "[\\d-a]", "[a-\\d]", "[\\w-]", "[\\p{L}-z]", "[a-b-\\d]", "[\\d--a]", "[\\u{41}-\\u{5A}]"]) {
+  try { new RegExp(p, "u"); console.log(JSON.stringify(p), "ok"); } catch (e) { console.log(JSON.stringify(p), (e as Error).name, (e as Error).message.split(": ").pop()); }
+}
+`)
+}
+
+// match, matchAll and search on a value held boxed (readFileSync's
+// `string | Buffer` in a JavaScript file, a JSON.parse result), matchAll
+// walked by for-of.
+func TestE2EBoxedStringMatch(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const fs = require("fs");
+const t = fs.readFileSync(__filename, { encoding: "utf8" });
+console.log(t.match(/(con)st/s)[1], [...t.matchAll(/fs/g)].length > 0);
+for (const [, w] of t.matchAll(/(f[s])\./g)) console.log(w);
+const a = JSON.parse("\"abcab\"");
+console.log(a.match(/b/g), a.search(/c/), [...a.matchAll(/a(b)/g)].map((x) => x[1]));
+`)
+}
+
+// A module object held boxed whose `match` is its own (assert's), not a
+// string's.
+func TestE2EBoxedNonStringMatch(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const assert = require("assert");
+function t(u) { assert.match(u, /^a/); }
+t("abc");
+try { assert.match("xyz", /^a/); } catch (e) { console.log(e.code); }
+const s = JSON.parse("\"q\"");
+console.log(s.match(/q/)[0]);
+`)
+}
+
+// A RegExp subclass's `super(...args)`, and flags held boxed undefined
+// (no flags, not "undefined").
+func TestE2ERegExpSpreadSuperAndBoxedUndefinedFlags(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `class R extends RegExp { constructor(...args) { super(...args); this.k = 1; } }
+const r = new R("a+", "g");
+console.log(r.source, r.flags, r.k, r instanceof RegExp, "caaab".match(r));
+const r2 = new R("x");
+console.log(r2.flags === "", r2.test("x"));
+console.log(new R().source);
+function f(p, u) { return new RegExp(p, u); }
+console.log(f("x").flags === "", f(undefined).source, f(/q/i).flags, f("y", "m").flags);
+`)
+}
+
+// An index key a builtin subclass's instance takes as its own property.
+func TestE2EHostSubclassIndexProperty(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `class R extends RegExp { constructor(...a) { super(...a); this[0] = "1"; } }
+const r = new R("x");
+console.log(r[0], Object.keys(r), r.test("x"));
+class D extends Date { constructor(...a) { super(...a); this[0] = "2"; } }
+const d = new D(0);
+console.log(d[0], Object.keys(d), d.getTime());
 `)
 }

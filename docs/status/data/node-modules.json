@@ -94,7 +94,8 @@
             "feature": "`console`",
             "status": "implemented",
             "notes": [
-              "Ambient global (no import needed) → [console](CONSOLE.md)"
+              "Ambient global (no import needed) → [console](CONSOLE.md)",
+              "`import { Console } from 'console'`: a Console writing to the streams given (`stdout`, `stderr`, `ignoreErrors`, `inspectOptions`, `groupIndentation`), its methods bound; the module's default export is the global console"
             ],
             "decl": [
               "console"
@@ -344,11 +345,8 @@
             "feature": "`buffer` (`Buffer`)",
             "status": "implemented",
             "notes": [
-              "A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)",
-              "The module's own exports are TypeScript (`lib/node/internal_buffer.ts`, [ADR-01281](../adr/01/ADR-01281.md)): `constants`, `kMaxLength`, `kStringMaxLength`, `INSPECT_MAX_BYTES`, `isUtf8`, `isAscii`, `transcode`, `SlowBuffer`; namespace and default imports reach them and the globals"
-            ],
-            "caveats": [
-              "`File` and `resolveObjectURL` are not exported (no `File` global, no object-URL registry)"
+              "A Node-specific global; `import { Buffer } from 'buffer'`/`'node:buffer'` works, same-name and aliased (`Buffer.from` member call → Stage 2 rename). `Blob`/`File`/`atob`/`btoa` importable too → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)",
+              "The module's own exports are TypeScript (`lib/node/internal_buffer.ts`, [ADR-01281](../adr/01/ADR-01281.md)): `constants`, `kMaxLength`, `kStringMaxLength`, `INSPECT_MAX_BYTES`, `isUtf8`, `isAscii`, `transcode`, `SlowBuffer`, `resolveObjectURL`; namespace and default imports reach them and the globals, also read as a value"
             ],
             "decl": [
               "Buffer"
@@ -423,7 +421,7 @@
             "feature": "`util/types`",
             "status": "implemented",
             "notes": [
-              "The type predicates `util.types` carries (`lib/node/util_types.ts`, [ADR-01289](../adr/01/ADR-01289.md)); the boxed-primitive, external, proxy and module-namespace ones are always false, as no such value exists here"
+              "The type predicates `util.types` carries (`lib/node/util_types.ts`, [ADR-01289](../adr/01/ADR-01289.md)); `isExternal` is always false, as no such value exists here"
             ],
             "decl": [
               "util/types#"
@@ -576,7 +574,7 @@
             "feature": "`wasi`",
             "status": "missing",
             "notes": [
-              "No WebAssembly runtime; a WASM *target* is a separate direction, not a hosted `wasi` module"
+              "The `WebAssembly` JS API runs modules on wasmtime ([Global functions](GLOBAL-FUNCTIONS.md)), but `node:wasi` (a WASI host for them) is not ported"
             ]
           },
           {

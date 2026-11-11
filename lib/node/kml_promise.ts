@@ -13,3 +13,15 @@ export function __kml_Promise_withResolvers<T>(): PromiseWithResolvers<T> { // k
     });
     return { promise, resolve, reject };
 }
+
+// Promise.try (ECMA-262 §27.2.4.9): callbackFn called now with args, its
+// result (a thenable adopted) or its throw settling the promise.
+export function __kml_Promise_try(callbackFn: (...args: any[]) => any, ...args: any[]): Promise<any> { // kml:lower Promise.try
+    return new Promise<any>((resolve, reject) => {
+        try {
+            resolve(callbackFn(...args));
+        } catch (e) {
+            reject(e);
+        }
+    });
+}

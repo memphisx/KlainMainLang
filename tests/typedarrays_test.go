@@ -177,7 +177,7 @@ console.log(doubled[4])
 
 func TestE2ETypedArrayUnannotatedMapPreservesElementType(t *testing.T) {
 	// Regression test for a second instance of the same bug class, in a
-	// completely separate code path: emit_exprs_types.go's inferExprType
+	// completely separate code path: emit_exprs_types.go's typeOfExpr
 	// (used to decide an *unannotated* variable's declared type) had its
 	// own independent "map" case that computed the result type from the
 	// callback body's own inferred type, disagreeing with what
@@ -292,17 +292,19 @@ console.log(Atomics.load(a, 0))
 }
 
 func TestE2EBigInt64ArrayRejections(t *testing.T) {
-	assertChanCompileError(t, `
+	// TypeScript's own errors: a number stored into, or a typed array
+	// built from numbers for, a BigInt64Array.
+	assertCLICompileError(t, false, `
 const a = new BigInt64Array(2)
 a[0] = 5
-`, "must be a bigint")
+`, "type 'number' is not assignable to type 'bigint'")
 	assertChanCompileError(t, `
 const a = new BigInt64Array(2)
 a.push(1n)
 `, "no TypedArray does")
-	assertChanCompileError(t, `
+	assertCLICompileError(t, false, `
 const a = new BigInt64Array([1, 2])
-`, "must be a bigint")
+`, "no overload matches this call")
 }
 
 // Uint8ClampedArray (TDD-00101): real ToUint8Clamp stores — clamp to
@@ -570,4 +572,245 @@ TypeError: Cannot convert a BigInt value to a number
 BigUint64Array(1) [ 1n ]
 Cannot convert a BigInt value to a number
 Cannot convert a BigInt value to a number`)
+}
+
+// An iteration method's callback gets the typed array itself as its third
+// argument, not a copy.
+func TestE2ETypedArrayCallbackGetsReceiver(t *testing.T) {
+	assertOutput(t, `
+const t = new Uint8Array([1, 2, 3]);
+t.forEach((x, i, a) => { if (i === 0) console.log(a === t, a instanceof Uint8Array, a); });
+console.log(t.map((x, i, a) => a.length + (a === t ? 10 : 0)));
+console.log(t.filter((x, i, a) => a[i] > 1 && a === t));
+console.log(t.some((x, i, a) => a === t), t.every((x, i, a) => a === t), t.find((x, i, a) => a === t), t.findIndex((x, i, a) => a === t));
+console.log(t.reduce((acc, x, i, a) => acc + (a === t ? 1 : 0), 0));
+const f = new Float64Array([1.5]); f.forEach((x, i, a) => console.log(a === f, a));
+`, "true true Uint8Array(3) [ 1, 2, 3 ]\nUint8Array(3) [ 13, 13, 13 ]\nUint8Array(2) [ 2, 3 ]\ntrue true 1 0\n3\ntrue Float64Array(1) [ 1.5 ]")
+}
+
+// `new ctor(…)` over several typed-array constructors: a union of views,
+// each built with its buffer, offset and length.
+func TestE2ETypedArrayConstructorUnion(t *testing.T) {
+	assertSameAsNode(t, `
+const ctors = [Uint8Array, Int16Array];
+for (const ctor of ctors) {
+  const t = new ctor(new ArrayBuffer(8), 0, 2);
+  t[1] = 7;
+  console.log(t.length, t[1], t.byteLength, new ctor(3).length);
+}
+`)
+}
+
+// A resizable buffer made by a function stays resizable at its caller.
+func TestE2EResizableBufferFromFunctionJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+function mk(n, m) { return new ArrayBuffer(n, { maxByteLength: m }); }
+const rab = mk(4, 16);
+rab.resize(8);
+console.log(rab.byteLength, rab.resizable, rab.maxByteLength);
+`)
+}
+
+func TestE2ETypedArrayOverResizableBuffer(t *testing.T) {
+	src := `
+const rab = new ArrayBuffer(4, { maxByteLength: 8 });
+const fixed = new Uint8Array(rab, 0, 4);
+const fixedOff = new Uint8Array(rab, 2, 2);
+const track = new Uint8Array(rab);
+const trackOff = new Uint8Array(rab, 2);
+for (let i = 0; i < 4; i++) track[i] = i;
+console.log(fixed.length, fixedOff.length, track.length, trackOff.length);
+rab.resize(6);
+console.log(fixed.length, fixedOff.length, track.length, trackOff.length, [...track]);
+rab.resize(1);
+console.log(fixed.length, fixedOff.length, track.length, trackOff.length, trackOff.byteOffset);
+for (const [n, f] of [["destr", () => { let [a] = fixed; return a; }], ["spread", () => [...trackOff]], ["forof", () => { for (const x of fixed) {} }], ["at", () => fixed.at(0)], ["join", () => fixed.join()]] as [string, () => unknown][]) {
+  try { console.log(n, f()); } catch (e) { console.log(n, (e as Error).name, (e as Error).message); }
+}
+rab.resize(8);
+console.log(fixed.length, trackOff.length, [...trackOff]);
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCLIJS(t, src)
+}
+
+func TestE2ETypedArraySubclassThroughAny(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+class MyU extends Uint8Array {}
+class MyB extends BigInt64Array {}
+const ctors = [Uint8Array, MyU, MyB];
+function sub(type) { return new Function("return class My" + type + " extends " + type + " {}")(); }
+const MyF = sub("Float32Array");
+for (const ctor of ctors.concat(MyF)) {
+  const rab = new ArrayBuffer(4 * ctor.BYTES_PER_ELEMENT, { maxByteLength: 8 * ctor.BYTES_PER_ELEMENT });
+  const w = new ctor(rab);
+  const big = w instanceof BigInt64Array;
+  for (let i = 0; i < 4; i++) w[i] = big ? BigInt(i) : i;
+  const f = new ctor(rab, 0, 4);
+  rab.resize(3 * ctor.BYTES_PER_ELEMENT);
+  console.log(ctor.name, f.length, w.length, [...w].map(Number), w instanceof Uint8Array, w instanceof MyU);
+  try { let [a] = f; } catch (e) { console.log(e.name); }
+}
+class A extends Array {}
+const a = new A(1, 2, 3);
+const x = a;
+let i = 0; x[i] = 8; x[1] = 9;
+console.log(a[0], a[1], a.length);
+`)
+}
+
+func TestE2ETypedArrayResizeMidIteration(t *testing.T) {
+	src := `
+for (const K of [Uint8Array, Float64Array, BigUint64Array, BigInt64Array]) {
+  const rab = new ArrayBuffer(4 * K.BYTES_PER_ELEMENT, { maxByteLength: 8 * K.BYTES_PER_ELEMENT });
+  const ks = [K, Int16Array];
+  const grow = new ks[0](rab);
+  const seen: unknown[] = [];
+  grow.forEach((n: unknown) => { seen.push(n); if (seen.length == 2) rab.resize(5 * K.BYTES_PER_ELEMENT); });
+  const shrink = new ks[0](rab);
+  const got: unknown[] = [];
+  shrink.forEach((n: unknown) => { got.push(n); if (got.length == 2) rab.resize(2 * K.BYTES_PER_ELEMENT); });
+  console.log(K.name, seen.length, got);
+}
+const rab = new ArrayBuffer(4, { maxByteLength: 8 });
+const u = new Uint8Array(rab);
+for (let i = 0; i < 4; i++) u[i] = i + 1;
+const vs: (number | undefined)[] = [];
+u.forEach(n => { vs.push(n); if (vs.length == 1) rab.resize(2); });
+console.log(vs, u.map(n => n * 2));
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCLIJS(t, src)
+}
+
+func TestE2EOptionalCallOnAbsentArray(t *testing.T) {
+	assertSameAsNode(t, `
+function f(xs?: number[]) { const w: number[] = []; xs?.forEach((v, i) => { if (i == 0) xs!.push(9); w.push(v); }); return w; }
+console.log(f([1, 2]), f());
+const m = new Map<string, number[]>([["a", [1, 2]]]);
+const g = m.get("a"); g?.forEach((v, i) => { if (i == 0) g!.push(5); console.log(v); });
+const fixed = new Uint8Array(2); fixed[0] = 3;
+const fs = [() => { let a = fixed[0]; return a; }, () => { let a = fixed[5]; return a; }];
+console.log(fs[0](), fs[1](), typeof fs[1]());
+function first() { let [a] = "xy"; return a; }
+function firstOf(m: Map<string, number>) { const [e] = m; return e; }
+console.log(first(), firstOf(new Map([["k", 1]])));
+`)
+}
+
+func TestE2EArrayProtoGenericOnTypedArray(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+const u = new Uint8Array([3, 1, 2]);
+const P = Array.prototype;
+console.log(P.map.call(u, x => x * 2), P.join.call(u, "-"), P.slice.call(u, 1), P.indexOf.call(u, 2), P.includes.call(u, 1));
+console.log(P.filter.call(u, x => x > 1), P.reduce.call(u, (a, b) => a + b), P.some.call(u, x => x > 2), P.every.call(u, x => x > 0));
+console.log(P.sort.call(u), P.reverse.call(u), P.find.call(u, x => x == 2), P.at.call(u, -1), P.lastIndexOf.call(u, 3));
+console.log(P.concat.call(u, [9]).length, P.keys.call(u).next(), P.toString.call(u), P.fill.call(u, 7, 1));
+try { P.push.call(u, 4); } catch (e) { console.log(e.constructor.name, e.message); }
+try { P.pop.call(u); } catch (e) { console.log(e.constructor.name, e.message); }
+const f = new Float64Array([1.5, NaN]);
+console.log(P.includes.call(f, NaN), P.indexOf.call(f, NaN), P.map.call(f, String));
+const u2 = new Uint8Array([3, 1]);
+console.log([1].concat(u2).length, Array.prototype.concat.call(u2, [9]).length, Array.prototype.concat.call({length:1, 0:5}, [9]).length);
+const P2 = Array.prototype;
+console.log([...P2.keys.call([7, 8])], [...P2.entries.call({ length: 1, 0: "a" })]);
+for (const K of [Uint8Array, Float64Array, BigInt64Array]) {
+const rab = new ArrayBuffer(4 * K.BYTES_PER_ELEMENT, {maxByteLength: 8 * K.BYTES_PER_ELEMENT});
+const fl = new K(rab, 0, 4); const vs = [];
+Array.prototype.reduce.call(fl, (a, n) => { vs.push(n); if (vs.length == 2) rab.resize(3 * K.BYTES_PER_ELEMENT); return a; }, "i");
+const lt = new K(rab); const ws = [];
+Array.prototype.forEach.call(lt, (n) => { ws.push(n); if (ws.length == 1) rab.resize(1 * K.BYTES_PER_ELEMENT); });
+console.log(K.name, vs, ws);
+}
+`)
+}
+
+func TestE2ETypedArraySearchShrinkAndNaN(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+for (const ctor of [Float32Array, Float64Array]) {
+  const rab = new ArrayBuffer(4 * ctor.BYTES_PER_ELEMENT, { maxByteLength: 8 * ctor.BYTES_PER_ELEMENT });
+  const lt = new ctor(rab);
+  lt[0] = -Infinity; lt[1] = Infinity; lt[2] = NaN;
+  console.log(lt.includes(-Infinity), lt.includes(Infinity), lt.includes(NaN), lt.indexOf(NaN), lt);
+  const ks = [ctor]; const x = new ks[0](rab); console.log(x.includes(NaN));
+}
+for (const ctor of [Uint8Array, BigInt64Array, Float64Array]) {
+  const rab = new ArrayBuffer(4 * ctor.BYTES_PER_ELEMENT, { maxByteLength: 8 * ctor.BYTES_PER_ELEMENT });
+  const fl = new ctor(rab, 0, 4);
+  const evil = { valueOf: () => { rab.resize(2 * ctor.BYTES_PER_ELEMENT); return 2; } };
+  const n0 = ctor === BigInt64Array ? 0n : 0;
+  console.log(fl.lastIndexOf(n0), fl.lastIndexOf(n0, evil), (rab.resize(4 * ctor.BYTES_PER_ELEMENT), fl.lastIndexOf(undefined, evil)));
+  const lt = new ctor(rab);
+  const evil2 = { valueOf: () => { rab.resize(2 * ctor.BYTES_PER_ELEMENT); return 3; } };
+  rab.resize(4 * ctor.BYTES_PER_ELEMENT);
+  console.log(lt.lastIndexOf(n0, evil2), lt.indexOf(n0, { valueOf: () => { rab.resize(ctor.BYTES_PER_ELEMENT); return 1; } }), lt.includes(undefined, { valueOf: () => { rab.resize(0); return 0; } }));
+}
+{
+const a = new Float64Array([1, NaN]); console.log(a.includes(NaN));
+const b = new Float32Array(2); b[0] = NaN; console.log(b.includes(NaN));
+const rab = new ArrayBuffer(16, {maxByteLength: 32}); const c = new Float64Array(rab); c[1] = NaN; console.log(c.includes(NaN), c[1]);
+}
+const a = [NaN, 1]; const x = [a, 0][0]; console.log(x.includes(NaN), [NaN].includes(NaN), ["a", NaN].includes(NaN), x.indexOf(NaN));
+`)
+}
+
+func TestE2ETypedArrayDefineProperty(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+for (const ctor of [Uint8Array, BigInt64Array]) {
+  const big = ctor === BigInt64Array;
+  const V = (n) => big ? BigInt(n) : n;
+  const rab = new ArrayBuffer(4 * ctor.BYTES_PER_ELEMENT, { maxByteLength: 8 * ctor.BYTES_PER_ELEMENT });
+  const fl = new ctor(rab, 0, 4), flo = new ctor(rab, 2 * ctor.BYTES_PER_ELEMENT, 2), lt = new ctor(rab, 0);
+  Object.defineProperty(fl, 0, { value: V(1) });
+  Object.defineProperty(flo, 0, { value: V(2) });
+  Object.defineProperty(lt, 1, { value: V(3) });
+  console.log(lt);
+  for (const [ta, i] of [[fl, 4], [flo, 2], [lt, 4]]) {
+    try { Object.defineProperty(ta, i, { value: V(8) }); console.log("no throw"); } catch (e) { console.log(e.constructor.name); }
+  }
+  rab.resize(3 * ctor.BYTES_PER_ELEMENT);
+  try { Object.defineProperty(fl, 0, { value: V(8) }); console.log("no throw"); } catch (e) { console.log(e.constructor.name); }
+  Object.defineProperty(lt, 2, { value: V(9) }); console.log(lt);
+}
+for (const d of [{ value: 1 }, { value: 1, configurable: false }, { get() { return 1; } }]) {
+  try { Object.defineProperty(new Uint8Array(2), 4, d); } catch (e) { console.log(e.message); }
+  try { Object.defineProperty(new Uint8Array(2), 0, d); console.log("ok"); } catch (e) { console.log(e.message); }
+}
+`)
+}
+
+func TestE2ETypedArrayToLocaleString(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+const ks = [Uint8Array, Float64Array, BigInt64Array];
+for (const K of ks) { const t = new K(3); t[1] = K === BigInt64Array ? 1234n : 1234; console.log(t.toLocaleString()); }
+const f = new Float32Array([1.5, 2000]); console.log(f.toLocaleString());
+const a = new Int16Array(0); console.log(JSON.stringify(a.toLocaleString()));
+`)
+}
+
+func TestE2EBigIntToLocaleString(t *testing.T) {
+	assertSameAsNode(t, `
+const b = 1234567n; console.log(b.toLocaleString(), (-5000n).toLocaleString(), (0n).toLocaleString());
+const a: any = 98765n; console.log(a.toLocaleString());
+`)
+}
+
+func TestE2EBigIntDivZeroRangeError(t *testing.T) {
+	assertSameAsNode(t, `
+try { console.log(1n / 0n); } catch (e: any) { console.log(e instanceof RangeError, e.message); }
+const a: any = 5n, z: any = 0n;
+try { console.log(a % z); } catch (e: any) { console.log(e instanceof RangeError, e.message); }
+`)
+}
+
+// %TypedArray%: every kind's constructor's [[Prototype]], its prototype
+// the kinds' shared one, not constructable.
+func TestE2ETypedArrayIntrinsicConstructor(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+const TA = Object.getPrototypeOf(Int8Array);
+console.log(TA === Object.getPrototypeOf(Uint8Array), TA.prototype === Object.getPrototypeOf(Int8Array.prototype), TA.prototype.constructor === TA);
+try { TA(); } catch (e) { console.log(e.name, e.message); }
+function* g() {}
+console.log(Object.getPrototypeOf(g) === Object.getPrototypeOf(function* () {}));
+`)
 }

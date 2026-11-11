@@ -11,6 +11,7 @@
 #define _GNU_SOURCE // dl_iterate_phdr's dlpi_tls_data
 #endif
 #include <gc.h>
+#include <gc/gc_typed.h>
 #include <stddef.h>
 #include <string.h>
 #ifdef _WIN32
@@ -721,6 +722,57 @@ void *kml_gc_alloc_pinned(size_t n) { return GC_malloc_uncollectable(n); }
 void *kml_gc_alloc_atomic(size_t n) { return GC_malloc_atomic(n); }
 void *kml_gc_alloc_atomic_pinned(size_t n) { return GC_malloc_atomic_uncollectable(n); }
 void *kml_gc_alloc(size_t n) { return GC_malloc(n); }
+
+// An object layout's row (unit kind KML_UNIT_LAYOUT, layout_table.go): its
+// size and one kind per 8-byte word.
+typedef struct {
+	long long id, size, nwords;
+	const unsigned char *kinds;
+} KmlLayout;
+extern const void *__kml_unit_find(long long kind, long long id);
+
+// The descriptors made so far, by type id: claimed with a CAS on the id,
+// the descriptor published after it (0 while another thread makes it).
+#define GD_SLOTS 4096
+static struct {
+	long long id;
+	GC_descr d;
+} gd_cache[GD_SLOTS];
+
+static GC_descr gd_make(const KmlLayout *l) {
+	long long n = l->nwords;
+	GC_word bm[(n + GC_WORDSZ - 1) / GC_WORDSZ + 1];
+	memset(bm, 0, sizeof bm);
+	for (long long i = 0; i < n; i++)
+		if (l->kinds[i] >= KML_WORD_TRACED) GC_set_bit(bm, i);
+	return GC_make_descriptor(bm, (size_t)n);
+}
+
+// A zeroed object of layout id, n bytes, scanned through its layout's
+// pointer map: a word holding no address is never taken for a pointer. A
+// layout with no row is scanned conservatively.
+void *kml_gc_alloc_typed(long long id, size_t n) {
+	unsigned h = (unsigned)(((unsigned long long)id * 0x9E3779B97F4A7C15ULL) >> 52) & (GD_SLOTS - 1);
+	for (unsigned probe = 0; probe < 16; probe++) {
+		unsigned i = (h + probe) & (GD_SLOTS - 1);
+		long long cur = __atomic_load_n(&gd_cache[i].id, __ATOMIC_ACQUIRE);
+		if (cur == id) {
+			GC_descr d = __atomic_load_n(&gd_cache[i].d, __ATOMIC_ACQUIRE);
+			if (d) return GC_malloc_explicitly_typed(n, d);
+			break;
+		}
+		if (cur != 0) continue;
+		const KmlLayout *l = (const KmlLayout *)__kml_unit_find(KML_UNIT_LAYOUT, id);
+		if (!l || (size_t)l->size != n) return GC_malloc(n);
+		GC_descr d = gd_make(l);
+		long long zero = 0;
+		if (__atomic_compare_exchange_n(&gd_cache[i].id, &zero, id, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+			__atomic_store_n(&gd_cache[i].d, d, __ATOMIC_RELEASE);
+		return GC_malloc_explicitly_typed(n, d);
+	}
+	const KmlLayout *l = (const KmlLayout *)__kml_unit_find(KML_UNIT_LAYOUT, id);
+	return l && (size_t)l->size == n ? GC_malloc_explicitly_typed(n, gd_make(l)) : GC_malloc(n);
+}
 void kml_gc_free(void *p) { GC_free(p); }
 // The start of the managed block holding p, or NULL for foreign memory.
 void *kml_gc_base(void *p) { return GC_base(p); }

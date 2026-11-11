@@ -25,7 +25,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 		full := fmt.Sprintf("__kml_ys%d_%s", n, name)
 		p := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", p))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", init, p))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", init, p))
 		e.define(full, Symbol{Ptr: p, Ty: TypeAny})
 		return full, p
 	}
@@ -35,7 +35,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", b.Ref, p))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", b.Ref, p))
 		return nil
 	}
 	eval := func(x ast.Expression) (Value, error) {
@@ -47,7 +47,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	}
 	load := func(p string) Value {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, p))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, p))
 		return Value{Ref: r, Ty: TypeAny}
 	}
 	isNullish := func(v Value) string {
@@ -93,8 +93,8 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sm.Ref, amP))
-		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", syncP))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sm.Ref, amP))
+		e.emitInstr(fmt.Sprintf("store i64 1, "+irPtr+" %s, align 8", syncP))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", gotL))
 		e.emitLabel(asyncL)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", gotL))
@@ -128,7 +128,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	recvName, recvP := slot("recv", fmt.Sprint(nbUndefined))
 	modeP := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", modeP))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", modeP))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", modeP))
 	kindP := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", kindP))
 	resName, resP := slot("res", fmt.Sprint(nbUndefined))
@@ -145,7 +145,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 
 	e.emitLabel(loopL)
 	mode := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", mode, modeP))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", mode, modeP))
 	e.emitTerminator(fmt.Sprintf("switch i64 %s, label %%%s [ i64 1, label %%%s i64 2, label %%%s ]", mode, nextL, throwL, retL))
 
 	// returnFrom completes the outer generator with v (its finallys first).
@@ -175,8 +175,8 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r.Ref, resP))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", kindP))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r.Ref, resP))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", kindP))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", gotL))
 
 	// throw: it.throw ? r = it.throw(recv) : close it, TypeError.
@@ -217,8 +217,8 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r.Ref, resP))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", kindP))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r.Ref, resP))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", kindP))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", gotL))
 
 	// return: it.return ? r = it.return(recv) : return recv from the outer.
@@ -239,15 +239,15 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r.Ref, resP))
-	e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", kindP))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r.Ref, resP))
+	e.emitInstr(fmt.Sprintf("store i64 1, "+irPtr+" %s, align 8", kindP))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", gotL))
 
 	// A result: awaited (an async iterator's promise), an object, done or not.
 	e.emitLabel(gotL)
 	if async {
 		syncNow := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", syncNow, syncP))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", syncNow, syncP))
 		isSync := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isSync, syncNow))
 		awL, chkL := e.freshLabel("ystar.any.await"), e.freshLabel("ystar.any.check")
@@ -257,7 +257,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", aw.Ref, resP))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", aw.Ref, resP))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", chkL))
 		e.emitLabel(chkL)
 	}
@@ -275,7 +275,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	if async {
 		// A sync iterator's value is awaited (CreateAsyncFromSyncIterator).
 		syncNow := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", syncNow, syncP))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", syncNow, syncP))
 		isSync := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isSync, syncNow))
 		awL, keepL := e.freshLabel("ystar.any.awv"), e.freshLabel("ystar.any.keepv")
@@ -285,7 +285,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", aw.Ref, valP))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", aw.Ref, valP))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", keepL))
 		e.emitLabel(keepL)
 	}
@@ -294,7 +294,7 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 
 	e.emitLabel(doneL)
 	kind := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", kind, kindP))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", kind, kindP))
 	isRet := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", isRet, kind))
 	fromRetL, valueL := e.freshLabel("ystar.any.fromret"), e.freshLabel("ystar.any.value")
@@ -304,14 +304,14 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 		return Value{}, err
 	}
 	e.emitLabel(valueL)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", load(valP).Ref, outP))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", load(valP).Ref, outP))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
 
 	// Not done: yield the value, then record how the outer was resumed.
 	e.emitLabel(yieldL)
 	e.emitGeneratorSwapToCaller(gctx, e.convert(load(valP), gctx.elemTy), false)
 	rmode := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorResumeModeField)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", rmode.Ref, modeP))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", rmode.Ref, modeP))
 	isThrow := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", isThrow, rmode.Ref))
 	sent := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorSentField)
@@ -319,11 +319,11 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	// A next/return resumption leaves no thrown cell: read it only on throw.
 	thrownCell := e.freshReg()
 	e.ensureZeroCell()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr @__kml_zero_cell", thrownCell, isThrow, thrown.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" @__kml_zero_cell", thrownCell, isThrow, thrown.Ref))
 	tbox := e.thrownCellAny(thrownCell)
 	recv := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", recv, isThrow, tbox.Ref, sent.Ref))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", recv, recvP))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", recv, recvP))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
 
 	e.emitLabel(endL)

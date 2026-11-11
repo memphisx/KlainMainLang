@@ -36,7 +36,7 @@ The honest middle column: each of these compiles and runs for its core case but 
 | Mapped & utility types | ✅ | • Effective ones are `Pick`/`Omit`/`Record`; `Partial`/`Required`/`Readonly` are erased structural no-ops. No key remapping (`as`), no `-?`/`-readonly` modifier removal; compile-time-only → [Type system](TYPE-SYSTEM.md) |
 | Conditional types + `infer` | ✅ | • `infer` limited to `Array`/`Promise<infer>` and bare `infer R`; no `(...) => infer R`; assignability is structural width, not full variance → [Type system](TYPE-SYSTEM.md) |
 | Generics | ✅ | • Monomorphization-based; **no call-site type args for functions** (generic *classes* take `new Box<T>()`); each type param needs an inferable `T`/`T[]` param; generic functions aren't first-class values → [Type system](TYPE-SYSTEM.md) |
-| Type assertions — `as T` / `as const` / `satisfies` / `<T>x` | ✅ | • **Erased, not enforcing** — the value keeps its inferred type; a cast relied on for re-typing does not take effect (matches TS runtime erasure, not static narrowing) → [Type system](TYPE-SYSTEM.md) |
+| Type assertions — `as T` / `as const` / `satisfies` / `<T>x` | ✅ | • An assertion to a type of another kind through `unknown`/`any` converts the value (`NaN` for a string asserted a number), where Node keeps it → [Type system](TYPE-SYSTEM.md) |
 | Template-literal types & string-literal types | ✅ | • Parsed but **erased/widened to `string`**, not narrowed or enforced → [Type system](TYPE-SYSTEM.md) |
 | `readonly T[]` modifier | ✅ | • Erased, not enforced; `ReadonlyArray<T>` alias not covered → [Type system](TYPE-SYSTEM.md) |
 | Ambient declarations (`declare var`/`function`/`enum`/`class`/`module`/`namespace`/`global`) | ✅ | • `declare var`/`function`/`enum` are real bindings; brace-bodied ambient forms parsed and erased (no external link target under whole-program AOT) → [Type system](TYPE-SYSTEM.md) |
@@ -57,7 +57,7 @@ Features that fit the model and would add value, not yet built.
 | `ReadonlyArray<T>` alias form | ❌ | • → [Type system](TYPE-SYSTEM.md) |
 | Full variance / bivariance in assignability | ❌ | • Only structural width subtyping today |
 | Key remapping in mapped types (`as`), `-?`/`-readonly` modifier removal | ❌ | • → [Type system](TYPE-SYSTEM.md) |
-| Spread into fixed-arity functions / uncommon variadic builtins (`f(...arr)`, `Math.hypot(...a)`) | ❌ | • Clean compile error (TDD-00106) |
+| Spread into fixed-arity functions / uncommon variadic builtins (`f(...arr)`, `Math.hypot(...a)`) | ✅ | • A tuple (readonly included) fills fixed parameters by position; an array over optional parameters fills each from its elements, undefined past the end; an array into required parameters is TS2556, as in tsc; under `-compat=js` any iterable spreads, through `apply` ([ADR-01970](../adr/01/ADR-01970.md)) |
 | `for` non-declaration init clause (`for (i = 0, j = 10; …)`) | ❌ | • Clean rejection (the update clause does take comma-separated expressions) |
 
 ## Out of scope (by the whole-program AOT / no-runtime / fixed-shape model)

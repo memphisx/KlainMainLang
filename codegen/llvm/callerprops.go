@@ -86,19 +86,27 @@ func (e *Emitter) prepareCallerProps() {
 }
 
 // cjsFiles is the set of the program's files Node runs as sloppy CommonJS
-// (a .ts one too, type-stripped): no import or export, no leading
-// "use strict" directive, not ESM.
+// (a .ts one too, type-stripped): no import or export, no
+// "use strict" directive in its prologue, not ESM.
 func cjsFiles(prog *ast.Program) map[string]bool {
-	strict, first := map[string]bool{}, map[string]bool{}
+	strict, first, past := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, s := range prog.Body {
 		f := prog.StmtFiles[s]
 		switch st := s.(type) {
 		case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
 			strict[f] = true
 		case *ast.ExpressionStatement:
-			if lit, ok := st.Expr.(*ast.StringLiteral); ok && lit.Value == "use strict" && !first[f] {
-				strict[f] = true
+			// (A directive anywhere in the file's prologue: its leading
+			// string-literal statements.)
+			if lit, ok := st.Expr.(*ast.StringLiteral); ok && !past[f] {
+				if lit.Value == "use strict" && lit.Plain {
+					strict[f] = true
+				}
+				break
 			}
+			past[f] = true
+		default:
+			past[f] = true
 		}
 		first[f] = true
 	}
@@ -174,8 +182,8 @@ func (e *Emitter) fileIsLib(path string) bool {
 func (e *Emitter) storeFrameActivation(fr, self, args string) {
 	for i, v := range []string{self, args} {
 		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 %d", p, frameIR, fr, 3+i))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, p))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 %d", p, frameIR, fr, 3+i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v, p))
 	}
 }
 
@@ -187,8 +195,7 @@ func (e *Emitter) markModuleFrame() {
 		return
 	}
 	e.storeFrameActivation(e.frame, "1", "0")
-	e.emitGlobal("@__kml_caller_frames = external global i32")
-	e.emitInstr("store i32 1, ptr @__kml_caller_frames, align 4")
+	e.emitInstr("store i32 1, " + irPtr + " @__kml_caller_frames, align 4")
 }
 
 // recordActivation stores sloppy decl's own boxed value and its arguments

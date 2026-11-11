@@ -2,6 +2,7 @@ package lexer_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"KlainMainLang/lexer"
@@ -344,5 +345,17 @@ func TestTemplateLineTerminatorsNormalized(t *testing.T) {
 	}
 	if tk.Type != lexer.TEMPLATE_NO_SUB || tk.Literal != "a\nb\nc" || tk.Raw != "a\nb\nc" {
 		t.Errorf("got {%v %q raw %q}, want cooked and raw \"a\\nb\\nc\"", tk.Type, tk.Literal, tk.Raw)
+	}
+}
+
+// A radix prefix with no digit after it is tsc's "digit expected".
+func TestRadixPrefixWithoutDigits(t *testing.T) {
+	for src, want := range map[string]string{"0x": "hexadecimal digit expected", "0X;": "hexadecimal digit expected", "0b": "binary digit expected", "0o ": "octal digit expected"} {
+		if _, err := scanAll(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: got %v, want %q", src, err, want)
+		}
+	}
+	if _, err := scanAll("0x1F 0b1 0o7"); err != nil {
+		t.Errorf("radix literals: %v", err)
 	}
 }

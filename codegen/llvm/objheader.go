@@ -12,9 +12,17 @@
 //	bits 51..52  the integrity level Object.freeze, seal and
 //	             preventExtensions record (staticIntegrity*): 0 none
 //	bit  53      kmlHdrImmortal: a shared sentinel cell, never changed
+//	bit  54      kmlHdrClosure: a function value's prefix word (a closure
+//	             header {fn, env} or a dynamic record {fn, env, arity}), its
+//	             low bits the function's id (0: anonymous)
+//	bits 55..60  a dynamic object's flags (type id kmlTypeIDBag; kml_heap.h
+//	             KML_BAG_*: non-extensible, Proxy, null prototype, array
+//	             exotic, module namespace, a function's bag)
+//	bit  61      kmlHdrProtoSet: a class instance whose prototype was
+//	             replaced (Object.setPrototypeOf, a newTarget)
 //
-// Bits 51..53 are object state, not type: a type test compares a header
-// with them cleared (headerIdentity).
+// Bits 51..53 and 61 are object state, not type: a type test compares a
+// header with them cleared (headerIdentity).
 //
 // A class instance's header is its TagID (which carries the magic), an
 // object literal's the id its layout was registered under. A header with
@@ -35,7 +43,18 @@ const (
 	kmlHdrLevelShift       = 51
 	kmlHdrLevelMask  int64 = 3 << kmlHdrLevelShift
 	kmlHdrImmortal   int64 = 1 << 53
-	kmlHdrStateMask        = kmlHdrLevelMask | kmlHdrImmortal
+	// kmlHdrProtoSet: a class instance given a prototype other than its
+	// class's (shapesrc/shape.c keeps it); state, not type.
+	kmlHdrProtoSet  int64 = 1 << 61
+	kmlHdrStateMask       = kmlHdrLevelMask | kmlHdrImmortal | kmlHdrProtoSet
+	kmlHdrClosure   int64 = 1 << 54
+	// A dynamic object (dynobjsrc/dynobj.c): its type id, the mask a bag
+	// test applies (the kind flags too: an Error of kind 1 is no bag),
+	// and its Proxy flag.
+	kmlTypeIDBag     int64 = 1
+	kmlBagHdr              = kmlHdrMagic | kmlTypeIDBag
+	kmlBagHdrMask    int64 = kmlHdrMagicMask | kmlHdrIDMask | 0xF<<47 | kmlHdrClosure
+	kmlBagFlagProxy  int64 = 1 << 56
 	kmlHdrMagic      int64 = 0x4B4D << 32
 	kmlHdrMagicMask  int64 = 0x7FFF << 32
 	kmlHdrIDMask     int64 = 0xFFFFFFFF
@@ -174,13 +193,22 @@ func layoutFieldKeyMemo(t Type, memo map[*Field]string) string {
 	case t.IsFunc():
 		// A function member's signature is part of the layout: a box's
 		// method adapter calls it with its own parameters' types.
+		// An object it takes or returns is a pointer whatever its own
+		// layout (its header names that): only its storage counts, so a
+		// self-referencing literal cut at another depth is one layout.
+		sig := func(p Type) string {
+			if p.IsObject() && !p.IsClass() {
+				return "{}"
+			}
+			return layoutFieldKeyMemo(p, memo)
+		}
 		var ps []string
 		for _, p := range t.FuncParams {
-			ps = append(ps, layoutFieldKeyMemo(p, memo))
+			ps = append(ps, sig(p))
 		}
 		ret := ""
 		if t.FuncRetType != nil {
-			ret = layoutFieldKeyMemo(*t.FuncRetType, memo)
+			ret = sig(*t.FuncRetType)
 		}
 		kind = "F(" + strings.Join(ps, ",") + ")" + ret + fmt.Sprint(t.FuncHasRest)
 	case t.IsPromise():
@@ -252,13 +280,13 @@ func (e *Emitter) emitStoreObjHeader(ptr string, t Type) {
 	// A malloc'd object starts with no key absent and its layout's order.
 	if i := t.presenceIndex(); i >= 0 {
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, t.StructIR(), ptr, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, t.StructIR(), ptr, i))
 		e.heapStore("i64", "0", g, 8)
 	}
 	if i := t.orderIndex(); i >= 0 {
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, t.StructIR(), ptr, i))
-		e.heapStore("ptr", "null", g, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, t.StructIR(), ptr, i))
+		e.heapStore(irPtr, "null", g, 8)
 	}
 }
 
@@ -271,4 +299,53 @@ type registeredLayout struct {
 // hasObjHeader reports whether t's layout starts with the header word.
 func hasObjHeader(t Type) bool {
 	return len(t.Fields) > 0 && t.Fields[0].Name == ClassTagField
+}
+
+// hdrWordSize is the size of the word a block starts with before its
+// body: a string's length word, an array's, a function value's or a host
+// value's header word (one target word).
+const hdrWordSize = 8
+
+// prefixWordOff is where a prefixed body's word sits relative to the body
+// pointer.
+const prefixWordOff = -hdrWordSize
+
+// emitBodyAddr binds dst to the body of the block at base: past its
+// header word.
+func (e *Emitter) emitBodyAddr(dst, base string) {
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", dst, base, hdrWordSize))
+}
+
+// emitPrefixWordAddr binds dst to the address of the word before the body
+// ref points at (prefixWordOff).
+func (e *Emitter) emitPrefixWordAddr(dst, ref string) {
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", dst, ref, prefixWordOff))
+}
+
+// emitClosureAlloc is the one heap allocation of a function value: size
+// bytes (a {fn, env} header or a {fn, env, arity} record) after its prefix
+// word, fn's (fnWord). dst is the value, past the word.
+func (e *Emitter) emitClosureAlloc(dst, size, fn string) {
+	base, sz := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 8", sz, size))
+	e.heapMallocInto(base, allocClosure, sz)
+	e.heapStore("i64", fmt.Sprint(e.fnWord(fn)), base, 8)
+	e.emitBodyAddr(dst, base)
+}
+
+// emitStaticFnRecord defines sym as a static function value of code fn: a
+// constant cell holding fn's prefix word (immortal) and then the fields of
+// ty (an IR struct type "{ ... }") as init gives them, sym an alias of the
+// value past the word.
+func (e *Emitter) emitStaticFnRecord(sym, linkage, ty, init, fn string) {
+	inner := strings.TrimSpace(ty[strings.Index(ty, "{")+1 : strings.LastIndex(ty, "}")])
+	vals := strings.TrimSpace(init[strings.Index(init, "{")+1 : strings.LastIndex(init, "}")])
+	word := e.fnWord(fn) | kmlHdrImmortal
+	if e.staticFnOf == nil {
+		e.staticFnOf = map[string]string{}
+	}
+	e.staticFnOf[sym] = fn
+	cell := sym + ".cell"
+	e.emitGlobal(fmt.Sprintf("%s = %s"+irGlobalAS+" constant { i64, %s } { i64 %d, %s }", cell, linkage, inner, word, vals))
+	e.emitGlobal(fmt.Sprintf("%s = %s alias %s, getelementptr inbounds (i8, "+irPtr+" %s, i64 8)", sym, linkage, ty, cell))
 }

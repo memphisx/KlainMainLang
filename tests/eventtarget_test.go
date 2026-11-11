@@ -120,3 +120,34 @@ bus.dispatchEvent(new Event("s"))
 console.log(order)
 `, "A")
 }
+
+// Event's legacy initEvent resets type, bubbles and cancelable except while
+// the event is dispatched; a missing type throws ERR_MISSING_ARGS, as the
+// constructor does.
+func TestE2EEventInitEvent(t *testing.T) {
+	assertSameAsNode(t, `const e = new Event('a');
+e.initEvent('b', true, true);
+console.log(e.type, e.bubbles, e.cancelable);
+const t = new EventTarget();
+t.addEventListener('b', (ev) => { ev.initEvent('c'); console.log('in', ev.type); });
+t.dispatchEvent(e);
+console.log(e.type);
+try { (e as any).initEvent(); } catch (x: any) { console.log(x.name, x.code, x.message); }
+try { new (Event as any)(); } catch (x: any) { console.log(x.name, x.code); }
+const ac = new AbortController();
+console.log(ac.signal.aborted, Event.NONE, Event.BUBBLING_PHASE);
+`)
+}
+
+// `new` through any passes the real argument count and its overflow into a
+// rest parameter; an implicit derived constructor forwards its own count.
+func TestE2EDynamicConstructArgumentCount(t *testing.T) {
+	assertSameAsNode(t, `class C { constructor(a?: any, b?: any) { console.log("len", arguments.length, a, b); } }
+new C(); new C(1); new (C as any)(); new (C as any)(1, 2); new (C as any)(1, 2, 3);
+const K: any = C; new K(); new K(1);
+class R { xs: number[]; constructor(a: string, ...xs: number[]) { this.xs = xs; console.log("R", a, xs.length, xs); } }
+const RK: any = R; new RK("q"); new RK("q", 1, 2); new RK();
+class D extends C {}
+const DK: any = D; new DK(7); new D(7); new D();
+`)
+}

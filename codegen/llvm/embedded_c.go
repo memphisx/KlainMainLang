@@ -71,37 +71,52 @@ func (c CSource) SrcExt() string {
 // link in the runner even though the CLI compiled it fine). Order matches the
 // CLI's historical order. Returns an error only for an unknown backend name.
 func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
+	if !e.cSourcesDone {
+		e.cSources, e.cSourcesErr = e.embeddedCSources()
+		e.cSourcesDone = true
+	}
+	return e.cSources, e.cSourcesErr
+}
+
+func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	// What the runtime reads from and calls into the program (TDD-00251).
 	out := []CSource{e.hooksCSource()}
-	if e.UsesBigInt() {
-		backend := e.BigIntBackend()
+	// The files without libraries of their own: linked when the program
+	// or a linked file names a symbol one defines (runtime_resolve.go).
+	var pool []CSource
+	var libPool []libUnit
+	// The BigInt and crypto backends, each the one the options select.
+	if backend := e.BigIntBackend(); true {
 		src, ok := BigIntBackendSource(backend)
 		if !ok {
 			return nil, fmt.Errorf("bigint: unknown backend %q", backend)
 		}
-		cflags, libs := LocateBigInt(backend)
-		out = append(out, CSource{"bigint", src, cflags, libs, ""})
+		libPool = append(libPool, libUnit{src: CSource{"bigint", src, nil, nil, ""}, locate: func() ([]string, []string, error) {
+			cflags, libs := LocateBigInt(backend)
+			return cflags, libs, nil
+		}})
 	}
-	if e.UsesCrypto() {
-		backend := e.CryptoBackend()
+	if backend := e.CryptoBackend(); true {
 		src, ok := CryptoBackendSource(backend)
 		if !ok {
 			return nil, fmt.Errorf("crypto: unknown backend %q", backend)
 		}
-		cflags, libs := LocateCrypto(backend)
-		out = append(out, CSource{"crypto", src, cflags, libs, ""})
+		libPool = append(libPool, libUnit{src: CSource{"crypto", src, nil, nil, ""}, locate: func() ([]string, []string, error) {
+			cflags, libs := LocateCrypto(backend)
+			return cflags, libs, nil
+		}})
 	}
-	if e.UsesTLSHandles() {
+	libPool = append(libPool, libUnit{src: CSource{"tlshandle", TLSHandleSource(), nil, nil, ""}, locate: func() ([]string, []string, error) {
 		if b := e.CryptoBackend(); b == "commoncrypto" || b == "cng" {
-			return nil, fmt.Errorf("tls: the `tls` module requires the OpenSSL crypto backend")
+			return nil, nil, fmt.Errorf("tls: the `tls` module requires the OpenSSL crypto backend")
 		}
 		cflags, libs := LocateTLS()
-		out = append(out, CSource{"tlshandle", TLSHandleSource(), cflags, libs, ""})
-	}
-	if e.UsesH2Node() {
+		return cflags, libs, nil
+	}})
+	libPool = append(libPool, libUnit{src: CSource{"h2node", H2NodeSource(), nil, nil, ""}, locate: func() ([]string, []string, error) {
 		cflags, libs := LocateHTTP2()
-		out = append(out, CSource{"h2node", H2NodeSource(), cflags, libs, ""})
-	}
+		return cflags, libs, nil
+	}})
 	if e.UsesFFIDl() && e.opts.Target.OS() == "windows" {
 		// Windows has no libdl; supply dlopen/dlsym/dlclose/dlerror over
 		// LoadLibrary/GetProcAddress so node:ffi links (runtime_ffi.go).
@@ -112,12 +127,8 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		// tables (TDD-00229).
 		out = append(out, e.FFIRegistrySources()...)
 	}
-	if e.UsesIPC() {
-		out = append(out, CSource{"ipc", IPCSource(), nil, nil, ""})
-	}
-	if e.UsesBufferCodecs() {
-		out = append(out, CSource{"bufcodecs", BufferCodecsSource(), nil, nil, ""})
-	}
+	pool = append(pool, CSource{"ipc", IPCSource(), nil, nil, ""})
+	pool = append(pool, CSource{"bufcodecs", BufferCodecsSource(), nil, nil, ""})
 	if e.usesDynamicImport && (e.opts.DynamicImport == "isolated" || e.opts.DynamicImport == "lazy") {
 		// The dlopen loader (TDD-00056, TDD-00238 Stage 5). Linux resolves dlopen from
 		// libdl (-ldl); macOS ships it in libSystem, so no extra lib there.
@@ -130,223 +141,107 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		}
 		out = append(out, CSource{"dynimport", DynImportShimSource(), nil, libs, ""})
 	}
-	if e.UsesJSONParse() {
-		out = append(out, CSource{"jsontree", JSONParseTreeSource(), nil, nil, ""})
-	}
+	pool = append(pool, CSource{"jsontree", JSONParseTreeSource(), nil, nil, ""})
 	if e.UsesPathWin32() {
 		out = append(out, CSource{"pathwin32", PathWin32Source(), nil, nil, ""})
 	}
-	if e.UsesDynJSON() {
-		out = append(out, CSource{"dynjson", DynJSONSource(), append(e.dynJSONViewFlags(), fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord()), fmt.Sprintf("-DKML_ARGS_HDR_WORD=%dLL", e.argumentsHeaderWord())), nil, ""})
-	}
+	pool = append(pool, CSource{"dynjson", DynJSONSource(), []string{fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord()), fmt.Sprintf("-DKML_ARGS_HDR_WORD=%dLL", e.argumentsHeaderWord())}, nil, ""})
 	// Every runtime unit that switches fibers or unwinds keeps the shadow
 	// call stack's thread-locals (kml_heap.h), so it always links.
 	out = append(out, CSource{"frames", FramesSource(), nil, nil, ""})
-	if e.usedJmpStack {
-		out = append(out, CSource{"jmpstack", JmpStackSource(), nil, nil, ""})
-	}
-	if e.usedStackGuard {
-		out = append(out, CSource{"stackguard", StackGuardSource(), nil, nil, ""})
-	}
-	if e.UsesMicrotasks() {
-		out = append(out, CSource{"microtask", MicrotaskSource(), nil, nil, ""})
-	}
-	if e.usedPromiseRuntime {
-		out = append(out, CSource{"promise", PromiseSource(), nil, nil, ""})
-	}
-	if e.usedTaskRuntime {
-		out = append(out, CSource{"task", TaskSource(), nil, nil, ""})
-	}
-	if e.UsesCoreC() {
-		out = append(out, CSource{"core", CoreSource(), nil, LibmLibs(), ""})
-	}
-	if e.UsesJSONRuntime() {
-		out = append(out, CSource{"jsonrt", JSONRuntimeSource(), nil, nil, ""})
-	}
-	if e.UsesStrHeaderC() {
-		out = append(out, CSource{"strheader", StrHeaderSource(), nil, nil, ""})
-	}
-	if e.UsesStringsC() {
-		out = append(out, CSource{"strings", StringsCSource(), nil, nil, ""})
-	}
-	if e.UsesRegexpC() {
-		out = append(out, CSource{"regexp", RegexpCSource(), nil, nil, ""})
-	}
-	if e.UsesDynObj() {
-		out = append(out, CSource{"dynobj", DynObjSource(), nil, nil, ""})
-	}
-	if e.UsesDynArr() {
-		out = append(out, CSource{"dynarr", DynArrSource(), nil, nil, ""})
-	}
-	if e.UsesDynJSONNode() {
-		out = append(out, CSource{"dynjsonnode", DynJSONNodeSource(), nil, nil, ""})
-	}
-	if e.UsesDate() {
-		out = append(out, CSource{"date", DateSource(), nil, LibmLibs(), ""})
-	}
-	if e.UsesEncoding() {
-		out = append(out, CSource{"encoding", EncodingSource(), nil, nil, ""})
-	}
-	if e.UsesPathNormalize() {
-		out = append(out, CSource{"path", PathSource(), nil, nil, ""})
-	}
-	if e.UsesWeakHelpers() {
-		out = append(out, CSource{"weak", e.WeakSource(), nil, nil, ""})
-	}
-	if e.UsesFinRegHelpers() {
-		out = append(out, CSource{"finalization", e.FinalizationSource(), nil, nil, ""})
-	}
-	if e.UsesAtomicsRuntime() {
-		out = append(out, CSource{"atomics", AtomicsSource(), nil, nil, ""})
-	}
-	if e.UsesProcessRuntime() {
-		out = append(out, CSource{"process", ProcessSource(), e.ProcessCFlags(), nil, ""})
-	}
-	if e.UsesAsyncHooks() {
-		out = append(out, CSource{"asynchooks", AsyncHooksSource(), nil, nil, ""})
-	}
-	if e.UsesViews() {
-		out = append(out, CSource{"views", e.ViewsSource(), e.dynJSONViewFlags(), nil, ""})
-	}
-	if e.UsesCryptoRand() {
-		out = append(out, CSource{"cryptorand", CryptoRandSource(), e.CryptoRandCFlags(), nil, ""})
-	}
-	if e.UsesErrno() {
-		out = append(out, CSource{"errno", ErrnoSource(), nil, nil, ""})
-	}
-	if e.UsesFsError() {
-		out = append(out, CSource{"fserror", FsErrorSource(), nil, nil, ""})
-	}
-	if e.UsesFsWatch() {
-		out = append(out, CSource{"fswatch", FsWatchSource(), nil, nil, ""})
-	}
-	if e.UsesStreams() {
-		out = append(out, CSource{"streams", StreamsSource(), nil, nil, ""})
-	}
-	if e.UsesZlibStream() {
-		out = append(out, CSource{"zlibstream", ZlibStreamSource(), nil, nil, ""})
-	}
-	if e.UsesFetch() {
-		out = append(out, CSource{"fetch", FetchSource(), e.FetchCFlags(), nil, ""})
-	}
-	if e.UsesPromiseAdopt() {
-		out = append(out, CSource{"promise_adopt", PromiseAdoptSource(), nil, nil, ""})
-	}
-	if e.UsesFetchSlotToPromise() {
-		out = append(out, CSource{"fetchslot", FetchSlotSource(), nil, nil, ""})
-	}
-	if e.UsesExceptions() {
-		out = append(out, CSource{"exceptions", ExceptionsSource(), e.ExceptionsCFlags(), nil, ""})
-	}
-	if e.UsesWorkers() {
-		out = append(out, CSource{"worker", WorkerSource(), nil, nil, ""})
-	}
-	if e.UsesIPCChild() {
-		out = append(out, CSource{"ipcc", IPCChildSource(), nil, nil, ""})
-	}
-	if e.UsesTimers() {
-		// Timers are uv_timer_t handles (the loop links libuv).
-		cflags, _ := LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
-		out = append(out, CSource{"timers", TimersSource(), cflags, nil, ""})
-	}
-	if e.usedEventLoop {
-		cflags, libs := LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
-		out = append(out, CSource{"loop", LoopSource(), append(cflags, e.loopCFlags...), libs, ""})
-	}
-	if e.UsesNative() {
-		out = append(out, CSource{"native", NativeSource(), e.NativeCFlags(), nil, ""})
-	}
-	if e.UsesDynWhen() {
-		out = append(out, CSource{"dynwhen", DynWhenSource(), nil, nil, ""})
-	}
+	pool = append(pool, CSource{"jmpstack", JmpStackSource(), nil, nil, ""})
+	pool = append(pool, CSource{"stackguard", StackGuardSource(), nil, nil, ""})
+	pool = append(pool, CSource{"microtask", MicrotaskSource(), nil, nil, ""})
+	pool = append(pool, CSource{"promise", PromiseSource(), nil, nil, ""})
+	pool = append(pool, CSource{"task", TaskSource(), nil, nil, ""})
+	pool = append(pool, CSource{"core", CoreSource(), nil, LibmLibs(), ""})
+	pool = append(pool, CSource{"jsonrt", JSONRuntimeSource(), nil, nil, ""})
+	pool = append(pool, CSource{"strheader", StrHeaderSource(), nil, nil, ""})
+	pool = append(pool, CSource{"request", RequestSource(), nil, nil, ""})
+	pool = append(pool, CSource{"strings", StringsCSource(), nil, nil, ""})
+	pool = append(pool, CSource{"regexp", RegexpCSource(), nil, nil, ""})
+	pool = append(pool, CSource{"dynobj", DynObjSource(), nil, nil, ""})
+	pool = append(pool, CSource{"dynarr", DynArrSource(), nil, nil, ""})
+	pool = append(pool, CSource{"dynentries", DynEntriesSource(), nil, nil, ""})
+	pool = append(pool, CSource{"dynjsonnode", DynJSONNodeSource(), nil, nil, ""})
+	pool = append(pool, CSource{"date", DateSource(), nil, LibmLibs(), ""})
+	pool = append(pool, CSource{"encoding", EncodingSource(), nil, nil, ""})
+	pool = append(pool, CSource{"path", PathSource(), nil, nil, ""})
+	pool = append(pool, CSource{"weak", e.WeakSource(), nil, nil, ""})
+	pool = append(pool, CSource{"finalization", e.FinalizationSource(), nil, nil, ""})
+	pool = append(pool, CSource{"atomics", AtomicsSource(), nil, nil, ""})
+	pool = append(pool, CSource{"process", ProcessSource(), e.ProcessCFlags(), nil, ""})
+	pool = append(pool, CSource{"asynchooks", AsyncHooksSource(), nil, nil, ""})
+	pool = append(pool, CSource{"views", e.ViewsSource(), nil, nil, ""})
+	pool = append(pool, CSource{"cryptorand", CryptoRandSource(), e.CryptoRandCFlags(), nil, ""})
+	pool = append(pool, CSource{"errno", ErrnoSource(), nil, nil, ""})
+	pool = append(pool, CSource{"fserror", FsErrorSource(), nil, nil, ""})
+	pool = append(pool, CSource{"fswatch", FsWatchSource(), nil, nil, ""})
+	pool = append(pool, CSource{"streams", StreamsSource(), nil, nil, ""})
+	libPool = append(libPool, libUnit{src: CSource{"zlibstream", ZlibStreamSource(), nil, nil, ""}, links: []string{"z"}})
+	// libcurl: the link brings -lcurl.
+	libPool = append(libPool, libUnit{src: CSource{"fetch", FetchSource(), e.FetchCFlags(), nil, ""}, links: []string{"curl"}})
+	pool = append(pool, CSource{"promise_adopt", PromiseAdoptSource(), nil, nil, ""})
+	pool = append(pool, CSource{"fetchslot", FetchSlotSource(), nil, nil, ""})
+	pool = append(pool, CSource{"exceptions", ExceptionsSource(), e.ExceptionsCFlags(), nil, ""})
+	pool = append(pool, CSource{"worker", WorkerSource(), nil, nil, ""})
+	pool = append(pool, CSource{"ipcc", IPCChildSource(), nil, nil, ""})
+	// Timers are uv_timer_t handles and the loop is libuv's: both locate it.
+	uvTarget, uvCross := e.opts.Target.OS(), e.opts.Target.Triple != ""
+	libPool = append(libPool, libUnit{src: CSource{"timers", TimersSource(), nil, nil, ""}, locate: func() ([]string, []string, error) {
+		cflags, _ := LocateUV(uvTarget, uvCross)
+		return cflags, nil, nil
+	}})
+	libPool = append(libPool, libUnit{src: CSource{"loop", LoopSource(), e.loopCFlags, nil, ""}, locate: func() ([]string, []string, error) {
+		cflags, libs := LocateUV(uvTarget, uvCross)
+		return cflags, libs, nil
+	}})
+	pool = append(pool, CSource{"native", NativeSource(), e.NativeCFlags(), nil, ""})
+	pool = append(pool, CSource{"entrypath", entryPathSource, nil, nil, ""})
+	pool = append(pool, CSource{"dynwhen", DynWhenSource(), nil, nil, ""})
 	if e.usedIslandLoop {
+		// The host reaches an island's entry points through dlsym: nothing
+		// in the island names them.
 		out = append(out, CSource{"island", islandSource, nil, nil, ""})
 	}
-	if e.UsesDynImportWatch() {
-		out = append(out, CSource{"dynimportwatch", DynImportWatchSource(), nil, nil, ""})
-	}
-	if e.UsesPromiseSettle() {
-		out = append(out, CSource{"promise_settle", PromiseSettleSource(), nil, nil, ""})
-	}
-	if e.UsesPromiseDefer() {
-		out = append(out, CSource{"promise_defer", PromiseDeferSource(), nil, nil, ""})
-	}
-	if e.UsesPromiseFinally() {
-		out = append(out, CSource{"promise_finally", PromiseFinallySource(), nil, nil, ""})
-	}
-	if e.UsesAnyProm() {
-		out = append(out, CSource{"anyprom", AnyPromSource(), nil, nil, ""})
-	}
-	if e.UsesFetchDrive() {
-		out = append(out, CSource{"fetchdrive", FetchDriveSource(), nil, nil, ""})
-	}
-	if e.UsesFetchBodyProm() {
-		out = append(out, CSource{"fetchbodyprom", FetchBodyPromSource(), nil, nil, ""})
-	}
-	if e.UsesModuleTask() {
-		out = append(out, CSource{"module_task", ModuleTaskSource(), nil, nil, ""})
-	}
-	if e.UsesBigIntBoxC() {
-		out = append(out, CSource{"bigintbox", BigIntBoxSource(), nil, nil, ""})
-	}
-	if e.UsesBigIntRelC() {
-		out = append(out, CSource{"bigintrel", BigIntRelSource(), nil, nil, ""})
-	}
-	if e.UsesToPrimitiveC() {
-		out = append(out, CSource{"toprim", ToPrimitiveSource(), nil, nil, ""})
-	}
-	if e.UsesLooseEqC() {
-		out = append(out, CSource{"looseeq", LooseEqSource(), nil, nil, ""})
-	}
-	if e.UsesHostBoxC() {
-		out = append(out, CSource{"hostbox", HostBoxSource(), nil, nil, ""})
-	}
-	if e.UsesErrKeysC() {
-		out = append(out, CSource{"errkeys", ErrKeysSource(), nil, nil, ""})
-	}
-	if e.UsesArrayGuard() {
-		out = append(out, CSource{"arrayguard", ArrayGuardSource(), nil, nil, ""})
-	}
-	if e.UsesCollections() {
-		out = append(out, CSource{"collections", CollectionsSource(), nil, nil, ""})
-	}
-	if e.UsesCollectionsAny() {
-		out = append(out, CSource{"collections_any", CollectionsAnySource(), nil, nil, ""})
-	}
-	if e.UsesUnitReg() {
-		out = append(out, CSource{"unitreg", UnitRegSource(), nil, nil, ""})
-	}
-	if e.UsesShapes() {
-		out = append(out, CSource{"shape", ShapeSource(), e.ShapeCFlags(), nil, ""})
-	}
-	if e.UsesCasemap() {
-		// Unicode case mapping for toUpperCase/toLowerCase. Tables + code,
-		// libc only.
-		out = append(out, CSource{"casemap", CasemapSource(), nil, LibmLibs(), ""})
-	}
-	if e.UsesCollate() {
-		out = append(out, CSource{"collate", CollateSource(), nil, nil, ""})
-	}
-	if e.UsesStringC() {
-		out = append(out, CSource{"string", StringSource(), []string{fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord())}, LibmLibs(), ""})
-	}
-	if e.UsesNumberC() {
-		out = append(out, CSource{"number", NumberSource(), nil, LibmLibs(), ""})
-	}
-	if e.UsesFnMeta() {
-		out = append(out, CSource{"fnmeta", FnMetaSource(), e.FnMetaCFlags(), nil, ""})
-	}
-	if e.UsesInspectReduce() {
-		out = append(out, CSource{"inspect", InspectReduceSource(), nil, nil, ""})
-	}
-	if e.UsesOSInfo() {
-		// os.type/release/version/machine/uptime/loadavg/userInfo/
-		// availableParallelism/networkInterfaces + process.env enumeration.
-		out = append(out, CSource{"osinfo", OSInfoSource(), nil, e.OSInfoLibs(), ""})
-	}
-	if e.UsesFloatFmt() {
-		out = append(out, CSource{"dtoa", DtoaSource(), nil, nil, ""})
-	}
+	pool = append(pool, CSource{"dynimportwatch", DynImportWatchSource(), nil, nil, ""})
+	pool = append(pool, CSource{"promise_settle", PromiseSettleSource(), nil, nil, ""})
+	pool = append(pool, CSource{"promise_defer", PromiseDeferSource(), nil, nil, ""})
+	pool = append(pool, CSource{"promise_finally", PromiseFinallySource(), nil, nil, ""})
+	pool = append(pool, CSource{"anyprom", AnyPromSource(), nil, nil, ""})
+	pool = append(pool, CSource{"fetchdrive", FetchDriveSource(), nil, nil, ""})
+	pool = append(pool, CSource{"fetchbodyprom", FetchBodyPromSource(), nil, nil, ""})
+	pool = append(pool, CSource{"module_task", ModuleTaskSource(), nil, nil, ""})
+	pool = append(pool, CSource{"bigintbox", BigIntBoxSource(), nil, nil, ""})
+	pool = append(pool, CSource{"bigintrel", BigIntRelSource(), nil, nil, ""})
+	pool = append(pool, CSource{"toprim", ToPrimitiveSource(), nil, nil, ""})
+	pool = append(pool, CSource{"stricteq", StrictEqSource(), nil, nil, ""})
+	pool = append(pool, CSource{"looseeq", LooseEqSource(), nil, nil, ""})
+	pool = append(pool, CSource{"hostbox", HostBoxSource(), nil, nil, ""})
+	pool = append(pool, CSource{"dynconstruct", DynConstructSource(), nil, nil, ""})
+	pool = append(pool, CSource{"errkeys", ErrKeysSource(), nil, nil, ""})
+	pool = append(pool, CSource{"arrayguard", ArrayGuardSource(), nil, nil, ""})
+	pool = append(pool, CSource{"collections", CollectionsSource(), nil, nil, ""})
+	pool = append(pool, CSource{"collections_any", CollectionsAnySource(), nil, nil, ""})
+	pool = append(pool, CSource{"unitreg", UnitRegSource(), nil, nil, ""})
+	pool = append(pool, CSource{"shape", ShapeSource(), e.ShapeCFlags(), nil, ""})
+	// Linked only when the program names __kml_obj_extra_on: in place of
+	// hooks.c's defaults, which a library unit never replaces on its own.
+	libPool = append(libPool, libUnit{src: CSource{"objextra", ObjExtraSource(), nil, nil, ""}})
+	libPool = append(libPool, libUnit{src: CSource{"promisebox", PromiseBoxSource(), nil, nil, ""}})
+	// Unicode case mapping for toUpperCase/toLowerCase. Tables + code,
+	// libc only.
+	pool = append(pool, CSource{"casemap", CasemapSource(), nil, LibmLibs(), ""})
+	pool = append(pool, CSource{"collate", CollateSource(), nil, nil, ""})
+	pool = append(pool, CSource{"string", StringSource(), []string{fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord())}, LibmLibs(), ""})
+	pool = append(pool, CSource{"number", NumberSource(), nil, LibmLibs(), ""})
+	pool = append(pool, CSource{"fnmeta", FnMetaSource(), e.FnMetaCFlags(), nil, ""})
+	pool = append(pool, CSource{"inspect", InspectReduceSource(), nil, nil, ""})
+	// os.type/release/version/machine/uptime/loadavg/userInfo/
+	// availableParallelism/networkInterfaces + process.env enumeration.
+	libPool = append(libPool, libUnit{src: CSource{"osinfo", OSInfoSource(), nil, e.OSInfoLibs(), ""}})
+	pool = append(pool, CSource{"osinfobags", OSInfoBagsSource(), nil, nil, ""})
+	pool = append(pool, CSource{"dtoa", DtoaSource(), nil, nil, ""})
 	if e.UsesWebview() {
 		cflags, libs, err := e.LocateWebview(e.WebviewBackend())
 		if err != nil {
@@ -375,17 +270,13 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 		}
 		out = append(out, CSource{"wvnatives", webviewNatives, nil, nil, ""})
 	}
-	if e.UsesHeapStats() {
-		// process.memoryUsage() heapTotal/heapUsed. Under -mm=gc it reads the
-		// collector's heap through the GC interface. No extra libs —
-		// malloc.h/malloc/malloc.h live in libc.
-		out = append(out, CSource{"procmem", ProcMemSource(), nil, nil, ""})
-	}
-	if e.UsesTtyShim() {
-		// TDD-00031: termios/ioctl/raw-read shim. No extra libs — termios and
-		// ioctl live in libc on both platforms.
-		out = append(out, CSource{"tty", TTYShimSource(), nil, nil, ""})
-	}
+	// process.memoryUsage() heapTotal/heapUsed. Under -mm=gc it reads the
+	// collector's heap through the GC interface. No extra libs —
+	// malloc.h/malloc/malloc.h live in libc.
+	pool = append(pool, CSource{"procmem", ProcMemSource(), nil, nil, ""})
+	// TDD-00031: termios/ioctl/raw-read shim. No extra libs — termios and
+	// ioctl live in libc on both platforms.
+	pool = append(pool, CSource{"tty", TTYShimSource(), nil, nil, ""})
 	if e.UsesTui() {
 		// TDD-00150 Stage 1: the klain:tui painter runtime (tui.c) plus the
 		// vendored Yoga flexbox engine, which is pre-compiled to objects and
@@ -430,17 +321,28 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			}
 			out = append(out, CSource{"threadpool", ThreadPoolSource(), cflags, WorkerPthreadLinkFlags(), ""})
 		} else {
-			out = append(out, CSource{"threadpool", ThreadPoolSource(), e.ThreadPoolCFlags(), nil, ""})
+			var poolLibs []string
+			if e.usedWasmNatives {
+				_, poolLibs = LocateWasm()
+			}
+			out = append(out, CSource{"threadpool", ThreadPoolSource(), e.ThreadPoolCFlags(), poolLibs, ""})
 		}
 	}
-	if e.usedCaresNatives {
+	var caresLinks []string
+	if e.opts.Target.OS() == "windows" {
+		caresLinks = []string{"cares", "iphlpapi", "ws2_32"}
+	}
+	libPool = append(libPool, libUnit{src: CSource{"cares", CaresSource(), nil, nil, ""}, locate: func() ([]string, []string, error) {
 		cflags, libs := e.CaresFlags()
-		out = append(out, CSource{"cares", CaresSource(), cflags, libs, ""})
-	}
-	if e.usedH2ONatives {
+		return cflags, libs, nil
+	}, links: caresLinks})
+	libPool = append(libPool, libUnit{src: CSource{"h2o", H2OSource(), nil, nil, ""}, locate: func() ([]string, []string, error) {
+		if _, _, ok := LocateH2O(); !ok && e.opts.Target.Triple == "" {
+			return nil, nil, fmt.Errorf("h2o: libh2o is not installed")
+		}
 		cflags, libs := e.H2OFlags()
-		out = append(out, CSource{"h2o", H2OSource(), cflags, libs, ""})
-	}
+		return cflags, libs, nil
+	}})
 	if e.UsesEmbeddedAssets() {
 		// The embedded static server needs pthread; -pthread is already added
 		// by the CLI when workers are used, but a serve-only program needs it too.
@@ -450,24 +352,12 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 			out = append(out, CSource{"embedassets", EmbedAssetsSource(), []string{"-pthread"}, nil, ""})
 		}
 	}
-	if e.usedFdlibm {
-		out = append(out, CSource{"fdlibm", fdlibmSource, nil, LibmLibs(), ""})
-	}
-	if e.usedBufFill {
-		out = append(out, CSource{"buffill", bufFillSource, nil, LibmLibs(), ""})
-	}
-	if e.usedKeyOrder {
-		out = append(out, CSource{"keyorder", keyOrderSource, nil, nil, ""})
-	}
-	if e.usedPropAttr {
-		out = append(out, CSource{"propattr", propAttrSource, nil, nil, ""})
-	}
-	if e.usedHoles {
-		out = append(out, CSource{"holes", holesSource, nil, nil, ""})
-	}
-	if e.usedWrapper {
-		out = append(out, CSource{"wrapper", wrapperSource, nil, nil, ""})
-	}
+	pool = append(pool, CSource{"fdlibm", fdlibmSource, nil, LibmLibs(), ""})
+	pool = append(pool, CSource{"buffill", bufFillSource, nil, LibmLibs(), ""})
+	pool = append(pool, CSource{"keyorder", keyOrderSource, nil, nil, ""})
+	pool = append(pool, CSource{"propattr", propAttrSource, nil, nil, ""})
+	pool = append(pool, CSource{"holes", holesSource, nil, nil, ""})
+	pool = append(pool, CSource{"wrapper", wrapperSource, nil, nil, ""})
 	// Every member allocates program values through the managed-heap
 	// interface (TDD-00230 P3.3a), reads a header word's object state
 	// through the same constants, and sees -mm=gc as KML_GC.
@@ -478,7 +368,22 @@ func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	for i := range out {
 		out[i].Content = prelude + out[i].Content
 	}
-	return out, nil
+	for i := range pool {
+		pool[i].Content = prelude + pool[i].Content
+	}
+	for i := range libPool {
+		libPool[i].src.Content = prelude + libPool[i].src.Content
+	}
+	picked, libs, err := resolveRuntime(e.Toolchain(), e.finalIR, out, pool, libPool)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range libs {
+		for _, lib := range u.links {
+			e.requireLink(lib)
+		}
+	}
+	return append(out, picked...), nil
 }
 
 //go:embed kmlheapsrc/kml_heap.h

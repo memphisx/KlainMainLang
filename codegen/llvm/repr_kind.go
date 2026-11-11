@@ -29,13 +29,10 @@ const (
 	kindFlatArray
 	// kindObject: a statically shaped object; Fields is its layout.
 	kindObject
-	// kindTuple marks a tuple type `[T0, T1, ...]` (TDD-00066). Storage-wise it
-	// IS an IsObject struct with synthetic positional field names "0","1",...
-	// (so StructIR/StructSize/FieldIndex/GEP, object-literal construction,
-	// object param/return/field passing, spread, and structuredClone all apply
-	// unchanged). kindTuple only additionally: maps a constant index `t[i]` to
-	// field "i", lets an array-destructuring pattern bind positionally, and
-	// renders/serializes as an array literal rather than an object.
+	// kindTuple marks a tuple type `[T0, T1, ...]` (TDD-00066). It is an
+	// array (a pointer to its header, as in JavaScript), whose ElemType is
+	// the storage every element is held in (tupleStorage); Fields, named
+	// "0","1",..., are the elements' own types, which a read converts to.
 	kindTuple
 	// kindClass marks a user-defined `class` instance (TDD-00009 Stage 1):
 	// storage-wise it's an ordinary IsObject heap struct (ClassType always
@@ -76,7 +73,7 @@ const (
 	// kindUndefined is the undefined literal's type.
 	kindUndefined
 	// kindStrLiteral marks a string-literal type (`"circle"`): string-shaped at
-	// runtime (IR "ptr", isStringTy true), with the literal in LitValue. Used as
+	// runtime (IR irPtr, isStringTy true), with the literal in LitValue. Used as
 	// the discriminant of a discriminated union (TDD-00116); elsewhere it behaves
 	// exactly as string.
 	kindStrLiteral
@@ -85,7 +82,7 @@ const (
 // kindParent is the kind a derived kind also answers for.
 var kindParent = map[reprKind]reprKind{
 	kindUndefined:       kindNull,
-	kindTuple:           kindObject,
+	kindTuple:           kindArray,
 	kindClass:           kindObject,
 	kindPromiseResolver: kindFunc,
 }

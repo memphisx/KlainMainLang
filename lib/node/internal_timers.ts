@@ -33,6 +33,17 @@ let immediateCount = 0;
 let immediateRefCount = 0;
 
 let warnedNegativeNumber = false;
+
+// process.getActiveResourcesInfo, as Node's: the loop's active handles,
+// then one 'Timeout' per referenced Timeout and one 'Immediate' per
+// referenced Immediate.
+export function getActiveResourcesInfo(): string[] {
+    const h = __kml_native.activeHandlesInfo();
+    const out: string[] = h === '' ? [] : h.split(',');
+    for (let i = 0; i < refCount; i++) out.push('Timeout');
+    for (let i = 0; i < immediateRefCount; i++) out.push('Immediate');
+    return out;
+}
 let warnedNotNumber = false;
 
 // A node of the linked lists: a TimersList is a list's sentinel, a Timeout

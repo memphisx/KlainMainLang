@@ -12,9 +12,12 @@ package shadow
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -23,7 +26,7 @@ import (
 
 // Disagreement is one point where the two passes answered differently.
 type Disagreement struct {
-	// Decider is the old codegen function asked ("inferExprType").
+	// Decider is the old codegen function asked ("typeOfExpr").
 	Decider string `json:"decider"`
 	// Kind is the AST node kind the question was about ("CallExpression").
 	Kind string `json:"kind"`
@@ -50,6 +53,11 @@ type Disagreement struct {
 const (
 	EnvVar  = "KML_SHADOW"
 	EnvUnit = "KML_SHADOW_UNIT"
+	// EnvKeep names a directory: a run with no EnvUnit that records a
+	// disagreement copies its entry file there, named by its content hash,
+	// and labels its disagreements with that copy (the E2E suite compiles
+	// from temporary directories it deletes).
+	EnvKeep = "KML_SHADOW_KEEP"
 )
 
 // Enabled reports whether this process records disagreements.
@@ -62,6 +70,7 @@ type Recorder struct {
 	w    io.Writer
 	unit string
 	seen map[string]bool
+	keep func() string // the kept copy's path, made on first use
 }
 
 // NewRecorder records to w, labelling each disagreement with unit.
@@ -83,6 +92,40 @@ func FromEnv() (*Recorder, io.Closer, error) {
 	return NewRecorder(f, os.Getenv(EnvUnit)), f, nil
 }
 
+// KeepEntry makes the recorder, when its unit is unset and EnvKeep names a
+// directory, label its disagreements with a copy of entry kept there, or of
+// src, the program's text, for a compile with no entry file (a test's
+// in-process program).
+func (r *Recorder) KeepEntry(entry, src string) {
+	dir := os.Getenv(EnvKeep)
+	if r == nil || r.unit != "" || dir == "" || entry == "" && src == "" {
+		return
+	}
+	var once sync.Once
+	var kept string
+	r.keep = func() string {
+		once.Do(func() {
+			b := []byte(src)
+			if entry != "" {
+				var err error
+				if b, err = os.ReadFile(entry); err != nil {
+					if src == "" {
+						kept = entry
+						return
+					}
+					b = []byte(src) // the entry was removed after parsing (a test's temp dir)
+				}
+			} else {
+				entry = "program.ts"
+			}
+			sum := sha256.Sum256(b)
+			kept = filepath.Join(dir, hex.EncodeToString(sum[:8])+filepath.Ext(entry))
+			os.WriteFile(kept, b, 0o644)
+		})
+		return kept
+	}
+}
+
 // Record writes d unless a disagreement of the same decider at the same node
 // position was already written. A nil Recorder records nothing.
 func (r *Recorder) Record(d Disagreement) {
@@ -98,6 +141,9 @@ func (r *Recorder) Record(d Disagreement) {
 	r.seen[key] = true
 	if d.Unit == "" {
 		d.Unit = r.unit
+		if d.Unit == "" && r.keep != nil && d.Asked == 0 {
+			d.Unit = r.keep()
+		}
 	}
 	b, _ := json.Marshal(d)
 	r.w.Write(append(b, '\n'))

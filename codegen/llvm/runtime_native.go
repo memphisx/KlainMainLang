@@ -8,14 +8,6 @@ import _ "embed"
 // (threadpoolsrc/klainpool.c), which calls each one's callback on the loop
 // thread.
 
-// ensureNativePool links the pool for a native operation: its C entry points,
-// and the tick and promise-job drain it runs after each callback.
-func (e *Emitter) ensureNativePool() {
-	e.ensureThreadPool()
-	e.ensureMicrotasks()
-	e.ensureStrHeaderRuntime() // __kml_str_alloc/__kml_str_finalize for C string results
-}
-
 // ensureNativeErrno declares the errno lookups a builtin module builds Node's
 // system errors from: the code name ("ECONNREFUSED"), libuv's description,
 // and err.errno (libuv's negative number). Defined in nativesrc/native.c.
@@ -24,13 +16,7 @@ func (e *Emitter) ensureNativeErrno() {
 		return
 	}
 	e.fnDecls["__kml_native_errno_name"] = true
-	e.ensureErrnoCode()
-	e.ensureErrnoDesc()
-	e.ensureStrerror()
 	e.ensureStrHeaderRuntime()
-	e.emitGlobal(`declare ptr @__kml_native_errno_name(double)
-declare ptr @__kml_native_errno_desc(double)
-declare double @__kml_native_uv_errno(double)`)
 }
 
 // ensureNativeFsError declares __kml_native_fs_error(errno, syscall, path?,
@@ -43,7 +29,6 @@ func (e *Emitter) ensureNativeFsError() {
 	}
 	e.fnDecls["__kml_native_fs_error"] = true
 	e.ensureFsThrow()
-	e.emitGlobal("declare ptr @__kml_native_fs_error(double, ptr, i1 zeroext, ptr, i1 zeroext, ptr)")
 }
 
 //go:embed nativesrc/native.c
@@ -51,6 +36,9 @@ var nativeSource string
 
 // NativeSource is the native primitives' C source.
 func NativeSource() string { return nativeSource }
+
+//go:embed nativesrc/entrypath.c
+var entryPathSource string
 
 // UsesNative reports whether the program links native.c.
 func (e *Emitter) UsesNative() bool {
@@ -60,10 +48,3 @@ func (e *Emitter) UsesNative() bool {
 // NativeCFlags: native.c is compiled the same way for every program; the
 // link drops what a program does not use (DeadStripFlags).
 func (e *Emitter) NativeCFlags() []string { return DeadStripFlags(e.exportsRuntime()) }
-
-// ensureNativeTLS compiles in tlssrc/tlshandle.c (and links libssl) for the
-// TLS primitives over the pool's TCP handles.
-func (e *Emitter) ensureNativeTLS() {
-	e.ensureNativePool()
-	e.usedTLSHandles = true
-}

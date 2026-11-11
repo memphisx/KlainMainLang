@@ -23,7 +23,7 @@ export class EmbeddedAssets {
     // the binary's own copy; an empty buffer when there is no such file.
     get(path: string): ArrayBuffer {
         const addr = __kml_native.assetsGet(this.blob, path);
-        return __kml_native.ffiView(addr, __kml_native.assetsLength(), true) as ArrayBuffer;
+        return __kml_native.ffiView(addr, __kml_native.assetsLength(), 1) as ArrayBuffer;
     }
 }
 

@@ -30,7 +30,7 @@ func reduceAccWidenable(t Type) bool {
 		return false
 	}
 	w := undefinedableElem(t)
-	return isNullableScalar(w) || w.IR == "ptr"
+	return isNullableScalar(w) || w.IR == irPtr
 }
 
 func undefinedableElem(t Type) Type {
@@ -66,21 +66,21 @@ func undefinedableElem(t Type) Type {
 func (e *Emitter) emitFieldPresent(objRef string, objTy Type, field Field) (present string, val Value) {
 	idx, _, _ := objTy.FieldIndex(field.Name)
 	gepReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, objTy.StructIR(), objRef, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, objTy.StructIR(), objRef, idx))
 	if isSettlementType(objTy) && (field.Name == "value" || field.Name == "reason") {
 		// A Promise.allSettled record has `value` when fulfilled and
 		// `reason` when rejected (even an undefined one), never both.
 		_, val = e.emitFieldPresentAt(gepReg, field)
 		sIdx, _, _ := objTy.FieldIndex("status")
 		sGep, status := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sGep, objTy.StructIR(), objRef, sIdx))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", status, sGep))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", sGep, objTy.StructIR(), objRef, sIdx))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", status, sGep))
 		op := "eq"
 		if field.Name == "reason" {
 			op = "ne"
 		}
 		present = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp %s ptr %s, %s", present, op, status, e.internString("fulfilled")))
+		e.emitInstr(fmt.Sprintf("%s = icmp %s "+irPtr+" %s, %s", present, op, status, e.internString("fulfilled")))
 		return present, val
 	}
 	present, val = e.emitFieldPresentAt(gepReg, field)
@@ -96,6 +96,9 @@ func (e *Emitter) emitFieldPresent(objRef string, objTy Type, field Field) (pres
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", r, present, has))
 		present = r
+	} else if bit >= 0 && field.Optional {
+		// A slot that cannot hold the absent state: the bit alone tells.
+		present = e.emitPresenceBitTest(objRef, objTy, bit)
 	}
 	return present, val
 }
@@ -126,7 +129,7 @@ func (e *Emitter) emitPresenceAll(objRef string, objTy Type, skip map[string]boo
 // presenceWordGep addresses objTy's presence word in objRef.
 func (e *Emitter) presenceWordGep(objRef string, objTy Type) string {
 	g := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, objTy.StructIR(), objRef, objTy.presenceIndex()))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, objTy.StructIR(), objRef, objTy.presenceIndex()))
 	return g
 }
 
@@ -146,28 +149,28 @@ func (e *Emitter) emitPresenceBitTest(objRef string, objTy Type, bit int) string
 	if objTy.absentMask()>>uint(bit)&1 != 0 {
 		def = "true"
 	}
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", def, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", def, slot))
 	// Only an object whose header is exactly this layout's id has the word
 	// where this layout puts it.
 	hdrL, ownL, doneL := e.freshLabel("presence.hdr"), e.freshLabel("presence.read"), e.freshLabel("presence.read.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(objRef), doneL, hdrL))
 	e.emitLabel(hdrL)
 	h, own := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, objRef))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, objRef))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", own, e.headerIdentity(h), e.objHeaderWord(objTy)))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", own, ownL, doneL))
 	e.emitLabel(ownL)
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", e.presenceBitLoad(objRef, objTy, bit), slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.presenceBitLoad(objRef, objTy, bit), slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
 	return r
 }
 
 func (e *Emitter) presenceBitLoad(objRef string, objTy Type, bit int) string {
 	w, m, r := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, e.presenceWordGep(objRef, objTy)))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, e.presenceWordGep(objRef, objTy)))
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", m, w, uint64(1)<<uint(bit)))
 	op := "ne"
 	if objTy.absentMask()>>uint(bit)&1 != 0 {
@@ -190,14 +193,14 @@ func (e *Emitter) emitPresenceInit(objRef string, objTy Type, name string) {
 		// later write undoes a spread that left the key out.
 		g := e.presenceWordGep(objRef, objTy)
 		w, n := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, g))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, g))
 		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", n, w, int64(^(uint64(1) << uint(bit)))))
 		e.heapStore("i64", n, g, 8)
 		return
 	}
 	g := e.presenceWordGep(objRef, objTy)
 	w, n := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, g))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, g))
 	e.emitInstr(fmt.Sprintf("%s = or i64 %s, %d", n, w, uint64(1)<<uint(bit)))
 	e.heapStore("i64", n, g, 8)
 }
@@ -217,7 +220,7 @@ func (e *Emitter) emitSetPresence(objRef string, objTy Type, name string, on boo
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(objRef), doneL, hdrL))
 		e.emitLabel(hdrL)
 		h, own := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, objRef))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, objRef))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", own, e.headerIdentity(h), e.objHeaderWord(objTy)))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", own, ownL, doneL))
 		e.emitLabel(ownL)
@@ -238,7 +241,7 @@ func (e *Emitter) emitPresenceAbsentInit(objRef string, objTy Type, name string)
 	}
 	g := e.presenceWordGep(objRef, objTy)
 	w, n := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, g))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, g))
 	e.emitInstr(fmt.Sprintf("%s = or i64 %s, %d", n, w, uint64(1)<<uint(bit)))
 	e.heapStore("i64", n, g, 8)
 }
@@ -246,11 +249,10 @@ func (e *Emitter) emitPresenceAbsentInit(objRef string, objTy Type, name string)
 func (e *Emitter) emitPresenceWordUpdate(objRef string, objTy Type, bit int, on bool) {
 	g := e.presenceWordGep(objRef, objTy)
 	w, n := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, g))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, g))
 	req := objTy.absentMask()
 	inv := req>>uint(bit)&1 != 0 // the bit marks absence: setting the key clears it
 	if objTy.orderIndex() >= 0 {
-		e.ensureKeyOrder()
 		og := e.keyOrderGep(objRef, objTy)
 		if on {
 			// A key created now lists last (keyorder.c), unless it was
@@ -268,11 +270,11 @@ func (e *Emitter) emitPresenceWordUpdate(objRef string, objTy Type, bit int, on 
 			seq, _ := e.keyOrderSeq(objTy)
 			pw := e.freshReg() // the word as present keys
 			e.emitInstr(fmt.Sprintf("%s = xor i64 %s, %d", pw, w, int64(req)))
-			e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_add(ptr %s, i64 %s, i64 %d, ptr %s)", og, pw, bit, seq))
+			e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_add("+irPtr+" %s, i64 %s, i64 %d, "+irPtr+" %s)", og, pw, bit, seq))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(doneL)
 		} else {
-			e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_del(ptr %s, i64 %d)", og, bit))
+			e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_del("+irPtr+" %s, i64 %d)", og, bit))
 		}
 	}
 	if on != inv {
@@ -290,12 +292,19 @@ func (e *Emitter) emitFieldPresentAt(gepReg string, field Field) (present string
 		val = e.loadArrayFieldValue(gepReg, field.Ty) // header-pointer slot (TDD-00213 S2)
 	} else {
 		loadReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
 		val = Value{Ref: loadReg, Ty: field.Ty}
 	}
 	// An UncheckedIndex field (a spawnSync result's stdout, typed plain `T`
 	// by tsc) always has its key; only its value may be undefined.
 	// A field that is not optional always has its key, whatever its value.
+	if optionalAnyField(field) {
+		// An optional any field: present while it holds a value (its
+		// presence bit, when the layout has one, adds a held undefined).
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", present, val.Ref, nbUndefined))
+		return present, val
+	}
 	if !jsonFieldSkippable(field.Ty) || field.Ty.UncheckedIndex || !field.Optional {
 		return "true", val
 	}
@@ -316,17 +325,27 @@ func (e *Emitter) emitFieldPresentAt(gepReg string, field Field) (present string
 		dataPtr := e.freshReg()
 		dataPtr = e.arrayData(val)
 		present = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, dataPtr))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", present, dataPtr))
 	case field.Ty.IsDynamic():
 		// A box: present unless it holds undefined.
 		present = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", present, val.Ref, nbUndefined))
 	default:
 		present = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", present, val.Ref))
 	}
 	return present, val
 }
+
+// optionalAnyField reports an optional field holding any: absent while it
+// holds undefined and its presence bit (if any) is clear.
+func optionalAnyField(f Field) bool {
+	return f.Optional && !f.Ty.UncheckedIndex && isUnconstrainedDynamic(f.Ty) && f.Ty.IR == "i64"
+}
+
+// fieldMayBeAbsent reports a field whose key an object may lack: an
+// optional one (jsonFieldSkippable, or an optional any).
+func fieldMayBeAbsent(f Field) bool { return jsonFieldSkippable(f.Ty) || optionalAnyField(f) }
 
 // hasSkippableField reports whether any field can be absent at runtime.
 func hasSkippableField(fields []Field) bool {
@@ -470,7 +489,7 @@ func tsTypeName(t Type) string {
 		return "number"
 	case isStringTy(t):
 		return "string"
-	case t.IR == "ptr":
+	case t.IR == irPtr:
 		return "object"
 	}
 	return t.IR
@@ -484,7 +503,7 @@ func nullableScalarEqComparable(t Type) bool {
 		return true
 	}
 	return !t.IsDynamic() && !t.IsArray() && !t.IsTuple() && !t.IsBigInt() &&
-		t.IR != "ptr" && t.IR != "void" && t.IR != ""
+		t.IR != irPtr && t.IR != "void" && t.IR != ""
 }
 
 // emitNullableScalarValueEq emits ==/===/!=/!== where at least one operand is
@@ -534,7 +553,7 @@ func (e *Emitter) emitNullableScalarValueEq(op string, left, right Value) (Value
 // runtime check, exactly as in TS.
 func (e *Emitter) emitNonNull(ex *ast.NonNullExpression) (Value, error) {
 	var v Value
-	if sym, ok := e.nullableScalarLValue(ex.Arg); ok && !sym.NarrowedNonNull && nullableScalarEqComparable(sym.Ty) {
+	if sym, ok := e.nullableScalarLValue(ex.Arg); ok && nullableScalarEqComparable(sym.Ty) {
 		// A local reads as its payload; the assertion needs its presence.
 		v = e.loadNullableScalarAgg(sym.Ptr, sym.Ty)
 	} else {
@@ -587,7 +606,12 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 	// and an array of tuples (`[[1, "x"]] as [number, string][]`) holds its
 	// element literals as those tuples.
 	if lit, ok := ex.Expr.(*ast.ArrayLiteral); ok && ex.TypeAnnot != nil {
-		if target := e.resolveType(ex.TypeAnnot); target.IsArray() && !target.IsTuple() && target.ElemType != nil && (target.ElemType.IsDynamic() || target.ElemType.IsTuple() || len(lit.Elements) == 0) {
+		if target := e.annotationType(ex.TypeAnnot); target.IsArray() && !target.IsTuple() && target.ElemType != nil && (target.ElemType.IsDynamic() || target.ElemType.IsTuple() || len(lit.Elements) == 0) {
+			return e.emitExprWithObjectHint(lit, target)
+		}
+		// One asserted to a tuple type is that tuple (`[1, 2] as [number,
+		// number]`), as an annotation makes it.
+		if target := e.annotationType(ex.TypeAnnot); target.IsTuple() && !target.IsDynamic() && len(target.Fields) == len(lit.Elements) && !hasSpread(lit) {
 			return e.emitExprWithObjectHint(lit, target)
 		}
 	}
@@ -595,7 +619,7 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 	// all name (`{} as { xs?: number[] }`) is built as that type, the
 	// fields it leaves out absent.
 	if lit, ok := ex.Expr.(*ast.ObjectLiteral); ok && ex.TypeAnnot != nil {
-		if target := e.resolveType(ex.TypeAnnot); target.IsObject() && !target.IsDynamic() && !target.IsClass() && len(target.Fields) > 0 && literalKeysAreFields(lit, target) {
+		if target := e.annotationType(ex.TypeAnnot); target.IsObject() && !target.IsDynamic() && !target.IsClass() && len(target.Fields) > 0 && literalKeysAreFields(lit, target) {
 			return e.emitExprWithObjectHint(lit, target)
 		}
 	}
@@ -615,7 +639,7 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 		}
 		return e.convert(v, t), nil
 	}
-	toAny := ex.TypeAnnot != nil && isUnconstrainedDynamic(e.resolveType(ex.TypeAnnot))
+	toAny := ex.TypeAnnot != nil && isUnconstrainedDynamic(e.annotationType(ex.TypeAnnot))
 	var v Value
 	var err error
 	if toAny {
@@ -638,7 +662,7 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 		// An interface over the value's own native layout (`new
 		// TypeError(m) as CodedError`): the same value, with the
 		// interface's members.
-		if t := e.resolveType(ex.TypeAnnot); e.nativeIfaceMembers[t.RefName] != nil && t.IR == v.Ty.IR && t.StructIR() == v.Ty.StructIR() {
+		if t := e.annotationType(ex.TypeAnnot); e.nativeIfaceMembers[t.RefName] != nil && t.IR == v.Ty.IR && t.StructIR() == v.Ty.StructIR() {
 			t.setNullable(v.Ty.Nullable())
 			return Value{Ref: v.Ref, Ty: t}, nil
 		}
@@ -646,10 +670,10 @@ func (e *Emitter) emitAsExpression(ex *ast.AsExpression) (Value, error) {
 	if ex.TypeAnnot == nil || !v.Ty.IsDynamic() {
 		return v, nil
 	}
-	if e.keepsBoxedTypedArray(ex) {
+	if e.keepsBox(ex) {
 		return v, nil
 	}
-	target := e.resolveType(ex.TypeAnnot)
+	target := e.annotationType(ex.TypeAnnot)
 	if target.IsDynamic() {
 		if isUnconstrainedDynamic(target) {
 			return Value{Ref: v.Ref, Ty: target}, nil // a union as any: the same box
@@ -683,7 +707,7 @@ func dictMissReadsUndefined(v Type) bool {
 	if v.Nullable() || v.IsDynamic() || v.IsArray() || v.IsFunc() {
 		return false
 	}
-	return v.IR == "ptr" || (v.IR == "double" && v.Float)
+	return v.IR == irPtr || (v.IR == "double" && v.Float)
 }
 
 // nullAssertedType is the type a `null`/`undefined` literal asserted to a type
@@ -697,11 +721,11 @@ func (e *Emitter) nullAssertedType(ex *ast.AsExpression) (Type, bool) {
 	if !ok {
 		// A value asserted to its own type widened with null or undefined
 		// (`[1] as number[] | undefined`) is typed as the widened one.
-		t := e.resolveType(ex.TypeAnnot)
+		t := e.annotationType(ex.TypeAnnot)
 		if !t.Nullable() || t.IsDynamic() {
 			return Type{}, false
 		}
-		inner := e.inferExprType(ex.Expr)
+		inner := e.typeOfExpr(ex.Expr)
 		strip := func(t Type) Type {
 			t.setNullable(false)
 			t.setUndefined(false)
@@ -715,13 +739,13 @@ func (e *Emitter) nullAssertedType(ex *ast.AsExpression) (Type, bool) {
 		}
 		return t, true
 	}
-	t := e.resolveType(ex.TypeAnnot)
+	t := e.annotationType(ex.TypeAnnot)
 	switch {
 	case t.IsDynamic():
 		return t, true // a union or any: the boxed null/undefined
 	case isNullableScalar(t) && (t.IsUndefined() == nl.IsUndefined || !t.IsUndefined() && !nl.IsUndefined):
 		return t, true
-	case t.Nullable() && t.IR == "ptr":
+	case t.Nullable() && t.IR == irPtr:
 		return t, true
 	}
 	return Type{}, false
@@ -732,9 +756,10 @@ func (e *Emitter) nullAssertedType(ex *ast.AsExpression) (Type, bool) {
 // is nullRef), or a number or boolean in its { i1, T } slot (null is the
 // absent slot with the triMarker payload).
 func threeStateEligible(t Type) bool {
-	if t.IR == "ptr" {
-		return !t.IsArray() && !t.IsDynamic() && !t.IsFunc() && !t.IsNull() && !t.IsTuple() &&
-			(isStringTy(t) || t.IsObject() || t.IsClass() || t.IsMap() || t.IsSet())
+	if t.IR == irPtr {
+		return !t.IsDynamic() && !t.IsNull() && !(t.IsTuple() && t.TupleByVal) &&
+			(isStringTy(t) || t.IsObject() || t.IsClass() || t.IsMap() || t.IsSet() || t.IsFunc() || t.IsBigInt() || t.IsDate() || t.IsTuple() ||
+				t.IsArray() && !t.IsFlatArray())
 	}
 	return triScalar(t)
 }
@@ -790,16 +815,16 @@ func (e *Emitter) nullRef() string {
 		e.usedNullRef = true
 		// One cell for the whole binary, the library's units and the C
 		// runtime included (collections.c tells a null key from "").
-		e.emitGlobal("@__kml_nullref_cell = weak_odr global { i64, [248 x i8] } zeroinitializer, align 8")
+		e.emitGlobal("@__kml_nullref_cell = weak_odr" + irGlobalAS + " global { i64, [248 x i8] } zeroinitializer, align 8")
 	}
-	return "getelementptr inbounds ({ i64, [248 x i8] }, ptr @__kml_nullref_cell, i32 0, i32 1)"
+	return "getelementptr inbounds ({ i64, [248 x i8] }, " + irPtr + " @__kml_nullref_cell, i32 0, i32 1)"
 }
 
 // toThreeState converts a value into a three-state target: a null that
 // meant null becomes nullRef (or the scalar marker), and the null pointer or
 // absent slot stays undefined.
 func (e *Emitter) toThreeState(v Value, target Type) Value {
-	if target.IR != "ptr" {
+	if target.IR != irPtr {
 		return e.toThreeStateScalar(v, target)
 	}
 	switch {
@@ -809,7 +834,7 @@ func (e *Emitter) toThreeState(v Value, target Type) Value {
 		return Value{Ref: "null", Ty: target}
 	case v.Ty.Nullable() && !v.Ty.IsUndefined():
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.ptrIsNull(v.Ref), e.nullRef(), v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, e.ptrIsNull(v.Ref), e.nullRef(), v.Ref))
 		return Value{Ref: r, Ty: target}
 	}
 	return Value{Ref: v.Ref, Ty: target}
@@ -817,6 +842,9 @@ func (e *Emitter) toThreeState(v Value, target Type) Value {
 
 // toThreeStateScalar is toThreeState for a number or boolean target.
 func (e *Emitter) toThreeStateScalar(v Value, target Type) Value {
+	if v.Ty.IsDynamic() {
+		return e.convert(v, target) // the box's tag says which absence it holds
+	}
 	agg := nullableScalarStorageIR(target)
 	plainTarget := target
 	plainTarget.setNullAndUndef(false)
@@ -846,11 +874,14 @@ func (e *Emitter) toThreeStateScalar(v Value, target Type) Value {
 func (e *Emitter) fromThreeState(v Value) Value {
 	t := v.Ty
 	t.setNullAndUndef(false)
-	if v.Ty.IR != "ptr" {
+	if v.Ty.IR != irPtr {
 		return Value{Ref: v.Ref, Ty: t}
 	}
+	// What is left absent is the null pointer, undefined's.
+	t.setNullable(true)
+	t.setUndefined(true)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, e.isNullRef(v.Ref), v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", r, e.isNullRef(v.Ref), v.Ref))
 	if e.notNullRef == nil {
 		e.notNullRef = map[string]bool{}
 	}
@@ -861,7 +892,7 @@ func (e *Emitter) fromThreeState(v Value) Value {
 // isTriNull tests a three-state value for null: a pointer against nullRef,
 // a scalar slot for absence with the marker payload.
 func (e *Emitter) isTriNull(v Value) string {
-	if v.Ty.IR == "ptr" {
+	if v.Ty.IR == irPtr {
 		return e.isNullRef(v.Ref)
 	}
 	present, payload := e.nullableScalarAggParts(v)
@@ -887,7 +918,7 @@ func (e *Emitter) triPayloadIsMarker(payload string, t Type) string {
 // isNullRef tests a three-state pointer for null.
 func (e *Emitter) isNullRef(ref string) string {
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", r, ref, e.nullRef()))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", r, ref, e.nullRef()))
 	return r
 }
 
@@ -909,7 +940,7 @@ func (e *Emitter) isAbsentPtr(ref string, t Type) string {
 // renderer that returns an owned string keeps ownership.
 func (e *Emitter) renderThreeState(v Value, render func(Value) (Value, error)) (Value, error) {
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	isNull := e.isTriNull(v)
 	nullL, plainL, doneL := e.freshLabel("tri.null"), e.freshLabel("tri.plain"), e.freshLabel("tri.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, plainL))
@@ -918,18 +949,18 @@ func (e *Emitter) renderThreeState(v Value, render func(Value) (Value, error)) (
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nv.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nv.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(plainL)
 	pv, err := render(e.fromThreeState(v))
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", pv.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", pv.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return Value{Ref: r, Ty: pv.Ty}, nil
 }
 
@@ -940,6 +971,27 @@ func (e *Emitter) renderThreeState(v Value, render func(Value) (Value, error)) (
 // types[i]); the body sees a binding of T, declared over it in a scope the
 // body runs in. A parameter whose own type admits null keeps an explicit null.
 func (e *Emitter) emitParamDefaultPrologue(params []ast.Param, types []Type, body *ast.BlockStatement, pos ast.Pos) error {
+	// A parameter's eval declares its vars before the defaults run: they
+	// are bound first, and the body's statements no longer declare them.
+	if body != nil {
+		for _, st := range body.Body {
+			if v, ok := st.(*ast.VarDeclaration); ok && v.ParamScope && !e.paramScopeDone[v] {
+				// The eval's own closure captures it: boxed here, where the
+				// box dominates every later use.
+				if e.hoistedCaptures == nil {
+					e.hoistedCaptures = map[string]bool{}
+				}
+				e.hoistedCaptures[v.Name] = true
+				if err := e.emitStmt(v); err != nil {
+					return err
+				}
+				if e.paramScopeDone == nil {
+					e.paramScopeDone = map[*ast.VarDeclaration]bool{}
+				}
+				e.paramScopeDone[v] = true
+			}
+		}
+	}
 	scoped := false
 	bodyNames := bodyDeclaredNames(body)
 	for i, p := range params {
@@ -959,7 +1011,7 @@ func (e *Emitter) emitParamDefaultPrologue(params []ast.Param, types []Type, bod
 		argName := "__kml_parg_" + p.Name
 		e.define(argName, sym)
 		arg := ast.NewIdentifier(argName, pos)
-		if e.inferExprType(p.Default).IR == "void" {
+		if e.typeOfExpr(p.Default).IR == "void" {
 			// A default with no value (`a = f()`, f returning void) runs for
 			// its effects; the parameter is then undefined.
 			run := ast.NewBlockStatement([]ast.Statement{ast.NewExpressionStatement(p.Default, pos)}, pos)
@@ -976,6 +1028,31 @@ func (e *Emitter) emitParamDefaultPrologue(params []ast.Param, types []Type, bod
 		if types[i].NullAndUndef() || types[i].IsDynamic() {
 			isUndef := ast.NewBinaryExpression("===", arg, ast.NewNullLiteral(true, pos), pos)
 			init = ast.NewConditionalExpression(isUndef, p.Default, arg, pos)
+		} else if bt := e.bodyParamType(p, types[i]); hasObjHeader(bt) && !bt.IsClass() && bt.IR == irPtr && types[i].IR == irPtr {
+			// Into an object type (a class value as `{ x: … }`): the
+			// argument, else the default converted to the parameter's own
+			// layout.
+			slot := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+			av, err := e.emitExpr(arg)
+			if err != nil {
+				return err
+			}
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", av.Ref, slot))
+			fillL, contL := e.freshLabel("pdflt.fill"), e.freshLabel("pdflt.cont")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(av.Ref), fillL, contL))
+			e.emitLabel(fillL)
+			dv, err := e.emitExprWithObjectHint(p.Default, bt)
+			if err != nil {
+				return err
+			}
+			dv = e.convert(dv, bt)
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", dv.Ref, slot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
+			e.emitLabel(contL)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
+			init = e.bindValue(Value{Ref: r, Ty: bt}, pos)
 		}
 		// The parameter itself and the later ones its default reads are in
 		// their dead zone while it runs. A name only the body declares is
@@ -1023,7 +1100,9 @@ func bodyDeclaredNames(body *ast.BlockStatement) map[string]bool {
 			names[x.Name] = true
 			return false
 		case *ast.VarDeclaration:
-			names[x.Name] = true
+			if !x.ParamScope {
+				names[x.Name] = true
+			}
 		}
 		return true
 	})
@@ -1088,16 +1167,21 @@ func laterParamRefs(params []ast.Param, i int) []string {
 	return out
 }
 
-// keepsBoxedTypedArray is whether `x as unknown as T` keeps the box: x a
-// typed array of another kind than T's (a Uint16Array asserted Uint8Array
-// stays a Uint16Array, as in JavaScript).
-func (e *Emitter) keepsBoxedTypedArray(ex *ast.AsExpression) bool {
-	t := e.resolveType(ex.TypeAnnot)
+// keepsBox is whether an assertion of a boxed value keeps the box, as
+// the erased assertion leaves the value itself: an array asserted from
+// `any` (`(x as string[]).push(v)` mutates x's own array, which a typed
+// copy would not), or `x as unknown as T` of a typed array of another kind
+// than T's (a Uint16Array asserted Uint8Array stays a Uint16Array).
+func (e *Emitter) keepsBox(ex *ast.AsExpression) bool {
+	t := e.annotationType(ex.TypeAnnot)
+	if t.IsArray() && !t.IsTuple() && !t.IsTypedArray() && !t.IsBuffer() && !t.Nullable() && isUnconstrainedDynamic(e.typeOfExpr(ex.Expr)) {
+		return true
+	}
 	in, ok := ex.Expr.(*ast.AsExpression)
 	if !ok || !t.IsTypedArray() || t.IsBuffer() || t.Nullable() {
 		return false
 	}
-	src := e.inferExprType(in.Expr)
+	src := e.typeOfExpr(in.Expr)
 	return src.IsTypedArray() && !src.IsBuffer() && (src.ElemType == nil || t.ElemType == nil || src.ElemType.IR != t.ElemType.IR ||
 		src.ElemType.Float != t.ElemType.Float || src.ElemType.Signed != t.ElemType.Signed)
 }

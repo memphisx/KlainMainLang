@@ -797,3 +797,36 @@ console.log(M.n);
 `,
 	}, "main.ts", "1 1 [Module: null prototype] { inc: [Function: inc], n: 1 }\n{ value: 1, writable: true, enumerable: true, configurable: false } [ 'inc', 'n' ]\nTypeError\n1")
 }
+
+// A module namespace held as a value is its exports' values only (a
+// re-exported type is not one); in JavaScript, a member the module does
+// not export reads as undefined, and its call is a TypeError naming it.
+func TestE2EModuleNamespaceValues(t *testing.T) {
+	assertSameAsNodeImports(t, `import * as fs from 'fs';
+import * as http from 'http';
+const o: any = fs;
+const h: any = http;
+console.log(typeof o.readFileSync, typeof o.nope, typeof h.createServer, typeof h.STATUS_CODES);`)
+	assertSameAsNodeCompatJS(t, `import * as fs from 'fs';
+import http from 'http';
+console.log(fs.nope);
+try { http.listen(0); } catch (e) { console.log(e.constructor.name, e.message); }`)
+}
+
+func TestE2EImportSideEffectOnly(t *testing.T) {
+	// `import "./x"` runs the module once, before the importer's body,
+	// binding nothing; a builtin module may be named so too.
+	assertMultiFileOutput(t, map[string]string{
+		"setup.ts": `
+export const ready = true
+console.log("setup")
+`,
+		"main.ts": `
+import "node:fs"
+import './setup'
+import "./setup";
+import { ready } from './setup'
+console.log("main", ready)
+`,
+	}, "main.ts", "setup\nmain true")
+}

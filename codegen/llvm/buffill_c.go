@@ -8,16 +8,3 @@ import _ "embed"
 
 //go:embed buffillsrc/buffill.c
 var bufFillSource string
-
-// ensureBufFill declares __kml_buf_fill_any once and links buffill.c with
-// what it calls: dynjson.c (inspection, a view's bytes, ToNumber) and the
-// Buffer codecs.
-func (e *Emitter) ensureBufFill() {
-	if e.usedBufFill {
-		return
-	}
-	e.usedBufFill = true
-	e.ensureDynJSONC()
-	e.ensureBufferCodecs()
-	e.emitGlobal(`declare i64 @__kml_buf_fill_any(ptr, i64, i64, ptr, ptr)`)
-}

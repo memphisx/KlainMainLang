@@ -51,8 +51,27 @@ func (c *Checker) deferredType(n ast.TypeNode, scope *binder.Scope) *Type {
 		b.WriteString(strconv.Itoa(k.ID) + ">" + strconv.Itoa(subst[k].ID) + ";")
 	}
 	return c.in.intern(b.String(), func() *Type {
-		return &Type{Flags: Deferred, deferNode: n, deferScope: scope, deferEnv: env, deferSubst: subst}
+		return &Type{Flags: Deferred, deferNode: n, deferScope: scope, deferEnv: env, deferSubst: subst, deferParams: c.scopeTypeParams(n, scope, env)}
 	})
+}
+
+// scopeTypeParams are the type parameters the bare type references in n
+// resolve to through scope, the names env binds aside.
+func (c *Checker) scopeTypeParams(n ast.TypeNode, scope *binder.Scope, env map[string]*Type) []*Type {
+	var out []*Type
+	seen := map[string]bool{}
+	ast.Inspect(n, func(x ast.Node) bool {
+		r, ok := x.(*ast.TypeReference)
+		if !ok || len(r.Qualifier) > 0 || len(r.TypeArgs) > 0 || seen[r.Name] || env[r.Name] != nil {
+			return true
+		}
+		seen[r.Name] = true
+		if t := c.typeFromNode(r, scope); !c.Unanswered(t) && t.Flags&TypeParam != 0 && !c.inferPlaceholders[t] {
+			out = append(out, t)
+		}
+		return true
+	})
+	return out
 }
 
 // instantiateDeferred evaluates a deferred type with m's types bound.
@@ -158,8 +177,8 @@ func (c *Checker) keyofType(t *Type) *Type {
 
 // indexedAccess is `o[k]`.
 func (c *Checker) indexedAccess(o, k *Type) *Type {
-	if o.Flags&Any != 0 {
-		return c.anyT
+	if o.Flags&Any != 0 || k.Flags&Any != 0 {
+		return c.anyT // (an any index: tsc's error type)
 	}
 	var rs []*Type
 	for _, om := range members(o) {
@@ -175,6 +194,21 @@ func (c *Checker) indexedAccess(o, k *Type) *Type {
 }
 
 func (c *Checker) indexOne(o, k *Type) *Type {
+	if o == c.globalThisT && k.Flags&StringLiteral != 0 {
+		// `(typeof globalThis)["isNaN"]`: the global of that name.
+		if k.Value == "globalThis" {
+			return c.globalThisT
+		}
+		if c.b.Globals != nil {
+			if sym := c.b.Globals.Symbols.Get(k.Value); sym != nil && sym.Flags&binder.Value != 0 {
+				return c.typeOfSymbol(sym)
+			}
+		}
+		if t := c.builtinValueType(k.Value); t != nil {
+			return t
+		}
+		return c.unanswered
+	}
 	if o.Flags&Object == 0 {
 		at := c.apparentType(o)
 		if at == nil {
@@ -260,6 +294,23 @@ func (c *Checker) withoutOptional(t *Type) *Type {
 	return c.in.union(ms...)
 }
 
+// identityMapped reports a homomorphic mapping whose value is the source's
+// own member, `{ [P in keyof T]: T[P] }` (Readonly, Partial, Required).
+func identityMapped(n *ast.MappedType) bool {
+	op, ok := n.Constraint.(*ast.TypeOperator)
+	ia, ok2 := n.Type.(*ast.IndexedAccessType)
+	if !ok || !ok2 {
+		return false
+	}
+	k, ok := ia.IndexType.(*ast.TypeReference)
+	if !ok || len(k.Qualifier) > 0 || k.Name != n.KeyName {
+		return false
+	}
+	a, ok := ia.ObjectType.(*ast.TypeReference)
+	b, ok2 := op.Type.(*ast.TypeReference)
+	return ok && ok2 && len(a.Qualifier) == 0 && len(b.Qualifier) == 0 && a.Name == b.Name && len(a.TypeArgs) == 0 && len(b.TypeArgs) == 0
+}
+
 // mappedType is `{ [P in K]: X }`. Over `keyof T` it is homomorphic: an
 // array or tuple T maps its elements, an object T keeps each property's
 // modifiers unless the mapping adds or removes them.
@@ -285,6 +336,31 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 			return src
 		case c.generic(src):
 			return c.deferredType(n, scope)
+		}
+		// Over a type variable (`{ [K in keyof T]: … }` with T bound), as
+		// tsc's instantiateMappedType: a union maps member by member, and
+		// what is not an object (a primitive, null, undefined) is itself.
+		if ref, isRef := op.Type.(*ast.TypeReference); isRef && len(ref.TypeArgs) == 0 && len(ref.Qualifier) == 0 {
+			if bind := c.typeParamBinder(ref.Name, scope); bind != nil {
+				switch {
+				case src.Flags&Union != 0:
+					var rs []*Type
+					for _, m := range src.Types {
+						pop := bind(m)
+						r := c.mappedType(n, scope)
+						pop()
+						if c.Unanswered(r) {
+							return r
+						}
+						rs = append(rs, r)
+					}
+					return c.in.union(rs...)
+				case src.Flags&(Object|Any|Unknown|NonPrimitive) == 0:
+					return src
+				}
+			}
+		}
+		switch {
 		case src.Flags&Object != 0 && src.Kind == Array:
 			e := value(c.numT)
 			if c.Unanswered(e) {
@@ -305,6 +381,11 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 			var props []*Property
 			for _, p := range src.Props {
 				vt := value(c.in.literal(StringLiteral, p.Name))
+				if c.Unanswered(vt) && identityMapped(n) {
+					// `T[P]` of a member indexed access does not model
+					// (an overloaded method): the member's own type.
+					vt = p.Type
+				}
 				if c.Unanswered(vt) {
 					return vt
 				}
@@ -326,7 +407,11 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 					return num
 				}
 			}
-			return c.in.indexedOn(c.in.objectOf(props, src.partial, false), str, num)
+			res := c.in.indexedOn(c.in.objectOf(props, src.partial, false, nil), str, num)
+			if identityMapped(n) && (src.Kind == Instance || src.Kind == Interface && src.Symbol != nil && c.inLibrary(src.Symbol.Scope)) {
+				c.mappedFrom[res] = src
+			}
+			return res
 		}
 	}
 	keys := c.typeFromNode(n.Constraint, scope)
@@ -338,6 +423,18 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 	}
 	var props []*Property
 	var str, num *Type
+	if keys.Flags&Any != 0 {
+		// Keys of any: every string, number and symbol key (tsc's
+		// `{ [x: string]: V; [x: number]: V; [x: symbol]: V }`), the
+		// template at each, any where it reads no member.
+		at := func(k *Type) *Type {
+			if v := value(k); !c.Unanswered(v) {
+				return v
+			}
+			return c.anyT
+		}
+		return c.in.indexedOn(c.in.object(nil), at(c.strT), at(c.numT))
+	}
 	for _, k := range members(keys) {
 		vt := value(k)
 		if c.Unanswered(vt) {
@@ -346,7 +443,17 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 		switch {
 		case k.Flags&(StringLiteral|NumberLiteral) != 0:
 			vt, opt := optional(vt, false)
-			props = append(props, &Property{Name: k.Value, Type: vt, Optional: opt, Readonly: n.ReadonlyMod > 0})
+			merged := false
+			for _, p := range props {
+				if p.Name == k.Value {
+					// Two keys of one name (members of different enums of
+					// one value): the property is either's value.
+					p.Type, merged = c.in.union(p.Type, vt), true
+				}
+			}
+			if !merged {
+				props = append(props, &Property{Name: k.Value, Type: vt, Optional: opt, Readonly: n.ReadonlyMod > 0})
+			}
 		case k.Flags&String != 0:
 			str = vt
 		case k.Flags&NumberLike != 0:
@@ -410,7 +517,9 @@ func (c *Checker) typeParamBinder(name string, scope *binder.Scope) func(*Type) 
 func (c *Checker) conditionalOnce(n *ast.ConditionalType, scope *binder.Scope, check *Type) *Type {
 	// A generic signature's own type parameters (`typeof setTimeout`'s
 	// `<TArgs>`) are bound by it, not free: the check is decided.
-	if c.generic(check) && hasFreeTypeParam(check, map[*Type]bool{}, nil) {
+	if c.generic(check) && hasFreeTypeParam(check, map[*Type]bool{}, nil) || check == c.thisT {
+		// (The polymorphic `this` is decided per receiver, as withThis
+		// instantiates it.)
 		return c.deferredType(n, scope)
 	}
 	var names []string
@@ -453,7 +562,7 @@ func (c *Checker) conditionalOnce(n *ast.ConditionalType, scope *binder.Scope, c
 		}
 	}
 	inst := c.instantiate(ext, m)
-	if c.generic(inst) {
+	if c.generic(inst) && hasFreeTypeParam(inst, map[*Type]bool{}, nil) {
 		return c.deferredType(n, scope)
 	}
 	branch := n.FalseType
@@ -534,14 +643,16 @@ func collectInfers(n ast.TypeNode, f func(*ast.InferType)) {
 		collectInfers(n.ObjectType, f)
 		collectInfers(n.IndexType, f)
 	case *ast.FunctionType:
-		for _, p := range n.Parameters {
-			if p.Type != nil {
-				collectInfers(p.Type, f)
-			}
+		if n.This != nil {
+			collectInfers(n.This, f)
 		}
-		if n.Type != nil {
-			collectInfers(n.Type, f)
-		}
+		collectSignatureInfers(n.Parameters, n.Type, f)
+	case *ast.ConstructorType:
+		collectSignatureInfers(n.Parameters, n.Type, f)
+	case *ast.MappedType:
+		// `{ [_ in keyof T]: infer U }`
+		collectInfers(n.Constraint, f)
+		collectInfers(n.Type, f)
 	case *ast.TypeLiteral:
 		for _, m := range n.Members {
 			switch m := m.(type) {
@@ -550,16 +661,28 @@ func collectInfers(n ast.TypeNode, f func(*ast.InferType)) {
 					collectInfers(m.Type, f)
 				}
 			case *ast.MethodSignature:
-				for _, p := range m.Parameters {
-					if p.Type != nil {
-						collectInfers(p.Type, f)
-					}
-				}
-				if m.Type != nil {
-					collectInfers(m.Type, f)
-				}
+				collectSignatureInfers(m.Parameters, m.Type, f)
+			case *ast.CallSignature:
+				collectSignatureInfers(m.Parameters, m.Type, f)
+			case *ast.ConstructSignature:
+				collectSignatureInfers(m.Parameters, m.Type, f)
+			case *ast.IndexSignature:
+				collectInfers(m.Type, f)
 			}
 		}
+	}
+}
+
+// collectSignatureInfers is collectInfers over a signature's parameter and
+// return types.
+func collectSignatureInfers(params []*ast.SignatureParameter, result ast.TypeNode, f func(*ast.InferType)) {
+	for _, p := range params {
+		if p.Type != nil {
+			collectInfers(p.Type, f)
+		}
+	}
+	if result != nil {
+		collectInfers(result, f)
 	}
 }
 

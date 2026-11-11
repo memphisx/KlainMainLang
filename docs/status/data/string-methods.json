@@ -157,14 +157,17 @@
             ]
           },
           {
-            "feature": "`.trimStart()` / `.trimEnd()`",
+            "feature": "`.trimStart()` / `.trimEnd()` (and `.trimLeft()` / `.trimRight()`)",
             "status": "implemented",
             "notes": [
-              "Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/00/ADR-00295.md))"
+              "Same full-whitespace-set handling as `.trim()` ([ADR-00295](../adr/00/ADR-00295.md))",
+              "`trimLeft`/`trimRight` are the same function objects as `trimStart`/`trimEnd`, as in JS"
             ],
             "decl": [
               "String.trimStart",
-              "String.trimEnd"
+              "String.trimEnd",
+              "String.trimLeft",
+              "String.trimRight"
             ]
           },
           {

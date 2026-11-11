@@ -21,7 +21,6 @@ import "strconv"
 // of main() runs the full loop.
 func (e *Emitter) noteLoopTurn() {
 	e.usedLoopTurn = true
-	e.usedAwaitTimerDrive = true // @__kml_fetch_pump resolves
 }
 
 // ensureLoopTurn declares the loop globals and the shared warning text.
@@ -31,11 +30,6 @@ func (e *Emitter) ensureLoopTurn() {
 		return
 	}
 	e.usedLoopTurnDefs = true
-	e.ensureExit()
-	e.ensureWriteDecl()
-	e.emitGlobal("@__kml_loop_oneshot = external thread_local global i8")
-	e.emitGlobal("@__kml_loop_nowait = external thread_local global i8")
-	e.emitGlobal("@__kml_loop_idle = external thread_local global i1")
 	msg := tlaUnsettledMsg
 	e.emitGlobal(`@.kml_tla_unsettled = private unnamed_addr constant [` + strconv.Itoa(len(msg)) + ` x i8] c"Warning: Detected unsettled top-level await\0A"`)
 }

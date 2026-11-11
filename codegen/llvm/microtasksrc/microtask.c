@@ -56,8 +56,27 @@ static void q_drain(kml_queue *q) {
  * promise still unhandled is reported. */
 static i64 *flags_of(void *p) { return (i64 *)((char *)p + KML_PROMISE_FLAGS); }
 
+#define TWIN_OF(p) (*(void **)((char *)(p) + KML_PROMISE_TWIN))
+
 void __kml_promise_mark_handled(void *p) {
-    if (p) *flags_of(p) |= KML_PROMISE_FLAG_HANDLED;
+    /* p and the views it is one object with (its TWIN ring). */
+    void *q = p;
+    while (q) {
+        *flags_of(q) |= KML_PROMISE_FLAG_HANDLED;
+        q = TWIN_OF(q);
+        if (q == p) break;
+    }
+}
+
+/* view, src's Promise<any> view (or the reverse), becomes one object with
+ * it: joined to src's TWIN ring, so a handler on either is one on both. The
+ * view answers for an unhandled rejection from here on: src itself is
+ * marked handled alone, the view only when src already was. */
+void __kml_promise_twin(void *src, void *view) {
+    if (*flags_of(src) & KML_PROMISE_FLAG_HANDLED) *flags_of(view) |= KML_PROMISE_FLAG_HANDLED;
+    *flags_of(src) |= KML_PROMISE_FLAG_HANDLED;
+    TWIN_OF(view) = TWIN_OF(src) ? TWIN_OF(src) : src;
+    TWIN_OF(src) = view;
 }
 
 void __kml_promise_note_rejected(void *p) {
@@ -93,17 +112,33 @@ void __kml_native_next_tick(void *inv, void *clo) {
     void **env = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     env[0] = inv;
     env[1] = clo;
-    void **cl = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    void **cl = (void **)kml_closure_alloc(2 * sizeof(void *));
     cl[0] = (void *)tick_tramp;
     cl[1] = env;
     q_push(&tq, cl);
 }
+/* Jobs a producer could not queue where it learned of them: a collector's
+ * finalizer runs inside an allocation, possibly one q_push itself made, so
+ * finalization.c parks its cleanups and this moves them onto the queue
+ * before anything reads it. */
+void (*__kml_microtask_prefill_hook)(void) = 0;
+
+static void prefill(void) {
+    if (__kml_microtask_prefill_hook) __kml_microtask_prefill_hook();
+}
+
 void __kml_drain_ticks(void) { q_drain(&tq); }
-void __kml_drain_promise_jobs(void) { q_drain(&mt); }
+void __kml_drain_promise_jobs(void) {
+    prefill();
+    q_drain(&mt);
+}
 
 /* The event loop must not block while jobs or ticks sit queued
  * (TDD-00097 Stage 5). */
-_Bool __kml_microtasks_pending(void) { return mt.head < mt.len || tq.head < tq.len; }
+_Bool __kml_microtasks_pending(void) {
+    prefill();
+    return mt.head < mt.len || tq.head < tq.len;
+}
 
 /* Node's processTicksAndRejections: every queued tick, then every promise
  * job, again while a job queued a tick; then the checkpoint's report of
@@ -113,6 +148,7 @@ _Bool __kml_microtasks_pending(void) { return mt.head < mt.len || tq.head < tq.l
 void (*__kml_clear_kept_hook)(void) = 0;
 
 void __kml_drain_microtasks(void) {
+    prefill();
     do {
         q_drain(&tq);
         q_drain(&mt);

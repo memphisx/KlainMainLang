@@ -11,7 +11,7 @@ import (
 // is declared, and calls it.
 func (e *Emitter) emitStringToStringBuiltin(args []ast.Expression, pos ast.Pos, name, runtimeFn string, ensure func()) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 1 argument", pos.Line, pos.Col, name)
+		return Value{}, internalAt(pos, "%s arity", name)
 	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
@@ -20,7 +20,7 @@ func (e *Emitter) emitStringToStringBuiltin(args []ast.Expression, pos ast.Pos, 
 	val = e.convert(val, TypePtr)
 	ensure()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr %s(ptr %s)", r, runtimeFn, val.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s("+irPtr+" %s)", r, runtimeFn, val.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -32,9 +32,14 @@ func (e *Emitter) emitStringToStringBuiltin(args []ast.Expression, pos ast.Pos, 
 // checked at run time.
 func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: crypto.getRandomValues takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "crypto.getRandomValues arity")
 	}
-	argTy := e.inferExprType(args[0])
+	if e.omittedArg(args[0]) {
+		e.emitThrowCoded("TypeError", "ERR_MISSING_ARGS", e.internString("Failed to execute 'getRandomValues' on 'Crypto': 1 argument required, but only 0 present."))
+		e.emitLabel(e.freshLabel("grv.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
+	argTy := e.typeOfExpr(args[0])
 	if argTy.IsArray() && argTy.ElemType != nil && !argTy.ElemType.Float &&
 		(argTy.IsTypedArray() || argTy.IsBuffer() || (argTy.ElemType.IR == "i8" && !argTy.ElemType.Signed)) {
 		// The argument itself is returned (`getRandomValues(a) === a`).
@@ -45,14 +50,13 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 		ptrReg, lenReg := e.freshReg(), e.freshReg()
 		ptrReg = e.arrayData(v)
 		lenReg = e.arrayLen(v)
-		e.ensureCryptoRandomBytes()
 		byteLenReg := lenReg
 		if w := argTy.ElemType.Align(); w != 1 {
 			byteLenReg = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteLenReg, lenReg, w))
 		}
 		e.emitCryptoQuotaCheck(byteLenReg)
-		e.emitInstr(fmt.Sprintf("call void @__kml_crypto_random_bytes(ptr %s, i64 %s)", ptrReg, byteLenReg))
+		e.emitInstr(fmt.Sprintf("call void @__kml_crypto_random_bytes("+irPtr+" %s, i64 %s)", ptrReg, byteLenReg))
 		return v, nil
 	}
 	v, err := e.emitExpr(args[0])
@@ -63,7 +67,7 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureCryptoFillAny()
+	e.ensureDynJSONC()
 	e.ensureExceptionHelpers()
 	e.ensureStrHeaderRuntime()
 	rc := e.freshReg()
@@ -110,10 +114,10 @@ func (e *Emitter) emitCryptoQuotaCheck(byteLenReg string) {
 // emitCryptoRandomUUID implements crypto.randomUUID().
 func (e *Emitter) emitCryptoRandomUUID(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: crypto.randomUUID takes no arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: crypto.randomUUID takes no arguments")
 	}
-	e.ensureCryptoRandomUUID()
+	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_crypto_random_uuid()", r))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_crypto_random_uuid()", r))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }

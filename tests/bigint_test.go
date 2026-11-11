@@ -219,10 +219,6 @@ func TestE2EBigIntUnsignedShiftIsError(t *testing.T) {
 	mustCompileError(t, `console.log(8n >>> 1n)`, ">>>")
 }
 
-func TestE2EBigIntJSONIsError(t *testing.T) {
-	mustCompileError(t, `console.log(JSON.stringify(5n))`, "BigInt")
-}
-
 // ADR-00586: Number(bigint) converts to the nearest double.
 func TestE2ENumberOfBigInt(t *testing.T) {
 	assertOutput(t, `
@@ -274,5 +270,25 @@ console.log(String(BigInt(v)));
 var o = { valueOf: function () { return 44; }, toString: function () { throw new Error("unreachable"); } };
 console.log(String(BigInt(o)));
 try { BigInt({}); } catch (e) { console.log(e.constructor.name, e.message); }
+`)
+}
+
+// Object() of a bigint or a symbol is its wrapper object: typeof object,
+// rendered [BigInt: 2n] / [Symbol: Symbol(q)], its primitive through
+// ToPrimitive (arithmetic, ==, a property key) and valueOf; a valueOf
+// returning a bigint gives ToPrimitive that bigint; a symbol's methods
+// read through any.
+func TestE2EBigIntSymbolWrappers(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `var w = Object(2n), s = Symbol("q"), sw = Object(s);
+console.log(typeof w, w + 1n, 1n + w, w == 2n, w === 2n, w.valueOf() === 2n, w.toString(), String(w));
+console.log(w, sw, typeof sw, sw.valueOf() === s, sw.description, sw.toString(), w instanceof BigInt, sw instanceof Symbol, Object.prototype.toString.call(w));
+var o = {}; o[sw] = 1; console.log(o[s]);
+var a = [2n, Symbol("z"), 1, {}];
+for (var x of a) { var w4 = Object(x); console.log(typeof w, w4 === x, w4); }
+var w2 = Object(2n), o2 = { valueOf() { return 3n; } };
+console.log(w2 == 2n, 2n == w2, w2 != 3n, o2 == 3n, 3n == o2, o2 == 3, w2 == "2", Object(2) == 2n);
+var s3 = Symbol("q"); var a = [s3, 1][0];
+console.log(a.valueOf() === s3, a.description, a.toString());
+var n = [2n, 1][0]; console.log(n == 2n, Object(2) == 2);
 `)
 }

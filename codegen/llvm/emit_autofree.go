@@ -55,12 +55,12 @@ type pendingFree struct {
 // allocated value (never a view into, or the retained pointer of, anything
 // pre-existing) — the call-initializer forms the implicit layer may treat as
 // owning. Receiver must itself be a builtin container type (checked by the
-// caller via inferExprType) so a user method that happens to share a name
+// caller via typeOfExpr) so a user method that happens to share a name
 // doesn't qualify.
 var escFreshMethodResults = map[string]bool{
 	"slice": true, "map": true, "filter": true, "concat": true,
 	"split": true, "flat": true, "flatMap": true, "join": true,
-	"trim": true, "trimStart": true, "trimEnd": true, "toUpperCase": true,
+	"trim": true, "trimStart": true, "trimEnd": true, "trimLeft": true, "trimRight": true, "toUpperCase": true,
 	"toLowerCase": true, "replace": true, "replaceAll": true,
 	"substring": true, "substr": true, "repeat": true, "padStart": true,
 	"padEnd": true, "toReversed": true, "toSorted": true, "toSpliced": true,
@@ -91,7 +91,7 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 			if v.Owned {
 				tag = "@owned"
 			}
-			return fmt.Errorf("%d:%d: %s on '%s' is not supported: %s", pos.Line, pos.Col, tag, v.Name, why)
+			return memDiag(pos, "%s on '%s' is not supported: %s", tag, v.Name, why)
 		}
 		return nil
 	}
@@ -134,16 +134,16 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 		}
 		e.ensureStrHeaderRuntime()
 		cur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cur, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", cur, sym.Ptr))
 		cp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", cp, cur))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cp, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", cp, cur))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", cp, sym.Ptr))
 	}
 	// The slot starts null in the entry block: a path that skips the
 	// declaration (a throw before it, caught later) reaches the free with
 	// nothing to free.
-	if strings.Contains(e.allocas.String(), "  "+sym.Ptr+" = alloca ptr") {
-		e.emitAlloca(fmt.Sprintf("store ptr null, ptr %s, align 8", sym.Ptr))
+	if strings.Contains(e.allocas.String(), "  "+sym.Ptr+" = alloca "+irPtr) {
+		e.emitAlloca(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", sym.Ptr))
 	}
 	e.pendingFrees = append(e.pendingFrees, pendingFree{
 		scopeDepth: len(e.scopes),
@@ -182,14 +182,14 @@ func (e *Emitter) maybeFreeOnRebind(name string, sym Symbol, pos ast.Pos) {
 func (e *Emitter) registerOwnedParam(fd *ast.FunctionDeclaration, prm ast.Param) error {
 	pos := fd.GetPos()
 	if e.hoistedCaptures != nil && e.hoistedCaptures[prm.Name] {
-		return fmt.Errorf("%d:%d: @owned parameter '%s' of '%s' is captured by a closure — its storage is a shared heap cell", pos.Line, pos.Col, prm.Name, fd.Name)
+		return internalAt(pos, "@owned parameter '%s' captured (the escape check refuses it)", prm.Name)
 	}
 	sym, ok := e.lookup(prm.Name)
 	if !ok {
 		return nil
 	}
 	if sym.Boxed || isNullableScalar(sym.Ty) || sym.Ty.IsClass() || sym.Ty.IsDynamic() || sym.Ty.IsDynamicObject() || !symbolTypeFreeable(sym.Ty) {
-		return fmt.Errorf("%d:%d: @owned parameter '%s' of '%s': this type has no compiler-insertable free", pos.Line, pos.Col, prm.Name, fd.Name)
+		return memDiag(pos, "@owned parameter '%s' of '%s': this type has no compiler-insertable free", prm.Name, fd.Name)
 	}
 	var lastUse ast.Statement
 	if m := e.autoOwnedParamLastUse[fd]; m != nil {
@@ -273,7 +273,7 @@ func (e *Emitter) autoFreeOwningInit(init ast.Expression, explicit bool) bool {
 				return true
 			}
 			if escFreshMethodResults[m.Property] {
-				rt := e.inferExprType(m.Object)
+				rt := e.typeOfExpr(m.Object)
 				// The strict string test: a Blob/URL/TypedArray handle is a `ptr`
 				// too, and its `slice` is not a fresh string (a Blob's slice
 				// was freed as one — `free(): invalid pointer` under -mm=auto).

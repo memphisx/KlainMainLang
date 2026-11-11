@@ -43,8 +43,9 @@ void *__kml_weak_create(i64 hdr) {
 }
 
 /* First cell whose live referent == key, else NULL; a collected referent
- * reads NULL and never matches a non-null key. */
+ * reads NULL, and a null key (a lookup of a primitive) matches nothing. */
 static kml_weak_cell *weak_find(kml_weak_cell **h, void *key) {
+    if (!key) return NULL; /* a key that is no object: no entry */
     for (kml_weak_cell *c = *h; c; c = c->next)
         if (*c->link == key) return c;
     return NULL;
@@ -78,6 +79,7 @@ unsigned char __kml_weak_has(void *h, void *key) {
  * registration on collected memory). */
 unsigned char __kml_weak_delete(void *h, void *key) {
     kml_weak_cell **prev = (kml_weak_cell **)h;
+    if (!key) return 0;
     for (kml_weak_cell *c = *prev; c; prev = &c->next, c = c->next) {
         if (*c->link == key) {
             *prev = c->next;
@@ -91,7 +93,6 @@ void *__kml_weakref_create(void *obj) { return link_new(obj); }
 
 void *__kml_weakref_deref(void *box) { return *(void **)box; }
 
-#ifdef KML_WEAK_NATIVES
 /* undefined as a NaN-boxed word (emit_dynamic.go nbUndefined). */
 #define KML_WEAK_NB_UNDEFINED 10
 
@@ -155,4 +156,11 @@ i64 __kml_weak_deref_any(double handle) {
     kml_keep(box);
     return box;
 }
-#endif /* KML_WEAK_NATIVES */
+
+/* A private name's side table: the private elements of the objects that
+ * are not instances of the declaring class's layout (a base constructor
+ * returned them for `this`), made on first use in the global *slot. */
+void *__kml_ptab(void **slot) {
+    if (!*slot) *slot = __kml_weak_create(0);
+    return *slot;
+}

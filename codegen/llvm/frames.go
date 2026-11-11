@@ -26,24 +26,7 @@ func FramesSource() string { return layoutHeader() + framesSource }
 // arguments }. The last two are a sloppy function's own boxed value and its
 // arguments object (0 otherwise, 1 for the module's frame), stored only in a
 // program reading `f.caller`/`f.arguments` (callerprops.go).
-const frameIR = "{ ptr, ptr, i64, i64, i64 }"
-
-// ensureFrameCut declares __kml_frame_cut(base): a resumed fiber's base cut
-// from its creator's frames (null for none).
-func (e *Emitter) ensureFrameCut() {
-	e.declareFn("__kml_frame_cut", "declare void @__kml_frame_cut(ptr)")
-}
-
-func (e *Emitter) ensureFrames() {
-	if e.usedFrames {
-		return
-	}
-	e.usedFrames = true
-	e.emitGlobal("@__kml_frame_top = external thread_local global ptr")
-	e.emitGlobal("@__kml_frame_base = external thread_local global ptr")
-	e.emitGlobal("declare void @__kml_error_capture(ptr)")
-	e.emitGlobal("declare ptr @__kml_error_stack(ptr)")
-}
+const frameIR = "{ " + irPtr + ", " + irPtr + ", i64, i64, i64 }"
 
 // fileOfFunc is the source file of the function node fn, or "" for one of a
 // builtin module (whose frames Node shows as its own internals) or unknown.
@@ -96,7 +79,9 @@ func (e *Emitter) frameDesc(name, file string) string {
 		e.frameDescs = map[[2]string]string{}
 	}
 	url := file
-	if abs, err := filepath.Abs(file); err == nil {
+	if abs, err := filepath.Abs(file); err == nil && e.scriptFile(file) {
+		url = abs // CommonJS: Node names the file by its path
+	} else if err == nil {
 		url = "file://" + filepath.ToSlash(abs)
 		if !strings.HasPrefix(filepath.ToSlash(abs), "/") {
 			url = "file:///" + filepath.ToSlash(abs) // a Windows drive path
@@ -107,7 +92,7 @@ func (e *Emitter) frameDesc(name, file string) string {
 	// file of another path (the conformance runner's harness functions), so
 	// its cached object serves both. The URL stays in the program's unit.
 	g := contentSymbol("@__kml_fdesc.", fmt.Sprintf("%s\x00%d", name, e.fileIndex(file)))
-	e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant { ptr, ptr } { ptr %s, ptr %s }", g, e.internString(name), e.internString(url)))
+	e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr"+irGlobalAS+" constant { "+irPtr+", "+irPtr+" } { "+irPtr+" %s, "+irPtr+" %s }", g, e.internString(name), e.internString(url)))
 	e.frameDescs[key] = g
 	return g
 }
@@ -155,9 +140,9 @@ func (e *Emitter) frameSlot(name string) string {
 		return "@__kml_frame_" + name
 	}
 	fn := "__kml_frame_" + name + "_slot"
-	e.declareFn(fn, fmt.Sprintf("declare ptr @%s()", fn))
+	e.declareFn(fn, fmt.Sprintf("declare "+irPtr+" @%s()", fn))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @%s()", r, fn))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @%s()", r, fn))
 	return r
 }
 
@@ -166,24 +151,23 @@ func (e *Emitter) enterFrameIn(file, name string, pos ast.Pos) {
 	if file == "" {
 		return
 	}
-	e.ensureFrames()
 	desc := e.frameDesc(name, file)
 	fr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", fr, frameIR))
 	e.emitStackCheck(fr)
 	old := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", old, e.frameSlot("top")))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", old, fr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", old, e.frameSlot("top")))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", old, fr))
 	d := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 1", d, frameIR, fr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", desc, d))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 1", d, frameIR, fr))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", desc, d))
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 2", p, frameIR, fr))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", packPos(pos), p))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 2", p, frameIR, fr))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", packPos(pos), p))
 	if e.usesCallerProps() {
 		e.storeFrameActivation(fr, "0", "0")
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fr, e.frameSlot("top")))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", fr, e.frameSlot("top")))
 	e.frame, e.frameOld, e.frameFile = fr, old, file
 }
 
@@ -197,11 +181,11 @@ const sgHeadroom = 256 * 1024
 // deeper native call fault on the guard. The band is 0 when no guard is
 // installed, and no other stack (a fiber's, another thread's) lies in it.
 func (e *Emitter) emitStackCheck(addr string) {
-	e.declareFn("__kml_sg_band_lo", "@__kml_sg_band_lo = external global i64")
+	e.declareFn("__kml_sg_band_lo", "@__kml_sg_band_lo = external"+irGlobalAS+" global i64")
 	e.declareFn("__kml_stack_overflow", "declare void @__kml_stack_overflow()")
 	sp, lo, d, in := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", sp, addr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_sg_band_lo, align 8", lo))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", sp, addr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_sg_band_lo, align 8", lo))
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", d, sp, lo))
 	e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, %d", in, d, sgHeadroom))
 	overL, okL := e.freshLabel("stack.over"), e.freshLabel("stack.ok")
@@ -219,13 +203,13 @@ func (e *Emitter) setFrameFile(file string) {
 		return
 	}
 	d := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 1", d, frameIR, e.frame))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.frameDesc(e.moduleFrameName(file), file), d))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 1", d, frameIR, e.frame))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.frameDesc(e.moduleFrameName(file), file), d))
 }
 
 // leaveFrame is the epilogue every return emits: the previous top back.
 func (e *Emitter) leaveFrame() {
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.frameOld, e.frameSlot("top")))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.frameOld, e.frameSlot("top")))
 }
 
 // frameAt is the call-site hook: the running frame's position becomes pos,
@@ -235,23 +219,22 @@ func (e *Emitter) frameAt(pos ast.Pos) {
 		return
 	}
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 2", p, frameIR, e.frame))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", packPos(pos), p))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 2", p, frameIR, e.frame))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", packPos(pos), p))
 }
 
 // enterFiberBase emits a fiber body's base frame (KML_FIBER_ENTRY in
 // kml_heap.h): a record with no descriptor whose previous frame is the
 // resumer's top, cut when the fiber is first resumed.
 func (e *Emitter) enterFiberBase() {
-	e.ensureFrames()
 	b := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", b, frameIR))
 	old := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", old, e.frameSlot("top")))
-	e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", frameIR, b))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", old, b))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", b, e.frameSlot("top")))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", b, e.frameSlot("base")))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", old, e.frameSlot("top")))
+	e.emitInstr(fmt.Sprintf("store %s zeroinitializer, "+irPtr+" %s, align 8", frameIR, b))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", old, b))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", b, e.frameSlot("top")))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", b, e.frameSlot("base")))
 }
 
 // callSite is the call-site hook around a call or construction at pos: the
@@ -293,7 +276,7 @@ func (e *Emitter) accessSite(m *ast.MemberExpression) func() {
 	if e.frame == "" {
 		return func() {}
 	}
-	if rt := e.inferExprType(m.Object); !rt.IsDynamic() && !rt.Nullable() && !rt.IsUndefined() {
+	if rt := e.typeOfExpr(m.Object); !rt.IsDynamic() && !rt.Nullable() && !rt.IsUndefined() {
 		return func() {}
 	}
 	e.frameAt(m.GetPos())
@@ -319,7 +302,6 @@ func (e *Emitter) pushCallAs(as callAs) func() {
 	if as.recv == "" {
 		return func() {}
 	}
-	e.ensureFrames()
 	key := "\x00as:" + as.recv + "\x00" + as.prop
 	g, ok := e.frameDescs[[2]string{key, ""}]
 	if !ok {
@@ -327,20 +309,20 @@ func (e *Emitter) pushCallAs(as callAs) func() {
 			e.frameDescs = map[[2]string]string{}
 		}
 		g = contentSymbol("@__kml_fdesc.", key)
-		e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr constant { ptr, ptr, ptr } { ptr %s, ptr null, ptr %s }", g, e.internString(as.recv), e.internString(as.prop)))
+		e.emitGlobal(fmt.Sprintf("%s = private unnamed_addr"+irGlobalAS+" constant { "+irPtr+", "+irPtr+", "+irPtr+" } { "+irPtr+" %s, "+irPtr+" null, "+irPtr+" %s }", g, e.internString(as.recv), e.internString(as.prop)))
 		e.frameDescs[[2]string{key, ""}] = g
 	}
 	m := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", m, frameIR))
 	old := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", old, e.frameSlot("top")))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", old, m))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", old, e.frameSlot("top")))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", old, m))
 	d := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 1", d, frameIR, m))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", g, d))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", m, e.frameSlot("top")))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 1", d, frameIR, m))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", g, d))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", m, e.frameSlot("top")))
 	return func() {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", old, e.frameSlot("top")))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", old, e.frameSlot("top")))
 	}
 }
 
@@ -354,7 +336,7 @@ func (e *Emitter) memberCallAs(callee ast.Expression) callAs {
 			callee = c.Arg
 			continue
 		case *ast.MemberExpression:
-			if rt := e.inferExprType(c.Object); rt.IsClass() {
+			if rt := e.typeOfExpr(c.Object); rt.IsClass() {
 				return callAs{ast.Unmangle(rt.ClassName), c.Property}
 			} else if rt.IsObject() {
 				return callAs{"Object", c.Property}
@@ -378,4 +360,26 @@ func callSitePos(ex *ast.CallExpression) ast.Pos {
 func (e *Emitter) isStackTraceLimit(m *ast.MemberExpression) bool {
 	id, ok := m.Object.(*ast.Identifier)
 	return ok && id.Name == "Error" && m.Property == "stackTraceLimit" && !e.isShadowedByLocal("Error")
+}
+
+// commonJSExts are the extensions Node runs as CommonJS when the file has
+// no import or export.
+var commonJSExts = map[string]bool{".js": true, ".cjs": true, ".cts": true}
+
+// scriptFile reports whether Node runs file as CommonJS (a .js, .cjs or
+// .cts file with no import or export), whose stack frames name it by path,
+// not by URL; Node names a .ts file by URL whatever its syntax.
+func (e *Emitter) scriptFile(file string) bool {
+	if e.esmFiles == nil {
+		e.esmFiles = map[string]bool{}
+		if e.prog != nil {
+			for _, st := range e.prog.Body {
+				switch st.(type) {
+				case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+					e.esmFiles[e.prog.StmtFiles[st]] = true
+				}
+			}
+		}
+	}
+	return commonJSExts[strings.ToLower(filepath.Ext(file))] && !e.esmFiles[file]
 }

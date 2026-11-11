@@ -4,7 +4,8 @@ package llvm
 // (TDD-00230 P3.3): a web stream whose chunks are T's representation read
 // where a stream of boxed chunks is declared (`Readable.fromWeb(blob.stream())`)
 // becomes a ReadableStream<any> pulling from the source's reader, each chunk
-// boxed as it is enqueued — the stream analogue of emitConvertPromise.
+// boxed as it is enqueued — the stream analogue of emitConvertPromise. Its
+// cancel forwards the reason and, like its end, releases the source's lock.
 
 import (
 	"fmt"
@@ -29,14 +30,14 @@ func streamChunksNeedConvert(a, b Type) bool {
 func (e *Emitter) emitConvertStreamToAny(v Value, target Type) Value {
 	src := "__kml_rsconv_" + e.freshReg()[1:]
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v.Ref, slot))
 	e.define(src, Symbol{Ptr: slot, Ty: v.Ty})
 	rd := src + "_rd"
 	prog, err := parser.Parse(fmt.Sprintf(`%[2]s.getReader();
 new ReadableStream<any>({
-  async pull(c) { const r = await %[1]s.read(); if (r.done) c.close(); else c.enqueue(r.value); },
-  cancel() { %[1]s.cancel(); },
+  async pull(c) { const r = await %[1]s.read(); if (r.done) { c.close(); %[1]s.releaseLock(); } else c.enqueue(r.value); },
+  cancel(reason) { const p = %[1]s.cancel(reason); %[1]s.releaseLock(); return p; },
 });`, rd, src))
 	if err != nil || len(prog.Body) != 2 || sema.Prepare(prog) != nil {
 		return v
@@ -46,13 +47,24 @@ new ReadableStream<any>({
 	if !ok1 || !ok2 {
 		return v
 	}
+	// The built source's pull and cancel are lowered here, typed as built:
+	// a task settling with no value (pull's own, cancel's source's).
+	if ns, ok := es.Expr.(*ast.NewReadableStreamExpression); ok {
+		if lit, ok := ns.Source.(*ast.ObjectLiteral); ok {
+			for _, p := range lit.Properties {
+				if fe, ok := p.Value.(*ast.FunctionExpression); ok && (p.Key == "pull" || p.Key == "cancel") && fe.RetType == nil {
+					fe.RetType = e.synthTypeAnnotation(asyncClosureRetType(true, PromiseOf(TypeVoid)))
+				}
+			}
+		}
+	}
 	reader, err := e.emitExpr(getReader.Expr)
 	if err != nil {
 		return v
 	}
 	rslot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", rslot, reader.Ty.IR))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", reader.Ty.IR, reader.Ref, rslot))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", reader.Ty.IR, reader.Ref, rslot))
 	e.define(rd, Symbol{Ptr: rslot, Ty: reader.Ty})
 	out, err := e.emitExpr(es.Expr)
 	if err != nil || !out.Ty.IsReadableStream() {

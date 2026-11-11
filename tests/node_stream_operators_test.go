@@ -224,3 +224,128 @@ r.on('data', () => {});
 l.write('y');
 `)
 }
+
+// An underlying source or sink is read as JavaScript reads it: from any
+// object (held in a variable, typed or not), members it does not use
+// ignored, callbacks declaring more parameters than the stream passes
+// called with the rest undefined, and its type member checked as Node does.
+func TestE2EStreamUnderlyingObjectsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function pullFn(c, extra) { console.log("pull", typeof extra); c.enqueue("x"); c.close(); }
+const src = {
+  start(c, z) { console.log("start", typeof z); },
+  pull: pullFn,
+  cancel(reason, q) { console.log("cancel", reason, q); },
+};
+const rs = new ReadableStream(src);
+const r = rs.getReader();
+const rs2 = new ReadableStream({ start: async (c) => { c.enqueue(1); }, cancel: (r) => console.log("c2", r) });
+(async () => { await rs2.cancel("why"); })();
+(async () => { const rr = new ReadableStream({ pull: pullFn, other: 1 }).getReader(); console.log(await rr.read()); })();
+try { new ReadableStream({ type: "zz" }); console.log("ok zz"); } catch (e) { console.log(e.name, e.message); }
+try { new WritableStream({ type: "x" }); console.log("ok w"); } catch (e) { console.log(e.name, e.message); }
+try { new WritableStream({ type: undefined }); console.log("ok w2"); } catch (e) { console.log(e.name, e.message); }
+`)
+}
+
+// ReadableStream.from over any iterable that is no array: an async
+// generator, a Set, a string, a sync iterator (closed on cancel), and its
+// errors.
+func TestE2EReadableStreamFromIterableJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+(async () => {
+async function* ag() { yield 1; yield 2; }
+for await (const v of ReadableStream.from(ag())) console.log("ag", v);
+for await (const v of ReadableStream.from(new Set(["a", "b"]))) console.log("set", v);
+for await (const v of ReadableStream.from("hi")) console.log("str", v);
+const bad = { [Symbol.asyncIterator]() { return { next() { return 5; } }; } };
+try { for await (const v of ReadableStream.from(bad)) console.log(v); } catch (e) { console.log(e.name, e.message); }
+let closed = false;
+const it = { [Symbol.iterator]() { let i = 0; return { next() { return { value: i++, done: false }; }, return() { closed = true; return {}; } }; } };
+const rd = ReadableStream.from(it).getReader();
+console.log(await rd.read()); await rd.cancel("x"); console.log("closed", closed);
+try { ReadableStream.from(); } catch (e) { console.log(e.name, e.message); }
+for (const x of [5, null]) { try { ReadableStream.from(x); } catch (e) { console.log(e.name, e.code, e.message); } }
+})();
+`)
+}
+
+func TestE2EReadableStreamFromAsyncGenerator(t *testing.T) {
+	assertOutput(t, `
+async function* ag(): AsyncGenerator<number> { yield 1; yield 2; }
+const s: ReadableStream<number> = ReadableStream.from(ag());
+async function main(): Promise<void> {
+  for await (const v of s) console.log("v", v + 1);
+  const r = ReadableStream.from(new Set(["a"])).getReader();
+  const x = await r.read();
+  console.log(x.value, x.done);
+}
+main();
+`, "v 2\nv 3\na false")
+}
+
+// enqueue() with no chunk enqueues undefined; extra arguments are ignored.
+func TestE2EStreamEnqueueArityJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const rs = new ReadableStream({ start(c) { c.enqueue(); c.enqueue(2, 3); c.close(); } });
+(async () => { for await (const v of rs) console.log(v); })();
+`)
+}
+
+// Calling a method a stream, reader or controller lacks throws JavaScript's
+// TypeError.
+func TestE2EStreamMissingMethodJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const rs = new ReadableStream({ start(c) { try { c.zap(1); } catch (e) { console.log(e.name, e.message); } c.close(); } });
+try { rs.zork(); } catch (e) { console.log(e.name, e.message); }
+const rd = rs.getReader();
+try { rd.nope(); } catch (e) { console.log(e.name, e.message); }
+`)
+}
+
+// A queuing strategy is read from any object, its unknown members ignored;
+// highWaterMark defaults when undefined and is validated as Node does, and
+// the strategy classes check their init.
+func TestE2EStreamQueuingStrategyJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => { try { console.log(n, f()); } catch (e) { console.log(n, e.name, e.code, e.message); } };
+t("unk", () => { new ReadableStream({}, { highWaterMark: 1, extra: 2 }); return "ok"; });
+t("neg", () => new ReadableStream({}, { highWaterMark: -1 }));
+t("nan", () => new ReadableStream({}, { highWaterMark: NaN }));
+t("undefHwm", () => { new ReadableStream({ start(c) { console.log("ds", c.desiredSize); } }, { highWaterMark: undefined }); return "ok"; });
+const strat = { highWaterMark: 3, size() { return 1; } };
+t("var", () => { new ReadableStream({ start(c) { console.log("desired", c.desiredSize); } }, strat); return "ok"; });
+t("cqs0", () => new ReadableStream({}, new CountQueuingStrategy()));
+t("cqsNoHwm", () => new ReadableStream({}, new CountQueuingStrategy({})));
+t("cqs2", () => { new ReadableStream({ start(c) { console.log("ds2", c.desiredSize); } }, new CountQueuingStrategy({ highWaterMark: 2 }, 9)); return "ok"; });
+t("blqs", () => { new ReadableStream({ start(c) { c.enqueue(new Uint8Array(3)); console.log("ds3", c.desiredSize); } }, new ByteLengthQueuingStrategy({ highWaterMark: 8, size: () => 5 })); return "ok"; });
+t("dynSize", () => { const s = JSON.parse('{"highWaterMark": 4}'); new ReadableStream({ start(c) { c.enqueue(1); console.log("ds4", c.desiredSize); } }, s); return "ok"; });
+`)
+}
+
+// pipeTo/pipeThrough options and transformers read from any object (unknown
+// members ignored), a transformer's start, missing or wrong arguments with
+// Node's errors (pipeTo rejects, pipeThrough throws), extras ignored.
+func TestE2EStreamPipeArgumentsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => f().then((v) => console.log(n, v), (e) => console.log(n, e.name, e.code, e.message));
+const src = () => new ReadableStream({ start(c) { c.enqueue("a"); c.enqueue("b"); c.close(); } });
+const sink = (tag) => new WritableStream({ write(ch) { console.log(tag, ch); } });
+(async () => {
+await t("opts", () => src().pipeTo(sink("w1"), { preventClose: true, extra: 1 }));
+const o = { preventAbort: false };
+await t("optVar", () => src().pipeTo(sink("w2"), o));
+await t("noArg", () => src().pipeTo());
+await t("badDest", () => src().pipeTo({}));
+await t("extraArg", () => src().pipeTo(sink("w3"), {}, 5));
+await t("badSignal", () => src().pipeTo(sink("w4"), { signal: 5 }));
+const tr = { transform(ch, c) { c.enqueue(ch.toUpperCase()); }, other: 1 };
+await t("trVar", () => src().pipeThrough(new TransformStream(tr)).pipeTo(sink("w5")));
+await t("trFlush", () => src().pipeThrough(new TransformStream({ flush(c) { c.enqueue("END"); } })).pipeTo(sink("w6")));
+try { src().pipeThrough({}); } catch (e) { console.log("ptBad", e.name, e.code, e.message); }
+try { src().pipeThrough(); } catch (e) { console.log("ptNone", e.name, e.code, e.message); }
+await t("tr3", () => src().pipeThrough(new TransformStream({ transform(ch, c, x) { c.enqueue(ch + typeof x); } })).pipeTo(sink("w7")));
+await t("trStart", () => src().pipeThrough(new TransformStream({ start(c) { c.enqueue("S"); } })).pipeTo(sink("w8")));
+})();
+`)
+}

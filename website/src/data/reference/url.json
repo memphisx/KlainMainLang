@@ -38,7 +38,7 @@
       "exampleKey": "url/url",
       "snippet": "const u = new URL(\"https://example.com:8080/a/b?x=1&y=hello%20world#frag\")\nconsole.log(u.hostname)  // example.com\nconsole.log(new URL(\"/p\", \"http://h.com/a\").href)  // http://h.com/p",
       "differences": [
-        "A default port is stripped and the host is lowercased (WHATWG normalization); `URL.parse`/`URL.canParse` statics and `JSON.stringify(url)` → `href` (toJSON) are supported",
+        "A default port is stripped and the host is lowercased (WHATWG normalization); `URL.parse`/`URL.canParse`/`URL.createObjectURL`/`URL.revokeObjectURL` statics and `JSON.stringify(url)` → `href` (toJSON) are supported",
         "A non-ASCII hostname is case-folded and punycoded, without the rest of UTS 46's mapping: a full-width `ＥＸＡＭＰＬＥ.com` punycodes where Node reads `example.com`"
       ],
       "seeAlso": [

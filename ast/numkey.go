@@ -2,6 +2,7 @@ package ast
 
 import (
 	"math"
+	"math/big"
 	"strconv"
 	"strings"
 )
@@ -13,17 +14,17 @@ func NumberKey(raw string) string {
 	s := strings.ReplaceAll(raw, "_", "")
 	var v float64
 	if len(s) > 2 && s[0] == '0' && strings.ContainsRune("xXoObB", rune(s[1])) {
-		n, err := strconv.ParseUint(s, 0, 64)
-		if err != nil {
+		n, ok := new(big.Int).SetString(strings.ToLower(s), 0)
+		if !ok {
 			return raw
 		}
-		v = float64(n)
+		v = bigToFloat(n)
 	} else if len(s) > 1 && s[0] == '0' && !strings.ContainsAny(s, ".eE") && strings.Trim(s, "01234567") == "" {
-		n, err := strconv.ParseUint(s[1:], 8, 64) // a legacy octal literal (`010`)
-		if err != nil {
+		n, ok := new(big.Int).SetString(s[1:], 8) // a legacy octal literal (`010`)
+		if !ok {
 			return raw
 		}
-		v = float64(n)
+		v = bigToFloat(n)
 	} else {
 		f, err := strconv.ParseFloat(s, 64)
 		if err != nil && !math.IsInf(f, 0) {
@@ -32,6 +33,13 @@ func NumberKey(raw string) string {
 		v = f
 	}
 	return JSNumberString(v)
+}
+
+// bigToFloat is integer n as the nearest double (Infinity past the
+// largest), as JavaScript reads a numeric literal of any length.
+func bigToFloat(n *big.Int) float64 {
+	f, _ := new(big.Float).SetInt(n).Float64()
+	return f
 }
 
 // JSNumberString is v as JavaScript's Number::toString(10) writes it.

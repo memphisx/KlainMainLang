@@ -19,7 +19,7 @@ extern void *__kml_str_alloc(i64 n);
 /* A headered string holding n bytes of p. */
 static char *str_of(const char *p, i64 n) {
     char *b = (char *)__kml_str_alloc(n);
-    memcpy(b, p, (size_t)n);
+    kml_copy(KML_HEAP_RAW, b, p, (size_t)n);
     b[n] = 0;
     return b;
 }
@@ -92,9 +92,9 @@ void *__kml_replace(const char *s, i64 slen, const char *search, i64 search_len,
     if (!found) return str_of(s, slen);
     i64 pre = found - s, suf = slen - (pre + search_len);
     char *buf = (char *)__kml_str_alloc(pre + rep_len + suf);
-    memcpy(buf, s, (size_t)pre);
-    memcpy(buf + pre, rep, (size_t)rep_len);
-    memcpy(buf + pre + rep_len, found + search_len, (size_t)suf);
+    kml_copy(KML_HEAP_RAW, buf, s, (size_t)pre);
+    kml_copy(KML_HEAP_RAW, buf + pre, rep, (size_t)rep_len);
+    kml_copy(KML_HEAP_RAW, buf + pre + rep_len, found + search_len, (size_t)suf);
     buf[pre + rep_len + suf] = 0;
     return buf;
 }
@@ -110,7 +110,7 @@ static i64 u8_char(const u8 *p, i64 left) {
  * any other character whole. Returns the count (1 or 2). */
 static int u16_units(const u8 *p, i64 n, u8 out[2][4], i64 len[2]) {
     if (n < 4) {
-        memcpy(out[0], p, (size_t)n);
+        memcpy(out[0], p, (size_t)n); /* scratch */
         len[0] = n;
         return 1;
     }
@@ -133,22 +133,22 @@ void *__kml_replace_all(const char *s, i64 slen, const char *search, i64 search_
         /* At most one unit per byte, a pair's two halves 3 bytes each. */
         char *buf = (char *)__kml_str_alloc(slen * 2 + rep_len * (slen + 1));
         char *out = buf;
-        memcpy(out, rep, (size_t)rep_len);
+        kml_copy(KML_HEAP_RAW, out, rep, (size_t)rep_len);
         out += rep_len;
         for (i64 i = 0; i < slen;) {
             i64 w = u8_char((const u8 *)s + i, slen - i), len[2];
             u8 unit[2][4];
             int k = u16_units((const u8 *)s + i, w, unit, len);
             for (int j = 0; j < k; j++) {
-                memcpy(out, unit[j], (size_t)len[j]);
+                kml_copy(KML_HEAP_RAW, out, unit[j], (size_t)len[j]);
                 out += len[j];
-                memcpy(out, rep, (size_t)rep_len);
+                kml_copy(KML_HEAP_RAW, out, rep, (size_t)rep_len);
                 out += rep_len;
             }
             i += w;
         }
         *out = 0;
-        *(i64 *)(buf - 8) = out - buf;
+        *(i64 *)KML_PREFIX(buf) = out - buf;
         return buf;
     }
     i64 cnt = 0, rem = slen;
@@ -164,14 +164,14 @@ void *__kml_replace_all(const char *s, i64 slen, const char *search, i64 search_
     rem = slen;
     while ((f = (const char *)memmem(cur, (size_t)rem, search, (size_t)search_len))) {
         i64 part = f - cur;
-        memcpy(out, cur, (size_t)part);
+        kml_copy(KML_HEAP_RAW, out, cur, (size_t)part);
         out += part;
-        memcpy(out, rep, (size_t)rep_len);
+        kml_copy(KML_HEAP_RAW, out, rep, (size_t)rep_len);
         out += rep_len;
         rem -= part + search_len;
         cur = f + search_len;
     }
-    memcpy(out, cur, (size_t)rem);
+    kml_copy(KML_HEAP_RAW, out, cur, (size_t)rem);
     out[rem] = 0;
     return buf;
 }
@@ -207,11 +207,11 @@ void *__kml_split_parts(const char *s, i64 slen, const char *sep, i64 sep_len, i
     rem = slen;
     while ((f = (const char *)memmem(cur, (size_t)rem, sep, (size_t)sep_len))) {
         i64 part = f - cur;
-        arr[idx++] = str_of(cur, part);
+        KML_STORE_PTR(&arr[idx++], str_of(cur, part));
         rem -= part + sep_len;
         cur = f + sep_len;
     }
-    arr[idx] = str_of(cur, rem);
+    KML_STORE_PTR(&arr[idx], str_of(cur, rem));
     *outlen = cnt + 1;
     return arr;
 }

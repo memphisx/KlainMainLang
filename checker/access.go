@@ -202,7 +202,7 @@ func (c *Checker) checkConstructorAccess(n *ast.NewExpression, sym *binder.Symbo
 		if decl.BaseClass == "" {
 			return
 		}
-		owner = resolveTypeName(decl.BaseClass, owner.Scope)
+		owner = c.baseClassSymbol(decl, owner.Scope)
 		if owner == nil || owner.Flags&binder.Class == 0 {
 			return
 		}

@@ -33,7 +33,7 @@ static void throw_type_error(const char *fmt, i64 arg) {
     int n = snprintf(buf, sizeof buf, fmt, arg);
     char *s = kml_alloc(KML_HEAP_RAW, 8 + (size_t)n + 1);
     *(i64 *)s = n;
-    memcpy(s + 8, buf, (size_t)n + 1);
+    kml_copy(KML_HEAP_RAW, s + 8, buf, (size_t)n + 1);
     __kml_throw_nullderef(s + 8);
 }
 
@@ -58,7 +58,7 @@ i64 __kml_array_level(void *hdr) {
     return kml_hdr_level((const i64 *)hdr - 1);
 }
 
-// Whether sloppy code's direct write (OP_SET, OP_LENGTH) to the array is
+// Whether sloppy code's direct write (OP_SET, OP_LENGTH, OP_DELETE) to the array is
 // refused: there it does nothing instead of throwing. Built-in methods
 // throw in sloppy code too, so they keep __kml_array_guard.
 i64 __kml_array_refuses(void *hdr, i64 op, i64 a) {
@@ -70,6 +70,8 @@ i64 __kml_array_refuses(void *hdr, i64 op, i64 a) {
         return a >= len || lvl == LVL_FROZEN;
     case OP_LENGTH:
         return (lvl == LVL_FROZEN && a != len) || (lvl == LVL_SEALED && a < len);
+    case OP_DELETE:
+        return lvl != LVL_NONEXT && a >= 0 && a < len;
     }
     return 0;
 }

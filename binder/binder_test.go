@@ -148,36 +148,37 @@ func TestEveryIdentifierIsBound(t *testing.T) {
 	}
 }
 
-// Redeclarations follow strict code's early errors.
+// Redeclarations follow strict code's early errors, each clashing
+// declaration reported, as tsc does.
 func TestRedeclarations(t *testing.T) {
 	for _, c := range []struct {
 		src  string
 		want string // clashing names, in order
 	}{
-		{"let x = 1\nlet x = 2", "x"},
+		{"let x = 1\nlet x = 2", "x,x"},
 		{"var x = 1\nvar x = 2", ""},
 		{"function f() {}\nvar f = 1", ""},
-		{"function h() {}\nfunction h() {}", "duplicate function implementation of 'h'"},
-		{"let x = 1\n{ var x = 2 }", "x"},
-		{"{ var x = 2 }\nlet x = 1", "x"},
-		{"function f(a: number) { let a = 1 }", "a"},
+		{"function h() {}\nfunction h() {}", "duplicate function implementation of 'h',duplicate function implementation of 'h'"},
+		{"let x = 1\n{ var x = 2 }", "x,x"},
+		{"{ var x = 2 }\nlet x = 1", "x,x"},
+		{"function f(a: number) { let a = 1 }", "a,a"},
 		{"function f(a: number) { var a = 1 }", ""},
-		{"const f = (a: number) => { let a = 1 }", "a"},
+		{"const f = (a: number) => { let a = 1 }", "a,a"},
 		{"try {} catch (e) { let e = 1 }", "e"},
 		{"try {} catch (e) { var e = 1 }", ""},
-		{"{ function g() {}\nfunction g() {} }", "g"},
+		{"{ function g() {}\nfunction g() {} }", "g,g"},
 		{"class C {}\ninterface C { x: number }", ""},
-		{"class C {}\nlet C = 1", "C"},
+		{"class C {}\nlet C = 1", "C,C"},
 		{"enum E { A }\nenum E { B = 2 }", "E (merge)"},
 		{"interface I { a: number }\ninterface I { b: number }", ""},
-		{"type T = number\ninterface T { a: number }", "T"},
+		{"type T = number\ninterface T { a: number }", "T,T"},
 		{"interface V { a: number }\nconst V = 1", ""},
-		{"enum E { A }\nconst E = 1", "E"},
+		{"enum E { A }\nconst E = 1", "E,E"},
 		{"import { a } from 'fs'\nlet a = 1", "a"},
 		{"namespace N { export const v = 1 }\nfunction N() {}", ""},
-		{"namespace N { export const v = 1 }\nlet N = 1", "N"},
+		{"namespace N { export const v = 1 }\nlet N = 1", "N,N"},
 		{"for (let i = 0; i < 1; i++) { let i = 2 }", ""},
-		{"class K { m(p: number) { let p = 1 } }", "p"},
+		{"class K { m(p: number) { let p = 1 } }", "p,p"},
 	} {
 		prog, err := parser.Parse(c.src)
 		if err != nil {
@@ -202,8 +203,8 @@ func TestRedeclarations(t *testing.T) {
 func TestAnnexBBlockFunctions(t *testing.T) {
 	for src, want := range map[string]int{
 		"{ function a() {}\nfunction a() {} }":                             0,
-		"{ async function a() {}\nfunction a() {} }":                       1,
-		"{ function a() {}\nlet a = 1 }":                                   1,
+		"{ async function a() {}\nfunction a() {} }":                       2,
+		"{ function a() {}\nlet a = 1 }":                                   2,
 		"switch (1) { case 1: function a() {}\ndefault: function a() {} }": 0,
 	} {
 		prog, err := parser.Parse(src)

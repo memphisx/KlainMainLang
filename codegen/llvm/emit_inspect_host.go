@@ -34,6 +34,9 @@ func (e *Emitter) emitInspectHost(v Value, depth int) (s Value, ok bool, err err
 	case t.IsArrayBuffer():
 		s, err := e.emitInspectArrayBuffer(v, depth)
 		return s, true, err
+	case hostPrefixedObject(t) && (t.IsResponse() || t.IsFetchRequest()):
+		s, err := e.emitInspectFetchObject(v, depth)
+		return s, true, err
 	case t.IsPromise():
 		// Node's `Promise { value }` form, through the boxed promise.
 		b, err := e.emitBoxValue(v)
@@ -47,7 +50,64 @@ func (e *Emitter) emitInspectHost(v Value, depth int) (s Value, ok bool, err err
 }
 
 func isInspectHost(t Type) bool {
-	return t.IR == "ptr" && (t.IsPromise() || t.IsArrayBuffer() || isInspectStream(t))
+	return t.IR == irPtr && (t.IsPromise() || t.IsArrayBuffer() || isInspectStream(t) ||
+		(hostPrefixedObject(t) && (t.IsResponse() || t.IsFetchRequest())))
+}
+
+// fetchInspectKeys are the accessors Node's inspect of a Response and a
+// Request lists, in its order; a literal stands for a member this layout
+// has no state for (always that value here).
+var fetchInspectKeys = map[bool][]struct{ key, literal string }{
+	true: {{"status", ""}, {"statusText", ""}, {"headers", ""}, {"body", ""}, {"bodyUsed", ""},
+		{"ok", ""}, {"redirected", ""}, {"type", ""}, {"url", ""}},
+	false: {{"method", ""}, {"url", ""}, {"headers", ""}, {"destination", ""}, {"referrer", ""},
+		{"referrerPolicy", ""}, {"mode", ""}, {"credentials", ""}, {"cache", ""}, {"redirect", ""},
+		{"integrity", ""}, {"keepalive", ""}, {"isReloadNavigation", "false"}, {"isHistoryNavigation", "false"}, {"signal", ""}},
+}
+
+// emitInspectFetchObject renders a Response or a Request as Node does,
+// `Response { status: 200, … }`: each accessor read as a member and
+// inspected as a nested value.
+func (e *Emitter) emitInspectFetchObject(v Value, level int) (Value, error) {
+	lim := e.effectiveInspectDepth()
+	name := "Request"
+	if v.Ty.IsResponse() {
+		name = "Response"
+	}
+	if level > lim {
+		return Value{Ref: e.internString("[" + name + "]"), Ty: TypePtr}, nil
+	}
+	const tmp = "__kml_insp_fetch"
+	e.pushScope()
+	defer e.popScope()
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v.Ref, slot))
+	e.define(tmp, Symbol{Ptr: slot, Ty: v.Ty})
+	list := e.inspectBegin(0, "1")
+	for _, k := range fetchInspectKeys[v.Ty.IsResponse()] {
+		var str Value
+		if _, has := e.abortSignalClass(); k.key == "signal" && !has {
+			str = Value{Ref: e.internString("AbortSignal { aborted: false }"), Ty: TypePtr}
+		} else if k.literal != "" {
+			str = Value{Ref: e.internString(k.literal), Ty: TypePtr}
+		} else {
+			mv, err := e.emitExpr(ast.NewMemberExpression(ast.NewIdentifier(tmp, ast.Pos{}), k.key, ast.Pos{}))
+			if err != nil {
+				return Value{}, err
+			}
+			str, err = e.emitInspectField(mv, 1+lim-(lim-1))
+			if err != nil {
+				return Value{}, err
+			}
+		}
+		entry, err := e.emitStringConcat(Value{Ref: e.internString(k.key + ": "), Ty: TypePtr}, str)
+		if err != nil {
+			return Value{}, err
+		}
+		e.inspectPush(list, entry)
+	}
+	return e.streamInspectEnd(list, name, 0, level), nil
 }
 
 // isInspectStream reports a ReadableStream, WritableStream or
@@ -92,7 +152,7 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 	}
 	pick := func(cond string, yes, no string) Value {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, cond, e.internString(yes), e.internString(no)))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, cond, e.internString(yes), e.internString(no)))
 		return Value{Ref: r, Ty: TypePtr}
 	}
 	chunk := TypeI64
@@ -120,8 +180,8 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 		e.pushScope()
 		defer e.popScope()
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v.Ref, slot))
 		e.define(tmp, Symbol{Ptr: slot, Ty: t})
 		var readable string
 		for _, side := range []string{"readable", "writable"} {
@@ -140,9 +200,14 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 				return Value{}, err
 			}
 		}
-		e.ensureStreamRuntime()
+		e.ensureExceptionHelpers()
+		e.ensureMicrotasks()
+		e.ensureNanBox()
+		e.ensurePromiseAddReaction()
+		e.ensureShapeRuntime()
+		e.ensureUnhandledRejections()
 		d, bp := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @__kml_rs_desired(ptr %s)", d, readable))
+		e.emitInstr(fmt.Sprintf("%s = call double @__kml_rs_desired("+irPtr+" %s)", d, readable))
 		e.emitInstr(fmt.Sprintf("%s = fcmp ole double %s, 0.0", bp, d))
 		if err := push("backpressure", pick(bp, "true", "false")); err != nil {
 			return Value{}, err
@@ -152,11 +217,20 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 	readable := t.IsReadableStream()
 	bits := e.freshReg()
 	if readable {
-		e.ensureStreamRuntime()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_inspect_bits(ptr %s)", bits, v.Ref))
+		e.ensureExceptionHelpers()
+		e.ensureMicrotasks()
+		e.ensureNanBox()
+		e.ensurePromiseAddReaction()
+		e.ensureShapeRuntime()
+		e.ensureUnhandledRejections()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_inspect_bits("+irPtr+" %s)", bits, v.Ref))
 	} else {
-		e.ensureWStreamRuntime()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_inspect_bits(ptr %s)", bits, v.Ref))
+		e.ensurePromiseAddReaction()
+		e.ensureMicrotasks()
+		e.ensureNanBox()
+		e.ensureExceptionHelpers()
+		e.ensureUnhandledRejections()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_inspect_bits("+irPtr+" %s)", bits, v.Ref))
 	}
 	lk, locked, st := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, 4", lk, bits))
@@ -176,7 +250,14 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 2", isErr, st))
 	mid := pick(isClosed, names[1], names[0])
 	state := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", state, isErr, e.internString(names[2]), mid.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", state, isErr, e.internString(names[2]), mid.Ref))
+	if !readable {
+		// A writable stream's state 3: erroring.
+		isErring, st3 := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 3", isErring, st))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", st3, isErring, e.internString("'erroring'"), state))
+		state = st3
+	}
 	if err := push("state", Value{Ref: state, Ty: TypePtr}); err != nil {
 		return Value{}, err
 	}
@@ -192,12 +273,12 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 // prefixes the class name, re-indented by level.
 func (e *Emitter) streamInspectEnd(list, name string, depth, level int) Value {
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_end(ptr %s, ptr %s, ptr %s, i64 0, i64 %d, i64 0, i64 0)",
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_end("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 0, i64 %d, i64 0, i64 0)",
 		r, list, e.internString("{"), e.internString("}"), depth))
 	named := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_tagged(ptr %s, ptr null, ptr %s)", named, e.internString(name), r))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_tagged("+irPtr+" %s, "+irPtr+" null, "+irPtr+" %s)", named, e.internString(name), r))
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_reindent(ptr %s, i64 %d)", out, named, level))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_reindent("+irPtr+" %s, i64 %d)", out, named, level))
 	return Value{Ref: out, Ty: TypePtr}
 }
 
@@ -208,17 +289,24 @@ func (e *Emitter) emitInspectArrayBuffer(v Value, depth int) (Value, error) {
 	if v.Ty.IsSharedArrayBuffer() {
 		name = "SharedArrayBuffer"
 	}
+	return e.emitInspectArrayBufferAs(v, depth, name, name, nil)
+}
+
+// emitInspectArrayBufferAs renders buffer v under head (`B [ArrayBuffer]`
+// for a class extending it, short its depth-limited form), extra pushing
+// the entries after its own.
+func (e *Emitter) emitInspectArrayBufferAs(v Value, depth int, head, short string, extra func(list string) error) (Value, error) {
 	if depth > e.effectiveInspectDepth() {
-		return Value{Ref: e.internString("[" + name + "]"), Ty: TypePtr}, nil
+		return Value{Ref: e.internString("[" + short + "]"), Ty: TypePtr}, nil
 	}
 	n := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, v.Ref))
 	dataGep, data := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataGep, v.Ref))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, dataGep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", dataGep, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, dataGep))
 	e.ensureInspectReduce()
 	hex := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_hex(ptr %s, i64 %s)", hex, data, n))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_hex("+irPtr+" %s, i64 %s)", hex, data, n))
 	list := e.inspectBegin(depth, "1")
 	entry, err := e.emitStringConcat(Value{Ref: e.internString("[Uint8Contents]: "), Ty: TypePtr}, Value{Ref: hex, Ty: TypePtr})
 	if err != nil {
@@ -234,7 +322,12 @@ func (e *Emitter) emitInspectArrayBuffer(v Value, depth int) (Value, error) {
 		return Value{}, err
 	}
 	e.inspectPush(list, entry)
-	return e.inspectEnd(list, e.internString(name+" {"), e.internString("}"), depth, false, false), nil
+	if extra != nil {
+		if err := extra(list); err != nil {
+			return Value{}, err
+		}
+	}
+	return e.inspectEnd(list, e.internString(head+" {"), e.internString("}"), depth, false, false), nil
 }
 
 // emitInspectStreamHandle renders a reader
@@ -253,12 +346,12 @@ func (e *Emitter) emitInspectStreamHandle(v Value, list string, push func(string
 	}
 	// The stream (undefined once released), and a reader's pending reads.
 	strSlot, nSlot := e.freshReg(), e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", strSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", strSlot))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", nSlot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString("undefined"), strSlot))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", nSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.internString("undefined"), strSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", nSlot))
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, stream))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, stream))
 	boundL, doneL := e.freshLabel("insp.handle.bound"), e.freshLabel("insp.handle.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, boundL))
 	e.emitLabel(boundL)
@@ -266,16 +359,16 @@ func (e *Emitter) emitInspectStreamHandle(v Value, list string, push func(string
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", str.Ref, strSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", str.Ref, strSlot))
 	if reader {
 		n := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_read_requests(ptr %s)", n, stream))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", n, nSlot))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_read_requests("+irPtr+" %s)", n, stream))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", n, nSlot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	sv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sv, strSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", sv, strSlot))
 	if err := push("stream", Value{Ref: sv, Ty: TypePtr}); err != nil {
 		return Value{}, err
 	}
@@ -296,7 +389,7 @@ func (e *Emitter) emitInspectStreamHandle(v Value, list string, push func(string
 	}
 	if reader {
 		n := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, nSlot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, nSlot))
 		ns, err := e.emitInspectField(Value{Ref: n, Ty: TypeI64}, entryDepth)
 		if err != nil {
 			return Value{}, err

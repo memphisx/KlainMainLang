@@ -55,23 +55,23 @@ func (e *Emitter) noteMapLayout(t Type) {
 // Only a header other than view's pays the call.
 func (e *Emitter) mapViewIsOwn(view Type, ptr string) string {
 	hp, hdr, eq := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, ptr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, hp))
+	e.emitPrefixWordAddr(hp, ptr)
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, hp))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", eq, e.headerIdentity(hdr), e.hostHeaderWord(e.mapViewBase(view))))
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
-	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", slot))
 	checkL, joinL := e.freshLabel("mview.check"), e.freshLabel("mview.owned")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", eq, joinL, checkL))
 	e.emitLabel(checkL)
 	f, notF := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s, i64 0, i64 0)", f, e.mapViewFn("foreign", view), ptr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %s, i64 0, i64 0)", f, e.mapViewFn("foreign", view), ptr))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", notF, f))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", notF, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", notF, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	own := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", own, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", own, slot))
 	return own
 }
 
@@ -95,13 +95,13 @@ func (e *Emitter) mapViewPtr(view Type, ptr string) string {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", own, ownL, otherL))
 	e.emitLabel(otherL)
 	cp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr %s(ptr %s)", cp, e.mapViewFn("copy", view), ptr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s("+irPtr+" %s)", cp, e.mapViewFn("copy", view), ptr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(ownL)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, cp, otherL, ptr, ownL))
+	e.emitInstr(fmt.Sprintf("%s = phi "+irPtr+" [ %s, %%%s ], [ %s, %%%s ]", r, cp, otherL, ptr, ownL))
 	return r
 }
 
@@ -154,7 +154,7 @@ func (e *Emitter) emitMapViewCall(view Type, ptr, op string, args []ast.Expressi
 		}
 		slot, ir := e.freshReg(), mapViewIR(v.Ty)
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, ir))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", ir, v.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", ir, v.Ref, slot))
 		name := fmt.Sprintf("__kml_mview_arg%d_%d", e.regCtr, i)
 		e.define(name, Symbol{Ptr: slot, Ty: v.Ty})
 		temps[i] = ast.NewIdentifier(name, ast.Pos{})
@@ -184,7 +184,7 @@ func (e *Emitter) emitMapViewCall(view Type, ptr, op string, args []ast.Expressi
 	e.emitLabel(ownEnd)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(otherBody)
-	argList := []string{"ptr " + ptr}
+	argList := []string{irPtr + " " + ptr}
 	for i := 0; i < 2; i++ {
 		a := fmt.Sprint(nbUndefined)
 		if i < len(boxed) {
@@ -264,11 +264,11 @@ func (e *Emitter) emitMapViewDispatcher(r mapViewReq) {
 	defer endStable()
 	retIR := "i64"
 	if r.op == "copy" {
-		retIR = "ptr"
+		retIR = irPtr
 	}
 	hp, hdr := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%m, i64 -8", hp))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, hp))
+	e.emitPrefixWordAddr(hp, "%m")
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, hp))
 	hdr = e.headerIdentity(hdr)
 	for _, h := range cases {
 		hit, next := e.freshLabel("mview.case"), e.freshLabel("mview.next")
@@ -278,8 +278,8 @@ func (e *Emitter) emitMapViewDispatcher(r mapViewReq) {
 		e.emitLabel(hit)
 		e.pushScope()
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %%m, ptr %s, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %%m, "+irPtr+" %s, align 8", slot))
 		e.define("__kml_mview_self", Symbol{Ptr: slot, Ty: h.ty})
 		self := ast.NewIdentifier("__kml_mview_self", ast.Pos{})
 		ret := e.mapViewCase(r, h, self)
@@ -291,16 +291,16 @@ func (e *Emitter) emitMapViewDispatcher(r mapViewReq) {
 	}
 	// An unknown layout: a copy reads as itself, a foreign test says no,
 	// an operation reads undefined.
-	fallback := map[string]string{"copy": "ret ptr %m", "foreign": "ret i64 0"}[r.op]
+	fallback := map[string]string{"copy": "ret " + irPtr + " %m", "foreign": "ret i64 0"}[r.op]
 	if fallback == "" {
 		fallback = fmt.Sprintf("ret i64 %d", nbUndefined)
 	}
 	e.emitTerminator(fallback)
 	body := e.allocas.String() + e.body.String()
 	restore()
-	header := fmt.Sprintf("internal i64 %s(ptr %%m, i64 %%a0, i64 %%a1)", r.name)
+	header := fmt.Sprintf("internal i64 %s("+irPtr+" %%m, i64 %%a0, i64 %%a1)", r.name)
 	if r.op == "copy" {
-		header = fmt.Sprintf("internal ptr %s(ptr %%m)", r.name)
+		header = fmt.Sprintf("internal "+irPtr+" %s("+irPtr+" %%m)", r.name)
 	}
 	e.writeFunc(header, body)
 }
@@ -319,12 +319,12 @@ func (e *Emitter) mapViewCase(r mapViewReq, h hostLayout, self *ast.Identifier) 
 	for i := 0; i < mapViewOps[r.op]; i++ {
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store i64 %%a%d, ptr %s, align 8", i, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %%a%d, "+irPtr+" %s, align 8", i, slot))
 		name := fmt.Sprintf("__kml_mview_a%d", i)
 		e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
 		args = append(args, ast.NewIdentifier(name, ast.Pos{}))
 	}
-	v, err := e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(self, r.op, ast.Pos{}), args, ast.Pos{}))
+	v, err := e.emitExpr(collMethodCall(self, e.typeOfExpr(self), r.op, args, ast.Pos{}))
 	if err != nil || e.blockDone || v.Ty.IR == "" || v.Ty.IR == "void" || r.op == "set" || r.op == "add" {
 		return undef
 	}
@@ -340,14 +340,14 @@ func (e *Emitter) mapViewCase(r mapViewReq, h hostLayout, self *ast.Identifier) 
 func (e *Emitter) mapViewCopy(view Type, h hostLayout, self *ast.Identifier) string {
 	dst := e.emitMapOrSetCreate(view)
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dst, slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", dst, slot))
 	e.define("__kml_mview_dst", Symbol{Ptr: slot, Ty: view})
 	d := ast.NewIdentifier("__kml_mview_dst", ast.Pos{})
 	var stmt ast.Statement
 	if view.IsSet() {
 		bx := ast.NewVarDeclaration("const", "__kml_mview_bx", anyAnnot(), ast.NewIdentifier("__kml_mview_x", ast.Pos{}), ast.Pos{})
-		body := ast.NewExpressionStatement(ast.NewCallExpression(ast.NewMemberExpression(d, "add", ast.Pos{}), []ast.Expression{ast.NewIdentifier("__kml_mview_bx", ast.Pos{})}, ast.Pos{}), ast.Pos{})
+		body := ast.NewExpressionStatement(collMethodCall(d, view, "add", []ast.Expression{ast.NewIdentifier("__kml_mview_bx", ast.Pos{})}, ast.Pos{}), ast.Pos{})
 		stmt = ast.NewForOfStatement("const", "__kml_mview_x", self, ast.NewBlockStatement([]ast.Statement{bx, body}, ast.Pos{}), ast.Pos{})
 	} else {
 		ent := ast.NewIdentifier("__kml_mview_e", ast.Pos{})
@@ -355,7 +355,7 @@ func (e *Emitter) mapViewCopy(view Type, h hostLayout, self *ast.Identifier) str
 		v := ast.NewIndexExpression(ent, ast.NewNumberLiteral("1", ast.Pos{}), ast.Pos{})
 		bk := ast.NewVarDeclaration("const", "__kml_mview_bk", anyAnnot(), k, ast.Pos{})
 		bv := ast.NewVarDeclaration("const", "__kml_mview_bv", anyAnnot(), v, ast.Pos{})
-		body := ast.NewExpressionStatement(ast.NewCallExpression(ast.NewMemberExpression(d, "set", ast.Pos{}), []ast.Expression{ast.NewIdentifier("__kml_mview_bk", ast.Pos{}), ast.NewIdentifier("__kml_mview_bv", ast.Pos{})}, ast.Pos{}), ast.Pos{})
+		body := ast.NewExpressionStatement(collMethodCall(d, view, "set", []ast.Expression{ast.NewIdentifier("__kml_mview_bk", ast.Pos{}), ast.NewIdentifier("__kml_mview_bv", ast.Pos{})}, ast.Pos{}), ast.Pos{})
 		stmt = ast.NewForOfStatement("const", "__kml_mview_e", self, ast.NewBlockStatement([]ast.Statement{bk, bv, body}, ast.Pos{}), ast.Pos{})
 	}
 	if err := e.emitStmt(stmt); err != nil {
@@ -365,7 +365,7 @@ func (e *Emitter) mapViewCopy(view Type, h hostLayout, self *ast.Identifier) str
 }
 
 // anyAnnot is the `any` annotation a generated declaration boxes through.
-func anyAnnot() *ast.TypeAnnotation { return &ast.TypeAnnotation{Name: "any", Source: "ts"} }
+func anyAnnot() ast.TypeNode { return ast.AnyAnnotation("ts") }
 
 // mapViewIR is the register type of a value of type t.
 func mapViewIR(t Type) string {

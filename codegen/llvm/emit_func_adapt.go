@@ -43,7 +43,7 @@ func adapterConvertible(concrete Type) bool {
 		return true // header boxing / { i1, T } wrapping (ADR-00478)
 	}
 	switch concrete.IR {
-	case "i64", "double", "i1", "ptr", "i8", "i16", "i32":
+	case "i64", "double", "i1", irPtr, "i8", "i16", "i32":
 		return true
 	}
 	return false
@@ -111,26 +111,32 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 		// More fixed source parameters than the target passes: only a
 		// target rest tail can supply them (`(a, b) => …` where `(...args:
 		// any[]) => void` is expected), each spread from it by position.
-		if tRest == nil || sRest != nil {
+		if tRest == nil && sRest == nil && trailingOptional(src, len(tFixed), len(sFixed)) {
+			// Parameters past the target's that the source takes absent
+			// (`m(x = 2)` overriding `m()`): each passed undefined.
+			needed = true
+			sFixed = sFixed[:len(tFixed)]
+		} else if tRest == nil || sRest != nil {
 			// Not spreadable by the direct adapter; the calling conventions
 			// still differ, so the conversion goes through the box.
 			return true, false
-		}
-		needed = true
-		te := restElem(*tRest)
-		for j, sp := range sFixed[len(tFixed):] {
-			if !spreadConvertible(te, sp) {
-				supported = false
+		} else {
+			needed = true
+			te := restElem(*tRest)
+			for j, sp := range sFixed[len(tFixed):] {
+				if !spreadConvertible(te, sp) {
+					supported = false
+				}
+				// A parameter the tail may not supply, with a default: the boxed
+				// closure's call fills it (with the earlier parameters in scope).
+				k := len(tFixed) + j
+				if (k < len(src.FuncParamDefaults) && src.FuncParamDefaults[k] != nil) ||
+					(k < len(src.FuncBodyDefaults) && src.FuncBodyDefaults[k] != nil) {
+					supported = false
+				}
 			}
-			// A parameter the tail may not supply, with a default: the boxed
-			// closure's call fills it (with the earlier parameters in scope).
-			k := len(tFixed) + j
-			if (k < len(src.FuncParamDefaults) && src.FuncParamDefaults[k] != nil) ||
-				(k < len(src.FuncBodyDefaults) && src.FuncBodyDefaults[k] != nil) {
-				supported = false
-			}
+			sFixed = sFixed[:len(tFixed)]
 		}
-		sFixed = sFixed[:len(tFixed)]
 	}
 	if len(sFixed) < len(tFixed) && sRest != nil {
 		// The target passes fixed arguments the source takes in its rest
@@ -154,6 +160,10 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 			// the argument is converted in turn (coerce, through the box when
 			// the direct adapter does not take it).
 			needed = true
+		} else if sp.IsArray() && tp.IsArray() && arrayElemsDiffer(sp, tp) {
+			// `{ chunk: any }[]` where the caller passes `any[]`: the
+			// elements convert through the box.
+			needed, supported = true, false
 		} else if storageIR(sp) != storageIR(tp) || sp.IsArray() != tp.IsArray() {
 			// A concrete-vs-concrete shape mismatch isn't this adapter's job
 			// (and shouldn't type-check upstream anyway).
@@ -171,7 +181,9 @@ func funcAdapterPlan(src, tgt Type) (needed, supported bool) {
 			te = *tRest.ElemType
 		}
 		if storageIR(se) != storageIR(te) || se.IsDynamic() != te.IsDynamic() {
-			supported = false
+			// (`number[]` passed where the source takes `any[]`, a
+			// builtin's value): the elements convert through the box.
+			needed, supported = true, false
 		}
 	}
 	if sRest != nil && tRest == nil {
@@ -229,7 +241,7 @@ func adapterSigParams(sig *[]string, ty Type, i int, isRest bool) (refs []string
 	if ty.IsArray() || isRest {
 		p := fmt.Sprintf("%%a%d_p", i)
 		l := fmt.Sprintf("%%a%d_l", i)
-		*sig = append(*sig, "ptr "+p, "i64 "+l)
+		*sig = append(*sig, irPtr+" "+p, "i64 "+l)
 		return []string{p, l}
 	}
 	r := fmt.Sprintf("%%a%d", i)
@@ -261,7 +273,9 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 	// slot): its box, which keeps the receiver a dynamic call passes (an
 	// emitter's `this`), behind a thunk of the target type; boxing the thunk
 	// again gives back that same function.
-	if src.FuncThis && !tgt.FuncThis {
+	// The other way (an arrow into a `this: T` slot): the thunk drops the
+	// receiver, as calling the box with one does.
+	if src.FuncThis != tgt.FuncThis {
 		if c, ok := e.emitBoxedClosureAs(orig, tgt); ok {
 			return c, true
 		}
@@ -270,11 +284,11 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 	// Unpack the original closure header (our env).
 	callee := func() (string, string) {
 		fpp, fp := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", fpp))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 0", fpp))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, fpp))
 		epp, ep := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", epp))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 1", epp))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ep, epp))
 		return fp, ep
 	}
 	name, ok := e.emitAdapterFunc("", src, tgt, callee)
@@ -284,13 +298,12 @@ func (e *Emitter) emitClosureAdapter(orig Value, tgt Type) (Value, bool) {
 	// The adapter's env is the original header: it is that function (TDD-00229).
 	e.registerFnMeta(name, "", 0, fnFlagThroughEnv)
 
-	e.ensureMalloc()
 	hdr := e.buildBuiltinClosure(name, orig.Ref)
 	// An absent function (an optional callback passed on) stays undefined:
 	// a header around null would pass the callee's `cb === undefined`.
 	isNull, ref := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, orig.Ref))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", ref, isNull, hdr))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, orig.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", ref, isNull, hdr))
 	return Value{Ref: ref, Ty: tgt}, true
 }
 
@@ -312,20 +325,20 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 
 	// Adapter signature (the target type's caller ABI) + converted call
 	// arguments (the source type's callee ABI).
-	sigParts := []string{"ptr %env"}
-	argParts := []string{"ptr " + ep}
+	sigParts := []string{irPtr + " %env"}
+	argParts := []string{irPtr + " " + ep}
 	// altParts/altTys call the source's dynamic entry (emit_dynentry.go): a
 	// class-typed parameter takes the argument's box itself; foreign holds,
 	// per such parameter, whether the argument is another object.
-	altParts := []string{"ptr " + ep}
-	altTys := []string{"ptr"}
+	altParts := []string{irPtr + " " + ep}
+	altTys := []string{irPtr}
 	var foreign []string
 	buildOK := true
 	syncAlt := func(from int, sp Type) {
 		// The arguments this parameter added, the same for the entry.
 		altParts = append(altParts, argParts[from:]...)
 		if sp.IsArray() {
-			altTys = append(altTys, "ptr", "i64")
+			altTys = append(altTys, irPtr, "i64")
 		} else if len(argParts) > from {
 			altTys = append(altTys, storageIR(sp))
 		}
@@ -346,10 +359,10 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 		switch {
 		case funcParamNeedsAdapt(sp, tp):
 			v := e.convert(Value{Ref: refs[0], Ty: tp}, sp)
-			argParts = append(argParts, "ptr "+v.Ref)
+			argParts = append(argParts, irPtr+" "+v.Ref)
 		case sp.IsDynamic() == tp.IsDynamic():
 			if sp.IsArray() {
-				argParts = append(argParts, "ptr "+refs[0], "i64 "+refs[1])
+				argParts = append(argParts, irPtr+" "+refs[0], "i64 "+refs[1])
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", storageIR(sp), refs[0]))
 			}
@@ -367,7 +380,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 				// The target's array param expects a header pointer and length
 				// (TDD-00127).
 				header, lReg := e.arrayArgFromAggregate(v)
-				argParts = append(argParts, "ptr "+header, "i64 "+lReg)
+				argParts = append(argParts, irPtr+" "+header, "i64 "+lReg)
 			} else {
 				argParts = append(argParts, fmt.Sprintf("%s %s", storageIR(sp), v.Ref))
 			}
@@ -388,6 +401,26 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			}
 		}
 		defer0()
+	}
+	// Source parameters past the target's with no tail to supply them:
+	// optional ones (funcAdapterPlan), each undefined.
+	if tRest == nil {
+		for j := len(tFixed); j < len(sFixed); j++ {
+			if !trailingOptional(src, j, j+1) {
+				buildOK = false
+				break
+			}
+			sp := sFixed[j]
+			u := e.convert(Value{Ref: "null", Ty: TypeUndefined}, sp)
+			if storageIR(u.Ty) != storageIR(sp) || sp.IsArray() {
+				buildOK = false
+				break
+			}
+			a := fmt.Sprintf("%s %s", storageIR(sp), u.Ref)
+			argParts = append(argParts, a)
+			altParts = append(altParts, a)
+			altTys = append(altTys, storageIR(sp))
+		}
 	}
 	// Rest tails.
 	if tRest != nil {
@@ -412,34 +445,34 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			}
 			altParts = append(altParts, a)
 			if sFixed[j].IsArray() {
-				altTys = append(altTys, "ptr", "i64")
+				altTys = append(altTys, irPtr, "i64")
 			} else {
 				altTys = append(altTys, storageIR(sFixed[j]))
 			}
 		}
 		if sRest != nil {
-			argParts = append(argParts, "ptr "+refs[0], "i64 "+refs[1])
-			altParts = append(altParts, "ptr "+refs[0], "i64 "+refs[1])
+			argParts = append(argParts, irPtr+" "+refs[0], "i64 "+refs[1])
+			altParts = append(altParts, irPtr+" "+refs[0], "i64 "+refs[1])
 		}
 		// else: target rest tail dropped.
 	} else if sRest != nil {
 		h := e.emptyArrayArgHeader()
-		argParts = append(argParts, "ptr "+h, "i64 0")
-		altParts = append(altParts, "ptr "+h, "i64 0")
+		argParts = append(argParts, irPtr+" "+h, "i64 0")
+		altParts = append(altParts, irPtr+" "+h, "i64 0")
 	}
 
 	// Indirect call typed by the source signature.
-	srcParamTys := []string{"ptr"}
+	srcParamTys := []string{irPtr}
 	for _, sp := range sFixed {
 		if sp.IsArray() {
-			srcParamTys = append(srcParamTys, "ptr", "i64")
+			srcParamTys = append(srcParamTys, irPtr, "i64")
 			continue
 		}
 		srcParamTys = append(srcParamTys, storageIR(sp))
 	}
 	if sRest != nil {
-		srcParamTys = append(srcParamTys, "ptr", "i64")
-		altTys = append(altTys, "ptr", "i64")
+		srcParamTys = append(srcParamTys, irPtr, "i64")
+		altTys = append(altTys, irPtr, "i64")
 	}
 	ownTypePart := "(" + strings.Join(srcParamTys, ", ") + ")"
 
@@ -472,6 +505,13 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
 			v := e.emitConvertPromise(Value{Ref: r, Ty: sr}, tr)
 			e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
+		case isNullableScalar(sr) && !isNullableScalar(tr) && reprKey(sr.withoutNullable()) == reprKey(tr):
+			// `T | undefined` (a body that may fall off the end) into a slot
+			// returning T: the undefined is T's undefined value.
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
+			v := e.convert(Value{Ref: r, Ty: sr}, tr)
+			e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
 		case sr.IsDynamic() == tr.IsDynamic():
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call %s %s %s(%s)", r, sr.LLVMRetType(), fnTypePart, fp, strings.Join(argParts, ", ")))
@@ -498,7 +538,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			if tr.IsArray() {
 				// The target's array return ABI is a header pointer (TDD-00213
 				// Stage 3): the unboxed array's header.
-				e.emitInstr(fmt.Sprintf("ret ptr %s", e.arrayReturnHeader(v)))
+				e.emitInstr(fmt.Sprintf("ret "+irPtr+" %s", e.arrayReturnHeader(v)))
 			} else {
 				e.emitInstr(fmt.Sprintf("ret %s %s", tr.LLVMRetType(), v.Ref))
 			}
@@ -511,9 +551,9 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", o, any, b))
 			any = o
 		}
-		altFp := e.emitDynEntryOf(fp)
+		altFp := e.emitDynEntryOf("%env")
 		has, use := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, altFp))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, altFp))
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", use, any, has))
 		altL, ownL := e.freshLabel("dynentry.alt"), e.freshLabel("dynentry.own")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", use, altL, ownL))
@@ -533,8 +573,7 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 	if name == "" {
 		return e.defineContentNamed("@__kml_fnadapt.", tr.LLVMRetType(), strings.Join(sigParts, ", "), body), true
 	}
-	e.functions.WriteString(fmt.Sprintf("\ndefine %s %s(%s) {\nentry:\n%s}\n",
-		tr.LLVMRetType(), name, strings.Join(sigParts, ", "), body))
+	e.writeFunc(fmt.Sprintf("%s %s(%s)", tr.LLVMRetType(), name, strings.Join(sigParts, ", ")), body)
 	return name, true
 }
 
@@ -551,11 +590,11 @@ func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", have, haveL, missL))
 	e.emitLabel(haveL)
 	data := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, hdr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, hdr))
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, storageIR(te), data, k))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %d", gep, storageIR(te), data, k))
 	el := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", el, storageIR(te), gep))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", el, storageIR(te), gep))
 	// Every element crosses as a box word, so a missing one can be
 	// undefined whatever the parameter's type.
 	word := el
@@ -566,14 +605,14 @@ func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool
 		}
 		word = b.Ref
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", word, slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", word, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(missL)
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	w := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, slot))
 	if sp.IsDynamic() {
 		return "i64 " + w, true
 	}
@@ -581,7 +620,7 @@ func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool
 	if sp.IsArray() {
 		// An array parameter takes its header pointer and length.
 		header, lReg := e.arrayArgFromAggregate(v)
-		return fmt.Sprintf("ptr %s, i64 %s", header, lReg), true
+		return fmt.Sprintf(irPtr+" %s, i64 %s", header, lReg), true
 	}
 	return fmt.Sprintf("%s %s", storageIR(sp), v.Ref), true
 }
@@ -589,6 +628,20 @@ func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool
 // hasParamDefaults reports whether a function type fills parameter
 // defaults through its calling convention (FuncParamDefaults evaluated by
 // the caller, or a FuncHasDefaultMask presence mask).
+// trailingOptional reports whether t's parameters [from, to) are all
+// optional ones a call may leave absent: undefined, filled by the body.
+func trailingOptional(t Type, from, to int) bool {
+	for k := from; k < to; k++ {
+		if k >= len(t.FuncParamOptional) || !t.FuncParamOptional[k] {
+			return false
+		}
+		if k < len(t.FuncParamDefaults) && t.FuncParamDefaults[k] != nil {
+			return false // the caller fills it
+		}
+	}
+	return to > from
+}
+
 func hasParamDefaults(t Type) bool {
 	if t.FuncHasDefaultMask {
 		return true
@@ -599,4 +652,34 @@ func hasParamDefaults(t Type) bool {
 		}
 	}
 	return false
+}
+
+// trailingOptionalOnly reports whether src differs from tgt only by the
+// optional parameters it adds past tgt's, with the same result type.
+func trailingOptionalOnly(src, tgt Type) bool {
+	sFixed, sRest := restOf(src)
+	tFixed, tRest := restOf(tgt)
+	if sRest != nil || tRest != nil || len(sFixed) <= len(tFixed) || !trailingOptional(src, len(tFixed), len(sFixed)) {
+		return false
+	}
+	for i, tp := range tFixed {
+		if storageIR(sFixed[i]) != storageIR(tp) || sFixed[i].IsDynamic() != tp.IsDynamic() || sFixed[i].IsArray() != tp.IsArray() {
+			return false
+		}
+	}
+	sr, tr := adapterRetOf(src), adapterRetOf(tgt)
+	return sr.IR == tr.IR && sr.IsDynamic() == tr.IsDynamic()
+}
+
+// arrayElemsDiffer reports two array types whose elements are stored
+// differently: one boxed and one concrete, or of different storage.
+func arrayElemsDiffer(a, b Type) bool {
+	ae, be := TypeF64, TypeF64
+	if a.ElemType != nil {
+		ae = *a.ElemType
+	}
+	if b.ElemType != nil {
+		be = *b.ElemType
+	}
+	return ae.IsDynamic() != be.IsDynamic() || storageIR(ae) != storageIR(be)
 }

@@ -10,6 +10,14 @@ typedef unsigned long long u64;
 extern int __kml_bigint_cmp(void *a, void *b);
 extern int __kml_bigint_cmp_double(void *a, double d);
 extern double __kml_any_tonum(i64 v);
+extern void *__kml_bigint_parse(const char *s);
+
+/* The string a boxed word holds (its NUL-terminated bytes), or null. */
+static const char *any_str(i64 w) {
+    u64 v = (u64)w;
+    if (v < 65536 || v >= (u64)KML_NB_DOUBLE_OFFSET || (v & 7) != 0) return 0;
+    return (const char *)v;
+}
 
 /* The bigint in a boxed word, or null when it holds none. */
 void *__kml_any_bigint_of(i64 w) {
@@ -28,6 +36,15 @@ int __kml_any_bigint_rel(i64 a, i64 b) {
     if (!ba && !bb) return 0;
     if (ba && bb) {
         c = __kml_bigint_cmp(ba, bb);
+    } else if (ba && any_str(b)) {
+        /* A string: its StringToBigInt, unordered when it is none. */
+        void *pb = __kml_bigint_parse(any_str(b));
+        if (!pb) return 4;
+        c = __kml_bigint_cmp(ba, pb);
+    } else if (bb && any_str(a)) {
+        void *pa = __kml_bigint_parse(any_str(a));
+        if (!pa) return 4;
+        c = __kml_bigint_cmp(pa, bb);
     } else if (ba) {
         double rd = __kml_any_tonum(b);
         if (rd != rd) return 4;

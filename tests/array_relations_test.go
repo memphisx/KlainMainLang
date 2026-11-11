@@ -52,3 +52,25 @@ const h: { [k: string]: number } = { a: 1 }
 console.log(a, b.length, c, d, f([1, 2, 3]), h)
 `)
 }
+
+// `// @ts-ignore` and `// @ts-expect-error` cover the next code line's type
+// errors, as tsc's do; an expect-error over none is TS2578.
+func TestE2ETsCommentDirectives(t *testing.T) {
+	assertSameAsNode(t, `
+function f(a: number) { return a * 2; }
+// @ts-expect-error
+console.log(f(1, 2));
+// @ts-ignore
+
+// a note between
+console.log(f(3, 4, 5));
+`)
+	_, err := parseAndCompile(`
+// @ts-expect-error
+const fine = 2;
+console.log(fine);
+`)
+	if err == nil || !strings.Contains(err.Error(), "Unused '@ts-expect-error' directive") {
+		t.Fatalf("want TS2578, got %v", err)
+	}
+}

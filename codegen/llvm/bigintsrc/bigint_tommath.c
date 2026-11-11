@@ -79,6 +79,46 @@ char *__kml_bigint_to_str(void *a, int radix) {
 	return s;
 }
 
+/* Node's buffer range check for writeBig(U)Int64*: NULL when a fits the
+ * 64-bit range, else the ERR_OUT_OF_RANGE message, Received in Node's
+ * underscore-grouped form (addNumericalSeparator). */
+char *__kml_bigint_range_msg(void *a, int is_signed) {
+	char *d = __kml_bigint_to_str(a, 10);
+	const char *lo = is_signed ? "-9223372036854775808" : "0";
+	const char *hi = is_signed ? "9223372036854775807" : "18446744073709551615";
+	int neg = d[0] == '-';
+	const char *mag = d + neg;
+	size_t n = strlen(mag);
+	/* Compare magnitudes as decimal strings. */
+	const char *bound = neg ? lo + (lo[0] == '-') : hi;
+	int fits;
+	if (neg && !is_signed) {
+		fits = 0;
+	} else {
+		size_t bn = strlen(bound);
+		fits = n < bn || (n == bn && strcmp(mag, bound) <= 0);
+	}
+	if (fits) {
+		free(d); /* scratch: the digit string */
+		return NULL;
+	}
+	/* Group by threes from the right, as Node does past four digits. */
+	char grouped[512];
+	size_t gi = 0;
+	if (neg) grouped[gi++] = '-';
+	for (size_t i = 0; i < n && gi < sizeof(grouped) - 4; i++) {
+		if (i > 0 && (n - i) % 3 == 0 && n >= 4) grouped[gi++] = '_';
+		grouped[gi++] = mag[i];
+	}
+	grouped[gi] = 0;
+	free(d); /* scratch: the digit string */
+	const char *range = is_signed ? ">= -(2n ** 63n) and < 2n ** 63n" : ">= 0n and < 2n ** 64n";
+	/* The caller copies it into a string at once. */
+	static _Thread_local char m[768];
+	snprintf(m, sizeof(m), "The value of \"value\" is out of range. It must be %s. Received %sn", range, grouped);
+	return m;
+}
+
 #define BI_BINOP(name, call)                       \
 	void *name(void *a, void *b) {                  \
 		mp_int *r = bi_new();                       \
@@ -150,20 +190,19 @@ void *__kml_bigint_not(void *a) {
 	return r;
 }
 
-void *__kml_bigint_shl(void *a, void *b) {
-	long long n = (long long)mp_get_i64((const mp_int *)b);
+/* a << n: a negative count shifts right (sign-propagating, so -5n >> 1n is
+ * -3n, matching JS). */
+static void *bi_shift(const mp_int *a, long long n) {
 	mp_int *r = bi_new();
-	mp_mul_2d((const mp_int *)a, (int)n, r);
+	if (n >= 0) mp_mul_2d(a, (int)n, r);
+	else mp_signed_rsh(a, (int)-n, r);
 	return r;
 }
 
-/* Arithmetic (sign-propagating) right shift, so -5n >> 1n == -3n, matching JS. */
-void *__kml_bigint_shr(void *a, void *b) {
-	long long n = (long long)mp_get_i64((const mp_int *)b);
-	mp_int *r = bi_new();
-	mp_signed_rsh((const mp_int *)a, (int)n, r);
-	return r;
-}
+void *__kml_bigint_shl(void *a, void *b) { return bi_shift((const mp_int *)a, (long long)mp_get_i64((const mp_int *)b)); }
+
+/* Arithmetic right shift; a negative count shifts left. */
+void *__kml_bigint_shr(void *a, void *b) { return bi_shift((const mp_int *)a, -(long long)mp_get_i64((const mp_int *)b)); }
 
 /* BigInt.asUintN(bits, x): x modulo 2^bits taken non-negative (the low `bits`
  * bits). mp_mod_2d truncates (keeps the dividend's sign) for a negative x, so

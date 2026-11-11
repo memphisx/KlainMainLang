@@ -111,40 +111,49 @@ func TestE2EDynamicImportIsolatedNonASCIIPath(t *testing.T) {
 	}
 }
 
-// TestE2EDynamicImportNonLiteralRejected confirms a runtime-computed specifier
-// is a clean compile error, not a silent gap.
-func TestE2EDynamicImportNonLiteralRejected(t *testing.T) {
+// A computed specifier selects, at run time, among the modules the file
+// names in relative-path string literals: ToString of it (a throw rejects),
+// the module it names, else Node's ERR_MODULE_NOT_FOUND rejection; a throw
+// evaluating it is the call's own.
+func TestE2EDynamicImportComputedSpecifier(t *testing.T) {
+	sharedModeImport(t, map[string]string{
+		"mod.ts": "export const x: number = 42;\n",
+		"entry.ts": "const o = { toString(): string { return './mod'; } };\n" +
+			"const s: string = String(o);\n" +
+			"const m = await import(s);\nconsole.log('x', m.x);\n" +
+			"const bad: any = { toString() { throw new RangeError('ts'); } };\n" +
+			"await import(bad).catch((e: any) => console.log(e.constructor.name, e.message));\n" +
+			"const miss: string = './missing' + '.js';\n" +
+			"await import(miss).catch((e: any) => console.log(e.code));\n" +
+			"try { import((() => { throw new TypeError('sync'); })()); } catch (e: any) { console.log('sync', e.message); }\n",
+	}, func(t *testing.T, out string, code int) {
+		if want := "x 42\nRangeError ts\nERR_MODULE_NOT_FOUND\nsync sync\n"; out != want || code != 0 {
+			t.Errorf("exit %d, output:\ngot  %q\nwant %q", code, out, want)
+		}
+	})
+}
+
+// A computed specifier whose type is not string is tsc's TS7036.
+func TestE2EDynamicImportComputedSpecifierType(t *testing.T) {
 	cli := buildCLI(t)
 	dir := tempDir(t)
 	writeFile(t, filepath.Join(dir, "entry.ts"),
-		"const p = \"./mod\";\nasync function main(): Promise<void> { await import(p); }\nmain();\n")
-	compile := exec.Command(cli, "-dynamic-import=isolated", filepath.Join(dir, "entry.ts"))
-	out, err := compile.CombinedOutput()
-	if err == nil {
-		t.Fatalf("expected compile failure for non-literal specifier, got success")
-	}
-	if !strings.Contains(string(out), "string-literal specifier") {
-		t.Errorf("expected string-literal-specifier error, got: %s", out)
+		"const o = { toString() { return './mod'; } };\nimport(o).then(() => {});\nexport {};\n")
+	out, err := exec.Command(cli, filepath.Join(dir, "entry.ts")).CombinedOutput()
+	if err == nil || !strings.Contains(string(out), "Dynamic import's specifier must be of type 'string'") {
+		t.Fatalf("want TS7036, got %v: %s", err, out)
 	}
 }
 
-// TestE2EDynamicImportBuiltinRejected: import() of any builtin module, one
-// written in TypeScript (`node:path`) or a `node:`-prefixed one, is the
-// clean compile error the bare names give.
-func TestE2EDynamicImportBuiltinRejected(t *testing.T) {
-	cli := buildCLI(t)
-	dir := tempDir(t)
-	for _, m := range []string{"node:path", "path", "node:https", "https"} {
-		writeFile(t, filepath.Join(dir, "entry.ts"),
-			"async function main(): Promise<void> { await import(\""+m+"\"); }\nmain();\n")
-		out, err := exec.Command(cli, filepath.Join(dir, "entry.ts")).CombinedOutput()
-		if err == nil {
-			t.Fatalf("import(%q): expected a compile failure, got success", m)
-		}
-		if want := "dynamic import('" + m + "') of a built-in module is not supported"; !strings.Contains(string(out), want) {
-			t.Errorf("import(%q): expected %q, got: %s", m, want, out)
-		}
-	}
+// TestE2EDynamicImportBuiltinNamespaces: import() of a builtin module is a
+// promise of its namespace, with or without `node:`, as Node's.
+func TestE2EDynamicImportBuiltinNamespaces(t *testing.T) {
+	assertSameAsNode(t, `
+const a = await import("node:path"); const b = await import("path")
+console.log(typeof a.join, a.join("x", "y"), b.sep === a.sep)
+const c = await import("node:https"); const d = await import("https")
+console.log(typeof c.request, typeof d.get)
+`)
 }
 
 // TestE2EDynamicImportIsolatedIslandNoAny: a lazy island compiles under the

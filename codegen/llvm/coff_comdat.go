@@ -60,7 +60,7 @@ func coffWeakComdats(ll string) string {
 				lines[i] = strings.TrimSuffix(ln, "{") + "comdat {"
 			}
 		} else if m := coffWeakVarRe.FindStringSubmatch(ln); m != nil {
-			if strings.Contains(ln, " = weak global ptr null") {
+			if strings.Contains(ln, " = weak"+irGlobalAS+" global "+irPtr+" null") {
 				// A hook (a weak null pointer a C runtime file may define as
 				// its routine): in a comdat it would be a strong definition
 				// colliding with that file's.

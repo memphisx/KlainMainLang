@@ -16,11 +16,12 @@ var h2oSource string
 // H2OSource returns the h2o backend's C runtime.
 func H2OSource() string { return h2oSource }
 
-// ensureH2ONatives compiles the h2o backend's natives and links libh2o: the
-// `@link h2o` of lib/native.d.ts.
+// ensureH2ONatives is the `@link h2o` of lib/native.d.ts: the h2o unit is
+// linked by the symbols it names (a library unit).
 func (e *Emitter) ensureH2ONatives() {
-	e.ensureNativePool()
-	e.usedH2ONatives = true
+	e.ensureMicrotasks()
+	e.ensureStrHeaderRuntime()
+	e.ensureThreadPool()
 }
 
 // LocateH2O returns libh2o's cflags and link flags (pkg-config's libh2o,

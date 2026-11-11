@@ -12,19 +12,19 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **758 passed**, 1837 failed, 1362 skipped (out of scope).
+3957 files total: **1059 passed**, 1524 failed, 1374 skipped (out of scope).
 
-Of the 2595 files that compiled far enough to run, **758 passed (29.2%)**.
+Of the 2583 files that compiled far enough to run, **1059 passed (41.0%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 740 | 1741 | 1062 | 3543 |
-| sequential | 8 | 23 | 90 | 121 |
-| es-module | 4 | 55 | 116 | 175 |
-| message | 1 | 8 | 2 | 11 |
-| internet | 5 | 10 | 23 | 38 |
+| parallel | 1029 | 1444 | 1070 | 3543 |
+| sequential | 14 | 15 | 92 | 121 |
+| es-module | 7 | 50 | 118 | 175 |
+| message | 2 | 7 | 2 | 11 |
+| internet | 7 | 8 | 23 | 38 |
 | pummel | 0 | 0 | 52 | 52 |
 | known_issues | 0 | 0 | 17 | 17 |
 
@@ -32,45 +32,45 @@ Of the 2595 files that compiled far enough to run, **758 passed (29.2%)**.
 
 | Module | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| http | 159 | 190 | 40 | 389 |
-| http2 | 97 | 113 | 48 | 258 |
-| fs | 75 | 86 | 88 | 249 |
-| tls | 11 | 119 | 71 | 201 |
-| stream | 60 | 93 | 20 | 173 |
-| net | 38 | 90 | 42 | 170 |
-| worker | 11 | 107 | 19 | 137 |
-| esm | 2 | 46 | 80 | 128 |
+| http | 211 | 137 | 41 | 389 |
+| http2 | 114 | 96 | 48 | 258 |
+| fs | 92 | 69 | 88 | 249 |
+| tls | 27 | 103 | 71 | 201 |
+| stream | 103 | 50 | 20 | 173 |
+| net | 55 | 73 | 42 | 170 |
+| worker | 25 | 92 | 20 | 137 |
+| esm | 5 | 42 | 81 | 128 |
 | child | 13 | 52 | 46 | 111 |
 | crypto | 15 | 45 | 42 | 102 |
 | vm | 0 | 75 | 19 | 94 |
-| process | 15 | 54 | 21 | 90 |
-| dgram | 36 | 24 | 26 | 86 |
-| cluster | 35 | 28 | 22 | 85 |
+| process | 27 | 42 | 21 | 90 |
+| dgram | 43 | 17 | 26 | 86 |
+| cluster | 43 | 20 | 22 | 85 |
 | repl | 1 | 36 | 41 | 78 |
-| https | 13 | 41 | 14 | 68 |
+| https | 21 | 33 | 14 | 68 |
 | inspector | 1 | 1 | 64 | 66 |
-| whatwg | 11 | 13 | 39 | 63 |
-| buffer | 8 | 39 | 15 | 62 |
-| timers | 19 | 24 | 16 | 59 |
-| zlib | 19 | 28 | 6 | 53 |
+| whatwg | 13 | 10 | 40 | 63 |
+| buffer | 17 | 30 | 15 | 62 |
+| timers | 27 | 16 | 16 | 59 |
+| zlib | 27 | 20 | 6 | 53 |
 | domain | 0 | 28 | 22 | 50 |
-| require | 2 | 4 | 42 | 48 |
-| async | 0 | 43 | 4 | 47 |
-| runner | 2 | 20 | 23 | 45 |
-| dns | 9 | 11 | 20 | 40 |
+| require | 2 | 3 | 43 | 48 |
+| async | 6 | 34 | 7 | 47 |
+| runner | 4 | 18 | 23 | 45 |
+| dns | 11 | 9 | 20 | 40 |
 | debugger | 0 | 0 | 38 | 38 |
 | trace | 0 | 20 | 14 | 34 |
-| diagnostics | 10 | 19 | 3 | 32 |
-| module | 0 | 17 | 12 | 29 |
+| diagnostics | 16 | 13 | 3 | 32 |
+| module | 1 | 16 | 12 | 29 |
 | snapshot | 0 | 12 | 17 | 29 |
-| webcrypto | 0 | 19 | 10 | 29 |
-| event | 3 | 19 | 6 | 28 |
+| webcrypto | 2 | 17 | 10 | 29 |
+| event | 9 | 13 | 6 | 28 |
 | permission | 0 | 18 | 10 | 28 |
 | util | 1 | 10 | 17 | 28 |
 | stream2 | 9 | 15 | 3 | 27 |
 | eslint | 0 | 0 | 24 | 24 |
 | internal | 0 | 1 | 21 | 22 |
-| readline | 6 | 9 | 6 | 21 |
+| readline | 7 | 5 | 9 | 21 |
 | cli | 0 | 11 | 9 | 20 |
 
 ## Top failure reasons
@@ -79,46 +79,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 139 | RUNTIME_NONZERO_EXIT: TypeError: Cannot read properties of undefined (reading '%s') |
-| 137 | RUNTIME_NONZERO_EXIT: AssertionError: Expected values to be strictly equal: |
-| 86 | COMPILE_ERROR: undefined variable '%s' |
-| 84 | MODULE_NOT_IMPLEMENTED: vm |
-| 61 | COMPILE_ERROR: object has no field '%s' |
-| 53 | MODULE_NOT_IMPLEMENTED: async_hooks |
-| 52 | RUN_TIMEOUT |
-| 51 | COMPILE_ERROR: undefined function or closure '%s' |
-| 48 | RUNTIME_NONZERO_EXIT: AssertionError: Expected values to be strictly deep-equal: |
-| 39 | COMPILE_ERROR: unknown class '%s' |
-| 36 | COMPILE_ERROR: '%s' has no exported member '%s' |
+| 187 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: |
+| 85 | MODULE_NOT_IMPLEMENTED: vm |
+| 77 | RUN_TIMEOUT |
+| 69 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal: |
+| 55 | RUNTIME_NONZERO_EXIT: TypeError: Cannot read properties of undefined (reading '%s') |
+| 41 | COMPILE_ERROR: '%s' has no exported member '%s' |
+| 40 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Missing expected exception. |
+| 40 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value: |
+| 37 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Missing expected exception (TypeError). |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
-| 28 | COMPILE_ERROR: property '%s' does not exist on type '%s' |
-| 27 | RUNTIME_NONZERO_EXIT: AssertionError: The expression evaluated to a falsy value: |
-| 27 | RUNTIME_NONZERO_EXIT: Error: fork('%s'): only this program's own module can be forked; a different m… |
-| 26 | RUNTIME_NONZERO_EXIT: Error: Worker code given as a string (eval: true) cannot run: a worker is comp… |
-| 24 | COMPILE_ERROR: Buffer.concat's list must be an array of Buffers or byte TypedArrays |
-| 24 | COMPILE_ERROR: internal: emitStaticObjToBag on non-object type i64 |
-| 24 | RUNTIME_NONZERO_EXIT: AssertionError: Missing expected exception (TypeError). |
-| 23 | MODULE_NOT_IMPLEMENTED: perf_hooks |
-| 23 | RUNTIME_NONZERO_EXIT: AssertionError: Missing expected exception. |
-| 22 | RUNTIME_NONZERO_EXIT: error: this compiled binary cannot act as the Node interpreter (a self-spawn v… |
-| 20 | COMPILE_ERROR: .then is currently supported only on a promise from a may-suspend async function or a… |
-| 20 | MODULE_NOT_IMPLEMENTED: v8 |
+| 30 | RUNTIME_NONZERO_EXIT: Error [ERR_CHILD_PROCESS_FORK_MODULE]: fork('%s'): only this program's own mod… |
+| 25 | RUNTIME_NONZERO_EXIT: error: this compiled binary cannot act as the Node interpreter (a self-spawn v… |
+| 22 | RUNTIME_NONZERO_EXIT: TypeError: async_hooks.createHook is not a function |
+| 21 | MODULE_NOT_IMPLEMENTED: v8 |
+| 20 | RUNTIME_NONZERO_EXIT: signal: segmentation fault (core dumped) |
+| 19 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: The input did not match the regular expression… |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
+| 18 | RUNTIME_NONZERO_EXIT: Mismatched <anonymous> function calls. Expected exactly 1, actual 0. |
 | 17 | MODULE_NOT_IMPLEMENTED: module |
-| 17 | RUNTIME_NONZERO_EXIT: signal: segmentation fault (core dumped) |
-| 16 | RUNTIME_NONZERO_EXIT: exit status 1 |
-| 15 | COMPILE_ERROR: nested function declarations are only supported directly in an enclosing function's o… |
-| 15 | RUNTIME_NONZERO_EXIT: [thrown value] |
-| 14 | COMPILE_ERROR: a number has no method '%s' |
-| 14 | RUNTIME_NONZERO_EXIT: Mismatched <anonymous> function calls. Expected exactly 1, actual 0. |
-| 13 | COMPILE_ERROR: expected }, got : |
-| 11 | RUNTIME_NONZERO_EXIT: AssertionError: function should not have been called |
-| 10 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
-| 10 | COMPILE_ERROR: only simple function calls are supported (the callee is not a named function, a funct… |
-| 10 | RUNTIME_NONZERO_EXIT: AssertionError: Values have same structure but are not reference-equal: |
-| 9 | RUNTIME_NONZERO_EXIT: Error: Cannot find module '%s' |
+| 16 | COMPILE_ERROR: expected }, got : |
+| 16 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: function should not have been called at file:/… |
+| 13 | RUNTIME_NONZERO_EXIT: Error: Cannot find module '%s' |
+| 11 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Values have same structure but are not referen… |
+| 10 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Expected "actual" to be reference-equal to "ex… |
+| 9 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): import path '%s' must start with '%s' or '%s'… |
 | 8 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): cannot find module '%s' (resolved to <path>) |
-| 8 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): import path '%s' must start with '%s' or '%s'… |
+| 8 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: error: this compiled binary cannot act as the … |
+| 7 | COMPILE_ERROR: internal: '%s' is not an object |
+| 7 | OUTPUT_MISMATCH: combined output does not match the .out baseline |
+| 7 | RUNTIME_NONZERO_EXIT: ReferenceError: timers is not defined |
+| 7 | RUNTIME_NONZERO_EXIT: TypeError: global.gc is not a function |
+| 6 | COMPILE_ERROR: expected ), got , |
+| 6 | MODULE_NOT_IMPLEMENTED: _http_common |
+| 6 | RUNTIME_NONZERO_EXIT: Mismatched noop function calls. Expected exactly 1, actual 0. |
+| 6 | RUNTIME_NONZERO_EXIT: ReferenceError: EventEmitter is not defined |
+| 5 | COMPILE_ERROR: identifier '%s' has already been declared |
+| 5 | COMPILE_ERROR: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not … |
+| 5 | MODULE_NOT_IMPLEMENTED: _http_server |
+| 5 | MODULE_NOT_IMPLEMENTED: sqlite |
+| 5 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Missing expected exception (RangeError). |
 
 ## Top skip reasons
 
@@ -128,7 +128,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 |---|---|
 | 144 | no V8 inspector — a compiled native binary has none (like Node's --without-inspector build) |
 | 82 | Node-internal harness file require('internal/test/binding') |
-| 70 | uses Function.prototype.call (dynamic dispatch, not targeted) |
+| 71 | uses Function.prototype.call (dynamic dispatch, not targeted) |
 | 62 | requires Node common harness (common.invalidArgTypeHelper) |
 | 57 | requires Node common harness (destructured common.spawnPromisified) |
 | 52 | pummel stress suite — resource-scale runs, not executed (counted, not hidden) |
@@ -138,9 +138,9 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 24 | requires Node common harness (common.skipIfEslintMissing) |
 | 22 | Node-internal harness file require('../common/arraystream') |
 | 22 | requires Node common harness (common.PORT) |
+| 20 | Node-internal harness file require('internal/util') |
 | 20 | requires Node common harness (common.mustNotMutateObjectDeep) |
 | 20 | uses Function.prototype.apply (dynamic dispatch, not targeted) |
-| 19 | Node-internal harness file require('internal/util') |
 | 18 | requires Node common harness (common.opensslCli) |
 | 17 | known_issues — upstream documents these as expected failures, not executed (counted, not hidden) |
 | 16 | Node-internal harness file require('../common/crypto') |
@@ -152,66 +152,99 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | requires Node common harness (common.allowGlobals) |
 
-## Passing files (758)
+## Passing files (1059)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
 | File | Module | Default-only |
 |---|---|---|
+| `es-module/test-esm-assert-strict.mjs` | esm |  |
 | `es-module/test-esm-child-process-fork-main.mjs` | esm |  |
+| `es-module/test-esm-dns-promises.mjs` | esm |  |
 | `es-module/test-esm-fs-promises.mjs` | esm |  |
+| `es-module/test-esm-loader-cache-clearing.js` | esm |  |
 | `es-module/test-require-module-detect-entry-point-aou.js` | require |  |
 | `es-module/test-require-module-detect-entry-point.js` | require |  |
 | `internet/test-dns-any.js` | dns |  |
+| `internet/test-dns-promises-resolve.js` | dns |  |
 | `internet/test-dns-regress-6244.js` | dns |  |
 | `internet/test-http-dns-fail.js` | http |  |
+| `internet/test-https-issue-43963.js` | https |  |
 | `internet/test-net-connect-timeout.js` | net |  |
 | `internet/test-net-connect-unref.js` | net |  |
 | `message/console_assert.js` | console_assert |  |
+| `message/max_tick_depth.js` | max_tick_depth |  |
 | `parallel/test-arm-math-illegal-instruction.js` | arm |  |
+| `parallel/test-assert-calltracker-report.js` | assert |  |
+| `parallel/test-assert-calltracker-verify.js` | assert |  |
 | `parallel/test-assert-fail.js` | assert |  |
 | `parallel/test-assert-if-error.js` | assert |  |
+| `parallel/test-async-hooks-run-in-async-scope-caught-exception.js` | async |  |
+| `parallel/test-async-hooks-run-in-async-scope-this-arg.js` | async |  |
+| `parallel/test-async-local-storage-bind.js` | async |  |
+| `parallel/test-async-local-storage-deep-stack.js` | async |  |
+| `parallel/test-async-local-storage-exit-does-not-leak.js` | async |  |
+| `parallel/test-async-local-storage-snapshot.js` | async |  |
+| `parallel/test-atomics-wake.js` | atomics |  |
+| `parallel/test-bad-unicode.js` | bad |  |
 | `parallel/test-beforeexit-event-exit.js` | beforeexit |  |
+| `parallel/test-blob-createobjecturl.js` | blob |  |
 | `parallel/test-buffer-ascii.js` | buffer |  |
 | `parallel/test-buffer-badhex.js` | buffer |  |
+| `parallel/test-buffer-bigint64.js` | buffer |  |
+| `parallel/test-buffer-fakes.js` | buffer |  |
+| `parallel/test-buffer-inheritance.js` | buffer |  |
 | `parallel/test-buffer-isencoding.js` | buffer |  |
+| `parallel/test-buffer-new.js` | buffer |  |
+| `parallel/test-buffer-no-negative-allocation.js` | buffer |  |
 | `parallel/test-buffer-nopendingdep-map.js` | buffer |  |
+| `parallel/test-buffer-pending-deprecation.js` | buffer |  |
 | `parallel/test-buffer-prototype-inspect.js` | buffer |  |
+| `parallel/test-buffer-safe-unsafe.js` | buffer |  |
 | `parallel/test-buffer-swap.js` | buffer |  |
 | `parallel/test-buffer-tostring.js` | buffer |  |
 | `parallel/test-buffer-zero-fill-reset.js` | buffer |  |
+| `parallel/test-buffer-zero-fill.js` | buffer |  |
 | `parallel/test-child-process-exec-any-shells-windows.js` | child |  |
 | `parallel/test-child-process-exec-cwd.js` | child |  |
 | `parallel/test-child-process-exec-error.js` | child |  |
 | `parallel/test-child-process-exec-stdout-stderr-data-string.js` | child |  |
+| `parallel/test-child-process-flush-stdio.js` | child |  |
 | `parallel/test-child-process-fork-url.mjs` | child |  |
 | `parallel/test-child-process-kill.js` | child |  |
 | `parallel/test-child-process-send-cb.js` | child |  |
 | `parallel/test-child-process-send-utf8.js` | child |  |
 | `parallel/test-child-process-set-blocking.js` | child |  |
-| `parallel/test-child-process-spawn-controller.js` | child |  |
 | `parallel/test-child-process-spawn-error.js` | child |  |
 | `parallel/test-child-process-spawn-event.js` | child |  |
 | `parallel/test-cluster-bind-privileged-port.js` | cluster |  |
 | `parallel/test-cluster-call-and-destroy.js` | cluster |  |
 | `parallel/test-cluster-cwd.js` | cluster |  |
+| `parallel/test-cluster-dgram-ipv6only.js` | cluster |  |
 | `parallel/test-cluster-dgram-reuse.js` | cluster |  |
+| `parallel/test-cluster-disconnect-before-exit.js` | cluster |  |
 | `parallel/test-cluster-disconnect-exitedAfterDisconnect-race.js` | cluster |  |
 | `parallel/test-cluster-disconnect-idle-worker.js` | cluster |  |
 | `parallel/test-cluster-disconnect-leak.js` | cluster |  |
+| `parallel/test-cluster-disconnect-race.js` | cluster |  |
+| `parallel/test-cluster-disconnect-unshared-tcp.js` | cluster |  |
 | `parallel/test-cluster-disconnect-with-no-workers.js` | cluster |  |
 | `parallel/test-cluster-fork-env.js` | cluster |  |
 | `parallel/test-cluster-invalid-message.js` | cluster |  |
 | `parallel/test-cluster-kill-infinite-loop.js` | cluster |  |
 | `parallel/test-cluster-listening-port.js` | cluster |  |
+| `parallel/test-cluster-message.js` | cluster |  |
+| `parallel/test-cluster-net-listen-ipv6only-false.js` | cluster |  |
 | `parallel/test-cluster-net-listen-relative-path.js` | cluster |  |
 | `parallel/test-cluster-net-server-drop-connection.js` | cluster |  |
 | `parallel/test-cluster-rr-handle-close.js` | cluster |  |
 | `parallel/test-cluster-rr-handle-keep-loop-alive.js` | cluster |  |
 | `parallel/test-cluster-rr-handle-ref-unref.js` | cluster |  |
 | `parallel/test-cluster-rr-ref.js` | cluster |  |
+| `parallel/test-cluster-send-deadlock.js` | cluster |  |
 | `parallel/test-cluster-send-handle-twice.js` | cluster |  |
 | `parallel/test-cluster-send-socket-to-worker-http-server.js` | cluster |  |
+| `parallel/test-cluster-setup-primary-argv.js` | cluster |  |
 | `parallel/test-cluster-setup-primary-emit.js` | cluster |  |
 | `parallel/test-cluster-setup-primary.js` | cluster |  |
 | `parallel/test-cluster-shared-handle-bind-privileged-port.js` | cluster |  |
@@ -226,6 +259,12 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-cluster-worker-isdead.js` | cluster |  |
 | `parallel/test-cluster-worker-no-exit.js` | cluster |  |
 | `parallel/test-cluster-worker-wait-server-close.js` | cluster |  |
+| `parallel/test-console-async-write-error.js` | console |  |
+| `parallel/test-console-log-stdio-broken-dest.js` | console |  |
+| `parallel/test-console-log-throw-primitive.js` | console |  |
+| `parallel/test-console-no-swallow-stack-overflow.js` | console |  |
+| `parallel/test-console-self-assign.js` | console |  |
+| `parallel/test-console-sync-write-error.js` | console |  |
 | `parallel/test-crypto-from-binary.js` | crypto |  |
 | `parallel/test-crypto-keygen-async-elliptic-curve-jwk-ec.js` | crypto |  |
 | `parallel/test-crypto-keygen-async-elliptic-curve-jwk-rsa.js` | crypto |  |
@@ -239,13 +278,15 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-crypto-padding-aes256.js` | crypto |  |
 | `parallel/test-crypto-publicDecrypt-fails-first-time.js` | crypto |  |
 | `parallel/test-crypto-randomfillsync-regression.js` | crypto |  |
+| `parallel/test-crypto-randomuuid.js` | crypto |  |
 | `parallel/test-crypto-update-encoding.js` | crypto |  |
-| `parallel/test-crypto-webcrypto-aes-decrypt-tag-too-small.js` | crypto |  |
 | `parallel/test-datetime-change-notify.js` | datetime |  |
 | `parallel/test-destroy-socket-in-lookup.js` | destroy |  |
 | `parallel/test-dgram-abort-closed.js` | dgram |  |
 | `parallel/test-dgram-address.js` | dgram |  |
+| `parallel/test-dgram-async-dispose.mjs` | dgram |  |
 | `parallel/test-dgram-bind-error-repeat.js` | dgram |  |
+| `parallel/test-dgram-bind-socket-close-before-lookup.js` | dgram |  |
 | `parallel/test-dgram-bind.js` | dgram |  |
 | `parallel/test-dgram-bytes-length.js` | dgram |  |
 | `parallel/test-dgram-close-in-listening.js` | dgram |  |
@@ -255,11 +296,14 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-dgram-connect-send-callback-multi-buffer.js` | dgram |  |
 | `parallel/test-dgram-connect-send-default-host.js` | dgram |  |
 | `parallel/test-dgram-connect-send-empty-array.js` | dgram |  |
+| `parallel/test-dgram-connect-send-empty-buffer.js` | dgram |  |
+| `parallel/test-dgram-connect-send-empty-packet.js` | dgram |  |
 | `parallel/test-dgram-connect-send-multi-buffer-copy.js` | dgram |  |
 | `parallel/test-dgram-connect-send-multi-string-array.js` | dgram |  |
 | `parallel/test-dgram-connect.js` | dgram |  |
 | `parallel/test-dgram-createSocket-type.js` | dgram |  |
 | `parallel/test-dgram-error-message-address.js` | dgram |  |
+| `parallel/test-dgram-implicit-bind.js` | dgram |  |
 | `parallel/test-dgram-ipv6only.js` | dgram |  |
 | `parallel/test-dgram-listen-after-bind.js` | dgram |  |
 | `parallel/test-dgram-oob-buffer.js` | dgram |  |
@@ -272,6 +316,8 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-dgram-send-callback-multi-buffer.js` | dgram |  |
 | `parallel/test-dgram-send-callback-recursive.js` | dgram |  |
 | `parallel/test-dgram-send-empty-array.js` | dgram |  |
+| `parallel/test-dgram-send-empty-buffer.js` | dgram |  |
+| `parallel/test-dgram-send-empty-packet.js` | dgram |  |
 | `parallel/test-dgram-send-invalid-msg-type.js` | dgram |  |
 | `parallel/test-dgram-send-multi-buffer-copy.js` | dgram |  |
 | `parallel/test-dgram-send-multi-string-array.js` | dgram |  |
@@ -279,35 +325,54 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-dgram-udp4.js` | dgram |  |
 | `parallel/test-dgram-unref-in-cluster.js` | dgram |  |
 | `parallel/test-dgram-unref.js` | dgram |  |
+| `parallel/test-diagnostics-channel-bind-store.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-has-subscribers.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-safe-subscriber-errors.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-symbol-named.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-sync-unsubscribe.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-tracing-channel-callback-early-exit.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-tracing-channel-callback-error.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-tracing-channel-callback-run-stores.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-tracing-channel-callback.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-tracing-channel-promise-early-exit.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-tracing-channel-promise-error.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-tracing-channel-promise-run-stores.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-tracing-channel-promise.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-tracing-channel-sync-early-exit.js` | diagnostics |  |
 | `parallel/test-diagnostics-channel-tracing-channel-sync-error.js` | diagnostics |  |
+| `parallel/test-diagnostics-channel-tracing-channel-sync-run-stores.js` | diagnostics |  |
 | `parallel/test-dns-cancel-reverse-lookup.js` | dns |  |
 | `parallel/test-dns-channel-cancel.js` | dns |  |
+| `parallel/test-dns-channel-timeout.js` | dns |  |
 | `parallel/test-dns-lookupService-promises.js` | dns |  |
 | `parallel/test-dns-multi-channel.js` | dns |  |
 | `parallel/test-dns-resolvens-typeerror.js` | dns |  |
 | `parallel/test-dns-setlocaladdress.js` | dns |  |
 | `parallel/test-dns-setserver-when-querying.js` | dns |  |
 | `parallel/test-eval.js` | eval |  |
+| `parallel/test-event-emitter-check-listener-leaks.js` | event |  |
 | `parallel/test-event-emitter-invalid-listener.js` | event |  |
+| `parallel/test-event-emitter-listener-count.js` | event |  |
+| `parallel/test-event-emitter-listeners.js` | event |  |
+| `parallel/test-event-emitter-modify-in-emit.js` | event |  |
+| `parallel/test-event-emitter-remove-listeners.js` | event |  |
+| `parallel/test-event-emitter-set-max-listeners-side-effects.js` | event |  |
 | `parallel/test-event-emitter-special-event-names.js` | event |  |
 | `parallel/test-event-emitter-symbols.js` | event |  |
 | `parallel/test-events-list.js` | events |  |
 | `parallel/test-events-listener-count-with-listener.js` | events |  |
+| `parallel/test-events-uncaught-exception-stack.js` | events |  |
 | `parallel/test-eventsource.js` | eventsource |  |
+| `parallel/test-eventtarget-once-twice.js` | eventtarget |  |
+| `parallel/test-exception-handler.js` | exception |  |
+| `parallel/test-exception-handler2.js` | exception |  |
 | `parallel/test-file-read-noexist.js` | file |  |
 | `parallel/test-file-write-stream.js` | file |  |
 | `parallel/test-file-write-stream2.js` | file |  |
 | `parallel/test-file-write-stream4.js` | file |  |
+| `parallel/test-fs-buffer.js` | fs |  |
 | `parallel/test-fs-buffertype-writesync.js` | fs |  |
+| `parallel/test-fs-chmod-mask.js` | fs |  |
 | `parallel/test-fs-chown-type-check.js` | fs |  |
 | `parallel/test-fs-close.js` | fs |  |
 | `parallel/test-fs-constants.js` | fs |  |
@@ -318,6 +383,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-fchown.js` | fs |  |
 | `parallel/test-fs-fmap.js` | fs |  |
 | `parallel/test-fs-fsync.js` | fs |  |
+| `parallel/test-fs-lchmod.js` | fs |  |
 | `parallel/test-fs-link.js` | fs |  |
 | `parallel/test-fs-long-path.js` | fs |  |
 | `parallel/test-fs-make-callback.js` | fs |  |
@@ -327,9 +393,12 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-mkdir-rmdir.js` | fs |  |
 | `parallel/test-fs-mkdtemp-prefix-check.js` | fs |  |
 | `parallel/test-fs-open-mode-mask.js` | fs |  |
+| `parallel/test-fs-open-no-close.js` | fs |  |
 | `parallel/test-fs-open-numeric-flags.js` | fs |  |
 | `parallel/test-fs-open.js` | fs |  |
 | `parallel/test-fs-operations-with-surrogate-pairs.js` | fs |  |
+| `parallel/test-fs-promises-file-handle-append-file.js` | fs |  |
+| `parallel/test-fs-promises-file-handle-chmod.js` | fs |  |
 | `parallel/test-fs-promises-writefile-typedarray.js` | fs |  |
 | `parallel/test-fs-read-file-assert-encoding.js` | fs |  |
 | `parallel/test-fs-read-file-sync-hostname.js` | fs |  |
@@ -337,6 +406,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-read-stream-autoClose.js` | fs |  |
 | `parallel/test-fs-read-stream-double-close.js` | fs |  |
 | `parallel/test-fs-read-stream-encoding.js` | fs |  |
+| `parallel/test-fs-read-stream-pos.js` | fs |  |
 | `parallel/test-fs-read-stream-resume.js` | fs |  |
 | `parallel/test-fs-read-zero-length.js` | fs |  |
 | `parallel/test-fs-readdir-buffer.js` | fs |  |
@@ -346,6 +416,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-readfile-empty.js` | fs |  |
 | `parallel/test-fs-readfile-fd.js` | fs |  |
 | `parallel/test-fs-readfile-unlink.js` | fs |  |
+| `parallel/test-fs-readfile-zero-byte-liar.js` | fs |  |
 | `parallel/test-fs-readfilesync-enoent.js` | fs |  |
 | `parallel/test-fs-readlink-type-check.js` | fs |  |
 | `parallel/test-fs-ready-event-stream.js` | fs |  |
@@ -360,13 +431,18 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-symlink-dir-junction.js` | fs |  |
 | `parallel/test-fs-symlink-longpath.js` | fs |  |
 | `parallel/test-fs-truncate-clear-file-zero.js` | fs |  |
+| `parallel/test-fs-truncate-sync.js` | fs |  |
 | `parallel/test-fs-unlink-type-check.js` | fs |  |
 | `parallel/test-fs-watch-abort-signal.js` | fs |  |
 | `parallel/test-fs-watch-close-when-destroyed.js` | fs |  |
+| `parallel/test-fs-watch-encoding.js` | fs |  |
 | `parallel/test-fs-watch-recursive-add-file-to-existing-subfolder.js` | fs |  |
+| `parallel/test-fs-watch-recursive-add-file-with-url.js` | fs |  |
 | `parallel/test-fs-watch-recursive-add-file.js` | fs |  |
+| `parallel/test-fs-watch-recursive-add-folder.js` | fs |  |
 | `parallel/test-fs-watch-recursive-delete.js` | fs |  |
 | `parallel/test-fs-watch-recursive-linux-parallel-remove.js` | fs |  |
+| `parallel/test-fs-watch-recursive-symlink.js` | fs |  |
 | `parallel/test-fs-watch-recursive-update-file.js` | fs |  |
 | `parallel/test-fs-watch-recursive-validate.js` | fs |  |
 | `parallel/test-fs-watch-recursive-watch-file.js` | fs |  |
@@ -374,6 +450,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-watch.js` | fs |  |
 | `parallel/test-fs-write-buffer.js` | fs |  |
 | `parallel/test-fs-write-file-invalid-path.js` | fs |  |
+| `parallel/test-fs-write-file-sync.js` | fs |  |
 | `parallel/test-fs-write-stream-autoclose-option.js` | fs |  |
 | `parallel/test-fs-write-stream-close-without-callback.js` | fs |  |
 | `parallel/test-fs-write-stream-double-close.js` | fs |  |
@@ -381,39 +458,56 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-write-stream-end.js` | fs |  |
 | `parallel/test-fs-write-stream-file-handle.js` | fs |  |
 | `parallel/test-fs-write-stream-throw-type-error.js` | fs |  |
+| `parallel/test-fs-write-sync.js` | fs |  |
+| `parallel/test-fs-writefile-with-fd.js` | fs |  |
 | `parallel/test-fs-writestream-open-write.js` | fs |  |
 | `parallel/test-global-domexception.js` | global |  |
 | `parallel/test-global-encoder.js` | global |  |
+| `parallel/test-handle-wrap-close-abort.js` | handle |  |
 | `parallel/test-http-abort-before-end.js` | http |  |
 | `parallel/test-http-abort-client.js` | http |  |
 | `parallel/test-http-abort-queued.js` | http |  |
+| `parallel/test-http-abort-stream-end.js` | http |  |
+| `parallel/test-http-aborted.js` | http |  |
 | `parallel/test-http-after-connect.js` | http |  |
 | `parallel/test-http-agent-close.js` | http |  |
+| `parallel/test-http-agent-error-on-idle.js` | http |  |
 | `parallel/test-http-agent-false.js` | http |  |
 | `parallel/test-http-agent-getname.js` | http |  |
 | `parallel/test-http-agent-maxsockets-respected.js` | http |  |
 | `parallel/test-http-agent-maxsockets.js` | http |  |
 | `parallel/test-http-agent-no-protocol.js` | http |  |
 | `parallel/test-http-agent-null.js` | http |  |
+| `parallel/test-http-agent-scheduling.js` | http |  |
 | `parallel/test-http-agent-timeout.js` | http |  |
 | `parallel/test-http-allow-content-length-304.js` | http |  |
 | `parallel/test-http-allow-req-after-204-res.js` | http |  |
+| `parallel/test-http-bind-twice.js` | http |  |
 | `parallel/test-http-blank-header.js` | http |  |
 | `parallel/test-http-buffer-sanity.js` | http |  |
+| `parallel/test-http-catch-uncaughtexception.js` | http |  |
 | `parallel/test-http-chunked-304.js` | http |  |
 | `parallel/test-http-chunked-smuggling.js` | http |  |
+| `parallel/test-http-client-abort-event.js` | http |  |
 | `parallel/test-http-client-abort-keep-alive-destroy-res.js` | http |  |
+| `parallel/test-http-client-abort-keep-alive-queued-tcp-socket.js` | http |  |
 | `parallel/test-http-client-abort-keep-alive-queued-unix-socket.js` | http |  |
 | `parallel/test-http-client-abort-no-agent.js` | http |  |
+| `parallel/test-http-client-abort-response-event.js` | http |  |
 | `parallel/test-http-client-abort-unix-socket.js` | http |  |
+| `parallel/test-http-client-abort.js` | http |  |
 | `parallel/test-http-client-abort2.js` | http |  |
+| `parallel/test-http-client-aborted-event.js` | http |  |
 | `parallel/test-http-client-agent-abort-close-event.js` | http |  |
 | `parallel/test-http-client-agent-end-close-event.js` | http |  |
 | `parallel/test-http-client-agent.js` | http |  |
 | `parallel/test-http-client-close-with-default-agent.js` | http |  |
 | `parallel/test-http-client-default-headers-exist.js` | http |  |
+| `parallel/test-http-client-encoding.js` | http |  |
 | `parallel/test-http-client-error-rawbytes.js` | http |  |
+| `parallel/test-http-client-finished.js` | http |  |
 | `parallel/test-http-client-get-url.js` | http |  |
+| `parallel/test-http-client-incomingmessage-destroy.js` | http |  |
 | `parallel/test-http-client-input-function.js` | http |  |
 | `parallel/test-http-client-invalid-path.js` | http |  |
 | `parallel/test-http-client-keep-alive-hint.js` | http |  |
@@ -423,13 +517,17 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http-client-race-2.js` | http |  |
 | `parallel/test-http-client-race.js` | http |  |
 | `parallel/test-http-client-read-in-error.js` | http |  |
-| `parallel/test-http-client-readable.js` | http |  |
 | `parallel/test-http-client-reject-chunked-with-content-length.js` | http |  |
 | `parallel/test-http-client-reject-cr-no-lf.js` | http |  |
 | `parallel/test-http-client-res-destroyed.js` | http |  |
 | `parallel/test-http-client-timeout-agent.js` | http |  |
 | `parallel/test-http-client-timeout-connect-listener.js` | http |  |
 | `parallel/test-http-client-timeout-event.js` | http |  |
+| `parallel/test-http-client-timeout-with-data.js` | http |  |
+| `parallel/test-http-client-timeout.js` | http |  |
+| `parallel/test-http-client-upload-buf.js` | http |  |
+| `parallel/test-http-client-upload.js` | http |  |
+| `parallel/test-http-conn-reset.js` | http |  |
 | `parallel/test-http-content-length.js` | http |  |
 | `parallel/test-http-contentLength0.js` | http |  |
 | `parallel/test-http-date-header.js` | http |  |
@@ -439,41 +537,61 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http-double-content-length.js` | http |  |
 | `parallel/test-http-dummy-characters-smuggling.js` | http |  |
 | `parallel/test-http-dump-req-when-res-ends.js` | http |  |
+| `parallel/test-http-end-throw-socket-handling.js` | http |  |
 | `parallel/test-http-eof-on-connect.js` | http |  |
+| `parallel/test-http-exceptions.js` | http |  |
 | `parallel/test-http-expect-continue.js` | http |  |
 | `parallel/test-http-expect-handling.js` | http |  |
+| `parallel/test-http-extra-response.js` | http |  |
 | `parallel/test-http-flush-headers.js` | http |  |
+| `parallel/test-http-flush-response-headers.js` | http |  |
+| `parallel/test-http-generic-streams.js` | http |  |
+| `parallel/test-http-head-request.js` | http |  |
+| `parallel/test-http-head-response-has-no-body-end-implicit-headers.js` | http |  |
+| `parallel/test-http-head-response-has-no-body-end.js` | http |  |
+| `parallel/test-http-head-response-has-no-body.js` | http |  |
+| `parallel/test-http-head-throw-on-response-body-write.js` | http |  |
 | `parallel/test-http-header-badrequest.js` | http |  |
 | `parallel/test-http-header-obstext.js` | http |  |
+| `parallel/test-http-header-owstext.js` | http |  |
 | `parallel/test-http-header-read.js` | http |  |
+| `parallel/test-http-header-validators.js` | http |  |
+| `parallel/test-http-hex-write.js` | http |  |
 | `parallel/test-http-highwatermark.js` | http |  |
 | `parallel/test-http-host-headers.js` | http |  |
+| `parallel/test-http-incoming-message-options.js` | http |  |
+| `parallel/test-http-incoming-pipelined-socket-destroy.js` | http |  |
 | `parallel/test-http-invalid-te.js` | http |  |
 | `parallel/test-http-invalidheaderfield.js` | http |  |
 | `parallel/test-http-keep-alive-close-on-header.js` | http |  |
 | `parallel/test-http-keep-alive-drop-requests.js` | http |  |
 | `parallel/test-http-keep-alive-max-requests.js` | http |  |
+| `parallel/test-http-keep-alive-timeout-custom.js` | http |  |
+| `parallel/test-http-keep-alive-timeout-race-condition.js` | http |  |
+| `parallel/test-http-keep-alive-timeout.js` | http |  |
+| `parallel/test-http-keep-alive.js` | http |  |
 | `parallel/test-http-keepalive-client.js` | http |  |
+| `parallel/test-http-keepalive-free.js` | http |  |
 | `parallel/test-http-keepalive-request.js` | http |  |
 | `parallel/test-http-listening.js` | http |  |
 | `parallel/test-http-malformed-request.js` | http |  |
 | `parallel/test-http-many-ended-pipelines.js` | http |  |
 | `parallel/test-http-max-header-size-per-stream.js` | http |  |
-| `parallel/test-http-max-headers-count.js` | http |  |
 | `parallel/test-http-max-sockets.js` | http |  |
 | `parallel/test-http-methods.js` | http |  |
-| `parallel/test-http-missing-header-separator-cr.js` | http |  |
-| `parallel/test-http-missing-header-separator-lf.js` | http |  |
+| `parallel/test-http-no-content-length.js` | http |  |
 | `parallel/test-http-no-read-no-dump.js` | http |  |
 | `parallel/test-http-outgoing-destroy.js` | http |  |
 | `parallel/test-http-outgoing-end-cork.js` | http |  |
 | `parallel/test-http-outgoing-finish-writable.js` | http |  |
 | `parallel/test-http-outgoing-finish.js` | http |  |
+| `parallel/test-http-outgoing-first-chunk-singlebyte-encoding.js` | http |  |
 | `parallel/test-http-outgoing-internal-headernames-setter.js` | http |  |
 | `parallel/test-http-outgoing-properties.js` | http |  |
 | `parallel/test-http-outgoing-writableFinished.js` | http |  |
 | `parallel/test-http-parser-finish-error.js` | http |  |
 | `parallel/test-http-parser-multiple-execute.js` | http |  |
+| `parallel/test-http-pause-resume-one-end.js` | http |  |
 | `parallel/test-http-pause.js` | http |  |
 | `parallel/test-http-pipe-fs.js` | http |  |
 | `parallel/test-http-pipeline-assertionerror-finish.js` | http |  |
@@ -491,16 +609,23 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http-request-invalid-method-error.js` | http |  |
 | `parallel/test-http-request-large-payload.js` | http |  |
 | `parallel/test-http-request-method-delete-payload.js` | http |  |
+| `parallel/test-http-request-methods.js` | http |  |
 | `parallel/test-http-request-smuggling-content-length.js` | http |  |
 | `parallel/test-http-res-write-after-end.js` | http |  |
 | `parallel/test-http-response-add-header-after-sent.js` | http |  |
+| `parallel/test-http-response-multiheaders.js` | http |  |
+| `parallel/test-http-response-no-headers.js` | http |  |
 | `parallel/test-http-response-readable.js` | http |  |
 | `parallel/test-http-response-remove-header-after-sent.js` | http |  |
 | `parallel/test-http-response-splitting.js` | http |  |
+| `parallel/test-http-response-status-message.js` | http |  |
+| `parallel/test-http-response-writehead-returns-this.js` | http |  |
+| `parallel/test-http-server-client-error.js` | http |  |
 | `parallel/test-http-server-close-all.js` | http |  |
 | `parallel/test-http-server-close-idle-wait-response.js` | http |  |
 | `parallel/test-http-server-consumed-timeout.js` | http |  |
 | `parallel/test-http-server-de-chunked-trailer.js` | http |  |
+| `parallel/test-http-server-delete-parser.js` | http |  |
 | `parallel/test-http-server-headers-timeout-interrupted-headers.js` | http |  |
 | `parallel/test-http-server-headers-timeout-keepalive.js` | http |  |
 | `parallel/test-http-server-incomingmessage-destroy.js` | http |  |
@@ -521,15 +646,20 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http-set-timeout.js` | http |  |
 | `parallel/test-http-socket-error-listeners.js` | http |  |
 | `parallel/test-http-status-code.js` | http |  |
+| `parallel/test-http-status-message.js` | http |  |
 | `parallel/test-http-status-reason-invalid-chars.js` | http |  |
 | `parallel/test-http-transfer-encoding-smuggling.js` | http |  |
+| `parallel/test-http-unix-socket-keep-alive.js` | http |  |
 | `parallel/test-http-unix-socket.js` | http |  |
 | `parallel/test-http-upgrade-advertise.js` | http |  |
+| `parallel/test-http-upgrade-agent.js` | http |  |
+| `parallel/test-http-upgrade-binary.js` | http |  |
 | `parallel/test-http-upgrade-client2.js` | http |  |
 | `parallel/test-http-upgrade-server2.js` | http |  |
 | `parallel/test-http-url.parse-auth-with-header-in-request.js` | http |  |
 | `parallel/test-http-url.parse-auth.js` | http |  |
 | `parallel/test-http-url.parse-basic.js` | http |  |
+| `parallel/test-http-url.parse-https.request.js` | http |  |
 | `parallel/test-http-url.parse-only-support-http-https-protocol.js` | http |  |
 | `parallel/test-http-url.parse-path.js` | http |  |
 | `parallel/test-http-url.parse-post.js` | http |  |
@@ -540,6 +670,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http-write-head-2.js` | http |  |
 | `parallel/test-http-write-head-after-set-header.js` | http |  |
 | `parallel/test-http-zerolengthbuffer.js` | http |  |
+| `parallel/test-http2-allow-http1.js` | http2 |  |
 | `parallel/test-http2-cancel-while-client-reading.js` | http2 |  |
 | `parallel/test-http2-client-data-end.js` | http2 |  |
 | `parallel/test-http2-client-priority-before-connect.js` | http2 |  |
@@ -552,6 +683,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http2-client-write-before-connect.js` | http2 |  |
 | `parallel/test-http2-client-write-empty-string.js` | http2 |  |
 | `parallel/test-http2-close-while-writing.js` | http2 |  |
+| `parallel/test-http2-compat-aborted.js` | http2 |  |
 | `parallel/test-http2-compat-client-upload-reject.js` | http2 |  |
 | `parallel/test-http2-compat-expect-continue-check.js` | http2 |  |
 | `parallel/test-http2-compat-expect-continue.js` | http2 |  |
@@ -563,6 +695,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http2-compat-serverrequest-settimeout.js` | http2 |  |
 | `parallel/test-http2-compat-serverrequest-trailers.js` | http2 |  |
 | `parallel/test-http2-compat-serverresponse-close.js` | http2 |  |
+| `parallel/test-http2-compat-serverresponse-createpushresponse.js` | http2 |  |
 | `parallel/test-http2-compat-serverresponse-end-after-statuses-without-body.js` | http2 |  |
 | `parallel/test-http2-compat-serverresponse-finished.js` | http2 |  |
 | `parallel/test-http2-compat-serverresponse-flushheaders.js` | http2 |  |
@@ -580,6 +713,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http2-compat-serverresponse.js` | http2 |  |
 | `parallel/test-http2-compat-write-head-destroyed.js` | http2 |  |
 | `parallel/test-http2-connect-method-extended.js` | http2 |  |
+| `parallel/test-http2-connect-method.js` | http2 |  |
 | `parallel/test-http2-connect-tls-with-delay.js` | http2 |  |
 | `parallel/test-http2-cookies.js` | http2 |  |
 | `parallel/test-http2-create-client-session.js` | http2 |  |
@@ -587,20 +721,25 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http2-dont-lose-data.js` | http2 |  |
 | `parallel/test-http2-dont-override.js` | http2 |  |
 | `parallel/test-http2-endafterheaders.js` | http2 |  |
+| `parallel/test-http2-forget-closed-streams.js` | http2 |  |
 | `parallel/test-http2-generic-streams-sendfile.js` | http2 |  |
 | `parallel/test-http2-generic-streams.js` | http2 |  |
 | `parallel/test-http2-goaway-delayed-request.js` | http2 |  |
 | `parallel/test-http2-goaway-opaquedata.js` | http2 |  |
+| `parallel/test-http2-head-request.js` | http2 |  |
 | `parallel/test-http2-info-headers.js` | http2 |  |
 | `parallel/test-http2-large-write-destroy.js` | http2 |  |
 | `parallel/test-http2-large-writes-session-memory-leak.js` | http2 |  |
 | `parallel/test-http2-max-concurrent-streams.js` | http2 |  |
 | `parallel/test-http2-methods.js` | http2 |  |
 | `parallel/test-http2-misbehaving-flow-control.js` | http2 |  |
+| `parallel/test-http2-misused-pseudoheaders.js` | http2 |  |
 | `parallel/test-http2-multi-content-length.js` | http2 |  |
 | `parallel/test-http2-multiheaders-raw.js` | http2 |  |
 | `parallel/test-http2-multiheaders.js` | http2 |  |
 | `parallel/test-http2-multiplex.js` | http2 |  |
+| `parallel/test-http2-multistream-destroy-on-read-tls.js` | http2 |  |
+| `parallel/test-http2-no-wanttrailers-listener.js` | http2 |  |
 | `parallel/test-http2-onping.js` | http2 |  |
 | `parallel/test-http2-options-max-reserved-streams.js` | http2 |  |
 | `parallel/test-http2-perform-server-handshake.js` | http2 |  |
@@ -609,7 +748,10 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http2-priority-cycle-.js` | http2 |  |
 | `parallel/test-http2-removed-header-stays-removed.js` | http2 |  |
 | `parallel/test-http2-request-remove-connect-listener.js` | http2 |  |
+| `parallel/test-http2-request-response-proto.js` | http2 |  |
 | `parallel/test-http2-respond-file-compat.js` | http2 |  |
+| `parallel/test-http2-respond-file-fd.js` | http2 |  |
+| `parallel/test-http2-respond-file-push.js` | http2 |  |
 | `parallel/test-http2-respond-no-data.js` | http2 |  |
 | `parallel/test-http2-sent-headers.js` | http2 |  |
 | `parallel/test-http2-server-close-callback.js` | http2 |  |
@@ -626,42 +768,65 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http2-server-timeout.js` | http2 |  |
 | `parallel/test-http2-session-stream-state.js` | http2 |  |
 | `parallel/test-http2-short-stream-client-server.js` | http2 |  |
+| `parallel/test-http2-single-headers.js` | http2 |  |
 | `parallel/test-http2-socket-close.js` | http2 |  |
 | `parallel/test-http2-status-code.js` | http2 |  |
 | `parallel/test-http2-stream-destroy-event-order.js` | http2 |  |
 | `parallel/test-http2-stream-removelisteners-after-close.js` | http2 |  |
 | `parallel/test-http2-tls-disconnect.js` | http2 |  |
 | `parallel/test-http2-too-many-streams.js` | http2 |  |
+| `parallel/test-http2-trailers-after-session-close.js` | http2 |  |
+| `parallel/test-http2-trailers.js` | http2 |  |
+| `parallel/test-http2-write-callbacks.js` | http2 |  |
+| `parallel/test-http2-write-empty-string.js` | http2 |  |
 | `parallel/test-http2-zero-length-header.js` | http2 |  |
 | `parallel/test-http2-zero-length-write.js` | http2 |  |
 | `parallel/test-https-agent-constructor.js` | https |  |
 | `parallel/test-https-agent-servername.js` | https |  |
+| `parallel/test-https-agent-session-injection.js` | https |  |
 | `parallel/test-https-agent.js` | https |  |
+| `parallel/test-https-byteswritten.js` | https |  |
 | `parallel/test-https-client-reject.js` | https |  |
+| `parallel/test-https-connecting-to-http.js` | https |  |
 | `parallel/test-https-drain.js` | https |  |
-| `parallel/test-https-max-headers-count.js` | https |  |
+| `parallel/test-https-eof-for-eom.js` | https |  |
+| `parallel/test-https-localaddress-bind-error.js` | https |  |
 | `parallel/test-https-request-arguments.js` | https |  |
 | `parallel/test-https-server-close-all.js` | https |  |
 | `parallel/test-https-server-headers-timeout.js` | https |  |
 | `parallel/test-https-server-request-timeout.js` | https |  |
 | `parallel/test-https-socket-options.js` | https |  |
 | `parallel/test-https-timeout-server-2.js` | https |  |
+| `parallel/test-https-timeout.js` | https |  |
+| `parallel/test-https-truncate.js` | https |  |
+| `parallel/test-https-unix-socket-self-signed.js` | https |  |
+| `parallel/test-icu-transcode.js` | icu |  |
 | `parallel/test-inspector-stops-no-file.js` | inspector |  |
 | `parallel/test-kill-segfault-freebsd.js` | kill |  |
+| `parallel/test-listen-fd-detached-inherit.js` | listen |  |
+| `parallel/test-listen-fd-detached.js` | listen |  |
 | `parallel/test-macos-app-sandbox.js` | macos |  |
 | `parallel/test-memory-usage-emfile.js` | memory |  |
+| `parallel/test-messageevent-brandcheck.js` | messageevent |  |
 | `parallel/test-microtask-queue-integration.js` | microtask |  |
 | `parallel/test-microtask-queue-run-immediate.js` | microtask |  |
 | `parallel/test-microtask-queue-run.js` | microtask |  |
+| `parallel/test-module-parent-setter-deprecation.js` | module |  |
 | `parallel/test-net-allow-half-open.js` | net |  |
 | `parallel/test-net-better-error-messages-listen-path.js` | net |  |
 | `parallel/test-net-better-error-messages-listen.js` | net |  |
+| `parallel/test-net-bind-twice.js` | net |  |
+| `parallel/test-net-can-reset-timeout.js` | net |  |
 | `parallel/test-net-connect-after-destroy.js` | net |  |
 | `parallel/test-net-connect-destroy.js` | net |  |
 | `parallel/test-net-connect-immediate-destroy.js` | net |  |
 | `parallel/test-net-connect-no-arg.js` | net |  |
+| `parallel/test-net-connect-paused-connection.js` | net |  |
 | `parallel/test-net-dns-error.js` | net |  |
 | `parallel/test-net-dns-lookup-skip.js` | net |  |
+| `parallel/test-net-dns-lookup.js` | net |  |
+| `parallel/test-net-during-close.js` | net |  |
+| `parallel/test-net-eaddrinuse.js` | net |  |
 | `parallel/test-net-end-without-connect.js` | net |  |
 | `parallel/test-net-error-twice.js` | net |  |
 | `parallel/test-net-isipv4.js` | net |  |
@@ -672,11 +837,17 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-net-listen-error.js` | net |  |
 | `parallel/test-net-listen-exclusive-random-ports.js` | net |  |
 | `parallel/test-net-listening.js` | net |  |
+| `parallel/test-net-local-address-port.js` | net |  |
+| `parallel/test-net-pause-resume-connecting.js` | net |  |
 | `parallel/test-net-persistent-keepalive.js` | net |  |
+| `parallel/test-net-remote-address-port.js` | net |  |
 | `parallel/test-net-server-close.js` | net |  |
 | `parallel/test-net-server-drop-connections.js` | net |  |
 | `parallel/test-net-server-listen-remove-callback.js` | net |  |
+| `parallel/test-net-server-max-connections-close-makes-more-available.js` | net |  |
+| `parallel/test-net-server-max-connections.js` | net |  |
 | `parallel/test-net-server-pause-on-connect.js` | net |  |
+| `parallel/test-net-server-try-ports.js` | net |  |
 | `parallel/test-net-server-unref-persistent.js` | net |  |
 | `parallel/test-net-server-unref.js` | net |  |
 | `parallel/test-net-settimeout.js` | net |  |
@@ -685,38 +856,62 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-net-socket-destroy-twice.js` | net |  |
 | `parallel/test-net-socket-no-halfopen-enforcer.js` | net |  |
 | `parallel/test-net-socket-timeout-unref.js` | net |  |
+| `parallel/test-net-socket-write-error.js` | net |  |
 | `parallel/test-net-stream.js` | net |  |
 | `parallel/test-net-sync-cork.js` | net |  |
+| `parallel/test-net-writable.js` | net |  |
 | `parallel/test-net-write-after-close.js` | net |  |
 | `parallel/test-net-write-cb-on-destroy-before-connect.js` | net |  |
+| `parallel/test-net-write-connect-write.js` | net |  |
+| `parallel/test-net-write-slow.js` | net |  |
 | `parallel/test-next-tick-doesnt-hang.js` | next |  |
+| `parallel/test-next-tick-errors.js` | next |  |
 | `parallel/test-next-tick-fixed-queue-regression.js` | next |  |
 | `parallel/test-next-tick-intentional-starvation.js` | next |  |
 | `parallel/test-next-tick-ordering.js` | next |  |
 | `parallel/test-next-tick-ordering2.js` | next |  |
 | `parallel/test-next-tick-when-exiting.js` | next |  |
 | `parallel/test-no-node-snapshot.js` | no |  |
+| `parallel/test-os-process-priority.js` | os |  |
 | `parallel/test-os.js` | os |  |
 | `parallel/test-outgoing-message-destroy.js` | outgoing |  |
 | `parallel/test-path-basename.js` | path | −4 |
 | `parallel/test-path-dirname.js` | path | −9 |
 | `parallel/test-path-relative.js` | path | −1 |
 | `parallel/test-path-zero-length-strings.js` | path | −8 |
+| `parallel/test-perf-gc-crash.js` | perf |  |
+| `parallel/test-perf-hooks-worker-timeorigin.js` | perf |  |
+| `parallel/test-performance-measure-detail.js` | performance |  |
+| `parallel/test-performance-measure.js` | performance |  |
+| `parallel/test-performanceobserver-gc.js` | performanceobserver |  |
 | `parallel/test-pipe-abstract-socket-http.js` | pipe |  |
 | `parallel/test-pipe-address.js` | pipe |  |
 | `parallel/test-pipe-return-val.js` | pipe |  |
+| `parallel/test-pipe-stream.js` | pipe |  |
 | `parallel/test-process-chdir-errormessage.js` | process |  |
 | `parallel/test-process-constants-noatime.js` | process |  |
+| `parallel/test-process-dlopen-undefined-exports.js` | process |  |
+| `parallel/test-process-domain-segfault.js` | process |  |
 | `parallel/test-process-emit.js` | process |  |
 | `parallel/test-process-env-delete.js` | process |  |
 | `parallel/test-process-env-deprecation.js` | process |  |
 | `parallel/test-process-env-windows-error-reset.js` | process |  |
+| `parallel/test-process-exit-from-before-exit.js` | process |  |
 | `parallel/test-process-exit-handler.js` | process |  |
 | `parallel/test-process-exit-recursive.js` | process |  |
 | `parallel/test-process-exit.js` | process |  |
+| `parallel/test-process-features.js` | process |  |
+| `parallel/test-process-getactiveresources-track-active-handles.js` | process |  |
+| `parallel/test-process-getactiveresources-track-interval-lifetime.js` | process |  |
+| `parallel/test-process-getactiveresources-track-multiple-timers.js` | process |  |
+| `parallel/test-process-getactiveresources-track-timer-lifetime.js` | process |  |
+| `parallel/test-process-getactiveresources.js` | process |  |
+| `parallel/test-process-getgroups.js` | process |  |
 | `parallel/test-process-hrtime-bigint.js` | process |  |
 | `parallel/test-process-hrtime.js` | process |  |
 | `parallel/test-process-kill-null.js` | process |  |
+| `parallel/test-process-next-tick.js` | process |  |
+| `parallel/test-process-prototype.js` | process |  |
 | `parallel/test-process-umask-mask.js` | process |  |
 | `parallel/test-process-umask.js` | process |  |
 | `parallel/test-process-uptime.js` | process |  |
@@ -727,10 +922,13 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-promise-unhandled-throw-handler.js` | promise |  |
 | `parallel/test-promise-unhandled-throw.js` | promise |  |
 | `parallel/test-querystring-multichar-separator.js` | querystring |  |
+| `parallel/test-queue-microtask.js` | queue |  |
 | `parallel/test-readable-from-iterator-closing.js` | readable |  |
+| `parallel/test-readable-from-web-enqueue-then-close.js` | readable |  |
 | `parallel/test-readable-large-hwm.js` | readable |  |
 | `parallel/test-readable-single-end.js` | readable |  |
 | `parallel/test-readline-async-iterators-destroy.js` | readline |  |
+| `parallel/test-readline-async-iterators.js` | readline |  |
 | `parallel/test-readline-carriage-return-between-chunks.js` | readline |  |
 | `parallel/test-readline-input-onerror.js` | readline |  |
 | `parallel/test-readline-position.js` | readline |  |
@@ -739,11 +937,15 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-ref-unref-return.js` | ref |  |
 | `parallel/test-regression-object-prototype.js` | regression |  |
 | `parallel/test-repl-stdin-push-null.js` | repl |  |
+| `parallel/test-runner-root-after-with-refed-handles.js` | runner |  |
 | `parallel/test-runner-subtest-after-hook.js` | runner |  |
 | `parallel/test-runner-test-fullname.js` | runner |  |
+| `parallel/test-runner-typechecking.js` | runner |  |
 | `parallel/test-signal-args.js` | signal |  |
 | `parallel/test-signal-handler-remove-on-exit.js` | signal |  |
 | `parallel/test-signal-handler.js` | signal |  |
+| `parallel/test-socket-write-after-fin-error.js` | socket |  |
+| `parallel/test-socket-write-after-fin.js` | socket |  |
 | `parallel/test-stdin-hang.js` | stdin |  |
 | `parallel/test-stdin-pause-resume-sync.js` | stdin |  |
 | `parallel/test-stdin-pause-resume.js` | stdin |  |
@@ -751,73 +953,116 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-stdio-pipe-access.js` | stdio |  |
 | `parallel/test-stdout-pipeline-destroy.js` | stdout |  |
 | `parallel/test-stdout-stderr-write.js` | stdout |  |
+| `parallel/test-stream-auto-destroy.js` | stream |  |
 | `parallel/test-stream-await-drain-writers-in-synchronously-recursion-write.js` | stream |  |
+| `parallel/test-stream-backpressure.js` | stream |  |
 | `parallel/test-stream-big-packet.js` | stream |  |
 | `parallel/test-stream-big-push.js` | stream |  |
+| `parallel/test-stream-construct.js` | stream |  |
 | `parallel/test-stream-destroy-event-order.js` | stream |  |
+| `parallel/test-stream-duplex-from.js` | stream |  |
 | `parallel/test-stream-duplex-props.js` | stream |  |
 | `parallel/test-stream-duplex-readable-end.js` | stream |  |
+| `parallel/test-stream-duplex-readable-writable.js` | stream |  |
 | `parallel/test-stream-duplex-writable-finished.js` | stream |  |
+| `parallel/test-stream-duplex.js` | stream |  |
 | `parallel/test-stream-duplexpair.js` | stream |  |
 | `parallel/test-stream-end-paused.js` | stream |  |
 | `parallel/test-stream-err-multiple-callback-construction.js` | stream |  |
 | `parallel/test-stream-error-once.js` | stream |  |
 | `parallel/test-stream-events-prepend.js` | stream |  |
+| `parallel/test-stream-filter.js` | stream |  |
+| `parallel/test-stream-flatMap.js` | stream |  |
+| `parallel/test-stream-ispaused.js` | stream |  |
+| `parallel/test-stream-map.js` | stream |  |
+| `parallel/test-stream-objectmode-undefined.js` | stream |  |
 | `parallel/test-stream-once-readable-pipe.js` | stream |  |
 | `parallel/test-stream-passthrough-drain.js` | stream |  |
 | `parallel/test-stream-pipe-after-end.js` | stream |  |
+| `parallel/test-stream-pipe-cleanup-pause.js` | stream |  |
 | `parallel/test-stream-pipe-deadlock.js` | stream |  |
+| `parallel/test-stream-pipe-error-unhandled.js` | stream |  |
 | `parallel/test-stream-pipe-flow-after-unpipe.js` | stream |  |
+| `parallel/test-stream-pipe-flow.js` | stream |  |
+| `parallel/test-stream-pipe-manual-resume.js` | stream |  |
+| `parallel/test-stream-pipe-multiple-pipes.js` | stream |  |
 | `parallel/test-stream-pipe-needDrain.js` | stream |  |
+| `parallel/test-stream-pipe-same-destination-twice.js` | stream |  |
 | `parallel/test-stream-pipeline-async-iterator.js` | stream |  |
 | `parallel/test-stream-pipeline-duplex.js` | stream |  |
 | `parallel/test-stream-pipeline-queued-end-in-destroy.js` | stream |  |
+| `parallel/test-stream-pipeline-uncaught.js` | stream |  |
 | `parallel/test-stream-pipeline-with-empty-string.js` | stream |  |
+| `parallel/test-stream-preprocess.js` | stream |  |
 | `parallel/test-stream-push-strings.js` | stream |  |
 | `parallel/test-stream-readable-aborted.js` | stream |  |
+| `parallel/test-stream-readable-add-chunk-during-data.js` | stream |  |
+| `parallel/test-stream-readable-constructor-set-methods.js` | stream |  |
 | `parallel/test-stream-readable-data.js` | stream |  |
+| `parallel/test-stream-readable-didRead.js` | stream |  |
+| `parallel/test-stream-readable-dispose.js` | stream |  |
+| `parallel/test-stream-readable-emit-readable-short-stream.js` | stream |  |
 | `parallel/test-stream-readable-emittedReadable.js` | stream |  |
 | `parallel/test-stream-readable-end-destroyed.js` | stream |  |
 | `parallel/test-stream-readable-ended.js` | stream |  |
 | `parallel/test-stream-readable-error-end.js` | stream |  |
 | `parallel/test-stream-readable-event.js` | stream |  |
 | `parallel/test-stream-readable-flow-recursion.js` | stream |  |
-| `parallel/test-stream-readable-from-web-termination.js` | stream |  |
 | `parallel/test-stream-readable-hwm-0-async.js` | stream |  |
 | `parallel/test-stream-readable-hwm-0-no-flow-data.js` | stream |  |
 | `parallel/test-stream-readable-hwm-0.js` | stream |  |
+| `parallel/test-stream-readable-infinite-read.js` | stream |  |
+| `parallel/test-stream-readable-invalid-chunk.js` | stream |  |
 | `parallel/test-stream-readable-needReadable.js` | stream |  |
+| `parallel/test-stream-readable-next-no-null.js` | stream |  |
 | `parallel/test-stream-readable-no-unneeded-readable.js` | stream |  |
+| `parallel/test-stream-readable-reading-readingMore.js` | stream |  |
 | `parallel/test-stream-readable-resume-hwm.js` | stream |  |
 | `parallel/test-stream-readable-resumeScheduled.js` | stream |  |
 | `parallel/test-stream-readable-setEncoding-existing-buffers.js` | stream |  |
+| `parallel/test-stream-readable-to-web.js` | stream |  |
 | `parallel/test-stream-readable-unpipe-resume.js` | stream |  |
 | `parallel/test-stream-readable-with-unimplemented-_read.js` | stream |  |
 | `parallel/test-stream-readableListening-state.js` | stream |  |
-| `parallel/test-stream-toWeb-allows-server-response.js` | stream |  |
+| `parallel/test-stream-set-default-hwm.js` | stream |  |
+| `parallel/test-stream-some-find-every.mjs` | stream |  |
 | `parallel/test-stream-transform-callback-twice.js` | stream |  |
+| `parallel/test-stream-transform-destroy.js` | stream |  |
+| `parallel/test-stream-transform-flush-data.js` | stream |  |
 | `parallel/test-stream-transform-hwm0.js` | stream |  |
 | `parallel/test-stream-transform-objectmode-falsey-value.js` | stream |  |
 | `parallel/test-stream-transform-split-objectmode.js` | stream |  |
 | `parallel/test-stream-unpipe-event.js` | stream |  |
 | `parallel/test-stream-unshift-empty-chunk.js` | stream |  |
+| `parallel/test-stream-unshift-read-race.js` | stream |  |
 | `parallel/test-stream-writable-aborted.js` | stream |  |
+| `parallel/test-stream-writable-end-cb-error.js` | stream |  |
+| `parallel/test-stream-writable-end-cb-uncaught.js` | stream |  |
 | `parallel/test-stream-writable-end-multiple.js` | stream |  |
 | `parallel/test-stream-writable-final-destroy.js` | stream |  |
 | `parallel/test-stream-writable-final-throw.js` | stream |  |
+| `parallel/test-stream-writable-finish-destroyed.js` | stream |  |
 | `parallel/test-stream-writable-finished-state.js` | stream |  |
+| `parallel/test-stream-writable-finished.js` | stream |  |
 | `parallel/test-stream-writable-invalid-chunk.js` | stream |  |
+| `parallel/test-stream-writable-needdrain-state.js` | stream |  |
 | `parallel/test-stream-writable-null.js` | stream |  |
 | `parallel/test-stream-writable-properties.js` | stream |  |
+| `parallel/test-stream-writable-writable.js` | stream |  |
+| `parallel/test-stream-writable-write-cb-error.js` | stream |  |
+| `parallel/test-stream-writable-write-cb-twice.js` | stream |  |
+| `parallel/test-stream-writable-write-writev-finish.js` | stream |  |
 | `parallel/test-stream-writableState-ending.js` | stream |  |
+| `parallel/test-stream-write-destroy.js` | stream |  |
 | `parallel/test-stream-write-drain.js` | stream |  |
+| `parallel/test-stream-write-final.js` | stream |  |
 | `parallel/test-stream2-decode-partial.js` | stream2 |  |
+| `parallel/test-stream2-finish-pipe-error.js` | stream2 |  |
 | `parallel/test-stream2-finish-pipe.js` | stream2 |  |
 | `parallel/test-stream2-httpclient-response-end.js` | stream2 |  |
 | `parallel/test-stream2-large-read-stall.js` | stream2 |  |
 | `parallel/test-stream2-pipe-error-once-listener.js` | stream2 |  |
 | `parallel/test-stream2-read-sync-stack.js` | stream2 |  |
-| `parallel/test-stream2-readable-empty-buffer-no-eof.js` | stream2 |  |
 | `parallel/test-stream2-readable-non-empty-end.js` | stream2 |  |
 | `parallel/test-stream2-unpipe-drain.js` | stream2 |  |
 | `parallel/test-stream3-cork-end.js` | stream3 |  |
@@ -827,11 +1072,14 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-timers-clear-null-does-not-throw-error.js` | timers |  |
 | `parallel/test-timers-clear-object-does-not-throw-error.js` | timers |  |
 | `parallel/test-timers-clear-timeout-interval-equivalent.js` | timers |  |
+| `parallel/test-timers-clearImmediate.js` | timers |  |
 | `parallel/test-timers-destroyed.js` | timers |  |
 | `parallel/test-timers-immediate-queue.js` | timers |  |
 | `parallel/test-timers-immediate-unref-nested-once.js` | timers |  |
 | `parallel/test-timers-immediate-unref-simple.js` | timers |  |
+| `parallel/test-timers-immediate-unref.js` | timers |  |
 | `parallel/test-timers-immediate.js` | timers |  |
+| `parallel/test-timers-interval-throw.js` | timers |  |
 | `parallel/test-timers-non-integer-delay.js` | timers |  |
 | `parallel/test-timers-refresh-in-callback.js` | timers |  |
 | `parallel/test-timers-same-timeout-wrong-list-deleted.js` | timers |  |
@@ -840,79 +1088,132 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-timers-throw-when-cb-not-function.js` | timers |  |
 | `parallel/test-timers-timeout-to-interval.js` | timers |  |
 | `parallel/test-timers-timeout-with-non-integer.js` | timers |  |
-| `parallel/test-timers-unref.js` | timers |  |
+| `parallel/test-timers-to-primitive.js` | timers |  |
+| `parallel/test-timers-uncaught-exception.js` | timers |  |
+| `parallel/test-timers-unref-throw-then-ref.js` | timers |  |
 | `parallel/test-timers-unrefd-interval-still-fires.js` | timers |  |
+| `parallel/test-timers-unrefed-in-beforeexit.js` | timers |  |
 | `parallel/test-timers-unrefed-in-callback.js` | timers |  |
+| `parallel/test-timers-zero-timeout.js` | timers |  |
+| `parallel/test-timers.js` | timers |  |
 | `parallel/test-tls-client-abort.js` | tls |  |
 | `parallel/test-tls-client-abort2.js` | tls |  |
+| `parallel/test-tls-client-destroy-soon.js` | tls |  |
+| `parallel/test-tls-client-verify.js` | tls |  |
+| `parallel/test-tls-close-error.js` | tls |  |
+| `parallel/test-tls-close-event-after-write.js` | tls |  |
+| `parallel/test-tls-cnnic-whitelist.js` | tls |  |
+| `parallel/test-tls-connect-address-family.js` | tls |  |
+| `parallel/test-tls-connect-no-host.js` | tls |  |
 | `parallel/test-tls-connect-simple.js` | tls |  |
+| `parallel/test-tls-fast-writing.js` | tls |  |
+| `parallel/test-tls-hello-parser-failure.js` | tls |  |
+| `parallel/test-tls-interleave.js` | tls |  |
+| `parallel/test-tls-invoke-queued.js` | tls |  |
 | `parallel/test-tls-ip-servername-deprecation.js` | tls |  |
+| `parallel/test-tls-junk-closes-server.js` | tls |  |
+| `parallel/test-tls-net-connect-prefer-path.js` | tls |  |
 | `parallel/test-tls-request-timeout.js` | tls |  |
 | `parallel/test-tls-reuse-host-from-socket.js` | tls |  |
 | `parallel/test-tls-server-connection-server.js` | tls |  |
 | `parallel/test-tls-set-encoding.js` | tls |  |
 | `parallel/test-tls-startcom-wosign-whitelist.js` | tls |  |
+| `parallel/test-tls-timeout-server-2.js` | tls |  |
+| `parallel/test-tls-tlswrap-segfault-2.js` | tls |  |
 | `parallel/test-tls-tlswrap-segfault.js` | tls |  |
 | `parallel/test-tls-use-after-free-regression.js` | tls |  |
+| `parallel/test-tls-zero-clear-in.js` | tls |  |
 | `parallel/test-tty-stdin-end.js` | tty |  |
 | `parallel/test-tz-version.js` | tz |  |
 | `parallel/test-url-domain-ascii-unicode.js` | url |  |
 | `parallel/test-url-format-whatwg.js` | url |  |
-| `parallel/test-url-format.js` | url |  |
-| `parallel/test-url-parse-format.js` | url |  |
 | `parallel/test-url-parse-query.js` | url |  |
+| `parallel/test-url-revokeobjecturl.js` | url |  |
 | `parallel/test-utf8-scripts.js` | utf8 |  |
 | `parallel/test-util-primordial-monkeypatching.js` | util |  |
 | `parallel/test-v8-flag-pool-size-0.js` | v8 |  |
+| `parallel/test-v8-stop-coverage.js` | v8 |  |
+| `parallel/test-v8-take-coverage-noop.js` | v8 |  |
+| `parallel/test-webcrypto-getRandomValues.js` | webcrypto |  |
+| `parallel/test-webcrypto-random.js` | webcrypto |  |
 | `parallel/test-websocket.js` | websocket |  |
-| `parallel/test-webstream-structured-clone-no-leftovers.mjs` | webstream |  |
+| `parallel/test-webstream-readable-from.js` | webstream |  |
 | `parallel/test-whatwg-encoding-custom-fatal-streaming.js` | whatwg |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-fatal.js` | whatwg |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-ignorebom.js` | whatwg |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-invalid-arg.js` | whatwg |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-streaming.js` | whatwg |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-utf16-surrogates.js` | whatwg |  |
+| `parallel/test-whatwg-events-add-event-listener-options-signal.js` | whatwg |  |
 | `parallel/test-whatwg-events-customevent.js` | whatwg |  |
 | `parallel/test-whatwg-url-custom-deepequal.js` | whatwg |  |
+| `parallel/test-whatwg-url-custom-global.js` | whatwg |  |
 | `parallel/test-whatwg-url-custom-href-side-effect.js` | whatwg |  |
 | `parallel/test-whatwg-url-custom-inspect.js` | whatwg |  |
 | `parallel/test-whatwg-url-override-hostname.js` | whatwg |  |
 | `parallel/test-windows-abort-exitcode.js` | windows |  |
+| `parallel/test-worker-abort-on-uncaught-exception.js` | worker |  |
 | `parallel/test-worker-console-listeners.js` | worker |  |
+| `parallel/test-worker-dns-terminate.js` | worker |  |
+| `parallel/test-worker-exit-event-error.js` | worker |  |
 | `parallel/test-worker-exit-from-uncaught-exception.js` | worker |  |
+| `parallel/test-worker-http2-generic-streams-terminate.js` | worker |  |
 | `parallel/test-worker-message-port-close-while-receiving.js` | worker |  |
+| `parallel/test-worker-message-port-multiple-sharedarraybuffers.js` | worker |  |
+| `parallel/test-worker-message-port-transfer-terminate.js` | worker |  |
+| `parallel/test-worker-nested-on-process-exit.js` | worker |  |
+| `parallel/test-worker-nested-uncaught.js` | worker |  |
 | `parallel/test-worker-no-sab.js` | worker |  |
 | `parallel/test-worker-onmessage.js` | worker |  |
 | `parallel/test-worker-parent-port-ref.js` | worker |  |
 | `parallel/test-worker-process-env-shared.js` | worker |  |
+| `parallel/test-worker-ref-onexit.js` | worker |  |
+| `parallel/test-worker-ref.js` | worker |  |
 | `parallel/test-worker-safe-getters.js` | worker |  |
+| `parallel/test-worker-stack-overflow.js` | worker |  |
 | `parallel/test-worker-terminate-http2-respond-with-file.js` | worker |  |
+| `parallel/test-worker-terminate-nested.js` | worker |  |
 | `parallel/test-worker-uncaught-exception-async.js` | worker |  |
 | `parallel/test-worker-uncaught-exception.js` | worker |  |
+| `parallel/test-worker-unref-from-message-during-exit.js` | worker |  |
+| `parallel/test-zlib-brotli-16GB.js` | zlib |  |
 | `parallel/test-zlib-brotli-from-brotli.js` | zlib |  |
 | `parallel/test-zlib-brotli-from-string.js` | zlib |  |
 | `parallel/test-zlib-brotli.js` | zlib |  |
 | `parallel/test-zlib-close-after-write.js` | zlib |  |
 | `parallel/test-zlib-close-in-ondata.js` | zlib |  |
 | `parallel/test-zlib-create-raw.js` | zlib |  |
+| `parallel/test-zlib-destroy-pipe.js` | zlib |  |
 | `parallel/test-zlib-dictionary-fail.js` | zlib |  |
 | `parallel/test-zlib-failed-init.js` | zlib |  |
 | `parallel/test-zlib-flush-drain-longblock.js` | zlib |  |
+| `parallel/test-zlib-flush.js` | zlib |  |
+| `parallel/test-zlib-from-concatenated-gzip.js` | zlib |  |
 | `parallel/test-zlib-from-gzip.js` | zlib |  |
 | `parallel/test-zlib-from-string.js` | zlib |  |
 | `parallel/test-zlib-invalid-arg-value-brotli-compress.js` | zlib |  |
 | `parallel/test-zlib-invalid-input.js` | zlib |  |
 | `parallel/test-zlib-maxOutputLength.js` | zlib |  |
 | `parallel/test-zlib-no-stream.js` | zlib |  |
+| `parallel/test-zlib-object-write.js` | zlib |  |
 | `parallel/test-zlib-premature-end.js` | zlib |  |
+| `parallel/test-zlib-reset-before-write.js` | zlib |  |
 | `parallel/test-zlib-sync-no-event.js` | zlib |  |
+| `parallel/test-zlib-truncated.js` | zlib |  |
+| `parallel/test-zlib-unzip-one-byte-chunks.js` | zlib |  |
 | `parallel/test-zlib-write-after-flush.js` | zlib |  |
 | `parallel/test-zlib-zero-windowBits.js` | zlib |  |
+| `sequential/test-buffer-creation-regression.js` | buffer |  |
 | `sequential/test-child-process-exit.js` | child |  |
 | `sequential/test-cluster-send-handle-large-payload.js` | cluster |  |
+| `sequential/test-fs-watch.js` | fs |  |
+| `sequential/test-http-keepalive-maxsockets.js` | http |  |
+| `sequential/test-http-server-keep-alive-timeout-slow-client-headers.js` | http |  |
 | `sequential/test-http-server-keep-alive-timeout-slow-server.js` | http |  |
 | `sequential/test-http-server-request-timeouts-mixed.js` | http |  |
 | `sequential/test-http2-large-file.js` | http2 |  |
 | `sequential/test-http2-timeout-large-write-file.js` | http2 |  |
 | `sequential/test-http2-timeout-large-write.js` | http2 |  |
 | `sequential/test-https-server-keep-alive-timeout.js` | https |  |
+| `sequential/test-net-connect-econnrefused.js` | net |  |
+| `sequential/test-worker-fshandles-error-on-termination.js` | worker |  |

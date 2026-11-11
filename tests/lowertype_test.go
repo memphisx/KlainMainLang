@@ -27,6 +27,7 @@ console.log(p.a, p.m())
 		t.Fatalf("parse: %v", err)
 	}
 	ir, err := llvm.NewEmitter().EmitProgram(prog)
+	ir = llvm.ShapeIR(ir)
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
@@ -51,16 +52,13 @@ console.log(p.a, p.m())
 
 // A @lowerType class has no base: C builds the whole instance.
 func TestLowerTypeClassRejectsExtends(t *testing.T) {
-	prog, err := parseStrict(`
+	_, err := parseStrict(`
 class Base { x = 1 }
 /** @lowerType bad */
 class D extends Base { y = 2 }
 console.log(new D().y)
 `)
-	if err != nil {
-		t.Fatalf("parse: %v", err)
-	}
-	if _, err := llvm.NewEmitter().EmitProgram(prog); err == nil || !strings.Contains(err.Error(), "@lowerType class cannot extend") {
+	if err == nil || !strings.Contains(err.Error(), "@lowerType class cannot extend") {
 		t.Fatalf("want the extends rejection, got %v", err)
 	}
 }

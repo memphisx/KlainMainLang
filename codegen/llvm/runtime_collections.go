@@ -14,7 +14,6 @@ import (
 	"KlainMainLang/ast"
 	_ "embed"
 	"fmt"
-	"strings"
 )
 
 //go:embed collectionssrc/collections_engine.h
@@ -25,25 +24,6 @@ var arrayGuardSource string
 
 // ArrayGuardSource is the array integrity runtime (Object.freeze of an array).
 func ArrayGuardSource() string { return layoutHeader() + arrayGuardSource }
-
-// UsesArrayGuard reports whether the program links arrayguard.c.
-func (e *Emitter) UsesArrayGuard() bool { return e.usedArrayGuard }
-
-// ensureArrayGuard declares the array integrity runtime: the level an
-// array's header word carries, and the guard every mutation calls
-// (arrayguard.c).
-func (e *Emitter) ensureArrayGuard() {
-	if e.usedArrayGuard {
-		return
-	}
-	e.usedArrayGuard = true
-	e.ensureNullDerefThrow()
-	e.emitGlobal(`declare void @__kml_array_guard(ptr, i64, i64, i64)
-declare i64 @__kml_array_refuses(ptr, i64, i64)
-declare i32 @__kml_array_integrity(ptr, i64)
-declare void @__kml_array_set_level(ptr, i64)
-@__kml_array_integrity_any = external global i8`)
-}
 
 // Array mutation kinds __kml_array_guard checks (arrayguard.c).
 const (
@@ -60,16 +40,16 @@ const (
 // the array's integrity level: a no-op unless the program freezes, seals or
 // makes an array non-extensible.
 func (e *Emitter) emitArrayGuard(hdr string, op int, a, b string) {
-	e.ensureArrayGuard()
+	e.ensureErrorNames()
 	flag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr @__kml_array_integrity_any, align 1", flag))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" @__kml_array_integrity_any, align 1", flag))
 	any := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", any, flag))
 	checkL := e.freshLabel("arrguard.check")
 	okL := e.freshLabel("arrguard.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", any, checkL, okL))
 	e.emitLabel(checkL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_array_guard(ptr %s, i64 %d, i64 %s, i64 %s)", hdr, op, a, b))
+	e.emitInstr(fmt.Sprintf("call void @__kml_array_guard("+irPtr+" %s, i64 %d, i64 %s, i64 %s)", hdr, op, a, b))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", okL))
 	e.emitLabel(okL)
 }
@@ -81,16 +61,16 @@ func (e *Emitter) emitArrayWriteGuard(hdr string, op int, a, skipL string) {
 		e.emitArrayGuard(hdr, op, a, "0")
 		return
 	}
-	e.ensureArrayGuard()
+	e.ensureErrorNames()
 	flag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr @__kml_array_integrity_any, align 1", flag))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" @__kml_array_integrity_any, align 1", flag))
 	any := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", any, flag))
 	checkL, okL := e.freshLabel("arrguard.check"), e.freshLabel("arrguard.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", any, checkL, okL))
 	e.emitLabel(checkL)
 	r, refused := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_array_refuses(ptr %s, i64 %d, i64 %s)", r, hdr, op, a))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_array_refuses("+irPtr+" %s, i64 %d, i64 %s)", r, hdr, op, a))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", refused, r))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", refused, skipL, okL))
 	e.emitLabel(okL)
@@ -104,7 +84,7 @@ func (e *Emitter) emitArrayGuardFor(objExpr ast.Expression, op int, idx ast.Expr
 	if !pureArrayRef(objExpr) {
 		return
 	}
-	if t := e.inferExprType(objExpr); !t.IsArray() || t.IsTypedArray() || t.IsFlatArray() {
+	if t := e.typeOfExpr(objExpr); !t.IsArray() || t.IsTypedArray() || t.IsFlatArray() {
 		return
 	}
 	hdr, _, _, err := e.resolveArrayMutLoc(objExpr, "write", objExpr.GetPos())
@@ -141,8 +121,8 @@ func pureArrayRef(x ast.Expression) bool {
 
 // emitArraySetLevel records an array's integrity level (staticIntegrity*).
 func (e *Emitter) emitArraySetLevel(hdr string, level int) {
-	e.ensureArrayGuard()
-	e.emitInstr(fmt.Sprintf("call void @__kml_array_set_level(ptr %s, i64 %d)", hdr, level))
+	e.ensureErrorNames()
+	e.emitInstr(fmt.Sprintf("call void @__kml_array_set_level("+irPtr+" %s, i64 %d)", hdr, level))
 }
 
 //go:embed collectionssrc/collections.c
@@ -154,7 +134,7 @@ var collectionsAnySource string
 // CollectionsSource is the Map/Set/sort/frozen-set runtime's C source, behind
 // kml_layout.h.
 func CollectionsSource() string {
-	return layoutHeader() + collectionsEngineSource + collectionsSource
+	return layoutHeader() + fmt.Sprintf("#define KML_SYMBOL_TYPEID %dLL\n", symbolTypeIDFlag) + collectionsEngineSource + collectionsSource
 }
 
 // CollectionsAnySource is the any-keyed map's C source; it needs the box
@@ -166,203 +146,35 @@ func CollectionsAnySource() string {
 		collectionsEngineSource + collectionsAnySource
 }
 
-// UsesCollections reports whether the program links collections.c.
-func (e *Emitter) UsesCollections() bool { return e.usedCollections }
-
-// UsesCollectionsAny reports whether the program links collections_any.c.
-func (e *Emitter) UsesCollectionsAny() bool { return e.usedCollectionsAny }
-
 // --- Sort helpers ---
-
-// ensureSortClosGlobal declares the closure a custom-comparator sort calls
-// (the global lives in collections.c).
-func (e *Emitter) ensureSortClosGlobal() {
-	if !e.usedSortClosGlobal {
-		e.usedCollections = true
-		e.emitGlobal("@__kml_sort_clos = external thread_local global ptr")
-		e.emitGlobal("@__kml_sort_res = external thread_local global i32")
-		e.usedSortClosGlobal = true
-	}
-}
-
-// ensureSortCmpI64Lex is the JS-faithful DEFAULT (no-comparator) integer sort:
-// real Array.prototype.sort with no comparator converts every element to a
-// string and compares lexicographically — even for numbers — so [10,1,21,2]
-// sorts to [1,10,2,21], NOT the numeric [1,2,10,21]. (A custom comparator
-// still routes through the numeric trampoline; only the default changes.)
-func (e *Emitter) ensureSortCmpI64Lex() {
-	if e.usedSortCmpI64Lex {
-		return
-	}
-	e.usedSortCmpI64Lex = true
-	e.usedCollections = true
-	e.emitGlobal("declare i32 @__kml_cmp_i64_lex(ptr, ptr)")
-}
-
-// ensureSortCmpF64Lex is the float counterpart of ensureSortCmpI64Lex — the
-// default no-comparator sort renders each double via the JS-faithful
-// shortest-round-trip formatter (__kml_dtoa) and strcmp's the results.
-func (e *Emitter) ensureSortCmpF64Lex() {
-	if e.usedSortCmpF64Lex {
-		return
-	}
-	e.usedSortCmpF64Lex = true
-	e.ensureDtoa()
-	e.ensureStrcmp()
-	e.emitGlobal(`define i32 @__kml_cmp_f64_lex(ptr %pa, ptr %pb) {
-  %a = load double, ptr %pa, align 8
-  %b = load double, ptr %pb, align 8
-  %ba = alloca [32 x i8], align 1
-  %bb = alloca [32 x i8], align 1
-  call void @__kml_dtoa(ptr %ba, double %a)
-  call void @__kml_dtoa(ptr %bb, double %b)
-  %r = call i32 @strcmp(ptr %ba, ptr %bb)
-  ret i32 %r
-}`)
-}
-
-func (e *Emitter) ensureSortCmpStr() {
-	if e.usedSortCmpStr {
-		return
-	}
-	e.usedSortCmpStr = true
-	e.usedCollections = true
-	e.ensureStrHeaderRuntime() // __kml_str_cmp
-	e.emitGlobal("declare i32 @__kml_cmp_str(ptr, ptr)")
-}
-
-// ensureAnyToCStr emits `ptr @__kml_any_to_cstr(i64 %v)` — the callable
-// runtime counterpart of the inline emitDynamicToString: it converts one
-// NaN-boxed `any` value to its JS String() form as a null-terminated heap
-// string. A callable function (not the inline emitter helper) is needed by
-// runtime comparators that qsort invokes — the default-comparator sort of a
-// boxed-element array (`any[]`, TDD-00200), which is lexicographic over each
-// element's string form, exactly like the concrete-typed default sort. Built
-// with the builder-swap idiom (cf. emitClassStaticInit) so it can reuse the
-// full tag-dispatch of emitDynamicToString rather than duplicating it as raw
-// IR.
-func (e *Emitter) ensureAnyToCStr() {
-	if e.usedAnyToCStr {
-		return
-	}
-	e.usedAnyToCStr = true
-
-	restoreBuilder := e.beginThunkEmit()
-	savedScopes := e.scopes
-	savedRetType := e.currentRetType
-
-	e.scopes = nil
-	e.currentRetType = TypePtr
-
-	// %v is the incoming boxed value; the first fresh reg is %1, so reserve
-	// the parameter name explicitly in the signature below.
-	sv, err := e.emitDynamicToString(Value{Ref: "%v", Ty: TypeAny})
-	if err != nil {
-		// emitDynamicToString only errors on unsupported shapes it never hits
-		// for a bare any; treat as unreachable but keep the builder consistent.
-		panic(err)
-	}
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", sv.Ref))
-
-	e.functions.WriteString("\ndefine ptr @__kml_any_to_cstr(i64 %v) {\nentry:\n")
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
-
-	restoreBuilder()
-	e.scopes = savedScopes
-	e.currentRetType = savedRetType
-}
 
 // ensureSortCmpAnyLex emits the default (no-comparator) sort comparator for a
 // boxed-element array (`any[]`): each slot is a NaN box, converted to its JS
-// String() form and compared lexicographically — matching JS's default sort,
-// which ToString's every element regardless of type.
+// String() form and compared in JavaScript's string order, as JS's default
+// sort ToString's every element regardless of type.
 func (e *Emitter) ensureSortCmpAnyLex() {
 	if e.usedSortCmpAnyLex {
 		return
 	}
 	e.usedSortCmpAnyLex = true
 	e.ensureStrHeaderRuntime() // __kml_str_cmp: JavaScript's string order
-	e.ensureAnyToCStr()
-	e.emitGlobal(`define i32 @__kml_cmp_any_lex(ptr %pa, ptr %pb) {
-  %a = load i64, ptr %pa, align 8
-  %b = load i64, ptr %pb, align 8
-  %as = call ptr @__kml_any_to_cstr(i64 %a)
-  %bs = call ptr @__kml_any_to_cstr(i64 %b)
-  %r = call i32 @__kml_str_cmp(ptr %as, ptr %bs)
-  ret i32 %r
-}`)
-}
-
-// ensureSortTrampolineArr declares the custom-comparator trampoline for an
-// array of arrays (collections.c): each element a header pointer, passed to
-// the closure with its length.
-func (e *Emitter) ensureSortTrampolineArr() {
-	if e.usedSortTrampolineArr {
-		return
+	restore := e.beginDetachedFunc()
+	var str [2]string
+	for i, p := range []string{"%pa", "%pb"} {
+		v := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", v, p))
+		s, err := e.emitDynamicToString(Value{Ref: v, Ty: TypeAny})
+		if err != nil {
+			panic(err) // a bare any always renders
+		}
+		str[i] = s.Ref
 	}
-	e.usedSortTrampolineArr = true
-	e.ensureSortClosGlobal()
-	e.emitGlobal("declare i32 @__kml_sort_tramp_arr(ptr, ptr)")
-}
-
-// ensureSortTrampolineAny declares the custom-comparator trampoline for a
-// boxed-element array (`any[]`, collections.c): the NaN boxes go straight to
-// the closure, whose params are `any`.
-func (e *Emitter) ensureSortTrampolineAny() {
-	if e.usedSortTrampolineAny {
-		return
-	}
-	e.usedSortTrampolineAny = true
-	e.ensureSortClosGlobal()
-	e.emitGlobal("declare i32 @__kml_sort_tramp_any(ptr, ptr)")
-}
-
-// ensureSortTrampolineI64 declares the trampoline for a custom comparator
-// over integer elements; the trampoline and the closure global are in
-// collections.c.
-func (e *Emitter) ensureSortTrampolineI64() {
-	if e.usedSortTrampolineI64 {
-		return
-	}
-	e.usedSortTrampolineI64 = true
-	e.ensureSortClosGlobal()
-	e.emitGlobal("declare i32 @__kml_sort_tramp_i64(ptr, ptr)")
-}
-
-// ensureSortTrampolineF64: the comparator returns a `number` (double,
-// TDD-00123); the trampoline reduces it to qsort's -1/0/1 sign.
-func (e *Emitter) ensureSortTrampolineF64() {
-	if e.usedSortTrampolineF64 {
-		return
-	}
-	e.usedSortTrampolineF64 = true
-	e.ensureSortClosGlobal()
-	e.emitGlobal("declare i32 @__kml_sort_tramp_f64(ptr, ptr)")
-}
-
-// ensureSortTrampolineObj is the comparator trampoline for an object/class
-// element array (ADR-00681): elements are object pointers and the comparator
-// returns a `number` (double).
-func (e *Emitter) ensureSortTrampolineObj() {
-	if e.usedSortTrampolineObj {
-		return
-	}
-	e.usedSortTrampolineObj = true
-	e.ensureSortClosGlobal()
-	e.emitGlobal("declare i32 @__kml_sort_tramp_obj(ptr, ptr)")
-}
-
-// ensureSortTrampolineStr: a string comparator also returns a `number`
-// (double, TDD-00123).
-func (e *Emitter) ensureSortTrampolineStr() {
-	if e.usedSortTrampolineStr {
-		return
-	}
-	e.usedSortTrampolineStr = true
-	e.ensureSortClosGlobal()
-	e.emitGlobal("declare i32 @__kml_sort_tramp_str(ptr, ptr)")
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp("+irPtr+" %s, "+irPtr+" %s)", r, str[0], str[1]))
+	e.emitTerminator("ret i32 " + r)
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("i32 @__kml_cmp_any_lex("+irPtr+" %pa, "+irPtr+" %pb)", body)
 }
 
 // --- Map / Set helpers ---
@@ -373,57 +185,30 @@ func (e *Emitter) ensureSortTrampolineStr() {
 // order); every lookup goes through the open-addressing index. Set reuses the
 // layout; elements are stored as keys and vals is ignored.
 
-// ensureMapClear declares __kml_map_clear, shared by Map.clear/Set.clear for
-// every key kind: resets size, the hash index and the open iterators.
-func (e *Emitter) ensureMapClear() {
-	if e.usedMapClear {
-		return
-	}
-	e.usedMapClear = true
-	e.usedCollections = true
-	e.ensureMapIters()
-	e.emitGlobal("declare void @__kml_map_clear(ptr)")
-}
-
-// ensureMapIters declares the live iteration of a Map or Set: each open
-// iterator is a node on the map's list, so a removal before its position
-// shifts it back and clear() rewinds it (collections.c).
-func (e *Emitter) ensureMapIters() {
-	if e.usedMapIters {
-		return
-	}
-	e.usedMapIters = true
-	e.usedCollections = true
-	e.emitGlobal(`declare ptr @__kml_map_iter_open(ptr, i64)
-declare void @__kml_map_iter_close(ptr)`)
-}
-
 // emitMapFlavor declares one key flavor's C entry points (sfx: str/num/any;
-// key: the IR key type) and defines its keys()/vals() wrappers.
+// key: the IR key type).
 func (e *Emitter) emitMapFlavor(sfx, key string) {
-	e.declareFn("__kml_map_copy_keys", "declare ptr @__kml_map_copy_keys(ptr)")
-	e.declareFn("__kml_map_copy_vals", "declare ptr @__kml_map_copy_vals(ptr)")
-	var b strings.Builder
-	fmt.Fprintf(&b, `declare ptr @__kml_map_%[1]s_create()
-declare ptr @__kml_map_%[1]s_create_h(i64)
-declare void @__kml_map_%[1]s_set(ptr, %[2]s, i64)
-declare i64 @__kml_map_%[1]s_get(ptr, %[2]s)
-declare zeroext i1 @__kml_map_%[1]s_has(ptr, %[2]s)
-declare zeroext i1 @__kml_map_%[1]s_delete(ptr, %[2]s)
-`, sfx, key)
-	for _, part := range []string{"keys", "vals"} {
-		fmt.Fprintf(&b, `
-define {ptr, i64} @__kml_map_%[1]s_%[2]s(ptr %%map) {
-entry:
-  %%size = load i64, ptr %%map, align 8
-  %%arr = call ptr @__kml_map_copy_%[2]s(ptr %%map)
-  %%r0 = insertvalue {ptr, i64} undef, ptr %%arr, 0
-  %%r1 = insertvalue {ptr, i64} %%r0, i64 %%size, 1
-  ret {ptr, i64} %%r1
+	e.declareFn("__kml_map_copy_keys", "declare "+irPtr+" @__kml_map_copy_keys("+irPtr+")")
+	e.declareFn("__kml_map_copy_vals", "declare "+irPtr+" @__kml_map_copy_vals("+irPtr+")")
+	e.emitGlobal(fmt.Sprintf(`declare `+irPtr+` @__kml_map_%[1]s_create()
+declare `+irPtr+` @__kml_map_%[1]s_create_h(i64)
+declare void @__kml_map_%[1]s_set(`+irPtr+`, %[2]s, i64)
+declare i64 @__kml_map_%[1]s_get(`+irPtr+`, %[2]s)
+declare zeroext i1 @__kml_map_%[1]s_has(`+irPtr+`, %[2]s)
+declare zeroext i1 @__kml_map_%[1]s_delete(`+irPtr+`, %[2]s)`, sfx, key))
 }
-`, sfx, part)
-	}
-	e.emitGlobal(b.String())
+
+// emitMapCopy is a Map's or Set's keys or values (part "keys"/"vals") copied
+// into a fresh array, as a {ptr, i64} aggregate register: the length is the
+// map's size, its first word.
+func (e *Emitter) emitMapCopy(part, mapPtr string) string {
+	e.declareFn("__kml_map_copy_"+part, "declare "+irPtr+" @__kml_map_copy_"+part+"("+irPtr+")")
+	size, arr, r0, r := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", size, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_copy_%s("+irPtr+" %s)", arr, part, mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {"+irPtr+", i64} undef, "+irPtr+" %s, 0", r0, arr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {"+irPtr+", i64} %s, i64 %s, 1", r, r0, size))
+	return r
 }
 
 // ensureMapStrHelpers declares the string-keyed Map/Set (FNV-1a, content
@@ -433,48 +218,5 @@ func (e *Emitter) ensureMapStrHelpers() {
 		return
 	}
 	e.usedMapStrHelpers = true
-	e.usedCollections = true
-	e.ensureMapIters()
-	e.emitMapFlavor("str", "ptr")
-}
-
-// ensureMapNumHelpers declares the number-keyed Map/Set (raw i64 keys, an
-// xor-fold multiply hash).
-func (e *Emitter) ensureMapNumHelpers() {
-	if e.usedMapNumHelpers {
-		return
-	}
-	e.usedMapNumHelpers = true
-	e.usedCollections = true
-	e.ensureMapIters()
-	e.emitMapFlavor("num", "i64")
-}
-
-// ensureIntegrityLevels declares the static-object integrity runtime
-// (collections.c): the level Object.freeze, seal and preventExtensions
-// record in an object's header word, which every field write reads.
-func (e *Emitter) ensureIntegrityLevels() {
-	if e.usedIntegrityLevels {
-		return
-	}
-	e.usedIntegrityLevels = true
-	e.usedCollections = true
-	e.emitGlobal("declare i64 @__kml_obj_level(ptr)\ndeclare void @__kml_obj_set_level(ptr, i64)\ndeclare i64 @__kml_side_level(ptr)\ndeclare void @__kml_side_set_level(ptr, i64)")
-}
-
-// ensureMapAnyHelpers declares the any-keyed Map/Set (TDD-00211): keys and
-// values are NaN-boxed i64 words, hashed consistently with JS SameValueZero
-// (collections_any.c). get returns the undefined box on a miss.
-func (e *Emitter) ensureMapAnyHelpers() {
-	if e.usedMapAnyHelpers {
-		return
-	}
-	e.usedMapAnyHelpers = true
-	e.usedCollections = true
-	e.usedCollectionsAny = true
-	e.ensureMapIters()
-	e.ensureAnyEq()            // __kml_any_eq, for SameValueZero
-	e.ensureFnMeta()           // __kml_fn_identity_dyn: a function key hashes by identity
-	e.ensureBoxedBigIntHooks() // __kml_boxed_bigint_str: a bigint key hashes by value
-	e.emitMapFlavor("any", "i64")
+	e.emitMapFlavor("str", irPtr)
 }

@@ -131,3 +131,22 @@ big.bytes().then((u) => console.log('bytes', u.length));
 new Blob(['a\0b', new Uint8Array([0, 99])]).text().then((t) => console.log(t.length, JSON.stringify(t)));
 `)
 }
+
+// URL.createObjectURL / revokeObjectURL and buffer.resolveObjectURL.
+func TestE2EObjectURLs(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCLIJS(t, `
+const { Blob, resolveObjectURL } = require('buffer');
+const b = new Blob(['hello'], { type: 'text/plain' });
+const u = URL.createObjectURL(b);
+console.log(typeof u, u.startsWith('blob:nodedata:'), u.length);
+const r = resolveObjectURL(u);
+console.log(r instanceof Blob, r === b, r.size, r.type);
+r.text().then(t => console.log(t));
+URL.revokeObjectURL(u);
+console.log(resolveObjectURL(u), resolveObjectURL('blob:other:x'), resolveObjectURL('not a url'));
+try { URL.createObjectURL('x') } catch (e) { console.log(e.code, e.message) }
+console.log(URL.revokeObjectURL('nope'));
+try { URL.revokeObjectURL() } catch (e) { console.log(e.code, e.message) }
+`)
+}

@@ -18,8 +18,16 @@
 typedef long long i64;
 
 #ifdef _WIN32
-/* memmem is defined by the generated module on Windows (ensureMemmem). */
-void *memmem(const void *hay, size_t hlen, const void *needle, size_t nlen);
+/* memmem, a GNU/BSD extension no Windows C runtime has (UCRT included):
+ * defined here for this file and the generated module's calls. */
+void *memmem(const void *hay, size_t hlen, const void *needle, size_t nlen) {
+    if (nlen == 0) return (void *)hay;
+    if (nlen > hlen) return NULL;
+    const char *h = (const char *)hay;
+    for (size_t i = 0; i <= hlen - nlen; i++)
+        if (memcmp(h + i, needle, nlen) == 0) return (void *)(h + i);
+    return NULL;
+}
 #endif
 
 /* The allocator, length read and free stay in the generated module, where
@@ -27,7 +35,7 @@ void *memmem(const void *hay, size_t hlen, const void *needle, size_t nlen);
 extern void *__kml_str_alloc(i64 n);
 extern i64 __kml_str_len(const char *s);
 
-void __kml_str_finalize(char *s) { *(i64 *)(s - 8) = (i64)strlen(s); }
+void __kml_str_finalize(char *s) { *(i64 *)KML_PREFIX(s) = (i64)strlen(s); }
 
 /* ---- UTF-16 indexing over UTF-8 bytes ----
  * A string holds UTF-8, with a lone surrogate as its own three-byte form
@@ -52,7 +60,7 @@ i64 __kml_str_u16len_slow(const char *s) {
         u += b >= 0xF0;          /* a four-byte one starts two */
     }
     if (u16_cur.s == s) u16_cur.s = NULL; /* a new string at a reused address */
-    if (u < (1LL << 30) - 1) *(i64 *)(s - 8) = n | ((u + 1) << 33);
+    if (u < (1LL << 30) - 1) *(i64 *)KML_PREFIX(s) = n | ((u + 1) << 33);
     return u;
 }
 
@@ -169,7 +177,7 @@ char *__kml_u16_sub(const char *s, i64 a, i64 b) {
         w += 3;
     }
     if (end > start) {
-        memcpy(w, s + start, (size_t)(end - start));
+        kml_copy(KML_HEAP_RAW, w, s + start, (size_t)(end - start));
         w += end - start;
     }
     if (mb) {
@@ -193,8 +201,8 @@ void __kml_wtf8_join(char *s, i64 at);
 char *__kml_str_concat(const char *a, const char *b) {
     i64 n1 = __kml_str_len(a), n2 = __kml_str_len(b);
     char *out = (char *)__kml_str_alloc(n1 + n2);
-    memcpy(out, a, (size_t)n1);
-    memcpy(out + n1, b, (size_t)n2 + 1);
+    kml_copy(KML_HEAP_RAW, out, a, (size_t)n1);
+    kml_copy(KML_HEAP_RAW, out + n1, b, (size_t)n2 + 1);
     if (__builtin_expect((unsigned char)out[n1] == 0xED, 0)) __kml_wtf8_join(out, n1);
     return out;
 }
@@ -213,8 +221,8 @@ void __kml_wtf8_join(char *s, i64 at) {
     o[1] = (unsigned char)(0x80 | ((cp >> 12) & 0x3F));
     o[2] = (unsigned char)(0x80 | ((cp >> 6) & 0x3F));
     o[3] = (unsigned char)(0x80 | (cp & 0x3F));
-    memmove(o + 4, p + at + 3, (size_t)(n - at - 3) + 1);
-    *(i64 *)(s - 8) = n - 2;
+    kml_copy(KML_HEAP_RAW, o + 4, p + at + 3, (size_t)(n - at - 3) + 1);
+    *(i64 *)KML_PREFIX(s) = n - 2;
 }
 
 /* A string's n bytes copied to p, made UTF-8: each lone surrogate becomes
@@ -243,9 +251,28 @@ char **__kml_str_index_keys(const char *s, i64 *n) {
         char tmp[24];
         int w = snprintf(tmp, sizeof tmp, "%lld", i);
         char *k = (char *)__kml_str_alloc(w);
-        memcpy(k, tmp, (size_t)w + 1);
+        kml_copy(KML_HEAP_RAW, k, tmp, (size_t)w + 1);
         KML_STORE_PTR(&keys[i], k);
     }
+    return keys;
+}
+
+/* A primitive string's own property names, as its String object's:
+ * its index keys, then "length" (Object.getOwnPropertyNames). */
+char **__kml_str_own_names_c(const char *s, i64 *n) {
+    i64 len = kml_str_u16len(s);
+    char **keys = (char **)kml_alloc(KML_HEAP_WORDS, (size_t)(len + 1) * sizeof(char *));
+    for (i64 i = 0; i < len; i++) {
+        char tmp[24];
+        int w = snprintf(tmp, sizeof tmp, "%lld", i);
+        char *k = (char *)__kml_str_alloc(w);
+        kml_copy(KML_HEAP_RAW, k, tmp, (size_t)w + 1);
+        KML_STORE_PTR(&keys[i], k);
+    }
+    char *l = (char *)__kml_str_alloc(6);
+    kml_copy(KML_HEAP_RAW, l, "length", 7);
+    KML_STORE_PTR(&keys[len], l);
+    *n = len + 1;
     return keys;
 }
 
@@ -314,10 +341,10 @@ void *__kml_str_join(char *const *parts, i64 n, const char *sep) {
     char *out = (char *)__kml_str_alloc(total), *w = out;
     int joins = 0;
     for (i64 i = 0; i < n; i++) {
-        if (i > 0) { memcpy(w, sep, (size_t)ls); w += ls; }
+        if (i > 0) { kml_copy(KML_HEAP_RAW, w, sep, (size_t)ls); w += ls; }
         i64 lp = __kml_str_len(parts[i]);
         joins |= lp > 0 && (unsigned char)parts[i][0] == 0xED;
-        memcpy(w, parts[i], (size_t)lp);
+        kml_copy(KML_HEAP_RAW, w, parts[i], (size_t)lp);
         w += lp;
     }
     *w = '\0';
@@ -333,7 +360,7 @@ void *__kml_str_from_cstr(const char *c) {
     if (!c) return NULL;
     i64 len = (i64)strlen(c);
     char *dst = (char *)__kml_str_alloc(len);
-    memcpy(dst, c, (size_t)len + 1);
+    kml_copy(KML_HEAP_RAW, dst, c, (size_t)len + 1);
     return dst;
 }
 
@@ -408,7 +435,7 @@ i64 __kml_str_lastindexof_from(const char *hay, const char *needle, i64 from) {
  * trailing NULL. */
 void *__kml_argv_headerize(i64 argc, char **argv) {
     void **arr = (void **)kml_alloc(KML_HEAP_WORDS, (size_t)(argc + 1) * 8);
-    arr[argc] = NULL;
+    KML_STORE_PTR(&arr[argc], NULL);
     for (i64 i = 0; i < argc; i++) arr[i] = __kml_str_from_cstr(argv[i]);
     return arr;
 }
@@ -418,9 +445,9 @@ void *__kml_argv_headerize(i64 argc, char **argv) {
  * at index 2. The raw argv keeps its OS shape for execv/fork. argc >= 1. */
 void *__kml_argv_node_shape(i64 argc, void **hdr) {
     void **arr = (void **)kml_alloc(KML_HEAP_WORDS, (size_t)(argc + 2) * 8);
-    arr[argc + 1] = NULL;
-    arr[0] = hdr[0];
-    arr[1] = hdr[0];
+    KML_STORE_PTR(&arr[argc + 1], NULL);
+    KML_STORE_PTR(&arr[0], hdr[0]);
+    KML_STORE_PTR(&arr[1], hdr[0]);
     for (i64 i = 1; i < argc; i++) arr[i + 1] = hdr[i];
     return arr;
 }

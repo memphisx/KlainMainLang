@@ -56,9 +56,7 @@
               "Sentinel `ptr null`",
               "Strict `===`/`!==` distinguishes `null` from `undefined` via the static type kind, so `null === undefined` is `false` and a `T | null` or `T | undefined` value compares against the right literal ([ADR-00833](../adr/00/ADR-00833.md))"
             ],
-            "caveats": [
-              "A value typed as **both** `T | null | undefined` shares the single `ptr null` sentinel, so it can't tell which nullish kind it holds — it compares per the statically-chosen kind, which can be wrong for the other"
-            ]
+            "caveats": []
           },
           {
             "feature": "JSDoc extended integers",
@@ -129,9 +127,7 @@
           {
             "feature": "`bigint`",
             "status": "implemented",
-            "caveats": [
-              "No `.toLocaleString()` (an `Intl`-shaped gap)"
-            ],
+            "caveats": [],
             "notes": [
               "Backend-agnostic `__kml_bigint_*` ABI over an opaque `ptr` handle, selectable via `-bigint=libtommath\\|gmp` (default `libtommath`, public domain; `gmp` LGPL) — each an embedded C file compiled+linked only when a program uses bigint ([TDD-00074](../tdd/TDD-00074.md)/[ADR-00216](../adr/00/ADR-00216.md))",
               "`123n`/hex/bin/oct/`_`-separator literals, `+ - * / % ** & \\| ^ ~ << >>`, same-type comparisons **and cross-type comparison with an integer `number`** (`10n < 5`, `10n == 10`, exact), unary `-`/`~`, truthiness (`0n` falsy), `typeof`, `++`/`--`, compound assignment, `.toString([radix])`, params/returns/fields/arrays, `BigInt(int\\|string)`, and the console-`n`-suffix vs `String()`-bare print split all work",
@@ -215,14 +211,14 @@
           {
             "feature": "Union types beyond `T \\| null`",
             "status": "implemented",
-            "caveats": [
-              "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object/interface/class members (any number of classes and plain object types, at most one headerless host object such as `URL`, or a **discriminated union** ([TDD-00116](../tdd/TDD-00116.md)); [ADR-01219](../adr/01/ADR-01219.md)), and a `ReadableStream` member ([TDD-00119](../tdd/TDD-00119.md)); two array members of one kind, a `Headers`-like host handle beside another of its kind, number-literal tags, and a non-first-position tag aren't supported",
-              "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null`/`instanceof`/`in`/a discriminant/a type guard (if/else branches + early return); a field/element, `switch (typeof x)`, and `as` casts aren't narrowed; a conditional expression narrows its branches too; before narrowing, an object union reads only a member all its object members declare ([TDD-00114](../tdd/TDD-00114.md))"
-            ],
+            "caveats": [],
             "notes": [
               "Usable at the top level of a var declaration/function param/return, as an **object field** ([TDD-00119](../tdd/TDD-00119.md)) and as an **array element** (`(number \\| string)[]`, a discriminated `(A \\| B)[]`, and `(number \\| undefined)[]` whose absent elements are real `undefined`s) — every write (literal, `push`, `xs[i] = v`) is checked against the member set and boxed ([ADR-01039](../adr/01/ADR-01039.md))",
               "Same runtime box as `any`/`unknown` with a checked member set on top ([TDD-00043](../tdd/TDD-00043.md)/[ADR-00136](../adr/00/ADR-00136.md)); a narrowed local unboxes to the concrete member ([ADR-00354](../adr/00/ADR-00354.md)), an object member to its typed pointer ([ADR-00355](../adr/00/ADR-00355.md))",
-              "An uninitialized union binding reads as boxed `undefined` (JS `let x;` semantics) until assigned ([ADR-00475](../adr/00/ADR-00475.md))"
+              "An uninitialized union binding reads as boxed `undefined` (JS `let x;` semantics) until assigned ([ADR-00475](../adr/00/ADR-00475.md))",
+              "Members may be scalars, classes, plain object types, host objects (`Map \\| Set`, `Headers \\| URLSearchParams`, a member all of them have read un-narrowed), arrays and tuples (`number[] \\| number[][]`: iterated, indexed, spread, and the array methods TypeScript resolves on the union), and discriminated unions tagged by any literal in any position ([ADR-01970](../adr/01/ADR-01970.md))",
+              "Narrowing by `typeof` (also `switch (typeof x)`), truthiness, `== null`, `instanceof`, `in`, a discriminant (also a tuple's literal element) or a type guard, on a local, a field or an element, as in TypeScript",
+              "Destructuring a union reads each member's property; the leaves of a `const` or never-reassigned parameter pattern over a discriminated union narrow together, a test of the discriminant leaf narrowing the others (`const { done, value } = it.next(); if (!done) value`) ([ADR-01929](../adr/01/ADR-01929.md))"
             ]
           },
           {
@@ -244,7 +240,8 @@
             "caveats": [
               "A tuple with an optional or rest element (`[a?: number]`, `[number, ...string[]]`) is stored as `any[]`: its elements read as `any`",
               "A non-constant index (`t[i]`) reads the element as `any`",
-              "A union holds at most one tuple or array member"
+              "A union holds at most one tuple or array member",
+              "A tuple boxed into `any` or held as a `Set`/`Map` key is a copy: its identity is lost (`set.has(t)` after `set.add(t)` is `false`)"
             ],
             "notes": [
               "Fixed-arity, heterogeneous, positional value stored as a fixed-shape struct ([TDD-00066](../tdd/TDD-00066.md)/[ADR-00201](../adr/00/ADR-00201.md))",
@@ -324,7 +321,7 @@
             "feature": "Type assertions (`x as T`, `as const`, `satisfies T`, `<T>x`)",
             "status": "implemented",
             "caveats": [
-              "**Erased, not enforcing** — the assertion is dropped and the value keeps its *own* inferred type, so `as T` does not re-type the expression; a cast the code *relies on* for typing won't take effect (matches TS runtime erasure, not static narrowing/widening — [ADR-00371](../adr/00/ADR-00371.md)); the general `any as T` question is [TDD-00176](../tdd/TDD-00176.md)"
+              "An assertion to a type of another kind through `unknown`/`any` (`\"s\" as unknown as number`) converts the value to that type (`NaN`), where Node keeps the value (`\"s\"`): the binding's storage is the asserted type's"
             ],
             "notes": [
               "Parsed as a left-associative postfix on any expression; `as const` and `satisfies T` are likewise identity; the old-style prefix `<T>expr` form parses in the unary position and is erased identically ([ADR-00451](../adr/00/ADR-00451.md))",
@@ -349,11 +346,12 @@
             "feature": "Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`)",
             "status": "implemented",
             "caveats": [
-              "A runtime *use* of a declared binding this compiler doesn't itself provide is an ordinary `undefined variable` error — under whole-program AOT an ambient declaration has no external target to bind to",
-              "`declare class` and the brace-bodied `global`/`module`/`namespace` blocks are parsed and erased (no binding — [ADR-00388](../adr/00/ADR-00388.md))"
+              "The string-named `declare module \"x\"` and `declare global` blocks are parsed and erased (no binding — [ADR-00388](../adr/00/ADR-00388.md))",
+              "A class extending a `declare class` is a compile error (the base exists only at run time)"
             ],
             "notes": [
-              "`declare var` is a real zero-initialized binding; `declare function` compiles to a throwing 'no implementation' stub (clear runtime error only if called); redeclared signatures collapse last-wins; `declare class/namespace/module/global` stay erased ([ADR-00471](../adr/00/ADR-00471.md))",
+              "`declare var` is a real zero-initialized binding; `declare function` compiles to a throwing 'no implementation' stub (clear runtime error only if called); redeclared signatures collapse last-wins ([ADR-00471](../adr/00/ADR-00471.md))",
+              "`declare class C` is typed by the checker and has no implementation: `new C()` reads `C` as a global the environment provides, else throws ReferenceError, as Node does ([ADR-01970](../adr/01/ADR-01970.md))",
               "Identifier-named `declare namespace/module X` members are real ambient bindings (vars zero-init and assignable, functions throwing stubs); string-named module and `global` blocks stay erased ([ADR-00474](../adr/00/ADR-00474.md))",
               "`declare [const] enum` is a real enum ([ADR-00476](../adr/00/ADR-00476.md))"
             ]
@@ -362,7 +360,7 @@
             "feature": "TypeScript type errors (assignability, calls, operators, properties, assignment targets)",
             "status": "implemented",
             "caveats": [
-              "Reported: `TS2322`, `TS2345`, `TS2554`/`TS2555`, `TS2362`/`TS2363`/`TS2365`, `TS2367`, `TS2339`, `TS2353`, `TS2741`/`TS2739`/`TS2740`, `TS2588`/`TS2628`/`TS2629`/`TS2630`, `TS2769`, `TS18046`–`TS18050`, `TS2531`–`TS2533`, `TS2571`, `TS2721`–`TS2723`, `TS2304` and the forms tsc gives it for a value (`TS2552`, `TS2662`/`TS2663`, `TS2693`, `TS2708`, `TS2301`, `TS18004`, `TS2592`/`TS2593`), `TS2558`, `TS2754`, the class-member accessibility codes (`TS2341`, `TS2445`, `TS2446`, `TS2673`, `TS2674`, `TS2855`), a call's `this` context (`TS2684`). Not yet: a near-miss type name (`TS2552`), a type name out of its scope, a partly assigned variable read (`TS2454`), iterating a possibly-`undefined` value (`TS2488`), a call no overload takes by arity (`TS2575`), and more",
+              "Reported: `TS2322`, `TS2345`, `TS2554`/`TS2555`, `TS2362`/`TS2363`/`TS2365`, `TS2367`, `TS2339`, `TS2353`, `TS2741`/`TS2739`/`TS2740`, `TS2588`/`TS2628`/`TS2629`/`TS2630`, `TS2769`, `TS18046`–`TS18050`, `TS2531`–`TS2533`, `TS2571`, `TS2721`–`TS2723`, `TS2454`, `TS7022`, `TS7023`, `TS2304` and the forms tsc gives it for a value (`TS2552`, `TS2662`/`TS2663`, `TS2693`, `TS2708`, `TS2301`, `TS18004`, `TS2592`/`TS2593`), `TS2558`, `TS2754`, the class-member accessibility codes (`TS2341`, `TS2445`, `TS2446`, `TS2673`, `TS2674`, `TS2855`), a call's `this` context (`TS2684`). Not yet: a near-miss type name (`TS2552`), a type name out of its scope, iterating a possibly-`undefined` value (`TS2488`), a call no overload takes by arity (`TS2575`), and more",
               "A property is checked only on a type whose members the checker knows whole: not on a library global's name (an `interface Element` merges with the library's) or a class merged with an interface",
               "A call is checked only against a function type the checker models whole: calls to generic functions and to the builtin library's undeclared parts are not checked, and a tagged template's call not at all",
               "A function type in a message names its parameters `p0`, `p1`, … where tsc prints their declared names",

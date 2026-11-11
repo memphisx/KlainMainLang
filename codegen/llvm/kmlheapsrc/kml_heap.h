@@ -34,6 +34,30 @@ static inline void *kml_calloc(int kind, __SIZE_TYPE__ count, __SIZE_TYPE__ n) {
 static inline void *kml_realloc(int kind, void *p, __SIZE_TYPE__ n) { (void)kind; return realloc(p, n); }
 static inline void kml_free(int kind, void *p) { (void)kind; free(p); }
 
+/* A function value (a {fn, env} closure header, a {fn, env, arity}
+ * record): n bytes after its prefix word, the magic with the closure flag
+ * and function id 0, an anonymous function (objheader.go). */
+#define KML_HDR_CLOSURE_WORD ((0x4B4DLL << 32) | (1LL << 54))
+
+/* A dynamic object's header word (objheader.go): the magic with type id 1,
+ * its flags above the bits every header shares. A bag test masks the
+ * header's kind flags too, so no other header (an Error kind 1) reads as
+ * one. */
+#define KML_BAG_HDR ((0x4B4DLL << 32) | 1)
+#define KML_BAG_HDR_MASK ((0x7FFFLL << 32) | 0xFFFFFFFFLL | (0xFLL << 47) | (1LL << 54))
+#define KML_IS_BAG_WORD(w) (((w) & KML_BAG_HDR_MASK) == KML_BAG_HDR)
+#define KML_BAG_NONEXT (1LL << 55)    /* non-extensible */
+#define KML_BAG_PROXY (1LL << 56)     /* a Proxy: target at +8, handler at +16 */
+#define KML_BAG_NULLPROTO (1LL << 57) /* a null prototype */
+#define KML_BAG_ARRAY (1LL << 58)     /* array exotic: Array.prototype */
+#define KML_BAG_MODULE (1LL << 59)    /* a module namespace object */
+#define KML_BAG_FUNC (1LL << 60)      /* a function's own-property bag */
+static inline void *kml_closure_alloc(__SIZE_TYPE__ n) {
+    long long *b = (long long *)kml_alloc(KML_HEAP_WORDS, n + 8);
+    b[0] = KML_HDR_CLOSURE_WORD;
+    return b + 1;
+}
+
 /* The GC interface (TDD-00230 phase 4): the collector as the runtime sees
  * it. gcshim.c implements it on Boehm under -mm=gc, and only gc-mode code
  * calls it; no runtime member names the collector itself. */
@@ -70,12 +94,24 @@ void *kml_gc_thread_base(void); /* this thread's own stack base */
  * a reader masks. A read-only string (a C literal with a header) carries its
  * count from the start: KML_STR_ASCII_HDR for ASCII text. */
 #define KML_STR_LEN_MASK 0xFFFFFFFFLL
-#define KML_STR_LEN(s) (*(const long long *)((const char *)(s) - 8) & KML_STR_LEN_MASK)
+/* The word before a prefixed body (a string's length word, an array's or a
+ * host value's header): its offset, and its address. */
+#define KML_PREFIX_OFF 8
+#define KML_PREFIX(p) ((char *)(p) - KML_PREFIX_OFF)
+
+/* An object's identity hash: the one place a table may derive a hash from a
+ * managed object (a Map/Set key compared by identity). Every collector this
+ * runtime links today (malloc, Boehm, the reference counter) never moves an
+ * object, so its address is a stable identity. A moving collector changes
+ * only this function: it hands out a stored hash (a header field or a side
+ * table it updates on a move), and no table needs rehashing. */
+static inline long long kml_id_hash(const void *p) { return (long long)(unsigned long long)(__UINTPTR_TYPE__)p; }
+#define KML_STR_LEN(s) (*(const long long *)((const char *)(s) - KML_PREFIX_OFF) & KML_STR_LEN_MASK)
 #define KML_STR_ASCII_HDR(n) ((long long)(n) | (((long long)(n) + 1) << 33))
 long long __kml_str_u16len_slow(const char *s);
 /* The string's length in UTF-16 code units: JavaScript's `length`. */
 static inline long long kml_str_u16len(const char *s) {
-    unsigned long long c = (unsigned long long)*(const long long *)(s - 8) >> 33;
+    unsigned long long c = (unsigned long long)*(const long long *)(s - KML_PREFIX_OFF) >> 33;
     return c ? (long long)c - 1 : __kml_str_u16len_slow(s);
 }
 /* Whether every byte of the string is ASCII, so byte offsets are its

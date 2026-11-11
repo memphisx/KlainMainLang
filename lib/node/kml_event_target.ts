@@ -5,7 +5,9 @@
 // MessageEvent, CloseEvent and ErrorEvent, as undici's (Stage 2). A program that
 // names one without declaring it imports this module.
 
+import type { GlobalEvent } from './kml_global_event';
 import { inspect } from './internal_util_inspect';
+import { NodeTypeError } from './internal_errors';
 
 // customInspect is util.inspect's rendering of an event-target object, as
 // lib/internal/abort_controller.js has it: `Name { …obj }`, or the name
@@ -50,7 +52,7 @@ export class Event {
 
     constructor(type: string, options?: EventInit) {
         if (arguments.length === 0) {
-            throw new TypeError('The "type" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "type" argument must be specified');
         }
         this.#type = `${type}`;
         this.#bubbles = options?.bubbles === true;
@@ -85,6 +87,16 @@ export class Event {
         if (value) this.#propagationStopped = true;
     }
 
+    // Node's legacy initializer: a no-op while the event is dispatched.
+    initEvent(type: string, bubbles: boolean = false, cancelable: boolean = false): void {
+        if (arguments.length === 0) {
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "type" argument must be specified');
+        }
+        if (this.#dispatching) return;
+        this.#type = `${type}`;
+        this.#bubbles = !!bubbles;
+        this.#cancelable = !!cancelable;
+    }
     composedPath(): EventTarget[] {
         return this.#dispatching && this.#currentTarget !== null ? [this.#currentTarget] : [];
     }
@@ -129,7 +141,7 @@ export class CustomEvent extends Event {
     #detail: any;
     constructor(type: string, options?: CustomEventInit) {
         if (arguments.length === 0) {
-            throw new TypeError('The "type" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "type" argument must be specified');
         }
         super(type, options);
         // Node's detail defaults to null.
@@ -271,7 +283,7 @@ export class AbortSignal extends EventTarget {
     #aborted = false;
     #reason: any = undefined;
     #deadline = 0;
-    #onabort: ((this: AbortSignal, ev: Event) => any) | null = null;
+    #onabort: ((this: AbortSignal, ev: GlobalEvent) => any) | null = null;
     #onabortRegistered = false;
 
     [inspect.custom](depth: number, options: any): string {
@@ -289,8 +301,8 @@ export class AbortSignal extends EventTarget {
     get aborted(): boolean { return this.#aborted; }
     get reason(): any { return this.#reason; }
 
-    get onabort(): ((this: AbortSignal, ev: Event) => any) | null { return this.#onabort; }
-    set onabort(handler: ((this: AbortSignal, ev: Event) => any) | null) {
+    get onabort(): ((this: AbortSignal, ev: GlobalEvent) => any) | null { return this.#onabort; }
+    set onabort(handler: ((this: AbortSignal, ev: GlobalEvent) => any) | null) {
         this.#onabort = typeof handler === "function" ? handler : null;
         // An event handler attribute holds its place among the listeners from
         // its first assignment.
@@ -336,7 +348,22 @@ export class AbortSignal extends EventTarget {
         return signal;
     }
 
-    static any(signals: AbortSignal[]): AbortSignal {
+    static any(signals: AbortSignal[]): AbortSignal;
+    static any(input?: any): AbortSignal {
+        // WebIDL's sequence<AbortSignal>: an iterable object, each element
+        // an AbortSignal.
+        if (input === null || typeof input !== 'object' || typeof input[Symbol.iterator] !== 'function') {
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'signals cannot be converted to sequence.');
+        }
+        const signals: AbortSignal[] = [];
+        let i = 0;
+        for (const s of input) {
+            if (!(s instanceof AbortSignal)) {
+                throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'signals[' + i + '] is not of type AbortSignal.');
+            }
+            signals.push(s as AbortSignal);
+            i++;
+        }
         const result = AbortSignal._new();
         for (const s of signals) {
             if (s.aborted) {
@@ -382,7 +409,7 @@ export class MessageEvent extends Event {
     #ports: any[];
     constructor(type: string, options?: MessageEventInit) {
         if (arguments.length === 0) {
-            throw new TypeError('The "type" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "type" argument must be specified');
         }
         super(type, options);
         this.#data = options?.data ?? null;
@@ -411,7 +438,7 @@ export class CloseEvent extends Event {
     #reason: string;
     constructor(type: string, options?: CloseEventInit) {
         if (arguments.length === 0) {
-            throw new TypeError('The "type" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "type" argument must be specified');
         }
         super(type, options);
         this.#wasClean = options?.wasClean ?? false;
@@ -440,7 +467,7 @@ export class ErrorEvent extends Event {
     #error: any;
     constructor(type: string, options?: ErrorEventInit) {
         if (arguments.length === 0) {
-            throw new TypeError('The "type" argument must be specified');
+            throw NodeTypeError('ERR_MISSING_ARGS', 'The "type" argument must be specified');
         }
         super(type, options);
         this.#message = options?.message ?? '';

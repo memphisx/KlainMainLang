@@ -3,6 +3,7 @@ package tests
 import (
 	"os/exec"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -114,4 +115,32 @@ func aboveFdLimit(bin string) *exec.Cmd {
 		return exec.Command(bin)
 	}
 	return exec.Command("sh", "-c", "ulimit -n 4096 && exec "+bin)
+}
+
+// A CommonJS script that requires a module still runs its process.nextTick
+// queue before its promise jobs (only an ES module's top level is itself a
+// promise job).
+func TestE2ECommonJSRequireTickOrder(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCLIJS(t, `
+const path = require('path');
+Promise.reject(1).catch(() => console.log('promise', typeof path.join));
+process.nextTick(() => console.log('tick'));
+queueMicrotask(() => console.log('microtask'));
+`)
+}
+
+// A default or namespace import of 'buffer' read as a value: its namespace
+// object, both lanes.
+func TestE2EBufferModuleImportAsValue(t *testing.T) {
+	t.Parallel()
+	src := `
+import buffer from 'buffer';
+import * as ns from 'buffer';
+const m: any = buffer;
+console.log(typeof m, m.Buffer === Buffer, typeof m.atob, typeof m.constants, m.kMaxLength > 0);
+console.log(typeof ns, ns.Buffer === Buffer, buffer.Buffer.from('hi').toString('hex'));
+`
+	assertSameAsNodeImports(t, src)
+	assertSameAsNodeCompatJS(t, strings.Replace(src, "const m: any", "const m", 1))
 }

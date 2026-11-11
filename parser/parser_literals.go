@@ -115,7 +115,6 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 				if err != nil {
 					return nil, err
 				}
-				eraseTypeParams(fd)
 				fe := p.newObjectMethod(fd, isAsyncMethod, fnPos)
 				fe.IsGenerator = isGeneratorMethod
 				return fe, nil
@@ -198,7 +197,9 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			if err != nil {
 				return nil, err
 			}
-			eraseTypeParams(fd)
+			if err := p.accessorArity(accessorKind, fd, nameTok); err != nil {
+				return nil, err
+			}
 			fnVal := p.newObjectMethod(fd, false, fnPos)
 			fnVal.NamePos = posOf(nameTok) // where a diagnostic about the accessor points
 			prop.Value = fnVal
@@ -220,7 +221,6 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			if err != nil {
 				return nil, err
 			}
-			eraseTypeParams(fd)
 			fe := p.newObjectMethod(fd, isAsyncMethod, fnPos)
 			fe.IsGenerator = isGeneratorMethod
 			props = append(props, ast.ObjectProperty{Key: propertyKeyText(keyTok), Value: fe})
@@ -255,7 +255,6 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 			if err != nil {
 				return nil, err
 			}
-			eraseTypeParams(fd)
 			val = p.newObjectMethod(fd, false, fnPos)
 		} else if p.check(lexer.COLON) {
 			p.advance() // ':'
@@ -293,6 +292,11 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 	}
 	if _, err := p.expect(lexer.RBRACE); err != nil {
 		return nil, err
+	}
+	for _, pr := range props {
+		if fe, ok := pr.Value.(*ast.FunctionExpression); ok && !fe.Method {
+			fe.PropValue = true
+		}
 	}
 	ol := ast.NewObjectLiteral(props, pos)
 	ol.RestTrailingComma = restTrailing
@@ -416,7 +420,7 @@ func (p *Parser) parseNewTail(name string, pos ast.Pos) (*ast.NewExpression, err
 	// `a<b>(c)` grammar ambiguity that keeps explicit type arguments out of
 	// V1 for plain calls — the same reasoning `new Map<K,V>()`/
 	// `new Set<T>()` already rely on.
-	var typeArgs []*ast.TypeAnnotation
+	var typeArgs []ast.TypeNode
 	if p.check(lexer.LT) {
 		ltStart := p.peek().Pos
 		p.advance() // consume '<'
@@ -520,7 +524,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 					return nil, err
 				}
 			}
-			var pty *ast.TypeAnnotation
+			var pty ast.TypeNode
 			if p.check(lexer.COLON) {
 				p.advance()
 				var err error
@@ -554,7 +558,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 			return nil, err
 		}
 		optional := p.match(lexer.QUESTION)
-		var pty *ast.TypeAnnotation
+		var pty ast.TypeNode
 		if p.check(lexer.COLON) {
 			p.advance()
 			pty, err = p.parseTypeAnnotation("ts")
@@ -580,7 +584,7 @@ func (p *Parser) parseArrowFunction() (*ast.ArrowFunction, error) {
 	}
 
 	// Optional return type annotation
-	var retType *ast.TypeAnnotation
+	var retType ast.TypeNode
 	if p.check(lexer.COLON) {
 		p.advance()
 		var err error
@@ -850,7 +854,9 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 
 	case lexer.STRING:
 		p.advance()
-		return ast.NewStringLiteral(tok.Literal, posOf(tok)), nil
+		sl := ast.NewStringLiteral(tok.Literal, posOf(tok))
+		sl.Plain = tok.End-tok.Pos == len(tok.Literal)+2
+		return sl, nil
 
 	case lexer.TEMPLATE_NO_SUB:
 		p.advance()
@@ -1020,6 +1026,12 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 
 	case lexer.SUPER:
 		p.advance()
+		switch p.peek().Type {
+		case lexer.DOT, lexer.LBRACKET, lexer.LPAREN, lexer.LT: // `super<T>(…)`: type arguments
+		default:
+			// `super?.x` and a bare `super` are early errors.
+			return nil, p.errAt(tok, diag.SuperNotFollowed)
+		}
 		return ast.NewSuperExpression(posOf(tok)), nil
 
 	case lexer.CLASS:
@@ -1061,7 +1073,6 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		if err != nil {
 			return nil, err
 		}
-		eraseTypeParams(fd)
 		fe := p.newFuncExpr(name, fd, false, fPos)
 		fe.IsGenerator = isGen
 		return fe, nil
@@ -1095,7 +1106,6 @@ func (p *Parser) parseAsyncFunctionOrArrow(tok lexer.Token) (ast.Expression, err
 			if err != nil {
 				return nil, err
 			}
-			eraseTypeParams(fd)
 			fe := p.newFuncExpr(name, fd, true, fPos)
 			fe.IsGenerator = isGen
 			return fe, nil
@@ -1188,42 +1198,19 @@ func (p *Parser) parseGenericArrow() (ast.Expression, error) {
 	if err != nil {
 		return nil, err
 	}
-	set := map[string]bool{}
 	for _, tp := range tps {
-		set[tp.Name] = true
 		af.TypeParams = append(af.TypeParams, tp.Name)
-		var c, d *ast.TypeAnnotation
+		var c, d ast.TypeNode
 		if tp.Constraint != nil {
-			c = ast.NodeAnnotation(tp.Constraint, "ts")
+			c = tp.Constraint
 		}
 		if tp.Default != nil {
-			d = ast.NodeAnnotation(tp.Default, "ts")
+			d = tp.Default
 		}
 		af.TypeParamConstraints = append(af.TypeParamConstraints, c)
 		af.TypeParamDefaults = append(af.TypeParamDefaults, d)
 	}
-	for i := range af.Params {
-		ast.EraseTypeParams(af.Params[i].Type, set)
-	}
-	ast.EraseTypeParams(af.RetType, set)
 	return af, nil
-}
-
-// eraseTypeParams erases a function's type parameters to any in its
-// annotations, as a generic method's are: a generic function expression or
-// object-literal method is typed as any in codegen; its type nodes keep them.
-func eraseTypeParams(fd *ast.FunctionDeclaration) {
-	if len(fd.TypeParams) == 0 {
-		return
-	}
-	set := map[string]bool{}
-	for _, tp := range fd.TypeParams {
-		set[tp] = true
-	}
-	for i := range fd.Params {
-		ast.EraseTypeParams(fd.Params[i].Type, set)
-	}
-	ast.EraseTypeParams(fd.ReturnType, set)
 }
 
 // newFuncExpr is the function expression fd was parsed for; a `this: T`

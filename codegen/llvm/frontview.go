@@ -11,8 +11,13 @@ import (
 
 // frontView is what codegen may ask of the checker.
 type frontView interface {
+	CtorReturnsForeign(cd *ast.ClassDeclaration) bool
+	AmbientName(name string) bool
+	InEvalCode(n ast.Node) bool
 	AnyArgOverloadCall(e *ast.CallExpression) bool
+	AnnotationType(ta ast.TypeNode) *checker.Type
 	AnyType() *checker.Type
+	ThisType() *checker.Type
 	Binding() *binder.Binding
 	BodyReturnType(body *ast.BlockStatement) *checker.Type
 	CallTypeArgs(e *ast.CallExpression) map[string]*checker.Type
@@ -20,6 +25,11 @@ type frontView interface {
 	ClassValueOf(cls *ast.ClassDeclaration) *checker.Type
 	ConstLiteralKey(id *ast.Identifier) (value string, number, ok bool)
 	ContextualSignature(fn ast.Expression) *checker.Type
+	MaxArgs(t *checker.Type) (int, bool)
+	MinArgs(t *checker.Type) (int, bool)
+	ParamIsString(t *checker.Type, i int) bool
+	ContextualType(e ast.Node) *checker.Type
+	IsGeneric(t *checker.Type) bool
 	ExpandoMember(e *ast.MemberExpression) bool
 	FieldType(cd *ast.ClassDeclaration, name string) *checker.Type
 	GlobalInterface(name string) *checker.Type
@@ -28,11 +38,14 @@ type frontView interface {
 	JSCallSiteParam(fn ast.Node, i int) *checker.Type
 	JSConstructorFields(decl *ast.ClassDeclaration) []*checker.Property
 	LibraryMethod(e *ast.MemberExpression) bool
+	LiteralContextMember(lit *ast.ObjectLiteral) *checker.Type
+	MappedFrom(t *checker.Type) *checker.Type
 	MaybeUndefined(t *checker.Type) bool
 	MemberDecl(e *ast.MemberExpression) ast.Node
 	MemberInLibrary(e *ast.MemberExpression) bool
 	MemberOverloadDecls(e *ast.MemberExpression) []ast.Node
 	ModuleVarType(v *ast.VarDeclaration) *checker.Type
+	VarType(v *ast.VarDeclaration) *checker.Type
 	NamespaceMember(e *ast.MemberExpression) *binder.Symbol
 	NonNullable(t *checker.Type) *checker.Type
 	NonUndefined(t *checker.Type) *checker.Type
@@ -43,6 +56,7 @@ type frontView interface {
 	PatternParamType(fd *ast.FunctionDeclaration, i int) *checker.Type
 	PrimitiveMember(str bool, name string) (*checker.Type, ast.Node, []ast.Node)
 	StorageTypeOf(e ast.Expression) *checker.Type
+	GlobalValueType(name string) *checker.Type
 	ErasedSignature(t *checker.Type) *checker.Type
 	StandsFor(syn, orig ast.Expression)
 	ImplementationSignature(fd *ast.FunctionDeclaration) *checker.Type
@@ -52,6 +66,8 @@ type frontView interface {
 	WarmDecl(n ast.Node)
 	TypeFromNode(n ast.TypeNode, scope *binder.Scope) *checker.Type
 	TypeFromNodeWithParams(n ast.TypeNode, scope *binder.Scope, names []string) *checker.Type
+	TypeFromNodeWithBindings(n ast.TypeNode, scope *binder.Scope, names []string, bound []*checker.Type) *checker.Type
+	PrimitiveType(keyword string) *checker.Type
 	TypeOf(e ast.Expression) *checker.Type
 	Unanswered(t *checker.Type) bool
 	WithoutFalsy(t *checker.Type) *checker.Type

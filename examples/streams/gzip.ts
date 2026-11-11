@@ -7,7 +7,7 @@ const enc = new TextEncoder();
 const dec = new TextDecoder();
 const original = "Thessaloniki says: streams compress well. ".repeat(100);
 
-const source = new ReadableStream<Uint8Array>({
+const source = new ReadableStream<Uint8Array<ArrayBuffer>>({
   start: (c) => { const b = enc.encode(original); c.enqueue(b); c.close(); }
 });
 

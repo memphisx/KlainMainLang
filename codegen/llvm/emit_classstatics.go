@@ -70,21 +70,20 @@ func (e *Emitter) staticAreaOf(c string) *staticArea {
 // recordFor is the record of class c the code being emitted runs against,
 // or a null pointer.
 func (e *Emitter) recordFor(c string) string {
-	e.ensureClassRec()
 	if sym, ok := e.lookup(c + classRecSuffix); ok {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, sym.Ptr))
 		return r
 	}
 	if sym, ok := e.lookup("this"); ok && sym.Ty.IsClass() && !sym.Ty.IsDynamic() && (sym.Ty.ClassName == c || e.classDerives(sym.Ty.ClassName, c)) {
 		this, of, up := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", this, sym.Ptr))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classrec_of(ptr %s)", of, this))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classrec_up(ptr %s, ptr %s)", up, of, e.classRefPtr(c)))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", this, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_of("+irPtr+" %s)", of, this))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_up("+irPtr+" %s, "+irPtr+" %s)", up, of, e.classRefPtr(c)))
 		return up
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classrec_static_cur(ptr %s)", r, e.classRefPtr(c)))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_static_cur("+irPtr+" %s)", r, e.classRefPtr(c)))
 	return r
 }
 
@@ -94,7 +93,7 @@ func (e *Emitter) staticAreaPtr(c string) string {
 	a := e.staticAreaOf(c)
 	rec := e.recordFor(c)
 	area := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classrec_statics(ptr %s, ptr %s, i64 ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64))", area, rec, e.classRefPtr(c), a.ir))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_statics("+irPtr+" %s, "+irPtr+" %s, i64 ptrtoint ("+irPtr+" getelementptr (%s, "+irPtr+" null, i32 1) to i64))", area, rec, e.classRefPtr(c), a.ir))
 	return area
 }
 
@@ -106,7 +105,7 @@ func (e *Emitter) staticSlotPtr(c, f string) string {
 	}
 	a := e.staticAreaOf(c)
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 %d", p, a.ir, e.staticAreaPtr(c), a.slot[f]))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 %d", p, a.ir, e.staticAreaPtr(c), a.slot[f]))
 	return p
 }
 
@@ -117,7 +116,7 @@ func (e *Emitter) staticOwnPtr(c, f string) string {
 	}
 	a := e.staticAreaOf(c)
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 %d", p, a.ir, e.staticAreaPtr(c), a.own[f]))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 %d", p, a.ir, e.staticAreaPtr(c), a.own[f]))
 	return p
 }
 
@@ -129,13 +128,12 @@ func (e *Emitter) bindStaticReceiver(c string) {
 	if !e.classRecords[c] {
 		return
 	}
-	e.ensureClassRec()
 	for b, i := c, 0; b != "" && i < 64 && e.classRecords[b]; i++ {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classrec_static_cur(ptr %s)", r, e.classRefPtr(b)))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_static_cur("+irPtr+" %s)", r, e.classRefPtr(b)))
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r, slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", r, slot))
 		e.define(b+classRecSuffix, Symbol{Ptr: slot, Ty: TypePtr})
 		b = e.classes[b].BaseClass
 	}
@@ -150,9 +148,9 @@ func (e *Emitter) passStaticReceiver(c string) func() {
 	}
 	rec := e.recordFor(c)
 	old := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classrec_recv(ptr %s)", old, rec))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_recv("+irPtr+" %s)", old, rec))
 	return func() {
-		e.emitInstr(fmt.Sprintf("call ptr @__kml_classrec_recv(ptr %s)", old))
+		e.emitInstr(fmt.Sprintf("call "+irPtr+" @__kml_classrec_recv("+irPtr+" %s)", old))
 	}
 }
 
@@ -221,6 +219,13 @@ func (e *Emitter) staticThisToClass(prog *ast.Program) {
 			}
 			prog.StaticThis[id] = cd
 			return id
+		case *ast.AssignmentExpression:
+			// `super.x = v` stores on the receiver, the class.
+			if a := n.(*ast.AssignmentExpression); a != nil {
+				if name, ok := superPropertyName(a.Left); ok {
+					a.Left = ast.NewMemberExpression(rw(cls, ast.NewThisExpression(a.Left.GetPos())).(ast.Expression), name, a.Left.GetPos())
+				}
+			}
 		}
 		ast.RewriteChildren(n, func(m ast.Node) ast.Node { return rw(cls, m) })
 		return n
@@ -236,6 +241,7 @@ func (e *Emitter) staticThisToClass(prog *ast.Program) {
 		if cd == nil || cd.Name == "" {
 			return true
 		}
+		staticSuperInits(cd, e.originate)
 		for i := range cd.Fields {
 			if cd.Fields[i].Static && cd.Fields[i].Initializer != nil {
 				cd.Fields[i].Initializer = rw(cd.Name, cd.Fields[i].Initializer).(ast.Expression)
@@ -243,9 +249,9 @@ func (e *Emitter) staticThisToClass(prog *ast.Program) {
 		}
 		for _, m := range cd.Methods {
 			if m.IsStatic && m.Body != nil && real[m] {
-				m.Params = append([]ast.Param{{Name: "this", Type: &ast.TypeAnnotation{Name: "any"}}}, m.Params...)
+				m.Params = append([]ast.Param{{Name: "this", Type: ast.AnyAnnotation("ts")}}, m.Params...)
 				staticSuperToCall(cd, m, e.originate)
-				staticPrivateBrand(cd, m, e.originate)
+				staticPrivateBrand(cd, m, e.originate, e.anonClasses[cd])
 				continue
 			}
 			if m.IsStatic && m.Body != nil {
@@ -329,7 +335,7 @@ func staticPrivateNamed(cd *ast.ClassDeclaration, origin func(syn, orig ast.Expr
 		return s
 	}
 	readMsg := func(p string) string {
-		return "Cannot read private member " + p + " from an object whose class did not declare it"
+		return "Cannot read private member " + ast.PrivateDisplay(p) + " from an object whose class did not declare it"
 	}
 	var rw func(hidden map[string]bool) func(n ast.Node) ast.Node
 	rw = func(hidden map[string]bool) func(n ast.Node) ast.Node {
@@ -361,7 +367,7 @@ func staticPrivateNamed(cd *ast.ClassDeclaration, origin func(syn, orig ast.Expr
 			case *ast.AssignmentExpression:
 				if me, ok := priv(x.Left); ok {
 					x.Right = f(x.Right).(ast.Expression)
-					msg := "Cannot write private member " + me.Property + " to an object whose class did not declare it"
+					msg := "Cannot write private member " + ast.PrivateDisplay(me.Property) + " to an object whose class did not declare it"
 					if x.Op != "=" {
 						msg = readMsg(me.Property)
 					}
@@ -419,8 +425,8 @@ func staticPrivateNamed(cd *ast.ClassDeclaration, origin func(syn, orig ast.Expr
 // static member's `this` is already the class's name (staticThisToClass),
 // so the generator needs no receiver. Only a module-level class's: the
 // binder ran before this pass, so a class declared in a function could not
-// capture the generator as a local. A body reading `arguments` stays a
-// method too: the call passes only the declared parameters.
+// capture the generator as a local. A body reading `arguments` is passed
+// the method's whole `arguments`.
 func liftStaticGenerators(prog *ast.Program) map[*ast.FunctionDeclaration]*ast.FunctionDeclaration {
 	lifted := map[*ast.FunctionDeclaration]*ast.FunctionDeclaration{}
 	lift := func(list []ast.Statement) []ast.Statement {
@@ -432,10 +438,43 @@ func liftStaticGenerators(prog *ast.Program) map[*ast.FunctionDeclaration]*ast.F
 				continue
 			}
 			for _, m := range cd.Methods {
-				if !m.IsStatic || !m.IsGenerator || m.Body == nil || m.AccessorKind != "" || readsArguments(m.Body) {
+				if !m.IsStatic || !m.IsGenerator || m.Body == nil || m.AccessorKind != "" {
 					continue
 				}
 				pos := m.GetPos()
+				if readsArguments(m.Body) {
+					// The method forwards its whole `arguments`, which the
+					// generator keeps as its own; the method's parameters
+					// stay only for its length, a default an undefined.
+					gen := *m
+					gen.Name = cd.Name + "__kml_sgen_" + m.Name
+					gen.IsStatic = false
+					gen.Params = append([]ast.Param(nil), m.Params...)
+					out = append(out, &gen)
+					lifted[m] = &gen
+					ps := make([]ast.Param, len(m.Params))
+					for i, p := range m.Params {
+						ps[i] = ast.Param{Name: p.Name, Rest: p.Rest, Type: ast.AnyAnnotation("ts")}
+						if p.ArrayPattern != nil || p.ObjectPattern != nil {
+							ps[i].Name = fmt.Sprintf("__kml_sgp%d", i)
+						}
+						if p.Rest {
+							ps[i].Type = nil
+						}
+						if p.Default != nil {
+							ps[i].Default = ast.NewNullLiteral(true, pos)
+						}
+					}
+					m.Params = ps
+					m.IsGenerator = false
+					m.IsAsync = false
+					m.ReturnType = nil
+					fwd := ast.NewSpreadElement(ast.NewIdentifier("arguments", pos), pos)
+					m.Body = ast.NewBlockStatement([]ast.Statement{
+						ast.NewReturnStatement(ast.NewCallExpression(ast.NewIdentifier(gen.Name, pos), []ast.Expression{fwd}, pos), pos),
+					}, pos)
+					continue
+				}
 				gen := *m
 				gen.Name = cd.Name + "__kml_sgen_" + m.Name
 				gen.IsStatic = false
@@ -458,9 +497,12 @@ func liftStaticGenerators(prog *ast.Program) map[*ast.FunctionDeclaration]*ast.F
 				lifted[m] = &gen
 				for i := range m.Params {
 					if m.Params[i].ArrayPattern != nil || m.Params[i].ObjectPattern != nil {
-						// The method forwards the whole value; the generator
-						// destructures it.
+						// The method forwards the whole value, whatever it
+						// is; the generator destructures it.
 						m.Params[i].ArrayPattern, m.Params[i].ObjectPattern = nil, nil
+						if m.Params[i].Type == nil {
+							m.Params[i].Type = ast.AnyAnnotation("ts")
+						}
 					}
 				}
 				m.IsGenerator = false
@@ -609,8 +651,33 @@ func (e *Emitter) staticReceivers(prog *ast.Program) map[*ast.FunctionDeclaratio
 // `Base.m.call(this, …)` and `super.f` to `Base.f`: its receiver is m's own.
 // Each built node is linked to the expression it stands for (origin).
 func staticSuperToCall(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, origin func(syn, orig ast.Expression)) {
-	if cd.BaseClass == "" || cd.BaseQualified {
+	if rw := staticSuperRewriter(cd, origin); rw != nil {
+		ast.RewriteChildren(m.Body, rw)
+	}
+}
+
+// staticSuperInits is staticSuperToCall over class cd's static blocks and
+// static field initializers, whose home object is the class too.
+func staticSuperInits(cd *ast.ClassDeclaration, origin func(syn, orig ast.Expression)) {
+	rw := staticSuperRewriter(cd, origin)
+	if rw == nil {
 		return
+	}
+	for _, sb := range cd.StaticBlocks {
+		ast.RewriteChildren(sb, rw)
+	}
+	for i := range cd.Fields {
+		if cd.Fields[i].Static && cd.Fields[i].Initializer != nil {
+			cd.Fields[i].Initializer = rw(cd.Fields[i].Initializer).(ast.Expression)
+		}
+	}
+}
+
+// staticSuperRewriter is the rewrite staticSuperToCall applies, nil when
+// cd has no base it names.
+func staticSuperRewriter(cd *ast.ClassDeclaration, origin func(syn, orig ast.Expression)) func(ast.Node) ast.Node {
+	if cd.BaseClass == "" || cd.BaseQualified {
+		return nil
 	}
 	var rw func(n ast.Node) ast.Node
 	rw = func(n ast.Node) ast.Node {
@@ -632,9 +699,33 @@ func staticSuperToCall(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, ori
 					return call
 				}
 			}
+			if ix, ok := x.Callee.(*ast.IndexExpression); ok {
+				if _, isSuper := ix.Object.(*ast.SuperExpression); isSuper {
+					// `super[k](…)`: `Base[k].call(this, …)`.
+					ix.Index = rw(ix.Index).(ast.Expression)
+					for i, a := range x.Args {
+						x.Args[i] = rw(a).(ast.Expression)
+					}
+					pos := x.GetPos()
+					base := ast.NewIndexExpression(ast.NewAsExpression(ast.NewIdentifier(cd.BaseClass, pos), ast.AnyAnnotation("ts"), pos), ix.Index, pos)
+					args := append([]ast.Expression{ast.NewThisExpression(pos)}, x.Args...)
+					call := ast.NewCallExpression(ast.NewMemberExpression(base, "call", pos), args, pos)
+					origin(base, ix)
+					origin(call, x)
+					return call
+				}
+			}
 		case *ast.MemberExpression:
 			if _, isSuper := x.Object.(*ast.SuperExpression); isSuper {
 				base := ast.NewMemberExpression(ast.NewIdentifier(cd.BaseClass, x.GetPos()), x.Property, x.GetPos())
+				origin(base, x)
+				return base
+			}
+		case *ast.IndexExpression:
+			if _, isSuper := x.Object.(*ast.SuperExpression); isSuper {
+				x.Index = rw(x.Index).(ast.Expression)
+				pos := x.GetPos()
+				base := ast.NewIndexExpression(ast.NewAsExpression(ast.NewIdentifier(cd.BaseClass, pos), ast.AnyAnnotation("ts"), pos), x.Index, pos)
 				origin(base, x)
 				return base
 			}
@@ -642,7 +733,7 @@ func staticSuperToCall(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, ori
 		ast.RewriteChildren(n, rw)
 		return n
 	}
-	ast.RewriteChildren(m.Body, rw)
+	return rw
 }
 
 // staticPrivateBrand rewrites each `this.#p` in static method m of class
@@ -652,7 +743,7 @@ func staticSuperToCall(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, ori
 //
 // Each node it builds is linked to the expression it stands for (origin):
 // the checker bound the program before this rewrite.
-func staticPrivateBrand(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, origin func(syn, orig ast.Expression)) {
+func staticPrivateBrand(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, origin func(syn, orig ast.Expression), anonymous bool) {
 	own := map[string]bool{}
 	for _, f := range cd.Fields {
 		if f.Static && strings.HasPrefix(f.Name, "#") {
@@ -664,8 +755,40 @@ func staticPrivateBrand(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, or
 			own[sm.Name] = true
 		}
 	}
-	if len(own) == 0 {
+	// An instance's private names: `this` must be an instance of the class.
+	inst := map[string]bool{}
+	for _, f := range cd.Fields {
+		if !f.Static && strings.HasPrefix(f.Name, "#") {
+			inst[f.Name] = true
+		}
+	}
+	for _, im := range cd.Methods {
+		if !im.IsStatic {
+			if found, static := privateInDeclarer(cd, privateNameOf(im.Name)); found && !static && strings.HasPrefix(privateNameOf(im.Name), "#") {
+				inst[privateNameOf(im.Name)] = true
+			}
+		}
+	}
+	if len(own) == 0 && len(inst) == 0 {
 		return
+	}
+	instPriv := func(x ast.Expression) (*ast.MemberExpression, bool) {
+		me, ok := x.(*ast.MemberExpression)
+		if !ok || !inst[me.Property] || own[me.Property] {
+			return nil, false
+		}
+		_, isThis := me.Object.(*ast.ThisExpression)
+		return me, isThis
+	}
+	// branded makes me's receiver the checked instance.
+	branded := func(me *ast.MemberExpression, msg string) {
+		pos := me.GetPos()
+		c := ast.NewCallExpression(ast.NewIdentifier("__kml_instance_brand", pos), []ast.Expression{
+			me.Object, ast.NewIdentifier(cd.Name, pos), ast.NewStringLiteral(msg, pos)}, pos)
+		// Not linked to the `this` it wraps: that is the class value to the
+		// checker, and this is an instance (the intrinsic's own type).
+		c.Intrinsic = "kml.instanceBrand"
+		me.Object = c
 	}
 	priv := func(x ast.Expression) (*ast.MemberExpression, bool) {
 		me, ok := x.(*ast.MemberExpression)
@@ -694,17 +817,51 @@ func staticPrivateBrand(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration, or
 		return s
 	}
 	readMsg := func(p string) string {
-		return "Cannot read private member " + p + " from an object whose class did not declare it"
+		return "Cannot read private member " + ast.PrivateDisplay(p) + " from an object whose class did not declare it"
 	}
 	var rw func(n ast.Node) ast.Node
 	rw = func(n ast.Node) ast.Node {
+		switch x := n.(type) {
+		case *ast.AssignmentExpression:
+			if me, ok := instPriv(x.Left); ok {
+				x.Right = rw(x.Right).(ast.Expression)
+				msg := "Cannot write private member " + ast.PrivateDisplay(me.Property) + " to an object whose class did not declare it"
+				if x.Op != "=" {
+					msg = readMsg(me.Property)
+				}
+				branded(me, msg)
+				return x
+			}
+		case *ast.UpdateExpression:
+			if me, ok := instPriv(x.Arg); ok {
+				branded(me, readMsg(me.Property))
+				return x
+			}
+		case *ast.CallExpression:
+			if me, ok := instPriv(x.Callee); ok {
+				for i, a := range x.Args {
+					x.Args[i] = rw(a).(ast.Expression)
+				}
+				shown := ast.Unmangle(cd.Name)
+				if anonymous {
+					shown = "anonymous" // V8's name for a class without its own
+				}
+				branded(me, "Receiver must be an instance of class "+shown)
+				return x
+			}
+		case *ast.MemberExpression:
+			if me, ok := instPriv(x); ok {
+				branded(me, readMsg(me.Property))
+				return x
+			}
+		}
 		switch x := n.(type) {
 		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ClassDeclaration, *ast.ClassExpression:
 			return n
 		case *ast.AssignmentExpression:
 			if me, ok := priv(x.Left); ok {
 				x.Right = rw(x.Right).(ast.Expression)
-				msg := "Cannot write private member " + me.Property + " to an object whose class did not declare it"
+				msg := "Cannot write private member " + ast.PrivateDisplay(me.Property) + " to an object whose class did not declare it"
 				if x.Op != "=" {
 					msg = readMsg(me.Property)
 				}
@@ -754,6 +911,51 @@ func init() {
 			return Value{Ref: "true", Ty: TypeBool}, nil
 		},
 		ty: func(*Emitter, *ast.CallExpression) Type { return TypeBool },
+	}
+}
+
+// privateNameOf is a class method's member name: an accessor's property
+// (accessorMethodName), else the method's own.
+func privateNameOf(method string) string {
+	for _, k := range []string{"get", "set"} {
+		if p := strings.TrimPrefix(method, accessorMethodName(k, "")); p != method {
+			return p
+		}
+	}
+	return method
+}
+
+// kml.instanceBrand(recv, C, msg): recv as an instance of class C, or a
+// TypeError with msg when it is not one (staticPrivateBrand: an instance's
+// private name read off a static method's receiver).
+func init() {
+	intrinsics["kml.instanceBrand"] = intrinsic{
+		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			pos := ex.GetPos()
+			cls := ex.Args[1].(*ast.Identifier)
+			tmp := fmt.Sprintf("__kml_ibrand_%d", e.weakSeedCtr)
+			e.weakSeedCtr++
+			if err := e.emitStmt(ast.NewVarDeclaration("const", tmp, ast.AnyAnnotation(""), ex.Args[0], pos)); err != nil {
+				return Value{}, err
+			}
+			o := func() ast.Expression { return ast.NewIdentifier(tmp, pos) }
+			saved := e.brandOnly
+			e.brandOnly = true
+			isC := ast.NewBinaryExpression("instanceof", o(), ast.NewIdentifier(cls.Name, pos), pos)
+			err := e.emitStmt(ast.NewIfStatement(ast.NewUnaryExpression("!", true, isC, pos), ast.NewBlockStatement([]ast.Statement{
+				ast.NewThrowStatement(ast.NewNewErrorExpression("TypeError", ast.NewStringLiteral(ex.Args[2].(*ast.StringLiteral).Value, pos), pos), pos)}, pos), nil, pos))
+			e.brandOnly = saved
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitExpr(ast.NewAsExpression(o(), e.classAnnotation(cls.Name), pos))
+		},
+		ty: func(e *Emitter, ex *ast.CallExpression) Type {
+			if info, ok := e.classes[ex.Args[1].(*ast.Identifier).Name]; ok {
+				return info.Ty
+			}
+			return TypeAny
+		},
 	}
 }
 
@@ -905,6 +1107,19 @@ func (e *Emitter) outerPrivateReads(prog *ast.Program) {
 				return n
 			}
 		case *ast.MemberExpression:
+			if _, self := x.Object.(*ast.ThisExpression); !self && !x.Optional && strings.HasPrefix(x.Property, "#") && len(stack) > 0 && stack[len(stack)-1].Name != "" {
+				// `o.#p` of the class's own field on another receiver: o
+				// must be an instance (its brand), and is read as one.
+				if field, own := declares(stack[len(stack)-1], x.Property); own && field {
+					pos := x.GetPos()
+					e.warmFront(x)
+					c := ast.NewCallExpression(ast.NewIdentifier("__kml_private_get", pos), []ast.Expression{
+						rw(x.Object).(ast.Expression), ast.NewIdentifier(stack[len(stack)-1].Name, pos), ast.NewStringLiteral(x.Property, pos)}, pos)
+					c.Intrinsic = "kml.privateGet"
+					e.originate(c, x)
+					return c
+				}
+			}
 			if strings.HasPrefix(x.Property, "#") && len(stack) > 1 {
 				if _, own := declares(stack[len(stack)-1], x.Property); !own {
 					for i := len(stack) - 2; i >= 0; i-- {
@@ -950,17 +1165,31 @@ func init() {
 				return Value{}, err
 			}
 			o := func() ast.Expression { return ast.NewIdentifier(tmp, pos) }
+			readMsg := "Cannot read private member " + ast.PrivateDisplay(name) + " from an object whose class did not declare it"
+			if e.overrideInstances(cls.Name) {
+				// Another object a base constructor returned keeps it in a
+				// side table.
+				ov, err := e.emitExpr(o())
+				if err != nil {
+					return Value{}, err
+				}
+				return e.overrideBranch(ov, cls.Name, func() (Value, error) {
+					return e.emitExpr(ast.NewMemberExpression(e.asClass(ov, cls.Name, pos), name, pos))
+				}, func() (Value, error) {
+					return e.emitPtabGet(ov, cls.Name+name, readMsg), nil
+				})
+			}
 			saved := e.brandOnly
 			e.brandOnly = true
 			isD := ast.NewBinaryExpression("instanceof", o(), ast.NewIdentifier(cls.Name, pos), pos)
-			msg := ast.NewStringLiteral("Cannot read private member "+name+" from an object whose class did not declare it", pos)
+			msg := ast.NewStringLiteral(readMsg, pos)
 			err := e.emitStmt(ast.NewIfStatement(ast.NewUnaryExpression("!", true, isD, pos), ast.NewBlockStatement([]ast.Statement{
 				ast.NewThrowStatement(ast.NewNewErrorExpression("TypeError", msg, pos), pos)}, pos), nil, pos))
 			e.brandOnly = saved
 			if err != nil {
 				return Value{}, err
 			}
-			as := ast.NewAsExpression(o(), &ast.TypeAnnotation{Name: cls.Name}, pos)
+			as := ast.NewAsExpression(o(), e.classAnnotation(cls.Name), pos)
 			return e.emitExpr(ast.NewMemberExpression(as, name, pos))
 		},
 		ty: func(e *Emitter, ex *ast.CallExpression) Type {
@@ -1007,7 +1236,24 @@ func init() {
 			saved := e.brandOnly
 			e.brandOnly = true
 			defer func() { e.brandOnly = saved }()
-			return e.emitExpr(test)
+			cn := ex.Args[1].(*ast.Identifier).Name
+			if ex.Args[3].(*ast.BooleanLiteral).Value || !e.overrideInstances(cn) {
+				return e.emitExpr(test)
+			}
+			// An object a base constructor returned keeps it in a side table.
+			ov, err := e.emitExpr(o())
+			if err != nil {
+				return Value{}, err
+			}
+			key := cn + name
+			if field, _ := e.privateKind(cn, name); !field {
+				key = cn + "#brand"
+			}
+			return e.overrideBranch(ov, cn, func() (Value, error) {
+				return Value{Ref: "true", Ty: TypeBool}, nil
+			}, func() (Value, error) {
+				return Value{Ref: e.ptabHas(ov, key), Ty: TypeBool}, nil
+			})
 		},
 		ty: func(*Emitter, *ast.CallExpression) Type { return TypeBool },
 	}

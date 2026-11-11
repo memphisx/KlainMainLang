@@ -1023,7 +1023,7 @@ func TestE2EFsWatchChange(t *testing.T) {
 	src := fmt.Sprintf(`
 import * as fs from 'fs'
 fs.writeFileSync("%s", "a")
-const w = fs.watch("%s", (evt: string, name: string) => {
+const w = fs.watch("%s", (evt: string, name: string | null) => {
   console.log("event=" + evt)
   w.close()
 })
@@ -1043,7 +1043,7 @@ import * as fs from 'fs'
 const root = "%s/r"
 fs.mkdirSync(root + "/a/b", { recursive: true })
 let step = 0
-const w = fs.watch(root, { recursive: true }, (evt: string, name: string) => {
+const w = fs.watch(root, { recursive: true }, (evt: string, name: string | null) => {
   const n = String(name).split("\\").join("/")
   if (step === 0 && n === "a/b/x.txt") {
     step = 1

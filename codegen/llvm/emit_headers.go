@@ -12,6 +12,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/sema"
@@ -23,7 +24,7 @@ import (
 func (e *Emitter) headersClass(pos ast.Pos) (Type, error) {
 	cls, ok := e.globalClass("Headers")
 	if !ok {
-		return Type{}, fmt.Errorf("%d:%d: internal: the Headers class is not linked", pos.Line, pos.Col)
+		return Type{}, internalAt(pos, "the Headers class is not linked")
 	}
 	return cls, nil
 }
@@ -32,13 +33,20 @@ func (e *Emitter) headersClass(pos ast.Pos) (Type, error) {
 // internal binding whose slot holds it.
 func (e *Emitter) bindValue(v Value, pos ast.Pos) ast.Expression {
 	name := "__kml_bound_" + e.freshReg()[1:]
+	// Register numbers restart per function: a display another function
+	// gave this name is not this binding's.
+	delete(e.synthDisplay, name)
 	if v.Ty.IsArray() {
 		e.define(name, Symbol{Ptr: e.newArrayHeaderSlotFromAggregate(v), Ty: v.Ty})
 		return ast.NewIdentifier(name, pos)
 	}
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, v.Ty.IR))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", v.Ty.IR, v.Ref, slot))
+	ir := v.Ty.IR
+	if isNullableScalar(v.Ty) {
+		ir = nullableScalarStorageIR(v.Ty) // the value is its { i1, T }
+	}
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, ir))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", ir, v.Ref, slot))
 	e.define(name, Symbol{Ptr: slot, Ty: v.Ty})
 	return ast.NewIdentifier(name, pos)
 }
@@ -78,6 +86,17 @@ func (e *Emitter) emitNewHeaders(init *Value, pos ast.Pos) (Value, error) {
 
 // headersMember is `h.method` for synthesized source.
 func (e *Emitter) headersMember(h Value, method string, pos ast.Pos) ast.Expression {
+	if sigs := e.classes[h.Ty.ClassName].MethodSigs; strings.HasPrefix(method, "#") && sigs != nil {
+		if _, ok := sigs[method]; !ok {
+			// A private name the module shares with another class's is
+			// renamed apart (`#pairs__kml_ps13`).
+			for k := range sigs {
+				if strings.HasPrefix(k, method+"__kml_ps") {
+					method = k
+				}
+			}
+		}
+	}
 	return ast.NewMemberExpression(e.bindValue(h, pos), method, pos)
 }
 
@@ -134,8 +153,8 @@ func (e *Emitter) emitHeadersSlist(h Value, pos ast.Pos) (string, error) {
 // loadPtrAt is the ptr element i of the array data.
 func (e *Emitter) loadPtrAt(data, i string) string {
 	gep, v := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", gep, data, i))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", v, gep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", gep, data, i))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", v, gep))
 	return v
 }
 
@@ -161,12 +180,12 @@ func (e *Emitter) emitResponseHeaders(resp Value, pos ast.Pos) (Value, error) {
 	pendIdx, pendTy, okP := resp.Ty.FieldIndex("__kml_pending")
 	hIdx, hTy, okH := resp.Ty.FieldIndex("__kml_headers")
 	if !okP || !okH {
-		return Value{}, fmt.Errorf("%d:%d: internal: not a Response", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "not a Response")
 	}
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	own := e.loadFieldValue(resp, hIdx, hTy)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", own.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", own.Ref, slot))
 	fillL, doneL := e.freshLabel("resp.hdr.fill"), e.freshLabel("resp.hdr.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(own.Ref), fillL, doneL))
 	e.emitLabel(fillL)
@@ -175,9 +194,10 @@ func (e *Emitter) emitResponseHeaders(resp Value, pos ast.Pos) (Value, error) {
 		return Value{}, err
 	}
 	pend := e.loadFieldValue(resp, pendIdx, pendTy)
-	e.ensureFetchHeadersRaw()
+	e.ensureFetch()
+	e.ensureStrHeaderRuntime()
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_headers_raw(ptr %s)", raw, pend.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_headers_raw("+irPtr+" %s)", raw, pend.Ref))
 	if _, err := e.emitHeadersMethod(h, "#fillRaw", pos, e.bindValue(Value{Ref: raw, Ty: TypePtr}, pos)); err != nil {
 		return Value{}, err
 	}
@@ -185,12 +205,12 @@ func (e *Emitter) emitResponseHeaders(resp Value, pos ast.Pos) (Value, error) {
 		return Value{}, err
 	}
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, resp.Ty.StructIR(), resp.Ref, hIdx))
-	e.heapStore("ptr", h.Ref, gep, 8)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", h.Ref, slot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, resp.Ty.StructIR(), resp.Ref, hIdx))
+	e.heapStore(irPtr, h.Ref, gep, 8)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", h.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 	return Value{Ref: out, Ty: cls}, nil
 }

@@ -25,7 +25,7 @@ func (e *Emitter) streamChunkWords(val Value) (string, string) {
 	if val.Ty.IsArray() {
 		l := e.arrayLen(val)
 		pi := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", pi, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", pi, val.Ref))
 		return pi, l
 	}
 	if isNullableScalar(val.Ty) {
@@ -42,7 +42,7 @@ func (e *Emitter) streamChunkWords(val Value) (string, string) {
 func (e *Emitter) streamChunkFromWords(v0, v1 string, ty Type) Value {
 	if ty.IsArray() {
 		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", h, v0))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, h, v0))
 		return Value{Ref: h, Ty: ty}
 	}
 	if isNullableScalar(ty) {
@@ -59,7 +59,7 @@ func (e *Emitter) emitRsAlloc(dst, hwm, fulfill string, chunkTy Type) {
 	if !chunkTy.IsDynamic() {
 		box = e.emitStreamBoxThunk(chunkTy)
 	}
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_alloc(double %s, ptr %s, ptr %s)", dst, hwm, fulfill, box))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_rs_alloc(double %s, "+irPtr+" %s, "+irPtr+" %s)", dst, hwm, fulfill, box))
 }
 
 // emitStreamBoxThunk emits `i64 (i64 %v0, i64 %v1)`: a chunk of chunkTy
@@ -84,10 +84,10 @@ func (e *Emitter) emitRsRead(s string, chunkTy Type) string {
 	prom := e.freshReg()
 	if chunkTy.IsDynamic() {
 		ff := e.emitStreamFulfillThunk(chunkTy)
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_read_any(ptr %s, ptr %s)", prom, s, ff))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_rs_read_any("+irPtr+" %s, "+irPtr+" %s)", prom, s, ff))
 		return prom
 	}
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_read(ptr %s)", prom, s))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_rs_read("+irPtr+" %s)", prom, s))
 	return prom
 }
 
@@ -113,12 +113,11 @@ func streamReadResultType(chunkTy Type) Type {
 // is `present` (= not done), a pointer/array chunk stores its register directly
 // (a done read's rebuilt chunk is already the null/zero that reads as absent).
 func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, doneI1, presentI1 string) string {
-	e.ensureMalloc()
 	rec := e.freshReg()
 	e.emitObjMallocInto(rec, resultTy)
 	vIdx, valTy, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), rec, vIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", vGep, resultTy.StructIR(), rec, vIdx))
 	if isNullableScalar(valTy) {
 		agg := e.makeNullableScalarAgg(valTy, presentI1, chunk.Ref)
 		e.heapStore(nullableScalarStorageIR(valTy), agg, vGep, 8)
@@ -129,7 +128,7 @@ func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, don
 	}
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), rec, dIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", dGep, resultTy.StructIR(), rec, dIdx))
 	e.heapStore("i1", doneI1, dGep, 1)
 	return rec
 }
@@ -143,13 +142,13 @@ func (e *Emitter) buildStreamReadRecord(resultTy, chunkTy Type, chunk Value, don
 func (e *Emitter) loadStreamResultValue(recPtr string, resultTy, chunkTy Type) Value {
 	vIdx, valTy, _ := resultTy.FieldIndex("value")
 	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, resultTy.StructIR(), recPtr, vIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", vGep, resultTy.StructIR(), recPtr, vIdx))
 	if valTy.IsArray() {
 		v := e.loadArraySlotAggregate(vGep, chunkTy) // header-ptr slot (TDD-00213 S2)
 		return v
 	}
 	loaded := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loaded, StructFieldIR(valTy), vGep, chunkTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", loaded, StructFieldIR(valTy), vGep, chunkTy.Align()))
 	if isNullableScalar(valTy) {
 		return e.nullableScalarPayloadOf(Value{Ref: loaded, Ty: valTy})
 	}
@@ -171,18 +170,37 @@ func (e *Emitter) emitStreamFulfillThunk(chunkTy Type) string {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %%done, 0", presentI1))
 	rec := e.buildStreamReadRecord(resultTy, chunkTy, chunk, doneI1, presentI1)
 	e.storePromiseValue("%p", Value{Ref: rec, Ty: resultTy})
-	e.emitInstr("call void @__kml_promise_settle(ptr %p, i64 1)")
+	e.emitInstr("call void @__kml_promise_settle(" + irPtr + " %p, i64 1)")
 	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	return e.defineContentNamed("@__kml_rs_fulfill.", "void", "ptr %p, i64 %v0, i64 %v1, i64 %done", body)
+	return e.defineContentNamed("@__kml_rs_fulfill.", "void", irPtr+" %p, i64 %v0, i64 %v1, i64 %done", body)
 }
 
 // streamCallbackClosure evaluates an underlying-source callback expression
 // (arrow / function expression only — a later invocation needs a real
 // closure header) with the given param hints.
 func (e *Emitter) streamCallbackClosure(arg ast.Expression, hints []Type, what string, pos ast.Pos) (Value, error) {
+	if streamCallbackNeedsAdapter(arg, len(hints)) {
+		// Any other function value, or one declaring more parameters than
+		// the stream passes: read once, called through an arrow taking
+		// what the stream passes (the rest of its parameters undefined).
+		fn := arg
+		if m, isMem := arg.(*ast.MemberExpression); !isMem || !pureRef(m.Object) {
+			var err error
+			if fn, err = e.receiverTemp(arg); err != nil {
+				return Value{}, err
+			}
+		} // else a method of the source, called on it (its this)
+		params := make([]ast.Param, len(hints))
+		args := make([]ast.Expression, len(hints))
+		for i := range hints {
+			params[i] = ast.Param{Name: fmt.Sprintf("__kml_rs_arg%d", i)}
+			args[i] = ast.NewIdentifier(params[i].Name, pos)
+		}
+		arg = ast.NewArrowFunction(params, nil, ast.NewCallExpression(fn, args, pos), nil, pos)
+	}
 	var val Value
 	var err error
 	switch fn := arg.(type) {
@@ -191,15 +209,96 @@ func (e *Emitter) streamCallbackClosure(arg ast.Expression, hints []Type, what s
 	case *ast.FunctionExpression:
 		val, err = e.emitFunctionExpression(fn, hints)
 	default:
-		return Value{}, fmt.Errorf("%d:%d: a ReadableStream's %s must be an arrow function or function expression", pos.Line, pos.Col, what)
+		return Value{}, internalAt(pos, "a ReadableStream's %s is no function literal after adapting", what)
 	}
 	if err != nil {
 		return Value{}, err
 	}
 	if !val.Ty.IsFunc() {
-		return Value{}, fmt.Errorf("%d:%d: a ReadableStream's %s must be a function", pos.Line, pos.Col, what)
+		return Value{}, internalAt(pos, "a ReadableStream's %s is no function", what)
 	}
 	return val, nil
+}
+
+// streamCallbackArity is how many arguments the stream passes each
+// underlying source or sink callback.
+var streamCallbackArity = map[string]int{"start": 1, "pull": 1, "cancel": 1, "write": 2, "close": 0, "abort": 1, "transform": 2, "flush": 1}
+
+// streamUnderlyingDynamic is streamUnderlying for a value held in any: each
+// callback is read off it once, now, and the stream is given the spec's
+// algorithm over it, PromiseResolve of calling it on the source (or of
+// undefined when it is absent). Its type member is read too.
+func (e *Emitter) streamUnderlyingDynamic(src ast.Expression, names []string) (map[string]ast.Expression, map[string]bool, bool, error) {
+	pos := src.GetPos()
+	tmp, err := e.receiverTemp(src)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	members := map[string]ast.Expression{}
+	for _, n := range names {
+		m, err := e.receiverTemp(ast.NewMemberExpression(tmp, n, pos))
+		if err != nil {
+			return nil, nil, false, err
+		}
+		undef := ast.NewNullLiteral(true, pos)
+		if n == "size" {
+			// Node's validateFunction of a present size (ERR_INVALID_ARG_TYPE).
+			if err := e.emitStrategySizeCheck(m); err != nil {
+				return nil, nil, false, err
+			}
+			// A strategy's size, called with this undefined; 1 when absent.
+			c := ast.NewIdentifier("__kml_rs_chunk", pos)
+			members[n] = ast.NewArrowFunction([]ast.Param{{Name: "__kml_rs_chunk"}}, nil,
+				ast.NewConditionalExpression(ast.NewBinaryExpression("===", m, undef, pos), ast.NewNumberLiteral("1", pos),
+					ast.NewCallExpression(m, []ast.Expression{c}, pos), pos), nil, pos)
+			continue
+		}
+		if _, callback := streamCallbackArity[n]; !callback {
+			members[n] = m // a plain member (highWaterMark)
+			continue
+		}
+		params := make([]ast.Param, streamCallbackArity[n])
+		args := []ast.Expression{tmp}
+		for i := range params {
+			params[i] = ast.Param{Name: fmt.Sprintf("__kml_rs_arg%d", i)}
+			args = append(args, ast.NewIdentifier(params[i].Name, pos))
+		}
+		call := ast.NewConditionalExpression(ast.NewBinaryExpression("===", m, undef, pos), undef,
+			ast.NewCallExpression(ast.NewMemberExpression(m, "call", pos), args, pos), pos)
+		// start is called as it is (its result adopted when a thenable);
+		// every other method through Node's `async (...args) =>
+		// method.call(obj, ...args)` wrapper, whose promise the stream
+		// reacts to as it is.
+		fn := ast.NewArrowFunction(params, ast.AnyAnnotation("ts"), call, nil, pos)
+		if n != "start" {
+			fn.RetType = nil
+			fn.IsAsync = true
+			if e.streamDirect == nil {
+				e.streamDirect = map[ast.Expression]bool{}
+			}
+			e.streamDirect[fn] = true
+		}
+		members[n] = fn
+	}
+	// A source's or sink's type, known only now.
+	if slices.Contains(names, "pull") || slices.Contains(names, "write") {
+		if err := e.emitStreamTypeCheck(ast.NewMemberExpression(tmp, "type", pos), slices.Contains(names, "pull")); err != nil {
+			return nil, nil, false, err
+		}
+	}
+	return members, map[string]bool{}, true, nil
+}
+
+// streamCallbackNeedsAdapter reports an underlying-source callback that is
+// no arrow or function expression of at most n parameters.
+func streamCallbackNeedsAdapter(arg ast.Expression, n int) bool {
+	switch fn := arg.(type) {
+	case *ast.ArrowFunction:
+		return len(fn.Params) > n
+	case *ast.FunctionExpression:
+		return len(fn.Params) > n
+	}
+	return true
 }
 
 // callbackReturnsPromise reports whether a source callback's static return
@@ -220,40 +319,31 @@ func (e *Emitter) emitStreamPullWrap(userTy Type) string {
 	restore := e.beginThunkEmit()
 	u := e.freshReg()
 	up := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", up))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", u, up))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 0", up))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", u, up))
 	sp := e.freshReg()
 	s := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", sp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", s, sp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 1", sp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", s, sp))
 	fp := e.freshReg()
 	fpp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, u))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", fpp, u))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, fpp))
 	ep := e.freshReg()
 	epp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, u))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
-	args := fmt.Sprintf("ptr %s", ep)
-	sig := "ptr"
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", epp, u))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ep, epp))
+	args := fmt.Sprintf(irPtr+" %s", ep)
+	sig := irPtr
 	if hasParam {
-		args += fmt.Sprintf(", ptr %s", s)
-		sig += ", ptr"
+		args += fmt.Sprintf(", "+irPtr+" %s", s)
+		sig += ", " + irPtr
 	}
-	if isAsync {
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr (%s) %s(%s)", r, sig, fp, args))
-		// The stream reacts to it (the spec's uponPromise): handled.
-		e.emitMarkPromiseHandled(r)
-		e.emitInstr(fmt.Sprintf("ret ptr %s", r))
-	} else {
-		e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", sig, fp, args))
-		e.emitInstr("ret ptr null")
-	}
+	e.emitStreamCallbackCall(isAsync, sig, fp, args)
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	fn := e.defineContentNamed("@__kml_rs_pullwrap.", "ptr", "ptr %env", body)
+	fn := e.defineContentNamed("@__kml_rs_pullwrap.", irPtr, irPtr+" %env", body)
 	return fn
 }
 
@@ -267,25 +357,28 @@ func (e *Emitter) emitStreamCancelWrap(userTy Type) string {
 	restore := e.beginThunkEmit()
 	fp := e.freshReg()
 	fpp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", fpp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 0", fpp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, fpp))
 	ep := e.freshReg()
 	epp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", epp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
-	if isAsync {
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr (ptr) %s(ptr %s)", r, fp, ep))
-		e.emitMarkPromiseHandled(r) // the stream reacts to it (uponPromise)
-		e.emitInstr(fmt.Sprintf("ret ptr %s", r))
-	} else {
-		e.emitInstr(fmt.Sprintf("call void (ptr) %s(ptr %s)", fp, ep))
-		e.emitInstr("ret ptr null")
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 1", epp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ep, epp))
+	// The reason, boxed, as the callback's parameter takes it.
+	sig, args := irPtr, irPtr+" "+ep
+	if len(userTy.FuncParams) == 1 {
+		pty := userTy.FuncParams[0]
+		r := Value{Ref: "%reason", Ty: TypeAny}
+		if !pty.IsDynamic() {
+			r = e.unboxArgToParam("%reason", pty)
+		}
+		sig += ", " + paramIR(pty)
+		args += ", " + paramIR(pty) + " " + r.Ref
 	}
+	e.emitStreamCallbackCall(isAsync, sig, fp, args)
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	fn := e.defineContentNamed("@__kml_rs_cancelwrap.", "ptr", "ptr %env, i64 %reason", body)
+	fn := e.defineContentNamed("@__kml_rs_cancelwrap.", irPtr, irPtr+" %env, i64 %reason", body)
 	return fn
 }
 
@@ -297,33 +390,48 @@ func (e *Emitter) emitStreamSizeWrap(userTy, chunkTy Type, pos ast.Pos) (string,
 	if userTy.FuncRetType != nil {
 		retTy = *userTy.FuncRetType
 	}
-	if retTy.IR != "i64" && retTy.IR != "double" {
-		return "", fmt.Errorf("%d:%d: a queuing strategy's size() must return a number", pos.Line, pos.Col)
-	}
 
 	restore := e.beginThunkEmit()
 	fp := e.freshReg()
 	fpp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", fpp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 0", fpp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, fpp))
 	ep := e.freshReg()
 	epp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", epp))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 1", epp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ep, epp))
 	var args, sig string
 	if chunkTy.IsArray() {
 		hdr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to ptr", hdr))
-		args = fmt.Sprintf("ptr %s, ptr %s, i64 %%v1", ep, hdr)
-		sig = "ptr, ptr, i64"
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %%v0 to "+irPtr, hdr))
+		args = fmt.Sprintf(irPtr+" %s, "+irPtr+" %s, i64 %%v1", ep, hdr)
+		sig = irPtr + ", " + irPtr + ", i64"
 	} else {
 		chunk := e.streamChunkFromWords("%v0", "%v1", chunkTy)
-		args = fmt.Sprintf("ptr %s, %s %s", ep, chunkTy.IR, chunk.Ref)
-		sig = "ptr, " + chunkTy.IR
+		args = fmt.Sprintf(irPtr+" %s, %s %s", ep, chunkTy.IR, chunk.Ref)
+		sig = irPtr + ", " + chunkTy.IR
+	}
+	if retTy.IR == "void" {
+		// No result: undefined, whose number is NaN.
+		e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", sig, fp, args))
+		e.emitInstr("ret double 0x7FF8000000000000")
+		body := e.allocas.String() + e.body.String()
+		restore()
+		return e.defineContentNamed("@__kml_rs_sizewrap.", "double", irPtr+" %env, i64 %v0, i64 %v1", body), nil
 	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call %s (%s) %s(%s)", r, retTy.IR, sig, fp, args))
-	if retTy.IR == "i64" {
+	if !retTy.IsDynamic() && retTy.IR != "i64" && retTy.IR != "double" {
+		// Any other result: its number (the algorithm's unrestricted double).
+		boxed, err := e.emitBoxValue(Value{Ref: r, Ty: retTy})
+		if err != nil {
+			restore()
+			return "", err
+		}
+		e.emitInstr(fmt.Sprintf("ret double %s", e.convert(boxed, TypeF64).Ref))
+	} else if retTy.IsDynamic() {
+		e.emitInstr(fmt.Sprintf("ret double %s", e.convert(Value{Ref: r, Ty: retTy}, TypeF64).Ref))
+	} else if retTy.IR == "i64" {
 		d := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, r))
 		e.emitInstr(fmt.Sprintf("ret double %s", d))
@@ -333,7 +441,7 @@ func (e *Emitter) emitStreamSizeWrap(userTy, chunkTy Type, pos ast.Pos) (string,
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	fn := e.defineContentNamed("@__kml_rs_sizewrap.", "double", "ptr %env, i64 %v0, i64 %v1", body)
+	fn := e.defineContentNamed("@__kml_rs_sizewrap.", "double", irPtr+" %env, i64 %v0, i64 %v1", body)
 	return fn, nil
 }
 
@@ -341,14 +449,14 @@ func (e *Emitter) emitStreamSizeWrap(userTy, chunkTy Type, pos ast.Pos) (string,
 // size: the chunk's element count (its {ptr,i64} length word) — for the byte
 // chunks (Uint8Array) it is meant for, that IS the byteLength.
 func (e *Emitter) emitStreamByteLengthSizeWrap() string {
-	return e.defineContentNamed("@__kml_rs_sizewrap.", "double", "ptr %env, i64 %v0, i64 %v1", "  %d = sitofp i64 %v1 to double\n  ret double %d\n")
+	return e.defineContentNamed("@__kml_rs_sizewrap.", "double", irPtr+" %env, i64 %v0, i64 %v1", "  %d = sitofp i64 %v1 to double\n  ret double %d\n")
 }
 
 // storeStreamField stores a ptr into the rstream struct field at idx.
 func (e *Emitter) storeStreamField(s string, idx int, val string) {
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, rstreamStructIR, s, idx))
-	e.heapStore("ptr", val, gep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, rstreamStructIR, s, idx))
+	e.heapStore(irPtr, val, gep, 8)
 }
 
 // resolveStreamStrategy destructures a queuing-strategy argument —
@@ -362,31 +470,54 @@ func (e *Emitter) resolveStreamStrategy(strategy ast.Expression, chunkTy Type, p
 	if strategy != nil {
 		strat := strategy
 		if ne, ok := strat.(*ast.NewExpression); ok && (ne.ClassName == "CountQueuingStrategy" || ne.ClassName == "ByteLengthQueuingStrategy") {
+			// new XQueuingStrategy(init): init.highWaterMark, required; a
+			// ByteLengthQueuingStrategy's size is chunk.byteLength.
 			byteLengthStrategy = ne.ClassName == "ByteLengthQueuingStrategy"
-			if len(ne.Args) != 1 {
-				return "", nil, false, fmt.Errorf("%d:%d: new %s expects one {highWaterMark} argument", pos.Line, pos.Col, ne.ClassName)
+			args, err := e.dropArgsPast(ne.Args, 1, pos)
+			if err != nil {
+				return "", nil, false, err
 			}
-			strat = ne.Args[0]
-		}
-		ol, ok := strat.(*ast.ObjectLiteral)
-		if !ok {
-			return "", nil, false, fmt.Errorf("%d:%d: a queuing strategy must be an object literal ({highWaterMark, size}) or a CountQueuingStrategy/ByteLengthQueuingStrategy", pos.Line, pos.Col)
-		}
-		for _, p := range ol.Properties {
-			switch p.Key {
-			case "highWaterMark":
-				hwmExpr = p.Value
-			case "size":
-				sizeExpr = p.Value
-			default:
-				return "", nil, false, fmt.Errorf("%d:%d: unknown queuing strategy member '%s'", pos.Line, pos.Col, p.Key)
+			if len(args) == 0 {
+				e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", e.internString(`The "init" argument must be of type object. Received undefined`))
+				e.emitLabel(e.freshLabel("strategy.dead"))
+				return "1.0", nil, false, nil
 			}
-		}
-		if byteLengthStrategy && sizeExpr != nil {
-			return "", nil, false, fmt.Errorf("%d:%d: ByteLengthQueuingStrategy defines its own size()", pos.Line, pos.Col)
-		}
-		if byteLengthStrategy && !chunkTy.IsArray() {
-			return "", nil, false, fmt.Errorf("%d:%d: ByteLengthQueuingStrategy requires byte-array chunks (e.g. Uint8Array)", pos.Line, pos.Col)
+			members, _, ok, err := e.streamUnderlying(args[0], []string{"highWaterMark", "size"})
+			if err != nil {
+				return "", nil, false, err
+			}
+			if !ok {
+				if members, _, _, err = e.streamUnderlyingDynamic(e.boxedOperand(args[0]), []string{"highWaterMark"}); err != nil {
+					return "", nil, false, err
+				}
+			}
+			hwmExpr = members["highWaterMark"]
+			if hwmExpr == nil {
+				e.emitThrowCoded("TypeError", "ERR_MISSING_OPTION", e.internString("init.highWaterMark is required"))
+				e.emitLabel(e.freshLabel("strategy.dead"))
+				return "1.0", nil, false, nil
+			}
+			if byteLengthStrategy && !chunkTy.IsArray() {
+				byteLengthStrategy = false
+				sizeExpr = ast.NewArrowFunction([]ast.Param{{Name: "__kml_rs_chunk"}}, nil,
+					ast.NewMemberExpression(ast.NewIdentifier("__kml_rs_chunk", pos), "byteLength", pos), nil, pos)
+			}
+		} else {
+			members, _, ok, err := e.streamUnderlying(strat, []string{"highWaterMark", "size"})
+			if err != nil {
+				return "", nil, false, err
+			}
+			if _, lit := strat.(*ast.ObjectLiteral); !lit && e.typeOfExpr(strat).IsClass() {
+				ok = false // a class instance's members may be accessors
+			}
+			if !ok {
+				// Members known only at run time (a strategy object held
+				// in a binding): read off its box.
+				if members, _, _, err = e.streamUnderlyingDynamic(e.boxedOperand(strat), []string{"highWaterMark", "size"}); err != nil {
+					return "", nil, false, err
+				}
+			}
+			hwmExpr, sizeExpr = members["highWaterMark"], members["size"]
 		}
 	}
 	hwmRef := "1.0"
@@ -395,10 +526,58 @@ func (e *Emitter) resolveStreamStrategy(strategy ast.Expression, chunkTy Type, p
 		if err != nil {
 			return "", nil, false, err
 		}
-		hv = e.convert(hv, TypeF64)
+		if hv, err = e.emitStreamHighWaterMark(hv); err != nil {
+			return "", nil, false, err
+		}
 		hwmRef = hv.Ref
 	}
 	return hwmRef, sizeExpr, byteLengthStrategy, nil
+}
+
+// boxedOperand is x read as `any`: its value boxed, bound to a temporary.
+func (e *Emitter) boxedOperand(x ast.Expression) ast.Expression {
+	return ast.NewAsExpression(x, ast.AnyAnnotation("ts"), x.GetPos())
+}
+
+// emitStreamHighWaterMark is ExtractHighWaterMark: undefined is the default
+// (1), NaN or a negative number Node's RangeError.
+func (e *Emitter) emitStreamHighWaterMark(hv Value) (Value, error) {
+	if hv.Ty.IsUndefined() && !hv.Ty.IsDynamic() {
+		return Value{Ref: "1.0", Ty: TypeF64}, nil
+	}
+	def := ""
+	if hv.Ty.IsDynamic() && hv.Ty.IR == "i64" {
+		def = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", def, hv.Ref, nbUndefined))
+	}
+	f := e.convert(hv, TypeF64)
+	bad := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp ult double %s, 0.0", bad, f.Ref)) // NaN or < 0
+	if def != "" {
+		nd, b2 := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", nd, def))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", b2, bad, nd))
+		bad = b2
+	}
+	badL, okL := e.freshLabel("hwm.bad"), e.freshLabel("hwm.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+	e.emitLabel(badL)
+	shown, err := e.emitValueToString(f)
+	if err != nil {
+		return Value{}, err
+	}
+	msg, err := e.emitStringConcat(Value{Ref: e.internString("The property 'strategy.highWaterMark' is invalid. Received "), Ty: TypePtr}, shown)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitThrowCoded("RangeError", "ERR_INVALID_ARG_VALUE", msg.Ref)
+	e.emitLabel(okL)
+	if def == "" {
+		return f, nil
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 1.0, double %s", r, def, f.Ref))
+	return Value{Ref: r, Ty: TypeF64}, nil
 }
 
 // emitNewReadableStream implements `new ReadableStream<T>(source?, strategy?)`.
@@ -406,25 +585,27 @@ func (e *Emitter) emitNewReadableStream(ex *ast.NewReadableStreamExpression) (Va
 	pos := ex.GetPos()
 	chunkTy := TypeAny // ReadableStream<R = any>
 	if ex.ChunkType != nil {
-		chunkTy = e.resolveType(ex.ChunkType)
+		chunkTy = e.annotationType(ex.ChunkType)
 	}
 	controllerTy := RSControllerType(chunkTy)
-	e.ensureStreamRuntime()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
+	e.ensurePromiseAddReaction()
+	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 
 	// Destructure the underlying source at compile time.
 	var startExpr, pullExpr, cancelExpr ast.Expression
 	if ex.Source != nil {
-		ol, ok := ex.Source.(*ast.ObjectLiteral)
+		members, _, ok, err := e.streamUnderlying(ex.Source, []string{"start", "pull", "cancel"})
+		if err != nil {
+			return Value{}, err
+		}
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: new ReadableStream's underlying source must be an object literal ({start, pull, cancel})", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "an underlying object streamUnderlying did not read")
 		}
-		members, unknown := literalMembers(ol, "start", "pull", "cancel")
-		if unknown == "type" || unknown == "autoAllocateChunkSize" {
-			return Value{}, fmt.Errorf("%d:%d: byte streams (underlying source '%s') are not supported — use a default stream of Uint8Array chunks", pos.Line, pos.Col, unknown)
-		}
-		if unknown != "" {
-			return Value{}, fmt.Errorf("%d:%d: unknown underlying source member '%s' (expected start, pull, cancel)", pos.Line, pos.Col, unknown)
-		}
+
 		startExpr, pullExpr, cancelExpr = members["start"], members["pull"], members["cancel"]
 	}
 
@@ -457,30 +638,24 @@ func (e *Emitter) emitNewReadableStream(ex *ast.NewReadableStreamExpression) (Va
 		if err != nil {
 			return Value{}, err
 		}
-		if len(userClo.Ty.FuncParams) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: a pull callback takes at most one (controller) parameter", pos.Line, pos.Col)
-		}
-		wrap := e.emitStreamPullWrap(userClo.Ty)
+		wrap := e.streamWrap(pullExpr, func() string { return e.emitStreamPullWrap(userClo.Ty) })
 		env := e.freshReg()
-		e.heapMallocInto(env, "16")
+		e.heapMallocInto(env, allocClosure, "16")
 		e0 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
-		e.heapStore("ptr", userClo.Ref, e0, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", e0, env))
+		e.heapStore(irPtr, userClo.Ref, e0, 8)
 		e1 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
-		e.heapStore("ptr", s, e1, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", e1, env))
+		e.heapStore(irPtr, s, e1, 8)
 		e.storeStreamField(s, 9, e.buildBuiltinClosure(wrap, env))
 	}
 
 	if cancelExpr != nil {
-		userClo, err := e.streamCallbackClosure(cancelExpr, nil, "cancel callback", pos)
+		userClo, err := e.streamCallbackClosure(cancelExpr, []Type{TypeAny}, "cancel callback", pos)
 		if err != nil {
 			return Value{}, err
 		}
-		if len(userClo.Ty.FuncParams) > 0 {
-			return Value{}, fmt.Errorf("%d:%d: a cancel callback with a reason parameter is not supported yet — use a zero-parameter cancel", pos.Line, pos.Col)
-		}
-		wrap := e.emitStreamCancelWrap(userClo.Ty)
+		wrap := e.streamWrap(cancelExpr, func() string { return e.emitStreamCancelWrap(userClo.Ty) })
 		e.storeStreamField(s, 10, e.buildBuiltinClosure(wrap, userClo.Ref))
 	}
 
@@ -493,33 +668,43 @@ func (e *Emitter) emitNewReadableStream(ex *ast.NewReadableStreamExpression) (Va
 		if err != nil {
 			return Value{}, err
 		}
-		if len(userClo.Ty.FuncParams) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: a start callback takes at most one (controller) parameter", pos.Line, pos.Col)
-		}
 		fp := e.freshReg()
 		fpp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", fpp, userClo.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, fpp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", fpp, userClo.Ref))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, fpp))
 		ep := e.freshReg()
 		epp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", epp, userClo.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ep, epp))
-		args := fmt.Sprintf("ptr %s", ep)
-		sig := "ptr"
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", epp, userClo.Ref))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ep, epp))
+		args := fmt.Sprintf(irPtr+" %s", ep)
+		sig := irPtr
 		if len(userClo.Ty.FuncParams) == 1 {
-			args += fmt.Sprintf(", ptr %s", s)
-			sig += ", ptr"
+			args += fmt.Sprintf(", "+irPtr+" %s", s)
+			sig += ", " + irPtr
 		}
-		if callbackReturnsPromise(userClo.Ty) {
+		if userClo.Ty.FuncRetType != nil && userClo.Ty.FuncRetType.IsDynamic() {
+			// A start read at run time: adopted when its result is a thenable.
+			b := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 (%s) %s(%s)", b, sig, fp, args))
+			p := e.emitStreamStartResult(b)
+			e.emitMarkPromiseHandled(p)
+			// Bit 1: already the setup's promise, reacted to as it is.
+			d := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 2", d, p))
+			e.declareFn("__kml_rs_start_promise", "declare void @__kml_rs_start_promise("+irPtr+", "+irPtr+")")
+			e.emitInstr(fmt.Sprintf("call void @__kml_rs_start_promise("+irPtr+" %s, "+irPtr+" %s)", s, d))
+		} else if callbackReturnsPromise(userClo.Ty) {
 			p := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr (%s) %s(%s)", p, sig, fp, args))
-			e.emitInstr(fmt.Sprintf("call void @__kml_promise_add_reaction(ptr %s, ptr %s)", p, startedClo))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" (%s) %s(%s)", p, sig, fp, args))
+			e.emitMarkPromiseHandled(p) // the stream reacts to it (uponPromise)
+			e.declareFn("__kml_rs_start_promise", "declare void @__kml_rs_start_promise("+irPtr+", "+irPtr+")")
+			e.emitInstr(fmt.Sprintf("call void @__kml_rs_start_promise("+irPtr+" %s, "+irPtr+" %s)", s, p))
 		} else {
 			e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", sig, fp, args))
-			e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", startedClo))
+			e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", startedClo))
 		}
 	} else {
-		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue(ptr %s)", startedClo))
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", startedClo))
 	}
 
 	return Value{Ref: s, Ty: ReadableStreamType(chunkTy)}, nil
@@ -529,16 +714,15 @@ func (e *Emitter) emitNewReadableStream(ex *ast.NewReadableStreamExpression) (Va
 // object (getReader() answers a new one each time, as in Node), the stream
 // after its host header word (TDD-00230 P3.3).
 func (e *Emitter) newStreamHandle(stream string, ty Type) Value {
-	e.ensureMalloc()
 	base, h := e.freshReg(), e.freshReg()
-	e.heapMallocInto(base, "32")
+	e.heapMallocInto(base, allocHost, "32")
 	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", h, base))
-	e.heapStore("ptr", stream, h, 8)
+	e.emitBodyAddr(h, base)
+	e.heapStore(irPtr, stream, h, 8)
 	for _, off := range []int{8, 16} {
 		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", p, h, off))
-		e.heapStore("ptr", "null", p, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", p, h, off))
+		e.heapStore(irPtr, "null", p, 8)
 	}
 	return Value{Ref: h, Ty: ty}
 }
@@ -554,8 +738,8 @@ const (
 // handleSlot loads slot i of handle h.
 func (e *Emitter) handleSlot(h string, i int) string {
 	p, v := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", p, h, i))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", v, p))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %d", p, h, i))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", v, p))
 	return v
 }
 
@@ -564,10 +748,10 @@ func (e *Emitter) handleSlot(h string, i int) string {
 // both ptr-typed or both void.
 func (e *Emitter) emitIfReleased(stream string, bound, released func() (Value, error)) (Value, error) {
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, stream))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, stream))
 	relL, boundL, joinL := e.freshLabel("handle.released"), e.freshLabel("handle.bound"), e.freshLabel("handle.join")
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, relL, boundL))
 	e.emitLabel(boundL)
 	bv, err := bound()
@@ -578,9 +762,9 @@ func (e *Emitter) emitIfReleased(stream string, bound, released func() (Value, e
 		e.emitLabel(relL)
 		return Value{}, err
 	}
-	isPtr := bv.Ty.IR == "ptr" && bv.Ref != ""
+	isPtr := bv.Ty.IR == irPtr && bv.Ref != ""
 	if isPtr {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", bv.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(relL)
@@ -589,7 +773,7 @@ func (e *Emitter) emitIfReleased(stream string, bound, released func() (Value, e
 		return Value{}, err
 	}
 	if isPtr && rv.Ref != "" {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", rv.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
@@ -597,7 +781,7 @@ func (e *Emitter) emitIfReleased(stream string, bound, released func() (Value, e
 		return bv, nil
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return Value{Ref: r, Ty: bv.Ty}, nil
 }
 
@@ -606,8 +790,17 @@ func (e *Emitter) emitIfReleased(stream string, bound, released func() (Value, e
 func (e *Emitter) emitStreamStateError(msg string) string {
 	errPtr := e.emitStreamStateErrorPtr(msg)
 	bits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bits, errPtr))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", bits, errPtr))
 	return bits
+}
+
+// emitStreamStateErrorBox is emitStreamStateError's error boxed, as a
+// stream keeps a reason.
+func (e *Emitter) emitStreamStateErrorBox(msg string) string {
+	bits := e.emitStreamStateError(msg)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i64 %s, 1", r, bits))
+	return r
 }
 
 // emitStreamStateErrorPtr is emitStreamStateError's error object.
@@ -619,11 +812,14 @@ func (e *Emitter) emitStreamStateErrorPtr(msg string) string {
 // emitRejectedStreamPromise is a Promise rejected with Node's stream state
 // error msg.
 func (e *Emitter) emitRejectedStreamPromise(msg string, ty Type) Value {
-	e.ensurePromiseSettle()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
+	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
 	bits := e.emitStreamStateError(msg)
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", p))
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_err(ptr %s, i64 %s)", p, bits))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", p))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_err("+irPtr+" %s, i64 %s)", p, bits))
 	return Value{Ref: p, Ty: ty}
 }
 
@@ -634,7 +830,7 @@ func (e *Emitter) streamOfHandle(ty Type, ref string) string {
 		return ref
 	}
 	s := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", s, ref))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", s, ref))
 	return s
 }
 
@@ -652,7 +848,7 @@ func (e *Emitter) resolveStreamHandle(objExpr ast.Expression, pos ast.Pos) (Type
 		sym, found := e.lookup(id.Name)
 		if found && (sym.Ty.IsReadableStream() || sym.Ty.IsStreamReader() || sym.Ty.IsRSController()) {
 			ptr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptr, sym.Ptr))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ptr, sym.Ptr))
 			return sym.Ty, ptr, e.streamOfHandle(sym.Ty, ptr), nil
 		}
 	}
@@ -661,7 +857,7 @@ func (e *Emitter) resolveStreamHandle(objExpr ast.Expression, pos ast.Pos) (Type
 		return Type{}, "", "", err
 	}
 	if !val.Ty.IsReadableStream() && !val.Ty.IsStreamReader() && !val.Ty.IsRSController() {
-		return Type{}, "", "", fmt.Errorf("%d:%d: value is not a ReadableStream/reader/controller", pos.Line, pos.Col)
+		return Type{}, "", "", internalAt(pos, "value is not a ReadableStream/reader/controller")
 	}
 	return val.Ty, val.Ref, e.streamOfHandle(val.Ty, val.Ref), nil
 }
@@ -690,20 +886,20 @@ func (e *Emitter) streamThrowTypeError(flagReg, msg string) {
 // streamReasonBits evaluates an optional cancel/error reason argument to its
 // error-pointer bits (0 when absent).
 func (e *Emitter) streamReasonBits(args []ast.Expression, pos ast.Pos) (string, error) {
+	// The reason as given, boxed (undefined when absent): a stream keeps
+	// the value itself, as controller.error(42)'s 42.
 	if len(args) == 0 {
-		return "0", nil
+		return fmt.Sprint(nbUndefined), nil
 	}
 	v, err := e.emitExpr(args[0])
 	if err != nil {
 		return "", err
 	}
-	errPtr, err := e.errorPtrFromValue(v)
+	boxed, err := e.emitBoxValue(v)
 	if err != nil {
 		return "", err
 	}
-	bits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", bits, errPtr))
-	return bits, nil
+	return boxed.Ref, nil
 }
 
 // emitStreamMethodCall dispatches stream/reader/controller method calls.
@@ -712,7 +908,12 @@ func (e *Emitter) emitStreamMethodCall(objExpr ast.Expression, method string, ar
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureStreamRuntime()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
+	e.ensurePromiseAddReaction()
+	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	chunkTy := TypeI64
 	if ty.StreamChunk != nil {
 		chunkTy = *ty.StreamChunk
@@ -734,21 +935,29 @@ func (e *Emitter) emitStreamMethodCall(objExpr ast.Expression, method string, ar
 		})
 	}
 	var table map[string]func(e *Emitter, c *streamCall) (Value, error)
-	var what string
 	switch {
 	case ty.IsReadableStream():
-		table, what = readableStreamMethods, "ReadableStream"
+		table = readableStreamMethods
 	case ty.IsStreamReader():
-		table, what = streamReaderMethods, "stream reader"
+		table = streamReaderMethods
 	case ty.IsRSController():
-		table, what = rsControllerMethods, "stream controller"
+		table = rsControllerMethods
 	default:
-		return Value{}, fmt.Errorf("%d:%d: unknown stream method '%s'", pos.Line, pos.Col, method)
+		return Value{}, internalAt(pos, "stream method '%s' on no stream type", method)
 	}
 	if f, ok := table[method]; ok {
 		return f(e, c)
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown %s method '%s'", pos.Line, pos.Col, what, method)
+	// No such method: JavaScript's TypeError once the arguments are
+	// evaluated (TypeScript's checker reports it first).
+	for _, a := range c.args {
+		if _, err := e.emitExpr(a); err != nil {
+			return Value{}, err
+		}
+	}
+	e.emitThrowTypeError(e.notFunctionMsg(method))
+	e.emitLabel(e.freshLabel("stream.nomethod.dead"))
+	return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
 }
 
 // streamCall is a stream method call: the receiver's stream, its chunk type
@@ -770,7 +979,6 @@ var readableStreamMethods, streamReaderMethods, rsControllerMethods map[string]f
 func init() {
 	readableStreamMethods = map[string]func(e *Emitter, c *streamCall) (Value, error){
 		"getReader": (*Emitter).streamGetReader,
-		"values":    (*Emitter).streamGetReader,
 		"cancel":    (*Emitter).streamCancel,
 		"pipeTo": func(e *Emitter, c *streamCall) (Value, error) {
 			return e.emitStreamPipeTo(c.ptr, c.chunkTy, c.args, c.pos)
@@ -791,27 +999,131 @@ func init() {
 		"enqueue": (*Emitter).streamEnqueue,
 		"close":   (*Emitter).streamClose,
 		"error":   (*Emitter).streamError,
+		"terminate": func(e *Emitter, c *streamCall) (Value, error) {
+			err := e.emitStreamStateErrorBox("Invalid state: TransformStream terminated")
+			e.emitInstr(fmt.Sprintf("call void @__kml_rs_terminate("+irPtr+" %s, i64 %s)", c.ptr, err))
+			return Value{Ty: TypeVoid}, nil
+		},
 	}
+}
+
+// streamReaderOptions checks getReader's options as Node does, before the
+// stream is locked: null or undefined, or an object whose mode is absent,
+// is the default reader; "byob" asks for a byte stream, which no stream
+// here is; any other mode, or a primitive, is a TypeError.
+func (e *Emitter) streamReaderOptions(c *streamCall) error {
+	ov, err := e.emitExprWithObjectHint(c.args[0], TypeAny)
+	if err != nil {
+		return err
+	}
+	for _, a := range c.args[1:] {
+		if _, err := e.emitExpr(a); err != nil {
+			return err
+		}
+	}
+	box, err := e.emitBoxValue(ov)
+	if err != nil {
+		return err
+	}
+	e.ensureDynJSONC()
+	tag, _ := e.emitUnboxTagPayload(box)
+	nullish, n1, n2 := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", n1, tag, kmlTagNull))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", n2, tag, kmlTagUndefined))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", nullish, n1, n2))
+	doneL, objCheckL := e.freshLabel("rdopts.done"), e.freshLabel("rdopts.obj")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nullish, doneL, objCheckL))
+	e.emitLabel(objCheckL)
+	prim := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagBoolean))
+	primL, modeL := e.freshLabel("rdopts.prim"), e.freshLabel("rdopts.mode")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", prim, primL, modeL))
+	e.emitLabel(primL)
+	suffix := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_received(i64 %s)", suffix, box.Ref))
+	msg, err := e.emitStringConcat(Value{Ref: e.internString(`The "options" argument must be of type object.`), Ty: TypePtr}, Value{Ref: suffix, Ty: TypePtr})
+	if err != nil {
+		return err
+	}
+	e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)
+	e.emitLabel(modeL)
+	mode, err := e.emitDynAnyMemberGetNamed(box, e.internString("mode"), "mode", c.pos)
+	if err != nil {
+		return err
+	}
+	mode = e.convert(mode, TypeAny)
+	absent := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", absent, mode.Ref, nbUndefined))
+	badL := e.freshLabel("rdopts.bad")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, doneL, badL))
+	e.emitLabel(badL)
+	// `${mode}` (its ToString, as Node's validation does) "byob": the
+	// stream must be a byte stream.
+	text := ast.NewTemplateLiteral([]string{"", ""}, []ast.Expression{e.bindValue(mode, c.pos)}, c.pos)
+	isByob, err := e.emitExpr(ast.NewBinaryExpression("===", text, ast.NewStringLiteral("byob", c.pos), c.pos))
+	if err != nil {
+		return err
+	}
+	isByob = e.toBool(isByob)
+	byobL, otherL := e.freshLabel("rdopts.byob"), e.freshLabel("rdopts.other")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isByob.Ref, byobL, otherL))
+	e.emitLabel(byobL)
+	sbox, err := e.emitBoxValue(Value{Ref: c.ptr, Ty: ReadableStreamType(c.chunkTy)})
+	if err != nil {
+		return err
+	}
+	shown, err := e.emitDynamicInspect(sbox)
+	if err != nil {
+		return err
+	}
+	bmsg, err := e.emitStringConcat(Value{Ref: e.internString("The argument 'stream' must be a byte stream. Received "), Ty: TypePtr}, shown)
+	if err != nil {
+		return err
+	}
+	e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_VALUE", bmsg.Ref)
+	e.emitLabel(otherL)
+	mshown, err := e.emitInspectQuoted(mode, "'")
+	if err != nil {
+		return err
+	}
+	mmsg, err := e.emitStringConcat(Value{Ref: e.internString("The property 'options.mode' is invalid. Received "), Ty: TypePtr}, mshown)
+	if err != nil {
+		return err
+	}
+	e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_VALUE", mmsg.Ref)
+	e.emitLabel(doneL)
+	return nil
 }
 
 func (e *Emitter) streamGetReader(c *streamCall) (Value, error) {
 	if c.method == "getReader" && len(c.args) > 0 {
-		return Value{}, fmt.Errorf("%d:%d: getReader() options (BYOB mode) are not supported", c.pos.Line, c.pos.Col)
+		if err := e.streamReaderOptions(c); err != nil {
+			return Value{}, err
+		}
 	}
 	ok := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock(ptr %s)", ok, c.ptr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock("+irPtr+" %s)", ok, c.ptr))
 	e.streamThrowTypeError(ok, "Invalid state: ReadableStream is locked")
 	return e.newStreamHandle(c.ptr, StreamReaderType(c.chunkTy)), nil
 }
 
 // streamCancel is a stream's and its reader's cancel(reason).
 func (e *Emitter) streamCancel(c *streamCall) (Value, error) {
-	bits, err := e.streamReasonBits(c.args, c.pos)
-	if err != nil {
-		return Value{}, err
+	// The reason as given, boxed (undefined when absent).
+	bits := fmt.Sprint(nbUndefined)
+	if len(c.args) > 0 {
+		v, err := e.emitExpr(c.args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		boxed, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		bits = boxed.Ref
 	}
 	prom := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_rs_cancel(ptr %s, i64 %s)", prom, c.ptr, bits))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_rs_cancel("+irPtr+" %s, i64 %s)", prom, c.ptr, bits))
 	pt := PromiseOf(TypeVoid)
 	pt.PromiseTask = true
 	return Value{Ref: prom, Ty: pt}, nil
@@ -827,32 +1139,37 @@ func (e *Emitter) streamRead(c *streamCall) (Value, error) {
 // streamReleaseLock is reader.releaseLock(): the reader's closed and pending
 // reads reject (__kml_rs_release) and it detaches from its stream.
 func (e *Emitter) streamReleaseLock(c *streamCall) (Value, error) {
-	closedErr := e.emitStreamStateError("Invalid state: Reader released")
-	readErr := e.emitStreamStateError("Invalid state: Releasing reader")
-	e.emitInstr(fmt.Sprintf("call void @__kml_rs_release(ptr %s, ptr %s, i64 %s, i64 %s)", c.ptr, c.handle, closedErr, readErr))
-	e.heapStore("ptr", "null", c.handle, 8)
+	closedErr := e.emitStreamStateErrorBox("Invalid state: Reader released")
+	readErr := e.emitStreamStateErrorBox("Invalid state: Releasing reader")
+	e.emitInstr(fmt.Sprintf("call void @__kml_rs_release("+irPtr+" %s, "+irPtr+" %s, i64 %s, i64 %s)", c.ptr, c.handle, closedErr, readErr))
+	e.heapStore(irPtr, "null", c.handle, 8)
 	return Value{Ty: TypeVoid}, nil
 }
 
 func (e *Emitter) streamEnqueue(c *streamCall) (Value, error) {
-	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: enqueue() expects 1 chunk argument", c.pos.Line, c.pos.Col)
+	args := c.args
+	if len(args) == 0 {
+		args = []ast.Expression{ast.NewNullLiteral(true, c.pos)} // enqueue(undefined)
 	}
-	cv, err := e.emitExprWithObjectHint(c.args[0], c.chunkTy)
+	args, err := e.dropArgsPast(args, 1, c.pos)
+	if err != nil {
+		return Value{}, err
+	}
+	cv, err := e.emitExprWithObjectHint(args[0], c.chunkTy)
 	if err != nil {
 		return Value{}, err
 	}
 	cv = e.convert(cv, c.chunkTy)
 	v0, v1 := e.streamChunkWords(cv)
 	ok := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_enqueue(ptr %s, i64 %s, i64 %s)", ok, c.ptr, v0, v1))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_enqueue("+irPtr+" %s, i64 %s, i64 %s)", ok, c.ptr, v0, v1))
 	e.streamThrowTypeError(ok, "cannot enqueue on a closed or errored ReadableStream")
 	return Value{Ty: TypeVoid}, nil
 }
 
 func (e *Emitter) streamClose(c *streamCall) (Value, error) {
 	ok := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", ok, c.ptr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close("+irPtr+" %s)", ok, c.ptr))
 	e.streamThrowTypeError(ok, "cannot close an already-closed or errored ReadableStream")
 	return Value{Ty: TypeVoid}, nil
 }
@@ -862,22 +1179,33 @@ func (e *Emitter) streamError(c *streamCall) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_rs_error(ptr %s, i64 %s)", c.ptr, bits))
+	e.emitInstr(fmt.Sprintf("call void @__kml_rs_error("+irPtr+" %s, i64 %s)", c.ptr, bits))
 	return Value{Ty: TypeVoid}, nil
 }
 
 // emitReadableStreamFrom implements `ReadableStream.from(array)` — a closed
 // stream pre-filled with the array's elements.
 func (e *Emitter) emitReadableStreamFrom(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: ReadableStream.from() expects 1 argument", pos.Line, pos.Col)
+	if len(args) == 0 {
+		args = []ast.Expression{ast.NewNullLiteral(true, pos)} // read as undefined
 	}
-	arrTy := e.inferExprType(args[0])
+	if len(args) > 1 {
+		var err error
+		if args, err = e.dropArgsPast(args, 1, pos); err != nil {
+			return Value{}, err
+		}
+	}
+	arrTy := e.typeOfExpr(args[0])
 	if !arrTy.IsArray() {
-		return Value{}, fmt.Errorf("%d:%d: ReadableStream.from() supports arrays (an async-iterable source is not supported yet)", pos.Line, pos.Col)
+		return e.emitReadableStreamFromIterable(args[0], pos)
 	}
 	elemTy := *arrTy.ElemType
-	e.ensureStreamRuntime()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
+	e.ensurePromiseAddReaction()
+	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 
 	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
 	if err != nil {
@@ -889,32 +1217,32 @@ func (e *Emitter) emitReadableStreamFrom(args []ast.Expression, pos ast.Pos) (Va
 
 	idxA := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxA))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxA))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxA))
 	condL := e.freshLabel("rs.from.cond")
 	bodyL := e.freshLabel("rs.from.body")
 	doneL := e.freshLabel("rs.from.done")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	idx := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx, idxA))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idx, idxA))
 	end := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", end, idx, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", end, doneL, bodyL))
 	e.emitLabel(bodyL)
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, ptrReg, idx))
 	elem := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", elem, elemTy.IR, gep, elemTy.Align()))
 	v0, v1 := e.streamChunkWords(Value{Ref: elem, Ty: elemTy})
 	tmp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_enqueue(ptr %s, i64 %s, i64 %s)", tmp, s, v0, v1))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_enqueue("+irPtr+" %s, i64 %s, i64 %s)", tmp, s, v0, v1))
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, idx))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idxA))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, idxA))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(doneL)
 	closed := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close(ptr %s)", closed, s))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_close("+irPtr+" %s)", closed, s))
 
 	return Value{Ref: s, Ty: ReadableStreamType(elemTy)}, nil
 }
@@ -924,7 +1252,12 @@ func (e *Emitter) emitReadableStreamFrom(args []ast.Expression, pos ast.Pos) (Va
 // promise awaited through the shared task-promise await (microtask-accurate in
 // both runtime tiers).
 func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal Value, condL, bodyL, incL, endL string) error {
-	e.ensureStreamRuntime()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
+	e.ensurePromiseAddReaction()
+	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	chunkTy := TypeI64
 	if ty.StreamChunk != nil {
 		chunkTy = *ty.StreamChunk
@@ -935,7 +1268,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 	if ty.IsReadableStream() {
 		// Lock like getReader() does; an already-locked stream throws.
 		ok := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock(ptr %s)", ok, streamVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock("+irPtr+" %s)", ok, streamVal.Ref))
 		e.streamThrowTypeError(ok, "Invalid state: ReadableStream is locked")
 	}
 
@@ -945,7 +1278,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 		if chunkTy.IsArray() {
 			// An array-shaped chunk variable is a stable slot holding a pointer
 			// to the current chunk's header (object-reference model, TDD-00127).
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", varPtr))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", varPtr))
 			e.define(s.VarName, Symbol{Ptr: varPtr, Ty: chunkTy})
 		} else {
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", varPtr, StructFieldIR(chunkTy), chunkTy.Align()))
@@ -953,7 +1286,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 		}
 	}
 	resultAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resultAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resultAlloca))
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
@@ -962,19 +1295,19 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 	if err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rec.Ref, resultAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", rec.Ref, resultAlloca))
 	recR := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", recR, resultAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", recR, resultAlloca))
 	dIdx, _, _ := resultTy.FieldIndex("done")
 	dGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dGep, resultTy.StructIR(), recR, dIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", dGep, resultTy.StructIR(), recR, dIdx))
 	doneReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", doneReg, dGep))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", doneReg, dGep))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", doneReg, endL, bodyL))
 
 	e.emitLabel(bodyL)
 	recB := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", recB, resultAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", recB, resultAlloca))
 	// done:false here, so the value field is always present — demote the
 	// `T | undefined` field back to its bare chunk value.
 	loaded := e.loadStreamResultValue(recB, resultTy, chunkTy).Ref
@@ -985,7 +1318,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 		}
 	case s.ArrayPattern != nil:
 		if !chunkTy.IsTuple() {
-			return fmt.Errorf("%d:%d: cannot array-destructure a stream chunk of non-tuple type", s.GetPos().Line, s.GetPos().Col)
+			return internalAt(s.GetPos(), "cannot array-destructure a stream chunk of non-tuple type")
 		}
 		if err := e.unpackTuplePatternInto(loaded, chunkTy, s.ArrayPattern, s.GetPos()); err != nil {
 			return err
@@ -994,9 +1327,9 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 		if chunkTy.IsArray() {
 			// Point the chunk variable's slot at a fresh header for this chunk.
 			chunkHeader := e.boxArrayValue(Value{Ref: loaded, Ty: chunkTy})
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", chunkHeader, varPtr))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", chunkHeader, varPtr))
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", StructFieldIR(chunkTy), loaded, varPtr, chunkTy.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", StructFieldIR(chunkTy), loaded, varPtr, chunkTy.Align()))
 		}
 	}
 	if err := e.emitForOfBody(s); err != nil {
@@ -1007,7 +1340,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(endL)
 	if ty.IsReadableStream() {
-		e.emitInstr(fmt.Sprintf("call void @__kml_rs_unlock(ptr %s)", streamVal.Ref))
+		e.emitInstr(fmt.Sprintf("call void @__kml_rs_unlock("+irPtr+" %s)", streamVal.Ref))
 	}
 	return nil
 }
@@ -1017,7 +1350,7 @@ func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal
 // writable family's on emitWStreamMethodCall.
 func init() {
 	for owner, names := range map[string][]string{
-		"ReadableStream":                  {"cancel", "getReader", "pipeThrough", "pipeTo", "tee", "values"},
+		"ReadableStream":                  {"cancel", "getReader", "pipeThrough", "pipeTo", "tee"},
 		"ReadableStreamGenericReader":     {"cancel"},
 		"ReadableStreamDefaultReader":     {"read", "releaseLock"},
 		"ReadableStreamDefaultController": {"close", "enqueue", "error", "terminate"},
@@ -1056,4 +1389,314 @@ func literalMembers(ol *ast.ObjectLiteral, names ...string) (map[string]ast.Expr
 		members[p.Key] = p.Value
 	}
 	return members, ""
+}
+
+// streamUnderlying resolves an underlying source or sink to its callback
+// members by name, and the other keys it has: an object literal's own (any
+// other property's value evaluated, as building the object does), or a
+// statically typed object's members read off it once evaluated. ok is false
+// for a value whose members are known only at run time.
+func (e *Emitter) streamUnderlying(src ast.Expression, names []string) (members map[string]ast.Expression, others map[string]bool, ok bool, err error) {
+	members, others = map[string]ast.Expression{}, map[string]bool{}
+	if ol, lit := src.(*ast.ObjectLiteral); lit {
+		for _, p := range ol.Properties {
+			if _, spread := p.Value.(*ast.SpreadElement); spread || p.KeyExpr != nil || p.AccessorKind != "" {
+				return e.streamUnderlyingBoxed(src, names)
+			}
+			if slices.Contains(names, p.Key) {
+				if p.Key == "size" && !mayBeFunctionLiteral(p.Value) {
+					// Not a function: the stream's own check throws, when it runs.
+					return e.streamUnderlyingBoxed(src, names)
+				}
+				members[p.Key] = p.Value
+				continue
+			}
+			others[p.Key] = true
+			if p.Key == "type" && (slices.Contains(names, "pull") || slices.Contains(names, "write")) {
+				if err := e.emitStreamTypeCheck(p.Value, slices.Contains(names, "pull")); err != nil {
+					return nil, nil, false, err
+				}
+				continue
+			}
+			if !noEffectExpr(p.Value) {
+				if _, err := e.emitExpr(p.Value); err != nil {
+					return nil, nil, false, err
+				}
+			}
+		}
+		return members, others, true, nil
+	}
+	ty := e.typeOfExpr(src)
+	if ty.IsDynamic() || !ty.IsObject() || ty.IsArray() {
+		return e.streamUnderlyingBoxed(src, names)
+	}
+	tmp, err := e.receiverTemp(src)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	for _, f := range ty.VisibleFields() {
+		if f.Name == "size" && slices.Contains(names, "size") && !f.Ty.IsFunc() && !f.Ty.IsDynamic() && !f.Ty.IsUndefined() {
+			return e.streamUnderlyingBoxed(src, names)
+		}
+		if slices.Contains(names, f.Name) {
+			members[f.Name] = ast.NewMemberExpression(tmp, f.Name, src.GetPos())
+		} else {
+			others[f.Name] = true
+		}
+	}
+	for _, n := range names {
+		if _, has := members[n]; !has && e.classMethodValue(ty, n) {
+			members[n] = ast.NewMemberExpression(tmp, n, src.GetPos())
+		}
+	}
+	return members, others, true, nil
+}
+
+// streamUnderlyingBoxed is streamUnderlying for a value whose members are
+// read when it runs (a spread literal, a union, a primitive): boxed, then
+// read as an any's. undefined is no underlying object (the defaults); any
+// other primitive is Node's ERR_INVALID_ARG_TYPE for the argument.
+func (e *Emitter) streamUnderlyingBoxed(src ast.Expression, names []string) (map[string]ast.Expression, map[string]bool, bool, error) {
+	pos := src.GetPos()
+	v, err := e.emitExpr(src)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	box, err := e.emitBoxValue(v)
+	if err != nil {
+		return nil, nil, false, err
+	}
+	role := ""
+	switch {
+	case slices.Contains(names, "pull"):
+		role = "source"
+	case slices.Contains(names, "write"):
+		role = "sink"
+	case slices.Contains(names, "transform"):
+		role = "transformer"
+	}
+	if role != "" {
+		tag, _ := e.emitUnboxTagPayload(box)
+		prim, isUndef, bad := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagUndefined))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+		notUndef := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notUndef, isUndef))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", bad, prim, notUndef))
+		badL, okL := e.freshLabel("stream.src.bad"), e.freshLabel("stream.src.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+		e.emitLabel(badL)
+		e.ensureDynJSONC()
+		suffix := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_received(i64 %s)", suffix, box.Ref))
+		msg, err := e.emitStringConcat(Value{Ref: e.internString(`The "` + role + `" argument must be of type object.`), Ty: TypePtr}, Value{Ref: suffix, Ty: TypePtr})
+		if err != nil {
+			return nil, nil, false, err
+		}
+		e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)
+		e.emitLabel(okL)
+		// undefined: an empty object's members, every one absent.
+		empty := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", empty))
+		eb := e.emitNbTagPtr(empty, kmlTagDynObject)
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", sel, isUndef, eb, box.Ref))
+		box = Value{Ref: sel, Ty: TypeAny}
+	}
+	return e.streamUnderlyingDynamic(e.bindValue(box, pos), names)
+}
+
+// typeMemberMessage is prefix + shown + "'".
+func (e *Emitter) typeMemberMessage(prefix string, shown Value) (string, error) {
+	m, err := e.emitStringConcat(Value{Ref: e.internString(prefix), Ty: TypePtr}, shown)
+	if err != nil {
+		return "", err
+	}
+	m, err = e.emitStringConcat(m, Value{Ref: e.internString("'"), Ty: TypePtr})
+	return m.Ref, err
+}
+
+// emitStreamTypeCheck checks an underlying source's (readable) or sink's
+// type member at run time: Node's errors for one it rejects; a byte
+// stream's ("bytes") is not supported, an error rather than a default
+// stream in its place.
+func (e *Emitter) emitStreamTypeCheck(typeExpr ast.Expression, readable bool) error {
+	ty, err := e.emitExpr(typeExpr)
+	if err != nil {
+		return err
+	}
+	ty, err = e.emitBoxValue(ty)
+	if err != nil {
+		return err
+	}
+	isU := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, ty.Ref, nbUndefined))
+	badL, okL := e.freshLabel("rs.type.bad"), e.freshLabel("rs.type.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isU, okL, badL))
+	e.emitLabel(badL)
+	shown, err := e.emitArgToString(ty)
+	if err != nil {
+		return err
+	}
+	if readable {
+		isBytes := e.emitStrEq(shown.Ref, e.internString("bytes"))
+		bytesL, otherL := e.freshLabel("rs.type.bytes"), e.freshLabel("rs.type.other")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBytes, bytesL, otherL))
+		e.emitLabel(bytesL)
+		e.emitThrowTypeError("byte streams (an underlying source's type 'bytes') are not supported")
+		e.emitLabel(otherL)
+		msg, err := e.typeMemberMessage("The property 'source.type' is invalid. Received '", shown)
+		if err != nil {
+			return err
+		}
+		e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_VALUE", msg)
+	} else {
+		msg, err := e.typeMemberMessage("The argument 'type' is invalid. Received '", shown)
+		if err != nil {
+			return err
+		}
+		e.emitThrowCoded("RangeError", "ERR_INVALID_ARG_VALUE", msg)
+	}
+	e.emitLabel(okL)
+	return nil
+}
+
+// emitInspectQuoted is the boxed v shown as inspect shows a nested value: a
+// string between quote, anything else as emitDynamicInspect renders it.
+func (e *Emitter) emitInspectQuoted(v Value, quote string) (Value, error) {
+	shown, err := e.emitDynamicInspect(v)
+	if err != nil {
+		return Value{}, err
+	}
+	tag, _ := e.emitUnboxTagPayload(v)
+	isStr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
+	q1, err := e.emitStringConcat(Value{Ref: e.internString(quote), Ty: TypePtr}, shown)
+	if err != nil {
+		return Value{}, err
+	}
+	q2, err := e.emitStringConcat(q1, Value{Ref: e.internString(quote), Ty: TypePtr})
+	if err != nil {
+		return Value{}, err
+	}
+	qs := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", qs, isStr, q2.Ref, shown.Ref))
+	return Value{Ref: qs, Ty: TypePtr}, nil
+}
+
+// streamWrap generates a stream callback's wrapper (gen), marking it direct
+// when expr is one of streamUnderlyingDynamic's async wrappers.
+func (e *Emitter) streamWrap(expr ast.Expression, gen func() string) string {
+	saved := e.streamWrapDirect
+	e.streamWrapDirect = e.streamDirect[expr]
+	defer func() { e.streamWrapDirect = saved }()
+	return gen()
+}
+
+// emitStreamStartResult is a start callback's result held in any (an
+// underlying object's start read at run time) as Node's setup resolves it:
+// `new Promise((r) => r(result))` — a thenable adopted through a job, a
+// promise adopted, any other value fulfilling it now.
+func (e *Emitter) emitStreamStartResult(box string) string {
+	e.ensurePromiseDynRuntime()
+	q := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", q, box))
+	return q
+}
+
+// optMember is `o?.p`.
+func optMember(o ast.Expression, p string, pos ast.Pos) *ast.MemberExpression {
+	m := ast.NewMemberExpression(o, p, pos)
+	m.Optional = true
+	return m
+}
+
+// mayBeFunctionLiteral reports an expression that may evaluate to a
+// function or undefined: anything but a primitive, object or array literal.
+func mayBeFunctionLiteral(x ast.Expression) bool {
+	switch v := x.(type) {
+	case *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral, *ast.TemplateLiteral, *ast.ObjectLiteral, *ast.ArrayLiteral:
+		return false
+	case *ast.NullLiteral:
+		return v.IsUndefined
+	}
+	return true
+}
+
+// emitStrategySizeCheck throws Node's TypeError when a queuing strategy's
+// size (the expression m, read once) is present and no function.
+func (e *Emitter) emitStrategySizeCheck(m ast.Expression) error {
+	v, err := e.emitExpr(m)
+	if err != nil {
+		return err
+	}
+	if v, err = e.emitBoxValue(v); err != nil {
+		return err
+	}
+	pos := m.GetPos()
+	held := e.anyTemp(v.Ref, pos) // read once: a getter runs once
+	tf, err := e.emitExpr(ast.NewBinaryExpression("!==", ast.NewUnaryExpression("typeof", true, held, pos), ast.NewStringLiteral("function", pos), pos))
+	if err != nil {
+		return err
+	}
+	isUndef, bad := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", isUndef, v.Ref, nbUndefined))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", bad, isUndef, tf.Ref))
+	badL, okL := e.freshLabel("strat.size.bad"), e.freshLabel("strat.size.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
+	e.emitLabel(badL)
+	if err := e.emitThrowArgType(`The "strategy.size" property must be of type function.`, v); err != nil {
+		return err
+	}
+	e.emitLabel(okL)
+	return nil
+}
+
+// streamLockCtors are the reader/writer constructors, each with the stream
+// it locks and that stream's acquiring method.
+var streamLockCtors = map[string][2]string{
+	"ReadableStreamDefaultReader": {"ReadableStream", "getReader"},
+	"WritableStreamDefaultWriter": {"WritableStream", "getWriter"},
+}
+
+// emitNewStreamLock is `new ReadableStreamDefaultReader(s)` (or the writer):
+// s's own acquire (which refuses a locked stream with ERR_INVALID_STATE),
+// after Node's ERR_INVALID_ARG_TYPE for an s that is no such stream.
+func (e *Emitter) emitNewStreamLock(ex *ast.NewExpression, lock [2]string) (Value, error) {
+	pos := ex.GetPos()
+	var arg ast.Expression = ast.NewNullLiteral(true, pos)
+	if len(ex.Args) > 0 {
+		arg = ex.Args[0]
+	}
+	for _, a := range ex.Args[min(1, len(ex.Args)):] {
+		if _, err := e.emitExpr(a); err != nil {
+			return Value{}, err
+		}
+	}
+	st := e.typeOfExpr(arg)
+	if lock[0] == "ReadableStream" && st.IsReadableStream() && !st.Nullable() || lock[0] == "WritableStream" && st.IsWritableStream() && !st.Nullable() {
+		return e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(arg, lock[1], pos), nil, pos))
+	}
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return Value{}, err
+	}
+	if v, err = e.emitBoxValue(v); err != nil {
+		return Value{}, err
+	}
+	held := e.anyTemp(v.Ref, pos)
+	test, err := e.emitExpr(ast.NewBinaryExpression("instanceof", held, ast.NewIdentifier(lock[0], pos), pos))
+	if err != nil {
+		return Value{}, err
+	}
+	badL, okL := e.freshLabel("lock.bad"), e.freshLabel("lock.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", test.Ref, okL, badL))
+	e.emitLabel(badL)
+	if err := e.emitThrowArgType(`The "stream" argument must be an instance of `+lock[0]+`.`, v); err != nil {
+		return Value{}, err
+	}
+	e.emitLabel(okL)
+	typed := ast.NewAsExpression(held, nameAnnotation(lock[0]), pos)
+	return e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(typed, lock[1], pos), nil, pos))
 }

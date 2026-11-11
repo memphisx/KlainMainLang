@@ -31,5 +31,4 @@ func (e *Emitter) ensureSyncRuntime() {
 		return
 	}
 	e.usedSync = true
-	e.emitGlobal(`declare void @klainsync_safepoint()`)
 }

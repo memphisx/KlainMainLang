@@ -570,3 +570,54 @@ export function __kml_Array_generic_toSpliced(o: any, args: any[]): any[] { // k
     for (let k = start + skip; k < len; k++) a[i++] = o[String(k)];
     return a;
 }
+
+// IsConcatSpreadable: an object's Symbol.isConcatSpreadable, else whether
+// it is an array.
+function spreadable(e: any): boolean {
+    if (e === null || (typeof e !== 'object' && typeof e !== 'function')) return false;
+    const s = e[Symbol.isConcatSpreadable];
+    if (s !== undefined) return !!s;
+    return Array.isArray(e);
+}
+
+export function __kml_Array_generic_concat(o: any, args: any[]): any[] { // kml:lower Array.prototype
+    const a: any[] = [];
+    let n = 0;
+    const items: any[] = [o];
+    for (let i = 0; i < args.length; i++) items.push(args[i]);
+    for (let i = 0; i < items.length; i++) {
+        const e = items[i];
+        if (spreadable(e)) {
+            const len = lengthOf(e);
+            if (n + len > MAX_LENGTH) throw new TypeError('Invalid array length');
+            const ks = present(e, 0, len, true);
+            for (let j = 0; j < ks.length; j++) {
+                const key = String(ks[j]);
+                if (key in e) a[n + ks[j]] = e[key];
+            }
+            n += len;
+        } else {
+            a[n] = e;
+            n++;
+        }
+    }
+    a.length = n;
+    return a;
+}
+
+// Array.prototype.toLocaleString: each element's toLocaleString (its
+// prototype's, which the program may replace), null and undefined (and a
+// hole) as "", joined by ",".
+export function __kml_Array_toLocaleString(o: any[], locales?: any, options?: any): string { // kml:lower toLocaleString
+    const len = o.length;
+    let s = '';
+    for (let i = 0; i < len; i++) {
+        if (i > 0) s += ',';
+        const v: any = o[i];
+        if (v !== null && v !== undefined) {
+            const f: any = v.toLocaleString;
+            s += String(f.call(v));
+        }
+    }
+    return s;
+}

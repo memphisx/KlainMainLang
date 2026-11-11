@@ -15,16 +15,21 @@ const IPv6Reg = new RegExp('^(?:' +
     '(?::(?:(?::' + v6Seg + '){0,5}:' + v4Str + '|(?::' + v6Seg + '){1,7}|:))' +
     ')(?:%[0-9a-zA-Z-.:]{1,})?$');
 
-export function isIPv4(input: string): boolean {
-    return IPv4Reg.test(input);
+// Node tests `${input}`: a JavaScript caller may pass any value.
+export function isIPv4(input: string): boolean;
+export function isIPv4(input?: any): boolean {
+    return IPv4Reg.test(typeof input === 'string' ? input : `${input}`);
 }
 
-export function isIPv6(input: string): boolean {
-    return IPv6Reg.test(input);
+export function isIPv6(input: string): boolean;
+export function isIPv6(input?: any): boolean {
+    return IPv6Reg.test(typeof input === 'string' ? input : `${input}`);
 }
 
-export function isIP(input: string): number {
-    if (isIPv4(input)) return 4;
-    if (isIPv6(input)) return 6;
+export function isIP(input: string): number;
+export function isIP(input?: any): number {
+    const s: string = typeof input === 'string' ? input : `${input}`;
+    if (isIPv4(s)) return 4;
+    if (isIPv6(s)) return 6;
     return 0;
 }

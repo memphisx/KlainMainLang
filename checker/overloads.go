@@ -23,22 +23,27 @@ func (c *Checker) overloadsType(key string, scope *binder.Scope, sigs []*ast.Fun
 		}
 		pop := c.pushEnv(sd.TypeParams, tps)
 		// Their constraints and defaults (`<T = void>`), read in the
-		// signature's own environment.
+		// signature's own environment; a bound naming a binding of the
+		// enclosing instantiation gives it its own copy (boundCopy).
+		changed := false
 		for j, tp := range tps {
-			if tp.Constraint == nil && j < len(sd.TypeParamConstraints) && sd.TypeParamConstraints[j] != nil {
-				if tn := sd.TypeParamConstraints[j].TypeNode(); tn != nil {
-					if ct := c.typeFromNode(tn, scope); !c.Unanswered(ct) {
-						tp.Constraint = ct
+			read := func(as []ast.TypeNode) *Type {
+				if j < len(as) && as[j] != nil {
+					if tn := as[j]; tn != nil {
+						if t := c.typeFromNode(tn, scope); !c.Unanswered(t) {
+							return t
+						}
 					}
 				}
+				return nil
 			}
-			if tp.Default == nil && j < len(sd.TypeParamDefaults) && sd.TypeParamDefaults[j] != nil {
-				if tn := sd.TypeParamDefaults[j].TypeNode(); tn != nil {
-					if dt := c.typeFromNode(tn, scope); !c.Unanswered(dt) {
-						tp.Default = dt
-					}
-				}
+			if nt := c.boundCopy(tp, read(sd.TypeParamConstraints), read(sd.TypeParamDefaults)); nt != tp {
+				tps[j], changed = nt, true
 			}
+		}
+		if changed {
+			pop()
+			pop = c.pushEnv(sd.TypeParams, tps)
 		}
 		t := c.signatureType(sd, sd.Params, sd.ReturnType, nil, nil, scope)
 		pop()
@@ -50,7 +55,7 @@ func (c *Checker) overloadsType(key string, scope *binder.Scope, sigs []*ast.Fun
 		// one it did not (an overload of an implementation) is named
 		// through the environment.
 		if len(tps) > 0 && len(t.TypeParams) == 0 {
-			t = c.in.function(t.Params, t.optionals, t.restParam, t.Result, t.Predicate, tps)
+			t = c.in.function(t.Params, t.optionals, t.restParam, t.Ret(), t.Predicate, tps)
 		}
 		out = append(out, t)
 	}
@@ -63,8 +68,32 @@ func (c *Checker) overloadsType(key string, scope *binder.Scope, sigs []*ast.Fun
 // unanswered: the pick could depend on it.
 func (c *Checker) resolveOverload(e *ast.CallExpression, fn *Type) *Type {
 	sig, m, ok := c.pickOverload(e, fn, true)
-	if !ok {
-		return c.unanswered
+	if ok {
+		sig, m = c.refitOverload(e, fn, sig, m)
+	}
+	if _, isNew := c.ctxStandIn[e]; !isNew && c.opts.CompatJS() && arityFitsAny(fn, len(e.Args)) && c.noOverloadFits(e, fn) {
+		// JavaScript: a call no declaration types (`[1].reduce((x, y) =>
+		// x + "", 0)`) holds whatever it returns at run time. (A `new`
+		// still builds its class's instance.)
+		return c.anyT
+	}
+	if _, isNew := c.ctxStandIn[e]; isNew && c.opts.CompatJS() && arityFitsAny(fn, len(e.Args)) && c.noOverloadFits(e, fn) {
+		// JavaScript: a `new` no overload fits (a source whose `type` is a
+		// string, not 'bytes') still builds the instance; its type is the
+		// longest candidate's, as tsc's pickLongestCandidateSignature.
+		if r := c.longestCandidateResult(e, fn); r != nil {
+			return r
+		}
+	}
+	if _, isNew := c.ctxStandIn[e]; !isNew && c.opts.CompatJS() && !arityFitsAny(fn, len(e.Args)) {
+		// JavaScript: a call with an argument count no declaration takes
+		// still runs (`Object.entries()` throws, extras are ignored).
+		return c.anyT
+	}
+	if !ok || !arityFits(sig, len(e.Args)) {
+		// (A pick from the arguments an overload takes gives callbacks
+		// their context; the call itself has no result type, an error.)
+		return c.sharedOverloadResult(e, fn)
 	}
 	// The chosen signature's type parameters the arguments left open come
 	// from the call's context, as for a single signature (`const w:
@@ -86,13 +115,55 @@ func (c *Checker) resolveOverload(e *ast.CallExpression, fn *Type) *Type {
 	}
 	// A type parameter the arguments give no candidate is unknown (tsc's
 	// getInferredType): `Array.from({ length: 2 })` is unknown[].
-	r := c.instantiate(sig.Result, m)
+	r := c.instantiate(sig.Ret(), m)
 	for _, tp := range sig.TypeParams {
 		if occurs(tp, r) {
 			return c.unanswered // a type parameter the arguments did not infer
 		}
 	}
 	return r
+}
+
+// refitOverload is the overload a call takes once its callbacks are typed:
+// picking skips a context-sensitive callback, so a pick whose callback's
+// result does not fit (`reduce((a, x) => { if (x) return a + x }, 0)`, a
+// possibly undefined result for `=> number`) gives way to the first later
+// overload that takes it, as tsc's applicability check does.
+func (c *Checker) refitOverload(e *ast.CallExpression, fn *Type, sig *Type, m map[*Type]*Type) (*Type, map[*Type]*Type) {
+	hasCallback := false
+	for _, a := range e.Args {
+		hasCallback = hasCallback || contextSensitive(a) && isFunctionLiteral(a)
+	}
+	if !hasCallback || len(fn.Overloads) < 2 || c.refitting[e] {
+		return sig, m
+	}
+	if c.refitting == nil {
+		c.refitting = map[*ast.CallExpression]bool{}
+	}
+	c.refitting[e] = true
+	defer delete(c.refitting, e)
+	if i, _ := c.argMisfit(e, sig); i < 0 {
+		return sig, m
+	}
+	later := false
+	for _, s2 := range fn.Overloads {
+		if s2 == sig {
+			later = true
+			continue
+		}
+		if !later || !arityFits(s2, len(e.Args)) || len(e.TypeArgs) > len(s2.TypeParams) {
+			continue
+		}
+		if i, _ := c.argMisfit(e, s2); i >= 0 {
+			continue
+		}
+		var m2 map[*Type]*Type
+		if len(s2.TypeParams) > 0 {
+			m2 = c.inferArgsRecv(callRecv(e), e.Args, e.TypeArgs, s2, true)
+		}
+		return s2, m2
+	}
+	return sig, m
 }
 
 // pickOverload is the first overload of fn a call's arguments fit (arity,
@@ -103,7 +174,11 @@ func (c *Checker) resolveOverload(e *ast.CallExpression, fn *Type) *Type {
 // so a callback's own contextual type (contextualType) picks without it.
 func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*Type, map[*Type]*Type, bool) {
 	for _, a := range e.Args {
-		if !contextSensitive(a) && !isEmptyArrayLiteral(a) && c.Unanswered(c.TypeOf(a)) {
+		x := a
+		if sp, ok := a.(*ast.SpreadElement); ok {
+			x = sp.Arg // a spread is typed by its operand
+		}
+		if !contextSensitive(x) && !isEmptyArrayLiteral(x) && c.Unanswered(c.TypeOf(x)) {
 			return nil, nil, false
 		}
 	}
@@ -114,7 +189,11 @@ func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*T
 	// there; a call with no `any` argument takes the assignability pass.
 	anyArg := false
 	for _, a := range e.Args {
-		if !contextSensitive(a) && c.TypeOf(a).Flags&Any != 0 {
+		x := a
+		if sp, ok := a.(*ast.SpreadElement); ok {
+			x = sp.Arg
+		}
+		if !contextSensitive(x) && c.TypeOf(x).Flags&Any != 0 {
 			anyArg = true
 		}
 	}
@@ -123,7 +202,44 @@ func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*T
 			return sig, m, ok
 		}
 	}
-	return c.pickOverloadPass(e, fn, guards, false)
+	if sig, m, ok := c.pickOverloadPass(e, fn, guards, false); ok {
+		return sig, m, ok
+	}
+	// More arguments than any overload takes (an error, TS2554): the
+	// arguments it does take still pick one, as tsc's resolution keeps a
+	// candidate for the error so the callbacks keep their context.
+	fitsAny := false
+	for _, sig := range fn.Overloads {
+		if arityFits(sig, len(e.Args)) {
+			fitsAny = true
+		}
+	}
+	for k := len(e.Args) - 1; !fitsAny && k >= 0; k-- {
+		for _, sig := range fn.Overloads {
+			if arityFits(sig, k) {
+				trimmed := *e
+				trimmed.Args = e.Args[:k]
+				return c.pickOverloadPass(&trimmed, fn, guards, false)
+			}
+		}
+	}
+	return nil, nil, false
+}
+
+// instantiatedParamAt is paramAt of sig instantiated by m: a rest typed by
+// a type parameter (`...args: TArgs`) binds the inferred tuple's elements.
+func (c *Checker) instantiatedParamAt(sig *Type, m map[*Type]*Type, i int) *Type {
+	if p := paramAt(sig, i); p != nil {
+		return c.instantiate(p, m)
+	}
+	if tp := restTypeParam(sig, sig); tp != nil {
+		if t := m[tp]; t != nil && t.Flags&Object != 0 && t.Kind == Tuple {
+			if j := i - (len(sig.Params) - 1); j < len(t.Elems) {
+				return t.Elems[j]
+			}
+		}
+	}
+	return nil
 }
 
 // pickOverloadPass is one pass of pickOverload: under subtype, an `any`
@@ -175,13 +291,21 @@ func (c *Checker) pickOverloadPass(e *ast.CallExpression, fn *Type, guards, subt
 				}
 				continue
 			}
-			p := paramAt(sig, i)
-			if p == nil || !c.argFits(a, c.instantiate(p, m)) {
+			p := c.instantiatedParamAt(sig, m, i)
+			if p == nil || !c.argFits(a, p) {
+				fits = false
+				break
+			}
+			// A function literal annotated throughout takes the callback's
+			// parameters contravariantly (strictFunctionTypes):
+			// `reduce((p: number, c) => …, 0)` skips `(prev: T, …)` for
+			// T = string | number.
+			if isFunctionLiteral(a) && !hasTypeParam(p) && c.literalParamsMisfit(a, p) {
 				fits = false
 				break
 			}
 			if subtype && c.TypeOf(a).Flags&Any != 0 {
-				if ip := c.instantiate(p, m); ip == nil || ip.Flags&(Any|Unknown) == 0 {
+				if ip := p; ip == nil || ip.Flags&(Any|Unknown) == 0 {
 					fits = false
 					break
 				}
@@ -248,7 +372,19 @@ func (c *Checker) assignable(a, p *Type) bool {
 // (`{ encoding: "utf8" }` fits `{ encoding: BufferEncoding }`), as tsc types
 // the literal in each signature's context (overloadArgType).
 func (c *Checker) argFits(a ast.Expression, p *Type) bool {
-	if isEmptyArrayLiteral(a) {
+	if sp, ok := a.(*ast.SpreadElement); ok {
+		// A spread's elements go to this parameter and the rest: one of
+		// any fits any parameter, as an array's element type relates.
+		st := c.TypeOf(sp.Arg)
+		if c.Unanswered(st) || st.Flags&Any != 0 {
+			return true
+		}
+		if st.Flags&Object != 0 && st.Kind == Array && st.Elem != nil && p != nil {
+			return !c.argMismatch(sp.Arg, st.Elem, p, relation{missingIsNo: true})
+		}
+		return true
+	}
+	if isEmptyArrayLiteral(a) && !c.opts.CompatJS() {
 		return c.acceptsArray(p) // `[]` takes its element type from the context
 	}
 	at := c.overloadArgType(a)
@@ -562,11 +698,22 @@ func (c *Checker) argMisfit(e *ast.CallExpression, sig *Type) (int, *Type) {
 		}
 	}
 	for i, a := range e.Args {
+		// A function literal's annotated parameters meet the callback's
+		// contravariantly (strictFunctionTypes): `(e, a: number) => …` does
+		// not take a string `a`, annotated throughout or not.
+		if p := paramAt(sig, i); p != nil && isFunctionLiteral(a) && !hasTypeParam(p) && c.literalParamsMisfit(a, c.instantiate(p, m)) {
+			return i, c.instantiate(p, m)
+		}
 		if contextSensitive(a) {
-			// A function literal's annotated parameters still meet the
-			// callback's: `(e, a: number) => …` does not take a string `a`.
-			if p := paramAt(sig, i); p != nil && !hasTypeParam(p) && c.literalParamsMisfit(a, c.instantiate(p, m)) {
-				return i, c.instantiate(p, m)
+			// Its result must fit the instantiated callback: `xs.reduce((a,
+			// b) => "s", 0)` fits neither `=> number` overload (TS2769).
+			if p := paramAt(sig, i); p != nil && isFunctionLiteral(a) {
+				if ip := c.instantiate(p, m); !c.Unanswered(ip) && !hasTypeParam(ip) && ip.Flags&Object != 0 && ip.Kind == Function && ip.Predicate == nil {
+					if at := c.TypeOf(a); !c.Unanswered(at) && at.Flags&Object != 0 && at.Kind == Function && at.Ret() != nil && ip.Ret() != nil &&
+						!c.Unanswered(at.Ret()) && !c.Unanswered(ip.Ret()) && ip.Ret().Flags&(Any|Unknown|Void) == 0 && !c.assignable(at.Ret(), ip.Ret()) {
+						return i, ip
+					}
+				}
 			}
 			continue
 		}
@@ -781,13 +928,13 @@ func (c *Checker) literalParamsMisfit(a ast.Expression, p *Type) bool {
 		scope = c.b.Module
 	}
 	for i, prm := range params {
-		if prm.Rest || prm.Type == nil || prm.Type.TypeNode() == nil || i >= len(target.Params) {
+		if prm.Rest || prm.Type == nil || i >= len(target.Params) {
 			continue
 		}
 		if i == len(target.Params)-1 && target.restParam {
 			continue
 		}
-		annotated := c.typeFromNode(prm.Type.TypeNode(), scope)
+		annotated := c.typeFromNode(prm.Type, scope)
 		if c.Unanswered(annotated) {
 			continue
 		}
@@ -888,4 +1035,157 @@ func (c *Checker) FunctionSignature(fd *ast.FunctionDeclaration) *Type {
 		return nil
 	}
 	return t
+}
+
+// sharedOverloadResult is a call no overload takes (a TypeScript error)
+// whose overloads all return one type: tsc types it by its best candidate,
+// which returns that type (`s.split({ toString })` is string[]).
+//
+// With non-generic overloads returning different types it is tsc's
+// createUnionOfSignaturesForOverloadFailure: the union of the results of the
+// candidates the arguments' count fits (all of them when none does).
+func (c *Checker) sharedOverloadResult(e *ast.CallExpression, fn *Type) *Type {
+	cands := fn.Overloads
+	var fit []*Type
+	for _, sig := range cands {
+		if arityFits(sig, len(e.Args)) {
+			fit = append(fit, sig)
+		}
+	}
+	if len(fit) > 0 {
+		cands = fit
+	}
+	var rets []*Type
+	for _, sig := range cands {
+		if len(sig.TypeParams) > 0 || c.Unanswered(sig.Ret()) {
+			return c.unanswered
+		}
+		rets = append(rets, sig.Ret())
+	}
+	if len(rets) == 0 {
+		return c.unanswered
+	}
+	r := c.in.union(rets...)
+	if c.Unanswered(r) {
+		return c.unanswered
+	}
+	for _, a := range e.Args {
+		if c.Unanswered(c.TypeOf(a)) {
+			return c.unanswered
+		}
+	}
+	return r
+}
+
+// MaxArgs is the most arguments a call of a function type t reads: the
+// longest parameter list among its signatures; ok is false for a rest
+// parameter (every argument read) or a type that is no function.
+func (c *Checker) MaxArgs(t *Type) (n int, ok bool) {
+	if t == nil || t.Flags&Object == 0 || t.Kind != Function {
+		return 0, false
+	}
+	sigs := t.Overloads
+	if len(sigs) == 0 {
+		sigs = []*Type{t}
+	}
+	for _, s := range sigs {
+		if s.restParam {
+			return 0, false
+		}
+		n = max(n, len(s.Params))
+	}
+	return n, true
+}
+
+// MinArgs is the fewest arguments any of a function type t's signatures
+// takes; ok is false for a type that is no function.
+func (c *Checker) MinArgs(t *Type) (n int, ok bool) {
+	if t == nil || t.Flags&Object == 0 || t.Kind != Function {
+		return 0, false
+	}
+	sigs := t.Overloads
+	if len(sigs) == 0 {
+		sigs = []*Type{t}
+	}
+	n = -1
+	for _, s := range sigs {
+		if m := s.MinArgs(); n < 0 || m < n {
+			n = m
+		}
+	}
+	return n, true
+}
+
+// ParamIsString reports whether every signature of a function type t
+// declares its i-th parameter a string (no union with undefined or null):
+// an argument there is converted with ToString.
+func (c *Checker) ParamIsString(t *Type, i int) bool {
+	if t == nil || t.Flags&Object == 0 || t.Kind != Function {
+		return false
+	}
+	sigs := t.Overloads
+	if len(sigs) == 0 {
+		sigs = []*Type{t}
+	}
+	for _, s := range sigs {
+		if i >= len(s.Params) || s.Params[i] == nil || s.Params[i].Flags&^StringLike != 0 || s.Params[i].Flags&StringLike == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// arityFitsAny reports an overload of fn that n arguments fit.
+func arityFitsAny(fn *Type, n int) bool {
+	for _, sig := range fn.Overloads {
+		if arityFits(sig, n) {
+			return true
+		}
+	}
+	return false
+}
+
+// noOverloadFits reports a call every overload of the right arity refuses
+// an argument of (checkOverloadCall's TS2769).
+func (c *Checker) noOverloadFits(e *ast.CallExpression, fn *Type) bool {
+	for _, sig := range fn.Overloads {
+		if !arityFits(sig, len(e.Args)) || len(e.TypeArgs) > len(sig.TypeParams) {
+			continue
+		}
+		if i, _ := c.argMisfit(e, sig); i < 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// longestCandidateResult is the result of the overload with the most
+// parameters that takes e's argument count (the first of a tie), its type
+// parameters their defaults or any; nil when it has no answer.
+func (c *Checker) longestCandidateResult(e *ast.CallExpression, fn *Type) *Type {
+	var best *Type
+	for _, sig := range fn.Overloads {
+		if arityFits(sig, len(e.Args)) && (best == nil || len(sig.Params) > len(best.Params)) {
+			best = sig
+		}
+	}
+	if best == nil || c.Unanswered(best.Ret()) {
+		return nil
+	}
+	if len(best.TypeParams) == 0 {
+		return best.Ret()
+	}
+	m := map[*Type]*Type{}
+	for _, tp := range best.TypeParams {
+		if tp.Default != nil {
+			m[tp] = c.instantiate(tp.Default, m)
+		} else {
+			m[tp] = c.anyT
+		}
+	}
+	r := c.instantiate(best.Ret(), m)
+	if c.Unanswered(r) {
+		return nil
+	}
+	return r
 }

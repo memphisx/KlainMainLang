@@ -57,7 +57,6 @@ func (e *Emitter) freshType(t Type, depth int) Type {
 	t.StreamOut = ptr(t.StreamOut)
 	t.FuncParams = slice(t.FuncParams)
 	t.UnionMembers = slice(t.UnionMembers)
-	t.IntersectionMembers = slice(t.IntersectionMembers)
 	t.Fields = fields(t.Fields)
 	t.DictFields = fields(t.DictFields)
 	return t

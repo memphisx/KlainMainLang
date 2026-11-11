@@ -25,17 +25,3 @@ var atomicsSource string
 
 // AtomicsSource is the Atomics.wait/notify runtime's C source.
 func AtomicsSource() string { return atomicsSource }
-
-// UsesAtomicsRuntime reports whether the program links the Atomics runtime.
-func (e *Emitter) UsesAtomicsRuntime() bool { return e.usedAtomicsRuntime }
-
-// ensureAtomicsRuntime declares the Atomics runtime (atomics.c) once.
-func (e *Emitter) ensureAtomicsRuntime() {
-	if e.usedAtomicsRuntime {
-		return
-	}
-	e.usedAtomicsRuntime = true
-	e.emitGlobal(`declare i64 @__kml_atomics_wait(ptr, i32, double)
-declare i64 @__kml_atomics_wait64(ptr, i64, double)
-declare i64 @__kml_atomics_notify(ptr, i64)`)
-}

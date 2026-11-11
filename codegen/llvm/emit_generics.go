@@ -19,6 +19,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"hash/crc32"
 	"hash/fnv"
 	"strings"
 )
@@ -28,6 +29,16 @@ import (
 // isn't accepted in V1 — object/class/Map/Set/Promise/closure type
 // arguments are all deliberately out of scope (see this file's doc comment).
 func mangleTypeArg(t Type) (string, error) {
+	if t.IsTuple() && !t.IsDynamic() {
+		// A tuple by its element types: two tuples sharing a storage
+		// array (`[number, string]`, `[string, number]`) are different
+		// instantiations.
+		s, err := mangleObjectStructural(t)
+		if err != nil {
+			return "", err
+		}
+		return "tup" + s, nil
+	}
 	if t.IsArray() {
 		inner, err := mangleTypeArg(*t.ElemType)
 		if err != nil {
@@ -124,20 +135,20 @@ func mangleTypeArgs(typeParams []string, subs map[string]Type) (string, error) {
 
 // buildTypeArgSubs zips typeParams (a declaration's own TypeParams, in
 // order) positionally against typeArgs (a usage site's parsed type
-// arguments), resolving each via resolveType. Arity mismatches are each
+// arguments), resolving each via annotationType. Arity mismatches are each
 // caller's own responsibility to reject before calling this — the parser
 // has no symbol table (see parseTypeParamList's own doc comment), so arity
 // checking happens here, at the codegen call sites that already know both
 // lengths. Only the shorter of the two lengths is zipped; a caller that
 // hasn't already validated matching lengths gets a partially-built map, not
 // a panic.
-func (e *Emitter) buildTypeArgSubs(typeParams []string, typeArgs []*ast.TypeAnnotation) map[string]Type {
+func (e *Emitter) buildTypeArgSubs(typeParams []string, typeArgs []ast.TypeNode) map[string]Type {
 	subs := make(map[string]Type, len(typeParams))
 	for i, tp := range typeParams {
 		if i >= len(typeArgs) {
 			break
 		}
-		subs[tp] = e.resolveType(typeArgs[i])
+		subs[tp] = e.annotationType(typeArgs[i])
 	}
 	return subs
 }
@@ -146,41 +157,22 @@ func (e *Emitter) buildTypeArgSubs(typeParams []string, typeArgs []*ast.TypeAnno
 // reference one of subs' type-parameter names (a bare "T", or "T[]" — V1
 // doesn't support nesting a type parameter any deeper than one array level)
 // into its concrete Type, substituting concrete for every occurrence;
-// anything else resolves normally via resolveType, exactly as it would for a
+// anything else resolves normally via annotationType, exactly as it would for a
 // non-generic declaration.
-func (e *Emitter) substituteGenericType(ta *ast.TypeAnnotation, subs map[string]Type) Type {
+func (e *Emitter) substituteGenericType(ta ast.TypeNode, subs map[string]Type) Type {
 	if ta == nil {
 		return TypeVoid
-	}
-	if concrete, ok := subs[ta.Name]; ok {
-		// `T | undefined`: the reference's own absence carries over.
-		// (as resolveType's type-parameter scope does).
-		if ta.Nullable {
-			concrete.setNullable(true)
-			concrete.setUndefined(ta.Undefined)
-		}
-		return concrete
-	}
-	for typeParam, concrete := range subs {
-		if ta.Name == typeParam+"[]" {
-			t := ArrayOf(concrete)
-			if ta.Nullable {
-				t.setNullable(true)
-				t.setUndefined(ta.Undefined)
-			}
-			return t
-		}
 	}
 	// Anything deeper (`Promise<T>`, `Map<string, T>`, `T[][]`, a closure type
 	// mentioning T) resolves structurally with the type parameters in scope.
 	var t Type
-	e.withTypeParamScope(subs, func() { t = e.resolveType(ta) })
+	e.withTypeParamScope(subs, func() { t = e.annotationType(ta) })
 	return t
 }
 
 // withTypeParamScope runs fn with subs layered over the active type-parameter
 // scope (an inner generic instantiation shadows an outer one's names), so
-// every resolveType inside fn — a body's `new Promise<T>`, a local's `T[]`
+// every annotationType inside fn — a body's `new Promise<T>`, a local's `T[]`
 // annotation, the return-type inference — substitutes the concrete types.
 // Restored on return, including on the error paths fn unwinds through.
 func (e *Emitter) withTypeParamScope(subs map[string]Type, fn func()) {
@@ -198,7 +190,7 @@ func (e *Emitter) withTypeParamScope(subs map[string]Type, fn func()) {
 }
 
 // buildGenericParamSig is buildParamSig's generic-aware sibling: the same
-// per-parameter rules (explicit annotation via resolveType, unannotated rest
+// per-parameter rules (explicit annotation via annotationType, unannotated rest
 // defaults to number[], unannotated scalar defaults to inferred TypeI64),
 // except a parameter whose annotation names one of subs' type parameters
 // substitutes its concrete type instead.
@@ -238,6 +230,15 @@ type genericParamPos struct {
 	// FnRet marks a function-typed parameter returning T (`fn: () => T`):
 	// T is what the callback argument returns.
 	FnRet bool
+	// Chunk marks a `ReadableStream<T>` parameter: T is the argument
+	// stream's chunk type.
+	Chunk bool
+}
+
+// streamOfParam reports whether n is `ReadableStream<typeParam>`.
+func streamOfParam(n ast.TypeNode, typeParam string) bool {
+	r, ok := ast.Unparen(n).(*ast.TypeReference)
+	return ok && r.Name == "ReadableStream" && len(r.Qualifier) == 0 && len(r.TypeArgs) == 1 && ast.RefName(r.TypeArgs[0]) == typeParam
 }
 
 // genericFuncTypeParamIndex finds, independently for each of decl's type
@@ -254,15 +255,17 @@ func genericFuncTypeParamIndex(decl *ast.FunctionDeclaration) map[string][]gener
 			if p.Type == nil {
 				continue
 			}
+			n := ast.NonNullish(p.Type)
+			ret, ctor, isSig := ast.SignatureReturn(n)
 			switch {
-			case p.Type.Name == typeParam:
+			case ast.RefName(n) == typeParam:
 				positions[typeParam] = append(positions[typeParam], genericParamPos{Idx: i})
-			case p.Type.Name == typeParam+"[]":
+			case ast.ArrayElemNode(n) != nil && ast.RefName(ast.ArrayElemNode(n)) == typeParam:
 				positions[typeParam] = append(positions[typeParam], genericParamPos{Idx: i, IsArray: true})
-			case p.Type.IsCtorType && p.Type.FuncRetType != nil && p.Type.FuncRetType.Name == typeParam:
-				positions[typeParam] = append(positions[typeParam], genericParamPos{Idx: i, Ctor: true})
-			case p.Type.IsFuncType && !p.Type.IsCtorType && p.Type.FuncRetType != nil && p.Type.FuncRetType.Name == typeParam:
-				positions[typeParam] = append(positions[typeParam], genericParamPos{Idx: i, FnRet: true})
+			case isSig && ast.RefName(ret) == typeParam:
+				positions[typeParam] = append(positions[typeParam], genericParamPos{Idx: i, Ctor: ctor, FnRet: !ctor})
+			case streamOfParam(n, typeParam):
+				positions[typeParam] = append(positions[typeParam], genericParamPos{Idx: i, Chunk: true})
 			}
 		}
 	}
@@ -270,14 +273,19 @@ func genericFuncTypeParamIndex(decl *ast.FunctionDeclaration) map[string][]gener
 }
 
 // inferGenericCallConcreteTypes is the pure (no IR emission) core shared by
-// emitGenericFuncCall and inferExprType's own generic-call case: finds, for
+// emitGenericFuncCall and typeOfExpr's own generic-call case: finds, for
 // every one of decl's type parameters independently, its own type-parameter-
 // typed argument at the call site and infers its concrete type. Returns
 // ok=false and the specific type-parameter name nothing could be inferred
 // for the moment any one of them fails — safe to call speculatively/
-// repeatedly, since inferExprType (unlike emitExpr) must never trigger real
+// repeatedly, since typeOfExpr (unlike emitExpr) must never trigger real
 // emission as a side effect of merely asking "what type is this call."
 func (e *Emitter) inferGenericCallConcreteTypes(decl *ast.FunctionDeclaration, args []ast.Expression, call *ast.CallExpression) (subs map[string]Type, missing string, ok bool) {
+	// The checker's inference, every type parameter's argument mapped by
+	// reprOf.
+	if subs, ok := e.checkerTypeArgs(decl, call); ok {
+		return subs, "", true
+	}
 	positions := genericFuncTypeParamIndex(decl)
 	subs = make(map[string]Type, len(decl.TypeParams))
 	for i, typeParam := range decl.TypeParams {
@@ -297,7 +305,7 @@ func (e *Emitter) inferGenericCallConcreteTypes(decl *ast.FunctionDeclaration, a
 				continue
 			}
 			if i < len(decl.TypeParamDefaults) && decl.TypeParamDefaults[i] != nil {
-				subs[typeParam] = e.resolveType(decl.TypeParamDefaults[i])
+				subs[typeParam] = e.annotationType(decl.TypeParamDefaults[i])
 				continue
 			}
 			// Otherwise its constraint, else unknown, as tsc infers it.
@@ -331,7 +339,7 @@ func (e *Emitter) inferGenericCallConcreteTypes(decl *ast.FunctionDeclaration, a
 // nothing infers it: its constraint when a plain one, else unknown.
 func (e *Emitter) uninferredTypeArg(decl *ast.FunctionDeclaration, i int) Type {
 	if i < len(decl.TypeParamConstraints) && decl.TypeParamConstraints[i] != nil {
-		if c := e.resolveType(decl.TypeParamConstraints[i]); c.IR != "" && c.IR != "void" {
+		if c := e.annotationType(decl.TypeParamConstraints[i]); c.IR != "" && c.IR != "void" {
 			return c
 		}
 	}
@@ -344,21 +352,27 @@ func (e *Emitter) inferFromGenericArg(arg ast.Expression, pos genericParamPos) (
 	if pos.Ctor {
 		return e.constructedType(arg)
 	}
+	if pos.Chunk {
+		if t := e.typeOfExpr(arg); t.IsReadableStream() && t.StreamChunk != nil {
+			return *t.StreamChunk, true
+		}
+		return Type{}, false
+	}
 	if pos.FnRet {
 		// The callback's own return type (its body inferred, or annotated).
-		if t := e.inferExprType(arg); t.IsFunc() && t.FuncRetType != nil && t.FuncRetType.IR != "" {
+		if t := e.typeOfExpr(arg); t.IsFunc() && t.FuncRetType != nil && t.FuncRetType.IR != "" {
 			return *t.FuncRetType, true
 		}
 		return Type{}, false
 	}
-	// inferExprType has no *ast.ArrayLiteral case of its own (see
+	// typeOfExpr has no *ast.ArrayLiteral case of its own (see
 	// inferArrayType's separate existing callers, e.g.
 	// emit_exprs_vardecl.go) — a literal array argument needs that instead.
 	var concrete Type
 	if lit, ok := arg.(*ast.ArrayLiteral); ok {
 		concrete = e.inferArrayType(lit)
 	} else {
-		concrete = e.inferExprType(arg)
+		concrete = e.typeOfExpr(arg)
 	}
 	if !pos.IsArray {
 		return concrete, true
@@ -377,46 +391,20 @@ func (e *Emitter) inferFromGenericArg(arg ast.Expression, pos genericParamPos) (
 // inferGenericCallConcreteTypes, instantiate (or reuse a memoized prior
 // instantiation), and dispatch exactly like a call to a concrete named
 // function.
-// checkTypeParamConstraints enforces each `<T extends X>` bound (TDD-00113): the
-// concrete type inferred/supplied for a constrained type parameter must
-// structurally satisfy its constraint annotation (reusing matchExtends, the same
-// structural-subtype test conditional types use — width subtyping, so an object
-// with extra fields still satisfies a smaller shape). An unconstrained parameter
-// (nil entry) is always fine. constraints is positionally aligned with
-// typeParams; a nil/short slice means no constraints. declKind/declName/pos are
-// for the error message.
-func (e *Emitter) checkTypeParamConstraints(typeParams []string, constraints []*ast.TypeAnnotation, subs map[string]Type, declKind, declName string, pos ast.Pos) error {
-	for i, name := range typeParams {
-		if i >= len(constraints) || constraints[i] == nil {
-			continue
-		}
-		concrete, ok := subs[name]
-		if !ok {
-			continue
-		}
-		if c := constraints[i]; c.Name != "" && len(c.TypeArgs) == 0 && c.ElemType == nil {
-			if bound, isParam := subs[c.Name]; isParam && c.Name != name {
-				// `B extends A`: the bound is A's argument; a class or
-				// object argument may be a subtype, a scalar is the same
-				// representation.
-				if reprKey(concrete) != reprKey(bound) && !concrete.IsObject() && !concrete.IsClass() {
-					return fmt.Errorf("%d:%d: type argument for '%s' does not satisfy the constraint '%s extends %s' on %s '%s'",
-						pos.Line, pos.Col, name, name, inspectClassName(c.Name), declKind, inspectClassName(declName))
-				}
-				continue
-			}
-		}
-		if !e.matchExtends(concrete, constraints[i], map[string]Type{}) {
-			return fmt.Errorf("%d:%d: type argument for '%s' does not satisfy the constraint '%s extends %s' on %s '%s'",
-				pos.Line, pos.Col, name, name, inspectClassName(constraints[i].Name), declKind, inspectClassName(declName))
-		}
-	}
-	return nil
-}
-
-func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.Expression, typeArgs []*ast.TypeAnnotation, pos ast.Pos, call *ast.CallExpression) (Value, error) {
+func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.Expression, typeArgs []ast.TypeNode, pos ast.Pos, call *ast.CallExpression) (Value, error) {
+	// Polymorphic recursion (`f<T>(x: T) { f([x]) }`) instantiates ever
+	// deeper types; past the cap every type parameter is any, one
+	// instantiation the deeper calls share.
 	if e.genericDepth > 8 {
-		return Value{}, fmt.Errorf("%d:%d: type instantiation for generic function '%s' is excessively deep (self-referential type arguments)", pos.Line, pos.Col, decl.Name)
+		subs := map[string]Type{}
+		for _, tp := range decl.TypeParams {
+			subs[tp] = TypeAny
+		}
+		mangled, sig, err := e.instantiateGenericFunc(decl, subs)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitCallToFuncSig(mangled, sig, args, pos)
 	}
 	e.genericDepth++
 	defer func() { e.genericDepth-- }()
@@ -425,11 +413,8 @@ func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.
 		var missing string
 		subs, missing, ok = e.inferGenericCallConcreteTypes(decl, args, call)
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: cannot infer type argument '%s' for generic function '%s' — declare a parameter typed '%s' or '%s[]' to infer from, or pass explicit call-site type arguments (`%s<T>(…)`)", pos.Line, pos.Col, missing, ast.Unmangle(decl.Name), missing, missing, ast.Unmangle(decl.Name))
+			return Value{}, internalAt(pos, "type argument %s of %s not inferred (inference falls back to the constraint or unknown)", missing, ast.Unmangle(decl.Name))
 		}
-	}
-	if err := e.checkTypeParamConstraints(decl.TypeParams, decl.TypeParamConstraints, subs, "function", decl.Name, pos); err != nil {
-		return Value{}, err
 	}
 	mangled, sig, err := e.instantiateGenericFunc(decl, subs)
 	if err != nil {
@@ -438,18 +423,18 @@ func (e *Emitter) emitGenericFuncCall(decl *ast.FunctionDeclaration, args []ast.
 	return e.emitCallToFuncSig(mangled, sig, args, pos)
 }
 
-// genericCallReturnType is inferExprType's pure helper for a call to a
+// genericCallReturnType is typeOfExpr's pure helper for a call to a
 // registered generic function: infers every concrete type the same way
 // emitGenericFuncCall would, then substitutes them into decl's return-type
 // annotation — or, for an unannotated return type, best-effort-infers it
 // from the body against the substituted parameter types (the same
-// inferUnannotatedReturnType path instantiateGenericFunc itself uses, which
+// funcBodyReturnType path instantiateGenericFunc itself uses, which
 // is already documented as safe to call without a real function existing
 // yet). Returns ok=false wherever emitGenericFuncCall would itself error
-// (nothing to infer from, or an unsupported concrete type) — inferExprType
+// (nothing to infer from, or an unsupported concrete type) — typeOfExpr
 // has no error return, so callers just fall through to its own final
 // default the same way every other unresolvable case here already does.
-func (e *Emitter) genericCallReturnType(decl *ast.FunctionDeclaration, args []ast.Expression, typeArgs []*ast.TypeAnnotation, call *ast.CallExpression) (Type, bool) {
+func (e *Emitter) genericCallReturnType(decl *ast.FunctionDeclaration, args []ast.Expression, typeArgs []ast.TypeNode, call *ast.CallExpression) (Type, bool) {
 	// Same depth cap the generic-interface/alias instantiation uses
 	// (ADR-00452/ADR-00473): a self-referential instantiation
 	// (`foo<typeof y>()` whose y depends on the call) recurses through
@@ -480,7 +465,7 @@ func (e *Emitter) genericCallReturnType(decl *ast.FunctionDeclaration, args []as
 		for i, p := range decl.Params {
 			paramNames[i] = p.Name
 		}
-		t, ok2 = e.inferUnannotatedReturnType(decl.Body, paramNames, e.bodyParamTypes(decl.Params, sig.ParamTypes))
+		t, ok2 = e.funcBodyReturnType(decl.Body, paramNames, e.bodyParamTypes(decl.Params, sig.ParamTypes))
 	})
 	return t, ok2
 }
@@ -502,7 +487,7 @@ func (e *Emitter) genericFuncSigIn(decl *ast.FunctionDeclaration, subs map[strin
 	for i, p := range decl.Params {
 		paramNames[i] = p.Name
 	}
-	if inferred, ok := e.inferUnannotatedReturnType(decl.Body, paramNames, e.bodyParamTypes(decl.Params, sig.ParamTypes)); ok {
+	if inferred, ok := e.funcBodyReturnType(decl.Body, paramNames, e.bodyParamTypes(decl.Params, sig.ParamTypes)); ok {
 		sig.RetType = inferred
 	} else {
 		sig.RetType = TypeVoid
@@ -536,12 +521,9 @@ func (e *Emitter) erasedGenericFunc(decl *ast.FunctionDeclaration) (string, Func
 func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map[string]Type) (string, FuncSig, error) {
 	suffix, err := mangleTypeArgs(decl.TypeParams, subs)
 	if err != nil {
-		return "", FuncSig{}, fmt.Errorf("%d:%d: generic function '%s': %s", decl.GetPos().Line, decl.GetPos().Col, decl.Name, err)
+		return "", FuncSig{}, internalAt(decl.GetPos(), "generic function %s: %s", decl.Name, err)
 	}
 	mangled := decl.Name + "__" + suffix
-	if sig, ok := e.funcs[mangled]; ok {
-		return mangled, sig, nil
-	}
 
 	var sig FuncSig
 	var emitErr error
@@ -551,8 +533,19 @@ func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map
 	savedScope := e.typeParamScope
 	e.typeParamScope = nil
 	defer func() { e.typeParamScope = savedScope }()
+	cached, found := false, FuncSig{}
 	e.withTypeParamScope(subs, func() {
 		sig = e.genericFuncSigIn(decl, subs)
+		// Type arguments of one layout may still give different
+		// signatures (`f<"a">` and `f<"b">` of a parameter typed `T
+		// extends "a" ? 1 : "u"`): each signature its own instance.
+		if prev, ok := e.funcs[mangled]; ok && funcSigReprKey(prev) != funcSigReprKey(sig) {
+			mangled += fmt.Sprintf("_s%08x", crc32.ChecksumIEEE([]byte(funcSigReprKey(sig))))
+		}
+		if prev, ok := e.funcs[mangled]; ok {
+			cached, found = true, prev
+			return
+		}
 
 		// Register before emitting the body — guards direct/mutual recursion the
 		// same way top-level forward references already rely on signatures
@@ -569,6 +562,9 @@ func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map
 		e.genericInst = savedInst
 		restore()
 	})
+	if cached {
+		return mangled, found, nil
+	}
 	if emitErr != nil {
 		delete(e.funcs, mangled)
 		return "", FuncSig{}, emitErr
@@ -576,92 +572,59 @@ func (e *Emitter) instantiateGenericFunc(decl *ast.FunctionDeclaration, subs map
 	return mangled, sig, nil
 }
 
-// instantiateGenericInterface builds the concrete ObjectType for decl's
-// fields with subs substituted for decl's own type parameters — called from
-// resolveType whenever a `Box<number, string>`-shaped type annotation names
-// a registered generic interface. Not memoized, matching this codebase's
-// existing convention for ArrayOf/MapType/SetType/PromiseOf (types.go) —
-// each call builds a fresh, structurally-equal Type value.
-func (e *Emitter) instantiateGenericInterface(decl *ast.InterfaceDeclaration, subs map[string]Type) Type {
-	// An index signature (`interface Dict<T> { [k: string]: T }`) makes it a
-	// dictionary of the substituted value type.
-	if decl.IndexSig != nil {
-		valTy := e.substituteGenericType(decl.IndexSig, subs)
-		return e.withDictFields(dictViewType(valTy), decl.Fields)
+// funcSigReprKey is the layout of sig's parameters and result.
+func funcSigReprKey(sig FuncSig) string {
+	var b strings.Builder
+	for _, p := range sig.ParamTypes {
+		b.WriteString(reprKey(p))
+		b.WriteByte(',')
 	}
-	fields := make([]Field, len(decl.Fields))
-	for i, f := range decl.Fields {
-		fty := e.substituteGenericType(f.Type, subs)
-		// `name?: T` widens to `T | undefined` (TDD-00187 Stage 2).
-		if f.Optional {
-			fty = optionalFieldType(fty)
-		}
-		fields[i] = Field{Name: f.Name, Ty: fty, Optional: f.Optional}
-	}
-	fields = e.withMethodFields(fields, decl.Methods, func(t *ast.TypeAnnotation) Type { return e.substituteGenericType(t, subs) })
-	return UserObjectType(e.withInterfaceBaseFields(decl, fields))
-}
-
-// withInterfaceBaseFields puts the members of a generic interface's
-// non-generic bases (`interface A<T> extends B`) before its own, as
-// registerInterfaces merges a plain interface's; its own win a name.
-func (e *Emitter) withInterfaceBaseFields(decl *ast.InterfaceDeclaration, own []Field) []Field {
-	bases := append([]string(nil), decl.Extends...)
-	for _, h := range decl.Heritage {
-		if ref, ok := h.(*ast.TypeReference); ok && len(ref.Qualifier) == 0 && len(ref.TypeArgs) == 0 {
-			bases = append(bases, ref.Name)
-		}
-	}
-	if len(bases) == 0 {
-		return own
-	}
-	suffix := ""
-	if i := strings.LastIndex(decl.Name, "__kml_mod"); i > 0 {
-		suffix = decl.Name[i:]
-	}
-	seen := map[string]bool{}
-	for _, f := range own {
-		seen[f.Name] = true
-	}
-	var merged []Field
-	for _, base := range bases {
-		bt, ok := e.interfaces[base]
-		if !ok && suffix != "" {
-			bt, ok = e.interfaces[base+suffix]
-		}
-		if !ok || !bt.IsObject() {
-			continue
-		}
-		for _, f := range bt.UserFields() {
-			if !seen[f.Name] {
-				seen[f.Name] = true
-				merged = append(merged, f)
-			}
-		}
-	}
-	return append(merged, own...)
+	b.WriteString("->")
+	b.WriteString(reprKey(sig.RetType))
+	return b.String()
 }
 
 // withMethodFields appends an interface's method signatures as
 // function-typed members (TDD-00233), as TypeScript types them; a name a
 // property already has, or an overload's later signature, adds nothing.
-func (e *Emitter) withMethodFields(fields []Field, methods []ast.InterfaceMethodSig, resolve func(*ast.TypeAnnotation) Type) []Field {
+func (e *Emitter) withMethodFields(fields []Field, methods []ast.InterfaceMethodSig, resolve func(ast.TypeNode) Type) []Field {
 	seen := map[string]bool{}
 	for _, f := range fields {
 		seen[f.Name] = true
 	}
+	overloaded := overloadedMethods(methods)
 	for _, m := range methods {
 		if seen[m.Name] || m.Type == nil {
 			continue
 		}
 		seen[m.Name] = true
 		fty := resolve(m.Type)
+		if overloaded[m.Name] {
+			// Several signatures: a dynamic function value, called with
+			// its arguments as written, whichever signature they select.
+			fty = TypeAny
+		}
 		if m.Optional {
 			fty = undefinedableElem(fty)
 		}
 		fields = append(fields, Field{Name: m.Name, Ty: fty, Optional: m.Optional})
 	}
 	return fields
+}
+
+// overloadedMethods are the method names methods declares more than once.
+func overloadedMethods(methods []ast.InterfaceMethodSig) map[string]bool {
+	n := map[string]int{}
+	for _, m := range methods {
+		n[m.Name]++
+	}
+	out := map[string]bool{}
+	for k, c := range n {
+		if c > 1 {
+			out[k] = true
+		}
+	}
+	return out
 }
 
 // genericClassMangledFields is the pure (no IR emission, no e.classes/
@@ -672,13 +635,16 @@ func (e *Emitter) withMethodFields(fields []Field, methods []ast.InterfaceMethod
 func (e *Emitter) genericClassMangledFields(decl *ast.ClassDeclaration, subs map[string]Type) (string, []Field, error) {
 	suffix, err := mangleTypeArgs(decl.TypeParams, subs)
 	if err != nil {
-		return "", nil, fmt.Errorf("%d:%d: generic class '%s': %s", decl.GetPos().Line, decl.GetPos().Col, decl.Name, err)
+		return "", nil, internalAt(decl.GetPos(), "generic class %s: %s", decl.Name, err)
 	}
 	mangled := decl.Name + "__" + suffix
 	var ownFields []Field
 	for _, f := range decl.Fields {
+		if f.Static {
+			continue // the class's, not an instance's
+		}
 		if f.Name == ClassTagField || f.Name == ClassVTableField {
-			return "", nil, fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal runtime state", decl.GetPos().Line, decl.GetPos().Col, decl.Name, f.Name)
+			return "", nil, internalAt(decl.GetPos(), "class %s declares the reserved field %s", decl.Name, f.Name)
 		}
 		// An unannotated field (`x = expr`, TDD-00063 Stage 1) has no type to
 		// substitute T into — its type comes from its initializer instead,
@@ -691,7 +657,7 @@ func (e *Emitter) genericClassMangledFields(decl *ast.ClassDeclaration, subs map
 				fty = optionalFieldType(fty)
 			}
 		} else {
-			fty = e.inferExprType(f.Initializer)
+			fty = e.typeOfExpr(f.Initializer)
 		}
 		ownFields = append(ownFields, Field{Name: f.Name, Ty: fty})
 	}
@@ -702,7 +668,7 @@ func (e *Emitter) genericClassMangledFields(decl *ast.ClassDeclaration, subs map
 // real (memoized, body-emitting) path delegates to: it returns the Type a
 // `new ClassName<...>(...)` expression evaluates to, without registering
 // anything into e.classes or emitting any IR — safe to call from
-// inferExprType and emitVarDecl's own pre-inference type lookup, both of
+// typeOfExpr and emitVarDecl's own pre-inference type lookup, both of
 // which must never trigger real emission as a side effect of merely asking
 // "what type is this expression."  The real emission still only ever
 // happens once, from emitNewExpression's own call to
@@ -789,6 +755,8 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 	e.interfaces[mangled] = ty
 
 	info := ClassInfo{
+		TypeSubs:                subs,
+		GenericOf:               decl.Name,
 		Ty:                      ty,
 		InheritedFields:         nil,
 		OwnFields:               ownFields,
@@ -842,10 +810,29 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 		info.CtorSig = sig
 	}
 
+	// Registered while its methods' signatures are built, so an inferred
+	// return that calls a sibling (`return this.#run()`) sees the
+	// sibling's; a second pass settles one that calls a later sibling.
+	e.classes[mangled] = info
+	inferRet := func(m *ast.FunctionDeclaration, sig FuncSig) Type {
+		ret := TypeVoid
+		e.pushScope()
+		e.define("this", Symbol{Ty: ty})
+		if inferred, ok := e.funcBodyReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes)); ok {
+			ret = inferred
+		}
+		e.popScope()
+		// An unannotated async method returns the promise of its result
+		// (methodSig's rule).
+		if m.IsAsync && !ret.IsPromise() {
+			ret = PromiseOf(ret)
+		}
+		return ret
+	}
 	for _, m := range decl.Methods {
 		key := genericMethodKey(m)
 		if _, dup := info.MethodSigs[key]; dup {
-			return "", fmt.Errorf("%d:%d: class '%s' declares more than one method named '%s'", m.GetPos().Line, m.GetPos().Col, decl.Name, m.Name)
+			return "", internalAt(m.GetPos(), "class %s keeps two methods named %s (a later one replaces an earlier before code generation)", decl.Name, m.Name)
 		}
 		// A generator method: a call constructs a generator instance over
 		// its body (as on a non-generic class), with no dispatch slot.
@@ -867,24 +854,28 @@ func (e *Emitter) instantiateGenericClass(decl *ast.ClassDeclaration, subs map[s
 		sig := e.buildGenericParamSig(m.Params, subs)
 		if m.AccessorKind == "set" {
 			sig.RetType = TypeVoid // a setter's result is discarded
-		} else if m.ReturnType != nil && m.ReturnType.IsThis {
+		} else if annotIs(m.ReturnType, "this") {
 			sig.RetType = ty // `this`: the instantiation's own instance
 			sig.RetThis = true
 		} else if m.ReturnType != nil {
 			sig.RetType = e.substituteGenericType(m.ReturnType, subs)
 		} else {
-			sig.RetType = TypeVoid
-			e.pushScope()
-			e.define("this", Symbol{Ty: ty})
-			if inferred, ok := e.inferUnannotatedReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes)); ok {
-				sig.RetType = inferred
-			}
-			e.popScope()
+			sig.RetType = inferRet(m, sig)
 		}
+		sig.IsAsync = m.IsAsync
 		info.MethodImplementor[key] = mangled
 		info.MethodSigs[key] = sig
 		info.Methods[key] = m
 		info.MethodOrder = append(info.MethodOrder, key)
+	}
+	for _, m := range decl.Methods {
+		key := genericMethodKey(m)
+		if m.IsGenerator || m.AccessorKind == "set" || m.ReturnType != nil || m.Body == nil {
+			continue
+		}
+		sig := info.MethodSigs[key]
+		sig.RetType = inferRet(m, sig)
+		info.MethodSigs[key] = sig
 	}
 
 	// Register before emitting bodies — guards a method/constructor that
@@ -951,13 +942,13 @@ func (e *Emitter) emitClassDeclAs(decl *ast.ClassDeclaration, llvmName string, i
 // positionally against decl's parameter list. ok is false when no explicit
 // arguments were given or the arity doesn't cover the parameters (callers
 // then fall back to inference).
-func (e *Emitter) explicitGenericSubs(decl *ast.FunctionDeclaration, typeArgs []*ast.TypeAnnotation) (map[string]Type, bool) {
+func (e *Emitter) explicitGenericSubs(decl *ast.FunctionDeclaration, typeArgs []ast.TypeNode) (map[string]Type, bool) {
 	if len(typeArgs) == 0 || len(typeArgs) < len(decl.TypeParams) {
 		return nil, false
 	}
 	subs := make(map[string]Type, len(decl.TypeParams))
 	for i, tp := range decl.TypeParams {
-		subs[tp] = e.resolveType(typeArgs[i])
+		subs[tp] = e.annotationType(typeArgs[i])
 	}
 	return subs, true
 }
@@ -966,7 +957,7 @@ func (e *Emitter) explicitGenericSubs(decl *ast.FunctionDeclaration, typeArgs []
 // class decl instantiates it with: the explicit ones, then each omitted
 // parameter's default (`class C<T = any>`). ok is false when an omitted
 // parameter has no default.
-func classTypeArgs(decl *ast.ClassDeclaration, explicit []*ast.TypeAnnotation) (args []*ast.TypeAnnotation, ok bool) {
+func classTypeArgs(decl *ast.ClassDeclaration, explicit []ast.TypeNode) (args []ast.TypeNode, ok bool) {
 	args = explicit
 	for i := len(args); i < len(decl.TypeParams); i++ {
 		if i >= len(decl.TypeParamDefaults) || decl.TypeParamDefaults[i] == nil {
@@ -978,7 +969,7 @@ func classTypeArgs(decl *ast.ClassDeclaration, explicit []*ast.TypeAnnotation) (
 }
 
 // genericArgsOK reports whether classTypeArgs completes explicit.
-func genericArgsOK(decl *ast.ClassDeclaration, explicit []*ast.TypeAnnotation) bool {
+func genericArgsOK(decl *ast.ClassDeclaration, explicit []ast.TypeNode) bool {
 	_, ok := classTypeArgs(decl, explicit)
 	return ok
 }
@@ -1004,10 +995,37 @@ func (e *Emitter) genericInstMethodRet(className, name string) (Type, bool) {
 		return Type{}, false
 	}
 	for _, m := range src.decl.Methods {
-		if m.Name != name || m.AccessorKind != "" || m.ReturnType == nil {
+		if m.Name != name || m.AccessorKind != "" {
 			continue
 		}
-		if m.ReturnType.IsThis {
+		if m.ReturnType == nil {
+			// Unannotated: inferred from its body, as the instantiation
+			// will infer it (an async one's promise).
+			self, ok := e.genericInstTypes[className]
+			if !ok || m.Body == nil || m.IsGenerator || e.genericInstInferring[m] {
+				return Type{}, false
+			}
+			if e.genericInstInferring == nil {
+				e.genericInstInferring = map[*ast.FunctionDeclaration]bool{}
+			}
+			e.genericInstInferring[m] = true
+			defer delete(e.genericInstInferring, m)
+			ret := TypeVoid
+			e.withTypeParamScope(src.subs, func() {
+				sig := e.buildGenericParamSig(m.Params, src.subs)
+				e.pushScope()
+				e.define("this", Symbol{Ty: self})
+				if t, ok := e.funcBodyReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes)); ok {
+					ret = t
+				}
+				e.popScope()
+			})
+			if m.IsAsync && !ret.IsPromise() {
+				ret = PromiseOf(ret)
+			}
+			return ret, true
+		}
+		if annotIs(m.ReturnType, "this") {
 			if t, ok := e.genericInstTypes[className]; ok {
 				return t, true // the instantiation's own instance
 			}
@@ -1017,6 +1035,96 @@ func (e *Emitter) genericInstMethodRet(className, name string) (Type, bool) {
 		return t, true
 	}
 	return Type{}, false
+}
+
+// checkerTypeArgs is each of decl's type parameters' argument the checker
+// infers for call, mapped by reprOf; ok is false unless it answers all.
+func (e *Emitter) checkerTypeArgs(decl *ast.FunctionDeclaration, call *ast.CallExpression) (map[string]Type, bool) {
+	c := e.front()
+	if call == nil || c == nil {
+		return nil, false
+	}
+	if orig, ok := e.callOrigins[call]; ok {
+		call = orig
+	}
+	targs := c.CallTypeArgs(call)
+	subs := make(map[string]Type, len(decl.TypeParams))
+	for _, tp := range decl.TypeParams {
+		t := targs[tp]
+		if t == nil {
+			return nil, false
+		}
+		r, ok := reprOf(t)
+		if !ok && e.reprOracle() != nil {
+			// An object type argument (`A = { BLAH: number }`): its layout,
+			// as an annotation of it has.
+			r, ok = e.repr().of(t)
+		}
+		if i := typeParamIndex(decl, tp); i >= 0 && (i < len(decl.TypeParamConstraints) && tupleAnnotation(decl.TypeParamConstraints[i]) || spreadInTuple(decl, tp)) {
+			// A tuple constraint (`T extends [A, B]`) types the argument as
+			// the tuple an annotation declares, as an explicit type
+			// argument does.
+			rc := reprCtx{tuples: true}
+			if e.reprOracle() != nil {
+				rc = e.repr()
+				rc.tuples = true
+			}
+			r, ok = rc.of(t)
+		}
+		if !ok {
+			return nil, false
+		}
+		subs[tp] = r
+	}
+	return subs, true
+}
+
+// typeParamIndex is the position of type parameter name in decl, or -1.
+func typeParamIndex(decl *ast.FunctionDeclaration, name string) int {
+	for i, tp := range decl.TypeParams {
+		if tp == name {
+			return i
+		}
+	}
+	return -1
+}
+
+// tupleAnnotation reports a type written as a tuple (`[A, B]`).
+func tupleAnnotation(n ast.TypeNode) bool {
+	_, ok := n.(*ast.TupleType)
+	return ok
+}
+
+// spreadInTuple reports a type parameter a parameter of decl spreads in a
+// tuple type (`x: [...A]`, `...args: [...A, L]`): what it is inferred to is
+// a tuple, laid out as one.
+func spreadInTuple(decl *ast.FunctionDeclaration, tp string) bool {
+	found := false
+	var walk func(n ast.TypeNode, inTuple bool)
+	walk = func(n ast.TypeNode, inTuple bool) {
+		switch x := n.(type) {
+		case *ast.TupleType:
+			for _, el := range x.Elements {
+				walk(el, true)
+			}
+		case *ast.RestType:
+			if r, ok := x.Type.(*ast.TypeReference); ok && inTuple && r.Name == tp && len(r.TypeArgs) == 0 && len(r.Qualifier) == 0 {
+				found = true
+			}
+		case *ast.NamedTupleMember:
+			if r, ok := x.Type.(*ast.TypeReference); ok && x.Rest && inTuple && r.Name == tp && len(r.TypeArgs) == 0 && len(r.Qualifier) == 0 {
+				found = true
+			}
+		case *ast.ParenthesizedType:
+			walk(x.Type, inTuple)
+		}
+	}
+	for _, p := range decl.Params {
+		if p.Type != nil {
+			walk(p.Type, false)
+		}
+	}
+	return found
 }
 
 // contextTypeArg is the type argument the checker infers for the generic

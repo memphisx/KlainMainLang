@@ -16,11 +16,12 @@ import (
 // weak-reference reclamation observable deterministically; under -mm=manual it
 // is a no-op (nothing is ever collected). Returns void.
 func (e *Emitter) emitGlobalGC(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: gc() takes no arguments", pos.Line, pos.Col)
+	// Its arguments (V8's options) are evaluated; a collection is a full
+	// one whatever they ask.
+	if _, err := e.dropArgsPast(args, 0, pos); err != nil {
+		return Value{}, err
 	}
 	if e.isGCMode() {
-		e.ensureGCInterface()
 		e.emitInstr("call void @kml_gc_collect()")
 		// TDD-00163 Stage 3: Boehm queues finalizers at collection but runs
 		// them lazily from later allocations; invoking them here makes
@@ -40,24 +41,24 @@ func (e *Emitter) emitNewWeakMapValue(init *ast.NewWeakMapExpression) (Value, er
 // weakMapKV is a `new WeakMap()`'s key and value types: its type arguments,
 // else a `WeakMap<K, V>` annotation's on its declaration (annot, may be
 // nil), else object keys and number values.
-func (e *Emitter) weakMapKV(init *ast.NewWeakMapExpression, annot *ast.TypeAnnotation) (Type, Type) {
+func (e *Emitter) weakMapKV(init *ast.NewWeakMapExpression, annot ast.TypeNode) (Type, Type) {
 	keyTy := TypePtr
-	valTy := TypeI64
+	valTy := TypeAny // `new WeakMap()`: WeakMap<WeakKey, any>, as TypeScript infers it
 	if init.KeyType == nil && init.ValType == nil && annot != nil {
-		if at := e.resolveType(annot); at.IsMap() && at.Weak && at.MapKey != nil && at.MapVal != nil {
+		if at := e.annotationType(annot); at.IsMap() && at.Weak && at.MapKey != nil && at.MapVal != nil {
 			return *at.MapKey, *at.MapVal
 		}
 	}
 	if init.KeyType != nil {
-		keyTy = e.resolveType(init.KeyType)
+		keyTy = e.annotationType(init.KeyType)
 	}
 	if init.ValType != nil {
-		valTy = e.resolveType(init.ValType)
+		valTy = e.annotationType(init.ValType)
 	} else if init.KeyType == nil && init.Init != nil {
 		// Inferred from the entries, as TypeScript infers K and V.
 		if k, v, ok := e.literalPairTypes(init.Init); ok {
 			keyTy, valTy = k, v
-		} else if k, v, ok := iterablePairTypes(e.inferExprType(init.Init)); ok {
+		} else if k, v, ok := iterablePairTypes(e.typeOfExpr(init.Init)); ok {
 			keyTy, valTy = k, v
 		}
 	}
@@ -68,10 +69,10 @@ func (e *Emitter) weakMapKV(init *ast.NewWeakMapExpression, annot *ast.TypeAnnot
 // the values iterable's element, else an object.
 func (e *Emitter) weakSetElem(init *ast.NewWeakSetExpression) Type {
 	if init.ElemType != nil {
-		return e.resolveType(init.ElemType)
+		return e.annotationType(init.ElemType)
 	}
 	if init.Init != nil {
-		if t := e.inferExprType(init.Init); (t.IsArray() || t.IsSet()) && t.ElemType != nil && !t.ElemType.IsDynamic() {
+		if t := e.typeOfExpr(init.Init); (t.IsArray() || t.IsSet()) && t.ElemType != nil && !t.ElemType.IsDynamic() {
 			return *t.ElemType
 		}
 	}
@@ -92,7 +93,7 @@ func (e *Emitter) literalPairTypes(x ast.Expression) (Type, Type, bool) {
 		if !ok || len(pair.Elements) != 2 {
 			return Type{}, Type{}, false
 		}
-		pk, pv := e.inferExprType(pair.Elements[0]), e.inferExprType(pair.Elements[1])
+		pk, pv := e.typeOfExpr(pair.Elements[0]), e.typeOfExpr(pair.Elements[1])
 		if i == 0 {
 			k, v = pk, pv
 			continue
@@ -130,6 +131,10 @@ func (e *Emitter) emitWeakSeed(coll Value, init ast.Expression, isMap bool, pos 
 	if nl, ok := init.(*ast.NullLiteral); (ok && !nl.Void) || isUndefinedLiteral(e, init) {
 		return nil
 	}
+	init, err := e.nullishSeedSource(init)
+	if err != nil {
+		return err
+	}
 	e.weakSeedCtr++
 	src := fmt.Sprintf("__kml_weak_src_%d", e.weakSeedCtr)
 	item := fmt.Sprintf("__kml_weak_item_%d", e.weakSeedCtr)
@@ -139,25 +144,28 @@ func (e *Emitter) emitWeakSeed(coll Value, init ast.Expression, isMap bool, pos 
 	target := e.bindValue(coll, pos)
 	var call ast.Expression
 	if isMap {
-		call = ast.NewCallExpression(ast.NewMemberExpression(target, "set", pos), []ast.Expression{
+		call = collMethodCall(target, coll.Ty, "set", []ast.Expression{
 			ast.NewIndexExpression(ast.NewIdentifier(item, pos), ast.NewNumberLiteral("0", pos), pos),
 			ast.NewIndexExpression(ast.NewIdentifier(item, pos), ast.NewNumberLiteral("1", pos), pos),
 		}, pos)
 	} else {
-		call = ast.NewCallExpression(ast.NewMemberExpression(target, "add", pos), []ast.Expression{ast.NewIdentifier(item, pos)}, pos)
+		call = collMethodCall(target, coll.Ty, "add", []ast.Expression{ast.NewIdentifier(item, pos)}, pos)
 	}
-	loop := ast.NewForOfStatement("const", item, ast.NewIdentifier(src, pos), ast.NewBlockStatement([]ast.Statement{ast.NewExpressionStatement(call, pos)}, pos), pos)
+	body := []ast.Statement{ast.NewExpressionStatement(call, pos)}
+	if isMap {
+		body = append([]ast.Statement{entryObjectCheck(item, pos)}, body...)
+	}
+	loop := ast.NewForOfStatement("const", item, ast.NewIdentifier(src, pos), ast.NewBlockStatement(body, pos), pos)
 	return e.emitStmt(loop)
 }
 
 // emitNewWeakMapValueAnnotated builds `new WeakMap<K, V>()`, typed by
 // weakMapKV under its declaration's annotation.
-func (e *Emitter) emitNewWeakMapValueAnnotated(init *ast.NewWeakMapExpression, annot *ast.TypeAnnotation) (Value, error) {
+func (e *Emitter) emitNewWeakMapValueAnnotated(init *ast.NewWeakMapExpression, annot ast.TypeNode) (Value, error) {
 	keyTy, valTy := e.weakMapKV(init, annot)
-	e.ensureWeakHelpers()
 	ptr := e.freshReg()
 	ty := WeakMapType(keyTy, valTy)
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_weak_create(i64 %d)", ptr, e.hostHeaderWord(ty)))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_weak_create(i64 %d)", ptr, e.hostHeaderWord(ty)))
 	v := Value{Ref: ptr, Ty: ty}
 	return v, e.emitWeakSeed(v, init.Init, true, init.GetPos())
 }
@@ -165,10 +173,9 @@ func (e *Emitter) emitNewWeakMapValueAnnotated(init *ast.NewWeakMapExpression, a
 // emitNewWeakSetValue builds `new WeakSet<T>(values?)`.
 func (e *Emitter) emitNewWeakSetValue(init *ast.NewWeakSetExpression) (Value, error) {
 	elemTy := e.weakSetElem(init)
-	e.ensureWeakHelpers()
 	ptr := e.freshReg()
 	ty := WeakSetType(elemTy)
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_weak_create(i64 %d)", ptr, e.hostHeaderWord(ty)))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_weak_create(i64 %d)", ptr, e.hostHeaderWord(ty)))
 	v := Value{Ref: ptr, Ty: ty}
 	return v, e.emitWeakSeed(v, init.Init, false, init.GetPos())
 }
@@ -180,14 +187,21 @@ func (e *Emitter) weakObjectKey(keyExpr ast.Expression, pos ast.Pos) (string, er
 	return e.weakObjectKeyFor(keyExpr, pos, "Invalid value used as weak map key")
 }
 
+// weakLookupKey is a get/has/delete key: one that is no object is null,
+// which no entry has (a lookup of it misses; only a store throws).
+func (e *Emitter) weakLookupKey(keyExpr ast.Expression, pos ast.Pos) (string, error) {
+	return e.weakObjectKeyFor(keyExpr, pos, "")
+}
+
 // weakObjectKeyFor is weakObjectKey with the TypeError a primitive run-time
-// key throws (a WeakSet's differs from a WeakMap's).
+// key throws (a WeakSet's differs from a WeakMap's); "" for a lookup's key,
+// which is null instead.
 func (e *Emitter) weakObjectKeyFor(keyExpr ast.Expression, pos ast.Pos, weakKeyError string) (string, error) {
 	kVal, err := e.emitExpr(keyExpr)
 	if err != nil {
 		return "", err
 	}
-	if as, ok := keyExpr.(*ast.AsExpression); ok && !kVal.Ty.IsDynamic() && as.TypeAnnot != nil && e.resolveType(as.TypeAnnot).IsDynamic() {
+	if as, ok := keyExpr.(*ast.AsExpression); ok && !kVal.Ty.IsDynamic() && as.TypeAnnot != nil && e.annotationType(as.TypeAnnot).IsDynamic() {
 		// `5 as any`: the static type is any, whatever its representation.
 		if kVal, err = e.emitBoxValue(kVal); err != nil {
 			return "", err
@@ -200,6 +214,13 @@ func (e *Emitter) weakObjectKeyFor(keyExpr ast.Expression, pos ast.Pos, weakKeyE
 		// Tags above undefined are the object kinds.
 		ok := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ugt i8 %s, %d", ok, tag, kmlTagUndefined))
+		if weakKeyError == "" {
+			_, payload := e.emitUnboxTagPayload(kVal)
+			p, r := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, payload))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", r, ok, p))
+			return r, nil
+		}
 		goodL, badL := e.freshLabel("weak.key.ok"), e.freshLabel("weak.key.bad")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, goodL, badL))
 		e.emitLabel(badL)
@@ -207,18 +228,24 @@ func (e *Emitter) weakObjectKeyFor(keyExpr ast.Expression, pos ast.Pos, weakKeyE
 		e.emitLabel(goodL)
 		_, payload := e.emitUnboxTagPayload(kVal)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, payload))
 		return r, nil
 	}
-	if kVal.Ty.IR != "ptr" || isStringTy(kVal.Ty) {
-		return "", fmt.Errorf("%d:%d: a WeakMap/WeakSet key must be an object (not a primitive)", pos.Line, pos.Col)
+	if kVal.Ty.IR != irPtr || isStringTy(kVal.Ty) || ownlessPrimitive(kVal.Ty) && !kVal.Ty.IsSymbol() {
+		// A primitive (a symbol is a weak key): a lookup misses, a store
+		// throws.
+		if weakKeyError != "" {
+			e.emitThrowTypeError(weakKeyError)
+			e.emitLabel(e.freshLabel("weak.key.dead"))
+		}
+		return "null", nil
 	}
 	return kVal.Ref, nil
 }
 
 // weakUnknownMethod reports a method the weak collection lacks.
 func weakUnknownMethod(kind, method string, pos ast.Pos) error {
-	return fmt.Errorf("%d:%d: unknown %s method '%s'", pos.Line, pos.Col, kind, method)
+	return internalAt(pos, "%s method '%s' the checker resolved", kind, method)
 }
 
 // emitWeakCall dispatches WeakMap (set/get/has/delete) and WeakSet
@@ -229,7 +256,6 @@ func (e *Emitter) emitWeakCall(ty Type, ptr, method string, args []ast.Expressio
 	if ty.IsSet() {
 		kind = "WeakSet"
 	}
-	e.ensureWeakHelpers()
 
 	c := &weakCall{ty: ty, ptr: ptr, method: method, args: args, pos: pos, kind: kind}
 	if f, ok := weakMethods[method]; ok {
@@ -267,7 +293,13 @@ func (e *Emitter) emitWeakSet(c *weakCall) (Value, error) {
 		return Value{}, weakUnknownMethod(c.kind, c.method, c.pos)
 	}
 	if len(c.args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: WeakMap.set() requires 2 arguments", c.pos.Line, c.pos.Col)
+		// A missing argument is undefined; one past what it reads is
+		// evaluated and ignored.
+		args, err := e.fitArgs(c.args, 2, c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+		c.args = args
 	}
 	valTy := TypeI64
 	if c.ty.MapVal != nil {
@@ -284,8 +316,14 @@ func (e *Emitter) emitWeakSet(c *weakCall) (Value, error) {
 	if vVal.Ty.IsDynamic() && !valTy.IsDynamic() {
 		vVal = e.convert(vVal, valTy)
 	}
+	if valTy.IsDynamic() && !vVal.Ty.IsDynamic() {
+		// An any slot holds the value's box.
+		if vVal, err = e.emitBoxValue(vVal); err != nil {
+			return Value{}, err
+		}
+	}
 	vRef := e.valueToMapVal(vVal, valTy)
-	e.emitInstr(fmt.Sprintf("call void @__kml_weak_set(ptr %s, ptr %s, i64 %s)", c.ptr, kRef, vRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_weak_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", c.ptr, kRef, vRef))
 	return Value{Ref: c.ptr, Ty: c.ty}, nil
 }
 
@@ -295,13 +333,19 @@ func (e *Emitter) emitWeakAdd(c *weakCall) (Value, error) {
 		return Value{}, weakUnknownMethod(c.kind, c.method, c.pos)
 	}
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: WeakSet.add() requires 1 argument", c.pos.Line, c.pos.Col)
+		// A missing argument is undefined; one past what it reads is
+		// evaluated and ignored.
+		args, err := e.fitArgs(c.args, 1, c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+		c.args = args
 	}
 	kRef, err := e.weakObjectKeyFor(c.args[0], c.pos, "Invalid value used in weak set")
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_weak_set(ptr %s, ptr %s, i64 0)", c.ptr, kRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_weak_set("+irPtr+" %s, "+irPtr+" %s, i64 0)", c.ptr, kRef))
 	return Value{Ref: c.ptr, Ty: c.ty}, nil
 }
 
@@ -311,13 +355,19 @@ func (e *Emitter) emitWeakGet(c *weakCall) (Value, error) {
 		return Value{}, weakUnknownMethod(c.kind, c.method, c.pos)
 	}
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: WeakMap.get() requires 1 argument", c.pos.Line, c.pos.Col)
+		// A missing argument is undefined; one past what it reads is
+		// evaluated and ignored.
+		args, err := e.fitArgs(c.args, 1, c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+		c.args = args
 	}
 	valTy := TypeI64
 	if c.ty.MapVal != nil {
 		valTy = *c.ty.MapVal
 	}
-	kRef, err := e.weakObjectKey(c.args[0], c.pos)
+	kRef, err := e.weakLookupKey(c.args[0], c.pos)
 	if err != nil {
 		return Value{}, err
 	}
@@ -327,8 +377,8 @@ func (e *Emitter) emitWeakGet(c *weakCall) (Value, error) {
 	if isNullableScalarMapValue(valTy) {
 		present := e.freshReg()
 		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_weak_has(ptr %s, ptr %s)", present, c.ptr, kRef))
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_weak_get(ptr %s, ptr %s)", raw, c.ptr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_weak_has("+irPtr+" %s, "+irPtr+" %s)", present, c.ptr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_weak_get("+irPtr+" %s, "+irPtr+" %s)", raw, c.ptr, kRef))
 		nty := valTy
 		nty.setNullable(true)
 		nty.setUndefined(true) // a miss is undefined, not null (ADR-00833)
@@ -337,34 +387,46 @@ func (e *Emitter) emitWeakGet(c *weakCall) (Value, error) {
 		return Value{Ref: agg, Ty: nty}, nil
 	}
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_weak_get(ptr %s, ptr %s)", raw, c.ptr, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_weak_get("+irPtr+" %s, "+irPtr+" %s)", raw, c.ptr, kRef))
 	return e.mapValFromI64(raw, valTy), nil
 }
 
 // emitWeakHas is a WeakMap's or WeakSet's has().
 func (e *Emitter) emitWeakHas(c *weakCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: %s.has() requires 1 argument", c.pos.Line, c.pos.Col, c.kind)
+		// A missing argument is undefined; one past what it reads is
+		// evaluated and ignored.
+		args, err := e.fitArgs(c.args, 1, c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+		c.args = args
 	}
-	kRef, err := e.weakObjectKey(c.args[0], c.pos)
+	kRef, err := e.weakLookupKey(c.args[0], c.pos)
 	if err != nil {
 		return Value{}, err
 	}
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_weak_has(ptr %s, ptr %s)", res, c.ptr, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_weak_has("+irPtr+" %s, "+irPtr+" %s)", res, c.ptr, kRef))
 	return Value{Ref: res, Ty: TypeBool}, nil
 }
 
 // emitWeakDelete is a WeakMap's or WeakSet's delete().
 func (e *Emitter) emitWeakDelete(c *weakCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: %s.delete() requires 1 argument", c.pos.Line, c.pos.Col, c.kind)
+		// A missing argument is undefined; one past what it reads is
+		// evaluated and ignored.
+		args, err := e.fitArgs(c.args, 1, c.pos)
+		if err != nil {
+			return Value{}, err
+		}
+		c.args = args
 	}
-	kRef, err := e.weakObjectKey(c.args[0], c.pos)
+	kRef, err := e.weakLookupKey(c.args[0], c.pos)
 	if err != nil {
 		return Value{}, err
 	}
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_weak_delete(ptr %s, ptr %s)", res, c.ptr, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_weak_delete("+irPtr+" %s, "+irPtr+" %s)", res, c.ptr, kRef))
 	return Value{Ref: res, Ty: TypeBool}, nil
 }

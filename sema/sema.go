@@ -169,6 +169,12 @@ func (w *walker) rewrite(n ast.Node) ast.Node {
 			}
 		}
 	}
+	if ne, ok := n.(*ast.NewExpression); ok && ne.Callee == nil && hasSpreadArg(ne.Args) {
+		// A spread's argument count is known at run time: the construction
+		// is the dynamic one (codegen's emitDynNew), not a lowering fixed
+		// to its written arguments.
+		return n
+	}
 	if ne, ok := n.(*ast.NewExpression); ok && ne.Callee == nil {
 		// A worker's path literal names the module file the resolver
 		// resolved it to (relative to the file it is written in), the path
@@ -229,6 +235,14 @@ func (w *walker) link(n ast.Node) {
 	case *ast.NewExpression:
 		if m, ok := to(n.ClassName); ok && !n.Qualified {
 			n.ClassName = m
+		} else if n.Qualified && len(n.QualifierPath) > 0 {
+			if m, ok := to(n.QualifierPath[0]); ok {
+				// `new WebAssembly.Module(b)`: off the global's object.
+				n.QualifierPath = append([]string{m}, n.QualifierPath[1:]...)
+				if len(n.QualifierPath) == 1 {
+					n.Qualifier = m
+				}
+			}
 		}
 	case *ast.ClassDeclaration:
 		if m, ok := to(n.BaseClass); ok && !n.BaseQualified {
@@ -361,4 +375,14 @@ func BuiltinNew(ne *ast.NewExpression) (ast.Expression, bool, error) {
 func IsBuiltinConstructor(name string) bool {
 	_, ok := builtinConstructors[name]
 	return ok
+}
+
+// hasSpreadArg reports a spread (`...xs`) among args.
+func hasSpreadArg(args []ast.Expression) bool {
+	for _, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			return true
+		}
+	}
+	return false
 }

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -40,7 +41,12 @@ func (c CSource) CachedObject(cacheDir string, compileFlags []string) (string, e
 		return "", ErrCObjectUncacheable
 	}
 	h := sha256.New()
-	for _, part := range [][]string{{c.Name, c.Content, runtime.GOOS, win32CompatHeader, clangIdentity()}, c.CFlags, compileFlags, HostClangArgs()} {
+	// A debug object names its kept source (below).
+	srcMode := "scratch-src"
+	if slices.Contains(compileFlags, "-g") {
+		srcMode = "kept-src"
+	}
+	for _, part := range [][]string{{c.Name, c.Content, runtime.GOOS, win32CompatHeader, clangIdentity(), srcMode}, c.CFlags, compileFlags, HostClangArgs()} {
 		for _, s := range part {
 			fmt.Fprintf(h, "%d:%s", len(s), s)
 		}
@@ -64,10 +70,19 @@ func (c CSource) CachedObject(cacheDir string, compileFlags []string) (string, e
 	// whichever finishes — the results are interchangeable.
 	stem := filepath.Join(cacheDir, fmt.Sprintf("%s-%s.%d", c.Name, tag, os.Getpid()))
 	src, tmp := stem+".c", stem+".o.tmp"
-	if err := os.WriteFile(src, []byte(c.Content), 0o644); err != nil {
-		return "", err
+	if slices.Contains(compileFlags, "-g") {
+		// A debug object names its source: it stays beside the object
+		// (same content whichever process writes it).
+		src = strings.TrimSuffix(obj, ".o") + ".c"
+		if err := writeFileAtomic(src, stem+".c.tmp", []byte(c.Content)); err != nil {
+			return "", err
+		}
+	} else {
+		if err := os.WriteFile(src, []byte(c.Content), 0o644); err != nil {
+			return "", err
+		}
+		defer os.Remove(src)
 	}
-	defer os.Remove(src)
 	args := append([]string{}, compileFlags...)
 	args = append(args, "-c", src, "-o", tmp)
 	for _, f := range c.CFlags {
@@ -138,4 +153,17 @@ func (e *Emitter) ExportsRuntime() bool { return e.exportsRuntime() }
 
 func (e *Emitter) exportsRuntime() bool {
 	return e.UsesFFIDl() || e.opts.DynamicImport == "lazy"
+}
+
+// writeFileAtomic writes data to path through the scratch file tmp, so a
+// reader never sees it half written.
+func writeFileAtomic(path, tmp string, data []byte) error {
+	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }

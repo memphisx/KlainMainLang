@@ -46,6 +46,7 @@ ByteLengthQueuingStrategy	QueuingStrategy	highWaterMark size
 CloseEvent	Event	code reason wasClean
 CloseEventInit	EventInit	code reason wasClean
 CompressionStream	GenericTransformStream	constructor readable writable
+ConcatArray		join length slice
 Console		Console assert clear count countReset debug dir dirxml error group groupCollapsed groupEnd info log profile profileEnd table time timeEnd timeLog timeStamp trace warn
 Control	EventEmitter	ref unref
 CountQueuingStrategy	QueuingStrategy	highWaterMark size
@@ -83,6 +84,8 @@ EventSource	EventTarget	CLOSED CONNECTING OPEN addEventListener close onerror on
 EventSourceEventMap		error message open
 EventSourceInit		withCredentials
 EventTarget		addEventListener dispatchEvent listener options removeEventListener type
+File	Blob	constructor lastModified name webkitRelativePath
+FilePropertyBag	BlobPropertyBag	lastModified
 FinalizationRegistry		register unregister
 FinalizationRegistryConstructor		prototype
 Float32Array		BYTES_PER_ELEMENT at buffer byteLength byteOffset copyWithin entries every fill filter find findIndex findLast findLastIndex forEach includes indexOf join keys lastIndexOf length map reduce reduceRight reverse set slice some sort subarray toLocaleString toReversed toSorted toString valueOf values with
@@ -90,12 +93,14 @@ Float32ArrayConstructor		BYTES_PER_ELEMENT from of prototype
 Float64Array		BYTES_PER_ELEMENT at buffer byteLength byteOffset copyWithin entries every fill filter find findIndex findLast findLastIndex forEach includes indexOf join keys lastIndexOf length map reduce reduceRight reverse set slice some sort subarray toLocaleString toReversed toSorted toString valueOf values with
 Float64ArrayConstructor		BYTES_PER_ELEMENT from of prototype
 FormData		append delete entries forEach get getAll has keys set values
+FormDataIterator	IteratorObject	
 Function		apply arguments bind call caller length name prototype toString
 FunctionConstructor		prototype
 Generator	IteratorObject	next return throw
 GenericTransformStream		readable writable
 HRTime		bigint
 Headers		append delete entries forEach get getSetCookie has keys set values
+HeadersIterator	IteratorObject	
 HkdfParams	Algorithm	hash info salt
 HmacImportParams	Algorithm	hash length
 HmacKeyGenParams	Algorithm	hash length
@@ -120,15 +125,31 @@ MapConstructor		groupBy prototype
 MapIterator	IteratorObject	
 Math		E LN10 LN2 LOG10E LOG2E PI SQRT1_2 SQRT2 abs acos acosh asin asinh atan atan2 atanh cbrt ceil clz32 cos cosh exp expm1 f16round floor fround hypot imul log log10 log1p log2 max min pow random round sign sin sinh sqrt tan tanh trunc
 MemoryUsage		arrayBuffers external heapTotal heapUsed rss
+MemoryUsageFn		rss
 MessageEvent	Event	data initMessageEvent lastEventId origin ports source
 MessageEventInit	EventInit	data lastEventId origin ports source
+Navigator	NavigatorAutomationInformation,NavigatorBadge,NavigatorConcurrentHardware,NavigatorContentUtils,NavigatorCookies,NavigatorGPU,NavigatorID,NavigatorLanguage,NavigatorLocks,NavigatorOnLine,NavigatorPlugins,NavigatorStorage	canShare clipboard credentials doNotTrack geolocation getGamepads hardwareConcurrency language languages locks login maxTouchPoints mediaCapabilities mediaDevices mediaSession permissions platform requestMIDIAccess requestMediaKeySystemAccess sendBeacon serviceWorker share userActivation userAgent vibrate wakeLock
+NavigatorAutomationInformation		webdriver
+NavigatorBadge		clearAppBadge setAppBadge
+NavigatorConcurrentHardware		hardwareConcurrency
+NavigatorContentUtils		registerProtocolHandler
+NavigatorCookies		cookieEnabled
+NavigatorGPU		gpu
+NavigatorID		appCodeName appName appVersion platform product productSub userAgent vendor vendorSub
+NavigatorLanguage		language languages
+NavigatorLocks		locks
+NavigatorOnLine		onLine
+NavigatorPlugins		javaEnabled mimeTypes pdfViewerEnabled plugins
+NavigatorStorage		storage
 NodeJS.Control	EventEmitter	ref unref
 NodeJS.EmitWarningOptions		code ctor detail type
 NodeJS.ErrnoException	Error	code errno path syscall
 NodeJS.HRTime		bigint
 NodeJS.Immediate	Disposable,RefCounted	_onImmediate hasRef ref unref
 NodeJS.MemoryUsage		arrayBuffers external heapTotal heapUsed rss
+NodeJS.MemoryUsageFn		rss
 NodeJS.Process	EventEmitter	abort addListener allowedNodeEnvironmentFlags arch argv argv0 availableMemory callback channel chdir config connected constrainedMemory cpuUsage cwd debugPort disconnect dlopen emit emitWarning env event execArgv execPath execve exit exitCode features finalization getActiveResourcesInfo getBuiltinModule getegid geteuid getgid getgroups getuid hasUncaughtExceptionCaptureCallback hrtime kill listeners loadEnvFile mainModule memoryUsage message nextTick noDeprecation on once options permission pid platform ppid prependListener prependOnceListener promise ref release report resourceUsage send sendHandle setSourceMapsEnabled setUncaughtExceptionCaptureCallback setegid seteuid setgid setgroups setuid sourceMapsEnabled stderr stdin stdout threadCpuUsage throwDeprecation title traceDeprecation traceProcessWarnings type umask unref uptime value version versions
+NodeJS.ProcessFeatures		cached_builtins debug inspector ipv6 require_module tls tls_alpn tls_ocsp tls_sni typescript uv
 NodeJS.Timeout	Disposable,RefCounted,Timer	_onTimeout close hasRef ref refresh unref
 Number		toExponential toFixed toLocaleString toPrecision toString valueOf
 NumberConstructor		EPSILON MAX_SAFE_INTEGER MAX_VALUE MIN_SAFE_INTEGER MIN_VALUE NEGATIVE_INFINITY NaN POSITIVE_INFINITY isFinite isInteger isNaN isSafeInteger parseFloat parseInt prototype
@@ -145,6 +166,7 @@ PerformanceObserver		constructor disconnect observe options takeRecords
 PerformanceObserverEntryList		getEntries getEntriesByName getEntriesByType
 PerformanceObserverInit		buffered entryTypes type
 Process	EventEmitter	abort addListener allowedNodeEnvironmentFlags arch argv argv0 availableMemory callback channel chdir config connected constrainedMemory cpuUsage cwd debugPort disconnect dlopen emit emitWarning env event execArgv execPath execve exit exitCode features finalization getActiveResourcesInfo getBuiltinModule getegid geteuid getgid getgroups getuid hasUncaughtExceptionCaptureCallback hrtime kill listeners loadEnvFile mainModule memoryUsage message nextTick noDeprecation on once options permission pid platform ppid prependListener prependOnceListener promise ref release report resourceUsage send sendHandle setSourceMapsEnabled setUncaughtExceptionCaptureCallback setegid seteuid setgid setgroups setuid sourceMapsEnabled stderr stdin stdout threadCpuUsage throwDeprecation title traceDeprecation traceProcessWarnings type umask unref uptime value version versions
+ProcessFeatures		cached_builtins debug inspector ipv6 require_module tls tls_alpn tls_ocsp tls_sni typescript uv
 Promise		catch finally then
 PromiseConstructor		all allSettled any prototype race reject resolve try withResolvers
 PromiseFulfilledResult		status value
@@ -165,6 +187,7 @@ ReadableStreamAsyncIterator	AsyncIteratorObject
 ReadableStreamDefaultController		close desiredSize enqueue error
 ReadableStreamDefaultReader	ReadableStreamGenericReader	read releaseLock
 ReadableStreamGenericReader		cancel closed
+ReadableStreamGetReaderOptions		mode
 ReadableStreamIteratorOptions		preventCancel
 ReadableStreamReadDoneResult		done value
 ReadableStreamReadValueResult		done value
@@ -208,9 +231,11 @@ TextDecodeOptions		stream
 TextDecoder	TextDecoderCommon	constructor decode encoding fatal ignoreBOM input options
 TextDecoderCommon		encoding fatal ignoreBOM
 TextDecoderOptions		fatal ignoreBOM
+TextDecoderStream	GenericTransformStream,TextDecoderCommon	encoding fatal ignoreBOM readable writable
 TextEncoder	TextEncoderCommon	encode encodeInto encoding
 TextEncoderCommon		encoding
 TextEncoderEncodeIntoResult		read written
+TextEncoderStream	GenericTransformStream,TextEncoderCommon	encoding readable writable
 ThisType		
 Timeout	Disposable,RefCounted,Timer	_onTimeout close hasRef ref refresh unref
 Timer	RefCounted	hasRef refresh
@@ -231,6 +256,7 @@ URLPatternInit		baseURL hash hostname password pathname port protocol search use
 URLPatternOptions		ignoreCase
 URLPatternResult		hash hostname inputs password pathname port protocol search username
 URLSearchParams		append constructor delete entries fn forEach get getAll has init keys set size sort thisArg toString values
+URLSearchParamsIterator	IteratorObject	
 Uint16Array		BYTES_PER_ELEMENT at buffer byteLength byteOffset copyWithin entries every fill filter find findIndex findLast findLastIndex forEach includes indexOf join keys lastIndexOf length map reduce reduceRight reverse set slice some sort subarray toLocaleString toReversed toSorted toString valueOf values with
 Uint16ArrayConstructor		BYTES_PER_ELEMENT from of prototype
 Uint32Array		BYTES_PER_ELEMENT at buffer byteLength byteOffset copyWithin entries every fill filter find findIndex findLast findLastIndex forEach includes indexOf join keys lastIndexOf length map reduce reduceRight reverse set slice some sort subarray toLocaleString toReversed toSorted toString valueOf values with

@@ -60,6 +60,15 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 					e.classShownNames = map[string]string{}
 				}
 				e.classShownNames[name] = cd.Name
+				if cd.Name == "$ClassExpr" {
+					// An anonymous class expression a lowering declared in a
+					// block of its own (lowerRuntimeClassKeys): no name.
+					e.classShownNames[name] = ""
+					if e.anonClasses == nil {
+						e.anonClasses = map[*ast.ClassDeclaration]bool{}
+					}
+					e.anonClasses[cd] = true
+				}
 				renames[cd.Name] = name
 				mine = append(mine, cd)
 				hoisted = append(hoisted, cd)
@@ -68,6 +77,10 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 				at := *cd
 				at.Name = name
 				e.markClassReeval(&at, cd)
+				if e.blockHoisted == nil {
+					e.blockHoisted = map[*ast.ClassDeclaration]bool{}
+				}
+				e.blockHoisted[cd] = true
 				atOf[cd] = &at
 				if e.classRecordsPending[cd] {
 					// The declaration's place makes this evaluation's record.
@@ -79,7 +92,7 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 				kept = append(kept, &at)
 			}
 			// A parameter's cell (emit_classclosure.go) opens the block.
-			blk.Body = append(blk.Body[:len(blk.Body)-origLen:len(blk.Body)-origLen], kept...)
+			blk.Body = append(blk.Body[:len(blk.Body)-origLen:len(blk.Body)-origLen], e.spliceCells(blk, kept)...)
 			for old, name := range renames {
 				resolver.RenameInBlock(blk, old, name)
 				for _, cd := range mine {
@@ -136,6 +149,10 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 				e.warmFront(v)
 				boundTo[ce] = v
 				if anonymousClass(ce) {
+					if e.anonClasses == nil {
+						e.anonClasses = map[*ast.ClassDeclaration]bool{}
+					}
+					e.anonClasses[ce.Decl] = true
 					ce.Decl.Name = v.Name
 				}
 			}
@@ -160,6 +177,10 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 			own := n.Decl.Name
 			if anonymousClass(n) {
 				own = ""
+				if e.anonClasses == nil {
+					e.anonClasses = map[*ast.ClassDeclaration]bool{}
+				}
+				e.anonClasses[n.Decl] = true
 			}
 			name := fmt.Sprintf("%s__kml_cx%d", own, e.classExprSeq)
 			if own != "" {

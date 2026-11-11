@@ -30,21 +30,24 @@ static i64 any_hash(i64 key) {
     if (u >= NUM0) {
         unsigned long long bits = u - NUM0;
         double d;
-        memcpy(&d, &bits, 8);
+        memcpy(&d, &bits, 8); /* scratch */
         return kml_mix(d == 0.0 ? (i64)NUM0 : key);
     }
     if (u >= 65536) { /* pointer-kind boxes; immediates are below */
         i64 kind = key & 7;
         void *p = (void *)(uintptr_t)(key & -8);
         if (kind == 0) return kml_mix(__kml_map_str_hash((const char *)(uintptr_t)key));
-        if (kind == 2) return kml_mix((i64)(uintptr_t) * (void **)p);
-        if (kind == 7) return kml_mix((i64)(uintptr_t)__kml_fn_identity_dyn(p));
+        if (kind == 2) return kml_mix(kml_id_hash(*(void **)p));
+        if (kind == 7) return kml_mix(kml_id_hash(__kml_fn_identity_dyn(p)));
         if (kind == 1) {
             i64 oh = *(i64 *)p;
             if (oh == KML_BIGINT_MAGIC) return kml_mix(__kml_map_str_hash(__kml_boxed_bigint_str(p)));
             if ((oh & KML_HDR_MAGIC_HOST_MASK) == KML_HDR_MAGIC_HOST)
-                return kml_mix((i64)(uintptr_t) * (void **)((char *)p + 8));
+                return kml_mix(kml_id_hash(*(void **)((char *)p + 8)));
         }
+        /* Any other pointer box (an object, a dynamic one): its identity,
+         * the kind bits kept so two kinds of one cell stay apart. */
+        return kml_mix(kml_id_hash(p) | kind);
     }
     return kml_mix(key);
 }

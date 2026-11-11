@@ -1,14 +1,17 @@
 package llvm
 
+import "fmt"
+
 import _ "embed"
 
 // runtime_dynobj.go — the D1 dynamic object runtime (TDD-00155 Stage 1): a
 // per-instance property bag behind box tag 10 (kmlTagDynObject). Layout:
 //
-//	DynObj header (48 bytes):
-//	  offset 0:  i64 flags   — low 32 bits magic 0x444C4D4B ("KMLD"); bit 32
-//	                           non-extensible, bit 33 Proxy, bit 34 NULLPROTO
-//	                           (prototype explicitly null — set_proto, TDD-00229)
+//	DynObj header (56 bytes):
+//	  offset 0:  i64 header  — kmlBagHdr (the header magic, type id 1) and
+//	                           the bag flags (objheader.go, kml_heap.h
+//	                           KML_BAG_*: non-extensible, Proxy, null
+//	                           prototype — set_proto, TDD-00229 — and more)
 //	  offset 8:  ptr proto   — prototype pointer (live since Stage 3: get and
 //	                           the `in` operator walk it; set/delete/keys stay
 //	                           own-table; set_proto keeps chains acyclic)
@@ -17,6 +20,7 @@ import _ "embed"
 //	  offset 32: i64 cap
 //	  offset 40: i64 classtag — instanceof TagID when this bag was widened from a
 //	                           class instance (ADR-00997), 0 otherwise
+//	  offset 48: i64 shape   — reserved for hidden classes (TDD-00220), 0
 //
 //	Property entry (32 bytes):
 //	  offset 0:  ptr key     — owned NUL-terminated UTF-8 copy
@@ -29,8 +33,8 @@ import _ "embed"
 //	                           ACCESSOR(8); =7 on plain assignment. Enforced
 //	                           since Stage 5: get/set invoke accessors (with
 //	                           the original receiver as `this`), set honors
-//	                           WRITABLE + the header's non-extensible bit
-//	                           (1<<32), delete honors CONFIGURABLE, and
+//	                           WRITABLE + the header's non-extensible flag,
+//	                           delete honors CONFIGURABLE, and
 //	                           Object.keys/for...in enumerate ENUMERABLE only
 //
 // The entry array is insertion-ordered — that IS JS string-key enumeration
@@ -51,86 +55,34 @@ var dynObjSource string
 // DynObjSource is the dynamic-object runtime's C source.
 func DynObjSource() string { return dynObjSource }
 
-// UsesDynObj reports whether the program links the dynamic-object runtime.
-func (e *Emitter) UsesDynObj() bool { return e.usedDynObj }
-
-func (e *Emitter) ensureDynObj() {
-	if e.usedDynObj {
-		return
+// emitDynObjKeyList is a bag's own string keys in ES order as a {ptr, i64}
+// aggregate register: every one (getOwnPropertyNames), or the enumerable
+// ones (Object.keys, for...in, JSON) when enumerable. C hands back the
+// array and writes its length through an out-parameter, since an aggregate
+// return differs between the C and IR ABIs on Windows.
+func (e *Emitter) emitDynObjKeyList(bag string, enumerable bool) string {
+	fn := "__kml_dynobj_keys_c"
+	if enumerable {
+		fn = "__kml_dynobj_keys_enum_c"
 	}
-	e.usedDynObj = true
-	e.ensureNanBox()
-	e.ensureAnyOps() // dynobj.c calls __kml_any_tobool for Proxy trap results
-	e.ensureCalloc()
-	e.ensureMalloc()
-	e.ensureFree()
-	e.ensureRealloc()
-	e.ensureMemcpy()
-	e.ensureMemmove()
-	e.ensureStrcmp()
-	e.ensureStrlen()
-	e.emitGlobal(`declare ptr @__kml_dynobj_new()
-declare i64 @__kml_classref_call(ptr, i64, ptr)
-declare void @__kml_dynobj_set_classtag(ptr, i64)
-declare i64 @__kml_dynobj_classtag(ptr)
-declare i64 @__kml_dynobj_find(ptr, ptr)
-declare void @__kml_dynobj_set(ptr, ptr, i64)
-declare i64 @__kml_dynobj_get(ptr, ptr)
-declare i64 @__kml_prim_proto_get(i64, ptr)
-declare i1 @__kml_dynobj_ordinary(ptr)
-declare i64 @__kml_dynobj_attrs_at(ptr, i64)
-declare i64 @__kml_dynobj_rawtag_at(ptr, i64)
-declare i64 @__kml_dynobj_rawpay_at(ptr, i64)
-declare i64 @__kml_dynobj_get_at(ptr, i64)
-declare i64 @__kml_dynobj_setv(ptr, ptr, i64)
-declare zeroext i1 @__kml_dynobj_has(ptr, ptr)
-declare zeroext i1 @__kml_dynobj_has_chain(ptr, ptr)
-declare ptr @__kml_dynobj_get_proto(ptr)
-declare zeroext i1 @__kml_instanceof_object(i64)
-declare ptr @__kml_object_prototype()
-declare zeroext i1 @__kml_dynobj_set_proto(ptr, ptr)
-declare zeroext i1 @__kml_dynobj_delete(ptr, ptr)
-declare i64 @__kml_dynobj_count(ptr)
-declare ptr @__kml_dynobj_key_at(ptr, i64)
-declare i64 @__kml_dynobj_is_index(ptr)
-declare void @__kml_dynobj_es_reorder(ptr, i64)
-declare zeroext i1 @__kml_key_is_symbol(ptr)
-declare ptr @__kml_dynobj_keys_c(ptr, ptr)
-declare ptr @__kml_dynobj_keys_enum_c(ptr, ptr)
-declare void @__kml_dynobj_merge(ptr, ptr)
-declare void @__kml_dynobj_defacc(ptr, ptr, ptr, ptr)
-declare void @__kml_dynobj_patch(ptr, i64, i64, i64, i64)
-declare void @__kml_dynobj_prevent(ptr, i64)
-declare zeroext i1 @__kml_dynobj_flags_test(ptr, i64)`)
-	// The key lists return {ptr,i64}: an aggregate return differs between the
-	// C and IR ABIs on Windows, so C hands back the array and its length
-	// through an out-parameter and these wrappers build the pair.
-	e.emitGlobal(`
-; getOwnPropertyNames: every own string key, in ES order.
-define { ptr, i64 } @__kml_dynobj_keys(ptr %o) {
-entry:
-  %np = alloca i64, align 8
-  %arr = call ptr @__kml_dynobj_keys_c(ptr %o, ptr %np)
-  %n = load i64, ptr %np, align 8
-  %r0 = insertvalue { ptr, i64 } undef, ptr %arr, 0
-  %r1 = insertvalue { ptr, i64 } %r0, i64 %n, 1
-  ret { ptr, i64 } %r1
+	return e.emitKeyListCall(fn, bag)
 }
 
-; Object.keys / for...in / JSON: own enumerable string keys, in ES order.
-define { ptr, i64 } @__kml_dynobj_keys_enum(ptr %o) {
-entry:
-  %np = alloca i64, align 8
-  %arr = call ptr @__kml_dynobj_keys_enum_c(ptr %o, ptr %np)
-  %n = load i64, ptr %np, align 8
-  %r0 = insertvalue { ptr, i64 } undef, ptr %arr, 0
-  %r1 = insertvalue { ptr, i64 } %r0, i64 %n, 1
-  ret { ptr, i64 } %r1
-}`)
+// emitKeyListCall calls key-list function fn (`char **fn(void *, i64 *n)`)
+// on bag and builds its {ptr, i64} aggregate.
+func (e *Emitter) emitKeyListCall(fn, bag string) string {
+	np := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", np))
+	arr, n, r0, r := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @%s("+irPtr+" %s, "+irPtr+" %s)", arr, fn, bag, np))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, np))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { "+irPtr+", i64 } undef, "+irPtr+" %s, 0", r0, arr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue { "+irPtr+", i64 } %s, i64 %s, 1", r, r0, n))
+	return r
 }
 
 // wellKnownMemberKeys are the well-known symbols a `[Symbol.x]` member name
 // compiles to "@@x" for (parser_classes.go), on classes and object literals
 // alike; a bag keys them the same way (emitSymbolPropertyKey).
 // wellKnownMemberKeys is mirrored by __kml_key_is_symbol (dynobjsrc/dynobj.c).
-var wellKnownMemberKeys = []string{"iterator", "asyncIterator", "toPrimitive", "toStringTag", "dispose", "asyncDispose"}
+var wellKnownMemberKeys = []string{"iterator", "asyncIterator", "toPrimitive", "toStringTag", "dispose", "asyncDispose", "species", "hasInstance"}

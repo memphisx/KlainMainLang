@@ -25,8 +25,8 @@ const anon = Symbol()
 console.log(anon.description) // (blank line)
 console.log(anon.toString())  // Symbol()
 
-// --- console.log and template literals both format the same way ---
-console.log(`token: ${named}`) // token: Symbol(hello)
+// --- a template literal needs String(): a symbol never converts implicitly ---
+console.log(`token: ${String(named)}`) // token: Symbol(hello)
 
 // --- only ===/!== are meaningful; anything else (arithmetic, <, +, ...) is a
 // clean compile error, same as real JS throwing TypeError on a Symbol

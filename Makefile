@@ -251,9 +251,17 @@ mode-lanes: build
 	export HTTPBIN_URL=http://127.0.0.1:$$(cat $$port_file); \
 	$(GO) run ./tools/modelanes -bin ./$(BINARY) -j $(EXAMPLES_JOBS) -timeout $(EXAMPLE_TIMEOUT)s
 
-## shadow-report: compile the corpus comparing every old codegen decider with the new front end, and rank the disagreements into .shadow-out/SHADOW-REPORT.md (TDD-00230 P0.2)
+## shadow-report: compile the corpus (examples, tools, apps, Test262's language tests, and the Node and WPT conformance programs when fetched) comparing every old codegen decider with the new front end, rank the disagreements and codegen rejections into .shadow-out/SHADOW-REPORT.md, and fail on a unit clean in the previous run that has a finding now (TDD-00230 P0.2)
+comma := ,
+empty :=
+space := $(empty) $(empty)
+SHADOW_MANIFESTS = $(if $(wildcard .node-tests/test),.shadow-out/node.manifest) $(if $(wildcard .wpt-tests),.shadow-out/wpt.manifest)
 shadow-report: build
-	$(GO) run ./tools/shadow -bin ./$(BINARY)
+	mkdir -p .shadow-out
+	rm -rf .shadow-out/node.manifest .shadow-out/wpt.manifest .shadow-out/conf-node .shadow-out/conf-wpt
+	$(if $(wildcard .node-tests/test),$(GO) run ./tools/conformance -suite=node -compat=both -workdir .shadow-out/conf-node -dump-manifest .shadow-out/node.manifest)
+	$(if $(wildcard .wpt-tests),$(GO) run ./tools/conformance -suite=wpt -compat=both -workdir .shadow-out/conf-wpt -dump-manifest .shadow-out/wpt.manifest)
+	$(GO) run ./tools/shadow -bin ./$(BINARY) $(if $(strip $(SHADOW_MANIFESTS)),-manifest $(subst $(space),$(comma),$(strip $(SHADOW_MANIFESTS))))
 
 ## status: regenerate every docs/status page (README included) from the docs/status/data/*.json source of truth — edit the JSON, never the pages; all coverage numbers derive from the row tables. Also regenerates the docs/adr/ and docs/tdd/ index README tables (and the status TDD backlog) from the ADR/TDD record files — edit those files, never the index tables.
 status:

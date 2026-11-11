@@ -50,7 +50,7 @@ func TestVarDeclWithType(t *testing.T) {
 	if decl.Kind != "let" || decl.Name != "s" {
 		t.Errorf("got kind=%q name=%q", decl.Kind, decl.Name)
 	}
-	if decl.TypeAnnot == nil || decl.TypeAnnot.Name != "string" {
+	if decl.TypeAnnot == nil || !ast.IsKeywordNode(decl.TypeAnnot, "string") {
 		t.Errorf("type annotation: %v", decl.TypeAnnot)
 	}
 }

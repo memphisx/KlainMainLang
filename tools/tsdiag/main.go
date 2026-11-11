@@ -8,6 +8,7 @@
 package main
 
 import (
+	"KlainMainLang/ast"
 	"bufio"
 	"flag"
 	"fmt"
@@ -35,6 +36,13 @@ var (
 	reOption    = regexp.MustCompile(`^\s*//\s*@\w+\s*:`)
 	reModule    = regexp.MustCompile(`(?m)^\s*(import|export)\b`)
 )
+
+// noImplicitAnyCode reports a TS70xx implicit-any code, reported only
+// under noImplicitAny (not the unreachable-code, unused-label, fallthrough
+// and missing-return ones, 7027 to 7030).
+func noImplicitAnyCode(code int) bool {
+	return code >= 7000 && code < 7100 && (code < 7027 || code > 7030)
+}
 
 // strictnessFree are the codes whose rules do not depend on strictNullChecks:
 // a non-strict case is compared on them only.
@@ -325,6 +333,10 @@ func main() {
 				parseFailed++
 				return
 			}
+			// The members keyed by a const (`[k]() {}`) are named as the
+			// compiler's resolver names them; one it cannot name stays as
+			// parsed.
+			_ = ast.NameComputedMembers(prog)
 			ran++
 			if !strict {
 				nonStrict++
@@ -360,15 +372,29 @@ func main() {
 				Locals: dirs["nounusedlocals"] == "true", Parameters: dirs["nounusedparameters"] == "true",
 				Script: !resolver.IsModule(prog),
 			})...)
+			implicitAny := strictFamily("noimplicitany")
 			for _, d := range ds {
 				if silenced[d.Pos.Line] || !strict && !strictnessFree[d.Code()] {
 					continue
+				}
+				if d.Code() == 2564 && !strictFamily("strictpropertyinitialization") {
+					continue
+				}
+				if !implicitAny && noImplicitAnyCode(d.Code()) {
+					continue // the checker always reports these; the case turns them off
+				}
+				if d.Code() == 2695 && dirs["allowunreachablecode"] == "true" {
+					continue // tsc reports an unused comma operand only without allowUnreachableCode
 				}
 				line := 0
 				if d.Pos.Line < len(lineMap) {
 					line = lineMap[d.Pos.Line]
 				}
-				k := key{line, d.Code()}
+				code := d.Code()
+				if code == 2551 {
+					code = 2339 // as the baseline's are folded
+				}
+				k := key{line, code}
 				if k.code == 2552 && suggestions >= 10 && want[key{line, 2304}] && !want[k] {
 					// The baselines' compiler gave at most 10 suggestions a
 					// file (tsc 7 has no cap): past them, TS2304.

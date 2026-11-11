@@ -363,7 +363,7 @@ class Baz extends Bar<string> {}
 	if err == nil {
 		t.Fatal("expected a compile error for generic extends on a non-EventEmitter base")
 	}
-	if !strings.Contains(err.Error(), "type arguments") {
+	if !strings.Contains(err.Error(), "is not generic") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }

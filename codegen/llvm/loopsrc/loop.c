@@ -36,9 +36,7 @@ i64 __kml_monotonic_ns(void);
 void klainsync_lock_os_thread(void);
 #endif
 
-_Bool __kml_curl_loop_active(void);
 int __kml_curl_inflight(void);
-void __kml_httpc_fire_ready(void);
 
 /* Tasks and microtasks (task.c, microtask.c, or the emitter's stubs). */
 #ifdef _WIN32
@@ -48,8 +46,9 @@ void __kml_httpc_fire_ready(void);
 int __kml_win_sig_deliver(void);
 #endif
 void __kml_drain_microtasks(void);
-void __kml_task_sched_step(void);
-_Bool __kml_task_resumable(void);
+/* The task scheduler's (task.c); a program without tasks has none to run. */
+__attribute__((weak)) void __kml_task_sched_step(void) {}
+__attribute__((weak)) _Bool __kml_task_resumable(void) { return 0; }
 _Bool __kml_microtasks_pending(void);
 
 /* The thread's libuv loop, its wait's timer and its wake-up. */
@@ -377,6 +376,11 @@ static void wait_events(i64 wait) {
  * over. */
 static _Bool runnable_now(void) { return __kml_microtasks_pending() | __kml_task_resumable(); }
 
+/* Whether the loop has work left (process 'beforeExit' runs it again). */
+_Bool __kml_event_loop_alive(void) {
+    return uv_loop_alive(&uvs_get()->loop) != 0 || runnable_now();
+}
+
 /* How deep this thread is in __kml_event_loop_run: a callback the loop runs
  * sees 1. */
 static _Thread_local int loop_depth;
@@ -418,11 +422,8 @@ void __kml_event_loop_run(void) {
             break;
         }
 
-        _Bool has_curl = __kml_curl_loop_active();
         _Bool immediate = runnable_now() | (__kml_loop_nowait != 0);
         wait_events(immediate ? 0 : -1);
-        if (has_curl)
-            __kml_httpc_fire_ready();
     }
     __kml_frame_top = frames_below;
     loop_depth--;
@@ -547,7 +548,13 @@ static char *kml_process_title;
 
 void *__kml_native_process_title(void) {
     if (kml_process_title != NULL) return __kml_str_from_cstr(kml_process_title);
-    return *(void **)__argv_ptr;
+    /* argv[0] is the C library's: copied into a string the program owns. */
+    return __kml_str_from_cstr(*(const char **)__argv_ptr);
+}
+
+/* process.versions.uv: the libuv the program links. */
+void *__kml_native_process_uv_version(void) {
+    return __kml_str_from_cstr(uv_version_string());
 }
 
 void __kml_native_process_set_title(void *title) {

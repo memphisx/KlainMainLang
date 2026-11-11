@@ -31,10 +31,12 @@
       framework renders correctly on the device, and the shipped <code>klaintop</code> example runs
       on Sailfish once it reads process data portably (see "Write once, run everywhere" below).
       <strong>aarch64 first</strong>: it's what current devices ship, so that's where the initial
-      support and on-device verification went. Sailfish also runs on 32-bit ARM
-      (<code>armv7hl</code>, the earlier hardware) and x86/x86_64 (the Jolla Tablet and the community
-      Intel ports); the <code>--target</code> machinery is generic, so those are a natural next step
-      rather than a boundary — open an issue if you're building for one and it'll get prioritized.
+      support and on-device verification went. Sailfish also runs on x86_64 (the community Intel
+      ports); the <code>--target</code> machinery is generic, so that is a natural next step rather
+      than a boundary — open an issue if you're building for it and it'll get prioritized. Its 32-bit
+      builds (<code>armv7hl</code> for the earlier ARM hardware, and 32-bit x86) wait for 32-bit
+      layouts: every value is laid out for 64-bit words today, so <code>--target</code> refuses a
+      32-bit triple.
     </p>
 
     <h2>1 · Where you build matters</h2>

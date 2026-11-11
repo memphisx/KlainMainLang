@@ -13,6 +13,8 @@
  * +0, avail_in +8 (u32), then next_out/avail_out. zlib's uLong is 32-bit on
  * Windows (LLP64), which moves them from 24/32 to 16/24 and shrinks the
  * struct from 112 to 88 bytes (mingw-w64 zlib.h, measured). */
+#include <stdio.h>
+#include <string.h>
 #include <stdlib.h>
 
 typedef long long i64;
@@ -43,6 +45,10 @@ extern int inflateEnd(ptr);
 extern void __kml_rs_error(ptr rs, i64 err);
 extern i64 __kml_rs_enqueue(ptr rs, i64 v0, i64 v1);
 extern i64 __kml_rs_chunk_hdr(ptr data, i64 n);
+extern long long __kml_any_view_bytes(long long word, char **data);
+extern i64 __kml_obj_get(void *o, const char *k);
+extern const char *__kml_obj_name(void *o);
+extern double __kml_any_number_conv(long long w);
 /* The constructor-name constant "Error" (one symbol per name, compared by
  * address): { i64 len, bytes }; a string value points at the bytes. Weak:
  * the program's linkonce copy, when it has one, is the same symbol. */
@@ -84,6 +90,30 @@ ptr __kml_zs_init(i64 mode, i64 wbits) {
     return c;
 }
 
+/* The zlib windowBits of a CompressionFormat (fmt, a string's characters),
+ * 0 for a value that is none: deflate's for compression, inflate's (15+32
+ * header auto-detection, raw unchanged) for decompression. */
+i64 __kml_zs_wbits(const char *fmt, i64 decompress) {
+    if (!fmt) return 0;
+    if (strcmp(fmt, "gzip") == 0) return decompress ? 47 : 31;
+    if (strcmp(fmt, "deflate") == 0) return decompress ? 47 : 15;
+    if (strcmp(fmt, "deflate-raw") == 0) return -15;
+    return 0;
+}
+
+/* Node's message for a format that is not a CompressionFormat. */
+char *__kml_zs_format_error(const char *fmt, i64 decompress) {
+    const char *ctor = decompress ? "DecompressionStream" : "CompressionStream";
+    const char *f = fmt ? fmt : "";
+    size_t n = strlen(ctor) + strlen(f) + 96;
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, n + 9);
+    int len = snprintf(base + 8, n + 1,
+                       "Failed to construct '%s': 1st argument '%s' is not a valid enum value of type CompressionFormat.",
+                       ctor, f);
+    *(long long *)base = len;
+    return base + 8;
+}
+
 /* Run deflate/inflate over the current input until it is consumed,
  * enqueuing every produced output block. */
 void __kml_zs_pump(ptr cp, int flush) {
@@ -110,7 +140,7 @@ void __kml_zs_pump(ptr cp, int flush) {
             eo->kind = KML_ERROR_TYPE_FLAG;
             eo->msg = zmsg.s;
             eo->name = kml_ctorname_Error + 8;
-            __kml_rs_error(c->readable, (i64)(size_t)eo);
+            __kml_rs_error(c->readable, (i64)(size_t)eo | 1); /* the Error, boxed */
             return;
         }
         /* Keep looping while input remains or the output block filled up
@@ -119,12 +149,68 @@ void __kml_zs_pump(ptr cp, int flush) {
     }
 }
 
+/* The bytes of an ArrayBuffer or SharedArrayBuffer held in `any` (an
+ * object word at its host header, the {byteLength, data} header after it),
+ * their count returned; -1 for any other value. */
+static i64 ab_bytes(i64 w, char **data) {
+    unsigned long long v = (unsigned long long)w;
+    if ((v & 7) != 1 || v < 65536 || v >= (1ULL << 49)) return -1;
+    i64 *cell = (i64 *)(v & ~7ULL);
+    i64 h = cell[0] & ~KML_HDR_STATE_MASK;
+    if (h != KML_AB_HDR && h != KML_SAB_HDR) return -1;
+    *data = (char *)cell[2];
+    return cell[1];
+}
+
+/* The bytes a DataView held in `any` covers: its buffer's, from its
+ * byteOffset for its byteLength; -1 for any other value. */
+static const struct { i64 len; char s[8]; } k_buffer = {KML_STR_ASCII_HDR(6), "buffer"};
+static const struct { i64 len; char s[16]; } k_offset = {KML_STR_ASCII_HDR(10), "byteOffset"};
+static const struct { i64 len; char s[16]; } k_length = {KML_STR_ASCII_HDR(10), "byteLength"};
+static i64 dv_bytes(i64 w, char **data) {
+    unsigned long long v = (unsigned long long)w;
+    if ((v & 7) != 1 || v < 65536 || v >= (1ULL << 49)) return -1;
+    void *o = (void *)(v & ~7ULL);
+    i64 h = *(i64 *)o;
+    if ((h & (0x7FFFLL << 32)) != (0x4B4DLL << 32) || (h & ((1LL << 49) | (1LL << 48)))) return -1;
+    const char *name = __kml_obj_name(o);
+    if (!name || strcmp(name, "DataView") != 0) return -1;
+    char *base = NULL;
+    if (ab_bytes(__kml_obj_get(o, k_buffer.s), &base) < 0) return -1;
+    i64 off = (i64)__kml_any_number_conv(__kml_obj_get(o, k_offset.s));
+    i64 len = (i64)__kml_any_number_conv(__kml_obj_get(o, k_length.s));
+    *data = base + off;
+    return len;
+}
+
+/* The UTF-8 bytes of a string held in `any`; -1 for any other value. */
+static i64 str_bytes(i64 w, char **data) {
+    unsigned long long v = (unsigned long long)w;
+    if ((v & 7) != 0 || v < 65536 || v >= (1ULL << 49)) return -1;
+    *data = (char *)v;
+    return KML_STR_LEN(*data);
+}
+
 /* The TransformStream-compatible transform / flush closures. */
 ptr __kml_zs_transform(ptr cp, i64 v0, i64 v1) {
     zctx *c = (zctx *)cp;
     if (c->finished) return NULL;
-    F(c->strm, Z_NEXT_IN, ptr) = *(ptr *)(size_t)v0; /* the chunk's data */
-    F(c->strm, Z_AVAIL_IN, u32) = (u32)v1;
+    /* A Uint8Array chunk is its header and length; one that came through
+     * an untyped stream or writer is a boxed `any` and a zero length (an
+     * empty typed chunk is zero bytes either way). */
+    char *data = NULL;
+    i64 n = v1;
+    if (n > 0) {
+        data = *(char **)(size_t)v0;
+    } else {
+        n = __kml_any_view_bytes(v0, &data);
+        if (n < 0) n = ab_bytes(v0, &data);
+        if (n < 0) n = dv_bytes(v0, &data);
+        if (n < 0) n = str_bytes(v0, &data);
+        if (n < 0) n = 0;
+    }
+    F(c->strm, Z_NEXT_IN, ptr) = data;
+    F(c->strm, Z_AVAIL_IN, u32) = (u32)n;
     __kml_zs_pump(c, 0);
     return NULL;
 }

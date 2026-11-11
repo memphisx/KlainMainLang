@@ -39,39 +39,4 @@ var weakSource string
 
 // WeakSource is the weak-collection runtime's C source; under -mm=gc it is
 // compiled with the disappearing-link backing (KML_GC).
-func (e *Emitter) WeakSource() string {
-	src := weakSource
-	if e.usedWeakNatives {
-		// The WeakRef natives (lib/node/kml_weakref.ts) and their kept
-		// objects, which the microtask runtime releases.
-		src = "#define KML_WEAK_NATIVES 1\n" + src
-	}
-	return src
-}
-
-// UsesWeakHelpers reports whether the program links the weak runtime.
-func (e *Emitter) UsesWeakHelpers() bool { return e.usedWeakHelpers }
-
-// ensureWeakHelpers declares the weak-collection runtime (weak.c) once.
-func (e *Emitter) ensureWeakHelpers() {
-	if e.usedWeakHelpers {
-		return
-	}
-	e.usedWeakHelpers = true
-	e.emitGlobal(`declare ptr @__kml_weak_create(i64)
-declare void @__kml_weak_set(ptr, ptr, i64)
-declare i64 @__kml_weak_get(ptr, ptr)
-declare zeroext i1 @__kml_weak_has(ptr, ptr)
-declare zeroext i1 @__kml_weak_delete(ptr, ptr)
-declare ptr @__kml_weakref_create(ptr)
-declare ptr @__kml_weakref_deref(ptr)`)
-}
-
-// ensureWeakNatives links the weak runtime for a WeakRef held in TypeScript
-// (lib/node/kml_weakref.ts): its kept objects are released at the microtask
-// checkpoint, so the microtask runtime comes along.
-func (e *Emitter) ensureWeakNatives() {
-	e.usedWeakNatives = true
-	e.ensureWeakHelpers()
-	e.ensureMicrotasks()
-}
+func (e *Emitter) WeakSource() string { return weakSource }

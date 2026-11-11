@@ -26,6 +26,7 @@ import (
 
 	"KlainMainLang/ast"
 	"KlainMainLang/diag"
+	"KlainMainLang/freevars"
 	"KlainMainLang/lib"
 )
 
@@ -98,6 +99,9 @@ type lookupTable struct {
 	// (prependNamespaceObjects); nsObjectSuffix makes that name the file's.
 	nsObjects      map[string]string
 	nsObjectSuffix string
+	// nsShared names the one namespace object of a namespace import's
+	// module, which every importer shares.
+	nsShared       map[string]string
 	builtinMembers map[string]builtinMemberRef
 	// parseTimeAliases maps an aliased import local name to the canonical
 	// builtin constructor it stands for (`U` → `URL` for
@@ -109,15 +113,21 @@ type lookupTable struct {
 	typeOnly map[string]bool
 	// nodeTypes is every local bound to a Node export implemented only as
 	// a type (Program.NodeTypeImports): a value use is an error.
-	nodeTypes   map[string]string
+	nodeTypes map[string]string
+	// compatJS reads a member a namespace import's module does not export
+	// as JavaScript does: off the module namespace object, undefined.
+	compatJS    bool
 	reservedErr *error                        // first-write-wins: set by the first rejected reference found anywhere in the walk, checked by the caller once renameFile returns
 	filePath    string                        // this file's own absolute path (TDD-00055 Stage 1) — backs import.meta.url's rewrite, see rewriteExpr's *ast.ImportMetaUrl case
 	resolved    map[*ast.StringLiteral]string // module-specifier literals resolved to canonical files, shared by every file
 	// thisParams are the file's `this: T` parameter annotations
 	// (Program.ThisParams), rewritten with their functions' parameters.
-	thisParams map[ast.Node]*ast.TypeAnnotation
+	thisParams map[ast.Node]ast.TypeNode
 	// workerLits is the file's `new Worker('…')` paths (Program.WorkerPaths).
 	workerLits map[string]bool
+	// assertions are the file's type assertions (Program.Assertions): a
+	// cast's type is renamed with the expression it types.
+	assertions map[ast.Expression]ast.Assertion
 }
 
 func stringSet(xs []string) map[string]bool {
@@ -135,6 +145,7 @@ func stringSet(xs []string) map[string]bool {
 // is shadowed.
 func renameFile(prog *ast.Program, lu lookupTable) {
 	lu.thisParams = prog.ThisParams
+	lu.assertions = prog.Assertions
 	for _, stmt := range prog.Body {
 		rewriteTopLevelStmt(stmt, lu)
 	}
@@ -212,6 +223,26 @@ func rewriteTopLevelStmt(stmt ast.Statement, lu lookupTable) {
 // type/body. Used both for a top-level function (called with a brand new
 // scope) and a class method/constructor (called with the class's own scope,
 // already carrying its TypeParams — see rewriteClassDecl).
+// rewriteTypeParams binds a generic arrow's or function expression's type
+// parameters and renames the names their constraints and defaults
+// reference (`<K extends keyof typeof src>`), as rewriteFunctionLike does a
+// declaration's.
+func rewriteTypeParams(names []string, constraints, defaults []ast.TypeNode, sc *scope, lu lookupTable) {
+	for _, tp := range names {
+		sc.bind(tp)
+	}
+	for _, c := range constraints {
+		if c != nil {
+			rewriteType(c, sc, lu)
+		}
+	}
+	for _, d := range defaults {
+		if d != nil {
+			rewriteType(d, sc, lu)
+		}
+	}
+}
+
 func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) {
 	sc.push()
 	sc.funcDepth++
@@ -253,6 +284,7 @@ func rewriteFunctionLike(f *ast.FunctionDeclaration, sc *scope, lu lookupTable) 
 		rewriteType(f.ReturnType, sc, lu)
 	}
 	if f.Body != nil {
+		bindFunctionVars(f.Body.Body, sc)
 		rewriteBlock(f.Body, sc, lu)
 	}
 	sc.pop()
@@ -415,6 +447,18 @@ func rewriteClassDeclIn(c *ast.ClassDeclaration, sc *scope, lu lookupTable) {
 	// `extends ns.Base` through a namespace import: that module's Base.
 	if m, ok := lu.ns[c.BaseQualifier][c.BaseClass]; ok && c.BaseQualifier != "" && !sc.bound(c.BaseQualifier) {
 		c.BaseClass = m
+	} else if c.BaseQualifier != "" {
+		// `extends v.Base` through a value binding (a default import, a
+		// require()): the qualifier's root is a top-level name too.
+		parts := strings.SplitN(c.BaseQualifier, ".", 2)
+		if m, ok := lu.names[parts[0]]; ok && !sc.bound(parts[0]) {
+			parts[0] = m
+			c.BaseQualifier = strings.Join(parts, ".")
+		} else if m, ok := lu.names[c.BaseClass]; ok && !sc.bound(parts[0]) && !sc.bound(c.BaseClass) {
+			// A namespace's class (`extends M.C1`): a bare top-level
+			// declaration (ADR-00408), as `new M.C1()` resolves.
+			c.BaseClass = m
+		}
 	} else if c.BaseClass != "" && !sc.bound(c.BaseClass) {
 		if m, ok := lu.names[c.BaseClass]; ok {
 			c.BaseClass = m
@@ -441,12 +485,19 @@ func rewriteClassDeclIn(c *ast.ClassDeclaration, sc *scope, lu lookupTable) {
 			c.AutoAccessors[ai].Decorators[di] = rewriteExpr(c.AutoAccessors[ai].Decorators[di], sc, lu)
 		}
 	}
+	for _, ix := range c.IndexSignatures {
+		rewriteType(ix.KeyType, sc, lu)
+		rewriteType(ix.Type, sc, lu)
+	}
 	for i := range c.Fields {
 		rewriteType(c.Fields[i].Type, sc, lu)
 		// A field's `= expr` initializer references top-level names that must be
 		// rewritten to their mangled form, exactly like any other expression —
 		// omitting this left `static x = f()` (and property decorators) unable
 		// to resolve `f` at emit time.
+		if c.Fields[i].KeyExpr != nil {
+			c.Fields[i].KeyExpr = rewriteExpr(c.Fields[i].KeyExpr, sc, lu)
+		}
 		if c.Fields[i].Key != nil {
 			if k, ok := rewriteExpr(c.Fields[i].Key, sc, lu).(*ast.Identifier); ok {
 				c.Fields[i].Key = k
@@ -465,6 +516,9 @@ func rewriteClassDeclIn(c *ast.ClassDeclaration, sc *scope, lu lookupTable) {
 	for _, m := range c.Methods {
 		for di := range m.Decorators {
 			m.Decorators[di] = rewriteExpr(m.Decorators[di], sc, lu)
+		}
+		if m.KeyExpr != nil {
+			m.KeyExpr = rewriteExpr(m.KeyExpr, sc, lu)
 		}
 		if m.Key != nil {
 			if k, ok := rewriteExpr(m.Key, sc, lu).(*ast.Identifier); ok {
@@ -539,8 +593,44 @@ func renameTopLevelVarRedeclaration(v *ast.VarDeclaration, sc *scope, lu lookupT
 	return true
 }
 
+// renameTopLevelVarHead is renameTopLevelVarRedeclaration for a `for (var
+// x in/of …)` head: at file top level, x is the file's own top-level x.
+func renameTopLevelVarHead(kind string, name *string, sc *scope, lu lookupTable) bool {
+	v := ast.VarDeclaration{Kind: kind, Name: *name}
+	if !renameTopLevelVarRedeclaration(&v, sc, lu) {
+		return false
+	}
+	*name = v.Name
+	return true
+}
+
+// bindFunctionVars binds, in a function's own frame, every `var` its body
+// declares at any depth (a loop head's too): it is the function's binding
+// throughout, shadowing a same-named outer one before and after its loop.
+func bindFunctionVars(body []ast.Statement, sc *scope) {
+	names := map[string]bool{}
+	freevars.CollectVarNames(body, names)
+	for n := range names {
+		sc.bind(n)
+	}
+}
+
 func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	switch s := stmt.(type) {
+	case *ast.TypeAliasDeclaration:
+		// A local alias: its name shadows a top-level one, and its body
+		// names the file's types as a top-level one's does.
+		sc.bind(s.Name)
+		sc.push()
+		for _, tp := range s.TypeParams {
+			sc.bind(tp)
+		}
+		for _, tp := range s.TypeParameters {
+			rewriteTypeNode(tp.Constraint, sc, lu)
+			rewriteTypeNode(tp.Default, sc, lu)
+		}
+		rewriteType(s.Type, sc, lu)
+		sc.pop()
 	case *ast.ClassDeclaration:
 		sc.bind(s.Name)
 		rewriteClassDeclIn(s, sc, lu)
@@ -573,6 +663,9 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			}
 		}
 	case *ast.ArrayDestructuring:
+		if s.TypeAnnot != nil {
+			rewriteType(s.TypeAnnot, sc, lu)
+		}
 		if s.Init != nil {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
@@ -588,6 +681,9 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 			sc.bind(s.Elems[i].Name)
 		}
 	case *ast.ObjectDestructuring:
+		if s.TypeAnnot != nil {
+			rewriteType(s.TypeAnnot, sc, lu)
+		}
 		if s.Init != nil {
 			s.Init = rewriteExpr(s.Init, sc, lu)
 		}
@@ -625,7 +721,7 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	case *ast.ForOfStatement:
 		s.Iterable = rewriteExpr(s.Iterable, sc, lu)
 		sc.push()
-		if s.VarName != "" {
+		if s.VarName != "" && !renameTopLevelVarHead(s.Kind, &s.VarName, sc, lu) {
 			sc.bind(s.VarName)
 		}
 		rewriteArrayPatternDefaults(s.ArrayPattern, sc, lu)
@@ -637,7 +733,9 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 	case *ast.ForInStatement:
 		s.Object = rewriteExpr(s.Object, sc, lu)
 		sc.push()
-		sc.bind(s.VarName)
+		if !renameTopLevelVarHead(s.Kind, &s.VarName, sc, lu) {
+			sc.bind(s.VarName)
+		}
 		rewriteBlock(s.Body, sc, lu)
 		sc.pop()
 	case *ast.WhileStatement:
@@ -689,6 +787,9 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 // expression — a bare `rewriteExpr(x, sc, lu)` with the result discarded
 // silently drops any such replacement.
 func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression {
+	if a, ok := lu.assertions[expr]; ok && a.Cast != nil {
+		rewriteType(a.Cast, sc, lu) // `<T>e`, `e as T`: T read where e is
+	}
 	switch e := expr.(type) {
 	case *ast.Identifier:
 		if !sc.bound(e.Name) {
@@ -712,7 +813,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			}
 			// A namespace import read as a value: its module namespace object.
 			if obj, ok := lu.nsObject(e.Name); ok {
-				e.Name = obj
+				e.Shown, e.Name = e.Name, obj
 				break
 			}
 			// TDD-00049 Stage 2: a named import of one built-in module
@@ -812,7 +913,12 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				if mangled, ok := members[e.Property]; ok {
 					return ast.NewIdentifier(mangled, e.GetPos())
 				}
-				// A member the module does not export (TS2339).
+				// A member the module does not export: undefined in
+				// JavaScript, TS2339 in TypeScript.
+				if lu.compatJS {
+					e.Object = rewriteExpr(e.Object, sc, lu) // the module namespace object
+					return e
+				}
 				if src, ok := lu.nsSource[id.Name]; ok && lu.reservedErr != nil && *lu.reservedErr == nil {
 					p := e.GetPos()
 					*lu.reservedErr = diag.New(diag.PropertyNotExist, diag.Span{Pos: diag.Pos{Line: p.Line, Col: p.Col}}, e.Property, fmt.Sprintf("typeof import(%q)", src))
@@ -839,6 +945,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 	case *ast.ArrowFunction:
 		sc.push()
 		sc.funcDepth++
+		rewriteTypeParams(e.TypeParams, e.TypeParamConstraints, e.TypeParamDefaults, sc, lu)
 		bindParams(e.Params, sc, lu)
 		rewritePatternDefaults(e.Params, sc, lu)
 		for i := range e.Params {
@@ -856,6 +963,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			e.Body = rewriteExpr(e.Body, sc, lu)
 		}
 		if e.Block != nil {
+			bindFunctionVars(e.Block.Body, sc)
 			rewriteBlock(e.Block, sc, lu)
 		}
 		sc.funcDepth--
@@ -885,6 +993,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		// here shields those references, letting codegen's self-capture
 		// (CapturedVar{IsSelf}) reclaim them (see emit_func.go).
 		sc.bind(e.Name)
+		rewriteTypeParams(e.TypeParams, e.TypeParamConstraints, e.TypeParamDefaults, sc, lu)
 		bindParams(e.Params, sc, lu)
 		rewritePatternDefaults(e.Params, sc, lu)
 		if ta := lu.thisParams[e]; ta != nil {
@@ -900,6 +1009,9 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		}
 		if e.RetType != nil {
 			rewriteType(e.RetType, sc, lu)
+		}
+		if e.Body != nil {
+			bindFunctionVars(e.Body.Body, sc)
 		}
 		rewriteBlock(e.Body, sc, lu)
 		sc.funcDepth--
@@ -932,7 +1044,10 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		} else if e.Qualified && e.Qualifier == "globalThis" && !sc.bound("globalThis") {
 			// `new globalThis.Map()`: the global, never a module's own Map.
 		} else if m, ok := lu.ns[e.Qualifier][e.ClassName]; ok && e.Qualifier != "" && !sc.bound(e.Qualifier) {
+			// The member is a top-level class (a companion's, or the
+			// global a module re-exports: `new buffer.Blob()`).
 			e.ClassName = m
+			e.Qualified, e.Qualifier, e.QualifierPath = false, "", nil
 		} else if _, value := lu.names[e.Qualifier]; e.Qualified && e.Qualifier != "" && (value || sc.bound(e.Qualifier)) {
 			// `new obj.K()` with obj a value: obj is the binding. K is a
 			// property name, which codegen resolves through the value.
@@ -978,7 +1093,21 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 		// into a plain string literal — codegen never sees this node.
 		// The module's file URL as Node renders it: percent-encoded, and on
 		// Windows `file:///C:/dir/f.ts` (see fileURLFromPath).
-		return ast.NewStringLiteral(fileURLFromPath(lu.filePath, runtime.GOOS == "windows"), e.GetPos())
+		url := ast.NewStringLiteral(fileURLFromPath(lu.filePath, runtime.GOOS == "windows"), e.GetPos())
+		file := ast.NewStringLiteral(lu.filePath, e.GetPos())
+		dir := ast.NewStringLiteral(filepath.Dir(lu.filePath), e.GetPos())
+		switch e.Field {
+		case "url":
+			return url
+		case "filename":
+			return file
+		case "dirname":
+			return dir
+		}
+		// The object itself: its members, as Node's ESM loader fills them.
+		return ast.NewObjectLiteral([]ast.ObjectProperty{
+			{Key: "dirname", Value: dir}, {Key: "filename", Value: file}, {Key: "url", Value: url},
+		}, e.GetPos())
 	}
 	// Every other expression kind (literals, ThisExpression, SuperExpression,
 	// NewXMLHttpRequestExpression — zero-arg)
@@ -995,82 +1124,19 @@ func (lu lookupTable) nsObject(local string) (string, bool) {
 	obj, ok := lu.nsObjects[local]
 	if !ok {
 		obj = local + lu.nsObjectSuffix
+		if shared, ok := lu.nsShared[local]; ok {
+			obj = shared
+		}
 		lu.nsObjects[local] = obj
 	}
 	return obj, true
 }
 
-func rewriteType(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
+func rewriteType(ta ast.TypeNode, sc *scope, lu lookupTable) {
 	if ta == nil {
 		return
 	}
-	// `typeof ns.x` through a namespace import: that module's x.
-	if ta.IsTypeof && len(ta.TypeofPath) > 0 && !sc.bound(ta.TypeofName) {
-		if m, ok := lu.ns[ta.TypeofName][ta.TypeofPath[0]]; ok {
-			ta.TypeofName, ta.TypeofPath = m, ta.TypeofPath[1:]
-		}
-	}
-	// `typeof ns`: the module namespace object's type.
-	if ta.IsTypeof && len(ta.TypeofPath) == 0 && !sc.bound(ta.TypeofName) {
-		if obj, ok := lu.nsObject(ta.TypeofName); ok {
-			ta.TypeofName = obj
-		}
-	}
-	if ta.IsTypeof && !sc.bound(ta.TypeofName) {
-		if m, ok := lu.names[ta.TypeofName]; ok {
-			ta.TypeofName = m
-		}
-	}
-	rewriteTypeName(ta, sc, lu)
-	rewriteTypeNode(ta.TypeNode(), sc, lu)
-	for i := range ta.Fields {
-		rewriteType(ta.Fields[i].Type, sc, lu)
-	}
-	rewriteType(ta.IndexSig, sc, lu)
-	if ta.ElemType != nil {
-		rewriteType(ta.ElemType, sc, lu)
-	}
-	if ta.KeyType != nil {
-		rewriteType(ta.KeyType, sc, lu)
-	}
-	for _, t := range ta.TypeArgs {
-		rewriteType(t, sc, lu)
-	}
-	for i := range ta.FuncParams {
-		rewriteType(&ta.FuncParams[i], sc, lu)
-	}
-	if ta.FuncRetType != nil {
-		rewriteType(ta.FuncRetType, sc, lu)
-	}
-	// Composite-member descent. These were all previously skipped: a named type
-	// used *only* inside a union (`A | B`), tuple (`[A, B]`), or intersection
-	// (`A & B`, TDD-00078) never had its member names rewritten, so a mangled
-	// declaration (any cross-file/renamed interface) went unresolved at that
-	// member position. rewriteTypeName is idempotent (a mangled name is never
-	// itself a lookup key), so the union/intersection head-copy sharing
-	// members[0]'s Name/Fields with this node is harmless — each name resolves
-	// once and a redundant second pass is a no-op.
-	for _, m := range ta.UnionMembers {
-		rewriteType(m, sc, lu)
-	}
-	for _, t := range ta.TupleElems {
-		rewriteType(t, sc, lu)
-	}
-	for _, m := range ta.IntersectionMembers {
-		rewriteType(m, sc, lu)
-	}
-	// keyof / indexed access / mapped types (TDD-00079). A named type referenced
-	// only inside one of these would otherwise stay unrenamed while its
-	// declaration got mangled — the same gap the composite members above had.
-	rewriteType(ta.KeyofOperand, sc, lu)
-	rewriteType(ta.IndexObject, sc, lu)
-	rewriteType(ta.IndexKey, sc, lu)
-	rewriteType(ta.MappedSource, sc, lu)
-	rewriteType(ta.MappedValue, sc, lu)
-	rewriteType(ta.CheckType, sc, lu)
-	rewriteType(ta.ExtendsType, sc, lu)
-	rewriteType(ta.TrueType, sc, lu)
-	rewriteType(ta.FalseType, sc, lu)
+	rewriteTypeNode(ta, sc, lu)
 }
 
 // rewriteTypeNode renames the declarations a type-syntax tree references
@@ -1112,6 +1178,12 @@ func rewriteTypeMember(m ast.TypeMember, sc *scope, lu lookupTable) {
 	sc.pop()
 }
 
+// ownName reports a name the file's own declarations rename.
+func (lu lookupTable) ownName(name string) bool {
+	_, ok := lu.names[name]
+	return ok
+}
+
 func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
 	if n == nil {
 		return
@@ -1126,7 +1198,15 @@ func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
 					t.Name, t.Qualifier = m, nil
 				}
 			}
-			if len(t.Qualifier) == 0 && !sc.bound(t.Name) {
+			if len(t.Qualifier) == 0 && !sc.bound(t.Name) && !predefinedTypeNames[t.Name] {
+				if m, ok := lu.names[t.Name]; ok {
+					t.Name = m
+				}
+			}
+			// A user namespace's type members are bare top-level names
+			// (ADR-00450), so its qualified references rename; a library
+			// namespace's type (`NodeJS.Platform`) keeps its name.
+			if len(t.Qualifier) > 0 && !sc.bound(t.Name) && !(lib.KnownGlobal(t.Qualifier[0]) && !sc.bound(t.Qualifier[0]) && !lu.ownName(t.Qualifier[0])) {
 				if m, ok := lu.names[t.Name]; ok {
 					t.Name = m
 				}
@@ -1151,6 +1231,29 @@ func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
 					t.Name = m
 				}
 			}
+		case *ast.ConditionalType:
+			// An `infer U` names U in the extends clause and the true
+			// branch, over any top-level U.
+			walk(t.CheckType)
+			sc.push()
+			ast.Inspect(t.ExtendsType, func(x ast.Node) bool {
+				if it, ok := x.(*ast.InferType); ok {
+					sc.bind(it.Name)
+				}
+				return true
+			})
+			walk(t.ExtendsType)
+			walk(t.TrueType)
+			sc.pop()
+			walk(t.FalseType)
+			return true
+		case *ast.MappedType:
+			// `[K in …]` names K in the mapped type.
+			sc.push()
+			sc.bind(t.KeyName)
+			ast.ForEachChild(n, walk)
+			sc.pop()
+			return true
 		}
 		ast.ForEachChild(n, walk)
 		return true
@@ -1158,47 +1261,12 @@ func rewriteTypeNode(n ast.TypeNode, sc *scope, lu lookupTable) {
 	walk(n)
 }
 
-// rewriteTypeName rewrites ta.Name, accounting for parser_types.go's flat
-// "Foo[]" (or multi-dimensional "Foo[][]") encoding of a named type followed
-// by an array suffix — the suffix is baked directly into the Name string
-// rather than represented via ElemType, so a plain lu.names[ta.Name] lookup
-// would silently miss "Foo[]" even though "Foo" itself has a mangled name.
 // predefinedTypeNames are TypeScript's predefined type keywords: no program
 // can declare a type of the name, so a value binding of it (`const any =
 // …`) never renames the type.
 var predefinedTypeNames = map[string]bool{
 	"any": true, "unknown": true, "never": true, "void": true, "undefined": true, "null": true,
 	"number": true, "string": true, "boolean": true, "bigint": true, "symbol": true, "object": true,
-}
-
-func rewriteTypeName(ta *ast.TypeAnnotation, sc *scope, lu lookupTable) {
-	name := ta.Name
-	suffix := ""
-	for strings.HasSuffix(name, "[]") {
-		name = name[:len(name)-2]
-		suffix += "[]"
-	}
-	// `ns.T` through a namespace import: that module's T.
-	if len(ta.Qualifier) == 1 && !sc.bound(ta.Qualifier[0]) {
-		if m, ok := lu.ns[ta.Qualifier[0]][name]; ok {
-			ta.Name, ta.Qualifier = m+suffix, nil
-			return
-		}
-	}
-	if sc.bound(name) || len(ta.Qualifier) == 0 && predefinedTypeNames[name] {
-		return
-	}
-	// A library namespace's type (`NodeJS.Platform`) keeps its name: the last
-	// segment alone may name a user type. A user namespace's type members are
-	// bare top-level names (ADR-00450), so its qualified references rename.
-	if len(ta.Qualifier) > 0 && lib.KnownGlobal(ta.Qualifier[0]) && !sc.bound(ta.Qualifier[0]) {
-		if _, own := lu.names[ta.Qualifier[0]]; !own {
-			return
-		}
-	}
-	if m, ok := lu.names[name]; ok {
-		ta.Name = m + suffix
-	}
 }
 
 // resolveWorkerPath records the canonical file a worker path literal names,

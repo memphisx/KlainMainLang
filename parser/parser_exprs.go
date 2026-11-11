@@ -122,6 +122,10 @@ func (p *Parser) parseYield() (ast.Expression, error) {
 	}
 	switch p.peek().Type {
 	case lexer.SEMICOLON, lexer.RPAREN, lexer.RBRACKET, lexer.RBRACE, lexer.COMMA, lexer.COLON, lexer.EOF:
+		if delegate {
+			// `yield*` delegates to an operand it must have.
+			return nil, p.errAt(p.peek(), diag.UnexpectedTokenInExpr, p.peek().Type)
+		}
 		return ast.NewYieldExpression(nil, delegate, pos), nil
 	}
 
@@ -714,7 +718,7 @@ func (p *Parser) parseCallMember() (ast.Expression, error) {
 			}
 			save := p.pos
 			p.advance() // '<'
-			var targs []*ast.TypeAnnotation
+			var targs []ast.TypeNode
 			okParse := true
 			p.speculating++
 			for {
@@ -840,7 +844,7 @@ func assignTarget(e ast.Expression, pattern bool) bool {
 	case *ast.Identifier:
 		return true
 	case *ast.NullLiteral:
-		return x.IsUndefined // `undefined` is an identifier (a TypeError to assign in strict code)
+		return x.IsUndefined && !x.Void // `undefined` is an identifier (a TypeError to assign in strict code)
 	case *ast.MemberExpression:
 		return !x.Optional && !inChain(x.Object)
 	case *ast.IndexExpression:
@@ -860,15 +864,15 @@ func assignTarget(e ast.Expression, pattern bool) bool {
 		for i, el := range x.Elements {
 			switch el := el.(type) {
 			case *ast.SpreadElement:
-				if _, dflt := el.Arg.(*ast.AssignmentExpression); dflt || i != len(x.Elements)-1 || !assignTarget(el.Arg, true) {
+				if _, dflt := el.Arg.(*ast.AssignmentExpression); dflt || i != len(x.Elements)-1 || !patternTarget(el.Arg) {
 					return false
 				}
 			case *ast.AssignmentExpression:
-				if el.Op != "=" || !assignTarget(el.Left, true) {
+				if el.Op != "=" || !patternTarget(el.Left) {
 					return false
 				}
 			default:
-				if !assignTarget(el, true) {
+				if !patternTarget(el) {
 					return false
 				}
 			}
@@ -889,11 +893,36 @@ func assignTarget(e ast.Expression, pattern bool) bool {
 				if i != len(x.Properties)-1 {
 					return false
 				}
+				continue
+			}
+			// A method or an accessor is no target; a value is one (its
+			// default's left side, in `{ a: b = 1 }`).
+			if p.AccessorKind != "" {
+				return false
+			}
+			v := p.Value
+			if fe, ok := v.(*ast.FunctionExpression); ok && fe.Method {
+				return false
+			}
+			if as, ok := v.(*ast.AssignmentExpression); ok && as.Op == "=" {
+				v = as.Left
+			}
+			if !p.Shorthand && !p.CoverInit && v != nil && !patternTarget(v) {
+				return false
 			}
 		}
 		return true
 	}
 	return false
+}
+
+// patternTarget is assignTarget for a pattern's element: a call is never
+// one, even where sloppy code keeps a call as a whole assignment's target.
+func patternTarget(e ast.Expression) bool {
+	if _, ok := e.(*ast.CallExpression); ok {
+		return false
+	}
+	return assignTarget(e, true)
 }
 
 // inChain reports whether e continues an optional chain (`a?.b` in

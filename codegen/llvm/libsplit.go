@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 )
 
 // libsplit.go — a program's IR split into one unit per builtin library
@@ -275,6 +276,15 @@ func declOfVis(e irEntity, vis string) (string, error) {
 		// or hold text with either in it.
 		var ty string
 		g, c := strings.Index(rhs, "global "), strings.Index(rhs, "constant ")
+		if al := strings.Index(rhs, "alias "); al >= 0 && (g < 0 || al < g) && (c < 0 || al < c) {
+			// An alias (a static function value past its prefix word,
+			// emitStaticFnRecord): its value type, in the managed space
+			// its aliasee lives in.
+			if ty = irLeadingType(rhs[al+len("alias "):]); ty == "" {
+				return "", fmt.Errorf("libsplit: cannot type alias @%s", e.name)
+			}
+			return fmt.Sprintf("@%s = external %s%sglobal %s", e.name, vis, strings.TrimPrefix(irGlobalAS, " ")+" ", ty), nil
+		}
 		switch {
 		case g >= 0 && (c < 0 || g < c):
 			ty = irLeadingType(rhs[g+len("global "):])
@@ -460,6 +470,22 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 				*e = setReachable(*e, vis)
 			}
 			defs[e.name] = i
+		}
+	}
+	// An alias's aliasee (a static function value's cell) lives in the
+	// alias's unit: an alias must point at a definition.
+	for i := range ents {
+		e := &ents[i]
+		if e.kind != 'g' || !strings.Contains(e.text, " alias ") {
+			continue
+		}
+		for _, n := range irNames(e.text[strings.Index(e.text, " alias "):], '@') {
+			if ci, ok := defs[n]; ok && ci != i && ents[ci].owner != e.owner {
+				ents[ci].owner = e.owner
+				if e.owner != "" {
+					ents[ci] = setReachable(ents[ci], vis)
+				}
+			}
 		}
 	}
 	if islands {
@@ -813,7 +839,7 @@ func LibObjects(llFile, cacheDir string, compileFlags []string) (objs []string, 
 		}
 		objs = append(objs, obj)
 	}
-	return objs, hits, os.WriteFile(llFile, []byte(u.Program), 0o644)
+	return objs, hits, os.WriteFile(llFile, []byte(unitText(u.Program)), 0o644)
 }
 
 // IslandObjects is LibObjects for a -dynamic-import=lazy program
@@ -850,7 +876,7 @@ func IslandObjects(llFile, cacheDir string, compileFlags, islandFlags []string, 
 			islands[target] = append(islands[target], obj)
 		}
 	}
-	return host, islands, os.WriteFile(llFile, []byte(u.Program), 0o644)
+	return host, islands, os.WriteFile(llFile, []byte(unitText(u.Program)), 0o644)
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -866,14 +892,36 @@ func sortedKeys(m map[string]string) []string {
 // keyed by its text, the flags and the host clang arguments; hit reports
 // it was already there.
 func cachedUnitObject(cacheDir, k, text string, compileFlags []string) (obj string, hit bool, err error) {
+	// Keyed by the unit's text as split: unitText is a function of it, so
+	// it runs only for a unit that is compiled, not for every hit.
 	h := sha256.New()
-	for _, s := range append(append([]string{text, runtime.GOOS, clangIdentity()}, compileFlags...), HostClangArgs()...) {
+	for _, s := range append(append([]string{unitTextVersion, text, runtime.GOOS, clangIdentity()}, compileFlags...), HostClangArgs()...) {
 		fmt.Fprintf(h, "%d:%s", len(s), s)
 	}
 	obj = filepath.Join(cacheDir, "lib-"+k+"-"+hex.EncodeToString(h.Sum(nil)[:10])+".o")
-	if st, serr := os.Stat(obj); serr == nil && st.Size() > 0 {
+	if knownUnitObject(obj) {
 		return obj, true, nil
 	}
+	if st, serr := os.Stat(obj); serr == nil && st.Size() > 0 {
+		noteUnitObject(obj)
+		return obj, true, nil
+	}
+	// One compile per object at a time in this process: with a cold cache a
+	// conformance run's workers all reach the same units at once, and each
+	// compiling them on its own multiplied the clang work by the workers.
+	done := make(chan struct{})
+	if prev, busy := unitCompiling.LoadOrStore(obj, done); busy {
+		<-prev.(chan struct{})
+		if knownUnitObject(obj) {
+			return obj, true, nil
+		}
+		return cachedUnitObject(cacheDir, k, text, compileFlags)
+	}
+	defer func() {
+		unitCompiling.Delete(obj)
+		close(done)
+	}()
+	text = unitText(text)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", false, err
 	}
@@ -903,8 +951,29 @@ func cachedUnitObject(cacheDir, k, text string, compileFlags []string) (obj stri
 	if err := os.Rename(stem+".o.tmp", obj); err != nil {
 		return "", false, err
 	}
+	noteUnitObject(obj)
 	return obj, false, nil
 }
+
+// unitTextVersion names unitText's rewrite in the cache key: the key hashes
+// the text before it, so a change to the rewrite must change this.
+const unitTextVersion = "unitText/1"
+
+// unitObjects are the cached objects this process has seen exist: a
+// conformance run looks the same few thousand up for every program, and a
+// stat each is most of a cached link's cost on a machine whose file system
+// is scanned. The cache only gains entries, so a seen object stays.
+var unitObjects sync.Map
+
+// unitCompiling holds, per object, the channel its compile closes.
+var unitCompiling sync.Map
+
+func knownUnitObject(obj string) bool {
+	_, ok := unitObjects.Load(obj)
+	return ok
+}
+
+func noteUnitObject(obj string) { unitObjects.Store(obj, struct{}{}) }
 
 // dropDefinedDeclares removes each `declare` of a function the module also
 // defines (a helper declared where it is called and defined at the end):
@@ -1010,7 +1079,7 @@ func moveUnitRows(ents []irEntity, defs map[string]int) []irEntity {
 	if len(byOwner) == 0 {
 		return ents
 	}
-	stride := fmt.Sprintf("ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64)", rowTy)
+	stride := fmt.Sprintf("ptrtoint ("+irPtr+" getelementptr (%s, "+irPtr+" null, i32 1) to i64)", rowTy)
 	owners := make([]string, 0, len(byOwner))
 	for o := range byOwner {
 		owners = append(owners, o)
@@ -1022,22 +1091,22 @@ func moveUnitRows(ents []irEntity, defs map[string]int) []irEntity {
 		desc := "__kml_unitreg." + llvmSafeSymbol(o)
 		ents = append(ents,
 			irEntity{name: tab, kind: 'g', owner: o,
-				text: fmt.Sprintf("@%s = private constant [%d x %s] [%s]", tab, len(rows), rowTy, strings.Join(rows, ", "))},
+				text: fmt.Sprintf("@%s = private"+irGlobalAS+" constant [%d x %s] [%s]", tab, len(rows), rowTy, strings.Join(rows, ", "))},
 			irEntity{name: desc, kind: 'g', owner: o,
-				text: fmt.Sprintf("@%s = private constant { i64, ptr, i64, i64 } { i64 %d, ptr @%s, i64 %d, i64 %s }, section \"%s\", align 8, no_sanitize_address", desc, unitKindFnMeta, tab, len(rows), stride, section)},
+				text: fmt.Sprintf("@%s = private"+irGlobalAS+" constant { i64, "+irPtr+", i64, i64 } { i64 %d, "+irPtr+" @%s, i64 %d, i64 %s }, section \"%s\", align 8, no_sanitize_address", desc, unitKindFnMeta, tab, len(rows), stride, section)},
 			// Kept by the linker though nothing names it (unitreg.c finds it
 			// by its section, walking the descriptors as one array: ASan's
 			// redzones between them would break that, so it leaves them out).
 			irEntity{name: "llvm.used", kind: 'g', owner: o,
-				text: fmt.Sprintf("@llvm.used = appending global [1 x ptr] [ptr @%s], section \"llvm.metadata\"", desc)},
+				text: fmt.Sprintf("@llvm.used = appending global [1 x ptr] [ptr %s], section \"llvm.metadata\"", globalAddr("@"+desc))},
 		)
 		defs[tab], defs[desc] = len(ents)-3, len(ents)-2
 	}
 	// The program's registration covers only the rows it keeps.
-	marker := fmt.Sprintf("i64 %d, ptr @%s, i64 %d, ", unitKindFnMeta, name, len(elems))
+	marker := fmt.Sprintf("i64 %d, "+irPtr+" @%s, i64 %d, ", unitKindFnMeta, name, len(elems))
 	if len(kept) > 0 {
-		ents[ti].text = fmt.Sprintf("@%s = private constant [%d x %s] [%s]", name, len(kept), rowTy, strings.Join(kept, ", "))
-		ents[init].text = strings.Replace(ents[init].text, marker, fmt.Sprintf("i64 %d, ptr @%s, i64 %d, ", unitKindFnMeta, name, len(kept)), 1)
+		ents[ti].text = fmt.Sprintf("@%s = private"+irGlobalAS+" constant [%d x %s] [%s]", name, len(kept), rowTy, strings.Join(kept, ", "))
+		ents[init].text = strings.Replace(ents[init].text, marker, fmt.Sprintf("i64 %d, "+irPtr+" @%s, i64 %d, ", unitKindFnMeta, name, len(kept)), 1)
 	} else {
 		ents[ti] = irEntity{kind: 'o'}
 		delete(defs, name)

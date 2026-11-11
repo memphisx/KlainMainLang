@@ -48,3 +48,22 @@ setTimeout(() => console.log("timer"), 10)
 Promise.resolve(2).finally(async () => { throw new Error("finfail") }).catch((e: Error) => console.log("finally threw", e.message))
 `)
 }
+
+// Promise.<combinator>.call(C, iterable): C's promise, each member resolved
+// through C.resolve, a throw from it rejecting through C's reject and
+// closing the iterator (an endless one is never drained).
+func TestE2EPromiseCombinatorCallOnReceiver(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCLIJS(t, `
+class B { constructor(ex) { ex(() => console.log("res"), (e) => console.log("rej", e)); } static resolve() { throw "bad"; } }
+const it = { [Symbol.iterator]() { return this; }, next() { return { done: false }; }, return() { console.log("closed"); return {}; } };
+for (const r of [Promise.all.call(B, it), Promise.allSettled.call(B, it), Promise.any.call(B, it), Promise.race.call(B, it)]) {
+  console.log(r instanceof B, r instanceof Promise);
+}
+try { Promise.all.call(1, []); } catch (e) { console.log(e.constructor.name, e.message); }
+class Twice { constructor(ex) { ex(() => {}, () => {}); ex(() => {}, () => {}); } }
+try { Promise.race.call(Twice, []); } catch (e) { console.log(e.constructor.name, e.message); }
+class Bad { constructor(ex) { ex(1, 2); } }
+try { Promise.any.call(Bad, []); } catch (e) { console.log(e.constructor.name, e.message); }
+`)
+}

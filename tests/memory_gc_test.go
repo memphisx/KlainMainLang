@@ -85,7 +85,10 @@ console.log(sink);
 // objects, ADR-01366), so its orphan is made in one task and checked in a
 // later one. Referents are made in separate functions so their pointers leave
 // the frames still live (conservative scanning would otherwise keep them),
-// and gc() forces a full Boehm collection.
+// and gc() forces a full Boehm collection. Boehm scans conservatively: a
+// stale copy of a pointer (a callee-saved register the event loop spilled,
+// a reused stack slot) still pins its object, so one orphan is not
+// guaranteed collected. Those copies are few, so most of 64 orphans are.
 func TestE2EGCModeWeakCollected(t *testing.T) {
 	const src = `
 interface Box { v: number }
@@ -103,13 +106,14 @@ const keptRef = new WeakRef(kept);
 wm.set(kept, "stays");
 orphanEntry();
 setTimeout(() => {
-  const orphanRef = makeOrphanRef();
-  console.log(orphanRef.deref() !== undefined);
+  const orphans: WeakRef<Box>[] = [];
+  for (let i = 0; i < 64; i++) orphans.push(makeOrphanRef());
+  console.log(orphans.every((r) => r.deref() !== undefined));
   setTimeout(() => {
     gc();
     gc();
     console.log(keptRef.deref() === undefined);
-    console.log(orphanRef.deref() === undefined);
+    console.log(orphans.filter((r) => r.deref() === undefined).length >= 32);
     console.log(wm.has(kept));
     console.log(wm.get(kept));
   }, 0);
@@ -127,8 +131,9 @@ setTimeout(() => {
 		t.Fatalf("run: %v", err)
 	}
 	got := strings.TrimRight(string(out), "\n")
-	// The orphan is alive in its own job (true); then kept survives (false),
-	// the orphan is collected (true), the map key is kept (true, "stays").
+	// The orphans are alive in their own job (true); then kept survives
+	// (false), most orphans are collected (true), the map key is kept
+	// (true, "stays").
 	want := "true\nfalse\ntrue\ntrue\nstays"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
@@ -327,5 +332,36 @@ console.log(sum, A.inc(), B.inc(), new A() instanceof B);
 	}
 	if big > small*2 {
 		t.Errorf("max RSS grew from %d to %d over 20x the evaluations", small, big)
+	}
+}
+
+// TestE2EGCModeTypedLayouts: under -mm=gc an object is allocated with its
+// layout's pointer map (ADR-01943), so its number and boolean words are not
+// scanned while its string, array, object, function and `any` words are.
+// Churns linked objects and class instances through several collections
+// and reads every kind of field back.
+func TestE2EGCModeTypedLayouts(t *testing.T) {
+	const src = `
+interface Node2 { n: number; name: string; tags: string[]; next: Node2 | null; extra: any; ok: boolean; opt?: number }
+class P { x = 1.5; s = "p"; kids: P[] = []; v: any = { a: 1 }; f = (k: number) => k + this.x; }
+let head: Node2 | null = null;
+for (let i = 0; i < 200000; i++) {
+  head = { n: i * 0.5, name: "n" + i, tags: ["t" + (i % 7)], next: i % 1000 === 0 ? null : head, extra: i % 3 ? { q: [i] } : "s" + i, ok: i % 2 === 0 };
+}
+const ps: P[] = [];
+for (let i = 0; i < 50000; i++) { const p = new P(); p.kids.push(new P()); p.s = "s" + i; ps.push(p); }
+let c = 0, sum = 0;
+for (let h = head; h; h = h.next) { c++; sum += h.n + h.tags[0].length + h.name.length; }
+let k = 0;
+for (const p of ps) k += p.kids.length + p.s.length + p.f(1) + (p.v.a as number);
+console.log(c, sum, k, JSON.stringify(head).length, ps[49999].s);
+`
+	binFile := buildBinaryGC(t, src)
+	out, err := exec.Command(binFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimRight(string(out), "\n"), "1000 99758750 513890 82839 s49999"; got != want {
+		t.Errorf("got %q, want %q", got, want)
 	}
 }

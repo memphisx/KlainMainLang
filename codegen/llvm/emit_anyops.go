@@ -27,110 +27,12 @@ import (
 	"KlainMainLang/ast"
 )
 
-// ensureAnyOps defines the ToNumber/ToBoolean runtime over NaN-boxed words.
-func (e *Emitter) ensureAnyOps() {
-	if e.usedAnyOps {
-		return
-	}
-	e.usedAnyOps = true
-	e.ensureNanBox()
-	e.ensureStrHeaderRuntime()
-	e.ensureToNumber()
-	e.ensureNullDerefThrow()
-	e.ensureAnyToPrimitive()
-	e.emitGlobal("declare double @__kml_obj_tonum(i64)") // boxsrc/toprim.c
-	symMsg := e.internString("Cannot convert a Symbol value to a number")
-	e.emitGlobal(`
-; JS ToNumber over a NaN-boxed word. Numbers decode; true/false -> 1/0;
-; null -> 0; undefined -> NaN; a string goes through the same StringToNumber
-; as Number(s) (@__kml_to_number: whitespace trimmed, Infinity, 0x/0o/0b,
-; junk -> NaN — strtod alone took "inf" and rejected "  Infinity  ",
-; ADR-01057); a boxed Symbol (an object whose hidden field 0 carries
-; symbolTypeIDFlag, ADR-01059) throws the spec's TypeError; any other bare
-; heap reference goes through ToPrimitive with the number hint first
-; (@__kml_obj_tonum, boxsrc/toprim.c), as the spec's ToNumber does.
-define double @__kml_any_tonum(i64 %v) {
-entry:
-  %isnum = icmp uge i64 %v, 562949953421312
-  br i1 %isnum, label %num, label %notnum
-num:
-  %bits = sub i64 %v, 562949953421312
-  %d = bitcast i64 %bits to double
-  ret double %d
-notnum:
-  %isimm = icmp ult i64 %v, 65536
-  br i1 %isimm, label %imm, label %ptr
-imm:
-  switch i64 %v, label %retnan [
-    i64 2, label %zero
-    i64 6, label %zero
-    i64 7, label %one
-  ]
-zero:
-  ret double 0.0
-one:
-  ret double 1.0
-ptr:
-  %kind = and i64 %v, 7
-  %isstr = icmp eq i64 %kind, 0
-  br i1 %isstr, label %str, label %notstr
-str:
-  %s = inttoptr i64 %v to ptr
-  %pv = call double @__kml_to_number(ptr %s)
-  ret double %pv
-notstr:
-  %isobj = icmp eq i64 %kind, 1
-  br i1 %isobj, label %obj, label %objnum
-obj:
-  %opay = and i64 %v, -8
-  %optr = inttoptr i64 %opay to ptr
-  %f0 = load i64, ptr %optr, align 8
-  %symbit = and i64 %f0, ` + fmt.Sprintf("%d", symbolTypeIDFlag) + `
-  %issym = icmp ne i64 %symbit, 0
-  br i1 %issym, label %symthrow, label %objnum
-objnum:
-  %on = call double @__kml_obj_tonum(i64 %v)
-  ret double %on
-symthrow:
-  call void @__kml_throw_nullderef(ptr ` + symMsg + `)
-  unreachable
-retnan:
-  ret double 0x7FF8000000000000
-}
-
-; JS ToBoolean over a NaN-boxed word.
-define i1 @__kml_any_tobool(i64 %v) {
-entry:
-  %isnum = icmp uge i64 %v, 562949953421312
-  br i1 %isnum, label %num, label %notnum
-num:
-  %bits = sub i64 %v, 562949953421312
-  %d = bitcast i64 %bits to double
-  %nz = fcmp one double %d, 0.0
-  ret i1 %nz
-notnum:
-  %isimm = icmp ult i64 %v, 65536
-  br i1 %isimm, label %imm, label %ptr
-imm:
-  %istrue = icmp eq i64 %v, 7
-  ret i1 %istrue
-ptr:
-  %kind = and i64 %v, 7
-  %isstr = icmp eq i64 %kind, 0
-  br i1 %isstr, label %str, label %rettrue
-str:
-  %s = inttoptr i64 %v to ptr
-  %len = call i64 @__kml_str_len(ptr %s)
-  %ne = icmp ne i64 %len, 0
-  ret i1 %ne
-rettrue:
-  ret i1 true
-}`)
-}
-
 // emitAnyToNum coerces a boxed value to a double register.
 func (e *Emitter) emitAnyToNum(v Value) string {
-	e.ensureAnyOps()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_any_tonum(i64 %s)", r, v.Ref))
 	return r
@@ -150,7 +52,10 @@ func (e *Emitter) emitAnyToF64Slot(v Value) string {
 
 // emitAnyTruthy coerces a boxed value to i1 via JS ToBoolean.
 func (e *Emitter) emitAnyTruthy(v Value) Value {
-	e.ensureAnyOps()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_tobool(i64 %s)", r, v.Ref))
 	return Value{Ref: r, Ty: TypeBool}
@@ -161,6 +66,10 @@ func (e *Emitter) emitAnyTruthy(v Value) Value {
 // concatenates; everything else runs through ToNumber. Arithmetic returns a
 // boxed number; relational returns a bool.
 func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Value, error) {
+	if left.Ty.IsObject() || right.Ty.IsObject() || left.Ty.IsDynamic() || right.Ty.IsDynamic() {
+		// A static object's ToPrimitive ends on Object.prototype.toString.
+		e.ensureDynJSONC()
+	}
 	lb, err := e.emitBoxValue(left)
 	if err != nil {
 		return Value{}, err
@@ -181,6 +90,11 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 	}
 	lb = Value{Ref: e.emitAnyToPrimitiveHint(lb.Ref, hint), Ty: TypeAny}
 	rb = Value{Ref: e.emitAnyToPrimitiveHint(rb.Ref, hint), Ty: TypeAny}
+	if op != "+" {
+		// ToNumeric of a symbol primitive: a TypeError.
+		e.emitAnySymbolGuard(lb.Ref, false)
+		e.emitAnySymbolGuard(rb.Ref, false)
+	}
 	// An `any` against a bigint: a bigint operator when the `any` holds a
 	// bigint too, a TypeError for any other non-string primitive.
 	_, bigArith := bigIntBinFn[op]
@@ -229,6 +143,8 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, concatL, numL))
 
 		e.emitLabel(concatL)
+		e.emitAnySymbolGuard(lb.Ref, true)
+		e.emitAnySymbolGuard(rb.Ref, true)
 		lstr, err := e.emitDynamicToString(lb)
 		if err != nil {
 			return Value{}, err
@@ -242,11 +158,13 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 			return Value{}, err
 		}
 		catInt := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", catInt, cat.Ref))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", catInt, resPtr))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", catInt, cat.Ref))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", catInt, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(numL)
+		e.emitAnySymbolGuard(lb.Ref, false)
+		e.emitAnySymbolGuard(rb.Ref, false)
 		var enc string
 		if bigArith {
 			if enc, err = bigOp(); err != nil {
@@ -260,12 +178,12 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		}); err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", enc, resPtr))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", enc, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, resPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, resPtr))
 		return Value{Ref: out, Ty: TypeAny}, nil
 	}
 
@@ -284,7 +202,6 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 			case "%":
 				e.emitInstr(fmt.Sprintf("%s = frem double %s, %s", r, ld, rd))
 			case "**":
-				e.ensureMathFuncs()
 				e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", r, ld, rd))
 			}
 			return e.emitNbEncodeDouble(r)
@@ -296,7 +213,6 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 	case "<", ">", "<=", ">=":
 		// Two strings compare lexicographically; anything else numerically
 		// (which is what JS does for string↔number too).
-		e.ensureStrcmp()
 		bothStrL := e.freshLabel("anycmp.str")
 		numCmpL := e.freshLabel("anycmp.num")
 		mergeL := e.freshLabel("anycmp.merge")
@@ -307,11 +223,11 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 
 		e.emitLabel(bothStrL)
 		lp, rp := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", lp, lb.Ref))
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rp, rb.Ref))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, lp, lb.Ref))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rp, rb.Ref))
 		c := e.freshReg()
 		e.ensureStrHeaderRuntime() // __kml_str_cmp: by UTF-16 code units
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", c, lp, rp))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp("+irPtr+" %s, "+irPtr+" %s)", c, lp, rp))
 		var scond string
 		switch op {
 		case "<":
@@ -325,13 +241,12 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		}
 		sr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp %s i32 %s, 0", sr, scond, c))
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", sr, resPtr))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", sr, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(numCmpL)
 		// A bigint on either side compares by value (JS's IsLessThan).
 		e.ensureBoxedBigIntHooks()
-		e.usedAnyBigIntRel = true
 		rel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_bigint_rel(i64 %s, i64 %s)", rel, lb.Ref, rb.Ref))
 		isBigRel := e.freshReg()
@@ -360,7 +275,7 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, %s", y, rel, b))
 			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", br, x, y))
 		}
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", br, resPtr))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", br, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(plainL)
 		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
@@ -377,36 +292,53 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		}
 		nr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = fcmp %s double %s, %s", nr, fcond, ld, rd))
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", nr, resPtr))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", nr, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", out, resPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", out, resPtr))
 		return Value{Ref: out, Ty: TypeBool}, nil
 	case "&", "|", "^":
 		// JS bitwise ops ToInt32 both operands, compute in the 32-bit domain,
 		// and yield a Number (double) — the same path a typed `number & number`
 		// takes, applied to the any operands' numeric coercion.
-		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
-		l32 := e.toInt32(Value{Ref: ld, Ty: TypeF64})
-		r32 := e.toInt32(Value{Ref: rd, Ty: TypeF64})
-		iop := map[string]string{"&": "and", "|": "or", "^": "xor"}[op]
-		bit := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = %s i32 %s, %s", bit, iop, l32, r32))
-		num := e.int32ToNumber(bit)
-		return Value{Ref: e.emitNbEncodeDouble(num.Ref), Ty: TypeAny}, nil
-	case "<<", ">>", ">>>":
-		// JS shift semantics (ToInt32 operand, 0-31 shift count, signed/unsigned
-		// result) — reuse emitBitShift over the any operands' numeric coercion.
-		ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
-		shifted, err := e.emitBitShift(op, Value{Ref: ld, Ty: TypeF64}, Value{Ref: rd, Ty: TypeF64})
+		// Two bigints are the bigint operation; one is a TypeError.
+		enc, err := e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic() && !left.Ty.IsBigInt() || !right.Ty.IsDynamic() && !right.Ty.IsBigInt(), func() string {
+			ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
+			l32 := e.toInt32(Value{Ref: ld, Ty: TypeF64})
+			r32 := e.toInt32(Value{Ref: rd, Ty: TypeF64})
+			iop := map[string]string{"&": "and", "|": "or", "^": "xor"}[op]
+			bit := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = %s i32 %s, %s", bit, iop, l32, r32))
+			return e.emitNbEncodeDouble(e.int32ToNumber(bit).Ref)
+		})
 		if err != nil {
 			return Value{}, err
 		}
-		return Value{Ref: e.emitNbEncodeDouble(shifted.Ref), Ty: TypeAny}, nil
+		return Value{Ref: enc, Ty: TypeAny}, nil
+	case "<<", ">>", ">>>":
+		// JS shift semantics (ToInt32 operand, 0-31 shift count, signed/unsigned
+		// result) — reuse emitBitShift over the any operands' numeric coercion.
+		var shiftErr error
+		enc, err := e.anyBigIntOr(lb, rb, left, right, op, pos, !left.Ty.IsDynamic() && !left.Ty.IsBigInt() || !right.Ty.IsDynamic() && !right.Ty.IsBigInt(), func() string {
+			ld, rd := e.emitAnyToNum(lb), e.emitAnyToNum(rb)
+			shifted, err := e.emitBitShift(op, Value{Ref: ld, Ty: TypeF64}, Value{Ref: rd, Ty: TypeF64})
+			if err != nil {
+				shiftErr = err
+				return "0"
+			}
+			return e.emitNbEncodeDouble(shifted.Ref)
+		})
+		if err == nil {
+			err = shiftErr
+		}
+		if err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: enc, Ty: TypeAny}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: operator '%s' on any/unknown is not yet supported", pos.Line, pos.Col, op)
+	return Value{}, internalAt(pos, "operator '%s' on any has no lowering", op)
 }
 
 // emitBothStringsCheck answers whether two boxed words are both string-kind.
@@ -443,7 +375,6 @@ func (e *Emitter) anyBigIntOr(lb, rb, left, right Value, op string, pos ast.Pos,
 	if mixOnly {
 		// The other operand is a number: a bigint in the `any` can only
 		// throw, so only the dynamic operand is tested.
-		e.ensureAnyIsBigInt()
 		either := "false"
 		for _, side := range []struct{ box, orig Value }{{lb, left}, {rb, right}} {
 			if !side.orig.Ty.IsDynamic() {
@@ -474,8 +405,8 @@ func (e *Emitter) anyBigIntOr(lb, rb, left, right Value, op string, pos ast.Pos,
 	bl.Ty.setNullable(true)
 	br.Ty.setNullable(true)
 	lp, rp, either := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", lp, bl.Ref))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", rp, br.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", lp, bl.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", rp, br.Ref))
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, lp, rp))
 	res := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
@@ -486,14 +417,14 @@ func (e *Emitter) anyBigIntOr(lb, rb, left, right Value, op string, pos ast.Pos,
 	if err != nil {
 		return "", err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitBoxBigInt(v).Ref, res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitBoxBigInt(v).Ref, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(numL)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", number(), res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", number(), res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, res))
 	return out, nil
 }
 
@@ -537,7 +468,6 @@ func (e *Emitter) anyMayHoldBigInt() bool { return e.programIndependent() || e.m
 // (emitAnyBigIntOpsFinalize), which is a stub when the program has no
 // bigint, so the library names no part of the bigint runtime.
 func (e *Emitter) anyBigIntOrLib(lb, rb Value, op string, number func() string) string {
-	e.ensureAnyIsBigInt()
 	lr, rr, either := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", lr, lb.Ref))
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", rr, rb.Ref))
@@ -552,14 +482,14 @@ func (e *Emitter) anyBigIntOrLib(lb, rb Value, op string, number func() string) 
 	fn := e.ensureAnyBigIntOp(op)
 	v := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, i64 %s)", v, fn, lb.Ref, rb.Ref))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v, res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(numL)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", number(), res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", number(), res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, res))
 	return out
 }
 
@@ -626,14 +556,6 @@ func (e *Emitter) defineAnyBigIntOp(op string) {
 	e.writeHelper("hidden", "i64", anyBigIntOpSymbol(op), "i64 %a, i64 %b", body)
 }
 
-// ensureAnyIsBigInt declares the boxed-bigint test (boxsrc/toprim.c).
-func (e *Emitter) ensureAnyIsBigInt() {
-	if !e.fnDecls["__kml_any_is_bigint"] {
-		e.fnDecls["__kml_any_is_bigint"] = true
-		e.emitGlobal("declare i32 @__kml_any_is_bigint(i64)")
-	}
-}
-
 // emitAnyArithNumber is an arithmetic operator between an `any` and a number
 // (anyArithIsNumber): ToNumber of the `any` after ToPrimitive, a TypeError
 // when it holds a bigint, and the operation on doubles, left unboxed.
@@ -644,7 +566,6 @@ func (e *Emitter) emitAnyArithNumber(op string, left, right Value) (Value, error
 		}
 		p := Value{Ref: e.emitAnyToPrimitiveHint(v.Ref, hintNumber), Ty: TypeAny}
 		if e.anyMayHoldBigInt() {
-			e.ensureAnyIsBigInt()
 			r, b := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", r, p.Ref))
 			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
@@ -675,8 +596,46 @@ func (e *Emitter) emitAnyArithNumber(op string, left, right Value) (Value, error
 	case "%":
 		e.emitInstr(fmt.Sprintf("%s = frem double %s, %s", r, ld, rd))
 	case "**":
-		e.ensureMathFuncs()
 		e.emitInstr(fmt.Sprintf("%s = call double @pow(double %s, double %s)", r, ld, rd))
 	}
 	return Value{Ref: r, Ty: TypeF64}, nil
+}
+
+// mayHoldSymbol reports whether the program can make a symbol at all: a
+// name of the Symbol family anywhere in it (a library unit always may).
+func (e *Emitter) mayHoldSymbol() bool {
+	if e.programIndependent() {
+		return true
+	}
+	if e.symbolScan == 0 {
+		e.symbolScan = 1
+		if e.prog != nil {
+			for _, st := range e.prog.Body {
+				ast.Inspect(st, func(n ast.Node) bool {
+					if id, ok := n.(*ast.Identifier); ok && strings.HasPrefix(id.Name, "Symbol") {
+						e.symbolScan = 2
+					}
+					return e.symbolScan != 2
+				})
+				if e.symbolScan == 2 {
+					break
+				}
+			}
+		}
+	}
+	return e.symbolScan == 2
+}
+
+// emitAnySymbolGuard throws the TypeError converting a symbol is (to a
+// string when toString, else to a number) when the primitive v is one.
+func (e *Emitter) emitAnySymbolGuard(v string, toString bool) {
+	if !e.mayHoldSymbol() {
+		return
+	}
+	e.declareFn("__kml_any_symbol_guard", "declare void @__kml_any_symbol_guard(i64, i32)")
+	k := 0
+	if toString {
+		k = 1
+	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_any_symbol_guard(i64 %s, i32 %d)", v, k))
 }

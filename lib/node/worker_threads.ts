@@ -20,6 +20,7 @@
 // module's exports, as Node's default export carries them.
 import { EventEmitter } from 'events';
 import { structuredCloneAny } from './internal_structured_clone';
+import { HostToken, hostCloners, hostRevivers } from './internal_clone_hooks';
 import { NodeError, NodeTypeError } from './internal_errors';
 import { received } from './internal_fs_utils';
 
@@ -109,6 +110,13 @@ function cloneForTransfer(value: any, ports: MessagePort[], tokens: Map<any, any
             memory.set(v, tok);
             return tok;
         }
+        for (const cloner of hostCloners) {
+            const tok = cloner(v);
+            if (tok !== undefined) {
+                memory.set(v, tok);
+                return tok;
+            }
+        }
         if (v instanceof SharedArrayBuffer) return v;
         if (isSharedView(v)) {
             const view = shareView(v);
@@ -149,13 +157,20 @@ function cloneForTransfer(value: any, ports: MessagePort[], tokens: Map<any, any
 }
 
 // The received value with each port token made a MessagePort of this thread.
+function reviveHost(t: HostToken): any {
+    const make = hostRevivers.get(t.tag);
+    return make === undefined ? undefined : make(t.data);
+}
+
 function revive(value: any): any {
     if (value === null || typeof value !== 'object') return value;
     if (value instanceof PortToken) return new MessagePort((value as PortToken).id);
+    if (value instanceof HostToken) return reviveHost(value as HostToken);
     const seen = new Set<any>();
     const walk = (v: any): any => {
         if (v === null || typeof v !== 'object') return v;
         if (v instanceof PortToken) return new MessagePort((v as PortToken).id);
+        if (v instanceof HostToken) return reviveHost(v as HostToken);
         if (seen.has(v) || v instanceof SharedArrayBuffer || ArrayBuffer.isView(v) || v instanceof ArrayBuffer) return v;
         seen.add(v);
         if (v instanceof Map) {
@@ -463,9 +478,6 @@ export class Worker extends EventEmitter {
                 throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.' + key + '" property must be an instance of Array. ' + received(v));
             }
         }
-        if (opts.eval === true) {
-            throw NodeError('ERR_WORKER_UNSUPPORTED_OPERATION', 'Worker code given as a string (eval: true) cannot run: a worker is compiled into the program');
-        }
         const pub = __kml_native.mportPair();
         const internal = __kml_native.mportPair();
         this._kmlPort = new MessagePort(pub);
@@ -481,6 +493,11 @@ export class Worker extends EventEmitter {
             }
             this._kmlOnExit(code);
         });
+        if (id === -1 && opts.eval === true) {
+            // Code the program computes: no worker module was compiled for
+            // it (a literal's is, found by its code).
+            throw NodeError('ERR_WORKER_UNSUPPORTED_OPERATION', 'Worker code given as a string (eval: true) cannot run: a worker is compiled into the program');
+        }
         if (id === -1) {
             const e: any = new Error("Cannot find module '" + path + "'");
             e.code = 'ERR_MODULE_NOT_FOUND';

@@ -71,7 +71,7 @@ func tsTypeString(ty Type) string {
 		return "boolean"
 	case ty.Float:
 		return "number"
-	case ty.IsArray() && ty.ElemType != nil:
+	case ty.IsArray() && ty.ElemType != nil && !ty.IsTuple():
 		return tsTypeString(*ty.ElemType) + "[]"
 	case ty.IsTuple():
 		parts := make([]string, len(ty.Fields))
@@ -92,7 +92,7 @@ func tsTypeString(ty Type) string {
 		return "Promise<void>"
 	case isStringTy(ty):
 		return "string"
-	case ty.IR == "ptr":
+	case ty.IR == irPtr:
 		return "unknown"
 	default: // integer scalars
 		return "number"
@@ -118,12 +118,12 @@ func (e *Emitter) noteWebviewNew(ex *ast.NewExpression) {
 		if lit, ok := p.Value.(*ast.ObjectLiteral); ok {
 			for _, b := range lit.Properties {
 				if b.KeyExpr == nil && b.Key != "" {
-					e.noteWebviewBinding(b.Key, e.inferExprType(b.Value))
+					e.noteWebviewBinding(b.Key, e.typeOfExpr(b.Value))
 				}
 			}
 			continue
 		}
-		for _, f := range e.inferExprType(p.Value).Fields {
+		for _, f := range e.typeOfExpr(p.Value).Fields {
 			if !isHiddenField(f.Name) {
 				e.noteWebviewBinding(f.Name, f.Ty)
 			}
@@ -139,11 +139,11 @@ func (e *Emitter) noteWebviewBindTyped(ex *ast.CallExpression) {
 		return
 	}
 	m, ok := e.libExports["klain_webview:Webview"]
-	if !ok || e.inferExprType(mem.Object).ClassName != m {
+	if !ok || e.typeOfExpr(mem.Object).ClassName != m {
 		return
 	}
 	if name, ok := staticStringValue(ex.Args[0]); ok {
-		e.noteWebviewBinding(name, e.inferExprType(ex.Args[1]))
+		e.noteWebviewBinding(name, e.typeOfExpr(ex.Args[1]))
 	}
 }
 

@@ -750,3 +750,42 @@ const f7: (() => "foo") | (() => "bar") = () => "bar";
 console.log(f7());
 `, "8 n5\nbar")
 }
+
+// A union of array types (`number[] | string[][]`, `string[] | number[]`) is
+// held in the box: iteration, element reads, spreads and the methods
+// TypeScript resolves on the union's array (`map`, `reduce`, `filter`)
+// work on either member.
+func TestE2EUnionOfArrays(t *testing.T) {
+	assertSameAsNode(t, `
+type Grid = number[] | number[][];
+function sum(g: Grid): number {
+  let s = 0;
+  for (const r of g) s += Array.isArray(r) ? r.reduce((a, b) => a + b, 0) : r;
+  return s;
+}
+const gs: Grid[] = [[1, 2], [[3, 4], [5]]];
+for (const g of gs) console.log(sum(g), g.length, JSON.stringify(g), g);
+const y: string[] | number[] = Math.random() < 2 ? ["b", "a"] : [2, 1];
+console.log(y.filter((v: string | number) => v !== "x"), y.reduce((p: number, c: string | number) => p + String(c).length, 0));
+console.log([...y], [0, ...y], y.slice(1), y.join("-"), y.at(-1), typeof y[0]);
+console.log(y.map((v: string | number) => typeof v), y.some((v: string | number) => v === "a"));
+function f() { return y.length + [...y].length; }
+console.log(f());
+const t: [number, string] | [string] = Math.random() > 2 ? [1, "a"] : ["b"];
+for (const e of t) console.log(e);
+console.log(t.length, t[0], JSON.stringify(t));
+`)
+}
+
+// A member every member of a union of host types has (`size` of `Map |
+// Set`) is read through the box, un-narrowed.
+func TestE2EUnionOfHostTypesCommonMember(t *testing.T) {
+	assertSameAsNode(t, `
+function k(x: Map<string, number> | Set<string>): string { return String(x.has("a")) + x.size; }
+console.log(k(new Map([["a", 1]])), k(new Set(["x", "y"])));
+function d(x: Map<string, number> | Set<string>): void { x.clear(); console.log(x.size); }
+d(new Map([["a", 1]])); d(new Set(["q"]));
+function h(x: Headers | URLSearchParams): string { return x instanceof Headers ? "H" + x.get("a") : "U" + x.get("b"); }
+console.log(h(new Headers({ a: "1" })), h(new URLSearchParams("b=2")));
+`)
+}

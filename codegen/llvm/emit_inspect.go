@@ -84,7 +84,7 @@ func (e *Emitter) emitInspectObject(val Value, depth int) (Value, error) {
 		return e.emitExtraSplit(val, TypePtr,
 			func(v Value) (Value, error) { return e.emitInspectObjectOwn(v, depth) },
 			func(obj string) string {
-				return fmt.Sprintf("call ptr @__kml_obj_inspect_dyn(ptr %s, i64 %d)", obj, depth)
+				return fmt.Sprintf("call "+irPtr+" @__kml_obj_inspect_dyn("+irPtr+" %s, i64 %d)", obj, depth)
 			})
 	}
 	return e.emitInspectObjectOwn(val, depth)
@@ -115,8 +115,8 @@ func (e *Emitter) emitInspectObjectOwn(val Value, depth int) (Value, error) {
 		}
 		e.ensureInspectReduce()
 		tag, r := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_obj_tostring_tag(ptr %s)", tag, val.Ref))
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_tagged(ptr %s, ptr %s, ptr %s)",
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_tostring_tag("+irPtr+" %s)", tag, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_tagged("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)",
 			r, e.internString(strings.TrimSuffix(name, " ")), tag, e.internString(rest)))
 		return r
 	}
@@ -183,48 +183,16 @@ func (e *Emitter) emitInspectObjectOwn(val Value, depth int) (Value, error) {
 	return e.inspectEnd(list, opener("{"), e.internString("}"), depth, false, false), nil
 }
 
-// emitInspectTuple renders a heap tuple as Node does an array: `[ 1, 'a' ]`
-// (ADR-01063). A tuple is a fixed-shape object whose fields are "0", "1", …
-func (e *Emitter) emitInspectTuple(val Value, depth int) (Value, error) {
-	fields := val.Ty.Fields
-	if len(fields) == 0 {
-		return Value{Ref: e.internString("[]"), Ty: TypePtr}, nil
-	}
-	list := e.inspectBegin(depth, "1")
-	numeric := true
-	for i, field := range fields {
-		if !(field.Ty.Float || field.Ty.IsInteger()) || field.Ty.IR == "i1" || field.Ty.IsDynamic() {
-			numeric = false
-		}
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, val.Ty.StructIR(), val.Ref, i))
-		var elem Value
-		if field.Ty.IsArray() {
-			elem = e.loadArrayFieldValue(gepReg, field.Ty)
-		} else {
-			loadReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
-			elem = Value{Ref: loadReg, Ty: field.Ty}
-		}
-		elemStr, err := e.emitInspectField(elem, depth+1)
-		if err != nil {
-			return Value{}, err
-		}
-		e.inspectPush(list, elemStr)
-	}
-	return e.inspectEnd(list, e.internString("["), e.internString("]"), depth, true, numeric), nil
-}
-
 // emitInspectNullablePtr renders a pointer-shaped value that may be absent: a
 // null pointer prints its keyword (`undefined`/`null` by the static type),
 // anything else runs `render`. Inspecting through a null pointer is a
 // segfault, so this is a real branch, not a select (ADR-01063).
 func (e *Emitter) emitInspectNullablePtr(v Value, render func(Value) (Value, error)) (Value, error) {
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(absentLiteral(v.Ty)), slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.internString(absentLiteral(v.Ty)), slot))
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 	nullL := e.freshLabel("inspect.ptr.null")
 	valL := e.freshLabel("inspect.ptr.val")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, valL))
@@ -237,11 +205,11 @@ func (e *Emitter) emitInspectNullablePtr(v Value, render func(Value) (Value, err
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", s.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", nullL))
 	e.emitLabel(nullL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 	return Value{Ref: out, Ty: TypePtr}, nil
 }
 
@@ -261,8 +229,8 @@ func (e *Emitter) emitInspectArray(val Value, depth int) (Value, error) {
 	// nullRef (null unboxed from `any`) renders as null. Its zeroed cell
 	// reads as an empty array, so the body above was safe to build.
 	isRef, out := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isRef, val.Ref, e.nullRef()))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", out, isRef, e.internString("null"), r.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isRef, val.Ref, e.nullRef()))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", out, isRef, e.internString("null"), r.Ref))
 	return Value{Ref: out, Ty: r.Ty}, nil
 }
 
@@ -286,7 +254,7 @@ func (e *Emitter) emitInspectArrayBodyNotArgs(val Value, depth int) (Value, erro
 	// result typed as a plain array) renders as the instance.
 	isClass, obj := e.emitArrayClassObject(val.Ref)
 	out := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", out))
 	clsL, arrL, doneL := e.freshLabel("insparr.cls"), e.freshLabel("insparr.plain"), e.freshLabel("insparr.join")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isClass, clsL, arrL))
 	e.emitLabel(clsL)
@@ -294,18 +262,18 @@ func (e *Emitter) emitInspectArrayBodyNotArgs(val Value, depth int) (Value, erro
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cs.Ref, out))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", cs.Ref, out))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(arrL)
 	as, err := e.emitInspectArrayAs(val, depth, collLabel{})
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", as.Ref, out))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", as.Ref, out))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, out))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, out))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -326,7 +294,7 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 	list := e.inspectBegin(depth, nonempty)
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 	// Node's maxArrayLength: at most 100 elements are rendered, then one
 	// `... n more items` entry (__kml_inspect_push_more, after the loop).
 	over := e.freshReg()
@@ -342,7 +310,7 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, shown))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -352,15 +320,15 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 		hdr := e.absentSafeArrayHeader(val.Ref)
 		// An accessor element shows as one, its getter not run.
 		lbl, isAcc := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_holes_acc_label(ptr %s, i64 %s)", lbl, hdr, idxVal))
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isAcc, lbl))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_holes_acc_label("+irPtr+" %s, i64 %s)", lbl, hdr, idxVal))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isAcc, lbl))
 		accL, notAccL := e.freshLabel("insparr.acc"), e.freshLabel("insparr.notacc")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAcc, accL, notAccL))
 		e.emitLabel(accL)
 		e.inspectPush(list, Value{Ref: lbl, Ty: TypePtr})
 		accNext := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", accNext, idxVal))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", accNext, idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", accNext, idxAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(notAccL)
 		hole := e.emitHoleTest(hdr, idxVal)
@@ -368,15 +336,15 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hole, holeL, elemL))
 		e.emitLabel(holeL)
 		run, after := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_run(ptr %s, i64 %s, i64 %s)", run, hdr, idxVal, shown))
-		e.emitInstr(fmt.Sprintf("call void @__kml_inspect_push_holes(ptr %s, i64 %s)", list, run))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_run("+irPtr+" %s, i64 %s, i64 %s)", run, hdr, idxVal, shown))
+		e.emitInstr(fmt.Sprintf("call void @__kml_inspect_push_holes("+irPtr+" %s, i64 %s)", list, run))
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", after, idxVal, run))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", after, idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", after, idxAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(elemL)
 	}
 	inGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	elem := e.loadArrayElem(inGep, elemTy)
 	// A BigInt64Array/BigUint64Array element is stored raw (i64/u64) but is
 	// semantically a bigint — wrap it so it inspects with the `n` suffix.
@@ -387,7 +355,7 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 			fromFn = "__kml_bigint_from_u64"
 		}
 		big := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @%s(i64 %s)", big, fromFn, elem.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @%s(i64 %s)", big, fromFn, elem.Ref))
 		elem = Value{Ref: big, Ty: BigIntType()}
 	}
 	elemStr, err := e.emitInspectField(elem, depth+1)
@@ -397,7 +365,7 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 	e.inspectPush(list, elemStr)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -407,7 +375,7 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 	e.emitLabel(moreL)
 	rest := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", rest, lenReg, inspectMaxArrayLength))
-	e.emitInstr(fmt.Sprintf("call void @__kml_inspect_push_more(ptr %s, i64 %s)", list, rest))
+	e.emitInstr(fmt.Sprintf("call void @__kml_inspect_push_more("+irPtr+" %s, i64 %s)", list, rest))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
 	e.emitLabel(endL)
 	// An exec() result lists its own index, input and groups after its
@@ -426,8 +394,8 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 		for _, prop := range []string{"index", "input", "groups"} {
 			ty, off, _ := execArrayMemberType(prop)
 			gep, r := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %d", gep, val.Ref, off))
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, ty.IR, gep))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", gep, val.Ref, off))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, ty.IR, gep))
 			var fv Value
 			var err error
 			if prop == "groups" {
@@ -462,7 +430,7 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 		// Then the properties added to it (`a.tag = 1`), which turn the
 		// alignment left.
 		n := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_inspect_push_arr_extras(ptr %s, ptr %s, i64 %d)", n, list, e.absentSafeArrayHeader(val.Ref), depth))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_inspect_push_arr_extras("+irPtr+" %s, "+irPtr+" %s, i64 %d)", n, list, e.absentSafeArrayHeader(val.Ref), depth))
 		num := "0"
 		if numeric {
 			none := e.freshReg()
@@ -554,7 +522,7 @@ func (e *Emitter) emitInspectBuffer(val Value) (Value, error) {
 	ptrReg = e.arrayData(val)
 	lenReg = e.arrayLen(val)
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buffer_inspect(ptr %s, i64 %s)", res, ptrReg, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_buffer_inspect("+irPtr+" %s, i64 %s)", res, ptrReg, lenReg))
 	return Value{Ref: res, Ty: TypePtr}, nil
 }
 
@@ -600,10 +568,9 @@ func (e *Emitter) emitInspectMapAs(val Value, depth int, label collLabel) (Value
 	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(val.Ref, suffix, keyTy)
 	render := func(idxVal string) (Value, error) {
 		// An array key or value is stored as its header pointer.
-		kGep, vGep := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))
-		kElem := e.loadArrayElem(kGep, keyTy)
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
+		vGep := e.freshReg()
+		kElem := e.loadKeyAt(keysPtr, idxVal, keyTy)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
 		vElem := e.loadArrayElem(vGep, valTy)
 		kStr, err := e.emitInspectField(kElem, depth+1)
 		if err != nil {
@@ -638,17 +605,17 @@ func (e *Emitter) emitInspectSetAs(val Value, depth int, label collLabel) (Value
 		elemTy = *val.Ty.MapKey
 	}
 	suffix, _ := mapRuntime(elemTy)
-	keysRes := e.freshReg()
 	e.ensureMapFamily(suffix)
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, val.Ref))
+	keysRes := e.emitMapCopy("keys", val.Ref)
 	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
 	keysPtr := e.freshReg()
 	keysLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", keysLen, keysRes))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", keysPtr, keysRes))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", keysLen, keysRes))
+	elemTy = arrayElemType(elemTy)
 	render := func(idxVal string) (Value, error) {
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, keysPtr, idxVal))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, keysPtr, idxVal))
 		return e.emitInspectField(e.loadArrayElem(gep, elemTy), depth+1)
 	}
 	return e.emitInspectCollectionAs(label.name("Set"), label.tag, keysLen, depth, render, label.nextra, label.push)
@@ -697,7 +664,7 @@ func (e *Emitter) emitInspectListBodyWith(open Value, lenReg string, depth int, 
 	list := e.inspectBegin(depth, nonempty)
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("inspcoll.cond")
 	bodyL := e.freshLabel("inspcoll.body")
@@ -707,7 +674,7 @@ func (e *Emitter) emitInspectListBodyWith(open Value, lenReg string, depth int, 
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -719,7 +686,7 @@ func (e *Emitter) emitInspectListBodyWith(open Value, lenReg string, depth int, 
 	e.inspectPush(list, elemStr)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -770,8 +737,8 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		}
 		q := Value{Ref: e.internString("'"), Ty: TypePtr}
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", s.Ref, slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", s.Ref, slot))
 		tag, _ := e.emitUnboxTagPayload(v)
 		strL, doneL := e.emitTagCheck(tag, kmlTagString, "inspect.box.str")
 		e.emitLabel(strL)
@@ -783,19 +750,22 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", quoted.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", quoted.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 		return Value{Ref: out, Ty: TypePtr}, nil
 	case v.Ty.IsBigInt():
 		return e.emitBigIntToString(v, true) // `10n`, like Node inspect
 	case v.Ty.IsDate() && !v.Ty.IsDynamic():
 		// util.inspect shows a Date as its toISOString, Invalid Date as such.
 		return e.emitDateInspect(v)
-	case v.Ty.IsRegExp() && v.Ty.IsObject() && !v.Ty.Nullable() && !v.Ty.IsDynamic():
+	case v.Ty.IsRegExp() && v.Ty.IsObject() && !v.Ty.IsDynamic():
 		// util.inspect shows a RegExp as its toString, `/a+/g`.
+		if v.Ty.Nullable() || v.Ty.IsNull() {
+			return e.emitInspectNullablePtr(v, e.emitValueToString)
+		}
 		return e.emitValueToString(v)
 	case isInspectableObject(v.Ty):
 		// Past the depth cap Node prints `[Object]` — except an empty object,
@@ -812,8 +782,8 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			render := func(b Value) (Value, error) {
 				e.ensureInspectReduce()
 				tag, r := e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_obj_tostring_tag(ptr %s)", tag, b.Ref))
-				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_tagged(ptr %s, ptr %s, ptr null)", r, e.internString(name), tag))
+				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_tostring_tag("+irPtr+" %s)", tag, b.Ref))
+				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_tagged("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" null)", r, e.internString(name), tag))
 				return Value{Ref: r, Ty: TypePtr}, nil
 			}
 			if v.Ty.Nullable() || v.Ty.IsNull() {
@@ -825,14 +795,6 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			return e.emitInspectNullablePtr(v, func(b Value) (Value, error) { return e.emitInspectObject(b, depth) })
 		}
 		return e.emitInspectObject(v, depth)
-	case v.Ty.IsTuple() && !v.Ty.TupleByVal:
-		if depth > e.effectiveInspectDepth() && len(v.Ty.Fields) > 0 {
-			return Value{Ref: e.internString("[Array]"), Ty: TypePtr}, nil
-		}
-		if v.Ty.Nullable() || v.Ty.IsNull() {
-			return e.emitInspectNullablePtr(v, func(b Value) (Value, error) { return e.emitInspectTuple(b, depth) })
-		}
-		return e.emitInspectTuple(v, depth)
 	case isInspectHost(v.Ty):
 		s, _, err := e.emitInspectHost(v, depth)
 		return s, err
@@ -854,10 +816,16 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[Map]"), Ty: TypePtr}, nil
 		}
+		if v.Ty.Nullable() || v.Ty.IsNull() {
+			return e.emitInspectNullablePtr(v, func(b Value) (Value, error) { return e.emitInspectMap(b, depth) })
+		}
 		return e.emitInspectMap(v, depth)
 	case v.Ty.IsSet():
 		if depth > e.effectiveInspectDepth() {
 			return Value{Ref: e.internString("[Set]"), Ty: TypePtr}, nil
+		}
+		if v.Ty.Nullable() || v.Ty.IsNull() {
+			return e.emitInspectNullablePtr(v, func(b Value) (Value, error) { return e.emitInspectSet(b, depth) })
 		}
 		return e.emitInspectSet(v, depth)
 	case v.Ty.IsCollIter():
@@ -897,7 +865,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			}
 			isAbsent := e.emitArrayIsAbsent(v)
 			sel := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isAbsent, e.internString(absentLiteral(v.Ty)), past.Ref))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", sel, isAbsent, e.internString(absentLiteral(v.Ty)), past.Ref))
 			return Value{Ref: sel, Ty: TypePtr}, nil
 		}
 		// A `T[] | undefined` element (a nested-array element absence, TDD-00221)
@@ -913,7 +881,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 				return Value{}, err
 			}
 			sel := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s",
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s",
 				sel, isAbsent, e.internString(absentLiteral(v.Ty)), arr.Ref))
 			return Value{Ref: sel, Ty: TypePtr}, nil
 		}
@@ -927,7 +895,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 		// double, then backticks), control characters escaped (ADR-01067).
 		e.ensureInspectReduce()
 		quotedReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_quote(ptr %s)", quotedReg, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_quote("+irPtr+" %s)", quotedReg, v.Ref))
 		quoted := Value{Ref: quotedReg, Ty: TypePtr}
 		// An absent string (a null pointer: an out-of-range element stored on, a
 		// `string | null` field) renders as its bare keyword, never quoted. A
@@ -937,7 +905,7 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			word = "null"
 		}
 		sel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, e.ptrIsNull(v.Ref), e.internString(word), quoted.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", sel, e.ptrIsNull(v.Ref), e.internString(word), quoted.Ref))
 		return Value{Ref: sel, Ty: TypePtr}, nil
 	default:
 		s, err := e.emitValueToString(v) // number / bool / symbol
@@ -965,7 +933,7 @@ func (e *Emitter) emitInspectArrayPastDepth(v Value) Value {
 		full, empty = "["+name+"]", name+"(0) []"
 	}
 	sel := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, e.icmpNe(lenReg, "0"), e.internString(full), e.internString(empty)))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", sel, e.icmpNe(lenReg, "0"), e.internString(full), e.internString(empty)))
 	return Value{Ref: sel, Ty: TypePtr}
 }
 
@@ -1000,7 +968,6 @@ func (e *Emitter) declareInspectOptDepth() {
 		return
 	}
 	e.fnDecls["@__kml_inspect_opt_depth"] = true
-	e.emitGlobal("@__kml_inspect_opt_depth = external global i64")
 }
 
 // isErrorValue reports a statically typed Error: a builtin one or an Error
@@ -1019,9 +986,25 @@ func (e *Emitter) isErrorValue(t Type) bool {
 // markErrorCauseOwn records that error obj's `cause` was assigned on it,
 // making it an own enumerable property (boxsrc/errkeys.c).
 func (e *Emitter) markErrorCauseOwn(obj Value) {
+	// A class that declares its own `cause` field lists it from its
+	// layout already (beside the error's own slot of that name).
+	if obj.Ty.IsClass() {
+		for name := obj.Ty.ClassName; name != ""; {
+			info, ok := e.classes[name]
+			if !ok {
+				break
+			}
+			for _, f := range info.OwnFields {
+				if f.Name == "cause" {
+					return
+				}
+			}
+			name = info.BaseClass
+		}
+	}
 	e.emitErrorOwnKeysHooks()
-	e.declareFn("__kml_error_own_cause", "declare void @__kml_error_own_cause(ptr)")
-	e.emitInstr(fmt.Sprintf("call void @__kml_error_own_cause(ptr %s)", obj.Ref))
+	e.declareFn("__kml_error_own_cause", "declare void @__kml_error_own_cause("+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @__kml_error_own_cause("+irPtr+" %s)", obj.Ref))
 }
 
 // markErrorNameOwn records that error obj's `name` was assigned on it, and
@@ -1040,8 +1023,8 @@ func (e *Emitter) markErrorNameOwn(obj Value) {
 	}
 	// The first assignment places the property; a later one keeps it there.
 	gep, cur, unset, v := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, obj.Ty.StructIR(), obj.Ref, idx))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, gep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, obj.Ty.StructIR(), obj.Ref, idx))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, gep))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", unset, cur))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", v, unset, pos+1, cur))
 	e.heapStore("i64", v, gep, 8)
@@ -1082,7 +1065,7 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 		e.ensureInspectReduce()
 		e.declareInspectOptDepth()
 		optDepth = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_inspect_opt_depth, align 8", optDepth))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_inspect_opt_depth, align 8", optDepth))
 	}
 	left := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", left, optDepth, depthReg))
@@ -1104,7 +1087,7 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 		depthName := fmt.Sprintf("__kml_insp_optdepth_%d", e.dynFnCtr)
 		e.dynFnCtr++
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", depthBox))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed, depthBox))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", boxed, depthBox))
 		e.define(depthName, Symbol{Ptr: depthBox, Ty: TypeAny})
 		fullDepth = ast.NewIdentifier(depthName, ast.Pos{})
 	}
@@ -1112,7 +1095,7 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 	e.dynFnCtr++
 	leftSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca double, align 8", leftSlot))
-	e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", leftF, leftSlot))
+	e.emitInstr(fmt.Sprintf("store double %s, "+irPtr+" %s, align 8", leftF, leftSlot))
 	e.define(leftName, Symbol{Ptr: leftSlot, Ty: TypeF64})
 	leftID := ast.NewIdentifier(leftName, ast.Pos{})
 	// options.depth is the inspection's configured depth (Node's
@@ -1125,8 +1108,8 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 	self := fmt.Sprintf("__kml_insp_self_%d", e.dynFnCtr)
 	e.dynFnCtr++
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", val.Ref, slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", val.Ref, slot))
 	e.define(self, Symbol{Ptr: slot, Ty: val.Ty})
 	r, err := e.emitClassMethodCall(val.Ty, ast.NewIdentifier(self, ast.Pos{}), inspectCustomMethod, all, ast.Pos{})
 	if err != nil {
@@ -1136,7 +1119,7 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 		// A string is spliced in indented to its nesting level.
 		e.ensureInspectReduce()
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_reindent(ptr %s, i64 %s)", out, r.Ref, depthReg))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_reindent("+irPtr+" %s, i64 %s)", out, r.Ref, depthReg))
 		return Value{Ref: out, Ty: r.Ty}, true, nil
 	}
 	if static < 0 {
@@ -1157,18 +1140,18 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 			}
 		} else {
 			e.ensureDynJSONC()
-			e.declareFn("__kml_any_inspect_at", "declare ptr @__kml_any_inspect_at(i64, i64)")
+			e.declareFn("__kml_any_inspect_at", "declare "+irPtr+" @__kml_any_inspect_at(i64, i64)")
 			s = Value{Ref: e.freshReg(), Ty: TypePtr}
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_any_inspect_at(i64 %s, i64 %s)", s.Ref, r.Ref, depthReg))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_any_inspect_at(i64 %s, i64 %s)", s.Ref, r.Ref, depthReg))
 		}
 		tag, pay := e.emitUnboxTagPayload(r)
 		isStr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
 		e.ensureInspectReduce()
 		str := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_inspect_reindent(ptr %s, i64 %s)", str, e.emitIntToPtr(pay), depthReg))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_reindent("+irPtr+" %s, i64 %s)", str, e.emitIntToPtr(pay), depthReg))
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", out, isStr, str, s.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", out, isStr, str, s.Ref))
 		return Value{Ref: out, Ty: TypePtr}, true, nil
 	}
 	s, err := e.emitInspectField(r, static)
@@ -1191,17 +1174,17 @@ func (e *Emitter) emitToStringTagHook() {
 		if !e.classHasMethodInherited(c, getter) {
 			// A class extending a host inherits its host's tag
 			// (`[object Map]`, TDD-00247).
-			e.emitTerminator(fmt.Sprintf("ret ptr %s", e.internString(hostTagName(*info.HostBase))))
+			e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", e.internString(hostTagName(*info.HostBase))))
 		} else if t, err := e.emitClassCall(info.Ty, Value{Ref: "%o", Ty: info.Ty}, getter, nil, ast.Pos{}, false); err == nil && !e.blockDone {
-			e.emitTerminator(fmt.Sprintf("ret ptr %s", e.convert(t, TypePtr).Ref))
+			e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", e.convert(t, TypePtr).Ref))
 		}
 		if !e.blockDone {
-			e.emitTerminator("ret ptr null")
+			e.emitTerminator("ret " + irPtr + " null")
 		}
 		body := e.allocas.String() + e.body.String()
 		restore()
-		e.emitGlobal(fmt.Sprintf("define internal ptr @%s(ptr %%o) {\nentry:\n%s}", thunk, body))
-		e.addUnitRow(unitKindToStringTag, "{ i64, ptr }", id, "ptr @"+thunk)
+		e.emitGlobal(funcDef("internal "+irPtr+" @"+thunk+"("+irPtr+" %o)", body))
+		e.addUnitRow(unitKindToStringTag, "{ i64, "+irPtr+" }", id, irPtr+" @"+thunk)
 	}
 	e.emitUnitDispatch("__kml_obj_tostring_tag", unitKindToStringTag, "", "")
 }
@@ -1225,16 +1208,16 @@ func (e *Emitter) emitInspectCustomHook() {
 			// chosen by the depth asked for.
 			e.emitHostClassInspectThunk(info)
 		} else if s, ok, err := e.emitInspectCustomAt(Value{Ref: "%o", Ty: info.Ty}, "%depth", -1); ok && err == nil && !e.blockDone {
-			e.emitTerminator(fmt.Sprintf("ret ptr %s", s.Ref))
+			e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", s.Ref))
 		}
 		if !e.blockDone {
-			e.emitTerminator("ret ptr null")
+			e.emitTerminator("ret " + irPtr + " null")
 		}
 		body := e.allocas.String() + e.body.String()
 		restore()
 		stable()
-		e.emitGlobal(fmt.Sprintf("define internal ptr @%s(ptr %%o, i64 %%depth) {\nentry:\n%s}", thunk, body))
-		e.addUnitRow(unitKindInspectCustom, "{ i64, ptr }", id, "ptr @"+thunk)
+		e.emitGlobal(funcDef("internal "+irPtr+" @"+thunk+"("+irPtr+" %o, i64 %depth)", body))
+		e.addUnitRow(unitKindInspectCustom, "{ i64, "+irPtr+" }", id, irPtr+" @"+thunk)
 	}
 	e.emitUnitDispatch("__kml_obj_inspect_custom", unitKindInspectCustom, ", i64 %depth", ", i64 %depth")
 }
@@ -1287,6 +1270,6 @@ func (e *Emitter) mapViewInspect(val Value, depth int, own func() (Value, error)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, ov.Ref, ownEnd, os.Ref, otherEnd))
+	e.emitInstr(fmt.Sprintf("%s = phi "+irPtr+" [ %s, %%%s ], [ %s, %%%s ]", r, ov.Ref, ownEnd, os.Ref, otherEnd))
 	return Value{Ref: r, Ty: TypePtr}, true, nil
 }

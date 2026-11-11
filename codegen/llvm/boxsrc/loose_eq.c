@@ -15,6 +15,7 @@ extern double __kml_any_tonum(i64 v);
 extern i64 __kml_toprimitive(i64 v, int hint);
 extern unsigned char __kml_boxed_bigint_eq(void *ca, void *cb);
 extern unsigned char __kml_boxed_bigint_eq_num(void *cell, double d);
+extern unsigned char __kml_boxed_bigint_eq_str(void *cell, const char *s);
 
 /* mirrors __kml_nb_tag (runtime_nanbox.go) */
 static int nb_tag(i64 w) {
@@ -34,18 +35,33 @@ static void *bigint_cell(i64 w) {
 
 _Bool __kml_any_loose_eq(i64 a0, i64 b0) {
     void *biga = bigint_cell(a0), *bigb = bigint_cell(b0);
+    /* A bigint against an object (`Object(2n) == 2n`): the object's
+     * primitive against it. */
+    if ((biga != 0) != (bigb != 0)) {
+        i64 other = biga ? b0 : a0;
+        if (nb_tag(other) >= 6 && !bigint_cell(other)) {
+            i64 p = __kml_toprimitive(other, 2);
+            if (p == other) return 0; /* a symbol: equal to no bigint */
+            return biga ? __kml_any_loose_eq(a0, p) : __kml_any_loose_eq(p, b0);
+        }
+    }
     if (biga || bigb) {
         if (biga && bigb) return __kml_boxed_bigint_eq(biga, bigb) & 1;
         void *cell = biga ? biga : bigb;
         i64 other = biga ? b0 : a0;
         int to = nb_tag(other);
         if (to == 4 || to == 5 || to >= 6) return 0;
+        if (to == 2) {
+            /* A string: its StringToBigInt, equal to none when it is none. */
+            return __kml_boxed_bigint_eq_str(cell, (const char *)(u64)other) & 1;
+        }
         return __kml_boxed_bigint_eq_num(cell, __kml_any_tonum(other)) & 1;
     }
     int aobj = nb_tag(a0) >= 6, bobj = nb_tag(b0) >= 6;
     if (aobj && bobj) return __kml_any_eq(a0, b0) & 1;
     i64 a = aobj ? __kml_toprimitive(a0, 2) : a0;
     i64 b = bobj ? __kml_toprimitive(b0, 2) : b0;
+    if (bigint_cell(a) || bigint_cell(b)) return __kml_any_loose_eq(a, b);
     int ta = nb_tag(a), tb = nb_tag(b);
     int anull = ta == 4 || ta == 5, bnull = tb == 4 || tb == 5;
     if (anull || bnull) return anull && bnull;

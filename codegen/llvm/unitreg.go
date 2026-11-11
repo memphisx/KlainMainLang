@@ -22,22 +22,21 @@ func UnitRegSource() string {
 	return unitRegSource
 }
 
-// UsesUnitReg reports whether the program registered any table rows (the
-// registry runtime is then linked in).
-func (e *Emitter) UsesUnitReg() bool { return e.usedUnitReg }
-
 // Table kinds; each must stay below KML_UNIT_KINDS in unitreg.c.
 const (
-	unitKindToStringTag   = 0 // { i64 id, ptr fn(ptr) -> ptr }
-	unitKindInspectCustom = 1 // { i64 id, ptr fn(ptr, i64) -> ptr }
-	unitKindHost          = 2 // hostRowTy (emit_hostbox.go), keyed by the whole header word
-	unitKindShape         = 3 // KmlShape (shapesrc/shape.c)
-	unitKindFnMeta        = 4 // KmlFnMeta (fnmetasrc/fnmeta.c), keyed by the code pointer
-	unitKindCtor          = 5 // ctorRowTy (emit_classref_rows.go), keyed by the reference payload
-	unitKindCtorOf        = 6 // { i64 id, ptr payload }: obj.constructor by type id
-	unitKindClassParent   = 7 // { i64 id, i64 parent id }: __kml_class_is walks it
-	unitKindDynEntry      = 8 // { i64 fn, ptr entry }: a literal's dynamic entry (emit_dynentry.go)
-	unitKindFnStatic      = 9 // { i64 fn identity, ptr get(ptr key) }: a builtin constructor's statics by value (fnmeta.c)
+	unitKindToStringTag   = 0  // { i64 id, ptr fn(ptr) -> ptr }
+	unitKindInspectCustom = 1  // { i64 id, ptr fn(ptr, i64) -> ptr }
+	unitKindHost          = 2  // hostRowTy (emit_hostbox.go), keyed by the whole header word
+	unitKindShape         = 3  // KmlShape (shapesrc/shape.c)
+	unitKindFnMeta        = 4  // KmlFnMeta (fnmetasrc/fnmeta.c), keyed by the function's prefix word
+	unitKindCtor          = 5  // ctorRowTy (emit_classref_rows.go), keyed by the reference payload
+	unitKindCtorOf        = 6  // { i64 id, ptr payload }: obj.constructor by type id
+	unitKindClassParent   = 7  // { i64 id, i64 parent id }: __kml_class_is walks it
+	unitKindDynEntry      = 8  // { i64 fn word, ptr entry }: a literal's dynamic entry (emit_dynentry.go)
+	unitKindFnStatic      = 9  // { i64 fn word, ptr get(ptr key) }: a builtin constructor's statics by value (fnmeta.c)
+	unitKindClassSrc      = 10 // KmlFnMeta: a class's source text, keyed by its reference (fnmeta.c)
+	unitKindLayout        = 11 // KmlLayout (kml_heap.h): an object layout's size and pointer map (layout_table.go)
+	unitKindPrimClass     = 12 // { i64 id, i64 0 }: a class extending Number, String or Boolean (its primitive at +8)
 )
 
 // unitRow is one table row: its constant, `{ i64 <id>, ... }`.
@@ -54,16 +53,6 @@ type unitTable struct {
 	rows  []unitRow
 }
 
-// ensureUnitReg declares the registry's lookup.
-func (e *Emitter) ensureUnitReg() {
-	if e.usedUnitReg {
-		return
-	}
-	e.usedUnitReg = true
-	e.emitGlobal("declare void @__kml_unit_register(i64, ptr, i64, i64)")
-	e.emitGlobal("declare ptr @__kml_unit_find(i64, i64)")
-}
-
 // addUnitRow adds a row to kind's table. rowTy is the row's IR struct type,
 // starting with the i64 id; fields is the IR of the fields after the id.
 func (e *Emitter) addUnitRow(kind int, rowTy string, id int64, fields string) {
@@ -72,7 +61,6 @@ func (e *Emitter) addUnitRow(kind int, rowTy string, id int64, fields string) {
 
 // addUnitRowLit adds a row given as its whole constant, `{ i64 <id>, ... }`.
 func (e *Emitter) addUnitRowLit(kind int, rowTy, lit string) {
-	e.ensureUnitReg()
 	if e.unitTables == nil {
 		e.unitTables = map[int]*unitTable{}
 	}
@@ -92,6 +80,7 @@ func (e *Emitter) addCtor(fn string) { e.ctors = append(e.ctors, fn) }
 func (e *Emitter) emitUnitRegFinalize() {
 	e.emitConstructorOfOnce() // a constructor read a late finalize step generated
 	e.emitClassParentRows()
+	e.emitLayoutRows()
 	if len(e.unitTables) > 0 {
 		kinds := make([]int, 0, len(e.unitTables))
 		for k := range e.unitTables {
@@ -137,16 +126,16 @@ func (e *Emitter) emitUnitRegFinalize() {
 // defineUnitInit defines the function registering a unit's tables: body's
 // registration calls, then return.
 func (e *Emitter) defineUnitInit(linkage, name, body string) {
-	e.emitGlobal(fmt.Sprintf("define %svoid %s() {\nentry:\n%s  ret void\n}", linkage, name, body))
+	e.emitGlobal(funcDef(linkage+"void "+name+"()", body+"  ret void\n"))
 }
 
 // emitUnitRows emits one table's rows as a constant array, and its
 // registration into body.
 func (e *Emitter) emitUnitRows(body *strings.Builder, name string, kind int, rowTy string, elems []string) {
 	arr := fmt.Sprintf("[%d x %s]", len(elems), rowTy)
-	e.emitGlobal(fmt.Sprintf("%s = private constant %s [%s]", name, arr, strings.Join(elems, ", ")))
-	stride := fmt.Sprintf("ptrtoint (ptr getelementptr (%s, ptr null, i32 1) to i64)", rowTy)
-	fmt.Fprintf(body, "  call void @__kml_unit_register(i64 %d, ptr %s, i64 %d, i64 %s)\n", kind, name, len(elems), stride)
+	e.emitGlobal(fmt.Sprintf("%s = private"+irGlobalAS+" constant %s [%s]", name, arr, strings.Join(elems, ", ")))
+	stride := fmt.Sprintf("ptrtoint ("+irPtr+" getelementptr (%s, "+irPtr+" null, i32 1) to i64)", rowTy)
+	fmt.Fprintf(body, "  call void @__kml_unit_register(i64 %d, "+irPtr+" %s, i64 %d, i64 %s)\n", kind, name, len(elems), stride)
 }
 
 // islandRowRe finds a dynamic-only file's key in a row's symbols.
@@ -203,20 +192,19 @@ func (e *Emitter) emitCtorList() {
 // and calls its function with (o<extra args>), or returns null when no row
 // matches. Only the two hooks C defines (kinds 0 and 1) are supported.
 func (e *Emitter) emitUnitDispatch(name string, kind int, params, args string) {
-	e.ensureUnitReg()
-	e.emitGlobal(fmt.Sprintf("declare ptr @%s(ptr%s)", name, strings.ReplaceAll(params, " %depth", "")))
+	e.emitGlobal(fmt.Sprintf("declare "+irPtr+" @%s(ptr%s)", name, strings.ReplaceAll(params, " %depth", "")))
 }
 
 // unitFieldIR looks key up in kind's table and binds `%<out>` to field idx
 // (of IR type ty) of the row found, or to def when there is none. Its
 // blocks are named after out, so one function can hold several.
 func unitFieldIR(kind int, rowTy, key string, idx int, ty, def, out string) string {
-	return fmt.Sprintf(`  %%%[1]s.row = call ptr @__kml_unit_find(i64 %[2]d, i64 %[3]s)
-  %%%[1]s.none = icmp eq ptr %%%[1]s.row, null
+	return fmt.Sprintf(`  %%%[1]s.row = call `+irPtr+` @__kml_unit_find(i64 %[2]d, i64 %[3]s)
+  %%%[1]s.none = icmp eq `+irPtr+` %%%[1]s.row, null
   br i1 %%%[1]s.none, label %%%[1]s.miss, label %%%[1]s.hit
 %[1]s.hit:
-  %%%[1]s.p = getelementptr %[4]s, ptr %%%[1]s.row, i32 0, i32 %[5]d
-  %%%[1]s.v = load %[6]s, ptr %%%[1]s.p, align 8
+  %%%[1]s.p = getelementptr %[4]s, `+irPtr+` %%%[1]s.row, i32 0, i32 %[5]d
+  %%%[1]s.v = load %[6]s, `+irPtr+` %%%[1]s.p, align 8
   br label %%%[1]s.join
 %[1]s.miss:
   br label %%%[1]s.join
@@ -228,10 +216,8 @@ func unitFieldIR(kind int, rowTy, key string, idx int, ty, def, out string) stri
 // emitClassIs is `instanceof` on a stored type id (a header word, or an
 // Error's flagged kind slot): whether its class is target's or extends it.
 func (e *Emitter) emitClassIs(stored string, target int64) string {
-	e.ensureUnitReg()
 	if !e.usedClassIs {
 		e.usedClassIs = true
-		e.emitGlobal("declare i32 @__kml_class_is(i64, i64)")
 	}
 	r, b := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_class_is(i64 %s, i64 %d)", r, stored, target))
@@ -262,6 +248,8 @@ func (e *Emitter) emitClassParentRows() {
 		} else if info.HostBase != nil {
 			// A class extending Map or Set: its host layout (TDD-00247).
 			parent = e.hostID(*info.HostBase) & kmlHdrIDMask
+		} else if fam, ok := e.genericFamilies[info.GenericOf]; ok && info.GenericOf != "" {
+			parent = fam & kmlHdrIDMask // an instantiation: its generic's (instanceof)
 		}
 		if parent >= 0 {
 			e.addUnitRow(unitKindClassParent, "{ i64, i64 }", info.TagID&kmlHdrIDMask, fmt.Sprintf("i64 %d", parent))

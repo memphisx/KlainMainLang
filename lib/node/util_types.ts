@@ -1,7 +1,6 @@
 // Node's `util/types` (lib/internal/util/types.js): the type predicates
-// `util.types` carries. This compiler has no boxed primitives
-// (`new Number(1)`), external values, proxies or module namespace objects
-// held as values, so their predicates are false.
+// `util.types` carries. This compiler has no external values, so that
+// predicate is false.
 
 function tag(value: any): string {
     return Object.prototype.toString.call(value);
@@ -39,12 +38,23 @@ export function isBigUint64Array(value: unknown): boolean {
     return isTypedArrayOf(value, 'BigUint64Array');
 }
 
+// A wrapper object (`new Boolean(true)`) is an object whose class tag is
+// its primitive's.
+function isWrapperOf(value: unknown, name: string): boolean {
+    return typeof value === 'object' && value !== null && tag(value) === '[object ' + name + ']';
+}
+
+export function isBigIntObject(value: unknown): boolean {
+    return isWrapperOf(value, 'BigInt');
+}
+
 export function isBooleanObject(value: unknown): boolean {
-    return false;
+    return isWrapperOf(value, 'Boolean');
 }
 
 export function isBoxedPrimitive(value: unknown): boolean {
-    return false;
+    return isWrapperOf(value, 'Boolean') || isWrapperOf(value, 'Number') || isWrapperOf(value, 'String') ||
+        isWrapperOf(value, 'BigInt') || isWrapperOf(value, 'Symbol');
 }
 
 export function isDataView(value: unknown): boolean {
@@ -100,7 +110,7 @@ export function isMapIterator(value: unknown): boolean {
 }
 
 export function isModuleNamespaceObject(value: unknown): boolean {
-    return false;
+    return isWrapperOf(value, 'Module');
 }
 
 export function isNativeError(value: unknown): boolean {
@@ -108,7 +118,7 @@ export function isNativeError(value: unknown): boolean {
 }
 
 export function isNumberObject(value: unknown): boolean {
-    return false;
+    return isWrapperOf(value, 'Number');
 }
 
 export function isPromise(value: unknown): boolean {
@@ -116,7 +126,7 @@ export function isPromise(value: unknown): boolean {
 }
 
 export function isProxy(value: unknown): boolean {
-    return false;
+    return __kml_native.isProxy(value);
 }
 
 export function isRegExp(value: unknown): boolean {
@@ -136,11 +146,11 @@ export function isSharedArrayBuffer(value: unknown): boolean {
 }
 
 export function isStringObject(value: unknown): boolean {
-    return false;
+    return isWrapperOf(value, 'String');
 }
 
 export function isSymbolObject(value: unknown): boolean {
-    return false;
+    return isWrapperOf(value, 'Symbol');
 }
 
 export function isTypedArray(value: unknown): boolean {

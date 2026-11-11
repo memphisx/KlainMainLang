@@ -25,7 +25,7 @@ func TestE2EArrayNonNumericIndexRejected(t *testing.T) {
 		{`const a=[1,2,3]; a.at(Symbol("x"))`, "argument of type 'symbol' is not assignable"},
 		{`const a=[1,2,3]; a.fill(0, Symbol("x"))`, "argument of type 'symbol' is not assignable"},
 		{`const a=[1,2,3]; a.copyWithin(Symbol("x"), 0)`, "argument of type 'symbol' is not assignable"},
-		{`const a=[1,2,3]; const o={v:1}; a[o]`, "array index"},
+		{`const a=[1,2,3]; const o={v:1}; a[o]`, "cannot be used as an index type"},
 		{`const a=[1,2,3]; a.splice(0, Symbol("x"))`, "argument of type 'symbol' is not assignable"},
 		{`const a=[1,2,3]; a.indexOf(1, Symbol("x"))`, "argument of type 'symbol' is not assignable"},
 	}

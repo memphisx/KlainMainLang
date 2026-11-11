@@ -40,9 +40,6 @@ var moduleTaskSource string
 // ModuleTaskSource is module.c, behind kml_layout.h.
 func ModuleTaskSource() string { return layoutHeader() + moduleTaskSource }
 
-// UsesModuleTask reports whether the program links module.c.
-func (e *Emitter) UsesModuleTask() bool { return e.usedModuleTaskRuntime }
-
 // tlaUnsettledMsg is what Node prints (first line) for a module whose top-level
 // await can never settle.
 const tlaUnsettledMsg = "Warning: Detected unsettled top-level await\n"
@@ -75,21 +72,6 @@ func stmtsHaveTopLevelAwait(body []ast.Statement) bool {
 	return false
 }
 
-// ensureModuleTaskRuntime emits the module task's trampoline and the helper a
-// blocking event-loop call in module code goes through.
-func (e *Emitter) ensureModuleTaskRuntime() {
-	if e.usedModuleTaskRuntime {
-		return
-	}
-	e.usedModuleTaskRuntime = true
-	e.ensureTaskRuntime()
-	// Defined in module.c; the entry program and worker loops read them.
-	e.emitGlobal(`@__kml_module_task = external thread_local global ptr, align 8
-@__kml_module_wants_loop = external thread_local global i1, align 1
-@__kml_module_promise = external thread_local global ptr, align 8
-declare void @__kml_module_trampoline()`)
-}
-
 // moduleBodySplit holds main()'s builders while the module body is emitted into
 // its own pair.
 type moduleBodySplit struct {
@@ -119,10 +101,7 @@ func (e *Emitter) beginModuleBody() *moduleBodySplit {
 func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 	e.emitTerminator("ret void")
 	e.inModuleTask = false
-	e.functions.WriteString("\ndefine internal void @__kml_module_body(ptr %__kml_module_args) {\nentry:\n")
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	e.writeFunc("internal void @__kml_module_body("+irPtr+" %__kml_module_args)", e.allocas.String()+e.body.String())
 	e.allocas = strings.Builder{}
 	e.body = strings.Builder{}
 	e.allocas.WriteString(s.allocas.String())
@@ -130,10 +109,10 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 	e.blockDone = s.blockDone
 	e.frame, e.frameOld, e.sitePos = s.frame, s.frameOld, s.sitePos
 
-	e.ensureModuleTaskRuntime()
+	e.ensureTaskRuntime()
 	prom := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_module_promise, align 8", prom))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", prom))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_module_promise, align 8", prom))
 	// The runtime consumes the module's promise (the loop's wait, or the
 	// importer polling an island): never an unhandled rejection (ADR-01192).
 	e.emitMarkPromiseHandled(prom)
@@ -145,7 +124,7 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 		tramp = "@__kml_task_trampoline"
 	}
 	t := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_spawn_task_ex(ptr @__kml_module_body, ptr null, ptr %s, i64 %d, ptr %s)",
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_spawn_task_ex("+irPtr+" @__kml_module_body, "+irPtr+" null, "+irPtr+" %s, i64 %d, "+irPtr+" %s)",
 		t, prom, e.moduleTaskStackBytes(), tramp))
 	return prom
 }
@@ -155,15 +134,15 @@ func (e *Emitter) endModuleBody(s *moduleBodySplit) string {
 // (__kml_module_park_for_loop), resume the task and run the loop again.
 func (e *Emitter) emitModuleLoopResume(loopL string) {
 	wants := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr @__kml_module_wants_loop, align 1", wants))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" @__kml_module_wants_loop, align 1", wants))
 	resumeL := e.freshLabel("mod.resume")
 	doneL := e.freshLabel("mod.loopdone")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", wants, resumeL, doneL))
 	e.emitLabel(resumeL)
-	e.emitInstr("store i1 false, ptr @__kml_module_wants_loop, align 1")
+	e.emitInstr("store i1 false, " + irPtr + " @__kml_module_wants_loop, align 1")
 	mt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_module_task, align 8", mt))
-	e.emitInstr(fmt.Sprintf("call void @__kml_task_resume(ptr %s)", mt))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_module_task, align 8", mt))
+	e.emitInstr(fmt.Sprintf("call void @__kml_task_resume("+irPtr+" %s)", mt))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
 	e.emitLabel(doneL)
 }
@@ -173,12 +152,10 @@ func (e *Emitter) emitModuleLoopResume(loopL string) {
 // pending, so nothing alive can settle it — a warning, `process.on('exit')`
 // listeners with code 13, exit code 13.
 func (e *Emitter) emitModuleUnsettledCheck(prom string) {
-	e.ensureExit()
-	e.ensureWriteDecl()
 	sp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, prom))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", sp, promiseStructIR, prom))
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, sp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", st, sp))
 	pending := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", pending, st))
 	unsL := e.freshLabel("mod.unsettled")
@@ -186,9 +163,9 @@ func (e *Emitter) emitModuleUnsettledCheck(prom string) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", pending, unsL, okL))
 	e.emitLabel(unsL)
 	w := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @write(i32 2, ptr @.kml_tla_unsettled, i64 %d)", w, len(tlaUnsettledMsg)))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @write(i32 2, "+irPtr+" @.kml_tla_unsettled, i64 %d)", w, len(tlaUnsettledMsg)))
 	if e.usedProcessLifecycle {
-		e.emitInstr("store i64 13, ptr @__kml_process_exit_code, align 8")
+		e.emitInstr("store i64 13, " + irPtr + " @__kml_process_exit_code, align 8")
 		e.emitInstr("call void @__kml_run_exit_handlers(i64 13)")
 	}
 	e.emitInstr("call void @exit(i32 13)")

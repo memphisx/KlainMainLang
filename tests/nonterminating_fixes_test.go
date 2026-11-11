@@ -176,3 +176,24 @@ console.log(gsab.byteLength)
 	// spec (and test262) read the length first — RangeError.
 	assertOutputCompatJS(t, src, "caught RangeError\n4")
 }
+
+// Atomics read as a value and an Atomics receiver held in any (its kind
+// decided at run time, V8's TypeError for a non-integer array or a
+// non-array), a member the namespace lacks, and `new X()` of a top-level
+// binding inside a function.
+func TestE2EAtomicsValueAndDynamicReceiver(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCLIJS(t, `
+const a = Atomics;
+const t = new Int32Array(2);
+console.log(typeof a.add, Object.prototype.toString.call(Atomics), a.add(t, 0, 5), a.load(t, 0), a.exchange(t, 1, 9), t);
+function f(x) { try { return Atomics.add(x, 0, 1) } catch (e) { return e.message } }
+console.log(f(new Uint8Array(1)), f(new Float64Array(1)), f({}), f(null), f('s'), f([1]), f(5));
+function g(x) { try { return Atomics.notify(x, 0) } catch (e) { return e.message } }
+console.log(g(new Int32Array(1)), g(new Int8Array(1)));
+console.log(Atomics.wake, Math.nope, JSON.nope);
+const EE = globalThis.Nope;
+function h() { try { new EE() } catch (e) { console.log(e.message) } }
+h();
+`)
+}

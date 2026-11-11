@@ -50,12 +50,19 @@ func hasBodyMixin(t Type) bool {
 // null at construction, see emit_fetch_request.go), so this is really just
 // the init-object path with the fields already resolved and validated.
 func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 && len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: fetch takes 1 argument (url or Request) or 2 (url, init)", pos.Line, pos.Col)
+	if len(args) > 2 {
+		kept, err := e.dropArgsPast(args, 2, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		args = kept
+	}
+	if len(args) == 0 {
+		args = []ast.Expression{ast.NewNullLiteral(true, pos)} // (its URL "undefined" then fails to parse)
 	}
 
 	if len(args) == 1 {
-		if reqTy := e.inferExprType(args[0]); reqTy.IsFetchRequest() {
+		if reqTy := e.typeOfExpr(args[0]); reqTy.IsFetchRequest() {
 			reqVal, err := e.emitExpr(args[0])
 			if err != nil {
 				return Value{}, err
@@ -75,7 +82,11 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			return e.emitFetchAsyncCall(urlVal.Ref, methodVal.Ref, headersRef, bodyVal.Ref, "null")
+			sigIdx, sigFieldTy, _ := reqTy.FieldIndex("__kml_signal")
+			sig := e.loadFieldValue(reqVal, sigIdx, sigFieldTy)
+			lenIdx, lenFieldTy, _ := reqTy.FieldIndex("bodyLength")
+			bodyLen := e.loadFieldValue(reqVal, lenIdx, lenFieldTy)
+			return e.emitFetchAsyncCallN(urlVal.Ref, methodVal.Ref, headersRef, bodyVal.Ref, bodyLen.Ref, sig.Ref)
 		}
 	}
 
@@ -95,8 +106,29 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		// An init held in `any` is read member by member at run time;
 		// undefined or null is no init (WebIDL's empty dictionary).
 		dyn := isUnconstrainedDynamic(initVal.Ty)
+		if nullishLiteralType(initVal.Ty) {
+			// undefined or null: no init.
+			return e.emitFetchAsyncCallN(urlVal.Ref, "null", "null", "null", "-1", "null")
+		}
+		if initVal.Ty.IsSymbol() {
+			// Not a dictionary (WebIDL's RequestInit conversion), and one
+			// its message cannot show: the promise rejects, nothing sent.
+			return e.emitFetchRejected(e.internString("Cannot convert a Symbol value to a string"), pos)
+		}
 		if !initVal.Ty.IsObject() && !dyn {
-			return Value{}, fmt.Errorf("%d:%d: fetch's second argument must be an object with an optional method/headers/body field", pos.Line, pos.Col)
+			// Not a dictionary: the promise rejects, nothing sent.
+			shown, err := e.emitValueToString(initVal)
+			if err != nil {
+				return Value{}, err
+			}
+			msg, err := e.emitStringConcat(Value{Ref: e.internString("undefined: Expected "), Ty: TypePtr}, shown)
+			if err != nil {
+				return Value{}, err
+			}
+			if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to be one of: Null, Undefined, Object."), Ty: TypePtr}); err != nil {
+				return Value{}, err
+			}
+			return e.emitFetchRejected(msg.Ref, pos)
 		}
 		dynGet := func(name string) Value {
 			v, _ := e.emitDynAnyMemberGetNamed(initVal, e.internString(name), name, pos)
@@ -106,19 +138,25 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		// are read only when it is there, and default to none.
 		var slots [5]string
 		var skipL, doneInitL string
+		// The error a refused init member rejects with (null: none), set
+		// before the init may be skipped.
+		rejectSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", rejectSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", rejectSlot))
+		rejectUsed := false
 		if initVal.Ty.Nullable() || dyn {
 			for i := range slots {
 				slots[i] = e.freshReg()
-				ir := "ptr"
+				ir := irPtr
 				if i == 4 {
 					ir = "i64"
 				}
 				e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slots[i], ir))
 			}
 			for i := 0; i < 4; i++ {
-				e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slots[i]))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", slots[i]))
 			}
-			e.emitInstr(fmt.Sprintf("store i64 -1, ptr %s, align 8", slots[4]))
+			e.emitInstr(fmt.Sprintf("store i64 -1, "+irPtr+" %s, align 8", slots[4]))
 			haveL := e.freshLabel("fetch.init")
 			skipL, doneInitL = e.freshLabel("fetch.noinit"), e.freshLabel("fetch.initdone")
 			var absent string
@@ -141,21 +179,25 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			}
 		}
 		if dyn {
-			// signal: an AbortSignal, or none when undefined/null.
+			// signal: an AbortSignal, or none when undefined/null; any
+			// other value rejects.
+			rejectUsed = true
+			if err := e.emitFetchSignalCheck(dynGet("signal"), rejectSlot, pos); err != nil {
+				return Value{}, err
+			}
 			if cls, hasSignals := e.abortSignalClass(); hasSignals {
 				sv := dynGet("signal")
 				sig := e.convert(sv, cls)
-				nullish := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp ule i64 %s, %d", nullish, sv.Ref, nbUndefined))
+				nullish := e.emitIsNullish(sv)
 				sel := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, nullish, sig.Ref))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", sel, nullish, sig.Ref))
 				signalRef = sel
 			}
 			mv := dynGet("method")
 			ms, _ := e.emitAnyIntoString(mv, TypePtr)
 			isUndef, sel := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, mv.Ref, nbUndefined))
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", sel, isUndef, ms.Ref))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", sel, isUndef, ms.Ref))
 			methodRef = sel
 		} else if idx, fieldTy, ok := initVal.Ty.FieldIndex("signal"); ok {
 			_, hasSignals := e.abortSignalClass()
@@ -166,7 +208,16 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 				// A program with no AbortSignal has none to pass: the member
 				// (RequestInit's `signal?: AbortSignal | null`) is absent.
 			default:
-				return Value{}, fmt.Errorf("%d:%d: fetch's init.signal must be an AbortSignal", pos.Line, pos.Col)
+				// Another value: the promise rejects (an undefined or null
+				// one is no signal).
+				box, err := e.emitBoxValue(e.loadFieldValue(initVal, idx, fieldTy))
+				if err != nil {
+					return Value{}, err
+				}
+				rejectUsed = true
+				if err := e.emitFetchSignalCheck(box, rejectSlot, pos); err != nil {
+					return Value{}, err
+				}
 			}
 		}
 		if idx, fieldTy, ok := initVal.Ty.FieldIndex("method"); ok && !dyn {
@@ -178,7 +229,12 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 				s, _ := e.emitAnyIntoString(mv, TypePtr)
 				methodRef = s.Ref
 			default:
-				return Value{}, fmt.Errorf("%d:%d: fetch's init.method must be a string", pos.Line, pos.Col)
+				// Another value: its ToString (WebIDL's ByteString).
+				sv, err := e.emitValueToString(mv)
+				if err != nil {
+					return Value{}, err
+				}
+				methodRef = sv.Ref
 			}
 		}
 		// The body, as undici's extractBody reads it, and the Content-Type
@@ -190,7 +246,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			bv := e.loadFieldValue(initVal, idx, fieldTy)
 			box, err := e.emitBoxValue(bv)
 			if err != nil {
-				return Value{}, fmt.Errorf("%d:%d: fetch's init.body: %v", pos.Line, pos.Col, err)
+				return Value{}, internalAt(pos, "fetch's init.body: %v", err)
 			}
 			bodyRef, bodyLen, ctRef = e.emitFetchBodyFromBox(box)
 		}
@@ -221,31 +277,30 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			}
 			has := e.convert(hasV, TypeBool).Ref
 			hasBody, need := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasBody, bodyRef))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasBody, bodyRef))
 			noCT := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", noCT, has))
 			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", need, noCT, hasBody))
 			addL, joinL := e.freshLabel("fetch.noct"), e.freshLabel("fetch.ctdone")
 			lslot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", lslot))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", headersRef, lslot))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", lslot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", headersRef, lslot))
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", need, addL, joinL))
 			e.emitLabel(addL)
-			e.ensureCurlSlist()
 			l2 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @curl_slist_append(ptr %s, ptr %s)", l2, headersRef, e.internString("Content-Type:")))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", l2, lslot))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @curl_slist_append("+irPtr+" %s, "+irPtr+" %s)", l2, headersRef, e.internString("Content-Type:")))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", l2, lslot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 			e.emitLabel(joinL)
 			l3 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", l3, lslot))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", l3, lslot))
 			headersRef = l3
 		}
 		if skipL != "" {
 			for i, r := range []string{methodRef, headersRef, bodyRef, signalRef} {
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r, slots[i]))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", r, slots[i]))
 			}
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bodyLen, slots[4]))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", bodyLen, slots[4]))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneInitL))
 			e.emitLabel(skipL)
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneInitL))
@@ -253,17 +308,152 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			refs := make([]string, 5)
 			for i := range refs {
 				refs[i] = e.freshReg()
-				ir := "ptr"
+				ir := irPtr
 				if i == 4 {
 					ir = "i64"
 				}
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", refs[i], ir, slots[i]))
+				e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", refs[i], ir, slots[i]))
 			}
 			methodRef, headersRef, bodyRef, signalRef, bodyLen = refs[0], refs[1], refs[2], refs[3], refs[4]
+		}
+		if rejectUsed {
+			// A refused init member: the promise rejects with its error.
+			errRef, rejected := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", errRef, rejectSlot))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", rejected, errRef))
+			rejL, sendL := e.freshLabel("fetch.rejected"), e.freshLabel("fetch.send")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", rejected, rejL, sendL))
+			e.emitLabel(rejL)
+			rv, err := e.emitFetchRejectedErr(errRef)
+			if err != nil {
+				return Value{}, err
+			}
+			res := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", res, rv.Ty.IR))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", rv.Ty.IR, rv.Ref, res))
+			joinL := e.freshLabel("fetch.settled")
+			e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+			e.emitLabel(sendL)
+			sv, err := e.emitFetchAsyncCallN(urlVal.Ref, methodRef, headersRef, bodyRef, bodyLen, signalRef)
+			if err != nil {
+				return Value{}, err
+			}
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", sv.Ty.IR, sv.Ref, res))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+			e.emitLabel(joinL)
+			out := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", out, sv.Ty.IR, res))
+			return Value{Ref: out, Ty: sv.Ty}, nil
 		}
 	}
 
 	return e.emitFetchAsyncCallN(urlVal.Ref, methodRef, headersRef, bodyRef, bodyLen, signalRef)
+}
+
+// emitFetchRejected is a fetch's result when its arguments are refused
+// before any request: a promise rejected with a TypeError of message msg
+// (a string register).
+func (e *Emitter) emitFetchRejected(msg string, pos ast.Pos) (Value, error) {
+	ev, err := e.emitExpr(ast.NewNewErrorExpression("TypeError", e.bindValue(Value{Ref: msg, Ty: TypePtr}, pos), pos))
+	if err != nil {
+		return Value{}, err
+	}
+	return e.emitFetchRejectedErr(ev.Ref)
+}
+
+// emitFetchRejectedErr is a fetch rejected with the error object errRef.
+func (e *Emitter) emitFetchRejectedErr(errRef string) (Value, error) {
+	e.ensureFetchAsync()
+	e.declareFn("__kml_fetch_rejected_pending", "declare "+irPtr+" @__kml_fetch_rejected_pending("+irPtr+")")
+	p := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_rejected_pending("+irPtr+" %s)", p, errRef))
+	return e.finishFetchPending(p)
+}
+
+// emitFetchSignalCheck refuses an init's signal (the box sv) that is not
+// an AbortSignal, undefined or null: WebIDL's TypeError, `RequestInit:
+// Expected signal ("5") to be an instance of AbortSignal.`, goes in the
+// reject slot the fetch then rejects with.
+func (e *Emitter) emitFetchSignalCheck(sv Value, slot string, pos ast.Pos) error {
+	nullish := e.emitIsNullish(sv)
+	isSig := "false"
+	if _, has := e.abortSignalClass(); has {
+		r := e.emitDynHostInstanceOf(sv, "AbortSignal")
+		isSig = r.Ref
+	}
+	ok := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok, nullish, isSig))
+	okL, badL := e.freshLabel("fetch.sig.ok"), e.freshLabel("fetch.sig.bad")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, badL))
+	e.emitLabel(badL)
+	shown, err := e.emitFetchSignalShown(sv, pos)
+	if err != nil {
+		return err
+	}
+	msg, err := e.emitStringConcat(Value{Ref: e.internString(`RequestInit: Expected signal ("`), Ty: TypePtr}, shown)
+	if err != nil {
+		return err
+	}
+	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(`") to be an instance of AbortSignal.`), Ty: TypePtr}); err != nil {
+		return err
+	}
+	ev, err := e.emitExpr(ast.NewNewErrorExpression("TypeError", e.bindValue(msg, pos), pos))
+	if err != nil {
+		return err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ev.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", okL))
+	e.emitLabel(okL)
+	return nil
+}
+
+// emitFetchSignalShown is the value sv as undici's webidl names it in a
+// message: a string in double quotes, a symbol as its description, anything
+// else as util.inspect shows it.
+func (e *Emitter) emitFetchSignalShown(sv Value, pos ast.Pos) (Value, error) {
+	id := e.bindValue(sv, pos)
+	isStr := ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, id, pos), ast.NewStringLiteral("string", pos), pos)
+	isSym := ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, id, pos), ast.NewStringLiteral("symbol", pos), pos)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	strV, err := e.emitExpr(isStr)
+	if err != nil {
+		return Value{}, err
+	}
+	sL, nsL, doneL := e.freshLabel("sig.str"), e.freshLabel("sig.notstr"), e.freshLabel("sig.shown")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.toBool(strV).Ref, sL, nsL))
+	e.emitLabel(sL)
+	q, err := e.emitExpr(ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral(`"`, pos), ast.NewAsExpression(id, nameAnnotation("string"), pos), pos), ast.NewStringLiteral(`"`, pos), pos))
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.convert(q, TypePtr).Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(nsL)
+	symV, err := e.emitExpr(isSym)
+	if err != nil {
+		return Value{}, err
+	}
+	yL, oL := e.freshLabel("sig.sym"), e.freshLabel("sig.other")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.toBool(symV).Ref, yL, oL))
+	e.emitLabel(yL)
+	ds, err := e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(id, "toString", pos), nil, pos))
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.convert(ds, TypePtr).Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(oL)
+	ins, err := e.emitDynamicInspect(sv)
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.convert(ins, TypePtr).Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
+	return Value{Ref: out, Ty: TypePtr}, nil
 }
 
 // emitFetchAsyncCallN is emitFetchAsyncCall with the body's byte length (-1:
@@ -272,23 +462,22 @@ func (e *Emitter) emitFetchAsyncCallN(urlRef, methodRef, headersRef, bodyRef, bo
 	e.ensureFetchAsync()
 	pendingReg := e.freshReg()
 	if bodyRef == "null" {
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async_n(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, ptr %s)",
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_async_n("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %s, "+irPtr+" %s)",
 			pendingReg, urlRef, methodRef, headersRef, bodyRef, bodyLen, signalRef))
 		return e.finishFetchPending(pendingReg)
 	}
 	// A body on a GET or HEAD request (the default method is GET) rejects
 	// with Node's TypeError, and nothing is sent.
-	e.ensureStrcasecmp()
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	hasBody, noMethod := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", hasBody, bodyRef))
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", noMethod, methodRef))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasBody, bodyRef))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", noMethod, methodRef))
 	m := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", m, noMethod, e.internString("GET"), methodRef))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", m, noMethod, e.internString("GET"), methodRef))
 	g, h, gz, hz, gh, bad := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @strcasecmp(ptr %s, ptr %s)", g, m, e.internString("GET")))
-	e.emitInstr(fmt.Sprintf("%s = call i32 @strcasecmp(ptr %s, ptr %s)", h, m, e.internString("HEAD")))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @strcasecmp("+irPtr+" %s, "+irPtr+" %s)", g, m, e.internString("GET")))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @strcasecmp("+irPtr+" %s, "+irPtr+" %s)", h, m, e.internString("HEAD")))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", gz, g))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", hz, h))
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", gh, gz, hz))
@@ -297,17 +486,17 @@ func (e *Emitter) emitFetchAsyncCallN(urlRef, methodRef, headersRef, bodyRef, bo
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, goL))
 	e.emitLabel(badL)
 	fp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_failed_pending(i64 -2)", fp))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fp, slot))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_failed_pending(i64 -2)", fp))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", fp, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(goL)
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async_n(ptr %s, ptr %s, ptr %s, ptr %s, i64 %s, ptr %s)",
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_async_n("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %s, "+irPtr+" %s)",
 		p, urlRef, methodRef, headersRef, bodyRef, bodyLen, signalRef))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", p, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", p, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pendingReg, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", pendingReg, slot))
 	return e.finishFetchPending(pendingReg)
 }
 
@@ -318,7 +507,7 @@ func (e *Emitter) emitFetchAsyncCallN(urlRef, methodRef, headersRef, bodyRef, bo
 func (e *Emitter) emitFetchAsyncCall(urlRef, methodRef, headersRef, bodyRef, signalRef string) (Value, error) {
 	e.ensureFetchAsync()
 	pendingReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fetch_async(ptr %s, ptr %s, ptr %s, ptr %s, ptr %s)",
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_async("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)",
 		pendingReg, urlRef, methodRef, headersRef, bodyRef, signalRef))
 	return e.finishFetchPending(pendingReg)
 }
@@ -326,10 +515,9 @@ func (e *Emitter) emitFetchAsyncCall(urlRef, methodRef, headersRef, bodyRef, sig
 // finishFetchPending boxes a pending fetch handle into a Promise<Response>
 // slot.
 func (e *Emitter) finishFetchPending(pendingReg string) (Value, error) {
-	e.ensureMalloc()
 	slotReg := e.freshReg()
-	e.heapMallocInto(slotReg, "8")
-	e.heapStore("ptr", pendingReg, slotReg, 8)
+	e.heapMallocInto(slotReg, allocHost, "8")
+	e.heapStore(irPtr, pendingReg, slotReg, 8)
 	return Value{Ref: slotReg, Ty: PromiseOf(ResponseType())}, nil
 }
 
@@ -347,7 +535,7 @@ func (e *Emitter) loadFieldValue(objVal Value, idx int, fieldTy Type) Value {
 		gep = e.emitRecordGep(objVal.Ref, objVal.Ty, idx, fieldTy, objVal.Ty.Fields[idx].Name)
 	} else {
 		gep = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
 	}
 	if isNullableScalar(fieldTy) {
 		// Its { i1, T } storage.
@@ -358,14 +546,14 @@ func (e *Emitter) loadFieldValue(objVal Value, idx int, fieldTy Type) Value {
 		return e.loadArrayFieldValue(gep, fieldTy)
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
 	return Value{Ref: r, Ty: fieldTy}
 }
 
 // buildFetchHeaderList is the curl_slist (ADR-00074/TDD-00017) of a
 // Map<string,string>'s entries (XMLHttpRequest's and http's header maps).
 func (e *Emitter) buildFetchHeaderList(mapPtr string) (string, error) {
-	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, "str", Type{IR: "ptr"})
+	keysPtr, keysLen, valsPtr := e.mapKeysAndVals(mapPtr, "str", Type{IR: irPtr})
 	return e.buildCurlSlist(keysLen, func(i string) (string, string) {
 		return e.loadPtrAt(keysPtr, i), e.loadPtrAt(valsPtr, i)
 	})
@@ -374,13 +562,12 @@ func (e *Emitter) buildFetchHeaderList(mapPtr string) (string, error) {
 // buildCurlSlist is a curl_slist of n "name: value" lines, entry(i) giving
 // line i's name and value. No lines is a null list.
 func (e *Emitter) buildCurlSlist(n string, entry func(i string) (name, value string)) (string, error) {
-	e.ensureCurlSlist()
 	listAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", listAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", listAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", listAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", listAlloca))
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("fetchheaders.cond")
 	bodyL := e.freshLabel("fetchheaders.body")
@@ -388,7 +575,7 @@ func (e *Emitter) buildCurlSlist(n string, entry func(i string) (name, value str
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	idxVal, isDone := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, %s", isDone, idxVal, n))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDone, doneL, bodyL))
 
@@ -403,17 +590,17 @@ func (e *Emitter) buildCurlSlist(n string, entry func(i string) (name, value str
 		return "", err
 	}
 	curList, newList := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curList, listAlloca))
-	e.emitInstr(fmt.Sprintf("%s = call ptr @curl_slist_append(ptr %s, ptr %s)", newList, curList, line2.Ref))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newList, listAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", curList, listAlloca))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @curl_slist_append("+irPtr+" %s, "+irPtr+" %s)", newList, curList, line2.Ref))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", newList, listAlloca))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	finalList := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", finalList, listAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", finalList, listAlloca))
 	return finalList, nil
 }
 
@@ -424,12 +611,12 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	e.emitResponseDriveToDone(objVal)
 	idx, fieldTy, ok := objVal.Ty.FieldIndex("body")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "not a Response")
 	}
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, objVal.Ty.StructIR(), objVal.Ref, idx))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", r, fieldTy.IR, gep, fieldTy.Align()))
 	// TDD-00120: the raw body field is the dual-use curl buffer (also .body /
 	// .arrayBuffer()), with no length header. text()/json() decode all
 	// bodyLength bytes as TextDecoder does: UTF-8, an invalid sequence as
@@ -437,32 +624,32 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	// without a body has a null one: "".
 	e.ensureStrHeaderRuntime()
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, r))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, r))
 	src := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", src, isNull, e.internString(""), r))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", src, isNull, e.internString(""), r))
 	lIdx, lTy, hasLen := objVal.Ty.FieldIndex("bodyLength")
 	if !hasLen || lTy.IR != "i64" {
 		rc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", rc, src))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", rc, src))
 		return Value{Ref: rc, Ty: fieldTy}, nil
 	}
 	lGep, raw, n := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lGep, objVal.Ty.StructIR(), objVal.Ref, lIdx))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", raw, lGep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", lGep, objVal.Ty.StructIR(), objVal.Ref, lIdx))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", raw, lGep))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", n, isNull, raw))
 	// A UTF-8 BOM (EF BB BF) opening the body is not part of the text.
 	long3, b0, b1, b2 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, 3", long3, n))
 	p1, p2 := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 1", p1, src))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 2", p2, src))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 1", p1, src))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 2", p2, src))
 	safe0, safe1, safe2 := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe0, long3, src, e.internString("___")))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe1, long3, p1, e.internString("___")))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe2, long3, p2, e.internString("___")))
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b0, safe0))
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b1, safe1))
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b2, safe2))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", safe0, long3, src, e.internString("___")))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", safe1, long3, p1, e.internString("___")))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", safe2, long3, p2, e.internString("___")))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", b0, safe0))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", b1, safe1))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", b2, safe2))
 	c0, c1, c2, c01, bom := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, -17", c0, b0))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, -69", c1, b1))
@@ -471,18 +658,18 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", bom, c01, c2))
 	skip, from, cnt := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 3, i64 0", skip, bom))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", from, src, skip))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", from, src, skip))
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", cnt, n, skip))
-	e.ensureBufferCodecs()
 	rc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_buf_utf8_str(ptr %s, i64 %s)", rc, from, cnt))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_buf_utf8_str("+irPtr+" %s, i64 %s)", rc, from, cnt))
 	return Value{Ref: rc, Ty: fieldTy}, nil
 }
 
 // emitResponseDriveToDone (TDD-00097 Stage 4): a headers-resolved Response
 // carries its pending handle; before any buffered body read, drive the
-// transfer to completion and cache body/bodyLength into the object (clearing
-// the handle so repeat reads are plain field loads).
+// transfer to completion and cache body/bodyLength into the object. The
+// handle stays: its headers, status line, URL and redirect count are read
+// from it after the body too (a finished transfer's drive returns at once).
 func (e *Emitter) emitResponseDriveToDone(objVal Value) {
 	pIdx, _, ok := objVal.Ty.FieldIndex("__kml_pending")
 	if !ok {
@@ -491,30 +678,28 @@ func (e *Emitter) emitResponseDriveToDone(objVal Value) {
 	e.ensureFetchAsync()
 	structIR := objVal.Ty.StructIR()
 	pGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", pGep, structIR, objVal.Ref, pIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", pGep, structIR, objVal.Ref, pIdx))
 	pending := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pending, pGep))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", pending, pGep))
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, pending))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, pending))
 	driveL := e.freshLabel("resp.drive")
 	doneL := e.freshLabel("resp.drive.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, driveL))
 	e.emitLabel(driveL)
-	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i64, ptr, i64 } @__kml_await_fetch(ptr %s)", raw, pending))
+	raw := e.emitOutAggCall("__kml_await_fetch_c", "{ i64, "+irPtr+", i64 }", irPtr+" "+pending)
 	body := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 1", body, raw))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, "+irPtr+", i64 } %s, 1", body, raw))
 	bodyLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, ptr, i64 } %s, 2", bodyLen, raw))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, "+irPtr+", i64 } %s, 2", bodyLen, raw))
 	bIdx, _, _ := objVal.Ty.FieldIndex("body")
 	bGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", bGep, structIR, objVal.Ref, bIdx))
-	e.heapStore("ptr", body, bGep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", bGep, structIR, objVal.Ref, bIdx))
+	e.heapStore(irPtr, body, bGep, 8)
 	lIdx, _, _ := objVal.Ty.FieldIndex("bodyLength")
 	lGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lGep, structIR, objVal.Ref, lIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", lGep, structIR, objVal.Ref, lIdx))
 	e.heapStore("i64", bodyLen, lGep, 8)
-	e.heapStore("ptr", "null", pGep, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 }
@@ -532,23 +717,22 @@ func (e *Emitter) emitResponseArrayBuffer(objVal Value, pos ast.Pos) (Value, err
 	e.emitResponseDriveToDone(objVal)
 	bodyIdx, bodyFieldTy, ok := objVal.Ty.FieldIndex("body")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "not a Response")
 	}
 	bodyVal := e.loadFieldValue(objVal, bodyIdx, bodyFieldTy)
 
 	lenIdx, lenFieldTy, ok := objVal.Ty.FieldIndex("bodyLength")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "not a Response")
 	}
 	lenVal := e.loadFieldValue(objVal, lenIdx, lenFieldTy)
 
-	e.ensureMalloc()
 	hdrReg := e.freshReg()
 	e.emitArrayBufferHeaderAlloc(hdrReg, 16, false, "malloc")
 	e.heapStore("i64", lenVal.Ref, hdrReg, 8)
 	dataSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dataSlot, hdrReg))
-	e.heapStore("ptr", bodyVal.Ref, dataSlot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", dataSlot, hdrReg))
+	e.heapStore(irPtr, bodyVal.Ref, dataSlot, 8)
 
 	return Value{Ref: hdrReg, Ty: ArrayBufferType()}, nil
 }
@@ -575,41 +759,43 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureFetchBodyProm()
-	e.ensureMalloc()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureUnhandledRejections()
+	e.ensureNanBox()
 
 	q := e.emitAllocSettledPromise() // pending (state 0); the runner settles it
 
 	// env = { ptr resp, ptr promise }
 	env := e.freshReg()
-	e.heapMallocInto(env, "16")
+	e.heapMallocInto(env, allocClosure, "16")
 	e0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", e0, env))
-	e.heapStore("ptr", objVal.Ref, e0, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", e0, env))
+	e.heapStore(irPtr, objVal.Ref, e0, 8)
 	e1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", e1, env))
-	e.heapStore("ptr", q, e1, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", e1, env))
+	e.heapStore(irPtr, q, e1, 8)
 
 	// closure = { runner, env }
 	clo := e.freshReg()
 	c0 := e.freshReg()
 	c1 := e.freshReg()
-	e.heapMallocInto(clo, "16")
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 0", c0, clo))
-	e.heapStore("ptr", runner, c0, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", c1, clo))
-	e.heapStore("ptr", env, c1, 8)
+	e.emitClosureAlloc(clo, "16", runner)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", c0, clo))
+	e.heapStore(irPtr, runner, c0, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", c1, clo))
+	e.heapStore(irPtr, env, c1, 8)
 
 	// Register keyed on the Response's in-flight fetch handle. If it's already
 	// done (or null — body previously driven), register settles synchronously.
 	pIdx, _, ok := objVal.Ty.FieldIndex("__kml_pending")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: not a Response", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "not a Response")
 	}
 	pGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", pGep, objVal.Ty.StructIR(), objVal.Ref, pIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", pGep, objVal.Ty.StructIR(), objVal.Ref, pIdx))
 	pending := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", pending, pGep))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", pending, pGep))
 	// A used or locked body rejects (Fetch's "unusable" body); else the body
 	// is marked used.
 	used := e.emitResponseBodyUsed(objVal)
@@ -617,10 +803,9 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	badL, goodL := e.freshLabel("resp.unusable"), e.freshLabel("resp.usable")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", unusable, badL, goodL))
 	e.emitLabel(badL)
-	e.ensureExceptionHelpers()
 	te := e.buildErrorObj(errorKindIDs["TypeError"], e.internString("Body is unusable: Body has already been read"), e.internString("TypeError"))
 	teBits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", teBits, te))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", teBits, te))
 	e.emitRejectCaught(q, fmt.Sprint(kmlTagError), teBits)
 	doneL := e.freshLabel("resp.bodyprom.done")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -628,9 +813,9 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	{
 		fIdx, _, _ := objVal.Ty.FieldIndex("__kml_bodyflags")
 		fGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", fGep, objVal.Ty.StructIR(), objVal.Ref, fIdx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", fGep, objVal.Ty.StructIR(), objVal.Ref, fIdx))
 		f := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f, fGep))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f, fGep))
 		// A null body is never used.
 		nb := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", nb, f, responseNullBody))
@@ -667,11 +852,11 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStream, collectL, regL))
 	e.emitLabel(collectL)
 	if objVal.Ty.IsResponse() { // a Request's body is never a stream
-		e.emitInstr(fmt.Sprintf("call void @__kml_resp_collect(ptr %s, ptr %s, ptr %s)", objVal.Ref, clo, q))
+		e.emitInstr(fmt.Sprintf("call void @__kml_resp_collect("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", objVal.Ref, clo, q))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(regL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_fetch_bodyprom_register(ptr %s, ptr %s)", pending, clo))
+	e.emitInstr(fmt.Sprintf("call void @__kml_fetch_bodyprom_register("+irPtr+" %s, "+irPtr+" %s)", pending, clo))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -712,15 +897,15 @@ func (e *Emitter) orStreamFlag(objVal Value, acc string, bit int) string {
 	sIdx, _, _ := objVal.Ty.FieldIndex("__kml_stream")
 	s := e.loadFieldValue(objVal, sIdx, TypePtr)
 	has := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", has, s.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, s.Ref))
 	// A null stream reads a zero flags word from a private zero cell.
 	e.ensureZeroCell()
 	sp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr @__kml_zero_cell", sp, has, s.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" @__kml_zero_cell", sp, has, s.Ref))
 	fp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 11", fp, rstreamStructIR, sp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 11", fp, rstreamStructIR, sp))
 	f := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", f, fp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", f, fp))
 	b := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", b, f, bit))
 	set := e.freshReg()
@@ -737,7 +922,7 @@ func (e *Emitter) ensureZeroCell() {
 		return
 	}
 	e.usedZeroCell = true
-	e.emitGlobal(fmt.Sprintf("@__kml_zero_cell = internal constant [%d x i8] zeroinitializer, align 8", rstreamStructSize))
+	e.emitGlobal(fmt.Sprintf("@__kml_zero_cell = internal"+irGlobalAS+" constant [%d x i8] zeroinitializer, align 8", rstreamStructSize))
 }
 
 // emitFetchBodyPromRunner synthesizes (once per method) the settle runner
@@ -750,9 +935,23 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 	respTy := objTy // a Response or a Request
 	reader, ok := bodyReaders[method]
 	if !ok {
-		return "", Type{}, fmt.Errorf("%d:%d: unknown Response method '%s'", pos.Line, pos.Col, method)
+		return "", Type{}, internalAt(pos, "unknown Response method '%s'", method)
 	}
 	innerTy := reader.inner(respTy, jsonTarget)
+	if method == "blob" {
+		cls, ok := e.globalClass("Blob")
+		if !ok {
+			return "", Type{}, internalAt(pos, "blob() needs Blob")
+		}
+		innerTy = cls
+	}
+	if method == "formData" {
+		cls, ok := e.globalClass("FormData")
+		if !ok {
+			return "", Type{}, internalAt(pos, "formData() needs FormData")
+		}
+		innerTy = cls
+	}
 
 	if e.fetchBodyPromRunner == nil {
 		e.fetchBodyPromRunner = map[string]string{}
@@ -778,13 +977,13 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 
 	build := func() error {
 		respP := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 0", respP))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 0", respP))
 		resp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", resp, respP))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", resp, respP))
 		qP := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %%env, i32 0, i32 1", qP))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %%env, i32 0, i32 1", qP))
 		q := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, qP))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", q, qP))
 		objVal := Value{Ref: resp, Ty: respTy}
 
 		tryL := e.freshLabel("fbp.try")
@@ -802,10 +1001,10 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 		} else {
 			bits := e.promiseBitsOf(val)
 			vSlot := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", vSlot, promiseStructIR, q))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", vSlot, promiseStructIR, q))
 			e.heapStore("i64", bits, vSlot, 8)
 		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle("+irPtr+" %s, i64 1)", q))
 		e.emitTerminator("ret void")
 
 		e.emitLabel(catchL)
@@ -816,7 +1015,7 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 	}
 	buildErr := build()
 	if buildErr == nil {
-		e.writeFunc(fmt.Sprintf("void %s(ptr %%env)", name), e.allocas.String()+e.body.String())
+		e.writeFunc(fmt.Sprintf("void %s("+irPtr+" %%env)", name), e.allocas.String()+e.body.String())
 	}
 	restoreBuilder()
 	return name, innerTy, buildErr
@@ -825,7 +1024,7 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 // The Body mixin's readers on a Response or a fetch Request, reached
 // through their `@intrinsic` declarations.
 func init() {
-	for _, name := range []string{"text", "json", "arrayBuffer"} {
+	for _, name := range []string{"text", "json", "arrayBuffer", "bytes", "blob", "formData"} {
 		name := name
 		intrinsics["Body.prototype."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
@@ -843,7 +1042,7 @@ func init() {
 				return e.emitResponseCall(objVal, name, ex.GetPos())
 			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
-				if !hasBodyMixin(e.inferExprType(ex.Callee.(*ast.MemberExpression).Object)) {
+				if !hasBodyMixin(e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object)) {
 					return Type{}
 				}
 				t, _ := e.intrinsicMethodType(bodyMethodTypes, ex)
@@ -895,6 +1094,81 @@ func init() {
 			inner: func(Type, *Type) Type { return ArrayBufferType() },
 			read: func(e *Emitter, objVal Value, _ Type, pos ast.Pos) (Value, error) {
 				return e.emitResponseArrayBuffer(objVal, pos)
+			},
+		},
+		// blob(): a Blob of arrayBuffer()'s bytes, typed by the
+		// Content-Type header ("" without one).
+		"blob": {
+			inner: func(Type, *Type) Type { return Type{} }, // the Blob class (blobInner)
+			read: func(e *Emitter, objVal Value, _ Type, pos ast.Pos) (Value, error) {
+				ab, err := e.emitResponseArrayBuffer(objVal, pos)
+				if err != nil {
+					return Value{}, err
+				}
+				const tmpAB, tmpObj = "__kml_body_blob_ab", "__kml_body_blob_obj"
+				e.pushScope()
+				defer e.popScope()
+				for _, b := range []struct {
+					name string
+					v    Value
+				}{{tmpAB, ab}, {tmpObj, objVal}} {
+					slot := e.freshReg()
+					e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+					e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", b.v.Ref, slot))
+					e.define(b.name, Symbol{Ptr: slot, Ty: b.v.Ty})
+				}
+				ct := ast.NewBinaryExpression("??", ast.NewCallExpression(ast.NewMemberExpression(
+					ast.NewMemberExpression(ast.NewIdentifier(tmpObj, pos), "headers", pos), "get", pos),
+					[]ast.Expression{ast.NewStringLiteral("content-type", pos)}, pos), ast.NewStringLiteral("", pos), pos)
+				opts := ast.NewObjectLiteral([]ast.ObjectProperty{{Key: "type", Value: ct}}, pos)
+				return e.emitExpr(ast.NewNewExpression(e.globalLinks["Blob"], []ast.Expression{
+					ast.NewArrayLiteral([]ast.Expression{ast.NewIdentifier(tmpAB, pos)}, pos), opts}, pos))
+			},
+		},
+		// formData(): FormData's parse of arrayBuffer()'s bytes, by the
+		// Content-Type header (multipart/form-data or urlencoded).
+		"formData": {
+			inner: func(Type, *Type) Type { return Type{} }, // the FormData class
+			read: func(e *Emitter, objVal Value, _ Type, pos ast.Pos) (Value, error) {
+				ab, err := e.emitResponseArrayBuffer(objVal, pos)
+				if err != nil {
+					return Value{}, err
+				}
+				const tmpAB, tmpObj = "__kml_body_fd_ab", "__kml_body_fd_obj"
+				e.pushScope()
+				defer e.popScope()
+				for _, b := range []struct {
+					name string
+					v    Value
+				}{{tmpAB, ab}, {tmpObj, objVal}} {
+					slot := e.freshReg()
+					e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+					e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", b.v.Ref, slot))
+					e.define(b.name, Symbol{Ptr: slot, Ty: b.v.Ty})
+				}
+				ct := ast.NewBinaryExpression("??", ast.NewCallExpression(ast.NewMemberExpression(
+					ast.NewMemberExpression(ast.NewIdentifier(tmpObj, pos), "headers", pos), "get", pos),
+					[]ast.Expression{ast.NewStringLiteral("content-type", pos)}, pos), ast.NewStringLiteral("", pos), pos)
+				return e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier(e.globalLinks["FormData"], pos), "kmlParse", pos),
+					[]ast.Expression{ast.NewIdentifier(tmpAB, pos), ct}, pos))
+			},
+		},
+		// bytes(): a Uint8Array over arrayBuffer()'s bytes.
+		"bytes": {
+			inner: func(Type, *Type) Type { return TypedArrayType("uint8") },
+			read: func(e *Emitter, objVal Value, _ Type, pos ast.Pos) (Value, error) {
+				ab, err := e.emitResponseArrayBuffer(objVal, pos)
+				if err != nil {
+					return Value{}, err
+				}
+				const tmp = "__kml_body_bytes"
+				e.pushScope()
+				defer e.popScope()
+				slot := e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ab.Ref, slot))
+				e.define(tmp, Symbol{Ptr: slot, Ty: ab.Ty})
+				return e.emitExpr(ast.NewNewTypedArrayExpression("uint8", ast.NewIdentifier(tmp, pos), pos))
 			},
 		},
 	}

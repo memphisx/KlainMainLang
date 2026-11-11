@@ -20,7 +20,7 @@ func (e *Emitter) emitMapOrSetCreate(ty Type) string {
 	suffix, _ := mapRuntime(*ty.MapKey)
 	e.ensureMapFamily(suffix)
 	e.noteMapLayout(ty)
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_%s_create_h(i64 %d)", ptr, suffix, e.hostHeaderWord(ty)))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_%s_create_h(i64 %d)", ptr, suffix, e.hostHeaderWord(ty)))
 	return ptr
 }
 
@@ -33,7 +33,11 @@ func mapRuntime(keyTy Type) (suffix, keyIR string) {
 	case keyTy.IsDynamic():
 		return "any", "i64"
 	case isStringTy(keyTy) && !hasHandleFlag(keyTy):
-		return "str", "ptr"
+		return "str", irPtr
+	case isNullableScalar(keyTy):
+		// A `number | null` key: null and 0 are different keys, so it is
+		// boxed, as an any key is (SameValueZero over the boxes).
+		return "any", "i64"
 	case keyTy.IsBigInt():
 		// A bigint key compares by value (SameValueZero): boxed, the any-keyed
 		// runtime's equality compares the cells' bigints.
@@ -52,8 +56,28 @@ func mapRuntime(keyTy Type) (suffix, keyIR string) {
 // isReferenceKeyTy reports whether a non-dynamic, non-string key type is a
 // reference type (array or object/class instance) that must be routed to the
 // any-keyed runtime as a boxed pointer rather than stored raw in an i64 slot.
+// loadKeyAt reads entry idx of a materialized keys array as a keyTy value:
+// a nullable scalar key from its box (materializeKeysAggregate keeps boxes).
+func (e *Emitter) loadKeyAt(keysPtr, idx string, keyTy Type) Value {
+	gep := e.freshReg()
+	if isNullableScalar(keyTy) {
+		box := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", gep, keysPtr, idx))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", box, gep))
+		return e.convert(Value{Ref: box, Ty: TypeAny}, keyTy)
+	}
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, keyTy.IR, keysPtr, idx))
+	return e.loadArrayElem(gep, keyTy)
+}
+
+// boxedKeyTy reports a key type the any-keyed runtime stores as a box: a
+// reference, a bigint or a nullable scalar.
+func boxedKeyTy(t Type) bool {
+	return isReferenceKeyTy(t) || t.IsBigInt() || isNullableScalar(t)
+}
+
 func isReferenceKeyTy(t Type) bool {
-	return t.IsArray() || t.IsObject() || t.IsFunc() && !t.IsDynamic() || t.IR == "ptr" && !t.IsDynamic() && hasHandleFlag(t)
+	return t.IsArray() || t.IsTuple() && !t.IsDynamic() || t.IsObject() || t.IsFunc() && !t.IsDynamic() || t.IR == irPtr && !t.IsDynamic() && hasHandleFlag(t)
 }
 
 // ensureMapFamily declares the __kml_map_<suffix>_* runtime once.
@@ -62,9 +86,9 @@ func (e *Emitter) ensureMapFamily(suffix string) {
 	case "str":
 		e.ensureMapStrHelpers()
 	case "any":
-		e.ensureMapAnyHelpers()
+		e.ensureBoxedBigIntHooks()
+		e.ensureFnMeta()
 	default:
-		e.ensureMapNumHelpers()
 	}
 }
 
@@ -73,7 +97,7 @@ func (e *Emitter) ensureMapFamily(suffix string) {
 // an already-evaluated NaN is an i64 box coerce's shortcut would leave
 // unboxed, the TDD-00210 gotcha); str/num keys go through valueToMapKey.
 func (e *Emitter) mapKeyRef(kVal Value, keyTy Type) (string, error) {
-	if keyTy.IsDynamic() || isReferenceKeyTy(keyTy) || keyTy.IsBigInt() {
+	if keyTy.IsDynamic() || boxedKeyTy(keyTy) {
 		boxed, err := e.emitBoxValue(kVal)
 		if err != nil {
 			return "", err
@@ -81,6 +105,43 @@ func (e *Emitter) mapKeyRef(kVal Value, keyTy Type) (string, error) {
 		return boxed.Ref, nil
 	}
 	return e.valueToMapKey(kVal, keyTy), nil
+}
+
+// setCollectionHint hands target's Map/Set type to the bare `new Map()` /
+// `new Set()` leaves of rhs (the value itself, or the branches of a
+// conditional whose other leaves are null or undefined), which would
+// otherwise build the default family whatever the binding says (ADR-01061).
+// The returned func restores the previous hint.
+func (e *Emitter) setCollectionHint(target Type, rhs ast.Expression) func() {
+	hint := target
+	hint.Absent = absNone
+	if hint.Weak || !(hint.IsMap() && hint.MapKey != nil && hint.MapVal != nil || hint.IsSet() && hint.MapKey != nil) {
+		return func() {}
+	}
+	var leaves func(x ast.Expression) (bool, int)
+	leaves = func(x ast.Expression) (bool, int) {
+		switch r := x.(type) {
+		case *ast.ConditionalExpression:
+			ok1, n1 := leaves(r.Consequent)
+			ok2, n2 := leaves(r.Alternate)
+			return ok1 && ok2, n1 + n2
+		case *ast.NullLiteral:
+			return true, 0
+		case *ast.Identifier:
+			return r.Name == "undefined", 0
+		case *ast.NewMapExpression:
+			return hint.IsMap() && r.KeyType == nil && r.ValType == nil && r.Init == nil, 1
+		case *ast.NewSetExpression:
+			return hint.IsSet() && r.ElemType == nil && r.Init == nil, 1
+		}
+		return false, 0
+	}
+	if ok, n := leaves(rhs); !ok || n == 0 {
+		return func() {}
+	}
+	saved, savedSticky := e.newCollectionHint, e.newCollectionHintSticky
+	e.newCollectionHint, e.newCollectionHintSticky = &hint, true
+	return func() { e.newCollectionHint, e.newCollectionHintSticky = saved, savedSticky }
 }
 
 // emitMapVarDecl handles `const m = new Map<K, V>()`.
@@ -92,7 +153,7 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 	// `number`); now `number` is float64, so the annotation must win to keep the
 	// stored value type and the read-back type in agreement.
 	if init.KeyType == nil && init.ValType == nil && v.TypeAnnot != nil {
-		if annTy := e.resolveType(v.TypeAnnot); annTy.IsMap() && annTy.MapKey != nil && annTy.MapVal != nil {
+		if annTy := e.annotationType(v.TypeAnnot); annTy.IsMap() && annTy.MapKey != nil && annTy.MapVal != nil {
 			keyTy, valTy = *annTy.MapKey, *annTy.MapVal
 		}
 	}
@@ -116,7 +177,7 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 		return err
 	}
 	ptrName := e.moduleGlobalPtrOrLocal(v, val.Ty)
-	e.heapStore("ptr", val.Ref, ptrName, 8)
+	e.heapStore(irPtr, val.Ref, ptrName, 8)
 	return nil
 }
 
@@ -149,7 +210,7 @@ func (e *Emitter) emitNewMapValueTyped(init *ast.NewMapExpression, keyTy, valTy 
 // (`[[k, v], ...]`) is read positionally, since it carries no tuple type of
 // its own without a contextual hint; otherwise the bare-form
 // string-key/number-value defaults stand.
-func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Expression) (keyTy, valTy Type) {
+func (e *Emitter) mapKVTypes(keyAnn, valAnn ast.TypeNode, entries ast.Expression) (keyTy, valTy Type) {
 	keyTy, valTy = TypePtr, TypeI64 // defaults: string keys, number values
 	entries = e.iterableArraySource(entries)
 	if keyAnn == nil && valAnn == nil && entries != nil {
@@ -159,22 +220,24 @@ func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Exp
 			keyTy, valTy = TypeAny, TypeAny
 		} else if lit, ok := entries.(*ast.ArrayLiteral); ok && len(lit.Elements) > 0 {
 			if pair, ok := lit.Elements[0].(*ast.ArrayLiteral); ok && len(pair.Elements) == 2 {
-				keyTy = e.inferExprType(pair.Elements[0])
-				valTy = e.inferExprType(pair.Elements[1])
+				keyTy = e.typeOfExpr(pair.Elements[0])
+				valTy = e.typeOfExpr(pair.Elements[1])
 			}
 			// Pairs of differing key or value types make the map any-keyed,
 			// as differing `.set` arguments do (TDD-00211): Node keeps
 			// every key and value as given.
 			for _, el := range lit.Elements[1:] {
 				pair := el.(*ast.ArrayLiteral)
-				if kt := e.inferExprType(pair.Elements[0]); kt.IR != keyTy.IR || kt.IsDynamic() != keyTy.IsDynamic() {
+				// (A pointer of another kind — a string beside an array —
+				// differs too: one slot type cannot read both.)
+				if kt := e.typeOfExpr(pair.Elements[0]); reprKey(kt) != reprKey(keyTy) {
 					keyTy = TypeAny
 				}
-				if vt := e.inferExprType(pair.Elements[1]); vt.IR != valTy.IR || vt.IsDynamic() != valTy.IsDynamic() {
+				if vt := e.typeOfExpr(pair.Elements[1]); reprKey(vt) != reprKey(valTy) {
 					valTy = TypeAny
 				}
 			}
-		} else if elemTy := e.inferExprType(entries); elemTy.IsArray() && elemTy.ElemType != nil &&
+		} else if elemTy := e.typeOfExpr(entries); elemTy.IsArray() && elemTy.ElemType != nil &&
 			elemTy.ElemType.IsTuple() && len(elemTy.ElemType.Fields) == 2 {
 			keyTy = elemTy.ElemType.Fields[0].Ty
 			valTy = elemTy.ElemType.Fields[1].Ty
@@ -191,10 +254,10 @@ func (e *Emitter) mapKVTypes(keyAnn, valAnn *ast.TypeAnnotation, entries ast.Exp
 		}
 	}
 	if keyAnn != nil {
-		keyTy = e.resolveType(keyAnn)
+		keyTy = e.annotationType(keyAnn)
 	}
 	if valAnn != nil {
-		valTy = e.resolveType(valAnn)
+		valTy = e.annotationType(valAnn)
 	}
 	return keyTy, forceAnyMapVal(keyTy, valTy)
 }
@@ -216,7 +279,7 @@ func forceAnyMapVal(keyTy, valTy Type) Type {
 	}
 	// A value slot is one word, so a number or boolean that may be null or
 	// undefined both rides a box, which keeps the two apart.
-	if valTy.NullAndUndef() && valTy.IR != "ptr" {
+	if valTy.NullAndUndef() && valTy.IR != irPtr {
 		return TypeAny
 	}
 	return valTy
@@ -277,21 +340,22 @@ func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Ty
 		for i, el := range lit.Elements {
 			pair, isArr := el.(*ast.ArrayLiteral)
 			if !isArr || len(pair.Elements) != 2 {
-				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-element pairs", pos.Line, pos.Col)
+				return "", "", Type{}, internalAt(pos, "new Map(...) expects a [key, value][] array of 2-element pairs")
 			}
-			kt := e.inferExprType(pair.Elements[0])
-			vt := e.inferExprType(pair.Elements[1])
+			kt := e.typeOfExpr(pair.Elements[0])
+			vt := e.typeOfExpr(pair.Elements[1])
 			if i == 0 {
 				refKey, refVal = kt, vt
 				continue
 			}
-			if kt.IR != refKey.IR && !refKey.IsArray() && !refKey.IsDynamic() && !isNullableScalar(refKey) && !keyTy.IsDynamic() {
-				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one key type — a heterogeneous-key map is not supported", pair.Elements[0].GetPos().Line, pair.Elements[0].GetPos().Col)
+			if kt.IR != refKey.IR && !refKey.IsArray() && !refKey.IsDynamic() && !isNullableScalar(refKey) && !keyTy.IsDynamic() &&
+				!(keyTy.Nullable() && (kt.IsNull() || refKey.IsNull())) {
+				return "", "", Type{}, internalAt(pair.Elements[0].GetPos(), "new Map(...) entries must share one key type — a heterogeneous-key map is not supported")
 			}
 			// A nullable value type takes null and undefined beside its values.
 			if vt.IR != refVal.IR && !refVal.IsArray() && !refVal.IsDynamic() && !isNullableScalar(refVal) &&
 				!valTy.IsDynamic() && !(valTy.Nullable() && (vt.IsNull() || refVal.IsNull())) {
-				return "", "", Type{}, fmt.Errorf("%d:%d: new Map(...) entries must share one value type — a heterogeneous-value map is not supported", pair.Elements[1].GetPos().Line, pair.Elements[1].GetPos().Col)
+				return "", "", Type{}, internalAt(pair.Elements[1].GetPos(), "new Map(...) entries must share one value type — a heterogeneous-value map is not supported")
 			}
 		}
 		tupleTy := TupleType([]Type{keyTy, valTy})
@@ -318,10 +382,18 @@ func (e *Emitter) resolveMapEntriesArray(entries ast.Expression, keyTy, valTy Ty
 // a 2-tuple whose fields match the map's K/V; anything else is a clean
 // compile error.
 func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, keyTy, valTy Type, pos ast.Pos) error {
-	t := e.inferExprType(entries)
+	entries, err := e.nullishSeedSource(entries)
+	if err != nil {
+		return err
+	}
+	t := e.typeOfExpr(entries)
 	if (t.IsArray() || t.IsTuple()) && !t.IsDynamic() && e.arrayIterPatchable() {
 		// Once Array.prototype[Symbol.iterator] may be replaced, the
 		// entries are the protocol's: `for (const p of entries) m.set(p[0], p[1])`.
+		return e.emitMapSeedLoop(mapPtr, entries, keyTy, valTy, pos)
+	}
+	if mapIterable(t) && t.IsSet() {
+		// A Set of entries: each as for-of over it yields it.
 		return e.emitMapSeedLoop(mapPtr, entries, keyTy, valTy, pos)
 	}
 	if t.IsDynamic() || t.IsObject() && !t.IsClass() && e.hostView(entries) == nil {
@@ -337,13 +409,13 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 	pairArray := elemTy.IsArray() && elemTy.ElemType != nil && !elemTy.ElemType.IsArray()
 	dynEntry := isUnconstrainedDynamic(elemTy)
 	if !pairArray && !dynEntry && (!elemTy.IsTuple() || len(elemTy.Fields) != 2) {
-		return fmt.Errorf("%d:%d: new Map(...) expects a [key, value][] array of 2-tuples", pos.Line, pos.Col)
+		return internalAt(pos, "new Map(...) expects a [key, value][] array of 2-tuples")
 	}
 	suffix, keyIR := mapRuntime(keyTy)
 
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxPtr))
 	condL := e.freshLabel("map.init.cond")
 	bodyL := e.freshLabel("map.init.body")
 	endL := e.freshLabel("map.init.end")
@@ -351,16 +423,16 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 
 	e.emitLabel(condL)
 	idxReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxReg, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxReg, idxPtr))
 	condReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", condReg, idxReg, srcLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
 
 	e.emitLabel(bodyL)
-	// The source array holds one ptr per tuple (a tuple's IR is "ptr" — a heap
+	// The source array holds one ptr per tuple (a tuple's IR is irPtr — a heap
 	// struct), so load the tuple pointer, then GEP its two fields.
 	slotGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotGep, elemTy.IR, srcPtr, idxReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", slotGep, elemTy.IR, srcPtr, idxReg))
 	entry := e.loadArrayElem(slotGep, elemTy)
 	var kVal, vVal Value
 	if dynEntry {
@@ -396,13 +468,8 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 		kVal = e.convert(e.arrayEntryElemOrZero(entry, *elemTy.ElemType, 0), keyTy)
 		vVal = e.convert(e.arrayEntryElemOrZero(entry, *elemTy.ElemType, 1), valTy)
 	} else {
-		tupleIR := elemTy.StructIR()
-		kGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kGep, tupleIR, entry.Ref))
-		kVal = e.loadScalarOrNullableField(kGep, keyTy)
-		vGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vGep, tupleIR, entry.Ref))
-		vVal = e.loadScalarOrNullableField(vGep, valTy)
+		entry.Ty = elemTy
+		kVal, vVal = e.convert(e.tupleElem(entry, 0), keyTy), e.convert(e.tupleElem(entry, 1), valTy)
 	}
 
 	kRef, err := e.mapKeyRef(kVal, keyTy)
@@ -415,11 +482,11 @@ func (e *Emitter) emitMapSeedFromEntries(mapPtr string, entries ast.Expression, 
 		}
 	}
 	vRef := e.valueToMapVal(vVal, valTy)
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 %s)", suffix, mapPtr, keyIR, kRef, vRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set("+irPtr+" %s, %s %s, i64 %s)", suffix, mapPtr, keyIR, kRef, vRef))
 
 	nextIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, idxReg))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", nextIdx, idxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(endL)
@@ -434,20 +501,20 @@ func (e *Emitter) arrayEntryElemOrZero(arr Value, elemTy Type, i int) Value {
 	n = e.arrayLen(arr)
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, elemTy.IR, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, elemTy.zeroLiteral(), slot, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", elemTy.IR, elemTy.zeroLiteral(), slot, elemTy.Align()))
 	has := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %d", has, n, i))
 	readL, doneL := e.freshLabel("entry.read"), e.freshLabel("entry.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, readL, doneL))
 	e.emitLabel(readL)
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gep, elemTy.IR, data, i))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %d", gep, elemTy.IR, data, i))
 	v := e.loadArrayElem(gep, elemTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, v.Ref, slot, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", elemTy.IR, v.Ref, slot, elemTy.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, elemTy.IR, slot, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", r, elemTy.IR, slot, elemTy.Align()))
 	return Value{Ref: r, Ty: elemTy}
 }
 
@@ -460,7 +527,7 @@ func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpressi
 		// (mirroring emitMapVarDecl; ADR-01061). Both were silently the string
 		// default before, so `s.has(NaN)` strcmp'd a poison pointer.
 		if v.TypeAnnot != nil {
-			if annTy := e.resolveType(v.TypeAnnot); annTy.IsSet() && annTy.MapKey != nil {
+			if annTy := e.annotationType(v.TypeAnnot); annTy.IsSet() && annTy.MapKey != nil {
 				t := *annTy.MapKey
 				elemOverride = &t
 			}
@@ -474,7 +541,7 @@ func (e *Emitter) emitSetVarDecl(v *ast.VarDeclaration, init *ast.NewSetExpressi
 		return err
 	}
 	ptrName := e.moduleGlobalPtrOrLocal(v, val.Ty)
-	e.heapStore("ptr", val.Ref, ptrName, 8)
+	e.heapStore(irPtr, val.Ref, ptrName, 8)
 	return nil
 }
 
@@ -501,33 +568,42 @@ func (e *Emitter) emitNewSetValueTyped(init *ast.NewSetExpression, elemOverride 
 	haveSrc := false
 	if init.Init != nil {
 		e.iterUse = true // the constructor iterates it (array_iter_patch.go)
-		ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(init.Init, init.GetPos())
+		src, err := e.nullishSeedSource(init.Init)
+		if err != nil {
+			return Value{}, err
+		}
+		if isStringTy(e.typeOfExpr(src)) {
+			// A string iterates its code points.
+			src = ast.NewArrayLiteral([]ast.Expression{&ast.SpreadElement{Arg: src}}, src.GetPos())
+		}
+		ptrReg, lenReg, srcElemTy, err := e.resolveArrayForHOF(src, init.GetPos())
 		if err != nil {
 			return Value{}, err
 		}
 		srcPtr, srcLen, elemTy, haveSrc = ptrReg, lenReg, srcElemTy, true
 	}
+	srcElemTy := elemTy
 	if init.ElemType != nil {
-		elemTy = e.resolveType(init.ElemType)
+		elemTy = e.annotationType(init.ElemType)
 	}
 
 	setPtr := e.emitMapOrSetCreate(SetType(elemTy))
 	if haveSrc {
-		if err := e.emitSetSeed(setPtr, srcPtr, srcLen, elemTy); err != nil {
+		if err := e.emitSetSeed(setPtr, srcPtr, srcLen, srcElemTy, elemTy); err != nil {
 			return Value{}, err
 		}
 	}
 	return Value{Ref: setPtr, Ty: SetType(elemTy)}, nil
 }
 
-// emitSetSeed adds the srcLen elements at srcPtr (elemTy) to the Set at
-// setPtr.
-func (e *Emitter) emitSetSeed(setPtr, srcPtr, srcLen string, elemTy Type) error {
+// emitSetSeed adds the srcLen elements at srcPtr (srcElemTy, the source
+// array's stored element type) to the Set of elemTy at setPtr.
+func (e *Emitter) emitSetSeed(setPtr, srcPtr, srcLen string, srcElemTy, elemTy Type) error {
 	{
 		seedSuffix, seedKeyIR := mapRuntime(elemTy)
 		idxPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+		e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxPtr))
 		condL := e.freshLabel("set.init.cond")
 		bodyL := e.freshLabel("set.init.body")
 		endL := e.freshLabel("set.init.end")
@@ -535,23 +611,26 @@ func (e *Emitter) emitSetSeed(setPtr, srcPtr, srcLen string, elemTy Type) error 
 
 		e.emitLabel(condL)
 		idxReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxReg, idxPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxReg, idxPtr))
 		condReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", condReg, idxReg, srcLen))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
 
 		e.emitLabel(bodyL)
 		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gepReg, elemTy.IR, srcPtr, idxReg))
-		elemVal := e.loadArrayElem(gepReg, elemTy)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gepReg, srcElemTy.IR, srcPtr, idxReg))
+		elemVal := e.loadArrayElem(gepReg, srcElemTy)
+		if reprKey(srcElemTy) != reprKey(elemTy) && !elemTy.IsDynamic() {
+			elemVal = e.convert(elemVal, elemTy)
+		}
 		eRef, err := e.mapKeyRef(elemVal, elemTy)
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 0)", seedSuffix, setPtr, seedKeyIR, eRef))
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set("+irPtr+" %s, %s %s, i64 0)", seedSuffix, setPtr, seedKeyIR, eRef))
 		nextIdx := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", nextIdx, idxReg))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", nextIdx, idxPtr))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", nextIdx, idxPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 		e.emitLabel(endL)
@@ -572,7 +651,7 @@ func (e *Emitter) resolveMapOrSetForCall(objExpr ast.Expression, pos ast.Pos) (T
 	if id, ok := objExpr.(*ast.Identifier); ok {
 		if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap() || sym.Ty.IsSet()) {
 			ptr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptr, sym.Ptr))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ptr, sym.Ptr))
 			return sym.Ty, ptr, nil
 		}
 		// Otherwise a union binding narrowed to its Map or Set member reads
@@ -584,9 +663,9 @@ func (e *Emitter) resolveMapOrSetForCall(objExpr ast.Expression, pos ast.Pos) (T
 	}
 	if !val.Ty.IsMap() && !val.Ty.IsSet() {
 		if id, ok := objExpr.(*ast.Identifier); ok {
-			return Type{}, "", fmt.Errorf("%d:%d: '%s' is not a Map or Set", pos.Line, pos.Col, id.Name)
+			return Type{}, "", internalAt(pos, "'%s' is not a Map or Set", id.Name)
 		}
-		return Type{}, "", fmt.Errorf("%d:%d: value is not a Map or Set", pos.Line, pos.Col)
+		return Type{}, "", internalAt(pos, "value is not a Map or Set")
 	}
 	return val.Ty, val.Ref, nil
 }
@@ -629,11 +708,16 @@ func (e *Emitter) emitMapMethod(ty Type, mapPtr string, method string, args []as
 	if _, op := mapViewOps[method]; !op && method != "clear" {
 		mapPtr = e.mapViewPtr(ty, mapPtr) // every entry, in the view's layout (TDD-00258)
 	}
+	fitted, v, thrown, err := e.fitCollectionArgs(method, args, TypeVoid, pos)
+	if err != nil || thrown {
+		return v, err
+	}
+	args = fitted
 	c := &mapCall{ty: ty, mapPtr: mapPtr, method: method, args: args, pos: pos, keyTy: keyTy, valTy: valTy, suffix: suffix, keyIR: keyIR}
 	if f, ok := mapMethods[method]; ok {
 		return f(e, c)
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown Map method '%s'", pos.Line, pos.Col, method)
+	return Value{}, internalAt(pos, "Map.%s", method)
 }
 
 // mapCall is one Map method call: the map, its key and value types and
@@ -670,7 +754,7 @@ func init() {
 // emitMapMethodSet is map.set().
 func (e *Emitter) emitMapMethodSet(c *mapCall) (Value, error) {
 	if len(c.args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: map.set() requires 2 arguments", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: map.set() requires 2 arguments")
 	}
 	kVal, err := e.emitExpr(c.args[0])
 	if err != nil {
@@ -705,14 +789,14 @@ func (e *Emitter) emitMapMethodSet(c *mapCall) (Value, error) {
 		return Value{}, err
 	}
 	vRef := e.valueToMapVal(vVal, c.valTy)
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 %s)", c.suffix, c.mapPtr, c.keyIR, kRef, vRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set("+irPtr+" %s, %s %s, i64 %s)", c.suffix, c.mapPtr, c.keyIR, kRef, vRef))
 	return Value{Ref: c.mapPtr, Ty: c.ty}, nil
 }
 
 // emitMapMethodGet is map.get().
 func (e *Emitter) emitMapMethodGet(c *mapCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: map.get() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: map.get() requires 1 argument")
 	}
 	kVal, err := e.emitExpr(c.args[0])
 	if err != nil {
@@ -731,7 +815,7 @@ func (e *Emitter) emitMapMethodGet(c *mapCall) (Value, error) {
 		return e.emitMapGetNullable(c.mapPtr, kRef, c.suffix, c.keyIR, c.valTy), nil
 	}
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_%s_get(ptr %s, %s %s)", raw, c.suffix, c.mapPtr, c.keyIR, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_%s_get("+irPtr+" %s, %s %s)", raw, c.suffix, c.mapPtr, c.keyIR, kRef))
 	// The any-keyed runtime (object/array key) returns the boxed `undefined`
 	// sentinel on a miss, not 0 — so a raw decode of a *concrete* pointer/array
 	// value would be a garbage pointer (bad `=== undefined`, crash on use). Gate
@@ -739,17 +823,18 @@ func (e *Emitter) emitMapMethodGet(c *mapCall) (Value, error) {
 	// null-pointer-miss handling below and mapValFromI64's null-header guard
 	// yield a real `undefined`. A dynamic (`any`) value is skipped: its slot is
 	// meant to read back as the box, undefined sentinel included (ADR-00948).
-	if c.valTy.IsDynamic() && c.suffix == "str" {
-		// A box: a missing key is undefined (the raw miss is 0).
+	if c.valTy.IsDynamic() && c.suffix != "any" {
+		// A box: a missing key is undefined (the raw miss of a string- or
+		// number-keyed map is 0).
 		present := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, %s %s)", present, c.mapPtr, c.keyIR, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has("+irPtr+" %s, %s %s)", present, c.suffix, c.mapPtr, c.keyIR, kRef))
 		gated := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", gated, present, raw, nbUndefined))
 		raw = gated
 	}
 	if c.suffix == "any" && !c.valTy.IsDynamic() {
 		present := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_any_has(ptr %s, %s %s)", present, c.mapPtr, c.keyIR, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_any_has("+irPtr+" %s, %s %s)", present, c.mapPtr, c.keyIR, kRef))
 		gated := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", gated, present, raw))
 		raw = gated
@@ -777,7 +862,7 @@ func (e *Emitter) emitMapMethodGet(c *mapCall) (Value, error) {
 // emitMapMethodHas is map.has().
 func (e *Emitter) emitMapMethodHas(c *mapCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: map.has() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: map.has() requires 1 argument")
 	}
 	kVal, err := e.emitExpr(c.args[0])
 	if err != nil {
@@ -788,14 +873,14 @@ func (e *Emitter) emitMapMethodHas(c *mapCall) (Value, error) {
 		return Value{}, err
 	}
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has(ptr %s, %s %s)", res, c.suffix, c.mapPtr, c.keyIR, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has("+irPtr+" %s, %s %s)", res, c.suffix, c.mapPtr, c.keyIR, kRef))
 	return Value{Ref: res, Ty: TypeBool}, nil
 }
 
 // emitMapMethodDelete is map.delete().
 func (e *Emitter) emitMapMethodDelete(c *mapCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: map.delete() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: map.delete() requires 1 argument")
 	}
 	kVal, err := e.emitExpr(c.args[0])
 	if err != nil {
@@ -806,30 +891,28 @@ func (e *Emitter) emitMapMethodDelete(c *mapCall) (Value, error) {
 		return Value{}, err
 	}
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_delete(ptr %s, %s %s)", res, c.suffix, c.mapPtr, c.keyIR, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_delete("+irPtr+" %s, %s %s)", res, c.suffix, c.mapPtr, c.keyIR, kRef))
 	return Value{Ref: res, Ty: TypeBool}, nil
 }
 
 // emitMapMethodKeys is map.keys().
 func (e *Emitter) emitMapMethodKeys(c *mapCall) (Value, error) {
-	res := e.freshReg()
 	e.ensureMapFamily(c.suffix)
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, c.suffix, c.mapPtr))
+	res := e.emitMapCopy("keys", c.mapPtr)
 	res = e.materializeKeysAggregate(res, c.keyTy)
 	return e.arrayFromAgg(res, ArrayOf(c.keyTy)), nil
 }
 
 // emitMapMethodValues is map.values().
 func (e *Emitter) emitMapMethodValues(c *mapCall) (Value, error) {
-	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", res, c.suffix, c.mapPtr))
+	res := e.emitMapCopy("vals", c.mapPtr)
 	return e.arrayFromAgg(res, ArrayOf(c.valTy)), nil
 }
 
 // emitMapMethodEntries is map.entries().
 func (e *Emitter) emitMapMethodEntries(c *mapCall) (Value, error) {
 	if len(c.args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: map.entries() takes no arguments", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: map.entries() takes no arguments")
 	}
 	return e.emitMapEntries(c.mapPtr, c.suffix, c.keyTy, c.valTy)
 }
@@ -837,7 +920,7 @@ func (e *Emitter) emitMapMethodEntries(c *mapCall) (Value, error) {
 // emitMapMethodForEach is map.forEach().
 func (e *Emitter) emitMapMethodForEach(c *mapCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: map.forEach() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "map.forEach() requires 1 argument")
 	}
 	mapTy := MapType(c.keyTy, c.valTy)
 	cb, err := e.resolveCallbackWithHints(c.args[0], []Type{c.valTy, c.keyTy, mapTy})
@@ -850,10 +933,9 @@ func (e *Emitter) emitMapMethodForEach(c *mapCall) (Value, error) {
 // emitMapMethodClear is map.clear().
 func (e *Emitter) emitMapMethodClear(c *mapCall) (Value, error) {
 	if len(c.args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: map.clear() takes no arguments", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: map.clear() takes no arguments")
 	}
-	e.ensureMapClear()
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_clear(ptr %s)", c.mapPtr))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_clear("+irPtr+" %s)", c.mapPtr))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -890,11 +972,16 @@ func (e *Emitter) emitSetMethod(ty Type, setPtr string, method string, args []as
 	if _, op := mapViewOps[method]; !op && method != "clear" {
 		setPtr = e.mapViewPtr(ty, setPtr)
 	}
+	fitted, v, thrown, err := e.fitCollectionArgs(method, args, TypeVoid, pos)
+	if err != nil || thrown {
+		return v, err
+	}
+	args = fitted
 	c := &setCall{ty: ty, setPtr: setPtr, method: method, args: args, pos: pos, elemTy: elemTy, strElem: strElem, suffix: suffix, keyIR: keyIR}
 	if f, ok := setMethods[method]; ok {
 		return f(e, c)
 	}
-	return Value{}, fmt.Errorf("%d:%d: unknown Set method '%s'", pos.Line, pos.Col, method)
+	return Value{}, internalAt(pos, "Set.%s", method)
 }
 
 // setCall is one Set method call: the set, its element type and runtime
@@ -928,7 +1015,7 @@ func init() {
 // emitSetMethodAdd is set.add().
 func (e *Emitter) emitSetMethodAdd(c *setCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: set.add() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: set.add() requires 1 argument")
 	}
 	eVal, err := e.emitExpr(c.args[0])
 	if err != nil {
@@ -938,14 +1025,14 @@ func (e *Emitter) emitSetMethodAdd(c *setCall) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set(ptr %s, %s %s, i64 0)", c.suffix, c.setPtr, c.keyIR, eRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_%s_set("+irPtr+" %s, %s %s, i64 0)", c.suffix, c.setPtr, c.keyIR, eRef))
 	return Value{Ref: c.setPtr, Ty: c.ty}, nil
 }
 
 // emitSetMethodHas is set.has().
 func (e *Emitter) emitSetMethodHas(c *setCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: set.has() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: set.has() requires 1 argument")
 	}
 	eVal, err := e.emitExpr(c.args[0])
 	if err != nil {
@@ -956,14 +1043,14 @@ func (e *Emitter) emitSetMethodHas(c *setCall) (Value, error) {
 		return Value{}, err
 	}
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has(ptr %s, %s %s)", res, c.suffix, c.setPtr, c.keyIR, eRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has("+irPtr+" %s, %s %s)", res, c.suffix, c.setPtr, c.keyIR, eRef))
 	return Value{Ref: res, Ty: TypeBool}, nil
 }
 
 // emitSetMethodDelete is set.delete().
 func (e *Emitter) emitSetMethodDelete(c *setCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: set.delete() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: set.delete() requires 1 argument")
 	}
 	eVal, err := e.emitExpr(c.args[0])
 	if err != nil {
@@ -974,16 +1061,15 @@ func (e *Emitter) emitSetMethodDelete(c *setCall) (Value, error) {
 		return Value{}, err
 	}
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_delete(ptr %s, %s %s)", res, c.suffix, c.setPtr, c.keyIR, eRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_delete("+irPtr+" %s, %s %s)", res, c.suffix, c.setPtr, c.keyIR, eRef))
 	return Value{Ref: res, Ty: TypeBool}, nil
 }
 
 // emitSetMethodValues is set.values().
 func (e *Emitter) emitSetMethodValues(c *setCall) (Value, error) {
 	// Set elements are stored as keys; return the keys array.
-	res := e.freshReg()
 	e.ensureMapFamily(c.suffix)
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, c.suffix, c.setPtr))
+	res := e.emitMapCopy("keys", c.setPtr)
 	res = e.materializeKeysAggregate(res, c.elemTy)
 	return e.arrayFromAgg(res, ArrayOf(c.elemTy)), nil
 }
@@ -991,7 +1077,7 @@ func (e *Emitter) emitSetMethodValues(c *setCall) (Value, error) {
 // emitSetMethodForEach is set.forEach().
 func (e *Emitter) emitSetMethodForEach(c *setCall) (Value, error) {
 	if len(c.args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: set.forEach() requires 1 argument", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "set.forEach() requires 1 argument")
 	}
 	// Real JS calls back(value, value, set) for a Set — the same value
 	// twice (kept only for Map/Set callback-shape parity), then the set
@@ -1007,10 +1093,9 @@ func (e *Emitter) emitSetMethodForEach(c *setCall) (Value, error) {
 // emitSetMethodClear is set.clear().
 func (e *Emitter) emitSetMethodClear(c *setCall) (Value, error) {
 	if len(c.args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: set.clear() takes no arguments", c.pos.Line, c.pos.Col)
+		return Value{}, internalAt(c.pos, "arity: set.clear() takes no arguments")
 	}
-	e.ensureMapClear()
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_clear(ptr %s)", c.setPtr))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_clear("+irPtr+" %s)", c.setPtr))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -1032,24 +1117,17 @@ func (e *Emitter) mapOrSetValuesArray(ty Type, ptr string) (Value, error) {
 			elemTy = *ty.MapKey
 		}
 		suffix, _ := mapRuntime(elemTy)
-		res := e.freshReg()
 		e.ensureMapFamily(suffix)
-		e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", res, suffix, ptr))
+		res := e.emitMapCopy("keys", ptr)
 		res = e.materializeKeysAggregate(res, elemTy)
 		return e.arrayFromAgg(res, ArrayOf(elemTy)), nil
 	}
 
-	keyTy := TypePtr
-	if ty.MapKey != nil {
-		keyTy = *ty.MapKey
-	}
 	valTy := TypeI64
 	if ty.MapVal != nil {
 		valTy = *ty.MapVal
 	}
-	suffix, _ := mapRuntime(keyTy)
-	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", res, suffix, ptr))
+	res := e.emitMapCopy("vals", ptr)
 	return e.arrayFromAgg(res, ArrayOf(valTy)), nil
 }
 
@@ -1064,8 +1142,8 @@ func (e *Emitter) valueToMapKey(v Value, keyTy Type) string {
 		if isStringTy(keyTy) {
 			isStr, p, r := e.freshReg(), e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, payload))
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isStr, p, e.nullRef()))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, payload))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isStr, p, e.nullRef()))
 			return r
 		}
 		isI, isF, isNum := e.freshReg(), e.freshReg(), e.freshReg()
@@ -1082,7 +1160,7 @@ func (e *Emitter) valueToMapKey(v Value, keyTy Type) string {
 			v = e.convert(v, keyTy) // null is nullRef (TDD-00257)
 		}
 		// Ensure we have a ptr (string values already are ptr).
-		if v.Ty.IR == "ptr" {
+		if v.Ty.IR == irPtr {
 			return v.Ref
 		}
 		// A non-ptr value inttoptr's to a ptr — coerce to i64 first so a float
@@ -1093,7 +1171,7 @@ func (e *Emitter) valueToMapKey(v Value, keyTy Type) string {
 		// has/get agree.
 		v = e.convert(v, TypeI64)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, v.Ref))
 		return r
 	}
 	// Number key. A `number` (float64) key bitcasts to i64 so the full double
@@ -1140,6 +1218,11 @@ func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
 	if v.Ty.IsDynamic() && !valTy.IsDynamic() && valTy.IR != "" {
 		v = e.convert(v, valTy)
 	}
+	// A `null` bound for a three-state slot is that slot's null (the null
+	// cell), not the undefined a bare null pointer reads as.
+	if valTy.NullAndUndef() && !v.Ty.NullAndUndef() && !v.Ty.IsDynamic() {
+		v = e.convert(v, valTy)
+	}
 	// A `T | undefined` scalar (`m.set(k, a[i])`, `m.set(k, xs.pop())`) bound
 	// for a plain-T slot stores its payload — the { i1, T } aggregate is not
 	// the scalar its type's IR names.
@@ -1154,15 +1237,15 @@ func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
 	if v.Ty.IsArray() {
 		header := e.arrayReturnHeader(v)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, header))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", r, header))
 		return r
 	}
 	switch v.Ty.IR {
 	case "i64":
 		return v.Ref
-	case "ptr":
+	case irPtr:
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", r, v.Ref))
 		return r
 	case "i1":
 		r := e.freshReg()
@@ -1189,26 +1272,27 @@ func (e *Emitter) valueToMapVal(v Value, valTy Type) string {
 // materializeKeysAggregate normalizes an any-keyed map/set's raw keys aggregate
 // (a {ptr,i64} array of NaN-boxes) into a proper keyTy[] array when keyTy is a
 // reference type (object/array). Every keys consumer (keys(), entries(),
-// forEach, Set for-of) loads each slot at keyTy.IR ("ptr"); the raw runtime slot
-// holds an i64 box, so loading it as "ptr" would reinterpret the box bits as a
+// forEach, Set for-of) loads each slot at keyTy.IR (irPtr); the raw runtime slot
+// holds an i64 box, so loading it as irPtr would reinterpret the box bits as a
 // header/object pointer and crash. Materialization unboxes each box back to its
 // LIVE header pointer (an array key) or object pointer (an object key), so the
 // surfaced keys alias the original references (SameValueZero identity is
 // preserved through iteration, matching JS). For a scalar/string/any keyTy the
 // boxes already ARE the presentation form, so the raw aggregate passes through.
 func (e *Emitter) materializeKeysAggregate(rawAgg string, keyTy Type) string {
-	if !isReferenceKeyTy(keyTy) && !keyTy.IsBigInt() {
+	// A nullable scalar key's box is already its array element (arrayElemType).
+	if !boxedKeyTy(keyTy) || isNullableScalar(keyTy) {
 		return rawAgg
 	}
 	dataReg := e.freshReg()
 	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", dataReg, rawAgg))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", lenReg, rawAgg))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", dataReg, rawAgg))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", lenReg, rawAgg))
 	outPtr := e.mallocArrayBuffer(lenReg, keyTy)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 	condL := e.freshLabel("matkeys.cond")
 	bodyL := e.freshLabel("matkeys.body")
 	doneL := e.freshLabel("matkeys.done")
@@ -1217,40 +1301,49 @@ func (e *Emitter) materializeKeysAggregate(rawAgg string, keyTy Type) string {
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	boxGep := e.freshReg()
 	box := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", boxGep, dataReg, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", box, boxGep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", boxGep, dataReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", box, boxGep))
 	elemRef := e.mapKeyFromSlot(box, keyTy)
 	e.storeArrayElement(outPtr, idxVal, elemRef, keyTy)
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	// The same {data, len} aggregate shape as rawAgg.
 	a0, a1 := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} undef, ptr %s, 0", a0, outPtr))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue {ptr, i64} %s, i64 %s, 1", a1, a0, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {"+irPtr+", i64} undef, "+irPtr+" %s, 0", a0, outPtr))
+	e.emitInstr(fmt.Sprintf("%s = insertvalue {"+irPtr+", i64} %s, i64 %s, 1", a1, a0, lenReg))
 	return a1
 }
 
 // mapKeyFromSlot is a reference or bigint key as its own type, from the
 // boxed i64 its map slot holds.
 func (e *Emitter) mapKeyFromSlot(box string, keyTy Type) string {
+	if isNullableScalar(keyTy) {
+		return e.convert(Value{Ref: box, Ty: TypeAny}, keyTy).Ref
+	}
 	_, payload := e.emitUnboxTagPayload(Value{Ref: box})
 	var elemRef string
-	if keyTy.IsBigInt() {
+	if keyTy.IsTuple() && !keyTy.IsDynamic() {
+		// A tuple boxes as the array it is.
+		elemRef = e.convert(Value{Ref: box, Ty: TypeAny}, keyTy).Ref
+	} else if keyTy.IsPromise() && !keyTy.IsDynamic() {
+		// A promise boxes into its wrapper: the promise it wraps.
+		elemRef = e.emitWrapperField(e.emitPromiseWrapperOrNull(Value{Ref: box, Ty: TypeAny}), 1, irPtr)
+	} else if keyTy.IsBigInt() {
 		// A bigint key's box is a { magic, bigint } cell.
 		cell := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", cell, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, cell, payload))
 		elemRef = e.emitBoxedBigIntLoad(cell).Ref
 	} else if keyTy.IsArray() {
 		// An array box's payload points to the any-array box cell (anyArrayBoxTy)
@@ -1258,13 +1351,24 @@ func (e *Emitter) mapKeyFromSlot(box string, keyTy Type) string {
 		// as header pointers (TDD-00213), so store that header directly.
 		boxCell := e.freshReg()
 		header := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", boxCell, payload))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", header, boxCell))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, boxCell, payload))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", header, boxCell))
 		elemRef = header
+	} else if headeredHost(keyTy) || isHostHandle(keyTy) {
+		// A host value (a Map, a Date) boxes as its header or its cell:
+		// unboxed to its handle, as any host read is.
+		elemRef = e.emitUnboxHost(Value{Ref: box, Ty: TypeAny}, keyTy).Ref
+	} else if keyTy.IsFunc() {
+		// A function boxes as its dynamic record: back to a closure header.
+		if c, ok := e.emitAnyToClosure(Value{Ref: box, Ty: TypeAny}, keyTy); ok {
+			elemRef = c.Ref
+		} else {
+			elemRef = e.emitIntToPtr(payload)
+		}
 	} else {
 		// An object key's box payload IS the object pointer.
 		objPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", objPtr, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, objPtr, payload))
 		elemRef = objPtr
 	}
 	return elemRef
@@ -1272,20 +1376,17 @@ func (e *Emitter) mapKeyFromSlot(box string, keyTy Type) string {
 
 func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string, keyTy Type) (keysPtr, keysLen, valsPtr string) {
 	e.ensureMapFamily(suffix)
-	keysRes := e.freshReg()
-	valsRes := e.freshReg()
-	e.ensureMapFamily(suffix)
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, mapPtr))
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_vals(ptr %s)", valsRes, suffix, mapPtr))
+	keysRes := e.emitMapCopy("keys", mapPtr)
+	valsRes := e.emitMapCopy("vals", mapPtr)
 	// Reference-type keys come back NaN-boxed; materialize them to real
 	// header/object pointers so per-slot keyTy.IR loads below are valid.
 	keysRes = e.materializeKeysAggregate(keysRes, keyTy)
 	keysPtr = e.freshReg()
 	keysLen = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", keysLen, keysRes))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", keysPtr, keysRes))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", keysLen, keysRes))
 	valsPtr = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", valsPtr, valsRes))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", valsPtr, valsRes))
 	return keysPtr, keysLen, valsPtr
 }
 
@@ -1304,17 +1405,15 @@ func (e *Emitter) emitMapEntries(mapPtr string, suffix string, keyTy, valTy Type
 	// 1 the value, the same struct layout the previous {key,value} object used,
 	// now positionally destructurable as `for (const [k, v] of m.entries())`.
 	entryTy := TupleType([]Type{keyTy, valTy})
-	entrySize := entryTy.StructSize()
 
-	e.ensureMalloc()
 	outBytes := e.freshReg()
 	outPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", outBytes, keysLen))
-	e.heapMallocInto(outPtr, outBytes)
+	e.heapMallocInto(outPtr, allocElems, outBytes)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("mapentries.cond")
 	bodyL := e.freshLabel("mapentries.body")
@@ -1324,34 +1423,24 @@ func (e *Emitter) emitMapEntries(mapPtr string, suffix string, keyTy, valTy Type
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, keysLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	kGep, kElem := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", kElem, keyTy.IR, kGep, keyTy.Align()))
 	vGep, vElem := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vElem, valTy.IR, vGep, valTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", vElem, valTy.IR, vGep, valTy.Align()))
 
-	entryReg := e.freshReg()
-	e.heapMallocInto(entryReg, fmt.Sprint(entrySize))
-	keySlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", keySlot, entryTy.StructIR(), entryReg))
-	e.heapStore(keyTy.IR, kElem, keySlot, keyTy.Align())
-	valSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
-	e.heapStore(valTy.IR, vElem, valSlot, valTy.Align())
+	entryReg := e.tupleOf([]Value{e.loadKeyAt(keysPtr, idxVal, keyTy), {Ref: vElem, Ty: valTy}}, entryTy).Ref
 
 	slotReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, outPtr, idxVal))
-	e.heapStore("ptr", entryReg, slotReg, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", slotReg, outPtr, idxVal))
+	e.heapStore(irPtr, entryReg, slotReg, 8)
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -1367,7 +1456,7 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("mapforeach.cond")
 	bodyL := e.freshLabel("mapforeach.body")
@@ -1377,16 +1466,15 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, keysLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	// An array key or value is stored as its header pointer.
-	kGep, vGep := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", kGep, keyTy.IR, keysPtr, idxVal))
-	kElem := e.loadArrayElem(kGep, keyTy)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
+	vGep := e.freshReg()
+	kElem := e.loadKeyAt(keysPtr, idxVal, keyTy)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", vGep, valTy.IR, valsPtr, idxVal))
 	vElem := e.loadArrayElem(vGep, valTy)
 
 	cbArgs := []Value{vElem}
@@ -1402,7 +1490,7 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -1415,19 +1503,18 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 // shape, where the "key" is just the value again.
 func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type, cb Callback) (Value, error) {
 	suffix, _ := mapRuntime(elemTy)
-	keysRes := e.freshReg()
 	e.ensureMapFamily(suffix)
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_%s_keys(ptr %s)", keysRes, suffix, setPtr))
+	keysRes := e.emitMapCopy("keys", setPtr)
 	// Reference-type elements come back NaN-boxed; materialize to real pointers.
 	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
 	keysPtr := e.freshReg()
 	keysLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", keysPtr, keysRes))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", keysLen, keysRes))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", keysPtr, keysRes))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", keysLen, keysRes))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("setforeach.cond")
 	bodyL := e.freshLabel("setforeach.body")
@@ -1437,14 +1524,12 @@ func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, keysLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
-	eGep, eElem := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", eGep, elemTy.IR, keysPtr, idxVal))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", eElem, elemTy.IR, eGep, elemTy.Align()))
+	eElem := e.loadKeyAt(keysPtr, idxVal, elemTy).Ref
 
 	cbArgs := []Value{{Ref: eElem, Ty: elemTy}}
 	if cb.acceptsArgAt(1) {
@@ -1459,7 +1544,7 @@ func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -1472,7 +1557,7 @@ func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type
 // value rather than a raw 0 (TDD-00064 bug #3). A pointer value type is
 // excluded — its miss is already a distinguishable null pointer.
 func isNullableScalarMapValue(valTy Type) bool {
-	return valTy.IR != "ptr" && valTy.IR != "void" && !valTy.IsDynamic()
+	return valTy.IR != irPtr && valTy.IR != "void" && !valTy.IsDynamic()
 }
 
 // emitMapGetNullable returns a scalar Map value as a `V | null` aggregate: the
@@ -1486,15 +1571,15 @@ func isNullableScalarMapValue(valTy Type) bool {
 // pointer folds truthiness to constant false). The dynamic box and an
 // already-nullable type are excluded.
 func mapGetUndefinedablePtr(valTy Type) bool {
-	return valTy.IR == "ptr" && !valTy.IsArray() && !valTy.IsDynamic() &&
+	return valTy.IR == irPtr && !valTy.IsArray() && !valTy.IsDynamic() &&
 		!valTy.Nullable() && !valTy.IsNull()
 }
 
 func (e *Emitter) emitMapGetNullable(mapPtr, kRef string, suffix, keyIR string, valTy Type) Value {
 	present := e.freshReg()
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has(ptr %s, %s %s)", present, suffix, mapPtr, keyIR, kRef))
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_%s_get(ptr %s, %s %s)", raw, suffix, mapPtr, keyIR, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_%s_has("+irPtr+" %s, %s %s)", present, suffix, mapPtr, keyIR, kRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_%s_get("+irPtr+" %s, %s %s)", raw, suffix, mapPtr, keyIR, kRef))
 	nty := valTy
 	nty.setNullable(true)
 	nty.setUndefined(true) // Map.get() misses yield `undefined`, not `null` (Node)
@@ -1509,16 +1594,16 @@ func (e *Emitter) mapValFromI64(rawReg string, valTy Type) Value {
 	// aliases the stored array.
 	if valTy.IsArray() {
 		header := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", header, rawReg))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, header, rawReg))
 		// A missing key returns 0: the null header, get()'s undefined.
 		return Value{Ref: header, Ty: valTy}
 	}
 	switch valTy.IR {
 	case "i64":
 		return Value{Ref: rawReg, Ty: valTy}
-	case "ptr":
+	case irPtr:
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, rawReg))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, rawReg))
 		return Value{Ref: r, Ty: valTy}
 	case "i1":
 		r := e.freshReg()
@@ -1539,36 +1624,6 @@ func (e *Emitter) mapValFromI64(rawReg string, valTy Type) Value {
 type mapKV struct {
 	key, val           Type
 	keyKnown, valKnown bool
-}
-
-// mapKeySig classifies a key type for unification: string keys hash by content,
-// numeric keys by raw bits, everything else (bool, object, symbol, null,
-// undefined, already-any) forces the any-keyed runtime.
-func mapKeySig(t Type) string {
-	switch {
-	case isStringTy(t):
-		return "str"
-	case !t.IsDynamic() && t.IR != "i1" && (t.Float || t.IsInteger()):
-		return "num"
-	default:
-		return "any"
-	}
-}
-
-// mapValSig classifies a value type: string/number/bool store directly in the
-// str/num map's i64 value slot; anything else (object, array, undefined, null,
-// mixed) is stored NaN-boxed as `any`.
-func mapValSig(t Type) string {
-	switch {
-	case isStringTy(t):
-		return "str:" + t.IR
-	case t.IR == "i1":
-		return "bool"
-	case !t.IsDynamic() && (t.Float || t.IsInteger()):
-		return "num:" + t.IR
-	default:
-		return "any"
-	}
 }
 
 // inferEmptyContainers types body's bare `[]`, `new Map()` and `new Set()`
@@ -1605,171 +1660,94 @@ type emptyScope struct {
 	kv  map[string]mapKV
 }
 
-// inferEmptyMapKVTypes scans one scope's body for untyped bindings initialized
-// to a bare `new Map()` (no type args, no seed entries) and unifies the key and
-// value types across every `binding.set(k, v)` call in that scope. Keys that
-// are all-string give a string-keyed map, all-one-numeric a numeric map, and
-// anything heterogeneous (or a bool/object/symbol/null/undefined key) an
-// any-keyed map; values unify likewise, widening to `any` (boxed) when mixed or
-// non-directly-storable. Mirrors inferEmptyArrayElemTypes (TDD-00205 Stage 1):
-// a throwaway scratch scope registers the body's bindings in source order so
-// e.inferExprType resolves identifiers used as set arguments. Nested function
-// bodies are separate scopes scanned by their own pass.
+// inferEmptyMapKVTypes is the key and value types of each unannotated
+// binding of a bare `new Map()`/`new Set()` in body (not in a nested
+// function), as the checker types it (tsc's `Map<any, any>` for an untyped
+// construction), mapped by reprOf.
 func (e *Emitter) inferEmptyMapKVTypes(body []ast.Statement) map[string]mapKV {
-	defer e.analysisPass()()
-	candidates := map[string]bool{}
-	keyContrib := map[string][]Type{}
-	valContrib := map[string][]Type{}
-
-	e.pushScope()
-	defer e.popScope()
-
-	declare := func(v *ast.VarDeclaration) {
-		var t Type
-		if v.TypeAnnot != nil {
-			t = e.resolveType(v.TypeAnnot)
-		} else if v.Init != nil {
-			t = e.inferExprType(v.Init)
-		}
-		e.define(v.Name, Symbol{Ty: t})
-		if v.TypeAnnot != nil {
-			return
-		}
-		if nm, ok := v.Init.(*ast.NewMapExpression); ok &&
-			nm.KeyType == nil && nm.ValType == nil && nm.Init == nil {
-			candidates[v.Name] = true
-			e.emptyPending = append(e.emptyPending, v)
-		}
-		// A bare `new Set()` is the same shape with one slot: its `.add`/`.has`/
-		// `.delete` arguments pick the element runtime (ADR-01061 — the string
-		// default turned `s.has(NaN)` into a strcmp on a poison pointer).
-		if ns, ok := v.Init.(*ast.NewSetExpression); ok && ns.ElemType == nil && ns.Init == nil {
-			candidates[v.Name] = true
-			e.emptyPending = append(e.emptyPending, v)
-		}
+	o := e.reprOracle()
+	if o == nil && e.foreignThisBody {
+		e.foreignThisBody = false
+		o = e.reprOracle()
+		e.foreignThisBody = true
 	}
-	var walkExpr func(ast.Expression)
-	walkExpr = func(expr ast.Expression) {
-		switch ex := expr.(type) {
-		case *ast.CallExpression:
-			if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-				if id, ok := mem.Object.(*ast.Identifier); ok && candidates[id.Name] {
-					switch mem.Property {
-					case "set":
-						if len(ex.Args) == 2 {
-							keyContrib[id.Name] = append(keyContrib[id.Name], e.inferExprType(ex.Args[0]))
-							valContrib[id.Name] = append(valContrib[id.Name], e.inferExprType(ex.Args[1]))
-						}
-					case "get", "has", "delete", "add":
-						// A lookup key also constrains the runtime family: an empty
-						// `new Map()` probed with `map.has([])` still needs the
-						// any-keyed runtime even though nothing was ever set.
-						if len(ex.Args) == 1 {
-							keyContrib[id.Name] = append(keyContrib[id.Name], e.inferExprType(ex.Args[0]))
-						}
-					}
-				}
-			}
-			for _, a := range ex.Args {
-				walkExpr(a)
-			}
-		case *ast.AssignmentExpression:
-			walkExpr(ex.Right)
-		}
+	if o == nil {
+		return nil
 	}
-	var walkStmts func([]ast.Statement)
-	walkStmts = func(stmts []ast.Statement) {
-		for _, stmt := range stmts {
-			switch s := stmt.(type) {
-			case *ast.VarDeclaration:
-				declare(s)
-				if s.Init != nil {
-					walkExpr(s.Init)
-				}
-			case *ast.VarDeclarationList:
-				for _, d := range s.Decls {
-					declare(d)
-					if d.Init != nil {
-						walkExpr(d.Init)
-					}
-				}
-			case *ast.ExpressionStatement:
-				walkExpr(s.Expr)
-			case *ast.IfStatement:
-				if s.Consequent != nil {
-					walkStmts(s.Consequent.Body)
-				}
-				if s.Alternate != nil {
-					walkStmts([]ast.Statement{s.Alternate})
-				}
-			case *ast.ForStatement:
-				if s.Body != nil {
-					walkStmts(s.Body.Body)
-				}
-			case *ast.WhileStatement:
-				if s.Body != nil {
-					walkStmts(s.Body.Body)
-				}
-			case *ast.BlockStatement:
-				walkStmts(s.Body)
-			}
-		}
-	}
-	walkStmts(body)
-
 	out := map[string]mapKV{}
-	for name := range candidates {
-		var kv mapKV
-		if keys := keyContrib[name]; len(keys) > 0 {
-			kv.key, kv.keyKnown = unifyMapKeyType(keys), true
-		}
-		if vals := valContrib[name]; len(vals) > 0 {
-			kv.val, kv.valKnown = unifyMapValType(vals), true
-		}
-		if kv.keyKnown || kv.valKnown {
-			out[name] = kv
-		}
+	for _, st := range body {
+		ast.Inspect(st, func(n ast.Node) bool {
+			switch n.(type) {
+			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+				return false // its own scope, inferred when it is compiled
+			}
+			v, ok := n.(*ast.VarDeclaration)
+			if !ok || v.TypeAnnot != nil {
+				return true
+			}
+			switch init := v.Init.(type) {
+			case *ast.NewMapExpression:
+				if init.KeyType != nil || init.ValType != nil || init.Init != nil {
+					return true
+				}
+			case *ast.NewSetExpression:
+				if init.ElemType != nil || init.Init != nil {
+					return true
+				}
+			default:
+				return true
+			}
+			t := o.c.VarType(v)
+			if o.c.Unanswered(t) {
+				return true
+			}
+			r, rok := o.r.of(t)
+			if !rok || !(r.IsMap() || r.IsSet()) {
+				return true
+			}
+			var kv mapKV
+			if r.MapKey != nil {
+				kv.key, kv.keyKnown = *r.MapKey, true
+			}
+			if r.MapVal != nil {
+				kv.val, kv.valKnown = *r.MapVal, true
+			}
+			out[v.Name] = kv
+			return true
+		})
 	}
 	return out
-}
-
-// unifyMapKeyType reduces the key types a bare Map is `.set()` with to one
-// runtime key type: all-string → string, all-numeric → number, else any.
-func unifyMapKeyType(types []Type) Type {
-	sig := mapKeySig(types[0])
-	for _, t := range types[1:] {
-		if mapKeySig(t) != sig {
-			return TypeAny
-		}
-	}
-	switch sig {
-	case "str":
-		return TypePtr
-	case "num":
-		return TypeF64
-	default:
-		return TypeAny
-	}
-}
-
-// unifyMapValType reduces the value types to one storage type: a single
-// directly-storable type is kept exactly; anything mixed or non-storable
-// widens to `any` (NaN-boxed).
-func unifyMapValType(types []Type) Type {
-	sig := mapValSig(types[0])
-	for _, t := range types[1:] {
-		if mapValSig(t) != sig {
-			return TypeAny
-		}
-	}
-	if sig == "any" {
-		return TypeAny
-	}
-	return types[0]
 }
 
 // mapValHinted reports a Map value type a stored value is built against
 // (a literal takes its shape): a function, box, array, object or tuple.
 func mapValHinted(v Type) bool {
 	return v.IsFunc() || v.IsDynamic() || v.IsArray() || v.IsObject() || v.IsDynamicObject() || v.IsTuple()
+}
+
+// nullishSeedSource is a collection constructor's iterable: a dynamic one
+// evaluated once, null and undefined read as no entries (`new Map(null)`).
+func (e *Emitter) nullishSeedSource(src ast.Expression) (ast.Expression, error) {
+	t := e.typeOfExpr(src)
+	if !t.IsDynamic() && !t.IsNull() && !t.IsUndefined() && !ownlessPrimitive(t) {
+		return src, nil
+	}
+	v, err := e.emitExpr(src)
+	if err != nil {
+		return nil, err
+	}
+	if !v.Ty.IsDynamic() {
+		if v, err = e.emitBoxValue(v); err != nil {
+			return nil, err
+		}
+	}
+	pos := src.GetPos()
+	id := e.bindValue(v, pos)
+	sel, err := e.emitExpr(ast.NewAsExpression(ast.NewConditionalExpression(ast.NewBinaryExpression("==", id, ast.NewNullLiteral(false, pos), pos),
+		ast.NewArrayLiteral(nil, pos), id, pos), ast.AnyAnnotation(""), pos))
+	if err != nil {
+		return nil, err
+	}
+	// A temporary: a value that is not iterable is described by its value.
+	return e.bindValue(sel, pos), nil
 }

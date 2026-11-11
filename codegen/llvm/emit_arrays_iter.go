@@ -7,24 +7,23 @@ import (
 
 func (e *Emitter) emitArrayKeys(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: keys takes no arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: keys takes no arguments")
 	}
-	if arrayIterable(e.inferExprType(mem.Object)) {
+	if arrayIterable(e.typeOfExpr(mem.Object)) {
 		return e.emitArrayIterOpen(mem.Object, mapIterKeys)
 	}
 	_, lenReg, _, err := e.resolveArrayForHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureMalloc()
 	byteCount := e.freshReg()
 	newPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", byteCount, lenReg))
-	e.heapMallocInto(newPtr, byteCount)
+	e.heapMallocInto(newPtr, allocBytes, byteCount)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("keys.cond")
 	bodyL := e.freshLabel("keys.body")
@@ -34,17 +33,17 @@ func (e *Emitter) emitArrayKeys(mem *ast.MemberExpression, args []ast.Expression
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, newPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", slot, newPtr, idxVal))
 	e.heapStore("i64", idxVal, slot, 8)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -56,9 +55,9 @@ func (e *Emitter) emitArrayKeys(mem *ast.MemberExpression, args []ast.Expression
 // elements — same materialized-array convention as emitArrayKeys.
 func (e *Emitter) emitArrayValues(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: values takes no arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: values takes no arguments")
 	}
-	if arrayIterable(e.inferExprType(mem.Object)) {
+	if arrayIterable(e.typeOfExpr(mem.Object)) {
 		return e.emitArrayIterOpen(mem.Object, mapIterValues)
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
@@ -77,9 +76,9 @@ func (e *Emitter) emitArrayValues(mem *ast.MemberExpression, args []ast.Expressi
 // `for (const e of arr.entries())` then read `e.index`/`e.value`.
 func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: entries takes no arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: entries takes no arguments")
 	}
-	if arrayIterable(e.inferExprType(mem.Object)) {
+	if arrayIterable(e.typeOfExpr(mem.Object)) {
 		return e.emitArrayIterOpen(mem.Object, mapIterEntries)
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(mem.Object, pos)
@@ -91,17 +90,15 @@ func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Express
 	// field 1 the value — positionally destructurable as
 	// `for (const [i, v] of arr.entries())`.
 	entryTy := TupleType([]Type{TypeI64, elemTy})
-	entrySize := entryTy.StructSize()
 
-	e.ensureMalloc()
 	outBytes := e.freshReg()
 	outPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", outBytes, lenReg))
-	e.heapMallocInto(outPtr, outBytes)
+	e.heapMallocInto(outPtr, allocElems, outBytes)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("entries.cond")
 	bodyL := e.freshLabel("entries.body")
@@ -111,38 +108,24 @@ func (e *Emitter) emitArrayEntries(mem *ast.MemberExpression, args []ast.Express
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	elemGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", elemGep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", elemGep, elemTy.IR, ptrReg, idxVal))
 	elemVal := e.loadArrayElem(elemGep, elemTy)
 
-	entryReg := e.freshReg()
-	e.heapMallocInto(entryReg, fmt.Sprint(entrySize))
-	idxSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", idxSlot, entryTy.StructIR(), entryReg))
-	e.heapStore("i64", idxVal, idxSlot, 8)
-	valSlot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
-	// The entry object's "value" field is a struct field. An array-typed value
-	// field holds a header pointer (TDD-00213 Stage 2), so store the unboxed
-	// array's header.
-	if elemTy.IsArray() {
-		e.storeArrayFieldHeader(valSlot, elemVal)
-	} else {
-		e.heapStore(StructFieldIR(elemTy), elemVal.Ref, valSlot, elemTy.Align())
-	}
+	entryReg := e.tupleOf([]Value{{Ref: idxVal, Ty: TypeI64}, elemVal}, entryTy).Ref
 
 	slotReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, outPtr, idxVal))
-	e.heapStore("ptr", entryReg, slotReg, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", slotReg, outPtr, idxVal))
+	e.heapStore(irPtr, entryReg, slotReg, 8)
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -164,9 +147,8 @@ func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error)
 	if len(args) > 0 {
 		return e.emitExpr(ast.NewArrayLiteral(args, pos))
 	}
-	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, "8")
+	e.heapMallocInto(dataReg, allocElems, "8")
 	r1 := e.newArrayHeader(dataReg, "0")
 	return Value{Ref: r1, Ty: ArrayOf(TypeAny)}, nil
 }
@@ -177,49 +159,47 @@ func (e *Emitter) emitArrayOf(args []ast.Expression, pos ast.Pos) (Value, error)
 // emitStringExtract). Shared by Array.from(string), `[...str]` and
 // `for (const ch of str)` (ADR-00535, ADR-01188).
 func (e *Emitter) emitStringToCharArray(v Value) Value {
-	e.ensureStrlen()
-	e.ensureMalloc()
 	sLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sLen, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", sLen, v.Ref))
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, sLen))
 	buf := e.freshReg()
-	e.heapMallocInto(buf, bytes)
+	e.heapMallocInto(buf, allocElems, bytes)
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxPtr))
 	outPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", outPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", outPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", outPtr))
 	condL := e.freshLabel("strfrom.cond")
 	bodyL := e.freshLabel("strfrom.body")
 	endL := e.freshLabel("strfrom.end")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	i1r, c := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i1r, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i1r, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", c, i1r, sLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, bodyL, endL))
 	e.emitLabel(bodyL)
 	i2 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i2, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i2, idxPtr))
 	n := e.emitUTF8SeqLen(v.Ref, i2, sLen)
 	ch := e.emitStringExtract(v.Ref, i2, n)
 	j := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", j, outPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", j, outPtr))
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slot, buf, j))
-	e.heapStore("ptr", ch.Ref, slot, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", slot, buf, j))
+	e.heapStore(irPtr, ch.Ref, slot, 8)
 	j2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", j2, j))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", j2, outPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", j2, outPtr))
 	i3 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", i3, i2, n))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i3, idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", i3, idxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(endL)
 	count := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, outPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", count, outPtr))
 	r1 := e.newArrayHeader(buf, count)
 	return Value{Ref: r1, Ty: ArrayOf(TypePtr)}
 }
@@ -230,9 +210,9 @@ func (e *Emitter) emitStringToCharArray(v Value) Value {
 // string's iterator yields.
 func (e *Emitter) emitUTF8SeqLen(s, i, sLen string) string {
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", p, s, i))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", p, s, i))
 	b := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b, p))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", b, p))
 	b32 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i8 %s to i64", b32, b))
 	m2, m3, m4 := e.freshReg(), e.freshReg(), e.freshReg()
@@ -271,7 +251,7 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 	// is mapFn's receiver: `.map((v, i) => mapFn.call(thisArg, v, i))`, each
 	// argument evaluated once, in order.
 	if len(args) > 0 {
-		if t := e.inferExprType(args[0]); t.IsTuple() && !t.IsDynamic() {
+		if t := e.typeOfExpr(args[0]); t.IsTuple() && !t.IsDynamic() {
 			// A tuple is an array of its elements (tupleAsArray).
 			args = append([]ast.Expression{ast.NewAsExpression(args[0], ast.AnyArrayAnnotation(""), pos)}, args[1:]...)
 		}
@@ -293,7 +273,7 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		mapFn := ast.NewArrowFunction([]ast.Param{{Name: "__kml_fv"}, {Name: "__kml_fi"}}, nil, call, nil, pos)
 		return e.emitArrayFromMaybeMapped(temps[0], temps[1], ast.Expression(mapFn), pos)
 	}
-	if len(args) == 2 && e.inferExprType(args[1]).IsDynamic() {
+	if len(args) == 2 && e.typeOfExpr(args[1]).IsDynamic() {
 		// An `any` mapFn may be undefined: then there is no mapping.
 		temps := make([]ast.Expression, 2)
 		for i, a := range args {
@@ -316,13 +296,27 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		return e.emitExpr(mapCall)
 	}
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Array.from takes 1 to 3 arguments (iterable, mapFn, thisArg)", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Array.from arity")
 	}
 	if hv := e.hostView(args[0]); hv != nil {
 		// A class extending Map or Set: its host's default iterator.
 		return e.emitArrayFrom([]ast.Expression{hv}, pos)
 	}
-	srcTy := e.inferExprType(args[0])
+	srcTy := e.typeOfExpr(args[0])
+
+	if lit, ok := stripAsAny(args[0]).(*ast.NullLiteral); ok {
+		// undefined or null itself: no iterator and no array-like.
+		if _, err := e.emitExpr(args[0]); err != nil {
+			return Value{}, err
+		}
+		what := "undefined"
+		if !lit.IsUndefined {
+			what = "object null"
+		}
+		e.emitThrowTypeError(what + " is not iterable (cannot read property Symbol(Symbol.iterator))")
+		e.emitLabel(e.freshLabel("arrfrom.dead"))
+		return Value{Ref: e.newArrayHeader("null", "0"), Ty: ArrayOf(TypeAny)}, nil
+	}
 
 	if srcTy.IsArray() {
 		e.iterUse = true // its iteration (array_iter_patch.go)
@@ -330,13 +324,11 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureMalloc()
-		e.ensureMemcpy()
 		bytesReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, lenReg, elemTy.Align()))
 		newPtr := e.freshReg()
-		e.heapMallocInto(newPtr, bytesReg)
-		e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", newPtr, ptrReg, bytesReg))
+		e.heapMallocInto(newPtr, elemAllocKind(elemTy), bytesReg)
+		e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", newPtr, ptrReg, bytesReg))
 		r1 := e.newArrayHeader(newPtr, lenReg)
 		return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 	}
@@ -346,6 +338,9 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		v, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
+		}
+		if !v.Ty.IsCollIter() {
+			return e.emitAnyArrayFrom(v) // held in any: iterated at run time
 		}
 		return e.emitCollIterDrain(v), nil
 	}
@@ -411,24 +406,21 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		}
 		// An array-like with properties besides `length` (`{ length: 2, 0:
 		// 'a' }`): its indexed reads, at run time.
-		if len(srcTy.Fields) > 1 || lenFieldTy.IsDynamic() {
+		if len(srcTy.Fields) > 1 || lenFieldTy.IsDynamic() || lenFieldTy.IsArray() || lenFieldTy.IR == irPtr {
 			v, err := e.emitExpr(args[0])
 			if err != nil {
 				return Value{}, err
 			}
 			return e.emitAnyArrayFrom(v)
 		}
-		if lenFieldTy.IsArray() || lenFieldTy.IR == "ptr" {
-			return Value{}, fmt.Errorf("%d:%d: Array.from array-like 'length' must be a number", pos.Line, pos.Col)
-		}
 		v, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
 		lenGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", lenGep, srcTy.StructIR(), v.Ref, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", lenGep, srcTy.StructIR(), v.Ref, idx))
 		lenRaw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", lenRaw, lenFieldTy.IR, lenGep, lenFieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", lenRaw, lenFieldTy.IR, lenGep, lenFieldTy.Align()))
 		// Coerce the length to i64 (a float length truncates toward zero, per
 		// ToIntegerOrInfinity), then clamp a negative length to 0.
 		lenI64 := e.convert(Value{Ref: lenRaw, Ty: lenFieldTy}, TypeI64).Ref
@@ -437,32 +429,31 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, lenI64))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", lenPos, isNeg, lenI64))
 
-		e.ensureMalloc()
 		bytes := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, lenPos, TypeAny.Align()))
 		data := e.freshReg()
-		e.heapMallocInto(data, bytes)
+		e.heapMallocInto(data, allocElems, bytes)
 
 		iSlot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
-		e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iSlot))
+		e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", iSlot))
 		condL := e.freshLabel("arrlike.cond")
 		bodyL := e.freshLabel("arrlike.body")
 		endL := e.freshLabel("arrlike.end")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(condL)
 		iCur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", iCur, iSlot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", iCur, iSlot))
 		more := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, iCur, lenPos))
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
 		e.emitLabel(bodyL)
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", slot, data, iCur))
-		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, slot))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", slot, data, iCur))
+		e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, slot))
 		iNext := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", iNext, iCur))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", iNext, iSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", iNext, iSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 		e.emitLabel(endL)
 		r1 := e.newArrayHeader(data, lenPos)
@@ -491,7 +482,14 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		return e.emitEmptyAnyArray(), nil
 	}
 
-	return Value{}, fmt.Errorf("%d:%d: Array.from argument is not iterable", pos.Line, pos.Col)
+	// Anything else (a number, a boolean, a function, …): read at run time,
+	// as an iterable when it has an iterator, else as an array-like of its
+	// ToObject — a primitive's wrapper has length 0.
+	v, err := e.emitExpr(args[0])
+	if err != nil {
+		return Value{}, err
+	}
+	return e.emitAnyArrayFrom(v)
 }
 
 // emitArrayCopyWithin implements arr.copyWithin(target, start?, end?):
@@ -503,7 +501,7 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 // already relied on by shift()/unshift()/splice()'s own tail shifts.
 func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 || len(args) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: copyWithin takes 1–3 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "copyWithin arity")
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
@@ -559,11 +557,10 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 	srcGep := e.freshReg()
 	dstGep := e.freshReg()
 	byteCount := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", srcGep, elemTy.IR, ptrReg, startN))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", dstGep, elemTy.IR, ptrReg, targetN))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", srcGep, elemTy.IR, ptrReg, startN))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", dstGep, elemTy.IR, ptrReg, targetN))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", byteCount, count, elemTy.Align()))
-	e.ensureMemmove()
-	e.emitInstr(fmt.Sprintf("call ptr @memmove(ptr %s, ptr %s, i64 %s)", dstGep, srcGep, byteCount))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memmove("+irPtr+" %s, "+irPtr+" %s, i64 %s)", dstGep, srcGep, byteCount))
 	e.emitHolesCall("__kml_holes_move", e.hofHolesHeader(mem.Object, hdr), targetN, startN, count)
 
 	r1 := e.receiverArrayHeader(hdr, ptrReg, lenReg)
@@ -574,11 +571,25 @@ func (e *Emitter) emitArrayCopyWithin(mem *ast.MemberExpression, args []ast.Expr
 // when fn, an evaluated mapFn, is undefined, as Array.from treats a missing
 // mapFn. A typed fn is never undefined.
 func (e *Emitter) emitArrayFromMaybeMapped(src, fn, mapper ast.Expression, pos ast.Pos) (Value, error) {
-	if !e.inferExprType(fn).IsDynamic() {
+	if !e.typeOfExpr(fn).IsDynamic() {
 		return e.emitArrayFrom([]ast.Expression{src, mapper}, pos)
+	}
+	// The mapper is made before the branch: making it boxes the locals it
+	// captures, and code after the branch reads them through those boxes.
+	mapper, err := e.receiverTemp(mapper)
+	if err != nil {
+		return Value{}, err
 	}
 	isUndef := ast.NewBinaryExpression("===", fn, ast.NewNullLiteral(true, pos), pos)
 	plain := arrayFromCall(pos, []ast.Expression{src})
 	mapped := ast.NewCallExpression(ast.NewMemberExpression(arrayFromCall(pos, []ast.Expression{src}), "map", pos), []ast.Expression{mapper}, pos)
 	return e.emitExpr(ast.NewConditionalExpression(isUndef, plain, mapped, pos))
+}
+
+// stripAsAny is x without an `as any` the compiler added around it.
+func stripAsAny(x ast.Expression) ast.Expression {
+	if as, ok := x.(*ast.AsExpression); ok {
+		return as.Expr
+	}
+	return x
 }

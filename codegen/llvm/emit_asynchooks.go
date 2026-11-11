@@ -18,28 +18,27 @@ import (
 // fires. Only applied when the program has the async_hooks module
 // (e.programUsesALS); otherwise timers are untouched.
 func (e *Emitter) wrapTimerClosureWithAsyncCtx(closurePtr string) string {
-	e.ensureAsyncCtxAccessors()
 	if e.programIndependent() {
 		// Shared code wraps only while a context is current: the same
 		// whether or not the program uses AsyncLocalStorage.
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_als_wrap(ptr %s)", r, closurePtr))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_als_wrap("+irPtr+" %s)", r, closurePtr))
 		return r
 	}
 	cc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_als_ctx_get()", cc))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_als_ctx_get()", cc))
 	env := e.freshReg()
-	e.heapMallocInto(env, "16")
-	e.heapStore("ptr", closurePtr, env, 8)
+	e.heapMallocInto(env, allocClosure, "16")
+	e.heapStore(irPtr, closurePtr, env, 8)
 	ccp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", ccp, env))
-	e.heapStore("ptr", cc, ccp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", ccp, env))
+	e.heapStore(irPtr, cc, ccp, 8)
 	hdr := e.freshReg()
-	e.heapMallocInto(hdr, "16")
-	e.heapStore("ptr", "@__kml_als_timer_tramp", hdr, 8)
+	e.emitClosureAlloc(hdr, "16", "@__kml_als_timer_tramp")
+	e.heapStore(irPtr, "@__kml_als_timer_tramp", hdr, 8)
 	hep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr { ptr, ptr }, ptr %s, i32 0, i32 1", hep, hdr))
-	e.heapStore("ptr", env, hep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", hep, hdr))
+	e.heapStore(irPtr, env, hep, 8)
 	return hdr
 }
 

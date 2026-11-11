@@ -85,6 +85,7 @@ func TestParseASIRejections(t *testing.T) {
 		{"let x = 1 let y = 2\n", "expected ';', got let"},
 		{"let x = 1\nx = 2 x = 3\n", "expected ';', got IDENT"},
 		{"throw\nnew Error('x')\n", "line break not allowed after 'throw'"},
+		{"label: { for (;;) { continue label; } }\n", "label of an enclosing iteration statement"},
 	}
 	for _, c := range cases {
 		_, err := parser.Parse(c.src)
@@ -97,7 +98,7 @@ func TestParseASIRejections(t *testing.T) {
 func TestParseScanErrorIsReportedAndTerminates(t *testing.T) {
 	// A scanning error past which the parser keeps looking must end the parse
 	// with the scanner's message, not loop.
-	_, err := parser.Parse("let o = { a: 1, \\u0062: 2 }\nlet p = [1\n")
+	_, err := parser.Parse("let o = { a: 1, \u00ac: 2 }\nlet p = [1\n")
 	if err == nil || !strings.Contains(err.Error(), "unexpected character") {
 		t.Fatalf("got %v, want the scanner's unexpected-character error", err)
 	}

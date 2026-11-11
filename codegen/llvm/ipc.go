@@ -9,24 +9,5 @@ import _ "embed"
 //go:embed ipcsrc/ipc.c
 var ipcSource string
 
-// UsesIPC reports whether the program used the fork IPC channel (either
-// side), so the driver links the embedded framing C.
-func (e *Emitter) UsesIPC() bool { return e.usedIPC }
-
 // IPCSource returns the embedded framing C.
 func IPCSource() string { return ipcSource }
-
-// ensureIPCDecls declares the framing C's entry points once and marks the
-// source for linking.
-func (e *Emitter) ensureIPCDecls() {
-	if e.usedIPC {
-		return
-	}
-	e.usedIPC = true
-	e.emitGlobal("declare ptr @__kml_ipc_chan_new()")
-	e.emitGlobal("declare void @__kml_ipc_feed(ptr, ptr, i64)")
-	e.emitGlobal("declare ptr @__kml_ipc_take(ptr)")
-	e.emitGlobal("declare i64 @__kml_ipc_send(i64, ptr)")
-	e.emitGlobal("declare ptr @__kml_ipc_take2(ptr, ptr)")
-	e.emitGlobal("declare i64 @__kml_ipc_send_raw(i64, ptr)")
-}

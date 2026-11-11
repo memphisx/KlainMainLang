@@ -8,7 +8,7 @@
     "loose": "16/17",
     "loosePct": 94,
     "strict": "4/17",
-    "strictPct": 18
+    "strictPct": 24
   },
   "lede": "The smaller Node built-ins, grouped here rather than each given a full page. net, tls, http and https are Node's own layering ported to TypeScript — a net.Socket is a Duplex over a native TCP handle, a TLSSocket a Socket whose handle carries a non-blocking OpenSSL session, and http/https build on them — all on one event loop with dgram and dns. Messages across process and channel boundaries (cluster, diagnostics_channel) are strings, and vm stays out of scope behind the same blocker as bare eval().",
   "entries": [
@@ -58,7 +58,6 @@
       "exampleKey": "assert/assert",
       "snippet": "assert.strictEqual(\"a\" + \"b\", \"ab\")\nassert.throws(() => { throw new Error(\"boom\") })",
       "differences": [
-        "No `assert.CallTracker` (deprecated in Node)",
         "Deep equality does not compare symbol-keyed properties, and a failure diff does not invoke getters",
         "An uncaught `AssertionError` prints `Uncaught: <message>` rather than Node's name, stack and property block"
       ],
@@ -121,7 +120,7 @@
         "`.promisify` wraps a function value and honours `promisify.custom`; a code-generated builtin (`fs.readFile`) is not a function value to pass it",
         "`promisify(f) === f` is false for an already-promisified `f`",
         "`.inspect` ignores `colors`, `showHidden`, `getters`, `maxStringLength` and `numericSeparator`; `compact: true` is treated as 3; a custom method's `depth` argument is `Infinity`, not `null`, when the depth is unlimited",
-        "No `inherits`, `MIMEType` or `getCallSites`"
+        "No `MIMEType` or `getCallSites`"
       ],
       "seeAlso": [],
       "spec": {

@@ -3,7 +3,7 @@
 // or lowered call, a namespace-mangled name, an intrinsic's desugaring, a
 // temporary's member read). It mirrors the dispatch emitCall and emitMember
 // run on that node, so the type is the one its emission produces. A node the
-// checker saw takes the checker's type (inferExprType).
+// checker saw takes the checker's type (typeOfExpr).
 package llvm
 
 import (
@@ -12,12 +12,12 @@ import (
 	"strings"
 )
 
-// structuralMemberType is a member read's representation from emitMember's
-// dispatch on its receiver.
-func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
+// builtMemberType is the type of a member read codegen builds, from
+// emitMember's dispatch on its receiver.
+func (e *Emitter) builtMemberType(ex *ast.MemberExpression) Type {
 	// A namespace's enum or class itself as a value — must match emitMember.
 	if bare := e.stripNSTypeQualifier(ex); bare != nil {
-		return e.inferExprType(bare)
+		return e.typeOfExpr(bare)
 	}
 	// A nested namespace itself (`A.B` of `A.B.port`): an object, held
 	// boxed; its members dispatch through the namespace.
@@ -28,7 +28,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 		return TypeAny
 	}
 	if call, ok := e.tsSubtleRef(ex); ok {
-		return e.inferExprType(call)
+		return e.typeOfExpr(call)
 	}
 	if e.isTemplateRaw(ex) {
 		return ArrayOf(TypePtr)
@@ -40,12 +40,12 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 		return TypeAny // the method as a dynamic function (emitMember)
 	}
 	if ex.Property == "code" && e.isDOMExceptionExpr(ex.Object) {
-		if ot := e.inferExprType(ex.Object); ot.IsError() && !ot.IsClass() {
+		if ot := e.typeOfExpr(ex.Object); ot.IsError() && !ot.IsClass() {
 			return TypeF64 // must match emitMemberRaw's DOMException code
 		}
 	}
 	if _, _, ok := execArrayMemberType(ex.Property); ok {
-		if ot := e.inferExprType(ex.Object); ot.ExecArray {
+		if ot := e.typeOfExpr(ex.Object); ot.ExecArray {
 			return execMemberValueType(ex.Property, ot.ExecMaybePlain)
 		}
 	}
@@ -54,17 +54,17 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	if _, ok := e.processStdioGetter(ex); ok {
 		return TypeAny
 	}
-	if r, ok := e.processMemberRewrite(ex); ok {
-		return e.inferExprType(r)
+	if r, ok := e.loweredMemberRewrite(ex); ok {
+		return e.typeOfExpr(r)
 	}
 	// `o?.x` is `PropType | undefined` — mirror emitOptionalMember, which
 	// wraps a pointer (non-array) object's optional read as `T | undefined`
 	// (a scalar/pointer prop; undefinedableElem no-ops on array/tuple/dynamic).
 	if ex.Optional {
-		objTy := e.inferExprType(ex.Object)
+		objTy := e.typeOfExpr(ex.Object)
 		plain := ast.NewMemberExpression(ex.Object, ex.Property, ex.GetPos())
-		inner := e.inferExprType(plain)
-		if (objTy.IR == "ptr" && !objTy.IsArray()) || isNullableScalar(objTy) ||
+		inner := e.typeOfExpr(plain)
+		if (objTy.IR == irPtr && !objTy.IsArray()) || isNullableScalar(objTy) ||
 			(optionalArrayGuards(objTy) && ex.Property == "length") {
 			return optionalCallResultType(optCalleeValue, inner)
 		}
@@ -73,7 +73,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	// A function's own property (TDD-00229) reads from its bag: the
 	// checker's primitive, else any (mirrors emitMember).
 	// A namespace merged into the function declares its members (below).
-	if ot := e.inferExprType(ex.Object); ot.IsFunc() && !ot.IsDynamic() && ex.Property != "name" && ex.Property != "length" && !numericBuiltinConst(ex) && !e.isNamespaceMember(ex) {
+	if ot := e.typeOfExpr(ex.Object); ot.IsFunc() && !ot.IsDynamic() && ex.Property != "name" && ex.Property != "length" && !numericBuiltinConst(ex) && !e.isNamespaceMember(ex) {
 		if pt, ok := e.checkerPrimitive(ex); ok {
 			return pt
 		}
@@ -84,7 +84,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	}
 	// An optional method read as a value: its code, or undefined
 	// (optionalMethodPresence).
-	if ot := e.inferExprType(ex.Object); ot.IsClass() && e.isOptionalMethod(ot.ClassName, ex.Property) {
+	if ot := e.typeOfExpr(ex.Object); ot.IsClass() && e.isOptionalMethod(ot.ClassName, ex.Property) {
 		if _, _, isField := ot.FieldIndex(ex.Property); !isField {
 			ty := TypePtr
 			ty.setNullable(true)
@@ -93,7 +93,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 		}
 	}
 	// A named property of an index-signature dictionary has its declared type.
-	if ot := e.inferExprType(ex.Object); ot.IsDynamicObject() {
+	if ot := e.typeOfExpr(ex.Object); ot.IsDynamicObject() {
 		for _, f := range ot.DictFields {
 			if f.Name == ex.Property {
 				return f.Ty
@@ -114,13 +114,13 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 		}
 	}
 	// An index-signature view (DynPropTy): every property has its type.
-	if ot := e.inferExprType(ex.Object); isUnconstrainedDynamic(ot) && ot.DynPropTy != nil {
+	if ot := e.typeOfExpr(ex.Object); isUnconstrainedDynamic(ot) && ot.DynPropTy != nil {
 		return dynPropReadType(*ot.DynPropTy)
 	}
 	// A property of an `any` value the checker knows to be a primitive
 	// (`r.stdout` of a `SpawnSyncReturns<string>` a TypeScript module
 	// returned through `any`): that primitive, mirroring emitMember.
-	if ot := e.inferExprType(ex.Object); isUnconstrainedDynamic(ot) {
+	if ot := e.typeOfExpr(ex.Object); isUnconstrainedDynamic(ot) {
 		if pt, ok := e.checkerPrimitive(ex); ok {
 			return pt
 		}
@@ -128,7 +128,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	// A member of an un-narrowed union of scalars is read off its box at
 	// run time (emitMember, emitCall): a count is a number, anything else
 	// a box.
-	if ot := e.inferExprType(ex.Object); ot.IsDynamic() && len(ot.UnionMembers) > 0 && isSelfDescribingBox(ot) && !unionAllHaveLength(ot) {
+	if ot := e.typeOfExpr(ex.Object); ot.IsDynamic() && len(ot.UnionMembers) > 0 && isSelfDescribingBox(ot) && !unionAllHaveLength(ot) {
 		if ex.Property == "length" {
 			return TypeF64
 		}
@@ -141,15 +141,15 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	// reject handler `(e) => (e as Error).name`) disagrees with its body's IR.
 	// An Error's `.errors` is AggregateError's any[] (mirrors emitMember's
 	// kind-guarded accessor).
-	if ot := e.inferExprType(ex.Object); ex.Property == "errors" && ot.IsError() && ot.IsObject() && !ot.IsClass() && !ot.IsCaught() {
+	if ot := e.typeOfExpr(ex.Object); ex.Property == "errors" && ot.IsError() && ot.IsObject() && !ot.IsClass() && !ot.IsCaught() {
 		return ArrayOf(TypeAny)
 	}
-	if e.inferExprType(ex.Object).IsCaught() {
+	if e.typeOfExpr(ex.Object).IsCaught() {
 		if ex.Property == "errors" {
 			return ArrayOf(TypeAny)
 		}
 		if _, fieldTy, ok := errorObjType.FieldIndex(ex.Property); ok && caughtTypedField(ex.Property) {
-			if nt := undefinedableElem(fieldTy); fieldTy.IR == "ptr" || isNullableScalar(nt) {
+			if nt := undefinedableElem(fieldTy); fieldTy.IR == irPtr || isNullableScalar(nt) {
 				return nt
 			}
 			return fieldTy
@@ -162,7 +162,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	}
 	// An array's or a string's method read as a value is its prototype's
 	// record.
-	ot := e.inferExprType(ex.Object)
+	ot := e.typeOfExpr(ex.Object)
 	for _, class := range []string{valueProtoClass(ot), primMethodClass(ot)} {
 		if _, ok := e.classMethod(class, ex.Property); ok && class != "" {
 			return TypeAny
@@ -177,7 +177,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	// (TDD-00155): the runtime tag dispatch yields another box.
 	// (A builtin's numeric constant, `Math.E`, is the number emitMember
 	// reads, below.)
-	if baseTy := e.inferExprType(ex.Object); isUnconstrainedDynamic(baseTy) && !e.isClassName(ex.Object) && !e.builtinNumericConst(ex) {
+	if baseTy := e.typeOfExpr(ex.Object); isUnconstrainedDynamic(baseTy) && !e.isClassName(ex.Object) && !e.builtinNumericConst(ex) {
 		return TypeAny
 	}
 	// `.length` on an array/string/tuple/typed-array is a Number (double)
@@ -185,7 +185,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	// which sitofp the i64 count to double. (An object field literally
 	// named `length` is resolved by the field-lookup path further below.)
 	if ex.Property == "length" {
-		ot := e.inferExprType(ex.Object)
+		ot := e.typeOfExpr(ex.Object)
 		if ot.IsArray() || ot.IsFlatArray() || ot.IsTuple() || ot.IsTypedArray() || isStringTy(ot) || ot.IsFunc() {
 			return TypeF64
 		}
@@ -209,104 +209,35 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 		return TypeAny
 	}
 	// A function value's `name` is a string (TDD-00229).
-	if ot := e.inferExprType(ex.Object); ex.Property == "name" && (ot.IsFunc()) {
+	if ot := e.typeOfExpr(ex.Object); ex.Property == "name" && (ot.IsFunc()) {
 		return TypePtr
 	}
-	// Response.body — must match emitResponseBodyStream (TDD-00097 St. 4).
-	if ex.Property == "body" {
-		if objTy := e.inferExprType(ex.Object); hasBodyMixin(objTy) {
-			return bodyStreamType()
-		}
-	}
-	if ex.Property == "bodyUsed" {
-		if objTy := e.inferExprType(ex.Object); hasBodyMixin(objTy) {
-			return TypeBool
-		}
-	}
-	// Response.statusText / .type — strings.
-	if ex.Property == "statusText" || ex.Property == "type" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsResponse() {
-			return TypePtr
-		}
-	}
-	// A Response's or Request's headers: a Headers.
-	if ex.Property == "headers" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsResponse() || objTy.IsFetchRequest() {
-			if cls, ok := e.globalClass("Headers"); ok {
-				return cls
-			}
-		}
-	}
-	// TransformStream sides — must match emitTransformStreamProperty.
-	if ex.Property == "readable" || ex.Property == "writable" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsTransformStream() {
-			if ex.Property == "readable" {
-				if objTy.StreamOut != nil {
-					return ReadableStreamType(*objTy.StreamOut)
-				}
-				return ReadableStreamType(TypeAny)
-			}
-			if objTy.StreamChunk != nil {
-				return WritableStreamType(*objTy.StreamChunk)
-			}
-			return WritableStreamType(TypeAny)
-		}
-	}
-	// Stream properties: the type emitStreamProp emits (TDD-00097).
-	if objTy := e.inferExprType(ex.Object); isReadableSide(objTy) || isWritableSide(objTy) {
-		if p, ok := streamPropFor(ex.Property, objTy); ok {
-			return p.ty()
-		}
-	}
-	// Growable-buffer properties (ADR-00494) — must match
-	// emitBufferGrowableProps.
-	if ex.Property == "growable" || ex.Property == "resizable" || ex.Property == "maxByteLength" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsArrayBuffer() {
-			if ex.Property == "maxByteLength" {
-				return TypeI64
-			}
-			return TypeBool
-		}
-	}
-	// `.byteLength` of an ArrayBuffer or typed array is a number — must
-	// match emitMemberRaw's countToNumber.
-	if ex.Property == "byteLength" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsArrayBuffer() || objTy.IsTypedArray() {
-			return TypeF64
-		}
-	}
-	// A typed array's view properties — must match emitTypedArrayViewProp.
-	if ex.Property == "byteOffset" || ex.Property == "buffer" {
-		if objTy := e.inferExprType(ex.Object); objTy.IsTypedArray() {
-			if ex.Property == "buffer" {
-				return TypeAny
-			}
-			return TypeI64
-		}
+	if pi, ok := e.propertyIntrinsic(ex); ok {
+		return pi.ty(e, ex)
 	}
 	// TS namespace member (TDD-00095) — must match emitMember.
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		if members, nsName := e.namespaceMembers(id.Name); members != nil && members[ex.Property] {
 			if !e.isShadowedByLocal(id.Name) {
-				return e.inferExprType(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
+				return e.typeOfExpr(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
 			}
 		}
 	}
 	// Nested-namespace member `A.B.member` (TDD-00148 V3) — must match emitMember.
 	if members, nsName := e.namespaceByChain(ex.Object); members != nil && members[ex.Property] {
-		return e.inferExprType(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
+		return e.typeOfExpr(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
 	}
 	// Namespace-qualified type-member chain (ADR-00480) — must match emitMember.
 	if bare := e.stripNSTypeQualifier(ex.Object); bare != nil {
-		return e.inferExprType(&ast.MemberExpression{Object: bare, Property: ex.Property})
+		return e.typeOfExpr(&ast.MemberExpression{Object: bare, Property: ex.Property})
 	}
 	// `x.constructor` of a class instance: its run-time class, a
 	// constructor reference (emitConstructorOf).
 	if ex.Property == "constructor" {
-		if ot := e.inferExprType(ex.Object); ot.IsTypedArray() && !ot.IsDynamic() {
+		if ot := e.typeOfExpr(ex.Object); ot.IsTypedArray() && !ot.IsDynamic() {
 			return TypeAny
 		}
-		if ot := e.inferExprType(ex.Object); ot.IsClass() && !ot.IsDynamic() {
+		if ot := e.typeOfExpr(ex.Object); ot.IsClass() && !ot.IsDynamic() {
 			if _, _, own := e.canonicalizeClassTy(ot).FieldIndex("constructor"); !own {
 				return TypeAny
 			}
@@ -315,10 +246,10 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	// Static field read: ClassName.staticField (TDD-00009 Stage 4).
 	if id, ok := ex.Object.(*ast.Identifier); ok {
 		if target, ok := e.identClassAlias(id); ok {
-			return e.inferExprType(ast.NewMemberExpression(ast.NewIdentifier(target, id.GetPos()), ex.Property, ex.GetPos()))
+			return e.typeOfExpr(ast.NewMemberExpression(ast.NewIdentifier(target, id.GetPos()), ex.Property, ex.GetPos()))
 		}
 		if _, name, found := e.genericStaticMember(id, ex.Property); found {
-			return e.inferExprType(ast.NewMemberExpression(ast.NewIdentifier(name, id.GetPos()), ex.Property, ex.GetPos()))
+			return e.typeOfExpr(ast.NewMemberExpression(ast.NewIdentifier(name, id.GetPos()), ex.Property, ex.GetPos()))
 		}
 		if info, found := e.classes[id.Name]; found {
 			if fty, ok := info.StaticFieldTypes[ex.Property]; ok {
@@ -349,16 +280,6 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 			}
 		}
 	}
-	if ex.Property == "size" {
-		if id, ok := ex.Object.(*ast.Identifier); ok {
-			if sym, found := e.lookup(id.Name); found && (sym.Ty.IsMap() || sym.Ty.IsSet()) {
-				return TypeI64
-			}
-		} else if objTy := e.inferExprType(ex.Object); objTy.IsMap() || objTy.IsSet() {
-			// Not a named variable — e.g. c.scores.size where scores: Map<K,V>.
-			return TypeI64
-		}
-	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
 		switch id.Name {
 		case "Symbol":
@@ -370,15 +291,10 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 				return TypeF64
 			}
 		case "process":
-			switch ex.Property {
-			case "platform", "arch":
-				return TypePtr
-			case "env":
-				// The bare value is a dynamic bag (emitProcessEnvValue); a
-				// keyed read is handled by the isProcessEnvExpr arm below.
-				if !ex.Optional {
-					return TypeAny
-				}
+			// The bare env is a dynamic bag (emitProcessEnvValue); a keyed
+			// read is handled by the isProcessEnvExpr arm below.
+			if ex.Property == "env" && !ex.Optional {
+				return TypeAny
 			}
 		}
 	}
@@ -386,7 +302,7 @@ func (e *Emitter) structuralMemberType(ex *ast.MemberExpression) Type {
 	// not just a bare identifier — e.g. a field access chained off
 	// another field access (ev.when.getFullYear() needs to know
 	// ev.when's type before it can resolve getFullYear on it).
-	if objTy := e.inferExprType(ex.Object); objTy.IsObject() {
+	if objTy := e.typeOfExpr(ex.Object); objTy.IsObject() {
 		// A class getter's read type is its return type, not a field type —
 		// consult accessors before FieldIndex (an accessor name is never a
 		// real Field, so FieldIndex would miss it). Matches the read path in
@@ -457,18 +373,21 @@ func (e *Emitter) programClassDecl(name string) *ast.ClassDeclaration {
 	return e.classDeclByName[name]
 }
 
-// structuralCallType is a call's representation from emitCall's dispatch
+// builtCallType is a call's representation from emitCall's dispatch
 // on its callee.
-func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
+func (e *Emitter) builtCallType(ex *ast.CallExpression) Type {
 	if id, ok := ex.Callee.(*ast.Identifier); ok && !ex.Optional && e.isGlobalObjectCtor(id.Name, false) {
 		return TypeAny // `Object(…)`: a dynamic object, as `new Object(…)` (emitObjectCtor)
 	}
+	if obj := e.generatorSelfIterator(ex); obj != nil {
+		return e.typeOfExpr(obj)
+	}
 	if r, ok := e.builtinIteratorCall(ex); ok {
-		return e.inferExprType(r)
+		return e.typeOfExpr(r)
 	}
 	// A call of an element held boxed (`arr[0]()` over generator or other
 	// function values in an any[]) is the dynamic call's result.
-	if _, ok := ex.Callee.(*ast.IndexExpression); ok && isUnconstrainedDynamic(e.inferExprType(ex.Callee)) {
+	if _, ok := ex.Callee.(*ast.IndexExpression); ok && isUnconstrainedDynamic(e.typeOfExpr(ex.Callee)) {
 		return TypeAny
 	}
 	if t, ok := e.thenableResolveCallType(ex); ok {
@@ -485,29 +404,29 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	if idx, ok := ex.Callee.(*ast.IndexExpression); ok && e.compatJS() {
 		if km, ok := idx.Index.(*ast.MemberExpression); ok {
 			if sym, ok := km.Object.(*ast.Identifier); ok && sym.Name == "Symbol" {
-				if ot := e.inferExprType(idx.Object); ot.IsObject() && !ot.IsArray() && !ot.IsTuple() && !ot.IsClass() {
+				if ot := e.typeOfExpr(idx.Object); ot.IsObject() && !ot.IsArray() && !ot.IsTuple() && !ot.IsClass() {
 					return TypeAny
 				}
 			}
 		}
 	}
 	if m := indexCalleeAsMember(ex); m != nil {
-		return e.inferExprType(m)
+		return e.typeOfExpr(m)
 	}
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if r, ok := e.processMemberRewrite(mem); ok {
-			return e.inferExprType(ast.NewCallExpression(r, ex.Args, ex.GetPos()))
+		if r, ok := e.loweredMemberRewrite(mem); ok {
+			return e.typeOfExpr(ast.NewCallExpression(r, ex.Args, ex.GetPos()))
 		}
 	}
 	if r, ok := e.funcOwnPropCall(ex); ok {
-		return e.inferExprType(r)
+		return e.typeOfExpr(r)
 	}
 	// A class instance's member whose value is an any (a getter returning
 	// a method): called dynamically, its result is dynamic.
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && !ex.Optional {
-		if ot := e.inferExprType(mem.Object); ot.ClassName != "" && !ot.IsDynamic() {
+		if ot := e.typeOfExpr(mem.Object); ot.ClassName != "" && !ot.IsDynamic() {
 			if info, ok := e.classes[ot.ClassName]; ok {
-				if _, isMethod := info.MethodSigs[mem.Property]; !isMethod && isUnconstrainedDynamic(e.inferExprType(mem)) {
+				if _, isMethod := info.MethodSigs[mem.Property]; !isMethod && isUnconstrainedDynamic(e.typeOfExpr(mem)) {
 					return TypeAny
 				}
 			}
@@ -517,7 +436,7 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 		return ft
 	}
 	// `obj[key](...)` on a bare any/unknown receiver (mirrors emitCall).
-	if ix, ok := ex.Callee.(*ast.IndexExpression); ok && !ix.Optional && isUnconstrainedDynamic(e.inferExprType(ix.Object)) {
+	if ix, ok := ex.Callee.(*ast.IndexExpression); ok && !ix.Optional && isUnconstrainedDynamic(e.typeOfExpr(ix.Object)) {
 		return TypeAny
 	}
 	// Calling a dynamic value (a local holding a boxed function) is a
@@ -542,12 +461,12 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	if id, ok := ex.Callee.(*ast.Identifier); ok && e.callableClasses[id.Name] {
 		if _, local := e.lookup(id.Name); !local {
 			if _, _, fn := e.resolveFuncRef(id.Name); !fn {
-				return e.inferExprType(ast.NewNewExpression(id.Name, ex.Args, ex.GetPos()))
+				return e.typeOfExpr(ast.NewNewExpression(id.Name, ex.Args, ex.GetPos()))
 			}
 		}
 	}
 	if c := e.receiverlessThisCall(ex); c != nil {
-		return e.inferExprType(c)
+		return e.typeOfExpr(c)
 	}
 	// A call through a builtin declaration's @lower target: the same
 	// decider emission reads (TDD-00230 P3.2).
@@ -560,21 +479,21 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	}
 	// Optional call `f?.(...)` — mirror emitOptionalCalleeCall.
 	if ex.Optional {
-		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && isUnconstrainedDynamic(e.inferExprType(mem.Object)) {
+		if mem, ok := ex.Callee.(*ast.MemberExpression); ok && isUnconstrainedDynamic(e.typeOfExpr(mem.Object)) {
 			return TypeAny
 		}
 		plain := *ex
 		plain.Optional = false
-		return optionalCallResultType(e.classifyOptionalCallee(ex.Callee), e.inferExprType(&plain))
+		return optionalCallResultType(e.classifyOptionalCallee(ex.Callee), e.typeOfExpr(&plain))
 	}
 	// `a?.m(...)` is `RetType | undefined` — mirror emitOptionalCall, which
 	// wraps a pointer (non-array) receiver's optional call as `T | undefined`.
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Optional {
-		objTy := e.inferExprType(mem.Object)
+		objTy := e.typeOfExpr(mem.Object)
 		plain := ast.NewCallExpression(&ast.MemberExpression{Object: mem.Object, Property: mem.Property}, ex.Args, ex.GetPos())
 		plain.TypeArgs = ex.TypeArgs
-		inner := e.inferExprType(plain)
-		if (objTy.IR == "ptr" && !objTy.IsArray()) || isNullableScalar(objTy) {
+		inner := e.typeOfExpr(plain)
+		if (objTy.IR == irPtr && !objTy.IsArray()) || isNullableScalar(objTy) {
 			return optionalCallResultType(optCalleeValue, inner)
 		}
 		return inner
@@ -587,7 +506,7 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	}
 	switch ex.Callee.(type) {
 	case *ast.ArrowFunction, *ast.FunctionExpression, *ast.CallExpression:
-		if ft := e.inferExprType(ex.Callee); ft.IsFunc() {
+		if ft := e.typeOfExpr(ex.Callee); ft.IsFunc() {
 			if ft.FuncRetType == nil {
 				return TypeVoid
 			}
@@ -606,11 +525,11 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 					pex := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Promise", mem.GetPos()), mem.Property, mem.GetPos()), ex.Args, ex.GetPos())
 					if t, ok := e.promiseSubclassStaticType(mem.Property, pex); ok {
 						if mem.Property == "resolve" && len(ex.Args) > 0 {
-							if at := e.inferExprType(ex.Args[0]); at.IsClass() && at.ClassName == id.Name {
+							if at := e.typeOfExpr(ex.Args[0]); at.IsClass() && at.ClassName == id.Name {
 								return at
 							}
 						}
-						return promiseSubclassOf(info.Ty, t)
+						return e.promiseDerivedOf(info.Ty, t)
 					}
 				}
 				if host := info.HostBase; host != nil && host.IsArray() {
@@ -624,7 +543,7 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 					case mem.Property == "from" || mem.Property == "of":
 						call := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Array", mem.GetPos()), mem.Property, mem.GetPos()), ex.Args, ex.GetPos())
 						call.Intrinsic = "Array." + mem.Property
-						return e.inferExprType(call)
+						return e.typeOfExpr(call)
 					}
 				}
 				if t, ok := e.forwardMethodRet[forwardMethodKey(id.Name, mem.Property, true)]; ok {
@@ -657,10 +576,10 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	// user-defined method named e.g. "slice" or "push" must not be
 	// shadowed by the array/string built-in of the same name.
 	if c, ok := e.tupleArrayCall(ex); ok {
-		return e.inferExprType(c)
+		return e.typeOfExpr(c)
 	}
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if objTy := e.inferExprType(mem.Object); objTy.IsClass() {
+		if objTy := e.typeOfExpr(mem.Object); objTy.IsClass() {
 			if t, ok := e.genericInstMethodRet(objTy.ClassName, mem.Property); ok {
 				return t // an instantiation no construction has made yet
 			}
@@ -691,19 +610,19 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 						host = PromiseOf(*objTy.PromiseType)
 						host.PromiseTask = true
 					}
-					rt := e.inferExprType(ast.NewCallExpression(ast.NewMemberExpression(e.hostInferReceiver(host, mem.GetPos()), mem.Property, mem.GetPos()), ex.Args, ex.GetPos()))
+					rt := e.typeOfExpr(ast.NewCallExpression(ast.NewMemberExpression(e.hostInferReceiver(host, mem.GetPos()), mem.Property, mem.GetPos()), ex.Args, ex.GetPos()))
 					// Its [Symbol.species] may pick another class, or Promise.
 					if ctor, err := e.speciesOf(objTy.ClassName, mem.GetPos()); err == nil && ctor != objTy.ClassName {
 						if ctor == "" {
 							return rt
 						}
-						return promiseSubclassOf(e.classes[ctor].Ty, rt)
+						return e.promiseDerivedOf(e.classes[ctor].Ty, rt)
 					}
-					return promiseSubclassOf(objTy, rt)
+					return e.promiseDerivedOf(objTy, rt)
 				}
 				if info.HostBase != nil {
 					// The host base's method (mirrors emitClassCall).
-					return e.inferExprType(ast.NewCallExpression(ast.NewMemberExpression(e.hostInferReceiver(*info.HostBase, mem.GetPos()), mem.Property, mem.GetPos()), ex.Args, ex.GetPos()))
+					return e.typeOfExpr(ast.NewCallExpression(ast.NewMemberExpression(e.hostInferReceiver(*info.HostBase, mem.GetPos()), mem.Property, mem.GetPos()), ex.Args, ex.GetPos()))
 				}
 			}
 		}
@@ -730,7 +649,7 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	// Function.prototype.call/.apply on a function value (TDD-00137) →
 	// the function's own return type.
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && (mem.Property == "call" || mem.Property == "apply") {
-		if objTy := e.inferExprType(mem.Object); objTy.IsFunc() {
+		if objTy := e.typeOfExpr(mem.Object); objTy.IsFunc() {
 			if objTy.FuncRetType != nil {
 				return *objTy.FuncRetType
 			}
@@ -740,7 +659,7 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	// Function.prototype.bind (TDD-00137 Stage C) → a new function value
 	// with the leading bound parameters removed.
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && mem.Property == "bind" {
-		if t, ok := e.boundFuncValueType(e.inferExprType(mem.Object), len(ex.Args)); ok {
+		if t, ok := e.boundFuncValueType(e.typeOfExpr(mem.Object), len(ex.Args)); ok {
 			return t
 		}
 	}
@@ -753,38 +672,15 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	}
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 		// `/** @value */` flat array: push returns the new length.
-		if objTy := e.inferExprType(mem.Object); objTy.IsFlatArray() && mem.Property == "push" {
+		if objTy := e.typeOfExpr(mem.Object); objTy.IsFlatArray() && mem.Property == "push" {
 			return TypeF64
-		}
-		// FinalizationRegistry method result types (TDD-00163).
-		if objTy := e.inferExprType(mem.Object); objTy.IsFinalizationRegistry() {
-			switch mem.Property {
-			case "register":
-				return TypeUndefined // register() evaluates to `undefined`
-			case "unregister":
-				return TypeBool
-			}
-		}
-	}
-	// An Array, Map or Set iterator's own methods (emitCollIterCall).
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if objTy := e.inferExprType(mem.Object); objTy.IsCollIter() {
-			switch mem.Property {
-			case "next":
-				return collIterResultType(objTy)
-			case "toArray":
-				return ArrayOf(collIterElemType(objTy))
-			case "reduce":
-				// The lib's Iterator.prototype.reduce returns a box.
-				return TypeAny
-			}
 		}
 	}
 	// gen.next(value)'s own result type ({value: T, done: bool}) —
 	// checked before the generic member-expression dispatch further
 	// down, same as every other type-tag-gated case there.
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && (mem.Property == "next" || mem.Property == "throw" || mem.Property == "return") {
-		if objTy := e.inferExprType(mem.Object); objTy.IsGenerator() {
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && strings.HasPrefix(ex.Intrinsic, "Generator.prototype.") {
+		if objTy := e.typeOfExpr(mem.Object); objTy.IsGenerator() {
 			res := genUserResultType(*objTy.GeneratorElemType)
 			// An async generator's .next() returns Promise<{value,done}> (TDD-00085);
 			// .throw()/.return() share the same {value,done} shape (TDD-00086).
@@ -847,7 +743,7 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 		// Buffer read*/write* accessors — must match emitBufferAccessor.
 		if k, ok2 := bufferAccessorKindFor(mem.Property); ok2 {
-			if e.inferExprType(mem.Object).IsBuffer() {
+			if e.typeOfExpr(mem.Object).IsBuffer() {
 				if k.write {
 					return TypeI64 // offset + width
 				}
@@ -864,25 +760,13 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 		if id, ok2 := mem.Object.(*ast.Identifier); ok2 {
 			if members, nsName := e.namespaceMembers(id.Name); members != nil && members[mem.Property] {
 				if !e.isShadowedByLocal(id.Name) {
-					return e.inferExprType(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
+					return e.typeOfExpr(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
 				}
 			}
 		}
 		// Nested-namespace member call `A.B.f(...)` (TDD-00148 V3).
 		if members, nsName := e.namespaceByChain(mem.Object); members != nil && members[mem.Property] {
-			return e.inferExprType(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
-		}
-		if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "process" && !e.isShadowedByLocal(id.Name) {
-			if mem.Property == "send" {
-				return TypeBool
-			}
-		}
-
-		// XMLHttpRequest response-header reads (ADR-00490).
-		if mem.Property == "getResponseHeader" || mem.Property == "getAllResponseHeaders" {
-			if e.inferExprType(mem.Object).IsXHR() {
-				return TypePtr
-			}
+			return e.typeOfExpr(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
 		}
 		if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Promise" {
 			if t, ok := e.promiseStaticType(mem.Property, ex); ok {
@@ -897,10 +781,10 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 		// objTy resolves mem.Object's type — via the identifier/lookup
 		// path when possible (kept as the primary path since a looked-up
 		// Symbol is what every other Map/Set method-call site already
-		// relies on), falling back to inferExprType for anything else
+		// relies on), falling back to typeOfExpr for anything else
 		// (e.g. req.query.get(...), where mem.Object — req.query — is
 		// itself a MemberExpression, not a bare identifier). Mirrors the
-		// same identifier-or-inferExprType fallback the "size" property
+		// same identifier-or-typeOfExpr fallback the "size" property
 		// case above already uses.
 		if t, ok := e.inferCollectionCallType(ex, mem); ok {
 			return t
@@ -909,12 +793,12 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
 		// A method of whatever an `any` holds is `any` (mirrors
 		// emitDynAnyMethodCall).
-		if _, arr := dynArrayMethods[mem.Property]; (arr || dynStringMethods[mem.Property] || dynNumberMethods[mem.Property] || mem.Property == "hasOwnProperty") && isUnconstrainedDynamic(e.inferExprType(mem.Object)) {
+		if _, arr := dynArrayMethods[mem.Property]; (arr || dynStringMethods[mem.Property] || dynNumberMethods[mem.Property] || mem.Property == "hasOwnProperty") && isUnconstrainedDynamic(e.typeOfExpr(mem.Object)) {
 			return TypeAny
 		}
 		// A plain object's own method (an interface's `map<U>(…)`) is
 		// what the call runs, not the built-in of the same name.
-		if objTy := e.inferExprType(mem.Object); objTy.IsObject() && !objTy.IsClass() && !objTy.IsArray() && !objTy.IsMap() {
+		if objTy := e.typeOfExpr(mem.Object); objTy.IsObject() && !objTy.IsClass() && !objTy.IsArray() && !objTy.IsMap() {
 			for _, f := range objTy.UserFields() {
 				if f.Name == mem.Property && f.Ty.IsFunc() && f.Ty.FuncRetType != nil {
 					return *f.Ty.FuncRetType
@@ -930,12 +814,12 @@ func (e *Emitter) structuralCallType(ex *ast.CallExpression) Type {
 	// access chained off another call, e.g. `f().getHandler()`); this
 	// just asks for that and unwraps the function type's return type.
 	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if calleeTy := e.inferExprType(mem); calleeTy.IsFunc() && calleeTy.FuncRetType != nil {
+		if calleeTy := e.typeOfExpr(mem); calleeTy.IsFunc() && calleeTy.FuncRetType != nil {
 			return *calleeTy.FuncRetType
 		}
 		// Any other method call on a bare any/unknown receiver reaches
 		// emitCall's dynamic dispatch, whose result is dynamic.
-		if isUnconstrainedDynamic(e.inferExprType(mem.Object)) {
+		if isUnconstrainedDynamic(e.typeOfExpr(mem.Object)) {
 			return TypeAny
 		}
 	}

@@ -18,7 +18,7 @@ import {
     OP_OPEN, OP_CLOSE, OP_FSYNC, OP_FDATASYNC, OP_READ, OP_WRITE, OP_STAT, OP_LSTAT, OP_FSTAT, OP_STATFS,
     OP_MKDIR, OP_MKDIRP, OP_RMDIR, OP_UNLINK, OP_RENAME, OP_LINK, OP_SYMLINK, OP_READLINK, OP_REALPATH,
     OP_MKDTEMP, OP_CHMOD, OP_FCHMOD, OP_CHOWN, OP_FCHOWN, OP_LCHOWN, OP_FTRUNCATE, OP_ACCESS, OP_UTIMES,
-    OP_FUTIMES, OP_LUTIMES, OP_COPYFILE, OP_READDIR,
+    OP_FUTIMES, OP_LUTIMES, OP_COPYFILE, OP_READDIR, OP_OPENDIR, OP_DIRREAD, OP_CLOSEDIR,
 } from './internal_fs_utils';
 import type {
     PathLike, PathOrFileDescriptor, TimeLike, Mode, OpenMode, NoParamCallback, ObjectEncodingOptions,
@@ -1013,6 +1013,272 @@ export function readdir(path: any, options: any, callback?: any): void {
         if (opts.withFileTypes) cb(null, direntsOf(p, names, types));
         else cb(null, encodeNames(names, opts.encoding));
     });
+}
+
+// ---- opendir / Dir (lib/internal/fs/dir.js) ----
+
+// A directory handle's request (uv_fs_opendir, uv_fs_readdir,
+// uv_fs_closedir): its error names the syscall but no path, as Node's
+// binding does.
+function dirCallSync(op: number, syscall: string, path: string, handle: number, n: number): number {
+    const r = __kml_native.fsCall(op, path, '', handle, n, 0, 0, Buffer.alloc(0));
+    if (r < 0) throw uvError(-r, syscall);
+    return r;
+}
+
+function dirCallAsync(op: number, syscall: string, path: string, handle: number, n: number,
+                      done: (err: NodeJS.ErrnoException | null, result: number, str: string) => void): void {
+    __kml_native.fsCallAsync(op, path, '', handle, n, 0, 0, Buffer.alloc(0), (errno: number, result: number) => {
+        const str = __kml_native.lastString();
+        if (errno !== 0) done(uvError(errno, syscall), 0, '');
+        else done(null, result, str);
+    });
+}
+
+function dirClosed(): Error {
+    return NodeError('ERR_DIR_CLOSED', 'Directory handle was closed');
+}
+
+type DirHandler = { handle: number; path: string };
+
+export class Dir {
+    #handle: number;
+    #path: string;
+    #bufferedEntries: Dirent[] = [];
+    #closed: boolean = false;
+    #options: any;
+    #operationQueue: (() => void)[] | null = null;
+    #handlerQueue: DirHandler[] = [];
+
+    constructor(handle: number, path: string, options: any) {
+        this.#handle = handle;
+        this.#path = path;
+        this.#options = { bufferSize: 32, ...getOptions(options, { encoding: 'utf8' }) };
+        const bufferSize = this.#options.bufferSize;
+        validateUint32(bufferSize, 'options.bufferSize');
+        if (bufferSize === 0) throw outOfRange('options.bufferSize', '>= 1 && <= 4294967295', bufferSize);
+    }
+
+    get path(): string {
+        return this.#path;
+    }
+
+    #readPromisified(): Promise<Dirent | null> {
+        return new Promise<Dirent | null>((resolve, reject) => {
+            this.#readImpl(false, (err: any, dirent: any) => {
+                if (err) reject(err);
+                else resolve(dirent);
+            });
+        });
+    }
+
+    #closePromisified(): Promise<void> {
+        return new Promise<void>((resolve, reject) => {
+            this.close((err: any) => {
+                if (err) reject(err);
+                else resolve();
+            });
+        });
+    }
+
+    // One batch of a handle's entries (handle.read), or null at its end.
+    #readBatchSync(handle: number, path: string): boolean {
+        const n = dirCallSync(OP_DIRREAD, 'scandir', '', handle, this.#options.bufferSize);
+        if (n === 0) return false;
+        this.processReadResult(path, lastString());
+        return true;
+    }
+
+    #processHandlerQueue(): boolean {
+        while (this.#handlerQueue.length > 0) {
+            const handler = this.#handlerQueue.shift() as DirHandler;
+            if (this.#readBatchSync(handler.handle, handler.path)) this.#handlerQueue.push(handler);
+            else dirCallSync(OP_CLOSEDIR, 'closedir', '', handler.handle, 0);
+            if (this.#bufferedEntries.length > 0) break;
+        }
+        return this.#bufferedEntries.length > 0;
+    }
+
+    read(): Promise<Dirent | null>;
+    read(cb: (err: NodeJS.ErrnoException | null, dirEnt: Dirent | null) => void): void;
+    read(callback?: any): any {
+        return arguments.length === 0 ? this.#readPromisified() : this.#readImpl(true, callback);
+    }
+
+    #shiftEntry(): Dirent {
+        const dirent = this.#bufferedEntries.shift() as Dirent;
+        if (this.#options.recursive && dirent.isDirectory()) this.readSyncRecursive(dirent);
+        return dirent;
+    }
+
+    #readImpl(maybeSync: boolean, callback: any): any {
+        if (this.#closed === true) throw dirClosed();
+        if (callback === undefined) return this.#readPromisified();
+        validateFunction(callback, 'callback');
+        if (this.#operationQueue !== null) {
+            this.#operationQueue.push(() => { this.#readImpl(maybeSync, callback); });
+            return;
+        }
+        if (this.#processHandlerQueue()) {
+            try {
+                const dirent = this.#shiftEntry();
+                if (maybeSync) process.nextTick(callback, null, dirent);
+                else callback(null, dirent);
+                return;
+            } catch (error) {
+                return callback(error);
+            }
+        }
+        this.#operationQueue = [];
+        dirCallAsync(OP_DIRREAD, 'scandir', '', this.#handle, this.#options.bufferSize, (err, n, str) => {
+            process.nextTick(() => {
+                const queue = this.#operationQueue as (() => void)[];
+                this.#operationQueue = null;
+                for (const op of queue) op();
+            });
+            if (err) return callback(err, undefined);
+            if (n === 0) return callback(null, null);
+            try {
+                this.processReadResult(this.#path, str);
+                callback(null, this.#shiftEntry());
+            } catch (error) {
+                callback(error);
+            }
+        });
+    }
+
+    processReadResult(path: string, result: string): void {
+        const [names, types] = decodeEntries(result);
+        const dirents = direntsOf(path, names, types);
+        const encoding = this.#options.encoding;
+        for (let i = 0; i < dirents.length; i++) {
+            const d = dirents[i];
+            if (encoding && encoding !== 'utf8' && encoding !== 'utf-8') (d as any).name = encodeNames([d.name], encoding)[0];
+            this.#bufferedEntries.push(d);
+        }
+    }
+
+    readSyncRecursive(dirent: Dirent): void {
+        const path = pathJoin(dirent.parentPath, String(dirent.name));
+        const handle = dirCallSync(OP_OPENDIR, 'opendir', path, 0, 0);
+        this.#handlerQueue.push({ handle, path });
+    }
+
+    readSync(): Dirent | null {
+        if (this.#closed === true) throw dirClosed();
+        if (this.#operationQueue !== null) {
+            throw NodeError('ERR_DIR_CONCURRENT_OPERATION', 'Cannot do synchronous work on directory handle with concurrent asynchronous operations');
+        }
+        if (this.#processHandlerQueue()) return this.#shiftEntry();
+        if (!this.#readBatchSync(this.#handle, this.#path)) return null;
+        return this.#shiftEntry();
+    }
+
+    close(): Promise<void>;
+    close(cb: NoParamCallback): void;
+    close(callback?: any): any {
+        if (callback === undefined) {
+            if (this.#closed === true) return Promise.reject(dirClosed());
+            return this.#closePromisified();
+        }
+        validateFunction(callback, 'callback');
+        if (this.#closed === true) {
+            process.nextTick(callback, dirClosed());
+            return;
+        }
+        if (this.#operationQueue !== null) {
+            this.#operationQueue.push(() => { this.close(callback); });
+            return;
+        }
+        this.#closeHandlers();
+        this.#closed = true;
+        dirCallAsync(OP_CLOSEDIR, 'closedir', '', this.#handle, 0, (err) => { callback(err); });
+    }
+
+    #closeHandlers(): void {
+        while (this.#handlerQueue.length > 0) {
+            const handler = this.#handlerQueue.shift() as DirHandler;
+            dirCallSync(OP_CLOSEDIR, 'closedir', '', handler.handle, 0);
+        }
+    }
+
+    closeSync(): void {
+        if (this.#closed === true) throw dirClosed();
+        if (this.#operationQueue !== null) {
+            throw NodeError('ERR_DIR_CONCURRENT_OPERATION', 'Cannot do synchronous work on directory handle with concurrent asynchronous operations');
+        }
+        this.#closeHandlers();
+        this.#closed = true;
+        dirCallSync(OP_CLOSEDIR, 'closedir', '', this.#handle, 0);
+    }
+
+    async *entries(): AsyncIterableIterator<Dirent> {
+        try {
+            while (true) {
+                const result = await this.#readPromisified();
+                if (result === null) break;
+                yield result;
+            }
+        } finally {
+            await this.#closePromisified();
+        }
+    }
+
+    // Node's Dir.prototype[Symbol.asyncIterator] is entries itself.
+    [Symbol.asyncIterator](): AsyncIterableIterator<Dirent> {
+        return this.entries();
+    }
+
+    [Symbol.dispose](): void {
+        if (this.#closed) return;
+        this.closeSync();
+    }
+
+    async [Symbol.asyncDispose](): Promise<void> {
+        if (this.#closed) return;
+        await this.#closePromisified();
+    }
+}
+
+export interface OpenDirOptions {
+    encoding?: BufferEncoding | undefined;
+    bufferSize?: number | undefined;
+    recursive?: boolean | undefined;
+}
+
+export function opendir(path: PathLike, cb: (err: NodeJS.ErrnoException | null, dir: Dir) => void): void;
+export function opendir(path: PathLike, options: OpenDirOptions, cb: (err: NodeJS.ErrnoException | null, dir: Dir) => void): void;
+export function opendir(path: any, options: any, callback?: any): void {
+    callback = typeof options === 'function' ? options : callback;
+    validateFunction(callback, 'callback');
+    const p = getValidatedPath(path, 'path');
+    const opts = getOptions(options, { encoding: 'utf8' });
+    dirCallAsync(OP_OPENDIR, 'opendir', p, 0, 0, (err, handle) => {
+        if (err) {
+            callback(err);
+            return;
+        }
+        let dir: Dir;
+        try {
+            dir = new Dir(handle, p, opts);
+        } catch (e) {
+            dirCallSync(OP_CLOSEDIR, 'closedir', '', handle, 0);
+            throw e;
+        }
+        callback(null, dir);
+    });
+}
+
+export function opendirSync(path: PathLike, options?: OpenDirOptions): Dir {
+    const p = getValidatedPath(path, 'path');
+    const opts = getOptions(options, { encoding: 'utf8' });
+    const handle = dirCallSync(OP_OPENDIR, 'opendir', p, 0, 0);
+    try {
+        return new Dir(handle, p, opts);
+    } catch (e) {
+        dirCallSync(OP_CLOSEDIR, 'closedir', '', handle, 0);
+        throw e;
+    }
 }
 
 // ---- rm / rmdir / unlink ----

@@ -88,6 +88,29 @@ var bodyMethodTypes = map[string]methodTypeFn{
 		t.PromiseTask = true
 		return t, true
 	},
+	"blob": func(e *Emitter, _ *ast.CallExpression, _ *ast.MemberExpression) (Type, bool) {
+		cls, ok := e.globalClass("Blob")
+		if !ok {
+			return Type{}, false
+		}
+		t := PromiseOf(cls)
+		t.PromiseTask = true
+		return t, true
+	},
+	"formData": func(e *Emitter, _ *ast.CallExpression, _ *ast.MemberExpression) (Type, bool) {
+		cls, ok := e.globalClass("FormData")
+		if !ok {
+			return Type{}, false
+		}
+		t := PromiseOf(cls)
+		t.PromiseTask = true
+		return t, true
+	},
+	"bytes": func(*Emitter, *ast.CallExpression, *ast.MemberExpression) (Type, bool) {
+		t := PromiseOf(TypedArrayType("uint8"))
+		t.PromiseTask = true
+		return t, true
+	},
 }
 
 // bufferMethodTypes are Buffer's own methods; its search and fill share
@@ -106,7 +129,7 @@ var bufferMethodTypes = map[string]methodTypeFn{
 
 // typedArraySubarrayType is a view with the receiver's own type.
 func typedArraySubarrayType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-	if objTy := e.inferExprType(mem.Object); objTy.IsTypedArray() {
+	if objTy := e.typeOfExpr(mem.Object); objTy.IsTypedArray() {
 		return objTy, true
 	}
 	return Type{}, false
@@ -115,7 +138,7 @@ func typedArraySubarrayType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberEx
 // arrayReceiverType is an array method returning an array of the
 // receiver's own kind.
 func arrayReceiverType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-	if objTy := e.inferExprType(mem.Object); objTy.IsArray() {
+	if objTy := e.typeOfExpr(mem.Object); objTy.IsArray() {
 		return objTy, true
 	}
 	return Type{}, false
@@ -125,7 +148,7 @@ func arrayReceiverType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpress
 // absent (an out-of-range index, a predicate miss, an empty array;
 // TDD-00187).
 func arrayMissType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-	objTy := e.inferExprType(mem.Object)
+	objTy := e.typeOfExpr(mem.Object)
 	if objTy.BigIntElem {
 		return undefinedableElem(BigIntType()), true
 	}
@@ -162,13 +185,13 @@ var arrayMethodTypes = map[string]methodTypeFn{
 	"with":          arrayReceiverType,
 	"copyWithin":    arrayReceiverType,
 	"toString": func(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		if ot := e.inferExprType(mem.Object); ot.IsBuffer() || isNumberTy(ot) || isForOfStringTy(ot) && !ot.IsClass() && !ot.IsObject() {
+		if ot := e.typeOfExpr(mem.Object); ot.IsBuffer() || isNumberTy(ot) || isForOfStringTy(ot) && !ot.IsClass() && !ot.IsObject() {
 			return TypePtr, true
 		}
 		return Type{}, false
 	},
 	"concat": func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		objTy := e.inferExprType(mem.Object)
+		objTy := e.typeOfExpr(mem.Object)
 		if isForOfStringTy(objTy) {
 			return TypePtr, true // String.prototype.concat — mirrors emitStringConcatMethod
 		}
@@ -178,13 +201,13 @@ var arrayMethodTypes = map[string]methodTypeFn{
 		return arrayReceiverType(e, ex, mem)
 	},
 	"values": func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		if objTy := e.inferExprType(mem.Object); arrayIterable(objTy) && len(ex.Args) == 0 {
+		if objTy := e.typeOfExpr(mem.Object); arrayIterable(objTy) && len(ex.Args) == 0 {
 			return CollIterType(objTy, mapIterValues), true
 		}
 		return arrayReceiverType(e, ex, mem)
 	},
 	"keys": func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		objTy := e.inferExprType(mem.Object)
+		objTy := e.typeOfExpr(mem.Object)
 		if arrayIterable(objTy) && len(ex.Args) == 0 {
 			return CollIterType(objTy, mapIterKeys), true
 		}
@@ -194,7 +217,7 @@ var arrayMethodTypes = map[string]methodTypeFn{
 		return Type{}, false
 	},
 	"entries": func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		objTy := e.inferExprType(mem.Object)
+		objTy := e.typeOfExpr(mem.Object)
 		if arrayIterable(objTy) && len(ex.Args) == 0 {
 			return CollIterType(objTy, mapIterEntries), true
 		}
@@ -206,7 +229,7 @@ var arrayMethodTypes = map[string]methodTypeFn{
 	// A fresh copy: present whatever the receiver's absence (a call on an
 	// absent one throws).
 	"slice": func(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		objTy := e.inferExprType(mem.Object)
+		objTy := e.typeOfExpr(mem.Object)
 		if objTy.IsArrayBuffer() || objTy.IsArray() {
 			return presentCopy(objTy), true
 		}
@@ -215,7 +238,7 @@ var arrayMethodTypes = map[string]methodTypeFn{
 	"map": func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
 		// A TypedArray's map() returns the receiver's kind (emitArrayMap),
 		// whatever its callback returns.
-		if recvTy := e.inferExprType(mem.Object); recvTy.IsTypedArray() {
+		if recvTy := e.typeOfExpr(mem.Object); recvTy.IsTypedArray() {
 			return recvTy, true
 		}
 		if len(ex.Args) == 1 {
@@ -230,7 +253,7 @@ var arrayMethodTypes = map[string]methodTypeFn{
 		return arrayReceiverType(e, ex, mem)
 	},
 	"find": func(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		if objTy := e.inferExprType(mem.Object); objTy.IsArray() && objTy.ElemType != nil {
+		if objTy := e.typeOfExpr(mem.Object); objTy.IsArray() && objTy.ElemType != nil {
 			return undefinedableElem(*objTy.ElemType), true
 		}
 		return Type{}, false
@@ -240,17 +263,19 @@ var arrayMethodTypes = map[string]methodTypeFn{
 	// emitArrayFlat's unwrap, depth by depth; an invalid depth takes the
 	// default (1) here, its error surfacing from the emitter.
 	"flat": func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		objTy := e.inferExprType(mem.Object)
+		objTy := e.typeOfExpr(mem.Object)
 		if !objTy.IsArray() || objTy.ElemType == nil {
 			return Type{}, false
 		}
 		depth := 1
 		if d, err := e.resolveFlatDepth(ex.Args, ex.GetPos()); err == nil {
 			depth = d
+		} else {
+			return ArrayOf(TypeAny), true // a run-time depth: boxed elements
 		}
 		elem := *objTy.ElemType
 		if flatHasAbsentRow(elem, depth) {
-			return ArrayOf(TypeAny), true
+			return e.flatBoxedType(ex), true
 		}
 		for i := 0; i < depth && elem.IsArray() && elem.ElemType != nil; i++ {
 			elem = *elem.ElemType
@@ -258,12 +283,15 @@ var arrayMethodTypes = map[string]methodTypeFn{
 		if t, ok := e.flatCheckerType(ex, elem); ok {
 			return t, true
 		}
+		if elem.IsDynamic() {
+			return e.flatBoxedType(ex), true
+		}
 		return ArrayOf(elem), true
 	},
 	// map's inference plus one level unwrapped when the callback returns
 	// an array (emitArrayFlatMap).
 	"flatMap": func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-		objTy := e.inferExprType(mem.Object)
+		objTy := e.typeOfExpr(mem.Object)
 		if !objTy.IsArray() || len(ex.Args) != 1 {
 			return Type{}, false
 		}
@@ -285,7 +313,7 @@ var arrayMethodTypes = map[string]methodTypeFn{
 }
 
 func arrayRemovedType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-	objTy := e.inferExprType(mem.Object)
+	objTy := e.typeOfExpr(mem.Object)
 	if objTy.IsArray() && objTy.ElemType != nil {
 		return undefinedableElem(*objTy.ElemType), true
 	}
@@ -296,7 +324,7 @@ func arrayRemovedType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpressi
 // seed an element. An iterator's (Iterator.prototype.reduce) returns its
 // declared type.
 func arrayReduceType(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
-	if len(ex.Args) == 2 && e.inferExprType(mem.Object).IsArray() {
+	if len(ex.Args) == 2 && e.typeOfExpr(mem.Object).IsArray() {
 		accTy := e.reduceSeedType(ex.Args[1])
 		// -compat=js: a callback that can fall off the end makes the
 		// accumulator `T | undefined` (emitArrayReduce's widening).
@@ -305,10 +333,16 @@ func arrayReduceType(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpressi
 				return undefinedableElem(accTy), true
 			}
 		}
+		if e.reduceAccIsAny(ex.Args[0], accTy, mem) {
+			return TypeAny, true
+		}
 		return accTy, true
 	}
 	if len(ex.Args) == 1 {
-		if objTy := e.inferExprType(mem.Object); objTy.IsArray() && objTy.ElemType != nil {
+		if objTy := e.typeOfExpr(mem.Object); objTy.IsArray() && objTy.ElemType != nil {
+			if e.reduceAccIsAny(ex.Args[0], *objTy.ElemType, mem) {
+				return TypeAny, true
+			}
 			return *objTy.ElemType, true
 		}
 	}
@@ -318,7 +352,7 @@ func arrayReduceType(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpressi
 // streamChunkType is the chunk type of the stream, reader or writer a
 // method is called on.
 func (e *Emitter) streamChunkType(mem *ast.MemberExpression) Type {
-	if t := e.inferExprType(mem.Object); t.StreamChunk != nil {
+	if t := e.typeOfExpr(mem.Object); t.StreamChunk != nil {
 		return *t.StreamChunk
 	}
 	return TypeI64
@@ -361,7 +395,7 @@ func init() {
 		"pipeTo": streamTaskVoid,
 		"pipeThrough": func(e *Emitter, ex *ast.CallExpression, _ *ast.MemberExpression) (Type, bool) {
 			if len(ex.Args) >= 1 {
-				if tTy := e.inferExprType(ex.Args[0]); tTy.IsTransformStream() && tTy.StreamOut != nil {
+				if tTy := e.typeOfExpr(ex.Args[0]); tTy.IsTransformStream() && tTy.StreamOut != nil {
 					return ReadableStreamType(*tTy.StreamOut), true
 				}
 			}
@@ -473,4 +507,36 @@ func (e *Emitter) flatCheckerType(ex *ast.CallExpression, elem Type) (Type, bool
 		return Type{}, false
 	}
 	return t, true
+}
+
+// flatBoxedType is a flat() result of boxed elements: the checker's
+// element type (`(number | undefined)[]`, `(number | number[])[]`) when it
+// is a box too, which describes the same storage; else an array of any.
+func (e *Emitter) flatBoxedType(ex *ast.CallExpression) Type {
+	if c := e.front(); c != nil {
+		if ct := c.TypeOf(ex); !c.Unanswered(ct) {
+			if t, ok := e.repr().of(ct); ok && t.IsArray() && t.ElemType != nil && t.ElemType.IsDynamic() {
+				return t
+			}
+		}
+	}
+	return ArrayOf(TypeAny)
+}
+
+// reduceAccIsAny reports a JavaScript-lane reduce whose accumulator is held
+// as `any` (emitArrayReduce): a callback with no result, or one whose result
+// the seed's type cannot hold (a string from a number seed, a possibly
+// undefined result).
+func (e *Emitter) reduceAccIsAny(cbExpr ast.Expression, seedTy Type, mem *ast.MemberExpression) bool {
+	if !e.compatJS() {
+		return false
+	}
+	rt, ok := e.callbackReturnType(cbExpr, seedTy, e.hofElemHint(mem.Object))
+	if !ok {
+		return false
+	}
+	if rt.IR == "void" || rt.IR == "" {
+		return true
+	}
+	return !convertiblePure(rt, seedTy) || isNullableScalar(rt) && !isNullableScalar(seedTy)
 }

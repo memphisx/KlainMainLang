@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
@@ -159,10 +158,11 @@ console.log(free <= total)
 `, "true\ntrue\ntrue")
 }
 
+// os.cpus() lists every online CPU, as Node's does: not the process's
+// affinity mask (Go's runtime.NumCPU), which a pinned run narrows.
 func TestE2EOSCpusCountMatchesRuntime(t *testing.T) {
-	want := fmt.Sprintf("%d", runtime.NumCPU())
-	assertOutputImports(t, `import os from 'os'
-console.log(os.cpus().length)`, want)
+	assertSameAsNode(t, `import os from 'os'
+console.log(os.cpus().length)`)
 }
 
 func TestE2EOSCpusFieldsWellFormed(t *testing.T) {

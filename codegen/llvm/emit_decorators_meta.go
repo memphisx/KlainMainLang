@@ -10,8 +10,10 @@ import (
 // class's design-type descriptor carries its source name (`Dep`, not
 // `Dep__kml_mod0`).
 func demangleModuleName(name string) string {
-	if i := strings.Index(name, "__kml_mod"); i >= 0 {
-		return name[:i]
+	for _, suffix := range []string{"__kml_mod", "__kml_nsv"} { // a module namespace object's too
+		if i := strings.Index(name, suffix); i >= 0 {
+			return name[:i]
+		}
 	}
 	return name
 }
@@ -76,24 +78,30 @@ func (e *Emitter) emitDesignTypeDescriptor(ty Type) Value {
 	if name == "" {
 		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}
 	}
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
 	nameBox := e.emitNbTagPtr(e.internString(name), kmlTagString)
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv(ptr %s, ptr %s, i64 %s)", st, bag, e.internString("name"), nameBox))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv("+irPtr+" %s, "+irPtr+" %s, i64 %s)", st, bag, e.internString("name"), nameBox))
 	return Value{Ref: e.emitNbTagPtr(bag, kmlTagDynObject), Ty: TypeAny}
 }
 
 // emitDesignParamtypes builds the boxed `design:paramtypes` value: a dynamic
 // array of one design-type descriptor per parameter.
 func (e *Emitter) emitDesignParamtypes(paramTypes []Type) Value {
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	arr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_new(i64 0)", arr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_new(i64 0)", arr))
 	for _, pty := range paramTypes {
 		d := e.emitDesignTypeDescriptor(pty)
-		e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push(ptr %s, i64 %s)", arr, d.Ref))
+		e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push("+irPtr+" %s, i64 %s)", arr, d.Ref))
 	}
 	return Value{Ref: e.emitNbTagPtr(arr, kmlTagDynArray), Ty: TypeAny}
 }
@@ -102,9 +110,12 @@ func (e *Emitter) emitDesignParamtypes(paramTypes []Type) Value {
 // parentBag[keyRef], creating (and storing) a fresh one if the slot is absent or
 // not a dynamic object. Used to lazily grow the metadata nesting.
 func (e *Emitter) emitDynGetOrCreateBag(parentBag, keyRef string) string {
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", cur, parentBag, keyRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", cur, parentBag, keyRef))
 	tag, pay := e.emitUnboxTagPayload(Value{Ref: cur, Ty: TypeAny})
 	isBag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
@@ -112,24 +123,24 @@ func (e *Emitter) emitDynGetOrCreateBag(parentBag, keyRef string) string {
 	makeL := e.freshLabel("meta.make")
 	doneL := e.freshLabel("meta.done")
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, haveL, makeL))
 	e.emitLabel(haveL)
 	existing := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", existing, pay))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", existing, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, existing, pay))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", existing, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(makeL)
 	fresh := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", fresh))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", fresh))
 	freshBox := e.emitNbTagPtr(fresh, kmlTagDynObject)
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv(ptr %s, ptr %s, i64 %s)", st, parentBag, keyRef, freshBox))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fresh, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv("+irPtr+" %s, "+irPtr+" %s, i64 %s)", st, parentBag, keyRef, freshBox))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", fresh, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, resPtr))
 	return out
 }
 
@@ -146,7 +157,7 @@ func (e *Emitter) metaPerPropBag(targetBag string, propKeyRef string) string {
 func (e *Emitter) emitDefineMetadata(targetBagPtr, propKeyRef, metaKeyRef, valueBox string) {
 	perProp := e.metaPerPropBag(targetBagPtr, propKeyRef)
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv(ptr %s, ptr %s, i64 %s)", st, perProp, metaKeyRef, valueBox))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_setv("+irPtr+" %s, "+irPtr+" %s, i64 %s)", st, perProp, metaKeyRef, valueBox))
 }
 
 // emitGetMetadata reads (target, propKey, metaKey), returning the stored boxed
@@ -154,16 +165,20 @@ func (e *Emitter) emitDefineMetadata(targetBagPtr, propKeyRef, metaKeyRef, value
 func (e *Emitter) emitGetMetadata(targetBagPtr, propKeyRef, metaKeyRef string) Value {
 	perProp := e.metaPerPropBag(targetBagPtr, propKeyRef)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", r, perProp, metaKeyRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", r, perProp, metaKeyRef))
 	return Value{Ref: r, Ty: TypeAny}
 }
 
 // emitClassMemberMetadata emits the compiler-generated design:* metadata for a
 // decorated member, before its user decorators run (so a user decorator can
-// read it). targetBagPtr is the raw ptr of the per-class decorator target.
-func (e *Emitter) emitClassMemberDesignMetadata(targetBagPtr string, cd *ast.ClassDeclaration, pos ast.Pos) {
-	if !e.opts.EmitDecoratorMetadata {
-		return
+// read it): on the prototype's metadata bag (protoBag) for an instance
+// member, the class's (classBag) for a static one and the constructor.
+func (e *Emitter) emitClassMemberDesignMetadata(protoBag, classBag string, cd *ast.ClassDeclaration, pos ast.Pos) {
+	on := func(static bool) string {
+		if static {
+			return classBag
+		}
+		return protoBag
 	}
 	// A decorated class emits design:paramtypes for its constructor (TS), stored
 	// under the constructor sentinel key.
@@ -172,7 +187,7 @@ func (e *Emitter) emitClassMemberDesignMetadata(targetBagPtr string, cd *ast.Cla
 		if cd.Constructor != nil {
 			ctorParams = e.classes[cd.Name].CtorSig.ParamTypes
 		}
-		e.emitDefineMetadata(targetBagPtr, e.internString(metaCtorKey), e.internString("design:paramtypes"), e.emitDesignParamtypes(ctorParams).Ref)
+		e.emitDefineMetadata(classBag, e.internString(metaCtorKey), e.internString("design:paramtypes"), e.emitDesignParamtypes(ctorParams).Ref)
 	}
 	for _, f := range cd.Fields {
 		if len(f.Decorators) == 0 {
@@ -182,7 +197,7 @@ func (e *Emitter) emitClassMemberDesignMetadata(targetBagPtr string, cd *ast.Cla
 		if ft := e.fieldDesignType(cd.Name, f.Name); ft != nil {
 			ty = *ft
 		}
-		e.emitDefineMetadata(targetBagPtr, e.internString(f.Name), e.internString("design:type"), e.emitDesignTypeDescriptor(ty).Ref)
+		e.emitDefineMetadata(on(f.Static), e.internString(f.Name), e.internString("design:type"), e.emitDesignTypeDescriptor(ty).Ref)
 	}
 	for _, m := range cd.Methods {
 		if len(m.Decorators) == 0 || !methodDecoratorSupported(cd, m) {
@@ -190,10 +205,10 @@ func (e *Emitter) emitClassMemberDesignMetadata(targetBagPtr string, cd *ast.Cla
 		}
 		sig := e.classes[cd.Name].MethodSigs[m.Name]
 		// A method's own design:type is always Function.
-		fnDesc := e.emitDesignTypeDescriptor(Type{IR: "ptr", Kind: kindFunc})
-		e.emitDefineMetadata(targetBagPtr, e.internString(m.Name), e.internString("design:type"), fnDesc.Ref)
-		e.emitDefineMetadata(targetBagPtr, e.internString(m.Name), e.internString("design:paramtypes"), e.emitDesignParamtypes(sig.ParamTypes).Ref)
-		e.emitDefineMetadata(targetBagPtr, e.internString(m.Name), e.internString("design:returntype"), e.emitDesignTypeDescriptor(sig.RetType).Ref)
+		fnDesc := e.emitDesignTypeDescriptor(Type{IR: irPtr, Kind: kindFunc})
+		e.emitDefineMetadata(on(m.IsStatic), e.internString(m.Name), e.internString("design:type"), fnDesc.Ref)
+		e.emitDefineMetadata(on(m.IsStatic), e.internString(m.Name), e.internString("design:paramtypes"), e.emitDesignParamtypes(sig.ParamTypes).Ref)
+		e.emitDefineMetadata(on(m.IsStatic), e.internString(m.Name), e.internString("design:returntype"), e.emitDesignTypeDescriptor(sig.RetType).Ref)
 	}
 }
 

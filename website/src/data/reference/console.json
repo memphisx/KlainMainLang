@@ -4,8 +4,8 @@
   "kind": "node",
   "statusPage": "CONSOLE.md",
   "coversRows": "all",
-  "coverage": { "loose": "12/12", "loosePct": 100, "strict": "10/12", "strictPct": 83 },
-  "lede": "Node-console-shaped logging for CLI tools and services. The full print family works, console.trace included, with the call stack Node prints. console.time tracks each label independently via a per-label backing map, matching console.count. console.table renders Node's exact Unicode box-drawing table for arrays of objects or primitives (other shapes fall back to console.log).",
+  "coverage": { "loose": "12/12", "loosePct": 100, "strict": "11/12", "strictPct": 92 },
+  "lede": "Node-console-shaped logging for CLI tools and services. The full print family works, console.trace included, with the call stack Node prints. console.time tracks each label independently via a per-label backing map, matching console.count. console.table renders Node's exact Unicode box-drawing table for arrays, objects, Maps and Sets, by Node's own algorithm.",
   "entries": [
     {
       "id": "console.log",
@@ -92,12 +92,9 @@
       "id": "console.table",
       "name": "console.table()",
       "statusRow": "console.table()",
-      "signature": "table(data: object[] | primitive[]): void",
-      "badge": "caveats",
-      "description": "Renders an array of objects (one column per shared field) or an array of primitives (a single Values column) as Node's Unicode box-drawing table — byte-for-byte the same layout Node v26 produces, with dynamic per-column widths, left-aligned cells, and quoted string cells.",
-      "differences": [
-        "A `columns` filter argument, a plain-object argument, and an array-of-arrays shape aren't tabulated — they fall back to `console.log`, as a non-tabular value does."
-      ],
+      "signature": "table(tabularData: any, properties?: string[]): void",
+      "badge": "exact",
+      "description": "Renders tabular data as Node's Unicode box-drawing table, by Node's own algorithm: arrays (of objects, primitives or arrays), plain objects, Maps and Sets, with an optional `properties` column filter and index columns in key order.",
       "seeAlso": ["console.log", "console.dir"],
       "spec": { "mdn": "https://nodejs.org/api/console.html#consoletabletabulardata-properties" }
     },

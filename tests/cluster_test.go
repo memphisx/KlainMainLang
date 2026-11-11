@@ -110,14 +110,23 @@ func TestE2EClusterDisconnectAll(t *testing.T) {
 	assertSameAsNodeImports(t, `
 import cluster from 'cluster'
 if (cluster.isPrimary) {
+  // The disconnect callback and the exits race (in Node too): each is
+  // reported once both are in.
   let online = 0
+  let disconnected = false
+  let exitLine = ''
+  const report = () => {
+    if (!disconnected || exitLine === '') return
+    console.log("all disconnected")
+    console.log(exitLine)
+  }
   cluster.on('online', () => {
     if (++online < 2) return
-    cluster.disconnect(() => { console.log("all disconnected") })
+    cluster.disconnect(() => { disconnected = true; report() })
   })
   let exits = 0
   cluster.on('exit', (w, code) => {
-    if (++exits === 2) console.log("exits " + code + " " + w.exitedAfterDisconnect)
+    if (++exits === 2) { exitLine = "exits " + code + " " + w.exitedAfterDisconnect; report() }
   })
   cluster.fork()
   cluster.fork()
@@ -196,12 +205,21 @@ if (cluster.isPrimary) {
       })
     })
   })
-  cluster.on('exit', (w, code, signal) => { console.log("exit " + code + " " + signal) })
-  const w = cluster.fork()
+  // The exit and the end of the worker's stdout race (in Node too): each is
+  // reported once both are in.
+  let exitLine = ''
+  let ended = false
   let out = ''
+  const report = () => {
+    if (exitLine === '' || !ended) return
+    console.log(exitLine)
+    console.log("captured " + out.trim())
+  }
+  cluster.on('exit', (w, code, signal) => { exitLine = "exit " + code + " " + signal; report() })
+  const w = cluster.fork()
   w.process.stdout!.setEncoding('utf8')
   w.process.stdout!.on('data', (chunk: string) => { out += chunk })
-  w.process.stdout!.on('end', () => { console.log("captured " + out.trim()) })
+  w.process.stdout!.on('end', () => { ended = true; report() })
 } else {
   console.log("argv " + process.argv[2] + " " + process.argv[3])
   const server = http.createServer((req, res) => { res.end("hi " + req.url) })

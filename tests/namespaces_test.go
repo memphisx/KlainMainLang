@@ -33,8 +33,8 @@ console.log(util.shout("hey"));
 }
 
 func TestE2ENamespaceNonExportedMemberOutsideAccessIsError(t *testing.T) {
-	// TDD-00148 Stage 2: a non-exported member now *parses* (it desugars
-	// like any member) but outside access stays a clean rejection.
+	// TDD-00148 Stage 2: a non-exported member parses (it desugars like any
+	// member); outside access is no property of the namespace's object.
 	_, err := parseAndCompile(`
 namespace util {
   function hidden(): number { return 1; }
@@ -44,7 +44,7 @@ console.log(util.hidden());
 	if err == nil {
 		t.Fatal("expected a compile error for outside access to a non-exported namespace member")
 	}
-	if !strings.Contains(err.Error(), "not exported") {
+	if !strings.Contains(err.Error(), "property 'hidden' does not exist on type 'typeof util'") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -176,19 +176,20 @@ func TestE2ENamespaceDeclareMembersErased(t *testing.T) {
 	// like top-level `declare`; real members alongside them still work.
 	assertOutput(t, `
 module M {
-    export declare var x;
-    export declare function f();
+    export declare var x: number;
+    export declare function f(): void;
     export function real(): number { return 5; }
 }
 console.log(M.real());
 `, "5")
 }
 
+// A value with only a construct signature is not callable (tsc TS2348).
 func TestE2EObjectTypeConstructSignature(t *testing.T) {
-	assertOutput(t, `
+	assertCLICompileError(t, false, `
 function bar(x: { new(): string; }): string { return x(); }
 console.log(bar((): string => "made"));
-`, "made")
+`, "not callable")
 }
 
 func TestE2ENamespaceExecutableStatements(t *testing.T) {
@@ -229,7 +230,7 @@ func TestE2EAmbientNamespaceMembers(t *testing.T) {
 	// (incl. nested chains), function members are throwing stubs; the
 	// string-named external-module and `global` forms stay erased.
 	assertOutput(t, `
-declare module Foo.Bar { export var foo; }
+declare module Foo.Bar { export var foo: number; }
 Foo.Bar.foo = 5;
 console.log(Foo.Bar.foo);
 declare namespace Svc {
@@ -366,4 +367,17 @@ console.log(o.w, Object.getOwnPropertyDescriptor(o, "w"));
 o.w = 9;
 console.log(A.w, JSON.stringify(o));
 `, "6 9 15 7\n0 { value: 0, writable: true, enumerable: true, configurable: true }\n9 {\"t\":6,\"u\":9,\"w\":9}")
+}
+
+// A namespace member it does not export, and an enum key it lacks, are no
+// properties of the object at run time: undefined, and a call of one
+// throws (as tsc's emitted JavaScript does).
+func TestE2ENamespaceUnexportedMemberJS(t *testing.T) {
+	assertOutputCompatJS(t, `
+namespace N { const x = 1; function hid() { return 1; } export const y = 2; export namespace M { const z = 3; export const w = 4; } }
+console.log((N as any).x, N.y, (N.M as any).z, N.M.w);
+try { (N as any).hid(1); } catch (e: any) { console.log(e.message); }
+enum E { A = 1 }
+console.log((E as any)["B"], (E as any).C, E.A);
+`, "undefined 2 undefined 4\nN.hid is not a function\nundefined undefined 1")
 }

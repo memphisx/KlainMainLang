@@ -26,20 +26,6 @@ var dynWhenSource string
 // DynWhenSource is dynwhen.c, behind kml_layout.h.
 func DynWhenSource() string { return layoutHeader() + dynWhenSource }
 
-// UsesDynWhen reports whether the program links dynwhen.c.
-func (e *Emitter) UsesDynWhen() bool { return e.usedDynWhen }
-
-func (e *Emitter) ensureDynWhen() {
-	if e.usedDynWhen {
-		return
-	}
-	e.usedDynWhen = true
-	e.ensurePromiseAdopt() // __kml_promise_attach
-	e.ensureTaskRuntime()
-	e.ensurePromiseDeferSettle()
-	e.emitGlobal("declare void @__kml_dynimport_when(ptr, ptr, ptr)\ndeclare ptr @__kml_dynimport_init(ptr, ptr, i64)")
-}
-
 // groupDynStatements records each dynamic-only file's top-level statements,
 // in order, by file.
 func (e *Emitter) groupDynStatements(prog *ast.Program) {
@@ -72,9 +58,9 @@ func (e *Emitter) dynModuleInit(target string) (string, error) {
 	for _, f := range files {
 		body = append(body, e.dynGroups[f]...)
 	}
-	e.ensureModuleTaskRuntime()
+	e.ensureTaskRuntime()
 	prom := "@__kml_dyn_" + h + "_prom"
-	e.emitGlobal(fmt.Sprintf("%s = %s%sglobal ptr null, align 8", prom, e.dynLinkage(), e.isolateTLS()))
+	e.emitGlobal(fmt.Sprintf("%s = %s%sglobal "+irPtr+" null, align 8", prom, e.dynLinkage(), e.isolateTLS()))
 	for _, f := range files {
 		flag := "@__kml_dynfile_" + IslandHash(f) + "_done"
 		if !e.dynInits[flag] { // a file two targets reach has one flag
@@ -92,11 +78,11 @@ func (e *Emitter) dynModuleInit(target string) (string, error) {
 	for _, f := range files {
 		done := "@__kml_dynfile_" + IslandHash(f) + "_done"
 		ran := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s", ran, done))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s", ran, done))
 		skipL, runL := e.freshLabel("dyn.ran"), e.freshLabel("dyn.run")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ran, skipL, runL))
 		e.emitLabel(runL)
-		e.emitInstr(fmt.Sprintf("store i1 true, ptr %s", done))
+		e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s", done))
 		if e.opts.DynamicImport == "lazy" {
 			// Its shared library's table rows (emitIslandUnitInits).
 			if e.islandUnitFiles == nil {
@@ -132,7 +118,7 @@ func (e *Emitter) dynModuleInit(target string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	e.writeDetachedFunc(e.dynLinkage(), "void", "@__kml_dyn_"+h+"_body", "ptr %__kml_module_args", fnBody)
+	e.writeDetachedFunc(e.dynLinkage(), "void", "@__kml_dyn_"+h+"_body", irPtr+" %__kml_module_args", fnBody)
 
 	return name, nil
 }
@@ -156,26 +142,29 @@ func (e *Emitter) emitBundledImport(ex *ast.ImportCallExpression) (Value, error)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureDynWhen()
+	e.ensureMicrotasks()
+	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
+	e.ensureNanBox()
+	e.ensureTaskRuntime()
 	objTy := e.importCallResultObjectType(ex)
 	fulfill := "@" + e.emitBundledFulfillFn(ex, objTy)
 	prom := "@__kml_dyn_" + IslandHash(ex.ResolvedPath) + "_prom"
 	if e.opts.DynamicImport == "lazy" {
-		e.ensureDynImportShim()
 		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_open(ptr %s)", h, e.internString(IslandHash(ex.ResolvedPath))))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynimport_open("+irPtr+" %s)", h, e.internString(IslandHash(ex.ResolvedPath))))
 		sym := func(name string) string {
 			fp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_sym(ptr %s, ptr %s)", fp, h, e.internString(strings.TrimPrefix(name, "@"))))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynimport_sym("+irPtr+" %s, "+irPtr+" %s)", fp, h, e.internString(strings.TrimPrefix(name, "@"))))
 			return fp
 		}
 		body, fulfill, prom = sym(body), sym(fulfill), sym(prom)
 	}
 	mp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynimport_init(ptr %s, ptr %s, i64 %d)", mp, prom, body, e.moduleTaskStackBytes()))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynimport_init("+irPtr+" %s, "+irPtr+" %s, i64 %d)", mp, prom, body, e.moduleTaskStackBytes()))
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
-	e.emitInstr(fmt.Sprintf("call void @__kml_dynimport_when(ptr %s, ptr %s, ptr %s)", mp, q, fulfill))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynimport_when("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", mp, q, fulfill))
 	promTy := PromiseOf(objTy)
 	promTy.PromiseTask = true
 	return Value{Ref: q, Ty: promTy}, nil
@@ -198,17 +187,16 @@ func (e *Emitter) emitBundledFulfillFn(ex *ast.ImportCallExpression, objTy Type)
 		v := Value{Ref: "null", Ty: TypeAny}
 		if ok && sym.Ptr != "" {
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", r, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", r, sym.Ty.IR, sym.Ptr, sym.Ty.Align()))
 			v = e.convert(Value{Ref: r, Ty: sym.Ty}, TypeAny)
 		}
 		e.storePromiseValue("%q", v)
 		e.emitTerminator("ret void")
 		body := e.allocas.String() + e.body.String()
 		restore()
-		e.writeDetachedFunc(e.dynLinkage(), "void", "@"+name, "ptr %q", body)
+		e.writeDetachedFunc(e.dynLinkage(), "void", "@"+name, irPtr+" %q", body)
 		return name
 	}
-	e.ensureCalloc()
 	obj := e.freshReg()
 	e.emitObjAllocInto(obj, objTy)
 	structIR := objTy.StructIR()
@@ -218,17 +206,17 @@ func (e *Emitter) emitBundledFulfillFn(ex *ast.ImportCallExpression, objTy Type)
 			continue
 		}
 		v := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", v, f.Ty.IR, sym.Ptr, f.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", v, f.Ty.IR, sym.Ptr, f.Ty.Align()))
 		idx, _, _ := objTy.FieldIndex(f.Name)
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, obj, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, structIR, obj, idx))
 		e.heapStore(f.Ty.IR, v, gep, f.Ty.Align())
 	}
 	e.storePromiseValue("%q", Value{Ref: obj, Ty: objTy})
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeDetachedFunc(e.dynLinkage(), "void", "@"+name, "ptr %q", body)
+	e.writeDetachedFunc(e.dynLinkage(), "void", "@"+name, irPtr+" %q", body)
 	return name
 }
 

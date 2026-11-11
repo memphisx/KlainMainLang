@@ -598,7 +598,7 @@
       "badge": "caveats",
       "description": "var is function-scoped and re-declarable; let/const are block-scoped and const rebinding is rejected. A top-level const/let/var is a module global — readable and writable from any named function whenever its type is determinable before main() runs. Block redeclaration, TDZ, and use-before-assignment are compile errors.",
       "differences": [
-        "Definite-assignment analysis is sound-not-complete: a typed `var`/`let` assigned only in a maybe-skipped loop or across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned`.",
+        "Definite-assignment analysis is sound-not-complete: a `var`/`let` assigned only across correlated conditions still falls through to the `undefined`/zero default rather than raising `used before being assigned`.",
         "A top-level `const`/`let` still isn't readable from a named `function` only in the invariant's genuine edges — a `bigint`, an un-annotated call *through another top-level binding* (`const f = () => …; const x = f()`), a `new Set([…])` typed from its initializer array, or an init depending on a runtime-local (a `{ …rest }` spread of a destructuring target); an arrow/closure still captures any of them."
       ],
       "seeAlso": [
@@ -773,12 +773,8 @@
       "name": "Destructured function parameters",
       "statusRow": "Destructured function parameters (function f({ x, y }: T) {} / function f([a, b]: T[]) {})",
       "signature": "function f({ x, y }: T) { … }",
-      "badge": "caveats",
-      "description": "Object- and array-destructured parameters. A destructured callback parameter needs no annotation — its type is supplied by contextual typing from the higher-order method's element type, so the common `Object.entries(o).map(([k, v]) => …)` / Map-entries / pair-array idiom works. A heterogeneous tuple pattern binds each position by its own type. Each element/field may have its own default; nested patterns work; supported on named functions, class methods/constructors, and arrow functions.",
-      "differences": [
-        "No combination with `...` or a whole-parameter default value; a pattern param with no annotation and no contextual type (a plain `function f([a, b])`) is still rejected, matching TS's implicit-any error.",
-        "A `= default` on a nested position is a clean rejection; per-element defaults follow the same rules as the statement-level destructuring rows."
-      ],
+      "badge": "exact",
+      "description": "Object- and array-destructured parameters. A destructured callback parameter needs no annotation — its type is supplied by contextual typing from the higher-order method's element type, so the common `Object.entries(o).map(([k, v]) => …)` / Map-entries / pair-array idiom works. A heterogeneous tuple pattern binds each position by its own type. Rests (`{ x, ...rest }`, `[h, ...t]`), a whole-parameter default, and defaults at any nested position all work; supported on named functions, class methods/constructors, and arrow functions. As in TypeScript, a pattern parameter with no annotation and no contextual type (`function f([a, b])`) is an implicit-any error; `-compat=js` binds it.",
       "seeAlso": [
         "lang.arraydestructure",
         "lang.objdestructure"
@@ -792,14 +788,9 @@
       "name": "Nested function declarations",
       "statusRow": "Nested function declarations (function outer() { function inner() {...}; return inner(); })",
       "signature": "function outer() { function inner() { … } }",
-      "badge": "caveats",
-      "description": "A helper function declared inside another function's body — hoisted (letrec-style: a capturing declaration is usable before its declaration statement), forward-referenceable, self-recursive, and visible to its own further-nested descendants. Captures enclosing locals/parameters by reference — arrays and loop variables included (a C-style or iterator `let` loop variable is captured per-iteration, JS semantics; `var` shares) — and escapes by name as a real closure value with an inferred type; a nested generator escapes as a first-class constructor closure.",
+      "badge": "exact",
+      "description": "A helper function declared inside another function's body — hoisted (letrec-style: a capturing declaration is usable before its declaration statement, and siblings may call each other), forward-referenceable, self-recursive or generic, and visible to its own further-nested descendants. Captures enclosing locals/parameters by reference — arrays and loop variables included (a C-style or iterator `let` loop variable is captured per-iteration, JS semantics; `var` shares) — and escapes by name as a real closure value with an inferred type; a nested generator escapes as a first-class constructor closure.",
       "snippet": "function outer(x: number): number {\n  function double(y: number): number {\n    return y * 2;\n  }\n  return double(x) + 1;\n}",
-      "differences": [
-        "Generic (`<T>`) nested declarations and same-scope duplicate names are clean compile errors.",
-        "A hoisted call that reads a captured variable declared *between* the call and the declaration is a clean compile error (Node crashes with a runtime TDZ error there).",
-        "Two mutually-recursive *capturing* nested siblings (`f` calls `g`, `g` calls `f`, both closing over an enclosing local) are a clean compile error; self-recursion works, including unannotated."
-      ],
       "seeAlso": [
         "lang.functiondecl",
         "lang.arrow"
@@ -818,8 +809,7 @@
       "snippet": "const add = (a: number, b: number): number => a + b;\nconsole.log(add.call(null, 3, 4));\nconsole.log(add.apply(null, [5, 6]));",
       "differences": [
         "`thisArg` is the receiver only of a function with a `this: T` parameter (declared, or from its contextual type); for any other function it is evaluated then ignored, so borrowing a class method against another receiver is unsupported.",
-        "call/apply/bind on a Node module's function isn't supported (it isn't a function value); the ECMAScript builtins (`parseInt`, `Math.max`, `encodeURIComponent`, …) are function values.",
-        "`.apply` takes either a literal array or a runtime array spread into a **rest** parameter; a runtime array into a fixed-arity function is the usual spread-into-fixed-arity rejection."
+        "call/apply/bind on a Node module's function isn't supported (it isn't a function value); the ECMAScript builtins (`parseInt`, `Math.max`, `encodeURIComponent`, …) are function values."
       ],
       "seeAlso": [
         "lang.fnexpr",
@@ -940,6 +930,21 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/withResolvers"
+      }
+    },
+    {
+      "id": "lang.promisetry",
+      "name": "Promise.try",
+      "statusRow": "Promise.try",
+      "signature": "Promise.try(callbackFn, ...args)",
+      "badge": "caveats",
+      "description": "Calls callbackFn right away with the extra arguments and wraps every outcome in one promise: its return value, a promise or thenable it returns (adopted), or a synchronous throw (a rejection). Called with another constructor as this, it still builds a plain Promise.",
+      "seeAlso": [
+        "lang.promisewithresolvers",
+        "lang.promiseresolvereject"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/try"
       }
     },
     {
@@ -1284,8 +1289,12 @@
       "name": "class inheritance (extends/super)",
       "statusRow": "class inheritance (extends/super)",
       "signature": "class D extends B { constructor() { super(); } }",
-      "badge": "exact",
+      "badge": "caveats",
       "description": "Single inheritance, base-first field layout, super(args)/super.method(args), and an implicit pass-through constructor when a derived class adds no fields. Dispatch is static except for a method provably overridden somewhere, which goes through a per-tree vtable (decided at compile time via whole-program analysis). extends also accepts the imported EventEmitter, with or without an event-map type argument.",
+      "differences": [
+        "A base known only at run time (a conditional, a mixin's parameter) is compiled once per class it can hold; a class expression that can reach it is lifted to one class, so evaluating it twice gives the same class",
+        "An instance of a class whose constructor may return another object (or of a class extending one) is read dynamically, which is slower than a plain instance"
+      ],
       "seeAlso": [
         "lang.class",
         "lang.instanceof"
@@ -1337,6 +1346,55 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/RegExp"
+      }
+    },
+    {
+      "id": "lang.extendsprimitive",
+      "name": "class X extends Number / String / Boolean",
+      "statusRow": "class X extends Number / String / Boolean",
+      "signature": "class Money extends Number { constructor(v: number, readonly currency: string) { super(v); } }",
+      "badge": "exact",
+      "description": "The instance is the primitive's wrapper object: new X(…) and super(…) take the constructor's argument, the primitive's methods, length and indices act on it, valueOf, arithmetic, String() and iteration of a String's characters give its primitive, instanceof both ways, Object.keys, JSON.stringify serializing the primitive, the same through any, and console.log as Node shows it ([Number (Money): 12.5] { currency: 'EUR' }).",
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsdate"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Number"
+      }
+    },
+    {
+      "id": "lang.extendsarraybuffer",
+      "name": "class X extends ArrayBuffer / SharedArrayBuffer",
+      "statusRow": "class X extends ArrayBuffer / SharedArrayBuffer",
+      "signature": "class Packet extends ArrayBuffer { kind = 1; }",
+      "badge": "exact",
+      "description": "The instance carries the buffer's body: new X(n, { maxByteLength }) and super(…) construct it; byteLength, resize/grow, resizable/maxByteLength, typed arrays and DataViews over it, slice making another instance of the class, instanceof both ways, ArrayBuffer.isView false, the same through any, and console.log as Node shows it (B [ArrayBuffer] { [Uint8Contents]: <07 00>, [byteLength]: 2, kind: 1 }).",
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsprimitive"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ArrayBuffer"
+      }
+    },
+    {
+      "id": "lang.extendsfunction",
+      "name": "class X extends Function",
+      "statusRow": "class X extends Function",
+      "signature": "class Formula extends Function { constructor() { super(\"x\", \"return x * x\"); } }",
+      "badge": "caveats",
+      "description": "An instance is a callable function the Function constructor builds from the construction's (super call's) arguments; its prototype is the class's, which inherits Function.prototype, so methods, accessors and fields act on it, instanceof works both ways, and name, length, call and apply behave as on any function.",
+      "differences": [
+        "The Function constructor compiles only source strings known at compile time: a constructor computing the strings it passes to super(…) (beyond forwarding its parameters), or a construction through a binding holding the class, throws the EvalError a run-time Function(…) does.",
+        "A class with a private member, a super.x access, or a constructor return is still a compile error."
+      ],
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsarraybuffer"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Function/Function"
       }
     },
     {

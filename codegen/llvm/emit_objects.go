@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -116,8 +117,14 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 		var err error
 		switch fn := call.Args[0].(type) {
 		case *ast.ArrowFunction:
+			if hint.FuncThis {
+				goto plain // the slot's receiver is not an arrow parameter
+			}
 			inner, err = e.emitArrowFunctionWithHints(fn, hint.FuncParams)
 		case *ast.FunctionExpression:
+			if hint.FuncThis {
+				goto plain
+			}
 			inner, err = e.emitFunctionExpression(fn, hint.FuncParams)
 		default:
 			goto plain
@@ -127,12 +134,14 @@ func (e *Emitter) emitExprWithObjectHint(expr ast.Expression, hint Type) (Value,
 		}
 		{
 			slot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", inner.Ref, slot))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", inner.Ref, slot))
 			name := "__kml_wrapped_cb" + slot[1:]
 			e.define(name, Symbol{Ptr: slot, Ty: inner.Ty})
 			args := append([]ast.Expression{ast.NewIdentifier(name, call.GetPos())}, call.Args[1:]...)
-			v, err := e.emitExpr(ast.NewCallExpression(call.Callee, args, call.GetPos()))
+			wrapped := ast.NewCallExpression(call.Callee, args, call.GetPos())
+			wrapped.TypeArgs = call.TypeArgs
+			v, err := e.emitExpr(wrapped)
 			if err != nil {
 				return Value{}, err
 			}
@@ -159,12 +168,23 @@ plain:
 	// built as that member (`["a", 2]` for `string | (string | number)[]`).
 	if lit, ok := expr.(*ast.ArrayLiteral); ok && hint.IsDynamic() && len(hint.UnionMembers) > 0 {
 		var arr *Type
-		n := 0
+		n, tuples := 0, 0
 		for i := range hint.UnionMembers {
 			if hint.UnionMembers[i].IsArray() {
 				arr = &hint.UnionMembers[i]
 				n++
 			}
+			if hint.UnionMembers[i].IsTuple() && !hint.UnionMembers[i].IsDynamic() {
+				tuples++
+			}
+		}
+		if tuples > 0 {
+			// Beside a tuple member: the member the checker types the
+			// literal as (`["x", 1]` for `number[] | [string, number]`).
+			if lt := e.typeOfExpr(lit); (lt.IsTuple() || lt.IsArray()) && !lt.IsDynamic() {
+				return e.emitExprWithObjectHint(lit, lt)
+			}
+			n = 0
 		}
 		if n == 1 {
 			v, err := e.emitExprWithObjectHint(lit, *arr)
@@ -173,16 +193,21 @@ plain:
 			}
 			return v, nil
 		}
+		// Several array members: the member the checker types the
+		// literal as (`[2, 1]` for `string[] | number[]`).
+		if lt := e.typeOfExpr(lit); n > 1 && lt.IsArray() && !lt.IsDynamic() {
+			return e.emitExprWithObjectHint(lit, lt)
+		}
 	}
 	// `Object.create(null)` where a string-keyed dictionary is expected is an
 	// empty dictionary with no prototype.
 	if hint.IsDynamicObject() && hint.IsMap() && isObjectCreateNull(expr) {
 		e.ensureMapStrHelpers()
 		m := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", m))
 		fp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 56", fp, m))
-		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", fp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 56", fp, m))
+		e.emitInstr(fmt.Sprintf("store i64 1, "+irPtr+" %s, align 8", fp))
 		return Value{Ref: m, Ty: hint}, nil
 	}
 	// A numeric literal bound into an explicit int64/uint64 slot is parsed
@@ -210,6 +235,11 @@ plain:
 		if m, ok := unionLiteralMember(expr, hint); ok {
 			return e.emitExprWithObjectHint(expr, m)
 		}
+		// Several object members: the one the literal's discriminants
+		// select, as the checker discriminates its context.
+		if m, ok := e.discriminatedLiteralMember(expr, hint); ok {
+			return e.emitExprWithObjectHint(expr, m)
+		}
 	}
 	// An object literal bound into a bare any/unknown slot becomes a D1
 	// dynamic object (TDD-00155) — a real runtime property bag, not a static
@@ -228,7 +258,7 @@ plain:
 		homogeneous := len(lit.Elements) > 0
 		var kind string
 		for _, el := range lit.Elements {
-			t := e.inferExprType(el)
+			t := e.typeOfExpr(el)
 			k := scalarTypeKind(t)
 			if k == "" {
 				homogeneous = false
@@ -282,7 +312,7 @@ plain:
 	}
 	// A ternary into an object or dictionary slot builds each branch against
 	// it (`const init: Init = c ? read() : {}`: the `{}` is the dictionary).
-	if ce, ok := expr.(*ast.ConditionalExpression); ok && (hint.IsObject() || hint.IsDynamicObject() || hint.IsTuple()) && hint.IR == "ptr" && !hint.IsDynamic() &&
+	if ce, ok := expr.(*ast.ConditionalExpression); ok && (hint.IsObject() || hint.IsDynamicObject() || hint.IsTuple()) && hint.IR == irPtr && !hint.IsDynamic() &&
 		(!hint.IsArray() || hint.IsTuple()) && e.ptrShapedBranch(ce.Consequent) && e.ptrShapedBranch(ce.Alternate) {
 		return e.emitConditionalHinted(ce, hint)
 	}
@@ -370,6 +400,10 @@ func (e *Emitter) emitClosureAgainstHint(v Value, err error) func(hint Type, pos
 			return Value{}, err
 		}
 		if merr := closureFallOffMismatch(v.Ty, hint, pos, "a function-typed slot"); merr != nil {
+			// Its result's undefined is the slot result type's.
+			if adapted, ok := e.emitClosureAdapter(v, hint); ok {
+				return adapted, nil
+			}
 			return Value{}, merr
 		}
 		// A parameter annotated with another representation than the slot's
@@ -379,7 +413,7 @@ func (e *Emitter) emitClosureAgainstHint(v Value, err error) func(hint Type, pos
 			if adapted, ok := e.emitClosureAdapter(v, hint); ok {
 				return adapted, nil
 			}
-		} else if needed || (v.Ty.FuncThis && !hint.FuncThis) {
+		} else if needed || v.Ty.FuncThis != hint.FuncThis {
 			// A conversion the direct adapter does not take: through the box.
 			if adapted, ok := e.emitBoxedClosureAs(v, hint); ok {
 				return adapted, nil
@@ -401,7 +435,7 @@ func (e *Emitter) literalFitsLayout(lit *ast.ObjectLiteral, t Type) bool {
 		if !ok || f.Ty.IsDynamic() {
 			continue
 		}
-		vt := e.inferExprType(p.Value)
+		vt := e.typeOfExpr(p.Value)
 		if vt.IsDynamic() || vt.IsUndefined() || vt.IsNull() {
 			continue
 		}
@@ -425,7 +459,7 @@ func (e *Emitter) emitRecordSpreadLiteral(lit *ast.ObjectLiteral, hint *Type) (V
 	has := false
 	for _, p := range lit.Properties {
 		if sp, ok := p.Value.(*ast.SpreadElement); ok && p.Key == "" && p.KeyExpr == nil {
-			if t := e.inferExprType(sp.Arg); isRecordView(t) && !t.Nullable() {
+			if t := e.typeOfExpr(sp.Arg); isRecordView(t) && !t.Nullable() {
 				has = true
 			}
 		}
@@ -457,8 +491,8 @@ func (e *Emitter) emitRecordSpreadLiteral(lit *ast.ObjectLiteral, hint *Type) (V
 			f := e.emitRecordForeign(v.Ref, v.Ty)
 			e.usedObjExtra = true
 			e.extraTypes = append(e.extraTypes, v.Ty)
-			has, either := e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_obj_has_extra(ptr %s)", has, v.Ref))
+			either := e.freshReg()
+			has := e.emitObjHasExtra(v.Ref)
 			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, f, has))
 			acc := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", acc, foreign, either))
@@ -467,7 +501,7 @@ func (e *Emitter) emitRecordSpreadLiteral(lit *ast.ObjectLiteral, hint *Type) (V
 	}
 	nl := ast.NewObjectLiteral(props, pos)
 	out := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", out))
 	dynL, staticL, doneL := e.freshLabel("recspread.dyn"), e.freshLabel("recspread.static"), e.freshLabel("recspread.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", foreign, dynL, staticL))
 	e.recordSpreadInner = true
@@ -478,18 +512,18 @@ func (e *Emitter) emitRecordSpreadLiteral(lit *ast.ObjectLiteral, hint *Type) (V
 		return Value{}, true, err
 	}
 	_, pay := e.emitUnboxTagPayload(Value{Ref: dv.Ref, Ty: TypeAny})
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.emitIntToPtr(pay), out))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.emitIntToPtr(pay), out))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(staticL)
 	sv, err := e.emitObjectLiteralWithHint(nl, hint)
 	if err != nil {
 		return Value{}, true, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sv.Ref, out))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", sv.Ref, out))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, out))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, out))
 	return Value{Ref: r, Ty: sv.Ty}, true, nil
 }
 
@@ -519,6 +553,11 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		}
 		v.Ty = e.inferDynamicObjectType(lit)
 		return v, nil
+	}
+	if lit.HasAccessors() && objLitHasSpread(lit) {
+		// Accessors beside a spread's keys: the object JavaScript builds,
+		// its accessors defined in order.
+		return e.emitDynObjLiteral(lit)
 	}
 	if lit.HasAccessors() {
 		return e.emitObjectLiteralWithAccessors(lit)
@@ -567,7 +606,7 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	for i, f := range ty.Fields {
 		if f.Ty.IsDynamic() && !f.Ty.IsArray() && StructFieldIR(f.Ty) == "i64" {
 			g := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, structIR, dataReg, i))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, structIR, dataReg, i))
 			e.heapStore("i64", fmt.Sprint(nbUndefined), g, 8)
 		}
 	}
@@ -578,29 +617,52 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	runBlk, inSpread := "", false
 	if ty.orderIndex() >= 0 {
 		for _, prop := range lit.Properties {
-			if sp, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" && e.inferExprType(sp.Arg).orderIndex() >= 0 {
-				e.ensureKeyOrder()
+			if sp, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" && e.typeOfExpr(sp.Arg).orderIndex() >= 0 {
 				runBlk = e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_keyorder_new()", runBlk))
+				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_keyorder_new()", runBlk))
 				break
 			}
 		}
 	}
 	pushKey := func(name string) {
 		if b := ty.presenceBit(name); runBlk != "" && !inSpread && b >= 0 {
-			e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_push(ptr %s, i64 %d)", runBlk, b))
+			e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_push("+irPtr+" %s, i64 %d)", runBlk, b))
 		}
+	}
+	// A key the layout lacks (`{ 0: … }` as a `class C { [n: number]: T
+	// }`, which only an index signature lets the checker accept; an
+	// undeclared option a JavaScript caller passes): the object's own extra
+	// property, as `c[0] = …` writes.
+	extraField := func(name string, val Value) error {
+		keyRef, err := e.dynAnyKeyRef(ast.NewStringLiteral(name, lit.GetPos()), lit.GetPos())
+		if err != nil {
+			return err
+		}
+		rhs, err := e.emitBoxValue(val)
+		if err != nil {
+			return err
+		}
+		_, err = e.emitDynAnyMemberSetNamed(Value{Ref: dataReg, Ty: ty}, keyRef, name, rhs, lit.GetPos())
+		return err
 	}
 	storeField := func(name string, val Value) error {
 		idx, fieldTy, ok := ty.FieldIndex(name)
 		if !ok {
-			return fmt.Errorf("%d:%d: object has no field '%s'", lit.GetPos().Line, lit.GetPos().Col, name)
+			// A key the layout the literal is built as lacks (an option
+			// the parameter's type does not declare, which a JavaScript
+			// caller may pass): the object's own extra property.
+			return extraField(name, val)
 		}
 		if !convertiblePure(val.Ty, fieldTy) {
-			return fmt.Errorf("%d:%d: field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", lit.GetPos().Line, lit.GetPos().Col, name)
+			// The field's type takes the value as from `any`.
+			boxed, err := e.emitBoxValue(val)
+			if err != nil {
+				return err
+			}
+			val = e.convert(boxed, fieldTy)
 		}
 		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
 		e.storeScalarOrNullableField(gepReg, fieldTy, val)
 		e.emitPresenceInit(dataReg, ty, name)
 		keyNames = append(keyNames, name)
@@ -614,7 +676,11 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 	storeFieldExpr := func(name string, expr ast.Expression) error {
 		idx, fieldTy, ok := ty.FieldIndex(name)
 		if !ok {
-			return fmt.Errorf("%d:%d: object has no field '%s'", lit.GetPos().Line, lit.GetPos().Col, name)
+			v, err := e.emitExpr(expr)
+			if err != nil {
+				return err
+			}
+			return extraField(name, v)
 		}
 		// An object/array literal value is *constructed* against fieldTy (the
 		// hint threads through storeScalarOrNullableFieldExpr → emitExprWith-
@@ -624,7 +690,7 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		// caught recursively during that construction.
 		_, isObjLit := expr.(*ast.ObjectLiteral)
 		_, isArrLit := expr.(*ast.ArrayLiteral)
-		if !isObjLit && !isArrLit && !convertiblePure(e.inferExprType(expr), fieldTy) && e.compatJS() {
+		if !isObjLit && !isArrLit && !convertiblePure(e.typeOfExpr(expr), fieldTy) {
 			// JavaScript stores the value as it is; the field's type takes it
 			// as from `any`, a value it cannot hold throwing at run time.
 			v, err := e.emitExpr(expr)
@@ -637,11 +703,8 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 			}
 			return storeField(name, e.convert(boxed, fieldTy))
 		}
-		if !isObjLit && !isArrLit && !convertiblePure(e.inferExprType(expr), fieldTy) {
-			return fmt.Errorf("%d:%d: field '%s' is assigned a value of an incompatible type — this compiler is a typed subset", lit.GetPos().Line, lit.GetPos().Col, name)
-		}
 		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
 		if err := e.storeScalarOrNullableFieldExpr(gepReg, fieldTy, expr); err != nil {
 			return err
 		}
@@ -661,14 +724,14 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 				srcVal = obj // `false | { j }`: the object or nothing
 			}
 			if !srcVal.Ty.IsObject() {
-				return Value{}, fmt.Errorf("%d:%d: spread in object literal requires an object value", spread.GetPos().Line, spread.GetPos().Col)
+				return Value{}, internalAt(spread.GetPos(), "spread in object literal requires an object value")
 			}
 			// `{ ...undefined }` / `{ ...null }` copies nothing: an absent
 			// optional source leaves its (optional) fields absent.
 			skipL := ""
 			if srcVal.Ty.Nullable() || srcVal.Ty.IsNull() {
 				isNull := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, srcVal.Ref))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, srcVal.Ref))
 				copyL, nullL := e.freshLabel("objspread.copy"), e.freshLabel("objspread.null")
 				skipL = e.freshLabel("objspread.skip")
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, copyL))
@@ -692,7 +755,7 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 			if runBlk != "" && srcVal.Ty.orderIndex() >= 0 {
 				srcMask = e.freshReg()
 				e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", srcMask))
-				e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", srcMask))
+				e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", srcMask))
 				inSpread = true
 			}
 			for _, f := range srcVal.Ty.SpreadFields() {
@@ -742,9 +805,9 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 				}
 				if b := srcVal.Ty.presenceBit(f.Name); srcMask != "" && b >= 0 {
 					m, n := e.freshReg(), e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", m, srcMask))
+					e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", m, srcMask))
 					e.emitInstr(fmt.Sprintf("%s = or i64 %s, %d", n, m, uint64(1)<<uint(b)))
-					e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", n, srcMask))
+					e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", n, srcMask))
 				}
 				if doneL != "" {
 					e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -754,15 +817,15 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 			// … and the properties added beside its layout (a class
 			// instance's accessor Object.defineProperty gave it).
 			e.ensureShapeRuntime()
-			e.declareFn("__kml_shape_expando_spread", "declare void @__kml_shape_expando_spread(ptr, ptr)")
-			e.emitInstr(fmt.Sprintf("call void @__kml_shape_expando_spread(ptr %s, ptr %s)", dataReg, srcVal.Ref))
+			e.declareFn("__kml_shape_expando_spread", "declare void @__kml_shape_expando_spread("+irPtr+", "+irPtr+")")
+			e.emitInstr(fmt.Sprintf("call void @__kml_shape_expando_spread("+irPtr+" %s, "+irPtr+" %s)", dataReg, srcVal.Ref))
 			if srcMask != "" {
 				inSpread = false
 				seq, ints := e.keyOrderSeq(srcVal.Ty)
 				order, m := e.freshReg(), e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", order, e.keyOrderSlot(Value{Ref: srcVal.Ref, Ty: srcVal.Ty.withoutNullable()})))
-				e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", m, srcMask))
-				e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_push_src(ptr %s, ptr %s, ptr %s, i64 %d, i64 %s, ptr %s)", runBlk, order, seq, ints, m, e.keyOrderMap(srcVal.Ty, ty)))
+				e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", order, e.keyOrderSlot(Value{Ref: srcVal.Ref, Ty: srcVal.Ty.withoutNullable()})))
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", m, srcMask))
+				e.emitInstr(fmt.Sprintf("call void @__kml_keyorder_push_src("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d, i64 %s, "+irPtr+" %s)", runBlk, order, seq, ints, m, e.keyOrderMap(srcVal.Ty, ty)))
 			}
 			if skipL != "" {
 				e.emitTerminator(fmt.Sprintf("br label %%%s", skipL))
@@ -779,7 +842,7 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		}
 	}
 	if runBlk != "" {
-		e.heapStore("ptr", runBlk, e.keyOrderGep(dataReg, ty), 8)
+		e.heapStore(irPtr, runBlk, e.keyOrderGep(dataReg, ty), 8)
 	} else {
 		e.emitKeyOrderInit(dataReg, ty, keyNames)
 	}
@@ -792,7 +855,7 @@ func (e *Emitter) emitDynamicObjectLiteralAs(lit *ast.ObjectLiteral, as *Type) (
 	for _, prop := range lit.Properties {
 		if _, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" {
 			pos := prop.Value.GetPos()
-			return Value{}, fmt.Errorf("%d:%d: object spread cannot be combined with a computed property key yet", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "object spread cannot be combined with a computed property key yet")
 		}
 	}
 
@@ -804,7 +867,7 @@ func (e *Emitter) emitDynamicObjectLiteralAs(lit *ast.ObjectLiteral, as *Type) (
 	}
 	e.ensureMapStrHelpers()
 	mapPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", mapPtr))
 
 	for _, prop := range lit.Properties {
 		keyExpr := prop.KeyExpr
@@ -891,18 +954,18 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 	if isLogicalAssignOp(op) {
 		e.ensureMapStrHelpers()
 		rawReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", rawReg, mapPtr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", rawReg, mapPtr, kRef))
 		cur := e.mapValFromI64(rawReg, valTy)
 		if valTy.IsDynamic() {
 			// A box: a missing key is undefined.
 			has := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", has, mapPtr, kRef))
+			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has("+irPtr+" %s, "+irPtr+" %s)", has, mapPtr, kRef))
 			sel := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", sel, has, rawReg, nbUndefined))
 			cur = Value{Ref: sel, Ty: valTy}
 		}
 		// `??=` on a non-ptr value type can never trigger (no null to coalesce).
-		if op == "??=" && valTy.IR != "ptr" && !valTy.IsDynamic() && !isF64Slot(valTy) {
+		if op == "??=" && valTy.IR != irPtr && !valTy.IsDynamic() && !isF64Slot(valTy) {
 			return cur, nil
 		}
 		var cond Value
@@ -940,11 +1003,11 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 			return Value{}, err
 		}
 		rhsVal = e.convert(rhsVal, valTy)
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, kRef, e.valueToMapVal(rhsVal, valTy)))
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", mapPtr, kRef, e.valueToMapVal(rhsVal, valTy)))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(mergeL)
 		finalRaw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", finalRaw, mapPtr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", finalRaw, mapPtr, kRef))
 		return e.mapValFromI64(finalRaw, valTy), nil
 	}
 
@@ -957,14 +1020,14 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 	} else {
 		e.ensureMapStrHelpers()
 		rawReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", rawReg, mapPtr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", rawReg, mapPtr, kRef))
 		cur := e.mapValFromI64(rawReg, valTy)
 		rhsVal, err := e.emitExpr(rhsExpr)
 		if err != nil {
 			return Value{}, err
 		}
 		if err := dateCompoundAssignGuard(op, valTy.IsDate(), rhsVal.Ty.IsDate()); err != nil {
-			return Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
+			return Value{}, internalAt(pos, "%v", err)
 		}
 		rhsVal = e.convert(rhsVal, valTy)
 		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, valTy, pos)
@@ -975,7 +1038,7 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 	rhs = e.convert(rhs, valTy)
 	vRef := e.valueToMapVal(rhs, valTy)
 	e.ensureMapStrHelpers()
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapPtr, kRef, vRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", mapPtr, kRef, vRef))
 	return rhs, nil
 }
 
@@ -991,6 +1054,11 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 // var-decl emitters (scalar/object/array) share this one detector and each store
 // the returned value in their own slot format.
 func (e *Emitter) emitDeclJSONProjection(expr ast.Expression, ty Type) (Value, bool, error) {
+	if ty.IsClass() || ty.IsDynamic() && ty.UnionMembers != nil && !primitiveUnion(ty) {
+		// A parse is a plain object, never a class instance or a chosen
+		// union member's layout: the binding holds the parse.
+		return Value{}, false, nil
+	}
 	awaited := false
 	if aw, ok := expr.(*ast.AwaitExpression); ok {
 		expr = aw.Argument
@@ -1008,7 +1076,7 @@ func (e *Emitter) emitDeclJSONProjection(expr ast.Expression, ty Type) (Value, b
 		val, err := e.emitJSONParse(ce.Args, ty, ce.GetPos())
 		return val, true, err
 	}
-	if mem.Property == "json" && hasBodyMixin(e.inferExprType(mem.Object)) {
+	if mem.Property == "json" && hasBodyMixin(e.typeOfExpr(mem.Object)) {
 		if awaited && len(ce.Args) == 0 {
 			// `await res.json()`: the lazy body promise parsed into ty, awaited
 			// — the body may still be arriving, or be a stream. The enclosing
@@ -1034,6 +1102,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 	// Module-global promotion (TDD-00093): a top-level object binding is a single
 	// ptr global; store the object pointer into it rather than a fresh local
 	// alloca (already in e.moduleGlobals, zero-initialized).
+	e.shadowLocalGlobalType(v, ty)
 	var ptrName string
 	if e.promotedGlobalDecls[v] {
 		ptrName = e.moduleGlobals[v.Name].Ptr
@@ -1052,26 +1121,25 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		// in the entry block (dominates unconditionally); a `let`/`const` at its
 		// declaration point (dominates its block scope, and re-mallocs per loop
 		// iteration for fresh per-iteration `let` cells).
-		e.ensureMalloc()
 		ptrName = e.freshReg()
 		atEntry := v.Kind == "var"
-		e.heapMallocAt(atEntry, ptrName, "8")
-		e.heapStoreAt(atEntry, "ptr", "null", ptrName, 8)
+		e.heapMallocAt(atEntry, ptrName, allocCell, "8")
+		e.heapStoreAt(atEntry, irPtr, "null", ptrName, 8)
 		e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, Boxed: true, IsConst: v.Kind == "const"})
 	} else {
 		ptrName = e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", ptrName))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", ptrName))
 		if v.Kind == "var" {
 			// A skippable `var` (hoistedVarMaySkip widened it to `T | undefined`)
 			// reads null — absent — on the path where this declaration never ran
 			// (ADR-01057).
-			e.emitAlloca(fmt.Sprintf("store ptr null, ptr %s, align 8", ptrName))
+			e.emitAlloca(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", ptrName))
 		}
 		e.define(v.Name, Symbol{Ptr: ptrName, Ty: ty, IsConst: v.Kind == "const"})
 	}
 
 	if v.Init == nil {
-		e.heapStore("ptr", "null", ptrName, 8)
+		e.heapStore(irPtr, "null", ptrName, 8)
 		return nil
 	}
 
@@ -1091,7 +1159,7 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if sym, ok := e.lookup(v.Name); ok {
 			finalPtr = sym.Ptr
 		}
-		e.heapStore("ptr", ref, finalPtr, 8)
+		e.heapStore(irPtr, ref, finalPtr, 8)
 	}
 
 	// JSON.parse / Response.json() (optionally awaited) projected into ty.
@@ -1123,6 +1191,20 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 			storeObj(val.Ref)
 			return nil
 		}
+		if tt, ok := numericMemberTuple(ty); ok && hasSpreadElem(init.Elements) {
+			// Into an object type of numeric members (`const c: { 0: A;
+			// 1: B } = [...pair]`): the tuple, its elements the members.
+			tv, err := e.emitTupleLiteral(init, init.Elements, tt)
+			if err != nil {
+				return err
+			}
+			val, err := e.tupleRecord(tv, ty)
+			if err != nil {
+				return err
+			}
+			storeObj(val.Ref)
+			return nil
+		}
 		val, err := e.emitExpr(init)
 		if err != nil {
 			return err
@@ -1148,7 +1230,8 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		}
 		if ty.IsDynamicObject() && plainRecordType(val.Ty) {
 			val = e.convert(val, ty) // its fields become the dictionary's entries
-		} else if val.Ty.IsDynamic() && !ty.IsDynamic() || ty.NullAndUndef() || val.Ty.IsClass() && (headeredHost(ty) || ty.IsPromise() && !ty.IsDynamic()) {
+		} else if val.Ty.IsDynamic() && !ty.IsDynamic() || ty.NullAndUndef() || val.Ty.IsClass() && (headeredHost(ty) || ty.IsPromise() && !ty.IsDynamic()) || ty.IsTuple() && val.Ty.IsTuple() && reprKey(val.Ty) != reprKey(ty) || tupleIntoRecord(val.Ty, ty) {
+			// A tuple of another element layout: relaid out.
 			// An `any` result (an implementation signature, a function
 			// returning any) into a class or interface binding: the
 			// object, unboxed; null into a three-state one;
@@ -1180,12 +1263,48 @@ func (e *Emitter) emitObjectVarDecl(v *ast.VarDeclaration, ty Type) error {
 		if err != nil {
 			return err
 		}
-		if val.Ty.IsDynamic() && !ty.IsDynamic() || ty.IsDynamicObject() && plainRecordType(val.Ty) || ty.NullAndUndef() || val.Ty.IsClass() && (headeredHost(ty) || ty.IsPromise() && !ty.IsDynamic()) {
+		if val.Ty.IsDynamic() && !ty.IsDynamic() || ty.IsDynamicObject() && plainRecordType(val.Ty) || ty.NullAndUndef() || val.Ty.IsClass() && (headeredHost(ty) || ty.IsPromise() && !ty.IsDynamic()) || ty.IsTuple() && val.Ty.IsTuple() && reprKey(val.Ty) != reprKey(ty) || hostIntoRecordView(val.Ty, ty) || tupleIntoRecord(val.Ty, ty) {
 			val = e.convert(val, ty) // converted to the declared layout
 		}
 		storeObj(val.Ref)
 		return nil
 	}
+}
+
+// numericMemberTuple is the tuple of an object type whose fields are named
+// "0" to "n-1", each the element its field is.
+func numericMemberTuple(t Type) (Type, bool) {
+	if !t.IsObject() || t.IsTuple() || t.IsArray() || t.IsDynamic() || t.IsClass() || len(t.UserFields()) == 0 {
+		return Type{}, false
+	}
+	elems := make([]Type, len(t.UserFields()))
+	seen := 0
+	for _, f := range t.UserFields() {
+		i, err := strconv.Atoi(f.Name)
+		if err != nil || i < 0 || i >= len(elems) {
+			return Type{}, false
+		}
+		elems[i] = f.Ty
+		seen++
+	}
+	if seen != len(elems) {
+		return Type{}, false
+	}
+	return TupleType(elems), true
+}
+
+// tupleIntoRecord reports a tuple read as an object type of its numeric
+// members (`const p: { 0: A; 1: B } = pair`): converted member by member.
+func tupleIntoRecord(src, target Type) bool {
+	return src.IsTuple() && !src.IsDynamic() && target.IsObject() && !target.IsTuple() && !target.IsArray() && !target.IsDynamic() && !target.IsClass()
+}
+
+// hostIntoRecordView reports a host value (a Date, a Map) read as a
+// structural type: it is read through its box's header (convert). A host
+// with a field layout of its own (a RegExp, a Response) is read through it.
+func hostIntoRecordView(src, target Type) bool {
+	return isRecordView(target) && !src.IsClass() && !src.IsDynamic() && !src.IsArray() && src.IR == irPtr &&
+		(headeredHost(src) || hostCellObject(src)) && !hostPrefixedObject(src) && !src.IsRegExp()
 }
 
 func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
@@ -1202,7 +1321,7 @@ func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
 			return nil
 		}
 	}
-	if t := e.inferExprType(s.Init); t.IsArray() && !t.IsDynamic() && !hasRestProp(s.Props) && !hasComputedKeyProp(s.Props) {
+	if t := e.typeOfExpr(s.Init); t.IsArray() && !t.IsDynamic() && !hasRestProp(s.Props) && !hasComputedKeyProp(s.Props) {
 		return e.unpackObjectPatternFromArray(s)
 	}
 	objPtr, objTy, err := e.resolveObjectPtr(s.Init, s.GetPos())
@@ -1356,9 +1475,10 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 		// sub-pattern rather than binding a leaf Local. A `= default`
 		// combined with a nested pattern isn't supported yet.
 		if prop.SubArray != nil || prop.SubObject != nil {
-			if prop.Default != nil {
-				// `{ k: { a } = d }`: field k (or d) under a hidden name,
-				// then that name destructured.
+			if prop.Default != nil || prop.SubArray != nil && (!fieldTy.IsArray() || fieldTy.ElemType == nil) || prop.SubObject != nil && !fieldTy.IsObject() {
+				// `{ k: { a } = d }`, or a field no static layout
+				// destructures (a string, a number, a Map): field k (or d)
+				// under a hidden name, then that name destructured.
 				hidden := e.nestedDefaultName()
 				leaf := ast.DestructProp{Key: prop.Key, Local: hidden, Pos: prop.Pos, Default: prop.Default}
 				if err := e.unpackObjectPatternInto(objPtr, objTy, []ast.DestructProp{leaf}, pos); err != nil {
@@ -1371,20 +1491,14 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			}
 			fieldGep := e.emitRecordGep(objPtr, objTy, idx, fieldTy, prop.Key)
 			if prop.SubArray != nil {
-				if !fieldTy.IsArray() || fieldTy.ElemType == nil {
-					return fmt.Errorf("%d:%d: cannot array-destructure non-array field '%s'", pos.Line, pos.Col, prop.Key)
-				}
 				dp, lv := e.arrayParts(e.loadArrayFieldValue(fieldGep, fieldTy))
 				if err := e.unpackArrayPatternInto(dp, lv, *fieldTy.ElemType, prop.SubArray); err != nil {
 					return err
 				}
 				continue
 			}
-			if !fieldTy.IsObject() {
-				return fmt.Errorf("%d:%d: cannot object-destructure non-object field '%s'", pos.Line, pos.Col, prop.Key)
-			}
 			objp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objp, fieldGep))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", objp, fieldGep))
 			if err := e.unpackObjectPatternInto(objp, fieldTy, prop.SubObject, pos); err != nil {
 				return err
 			}
@@ -1396,8 +1510,8 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			// (a `T | null` field keeps its null); the default is not evaluated.
 			prop.Default = nil
 		}
-		if prop.Default != nil && !((fieldTy.Nullable() || fieldTy.Kind == kindUndefined) && fieldTy.IR == "ptr") && !isNullableScalar(fieldTy) && !fieldTy.IsDynamic() {
-			return fmt.Errorf("%d:%d: a destructuring default requires field '%s' to be nullable/optional (T | null, T | undefined, or `key?: T`) — no other field type has a reliable way to tell a real value apart from 'not provided'", pos.Line, pos.Col, prop.Key)
+		if prop.Default != nil && !((fieldTy.Nullable() || fieldTy.Kind == kindUndefined) && fieldTy.IR == irPtr) && !isNullableScalar(fieldTy) && !fieldTy.IsDynamic() {
+			return internalAt(pos, "a destructuring default requires field '%s' to be nullable/optional (T | null, T | undefined, or `key?: T`) — no other field type has a reliable way to tell a real value apart from 'not provided'", prop.Key)
 		}
 		gepReg := e.emitRecordGep(objPtr, objTy, idx, fieldTy, prop.Key)
 		if fieldTy.IsArray() {
@@ -1410,11 +1524,11 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			// is `o.w.push(x)`), null when the field holds null.
 			header := e.loadArrayFieldValue(gepReg, fieldTy).Ref
 			hdrSlot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", hdrSlot))
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, hdrSlot))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", hdrSlot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", header, hdrSlot))
 			if prop.Default != nil {
 				isNullReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, header))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNullReg, header))
 				absentL := e.freshLabel("destr.absent")
 				afterL := e.freshLabel("destr.after")
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNullReg, absentL, afterL))
@@ -1424,11 +1538,18 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 					return err
 				}
 				if !defVal.Ty.IsArray() {
-					return fmt.Errorf("%d:%d: destructuring default must be an array to match field '%s'", prop.Default.GetPos().Line, prop.Default.GetPos().Col, prop.Key)
+					return internalAt(prop.Default.GetPos(), "destructuring default must be an array to match field '%s'", prop.Key)
 				}
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(defVal), hdrSlot))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.arrayReturnHeader(defVal), hdrSlot))
 				e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 				e.emitLabel(afterL)
+				if bound, ok := e.defaultedBindingType(fieldTy, prop.Default); ok {
+					cur := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", cur, hdrSlot))
+					nv := e.convert(Value{Ref: cur, Ty: fieldTy}, bound)
+					e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nv.Ref, hdrSlot))
+					fieldTy = bound
+				}
 			}
 			e.define(prop.Local, Symbol{Ptr: hdrSlot, Ty: fieldTy})
 			continue
@@ -1469,7 +1590,7 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 			continue
 		}
 		valReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", valReg, fieldTy.IR, gepReg, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", valReg, fieldTy.IR, gepReg, fieldTy.Align()))
 		localPtr := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", localPtr, fieldTy.IR, fieldTy.Align()))
 
@@ -1479,7 +1600,7 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 				// A boxed field: the default replaces its undefined.
 				isNullReg = e.emitIsUndefinedValue(Value{Ref: valReg, Ty: fieldTy})
 			} else {
-				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNullReg, valReg))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNullReg, valReg))
 			}
 			absentL := e.freshLabel("destr.absent")
 			presentL := e.freshLabel("destr.present")
@@ -1492,16 +1613,27 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 				return err
 			}
 			defVal = e.convert(defVal, fieldTy)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, defVal.Ref, localPtr, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", fieldTy.IR, defVal.Ref, localPtr, fieldTy.Align()))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 			e.emitLabel(presentL)
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 			e.emitLabel(afterL)
+			// `{x = d}` over `x?: T | null`: the default replaces undefined,
+			// so the binding holds T or null.
+			if bound, ok := e.defaultedBindingType(fieldTy, prop.Default); ok {
+				cur := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", cur, fieldTy.IR, localPtr, fieldTy.Align()))
+				nv := e.convert(Value{Ref: cur, Ty: fieldTy}, bound)
+				localPtr = e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", localPtr, bound.IR, bound.Align()))
+				e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", bound.IR, nv.Ref, localPtr, bound.Align()))
+				fieldTy = bound
+			}
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", fieldTy.IR, valReg, localPtr, fieldTy.Align()))
 		}
 		e.definePatternLocal(prop.Local, Symbol{Ptr: localPtr, Ty: fieldTy})
 	}
@@ -1532,7 +1664,6 @@ func (e *Emitter) bindObjectRest(objPtr string, objTy Type, srcStructIR string, 
 	// still needs a valid zero-sized-safe allocation, and any field the copy
 	// below doesn't reach must read back zero, matching object-literal
 	// construction (ADR-00157).
-	e.ensureCalloc()
 	destReg := e.freshReg()
 	e.emitObjAllocInto(destReg, restTy)
 	destStructIR := restTy.StructIR()
@@ -1544,14 +1675,14 @@ func (e *Emitter) bindObjectRest(objPtr string, objTy Type, srcStructIR string, 
 		srcGep := e.emitRecordGep(objPtr, objTy, srcIdx, f.Ty, f.Name)
 		loadReg := e.freshReg()
 		destGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, fieldIR, srcGep, f.Ty.Align()))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", destGep, destStructIR, destReg, destIdx))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", loadReg, fieldIR, srcGep, f.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", destGep, destStructIR, destReg, destIdx))
 		e.heapStore(fieldIR, loadReg, destGep, f.Ty.Align())
 	}
 
 	localPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", localPtr))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", destReg, localPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", localPtr))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", destReg, localPtr))
 	e.define(local, Symbol{Ptr: localPtr, Ty: restTy})
 	return nil
 }
@@ -1575,10 +1706,15 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 			return e.boxedDestructureSource(src)
 		}
 		if !found {
-			return "", Type{}, fmt.Errorf("%d:%d: '%s' is not an object", pos.Line, pos.Col, src.Name)
+			if _, fn := e.funcs[src.Name]; fn {
+				// A function declaration's value (assert's `ok`, its
+				// properties assigned onto it): its boxed function object.
+				return e.boxedDestructureSource(src)
+			}
+			return "", Type{}, internalAt(pos, "'%s' is not an object", src.Name)
 		}
 		objPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", objPtr, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", objPtr, sym.Ptr))
 		return objPtr, sym.Ty, nil
 
 	case *ast.CallExpression:
@@ -1606,30 +1742,53 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 			return "", Type{}, err
 		}
 		if !val.Ty.IsObject() && !isUnconstrainedDynamic(val.Ty) {
-			return "", Type{}, fmt.Errorf("%d:%d: awaited value is not an object", pos.Line, pos.Col)
+			// A primitive result: destructured as the object it coerces
+			// to (null and undefined throw).
+			b, err := e.emitBoxValue(val)
+			if err != nil {
+				return "", Type{}, err
+			}
+			return b.Ref, b.Ty, nil
 		}
 		return val.Ref, val.Ty, nil
 
 	case *ast.ObjectLiteral:
+		for _, prop := range src.Properties {
+			if prop.AccessorKind != "" || prop.KeyExpr != nil {
+				// An accessor or a computed key: the literal as any object
+				// literal is built (a getter is read when destructured).
+				val, err := e.emitExpr(src)
+				if err != nil {
+					return "", Type{}, err
+				}
+				if !val.Ty.IsObject() || val.Ty.IsDynamic() {
+					b, err := e.emitBoxValue(val)
+					if err != nil {
+						return "", Type{}, err
+					}
+					return b.Ref, TypeAny, nil
+				}
+				return val.Ref, val.Ty, nil
+			}
+		}
 		ty := e.inferObjectType(src)
 		// calloc, not malloc — see emitObjectLiteralWithHint's identical
 		// comment; an omitted `?:` optional field must read back zero, not
 		// malloc garbage.
-		e.ensureCalloc()
 		dataReg := e.freshReg()
 		e.emitObjAllocInto(dataReg, ty)
 		structIR := ty.StructIR()
 		for _, prop := range src.Properties {
 			idx, fieldTy, ok := ty.FieldIndex(prop.Key)
 			if !ok {
-				return "", Type{}, fmt.Errorf("%d:%d: object has no field '%s'", pos.Line, pos.Col, prop.Key)
+				return "", Type{}, internalAt(pos, "object has no field '%s'", prop.Key)
 			}
 			val, err := e.emitExpr(prop.Value)
 			if err != nil {
 				return "", Type{}, err
 			}
 			gepReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
 			e.storeScalarOrNullableField(gepReg, fieldTy, val)
 		}
 		return dataReg, ty, nil
@@ -1638,7 +1797,7 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 	// member, a ternary): its value.
 	// One emitted as a box (an element of an any-held array) destructures
 	// through the dynamic gets.
-	if t := e.inferExprType(init); t.IsObject() || isUnconstrainedDynamic(t) {
+	if t := e.typeOfExpr(init); t.IsObject() || isUnconstrainedDynamic(t) {
 		val, err := e.emitExpr(init)
 		if err != nil {
 			return "", Type{}, err
@@ -1672,8 +1831,21 @@ func (e *Emitter) boxedDestructureSource(init ast.Expression) (string, Type, err
 // emitObjectGroupBy is Object.groupBy(items, fn): a null-prototype object
 // whose own properties, in first-seen order, hold each key's elements.
 func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, error) {
+	if len(args) >= 1 {
+		if _, ok := stripAsAny(args[0]).(*ast.NullLiteral); ok {
+			// RequireObjectCoercible(items).
+			for _, a := range args {
+				if _, err := e.emitExpr(a); err != nil {
+					return Value{}, err
+				}
+			}
+			e.emitThrowTypeError("Object.groupBy called on null or undefined")
+			e.emitLabel(e.freshLabel("groupby.dead"))
+			return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+		}
+	}
 	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: Object.groupBy takes exactly 2 arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.groupBy arity")
 	}
 	ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
 	if err != nil {
@@ -1683,15 +1855,18 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureDynObj()
-	e.ensureDynArr()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
+	e.ensureShapeRuntime()
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
 	e.emitDynSetProtoChecked(bag, "null")
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 	condL := e.freshLabel("grpby.cond")
 	bodyL := e.freshLabel("grpby.body")
 	doneL := e.freshLabel("grpby.done")
@@ -1699,13 +1874,13 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	loopDone := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", loopDone, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", loopDone, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	elemGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", elemGep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", elemGep, elemTy.IR, ptrReg, idxVal))
 	elem := e.loadArrayElem(elemGep, elemTy)
 	cbArgs := []Value{elem}
 	if cb.arity() >= 2 {
@@ -1727,7 +1902,7 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 	// The key's group: a dynamic array, created on its first element.
 	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_find(ptr %s, ptr %s)", found, bag, keyVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_find("+irPtr+" %s, "+irPtr+" %s)", found, bag, keyVal.Ref))
 	has := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", has, found))
 	oldL := e.freshLabel("grpby.old")
@@ -1736,25 +1911,25 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, oldL, newL))
 	e.emitLabel(oldL)
 	word := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get_at(ptr %s, i64 %s)", word, bag, found))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get_at("+irPtr+" %s, i64 %s)", word, bag, found))
 	untagged := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, -8", untagged, word))
 	oldArr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", oldArr, untagged))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, oldArr, untagged))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", pushL))
 	e.emitLabel(newL)
 	newArr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_new(i64 0)", newArr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_new(i64 0)", newArr))
 	arrBox := e.emitNbTagPtr(newArr, kmlTagDynArray)
-	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set(ptr %s, ptr %s, i64 %s)", bag, keyVal.Ref, arrBox))
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", bag, keyVal.Ref, arrBox))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", pushL))
 	e.emitLabel(pushL)
 	arr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", arr, oldArr, oldL, newArr, newL))
-	e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push(ptr %s, i64 %s)", arr, boxed.Ref))
+	e.emitInstr(fmt.Sprintf("%s = phi "+irPtr+" [ %s, %%%s ], [ %s, %%%s ]", arr, oldArr, oldL, newArr, newL))
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push("+irPtr+" %s, i64 %s)", arr, boxed.Ref))
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -1764,9 +1939,9 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 // emitObjectKeys implements Object.keys(obj | groupMap) → string[].
 func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Object.keys takes 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.keys takes 1 argument")
 	}
-	if t := e.inferExprType(args[0]); !t.Nullable() {
+	if t := e.typeOfExpr(args[0]); !t.Nullable() {
 		if _, ok := e.arrayClassHost(t); ok {
 			// An instance of a class extending Array: its indices, then its
 			// own fields.
@@ -1783,6 +1958,21 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 			return e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(keys, "concat", pos), []ast.Expression{ast.NewArrayLiteral(names, pos)}, pos))
 		}
 	}
+	if t := e.typeOfExpr(args[0]); !t.Nullable() && e.isPrimHostClass(t) && e.classes[t.ClassName].HostBase.HostTag == "String" {
+		// An instance of a class extending String: its string's indices,
+		// then its own fields.
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		var names []ast.Expression
+		for _, f := range t.VisibleFields() {
+			names = append(names, ast.NewStringLiteral(f.Name, pos))
+		}
+		keys := ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier("Object", pos), "keys", pos), []ast.Expression{e.bindHostPrimitive(v, pos)}, pos)
+		keys.Intrinsic = "Object.keys"
+		return e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(keys, "concat", pos), []ast.Expression{ast.NewArrayLiteral(names, pos)}, pos))
+	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -1792,7 +1982,7 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 		return e.emitDynAnyKeys(Value{Ref: e.emitBoxArrayPlain(val), Ty: TypeAny}, pos)
 	}
 	// A string: its index keys; any other primitive has none.
-	if isStringTy(val.Ty) && !hasHandleFlag(val.Ty) && !val.Ty.Nullable() || val.Ty.IR == "i1" || val.Ty.Float || val.Ty.IsInteger() {
+	if isStringTy(val.Ty) && !hasHandleFlag(val.Ty) && !val.Ty.Nullable() || ownlessPrimitive(val.Ty) {
 		box, err := e.emitBoxValue(val)
 		if err != nil {
 			return Value{}, err
@@ -1830,20 +2020,26 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 	if val.Ty.IsDate() && !val.Ty.IsDynamic() {
 		return e.mkArray("null", "0", ArrayOf(TypePtr)), nil
 	}
-	// A dynamic object (or any string-keyed Map<string,V>) is backed by the
-	// same runtime as Map<K,V> — delegate to its own .keys() rather than
-	// walking a compile-time field list, see docs/tdd/TDD-00012.md.
+	// A Map is an object whose entries are no properties: its own
+	// enumerable properties, as any boxed value's.
 	if val.Ty.IsMap() {
-		if val.Ty.MapKey == nil || !isStringTy(*val.Ty.MapKey) {
-			return Value{}, fmt.Errorf("%d:%d: Object.keys requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
+		box, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
 		}
-		return e.emitMapMethod(val.Ty, val.Ref, "keys", nil, pos)
+		return e.emitDynAnyKeys(box, pos)
 	}
 	// A zero-field class (methods-only) has genuinely known, just-empty
 	// fields — unlike a plain object literal, whose Fields being empty means
 	// "unknown", so only the non-class case treats emptiness as an error.
 	if !val.Ty.IsObject() || (!val.Ty.IsClass() && !hasBodyMixin(val.Ty) && len(val.Ty.VisibleFields()) == 0) {
-		return Value{}, fmt.Errorf("%d:%d: Object.keys requires an object with known fields", pos.Line, pos.Col)
+		// Any other value (a Map, a Set, a symbol, a host object): the
+		// enumeration of its own enumerable string keys, boxed.
+		box, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyKeys(box, pos)
 	}
 	if box, ok, err := e.ownAccessorBox(val); ok || err != nil {
 		if err != nil {
@@ -1865,7 +2061,7 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 	}
 	if extraCandidate(val.Ty) {
 		return e.emitExtraSplit(val, ArrayOf(TypePtr), own, func(obj string) string {
-			return fmt.Sprintf("call { ptr, i64 } @__kml_obj_keys_dyn(ptr %s)", obj)
+			return fmt.Sprintf("call void @__kml_obj_keys_dyn("+irPtr+" %s)", obj)
 		})
 	}
 	return own(val)
@@ -1874,14 +2070,13 @@ func (e *Emitter) emitObjectKeys(args []ast.Expression, pos ast.Pos) (Value, err
 // emitObjectFieldNames allocates a string[] of compile-time field names.
 func (e *Emitter) emitObjectFieldNames(fields []Field, pos ast.Pos) (Value, error) {
 	n := int64(len(fields))
-	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, fmt.Sprint(n*8))
+	e.heapMallocInto(dataReg, allocElems, fmt.Sprint(n*8))
 	for i, f := range fields {
 		keyPtr := e.internString(f.Name)
 		slotReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", slotReg, dataReg, i))
-		e.heapStore("ptr", keyPtr, slotReg, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %d", slotReg, dataReg, i))
+		e.heapStore(irPtr, keyPtr, slotReg, 8)
 	}
 	return e.mkArray(dataReg, fmt.Sprint(n), ArrayOf(TypePtr)), nil
 }
@@ -1891,13 +2086,12 @@ func (e *Emitter) emitObjectFieldNames(fields []Field, pos ast.Pos) (Value, erro
 // are appended at runtime behind each field's presence test (ADR-01063).
 func (e *Emitter) emitObjectPresentFieldNames(val Value, fields []Field) (Value, error) {
 	n := int64(len(fields))
-	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, fmt.Sprint(n*8))
+	e.heapMallocInto(dataReg, allocElems, fmt.Sprint(n*8))
 	rank, rankCount, ranked := e.keyRanks(val, fields)
 	countA := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countA))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countA))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", countA))
 	for _, f := range fields {
 		present, _ := e.emitFieldPresent(val.Ref, val.Ty, f)
 		present = e.andEnumerable(present, val.Ref, f.Name)
@@ -1906,22 +2100,22 @@ func (e *Emitter) emitObjectPresentFieldNames(val Value, fields []Field) (Value,
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, doL, contL))
 		e.emitLabel(doL)
 		cur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, countA))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, countA))
 		at := cur
 		if ranked {
 			at = rank(f) // its place in the object's key order
 		}
 		slotReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, dataReg, at))
-		e.heapStore("ptr", e.internString(f.Name), slotReg, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", slotReg, dataReg, at))
+		e.heapStore(irPtr, e.internString(f.Name), slotReg, 8)
 		next := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, countA))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, countA))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
 		e.emitLabel(contL)
 	}
 	count := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, countA))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", count, countA))
 	if ranked {
 		count = rankCount()
 	}
@@ -1933,7 +2127,7 @@ func (e *Emitter) emitObjectPresentFieldNames(val Value, fields []Field) (Value,
 // All field values are stringified (booleans → "true"/"false", numbers → decimal).
 func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Object.values takes 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.values takes 1 argument")
 	}
 	if v, ok, err := e.emitArrayClassOwnValues(args[0], false, pos); ok || err != nil {
 		return v, err
@@ -1942,15 +2136,18 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	if err != nil {
 		return Value{}, err
 	}
-	// A dynamic object (or any string-keyed Map<string,V>): delegate to its
-	// own .values() — see emitObjectKeys and docs/tdd/TDD-00012.md. Note this
-	// returns real typed values (matching Map.values()'s convention), unlike
-	// the string[] this function returns for fixed-shape objects below.
+	// A Map is an object whose entries are no properties: its own
+	// enumerable properties, as any boxed value's.
 	if objVal.Ty.IsMap() {
-		if objVal.Ty.MapKey == nil || !isStringTy(*objVal.Ty.MapKey) {
-			return Value{}, fmt.Errorf("%d:%d: Object.values requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
 		}
-		return e.emitMapMethod(objVal.Ty, objVal.Ref, "values", nil, pos)
+		return e.emitDynAnyEntries(box, false, pos)
+	}
+	// A typed array or Buffer: its elements, in a plain array.
+	if (objVal.Ty.IsTypedArray() || objVal.Ty.IsBuffer()) && !objVal.Ty.Nullable() {
+		return e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(e.builtinIdent("Array", pos), "from", pos), []ast.Expression{e.bindValue(objVal, pos)}, pos))
 	}
 	// An array: its elements, in a new array.
 	if objVal.Ty.IsArray() && !objVal.Ty.Nullable() && !objVal.Ty.IsTuple() {
@@ -1964,6 +2161,14 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	if isStringTy(objVal.Ty) && !hasHandleFlag(objVal.Ty) && !objVal.Ty.Nullable() {
 		return e.emitCall(ast.NewCallExpression(ast.NewMemberExpression(e.bindValue(objVal, pos), "split", pos), []ast.Expression{ast.NewStringLiteral("", pos)}, pos))
 	}
+	// Any other primitive has no own properties.
+	if ownlessPrimitive(objVal.Ty) {
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyEntries(box, false, pos)
+	}
 	if box, ok, err := e.ownAccessorBox(objVal); ok || err != nil {
 		if err != nil {
 			return Value{}, err
@@ -1972,7 +2177,13 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 	}
 	visFields := objVal.Ty.VisibleFields()
 	if !objVal.Ty.IsObject() || (!objVal.Ty.IsClass() && len(visFields) == 0) {
-		return Value{}, fmt.Errorf("%d:%d: Object.values requires an object with known fields", pos.Line, pos.Col)
+		// Any other value (a Map, a Set, a symbol, a host object): the
+		// enumeration of its own enumerable string keys, boxed.
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyEntries(box, false, pos)
 	}
 	// Homogeneous fixed shapes keep real typed values (ADR-00492) — same
 	// rule Object.entries applies below; mixed shapes still stringify. An
@@ -1997,19 +2208,18 @@ func (e *Emitter) emitObjectValues(args []ast.Expression, pos ast.Pos) (Value, e
 func (e *Emitter) emitObjectValuesOwn(objVal Value, visFields []Field, valTy Type, homogeneous bool, pos ast.Pos) (Value, error) {
 	visFields = esOrderedFields(visFields) // ES enumeration order (Node key order)
 	n := int64(len(visFields))
-	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, fmt.Sprint(n*int64(valTy.Align())))
+	e.heapMallocInto(dataReg, elemAllocKind(valTy), fmt.Sprint(n*int64(valTy.Align())))
 	count, err := e.forEachPresentField(objVal, visFields, func(f Field, idxRef string, elemVal Value) error {
 		if !homogeneous {
 			boxed, err := e.emitBoxValue(elemVal)
 			if err != nil {
-				return fmt.Errorf("%d:%d: Object.values: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+				return err
 			}
 			elemVal = boxed
 		}
 		slotReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slotReg, StructFieldIR(valTy), dataReg, idxRef))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", slotReg, StructFieldIR(valTy), dataReg, idxRef))
 		e.storeArrayElem(slotReg, valTy, elemVal)
 		return nil
 	})
@@ -2062,7 +2272,7 @@ func (e *Emitter) forEachPresentField(objVal Value, fields []Field, body func(f 
 	rank, rankCount, ranked := e.keyRanks(objVal, fields)
 	countA := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", countA))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", countA))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", countA))
 	for _, f := range fields {
 		present, v := e.emitFieldPresent(objVal.Ref, objVal.Ty, f)
 		present = e.andEnumerable(present, objVal.Ref, f.Name)
@@ -2079,7 +2289,7 @@ func (e *Emitter) forEachPresentField(objVal Value, fields []Field, body func(f 
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, doL, contL))
 		e.emitLabel(doL)
 		cur := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, countA))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, countA))
 		at := cur
 		if ranked {
 			at = rank(f) // its place in the object's key order
@@ -2089,7 +2299,7 @@ func (e *Emitter) forEachPresentField(objVal Value, fields []Field, body func(f 
 		}
 		next := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, countA))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, countA))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
 		e.emitLabel(contL)
 	}
@@ -2097,7 +2307,7 @@ func (e *Emitter) forEachPresentField(objVal Value, fields []Field, body func(f 
 		return rankCount(), nil
 	}
 	count := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", count, countA))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", count, countA))
 	return count, nil
 }
 
@@ -2106,7 +2316,7 @@ func (e *Emitter) forEachPresentField(objVal Value, fields []Field, body func(f 
 // Iterate with `for (const e of Object.entries(obj))` then access `e.key` / `e.value`.
 func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Object.entries takes 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.entries takes 1 argument")
 	}
 	if v, ok, err := e.emitArrayClassOwnValues(args[0], true, pos); ok || err != nil {
 		return v, err
@@ -2115,16 +2325,14 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
-	// A dynamic object (or any string-keyed Map<string,V>): delegate to its
-	// own .entries() — see emitObjectKeys and docs/tdd/TDD-00012.md. Returns
-	// {key: string, value: V}[] with a real typed value, unlike the
-	// {key: string, value: string}[] this function builds for fixed-shape
-	// objects below.
+	// A Map is an object whose entries are no properties: its own
+	// enumerable properties, as any boxed value's.
 	if objVal.Ty.IsMap() {
-		if objVal.Ty.MapKey == nil || !isStringTy(*objVal.Ty.MapKey) {
-			return Value{}, fmt.Errorf("%d:%d: Object.entries requires a string-keyed Map or dynamic object", pos.Line, pos.Col)
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
 		}
-		return e.emitMapMethod(objVal.Ty, objVal.Ref, "entries", nil, pos)
+		return e.emitDynAnyEntries(box, true, pos)
 	}
 	// An array: its [index, element] pairs.
 	if objVal.Ty.IsArray() && !objVal.Ty.Nullable() && !objVal.Ty.IsTuple() && objVal.Ty.ElemType != nil {
@@ -2143,6 +2351,14 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 		}
 		return e.emitObjectEntriesOfArray(units)
 	}
+	// Any other primitive has no own properties.
+	if ownlessPrimitive(objVal.Ty) {
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyEntries(box, true, pos)
+	}
 	if box, ok, err := e.ownAccessorBox(objVal); ok || err != nil {
 		if err != nil {
 			return Value{}, err
@@ -2151,7 +2367,13 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 	}
 	visFields := objVal.Ty.VisibleFields()
 	if !objVal.Ty.IsObject() || (!objVal.Ty.IsClass() && len(visFields) == 0) {
-		return Value{}, fmt.Errorf("%d:%d: Object.entries requires an object with known fields", pos.Line, pos.Col)
+		// Any other value (a Map, a Set, a symbol, a host object): the
+		// enumeration of its own enumerable string keys, boxed.
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyEntries(box, true, pos)
 	}
 	// Each entry is a real [string, V] tuple (TDD-00066). When every visible
 	// field shares one type, V is that real type (ADR-00492); a heterogeneous
@@ -2172,40 +2394,24 @@ func (e *Emitter) emitObjectEntries(args []ast.Expression, pos ast.Pos) (Value, 
 // emitObjectEntriesOwn is Object.entries over objVal's static layout.
 func (e *Emitter) emitObjectEntriesOwn(objVal Value, visFields []Field, valTy Type, homogeneous bool, pos ast.Pos) (Value, error) {
 	entryTy := TupleType([]Type{TypePtr, valTy})
-	entrySize := int64(entryTy.StructSize())
 	visFields = esOrderedFields(visFields) // ES enumeration order (Node key order)
 	n := int64(len(visFields))
-	e.ensureMalloc()
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, fmt.Sprint(n*8))
+	e.heapMallocInto(dataReg, allocElems, fmt.Sprint(n*8))
 	// Only present fields get an entry (ADR-01066) — see forEachPresentField.
 	count, err := e.forEachPresentField(objVal, visFields, func(f Field, idxRef string, entryVal Value) error {
-		// Allocate one {key: string, value: V} entry struct.
-		entryReg := e.freshReg()
-		e.heapMallocInto(entryReg, fmt.Sprint(entrySize))
-		// Store the key (compile-time field name).
-		keyPtr := e.internString(f.Name)
-		keySlot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", keySlot, entryTy.StructIR(), entryReg))
-		e.heapStore("ptr", keyPtr, keySlot, 8)
 		if !homogeneous {
 			boxed, err := e.emitBoxValue(entryVal)
 			if err != nil {
-				return fmt.Errorf("%d:%d: Object.entries: field '%s': %w", pos.Line, pos.Col, f.Name, err)
+				return err
 			}
 			entryVal = boxed
 		}
-		valSlot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", valSlot, entryTy.StructIR(), entryReg))
-		if valTy.IsArray() {
-			e.storeArrayFieldHeader(valSlot, entryVal)
-		} else {
-			e.heapStore(StructFieldIR(valTy), entryVal.Ref, valSlot, valTy.Align())
-		}
+		entryReg := e.tupleOf([]Value{{Ref: e.internString(f.Name), Ty: TypePtr}, entryVal}, entryTy).Ref
 		// Store entry pointer in the outer array.
 		slotReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", slotReg, dataReg, idxRef))
-		e.heapStore("ptr", entryReg, slotReg, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", slotReg, dataReg, idxRef))
+		e.heapStore(irPtr, entryReg, slotReg, 8)
 		return nil
 	})
 	if err != nil {
@@ -2232,9 +2438,20 @@ func (e *Emitter) emitObjectEntriesOwn(objVal Value, visFields []Field, valTy Ty
 // alone, so it is a `T[]` pair only when every element of every pair is a
 // string; otherwise the literal seeds as tuples.
 func (e *Emitter) fromEntriesTypes(arg ast.Expression) (Type, *Type) {
-	entries := e.inferExprType(arg)
+	entries := e.typeOfExpr(arg)
+	if entries.IsMap() && !entries.IsSet() && entries.MapKey != nil && entries.MapVal != nil {
+		k := *entries.MapKey
+		return *entries.MapVal, &k
+	}
+	// Another iterable (a generator, a Set, an iterator): its entries as
+	// Array.from of it holds them.
+	if !entries.IsArray() && !entries.IsDynamic() && (entries.IsGenerator() || entries.IsSet() || entries.IsCollIter()) {
+		entries = e.typeOfExpr(arrayFromCall(arg.GetPos(), []ast.Expression{arg}))
+	}
+	// Entries no array of pairs describes (an any[], an object): their
+	// values boxed.
 	if !entries.IsArray() || entries.ElemType == nil {
-		return TypeI64, nil
+		return TypeAny, nil
 	}
 	el := entries.ElemType
 	switch {
@@ -2243,12 +2460,12 @@ func (e *Emitter) fromEntriesTypes(arg ast.Expression) (Type, *Type) {
 		return el.Fields[1].Ty, &k
 	case el.IsArray() && el.ElemType != nil && !el.ElemType.IsArray():
 		if lit, ok := arg.(*ast.ArrayLiteral); ok && !e.allStringPairs(lit) {
-			return TypeI64, nil
+			return TypeAny, nil
 		}
 		k := *el.ElemType
 		return k, &k
 	}
-	return TypeI64, nil
+	return TypeAny, nil
 }
 
 // allStringPairs reports whether every element of lit is an array literal of
@@ -2260,7 +2477,7 @@ func (e *Emitter) allStringPairs(lit *ast.ArrayLiteral) bool {
 			return false
 		}
 		for _, x := range pair.Elements {
-			if t := e.inferExprType(x); !isStringTy(t) || t.IsObject() {
+			if t := e.typeOfExpr(x); !isStringTy(t) || t.IsObject() {
 				return false
 			}
 		}
@@ -2270,20 +2487,43 @@ func (e *Emitter) allStringPairs(lit *ast.ArrayLiteral) bool {
 
 func (e *Emitter) emitObjectFromEntries(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Object.fromEntries takes 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.fromEntries arity")
+	}
+	// RequireObjectCoercible first: V8 says "undefined is not iterable" for
+	// undefined and null alike.
+	if t := e.typeOfExpr(args[0]); t.IsDynamic() || t.Nullable() || t.IsUndefined() || t.IsNull() {
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		box, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		nn := e.emitIsNullish(box)
+		badL, okL := e.freshLabel("fromentries.nullish"), e.freshLabel("fromentries.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", nn, badL, okL))
+		e.emitLabel(badL)
+		e.emitThrowTypeError("undefined is not iterable")
+		e.emitLabel(okL)
+		if t.IsUndefined() || t.IsNull() {
+			e.emitLabel(e.freshLabel("fromentries.dead"))
+			return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+		}
+		args = []ast.Expression{e.bindValue(v, pos)}
 	}
 	// Value type from the entries' value slot; key forced to string.
 	valTy, _ := e.fromEntriesTypes(args[0])
-	if e.fromEntriesKeyed(args[0]) {
+	if t := e.typeOfExpr(args[0]); e.fromEntriesKeyed(args[0]) || !t.IsDynamic() && !t.Nullable() && (scalarTypeKind(t) == "number" || scalarTypeKind(t) == "boolean" || t.IsBigInt()) {
 		return e.emitObjectFromEntriesKeyed(args[0], pos)
 	}
 
 	mapKey := TypePtr
-	ty := Type{IR: "ptr", Host: hostDynamicObject, MapKey: &mapKey, MapVal: &valTy}
+	ty := Type{IR: irPtr, Host: hostDynamicObject, MapKey: &mapKey, MapVal: &valTy}
 
 	e.ensureMapStrHelpers()
 	mapPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", mapPtr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", mapPtr))
 	if err := e.emitMapSeedFromEntries(mapPtr, args[0], mapKey, valTy, pos); err != nil {
 		return Value{}, err
 	}
@@ -2296,7 +2536,7 @@ func (e *Emitter) fromEntriesKeyed(arg ast.Expression) bool {
 	if _, keyTy := e.fromEntriesTypes(arg); keyTy != nil && !isStringTy(*keyTy) {
 		return true
 	}
-	if t := e.inferExprType(arg); t.IsMap() && t.MapKey != nil && !isStringTy(*t.MapKey) {
+	if t := e.typeOfExpr(arg); t.IsMap() && t.MapKey != nil && !isStringTy(*t.MapKey) {
 		return true
 	} else if isUnconstrainedDynamic(t) {
 		return true // a dynamic iterable's keys may be anything
@@ -2307,7 +2547,7 @@ func (e *Emitter) fromEntriesKeyed(arg ast.Expression) bool {
 			if !isArr || len(pair.Elements) != 2 {
 				continue // shape errors are reported by the seed path
 			}
-			if kt := e.inferExprType(pair.Elements[0]); !isStringTy(kt) || kt.IsObject() {
+			if kt := e.typeOfExpr(pair.Elements[0]); !isStringTy(kt) || kt.IsObject() {
 				return true
 			}
 		}
@@ -2324,11 +2564,40 @@ func (e *Emitter) emitObjectFromEntriesKeyed(arg ast.Expression, pos ast.Pos) (V
 	srcName := fmt.Sprintf("__kml_fe_src_%d", e.fromEntriesCtr)
 	obj := fmt.Sprintf("__kml_fe_obj_%d", e.fromEntriesCtr)
 	pair := fmt.Sprintf("__kml_fe_pair_%d", e.fromEntriesCtr)
+	// undefined or null itself: V8 says "undefined is not iterable" for
+	// both.
+	lit := arg
+	if as, ok := lit.(*ast.AsExpression); ok {
+		lit = as.Expr
+	}
+	if _, ok := lit.(*ast.NullLiteral); ok {
+		if e.synthDisplay == nil {
+			e.synthDisplay = map[string]string{}
+		}
+		e.synthDisplay[srcName] = "undefined"
+	}
+	if t := e.typeOfExpr(arg); !t.IsDynamic() && !t.Nullable() && (scalarTypeKind(t) == "number" || scalarTypeKind(t) == "boolean" || t.IsBigInt()) {
+		// A primitive with no iterator: V8 describes the value
+		// (`number 5 is not iterable …`).
+		v, err := e.emitExpr(arg)
+		if err != nil {
+			return Value{}, err
+		}
+		boxed, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		if err := e.emitThrowNotIterableValue(boxed); err != nil {
+			return Value{}, err
+		}
+		e.emitLabel(e.freshLabel("fromentries.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
 	if err := e.emitStmt(ast.NewVarDeclaration("const", srcName, nil, arg, pos)); err != nil {
 		return Value{}, err
 	}
 	iter := ast.NewIdentifier(srcName, pos)
-	decl := ast.NewVarDeclaration("const", obj, &ast.TypeAnnotation{Name: "any"}, ast.NewObjectLiteral(nil, pos), pos)
+	decl := ast.NewVarDeclaration("const", obj, ast.AnyAnnotation("ts"), ast.NewObjectLiteral(nil, pos), pos)
 	set := ast.NewAssignmentExpression("=",
 		ast.NewIndexExpression(ast.NewIdentifier(obj, pos), ast.NewIndexExpression(ast.NewIdentifier(pair, pos), ast.NewNumberLiteral("0", pos), pos), pos),
 		ast.NewIndexExpression(ast.NewIdentifier(pair, pos), ast.NewNumberLiteral("1", pos), pos), pos)
@@ -2357,7 +2626,13 @@ func (e *Emitter) emitObjectFromEntriesKeyed(arg ast.Expression, pos ast.Pos) (V
 // already take for shapes outside what a fixed struct can represent.
 func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: Object.assign requires at least 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.assign without a target")
+	}
+	if tt := e.typeOfExpr(args[0]); ownlessPrimitive(tt) || isPlainStringTy(tt) && !tt.Nullable() && !tt.IsDynamic() {
+		// A primitive target is ToObject'd: its wrapper object takes the
+		// properties and is the result.
+		wrapped := append([]ast.Expression{ast.NewCallExpression(e.builtinIdent("Object", pos), args[:1], pos)}, args[1:]...)
+		args = wrapped
 	}
 	if e.dynamicAssign(args) {
 		return e.emitDynObjectAssign(args, pos)
@@ -2365,7 +2640,7 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 	if lit, ok := assignAsSpread(args); ok {
 		return e.emitExpr(lit)
 	}
-	if tt := e.inferExprType(args[0]); tt.IsArray() && !tt.IsTypedArray() && !tt.IsBuffer() {
+	if tt := e.typeOfExpr(args[0]); tt.IsArray() && !tt.IsTypedArray() && !tt.IsBuffer() {
 		// An array target: its indices (and any other own keys) are written
 		// through the dynamic path, onto the array itself; the result is
 		// the target, typed as it is. An empty literal takes an array
@@ -2373,7 +2648,7 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 		var tv Value
 		var err error
 		if lit, ok := args[0].(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 && len(args) > 1 {
-			if st := e.inferExprType(args[1]); st.IsArray() && !st.IsTypedArray() {
+			if st := e.typeOfExpr(args[1]); st.IsArray() && !st.IsTypedArray() {
 				tv, err = e.emitExprWithObjectHint(args[0], st)
 			} else {
 				tv, err = e.emitExpr(args[0])
@@ -2396,7 +2671,10 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 		return Value{}, err
 	}
 	if !targetVal.Ty.IsObject() {
-		return Value{}, fmt.Errorf("%d:%d: Object.assign's target must be an object", pos.Line, pos.Col)
+		// Any other target (a function, a Map, a primitive's wrapper): the
+		// sources' properties become its own, written through its box; the
+		// result is that object, boxed.
+		return e.emitDynObjectAssignOnto(targetVal, args, pos)
 	}
 	if len(args) > 1 {
 		// Only a real write attempt (at least one source) needs the check —
@@ -2412,13 +2690,13 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 			return Value{}, err
 		}
 		if !srcVal.Ty.IsObject() {
-			return Value{}, fmt.Errorf("%d:%d: Object.assign's sources must be objects", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "Object.assign source of %s", srcVal.Ty.IR)
 		}
 		srcStructIR := srcVal.Ty.StructIR()
 		for _, f := range srcVal.Ty.VisibleFields() {
 			dstIdx, dstTy, ok := targetVal.Ty.FieldIndex(f.Name)
 			if !ok {
-				return Value{}, fmt.Errorf("%d:%d: Object.assign: source has field '%s' not present on target's type", pos.Line, pos.Col, f.Name)
+				return Value{}, internalAt(pos, "Object.assign source field %s off the target's type", f.Name)
 			}
 			// The target field keeps its own type in this typed-object subset,
 			// so a source whose same-named field has an incompatible type
@@ -2429,16 +2707,16 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 			// typed-subset equivalent of JS's last-write-wins on a differently
 			// typed property.
 			if !convertiblePure(f.Ty, dstTy) {
-				return Value{}, fmt.Errorf("%d:%d: Object.assign: source field '%s' has a type incompatible with the target field's type — a merge that changes a field's type is not supported (this compiler's objects are a typed subset)", pos.Line, pos.Col, f.Name)
+				return Value{}, internalAt(pos, "Object.assign: source field '%s' retypes the target's (the checker's AssignRetypesField)", f.Name)
 			}
 			srcIdx, _, _ := srcVal.Ty.FieldIndex(f.Name)
 			srcGep := e.freshReg()
 			loadReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", srcGep, srcStructIR, srcVal.Ref, srcIdx))
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", srcGep, srcStructIR, srcVal.Ref, srcIdx))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", loadReg, StructFieldIR(f.Ty), srcGep, f.Ty.Align()))
 			val := e.convert(Value{Ref: loadReg, Ty: f.Ty}, dstTy)
 			dstGep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", dstGep, targetStructIR, targetVal.Ref, dstIdx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", dstGep, targetStructIR, targetVal.Ref, dstIdx))
 			e.heapStore(StructFieldIR(dstTy), val.Ref, dstGep, dstTy.Align())
 		}
 	}
@@ -2449,15 +2727,18 @@ func (e *Emitter) emitObjectAssign(args []ast.Expression, pos ast.Pos) (Value, e
 // the copy runs on the values' run-time properties, and the result is `any`
 // (as TypeScript types it).
 func (e *Emitter) dynamicAssign(args []ast.Expression) bool {
+	if len(args) == 0 {
+		return true // (no target: the run-time path's TypeError)
+	}
 	for _, a := range args {
-		if isUnconstrainedDynamic(e.inferExprType(a)) {
+		if isUnconstrainedDynamic(e.typeOfExpr(a)) {
 			return true
 		}
 	}
 	// A primitive source (a string's indices; null, undefined, a number or
 	// a boolean, which have no own enumerable keys) is read at run time.
 	for _, a := range args[1:] {
-		if st := e.inferExprType(a); !st.IsObject() && !st.IsArray() {
+		if st := e.typeOfExpr(a); !st.IsObject() && !st.IsArray() {
 			return true
 		}
 	}
@@ -2465,15 +2746,20 @@ func (e *Emitter) dynamicAssign(args []ast.Expression) bool {
 	// JavaScript: the target then holds more than its type, so the result
 	// (TypeScript's T & U) is read dynamically.
 	if len(args) > 1 {
-		tt := e.inferExprType(args[0])
+		tt := e.typeOfExpr(args[0])
 		if tt.IsObject() && !tt.IsArray() {
 			for _, a := range args[1:] {
-				st := e.inferExprType(a)
+				st := e.typeOfExpr(a)
 				if !st.IsObject() {
 					continue
 				}
+				_, freshTarget := args[0].(*ast.ObjectLiteral)
 				for _, f := range st.VisibleFields() {
-					if _, _, ok := tt.FieldIndex(f.Name); !ok {
+					if _, dt, ok := tt.FieldIndex(f.Name); !ok || !convertiblePure(f.Ty, dt) && (e.compatJS() || freshTarget) {
+						// (or one of another type, which its slot cannot
+						// hold: the JavaScript lane's objects take it; a
+						// strict target's typed slot does only when no
+						// other binding reads it)
 						return true
 					}
 				}
@@ -2502,6 +2788,16 @@ func (e *Emitter) emitDynObjectAssignOnto(tv Value, args []ast.Expression, pos a
 	if err != nil {
 		return Value{}, err
 	}
+	// ToObject(target): undefined and null throw before any source is read.
+	isU, isN, absent := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isU, target.Ref, nbUndefined))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isN, target.Ref, nbNull))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, isU, isN))
+	throwL, okL := e.freshLabel("dynassign.notarget"), e.freshLabel("dynassign.target")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, throwL, okL))
+	e.emitLabel(throwL)
+	e.emitThrowTypeError("Cannot convert undefined or null to object")
+	e.emitLabel(okL)
 	for _, a := range args[1:] {
 		sv, err := e.emitExprWithObjectHint(a, TypeAny)
 		if err != nil {
@@ -2538,21 +2834,21 @@ func (e *Emitter) emitDynCopyOwnProps(target, src Value, pos ast.Pos) error {
 	n = e.arrayLen(keys)
 	iSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", iSlot))
 	condL, bodyL := e.freshLabel("dynassign.cond"), e.freshLabel("dynassign.body")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	i := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, iSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, iSlot))
 	more := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, n))
 	symsL := e.freshLabel("dynassign.syms")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, symsL))
 	e.emitLabel(bodyL)
 	kp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", kp, data, i))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", kp, data, i))
 	key := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", key, kp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", key, kp))
 	v, err := e.emitDynAnyMemberGet(src, key, pos)
 	if err != nil {
 		return err
@@ -2562,7 +2858,7 @@ func (e *Emitter) emitDynCopyOwnProps(target, src Value, pos ast.Pos) error {
 	}
 	i2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i2, i))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i2, iSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", i2, iSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	// Then its own symbol-keyed properties, as Object.assign copies them.
 	e.emitLabel(symsL)
@@ -2573,20 +2869,20 @@ func (e *Emitter) emitDynCopyOwnProps(target, src Value, pos ast.Pos) error {
 	sdata, sn := e.arrayData(syms), e.arrayLen(syms)
 	jSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", jSlot))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", jSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", jSlot))
 	scondL, sbodyL := e.freshLabel("dynassign.scond"), e.freshLabel("dynassign.sbody")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", scondL))
 	e.emitLabel(scondL)
 	j := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", j, jSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", j, jSlot))
 	smore := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", smore, j, sn))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", smore, sbodyL, nextL))
 	e.emitLabel(sbodyL)
 	sp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", sp, sdata, j))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", sp, sdata, j))
 	sym := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", sym, sp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", sym, sp))
 	skey := e.emitSymbolPropertyKey(Value{Ref: sym, Ty: SymbolType()})
 	sv2, err := e.emitDynAnyMemberGet(src, skey, pos)
 	if err != nil {
@@ -2597,7 +2893,7 @@ func (e *Emitter) emitDynCopyOwnProps(target, src Value, pos ast.Pos) error {
 	}
 	j2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", j2, j))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", j2, jSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", j2, jSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", scondL))
 	e.emitLabel(nextL)
 	return nil
@@ -2622,8 +2918,9 @@ func (e *Emitter) emitDynCopyOwnProps(target, src Value, pos ast.Pos) error {
 // itself, only what "no dynamic add/delete" needs to actively enforce once
 // it exists.
 func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Object.freeze takes 1 argument", pos.Line, pos.Col)
+	args, err := e.fitArgs(args, 1, pos)
+	if err != nil {
+		return Value{}, err
 	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
@@ -2633,8 +2930,23 @@ func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, e
 	if isUnconstrainedDynamic(val.Ty) {
 		return e.emitDynPrevent(val, 2)
 	}
+	if val.Ty.IsFunc() || hostIndexBase(val.Ty) {
+		// A function, or a host object (a Map, a Date): its box carries
+		// its own properties' level.
+		box, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		if _, err := e.emitDynPrevent(box, 2); err != nil {
+			return Value{}, err
+		}
+		return val, nil
+	}
+	if isPrimitiveIntegrityTy(val.Ty) {
+		return val, nil // a primitive is returned as it is
+	}
 	if !val.Ty.IsObject() {
-		return Value{}, fmt.Errorf("%d:%d: Object.freeze requires an object", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.freeze of a %s", val.Ty.IR)
 	}
 	e.emitStaticIntegrity(val, staticIntegrityFrozen)
 	return val, nil
@@ -2651,6 +2963,14 @@ func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, e
 // to check it against. callerName customizes the error text so it reads
 // naturally regardless of which of the three call sites triggered it.
 func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName string, ownOnly bool, pos ast.Pos) (Value, error) {
+	if !ownOnly && !isPureKeyExpr(keyExpr) {
+		// `k in o` evaluates k before o.
+		kv, err := e.emitExpr(keyExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		keyExpr = e.bindValue(kv, pos)
+	}
 	objVal, err := e.emitExpr(objExpr)
 	if err != nil {
 		return Value{}, err
@@ -2723,7 +3043,11 @@ func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName
 		return Value{Ref: res, Ty: TypeBool}, nil
 	}
 	if !objVal.Ty.IsObject() && !ownOnly && !objVal.Ty.IsFunc() {
-		return Value{}, fmt.Errorf("%d:%d: %s requires an object", pos.Line, pos.Col, callerName)
+		// A primitive (or a call that never returns, or returns nothing):
+		// no object, the TypeError `in` throws.
+		e.emitThrowTypeError("Cannot use 'in' operator to search for a key in a primitive")
+		e.emitLabel(e.freshLabel("in.dead"))
+		return Value{Ref: "0", Ty: TypeBool}, nil
 	}
 	if !objVal.Ty.IsObject() {
 		// A function, or a primitive's own properties (hasOwnProperty
@@ -2756,28 +3080,56 @@ func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName
 
 // emitHasOwnStatic is emitHasOwnProperty over objVal's static layout.
 func (e *Emitter) emitHasOwnStatic(objVal Value, keyExpr ast.Expression, callerName string, ownOnly bool, pos ast.Pos) (Value, error) {
+	if objVal.Ty.IsError() || e.isErrorValueTy(objVal.Ty) {
+		// An Error's own keys include those set on it at run time (its
+		// bag of further own properties): the boxed value's test.
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		key, err := e.dynAnyKeyRef(keyExpr, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyHas(box, key, ownOnly, pos)
+	}
 	keyLit, ok := keyExpr.(*ast.StringLiteral)
 	if !ok {
-		if kt := e.inferExprType(keyExpr); isStringTy(kt) && !kt.Nullable() && !kt.IsDynamic() && !objVal.Ty.IsDynamic() {
+		if kt := e.typeOfExpr(keyExpr); isStringTy(kt) && !kt.Nullable() && !kt.IsDynamic() && !objVal.Ty.IsDynamic() {
 			return e.emitStaticHasRuntimeKey(objVal, keyExpr, ownOnly)
 		}
-		return Value{}, fmt.Errorf("%d:%d: %s requires a string literal key (dynamic keys are not supported)", pos.Line, pos.Col, callerName)
+		// Any other key (a symbol, a number, a value held in any): the
+		// boxed object's own-or-chain test, as a dynamic one's.
+		box, err := e.emitBoxValue(objVal)
+		if err != nil {
+			return Value{}, err
+		}
+		key, err := e.dynAnyKeyRef(keyExpr, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyHas(box, key, ownOnly, pos)
 	}
 	_, fieldTy, found := objVal.Ty.FieldIndex(keyLit.Value)
-	if !found && !ownOnly && (objectProtoKeys[keyLit.Value] || e.classProtoHas(objVal.Ty, keyLit.Value)) {
+	// A class's `#name` member is private: no string key names it.
+	privateName := objVal.Ty.IsClass() && strings.HasPrefix(keyLit.Value, "#")
+	if privateName {
+		found = false
+	}
+	if !found && !ownOnly && (objectProtoKeys[keyLit.Value] || !privateName && e.classProtoHas(objVal.Ty, keyLit.Value)) {
 		return Value{Ref: "true", Ty: TypeBool}, nil // inherited: a prototype's
 	}
 	if found {
 		// An optional field that was omitted has no key — `"age" in a` is a
 		// runtime presence test, not a static true (ADR-01063).
-		if jsonFieldSkippable(fieldTy) || isSettlementType(objVal.Ty) {
-			f := Field{Name: keyLit.Value, Ty: fieldTy}
-			for _, vf := range objVal.Ty.VisibleFields() {
-				if vf.Name == keyLit.Value {
-					f = vf
-					break
-				}
+		f := Field{Name: keyLit.Value, Ty: fieldTy}
+		for _, vf := range objVal.Ty.VisibleFields() {
+			if vf.Name == keyLit.Value {
+				f = vf
+				break
 			}
+		}
+		if fieldMayBeAbsent(f) || isSettlementType(objVal.Ty) || f.Optional && objVal.Ty.presenceBit(f.Name) >= 0 {
 			present, _ := e.emitFieldPresent(objVal.Ref, objVal.Ty, f)
 			return Value{Ref: present, Ty: TypeBool}, nil
 		}
@@ -2787,7 +3139,7 @@ func (e *Emitter) emitHasOwnStatic(objVal Value, keyExpr ast.Expression, callerN
 	// (`(o as any).b = 1`), held in the object's expando table.
 	e.ensureShapeRuntime()
 	has := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_expando_has(ptr %s, ptr %s)", has, objVal.Ref, e.internString(keyLit.Value)))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_expando_has("+irPtr+" %s, "+irPtr+" %s)", has, objVal.Ref, e.internString(keyLit.Value)))
 	own := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", own, has))
 	return Value{Ref: own, Ty: TypeBool}, nil
@@ -2803,8 +3155,11 @@ func (e *Emitter) emitStaticHasRuntimeKey(objVal Value, keyExpr ast.Expression, 
 	}
 	res := "false"
 	for _, f := range objVal.Ty.VisibleFields() {
+		if objVal.Ty.IsClass() && strings.HasPrefix(f.Name, "#") {
+			continue // private: no string key names it
+		}
 		eq := e.emitStrEq(kv.Ref, e.internString(f.Name))
-		if jsonFieldSkippable(f.Ty) || isSettlementType(objVal.Ty) {
+		if fieldMayBeAbsent(f) || isSettlementType(objVal.Ty) || f.Optional && objVal.Ty.presenceBit(f.Name) >= 0 {
 			present, _ := e.emitFieldPresent(objVal.Ref, objVal.Ty, f)
 			both := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, eq, present))
@@ -2819,7 +3174,7 @@ func (e *Emitter) emitStaticHasRuntimeKey(objVal Value, keyExpr ast.Expression, 
 		if info, ok := e.classes[objVal.Ty.ClassName]; ok && objVal.Ty.IsClass() {
 			var own []string
 			for m := range info.MethodSigs {
-				if n := strings.TrimPrefix(strings.TrimPrefix(m, "__kml_get_"), "__kml_set_"); !strings.HasPrefix(n, "__kml_") && !objectProtoKeys[n] {
+				if n := strings.TrimPrefix(strings.TrimPrefix(m, "__kml_get_"), "__kml_set_"); !strings.HasPrefix(n, "__kml_") && !strings.HasPrefix(n, "#") && !objectProtoKeys[n] {
 					own = append(own, n)
 				}
 			}
@@ -2891,7 +3246,45 @@ var sortedObjectProtoKeys = func() []string {
 // puts the key on the left and the object on the right, the opposite of
 // hasOwnProperty(obj, key).
 func (e *Emitter) emitInOperator(ex *ast.BinaryExpression) (Value, error) {
+	if rt := e.typeOfExpr(ex.Right); e.compatJS() && (rt.IsSymbol() || !rt.IsObject() && !rt.IsFunc() && !rt.IsDynamic() && !rt.IsArray() && !rt.IsClass()) {
+		// A primitive (or null or undefined) to search in: JavaScript's
+		// TypeError, once both operands are evaluated.
+		return e.emitInPrimitiveThrow(ex.Left, ex.Right, ex.GetPos())
+	}
 	return e.emitHasOwnProperty(ex.Right, ex.Left, "the 'in' operator", false, ex.GetPos())
+}
+
+// emitInPrimitiveThrow evaluates `key in v` for a v that is no object:
+// V8's "Cannot use 'in' operator to search for '<key>' in <v>".
+func (e *Emitter) emitInPrimitiveThrow(key, v ast.Expression, pos ast.Pos) (Value, error) {
+	shown := func(x ast.Expression) (Value, error) {
+		val, err := e.emitExpr(x)
+		if err != nil {
+			return Value{}, err
+		}
+		b, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitValueToString(b)
+	}
+	k, err := shown(key)
+	if err != nil {
+		return Value{}, err
+	}
+	o, err := shown(v)
+	if err != nil {
+		return Value{}, err
+	}
+	msg := Value{Ref: e.internString("Cannot use 'in' operator to search for '"), Ty: TypePtr}
+	for _, part := range []Value{k, {Ref: e.internString("' in "), Ty: TypePtr}, o} {
+		if msg, err = e.emitStringConcat(msg, part); err != nil {
+			return Value{}, err
+		}
+	}
+	e.emitThrowTypeErrorValue(msg.Ref)
+	e.emitLabel(e.freshLabel("in.dead"))
+	return Value{Ref: "0", Ty: TypeBool}, nil
 }
 
 // emitObjectSeal implements Object.seal(obj). Real JS's seal blocks adding
@@ -2902,8 +3295,9 @@ func (e *Emitter) emitInOperator(ex *ast.BinaryExpression) (Value, error) {
 // scope-narrowed approximation of one: there is currently nothing for seal
 // to additionally enforce.
 func (e *Emitter) emitObjectSeal(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Object.seal takes 1 argument", pos.Line, pos.Col)
+	args, err := e.fitArgs(args, 1, pos)
+	if err != nil {
+		return Value{}, err
 	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
@@ -2913,8 +3307,23 @@ func (e *Emitter) emitObjectSeal(args []ast.Expression, pos ast.Pos) (Value, err
 	if isUnconstrainedDynamic(val.Ty) {
 		return e.emitDynPrevent(val, 1)
 	}
+	if val.Ty.IsFunc() || hostIndexBase(val.Ty) {
+		// A function, or a host object (a Map, a Date): its box carries
+		// its own properties' level.
+		box, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		if _, err := e.emitDynPrevent(box, 1); err != nil {
+			return Value{}, err
+		}
+		return val, nil
+	}
+	if isPrimitiveIntegrityTy(val.Ty) {
+		return val, nil // a primitive is returned as it is
+	}
 	if !val.Ty.IsObject() {
-		return Value{}, fmt.Errorf("%d:%d: Object.seal requires an object", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Object.seal of a %s", val.Ty.IR)
 	}
 	e.emitStaticIntegrity(val, staticIntegritySealed)
 	return val, nil
@@ -2937,14 +3346,12 @@ func (e *Emitter) emitStaticLevel(v Value) string {
 		if !sideLevelObject(v.Ty) {
 			return "0"
 		}
-		e.ensureIntegrityLevels()
 		lv := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_side_level(ptr %s)", lv, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_side_level("+irPtr+" %s)", lv, v.Ref))
 		return lv
 	}
-	e.ensureIntegrityLevels()
 	lv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_obj_level(ptr %s)", lv, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_obj_level("+irPtr+" %s)", lv, v.Ref))
 	return lv
 }
 
@@ -2959,13 +3366,11 @@ func sideLevelObject(t Type) bool {
 func (e *Emitter) emitStaticIntegrity(v Value, level int) {
 	if !hasObjHeader(v.Ty) {
 		if sideLevelObject(v.Ty) {
-			e.ensureIntegrityLevels()
-			e.emitInstr(fmt.Sprintf("call void @__kml_side_set_level(ptr %s, i64 %d)", v.Ref, level))
+			e.emitInstr(fmt.Sprintf("call void @__kml_side_set_level("+irPtr+" %s, i64 %d)", v.Ref, level))
 		}
 		return
 	}
-	e.ensureIntegrityLevels()
-	e.emitInstr(fmt.Sprintf("call void @__kml_obj_set_level(ptr %s, i64 %d)", v.Ref, level))
+	e.emitInstr(fmt.Sprintf("call void @__kml_obj_set_level("+irPtr+" %s, i64 %d)", v.Ref, level))
 }
 
 // emitStaticIntegrityTest answers Object.isExtensible (level 0), isSealed
@@ -3072,14 +3477,14 @@ func (e *Emitter) registerCryptoSubtleAliases(prog *ast.Program) {
 // stringified key exactly as real JS does. Any other key type keeps the
 // clean rejection.
 func (e *Emitter) dynObjectKeyExpr(keyExpr ast.Expression, pos ast.Pos) (ast.Expression, error) {
-	kt := e.inferExprType(keyExpr)
+	kt := e.typeOfExpr(keyExpr)
 	if isStringTy(kt) {
 		return keyExpr, nil
 	}
 	if kt.IR == "double" || kt.IR == "i64" || kt.IR == "i32" || kt.IR == "i16" || kt.IR == "i8" {
 		return stringCall(keyExpr, pos), nil
 	}
-	return nil, fmt.Errorf("%d:%d: computed property key must be a string or number", pos.Line, pos.Col)
+	return nil, internalAt(pos, "computed property key must be a string or number")
 }
 
 // homogeneousFieldType reports whether every field shares one storage type,
@@ -3268,7 +3673,7 @@ func init() {
 		"getOwnPropertySymbols":    args((*Emitter).emitObjectGetOwnPropertySymbols),
 		"hasOwn": func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 			if len(ex.Args) != 2 {
-				return Value{}, fmt.Errorf("%d:%d: Object.hasOwn takes 2 arguments", ex.GetPos().Line, ex.GetPos().Col)
+				return Value{}, internalAt(ex.GetPos(), "Object.hasOwn takes 2 arguments")
 			}
 			return e.emitHasOwnProperty(ex.Args[0], ex.Args[1], "Object.hasOwn", true, ex.GetPos())
 		},
@@ -3286,7 +3691,7 @@ func init() {
 func arrayIntegrityFirst(prop string, rest objectStaticFn) objectStaticFn {
 	return func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 		if len(ex.Args) == 1 {
-			if t := e.inferExprType(ex.Args[0]); t.IsArray() && !t.IsFlatArray() && !t.IsDynamic() && !t.Nullable() {
+			if t := e.typeOfExpr(ex.Args[0]); t.IsArray() && !t.IsFlatArray() && !t.IsDynamic() && !t.Nullable() {
 				return e.emitArrayIntegrityOp(prop, ex.Args[0])
 			}
 		}
@@ -3301,7 +3706,7 @@ func arrayIntegrityFirst(prop string, rest objectStaticFn) objectStaticFn {
 func integrityLevel(prop string, level int) objectStaticFn {
 	prevent := prop == "preventExtensions"
 	return func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-		if len(ex.Args) == 1 && isUnconstrainedDynamic(e.inferExprType(ex.Args[0])) {
+		if len(ex.Args) == 1 && isUnconstrainedDynamic(e.typeOfExpr(ex.Args[0])) {
 			v, err := e.emitExprWithObjectHint(ex.Args[0], TypeAny)
 			if err != nil {
 				return Value{}, err
@@ -3311,7 +3716,7 @@ func integrityLevel(prop string, level int) objectStaticFn {
 			}
 			return e.emitDynFlagsTest(v, level)
 		}
-		if len(ex.Args) == 1 && e.inferExprType(ex.Args[0]).IsObject() {
+		if len(ex.Args) == 1 && e.typeOfExpr(ex.Args[0]).IsObject() {
 			v, err := e.emitExpr(ex.Args[0])
 			if err != nil {
 				return Value{}, err
@@ -3322,14 +3727,58 @@ func integrityLevel(prop string, level int) objectStaticFn {
 			}
 			return e.emitStaticIntegrityTest(v, level), nil
 		}
-		if at := e.inferExprType(ex.Args[0]); len(ex.Args) == 1 && isPrimitiveIntegrityTy(at) {
+		if at := e.typeOfExpr(ex.Args[0]); len(ex.Args) == 1 && isPrimitiveIntegrityTy(at) {
 			v, err := e.emitExpr(ex.Args[0])
 			if err != nil || prevent {
 				return v, err
 			}
 			return Value{Ref: fmt.Sprint(prop != "isExtensible"), Ty: TypeBool}, nil
 		}
-		return Value{}, errNotObjectStatic
+		if at := e.typeOfExpr(ex.Args[0]); len(ex.Args) == 1 && (at.IsFunc() || hostIndexBase(at)) {
+			// A function or a host object (a Map, a Date) is an object:
+			// its box carries its own properties' level, as a dynamic
+			// object's does.
+			v, err := e.emitExpr(ex.Args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			box, err := e.emitBoxValue(v)
+			if err != nil {
+				return Value{}, err
+			}
+			if prevent {
+				if _, err := e.emitDynPrevent(box, 0); err != nil {
+					return Value{}, err
+				}
+				return v, nil
+			}
+			return e.emitDynFlagsTest(box, level)
+		}
+		// Anything else (an array, a tuple): its box carries the level.
+		args := ex.Args
+		if len(args) == 0 {
+			args = []ast.Expression{ast.NewNullLiteral(true, ex.GetPos())}
+		}
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		for _, x := range args[1:] {
+			if _, err := e.emitExpr(x); err != nil {
+				return Value{}, err
+			}
+		}
+		box, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		if prevent {
+			if _, err := e.emitDynPrevent(box, 0); err != nil {
+				return Value{}, err
+			}
+			return v, nil
+		}
+		return e.emitDynFlagsTest(box, level)
 	}
 }
 
@@ -3355,7 +3804,7 @@ func (e *Emitter) emitArrayIntegrityOp(prop string, arg ast.Expression) (Value, 
 	}
 	hdr, lenReg := e.arrayArgFromAggregate(v)
 	v.Ref = hdr
-	e.ensureArrayGuard()
+	e.ensureErrorNames()
 	level := map[string]int{"freeze": staticIntegrityFrozen, "seal": staticIntegritySealed, "preventExtensions": staticIntegrityNonExtensible}
 	if lvl, ok := level[prop]; ok {
 		if v.Ty.IsTypedArray() && prop != "preventExtensions" {
@@ -3373,7 +3822,7 @@ func (e *Emitter) emitArrayIntegrityOp(prop string, arg ast.Expression) (Value, 
 	}
 	which := map[string]int{"isFrozen": 0, "isSealed": 1, "isExtensible": 2}[prop]
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_array_integrity(ptr %s, i64 %d)", r, hdr, which))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_array_integrity("+irPtr+" %s, i64 %d)", r, hdr, which))
 	b := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
 	return Value{Ref: b, Ty: TypeBool}, nil
@@ -3386,7 +3835,7 @@ func (e *Emitter) emitArrayStatic(prop string, ex *ast.CallExpression) (Value, e
 		return f(e, ex)
 	}
 	pos := ex.GetPos()
-	return Value{}, fmt.Errorf("%d:%d: Array.%s is not supported", pos.Line, pos.Col, prop)
+	return Value{}, internalAt(pos, "Array.%s is not supported", prop)
 }
 
 // arrayStatics are the Array constructor's static methods, by name.
@@ -3407,7 +3856,7 @@ func init() {
 // emitArrayIsArray is Array.isArray(v).
 func (e *Emitter) emitArrayIsArray(ex *ast.CallExpression) (Value, error) {
 	if len(ex.Args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Array.isArray takes exactly 1 argument", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, internalAt(ex.GetPos(), "Array.isArray takes exactly 1 argument")
 	}
 	// A dynamic (`any`) argument's array-ness is only known at
 	// runtime — a NaN-box can carry an array now and a plain object
@@ -3416,7 +3865,7 @@ func (e *Emitter) emitArrayIsArray(ex *ast.CallExpression) (Value, error) {
 	// compile-time IsArray, which is always false for `any` and made
 	// `Array.isArray(x)` wrongly return false for a genuine boxed
 	// array (ADR-00934).
-	argTy := e.inferExprType(ex.Args[0])
+	argTy := e.typeOfExpr(ex.Args[0])
 	if argTy.IsDynamic() {
 		v, err := e.emitExpr(ex.Args[0])
 		if err != nil {
@@ -3500,8 +3949,8 @@ func (e *Emitter) ptrShapedBranch(x ast.Expression) bool {
 	case *ast.ObjectLiteral, *ast.ArrayLiteral: // built against the hint
 		return true
 	}
-	t := e.inferExprType(x)
-	return t.IR == "ptr" && (!t.IsArray() || t.IsTuple()) && !t.IsDynamic()
+	t := e.typeOfExpr(x)
+	return t.IR == irPtr && (!t.IsArray() || t.IsTuple()) && !t.IsDynamic()
 }
 
 // emitConditionalHinted is `c ? a : b` stored where an object of type hint
@@ -3509,7 +3958,7 @@ func (e *Emitter) ptrShapedBranch(x ast.Expression) bool {
 func (e *Emitter) emitConditionalHinted(ce *ast.ConditionalExpression, hint Type) (Value, error) {
 	thenL, elseL, mergeL := e.freshLabel("ternary.then"), e.freshLabel("ternary.else"), e.freshLabel("ternary.merge")
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	cond, err := e.emitExpr(ce.Test)
 	if err != nil {
 		return Value{}, err
@@ -3526,12 +3975,12 @@ func (e *Emitter) emitConditionalHinted(ce *ast.ConditionalExpression, hint Type
 			return Value{}, err
 		}
 		v = e.convert(v, hint)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	}
 	e.emitLabel(mergeL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return Value{Ref: r, Ty: hint}, nil
 }
 
@@ -3543,18 +3992,17 @@ func (e *Emitter) emitObjectEntriesOfArray(arr Value) (Value, error) {
 	data, n := e.freshReg(), e.freshReg()
 	data = e.arrayData(arr)
 	n = e.arrayLen(arr)
-	e.ensureMalloc()
 	bytes, out := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, n))
-	e.heapMallocInto(out, bytes)
+	e.heapMallocInto(out, allocElems, bytes)
 	iSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", iSlot))
 	condL, bodyL, doneL := e.freshLabel("arrent.cond"), e.freshLabel("arrent.body"), e.freshLabel("arrent.done")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	i, more := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, iSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, iSlot))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, n))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, doneL))
 	e.emitLabel(bodyL)
@@ -3563,24 +4011,14 @@ func (e *Emitter) emitObjectEntriesOfArray(arr Value) (Value, error) {
 		return Value{}, err
 	}
 	src := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", src, StructFieldIR(elemTy), data, i))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", src, StructFieldIR(elemTy), data, i))
 	el := e.loadArrayElem(src, elemTy)
-	entry := e.freshReg()
-	e.heapMallocInto(entry, fmt.Sprint(entryTy.StructSize()))
-	kSlot, vSlot := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kSlot, entryTy.StructIR(), entry))
-	e.heapStore("ptr", key.Ref, kSlot, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", vSlot, entryTy.StructIR(), entry))
-	if elemTy.IsArray() {
-		e.storeArrayFieldHeader(vSlot, el)
-	} else {
-		e.heapStore(StructFieldIR(elemTy), el.Ref, vSlot, elemTy.Align())
-	}
+	entry := e.tupleOf([]Value{key, el}, entryTy).Ref
 	dst, next := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", dst, out, i))
-	e.heapStore("ptr", entry, dst, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", dst, out, i))
+	e.heapStore(irPtr, entry, dst, 8)
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, iSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, iSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(doneL)
 	r1 := e.newArrayHeader(out, n)
@@ -3592,7 +4030,7 @@ func (e *Emitter) emitObjectEntriesOfArray(arr Value) (Value, error) {
 // fields' values (as [key, value] pairs), boxed when a field's type is not
 // the elements'. ok is false for any other value.
 func (e *Emitter) emitArrayClassOwnValues(arg ast.Expression, entries bool, pos ast.Pos) (Value, bool, error) {
-	t := e.inferExprType(arg)
+	t := e.typeOfExpr(arg)
 	host, ok := e.arrayClassHost(t)
 	if !ok || t.Nullable() {
 		return Value{}, false, nil
@@ -3647,7 +4085,7 @@ func (e *Emitter) falsyUnionSpreadSource(arg ast.Expression, v Value) (Value, bo
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
 	p := e.emitIntToPtr(payload)
 	sel := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", sel, isObj, p))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", sel, isObj, p))
 	r.setNullable(true)
 	return Value{Ref: sel, Ty: r}, true
 }
@@ -3681,4 +4119,71 @@ func isPrimitiveReceiver(t Type) bool {
 		return false
 	}
 	return isStringTy(t) || t.IsBigInt() || isNumericScalar(t) || t.IR == "i1"
+}
+
+// defaultedBindingType is the type a three-state `T | null | undefined`
+// pointer has once a default that is never absent replaced its undefined:
+// `T | null`. ok is false for any other field or default.
+func (e *Emitter) defaultedBindingType(fieldTy Type, def ast.Expression) (Type, bool) {
+	if def == nil || !fieldTy.NullAndUndef() || fieldTy.IR != irPtr {
+		return fieldTy, false
+	}
+	if dt := e.typeOfExpr(def); dt.IR == "" || dt.IR == "void" || dt.Nullable() || dt.IsDynamic() || dt.IsNull() || dt.Kind == kindUndefined {
+		return fieldTy, false
+	}
+	fieldTy.Absent = absNull
+	return fieldTy, true
+}
+
+// discriminatedLiteralMember is the member of union u an object literal's
+// discriminant properties select (checker.LiteralContextMember).
+func (e *Emitter) discriminatedLiteralMember(expr ast.Expression, u Type) (Type, bool) {
+	lit, ok := expr.(*ast.ObjectLiteral)
+	o := e.reprOracle()
+	if !ok || o == nil {
+		return Type{}, false
+	}
+	ct := o.c.LiteralContextMember(lit)
+	if ct == nil {
+		return Type{}, false
+	}
+	rt, ok := e.repr().of(ct)
+	if !ok {
+		return Type{}, false
+	}
+	for _, m := range u.UnionMembers {
+		if reprKey(m) == reprKey(rt) && (m.orderIndex() >= 0 || literalKeysInOrder(lit, m)) {
+			return m, true
+		}
+	}
+	return Type{}, false
+}
+
+// literalKeysInOrder reports an object literal of static keys that are each
+// a field of m, in m's field order: built with m's layout and no order slot
+// to record its own, its keys keep the order the literal writes them in.
+func literalKeysInOrder(lit *ast.ObjectLiteral, m Type) bool {
+	at := 0
+	for _, p := range lit.Properties {
+		if p.KeyExpr != nil || p.Key == "" || p.AccessorKind != "" {
+			return false
+		}
+		for at < len(m.Fields) && m.Fields[at].Name != p.Key {
+			at++
+		}
+		if at == len(m.Fields) {
+			return false
+		}
+		at++
+	}
+	return true
+}
+
+// ownlessPrimitive reports a non-nullable primitive other than a string: it
+// has no own properties (Object.keys/values/entries give []).
+func ownlessPrimitive(t Type) bool {
+	if t.Nullable() || t.IsDynamic() {
+		return false
+	}
+	return t.IR == "i1" || t.Float || t.IsInteger() || t.IsBigInt() || t.IsSymbol()
 }

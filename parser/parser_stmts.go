@@ -132,12 +132,12 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 	}
 
 	if p.check(lexer.VAR) || p.check(lexer.LET) || p.check(lexer.CONST) {
-		p.advance() // kind (ambient bindings are all zero-initialized vars here)
+		kind := p.advance().Literal
 		nameTok, err := p.expect(lexer.IDENT)
 		if err != nil {
 			return nil, err
 		}
-		var ta *ast.TypeAnnotation
+		var ta ast.TypeNode
 		if p.match(lexer.COLON) {
 			ta, err = p.parseTypeAnnotation("ts")
 			if err != nil {
@@ -147,9 +147,28 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 		if err := p.parseSemicolon(); err != nil {
 			return nil, err
 		}
-		vd := ast.NewVarDeclaration("var", nameTok.Literal, ta, nil, pos)
+		vd := ast.NewVarDeclaration(kind, nameTok.Literal, ta, nil, pos)
 		vd.Ambient = true
+		vd.NamePos = posOf(nameTok)
 		return vd, nil
+	}
+	// `declare class C { … }` in a program: the class's declaration, typed
+	// like any other but with no implementation — its name is a global the
+	// environment provides.
+	if !p.declarations && (p.check(lexer.CLASS) || p.isWord(0, "abstract") && p.peekNth(1).Type == lexer.CLASS) {
+		abstract := p.isWord(0, "abstract")
+		if abstract {
+			p.advance()
+		}
+		p.ambientClass = true
+		cd, err := p.parseClassDecl(abstract, "")
+		p.ambientClass = false
+		if err != nil {
+			return nil, err
+		}
+		cd.Ambient = true
+		p.ambientNames = append(p.ambientNames, cd.Name)
+		return cd, nil
 	}
 	// The rest is erased; the name it declares is recorded, since a program
 	// may use the ambient binding (`declare class C {…}` then `x instanceof C`).
@@ -222,7 +241,11 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		case lexer.LBRACKET:
 			return p.parseArrayDestructuring()
 		case lexer.LBRACE:
-			return p.parseObjectDestructuring()
+			od, err := p.parseObjectDestructuring()
+			if err != nil {
+				return nil, err
+			}
+			return globalThisPattern(od), nil
 		}
 		return p.parseVarDecl(true)
 	case lexer.FUNCTION:
@@ -340,7 +363,16 @@ func (p *Parser) parseStatement() (ast.Statement, error) {
 		}
 		// label: statement (e.g. `outer: for (...) { ... }`)
 		if p.peekNth(1).Type == lexer.COLON {
-			return p.parseLabeledStatement()
+			ls, err := p.parseLabeledStatement()
+			if err != nil {
+				return nil, err
+			}
+			if fd, ok := ls.Body.(*ast.FunctionDeclaration); ok {
+				// A labelled function declaration (sloppy code's): no break
+				// can target the label, so it is the declaration.
+				return fd, nil
+			}
+			return ls, nil
 		}
 	}
 	return p.parseExpressionStatement()
@@ -539,7 +571,7 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 				if err != nil {
 					return nil, err
 				}
-				var ta *ast.TypeAnnotation
+				var ta ast.TypeNode
 				if p.match(lexer.COLON) {
 					ta, err = p.parseTypeAnnotation("ts")
 					if err != nil {
@@ -551,23 +583,59 @@ func (p *Parser) parseNamespaceBody(nsTok lexer.Token, ns string, ambient bool) 
 				}
 				vd := ast.NewVarDeclaration("var", nameTok.Literal, ta, nil, posOf(nsTok))
 				vd.Ambient = true
+				vd.NamePos = posOf(nameTok)
 				p.namespaces[ns][vd.Name] = exported
 				vd.Name = ast.NamespaceMangle(ns, vd.Name)
 				decls = append(decls, vd)
+				continue
+			}
+			if k := p.peekNth(1).Type; k == lexer.LBRACE || k == lexer.LBRACKET {
+				// `export const { a, b } = o`: each name the pattern binds
+				// is a member.
+				bind := func(name string) string {
+					p.namespaces[ns][name] = exported
+					if exported {
+						p.exportNS(ns, name, p.peek().Type != lexer.CONST)
+					}
+					return ast.NamespaceMangle(ns, name)
+				}
+				if k == lexer.LBRACKET {
+					ad, err := p.parseArrayDestructuring()
+					if err != nil {
+						return nil, err
+					}
+					ad.Elems = mangleArrayPattern(ad.Elems, bind)
+					decls = append(decls, ad)
+				} else {
+					od, err := p.parseObjectDestructuring()
+					if err != nil {
+						return nil, err
+					}
+					od.Props = mangleObjectPattern(od.Props, bind)
+					decls = append(decls, od)
+				}
 				continue
 			}
 			vd, err := p.parseVarDecl(true)
 			if err != nil {
 				return nil, err
 			}
-			switch d := vd.(type) {
-			case *ast.VarDeclaration:
+			member := func(d *ast.VarDeclaration) {
 				p.namespaces[ns][d.Name] = exported
 				if exported {
 					p.exportNS(ns, d.Name, d.Kind != "const")
 				}
 				d.Name = ast.NamespaceMangle(ns, d.Name)
 				decls = append(decls, d)
+			}
+			switch d := vd.(type) {
+			case *ast.VarDeclaration:
+				member(d)
+			case *ast.VarDeclarationList:
+				// `export const a = 1, b = 2`: each binding a member.
+				for _, x := range d.Decls {
+					member(x)
+				}
 			default:
 				return nil, p.errAt(nsTok, diag.NamespaceMemberBindings)
 			}
@@ -817,7 +885,7 @@ func (p *Parser) parseOneVarDeclarator(kind string, pos ast.Pos, doc *jsdoc.Comm
 		definite = true
 	}
 
-	var ta *ast.TypeAnnotation
+	var ta ast.TypeNode
 	// TS type annotation
 	if p.check(lexer.COLON) {
 		p.advance()
@@ -1035,7 +1103,7 @@ func applyJSDocFuncTypes(fd *ast.FunctionDeclaration, doc *jsdoc.Comment) {
 				fd.TypeParams = append(fd.TypeParams, tp.Name)
 				if tp.Constraint != "" {
 					fd.TypeParamConstraints = append(fd.TypeParamConstraints,
-						&ast.TypeAnnotation{Name: tp.Constraint, Source: "jsdoc"})
+						jsdocTypeAnnotation(tp.Constraint))
 				} else {
 					fd.TypeParamConstraints = append(fd.TypeParamConstraints, nil)
 				}
@@ -1087,14 +1155,14 @@ func (p *Parser) parseFunctionRest(name string, isAsync, bodyOptional, overloadO
 	}
 	if fd != nil && thisTA != nil {
 		if p.thisParams == nil {
-			p.thisParams = map[ast.Node]*ast.TypeAnnotation{}
+			p.thisParams = map[ast.Node]ast.TypeNode{}
 		}
 		p.thisParams[fd] = thisTA
 	}
 	return fd, err
 }
 
-func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overloadOK bool) (*ast.FunctionDeclaration, *ast.TypeAnnotation, error) {
+func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overloadOK bool) (*ast.FunctionDeclaration, ast.TypeNode, error) {
 	// Its parameters and body are a generator's when the caller said so:
 	// `yield` is an expression there, and an identifier in any other
 	// function of sloppy code.
@@ -1126,7 +1194,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	// but isn't specially instantiated yet (same "parse ahead of codegen"
 	// shape parseNewGenericBody already uses for classes).
 	var typeParams []string
-	var typeParamConstraints, typeParamDefaults []*ast.TypeAnnotation
+	var typeParamConstraints, typeParamDefaults []ast.TypeNode
 	if p.check(lexer.LT) {
 		tp, tc, td, err := p.parseTypeParamList(name + "<T>")
 		if err != nil {
@@ -1152,7 +1220,7 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 		return nil, nil, err
 	}
 
-	var retType *ast.TypeAnnotation
+	var retType ast.TypeNode
 	if p.check(lexer.COLON) {
 		p.advance()
 		retType, err = p.parseTypeAnnotation("ts")
@@ -1190,14 +1258,10 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 		return nil, nil, err
 	}
 
-	// A function whose body's own first statement is a literal "use strict"
-	// directive is early-error-checked the same way real strict-mode code
-	// is: a non-simple parameter list (default/rest/destructured) is a
-	// SyntaxError, and so is binding 'eval' or 'arguments' as a parameter
-	// name. This only fires on the textually-first-statement case (real
-	// JS's directive prologue can hold more than one string-literal
-	// statement before "use strict") — narrower than the full spec rule,
-	// but covers the shape every real "use strict" function actually uses.
+	// A function whose directive prologue holds "use strict" is
+	// early-error-checked as strict code is: a non-simple parameter list
+	// (default/rest/destructured) is a SyntaxError, and so is binding
+	// 'eval' or 'arguments' as a parameter name.
 	if bodyStartsWithUseStrict(body) {
 		for _, prm := range params {
 			if prm.ArrayPattern != nil || prm.ObjectPattern != nil || prm.Rest || prm.Default != nil {
@@ -1226,19 +1290,10 @@ func (p *Parser) parseFunctionRestThis(name string, isAsync, bodyOptional, overl
 	return fd, thisTA, nil
 }
 
-// bodyStartsWithUseStrict reports whether body's first statement is a bare
-// "use strict" directive (an expression-statement string literal) — the
-// shape every real "use strict" function body uses in practice.
+// bodyStartsWithUseStrict reports whether body's directive prologue holds
+// "use strict".
 func bodyStartsWithUseStrict(body *ast.BlockStatement) bool {
-	if body == nil || len(body.Body) == 0 {
-		return false
-	}
-	es, ok := body.Body[0].(*ast.ExpressionStatement)
-	if !ok {
-		return false
-	}
-	sl, ok := es.Expr.(*ast.StringLiteral)
-	return ok && sl.Value == "use strict"
+	return body != nil && ast.HasUseStrictDirective(body.Body)
 }
 
 // strictReservedBinding reports whether name is one of the two identifiers a
@@ -1441,7 +1496,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 					return nil, err
 				}
 			}
-			var ta *ast.TypeAnnotation
+			var ta ast.TypeNode
 			if p.check(lexer.COLON) {
 				p.advance()
 				var err error
@@ -1486,7 +1541,7 @@ func (p *Parser) parseParamList() ([]ast.Param, error) {
 			}
 		}
 		optional := p.match(lexer.QUESTION)
-		var ta *ast.TypeAnnotation
+		var ta ast.TypeNode
 		if p.check(lexer.COLON) {
 			p.advance()
 			ta, err = p.parseTypeAnnotation("ts")
@@ -1890,8 +1945,10 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 		catchTok := p.advance() // consume 'catch'
 		catchPos := posOf(catchTok)
 		var paramName string
-		var paramType *ast.TypeAnnotation
+		var paramType ast.TypeNode
 		var objPattern []ast.DestructProp
+		var aryPattern []ast.ArrayPatternElem
+		var aryPos ast.Pos
 		// Optional catch binding: `catch { ... }` with no `(e)` at all.
 		if p.check(lexer.LPAREN) {
 			p.advance()
@@ -1930,6 +1987,17 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 				if _, err := p.expect(lexer.RBRACE); err != nil {
 					return nil, err
 				}
+			} else if p.check(lexer.LBRACKET) {
+				// `catch ([a, b = d])`: the caught value bound to a hidden
+				// parameter the body's first statement destructures, as the
+				// catch parameter's own scope would.
+				aryPos = posOf(p.peek())
+				elems, err := p.parseArrayPatternElems()
+				if err != nil {
+					return nil, err
+				}
+				aryPattern = elems
+				paramName = fmt.Sprintf("__kml_catch_%d_%d", catchPos.Line, catchPos.Col)
 			} else {
 				paramTok, err := p.expect(lexer.IDENT)
 				if err != nil {
@@ -1954,6 +2022,10 @@ func (p *Parser) parseTryStatement() (*ast.TryStatement, error) {
 		cbody, err := p.parseBlock()
 		if err != nil {
 			return nil, err
+		}
+		if aryPattern != nil {
+			d := ast.NewArrayDestructuring("let", aryPattern, ast.NewIdentifier(paramName, aryPos), aryPos)
+			cbody.Body = append([]ast.Statement{d}, cbody.Body...)
 		}
 		catch = &ast.CatchClause{Param: paramName, ParamType: paramType, ObjectPattern: objPattern, Body: cbody, Pos: catchPos}
 	}
@@ -2222,7 +2294,7 @@ func (p *Parser) parseArrayDestructuring() (*ast.ArrayDestructuring, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ta *ast.TypeAnnotation
+	var ta ast.TypeNode
 	if p.match(lexer.COLON) {
 		if ta, err = p.parseTypeAnnotation("ts"); err != nil {
 			return nil, err
@@ -2250,7 +2322,7 @@ func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
 	if err != nil {
 		return nil, err
 	}
-	var ta *ast.TypeAnnotation
+	var ta ast.TypeNode
 	if p.match(lexer.COLON) {
 		if ta, err = p.parseTypeAnnotation("ts"); err != nil {
 			return nil, err
@@ -2269,6 +2341,36 @@ func (p *Parser) parseObjectDestructuring() (*ast.ObjectDestructuring, error) {
 	d := ast.NewObjectDestructuring(tok.Literal, props, init, pos)
 	d.TypeAnnot = ta
 	return d, nil
+}
+
+// globalThisPattern is `const { crypto } = globalThis` as the
+// declarations it makes: each name reads its global through the global
+// object, a property get as the pattern's.
+func globalThisPattern(d *ast.ObjectDestructuring) ast.Statement {
+	g, ok := d.Init.(*ast.Identifier)
+	if !ok || g.Name != "globalThis" || d.TypeAnnot != nil || d.Kind == "var" || !plainProps(d.Props) {
+		return d
+	}
+	decls := make([]*ast.VarDeclaration, len(d.Props))
+	for i, pr := range d.Props {
+		at := pr.Pos
+		if at.Line == 0 {
+			at = d.GetPos()
+		}
+		decls[i] = ast.NewVarDeclaration(d.Kind, pr.Local, nil, ast.NewMemberExpression(ast.NewIdentifier("globalThis", g.GetPos()), pr.Key, g.GetPos()), at)
+	}
+	return ast.NewVarDeclarationList(decls, d.GetPos())
+}
+
+// plainProps reports a pattern of plain named properties: no default,
+// nested pattern, rest or computed key.
+func plainProps(props []ast.DestructProp) bool {
+	for _, p := range props {
+		if p.Rest || p.KeyExpr != nil || p.Default != nil || p.SubObject != nil || p.SubArray != nil || p.Key == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func (p *Parser) parseWhileStatement() (*ast.WhileStatement, error) {
@@ -2377,6 +2479,14 @@ func (p *Parser) parseSingleStatement(inIf bool) (*ast.BlockStatement, error) {
 	case p.isWord(0, "async") && p.peekNth(1).Type == lexer.FUNCTION && p.sameLine(1):
 		return nil, p.errAt(tok, diag.DeclInSingleStatement, "function")
 	}
+	// Nor is a labelled function declaration (IsLabelledFunction).
+	i := 0
+	for p.peekNth(i).Type == lexer.IDENT && p.peekNth(i+1).Type == lexer.COLON {
+		i += 2
+	}
+	if i > 0 && p.peekNth(i).Type == lexer.FUNCTION {
+		return nil, p.errAt(p.peekNth(i), diag.DeclInSingleStatement, "function")
+	}
 	stmt, err := p.parseStatement()
 	if err != nil {
 		return nil, err
@@ -2478,4 +2588,39 @@ func nonSimpleParams(params []ast.Param) bool {
 		}
 	}
 	return false
+}
+
+// mangleArrayPattern renames each name an array pattern binds by bind.
+func mangleArrayPattern(es []ast.ArrayPatternElem, bind func(string) string) []ast.ArrayPatternElem {
+	out := make([]ast.ArrayPatternElem, len(es))
+	for i, e := range es {
+		if e.Name != "" {
+			e.Name = bind(e.Name)
+		}
+		if e.SubArray != nil {
+			e.SubArray = mangleArrayPattern(e.SubArray, bind)
+		}
+		if e.SubObject != nil {
+			e.SubObject = mangleObjectPattern(e.SubObject, bind)
+		}
+		out[i] = e
+	}
+	return out
+}
+
+// mangleObjectPattern renames each name an object pattern binds by bind.
+func mangleObjectPattern(ps []ast.DestructProp, bind func(string) string) []ast.DestructProp {
+	out := make([]ast.DestructProp, len(ps))
+	for i, d := range ps {
+		switch {
+		case d.SubArray != nil:
+			d.SubArray = mangleArrayPattern(d.SubArray, bind)
+		case d.SubObject != nil:
+			d.SubObject = mangleObjectPattern(d.SubObject, bind)
+		case d.Local != "":
+			d.Local = bind(d.Local)
+		}
+		out[i] = d
+	}
+	return out
 }

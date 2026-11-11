@@ -171,7 +171,7 @@ func (b *binder) scopeStartFlow(s *Scope) {
 
 // containerOf is the function (or the module) a scope's code runs in.
 func containerOf(s *Scope) *Scope {
-	for s.Kind != FunctionScope && s.Kind != ModuleScope || s.Inline {
+	for s.Kind != FunctionScope && s.Kind != ModuleScope && s.Kind != NamespaceScope || s.Inline {
 		s = s.Parent
 	}
 	return s
@@ -190,6 +190,12 @@ func functionOf(s *Scope) *Scope {
 // fact (found) and whether any reaches the start of sym's scope without it
 // (missed). fact says whether an assignment node establishes it.
 func walkBack(f *FlowNode, sym *Symbol, fact func(*FlowNode) bool) (found, missed bool) {
+	return walkBackStop(f, sym, fact, nil)
+}
+
+// walkBackStop is walkBack, a condition or switch clause for which stop
+// reports true ending its path as a fact does.
+func walkBackStop(f *FlowNode, sym *Symbol, fact, stop func(*FlowNode) bool) (found, missed bool) {
 	home := containerOf(sym.Scope)
 	// Both answers are reachability over the predecessor graph (a fact
 	// node and a scope start end a path), so each node is visited once;
@@ -219,12 +225,18 @@ func walkBack(f *FlowNode, sym *Symbol, fact func(*FlowNode) bool) (found, misse
 				f = f.Antecedent
 				continue
 			case f.Flags&(FlowTrueCondition|FlowFalseCondition|FlowSwitchClause|FlowCall|FlowPropertyAssignment) != 0:
+				if stop != nil && f.Flags&(FlowTrueCondition|FlowFalseCondition|FlowSwitchClause) != 0 && stop(f) {
+					found = true
+					f = nil
+					continue
+				}
 				f = f.Antecedent
 				continue
 			case f.Flags&FlowStart != 0:
-				// The start of the binding's own function or module: nothing
-				// on this path set it.
-				if f.Scope == home {
+				// The start of the binding's own function or module (a
+				// namespace body's is its module's): nothing on this path
+				// set it.
+				if f.Scope == home || home.Kind == NamespaceScope {
 					missed = true
 				}
 				f = nil
@@ -238,11 +250,60 @@ func walkBack(f *FlowNode, sym *Symbol, fact func(*FlowNode) bool) (found, misse
 	return found, missed
 }
 
-// ExemptFromAssignment reports whether a declared type opts a binding out of
-// the definite-assignment check: `any`/`unknown` hold `undefined` anyway, and
-// a nullable type has its own absent state.
-func ExemptFromAssignment(ta *ast.TypeAnnotation) bool {
-	return ta != nil && (ta.Name == "any" || ta.Name == "unknown" || ta.Nullable)
+// exemptFromAssignment reports whether a declared type opts a binding out of
+// the definite-assignment check, as TypeScript does: a type that holds
+// `undefined` (`any`, `unknown`, `void`, a union with `undefined`) needs no
+// assignment. A type alias is followed to the type it names, from the scope
+// the binding is declared in.
+func exemptFromAssignment(ta ast.TypeNode, scope *Scope, depth int) bool {
+	if ta == nil {
+		return false
+	}
+	return exemptNode(ta, scope, depth)
+}
+
+func exemptNode(n ast.TypeNode, scope *Scope, depth int) bool {
+	if n == nil || depth > 16 {
+		return false
+	}
+	switch x := ast.Unparen(n).(type) {
+	case *ast.KeywordType:
+		switch x.Keyword {
+		case "any", "unknown", "void", "undefined":
+			return true
+		}
+		return false
+	case *ast.UnionType:
+		for _, m := range x.Types {
+			if exemptNode(m, scope, depth+1) {
+				return true
+			}
+		}
+		return false
+	case *ast.TypeReference:
+		if len(x.Qualifier) > 0 || len(x.TypeArgs) > 0 {
+			return false
+		}
+		switch x.Name {
+		case "any", "unknown", "void", "undefined":
+			return true
+		}
+		for sc := scope; sc != nil; sc = sc.Parent {
+			sym := sc.Symbols.Get(x.Name)
+			if sym == nil {
+				continue
+			}
+			for _, d := range sym.Declarations {
+				if alias, ok := d.Node.(*ast.TypeAliasDeclaration); ok && len(alias.TypeParams) == 0 {
+					return exemptFromAssignment(alias.Type, sc, depth+1)
+				}
+			}
+			if sym.Flags&Type != 0 {
+				return false
+			}
+		}
+	}
+	return false
 }
 
 // tdzKind reports whether sym is a binding with a temporal dead zone: a
@@ -268,7 +329,7 @@ func trackedForAssignment(sym *Symbol) bool {
 		return false
 	}
 	v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
-	return ok && !v.Ambient && !v.Definite && v.Init == nil && v.TypeAnnot != nil && !ExemptFromAssignment(v.TypeAnnot)
+	return ok && !v.Ambient && !v.Definite && v.Init == nil && v.TypeAnnot != nil && !exemptFromAssignment(v.TypeAnnot, sym.Scope, 0)
 }
 
 // alwaysTrue reports whether a loop condition never ends the loop: absent,
@@ -333,6 +394,27 @@ func (b *Binding) FlowDiagnostics(offset func(line, col int) int, definite bool)
 		}
 	}
 	return out
+}
+
+// UnassignedVarRead reports a read of a var, in the function that declares
+// it, that some path reaches from the function's start with no value
+// stored in it (TypeScript's definite assignment for a hoisted var). A
+// condition or switch clause for which tests reports true ends a path as a
+// store does: narrowing there may remove the undefined.
+func (b *Binding) UnassignedVarRead(id *ast.Identifier, tests func(*FlowNode) bool) bool {
+	sym := b.refs[id]
+	f := b.refFlow[id]
+	if sym == nil || f == nil || b.written[id] || b.asserted[id] || b.refContainer[id] != containerOf(sym.Scope) || len(sym.Declarations) == 0 {
+		return false
+	}
+	for _, d := range sym.Declarations {
+		v, ok := d.Node.(*ast.VarDeclaration)
+		if !ok || v.Kind != "var" || v.Ambient || v.Definite || d.Kind == Lexical {
+			return false
+		}
+	}
+	_, missed := walkBackStop(f, sym, func(n *FlowNode) bool { return n.Assign }, tests)
+	return missed
 }
 
 // DefinitelyAssigned reports a read of a tracked binding (a typed
@@ -410,6 +492,13 @@ func (b *Binding) FlowAt(id *ast.Identifier) (f *FlowNode, local bool) {
 	return f, sym != nil && f != nil && b.refContainer[id] == containerOf(sym.Scope)
 }
 
+// QueryFlowAt is FlowAt for the name of a type query `typeof x`, sym the
+// symbol x names.
+func (b *Binding) QueryFlowAt(q *ast.TypeQuery, sym *Symbol) (f *FlowNode, local bool) {
+	f = b.queryFlow[q]
+	return f, sym != nil && f != nil && b.queryContainer[q] == containerOf(sym.Scope)
+}
+
 // StoresTo lists the nodes that store to sym, in any function, reachable or
 // not: a variable declaration, a plain or compound assignment expression, or
 // nil for a store through anything else (an update, a destructuring, a loop
@@ -420,6 +509,13 @@ func (b *Binding) StoresTo(sym *Symbol) []ast.Node { return b.stores[sym] }
 // sym stores to it: a call may change it between a narrowing and a read,
 // which flow analysis (as TypeScript's) does not see.
 func (b *Binding) StoredElsewhere(sym *Symbol) bool { return b.foreignStores[sym] }
+
+// ReadElsewhere reports a read of a local from a function other than the
+// one declaring it (a closure's), where its flow does not reach.
+func (b *Binding) ReadElsewhere(id *ast.Identifier) bool {
+	sym := b.refs[id]
+	return sym != nil && sym.Scope != nil && b.refContainer[id] != containerOf(sym.Scope)
+}
 
 // EndReachable reports whether some path reaches the end of a function's
 // body, where it returns undefined.

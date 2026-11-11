@@ -15,12 +15,15 @@ package main
 
 import (
 	"KlainMainLang/options"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -93,11 +96,12 @@ type tsResult struct {
 	Status  string // MATCH_ACCEPT | MATCH_REJECT | MISMATCH_FALSE_REJECT | MISMATCH_FALSE_ACCEPT | SKIP_OUT_OF_SCOPE
 	Reason  string
 	Blocker string // false-reject only: concrete identifier/character the case died on (see blockerOf)
+	path    string // the case file, for the report's corpus order
 }
 
 // passList, when set, receives each lane's verdicts (`case\tstatus`, sorted)
 // for a regression diff between two compilers.
-func runTSSuite(workDir string, timeout time.Duration, compat, passList string) {
+func runTSSuite(workDir string, timeout time.Duration, workers int, compat, passList string) {
 	if err := os.MkdirAll(workDir, 0755); err != nil {
 		fatal("creating workdir: %v", err)
 	}
@@ -133,7 +137,7 @@ func runTSSuite(workDir string, timeout time.Duration, compat, passList string) 
 	var primary []tsResult
 	for _, lane := range lanes {
 		laneCompat = lane
-		results := runTSLane(casesRoot, hasErrorsBaseline, workDir)
+		results := runTSLane(casesRoot, hasErrorsBaseline, workDir, workers)
 		primary = results
 		out := reportPath("CONFORMANCE-RESULTS-TS.md")
 		if err := writeTSReport(out, results); err != nil {
@@ -169,8 +173,10 @@ func runTSSuite(workDir string, timeout time.Duration, compat, passList string) 
 }
 
 // runTSLane runs every case once under the current laneCompat and returns the
-// accept/reject results. Called once per compat lane.
-func runTSLane(casesRoot string, hasErrorsBaseline map[string]bool, workDir string) []tsResult {
+// accept/reject results. Called once per compat lane. Each case's front end
+// runs in a process of its own (tsChild), workers at a time: a case that
+// times out or swells the heap takes only its own process with it.
+func runTSLane(casesRoot string, hasErrorsBaseline map[string]bool, workDir string, workers int) []tsResult {
 	// Collect first so the progress tracker knows the real total up front.
 	type tsCase struct{ path, group string }
 	var cases []tsCase
@@ -184,13 +190,36 @@ func runTSLane(casesRoot string, hasErrorsBaseline map[string]bool, workDir stri
 			return nil
 		})
 	}
+	self, err := os.Executable()
+	if err != nil {
+		fatal("locating this runner for the TS workers: %v", err)
+	}
+	fmt.Fprintf(os.Stderr, "running %d TS cases with %d workers (lane=%s)...\n", len(cases), workers, laneLabel())
+	jobs := make(chan int, len(cases))
+	out := make(chan tsResult, len(cases))
+	var wg sync.WaitGroup
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			dir := filepath.Join(workDir, fmt.Sprintf("tsw%d", id))
+			for i := range jobs {
+				c := cases[i]
+				if os.Getenv("TS_VERBOSE") != "" {
+					fmt.Fprintf(os.Stderr, "case: %s\n", c.path)
+				}
+				out <- runOneTS(self, c.path, c.group, hasErrorsBaseline, dir)
+			}
+		}(w)
+	}
+	for i := range cases {
+		jobs <- i
+	}
+	close(jobs)
+	go func() { wg.Wait(); close(out) }()
 	var results []tsResult
 	prog := newProgressTracker("ts", laneLabel(), len(cases), workDir)
-	for _, c := range cases {
-		if os.Getenv("TS_VERBOSE") != "" {
-			fmt.Fprintf(os.Stderr, "case: %s\n", c.path)
-		}
-		r := runOneTS(c.path, c.group, hasErrorsBaseline, workDir)
+	for r := range out {
 		results = append(results, r)
 		switch r.Status {
 		case "MATCH_ACCEPT", "MATCH_REJECT":
@@ -201,13 +230,27 @@ func runTSLane(casesRoot string, hasErrorsBaseline map[string]bool, workDir stri
 			prog.tick("SKIP", r.Reason)
 		}
 	}
+	// The report lists cases in corpus order, whichever worker finished first.
+	order := map[string]int{}
+	for i, c := range cases {
+		order[c.group+"/"+c.path] = i
+	}
+	sort.SliceStable(results, func(a, b int) bool {
+		return order[results[a].Group+"/"+results[a].path] < order[results[b].Group+"/"+results[b].path]
+	})
 	return results
 }
 
-func runOneTS(path, group string, hasErrorsBaseline map[string]bool, workDir string) (res tsResult) {
+// tsChildFlag runs one case's front end in this process and prints its
+// verdict (tsChild); the lane's workers start the runner with it.
+const tsChildFlag = "-ts-case"
+
+// runOneTS classifies one case: its front end runs in a child process.
+func runOneTS(self, path, group string, hasErrorsBaseline map[string]bool, dir string) (res tsResult) {
 	base := strings.TrimSuffix(filepath.Base(path), ".ts")
 	res.Case = base
 	res.Group = group
+	res.path = path
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -215,15 +258,75 @@ func runOneTS(path, group string, hasErrorsBaseline map[string]bool, workDir str
 		res.Reason = "read error"
 		return res
 	}
-	src := string(raw)
-	expectReject := hasErrorsBaseline[tsBaselineName(base, src)]
+	expectReject := hasErrorsBaseline[tsBaselineName(base, string(raw))]
+	lane := "strict"
+	if laneCompat == "js" {
+		lane = "js"
+	}
+	// The child's own guard returns CODEGEN_TIMEOUT after codegenTimeout;
+	// this one ends a child that never got that far.
+	ctx, cancel := context.WithTimeout(context.Background(), codegenTimeout+30*time.Second)
+	defer cancel()
+	cmd := killableCommand(ctx, self, tsChildFlag, path, "-ts-dir", dir, "-compat", lane)
+	cmd.Stderr = nil
+	stdout, runErr := cmd.Output()
+	// The verdict is the child's last line: the front end may print first.
+	verdict := strings.TrimSpace(string(stdout))
+	if i := strings.LastIndexByte(verdict, '\n'); i >= 0 {
+		verdict = verdict[i+1:]
+	}
 	var cerr error
+	switch {
+	case strings.HasPrefix(verdict, "SKIP "):
+		res.Status = "SKIP_OUT_OF_SCOPE"
+		res.Reason = strings.TrimPrefix(verdict, "SKIP ")
+		return res
+	case verdict == "ACCEPT":
+	case strings.HasPrefix(verdict, "REJECT "):
+		cerr = errors.New(strings.TrimPrefix(verdict, "REJECT "))
+	case ctx.Err() != nil:
+		cerr = errors.New("CODEGEN_TIMEOUT")
+	default:
+		cerr = fmt.Errorf("panic: the front end exited without a verdict (%v)", runErr)
+	}
+	accepted := cerr == nil
+
+	switch {
+	case expectReject && !accepted:
+		res.Status = "MATCH_REJECT" // TS rejects, we reject
+	case !expectReject && accepted:
+		res.Status = "MATCH_ACCEPT" // TS accepts, we accept
+	case expectReject && accepted:
+		res.Status = "MISMATCH_FALSE_ACCEPT" // TS rejects, we accepted — a real soundness gap
+		res.Reason = "expected rejection (TS has an errors baseline) but this compiled clean"
+	default: // !expectReject && !accepted
+		res.Status = "MISMATCH_FALSE_REJECT" // TS accepts, we rejected — usually an unsupported-feature scope gap
+		res.Reason = normalizeReason("REJECTED", firstLine(cerr.Error()))
+		res.Blocker = blockerOf(firstLine(cerr.Error()))
+	}
+	return res
+}
+
+// tsChild is a worker process: it runs the front end over the case at path,
+// in scratch directory dir, and prints `ACCEPT`, `REJECT <first error
+// line>` or `SKIP <reason>`.
+func tsChild(path, dir string) {
+	fmt.Println(tsVerdict(path, dir))
+}
+
+func tsVerdict(path, dir string) string {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "SKIP read error"
+	}
+	src := string(raw)
 	checks := tsCaseChecks(src)
+	var cerr error
 	if reTSMultiFile.MatchString(src) {
 		// Materialize the virtual files and compile the last implementation
-		// file as the entry (TDD-00204 Track 4). The TS lane is single-
-		// threaded, so one scratch dir, wiped per case, suffices.
-		caseDir := filepath.Join(workDir, "tscase")
+		// file as the entry (TDD-00204 Track 4), in this worker's scratch
+		// dir, wiped per case.
+		caseDir := filepath.Join(dir, "tscase")
 		_ = os.RemoveAll(caseDir)
 		entry := ""
 		for _, vf := range splitTSMultiFile(src) {
@@ -238,46 +341,26 @@ func runOneTS(path, group string, hasErrorsBaseline map[string]bool, workDir str
 			name = strings.TrimPrefix(name, "/")
 			p := filepath.Join(caseDir, filepath.FromSlash(name))
 			if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
-				res.Status = "SKIP_OUT_OF_SCOPE"
-				res.Reason = "scratch write error"
-				return res
+				return "SKIP scratch write error"
 			}
 			if err := os.WriteFile(p, []byte(vf.content), 0644); err != nil {
-				res.Status = "SKIP_OUT_OF_SCOPE"
-				res.Reason = "scratch write error"
-				return res
+				return "SKIP scratch write error"
 			}
 			if (strings.HasSuffix(name, ".ts") || strings.HasSuffix(name, ".tsx")) && !strings.HasSuffix(name, ".d.ts") {
 				entry = p
 			}
 		}
 		if entry == "" {
-			res.Status = "SKIP_OUT_OF_SCOPE"
-			res.Reason = "multi-file case with no implementation file (declaration-only)"
-			return res
+			return "SKIP multi-file case with no implementation file (declaration-only)"
 		}
 		_, cerr = frontEndWith(entry, checks)
 	} else {
-		_, cerr = frontEndSourceWith(src, workDir, "ts", checks)
+		_, cerr = frontEndSourceWith(src, dir, "ts", checks)
 	}
-	accepted := cerr == nil
-
-	switch {
-	case expectReject && !accepted:
-		res.Status = "MATCH_REJECT" // TS rejects, we reject
-	case !expectReject && accepted:
-		res.Status = "MATCH_ACCEPT" // TS accepts, we accept
-	case expectReject && accepted:
-		res.Status = "MISMATCH_FALSE_ACCEPT" // TS rejects, we accepted — a real soundness gap
-		res.Reason = "expected rejection (TS has an errors baseline) but this compiled clean"
-	default: // !expectReject && !accepted
-		res.Status = "MISMATCH_FALSE_REJECT" // TS accepts, we rejected — usually an unsupported-feature scope gap
-		if cerr != nil {
-			res.Reason = normalizeReason("REJECTED", firstLine(cerr.Error()))
-			res.Blocker = blockerOf(firstLine(cerr.Error()))
-		}
+	if cerr != nil {
+		return "REJECT " + strings.ReplaceAll(firstLine(cerr.Error()), "\n", " ")
 	}
-	return res
+	return "ACCEPT"
 }
 
 func writeTSReport(path string, all []tsResult) error {

@@ -24,13 +24,13 @@ typedef struct {
 static i64 nb_double(double d) {
     unsigned long long bits;
     if (d != d) bits = 0x7FF8000000000000ULL;
-    else memcpy(&bits, &d, 8);
+    else memcpy(&bits, &d, 8); /* scratch */
     return (i64)(bits + (1ULL << 49));
 }
 static i64 nb_pack(i64 tag, i64 pay) {
     switch (tag) {
     case 0: return nb_double((double)pay);
-    case 1: { double d; memcpy(&d, &pay, 8); return nb_double(d); }
+    case 1: { double d; memcpy(&d, &pay, 8); return nb_double(d); } /* scratch */
     case 3: return pay ? 7 : 6;
     case 4: return 2;
     case 5: return 10;
@@ -81,7 +81,7 @@ void __kml_dynarr_grow(void *ap, i64 need) {
 void __kml_dynarr_store(void *ap, i64 i, i64 v) {
     Elem *e = &((Arr *)ap)->data[i];
     e->tag = nb_tag(v);
-    e->pay = nb_pay(v);
+    KML_STORE_PTR(&e->pay, nb_pay(v));
 }
 
 void __kml_dynarr_push(void *ap, i64 v) {
@@ -225,7 +225,7 @@ char **__kml_index_keys_c(i64 len) {
         char *base = (char *)kml_alloc(KML_HEAP_RAW, 32);
         int m = snprintf(base + 8, 24, "%lld", i);
         *(i64 *)base = m;
-        arr[i] = base + 8;
+        KML_STORE_PTR(&arr[i], base + 8);
     }
     return arr;
 }
@@ -247,11 +247,11 @@ char **__kml_dynarr_keys_c(void *ap, i64 *n) {
             int at = __kml_shape_expando_attrs(ap, base + 8);
             if (at < 0 || !(at & 2)) continue;
         }
-        arr[k++] = base + 8;
+        KML_STORE_PTR(&arr[k++], base + 8);
     }
     for (i64 i = 0; i < extra; i++) {
         const char *key = __kml_shape_expando_key(ap, i);
-        if (strncmp(key, "\x01@@sym:", 7) != 0 && __kml_dynarr_index(key) < 0 && (__kml_shape_expando_attrs(ap, key) & 2)) arr[k++] = (char *)key;
+        if (strncmp(key, "\x01@@sym:", 7) != 0 && __kml_dynarr_index(key) < 0 && (__kml_shape_expando_attrs(ap, key) & 2)) KML_STORE_PTR(&arr[k++], (char *)key);
     }
     *n = k;
     return arr;

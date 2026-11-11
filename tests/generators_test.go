@@ -1270,9 +1270,9 @@ main2()
 `, "0\nouter cleanup\n42 done=true\ntrue")
 }
 
-// .throw(e) on an async generator suspended at `yield* asyncIterable` propagates
-// the error into the outer body (catchable there) instead of being swallowed by
-// another inner step — the V1 own-path behavior.
+// .throw(e) on an async generator suspended at `yield* asyncIterable` whose
+// iterator has no throw method closes it and throws the spec's TypeError
+// into the outer body, catchable there.
 func TestE2EAsyncYieldStarIterableThrowPropagatesToOuter(t *testing.T) {
 	assertOutput(t, `
 async function d(v: number): Promise<number> { return v }
@@ -1297,7 +1297,7 @@ async function main2(): Promise<void> {
   console.log((await it.throw(new Error("bang"))).value)
 }
 main2()
-`, "0\nouter caught bang\n77")
+`, "0\nouter caught The iterator does not provide a 'throw' method.\n77")
 }
 
 // When the inner async-iterable has its own .throw/.return methods, a yield*
@@ -1785,5 +1785,204 @@ function* g2(): Generator<string, number> { yield "a"; yield "b"; return 5; }
 for (const v of g()) console.log(v);
 const it = g();
 console.log(it.next(), it.next(), it.next(), it.next(), it.next());
+`)
+}
+
+// return() with no value (or undefined) completes with an undefined value,
+// whatever the element's representation, a sync or an async generator's.
+func TestE2EGeneratorReturnWithoutValue(t *testing.T) {
+	assertSameAsNode(t, `
+function* g(): Generator<number, number, unknown> { try { yield 1; yield 2; } finally { console.log("fin"); } return 0; }
+const a = g(); console.log(a.return(9), a.next());
+const b = g(); b.next(); console.log(b.return(7), b.next());
+function* h() { yield 1; } const c = h(); c.next(); console.log(c.return(), c.next());
+const d = h(); console.log(d.return(), d.next());
+function* k(): Generator<number, number, unknown> { try { yield 1; } finally { return 5; } }
+const kk = k(); kk.next(); console.log(kk.return(3));
+async function* ag() { yield 1; yield 2; }
+(async () => { const x = ag(); await x.next(); console.log(await x.return(undefined), await x.next()); const y = ag(); console.log(await y.return(undefined)); })();
+`)
+}
+
+// A generator held boxed: next, return, throw, [Symbol.iterator] and the
+// iterator helpers read off it as dynamic functions.
+func TestE2EGeneratorMethodsThroughAny(t *testing.T) {
+	assertSameAsNode(t, `function* g(): Generator<number, void, any> { const x = yield 1; console.log("got", x); try { yield 2; } catch (e) { console.log("caught", e); yield 3; } }
+const a: any = g(); console.log(a.next(), a.next("hi"), a.throw("boom"), a.return(7), a.next());
+const f = a.next; console.log(typeof f);
+const b: any = g(); const it = b[Symbol.iterator](); console.log(it === b, [...b]);
+const c: any = g(); console.log(c.map((x: number) => x * 10).toArray());
+async function* ag() { yield 1; } const d: any = ag(); d.next().then((r: any) => console.log("async", r));
+`)
+}
+
+// `instanceof` alone observes a generator instance's prototype, and a
+// generator function expression is the function its instances came from
+// (ADR-01940, ADR-01942).
+func TestE2EGeneratorInstanceofWithoutPrototypeName(t *testing.T) {
+	assertSameAsNode(t, `
+function* h() {}
+const g = function* () {};
+async function* ag() {}
+console.log(h() instanceof h, g() instanceof g, ag() instanceof ag, h() instanceof g);
+console.log(Function.prototype);
+console.log(g() instanceof g);
+`)
+}
+
+// A binding annotated `Generator<Y, R>` with R of another representation
+// holds the instance the generator builds (its one value slot boxed), and
+// a `let` stepped by next() keeps the step's layout.
+func TestE2EGeneratorAnnotatedReturnSlot(t *testing.T) {
+	assertSameAsNode(t, `function* adder(): Generator<undefined, number, number> {
+    const a: number = yield;
+    const b: number = yield;
+    return a + b;
+}
+const g: Generator<undefined, number, number> = adder();
+g.next();
+g.next(10);
+console.log(g.next(32));
+function* h(): Generator<number, string> { yield 1; return 'y'; }
+const b: Generator<number, string> = h();
+let r = b.next();
+while (!r.done) { console.log(r.value); r = b.next(); }
+console.log(r.value, r.done);
+`)
+}
+
+// A nested generator captures an enclosing array by reference.
+func TestE2ENestedGeneratorCapturesArray(t *testing.T) {
+	assertOutput(t, `
+function outer() {
+  const xs = [1, 2, 3];
+  function* g() { for (const x of xs) yield x * 2; xs.push(9); }
+  const out = [...g()];
+  console.log(out.join(","), xs.length);
+}
+outer();
+function outer2(names: string[]) {
+  function* each() { for (let i = 0; i < names.length; i++) yield names[i].toUpperCase(); }
+  for (const n of each()) console.log(n);
+}
+outer2(["a", "b"]);
+`, "2,4,6 4\nA\nB")
+}
+
+// A generator called with too few or too many arguments, and next()/return()
+// given extra ones, behave as in JavaScript: a missing one is undefined, an
+// extra one is evaluated in order and ignored.
+func TestE2EGeneratorExtraArgsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function* g(a, b) { const s = yield a; yield [b, s]; }
+console.log([...g(1)], [...g(1, 2, 3)], [...g()]);
+let n = 0;
+const it = g(5, 6);
+console.log(it.next(n++, n++), it.next(n++, n++), n, it.return(9, n++), n);
+async function* ag() { const v = yield 1; yield v; }
+const a = ag();
+a.next(0, n++).then(r => a.next(7, n++)).then(r => console.log(r, n));
+`)
+}
+
+// yield* over a user class async iterable forwards the outer generator's
+// return to the inner iterator's return, by the spec's delegation protocol.
+func TestE2EYieldStarClassAsyncIterableForwards(t *testing.T) {
+	assertSameAsNode(t, `
+class Src {
+  i = 0;
+  [Symbol.asyncIterator]() { return this; }
+  async next(): Promise<{ value: number; done: boolean }> { this.i++; return { value: this.i, done: this.i > 3 }; }
+  async return(v?: any): Promise<{ value: any; done: boolean }> { console.log("inner return", v); return { value: v, done: true }; }
+}
+async function* outer() { const r = yield* new Src(); console.log("r", r); yield 99; }
+(async () => {
+  for await (const v of outer()) console.log(v);
+  const g = outer();
+  console.log(await g.next());
+  console.log(await g.return(undefined));
+})();
+`)
+}
+
+// yield* of a generator whose elements have another representation than the
+// outer one's (an `any` inner under a `number` outer), sync and async.
+func TestE2EYieldStarMixedRepresentation(t *testing.T) {
+	assertOutput(t, `
+function* inner(): Generator<any> { yield 1; yield 2; }
+function* outer(): Generator<number> { yield 0; yield* inner(); }
+console.log([...outer()]);
+async function* ai(): AsyncGenerator<any> { yield 1; yield 2; }
+async function* ao(): AsyncGenerator<number> { yield 0; yield* ai(); }
+(async () => { for await (const v of ao()) console.log(v); })();
+`, "[ 0, 1, 2 ]\n0\n1\n2")
+}
+
+// An iterator whose shape no declaration gives (a class or object without
+// next, a next returning a Promise under for...of, a result known only at
+// run time) is iterated by the protocol on the iterator itself, as Node
+// does, with its TypeErrors; a sync iterator under for await has its values
+// awaited, and an early exit closes it.
+func TestE2EForOfIteratorProtocolFallback(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+class It { constructor() { this.i = 0; } next() { this.i++; return { value: this.i, done: this.i > 2 }; } }
+class Able { [Symbol.iterator]() { return new It(); } }
+for (const v of new Able()) console.log("a", v);
+const o = { [Symbol.iterator]() { return new It(); } };
+for (const v of o) console.log("b", v);
+const bad = { [Symbol.iterator]: 5 };
+try { for (const v of bad) console.log(v); } catch (e) { console.log(e.constructor.name, e.message); }
+class NoNext { [Symbol.iterator]() { return {}; } }
+try { for (const v of new NoNext()) console.log(v); } catch (e) { console.log(e.constructor.name, e.message); }
+class AIt { constructor() { this.i = 0; } next() { this.i++; return Promise.resolve({ value: this.i, done: this.i > 2 }); } }
+class AAble { [Symbol.asyncIterator]() { return new AIt(); } }
+const ao = { [Symbol.asyncIterator]() { return new AIt(); } };
+class ANo { [Symbol.asyncIterator]() { return {}; } }
+(async () => {
+  for await (const v of new AAble()) console.log("c", v);
+  for await (const v of ao) console.log("d", v);
+  try { for await (const v of new ANo()) console.log(v); } catch (e) { console.log(e.constructor.name, e.message); }
+})();
+const syncIt = { [Symbol.iterator]() { let i = 0; return { next() { i++; return { value: Promise.resolve(i * 10), done: i > 2 }; }, return() { console.log("closed"); return { done: true }; } }; } };
+class SAble { [Symbol.iterator]() { let i = 0; return { next() { i++; return { value: i, done: i > 3 }; }, return() { console.log("sclosed"); return { done: true }; } }; } }
+(async () => {
+  for await (const v of syncIt) console.log("e", v);
+  for (const v of new SAble()) { console.log("f", v); if (v === 2) break; }
+  for await (const v of new SAble()) { console.log("g", v); if (v === 2) break; }
+})();
+`)
+}
+
+// Array-destructuring a loop element that is only ever undefined (a bare
+// `yield;`) throws a TypeError where it is read, as in Node (whose text
+// renders the site as ".for"), instead of crashing.
+func TestE2EForOfDestructureUndefinedElement(t *testing.T) {
+	assertOutput(t, `
+function* h() { yield; }
+try { for (const [x] of h()) console.log("in", x); console.log("after"); } catch (e: any) { console.log(e instanceof TypeError, e.message); }
+console.log("end");
+`, "true undefined is not iterable (cannot read property Symbol(Symbol.iterator))\nend")
+}
+
+// A nested generator declaration called before its statement (declarations
+// are hoisted) captures its enclosing bindings: one declared before the call
+// is read, one declared after it is in its dead zone until then.
+func TestE2ENestedGeneratorCalledBeforeDeclaration(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function outer() {
+  let y = 1;
+  const g = gen();
+  console.log(g.next());
+  function* gen() { yield y; }
+  const g1 = gen1();
+  let w = 3;
+  console.log(g1.next());
+  function* gen1() { yield w; }
+  const g2 = gen2();
+  try { g2.next(); } catch (e) { console.log(e.constructor.name, e.message); }
+  let z = 2;
+  function* gen2() { yield z; }
+}
+outer();
 `)
 }

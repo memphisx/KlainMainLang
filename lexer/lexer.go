@@ -261,10 +261,10 @@ func (l *Lexer) nextToken() (Token, error) {
 	if ch == '"' || ch == '\'' {
 		return l.readString(line, col)
 	}
-	if unicode.IsLetter(ch) || ch == '_' || ch == '$' {
+	if isIDStart(ch) || ch == '\\' && l.peekAt(1) == 'u' {
 		return l.readIdent(line, col)
 	}
-	if ch == '#' && (unicode.IsLetter(l.peekAt(1)) || l.peekAt(1) == '_' || l.peekAt(1) == '$') {
+	if ch == '#' && (isIDStart(l.peekAt(1)) || l.peekAt(1) == '\\' && l.peekAt(2) == 'u') {
 		return l.readPrivateName(line, col)
 	}
 
@@ -526,6 +526,9 @@ func (l *Lexer) readNumberBody(line, col int) (Token, error) {
 			if err := l.readDigitRun(&buf, isHexDigit, line, col); err != nil {
 				return Token{}, err
 			}
+			if buf.Len() == 2 { // the prefix alone (`0x`)
+				return Token{}, l.errAt(l.line, l.col, diag.HexDigitExpected)
+			}
 			if l.peek() == 'n' {
 				l.advance()
 				return l.tok(BIGINT, buf.String(), line, col), nil
@@ -537,6 +540,9 @@ func (l *Lexer) readNumberBody(line, col int) (Token, error) {
 			if err := l.readDigitRun(&buf, isBinDigit, line, col); err != nil {
 				return Token{}, err
 			}
+			if buf.Len() == 2 { // the prefix alone (`0x`)
+				return Token{}, l.errAt(l.line, l.col, diag.BinaryDigitExpected)
+			}
 			if l.peek() == 'n' {
 				l.advance()
 				return l.tok(BIGINT, buf.String(), line, col), nil
@@ -547,6 +553,9 @@ func (l *Lexer) readNumberBody(line, col int) (Token, error) {
 			buf.WriteRune(l.advance()) // 'o'
 			if err := l.readDigitRun(&buf, isOctDigit, line, col); err != nil {
 				return Token{}, err
+			}
+			if buf.Len() == 2 { // the prefix alone (`0x`)
+				return Token{}, l.errAt(l.line, l.col, diag.OctalDigitExpected)
 			}
 			if l.peek() == 'n' {
 				l.advance()
@@ -746,13 +755,13 @@ func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
 				return l.errAt(line, col, diag.InvalidUnicodeEscape)
 			}
 			l.advance() // consume '}'
-			buf.WriteRune(rune(val))
+			writeCodeUnit(buf, val)
 		} else {
 			v, ok := l.readHexEscape(4)
 			if !ok {
 				return l.errAt(line, col, diag.InvalidUnicodeEscape)
 			}
-			buf.WriteRune(rune(v))
+			writeCodeUnit(buf, v)
 		}
 	case '\n', '\u2028', '\u2029':
 		// LineContinuation — the escaped line terminator yields nothing.
@@ -768,6 +777,30 @@ func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
 		buf.WriteRune(esc)
 	}
 	return nil
+}
+
+// writeCodeUnit writes an escaped code point or UTF-16 code unit. A string
+// holds WTF-8 (TDD-00230 phase 5): a lone surrogate (`"\uD83D"`) is its
+// generalized UTF-8 bytes, as Go's WriteRune would make U+FFFD, and a low
+// surrogate after a high one (`"\uD83D\uDE00"`) joins it into the pair's
+// code point.
+func writeCodeUnit(buf *strings.Builder, v int) {
+	if v < 0xD800 || v > 0xDFFF {
+		buf.WriteRune(rune(v))
+		return
+	}
+	if v >= 0xDC00 {
+		if s := buf.String(); len(s) >= 3 && s[len(s)-3] == 0xED && s[len(s)-2]&0xF0 == 0xA0 {
+			high := 0xD000 | int(s[len(s)-2]&0x3F)<<6 | int(s[len(s)-1]&0x3F)
+			buf.Reset()
+			buf.WriteString(s[:len(s)-3])
+			buf.WriteRune(rune(0x10000 + (high-0xD800)<<10 + (v - 0xDC00)))
+			return
+		}
+	}
+	buf.WriteByte(byte(0xE0 | v>>12))
+	buf.WriteByte(byte(0x80 | v>>6&0x3F))
+	buf.WriteByte(byte(0x80 | v&0x3F))
 }
 
 // readHexEscape reads exactly n hex digits and returns their value. Used by
@@ -887,17 +920,97 @@ func (l *Lexer) readRegex(line, col int) (Token, error) {
 	return t, nil
 }
 
-func (l *Lexer) readIdent(line, col int) (Token, error) {
-	var buf strings.Builder
+// isIDStart is ECMAScript's IdentifierStart code point (ID_Start, `$`, `_`).
+func isIDStart(c rune) bool {
+	return unicode.IsLetter(c) || c == '_' || c == '$' || unicode.Is(unicode.Nl, c) || unicode.Is(unicode.Other_ID_Start, c)
+}
+
+// isIDPart is IdentifierPart (ID_Continue, `$`, ZWNJ, ZWJ).
+func isIDPart(c rune) bool {
+	return isIDStart(c) || unicode.IsDigit(c) || unicode.In(c, unicode.Mn, unicode.Mc, unicode.Nd, unicode.Pc, unicode.Other_ID_Continue) || c == 0x200C || c == 0x200D
+}
+
+// readIdentChars reads an IdentifierName's characters after start (a `#`
+// already consumed), decoding `\uXXXX` / `\u{X…}` escapes; escaped reports
+// one was present (an escaped name is never a keyword).
+func (l *Lexer) readIdentChars(buf *strings.Builder, line, col int) (escaped bool, err error) {
+	first := true
 	for l.pos < len(l.src) {
 		c := l.peek()
-		if unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' || c == '$' {
-			buf.WriteRune(l.advance())
-		} else {
-			break
+		if c == '\\' {
+			if l.peekAt(1) != 'u' {
+				return escaped, l.errAt(line, col, diag.InvalidUnicodeEscape)
+			}
+			l.advance()
+			l.advance()
+			var cp rune
+			if l.peek() == '{' {
+				l.advance()
+				n := 0
+				for l.pos < len(l.src) && l.peek() != '}' {
+					d, ok := hexVal(l.advance())
+					if !ok {
+						return escaped, l.errAt(line, col, diag.InvalidUnicodeEscape)
+					}
+					cp = cp*16 + d
+					n++
+					if cp > 0x10FFFF {
+						return escaped, l.errAt(line, col, diag.CodePointOutOfRange)
+					}
+				}
+				if n == 0 || l.pos >= len(l.src) {
+					return escaped, l.errAt(line, col, diag.InvalidUnicodeEscape)
+				}
+				l.advance() // }
+			} else {
+				for i := 0; i < 4; i++ {
+					d, ok := hexVal(l.advance())
+					if !ok {
+						return escaped, l.errAt(line, col, diag.InvalidUnicodeEscape)
+					}
+					cp = cp*16 + d
+				}
+			}
+			if first && !isIDStart(cp) || !first && !isIDPart(cp) {
+				return escaped, l.errAt(line, col, diag.InvalidUnicodeEscape)
+			}
+			buf.WriteRune(cp)
+			escaped, first = true, false
+			continue
 		}
+		if first && isIDStart(c) || !first && isIDPart(c) {
+			buf.WriteRune(l.advance())
+			first = false
+			continue
+		}
+		break
+	}
+	return escaped, nil
+}
+
+func hexVal(c rune) (rune, bool) {
+	switch {
+	case c >= '0' && c <= '9':
+		return c - '0', true
+	case c >= 'a' && c <= 'f':
+		return c - 'a' + 10, true
+	case c >= 'A' && c <= 'F':
+		return c - 'A' + 10, true
+	}
+	return 0, false
+}
+
+func (l *Lexer) readIdent(line, col int) (Token, error) {
+	var buf strings.Builder
+	escaped, err := l.readIdentChars(&buf, line, col)
+	if err != nil {
+		return Token{}, err
 	}
 	lit := buf.String()
+	if escaped {
+		// (An escaped reserved word names a property, never the keyword.)
+		return l.tok(IDENT, lit, line, col), nil
+	}
 	return l.tok(LookupIdent(lit), lit, line, col), nil
 }
 
@@ -908,13 +1021,8 @@ func (l *Lexer) readIdent(line, col int) (Token, error) {
 func (l *Lexer) readPrivateName(line, col int) (Token, error) {
 	var buf strings.Builder
 	buf.WriteRune(l.advance()) // '#'
-	for l.pos < len(l.src) {
-		c := l.peek()
-		if unicode.IsLetter(c) || unicode.IsDigit(c) || c == '_' || c == '$' {
-			buf.WriteRune(l.advance())
-		} else {
-			break
-		}
+	if _, err := l.readIdentChars(&buf, line, col); err != nil {
+		return Token{}, err
 	}
 	return l.tok(PRIVATE_NAME, buf.String(), line, col), nil
 }

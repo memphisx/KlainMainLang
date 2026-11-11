@@ -1,8 +1,8 @@
 /* propattr.c — the attributes Object.defineProperty gives a static
  * object's own property (TDD-00230 P3.3): writable, enumerable and
  * configurable. A static layout has no room for them; an object whose
- * attributes were ever defined has a record in a side map keyed by its
- * address, listing (name, attrs) for each property that is not plain (a
+ * attributes were ever defined has a record in a side table (keyed by
+ * its identity, collections.c), listing (name, attrs) for each property that is not plain (a
  * plain property is writable, enumerable and configurable). Programs that
  * never define a property never reach this file.
  *
@@ -13,9 +13,8 @@
 
 typedef long long i64;
 
-extern void *__kml_pattr_map_get(void);
-extern i64 __kml_map_num_get(void *m, i64 key);
-extern void __kml_map_num_set(void *m, i64 key, i64 val);
+extern void *__kml_pattr_rec_get(void *obj);
+extern void __kml_pattr_rec_set(void *obj, void *rec);
 
 #define PA_NW 1
 #define PA_NE 2
@@ -28,15 +27,14 @@ typedef struct {
 } PRec;
 
 static PRec *rec_of(void *obj, int create) {
-    void *m = __kml_pattr_map_get();
-    PRec *r = (PRec *)(intptr_t)__kml_map_num_get(m, (i64)(intptr_t)obj);
+    PRec *r = (PRec *)__kml_pattr_rec_get(obj);
     if (r || !create) return r;
     r = (PRec *)kml_alloc(KML_HEAP_RAW, sizeof(PRec));
     r->n = 0;
     r->cap = 0;
     r->names = 0;
     r->attrs = 0;
-    __kml_map_num_set(m, (i64)(intptr_t)obj, (i64)(intptr_t)r);
+    __kml_pattr_rec_set(obj, r);
     return r;
 }
 

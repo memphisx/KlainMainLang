@@ -71,6 +71,7 @@
             "notes": [
               "An *acyclic* imported file's top-level statements run exactly once, in real dependency order, strictly before whatever imports it — no restriction to declarations-only",
               "Diamond-shared dependencies still run exactly once (existing per-path memoization)",
+              "The effect-only form `import './setup'` (and `import 'node:fs'`) runs the module, binding nothing",
               "The literal-only initializer rule exists because a cyclic pair reading each other's not-yet-initialized binding would be an uninitialized read; a literal can never observe one. See [TDD-00052](../tdd/TDD-00052.md)/[ADR-00145](../adr/00/ADR-00145.md)"
             ]
           },
@@ -134,15 +135,19 @@
             ]
           },
           {
-            "feature": "Static CommonJS `require('<literal>')`",
+            "feature": "CommonJS `require` / `node:module`",
             "status": "implemented",
             "caveats": [
-              "Top-level, string-literal specifier only. A destructuring default/nested-pattern/rest on a require binding, or a dynamic `require(expr)` / a `require` nested in a function body (lazy loading), is a clean compile error — deferred to the runtime/lazy-loading capability"
+              "A required module's body runs at program start, not at its first `require`; `require.cache` is an empty object whose entries change nothing",
+              "A computed `require(name)` finds only the modules the program links: the file's literal requires and the builtins its string literals name; any other name throws `MODULE_NOT_FOUND`. Files are never loaded at run time",
+              "`node:module` has `Module`, `builtinModules`, `isBuiltin`, `createRequire` and `syncBuiltinESMExports`; not `register`/`registerHooks`, `findPackageJSON`, `SourceMap`/`findSourceMap`, the compile cache or `stripTypeScriptTypes`"
             ],
             "notes": [
-              "`const x = require('m')` binds the namespace (whole module object); `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only",
+              "`const x = require('m')` binds the namespace (whole module object), or for `events`/`assert` Node's `module.exports` function; `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only; a `require('m')` anywhere else (in a function, an expression, a pattern with defaults) is that module, linked statically",
+              "`require` is a value: `require(name)`, `require.resolve`, `require.main === module`, and `createRequire(import.meta.url)` in an ES module; a module has one namespace object however many files import it",
+              "A CommonJS file (one that uses `module`/`exports` and has no ES `export`) gets Node's `module` object; `require` of it gives `module.exports`, whatever the file assigned there. An extensionless specifier tries `.ts`, `.js`, `.mjs`, `.cjs`, then a directory's `index.ts`/`index.js`; `global` is `globalThis` in every module",
               "Desugared to the equivalent ES import at parse time, so it resolves and dispatches identically to `import`; interoperates with `import` in the same file",
-              "See [ADR-00369](../adr/00/ADR-00369.md)"
+              "See [ADR-00369](../adr/00/ADR-00369.md), [ADR-01970](../adr/01/ADR-01970.md)"
             ]
           },
           {
@@ -176,9 +181,9 @@
             "feature": "Dynamic `import(...)`",
             "status": "implemented",
             "caveats": [
-              "String-literal specifier only — a runtime-computed `import(expr)` is a clean compile error (all imports resolve at compile time)",
+              "A runtime-computed `import(expr)` can load only a module the importing file also names in a string literal (a relative path, or a builtin module's name; a native program holds only the modules compiled into it); any other specifier rejects with Node's `ERR_MODULE_NOT_FOUND`",
+              "A builtin module's namespace object has no `default` member (`(await import('node:os')).default` is undefined)",
               "Under `-dynamic-import=isolated` the result object exposes the target's **annotated scalar/string exports** only; `function`/`class`/array/object exports are omitted, and an un-annotated export has no field",
-              "`import('node:…')` of a builtin module is a clean compile error",
               "`-dynamic-import=lazy` and `-dynamic-import=isolated` refuse `--static` (a static binary can't `dlopen`); on Windows `lazy` compiles the program's thread-locals emulated (a call per access, [TDD-00254](../tdd/TDD-00254.md))",
               "Under `-dynamic-import=isolated`, an island's sockets, pipes and children are invisible to the importer's event loop: while such an island's top-level `await` is pending, the importer re-polls it every 10 ms instead of waking on the island's fd ([TDD-00225](../tdd/TDD-00225.md)); the island's timers are folded exactly"
             ],
@@ -208,7 +213,7 @@
               "`import fs from 'fs'`, `import * as fs from 'fs'`, and `import { readFileSync } from 'fs'` (including aliasing and combining a default with named specifiers in one statement) all bind through the same scope-aware machinery as a real file import; every Node-named builtin also resolves under the **`node:` prefix** (`import test from 'node:test'` — [ADR-00419](../adr/00/ADR-00419.md))",
               "A local variable of the same name correctly shadows it instead of silently colliding ([TDD-00049](../tdd/TDD-00049.md))",
               "Importing an unknown member is a clean, explicit rejection",
-              "Node-style built-ins require a default, namespace, or named import; `process`/`console` stay ambient by design, matching real Node/JS",
+              "Node-style built-ins require a default, namespace, or named import; `process`/`console` are also globals, as in Node",
               "See [ADR-00141](../adr/00/ADR-00141.md)/[ADR-00142](../adr/00/ADR-00142.md)"
             ]
           }

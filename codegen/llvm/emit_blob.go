@@ -5,8 +5,6 @@ package llvm
 // a Blob made around another body value.
 
 import (
-	"fmt"
-
 	"KlainMainLang/ast"
 )
 
@@ -15,7 +13,7 @@ import (
 func (e *Emitter) blobClass(pos ast.Pos) (Type, error) {
 	cls, ok := e.globalClass("Blob")
 	if !ok {
-		return Type{}, fmt.Errorf("%d:%d: internal: the Blob class is not linked", pos.Line, pos.Col)
+		return Type{}, internalAt(pos, "the Blob class is not linked")
 	}
 	return cls, nil
 }

@@ -200,3 +200,118 @@ console.log(b instanceof Buffer, u instanceof Buffer, b instanceof Uint8Array);
 console.log(a instanceof Buffer, au instanceof Buffer, a instanceof Uint8Array, n instanceof Buffer);
 `)
 }
+
+// Buffer calls with missing or extra arguments behave as Node: extras are
+// evaluated and ignored, a missing required one throws ERR_INVALID_ARG_TYPE.
+func TestE2EBufferArityJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => { try { const r = f(); console.log(n, r); } catch (e) { console.log(n, e.name, e.code, e.message); } };
+t("from0", () => Buffer.from());
+t("from3", () => Buffer.from("ab", "utf8", 9));
+t("alloc0", () => Buffer.alloc());
+t("alloc4", () => Buffer.alloc(2, 1, "utf8", 5));
+t("allocU0", () => Buffer.allocUnsafe().length);
+t("concat0", () => Buffer.concat());
+t("concat3", () => Buffer.concat([Buffer.from("a")], 1, 2));
+t("compare1", () => Buffer.compare(Buffer.from("a")));
+t("compare3", () => Buffer.compare(Buffer.from("a"), Buffer.from("b"), 3));
+t("isBuffer0", () => Buffer.isBuffer());
+t("isBuffer2", () => Buffer.isBuffer(Buffer.from("a"), 1));
+t("byteLength0", () => Buffer.byteLength());
+t("byteLength3", () => Buffer.byteLength("ab", "utf8", 1));
+t("isEncoding0", () => Buffer.isEncoding());
+t("isEncoding2", () => Buffer.isEncoding("hex", 1));
+const b = Buffer.from("abc");
+t("toString4", () => b.toString("utf8", 0, 2, 9));
+t("write0", () => b.write());
+t("write5", () => b.write("x", 0, 1, "utf8", 9));
+t("copy0", () => b.copy());
+t("copy5", () => b.copy(Buffer.alloc(3), 0, 0, 3, 9));
+t("fill0", () => b.fill());
+t("fill5", () => b.fill(1, 0, 1, "utf8", 9));
+t("equals0", () => b.equals());
+t("equals2", () => b.equals(b, 1));
+t("writeUInt8_0", () => b.writeUInt8());
+t("writeUInt8_3", () => b.writeUInt8(1, 0, 9));
+`)
+}
+
+// Buffer's argument forms beyond the plain ones read as Node's do:
+// spread and array-like sources, runtime-checked concat lists, a view's
+// byteLength, copy into a wider view, search from a byteOffset in an
+// encoding, compare over ranges; a bad argument is Node's coded TypeError.
+func TestE2EBufferArgumentFormsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (g) => { try { console.log(g()); } catch (e) { console.log(e.code, e.message); } };
+const a = [1, 2];
+t(() => Buffer.from([...a, 3])); t(() => Buffer.from({ length: 2, 0: 65, 1: 66 }));
+t(() => Buffer.from(5)); t(() => Buffer.from({})); t(() => Buffer.from(new BigInt64Array(1)));
+t(() => Buffer.alloc(2, null)); t(() => Buffer.alloc(2, {})); t(() => Buffer.alloc(2, [1]));
+const l16 = [new Uint16Array([258])];
+t(() => Buffer.concat(l16)); t(() => Buffer.concat([1])); t(() => Buffer.concat(5));
+const mix = [Buffer.from("ab"), new Uint8Array([67])]; t(() => Buffer.concat(mix)); t(() => Buffer.concat(mix, 2));
+t(() => Buffer.concat([new Uint16Array([1]), Buffer.from("a")]));
+t(() => Buffer.byteLength(new Uint16Array(3))); t(() => Buffer.byteLength(new ArrayBuffer(5))); t(() => Buffer.byteLength(new DataView(new ArrayBuffer(4))));
+const c = Buffer.alloc(8); t(() => c.writeBigInt64LE(5));
+const s = Buffer.from("abc"); const u16 = new Uint16Array(2); t(() => s.copy(u16)); console.log(u16); t(() => s.copy([]));
+const h = Buffer.from("héllo hello");
+t(() => [h.indexOf("l", 3), h.indexOf("l", -3), h.indexOf("", 100), h.lastIndexOf("l", 2), h.lastIndexOf("l", 100), h.lastIndexOf("he", -100)]);
+t(() => [h.includes("l", 4, "utf8"), h.indexOf("6c6c", 0, "hex"), h.indexOf("6c6c", "hex"), h.indexOf("o", NaN), h.lastIndexOf("o", NaN)]);
+const x = Buffer.from("abcdef"), y = Buffer.from("cdx");
+t(() => [x.compare(y, 0, 2, 2, 4), x.compare(y, 0, 3, 2, 5), x.compare(y, 1), x.compare(y, 0, 0, 1, 2), x.compare(y, 4)]);
+t(() => x.compare(y, 0, 9)); t(() => x.compare(y, undefined, undefined, 7)); t(() => x.equals(y, 1));
+`)
+}
+
+// A Buffer method named by a key known at run time, on the Buffer itself
+// and through `any`.
+func TestE2EBufferComputedMethodCall(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const buf = Buffer.alloc(8);
+for (const e of ["LE", "BE"]) {
+  buf[`+"`writeBigInt64${e}`"+`](123n, 0);
+  const r = buf[`+"`readBigInt64${e}`"+`](0);
+  console.log(r, r === 123n, buf["readUInt8"](7));
+}
+const k = "readUInt16" + "BE";
+console.log(buf[k](0), buf[k](6));
+try { buf["nope" + k](); } catch (e) { console.log(e.constructor.name); }
+`)
+}
+
+// writeBigInt64*/writeBigUInt64* outside the 64-bit range: Node's
+// ERR_OUT_OF_RANGE, the value left unwritten.
+func TestE2EBufferBigInt64WriteRange(t *testing.T) {
+	assertSameAsNode(t, `const buf = Buffer.alloc(8);
+for (const v of [0x8000000000000000n, -0x8000000000000001n, 5n, -5n]) {
+  try { buf.writeBigInt64LE(v, 0); console.log("ok", buf.readBigInt64LE(0)); }
+  catch (e) { console.log((e as Error).name, (e as any).code, (e as Error).message); }
+}
+for (const v of [-1n, 0x10000000000000000n, 0xffffffffffffffffn, 1234n]) {
+  try { buf.writeBigUInt64BE(v, 0); console.log("ok", buf.readBigUInt64BE(0)); }
+  catch (e) { console.log((e as Error).name, (e as any).code, (e as Error).message); }
+}
+`)
+}
+
+// An array given a prototype (Object.setPrototypeOf): its reads, its
+// prototype and instanceof follow that chain; a constructor given as a
+// function's prototype lends it its statics; Buffer.prototype inherits
+// Uint8Array.prototype.
+func TestE2EArraySetPrototypeOf(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `function T(n) { const u = new Uint8Array(n); Object.setPrototypeOf(u, T.prototype); return u; }
+Object.setPrototypeOf(T.prototype, Buffer.prototype);
+Object.setPrototypeOf(T, Buffer);
+console.log(Object.getPrototypeOf(T) === Buffer, typeof T.from);
+T.prototype.sum = function () { let c = 0; for (let i = 0; i < this.length; i++) c += this[i]; return c; };
+const x = T(3); x[0] = 2; x[2] = 5;
+console.log(x.sum(), x instanceof T, x instanceof Uint8Array, x.length);
+const v = [x][0];
+console.log(v.sum(), Object.getPrototypeOf(v) === T.prototype, v instanceof T, v.constructor === T);
+console.log(Object.getPrototypeOf(Object.getPrototypeOf(v)) === Buffer.prototype);
+v.fill(5);
+console.log(v.sum());
+console.log(typeof Buffer.prototype.fill, Object.getPrototypeOf(Buffer.prototype) === Uint8Array.prototype, Buffer.prototype.constructor === Buffer);
+const b = Buffer.from("ab");
+console.log(Object.getPrototypeOf(b) === Buffer.prototype, b instanceof Buffer);
+`)
+}

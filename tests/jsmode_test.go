@@ -747,3 +747,170 @@ function chk(F) {
 console.log(chk(Function), chk(Object), chk(Array), chk(Map), chk(Error));
 `)
 }
+
+// A function declared twice is its last declaration (hoisting replaces the
+// first), and a loop of bindings reassigned from calls reading each other
+// types without exhausting the checker.
+func TestE2EJSRedeclaredFunctionAndChainedCalls(t *testing.T) {
+	body := strings.Repeat("    a = F(a, b, c, d); d = F(d, a, b, c); c = F(c, d, a, b); b = F(b, c, d, a);\n", 16)
+	src := `function f() { return 1; }
+function f() { return "A"; }
+var r = f();
+console.log(r, typeof r);
+function F(a, b, c, d) { return a + b + c + d; }
+function sum() {
+  var k, a, b, c, d;
+  a = 1; b = 2; c = 3; d = 4;
+  for (k = 0; k < 1; k++) {
+` + body + `  }
+  return (a + b + c + d) % 1000;
+}
+console.log(sum());
+`
+	assertOutputCompatJS(t, src, "A string\n200")
+}
+
+// An object literal whose method returns `this` is one class: an async
+// `yield*` over it reaches its `return` accessor (a link error before).
+func TestE2EJSAsyncYieldStarOverLiteralWithReturnGetter(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `var n = 0;
+var it = {
+  [Symbol.asyncIterator]: function () { return this; },
+  next: function () { n++; return { value: n, done: n > 2 }; },
+  get return() { return null; },
+};
+async function* g() { yield* it; }
+(async () => { for await (const v of g()) console.log(v); })();
+`)
+}
+
+// A function expression reading a name declared only in an earlier, closed
+// block reads the global: "is not defined", not the block's dead binding.
+func TestE2EJSClosedBlockLetUnseenByLaterFunction(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `try { { let xx = 18; throw 25; } } catch (e) {
+  (function () { try { console.log(xx); } catch (e2) { console.log(e2 instanceof ReferenceError, e2.message); } })();
+}
+{ let yy = 1; }
+(function () { try { console.log(yy); } catch (e) { console.log(e.message); } })();
+`)
+}
+
+// A Map or Set seeded with pairs whose values differ in kind (an array, a
+// string) keeps each value as given.
+func TestE2EJSMapSeedMixedValueKinds(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `const m = new Map([[1, [1, 2]], [2, "x"]]);
+console.log(m.get(1), m.get(2));
+const s = new Set([[1, "a"], ["b", 2]]);
+console.log(s.size, [...s]);
+console.log("a,b,c".split({ toString: function () { return ","; } }).length);
+`)
+}
+
+func TestE2EModuleThis(t *testing.T) {
+	// A module's own `this`, read at its top level or by an arrow there:
+	// CommonJS's module.exports (one object) in a script, as Node runs it.
+	assertSameAsNodeCompatJS(t, `const f = () => this;
+console.log(typeof f(), f() === undefined, f() === f());
+const g = () => () => this;
+console.log(g()() === f(), typeof this);
+`)
+	// undefined in an ES module, in either lane.
+	assertSameAsNode(t, `export {};
+const f = () => this;
+console.log(typeof f(), f() === undefined);
+`)
+}
+
+func TestStrictArrowCapturesGlobalThis(t *testing.T) {
+	// A script's top-level arrow capturing `this` is tsc's TS7041.
+	_, err := parseAndCompile(`const f = () => this;
+console.log(typeof f());
+`)
+	if err == nil || !strings.Contains(err.Error(), "captures the global value of 'this'") {
+		t.Fatalf("expected TS7041, got: %v", err)
+	}
+}
+
+// A var declared again with a value of another type, or an array binding
+// assigned a scalar (and back), holds each in turn.
+func TestE2EVarRedeclaredOtherType(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `var a = [2n, 1];
+for (var x of a) console.log(x);
+var a = [3, 1][0];
+console.log(a);
+var b = [2, 1];
+for (var x of b) console.log(x);
+var b = "s";
+console.log(b);
+let lx = [1, 2]; console.log(lx.length); lx = 5; console.log(lx);
+var y = "s"; y = [3]; console.log(y[0]);
+var q = [2n, Symbol("z")];
+for (var e of q) console.log(typeof e);
+var q = Symbol("w"); console.log(q.toString());
+`)
+}
+
+// A builtin called with fewer arguments than it declares reads undefined
+// for each missing one, and one called with more still evaluates the rest,
+// in order: Math/Number helpers and a generator's .throw().
+func TestE2EBuiltinArgumentCountJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+console.log(Math.abs(), Math.abs(-2.5, console.log("x")), Math.imul(3), Math.imul(3, 4, console.log("y")), isNaN(), Math.sign(-3, 1), Math.atan2(1), Number.isInteger(), parseFloat("2.5", 9), Math.clz32());
+function* g() { try { yield 1; } catch (e) { console.log("caught", e); yield 2; } }
+const it = g(); it.next(); console.log(it.throw());
+const j = g(); j.next(); console.log(j.throw(5, console.log("side")));
+`)
+}
+
+// A function declaration in an object literal's method, hoisted as in any
+// function body, and a parameter's eval declaring a var the body shadows.
+func TestE2EObjectMethodNestedFunctionJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+let o = {
+  f() { return y(); function y() { return 3; } },
+  g() { function arguments() { return 4; } return typeof arguments; },
+  h(p = eval("var x = 1")) { function x() {} return typeof x; },
+  k: function (p = eval("var z = 2")) { return z; },
+  n: 1,
+};
+o.m = 2;
+console.log(o.f(), o.g(), o.h(), o.k());
+`)
+}
+
+// `delete` of what is not a deletable property: a declared binding (false),
+// a non-reference (its operand runs; true), a builtin constant (false, or
+// strict code's TypeError), and a null or undefined base (TypeError).
+func TestE2EDeleteNonPropertiesJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+var x = 1; function f() {} class K {}
+var n = 0;
+console.log(delete x, delete f, delete K, delete undeclaredName, delete 0, delete delete x, delete (n++, 5), n, x);
+console.log(delete Math.LN2, delete Number.MAX_VALUE);
+(function () { "use strict"; try { delete Math.PI; } catch (e) { console.log(e.constructor.name, e.message); } })();
+var base = null, u;
+try { delete base.prop; } catch (e) { console.log(e.constructor.name, e.message); }
+try { delete u[1]; } catch (e) { console.log(e.constructor.name, e.message); }
+`)
+}
+
+// The strict lane reports tsc's delete-operand errors: TS2703, TS2704,
+// TS2790.
+func TestE2EDeleteOperandStrict(t *testing.T) {
+	assertCLICompileError(t, false, "console.log(delete 0);\n", "must be a property reference")
+	assertCLICompileError(t, false, "console.log(delete Math.PI);\n", "cannot be a read-only property")
+	assertCLICompileError(t, false, "const o = { a: 1 }; delete o.a; console.log(o);\n", "must be optional")
+}
+
+// Deleting a class field with no initializer (a boxed slot), or one keyed
+// at run time, removes its own key.
+func TestE2EDeleteBoxedClassFieldJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+var k = "h";
+class C { f = 1; g; [k]; }
+let c = new C();
+console.log(Object.keys(c));
+delete c.g; delete c.h;
+console.log(c.hasOwnProperty("g"), c.hasOwnProperty("h"), "g" in c, Object.keys(c), c.g);
+`)
+}

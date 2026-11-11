@@ -2,9 +2,8 @@
 // TDD-00040): libcurl's multi interface driven by the event loop, the
 // abort scan, the single/group/settled/headers waits and the Response
 // header and status helpers. The routines live in fetchsrc/fetch.c and
-// fetchsrc/fetch_stream.c (TDD-00240); this file declares them, defines the
-// by-value wrappers the C ABI cannot express, and picks which sections of
-// the C unit a program links (FetchCFlags).
+// fetchsrc/fetch_stream.c (TDD-00240); this file declares them and picks
+// which sections of the C unit a program links (FetchCFlags).
 //
 // A pending fetch is a malloc'd { ptr easy, ptr buf, i64 done, i64
 // httpStatus, i64 curlResult, ptr signal, i64 headersDone, ptr bodyStream,
@@ -17,6 +16,7 @@ package llvm
 import (
 	_ "embed"
 	"fmt"
+	"strings"
 )
 
 //go:embed fetchsrc/fetch.c
@@ -42,7 +42,7 @@ func (e *Emitter) FetchCFlags() []string {
 		fmt.Sprintf("-DKML_ERR_FLAG=%dLL", errorTypeIDFlag),
 		fmt.Sprintf("-DKML_RS_STATE=%d", rsOffs[0]),
 		fmt.Sprintf("-DKML_RS_RH=%d", rsOffs[14]),
-		fmt.Sprintf("-DKML_RS_RL=%d", rsOffs[15])), DeadStripFlags(e.exportsRuntime())...)
+		fmt.Sprintf("-DKML_RS_RL=%d", rsOffs[15])), append(e.signalCFlags(), DeadStripFlags(e.exportsRuntime())...)...)
 }
 
 // ensureFetch declares the curl_easy_* primitives and the pieces shared by
@@ -55,25 +55,18 @@ func (e *Emitter) ensureFetch() {
 	}
 	e.usedFetch = true
 	e.requireLink("curl")
-	e.ensureMalloc()
-	e.ensureCalloc()
-	e.ensureRealloc()
-	e.ensureMemcpy()
+	// fetch.c drives its transfers on the event loop (loop.c's handles,
+	// timers.c's clock).
+	e.ensureEventLoop()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.ensureExceptionHelpers()
 	// A failure's cause (fetch.c): the system error's code and errno, a
 	// boxed Error, the lookup's hostname in the extra bag.
-	e.ensureErrnoCode()
 	e.ensureNanBox()
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 
-	e.emitGlobal("declare void @curl_global_init(i64 noundef)")
-	e.emitGlobal("declare ptr @curl_easy_init()")
-	e.emitGlobal("declare i32 @curl_easy_setopt(ptr noundef, i32 noundef, ...)")
-	e.emitGlobal("declare i32 @curl_easy_perform(ptr noundef)")
-	e.emitGlobal("declare i32 @curl_easy_getinfo(ptr noundef, i32 noundef, ...)")
-	e.emitGlobal("declare void @curl_easy_cleanup(ptr noundef)")
-	e.emitGlobal("declare ptr @curl_easy_strerror(i32 noundef)")
 	// The names and messages fetch's errors carry, interned here so the C
 	// reads them (an error's name is compared by address).
 	strs := []string{"TypeError", "AbortError", "The operation was aborted", "TimeoutError",
@@ -83,17 +76,13 @@ func (e *Emitter) ensureFetch() {
 		if i > 0 {
 			refs += ", "
 		}
-		refs += "ptr " + e.internString(s)
+		refs += irPtr + " " + e.internString(s)
 	}
 	// hooks.c holds them; the hooks constructor fills them in.
-	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs.ir = private constant [%d x ptr] [%s], align 8", len(strs), refs))
-	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs = external global [%d x ptr], align 8", len(strs)))
-	e.ensureMemcpy()
-	e.addHookInit(fmt.Sprintf("  call ptr @memcpy(ptr @__kml_fetch_strs, ptr @__kml_fetch_strs.ir, i64 %d)\n", 8*len(strs)))
+	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs.ir = private"+irGlobalAS+" constant [%d x "+irPtr+"] [%s], align 8", len(strs), refs))
+	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs = external"+irGlobalAS+" global [%d x "+irPtr+"], align 8", len(strs)))
+	e.addHookInit(fmt.Sprintf("  call "+irPtr+" @memcpy("+irPtr+" @__kml_fetch_strs, "+irPtr+" @__kml_fetch_strs.ir, i64 %d)\n", 8*len(strs)))
 	// Read by the worker pre-init (emitter.go) and fetch.c.
-	e.emitGlobal("@__kml_curl_inited = external global i1, align 1")
-	e.emitGlobal(`declare ptr @__kml_fetch_errstr(i32)
-declare ptr @__kml_fetch_failed_pending(i64)`)
 }
 
 // ensureFetchAsync declares everything a real, non-blocking `await
@@ -120,175 +109,21 @@ func (e *Emitter) ensureFetchAsync() {
 	e.noteLoopTurn() // the main-stack waits take turns of the real loop
 	e.ensureFetch()
 	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
-	e.ensureFiberRuntime()
-	e.ensureCurrentTaskGlobal() // @__kml_current_task, read by the task-park path
 	e.ensureExceptionHelpers()
 	e.ensureSignalAborted() // __kml_signal_aborted, used by the await abort check (TDD-00081)
 	e.ensureNanBox()        // __kml_nb_tag/__kml_nb_pay, to throw the boxed signal.reason on abort
 
-	e.emitGlobal("declare ptr @curl_multi_init()")
-	e.emitGlobal("declare i32 @curl_multi_add_handle(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i32 @curl_multi_remove_handle(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare i32 @curl_multi_timeout(ptr noundef, ptr noundef)")
-	e.emitGlobal("declare ptr @curl_multi_info_read(ptr noundef, ptr noundef)")
 	// The one CURLM handle, created on first use; the HTTP client reads it too.
-	e.emitGlobal("@__kml_curl_multi = external thread_local global ptr, align 8")
-	e.emitGlobal(`declare ptr @__kml_fetch_async(ptr, ptr, ptr, ptr, ptr)
-declare ptr @__kml_fetch_async_n(ptr, ptr, ptr, ptr, i64, ptr)
-declare void @__kml_curl_drain_messages()
-declare i32 @__kml_curl_inflight()
-declare zeroext i1 @__kml_fetch_pump()
-declare void @__kml_sigfetch_add(ptr)
-declare void @__kml_sigfetch_scan()
-declare void @__kml_fetch_abort_now(ptr)
-declare void @__kml_fetch_throw_abort(ptr)
-declare void @__kml_pending_finish_c(ptr, ptr)
-declare void @__kml_await_fetch_c(ptr, ptr)`)
-	// The {status, body, len} aggregate cannot cross the C ABI by value: the
-	// C routines fill an out-param, these keep the by-value signatures the
-	// call sites use.
-	e.emitGlobal(`define { i64, ptr, i64 } @__kml_pending_finish(ptr %pending) {
-entry:
-  %o = alloca { i64, ptr, i64 }, align 8
-  call void @__kml_pending_finish_c(ptr %pending, ptr %o)
-  %r = load { i64, ptr, i64 }, ptr %o, align 8
-  ret { i64, ptr, i64 } %r
 }
 
-define { i64, ptr, i64 } @__kml_await_fetch(ptr %pending) {
-entry:
-  %o = alloca { i64, ptr, i64 }, align 8
-  call void @__kml_await_fetch_c(ptr %pending, ptr %o)
-  %r = load { i64, ptr, i64 }, ptr %o, align 8
-  ret { i64, ptr, i64 } %r
-}`)
-}
-
-// ensureAwaitFetchHeaders declares @__kml_await_fetch_headers (TDD-00097
-// Stage 4): drive the multi loop until the response's headers have arrived
-// or the transfer is done, then return the HTTP status — the
-// resolve-at-headers point `await fetch(...)` uses, so `.body` can stream
-// the rest. Also brings in @__kml_fetch_pump, the no-fiber await drive's
-// hook (a no-op stub is emitted at finalize when fetch is unused).
-func (e *Emitter) ensureAwaitFetchHeaders() {
-	if e.usedAwaitFetchHeaders {
-		return
-	}
-	e.usedAwaitFetchHeaders = true
-	e.ensureFetchAsync()
-	e.ensureMicrotasks()
-	e.emitGlobal("declare i64 @__kml_await_fetch_headers(ptr)")
-}
-
-// ensureCurlSlist declares curl_slist_append (ADR-00074/TDD-00017) —
-// emit_fetch.go's buildFetchHeaderList calls it once per Map<string,string>
-// entry to build the linked list CURLOPT_HTTPHEADER expects. The built list
-// is never freed in manual mode, like every other fetch-related allocation
-// (-mm=gc is the opt-in fix, TDD-00001).
-func (e *Emitter) ensureCurlSlist() {
-	if e.usedCurlSlist {
-		return
-	}
-	e.usedCurlSlist = true
-	e.requireLink("curl")
-	e.emitGlobal("declare ptr @curl_slist_append(ptr noundef, ptr noundef)")
-}
-
-// ensurePendingFinishSettled declares __kml_pending_finish_settled(ptr
-// pending) -> {i1 failed, i64 status, ptr body, ptr reasonMsg, i64 bodyLen}:
-// a non-throwing sibling of __kml_pending_finish for Promise.allSettled and
-// XMLHttpRequest.send() (TDD-00040). On failure reasonMsg is curl's message
-// and bodyLen 0.
-func (e *Emitter) ensurePendingFinishSettled() {
-	if e.usedPendingFinishSettled {
-		return
-	}
-	e.usedPendingFinishSettled = true
-	e.ensureFetch()
-	e.emitGlobal(`declare void @__kml_pending_finish_settled_c(ptr, ptr)
-
-define { i1, i64, ptr, ptr, i64 } @__kml_pending_finish_settled(ptr %pending) {
-entry:
-  %o = alloca { i1, i64, ptr, ptr, i64 }, align 8
-  call void @__kml_pending_finish_settled_c(ptr %pending, ptr %o)
-  %r = load { i1, i64, ptr, ptr, i64 }, ptr %o, align 8
-  ret { i1, i64, ptr, ptr, i64 } %r
-}`)
-}
-
-// ensureFetchAwaitSettled declares __kml_await_fetch_settled(ptr pending) ->
-// the settled result (TDD-00040): __kml_await_fetch's wait finishing without
-// throwing — XMLHttpRequest.send()'s whole transfer mechanism, which never
-// throws on a network failure (it fires .onerror instead).
-func (e *Emitter) ensureFetchAwaitSettled() {
-	if e.usedFetchAwaitSettled {
-		return
-	}
-	e.usedFetchAwaitSettled = true
-	e.ensureFetchAsync()
-	e.ensurePendingFinishSettled()
-	e.emitGlobal(`declare void @__kml_await_fetch_settled_c(ptr, ptr)
-
-define { i1, i64, ptr, ptr, i64 } @__kml_await_fetch_settled(ptr %pending) {
-entry:
-  %o = alloca { i1, i64, ptr, ptr, i64 }, align 8
-  call void @__kml_await_fetch_settled_c(ptr %pending, ptr %o)
-  %r = load { i1, i64, ptr, ptr, i64 }, ptr %o, align 8
-  ret { i1, i64, ptr, ptr, i64 } %r
-}`)
-}
-
-// ensureFetchHeadersRaw declares __kml_fetch_headers_raw: a Response's
-// captured raw header text (every response's block of a redirect chain
-// included) as a string, "" for a Response with none. Headers' #fillRaw
-// parses it.
-func (e *Emitter) ensureFetchHeadersRaw() {
-	if e.usedFetchHeadersRaw {
-		return
-	}
-	e.usedFetchHeadersRaw = true
-	e.ensureFetch()
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal("declare ptr @__kml_fetch_headers_raw(ptr)")
-}
-
-// ensureFetchHeadersMap declares __kml_fetch_headers_map (ADR-00490): lazily
-// parses a Response's captured raw header text into a Map<string,string> with
-// lowercased keys, matching the Fetch spec's Headers case rule.
-func (e *Emitter) ensureFetchHeadersMap() {
-	if e.usedFetchHeadersMap {
-		return
-	}
-	e.usedFetchHeadersMap = true
-	e.ensureFetch()
-	e.ensureMapStrHelpers()
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal("declare ptr @__kml_fetch_headers_map(ptr)")
-}
-
-// ensureFetchStatusText declares __kml_fetch_status_text: a fetched
-// Response's statusText, the reason phrase of the last status line in its
-// captured headers, or "" when there is none (HTTP/2 sends no reason phrase)
-// or the Response was not fetched.
-func (e *Emitter) ensureFetchStatusText() {
-	if e.fnDecls["__kml_fetch_status_text"] {
-		return
-	}
-	e.fnDecls["__kml_fetch_status_text"] = true
-	e.ensureFetch()
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal("declare ptr @__kml_fetch_status_text(ptr)")
-}
-
-// ensureXHRHeadersAll declares __kml_xhr_headers_all (ADR-00490): serializes
-// a parsed response-header map into getAllResponseHeaders()'s "name:
-// value\r\n" text, in stored (arrival) order; a null map yields "".
-func (e *Emitter) ensureXHRHeadersAll() {
-	if e.usedXHRHeadersAll {
-		return
-	}
-	e.usedXHRHeadersAll = true
-	e.ensureMapStrHelpers()
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal("declare ptr @__kml_xhr_headers_all(ptr)")
+// emitOutAggCall calls C routine fn, which writes an aggregate of type agg
+// through its last (out) parameter, and returns the aggregate's register: an
+// aggregate this size cannot cross the C ABI by value.
+func (e *Emitter) emitOutAggCall(fn, agg string, args ...string) string {
+	o := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", o, agg))
+	e.emitInstr(fmt.Sprintf("call void @%s(%s, "+irPtr+" %s)", fn, strings.Join(args, ", "), o))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, agg, o))
+	return r
 }

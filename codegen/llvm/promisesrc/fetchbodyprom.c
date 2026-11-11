@@ -29,7 +29,7 @@ void __kml_fbp_invoke(void *closure) {
     void *env = F(closure, KML_CLOSURE_ENV, void *);
     fn(env);
     kml_free(KML_HEAP_WORDS, env);
-    kml_free(KML_HEAP_WORDS, closure);
+    kml_free(KML_HEAP_WORDS, KML_PREFIX(closure));
 }
 
 /* Settle now when the body is already complete (pending null, or done set),

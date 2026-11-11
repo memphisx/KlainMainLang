@@ -65,7 +65,7 @@ console.log(factorial(30n)); // 265252859812191058636308480000000
 console.log((255n).toString(16)); // ff
 console.log((5n).toString(2)); // 101
 
-// Division by zero is a catchable Error, not a crash.
+// Division by zero is a catchable RangeError, not a crash.
 try {
   const zero = 0n;
   console.log(1n / zero);

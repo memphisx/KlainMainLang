@@ -6,7 +6,7 @@ export * from './internal_fs';
 import {
     access as pAccess, appendFile as pAppendFile, chmod as pChmod, chown as pChown, copyFile as pCopyFile,
     lchown as pLchown, lutimes as pLutimes, link as pLink, lstat as pLstat, mkdir as pMkdir, mkdtemp as pMkdtemp,
-    open as pOpen, readdir as pReaddir, readFile as pReadFile, readlink as pReadlink, realpath as pRealpath,
+    open as pOpen, opendir as pOpendir, readdir as pReaddir, readFile as pReadFile, readlink as pReadlink, realpath as pRealpath,
     rename as pRename, rm as pRm, rmdir as pRmdir, stat as pStat, statfs as pStatfs, symlink as pSymlink,
     truncate as pTruncate, unlink as pUnlink, utimes as pUtimes, writeFile as pWriteFile, constants as pConstants,
 } from './internal_fs_promises';
@@ -25,6 +25,7 @@ export const promises = {
     mkdir: pMkdir,
     mkdtemp: pMkdtemp,
     open: pOpen,
+    opendir: pOpendir,
     readdir: pReaddir,
     readFile: pReadFile,
     readlink: pReadlink,

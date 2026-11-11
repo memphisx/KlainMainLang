@@ -23,18 +23,6 @@ const (
 	pattrNotConfigurable = 4
 )
 
-func (e *Emitter) ensurePropAttr() {
-	if e.usedPropAttr {
-		return
-	}
-	e.usedPropAttr = true
-	e.usedCollections = true
-	e.ensureMapNumHelpers()
-	e.emitGlobal("declare i64 @__kml_pattr_attrs(ptr, ptr)")
-	e.emitGlobal("declare i64 @__kml_pattr_define(ptr, ptr, i64, i64, i64, i64)")
-	e.emitGlobal("declare void @__kml_pattr_forget(ptr, ptr)")
-}
-
 // propAttrsUsed reports whether the program defines a property anywhere
 // (Object.defineProperty / defineProperties, Reflect.defineProperty): only
 // then can a static object's property have an attribute other than the
@@ -67,9 +55,8 @@ func (e *Emitter) propAttrsUsed() bool {
 
 // emitPropAttrs is the attribute bits of obj's property name.
 func (e *Emitter) emitPropAttrs(obj, name string) string {
-	e.ensurePropAttr()
 	a := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_attrs(ptr %s, ptr %s)", a, obj, e.internString(name)))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_attrs("+irPtr+" %s, "+irPtr+" %s)", a, obj, e.internString(name)))
 	return a
 }
 
@@ -134,7 +121,7 @@ func (e *Emitter) emitDeleteConfigurableCheck(obj string, objTy Type, name strin
 	e.emitLabel(badL)
 	e.emitThrowTypeError(fmt.Sprintf("Cannot delete property '%s' of %s", name, objectTagFor(objTy)))
 	e.emitLabel(okL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_pattr_forget(ptr %s, ptr %s)", obj, e.internString(name)))
+	e.emitInstr(fmt.Sprintf("call void @__kml_pattr_forget("+irPtr+" %s, "+irPtr+" %s)", obj, e.internString(name)))
 }
 
 // objectTagFor is V8's `#<Name>` for an object in an error message.
@@ -150,15 +137,8 @@ func objectTagFor(t Type) string {
 // object's record (validated as ValidateAndApplyPropertyDescriptor does), its
 // value into the field, and the key exists afterwards.
 func (e *Emitter) emitStaticDefineProperty(obj Value, f Field, descExpr ast.Expression, pos ast.Pos) (Value, error) {
-	if lit, ok := descExpr.(*ast.ObjectLiteral); ok {
-		for _, p := range lit.Properties {
-			if p.Key == "get" || p.Key == "set" {
-				return Value{}, fmt.Errorf("%d:%d: Object.defineProperty: an accessor on a declared field of a typed object is not supported; type the object as any", pos.Line, pos.Col)
-			}
-		}
-	}
-	e.ensurePropAttr()
-	e.ensureObjectIs()
+	e.ensureBoxedBigIntHooks()
+	e.ensureFnMeta()
 	descBag, err := e.emitDynBagOrThrow(descExpr, "Object.defineProperty (descriptor)", pos)
 	if err != nil {
 		return Value{}, err
@@ -180,7 +160,7 @@ func (e *Emitter) emitStaticDefineProperty(obj Value, f Field, descExpr ast.Expr
 	has := bits(wP, eP, cP)
 	val := bits(wV, eV, cV)
 	valBox := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", valBox, descBag, e.internString("value")))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", valBox, descBag, e.internString("value")))
 	vP := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", vP, valBox, nbUndefined))
 	present, cur := e.emitFieldPresent(obj.Ref, obj.Ty, f)
@@ -196,7 +176,7 @@ func (e *Emitter) emitStaticDefineProperty(obj Value, f Field, descExpr ast.Expr
 	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", existed, present))
 	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", sameW, sameAny))
 	rej, bad := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_define(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s, i64 %s)", rej, obj.Ref, e.internString(f.Name), has, val, existed, sameW))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_define("+irPtr+" %s, "+irPtr+" %s, i64 %s, i64 %s, i64 %s, i64 %s)", rej, obj.Ref, e.internString(f.Name), has, val, existed, sameW))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", bad, rej))
 	badL, okL := e.freshLabel("defprop.redef"), e.freshLabel("defprop.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
@@ -240,9 +220,9 @@ func (e *Emitter) andEnumerable(present, obj, name string) string {
 // (boxed, undefined when the descriptor gives none) is stored: a rejected
 // redefinition throws the TypeError and stores nothing.
 func (e *Emitter) emitErrorDefineAttrs(errPtr, keyRef, descBag, v string) {
-	e.ensurePropAttr()
-	e.ensureObjectIs()
-	e.declareFn("__kml_error_own_desc", "declare i64 @__kml_error_own_desc(ptr, ptr)")
+	e.ensureBoxedBigIntHooks()
+	e.ensureFnMeta()
+	e.declareFn("__kml_error_own_desc", "declare i64 @__kml_error_own_desc("+irPtr+", "+irPtr+")")
 	wP, wV := e.descFieldBool(descBag, "writable")
 	eP, eV := e.descFieldBool(descBag, "enumerable")
 	cP, cV := e.descFieldBool(descBag, "configurable")
@@ -260,25 +240,25 @@ func (e *Emitter) emitErrorDefineAttrs(errPtr, keyRef, descBag, v string) {
 	has, val := bits(wP, eP, cP), bits(wV, eV, cV)
 	// The key's current descriptor: whether it exists, and its value.
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_error_own_desc(ptr %s, ptr %s)", cur, errPtr, keyRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_error_own_desc("+irPtr+" %s, "+irPtr+" %s)", cur, errPtr, keyRef))
 	ex, existed := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", ex, cur, nbUndefined))
 	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", existed, ex))
 	_, curPay := e.emitUnboxTagPayload(Value{Ref: cur, Ty: TypeAny})
 	curBag, old := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr null", curBag, ex, e.emitIntToPtr(curPay)))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", curBag, ex, e.emitIntToPtr(curPay)))
 	oldSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", oldSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, oldSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, oldSlot))
 	rdL, rdDone := e.freshLabel("errdef.old"), e.freshLabel("errdef.olddone")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ex, rdL, rdDone))
 	e.emitLabel(rdL)
 	ov := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", ov, curBag, e.internString("value")))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", ov, oldSlot))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", ov, curBag, e.internString("value")))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ov, oldSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", rdDone))
 	e.emitLabel(rdDone)
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", old, oldSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", old, oldSlot))
 	vP, notV, same, sameAny, sameW := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", vP, v, nbUndefined))
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notV, vP))
@@ -286,7 +266,7 @@ func (e *Emitter) emitErrorDefineAttrs(errPtr, keyRef, descBag, v string) {
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", sameAny, same, notV))
 	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", sameW, sameAny))
 	rej, bad := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_define(ptr %s, ptr %s, i64 %s, i64 %s, i64 %s, i64 %s)", rej, errPtr, keyRef, has, val, existed, sameW))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_define("+irPtr+" %s, "+irPtr+" %s, i64 %s, i64 %s, i64 %s, i64 %s)", rej, errPtr, keyRef, has, val, existed, sameW))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", bad, rej))
 	badL, okL := e.freshLabel("errdef.redef"), e.freshLabel("errdef.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
@@ -300,7 +280,6 @@ func (e *Emitter) emitErrorDefineAttrs(errPtr, keyRef, descBag, v string) {
 // made non-configurable throws the strict-mode TypeError, any other forgets
 // its attributes.
 func (e *Emitter) emitDynDeleteConfigurableCheck(tag, payload, keyRef string) {
-	e.ensurePropAttr()
 	isObj := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
 	objL, doneL := e.freshLabel("dyndel.attrs"), e.freshLabel("dyndel.attrsdone")
@@ -308,7 +287,7 @@ func (e *Emitter) emitDynDeleteConfigurableCheck(tag, payload, keyRef string) {
 	e.emitLabel(objL)
 	obj := e.emitIntToPtr(payload)
 	a, m, nc := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_attrs(ptr %s, ptr %s)", a, obj, keyRef))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_pattr_attrs("+irPtr+" %s, "+irPtr+" %s)", a, obj, keyRef))
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", m, a, pattrNotConfigurable))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", nc, m))
 	badL, okL := e.freshLabel("dyndel.nc"), e.freshLabel("dyndel.ok")
@@ -322,7 +301,7 @@ func (e *Emitter) emitDynDeleteConfigurableCheck(tag, payload, keyRef string) {
 	if s, err := e.emitErrorToString(Value{Ref: errPtr, Ty: errorObjType}); err == nil {
 		errName = s.Ref
 	}
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", name, isErr, errName, e.internString("#<Object>")))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", name, isErr, errName, e.internString("#<Object>")))
 	msg := Value{Ref: e.internString("Cannot delete property '"), Ty: TypePtr}
 	for _, part := range []string{keyRef, e.internString("' of "), name} {
 		if m2, err := e.emitStringConcat(msg, Value{Ref: part, Ty: TypePtr}); err == nil {
@@ -331,7 +310,7 @@ func (e *Emitter) emitDynDeleteConfigurableCheck(tag, payload, keyRef string) {
 	}
 	e.emitThrowTypeErrorValue(msg.Ref)
 	e.emitLabel(okL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_pattr_forget(ptr %s, ptr %s)", obj, keyRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_pattr_forget("+irPtr+" %s, "+irPtr+" %s)", obj, keyRef))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 }

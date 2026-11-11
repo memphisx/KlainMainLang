@@ -328,8 +328,8 @@ for (let i = 0; i < 3; i++) {
 	if err == nil {
 		t.Fatal("expected a compile error for a bare break inside a closure nested in a loop, got none")
 	}
-	if !strings.Contains(err.Error(), "break statement outside of loop") {
-		t.Fatalf("expected 'break statement outside of loop', got: %v", err)
+	if !strings.Contains(err.Error(), "jump target cannot cross function boundary") {
+		t.Fatalf("expected 'jump target cannot cross function boundary', got: %v", err)
 	}
 }
 
@@ -540,4 +540,54 @@ function f(): number {
 }
 console.log("fn " + f())
 `, "top 3\ncatch 10\nfinally 10 1\ntwice 5\nif 8\nfn 4")
+}
+
+func TestE2ELabeledNonLoopAndStacked(t *testing.T) {
+	// Any labeled statement is a break target (a block, an if, a switch,
+	// a try), and stacked labels all name the loop they prefix.
+	assertSameAsNode(t, `target: {
+  console.log("a");
+  if (Math.random() >= 0) break target;
+  console.log("never");
+}
+outer: inner: for (let i = 0; i < 3; i++) {
+  for (let j = 0; j < 3; j++) {
+    if (j === 1) continue outer;
+    if (i === 2) break inner;
+    console.log(i, j);
+  }
+}
+sw: switch (2) {
+  case 2:
+    for (let k = 0; k < 5; k++) { if (k === 1) break sw; console.log("k", k); }
+    console.log("never2");
+}
+blk: try { console.log("t"); break blk; } finally { console.log("f"); }
+lab: if (true) { console.log("if"); break lab; }
+console.log("end");
+`)
+}
+
+func TestE2ECollectionLoopContinue(t *testing.T) {
+	// continue (plain or labeled) keeps walking a Set or Map: only leaving
+	// the loop closes its iterator.
+	assertSameAsNode(t, `const st = new Set([1, 2, 3]);
+const m = new Map([["a", 1], ["b", 2]]);
+function* gen() { yield 1; yield 2; }
+a: for (const x of [1, 2, 3]) { for (const y of [1, 2]) { if (y === 2) continue a; console.log("arr", x, y); } }
+b: for (const [k, v] of m) { for (const y of [1, 2]) { if (y === 2) continue b; console.log("map", k, v); } }
+c: for (const ch of "xy") { for (const y of [1, 2]) { if (y === 2) continue c; console.log("str", ch); } }
+d: for (const k in { p: 1, q: 2 }) { for (const y of [1, 2]) { if (y === 2) continue d; console.log("in", k); } }
+e: for (const s of st) { for (const y of [1, 2]) { if (y === 2) continue e; console.log("set", s); } }
+f: for (const g of gen()) { for (const y of [1, 2]) { if (y === 2) continue f; console.log("gen", g); } }
+let n = 0;
+w: do { n++; for (const y of [1, 2]) { if (y === 2) continue w; console.log("do", n); } } while (n < 2);
+for (const s of st) { if (s === 2) break; console.log("b", s); }
+o: for (const s of st) { for (const [k] of m) { if (k === "b") continue o; if (s === 3) break o; console.log(s, k); } }
+function f() { for (const s of st) { if (s === 2) return s; } return 0; }
+console.log(f(), f());
+for (const s of st) { try { if (s === 2) continue; console.log("t", s); } finally { console.log("fin", s); } }
+st.add(4);
+for (const s of st) { if (s % 2) continue; console.log("even", s); }
+`)
 }

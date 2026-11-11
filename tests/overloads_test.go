@@ -141,16 +141,19 @@ console.log(apply((n: number): string => "n=" + String(n), 5));
 `, "n=5")
 }
 
-func TestE2EObjectTypeCallSignatureMixedIsError(t *testing.T) {
-	_, err := parseAndCompile(`
-const x: { (n: number): string; extra: number } = null;
+// A call signature beside other members is a function object carrying
+// them, as JavaScript holds one.
+func TestE2EObjectTypeCallSignatureWithMembers(t *testing.T) {
+	assertSameAsNode(t, `interface G { (x: number): number; label: string; reset(): void }
+function mk(): G { const f = ((x: number) => x * 3) as G; f.label = "triple"; f.reset = () => console.log("reset", f.label); return f; }
+const g = mk();
+console.log(g(2), g.label, typeof g);
+g.reset();
+const arr: G[] = [g];
+console.log(arr[0](5));
+const h: { (): { n: number }; tag: string } = Object.assign(() => ({ n: 4 }), { tag: "q" });
+console.log(h().n * 2, h.tag);
 `)
-	if err == nil {
-		t.Fatal("expected a parse error for a call signature mixed with other members")
-	}
-	if !strings.Contains(err.Error(), "call signature combined with other object-type members") {
-		t.Errorf("unexpected error message: %v", err)
-	}
 }
 
 // --- numeric-literal types + string enum member names (ADR-00459) ---

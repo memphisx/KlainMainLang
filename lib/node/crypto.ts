@@ -387,7 +387,17 @@ export function randomInt(a: any, b?: any, c?: any): any {
     process.nextTick(() => { callback(undefined, v); });
 }
 
-export function randomUUID(options?: { disableEntropyCache?: boolean }): UUID {
+export function randomUUID(options?: { disableEntropyCache?: boolean }): UUID;
+export function randomUUID(options?: any): UUID {
+    // Node's validateObject/validateBoolean: a JavaScript caller may pass
+    // any value.
+    if (options !== undefined) {
+        validateObject(options, 'options');
+        const d = options.disableEntropyCache;
+        if (d !== undefined && typeof d !== 'boolean') {
+            throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "options.disableEntropyCache" property must be of type boolean. ' + received(d));
+        }
+    }
     return globalThis.crypto.randomUUID() as UUID;
 }
 

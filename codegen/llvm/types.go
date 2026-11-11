@@ -26,7 +26,7 @@ type Type struct {
 	Kind reprKind
 	// Absent is which absent values the representation holds (absence.go).
 	Absent      absence
-	IR          string // e.g. "i64", "i32", "float", "double", "i1", "ptr"
+	IR          string // e.g. "i64", "i32", "float", "double", "i1", irPtr
 	Signed      bool
 	Float       bool
 	ElemType    *Type   // non-nil when IsArray
@@ -92,7 +92,7 @@ type Type struct {
 	// e.g. Promise.race's Response branch), as opposed to every other
 	// Promise<Response> — a plain fetch() call — whose slot holds a still-
 	// pending fetch handle to be waited on. Both share the exact same static
-	// type (IsResponse=true) and IR ("ptr"), so emitAwait's IsResponse
+	// type (IsResponse=true) and IR (irPtr), so emitAwait's IsResponse
 	// branch, which always expects the "raw fetch handle" shape, needs this
 	// flag to know when it must NOT re-run __kml_await_fetch on an
 	// already-resolved Response — a real bug found and fixed while adding
@@ -122,16 +122,7 @@ type Type struct {
 	// positions instead, since the member set makes it fully checkable there.
 	UnionMembers []Type
 	LitValue     string
-	// IntersectionMembers carries the resolved members of an A & B & ...
-	// intersection (TDD-00078). Unlike UnionMembers, this is NOT a runtime
-	// shape: an object-type intersection is already collapsed into this Type's
-	// own IsObject/Fields (the merged struct), so downstream object machinery
-	// uses it as an ordinary object type and ignores this field. It is retained
-	// only so validateIntersectionMembers can re-check the members (all-object,
-	// no field conflicts) at each use site, mirroring how UnionMembers is
-	// validated — resolveType itself has no error return.
-	IntersectionMembers []Type
-	ClassName           string
+	ClassName    string
 	// RefName is a nominal re-resolution handle for a *named structural* type
 	// (a top-level `interface`, or a `type` alias of an object shape) — set on
 	// the ObjectType registered in e.interfaces, NOT implying IsClass. It exists
@@ -232,7 +223,7 @@ type Type struct {
 // ArrayOf returns an array type whose elements are of the given type.
 func ArrayOf(elem Type) Type {
 	elem = arrayElemType(elem)
-	return Type{IR: "ptr", Kind: kindArray, ElemType: &elem}
+	return Type{IR: irPtr, Kind: kindArray, ElemType: &elem}
 }
 
 // arrayElemType is the type an array stores for a declared/produced element
@@ -288,7 +279,7 @@ func ObjectType(fields []Field) Type {
 			fields[i].Ty = TypeUndefined
 		}
 	}
-	return Type{IR: "ptr", Kind: kindObject, Fields: withPresence(fields)}
+	return Type{IR: irPtr, Kind: kindObject, Fields: withPresence(fields)}
 }
 
 // PresenceField is the hidden last field of a layout with optional members
@@ -409,7 +400,7 @@ func (t Type) presenceBit(name string) int {
 // (TDD-00230 P3.4), when their header is added with the runtime's readers.
 // Boxed into `any`, one reads as "no shape".
 func hostObjectType(fields []Field) Type {
-	return Type{IR: "ptr", Kind: kindObject, Fields: fields}
+	return Type{IR: irPtr, Kind: kindObject, Fields: fields}
 }
 
 // UserFields returns t's fields after the header word: the layout's own
@@ -460,75 +451,105 @@ func TupleType(elems []Type) Type {
 	for i, ety := range elems {
 		fields[i] = Field{Name: fmt.Sprintf("%d", i), Ty: ety}
 	}
-	// Headerless: a tuple is value-like data (TDD-00230 phase 5); boxed into
-	// `any` it becomes an array box, not an object with a shape.
-	return Type{IR: "ptr", Kind: kindTuple, Fields: fields}
+	// An array, as in JavaScript: aliases, `===` and `Array.isArray` see one
+	// object. Its elements are held in one storage type.
+	store := tupleStorage(elems)
+	return Type{IR: irPtr, Kind: kindTuple, Fields: fields, ElemType: &store}
+}
+
+// tupleStorage is the array element type a tuple of elems holds its
+// elements in: their one type when they share it, else any.
+func tupleStorage(elems []Type) Type {
+	if len(elems) == 0 {
+		return TypeAny
+	}
+	plain := func(t Type) bool {
+		return isPlainStringType(t) || (t.IR == "i64" || t.IR == "double" || t.IR == "i1") && !t.IsDynamic() && !t.IsArray() && !isNullableScalar(t)
+	}
+	if plain(elems[0]) {
+		for _, t := range elems[1:] {
+			if !plain(t) || t.IR != elems[0].IR || isPlainStringType(t) != isPlainStringType(elems[0]) {
+				return TypeAny
+			}
+		}
+		return arrayElemType(stripLiteral(elems[0]))
+	}
+	k := reprKey(elems[0])
+	for _, t := range elems[1:] {
+		if reprKey(t) != k {
+			return TypeAny
+		}
+	}
+	if isNullableScalar(elems[0]) {
+		return TypeAny
+	}
+	return arrayElemType(elems[0])
 }
 
 // MapType returns a Map<key,val> type.
 func MapType(key, val Type) Type {
-	return Type{IR: "ptr", Host: hostMap, MapKey: &key, MapVal: &val}
+	return Type{IR: irPtr, Host: hostMap, MapKey: &key, MapVal: &val}
 }
 
 // SetType returns a Set<elem> type.
 func SetType(elem Type) Type {
-	return Type{IR: "ptr", Host: hostSet, MapKey: &elem}
+	return Type{IR: irPtr, Host: hostSet, MapKey: &elem}
 }
 
 // WeakMapType returns a WeakMap<key,val> type (TDD-00112) — an object-identity-
 // keyed, non-iterable map with mode-dependent backing.
 func WeakMapType(key, val Type) Type {
-	return Type{IR: "ptr", Host: hostMap, Weak: true, MapKey: &key, MapVal: &val}
+	return Type{IR: irPtr, Host: hostMap, Weak: true, MapKey: &key, MapVal: &val}
 }
 
 // WeakSetType returns a WeakSet<elem> type (TDD-00112).
 func WeakSetType(elem Type) Type {
-	return Type{IR: "ptr", Host: hostSet, Weak: true, MapKey: &elem}
+	return Type{IR: irPtr, Host: hostSet, Weak: true, MapKey: &elem}
 }
 
 // PromiseOf returns a Promise<T> type (the coroutine handle ptr).
 // Pass TypeVoid for Promise<void>.
 func PromiseOf(inner Type) Type {
 	if inner.IR == "void" {
-		return Type{IR: "ptr", Host: hostPromise}
+		return Type{IR: irPtr, Host: hostPromise}
 	}
 	innerCopy := inner
-	return Type{IR: "ptr", Host: hostPromise, PromiseType: &innerCopy}
+	return Type{IR: irPtr, Host: hostPromise, PromiseType: &innerCopy}
 }
 
 // ReadableStreamType returns a ReadableStream<chunk> type (TDD-00097).
 func ReadableStreamType(chunk Type) Type {
 	c := chunk
-	return Type{IR: "ptr", Host: hostReadableStream, StreamChunk: &c}
+	return Type{IR: irPtr, Host: hostReadableStream, StreamChunk: &c}
 }
 
 // StreamReaderType returns the reader type getReader() yields.
 func StreamReaderType(chunk Type) Type {
 	c := chunk
-	return Type{IR: "ptr", Host: hostStreamReader, StreamChunk: &c}
+	return Type{IR: irPtr, Host: hostStreamReader, StreamChunk: &c}
 }
 
 // RSControllerType returns the controller type start/pull callbacks receive.
 func RSControllerType(chunk Type) Type {
 	c := chunk
-	return Type{IR: "ptr", Host: hostRSController, StreamChunk: &c}
+	return Type{IR: irPtr, Host: hostRSController, StreamChunk: &c}
 }
 
 // WritableStreamType / WSWriterType / WSControllerType are the writable-side
 // mirrors (TDD-00097 Stage 2).
 func WritableStreamType(chunk Type) Type {
 	c := chunk
-	return Type{IR: "ptr", Host: hostWritableStream, StreamChunk: &c}
+	return Type{IR: irPtr, Host: hostWritableStream, StreamChunk: &c}
 }
 
 func WSWriterType(chunk Type) Type {
 	c := chunk
-	return Type{IR: "ptr", Host: hostStreamWriter, StreamChunk: &c}
+	return Type{IR: irPtr, Host: hostStreamWriter, StreamChunk: &c}
 }
 
 func WSControllerType(chunk Type) Type {
 	c := chunk
-	return Type{IR: "ptr", Host: hostWSController, StreamChunk: &c}
+	return Type{IR: irPtr, Host: hostWSController, StreamChunk: &c}
 }
 
 // ResponseType returns fetch()'s Response object type: a plain heap object
@@ -596,7 +617,7 @@ func SymbolType() Type {
 // an IsObject struct — nothing reads fields off it; every operation goes through
 // the __kml_bigint_* ABI in emit_bigint.go.
 func BigIntType() Type {
-	return Type{IR: "ptr", Host: hostBigInt}
+	return Type{IR: irPtr, Host: hostBigInt}
 }
 
 // FetchRequestType returns `new Request(...)`'s result type (TDD-00040): a
@@ -618,6 +639,20 @@ func FetchRequestType() Type {
 		{Name: "__kml_pending", Ty: TypePtr}, // always null
 		{Name: "__kml_stream", Ty: TypePtr},
 		{Name: "__kml_bodyflags", Ty: TypeI64},
+		// The init's remaining members, with the Fetch standard's defaults
+		// (requestInitStrings, emitNewRequestExpression).
+		{Name: "cache", Ty: TypePtr},
+		{Name: "credentials", Ty: TypePtr},
+		{Name: "destination", Ty: TypePtr},
+		{Name: "integrity", Ty: TypePtr},
+		{Name: "keepalive", Ty: TypeBool},
+		{Name: "mode", Ty: TypePtr},
+		{Name: "redirect", Ty: TypePtr},
+		{Name: "referrer", Ty: TypePtr},
+		{Name: "referrerPolicy", Ty: TypePtr},
+		// Its AbortSignal (null when the program has none): one following
+		// the init's signal, else a fresh one.
+		{Name: "__kml_signal", Ty: TypePtr},
 	})
 	ty.setHost(hostFetchRequest, true)
 	return ty
@@ -665,11 +700,11 @@ func XMLHttpRequestType() Type {
 	return ty
 }
 
-// Generator instance struct field names (TDD-00061/ADR-00172) — a fixed
-// prologue shared by every generator, followed by one field per the
-// generator function's own declared parameter (named "__param0",
-// "__param1", ... — same synthetic-name convention a destructured function
-// parameter's own pattern fields already use, see ast.Param's doc comment).
+// Generator instance struct field names (TDD-00061/ADR-00172): one layout
+// shared by every generator of a yield type. The receiver and parameters
+// live in the instance's args block (GeneratorArgsType), named "__this" and
+// "__param0", "__param1", … (the synthetic-name convention a destructured
+// parameter's pattern fields use, see ast.Param's doc comment).
 const (
 	GeneratorProtoField      = "__proto"      // the prototype the instance inherits (a boxed object; 0 = the root, genproto.go) — first, at one offset in every layout
 	GeneratorCtxField        = "__ctx"        // this generator's own ucontext_t (ptr, malloc'd ucontextLayout()-sized)
@@ -693,11 +728,17 @@ const (
 	// generator's layout for uniformity; sync generators never touch them.
 	GeneratorPendingQField = "__pendingQ" // the in-flight step's result promise (ptr; null = no step running)
 	GeneratorParkedField   = "__parked"   // i64 1 while the fiber is suspended at an await-park (vs a yield/completion)
-	GeneratorReqHeadField  = "__reqHead"  // queued .next/.throw/.return requests while a step is in flight (ptr to {i64 mode, ptr sentSlot, ptr thrown, ptr q, ptr next})
-	GeneratorReqTailField  = "__reqTail"  // tail of the request FIFO (ptr)
+	// GeneratorStepFnField is the step function serving the in-flight
+	// request: the one its caller's view of T settles results as.
+	GeneratorStepFnField  = "__stepFn"
+	GeneratorReqHeadField = "__reqHead" // queued .next/.throw/.return requests while a step is in flight (ptr to {i64 mode, ptr sentSlot, ptr thrown, ptr q, ptr next, ptr step})
+	GeneratorReqTailField = "__reqTail" // tail of the request FIFO (ptr)
 	// How many declared parameters the call passed, plus one (0: not
 	// known, every declared one counts) — the body's `arguments` length.
 	GeneratorArgcField = "__argc"
+	// The args block: the receiver and parameters the body binds at entry
+	// (ptr; null when the generator takes neither).
+	GeneratorArgsField = "__args"
 )
 
 // GeneratorType returns a `function* f(params): T {}`'s instance value type
@@ -710,10 +751,13 @@ const (
 // yielding kind.
 func CollIterType(src Type, kind mapIterKind) Type {
 	srcCopy := src
-	return Type{IR: "ptr", Host: hostCollIter, IterKind: kind, IterSrc: &srcCopy}
+	return Type{IR: irPtr, Host: hostCollIter, IterKind: kind, IterSrc: &srcCopy}
 }
 
-func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Type {
+func GeneratorType(elem Type, isAsync bool) Type {
+	if elem.IR == "void" || elem.IR == "" {
+		elem = TypeAny // `Generator<void>` yields undefined: held boxed
+	}
 	elemCopy := elem
 	fields := []Field{
 		{Name: GeneratorProtoField, Ty: TypeAny},
@@ -722,7 +766,10 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 		{Name: GeneratorCallerCtxField, Ty: TypePtr},
 		{Name: GeneratorStartedField, Ty: TypeBool},
 		{Name: GeneratorDoneField, Ty: TypeBool},
-		{Name: GeneratorYieldedField, Ty: elem},
+		// Boxed whatever T is: a Generator<T> is one layout, so an instance
+		// typed by an erased or asserted T (`as AsyncGenerator<T>`) reads
+		// the value its body stored. T types the reads (loadGeneratorField).
+		{Name: GeneratorYieldedField, Ty: TypeAny},
 		{Name: GeneratorSentField, Ty: TypeAny},
 		{Name: GeneratorResumeModeField, Ty: TypeI64},
 		{Name: GeneratorThrownField, Ty: TypePtr},
@@ -736,17 +783,8 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 		{Name: GeneratorReqHeadField, Ty: TypePtr},
 		{Name: GeneratorReqTailField, Ty: TypePtr},
 		{Name: GeneratorArgcField, Ty: TypeI64},
-	}
-	// A generator *method* (TDD-00063 Stage 2b) carries its receiver in a
-	// dedicated __this slot (a ptr to the class instance), stored at
-	// construction and read back once at the body's entry to bind `this` —
-	// the exact same fiber-stack-persistence story the __paramN slots use.
-	// nil for a free-function generator, which has no receiver.
-	if thisTy != nil {
-		fields = append(fields, Field{Name: GeneratorThisField, Ty: *thisTy})
-	}
-	for i, pt := range paramTypes {
-		fields = append(fields, Field{Name: fmt.Sprintf("__param%d", i), Ty: pt})
+		{Name: GeneratorArgsField, Ty: TypePtr},
+		{Name: GeneratorStepFnField, Ty: TypePtr},
 	}
 	ty := ObjectType(fields)
 	ty.setKind(kindObject, false)
@@ -756,16 +794,30 @@ func GeneratorType(elem Type, paramTypes []Type, thisTy *Type, isAsync bool) Typ
 	return ty
 }
 
+// GeneratorArgsType is a generator instance's args block: a generator
+// method's receiver (TDD-00063 Stage 2b), then the function's own declared
+// parameters, stored at construction and read once at the body's entry.
+func GeneratorArgsType(paramTypes []Type, thisTy *Type) Type {
+	var fields []Field
+	if thisTy != nil {
+		fields = append(fields, Field{Name: GeneratorThisField, Ty: *thisTy})
+	}
+	for i, pt := range paramTypes {
+		fields = append(fields, Field{Name: fmt.Sprintf("__param%d", i), Ty: pt})
+	}
+	return ObjectType(fields)
+}
+
 // ArrayBufferType returns `new ArrayBuffer(...)`'s result type — see
 // IsArrayBuffer's doc comment for the hidden-struct representation.
 func ArrayBufferType() Type {
-	return Type{IR: "ptr", Host: hostArrayBuffer}
+	return Type{IR: irPtr, Host: hostArrayBuffer}
 }
 
 // SharedArrayBufferType returns `new SharedArrayBuffer(...)`'s result type —
 // the ArrayBuffer representation plus the shared-across-workers flag.
 func SharedArrayBufferType() Type {
-	return Type{IR: "ptr", Host: hostSharedArrayBuffer}
+	return Type{IR: irPtr, Host: hostSharedArrayBuffer}
 }
 
 // RegexHandleField is the name of the hidden ptr field every RegExp
@@ -782,7 +834,7 @@ const RegexHandleField = "__kml_regex_handle"
 // source/flags carry the original constructor arguments verbatim;
 // global/ignoreCase/multiline/dotAll are decomposed once at construction
 // (V1's supported flag set — see docs/tdd/TDD-00035.md's flag scope table;
-// u/d are deferred; `y` since ADR-01062) so no method needs to re-parse the flags string;
+// `y` since ADR-01062; `u`/`v`/`d` read as flags) so no method needs to re-parse the flags string;
 // lastIndex is mutable, `g`-flag iteration state.
 func RegExpType() Type {
 	ty := hostObjectType([]Field{
@@ -794,6 +846,9 @@ func RegExpType() Type {
 		{Name: "multiline", Ty: TypeBool},
 		{Name: "dotAll", Ty: TypeBool},
 		{Name: "sticky", Ty: TypeBool},
+		{Name: "unicode", Ty: TypeBool},
+		{Name: "unicodeSets", Ty: TypeBool},
+		{Name: "hasIndices", Ty: TypeBool},
 		{Name: "lastIndex", Ty: TypeI64},
 	})
 	ty.setHost(hostRegExp, true)
@@ -1000,7 +1055,7 @@ func (t Type) VisibleFields() []Field {
 	// A private field (`#x`) and a symbol-keyed one (TDD-00246) are no
 	// string keys.
 	hidden := func(f Field) bool {
-		return strings.HasPrefix(f.Name, "#") || strings.HasPrefix(f.Name, symbolFieldPrefix)
+		return strings.HasPrefix(f.Name, "#") || isSymbolFieldName(f.Name)
 	}
 	hasHidden := false
 	for _, f := range fields {
@@ -1025,7 +1080,7 @@ func (t Type) VisibleFields() []Field {
 // Stage 2) — see Type.IsFlatArray.
 func FlatArrayType(elem Type) Type {
 	el := elem
-	return Type{IR: "ptr", Kind: kindFlatArray, ElemType: &el}
+	return Type{IR: irPtr, Kind: kindFlatArray, ElemType: &el}
 }
 
 // FinalizationRegistryType is a FinalizationRegistry<T> handle (TDD-00163): a
@@ -1044,7 +1099,7 @@ func FinalizationRegistryType(held Type) Type {
 // at the LLVM level (a pointer to a {funcPtr, envPtr} header on the heap).
 func FuncType(params []Type, ret Type) Type {
 	retCopy := ret
-	return Type{IR: "ptr", Kind: kindFunc, FuncParams: params, FuncRetType: &retCopy}
+	return Type{IR: irPtr, Kind: kindFunc, FuncParams: params, FuncRetType: &retCopy}
 }
 
 // StructFieldIR returns the LLVM type string used for a field's own storage
@@ -1060,7 +1115,7 @@ func StructFieldIR(ty Type) string {
 		// the array and a mutation through the
 		// field propagates. Load/store of an array field goes through
 		// loadArrayFieldValue / storeArrayFieldHeader, which deref/mint the header.
-		return "ptr"
+		return irPtr
 	}
 	// A nullable non-pointer scalar field carries its presence bit alongside
 	// the value (TDD-00064 Stage 3), so a null field is distinguishable from a
@@ -1098,12 +1153,12 @@ func StructFieldSize(ty Type) int64 {
 // float32/float64, Date/i64) — the one case a plain null pointer cannot stand
 // in for "absent," so TDD-00064 Option A gives it a presence-flagged
 // { i1 present, T value } storage slot instead. A Nullable *pointer* type
-// (string/object/array/class/Map/Set/... — IR "ptr") keeps its existing
+// (string/object/array/class/Map/Set/... — IR irPtr) keeps its existing
 // null-pointer representation and is deliberately excluded here; so is a
 // Nullable constrained union (IsDynamic — its own { i8, i64 } box already
 // carries a null tag) and void.
 func isNullableScalar(ty Type) bool {
-	return ty.Nullable() && !ty.IsDynamic() && ty.IR != "ptr" && ty.IR != "void"
+	return ty.Nullable() && !ty.IsDynamic() && ty.IR != irPtr && ty.IR != "void"
 }
 
 // nullableScalarStorageIR returns the LLVM storage type of a nullable-scalar
@@ -1203,7 +1258,7 @@ func (t Type) Align() int {
 		return 2
 	case "i32", "float":
 		return 4
-	case "i64", "double", "ptr":
+	case "i64", "double", irPtr:
 		return 8
 	case "i1":
 		return 1
@@ -1225,19 +1280,19 @@ func (t Type) zeroLiteral() string {
 		// decodes as undefined today, but only by the immediate-range fallback).
 		return fmt.Sprintf("%d", nbUndefined)
 	}
-	if t.IR == "ptr" {
+	if t.IR == irPtr {
 		return "null"
 	}
 	return "0"
 }
 
 // IsInteger returns true for integer (non-float) types.
-func (t Type) IsInteger() bool { return !t.Float && t.IR != "ptr" && t.IR != "void" }
+func (t Type) IsInteger() bool { return !t.Float && t.IR != irPtr && t.IR != "void" }
 
 // isSafeNumericArg reports whether v can be safely passed to an inferred
 // (unannotated, defaulted-to-i64) parameter without silently corrupting
 // data — see docs/adr/00/ADR-00042.md. IsInteger()/Float already exclude
-// ptr-backed types (string/object/array/closure/Promise all use IR "ptr"),
+// ptr-backed types (string/object/array/closure/Promise all use IR irPtr),
 // but a boxed any/unknown value's IR is a distinct aggregate ("{ i8, i64 }")
 // that's neither ptr nor float, so IsDynamic needs its own explicit check —
 // otherwise it would slip through as if it were already a plain number.
@@ -1252,21 +1307,21 @@ func isSafeNumericArg(t Type) bool {
 // (TDD-00064 Stage 3), so `T | null` survives a function boundary with its
 // null-ness.
 func (t Type) LLVMRetType() string {
+	// A by-value small-tuple return (TDD-00134 Stage 3) is the aggregate of
+	// its elements, register-passable, where any other tuple returns its
+	// header pointer.
+	if t.IsTuple() && t.TupleByVal {
+		return tupleAggIR(t)
+	}
 	if t.IsArray() {
 		// An array is returned as a pointer to its shared {data,len} header
 		// (TDD-00213 Stage 3) — so a returned
 		// field/global/captured/named array keeps its identity and the caller
 		// aliases the same array (mirrors the header-pointer param and field ABI).
-		return "ptr"
+		return irPtr
 	}
 	if isNullableScalar(t) {
 		return nullableScalarStorageIR(t)
-	}
-	// A by-value small-tuple return (TDD-00134 Stage 3) is the struct
-	// aggregate itself, register-passable (unlike the array, which returns
-	// its header pointer above).
-	if t.IsTuple() && t.TupleByVal {
-		return t.StructIR()
 	}
 	return t.IR
 }
@@ -1292,7 +1347,7 @@ func (t Type) PrintfFmt() string {
 		return "%g"
 	case "i1":
 		return "%d"
-	case "ptr":
+	case irPtr:
 		return "%s"
 	}
 	return "%d"
@@ -1312,9 +1367,9 @@ var (
 	TypeU64       = Type{IR: "i64", Signed: false}
 	TypeF32       = Type{IR: "float", Float: true}
 	TypeF64       = Type{IR: "double", Float: true}
-	TypePtr       = Type{IR: "ptr"}
-	TypeNull      = Type{IR: "ptr", Kind: kindNull}
-	TypeUndefined = Type{IR: "ptr", Kind: kindUndefined}
+	TypePtr       = Type{IR: irPtr}
+	TypeNull      = Type{IR: irPtr, Kind: kindNull}
+	TypeUndefined = Type{IR: irPtr, Kind: kindUndefined}
 	// TypeAny backs any/unknown: the NaN-boxed single-word dynamic value
 	// (TDD-00156) — numbers offset-encoded doubles, heap references
 	// low-3-bit-kind-tagged raw pointers, undefined/null/true/false small
@@ -1325,7 +1380,7 @@ var (
 	// { i8 tag, i64 payload } thrown-value record (TypeScript `unknown`).
 	TypeCaught = Type{IR: "{ i8, i64 }", Kind: kindCaught}
 	// TypeDate backs Date: a headered heap object holding the time value.
-	TypeDate = Type{IR: "ptr", Host: hostDate}
+	TypeDate = Type{IR: irPtr, Host: hostDate}
 )
 
 // FuncSig holds the signature of a user-defined function.
@@ -1353,9 +1408,12 @@ type FuncSig struct {
 	// may-suspend one via a coroutine fiber, a non-suspending one via an inline
 	// catch-and-settle wrapper that settles the promise on return / rejects it on
 	// throw. Used to tag a call's result type PromiseTask regardless of MaySuspend.
-	IsAsync  bool
-	HasRest  bool             // last param is a rest (variadic) parameter
-	Defaults []ast.Expression // per-param default expression; nil entry means no default
+	IsAsync bool
+	HasRest bool // last param is a rest (variadic) parameter
+	// ReadsArgs: an explicit rest parameter's function that reads
+	// `arguments`, so a call stores how many declared parameters it passed.
+	ReadsArgs bool
+	Defaults  []ast.Expression // per-param default expression; nil entry means no default
 	// HasDefault marks each parameter declared with a default, whether its
 	// caller (Defaults, a destructured one) or the body fills it.
 	HasDefault []bool
@@ -1404,11 +1462,6 @@ func ResolveTypeName(name string) Type {
 		return BigIntType()
 	case "any", "unknown", "object":
 		return TypeAny
-	case "RegExpExecArray":
-		// What `exec` returns (`| null` is the nullable form).
-		return execArrayType()
-	case "RegExpMatchArray":
-		return matchArrayType()
 	case "int8":
 		return TypeI8
 	case "int16":
@@ -1429,13 +1482,6 @@ func ResolveTypeName(name string) Type {
 		return TypeF32
 	case "float64":
 		return TypeF64
-	case "ArrayBufferLike":
-		// An ArrayBuffer or a SharedArrayBuffer: one representation.
-		return ArrayBufferType()
-	case "ArrayBufferView", "BufferSource", "AllowSharedBufferSource":
-		// A typed array or a DataView (or, for the last two, a buffer):
-		// held boxed, each value as its own class.
-		return TypeAny
 	}
 	return TypeI64 // default
 }
@@ -1444,7 +1490,7 @@ func ResolveTypeName(name string) Type {
 // other side a conditional's element-read branch keeps its absence against.
 func nonPtrScalar(t Type) bool {
 	return !t.IsNull() && !t.IsDynamic() && !t.IsArray() && !t.IsObject() &&
-		t.IR != "ptr" && t.IR != "void" && !t.Nullable()
+		t.IR != irPtr && t.IR != "void" && !t.Nullable()
 }
 
 // absentMask is t's presence bits that mark a key's absence rather than
@@ -1459,4 +1505,19 @@ func (t Type) absentMask() uint64 {
 		}
 	}
 	return m
+}
+
+// stripLiteral is a plain scalar or string type without its literal: the
+// storage it shares with the other members of its kind.
+func stripLiteral(t Type) Type {
+	switch {
+	case isPlainStringType(t):
+		return TypePtr
+	case t.IR == "i1":
+		return TypeBool
+	case t.IR == "double":
+		return TypeF64
+	}
+	t.LitValue = ""
+	return t
 }

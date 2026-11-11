@@ -35,7 +35,7 @@ static long long u16_at(const char *s, long long idx) {
 static char *str_new(const char *p, long long n) {
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
-    if (n > 0) memcpy(base + 8, p, (size_t)n);
+    if (n > 0) kml_copy(KML_HEAP_RAW, base + 8, p, (size_t)n);
     base[n + 8] = 0;
     return base + 8;
 }
@@ -211,16 +211,16 @@ static char *pad(const char *s, double maxLength, bool hasFill, const char *fill
         *(long long *)base = total;
         char *out = base + 8, *w = out;
         if (!atStart) {
-            memcpy(w, s, (size_t)n);
+            kml_copy(KML_HEAP_RAW, w, s, (size_t)n);
             w += n;
         }
-        for (long long i = 0; i < whole; i++, w += fl) memcpy(w, f, (size_t)fl);
+        for (long long i = 0; i < whole; i++, w += fl) kml_copy(KML_HEAP_RAW, w, f, (size_t)fl);
         if (pl) {
-            memcpy(w, part, (size_t)pl);
+            kml_copy(KML_HEAP_RAW, w, part, (size_t)pl);
             w += pl;
         }
         if (atStart) {
-            memcpy(w, s, (size_t)n);
+            kml_copy(KML_HEAP_RAW, w, s, (size_t)n);
             w += n;
         }
         *w = 0;
@@ -231,7 +231,7 @@ static char *pad(const char *s, double maxLength, bool hasFill, const char *fill
     *(long long *)base = total;
     char *out = base + 8, *fillAt = atStart ? out : out + n;
     for (long long i = 0; i < add; i++) fillAt[i] = f[i % fl];
-    memcpy(atStart ? out + add : out, s, (size_t)n);
+    kml_copy(KML_HEAP_RAW, atStart ? out + add : out, s, (size_t)n);
     out[total] = 0;
     return out;
 }
@@ -322,7 +322,7 @@ char *__kml_String_repeat(const char *s, double count) {
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)total + 9);
     *(long long *)base = total;
     char *out = base + 8;
-    for (long long i = 0; i < times; i++) memcpy(out + i * n, s, (size_t)n);
+    for (long long i = 0; i < times; i++) kml_copy(KML_HEAP_RAW, out + i * n, s, (size_t)n);
     out[total] = 0;
     return out;
 }
@@ -347,10 +347,10 @@ char *__kml_String_concat(const char *s, const array_header *strings) {
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;
     char *out = base + 8, *p = out;
-    memcpy(p, s, (size_t)str_len(s));
+    kml_copy(KML_HEAP_RAW, p, s, (size_t)str_len(s));
     p += str_len(s);
     for (long long i = 0; i < strings->len; i++) {
-        memcpy(p, xs[i], (size_t)str_len(xs[i]));
+        kml_copy(KML_HEAP_RAW, p, xs[i], (size_t)str_len(xs[i]));
         p += str_len(xs[i]);
     }
     *p = 0;
@@ -393,7 +393,7 @@ array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, 
     if (sep == NULL) {
         // An undefined separator: the whole string, unsplit.
         char **one = (char **)kml_alloc(KML_HEAP_WORDS, sizeof(char *));
-        one[0] = str_new(s, str_len(s));
+        KML_STORE_PTR(&one[0], str_new(s, str_len(s)));
         h->data = one;
         h->len = 1;
         return h;
@@ -402,7 +402,7 @@ array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, 
     if (n == 0) {
         if (m == 0) return h;
         char **one = (char **)kml_alloc(KML_HEAP_WORDS, sizeof(char *));
-        one[0] = str_new("", 0);
+        KML_STORE_PTR(&one[0], str_new("", 0));
         h->data = one;
         h->len = 1;
         return h;
@@ -423,8 +423,8 @@ array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, 
                     out = (char **)kml_realloc(KML_HEAP_WORDS, out, (size_t)cap * sizeof(char *));
                 }
                 long long u = __kml_u16_index(s, start);
-                out[count++] = __kml_u16_sub(s, u, u + 1);
-                if ((unsigned long long)count < lim) out[count++] = __kml_u16_sub(s, u + 1, u + 2);
+                KML_STORE_PTR(&out[count++], __kml_u16_sub(s, u, u + 1));
+                if ((unsigned long long)count < lim) KML_STORE_PTR(&out[count++], __kml_u16_sub(s, u + 1, u + 2));
                 start += 4;
                 continue;
             }
@@ -437,7 +437,7 @@ array_header *__kml_String_split(const char *s, const char *sep, bool hasLimit, 
             cap *= 2;
             out = (char **)kml_realloc(KML_HEAP_WORDS, out, (size_t)cap * sizeof(char *));
         }
-        out[count++] = str_new(s + start, at - start);
+        KML_STORE_PTR(&out[count++], str_new(s + start, at - start));
         if (m == 0) {
             start = at;
             continue;
@@ -606,7 +606,7 @@ char *__kml_url_opaque_set(const char *href, int part, const char *value) {
     const char *qEnd = h ? h : href + n;
     size_t vn = strlen(value);
     char *buf = (char *)malloc(n + vn * 3 + 3), *o = buf; /* scratch */
-    memcpy(o, href, (size_t)(pathEnd - href)), o += pathEnd - href;
+    memcpy(o, href, (size_t)(pathEnd - href)), o += pathEnd - href; /* scratch */
     static const char hex[] = "0123456789ABCDEF";
     if (part == 6) {
         if (vn > 0) {
@@ -617,9 +617,9 @@ char *__kml_url_opaque_set(const char *href, int part, const char *value) {
                 else *o++ = (char)c;
             }
         }
-        if (h) memcpy(o, h, (size_t)(href + n - h)), o += href + n - h;
+        if (h) memcpy(o, h, (size_t)(href + n - h)), o += href + n - h; /* scratch */
     } else {
-        if (q) memcpy(o, q, (size_t)(qEnd - q)), o += qEnd - q;
+        if (q) memcpy(o, q, (size_t)(qEnd - q)), o += qEnd - q; /* scratch */
         if (vn > 0) {
             *o++ = '#';
             for (size_t i = 0; i < vn; i++) {
@@ -1122,7 +1122,7 @@ extern char *__kml_str_alloc(long long n);
 
 static char *kml_headered_copy(const char *s, size_t n) {
 	char *d = __kml_str_alloc((long long)n);
-	memcpy(d, s, n);
+	kml_copy(KML_HEAP_RAW, d, s, n);
 	d[n] = '\0';
 	return d;
 }

@@ -19,11 +19,6 @@ var errKeysSource string
 // behind kml_layout.h.
 func ErrKeysSource() string { return layoutHeader() + errKeysSource }
 
-// UsesErrKeysC reports whether the program links the Error own-keys hooks:
-// emitObjHooksFinalize (which declares them) runs with the dynamic JSON
-// runtime.
-func (e *Emitter) UsesErrKeysC() bool { return e.usedDynJSONC }
-
 // ensureAnyIterCollect defines @__kml_any_iter_collect(v): the values the
 // iteration protocol yields for v, as a boxed `any[]` — the routine is
 // `const r = []; for (const x of v) r.push(x); return r`, compiled once
@@ -34,19 +29,20 @@ func (e *Emitter) ensureAnyIterCollect() {
 		return
 	}
 	e.usedAnyIterCollect = true
-	e.ensureDynArr()
+	e.ensureNanBox()
+	e.ensureShapeRuntime()
 	restore := e.sharedBody(e.beginDetachedFunc())
 	pos := ast.Pos{}
 
 	vSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", vSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %%p_v, ptr %s, align 8", vSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %%p_v, "+irPtr+" %s, align 8", vSlot))
 	e.define("__kml_collect_v", Symbol{Ptr: vSlot, Ty: TypeAny})
 	arr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_new(i64 4)", arr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_new(i64 4)", arr))
 	rSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", rSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbTagPtr(arr, kmlTagDynArray), rSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitNbTagPtr(arr, kmlTagDynArray), rSlot))
 	e.define("__kml_collect_r", Symbol{Ptr: rSlot, Ty: TypeAny})
 
 	push := ast.NewExpressionStatement(ast.NewCallExpression(
@@ -64,14 +60,12 @@ func (e *Emitter) ensureAnyIterCollect() {
 		panic(fmt.Sprintf("__kml_any_iter_collect: %v", err))
 	}
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, rSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, rSlot))
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", out))
 
-	e.functions.WriteString("\ndefine i64 @__kml_any_iter_collect(i64 %p_v) {\nentry:\n")
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	body := e.allocas.String() + e.body.String()
 	restore()
+	e.writeFunc("i64 @__kml_any_iter_collect(i64 %p_v)", body)
 }
 
 // hasIteratorMember reports whether a static object or class instance has a
@@ -99,14 +93,13 @@ func (e *Emitter) ensureAnyArrayLikeCollect() {
 		return
 	}
 	e.usedAnyArrayLikeCollect = true
-	e.ensureDynArr()
-	e.ensureMalloc()
-	e.ensureSprintf()
+	e.ensureNanBox()
+	e.ensureShapeRuntime()
 	restore := e.sharedBody(e.beginDetachedFunc())
 	pos := ast.Pos{}
 	v := Value{Ref: "%p_v", Ty: TypeAny}
 	arr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_new(i64 4)", arr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_new(i64 4)", arr))
 	lenBox, err := e.emitDynAnyMemberGetNamed(v, e.internString("length"), "length", pos)
 	if err != nil {
 		panic(fmt.Sprintf("__kml_any_arraylike_collect: %v", err))
@@ -121,36 +114,34 @@ func (e *Emitter) ensureAnyArrayLikeCollect() {
 	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", n, clamped))
 	iSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", iSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", iSlot))
 	condL, bodyL, endL := e.freshLabel("arrlike.cond"), e.freshLabel("arrlike.body"), e.freshLabel("arrlike.end")
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	i := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i, iSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, iSlot))
 	more := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, n))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
 	e.emitLabel(bodyL)
-	key := e.freshReg()
-	e.heapMallocInto(key, "24")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", key, e.internString("%lld"), i))
+	key := e.emitStringScratch(24)
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", key, e.internString("%lld"), i))
+	e.emitStringFinalizeLen(key)
 	elem, err := e.emitDynAnyMemberGet(v, key, pos)
 	if err != nil {
 		panic(fmt.Sprintf("__kml_any_arraylike_collect: %v", err))
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push(ptr %s, i64 %s)", arr, elem.Ref))
+	e.emitInstr(fmt.Sprintf("call void @__kml_dynarr_push("+irPtr+" %s, i64 %s)", arr, elem.Ref))
 	ni := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", ni, i))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", ni, iSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ni, iSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(endL)
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(arr, kmlTagDynArray)))
 
-	e.functions.WriteString("\ndefine i64 @__kml_any_arraylike_collect(i64 %p_v) {\nentry:\n")
-	e.functions.WriteString(e.allocas.String())
-	e.functions.WriteString(e.body.String())
-	e.functions.WriteString("}\n")
+	body := e.allocas.String() + e.body.String()
 	restore()
+	e.writeFunc("i64 @__kml_any_arraylike_collect(i64 %p_v)", body)
 }
 
 // emitAnyArrayFrom is Array.from over a value held in `any` (or a static
@@ -164,23 +155,21 @@ func (e *Emitter) emitAnyArrayFrom(val Value) (Value, error) {
 	e.ensureDynJSONC()
 	if !e.declaredAnyArrView {
 		e.declaredAnyArrView = true
-		e.emitGlobal("declare ptr @__kml_anyarr_view(i64)")
-		e.emitGlobal("declare void @__kml_anyarr_sync(i64, ptr)")
 	}
 	// A string walks its code points.
 	boxed = e.anyStringAsCodePoints(boxed)
 	src := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", src))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitHostIterValue(boxed.Ref), src))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitHostIterValue(boxed.Ref), src))
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, src))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, src))
 	direct := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_anyarr_view(i64 %s)", direct, cur))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_anyarr_view(i64 %s)", direct, cur))
 	isArr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isArr, direct))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isArr, direct))
 	viewSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", viewSlot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", direct, viewSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", viewSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", direct, viewSlot))
 	haveL, otherL := e.freshLabel("afrom.have"), e.freshLabel("afrom.other")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayFastPathOK(isArr), haveL, otherL))
 	e.emitLabel(otherL)
@@ -197,25 +186,25 @@ func (e *Emitter) emitAnyArrayFrom(val Value) (Value, error) {
 	c1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect(i64 %s)", c1, iterable.Ref))
 	v1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_anyarr_view(i64 %s)", v1, c1))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v1, viewSlot))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_anyarr_view(i64 %s)", v1, c1))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v1, viewSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", haveL))
 	e.emitLabel(likeL)
 	e.ensureAnyArrayLikeCollect()
 	c2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_arraylike_collect(i64 %s)", c2, cur))
 	v2 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_anyarr_view(i64 %s)", v2, c2))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v2, viewSlot))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_anyarr_view(i64 %s)", v2, c2))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v2, viewSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", haveL))
 	e.emitLabel(haveL)
 	view := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", view, viewSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", view, viewSlot))
 	data, n := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, view))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, view))
 	lp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", lp, arrayHeaderTy, view))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", n, lp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", lp, arrayHeaderTy, view))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, lp))
 	copied := e.emitArrayCopy(data, n, TypeAny)
 	r1 := e.newArrayHeader(copied, n)
 	return Value{Ref: r1, Ty: ArrayOf(TypeAny)}, nil
@@ -223,9 +212,8 @@ func (e *Emitter) emitAnyArrayFrom(val Value) (Value, error) {
 
 // emitEmptyAnyArray is a fresh, empty `any[]`.
 func (e *Emitter) emitEmptyAnyArray() Value {
-	e.ensureMalloc()
 	data := e.freshReg()
-	e.heapMallocInto(data, "8")
+	e.heapMallocInto(data, allocElems, "8")
 	r1 := e.newArrayHeader(data, "0")
 	return Value{Ref: r1, Ty: ArrayOf(TypeAny)}
 }
@@ -233,14 +221,18 @@ func (e *Emitter) emitEmptyAnyArray() Value {
 // emitUnboxAnyArray copies an `any[]` into a fresh array of elem, each
 // element unboxed.
 func (e *Emitter) emitUnboxAnyArray(arr Value, elem Type) (Value, error) {
+	// An element the array stores boxed (a nullable scalar, arrayElemType):
+	// the boxes already are its elements.
+	if arrayElemType(elem).IsDynamic() {
+		return Value{Ref: arr.Ref, Ty: ArrayOf(elem)}, nil
+	}
 	src, n := e.freshReg(), e.freshReg()
 	src = e.arrayData(arr)
 	n = e.arrayLen(arr)
-	e.ensureMalloc()
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, n, elem.Align()))
 	data := e.freshReg()
-	e.heapMallocInto(data, bytes)
+	e.heapMallocInto(data, elemAllocKind(elem), bytes)
 	if err := e.emitSpreadUnboxLoop(src, n, elem, data); err != nil {
 		return Value{}, err
 	}
@@ -253,11 +245,13 @@ func (e *Emitter) emitUnboxAnyArray(arr Value, elem Type) (Value, error) {
 // its layout: the system fields set on it, then the keys of its `extra`
 // bag. They are boxsrc/errkeys.c.
 func (e *Emitter) emitErrorOwnKeysHooks() {
-	e.ensureDynObj()
-	e.ensureStrcmp() // other generated code leans on this decl arriving here
-	e.declareFn("__kml_error_nextra", "declare i64 @__kml_error_nextra(ptr)")
-	e.declareFn("__kml_error_extra_key", "declare ptr @__kml_error_extra_key(ptr, i64)")
-	e.declareFn("__kml_error_extra_get", "declare i64 @__kml_error_extra_get(ptr, ptr, ptr)")
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
+	e.declareFn("__kml_error_nextra", "declare i64 @__kml_error_nextra("+irPtr+")")
+	e.declareFn("__kml_error_extra_key", "declare "+irPtr+" @__kml_error_extra_key("+irPtr+", i64)")
+	e.declareFn("__kml_error_extra_get", "declare i64 @__kml_error_extra_get("+irPtr+", "+irPtr+", "+irPtr+")")
 }
 
 // ensureAnyIterTake defines @__kml_any_iter_take(v, n): at most n values the
@@ -270,25 +264,26 @@ func (e *Emitter) ensureAnyIterTake() {
 		return
 	}
 	e.usedAnyIterTake = true
-	e.ensureDynArr()
+	e.ensureNanBox()
+	e.ensureShapeRuntime()
 	restore := e.sharedBody(e.beginDetachedFunc())
 	pos := ast.Pos{}
 
 	vSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", vSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %%p_v, ptr %s, align 8", vSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %%p_v, "+irPtr+" %s, align 8", vSlot))
 	e.define("__kml_take_v", Symbol{Ptr: vSlot, Ty: TypeAny})
 	nSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca double, align 8", nSlot))
 	nd := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %%p_n to double", nd))
-	e.emitInstr(fmt.Sprintf("store double %s, ptr %s, align 8", nd, nSlot))
+	e.emitInstr(fmt.Sprintf("store double %s, "+irPtr+" %s, align 8", nd, nSlot))
 	e.define("__kml_take_n", Symbol{Ptr: nSlot, Ty: TypeF64})
 	arr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_new(i64 4)", arr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_new(i64 4)", arr))
 	rSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", rSlot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbTagPtr(arr, kmlTagDynArray), rSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitNbTagPtr(arr, kmlTagDynArray), rSlot))
 	e.define("__kml_take_r", Symbol{Ptr: rSlot, Ty: TypeAny})
 
 	id := func(n string) ast.Expression { return ast.NewIdentifier(n, pos) }
@@ -302,7 +297,7 @@ func (e *Emitter) ensureAnyIterTake() {
 	// n = 0: get the iterator and close it.
 	iter := ast.NewCallExpression(ast.NewIndexExpression(id("__kml_take_v"),
 		ast.NewMemberExpression(id("Symbol"), "iterator", pos), pos), nil, pos)
-	getIt := ast.NewVarDeclaration("const", "__kml_take_it", &ast.TypeAnnotation{Name: "any", Source: "ts"}, iter, pos)
+	getIt := ast.NewVarDeclaration("const", "__kml_take_it", ast.AnyAnnotation("ts"), iter, pos)
 	retFn := ast.NewMemberExpression(id("__kml_take_it"), "return", pos)
 	hasRet := ast.NewBinaryExpression("!=", retFn, ast.NewNullLiteral(false, pos), pos)
 	callRet := ast.NewExpressionStatement(ast.NewCallExpression(
@@ -321,7 +316,7 @@ func (e *Emitter) ensureAnyIterTake() {
 		panic(fmt.Sprintf("__kml_any_iter_take: %v", err))
 	}
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, rSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, rSlot))
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", out))
 	e.writeFunc("i64 @__kml_any_iter_take(i64 %p_v, i64 %p_n)", e.allocas.String()+e.body.String())
 	restore()

@@ -59,7 +59,7 @@ func (e *Emitter) asTriStr(v Value) (Value, bool) {
 // pointer (TDD-00257): its null pointer is undefined and nullRef is null,
 // as a three-state pointer's are, whichever of them its type admits.
 func triStr(t Type) bool {
-	return t.IR == "ptr" && t.Absent != absBoth && isStringTy(t) && !hasHandleFlag(t) && !t.IsDynamic() && !t.IsNull() && t.Kind != kindUndefined
+	return t.IR == irPtr && t.Absent != absBoth && isStringTy(t) && !hasHandleFlag(t) && !t.IsDynamic() && !t.IsNull() && t.Kind != kindUndefined
 }
 
 // absenceCheck reports a state the old three flags allowed and absence

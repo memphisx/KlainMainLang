@@ -25,19 +25,14 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 	if anySpread(args) {
 		return e.emitConsolePrintSpread(args, fd, prefix)
 	}
-	if fd == 2 {
-		e.ensureDprintf()
-	} else {
-		e.ensurePrintf()
-	}
 	e.emitConsoleGroupIndent(fd)
 	if prefix != "" {
 		pfxPtr := e.internString(prefix)
 		fmtStr := e.internString("%s")
 		if fd == 2 {
-			e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", fmtStr, pfxPtr))
+			e.emitInstr(fmt.Sprintf("call i32 (i32, "+irPtr+", ...) @dprintf(i32 2, "+irPtr+" %s, "+irPtr+" %s)", fmtStr, pfxPtr))
 		} else {
-			e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtStr, pfxPtr))
+			e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", ...) @printf("+irPtr+" %s, "+irPtr+" %s)", fmtStr, pfxPtr))
 		}
 	}
 	if len(args) == 0 {
@@ -277,6 +272,26 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitLabel(doneL)
 		return nil
 	}
+	// A possibly absent dictionary (an exec result's `groups`): its keyword
+	// when absent, else the dictionary.
+	if val.Ty.Host == hostDynamicObject && val.Ty.Nullable() && !val.Ty.IsDynamic() {
+		isNull := e.ptrIsNull(val.Ref)
+		absentL, dictL, doneL := e.freshLabel("clog.dictnull"), e.freshLabel("clog.dict"), e.freshLabel("clog.dictdone")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, absentL, dictL))
+		e.emitLabel(absentL)
+		e.emitConsolePrintVal(Value{Ref: e.internString(absentLiteral(val.Ty)), Ty: TypePtr}, e.internString("%s"+term), fd)
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(dictL)
+		present := val
+		present.Ty.setNullable(false)
+		present.Ty.setUndefined(false)
+		if err := e.emitConsolePrintValueToken(present, fd, term); err != nil {
+			return err
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		return nil
+	}
 	// A function value renders util.inspect's `[Function: name]` form
 	// (TDD-00229); before this it fell through to a `%s` of the header.
 	if val.Ty.IsFunc() {
@@ -366,7 +381,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 	}
 	// Map / Set inspect as `Map(1) { 'a' => 1 }` / `Set(2) { 1, 2 }`.
 	if val.Ty.IsMap() {
-		strVal, err := e.emitInspectMap(val, 0)
+		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
 			return err
 		}
@@ -374,27 +389,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		return nil
 	}
 	if val.Ty.IsSet() {
-		strVal, err := e.emitInspectSet(val, 0)
-		if err != nil {
-			return err
-		}
-		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
-		return nil
-	}
-	// A heap tuple prints like an array, `[ 1, 'a' ]` (util.inspect; ADR-01063
-	// — it was the `1,a` String() join before), an absent one its keyword; a
-	// by-value tuple keeps the join (its aggregate has no inspect path).
-	if val.Ty.IsTuple() {
-		var strVal Value
-		var err error
-		switch {
-		case val.Ty.TupleByVal:
-			strVal, err = e.emitValueToString(val)
-		case val.Ty.Nullable() || val.Ty.IsNull():
-			strVal, err = e.emitInspectNullablePtr(val, func(b Value) (Value, error) { return e.emitInspectTuple(b, 0) })
-		default:
-			strVal, err = e.emitInspectTuple(val, 0)
-		}
+		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
 			return err
 		}
@@ -444,7 +439,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		// print its keyword, not dereference null to inspect fields (a segfault).
 		if val.Ty.Nullable() || val.Ty.IsNull() {
 			isNull := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, val.Ref))
 			nullL := e.freshLabel("clog.objnull")
 			objL := e.freshLabel("clog.obj")
 			doneL := e.freshLabel("clog.objdone")
@@ -485,7 +480,7 @@ func (e *Emitter) emitConsolePrintValueToken(val Value, fd int, term string) err
 		e.emitConsolePrintVal(strVal, e.internString("%s"+term), fd)
 		return nil
 	}
-	if val.Ty.IsDate() && !val.Ty.IsDynamic() || val.Ty.IsRegExp() && val.Ty.IsObject() && !val.Ty.Nullable() && !val.Ty.IsDynamic() {
+	if val.Ty.IsDate() && !val.Ty.IsDynamic() || val.Ty.IsRegExp() && val.Ty.IsObject() && !val.Ty.IsDynamic() {
 		// console.log(date) shows its util.inspect form, the ISO string.
 		strVal, err := e.emitInspectField(val, 0)
 		if err != nil {
@@ -541,7 +536,7 @@ func (e *Emitter) inspectNegZero(val Value, strVal Value) Value {
 	sel := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, f64.Ref))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, -9223372036854775808", isNegZero, bits))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, isNegZero, e.internString("-0"), strVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", sel, isNegZero, e.internString("-0"), strVal.Ref))
 	return Value{Ref: sel, Ty: TypePtr}
 }
 
@@ -554,28 +549,23 @@ func (e *Emitter) inspectNegZero(val Value, strVal Value) Value {
 // spread contributes nothing), and one trailing newline closes the line — so
 // the output is exactly `a b c\n` for any positional/spread mix.
 func (e *Emitter) emitConsolePrintSpread(args []ast.Expression, fd int, prefix string) (Value, error) {
-	if fd == 2 {
-		e.ensureDprintf()
-	} else {
-		e.ensurePrintf()
-	}
 	e.emitConsoleGroupIndent(fd)
 	if prefix != "" {
 		pfxPtr := e.internString(prefix)
 		fmtStr := e.internString("%s")
 		if fd == 2 {
-			e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", fmtStr, pfxPtr))
+			e.emitInstr(fmt.Sprintf("call i32 (i32, "+irPtr+", ...) @dprintf(i32 2, "+irPtr+" %s, "+irPtr+" %s)", fmtStr, pfxPtr))
 		} else {
-			e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtStr, pfxPtr))
+			e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", ...) @printf("+irPtr+" %s, "+irPtr+" %s)", fmtStr, pfxPtr))
 		}
 	}
 	startedPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", startedPtr))
-	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", startedPtr))
+	e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", startedPtr))
 	// emitSep prints one space before a token when one has already been printed.
 	emitSep := func() {
 		started := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", started, startedPtr))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", started, startedPtr))
 		sepL := e.freshLabel("log.sep")
 		contL := e.freshLabel("log.cont")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", started, sepL, contL))
@@ -583,7 +573,7 @@ func (e *Emitter) emitConsolePrintSpread(args []ast.Expression, fd int, prefix s
 		e.emitConsolePrintVal(Value{Ref: e.internString(" "), Ty: TypePtr}, e.internString("%s"), fd)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", contL))
 		e.emitLabel(contL)
-		e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", startedPtr))
+		e.emitInstr(fmt.Sprintf("store i1 1, "+irPtr+" %s, align 1", startedPtr))
 	}
 	for _, arg := range args {
 		if sp, ok := arg.(*ast.SpreadElement); ok {
@@ -591,12 +581,9 @@ func (e *Emitter) emitConsolePrintSpread(args []ast.Expression, fd int, prefix s
 			if err != nil {
 				return Value{}, err
 			}
-			if elemTy.IsArray() || elemTy.IsObject() {
-				return Value{}, fmt.Errorf("%d:%d: console spread of an array of arrays or objects is not supported", sp.Arg.GetPos().Line, sp.Arg.GetPos().Col)
-			}
 			idxAlloca := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 			condL := e.freshLabel("log.cond")
 			bodyL := e.freshLabel("log.body")
 			doneL := e.freshLabel("log.done")
@@ -604,20 +591,20 @@ func (e *Emitter) emitConsolePrintSpread(args []ast.Expression, fd int, prefix s
 			e.emitLabel(condL)
 			idxVal := e.freshReg()
 			done := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 			e.emitLabel(bodyL)
 			emitSep()
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, ptrReg, idxVal))
 			elem := e.loadArrayElem(gep, elemTy)
 			if err := e.emitConsolePrintValueToken(elem, fd, ""); err != nil {
 				return Value{}, err
 			}
 			idxNext := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 			e.emitLabel(doneL)
 			continue
@@ -656,18 +643,12 @@ func (e *Emitter) emitConsoleGroupIndent(fd int) {
 	if e.blockDone {
 		return
 	}
-	e.ensureConsoleGroupDepth()
-	if fd == 2 {
-		e.ensureDprintf()
-	} else {
-		e.ensurePrintf()
-	}
 	depthReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_console_group_depth, align 8", depthReg))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_console_group_depth, align 8", depthReg))
 
 	counterPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", counterPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", counterPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", counterPtr))
 
 	loopL := e.freshLabel("group.indent.loop")
 	bodyL := e.freshLabel("group.indent.body")
@@ -676,7 +657,7 @@ func (e *Emitter) emitConsoleGroupIndent(fd int) {
 
 	e.emitLabel(loopL)
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cur, counterPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, counterPtr))
 	cond := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", cond, cur, depthReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond, bodyL, doneL))
@@ -685,13 +666,13 @@ func (e *Emitter) emitConsoleGroupIndent(fd int) {
 	indentStr := e.internString("  ")
 	fmtStr := e.internString("%s")
 	if fd == 2 {
-		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", fmtStr, indentStr))
+		e.emitInstr(fmt.Sprintf("call i32 (i32, "+irPtr+", ...) @dprintf(i32 2, "+irPtr+" %s, "+irPtr+" %s)", fmtStr, indentStr))
 	} else {
-		e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", fmtStr, indentStr))
+		e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", ...) @printf("+irPtr+" %s, "+irPtr+" %s)", fmtStr, indentStr))
 	}
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, counterPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, counterPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", loopL))
 
 	e.emitLabel(doneL)
@@ -710,12 +691,11 @@ func (e *Emitter) emitConsoleGroup(args []ast.Expression, pos ast.Pos) (Value, e
 			return Value{}, err
 		}
 	}
-	e.ensureConsoleGroupDepth()
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_console_group_depth, align 8", cur))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_console_group_depth, align 8", cur))
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_console_group_depth, align 8", next))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" @__kml_console_group_depth, align 8", next))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -724,18 +704,17 @@ func (e *Emitter) emitConsoleGroup(args []ast.Expression, pos ast.Pos) (Value, e
 // harmless rather than underflowing into a negative depth).
 func (e *Emitter) emitConsoleGroupEnd(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: console.groupEnd takes no arguments", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "arity: console.groupEnd takes no arguments")
 	}
-	e.ensureConsoleGroupDepth()
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr @__kml_console_group_depth, align 8", cur))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_console_group_depth, align 8", cur))
 	isZero := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sle i64 %s, 0", isZero, cur))
 	dec := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", dec, cur))
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", next, isZero, dec))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr @__kml_console_group_depth, align 8", next))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" @__kml_console_group_depth, align 8", next))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -744,16 +723,54 @@ func (e *Emitter) emitConsoleGroupEnd(args []ast.Expression, pos ast.Pos) (Value
 // limit, `null` for unlimited) is honored by overriding the inspector's
 // recursion cap for this one call; `colors` is accepted syntactically but
 // ignored (this compiler emits no ANSI in inspected output).
+// staticDirOptions reports console.dir options this compile reads itself:
+// an object literal of a literal depth (a non-negative integer or null)
+// and colors (no ANSI is emitted); any other is util.inspect's at run time.
+func (e *Emitter) staticDirOptions(x ast.Expression) bool {
+	ol, ok := x.(*ast.ObjectLiteral)
+	if !ok {
+		return isUndefinedLiteral(e, x)
+	}
+	for _, p := range ol.Properties {
+		switch p.Key {
+		case "depth":
+			if _, isNull := p.Value.(*ast.NullLiteral); isNull {
+				continue
+			}
+			nl, ok := p.Value.(*ast.NumberLiteral)
+			if !ok || nl.IsBigInt {
+				return false
+			}
+			if n, err := strconv.Atoi(nl.Value); err != nil || n < 0 {
+				return false
+			}
+		case "colors":
+			if _, ok := p.Value.(*ast.BooleanLiteral); !ok {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 func (e *Emitter) emitConsoleDir(args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: console.dir takes 1 or 2 arguments (obj, options?)", pos.Line, pos.Col)
+	var err error
+	if len(args) == 0 {
+		args = []ast.Expression{ast.NewNullLiteral(true, pos)} // console.dir(): undefined
+	}
+	if len(e.passedArgs(args)) > 2 {
+		if args, err = e.dropArgsPast(args, 2, pos); err != nil {
+			return Value{}, err
+		}
 	}
 	// Options known only at run time: Node's own form, the line
 	// util.inspect(obj, { customInspect: false, ...options }) renders.
-	if resolver.DirOptionsAtRunTime(args) {
+	if resolver.DirOptionsAtRunTime(args) || len(args) == 2 && (e.compatJS() || !e.staticDirOptions(args[1])) {
 		m, ok := e.libExports["internal_util_inspect:inspect"]
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: internal error: console.dir's run-time inspect is not linked", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "console.dir's run-time inspect is not linked")
 		}
 		opts := ast.NewObjectLiteral([]ast.ObjectProperty{
 			{Key: "customInspect", Value: &ast.BooleanLiteral{Value: false}},
@@ -767,34 +784,23 @@ func (e *Emitter) emitConsoleDir(args []ast.Expression, pos ast.Pos) (Value, err
 	e.inspectDepthCap = 2
 	e.inspectDepthSet = true
 	if len(args) == 2 {
-		ol, ok := args[1].(*ast.ObjectLiteral)
-		if !ok {
-			e.inspectDepthSet = false
-			return Value{}, fmt.Errorf("%d:%d: console.dir's options argument must be an object literal", pos.Line, pos.Col)
+		ol, _ := args[1].(*ast.ObjectLiteral)
+		if ol == nil {
+			ol = &ast.ObjectLiteral{}
 		}
 		for _, prop := range ol.Properties {
-			switch prop.Key {
-			case "depth":
+			if prop.Key == "depth" {
 				// A literal number caps nesting; `null` means unlimited (a large
 				// cap, since the walk is compile-time-bounded by the type anyway).
 				if _, isNull := prop.Value.(*ast.NullLiteral); isNull {
 					e.inspectDepthCap = 1 << 20
 				} else if nl, ok := prop.Value.(*ast.NumberLiteral); ok && !nl.IsBigInt {
 					n, convErr := strconv.Atoi(nl.Value)
-					if convErr != nil || n < 0 {
-						e.inspectDepthSet = false
-						return Value{}, fmt.Errorf("%d:%d: console.dir's depth option must be a non-negative integer literal or null", pos.Line, pos.Col)
+					if convErr != nil {
+						n = 0
 					}
 					e.inspectDepthCap = n
-				} else {
-					e.inspectDepthSet = false
-					return Value{}, fmt.Errorf("%d:%d: console.dir's depth option must be a literal number or null", pos.Line, pos.Col)
 				}
-			case "colors":
-				// Accepted, ignored — inspected output carries no ANSI here.
-			default:
-				e.inspectDepthSet = false
-				return Value{}, fmt.Errorf("%d:%d: console.dir options support only { depth, colors }", pos.Line, pos.Col)
 			}
 		}
 	}
@@ -815,7 +821,7 @@ func (e *Emitter) consoleLabelArg(args []ast.Expression, name string, pos ast.Po
 // a string (or omitted), which a lookup by the label as given needs.
 func (e *Emitter) consoleLabelArgKind(args []ast.Expression, name string, pos ast.Pos) (string, string, error) {
 	if len(args) > 1 {
-		return "", "", fmt.Errorf("%d:%d: console.%s takes 0 or 1 arguments (label?)", pos.Line, pos.Col, name)
+		return "", "", internalAt(pos, "arity: console.%s takes 0 or 1 arguments (label?)", name)
 	}
 	if len(args) == 0 {
 		return e.internString("default"), "1", nil
@@ -850,29 +856,29 @@ func (e *Emitter) consoleLabelArgKind(args []ast.Expression, name string, pos as
 // console.time() backing map, creating it on first use — same shape as
 // emitConsoleCountMapEnsure below.
 func (e *Emitter) emitConsoleTimeMapEnsure() string {
-	e.ensureConsoleTimer()
+	e.ensureMapStrHelpers()
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_console_time_map, align 8", cur))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cur, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_console_time_map, align 8", cur))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", cur, resPtr))
 
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cur))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, cur))
 	createL := e.freshLabel("consoletime.create")
 	doneL := e.freshLabel("consoletime.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, createL, doneL))
 
 	e.emitLabel(createL)
 	newMap := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", newMap))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_console_time_map, align 8", newMap))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newMap, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", newMap))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_console_time_map, align 8", newMap))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", newMap, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", result, resPtr))
 	return result
 }
 
@@ -889,7 +895,7 @@ func (e *Emitter) emitConsoleTime(args []ast.Expression, pos ast.Pos) (Value, er
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", nowReg))
 	bits := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", bits, nowReg))
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapReg, labelPtr, bits))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", mapReg, labelPtr, bits))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -902,33 +908,29 @@ func (e *Emitter) emitConsoleTimeEnd(args []ast.Expression, pos ast.Pos) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureSprintf()
-	e.ensureMalloc()
-	e.ensureStrlen()
-	e.ensurePrintf()
 
 	mapReg := e.emitConsoleTimeMapEnsure()
 	nowReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_performance_now()", nowReg))
 	startBits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", startBits, mapReg, labelPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", startBits, mapReg, labelPtr))
 	startReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", startReg, startBits))
 	elapsed := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fsub double %s, %s", elapsed, nowReg, startReg))
 
 	labelLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", labelLen, labelPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", labelLen, labelPtr))
 	bufSize := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 48", bufSize, labelLen))
 	buf := e.freshReg()
-	e.heapMallocInto(buf, bufSize)
+	e.heapMallocInto(buf, allocBytes, bufSize)
 	msgFmt := e.internString("%s: %gms")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, double %s)", buf, msgFmt, labelPtr, elapsed))
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, double %s)", buf, msgFmt, labelPtr, elapsed))
 
 	e.emitConsoleGroupIndent(1)
 	nlFmt := e.internString("%s\n")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", nlFmt, buf))
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", ...) @printf("+irPtr+" %s, "+irPtr+" %s)", nlFmt, buf))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -938,29 +940,29 @@ func (e *Emitter) emitConsoleTimeEnd(args []ast.Expression, pos ast.Pos) (Value,
 // already established for "branch, then merge a value back" — simpler and
 // safer than hand-tracking phi predecessor labels.
 func (e *Emitter) emitConsoleCountMapEnsure() string {
-	e.ensureConsoleCountMap()
+	e.ensureMapStrHelpers()
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr @__kml_console_count_map, align 8", cur))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cur, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_console_count_map, align 8", cur))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", cur, resPtr))
 
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cur))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, cur))
 	createL := e.freshLabel("consolecount.create")
 	doneL := e.freshLabel("consolecount.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, createL, doneL))
 
 	e.emitLabel(createL)
 	newMap := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", newMap))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_console_count_map, align 8", newMap))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newMap, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", newMap))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_console_count_map, align 8", newMap))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", newMap, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", result, resPtr))
 	return result
 }
 
@@ -975,27 +977,23 @@ func (e *Emitter) emitConsoleCount(args []ast.Expression, pos ast.Pos) (Value, e
 	}
 	mapReg := e.emitConsoleCountMapEnsure()
 	cur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", cur, mapReg, labelPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", cur, mapReg, labelPtr))
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, cur))
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", mapReg, labelPtr, next))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", mapReg, labelPtr, next))
 
-	e.ensureSprintf()
-	e.ensureMalloc()
-	e.ensureStrlen()
-	e.ensurePrintf()
 	labelLen := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", labelLen, labelPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", labelLen, labelPtr))
 	bufSize := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 32", bufSize, labelLen))
 	buf := e.freshReg()
-	e.heapMallocInto(buf, bufSize)
+	e.heapMallocInto(buf, allocBytes, bufSize)
 	msgFmt := e.internString("%s: %lld")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s, i64 %s)", buf, msgFmt, labelPtr, next))
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %s)", buf, msgFmt, labelPtr, next))
 
 	e.emitConsoleGroupIndent(1)
 	nlFmt := e.internString("%s\n")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s, ptr %s)", nlFmt, buf))
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", ...) @printf("+irPtr+" %s, "+irPtr+" %s)", nlFmt, buf))
 	return Value{Ty: TypeVoid}, nil
 }
 
@@ -1012,19 +1010,19 @@ func (e *Emitter) emitConsoleCountReset(args []ast.Expression, pos ast.Pos) (Val
 	// given, so a non-string one (counted under its string form) never
 	// matches.
 	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has(ptr %s, ptr %s)", found, mapReg, labelPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_map_str_has("+irPtr+" %s, "+irPtr+" %s)", found, mapReg, labelPtr))
 	has := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", has, found, isStr))
 	setL, warnL, doneL := e.freshLabel("countreset.set"), e.freshLabel("countreset.warn"), e.freshLabel("countreset.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, setL, warnL))
 	e.emitLabel(setL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 0)", mapReg, labelPtr))
+	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 0)", mapReg, labelPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(warnL)
 	tmp := "__kml_countreset_" + e.freshReg()[1:]
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", labelPtr, slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", labelPtr, slot))
 	e.define(tmp, Symbol{Ptr: slot, Ty: TypePtr})
 	msg := ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral("Count for '", pos), ast.NewIdentifier(tmp, pos), pos), ast.NewStringLiteral("' does not exist", pos), pos)
 	if m, ok := e.libExports["internal_process_warning:emitWarning"]; ok {
@@ -1034,11 +1032,9 @@ func (e *Emitter) emitConsoleCountReset(args []ast.Expression, pos ast.Pos) (Val
 	} else {
 		// A program compiled without the library (no process emitter to
 		// listen): the default listener's line.
-		e.ensureDprintf()
-		e.ensureGetpid()
 		pid := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @getpid()", pid))
-		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, i32 %s, ptr %s)", e.internString("(node:%d) Warning: Count for '%s' does not exist\n"), pid, labelPtr))
+		e.emitInstr(fmt.Sprintf("call i32 (i32, "+irPtr+", ...) @dprintf(i32 2, "+irPtr+" %s, i32 %s, "+irPtr+" %s)", e.internString("(node:%d) Warning: Count for '%s' does not exist\n"), pid, labelPtr))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -1050,9 +1046,9 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 		parts := append([]string{fmtPtr}, extra...)
 		joined := strings.Join(parts, ", ")
 		if fd == 2 {
-			e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s)", joined))
+			e.emitInstr(fmt.Sprintf("call i32 (i32, "+irPtr+", ...) @dprintf(i32 2, "+irPtr+" %s)", joined))
 		} else {
-			e.emitInstr(fmt.Sprintf("call i32 (ptr, ...) @printf(ptr %s)", joined))
+			e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", ...) @printf("+irPtr+" %s)", joined))
 		}
 	}
 	switch val.Ty.IR {
@@ -1078,7 +1074,7 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 		call("double " + r)
 	case "double":
 		call("double " + val.Ref)
-	case "ptr":
+	case irPtr:
 		// A ptr value being printed can genuinely be null at runtime even
 		// when its static type doesn't say Nullable — e.g. Map<K,V>.get()
 		// on a missing key (emit_collections.go) returns a bare null V,
@@ -1095,22 +1091,22 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 		// URLSearchParams/Map-specific call sites.
 		safe := e.freshReg()
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, val.Ref))
 		// A `T | undefined` pointer (an element-absence result, TDD-00187)
 		// renders its null as "undefined", matching real JS.
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString(absentLiteral(val.Ty)), val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", safe, isNull, e.internString(absentLiteral(val.Ty)), val.Ref))
 		// `%s` and literal text: the string is written by its length, so an
 		// embedded NUL byte prints as Node prints it.
 		if raw, ok := e.strConstRaw[fmtPtr]; ok && strings.HasPrefix(raw, "%s") && !strings.Contains(raw[2:], "%") {
 			e.ensureStrHeaderRuntime()
-			e.emitInstr(fmt.Sprintf("call void @__kml_write_str(i64 %d, ptr %s)", fd, safe))
+			e.emitInstr(fmt.Sprintf("call void @__kml_write_str(i64 %d, "+irPtr+" %s)", fd, safe))
 			if rest := raw[2:]; rest != "" {
 				fmtPtr = e.internString(rest)
 				call()
 			}
 			return
 		}
-		call("ptr " + safe)
+		call(irPtr + " " + safe)
 	}
 }
 
@@ -1118,9 +1114,8 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 // If condition is falsy, it prints "Assertion failed: <message>" to stderr and continues.
 func (e *Emitter) emitConsoleAssert(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) == 0 {
-		return Value{}, fmt.Errorf("%d:%d: console.assert requires at least one argument", pos.Line, pos.Col)
+		args = []ast.Expression{ast.NewNullLiteral(true, pos)} // undefined: falsy
 	}
-	e.ensureDprintf()
 
 	cond, err := e.emitExpr(args[0])
 	if err != nil {
@@ -1136,7 +1131,7 @@ func (e *Emitter) emitConsoleAssert(args []ast.Expression, pos ast.Pos) (Value, 
 	if len(args) > 1 {
 		pfxPtr := e.internString("Assertion failed: ")
 		fmtStr := e.internString("%s")
-		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", fmtStr, pfxPtr))
+		e.emitInstr(fmt.Sprintf("call i32 (i32, "+irPtr+", ...) @dprintf(i32 2, "+irPtr+" %s, "+irPtr+" %s)", fmtStr, pfxPtr))
 		msgArgs := args[1:]
 		if _, err := e.emitConsolePrint(msgArgs, 2, ""); err != nil {
 			return Value{}, err
@@ -1144,7 +1139,7 @@ func (e *Emitter) emitConsoleAssert(args []ast.Expression, pos ast.Pos) (Value, 
 	} else {
 		msgPtr := e.internString("Assertion failed\n")
 		fmtStr := e.internString("%s")
-		e.emitInstr(fmt.Sprintf("call i32 (i32, ptr, ...) @dprintf(i32 2, ptr %s, ptr %s)", fmtStr, msgPtr))
+		e.emitInstr(fmt.Sprintf("call i32 (i32, "+irPtr+", ...) @dprintf(i32 2, "+irPtr+" %s, "+irPtr+" %s)", fmtStr, msgPtr))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", passL))
 
@@ -1170,7 +1165,7 @@ func (e *Emitter) arrayAbsentLiteral(val Value) string {
 		return lit
 	}
 	isRef, r := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isRef, val.Ref, e.nullRef()))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isRef, e.internString("null"), lit))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isRef, val.Ref, e.nullRef()))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isRef, e.internString("null"), lit))
 	return r
 }

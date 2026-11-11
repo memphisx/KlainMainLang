@@ -117,3 +117,20 @@ async function run() {
 run()
 `, "boom\nMyErr\nMyErr: boom\ntrue\ntrue")
 }
+
+// Promises of `number | null` and `number | null | undefined` in one
+// combinator: their values keep which absence each holds.
+func TestE2ECombinatorMixedNullableScalars(t *testing.T) {
+	assertOutput(t, `
+async function a(k: number): Promise<number | null> { return k === 0 ? null : 4; }
+async function n(k: number): Promise<number | null | undefined> { return k === 0 ? null : k === 1 ? undefined : 2; }
+async function main() {
+  const r = await Promise.allSettled([a(0), a(1), n(0), n(1), n(2)]);
+  console.log(r.map(x => x.status === "fulfilled" ? x.value : 0));
+  const q = await Promise.all([a(0), n(1), a(1)]);
+  console.log(q, q.map(v => v === null), q.map(v => v === undefined));
+  for (const x of await Promise.allSettled([a(0), n(1)])) console.log(x.status);
+}
+main().then(() => Promise.allSettled([a(0), n(2)])).then(r => console.log(r.map(x => x.status)));
+`, "[ null, 4, null, undefined, 2 ]\n[ null, undefined, 4 ] [ true, false, false ] [ false, true, false ]\nfulfilled\nfulfilled\n[ 'fulfilled', 'fulfilled' ]")
+}

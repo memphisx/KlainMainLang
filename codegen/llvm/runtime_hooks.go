@@ -27,17 +27,11 @@ func (e *Emitter) hooksCSource() CSource {
 // hookFuncs are the generated routines the runtime's C calls through
 // hooks.c (without the __kml_ prefix).
 var hookFuncs = []string{
-	"any_eq", "any_tobool", "any_tonum",
-	"classref_shown", "classref_nstatic", "classref_skey", "classref_sget",
-	"error_inspect", "promise_inspect_parts",
-	"fs_error_new",
-	"httpc_fire_ready",
+	"error_inspect", "proxy_tget", "proxy_tset",
 	"objproto_fill",
-	"pdyn_attach", "prim_proto_of", "promise_wrapper_of",
+	"pdyn_attach", "prim_proto_of",
 	"process_uncaught", "unhandled_report",
-	"signal_aborted", "signal_reason", "signal_timeout",
 	"stream_decode",
-	"throw_nullderef", "throw_range_error",
 	"worker_run_loop", "worker_uncaught",
 }
 
@@ -71,8 +65,8 @@ func (e *Emitter) emitHookRegistration() {
 		if !defined[name] {
 			continue
 		}
-		e.emitGlobal(fmt.Sprintf("@__kml_hookp_%s = external global ptr, align 8", name))
-		fmt.Fprintf(&body, "  store ptr @__kml_ir_%s, ptr @__kml_hookp_%s, align 8\n", name, name)
+		e.emitGlobal(fmt.Sprintf("@__kml_hookp_%s = external"+irGlobalAS+" global "+irPtr+", align 8", name))
+		fmt.Fprintf(&body, "  store "+irPtr+" %s, "+irPtr+" @__kml_hookp_%s, align 8\n", fnValue("@__kml_ir_"+name), name)
 	}
 	for _, ir := range e.hookInits {
 		body.WriteString(ir)
@@ -80,7 +74,7 @@ func (e *Emitter) emitHookRegistration() {
 	if body.Len() == 0 {
 		return
 	}
-	e.emitGlobal("define internal void @__kml_hooks_init() {\nentry:\n" + body.String() + "  ret void\n}")
+	e.emitGlobal(funcDef("internal void @__kml_hooks_init()", body.String()+"  ret void\n"))
 	e.addCtor("@__kml_hooks_init")
 }
 
@@ -110,11 +104,26 @@ func definedKMLNames(ir string) map[string]bool {
 }
 
 // renameHooks gives the program's copies of the hooks and primitives their
-// __kml_ir_ names, at their definitions and every use. One pass into a
+// __kml_ir_ names, at their definitions and every use; a hook it does not
+// define keeps its name, hooks.c's trampoline. One pass into a
 // buffer sized up front: a program's IR runs to tens of megabytes, and a
 // regexp replace's doubling result would hold several copies of it.
 func renameHooks(ir string) string {
 	const pre = "@__kml_"
+	// A hook the program does not define is called through hooks.c's
+	// trampoline, which holds its default.
+	defined := definedKMLNames(ir)
+	renamed := func(n string) bool {
+		if !hookRenamed[n] {
+			return false
+		}
+		for _, p := range hookPrims {
+			if p == n {
+				return true
+			}
+		}
+		return defined[n]
+	}
 	var b strings.Builder
 	b.Grow(len(ir) + len(ir)/64)
 	last := 0
@@ -128,7 +137,7 @@ func renameHooks(ir string) string {
 		for k < len(ir) && isIRNameByte(ir[k]) {
 			k++
 		}
-		if hookRenamed[ir[start:k]] {
+		if renamed(ir[start:k]) {
 			b.WriteString(ir[last:start])
 			b.WriteString("ir_")
 			last = start

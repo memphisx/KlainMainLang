@@ -40,6 +40,9 @@ func (e *Emitter) front() frontView {
 	b := binder.BindWith(e.prog, binder.Options{AnnexB: e.compatJS(), Lib: libProgs})
 	e.frontBinding = b
 	e.frontChecker = checker.NewWith(b, e.opts)
+	// Checked whole first, so every answer is the program's as written,
+	// whatever emission asks first and whatever lowering rewrites later.
+	e.frontChecker.Check()
 	return e.frontChecker
 }
 
@@ -58,6 +61,16 @@ func (e *Emitter) warmFront(n ast.Node) {
 	if w, ok := e.shadowOracle.(interface{ Warm(ast.Node) }); ok {
 		w.Warm(n)
 	}
+	// Every annotation too, read where it is written, before a rewrite
+	// renames what it names (a local class lifted as `A__kml_cx1`).
+	if _, whole := n.(*ast.Program); whole && e.frontBinding != nil && e.frontAnnWarm == nil {
+		e.frontAnnWarm = map[ast.TypeNode]*checker.Type{}
+		e.frontBinding.EachAnnotation(func(tn ast.TypeNode, sc *binder.Scope) {
+			if t := c.TypeFromNode(tn, sc); !c.Unanswered(t) {
+				e.frontAnnWarm[tn] = t
+			}
+		})
+	}
 	var decls []*ast.VarDeclaration // after every expression, as the oracle's Warm
 	defer func() {
 		for _, v := range decls {
@@ -67,6 +80,12 @@ func (e *Emitter) warmFront(n ast.Node) {
 	ast.Inspect(n, func(x ast.Node) bool {
 		if v, ok := x.(*ast.VarDeclaration); ok {
 			decls = append(decls, v)
+		}
+		if b, ok := x.(*ast.BlockStatement); ok {
+			switch c.ParentOf(b).(type) {
+			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction:
+				c.BodyReturnType(b) // a function's result, read as written
+			}
 		}
 		if ex, ok := x.(ast.Expression); ok {
 			if t := c.TypeOf(ex); !c.Unanswered(t) {
@@ -134,7 +153,7 @@ func (l *lowering) resultType() Type {
 		return intrinsics[l.intrinsic].ty(l.e, l.ex)
 	}
 	if l.libFn != "" {
-		return l.e.inferExprType(l.libCall())
+		return l.e.typeOfExpr(l.libCall())
 	}
 	if l.resultOptional {
 		return undefinedableElem(l.result)
@@ -172,8 +191,7 @@ func (e *Emitter) sharedLibLowering(decl ast.Node, overloads []ast.Node) (string
 		}
 		target = ms.Lower
 	}
-	m, ok := e.globalLinks[target]
-	return m, ok
+	return e.lowerLink(target)
 }
 
 // libCall is a library-lowered call as the call of its function (built
@@ -223,9 +241,9 @@ type loweredParam struct {
 // loweredCall resolves a call through a builtin declaration's @lower
 // target: a method of a builtin global object (`Math.sin(x)`), the global
 // not shadowed by the program, or of a string (`s.trim()`). It is the one
-// decider both emission and inferExprType consult. It is not memoised: it
+// decider both emission and typeOfExpr consult. It is not memoised: it
 // reads codegen's scope (shadowing, the receiver's representation), which
-// inferExprType may consult before a callback's parameters are bound.
+// typeOfExpr may consult before a callback's parameters are bound.
 // callSignatureIntrinsic is the intrinsic every call signature of an
 // interface type names, or "" when one names none or they differ.
 func callSignatureIntrinsic(t *checker.Type) string {
@@ -292,7 +310,26 @@ func (e *Emitter) isLibMember(d ast.Node) bool {
 			}
 		}
 	}
-	return e.libMembers[d]
+	if e.libMembers[d] {
+		return true
+	}
+	// A well-known-symbol member (`[Symbol.asyncIterator]`) reaches here as
+	// the checker's renamed copy; one lowered to a library module's export
+	// is a builtin declaration's all the same.
+	ms, ok := d.(*ast.MethodSignature)
+	return ok && strings.HasPrefix(ms.Name, "@@") && strings.Contains(ms.Lower, ":")
+}
+
+// lowerLink is the program function a declaration's `@lower` names: a
+// global module's linked function, or a builtin module's export
+// (`internal_process_methods:cwd`) when the program has that module.
+func (e *Emitter) lowerLink(name string) (string, bool) {
+	if strings.Contains(name, ":") {
+		m, ok := e.libExports[name]
+		return m, ok
+	}
+	m, ok := e.globalLinks[name]
+	return m, ok
 }
 
 func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
@@ -329,7 +366,7 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 					}
 				}
 				if fd, ok := d.Node.(*ast.FunctionDeclaration); ok && fd.Lower != "" {
-					if m, linked := e.globalLinks[fd.Lower]; linked {
+					if m, linked := e.lowerLink(fd.Lower); linked {
 						return &lowering{libFn: m, e: e, ex: ex}, true
 					}
 				}
@@ -346,6 +383,9 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 	if !ok || mem.Optional {
 		return nil, false
 	}
+	if key, ok := e.protoMethodCall(c, mem, len(ex.Args)); ok {
+		return &lowering{intrinsic: key, e: e, ex: ex}, true
+	}
 	if key, ok := e.methodIntrinsic(c, mem); ok {
 		// An intrinsic's emitter reads its types off the arguments; explicit
 		// type arguments (`Object.freeze<T>(o)`) change nothing.
@@ -354,13 +394,13 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 	// A global function reached through globalThis (`globalThis.setTimeout`)
 	// lowered to a library function.
 	if fd, ok := c.MemberDecl(mem).(*ast.FunctionDeclaration); ok && fd.Lower != "" {
-		if m, linked := e.globalLinks[fd.Lower]; linked {
+		if m, linked := e.lowerLink(fd.Lower); linked {
 			return &lowering{libFn: m, e: e, ex: ex}, true
 		}
 	}
 	for _, d := range c.MemberOverloadDecls(mem) {
 		if fd, ok := d.(*ast.FunctionDeclaration); ok && fd.Lower != "" {
-			if m, linked := e.globalLinks[fd.Lower]; linked {
+			if m, linked := e.lowerLink(fd.Lower); linked {
 				return &lowering{libFn: m, e: e, ex: ex}, true
 			}
 		}
@@ -369,7 +409,7 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 		// A BigInt64Array/BigUint64Array codegen holds (a prototype record's
 		// receiver, which the checker does not type): its method's
 		// TypeScript implementation, as its declaration lowers to.
-		if ot := e.inferExprType(mem.Object); ot.BigIntElem && !ot.IsDynamic() && ot.ElemType != nil {
+		if ot := e.typeOfExpr(mem.Object); ot.BigIntElem && !ot.IsDynamic() && ot.ElemType != nil {
 			kind := "BigInt64Array"
 			if !ot.ElemType.Signed {
 				kind = "BigUint64Array"
@@ -380,7 +420,7 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 			}
 		}
 		// A bigint likewise (BigInt.prototype's record).
-		if ot := e.inferExprType(mem.Object); ot.IsBigInt() && !ot.IsDynamic() {
+		if ot := e.typeOfExpr(mem.Object); ot.IsBigInt() && !ot.IsDynamic() {
 			if m, linked := e.globalLinks["__kml_BigInt_"+mem.Property]; linked {
 				r := ot
 				return &lowering{libFn: m, recv: &r, e: e, ex: ex}, true
@@ -406,7 +446,7 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 			// A value codegen holds as a string or number that the checker
 			// cannot type (an untyped value under -compat=js): the apparent
 			// type's member.
-			fn, decl, overloads = c.PrimitiveMember(r.IR == "ptr", mem.Property)
+			fn, decl, overloads = c.PrimitiveMember(r.IR == irPtr, mem.Property)
 		}
 	} else if d, ov := c.MemberDecl(mem), c.MemberOverloadDecls(mem); e.isLibMember(d) || len(ov) > 0 && e.isLibMember(ov[0]) {
 		// A builtin interface's method on an object (an iterator's
@@ -447,7 +487,7 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 		return nil, false // the named path, which rejects what the intrinsic cannot take
 	}
 	if ok && ms.Lower != "" {
-		if m, linked := e.globalLinks[ms.Lower]; linked {
+		if m, linked := e.lowerLink(ms.Lower); linked {
 			return &lowering{libFn: m, recv: recv, e: e, ex: ex}, true
 		}
 	}
@@ -498,13 +538,13 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 		if n == 0 || !l.params[n-1].rest || i < n-1 {
 			return nil, false
 		}
-		at := e.inferExprType(sp.Arg)
+		at := e.typeOfExpr(sp.Arg)
 		if !at.IsArray() || at.ElemType == nil || at.ElemType.IR != l.params[n-1].ty.ElemType.IR ||
 			at.ElemType.IsDynamic() || at.ElemType.Nullable() || isUnconstrainedDynamic(at) {
 			return nil, false
 		}
 	}
-	res := fn.Result
+	res := fn.Ret()
 	if u := c.NonUndefined(res); u != res && c.MaybeUndefined(res) && res.Flags&checker.Union != 0 {
 		res, l.resultOptional = u, true // `T | undefined`
 	}
@@ -565,19 +605,26 @@ func (e *Emitter) methodIntrinsic(c frontView, mem *ast.MemberExpression) (strin
 // `@value` array, a bigint typed array's unsupported method, or a receiver
 // codegen holds as something else take the named paths, which reject them.
 func (e *Emitter) intrinsicApplies(key string, mem *ast.MemberExpression) bool {
-	if _, known := intrinsics[key]; !known {
+	in, known := intrinsics[key]
+	if !known {
 		return false
+	}
+	if in.applies != nil {
+		return in.applies(e, mem)
+	}
+	if e.ownMemberNamed(mem) {
+		return false // the receiver's own member of the name, not the builtin's
 	}
 	if owner, _, ok := strings.Cut(key, ".prototype."); ok && collectionIntrinsics[owner] != nil {
 		// Codegen must hold the receiver as that collection (a dictionary
 		// keeps its own path).
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		weak := owner == "WeakMap" || owner == "WeakSet"
 		return (ot.IsMap() || ot.IsSet()) && ot.Weak == weak && !ot.IsDynamicObject() &&
 			!isUnconstrainedDynamic(ot)
 	}
 	if strings.HasPrefix(key, "RegExp.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return ot.IsRegExp() && !ot.IsDynamic()
 	}
 	if strings.HasPrefix(key, "Function.prototype.") {
@@ -586,70 +633,63 @@ func (e *Emitter) intrinsicApplies(key string, mem *ast.MemberExpression) bool {
 		if id, ok := mem.Object.(*ast.Identifier); ok && e.compatJS() && e.jsProtoCtor[id.Name] {
 			return false
 		}
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return ot.IsFunc() && !ot.IsDynamic()
 	}
 	if strings.HasPrefix(key, "Promise.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return ot.IsPromise() && !ot.IsDynamic()
 	}
 	if strings.HasPrefix(key, "Date.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return ot.IsDate() && !ot.IsDynamic() || e.isDateClass(ot)
 	}
 	if strings.HasPrefix(key, "TypedArray.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return ot.IsTypedArray() && !isUnconstrainedDynamic(ot)
 	}
 	if owner, _, ok := strings.Cut(key, ".prototype."); ok {
 		if held := ownerReprs[owner]; held != nil {
-			ot := e.inferExprType(mem.Object)
+			ot := e.typeOfExpr(mem.Object)
 			return held(ot) && !isUnconstrainedDynamic(ot)
 		}
 	}
-	switch key {
-	case "Object.prototype.toString":
-		ot := e.inferExprType(mem.Object)
-		if isNumberTy(ot) && ot.IR != "i1" {
-			// A number reaches Object's toString only through a declaration
-			// that names it, or as a union with a boolean (whose members
-			// TypeScript requires to take no argument); an undeclared one
-			// takes Number.prototype.toString(radix)'s lowering.
-			c := e.front()
-			if c == nil || isUnconstrainedDynamic(ot) {
-				return false
-			}
-			t := c.TypeOf(mem.Object)
-			return c.MemberDecl(mem) != nil || !c.Unanswered(t) && t.Flags&checker.Union != 0
-		}
-		return objectProtoToStringApplies(ot)
-	case "Object.prototype.hasOwnProperty":
-		ot := e.inferExprType(mem.Object)
-		return ot.IsObject() && !isUnconstrainedDynamic(ot) || isPrimitiveReceiver(ot)
-	case "BigInt.prototype.toString":
-		return e.inferExprType(mem.Object).IsBigInt()
+	if strings.HasPrefix(key, "Generator.prototype.") {
+		ot := e.typeOfExpr(mem.Object)
+		return ot.IsGenerator() && !ot.IsDynamic() && ot.GeneratorElemType != nil
+	}
+	if strings.HasPrefix(key, "ArrayBuffer.prototype.") {
+		ot := e.typeOfExpr(mem.Object)
+		return ot.IsArrayBuffer() && !ot.IsDynamic()
+	}
+	if strings.HasPrefix(key, "Number.prototype.") {
+		return isNumericScalar(e.typeOfExpr(mem.Object)) // an `any` or an object is not a number
 	}
 	if owner, _, ok := strings.Cut(key, ".prototype."); ok && strings.Contains(owner, "Stream") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		if strings.HasPrefix(owner, "Writable") {
 			return ot.IsWritableStream() || ot.IsStreamWriter() || ot.IsWSController()
 		}
 		return ot.IsReadableStream() || ot.IsStreamReader() || ot.IsRSController()
 	}
 	if strings.HasPrefix(key, "Body.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return hasBodyMixin(ot) && !isUnconstrainedDynamic(ot)
 	}
 	if strings.HasPrefix(key, "XMLHttpRequest.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return ot.IsXHR() && !isUnconstrainedDynamic(ot)
 	}
 	if strings.HasPrefix(key, "Buffer.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
 		return ot.IsBuffer() && !isUnconstrainedDynamic(ot)
 	}
 	if strings.HasPrefix(key, "Array.prototype.") {
-		ot := e.inferExprType(mem.Object)
+		ot := e.typeOfExpr(mem.Object)
+		if ot.IsTuple() && !ot.IsDynamic() {
+			// Run on the tuple's elements as an array (tupleArrayCall).
+			return tupleArrayMethods[strings.TrimPrefix(key, "Array.prototype.")]
+		}
 		if !ot.IsArray() || isUnconstrainedDynamic(ot) || ot.IsFlatArray() || ot.BigIntElem && bigIntElemRejectedMethods[mem.Property] {
 			return false
 		}
@@ -660,6 +700,9 @@ func (e *Emitter) intrinsicApplies(key string, mem *ast.MemberExpression) bool {
 // isBuiltinGlobal reports whether id names a builtin global object, not a
 // program binding that shadows it.
 func (e *Emitter) isBuiltinGlobal(c frontView, id *ast.Identifier) bool {
+	if e.builtinIdents[id] {
+		return true // a global codegen itself reads, which no scope binds
+	}
 	if e.isShadowedByLocal(id.Name) {
 		return false
 	}
@@ -707,7 +750,7 @@ func (e *Emitter) loweredReceiver(c frontView, obj ast.Expression) (ty Type, kno
 	if id, ok := obj.(*ast.Identifier); ok && c.Binding().Program.BuiltinMarkers[id.Name] != "" {
 		return Type{}, false, false // a builtin module (`ffi.toString`), not a value
 	}
-	ct := e.inferExprType(obj)
+	ct := e.typeOfExpr(obj)
 	// A possibly-absent number (a typed-array element read) is one too:
 	// emitCall's receiver guard throws on an absent one.
 	number := isNumberTy(ct) && ct.IR != "i1" && !ct.IsDate() && !ct.IsBigInt() && !ct.IsDynamic()
@@ -721,6 +764,11 @@ func (e *Emitter) loweredReceiver(c frontView, obj ast.Expression) (ty Type, kno
 		repr, kind = TypeF64, checker.Number|checker.NumberLiteral
 	}
 	t := c.TypeOf(obj)
+	// A type parameter's members are its constraint's (`x.trim()` of `x:
+	// T` with `T extends string`).
+	for i := 0; i < 8 && !c.Unanswered(t) && t.Flags&checker.TypeParam != 0 && t.Constraint != nil; i++ {
+		t = t.Constraint
+	}
 	if !c.Unanswered(t) {
 		t = c.NonNullable(t)
 	}
@@ -729,6 +777,15 @@ func (e *Emitter) loweredReceiver(c frontView, obj ast.Expression) (ty Type, kno
 		return repr, false, true
 	case t.Flags&checker.Union == 0 && t.Flags&kind != 0:
 		return repr, true, true
+	case t.Flags&checker.Union != 0 && len(t.Types) > 0:
+		// A union of literals of the one kind (`"a" | "b"`): the apparent
+		// type's member, the union naming no one declaration.
+		for _, m := range t.Types {
+			if m.Flags&checker.Union != 0 || m.Flags&kind == 0 {
+				return Type{}, false, false
+			}
+		}
+		return repr, false, true
 	}
 	return Type{}, false, false
 }
@@ -763,8 +820,8 @@ func lowerRepr(t *checker.Type) (Type, bool) {
 	case t.Flags&checker.Void != 0:
 		return TypeVoid, true
 	}
-	if r, ok := lowerTypeRepr(t); ok && r.IsError() {
-		// A declaration's native layout: so far the Error object.
+	if r, ok := lowerTypeRepr(t); ok && (r.IsError() || r.IsReadableStream()) {
+		// A declaration's native layout: the Error object, a web stream.
 		return r, true
 	}
 	return Type{}, false
@@ -777,7 +834,7 @@ func lowerCallback(t *checker.Type) ([]Type, bool) {
 	if t.Flags&checker.Object == 0 || t.Kind != checker.Function || len(t.Overloads) > 0 || len(t.TypeParams) > 0 {
 		return nil, false
 	}
-	if t.Result == nil || t.Result.Flags&checker.Void == 0 {
+	if t.Ret() == nil || t.Ret().Flags&checker.Void == 0 {
 		return nil, false
 	}
 	params := []Type{}
@@ -812,7 +869,7 @@ func isBytesType(t *checker.Type) bool {
 // (ToNumber, ToString); a missing required number is NaN, ToNumber(undefined).
 func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error) {
 	if l.intrinsic != "" {
-		return intrinsics[l.intrinsic].emit(e, ex)
+		return intrinsics[l.intrinsic].emit(e, e.dropIgnoredArgs(ex))
 	}
 	if l.libFn != "" {
 		return e.emitExpr(l.libCall())
@@ -853,7 +910,7 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 			rest = append(rest, v.Ref)
 			continue
 		}
-		if i < len(l.params) && l.params[i].bytes && e.inferExprType(a).IsDynamic() {
+		if i < len(l.params) && l.params[i].bytes && e.typeOfExpr(a).IsDynamic() {
 			// A box (an any-held Buffer): its bytes, not its elements read
 			// as numbers.
 			v, err := e.emitExpr(a)
@@ -861,7 +918,7 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 				return Value{}, err
 			}
 			ptr, n := e.arrayParts(e.convert(v, TypedArrayType("uint8")))
-			args = append(args, "ptr noundef "+ptr, "i64 noundef "+n)
+			args = append(args, irPtr+" noundef "+ptr, "i64 noundef "+n)
 			continue
 		}
 		if i < len(l.params) && l.params[i].bytes {
@@ -873,7 +930,7 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 			if err != nil {
 				return Value{}, err
 			}
-			args = append(args, "ptr noundef "+ptr, "i64 noundef "+size.Ref)
+			args = append(args, irPtr+" noundef "+ptr, "i64 noundef "+size.Ref)
 			continue
 		}
 		if i < len(l.params) && l.params[i].callback != nil {
@@ -882,13 +939,33 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 				return Value{}, err
 			}
 			if cb.kind != cbClosure {
-				return Value{}, fmt.Errorf("%d:%d: a native callback must be a function value", a.GetPos().Line, a.GetPos().Col)
+				// A named function: a closure calling it, as any other
+				// function value is passed.
+				fv, err := e.emitExpr(a)
+				if err != nil {
+					return Value{}, err
+				}
+				fn := e.bindValue(fv, a.GetPos())
+				var ps []ast.Param
+				var xs []ast.Expression
+				for j := range l.params[i].callback {
+					n := fmt.Sprintf("__kml_na%d", j)
+					ps = append(ps, ast.Param{Name: n})
+					xs = append(xs, ast.NewIdentifier(n, a.GetPos()))
+				}
+				wrap := ast.NewArrowFunction(ps, nil, ast.NewCallExpression(fn, xs, a.GetPos()), nil, a.GetPos())
+				if cb, err = e.resolveCallbackWithHints(wrap, l.params[i].callback); err != nil {
+					return Value{}, err
+				}
+				if cb.kind != cbClosure {
+					return Value{}, internalAt(a.GetPos(), "native callback closure")
+				}
 			}
 			inv, err := e.emitLoweredInvoker(cb.ty, l.params[i].callback)
 			if err != nil {
 				return Value{}, err
 			}
-			args = append(args, "ptr noundef "+inv, "ptr noundef "+cb.hdrPtr)
+			args = append(args, irPtr+" noundef "+inv, irPtr+" noundef "+cb.hdrPtr)
 			continue
 		}
 		if i < len(l.params) && l.params[i].optional && isUndefinedLiteral(e, a) {
@@ -927,13 +1004,17 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 		switch {
 		case p.rest:
 		case p.bytes || p.callback != nil:
-			return Value{}, fmt.Errorf("%d:%d: missing argument %d", ex.GetPos().Line, ex.GetPos().Col, i+1)
+			return Value{}, internalAt(ex.GetPos(), "missing argument %d of a lowered builtin", i+1)
 		case p.optional:
 			args = append(args, "i1 zeroext false", p.ty.IR+" "+zeroOf(p.ty))
 		case p.ty.Float:
 			args = append(args, "double noundef 0x7FF8000000000000")
+		case e.compatJS() && isStringTy(p.ty):
+			// A missing string argument is undefined, converted as the
+			// builtin converts it: "undefined".
+			args = append(args, fmt.Sprintf("%s noundef %s", paramIR(p.ty), e.internString("undefined")))
 		default:
-			return Value{}, fmt.Errorf("%d:%d: missing argument %d", ex.GetPos().Line, ex.GetPos().Col, i+1)
+			return Value{}, internalAt(ex.GetPos(), "missing argument %d of a lowered builtin", i+1)
 		}
 	}
 	if restSpread {
@@ -944,22 +1025,22 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 		if err != nil {
 			return Value{}, err
 		}
-		args = append(args, "ptr noundef "+e.arrayReturnHeader(v))
+		args = append(args, irPtr+" noundef "+e.arrayReturnHeader(v))
 	} else if restAt >= 0 {
-		args = append(args, "ptr noundef "+e.restArray(rest))
+		args = append(args, irPtr+" noundef "+e.restArray(rest))
 	}
 	var slot string
 	if l.resultOptional {
 		slot = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s", slot, l.result.IR))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s", l.result.IR, zeroOf(l.result), slot))
-		args = append(args, "ptr noundef "+slot)
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s", l.result.IR, zeroOf(l.result), slot))
+		args = append(args, irPtr+" noundef "+slot)
 	}
 	e.declareLowered(l)
 	if l.resultOptional {
 		present, v := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call zeroext i1 @%s(%s)", present, l.target, strings.Join(args, ", ")))
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s", v, l.result.IR, slot))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s", v, l.result.IR, slot))
 		return e.wrapUndefinedable(Value{Ref: v, Ty: l.result}, present), nil
 	}
 	if l.result.IR == "void" {
@@ -968,7 +1049,7 @@ func (e *Emitter) emitLowered(ex *ast.CallExpression, l *lowering) (Value, error
 	}
 	if l.result.IsArray() {
 		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @%s(%s)", h, l.target, strings.Join(args, ", ")))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @%s(%s)", h, l.target, strings.Join(args, ", ")))
 		return e.arrayValueFromHeaderReg(h, l.result), nil
 	}
 	r := e.freshReg()
@@ -998,7 +1079,7 @@ func (e *Emitter) emitLoweredInvoker(fnTy Type, params []Type) (string, error) {
 	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	return e.defineContentNamed("@__kml_lower_inv.", "void", strings.Join(append([]string{"ptr %clo"}, sig...), ", "), body), nil
+	return e.defineContentNamed("@__kml_lower_inv.", "void", strings.Join(append([]string{irPtr + " %clo"}, sig...), ", "), body), nil
 }
 
 // optionalPresence is whether an argument to an optional parameter is
@@ -1018,9 +1099,9 @@ func (e *Emitter) optionalPresence(v Value) (string, Value) {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", r, v.Ref, nbUndefined))
 		return r, v
-	case v.Ty.IR == "ptr" && v.Ty.Nullable() && v.Ty.IsUndefined():
+	case v.Ty.IR == irPtr && v.Ty.Nullable() && v.Ty.IsUndefined():
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", r, v.Ref))
 		return r, v
 	case v.Ty.IsUndefined() || v.Ty.IR == "void":
 		return "false", Value{Ref: "0.0", Ty: TypeF64}
@@ -1033,7 +1114,7 @@ func (e *Emitter) lowerArg(v Value, ty Type) (Value, error) {
 	if ty.IsDynamic() {
 		return e.emitBoxValue(v)
 	}
-	if ty.IR == "ptr" {
+	if ty.IR == irPtr {
 		return e.emitArgToString(v) // ToString
 	}
 	if ty.Float || ty.IsInteger() {
@@ -1054,13 +1135,12 @@ func (e *Emitter) restArray(elems []string) string {
 	if len(elems) == 0 {
 		return e.newArrayHeader("null", "0")
 	}
-	e.ensureMalloc()
 	data := e.freshReg()
-	e.heapMallocInto(data, fmt.Sprint(8*len(elems)))
+	e.heapMallocInto(data, allocElems, fmt.Sprint(8*len(elems)))
 	for i, ref := range elems {
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %d", slot, data, i))
-		e.heapStore("ptr", ref, slot, 8)
+		e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %d", slot, data, i))
+		e.heapStore(irPtr, ref, slot, 8)
 	}
 	return e.newArrayHeader(data, fmt.Sprint(len(elems)))
 }
@@ -1073,7 +1153,7 @@ func paramIR(ty Type) string {
 	case ty.IR == "i1":
 		return "i1 zeroext"
 	case ty.IsArray():
-		return "ptr"
+		return irPtr
 	}
 	return ty.IR
 }
@@ -1083,7 +1163,7 @@ func resultIR(ty Type) string {
 	case ty.IR == "i1":
 		return "zeroext i1"
 	case ty.IsArray():
-		return "ptr" // the array's header
+		return irPtr // the array's header
 	}
 	return ty.IR
 }
@@ -1091,7 +1171,7 @@ func resultIR(ty Type) string {
 // zeroOf is a representation's zero value, passed for an absent optional.
 func zeroOf(ty Type) string {
 	switch {
-	case ty.IR == "ptr":
+	case ty.IR == irPtr:
 		return "null"
 	case ty.Float:
 		return "0.0"
@@ -1122,10 +1202,10 @@ func (e *Emitter) declareLowered(l *lowering) {
 	for _, p := range l.params {
 		switch {
 		case p.bytes:
-			params = append(params, "ptr noundef", "i64 noundef")
+			params = append(params, irPtr+" noundef", "i64 noundef")
 			continue
 		case p.callback != nil:
-			params = append(params, "ptr noundef", "ptr noundef")
+			params = append(params, irPtr+" noundef", irPtr+" noundef")
 			continue
 		case p.optional:
 			params = append(params, "i1 zeroext")
@@ -1134,96 +1214,123 @@ func (e *Emitter) declareLowered(l *lowering) {
 	}
 	ret := resultIR(l.result)
 	if l.resultOptional {
-		params = append(params, "ptr noundef")
+		params = append(params, irPtr+" noundef")
 		ret = "zeroext i1"
 	}
 	e.declareFn(l.target, fmt.Sprintf("declare %s @%s(%s)", ret, l.target, strings.Join(params, ", ")))
 }
 
+// linkedBySymbol stands in for a runtime unit the link takes by the symbols
+// the program names (runtime_resolve.go): nothing to declare or flag.
+func (e *Emitter) linkedBySymbol() {}
+
 // runtimeUnits are the `@link` names of the embedded C sources: using one
 // compiles it in. Any other `@link` name is a system library.
 var runtimeUnits = map[string]func(*Emitter){
-	"casemap":    (*Emitter).ensureCasemap,
-	"string":     (*Emitter).ensureStringC,
-	"number":     (*Emitter).ensureNumberC,
-	"pool":       (*Emitter).ensureNativePool,
-	"inspect":    (*Emitter).ensureDynJSONC,
-	"tls":        (*Emitter).ensureNativeTLS,
-	"osinfo":     (*Emitter).ensureOSInfo,
-	"zlib":       (*Emitter).ensureZlibNatives,
-	"cares":      (*Emitter).ensureCaresNatives,
-	"h2o":        (*Emitter).ensureH2ONatives,
-	"fs":         (*Emitter).ensureFsNatives,
+	"casemap": (*Emitter).ensureCasemap,
+	"string":  (*Emitter).ensureStringC,
+	"number":  (*Emitter).ensureNumberC,
+	"pool":    func(e *Emitter) { e.ensureMicrotasks(); e.ensureStrHeaderRuntime(); e.ensureThreadPool() },
+	"inspect": (*Emitter).ensureDynJSONC,
+	"tls":     func(e *Emitter) { e.ensureStrHeaderRuntime(); e.ensureThreadPool() },
+	"osinfo":  func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"zlib":    (*Emitter).ensureZlibNatives,
+	"cares":   (*Emitter).ensureCaresNatives,
+	"h2o":     (*Emitter).ensureH2ONatives,
+	"fs": func(e *Emitter) {
+		e.ensureMicrotasks()
+		e.ensureStrHeaderRuntime()
+		e.ensureThreadPool()
+		e.ensureStrHeaderRuntime()
+	},
 	"sqlite":     (*Emitter).ensureSqliteNatives,
+	"wasm":       (*Emitter).ensureWasmNatives,
 	"ffi":        (*Emitter).ensureFFINatives,
 	"crypto":     (*Emitter).ensureCryptoNatives,
-	"http2":      (*Emitter).ensureH2Natives,
+	"http2":      func(e *Emitter) { e.ensureStrHeaderRuntime(); e.ensureThreadPool() },
 	"umap":       (*Emitter).ensureUmapOrder,
-	"weak":       (*Emitter).ensureWeakNatives,
+	"weak":       func(e *Emitter) { e.ensureMicrotasks() },
 	"timers":     (*Emitter).ensureTimerNatives,
 	"microtasks": (*Emitter).ensureMicrotasks,
-	"frames":     (*Emitter).ensureFrames,
-	"fdlibm":     (*Emitter).ensureFdlibm,
+	"frames":     (*Emitter).linkedBySymbol,
+	"fdlibm":     (*Emitter).linkedBySymbol,
 	"tty":        (*Emitter).ensureTtyRead,
 	"tui":        (*Emitter).ensureTui,
 	"assets":     (*Emitter).ensureAssetsNatives,
 	"webview":    (*Emitter).ensureWebviewRuntime,
 	"sync":       (*Emitter).ensureSyncRuntime,
+	"streams": func(e *Emitter) {
+		e.ensureExceptionHelpers()
+		e.ensureMicrotasks()
+		e.ensureNanBox()
+		e.ensurePromiseAddReaction()
+		e.ensureShapeRuntime()
+		e.ensureUnhandledRejections()
+	},
 }
 
 // runtimeSymbols are the `@lower` targets the IR runtime defines, rather
 // than declares: using one emits its definition.
 var runtimeSymbols = map[string]func(*Emitter){
-	"__kml_trim":       (*Emitter).ensureStringTrim,
-	"__kml_trim_start": (*Emitter).ensureStringTrimStart,
-	"__kml_trim_end":   (*Emitter).ensureStringTrimEnd,
 	// lib/native.d.ts
 	"__kml_drain_microtasks":             (*Emitter).ensureMicrotasks,
-	"__kml_Object_is":                    (*Emitter).ensureObjectIs,
 	"__kml_ctor_kind":                    (*Emitter).ensureCtorKind,
 	"__kml_native_fs_error":              (*Emitter).ensureNativeFsError,
-	"__kml_native_fs_watch":              (*Emitter).ensureNativeFsWatch,
-	"__kml_native_fs_watch_close":        (*Emitter).ensureNativeFsWatch,
-	"__kml_native_fs_watch_ref":          (*Emitter).ensureNativeFsWatch,
 	"__kml_native_errno_name":            (*Emitter).ensureNativeErrno,
 	"__kml_native_errno_desc":            (*Emitter).ensureNativeErrno,
 	"__kml_native_uv_errno":              (*Emitter).ensureNativeErrno,
 	"__kml_native_entry_path":            (*Emitter).ensureNativeEntryPath,
-	"__kml_native_signal_start":          (*Emitter).ensureNativeSignal,
-	"__kml_native_signal_stop":           (*Emitter).ensureNativeSignal,
 	"__kml_native_process_hook":          (*Emitter).ensureProcessHooks,
 	"__kml_native_process_unhook":        (*Emitter).ensureProcessHooks,
-	"__kml_native_ipc_child_claim":       (*Emitter).ensureNativeIPCChildClaim,
-	"__kml_native_async_context_get":     (*Emitter).ensureNativeAsyncContext,
-	"__kml_native_async_context_set":     (*Emitter).ensureNativeAsyncContext,
-	"__kml_native_perf_now":              (*Emitter).ensureNativePerf,
-	"__kml_native_perf_time_origin":      (*Emitter).ensureNativePerf,
-	"__kml_native_process_cwd":           (*Emitter).ensureNativeProcessCwd,
-	"__kml_native_process_chdir":         (*Emitter).ensureNativeProcessChdir,
-	"__kml_native_process_uptime":        (*Emitter).ensureNativeProcessUptime,
-	"__kml_native_process_hrtime":        (*Emitter).ensureNativeProcessHrtime,
-	"__kml_native_process_hrtime_read":   (*Emitter).ensureNativeProcessHrtime,
-	"__kml_native_kill_pid":              (*Emitter).ensureNativeKillPid,
-	"__kml_native_process_memory":        (*Emitter).ensureNativeProcessMemory,
-	"__kml_native_process_umask":         (*Emitter).ensureNativeProcessUmask,
-	"__kml_native_process_id":            (*Emitter).ensureNativeProcessIds,
-	"__kml_native_process_argc":          (*Emitter).ensureNativeProcessArgv,
-	"__kml_native_process_argv":          (*Emitter).ensureNativeProcessArgv,
-	"__kml_native_process_argv0":         (*Emitter).ensureNativeProcessArgv,
-	"__kml_native_process_exec_path":     (*Emitter).ensureNativeProcessExecPath,
-	"__kml_native_process_title":         (*Emitter).ensureNativeProcessTitle,
-	"__kml_native_process_set_title":     (*Emitter).ensureNativeProcessTitle,
 	"__kml_native_process_set_exit_code": (*Emitter).ensureNativeProcessExit,
 	"__kml_native_process_get_exit_code": (*Emitter).ensureNativeProcessExit,
 	"__kml_native_process_really_exit":   (*Emitter).ensureNativeProcessExit,
 	"__kml_native_process_version":       (*Emitter).ensureNativeProcessVersion,
-	"__kml_native_env_get":               (*Emitter).ensureNativeEnv,
-	"__kml_native_env_set":               (*Emitter).ensureNativeEnv,
-	"__kml_native_env_delete":            (*Emitter).ensureNativeEnv,
+	"__kml_trim":                         func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_trim_start":                   func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_trim_end":                     func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_Object_is":                    func(e *Emitter) { e.ensureBoxedBigIntHooks(); e.ensureFnMeta() },
+	"__kml_native_fs_watch": func(e *Emitter) {
+		e.ensureFsWatchRuntime()
+		e.ensureMicrotasks()
+		e.ensureStrHeaderRuntime()
+		e.ensureThreadPool()
+	},
+	"__kml_native_fs_watch_close": func(e *Emitter) {
+		e.ensureFsWatchRuntime()
+		e.ensureMicrotasks()
+		e.ensureStrHeaderRuntime()
+		e.ensureThreadPool()
+	},
+	"__kml_native_fs_watch_ref": func(e *Emitter) {
+		e.ensureFsWatchRuntime()
+		e.ensureMicrotasks()
+		e.ensureStrHeaderRuntime()
+		e.ensureThreadPool()
+	},
+	"__kml_native_signal_start":       func(e *Emitter) { e.ensureEventLoop() },
+	"__kml_native_signal_stop":        func(e *Emitter) { e.ensureEventLoop() },
+	"__kml_native_ipc_child_claim":    func(e *Emitter) { e.ensureIPCChildRuntime() },
+	"__kml_native_async_context_get":  (*Emitter).linkedBySymbol,
+	"__kml_native_async_context_set":  (*Emitter).linkedBySymbol,
+	"__kml_native_process_cwd":        func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_native_process_uptime":     func(e *Emitter) { e.ensureProcessUptime() },
+	"__kml_native_process_memory":     (*Emitter).linkedBySymbol,
+	"__kml_native_process_id":         (*Emitter).linkedBySymbol,
+	"__kml_native_process_exec_path":  func(e *Emitter) { e.ensureNodeInterpFlagGuard(); e.ensureStrHeaderRuntime() },
+	"__kml_native_process_platform":   func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_native_process_arch":       func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_native_process_title":      func(e *Emitter) { e.ensureEventLoop(); e.ensureStrHeaderRuntime() },
+	"__kml_native_process_uv_version": func(e *Emitter) { e.ensureEventLoop(); e.ensureStrHeaderRuntime() },
+	"__kml_native_process_set_title":  func(e *Emitter) { e.ensureEventLoop(); e.ensureStrHeaderRuntime() },
+	"__kml_native_env_get":            func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_native_env_set":            func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_native_env_delete":         func(e *Emitter) { e.ensureStrHeaderRuntime() },
 }
 
-// ensureNativeEntryPath defines @__kml_native_entry_path: the program's
-// entry file (require.main.filename), the module a self-fork runs.
+// ensureNativeEntryPath stores into hooks.c's @__kml_entry_path the program's entry file
+// (require.main.filename, the module a self-fork runs), which
+// __kml_native_entry_path (entrypath.c) answers.
 func (e *Emitter) ensureNativeEntryPath() {
 	if e.fnDecls["__kml_native_entry_path"] {
 		return
@@ -1233,7 +1340,8 @@ func (e *Emitter) ensureNativeEntryPath() {
 	if e.prog != nil {
 		path = e.prog.EntryPath
 	}
-	e.emitGlobal(fmt.Sprintf("define ptr @__kml_native_entry_path() {\nentry:\n  ret ptr %s\n}", e.internString(path)))
+	e.emitGlobal("@__kml_entry_path = external" + irGlobalAS + " global " + irPtr + ", align 8")
+	e.addHookInit(fmt.Sprintf("  store "+irPtr+" %s, "+irPtr+" @__kml_entry_path, align 8\n", e.internString(path)))
 }
 
 // declareFn emits a function declaration once per symbol: the lowered path
@@ -1251,8 +1359,8 @@ func (e *Emitter) declareFn(name, line string) {
 // unboxes to; ok is false when the reference is not dynamic or the checker
 // does not narrow it to one primitive.
 func (e *Emitter) checkerNarrowed(id *ast.Identifier, ty Type) (Type, bool) {
-	if e.dynEntryWidenedIdent(id) || e.stdioBinding(id) {
-		return Type{}, false // a dynamic entry's box, a stdio stream's, stays one
+	if e.dynEntryWidenedIdent(id) || e.stdioBinding(id) || e.runtimeCloneBinding(id) || e.accessorTargetIdent(id) {
+		return Type{}, false // a dynamic entry's box, a stdio stream's, a run-time clone's, an accessor target's, stays one
 	}
 	if ty.IsDynamic() && len(ty.UnionMembers) > 0 {
 		return e.checkerNarrowedUnion(id, ty)
@@ -1268,6 +1376,13 @@ func (e *Emitter) checkerNarrowed(id *ast.Identifier, ty Type) (Type, bool) {
 	}
 	t := c.TypeOf(id)
 	if c.Unanswered(t) || t.Flags&(checker.Any|checker.Unknown) != 0 {
+		return Type{}, false
+	}
+	if annotatedPatternLeaf(e.frontBinding, id) && c.StorageTypeOf(id) == t {
+		// A pattern leaf held boxed (its source's element is a box) under
+		// an annotation flow has not narrowed: the annotation is a claim
+		// nothing checked, the element may be missing (`[a, b]: [number,
+		// string] = JSON.parse("[4]")`), so the box stays.
 		return Type{}, false
 	}
 	switch {
@@ -1321,10 +1436,18 @@ func (e *Emitter) checkerPresent(id *ast.Identifier, ty Type) bool {
 
 // assignedString reports a read of a string local declared without a
 // value (its storage `string | undefined`) where every path has stored one,
-// or has passed a guard excluding undefined since the last store.
+// or has passed a guard excluding undefined since the last store; and a
+// read of a `string | null` one every store reaching which is a string
+// (`const s: string | null = "x"`, which the checker narrows to string).
 func (e *Emitter) assignedString(id *ast.Identifier, ty Type) bool {
 	c := e.front()
-	return c != nil && isStringTy(ty) && ty.Nullable() && ty.IsUndefined() && e.flowTrusted(id) && (!ty.UncheckedIndex && c.Binding().DefinitelyAssigned(id) || e.storesPresent(id) || c.Binding().GuardedSinceStore(id))
+	if c == nil || !isStringTy(ty) || !ty.Nullable() || !e.flowTrusted(id) {
+		return false
+	}
+	if !ty.IsUndefined() {
+		return !ty.UncheckedIndex && e.storesPresent(id)
+	}
+	return !ty.UncheckedIndex && c.Binding().DefinitelyAssigned(id) || e.storesPresent(id) || c.Binding().GuardedSinceStore(id)
 }
 
 // storesPresent reports a read every path to which stores a value that is
@@ -1352,7 +1475,7 @@ func (e *Emitter) storesPresent(id *ast.Identifier) bool {
 		case *ast.AssignmentExpression:
 			v = x.Right
 		}
-		t := e.inferExprType(v)
+		t := e.typeOfExpr(v)
 		if t.IR == "" || t.IR == "void" || t.Nullable() || t.IsUndefined() || t.IsNull() || t.IsDynamic() {
 			return false
 		}
@@ -1367,7 +1490,7 @@ func (e *Emitter) storesPresent(id *ast.Identifier) bool {
 // present, as TypeScript types it.
 func (e *Emitter) checkerPresentRef(ref ast.Expression, ty Type) bool {
 	c := e.front()
-	if c == nil || ty.UncheckedIndex || ty.IR != "ptr" || !ty.Nullable() || ty.IsDynamic() || isNullableScalar(ty) {
+	if c == nil || ty.UncheckedIndex || ty.IR != irPtr || !ty.Nullable() || ty.IsDynamic() || isNullableScalar(ty) {
 		return false
 	}
 	if !ty.IsClass() && !ty.IsFunc() && !ty.IsPromise() && !ty.IsObject() && !ty.IsArray() {
@@ -1484,11 +1607,15 @@ func (e *Emitter) checkerNarrowedUnion(id ast.Expression, ty Type) (Type, bool) 
 		kind = "boolean"
 	case t.Flags&(checker.String|checker.StringLiteral) != 0:
 		kind = "string"
+	case t.Flags&checker.ESSymbol != 0:
+		kind = "symbol"
+	case t.Flags&(checker.BigInt|checker.BigIntLiteral) != 0:
+		kind = "bigint"
 	case t.Flags&checker.Object != 0 && t.Kind == checker.Function:
 		kind = "function"
 	case t.Flags&checker.Object != 0 && (t.Kind == checker.Array || t.Kind == checker.Tuple):
 		kind = "array"
-	case t.Flags&checker.Object != 0 && t.Symbol != nil && t.Symbol.Name == "ReadonlyArray":
+	case t.Flags&checker.Object != 0 && declaredLowerType(t.Symbol) == "readonlyarray":
 		kind = "array"
 	case isBytesType(t):
 		kind = "array" // a Buffer/Uint8Array is an array here
@@ -1565,7 +1692,7 @@ func (e *Emitter) registerLibraryStringAliases(prog *ast.Program) {
 			if !ok || len(a.TypeParams) > 0 || a.Type == nil || own[a.Name] {
 				continue
 			}
-			if u, ok := a.Type.TypeNode().(*ast.UnionType); ok && allStringLiterals(u) {
+			if u, ok := a.Type.(*ast.UnionType); ok && allStringLiterals(u) {
 				if _, taken := e.interfaces[a.Name]; !taken {
 					e.interfaces[a.Name] = TypePtr
 				}
@@ -1704,12 +1831,32 @@ func reprOwners(ty Type) []string {
 		return []string{"WritableStreamDefaultController"}
 	case ty.IsBuffer():
 		return []string{"Buffer", "TypedArray", "Array", "Object"}
+	case ty.IsArrayBuffer():
+		// (Both kinds' limits are ArrayBuffer.prototype's intrinsics.)
+		return []string{"ArrayBuffer", "Object"}
 	case ty.IsTypedArray():
 		return []string{"TypedArray", "Array", "Object"}
 	case ty.IsXHR():
 		return []string{"XMLHttpRequest"}
+	case ty.IsGenerator() && ty.GeneratorElemType != nil:
+		return []string{"Generator", "Object"}
+	case (ty.IsMap() || ty.IsSet()) && !ty.IsDynamicObject():
+		owner := "Set"
+		if ty.IsMap() {
+			owner = "Map"
+		}
+		if ty.Weak {
+			owner = "Weak" + owner
+		}
+		return []string{owner, "Object"}
+	case ty.IsResponse():
+		return []string{"Response", "Body"}
+	case ty.IsFetchRequest():
+		return []string{"Request", "Body"}
 	case hasBodyMixin(ty):
 		return []string{"Body"}
+	case ty.IsTransformStream():
+		return []string{"TransformStream"}
 	case ty.IsBigInt():
 		return []string{"BigInt"}
 	case ty.IsRegExp() && !ty.IsDynamic():
@@ -1731,7 +1878,7 @@ func reprOwners(ty Type) []string {
 // overloaded generic context, synthesized code): the method of the owner
 // codegen's own representation of the receiver names.
 func (e *Emitter) reprIntrinsic(mem *ast.MemberExpression) (string, bool) {
-	for _, owner := range reprOwners(e.inferExprType(mem.Object)) {
+	for _, owner := range reprOwners(e.typeOfExpr(mem.Object)) {
 		key := owner + ".prototype." + mem.Property
 		if e.intrinsicApplies(key, mem) {
 			return key, true
@@ -1744,16 +1891,19 @@ func (e *Emitter) reprIntrinsic(mem *ast.MemberExpression) (string, bool) {
 // `@lower` links to, for the global id names (`setTimeout`).
 func (e *Emitter) loweredGlobalFn(id *ast.Identifier) (string, bool) {
 	c := e.front()
-	if c == nil || !e.isBuiltinGlobal(c, id) {
+	if c == nil || !e.builtinIdents[id] && !e.isBuiltinGlobal(c, id) {
 		return "", false
 	}
 	sym, _ := c.Binding().Resolve(id)
+	if sym == nil && e.builtinIdents[id] && c.Binding().Globals != nil {
+		sym = c.Binding().Globals.Symbols.Get(id.Name) // a global codegen reads (`globalThis.setInterval`)
+	}
 	if sym == nil {
 		return "", false
 	}
 	for _, d := range sym.Declarations {
 		if fd, ok := d.Node.(*ast.FunctionDeclaration); ok && fd.Lower != "" {
-			if m, linked := e.globalLinks[fd.Lower]; linked {
+			if m, linked := e.lowerLink(fd.Lower); linked {
 				return m, true
 			}
 		}
@@ -1892,6 +2042,22 @@ func (e *Emitter) flowTrusted(ref ast.Expression) bool {
 	return flowTrusted(e.frontBinding, ref)
 }
 
+// annotatedPatternLeaf reports a name an annotated array or object
+// destructuring declares.
+func annotatedPatternLeaf(b *binder.Binding, id *ast.Identifier) bool {
+	sym, _ := b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return false
+	}
+	switch d := sym.Declarations[0].Node.(type) {
+	case *ast.ArrayDestructuring:
+		return d.TypeAnnot != nil
+	case *ast.ObjectDestructuring:
+		return d.TypeAnnot != nil
+	}
+	return false
+}
+
 func flowTrusted(b *binder.Binding, ref ast.Expression) bool {
 	switch r := ref.(type) {
 	case *ast.Identifier:
@@ -1934,6 +2100,36 @@ func (e *Emitter) stdioBinding(id *ast.Identifier) bool {
 	return stdio
 }
 
+// runtimeCloneBinding reports a binding initialized with a structuredClone
+// the run-time clone performs: typed by its argument's type, it holds a box
+// (a class instance's clone is a plain object, as in Node).
+func (e *Emitter) runtimeCloneBinding(id *ast.Identifier) bool {
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	sym, _ := c.Binding().Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return false
+	}
+	v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
+	if !ok || v.TypeAnnot != nil {
+		return false
+	}
+	call, ok := v.Init.(*ast.CallExpression)
+	return ok && e.runtimeCloneCall(call)
+}
+
+// runtimeCloneCall reports a structuredClone call the run-time clone
+// performs, whose result is a box.
+func (e *Emitter) runtimeCloneCall(call *ast.CallExpression) bool {
+	if len(call.Args) == 0 {
+		return false
+	}
+	callee, ok := call.Callee.(*ast.Identifier)
+	return ok && callee.Name == "structuredClone" && !e.boundName(callee) && e.clonesAtRuntimeOrUncopied(call.Args[0])
+}
+
 // stdioStream reports a read of a stdio stream: `process.stdout`, or a
 // binding of one.
 func (e *Emitter) stdioStream(x ast.Expression) bool {
@@ -1963,7 +2159,7 @@ func (e *Emitter) erasedCallbackParam(fn *ast.ArrowFunction, i int) (Type, bool)
 	if !ok || mem.Optional {
 		return Type{}, false
 	}
-	objTy := e.inferExprType(mem.Object)
+	objTy := e.typeOfExpr(mem.Object)
 	if !objTy.IsClass() {
 		return Type{}, false
 	}
@@ -1990,4 +2186,255 @@ func (e *Emitter) erasedCallbackParam(fn *ast.ArrowFunction, i int) (Type, bool)
 		return e.canonicalizeClassTy(pt.FuncParams[i]), true
 	}
 	return Type{}, false
+}
+
+// loweredGlobalValue is the type of a builtin lowered to a library function
+// read as a value (loweredGlobalFn), as emitVarDecl sizes its binding.
+func (e *Emitter) loweredGlobalValue(id *ast.Identifier) (Type, bool) {
+	m, ok := e.loweredGlobalFn(id)
+	if !ok {
+		return Type{}, false
+	}
+	if _, sig, found := e.resolveFuncRef(m); found {
+		return funcValueType(sig), true
+	}
+	return Type{}, false
+}
+
+// funcRefValue is the value of the function codegen declared as name: a
+// generic one's erased instantiation (emitIdent).
+func (e *Emitter) funcRefValue(name string) (Type, bool) {
+	if decl, ok := e.genericFuncs[name]; ok && !e.isShadowedByLocal(name) {
+		return e.erasedGenericValueType(decl), true
+	}
+	if _, sig, found := e.resolveFuncRef(name); found {
+		return funcValueType(sig), true
+	}
+	return Type{}, false
+}
+
+// ownMemberNamed reports a member call's receiver that is a static object
+// or class instance with its own field or method of the member's name.
+func (e *Emitter) ownMemberNamed(mem *ast.MemberExpression) bool {
+	ot := e.typeOfExpr(mem.Object)
+	if ot.IsDynamic() || ot.IsArray() {
+		return false
+	}
+	if _, _, ok := ot.FieldIndex(mem.Property); ok && ot.IsObject() {
+		return true
+	}
+	if ot.IsClass() {
+		if info, ok := e.classes[ot.ClassName]; ok && info.HostBase == nil {
+			if _, ok := info.MethodSigs[mem.Property]; ok {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// dropIgnoredArgs is a builtin call (-compat=js) without the arguments past
+// the most its declaration reads, each evaluated here for its effects, as
+// the callee ignores it.
+func (e *Emitter) dropIgnoredArgs(ex *ast.CallExpression) *ast.CallExpression {
+	c := e.front()
+	if c == nil || !e.compatJS() {
+		return ex
+	}
+	if id, ok := ex.Callee.(*ast.Identifier); ok && untypedParamBuiltins[id.Name] && !e.isShadowedByLocal(id.Name) {
+		return ex // (its declaration's string is no conversion it makes)
+	}
+	ct := c.TypeOf(ex.Callee)
+	lo, _ := c.MinArgs(ct)
+	if len(ex.Args) < lo && !hasSpreadArg(ex.Args) {
+		// A missing argument is undefined, as JavaScript passes it.
+		padded := *ex
+		padded.Args = append([]ast.Expression(nil), ex.Args...)
+		for len(padded.Args) < lo {
+			u := ast.NewNullLiteral(true, ex.GetPos())
+			e.markOmittedArg(u)
+			padded.Args = append(padded.Args, u)
+		}
+		ex = &padded
+	}
+	// A string parameter given a value that may be no string (undefined,
+	// null, an any): ToString of it, as the builtin converts it.
+	var conv *ast.CallExpression
+	for i, a := range ex.Args {
+		if _, spread := a.(*ast.SpreadElement); spread || i >= lo {
+			// (an optional parameter given undefined is absent, as
+			// JavaScript's builtins read it)
+			continue
+		}
+		at := e.typeOfExpr(a)
+		if !c.ParamIsString(ct, i) {
+			if (at.IsUndefined() || at.IsNull()) && !at.IsDynamic() {
+				// undefined or null itself: the method's run-time path
+				// (its any form), which refuses it as JavaScript does.
+				if conv == nil {
+					cp := *ex
+					cp.Args = append([]ast.Expression(nil), ex.Args...)
+					conv = &cp
+				}
+				conv.Args[i] = ast.NewAsExpression(a, ast.AnyAnnotation("ts"), a.GetPos())
+				if e.omittedArg(a) {
+					e.markOmittedArg(conv.Args[i])
+				}
+			}
+			continue
+		}
+		if !(at.IsUndefined() || at.IsNull() || at.IsDynamic() || at.Nullable()) {
+			continue
+		}
+		if conv == nil {
+			cp := *ex
+			cp.Args = append([]ast.Expression(nil), ex.Args...)
+			conv = &cp
+		}
+		v, err := e.emitExpr(a)
+		if err != nil {
+			return ex
+		}
+		sv, err := e.emitValueToString(v)
+		if err != nil {
+			return ex
+		}
+		conv.Args[i] = e.bindValue(sv, a.GetPos())
+		if e.omittedArg(a) {
+			e.markOmittedArg(conv.Args[i])
+		}
+	}
+	if conv != nil {
+		ex = conv
+	}
+	if len(ex.Args) == 0 {
+		return ex
+	}
+	n, ok := c.MaxArgs(ct)
+	if !ok {
+		n, ok = callSignatureMaxArgs(ct) // a builtin constructor called (`Number(x)`)
+	}
+	if !ok || len(ex.Args) <= n {
+		return ex
+	}
+	// The receiver and the arguments kept, where their evaluation has
+	// effects, are evaluated first (bound to their values), so the order
+	// stays JavaScript's.
+	trimmed := *ex
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && !effectFree(mem.Object) {
+		v, err := e.emitExpr(mem.Object)
+		if err != nil {
+			return ex
+		}
+		m := *mem
+		m.Object = e.bindValue(v, mem.Object.GetPos())
+		trimmed.Callee = &m
+	}
+	trimmed.Args = make([]ast.Expression, n)
+	for i, a := range ex.Args[:n] {
+		trimmed.Args[i] = a
+		if !effectFree(a) {
+			v, err := e.emitExpr(a)
+			if err != nil {
+				return ex
+			}
+			trimmed.Args[i] = e.bindValue(v, a.GetPos())
+		}
+	}
+	for _, a := range ex.Args[n:] {
+		if _, err := e.emitExpr(a); err != nil {
+			return ex
+		}
+	}
+	return &trimmed
+}
+
+// effectFree reports an expression whose evaluation has no effects a
+// program can observe: a name, a literal, a function, a member of one.
+func effectFree(x ast.Expression) bool {
+	switch v := x.(type) {
+	case *ast.Identifier, *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral, *ast.NullLiteral,
+		*ast.ArrowFunction, *ast.FunctionExpression, *ast.ThisExpression:
+		return true
+	case *ast.MemberExpression:
+		return effectFree(v.Object) && !v.Optional
+	case *ast.ArrayLiteral:
+		for _, el := range v.Elements {
+			if el != nil && !effectFree(el) {
+				return false
+			}
+		}
+		return true
+	case *ast.ObjectLiteral:
+		for _, p := range v.Properties {
+			if p.KeyExpr != nil || p.Value == nil || !effectFree(p.Value) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// callSignatureMaxArgs is MaxArgs over the call signatures t's interface
+// declarations give it.
+func callSignatureMaxArgs(t *checker.Type) (n int, ok bool) {
+	if t == nil || t.Symbol == nil {
+		return 0, false
+	}
+	for _, d := range t.Symbol.Declarations {
+		decl, isIface := d.Node.(*ast.InterfaceDeclaration)
+		if !isIface {
+			continue
+		}
+		for _, m := range decl.Members {
+			cs, isCall := m.(*ast.CallSignature)
+			if !isCall {
+				continue
+			}
+			for _, p := range cs.Parameters {
+				if p.Rest {
+					return 0, false
+				}
+			}
+			n, ok = max(n, len(cs.Parameters)), true
+		}
+	}
+	return n, ok
+}
+
+// markOmittedArg records u as the undefined standing for an argument the
+// call left out: the few builtins that count their arguments (atob,
+// crypto.getRandomValues) throw their own error for it.
+func (e *Emitter) markOmittedArg(u ast.Expression) {
+	if e.omittedArgs == nil {
+		e.omittedArgs = map[ast.Expression]bool{}
+	}
+	e.omittedArgs[u] = true
+}
+
+// omittedArg reports whether a is the undefined standing for an omitted
+// argument (markOmittedArg).
+func (e *Emitter) omittedArg(a ast.Expression) bool {
+	return e.omittedArgs[a]
+}
+
+// untypedParamBuiltins are the global functions whose declared parameter
+// types are no conversion they make: eval returns a value that is not a
+// string as it is.
+var untypedParamBuiltins = map[string]bool{"eval": true}
+
+// accessorTargetIdent reports id naming a binding an accessor is defined
+// on, held boxed (accessorLiteral).
+func (e *Emitter) accessorTargetIdent(id *ast.Identifier) bool {
+	o := e.reprOracle()
+	if o == nil || o.b == nil {
+		return false
+	}
+	sym, _ := o.b.Resolve(id)
+	if sym == nil {
+		return false
+	}
+	v, ok := singleVarDecl(sym)
+	return ok && accessorLiteral(o.b, v)
 }

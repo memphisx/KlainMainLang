@@ -119,7 +119,7 @@ export class Readline {
 export class Interface extends _Interface {
     question(query: string, options: { signal?: AbortSignal } = {}): Promise<string> {
         return new Promise<string>((resolve, reject) => {
-            let cb = resolve;
+            let cb: (answer: string) => void = resolve;
 
             if (options?.signal) {
                 validateAbortSignal(options.signal, 'options.signal');

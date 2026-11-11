@@ -91,6 +91,9 @@ type tsSummaryLane struct {
 // malformed or missing file is treated as empty (rebuilt from what this run
 // knows). corpusCommit, when non-empty, is recorded at the suite level.
 func updateConformanceSummary(suite, lane string, laneStats any, corpusCommit string) error {
+	if dumpManifest != "" {
+		return nil // dump mode writes no summary
+	}
 	summaryMu.Lock()
 	defer summaryMu.Unlock()
 

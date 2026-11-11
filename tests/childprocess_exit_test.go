@@ -23,28 +23,41 @@ func needShAndSleep(t *testing.T) {
 }
 
 // The shell exits at once with status 7 while a background grandchild keeps the
-// inherited stdout/stderr open for two more seconds. Node reports 'exit' (7)
+// inherited stdout/stderr open until it is killed. Node reports 'exit' (7)
 // immediately and 'close' (7) only when the grandchild lets go of the pipes.
 func TestE2EChildProcessExitFiresBeforeStdioCloses(t *testing.T) {
 	needShAndSleep(t)
 	bin := buildBinaryImports(t, `
 import { spawn } from 'node:child_process'
-const t0 = Date.now()
-const c = spawn('sh', ['-c', 'sleep 2 & exit 7'])
+// The grandchild holds the pipes until the 'exit' handler kills it: 'close'
+// can only come after that, and an 'exit' held back by the pipes never comes.
+let pid = 0
+let exited = false
+const release = () => { if (pid !== 0 && exited) process.kill(pid) }
+const c = spawn('sh', ['-c', 'sleep 60 & echo $!; exit 7'])
+c.stdout.on('data', (d: any) => { pid = parseInt(String(d)); release() })
 c.on('exit', (code: number) => {
-  console.log('exit ' + code + (Date.now() - t0 < 1200 ? ' early' : ' LATE'))
+  console.log('exit ' + code)
+  exited = true
+  release()
 })
 c.on('close', (code: number) => {
-  console.log('close ' + code + (Date.now() - t0 >= 1500 ? ' after-stdio' : ' TOO-SOON'))
+  console.log('close ' + code + (exited ? ' after-stdio' : ' TOO-SOON'))
 })
 `)
+	start := time.Now()
 	out, err := exec.Command(bin).CombinedOutput()
 	if err != nil {
 		t.Fatalf("run: %v\n%s", err, out)
 	}
 	got := strings.ReplaceAll(strings.TrimSpace(string(out)), "\r\n", "\n")
-	if want := "exit 7 early\nclose 7 after-stdio"; got != want {
+	if want := "exit 7\nclose 7 after-stdio"; got != want {
 		t.Errorf("exit/close sequence:\n got %q\nwant %q", got, want)
+	}
+	// Only the grandchild's own 60 s end would release an 'exit' the pipes
+	// held back.
+	if wall := time.Since(start); wall > 45*time.Second {
+		t.Errorf("'exit' waited for the grandchild (%v)", wall)
 	}
 }
 

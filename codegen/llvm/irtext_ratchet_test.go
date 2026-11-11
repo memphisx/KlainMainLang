@@ -11,8 +11,9 @@ import (
 )
 
 // irDefineRe is an IR function definition written as Go text: at a line
-// start inside a raw string, or after a "\n" or a quote.
-var irDefineRe = regexp.MustCompile("(?m)(^|\\\\n|[`\"])define ")
+// start inside a raw string, or after a "\n" or a quote; or a funcDef call,
+// which wraps a body in one.
+var irDefineRe = regexp.MustCompile("(?m)(^|\\\\n|[`\"])define |\\bfuncDef\\(")
 
 // irTextDefines counts the IR function definitions each codegen file
 // writes as text.

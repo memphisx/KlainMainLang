@@ -99,7 +99,7 @@ func chainLinkAt(top ast.Expression, depth int) ast.Expression {
 
 // rewriteChain returns a copy of the chain's spine in which the link at depth
 // is no longer optional and, when newBase is non-nil, reads from newBase. Only
-// the spine is copied — the AST is shared with inferExprType and must not be
+// the spine is copied — the AST is shared with typeOfExpr and must not be
 // mutated.
 func rewriteChain(n ast.Expression, depth int, newBase ast.Expression) ast.Expression {
 	switch x := n.(type) {
@@ -210,11 +210,13 @@ func (e *Emitter) classifyChainGuard(link ast.Expression) (guard optionalChainGu
 			return chainGuardNone, true
 		}
 	}
-	bt := e.inferExprType(base)
+	bt := e.typeOfExpr(base)
 	switch {
+	case bt.Kind == kindNull || bt.Kind == kindUndefined:
+		return chainGuardAbsent, false // only ever null or undefined: always short-circuits
 	case isNullableScalar(bt):
 		return chainGuardScalar, false
-	case bt.IR == "ptr" && !bt.IsArray():
+	case bt.IR == irPtr && !bt.IsArray():
 		return chainGuardPtr, false
 	case optionalArrayGuards(bt):
 		// Even a `T[]` binding can hold undefined or null from `any`.
@@ -232,11 +234,45 @@ func (e *Emitter) inferOptionalChain(top ast.Expression) (Type, bool) {
 		return Type{}, false
 	}
 	guard, hostDependent := e.classifyChainGuard(chainLinkAt(top, depth))
-	inner := e.inferExprType(e.copyChain(top, depth, nil))
+	inner := e.typeOfExpr(e.copyChain(top, depth, nil))
 	if guard == chainGuardNone && !hostDependent {
 		return inner, true
 	}
 	return optionalCallResultType(optCalleeValue, inner), true
+}
+
+// shortCircuited is the `undefined` a chain that always short-circuits at
+// its link depth links down evaluates to: boxed where the chain is typed
+// dynamic (a receiver typed only null or undefined, whose links the front
+// end types as tsc's error type).
+func (e *Emitter) shortCircuited(top ast.Expression, depth int) Value {
+	if base, _, ok := chainChild(chainLinkAt(top, depth)); ok {
+		if bt := e.typeOfExpr(base); bt.Kind == kindNull || bt.Kind == kindUndefined {
+			if t := e.typeOfExpr(top); isUnconstrainedDynamic(t) {
+				return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
+			}
+		}
+	}
+	return e.undefinedValueOf(e.typeOfExpr(e.copyChain(top, depth, nil)))
+}
+
+// nullishShortCircuit emits a single optional link whose receiver base is
+// typed only null or undefined: base is evaluated (for its effects) and the
+// link is its `undefined`, the rest skipped. ok is false for any other base.
+func (e *Emitter) nullishShortCircuit(link, base ast.Expression) (Value, bool, error) {
+	if bt := e.typeOfExpr(base); bt.Kind != kindNull && bt.Kind != kindUndefined {
+		return Value{}, false, nil
+	}
+	if _, err := e.emitExpr(base); err != nil {
+		return Value{}, false, err
+	}
+	if t := e.typeOfExpr(link); isUnconstrainedDynamic(t) {
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, true, nil
+	} else if t.Kind == kindUndefined {
+		return Value{Ref: "null", Ty: t}, true, nil
+	} else {
+		return e.undefinedValueOf(t), true, nil
+	}
 }
 
 // undefinedValueOf is the `undefined` of a short-circuited chain whose
@@ -267,7 +303,7 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 
 	switch guard {
 	case chainGuardAbsent:
-		return e.undefinedValueOf(e.inferExprType(e.copyChain(top, depth, nil))), true, nil
+		return e.shortCircuited(top, depth), true, nil
 	case chainGuardNone:
 		plain := e.copyChain(top, depth, nil)
 		pv, perr := e.emitExpr(plain)
@@ -275,7 +311,7 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 			return pv, true, perr
 		}
 		// Present on this host, but typed `T | undefined` on every host.
-		if resTy := optionalCallResultType(optCalleeValue, e.inferExprType(plain)); isNullableScalar(resTy) && !isNullableScalar(pv.Ty) {
+		if resTy := optionalCallResultType(optCalleeValue, e.typeOfExpr(plain)); isNullableScalar(resTy) && !isNullableScalar(pv.Ty) {
 			return e.convert(pv, resTy), true, nil
 		}
 		return pv, true, nil
@@ -288,7 +324,7 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 	var recv ast.Expression
 	if call, isCall := link.(*ast.CallExpression); isCall && call.Optional {
 		if mem, isMem := base.(*ast.MemberExpression); isMem {
-			if ot := e.inferExprType(mem.Object); ot.IsObject() && !ot.IsDynamic() {
+			if ot := e.typeOfExpr(mem.Object); ot.IsObject() && !ot.IsDynamic() {
 				if _, fty, ok := ot.FieldIndex(mem.Property); ok && fty.FuncThis {
 					r, err := e.receiverTemp(mem.Object)
 					if err != nil {
@@ -320,32 +356,32 @@ func (e *Emitter) emitOptionalChain(top ast.Expression) (v Value, handled bool, 
 		tmpTy = payload.Ty
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, payload.Ty.IR, payload.Ty.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", payload.Ty.IR, payload.Ref, slot, payload.Ty.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", payload.Ty.IR, payload.Ref, slot, payload.Ty.Align()))
 		e.define(tmpName, Symbol{Ptr: slot, Ty: tmpTy})
-	case bv.Ty.IR == "ptr" && !bv.Ty.IsArray():
+	case bv.Ty.IR == irPtr && !bv.Ty.IsArray():
 		isNull = e.isAbsentPtr(bv.Ref, bv.Ty) // a plain string's nullRef too
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bv.Ref, slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", bv.Ref, slot))
 		e.define(tmpName, Symbol{Ptr: slot, Ty: tmpTy})
-	case bv.Ty.IsArray() && !bv.Ty.IsTuple() && bv.Ty.IR == "ptr":
+	case bv.Ty.IsArray() && !bv.Ty.IsTuple() && bv.Ty.IR == irPtr:
 		isNull = e.emitArrayIsAbsent(bv)
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", bv.Ref, slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", bv.Ref, slot))
 		e.define(tmpName, Symbol{Ptr: slot, Ty: tmpTy})
 	case isUnconstrainedDynamic(bv.Ty):
 		isNull = e.anyIsNullish(bv)
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", bv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", bv.Ref, slot))
 		e.define(tmpName, Symbol{Ptr: slot, Ty: bv.Ty})
 	default:
 		// Inference promised a nullable base and emission produced a value that
 		// cannot be absent: the base is already evaluated and cannot be bound
 		// generically (an array is its header pointer), so refuse rather than evaluate
 		// it a second time.
-		return Value{}, true, fmt.Errorf("%d:%d: optional chain on a value of type %s is not supported", pos.Line, pos.Col, bv.Ty.IR)
+		return Value{}, true, internalAt(pos, "optional chain base of type %s cannot be absent", bv.Ty.IR)
 	}
 	through := e.copyChain(top, depth, ast.NewIdentifier(tmpName, base.GetPos()))
 	if recv != nil {

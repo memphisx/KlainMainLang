@@ -860,7 +860,7 @@ console.log(typeof Math.PI)
 console.log(typeof JSON.parse)
 console.log(typeof K)
 console.log(typeof fetch)
-`, "function\nfunction\nfunction\nundefined\nobject\nfunction\nnumber\nfunction\nfunction\nfunction")
+`, "function\nfunction\nfunction\nfunction\nobject\nfunction\nnumber\nfunction\nfunction\nfunction")
 	// An undeclared name is TS2304 to tsc; JavaScript reads its typeof as
 	// "undefined".
 	assertOutputCompatJS(t, `console.log(typeof totallyUndeclared)`, "undefined")
@@ -1017,7 +1017,7 @@ console.log(null == undefined)
 
 func TestE2ENullOptionalChain(t *testing.T) {
 	assertOutput(t, `
-const s: string | null = null
+const s = null as string | null
 console.log(s?.length)
 const t2: string | null = "hello"
 console.log(t2?.length)
@@ -1638,7 +1638,7 @@ let x: any = 1; x = 'hi'; x = true; console.log(x);
 func TestE2EOptionalChainCallShortCircuits(t *testing.T) {
 	assertOutput(t, `
 class C { m(): number { console.log("called"); return 7; } }
-const a: C | null = null;
+const a = null as C | null;
 const r = a?.m();
 console.log("done", r);
 console.log(r === undefined);

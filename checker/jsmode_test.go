@@ -1,6 +1,7 @@
 package checker_test
 
 import (
+	"strings"
 	"testing"
 
 	"KlainMainLang/ast"
@@ -36,6 +37,8 @@ func typeOfLastJS(t *testing.T, src string) string {
 func TestCompatJS(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"function add(a, b) { a; return a + b }\nadd(1, 2)", "number"},
+		{"declare function r<U>(f: (p: U) => U, i: U): U\nr(a => a, [])", "any[]"}, // `[]` is any[]
+		{"declare function r<U>(i: U): U\nr([])", "any[]"},
 		{"function greet(n) { n; return 'hi ' + n }\ngreet('x')", "string"},
 		{"function f(a) { a }\nf(1)\nf('x')\nf", "(a: any) => void"}, // disagreeing sites: checkJs's any
 		{"function g(a) { a }", "any"},
@@ -60,8 +63,9 @@ func TestCompatJS(t *testing.T) {
 			t.Errorf("%q: got %s, want %s", tc.src, got, tc.want)
 		}
 	}
-	// Strict mode keeps an unannotated parameter unanswered.
-	if got := typeOfLast(t, "function g(a) { a }\ng(1)\na0()\nfunction a0() { }\ng"); got != "?" {
+	// Strict mode types an unannotated parameter with no context the
+	// implicit any it reports (TS7006), not from its call sites.
+	if got := typeOfLast(t, "function g(a) { a }\ng(1)\na0()\nfunction a0() { }\ng"); got != "(a: any) => void" {
 		t.Errorf("strict: got %s", got)
 	}
 }
@@ -92,6 +96,38 @@ func TestJSCallSiteParamBeforeFunctionRead(t *testing.T) {
 	}
 	if got := c.TypeOf(last); c.Unanswered(got) || got.String() != "(x: number[]) => string[]" {
 		t.Fatalf("function: got %s", got)
+	}
+}
+
+// A recursive call passing what it computes from the parameter leaves the
+// parameter to the other sites, whichever query reaches it first.
+func TestJSRecursiveCallSiteParam(t *testing.T) {
+	src := "function fact(arg) { if (arg === 1) { return arg; } else { return fact(arg - 1) * arg; } }\nvar x = fact(4);"
+	for _, first := range []string{"param", "product"} {
+		prog, err := parser.Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := checker.NewWith(binder.BindWith(prog, binder.Options{AnnexB: true}), options.Options{Compat: "js"})
+		var fd *ast.FunctionDeclaration
+		var product ast.Expression
+		ast.Inspect(prog, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.FunctionDeclaration:
+				fd = n
+			case *ast.BinaryExpression:
+				if n.Op == "*" {
+					product = n
+				}
+			}
+			return true
+		})
+		if first == "product" {
+			c.TypeOf(product)
+		}
+		if p := c.JSCallSiteParam(fd, 0); p == nil || p.String() != "number" {
+			t.Fatalf("%s first: parameter: got %v, want number", first, p)
+		}
 	}
 }
 
@@ -179,7 +215,7 @@ func TestNestedPatternEmptyDefault(t *testing.T) {
 func TestComputedKeyIndexSignature(t *testing.T) {
 	s := "let v = \"v\";\nconst k = \"lit\";\nlet n = 3;\nconst o = { [v]: 1, f() {} };\nconst p = { [k]: true, a: 1 };\nconst q = { [n]: \"s\", 2: 5, b: 1 };\nconst r = { [v]: 1, [n]: \"x\" };\n"
 	want := map[string]string{
-		"o": "{ [x: string]: number | () => void; f: () => void; }",
+		"o": "{ [x: string]: number | (() => void); f: () => void; }",
 		"p": "{ lit: boolean; a: number; }",
 		"q": "{ [x: number]: string | number; 2: number; b: number; }",
 		"r": "{ [x: string]: string | number; [x: number]: string; }",
@@ -410,6 +446,87 @@ func TestJSCallSiteOrder(t *testing.T) {
 			if got := c.TypeOf(callees[i]).String(); got != "(x: any) => string[]" {
 				t.Errorf("reversed=%v callee %d: %s", rev, i, got)
 			}
+		}
+	}
+}
+
+// A loop of bindings each reassigned from a call that reads the others
+// (`a = F(a, b); b = F(b, a); …`) types in linear time: the call's result is
+// its signature's, without walking back through its arguments.
+func TestJSChainedCallReassignmentsInLoop(t *testing.T) {
+	body := strings.Repeat("a = F(a, b, c, d); d = F(d, a, b, c); c = F(c, d, a, b); b = F(b, c, d, a);\n", 64)
+	src := "function F(a, b, c, d) { return 0; }\nfunction md5() {\n var k, a, b, c, d;\n a = 1; b = 2; c = 3; d = 4;\n for (k = 0; k < 1; k++) {\n" + body + " }\n return a + b + c + d;\n}\nmd5()"
+	if got := typeOfLastJS(t, src); got != "number" {
+		t.Fatalf("got %s, want number", got)
+	}
+}
+
+// A function declared twice is its last declaration, as hoisting leaves it.
+func TestJSRedeclaredFunctionIsLast(t *testing.T) {
+	if got := typeOfLastJS(t, "function f() { return 1; }\nfunction f() { return \"A\"; }\nf()"); got != "string" {
+		t.Fatalf("got %s, want string", got)
+	}
+}
+
+// `new` of a constructor function a variable holds is its instance: any.
+func TestJSNewOfFunctionExpressionValue(t *testing.T) {
+	if got := typeOfLastJS(t, "var G = function () { this.x = 1; };\nnew G()"); got != "any" {
+		t.Fatalf("got %s, want any", got)
+	}
+}
+
+// A JavaScript function expression's `this` is any: its call sets it.
+func TestJSFunctionExpressionThisIsAny(t *testing.T) {
+	if got := typeOfLastJS(t, "var context = null;\nvar fn = function () { return function () { context = this; }; };\ncontext"); got != "any" {
+		t.Fatalf("got %s, want any", got)
+	}
+}
+
+// A JavaScript function reading `arguments` takes an implicit any[] rest,
+// as tsc's checkJs gives it; a nested function's reads do not count.
+func TestJSArgumentsImplicitRest(t *testing.T) {
+	cases := map[string]string{
+		"function g() { arguments; return 1; }\ng":                         "(...__kml_arguments_rest: any[]) => number",
+		"function g(a) { return a; }\ng(1)":                                "number",
+		"function g() { function h() { return arguments; } return 1; }\ng": "() => number",
+	}
+	for src, want := range cases {
+		if got := typeOfLastJS(t, src); got != want {
+			t.Errorf("%q: got %s, want %s", src, got, want)
+		}
+	}
+}
+
+// A const binding of a class in its own static member (`const g = this`,
+// `const g = C`), read while the class's statics are typed, is the class's
+// value; and a class expression typed across that cycle keeps its full type.
+func TestStaticMemberAliasOfOwnClass(t *testing.T) {
+	for src, want := range map[string]string{
+		"class C { static y() { const g = this; return g; } }\nC.y();":                                                    "typeof C",
+		"class C { static y() { const g = C; return g; } }\nC.y();":                                                       "typeof C",
+		"class C { static y() { const g = this; return () => g; } }\nC.y();":                                              "() => typeof C",
+		"var C = class { static x(v) { const g = this; return g; } }\nnew C();":                                           "C",
+		"class C { static #x(v) { return v; } static y() { const g = this; return g.#x(1); } }\nC.y();":                   "any",
+		"class C { static x(v) { const g = this; return (async function () { return g; })(); } }\nPromise.all([C.x(1)]);": "Promise<[",
+	} {
+		prog, err := parser.Parse(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c := checker.NewWith(binder.BindWith(prog, binder.Options{AnnexB: true, Lib: libProgsT(t)}), options.Options{Compat: "js"})
+		var last ast.Expression
+		ast.Inspect(prog, func(n ast.Node) bool {
+			if r, ok := n.(*ast.ReturnStatement); ok && r.Value != nil {
+				c.TypeOf(r.Value) // the member's result first, as codegen asks
+			}
+			if es, ok := n.(*ast.ExpressionStatement); ok {
+				last = es.Expr
+			}
+			return true
+		})
+		ty := c.TypeOf(last)
+		if got := ty.String(); c.Unanswered(ty) || got != want && !(strings.HasSuffix(want, "[") && strings.HasPrefix(got, want)) {
+			t.Errorf("%q: got %s (unanswered %v), want %s", src, got, c.Unanswered(ty), want)
 		}
 	}
 }

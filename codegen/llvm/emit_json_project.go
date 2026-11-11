@@ -20,17 +20,32 @@ import (
 func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Value, error) {
 	switch {
 	case targetTy.IsClass():
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a class instance is not supported", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "JSON.parse projected into class %s", targetTy.ClassName)
+	case targetTy.IsDynamic() && targetTy.UnionMembers != nil && primitiveUnion(targetTy):
+		// A union of primitives (`number | null`, `string | number`): the
+		// box the JSON value converts to is its representation.
+		e.ensureNanBox()
+		e.ensureShapeRuntime()
+		e.ensureAnyToPrimitive()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node("+irPtr+" %s)", r, node))
+		return e.convert(Value{Ref: r, Ty: TypeAny}, targetTy), nil
 	case targetTy.IsDynamic() && targetTy.UnionMembers != nil:
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse into a union type is not supported — use any/unknown or a concrete shape", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "JSON.parse projected into an object union")
 	case targetTy.IsDynamic():
 		// Untyped parse (TDD-00155 Stage 2 / TDD-00077 P4): convert the whole
 		// tree into dynamic values — objects become tag-10 bags, arrays tag-11
 		// dynamic arrays, scalars their box tags. Strings/keys are copied out,
 		// so the caller's __kml_json_free stays correct.
-		e.ensureDynJSONFromNode()
+		e.ensureNanBox()
+		e.ensureShapeRuntime()
+		e.ensureAnyToPrimitive()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node(ptr %s)", r, node))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node("+irPtr+" %s)", r, node))
 		return Value{Ref: r, Ty: TypeAny}, nil
 	case targetTy.IsTuple():
 		return e.emitJSONProjectTuple(node, targetTy, pos)
@@ -40,15 +55,14 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 		return e.emitJSONProjectObject(node, targetTy, pos)
 	case targetTy.IR == "i1":
 		b := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_bool(ptr %s)", b, node))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_bool("+irPtr+" %s)", b, node))
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", r, b))
 		return Value{Ref: r, Ty: TypeBool}, nil
 	case targetTy.Float:
 		lex := e.emitJSONNumLexeme(node)
-		e.ensureStrtod()
 		d := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @strtod(ptr %s, ptr null)", d, lex))
+		e.emitInstr(fmt.Sprintf("%s = call double @strtod("+irPtr+" %s, "+irPtr+" null)", d, lex))
 		if targetTy.IR == "float" {
 			f := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = fptrunc double %s to float", f, d))
@@ -57,28 +71,31 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 		return Value{Ref: d, Ty: targetTy}, nil
 	case isStringTy(targetTy):
 		s := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_string_dup(ptr %s)", s, node))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_string_dup("+irPtr+" %s)", s, node))
 		if triStr(targetTy) {
 			// A JSON null is null: nullRef (TDD-00257).
 			kind, isNull, r := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind(ptr %s)", kind, node))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind("+irPtr+" %s)", kind, node))
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isNull, kind)) // KJSON_NULL == 0
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.nullRef(), s))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isNull, e.nullRef(), s))
 			s = r
 		}
 		return Value{Ref: s, Ty: targetTy}, nil
-	case targetTy.IR == "ptr" || targetTy.IsFunc():
+	case targetTy.IR == irPtr || targetTy.IsFunc():
 		// A member JSON cannot spell (a function, a host value): the value
 		// the text holds, converted as from any.
-		e.ensureDynJSONFromNode()
+		e.ensureNanBox()
+		e.ensureShapeRuntime()
+		e.ensureAnyToPrimitive()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node(ptr %s)", r, node))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node("+irPtr+" %s)", r, node))
 		return e.convert(Value{Ref: r, Ty: TypeAny}, targetTy), nil
 	default: // integer scalars (i64/i32/i16/i8)
 		lex := e.emitJSONNumLexeme(node)
-		e.ensureAtoll()
 		n := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @atoll(ptr %s)", n, lex))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @atoll("+irPtr+" %s)", n, lex))
 		return e.convert(Value{Ref: n, Ty: TypeI64}, targetTy), nil
 	}
 }
@@ -87,7 +104,7 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 // (transient — atoll/strtod consume it before the tree is freed).
 func (e *Emitter) emitJSONNumLexeme(node string) string {
 	lex := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_num_lexeme(ptr %s)", lex, node))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_num_lexeme("+irPtr+" %s)", lex, node))
 	return lex
 }
 
@@ -96,7 +113,6 @@ func (e *Emitter) emitJSONNumLexeme(node string) string {
 // value for that key (or a type-appropriate default when the key is absent).
 // Nested object and array fields recurse through emitJSONProject.
 func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos) (Value, error) {
-	e.ensureMalloc()
 	structIR := targetTy.StructIR()
 	dataReg := e.freshReg()
 	e.emitObjMallocInto(dataReg, targetTy)
@@ -106,13 +122,13 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 			continue
 		}
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, structIR, dataReg, i))
 		fieldIR := StructFieldIR(f.Ty)
 
 		child := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_get(ptr %s, ptr %s)", child, node, e.internString(f.Name)))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_get("+irPtr+" %s, "+irPtr+" %s)", child, node, e.internString(f.Name)))
 		isMissing := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isMissing, child))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isMissing, child))
 
 		foundL := e.freshLabel("jsonp.found")
 		missingL := e.freshLabel("jsonp.missing")
@@ -156,24 +172,26 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 // emitJSONExpandoRest keeps the node's keys the target shape does not
 // declare as the projected object's own expando properties.
 func (e *Emitter) emitJSONExpandoRest(obj, node string, targetTy Type) {
-	e.ensureDynJSONFromNode()
+	e.ensureNanBox()
 	e.ensureShapeRuntime()
+	e.ensureAnyToPrimitive()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	e.usedObjExtensible = true // inspect, keys and stringify read the extras
 	if !e.usedJSONExpandoRest {
 		e.usedJSONExpandoRest = true
-		e.emitGlobal("declare void @__kml_json_expando_rest(ptr, ptr, ptr, i64)")
 	}
 	var refs []string
 	for _, f := range targetTy.UserFields() {
-		refs = append(refs, "ptr "+e.internString(f.Name))
+		refs = append(refs, irPtr+" "+e.internString(f.Name))
 	}
 	tab := "null"
 	if len(refs) > 0 {
 		tab = fmt.Sprintf("@__kml_json_known_%d", e.jsonKnownTabs)
 		e.jsonKnownTabs++
-		e.emitGlobal(fmt.Sprintf("%s = private constant [%d x ptr] [%s]", tab, len(refs), strings.Join(refs, ", ")))
+		e.emitGlobal(fmt.Sprintf("%s = private"+irGlobalAS+" constant [%d x "+irPtr+"] [%s]", tab, len(refs), strings.Join(refs, ", ")))
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_json_expando_rest(ptr %s, ptr %s, ptr %s, i64 %d)", obj, node, tab, len(refs)))
+	e.emitInstr(fmt.Sprintf("call void @__kml_json_expando_rest("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d)", obj, node, tab, len(refs)))
 }
 
 // emitJSONProjectTuple projects a JSON array node onto a fixed-arity tuple
@@ -185,51 +203,35 @@ func (e *Emitter) emitJSONExpandoRest(obj, node string, targetTy Type) {
 // __kml_json_item(node, i) rather than by key. Nested object/array/tuple
 // elements recurse through emitJSONFieldFound → emitJSONProject.
 func (e *Emitter) emitJSONProjectTuple(node string, targetTy Type, pos ast.Pos) (Value, error) {
-	e.ensureMalloc()
-	structIR := targetTy.StructIR()
-	dataReg := e.freshReg()
-	e.emitObjMallocInto(dataReg, targetTy)
-
+	vals := make([]Value, len(targetTy.Fields))
 	for i, f := range targetTy.Fields {
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, dataReg, i))
 		fieldIR := StructFieldIR(f.Ty)
-
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, fieldIR))
 		child := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_item(ptr %s, i64 %d)", child, node, i))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_item("+irPtr+" %s, i64 %d)", child, node, i))
 		isMissing := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isMissing, child))
-
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isMissing, child))
 		foundL := e.freshLabel("jsonp.tfound")
 		missingL := e.freshLabel("jsonp.tmissing")
 		mergeL := e.freshLabel("jsonp.tmerge")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isMissing, missingL, foundL))
-
 		e.emitLabel(foundL)
 		foundRef, err := e.emitJSONFieldFound(child, f.Ty, pos)
 		if err != nil {
 			return Value{}, err
 		}
-		// An array field holds a header pointer (TDD-00213 Stage 2); store the
-		// projected array's header.
-		if f.Ty.IsArray() {
-			e.storeArrayFieldHeader(gep, Value{Ref: foundRef, Ty: f.Ty})
-		} else {
-			e.heapStore(fieldIR, foundRef, gep, f.Ty.Align())
-		}
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", fieldIR, foundRef, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
 		e.emitLabel(missingL)
-		if f.Ty.IsArray() {
-			e.storeArrayFieldHeader(gep, Value{Ref: e.jsonDefaultRef(f.Ty), Ty: f.Ty})
-		} else {
-			e.heapStore(fieldIR, e.jsonDefaultRef(f.Ty), gep, f.Ty.Align())
-		}
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", fieldIR, e.jsonDefaultRef(f.Ty), slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-
 		e.emitLabel(mergeL)
+		r := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, fieldIR, slot))
+		vals[i] = Value{Ref: r, Ty: f.Ty}
 	}
-	return Value{Ref: dataReg, Ty: targetTy}, nil
+	return e.tupleOf(vals, targetTy), nil
 }
 
 // emitJSONFieldFound projects a present field value (child is non-null),
@@ -239,7 +241,7 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 	if isNullableScalar(fieldTy) {
 		// A literal `null` value boxes as absent; any other value as present.
 		kind := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind(ptr %s)", kind, child))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind("+irPtr+" %s)", kind, child))
 		isNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isNull, kind)) // KJSON_NULL == 0
 		present := e.freshReg()
@@ -257,19 +259,19 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 		}
 		return e.makeNullableScalarAgg(fieldTy, present, pl), nil
 	}
-	if fieldTy.Nullable() && fieldTy.IR == "ptr" && !fieldTy.IsArray() && !fieldTy.IsDynamic() {
+	if fieldTy.Nullable() && fieldTy.IR == irPtr && !fieldTy.IsArray() && !fieldTy.IsDynamic() {
 		// A JSON null in a `T | null` (or optional) string or object field
 		// is the absent pointer, not an empty string or object.
 		kind, isNull := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind(ptr %s)", kind, child))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind("+irPtr+" %s)", kind, child))
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isNull, kind)) // KJSON_NULL == 0
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 		nullRef := "null"
 		if fieldTy.NullAndUndef() || triStr(fieldTy) {
 			nullRef = e.nullRef() // null, distinct from a missing key's undefined
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nullRef, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nullRef, slot))
 		valL, doneL := e.freshLabel("jsonp.nonnull"), e.freshLabel("jsonp.nulldone")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, valL))
 		e.emitLabel(valL)
@@ -277,11 +279,11 @@ func (e *Emitter) emitJSONFieldFound(child string, fieldTy Type, pos ast.Pos) (s
 		if err != nil {
 			return "", err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", v.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 		return r, nil
 	}
 	v, err := e.emitJSONProject(child, fieldTy, pos)
@@ -318,7 +320,7 @@ func (e *Emitter) jsonDefaultRef(ty Type) string {
 		if e.isAutoMode() {
 			e.ensureStrHeaderRuntime()
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r, e.internString("")))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", r, e.internString("")))
 			return r
 		}
 		return e.internString("")
@@ -332,18 +334,17 @@ func (e *Emitter) jsonDefaultRef(ty Type) string {
 // array value. Object elements (`Item[]`) and nested arrays recurse.
 func (e *Emitter) emitJSONProjectArray(node string, targetTy Type, pos ast.Pos) (Value, error) {
 	elemTy := *targetTy.ElemType
-	e.ensureMalloc()
 
 	lenReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_json_len(ptr %s)", lenReg, node))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_json_len("+irPtr+" %s)", lenReg, node))
 	sizeReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", sizeReg, lenReg, elemTy.Align()))
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, sizeReg)
+	e.heapMallocInto(dataReg, elemAllocKind(elemTy), sizeReg)
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("jsonparr.cond")
 	bodyL := e.freshLabel("jsonparr.body")
@@ -353,35 +354,46 @@ func (e *Emitter) emitJSONProjectArray(node string, targetTy Type, pos ast.Pos) 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	done := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	item := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_item(ptr %s, i64 %s)", item, node, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_item("+irPtr+" %s, i64 %s)", item, node, idxVal))
 	elemVal, err := e.emitJSONProject(item, elemTy, pos)
 	if err != nil {
 		return Value{}, err
 	}
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, dataReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, dataReg, idxVal))
 	e.storeArrayElem(gep, elemTy, elemVal)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	r1 := e.newArrayHeader(dataReg, lenReg)
 	// A JSON null is null's header, nullRef, not an empty array.
 	kind, isNull, r := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind(ptr %s)", kind, node))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_json_kind("+irPtr+" %s)", kind, node))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", isNull, kind)) // KJSON_NULL == 0
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isNull, e.nullRef(), r1))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isNull, e.nullRef(), r1))
 	return Value{Ref: r, Ty: ArrayOf(elemTy)}, nil
+}
+
+// primitiveUnion reports a union whose members are all numbers, booleans or
+// strings (null and undefined beside them).
+func primitiveUnion(t Type) bool {
+	for _, m := range t.UnionMembers {
+		if !(m.Float || m.IsInteger() || m.IR == "i1" || isStringTy(m) && !m.IsObject() && !m.IsClass()) || m.IsBigInt() || m.IsDate() {
+			return false
+		}
+	}
+	return len(t.UnionMembers) > 0
 }

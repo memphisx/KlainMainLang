@@ -225,3 +225,44 @@ const ap3: any = (g3 as any).apply;
 console.log(ap3.call(f3, null, [7]));
 `)
 }
+
+// A function literal emitted straight into a dynamic slot (an `any[]`
+// element, an `any` object's method) keeps its source text.
+func TestE2EDynamicFunctionLiteralSourceText(t *testing.T) {
+	assertSameAsNode(t, `const arr: any[] = [() => 2, function named(x: number) { return x; }];
+console.log(String(arr[0]), String(arr[1]));
+const o: any = { m: (a: string) => a.length };
+console.log(o.m.toString());
+`)
+}
+
+// A `function` owns a `prototype` whose `constructor` is the function, read
+// through any reference to it; arrows, methods and async functions own none.
+// `new` and `instanceof` through `any` take such a function as the
+// constructor it is.
+func TestE2EFunctionPrototypeObject(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `function F(n) { this.n = n; }
+F.prototype.get = function () { return this.n; };
+console.log(new F(4).get());
+const a = F; console.log(typeof a.prototype, a.prototype === F.prototype, a.prototype.constructor === F, Object.keys(F.prototype));
+const h = function () {}; console.log(typeof h.prototype, typeof (() => 1).prototype, h.prototype.constructor === h);
+const o = { m() {} }; console.log(typeof o.m.prototype);
+async function af() {} console.log(typeof af.prototype);
+console.log(new F(1) instanceof F, F, a.name);
+var V = function (n) { this.n = n; };
+V.prototype.m = function () { return this.n * 2; };
+const v = new V(3); console.log(v.m(), v instanceof V, v.constructor === V);
+const b = new function () { this.z = 1; }; console.log(b.z);
+const G = function () {}; console.log(new G() instanceof G);
+`)
+	assertSameAsNode(t, `function P(this: any, x: number) { this.x = x; }
+const C: any = P;
+const o = new C(5); console.log(o.x, o instanceof C, o.constructor === P, Object.getPrototypeOf(o) === C.prototype);
+function R(this: any) { return { r: 1 }; }
+const RR: any = R; console.log(new RR());
+const fe: any = function (this: any) { this.k = 2; }; console.log(new fe().k);
+try { const ar: any = () => 1; new ar(); } catch (e) { console.log((e as Error).message); }
+const f: any = function (this: any, a: any, b: any) { return [this.k, a, b]; };
+const g = f.bind({ k: 1 }, 2); console.log(g(3), g.name, g.length);
+`)
+}

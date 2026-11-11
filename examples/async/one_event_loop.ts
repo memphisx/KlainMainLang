@@ -17,9 +17,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise<void>((res) => { setTimeout(() => { res() }, ms) })
 }
 
-// Reports how many heartbeats happened during a wait. A starved loop scores 0.
+// Reports whether the heartbeat ticked during a wait. A starved loop scores
+// 0; a running one at least 1, as the next tick is due before any 100 ms wait
+// ends (how many more is up to the scheduler).
 function report(what: string, before: number): void {
-  console.log(what + ": heartbeat kept going = " + (beats - before >= 2))
+  console.log(what + ": heartbeat kept going = " + (beats - before >= 1))
 }
 
 // 1. A top-level await runs the loop: the child's output arrives during it.
@@ -27,9 +29,11 @@ let childSaid = ""
 const child = spawn('sh', ['-c', 'echo hello-from-child'])
 child.stdout.on('data', (d: string) => { childSaid = childSaid + d })
 child.on('exit', (code: number) => { console.log("child exit " + code) })
-child.on('close', (code: number) => { console.log("child close " + code) })
+const closed = new Promise<void>((res) => {
+  child.on('close', (code: number) => { console.log("child close " + code); res() })
+})
 let mark = beats
-await sleep(100)
+await Promise.all([sleep(100), closed])
 report("top-level await", mark)
 console.log("child output seen during the await: " + childSaid.trim())
 

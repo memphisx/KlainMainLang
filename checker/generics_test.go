@@ -67,7 +67,8 @@ func TestGenericDeclarations(t *testing.T) {
 		{decls + "new Stack<string>('a')", "Stack<string>"},
 		{decls + "new Stack(1).peek()", "number"},
 		{decls + "new Stack('s').items", "string[]"},
-		{decls + "new Stack(1).size", "?"},
+		{decls + "new Stack(1).size", "() => number"},
+		{decls + "new Stack(1).size()", "number"},
 		{decls + "new Plain(1)", "Plain"},
 		{decls + "declare const q: Box<Pair<number, string>>\nq.value", "[number, string]"},
 	} {
@@ -99,7 +100,7 @@ func TestOverloads(t *testing.T) {
 		{overloads + "new K().m(2)", "number"},
 		{overloads + "new K().m('q')", "string"},
 		{overloads + "conv", "{ (x: string): number; (x: number): string }"},
-		{overloads + "declare const u: string | number\nconv(u)", "?"},
+		{overloads + "declare const u: string | number\nconv(u)", "string | number"}, // tsc: the union of the candidates' results
 		{overloads + "conv(unknownName)", "?"},
 	} {
 		if got := typeOfLast(t, tc.src); got != tc.want {

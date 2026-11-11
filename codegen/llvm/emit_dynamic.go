@@ -70,71 +70,6 @@ func isClassUnionBox(ty Type) bool {
 	return true
 }
 
-// containsDynamicElement reports whether ty contains, as an array element or
-// object field, ANY dynamic type — bare any/unknown or a constrained union
-// alike. Used to reject the out-of-scope positions (array element, object
-// field) with a clean compiler error instead of silently producing broken
-// IR. Deliberately does NOT check ty itself at the top level — callers
-// combine it with their own top-level isUnconstrainedDynamic check, since
-// some call sites (e.g. a bare `let x: any`, or a constrained union as a
-// function param/return — see isUnconstrainedDynamic) allow a dynamic type
-// at the top level but still need to reject it nested inside a container.
-//
-// Note this rejects a *constrained* union nested inside an array/object too,
-// unlike the top-level positions isUnconstrainedDynamic's callers allow a
-// union through for (var decl, function param/return): member-set checking
-// (unionAllowsAssignmentFrom) is only wired up at those top-level
-// assignment/call/return boundaries, not at array-literal-element
-// construction, HOF callback element passing, or object-literal field
-// assignment — so a union nested in a container would silently skip that
-// checking today rather than being rejected, worse than not supporting it at
-// all. A real, deliberate scope cut for V1 (TDD-00043's Open Questions
-// already defers object/array *members* past V1 for a related reason); union
-// *elements*/*fields* nested in an otherwise-concrete container are a
-// separate, still-open gap from that, left for whenever this is revisited.
-// objectFieldDynamicRejected reports whether a dynamic type is disallowed as an
-// OBJECT FIELD. Bare any/unknown (nil UnionMembers) is rejected; a *constrained*
-// union (TDD-00119) is allowed, since its member set is checked and boxed at
-// object-literal-field construction (storeScalarOrNullableField +
-// unionAllowsAssignmentFrom) and at the return boundary.
-// objectFieldDynamicRejected reports whether a field type is a dynamic type this
-// compiler cannot yet represent in an object/class field slot. Both dynamic
-// field kinds are now supported: a constrained-union field (`string | number`,
-// TDD-00119) has long held an { i8, i64 } box, and a bare `any`/`unknown` field
-// (TDD-00208) is now a NaN-box slot too (box-on-write / unbox-on-read, the
-// field-shaped counterpart of the boxed-element array `any[]`, TDD-00200). So no
-// dynamic field type is rejected here. (A constrained-union *array element*
-// remains rejected — see containsDynamicElement — a distinct, still-open case.)
-func objectFieldDynamicRejected(ty Type) bool {
-	return false
-}
-
-func containsDynamicElement(ty Type) bool {
-	if ty.IsArray() && ty.ElemType != nil {
-		et := *ty.ElemType
-		// A bare any/unknown element is the boxed-element array (TDD-00200): a
-		// real, supported representation (one NaN box per slot, box-on-write /
-		// unbox-on-read over the normal array machinery), legal in BOTH -compat
-		// lanes — an explicit `any[]` is the developer opting into boxing. A
-		// *constrained union* element is still rejected: element-level union
-		// member-set checking/boxing isn't wired (array-literal element
-		// construction and HOF element passing would skip the check) — a
-		// deliberate scope cut (TDD-00043).
-		if et.IsDynamic() {
-			return false
-		}
-		return containsDynamicElement(et)
-	}
-	if ty.IsObject() {
-		for _, f := range ty.Fields {
-			if objectFieldDynamicRejected(f.Ty) || containsDynamicElement(f.Ty) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 // scalarTypeKind classifies a concrete (non-dynamic) type into one of the
 // three scalar kinds a union member can currently be (TDD-00043 V1 scope):
 // "number" (any integer or float width, including JSDoc-extended int8…
@@ -156,7 +91,7 @@ func scalarTypeKind(t Type) string {
 		return "boolean"
 	case t.IsBigInt():
 		return "bigint" // a pointer, but no string
-	case t.IR == "ptr":
+	case t.IR == irPtr:
 		return "string"
 	case t.Float, t.IR == "i8", t.IR == "i16", t.IR == "i32", t.IR == "i64":
 		return "number"
@@ -171,8 +106,7 @@ func scalarTypeKind(t Type) string {
 // any/unknown in that position (isUnconstrainedDynamic), so a union with an
 // out-of-scope member gets the same clean compile-time rejection instead of
 // silently falling through to broken codegen once its runtime tag turns out
-// to be one containsDynamicElement's/emitBoxValue's/etc. narrower callers
-// don't expect.
+// to be one emitBoxValue's (and other) narrower callers don't expect.
 func validateUnionMembers(ty Type, line, col int) error {
 	if ty.UnionMembers == nil {
 		return nil
@@ -199,18 +133,12 @@ func validateUnionMembers(ty Type, line, col int) error {
 			} else {
 				arrays++
 			}
-			if arrays > 1 || byteArrays > 1 {
-				return fmt.Errorf("%d:%d: a union with two or more array members of one kind is not supported yet", line, col)
-			}
 			continue
 		}
 		// A tuple boxes as an array of its elements, so it counts as the
 		// union's one array.
 		if m.IsTuple() && !m.IsDynamic() {
 			arrays++
-			if arrays > 1 {
-				return fmt.Errorf("%d:%d: a union with two or more array members of one kind is not supported yet", line, col)
-			}
 			continue
 		}
 		// An object/interface/class member is allowed (TDD-00115), boxed as tag 6.
@@ -218,7 +146,7 @@ func validateUnionMembers(ty Type, line, col int) error {
 			objectMembers = append(objectMembers, m)
 			continue
 		}
-		return fmt.Errorf("%d:%d: union member types are limited to number, string, boolean (plus null/undefined), object/interface/class, and ReadableStream types", line, col)
+		return unsupportedAt(ast.Pos{Line: line, Col: col}, "a union member other than number, string, boolean, null/undefined, an object, interface or class, an array or a ReadableStream")
 	}
 	// One object member: usable via `typeof x === "object"` narrowing (TDD-00115).
 	// Two or more: allowed only as a *discriminated* union (TDD-00116) — every
@@ -226,7 +154,7 @@ func validateUnionMembers(ty Type, line, col int) error {
 	// distinct value, narrowed by `x.tag === "..."`.
 	if len(objectMembers) >= 2 && !selfIdentifyingObjects(objectMembers) {
 		if _, ok := unionDiscriminant(objectMembers); !ok {
-			return fmt.Errorf("%d:%d: a union with two or more object members must be a discriminated union — every member needs a common first-position string-literal tag field with a distinct value (e.g. `{ kind: \"a\", ... } | { kind: \"b\", ... }`)", line, col)
+			return unsupportedAt(ast.Pos{Line: line, Col: col}, "a union of two or more object members without a common string-literal tag field (`{ kind: \"a\", ... } | { kind: \"b\", ... }`)")
 		}
 	}
 	return nil
@@ -316,9 +244,14 @@ func unionAllowsAssignmentFrom(unionTy Type, valTy Type) bool {
 		valTy.setUndefined(false)
 		valTy.setKind(kindNull, false)
 	}
-	// A dynamic member (`ArrayBufferView`, `any`) holds any value.
+	// A dynamic member (`ArrayBufferView`, `any`) holds any value; a member
+	// that is itself a union (`IteratorResult<T> | PromiseLike<…>`) holds
+	// what its own members do.
 	for _, m := range unionTy.UnionMembers {
 		if m.IsDynamic() && m.UnionMembers == nil {
+			return true
+		}
+		if m.IsDynamic() && unionAllowsAssignmentFrom(m, valTy) {
 			return true
 		}
 	}
@@ -579,12 +512,6 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	// number/string/boolean/int array renders its contents, and an element kind
 	// not representable at box time stores the sentinel -1 and keeps the
 	// `[object Array]` stand-in.
-	// A tuple is an array at run time: through `any` it is an any[] of its
-	// elements, boxed (a copy — the tuple's struct has no array header to
-	// share).
-	if v.Ty.IsTuple() && !v.Ty.IsArray() {
-		return e.boxTupleAsArray(v)
-	}
 	if v.Ty.IsArray() {
 		boxed := e.emitBoxArrayPlain(v)
 		if e.arrayMayBeClassBody(v) {
@@ -639,7 +566,7 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		// parameter types and boxes the result. No closure (a `(() => T) |
 		// null` holding null) is null.
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 		nullL, boxL, joinL := e.freshLabel("boxfn.null"), e.freshLabel("boxfn.box"), e.freshLabel("boxfn.join")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, boxL))
 		e.emitLabel(boxL)
@@ -660,8 +587,13 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		e.emitLabel(nullL)
 		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 		e.emitLabel(joinL)
+		// No closure is null, or undefined for a `F | undefined`.
+		absentWord := int64(nbNull)
+		if v.Ty.Nullable() && v.Ty.IsUndefined() {
+			absentWord = nbUndefined
+		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %d, %%%s ]", r, boxed.Ref, boxEnd, nbNull, nullL))
+		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %d, %%%s ]", r, boxed.Ref, boxEnd, absentWord, nullL))
 		return Value{Ref: r, Ty: TypeAny}, nil
 	case hostCellObject(v.Ty):
 		// A headerless host object (a RegExp): a host cell (emit_hostbox.go).
@@ -674,7 +606,7 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 			absentWord = nbNull
 		}
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 		presL, absL, joinL := e.freshLabel("hostbox.present"), e.freshLabel("hostbox.absent"), e.freshLabel("hostbox.join")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, absL, presL))
 		e.emitLabel(presL)
@@ -698,7 +630,7 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 			absentWord = nbNull
 		}
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 		presL, absL, joinL := e.freshLabel("dictbox.present"), e.freshLabel("dictbox.absent"), e.freshLabel("dictbox.join")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, absL, presL))
 		e.emitLabel(presL)
@@ -739,7 +671,7 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		if v.Ty.Nullable() {
 			isNull := e.freshReg()
 			sel := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, absent, tagged))
 			return Value{Ref: sel, Ty: TypeAny}, nil
 		}
@@ -770,7 +702,7 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		// A possibly absent host handle (`Date | undefined`, an unchecked
 		// `dates[i]`): absent boxes as its keyword.
 		isNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 		presL, absL, joinL := e.freshLabel("hostbox.present"), e.freshLabel("hostbox.absent"), e.freshLabel("hostbox.join")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, absL, presL))
 		e.emitLabel(presL)
@@ -785,10 +717,10 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %d, %%%s ]", r, boxed.Ref, presEnd, absent, absL))
 		return Value{Ref: r, Ty: TypeAny}, nil
-	case v.Ty.IR == "ptr":
+	case v.Ty.IR == irPtr:
 		// String: kind bits 0 — the value IS the pointer.
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", r, v.Ref))
 		// A NULLABLE pointer (a `string | null` — e.g. `URLSearchParams.get(missing)`
 		// — whose null representation is the null pointer) that is null at runtime
 		// must box as the `nbNull` sentinel, not a string-tagged box with a 0
@@ -797,7 +729,7 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 		if v.Ty.Nullable() {
 			isNull := e.freshReg()
 			sel := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", sel, isNull, absent, r))
 			return Value{Ref: sel, Ty: TypeAny}, nil
 		}
@@ -832,7 +764,7 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 // storage size, and routines generated for its element type that box element
 // i (`i64 (ptr data, i64 i)`) and store a box into element i
 // (`void (ptr data, i64 i, i64 box)`) — anyArrayElemRoutines.
-const anyArrayBoxTy = "{ ptr, i8, i8, i8, i8, i32, ptr, ptr }"
+const anyArrayBoxTy = "{ " + irPtr + ", i8, i8, i8, i8, i32, " + irPtr + ", " + irPtr + " }"
 
 // anyArrayBoxSize is anyArrayBoxTy's size in bytes.
 const anyArrayBoxSize = 32
@@ -857,24 +789,24 @@ func (e *Emitter) emitBoxIsTypedArray(v Value, typed int) string {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", resPtr))
 	readL := e.freshLabel("boxtyped.read")
 	mergeL := e.freshLabel("boxtyped.merge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, readL, mergeL))
 	e.emitLabel(readL)
 	box := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, box, payload))
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", gep, anyArrayBoxTy, box))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", gep, anyArrayBoxTy, box))
 	b := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", b, gep))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", b, gep))
 	is := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", is, b, typed))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", is, resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", is, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", res, resPtr))
 	return res
 }
 
@@ -952,8 +884,6 @@ func anyArrayBoxBytes(t Type) (kind, typed int) {
 // offset 16, and returns the box pointer — the payload of a kmlTagArray box
 // (TDD-00212).
 func (e *Emitter) boxAnyArray(v Value) string {
-	e.ensureMalloc()
-	e.ensureCalloc()
 	kind, typed := anyArrayBoxBytes(v.Ty)
 	if typed != anyArrayPlain {
 		e.ensureBoxedViews()
@@ -967,6 +897,12 @@ func (e *Emitter) boxAnyArray(v Value) string {
 	if v.Ty.ElemType != nil && v.Ty.ElemType.IsArray() {
 		kind = 13 // KJ_ARRAY: elements are header pointers
 		innerKind, innerTyped = anyArrayBoxBytes(*v.Ty.ElemType)
+		if innerKind < 0 || innerKind == 13 {
+			// An inner array whose elements the byte cannot describe
+			// (`T[][][]`, `Foo[][]`): each element boxes as its own array
+			// (KJ_BOXED's routines).
+			kind, innerKind, innerTyped = -1, -1, anyArrayPlain
+		}
 	}
 	// The box holds the LIVE array header pointer (Stage 3). When the value came
 	// from a named array, reuse its header (v.Ref) so mutations through
@@ -986,26 +922,26 @@ func (e *Emitter) boxAnyArray(v Value) string {
 		}
 	}
 	box := e.freshReg()
-	e.heapCallocInto(box, "1", fmt.Sprint(anyArrayBoxSize))
-	e.heapStore("ptr", header, box, 8)
+	e.heapCallocInto(box, allocObject, "1", fmt.Sprint(anyArrayBoxSize))
+	e.heapStore(irPtr, header, box, 8)
 	if kind == kjBoxed {
 		elemIR := StructFieldIR(*v.Ty.ElemType)
 		szp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr null, i64 1", szp, elemIR))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" null, i64 1", szp, elemIR))
 		sz := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i32", sz, szp))
-		for i, f := range []struct{ ir, v string }{{"i32", sz}, {"ptr", boxer}, {"ptr", unboxer}} {
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i32", sz, szp))
+		for i, f := range []struct{ ir, v string }{{"i32", sz}, {irPtr, boxer}, {irPtr, unboxer}} {
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, anyArrayBoxTy, box, 5+i))
-			e.heapStore(f.ir, f.v, gep, map[string]int{"i32": 4, "ptr": 8}[f.ir])
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, anyArrayBoxTy, box, 5+i))
+			e.heapStore(f.ir, f.v, gep, map[string]int{"i32": 4, irPtr: 8}[f.ir])
 		}
 	}
 	kindGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", kindGep, anyArrayBoxTy, box))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", kindGep, anyArrayBoxTy, box))
 	e.heapStore("i8", fmt.Sprint(kind), kindGep, 1)
 	for i, b := range []int{typed, innerKind, innerTyped} {
 		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, anyArrayBoxTy, box, i+2))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, anyArrayBoxTy, box, i+2))
 		e.heapStore("i8", fmt.Sprint(b), gep, 1)
 	}
 	return box
@@ -1016,7 +952,7 @@ func (e *Emitter) boxAnyArray(v Value) string {
 // (converted as an assignment from `any` converts). ok is false for an
 // element the box describes otherwise (a flat @value struct).
 func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok bool) {
-	if elem.Inline || elem.IsArray() || elem.IR == "" || elem.IR == "void" {
+	if elem.Inline || elem.IR == "" || elem.IR == "void" {
 		return "", "", false
 	}
 	key := layoutFieldKey(elem) + "|" + elem.IR
@@ -1031,7 +967,7 @@ func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok boo
 	restore := e.beginDetachedFunc()
 	restore = e.sharedBody(restore) // content-named: the same in every program
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%data, i64 %%i", gep, elemIR))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%data, i64 %%i", gep, elemIR))
 	val := e.loadArrayElem(gep, elem)
 	boxed, err := e.emitBoxValue(val)
 	if err != nil {
@@ -1040,18 +976,18 @@ func (e *Emitter) anyArrayElemRoutines(elem Type) (boxer, unboxer string, ok boo
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", boxed.Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	boxer = e.defineContentNamed("@__kml_arrelem_box.", "i64", "ptr %data, i64 %i", body)
+	boxer = e.defineContentNamed("@__kml_arrelem_box.", "i64", irPtr+" %data, i64 %i", body)
 
 	restore = e.beginDetachedFunc()
 	restore = e.sharedBody(restore) // content-named: the same in every program
 	gep = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%data, i64 %%i", gep, elemIR))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%data, i64 %%i", gep, elemIR))
 	conv := e.convert(Value{Ref: "%w", Ty: TypeAny}, elem)
 	e.storeArrayElem(gep, elem, conv)
 	e.emitTerminator("ret void")
 	body = e.allocas.String() + e.body.String()
 	restore()
-	unboxer = e.defineContentNamed("@__kml_arrelem_unbox.", "void", "ptr %data, i64 %i, i64 %w", body)
+	unboxer = e.defineContentNamed("@__kml_arrelem_unbox.", "void", irPtr+" %data, i64 %i, i64 %w", body)
 	e.anyArrElemFns[key] = [2]string{boxer, unboxer}
 	return boxer, unboxer, true
 }
@@ -1080,7 +1016,7 @@ func (e *Emitter) emitNbTagPtr(ptrReg string, tag int) string {
 	kind := map[int]int64{kmlTagString: 0, kmlTagObject: 1, kmlTagArray: 2, kmlTagFuncRef: 3,
 		kmlTagStream: 4, kmlTagDynObject: 5, kmlTagDynArray: 6, kmlTagDynFunc: 7}[tag]
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = ptrtoint ptr %s to i64", r, ptrReg))
+	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", r, ptrReg))
 	if kind == 0 {
 		return r
 	}
@@ -1161,7 +1097,7 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 		restore := e.beginDetachedFunc()
 		r, err := e.emitDynamicRenderInline(Value{Ref: "%v", Ty: TypeAny}, inspect, depth)
 		if err == nil && !e.blockDone {
-			e.emitTerminator("ret ptr " + r.Ref)
+			e.emitTerminator("ret " + irPtr + " " + r.Ref)
 		}
 		body := e.allocas.String() + e.body.String()
 		restore()
@@ -1170,11 +1106,11 @@ func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, 
 			delete(e.protoBuilders, fn)
 			return Value{}, err
 		}
-		e.writeFunc("ptr "+fn+"(i64 %v)", body)
+		e.writeFunc(irPtr+" "+fn+"(i64 %v)", body)
 	}
-	e.declareFn(fn[1:], "declare ptr "+fn+"(i64)")
+	e.declareFn(fn[1:], "declare "+irPtr+" "+fn+"(i64)")
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr %s(i64 %s)", r, fn, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s(i64 %s)", r, fn, v.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -1194,22 +1130,19 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	tag, payload := e.emitUnboxTagPayload(v)
 
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	mergeL := e.freshLabel("dynstr.merge")
 
 	store := func(ref string) {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ref, resPtr))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ref, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	}
-
-	e.ensureSprintf()
-	e.ensureMalloc()
 
 	matchL, nextL := e.emitTagCheck(tag, kmlTagInt, "dynstr.int")
 	e.emitLabel(matchL)
 	scratch := e.emitStringScratch(32) // TDD-00120
 	fmtInt := e.internString("%lld")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", scratch, fmtInt, payload))
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", scratch, fmtInt, payload))
 	e.emitStringFinalizeLen(scratch)
 	store(scratch)
 	e.emitLabel(nextL)
@@ -1219,8 +1152,7 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	fscratch := e.emitStringScratch(32) // TDD-00120
 	fdouble := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", fdouble, payload))
-	e.ensureDtoa() // JS-faithful shortest round-trip (TDD-00080)
-	e.emitInstr(fmt.Sprintf("call void @__kml_dtoa(ptr %s, double %s)", fscratch, fdouble))
+	e.emitInstr(fmt.Sprintf("call void @__kml_dtoa("+irPtr+" %s, double %s)", fscratch, fdouble))
 	e.emitStringFinalizeLen(fscratch)
 	store(fscratch)
 	e.emitLabel(nextL)
@@ -1228,7 +1160,7 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	matchL, nextL = e.emitTagCheck(tag, kmlTagString, "dynstr.string")
 	e.emitLabel(matchL)
 	sptr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", sptr, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, sptr, payload))
 	store(sptr)
 	e.emitLabel(nextL)
 
@@ -1237,7 +1169,7 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	isTrue := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isTrue, payload))
 	boolPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", boolPtr, isTrue, e.internString("true"), e.internString("false")))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", boolPtr, isTrue, e.internString("true"), e.internString("false")))
 	store(boolPtr)
 	e.emitLabel(nextL)
 
@@ -1260,7 +1192,7 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	e.emitLabel(matchL)
 	e.ensureDynJSONC()
 	aBox := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", aBox, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, aBox, payload))
 	// The walker reads the box itself: field 0 is the live array header (so a
 	// post-box push is reflected — TDD-00212 Stage 3), field 1 the element
 	// kind, field 2 the typed-array byte (ADR-01059).
@@ -1269,9 +1201,9 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	// as `Int32Array(3) [ … ]`); String() / interpolation → the flat Array join
 	// (`1,2,3`). Both share the element stride/format on the same box.
 	if inspect {
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_array_inspect_at(ptr %s, i64 %d)", aStr, aBox, depth))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_array_inspect_at("+irPtr+" %s, i64 %d)", aStr, aBox, depth))
 	} else {
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_array_join(ptr %s)", aStr, aBox))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_array_join("+irPtr+" %s)", aStr, aBox))
 	}
 	store(aStr)
 	e.emitLabel(nextL)
@@ -1281,32 +1213,31 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	matchL, nextL = e.emitTagCheck(tag, kmlTagFuncRef, "dynstr.funcref")
 	e.emitLabel(matchL)
 	fnName := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", fnName, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, fnName, payload))
 	if !inspect {
 		// String(K): a class's source text, else the native-function form.
 		e.ensureFnMeta()
-		e.declareFn("__kml_classref_tostring", "declare ptr @__kml_classref_tostring(ptr)")
+		e.declareFn("__kml_classref_tostring", "declare "+irPtr+" @__kml_classref_tostring("+irPtr+")")
 		src := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classref_tostring(ptr %s)", src, fnName))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_tostring("+irPtr+" %s)", src, fnName))
 		store(src)
 	} else {
 		// console.log inspects: a class boxed as a value as `[class C] {
 		// statics }`, a builtin constructor as `[Function: TypeError]`.
 		e.ensureDynJSONC()
-		e.ensureClassRefInspect()
 		cls := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classref_shown(ptr %s)", cls, fnName))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_shown("+irPtr+" %s)", cls, fnName))
 		isCls := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isCls, cls))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isCls, cls))
 		clsL, fnL := e.freshLabel("dynstr.classref"), e.freshLabel("dynstr.nativefn")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isCls, clsL, fnL))
 		e.emitLabel(clsL)
 		full := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classref_inspect_at(ptr %s, i64 %d)", full, fnName, depth))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_inspect_at("+irPtr+" %s, i64 %d)", full, fnName, depth))
 		store(full)
 		e.emitLabel(fnL)
 		fnBuf := e.emitStringScratch(64) // TDD-00120; a builtin constructor's name
-		e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, ptr %s)", fnBuf, e.internString("[Function: %s]"), fnName))
+		e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", fnBuf, e.internString("[Function: %s]"), fnName))
 		e.emitStringFinalizeLen(fnBuf)
 		store(fnBuf)
 	}
@@ -1320,16 +1251,16 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 		// util.inspect's `[Function: name]` form (TDD-00229).
 		e.ensureFnMeta()
 		rec := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rec, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rec, payload))
 		fs := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_inspect_dyn(ptr %s, i64 %d)", fs, rec, depth))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_inspect_dyn("+irPtr+" %s, i64 %d)", fs, rec, depth))
 		store(fs)
 	} else {
 		e.ensureFnMeta()
 		rec := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", rec, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rec, payload))
 		fs := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_fn_tostring_dyn(ptr %s)", fs, rec))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_tostring_dyn("+irPtr+" %s)", fs, rec))
 		store(fs)
 	}
 	e.emitLabel(nextL)
@@ -1338,16 +1269,15 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	// `String([1,'hi',true])` — the C walker handles nesting/null/undefined.
 	matchL, nextL = e.emitTagCheck(tag, kmlTagDynArray, "dynstr.dynarr")
 	e.emitLabel(matchL)
-	e.ensureDynJSONC()
 	daHdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", daHdr, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, daHdr, payload))
 	daStr := e.freshReg()
 	// console.log → bracket inspect form (`[ 1, 'hi', true ]`); String() → the
 	// flat comma join (`1,hi,true`). TDD-00212 Stage 2.
 	if inspect {
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_inspect_at(ptr %s, i64 %d)", daStr, daHdr, depth))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_inspect_at("+irPtr+" %s, i64 %d)", daStr, daHdr, depth))
 	} else {
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynarr_join(ptr %s)", daStr, daHdr))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_join("+irPtr+" %s)", daStr, daHdr))
 	}
 	store(daStr)
 	e.emitLabel(nextL)
@@ -1362,9 +1292,9 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 		e.emitLabel(matchL)
 		e.ensureDynJSONC()
 		doPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", doPtr, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, doPtr, payload))
 		doStr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_inspect_at(ptr %s, i64 %d)", doStr, doPtr, depth))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_inspect_at("+irPtr+" %s, i64 %d)", doStr, doPtr, depth))
 		store(doStr)
 		e.emitLabel(nextL)
 	}
@@ -1387,7 +1317,7 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	// bigint runtime into a program that has no bigints.
 	e.ensureBoxedBigIntHooks()
 	bigDigits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_boxed_bigint_str(ptr %s)", bigDigits, bigCell))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_boxed_bigint_str("+irPtr+" %s)", bigDigits, bigCell))
 	bigStr := Value{Ref: bigDigits, Ty: TypePtr}
 	if inspect {
 		var err error
@@ -1424,9 +1354,9 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 		// util.inspect's form: the header with Node's `Ctor [Name]`, then
 		// its own properties (dynjson.c inspect_error).
 		e.ensureDynJSONC()
-		e.declareFn("__kml_obj_inspect_at", "declare ptr @__kml_obj_inspect_at(ptr, i64)")
+		e.declareFn("__kml_obj_inspect_at", "declare "+irPtr+" @__kml_obj_inspect_at("+irPtr+", i64)")
 		es := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_obj_inspect_at(ptr %s, i64 %d)", es, errObjPtr, depth))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_inspect_at("+irPtr+" %s, i64 %d)", es, errObjPtr, depth))
 		store(es)
 	} else {
 		errStr, err := e.emitErrorToString(Value{Ref: errObjPtr, Ty: TypePtr})
@@ -1454,19 +1384,19 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 	if inspect {
 		// A static object renders through its layout row (TDD-00233).
 		e.ensureDynJSONC()
-		e.declareFn("__kml_obj_inspect_at", "declare ptr @__kml_obj_inspect_at(ptr, i64)")
+		e.declareFn("__kml_obj_inspect_at", "declare "+irPtr+" @__kml_obj_inspect_at("+irPtr+", i64)")
 		op := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", op, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, op, payload))
 		os := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_obj_inspect_at(ptr %s, i64 %d)", os, op, depth))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_inspect_at("+irPtr+" %s, i64 %d)", os, op, depth))
 		store(os)
 	} else {
 		// Object.prototype.toString: "[object Tag]" for a class with a
 		// Symbol.toStringTag, else "[object Object]".
 		e.ensureDynJSONC()
-		e.declareFn("__kml_object_tostring", "declare ptr @__kml_object_tostring(i64)")
+		e.declareFn("__kml_object_tostring", "declare "+irPtr+" @__kml_object_tostring(i64)")
 		os := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_object_tostring(i64 %s)", os, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_object_tostring(i64 %s)", os, v.Ref))
 		store(os)
 	}
 	e.emitLabel(nextL)
@@ -1482,7 +1412,7 @@ func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Val
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", result, resPtr))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
@@ -1494,11 +1424,11 @@ func (e *Emitter) emitDynamicTypeof(v Value) (Value, error) {
 	tag, payload := e.emitUnboxTagPayload(v)
 
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	mergeL := e.freshLabel("dyntypeof.merge")
 
 	store := func(label string) {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.internString(label), resPtr))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.internString(label), resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	}
 
@@ -1563,12 +1493,21 @@ func (e *Emitter) emitDynamicTypeof(v Value) (Value, error) {
 	store("object")
 	e.emitLabel(nextL)
 
-	// Remaining tags: object.
+	// Remaining tags: object, or a Proxy of a function (dynobj.c).
+	pxFn := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_proxy_is_fn(i64 %s)", pxFn, v.Ref))
+	pxHit := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", pxHit, pxFn))
+	pxL, objL := e.freshLabel("dyntypeof.pxfn"), e.freshLabel("dyntypeof.rest")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", pxHit, pxL, objL))
+	e.emitLabel(pxL)
+	store("function")
+	e.emitLabel(objL)
 	store("object")
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", result, resPtr))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
@@ -1585,7 +1524,8 @@ func (e *Emitter) emitAnyEquals(a, b Value, negate bool) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureAnyEq()
+	e.ensureBoxedBigIntHooks()
+	e.ensureFnMeta()
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", result, boxedA.Ref, boxedB.Ref))
 	if negate {
@@ -1697,56 +1637,4 @@ func selfIdentifyingObjects(members []Type) bool {
 		}
 	}
 	return true
-}
-
-// boxTupleAsArray boxes a tuple as an any[] holding its boxed elements; an
-// absent tuple (a null pointer) boxes as undefined.
-func (e *Emitter) boxTupleAsArray(v Value) (Value, error) {
-	n := len(v.Ty.Fields)
-	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
-	nullL, boxL, doneL := e.freshLabel("boxtup.null"), e.freshLabel("boxtup.box"), e.freshLabel("boxtup.done")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, boxL))
-	e.emitLabel(nullL)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(boxL)
-	boxed, err := e.boxTupleElems(v, n)
-	if err != nil {
-		return Value{}, err
-	}
-	boxEnd := e.freshLabel("boxtup.boxend")
-	e.emitTerminator(fmt.Sprintf("br label %%%s", boxEnd))
-	e.emitLabel(boxEnd)
-	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-	e.emitLabel(doneL)
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %d, %%%s ], [ %s, %%%s ]", r, nbUndefined, nullL, boxed.Ref, boxEnd))
-	return Value{Ref: r, Ty: TypeAny}, nil
-}
-
-// boxTupleElems is boxTupleAsArray's present case.
-func (e *Emitter) boxTupleElems(v Value, n int) (Value, error) {
-	e.ensureMalloc()
-	data := e.freshReg()
-	e.heapMallocInto(data, fmt.Sprint(max(n, 1)*8))
-	structIR := v.Ty.StructIR()
-	for i, f := range v.Ty.Fields {
-		gep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, structIR, v.Ref, i))
-		var fv Value
-		if f.Ty.IsArray() {
-			fv = e.loadArrayFieldValue(gep, f.Ty)
-		} else {
-			fv = e.loadScalarOrNullableField(gep, f.Ty)
-		}
-		bv, err := e.emitBoxValue(fv)
-		if err != nil {
-			return Value{}, err
-		}
-		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", slot, data, i))
-		e.heapStore("i64", bv.Ref, slot, 8)
-	}
-	r1 := e.newArrayHeader(data, fmt.Sprint(n))
-	return e.emitBoxValue(Value{Ref: r1, Ty: ArrayOf(TypeAny)})
 }

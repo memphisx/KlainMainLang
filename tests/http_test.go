@@ -189,7 +189,8 @@ func TestE2EHTTPClusterWorkersExitWithPrimary(t *testing.T) {
 import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8977, (req: HttpRequest): Res => {
-  return { status: 200, body: "ok" }
+  const until = Date.now() + 150; while (Date.now() < until) {}
+  return { status: 200, body: process.pid.toString() }
 }, { host: '127.0.0.1', workers: 3 })
 `
 	np := freePort(t)
@@ -206,8 +207,9 @@ http.listen(8977, (req: HttpRequest): Res => {
 		waitPortFree(addr)
 	})
 	waitListening(t, np)
-	// Let every worker reach its event loop before the primary goes.
-	time.Sleep(500 * time.Millisecond)
+	// Workers are serving (two answered) before the primary goes.
+	url := fmt.Sprintf("http://%s/", addr)
+	clusterServesFromSeveralPIDs(t, func() string { return httpGetBody(url) }, nil)
 
 	if err := cmd.Process.Kill(); err != nil {
 		t.Fatalf("kill primary: %v", err)
@@ -231,6 +233,55 @@ http.listen(8977, (req: HttpRequest): Res => {
 // http.listen's clustering fork() (GC_set_handle_fork(1) before GC_INIT()).
 // Skips (via buildBinaryGC) if libgc/bdw-gc isn't installed, same as
 // startHTTPServerGC.
+// clusterServesFromSeveralPIDs: a { workers: N } cluster serves from more
+// than one process. Which process accepts a connection is the kernel's call,
+// and a worker may still be starting, so this is not asked of one burst:
+// each round sends 3 requests at once to a handler that holds its process
+// for 150 ms (a busy worker cannot accept, so a sibling has to), until two
+// PIDs answered. pidOf checks a body and gives its PID (nil: the body).
+func clusterServesFromSeveralPIDs(t *testing.T, get func() string, pidOf func(string) (string, bool)) {
+	t.Helper()
+	seen := map[string]int{}
+	deadline := time.Now().Add(30 * time.Second)
+	for len(seen) < 2 && time.Now().Before(deadline) {
+		results := make(chan string, 3)
+		var wg sync.WaitGroup
+		for i := 0; i < 3; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); results <- get() }()
+		}
+		wg.Wait()
+		close(results)
+		for r := range results {
+			if r == "" {
+				continue
+			}
+			pid := r
+			if pidOf != nil {
+				var ok bool
+				if pid, ok = pidOf(r); !ok {
+					t.Fatalf("body: got %q", r)
+				}
+			}
+			seen[pid]++
+		}
+	}
+	if len(seen) < 2 {
+		t.Fatalf("expected more than one worker PID to serve while each was busy, got only %v", seen)
+	}
+}
+
+// httpGetBody is url's body, "" on any error.
+func httpGetBody(url string) string {
+	resp, err := http.Get(url)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	return string(body)
+}
+
 func startHTTPClusterServerGC(t *testing.T, src string, port int) int {
 	t.Helper()
 	np := freePort(t)
@@ -800,9 +851,11 @@ http.createServer(
 		resp.Body.Close()
 	}
 
-	// closedWithin dials, sends `req` (no completion), and asserts the server
-	// closes the connection (recv → EOF) within [min,max] seconds.
-	closedWithin := func(name, req string, min, max float64) {
+	// closedAfter dials, sends `req` (no completion), and asserts the server
+	// closes the connection (recv → EOF) no sooner than min seconds. A timer
+	// never fires early, so the lower bound tells the timeouts apart; how late
+	// one fires is the scheduler's, so the only upper bound is that it fires.
+	closedAfter := func(name, req string, min float64) {
 		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
 			t.Fatalf("%s dial: %v", name, err)
@@ -811,26 +864,26 @@ http.createServer(
 		if _, err := conn.Write([]byte(req)); err != nil {
 			t.Fatalf("%s write: %v", name, err)
 		}
-		conn.SetReadDeadline(time.Now().Add(time.Duration(max+1.5) * time.Second))
+		conn.SetReadDeadline(time.Now().Add(20 * time.Second))
 		start := time.Now()
 		buf := make([]byte, 256)
 		// Drain any response bytes until EOF (the server closes on timeout).
-		for {
-			if _, err := conn.Read(buf); err != nil {
-				break // EOF / reset → connection closed
-			}
+		var err2 error
+		for err2 == nil {
+			_, err2 = conn.Read(buf)
 		}
-		elapsed := time.Since(start).Seconds()
-		if elapsed < min || elapsed > max {
-			t.Errorf("%s: connection closed after %.2fs, want [%.2f, %.2f]", name, elapsed, min, max)
+		if ne, ok := err2.(net.Error); ok && ne.Timeout() {
+			t.Errorf("%s: connection never closed", name)
+		} else if elapsed := time.Since(start).Seconds(); elapsed < min {
+			t.Errorf("%s: connection closed after %.2fs, want at least %.2f", name, elapsed, min)
 		}
 	}
 
 	// Incomplete headers → headersTimeout (~0.3s).
-	closedWithin("headersTimeout", "GET /slow HTTP/1.1\r\nHost: x\r\n", 0.15, 0.7)
+	closedAfter("headersTimeout", "GET /slow HTTP/1.1\r\nHost: x\r\n", 0.15)
 	// Headers complete but body never finishes → requestTimeout (~0.9s).
-	closedWithin("requestTimeout",
-		"POST /b HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nAB", 0.6, 1.4)
+	closedAfter("requestTimeout",
+		"POST /b HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nAB", 0.6)
 
 	// Idle keep-alive → keepAliveTimeout (~0.4s after the response is read).
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
@@ -853,18 +906,19 @@ http.createServer(
 	}
 	// The 2-byte "ok" body has no Content-Length? It does (res.end sends one), so
 	// read it, then time the idle close.
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
 	start := time.Now()
 	buf := make([]byte, 256)
-	for {
-		if _, err := conn.Read(buf); err != nil {
-			break
-		}
+	var kaErr error
+	for kaErr == nil {
+		_, kaErr = br.Read(buf)
 	}
 	// Node closes an idle kept-alive socket keepAliveTimeout plus
 	// keepAliveTimeoutBuffer (1000ms) after the response.
-	if elapsed := time.Since(start).Seconds(); elapsed < 1.2 || elapsed > 2.0 {
-		t.Errorf("keepAliveTimeout: idle connection closed after %.2fs, want ~1.4", elapsed)
+	if ne, ok := kaErr.(net.Error); ok && ne.Timeout() {
+		t.Errorf("keepAliveTimeout: idle connection never closed")
+	} else if elapsed := time.Since(start).Seconds(); elapsed < 1.2 {
+		t.Errorf("keepAliveTimeout: idle connection closed after %.2fs, want at least 1.2", elapsed)
 	}
 
 	// The server is still healthy after all the aborts.
@@ -1643,20 +1697,25 @@ server.listen(8310, '127.0.0.1')
 	}
 	time.Sleep(200 * time.Millisecond)
 	c1.Close() // truncate mid-request → clientError(HPE_INVALID_EOF_STATE), as Node reports it
-	time.Sleep(300 * time.Millisecond)
 
-	// A normal request on a fresh connection reports what the listener recorded.
-	c2, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
-	if err != nil {
-		t.Fatalf("dial c2: %v", err)
+	// A normal request on a fresh connection reports what the listener
+	// recorded, once the server has seen the close.
+	var resp string
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		c2, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 2*time.Second)
+		if err != nil {
+			t.Fatalf("dial c2: %v", err)
+		}
+		if _, err := c2.Write([]byte("GET /r HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")); err != nil {
+			t.Fatalf("write req: %v", err)
+		}
+		c2.SetReadDeadline(time.Now().Add(4 * time.Second))
+		resp = readContentLengthResponse(t, bufio.NewReader(c2))
+		c2.Close()
+		if !strings.Contains(resp, "count=0") {
+			break
+		}
 	}
-	defer c2.Close()
-	b2 := bufio.NewReader(c2)
-	if _, err := c2.Write([]byte("GET /r HTTP/1.1\r\nHost: x\r\n\r\n")); err != nil {
-		t.Fatalf("write req: %v", err)
-	}
-	c2.SetReadDeadline(time.Now().Add(4 * time.Second))
-	resp := readContentLengthResponse(t, b2)
 	if !strings.Contains(resp, "count=1") || !strings.Contains(resp, "code=HPE_INVALID_EOF_STATE") {
 		t.Fatalf("clientError did not fire as expected:\n%q", resp)
 	}
@@ -2188,8 +2247,23 @@ http.listen(8951, async (req: HttpRequest): Promise<Res> => {
 // entire single-threaded process (every fiber, not just its own) for the
 // full delay, and the fast request would have had to wait behind it.
 func TestE2EHTTPListenConcurrentAwaitFetch(t *testing.T) {
-	const slowDelay = 1200 * time.Millisecond
-	upstream := newDelayedUpstreamServer(t, slowDelay)
+	// The upstream holds /slow until the fast request has been answered, and
+	// says when /slow arrived: no timing, only order. A handler whose await
+	// blocked the process would never answer the fast request (the deadline).
+	slowArrived := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	defer once.Do(func() { close(release) })
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(slowArrived)
+			<-release
+		}
+		fmt.Fprintf(w, "upstream %s", r.URL.Path)
+	})
+	upstream := httptest.NewServer(mux)
+	t.Cleanup(upstream.Close)
 	src := fmt.Sprintf(`
 import http from 'klain:http'
 interface Res { status: number; body: string }
@@ -2199,11 +2273,12 @@ http.listen(8952, async (req: HttpRequest): Promise<Res> => {
 }, { host: '127.0.0.1' })
 `, upstream.URL)
 	port := startHTTPServer(t, src, 8952)
+	client := &http.Client{Timeout: 30 * time.Second}
 
 	slowDone := make(chan struct{})
 	go func() {
 		defer close(slowDone)
-		resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/slow", port))
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/slow", port))
 		if err != nil {
 			t.Errorf("slow GET: %v", err)
 			return
@@ -2215,23 +2290,21 @@ http.listen(8952, async (req: HttpRequest): Promise<Res> => {
 		}
 	}()
 
-	time.Sleep(200 * time.Millisecond) // let the slow request's fetch start first
-
-	fastStart := time.Now()
-	resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/fast", port))
-	if err != nil {
-		t.Fatalf("fast GET: %v", err)
+	select {
+	case <-slowArrived:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the slow request's fetch never reached the upstream")
 	}
-	defer resp.Body.Close()
-	fastElapsed := time.Since(fastStart)
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/fast", port))
+	if err != nil {
+		t.Fatalf("fast GET while the slow fetch is in flight (concurrency is broken): %v", err)
+	}
 	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
 	if string(body) != "upstream /fast" {
 		t.Errorf("fast GET body: got %q, want %q", string(body), "upstream /fast")
 	}
-	if fastElapsed >= slowDelay/2 {
-		t.Errorf("fast request took %v — expected it to complete quickly despite the slow request's %v upstream fetch still being in flight (concurrency is broken)", fastElapsed, slowDelay)
-	}
-
+	once.Do(func() { close(release) })
 	<-slowDone
 }
 
@@ -2837,40 +2910,13 @@ func TestE2EHTTPListenClusteringMultipleWorkerPIDs(t *testing.T) {
 import http from 'klain:http'
 interface Res { status: number; body: string }
 http.listen(8963, (req: HttpRequest): Res => {
+  const until = Date.now() + 150; while (Date.now() < until) {}
   return { status: 200, body: process.pid.toString() }
 }, { host: '127.0.0.1', workers: 3 })
 `
 	port := startHTTPClusterServer(t, src, 8963)
-
-	const n = 40
-	results := make(chan string, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
-			if err != nil {
-				results <- ""
-				return
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			results <- string(body)
-		}()
-	}
-	wg.Wait()
-	close(results)
-
-	seen := map[string]int{}
-	for r := range results {
-		if r != "" {
-			seen[r]++
-		}
-	}
-	if len(seen) < 2 {
-		t.Fatalf("expected %d concurrent requests to be served by more than one distinct worker PID (proves fork+shared-listener+non-blocking-accept work together, not just that the binary starts), got only %v", n, seen)
-	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	clusterServesFromSeveralPIDs(t, func() string { return httpGetBody(url) }, nil)
 }
 
 // TestE2EHTTPClusterCombinedWithCreateServer (ADR-00989): a klain:http
@@ -2891,6 +2937,7 @@ http.createServer((req: http.IncomingMessage, res: http.ServerResponse) => {
   res.end("extra")
 }).listen(%d, '127.0.0.1')
 khttp.listen(%d, (req: HttpRequest): Res => {
+  const until = Date.now() + 150; while (Date.now() < until) {}
   return { status: 200, body: process.pid.toString() }
 }, { host: '127.0.0.1', workers: 3 })
 `, p1, p2)
@@ -2924,30 +2971,8 @@ khttp.listen(%d, (req: HttpRequest): Res => {
 		t.Errorf("createServer port body: got %q, want %q", b, "extra")
 	}
 
-	// The cluster port answers and is served by more than one worker PID —
-	// concurrent requests (not sequential, which a shared-accept cluster routes
-	// to whichever worker wins the race, usually the same one).
-	const n = 40
-	results := make(chan string, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			results <- get(p2)
-		}()
-	}
-	wg.Wait()
-	close(results)
-	seen := map[string]int{}
-	for r := range results {
-		if r != "" {
-			seen[r]++
-		}
-	}
-	if len(seen) < 2 {
-		t.Fatalf("expected the cluster port to be served by more than one worker PID, got %v", seen)
-	}
+	// The cluster port is served by more than one worker PID.
+	clusterServesFromSeveralPIDs(t, func() string { return get(p2) }, nil)
 }
 
 // TestE2EHTTPListenClusteringDefaultIsSingleProcess confirms the two-argument
@@ -2991,14 +3016,16 @@ import http from 'klain:http'
 interface Res { status: number; body: string }
 console.log("BANNER")
 http.listen(8965, (req: HttpRequest): Res => {
-  return { status: 200, body: "ok" }
+  console.log("served")
+  const until = Date.now() + 150; while (Date.now() < until) {}
+  return { status: 200, body: process.pid.toString() }
 }, { host: '127.0.0.1', workers: 4 })
 `
 	np := freePort(t)
 	binFile := buildBinaryImports(t, subPort(src, 8965, np))
 	cmd := exec.Command(binFile)
 	setProcGroup(cmd)
-	var out bytes.Buffer
+	var out syncBuffer
 	cmd.Stdout = &out
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start server: %v", err)
@@ -3010,18 +3037,12 @@ http.listen(8965, (req: HttpRequest): Res => {
 		waitPortFree(addr)
 	})
 
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
-		if err == nil {
-			conn.Close()
-			break
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	// Give every forked worker a moment to have run its own copy of the
-	// top-level console.log (were the bug still present) before checking.
-	time.Sleep(200 * time.Millisecond)
+	waitListening(t, np)
+	// Each worker that serves logs a line, which writes out whatever its
+	// stdout buffer still held from before the fork: once two have served,
+	// a BANNER copied into the workers would be in the output.
+	url := fmt.Sprintf("http://127.0.0.1:%d/", np)
+	clusterServesFromSeveralPIDs(t, func() string { return httpGetBody(url) }, nil)
 
 	count := strings.Count(out.String(), "BANNER")
 	if count != 1 {
@@ -3101,50 +3122,18 @@ http.listen(8966, (req: HttpRequest): Res => {
     let s: string = "abcdefghijklmnopqrstuvwxyz0123456789" + "abcdefghijklmnopqrstuvwxyz0123456789";
     total = total + s.length;
   }
+  const until = Date.now() + 150; while (Date.now() < until) {}
   return { status: 200, body: process.pid.toString() + ":" + total.toString() };
 }, { host: '127.0.0.1', workers: 3 })
 `
 	port := startHTTPClusterServerGC(t, src, 8966)
-
-	const n = 20
 	// 100,000 iterations * 72 (two concatenated 36-byte segments).
 	const wantTotal = "7200000"
-
-	results := make(chan string, n)
-	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			resp, err := http.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
-			if err != nil {
-				results <- ""
-				return
-			}
-			defer resp.Body.Close()
-			body, _ := io.ReadAll(resp.Body)
-			results <- string(body)
-		}()
-	}
-	wg.Wait()
-	close(results)
-
-	seenPIDs := map[string]int{}
-	for r := range results {
-		if r == "" {
-			t.Error("a request failed")
-			continue
-		}
-		pid, total, ok := strings.Cut(r, ":")
-		if !ok || total != wantTotal {
-			t.Errorf("body: got %q, want \"<pid>:%s\"", r, wantTotal)
-			continue
-		}
-		seenPIDs[pid]++
-	}
-	if len(seenPIDs) < 2 {
-		t.Fatalf("expected %d concurrent requests to be served by more than one distinct worker PID under -mm=gc, got only %v", n, seenPIDs)
-	}
+	url := fmt.Sprintf("http://127.0.0.1:%d/", port)
+	clusterServesFromSeveralPIDs(t, func() string { return httpGetBody(url) }, func(body string) (string, bool) {
+		pid, total, ok := strings.Cut(body, ":")
+		return pid, ok && total == wantTotal
+	})
 }
 
 // TestE2EHTTPCreateServerGCModeConcurrentConnections: under -mm=gc, a socket
@@ -4656,5 +4645,46 @@ server.listen(0, () => {
     res.on('end', () => { console.log('get done', res.statusCode); agent.destroy(); server.close() })
   }).end()
 })
+`)
+}
+
+// `res.write(chunk, cb)` on a JavaScript response (an `any`): the
+// stream's write, not a Buffer's `write(string, offset)`.
+func TestE2EHTTPAnyResponseWriteCallback(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const http = require("http");
+const server = http.createServer((req, res) => {
+  res.write("okay", () => { console.log("written"); });
+  res.end();
+});
+server.listen(0, "127.0.0.1", () => {
+  http.get({ port: server.address().port, host: "127.0.0.1" }, (r) => {
+    let body = "";
+    r.on("data", (c) => { body += c; });
+    r.on("end", () => { console.log(r.statusCode, body); server.close(); });
+  });
+});
+`)
+}
+
+// A request's createConnection adds a buffering option to the options it
+// is handed; net.createConnection gives the socket that high-water mark.
+func TestE2EHTTPCreateConnectionHighWaterMark(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const http = require("http");
+const net = require("net");
+const server = http.createServer((req, res) => { res.end(); });
+server.listen(0, () => {
+  const req = http.request({
+    port: server.address().port,
+    createConnection(options) {
+      options.readableHighWaterMark = 1024;
+      return net.createConnection(options);
+    }
+  }, (res) => {
+    console.log(res.socket === req.socket, res.socket.readableHighWaterMark, res.readableHighWaterMark);
+    res.resume();
+    server.close();
+  });
+  req.end();
+});
 `)
 }

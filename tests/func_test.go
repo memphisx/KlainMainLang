@@ -464,15 +464,15 @@ f(5, "hi");
 
 func TestE2EClosureMissingRequiredArgRejected(t *testing.T) {
 	// Calling a first-class function value with fewer arguments than its required
-	// parameters is an arity error — the same rejection a named function's call
-	// site makes, not a silent zero-fill (ADR-00963). The closure's own optional
+	// parameters is TypeScript's arity error — the same rejection a named
+	// function's call site gets, not a silent zero-fill (ADR-00963). The closure's own optional
 	// marker is overridden by the required slot it is bound into, so `f()` is a
 	// missing-required-argument error even though the arrow wrote `x?`.
-	assertCodegenError(t, `
+	assertCLICompileError(t, false, `
 type Cb = (x: number) => void;
 const f: Cb = (x?: number) => { console.log(x ?? -1); };
 f();
-`, "missing argument 1")
+`, "expected 1 arguments, but got 0")
 }
 
 func TestE2EArrowMoreOptionalThanParamType(t *testing.T) {
@@ -997,13 +997,6 @@ console.log(out)
 `, "123-abc")
 }
 
-func TestE2EArgumentsObjectWithRestRejected(t *testing.T) {
-	_, err := parseAndCompile(`function f(...xs: number[]): number { return arguments.length }`)
-	if err == nil {
-		t.Fatal("expected a compile error for `arguments` alongside a rest parameter, got none")
-	}
-}
-
 func TestE2EArgumentsObjectInArrowRejected(t *testing.T) {
 	// Real JS arrow functions have no own `arguments`; here the reference stays
 	// an undefined-variable error rather than synthesizing from arrow params.
@@ -1156,28 +1149,75 @@ console.log(byRef());
 `, "2\n42\n14")
 }
 
-func TestE2ENestedFunctionCaptureTDZRejected(t *testing.T) {
-	// The TDZ-posture edge: the hoisted call touches a captured variable
-	// declared BETWEEN the call and the declaration — a runtime TDZ crash in
-	// JS, a clean compile error here (TDD-00070/00071 posture).
-	_, err := parseAndCompile(`
+func TestE2ENestedFunctionCaptureTDZThrows(t *testing.T) {
+	// The hoisted call touches a captured variable declared between the
+	// call and the declaration: JavaScript's dead-zone ReferenceError, at
+	// run time.
+	assertOutput(t, `
 function bad(): number {
   const v = pre();
   let base = 5;
   function pre(): number { return base + 1; }
   return v;
 }
-console.log(bad());
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a hoisted call reading a not-yet-declared captured variable, got none")
-	}
+try { bad(); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+`, "ReferenceError Cannot access 'base' before initialization\n")
+}
+
+func TestE2EClosureCapturesLaterBinding(t *testing.T) {
+	// A closure built before a let/const it reads shares that binding's
+	// cell: called after the declaration it sees the value (and later
+	// writes), called before it throws the dead zone's ReferenceError.
+	assertOutput(t, `
+function a(): void {
+  const show = (): string => `+"`${n} ${s} ${o.k} ${arr.length} ${String(an)}`"+`;
+  const bump = (): void => { n++; arr.push(n); };
+  let n = 1;
+  const s = "s";
+  const o = { k: 2 };
+  const arr: number[] = [];
+  let an: any = { z: 1 };
+  bump(); bump();
+  console.log(show(), arr.join(","));
+  an = "now";
+  console.log(show());
+}
+a();
+function b(): void {
+  const early = (): number => late * 2;
+  try { early(); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+  const late = 21;
+  console.log(early());
+}
+b();
+function c(): void {
+  function hoisted(): string { return msg + "!"; }
+  const msg = "c";
+  console.log(hoisted());
+  for (let i = 0; i < 2; i++) {
+    const f = (): number => i + k;
+    const k = 10;
+    console.log(f());
+  }
+}
+c();
+function d(): void {
+  const g = (): number[] => xs;
+  let xs = [1, 2];
+  xs = [3];
+  console.log(g());
+  const h = (): boolean => flag;
+  const flag = true;
+  console.log(h());
+}
+d();
+`, "3 s 2 2 [object Object] 2,3\n3 s 2 2 now\nReferenceError Cannot access 'late' before initialization\n42\nc!\n10\n11\n[ 3 ]\ntrue\n")
 }
 
 func TestE2ENestedFunctionCaptureSelfRecursive(t *testing.T) {
 	// A self-recursive UNANNOTATED capturing nested function: the signature
 	// inference used to recurse without bound through the letrec identifier
-	// lookup (buildFunctionSig → inferUnannotatedReturnType → inferExprType →
+	// lookup (buildFunctionSig → funcBodyReturnType → typeOfExpr →
 	// buildFunctionSig …) and blow the compiler's stack. The guard keeps the
 	// cycle finite; when the FIRST reachable return is the recursive call
 	// itself, inference must fall through to the base-case return's type (the
@@ -1407,18 +1447,17 @@ console.log(inner());
 	}
 }
 
+// tsc rejects two implementations of one name (TS2393); in JavaScript the
+// last binds it (TestE2ENestedFunctionMutualRecursion).
 func TestE2ENestedFunctionDuplicateNameRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+	assertCLICompileError(t, false, `
 function outer(): number {
     function helper(): number { return 1; }
     function helper(): number { return 2; }
     return helper();
 }
 console.log(outer());
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for two same-named nested function declarations in the same scope, got none")
-	}
+`, "duplicate function implementation of 'helper'")
 }
 
 // --- Fixed-point unannotated-return-type inference (TDD-00058) ---
@@ -1457,17 +1496,10 @@ console.log(outer())
 `, "7")
 }
 
-func TestE2ENestedGenericFunctionRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-function outer(): number {
-    function identity<T>(x: T): T { return x; }
-    return identity(1);
-}
-console.log(outer());
-`)
-	if err == nil {
-		t.Fatal("expected a compile error for a generic nested function declaration, got none")
-	}
+// A generic function or generator declared inside a function or block:
+// over the enclosing locals, recursive, async, with its own name and length.
+func TestE2ENestedGenericFunction(t *testing.T) {
+	assertOutput(t, "function o2(n: number) { function h<T>(x: T): [T, number] { return [x, n]; } return [h(1), h(\"z\")]; }\nconsole.log(o2(3));\n{ function g<T>(x: T): T { return x; } console.log(g(1), g(\"a\")); }\nfunction early() { const r = pick([1, 2, 3]); function pick<T>(xs: T[]): T { return xs[xs.length - 1]; } return r; }\nconsole.log(early());\nfunction rec() { function rep<T>(x: T, k: number): T[] { return k === 0 ? [] : [x, ...rep(x, k - 1)]; } return rep(\"a\", 3); }\nconsole.log(rec(), rec().length);\nasync function aw() { async function wrap<T>(x: T): Promise<T[]> { return [x]; } return await wrap(5); }\naw().then(v => console.log(\"aw\", v));\nfunction named() { function idn<T>(x: T) { return x; } return [idn.name, idn.length, typeof idn]; }\nconsole.log(named());\nfunction outerGen() { function* each<T>(xs: T[]): Generator<T> { for (const x of xs) yield x; } return [...each([1, 2]), ...each([\"a\"])]; }\nconsole.log(outerGen());\nfunction pairUp(k: number) { function pair<A, B>(a: A, b: B): [A, B, number] { return [a, b, k]; } return [pair(1, \"x\"), pair(true, [2])]; }\nconsole.log(pairUp(4));\n", "[ [ 1, 3 ], [ 'z', 3 ] ]\n1 a\n3\n[ 'a', 'a', 'a' ] 3\n[ 'idn', 1, 'function' ]\n[ 1, 2, 'a' ]\n[ [ 1, 'x', 4 ], [ true, [ 2 ], 4 ] ]\naw [ 5 ]")
 }
 
 // --- Function expressions (TDD-00060) ---
@@ -2000,8 +2032,15 @@ console.log(x);
 	if err == nil {
 		t.Fatal("expected a compile error for a duplicate top-level 'let', got none")
 	}
-	if !strings.Contains(err.Error(), "3:1: identifier 'x' has already been declared") {
-		t.Fatalf("expected the second 'let' at 3:1 to be a redeclaration, got: %v", err)
+	if !strings.Contains(err.Error(), "3:5: identifier 'x' has already been declared") {
+		t.Fatalf("expected the second 'let''s name at 3:5 to be a redeclaration, got: %v", err)
+	}
+}
+
+func TestE2EAmbientConstVarRedeclarationRejected(t *testing.T) {
+	_, err := parseAndCompileImports(t, "declare const e: string;\ndeclare var e: number;\nconsole.log(1);\n")
+	if err == nil || !strings.Contains(err.Error(), "2:13: identifier 'e' has already been declared") {
+		t.Fatalf("expected the ambient var's name at 2:13 to be a redeclaration, got: %v", err)
 	}
 }
 
@@ -2014,8 +2053,8 @@ console.log(x);
 	if err == nil {
 		t.Fatal("expected a compile error for a let/var cross-kind collision, got none")
 	}
-	if !strings.Contains(err.Error(), "3:1: identifier 'x' has already been declared") {
-		t.Fatalf("expected the 'var' at 3:1 to be a redeclaration, got: %v", err)
+	if !strings.Contains(err.Error(), "3:5: identifier 'x' has already been declared") {
+		t.Fatalf("expected the 'var' at 3:5 to be a redeclaration, got: %v", err)
 	}
 }
 
@@ -2104,7 +2143,8 @@ console.log(d, e, typeof e);
 		"43\n" +
 		"undefined undefined\n" +
 		"1 undefined undefined"
-	assertOutput(t, src, want)
+	// TypeScript rejects each read (TS2454); JavaScript runs the program.
+	mustCompileError(t, src, "4:15: variable 'r' is used before being assigned")
 	assertOutputCompatJS(t, src, want)
 }
 
@@ -2143,8 +2183,10 @@ opt(new D());
 
 func TestE2ENestedTopLevelVarReadFromFunction(t *testing.T) {
 	// A `var` inside a top-level block is module scoped: a function reads
-	// it, undefined until (and unless) its declaration runs.
-	assertSameAsNode(t, `
+	// it, undefined until (and unless) its declaration runs. TypeScript
+	// rejects the module-level reads (TS2454); JavaScript runs them.
+	mustCompileError(t, "if (Math.random() > 2) { var x = 1; }\nconsole.log(x);\n", "2:13: variable 'x' is used before being assigned")
+	assertSameAsNodeCompatJS(t, `
 if (Math.random() > 2) { var x = 1; var s = "s"; }
 function f() { return [x, s]; }
 console.log(x, s, typeof x, typeof s, f());
@@ -2160,7 +2202,10 @@ func TestE2EHoistedVarLoopAndSwitchShapes(t *testing.T) {
 	// A `for` init `var` is not widened (it runs whenever the loop is reached);
 	// a `var` in a loop body, `while`, `switch` case or `try` is. A `var`
 	// re-read inside its own loop body (`acc ?? 0`) sees its previous value.
-	assertOutput(t, `
+	// TypeScript rejects the program (TS2454, TS7022); JavaScript runs it.
+	mustCompileError(t, "function h(c: boolean) {\n  while (c) { var w = \"w\"; break; }\n  console.log(w);\n}\nh(true);\n", "3:15: variable 'w' is used before being assigned")
+	mustCompileError(t, "function h() {\n  for (var j = 0; j < 3; j++) { var acc = (acc ?? 0) + j; }\n  return acc;\n}\nh();\n", "2:37: 'acc' implicitly has type 'any'")
+	assertOutputCompatJS(t, `
 function h(c: boolean) {
   for (var i = 0; i < 2; i++) { var k = i * 2; }
   console.log(i, k);
@@ -2177,6 +2222,30 @@ function h(c: boolean) {
 h(true);
 h(false);
 `, "2 2\nw\n9\n3 3\n5\n2 2\nundefined\nundefined\n3 3\nundefined")
+}
+
+// A var every path assigns before the read, one tested before it is read,
+// or one whose type holds undefined is no TS2454.
+func TestE2EHoistedVarDefinitelyAssigned(t *testing.T) {
+	assertOutput(t, `
+function h(c: boolean) {
+  for (var i = 0; i < 2; i++) {}
+  var a: number;
+  if (c) { a = 1; } else { a = 2; }
+  var u: string | undefined;
+  var t = c ? "x" : undefined;
+  console.log(i, a, u, t);
+  for (var k = 0; k < 1; k++) { var inLoop = k; }
+  var b: number;
+  b = 3;
+  console.log(b + 1);
+}
+h(true);
+var top: number;
+function later() { return top; }
+top = 4;
+console.log(later());
+`, "2 1 undefined x\n4\n4")
 }
 
 func TestE2EBlockScopedLetRedeclarationRejected(t *testing.T) {
@@ -2404,11 +2473,11 @@ outer();
 // --- definite assignment (TDD-00071 Stage 2, caveat #1) ---
 
 func TestE2EDefiniteAssignConditionalVarAllowed(t *testing.T) {
-	// ADR-00454 policy revision: `var` has no TDZ in JS (hoisted,
-	// undefined-initialized), so a maybe-unassigned var read is legal and
-	// yields `undefined` (ADR-01057; the deterministic zero default before
-	// that); only `let`/`const` keep definite-assignment enforcement.
-	assertOutput(t, `
+	// `var` has no TDZ in JS (hoisted, undefined-initialized), so a
+	// maybe-unassigned var read yields `undefined` (ADR-01057); TypeScript
+	// reports it (TS2454), so only JavaScript runs it.
+	mustCompileError(t, "function f(c: boolean): void {\n  if (c) { var r = 42; }\n  console.log(r);\n}\nf(false);\n", "3:15: variable 'r' is used before being assigned")
+	assertOutputCompatJS(t, `
 function f(c: boolean): void {
   if (c) { var r = 42; }
   console.log(r);
@@ -3613,4 +3682,40 @@ func TestE2EAwaitOfBoxedParamCall(t *testing.T) {
 const f = async (a = 1, b = async () => await 2) => a + await b();
 f().then(console.log);
 `, "3")
+}
+
+// TS2454 follows the declared type, as tsc does: a type holding undefined
+// (directly, through an alias, or `unknown`/`void`) needs no assignment; a
+// `T | null` does.
+func TestE2EDefiniteAssignFollowsDeclaredType(t *testing.T) {
+	_, err := parseAndCompileImports(t, `
+type U = number | undefined; type W = U; type N = number | null;
+let a: U; let b: W; let c: number | undefined; let d: unknown; let e: N; let f: number | null; let g: void;
+console.log(a, b, c, d, e, f, g);
+`)
+	if err == nil {
+		t.Fatal("expected definite-assignment errors, got none")
+	}
+	msg := err.Error()
+	for _, want := range []string{"4:25: variable 'e' is used before being assigned", "4:28: variable 'f' is used before being assigned"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("missing %q in: %v", want, msg)
+		}
+	}
+	for _, name := range []string{"'a'", "'b'", "'c'", "'d'", "'g'"} {
+		if strings.Contains(msg, "variable "+name) {
+			t.Fatalf("unexpected error for %s: %v", name, msg)
+		}
+	}
+}
+
+// A function returning its own name returns itself, however many calls
+// deep (`F()()()`).
+func TestE2EFunctionReturnsItself(t *testing.T) {
+	assertOutput(t, `
+function F() { return F; }
+console.log(F() === F, F()() === F, F()()() === F, typeof F()()(), F()()()()().name);
+const f = () => f;
+console.log(f()()() === f);
+`, "true true true function F\ntrue")
 }

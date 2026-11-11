@@ -269,14 +269,13 @@ console.log(Buffer.from("ab").length)
 }
 
 func TestE2EReexportModuleOnlyExtraRejected(t *testing.T) {
-	// A module-only extra that is not yet built (legacy url.format, or
-	// perf_hooks.PerformanceObserver) keeps the standard "no exported member"
-	// rejection. (the legacy url.* functions are all implemented — Stage 4.)
+	// A name the module does not export keeps the standard "no exported
+	// member" rejection, as tsc's TS2305.
 	for _, src := range []string{
-		`import { resolveObjectURL } from 'buffer'`,
+		`import { resolveObjectUrl } from 'buffer'`,
 	} {
 		if _, err := parseAndCompileImports(t, src); err == nil {
-			t.Fatalf("expected a compile error for an unbuilt module-only extra: %s", src)
+			t.Fatalf("expected a compile error for a member the module does not export: %s", src)
 		}
 	}
 }

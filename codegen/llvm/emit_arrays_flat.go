@@ -49,31 +49,29 @@ func flatArrayElemOK(elemTy Type) bool {
 func (e *Emitter) emitFlatArrayVarDecl(v *ast.VarDeclaration, declaredTy Type) error {
 	pos := v.GetPos()
 	if !declaredTy.IsArray() || declaredTy.ElemType == nil {
-		return fmt.Errorf("%d:%d: @value applies to an array declaration (e.g. `/** @value */ const ps: Point[] = [...]`)", pos.Line, pos.Col)
+		return internalAt(pos, "@value applies to an array declaration (e.g. `/** @value */ const ps: Point[] = [...]`)")
 	}
 	elemTy := *declaredTy.ElemType
 	if !flatArrayElemOK(elemTy) {
-		return fmt.Errorf("%d:%d: @value requires a fixed-shape object element type (an interface/object shape) — class instances, tuples, nested arrays, and dynamic values keep the default layout", pos.Line, pos.Col)
+		return internalAt(pos, "@value requires a fixed-shape object element type (an interface/object shape) — class instances, tuples, nested arrays, and dynamic values keep the default layout")
 	}
 	if e.promotedGlobalDecls[v] {
-		return fmt.Errorf("%d:%d: a @value array read by other functions is not supported yet — declare it inside the function that uses it", pos.Line, pos.Col)
+		return internalAt(pos, "a @value array read by other functions is not supported yet — declare it inside the function that uses it")
 	}
 	lit, ok := v.Init.(*ast.ArrayLiteral)
 	if !ok {
-		return fmt.Errorf("%d:%d: a @value array must be initialized with an array literal", pos.Line, pos.Col)
+		return internalAt(pos, "a @value array must be initialized with an array literal")
 	}
 	for _, el := range lit.Elements {
 		if _, isSpread := el.(*ast.SpreadElement); isSpread {
-			return fmt.Errorf("%d:%d: a spread element is not supported in a @value array literal", pos.Line, pos.Col)
+			return internalAt(pos, "a spread element is not supported in a @value array literal")
 		}
 	}
 
 	size := elemTy.StructSize()
 	n := int64(len(lit.Elements))
-	e.ensureMalloc()
-	e.ensureMemcpy()
 	dataReg := e.freshReg()
-	e.heapMallocInto(dataReg, fmt.Sprint(maxInt64(n*size, 1)))
+	e.heapMallocInto(dataReg, allocElems, fmt.Sprint(maxInt64(n*size, 1)))
 	structIR := elemTy.StructIR()
 	for i, el := range lit.Elements {
 		val, err := e.emitExprWithObjectHint(el, elemTy)
@@ -81,18 +79,18 @@ func (e *Emitter) emitFlatArrayVarDecl(v *ast.VarDeclaration, declaredTy Type) e
 			return err
 		}
 		if !val.Ty.IsObject() {
-			return fmt.Errorf("%d:%d: @value array element %d is not an object value", pos.Line, pos.Col, i)
+			return internalAt(pos, "@value array element %d is not an object value", i)
 		}
 		slot := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", slot, structIR, dataReg, i))
-		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", slot, val.Ref, size))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %d", slot, structIR, dataReg, i))
+		e.emitInstr(fmt.Sprintf("call void @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %d)", slot, val.Ref, size))
 	}
 
 	flatTy := FlatArrayType(elemTy)
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	hdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", hdr, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", hdr, slot))
 	e.define(v.Name, Symbol{Ptr: slot, Ty: flatTy, IsConst: v.Kind == "const"})
 	return nil
 }
@@ -101,37 +99,37 @@ func (e *Emitter) emitFlatArrayVarDecl(v *ast.VarDeclaration, declaredTy Type) e
 // pointer (a view — mutating the binding's fields mutates the array).
 func (e *Emitter) emitForOfFlatArray(s *ast.ForOfStatement, arrTy Type, condL, bodyL, incL, endL string) error {
 	if s.VarName == "" {
-		return fmt.Errorf("%d:%d: destructuring a @value array element in for...of is not supported — bind a name and read its fields", s.GetPos().Line, s.GetPos().Col)
+		return internalAt(s.GetPos(), "destructuring a @value array element in for...of is not supported — bind a name and read its fields")
 	}
 	elemTy := *arrTy.ElemType
 	sym, found := e.lookup(mustIdentName(s.Iterable))
 	if !found {
-		return fmt.Errorf("%d:%d: undefined variable", s.GetPos().Line, s.GetPos().Col)
+		return internalAt(s.GetPos(), "undefined variable")
 	}
 	dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxPtr))
 	elemSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", elemSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", elemSlot))
 	e.define(s.VarName, Symbol{Ptr: elemSlot, Ty: elemTy, IsConst: s.Kind == "const"})
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	e.emitSafepoint()
 	idxV, lenV, cond := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxV, idxPtr))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", lenV, lenSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxV, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", lenV, lenSlot))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", cond, idxV, lenV))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", cond, bodyL, endL))
 
 	e.emitLabel(bodyL)
 	idx2, data, gep := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx2, idxPtr))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, dataSlot))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.StructIR(), data, idx2))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", gep, elemSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idx2, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, dataSlot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.StructIR(), data, idx2))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", gep, elemSlot))
 	if err := e.emitForOfBody(s); err != nil {
 		return err
 	}
@@ -139,9 +137,9 @@ func (e *Emitter) emitForOfFlatArray(s *ast.ForOfStatement, arrTy Type, condL, b
 
 	e.emitLabel(incL)
 	idx3, idx4 := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idx3, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idx3, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idx4, idx3))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idx4, idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idx4, idxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(endL)
@@ -156,11 +154,11 @@ func (e *Emitter) emitFlatArrayPush(arrTy Type, mem *ast.MemberExpression, args 
 	elemTy := *arrTy.ElemType
 	id, ok := mem.Object.(*ast.Identifier)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: push on a @value array requires a named array variable", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "push on a @value array requires a named array variable")
 	}
 	sym, found := e.lookup(id.Name)
 	if !found {
-		return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
+		return Value{}, internalAt(pos, "undefined variable '%s'", id.Name)
 	}
 	dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 	size := elemTy.StructSize()
@@ -173,31 +171,29 @@ func (e *Emitter) emitFlatArrayPush(arrTy Type, mem *ast.MemberExpression, args 
 			return Value{}, err
 		}
 		if !v.Ty.IsObject() {
-			return Value{}, fmt.Errorf("%d:%d: push on a @value array takes object values of its element type", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "push on a @value array takes object values of its element type")
 		}
 		vals = append(vals, v)
 	}
 
 	curPtr, curLen := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curPtr, dataSlot))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", curLen, lenSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", curPtr, dataSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", curLen, lenSlot))
 	if len(vals) == 0 {
 		return e.countToNumber(Value{Ref: curLen, Ty: TypeI64}), nil
 	}
 
-	e.ensureRealloc()
-	e.ensureMemcpy()
 	newLen, newBytes, newPtr := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, curLen, len(vals)))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", newBytes, newLen, size))
-	e.heapReallocInto(newPtr, curPtr, newBytes)
+	e.heapReallocInto(newPtr, allocElems, curPtr, newBytes)
 	for i, v := range vals {
 		slotIdx, slot := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, curLen, i))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", slot, structIR, newPtr, slotIdx))
-		e.emitInstr(fmt.Sprintf("call void @memcpy(ptr %s, ptr %s, i64 %d)", slot, v.Ref, size))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", slot, structIR, newPtr, slotIdx))
+		e.emitInstr(fmt.Sprintf("call void @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %d)", slot, v.Ref, size))
 	}
-	e.heapStore("ptr", newPtr, dataSlot, 8)
+	e.heapStore(irPtr, newPtr, dataSlot, 8)
 	e.heapStore("i64", newLen, lenSlot, 8)
 	return e.countToNumber(Value{Ref: newLen, Ty: TypeI64}), nil
 }

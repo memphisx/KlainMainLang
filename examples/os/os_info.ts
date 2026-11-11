@@ -31,7 +31,7 @@ console.log(loopbacks > 0); // true
 // process.env as a whole object — enumeration, spread, entries.
 process.env.OS_INFO_EXAMPLE = "on";
 console.log(Object.keys(process.env).includes("OS_INFO_EXAMPLE")); // true
-const childEnv = { ...process.env, NODE_ENV: "production" };
+const childEnv: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: "production" };
 console.log(childEnv.OS_INFO_EXAMPLE, childEnv.NODE_ENV); // on production
 for (const [k, v] of Object.entries(process.env)) {
   if (k === "OS_INFO_EXAMPLE") console.log(k, v); // OS_INFO_EXAMPLE on

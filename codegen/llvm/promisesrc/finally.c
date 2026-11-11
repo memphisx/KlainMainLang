@@ -32,7 +32,7 @@ static void finally_step(void *envp) {
 
 void __kml_promise_finally_wait(void *r, void *q, i64 res, i64 v0, i64 v1) {
     finally_env *env = kml_alloc(KML_HEAP_WORDS, sizeof *env);
-    void **clo = kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    void **clo = kml_closure_alloc(2 * sizeof(void *));
     env->q = q;
     env->res = res;
     env->v0 = v0;

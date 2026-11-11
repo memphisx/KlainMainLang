@@ -4,6 +4,7 @@
 // Buffer's writable poolSize.
 
 import { NodeTypeError } from './internal_errors';
+import { Blob, _kmlGetDataObject } from './kml_blob';
 
 export const kMaxLength = 9007199254740991;
 export const kStringMaxLength = 536870888;
@@ -91,4 +92,19 @@ export function transcode(source: Uint8Array, fromEnc: BufferEncoding, toEnc: Bu
 // Deprecated (DEP0030): Buffer.allocUnsafeSlow.
 export function SlowBuffer(size: number): Buffer {
     return Buffer.allocUnsafeSlow(size);
+}
+
+// The Blob an object URL (URL.createObjectURL) names, or undefined: a new
+// Blob over the same bytes and type, as Node's createBlob of the handle.
+export function resolveObjectURL(url: string): Blob | undefined {
+    const text = `${url}`;
+    try {
+        const split = new URL(text).pathname.split(':');
+        if (split.length !== 2 || split[0] !== 'nodedata') return undefined;
+        const blob = _kmlGetDataObject(split[1]);
+        if (blob === undefined) return undefined;
+        return new Blob([blob], { type: blob.type });
+    } catch (e) {
+        return undefined;
+    }
 }

@@ -59,6 +59,10 @@ func (e *Emitter) jsCollectProtoCtors(prog *ast.Program) {
 		if nx, ok := n.(*ast.NewExpression); ok && fnDecls[protoCtorCallee(nx)] != nil {
 			e.jsProtoCtor[protoCtorCallee(nx)] = true
 		}
+		// `class C extends F`: C's super() constructs through F.
+		if cd, ok := n.(*ast.ClassDeclaration); ok && !cd.BaseQualified && fnDecls[cd.BaseClass] != nil && e.compatJS() {
+			e.jsProtoCtor[cd.BaseClass] = true
+		}
 		return true
 	})
 	if !e.compatJS() {
@@ -94,16 +98,24 @@ func (e *Emitter) jsCollectProtoCtors(prog *ast.Program) {
 // "use strict" directive, not .mjs.
 func (e *Emitter) sloppyFiles(prog *ast.Program) map[string]bool {
 	strict := map[string]bool{}
-	first := map[string]bool{}
+	first, past := map[string]bool{}, map[string]bool{}
 	for _, s := range prog.Body {
 		f := prog.StmtFiles[s]
 		switch st := s.(type) {
 		case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
 			strict[f] = true
 		case *ast.ExpressionStatement:
-			if lit, ok := st.Expr.(*ast.StringLiteral); ok && lit.Value == "use strict" && !first[f] {
-				strict[f] = true
+			// (A directive anywhere in the file's prologue: its leading
+			// string-literal statements.)
+			if lit, ok := st.Expr.(*ast.StringLiteral); ok && !past[f] {
+				if lit.Value == "use strict" && lit.Plain {
+					strict[f] = true
+				}
+				break
 			}
+			past[f] = true
+		default:
+			past[f] = true
 		}
 		first[f] = true
 	}
@@ -115,6 +127,57 @@ func (e *Emitter) sloppyFiles(prog *ast.Program) map[string]bool {
 		}
 	}
 	return out
+}
+
+// strictFuncIn reports a function in a sloppy file that is strict code all
+// the same: it, or a function or class around it, has a "use strict"
+// directive (a class body is strict). Its `this` is the caller's, never
+// the global object.
+func (e *Emitter) strictFuncIn(fn ast.Node) bool {
+	if e.strictFuncs == nil {
+		e.strictFuncs = map[ast.Node]bool{}
+		if e.prog != nil {
+			var walk func(n ast.Node, strict bool)
+			walk = func(root ast.Node, strict bool) {
+				ast.Inspect(root, func(n ast.Node) bool {
+					switch x := n.(type) {
+					case *ast.ClassDeclaration, *ast.ClassExpression:
+						if n != root && !strict {
+							walk(n, true)
+							return false
+						}
+					case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction:
+						var body []ast.Statement
+						switch f := x.(type) {
+						case *ast.FunctionDeclaration:
+							if f.Body != nil {
+								body = f.Body.Body
+							}
+						case *ast.FunctionExpression:
+							if f.Body != nil {
+								body = f.Body.Body
+							}
+						case *ast.ArrowFunction:
+							if f.Block != nil {
+								body = f.Block.Body
+							}
+						}
+						own := strict || hasUseStrict(body)
+						if own {
+							e.strictFuncs[n] = true
+						}
+						if n != root && own && !strict {
+							walk(n, true)
+							return false
+						}
+					}
+					return true
+				})
+			}
+			walk(e.prog, false)
+		}
+	}
+	return e.strictFuncs[fn]
 }
 
 // sloppyWriteSites records, for each assignment, update and delete in a
@@ -165,22 +228,7 @@ func sloppyWriteSites(prog *ast.Program, sloppy map[string]bool) map[ast.Node]bo
 }
 
 // hasUseStrict reports a body whose directive prologue has "use strict".
-func hasUseStrict(body []ast.Statement) bool {
-	for _, st := range body {
-		es, ok := st.(*ast.ExpressionStatement)
-		if !ok {
-			return false
-		}
-		lit, ok := es.Expr.(*ast.StringLiteral)
-		if !ok {
-			return false
-		}
-		if lit.Value == "use strict" {
-			return true
-		}
-	}
-	return false
-}
+func hasUseStrict(body []ast.Statement) bool { return ast.HasUseStrictDirective(body) }
 
 // ensureProtoBag emits (once per constructor) the lazily-initialized
 // module global holding F's prototype bag, and returns the getter's name.
@@ -195,23 +243,46 @@ func (e *Emitter) ensureProtoBag(ctorName string) string {
 		return getter
 	}
 	e.protoBagEmitted[ctorName] = true
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	global := "@__kml_proto_" + ctorName
-	e.emitGlobal(fmt.Sprintf("%s = internal %sglobal ptr null, align 8", global, e.isolateTLS()))
-	e.emitGlobal(fmt.Sprintf(`
-define ptr %s() {
-entry:
-  %%cur = load ptr, ptr %s, align 8
-  %%isnull = icmp eq ptr %%cur, null
-  br i1 %%isnull, label %%init, label %%have
-init:
-  %%bag = call ptr @__kml_dynobj_new()
-  store ptr %%bag, ptr %s, align 8
-  br label %%have
-have:
-  %%out = load ptr, ptr %s, align 8
-  ret ptr %%out
-}`, getter, global, global, global))
+	e.emitGlobal(fmt.Sprintf("%s = internal %sglobal "+irPtr+" null, align 8", global, e.isolateTLS()))
+	restore := e.beginDetachedFunc()
+	cur, isNull, bag, out := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	initL, haveL := e.freshLabel("init"), e.freshLabel("have")
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", cur, global))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, cur))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, initL, haveL))
+	e.emitLabel(initL)
+	// A function's `prototype` is the one its value reads (`(F as any).prototype`).
+	_, _, isFn := e.resolveFuncRef(ctorName)
+	var box Value
+	if isFn {
+		// The function's value as its name reads it anywhere, so its bag
+		// and identity are the ones every other reference sees.
+		v, err := e.emitExpr(ast.NewIdentifier(ctorName, ast.Pos{}))
+		if err == nil {
+			box, err = e.emitBoxValue(v)
+		}
+		isFn = err == nil && box.Ty.IsDynamic()
+	}
+	if isFn {
+		e.ensureFnMeta()
+		e.declareFn("__kml_fn_ctor_proto", "declare "+irPtr+" @__kml_fn_ctor_proto(i64)")
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_ctor_proto(i64 %s)", bag, box.Ref))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", bag, global))
+	e.emitTerminator("br label %" + haveL)
+	e.emitLabel(haveL)
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, global))
+	e.emitTerminator("ret " + irPtr + " " + out)
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc(irPtr+" "+getter+"()", body)
 	return getter
 }
 
@@ -219,7 +290,7 @@ have:
 func (e *Emitter) emitProtoBagRead(ctorName string) Value {
 	getter := e.ensureProtoBag(ctorName)
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr %s()", bag, getter))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", bag, getter))
 	return e.emitDynObjBox(bag)
 }
 
@@ -235,14 +306,25 @@ func (e *Emitter) emitProtoBagWrite(ctorName string, rhs Value, pos ast.Pos) (Va
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr @__kml_proto_%s, align 8", ptrReg, ctorName))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_proto_%s, align 8", ptrReg, ctorName))
+	// The function's own `prototype` property is the same object: a read
+	// through its value (`f.prototype`, Reflect.construct's newTarget)
+	// sees what was assigned.
+	if _, _, isFn := e.resolveFuncRef(ctorName); isFn {
+		if v, err := e.emitExpr(ast.NewIdentifier(ctorName, pos)); err == nil {
+			if fb, err := e.emitBoxValue(v); err == nil && fb.Ty.IsDynamic() {
+				_, payload := e.emitUnboxTagPayload(fb)
+				bag := e.emitFnPropsBag(e.emitIntToPtr(payload))
+				e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", bag, e.internString("prototype"), boxed.Ref))
+			}
+		}
+	}
 	return boxed, nil
 }
 
 // emitProtoCtorArgs emits the typed argument list for a constructor-function
 // invocation (`new F(...)` / `Base.call(this, ...)`), per its registered
-// sig: scalar/string/object/dynamic params (array and nullable-scalar
-// params are rejected cleanly). As in JavaScript, a missing argument is
+// sig. As in JavaScript, a missing argument is
 // undefined (the stand-in a call's omitted argument gets) and an extra one
 // is evaluated, then dropped.
 func (e *Emitter) emitProtoCtorArgs(name string, sig FuncSig, args []ast.Expression, pos ast.Pos) ([]string, error) {
@@ -261,12 +343,35 @@ func (e *Emitter) emitProtoCtorArgs(name string, sig FuncSig, args []ast.Express
 				return nil, err
 			}
 			header, lenReg := e.packArrayArg(lit, e.convert(val, pty), pty)
-			parts = append(parts, "ptr "+header, "i64 "+lenReg)
+			parts = append(parts, irPtr+" "+header, "i64 "+lenReg)
 			args = args[:min(len(args), i)]
 			break
 		}
 		if pty.IsArray() || isNullableScalar(pty) {
-			return nil, fmt.Errorf("%d:%d: an array/nullable parameter on a prototype constructor is not supported yet", pos.Line, pos.Col)
+			// An array (its header and length) or a `T | undefined` (its
+			// aggregate); a missing argument is undefined.
+			var a ast.Expression
+			if i < len(args) {
+				a = args[i]
+			} else {
+				a = ast.NewNullLiteral(true, pos)
+				e.markOmittedArg(a)
+			}
+			if !pty.IsArray() {
+				agg, err := e.emitNullableScalarArg(a, pty)
+				if err != nil {
+					return nil, err
+				}
+				parts = append(parts, agg)
+				continue
+			}
+			val, err := e.emitExprWithObjectHint(a, pty)
+			if err != nil {
+				return nil, err
+			}
+			header, lenReg := e.packArrayArg(a, e.convert(val, pty), pty)
+			parts = append(parts, irPtr+" "+header, "i64 "+lenReg)
+			continue
 		}
 		if i >= len(args) {
 			if pty.IsDynamic() {
@@ -282,7 +387,7 @@ func (e *Emitter) emitProtoCtorArgs(name string, sig FuncSig, args []ast.Express
 			return nil, err
 		}
 		if pty.Inferred && !isSafeNumericArg(val.Ty) {
-			return nil, fmt.Errorf("%d:%d: constructor parameter %d of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", a.GetPos().Line, a.GetPos().Col, i+1, name)
+			return nil, internalAt(a.GetPos(), "checker-rejected: constructor parameter %d of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here", i+1, name)
 		}
 		if pty.IsDynamic() {
 			b, err := e.emitBoxValue(val)
@@ -310,17 +415,36 @@ func (e *Emitter) emitProtoCtorArgs(name string, sig FuncSig, args []ast.Express
 func (e *Emitter) emitProtoCtorNew(ex *ast.NewExpression) (Value, error) {
 	llvmName, sig, ok := e.resolveFuncRef(ex.ClassName)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: unknown constructor function '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
+		return Value{}, internalAt(ex.GetPos(), "unknown constructor function '%s'", ex.ClassName)
 	}
-	e.ensureDynObj()
-	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	getter := e.ensureProtoBag(ex.ClassName)
 	proto := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr %s()", proto, getter))
-	ok2 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_set_proto(ptr %s, ptr %s)", ok2, bag, proto))
-	thisBox := e.emitDynObjBox(bag)
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", proto, getter))
+	var thisBox Value
+	if len(e.callOnClasses()) > 0 {
+		// A prototype chain reaching a class whose constructor runs on
+		// `this` (`Base.call(this)`): an instance of that class.
+		e.declareFn("__kml_ctor_this", "declare i64 @__kml_ctor_this("+irPtr+")")
+		t := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ctor_this("+irPtr+" %s)", t, proto))
+		thisBox = Value{Ref: t, Ty: TypeAny}
+	} else {
+		bag := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
+		ok2 := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_set_proto("+irPtr+" %s, "+irPtr+" %s)", ok2, bag, proto))
+		thisBox = e.emitDynObjBox(bag)
+	}
+	// new.target is the function itself.
+	if fv, err := e.emitExpr(ast.NewIdentifier(ex.ClassName, ex.GetPos())); err == nil {
+		if fb, err := e.emitBoxValue(fv); err == nil {
+			e.emitNewTargetPending(fb.Ref)
+		}
+	}
 
 	r, err := e.emitProtoCtorInvoke(ex.ClassName, llvmName, sig, thisBox, ex.Args, ex.GetPos())
 	if err != nil {
@@ -349,11 +473,12 @@ func (e *Emitter) emitProtoCtorNew(ex *ast.NewExpression) (Value, error) {
 // caller's own receiver.
 func (e *Emitter) emitProtoCtorChainCall(ctorName string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: %s.call needs a `this` argument", pos.Line, pos.Col, ctorName)
+		// `F.call()`: this is undefined.
+		args = []ast.Expression{ast.NewNullLiteral(true, pos)}
 	}
 	llvmName, sig, ok := e.resolveFuncRef(ctorName)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: unknown constructor function '%s'", pos.Line, pos.Col, ctorName)
+		return Value{}, internalAt(pos, "unknown constructor function '%s'", ctorName)
 	}
 	thisVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -372,6 +497,19 @@ func (e *Emitter) emitProtoCtorChainCall(ctorName string, args []ast.Expression,
 // emitProtoCtorInvoke runs constructor function name's body with the boxed
 // receiver thisBox and returns its result.
 func (e *Emitter) emitProtoCtorInvoke(name, llvmName string, sig FuncSig, thisBox Value, args []ast.Expression, pos ast.Pos) (Value, error) {
+	{
+		as := e.protoCtorArgSig(name, sig)
+		regular := len(as.ParamTypes)
+		if as.HasRest {
+			regular--
+		}
+		split, done, err := e.splitSpreadArgs(args, as.HasRest, regular, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		defer done()
+		args = split
+	}
 	parts, err := e.emitProtoCtorArgs(name, e.protoCtorArgSig(name, sig), args, pos)
 	if err != nil {
 		return Value{}, err
@@ -399,10 +537,6 @@ func (e *Emitter) emitProtoCtorInvoke(name, llvmName string, sig FuncSig, thisBo
 // emitProtoCtorPlainCall is `F(args)` for a constructor function F: its
 // body run with globalThis as `this`, as a sloppy-mode call is.
 func (e *Emitter) emitProtoCtorPlainCall(name string, args []ast.Expression, pos ast.Pos) (Value, error) {
-	llvmName, sig, ok := e.resolveFuncRef(name)
-	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: unknown constructor function '%s'", pos.Line, pos.Col, name)
-	}
 	gb := Value{Ref: strconv.FormatInt(nbUndefined, 10), Ty: TypeAny}
 	if key, ok := namespaceValueExport("globalThis"); ok && e.libExports[key] != "" {
 		g, err := e.emitExpr(ast.NewIdentifier("globalThis", pos))
@@ -413,7 +547,17 @@ func (e *Emitter) emitProtoCtorPlainCall(name string, args []ast.Expression, pos
 			return Value{}, err
 		}
 	}
-	return e.emitProtoCtorInvoke(name, llvmName, sig, gb, args, pos)
+	return e.emitProtoCtorRun(name, gb, args, pos)
+}
+
+// emitProtoCtorRun runs constructor function name's body with thisBox as
+// `this` on args.
+func (e *Emitter) emitProtoCtorRun(name string, thisBox Value, args []ast.Expression, pos ast.Pos) (Value, error) {
+	llvmName, sig, ok := e.resolveFuncRef(name)
+	if !ok {
+		return Value{}, internalAt(pos, "unknown constructor function '%s'", name)
+	}
+	return e.emitProtoCtorInvoke(name, llvmName, sig, thisBox, args, pos)
 }
 
 // emitProtoCtorInstanceOf is `left instanceof F` for a constructor function
@@ -431,23 +575,62 @@ func (e *Emitter) emitProtoCtorInstanceOf(left ast.Expression, ctorName string) 
 	tag, payload := e.emitUnboxTagPayload(boxed)
 	out := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", out))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", out))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", out))
 	doneL := e.freshLabel("protoinst.done")
 	objL, noL := e.emitTagCheck(tag, kmlTagDynObject, "protoinst.obj")
 	e.emitLabel(objL)
 	obj, bag, has, r := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", obj, payload))
-	e.emitInstr(fmt.Sprintf("%s = call ptr %s()", bag, getter))
-	e.declareFn("__kml_dynobj_chain_has", "declare i64 @__kml_dynobj_chain_has(ptr, ptr)")
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_chain_has(ptr %s, ptr %s)", has, obj, bag))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, obj, payload))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", bag, getter))
+	e.declareFn("__kml_dynobj_chain_has", "declare i64 @__kml_dynobj_chain_has("+irPtr+", "+irPtr+")")
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_chain_has("+irPtr+" %s, "+irPtr+" %s)", has, obj, bag))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", r, has))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", r, out))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", r, out))
 	e.emitTerminator("br label %" + doneL)
 	e.emitLabel(noL)
+	{
+		// A class instance (`class C extends F`, or one given F.prototype's
+		// chain as its prototype): its prototype's chain.
+		stL, noStL := e.emitTagCheck(tag, kmlTagObject, "protoinst.static")
+		e.emitLabel(stL)
+		proto := e.emitBuiltinProtoOf(e.emitIntToPtr(payload))
+		ptag, ppay := e.emitUnboxTagPayload(Value{Ref: proto, Ty: TypeAny})
+		pbL, noPbL := e.emitTagCheck(ptag, kmlTagDynObject, "protoinst.protobag")
+		e.emitLabel(pbL)
+		pb, bag2, eq, has2, r2 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, pb, ppay))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", bag2, getter))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", eq, pb, bag2))
+		e.declareFn("__kml_dynobj_chain_has", "declare i64 @__kml_dynobj_chain_has("+irPtr+", "+irPtr+")")
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_chain_has("+irPtr+" %s, "+irPtr+" %s)", has2, pb, bag2))
+		either := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", r2, has2))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, eq, r2))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", either, out))
+		e.emitTerminator("br label %" + doneL)
+		e.emitLabel(noPbL)
+		e.emitTerminator("br label %" + doneL)
+		e.emitLabel(noStL)
+	}
+	{
+		// An array given a prototype whose chain holds F.prototype.
+		arrL, noArrL := e.emitTagCheck(tag, kmlTagArray, "protoinst.arr")
+		e.emitLabel(arrL)
+		e.ensureShapeRuntime()
+		hdr, bag3, has3, r3 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, e.emitIntToPtr(payload)))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", bag3, getter))
+		e.declareFn("__kml_array_chain_has", "declare i64 @__kml_array_chain_has("+irPtr+", "+irPtr+")")
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_array_chain_has("+irPtr+" %s, "+irPtr+" %s)", has3, hdr, bag3))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", r3, has3))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", r3, out))
+		e.emitTerminator("br label %" + doneL)
+		e.emitLabel(noArrL)
+	}
 	e.emitTerminator("br label %" + doneL)
 	e.emitLabel(doneL)
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, out))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", res, out))
 	return Value{Ref: res, Ty: TypeBool}, nil
 }
 
@@ -462,7 +645,7 @@ func (e *Emitter) seedProtoCtorConstructors() error {
 		names = append(names, n)
 	}
 	sort.Strings(names)
-	e.declareFn("__kml_dynobj_set_hidden", "declare void @__kml_dynobj_set_hidden(ptr, ptr, i64)")
+	e.declareFn("__kml_dynobj_set_hidden", "declare void @__kml_dynobj_set_hidden("+irPtr+", "+irPtr+", i64)")
 	for _, n := range names {
 		fv, err := e.emitExpr(ast.NewIdentifier(n, ast.Pos{}))
 		if err != nil {
@@ -473,8 +656,8 @@ func (e *Emitter) seedProtoCtorConstructors() error {
 			return err
 		}
 		bag := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr %s()", bag, e.ensureProtoBag(n)))
-		e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set_hidden(ptr %s, ptr %s, i64 %s)", bag, e.internString("constructor"), fb.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", bag, e.ensureProtoBag(n)))
+		e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_set_hidden("+irPtr+" %s, "+irPtr+" %s, i64 %s)", bag, e.internString("constructor"), fb.Ref))
 	}
 	return nil
 }
@@ -507,4 +690,23 @@ func (e *Emitter) protoCtorArgSig(name string, sig FuncSig) FuncSig {
 		sig.ParamTypes = sig.ParamTypes[1:]
 	}
 	return sig
+}
+
+// emitNewTargetPending leaves boxed v as the new.target of the next
+// prototype constructor entered (its entry takes it).
+func (e *Emitter) emitNewTargetPending(v string) {
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" @__kml_newtarget_pending, align 8", v))
+}
+
+// emitNewTargetFromInstance leaves an instance's class (`this.constructor`,
+// the derived constructor's new.target) as the pending new.target of the
+// constructor function its super() runs.
+func (e *Emitter) emitNewTargetFromInstance(tb Value, pos ast.Pos) {
+	c, err := e.emitExpr(ast.NewMemberExpression(e.bindValue(tb, pos), "constructor", pos))
+	if err != nil || e.blockDone {
+		return
+	}
+	if cb, err := e.emitBoxValue(c); err == nil {
+		e.emitNewTargetPending(cb.Ref)
+	}
 }

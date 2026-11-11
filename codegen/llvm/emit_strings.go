@@ -29,7 +29,7 @@ func (e *Emitter) toNumberArgRef(v Value, target Type, pos ast.Pos, what string)
 
 // isStringTy returns true for a plain string (ptr, not object/array/closure).
 func isStringTy(ty Type) bool {
-	return ty.IR == "ptr" && !ty.IsObject() && !ty.IsArray() && !ty.IsFlatArray() && !ty.IsFunc() && !ty.IsBigInt()
+	return ty.IR == irPtr && !ty.IsObject() && !ty.IsArray() && !ty.IsFlatArray() && !ty.IsFunc() && !ty.IsBigInt()
 }
 
 // stringFlags are the Type flags a string itself can carry; every other
@@ -76,11 +76,11 @@ func isForOfStringTy(ty Type) bool {
 // isNumberTy returns true for a plain numeric scalar (any int/float width,
 // or bool) — used to gate Number.prototype method dispatch (toString(radix)
 // etc.) to a receiver that's actually a number, not e.g. a string (also
-// IR=="ptr"-free of the object/array/func flags, so not caught by
+// IR==irPtr-free of the object/array/func flags, so not caught by
 // isStringTy's negative check alone) or a Date (IR=="i64" like a plain
 // number, but IsDate-tagged and meant to go through Date's own dispatch).
 func isNumberTy(ty Type) bool {
-	return ty.IR != "ptr" && !ty.IsDate()
+	return ty.IR != irPtr && !ty.IsDate()
 }
 
 // emitStringNullToLiteral substitutes the interned "null" string for v when
@@ -108,11 +108,11 @@ func (e *Emitter) emitStringNullToLiteral(v Value) Value {
 	}
 	isNull := e.freshReg()
 	safe := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", safe, isNull, e.internString(lit), v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", safe, isNull, e.internString(lit), v.Ref))
 	if tri {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, e.isNullRef(v.Ref), e.internString("null"), safe))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, e.isNullRef(v.Ref), e.internString("null"), safe))
 		safe = r
 	}
 	return Value{Ref: safe, Ty: TypePtr}
@@ -133,7 +133,7 @@ func (e *Emitter) emitStringNullToLiteral(v Value) Value {
 func (e *Emitter) emitStrLenHeader(ref string) string {
 	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", r, ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", r, ref))
 	return r
 }
 
@@ -149,7 +149,7 @@ func (e *Emitter) emitStrLenHeader(ref string) string {
 func (e *Emitter) emitStringAlloc(dataLenReg string) string {
 	e.ensureStrHeaderRuntime()
 	dataPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_alloc(i64 %s)", dataPtr, dataLenReg))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 %s)", dataPtr, dataLenReg))
 	return dataPtr
 }
 
@@ -166,13 +166,11 @@ func (e *Emitter) emitStringScratch(capBytes int) string {
 // capacity expression, for producers whose scratch size is only known at runtime.
 func (e *Emitter) emitStringScratchReg(capExpr string) string {
 	e.ensureStrHeaderRuntime()
-	e.ensureMalloc()
-	sz := e.freshReg()
-	base := e.freshReg()
-	dataPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 8", sz, capExpr))
-	e.heapMallocInto(base, sz)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", dataPtr, base))
+	// Through the one string allocator: capExpr counts the NUL, which
+	// __kml_str_alloc adds itself.
+	n, dataPtr := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", n, capExpr))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 %s)", dataPtr, n))
 	return dataPtr
 }
 
@@ -181,7 +179,7 @@ func (e *Emitter) emitStringScratchReg(capExpr string) string {
 // strlen is needed, and an embedded NUL in the content is preserved).
 func (e *Emitter) emitStringSetLen(dataPtr, lenReg string) {
 	hp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, dataPtr))
+	e.emitPrefixWordAddr(hp, dataPtr)
 	e.heapStore("i64", lenReg, hp, 8)
 }
 
@@ -190,11 +188,10 @@ func (e *Emitter) emitStringSetLen(dataPtr, lenReg string) {
 // contains an embedded NUL, so strlen is the true length). Pairs with
 // emitStringScratch.
 func (e *Emitter) emitStringFinalizeLen(dataPtr string) {
-	e.ensureStrlen()
 	l := e.freshReg()
 	hp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen(ptr %s)", l, dataPtr))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, dataPtr))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @strlen("+irPtr+" %s)", l, dataPtr))
+	e.emitPrefixWordAddr(hp, dataPtr)
 	e.heapStore("i64", l, hp, 8)
 }
 
@@ -203,19 +200,17 @@ func (e *Emitter) emitStringFinalizeLen(dataPtr string) {
 // corrupt the heap (interior free).
 func (e *Emitter) emitStringFree(ptrRef string) {
 	e.ensureStrHeaderRuntime()
-	e.emitInstr(fmt.Sprintf("call void @__kml_str_free(ptr %s)", ptrRef))
+	e.emitInstr(fmt.Sprintf("call void @__kml_str_free("+irPtr+" %s)", ptrRef))
 }
 
 func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
-	e.ensureStrlen()
-	e.ensureMemcpy()
 	left = e.emitStringNullToLiteral(left)
 	right = e.emitStringNullToLiteral(right)
 	// One runtime call (strheader.c): inline, the lengths, allocation,
 	// copies and surrogate join were 18 instructions and two blocks per `+`.
 	e.ensureStrHeaderRuntime()
 	buf := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_concat(ptr %s, ptr %s)", buf, left.Ref, right.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_concat("+irPtr+" %s, "+irPtr+" %s)", buf, left.Ref, right.Ref))
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
 
@@ -224,11 +219,10 @@ func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
 // folds to a length test and a few loads; the memcmp length is the constant
 // operand's when there is one.
 func (e *Emitter) emitStrEq(a, b string) string {
-	e.ensureMemcmp()
 	lenOf := func(p string) string {
 		hp, h, n := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, p))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, hp))
+		e.emitPrefixWordAddr(hp, p)
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, hp))
 		e.emitInstr(fmt.Sprintf("%s = and i64 %s, 4294967295", n, h))
 		return n
 	}
@@ -242,8 +236,8 @@ func (e *Emitter) emitStrEq(a, b string) string {
 	// The same pointer is equal; nullRef (a `string | null`'s null, an
 	// empty cell, TDD-00257) equals nothing else, "" included.
 	same, na, nb, anyNull, nn, leq0, leq := e.freshReg(), e.isNullRef(a), e.isNullRef(b), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", same, a, b))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", same, slot))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", same, a, b))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", same, slot))
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", anyNull, na, nb))
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", nn, anyNull))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", leq0, la, lb))
@@ -252,13 +246,13 @@ func (e *Emitter) emitStrEq(a, b string) string {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", leq, bytes, done))
 	e.emitLabel(bytes)
 	mc, z := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @memcmp(ptr %s, ptr %s, i64 %s)", mc, a, b, n))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @memcmp("+irPtr+" %s, "+irPtr+" %s, i64 %s)", mc, a, b, n))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", z, mc))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", z, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", z, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", done))
 	e.emitLabel(done)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
 	return r
 }
 
@@ -280,13 +274,13 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 		e.ensureStrHeaderRuntime()
 		lNull := e.freshReg()
 		rNull := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", lNull, left.Ref))
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", rNull, right.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", lNull, left.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", rNull, right.Ref))
 		empty := e.internString("")
 		lSafe := e.freshReg()
 		rSafe := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", lSafe, lNull, empty, left.Ref))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", rSafe, rNull, empty, right.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", lSafe, lNull, empty, left.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", rSafe, rNull, empty, right.Ref))
 		// Equality compares inline; an ordering goes through __kml_str_cmp.
 		var raw string
 		if op == "==" || op == "===" || op == "!=" || op == "!==" {
@@ -298,7 +292,7 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 			}
 		} else {
 			cmp := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp(ptr %s, ptr %s)", cmp, lSafe, rSafe))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp("+irPtr+" %s, "+irPtr+" %s)", cmp, lSafe, rSafe))
 			raw = e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp %s i32 %s, 0", raw, map[string]string{"<": "slt", ">": "sgt", "<=": "sle", ">=": "sge"}[op], cmp))
 		}
@@ -320,7 +314,7 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 		}
 		return Value{Ref: result, Ty: TypeBool}, nil
 	}
-	return Value{}, fmt.Errorf("%d:%d: operator '%s' is not supported for strings", pos.Line, pos.Col, op)
+	return Value{}, internalAt(pos, "operator '%s' is not supported for strings", op)
 }
 
 // emitStringExtract allocates a new heap string containing src[start..start+length)
@@ -329,9 +323,9 @@ func (e *Emitter) emitStringExtract(srcRef, startReg, lenReg string) Value {
 	srcPtr := e.freshReg()
 	nullSlot := e.freshReg()
 	buf := e.emitStringAlloc(lenReg)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", srcPtr, srcRef, startReg))
-	e.emitInstr(fmt.Sprintf("call ptr @memcpy(ptr %s, ptr %s, i64 %s)", buf, srcPtr, lenReg))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 %s", nullSlot, buf, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", srcPtr, srcRef, startReg))
+	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", buf, srcPtr, lenReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", nullSlot, buf, lenReg))
 	e.heapStore("i8", "0", nullSlot, 1)
 	return Value{Ref: buf, Ty: TypePtr}
 }
@@ -369,8 +363,13 @@ func (e *Emitter) emitNormalizeSliceIdx(idx, sLen string) string {
 // one; this compiler doesn't implement that implicit coercion, matching
 // match()/matchAll()/replace()/replaceAll()'s identical narrowing).
 func (e *Emitter) emitStringSearch(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: search takes exactly 1 argument", pos.Line, pos.Col)
+	args, err := e.fitArgs(args, 1, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if isUndefinedLiteral(e, stripAsAny(args[0])) {
+		// `new RegExp(undefined)`: the empty pattern, matching at 0.
+		args = []ast.Expression{ast.NewNewRegExpExpression(ast.NewStringLiteral("(?:)", pos), nil, pos)}
 	}
 	// Real JS coerces a non-RegExp argument to a RegExp (`str.search(".")`
 	// treats "." as the any-char pattern, not a literal dot), so a pattern is
@@ -380,8 +379,11 @@ func (e *Emitter) emitStringSearch(mem *ast.MemberExpression, args []ast.Express
 	if err != nil {
 		return Value{}, err
 	}
+	if isUnconstrainedDynamic(strVal.Ty) {
+		return e.emitDynAnyMethodCall(strVal, "search", args, pos) // dispatched on its tag
+	}
 	if !isStringTy(strVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: search is only supported on strings", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "search is only supported on strings")
 	}
 	strVal = e.convert(strVal, TypePtr)
 	args, err = e.hostRegExpArgs(args)
@@ -401,8 +403,12 @@ func (e *Emitter) emitStringSearch(mem *ast.MemberExpression, args []ast.Express
 // arguments are evaluated for their effects; root order is what Node's
 // default locale uses.
 func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 3 {
-		return Value{}, fmt.Errorf("%d:%d: localeCompare takes 1 to 3 arguments", pos.Line, pos.Col)
+	args = padArgs(args, 1, pos)
+	var err error
+	if len(args) > 3 {
+		if args, err = e.dropArgsPast(args, 3, pos); err != nil {
+			return Value{}, err
+		}
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -412,7 +418,7 @@ func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.
 		return e.emitDynAnyMethodCall(objVal, "localeCompare", args, pos) // dispatched on its tag
 	}
 	if !isStringTy(objVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: localeCompare is only supported on strings", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "localeCompare is only supported on strings")
 	}
 	otherVal, err := e.emitExpr(args[0])
 	if err != nil {
@@ -433,9 +439,9 @@ func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.
 			}
 		}
 	}
-	e.ensureCollate()
+	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_collate(ptr %s, ptr %s, i64 %s)", r, objVal.Ref, e.convert(otherVal, TypePtr).Ref, flags))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_collate("+irPtr+" %s, "+irPtr+" %s, i64 %s)", r, objVal.Ref, e.convert(otherVal, TypePtr).Ref, flags))
 	return e.countToNumber(Value{Ref: r, Ty: TypeI64}), nil
 }
 
@@ -476,8 +482,9 @@ func (e *Emitter) emitStringReplaceMethod(mem *ast.MemberExpression, args []ast.
 	if all {
 		method = "replaceAll"
 	}
-	if len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: %s takes exactly 2 arguments", pos.Line, pos.Col, method)
+	args, err := e.fitArgs(args, 2, pos)
+	if err != nil {
+		return Value{}, err
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -487,12 +494,12 @@ func (e *Emitter) emitStringReplaceMethod(mem *ast.MemberExpression, args []ast.
 		return e.emitDynAnyMethodCall(objVal, method, args, pos) // dispatched on its tag
 	}
 	if !isStringTy(objVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: %s is only supported on strings", pos.Line, pos.Col, method)
+		return Value{}, internalAt(pos, "%s is only supported on strings", method)
 	}
 	if args, err = e.hostRegExpArgs(args); err != nil {
 		return Value{}, err
 	}
-	if !e.inferExprType(args[0]).IsDynamic() {
+	if !e.typeOfExpr(args[0]).IsDynamic() {
 		return e.emitStringReplaceArgs(objVal, args, pos, all)
 	}
 	// A `string | RegExp` (or `any`) search: which replace is decided by
@@ -502,7 +509,7 @@ func (e *Emitter) emitStringReplaceMethod(mem *ast.MemberExpression, args []ast.
 		return Value{}, err
 	}
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	isRe := e.emitDynHostInstanceOf(searchVal, "RegExp")
 	reL, strL, doneL := e.freshLabel("replace.re"), e.freshLabel("replace.str"), e.freshLabel("replace.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRe.Ref, reL, strL))
@@ -519,25 +526,25 @@ func (e *Emitter) emitStringReplaceMethod(mem *ast.MemberExpression, args []ast.
 			return Value{}, err
 		}
 		if !e.blockDone {
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.convert(v, TypePtr).Ref, slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.convert(v, TypePtr).Ref, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		}
 	}
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
 // emitStringReplaceArgs is replace/replaceAll on the string objVal once the
 // search's kind is known statically.
 func (e *Emitter) emitStringReplaceArgs(objVal Value, args []ast.Expression, pos ast.Pos, all bool) (Value, error) {
-	if e.inferExprType(args[0]).IsRegExp() {
+	if e.typeOfExpr(args[0]).IsRegExp() {
 		return e.emitRegexReplace(objVal, args, pos, all)
 	}
 	// String-literal search with a function replacer: invoke it per match with
 	// (match, offset, string) — ADR-00697.
-	if e.inferExprType(args[1]).IsFunc() {
+	if e.typeOfExpr(args[1]).IsFunc() {
 		return e.emitStringReplaceLiteralCallback(objVal, args[0], args[1], all, pos)
 	}
 	searchVal, err := e.emitExpr(args[0])
@@ -558,22 +565,26 @@ func (e *Emitter) emitStringReplaceArgs(objVal Value, args []ast.Expression, pos
 	}
 	fn := "__kml_replace"
 	if all {
-		e.ensureStringReplaceAll()
+		e.ensureStrHeaderRuntime()
 		fn = "__kml_replace_all"
 	} else {
-		e.ensureStringReplace()
+		e.ensureStrHeaderRuntime()
 	}
 	sLen := e.emitStrLenHeader(objVal.Ref)
 	searchLen := e.emitStrLenHeader(searchVal.Ref)
 	repLen := e.emitStrLenHeader(repVal.Ref)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @%s(ptr %s, i64 %s, ptr %s, i64 %s, ptr %s, i64 %s)", result, fn, objVal.Ref, sLen, searchVal.Ref, searchLen, repVal.Ref, repLen))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @%s("+irPtr+" %s, i64 %s, "+irPtr+" %s, i64 %s, "+irPtr+" %s, i64 %s)", result, fn, objVal.Ref, sLen, searchVal.Ref, searchLen, repVal.Ref, repLen))
 	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
 func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
-	if len(args) < 1 || len(args) > 2 {
-		return Value{}, fmt.Errorf("%d:%d: split takes 1 or 2 arguments (separator[, limit])", pos.Line, pos.Col)
+	args = padArgs(args, 1, pos) // (no separator: undefined, the whole string)
+	var err error
+	if len(args) > 2 {
+		if args, err = e.dropArgsPast(args, 2, pos); err != nil {
+			return Value{}, err
+		}
 	}
 	objVal, err := e.emitExpr(mem.Object)
 	if err != nil {
@@ -583,29 +594,29 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 		return e.emitDynAnyMethodCall(objVal, "split", args, pos) // dispatched on its tag
 	}
 	if !isStringTy(objVal.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: split is only supported on strings", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "split is only supported on strings")
 	}
 	var result Value
 	if args, err = e.hostRegExpArgs(args); err != nil {
 		return Value{}, err
 	}
-	if e.inferExprType(args[0]).IsRegExp() {
+	if e.typeOfExpr(args[0]).IsRegExp() {
 		objVal = e.convert(objVal, TypePtr)
 		regexVal, err := e.emitExpr(args[0])
 		if err != nil {
 			return Value{}, err
 		}
 		result = e.emitRegexSplit(objVal, regexVal)
-	} else if sepTy := e.inferExprType(args[0]); sepTy.IsUndefined() && !sepTy.Nullable() {
+	} else if sepTy := e.typeOfExpr(stripAsAny(args[0])); sepTy.IsUndefined() && !sepTy.Nullable() || isUndefinedLiteral(e, stripAsAny(args[0])) {
 		// An undefined separator leaves the string whole (it is not
 		// ToString'd): the string runtime's split with a null separator.
 		if _, err := e.emitExpr(args[0]); err != nil {
 			return Value{}, err
 		}
 		e.ensureStringC()
-		e.declareFn("__kml_String_split", "declare ptr @__kml_String_split(ptr noundef, ptr noundef, i1 zeroext, double noundef)")
+		e.declareFn("__kml_String_split", "declare "+irPtr+" @__kml_String_split("+irPtr+" noundef, "+irPtr+" noundef, i1 zeroext, double noundef)")
 		h := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_String_split(ptr %s, ptr null, i1 zeroext false, double 0.0)", h, e.convert(objVal, TypePtr).Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_String_split("+irPtr+" %s, "+irPtr+" null, i1 zeroext false, double 0.0)", h, e.convert(objVal, TypePtr).Ref))
 		result = e.arrayValueFromHeaderReg(h, ArrayOf(TypePtr))
 	} else {
 		sepVal, err := e.emitExpr(args[0])
@@ -622,34 +633,34 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 			// The string runtime's split, which the declaration's string
 			// overload lowers to (an empty separator splits code points).
 			e.ensureStringC()
-			e.declareFn("__kml_String_split", "declare ptr @__kml_String_split(ptr noundef, ptr noundef, i1 zeroext, double noundef)")
+			e.declareFn("__kml_String_split", "declare "+irPtr+" @__kml_String_split("+irPtr+" noundef, "+irPtr+" noundef, i1 zeroext, double noundef)")
 			h := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_String_split(ptr %s, ptr %s, i1 zeroext false, double 0.0)", h, objVal.Ref, sepVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_String_split("+irPtr+" %s, "+irPtr+" %s, i1 zeroext false, double 0.0)", h, objVal.Ref, sepVal.Ref))
 			return e.arrayValueFromHeaderReg(h, ArrayOf(TypePtr)), nil
 		}
 		if sepVal.Ty.IsDynamic() {
 			// A `string | RegExp` (or `any`) separator: which split is
 			// decided by what the box holds.
 			slot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 			isRe := e.emitDynHostInstanceOf(sepVal, "RegExp")
 			reL, strL, doneL := e.freshLabel("split.re"), e.freshLabel("split.str"), e.freshLabel("split.done")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRe.Ref, reL, strL))
 			e.emitLabel(reL)
 			re := e.emitUnboxHost(sepVal, RegExpType())
 			rv := e.emitRegexSplit(objVal, re)
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", rv.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", rv.Ref, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(strL)
 			sv, err := stringSplit(sepVal)
 			if err != nil {
 				return Value{}, err
 			}
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sv.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", sv.Ref, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 			e.emitLabel(doneL)
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 			result = Value{Ref: r, Ty: ArrayOf(TypePtr)}
 		} else if result, err = stringSplit(sepVal); err != nil {
 			return Value{}, err
@@ -701,7 +712,7 @@ func (e *Emitter) emitStringCharAt(strPtr string, indexExpr ast.Expression) (Val
 	}
 	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_index(ptr %s, i64 %s)", r, strPtr, idxVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_index("+irPtr+" %s, i64 %s)", r, strPtr, idxVal.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -719,39 +730,29 @@ func (e *Emitter) emitStringFromCharCode(args []ast.Expression, codePoint bool, 
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureStrFromCodes()
+	e.ensureCasemap()
 	errSlot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", errSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", errSlot))
 	cp := 0
 	if codePoint {
 		cp = 1
 	}
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_String_fromCodes(ptr %s, i64 %s, i32 %d, ptr %s)", res, codes, n, cp, errSlot))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_String_fromCodes("+irPtr+" %s, i64 %s, i32 %d, "+irPtr+" %s)", res, codes, n, cp, errSlot))
 	if codePoint {
 		bad := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", bad, res))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", bad, res))
 		badL := e.freshLabel("fromcodepoint.bad")
 		okL := e.freshLabel("fromcodepoint.ok")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
 		e.emitLabel(badL)
 		msg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", msg, errSlot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", msg, errSlot))
 		e.ensureExceptionHelpers()
 		e.emitInternalThrowKind("RangeError", msg)
 		e.emitLabel(okL)
 	}
 	return Value{Ref: res, Ty: TypePtr}, nil
-}
-
-// ensureStrFromCodes declares @__kml_String_fromCodes, from the casemap C
-// file (which it compiles in).
-func (e *Emitter) ensureStrFromCodes() {
-	e.ensureCasemap()
-	if !e.usedStrFromCodes {
-		e.emitGlobal("declare ptr @__kml_String_fromCodes(ptr, i64, i32, ptr)")
-		e.usedStrFromCodes = true
-	}
 }
 
 // emitStringConcatMethod implements `str.concat(...values)`: the receiver
@@ -806,15 +807,14 @@ func (e *Emitter) numberToDouble(mem *ast.MemberExpression) (string, error) {
 // locale/options argument is an Intl feature (out of scope), rejected cleanly.
 func (e *Emitter) emitNumberToLocaleString(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: toLocaleString() locale/options arguments are an Intl feature (not supported); the no-argument form gives the en-US default", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "toLocaleString() locale/options arguments (the checker's NumberLocaleArgs)")
 	}
 	dblReg, err := e.numberToDouble(mem)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureDtoa()
 	buf := e.emitStringScratch(512)
-	e.emitInstr(fmt.Sprintf("call void @__kml_num_tolocalestring(ptr %s, double %s)", buf, dblReg))
+	e.emitInstr(fmt.Sprintf("call void @__kml_num_tolocalestring("+irPtr+" %s, double %s)", buf, dblReg))
 	e.emitStringFinalizeLen(buf)
 	return Value{Ref: buf, Ty: TypePtr}, nil
 }
@@ -826,7 +826,7 @@ func (e *Emitter) emitNumberToLocaleString(mem *ast.MemberExpression, args []ast
 // code, specialized here to a plain ptr since every URL part is a string.
 func (e *Emitter) emitStrBranch(condReg string, thenFn, elseFn func() (string, error)) (string, error) {
 	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", resPtr))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 
 	thenL := e.freshLabel("strb.then")
 	elseL := e.freshLabel("strb.else")
@@ -838,7 +838,7 @@ func (e *Emitter) emitStrBranch(condReg string, thenFn, elseFn func() (string, e
 	if err != nil {
 		return "", err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", tv, resPtr))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", tv, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(elseL)
@@ -846,12 +846,12 @@ func (e *Emitter) emitStrBranch(condReg string, thenFn, elseFn func() (string, e
 	if err != nil {
 		return "", err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ev, resPtr))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ev, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", result, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", result, resPtr))
 	return result, nil
 }
 
@@ -861,8 +861,8 @@ func (e *Emitter) emitStrBranch(condReg string, thenFn, elseFn func() (string, e
 func (e *Emitter) emitStrU16Len(s string) string {
 	e.ensureStrHeaderRuntime()
 	hp, h, c, known := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, s))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, hp))
+	e.emitPrefixWordAddr(hp, s)
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, hp))
 	e.emitInstr(fmt.Sprintf("%s = lshr i64 %s, 33", c, h))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", known, c))
 	fastL, slowL, doneL := e.freshLabel("u16len.fast"), e.freshLabel("u16len.slow"), e.freshLabel("u16len.done")
@@ -873,10 +873,27 @@ func (e *Emitter) emitStrU16Len(s string) string {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(slowL)
 	m := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_u16len_slow(ptr %s)", m, s))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_u16len_slow("+irPtr+" %s)", m, s))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %s, %%%s ]", r, n, fastL, m, slowL))
 	return r
+}
+
+// fitArgs is args as a call of n parameters reads them: a missing one
+// undefined, an extra one evaluated for its effects and dropped.
+func (e *Emitter) fitArgs(args []ast.Expression, n int, pos ast.Pos) ([]ast.Expression, error) {
+	if len(args) > n {
+		return e.dropArgsPast(args, n, pos)
+	}
+	return padArgs(args, n, pos), nil
+}
+
+// padArgs is args with undefined for each missing one of the first n.
+func padArgs(args []ast.Expression, n int, pos ast.Pos) []ast.Expression {
+	for len(args) < n {
+		args = append(append([]ast.Expression(nil), args...), ast.NewNullLiteral(true, pos))
+	}
+	return args
 }

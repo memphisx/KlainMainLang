@@ -93,3 +93,29 @@ await show(mk({ method: "DELETE" }))
 try { new Request("http://x.test/a", { body: "x" }) } catch (e) { console.log((e as Error).name, (e as Error).message) }
 `)
 }
+
+func TestE2EFetchArgumentRejectionsJS(t *testing.T) {
+	// A fetch whose arguments WebIDL refuses (a primitive init, a signal
+	// that is no AbortSignal, a URL that does not parse) returns a rejected
+	// promise; nothing is sent. A helper passing the promise through an
+	// untyped parameter hands back that promise.
+	assertSameAsNodeCompatJS(t, `
+const t = (p) => p.catch((e) => console.log(e.name + ": " + e.message + (e.cause ? " | cause: " + e.cause.message : "")));
+const id = (p) => p;
+(async () => {
+  await t(fetch("http://127.0.0.1:1/", 5));
+  await t(fetch("http://127.0.0.1:1/", true));
+  await t(fetch("http://127.0.0.1:1/", Symbol("z")));
+  await t(fetch("http://127.0.0.1:1/", { signal: 5 }));
+  await t(fetch("http://127.0.0.1:1/", { signal: "x" }));
+  await t(fetch("http://127.0.0.1:1/", { signal: { a: 1 } }));
+  await t(fetch("http://127.0.0.1:1/", { signal: [1, 2] }));
+  await t(fetch("http://127.0.0.1:1/", { signal: Symbol("q") }));
+  await t(fetch());
+  await t(fetch("foo"));
+  await t(fetch("/rel"));
+  await t(fetch(5));
+  await t(id(fetch("http://h:99999/")));
+})();
+`)
+}

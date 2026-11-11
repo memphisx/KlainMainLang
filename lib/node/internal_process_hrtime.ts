@@ -38,3 +38,6 @@ export function hrtimeBigint(): bigint {
     __kml_native.processHrtime();
     return BigInt(__kml_native.processHrtimeRead(0)) * 1000000000n + BigInt(__kml_native.processHrtimeRead(1));
 }
+
+// process.hrtime.bigint.
+hrtime.bigint = hrtimeBigint;

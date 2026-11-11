@@ -452,3 +452,12 @@ server.listen(0, '127.0.0.1', () => {
 })
 `, "ok")
 }
+
+// net.isIP and its kin take any value from JavaScript, tested as Node
+// tests `${input}`.
+func TestE2ENetIsIPAnyValue(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const net = require("net");
+for (const v of [undefined, "", null, 123, true, {}, { toString: () => "::2001:252:1:255.255.255.255" }, "::1", "1.2.3.4"]) console.log(net.isIP(v), net.isIPv4(v), net.isIPv6(v));
+console.log(net.isIP());
+`)
+}

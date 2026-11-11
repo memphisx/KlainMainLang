@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -19,11 +20,6 @@ import (
 
 const upstreamDelay = 600 * time.Millisecond
 
-// A starved loop never runs the interval during the wait; one that serves it
-// runs it at least once. How many times is a timing question (a loaded
-// machine stretches every tick) and is not asserted.
-const minTicks = 1
-
 var ticksRe = regexp.MustCompile(`ticks=(\d+)`)
 
 func ticksOf(t *testing.T, out string) int {
@@ -36,22 +32,50 @@ func ticksOf(t *testing.T, out string) int {
 	return n
 }
 
+// throttledCommand runs bin at the lowest scheduling priority the host
+// offers (macOS's background QoS through taskpolicy, Linux's nice 19), so a
+// structural assertion is also checked on a starved CPU; nil where neither
+// is available.
+func throttledCommand(bin string, args ...string) *exec.Cmd {
+	switch runtime.GOOS {
+	case "darwin":
+		if p, err := exec.LookPath("taskpolicy"); err == nil {
+			return exec.Command(p, append([]string{"-b", bin}, args...)...)
+		}
+	case "linux":
+		if p, err := exec.LookPath("nice"); err == nil {
+			return exec.Command(p, append([]string{"-n", "19", bin}, args...)...)
+		}
+	}
+	return nil
+}
+
 // runWaitProbe compiles src (which must print "body=… ticks=N"), runs it, and
-// checks the body arrived, the interval kept ticking, and the wait did not spin.
+// checks the body arrived, the interval kept ticking, and the wait did not
+// spin; then again throttled.
 func runWaitProbe(t *testing.T, src string) {
 	t.Helper()
 	bin := buildBinaryImports(t, src)
-	cmd := exec.Command(bin)
+	checkWaitProbe(t, exec.Command(bin))
+	if cmd := throttledCommand(bin); cmd != nil {
+		checkWaitProbe(t, cmd)
+	}
+}
+
+func checkWaitProbe(t *testing.T, cmd *exec.Cmd) {
+	t.Helper()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("run: %v\n%s", err, out)
+		t.Fatalf("run %v: %v\n%s", cmd.Args, err, out)
 	}
 	s := string(out)
 	if !strings.Contains(s, "body=upstream /slow") {
 		t.Fatalf("response body missing:\n%s", s)
 	}
-	if n := ticksOf(t, s); n < minTicks {
-		t.Errorf("the interval fired %d times during a %v wait (want >= %d): the wait starved the event loop", n, upstreamDelay, minTicks)
+	// A starved loop never runs the interval during the wait; one that
+	// serves it runs it. How many times is not asserted.
+	if ticksOf(t, s) == 0 {
+		t.Errorf("the interval never fired during a %v wait: the wait starved the event loop", upstreamDelay)
 	}
 	if cpu := cmd.ProcessState.UserTime() + cmd.ProcessState.SystemTime(); cpu > 350*time.Millisecond {
 		t.Errorf("the process burned %v of CPU across a %v wait: the wait is spinning, not sleeping in the loop", cpu, upstreamDelay)
@@ -264,4 +288,14 @@ for (let i = 0; i < 150; i++) {
 }
 console.log("done", n)
 `, up.URL), "done 150")
+}
+
+// A top-level binding of an awaited empty array literal, read by a
+// function, is the module's global array.
+func TestE2ETopLevelAwaitEmptyArrayReadByFunction(t *testing.T) {
+	assertSameAsNode(t, `export let x = await [];
+export const y = await [];
+function f() { return x.length + y.length; }
+console.log(f(), x, y);
+`)
 }

@@ -358,3 +358,52 @@ var n = { __proto__: null, c: 3 };
 console.log(Object.getPrototypeOf(n), n.c);
 `)
 }
+
+// A typed object literal Object.setPrototypeOf retargets, and the object it
+// links in, keep their types: each is held as an object with a prototype.
+func TestE2ESetPrototypeOfTypedLiteral(t *testing.T) {
+	assertSameAsNode(t, `
+interface P { a: number; name: string }
+const base = { describe(this: P): string { return this.name + "=" + this.a; }, k: 7 };
+const o = { a: 1, name: "x", nested: { d: [1, 2] } };
+Object.setPrototypeOf(o, base);
+function show(p: P): string { return p.name + p.a; }
+o.a += 2;
+console.log(show(o), o.nested.d.length, (o as any).k, (o as any).describe(), JSON.stringify(o));
+const r = Reflect.setPrototypeOf(o, null);
+console.log(r, Object.getPrototypeOf(o), Object.keys(o).join());
+const e = { z: 0 };
+try { Object.setPrototypeOf(e, e); } catch (err) { console.log((err as Error).constructor.name); }
+const base2 = { k: 7, hi(): string { return "hi"; } };
+const c = Object.create(base2);
+console.log(c.k, c.hi(), Object.getPrototypeOf(c) === base2);
+`)
+}
+
+// A function's ToPrimitive ends at its source text, and a string against
+// a function, array or object compares loosely through it.
+func TestE2EFunctionToPrimitiveCompare(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+var f = function () { return 1; };
+var o = {};
+console.log(f >= o, o < f, f <= o, f > "a", f + "!", f * 1, f == "function () { return 1; }");
+console.log([1] == "1", "1,2" == [1, 2], o == "[object Object]", f != "x");
+f.valueOf = function () { return 7; };
+console.log(f + 1, f > 6, f * 2);
+`)
+}
+
+// delete on a primitive string: its indices and length are kept (false;
+// strict code's TypeError), any other key true.
+func TestE2EDeleteStringIndex(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+console.log(delete "abc"[5], delete "abc"[0], delete "abc".length, delete "abc"["x"]);
+var s = "hey"; console.log(delete s[1], delete s[9]);
+console.log(delete void 0, delete typeof 0, delete 'Test262'[100], delete !0);
+(function () {
+  "use strict";
+  try { delete "abc"[0]; console.log("no"); } catch (e) { console.log(e.constructor.name, e.message); }
+  console.log(delete "abc"[7]);
+})();
+`)
+}

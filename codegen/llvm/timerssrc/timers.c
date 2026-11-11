@@ -12,6 +12,7 @@
  * They are libuv handles on the thread's loop (loop.c), on Windows too
  * (TDD-00252). */
 #include <stdlib.h>
+#include <string.h>
 #include <stdint.h>
 
 #ifdef _WIN32
@@ -32,6 +33,7 @@ typedef struct timespec kml_ts;
 typedef long long i64;
 typedef void (*kml_inv2)(void *clo, double a, double b);
 void __kml_drain_microtasks(void);
+_Bool __kml_make_callback(kml_inv2 inv, void *clo, double a, double b);
 
 i64 __kml_monotonic_ns(void) {
     kml_ts ts;
@@ -88,9 +90,10 @@ static void set_timer_ref(int on) {
  * its own arming and reference. */
 static void run_timers(void) {
     due_ns = 0;
-    double now = now_ms();
-    next_expiry = 0;
-    ((kml_inv2)pt_inv)(pt_clo, now, 0);
+    /* A throw a listener handled leaves the rest of the list due: Node
+     * calls processTimers again. */
+    do next_expiry = 0;
+    while (__kml_make_callback((kml_inv2)pt_inv, pt_clo, now_ms(), 0));
     double r = next_expiry;
     if (r != 0) {
         double left = (r < 0 ? -r : r) - now_ms();
@@ -106,7 +109,8 @@ static void run_timers(void) {
 static void run_immediates(void) {
     if (imm_count == 0)
         return;
-    ((kml_inv2)pi_inv)(pi_clo, 0, 0);
+    while (__kml_make_callback((kml_inv2)pi_inv, pi_clo, 0, 0) && imm_count != 0)
+        ;
     __kml_drain_microtasks();
 }
 
@@ -162,6 +166,48 @@ void __kml_native_immediate_toggle_ref(double on) {
 }
 
 void __kml_native_immediate_count(double n) { imm_count = n; }
+
+/* process.getActiveResourcesInfo's handles: each referenced open handle
+ * of the loop by the name of Node's wrap for it, as Node lists its
+ * referenced handle wraps. The runtime's own timer,
+ * phase and wakeup handles stand for no wrap. */
+static char active_buf[4096];
+static size_t active_len;
+static void active_note(uv_handle_t *h, void *arg) {
+    (void)arg;
+    if (!uv_has_ref(h) || uv_is_closing(h)) return; /* (Node's: refed, open) */
+    const char *n = 0;
+    struct sockaddr_storage ss;
+    int sl = sizeof ss;
+    char pb[8];
+    size_t pl = sizeof pb;
+    switch (h->type) {
+    case UV_TCP: n = uv_tcp_getpeername((uv_tcp_t *)h, (struct sockaddr *)&ss, &sl) == 0 ? "TCPSocketWrap" : "TCPServerWrap"; break;
+    case UV_NAMED_PIPE: n = uv_pipe_getpeername((uv_pipe_t *)h, pb, &pl) != UV_ENOTCONN ? "PipeWrap" : "PipeServerWrap"; break;
+    case UV_TTY: n = "TTYWrap"; break;
+    case UV_UDP: n = "UDPWrap"; break;
+    case UV_PROCESS: n = "ProcessWrap"; break;
+    case UV_SIGNAL: n = "SignalWrap"; break;
+    case UV_FS_EVENT: n = "FSEventWrap"; break;
+    case UV_FS_POLL: n = "StatWatcher"; break;
+    default: return;
+    }
+    size_t k = strlen(n);
+    if (active_len + k + 2 >= sizeof active_buf) return;
+    if (active_len) active_buf[active_len++] = ',';
+    memcpy(active_buf + active_len, n, k);
+    active_len += k;
+}
+
+char *__kml_native_active_handles(void) {
+    active_len = 0;
+    uv_walk(__kml_loop_uv(), active_note, 0);
+    char *base = (char *)kml_alloc(KML_HEAP_RAW, active_len + 9);
+    *(int64_t *)base = (int64_t)active_len;
+    memcpy(base + 8, active_buf, active_len);
+    base[8 + active_len] = 0;
+    return base + 8;
+}
 
 /* The armed timer's deadline (0 when none): a dynamic-import island folds
  * it into its wait. */

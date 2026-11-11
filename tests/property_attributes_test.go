@@ -53,14 +53,14 @@ export {};
 
 func TestE2EDefinePropertyBesideLayout(t *testing.T) {
 	// A static object's or class instance's new property, its attributes
-	// and accessors (ADR-01824).
-	assertSameAsNode(t, `
+	// and accessors (ADR-01824). A .ts file is strict code, as tsc emits it.
+	assertSameAsNode(t, `"use strict";
 const o = { a: 1 };
 Object.defineProperty(o, "b", { value: 2, enumerable: true });
 Object.defineProperty(o, "h", { value: 3 });
 Object.defineProperty(o, "g", { get() { return this.a * 10; }, enumerable: true });
 console.log(o, Object.keys(o).join(), Object.getOwnPropertyNames(o).join(), JSON.stringify(o));
-(o as any).h = 9;
+try { (o as any).h = 9; } catch (e) { console.log((e as Error).message); }
 console.log((o as any).h, (o as any).g, JSON.stringify(Object.getOwnPropertyDescriptor(o, "h")));
 class P { x = 1; }
 const p = new P();

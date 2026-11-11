@@ -13,7 +13,7 @@ import (
 // parseTypeAnnotation parses a type and converts it to the annotation code
 // generation reads. source is stamped into the annotation ("ts", "jsdoc",
 // "as").
-func (p *Parser) parseTypeAnnotation(source string) (*ast.TypeAnnotation, error) {
+func (p *Parser) parseTypeAnnotation(source string) (ast.TypeNode, error) {
 	from := p.pos
 	n, err := p.parseType()
 	if err != nil {
@@ -151,7 +151,7 @@ func (p *Parser) parseIndexSignatureNode() (*ast.IndexSignature, error) {
 
 // parseIndexSignature parses an index signature and returns its value type's
 // annotation (interfaces read members one at a time).
-func (p *Parser) parseIndexSignature(source string) (*ast.TypeAnnotation, error) {
+func (p *Parser) parseIndexSignature(source string) (ast.TypeNode, error) {
 	n, err := p.parseIndexSignatureNode()
 	if err != nil {
 		return nil, err
@@ -209,10 +209,12 @@ func (p *Parser) parseSignatureTail() ([]*ast.SignatureParameter, ast.TypeNode, 
 		}
 		if p.match(lexer.ASSIGN) {
 			// An initializer is not allowed in a signature (tsc TS2371), but
-			// parses: skip the expression.
+			// parses: skip the expression. The parameter is optional, as
+			// tsc's getMinArgumentCount counts one with an initializer.
 			if _, err := p.parseAssignment(); err != nil {
 				return nil, nil, err
 			}
+			prm.Optional = true
 		}
 		if prm.Name == "this" && len(params) == 0 && !prm.Rest {
 			// A leading `this: T` types the signature's `this`; it is not a
@@ -942,7 +944,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	// Optional `<T extends C = D>` type-parameter list (TDD-00010 V1): the
 	// nodes as written, and the names and constraints code generation reads.
 	var typeParams []string
-	var typeParamConstraints []*ast.TypeAnnotation
+	var typeParamConstraints []ast.TypeNode
 	var typeParamNodes []*ast.TypeParameter
 	if p.check(lexer.LT) {
 		tps, err := p.parseTypeParameterNodes(nameTok.Literal + "<T>")
@@ -952,7 +954,7 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 		typeParamNodes = tps
 		for _, tp := range tps {
 			typeParams = append(typeParams, tp.Name)
-			var c *ast.TypeAnnotation
+			var c ast.TypeNode
 			if tp.Constraint != nil {
 				if c, err = ast.TypeAnnotationOf(tp.Constraint, "ts"); err != nil {
 					c = nil // unrepresentable for code generation; the checker reads the node
@@ -999,8 +1001,19 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 	decl := ast.NewInterfaceDeclaration(nameTok.Literal, fields, methods, pos)
 	if doc != nil {
 		for _, a := range doc.Annotations {
-			if a.Tag == "lowerType" {
+			switch a.Tag {
+			case "lowerType":
 				decl.LowerType = a.Value
+			case "lower":
+				decl.Lower = a.Value
+				for _, m := range members {
+					switch m := m.(type) {
+					case *ast.MethodSignature:
+						m.Holder = a.Value
+					case *ast.PropertySignature:
+						m.Holder = a.Value
+					}
+				}
 			}
 		}
 	}
@@ -1031,6 +1044,14 @@ func (p *Parser) parseTypeMembers() ([]ast.TypeMember, error) {
 			// A JSDoc width overrides the member's TS type for code
 			// generation, as for a variable (`/** @type {int32} */`).
 			ps.JSDocType = doc.GetType()
+			for _, a := range doc.Annotations {
+				switch a.Tag {
+				case "lower":
+					ps.Lower = a.Value
+				case "intrinsic":
+					ps.Intrinsic = a.Value
+				}
+			}
 		}
 		if ms, ok := m.(*ast.MethodSignature); ok && doc != nil {
 			// A builtin declaration's lowering (TDD-00230 P3.2).
@@ -1174,6 +1195,12 @@ func (p *Parser) parseMemberName() (string, bool, error) {
 		if _, err := p.expect(lexer.RBRACKET); err != nil {
 			return "", false, err
 		}
+		switch lit := e.(type) {
+		case *ast.StringLiteral:
+			return lit.Value, false, nil // `["a b"]` names the property "a b"
+		case *ast.NumberLiteral:
+			return lit.Value, false, nil
+		}
 		return "[" + computedName(e) + "]", true, nil
 	}
 	return "", false, p.errAt(tok, diag.ExpectedPropertyName, tok.Type)
@@ -1244,7 +1271,7 @@ func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 	// the nodes as written (defaults included), and the names and
 	// constraints code generation reads.
 	var typeParams []string
-	var typeParamConstraints []*ast.TypeAnnotation
+	var typeParamConstraints []ast.TypeNode
 	var typeParamNodes []*ast.TypeParameter
 	if p.check(lexer.LT) {
 		tps, err := p.parseTypeParameterNodes(nameTok.Literal + "<T>")
@@ -1254,7 +1281,7 @@ func (p *Parser) parseTypeAliasDecl() (*ast.TypeAliasDeclaration, error) {
 		typeParamNodes = tps
 		for _, tp := range tps {
 			typeParams = append(typeParams, tp.Name)
-			var c *ast.TypeAnnotation
+			var c ast.TypeNode
 			if tp.Constraint != nil {
 				if c, err = ast.TypeAnnotationOf(tp.Constraint, "ts"); err != nil {
 					c = nil // unrepresentable for code generation; the checker reads the node

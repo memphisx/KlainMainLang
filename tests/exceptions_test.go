@@ -513,7 +513,7 @@ function h() {
   let arr = [1];
   try { x = 1; y = 2; s = "b"; arr = [2, 3]; throw new Error("e"); } catch (e) { console.log("catch", x, y, s, arr); }
   console.log("after", x, y, s, arr);
-  try { var tt = 1; throw new Error("e"); } catch (e) { console.log("catch tt", tt); }
+  try { var tt: number | undefined = 1; throw new Error("e"); } catch (e) { console.log("catch tt", tt); }
   console.log("after tt", tt);
   let n = 0;
   for (let i = 0; i < 3; i++) {

@@ -6,7 +6,7 @@
 //
 // Shallow free only, deliberately: frees the value's own top-level heap
 // allocation(s) (and, for Map/Set/closures, their own internal backing
-// buffers — see ensureMapFree/ensureClosureFree in runtime.go), never
+// buffers — see collections.c and core.c), never
 // anything reachable *through* it (a string field inside a freed object, an
 // element of a freed array, a captured variable's shared cell). No
 // analysis, no double-free detection, no use-after-free protection beyond
@@ -15,6 +15,7 @@
 package llvm
 
 import (
+	"KlainMainLang/diag"
 	"fmt"
 
 	"KlainMainLang/ast"
@@ -26,10 +27,10 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 		// TDD-00173: in auto mode the compiler inserts every free itself; a
 		// manual call it cannot plan for would be a double-free waiting to
 		// happen, so it is rejected outright (TDD-00001's exclusivity rule).
-		return Value{}, fmt.Errorf("%d:%d: Memory.free is not allowed under -mm=auto — the compiler inserts frees itself; annotate with /** @free */ or /** @owned */ to control placement", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Memory.free under -mm=auto")
 	}
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: Memory.free takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "Memory.free with %d arguments", len(args))
 	}
 
 	// Named-variable case: free the underlying pointer(s) directly from the
@@ -40,7 +41,7 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 	if id, ok := args[0].(*ast.Identifier); ok {
 		sym, found := e.lookup(id.Name)
 		if !found {
-			return Value{}, fmt.Errorf("%d:%d: undefined variable '%s'", pos.Line, pos.Col, id.Name)
+			return Value{}, internalAt(pos, "Memory.free of unbound '%s'", id.Name)
 		}
 		if err := e.freeSymbol(sym, pos); err != nil {
 			return Value{}, err
@@ -55,10 +56,9 @@ func (e *Emitter) emitMemoryFree(args []ast.Expression, pos ast.Pos) (Value, err
 		return Value{}, err
 	}
 	if val.Ty.IsArray() {
-		e.ensureFree()
 		dataPtr := e.freshReg()
 		dataPtr = e.arrayData(val)
-		e.heapFree(dataPtr)
+		e.heapFree(arrayDataKind(val.Ty), dataPtr)
 		return Value{Ty: TypeVoid}, nil
 	}
 	if err := e.freeResolvedPointer(val.Ref, val.Ty, pos); err != nil {
@@ -85,17 +85,16 @@ func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
 		// memory — matching the pre-header behaviour that zeroed both slots.
 		// The tiny header itself is intentionally left allocated so the slot
 		// stays valid.
-		e.ensureFree()
 		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
 		dataPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", dataPtr, dataSlot))
-		e.heapFree(dataPtr)
-		e.heapStore("ptr", "null", dataSlot, 8)
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", dataPtr, dataSlot))
+		e.heapFree(arrayDataKind(sym.Ty), dataPtr)
+		e.heapStore(irPtr, "null", dataSlot, 8)
 		e.heapStore("i64", "0", lenSlot, 8)
 		return nil
 	}
 	ptrReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ptrReg, sym.Ptr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ptrReg, sym.Ptr))
 	if err := e.freeResolvedPointer(ptrReg, sym.Ty, pos); err != nil {
 		return err
 	}
@@ -104,7 +103,7 @@ func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
 	if triStr(sym.Ty) {
 		nul = e.nullRef()
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", nul, sym.Ptr))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", nul, sym.Ptr))
 	return nil
 }
 
@@ -119,7 +118,7 @@ func symbolTypeFreeable(ty Type) bool {
 		return true
 	case isStringTy(ty) && !ty.IsPromise() && !ty.IsDynamic():
 		return true
-	case ty.IsObject() || ty.IsPromise() || (ty.IR == "ptr" && !ty.IsDynamic() && !ty.IsArray()):
+	case ty.IsObject() || ty.IsPromise() || (ty.IR == irPtr && !ty.IsDynamic() && !ty.IsArray()):
 		return true
 	}
 	return false
@@ -137,24 +136,21 @@ func (e *Emitter) freeResolvedPointer(ptrReg string, ty Type, pos ast.Pos) error
 	// Under -mm=gc the Boehm finalizer is the death signal instead.
 	if e.programUsesFinReg && !e.isGCMode() {
 		e.ensureFinalizationHelpers()
-		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree(ptr %s)", ptrReg))
+		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree("+irPtr+" %s)", ptrReg))
 	}
 	switch {
 	case (ty.IsMap() || ty.IsSet()) && !ty.Weak:
 		// (A WeakMap/WeakSet's handle is its list head, freed after its
 		// header word below.)
-		e.ensureMapFree()
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_free(ptr %s)", ptrReg))
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_free("+irPtr+" %s)", ptrReg))
 	case headeredHost(ty) || ty.IsPromise() && ty.PromiseTask && !ty.IsDynamic():
 		// A RegExp's or task promise's allocation starts at its header word
 		// (TDD-00247).
-		e.ensureFree()
 		base := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", base, ptrReg))
-		e.heapFree(base)
+		e.emitPrefixWordAddr(base, ptrReg)
+		e.heapFree(allocHost, base)
 	case ty.IsFunc():
-		e.ensureClosureFree()
-		e.emitInstr(fmt.Sprintf("call void @__kml_closure_free(ptr %s)", ptrReg))
+		e.emitInstr(fmt.Sprintf("call void @__kml_closure_free("+irPtr+" %s)", ptrReg))
 	case isStringTy(ty) && !ty.IsPromise() && !ty.IsDynamic():
 		// (A Blob is a `ptr` handle too — its record is a plain malloc, below.)
 		// A heap string is length-prefixed (TDD-00120): its malloc base is 8
@@ -162,13 +158,24 @@ func (e *Emitter) freeResolvedPointer(ptrReg string, ty Type, pos ast.Pos) error
 		// (An interned literal is static and never legitimately freed here — a
 		// pre-existing Memory.free-on-a-literal misuse stays undefined.)
 		e.emitStringFree(ptrReg)
-	case ty.IsObject() || ty.IsPromise() || (ty.IR == "ptr" && !ty.IsDynamic() && !ty.IsArray()):
+	case ty.IsObject() || ty.IsPromise() || (ty.IR == irPtr && !ty.IsDynamic() && !ty.IsArray()):
 		// A plain single heap pointer: string, object literal/interface
 		// value, or an un-awaited Promise's malloc'd slot.
-		e.ensureFree()
-		e.heapFree(ptrReg)
+		e.heapFree(allocObject, ptrReg)
 	default:
-		return fmt.Errorf("%d:%d: Memory.free is not supported for this type — nothing heap-allocated to free (or, for any/unknown, no safe way to tell what's inside without runtime tag inspection this builtin doesn't do)", pos.Line, pos.Col)
+		return memDiag(pos, "Memory.free is not supported for this type — nothing heap-allocated to free (or, for any/unknown, no safe way to tell what's inside without runtime tag inspection this builtin doesn't do)")
 	}
 	return nil
+}
+
+// memDiag is a misuse of the memory annotations or Memory.free that only
+// the value's lowered type reveals: their own diagnostic.
+func memDiag(pos ast.Pos, format string, args ...any) error {
+	return diag.New(diag.MemAnnotation, diag.Span{Pos: diag.Pos{Line: pos.Line, Col: pos.Col}, Start: -1, End: -1}, fmt.Sprintf(format, args...))
+}
+
+// unsupportedAt is a construct valid in TypeScript that only the lowered
+// types show this compiler does not implement.
+func unsupportedAt(pos ast.Pos, format string, args ...any) error {
+	return diag.New(diag.CodegenUnsupported, diag.Span{Pos: diag.Pos{Line: pos.Line, Col: pos.Col}, Start: -1, End: -1}, fmt.Sprintf(format, args...))
 }

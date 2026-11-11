@@ -16,11 +16,26 @@ func expandoDecl(sym *binder.Symbol) ast.Node {
 	if sym == nil || len(sym.Declarations) == 0 {
 		return nil
 	}
-	if len(sym.Declarations) > 1 {
+	decls := sym.Declarations
+	if len(decls) > 1 {
+		// A namespace merged into the function adds a declaration with
+		// no node of its own.
+		kept := decls[:0:0]
+		for _, d := range decls {
+			if d.Node != nil {
+				kept = append(kept, d)
+			}
+		}
+		decls = kept
+	}
+	if len(decls) == 0 {
+		return nil
+	}
+	if len(decls) > 1 {
 		// An overloaded function: its implementation, when every
 		// declaration is one of its signatures.
 		var impl *ast.FunctionDeclaration
-		for _, d := range sym.Declarations {
+		for _, d := range decls {
 			fd, ok := d.Node.(*ast.FunctionDeclaration)
 			if !ok {
 				return nil
@@ -34,7 +49,7 @@ func expandoDecl(sym *binder.Symbol) ast.Node {
 		}
 		return impl
 	}
-	switch d := sym.Declarations[0].Node.(type) {
+	switch d := decls[0].Node.(type) {
 	case *ast.FunctionDeclaration:
 		return d
 	case *ast.VarDeclaration:
@@ -47,6 +62,28 @@ func expandoDecl(sym *binder.Symbol) ast.Node {
 		}
 	}
 	return nil
+}
+
+// expandoTarget is the function symbol sym names: sym itself, or what a
+// const alias of it (`export default strict`, a `const` the resolver binds
+// to the exported function) names.
+func (c *Checker) expandoTarget(sym *binder.Symbol) *binder.Symbol {
+	for i := 0; i < 8 && sym != nil && len(sym.Declarations) == 1; i++ {
+		v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
+		if !ok || v.Kind != "const" || v.TypeAnnot != nil {
+			break
+		}
+		id, ok := v.Init.(*ast.Identifier)
+		if !ok {
+			break
+		}
+		next, _ := c.b.Resolve(id)
+		if next == nil || next == sym {
+			break
+		}
+		sym = next
+	}
+	return sym
 }
 
 // expandos are the property assignments the scope declaring sym makes to
@@ -92,6 +129,17 @@ func (c *Checker) expandos(sym *binder.Symbol) map[string][]ast.Expression {
 							}
 						}
 					}
+					// `foo[k] = v` by a constant key (a const string, number
+					// or unique symbol) declares the member that key names.
+					if ix, ok := a.Left.(*ast.IndexExpression); ok && !ix.Optional {
+						if id, ok := ix.Object.(*ast.Identifier); ok {
+							if s, _ := c.b.Resolve(id); s == sym {
+								if key, lit := c.accessKey(ix.Index); lit {
+									out[key] = append(out[key], a.Right)
+								}
+							}
+						}
+					}
 				}
 			}
 			walk(ch)
@@ -112,7 +160,7 @@ func (c *Checker) expandoType(object ast.Expression, prop string) *Type {
 		return nil
 	}
 	sym, _ := c.b.Resolve(id)
-	values := c.expandos(sym)[prop]
+	values := c.expandos(c.expandoTarget(sym))[prop]
 	if len(values) == 0 {
 		return nil
 	}
@@ -131,7 +179,7 @@ func (c *Checker) expandoMember(m *ast.MemberExpression) bool {
 		return false
 	}
 	sym, _ := c.b.Resolve(id)
-	return sym != nil && len(c.expandos(sym)[m.Property]) > 0
+	return sym != nil && len(c.expandos(c.expandoTarget(sym))[m.Property]) > 0
 }
 
 // expandoFunction reports whether object names a function an expando
@@ -183,4 +231,84 @@ func (c *Checker) functionMember(prop string) *Type {
 // its object names (`f.p` after `f.p = v`).
 func (c *Checker) ExpandoMember(e *ast.MemberExpression) bool {
 	return c.expandoFunction(e.Object) && c.expandoType(e.Object, e.Property) != nil
+}
+
+// untypedCallee reports a callee tsc calls untyped (isUntypedFunctionCall):
+// not a union, assignable to Function, with no call or construct
+// signature of its own. Its call and its construction are any.
+func (c *Checker) untypedCallee(t *Type) bool {
+	if c.Unanswered(t) || t.Flags&Union != 0 || t.Flags&Object == 0 || t.Kind == Function || len(t.Calls) > 0 || len(t.Constructs) > 0 {
+		return false
+	}
+	if c.b.Globals == nil {
+		return false
+	}
+	sym := c.b.Globals.Symbols.Get("Function")
+	if sym == nil || sym.Flags&binder.Interface == 0 {
+		return false
+	}
+	fn := c.interfaceOf(sym, nil)
+	if c.Unanswered(fn) {
+		return false
+	}
+	return t == fn || c.assignableTo(t, fn) == yes
+}
+
+// untypedUnion reports a union with a member called untyped
+// (untypedCallee) whose other members are callable or constructable: tsc
+// calls it untyped too.
+func (c *Checker) untypedUnion(t *Type) bool {
+	if c.Unanswered(t) || t.Flags&Union == 0 {
+		return false
+	}
+	untyped := false
+	for _, m := range members(t) {
+		switch {
+		case c.untypedCallee(m):
+			untyped = true
+		case m.Flags&Object != 0 && (m.Kind == Function || len(m.Calls) > 0 || len(m.Constructs) > 0):
+		default:
+			return false
+		}
+	}
+	return untyped
+}
+
+// optionalOnNullish reports the receiver of an optional access that is only
+// ever null or undefined: the access always short-circuits, and its member
+// is one of never.
+func (c *Checker) optionalOnNullish(obj *Type) bool {
+	if c.Unanswered(obj) || obj.Flags&(Any|Unknown) != 0 {
+		return false
+	}
+	for _, m := range members(obj) {
+		if m.Flags&(Null|Undefined|Void) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// invalidIndexKey reports a key type no property key can be: an object,
+// array or function (TS2538). JavaScript converts it with ToPropertyKey.
+func (c *Checker) invalidIndexKey(kt *Type) bool {
+	return !c.Unanswered(kt) && kt.Flags&Union == 0 && kt.Flags&(Object|NonPrimitive|Void) != 0
+}
+
+// symbolKey reports a key typed `symbol` (not one unique symbol, which names
+// a property).
+func symbolKey(kt *Type) bool {
+	return kt.Flags&ESSymbol != 0 && kt.Flags&Union == 0 && kt.Symbol == nil && kt.Value == ""
+}
+
+// wellKnownSymbolRead reports a key read off a SymbolConstructor
+// (`Symbol.iterator`, through any binding of that type): a unique symbol the
+// checker types as `symbol`, which names a property rather than indexing.
+func (c *Checker) wellKnownSymbolRead(key ast.Expression) bool {
+	m, ok := key.(*ast.MemberExpression)
+	if !ok {
+		return false
+	}
+	ot := c.TypeOf(m.Object)
+	return !c.Unanswered(ot) && ot.Symbol != nil && sourceName(ot.Symbol.Name) == "SymbolConstructor"
 }

@@ -243,7 +243,7 @@ ctrl.abort()
 func TestE2EFetchTimeoutSignalInHandler(t *testing.T) {
 	assertOutput(t, `
 import * as http from 'http';
-const slow = http.createServer((req, res) => { setTimeout(() => res.end('late'), 1500); });
+const slow = http.createServer((req, res) => {}); // never answers: only the timeout ends the fetch
 slow.listen(0, () => {
   const sp = (slow.address() as any).port;
   const front = http.createServer(async (req, res) => {
@@ -256,12 +256,11 @@ slow.listen(0, () => {
   });
   front.listen(0, async () => {
     const fp = (front.address() as any).port;
-    const t0 = Date.now();
     const r = await fetch(`+"`"+`http://127.0.0.1:${fp}/`+"`"+`);
-    console.log(await r.text(), Date.now() - t0 < 1000);
+    console.log(await r.text());
     front.close(); slow.close();
     process.exit(0);
   });
 });
-`, "err TimeoutError true")
+`, "err TimeoutError")
 }

@@ -12,10 +12,13 @@ import (
 var hostBoxSource string
 
 // HostBoxSource is the host-box dispatchers' C source (boxsrc/hostbox.c).
-func HostBoxSource() string { return hostBoxSource }
+func HostBoxSource() string { return layoutHeader() + hostBoxSource }
 
-// UsesHostBoxC reports whether the program links the host-box dispatchers.
-func (e *Emitter) UsesHostBoxC() bool { return e.usedHostBox }
+//go:embed boxsrc/dynconstruct.c
+var dynConstructSource string
+
+// DynConstructSource is `new c(...)` through `any`'s C source.
+func DynConstructSource() string { return layoutHeader() + dynConstructSource }
 
 // emit_hostbox.go — a host handle (a Map, a Blob, Headers, an ArrayBuffer, a
 // Worker, …: a bare pointer to runtime state with no header word of its own)
@@ -33,13 +36,13 @@ const hostTypeIDFlag int64 = 1 << 49
 // follows the header, where a cell holds a handle.
 const hostInlineFlag int64 = 1 << 50
 
-const hostBoxTy = "{ i64, ptr }"
+const hostBoxTy = "{ i64, " + irPtr + " }"
 
 // hostLayout is one host type boxed somewhere in the program.
 // hostCellObject reports a headerless host object that boxes into a host
 // cell like a handle does.
 func hostCellObject(t Type) bool {
-	return (t.IsRegExp() || hostPrefixedObject(t)) && t.IsObject() && t.IR == "ptr" && !t.IsDynamic() && !t.IsArray() && !t.IsNull() && !t.IsUndefined()
+	return (t.IsRegExp() || hostPrefixedObject(t)) && t.IsObject() && t.IR == irPtr && !t.IsDynamic() && !t.IsArray() && !t.IsNull() && !t.IsUndefined()
 }
 
 // hostPrefixedObject reports a host class layout (hostObjectType) whose
@@ -54,7 +57,7 @@ func hostPrefixedObject(t Type) bool {
 
 // hostHandleIR is the IR type of the word a host cell of t carries.
 func hostHandleIR(t Type) string {
-	return "ptr"
+	return irPtr
 }
 
 // headeredHost reports a host value that carries its own header word, before
@@ -64,7 +67,7 @@ func hostHandleIR(t Type) string {
 func headeredHost(t Type) bool {
 	return hostPrefixedObject(t) || t.IsArrayBuffer() && !t.IsClass() && !t.IsDynamic() && !t.IsArray() ||
 		t.IsMap() || t.IsSet() ||
-		(t.IsCollIter() || t.IsReadableStream() || t.IsStreamReader() || t.IsStreamWriter() || t.IsWritableStream() || t.IsTransformStream()) && !t.IsDynamic() || t.IsRegExp() && t.IsObject() && !t.IsClass() || t.IsDate() && t.IR == "ptr" && !t.IsClass() && !t.IsDynamic() ||
+		(t.IsCollIter() || t.IsReadableStream() || t.IsStreamReader() || t.IsStreamWriter() || t.IsWritableStream() || t.IsTransformStream()) && !t.IsDynamic() || t.IsRegExp() && t.IsObject() && !t.IsClass() || t.IsDate() && t.IR == irPtr && !t.IsClass() && !t.IsDynamic() ||
 		t.IsPrimWrapper()
 }
 
@@ -81,12 +84,12 @@ func hostBodyAt8(t Type) bool {
 func (e *Emitter) emitHostCellLoad(cell string, t Type) string {
 	if headeredHost(t) {
 		body := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, cell))
+		e.emitBodyAddr(body, cell)
 		return body
 	}
 	hp, handle := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", hp, hostBoxTy, cell))
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", handle, hostHandleIR(t), hp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", hp, hostBoxTy, cell))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", handle, hostHandleIR(t), hp))
 	return handle
 }
 
@@ -107,7 +110,7 @@ func isHostHandle(t Type) bool {
 	}
 	// An index-signature dictionary is map-backed but an object: it boxes as
 	// a dynamic object (emitBoxValue), not a host cell.
-	return t.IR == "ptr" && !t.IsDynamic() && !t.IsObject() && !t.IsArray() && !t.IsFunc() &&
+	return t.IR == irPtr && !t.IsDynamic() && !t.IsObject() && !t.IsArray() && !t.IsFunc() &&
 		!t.IsPromise() && !t.IsGenerator() &&
 		!t.IsBigInt() && !t.IsCaught() && !t.IsNull() && t.Kind != kindUndefined && !t.IsDynamicObject() && hasHandleFlag(t)
 }
@@ -220,7 +223,6 @@ func (e *Emitter) hostID(t Type) int64 {
 // emitBoxHost boxes a host handle: a fresh cell, or null for an absent
 // nullable one.
 func (e *Emitter) emitBoxHost(v Value) Value {
-	e.ensureMalloc()
 	e.ensureHostBoxHooks()
 	id := e.hostID(v.Ty)
 	var cell string
@@ -228,14 +230,14 @@ func (e *Emitter) emitBoxHost(v Value) Value {
 		// Its header word is already before its body: the box is the
 		// object itself, so identity holds through `any`.
 		cell = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", cell, v.Ref))
+		e.emitPrefixWordAddr(cell, v.Ref)
 	} else {
 		cell = e.freshReg()
-		e.heapMallocInto(cell, "16")
-		e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", id, cell))
+		e.heapMallocInto(cell, allocHost, "16")
+		e.heapStore("i64", fmt.Sprint(id), cell, 8)
 		hp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", hp, hostBoxTy, cell))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", hostHandleIR(v.Ty), v.Ref, hp))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", hp, hostBoxTy, cell))
+		e.heapStore(hostHandleIR(v.Ty), v.Ref, hp, 8)
 	}
 	boxed := e.emitNbTagPtr(cell, kmlTagObject)
 	if !v.Ty.Nullable() {
@@ -256,21 +258,21 @@ func (e *Emitter) emitBoxHost(v Value) Value {
 // pointer and an i1.
 func (e *Emitter) emitHostProbe(payload string) (cell, isHost string) {
 	cell = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", cell, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, cell, payload))
 	isNull := e.ptrIsNull(cell)
 	out := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", out))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", out))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", out))
 	loadL, doneL := e.freshLabel("host.probe"), e.freshLabel("host.probed")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, loadL))
 	e.emitLabel(loadL)
 	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, cell))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", e.hostHeaderTest(hdr), out))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, cell))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.hostHeaderTest(hdr), out))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	isHost = e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", isHost, out))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", isHost, out))
 	return cell, isHost
 }
 
@@ -304,10 +306,10 @@ func (e *Emitter) emitUnboxHost(v Value, target Type) Value {
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", first, nullish, t))
 	} else {
 		raw := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", raw, payload))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", first, nullish, raw))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, raw, payload))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", first, nullish, raw))
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", hir, first, slot))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", hir, first, slot))
 	isObj := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
 	probeL, loadL, doneL := e.freshLabel("unhost.probe"), e.freshLabel("unhost.load"), e.freshLabel("unhost.done")
@@ -319,47 +321,41 @@ func (e *Emitter) emitUnboxHost(v Value, target Type) Value {
 		// the host has: the runtime's row lookup walks its class to the host.
 		e.ensureHostBoxHooks()
 		name := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_host_class_name(i64 %s)", name, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_host_class_name(i64 %s)", name, v.Ref))
 		isHost = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isHost, name))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isHost, name))
 	}
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isHost, loadL, doneL))
 	e.emitLabel(loadL)
 	h := e.emitHostCellLoad(cell, target)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", hir, h, slot))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", hir, h, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, hir, slot))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, hir, slot))
 	return Value{Ref: r, Ty: target}
 }
 
-// hostClassNames are the classes `x instanceof C` can test a boxed host
-// value against.
+// isHostClassName reports whether `x instanceof name` tests a boxed host
+// value: name's declaration names a host layout, generic or not.
 func (e *Emitter) isHostClassName(name string) bool {
-	t, ok := hostClassTypes[name]
+	t, ok := primWrapperClasses[name]
 	if !ok {
-		t = e.resolveTypeName(name)
+		if t, ok = e.bareLayout(name); !ok {
+			t = e.resolveTypeName(name)
+		}
 	}
 	return isHostHandle(t) && hostClassName(t) == name
 }
 
-// hostClassTypes are the host classes whose type name alone (a generic one
-// without its arguments) does not resolve.
-var hostClassTypes = map[string]Type{
-	"Map":     MapType(TypePtr, TypePtr),
-	"Set":     SetType(TypePtr),
-	"WeakMap": WeakMapType(TypePtr, TypePtr),
-	"WeakSet": WeakSetType(TypePtr),
-	// The registry's held type is not part of its host key.
-	"FinalizationRegistry": FinalizationRegistryType(TypeAny),
-	// A stream's chunk type is not part of its host key.
-	"ReadableStream":  ReadableStreamType(TypeI64),
-	"WritableStream":  WritableStreamType(TypeI64),
-	"TransformStream": {IR: "ptr", Host: hostTransformStream},
-	"Number":          primWrapperType("Number"),
-	"String":          primWrapperType("String"),
-	"Boolean":         primWrapperType("Boolean"),
+// primWrapperClasses are the primitive wrapper classes: their declarations
+// type the primitive, not the wrapper object.
+var primWrapperClasses = map[string]Type{
+	"Number":  primWrapperType("Number"),
+	"String":  primWrapperType("String"),
+	"Boolean": primWrapperType("Boolean"),
+	"BigInt":  primWrapperType("BigInt"),
+	"Symbol":  primWrapperType("Symbol"),
 }
 
 // emitDynHostInstanceOf is `box instanceof name` for a host class: the box's
@@ -367,8 +363,8 @@ var hostClassTypes = map[string]Type{
 func (e *Emitter) emitDynHostInstanceOf(v Value, name string) Value {
 	e.ensureHostBoxHooks()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_host_is(i64 %s, ptr %s)", r, v.Ref, e.internString(name)))
-	return Value{Ref: r, Ty: TypeBool}
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_host_is(i64 %s, "+irPtr+" %s)", r, v.Ref, e.internString(name)))
+	return e.orBuiltinProtoChain(Value{Ref: r, Ty: TypeBool}, v, name)
 }
 
 // ensureHostBoxHooks declares the finalize-defined host routines.
@@ -378,11 +374,6 @@ func (e *Emitter) ensureHostBoxHooks() {
 	}
 	e.usedHostBox = true
 	// The dispatchers over a host box's registered row (boxsrc/hostbox.c).
-	e.emitGlobal(`declare ptr @__kml_host_inspect(ptr, i64)
-declare ptr @__kml_host_tag(ptr)
-declare zeroext i1 @__kml_host_is(i64, ptr)
-declare i64 @__kml_host_iter(i64)
-declare ptr @__kml_host_class_name(i64)`)
 }
 
 // emitHostInspectCall renders a probed host cell as console.log does.
@@ -392,7 +383,7 @@ func (e *Emitter) emitHostInspectCall(cell string, depth int) string {
 		depth = max
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_host_inspect(ptr %s, i64 %d)", r, cell, depth))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_host_inspect("+irPtr+" %s, i64 %d)", r, cell, depth))
 	return r
 }
 
@@ -411,7 +402,7 @@ func (e *Emitter) emitHostInspectRoutines() {
 			if h.ty.IsArray() {
 				// An array's cell is its header word; the header follows.
 				hdr := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%cell, i64 8", hdr))
+				e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %%cell, i64 8", hdr))
 				v = e.arrayValueFromHeaderReg(hdr, h.ty)
 			} else {
 				v = Value{Ref: e.emitHostCellLoad("%cell", h.ty), Ty: h.ty}
@@ -420,11 +411,11 @@ func (e *Emitter) emitHostInspectRoutines() {
 			if err != nil || s.Ref == "" {
 				s = Value{Ref: e.internString("[" + h.class + "]"), Ty: TypePtr}
 			}
-			e.emitTerminator(fmt.Sprintf("ret ptr %s", s.Ref))
+			e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", s.Ref))
 			body := e.allocas.String() + e.body.String()
 			restore()
 			stable()
-			e.writeFunc(fmt.Sprintf("internal ptr %s(ptr %%cell)", fn), body)
+			e.writeFunc(fmt.Sprintf("internal "+irPtr+" %s("+irPtr+" %%cell)", fn), body)
 		}
 	}
 }
@@ -436,8 +427,6 @@ func (e *Emitter) emitHostBoxFinalize() {
 	if !e.usedHostBox {
 		return
 	}
-	e.ensureUnitReg()
-	e.ensureStrcmp() // other generated code leans on this decl arriving here
 	for n := -1; n != len(e.hostLayouts); {
 		n = len(e.hostLayouts)
 		e.emitHostIterRoutines()
@@ -455,7 +444,7 @@ func (e *Emitter) emitHostBoxFinalize() {
 }
 
 // hostRowTy is a registered host layout row (see emitHostBoxFinalize).
-const hostRowTy = "{ i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr }"
+const hostRowTy = "{ i64, " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + " }"
 
 // registerHostRow adds h's row: its inspect routine per depth, its own
 // toString, its `[object X]` tag, its class name, its iterator and toJSON.
@@ -464,29 +453,29 @@ func (e *Emitter) registerHostRow(h hostLayout, maxD int) {
 	// The table opens with the depth the routines were generated at and the
 	// deepest one, then holds one routine per depth.
 	fns := []string{
-		fmt.Sprintf("ptr inttoptr (i64 %d to ptr)", e.effectiveInspectDepth()),
-		fmt.Sprintf("ptr inttoptr (i64 %d to ptr)", maxD),
+		fmt.Sprintf(irPtr+" inttoptr (i64 %d to "+irPtr+")", e.effectiveInspectDepth()),
+		fmt.Sprintf(irPtr+" inttoptr (i64 %d to "+irPtr+")", maxD),
 	}
 	for d := 0; d <= maxD; d++ {
-		fns = append(fns, fmt.Sprintf("ptr @__kml_host_inspect_%d_%d", id, d))
+		fns = append(fns, fmt.Sprintf(irPtr+" @__kml_host_inspect_%d_%d", id, d))
 	}
 	tab := fmt.Sprintf("@__kml_host_inspect_tab_%d", id)
-	e.emitGlobal(fmt.Sprintf("%s = private constant [%d x ptr] [%s]", tab, len(fns), strings.Join(fns, ", ")))
+	e.emitGlobal(fmt.Sprintf("%s = private"+irGlobalAS+" constant [%d x "+irPtr+"] [%s]", tab, len(fns), strings.Join(fns, ", ")))
 	field := func(fn string) string {
 		if fn == "" {
-			return "ptr null"
+			return irPtr + " null"
 		}
-		return "ptr " + fn
+		return irPtr + " " + fn
 	}
 	tostr := ""
 	if hostOwnToString[h.class] {
 		tostr = e.emitHostToStringRoutine(h)
 	}
 	e.addUnitRow(unitKindHost, hostRowTy, h.id, strings.Join([]string{
-		"ptr " + tab,
+		irPtr + " " + tab,
 		field(tostr),
-		"ptr " + e.internString("[object "+h.class+"]"),
-		"ptr " + e.internString(h.class),
+		irPtr + " " + e.internString("[object "+h.class+"]"),
+		irPtr + " " + e.internString(h.class),
 		field(e.hostIterFns[h.id]),
 		field(e.hostToJSONFn(h)),
 		field(e.hostToPrimFn(h)),
@@ -498,7 +487,7 @@ func (e *Emitter) registerHostRow(h hostLayout, maxD int) {
 func (e *Emitter) emitHostToStringTag(cell string) string {
 	e.ensureHostBoxHooks()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_host_tag(ptr %s)", r, cell))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_host_tag("+irPtr+" %s)", r, cell))
 	return r
 }
 
@@ -522,10 +511,10 @@ func (e *Emitter) emitHostToStringRoutine(h hostLayout) string {
 	if err != nil || s.Ref == "" {
 		s = Value{Ref: e.internString("[object " + h.class + "]"), Ty: TypePtr}
 	}
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", s.Ref))
+	e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", s.Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal ptr %s(ptr %%cell)", fn), body)
+	e.writeFunc(fmt.Sprintf("internal "+irPtr+" %s("+irPtr+" %%cell)", fn), body)
 	return fn
 }
 
@@ -569,7 +558,7 @@ func (e *Emitter) emitHostIterRoutines() {
 		}
 		body := e.allocas.String() + e.body.String()
 		restore()
-		e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%cell)", fn), body)
+		e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%cell)", fn), body)
 		e.hostIterFns[h.id] = fn
 	}
 }
@@ -587,10 +576,10 @@ func (e *Emitter) hostToJSONFn(h hostLayout) string {
 	if err == nil {
 		ret = s.Ref
 	}
-	e.emitTerminator(fmt.Sprintf("ret ptr %s", ret))
+	e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", ret))
 	body := e.allocas.String() + e.body.String()
 	restore()
 	fn := fmt.Sprintf("@__kml_host_tojson_%d", h.id&kmlHdrIDMask)
-	e.writeFunc(fmt.Sprintf("internal ptr %s(ptr %%cell)", fn), body)
+	e.writeFunc(fmt.Sprintf("internal "+irPtr+" %s("+irPtr+" %%cell)", fn), body)
 	return fn
 }

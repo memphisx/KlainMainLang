@@ -20,8 +20,8 @@ type literalOracle struct{}
 func (literalOracle) ExprType(expr ast.Expression) (Type, bool) {
 	return Type{IR: "i8"}, true
 }
-func (literalOracle) AnnotationType(ta *ast.TypeAnnotation) (Type, bool) {
-	return TypePtr, ta.Name == "number"
+func (literalOracle) AnnotationType(ta ast.TypeNode) (Type, bool) {
+	return TypePtr, ast.IsKeywordNode(ta, "number")
 }
 func (literalOracle) GlobalType(*ast.VarDeclaration) (Type, bool, bool) { return Type{}, false, false }
 func (literalOracle) ReturnType(*ast.BlockStatement) (Type, bool, bool) { return Type{}, false, false }
@@ -71,7 +71,7 @@ func TestShadowRecordsDisagreementsWithoutChangingIR(t *testing.T) {
 			t.Errorf("record %+v", d)
 		}
 	}
-	for _, want := range []string{"inferExprType Identifier", "resolveType KeywordType"} {
+	for _, want := range []string{"typeOfExpr Identifier"} {
 		if !seen[want] {
 			t.Errorf("no %s disagreement in %v", want, ds)
 		}

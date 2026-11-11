@@ -32,8 +32,8 @@ interface Console {
     info(...data: any[]): void;
     /** @intrinsic console.log */
     log(...data: any[]): void;
-    /** @intrinsic console.table */
-    table(tabularData?: any, properties?: string[]): void;
+    /** @lower internal_console_table:table */
+    table(tabularData?: any, properties?: readonly string[]): void;
     /** @intrinsic console.time */
     time(label?: string): void;
     /** @intrinsic console.timeEnd */
@@ -81,6 +81,7 @@ interface BufferConstructor {
     byteLength(string: string | NodeJS.ArrayBufferView | ArrayBufferLike, encoding?: BufferEncoding): number;
     /** @intrinsic Buffer.compare */
     compare(buf1: Uint8Array, buf2: Uint8Array): -1 | 0 | 1;
+    /** @lower internal_buffer:poolSize */
     poolSize: number;
 }
 /** @lowerType buffer */
@@ -350,6 +351,15 @@ interface URLSearchParams {
     toString(): string;
     forEach(callbackfn: (value: string, key: string, parent: URLSearchParams) => void, thisArg?: any): void;
 }
+interface URLSearchParamsIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): URLSearchParamsIterator<T>;
+}
+interface URLSearchParams {
+    [Symbol.iterator](): URLSearchParamsIterator<[string, string]>;
+    entries(): URLSearchParamsIterator<[string, string]>;
+    keys(): URLSearchParamsIterator<string>;
+    values(): URLSearchParamsIterator<string>;
+}
 declare var URLSearchParams: {
     prototype: URLSearchParams;
     new (init?: string[][] | Record<string, string> | string | URLSearchParams): URLSearchParams;
@@ -369,12 +379,17 @@ declare namespace NodeJS {
         | "SIGIOT" | "SIGKILL" | "SIGPIPE" | "SIGPOLL" | "SIGPROF" | "SIGPWR" | "SIGQUIT" | "SIGSEGV" | "SIGSTKFLT"
         | "SIGSTOP" | "SIGSYS" | "SIGTERM" | "SIGTRAP" | "SIGTSTP" | "SIGTTIN" | "SIGTTOU" | "SIGUNUSED" | "SIGURG"
         | "SIGUSR1" | "SIGUSR2" | "SIGVTALRM" | "SIGWINCH" | "SIGXCPU" | "SIGXFSZ" | "SIGBREAK" | "SIGLOST" | "SIGINFO";
+    /** @lowerType dict */
     interface Dict<T> {
         [key: string]: T | undefined;
     }
+    /** @lowerType boxed */
     interface ProcessEnv extends Dict<string> {}
+    /** @lowerType string */
     type Platform = "aix" | "android" | "darwin" | "freebsd" | "haiku" | "linux" | "openbsd" | "sunos" | "win32" | "cygwin" | "netbsd";
+    /** @lowerType string */
     type Architecture = "arm" | "arm64" | "ia32" | "loong64" | "mips" | "mipsel" | "ppc" | "ppc64" | "riscv64" | "s390" | "s390x" | "x64";
+    /** @lowerType memoryusage */
     interface MemoryUsage {
         rss: number;
         heapTotal: number;
@@ -408,7 +423,10 @@ declare namespace NodeJS {
     type WriteStream = import("tty").WriteStream & { _isStdio: true; destroySoon(): void };
     // Process is an EventEmitter; its members are declared here, as
     // @types/node's own overloads are.
-    interface Process {
+    // The members process's emitter object holds (lib/node/internal_process.ts):
+    // EventEmitter's, the fork channel's, and title.
+    /** @lower internal_process:_kmlProcess */
+    interface ProcessEmitter {
         addListener(event: "beforeExit", listener: BeforeExitListener): this;
         addListener(event: "disconnect", listener: DisconnectListener): this;
         addListener(event: "exit", listener: ExitListener): this;
@@ -484,44 +502,89 @@ declare namespace NodeJS {
         rawListeners(eventName: string | symbol): Function[];
         listenerCount(eventName: string | symbol, listener?: Function): number;
         eventNames(): Array<string | symbol>;
-        emitWarning(warning: string | Error, ctor?: Function): void;
-        emitWarning(warning: string | Error, type?: string, ctor?: Function): void;
-        emitWarning(warning: string | Error, type?: string, code?: string, ctor?: Function): void;
-        emitWarning(warning: string | Error, options?: EmitWarningOptions): void;
         send?(message: any, sendHandle?: any, options?: { keepOpen?: boolean | undefined }, callback?: (error: Error | null) => void): boolean;
         disconnect?(): void;
         connected: boolean;
         channel?: Control;
+        title: string;
+        exitCode: number | string | null | undefined;
+    }
+    interface Process extends ProcessEmitter {
+        /** @lower internal_process_warning:emitWarning */
+        emitWarning(warning: string | Error, ctor?: Function): void;
+        /** @lower internal_process_warning:emitWarning */
+        emitWarning(warning: string | Error, type?: string, ctor?: Function): void;
+        /** @lower internal_process_warning:emitWarning */
+        emitWarning(warning: string | Error, type?: string, code?: string, ctor?: Function): void;
+        /** @lower internal_process_warning:emitWarning */
+        emitWarning(warning: string | Error, options?: EmitWarningOptions): void;
+        /** @lower internal_process_env:argv */
         argv: string[];
+        /** @lower internal_process_env:argv0 */
         argv0: string;
+        /** @lower internal_process_env:execArgv */
         execArgv: string[];
+        /** @lower internal_process_env:execPath */
         execPath: string;
         env: ProcessEnv;
-        exitCode: number | string | null | undefined;
+        /** @lower internal_process_methods:pid */
         readonly pid: number;
+        /** @lower internal_process_methods:ppid */
         readonly ppid: number;
         stdin: ReadStream;
         stdout: WriteStream & { fd: 1 };
         stderr: WriteStream & { fd: 2 };
+        /** @lower internal_process_methods:umask */
         umask(mask?: string | number): number;
+        /** @lower internal_process_methods:getuid */
         getuid(): number;
+        /** @lower internal_process_methods:geteuid */
         geteuid(): number;
+        /** @lower internal_process_methods:getgid */
         getgid(): number;
+        /** @lower internal_process_methods:getegid */
         getegid(): number;
+        /** @lower internal_process_methods:platform */
         readonly platform: Platform;
+        /** @lower internal_process_methods:arch */
         readonly arch: Architecture;
+        /** @lower internal_process_env:version */
         readonly version: string;
+        /** @lower internal_process_env:versions */
         readonly versions: ProcessVersions;
-        title: string;
+        /** @lower internal_process_env:features */
+        readonly features: ProcessFeatures;
+        /** @lower internal_process_methods:cwd */
         cwd(): string;
+        /** @lower internal_process_methods:chdir */
         chdir(directory: string): void;
+        /** @lower internal_process_env:exit */
         exit(code?: number | string | null): never;
+        /** @lower internal_process_methods:uptime */
         uptime(): number;
+        /** @lower internal_timers:getActiveResourcesInfo */
+        getActiveResourcesInfo(): string[];
+        /** @lower internal_process_hrtime:hrtime */
         hrtime: HRTime;
-        memoryUsage(): MemoryUsage;
+        /** @lower internal_process_methods:memoryUsage */
+        memoryUsage: MemoryUsageFn;
+        /** @lower internal_process_methods:kill */
         kill(pid: number, signal?: string | number): true;
         /** @lower __kml_process_nextTick */
         nextTick(callback: Function, ...args: any[]): void;
+    }
+    interface ProcessFeatures {
+        readonly cached_builtins: boolean;
+        readonly debug: boolean;
+        readonly inspector: boolean;
+        readonly ipv6: boolean;
+        readonly require_module: boolean;
+        readonly tls: boolean;
+        readonly tls_alpn: boolean;
+        readonly tls_ocsp: boolean;
+        readonly tls_sni: boolean;
+        readonly typescript: "strip" | "transform" | false;
+        readonly uv: boolean;
     }
     interface ProcessVersions extends Dict<string> {
         http_parser: string;
@@ -532,6 +595,10 @@ declare namespace NodeJS {
         zlib: string;
         modules: string;
         openssl: string;
+    }
+    interface MemoryUsageFn {
+        (): MemoryUsage;
+        rss(): number;
     }
     interface HRTime {
         (time?: [number, number]): [number, number];
@@ -558,6 +625,7 @@ declare namespace NodeJS {
     }
     // A timer handle (@types/node's timers.d.ts): Node's Timeout and
     // Immediate, lib/node/internal_timers.ts's classes.
+    /** @lowerType timeout */
     interface Timeout {
         ref(): this;
         unref(): this;
@@ -565,6 +633,7 @@ declare namespace NodeJS {
         refresh(): this;
         close(): this;
     }
+    /** @lowerType immediate */
     interface Immediate {
         ref(): this;
         unref(): this;
@@ -575,6 +644,7 @@ declare namespace NodeJS {
 declare var process: NodeJS.Process;
 
 // Node's `--expose-gc` global.
+/** @intrinsic gc */
 declare function gc(): void;
 
 // Node's timers (@types/node's timers.d.ts globals).
@@ -638,16 +708,6 @@ declare module "url" {
 // web-globals/fetch.d.ts) in TypeScript's own library shapes (lib.dom.d.ts):
 // fetch, Request, Response and Headers.
 type RequestInfo = Request | string;
-// FormData has no implementation: the type is declared for BodyInit and
-// Body.formData(), and no constructor is.
-interface FormData {
-    append(name: string, value: string | Blob, fileName?: string): void;
-    delete(name: string): void;
-    get(name: string): FormDataEntryValue | null;
-    getAll(name: string): FormDataEntryValue[];
-    has(name: string): boolean;
-    set(name: string, value: string | Blob, fileName?: string): void;
-}
 type FormDataEntryValue = File | string;
 type BodyInit =
     | ReadableStream
@@ -670,12 +730,17 @@ type RequestRedirect = "error" | "follow" | "manual";
 type RequestDuplex = "half";
 type ResponseType = "basic" | "cors" | "default" | "error" | "opaque" | "opaqueredirect";
 interface Body {
-    readonly body: ReadableStream<Uint8Array> | null;
+    /** @intrinsic Body.prototype.body */
+    readonly body: ReadableStream<Uint8Array<ArrayBuffer>> | null;
+    /** @intrinsic Body.prototype.bodyUsed */
     readonly bodyUsed: boolean;
     /** @intrinsic Body.prototype.arrayBuffer */
     arrayBuffer(): Promise<ArrayBuffer>;
+    /** @intrinsic Body.prototype.blob */
     blob(): Promise<Blob>;
+    /** @intrinsic Body.prototype.bytes */
     bytes(): Promise<Uint8Array<ArrayBuffer>>;
+    /** @intrinsic Body.prototype.formData */
     formData(): Promise<FormData>;
     /** @intrinsic Body.prototype.json */
     json(): Promise<any>;
@@ -690,6 +755,15 @@ interface Headers {
     has(name: string): boolean;
     set(name: string, value: string): void;
     forEach(callbackfn: (value: string, key: string, parent: Headers) => void, thisArg?: any): void;
+}
+interface HeadersIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): HeadersIterator<T>;
+}
+interface Headers {
+    [Symbol.iterator](): HeadersIterator<[string, string]>;
+    entries(): HeadersIterator<[string, string]>;
+    keys(): HeadersIterator<string>;
+    values(): HeadersIterator<string>;
 }
 declare var Headers: {
     prototype: Headers;
@@ -717,6 +791,7 @@ interface Request extends Body {
     readonly cache: RequestCache;
     readonly credentials: RequestCredentials;
     readonly destination: RequestDestination;
+    /** @intrinsic Request.prototype.headers */
     readonly headers: Headers;
     readonly integrity: string;
     readonly keepalive: boolean;
@@ -725,6 +800,7 @@ interface Request extends Body {
     readonly redirect: RequestRedirect;
     readonly referrer: string;
     readonly referrerPolicy: ReferrerPolicy;
+    /** @intrinsic Request.prototype.signal */
     readonly signal: AbortSignal;
     readonly url: string;
     clone(): Request;
@@ -740,12 +816,17 @@ interface ResponseInit {
 }
 /** @lowerType response */
 interface Response extends Body {
+    /** @intrinsic Response.prototype.headers */
     readonly headers: Headers;
     readonly ok: boolean;
+    /** @intrinsic Response.prototype.redirected */
     readonly redirected: boolean;
     readonly status: number;
+    /** @intrinsic Response.prototype.statusText */
     readonly statusText: string;
+    /** @intrinsic Response.prototype.type */
     readonly type: ResponseType;
+    /** @intrinsic Response.prototype.url */
     readonly url: string;
     clone(): Response;
 }
@@ -798,6 +879,10 @@ declare var CountQueuingStrategy: {
     new (init: QueuingStrategyInit): CountQueuingStrategy;
 };
 type ReadableStreamType = "bytes";
+type ReadableStreamReaderMode = "byob";
+interface ReadableStreamGetReaderOptions {
+    mode?: ReadableStreamReaderMode;
+}
 type ReadableStreamController<T> = ReadableStreamDefaultController<T>;
 type ReadableStreamReader<T> = ReadableStreamDefaultReader<T>;
 interface UnderlyingSourceCancelCallback {
@@ -880,24 +965,27 @@ interface ReadableStreamReadValueResult<T> {
 }
 /** @lowerType readablestreamreadresult */
 type ReadableStreamReadResult<T> = ReadableStreamReadValueResult<T> | ReadableStreamReadDoneResult<T>;
+/** @lowerType streamasynciterator */
 interface ReadableStreamAsyncIterator<T> extends AsyncIterableIterator<T> {
     [Symbol.asyncIterator](): ReadableStreamAsyncIterator<T>;
 }
 /** @lowerType readablestream */
 interface ReadableStream<R = any> {
+    /** @intrinsic ReadableStream.prototype.locked */
     readonly locked: boolean;
     /** @intrinsic ReadableStream.prototype.cancel */
     cancel(reason?: any): Promise<void>;
     /** @intrinsic ReadableStream.prototype.getReader */
-    getReader(): ReadableStreamDefaultReader<R>;
+    getReader(options?: ReadableStreamGetReaderOptions): ReadableStreamDefaultReader<R>;
     /** @intrinsic ReadableStream.prototype.pipeThrough */
     pipeThrough<T>(transform: ReadableWritablePair<T, R>, options?: StreamPipeOptions): ReadableStream<T>;
     /** @intrinsic ReadableStream.prototype.pipeTo */
     pipeTo(destination: WritableStream<R>, options?: StreamPipeOptions): Promise<void>;
     /** @intrinsic ReadableStream.prototype.tee */
     tee(): [ReadableStream<R>, ReadableStream<R>];
-    /** @intrinsic ReadableStream.prototype.values */
+    /** @lower internal_rs_iterator:values */
     values(options?: ReadableStreamIteratorOptions): ReadableStreamAsyncIterator<R>;
+    /** @lower internal_rs_iterator:values */
     [Symbol.asyncIterator](options?: ReadableStreamIteratorOptions): ReadableStreamAsyncIterator<R>;
 }
 declare var ReadableStream: {
@@ -908,6 +996,7 @@ declare var ReadableStream: {
     new <R = any>(underlyingSource?: UnderlyingSource<R>, strategy?: QueuingStrategy<R>): ReadableStream<R>;
 };
 interface ReadableStreamGenericReader {
+    /** @intrinsic ReadableStreamGenericReader.prototype.closed */
     readonly closed: Promise<void>;
     /** @intrinsic ReadableStreamGenericReader.prototype.cancel */
     cancel(reason?: any): Promise<void>;
@@ -925,6 +1014,7 @@ declare var ReadableStreamDefaultReader: {
 };
 /** @lowerType readablestreamdefaultcontroller */
 interface ReadableStreamDefaultController<R = any> {
+    /** @intrinsic ReadableStreamDefaultController.prototype.desiredSize */
     readonly desiredSize: number | null;
     /** @intrinsic ReadableStreamDefaultController.prototype.close */
     close(): void;
@@ -939,6 +1029,7 @@ declare var ReadableStreamDefaultController: {
 };
 /** @lowerType writablestream */
 interface WritableStream<W = any> {
+    /** @intrinsic WritableStream.prototype.locked */
     readonly locked: boolean;
     /** @intrinsic WritableStream.prototype.abort */
     abort(reason?: any): Promise<void>;
@@ -953,8 +1044,11 @@ declare var WritableStream: {
 };
 /** @lowerType writablestreamdefaultwriter */
 interface WritableStreamDefaultWriter<W = any> {
+    /** @intrinsic WritableStreamDefaultWriter.prototype.closed */
     readonly closed: Promise<void>;
+    /** @intrinsic WritableStreamDefaultWriter.prototype.desiredSize */
     readonly desiredSize: number | null;
+    /** @intrinsic WritableStreamDefaultWriter.prototype.ready */
     readonly ready: Promise<void>;
     /** @intrinsic WritableStreamDefaultWriter.prototype.abort */
     abort(reason?: any): Promise<void>;
@@ -981,7 +1075,9 @@ declare var WritableStreamDefaultController: {
 };
 /** @lowerType transformstream */
 interface TransformStream<I = any, O = any> {
+    /** @intrinsic TransformStream.prototype.readable */
     readonly readable: ReadableStream<O>;
+    /** @intrinsic TransformStream.prototype.writable */
     readonly writable: WritableStream<I>;
 }
 declare var TransformStream: {
@@ -1079,8 +1175,60 @@ declare var Blob: {
     new (blobParts?: BlobPart[], options?: BlobPropertyBag): Blob;
 };
 
+// File, FormData and Navigator (TypeScript's lib.dom.d.ts shapes, as
+// @types/node's web globals declare them).
+interface FilePropertyBag extends BlobPropertyBag {
+    lastModified?: number;
+}
+interface File extends Blob {
+    readonly lastModified: number;
+    readonly name: string;
+}
+declare var File: {
+    prototype: File;
+    new (fileBits: BlobPart[], fileName: string, options?: FilePropertyBag): File;
+};
+interface FormData {
+    append(name: string, value: string | Blob): void;
+    append(name: string, value: string): void;
+    append(name: string, blobValue: Blob, filename?: string): void;
+    delete(name: string): void;
+    get(name: string): FormDataEntryValue | null;
+    getAll(name: string): FormDataEntryValue[];
+    has(name: string): boolean;
+    set(name: string, value: string | Blob): void;
+    set(name: string, value: string): void;
+    set(name: string, blobValue: Blob, filename?: string): void;
+    forEach(callbackfn: (value: FormDataEntryValue, key: string, parent: FormData) => void, thisArg?: any): void;
+    [Symbol.iterator](): FormDataIterator<[string, FormDataEntryValue]>;
+    entries(): FormDataIterator<[string, FormDataEntryValue]>;
+    keys(): FormDataIterator<string>;
+    values(): FormDataIterator<FormDataEntryValue>;
+}
+interface FormDataIterator<T> extends IteratorObject<T, BuiltinIteratorReturn, unknown> {
+    [Symbol.iterator](): FormDataIterator<T>;
+}
+declare var FormData: {
+    prototype: FormData;
+    new (): FormData;
+};
+interface Navigator {
+    readonly hardwareConcurrency: number;
+    readonly language: string;
+    readonly languages: readonly string[];
+    readonly platform: string;
+    readonly userAgent: string;
+}
+declare var Navigator: {
+    prototype: Navigator;
+    new (): Navigator;
+};
+declare var navigator: Navigator;
+
 // TextEncoder and TextDecoder (TypeScript's lib.dom.d.ts).
+/** @lowerType dynamic */
 type AllowSharedBufferSource = ArrayBufferLike | ArrayBufferView<ArrayBufferLike>;
+/** @lowerType dynamic */
 type BufferSource = ArrayBufferView<ArrayBuffer> | ArrayBuffer;
 interface TextDecoderCommon {
     readonly encoding: string;
@@ -1115,6 +1263,22 @@ interface TextEncoder extends TextEncoderCommon {
 declare var TextEncoder: {
     prototype: TextEncoder;
     new (): TextEncoder;
+};
+interface TextEncoderStream extends GenericTransformStream, TextEncoderCommon {
+    readonly readable: ReadableStream<Uint8Array<ArrayBuffer>>;
+    readonly writable: WritableStream<string>;
+}
+declare var TextEncoderStream: {
+    prototype: TextEncoderStream;
+    new (): TextEncoderStream;
+};
+interface TextDecoderStream extends GenericTransformStream, TextDecoderCommon {
+    readonly readable: ReadableStream<string>;
+    readonly writable: WritableStream<AllowSharedBufferSource>;
+}
+declare var TextDecoderStream: {
+    prototype: TextDecoderStream;
+    new (label?: string, options?: TextDecoderOptions): TextDecoderStream;
 };
 
 // performance and the user-timing entry classes (@types/node's
@@ -1432,6 +1596,7 @@ declare var EventSource: {
 // Node's `util` module: the code-generated part (@types/node's util.d.ts
 // `format` and `inspect`); `promisify` is lib/node/internal_util.ts.
 
+/** @lowerType domexception */
 interface DOMException extends Error {
     readonly code: number;
     readonly message: string;
@@ -1512,3 +1677,143 @@ declare var HttpRequest: {
     prototype: HttpRequest;
     new (resume: () => void, method: string, url: string, headers: Map<string, string>): HttpRequest;
 };
+
+// WebAssembly (lib/node/kml_wasm.ts), as TypeScript's lib.dom.d.ts declares it.
+declare namespace WebAssembly {
+    interface CompileError extends Error {
+    }
+
+    var CompileError: {
+        prototype: CompileError;
+        new(message?: string): CompileError;
+        (message?: string): CompileError;
+    };
+
+    interface Global<T extends ValueType = ValueType> {
+        value: ValueTypeMap[T];
+        valueOf(): ValueTypeMap[T];
+    }
+
+    var Global: {
+        prototype: Global;
+        new<T extends ValueType = ValueType>(descriptor: GlobalDescriptor<T>, v?: ValueTypeMap[T]): Global<T>;
+    };
+
+    interface Instance {
+        readonly exports: Exports;
+    }
+
+    var Instance: {
+        prototype: Instance;
+        new(module: Module, importObject?: Imports): Instance;
+    };
+
+    interface LinkError extends Error {
+    }
+
+    var LinkError: {
+        prototype: LinkError;
+        new(message?: string): LinkError;
+        (message?: string): LinkError;
+    };
+
+    interface Memory {
+        readonly buffer: ArrayBuffer;
+        grow(delta: number): number;
+    }
+
+    var Memory: {
+        prototype: Memory;
+        new(descriptor: MemoryDescriptor): Memory;
+    };
+
+    interface Module {
+    }
+
+    var Module: {
+        prototype: Module;
+        new(bytes: BufferSource): Module;
+        customSections(moduleObject: Module, sectionName: string): ArrayBuffer[];
+        exports(moduleObject: Module): ModuleExportDescriptor[];
+        imports(moduleObject: Module): ModuleImportDescriptor[];
+    };
+
+    interface RuntimeError extends Error {
+    }
+
+    var RuntimeError: {
+        prototype: RuntimeError;
+        new(message?: string): RuntimeError;
+        (message?: string): RuntimeError;
+    };
+
+    interface Table {
+        readonly length: number;
+        get(index: number): any;
+        grow(delta: number, value?: any): number;
+        set(index: number, value?: any): void;
+    }
+
+    var Table: {
+        prototype: Table;
+        new(descriptor: TableDescriptor, value?: any): Table;
+    };
+
+    interface GlobalDescriptor<T extends ValueType = ValueType> {
+        mutable?: boolean;
+        value: T;
+    }
+
+    interface MemoryDescriptor {
+        initial: number;
+        maximum?: number;
+        shared?: boolean;
+    }
+
+    interface ModuleExportDescriptor {
+        kind: ImportExportKind;
+        name: string;
+    }
+
+    interface ModuleImportDescriptor {
+        kind: ImportExportKind;
+        module: string;
+        name: string;
+    }
+
+    interface TableDescriptor {
+        element: TableKind;
+        initial: number;
+        maximum?: number;
+    }
+
+    interface ValueTypeMap {
+        anyfunc: Function;
+        externref: any;
+        f32: number;
+        f64: number;
+        i32: number;
+        i64: bigint;
+        v128: never;
+    }
+
+    interface WebAssemblyInstantiatedSource {
+        instance: Instance;
+        module: Module;
+    }
+
+    type ImportExportKind = "function" | "global" | "memory" | "table";
+    type TableKind = "anyfunc" | "externref";
+    type ExportValue = Function | Global | Memory | Table;
+    type Exports = Record<string, ExportValue>;
+    type ImportValue = ExportValue | number;
+    type Imports = Record<string, ModuleImports>;
+    type ModuleImports = Record<string, ImportValue>;
+    type ValueType = keyof ValueTypeMap;
+    function compile(bytes: BufferSource): Promise<Module>;
+    function compileStreaming(source: Response | PromiseLike<Response>): Promise<Module>;
+    function instantiate(bytes: BufferSource, importObject?: Imports): Promise<WebAssemblyInstantiatedSource>;
+    function instantiate(moduleObject: Module, importObject?: Imports): Promise<Instance>;
+    function instantiateStreaming(source: Response | PromiseLike<Response>, importObject?: Imports): Promise<WebAssemblyInstantiatedSource>;
+    function validate(bytes: BufferSource): boolean;
+}

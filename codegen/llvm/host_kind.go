@@ -46,8 +46,7 @@ const (
 	// own IR shape.
 	hostGenerator
 	// hostCollIter marks an Array, Map or Set iterator (`arr.values()`,
-	// `m.keys()`, `s.entries()`): a ptr to a {next, pos, source} node
-	// (ensureMapIters).
+	// `m.keys()`, `s.entries()`): a ptr to a {next, pos, source} node.
 	hostCollIter
 	// hostTypedArray marks a TypedArray (Int8Array/Uint8Array/Int16Array/
 	// Uint16Array/Int32Array/Uint32Array/Float32Array/Float64Array — no

@@ -177,12 +177,10 @@
       "name": "bigint",
       "statusRow": "bigint",
       "signature": "const n = 10n",
-      "badge": "caveats",
-      "description": "Arbitrary-precision integers over a backend-agnostic ABI, selectable via -bigint=libtommath|gmp (default libtommath, public domain). Literals, the full arithmetic/bitwise operator set, same-type and cross-type-with-integer comparisons, typeof, ++/--, .toString([radix]), BigInt.asIntN/asUintN, Number(bigint), params/returns/fields/arrays, and BigInt(int|string) all work. Division/modulo by zero throws a catchable Error.",
+      "badge": "exact",
+      "description": "Arbitrary-precision integers over a backend-agnostic ABI, selectable via -bigint=libtommath|gmp (default libtommath, public domain). Literals, the full arithmetic/bitwise operator set, same-type and cross-type-with-integer comparisons, typeof, ++/--, .toString([radix]), .toLocaleString(), BigInt.asIntN/asUintN, Number(bigint), params/returns/fields/arrays, and BigInt(int|string) all work. Division/modulo by zero throws a RangeError.",
       "snippet": "const a = 10n\nconsole.log(a + 20n)              // 30n\nconsole.log(BigInt.asIntN(8, 255n))  // -1n\nconsole.log(Number(a))            // 10",
-      "differences": [
-        "No `.toLocaleString()` (an `Intl`-shaped gap)"
-      ],
+      "differences": [],
       "seeAlso": [
         "types.number"
       ],
@@ -293,13 +291,10 @@
       "name": "Union types beyond T | null",
       "statusRow": "Union types beyond T | null",
       "signature": "let x: string | number",
-      "badge": "caveats",
-      "description": "The same runtime box as any/unknown with a checked member set on top, statically restricted to the declared members at every assignment/call/return boundary. A narrowed local unboxes to the concrete member; an object member to its typed pointer. Usable for a variable, parameter, return value, object field and array element ((number | string)[], and (number | undefined)[] whose absent elements are real undefineds); every write is checked against the member set.",
+      "badge": "exact",
+      "description": "The same runtime box as any/unknown with a checked member set on top, statically restricted to the declared members at every assignment/call/return boundary. A narrowed local unboxes to the concrete member; an object member to its typed pointer. Members may be scalars, classes, object types, host objects, arrays and tuples (number[] | number[][]), and discriminated unions tagged by any literal. Usable for a variable, parameter, return value, object field and array element; every write is checked against the member set, and narrowing follows TypeScript.",
       "snippet": "let x: string | number = \"hello\"\nconsole.log(typeof x)    // string\nx = 42\nconsole.log(typeof x)    // number",
-      "differences": [
-        "Scalar members (`number`/`string`/`boolean` + `null`/`undefined`), object members (classes, plain object types, one headerless host object such as `URL`, or a discriminated union), and a `ReadableStream` member; two array members of one kind, number-literal tags, and a non-first-position tag aren't supported",
-        "Flow narrowing is for a union **local** via `typeof`/truthiness/`==null`/`instanceof`/`in`/a tag (if/else branches + early return); a field/element, `switch (typeof x)`, and `as` casts aren't narrowed; before narrowing an object union reads only a member all its object members declare"
-      ],
+      "differences": [],
       "seeAlso": [
         "types.nullable",
         "types.any"
@@ -335,7 +330,7 @@
       "statusRow": "Tuple types",
       "signature": "const point: [number, number]",
       "badge": "caveats",
-      "description": "A fixed-arity, heterogeneous, positional value stored as a fixed-shape struct. Supports labelled elements ([min: number, max: number]), the tuple literal, constant-index read and assignment, .length (compile-time constant), destructuring (including nested and for-of), and array-shaped rendering. Map/Array/Object.entries() return real [K, V] tuples.",
+      "description": "A fixed-arity, heterogeneous, positional value that is an Array, as in JavaScript: an alias, an array-typed binding and a value boxed into any are the same array. Supports labelled elements ([min: number, max: number]), the tuple literal, constant-index read and assignment with each element's own type, .length, the array methods, destructuring (including nested and for-of), and array rendering. Map/Array/Object.entries() return real [K, V] tuples.",
       "snippet": "const point: [number, number] = [3, 4]\nconsole.log(point[0])              // 3\nconst [name, value] = point",
       "differences": [
         "No rest/optional elements",
@@ -513,7 +508,7 @@
       "description": "declare ambient declarations describe types the environment provides; carrying no implementation, they are parsed and erased.",
       "snippet": "declare const BUILD_ID: string;\ndeclare function nativeHook(x: number): number;\ndeclare module \"vendor-lib\" {\n  export function doThing(): void;\n}",
       "differences": [
-        "Parsed and erased — the no-body/no-init forms and the brace-bodied `global`/`module`/`namespace`/`class` blocks all compile away. Ambient declarations describe externally-provided values; under whole-program AOT they have no target to bind to, so a runtime *use* of a declared binding this compiler doesn't itself provide is an ordinary `undefined variable` error"
+        "`declare var`/`let`/`const` are uninitialized bindings, `declare function` a stub that throws if called, and `declare namespace X` real ambient members. `declare class C` is typed with no implementation: `new C()` reads `C` as a global the environment provides, else throws ReferenceError, as Node does. String-named `declare module` and `declare global` blocks compile away"
       ],
       "seeAlso": [],
       "spec": {

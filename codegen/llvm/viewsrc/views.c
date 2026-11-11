@@ -14,6 +14,7 @@
  * and the next `.buffer` makes a fresh header (no one held the old one). */
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <pthread.h>
 
 typedef long long i64;
@@ -153,11 +154,12 @@ void *__kml_view_buffer(void *data, i64 len) {
     if (!r || r->root != root) r = kml_view_put(root, root, root_len, 0);
     if (!r->buf) {
         /* The ArrayBuffer's host header word precedes its header. */
-        i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 24);
+        i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 32);
         base[0] = r->shared ? KML_SAB_HDR : KML_AB_HDR;
         void **hdr = (void **)(base + 1);
         *(i64 *)hdr = root_len;
         hdr[1] = root;
+        base[3] = -1; /* fixed-length: no maximum */
         kml_view_set_buf(r, hdr);
     }
     void *buf = r->buf;
@@ -165,11 +167,92 @@ void *__kml_view_buffer(void *data, i64 len) {
     return buf;
 }
 
-#ifdef KML_BOXED_VIEWS
 /* ta.buffer of a typed array held in `any`: the buffer boxed as a host
  * object under the object tag, at its header word. */
 i64 __kml_view_buffer_any(void *data, i64 len) {
     void *buf = __kml_view_buffer(data, len);
     return (i64)((uintptr_t)((i64 *)buf - 1) | 1);
 }
+
+/* Views over a resizable (growable) buffer: each typed array's header
+ * length is kept as the buffer's byte length makes it. A length-tracking
+ * view (fixed < 0) spans the buffer from off to its end; a fixed-length one
+ * spans fixed elements; either is out of bounds, its length 0, while the
+ * buffer is too short for it. lenp is the header's length word; under
+ * -mm=gc the entry links the header weakly, so a dead view drops out. */
+typedef struct kml_track {
+    void *buf;
+    void *hdr; /* the header's allocation (lenp - 16), weakly linked */
+    void *key; /* hdr, unlinked: the by-header index's key */
+    i64 off, bpe, fixed;
+    int oob;   /* out of bounds as the buffer's length last left it */
+    struct kml_track *next, *hnext;
+} kml_track;
+static kml_track *kml_tracks[KML_VIEW_BUCKETS], *kml_tracks_h[KML_VIEW_BUCKETS];
+
+/* How many tracked views are out of bounds: while 0, no typed array is,
+ * and its methods skip asking (__kml_view_oob). */
+i64 __kml_views_oob;
+
+/* A typed array whose header length word is lenp views buf at byte offset
+ * off with bpe-byte elements, fixed of them (-1: tracking its length). */
+void __kml_view_track(i64 *lenp, void *buf, i64 off, i64 bpe, i64 fixed) {
+    if (!lenp || !buf || ((i64 *)buf)[2] < 0) return; /* fixed-length buffer */
+    kml_track *t = (kml_track *)KML_VIEW_ALLOC(sizeof(kml_track));
+    t->buf = buf;
+    t->hdr = (char *)lenp - 16;
+#ifdef KML_GC
+    kml_gc_weak_link(&t->hdr, t->hdr);
+    kml_gc_weak_link(&t->buf, buf); /* (a dead buffer's address may be reused) */
 #endif
+    t->key = (char *)lenp - 16;
+    t->off = off;
+    t->bpe = bpe;
+    t->fixed = fixed;
+    t->oob = 0;
+    unsigned h = kml_view_hash(buf), hh = kml_view_hash(t->key);
+    pthread_mutex_lock(&kml_views_mu);
+    t->next = kml_tracks[h];
+    kml_tracks[h] = t;
+    t->hnext = kml_tracks_h[hh];
+    kml_tracks_h[hh] = t;
+    pthread_mutex_unlock(&kml_views_mu);
+}
+
+/* buf was resized (grown) from old bytes: bytes it grew into read zero
+ * (whatever a shrink left there), and every view tracked over it takes the
+ * length its new byte length gives. */
+void __kml_view_resized(void *buf, i64 old) {
+    i64 n = *(i64 *)buf;
+    if (n > old) memset(*(char **)((char *)buf + 8) + old, 0, (size_t)(n - old));
+    pthread_mutex_lock(&kml_views_mu);
+    for (kml_track *t = kml_tracks[kml_view_hash(buf)]; t; t = t->next) {
+        if (t->buf != buf || !t->hdr) continue;
+        i64 *lenp = (i64 *)((char *)t->hdr + 16);
+        int oob = t->fixed >= 0 ? t->off + t->fixed * t->bpe > n : t->off > n;
+        *lenp = oob ? 0 : t->fixed >= 0 ? t->fixed : (n - t->off) / t->bpe;
+        __kml_views_oob += oob - t->oob;
+        t->oob = oob;
+    }
+    pthread_mutex_unlock(&kml_views_mu);
+}
+
+/* Whether the typed array whose header is h (its data field) is out of
+ * bounds of its resizable buffer. */
+i64 __kml_view_oob(void *h) {
+    void *key = (char *)h - 8;
+    int oob = 0;
+    pthread_mutex_lock(&kml_views_mu);
+    for (kml_track *t = kml_tracks_h[kml_view_hash(key)]; t; t = t->hnext)
+        if (t->key == key && t->hdr) {
+            oob = t->oob;
+            break;
+        }
+    pthread_mutex_unlock(&kml_views_mu);
+    return oob;
+}
+
+/* ta.byteOffset: 0 while out of bounds. */
+i64 __kml_view_offset_of(void *h, void *data) {
+    return __kml_views_oob && __kml_view_oob(h) ? 0 : __kml_view_offset(data);
+}

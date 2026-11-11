@@ -456,7 +456,7 @@ extern void (*const __kml_lt_kml_khttp_req_init)(void *self);
 // any `?`); the backend adopts it with the query and headers.
 void *__kml_native_khttp_h2o_request(double id) {
     kh_ex *ex = kh_get(id);
-    char *self = (char *)calloc(1, (size_t)__kml_lt_kml_khttp_req_size);
+    char *self = (char *)kml_calloc(KML_HEAP_WORDS, 1, (size_t)__kml_lt_kml_khttp_req_size);
     *(int64_t *)self = __kml_lt_kml_khttp_req_tag;
     if (__kml_lt_kml_khttp_req_vtable_at) *(void **)(self + __kml_lt_kml_khttp_req_vtable_at) = __kml_lt_kml_khttp_req_vtable;
     __kml_lt_kml_khttp_req_init(self);

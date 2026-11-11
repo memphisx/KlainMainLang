@@ -64,3 +64,12 @@ C { a: 1, g: undefined } [ 'a', 'g' ] false undefined
 D { a: 1, f: undefined, h: undefined } [ 'a', 'f', 'h' ]
 G { a: 1, f: undefined, g: undefined, a2: 2 } [ 'a', 'f', 'g', 'a2' ]`)
 }
+
+// `x?.[i]` on an any that holds null or undefined short-circuits.
+func TestE2EOptionalIndexOnBoxedValue(t *testing.T) {
+	src := "const a: any = undefined; const b: any = null; const c: any = [1, 2]; const o: any = { k: [3] };\nconsole.log(a?.[0], b?.[1], c?.[1], o.k?.[0], o.z?.[0], a?.[0].x);\n"
+	want := "undefined undefined 2 3 undefined undefined"
+	if got := compileAndRun(t, src); got != want {
+		t.Fatalf("got:\n%s\nwant:\n%s", got, want)
+	}
+}

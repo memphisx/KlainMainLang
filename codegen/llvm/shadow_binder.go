@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 type frontOracle struct {
@@ -29,6 +30,15 @@ type frontOracle struct {
 	// litBusy holds the object literals being typed, for one whose property
 	// reads the literal again.
 	litBusy map[*ast.ObjectLiteral]bool
+	// storageBusy and returnsBusy guard literalStorage and
+	// literalMethodReturns against a method reading its own literal's
+	// binding.
+	storageBusy map[*ast.ObjectLiteral]bool
+	returnsBusy map[*ast.ObjectLiteral]bool
+	// dynInit caches dynamicInit per declaration.
+	dynInit map[*ast.VarDeclaration]bool
+	// fnReads caches readInFunctions (its "" key marks it filled).
+	fnReads map[string]bool
 	// forOfBusy holds the loops whose iterable is being typed, for one that
 	// reads its own variable (`for (var v of v)`).
 	forOfBusy map[*ast.ForOfStatement]bool
@@ -51,6 +61,47 @@ type frontOracle struct {
 }
 
 func init() {
+	boxed := func(frontOracle, *ast.CallExpression) (Type, bool) { return TypeAny, true }
+	// The Object statics that build or return a dynamic object (a defined
+	// accessor, a prototype link, a descriptor) are held boxed, whatever
+	// the lib's result type.
+	for _, k := range []string{"defineProperty", "getOwnPropertyDescriptor", "create", "getPrototypeOf", "setPrototypeOf", "groupBy"} {
+		in := intrinsics["Object."+k]
+		in.held = boxed
+		intrinsics["Object."+k] = in
+	}
+	// Of a dynamic object, values/entries are a dynamic array
+	// (emitDynAnyEntries).
+	for _, k := range []string{"values", "entries"} {
+		in := intrinsics["Object."+k]
+		in.held = func(o frontOracle, call *ast.CallExpression) (Type, bool) {
+			if len(call.Args) == 1 {
+				if at, ok := o.ExprType(call.Args[0]); ok && isUnconstrainedDynamic(at) {
+					return TypeAny, true
+				}
+			}
+			return Type{}, false
+		}
+		intrinsics["Object."+k] = in
+	}
+	// JSON.stringify of an `any` (or of arguments only known at run time)
+	// may be undefined: held boxed, though the lib's result is string.
+	in := intrinsics["JSON.stringify"]
+	in.held = func(o frontOracle, call *ast.CallExpression) (Type, bool) {
+		if resolver.StringifyArgsAtRunTime(call.Args) {
+			return TypeAny, true
+		}
+		if len(call.Args) >= 1 {
+			if at, ok := o.ExprType(call.Args[0]); ok && isUnconstrainedDynamic(at) {
+				return TypeAny, true
+			}
+		}
+		return Type{}, false
+	}
+	intrinsics["JSON.stringify"] = in
+}
+
+func init() {
 	NewShadowOracle = func(prog *ast.Program, opts options.Options, r reprCtx) ShadowOracle {
 		// The lane's own rules: Annex B binding and the checker's js mode.
 		libProgs, _ := lib.Programs() // a parse error in them fails the strict lane's check first
@@ -62,17 +113,29 @@ func init() {
 			ns := b.Globals.Symbols.Get("NodeJS")
 			return ns != nil && b.NamespaceScope(ns) == sym.Scope
 		}
-		return frontOracle{b: b, c: checker.NewWith(b, opts), r: r, storesBusy: map[*ast.Identifier]bool{}, litBusy: map[*ast.ObjectLiteral]bool{}, forOfBusy: map[*ast.ForOfStatement]bool{}}.withPromiseCallbacks(prog)
+		// Checked up front, as the front end's checker is, so it answers
+		// from the program as written, before lowering rewrites it.
+		c := checker.NewWith(b, opts)
+		c.Check()
+		return frontOracle{b: b, c: c, r: r, q: &oracleQuery{}, storesBusy: map[*ast.Identifier]bool{}, litBusy: map[*ast.ObjectLiteral]bool{}, storageBusy: map[*ast.ObjectLiteral]bool{}, returnsBusy: map[*ast.ObjectLiteral]bool{}, dynInit: map[*ast.VarDeclaration]bool{}, fnReads: map[string]bool{}, forOfBusy: map[*ast.ForOfStatement]bool{}}.withPromiseCallbacks(prog)
 	}
 }
 
-// ExprType answers inferExprType, which gives a variable or property read
+// ExprType answers typeOfExpr, which gives a variable or property read
 // the representation of its storage: the checker's storage type, not the
 // type the read narrows it to.
 func (o frontOracle) ExprType(e ast.Expression) (Type, bool) {
+	// A binding an accessor is defined on is held boxed (accessorLiteral).
+	if id, isID := e.(*ast.Identifier); isID {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV && accessorLiteral(o.b, v) {
+				return TypeAny, true
+			}
+		}
+	}
 	if o.q == nil {
 		t, ok := o.exprTypeQuery(e)
-		return o.growableBuffer(e, t), ok
+		return o.byValReturn(e, o.growableBuffer(e, t), ok), ok
 	}
 	key := oracleKey{e: e}
 	if o.r.scopeKey != nil {
@@ -100,6 +163,7 @@ func (o frontOracle) ExprType(e ast.Expression) (Type, bool) {
 	o.q.depth++
 	t, ok := o.exprTypeQuery(e)
 	t = o.growableBuffer(e, t)
+	t = o.byValReturn(e, t, ok)
 	o.q.depth--
 	o.q.inflight[key]--
 	if o.q.cuts == cuts {
@@ -138,9 +202,410 @@ type oracleAnswer struct {
 
 // exprTypeQuery is ExprType, unmemoized.
 func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
+	// A structuredClone the run time performs: a box (a class instance's
+	// clone is a plain object, as in Node).
+	if call, isCall := e.(*ast.CallExpression); isCall && o.r.runtimeClone != nil && o.r.runtimeClone(call) {
+		return TypeAny, true
+	}
+	// A private member of a static method's `this` taken as a parameter
+	// (staticReceivers, which rewrites the body): brand-checked, then read
+	// from the class's slot, typed as the member the rewrite started from.
+	if m, isM := e.(*ast.MemberExpression); isM && strings.HasPrefix(m.Property, "#") && o.r.origin != nil && o.c.TypeOf(m.Object).Flags&checker.Any != 0 {
+		if orig, ok := o.r.origin(m); ok && orig != ast.Expression(m) {
+			if ot := o.c.TypeOf(orig); !o.c.Unanswered(ot) && ot.Flags&checker.Any == 0 {
+				if rt, ok := o.r.of(ot); ok {
+					return rt, true
+				}
+			}
+		}
+	}
+	// A property the checker cannot type of a value held boxed (a js-lane
+	// binding) is read by the dynamic dispatch: a box.
+	if m, isM := e.(*ast.MemberExpression); isM && o.c.Unanswered(o.c.TypeOf(m)) {
+		if rt, ok := o.ExprType(m.Object); ok && isUnconstrainedDynamic(rt) && rt.DynPropTy == nil {
+			return TypeAny, true
+		}
+	}
+	// A member the checker cannot type of a class instance codegen lays out
+	// (a js-lane field the constructor assigns, in the program's own code):
+	// that field's slot.
+	if m, isM := e.(*ast.MemberExpression); isM && o.r.js != nil && o.r.js() && o.r.inLib != nil && !o.r.inLib() && !strings.HasPrefix(m.Property, "__kml_") && o.c.Unanswered(o.c.TypeOf(m)) {
+		if rt, ok := o.ExprType(m.Object); ok && rt.ClassName != "" {
+			if _, ft, fok := rt.FieldIndex(m.Property); fok {
+				return ft, true
+			}
+		}
+	}
+	// A call or read the any-argument dispatch runs (a builtin function
+	// passed as a callback, `xs.filter(Boolean)`) is emitted through that
+	// dispatch: its box.
+	if o.r.boxOverride != nil {
+		if bt, ok := o.r.boxOverride(e); ok {
+			return bt, true
+		}
+	}
+	// An array's or a string's method read as a value is its prototype's
+	// record, a box, whatever signature the checker gives it.
+	if m, isM := e.(*ast.MemberExpression); isM && !m.Optional && o.r.methodRecord != nil && o.r.methodRecord(m) {
+		return TypeAny, true
+	}
+	// A JavaScript literal property's function returning its own `this`
+	// returns that box: its `this` is set by the call. Asked while the
+	// literal itself is typed, its parameters are what it binds them as.
+	if fe, isFE := e.(*ast.FunctionExpression); isFE && fe.PropValue && fe.RetType == nil && !fe.IsAsync && !fe.IsGenerator && o.r.js != nil && o.r.js() && o.r.literalParam != nil && returnsOwnThis(fe.Body) {
+		params := make([]Type, len(fe.Params))
+		for i, p := range fe.Params {
+			pt, pok := o.r.literalParam(fe, i)
+			if !pok || p.Rest || p.ArrayPattern != nil || p.ObjectPattern != nil {
+				return Type{}, false
+			}
+			params[i] = pt
+		}
+		return FuncType(params, TypeAny), true
+	}
+	// A method read off a receiver held as a box (a class a function
+	// returns) is read dynamically: the box's member.
+	if m, isM := e.(*ast.MemberExpression); isM && !m.Optional {
+		if mt := o.c.TypeOf(m); !o.c.Unanswered(mt) && mt.Flags&checker.Object != 0 && mt.Kind == checker.Function {
+			if ot := o.c.TypeOf(m.Object); !o.c.Unanswered(ot) && ot.Flags&checker.Any == 0 && o.callInitialized(m.Object) {
+				if rt, ok := o.ExprType(m.Object); ok && isUnconstrainedDynamic(rt) {
+					return TypeAny, true
+				}
+			}
+		}
+	}
+	// A call of a receiver's method whose result is the receiver's own type
+	// (a literal method returning `this`), with no layout of its own,
+	// returns what the receiver holds.
+	if call, isCall := e.(*ast.CallExpression); isCall {
+		var recv ast.Expression
+		if ix, isIx := call.Callee.(*ast.IndexExpression); isIx {
+			recv = ix.Object // (a named method's call has its own rules)
+		}
+		if recv != nil {
+			if t := o.c.TypeOf(call); !o.c.Unanswered(t) && t == o.c.TypeOf(recv) && t.Flags&checker.Object != 0 && t.Kind == checker.Anonymous {
+				if _, mapped := o.r.of(t); !mapped {
+					return o.ExprType(recv)
+				}
+			}
+		}
+	}
+	// A literal spreading a class instance with a TypeScript-private or
+	// protected field copies it at run time (an own property), though tsc's
+	// type leaves it out: the layout codegen builds holds it.
+	// A named member read off a plain box the checker types a primitive is
+	// that primitive (emitMember's dynamic arm unboxes it): `this.k` in an
+	// object literal's method, whose `this` is a box.
+	// … but in a static generator lifted out of its class (liftStaticGenerators)
+	// that takes its receiver as a leading `this: any`, the read stays the
+	// box the generator yields.
+	if m, ok := e.(*ast.MemberExpression); ok && o.liftedGenReceiver(m) {
+		return TypeAny, true
+	}
+	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional && o.r.checkerPrim != nil {
+		if _, isThis := m.Object.(*ast.ThisExpression); isThis {
+			if ot, ok := o.ExprType(m.Object); ok && isUnconstrainedDynamic(ot) && ot.DynPropTy == nil {
+				if pt, ok := o.r.checkerPrim(m); ok {
+					return pt, true
+				}
+			}
+		}
+	}
+	if lit, ok := e.(*ast.ObjectLiteral); ok && o.spreadsHiddenFields(lit) {
+		return o.hiddenFieldsLiteral(lit)
+	}
+	if id, ok := e.(*ast.Identifier); ok {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if v, isV := sym.Declarations[0].Node.(*ast.VarDeclaration); isV && v.TypeAnnot == nil {
+				if lit, isLit := v.Init.(*ast.ObjectLiteral); isLit && o.spreadsHiddenFields(lit) {
+					return o.hiddenFieldsLiteral(lit) // a binding of one
+				}
+			}
+		}
+	}
+	// A js-lane prototype constructor returns a box (what `new` of it or a
+	// plain call's `return new F(v)` yields; jsCollectProtoCtors).
+	if id, ok := e.(*ast.Identifier); ok && o.r.protoCtor != nil && o.r.protoCtor(id.Name) {
+		if sym, _ := o.b.Resolve(id); sym != nil && sym.Flags&binder.Function != 0 && sym.Scope != nil && sym.Scope.Kind == binder.ModuleScope {
+			if t, ok := o.exprTypeQueryInner(e); ok && t.IsFunc() && t.FuncRetType != nil && t.FuncRetType.IR != "void" && !t.FuncRetType.IsDynamic() {
+				any := TypeAny
+				t.FuncRetType = &any
+				return t, true
+			}
+		}
+	}
+	// `new F(…)` of a prototype constructor function is a dynamic object,
+	// answered before any rule that reads F (inside F's own body, whose
+	// return is still being inferred).
+	if nx, ok := e.(*ast.NewExpression); ok && o.r.protoCtor != nil && (o.r.protoCtor(nx.ClassName) || o.newOfFunctionDecl(nx)) {
+		return TypeAny, true
+	}
+	// `new Map([[k, v], …])` in the JavaScript lane, whose pairs of
+	// differing value types no typed overload takes (the lane's lenient
+	// arity then picks `new (): Map<any, any>`): the types codegen reads
+	// the entries with.
+	if nm, ok := e.(*ast.NewMapExpression); ok && o.r.mapEntries != nil && o.r.js != nil && o.r.js() && nm.KeyType == nil && nm.ValType == nil {
+		if _, lit := nm.Init.(*ast.ArrayLiteral); lit && o.mapAnyAny(nm) {
+			return o.r.mapEntries(nm), true
+		}
+	}
+	// A JavaScript `new Set([[…], […]])` whose rows differ in layout holds
+	// them as the seed does: boxed rows.
+	set := e
+	if id, isID := e.(*ast.Identifier); isID && o.r.js != nil && o.r.js() {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV && v.Kind == "const" && v.TypeAnnot == nil {
+				if _, isNS := v.Init.(*ast.NewSetExpression); isNS {
+					set = v.Init // a const binding of one holds it as built
+				}
+			}
+		}
+	}
+	if ns, ok := set.(*ast.NewSetExpression); ok && o.r.js != nil && o.r.js() && ns.ElemType == nil {
+		if seed, lit := ns.Init.(*ast.ArrayLiteral); lit && len(seed.Elements) > 1 {
+			if st, sok := o.ExprType(seed); sok && st.IsArray() && st.ElemType != nil && reprKey(*st.ElemType) == reprKey(ArrayOf(TypeAny)) {
+				return SetType(*st.ElemType), true
+			}
+		}
+	}
+	// A const binding of a builtin method or a function value's property,
+	// read as a value through a box (`const of = Array.of`, `const f =
+	// n.isNaN`), holds that box.
+	if id, ok := e.(*ast.Identifier); ok {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV && v.Kind == "const" && v.TypeAnnot == nil {
+				if m, isM := v.Init.(*ast.MemberExpression); isM && !m.Optional && (o.boxedReceiver(m) && o.functionTyped(m) || o.r.methodRecord != nil && o.r.methodRecord(m)) {
+					if it, ok := o.ExprType(m); ok && isUnconstrainedDynamic(it) && it.DynPropTy == nil {
+						return it, true
+					}
+				}
+			}
+		}
+	}
+	// A const binding of one holds it as built.
+	if id, ok := e.(*ast.Identifier); ok && o.r.mapEntries != nil && o.r.js != nil && o.r.js() {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV && v.Kind == "const" && v.TypeAnnot == nil {
+				if nm, isNM := v.Init.(*ast.NewMapExpression); isNM && nm.KeyType == nil && nm.ValType == nil {
+					if _, lit := nm.Init.(*ast.ArrayLiteral); lit && o.mapAnyAny(nm) {
+						return o.r.mapEntries(nm), true
+					}
+				}
+			}
+		}
+	}
+	return o.exprTypeQueryInner(e)
+}
+
+// newOfFunctionDecl reports `new F(…)` of a plain function declaration
+// (top-level, or local to a block or function) under -compat=js: a prototype constructor, which
+// jsCollectProtoCtors records only after the bodies it may sit in (`return
+// new P(v)` inside P) are first inferred.
+func (o frontOracle) newOfFunctionDecl(nx *ast.NewExpression) bool {
+	if o.r.js == nil || !o.r.js() || nx.Qualified || nx.ClassName == "" {
+		return false
+	}
+	sym := o.b.NewTarget(nx)
+	if sym == nil || len(sym.Declarations) != 1 || sym.Scope == nil {
+		return false
+	}
+	// A block's function the resolver binds as a constant function
+	// expression is one too.
+	if v, isV := sym.Declarations[0].Node.(*ast.VarDeclaration); isV {
+		if fe, isFE := v.Init.(*ast.FunctionExpression); isFE {
+			return !fe.IsGenerator && !fe.IsAsync && len(fe.TypeParams) == 0
+		}
+		// Annex B's `var F` a block's function declaration assigns.
+		if nl, isNull := v.Init.(*ast.NullLiteral); v.Kind == "var" && (v.Init == nil || isNull && nl.IsUndefined) {
+			return blockFunctionNames(o.b)[v.Name]
+		}
+		return false
+	}
+	fd, ok := sym.Declarations[0].Node.(*ast.FunctionDeclaration)
+	return ok && !fd.IsGenerator && !fd.IsAsync && len(fd.TypeParams) == 0
+}
+
+// boxedReceiver reports a member read of a program binding held as a box
+// or a function value (`const n = Number; n.isNaN`), which the dynamic
+// dispatch reads (typeOfExprFull's boxed- and function-receiver rules).
+func (o frontOracle) boxedReceiver(m *ast.MemberExpression) bool {
+	id, isID := m.Object.(*ast.Identifier)
+	if !isID {
+		return false
+	}
+	if sym, _ := o.b.Resolve(id); sym == nil || sym.Flags&binder.Variable == 0 || o.r.libGlobal(sym) {
+		return false // (a library global, `JSON`: its intrinsics)
+	}
+	rt, ok := o.ExprType(m.Object)
+	if ok && rt.IsFunc() && o.r.funcProp != nil {
+		// A function value's property: off the boxed function too.
+		_, fok := o.r.funcProp(m)
+		return fok
+	}
+	return ok && isUnconstrainedDynamic(rt) && rt.DynPropTy == nil
+}
+
+// mapAnyAny reports a `new Map(…)` the checker leaves unanswered or types
+// Map<any, any>.
+func (o frontOracle) mapAnyAny(nm *ast.NewMapExpression) bool {
+	t := o.c.TypeOf(nm)
+	if o.c.Unanswered(t) {
+		return true
+	}
+	return len(t.TypeArgs) == 2 && t.TypeArgs[0].Flags&checker.Any != 0 && t.TypeArgs[1].Flags&checker.Any != 0
+}
+
+// literalGeneratorRead reports `o.g` of a const bound to an object
+// literal whose g is a generator function: held boxed, as codegen's
+// object literal holds a generator method.
+func (o frontOracle) literalGeneratorRead(m *ast.MemberExpression) bool {
+	return o.literalGeneratorReadAt(m, 0)
+}
+
+func (o frontOracle) literalGeneratorReadAt(m *ast.MemberExpression, depth int) bool {
+	id, ok := m.Object.(*ast.Identifier)
+	if !ok || depth > 8 {
+		return false
+	}
+	sym, _ := o.b.Resolve(id)
+	if sym == nil {
+		return false
+	}
+	v, isV := singleVarDecl(sym)
+	if !isV || v.Kind != "const" || v.TypeAnnot != nil {
+		return false
+	}
+	lit, ok := v.Init.(*ast.ObjectLiteral)
+	if !ok {
+		return false
+	}
+	found := false
+	for _, p := range lit.Properties {
+		if p.KeyExpr == nil && p.Key == m.Property {
+			switch val := p.Value.(type) {
+			case *ast.FunctionExpression:
+				found = val.IsGenerator
+			case *ast.MemberExpression:
+				found = o.literalGeneratorReadAt(val, depth+1) // `{ g: o.g }`
+			case *ast.Identifier:
+				found = o.generatorDeclRef(val) // `{ g }` of a `function* g`
+			default:
+				found = false
+			}
+		}
+	}
+	return found
+}
+
+func (o frontOracle) exprTypeQueryInner(e ast.Expression) (Type, bool) {
 	if o.r.boxOverride != nil {
 		if t, ok := o.r.boxOverride(e); ok {
 			return t, true
+		}
+	}
+	if m, ok := e.(*ast.MemberExpression); ok && (o.dynamicMethodRead(m) || o.literalGeneratorRead(m)) {
+		return TypeAny, true
+	}
+	// A property read off a binding held as a plain box (an iterator step
+	// over a parameter's iterator) is the box's dynamic read: a box, the
+	// precise member type the checker gives it notwithstanding.
+	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional && !exprReceiverOrCallee(o.c.ParentOf(m), m) && o.boxedReceiver(m) {
+		if rt, rok := o.ExprType(m.Object); rok && !rt.IsFunc() && len(rt.UnionMembers) == 0 {
+			// (A primitive member, `.length`, reads typed.)
+			if ct, mt := o.c.TypeOf(m.Object), o.c.TypeOf(m); !o.c.Unanswered(ct) && ct.Flags&checker.Object != 0 && !o.c.Unanswered(mt) && mt.Flags&checker.Object != 0 && mt.Flags&checker.Union == 0 {
+				return TypeAny, true
+			}
+		}
+	}
+	// A const alias of a builtin lowered to a library function (`const st =
+	// setTimeout`): that function's value (emitVarDecl's loweredGlobalFn).
+	if id, isID := e.(*ast.Identifier); isID && o.r.loweredValue != nil {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 && !o.b.StoredElsewhere(sym) {
+			if v, isV := sym.Declarations[0].Node.(*ast.VarDeclaration); isV && v.Kind == "const" && v.TypeAnnot == nil {
+				if init, isI := v.Init.(*ast.Identifier); isI {
+					if lt, lok := o.r.loweredValue(init); lok {
+						return lt, true
+					}
+				}
+			}
+		}
+	}
+	// A parameter annotated with one string literal and null or undefined
+	// (`y: 'p' | null`) keeps the literal, as annotationType reads it.
+	if id, isID := e.(*ast.Identifier); isID {
+		if lit, ok := o.literalParamAnnotation(id); ok {
+			if ty, ok := o.exprType(e); ok && ty.IR == irPtr && !ty.IsDynamic() && ty.Kind == kindNone {
+				ty.Kind, ty.LitValue = kindStrLiteral, lit
+				return ty, true
+			}
+		}
+	}
+	// A `for (var q of …)` binding read outside its loop's body (after the
+	// loop, or in a closure): the loop may not have run, so possibly
+	// undefined, as codegen holds it.
+	if id, isID := e.(*ast.Identifier); isID {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			var body ast.Node
+			switch d := sym.Declarations[0].Node.(type) {
+			case *ast.ForOfStatement:
+				if d.Kind == "var" && d.VarName == id.Name && (o.b.ReadElsewhere(id) || !nonEmptyLiteral(d.Iterable)) {
+					body = d.Body // (over a non-empty literal, the loop runs)
+				}
+			case *ast.ForInStatement:
+				if d.Kind == "var" && d.VarName == id.Name {
+					body = d.Body
+				}
+			}
+			if body != nil && (o.b.ReadElsewhere(id) || !o.within(id, body)) {
+				if ty, ok := o.exprType(e); ok && !ty.IsDynamic() && !ty.Nullable() && ty.IR == irPtr {
+					return indexReadType(ty), true
+				}
+			}
+		}
+	}
+	// `...{ length }`: the rest array's length, a number (tsc's implicit
+	// any notwithstanding), as codegen binds it.
+	if id, isID := e.(*ast.Identifier); isID && o.restPatternLength(id) {
+		return TypeF64, true
+	}
+	// A property of `globalThis.X` (X a library global) reads as X's
+	// (`globalThis.crypto.subtle`, as codegen's unwrapGlobalThis reads it).
+	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional && o.globalThisGlobal(m.Object) {
+		if mt := o.c.TypeOf(m); !o.c.Unanswered(mt) && mt.Flags&checker.Object != 0 && mt.Flags&checker.Union == 0 && mt.Kind != checker.Function {
+			if t, tok := o.r.of(mt); tok && !t.IsDynamic() {
+				return t, true
+			}
+		}
+	}
+	// … and off any other expression held as a plain box (a generic
+	// method's boxed result, `nested.get().get`).
+	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional {
+		if _, isID := m.Object.(*ast.Identifier); !isID && !o.globalThisGlobal(m.Object) {
+			if rt, rok := o.ExprType(m.Object); rok && isUnconstrainedDynamic(rt) && rt.DynPropTy == nil && len(rt.UnionMembers) == 0 {
+				if mt := o.c.TypeOf(m); !o.c.Unanswered(mt) && mt.Flags&checker.Object != 0 && mt.Flags&checker.Union == 0 {
+					return TypeAny, true
+				}
+			}
+		}
+	}
+	// A generator step's `value`/`done` is codegen's {value, done} field,
+	// not the IteratorResult member flow narrows it to.
+	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional && (m.Property == "value" || m.Property == "done") {
+		if rt, rok := o.ExprType(m.Object); rok && isGenStepLayout(rt) {
+			if _, ft, found := rt.FieldIndex(m.Property); found {
+				return ft, true
+			}
+		}
+	}
+	// A generator function a literal's layout holds boxed, read off any
+	// receiver of that layout (`make().seq`).
+	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional && isGeneratorFunc(o.c.TypeOf(m)) {
+		if rt, rok := o.ExprType(m.Object); rok && rt.IsObject() && !rt.IsDynamic() && !rt.IsClass() {
+			for _, f := range rt.Fields {
+				if f.Name == m.Property && isUnconstrainedDynamic(f.Ty) {
+					return TypeAny, true
+				}
+			}
 		}
 	}
 	// A node a rewrite after binding built is the checker's type of the
@@ -151,6 +616,9 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 		if orig, isSyn := o.r.origin(e); isSyn {
 			// A sequence is its last expression, as emission evaluates it.
 			if s, isSeq := e.(*ast.SequenceExpression); isSeq && len(s.Exprs) > 0 {
+				if st, sok := o.superSequence(s); sok {
+					return st, true
+				}
 				return o.ExprType(s.Exprs[len(s.Exprs)-1])
 			}
 			t, kept := o.r.warm(orig)
@@ -196,7 +664,7 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 	// A literal setting its prototype (`{ __proto__: null }`) builds as a
 	// dynamic object (hasProtoKey), held as a box; under -compat=js every
 	// bare literal does (emitExpr's routing), accessors included.
-	if lit, isOL := e.(*ast.ObjectLiteral); isOL && (hasProtoKey(lit) || o.r.js != nil && o.r.js()) {
+	if lit, isOL := e.(*ast.ObjectLiteral); isOL && (hasProtoKey(lit) || lit.HasAccessors() && objLitHasSpread(lit) || o.r.js != nil && o.r.js()) {
 		return TypeAny, true
 	}
 	// A generator expression is a boxed constructor closure (mirrors
@@ -283,6 +751,9 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 		ct, cok := o.ExprType(ce.Consequent)
 		at, aok := o.ExprType(ce.Alternate)
 		if cok && aok {
+			if reprKey(ct) == reprKey(at) && ct.IR != "" {
+				return ct, true // branches of one layout (objects of a tuple field)
+			}
 			if nty, nok := ternaryNullableScalarType(ct, at); nok {
 				return nty, true
 			}
@@ -297,6 +768,143 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 			}
 			if ternaryMixed(ct, at) {
 				return TypeAny, true
+			}
+		}
+	}
+	// A function declaration the mapping does not represent (generic,
+	// compiled once with its type parameters erased; overloaded, compiled
+	// as its implementation) is that compiled function's value.
+	if id, isID := e.(*ast.Identifier); isID && !ok && o.r.funcRef != nil {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) > 0 && sameFunctionDecls(sym.Declarations) {
+			// (A generic one called directly is typed per call, never as a
+			// value: erasing it there would ask this again, without end.)
+			if fd, isFD := functionDeclOf(sym.Declarations); isFD && fd.Name == id.Name && !fd.IsGenerator && (len(fd.TypeParams) == 0 || !exprCallee(o.c.ParentOf(id), id)) {
+				if ft, fok := o.r.funcRef(fd.Name); fok {
+					return ft, true
+				}
+			}
+		}
+	}
+	// A match result's own member the checker types by an index signature
+	// (`m.groups`): the layout codegen reads it as (execMembers).
+	if m, isM := e.(*ast.MemberExpression); isM && !ok {
+		if rt, rok := o.ExprType(m.Object); rok && rt.ExecArray {
+			if mt, _, has := execArrayMemberType(m.Property); has {
+				return mt, true
+			}
+		}
+	}
+	// A member of a value that is only undefined or null (`v()` of a
+	// function returning nothing) throws when read: a dynamic read.
+	if m, isM := e.(*ast.MemberExpression); isM && !ok && !m.Optional {
+		if rt, rok := o.ExprType(m.Object); rok && (rt.IR == "void" || rt.Kind == kindUndefined || rt.IsNull()) {
+			return TypeAny, true
+		}
+	}
+	// A rest parameter annotated with a tuple of several element kinds
+	// (`...p: [string, number]`) collects its arguments boxed.
+	if id, isID := e.(*ast.Identifier); isID && !ok {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if pm := declaredParam(sym, id.Name); pm != nil && pm.Rest && pm.Type != nil {
+				if ct := o.c.StorageTypeOf(id); !o.c.Unanswered(ct) && ct.Flags&checker.Object != 0 && ct.Kind == checker.Tuple {
+					return ArrayOf(TypeAny), true
+				}
+			}
+		}
+	}
+	// A function declaration whose every return is its own name returns
+	// itself boxed (returnsOwnName).
+	if id, isID := e.(*ast.Identifier); isID && ok && ty.IsFunc() {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if fd, isFD := sym.Declarations[0].Node.(*ast.FunctionDeclaration); isFD && fd.ReturnType == nil && returnsOwnName(fd) {
+				boxed := TypeAny
+				ty.FuncRetType = &boxed
+				return ty, true
+			}
+		}
+	}
+	// `super(…)` is the constructed instance, its class's `this`.
+	if call, isCall := e.(*ast.CallExpression); isCall && o.r.class != nil {
+		if _, isSuper := call.Callee.(*ast.SuperExpression); isSuper {
+			for n := o.c.ParentOf(call); n != nil; n = o.c.ParentOf(n) {
+				if cd, isCD := n.(*ast.ClassDeclaration); isCD {
+					if sym, sok := o.b.DeclSymbol(cd); sok {
+						if ct, cok := o.r.class(sym); cok && ct.IsClass() {
+							return ct, true
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+	// `super` in a subclass of Array is the receiver as an array of its
+	// element (`super.filter(f)`).
+	if sx, isSX := e.(*ast.SuperExpression); isSX && !ok {
+		if t := o.c.TypeOf(sx); !o.c.Unanswered(t) && t.Flags&checker.Object != 0 && t.Symbol != nil && t.Symbol.Name == "Array" && o.r.libGlobal(t.Symbol) && len(t.TypeArgs) == 1 {
+			if et, eok := o.r.of(t.TypeArgs[0]); eok {
+				return ArrayOf(et), true
+			}
+		}
+	}
+	// An arrow returning `super(…)` (`const go = () => super(9)`) returns
+	// the instance.
+	if af, isAF := e.(*ast.ArrowFunction); isAF && !ok && af.Block == nil && len(af.Params) == 0 {
+		body := af.Body
+		if sq, isSeq := body.(*ast.SequenceExpression); isSeq {
+			if st, sok := o.superSequence(sq); sok {
+				return FuncType(nil, st), true
+			}
+		}
+		if call, isCall := body.(*ast.CallExpression); isCall {
+			if _, isSuper := call.Callee.(*ast.SuperExpression); isSuper {
+				if st, sok := o.ExprType(call); sok {
+					return FuncType(nil, st), true
+				}
+			}
+		}
+	}
+	// An element callback on an array the checker leaves unanswered (an
+	// evolving JavaScript array): it takes and returns boxes, map and
+	// flatMap make an `any[]`, filter the receiver's kind.
+	if !ok {
+		if call, isCall := e.(*ast.CallExpression); isCall && boxedArrayElemCall(o, call) {
+			m := call.Callee.(*ast.MemberExpression)
+			if r, has := evolvingElemResult[m.Property]; has {
+				if r {
+					return o.ExprType(m.Object)
+				}
+				return ArrayOf(TypeAny), true
+			}
+		}
+		var params []ast.Param
+		switch f := e.(type) {
+		case *ast.FunctionExpression:
+			params = f.Params
+		case *ast.ArrowFunction:
+			params = f.Params
+		default:
+			params = nil
+		}
+		if call, isCall := o.c.ParentOf(e).(*ast.CallExpression); isCall && params != nil && len(call.Args) > 0 && call.Args[0] == e && boxedArrayElemCall(o, call) {
+			pts := make([]Type, len(params))
+			for i := range pts {
+				pts[i] = TypeAny
+			}
+			return FuncType(pts, TypeAny), true
+		}
+	}
+	// A function member of a library global held as a box, no intrinsic
+	// implementing it (`Promise.try` read as a value): a read off that box.
+	if m, isM := e.(*ast.MemberExpression); isM && !ok && !m.Optional && !exprCallee(o.c.ParentOf(m), m) && o.libGlobalRef(m.Object) {
+		if bt, bok := o.ExprType(m.Object); bok && isUnconstrainedDynamic(bt) {
+			if ft := o.c.TypeOf(m); !o.c.Unanswered(ft) && ft.Flags&checker.Object != 0 && ft.Kind == checker.Function {
+				if o.r.builtinRef == nil {
+					return TypeAny, true
+				}
+				if _, isRef := o.r.builtinRef(m); !isRef {
+					return TypeAny, true
+				}
 			}
 		}
 	}
@@ -348,7 +956,7 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 	// A call of a declared function whose annotated result the checker
 	// answers with a union no inferred representation holds (`boolean |
 	// Error`) returns the annotation's representation, as emission
-	// registers the function's result (resolveType).
+	// registers the function's result (annotationType).
 	if call, isCall := e.(*ast.CallExpression); isCall && !ok && !call.Optional && o.r.annotation != nil {
 		if id, isID := call.Callee.(*ast.Identifier); isID {
 			if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
@@ -389,7 +997,9 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 		}
 		if ook && ot.IsObject() && !ot.IsDynamic() {
 			for _, f := range ot.Fields {
-				if f.Name == m.Property && reprHasTuple(f.Ty) {
+				if f.Name == m.Property && (reprHasTuple(f.Ty) || ot.IsClass() && !f.Ty.IsTuple()) {
+					// (A class instance's field, whatever the checker's
+					// instance spells: an erased one's holds no tuple.)
 					ty = f.Ty
 					break
 				}
@@ -397,9 +1007,9 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 		}
 	}
 	// An assertion naming a tuple (`[["k", "v"]] as [string, string][]`)
-	// is the headerless struct its annotation declares (resolveType), not
+	// is the headerless struct its annotation declares (annotationType), not
 	// the array an inferred tuple of one element kind is.
-	if as, isAs := e.(*ast.AsExpression); isAs && ok && as.TypeAnnot != nil && typeNodeHasTuple(as.TypeAnnot.TypeNode()) {
+	if as, isAs := e.(*ast.AsExpression); isAs && ok && as.TypeAnnot != nil && typeNodeHasTuple(as.TypeAnnot) {
 		if at, aok := o.AnnotationType(as.TypeAnnot); aok {
 			ty = at
 		}
@@ -486,7 +1096,7 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 		}
 	}
 	// An arithmetic operator with an operand codegen holds as a box is the
-	// runtime dispatch's box (inferExprType's dynamic-operand rule).
+	// runtime dispatch's box (typeOfExpr's dynamic-operand rule).
 	if b, isB := e.(*ast.BinaryExpression); isB && ok && !ty.IsDynamic() {
 		if dt, dok := o.dynamicBinary(b); dok {
 			ty = dt
@@ -535,6 +1145,39 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
+	// One of spreads only (`[...pairs]`, over declared tuples whose
+	// inferred mix has no layout of its own) holds what the spread arrays
+	// hold, when they agree.
+	if lit, isAL := e.(*ast.ArrayLiteral); isAL && !ok && len(lit.Elements) > 0 {
+		var held *Type
+		agree := true
+		for _, el := range lit.Elements {
+			sp, isSp := el.(*ast.SpreadElement)
+			if !isSp {
+				agree = false
+				break
+			}
+			at, aok := o.ExprType(sp.Arg)
+			var et Type
+			switch {
+			case !aok:
+			case at.IsArray() && at.ElemType != nil:
+				et = *at.ElemType
+			case mapIterable(at) && at.IsSet() && at.MapKey != nil:
+				et = *at.MapKey
+			case at.IsCollIter():
+				et = collIterElemType(at)
+			}
+			if !et.IsTuple() || et.IsDynamic() || held != nil && !sameFieldLayout(*held, et) {
+				agree = false
+				break
+			}
+			held = &et
+		}
+		if agree && held != nil {
+			ty, ok = ArrayOf(*held), true
+		}
+	}
 	// One the checker leaves unanswered (`[0, 0n, true, "s", {}, Symbol()]`)
 	// is joined the same way from its elements' answers.
 	if lit, isAL := e.(*ast.ArrayLiteral); isAL && (ok && ty.IsArray() && ty.ElemType != nil && ty.ElemType.IsDynamic() && len(ty.ElemType.UnionMembers) > 0 || !ok && len(lit.Elements) > 0) {
@@ -555,6 +1198,25 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 				return *sibling
 			}
 			return t
+		}
+		// Generators spread (`[...h()]`) whose yields the checker cannot type
+		// and codegen holds boxed: the array of those boxes.
+		if !ok {
+			gens := true
+			for _, el := range lit.Elements {
+				sp, isSp := el.(*ast.SpreadElement)
+				if !isSp {
+					gens = false
+					break
+				}
+				if at, aok := o.ExprType(sp.Arg); !aok || !at.IsGenerator() || at.GeneratorElemType == nil || !at.GeneratorElemType.IsDynamic() {
+					gens = false
+					break
+				}
+			}
+			if gens {
+				return ArrayOf(TypeAny), true
+			}
 		}
 		u, mixed := mixedArrayElem(lit, typeOf)
 		boxed := !mixed && mixedKindsBoxed(lit, typeOf)
@@ -585,6 +1247,28 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 			ty, ok = ArrayOf(u), true
 		case boxed:
 			ty, ok = ArrayOf(TypeAny), true
+		}
+	}
+	// An array of object literals with methods holds them as their
+	// literals are built: each method takes its `this` (FuncThis).
+	if lit, isAL := e.(*ast.ArrayLiteral); isAL && ok && len(lit.Elements) > 0 && ty.ElemType != nil && ty.ElemType.IsObject() {
+		var et Type
+		same := true
+		for i, el := range lit.Elements {
+			ol, isOL := el.(*ast.ObjectLiteral)
+			if !isOL || !literalHasMethod(ol) {
+				same = false
+				break
+			}
+			t, tok := o.ExprType(ol)
+			if !tok || i > 0 && reprKey(t) != reprKey(et) {
+				same = false
+				break
+			}
+			et = t
+		}
+		if same {
+			ty = ArrayOf(et)
 		}
 	}
 	// A literal asserted to an array of tuples (`[[1, "x"]] as [number,
@@ -642,7 +1326,13 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 	if id, isID := e.(*ast.Identifier); isID && o.r.builtinRef != nil {
 		if sym, _ := o.b.Resolve(id); sym != nil {
 			if v, single := singleVarDecl(sym); single && v.TypeAnnot == nil && v.Init != nil && len(o.b.StoresTo(sym)) <= 1 {
-				if bt, bok := o.r.builtinRef(v.Init); bok {
+				init := v.Init
+				if ix, isIx := init.(*ast.IndexExpression); isIx && !ix.Optional && o.libGlobalRef(ix.Object) {
+					if key, isStr := ix.Index.(*ast.StringLiteral); isStr {
+						init = ast.NewMemberExpression(ix.Object, key.Value, ix.GetPos()) // `Date["UTC"]`
+					}
+				}
+				if bt, bok := o.r.builtinRef(init); bok {
 					ty, ok = bt, true
 				}
 			}
@@ -671,7 +1361,9 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 				if p.Default != nil {
 					pt = o.c.PatternDefaultType(*p)
 				}
-				if pr, pok := o.r.of(pt); pok && pr.IsArray() && pr.ElemType != nil && pr.ElemType.IsDynamic() && (p.Default != nil || el.Rest && nestedInDefaultedElem(p.ArrayPattern, el)) {
+				// A leaf with its own default (`[p = 7] = []`) takes that
+				// default's type once unpacked, as the checker types it.
+				if pr, pok := o.r.of(pt); pok && pr.IsArray() && pr.ElemType != nil && pr.ElemType.IsDynamic() && el.Default == nil && (p.Default != nil || el.Rest && nestedInDefaultedElem(p.ArrayPattern, el)) {
 					if el.Rest {
 						ty, ok = ArrayOf(TypeAny), true
 					} else {
@@ -679,6 +1371,14 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 					}
 				}
 			}
+		}
+	}
+	// A loop variable the checker types as a union over a static array
+	// (`PromiseSettledResult` of an allSettled result) is held as the
+	// array's element, as the loop stores it.
+	if id, isID := e.(*ast.Identifier); isID && ok && ty.IsDynamic() && len(ty.UnionMembers) > 0 {
+		if it, iok := o.forOfIterableType(id); iok && it.IsArray() && !it.IsDynamic() && it.ElemType != nil && !it.ElemType.IsDynamic() && !it.BigIntElem {
+			ty = *it.ElemType
 		}
 	}
 	// A Map's entries are its [key, value] tuples, of the kinds the loop's
@@ -689,6 +1389,17 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 				ty, ok = TupleType([]Type{*it.MapKey, *it.MapVal}), true
 			}
 		}
+		// `const [e] = m`: an array pattern's direct element over a Map is
+		// one of its entries, the same tuple.
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if d, isAD := sym.Declarations[0].Node.(*ast.ArrayDestructuring); isAD {
+				if el := findArrayPatternElem(d.Elems, id.Name); el != nil && !el.Rest && directArrayPatternElem(d.Elems, el) {
+					if it, iok := o.ExprType(d.Init); iok && it.Host == hostMap && !it.Weak && it.MapKey != nil && it.MapVal != nil {
+						ty, ok = TupleType([]Type{*it.MapKey, *it.MapVal}), true
+					}
+				}
+			}
+		}
 	}
 	// An object literal's method returning its own `this` (an iterator's
 	// `[Symbol.iterator]() { return this; }`): tsc's recursive literal
@@ -697,6 +1408,110 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 	if fe, isFE := e.(*ast.FunctionExpression); isFE && !ok && returnsOnlyThis(fe) {
 		if _, inLit := o.c.ParentOf(fe).(*ast.ObjectLiteral); inLit {
 			ty, ok = FuncType(nil, TypeAny), true
+		}
+	}
+	// `new K()` of a `const K = class {…}` binding (inside its own static
+	// method too, where the checker's class is still open): the class's
+	// instance, as codegen declares it.
+	if ne, isNE := e.(*ast.NewExpression); isNE && !ok && o.r.class != nil && ne.Callee == nil && !ne.Qualified {
+		{
+			if sym := o.b.NewTarget(ne); sym != nil && len(sym.Declarations) == 1 && !o.b.StoredElsewhere(sym) {
+				if v, isV := sym.Declarations[0].Node.(*ast.VarDeclaration); isV && v.Kind == "const" {
+					// Hoisting leaves the binding a reference to the class.
+					if ref, isRef := v.Init.(*ast.Identifier); isRef && strings.Contains(ref.Name, "__kml_cx") {
+						if o.r.annotation != nil {
+							if ct := o.r.annotation(nameAnnotation(ref.Name)); ct.IsClass() && ct.ClassName == ref.Name {
+								ty, ok = ct, true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	// A property of a `this` codegen binds as a plain box (a static method
+	// of a class expression a factory makes per call, whose statics live on
+	// each class object): the dynamic read.
+	if m, isM := e.(*ast.MemberExpression); isM && !m.Optional {
+		if th, isThis := m.Object.(*ast.ThisExpression); isThis && o.r.inferred != nil && o.staticOfClassExpr(th) {
+			if tt, tok := o.r.inferred(th); tok && isUnconstrainedDynamic(tt) && tt.DynPropTy == nil && len(tt.UnionMembers) == 0 {
+				return TypeAny, true
+			}
+		}
+	}
+	// A spread literal whose type has no representation (optional members
+	// of a Map, a Date or a tuple, nullable): the dynamic object codegen
+	// builds.
+	if lit, isLit := e.(*ast.ObjectLiteral); isLit && !ok && objLitHasSpread(lit) {
+		if lt := o.c.TypeOf(lit); !o.c.Unanswered(lt) {
+			if _, mok := o.r.of(lt); !mok {
+				ty, ok = TypeAny, true
+			}
+		}
+	}
+	// A property only one member of the receiver's union has (`server.
+	// address().port` off `string | AddressInfo | null`, a js-lane read):
+	// that member's property, as codegen reads it.
+	if m, isM := e.(*ast.MemberExpression); isM && !ok && !m.Optional && o.c.Unanswered(o.c.TypeOf(m)) {
+		if rt := o.c.TypeOf(m.Object); !o.c.Unanswered(rt) && rt.Flags&checker.Union != 0 {
+			var only *checker.Property
+			n := 0
+			for _, u := range rt.Types {
+				if u.Flags&checker.Object != 0 {
+					if p := u.Prop(m.Property); p != nil {
+						only = p
+						n++
+					}
+				}
+			}
+			if n == 1 && only.Type != nil && !o.c.Unanswered(only.Type) {
+				if pt, pok := o.r.of(only.Type); pok && !pt.IsDynamic() && pt.IR != irPtr {
+					ty, ok = pt, true
+				}
+			}
+		}
+	}
+	// `new` of a class value the checker cannot follow (a class a call
+	// returns, `new c.B()` of a class-valued field): constructed through the
+	// dynamic path, a box.
+	if ne, isNE := e.(*ast.NewExpression); isNE && !ok && o.c.Unanswered(o.c.TypeOf(ne)) && len(ne.TypeArgs) == 0 {
+		if m, isM := ne.Callee.(*ast.MemberExpression); isM && !m.Optional {
+			if ft, fok := o.ExprType(m); fok && ft.IsDynamic() {
+				ty, ok = TypeAny, true
+			}
+		} else if qc, isQ := o.b.QualifiedCallee(ne).(*ast.MemberExpression); isQ && ne.Callee == nil {
+			// `new c.B()`: a class held in a field of an instance.
+			if id, isID := qc.Object.(*ast.Identifier); isID {
+				if sym, _ := o.b.Resolve(id); sym != nil && sym.Flags&binder.Variable != 0 && len(sym.Declarations) == 1 {
+					if v, isV := sym.Declarations[0].Node.(*ast.VarDeclaration); isV {
+						if _, isNew := v.Init.(*ast.NewExpression); isNew {
+							ty, ok = TypeAny, true
+						}
+					}
+				}
+			}
+		} else if ne.Callee == nil && !ne.Qualified {
+			if o.r.js != nil && o.r.js() && o.b.NewTarget(ne) == nil && o.b.LookupScope(ne) != nil {
+				// A name no scope declares, constructed in JavaScript
+				// through the global property: a box.
+				ty, ok = TypeAny, true
+			}
+			if sym := o.b.NewTarget(ne); sym != nil && len(sym.Declarations) == 1 {
+				if v, isV := sym.Declarations[0].Node.(*ast.VarDeclaration); isV && v.TypeAnnot == nil {
+					switch v.Init.(type) {
+					case *ast.CallExpression, *ast.MemberExpression: // `const E = events.EventEmitter`
+						ty, ok = TypeAny, true
+					}
+				}
+			}
+		}
+	}
+	// A call of a literal's `return this` method (`o.self()`, and a call
+	// on its result), which the checker leaves unanswered: the box the
+	// method returns.
+	if call, isC := e.(*ast.CallExpression); isC && !ok && !call.Optional {
+		if m, isM := call.Callee.(*ast.MemberExpression); isM && !m.Optional && o.selfReturningCall(m) {
+			ty, ok = TypeAny, true
 		}
 	}
 	// Any literal whose checker type has no representation (a property of
@@ -728,7 +1543,7 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 	}
 	// An unannotated function returning a literal with an accessor returns
 	// that literal's synthetic class, as its return is inferred from the
-	// value (inferUnannotatedReturnType over inferObjectType).
+	// value (funcBodyReturnType over inferObjectType).
 	if fe, isFE := e.(*ast.FunctionExpression); isFE && ok && ty.IsFunc() && fe.RetType == nil && !fe.IsAsync && !fe.IsGenerator && fe.Body != nil {
 		if lit, isLit := firstReturnExpr(fe.Body).(*ast.ObjectLiteral); isLit && lit.HasAccessors() {
 			if rt, rok := o.ExprType(lit); rok && rt.IsClass() {
@@ -822,11 +1637,36 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 			ty.FuncCountsArgs = true
 		}
 	}
+	// An immediately invoked function's unannotated parameter is typed by
+	// its argument (tsc's contextual IIFE parameter): a box where the
+	// argument is one, as an object literal spreading a box is.
+	if fn, isFE := e.(*ast.FunctionExpression); isFE && ok && ty.IsFunc() && !ty.FuncThis {
+		if call, isCall := o.c.ParentOf(fn).(*ast.CallExpression); isCall && call.Callee == ast.Expression(fn) {
+			var ps []Type
+			for i, p := range fn.Params {
+				if i >= len(call.Args) || i >= len(ty.FuncParams) || p.Type != nil || p.Default != nil || p.Rest || p.ArrayPattern != nil || p.ObjectPattern != nil {
+					continue
+				}
+				if _, spread := call.Args[i].(*ast.SpreadElement); spread {
+					break
+				}
+				if at, aok := o.ExprType(call.Args[i]); aok && (isUnconstrainedDynamic(at)) && !ty.FuncParams[i].IsDynamic() {
+					if ps == nil {
+						ps = append([]Type(nil), ty.FuncParams...)
+					}
+					ps[i] = TypeAny
+				}
+			}
+			if ps != nil {
+				ty.FuncParams = ps
+			}
+		}
+	}
 	// An annotated return is the annotation as emission resolves it: a
 	// declared tuple is a positional struct (TupleType), not the array the
-	// checker's tuple maps to (inferExprType's resolveType).
+	// checker's tuple maps to (typeOfExpr's annotationType).
 	if ok && ty.IsFunc() && o.r.annotation != nil {
-		var rt *ast.TypeAnnotation
+		var rt ast.TypeNode
 		async := false
 		switch fn := e.(type) {
 		case *ast.ArrowFunction:
@@ -877,8 +1717,20 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 		}
 	}
 	// An empty array literal's `never` element is codegen's default number
-	// (inferArrayType), nested or not.
-	if _, isAL := e.(*ast.ArrayLiteral); isAL && ok && ty.IsArray() {
+	// (inferArrayType), nested or not; awaited, it is the same array.
+	lit := e
+	if id, isID := lit.(*ast.Identifier); isID && ok && ty.IsArray() {
+		// A binding of one holds that array.
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV && v.TypeAnnot == nil && v.Init != nil {
+				lit = v.Init
+			}
+		}
+	}
+	if aw, isAw := lit.(*ast.AwaitExpression); isAw {
+		lit = aw.Argument
+	}
+	if _, isAL := lit.(*ast.ArrayLiteral); isAL && ok && ty.IsArray() {
 		if nt, changed := neverLeafToNumber(ty); changed {
 			ty = nt
 		}
@@ -924,9 +1776,28 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 			case *ast.ArrowFunction:
 				continue
 			case *ast.FunctionExpression:
-				if _, lit := o.c.ParentOf(f).(*ast.ObjectLiteral); lit && f.Method {
+				// A literal with a getter or setter is its synthetic
+				// class's instance (ensureObjLitClass), its methods'
+				// `this` included.
+				if ol, lit := o.c.ParentOf(f).(*ast.ObjectLiteral); lit && ol.HasAccessors() && !ol.HasComputedKey() && !hasProtoKey(ol) && !objLitHasSpread(ol) && o.r.objLit != nil && !o.declaresThis(f) && (o.r.js == nil || !o.r.js()) {
+					if ct, cok := o.r.objLit(ol); cok {
+						ty, ok = ct, true
+						break walk
+					}
+				}
+				if _, lit := o.c.ParentOf(f).(*ast.ObjectLiteral); lit && (f.Method || f.PropValue) {
 					if tt, has := o.r.funcThis(f); has {
-						ty, ok = tt, true
+						// A boxed `this` the checker types from the method's
+						// contextual `this` parameter reads as that type.
+						// A method whose `this` a `this` parameter types
+						// (its own `read(this: Readable)`, or the
+						// contextual signature's) reads it as that type;
+						// the literal's own type is its box.
+						if !(tt.IsDynamic() && ok && !ty.IsDynamic() && ty.IR != "" && (o.declaresThis(f) || ty.IsClass() || declaredByInterface(o.c.TypeOf(th)))) {
+							ty, ok = tt, true
+						}
+					} else if f.PropValue && o.r.js != nil && o.r.js() {
+						ty, ok = TypeAny, true // a JavaScript function's own call-time `this`
 					}
 				}
 				break walk
@@ -993,9 +1864,8 @@ func (o frontOracle) exprTypeQuery(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
-	// A typed array re-asserted through a box to another kind keeps the box
-	// (its run-time kind is the source's).
-	if as, isAs := e.(*ast.AsExpression); isAs && as.TypeAnnot != nil && o.r.keepsBoxedTypedArray != nil && o.r.keepsBoxedTypedArray(as) {
+	// An assertion that keeps the box (keepsBox): the operand's box.
+	if as, isAs := e.(*ast.AsExpression); isAs && as.TypeAnnot != nil && o.r.keepsBox != nil && o.r.keepsBox(as) {
 		if it, iok := o.ExprType(as.Expr); iok && it.IsDynamic() {
 			ty, ok = it, true
 		}
@@ -1202,6 +2072,28 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 			return nt, true
 		}
 	}
+	// An array of object literals of one layout holds that layout, its
+	// methods taking their `this` as each literal's own answer does.
+	if al, isAL := e.(*ast.ArrayLiteral); isAL && ok && ty.IsArray() && ty.ElemType != nil && len(al.Elements) > 0 {
+		var et Type
+		same := true
+		for i, el := range al.Elements {
+			ol, isOL := el.(*ast.ObjectLiteral)
+			if !isOL {
+				same = false
+				break
+			}
+			lt, lok := o.ExprType(ol)
+			if !lok || i > 0 && reprKey(lt) != reprKey(et) {
+				same = false
+				break
+			}
+			et = lt
+		}
+		if same && reprKey(et) != reprKey(*ty.ElemType) && reprKey(withoutFuncThis(et)) == reprKey(withoutFuncThis(*ty.ElemType)) {
+			return ArrayOf(et), true
+		}
+	}
 	// A class a static field holds is held boxed: a member read off it
 	// is read dynamically (emitMember), whatever class the checker knows.
 	if m, isM := e.(*ast.MemberExpression); isM && ok && !m.Optional && !ty.IsDynamic() && o.staticClassField(m.Object) {
@@ -1223,8 +2115,10 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 	if id, isID := e.(*ast.Identifier); isID && ok && ty.IsFunc() && !ty.FuncThis {
 		if sym, _ := o.b.Resolve(id); sym != nil {
 			if v, isV := singleVarDecl(sym); isV && v.TypeAnnot == nil && (v.Kind == "const" || !o.reassigned(sym)) {
-				if m, isM := v.Init.(*ast.MemberExpression); isM {
-					if _, isLit := m.Object.(*ast.ObjectLiteral); isLit {
+				if m, isM := v.Init.(*ast.MemberExpression); isM && !m.Optional {
+					_, isLit := m.Object.(*ast.ObjectLiteral)
+					_, isRef := m.Object.(*ast.Identifier) // `const f = counter.describe`
+					if isLit || isRef {
 						if mt, mok := o.ExprType(m); mok && mt.IsFunc() && mt.FuncThis {
 							return mt, true
 						}
@@ -1233,11 +2127,58 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
+	// A binding of an array of object literals whose methods take their
+	// `this` holds that array; a callback given its elements, one of them.
+	if id, isID := e.(*ast.Identifier); isID && ok && (ty.IsArray() || ty.IsObject()) && !ty.IsDynamic() {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV && v.TypeAnnot == nil && (v.Kind == "const" || !o.reassigned(sym)) {
+				if al, isAL := v.Init.(*ast.ArrayLiteral); isAL && ty.IsArray() {
+					if at, aok := o.ExprType(al); aok && onlyThisDiffers(at, ty) {
+						return at, true
+					}
+				}
+			}
+			if pm := declaredParam(sym, id.Name); pm != nil && pm.Type == nil && ty.IsObject() {
+				if fn, isFn := sym.Declarations[0].Node.(*ast.ArrowFunction); isFn && len(fn.Params) > 0 && &fn.Params[0] == pm {
+					if call, isCall := o.c.ParentOf(fn).(*ast.CallExpression); isCall && len(call.Args) > 0 && call.Args[0] == ast.Expression(fn) {
+						if m, isM := call.Callee.(*ast.MemberExpression); isM && !m.Optional && elementCallback[m.Property] {
+							if rt, rok := o.ExprType(m.Object); rok && rt.IsArray() && rt.ElemType != nil && onlyThisDiffers(*rt.ElemType, ty) {
+								return *rt.ElemType, true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	// `const q = a` of a const bound to an object literal: a's layout (its
+	// methods taking their `this` included).
+	if id, isID := e.(*ast.Identifier); isID && ok && ty.IsObject() && !ty.IsDynamic() {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV && v.Kind == "const" && v.TypeAnnot == nil {
+				if src, isSrc := v.Init.(*ast.Identifier); isSrc {
+					if ss, _ := o.b.Resolve(src); ss != nil {
+						if sv, sok := singleVarDecl(ss); sok && sv.Kind == "const" && sv.TypeAnnot == nil {
+							if _, isLit := sv.Init.(*ast.ObjectLiteral); isLit {
+								if at, aok := o.ExprType(src); aok && at.IsObject() && !at.IsDynamic() {
+									return at, true
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
 	// A collection seed of rows of differing kinds the checker leaves
 	// unmapped is the array of its first row (inferArrayTypeOf).
-	if seed, isLit := e.(*ast.ArrayLiteral); isLit && !ok && len(seed.Elements) > 0 && (o.r.js == nil || !o.r.js()) {
+	if seed, isLit := e.(*ast.ArrayLiteral); isLit && !ok && len(seed.Elements) > 0 {
 		if row, isRow := seed.Elements[0].(*ast.ArrayLiteral); isRow && o.collectionSeedRow(row) {
 			if rt, rok := o.ExprType(row); rok {
+				if o.r.js != nil && o.r.js() && !sameSeedRows(o, seed, rt) {
+					// JavaScript's rows of different layouts: boxed rows.
+					return ArrayOf(ArrayOf(TypeAny)), true
+				}
 				return ArrayOf(rt), true
 			}
 		}
@@ -1252,11 +2193,17 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 		}
 	}
 	// An unannotated binding initialized `null` and never given a value
-	// (its evolving type's storage is `null | undefined`) holds the null.
-	if id, isID := e.(*ast.Identifier); isID && ok && ty.IsNull() && ty.IsUndefined() {
-		if sym, _ := o.b.Resolve(id); sym != nil {
+	// (its evolving type's storage is `null | undefined`, which maps to a
+	// box) holds the null.
+	if id, isID := e.(*ast.Identifier); isID && ok && (ty.IsNull() && ty.IsUndefined() || isUnconstrainedDynamic(ty) && nullAndUndefinedOnly(o.c.StorageTypeOf(id))) {
+		// (A JavaScript module binding a function reads is the global's
+		// box.)
+		if sym, _ := o.b.Resolve(id); sym != nil && !(o.r.js != nil && o.r.js() && sym.Scope != nil && sym.Scope.Kind == binder.ModuleScope && inFunction(o.c, id)) {
 			if v, isV := singleVarDecl(sym); isV && v.TypeAnnot == nil {
 				if nl, isNull := v.Init.(*ast.NullLiteral); isNull && !nl.IsUndefined {
+					if !ty.IsNull() {
+						return TypeNull, true
+					}
 					ty.setUndefined(false)
 					return ty, true
 				}
@@ -1356,6 +2303,18 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
+	// A function's own local the checker types as a union its declaration
+	// stores as one member (a ternary of Buffer and Uint8Array) is held as
+	// that member (localDeclType, emitVarDeclBody).
+	if id, isID := e.(*ast.Identifier); isID && ok && ty.IsDynamic() && len(ty.UnionMembers) > 0 && o.r.localDecl != nil {
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, isV := singleVarDecl(sym); isV {
+				if lt, has := o.r.localDecl(v); has && !lt.IsDynamic() {
+					return lt, true
+				}
+			}
+		}
+	}
 	// An unannotated binding is held as an initializer codegen holds boxed.
 	if id, isID := e.(*ast.Identifier); isID {
 		if sym, _ := o.b.Resolve(id); sym != nil {
@@ -1378,17 +2337,90 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 			ty, ok = r.of(nt)
 		}
 	}
+	// A function literal annotating its result: a tuple it declares is the
+	// positional struct codegen builds (annotatedFuncResult).
+	if !ok && annotatedFuncResult(e) {
+		if nt := o.c.TypeOf(e); !o.c.Unanswered(nt) && hasTuple(nt) {
+			r := o.r
+			r.tuples = true
+			ty, ok = r.of(nt)
+		}
+	}
 	// A read of a property an annotation declares a tuple holds that tuple.
 	if m, isM := e.(*ast.MemberExpression); isM {
 		ps, isPS := o.c.MemberDecl(m).(*ast.PropertySignature)
 		rt := o.c.NonNullable(o.c.TypeOf(m.Object))
 		declared := isPS && ps.Type != nil || !o.c.Unanswered(rt) && rt.Flags&checker.Object != 0 && (rt.Kind == checker.Interface || rt.Kind == checker.Instance)
 		if declared {
+			// A class instance's field holds what its instantiation lays
+			// out: an erased one's (`Opt<any>`, a generic method's result)
+			// is no tuple, whatever the checker's instance spells.
+			if ot, ook := o.ExprType(m.Object); ook && ot.IsClass() && !ot.IsDynamic() {
+				for _, f := range ot.Fields {
+					if f.Name == m.Property && !f.Ty.IsTuple() && hasTuple(o.c.TypeOf(m)) {
+						declared = false
+						ty, ok = f.Ty, true
+					}
+				}
+			}
+		}
+		if declared {
 			if nt := o.c.TypeOf(m); !o.c.Unanswered(nt) && hasTuple(nt) {
 				r := o.r
 				r.tuples = true
 				if tt, tok := r.of(nt); tok {
 					ty, ok = tt, true
+				}
+			}
+		}
+	}
+	// A call (or its await) of a function declared to return a tuple (or a
+	// promise of one): the tuple, as the declaration spells it.
+	if !ok {
+		inner := e
+		if aw, isAw := e.(*ast.AwaitExpression); isAw {
+			inner = aw.Argument
+		}
+		if call, isC := inner.(*ast.CallExpression); isC && !call.Optional {
+			if cid, isID := call.Callee.(*ast.Identifier); isID {
+				if sym, _ := o.b.Resolve(cid); sym != nil && len(sym.Declarations) == 1 {
+					if fd, isFD := sym.Declarations[0].Node.(*ast.FunctionDeclaration); isFD && fd.ReturnType != nil && len(fd.TypeParams) == 0 {
+						if nt := o.c.TypeOf(e); !o.c.Unanswered(nt) && hasTuple(nt) {
+							r := o.r
+							r.tuples = true
+							if tt, tok := r.of(nt); tok {
+								ty, ok = tt, true
+							}
+						}
+					}
+				}
+			}
+			if m, isM := call.Callee.(*ast.MemberExpression); isM {
+				// A class method declared to return one (`m(): [T, string]`).
+				if fd, isFD := o.c.MemberDecl(m).(*ast.FunctionDeclaration); isFD && fd.ReturnType != nil {
+					if nt := o.c.TypeOf(e); !o.c.Unanswered(nt) && hasTuple(nt) {
+						r := o.r
+						r.tuples = true
+						if tt, tok := r.of(nt); tok {
+							ty, ok = tt, true
+						}
+					}
+				}
+			}
+		}
+	}
+	// A call of a function value no declaration spells tuples for (an
+	// unannotated parameter or arrow): what the callee, as held, returns.
+	if !ok {
+		if call, isC := e.(*ast.CallExpression); isC && !call.Optional {
+			if nt := o.c.TypeOf(e); !o.c.Unanswered(nt) && hasTuple(nt) {
+				if ft, fok := o.ExprType(call.Callee); fok {
+					switch {
+					case ft.IsDynamic():
+						ty, ok = TypeAny, true
+					case ft.IsFunc() && ft.FuncRetType != nil:
+						ty, ok = *ft.FuncRetType, true
+					}
 				}
 			}
 		}
@@ -1400,7 +2432,7 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 		if sym, _ := o.b.Resolve(id); sym != nil {
 			if len(sym.Declarations) == 1 {
 				if fd, isFD := sym.Declarations[0].Node.(*ast.FunctionDeclaration); isFD && fd.ReturnType != nil {
-					if nt := o.c.TypeOf(id); !o.c.Unanswered(nt) && nt.Flags&checker.Object != 0 && nt.Kind == checker.Function && hasTuple(nt.Result) {
+					if nt := o.c.TypeOf(id); !o.c.Unanswered(nt) && nt.Flags&checker.Object != 0 && nt.Kind == checker.Function && hasTuple(nt.Ret()) {
 						r := o.r
 						r.tuples = true
 						if ft, fok := r.of(nt); fok {
@@ -1416,6 +2448,18 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 					r.tuples = true
 					if pt, pok := r.of(nt); pok {
 						ty, ok = pt, true
+						// A read flow narrows to one of its members is
+						// that member, unboxed (emitIdent).
+						if rt := o.c.TypeOf(id); pt.IsDynamic() && len(pt.UnionMembers) > 0 && flowTrusted(o.b, id) && !o.c.Unanswered(rt) && rt.Flags&checker.Union == 0 {
+							if mt, mok := r.of(rt); mok {
+								for _, m := range pt.UnionMembers {
+									if reprKey(m) == reprKey(mt) {
+										ty = mt
+										break
+									}
+								}
+							}
+						}
 					}
 				}
 			}
@@ -1434,6 +2478,9 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
+	if id, isID := e.(*ast.Identifier); isID && ok && ty.IsDynamic() && o.emptyObjectRest(id) && !o.boxedRestSource(id) {
+		return UserObjectType(nil), true // bindObjectRest's residual: no fields left
+	}
 	if id, isID := e.(*ast.Identifier); isID && ok && !ty.Nullable() && (ty.IR == "i1" || ty.IR == "double" && ty.Float || ty.IsObject() && !ty.IsDynamic() || isStringTy(ty) || ty.IsArray()) {
 		// A number, boolean, string or object an array pattern binds without a default from
 		// a source that is not a literal may be past its end: an
@@ -1442,7 +2489,15 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 			var el *ast.ArrayPatternElem
 			switch d := sym.Declarations[0].Node.(type) {
 			case *ast.ArrayDestructuring:
-				if _, lit := d.Init.(*ast.ArrayLiteral); !lit {
+				if src, lit := d.Init.(*ast.ArrayLiteral); lit && !hasSpreadElem(src.Elements) {
+					// A literal source binds its elements; a name past its
+					// end (JavaScript, `let [x, y] = [[1]]`) reads undefined.
+					for i := range d.Elems {
+						if d.Elems[i].Name == id.Name && i >= len(src.Elements) {
+							el = &d.Elems[i]
+						}
+					}
+				} else if !lit {
 					el = findArrayPatternElem(d.Elems, id.Name)
 					// A tuple source binds positionally, its elements as
 					// they are (unpackTuplePatternInto).
@@ -1453,6 +2508,17 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 			case *ast.ObjectDestructuring:
 				if _, lit := d.Init.(*ast.ObjectLiteral); !lit {
 					el = findArrayPatternElemIn(d.Props, id.Name)
+				}
+			case *ast.ForOfStatement:
+				// `for (const [a, b] of rows)` over arrays (not tuples): the
+				// same, each row possibly shorter.
+				if it, iok := o.ExprType(d.Iterable); d.ArrayPattern != nil && !d.Await && iok && it.IsArray() && !it.IsDynamic() && it.ElemType != nil {
+					if row := *it.ElemType; row.IsArray() && !row.IsTuple() && !row.IsDynamic() {
+						el = findArrayPatternElem(d.ArrayPattern, id.Name)
+						if !directArrayPatternElem(d.ArrayPattern, el) {
+							el = nil
+						}
+					}
 				}
 			}
 			if el != nil && el.Default == nil && !el.Rest {
@@ -1478,6 +2544,13 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 				if o.dynamicInit(v) {
 					return o.boxedInitRead(id, v)
 				}
+				// A JavaScript alias of an array binding (`let u2 = u`) holds
+				// what its source holds, element boxes and all.
+				if src, isSrc := v.Init.(*ast.Identifier); isSrc && v.TypeAnnot == nil && ty.IsArray() && o.r.js != nil && o.r.js() {
+					if st, sok := o.ExprType(src); sok && st.IsArray() && !st.IsTuple() {
+						return st, true
+					}
+				}
 				if sym.Scope != nil && sym.Scope.Kind == binder.ModuleScope && o.evolvingBoxed(v) {
 					return ArrayOf(TypeAny), true
 				}
@@ -1496,6 +2569,14 @@ func (o frontOracle) exprTypeBase(e ast.Expression) (Type, bool) {
 				if lit, isLit := v.Init.(*ast.ObjectLiteral); isLit && v.TypeAnnot == nil && v.Kind == "const" && (genFuncProp(o.c.TypeOf(lit)) || o.boxedIdentValue(lit)) && (o.r.js == nil || !o.r.js()) {
 					if lt, ok := o.literalFields(lit); ok {
 						return lt, true
+					}
+				}
+				// An unannotated binding of a builtin iterator call the checker
+				// types by a lib interface (`const it = arr[Symbol.iterator]()`)
+				// holds the iterator codegen lays out.
+				if call, isCall := v.Init.(*ast.CallExpression); isCall && v.TypeAnnot == nil && isUnconstrainedDynamic(ty) && o.r.codegenCall != nil {
+					if ct, cok := o.r.codegenCall(call); cok && ct.IsCollIter() {
+						return ct, true
 					}
 				}
 				st := o.undefinedSlot(v, sym, ty)
@@ -1523,7 +2604,23 @@ func (o frontOracle) dynamicInit(v *ast.VarDeclaration) bool {
 	if v.TypeAnnot != nil || v.Init == nil || v.Ambient {
 		return false
 	}
+	// Each read of the binding asks again; typing a large initializer
+	// (a 20K-row table) once per read is quadratic.
+	if d, seen := o.dynInit[v]; seen {
+		return d
+	}
+	d := o.dynamicInitUncached(v)
+	o.dynInit[v] = d
+	return d
+}
+
+func (o frontOracle) dynamicInitUncached(v *ast.VarDeclaration) bool {
 	if ol, isOL := v.Init.(*ast.ObjectLiteral); isOL && ol.HasComputedKey() && (o.r.js == nil || !o.r.js()) {
+		return true
+	}
+	// An object literal an accessor is defined on (`Object.defineProperty(o,
+	// "a", { get() {…} })`): a dynamic object, whose reads call it.
+	if accessorLiteral(o.b, v) {
 		return true
 	}
 	switch v.Init.(type) {
@@ -1615,7 +2712,35 @@ func (o frontOracle) presentRead(id *ast.Identifier, ty Type, absentInit bool) b
 	return !o.c.Unanswered(st) && !o.c.Unanswered(nt) && !presentType(st) && presentType(nt)
 }
 
+// boxedValueQuery reports whether q (`typeof E`, `typeof N.Sub`) names an
+// enum or a namespace itself, whose object a value holds boxed
+// (exprTypeOuter).
+func (o frontOracle) boxedValueQuery(q *ast.TypeQuery) bool {
+	var sym *binder.Symbol
+	for s := o.b.LookupScope(q); s != nil && sym == nil; s = s.Parent {
+		if v := s.Symbols.Get(q.Name); v != nil && v.Flags&binder.Value != 0 {
+			sym = v
+		}
+	}
+	for _, seg := range q.Path {
+		if sym == nil {
+			return false
+		}
+		sc := o.b.NamespaceScope(sym)
+		if sc == nil {
+			return false
+		}
+		sym = sc.Symbols.Get(seg)
+	}
+	return sym != nil && sym.Flags&binder.Variable == 0 && sym.Flags&(binder.Enum|binder.NamespaceModule) != 0 && sym.Flags&(binder.Class|binder.Function) == 0
+}
+
 func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
+	// A read through a proxy is its get trap's result, whatever the
+	// target declares.
+	if obj := dynamicReadReceiver(e); obj != nil && o.proxyValue(obj) {
+		return TypeAny, true
+	}
 	// An enum's name as a value is its object, held boxed (emitIdent), and
 	// so is a namespace's enum (`X.Kind`).
 	if id, isID := e.(*ast.Identifier); isID {
@@ -1743,7 +2868,7 @@ func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
 				}
 				continue
 			}
-			if len(lit.Elements) > 1 {
+			if len(lit.Elements) > 1 && !plainLiteral(el) {
 				if et, ok := o.ExprType(el); ok && isUnconstrainedDynamic(et) {
 					return ArrayOf(TypeAny), true
 				}
@@ -1856,9 +2981,17 @@ func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
 			return it, true
 		}
 	}
+	// … written with a string key (`Date["UTC"]`): the same closure.
+	if ix, isIx := e.(*ast.IndexExpression); isIx && !ix.Optional && o.r.builtinRef != nil && !exprReceiverOrCallee(o.c.ParentOf(ix), ix) {
+		if key, isStr := ix.Index.(*ast.StringLiteral); isStr && o.libGlobalRef(ix.Object) {
+			if t, ok := o.r.builtinRef(ast.NewMemberExpression(ix.Object, key.Value, ix.GetPos())); ok {
+				return t, true
+			}
+		}
+	}
 	// A builtin function an intrinsic implements, read as a value (`var
 	// dp = Object.defineProperty`): the closure codegen builds for it.
-	if m, isM := e.(*ast.MemberExpression); isM && !m.Optional && o.r.builtinRef != nil && !exprReceiverOrCallee(o.c.ParentOf(m), m) {
+	if m, isM := e.(*ast.MemberExpression); isM && !m.Optional && o.r.builtinRef != nil && (!exprReceiverOrCallee(o.c.ParentOf(m), m) || funcMetaReceiver(o.c.ParentOf(m), m)) && !o.boxedReceiver(m) && !(o.r.methodRecord != nil && o.r.methodRecord(m)) {
 		if t, ok := o.r.builtinRef(m); ok {
 			return t, true
 		}
@@ -1942,7 +3075,7 @@ func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
 					if fd, isFD := d.Node.(*ast.FunctionDeclaration); isFD && len(fd.Overloads) > 0 && fd.ReturnType != nil && !fd.IsAsync && !fd.IsGenerator && o.voidOverValue(call, fd) {
 						return TypeAny, true
 					}
-					if fd, isFD := d.Node.(*ast.FunctionDeclaration); isFD && len(fd.Overloads) > 0 && fd.ReturnType != nil && fd.ReturnType.Name == "any" && !fd.IsAsync && !fd.IsGenerator {
+					if fd, isFD := d.Node.(*ast.FunctionDeclaration); isFD && len(fd.Overloads) > 0 && annotIs(fd.ReturnType, "any") && !fd.IsAsync && !fd.IsGenerator {
 						if ct := o.c.TypeOf(call); o.c.Unanswered(ct) || ct.Flags&checker.Union != 0 && o.c.NonNullable(ct).Flags&checker.Union != 0 || o.objectResult(call) {
 							return TypeAny, true // an overload of several kinds: the implementation's box
 						}
@@ -1986,12 +3119,21 @@ func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
+	// `slice` on an instance of a class extending ArrayBuffer makes
+	// another of that class (species).
+	if call, isCall := e.(*ast.CallExpression); isCall && o.r.bufferClass != nil {
+		if m, isM := call.Callee.(*ast.MemberExpression); isM && m.Property == "slice" {
+			if rt, rok := o.ExprType(m.Object); rok && rt.IsClass() && !rt.IsDynamic() && !rt.Nullable() && o.r.bufferClass(rt.ClassName) {
+				return rt, true
+			}
+		}
+	}
 	// `then`/`catch`/`finally` on a Promise subclass's instance makes another
 	// of that class (species), settling with the checker's value.
 	if call, isCall := e.(*ast.CallExpression); isCall {
 		if m, isM := call.Callee.(*ast.MemberExpression); isM && (m.Property == "then" || m.Property == "catch" || m.Property == "finally") {
-			if rt, rok := o.ExprType(m.Object); rok && rt.IsClass() && (rt.PromiseType != nil || o.extendsPromise(o.c.TypeOf(m.Object))) {
-				if ty, ok := o.r.of(o.c.TypeOf(call)); ok && ty.IsPromise() && ty.PromiseType != nil {
+			if rt, rok := o.ExprType(m.Object); rok && rt.IsClass() && (rt.PromiseType != nil || o.r.promiseClass != nil && o.r.promiseClass(rt.ClassName) || o.extendsPromise(o.c.TypeOf(m.Object))) {
+				if ty, ok := o.r.of(o.c.TypeOf(call)); ok && ty.IsPromise() {
 					out := rt
 					if o.r.species != nil {
 						if ct, plain, sok := o.r.species(rt.ClassName); sok {
@@ -2001,8 +3143,17 @@ func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
 							out = ct
 						}
 					}
-					pt := *ty.PromiseType
-					out.PromiseType = &pt
+					if o.r.promiseErased != nil && o.r.promiseErased(out.ClassName) {
+						out.PromiseType = &TypeAny
+						return out, true
+					}
+					// A promise settling to nothing carries no value type
+					// (promiseSubclassOf).
+					out.PromiseType = nil
+					if ty.PromiseType != nil && !ty.PromiseType.IsNever() {
+						pt := *ty.PromiseType
+						out.PromiseType = &pt
+					}
 					return out, true
 				}
 			}
@@ -2055,13 +3206,13 @@ func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
 				}
 			}
 			if isFD && len(fd.Overloads) > 0 && fd.ReturnType != nil && !fd.IsAsync && !fd.IsGenerator {
-				if fd.ReturnType.Name == "any" && (!o.overloadsAgree(call) && o.anyArgument(call) || o.objectResult(call)) {
+				if annotIs(fd.ReturnType, "any") && (!o.overloadsAgree(call) && o.anyArgument(call) || o.objectResult(call)) {
 					return TypeAny, true // the implementation's box
 				}
 				if o.voidOverValue(call, fd) {
 					return TypeAny, true
 				}
-				if rt := fd.ReturnType; rt.Name == "any" || rt.Name == "Promise" && rt.ElemType != nil && rt.ElemType.Name == "any" {
+				if o.anyOrPromiseOfAny(fd) {
 					if ty, ok := o.r.of(o.c.TypeOf(call)); ok && ty.IsPromise() {
 						ty.PromiseType = &TypeAny
 						return ty, true
@@ -2083,7 +3234,7 @@ func (o frontOracle) exprTypeOuter(e ast.Expression) (Type, bool) {
 			if el == nil {
 				continue
 			}
-			if _, spread := el.(*ast.SpreadElement); spread {
+			if _, spread := el.(*ast.SpreadElement); spread || plainLiteral(el) {
 				continue
 			}
 			if et, ok := o.ExprType(el); ok && isUnconstrainedDynamic(et) {
@@ -2362,6 +3513,52 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
+	// A `const` holding a collection iterator (`const names = m.keys()`)
+	// holds its initializer's: the iterator keeps the collection it walks,
+	// which its type (`MapIterator<string>`) no longer names. So does one
+	// holding a generator's step (`const r = it.next()`): codegen's own
+	// {value, done}, not the IteratorResult union its type names.
+	if id, ok := e.(*ast.Identifier); ok {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if v, isVar := sym.Declarations[0].Node.(*ast.VarDeclaration); isVar && v.TypeAnnot == nil {
+				init := v.Init
+				if aw, isAwait := init.(*ast.AwaitExpression); isAwait {
+					init = aw.Argument // an async generator's step, awaited
+					// … or a `const` holding it (`const p = it.next(); await p`)
+					if pid, isID := init.(*ast.Identifier); isID {
+						if ps, _ := o.b.Resolve(pid); ps != nil && len(ps.Declarations) == 1 {
+							if pv, isVar := ps.Declarations[0].Node.(*ast.VarDeclaration); isVar && pv.Kind == "const" && pv.TypeAnnot == nil && pv.Init != nil {
+								if pc, isCall := pv.Init.(*ast.CallExpression); isCall && o.generatorStep(pc) {
+									init = pc
+								}
+							}
+						}
+					}
+				}
+				if call, isCall := init.(*ast.CallExpression); isCall {
+					step := o.generatorStep(call)
+					if step && v.Kind != "const" && !o.stepsOnly(sym) {
+						step = false
+					}
+					if step || v.Kind == "const" && collIterCall(call) {
+						if t, ok := o.ExprType(v.Init); ok && (step || t.IsCollIter()) {
+							return t, true
+						}
+					}
+				}
+			}
+		}
+	}
+	// An async generator's step reaching a `.then` callback's parameter
+	// (`g.next().then(r => r.value)`) is the same {value, done}: the
+	// promise's own.
+	if id, ok := e.(*ast.Identifier); ok {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if t, ok := o.thenStepParam(sym); ok {
+				return t, true
+			}
+		}
+	}
 	// A call through a function value whose result is a box (a builtin's
 	// closure, `const sc = structuredClone; sc(x)`) returns that box.
 	if call, ok := e.(*ast.CallExpression); ok && !call.Optional {
@@ -2389,7 +3586,9 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 	// A function value's property other than its own is read off the boxed
 	// function.
 	if m, ok := e.(*ast.MemberExpression); ok && !m.Optional && o.r.funcProp != nil && !o.classValue(m.Object) && !o.localClassValue(m.Object) {
-		if ot, ook := o.ExprType(m.Object); ook && ot.IsFunc() {
+		// An overloaded or generic function (`promisify`) is a function to
+		// the checker whatever value codegen holds it as.
+		if ot, ook := o.ExprType(m.Object); ook && ot.IsFunc() || o.checkerFunction(m.Object) {
 			if st, sok := o.r.funcProp(m); sok {
 				return st, true
 			}
@@ -2435,10 +3634,6 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 	// An immediately invoked generator function expression's instance is
 	// held as a box.
 	if iifeGenerator(e) {
-		return TypeAny, true
-	}
-	// `new F(…)` of a prototype constructor function is a dynamic object.
-	if nx, ok := e.(*ast.NewExpression); ok && o.r.protoCtor != nil && o.r.protoCtor(nx.ClassName) {
 		return TypeAny, true
 	}
 	// A property of a builtin constructor's or a class's prototype object
@@ -2554,14 +3749,24 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 			return t, true
 		}
 	}
-	// A generator function read as a value: the constructor closure whose
-	// result is codegen's generator instance (generatorValueType).
+	// A generator function read as a value: its constructor closure, boxed
+	// (generatorValueType), whether or not codegen has registered it yet.
 	if id, ok := e.(*ast.Identifier); ok && o.r.generatorValue != nil {
 		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			// A parameter's declaration is its function too: not the
+			// generator itself.
+			param := sym.Flags&binder.FunctionScopedVariable != 0
 			gen := false
 			switch d := sym.Declarations[0].Node.(type) {
 			case *ast.FunctionDeclaration:
-				gen = d.IsGenerator
+				gen = d.IsGenerator && !param
+				// A nested one that captures and reads its own value is
+				// held in a cell, as a function (emitSelfReferencingGenerator).
+				if gen && readsOwnValue(d) && sym.Scope != nil && sym.Scope.Kind != binder.ModuleScope && o.r.heldIdent != nil {
+					if ht, hok := o.r.heldIdent(id); hok && ht.IsFunc() {
+						return ht, true
+					}
+				}
 			case *ast.VarDeclaration:
 				// A top-level `var g = function* () {}` is a declaration
 				// (rewriteTopLevelGeneratorExpressions), so registered
@@ -2571,12 +3776,17 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 			case *ast.FunctionExpression:
 				// Its own name in its body, renamed to the binding that
 				// declaration took (renameGeneratorSelfName).
-				gen = d.IsGenerator
+				gen = d.IsGenerator && !param
+				if gen && o.r.heldIdent != nil {
+					// Lifted to a nested declaration that captures: held
+					// in a cell, as a function.
+					if ht, hok := o.r.heldIdent(id); hok && ht.IsFunc() {
+						return ht, true
+					}
+				}
 			}
 			if gen {
-				if t, ok := o.r.generatorValue(id); ok {
-					return t, true
-				}
+				return TypeAny, true
 			}
 		}
 	}
@@ -2624,35 +3834,12 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
-	// The Object statics that build or return a dynamic object (a defined
-	// accessor, a prototype link, a descriptor) are held boxed, whatever
-	// the lib's result type.
+	// A builtin whose result the lane holds otherwise than its lib type.
 	if call, ok := e.(*ast.CallExpression); ok {
 		if m, ok := call.Callee.(*ast.MemberExpression); ok {
-			switch o.intrinsicKey(m) {
-			case "Object.defineProperty", "Object.getOwnPropertyDescriptor", "Object.create",
-				"Object.getPrototypeOf", "Object.setPrototypeOf", "Object.groupBy":
-				return TypeAny, true
-			case "Object.values", "Object.entries":
-				// Of a dynamic object: a dynamic array (emitDynAnyEntries).
-				if len(call.Args) == 1 {
-					if at, ok := o.ExprType(call.Args[0]); ok && isUnconstrainedDynamic(at) {
-						return TypeAny, true
-					}
-				}
-			}
-		}
-	}
-	// JSON.stringify of an `any` (or of arguments only known at run time)
-	// may be undefined: held boxed, though the lib's result is string.
-	if call, ok := e.(*ast.CallExpression); ok {
-		if m, ok := call.Callee.(*ast.MemberExpression); ok && o.intrinsicKey(m) == "JSON.stringify" {
-			if resolver.StringifyArgsAtRunTime(call.Args) {
-				return TypeAny, true
-			}
-			if len(call.Args) >= 1 {
-				if at, ok := o.ExprType(call.Args[0]); ok && isUnconstrainedDynamic(at) {
-					return TypeAny, true
+			if in := intrinsics[o.intrinsicKey(m)]; in.held != nil {
+				if t, ok := in.held(o, call); ok {
+					return t, true
 				}
 			}
 		}
@@ -2702,7 +3889,7 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 	// its possibly-undefined slot, not a typed closure.
 	if m, ok := e.(*ast.MemberExpression); ok {
 		if fd, ok := o.c.MemberDecl(m).(*ast.FunctionDeclaration); ok && fd.IsOptional && fd.Body == nil {
-			return Type{IR: "ptr", Absent: absenceOf(true, true, false)}, true
+			return Type{IR: irPtr, Absent: absenceOf(true, true, false)}, true
 		}
 	}
 	// `a && b` of one pointer type is held in the left operand's slot: a
@@ -2712,7 +3899,7 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 	if b, ok := e.(*ast.BinaryExpression); ok && b.Op == "&&" {
 		lt, lok := o.ExprType(b.Left)
 		ty, tok := o.exprType(e)
-		if lok && tok && lt.NullAndUndef() && lt.IR == "ptr" && ty.IR == "ptr" && ty.Nullable() && !ty.NullAndUndef() && reprKey(lt.withoutNullable()) == reprKey(ty.withoutNullable()) {
+		if lok && tok && lt.NullAndUndef() && lt.IR == irPtr && ty.IR == irPtr && ty.Nullable() && !ty.NullAndUndef() && reprKey(lt.withoutNullable()) == reprKey(ty.withoutNullable()) {
 			ty.setNullAndUndef(true)
 			return ty, true
 		}
@@ -2722,15 +3909,19 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 	// which a thrown non-object lacks.
 	if m, ok := e.(*ast.MemberExpression); ok {
 		if as, ok := m.Object.(*ast.AsExpression); ok && o.caughtBinding(as) {
-			if ty, ok := o.exprType(e); ok && ty.IR == "ptr" && !ty.IsDynamic() && !ty.Nullable() {
+			if ty, ok := o.exprType(e); ok && ty.IR == irPtr && !ty.IsDynamic() && !ty.Nullable() {
 				ty.setNullable(true)
 				ty.setUndefined(true)
 				return ty, true
 			}
 		}
 	}
-	// A comma expression is its last operand.
+	// A comma expression is its last operand; `(super(…), …, this)`, an
+	// inlined field initialization's, is the instance the call returns.
 	if sq, ok := e.(*ast.SequenceExpression); ok && len(sq.Exprs) > 0 {
+		if st, sok := o.superSequence(sq); sok {
+			return st, true
+		}
 		return o.ExprType(sq.Exprs[len(sq.Exprs)-1])
 	}
 	if lit, ok := e.(*ast.ArrayLiteral); ok && o.r.js != nil && o.r.js() && o.jsBoxedArrayLiteral(lit) {
@@ -2770,6 +3961,19 @@ func (o frontOracle) exprTypeRaw(e ast.Expression) (Type, bool) {
 	ty, ok := o.exprType(e)
 	if ok && ty.IsFunc() && o.r.js != nil && o.r.js() {
 		ty = o.jsDefaultedParams(e, ty)
+	}
+	if call, isCall := e.(*ast.CallExpression); ok && isCall && !ty.IsDynamic() && o.r.js != nil && o.r.js() {
+		// A call of a function literal binding returning its boxed parameter
+		// is that box (jsDefaultedParams' result type).
+		if id, isID := call.Callee.(*ast.Identifier); isID {
+			if ft, fok := o.exprTypeRaw(id); fok && ft.IsFunc() && ft.FuncRetType != nil && isUnconstrainedDynamic(*ft.FuncRetType) {
+				if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+					if v, vok := sym.Declarations[0].Node.(*ast.VarDeclaration); vok && v.Init != nil && (literalReturnsOnlyBoxedParam(v.Init, ft.FuncParams) || o.jsReturnsReboxed(v.Init)) {
+						return TypeAny, true
+					}
+				}
+			}
+		}
 	}
 	// An element whose type the checker gives no layout for (a
 	// `PromiseSettledResult` union) is the element the array holds.
@@ -2838,6 +4042,12 @@ func (o frontOracle) jsDefaultedParams(e ast.Expression, ty Type) Type {
 				if out != nil {
 					ty.FuncParams = out
 					ty.FuncParamOptional = nil
+					// Its result read off a boxed parameter alone (`return
+					// a`) is that box.
+					if returnsOnlyBoxedParam(fd, out) {
+						rt := TypeAny
+						ty.FuncRetType = &rt
+					}
 				}
 			}
 		}
@@ -2850,7 +4060,20 @@ func (o frontOracle) jsDefaultedParams(e ast.Expression, ty Type) Type {
 	}
 	var out []Type
 	for i, p := range params {
-		if p.Type != nil || p.Default == nil || p.Rest || p.ArrayPattern != nil || p.ObjectPattern != nil {
+		if p.Type != nil || p.Rest || p.ArrayPattern != nil || p.ObjectPattern != nil {
+			continue
+		}
+		if p.Default == nil {
+			// One its call sites type (jsArrowParam keeps only their one
+			// primitive) is held boxed.
+			t := o.c.JSCallSiteParam(e, i)
+			if t == nil || t.Flags&checker.Union == 0 && t.Flags&(checker.String|checker.Number|checker.Boolean) != 0 || i >= len(ty.FuncParams) || ty.FuncParams[i].IsDynamic() {
+				continue
+			}
+			if out == nil {
+				out = append([]Type(nil), ty.FuncParams...)
+			}
+			out[i] = TypeAny
 			continue
 		}
 		switch d := p.Default.(type) {
@@ -2872,10 +4095,46 @@ func (o frontOracle) jsDefaultedParams(e ast.Expression, ty Type) Type {
 		}
 		out[i] = TypeAny
 	}
+	reboxed := map[string]bool{}
+	for i, p := range params {
+		if out != nil && i < len(out) && i < len(ty.FuncParams) && out[i].IsDynamic() && !ty.FuncParams[i].IsDynamic() {
+			reboxed[p.Name] = true
+		}
+	}
 	if out != nil {
 		ty.FuncParams = out
 	}
+	// Its result read off a boxed parameter (`(p) => p`, `(p) => p.then(f)`)
+	// is a box, whatever the checker's call sites make the parameter.
+	if ty.FuncRetType != nil && !ty.FuncRetType.IsDynamic() && ty.FuncRetType.IR != "void" && (literalReturnsOnlyBoxedParam(e, ty.FuncParams) || returnsRead(e, reboxed)) {
+		rt := TypeAny
+		ty.FuncRetType = &rt
+	}
 	return ty
+}
+
+// jsReturnsReboxed reports a function literal whose result reads a
+// parameter jsDefaultedParams holds boxed against its call sites' type.
+func (o frontOracle) jsReturnsReboxed(e ast.Expression) bool {
+	var params []ast.Param
+	switch f := e.(type) {
+	case *ast.ArrowFunction:
+		params = f.Params
+	case *ast.FunctionExpression:
+		params = f.Params
+	default:
+		return false
+	}
+	names := map[string]bool{}
+	for i, p := range params {
+		if p.Type != nil || p.Default != nil || p.Rest || p.ArrayPattern != nil || p.ObjectPattern != nil {
+			continue
+		}
+		if t := o.c.JSCallSiteParam(e, i); t != nil && !(t.Flags&checker.Union == 0 && t.Flags&(checker.String|checker.Number|checker.Boolean) != 0) && t.Flags&checker.Any == 0 {
+			names[p.Name] = true
+		}
+	}
+	return returnsRead(e, names)
 }
 
 func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
@@ -2951,7 +4210,7 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 	}
 	ty, ok := o.r.of(t)
 	// A `const` holding `a || b` is held in that expression's slot.
-	if id, isID := e.(*ast.Identifier); isID && ok && ty.IR == "ptr" && ty.Nullable() && !ty.NullAndUndef() {
+	if id, isID := e.(*ast.Identifier); isID && ok && ty.IR == irPtr && ty.Nullable() && !ty.NullAndUndef() {
 		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
 			if v, isVar := sym.Declarations[0].Node.(*ast.VarDeclaration); isVar && v.Kind == "const" && v.TypeAnnot == nil {
 				if bin, isBin := v.Init.(*ast.BinaryExpression); isBin && (bin.Op == "||" || bin.Op == "&&") {
@@ -2992,6 +4251,21 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 			return lt, true
 		}
 	}
+	// An array literal of builtin global functions (`[String, Number]`),
+	// whose element type does not map: any[], each element boxed, as
+	// codegen builds it.
+	if lit, isLit := e.(*ast.ArrayLiteral); isLit && !ok && len(lit.Elements) > 0 {
+		all := true
+		for _, el := range lit.Elements {
+			if id, isID := el.(*ast.Identifier); !isID || !o.isGlobalFunc(id) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return ArrayOf(TypeAny), true
+		}
+	}
 	if !ok {
 		// A read off a box whose declared type does not map is the box's
 		// dynamic read.
@@ -3022,6 +4296,13 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 			return FuncType([]Type{TypeCaught}, TypeVoid), true
 		} else if ne != nil && i == 0 {
 			// `resolve` takes the promise's value; a Promise<void>'s none.
+			// A generic subclass's value is erased: any, as codegen
+			// builds it.
+			if ne.ClassName != "Promise" && o.genericClass(ne.ClassName) {
+				rt := FuncType([]Type{TypeAny}, TypeVoid)
+				rt.setKind(kindPromiseResolver, true)
+				return rt, true
+			}
 			// An explicit type argument is the value its executor was
 			// emitted with: a type parameter's is that instantiation's.
 			if len(ne.TypeArgs) == 1 && o.r.promiseValue != nil {
@@ -3035,6 +4316,10 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 				}
 			}
 			if pt := o.c.TypeOf(ne); !o.c.Unanswered(pt) {
+				// A Promise subclass's instance: the Promise<T> it extends.
+				for b := pt; b != nil && b.Flags&checker.Object != 0 && b.Kind == checker.Instance && b.Base != nil; b = b.Base {
+					pt = b.Base
+				}
 				if r, ok := o.r.of(pt); ok && r.IsPromise() {
 					if r.PromiseType == nil || r.PromiseType.IR == "void" || r.PromiseType.IR == "" {
 						return FuncType(nil, TypeVoid), true
@@ -3044,6 +4329,13 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 					return rt, true
 				}
 			}
+		}
+	}
+	// A callback parameter typed by an erased generic class's constructor
+	// (`new Q<number>((r) => …)`): codegen reads the erased annotation.
+	if id, isID := e.(*ast.Identifier); isID {
+		if t, ok := o.erasedCtorCallbackParam(id); ok {
+			return t, true
 		}
 	}
 	// A read of a `then` callback's value parameter (thenValueBox).
@@ -3192,7 +4484,7 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 	}
 	// A property read through an erased `x as C` reads the operand's
 	// object: a property it lacks, or has optional, may be absent.
-	if m, ok := e.(*ast.MemberExpression); ok && !ty.Nullable() && ty.IR == "ptr" && !ty.IsDynamic() {
+	if m, ok := e.(*ast.MemberExpression); ok && !ty.Nullable() && ty.IR == irPtr && !ty.IsDynamic() {
 		if as, ok := m.Object.(*ast.AsExpression); ok && as.TypeAnnot != nil {
 			if ot := o.c.TypeOf(as.Expr); !o.c.Unanswered(ot) {
 				ot = o.c.NonNullable(ot)
@@ -3206,7 +4498,7 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 		}
 	}
 	// … and a `const` initialized from that read holds the same.
-	if id, ok := e.(*ast.Identifier); ok && !ty.Nullable() && ty.IR == "ptr" && !ty.IsDynamic() {
+	if id, ok := e.(*ast.Identifier); ok && !ty.Nullable() && ty.IR == irPtr && !ty.IsDynamic() {
 		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
 			if v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration); ok && v.Kind == "const" && v.TypeAnnot == nil {
 				if m, ok := v.Init.(*ast.MemberExpression); ok {
@@ -3227,8 +4519,8 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 	// `x as T` is erased (ADR-00371): a possibly-null pointer asserted to
 	// the same shape without null stays possibly null at run time, where a
 	// call or member read through it throws as in Node.
-	if src := o.assertedOperand(e); src != nil && !ty.Nullable() && ty.IR == "ptr" && !ty.IsDynamic() {
-		if st, ok := o.ExprType(src); ok && st.Nullable() && st.IR == "ptr" && !st.IsDynamic() &&
+	if src := o.assertedOperand(e); src != nil && !ty.Nullable() && ty.IR == irPtr && !ty.IsDynamic() {
+		if st, ok := o.ExprType(src); ok && st.Nullable() && st.IR == irPtr && !st.IsDynamic() &&
 			st.IsFunc() == ty.IsFunc() && st.IsArray() == ty.IsArray() && st.IsObject() == ty.IsObject() {
 			ty.setNullable(true)
 			ty.setUndefined(st.IsUndefined())
@@ -3270,7 +4562,7 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 	if id, isID := e.(*ast.Identifier); isID && ty.IsDynamic() && len(ty.UnionMembers) > 0 && flowTrusted(o.b, id) {
 		if nt := o.c.TypeOf(id); !o.c.Unanswered(nt) && nt.Flags&checker.Union == 0 &&
 			(nt.Flags&(checker.Boolean|checker.BooleanLiteral|checker.Number|checker.NumberLiteral|checker.String|checker.StringLiteral|checker.ESSymbol) != 0 ||
-				nt.Flags&checker.Object != 0 && (nt.Kind == checker.Instance || nt.Kind == checker.Array || nt.Kind == checker.Interface)) {
+				nt.Flags&checker.Object != 0 && (nt.Kind == checker.Instance || nt.Kind == checker.Array || nt.Kind == checker.Tuple || nt.Kind == checker.Interface)) {
 			if r, ok := o.r.of(nt); ok {
 				for _, m := range ty.UnionMembers {
 					if reprKey(m) == reprKey(r) {
@@ -3313,6 +4605,19 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 						if reprKey(m) == reprKey(r) {
 							return m, true
 						}
+					}
+				}
+				// … to its one function member (`typeof o === 'function'`),
+				// that function.
+				if nt.Flags&checker.Object != 0 && nt.Kind == checker.Function {
+					var fn []Type
+					for _, m := range ty.UnionMembers {
+						if m.IsFunc() {
+							fn = append(fn, m)
+						}
+					}
+					if len(fn) == 1 {
+						return fn[0], true
 					}
 				}
 			} else if sub, ok := o.unionSubset(ty, nt); ok {
@@ -3371,10 +4676,13 @@ func (o frontOracle) exprType(e ast.Expression) (Type, bool) {
 		if _, isIndex := e.(*ast.IndexExpression); isIndex {
 			return indexReadType(*arr.ElemType), true // the native element
 		}
+		if id, isID := e.(*ast.Identifier); isID && o.storesPresent(id) && o.reprStoresPresent(id) {
+			break // a store since that holds a present value (`n = n * 256`)
+		}
 		ty = indexReadType(ty)
 		ty.UncheckedIndex = false // a local holds the number it converted to
 	case arr.IsArray():
-		if arr.DynPropTy != nil && ty.IR != "ptr" {
+		if arr.DynPropTy != nil && ty.IR != irPtr {
 			break // a scalar record value holds its own absence (dynPropReadType)
 		}
 		if _, isIndex := e.(*ast.IndexExpression); isIndex && arr.DynPropTy == nil && arr.ElemType != nil && arr.ElemType.IsDynamic() && !ty.IsDynamic() {
@@ -3427,7 +4735,7 @@ func dynamicReadReceiver(e ast.Expression) ast.Expression {
 // through an erased `err as T`.
 func (o frontOracle) caughtBinding(e ast.Expression) bool {
 	for as, ok := e.(*ast.AsExpression); ok && as.TypeAnnot != nil; as, ok = e.(*ast.AsExpression) {
-		if kw, isKw := as.TypeAnnot.TypeNode().(*ast.KeywordType); isKw && (kw.Keyword == "any" || kw.Keyword == "unknown") {
+		if kw, isKw := as.TypeAnnot.(*ast.KeywordType); isKw && (kw.Keyword == "any" || kw.Keyword == "unknown") {
 			return false // boxed into the box the assertion names
 		}
 		e = as.Expr
@@ -3458,7 +4766,7 @@ func presentRefCandidate(e ast.Expression, ty Type) bool {
 	default:
 		return false
 	}
-	return ty.IR == "ptr" && ty.Nullable() && !ty.IsDynamic() && !ty.UncheckedIndex &&
+	return ty.IR == irPtr && ty.Nullable() && !ty.IsDynamic() && !ty.UncheckedIndex &&
 		(ty.IsClass() || ty.IsFunc() || ty.IsPromise() || ty.IsObject() || ty.IsArray())
 }
 
@@ -3574,22 +4882,105 @@ func (o frontOracle) elementRead(e ast.Expression) (Type, bool) {
 	return Type{}, false
 }
 
-func (o frontOracle) AnnotationType(ta *ast.TypeAnnotation) (Type, bool) {
-	n := ta.TypeNode()
+func (o frontOracle) AnnotationType(ta ast.TypeNode) (Type, bool) {
+	n := ta
 	if n == nil {
 		return Type{}, false
 	}
-	// A `NodeJS.*` type is the representation the matching `process`
-	// member has (nodeJSNamespaceType), a builtin layout.
-	if nt, ok := nodeJSNamespaceType(ta); ok {
-		if ta.Nullable {
-			nt.setNullable(true)
-			nt.setUndefined(ta.Undefined)
+	// An iteration-protocol interface (`AsyncIterableIterator<T>`) or
+	// `PromiseLike<T>` outside a generator's own signature is any object
+	// with the protocol's members: a box, driven by the run-time protocol.
+	if r, ok := ast.NonNullish(n).(*ast.TypeReference); ok && len(r.Qualifier) == 0 && (generatorWrapperNames[r.Name] || r.Name == "PromiseLike") && o.r.userType != nil && !o.r.userType(r.Name) {
+		if ms, _, _ := ast.NonNullishMembers(n); len(ms) == 1 {
+			return TypeAny, true
 		}
-		return nt, true
+	}
+	// A rewrite's `any` (a reference node naming the keyword): the box.
+	if r, ok := n.(*ast.TypeReference); ok && r.Name == "any" && len(r.Qualifier) == 0 && len(r.TypeArgs) == 0 {
+		return TypeAny, true
+	}
+	// An intersection with a module's type (`import("tty").ReadStream & {
+	// fd: 0 }`), or an alias of one, is held boxed: read by its run-time
+	// kind.
+	if importIntersection(n) || o.importAlias(n) {
+		return TypeAny, true
+	}
+	if it, isI := n.(*ast.IntersectionType); isI {
+		for _, m := range it.Types {
+			if o.importAlias(m) {
+				return TypeAny, true
+			}
+		}
+	}
+	// A tuple with a rest element (`[number, ...string[]]`) has no fixed
+	// shape: an array of boxed elements, as the annotation converts. One
+	// whose every spread is a type parameter the instantiation binds to a
+	// tuple (`[...A, L]`) is that tuple's elements in place.
+	if tt, isT := n.(*ast.TupleType); isT {
+		if t, ok := o.splicedTuple(tt); ok {
+			return t, true
+		}
+		for _, el := range tt.Elements {
+			_, rest := el.(*ast.RestType)
+			if nm, named := el.(*ast.NamedTupleMember); named && nm.Rest {
+				rest = true
+			}
+			if rest {
+				return ArrayOf(TypeAny), true
+			}
+		}
+	}
+	// `T[K]` in an instantiation binding T to an object and K to a string
+	// key (`pluck<T, K extends keyof T>`): the field type every key shares,
+	// else a box, as annotationType reads it.
+	if ia, isIA := n.(*ast.IndexedAccessType); isIA && o.r.typeParam != nil {
+		on, ook := bareTypeRefName(ia.ObjectType)
+		kn, kok := bareTypeRefName(ia.IndexType)
+		if ook && kok {
+			if _, arr := ia.ObjectType.(*ast.ArrayType); !arr {
+				ot, okT := o.r.typeParam(on)
+				kt, okK := o.r.typeParam(kn)
+				if okT && okK && ot.IsObject() && !ot.IsDynamic() && kt.IR == irPtr && isStringTy(kt) && !kt.IsStrLiteral() {
+					var common *Type
+					same := true
+					for i := range ot.Fields {
+						f := ot.Fields[i]
+						if strings.HasPrefix(f.Name, "__kml_") {
+							continue
+						}
+						if common == nil {
+							common = &ot.Fields[i].Ty
+						} else if reprKey(*common) != reprKey(f.Ty) {
+							same = false
+						}
+					}
+					if common != nil && same {
+						return *common, true
+					}
+					return TypeAny, true
+				}
+			}
+		}
+	}
+	// An assertion signature (`asserts value is T`) returns nothing; a
+	// type predicate (`x is A`), a boolean.
+	if p, isP := n.(*ast.TypePredicate); isP {
+		if p.Asserts {
+			return TypeVoid, true
+		}
+		return TypeBool, true
+	}
+	// The polymorphic `this` of a class's method is the class's instance
+	// (the annotation names the class).
+	if ast.IsKeywordNode(n, "this") && o.r.class != nil && o.b.Module != nil {
+		if sym := o.b.Module.Symbols.Get(o.thisClassName(n)); sym != nil {
+			if ct, ok := o.r.class(sym); ok {
+				return ct, true
+			}
+		}
 	}
 	// The empty object type `{}` (alone, or a union member: `AddressInfo |
-	// {}`) admits any non-nullish value: held as the box resolveType gives
+	// {}`) admits any non-nullish value: held as the box annotationType gives
 	// it.
 	if emptyTypeLiteral(n) {
 		return TypeAny, true
@@ -3602,45 +4993,125 @@ func (o frontOracle) AnnotationType(ta *ast.TypeAnnotation) (Type, bool) {
 		}
 	}
 	var t *checker.Type
+	var names []string
+	var binds []*checker.Type
+	scope := o.b.Module
 	if params := o.genericAliasParams(n); params != nil {
 		// A generic alias's body, instantiated: its parameters are the
-		// instantiation's (resolveType binds them).
-		t = o.c.TypeFromNodeWithParams(n, o.b.Module, params)
-	} else if names := o.boundTypeParams(); len(names) > 0 {
+		// instantiation's (annotationType binds them).
+		t = o.c.TypeFromNodeWithParams(n, scope, params)
+	} else if names = o.boundTypeParams(); len(names) > 0 {
 		// An annotation in a generic body names the instantiation's type
-		// parameters (resolveType reads them from its scope).
-		t = o.c.TypeFromNodeWithParams(n, o.b.Module, names)
+		// parameters (annotationType reads them from its scope); one bound to
+		// a primitive is that type, so a type computed from it evaluates
+		// (`Awaited<T>`, `T extends string ? … : …`).
+		binds = o.primitiveBindings(names, hasConditional(n))
+		t = o.c.TypeFromNodeWithBindings(n, scope, names, binds)
+		if binds == nil {
+			binds = make([]*checker.Type, len(names))
+		}
 	} else {
-		t = o.c.TypeFromNode(n, o.b.Module)
+		t = o.c.TypeFromNode(n, scope)
+		if o.c.Unanswered(t) && mentionsThisType(n) {
+			// An interface member's own `this` (`self(): this`), read
+			// outside the interface: its polymorphic `this`, unbound.
+			t = o.c.TypeFromNodeWithBindings(n, scope, []string{"this"}, []*checker.Type{o.c.ThisType()})
+		}
+	}
+	// A type parameter no instantiation binds (an erased class's, a
+	// generic arrow's or method's in a body compiled once): erased, the
+	// box annotationType holds it as, wherever the annotation names it
+	// (`call<T>(run: (done: (v: T) => void) => void): Promise<T>`).
+	if o.c.Unanswered(t) && o.r.erasedTPNames != nil {
+		bound := map[string]bool{}
+		for _, nm := range names {
+			bound[nm] = true
+		}
+		all, allB := append([]string(nil), names...), append([]*checker.Type(nil), binds...)
+		for _, nm := range o.r.erasedTPNames() {
+			if !bound[nm] {
+				all, allB = append(all, nm), append(allB, o.c.AnyType())
+			}
+		}
+		if len(all) > len(names) && !bound["this"] && mentionsThisType(n) {
+			// (With an interface member's own `this`: `extend<T>(p: T):
+			// this & T`.)
+			all, allB = append(all, "this"), append(allB, o.c.ThisType())
+		}
+		if len(all) > len(names) {
+			t = o.c.TypeFromNodeWithBindings(n, scope, all, allB)
+		}
+		// An access indexed by one (`AbortSignalEventMap[K]`): every key's
+		// member, as annotationType reads it.
+		if o.c.Unanswered(t) && len(all) > len(names) {
+			erased := map[string]bool{}
+			for _, nm := range all[len(names):] {
+				erased[nm] = true
+			}
+			if en := erasedIndexAccess(n, erased); en != n {
+				t = o.c.TypeFromNodeWithBindings(en, scope, all, allB)
+			}
+		}
+	}
+	// Read where it is written: a function's own class (`const b: A`
+	// naming a class declared in the body) is not the module's, and its
+	// name as written, before a rewrite renamed it.
+	if o.c.Unanswered(t) {
+		if sc := o.b.AnnotationScope(n); sc != nil && sc != scope {
+			t = o.c.TypeFromNode(n, sc)
+		}
+	}
+	if o.c.Unanswered(t) && o.r.warmAnn != nil {
+		if wt, ok := o.r.warmAnn(n); ok {
+			t = wt
+		}
 	}
 	if o.c.Unanswered(t) {
 		return Type{}, false
 	}
+	if t.Flags&checker.Object != 0 && t.Kind == checker.Tuple && len(t.Elems) == 0 {
+		return TupleType(nil), true // `[]`: an empty struct
+	}
+	// `keyof T` of a type codegen cannot list the keys of (an erased type
+	// parameter's): a string key.
+	if op, isOp := n.(*ast.TypeOperator); isOp && op.Operator == "keyof" && t.Flags&checker.Union != 0 {
+		keys := true
+		for _, m := range t.Types {
+			keys = keys && m.Flags&(checker.String|checker.Number|checker.ESSymbol) != 0
+		}
+		if keys {
+			return TypePtr, true
+		}
+	}
+	if q, isQ := n.(*ast.TypeQuery); isQ && o.boxedValueQuery(q) {
+		return TypeAny, true // `typeof E`, `typeof N`: its object, held boxed
+	}
 	if t.Flags&checker.StringLiteral != 0 {
 		// An annotation keeps its string literal (a discriminant's tag).
-		return Type{IR: "ptr", Kind: kindStrLiteral, LitValue: t.Value}, true
+		return Type{IR: irPtr, Kind: kindStrLiteral, LitValue: t.Value}, true
 	}
 	r := o.r
 	r.literals, r.tuples = true, true
 	if at := o.enclosingRecursiveAlias(n, t); at != nil {
-		// Inside a recursive alias's own declaration resolveType still
+		// Inside a recursive alias's own declaration annotationType still
 		// holds the alias's placeholder: its self-reference has no fields.
 		r.mapping = map[*checker.Type]bool{at: true}
 	}
 	ty, ok := r.of(t)
+	if op, isOp := n.(*ast.TypeOperator); !ok && isOp && op.Operator == "keyof" {
+		return TypePtr, true // a key of a type left open: a string
+	}
 	if !ok {
 		return ty, ok
 	}
-	if ta.Nullable && ty.Kind == kindNone && ty.IR != "void" && !ty.Nullable() {
-		// An optional parameter's string or number (`suffix?: string`):
-		// its parse recorded the undefined the type node leaves out, as
-		// resolveType applies it to a named type.
+	nullable, undef, _ := annotAbsence(ta)
+	if nullable && ty.Kind == kindNone && ty.IR != "void" && !ty.Nullable() {
 		ty.setNullable(true)
-		ty.setUndefined(ta.Undefined)
+		ty.setUndefined(undef)
 	}
-	if ta.Nullable && ty.IsDynamic() && len(ty.UnionMembers) > 0 && !ty.Nullable() {
+	if nullable && ty.IsDynamic() && len(ty.UnionMembers) > 0 && !ty.Nullable() {
 		// An optional parameter's union (`options?: AddEventListenerOptions
-		// | boolean`): the box resolveType marks absent.
+		// | boolean`): the box annotationType marks absent.
 		ty.setNullable(true)
 	}
 	return annotationNullish(ta, ty), true
@@ -3659,6 +5130,73 @@ func (o frontOracle) boundTypeParams() []string {
 	return o.r.typeParamNames()
 }
 
+// primitiveBindings is each bound type parameter's checker type where its
+// instantiation is a plain primitive, else nil.
+func (o frontOracle) primitiveBindings(names []string, conditional bool) []*checker.Type {
+	if o.r.typeParam == nil {
+		return nil
+	}
+	out := make([]*checker.Type, len(names))
+	for i, name := range names {
+		tt, ok := o.r.typeParam(name)
+		if !ok || tt.Nullable() {
+			continue
+		}
+		if tt.IsDynamic() && len(tt.UnionMembers) == 0 && tt.Kind == kindDynamic {
+			// Bound to the box: any, as an erased parameter reads.
+			out[i] = o.c.AnyType()
+			continue
+		}
+		if kw, bare := typeNodeOf(tt).(*ast.KeywordType); bare && kw.Keyword == "string" && conditional {
+			// A string binding may be a widened literal (`K` of `w("a")`),
+			// which a conditional tests: left erased, as any (both
+			// branches).
+			out[i] = o.c.AnyType()
+			continue
+		}
+		if nd := typeNodeOf(tt); nd != nil && !tt.IsStrLiteral() {
+			// A primitive, promise or array of them (`Awaited<T>` for T =
+			// Promise<number> is number).
+			if bt := o.c.TypeFromNode(nd, o.b.Module); !o.c.Unanswered(bt) {
+				out[i] = bt
+			}
+			continue
+		}
+		if tt.Host != 0 {
+			continue
+		}
+		// A string literal (`K` of `pluck(p, "z")`), a declared object or
+		// class (`T` of it): the checker's own, so `T[K]` evaluates.
+		var ref ast.TypeNode
+		switch {
+		case tt.IsStrLiteral():
+			ref = &ast.LiteralType{Kind: "string", Value: tt.LitValue}
+		case tt.Kind == kindClass && tt.ClassName != "":
+			ref = &ast.TypeReference{Name: tt.ClassName}
+		case tt.IsObject() && !tt.IsDynamic() && tt.RefName != "":
+			ref = &ast.TypeReference{Name: tt.RefName}
+		}
+		if ref != nil {
+			if bt := o.c.TypeFromNode(ref, o.b.Module); !o.c.Unanswered(bt) {
+				out[i] = bt
+			}
+			continue
+		}
+		if tt.Kind != kindNone {
+			continue
+		}
+		switch {
+		case tt.IR == "double" && tt.Float:
+			out[i] = o.c.PrimitiveType("number")
+		case tt.IR == "i1":
+			out[i] = o.c.PrimitiveType("boolean")
+		case tt.IR == "void":
+			out[i] = o.c.PrimitiveType("void")
+		}
+	}
+	return out
+}
+
 func (o frontOracle) genericAliasParams(n ast.Node) []string {
 	prog, ok := o.b.Module.Node.(*ast.Program)
 	if !ok {
@@ -3666,11 +5204,11 @@ func (o frontOracle) genericAliasParams(n ast.Node) []string {
 	}
 	for _, st := range prog.Body {
 		ad, ok := st.(*ast.TypeAliasDeclaration)
-		if !ok || len(ad.TypeParams) == 0 || ad.Type == nil || ad.Type.TypeNode() == nil {
+		if !ok || len(ad.TypeParams) == 0 || ad.Type == nil {
 			continue
 		}
 		inside := false
-		ast.Inspect(ad.Type.TypeNode(), func(m ast.Node) bool {
+		ast.Inspect(ad.Type, func(m ast.Node) bool {
 			if m == n {
 				inside = true
 			}
@@ -3704,7 +5242,7 @@ func (o frontOracle) enclosingRecursiveAlias(n ast.Node, t *checker.Type) *check
 			continue
 		}
 		inside := false
-		ast.Inspect(ad.Type.TypeNode(), func(m ast.Node) bool {
+		ast.Inspect(ad.Type, func(m ast.Node) bool {
 			if m == n {
 				inside = true
 			}
@@ -3724,9 +5262,41 @@ func (o frontOracle) growableBuffer(e ast.Expression, t Type) Type {
 	if !t.IsArrayBuffer() {
 		return t
 	}
-	growable := func(x ast.Expression) bool {
-		nb, isBuf := x.(*ast.NewArrayBufferExpression)
-		return isBuf && nb.MaxByteLength != nil
+	var growable func(x ast.Expression, depth int) bool
+	growable = func(x ast.Expression, depth int) bool {
+		if nb, isBuf := x.(*ast.NewArrayBufferExpression); isBuf {
+			return nb.MaxByteLength != nil
+		}
+		// A call of a program function each of whose returns is one
+		// (`function make(n, m) { return new ArrayBuffer(n, {maxByteLength: m}); }`).
+		call, isCall := x.(*ast.CallExpression)
+		if !isCall || depth > 3 {
+			return false
+		}
+		id, isID := call.Callee.(*ast.Identifier)
+		if !isID {
+			return false
+		}
+		sym, _ := o.b.Resolve(id)
+		if sym == nil || len(sym.Declarations) != 1 {
+			return false
+		}
+		fd, isFD := sym.Declarations[0].Node.(*ast.FunctionDeclaration)
+		if !isFD || fd.Body == nil || fd.ReturnType != nil || fd.IsGenerator || fd.IsAsync {
+			return false
+		}
+		all, any := true, false
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			switch r := n.(type) {
+			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration:
+				return false
+			case *ast.ReturnStatement:
+				any = true
+				all = all && r.Value != nil && growable(r.Value, depth+1)
+			}
+			return all
+		})
+		return all && any
 	}
 	if id, isID := e.(*ast.Identifier); isID {
 		// A binding every declaration of initializes with a growable buffer
@@ -3735,7 +5305,7 @@ func (o frontOracle) growableBuffer(e ast.Expression, t Type) Type {
 			all := true
 			for _, d := range sym.Declarations {
 				v, isV := d.Node.(*ast.VarDeclaration)
-				if !isV || v.TypeAnnot != nil || !growable(v.Init) {
+				if !isV || v.TypeAnnot != nil || !growable(v.Init, 0) {
 					all = false
 					break
 				}
@@ -3746,16 +5316,48 @@ func (o frontOracle) growableBuffer(e ast.Expression, t Type) Type {
 			}
 		}
 	}
-	if _, isBuf := e.(*ast.NewArrayBufferExpression); isBuf {
-		t.BufferGrowable = growable(e)
+	switch e.(type) {
+	case *ast.NewArrayBufferExpression, *ast.CallExpression:
+		t.BufferGrowable = growable(e, 0)
 	}
 	return t
 }
 
-// GlobalType answers reliableGlobalType: a module variable is promotable
+// GlobalType answers the module-global pre-pass: a module variable is promotable
 // when its declared type has a representation.
 func (o frontOracle) GlobalType(v *ast.VarDeclaration) (Type, bool, bool) {
+	// An alias of an unannotated object literal's binding (`const q = a`)
+	// holds that binding's object, in its layout.
+	if id, isID := v.Init.(*ast.Identifier); isID && v.TypeAnnot == nil && o.b != nil {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if src, isVar := sym.Declarations[0].Node.(*ast.VarDeclaration); isVar && src != v && src.TypeAnnot == nil {
+				if _, lit := src.Init.(*ast.ObjectLiteral); lit {
+					// Its layout, promoted when this binding is read by a
+					// function (`const p = fs.promises`, which the resolver
+					// names as the library's own binding), whether or not the
+					// literal's own binding is.
+					st, _, sok := o.GlobalType(src)
+					if !sok {
+						return st, false, false
+					}
+					return st, o.readInFunctions(v.Name) || o.r.anyHeld != nil && o.r.anyHeld(v), true
+				}
+			}
+		}
+	}
+	// An initialized `var` sharing its name with a top-level function is one
+	// binding: a global any, holding the function until the `var` runs.
+	if v.Kind == "var" && v.Init != nil && v.TypeAnnot == nil && o.topFunction(v.Name) {
+		return TypeAny, true, true
+	}
 	ty, ok, decided := o.globalType(v)
+	// A binding no function reads stays a main() local: as a global it would
+	// behave the same, and its own declaration lays it out.
+	// (A binding JavaScript holds as any, assigned another kind anywhere, is
+	// a global whether or not a function reads it.)
+	if ok && decided && !o.readInFunctions(v.Name) && !(o.r.anyHeld != nil && o.r.anyHeld(v)) {
+		return ty, false, true
+	}
 	if _, isM := v.Init.(*ast.MemberExpression); isM && ok && v.TypeAnnot == nil && ty.IsFunc() && ty.FuncCountsArgs {
 		ty.FuncCountsArgs = false // a bound method value (exprTypeBase)
 	}
@@ -3764,6 +5366,16 @@ func (o frontOracle) GlobalType(v *ast.VarDeclaration) (Type, bool, bool) {
 		case *ast.ObjectLiteral:
 			ty = o.literalMethodDefaults(init, ty)
 			ty = o.literalMethodReturns(init, ty)
+		case *ast.ArrayLiteral:
+			// An array of object literals (`[{ n: 1, d() { … } }, …]`):
+			// its element, as a literal's binding holds it.
+			if ty.IsArray() && ty.ElemType != nil && ty.ElemType.IsObject() && len(init.Elements) > 0 {
+				if first, lit := init.Elements[0].(*ast.ObjectLiteral); lit && literalHasMethod(first) {
+					if el, eok := o.ExprType(first); eok && el.IsObject() && sameFieldNames(el, *ty.ElemType) {
+						ty = ArrayOf(el)
+					}
+				}
+			}
 		case *ast.Identifier, *ast.FunctionExpression:
 			if ty.IsFunc() {
 				if params := o.declParams(init); params != nil {
@@ -3775,12 +5387,47 @@ func (o frontOracle) GlobalType(v *ast.VarDeclaration) (Type, bool, bool) {
 	if ok && v.TypeAnnot == nil {
 		ty = o.growableBuffer(v.Init, ty)
 	}
+	if ok && ty.IR == "void" {
+		ty = TypeUndefined // a void call's result, stored as undefined
+	}
 	return ty, ok, decided
 }
 
 func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
+	if accessorLiteral(o.b, v) {
+		return TypeAny, true, true // a dynamic object, whose reads call its accessors
+	}
+	if c, isCall := v.Init.(*ast.CallExpression); isCall && (c.Intrinsic == ast.ModuleNamespaceIntrinsic || c.Intrinsic == ast.LiveBindingsIntrinsic) {
+		return TypeAny, true, true // a module namespace object, one box (typeOfExpr)
+	}
 	if v.TypeAnnot == nil && o.r.widened != nil && o.r.widened(v.Name) || o.r.anyHeld != nil && o.r.anyHeld(v) {
 		return TypeAny, true, true
+	}
+	// Under -compat=js a copy of a boxed binding (`var e = d` where d is
+	// later assigned null) holds the same box …
+	if id, isID := v.Init.(*ast.Identifier); isID && v.TypeAnnot == nil && o.r.js != nil && o.r.js() {
+		if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) == 1 {
+			if src, isVar := sym.Declarations[0].Node.(*ast.VarDeclaration); isVar && src.TypeAnnot == nil && src != v {
+				if o.r.widened != nil && o.r.widened(src.Name) || o.r.anyHeld != nil && o.r.anyHeld(src) {
+					return TypeAny, true, true
+				}
+				// … and a copy of one whose initializer is held dynamically
+				// (the js lane's nested-array boxes), that binding's layout.
+				if _, isID := src.Init.(*ast.Identifier); !isID && o.dynamicInit(src) {
+					if st, _, ok := o.globalType(src); ok {
+						return st, true, true
+					}
+				}
+			}
+		}
+	}
+	switch v.Init.(type) {
+	case *ast.NewWeakSetExpression, *ast.NewWeakMapExpression:
+		if o.r.bareCollection != nil {
+			if t, ok := o.r.bareCollection(v); ok {
+				return t, true, true // seeded from null (bareCollectionType)
+			}
+		}
 	}
 	if iifeGenerator(v.Init) && v.TypeAnnot == nil {
 		return TypeAny, true, true
@@ -3803,10 +5450,17 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 			}
 		}
 	}
-	// A collection's or matchAll's lazy iterator, as codegen names it.
+	// A collection's or matchAll's lazy iterator, or a generator's step,
+	// as codegen names it.
 	if call, isCall := v.Init.(*ast.CallExpression); isCall && v.TypeAnnot == nil {
-		if it, ok := o.ExprType(call); ok && it.IsCollIter() {
+		if it, ok := o.ExprType(call); ok && (it.IsCollIter() || o.generatorStep(call) && (v.Kind == "const" || o.stepsOnlyDecl(v))) {
 			return it, true, true
+		}
+		// Such an iterator's `next()`: its {value, done} step.
+		if m, isM := call.Callee.(*ast.MemberExpression); isM && m.Property == "next" && len(call.Args) == 0 {
+			if it, ok := o.ExprType(m.Object); ok && it.IsCollIter() {
+				return collIterResultType(it), true, true
+			}
 		}
 	}
 	if call, isCall := v.Init.(*ast.CallExpression); isCall && v.TypeAnnot == nil {
@@ -3815,9 +5469,6 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 		}
 		if tt, ok := o.assignResult(call); ok && !tt.IsArray() {
 			return tt, true, true
-		}
-		if it, ok := o.implementationResult(call); ok {
-			return it, true, true
 		}
 	}
 	// A builtin function held in a variable (`var dp =
@@ -3927,6 +5578,9 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 		return TypeAny, true, true
 	}
 	if o.dynamicInit(v) {
+		if accessorLiteral(o.b, v) {
+			return TypeAny, true, true
+		}
 		t, ok := o.ExprType(v.Init)
 		return t, ok, true
 	}
@@ -3934,7 +5588,7 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 		return ArrayOf(TypeAny), true, true
 	}
 	if _, isLit := v.Init.(*ast.ObjectLiteral); isLit && v.TypeAnnot == nil && o.r.js != nil && o.r.js() {
-		return TypeAny, true, true // the js lane's dynamic object (decideGlobalType)
+		return TypeAny, true, true // the js lane's dynamic object
 	}
 	if lit, isLit := v.Init.(*ast.ObjectLiteral); isLit && v.TypeAnnot == nil && hasAccessor(lit) && o.r.objLit != nil && (o.r.js == nil || !o.r.js()) {
 		if ct, cok := o.r.objLit(lit); cok {
@@ -3960,8 +5614,8 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 	// An unannotated binding with no initializer is held `any` (its
 	// narrower types are flow's, per read), in either lane.
 	if v.Init == nil && v.TypeAnnot == nil && !v.Ambient {
-		if o.b.Module != nil {
-			if sym := o.b.Module.Symbols.Get(v.Name); sym != nil && len(sym.Declarations) > 1 && sym.Declarations[0].Node != ast.Node(v) {
+		if o.b != nil {
+			if sym, found := o.b.DeclSymbol(v); found && laterVarDecl(sym, v) {
 				return Type{}, false, true // a later `var` is a store to the first
 			}
 		}
@@ -3972,14 +5626,56 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 	if m, ok := v.Init.(*ast.MemberExpression); ok && v.TypeAnnot == nil && o.r.stdio != nil && (o.r.stdio(m) || o.r.stdio(m.Object)) {
 		return TypeAny, true, true
 	}
-	t := o.c.ModuleVarType(v)
+	// An awaited array literal is the array (its `never` leaf codegen's
+	// number).
+	if aw, isAw := v.Init.(*ast.AwaitExpression); isAw && v.TypeAnnot == nil {
+		if _, isAL := aw.Argument.(*ast.ArrayLiteral); isAL {
+			if at, ok := o.ExprType(aw); ok {
+				return at, true, true
+			}
+		}
+	}
+	t := o.c.VarType(v)
+	_, initRef := v.Init.(*ast.Identifier)
+	if !o.c.Unanswered(t) && t.Flags&checker.Object != 0 && (t.Kind == checker.Function && len(t.Overloads) > 0 || initRef && len(t.Calls) > 0) && v.TypeAnnot == nil && v.Init != nil {
+		// An overloaded function's value, or one with properties (`export
+		// default strict`, `const f = g`): what its initializer is held as,
+		// the implementation.
+		if it, ok := o.ExprType(v.Init); ok {
+			return it, true, true
+		}
+		if id, ok := v.Init.(*ast.Identifier); ok && o.b != nil {
+			if sym, _ := o.b.Resolve(id); sym != nil && len(sym.Declarations) > 0 {
+				for _, d := range sym.Declarations {
+					if fd, isFD := d.Node.(*ast.FunctionDeclaration); isFD {
+						if it := o.c.ImplementationSignature(fd); it != nil {
+							if rt, rok := o.r.of(it); rok {
+								return rt, true, true
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	if o.c.Unanswered(t) && v.TypeAnnot != nil && o.synthesizedDecl(v) {
+		// A declaration codegen synthesizes (an enum's or a namespace's
+		// object, an enum's computed member) holds its annotation.
+		if at, ok := o.AnnotationType(v.TypeAnnot); ok {
+			return at, true, true
+		}
+	}
 	if o.c.Unanswered(t) {
+		// A binding no function reads stays a local whatever its type.
+		if !o.readInFunctions(v.Name) {
+			return Type{}, false, true
+		}
 		return Type{}, false, false
 	}
 	// A `var` declared again is the first declaration's global; the later
 	// one is a store to it.
-	if o.b.Module != nil {
-		if sym := o.b.Module.Symbols.Get(v.Name); sym != nil && len(sym.Declarations) > 1 && sym.Declarations[0].Node != ast.Node(v) {
+	if o.b != nil {
+		if sym, found := o.b.DeclSymbol(v); found && laterVarDecl(sym, v) {
 			return Type{}, false, true
 		} else if sym != nil && o.jsWidenedVar(sym) {
 			return TypeAny, true, true
@@ -3997,21 +5693,28 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 	if _, named := v.Init.(*ast.Identifier); isGeneratorFunc(t) && !named {
 		return TypeAny, true, true // a generator method read off its object
 	}
+	if v.TypeAnnot != nil && t.Flags&checker.Object != 0 && t.Kind == checker.Tuple && len(t.Elems) == 0 {
+		return TupleType(nil), true, true // an annotation's `[]`, an empty struct
+	}
 	if v.TypeAnnot != nil && t.Flags&checker.StringLiteral != 0 && t.Flags&checker.Union == 0 {
 		// An annotation keeps its string literal (`Named<User>` naming
-		// `"named"`), as resolveType resolves it.
-		return Type{IR: "ptr", Kind: kindStrLiteral, LitValue: t.Value}, true, true
+		// `"named"`), as annotationType resolves it.
+		return Type{IR: irPtr, Kind: kindStrLiteral, LitValue: t.Value}, true, true
 	}
 	r := o.r
-	r.tuples = v.TypeAnnot != nil
+	// A `new Map<K, [A, B]>()`'s type arguments are annotations too.
+	r.tuples = v.TypeAnnot != nil || explicitTupleTypeArgs(v.Init) || annotatedFuncResult(v.Init)
+	r.unwritten = v.TypeAnnot == nil
 	ty, ok := r.of(t)
 	if ok && ty.IsFunc() && o.r.js != nil && o.r.js() && v.Init != nil {
 		ty = o.jsDefaultedParams(v.Init, ty)
 	}
 	if lit, isLit := v.Init.(*ast.ObjectLiteral); ok && isLit && v.TypeAnnot == nil {
-		ty = o.literalGenFields(lit, ty)
+		// Each field is stored as the literal builds it (an asserted array
+		// of tuples in that shape, literalStorage).
+		ty = o.literalGenFields(lit, o.literalStorage(lit, ty))
 	}
-	if !ok && v.TypeAnnot == nil && v.Init != nil && hasTuple(t) {
+	if !r.tuples && v.Init != nil && hasTuple(t) {
 		// An unannotated binding of a tuple (`const t = f()`, `let w = u`)
 		// holds what its initializer is held as: a tuple an annotation
 		// declared, else the array codegen built.
@@ -4021,8 +5724,8 @@ func (o frontOracle) globalType(v *ast.VarDeclaration) (Type, bool, bool) {
 		// A generic class's instantiation: the class codegen built for it.
 		ty, ok = o.ExprType(v.Init)
 	}
-	if ok && o.b.Module != nil {
-		if sym := o.b.Module.Symbols.Get(v.Name); sym != nil {
+	if ok && o.b != nil {
+		if sym, found := o.b.DeclSymbol(v); found {
 			ty = o.undefinedSlot(v, sym, ty)
 		}
 	}
@@ -4110,39 +5813,95 @@ func reprHasTuple(t Type) bool {
 	return t.IsTuple() || t.IsArray() && t.ElemType != nil && reprHasTuple(*t.ElemType)
 }
 
+// selfContaining reports a function type that contains itself (`const f =
+// () => f`, tsc's `() => ...`): no closure signature spells it, so its
+// values are held boxed and called dynamically.
+// selfReturningDecl reports the type of a function declaration whose every
+// return returns its own name (returnsOwnName).
+func selfReturningDecl(t *checker.Type) bool {
+	decl := func(x *checker.Type) bool {
+		if x == nil || x.Symbol == nil || len(x.Symbol.Declarations) != 1 {
+			return false
+		}
+		fd, ok := x.Symbol.Declarations[0].Node.(*ast.FunctionDeclaration)
+		return ok && fd.ReturnType == nil && returnsOwnName(fd)
+	}
+	// A read of it is typed as a signature returning the declaration's own
+	// type: the same function.
+	if r := t.Ret(); r != nil && r != t && t.Symbol == nil && r.Flags&checker.Object != 0 && r.Kind == checker.Function && decl(r) {
+		return true
+	}
+	return decl(t)
+}
+
+func selfContaining(t *checker.Type) bool {
+	seen := map[*checker.Type]bool{}
+	var walk func(x *checker.Type) bool
+	walk = func(x *checker.Type) bool {
+		if x == nil || x.Flags&checker.Object == 0 || x.Kind != checker.Function {
+			return false
+		}
+		if x == t && len(seen) > 0 {
+			return true
+		}
+		if seen[x] {
+			return false
+		}
+		seen[x] = true
+		if walk(x.Ret()) {
+			return true
+		}
+		for _, p := range x.Params {
+			if walk(p) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(t)
+}
+
 // hasTuple reports a tuple type in t, its array element or union members.
-func hasTuple(t *checker.Type) bool {
+func hasTuple(t *checker.Type) bool { return hasTupleIn(t, map[*checker.Type]bool{}) }
+
+// hasTupleIn is hasTuple, seen the types being searched around t: a type
+// that contains itself (`const f = () => f`) holds no tuple there.
+func hasTupleIn(t *checker.Type, seen map[*checker.Type]bool) bool {
+	if seen[t] {
+		return false
+	}
+	seen[t] = true
 	switch {
 	case t == nil:
 		return false
 	case t.Flags&checker.Union != 0:
 		for _, m := range t.Types {
-			if hasTuple(m) {
+			if hasTupleIn(m, seen) {
 				return true
 			}
 		}
 	case t.Flags&checker.Object != 0 && t.Kind == checker.Tuple:
 		return true
 	case t.Flags&checker.Object != 0 && t.Kind == checker.Array:
-		return hasTuple(t.Elem)
+		return hasTupleIn(t.Elem, seen)
 	case t.Flags&checker.Object != 0 && (t.Kind == checker.Instance || t.Kind == checker.Interface) && len(t.TypeArgs) > 0:
 		// A collection's type arguments (`Map<number, [string, string]>`).
 		for _, a := range t.TypeArgs {
-			if hasTuple(a) {
+			if hasTupleIn(a, seen) {
 				return true
 			}
 		}
 	case t.Flags&checker.Object != 0 && (t.StringIndex != nil || t.NumberIndex != nil) && len(t.Props) == 0:
 		// A record whose values an annotation declares as tuples.
-		return hasTuple(t.StringIndex) || hasTuple(t.NumberIndex)
+		return hasTupleIn(t.StringIndex, seen) || hasTupleIn(t.NumberIndex, seen)
 	case t.Flags&checker.Object != 0 && t.Kind == checker.Function && len(t.Overloads) == 0:
 		// A function type an annotation spells returns or takes its tuples
 		// as declared.
-		if hasTuple(t.Result) {
+		if hasTupleIn(t.Ret(), seen) {
 			return true
 		}
 		for _, p := range t.Params {
-			if hasTuple(p) {
+			if hasTupleIn(p, seen) {
 				return true
 			}
 		}
@@ -4150,13 +5909,24 @@ func hasTuple(t *checker.Type) bool {
 	return false
 }
 
-// ReturnType answers inferUnannotatedReturnType: hasValue is false for a
+// ReturnType answers funcBodyReturnType: hasValue is false for a
 // body that returns no value (void).
 func (o frontOracle) ReturnType(body *ast.BlockStatement) (Type, bool, bool) {
+	// An object literal method's `return this`: the literal's synthetic class
+	// where it has an accessor (ensureObjLitClass), in either lane.
+	fe, isFE := o.c.ParentOf(body).(*ast.FunctionExpression)
+	thisOnly := isFE && returnsOnlyThis(fe)
+	if thisOnly {
+		if lit, inLit := o.c.ParentOf(fe).(*ast.ObjectLiteral); inLit && hasAccessor(lit) && o.r.objLit != nil {
+			if ct, cok := o.r.objLit(lit); cok {
+				return ct, true, true
+			}
+		}
+	}
 	t := o.c.BodyReturnType(body)
 	if o.c.Unanswered(t) {
-		// An object literal method's `return this`: a box (exprTypeQuery).
-		if fe, isFE := o.c.ParentOf(body).(*ast.FunctionExpression); isFE && returnsOnlyThis(fe) {
+		// Any other literal's: a box (exprTypeQuery).
+		if thisOnly {
 			if _, inLit := o.c.ParentOf(fe).(*ast.ObjectLiteral); inLit {
 				return TypeAny, true, true
 			}
@@ -4183,7 +5953,7 @@ func (o frontOracle) ReturnType(body *ast.BlockStatement) (Type, bool, bool) {
 	}
 	if ty.IsFunc() {
 		// A returned function is what its returns read as when that is a
-		// function or a box (inferUnannotatedReturnType keeps the old
+		// function or a box (funcBodyReturnType keeps the old
 		// inference: the closure carries its parameters' defaults, which
 		// the type has not).
 		if rt, hv, rok := o.returnsAnswered(body); rok && (rt.IsFunc() || rt.IsDynamic()) {
@@ -4202,6 +5972,12 @@ func (o frontOracle) ReturnType(body *ast.BlockStatement) (Type, bool, bool) {
 		// A returned accessor literal is its synthetic class's instance, and
 		// a returned literal whose methods return one has them so.
 		if rt, _, rok := o.returnsAnswered(body); rok && (rt.IsClass() && !ty.IsClass() || len(rt.Fields) > 0 && len(rt.Fields) == len(ty.Fields) && reprKey(rt) != reprKey(ty)) {
+			// The checker's absence stays: a body that may fall off its end
+			// (`{ n } | undefined`) returns undefined there.
+			if ty.Nullable() && !rt.Nullable() {
+				rt.setNullable(true)
+				rt.setUndefined(ty.IsUndefined())
+			}
 			return rt, true, true
 		}
 	}
@@ -4236,10 +6012,41 @@ func (o frontOracle) Reference(id *ast.Identifier) (bool, bool) {
 // outside it has no answer yet.
 func reprOf(t *checker.Type) (Type, bool) { return reprCtx{}.of(t) }
 
+// ambientClassSymbol reports a symbol a `declare class` declares.
+func ambientClassSymbol(s *binder.Symbol) bool {
+	if s == nil {
+		return false
+	}
+	for _, d := range s.Declarations {
+		if cd, ok := d.Node.(*ast.ClassDeclaration); ok && cd.Ambient {
+			return true
+		}
+	}
+	return false
+}
+
 // reprCtx is what a representation depends on beyond the type: the classes
 // codegen registered, and the lane (the js lane holds an object literal's
 // type as a dynamic object). The zero value answers neither.
 type reprCtx struct {
+	// param marks a signature's own parameter: a `T | PromiseLike<T>`
+	// there is T, codegen's resolvers adopting a thenable at run time.
+	param bool
+	// fnBusy are the function and dictionary types being represented: one
+	// that contains itself (`const f = () => f`, tsc's `() => ...`) holds
+	// the inner occurrence as a box.
+	fnBusy map[*checker.Type]bool
+	// erasedTP are the type parameters of the generic signatures being
+	// represented: codegen compiles a value of such a signature with them
+	// erased to any.
+	erasedTP map[*checker.Type]bool
+	// unwritten is set for a type no annotation wrote (an unannotated
+	// binding's): a union of several array types is the box codegen's
+	// literal inference builds, where an annotation of one is rejected.
+	unwritten bool
+	// erasedGeneric reports a nested generic function compiled with its
+	// type parameters erased to any (lowerNestedGenericFuncs).
+	erasedGeneric func(ast.Node) bool
 	// typeParam is the concrete type of the instantiation being emitted
 	// for a type parameter's name (typeParamScope), when one is.
 	typeParam func(name string) (Type, bool)
@@ -4264,6 +6071,10 @@ type reprCtx struct {
 	// genDesugared reports a generator whose destructured parameters
 	// codegen rewrote (desugarGeneratorPatternParams).
 	genDesugared func(*ast.BlockStatement) bool
+	// genPatternInits is a generator's destructured parameters, moved off
+	// its signature (desugarGeneratorPatternParams): their defaults read
+	// names as the function does.
+	genPatternInits func() map[*ast.FunctionDeclaration][]ast.Statement
 	// liftedGen is the generator holding a lifted static generator
 	// method's body (liftStaticGenerators).
 	liftedGen func(*ast.FunctionDeclaration) *ast.FunctionDeclaration
@@ -4297,14 +6108,22 @@ type reprCtx struct {
 	// a bare `new Map()`/`new Set()`: its key and value types from the
 	// binding's later calls (inferEmptyMapKVTypes).
 	bareCollection func(*ast.VarDeclaration) (Type, bool)
+	// mapEntries is codegen's key and value types of a `new Map(entries)`
+	// (mapKVTypes).
+	mapEntries func(*ast.NewMapExpression) Type
+	// methodRecord reports a builtin method read as a value that codegen
+	// holds as its prototype's record (typeOfExprFull).
+	methodRecord func(*ast.MemberExpression) bool
 	// funcProp is a function value's property codegen reads off the boxed
 	// function (`g.toString`): ok is false for one it reads as declared.
 	funcProp func(*ast.MemberExpression) (Type, bool)
 	// nodeJS reports a symbol the builtin `NodeJS` namespace declares.
 	nodeJS func(*binder.Symbol) bool
+	// extends reports whether class name derives from base (classExtends).
+	extends func(name, base string) bool
 	// libClass is the implementation class codegen gives a lib-declared
-	// interface (`Event`, `NodeJS.Timeout`), as resolveType does.
-	libClass func(name string, nodeJS bool) (Type, bool)
+	// interface (`Event`, `NodeJS.Timeout`), as annotationType does.
+	libClass func(sym *binder.Symbol, nodeJS bool, args []Type) (Type, bool)
 	// protoCtor reports a js-lane prototype constructor function: `new` of
 	// one is a dynamic object.
 	protoCtor func(string) bool
@@ -4314,9 +6133,19 @@ type reprCtx struct {
 	// species is the class type a registered class's [Symbol.species]
 	// names (plain is true for Promise itself).
 	species func(className string) (ty Type, plain, ok bool)
+	// bufferClass reports a class extending ArrayBuffer (SharedArrayBuffer).
+	bufferClass func(className string) bool
+	// promiseErased reports a class extending Promise whose extends clause
+	// erases its value type, so its instances hold every value boxed.
+	promiseErased func(className string) bool
+	// promiseClass reports a class extending Promise.
+	promiseClass func(className string) bool
 	// inferred is codegen's own type for an expression the checker cannot
 	// answer.
 	inferred func(ast.Expression) (Type, bool)
+	// byValRet reports a function -optimize-memory returns its tuple from
+	// by value (planTupleByValReturns).
+	byValRet func(name string) bool
 	// widened reports a parameter a dynamic entry binds as `any`
 	// (emit_dynentry.go).
 	widenedParam func(*ast.Identifier) bool
@@ -4324,6 +6153,12 @@ type reprCtx struct {
 	// anyHeld answers an annotated binding initialized from an `any`,
 	// which holds the box (emit_anyarg.go).
 	anyHeld func(*ast.VarDeclaration) bool
+	// runtimeClone reports a structuredClone the run-time clone performs
+	// (its result a box, as the intrinsic types it).
+	runtimeClone func(*ast.CallExpression) bool
+	// localDecl answers a function's own unannotated local as its
+	// declaration stores it (localDeclType).
+	localDecl func(*ast.VarDeclaration) (Type, bool)
 	// anyArgBox answers a call whose any-argument check boxes its result
 	// (anyArgReturnsBox).
 	boxOverride func(ast.Expression) (Type, bool)
@@ -4355,13 +6190,13 @@ type reprCtx struct {
 	// newTargetHeld reports a function's new.target that emission holds as
 	// the function itself (newTargetType), else undefined.
 	newTargetHeld func(*ast.NewTargetExpression) bool
-	// keepsBoxedTypedArray reports a typed array re-asserted through a box
-	// to another kind (`u16 as unknown as Uint8Array`): it stays boxed.
-	keepsBoxedTypedArray func(*ast.AsExpression) bool
-	funcThis             func(*ast.FunctionExpression) (Type, bool)
-	literalParam         func(ast.Expression, int) (Type, bool)
-	annotation           func(*ast.TypeAnnotation) Type
-	unresolved           func(*ast.Identifier) bool
+	// keepsBox reports an assertion that keeps its operand's box (an
+	// array asserted from any, a typed array asserted to another kind).
+	keepsBox     func(*ast.AsExpression) bool
+	funcThis     func(*ast.FunctionExpression) (Type, bool)
+	literalParam func(ast.Expression, int) (Type, bool)
+	annotation   func(ast.TypeNode) Type
+	unresolved   func(*ast.Identifier) bool
 	// heldIdent is the type the binding a name reads is held as in the scope
 	// being emitted (a callback parameter codegen hinted, a replace
 	// callback's capture group).
@@ -4387,24 +6222,54 @@ type reprCtx struct {
 	// builtinValue is a builtin global read as a value: the function,
 	// namespace object or boxed constructor codegen makes of it.
 	builtinValue func(*ast.Identifier) (Type, bool)
+	// loweredValue is a builtin function lowered to a library function,
+	// read as a value (`const st = setTimeout`): that function's value.
+	loweredValue func(*ast.Identifier) (Type, bool)
+	// funcRef is the value of the function codegen declared under a name
+	// (resolveFuncRef): a generic one's erased signature.
+	funcRef func(string) (Type, bool)
 	// generatorValue is a generator function read as a value
 	// (generatorValueType); its instance layout is codegen's.
 	generatorValue func(*ast.Identifier) (Type, bool)
 	// importResult is a dynamic import's module object: the layout of the
 	// exports codegen builds (importCallResultObjectType).
 	importResult func(*ast.ImportCallExpression) Type
+	// erasedTPNames are the type-parameter names a body compiled once
+	// erases (erasedTypeParamNames).
+	erasedTPNames func() []string
+	// warmAnn is an annotation's type as written (frontAnnWarm).
+	warmAnn func(ast.TypeNode) (*checker.Type, bool)
+	// inLib reports emission inside a builtin library module.
+	inLib func() bool
+	// globalClass is the class of the builtin module a global interface's
+	// name links to (TDD-00232).
+	globalClass func(string) (Type, bool)
+	// userType reports a generic or plain interface the program declares
+	// under name.
+	userType func(string) bool
+	// mappedFrom is the instance a member-preserving mapped type maps
+	// (checker.MappedFrom): its values are that instance's.
+	mappedFrom func(*checker.Type) *checker.Type
 }
 
 // repr is the representation context of the program being emitted.
 func (e *Emitter) repr() reprCtx {
-	return reprCtx{typeParam: func(n string) (Type, bool) { t, ok := e.typeParamScope[n]; return t, ok }, typeParamNames: func() []string {
+	return reprCtx{mappedFrom: func(t *checker.Type) *checker.Type {
+		if e.frontRepr != nil {
+			return e.frontRepr.c.MappedFrom(t)
+		}
+		return nil
+	}, erasedGeneric: func(n ast.Node) bool { fd, ok := n.(*ast.FunctionDeclaration); return ok && e.erasedGenerics[fd] }, typeParam: func(n string) (Type, bool) { t, ok := e.typeParamScope[n]; return t, ok }, typeParamNames: func() []string {
 		names := make([]string, 0, len(e.typeParamScope))
 		for n := range e.typeParamScope {
 			names = append(names, n)
 		}
 		sort.Strings(names)
 		return names
-	}, promiseValue: func(ne *ast.NewExpression) (Type, bool) { t, ok := e.promiseValue[ne]; return t, ok }, class: e.classRepr, genericClass: e.genericClassRepr, iface: e.interfaceRepr, narrowClass: e.narrowableClass, narrowedUnion: e.checkerNarrowedUnion, genDesugared: e.genDesugaredBody, liftedGen: func(m *ast.FunctionDeclaration) *ast.FunctionDeclaration { return e.liftedStaticGens[m] }, stdio: e.stdioStream, objects: true, js: e.compatJS, widened: func(n string) bool { return e.widenedBindings[n] }, filledBoxed: func(v *ast.VarDeclaration) bool { return e.filledBoxed[v] }, objLit: e.objLitClassRepr, protoCtor: func(n string) bool { return e.jsProtoCtor[n] }, funcProp: e.funcValueProp, libClass: e.libInterfaceClass, bareCollection: e.bareContainerType, classMethod: e.classMethodDecl, species: e.speciesClass, boundFunc: e.boundFuncValueType, erasedCall: e.erasedMethodCall, widenedParam: e.dynEntryWidenedIdent, checkerPrim: e.checkerPrimitive, anyHeld: e.anyHeldDecl, boxOverride: e.boxOverride, narrowed: e.checkerNarrowed, erasedParam: e.erasedCallbackParam, chainCopy: e.chainCopyOf, origin: func(x ast.Expression) (ast.Expression, bool) { o, ok := e.synthOrigin[x]; return o, ok }, warm: func(x ast.Expression) (*checker.Type, bool) { t, ok := e.frontWarm[x]; return t, ok }, builtinRef: e.builtinRefValueType, codegenCall: e.codegenCallRepr, genericNew: e.genericNewRepr, methodValue: e.classMethodValue, newTargetHeld: e.newTargetHeld, keepsBoxedTypedArray: e.keepsBoxedTypedArray, funcThis: e.funcExprThisType, literalParam: e.literalParamType, annotation: e.resolveType, unresolved: e.unresolvedReference, heldIdent: e.heldIdent, getterDecl: e.classGetterDecl, staticMethod: e.staticMethodValue, scopeKey: e.inferScopeIdentity, builtinValue: e.unboundBuiltinValueType, generatorValue: e.generatorValueRepr, importResult: e.importCallResultObjectType, unassigned: e.unassignedField, inferred: func(x ast.Expression) (Type, bool) { return e.inferExprType(x), true }}
+	}, promiseValue: func(ne *ast.NewExpression) (Type, bool) { t, ok := e.promiseValue[ne]; return t, ok }, class: e.classRepr, genericClass: e.genericClassRepr, iface: e.interfaceRepr, narrowClass: e.narrowableClass, narrowedUnion: e.checkerNarrowedUnion, genDesugared: e.genDesugaredBody, genPatternInits: func() map[*ast.FunctionDeclaration][]ast.Statement { return e.genPatternInits }, liftedGen: func(m *ast.FunctionDeclaration) *ast.FunctionDeclaration { return e.liftedStaticGens[m] }, stdio: e.stdioStream, objects: true, js: e.compatJS, widened: func(n string) bool { return e.widenedBindings[n] }, filledBoxed: func(v *ast.VarDeclaration) bool { return e.filledBoxed[v] }, objLit: e.objLitClassRepr, protoCtor: func(n string) bool { return e.jsProtoCtor[n] }, funcProp: e.funcValueProp, libClass: e.libInterfaceClass, bareCollection: e.bareContainerType, methodRecord: e.methodRecordRead, mapEntries: func(x *ast.NewMapExpression) Type { return MapType(e.mapKVTypes(x.KeyType, x.ValType, x.Init)) }, classMethod: e.classMethodDecl, species: e.speciesClass, bufferClass: func(n string) bool {
+		info, ok := e.classes[n]
+		return ok && info.HostBase != nil && info.HostBase.IsArrayBuffer()
+	}, promiseErased: e.promiseHostErased, promiseClass: e.isPromiseClass, boundFunc: e.boundFuncValueType, erasedCall: e.erasedMethodCall, widenedParam: e.dynEntryWidenedIdent, checkerPrim: e.checkerPrimitive, anyHeld: e.anyHeldDecl, localDecl: e.localDeclType, runtimeClone: e.runtimeCloneCall, extends: e.classExtends, boxOverride: e.boxOverride, narrowed: e.checkerNarrowed, erasedParam: e.erasedCallbackParam, chainCopy: e.chainCopyOf, origin: func(x ast.Expression) (ast.Expression, bool) { o, ok := e.synthOrigin[x]; return o, ok }, warm: func(x ast.Expression) (*checker.Type, bool) { t, ok := e.frontWarm[x]; return t, ok }, builtinRef: e.builtinRefValueType, codegenCall: e.codegenCallRepr, genericNew: e.genericNewRepr, methodValue: e.classMethodValue, newTargetHeld: e.newTargetHeld, keepsBox: e.keepsBox, funcThis: e.funcExprThisType, literalParam: e.literalParamType, annotation: e.annotationType, unresolved: e.unresolvedReference, heldIdent: e.heldIdent, getterDecl: e.classGetterDecl, staticMethod: e.staticMethodValue, scopeKey: e.inferScopeIdentity, builtinValue: e.unboundBuiltinValueType, loweredValue: e.loweredGlobalValue, funcRef: e.funcRefValue, generatorValue: e.generatorValueRepr, importResult: e.importCallResultObjectType, erasedTPNames: e.erasedTypeParamNames, warmAnn: func(n ast.TypeNode) (*checker.Type, bool) { t, ok := e.frontAnnWarm[n]; return t, ok }, inLib: func() bool { return e.inLib != "" }, globalClass: e.globalLinkedClass, userType: func(n string) bool { _, g := e.genericInterfaces[n]; _, i := e.interfaces[n]; return g || i }, unassigned: e.unassignedField, inferred: func(x ast.Expression) (Type, bool) { return e.typeOfExpr(x), true }, byValRet: func(n string) bool { sig, ok := e.funcs[n]; return ok && sig.RetType.TupleByVal }}
 }
 
 // narrowableClass is the instance type of the class sym declares when an
@@ -4451,6 +6316,11 @@ func (e *Emitter) classRepr(sym *binder.Symbol) (Type, bool) {
 				cd, ok = ce.Decl, true // `const C = class {}`: the same
 			}
 		}
+		if ok && e.foreignCtorClass(cd) {
+			// Its constructor may return an object that is not its instance:
+			// what `new` yields is held as any, the object it is.
+			return TypeAny, true
+		}
 		if ok {
 			if name, ok := e.classDeclName[cd]; ok {
 				// Published before its layout is built (ADR-00906): no
@@ -4485,11 +6355,36 @@ func (e *Emitter) interfaceRepr(sym *binder.Symbol) (Type, bool) {
 		return ty, true
 	}
 	for _, d := range sym.Declarations {
+		// A non-generic object alias is registered as an interface is.
+		if ad, ok := d.Node.(*ast.TypeAliasDeclaration); ok && len(ad.TypeParams) == 0 {
+			if ty, ok := e.interfaces[ad.Name]; ok && ty.RefName == ad.Name && ty.IsObject() && len(ty.Fields) > 0 {
+				return ty, true
+			}
+		}
 		if id, ok := d.Node.(*ast.InterfaceDeclaration); ok && id.LowerType == "" && len(id.TypeParams) == 0 {
 			if ty, ok := e.interfaces[id.Name]; ok && ty.RefName == id.Name && (ty.IsObject() && len(ty.Fields) > 0 || e.nativeIfaceMembers[id.Name] != nil) {
 				// An object type's members, or a native layout (`extends
 				// Date`) whose own members the interface adds.
 				return ty, true
+			}
+			if ty, ok := e.interfaces[id.Name]; ok && reprKey(ty) == reprKey(errorObjType) {
+				// An Error kin adding only fields every Error has
+				// (`extends NodeJS.ErrnoException { port?: number }`): the
+				// Error representation.
+				return ty, true
+			}
+			if ty, ok := e.interfaces[id.Name]; ok && ty.RefName == id.Name && ty.IsObject() && ty.Fields == nil && e.ambientBuilding(id.Name) {
+				// A self-reference while the interface's own members
+				// resolve (a listener's `this: AbortSignal`): the
+				// placeholder ambientInterfaceType breaks the cycle with.
+				return ty, true
+			}
+			// A builtin declaration's interface not yet read: registered
+			// as annotationType registers it on first use.
+			if _, seen := e.interfaces[id.Name]; !seen && libDeclared(sym) {
+				if ty, ok := e.ambientInterfaceType(id.Name); ok && ty.IsObject() && len(ty.Fields) > 0 {
+					return ty, true
+				}
 			}
 		}
 	}
@@ -4534,10 +6429,68 @@ func (e *Emitter) interfaceClassBase(sym *binder.Symbol) (Type, bool) {
 }
 
 func (r reprCtx) of(t *checker.Type) (Type, bool) {
+	if t.SelfReferential() {
+		// A union holding itself (`T | Box<R<T>>`) has no finite layout:
+		// a box, read by its run-time kind.
+		return TypeAny, true
+	}
+	if t.Flags&checker.Object != 0 && t.Flags&checker.Union == 0 && len(t.Calls)+len(t.Constructs) > 0 && len(t.Props) > 0 && (t.Symbol == nil || !libDeclared(t.Symbol)) && t.Kind != checker.Instance {
+		// A program's callable with properties (`F & { foo: string }`): a
+		// function object, held boxed as one carrying expandos is. A
+		// library one (`process.memoryUsage`) keeps its host function.
+		return TypeAny, true
+	}
 	if t.Flags&checker.Union != 0 {
 		return r.union(t)
 	}
+	// `Readonly<Map<K, V>>` with no representation of its own (an
+	// overloaded member): the Map it maps (readonly is the checker's alone).
+	if r.mappedFrom != nil {
+		if src := r.mappedFrom(t); src != nil {
+			own := r
+			own.mappedFrom = nil
+			if rt, ok := own.of(t); ok {
+				return rt, true
+			}
+			return r.of(src)
+		}
+	}
+	// An ambient class's instance or constructor (`declare class C`): an
+	// object only the environment provides, held boxed.
+	if t.Flags&checker.Object != 0 && ambientClassSymbol(t.Symbol) {
+		return TypeAny, true
+	}
+	// A global interface a builtin module implements (`Event`,
+	// `AbortSignal`, `URL`) is that module's class.
+	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && len(t.TypeArgs) == 0 && r.globalClass != nil && r.libGlobal(t.Symbol) {
+		if ct, ok := r.globalClass(t.Symbol.Name); ok {
+			return ct, true
+		}
+	}
+	// An object type that is one call signature and nothing else (`{ (n:
+	// number): string }`, `interface Renderer { (n: number): string }`) is
+	// that function; an instance of a generic one (`Make<T>`), of its
+	// instantiated signature.
+	if t.Flags&checker.Object != 0 && (t.Kind == checker.Interface || t.Kind == checker.Anonymous) && len(t.Calls) == 1 && len(t.Constructs) == 0 && len(t.Props) == 0 && t.StringIndex == nil && t.NumberIndex == nil {
+		if r.fnBusy[t.Calls[0]] {
+			return TypeAny, true // reached again from its own result (`interface A { (): A }`)
+		}
+		if ft, ok := r.of(t.Calls[0]); ok && ft.IsFunc() {
+			return ft, true
+		}
+	}
 	switch {
+	case t.Flags&checker.Deferred != 0 && r.erasedDeferred(t):
+		// A type computed from a type parameter codegen erased (`T[K]` in
+		// a generic arrow): a box, read by its run-time kind.
+		return TypeAny, true
+	case t.Flags&checker.Deferred != 0 && r.param:
+		// A parameter a builtin declaration types by what the checker
+		// does not evaluate (`ev: AbortSignalEventMap[K]`): a box, read by
+		// its run-time kind.
+		return TypeAny, true
+	case t.Flags&checker.TypeParam != 0 && r.erasedTP[t]:
+		return TypeAny, true
 	case t.Flags&checker.TypeParam != 0:
 		// A generic body is emitted once per instantiation: its type
 		// parameter is that instantiation's type.
@@ -4545,14 +6498,58 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 		if name == "" && t.Symbol != nil {
 			name = t.Symbol.Name // a declared type parameter's symbol
 		}
+		if t.Symbol != nil && r.erasedGeneric != nil {
+			for _, d := range t.Symbol.Declarations {
+				if r.erasedGeneric(d.Node) {
+					return TypeAny, true
+				}
+			}
+		}
 		if r.typeParam != nil && name != "" && name != "this" {
 			if tt, ok := r.typeParam(name); ok {
 				return tt, true
 			}
+			if r.typeParamNames != nil && len(r.typeParamNames()) == 0 {
+				// A body compiled once, outside any instantiation (a generic
+				// subclass's inherited member, a lowered library function's
+				// `__kml_Promise_withResolvers<T>`): its type parameter is
+				// erased.
+				return TypeAny, true
+			}
+		}
+		if name == "this" && t.Symbol == nil && t.Constraint == nil {
+			// The polymorphic `this` of an interface's own member, not yet
+			// bound to a receiver: the object itself, held boxed.
+			return TypeAny, true
+		}
+		if name != "this" && r.typeParam != nil && t.Constraint != nil && t.Constraint.Flags&checker.Object != 0 && t.Constraint.Flags&checker.Union == 0 && t.Constraint.Kind == checker.Array {
+			// A type parameter this instantiation leaves unbound (a generic
+			// method's own, `O extends Opt<any>[]`, its rest arguments
+			// collected by every call alike): its array constraint, in the
+			// signature and the body both.
+			own := r
+			own.typeParam = nil
+			if ct, ok := own.of(t.Constraint); ok {
+				return ct, true
+			}
 		}
 		return Type{}, false
+	case t.Kind == checker.Anonymous && t.Value == "globalThis":
+		// The global object is a box (emitIdent's globalThis).
+		return TypeAny, true
+	case t.ModuleNamespace:
+		// A module namespace object is held boxed (decideGlobalType,
+		// importCallResultObjectType).
+		return TypeAny, true
+	case len(t.Intersects) > 0 && r.hostIntersection(t):
+		// A host or class member's value carrying the others' properties,
+		// read dynamically (annotationType's intersection).
+		return TypeAny, true
+	case t.ImportCall != nil && r.importResult != nil:
+		// The module object codegen lays out (importCallResultObjectType).
+		return r.importResult(t.ImportCall), true
 	case t.Flags&(checker.Any|checker.Unknown|checker.NonPrimitive) != 0, t.AnyArith:
-		// `object` too: resolveType holds any non-primitive boxed.
+		// `object` too: annotationType holds any non-primitive boxed.
 		return TypeAny, true
 	case t.Flags&(checker.Number|checker.NumberLiteral) != 0:
 		return TypeF64, true
@@ -4576,10 +6573,8 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 		return TypeNull, true
 	case t.Flags&checker.Undefined != 0:
 		return TypeUndefined, true
-	case t.Flags&checker.Object != 0 && t.Symbol != nil && t.Symbol.Name == "TemplateStringsArray" && r.libGlobal(t.Symbol):
-		return ArrayOf(TypePtr), true // a tag's strings: the array of the literal's parts
-	case t.Flags&checker.Object != 0 && t.Kind != checker.Array && len(t.TypeArgs) == 1 && t.Symbol != nil && t.Symbol.Name == "ReadonlyArray" && t.Symbol.Scope != nil && t.Symbol.Scope.Parent == nil:
-		// The library's `ReadonlyArray<T>` is an array to resolveType, as
+	case t.Flags&checker.Object != 0 && t.Kind != checker.Array && len(t.TypeArgs) == 1 && declaredLowerType(t.Symbol) == "readonlyarray":
+		// The library's `ReadonlyArray<T>` is an array to annotationType, as
 		// `readonly T[]` is.
 		if e, ok := r.of(t.TypeArgs[0]); ok {
 			return ArrayOf(e), true
@@ -4589,6 +6584,10 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 			// JavaScript stores anything into an array of only null or
 			// undefined (`var a = [,]`): -compat=js holds its elements boxed.
 			if r.js != nil && r.js() && t.Elem.Flags&^checker.Nullish == 0 {
+				e = TypeAny
+			}
+			// A void element (`[1].map(() => {})`) is undefined, held as a box.
+			if e.IR == "void" {
 				e = TypeAny
 			}
 			return ArrayOf(e), true
@@ -4618,19 +6617,36 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 		if r.tuples {
 			return TupleType(elems), true
 		}
-		for _, e := range elems[1:] {
-			if reprKey(e) != reprKey(elems[0]) {
-				return Type{}, false
+		if j, ok := joinedElems(elems); ok {
+			return ArrayOf(j), true
+		}
+		// Functions of different signatures: emission boxes each element.
+		// Any other mix is the tuple itself, an array of its elements
+		// (ADR-01977).
+		for _, el := range elems {
+			if !el.IsFunc() {
+				return TupleType(elems), true
 			}
 		}
-		return ArrayOf(elems[0]), true
+		return ArrayOf(TypeAny), true
 	case t.Flags&checker.Object != 0 && t.Kind == checker.Function && len(t.Overloads) == 0 && len(t.TypeParams) == 0:
 		return r.function(t)
+	case t.Flags&checker.Object != 0 && t.Kind == checker.Function && len(t.Overloads) == 0 && t.Symbol == nil:
+		// A generic signature written as a type (`<T>(x: T) => T`), not a
+		// declaration's: its own type parameters erased.
+		er := make(map[*checker.Type]bool, len(r.erasedTP)+len(t.TypeParams))
+		for k := range r.erasedTP {
+			er[k] = true
+		}
+		for _, tp := range t.TypeParams {
+			er[tp] = true
+		}
+		r.erasedTP = er
+		return r.function(t)
 	}
-	// A `NodeJS.*` interface is the builtin layout nodeJSNamespaceType
-	// gives its annotation.
+	// A `NodeJS.*` interface is the layout its declaration's tag names.
 	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && len(t.TypeArgs) == 0 && t.Symbol.Scope != nil && t.Symbol.Scope.Kind == binder.NamespaceScope && r.nodeJS != nil && r.nodeJS(t.Symbol) {
-		if nt, ok := nodeJSNamespaceType(&ast.TypeAnnotation{Qualifier: []string{"NodeJS"}, Name: t.Symbol.Name}); ok {
+		if nt, ok := taggedLayout(t.Symbol); ok {
 			return nt, true
 		}
 		// A callable one (`process.hrtime`, NodeJS.HRTime) is the
@@ -4642,40 +6658,69 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 			}
 		}
 	}
+	// A JavaScript generator holds what it yields boxed, whatever the
+	// checker infers from the yields' literals.
+	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && r.js != nil && r.js() && isGeneratorInstance(t) {
+		return GeneratorType(TypeAny, declaredLowerType(t.Symbol) == "asyncgenerator"), true
+	}
 	// A lib-declared interface a lib module implements as a class:
-	// that class.
-	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && len(t.TypeArgs) == 0 && r.libClass != nil {
+	// that class, whatever its type arguments (`DataView<ArrayBufferLike>`,
+	// `WeakRef<T>`: one class serves every instantiation). An iteration
+	// interface's instantiation (`Generator<number>`) is held boxed instead,
+	// as annotationType holds it.
+	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && r.libClass != nil && (len(t.TypeArgs) == 0 || !generatorWrapperNames[t.Symbol.Name]) {
 		nodeJS := t.Symbol.Scope != nil && t.Symbol.Scope.Kind == binder.NamespaceScope && r.nodeJS != nil && r.nodeJS(t.Symbol)
 		if nodeJS || r.libGlobal(t.Symbol) {
-			if ct, ok := r.libClass(t.Symbol.Name, nodeJS); ok {
+			var args []Type
+			for _, a := range t.TypeArgs {
+				at, aok := r.of(a)
+				if !aok {
+					args = nil
+					break
+				}
+				args = append(args, at)
+			}
+			if ct, ok := r.libClass(t.Symbol, nodeJS, args); ok {
 				return ct, true
+			}
+			// (One class whatever the arguments: `DataView<ArrayBuffer |
+			// SharedArrayBuffer>` is the DataView.)
+			if args != nil {
+				if ct, ok := r.libClass(t.Symbol, nodeJS, nil); ok {
+					return ct, true
+				}
 			}
 		}
 	}
-	// `arguments` is held as an any[] (synthesizeArgumentsObject).
-	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && t.Symbol.Name == "IArguments" {
-		return ArrayOf(TypeAny), true
-	}
-	// `Function`, any callable, and a primitive's wrapper object (`new
-	// Boolean(true)`) or `Object` are held as a dynamic value.
-	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && len(t.TypeArgs) == 0 && r.libGlobal(t.Symbol) {
-		switch t.Symbol.Name {
-		case "Function", "Boolean", "Number", "String", "Object":
-			return TypeAny, true
-		case "RegExpExecArray":
-			// exec()'s match array, its header carrying index, input and
-			// groups (resolveType).
-			return execArrayType(), true
-		case "RegExpMatchArray":
-			return matchArrayType(), true
-		}
+	// An iteration-protocol interface's instantiation other than a
+	// generator's (`Iterator<number>`, a function's result): any object
+	// with the protocol's members, held boxed as annotationType holds it.
+	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && len(t.TypeArgs) > 0 &&
+		generatorWrapperNames[t.Symbol.Name] && !isGeneratorInstance(t) && r.libGlobal(t.Symbol) {
+		return TypeAny, true
 	}
 	// A user class's value (`typeof C`) is its constructor reference,
 	// boxed (resolveTypeofType).
 	if t.Flags&checker.Object != 0 && t.ClassOf != nil && r.class != nil {
-		if _, ok := r.class(t.ClassOf); ok {
+		if _, ok := r.class(t.ClassOf); ok || genericClassDecl(t.ClassOf) {
 			return TypeAny, true
 		}
+	}
+	// A value of only signatures, several of them (overloads, or call and
+	// construct signatures both), is a dynamic function value: a call
+	// passes its arguments as written, whichever signature they select.
+	if t.Flags&checker.Object != 0 && (t.Kind == checker.Anonymous || t.Kind == checker.Interface || t.Kind == checker.Instance || t.Kind == checker.Function) && t.ClassOf == nil &&
+		len(t.Calls)+len(t.Constructs) > 1 && len(t.Calls) > 0 && len(t.Props) == 0 && t.StringIndex == nil && t.NumberIndex == nil {
+		return TypeAny, true
+	}
+	// So is an overload list a type wrote (`((e: 0) => A) & ((e: 1) => B)`).
+	if t.Flags&checker.Object != 0 && t.Flags&checker.Union == 0 && t.Kind == checker.Function && len(t.Overloads) > 0 && t.Symbol == nil {
+		return TypeAny, true
+	}
+	// A constructor type (`new (n: string) => A`) holds such a reference
+	// too, whichever class it is given.
+	if t.Flags&checker.Object != 0 && (t.Kind == checker.Anonymous || t.Kind == checker.Interface) && t.ClassOf == nil && len(t.Constructs) > 0 && len(t.Calls) == 0 && len(t.Props) == 0 && t.StringIndex == nil && t.NumberIndex == nil {
+		return TypeAny, true
 	}
 	// A generic class codegen erased (eraseTypeOnlyGenerics) is one class
 	// whatever its type arguments (`EventEmitter<[never]>`).
@@ -4683,17 +6728,6 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 		if ty, ok := r.class(t.Symbol); ok {
 			return ty, true
 		}
-	}
-	// A FinalizationRegistry<T> is its handle over the held values' type.
-	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && t.Symbol.Name == "FinalizationRegistry" && len(t.TypeArgs) == 1 && r.libGlobal(t.Symbol) {
-		if held, ok := r.of(t.TypeArgs[0]); ok {
-			return FinalizationRegistryType(held), true
-		}
-	}
-	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && t.Symbol.Name == "IteratorObject" && r.libGlobal(t.Symbol) {
-		// An iterator helper's result (`it.filter(f)`, `it.drop(1)`): a
-		// lazy iterator codegen holds boxed.
-		return TypeAny, true
 	}
 	if t.Flags&checker.Object != 0 && t.Kind == checker.Instance && t.Symbol != nil && len(t.TypeArgs) > 0 && r.genericClass != nil {
 		args := make([]Type, len(t.TypeArgs))
@@ -4716,10 +6750,11 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 			return dictViewType(v), true
 		}
 	}
-	// A library interface with required members beside a string index
-	// signature (`ProcessVersions extends Dict<string>`): the host value
-	// codegen reads through a box.
-	if r.objects && t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.StringIndex != nil && len(t.Props) > 0 && !allOptional(t.Props) && t.Symbol != nil && libDeclared(t.Symbol) && len(t.Calls) == 0 && len(t.Constructs) == 0 {
+	// An interface with required members beside an index signature (a
+	// library's `ProcessVersions extends Dict<string>`, a program's `{ m():
+	// void; [k: string]: unknown }`): an open object, read through a box.
+	if r.objects && t.Flags&checker.Object != 0 && t.Kind == checker.Interface && len(t.Props) > 0 && !allOptional(t.Props) && t.Symbol != nil && len(t.Calls) == 0 && len(t.Constructs) == 0 &&
+		(t.StringIndex != nil && libDeclared(t.Symbol) || (t.StringIndex != nil || t.NumberIndex != nil) && !libDeclared(t.Symbol)) {
 		return TypeAny, true
 	}
 	// A string index signature and nothing else (`{ [k: string]: T }`): a
@@ -4727,7 +6762,15 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 	// An interface of one (`NodeJS.Dict<T>`) is the same, its value
 	// `T | undefined` held as T (codegen's Dict), and so is one naming
 	// optional members beside it (`IncomingHttpHeaders`' `accept?`).
-	if r.objects && t.Flags&checker.Object != 0 && (t.Kind == checker.Anonymous || t.Kind == checker.Interface) && t.StringIndex != nil && (len(t.Props) == 0 || t.Kind == checker.Interface && allOptional(t.Props)) && len(t.Calls) == 0 && len(t.Constructs) == 0 && (t.Kind != checker.Interface || dictInterface(t.Symbol)) {
+	if r.objects && t.Flags&checker.Object != 0 && (t.Kind == checker.Anonymous || t.Kind == checker.Interface) && t.StringIndex != nil && (len(t.Props) == 0 || t.Kind == checker.Interface && allOptional(t.Props) || t.Kind == checker.Anonymous) && len(t.Calls) == 0 && len(t.Constructs) == 0 && (t.Kind != checker.Interface || dictInterface(t.Symbol)) {
+		if r.fnBusy[t] {
+			return TypeAny, true // a dictionary of itself: the inner one boxed
+		}
+		busy := map[*checker.Type]bool{t: true}
+		for k := range r.fnBusy {
+			busy[k] = true
+		}
+		r.fnBusy = busy
 		if v, ok := r.of(t.StringIndex); ok {
 			if t.Kind == checker.Interface && v.Nullable() && v.IsUndefined() && (!v.IsDynamic() || len(t.Props) == 0 && !ownIndexSig(t.Symbol)) {
 				// A union's box too when the index is `NodeJS.Dict`'s
@@ -4768,7 +6811,15 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 	// A builtin interface whose declaration names its native layout; a
 	// program's interface over one (`extends TypeError`) is the type codegen
 	// registered for it, which carries its own members.
-	if ty, ok := lowerTypeReprWith(t, r.of); ok {
+	argOf := r.of
+	if lt := declaredLowerType(t.Symbol); lt == "set" || lt == "map" {
+		// A collection's tuple elements are the declared tuple's struct, as
+		// an annotation's (`new Set(pairs as [string, number][])`).
+		rt := r
+		rt.tuples = true
+		argOf = rt.of
+	}
+	if ty, ok := lowerTypeReprWith(t, argOf); ok {
 		if t.Kind == checker.Interface && t.Symbol != nil && len(t.TypeArgs) == 0 && r.iface != nil {
 			if it, ok := r.iface(t.Symbol); ok && it.RefName != "" && it.StructIR() == ty.StructIR() {
 				return it, true
@@ -4780,6 +6831,9 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 		if ty, ok := r.iface(t.Symbol); ok {
 			return ty, true
 		}
+		if ty, ok := r.arrayHeritage(t.Symbol); ok {
+			return ty, true
+		}
 		// An interface declared in a function body (codegen registers only
 		// the module's): its members, as an object type's.
 		if r.objects && localInterface(t.Symbol) && len(t.Calls) == 0 && len(t.Constructs) == 0 && t.StringIndex == nil && t.NumberIndex == nil {
@@ -4787,11 +6841,18 @@ func (r reprCtx) of(t *checker.Type) (Type, bool) {
 		}
 		return Type{}, false
 	}
+	// The iteration protocol (`Iterable<T>`, `AsyncIterable<T>`): a string,
+	// an array, a collection or a generator satisfies it, each in its own
+	// layout, so a value of it is held boxed; so is a `PromiseLike<T>`, a
+	// native promise or any thenable.
+	if t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && (t.Symbol.Name == "Iterable" || t.Symbol.Name == "AsyncIterable" || t.Symbol.Name == "PromiseLike") && r.libGlobal(t.Symbol) {
+		return TypeAny, true
+	}
 	// A program's generic interface, instantiated (`Box<number>`): its
 	// instantiated members, as an object type's (codegen's per-argument
 	// structural type).
 	if r.objects && t.Flags&checker.Object != 0 && t.Kind == checker.Interface && t.Symbol != nil && len(t.TypeArgs) > 0 &&
-		!r.libGlobal(t.Symbol) && len(t.Calls) == 0 && len(t.Constructs) == 0 && t.StringIndex == nil && t.NumberIndex == nil {
+		(!r.libGlobal(t.Symbol) || ambientDataShape(t.Symbol.Name)) && len(t.Calls) == 0 && len(t.Constructs) == 0 && t.StringIndex == nil && t.NumberIndex == nil {
 		return r.object(t)
 	}
 	return Type{}, false
@@ -4832,17 +6893,65 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 	if rt, ok := r.streamReadResult(t); ok {
 		return rt, true
 	}
+	if st, ok := r.settledResult(t); ok {
+		return st, true
+	}
+	// Overloaded functions of each member (`y.filter` on `string[] |
+	// number[]`): a boxed function, as functions of different signatures
+	// are (below).
+	overloads := len(t.Types) > 1
+	for _, m := range t.Types {
+		overloads = overloads && m.Flags&checker.Object != 0 && m.Kind == checker.Function && len(m.Overloads) > 0
+	}
+	if overloads {
+		return TypeAny, true
+	}
+	// `ArrayBufferView` (every typed array and DataView): the plain box
+	// annotationType gives it, whether or not the DataView class is linked.
+	// Typed arrays of different element kinds (`Uint8Array | Int16Array`,
+	// `new ctor()` over several constructors) share no layout either.
+	// Nor does a typed array and an instance of a class (one extending it:
+	// `new K()` over `Uint8Array` and `class MyU extends Uint8Array`).
+	views := map[string]bool{}
+	own := false
+	for _, m := range t.Types {
+		if m.Flags&checker.Object != 0 && m.Symbol != nil && r.libGlobal(m.Symbol) {
+			switch {
+			case m.Symbol.Name == "DataView":
+				views["DataView"] = true
+			case strings.HasSuffix(m.Symbol.Name, "Array") && m.Symbol.Name != "Array" && m.Symbol.Name != "ReadonlyArray":
+				views[m.Symbol.Name] = true
+			}
+		} else if m.Flags&checker.Object != 0 && m.Symbol != nil && m.Kind == checker.Instance {
+			own = true
+		}
+	}
+	if len(views) > 1 || len(views) == 1 && own {
+		return TypeAny, true
+	}
 	var parts []Type
 	seen := map[string]bool{}
 	null, undef := false, false
-	named := true // every object member a declared interface
+	thenable := false // a PromiseLike member
+	named := true     // every object member a declared interface
 	for _, m := range t.Types {
-		if m.Flags&checker.Object != 0 && m.Kind != checker.Interface {
+		if m.Flags&checker.Object != 0 && m.Kind != checker.Interface && !writtenLiteral(m) {
 			named = false
 		}
 		var pt Type
 		switch {
-		case m.Flags&checker.Undefined != 0:
+		case m.Flags&checker.Object != 0 && m.Kind == checker.Interface && m.Symbol != nil && m.Symbol.Name == "PromiseLike" && r.libGlobal(m.Symbol) && len(t.Types) > 1:
+			// `T | PromiseLike<T>`: a parameter's is T (codegen's resolvers
+			// adopt a thenable at run time); any other is a value or any
+			// thenable, boxed, as codegen's annotation decider holds it.
+			thenable = true
+			if r.param {
+				continue
+			}
+			pt = TypeAny
+		case m.Flags&(checker.Undefined|checker.Void) != 0:
+			// `void` beside other members is the undefined a function
+			// that returns nothing yields (`string | void`).
 			undef = true
 			continue
 		case m.Flags&checker.Null != 0:
@@ -4851,10 +6960,21 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 		case m.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 			pt = TypeBool
 		case r.literals && m.Flags&checker.StringLiteral != 0:
-			pt = Type{IR: "ptr", Kind: kindStrLiteral, LitValue: m.Value}
+			pt = Type{IR: irPtr, Kind: kindStrLiteral, LitValue: m.Value}
 		default:
 			var ok bool
-			pt, ok = r.of(m)
+			mr := r
+			if m.Flags&checker.Object != 0 && m.Kind == checker.Anonymous {
+				// An object member keeps its literal tags (`k: "a"`), the
+				// discriminants codegen narrows the union by.
+				mr.literals = true
+			}
+			pt, ok = mr.of(m)
+			if !ok && callableInterface(m) {
+				// A callable interface (`EventListener`) beside other
+				// members: a box, read by its run-time kind.
+				return TypeAny, true
+			}
 			if ok && isUnconstrainedDynamic(pt) {
 				// A dictionary view with only null/undefined beside it
 				// stays the view: the box holds the absent value too.
@@ -4862,6 +6982,11 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 					return pt, true
 				}
 				return TypeAny, true // a member held as `any` holds the rest
+			}
+			if ok && pt.IsDynamic() && pt.DynPropTy == nil && len(t.Types) > 1 && m.Flags&checker.TypeParam != 0 {
+				// A type parameter bound to a boxed union, beside other
+				// members: the box holds the rest.
+				return TypeAny, true
 			}
 			if !ok || pt.IsDynamic() || pt.IsNull() || pt.IsUndefined() || pt.IR == "void" {
 				return Type{}, false
@@ -4913,13 +7038,36 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 	if len(parts) > 1 {
 		allStr := true
 		for _, p := range parts {
-			allStr = allStr && p.IR == "ptr" && isStringTy(p) && !hasHandleFlag(p)
+			allStr = allStr && p.IR == irPtr && isStringTy(p) && !hasHandleFlag(p)
 		}
 		if allStr {
 			parts = []Type{TypePtr}
 		}
 	}
+	if thenable && len(parts) > 1 {
+		return TypeAny, true // a value of several kinds or a thenable: boxed
+	}
+	// A class beside its subclasses (`ClientHttp2Stream | Http2Stream`, a
+	// flow union of `this`) is one pointer: the base class's.
+	if len(parts) > 1 && r.extends != nil {
+		for _, base := range parts {
+			if base.ClassName == "" {
+				continue
+			}
+			all := true
+			for _, p := range parts {
+				all = all && p.ClassName != "" && (p.ClassName == base.ClassName || r.extends(p.ClassName, base.ClassName))
+			}
+			if all {
+				parts = []Type{base}
+				break
+			}
+		}
+	}
 	switch {
+	case len(parts) == 0 && undef && null:
+		// `null | undefined`: a box keeps which one it holds.
+		return TypeAny, true
 	case len(parts) == 0 && undef:
 		return TypeUndefined, true
 	case len(parts) == 0:
@@ -4932,7 +7080,7 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 		if null && undef && threeStateEligible(p) {
 			return withNullAndUndef(p), true
 		}
-		if p.IR == "ptr" || p.IsArray() {
+		if p.IR == irPtr || p.IsArray() {
 			p.setNullable(true)
 			p.setUndefined(undef)
 			return p, true
@@ -4943,6 +7091,12 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 		p.setNullable(true) // `T | null`
 		return p, true
 	}
+	// Task promises of one payload differing only in which absences it
+	// holds (`Promise<number | null> | Promise<number | null | undefined>`):
+	// the one promise whose payload holds them all, as a task settles it.
+	if merged, ok := mergeTaskPromises(parts); ok && !null && !undef {
+		return merged, true
+	}
 	allFuncs := true
 	for _, p := range parts {
 		allFuncs = allFuncs && p.IsFunc()
@@ -4952,44 +7106,60 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 		// function, called through the dynamic convention, holds either.
 		return TypeAny, true
 	}
+	// A function beside scalars (`boolean | ((a: string, b: string) =>
+	// number)`): a box of each, as annotationType gives it.
+	funcs, scalars := 0, 0
+	for _, p := range parts {
+		switch {
+		case p.IsFunc():
+			funcs++
+		case !p.IsDynamic() && !p.IsObject() && !p.IsArray() && !p.IsClass() && (p.IR == "i1" || p.Float || p.IsInteger() || p.IR == irPtr && isStringTy(p) && !hasHandleFlag(p)):
+			scalars++
+		}
+	}
+	if funcs > 0 && funcs+scalars == len(parts) {
+		return Type{IR: TypeAny.IR, Kind: kindDynamic, UnionMembers: parts, Absent: absenceOf(null || undef, undef, false)}, true
+	}
 	objs, arrs, byteArrs := 0, 0, 0
 	for _, p := range parts {
 		// A class instance names its own layout (`Readable | Writable`,
-		// as resolveType boxes it), and so does one plain array and one
-		// byte array (`string | Buffer | string[]`, validateUnionMembers);
-		// a second of either kind or a function has none a box could name.
+		// as annotationType boxes it), and an array its header, whatever the
+		// other arrays beside it; a function has none a box could name.
 		if p.IsArray() && (p.IsTypedArray() || p.IsBuffer()) {
 			byteArrs++
 		} else if p.IsArray() {
 			arrs++
 		}
-		if arrs > 1 || byteArrs > 1 || p.IsFunc() {
-			return Type{}, false
-		}
 		if p.IsObject() && !p.IsSymbol() && !p.IsClass() {
 			objs++
 		}
 	}
+	// Typed-array views beside a class (`ArrayBufferView`: every typed
+	// array and DataView): the plain box annotationType gives the union.
+	classes := 0
+	for _, p := range parts {
+		if p.IsClass() {
+			classes++
+		}
+	}
+	if byteArrs > 1 && classes > 0 {
+		return TypeAny, true
+	}
 	if objs > 0 && objs < len(parts) {
 		// Strings beside one plain object (`BufferEncoding |
 		// ObjectEncodingOptions`): a box of the string and the object, as
-		// resolveType gives it; scalars beside one (`number | Error`), a
-		// box of each. Several objects have no box this maps.
-		if objs != 1 {
-			return Type{}, false
-		}
+		// annotationType gives it; scalars beside one (`number | Error`), a
+		// box of each; several objects, or a function beside them, a box of
+		// every member.
 		var strs, rest []Type
 		for _, p := range parts {
-			if p.IR == "ptr" && isStringTy(p) && !hasHandleFlag(p) {
+			if p.IR == irPtr && isStringTy(p) && !hasHandleFlag(p) {
 				strs = append(strs, p)
 			} else {
 				rest = append(rest, p)
 			}
 		}
-		if len(strs) > 0 {
-			if len(rest) != 1 {
-				return Type{}, false
-			}
+		if objs == 1 && len(strs) > 0 && len(rest) == 1 {
 			return Type{IR: TypeAny.IR, Kind: kindDynamic, UnionMembers: []Type{TypePtr, rest[0]}, Absent: absenceOf(null || undef, undef, false)}, true
 		}
 		return Type{IR: TypeAny.IR, Kind: kindDynamic, UnionMembers: parts, Absent: absenceOf(null || undef, undef, false)}, true
@@ -4998,10 +7168,66 @@ func (r reprCtx) union(t *checker.Type) (Type, bool) {
 		// Plain objects of different shapes (tsc's normalized `{ a: number }
 		// | { a?: undefined }`): the box a `U` annotation of them gives,
 		// read by key. Declared interfaces keep their layouts, as
-		// resolveType's union does.
+		// annotationType's union does.
 		return Type{IR: TypeAny.IR, Kind: kindDynamic, Absent: absenceOf(null || undef, undef, false)}, true
 	}
 	return Type{IR: TypeAny.IR, Kind: kindDynamic, UnionMembers: parts, Absent: absenceOf(null || undef, undef, false)}, true
+}
+
+// declaredByInterface reports an object type an interface declaration
+// declares (not a module's namespace object or a literal's type).
+func declaredByInterface(t *checker.Type) bool {
+	if t.Symbol == nil || len(t.Symbol.Declarations) == 0 {
+		return false
+	}
+	_, ok := t.Symbol.Declarations[0].Node.(*ast.InterfaceDeclaration)
+	return ok
+}
+
+// genericOverloads reports an overloaded function type every signature of
+// which has its own type parameters.
+func genericOverloads(t *checker.Type) bool {
+	if len(t.Overloads) == 0 {
+		return false
+	}
+	for _, o := range t.Overloads {
+		if len(o.TypeParams) == 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// firstOverload is an object's overloaded method member as codegen lays
+// it out: its first overload, that overload's own type parameters erased
+// (an interface's `then<U>(…)` overloads).
+func (r reprCtx) firstOverload(t *checker.Type) (Type, bool) {
+	first := t.Overloads[0]
+	er := make(map[*checker.Type]bool, len(r.erasedTP)+len(first.TypeParams))
+	for k := range r.erasedTP {
+		er[k] = true
+	}
+	for _, tp := range first.TypeParams {
+		er[tp] = true
+	}
+	r.erasedTP = er
+	return r.function(first)
+}
+
+// writtenLiteral reports a type literal the source wrote (`{ kind: 'a';
+// size: number }`): every member a signature, none a normalized object
+// literal's synthesized optional undefined. It keeps its layout in a union,
+// as a declared interface does.
+func writtenLiteral(t *checker.Type) bool {
+	if t.Kind != checker.Anonymous || len(t.Props) == 0 {
+		return false
+	}
+	for _, p := range t.Props {
+		if _, method := p.Decl.(*ast.MethodSignature); !p.Written && !method {
+			return false
+		}
+	}
+	return true
 }
 
 // ownIndexSig reports an interface whose declaration writes its string
@@ -5057,7 +7283,7 @@ func (o frontOracle) overloadedClosureCall(call *ast.CallExpression) (Type, bool
 	}
 	for _, d := range sym.Declarations {
 		fd, isFD := d.Node.(*ast.FunctionDeclaration)
-		if !isFD || len(fd.Overloads) == 0 || fd.ReturnType == nil || !fd.ReturnType.IsFuncType || fd.ReturnType.IsCtorType || fd.IsAsync || fd.IsGenerator {
+		if !isFD || len(fd.Overloads) == 0 || !annotIsFunctionType(fd.ReturnType) || fd.IsAsync || fd.IsGenerator {
 			continue
 		}
 		if ft, ok := o.AnnotationType(fd.ReturnType); ok && ft.IsFunc() {
@@ -5080,6 +7306,15 @@ func hasNullMember(t *checker.Type) bool {
 // reprOfFunction is a function type's representation: a closure pointer
 // carrying its parameters' and result's representations.
 func (r reprCtx) function(t *checker.Type) (Type, bool) {
+	r.param = false // a nested signature's result is no parameter
+	if r.fnBusy[t] || len(r.fnBusy) > 0 && selfContaining(t) {
+		return TypeAny, true // the inner occurrence (or a copy of it)
+	}
+	busy := map[*checker.Type]bool{t: true}
+	for k := range r.fnBusy {
+		busy[k] = true
+	}
+	r.fnBusy = busy
 	var params []Type
 	if t.ThisType != nil {
 		this, ok := r.of(t.ThisType)
@@ -5088,28 +7323,54 @@ func (r reprCtx) function(t *checker.Type) (Type, bool) {
 		}
 		params = append(params, this)
 	}
+	// Every parameter's omittability is explicit, as an annotation's is: a
+	// first-class call site rejects a missing required argument only where
+	// it is recorded.
 	var optional []bool
+	if len(t.Params) > 0 {
+		optional = make([]bool, len(t.Params))
+	}
+	// A parameter's type is its annotation's (or a contextual
+	// annotation's): string literals stay literals, as annotationType keeps
+	// them in a signature (a discriminated union parameter's tags).
+	pctx := r
+	pctx.literals, pctx.param = true, true
+	pctx.tuples = true // a tuple parameter is its annotation's tuple
 	for i, p := range t.Params {
-		pr, ok := r.of(p)
+		ctx := pctx
+		if i == len(t.Params)-1 && t.HasRestParam() {
+			// A rest tuple is the array its call collects, not a tuple value.
+			ctx.tuples = r.tuples
+		}
+		pr, ok := ctx.of(p)
+		if !ok && i == len(t.Params)-1 && t.HasRestParam() && p.Flags&checker.Object != 0 && p.Kind == checker.Tuple {
+			// A tuple rest parameter (`...xs: [boolean, number]`) of mixed
+			// elements: the boxed array the call collects its arguments into.
+			pr, ok = ArrayOf(TypeAny), true
+		}
 		if !ok {
 			return Type{}, false
 		}
 		if pr.IR == "void" {
 			pr = TypeAny // a `void` parameter (`T` = void) holds whatever is passed
 		}
+		if i == len(t.Params)-1 && t.HasRestParam() && !pr.IsArray() && pr.IsDynamic() {
+			// A rest parameter typed by an erased type parameter (`...o: O`,
+			// `O extends Opt<any>[]`): the boxed array its arguments fill.
+			pr = ArrayOf(TypeAny)
+		}
 		params = append(params, pr)
 		if t.OptionalParam(i) {
-			if optional == nil {
-				optional = make([]bool, len(t.Params))
-			}
 			optional[i] = true
 		}
 	}
 	ret := TypeVoid
-	if t.Result != nil && t.Result.Flags&checker.Never != 0 {
+	if selfReturningDecl(t) {
+		ret = TypeAny // itself, boxed (returnsOwnName)
+	} else if t.Ret() != nil && t.Ret().Flags&checker.Never != 0 {
 		ret = TypeNever // a function that never returns (ADR-00869)
-	} else if t.Result != nil {
-		rr, ok := r.of(t.Result)
+	} else if t.Ret() != nil {
+		rr, ok := r.of(t.Ret())
 		if !ok {
 			return Type{}, false
 		}
@@ -5139,10 +7400,23 @@ func (r reprCtx) object(t *checker.Type) (Type, bool) {
 	if len(t.Props) == 0 && t.Symbol == nil {
 		return TypeAny, true
 	}
-	// A self-reference inside the literal is the stub resolveType cuts
+	// A self-reference inside the literal is the stub annotationType cuts
 	// the cycle at: an object with no fields of its own.
 	if r.mapping[t] {
-		return UserObjectType(nil), true
+		if t.RecursiveAlias() && len(t.TypeArgs) > 0 {
+			// A generic one's instance names no registered alias: held
+			// boxed, its object read by its header.
+			return TypeAny, true
+		}
+		stub := UserObjectType(nil)
+		if t.RecursiveAlias() {
+			// Named, so a field read re-resolves it once the alias is
+			// registered (canonicalizeClassTy).
+			if ad, ok := t.Symbol.Declarations[0].Node.(*ast.TypeAliasDeclaration); ok {
+				stub.RefName = ad.Name
+			}
+		}
+		return stub, true
 	}
 	if r.mapping == nil {
 		r.mapping = map[*checker.Type]bool{}
@@ -5151,14 +7425,29 @@ func (r reprCtx) object(t *checker.Type) (Type, bool) {
 	defer delete(r.mapping, t)
 	fields := make([]Field, 0, len(t.Props))
 	for _, p := range t.Props {
-		if p.Accessor {
+		if p.Accessor && (t.Kind != checker.Anonymous || t.ClassOf != nil) {
 			return Type{}, false
 		}
+		// A type literal's accessor (`{ get done(): boolean }`) is a
+		// property to its readers: the object's own getter answers it.
 		ty, ok := r.of(p.Type)
+		if p.Type.Flags&checker.Object != 0 && p.Type.Kind == checker.Function && len(p.Type.Overloads) > 0 {
+			// An overloaded method: a dynamic function value, called with
+			// its arguments as written (withMethodFields).
+			ty, ok = TypeAny, true
+		}
+		if p.Write != nil && p.Write != p.Type {
+			// A setter taking other values than its getter gives (`get
+			// done(): false; set done(v: T | null)`): the slot holds either.
+			ty, ok = TypeAny, true
+		}
+		if !ok && p.Type.Flags&checker.Object != 0 && p.Type.Kind == checker.Function && genericOverloads(p.Type) && declaredByInterface(t) {
+			ty, ok = r.firstOverload(p.Type)
+		}
 		if r.literals && p.Type.Flags&checker.StringLiteral != 0 && p.Type.Flags&checker.Union == 0 {
 			// An annotation's literal-typed member keeps its literal, as
-			// resolveType resolves the member's annotation.
-			ty, ok = Type{IR: "ptr", Kind: kindStrLiteral, LitValue: p.Type.Value}, true
+			// annotationType resolves the member's annotation.
+			ty, ok = Type{IR: irPtr, Kind: kindStrLiteral, LitValue: p.Type.Value}, true
 		}
 		if isGeneratorFunc(p.Type) {
 			// An object's generator method is held as `any` (a generator
@@ -5169,7 +7458,7 @@ func (r reprCtx) object(t *checker.Type) (Type, bool) {
 			return Type{}, false
 		}
 		if p.Optional {
-			ty = optionalFieldType(ty) // `key?: T` holds absence, as resolveType widens it
+			ty = optionalFieldType(ty) // `key?: T` holds absence, as annotationType widens it
 		}
 		fields = append(fields, Field{Name: p.Name, Ty: ty, Optional: p.Optional})
 	}
@@ -5217,12 +7506,17 @@ func (o frontOracle) withPromiseCallbacks(prog *ast.Program) frontOracle {
 		}
 		return false
 	}
-	for _, st := range prog.Body {
+	// A worker module's top level, kept out of Body, holds executors too.
+	stmts := prog.Body
+	for _, wm := range prog.WorkerModules {
+		stmts = append(stmts[:len(stmts):len(stmts)], wm.Body...)
+	}
+	for _, st := range stmts {
 		ast.Inspect(st, func(n ast.Node) bool {
 			switch x := n.(type) {
 			case *ast.VarDeclaration:
 				if x.TypeAnnot != nil && isFn(x.Init) {
-					if kw, ok := x.TypeAnnot.TypeNode().(*ast.KeywordType); ok && kw.Keyword == "any" {
+					if kw, ok := x.TypeAnnot.(*ast.KeywordType); ok && kw.Keyword == "any" {
 						o.anyBound[x.Init] = true
 					}
 				}
@@ -5241,7 +7535,7 @@ func (o frontOracle) withPromiseCallbacks(prog *ast.Program) frontOracle {
 					}
 				}
 			case *ast.NewExpression:
-				if len(x.Args) > 0 && x.ClassName == "Promise" && !x.Qualified && isFn(x.Args[0]) {
+				if len(x.Args) > 0 && !x.Qualified && isFn(x.Args[0]) && (x.ClassName == "Promise" || o.promiseSubclassImplicitCtor(x.ClassName)) {
 					o.executors[x.Args[0]] = x
 				}
 			case *ast.CallExpression:
@@ -5365,6 +7659,13 @@ func presentType(t *checker.Type) bool {
 // (`{ v: first }` after `typeof first === 'boolean'`) keeps its own storage,
 // as a narrowed read does not change how a value is held.
 func (o frontOracle) literalStorage(lit *ast.ObjectLiteral, ty Type) Type {
+	// A method reading the literal's own binding (`n: function () { return
+	// o.m(); }`) asks for the literal again: the checker's layout there.
+	if o.storageBusy[lit] {
+		return ty
+	}
+	o.storageBusy[lit] = true
+	defer delete(o.storageBusy, lit)
 	fields := append([]Field(nil), ty.Fields...)
 	for _, p := range lit.Properties {
 		if p.KeyExpr != nil || p.AccessorKind != "" || p.Value == nil {
@@ -5470,8 +7771,11 @@ func genFuncProp(t *checker.Type) bool {
 
 // isGeneratorInstance reports a Generator or an AsyncGenerator.
 func isGeneratorInstance(t *checker.Type) bool {
-	return t != nil && t.Flags&checker.Object != 0 && t.Symbol != nil && (t.Kind == checker.Interface || t.Kind == checker.Instance) &&
-		(t.Symbol.Name == "Generator" || t.Symbol.Name == "AsyncGenerator")
+	if t == nil || t.Flags&checker.Object == 0 || t.Symbol == nil || (t.Kind != checker.Interface && t.Kind != checker.Instance) {
+		return false
+	}
+	l := declaredLowerType(t.Symbol)
+	return l == "generator" || l == "asyncgenerator"
 }
 
 // isGeneratorFunc reports a function type returning a Generator or an
@@ -5480,7 +7784,7 @@ func isGeneratorFunc(t *checker.Type) bool {
 	if t.Flags&checker.Object == 0 || t.Kind != checker.Function {
 		return false
 	}
-	return isGeneratorInstance(t.Result)
+	return isGeneratorInstance(t.Ret())
 }
 
 // storesPresent mirrors the emitter's: every reaching store is a
@@ -5657,7 +7961,11 @@ func (o frontOracle) matchArray(e ast.Expression) bool {
 		return false
 	}
 	t = o.c.NonNullable(t)
-	return t.Flags&checker.Object != 0 && t.Symbol != nil && (t.Symbol.Name == "RegExpMatchArray" || t.Symbol.Name == "RegExpExecArray")
+	if t.Flags&checker.Object == 0 || t.Symbol == nil {
+		return false
+	}
+	l := declaredLowerType(t.Symbol)
+	return l == "regexpmatcharray" || l == "regexpexecarray"
 }
 
 // libGlobal reports a symbol the builtin declarations declare globally (a
@@ -5826,11 +8134,21 @@ func (o frontOracle) redeclaredVarHeld(sym *binder.Symbol, id *ast.Identifier) (
 }
 
 func singleVarDecl(sym *binder.Symbol) (*ast.VarDeclaration, bool) {
-	if len(sym.Declarations) != 1 {
-		return nil, false
+	var v *ast.VarDeclaration
+	for _, d := range sym.Declarations {
+		switch n := d.Node.(type) {
+		case *ast.TypeAliasDeclaration, *ast.InterfaceDeclaration:
+			continue // a type merged with the value (`type P = …; const P = …`)
+		case *ast.VarDeclaration:
+			if v != nil {
+				return nil, false
+			}
+			v = n
+		default:
+			return nil, false
+		}
 	}
-	v, ok := sym.Declarations[0].Node.(*ast.VarDeclaration)
-	return v, ok
+	return v, v != nil
 }
 
 // jsWidenedVar reports a -compat=js module var declared more than once,
@@ -5968,7 +8286,8 @@ var elementCopyingMethod = map[string]bool{
 }
 
 // boxedElementParam is the type of an unannotated first parameter of a
-// callback passed to an array method on a boxed-element array: its boxes.
+// callback passed to an array method on a boxed-element array: its boxes;
+// on an allSettled result, its settlement records.
 func (o frontOracle) boxedElementParam(id *ast.Identifier) (Type, bool) {
 	sym, _ := o.b.Resolve(id)
 	if sym == nil || len(sym.Declarations) != 1 {
@@ -5998,6 +8317,11 @@ func (o frontOracle) boxedElementParam(id *ast.Identifier) (Type, bool) {
 	rt, ok := o.ExprType(m.Object)
 	if ok && o.boxedArrayCall(call) {
 		return TypeAny, true // the box's method passes its elements boxed
+	}
+	// An allSettled result's element: the checker gives its
+	// `PromiseSettledResult` union no layout.
+	if ok && rt.IsArray() && rt.ElemType != nil && isSettlementType(*rt.ElemType) && elementCallback[m.Property] {
+		return *rt.ElemType, true
 	}
 	if !ok || !rt.IsArray() || rt.IsTypedArray() || rt.ElemType == nil || reprKey(*rt.ElemType) != reprKey(TypeAny) {
 		return Type{}, false
@@ -6032,6 +8356,11 @@ func (o frontOracle) boxedArrayCall(call *ast.CallExpression) bool {
 
 // elementCallback names the array methods whose callback's first parameter
 // is an element.
+// evolvingElemResult is what an element callback method makes of an
+// evolving JavaScript array: true for the receiver's own kind (filter),
+// false for an `any[]` (map, flatMap).
+var evolvingElemResult = map[string]bool{"map": false, "flatMap": false, "filter": true}
+
 var elementCallback = map[string]bool{
 	"map": true, "filter": true, "forEach": true, "some": true, "every": true, "find": true,
 	"findIndex": true, "findLast": true, "findLastIndex": true, "flatMap": true,
@@ -6104,10 +8433,10 @@ func (o frontOracle) overloadsAgree(call *ast.CallExpression) bool {
 	}
 	key := ""
 	for _, sig := range sigs {
-		if sig.Result == nil || len(sig.TypeParams) > 0 {
+		if sig.Ret() == nil || len(sig.TypeParams) > 0 {
 			return false
 		}
-		r, ok := o.r.of(sig.Result)
+		r, ok := o.r.of(sig.Ret())
 		if !ok {
 			return false
 		}
@@ -6143,6 +8472,164 @@ func declaredParam(sym *binder.Symbol, name string) *ast.Param {
 		}
 	}
 	return nil
+}
+
+// globalThisGlobal reports `globalThis.X` of a library global X, which
+// codegen reads as the bare X (unwrapGlobalThis).
+func (o frontOracle) globalThisGlobal(e ast.Expression) bool {
+	g, ok := e.(*ast.MemberExpression)
+	if !ok || g.Optional {
+		return false
+	}
+	id, isID := g.Object.(*ast.Identifier)
+	if !isID || id.Name != "globalThis" {
+		return false
+	}
+	if sym, _ := o.b.Resolve(id); sym != nil && !o.r.libGlobal(sym) {
+		return false
+	}
+	gs := o.b.Globals.Symbols.Get(g.Property)
+	return gs != nil && o.r.libGlobal(gs)
+}
+
+// literalParamAnnotation is the annotation of the parameter id reads when
+// it names one string literal, possibly nullable.
+func (o frontOracle) literalParamAnnotation(id *ast.Identifier) (string, bool) {
+	sym, _ := o.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 || o.b.StoredElsewhere(sym) {
+		return "", false
+	}
+	var params []ast.Param
+	switch fn := sym.Declarations[0].Node.(type) {
+	case *ast.FunctionDeclaration:
+		params = fn.Params
+	case *ast.ArrowFunction:
+		params = fn.Params
+	case *ast.FunctionExpression:
+		params = fn.Params
+	default:
+		return "", false
+	}
+	for _, p := range params {
+		if p.Name != id.Name || p.Type == nil {
+			continue
+		}
+		ms, hasNull, hasUndef := ast.NonNullishMembers(p.Type)
+		if lt, ok := ms0(ms).(*ast.LiteralType); ok && len(ms) == 1 && lt.Kind == "string" && (hasNull || hasUndef || p.Optional) {
+			return lt.Value, true
+		}
+	}
+	return "", false
+}
+
+// thisClassName is the name of the class whose polymorphic `this` the
+// type node n (a member's annotation) spells, "" when none encloses it.
+func (o frontOracle) thisClassName(n ast.TypeNode) string {
+	for sc := o.b.AnnotationScope(n); sc != nil; sc = sc.Parent {
+		if sc.Kind != binder.FunctionScope || sc.Node == nil {
+			continue
+		}
+		for p := o.c.ParentOf(sc.Node); p != nil; p = o.c.ParentOf(p) {
+			switch x := p.(type) {
+			case *ast.ClassDeclaration:
+				return x.Name
+			case *ast.ClassExpression:
+				return x.Decl.Name
+			}
+		}
+		return ""
+	}
+	return ""
+}
+
+// isAnyArrayNode reports `any[]` (or `Array<any>`).
+func isAnyArrayNode(n ast.TypeNode) bool {
+	el := ast.ArrayElemNode(n)
+	return el != nil && ast.IsKeywordNode(el, "any")
+}
+
+// ms0 is ms's first node, nil when there is none.
+func ms0(ms []ast.TypeNode) ast.TypeNode {
+	if len(ms) == 0 {
+		return nil
+	}
+	return ast.Unparen(ms[0])
+}
+
+// staticOfClassExpr reports a `this` read in a static method of a class
+// expression.
+func (o frontOracle) staticOfClassExpr(th *ast.ThisExpression) bool {
+	for n := o.c.ParentOf(th); n != nil; n = o.c.ParentOf(n) {
+		switch x := n.(type) {
+		case *ast.ArrowFunction:
+			continue
+		case *ast.FunctionDeclaration:
+			if !x.IsStatic {
+				return false
+			}
+			cd, isCD := o.c.ParentOf(x).(*ast.ClassDeclaration)
+			if !isCD {
+				return false
+			}
+			_, isCE := o.c.ParentOf(cd).(*ast.ClassExpression)
+			return isCE || strings.Contains(cd.Name, "__kml_cx")
+		case *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		}
+	}
+	return false
+}
+
+// nonEmptyLiteral reports a string or array literal with an element.
+func nonEmptyLiteral(e ast.Expression) bool {
+	switch x := e.(type) {
+	case *ast.StringLiteral:
+		return x.Value != ""
+	case *ast.ArrayLiteral:
+		return len(x.Elements) > 0
+	}
+	return false
+}
+
+// within reports n inside node anc.
+func (o frontOracle) within(n, anc ast.Node) bool {
+	for p := n; p != nil; p = o.c.ParentOf(p) {
+		if p == anc {
+			return true
+		}
+	}
+	return false
+}
+
+// restPatternLength reports id bound by a rest parameter's object
+// pattern to the rest array's own `length`.
+func (o frontOracle) restPatternLength(id *ast.Identifier) bool {
+	sym, _ := o.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return false
+	}
+	var params []ast.Param
+	switch f := sym.Declarations[0].Node.(type) {
+	case *ast.ArrowFunction:
+		params = f.Params
+	case *ast.FunctionExpression:
+		params = f.Params
+	case *ast.FunctionDeclaration:
+		params = f.Params
+	}
+	if len(params) == 0 {
+		return false
+	}
+	p := params[len(params)-1]
+	if !p.Rest || p.Type != nil {
+		return false
+	}
+	for _, d := range p.ObjectPattern {
+		if d.Key == "length" && d.Local == id.Name && d.KeyExpr == nil && d.Default == nil && d.SubArray == nil && d.SubObject == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // functionValueProp reports a read of a property a program's function
@@ -6277,7 +8764,7 @@ func neverLeafToNumber(t Type) (Type, bool) {
 // arithOps are the arithmetic binary operators.
 var arithOps = map[string]bool{"+": true, "-": true, "*": true, "/": true, "%": true, "**": true}
 
-// dynamicBinary is inferExprType's answer for an arithmetic operator with
+// dynamicBinary is typeOfExpr's answer for an arithmetic operator with
 // an operand held as a box.
 func (o frontOracle) dynamicBinary(b *ast.BinaryExpression) (Type, bool) {
 	if !arithOps[b.Op] {
@@ -6346,10 +8833,17 @@ func (o frontOracle) thenValueBox(fn *ast.ArrowFunction) (Type, bool) {
 		return Type{}, false
 	}
 	rt, ok := o.ExprType(m.Object)
-	if !ok || !rt.IsPromise() || rt.PromiseType == nil || !isUnconstrainedDynamic(*rt.PromiseType) && !(rt.PromiseType.IsFunc() && rt.PromiseType.FuncCountsArgs) {
+	if !ok || !rt.IsPromise() || rt.PromiseType == nil {
 		return Type{}, false
 	}
-	return *rt.PromiseType, true
+	pt := *rt.PromiseType
+	// An allSettled array: the checker gives its `PromiseSettledResult`
+	// union no layout.
+	settled := pt.IsArray() && pt.ElemType != nil && isSettlementType(*pt.ElemType)
+	if !isUnconstrainedDynamic(pt) && !(pt.IsFunc() && pt.FuncCountsArgs) && !settled {
+		return Type{}, false
+	}
+	return pt, true
 }
 
 // asyncBodyReturn is what an unannotated async (not generator) function's
@@ -6391,7 +8885,7 @@ func (o frontOracle) asyncBodyReturn(fn ast.Node) (Type, bool) {
 // as its synthetic class: a computed key makes it a dynamic object instead
 // (inferObjectType).
 func hasAccessor(lit *ast.ObjectLiteral) bool {
-	if lit.HasComputedKey() {
+	if lit.HasComputedKey() || objLitHasSpread(lit) {
 		return false
 	}
 	for _, p := range lit.Properties {
@@ -6402,26 +8896,38 @@ func hasAccessor(lit *ast.ObjectLiteral) bool {
 	return false
 }
 
-// libInterfaceClass is the class resolveType gives a lib-declared
-// interface's name: a global module's class (globalLinks), or a timer
-// handle's (`NodeJS.Timeout`).
-func (e *Emitter) libInterfaceClass(name string, nodeJS bool) (Type, bool) {
+// libInterfaceClass is the class annotationType gives a lib-declared
+// interface: a global module's class (globalLinks), or the class its
+// declaration's tag names (`NodeJS.Timeout`).
+func (e *Emitter) libInterfaceClass(sym *binder.Symbol, nodeJS bool, args []Type) (Type, bool) {
 	var m string
 	if nodeJS {
-		if name != "Timeout" && name != "Immediate" {
-			return Type{}, false
-		}
-		m = e.libExports["internal_timers:"+name]
-	} else {
-		m = e.globalLinks[name]
+		m = e.taggedLibClass(sym)
+	} else if m = e.globalLinks[sym.Name]; m == "" {
+		m = e.taggedLibClass(sym)
 	}
-	if _, isClass := e.classes[m]; m == "" || !isClass {
+	// A generic one (StreamAsyncIterator<R>) is its instantiation.
+	if cd := e.genericClasses[m]; cd != nil && len(cd.TypeParams) == len(args) {
+		subs := make(map[string]Type, len(args))
+		for i, n := range cd.TypeParams {
+			subs[n] = args[i]
+		}
+		if t, err := e.genericClassInstanceType(cd, subs); err == nil {
+			return t, true
+		}
 		return Type{}, false
 	}
-	return e.resolveType(&ast.TypeAnnotation{Name: m}), true
+	info, isClass := e.classes[m]
+	if m == "" || !isClass {
+		return Type{}, false
+	}
+	if info.Ty.IR != "" {
+		return info.Ty, true // the class's instance
+	}
+	return e.namedType(m), true
 }
 
-// bareContainerType is the type decideGlobalType gives an unannotated
+// bareContainerType is the type codegen's pre-pass gives an unannotated
 // binding of a bare `[]` (typed by its pushes, or codegen's default) or of
 // a bare collection (bareCollectionType).
 func (e *Emitter) bareContainerType(v *ast.VarDeclaration) (Type, bool) {
@@ -6433,12 +8939,19 @@ func (e *Emitter) bareContainerType(v *ast.VarDeclaration) (Type, bool) {
 		defer func() { e.emptyArrayElems, e.emptyMapKV = arr, kv }()
 	}
 	if lit, ok := v.Init.(*ast.ArrayLiteral); ok && v.TypeAnnot == nil && len(lit.Elements) == 0 {
-		return e.decideGlobalType(v)
+		if ns := e.stmtNS[v]; ns != "" && e.curNamespace == "" {
+			e.curNamespace = ns
+			defer func() { e.curNamespace = "" }()
+		}
+		if ty := e.declaredArrayType(v.Name, lit); ty.IsArray() && ty.ElemType != nil {
+			return ty, true
+		}
+		return Type{}, false
 	}
 	return e.bareCollectionType(v)
 }
 
-// bareCollectionType is the type decideGlobalType gives an unannotated
+// bareCollectionType is the type codegen's pre-pass gives an unannotated
 // binding of a bare `new Map()`/`new Set()` whose calls the pre-pass saw.
 func (e *Emitter) bareCollectionType(v *ast.VarDeclaration) (Type, bool) {
 	if v.TypeAnnot != nil {
@@ -6453,19 +8966,47 @@ func (e *Emitter) bareCollectionType(v *ast.VarDeclaration) (Type, bool) {
 		if init.ElemType != nil || init.Init != nil {
 			return Type{}, false
 		}
+	case *ast.NewWeakSetExpression:
+		// `new WeakSet()`, `new WeakSet(null)`: seeded from nothing, in the
+		// key type codegen infers for the construction.
+		if _, isNull := init.Init.(*ast.NullLiteral); (isNull || init.Init == nil) && init.ElemType == nil {
+			return WeakSetType(e.weakSetElem(init)), true
+		}
+		return Type{}, false
+	case *ast.NewWeakMapExpression:
+		if _, isNull := init.Init.(*ast.NullLiteral); (isNull || init.Init == nil) && init.KeyType == nil && init.ValType == nil {
+			return WeakMapType(e.weakMapKV(init, nil)), true
+		}
+		return Type{}, false
 	default:
 		return Type{}, false
 	}
-	if _, ok := e.emptyMapKV[v.Name]; !ok {
-		return Type{}, false
+	// With no call seen, emitMapVarDecl/emitSetVarDecl's defaults.
+	kv := e.emptyMapKV[v.Name]
+	// Its widened key and value types from the pre-pass, as
+	// emitMapVarDecl/emitSetVarDecl create its runtime family (TDD-00211,
+	// ADR-01061).
+	if _, isSet := v.Init.(*ast.NewSetExpression); isSet {
+		elemTy := TypePtr
+		if kv.keyKnown {
+			elemTy = kv.key
+		}
+		return SetType(elemTy), true
 	}
-	return e.decideGlobalType(v)
+	keyTy, valTy := TypePtr, TypeI64
+	if kv.keyKnown {
+		keyTy = kv.key
+	}
+	if kv.valKnown {
+		valTy = kv.val
+	}
+	return MapType(keyTy, forceAnyMapVal(keyTy, valTy)), true
 }
 
 // funcValueProp is the box a function value's property other than its own
-// reads as (inferExprType's function-value rule).
+// reads as (typeOfExpr's function-value rule).
 func (e *Emitter) funcValueProp(m *ast.MemberExpression) (Type, bool) {
-	if st := e.structuralMemberType(m); st.IsDynamic() {
+	if st := e.builtMemberType(m); st.IsDynamic() {
 		return st, true
 	}
 	return Type{}, false
@@ -6478,6 +9019,12 @@ func (e *Emitter) objLitClassRepr(lit *ast.ObjectLiteral) (Type, bool) {
 		return info.Ty, true
 	}
 	return Type{}, false
+}
+
+// checkerFunction reports an expression the checker types as a function.
+func (o frontOracle) checkerFunction(e ast.Expression) bool {
+	t := o.c.TypeOf(e)
+	return t != nil && t.Flags&checker.Object != 0 && t.Kind == checker.Function
 }
 
 // anyImplCallbackParam reports an unannotated parameter of a function
@@ -6502,7 +9049,9 @@ func (o frontOracle) anyImplCallbackParam(id *ast.Identifier) bool {
 	}
 	pidx := -1
 	for i, p := range params {
-		if p.Name == id.Name && p.Type == nil {
+		// A rest parameter collects the boxes into an array, the
+		// checker's `any[]`.
+		if p.Name == id.Name && p.Type == nil && !p.Rest {
 			pidx = i
 		}
 	}
@@ -6546,19 +9095,23 @@ func (o frontOracle) anyImplCallbackParam(id *ast.Identifier) bool {
 		at = last
 	}
 	pt := impl.Params[at].Type
-	if pt != nil && pt.IsFuncType && !impl.Params[at].Rest {
+	var ptn ast.TypeNode
+	if pt != nil {
+		ptn = pt
+	}
+	if ft, isFn := ast.NonNullish(ptn).(*ast.FunctionType); ptn != nil && isFn && !impl.Params[at].Rest {
 		// A listener the implementation takes as `(...args: any[]) => void`
 		// is called with boxes (`socket.on('data', (d) => …)`).
-		if n := len(pt.FuncParams); n > 0 {
+		if n := len(ft.Parameters); n > 0 {
 			k := pidx
-			if pt.FuncHasRest && k >= n-1 {
-				return pt.FuncParams[n-1].Name == "any[]"
+			if last := ft.Parameters[n-1]; last.Rest && k >= n-1 {
+				return isAnyArrayNode(last.Type)
 			}
-			return k < n && pt.FuncParams[k].Name == "any"
+			return k < n && (ft.Parameters[k].Type == nil || ast.IsKeywordNode(ft.Parameters[k].Type, "any"))
 		}
 		return false
 	}
-	if pt == nil || !(pt.Name == "any" || impl.Params[at].Rest && pt.Name == "any[]") {
+	if ptn == nil || !(ast.IsKeywordNode(ptn, "any") || impl.Params[at].Rest && isAnyArrayNode(ptn)) {
 		return false
 	}
 	// The implementation builds plain records (`dns`'s NaptrRecord): an
@@ -6774,9 +9327,17 @@ func (o frontOracle) extendsPromise(t *checker.Type) bool {
 // implementation returns a value (`dns.lookup`'s request object): codegen
 // holds what the implementation returns, boxed.
 func (o frontOracle) voidOverValue(call *ast.CallExpression, impl *ast.FunctionDeclaration) bool {
-	switch impl.ReturnType.Name {
-	case "", "void", "undefined", "never":
+	if impl.ReturnType == nil {
 		return false
+	}
+	switch n := ast.Unparen(impl.ReturnType).(type) {
+	case *ast.KeywordType:
+		if n.Keyword == "void" || n.Keyword == "undefined" || n.Keyword == "never" {
+			return false
+		}
+	case *ast.TypeReference, *ast.ArrayType:
+	default:
+		return false // a type spelled other than by name
 	}
 	t := o.c.TypeOf(call)
 	return !o.c.Unanswered(t) && t.Flags&checker.Void != 0
@@ -6926,38 +9487,6 @@ func (o frontOracle) assignResult(call *ast.CallExpression) (Type, bool) {
 	return Type{}, false
 }
 
-// implementationResult answers a call of an overloaded function whose
-// implementation returns the picked overload's result or undefined
-// (`statSync(p)`'s `Stats | undefined`): a binding of it holds the
-// implementation's result, nullable.
-func (o frontOracle) implementationResult(call *ast.CallExpression) (Type, bool) {
-	var fd *ast.FunctionDeclaration
-	switch c := call.Callee.(type) {
-	case *ast.Identifier:
-		if sym, _ := o.b.Resolve(c); sym != nil {
-			for _, d := range sym.Declarations {
-				if f, ok := d.Node.(*ast.FunctionDeclaration); ok && len(f.Overloads) > 0 {
-					fd = f
-				}
-			}
-		}
-	case *ast.MemberExpression:
-		fd, _ = o.c.MemberDecl(c).(*ast.FunctionDeclaration)
-	}
-	if fd == nil || len(fd.Overloads) == 0 || fd.ReturnType == nil || fd.IsAsync || fd.IsGenerator {
-		return Type{}, false
-	}
-	it, ok := o.AnnotationType(fd.ReturnType)
-	if !ok || !it.Nullable() || it.IR != "ptr" {
-		return Type{}, false
-	}
-	ct, ok := o.ExprType(call)
-	if !ok || ct.Nullable() || reprKey(ct) != reprKey(it.withoutNullable()) {
-		return Type{}, false
-	}
-	return it, true
-}
-
 // sourcesFit reports Object.assign sources that are static objects whose
 // every property the target's layout has.
 func (o frontOracle) sourcesFit(tt Type, srcs []ast.Expression) bool {
@@ -6991,6 +9520,16 @@ func (o frontOracle) widenedUse(e ast.Expression) bool {
 // orig's own answer while c still sits in an optional chain, else orig's
 // non-optional type (the undefined its chain adds gone).
 func (o frontOracle) chainCopyType(c, orig ast.Expression) (Type, bool) {
+	// A link of the copy read off a receiver the copy holds as a box (its
+	// now plain `tmp.f` a shadowable read, boxOverride): the dynamic
+	// dispatch's, as codegen reads it.
+	if m, isM := c.(*ast.MemberExpression); isM && !m.Optional && o.r.boxOverride != nil && o.r.funcProp != nil {
+		if rt, ok := o.r.boxOverride(m.Object); ok && isUnconstrainedDynamic(rt) {
+			if st, ok := o.r.funcProp(m); ok {
+				return st, true
+			}
+		}
+	}
 	if copyInOptionalChain(c) {
 		return o.ExprType(orig)
 	}
@@ -7091,6 +9630,75 @@ func exprReceiverOrCallee(parent ast.Node, id ast.Expression) bool {
 		return p.Callee == ast.Expression(id)
 	}
 	return false
+}
+
+// withoutFuncThis is object type t with its methods' `this` parameters
+// dropped: the layout the checker's own type gives it.
+func withoutFuncThis(t Type) Type {
+	fs := make([]Field, len(t.Fields))
+	copy(fs, t.Fields)
+	for i, f := range fs {
+		if f.Ty.IsFunc() && f.Ty.FuncThis {
+			ft := f.Ty
+			ft.FuncThis = false
+			if len(ft.FuncParams) > 0 {
+				ft.FuncParams = ft.FuncParams[1:]
+			}
+			fs[i].Ty = ft
+		}
+	}
+	t.Fields = fs
+	return t
+}
+
+// onlyThisDiffers reports a and b as one layout but for a's methods taking
+// their `this` (withoutFuncThis).
+func onlyThisDiffers(a, b Type) bool {
+	if reprKey(a) == reprKey(b) {
+		return false
+	}
+	strip := func(t Type) Type {
+		if t.IsArray() && t.ElemType != nil {
+			el := withoutFuncThis(*t.ElemType)
+			return ArrayOf(el)
+		}
+		return withoutFuncThis(t)
+	}
+	return reprKey(strip(a)) == reprKey(strip(b))
+}
+
+// boxedArrayElemCall reports an element-callback method call on an array
+// the checker leaves unanswered (an evolving JavaScript array): codegen
+// types its callback's parameters and result as boxes.
+func boxedArrayElemCall(o frontOracle, call *ast.CallExpression) bool {
+	m, ok := call.Callee.(*ast.MemberExpression)
+	if !ok || m.Optional || call.Optional || !elementCallback[m.Property] || !o.c.Unanswered(o.c.TypeOf(call)) {
+		return false
+	}
+	rt, rok := o.ExprType(m.Object)
+	return rok && rt.IsArray() && rt.ElemType != nil && !rt.IsTypedArray() && o.r.js != nil && o.r.js()
+}
+
+// superSequence is the instance `(super(…), …, this)` evaluates to
+// (inlineFieldInitsAtSuper): the super call's.
+func (o frontOracle) superSequence(sq *ast.SequenceExpression) (Type, bool) {
+	if _, isThis := sq.Exprs[len(sq.Exprs)-1].(*ast.ThisExpression); !isThis || len(sq.Exprs) < 2 {
+		return Type{}, false
+	}
+	call, isCall := sq.Exprs[0].(*ast.CallExpression)
+	if !isCall {
+		return Type{}, false
+	}
+	if _, isSuper := call.Callee.(*ast.SuperExpression); !isSuper {
+		return Type{}, false
+	}
+	return o.ExprType(call)
+}
+
+// exprCallee reports x as parent's call callee.
+func exprCallee(parent ast.Node, x ast.Expression) bool {
+	c, ok := parent.(*ast.CallExpression)
+	return ok && c.Callee == x
 }
 
 // isGenStepLayout reports codegen's generator step result, `{value, done}`.
@@ -7235,6 +9843,98 @@ func (o frontOracle) namesClass(id *ast.Identifier) bool {
 	return sym != nil && (sym.Flags&binder.Class != 0 || classExprBinding(sym))
 }
 
+// functionTyped reports an expression the checker types as a function (a
+// method read as a value), not a data property a narrowing may refine.
+func (o frontOracle) functionTyped(e ast.Expression) bool {
+	t := o.c.TypeOf(e)
+	return !o.c.Unanswered(t) && t.Flags&checker.Object != 0 && t.Kind == checker.Function
+}
+
+// liftedGenReceiver reports a member read off `this` in a static generator
+// method lifted to a generator function that takes its receiver as a
+// leading `this` parameter.
+func (o frontOracle) liftedGenReceiver(m *ast.MemberExpression) bool {
+	if _, isThis := m.Object.(*ast.ThisExpression); !isThis || o.r.liftedGen == nil {
+		return false
+	}
+	for n := o.c.ParentOf(m); n != nil; n = o.c.ParentOf(n) {
+		switch f := n.(type) {
+		case *ast.ArrowFunction:
+			continue
+		case *ast.FunctionDeclaration:
+			g := o.r.liftedGen(f)
+			return g != nil && len(g.Params) > 0 && g.Params[0].Name == "this"
+		case *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		}
+	}
+	return false
+}
+
+// spreadsHiddenFields reports an object literal spreading a class instance
+// with a private or protected field (not a `#` name).
+func (o frontOracle) spreadsHiddenFields(lit *ast.ObjectLiteral) bool {
+	for _, p := range lit.Properties {
+		sp, ok := p.Value.(*ast.SpreadElement)
+		if !ok || p.Key != "" || p.KeyExpr != nil {
+			continue
+		}
+		t := o.c.TypeOf(sp.Arg)
+		if o.c.Unanswered(t) || t.Flags&checker.Object == 0 || t.Kind != checker.Instance {
+			continue
+		}
+		for _, q := range t.Props {
+			if q.Field && q.Visibility != "" && !strings.HasPrefix(q.Name, "#") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// hiddenFieldsLiteral is such a literal's layout, as inferObjectType builds
+// it: each spread's fields, then each property, a later one replacing an
+// earlier one of its name.
+func (o frontOracle) hiddenFieldsLiteral(lit *ast.ObjectLiteral) (Type, bool) {
+	if lit.HasAccessors() || hasProtoKey(lit) {
+		return Type{}, false
+	}
+	var fields []Field
+	upsert := func(f Field) {
+		for i, existing := range fields {
+			if existing.Name == f.Name {
+				fields[i] = f
+				return
+			}
+		}
+		fields = append(fields, f)
+	}
+	for _, p := range lit.Properties {
+		if sp, ok := p.Value.(*ast.SpreadElement); ok && p.Key == "" && p.KeyExpr == nil {
+			st, ok := o.ExprType(sp.Arg)
+			if !ok || st.IsDynamic() || !st.IsObject() {
+				return Type{}, false
+			}
+			for _, f := range st.SpreadFields() {
+				upsert(f)
+			}
+			continue
+		}
+		if p.KeyExpr != nil || p.AccessorKind != "" {
+			return Type{}, false
+		}
+		ft, ok := o.ExprType(p.Value)
+		if !ok {
+			return Type{}, false
+		}
+		if fe, isFE := p.Value.(*ast.FunctionExpression); isFE && fe.IsGenerator {
+			ft = TypeAny
+		}
+		upsert(Field{Name: p.Key, Ty: ft})
+	}
+	return UserObjectType(fields), true
+}
+
 // objLitHasSpread reports an object literal with a `...spread` property.
 func objLitHasSpread(lit *ast.ObjectLiteral) bool {
 	for _, prop := range lit.Properties {
@@ -7281,6 +9981,74 @@ func (r reprCtx) streamReadResult(t *checker.Type) (Type, bool) {
 		return Type{}, false
 	}
 	return streamReadResultType(elem), true
+}
+
+// joinedElems is the one element kind of an inferred tuple's elements:
+// all the same, or nullable scalars (or settlements of them) differing only
+// in their absent states, which codegen's literal joins (joinedPromiseElems).
+func joinedElems(elems []Type) (Type, bool) {
+	out := elems[0]
+	for _, e := range elems[1:] {
+		if reprKey(e) == reprKey(out) {
+			continue
+		}
+		a, b := out, e
+		settled := isSettlementType(a) && isSettlementType(b)
+		if settled {
+			a, b = a.VisibleFields()[1].Ty, b.VisibleFields()[1].Ty
+		}
+		if _, ok := sameButAbsence([]Type{a}, b); !ok {
+			return Type{}, false
+		}
+		a.Absent = joinAbsence(a.Absent, b.Absent)
+		if settled {
+			out = SettlementType(a)
+		} else {
+			out = a
+		}
+	}
+	return out, true
+}
+
+// funcMetaReceiver reports x as the receiver of a function's own `length`
+// or `name` read (`Promise.all.length`).
+func funcMetaReceiver(parent ast.Node, x ast.Expression) bool {
+	pm, ok := parent.(*ast.MemberExpression)
+	return ok && pm.Object == x && !pm.Optional && (pm.Property == "length" || pm.Property == "name")
+}
+
+// settledResult is the settlement record (SettlementType) a library
+// `PromiseSettledResult<T>` union is: Promise.allSettled's elements.
+var settledNames = [2]string{"PromiseFulfilledResult", "PromiseRejectedResult"}
+
+func (r reprCtx) settledResult(t *checker.Type) (Type, bool) {
+	var value *checker.Type
+	rejected := false
+	for _, m := range t.Types {
+		if m.Flags&checker.Object == 0 || m.Kind != checker.Interface || m.Symbol == nil || !r.libGlobal(m.Symbol) {
+			return Type{}, false
+		}
+		// The fulfilled record carries `value: T`, the rejected `reason`.
+		switch {
+		case m.Prop("value") != nil && len(m.TypeArgs) == 1 && m.Symbol.Name == settledNames[0]:
+			value = m.TypeArgs[0]
+		case m.Prop("reason") != nil && m.Symbol.Name == settledNames[1]:
+			rejected = true
+		default:
+			return Type{}, false
+		}
+	}
+	if value == nil || !rejected || len(t.Types) != 2 {
+		return Type{}, false
+	}
+	vt, ok := r.of(value)
+	if !ok {
+		return Type{}, false
+	}
+	if isVoidTy(vt) {
+		vt = TypeAny // a Promise<void> fulfils with undefined
+	}
+	return SettlementType(vt), true
 }
 
 // emptyTypeLiteral reports the type literal `{}`.
@@ -7336,7 +10104,7 @@ func (o frontOracle) literalFromReturns(e ast.Expression) (Type, bool) {
 	var params []ast.Param
 	var body *ast.BlockStatement
 	var exprBody ast.Expression // `=> expr`
-	var retAnn *ast.TypeAnnotation
+	var retAnn ast.TypeNode
 	switch fn := e.(type) {
 	case *ast.FunctionExpression:
 		if fn.IsGenerator || fn.IsAsync {
@@ -7355,11 +10123,10 @@ func (o frontOracle) literalFromReturns(e ast.Expression) (Type, bool) {
 		return Type{}, false
 	}
 	ct := o.c.TypeOf(e)
-	if o.c.Unanswered(ct) || ct.Flags&checker.Object == 0 || ct.Kind != checker.Function || ct.ThisType != nil || len(ct.Overloads) > 0 || len(ct.TypeParams) > 0 || ct.Result == nil || len(ct.Params) != len(params) {
+	if o.c.Unanswered(ct) || ct.Flags&checker.Object == 0 || ct.Kind != checker.Function || ct.ThisType != nil || len(ct.Overloads) > 0 || len(ct.TypeParams) > 0 || ct.Ret() == nil || len(ct.Params) != len(params) {
 		return Type{}, false
 	}
-	stub := *ct
-	stub.Result = nil
+	stub := *ct.WithoutResult()
 	stub.Params = append([]*checker.Type(nil), ct.Params...)
 	boxed := map[int]bool{}
 	for i, p := range params {
@@ -7373,7 +10140,7 @@ func (o frontOracle) literalFromReturns(e ast.Expression) (Type, bool) {
 			}
 		}
 	}
-	ret, rok := o.r.of(ct.Result)
+	ret, rok := o.r.of(ct.Ret())
 	if !rok {
 		switch {
 		case body != nil:
@@ -7423,6 +10190,35 @@ func returnsOnlyThis(fe *ast.FunctionExpression) bool {
 }
 
 // hasSelfReturningMethod reports a literal with a returnsOnlyThis method.
+func (o frontOracle) selfReturningCall(m *ast.MemberExpression) bool {
+	switch obj := m.Object.(type) {
+	case *ast.CallExpression:
+		if om, isM := obj.Callee.(*ast.MemberExpression); isM && !om.Optional && !obj.Optional {
+			return o.selfReturningCall(om)
+		}
+	case *ast.Identifier:
+		sym, _ := o.b.Resolve(obj)
+		if sym == nil || len(sym.Declarations) != 1 || o.b.StoredElsewhere(sym) {
+			return false
+		}
+		vd, isVD := sym.Declarations[0].Node.(*ast.VarDeclaration)
+		if !isVD || vd.Kind != "const" || vd.TypeAnnot != nil {
+			return false
+		}
+		lit, isLit := vd.Init.(*ast.ObjectLiteral)
+		if !isLit || hasAccessor(lit) {
+			return false
+		}
+		for _, p := range lit.Properties {
+			if p.KeyExpr == nil && p.Key == m.Property {
+				fe, isFE := p.Value.(*ast.FunctionExpression)
+				return isFE && returnsOnlyThis(fe)
+			}
+		}
+	}
+	return false
+}
+
 func hasSelfReturningMethod(lit *ast.ObjectLiteral) bool {
 	for _, p := range lit.Properties {
 		if fe, isFE := p.Value.(*ast.FunctionExpression); isFE && returnsOnlyThis(fe) {
@@ -7505,6 +10301,12 @@ func (e *Emitter) builtinRefValueType(expr ast.Expression) (Type, bool) {
 // types, each property whose type does not map taking its value's answer;
 // false for a literal with a spread, accessor, method or computed key.
 func (o frontOracle) literalFields(lit *ast.ObjectLiteral) (Type, bool) {
+	if o.litBusy[lit] {
+		// A property whose function returns the literal's own binding.
+		return Type{}, false
+	}
+	o.litBusy[lit] = true
+	defer delete(o.litBusy, lit)
 	ct := o.c.TypeOf(lit)
 	if o.c.Unanswered(ct) || ct.Flags&checker.Object == 0 || ct.Kind != checker.Anonymous || len(ct.Props) != len(lit.Properties) {
 		return Type{}, false
@@ -7537,6 +10339,8 @@ func (o frontOracle) literalFields(lit *ast.ObjectLiteral) (Type, bool) {
 		}
 		if fe, isFE := lp.Value.(*ast.FunctionExpression); isFE && fe.IsGenerator {
 			ty, ok = TypeAny, true // a generator method is held as `any`
+		} else if o.generatorDeclRef(lp.Value) {
+			ty, ok = TypeAny, true // `{ seq }` of a `function*`: the same
 		} else if isGeneratorFunc(p.Type) {
 			ty, ok = o.ExprType(lp.Value) // a function returning one
 		}
@@ -7559,6 +10363,21 @@ func (o frontOracle) literalFields(lit *ast.ObjectLiteral) (Type, bool) {
 		fields = append(fields, Field{Name: p.Name, Ty: ty})
 	}
 	return UserObjectType(fields), true
+}
+
+// generatorDeclRef reports an identifier naming a generator function
+// declaration.
+func (o frontOracle) generatorDeclRef(e ast.Expression) bool {
+	id, ok := e.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	sym, _ := o.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return false
+	}
+	fd, isFD := sym.Declarations[0].Node.(*ast.FunctionDeclaration)
+	return isFD && fd.IsGenerator
 }
 
 // literalHasMethod reports whether object literal lit has a function
@@ -7611,6 +10430,9 @@ func allOptional(props []*checker.Property) bool {
 // (dynamicInit): unboxed where the checker narrows the read
 // (checkerNarrowed), as emitIdent reads it.
 func (o frontOracle) boxedInitRead(id *ast.Identifier, v *ast.VarDeclaration) (Type, bool) {
+	if accessorLiteral(o.b, v) {
+		return TypeAny, true
+	}
 	it, ok := o.ExprType(v.Init)
 	if ok && o.r.narrowed != nil && !it.IsArray() {
 		if nt, nok := o.r.narrowed(id, it); nok {
@@ -7627,15 +10449,17 @@ func explicitTupleTypeArgs(x ast.Expression) bool {
 	if !ok {
 		return false
 	}
-	var has func(a *ast.TypeAnnotation) bool
-	has = func(a *ast.TypeAnnotation) bool {
-		if a == nil {
-			return false
+	has := func(a ast.TypeNode) bool {
+		found := false
+		if a != nil {
+			ast.Inspect(a, func(n ast.Node) bool {
+				if _, ok := n.(*ast.TupleType); ok {
+					found = true
+				}
+				return !found
+			})
 		}
-		if len(a.TupleElems) > 0 {
-			return true
-		}
-		return has(a.ElemType) || has(a.KeyType)
+		return found
 	}
 	return has(nm.KeyType) || has(nm.ValType)
 }
@@ -7710,8 +10534,22 @@ func (o frontOracle) writtenIn(n ast.Node) map[*binder.Symbol]bool {
 func (o frontOracle) libTupleSource(e ast.Expression) bool {
 	switch x := e.(type) {
 	case *ast.CallExpression:
+		// A Map's `m[Symbol.iterator]()`: its entries.
+		if ix, isIx := x.Callee.(*ast.IndexExpression); isIx && o.libMapValue(ix.Object) {
+			if mem, isMem := ix.Index.(*ast.MemberExpression); isMem && mem.Property == "iterator" {
+				if id, isID := mem.Object.(*ast.Identifier); isID && id.Name == "Symbol" {
+					return true
+				}
+			}
+		}
 		m, isM := x.Callee.(*ast.MemberExpression)
 		if !isM {
+			return false
+		}
+		// A method of an array held with boxed elements (`Array.from` of
+		// a class's iterator, then `.find(…)`): its result is held boxed
+		// too, whatever tuples the signature spells.
+		if ot, ok := o.ExprType(m.Object); ok && ot.IsArray() && ot.ElemType != nil && ot.ElemType.IsDynamic() {
 			return false
 		}
 		return o.c.MemberInLibrary(m)
@@ -7721,13 +10559,38 @@ func (o frontOracle) libTupleSource(e ast.Expression) bool {
 		}
 		for _, el := range x.Elements {
 			sp, isSp := el.(*ast.SpreadElement)
-			if !isSp || !o.libTupleSource(sp.Arg) {
+			if !isSp || !o.libTupleSource(sp.Arg) && !o.libMapValue(sp.Arg) && !o.declaredIteratorValue(sp.Arg) {
 				return false
 			}
 		}
 		return true
 	}
 	return false
+}
+
+// declaredIteratorValue reports e a class instance whose
+// [Symbol.iterator]() declares its result (`IterableIterator<[string,
+// any]>`, FormData's): spread, the tuples that declaration spells.
+func (o frontOracle) declaredIteratorValue(e ast.Expression) bool {
+	t := o.c.NonNullable(o.c.TypeOf(e))
+	if o.c.Unanswered(t) || t.Flags&checker.Object == 0 || t.Kind != checker.Instance {
+		return false
+	}
+	p := t.Prop("@@iterator")
+	if p == nil {
+		return false
+	}
+	fd, isFD := p.Decl.(*ast.FunctionDeclaration)
+	return isFD && fd.ReturnType != nil
+}
+
+// libMapValue reports e a library Map's value: spread, its entry tuples.
+func (o frontOracle) libMapValue(e ast.Expression) bool {
+	t := o.c.NonNullable(o.c.TypeOf(e))
+	if o.c.Unanswered(t) || t.Flags&checker.Object == 0 || t.Kind != checker.Interface || t.Symbol == nil {
+		return false
+	}
+	return (t.Symbol.Name == "Map" || t.Symbol.Name == "ReadonlyMap") && t.Symbol.Scope == o.b.Globals
 }
 
 // patternParamLeaf is the array-pattern parameter of sym's function binding
@@ -7816,7 +10679,7 @@ func (o frontOracle) paramReplacingFunc(id *ast.Identifier) *ast.FunctionDeclara
 }
 
 // promotedGlobal reports a module `var` codegen promotes to a module global
-// (reliableGlobalType), held as its registered type: no hoisting widening.
+// (the module-global pre-pass), held as its registered type: no hoisting widening.
 func (o frontOracle) promotedGlobal(sym *binder.Symbol, v *ast.VarDeclaration) bool {
 	if sym.Scope.Kind != binder.ModuleScope {
 		return false
@@ -8028,6 +10891,12 @@ func (o frontOracle) staticClassField(x ast.Expression) bool {
 // literalMethodReturns is ty with the method fields of lit that return an
 // accessor literal (ReturnType) returning its synthetic class's instance.
 func (o frontOracle) literalMethodReturns(lit *ast.ObjectLiteral, ty Type) Type {
+	// A method reading the literal's own binding asks for it again.
+	if o.returnsBusy[lit] {
+		return ty
+	}
+	o.returnsBusy[lit] = true
+	defer delete(o.returnsBusy, lit)
 	var fields []Field
 	for _, p := range lit.Properties {
 		fe, isFE := p.Value.(*ast.FunctionExpression)
@@ -8122,4 +10991,1393 @@ func (e *Emitter) genericNewRepr(ne *ast.NewExpression) (Type, bool) {
 	}
 	ty, err := e.genericClassInstanceType(genDecl, e.buildTypeArgSubs(genDecl.TypeParams, targs))
 	return ty, err == nil
+}
+
+// anyOrPromiseOfAny reports whether implementation fd is declared to return
+// `any` or a `Promise<any>`.
+func (o frontOracle) anyOrPromiseOfAny(fd *ast.FunctionDeclaration) bool {
+	sig := o.c.ImplementationSignature(fd)
+	if sig == nil || sig.Ret() == nil {
+		return false
+	}
+	r := sig.Ret()
+	if r.Flags&checker.Any != 0 {
+		return true
+	}
+	return r.Flags&checker.Object != 0 && r.Symbol != nil && declaredLowerType(r.Symbol) == "promise" &&
+		len(r.TypeArgs) == 1 && r.TypeArgs[0].Flags&checker.Any != 0
+}
+
+// dynamicMethodRead reports a read of a method a dynamically represented
+// builtin declares (`o.hasOwnProperty`, Object.prototype's) on a static
+// object or class instance, whose layout has no such member: a function
+// value taking its receiver as `this`, held boxed.
+func (o frontOracle) dynamicMethodRead(m *ast.MemberExpression) bool {
+	rt, ok := o.ExprType(m.Object)
+	return ok && isDynamicMethodRead(o.c, m, rt)
+}
+
+func isDynamicMethodRead(c frontView, m *ast.MemberExpression, recv Type) bool {
+	if c == nil || !recv.IsObject() || recv.IsDynamic() || recv.IsArray() {
+		return false
+	}
+	ms, ok := c.MemberDecl(m).(*ast.MethodSignature)
+	return ok && dynamicLibMethods()[ms]
+}
+
+var (
+	dynamicLibMethodsOnce sync.Once
+	dynamicLibMethodsSet  map[*ast.MethodSignature]bool
+)
+
+// dynamicLibMethods are the methods of the builtin interfaces tagged
+// `@lowerType dynamic` (Object's).
+func dynamicLibMethods() map[*ast.MethodSignature]bool {
+	dynamicLibMethodsOnce.Do(func() {
+		dynamicLibMethodsSet = map[*ast.MethodSignature]bool{}
+		progs, err := lib.Programs()
+		if err != nil {
+			return
+		}
+		for _, p := range progs {
+			ast.Inspect(p, func(n ast.Node) bool {
+				if id, ok := n.(*ast.InterfaceDeclaration); ok && id.LowerType == "dynamic" {
+					for _, mem := range id.Members {
+						if ms, ok := mem.(*ast.MethodSignature); ok {
+							dynamicLibMethodsSet[ms] = true
+						}
+					}
+				}
+				return true
+			})
+		}
+	})
+	return dynamicLibMethodsSet
+}
+
+// generatorStep reports a generator's next(), return() or throw() call.
+func (o frontOracle) generatorStep(e ast.Expression) bool {
+	call, ok := e.(*ast.CallExpression)
+	if !ok || call.Optional {
+		return false
+	}
+	m, ok := call.Callee.(*ast.MemberExpression)
+	if !ok || m.Optional || (m.Property != "next" && m.Property != "return" && m.Property != "throw") {
+		return false
+	}
+	rt, ok := o.ExprType(m.Object)
+	if ok && rt.IsGenerator() {
+		return true
+	}
+	// Any other iterator's step codegen builds as {value, done} (a
+	// collection's or a matchAll iterator's).
+	st, sok := o.ExprType(call)
+	return ok && sok && isGenStepLayout(st)
+}
+
+// genericClassDecl reports a symbol declaring a generic class: codegen
+// instantiates it per use, and its value is the boxed constructor
+// reference like any class's.
+func genericClassDecl(sym *binder.Symbol) bool {
+	for _, d := range sym.Declarations {
+		if cd, ok := d.Node.(*ast.ClassDeclaration); ok && len(cd.DeclaredTypeParams().Names) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// hostIntersection reports an intersection with a host or class member
+// (`Error & { port?: number }`): no struct of the merged fields holds it.
+func (r *reprCtx) hostIntersection(t *checker.Type) bool {
+	for _, m := range t.Intersects {
+		// An array carrying properties (`string[] & { tag: string }`) has
+		// no fixed shape either.
+		if mt, ok := r.of(m); ok && (mt.IsError() || mt.IsClass() || mt.Host != 0 && !mt.IsObject() || mt.IsArray()) {
+			return true
+		}
+	}
+	return false
+}
+
+// thenStepParam is the type of sym when it is the unannotated first
+// parameter of a callback passed straight to `.then` on a generator step's
+// promise: the step codegen resolves it with.
+func (o frontOracle) thenStepParam(sym *binder.Symbol) (Type, bool) {
+	if sym.Scope == nil {
+		return Type{}, false
+	}
+	var fn ast.Node
+	var params []ast.Param
+	switch f := sym.Scope.Node.(type) {
+	case *ast.ArrowFunction:
+		fn, params = f, f.Params
+	case *ast.FunctionExpression:
+		fn, params = f, f.Params
+	default:
+		return Type{}, false
+	}
+	if len(params) == 0 || params[0].Name != sym.Name || params[0].Type != nil || params[0].ArrayPattern != nil || params[0].ObjectPattern != nil {
+		return Type{}, false
+	}
+	call, ok := o.c.ParentOf(fn).(*ast.CallExpression)
+	if !ok || len(call.Args) == 0 || call.Args[0] != fn {
+		return Type{}, false
+	}
+	m, ok := call.Callee.(*ast.MemberExpression)
+	if !ok || m.Property != "then" || !o.generatorStep(m.Object) {
+		return Type{}, false
+	}
+	if pt, ok := o.ExprType(m.Object); ok && pt.PromiseType != nil {
+		return *pt.PromiseType, true
+	}
+	return Type{}, false
+}
+
+// stepsOnly reports a binding every write to which stores a generator step
+// (`r = it.next()`): it keeps the step's {value, done} layout.
+func (o frontOracle) stepsOnly(sym *binder.Symbol) bool {
+	if sym.Scope == nil || sym.Scope.Node == nil {
+		return false
+	}
+	only := true
+	ast.Inspect(sym.Scope.Node, func(n ast.Node) bool {
+		var target ast.Expression
+		var value ast.Expression
+		switch x := n.(type) {
+		case *ast.AssignmentExpression:
+			target, value = x.Left, x.Right
+			if x.Op != "=" {
+				value = nil
+			}
+		case *ast.UpdateExpression:
+			target = x.Arg
+		}
+		if id, isID := target.(*ast.Identifier); isID {
+			if s, _ := o.b.Resolve(id); s == sym && (value == nil || !o.generatorStep(value)) {
+				only = false
+			}
+		}
+		return only
+	})
+	return only
+}
+
+// stepsOnlyDecl is stepsOnly for the binding v declares.
+func (o frontOracle) stepsOnlyDecl(v *ast.VarDeclaration) bool {
+	sym, ok := o.b.DeclSymbol(v)
+	return ok && sym != nil && o.stepsOnly(sym)
+}
+
+// collIterCall reports a call that may build a collection iterator:
+// keys(), values() or entries() of a collection, or a string's matchAll().
+func collIterCall(call *ast.CallExpression) bool {
+	m, ok := call.Callee.(*ast.MemberExpression)
+	if !ok {
+		return false
+	}
+	_, iter := collIterMethod(m.Property)
+	return iter || m.Property == "matchAll"
+}
+
+// nullAndUndefinedOnly reports the type `null | undefined`.
+func nullAndUndefinedOnly(t *checker.Type) bool {
+	if t == nil || t.Flags&checker.Union == 0 || len(t.Types) != 2 {
+		return false
+	}
+	n, u := false, false
+	for _, m := range t.Types {
+		n = n || m.Flags&checker.Null != 0
+		u = u || m.Flags&checker.Undefined != 0
+	}
+	return n && u
+}
+
+// synthesizedDecl reports a declaration codegen made, which the binder
+// never bound.
+func (o frontOracle) synthesizedDecl(v *ast.VarDeclaration) bool {
+	if o.b == nil {
+		return false
+	}
+	_, found := o.b.DeclSymbol(v)
+	return !found
+}
+
+// arrayHeritage is the array a program interface with no members of its
+// own is when it extends `Array<T>` or `ReadonlyArray<T>`
+// (`interface Ticks extends ReadonlyArray<number> {}`): the base's layout,
+// as an annotation naming it resolves.
+func (r reprCtx) arrayHeritage(sym *binder.Symbol) (Type, bool) {
+	if r.annotation == nil || len(sym.Declarations) != 1 {
+		return Type{}, false
+	}
+	id, ok := sym.Declarations[0].Node.(*ast.InterfaceDeclaration)
+	if !ok || len(id.Members) != 0 || len(id.TypeParameters) != 0 || len(id.Heritage) != 1 {
+		return Type{}, false
+	}
+	ref, ok := id.Heritage[0].(*ast.TypeReference)
+	if !ok || len(ref.Qualifier) != 0 || (ref.Name != "Array" && ref.Name != "ReadonlyArray") || len(ref.TypeArgs) != 1 {
+		return Type{}, false
+	}
+	ta, err := ast.TypeAnnotationOf(ref, "")
+	if err != nil {
+		return Type{}, false
+	}
+	if ty := r.annotation(ta); ty.IsArray() && ty.ElemType != nil {
+		return ty, true
+	}
+	return Type{}, false
+}
+
+// annotatedFuncResult reports a function expression or arrow with a return
+// annotation: a tuple it declares is the positional struct codegen builds.
+func annotatedFuncResult(x ast.Expression) bool {
+	switch f := x.(type) {
+	case *ast.ArrowFunction:
+		return f.RetType != nil
+	case *ast.FunctionExpression:
+		return f.RetType != nil
+	}
+	return false
+}
+
+// laterVarDecl reports v is a variable declaration of sym after its first
+// one (a `var` declared again); a type of the same name is not one.
+func laterVarDecl(sym *binder.Symbol, v *ast.VarDeclaration) bool {
+	// A program's global belongs to its first top-level declaration, as
+	// codegen lays it out; one nested in a block is a store to it.
+	if sym.Scope != nil {
+		if prog, ok := sym.Scope.Node.(*ast.Program); ok {
+			top := map[ast.Node]bool{}
+			var add func(st ast.Statement)
+			add = func(st ast.Statement) {
+				switch x := st.(type) {
+				case *ast.VarDeclaration:
+					top[x] = true
+				case *ast.VarDeclarationList:
+					for _, d := range x.Decls {
+						top[d] = true
+					}
+				case *ast.ExportDeclaration:
+					add(x.Decl)
+				}
+			}
+			for _, st := range prog.Body {
+				add(st)
+			}
+			for _, d := range sym.Declarations {
+				if _, isVar := d.Node.(*ast.VarDeclaration); isVar && top[d.Node] {
+					return d.Node != ast.Node(v)
+				}
+			}
+		}
+	}
+	for _, d := range sym.Declarations {
+		if _, isVar := d.Node.(*ast.VarDeclaration); isVar {
+			return d.Node != ast.Node(v)
+		}
+	}
+	return false
+}
+
+// sameFieldNames reports two object layouts with the same fields in order.
+func sameFieldNames(a, b Type) bool {
+	if len(a.Fields) != len(b.Fields) {
+		return false
+	}
+	for i := range a.Fields {
+		if a.Fields[i].Name != b.Fields[i].Name {
+			return false
+		}
+	}
+	return true
+}
+
+// topFunction reports a top-level non-generic function declaration with a
+// body named name.
+// They share readInFunctions' table under a "\x00f" key prefix, filled once.
+func (o frontOracle) topFunction(name string) bool {
+	if !o.fnReads["\x00f"] {
+		o.fnReads["\x00f"] = true // filled
+		if o.b != nil && o.b.Module != nil {
+			if prog, isProg := o.b.Module.Node.(*ast.Program); isProg {
+				for _, st := range prog.Body {
+					if fd, ok := st.(*ast.FunctionDeclaration); ok && fd.Body != nil && len(fd.TypeParams) == 0 {
+						o.fnReads["\x00f"+fd.Name] = true
+					}
+				}
+			}
+		}
+	}
+	return o.fnReads["\x00f"+name]
+}
+
+// readInFunctions reports a top-level name some function body reads
+// (namesReadInFunctions, computed once per program), a namespace member, or
+// a binding the compiler synthesizes.
+func (o frontOracle) readInFunctions(name string) bool {
+	// A namespace member is read through its namespace's qualified names
+	// (`Config.port`) and by its bare name inside it, and a binding the
+	// compiler synthesizes (an enum's value, a dynamic module's export) by
+	// the code it generates: each counted as read.
+	if strings.Contains(name, ast.NamespaceMangle("", "")) || strings.HasPrefix(name, "__kml_") {
+		return true
+	}
+	if !o.fnReads[""] {
+		if o.b != nil && o.b.Module != nil {
+			if prog, isProg := o.b.Module.Node.(*ast.Program); isProg {
+				for n := range namesReadInFunctions(prog) {
+					o.fnReads[n] = true
+				}
+				if o.r.genPatternInits != nil {
+					for _, sts := range o.r.genPatternInits() {
+						for _, st := range sts {
+							ast.Inspect(st, func(n ast.Node) bool {
+								if id, ok := n.(*ast.Identifier); ok {
+									o.fnReads[id.Name] = true
+								}
+								return true
+							})
+						}
+					}
+				}
+				// The entry's exports, which an importer reads (a
+				// dynamic-import island's accessors).
+				for _, m := range prog.EntryExportMangled {
+					o.fnReads[m] = true
+				}
+			}
+		}
+		o.fnReads[""] = true // filled
+	}
+	return o.fnReads[name]
+}
+
+// promiseSubclassNoCtor reports a program class named name that extends
+// Promise with no constructor and no instance members: `new` passes its
+// executor straight to Promise's.
+// promiseSubclassImplicitCtor reports a program class extending Promise
+// directly with no constructor and no fields of its own (methods allowed):
+// `new C(executor)` hands the executor to Promise's, which passes it the
+// resolve and reject functions.
+func (o frontOracle) promiseSubclassImplicitCtor(name string) bool {
+	prog, ok := o.b.Module.Node.(*ast.Program)
+	if !ok {
+		return false
+	}
+	for _, st := range prog.Body {
+		if cd, isCD := st.(*ast.ClassDeclaration); isCD && cd.Name == name {
+			return cd.BaseClass == "Promise" && !cd.BaseQualified && cd.Constructor == nil && len(cd.Fields) == 0
+		}
+	}
+	return false
+}
+
+// erasedCtorCallbackParam is the type of id when it names a parameter of a
+// function passed to `new C(…)` for a class whose type parameters codegen
+// erased: the matching entry of the constructor parameter's (erased)
+// function-type annotation.
+func (o frontOracle) erasedCtorCallbackParam(id *ast.Identifier) (Type, bool) {
+	sym, _ := o.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return Type{}, false
+	}
+	fn := sym.Declarations[0].Node
+	var params []ast.Param
+	switch f := fn.(type) {
+	case *ast.ArrowFunction:
+		params = f.Params
+	case *ast.FunctionExpression:
+		params = f.Params
+	default:
+		return Type{}, false
+	}
+	pi := -1
+	for i, p := range params {
+		if p.Name == id.Name && p.Type == nil {
+			pi = i
+		}
+	}
+	ne, ok := o.c.ParentOf(fn).(*ast.NewExpression)
+	if pi < 0 || !ok || ne.Qualified {
+		return Type{}, false
+	}
+	prog, isProg := o.b.Module.Node.(*ast.Program)
+	if !isProg {
+		return Type{}, false
+	}
+	for _, st := range prog.Body {
+		cd, isCD := st.(*ast.ClassDeclaration)
+		if !isCD || cd.Name != ne.ClassName {
+			continue
+		}
+		if cd.Declared == nil || cd.Constructor == nil {
+			return Type{}, false
+		}
+		for j, a := range ne.Args {
+			if ast.Node(a) != fn || j >= len(cd.Constructor.Params) {
+				continue
+			}
+			ta := cd.Constructor.Params[j].Type
+			if ta == nil {
+				return Type{}, false
+			}
+			ft, isFn := ast.NonNullish(ta).(*ast.FunctionType)
+			if !isFn || pi >= len(ft.Parameters) {
+				return Type{}, false
+			}
+			fp := ft.Parameters[pi].Type
+			fpf, fpFn := ast.NonNullish(fp).(*ast.FunctionType)
+			if fp == nil || !fpFn {
+				if fp == nil || ast.IsKeywordNode(fp, "any") {
+					return TypeAny, true
+				}
+				return Type{}, false
+			}
+			// A function-typed parameter (`res: (v: T) => void`): the
+			// checker's answer with its erased parameters any.
+			bt, ok := o.r.of(o.c.TypeOf(id))
+			if !ok || !bt.IsFunc() || len(bt.FuncParams) != len(fpf.Parameters) {
+				return Type{}, false
+			}
+			bt.FuncParams = append([]Type(nil), bt.FuncParams...)
+			for k, q := range fpf.Parameters {
+				if q.Type == nil || ast.IsKeywordNode(q.Type, "any") {
+					bt.FuncParams[k] = TypeAny
+				}
+			}
+			return bt, true
+		}
+		return Type{}, false
+	}
+	return Type{}, false
+}
+
+// returnsOnlyBoxedParam reports every return of fd's own body a bare read
+// of a parameter boxed in params.
+func returnsOnlyBoxedParam(fd *ast.FunctionDeclaration, params []Type) bool {
+	if fd.Body == nil || fd.IsAsync || fd.IsGenerator {
+		return false
+	}
+	return bodyReturnsOnlyBoxedParam(fd.Body, fd.Params, params)
+}
+
+// literalReturnsOnlyBoxedParam is returnsOnlyBoxedParam for an arrow or a
+// function expression (an arrow's concise body a parameter alone).
+func literalReturnsOnlyBoxedParam(e ast.Expression, params []Type) bool {
+	switch f := e.(type) {
+	case *ast.ArrowFunction:
+		if f.IsAsync {
+			return false
+		}
+		if f.Body != nil {
+			id, isID := f.Body.(*ast.Identifier)
+			if !isID {
+				return false
+			}
+			for i, p := range f.Params {
+				if p.Name == id.Name && i < len(params) && params[i].IsDynamic() {
+					return true
+				}
+			}
+			return false
+		}
+		return f.Block != nil && bodyReturnsOnlyBoxedParam(f.Block, f.Params, params)
+	case *ast.FunctionExpression:
+		return !f.IsAsync && !f.IsGenerator && f.Body != nil && bodyReturnsOnlyBoxedParam(f.Body, f.Params, params)
+	}
+	return false
+}
+
+// returnsRead reports a concise arrow body, or a return of a function
+// literal e, whose expression is a member access or call chain rooted at one
+// of names.
+func returnsRead(e ast.Expression, names map[string]bool) bool {
+	if len(names) == 0 {
+		return false
+	}
+	rooted := func(x ast.Expression) bool {
+		for {
+			switch n := x.(type) {
+			case *ast.Identifier:
+				return names[n.Name]
+			case *ast.MemberExpression:
+				x = n.Object
+			case *ast.IndexExpression:
+				x = n.Object
+			case *ast.CallExpression:
+				x = n.Callee
+			default:
+				return false
+			}
+		}
+	}
+	var body ast.Node
+	switch f := e.(type) {
+	case *ast.ArrowFunction:
+		if f.IsAsync {
+			return false
+		}
+		if f.Body != nil {
+			return rooted(f.Body)
+		}
+		body = f.Block
+	case *ast.FunctionExpression:
+		if f.IsAsync || f.IsGenerator {
+			return false
+		}
+		body = f.Body
+	}
+	if body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(body, func(x ast.Node) bool {
+		switch r := x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration:
+			return false
+		case *ast.ReturnStatement:
+			found = found || r.Value != nil && rooted(r.Value)
+		}
+		return true
+	})
+	return found
+}
+
+func bodyReturnsOnlyBoxedParam(body ast.Node, fparams []ast.Param, params []Type) bool {
+	n := 0
+	ok := true
+	ast.Inspect(body, func(x ast.Node) bool {
+		switch r := x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration:
+			return false
+		case *ast.ReturnStatement:
+			n++
+			id, isID := r.Value.(*ast.Identifier)
+			if !isID {
+				ok = false
+				return false
+			}
+			found := false
+			for i, p := range fparams {
+				if p.Name == id.Name && i < len(params) && params[i].IsDynamic() {
+					found = true
+				}
+			}
+			ok = ok && found
+		}
+		return true
+	})
+	return ok && n > 0
+}
+
+// readsOwnBinding reports a read of v's own binding inside a function in
+// its initializer lit.
+func (o frontOracle) readsOwnBinding(v *ast.VarDeclaration, lit *ast.ObjectLiteral) bool {
+	found := false
+	var walk func(n ast.Node, inFn bool) bool
+	walk = func(n ast.Node, inFn bool) bool {
+		ast.Inspect(n, func(x ast.Node) bool {
+			if found {
+				return false
+			}
+			switch f := x.(type) {
+			case *ast.ArrowFunction, *ast.FunctionExpression:
+				if !inFn && x != n {
+					walk(f, true)
+					return false
+				}
+			case *ast.Identifier:
+				if inFn && f.Name == v.Name {
+					if sym, _ := o.b.Resolve(f); sym != nil && len(sym.Declarations) > 0 && sym.Declarations[0].Node == ast.Node(v) {
+						found = true
+					}
+				}
+			}
+			return true
+		})
+		return found
+	}
+	return walk(lit, false)
+}
+
+// literalBindingType is the checker's type of v's binding (the widened
+// literal its reads have), represented.
+func (o frontOracle) literalBindingType(v *ast.VarDeclaration) (Type, bool) {
+	ct := o.c.VarType(v)
+	if ct == nil || o.c.Unanswered(ct) {
+		return Type{}, false
+	}
+	return o.r.of(ct)
+}
+
+// genericClass reports a program class named name with type parameters.
+func (o frontOracle) genericClass(name string) bool {
+	prog, ok := o.b.Module.Node.(*ast.Program)
+	if !ok {
+		return false
+	}
+	for _, st := range prog.Body {
+		if cd, isCD := st.(*ast.ClassDeclaration); isCD && cd.Name == name {
+			return len(cd.TypeParams) > 0 || cd.Declared != nil // (erased: Declared keeps them)
+		}
+	}
+	return false
+}
+
+func (o frontOracle) promiseSubclassNoCtor(name string) bool {
+	prog, ok := o.b.Module.Node.(*ast.Program)
+	if !ok {
+		return false
+	}
+	for _, st := range prog.Body {
+		if cd, isCD := st.(*ast.ClassDeclaration); isCD && cd.Name == name {
+			if cd.BaseClass != "Promise" || cd.BaseQualified || cd.Constructor != nil || len(cd.Fields) > 0 {
+				return false
+			}
+			for _, m := range cd.Methods {
+				if !m.IsStatic {
+					return false // an instance method: a class of its own
+				}
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// emptyObjectRest reports an object pattern's rest binding (`{ a, ...rest }`)
+// over a source whose every property the pattern names: the checker's `{}`.
+func (o frontOracle) emptyObjectRest(id *ast.Identifier) bool {
+	sym, _ := o.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return false
+	}
+	d, ok := sym.Declarations[0].Node.(*ast.ObjectDestructuring)
+	if !ok {
+		return false
+	}
+	for _, p := range d.Props {
+		if p.Rest && p.Local == id.Name {
+			t := o.c.TypeOf(id)
+			return !o.c.Unanswered(t) && t.Flags&checker.Object != 0 && t.Kind == checker.Anonymous && len(t.Props) == 0 && len(t.Intersects) == 0 && t.StringIndex == nil && t.NumberIndex == nil
+		}
+	}
+	return false
+}
+
+// byValReturn is a read of a function declaration -optimize-memory returns
+// its tuple from by value: that ABI on its result.
+func (o frontOracle) byValReturn(e ast.Expression, t Type, ok bool) Type {
+	id, isID := e.(*ast.Identifier)
+	if !isID || !ok || o.r.byValRet == nil || !t.IsFunc() || t.FuncRetType == nil || !t.FuncRetType.IsTuple() || t.FuncRetType.TupleByVal {
+		return t
+	}
+	sym, _ := o.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 || sym.Scope == nil || sym.Scope.Kind != binder.ModuleScope {
+		return t
+	}
+	if _, fd := sym.Declarations[0].Node.(*ast.FunctionDeclaration); !fd || !o.r.byValRet(id.Name) {
+		return t
+	}
+	rt := *t.FuncRetType
+	rt.TupleByVal = true
+	t.FuncRetType = &rt
+	return t
+}
+
+// returnsOwnThis reports a body whose every return returns `this`.
+func returnsOwnThis(body *ast.BlockStatement) bool {
+	if body == nil {
+		return false
+	}
+	n, own := 0, true
+	ast.Inspect(body, func(x ast.Node) bool {
+		switch r := x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.ReturnStatement:
+			n++
+			if _, ok := r.Value.(*ast.ThisExpression); !ok {
+				own = false
+			}
+		}
+		return true
+	})
+	return n > 0 && own
+}
+
+// inFunction reports a node inside a function or class body.
+func inFunction(c frontView, n ast.Node) bool {
+	for p := c.ParentOf(n); p != nil; p = c.ParentOf(p) {
+		switch p.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+			return true
+		}
+	}
+	return false
+}
+
+// sameSeedRows reports a collection seed whose rows all hold rt.
+func sameSeedRows(o frontOracle, seed *ast.ArrayLiteral, rt Type) bool {
+	for _, el := range seed.Elements[1:] {
+		row, isRow := el.(*ast.ArrayLiteral)
+		if !isRow {
+			return false
+		}
+		t, ok := o.ExprType(row)
+		if !ok || reprKey(t) != reprKey(rt) {
+			return false
+		}
+	}
+	return true
+}
+
+// boxedRestSource reports a rest binding whose pattern's source is held as a
+// box (a Proxy): its rest is read off the box, a box too.
+func (o frontOracle) boxedRestSource(id *ast.Identifier) bool {
+	sym, _ := o.b.Resolve(id)
+	if sym == nil || len(sym.Declarations) != 1 {
+		return false
+	}
+	d, ok := sym.Declarations[0].Node.(*ast.ObjectDestructuring)
+	if !ok || d.Init == nil {
+		return false
+	}
+	st, sok := o.ExprType(d.Init)
+	return sok && isUnconstrainedDynamic(st)
+}
+
+// proxyValue reports a `new Proxy(...)` expression, or a const binding of
+// one: held boxed (emitNewProxy).
+func (o frontOracle) proxyValue(x ast.Expression) bool {
+	if id, isID := x.(*ast.Identifier); isID {
+		sym, _ := o.b.Resolve(id)
+		if sym == nil {
+			return false
+		}
+		v, isV := singleVarDecl(sym)
+		if !isV || v.Kind != "const" || v.Init == nil {
+			return false
+		}
+		x = v.Init
+	}
+	nx, isNew := x.(*ast.NewExpression)
+	if !isNew || nx.Callee != nil || nx.ClassName != "Proxy" || nx.Qualified {
+		return false
+	}
+	t, ok := o.ExprType(nx)
+	return ok && isUnconstrainedDynamic(t)
+}
+
+// callInitialized reports a variable whose one declaration is initialized
+// by a call (`const C = make()`).
+func (o frontOracle) callInitialized(x ast.Expression) bool {
+	id, isID := x.(*ast.Identifier)
+	if !isID {
+		return false
+	}
+	sym, _ := o.b.Resolve(id)
+	if sym == nil {
+		return false
+	}
+	v, isV := singleVarDecl(sym)
+	if !isV {
+		return false
+	}
+	_, isCall := v.Init.(*ast.CallExpression)
+	return isCall
+}
+
+// LocalType is a function local's declared type: an unannotated binding of
+// an expression holds that expression's value as it is emitted (an element
+// read widened to a number), and every other declaration its declared type
+// (GlobalType).
+func (o frontOracle) LocalType(v *ast.VarDeclaration) (Type, bool) {
+	if accessorLiteral(o.b, v) {
+		return TypeAny, true // a dynamic object, whose reads call its accessors
+	}
+	// A binding widened across kinds, or of a call the any-argument check
+	// boxes, holds the box.
+	if v.TypeAnnot == nil && o.r.widened != nil && o.r.widened(v.Name) || o.r.anyHeld != nil && o.r.anyHeld(v) {
+		return TypeAny, true
+	}
+	if o.varSharesFunction(v) {
+		// One binding with a function declaration: the function until the
+		// `var` runs, then its value.
+		return TypeAny, true
+	}
+	switch v.Init.(type) {
+	case *ast.NewWeakMapExpression, *ast.NewWeakSetExpression:
+		// A bare weak collection: the key type codegen seeds from its
+		// first use, as a global's (bareCollectionType).
+		if o.r.bareCollection != nil {
+			if t, ok := o.r.bareCollection(v); ok {
+				return t, true
+			}
+		}
+	}
+	if v.TypeAnnot == nil && v.Init != nil {
+		switch init := v.Init.(type) {
+		case *ast.NullLiteral:
+			// A binding only ever null (or undefined) holds that value.
+			if init.IsUndefined {
+				return TypeUndefined, true
+			}
+			return TypeNull, true
+		case *ast.IndexExpression:
+			if it, ok := o.ExprType(init); ok {
+				return elementBindingType(it), true
+			}
+		case *ast.BooleanLiteral, *ast.StringLiteral, *ast.TemplateLiteral,
+			*ast.NumberLiteral, *ast.ArrayLiteral, *ast.ObjectLiteral, *ast.NewArrayExpression,
+			*ast.NewMapExpression, *ast.NewSetExpression:
+		default:
+			// A call the any-argument dispatch runs holds its box.
+			if o.r.boxOverride != nil {
+				if bt, ok := o.r.boxOverride(init); ok {
+					return bt, true
+				}
+			}
+			if it, ok := o.ExprType(init); ok {
+				// A call answered `any` (an implementation signature behind
+				// overloads) whose overload resolves to a primitive is held
+				// as that primitive.
+				if call, isCall := init.(*ast.CallExpression); isCall && isUnconstrainedDynamic(it) && it.DynPropTy == nil && o.r.checkerPrim != nil {
+					if pt, ok := o.r.checkerPrim(call); ok {
+						return pt, true
+					}
+				}
+				// A void result (`await tick()`) holds undefined.
+				if it.IR == "void" {
+					return TypeUndefined, true
+				}
+				return it, true
+			}
+		}
+	}
+	ty, _, ok := o.GlobalType(v)
+	return ty, ok && ty.IR != ""
+}
+
+// mergeTaskPromises is one task promise for parts, every one a task
+// promise of the same payload but for the absences it holds.
+func mergeTaskPromises(parts []Type) (Type, bool) {
+	var out Type
+	for i, p := range parts {
+		if !p.IsPromise() || !p.PromiseTask || p.PromiseType == nil {
+			return Type{}, false
+		}
+		in := *p.PromiseType
+		if i == 0 {
+			out = p
+			continue
+		}
+		cur := *out.PromiseType
+		a, b := cur, in
+		a.Absent, b.Absent = 0, 0
+		if reprKey(a) != reprKey(b) {
+			return Type{}, false
+		}
+		switch {
+		case cur.NullAndUndef() || in.NullAndUndef(),
+			(cur.Nullable() || in.Nullable()) && cur.IsUndefined() != in.IsUndefined():
+			if !threeStateEligible(a) {
+				return Type{}, false
+			}
+			m := withNullAndUndef(a)
+			out.PromiseType = &m
+		case in.Nullable() && !cur.Nullable():
+			m := in
+			out.PromiseType = &m
+		}
+	}
+	return out, true
+}
+
+// plainLiteral reports a primitive literal or an array literal of them,
+// never typed as a box (a large constant table's rows).
+func plainLiteral(e ast.Expression) bool {
+	switch x := e.(type) {
+	case *ast.StringLiteral, *ast.NumberLiteral, *ast.BooleanLiteral:
+		return true
+	case *ast.ArrayLiteral:
+		for _, el := range x.Elements {
+			if !plainLiteral(el) {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// declaresThis reports a function declaring a `this: T` parameter.
+func (o frontOracle) declaresThis(f ast.Node) bool {
+	prog, ok := o.b.Module.Node.(*ast.Program)
+	return ok && prog.ThisParams[f] != nil
+}
+
+// sameFunctionDecls reports ds as one function's declarations, all of one
+// name, with any namespace merged into it (`exec.__promisify__`).
+func sameFunctionDecls(ds []binder.Declaration) bool {
+	name := ""
+	for _, d := range ds {
+		if d.Kind == binder.NamespaceDecl {
+			continue
+		}
+		fd, ok := d.Node.(*ast.FunctionDeclaration)
+		if !ok || (name != "" && fd.Name != name) {
+			return false
+		}
+		name = fd.Name
+	}
+	return true
+}
+
+// functionDeclOf is the function declaration among ds.
+func functionDeclOf(ds []binder.Declaration) (*ast.FunctionDeclaration, bool) {
+	for i := len(ds) - 1; i >= 0; i-- {
+		if fd, ok := ds[i].Node.(*ast.FunctionDeclaration); ok {
+			return fd, true
+		}
+	}
+	return nil, false
+}
+
+// bareTypeRefName is the name of an unqualified type reference without type
+// arguments, or of an array of one (`T`, `T[]`).
+func bareTypeRefName(n ast.TypeNode) (string, bool) {
+	if a, ok := n.(*ast.ArrayType); ok {
+		n = a.ElementType
+	}
+	if r, ok := n.(*ast.TypeReference); ok && len(r.Qualifier) == 0 && len(r.TypeArgs) == 0 {
+		return r.Name, true
+	}
+	return "", false
+}
+
+// erasedTypeParamNames are the names a generic class, function, method or
+// arrow of the program declares as type parameters: erased in a body
+// compiled outside any instantiation.
+func (e *Emitter) erasedTypeParamNames() []string {
+	if e.classTPNames == nil && e.prog != nil {
+		seen := map[string]bool{}
+		ast.Inspect(e.prog, func(n ast.Node) bool {
+			var names []string
+			switch d := n.(type) {
+			case *ast.ClassDeclaration:
+				// (An erased class's are its declared ones.)
+				names = d.DeclaredTypeParams().Names
+			case *ast.FunctionDeclaration:
+				// A generic function's or method's, outside an
+				// instantiation (which binds them instead).
+				names = d.TypeParams
+			case *ast.ArrowFunction:
+				names = d.TypeParams // erased to any
+			case *ast.FunctionExpression:
+				names = d.TypeParams
+			case *ast.InterfaceDeclaration:
+				// A generic interface's, and its methods' own, in a
+				// member read outside an instantiation (`emit<E extends
+				// keyof M>(…args: Args<M[E]>)`).
+				names = append(names, d.TypeParams...)
+				for _, m := range d.Members {
+					if ms, ok := m.(*ast.MethodSignature); ok {
+						for _, tp := range ms.TypeParameters {
+							names = append(names, tp.Name)
+						}
+					}
+				}
+			}
+			for _, tp := range names {
+				if !seen[tp] {
+					seen[tp] = true
+					e.classTPNames = append(e.classTPNames, tp)
+				}
+			}
+			return true
+		})
+		// A builtin interface method's own (`addEventListener<K extends
+		// keyof AbortSignalEventMap>`), its members laid out once.
+		if libProgs, err := lib.Programs(); err == nil {
+			for _, lp := range libProgs {
+				for _, st := range lp.Body {
+					id, ok := st.(*ast.InterfaceDeclaration)
+					if !ok {
+						continue
+					}
+					for _, m := range id.Members {
+						ms, ok := m.(*ast.MethodSignature)
+						if !ok {
+							continue
+						}
+						for _, tp := range ms.TypeParameters {
+							if !seen[tp.Name] {
+								seen[tp.Name] = true
+								e.classTPNames = append(e.classTPNames, tp.Name)
+							}
+						}
+					}
+				}
+			}
+		}
+		if e.classTPNames == nil {
+			e.classTPNames = []string{}
+		}
+	}
+	return e.classTPNames
+}
+
+// globalLinkedClass is the instance type of the module class a global
+// interface named name links to.
+func (e *Emitter) globalLinkedClass(name string) (Type, bool) {
+	m, ok := e.globalLinks[name]
+	if !ok || e.userTypeName(name) || e.front() == nil || e.frontBinding == nil || e.frontBinding.Module == nil {
+		return Type{}, false
+	}
+	sym := e.frontBinding.Module.Symbols.Get(m)
+	if sym == nil {
+		return Type{}, false
+	}
+	return e.classRepr(sym)
+}
+
+// erasedIndexAccess is n with each access indexed by an erased type
+// parameter (`M[K]`) read over every key of its object (`M[keyof M]`), or n
+// itself when it has none. The nodes it rewrites are copies.
+func erasedIndexAccess(n ast.TypeNode, erased map[string]bool) ast.TypeNode {
+	switch x := n.(type) {
+	case *ast.IndexedAccessType:
+		if name, ok := bareTypeRefName(x.IndexType); ok && erased[name] {
+			if _, isArr := x.IndexType.(*ast.ArrayType); !isArr {
+				return &ast.IndexedAccessType{ObjectType: x.ObjectType, IndexType: &ast.TypeOperator{Operator: "keyof", Type: x.ObjectType, Range: x.Range}, Range: x.Range}
+			}
+		}
+	case *ast.FunctionType:
+		var ps []*ast.SignatureParameter
+		for i, p := range x.Parameters {
+			if np := erasedIndexAccess(p.Type, erased); np != p.Type {
+				if ps == nil {
+					ps = append([]*ast.SignatureParameter(nil), x.Parameters...)
+				}
+				cp := *p
+				cp.Type = np
+				ps[i] = &cp
+			}
+		}
+		if ps != nil {
+			cp := *x
+			cp.Parameters = ps
+			return &cp
+		}
+	case *ast.UnionType:
+		var ms []ast.TypeNode
+		for i, m := range x.Types {
+			if nm := erasedIndexAccess(m, erased); nm != m {
+				if ms == nil {
+					ms = append([]ast.TypeNode(nil), x.Types...)
+				}
+				ms[i] = nm
+			}
+		}
+		if ms != nil {
+			cp := *x
+			cp.Types = ms
+			return &cp
+		}
+	}
+	return n
+}
+
+// callableInterface reports an interface type declared with a call
+// signature (`interface EventListener { (evt: Event): void }`).
+func callableInterface(t *checker.Type) bool {
+	if t.Flags&checker.Object == 0 || t.Kind != checker.Interface || t.Symbol == nil {
+		return false
+	}
+	for _, d := range t.Symbol.Declarations {
+		if id, ok := d.Node.(*ast.InterfaceDeclaration); ok && id.CallSig != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// typeNodeOf is a type node naming codegen type t, for the primitive,
+// promise, array and plain object shapes a binding needs (`T` = `Promise<number>` of
+// `u(Promise.resolve(3))`), else nil.
+func typeNodeOf(t Type) ast.TypeNode {
+	if t.Nullable() {
+		return nil
+	}
+	switch {
+	case t.IsPromise() && t.PromiseType != nil:
+		if in := typeNodeOf(*t.PromiseType); in != nil {
+			return &ast.TypeReference{Name: "Promise", TypeArgs: []ast.TypeNode{in}}
+		}
+	case t.IsArray() && t.ElemType != nil && !t.IsTypedArray() && !t.IsBuffer() && !t.IsTuple():
+		if in := typeNodeOf(*t.ElemType); in != nil {
+			return &ast.ArrayType{ElementType: in}
+		}
+	case t.Kind == kindClass && t.ClassName != "":
+		return &ast.TypeReference{Name: t.ClassName} // a class's instance
+	case t.IsTuple():
+		// A tuple's elements (`A` of `same([1, "a"])`).
+		es := make([]ast.TypeNode, len(t.Fields))
+		for i, f := range t.Fields {
+			if es[i] = typeNodeOf(f.Ty); es[i] == nil {
+				return nil
+			}
+		}
+		return &ast.TupleType{Elements: es}
+	case t.IsObject() && !t.IsDynamic() && !t.IsClass() && t.RefName == "" && t.Host == 0 && len(t.Fields) > 0:
+		// An object literal's layout (`T` of `r({ a: 1 })`).
+		var ms []ast.TypeMember
+		for _, f := range t.Fields {
+			if strings.HasPrefix(f.Name, "__kml_") {
+				continue
+			}
+			ft := f.Ty
+			if f.Optional {
+				ft = ft.withoutNullable()
+			}
+			in := typeNodeOf(ft)
+			if in == nil {
+				return nil
+			}
+			ms = append(ms, &ast.PropertySignature{Name: f.Name, Optional: f.Optional, Type: in})
+		}
+		return &ast.TypeLiteral{Members: ms}
+	case t.IsBigInt():
+		return &ast.KeywordType{Keyword: "bigint"}
+	case t.Kind != kindNone || t.Host != 0:
+	case t.IR == "double" && t.Float:
+		return &ast.KeywordType{Keyword: "number"}
+	case t.IR == "i1":
+		return &ast.KeywordType{Keyword: "boolean"}
+	case t.IR == irPtr && isStringTy(t) && !hasHandleFlag(t):
+		return &ast.KeywordType{Keyword: "string"}
+	}
+	return nil
+}
+
+// importIntersection reports an intersection one member of which is an
+// `import("m").T` type.
+func importIntersection(n ast.TypeNode) bool {
+	it, ok := n.(*ast.IntersectionType)
+	if !ok {
+		return false
+	}
+	for _, m := range it.Types {
+		if _, imp := m.(*ast.ImportType); imp {
+			return true
+		}
+	}
+	return false
+}
+
+// importAlias reports a reference to an alias of an importIntersection
+// (`WriteStream`, of `import("tty").WriteStream & { … }`).
+func (o frontOracle) importAlias(n ast.TypeNode) bool {
+	r, ok := n.(*ast.TypeReference)
+	if !ok || len(r.TypeArgs) > 0 || len(r.Qualifier) > 0 {
+		return false
+	}
+	sc := o.b.AnnotationScope(n)
+	if sc == nil {
+		sc = o.b.Module
+	}
+	for s := sc; s != nil; s = s.Parent {
+		sym := s.Symbols.Get(r.Name)
+		if sym == nil {
+			continue
+		}
+		for _, d := range sym.Declarations {
+			if ad, ok := d.Node.(*ast.TypeAliasDeclaration); ok && ad.Type != nil && importIntersection(ad.Type) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
+}
+
+// hasConditional reports a conditional type anywhere in n.
+func hasConditional(n ast.TypeNode) bool {
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		if _, ok := x.(*ast.ConditionalType); ok {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// mentionsThisType reports a type node naming the `this` type.
+func mentionsThisType(n ast.TypeNode) bool {
+	found := false
+	ast.Inspect(n, func(m ast.Node) bool {
+		if tn, ok := m.(ast.TypeNode); ok && ast.IsKeywordNode(tn, "this") {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// erasedDeferred reports a deferred type waiting on a type parameter the
+// emission has an answer for: one codegen erased to any, or one the
+// instantiation being emitted binds. The checker evaluates it with
+// neither, so its value is held boxed.
+func (r reprCtx) erasedDeferred(t *checker.Type) bool {
+	for _, tp := range t.DeferredTypeParams() {
+		if _, ok := r.of(tp); ok {
+			return true
+		}
+	}
+	return false
+}
+
+// splicedTuple is tuple annotation tt with each spread of a type parameter
+// bound to a tuple replaced by its elements; false when some spread is
+// anything else or an element is not laid out.
+func (o frontOracle) splicedTuple(tt *ast.TupleType) (Type, bool) {
+	if o.r.typeParam == nil {
+		return Type{}, false
+	}
+	var elems []Type
+	spliced := false
+	for _, el := range tt.Elements {
+		var spread ast.TypeNode
+		switch m := el.(type) {
+		case *ast.RestType:
+			spread = m.Type
+		case *ast.NamedTupleMember:
+			if m.Optional {
+				return Type{}, false
+			}
+			if m.Rest {
+				spread = m.Type
+			} else {
+				el = m.Type
+			}
+		case *ast.OptionalType:
+			return Type{}, false
+		}
+		if spread != nil {
+			name, ok := bareTypeRefName(spread)
+			if !ok {
+				return Type{}, false
+			}
+			bound, ok := o.r.typeParam(name)
+			if !ok || !bound.IsTuple() {
+				return Type{}, false
+			}
+			for _, f := range bound.Fields {
+				elems = append(elems, f.Ty)
+			}
+			spliced = true
+			continue
+		}
+		t, ok := o.AnnotationType(el)
+		if !ok {
+			return Type{}, false
+		}
+		elems = append(elems, t)
+	}
+	if !spliced {
+		return Type{}, false
+	}
+	return TupleType(elems), true
+}
+
+// varSharesFunction reports whether `var` v is one binding with a function
+// declaration of its scope (`var d = 1; function d() {}`).
+func (o frontOracle) varSharesFunction(v *ast.VarDeclaration) bool {
+	if v.Kind != "var" || v.TypeAnnot != nil || o.b == nil {
+		return false
+	}
+	sym, ok := o.b.DeclSymbol(v)
+	if !ok || sym == nil {
+		return false
+	}
+	for _, d := range sym.Declarations {
+		if _, fn := d.Node.(*ast.FunctionDeclaration); fn {
+			return true
+		}
+	}
+	return false
+}
+
+// accessorTargets is the declarations of the bindings the program defines
+// an accessor property on by name: the first argument of
+// Object.defineProperty / Reflect.defineProperty with a descriptor literal
+// naming get or set, or of Object.defineProperties with such a descriptor.
+func accessorTargets(b *binder.Binding) map[*ast.VarDeclaration]bool {
+	if b == nil || b.Program == nil {
+		return nil
+	}
+	if m, ok := b.Memo.Load("accessorTargets"); ok {
+		return m.(map[*ast.VarDeclaration]bool)
+	}
+	out := map[*ast.VarDeclaration]bool{}
+	accessorDefinitions(b.Program, func(c *ast.CallExpression, _ string) {
+		if id, ok := c.Args[0].(*ast.Identifier); ok {
+			if sym, _ := b.Resolve(id); sym != nil {
+				for _, d := range sym.Declarations {
+					if v, ok := d.Node.(*ast.VarDeclaration); ok {
+						out[v] = true
+					}
+				}
+			}
+		}
+	})
+	b.Memo.Store("accessorTargets", out)
+	return out
+}
+
+// accessorLiteral reports v, an unannotated binding of an object literal
+// or a class instance, as a target accessorTargets lists.
+func accessorLiteral(b *binder.Binding, v *ast.VarDeclaration) bool {
+	switch v.Init.(type) {
+	case *ast.ObjectLiteral, *ast.NewExpression:
+		return v.TypeAnnot == nil && accessorTargets(b)[v]
+	}
+	return false
+}
+
+// blockFunctionNames is the names of prog's plain (not generator or async)
+// function declarations nested in a block, which Annex B also binds as a
+// var of the enclosing function, and of the vars assigned such a function.
+func blockFunctionNames(b *binder.Binding) map[string]bool {
+	if b == nil || b.Program == nil {
+		return nil
+	}
+	prog := b.Program
+	if m, ok := b.Memo.Load("blockFunctionNames"); ok {
+		return m.(map[string]bool)
+	}
+	out := map[string]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.BlockStatement:
+			for _, st := range x.Body {
+				if fd, ok := st.(*ast.FunctionDeclaration); ok && !fd.IsGenerator && !fd.IsAsync {
+					out[fd.Name] = true
+				}
+			}
+		case *ast.AssignmentExpression:
+			// (The resolver's form of one: the var assigned the function.)
+			if id, ok := x.Left.(*ast.Identifier); ok && x.Op == "=" {
+				if fe, ok := x.Right.(*ast.FunctionExpression); ok && !fe.IsGenerator && !fe.IsAsync {
+					out[id.Name] = true
+				}
+			}
+		}
+		return true
+	})
+	b.Memo.Store("blockFunctionNames", out)
+	return out
 }

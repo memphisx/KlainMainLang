@@ -7,6 +7,7 @@ package tests
 // No compiler flag involved — the layout is opted into per binding.
 
 import (
+	"KlainMainLang/resolver"
 	"os/exec"
 	"strings"
 	"testing"
@@ -85,6 +86,7 @@ f()
 		t.Fatalf("parse: %v", err)
 	}
 	ir, err := llvm.NewEmitter().EmitProgram(prog)
+	ir = llvm.ShapeIR(ir)
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}
@@ -105,22 +107,18 @@ function f(): void {
 /** @value */
 const a: P[] = [{ x: 1 }]
 `
-	cases := []struct{ body, wantSubstr string }{
-		{`const b = a.map((p) => p.x)`, "'map' needs a regular"},
-		{`a.sort()`, "'sort' needs a regular"},
-		{`const b = a.slice(0)`, "'slice' needs a regular"},
-		{`a.forEach((p) => console.log(p.x))`, "'forEach' needs a regular"},
-		{`a.pop()`, "'pop' needs a regular"},
-		{`const b = [...a]`, "spreading 'a' needs a regular"},
-		{`const [p] = a`, "destructuring 'a' needs a regular"},
-	}
-	for _, c := range cases {
-		assertCodegenError(t, header+c.body+"\n}\nf()\n", c.wantSubstr)
+	// Any use but an index, .length, .push or for...of.
+	for _, body := range []string{
+		`const b = a.map((p) => p.x)`, `a.sort()`, `const b = a.slice(0)`,
+		`a.forEach((p) => console.log(p.x))`, `a.pop()`, `const b = [...a]`, `const [p] = a`,
+		`console.log(a)`, `const q = { a }`,
+	} {
+		assertAnnotationError(t, header+body+"\n}\nf()\n", "this use of 'a' needs a regular array")
 	}
 }
 
 func TestFlatArrayRejectsBadTargets(t *testing.T) {
-	assertCodegenError(t, `
+	assertAnnotationError(t, `
 function f(): void {
 /** @value */
 const n: number = 1
@@ -128,7 +126,7 @@ console.log(n)
 }
 f()
 `, "@value applies to an array declaration")
-	assertCodegenError(t, `
+	assertAnnotationError(t, `
 class C { x: number = 1 }
 function f(): void {
 /** @value */
@@ -137,6 +135,48 @@ console.log(a.length)
 }
 f()
 `, "fixed-shape object element type")
+	assertAnnotationError(t, `
+interface P { x: number }
+function f(): void {
+/** @value */
+const a: P[] = [{ x: 1 }]
+for (const { x } of a) console.log(x)
+}
+f()
+`, "destructuring a @value array element in for...of")
+	assertAnnotationError(t, `
+interface P { x: number }
+/** @value */
+const a: P[] = [{ x: 1 }]
+function f(): void { console.log(a.length) }
+f()
+`, "read by other functions")
+	assertAnnotationError(t, `
+interface P { x: number }
+function f(): void {
+const q: P[] = [{ x: 1 }]
+/** @value */
+const a: P[] = [...q]
+console.log(a.length)
+}
+f()
+`, "with no spread or hole")
+}
+
+// assertAnnotationError compiles src through the resolver's annotation
+// checks and expects an error containing wantSub.
+func assertAnnotationError(t *testing.T, src, wantSub string) {
+	t.Helper()
+	prog, err := parser.Parse(src)
+	if err == nil {
+		err = resolver.AnnotationChecks(prog, "")
+	}
+	if err == nil {
+		t.Fatalf("expected an error containing %q, got success", wantSub)
+	}
+	if !strings.Contains(err.Error(), wantSub) {
+		t.Fatalf("expected error containing %q, got: %v", wantSub, err)
+	}
 }
 
 func TestE2EFlatArrayAutoModeFreesBuffer(t *testing.T) {

@@ -388,3 +388,24 @@ const b = (x: boolean | undefined) => x;
 console.log(JSON.stringify(b(undefined)), JSON.stringify(b(true)));
 `)
 }
+
+// JSON.stringify walks as deep as the stack allows, as Node does: a deep
+// chain is no cycle, a real cycle names its path, and a toJSON may stringify
+// again (or throw) within a walk.
+func TestE2EJSONStringifyDeepNesting(t *testing.T) {
+	assertSameAsNode(t, `
+interface N { v: number; next: N | null }
+let h: N | null = null;
+for (let i = 0; i < 3000; i++) h = { v: i, next: h };
+console.log(JSON.stringify(h).length);
+const a: any = { name: "a", kids: [{ x: 1 }] };
+a.kids[0].back = { up: a };
+try { JSON.stringify(a); } catch (e: any) { console.log(e.message); }
+const inner: any = { toJSON() { return JSON.stringify({ deep: [1, { z: 2 }] }); } };
+console.log(JSON.stringify({ p: { q: inner }, r: [inner] }));
+const bad: any = { toJSON() { throw new Error("boom"); } };
+for (let i = 0; i < 3; i++) { try { JSON.stringify({ w: { v: bad } }); } catch (e: any) { console.log(e.message); } }
+const c2: any = { k: 1 }; c2.self = c2;
+try { JSON.stringify({ o: c2 }); } catch (e: any) { console.log(e.message); }
+`)
+}

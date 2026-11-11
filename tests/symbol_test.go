@@ -32,7 +32,7 @@ func TestE2ESymbolToStringAndFormatting(t *testing.T) {
 	assertOutput(t, `
 const a = Symbol("x")
 console.log(a.toString())
-console.log(`+"`sym: ${a}`"+`)
+console.log(`+"`sym: ${String(a)}`"+`)
 const b = Symbol()
 console.log(b.toString())
 `, "Symbol(x)\nsym: Symbol(x)\nSymbol()")
@@ -76,24 +76,21 @@ const a = new Symbol("x")
 	}
 }
 
-func TestE2ESymbolJSONStringifyRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+// JSON.stringify of a symbol is undefined; a symbol-valued property is
+// skipped and a symbol array element is null.
+func TestE2ESymbolJSONStringify(t *testing.T) {
+	assertSameAsNode(t, `
 const a = Symbol("x")
 console.log(JSON.stringify(a))
+console.log(JSON.stringify({ s: a, n: 1 }), JSON.stringify([a]))
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for JSON.stringify(symbol), got none")
-	}
 }
 
-func TestE2ESymbolStructuredCloneRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const a = Symbol("x")
-const b = structuredClone(a)
+// structuredClone of a symbol throws Node's DataCloneError.
+func TestE2ESymbolStructuredClone(t *testing.T) {
+	assertSameAsNode(t, `
+try { structuredClone(Symbol("s")) } catch (e) { console.log((e as Error).name, (e as Error).message) }
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for structuredClone(symbol), got none")
-	}
 }
 
 func TestE2ESymbolMemoryFree(t *testing.T) {
@@ -163,5 +160,42 @@ class C {
   m(): string { return String(k) + " " + (g === Symbol.for('app')) + " " + k.description }
 }
 console.log(f(), new C().m(), new C().isK(), new C(Symbol('x')).isK(), typeof k)
+`)
+}
+
+// A class's static [Symbol.hasInstance] decides instanceof, statically and
+// through a constructor held in a value; so does an object's own.
+func TestE2ESymbolHasInstance(t *testing.T) {
+	assertSameAsNode(t, `class Even { static [Symbol.hasInstance](x: unknown): boolean { return typeof x === "number" && x % 2 === 0; } }
+console.log((2 as unknown) instanceof Even, (3 as unknown) instanceof Even, ("a" as unknown) instanceof Even);
+class Sub extends Even {}
+console.log((4 as unknown) instanceof Sub, new Sub() instanceof Sub);
+class Truthy { static [Symbol.hasInstance](x: unknown): any { return x ? "yes" : 0; } }
+console.log({} instanceof Truthy, (0 as unknown) instanceof Truthy);
+const K: any = Even; console.log((2 as unknown) instanceof K, (5 as unknown) instanceof K);
+function f(c: typeof Even, v: unknown) { return v instanceof c; } console.log(f(Even, 8), f(Even, 7));
+const o = { [Symbol.hasInstance]: (v: unknown) => v === "k" }; console.log(("k" as unknown) instanceof (o as any));
+`)
+}
+
+// Well-known-symbol keys of an object literal: read by index, typed and
+// boxed.
+func TestE2EWellKnownSymbolLiteralKeys(t *testing.T) {
+	assertSameAsNode(t, `const o = { [Symbol.iterator]: () => 1, [Symbol.toPrimitive]: () => 2, [Symbol.hasInstance]: () => 3 };
+console.log(typeof o[Symbol.iterator], typeof o[Symbol.toPrimitive]);
+const a: any = o; console.log(typeof a[Symbol.iterator], typeof a[Symbol.hasInstance], Object.getOwnPropertySymbols(o).length);
+`)
+}
+
+// Well-known-symbol keys listed as symbols, not string keys, and an own
+// [Symbol.toStringTag] naming Object.prototype.toString's tag.
+func TestE2EWellKnownSymbolLiteralEnumeration(t *testing.T) {
+	assertSameAsNode(t, `const o = { a: 1, [Symbol.toStringTag]: "Tag", [Symbol.iterator]: function* () { yield 1; } };
+console.log(Object.keys(o), JSON.stringify(o), Object.getOwnPropertySymbols(o).map(s => s.toString()), String(o));
+console.log(Reflect.ownKeys(o).length, [...o], Object.assign({}, o)[Symbol.toStringTag]);
+class C { *[Symbol.iterator]() { yield 2; } } console.log(Object.getOwnPropertySymbols(new C()).length, [...new C()]);
+const sp = { ...o }; console.log(Object.getOwnPropertySymbols(sp).length);
+console.log(o);
+const q = { [Symbol.toStringTag]: 5 }; console.log(String(q), String({ [Symbol.toStringTag]: "Z" }), Object.prototype.toString.call(o));
 `)
 }

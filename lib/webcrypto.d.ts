@@ -24,6 +24,7 @@ interface AesKeyGenParams extends Algorithm {
 interface Algorithm {
     name: string;
 }
+/** @lowerType dynamic */
 interface CryptoKeyPair {
     privateKey: CryptoKey;
     publicKey: CryptoKey;
@@ -113,6 +114,7 @@ declare var Crypto: {
     prototype: Crypto;
     new(): Crypto;
 };
+/** @lowerType dynamic */
 interface CryptoKey {
     readonly algorithm: KeyAlgorithm;
     readonly extractable: boolean;

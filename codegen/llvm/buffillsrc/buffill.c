@@ -56,7 +56,7 @@ static long long fill_offset(long long word, const char *name, long long len, lo
     if (tag != 0 && tag != 1) {
         char *r = __kml_received(word);
         snprintf(buf, sizeof buf, "The \"%s\" argument must be of type number.%s", name, r);
-        kml_free(KML_HEAP_RAW, r - 8);
+        kml_free(KML_HEAP_RAW, KML_PREFIX(r));
         *msg = hdr_str(buf);
         return 1; /* TypeError ERR_INVALID_ARG_TYPE */
     }
@@ -64,7 +64,7 @@ static long long fill_offset(long long word, const char *name, long long len, lo
     if (d != floor(d) || isinf(d)) {
         char *shown = __kml_inspect_opts(word, 2, 3, 0, 80, 100, 1);
         snprintf(buf, sizeof buf, "The value of \"%s\" is out of range. It must be an integer. Received %s", name, shown);
-        kml_free(KML_HEAP_RAW, shown - 8);
+        kml_free(KML_HEAP_RAW, KML_PREFIX(shown));
         *msg = hdr_str(buf);
         return 2; /* RangeError ERR_OUT_OF_RANGE */
     }
@@ -72,7 +72,7 @@ static long long fill_offset(long long word, const char *name, long long len, lo
     if (d < 0 || d > (double)len) {
         char *shown = __kml_inspect_opts(word, 2, 3, 0, 80, 100, 1);
         snprintf(buf, sizeof buf, "The value of \"%s\" is out of range. It must be >= 0 && <= %lld. Received %s", name, len, shown);
-        kml_free(KML_HEAP_RAW, shown - 8);
+        kml_free(KML_HEAP_RAW, KML_PREFIX(shown));
         *msg = hdr_str(buf);
         return 2;
     }
@@ -119,7 +119,7 @@ long long __kml_buf_fill_any(unsigned char *data, long long len, long long argc,
         } else if (t != 5) {
             char *r = __kml_received(encoding);
             snprintf(buf, sizeof buf, "The \"encoding\" argument must be of type string.%s", r);
-            kml_free(KML_HEAP_RAW, r - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(r));
             *msg = hdr_str(buf);
             return 1;
         }
@@ -140,7 +140,7 @@ long long __kml_buf_fill_any(unsigned char *data, long long len, long long argc,
             kml_free(KML_HEAP_RAW, bytes);
             char *shown = __kml_inspect_opts(value, 2, 3, 0, 80, 100, 1);
             snprintf(buf, sizeof buf, "The argument 'value' is invalid. Received %s", shown);
-            kml_free(KML_HEAP_RAW, shown - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(shown));
             *msg = hdr_str(buf);
             return 4;
         }
@@ -157,7 +157,7 @@ long long __kml_buf_fill_any(unsigned char *data, long long len, long long argc,
         if (n == 0) {
             char *shown = __kml_inspect_opts(value, 2, 3, 0, 80, 100, 1);
             snprintf(buf, sizeof buf, "The argument 'value' is invalid. Received %s", shown);
-            kml_free(KML_HEAP_RAW, shown - 8);
+            kml_free(KML_HEAP_RAW, KML_PREFIX(shown));
             *msg = hdr_str(buf);
             return 4;
         }

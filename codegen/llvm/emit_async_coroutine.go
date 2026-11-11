@@ -148,15 +148,14 @@ func (e *Emitter) writeAsyncDefinition(name, paramStr string, awaited bool) {
 		sym = "@" + sym
 	}
 	if !awaited {
-		e.writeFunc(fmt.Sprintf("ptr %s(%s)", sym, paramStr), e.allocas.String()+e.body.String())
+		e.writeFunc(fmt.Sprintf(irPtr+" %s(%s)", sym, paramStr), e.allocas.String()+e.body.String())
 		return
 	}
 	e.ensureTaskRuntime()
-	e.ensureMalloc()
 	inner := quoteSymSuffix(sym, ".inner")
 	tramp := quoteSymSuffix(sym, ".tramp")
 
-	e.writeFunc(fmt.Sprintf("internal ptr %s(%s)", inner, paramStr), e.allocas.String()+e.body.String())
+	e.writeFunc(fmt.Sprintf("internal "+irPtr+" %s(%s)", inner, paramStr), e.allocas.String()+e.body.String())
 
 	types, names := splitLLVMParams(paramStr)
 	bundleTy := "{ " + strings.Join(types, ", ") + " }"
@@ -165,50 +164,50 @@ func (e *Emitter) writeAsyncDefinition(name, paramStr string, awaited bool) {
 	}
 
 	var w strings.Builder
-	fmt.Fprintf(&w, "\ndefine ptr %s(%s) {\nentry:\n", sym, paramStr)
-	fmt.Fprintf(&w, "  %%__co_sz = ptrtoint ptr getelementptr (%s, ptr null, i32 1) to i64\n", bundleTy)
-	w.WriteString("  %__co_b = call ptr @malloc(i64 %__co_sz)\n")
+	fmt.Fprintf(&w, "  %%__co_sz = ptrtoint "+irPtr+" getelementptr (%s, "+irPtr+" null, i32 1) to i64\n", bundleTy)
+	w.WriteString("  %__co_b = call " + irPtr + " @malloc(i64 %__co_sz)\n")
 	for i, ty := range types {
-		fmt.Fprintf(&w, "  %%__co_f%d = getelementptr %s, ptr %%__co_b, i32 0, i32 %d\n", i, bundleTy, i)
-		fmt.Fprintf(&w, "  store %s %s, ptr %%__co_f%d\n", ty, names[i], i)
+		fmt.Fprintf(&w, "  %%__co_f%d = getelementptr %s, "+irPtr+" %%__co_b, i32 0, i32 %d\n", i, bundleTy, i)
+		fmt.Fprintf(&w, "  store %s %s, "+irPtr+" %%__co_f%d\n", ty, names[i], i)
 	}
-	w.WriteString("  %__co_p = call ptr @__kml_task_alloc_promise()\n")
-	fmt.Fprintf(&w, "  %%__co_t = call ptr @__kml_spawn_task(ptr %s, ptr %%__co_b, ptr %%__co_p)\n", tramp)
-	w.WriteString("  ret ptr %__co_p\n}\n")
+	w.WriteString("  %__co_p = call " + irPtr + " @__kml_task_alloc_promise()\n")
+	fmt.Fprintf(&w, "  %%__co_t = call "+irPtr+" @__kml_spawn_task("+irPtr+" %s, "+irPtr+" %%__co_b, "+irPtr+" %%__co_p)\n", tramp)
+	w.WriteString("  ret " + irPtr + " %__co_p\n")
+	e.writeFunc(fmt.Sprintf(irPtr+" %s(%s)", sym, paramStr), w.String())
 
-	fmt.Fprintf(&w, "\ndefine internal void %s(ptr %%__co_b) {\nentry:\n", tramp)
+	w.Reset()
 	var args []string
 	for i, ty := range types {
-		fmt.Fprintf(&w, "  %%__co_f%d = getelementptr %s, ptr %%__co_b, i32 0, i32 %d\n", i, bundleTy, i)
-		fmt.Fprintf(&w, "  %%__co_a%d = load %s, ptr %%__co_f%d\n", i, ty, i)
+		fmt.Fprintf(&w, "  %%__co_f%d = getelementptr %s, "+irPtr+" %%__co_b, i32 0, i32 %d\n", i, bundleTy, i)
+		fmt.Fprintf(&w, "  %%__co_a%d = load %s, "+irPtr+" %%__co_f%d\n", i, ty, i)
 		args = append(args, fmt.Sprintf("%s %%__co_a%d", ty, i))
 	}
-	fmt.Fprintf(&w, "  %%__co_h = call ptr %s(%s)\n", inner, strings.Join(args, ", "))
+	fmt.Fprintf(&w, "  %%__co_h = call "+irPtr+" %s(%s)\n", inner, strings.Join(args, ", "))
 	// H is this trampoline's to read: never an unhandled rejection (ADR-01192).
 	e.ensureUnhandledRejections()
-	w.WriteString("  call void @__kml_promise_mark_handled(ptr %__co_h)\n")
+	w.WriteString("  call void @__kml_promise_mark_handled(" + irPtr + " %__co_h)\n")
 	// inner returned, so its promise H is settled. Adopt it into this task's
 	// promise P: value/reason words first, then the state through the task's own
 	// finish (fulfilled — by returning to the trampoline) or reject path.
-	w.WriteString("  %__co_t = load ptr, ptr @__kml_current_task, align 8\n")
-	fmt.Fprintf(&w, "  %%__co_pp = getelementptr %s, ptr %%__co_t, i32 0, i32 %d\n", taskStructIR, taskPromiseSlot)
-	w.WriteString("  %__co_p = load ptr, ptr %__co_pp, align 8\n")
+	w.WriteString("  %__co_t = load " + irPtr + ", " + irPtr + " @__kml_current_task, align 8\n")
+	fmt.Fprintf(&w, "  %%__co_pp = getelementptr %s, "+irPtr+" %%__co_t, i32 0, i32 %d\n", taskStructIR, taskPromiseSlot)
+	w.WriteString("  %__co_p = load " + irPtr + ", " + irPtr + " %__co_pp, align 8\n")
 	for _, f := range []int{2, 3} {
-		fmt.Fprintf(&w, "  %%__co_hv%d_p = getelementptr %s, ptr %%__co_h, i32 0, i32 %d\n", f, promiseStructIR, f)
-		fmt.Fprintf(&w, "  %%__co_hv%d = load i64, ptr %%__co_hv%d_p, align 8\n", f, f)
-		fmt.Fprintf(&w, "  %%__co_pv%d_p = getelementptr %s, ptr %%__co_p, i32 0, i32 %d\n", f, promiseStructIR, f)
-		fmt.Fprintf(&w, "  store i64 %%__co_hv%d, ptr %%__co_pv%d_p, align 8\n", f, f)
+		fmt.Fprintf(&w, "  %%__co_hv%d_p = getelementptr %s, "+irPtr+" %%__co_h, i32 0, i32 %d\n", f, promiseStructIR, f)
+		fmt.Fprintf(&w, "  %%__co_hv%d = load i64, "+irPtr+" %%__co_hv%d_p, align 8\n", f, f)
+		fmt.Fprintf(&w, "  %%__co_pv%d_p = getelementptr %s, "+irPtr+" %%__co_p, i32 0, i32 %d\n", f, promiseStructIR, f)
+		fmt.Fprintf(&w, "  store i64 %%__co_hv%d, "+irPtr+" %%__co_pv%d_p, align 8\n", f, f)
 	}
-	fmt.Fprintf(&w, "  %%__co_hs_p = getelementptr %s, ptr %%__co_h, i32 0, i32 0\n", promiseStructIR)
-	w.WriteString("  %__co_hs = load i64, ptr %__co_hs_p, align 8\n")
+	fmt.Fprintf(&w, "  %%__co_hs_p = getelementptr %s, "+irPtr+" %%__co_h, i32 0, i32 0\n", promiseStructIR)
+	w.WriteString("  %__co_hs = load i64, " + irPtr + " %__co_hs_p, align 8\n")
 	w.WriteString("  %__co_rej = icmp eq i64 %__co_hs, 2\n")
 	w.WriteString("  br i1 %__co_rej, label %__co_reject, label %__co_done\n")
 	w.WriteString("__co_reject:\n")
-	w.WriteString("  %__co_err = inttoptr i64 %__co_hv2 to ptr\n")
-	w.WriteString("  call void @__kml_task_reject(ptr %__co_t, ptr %__co_err)\n")
+	w.WriteString("  %__co_err = inttoptr i64 %__co_hv2 to " + irPtr + "\n")
+	w.WriteString("  call void @__kml_task_reject(" + irPtr + " %__co_t, " + irPtr + " %__co_err)\n")
 	w.WriteString("  ret void\n")
-	w.WriteString("__co_done:\n  ret void\n}\n")
-	e.functions.WriteString(w.String())
+	w.WriteString("__co_done:\n  ret void\n")
+	e.writeFunc(fmt.Sprintf("internal void %s("+irPtr+" %%__co_b)", tramp), w.String())
 }
 
 // quoteSymSuffix appends a suffix to an LLVM global symbol, inside its quotes

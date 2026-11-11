@@ -28,7 +28,7 @@
             "status": "implemented",
             "notes": [
               "The URL Standard's basic URL parser in TypeScript (`lib/node/kml_url.ts`, [TDD-00237](../tdd/TDD-00237.md), [ADR-01320](../adr/01/ADR-01320.md)) — the algorithm Node's ada implements: special and non-special schemes, opaque paths, IPv4 number forms, IPv6 compression, per-component percent-encode sets, and the setters as the standard's state overrides",
-              "Node's `URL` surface (lib/internal/url.js): every component getter and setter, `searchParams`, `toString`/`toJSON`, `URL.parse`/`URL.canParse`, util.inspect's `URL { … }`, and `TypeError [ERR_INVALID_URL]` with `input` (and `base`) on a bad input",
+              "Node's `URL` surface (lib/internal/url.js): every component getter and setter, `searchParams`, `toString`/`toJSON`, `URL.parse`/`URL.canParse`, `URL.createObjectURL`/`revokeObjectURL` (a `blob:nodedata:<uuid>` URL that `buffer.resolveObjectURL` answers, [ADR-01970](../adr/01/ADR-01970.md)), util.inspect's `URL { … }`, and `TypeError [ERR_INVALID_URL]` with `input` (and `base`) on a bad input",
               "`URL`/`URLSearchParams` are globals (no import), and the same classes `url` exports; a class may extend them"
             ],
             "caveats": [

@@ -16,10 +16,6 @@ var ipcChildSource string
 // IPCChildSource is the child-side channel C (ipcc.c), behind kml_layout.h.
 func IPCChildSource() string { return layoutHeader() + ipcChildSource }
 
-// UsesIPCChild reports whether the program links ipcc.c (it reads the
-// channel as a forked child).
-func (e *Emitter) UsesIPCChild() bool { return e.usedIPCChildRuntime }
-
 // ensureIPCChildRuntime declares the child-side channel (ipcsrc/ipcc.c):
 // NODE_CHANNEL_FD parsing, send, and the event-loop hooks that deliver
 // 'message' events.
@@ -28,31 +24,6 @@ func (e *Emitter) ensureIPCChildRuntime() {
 		return
 	}
 	e.usedIPCChildRuntime = true
-	e.ensureIPCDecls()
-	e.ensureMalloc()
-	e.ensureFree()
-	e.ensureMemcpy()
-	e.ensureStrlen()
 	e.ensureStrHeaderRuntime()
-	e.ensureReadDecl()
-	e.ensureCloseDecl()
-	e.ensureFcntlDecl()
-	e.ensureAtoll()
-	e.ensureGetenv()
 
-	e.emitGlobal(`declare i32 @__kml_ipcc_fd()
-declare i1 @__kml_ipcc_send(ptr)`)
-}
-
-// ensureNativeIPCChildClaim defines lib/native.d.ts's ipcChildClaim: the
-// process emitter's fork channel takes the descriptor over from the
-// runtime's own child-side reader (which cluster's worker side still sends
-// through), probing it first so NODE_CHANNEL_FD may then be deleted.
-func (e *Emitter) ensureNativeIPCChildClaim() {
-	if e.fnDecls["__kml_native_ipc_child_claim"] {
-		return
-	}
-	e.fnDecls["__kml_native_ipc_child_claim"] = true
-	e.ensureIPCChildRuntime()
-	e.emitGlobal("declare void @__kml_native_ipc_child_claim()")
 }

@@ -211,6 +211,7 @@ function t(fn) { try { console.log(fn()); } catch (e) { console.log(e.constructo
 t(function () { return nope; });
 t(function () { return typeof nope; });
 t(function () { return nope(); });
+t(function () { return fs.readFileSync("x", "utf8"); });
 var x = 1;
 y = 2;
 function f() { z = 3; return y + z; }
@@ -1312,6 +1313,30 @@ for (const r of [o, Object.create(C.prototype)]) {
 `)
 }
 
+func TestE2EJSFileInstancePrivateFromStaticMethod(t *testing.T) {
+	// A static method's receiver is whatever it is called on: an instance's
+	// private names read off it are the instance's, and any other receiver
+	// throws with V8's messages (an anonymous class is "anonymous").
+	assertJSFileSameAsNode(t, `
+var C = class {
+  #f() { return 42; }
+  #v = 7;
+  get #a() { return 9; }
+  static g() { return this.#f(); }
+  static h() { return this.#v; }
+  static k() { this.#v = 8; return this.#v + this.#a; }
+};
+class D {
+  #f() { return 1; }
+  static g() { return this.#f(); }
+}
+console.log(C.g.call(new C()), C.h.call(new C()), C.k.call(new C()), D.g.call(new D()));
+for (const run of [() => C.g(), () => C.h(), () => C.k.call({}), () => D.g()]) {
+  try { run(); } catch (e) { console.log(e.constructor.name, e.message); }
+}
+`)
+}
+
 func TestE2EJSFileObjectPrototypeMembers(t *testing.T) {
 	// Object.prototype's own members, the __proto__ accessor included,
 	// and a chain that never reaches it (ADR-01823).
@@ -1358,4 +1383,214 @@ console.log(JSON.stringify(b), b.map((x) => x * 2).join(), b.indexOf(23), [...b]
 Object.defineProperty(b, "1", { value: 5 }); console.log(b[1], b);
 const w = [1]; w[1] = "x"; w.push(true); console.log(w, w[1]);
 `)
+}
+
+func TestE2EJSFileShortCircuitOnNullishAndLogicalAssign(t *testing.T) {
+	// An optional chain on a binding only ever null or undefined always
+	// short-circuits (its later links, arguments and index never run); a
+	// logical assignment to an implicit-any `let x = null` is any.
+	assertJSFileSameAsNode(t, `
+const a = undefined;
+const n = null;
+let x = 1;
+a?.[++x];
+a?.b.c(++x).d;
+n?.m(++x);
+undefined?.[++x];
+console.log(x, a?.b, n?.b, a?.[1], typeof a?.(), n?.());
+let y = null;
+let o = { [y ??= 1]: 2 };
+console.log(o[y ??= 1], y ??= 5, (y ||= 9), (y &&= 3));
+let s;
+console.log(s ??= "a", s);
+`)
+}
+
+func TestE2EJSFileSuperCallAsExpression(t *testing.T) {
+	// super(…) anywhere in a derived constructor (a conditional, an arrow,
+	// an optional chain's base) evaluates to the this it initialized, with
+	// the own field initializers run right after it; an optional read of a
+	// key the class does not declare is undefined.
+	assertJSFileSameAsNode(t, `
+class A { constructor(v) { this.k = v; console.log('A ctor', v) } }
+class B extends A {
+  f = (console.log('field init'), 2)
+  constructor (c) {
+    console.log('before')
+    const r = c ? super(1) : super(2)
+    console.log(r === this, r.k, this.f, this?.missing)
+  }
+}
+new B(true); new B(false)
+class C extends A { constructor () { const go = () => super(9); go(); console.log(this.k) } }
+new C()
+class D extends A { constructor () { console.log(super(5)?.k) } }
+new D()
+`)
+}
+
+func TestE2EJSFilePrivateNamesHideFromStringKeys(t *testing.T) {
+	// A class's #private member is no string-keyed property: `"#m" in o`,
+	// a runtime "#f" key and hasOwnProperty are false, while the brand
+	// check `#m in o` is true.
+	assertJSFileSameAsNode(t, `
+class C {
+  #m() { return "T"; }
+  #f = 1;
+  get #g() { return 2 }
+  pub = 3;
+  check() {
+    const k = "#f", j = "#m";
+    console.log(this.hasOwnProperty("#m"), "#m" in this, "#f" in this, "#g" in this, k in this, j in this, "pub" in this, #m in this, #f in this, this.#m(), this.#f)
+  }
+}
+new C().check()
+`)
+}
+
+// A "use strict" directive anywhere in a function's prologue (after other
+// string literals too) makes it strict code: a plain call's this is
+// undefined, as in a function nested in it. An escaped one is no directive.
+func TestE2EFunctionStrictDirectiveThis(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+function f() { "x"; "use strict"; return typeof this; }
+console.log(f());
+function f4() { "use strict"; return typeof this; }
+console.log(f4());
+var g4 = function () { "use strict"; return typeof this; }; console.log(g4());
+function h4() { "use strict"; return (function () { return typeof this; })(); }
+console.log(h4());
+`)
+	assertJSFileSameAsNode(t, `"use\x20strict";
+var x = function () { return typeof this; }; console.log(x());
+`)
+	mustCompileError(t, "\"a\";\n\"use strict\";\neval = 42;\n", "'eval' cannot be assigned to in strict mode")
+}
+
+// arguments in a function with an explicit rest parameter: the declared
+// arguments passed, then the rest's; a write to the rest leaves it alone.
+func TestE2EArgumentsWithRestParameter(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+function f(a, ...r) { return [arguments.length, arguments[0], arguments[1], arguments[2], r.length]; }
+console.log(f(), f(1), f(1, 2), f(1, 2, 3));
+function g(...b) { b[0] = 9; return [arguments.length, arguments[0], b[0]]; }
+console.log(g(5, 6));
+function h(...r) { return new.target === undefined ? arguments.length : 0; }
+console.log(h(1, 2, 3));
+`)
+}
+
+// A Promise (or a subclass) built with no executor throws V8's TypeError;
+// arguments past it are ignored; an executor with a rest parameter, or
+// reading arguments, gets both resolving functions.
+func TestE2EPromiseExecutorArgumentsAndRest(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+class Prom extends Promise {}
+try { new Prom(); } catch (e) { console.log(e.constructor.name, e.message); }
+var args;
+var p = new Prom(function () { args = arguments; }, 7);
+console.log(args.length, typeof args[0], typeof args[1], p instanceof Prom, p instanceof Promise);
+new Prom(function (res) { res(3); }).then(function (v) { console.log("v", v); });
+var args;
+new Promise(function () { args = arguments; });
+console.log(args.length, typeof args[0]);
+new Promise(function (r, ...x) { console.log(x.length, typeof x[0]); });
+new Promise((r, ...x) => { x[0]("boom"); }).catch((e) => console.log("caught", e));
+new Promise(function (...a) { a[0](4); }).then((v) => console.log("v", v));
+new Promise(function (r, ...x) { console.log(typeof r, x.length, typeof x[0], x[0] === undefined); });
+new Promise((r, ...x) => { console.log(typeof r, x.length, typeof x[0]); });
+var ex = function (r, ...x) { console.log("v", typeof x[0]); }; new Promise(ex);
+`)
+}
+
+func TestE2EJSFileVarLoopHeadBinding(t *testing.T) {
+	// A `var` declared in a loop head or a block is the function's (or the
+	// file's) one binding: hoisted functions capture it, an earlier `var`
+	// of the name is the same variable, and it shadows an outer name.
+	assertJSFileSameAsNode(t, `
+function g() { for (var i = 0; i < 2; i++) r(); function r() { console.log("ab" + i) } }
+g();
+function h() { r(); for (var k in { a: 1, b: 2 }) r(); r(); function r() { console.log(k) } }
+h();
+function m() { var k = 0; for (var k of ["x"]) {} return k }
+console.log(m());
+const z = 5;
+function s() { for (var z of [1]) {} return z }
+console.log(s(), z);
+function o() { var q = 1; function i() { for (var q of [2]) {} return q } return [i(), q] }
+console.log(o());
+var top = 9; for (var top of [1, 2]) {} console.log(top);
+for (var w = 0; w < 2; w++) {} function rw() { return w } console.log(rw(), w);
+for (var u of [3, 4]) {} function ru() { return u } console.log(ru(), u);
+if (true) { var blk = 3 } function rb() { return blk } console.log(rb());
+`)
+}
+
+func TestE2EAsyncDestructuredParamsAcrossAwait(t *testing.T) {
+	// A suspending async function's destructured parameters unpack as a
+	// non-suspending one's do: an any argument, a default, an array pattern.
+	assertJSFileSameAsNode(t, `
+async function f(s, { g = false, mode } = {}) { await 1; return [g, mode] }
+async function a([x, y = 5] = []) { await 1; return [x, y] }
+(async () => {
+  console.log(await f(1), await f(1, { g: 3, mode: "m" }));
+  console.log(await a(), await a([1]), await a(["q", "r"]));
+})();
+function p(s, { g = false } = {}) { return g }
+console.log(p(1), p(1, { g: 3 }));
+`)
+}
+
+// A function declaration that reads a destructured binding is hoisted like
+// any other: a closure written before it may call it, and a call before the
+// binding runs is the TDZ ReferenceError.
+func TestE2EJSFileHoistedFnReadsDestructured(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCLIJS(t, `
+const f = () => { const { port } = { port: 3 }; setTimeout(() => { next(); }, 1); function next() { console.log('n', port) } }; f();
+function g() { next(); const { port } = { port: 3 }; function next() { console.log(typeof port) } }
+try { g() } catch (e) { console.log(e.constructor.name, e.message) }
+function h() { const [a, b] = [1, 2]; const k = () => next(); function next() { return a + b } return k() } console.log(h());
+function m() { let { x } = { x: 1 }; const k = () => next(); x = 5; function next() { return x } return k() } console.log(m());
+`)
+}
+
+// In the JavaScript lane a property destructured from a union some member
+// of which lacks it (server.address()'s `AddressInfo | string | null`) is
+// any, also read from a nested function declaration.
+func TestE2EJSFileDestructuredFromNullableUnion(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCLIJS(t, `
+const net = require('net');
+const server = net.createServer();
+server.listen(0, () => {
+  const { port } = server.address();
+  function next() {
+    const c = net.connect(port, () => { console.log('connected', port > 0); c.destroy(); server.close(); });
+  }
+  next();
+});
+function f() { const { v } = Math.random() > 2 ? null : { v: 3 }; function g() { return v * 2 } return g() }
+console.log(f());
+`)
+}
+
+// A top-level alias of a module's object (`const p = fs.promises`) or of an
+// object literal's binding, read by a function: a global holding that
+// object, in either lane.
+func TestE2EJSFileGlobalAliasOfObject(t *testing.T) {
+	t.Parallel()
+	src := `
+import fs from 'fs';
+const fsPromises = fs.promises;
+const o = { a() { return 1 }, b: 2 };
+const alias = o;
+function m() {
+  console.log(typeof fsPromises, typeof fsPromises.readFile, fsPromises === fs.promises);
+  console.log(alias.a(), alias.b, alias === o);
+}
+m();
+`
+	assertSameAsNodeCLIJS(t, src)
+	assertSameAsNodeImports(t, src)
 }

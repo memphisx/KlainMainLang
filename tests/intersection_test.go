@@ -88,13 +88,13 @@ console.log(v.x)
 `, "not assignable")
 }
 
-// A field declared with conflicting types across members is rejected under the
-// default -compat=strict (the -compat=js `never`-field path is a later stage).
+// A field declared with disjoint types across members is `never`, so the
+// strict lane rejects the assignment as tsc does (TS2322).
 func TestE2EIntersectionConflictRejected(t *testing.T) {
 	mustCompileError(t, `
 const v: { x: number } & { x: string } = { x: 1 }
 console.log(v.x)
-`, "conflicting types")
+`, "not assignable to type 'never'")
 }
 
 // Same-named object fields across members are recursively intersected
@@ -178,4 +178,23 @@ const m = new Map<Id, number>();
 m.set(mk("k"), 3);
 console.log(ids.join(","), rec.id.toUpperCase(), rec.n * 2, m.get(mk("k")));
 `, "a,b Q 10 3")
+}
+
+// An Error member's value keeps its own layout as a parameter, whether the
+// member is Error itself or a qualified Error kin.
+func TestE2EIntersectionErrorParam(t *testing.T) {
+	assertOutput(t, `
+function f(err: Error & { port?: number }) { console.log(err.message, err.port) }
+const e = new Error("x") as Error & { port?: number }
+e.port = 3
+f(e)
+f(new Error("z"))
+function g(err: NodeJS.ErrnoException & { port?: number }) { console.log(err.message, err.code, err.port) }
+g(new Error("y"))
+let t: NodeJS.Timeout | number = 5
+console.log(typeof t)
+t = setTimeout(() => {}, 1)
+console.log(typeof t)
+clearTimeout(t)
+`, "x 3\nz undefined\ny undefined undefined\nnumber\nobject")
 }

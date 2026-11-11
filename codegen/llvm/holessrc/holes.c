@@ -33,7 +33,7 @@ static i64 *holes_cover(Hdr *h, i64 n) {
     i64 *bm = (i64 *)kml_alloc(KML_HEAP_RAW, (size_t)(need + 3) * 8);
     memset(bm, 0, (size_t)(need + 3) * 8);
     if (h->holes) {
-        memcpy(BM_BITS(bm), BM_BITS(h->holes), (size_t)have * 8);
+        kml_copy(KML_HEAP_RAW, BM_BITS(bm), BM_BITS(h->holes), (size_t)have * 8);
         BM_T0(bm) = BM_T0(h->holes);
         BM_T1(bm) = BM_T1(h->holes);
     }
@@ -214,7 +214,7 @@ i64 __kml_holes_compact(void *hdr, i64 esize, i64 n) {
     i64 k = 0;
     for (i64 i = 0; i < n; i++) {
         if (__kml_holes_is(hdr, i)) continue;
-        if (k != i) memcpy(d + k * esize, d + i * esize, (size_t)esize);
+        if (k != i) kml_copy(KML_HEAP_WORDS, d + k * esize, d + i * esize, (size_t)esize);
         k++;
     }
     holes_unmark(hdr, 0, k);
@@ -320,4 +320,24 @@ const char *__kml_holes_acc_label(void *hdr, i64 i) {
     if (a < 0 || !(a & 8)) return NULL;
     void **pair = (void **)__kml_shape_expando_raw(hdr, key);
     return pair[0] && pair[1] ? gs.s : pair[0] ? g.s : s.s;
+}
+
+/* A static array literal's rows (emit_arrays_literal_static.go): outer[i]
+ * is a fresh box, after its header word `word`, whose data is a copy of the
+ * next lens[i] elements (esz bytes each) of flat, packed. */
+void __kml_arr_lit_rows(void **outer, const char *flat, const i64 *lens, i64 n, i64 esz, i64 word) {
+    i64 off = 0;
+    for (i64 i = 0; i < n; i++) {
+        size_t bytes = (size_t)(lens[i] * esz);
+        void *data = kml_alloc(KML_HEAP_WORDS, bytes);
+        kml_copy(KML_HEAP_WORDS, data, flat + off, bytes);
+        i64 *cell = (i64 *)kml_alloc(KML_HEAP_WORDS, 32);
+        cell[0] = word;
+        Hdr *box = (Hdr *)(cell + 1);
+        box->data = data;
+        box->len = lens[i];
+        box->holes = NULL;
+        outer[i] = box;
+        off += (i64)bytes;
+    }
 }

@@ -7,21 +7,24 @@ import (
 
 func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: map takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "map arity %d", len(args))
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	self := e.hofSelf(mem.Object, hdr)
 	live := e.hofLiveHeader(mem.Object, hdr)
 	hdr = e.hofHolesHeader(mem.Object, hdr)
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
 	retElemTy := cb.retType()
-	if retElemTy.IR == "void" || retElemTy.IR == "" {
-		return Value{}, fmt.Errorf("%d:%d: map callback must return a value", pos.Line, pos.Col)
+	// A callback returning nothing maps every element to undefined.
+	voidRet := retElemTy.IR == "void" || retElemTy.IR == ""
+	if voidRet {
+		retElemTy = TypeAny
 	}
 	// A TypedArray's .map() always returns the same TypedArray kind (real
 	// JS semantics: Uint8Array.prototype.map() always returns a new
@@ -34,7 +37,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	// receiver's own (narrower) element stride — found by direct testing,
 	// not by inspection, while verifying "everything already reused for
 	// free" during TDD-00018's implementation.
-	recvTy := e.inferExprType(mem.Object)
+	recvTy := e.typeOfExpr(mem.Object)
 	isTypedArray := recvTy.IsTypedArray()
 	if isTypedArray {
 		retElemTy = elemTy
@@ -45,20 +48,18 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	boxedRet := isNullableScalar(retElemTy)
 	retElemTy = arrayElemType(retElemTy)
 
-	e.ensureMalloc()
 	outBytes := e.freshReg()
 	outPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", outBytes, lenReg, retElemTy.Align()))
-	e.heapMallocInto(outPtr, outBytes)
+	e.heapMallocInto(outPtr, elemAllocKind(retElemTy), outBytes)
 	if hdr != "" {
 		// A hole is skipped: its slot of the result stays a zeroed hole.
-		e.ensureMemset()
-		e.emitInstr(fmt.Sprintf("call ptr @memset(ptr %s, i32 0, i64 %s)", outPtr, outBytes))
+		e.emitInstr(fmt.Sprintf("call "+irPtr+" @memset("+irPtr+" %s, i32 0, i64 %s)", outPtr, outBytes))
 	}
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("map.cond")
 	bodyL := e.freshLabel("map.body")
@@ -68,7 +69,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -77,10 +78,13 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	inGep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, func() { e.hofSkip(idxVal, idxAlloca, 1, condL) })
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := e.hofCBArgs(cb, []Value{inVal}, idxVal, live, ptrReg, lenReg, elemTy)
+	cbArgs := e.hofCBArgs(cb, []Value{e.walkElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, self, ptrReg, lenReg, elemTy)
 	resultVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
+	}
+	if voidRet {
+		resultVal = Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
 	}
 	if isTypedArray {
 		// A Uint8ClampedArray's .map() clamp-stores each result (TDD-00101).
@@ -98,7 +102,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 	}
 
 	outGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", outGep, retElemTy.IR, outPtr, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", outGep, retElemTy.IR, outPtr, idxVal))
 	// A callback that returns an array per element (the shape .flatMap()
 	// builds .map() on top of) needs retElemTy's own slot boxed exactly
 	// like any other nested-array-element write — see storeArrayElem's own
@@ -109,7 +113,7 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -129,23 +133,23 @@ func (e *Emitter) emitArrayMap(mem *ast.MemberExpression, args []ast.Expression,
 // same HOF-callback array narrowing the reference-semantics caveat documents).
 func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: forEach takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "forEach arity %d", len(args))
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	self := e.hofSelf(mem.Object, hdr)
 	live := e.hofLiveHeader(mem.Object, hdr)
 	hdr = e.hofHolesHeader(mem.Object, hdr)
-	arrTy := ArrayOf(elemTy)
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, arrTy})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("foreach.cond")
 	bodyL := e.freshLabel("foreach.body")
@@ -155,7 +159,7 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -164,14 +168,14 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 	inGep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, func() { e.hofSkip(idxVal, idxAlloca, 1, condL) })
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := e.hofCBArgs(cb, []Value{inVal}, idxVal, live, ptrReg, lenReg, elemTy)
+	cbArgs := e.hofCBArgs(cb, []Value{e.walkElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, self, ptrReg, lenReg, elemTy)
 	if _, err := e.emitCBCall(cb, cbArgs); err != nil {
 		return Value{}, err
 	}
 
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -182,31 +186,31 @@ func (e *Emitter) emitArrayForEach(mem *ast.MemberExpression, args []ast.Express
 // only elements for which pred(elem[, index]) returns true.
 func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: filter takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "filter arity %d", len(args))
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	self := e.hofSelf(mem.Object, hdr)
 	live := e.hofLiveHeader(mem.Object, hdr)
 	hdr = e.hofHolesHeader(mem.Object, hdr)
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
 
-	e.ensureMalloc()
 	outBytes := e.freshReg()
 	outPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", outBytes, lenReg, elemTy.Align()))
-	e.heapMallocInto(outPtr, outBytes)
+	e.heapMallocInto(outPtr, elemAllocKind(elemTy), outBytes)
 
 	idxAlloca := e.freshReg()
 	cntAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", cntAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", cntAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", cntAlloca))
 
 	condL := e.freshLabel("filt.cond")
 	bodyL := e.freshLabel("filt.body")
@@ -218,7 +222,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -227,7 +231,7 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	inGep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, func() { e.hofSkip(idxVal, idxAlloca, 1, condL) })
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	cbArgs := e.hofCBArgs(cb, []Value{inVal}, idxVal, live, ptrReg, lenReg, elemTy)
+	cbArgs := e.hofCBArgs(cb, []Value{e.walkElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, self, ptrReg, lenReg, elemTy)
 	predVal, err := e.emitCBCall(cb, cbArgs)
 	if err != nil {
 		return Value{}, err
@@ -239,24 +243,24 @@ func (e *Emitter) emitArrayFilter(mem *ast.MemberExpression, args []ast.Expressi
 	cntVal := e.freshReg()
 	outGep := e.freshReg()
 	cntNext := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", cntVal, cntAlloca))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", outGep, elemTy.IR, outPtr, cntVal))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cntVal, cntAlloca))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", outGep, elemTy.IR, outPtr, cntVal))
 	e.storeArrayElem(outGep, elemTy, inVal)
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", cntNext, cntVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", cntNext, cntAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", cntNext, cntAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	finalCnt := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", finalCnt, cntAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", finalCnt, cntAlloca))
 	r1 := e.newArrayHeader(outPtr, finalCnt)
-	if recvTy := e.inferExprType(mem.Object); recvTy.IsTypedArray() {
+	if recvTy := e.typeOfExpr(mem.Object); recvTy.IsTypedArray() {
 		return Value{Ref: r1, Ty: typedArrayResultType(recvTy)}, nil // a typed array filters to its own kind
 	}
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
@@ -286,13 +290,14 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		verb = "reduceRight"
 	}
 	if len(args) != 1 && len(args) != 2 {
-		return Value{}, fmt.Errorf("%d:%d: %s takes 1 or 2 arguments (callback[, initial])", pos.Line, pos.Col, verb)
+		return Value{}, internalAt(pos, "%s arity %d", verb, len(args))
 	}
 	hasInitial := len(args) == 2
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	self := e.hofSelf(mem.Object, hdr)
 	live := e.hofLiveHeader(mem.Object, hdr)
 	hdr = e.hofHolesHeader(mem.Object, hdr)
 	// accTy's hint comes from a pure static inference of the initial-value
@@ -306,28 +311,63 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	if hasInitial {
 		accTyHint = e.reduceSeedType(args[1])
 	}
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeF64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{accTyHint, e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
-	// `-compat=js`: a callback that can fall off the end returns `T | undefined`
-	// (ADR-01065), and in JS the accumulator then *is* undefined on the next
-	// step — `[1,2,3].reduce((a, x) => { if (x > 1) return a + x }, 0)` is NaN
+	// A callback that can fall off the end returns `T | undefined`
+	// (ADR-01065; the checker takes reduce's generic overload for it), and
+	// the accumulator then *is* undefined on the next step — `[1,2,3].reduce((a, x) => { if (x > 1) return a + x }, 0)` is NaN
 	// in Node. Widen the accumulator to the same nullable scalar and re-resolve
 	// the callback with that parameter hint, so `a + x` inside it sees a
 	// presence-aware operand (nullableScalarOperand) rather than a payload zero.
 	accWidened := false
-	if rt := cb.retType(); e.compatJS() && hasInitial && rt.Nullable() && rt.IsUndefined() && reduceAccWidenable(accTyHint) {
+	if rt := cb.retType(); hasInitial && rt.Nullable() && rt.IsUndefined() && reduceAccWidenable(accTyHint) {
 		accTyHint = undefinedableElem(accTyHint)
-		if cb, err = e.resolveCallbackWithHints(args[0], []Type{accTyHint, elemTy, TypeF64, ArrayOf(elemTy)}); err != nil {
+		if cb, err = e.resolveCallbackWithHints(args[0], []Type{accTyHint, e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)}); err != nil {
 			return Value{}, err
 		}
 		accWidened = true
 	}
+	// A callback with no result (JavaScript's): each step's accumulator is
+	// undefined, held as a box from the initial value on.
+	voidCB := false
+	widenSeed := false
+	if rt := cb.retType(); rt.IR == "void" || rt.IR == "" {
+		accTyHint = TypeAny
+		if cb, err = e.resolveCallbackWithHints(args[0], []Type{TypeAny, e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)}); err != nil {
+			return Value{}, err
+		}
+		accWidened, voidCB = true, true
+		widenSeed = !hasInitial // the first element, boxed
+	}
+
+	// JavaScript's accumulator is whatever the last step returned: a callback
+	// whose result the seed's type cannot hold (a string from a number seed,
+	// a possibly-undefined result, a box of either kind) widens it to `any`.
+	if rt := cb.retType(); e.compatJS() && !accWidened && rt.IR != "void" && rt.IR != "" {
+		seedTy := elemTy
+		if hasInitial {
+			seedTy = e.typeOfExpr(args[1])
+			if lit, ok := args[1].(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 {
+				seedTy = accTyHint
+			}
+		}
+		if !convertiblePure(rt, seedTy) || isNullableScalar(rt) && !isNullableScalar(seedTy) || rt.IsDynamic() && !seedTy.IsDynamic() {
+			accTyHint = TypeAny
+			if cb, err = e.resolveCallbackWithHints(args[0], []Type{TypeAny, e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)}); err != nil {
+				return Value{}, err
+			}
+			accWidened = true
+			if !hasInitial {
+				widenSeed = true
+			}
+		}
+	}
 	// A reduce callback must return the accumulator value; a void callback would
 	// leave nothing to store back into the accumulator (invalid IR otherwise).
-	if rt := cb.retType(); rt.IR == "void" || rt.IR == "" {
-		return Value{}, fmt.Errorf("%d:%d: %s callback must return the accumulator value", pos.Line, pos.Col, verb)
+	if rt := cb.retType(); !voidCB && (rt.IR == "void" || rt.IR == "") {
+		return Value{}, internalAt(pos, "%s callback without a result past its widening", verb)
 	}
 
 	var accTy Type
@@ -339,7 +379,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	lastIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", lastIdx, lenReg))
 
-	if accWidened {
+	if accWidened && hasInitial {
 		initVal, err := e.emitExpr(args[1])
 		if err != nil {
 			return Value{}, err
@@ -347,11 +387,11 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		accTy = accTyHint
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accSlotIR(accTy), storageAlign(accTy)))
 		seed := e.convert(initVal, accTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), seed.Ref, accAlloca, storageAlign(accTy)))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", accSlotIR(accTy), seed.Ref, accAlloca, storageAlign(accTy)))
 		if fromRight {
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lastIdx, idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", lastIdx, idxAlloca))
 		} else {
-			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 		}
 	} else if hasInitial {
 		initVal, err := e.emitExpr(args[1])
@@ -364,16 +404,19 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 			initVal = e.convert(initVal, accTy)
 		}
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accSlotIR(accTy), accTy.Align()))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), initVal.Ref, accAlloca, accTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", accSlotIR(accTy), initVal.Ref, accAlloca, accTy.Align()))
 		// reduce starts at the first index (0); reduceRight at the last (len-1),
 		// which is -1 for an empty array so the descending loop exits at once.
 		if fromRight {
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", lastIdx, idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", lastIdx, idxAlloca))
 		} else {
-			e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+			e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 		}
 	} else {
 		accTy = elemTy
+		if widenSeed {
+			accTy = TypeAny
+		}
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", accAlloca, accSlotIR(accTy), accTy.Align()))
 
 		// The seed is the first element that is no hole (the last, reduceRight).
@@ -383,9 +426,8 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		}
 		emptyReg := e.freshReg()
 		if hdr != "" {
-			e.ensureHoles()
 			seedIdx = e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_seed(ptr %s, i64 %s, i32 %d)", seedIdx, hdr, lenReg, map[bool]int{false: 0, true: 1}[fromRight]))
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_seed("+irPtr+" %s, i64 %s, i32 %d)", seedIdx, hdr, lenReg, map[bool]int{false: 0, true: 1}[fromRight]))
 			e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", emptyReg, seedIdx))
 		} else {
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", emptyReg, lenReg))
@@ -401,16 +443,21 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		// Seed from the last element (reduceRight) or the first (reduce), then
 		// start the loop one step inward.
 		firstGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", firstGep, elemTy.IR, ptrReg, seedIdx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", firstGep, elemTy.IR, ptrReg, seedIdx))
 		firstVal := e.loadArrayElem(firstGep, elemTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(elemTy), firstVal.Ref, accAlloca, elemTy.Align()))
+		if widenSeed {
+			if firstVal, err = e.emitBoxValue(firstVal); err != nil {
+				return Value{}, err
+			}
+		}
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", accSlotIR(accTy), firstVal.Ref, accAlloca, accTy.Align()))
 		startIdx := e.freshReg()
 		if fromRight {
 			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, 1", startIdx, seedIdx))
 		} else {
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", startIdx, seedIdx))
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", startIdx, idxAlloca))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", startIdx, idxAlloca))
 	}
 
 	condL := e.freshLabel("red.cond")
@@ -421,7 +468,7 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	// reduceRight walks down and finishes once the index passes 0 (negative);
 	// reduce walks up and finishes when it reaches len.
 	if fromRight {
@@ -438,11 +485,11 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	}
 	e.emitHoleSkip(hdr, idxVal, idxAlloca, redStep, condL)
 	accCur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", accCur, accSlotIR(accTy), accAlloca, storageAlign(accTy)))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", accCur, accSlotIR(accTy), accAlloca, storageAlign(accTy)))
 	inGep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, func() { e.hofSkip(idxVal, idxAlloca, redStep, condL) })
 	inVal := e.loadArrayElem(inGep, elemTy)
 
-	newAcc, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{{Ref: accCur, Ty: accTy}, inVal}, idxVal, live, ptrReg, lenReg, elemTy))
+	newAcc, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{{Ref: accCur, Ty: accTy}, e.walkElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, self, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -451,16 +498,18 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	// not assignable to type 'T'" — reject as tsc does rather than let coerce
 	// collapse the absent value to zero. `-compat=js` keeps the lenient collapse
 	// (the accumulator would be `undefined` there — BACKLOG §0).
-	if isNullableScalar(newAcc.Ty) && !isNullableScalar(accTy) && !e.compatJS() {
-		return Value{}, fmt.Errorf("%d:%d: %s callback returns %s | undefined (a path falls off the end) but the accumulator is %s — every path of the callback must return a value",
-			pos.Line, pos.Col, verb, tsTypeName(newAcc.Ty.withoutNullable()), tsTypeName(accTy))
+	if voidCB {
+		newAcc = Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
+	}
+	if isNullableScalar(newAcc.Ty) && !isNullableScalar(accTy) && !e.compatJS() && !accWidened {
+		return Value{}, internalAt(pos, "%s callback result %s | undefined past the accumulator's widening", verb, tsTypeName(newAcc.Ty.withoutNullable()))
 	}
 	if accWidened {
 		// The widened accumulator stores the callback's nullable result as is
 		// (the { i1, T } aggregate, or a possibly-null pointer) — absence travels
 		// with it into the next step and out as the result.
 		stepped := e.convert(newAcc, accTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), stepped.Ref, accAlloca, storageAlign(accTy)))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", accSlotIR(accTy), stepped.Ref, accAlloca, storageAlign(accTy)))
 	} else {
 		newAccCoerced := e.convert(newAcc, accTy)
 		// The accumulator has one type for the whole fold: the initial value's, or
@@ -468,10 +517,9 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 		// to it (`[1, 2].reduce((x, y) => `${x}+${y}`, 0)` — a string into a number)
 		// is tsc's "no overload matches this call"; storing it anyway was invalid IR.
 		if newAccCoerced.Ty.IR != accTy.IR {
-			return Value{}, fmt.Errorf("%d:%d: %s callback returns %s but the accumulator is %s — give the initial value the callback's result type",
-				pos.Line, pos.Col, verb, tsTypeName(newAcc.Ty), tsTypeName(accTy))
+			return Value{}, internalAt(pos, "%s callback result %s past the accumulator %s (checker-rejected)", verb, tsTypeName(newAcc.Ty), tsTypeName(accTy))
 		}
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", accSlotIR(accTy), newAccCoerced.Ref, accAlloca, accTy.Align()))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", accSlotIR(accTy), newAccCoerced.Ref, accAlloca, accTy.Align()))
 	}
 
 	idxNext := e.freshReg()
@@ -480,12 +528,12 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 	} else {
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, accSlotIR(accTy), accAlloca, storageAlign(accTy)))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", result, accSlotIR(accTy), accAlloca, storageAlign(accTy)))
 	return Value{Ref: result, Ty: accTy}, nil
 }
 
@@ -493,14 +541,15 @@ func (e *Emitter) emitArrayReduce(mem *ast.MemberExpression, args []ast.Expressi
 // pred, or `undefined` (`T | undefined`, TDD-00187) if none is found.
 func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: find takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "find arity %d", len(args))
 	}
 	live, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	self := e.hofSelf(mem.Object, live)
 	live = e.hofLiveHeader(mem.Object, live)
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{findElemHint(live, elemTy), TypeF64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{findElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
@@ -509,14 +558,14 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", foundAlloca, elemTy.IR, elemTy.Align()))
 	// Miss default: undefined box for a dynamic element, zero/null otherwise
 	// (a scalar's zero is then marked absent via the flag below — TDD-00187).
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, missRef(elemTy), foundAlloca, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", elemTy.IR, missRef(elemTy), foundAlloca, elemTy.Align()))
 	flagAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", flagAlloca))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", flagAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", flagAlloca))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("find.cond")
 	bodyL := e.freshLabel("find.body")
@@ -528,14 +577,14 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
 	e.emitLabel(bodyL)
 	inGep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, nil)
 	inVal := e.loadArrayElem(inGep, elemTy)
-	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{e.findElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, ptrReg, lenReg, elemTy))
+	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{e.findElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, self, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -544,13 +593,13 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 
 	e.emitLabel(matchL)
 	e.storeArrayElem(foundAlloca, elemTy, inVal)
-	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", flagAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", flagAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(incL)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
@@ -558,35 +607,36 @@ func (e *Emitter) emitArrayFind(mem *ast.MemberExpression, args []ast.Expression
 		return e.loadArrayElemMaybeNull(foundAlloca, elemTy), nil
 	}
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, elemTy.IR, foundAlloca, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", result, elemTy.IR, foundAlloca, elemTy.Align()))
 	found := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", found, flagAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", found, flagAlloca))
 	return e.wrapUndefinedable(Value{Ref: result, Ty: elemTy}, found), nil
 }
 
 // emitArraySome implements arr.some(pred): returns true if any element satisfies pred.
 func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: some takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "some arity %d", len(args))
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	self := e.hofSelf(mem.Object, hdr)
 	live := e.hofLiveHeader(mem.Object, hdr)
 	hdr = e.hofHolesHeader(mem.Object, hdr)
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
 
 	resAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resAlloca))
-	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resAlloca))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("some.cond")
 	bodyL := e.freshLabel("some.body")
@@ -598,7 +648,7 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -606,7 +656,7 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	e.emitHoleSkip(hdr, idxVal, idxAlloca, 1, condL)
 	inGep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, func() { e.hofSkip(idxVal, idxAlloca, 1, condL) })
 	inVal := e.loadArrayElem(inGep, elemTy)
-	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{inVal}, idxVal, live, ptrReg, lenReg, elemTy))
+	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{e.walkElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, self, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -614,44 +664,45 @@ func (e *Emitter) emitArraySome(mem *ast.MemberExpression, args []ast.Expression
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", boolVal.Ref, trueL, incL))
 
 	e.emitLabel(trueL)
-	e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", resAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 1, "+irPtr+" %s, align 1", resAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(incL)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", result, resAlloca))
 	return Value{Ref: result, Ty: TypeBool}, nil
 }
 
 // emitArrayEvery implements arr.every(pred): returns true if all elements satisfy pred.
 func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: every takes exactly 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "every arity %d", len(args))
 	}
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
 	}
+	self := e.hofSelf(mem.Object, hdr)
 	live := e.hofLiveHeader(mem.Object, hdr)
 	hdr = e.hofHolesHeader(mem.Object, hdr)
-	cb, err := e.resolveCallbackWithHints(args[0], []Type{elemTy, TypeF64, ArrayOf(elemTy)})
+	cb, err := e.resolveCallbackWithHints(args[0], []Type{e.walkElemHint(live, elemTy), TypeF64, e.hofSelfHint(self, elemTy)})
 	if err != nil {
 		return Value{}, err
 	}
 
 	resAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resAlloca))
-	e.emitInstr(fmt.Sprintf("store i1 1, ptr %s, align 1", resAlloca)) // assume true
+	e.emitInstr(fmt.Sprintf("store i1 1, "+irPtr+" %s, align 1", resAlloca)) // assume true
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("evry.cond")
 	bodyL := e.freshLabel("evry.body")
@@ -663,7 +714,7 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -671,7 +722,7 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	e.emitHoleSkip(hdr, idxVal, idxAlloca, 1, condL)
 	inGep := e.hofLiveGep(live, ptrReg, idxVal, elemTy, func() { e.hofSkip(idxVal, idxAlloca, 1, condL) })
 	inVal := e.loadArrayElem(inGep, elemTy)
-	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{inVal}, idxVal, live, ptrReg, lenReg, elemTy))
+	predVal, err := e.emitCBCall(cb, e.hofCBArgs(cb, []Value{e.walkElemArg(live, idxVal, elemTy, inVal)}, idxVal, live, self, ptrReg, lenReg, elemTy))
 	if err != nil {
 		return Value{}, err
 	}
@@ -679,18 +730,18 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", boolVal.Ref, incL, falseL))
 
 	e.emitLabel(falseL)
-	e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(incL)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", result, resAlloca))
 	return Value{Ref: result, Ty: TypeBool}, nil
 }
 
@@ -702,10 +753,13 @@ func (e *Emitter) emitArrayEvery(mem *ast.MemberExpression, args []ast.Expressio
 // itself when the callback takes them. The array is a fresh header
 // over the same data (the array value shape every HOF returns): element
 // reads through it are live, the length a snapshot (ADR-00573).
-func (e *Emitter) hofCBArgs(cb Callback, lead []Value, idx, live, ptrReg, lenReg string, elemTy Type) []Value {
+func (e *Emitter) hofCBArgs(cb Callback, lead []Value, idx, live string, self Value, ptrReg, lenReg string, elemTy Type) []Value {
 	args := lead
 	if cb.acceptsArgAt(len(lead)) {
 		args = append(args, Value{Ref: idx, Ty: TypeI64})
+	}
+	if cb.acceptsArgAt(len(lead)+1) && self.Ref != "" {
+		return append(args, self) // the typed array itself
 	}
 	if cb.acceptsArgAt(len(lead)+1) && live != "" {
 		// The array itself (hofLiveHeader).
@@ -716,6 +770,30 @@ func (e *Emitter) hofCBArgs(cb Callback, lead []Value, idx, live, ptrReg, lenReg
 		args = append(args, Value{Ref: agg1, Ty: ArrayOf(elemTy)})
 	}
 	return args
+}
+
+// hofSelf is the receiver an array method passes its callback as the
+// third argument when that is a typed array, whose header hdr is: the typed
+// array itself (`a === t`). Empty for any other receiver, which passes its
+// live header or a header over its data (hofCBArgs).
+func (e *Emitter) hofSelf(objExpr ast.Expression, hdr string) Value {
+	if hdr == "" || hdr == "zeroinitializer" {
+		return Value{}
+	}
+	t := e.typeOfExpr(objExpr)
+	if !t.IsTypedArray() || t.IsDynamic() || t.Nullable() {
+		return Value{}
+	}
+	return Value{Ref: hdr, Ty: t}
+}
+
+// hofSelfHint is the type a callback's third parameter takes: the typed
+// array's own type, else an array of elemTy.
+func (e *Emitter) hofSelfHint(self Value, elemTy Type) Type {
+	if self.Ref != "" {
+		return self.Ty
+	}
+	return ArrayOf(elemTy)
 }
 
 // typedArrayResultType is the type of a new typed array a method of recv
@@ -739,7 +817,7 @@ func (e *Emitter) reduceSeedType(seed ast.Expression) Type {
 	if lit, ok := seed.(*ast.ArrayLiteral); ok && len(lit.Elements) == 0 && e.compatJS() {
 		return ArrayOf(TypeAny)
 	}
-	return e.inferExprType(seed)
+	return e.typeOfExpr(seed)
 }
 
 // hofLiveHeader is the header of the array an array method's callback walk
@@ -750,10 +828,64 @@ func (e *Emitter) hofLiveHeader(objExpr ast.Expression, hdr string) string {
 	if hdr == "" || hdr == "zeroinitializer" {
 		return ""
 	}
-	if t := e.inferExprType(objExpr); !t.IsArray() || t.IsTypedArray() || t.IsFlatArray() || t.ExecArray || t.IsDynamic() || t.Nullable() {
+	t := e.typeOfExpr(objExpr)
+	if t.IsTypedArray() && !t.IsDynamic() && !t.Nullable() && e.programResizesBuffers() {
+		// A view over a resizable buffer the callback may resize: each
+		// step reads the length its header has then, an index past it the
+		// element undefined (a typed array's [[Get]]), not skipped.
+		if e.liveTyped == nil {
+			e.liveTyped = map[string]bool{}
+		}
+		e.liveTyped[hdr] = true
+		return hdr
+	}
+	// (A possibly-absent array's walk got here with its header: the
+	// receiver was there.)
+	if !t.IsArray() || t.IsTypedArray() || t.IsFlatArray() || t.ExecArray || t.IsDynamic() {
 		return ""
 	}
 	return hdr
+}
+
+// programResizesBuffers reports a program that may resize an ArrayBuffer
+// (it names `resize` or `grow`, or makes one with `maxByteLength`).
+func (e *Emitter) programResizesBuffers() bool {
+	if e.resizesKnown {
+		return e.resizes
+	}
+	e.resizesKnown = true
+	if e.prog != nil {
+		ast.Inspect(e.prog, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.MemberExpression:
+				e.resizes = e.resizes || x.Property == "resize" || x.Property == "grow"
+			case *ast.ObjectLiteral:
+				for _, p := range x.Properties {
+					e.resizes = e.resizes || p.Key == "maxByteLength"
+				}
+			}
+			return !e.resizes
+		})
+	}
+	return e.resizes
+}
+
+// walkElemHint is the element parameter type a walk's callback gets: under
+// a live typed array, possibly undefined (findElemHint).
+func (e *Emitter) walkElemHint(live string, elemTy Type) Type {
+	if e.liveTyped[live] {
+		return findElemHint(live, elemTy)
+	}
+	return elemTy
+}
+
+// walkElemArg is the element a walk's callback receives at idx (findElemArg
+// under a live typed array).
+func (e *Emitter) walkElemArg(live, idx string, elemTy Type, raw Value) Value {
+	if e.liveTyped[live] {
+		return e.findElemArg(live, idx, elemTy, raw)
+	}
+	return raw
 }
 
 // hofLiveGep is the address of element idx of the array a callback walk
@@ -765,8 +897,11 @@ func (e *Emitter) hofLiveHeader(objExpr ast.Expression, hdr string) string {
 func (e *Emitter) hofLiveGep(live, ptrReg, idx string, elemTy Type, skip func()) string {
 	gep := e.freshReg()
 	if live == "" {
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, ptrReg, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, ptrReg, idx))
 		return gep
+	}
+	if e.liveTyped[live] {
+		skip = nil // (a typed array's element past its length is undefined)
 	}
 	v := Value{Ref: live, Ty: ArrayOf(elemTy)}
 	data, n := e.arrayData(v), e.arrayLen(v)
@@ -778,15 +913,15 @@ func (e *Emitter) hofLiveGep(live, ptrReg, idx string, elemTy Type, skip func())
 		e.emitLabel(outL)
 		skip()
 		e.emitLabel(okL)
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", gep, elemTy.IR, data, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, data, idx))
 		return gep
 	}
 	miss := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", miss, elemTy.IR, elemTy.Align()))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", elemTy.IR, missRef(elemTy), miss, elemTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", elemTy.IR, missRef(elemTy), miss, elemTy.Align()))
 	at, r := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", at, elemTy.IR, data, idx))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, in, at, miss))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", at, elemTy.IR, data, idx))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, in, at, miss))
 	return r
 }
 
@@ -821,6 +956,6 @@ func (e *Emitter) findElemArg(live, idx string, elemTy Type, raw Value) Value {
 func (e *Emitter) hofSkip(idx, idxSlot string, step int, condL string) {
 	next := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", next, idx, step))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", next, idxSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, idxSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 }

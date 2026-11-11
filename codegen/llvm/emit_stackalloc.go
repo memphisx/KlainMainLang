@@ -30,6 +30,7 @@
 package llvm
 
 import (
+	"KlainMainLang/memplan"
 	"fmt"
 	"reflect"
 
@@ -52,7 +53,7 @@ func (e *Emitter) structAlloc(lit ast.Expression, ty Type) (dataReg string) {
 		e.stackAllocatedLits[lit] = true
 		dataReg = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", dataReg, structIR))
-		e.emitInstr(fmt.Sprintf("store %s zeroinitializer, ptr %s, align 8", structIR, dataReg))
+		e.emitInstr(fmt.Sprintf("store %s zeroinitializer, "+irPtr+" %s, align 8", structIR, dataReg))
 		e.emitStoreObjHeader(dataReg, ty)
 		return dataReg
 	}
@@ -67,60 +68,58 @@ func (e *Emitter) emitObjAlloc(ty Type) string {
 		e.emitObjAllocInto(dataReg, ty)
 		return dataReg
 	}
-	e.ensureCalloc()
 	dataReg := e.freshReg()
-	e.heapCallocInto(dataReg, "1", fmt.Sprint(ty.StructSize()))
+	e.emitObjBlock(dataReg, ty, true)
 	e.emitStoreObjHeader(dataReg, ty)
 	return dataReg
 }
 
 // closureAllocs returns the allocation instructions' registers for a closure
-// literal's 16-byte {fn,env} header and (if caps > 0) its env struct —
+// literal's 16-byte {fn,env} header of code fn and (if caps > 0) its env struct —
 // entry-block allocas when lit is the currently stack-planned initializer
 // (TDD-00134 Stage 1, consuming the marker), plain mallocs otherwise. The
 // shared capture cells are unaffected either way: they stay heap, shared by
 // pointer with the enclosing scope.
-func (e *Emitter) closureAllocs(lit ast.Expression, envIR string, envSize int64) (hdr, env string) {
+func (e *Emitter) closureAllocs(lit ast.Expression, envIR string, envSize int64, fn string) (hdr, env string) {
 	if e.pendingStackAllocLit != nil && e.pendingStackAllocLit == lit {
 		e.pendingStackAllocLit = nil
 		if e.stackAllocatedLits == nil {
 			e.stackAllocatedLits = map[ast.Expression]bool{}
 		}
 		e.stackAllocatedLits[lit] = true
+		// The prefix word too: a function value's name and length read it.
+		cell := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca { i64, "+irPtr+", "+irPtr+" }, align 8", cell))
+		e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", e.fnWord(fn), cell))
 		hdr = e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca {ptr, ptr}, align 8", hdr))
+		e.emitBodyAddr(hdr, cell)
 		if envSize > 0 {
 			env = e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", env, envIR))
 		}
 		return hdr, env
 	}
-	e.ensureMalloc()
 	hdr = e.freshReg()
-	e.heapMallocInto(hdr, "16")
+	e.emitClosureAlloc(hdr, "16", fn)
 	if envSize > 0 {
 		env = e.freshReg()
-		e.heapMallocInto(env, fmt.Sprint(envSize))
+		e.heapMallocInto(env, allocClosure, fmt.Sprint(envSize))
 	}
 	return hdr, env
 }
 
 // planStackAllocs records, per candidate declaration, whether its flow
 // provably keeps the value block-local — the -optimize-memory analog of
-// planAutoFrees, writing to its own plan.
+// the free plan, writing to its own plan.
 func (e *Emitter) planStackAllocs(prog *ast.Program) error {
 	if !e.opts.OptimizeMemory {
 		return nil
 	}
-	p := &escPlanner{
-		auto:  true,
-		stack: true,
-		plan:  map[*ast.VarDeclaration]bool{},
+	plan, err := memplan.Stack(prog)
+	if err != nil {
+		return fmt.Errorf("internal: %v", err)
 	}
-	if err := p.walkStmts(prog.Body, false); err != nil {
-		return err
-	}
-	e.stackAllocPlan = p.plan
+	e.stackAllocPlan = plan
 	return nil
 }
 
@@ -298,89 +297,13 @@ func containsThis(root interface{}) bool {
 	return found
 }
 
-// collectFinRegNames returns the identifiers that provably denote a
-// FinalizationRegistry everywhere they appear: bound exactly once, by a
-// `new FinalizationRegistry(...)` declaration, and never rebound by any
-// other binder (another declaration, a parameter, a catch/for binder, a
-// destructuring element, an assignment). The scan is deliberately
-// over-broad on the disqualifying side — via reflection, ANY struct field
-// that names a binding (`Name`/`VarName`/`Param`/`Local`/`Alias`) counts —
-// since over-disqualifying only loses an optimization, never soundness.
-func collectFinRegNames(prog *ast.Program) map[string]bool {
-	candidates := map[string]int{}
-	other := map[string]bool{}
-
-	binderFields := map[string]bool{"Name": true, "VarName": true, "Param": true, "Local": true, "Alias": true}
-
-	addrOf := func(v reflect.Value) interface{} {
-		if v.CanAddr() {
-			if a := v.Addr(); a.CanInterface() {
-				return a.Interface()
-			}
-		}
-		return nil
-	}
-
-	var visit func(v reflect.Value)
-	visit = func(v reflect.Value) {
-		switch v.Kind() {
-		case reflect.Ptr, reflect.Interface:
-			if !v.IsNil() {
-				visit(v.Elem())
-			}
-		case reflect.Slice:
-			for i := 0; i < v.Len(); i++ {
-				visit(v.Index(i))
-			}
-		case reflect.Struct:
-			// An Identifier is a *reference*, not a binder — its Name field
-			// must not disqualify (every use of the registry would).
-			if _, isRef := addrOf(v).(*ast.Identifier); isRef {
-				return
-			}
-			if vd, ok := addrOf(v).(*ast.VarDeclaration); ok {
-				if ne, isNew := vd.Init.(*ast.NewExpression); isNew && ne.ClassName == "FinalizationRegistry" {
-					candidates[vd.Name]++
-				} else {
-					other[vd.Name] = true
-				}
-				visit(reflect.ValueOf(vd.Init))
-				return
-			}
-			for i := 0; i < v.NumField(); i++ {
-				f := v.Field(i)
-				name := v.Type().Field(i).Name
-				if f.Kind() == reflect.String && binderFields[name] && f.String() != "" {
-					other[f.String()] = true
-					continue
-				}
-				if f.CanInterface() {
-					visit(f)
-				}
-			}
-		}
-	}
-	for _, s := range prog.Body {
-		visit(reflect.ValueOf(s))
-	}
-
-	out := map[string]bool{}
-	for n, cnt := range candidates {
-		if cnt == 1 && !other[n] {
-			out[n] = true
-		}
-	}
-	return out
-}
-
 // emitObjAllocInto is emitObjAlloc into a register the caller already named.
 func (e *Emitter) emitObjAllocInto(reg string, ty Type) {
-	e.ensureCalloc()
 	if hostPrefixedObject(ty) {
 		e.emitHostPrefixedAlloc(reg, ty, "calloc(i64 1, ")
 		return
 	}
-	e.heapCallocInto(reg, "1", fmt.Sprint(ty.StructSize()))
+	e.emitObjBlock(reg, ty, true)
 	e.emitStoreObjHeader(reg, ty)
 }
 
@@ -388,19 +311,18 @@ func (e *Emitter) emitObjAllocInto(reg string, ty Type) {
 // with call, its header word at the base, and names its body reg.
 func (e *Emitter) emitHostPrefixedAlloc(reg string, ty Type, call string) {
 	base := e.freshReg()
-	e.heapAllocCall(base, fmt.Sprintf("%si64 %d)", call, ty.StructSize()+8))
+	e.heapAllocCall(base, allocHost, fmt.Sprintf("%si64 %d)", call, ty.StructSize()+8))
 	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", reg, base))
+	e.emitBodyAddr(reg, base)
 }
 
 // emitObjMallocInto is emitObjAllocInto without the zeroing, for a caller
 // that stores every field itself.
 func (e *Emitter) emitObjMallocInto(reg string, ty Type) {
-	e.ensureMalloc()
 	if hostPrefixedObject(ty) {
 		e.emitHostPrefixedAlloc(reg, ty, "malloc(")
 		return
 	}
-	e.heapMallocInto(reg, fmt.Sprint(ty.StructSize()))
+	e.emitObjBlock(reg, ty, false)
 	e.emitStoreObjHeader(reg, ty)
 }

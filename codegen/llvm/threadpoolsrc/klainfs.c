@@ -93,7 +93,7 @@ enum {
     KFS_RMDIR, KFS_UNLINK, KFS_RENAME, KFS_LINK, KFS_SYMLINK, KFS_READLINK,
     KFS_REALPATH, KFS_MKDTEMP, KFS_CHMOD, KFS_FCHMOD, KFS_CHOWN, KFS_FCHOWN,
     KFS_LCHOWN, KFS_TRUNCATE, KFS_FTRUNCATE, KFS_ACCESS, KFS_UTIMES,
-    KFS_FUTIMES, KFS_LUTIMES, KFS_COPYFILE, KFS_READDIR,
+    KFS_FUTIMES, KFS_LUTIMES, KFS_COPYFILE, KFS_READDIR, KFS_OPENDIR, KFS_DIRREAD, KFS_CLOSEDIR,
 };
 
 // libuv's uv_dirent_type_t, what Node's getDirents reads.
@@ -277,17 +277,19 @@ static int kfs_entry_cmp(const void *a, const void *b) {
     return strcmp(((const kfs_entry *)a)->name, ((const kfs_entry *)b)->name);
 }
 
-// readdir's result: each entry as its type digit and its name, joined by
-// '/', which no file name contains. libuv's scandir sorts them (strcmp).
-static int kfs_readdir(kml_pool_item *it) {
-    void *d = opendir(it->arg0);
-    if (!d) return errno;
+// Up to max entries (max < 0: every one) of the open directory d, past
+// "." and "..", into *out (n of them); an errno, or 0.
+static int kfs_read_entries(void *d, int64_t max, kfs_entry **out, size_t *count) {
     size_t n = 0, cap = 16;
     kfs_entry *ents = (kfs_entry *)malloc(cap * sizeof *ents); /* scratch */
-    for (;;) {
+    int e = 0;
+    while (max < 0 || (int64_t)n < max) {
         errno = 0;
         kfs_dirent *de = readdir(d);
-        if (!de) break;
+        if (!de) {
+            e = errno;
+            break;
+        }
         const char *nm = de->d_name;
         if (strcmp(nm, ".") == 0 || strcmp(nm, "..") == 0) continue;
         int t = KFS_DT_UNKNOWN;
@@ -308,10 +310,14 @@ static int kfs_readdir(kml_pool_item *it) {
         ents[n].type = t;
         n++;
     }
-    closedir(d);
-#ifndef _WIN32
-    qsort(ents, n, sizeof *ents, kfs_entry_cmp);
-#endif
+    *out = ents;
+    *count = n;
+    return e;
+}
+
+// The entries as res_str: each as its type digit and its name, joined by
+// '/', which no file name contains. Frees them.
+static void kfs_entries_result(kml_pool_item *it, kfs_entry *ents, size_t n) {
     size_t len = 1;
     for (size_t i = 0; i < n; i++) len += strlen(ents[i].name) + 2;
     char *out = (char *)malloc(len); /* scratch */
@@ -328,6 +334,42 @@ static int kfs_readdir(kml_pool_item *it) {
     free(ents); /* scratch */
     free(it->res_str); /* scratch */
     it->res_str = out;
+    it->res = (double)n;
+}
+
+// readdir's result (kfs_entries_result). libuv's scandir sorts them
+// (strcmp).
+static int kfs_readdir(kml_pool_item *it) {
+    void *d = opendir(it->arg0);
+    if (!d) return errno;
+    kfs_entry *ents;
+    size_t n;
+    int e = kfs_read_entries(d, -1, &ents, &n);
+    closedir(d);
+    if (e != 0) {
+        for (size_t i = 0; i < n; i++) free(ents[i].name); /* scratch */
+        free(ents); /* scratch */
+        return e;
+    }
+#ifndef _WIN32
+    qsort(ents, n, sizeof *ents, kfs_entry_cmp);
+#endif
+    kfs_entries_result(it, ents, n);
+    return 0;
+}
+
+// uv_fs_readdir: the next d[1] entries of the directory handle d[0], in
+// the order the system gives them (res: how many; 0 at the end).
+static int kfs_dirread(kml_pool_item *it) {
+    kfs_entry *ents;
+    size_t n;
+    int e = kfs_read_entries((void *)(uintptr_t)it->d[0], (int64_t)it->d[1], &ents, &n);
+    if (e != 0) {
+        for (size_t i = 0; i < n; i++) free(ents[i].name); /* scratch */
+        free(ents); /* scratch */
+        return e;
+    }
+    kfs_entries_result(it, ents, n);
     return 0;
 }
 
@@ -455,7 +497,7 @@ static void work_fs(kml_pool_item *it) {
             if (ns) {
                 free(first); /* scratch */
                 first = strdup(ns);
-                kml_free(KML_HEAP_RAW, ns - 8);
+                kml_free(KML_HEAP_RAW, KML_PREFIX(ns));
             }
 #endif
             free(it->res_str); /* scratch */
@@ -591,6 +633,19 @@ static void work_fs(kml_pool_item *it) {
         break;
     case KFS_READDIR:
         e = kfs_readdir(it);
+        break;
+    case KFS_OPENDIR: {
+        // uv_fs_opendir: the handle, as a number.
+        void *d = opendir(it->arg0);
+        if (!d) e = errno;
+        else it->res = (double)(uintptr_t)d;
+        break;
+    }
+    case KFS_DIRREAD:
+        e = kfs_dirread(it);
+        break;
+    case KFS_CLOSEDIR:
+        if (closedir((void *)(uintptr_t)it->d[0]) != 0) e = errno;
         break;
     default:
         e = kfs_errno_EINVAL;

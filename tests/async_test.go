@@ -1010,3 +1010,63 @@ async function m() {
 m();
 `, "true\ntrue true\ntrue true\n")
 }
+
+// A may-suspend async function passed by name to an array method runs as
+// its own task, as a direct call does: each element gets its promise.
+func TestE2EAsyncNamedFunctionAsCallback(t *testing.T) {
+	assertSameAsNode(t, `async function w(n: number): Promise<number> { await null; return n + 1; }
+const ps = [1, 2].map(w);
+console.log(ps);
+for (const p of ps) console.log(await p);
+console.log(await Promise.all([3, 4].map(w)));
+async function each(n: number) { await null; console.log("e", n); }
+[5, 6].forEach(each);
+await null; await null;
+`)
+}
+
+func TestE2EAwaitOverloadedThenable(t *testing.T) {
+	// A thenable whose then is overloaded awaits as the union of every
+	// signature's onfulfilled value (tsc's getPromisedTypeOfPromise).
+	assertSameAsNode(t, `interface Thenable<T> {
+  then<U>(ok?: (value: T) => Thenable<U>): Thenable<U>;
+  then<U>(ok?: (value: T) => U): Thenable<U>;
+}
+function make(v: number): Thenable<number> {
+  return { then(ok?: (value: number) => any) { ok?.(v); return make(v) } } as Thenable<number>;
+}
+async function main() {
+  const n = await make(42);
+  console.log(n + 1);
+}
+main();
+`)
+}
+
+// `return f()` in a Promise<void> async function, and an expression-bodied
+// async arrow whose body is a void call, still run the call (ADR-01982).
+func TestE2EAsyncVoidReturnRunsExpression(t *testing.T) {
+	assertSameAsNode(t, `const g = async () => console.log(await Promise.resolve(2));
+g();
+(async () => console.log(await Promise.resolve(3)))();
+async function h(): Promise<void> { return console.log("in"); }
+h().then(v => console.log(v));
+`)
+}
+
+// `.then` on an immediately called async function expression: its task
+// promise, as an async arrow's.
+func TestE2EAsyncFunctionExpressionIIFEThen(t *testing.T) {
+	assertSameAsNode(t, `(async function() { await null; return 1; })().then((v) => console.log("a", v));
+(async function() { return 2; })().then((v) => console.log("b", v)).finally(() => console.log("c"));
+`)
+}
+
+// A JavaScript async function called without a parameter its other calls
+// pass (a RegExp there): the parameter is undefined.
+func TestE2EAsyncOmittedArgumentJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `async function w(d, e) { console.log(e === undefined, typeof e); if (e) console.log(e.test(d)); await null; console.log(d); }
+async function main() { await w("x"); await w("1", /^1/); }
+main();
+`)
+}

@@ -94,9 +94,7 @@ func TestUserBindingsShadowBuiltins(t *testing.T) {
 
 func TestBuiltinConstructorArity(t *testing.T) {
 	for src, want := range map[string]string{
-		"new WeakMap(1, 2)":         "takes 0 to 1 arguments",
-		`new Error("x", { y: 1 })`:  "{ cause: <expr> }",
-		"new Date(1,2,3,4,5,6,7,8)": "at most 7 arguments",
+		"new WeakMap([], f())": "takes 0 to 1 arguments",
 	} {
 		prog, err := parser.Parse(src)
 		if err != nil {
@@ -105,5 +103,15 @@ func TestBuiltinConstructorArity(t *testing.T) {
 		if err := sema.Prepare(prog); err == nil || !strings.Contains(err.Error(), want) {
 			t.Errorf("%s: got %v, want error containing %q", src, err, want)
 		}
+	}
+}
+
+// Any options value other than a `{ cause }` literal is kept for the run
+// time to read its cause.
+func TestErrorOptionsKept(t *testing.T) {
+	prog := prepared(t, `new Error("x", { y: 1 })`)
+	ne, ok := firstNew(prog).(*ast.NewErrorExpression)
+	if !ok || ne.Options == nil || ne.Cause != nil {
+		t.Fatalf("want the options kept, got %#v", firstNew(prog))
 	}
 }

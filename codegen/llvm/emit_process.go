@@ -27,10 +27,6 @@ func memoryUsageType() Type {
 	})
 }
 
-// UsesHeapStats reports whether process.memoryUsage()'s heapTotal/heapUsed
-// shim (ProcMemSource) needs linking.
-func (e *Emitter) UsesHeapStats() bool { return e.usedHeapStats }
-
 // ProcMemSource is the heap-accounting shim behind process.memoryUsage()'s
 // heapTotal/heapUsed. It reports this compiler's object heap: Boehm's collected
 // heap under -mm=gc (KML_GC), AddressSanitizer's allocator in a sanitizer

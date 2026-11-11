@@ -20,12 +20,11 @@
       "differences": [
         "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time) — byte data flows as `Uint8Array` chunks through default readers",
         "`ReadableStream.from()` accepts arrays only, not async iterables",
-        "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter",
+        "Source callbacks must be arrow/function-expression/method-shorthand literals",
         "`read()` on a closed stream whose chunk type is an **array/tuple** still yields the chunk's zero-shaped value, not `undefined` (an array slot has no spare absent state); a scalar/string/object chunk reads a real `undefined`, and `controller.desiredSize` is `null` once errored",
-        "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
         "In the no-fiber tier, `await` of an already-settled `read()` skips the microtask drain, so a pending pull can run one tick later than real JS",
         "A synchronously-throwing pull/start propagates to the caller instead of erroring the stream",
-        "`tee()` forwards the last cancelling branch's reason instead of composing both; a signal abort of `pipeTo` takes effect at the next chunk boundary"
+        "A signal abort of `pipeTo` takes effect at the next chunk boundary"
       ],
       "seeAlso": ["streams.writablestream", "streams.transformstream", "streams.blobstream"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream" }
@@ -76,8 +75,7 @@
       "exampleKey": "streams/gzip",
       "snippet": "const [rawBranch, decodeBranch] = source.pipeThrough(new CompressionStream(\"gzip\")).tee()\nfor await (const chunk of decodeBranch.pipeThrough(new DecompressionStream(\"gzip\"))) {\n  out = out + dec.decode(chunk)\n}",
       "differences": [
-        "The format argument must be a string literal (\"gzip\", \"deflate\", \"deflate-raw\") — a runtime-computed format string is a compile error",
-        "Chunks are `Uint8Array` only (no ArrayBuffer/DataView BufferSource variants)"
+        "No \"brotli\" format (Node 24 accepts it): it throws the TypeError for a value that is no CompressionFormat"
       ],
       "seeAlso": ["streams.transformstream"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/CompressionStream" }
@@ -107,11 +105,7 @@
       "exampleKey": "streams/class_extends",
       "snippet": "class Greeter extends Readable {\n  words: string[] = [\"kalimera\", \"kosme\", \"apo\", \"thessaloniki\"]\n  i: number = 0\n  constructor() { super({ objectMode: true }) }\n  _read() {\n    if (this.i >= this.words.length) { this.push(null) }\n    else { this.push(this.words[this.i]); this.i = this.i + 1 }\n  }\n}",
       "differences": [
-        "An omitted error argument reaches a callback declared `(err?: Error | null)` as `null`; Node passes `undefined`",
-        "The fs streams and the HTTP server's `req`/`res` are separate runtime handles, not instances of these classes",
-        "`Readable.toWeb` has no pull backpressure; `Duplex.toWeb`/`fromWeb` are missing",
-        "Not ported: `Readable.wrap`, `isReadable`/`isErrored`/`setDefaultHighWaterMark`",
-        "A method replaced on an instance (`this._read = fn`) is not supported; pass it in the options"
+        "The fs streams and the HTTP server's `req`/`res` are separate runtime handles, not instances of these classes"
       ],
       "seeAlso": ["streams.streampipeline", "streams.duplexpair", "streams.readablestream"],
       "spec": { "mdn": "https://nodejs.org/api/stream.html#class-streamreadable" }

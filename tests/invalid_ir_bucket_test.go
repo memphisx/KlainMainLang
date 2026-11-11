@@ -1,6 +1,9 @@
 package tests
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // The programs below all reached clang as invalid IR (the conformance run's
 // CLANG_ERROR bucket, ADR-01043). Each now either runs with Node's output or is
@@ -51,8 +54,10 @@ NaN NaN NaN 0.7071067811865476 0 1
 // The fold's accumulator has one type; a callback result with no conversion to
 // it was stored anyway.
 func TestE2EReduceAccumulatorTypeMismatchRejected(t *testing.T) {
-	assertCodegenError(t, "const xs: number[] = [1, 2, 3]\nconsole.log(xs.reduce((x, y) => `(${x}+${y})`, 0))\n",
-		"reduce callback returns string but the accumulator is number")
+	// tsc rejects it (TS2769: no overload takes a string result for U = number).
+	if _, err := parseAndCompile("const xs: number[] = [1, 2, 3]\nconsole.log(xs.reduce((x, y) => `(${x}+${y})`, 0))\n"); err == nil || !strings.Contains(err.Error(), "no overload matches this call") {
+		t.Fatalf("expected a no-overload rejection, got: %v", err)
+	}
 	assertOutput(t, "const xs: number[] = [1, 2, 3]\n"+
 		"console.log(xs.reduce((a, b) => a + b, 0), xs.reduce((a, b) => a + b), xs.reduce((a, b) => a + b * 0.5, 0))\n"+
 		"console.log(xs.reduce((s, b) => s + \",\" + b, \"\"), [\"a\", \"bb\"].reduce((n, s) => n + s.length, 0))\n"+

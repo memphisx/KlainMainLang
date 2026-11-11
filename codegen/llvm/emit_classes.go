@@ -45,10 +45,17 @@ type MethodSlot struct {
 // populated by registerClasses before any function or method body is
 // emitted (mirroring how registerInterfaces/registerFunctions front-load
 // their own registries). Ty is also stored into e.interfaces[name] so
-// resolveType's existing named-type lookup resolves a class name in any
+// annotationType's existing named-type lookup resolves a class name in any
 // type annotation with no changes of its own.
 type ClassInfo struct {
-	Ty          Type // ClassType(name, inherited, own, hasVTable) — the instance's storage type
+	Ty Type // ClassType(name, inherited, own, hasVTable) — the instance's storage type
+	// TypeSubs are a generic class instantiation's type arguments, by
+	// parameter name: a method body compiled again (a foreign receiver's
+	// adapter) binds them as the instantiation's own did.
+	TypeSubs map[string]Type
+	// GenericOf is the generic class an instantiation is of (`Box` for
+	// `Box<number>`'s), "" for any other class.
+	GenericOf   string
 	Constructor *ast.FunctionDeclaration
 	// ImplicitCtor marks a Constructor this compiler synthesized for a class
 	// that declares none (JavaScript's `constructor(...args)`, length 0).
@@ -148,7 +155,7 @@ type ClassInfo struct {
 	HostBase *Type
 	// HostAnnot is HostBase as an annotation (`Map<string, number>`): an
 	// instance viewed as its host (`x as Map<string, number>`).
-	HostAnnot *ast.TypeAnnotation
+	HostAnnot ast.TypeNode
 	// ErrorBaseKind is the builtin error an error subclass extends
 	// directly ("Error", "TypeError", "RangeError", …): its default `.name`,
 	// and the builtin kind `instanceof` also matches.
@@ -163,10 +170,6 @@ type ClassInfo struct {
 	// since InheritedFields/OwnFields/FlatFields don't otherwise track
 	// per-field provenance.
 	FieldOrigin map[string]string
-	// ReadonlyFields is the set of `readonly` instance-field names (own +
-	// inherited) — TDD-00154. A write is rejected unless it is inside the
-	// constructor of the field's declaring class (FieldOrigin).
-	ReadonlyFields map[string]bool
 	// DeclareFields are `declare` fields (own and inherited): no own
 	// property until assigned.
 	DeclareFields map[string]bool
@@ -212,13 +215,13 @@ type ClassInfo struct {
 //
 // The fix is narrow rather than architectural: every place that returns a
 // field's type as the type of the expression *for a caller to potentially
-// drill into further* (emitMember, emitOptionalMember, inferExprType's
+// drill into further* (emitMember, emitOptionalMember, typeOfExpr's
 // field-read case) re-resolves a class-typed field's type through this
 // helper before handing it back, so the caller always sees the final,
 // fully-resolved field list — without changing Field/Type's storage shape
 // or touching any of the many other call sites that read a field's type
 // for a non-chaining purpose (coercion, alignment, GEP storage width),
-// where the snapshot's IR-level shape (always "ptr" for any class) was
+// where the snapshot's IR-level shape (always irPtr for any class) was
 // already correct and sufficient.
 // boxSelfReference boxes a value typed by a named shape's self-reference
 // placeholder (`next: N | null` captured inside N before N's fields
@@ -306,7 +309,7 @@ func (e *Emitter) canonicalizeClassTy(ty Type) Type {
 // buildParamSig resolves a parameter list into a FuncSig's parameter half
 // (types/names/defaults/rest), the same per-parameter rules
 // registerFunctions uses for top-level functions: an explicit annotation is
-// resolved via resolveType; a rest parameter with no annotation defaults to
+// resolved via annotationType; a rest parameter with no annotation defaults to
 // number[]; a destructured one the type its pattern gives it (fd's, when
 // the list is a declaration's); anything else unannotated defaults to
 // (inferred) TypeI64.
@@ -315,7 +318,7 @@ func (e *Emitter) buildParamSig(params []ast.Param, fd *ast.FunctionDeclaration)
 	for i, p := range params {
 		var pty Type
 		if p.Type != nil {
-			pty = e.resolveType(p.Type)
+			pty = e.annotationType(p.Type)
 		} else if p.Rest {
 			pty = untypedRestType()
 		} else if dt, ok := e.paramDefaultType(p); ok {
@@ -360,8 +363,15 @@ func (e *Emitter) adaptOverrideParams(m, base *ast.FunctionDeclaration) {
 		if p.Rest || bp.Rest || p.Type == nil || bp.Type == nil || p.ArrayPattern != nil || p.ObjectPattern != nil || p.Default != nil {
 			continue
 		}
-		own, theirs := e.resolveType(p.Type), e.resolveType(bp.Type)
-		if own.IR == theirs.IR && own.IsArray() == theirs.IsArray() && own.IsDynamic() == theirs.IsDynamic() {
+		own, theirs := e.annotationType(p.Type), e.annotationType(bp.Type)
+		// A callback whose own parameters are stored differently
+		// (`(e?: Error | null) => void` over `(e?: any) => void`) is the
+		// same pointer but must be converted, as an argument would be.
+		closureDiffers := false
+		if own.IsFunc() && theirs.IsFunc() {
+			closureDiffers, _ = funcAdapterPlan(theirs, own)
+		}
+		if !closureDiffers && own.IR == theirs.IR && own.IsArray() == theirs.IsArray() && own.IsDynamic() == theirs.IsDynamic() {
 			continue
 		}
 		tmp := fmt.Sprintf("__kml_adapt%d", i)
@@ -452,6 +462,102 @@ func accessorMethodName(kind, prop string) string {
 // `["constructor"]() {}`) must not take the constructor's symbol.
 const ctorSymbolSuffix = "__kml_ctor"
 
+// ctorMayOverride reports whether class name's constructor has a
+// `return <expr>`, which may override the allocated instance: the
+// constructor then leaves the instance it returns in @__kml_ctor_ret.
+func (e *Emitter) ctorMayOverride(name string) bool {
+	info, ok := e.classes[name]
+	if !ok {
+		return false
+	}
+	if (e.compatJS() || e.foreignCtorName(name)) && info.BaseClass != "" && info.BaseClass != name && (e.ctorMayOverride(info.BaseClass) || e.valueBases[fnBaseOf(info.BaseClass)] && !builtinValueBases[fnBaseOf(info.BaseClass)]) {
+		// Its `this` is what the base's construction returned.
+		return true
+	}
+	if info.Constructor == nil || info.Constructor.Body == nil {
+		return false
+	}
+	found := false
+	ast.Inspect(info.Constructor.Body, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FunctionExpression, *ast.FunctionDeclaration, *ast.ArrowFunction, *ast.ClassExpression, *ast.ClassDeclaration:
+			return false
+		case *ast.ReturnStatement:
+			if x.Value != nil && (e.compatJS() || e.ctorReturnMayOverride(x.Value)) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
+// foreignCtorClass reports whether cd's constructor, or one of its bases',
+// may return an object that is not an instance of the class: its instances
+// are then held as any.
+func (e *Emitter) foreignCtorClass(cd *ast.ClassDeclaration) bool {
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	if e.foreignCtor == nil {
+		e.foreignCtor = map[*ast.ClassDeclaration]bool{}
+	}
+	if v, ok := e.foreignCtor[cd]; ok {
+		return v
+	}
+	e.foreignCtor[cd] = false // a cycle reads false
+	v := c.CtorReturnsForeign(cd)
+	if !v && cd.BaseClass != "" && e.prog != nil {
+		for _, st := range e.prog.Body {
+			if b, ok := st.(*ast.ClassDeclaration); ok && b.Name == cd.BaseClass && e.foreignCtorClass(b) {
+				v = true
+			}
+		}
+	}
+	e.foreignCtor[cd] = v
+	return v
+}
+
+// foreignCtorName is foreignCtorClass of the class registered as name.
+func (e *Emitter) foreignCtorName(name string) bool {
+	if e.prog == nil {
+		return false
+	}
+	for _, st := range e.prog.Body {
+		if cd, ok := st.(*ast.ClassDeclaration); ok && cd.Name == name {
+			return e.foreignCtorClass(cd)
+		}
+	}
+	return false
+}
+
+// ctorReturnMayOverride reports a constructor's `return v` under
+// TypeScript typing that can replace the instance: an object, not a
+// primitive, null or undefined (which leave it).
+func (e *Emitter) ctorReturnMayOverride(v ast.Expression) bool {
+	for as, ok := v.(*ast.AsExpression); ok; as, ok = v.(*ast.AsExpression) {
+		v = as.Expr
+	}
+	t := e.typeOfExpr(v)
+	return !(t.IsUndefined() || t.IR == "void" || t.IsNull() || t.IsSymbol() || t.IsBigInt() || isPlainStringTy(t) && !t.IsClass() && !t.IsObject() || t.IR == "double" || t.IR == "i1" || t.IsInteger())
+}
+
+// emitCtorOverride is a `new` site's result after the constructor ran:
+// the instance the constructor returned, else the allocated one.
+func (e *Emitter) emitCtorOverride(className, dataReg string) string {
+	if !e.ctorMayOverride(className) {
+		return dataReg
+	}
+	ov := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_ctor_ret, align 8", ov))
+	e.emitInstr("store " + irPtr + " null, " + irPtr + " @__kml_ctor_ret, align 8")
+	isNull := e.ptrIsNull(ov)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isNull, dataReg, ov))
+	return r
+}
+
 func llvmSafeSymbol(s string) string {
 	s = strings.ReplaceAll(s, "@@", "__kml_wks_")
 	s = strings.ReplaceAll(s, "#", "__kml_priv_")
@@ -506,21 +612,12 @@ func (e *Emitter) classAccessorSigs(className, prop string) (getter, setter *Fun
 	return getter, setter, getter != nil || setter != nil
 }
 
-// checkReadonlyWrite enforces the TS `readonly` field modifier (TDD-00154): a
-// write to a readonly field is allowed only inside the constructor of the class
-// that declares it (which also covers field initializers, spliced into the
-// constructor). Any other write — a regular method, an outside `obj.x = v`, or a
-// subclass constructor writing an inherited readonly field — is a clean error.
-func (e *Emitter) checkReadonlyWrite(className, fieldName string, pos ast.Pos) error {
-	info, ok := e.classes[className]
-	if !ok || !info.ReadonlyFields[fieldName] {
-		return nil
-	}
-	origin := info.FieldOrigin[fieldName]
-	if e.currentCtorClass == origin {
-		return nil
-	}
-	return fmt.Errorf("%d:%d: cannot assign to '%s' because it is a read-only property (declared on class '%s') — a readonly field can only be set in that class's constructor", pos.Line, pos.Col, fieldName, inspectClassName(origin))
+// functionProtoMembers are Function.prototype's members, which every class
+// value inherits.
+var functionProtoMembers = map[string]bool{
+	"apply": true, "bind": true, "call": true, "toString": true, "constructor": true,
+	"hasOwnProperty": true, "isPrototypeOf": true, "propertyIsEnumerable": true,
+	"toLocaleString": true, "valueOf": true, "__proto__": true,
 }
 
 // emitStaticFieldRead evaluates `ClassName.staticField` (TDD-00009 Stage
@@ -532,6 +629,9 @@ func (e *Emitter) emitStaticFieldRead(info ClassInfo, className, fieldName strin
 	if !ok {
 		if _, isGetter := info.StaticMethodSigs[accessorMethodName("get", fieldName)]; isGetter {
 			return e.emitStaticMethodCall(info, className, accessorMethodName("get", fieldName), nil, pos)
+		}
+		if _, isMethod := info.StaticMethodSigs[fieldName]; isMethod && e.staticMethodOverridable(className, fieldName) {
+			return e.emitStaticMethodOverrideRead(info, className, fieldName, pos)
 		}
 		if sig, isMethod := info.StaticMethodSigs[fieldName]; isMethod {
 			// A static method read as a value (`const f = C.m`): its function
@@ -548,10 +648,27 @@ func (e *Emitter) emitStaticFieldRead(info ClassInfo, className, fieldName strin
 			// the first defaulted or rest one.
 			return e.countToNumber(Value{Ref: fmt.Sprint(e.ctorLength(className)), Ty: TypeI64}), nil
 		}
-		return Value{}, fmt.Errorf("%d:%d: class '%s' has no static field '%s'", pos.Line, pos.Col, className, fieldName)
+		if e.extendsObject(className) {
+			// A static Object has (`C.keys`): inherited, as in JavaScript.
+			return e.emitExpr(ast.NewMemberExpression(e.builtinIdent("Object", pos), fieldName, pos))
+		}
+		if b := e.builtinRootBase(className); b != "" && !e.blockDone {
+			// A static of the builtin the class extends
+			// (`MyU8.BYTES_PER_ELEMENT`, `MyMap.groupBy`): inherited.
+			if v, err := e.emitExpr(ast.NewMemberExpression(e.builtinIdent(b, pos), fieldName, pos)); err == nil {
+				return v, nil
+			}
+		}
+		if e.compatJS() || functionProtoMembers[fieldName] {
+			// A class is an object: a property it was given at run time
+			// (`Object.defineProperty(C, "k", …)`), else its prototype
+			// chain's (Function.prototype's `call`, `bind`), else undefined.
+			return e.emitDynAnyMemberGetNamed(e.emitClassRef(className), e.internString(fieldName), fieldName, pos)
+		}
+		return Value{}, internalAt(pos, "class '%s' has no static field '%s'", className, fieldName)
 	}
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, storageIR(fieldTy), e.staticFieldReadPtr(className, fieldName), fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", reg, storageIR(fieldTy), e.staticFieldReadPtr(className, fieldName), fieldTy.Align()))
 	return Value{Ref: reg, Ty: fieldTy}, nil
 }
 
@@ -568,9 +685,9 @@ func (e *Emitter) staticFieldReadPtr(className, fieldName string) string {
 	}
 	for i := len(chain) - 1; i >= 0; i-- {
 		own := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", own, e.staticOwnPtr(chain[i], fieldName)))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", own, e.staticOwnPtr(chain[i], fieldName)))
 		sel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sel, own, e.staticSlotPtr(chain[i], fieldName), ptr))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", sel, own, e.staticSlotPtr(chain[i], fieldName), ptr))
 		ptr = sel
 	}
 	return ptr
@@ -613,7 +730,7 @@ func (e *Emitter) emitStaticFieldAssign(info ClassInfo, className, fieldName, op
 			e.dynFnCtr++
 			slot := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, StructFieldIR(v.Ty)))
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", StructFieldIR(v.Ty), v.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", StructFieldIR(v.Ty), v.Ref, slot))
 			// A nullable scalar's slot holds its { i1, payload } pair, read
 			// back as one (null stays null in the setter).
 			e.define(tmp, Symbol{Ptr: slot, Ty: v.Ty})
@@ -622,7 +739,23 @@ func (e *Emitter) emitStaticFieldAssign(info ClassInfo, className, fieldName, op
 			}
 			return v, nil
 		}
-		return Value{}, fmt.Errorf("%d:%d: class '%s' has no static field '%s'", pos.Line, pos.Col, className, fieldName)
+		if e.compatJS() {
+			// A class is an object: the property goes on it at run time.
+			ref := ast.NewMemberExpression(ast.NewIdentifier(className, pos), fieldName, pos)
+			if isLogicalAssignOp(op) {
+				return e.emitExpr(ast.NewBinaryExpression(strings.TrimSuffix(op, "="), ref, ast.NewAssignmentExpression("=", ref, rhsExpr, pos), pos))
+			}
+			value := rhsExpr
+			if op != "=" {
+				value = ast.NewBinaryExpression(op[:len(op)-1], ref, rhsExpr, pos)
+			}
+			v, err := e.emitExpr(value)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMemberSetNamed(e.emitClassRef(className), e.internString(fieldName), fieldName, v, pos)
+		}
+		return Value{}, internalAt(pos, "class '%s' has no static field '%s'", className, fieldName)
 	}
 	inherited := info.StaticFieldOwner[fieldName] != className
 	if isLogicalAssignOp(op) {
@@ -644,14 +777,14 @@ func (e *Emitter) emitStaticFieldAssign(info ClassInfo, className, fieldName, op
 		}
 	} else {
 		curReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", curReg, storageIR(fieldTy), globalPtr, fieldTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", curReg, storageIR(fieldTy), globalPtr, fieldTy.Align()))
 		cur := Value{Ref: curReg, Ty: fieldTy}
 		rhsVal, err := e.emitExpr(rhsExpr)
 		if err != nil {
 			return Value{}, err
 		}
 		if err := dateCompoundAssignGuard(op, fieldTy.IsDate(), rhsVal.Ty.IsDate()); err != nil {
-			return Value{}, fmt.Errorf("%d:%d: %s", pos.Line, pos.Col, err)
+			return Value{}, internalAt(pos, "%s", err)
 		}
 		rhsVal = e.convert(rhsVal, fieldTy)
 		rhs, err = e.emitArith(strings.TrimSuffix(op, "="), cur, rhsVal, fieldTy, pos)
@@ -753,6 +886,83 @@ func guardMissingSuper(body *ast.BlockStatement) {
 	}
 }
 
+// superAgainMessage is Node's message for a second super() call.
+const superAgainMessage = "Super constructor may only be called once"
+
+// countSuperCalls counts the super(...) call sites of a constructor body,
+// arrow functions included.
+func countSuperCalls(body *ast.BlockStatement) int {
+	n := 0
+	ast.Inspect(body, func(x ast.Node) bool {
+		switch x := x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.CallExpression:
+			if _, ok := x.Callee.(*ast.SuperExpression); ok {
+				n++
+			}
+		}
+		return true
+	})
+	return n
+}
+
+// guardRepeatedSuper makes a constructor with several super() sites throw
+// Node's ReferenceError when a second one runs: after each statement that
+// calls super(), a flag set by the first call is checked.
+//
+//	let done = false
+//	super(); if (done) throw RE; done = true
+func guardRepeatedSuper(body *ast.BlockStatement) {
+	pos := body.GetPos()
+	const flag = "__kml_super_done"
+	ast.Inspect(body, func(x ast.Node) bool {
+		switch blk := x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.BlockStatement:
+			var out []ast.Statement
+			for _, st := range blk.Body {
+				out = append(out, st)
+				if !stmtCallsSuperDirectly(st) {
+					continue
+				}
+				out = append(out,
+					ast.NewIfStatement(ast.NewIdentifier(flag, pos), ast.NewBlockStatement([]ast.Statement{
+						ast.NewThrowStatement(ast.NewNewErrorExpression("ReferenceError", ast.NewStringLiteral(superAgainMessage, pos), pos), pos),
+					}, pos), nil, pos),
+					ast.NewExpressionStatement(ast.NewAssignmentExpression("=", ast.NewIdentifier(flag, pos), ast.NewBooleanLiteral(true, pos), pos), pos))
+			}
+			blk.Body = out
+		}
+		return true
+	})
+	body.Body = append([]ast.Statement{ast.NewVarDeclaration("let", flag, nil, ast.NewBooleanLiteral(false, pos), pos)}, body.Body...)
+}
+
+// stmtCallsSuperDirectly reports a simple statement (not a block, branch or
+// loop, whose own blocks are visited) that calls super(...).
+func stmtCallsSuperDirectly(st ast.Statement) bool {
+	switch st.(type) {
+	case *ast.ExpressionStatement, *ast.VarDeclaration, *ast.VarDeclarationList, *ast.ReturnStatement:
+	default:
+		return false
+	}
+	found := false
+	ast.Inspect(st, func(x ast.Node) bool {
+		switch x := x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.CallExpression:
+			if _, ok := x.Callee.(*ast.SuperExpression); ok {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
+}
+
 // topLevelSuperCallIndex returns the statement index of the first top-level
 // `super(...)` call in body, or -1 if there is none — the insertion anchor
 // for field initializers (TDD-00063 Stage 1), which must run immediately
@@ -803,7 +1013,7 @@ func (e *Emitter) classFieldNullEvolves(cd *ast.ClassDeclaration, fieldName stri
 			return true
 		}
 		if as.Op == "=" {
-			rt := e.inferExprType(as.Right)
+			rt := e.typeOfExpr(as.Right)
 			return !rt.IsNull() && !rt.IsUndefined()
 		}
 		return false
@@ -957,6 +1167,36 @@ func classFieldInitStmts(cd *ast.ClassDeclaration) []ast.Statement {
 	return stmts
 }
 
+// inlineFieldInitsAtSuper rewrites each `super(…)` in cd's constructor that
+// is not a top-level statement (arrow functions included: they share the
+// constructor's this) to `(super(…), this.f = init, …, this)`: the own field
+// initializers run right after the base constructor returns, and the call
+// still evaluates to the this it initialized.
+func inlineFieldInitsAtSuper(cd *ast.ClassDeclaration) {
+	var rewrite func(ast.Node) ast.Node
+	rewrite = func(n ast.Node) ast.Node {
+		switch n.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return n
+		}
+		ast.RewriteChildren(n, rewrite)
+		call, ok := n.(*ast.CallExpression)
+		if !ok {
+			return n
+		}
+		if _, super := call.Callee.(*ast.SuperExpression); !super {
+			return n
+		}
+		pos := call.GetPos()
+		exprs := []ast.Expression{call}
+		for _, st := range classFieldInitStmts(cd) {
+			exprs = append(exprs, st.(*ast.ExpressionStatement).Expr)
+		}
+		return ast.NewSequenceExpression(append(exprs, ast.NewThisExpression(pos)), pos)
+	}
+	ast.RewriteChildren(cd.Constructor.Body, rewrite)
+}
+
 // classStaticFieldInitStmts lowers each `static x = expr` field to a
 // `ClassName.x = expr` assignment, in field-declaration order — the statements
 // emitClassStaticInit runs (ahead of any `static {}` block) so a static field's
@@ -1063,6 +1303,377 @@ func (e *Emitter) genericStaticMember(id *ast.Identifier, prop string) (ClassInf
 // class of whatever program it is shared with.
 func (e *Emitter) methodsMayReadArgs() bool { return e.methodsReadArgs || e.programIndependent() }
 
+// objectBaseClass is the class a class extending the builtin Object
+// extends instead: Object constructs a plain object for a derived class's
+// new.target, which is what an empty base's construction yields.
+const objectBaseClass = "Object__kml_base"
+
+// objectBase points each class extending the builtin Object (no program
+// binding of that name, which would be module-mangled) at objectBaseClass,
+// declared once ahead of the program.
+// settleMemberDefinitions keeps the class members JavaScript's definition
+// order leaves (JS lane): on the prototype (or the class, for statics) a
+// method replaces whatever its name held, an accessor replaces a method and
+// merges with the other half of an accessor; a field, defined on the
+// instance (or the class) afterwards, hides an accessor of its name. (An
+// instance field leaves the prototype's accessor in JavaScript, seen only
+// by reflection on the prototype.)
+func settleMemberDefinitions(cd *ast.ClassDeclaration) {
+	type slot struct{ method, get, set int }
+	slots := map[string]*slot{}
+	key := func(m *ast.FunctionDeclaration) string {
+		if m.IsStatic {
+			return "static " + m.Name
+		}
+		return m.Name
+	}
+	for i, m := range cd.Methods {
+		if m.Body == nil && m.AccessorKind == "" {
+			continue // an overload signature
+		}
+		k := key(m)
+		sl := slots[k]
+		if sl == nil {
+			sl = &slot{-1, -1, -1}
+			slots[k] = sl
+		}
+		switch m.AccessorKind {
+		case "get":
+			sl.method, sl.get = -1, i
+		case "set":
+			sl.method, sl.set = -1, i
+		default:
+			sl.method, sl.get, sl.set = i, -1, -1
+		}
+	}
+	fields := map[string]bool{}
+	for _, f := range cd.Fields {
+		k := f.Name
+		if f.Static {
+			k = "static " + k
+		}
+		fields[k] = true
+	}
+	kept := cd.Methods[:0:0]
+	changed := false
+	for i, m := range cd.Methods {
+		sl := slots[key(m)]
+		live := sl == nil || i == sl.method || i == sl.get || i == sl.set
+		if m.AccessorKind != "" && fields[key(m)] {
+			live = false
+		}
+		if m.Body == nil && m.AccessorKind == "" && sl != nil && sl.method < 0 {
+			live = false // overloads of a method an accessor replaced
+		}
+		if live {
+			kept = append(kept, m)
+		} else {
+			changed = true
+		}
+	}
+	if changed {
+		cd.Methods = kept
+	}
+}
+
+// undeclaredHeritage finds each top-level class extending a name nothing
+// declares (JavaScript: its definition's read of the name is a
+// ReferenceError). The class registers as Object-based; its definition
+// reads the name first (undeclaredBases).
+func (e *Emitter) undeclaredHeritage(prog *ast.Program) {
+	c := e.front()
+	if c == nil {
+		return
+	}
+	declared := map[string]bool{}
+	params := func(ps []ast.Param) {
+		for _, p := range ps {
+			declared[p.Name] = true
+		}
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch d := n.(type) {
+		case *ast.VarDeclaration:
+			declared[d.Name] = true
+		case *ast.ClassDeclaration:
+			declared[d.Name] = true
+		case *ast.FunctionDeclaration:
+			declared[d.Name] = true
+			params(d.Params)
+		case *ast.FunctionExpression:
+			params(d.Params)
+		case *ast.ArrowFunction:
+			params(d.Params)
+		}
+		return true
+	})
+	for _, stmt := range prog.Body {
+		cd, ok := stmt.(*ast.ClassDeclaration)
+		if !ok || cd.BaseClass == "" || cd.BaseQualified || len(cd.TypeParams) > 0 || declared[cd.BaseClass] {
+			continue
+		}
+		b := cd.BaseClass
+		if b == "Object" || builtinValueBases[b] || e.isErrorRootKind(b) || e.hostBaseOf(cd) != nil || e.isHostLayoutBase(b) || c.GlobalInterface(b) != nil || c.AmbientName(b) {
+			continue
+		}
+		if e.undeclaredBases == nil {
+			e.undeclaredBases = map[string]string{}
+		}
+		e.undeclaredBases[cd.Name] = b
+		cd.BaseClass = "Object"
+	}
+}
+
+func objectBase(prog *ast.Program) {
+	found := false
+	for _, stmt := range prog.Body {
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok && cd.BaseClass == "Object" && !cd.BaseQualified && len(cd.BaseTypeArgs) == 0 {
+			cd.BaseClass, found = objectBaseClass, true
+		}
+	}
+	if found {
+		base := ast.NewClassDeclaration(objectBaseClass, "", nil, false, nil, nil, nil, nil, nil, ast.Pos{})
+		prog.Body = append([]ast.Statement{base}, prog.Body...)
+	}
+}
+
+// fnBaseSuffix names the class a class extending a constructor function
+// of the program (`class C extends F`) extends instead: an empty base,
+// whose super() call runs F with the instance as `this`
+// (emitFnBaseSuperCall), its prototype F.prototype.
+const fnBaseSuffix = "__kml_fnbase"
+
+// fnBases points each class extending a top-level function declaration at
+// that function's empty base class, declared once ahead of the program;
+// it returns the bases by function. A class extending a top-level variable
+// (`var B = function () {}.bind()`) extends the value it holds when the
+// class is defined (valueBases) the same way.
+func fnBases(prog *ast.Program) (map[string]string, map[string]bool) {
+	fns := map[string]bool{}
+	classes := map[string]bool{}
+	nonCtor := map[string]bool{}
+	for _, stmt := range prog.Body {
+		switch d := stmt.(type) {
+		case *ast.FunctionDeclaration:
+			if !d.IsGenerator && !d.IsAsync {
+				fns[d.Name] = true
+			} else if d.Body != nil {
+				nonCtor[d.Name] = true // a value heritage rejects
+			}
+		case *ast.ClassDeclaration:
+			classes[d.Name] = true
+		}
+	}
+	vals := map[string]bool{}
+	for n := range nonCtor {
+		vals[n] = true
+	}
+	for _, stmt := range prog.Body {
+		if v, ok := stmt.(*ast.VarDeclaration); ok && !v.Ambient && !fns[v.Name] && !classes[v.Name] {
+			if _, isClass := v.Init.(*ast.ClassExpression); !isClass {
+				vals[v.Name] = true
+			}
+		}
+	}
+	// A class in a function extending one of its parameters or variables
+	// (`function g(B) { class T extends B {} }`): the value it holds.
+	allClasses := map[string]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if cd, ok := n.(*ast.ClassDeclaration); ok {
+			allClasses[cd.Name] = true
+		}
+		return true
+	})
+	localBase := func(params []ast.Param, body ast.Node) {
+		if body == nil {
+			return
+		}
+		locals := map[string]bool{}
+		for _, p := range params {
+			locals[p.Name] = true
+		}
+		ast.Inspect(body, func(n ast.Node) bool {
+			if v, ok := n.(*ast.VarDeclaration); ok {
+				if _, isClass := v.Init.(*ast.ClassExpression); !isClass {
+					locals[v.Name] = true
+				}
+			}
+			return true
+		})
+		ast.Inspect(body, func(n ast.Node) bool {
+			if cd, ok := n.(*ast.ClassDeclaration); ok && !cd.BaseQualified && locals[cd.BaseClass] && !allClasses[cd.BaseClass] && !fns[cd.BaseClass] {
+				vals[cd.BaseClass] = true
+			}
+			return true
+		})
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch f := n.(type) {
+		case *ast.FunctionDeclaration:
+			if f.Body != nil {
+				localBase(f.Params, f.Body)
+			}
+		case *ast.FunctionExpression:
+			if f.Body != nil {
+				localBase(f.Params, f.Body)
+			}
+		case *ast.ArrowFunction:
+			if f.Block != nil {
+				localBase(f.Params, f.Block)
+			}
+		}
+		return true
+	})
+	values := map[string]bool{}
+	nested := map[string]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if cd, ok := n.(*ast.ClassDeclaration); ok && vals[cd.BaseClass] && !cd.BaseQualified {
+			fns[cd.BaseClass], values[cd.BaseClass], nested[cd.BaseClass] = true, true, true
+		}
+		return true
+	})
+	for _, stmt := range prog.Body {
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok && !cd.BaseQualified && builtinValueBases[cd.BaseClass] && !fns[cd.BaseClass] && !classes[cd.BaseClass] {
+			vals[cd.BaseClass] = true // the global itself, a value
+		}
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok && vals[cd.BaseClass] && !cd.BaseQualified {
+			fns[cd.BaseClass], values[cd.BaseClass] = true, true
+		}
+	}
+	var out map[string]string
+	var bases []ast.Statement
+	var classDecls []*ast.ClassDeclaration
+	for _, stmt := range prog.Body {
+		if cd, ok := stmt.(*ast.ClassDeclaration); ok {
+			classDecls = append(classDecls, cd)
+		}
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		if cd, ok := n.(*ast.ClassDeclaration); ok && nested[cd.BaseClass] {
+			classDecls = append(classDecls, cd)
+		}
+		return true
+	})
+	for _, cd := range classDecls {
+		if !fns[cd.BaseClass] || cd.BaseQualified {
+			continue
+		}
+		fn := cd.BaseClass
+		if out == nil {
+			out = map[string]string{}
+		}
+		if _, done := out[fn]; !done {
+			out[fn] = fn + fnBaseSuffix
+			bases = append(bases, ast.NewClassDeclaration(fn+fnBaseSuffix, "", nil, false, nil, nil, nil, nil, nil, ast.Pos{}))
+		}
+	}
+	prog.Body = append(bases, prog.Body...)
+	return out, values
+}
+
+// nonConstructingBuiltins are the global functions whose [[Construct]]
+// always throws a TypeError ("X is not a constructor") when a new.target
+// reaches it, as a subclass's super() does: valid heritage, never built.
+var nonConstructingBuiltins = map[string]bool{"Symbol": true, "BigInt": true}
+
+// builtinValueBases are the builtin globals a class extends as values, read
+// at its definition: the non-constructing ones, and Proxy, a constructor
+// without a `prototype` (the heritage's TypeError).
+var builtinValueBases = map[string]bool{"Symbol": true, "BigInt": true, "Proxy": true}
+
+// classBase is the base class cd's registry entry extends: a constructor
+// function's empty base for `extends F` (fnBases), else cd's own.
+func (e *Emitter) classBase(cd *ast.ClassDeclaration) string {
+	if b, ok := e.fnBaseClasses[cd.BaseClass]; ok && !cd.BaseQualified {
+		return b
+	}
+	return cd.BaseClass
+}
+
+// fnBaseRoot is the constructor function className's base chain ends at,
+// when no class along it declares a constructor, or "".
+func (e *Emitter) fnBaseRoot(className string) string {
+	for i := 0; i < 64 && className != ""; i++ {
+		if fn := fnBaseOf(className); fn != "" {
+			return fn
+		}
+		info, ok := e.classes[className]
+		if !ok || info.Constructor != nil {
+			return ""
+		}
+		className = info.BaseClass
+	}
+	return ""
+}
+
+// fnBaseOf is the constructor function className's empty base stands for,
+// or "".
+func fnBaseOf(className string) string {
+	if strings.HasSuffix(className, fnBaseSuffix) {
+		return strings.TrimSuffix(className, fnBaseSuffix)
+	}
+	return ""
+}
+
+// classOwnStaticKeys are class c's own keys as an object: length, name and
+// prototype, its static methods and accessors, and its static fields (only
+// these, when enumerable).
+func (e *Emitter) classOwnStaticKeys(c string, enumerable bool) []string {
+	info := e.classes[c]
+	var keys []string
+	if !enumerable {
+		keys = append(keys, "length", "name", "prototype")
+		ms := make([]string, 0, len(info.StaticMethodSigs))
+		for m := range info.StaticMethodSigs {
+			ms = append(ms, m)
+		}
+		sort.Strings(ms) // one emitted order, whatever the map's
+		for _, m := range ms {
+			if info.StaticMethodImplementor[m] != c {
+				continue
+			}
+			k := strings.TrimPrefix(strings.TrimPrefix(m, "__kml_get_"), "__kml_set_")
+			if !strings.HasPrefix(k, "#") && !strings.HasPrefix(k, "__kml_") {
+				keys = append(keys, k)
+			}
+		}
+	}
+	for _, f := range info.OwnStaticFieldOrder {
+		if !strings.HasPrefix(f, "#") {
+			keys = append(keys, f)
+		}
+	}
+	return keys
+}
+
+// builtinRootBase is the builtin with a layout of its own (a typed array,
+// Map, ArrayBuffer, …) className's base chain ends at, or "".
+func (e *Emitter) builtinRootBase(className string) string {
+	for i := 0; i < 64 && className != ""; i++ {
+		b := e.classes[className].BaseClass
+		if _, user := e.classes[b]; b != "" && !user {
+			if typedArrayNames[b] || e.isHostLayoutBase(b) || b == "ArrayBuffer" || b == "SharedArrayBuffer" {
+				return b
+			}
+			return ""
+		}
+		className = b
+	}
+	return ""
+}
+
+// extendsObject reports className's base chain ending at the builtin
+// Object (objectBase).
+func (e *Emitter) extendsObject(className string) bool {
+	for i := 0; i < 64 && className != ""; i++ {
+		if className == objectBaseClass {
+			return true
+		}
+		className = e.classes[className].BaseClass
+	}
+	return false
+}
+
 func (e *Emitter) registerClasses(prog *ast.Program) error {
 	ast.Inspect(prog, func(n ast.Node) bool {
 		if cd, ok := n.(*ast.ClassDeclaration); ok {
@@ -1081,6 +1692,35 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		}
 		return !e.methodsReadArgs
 	})
+	if e.compatJS() {
+		e.undeclaredHeritage(prog)
+		ast.Inspect(prog, func(n ast.Node) bool {
+			if cd, ok := n.(*ast.ClassDeclaration); ok {
+				settleMemberDefinitions(cd)
+			}
+			return true
+		})
+	}
+	objectBase(prog)
+	if e.compatJS() {
+		// Registration sees each `extends F` as its empty base; the
+		// declaration keeps F for the checker's later queries.
+		e.fnBaseClasses, e.valueBases = fnBases(prog)
+		var restore []*ast.ClassDeclaration
+		for _, stmt := range prog.Body {
+			if cd, ok := stmt.(*ast.ClassDeclaration); ok && !cd.BaseQualified {
+				if b, ok := e.fnBaseClasses[cd.BaseClass]; ok {
+					cd.BaseClass = b
+					restore = append(restore, cd)
+				}
+			}
+		}
+		defer func() {
+			for _, cd := range restore {
+				cd.BaseClass = fnBaseOf(cd.BaseClass)
+			}
+		}()
+	}
 	classDeclByName := make(map[string]*ast.ClassDeclaration)
 	for _, stmt := range prog.Body {
 		if cd, ok := stmt.(*ast.ClassDeclaration); ok {
@@ -1096,10 +1736,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// class can't be an `extends` base or target here.
 			if len(cd.TypeParams) > 0 {
 				if cd.BaseClass != "" {
-					return fmt.Errorf("%d:%d: generic class '%s' cannot use 'extends' — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+					return internalAt(cd.GetPos(), "generic class '%s' cannot use 'extends' — not yet supported", cd.Name)
 				}
 				if cd.IsAbstract {
-					return fmt.Errorf("%d:%d: generic class '%s' cannot be abstract — not yet supported", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
+					return internalAt(cd.GetPos(), "generic class '%s' cannot be abstract — not yet supported", cd.Name)
 				}
 				// A static member cannot name the class's type parameters, so
 				// the statics (methods, fields, static blocks) compile once,
@@ -1160,7 +1800,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		cd := classDeclByName[name]
 		switch visitState[name] {
 		case 1:
-			return fmt.Errorf("%d:%d: class '%s' has a cyclic 'extends' chain", cd.GetPos().Line, cd.GetPos().Col, name)
+			return internalAt(cd.GetPos(), "class '%s' has a cyclic 'extends' chain", name)
 		case 2:
 			return nil
 		}
@@ -1170,18 +1810,28 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// of it) is never a registered class — nothing to recurse into;
 			// its fields are grafted in Pass 1.
 			if len(cd.BaseTypeArgs) > 0 {
-				return fmt.Errorf("%d:%d: class '%s' extends %s with type arguments, but %s is not generic", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass, cd.BaseClass)
+				return internalAt(cd.GetPos(), "class %s extends non-generic %s with type arguments (TS2315 first)", name, cd.BaseClass)
 			}
 		} else if _, user := classDeclByName[cd.BaseClass]; !user && cd.BaseClass != "" && e.hostBaseOf(cd) != nil {
 			// A builtin host base (TDD-00247): never a registered class;
 			// its body is grafted in Pass 1.
 		} else if _, user := classDeclByName[cd.BaseClass]; !user && cd.BaseClass != "" && e.isHostLayoutBase(cd.BaseClass) {
-			return fmt.Errorf("%d:%d: class '%s' extends the builtin '%s': extending a builtin other than Error is not supported yet", cd.GetPos().Line, cd.GetPos().Col, ast.Unmangle(name), cd.BaseClass)
-		} else if len(cd.BaseTypeArgs) > 0 && !e.typeOnlyGenerics[cd.BaseClass] {
-			return fmt.Errorf("%d:%d: class '%s' extends '%s' with type arguments, but a generic class base is not supported yet", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass)
+			return internalAt(cd.GetPos(), "class '%s' extends the builtin '%s'", ast.Unmangle(name), cd.BaseClass)
 		} else if cd.BaseClass != "" {
+			// (Type arguments on a base that declares no type parameters
+			// are TS2315; JavaScript erases them.)
 			if _, ok := classDeclByName[cd.BaseClass]; !ok {
-				return fmt.Errorf("%d:%d: class '%s' extends unknown class '%s'", cd.GetPos().Line, cd.GetPos().Col, name, cd.BaseClass)
+				if k, ok := e.classOfCallConst(cd.BaseClass, classDeclByName); ok {
+					// A constant holding the class a function returns
+					// (`const AU = A(User)`): that class.
+					cd.BaseClass = k
+				}
+			}
+			if _, ok := classDeclByName[cd.BaseClass]; !ok {
+				// A base known only at run time that specializeDynamicBases
+				// left as written: it can hold a class that names its own
+				// function's locals, which no other scope can name.
+				return unsupportedAt(cd.GetPos(), "a class extending '%s', a value that can hold a class naming its own function's locals,", ast.Unmangle(cd.BaseClass))
 			}
 			if err := visit(cd.BaseClass); err != nil {
 				return err
@@ -1223,7 +1873,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			baseInfo = e.classes[cd.BaseClass]
 			hostBase = baseInfo.HostBase
 		}
-		var hostAnnot *ast.TypeAnnotation
+		var hostAnnot ast.TypeNode
 		if haveBase {
 			hostAnnot = baseInfo.HostAnnot
 		} else if hostBase != nil {
@@ -1259,13 +1909,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		for k, v := range baseInfo.FieldOrigin {
 			fieldOrigin[k] = v
 		}
-		// TDD-00154: readonly field names (own + inherited). A write is checked
-		// against FieldOrigin so only the *declaring* class's constructor may set
-		// it, matching TypeScript.
-		readonlyFields := make(map[string]bool, len(baseInfo.ReadonlyFields))
-		for k, v := range baseInfo.ReadonlyFields {
-			readonlyFields[k] = v
-		}
 		declareFields := make(map[string]bool, len(baseInfo.DeclareFields))
 		for k, v := range baseInfo.DeclareFields {
 			declareFields[k] = v
@@ -1283,11 +1926,8 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 
 		var ownFields []Field
 		for _, f := range cd.Fields {
-			if f.Name == ClassTagField {
-				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal runtime type tag", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassTagField)
-			}
-			if f.Name == ClassVTableField {
-				return fmt.Errorf("%d:%d: class '%s' cannot declare a field named '%s' — reserved for the compiler's internal runtime vtable pointer", cd.GetPos().Line, cd.GetPos().Col, cd.Name, ClassVTableField)
+			if (f.Name == ClassTagField || f.Name == ClassVTableField) && !f.Static {
+				return internalAt(cd.GetPos(), "class %s declares the reserved field %s", cd.Name, f.Name)
 			}
 			if f.Static {
 				// A static field's initializer (`static x = expr`) runs in the
@@ -1298,14 +1938,14 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				// field (line below) and a `let x = expr` use.
 				var fty Type
 				if f.Type != nil {
-					fty = e.resolveType(f.Type)
+					fty = e.annotationType(f.Type)
 					if f.Initializer == nil {
 						// `static x: number;` is undefined until assigned
 						// (no initialization check covers a static field).
 						fty = undefinedableElem(fty)
 					}
 				} else if f.Initializer != nil {
-					fty = e.inferExprType(f.Initializer)
+					fty = e.typeOfExpr(f.Initializer)
 					if fty.IR == "" || fty.IR == "void" {
 						// An initializer of no value (a call that only
 						// throws): the slot holds whatever is assigned later.
@@ -1334,10 +1974,11 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 					}
 					e.errorShadowedSlots[f.Name] = true
 					delete(fieldOrigin, f.Name)
-				} else if e.redeclaresSameStorage(inheritedFields, f) {
-					continue
 				} else {
-					return fmt.Errorf("%d:%d: class '%s' redeclares inherited field '%s' with a different type", cd.GetPos().Line, cd.GetPos().Col, cd.Name, f.Name)
+					// Its type is assignable to the base's (the checker's
+					// TS2416 otherwise): the inherited slot holds it, in
+					// the base's representation.
+					continue
 				}
 			}
 			seen[f.Name] = true
@@ -1346,7 +1987,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// `let x = expr` uses; an annotated field keeps its declared type.
 			var fty Type
 			if f.Type != nil {
-				fty = e.resolveType(f.Type)
+				fty = e.annotationType(f.Type)
 				// `tag?: T` widens to `T | undefined` (TDD-00187 Stage 2);
 				// the instance's calloc zero reads back as absent.
 				if f.Optional {
@@ -1375,7 +2016,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				// (ADR-00946/00949, the class self-reference machinery).
 				e.pushScope()
 				e.define("this", Symbol{Ty: ClassType(cd.Name, nil, nil, false)})
-				fty = e.inferExprType(f.Initializer)
+				fty = e.typeOfExpr(f.Initializer)
 				e.popScope()
 				if fty.IR == "" || fty.IR == "void" {
 					fty = TypeAny // an initializer of no value (a call that only throws)
@@ -1404,9 +2045,17 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				// (TDD-00208) rather than a `null`-typed `ptr` — so
 				// `this.#field ??= 1` stores 1 instead of a `double` into a
 				// null slot (invalid IR).
-				if (fty.IsNull() || fty.IsUndefined()) && !e.opts.NoAny && e.classFieldNullEvolves(cd, f.Name) {
+				if (fty.IsNull() || fty.IsUndefined()) && e.classFieldNullEvolves(cd, f.Name) {
 					fty = TypeAny
 				}
+				if e.jsFieldTakesOtherKind(prog, f.Name, fty) {
+					fty = TypeAny
+				}
+			}
+			if f.Type == nil && f.Optional {
+				// An unannotated field a `delete` names (JavaScript): absent
+				// once deleted.
+				fty = optionalFieldType(fty)
 			}
 			// A `name?: T` field is optional: an own property from
 			// construction (every declared field is), until `delete` removes
@@ -1416,20 +2065,20 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if f.Declare && !f.Static {
 				declareFields[f.Name] = true
 			}
-			if f.Readonly {
-				readonlyFields[f.Name] = true
-			}
 		}
 		// JS-compat field inference (TDD-00022 sub-problem 2, `-compat=js`
 		// only): a class with a constructor and no declared instance fields
 		// collects them from the constructor's `this.NAME = expr` assignments
-		// — the vanilla-JS class shape. See emit_classes_jsinfer.go.
+		// — the vanilla-JS class shape. See emit_classes_jsfields.go.
 		if e.compatJS() && len(ownFields) == 0 && cd.Constructor != nil {
 			inferred, err := e.jsInferConstructorFields(cd, seen)
 			if err != nil {
 				return err
 			}
 			for _, f := range inferred {
+				if e.jsFieldTakesOtherKind(prog, f.Name, f.Ty) {
+					f.Ty = TypeAny
+				}
 				seen[f.Name] = true
 				ownFields = append(ownFields, f)
 				fieldOrigin[f.Name] = cd.Name
@@ -1455,7 +2104,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		}
 
 		info := ClassInfo{
-			BaseClass:               cd.BaseClass,
+			BaseClass:               e.classBase(cd),
 			AncestorChain:           ancestorChain,
 			RootClass:               rootClass,
 			InheritedFields:         inheritedFields,
@@ -1474,7 +2123,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			IsAbstract:              cd.IsAbstract,
 			Implements:              cd.Implements,
 			FieldOrigin:             fieldOrigin,
-			ReadonlyFields:          readonlyFields,
 			DeclareFields:           declareFields,
 			StaticFieldTypes:        staticFieldTypes,
 			OwnStaticFieldTypes:     ownStaticFieldTypes,
@@ -1557,10 +2205,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// V1 scope: instance methods only.
 			if m.IsGenerator {
 				if m.IsStatic {
-					return fmt.Errorf("%d:%d: a static generator method in a class declared inside a function, or reading `arguments`, is not yet supported ('%s' on class '%s')", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					return internalAt(m.GetPos(), "a static generator method in a class declared inside a function, or reading `arguments`, is not yet supported ('%s' on class '%s')", m.Name, cd.Name)
 				}
 				if m.Body == nil {
-					return fmt.Errorf("%d:%d: an abstract generator method ('%s' on class '%s') is not supported", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					return internalAt(m.GetPos(), "an abstract generator method ('%s' on class '%s') is not supported", m.Name, cd.Name)
 				}
 				genInfo, gerr := e.buildGeneratorMethodInfo(m, cd.Name, provisionalTy)
 				if gerr != nil {
@@ -1585,17 +2233,21 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				}
 				if m.AccessorKind == "get" {
 					if nParams != 0 {
-						return fmt.Errorf("%d:%d: getter '%s' on class '%s' must take no parameters", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+						return internalAt(m.GetPos(), "getter '%s' on class '%s' must take no parameters", m.Name, cd.Name)
 					}
-					if sig.RetType.IR == "void" && e.compatJS() {
-						// JavaScript's getter falling off its end: undefined.
+					if sig.RetType.IR == "void" {
+						// A getter falling off its end, or one that only
+						// throws (the checker reports one TypeScript requires
+						// to return): undefined.
 						sig.RetType = TypeAny
-					} else if sig.RetType.IR == "void" {
-						return fmt.Errorf("%d:%d: getter '%s' on class '%s' must return a value", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					} else if e.compatJS() && (sig.RetType.IsNull() || sig.RetType.IsUndefined()) && m.ReturnType == nil {
+						// One returning only null or undefined: the property
+						// holds any value its setter is given (`??=`).
+						sig.RetType = TypeAny
 					}
 				} else { // "set"
 					if nParams != 1 {
-						return fmt.Errorf("%d:%d: setter '%s' on class '%s' must take exactly one parameter", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+						return internalAt(m.GetPos(), "setter '%s' on class '%s' must take exactly one parameter", m.Name, cd.Name)
 					}
 					// A setter's return value is always discarded, matching
 					// real JS — regardless of any declared/inferred return.
@@ -1607,10 +2259,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 					// assigned (emitStaticFieldRead/Assign).
 					mangled := accessorMethodName(m.AccessorKind, m.Name)
 					if _, ok := info.StaticFieldTypes[m.Name]; ok {
-						return fmt.Errorf("%d:%d: class '%s' cannot declare static accessor '%s' — a static field with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+						return internalAt(m.GetPos(), "class '%s' cannot declare static accessor '%s' — a static field with that name already exists", cd.Name, m.Name)
 					}
 					if ownStaticDeclared[mangled] {
-						return fmt.Errorf("%d:%d: class '%s' declares more than one static %s accessor for '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.AccessorKind, m.Name)
+						return internalAt(m.GetPos(), "class '%s' declares more than one static %s accessor for '%s'", cd.Name, m.AccessorKind, m.Name)
 					}
 					ownStaticDeclared[mangled] = true
 					info.StaticMethodSigs[mangled] = sig
@@ -1622,10 +2274,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				// plain field or a plain method (own or inherited) under
 				// the same, unmangled property name.
 				if _, _, ok := provisionalTy.FieldIndex(m.Name); ok {
-					return fmt.Errorf("%d:%d: class '%s' cannot declare accessor '%s' — a field with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+					return internalAt(m.GetPos(), "class '%s' cannot declare accessor '%s' — a field with that name already exists", cd.Name, m.Name)
 				}
 				if _, ok := info.MethodSigs[m.Name]; ok {
-					return fmt.Errorf("%d:%d: class '%s' cannot declare accessor '%s' — a method with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+					return internalAt(m.GetPos(), "class '%s' cannot declare accessor '%s' — a method with that name already exists", cd.Name, m.Name)
 				}
 
 				mangled := accessorMethodName(m.AccessorKind, m.Name)
@@ -1643,7 +2295,17 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 					// An unannotated setter parameter has the getter's type, as
 					// in TypeScript.
 					if getterRet.IR != setterParam.IR && getterRet.IR != "void" {
-						if setter := accessorDecl(cd, "set", m.Name, false); setter != nil && len(setter.Params) == 1 && setter.Params[0].Type == nil {
+						if setter := accessorDecl(cd, "set", m.Name, false); e.compatJS() && setterParam.IsDynamic() && setter != nil && len(setter.Params) == 1 && setter.Params[0].Type == nil {
+							// JavaScript: the setter takes any value, and the
+							// getter's result is read as one.
+							if m.AccessorKind == "get" {
+								sig.RetType = setterParam
+							} else {
+								otherSig.RetType = setterParam
+								info.MethodSigs[accessorMethodName(otherKind, m.Name)] = otherSig
+							}
+							getterRet = setterParam
+						} else if setter != nil && len(setter.Params) == 1 && setter.Params[0].Type == nil {
 							if m.AccessorKind == "set" {
 								sig.ParamTypes[0] = getterRet
 							} else {
@@ -1653,19 +2315,16 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 							setterParam = getterRet
 						}
 					}
-					if getterRet.IR != setterParam.IR {
-						return fmt.Errorf("%d:%d: getter/setter '%s' on class '%s' disagree on type", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
-					}
 				}
 
 				if ownDeclared[mangled] {
-					return fmt.Errorf("%d:%d: class '%s' declares more than one %s accessor for '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.AccessorKind, m.Name)
+					return internalAt(m.GetPos(), "class '%s' declares more than one %s accessor for '%s'", cd.Name, m.AccessorKind, m.Name)
 				}
 				ownDeclared[mangled] = true
 
 				if existingSig, overriding := info.MethodSigs[mangled]; overriding {
 					if !sigCompatible(existingSig, sig) {
-						return fmt.Errorf("%d:%d: accessor '%s' on class '%s' overrides an inherited accessor with an incompatible signature", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+						return internalAt(m.GetPos(), "accessor '%s' on class '%s' overrides an inherited accessor with an incompatible signature", m.Name, cd.Name)
 					}
 					slot := info.MethodDispatchSlot[mangled]
 					if slot == nil {
@@ -1693,7 +2352,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// vtable emitter reference a symbol that does not exist.
 			if m.IsGenerator {
 				if ownDeclared[m.Name] {
-					return fmt.Errorf("%d:%d: class '%s' declares more than one method named '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+					return internalAt(m.GetPos(), "class '%s' declares more than one method named '%s'", cd.Name, m.Name)
 				}
 				ownDeclared[m.Name] = true
 				info.MethodImplementor[m.Name] = cd.Name
@@ -1704,7 +2363,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 
 			if m.IsStatic {
 				if ownStaticDeclared[m.Name] {
-					return fmt.Errorf("%d:%d: class '%s' declares more than one static method named '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+					return internalAt(m.GetPos(), "class '%s' declares more than one static method named '%s'", cd.Name, m.Name)
 				}
 				ownStaticDeclared[m.Name] = true
 				info.StaticMethodSigs[m.Name] = sig
@@ -1713,7 +2372,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			}
 
 			if ownDeclared[m.Name] {
-				return fmt.Errorf("%d:%d: class '%s' declares more than one method named '%s'", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+				return internalAt(m.GetPos(), "class '%s' declares more than one method named '%s'", cd.Name, m.Name)
 			}
 			ownDeclared[m.Name] = true
 			// Symmetric to the accessor branch's own field/method collision
@@ -1721,17 +2380,17 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// claimed by an accessor (own-earlier-in-this-class, or
 			// inherited — both already live in info.MethodSigs by now).
 			if _, ok := info.MethodSigs[accessorMethodName("get", m.Name)]; ok {
-				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — a getter with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+				return internalAt(m.GetPos(), "class '%s' cannot declare method '%s' — a getter with that name already exists", cd.Name, m.Name)
 			}
 			if _, ok := info.MethodSigs[accessorMethodName("set", m.Name)]; ok {
-				return fmt.Errorf("%d:%d: class '%s' cannot declare method '%s' — a setter with that name already exists", m.GetPos().Line, m.GetPos().Col, cd.Name, m.Name)
+				return internalAt(m.GetPos(), "class '%s' cannot declare method '%s' — a setter with that name already exists", cd.Name, m.Name)
 			}
 
 			if existingSig, overriding := info.MethodSigs[m.Name]; overriding {
 				if !sigCompatible(existingSig, sig) {
-					needed, supported := funcAdapterPlan(funcTypeFromSig(sig), funcTypeFromSig(existingSig))
-					if !needed || !supported || m.IsAsync || existingSig.This || sig.This {
-						return fmt.Errorf("%d:%d: method '%s' on class '%s' overrides an inherited method with an incompatible signature", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+					needed, supported := funcAdapterPlan(overrideFuncType(sig), funcTypeFromSig(existingSig))
+					if !needed || !supported || (m.IsAsync && !trailingOptionalOnly(overrideFuncType(sig), funcTypeFromSig(existingSig))) || existingSig.This || sig.This {
+						return internalAt(m.GetPos(), "method '%s' on class '%s' overrides an inherited method with an incompatible signature", m.Name, cd.Name)
 					}
 					if info.OverrideSigs == nil {
 						info.OverrideSigs = map[string]FuncSig{}
@@ -1763,13 +2422,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 		// class can actually be instantiated. An abstract class is exempt
 		// (that's the whole point — it's allowed to leave stubs open for
 		// its own subclasses).
-		if !cd.IsAbstract {
-			for mname, decl := range info.Methods {
-				if decl.Body == nil && !decl.IsOptional {
-					return fmt.Errorf("%d:%d: class '%s' does not implement abstract method '%s' inherited from '%s'", cd.GetPos().Line, cd.GetPos().Col, cd.Name, mname, info.MethodImplementor[mname])
-				}
-			}
-		}
 
 		// Constructor rules (TDD-00009 Stage 3): see hasTopLevelSuperCall's
 		// doc comment for why the super()-presence check is shallow.
@@ -1784,15 +2436,22 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if cd.BaseClass != "" && !isErrorRoot && !containsSuperCall(cd.Constructor.Body) {
 				guardMissingSuper(cd.Constructor.Body)
 			}
+			if n := countSuperCalls(cd.Constructor.Body); cd.BaseClass != "" && (n > 1 || n == 1 && !hasTopLevelSuperCall(cd.Constructor.Body)) {
+				guardRepeatedSuper(cd.Constructor.Body)
+			}
 			callsSuper := hasTopLevelSuperCall(cd.Constructor.Body)
-			if baseCtor != nil && !callsSuper && containsSuperCall(cd.Constructor.Body) {
-				return fmt.Errorf("%d:%d: constructor of class '%s' must call super(...) (base class '%s' has a constructor)", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name, cd.BaseClass)
+			nestedSuper := cd.BaseClass != "" && !callsSuper && containsSuperCall(cd.Constructor.Body)
+			if nestedSuper {
+				// `const r = super()`, `super()?.a`, `if (c) super()`: each
+				// call runs the own field initializers right after it.
+				inlineFieldInitsAtSuper(cd)
+				callsSuper = true
 			}
 			// A derived class must call super() (TS2377) even when its base
 			// has no constructor of its own: that call is then a no-op
 			// (emitSuperCall).
 			if baseCtor == nil && callsSuper && !isErrorRoot && !haveBase && hostBase == nil {
-				return fmt.Errorf("%d:%d: constructor of class '%s' calls super(...) but the class has no base class", cd.Constructor.GetPos().Line, cd.Constructor.GetPos().Col, cd.Name)
+				return internalAt(cd.Constructor.GetPos(), "constructor of class '%s' calls super(...) but the class has no base class", cd.Name)
 			}
 			info.Constructor = cd.Constructor
 			// One reading `arguments` takes its implicit rest, as a method does.
@@ -1808,7 +2467,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			// TDD-00063 Stage 1: splice own field initializers in right after
 			// super() returns (`this` now exists), or at the top for a base
 			// class, before the rest of the constructor body runs.
-			if inits := classFieldInitStmts(cd); len(inits) > 0 {
+			if inits := classFieldInitStmts(cd); len(inits) > 0 && !nestedSuper {
 				at := topLevelSuperCallIndex(cd.Constructor.Body) + 1 // -1 → 0 when there is no super()
 				stmts := cd.Constructor.Body.Body
 				spliced := make([]ast.Statement, 0, len(stmts)+len(inits))
@@ -1818,7 +2477,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				cd.Constructor.Body.Body = spliced
 			}
 
-		case (len(ownFields) > 0 || len(classFieldInitStmts(cd)) > 0 || (e.standardDecorators() && classHasStandardDecorators(cd))) && (baseCtor == nil || !baseCtorSig.HasRest):
+		case (len(ownFields) > 0 || len(classFieldInitStmts(cd)) > 0 || (e.standardDecorators() && classHasStandardDecorators(cd))):
 			// A standard-decorated class needs a constructor even with no fields,
 			// so its per-instance decorator effects (field-init transforms,
 			// addInitializer callbacks) run in the constructor tail (TDD-00161
@@ -1847,8 +2506,8 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			} else if baseCtor == nil && hostBase != nil && !haveBase && hostBase.IsRegExp() {
 				// RegExp's constructor, forwarded: `(pattern?, flags?)`.
 				params = []ast.Param{
-					{Name: "pattern", Type: &ast.TypeAnnotation{Name: "any"}, Optional: true},
-					{Name: "flags", Type: &ast.TypeAnnotation{Name: "string"}, Optional: true},
+					{Name: "pattern", Type: ast.AnyAnnotation("ts"), Optional: true},
+					{Name: "flags", Type: nameAnnotation("string"), Optional: true},
 				}
 				superCall := ast.NewCallExpression(ast.NewSuperExpression(cd.GetPos()), []ast.Expression{ast.NewIdentifier("pattern", cd.GetPos()), ast.NewIdentifier("flags", cd.GetPos())}, cd.GetPos())
 				stmts = append(stmts, ast.NewExpressionStatement(superCall, cd.GetPos()))
@@ -1860,11 +2519,11 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			} else if baseCtor == nil && isErrorRoot {
 				// A builtin Error's constructor, forwarded: `(message?, options?)`,
 				// DOMException's `(message?, name?)`.
-				second := ast.Param{Name: "options", Type: &ast.TypeAnnotation{Name: "any"}, Optional: true}
+				second := ast.Param{Name: "options", Type: ast.AnyAnnotation("ts"), Optional: true}
 				if cd.BaseClass == "DOMException" {
-					second = ast.Param{Name: "name", Type: &ast.TypeAnnotation{Name: "string"}, Optional: true}
+					second = ast.Param{Name: "name", Type: nameAnnotation("string"), Optional: true}
 				}
-				params = []ast.Param{{Name: "message", Type: &ast.TypeAnnotation{Name: "string"}, Optional: true}, second}
+				params = []ast.Param{{Name: "message", Type: nameAnnotation("string"), Optional: true}, second}
 				superCall := ast.NewCallExpression(ast.NewSuperExpression(cd.GetPos()), []ast.Expression{ast.NewIdentifier("message", cd.GetPos()), ast.NewIdentifier(second.Name, cd.GetPos())}, cd.GetPos())
 				stmts = append(stmts, ast.NewExpressionStatement(superCall, cd.GetPos()))
 			} else if baseCtor != nil {
@@ -1873,6 +2532,10 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 				for i, pname := range baseCtorSig.ParamNames {
 					params[i] = ast.Param{Name: pname}
 					superArgs[i] = ast.NewIdentifier(pname, cd.GetPos())
+					if baseCtorSig.HasRest && i == len(baseCtorSig.ParamNames)-1 {
+						params[i].Rest = true
+						superArgs[i] = ast.NewSpreadElement(superArgs[i], cd.GetPos())
+					}
 				}
 				superCall := ast.NewCallExpression(ast.NewSuperExpression(cd.GetPos()), superArgs, cd.GetPos())
 				stmts = append(stmts, ast.NewExpressionStatement(superCall, cd.GetPos()))
@@ -1911,14 +2574,6 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			info.ImplicitCtor = true
 			info.CtorSig = baseCtorSig
 
-		case len(ownFields) > 0:
-			// Only reachable now when the class adds own fields *and* the base
-			// has a rest-parameter constructor: a pass-through
-			// `constructor(...args) { super(...args) }` isn't representable
-			// without a general spread-call mechanism this compiler lacks, so an
-			// explicit derived constructor is required (same limitation the
-			// no-own-fields pass-through case below carries).
-			return fmt.Errorf("%d:%d: class '%s' adds fields but its base class has a rest-parameter constructor — write an explicit constructor that calls super(...)", cd.GetPos().Line, cd.GetPos().Col, cd.Name)
 		}
 
 		e.classes[cd.Name] = info
@@ -2010,7 +2665,7 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 	// generic class's per-instantiation monomorphization has no single
 	// decorator target, so a decorated generic class is a clean rejection.
 	if len(cd.Decorators) > 0 && len(cd.TypeParams) > 0 {
-		return fmt.Errorf("%d:%d: a decorator on a generic class is not yet supported", cd.GetPos().Line, cd.GetPos().Col)
+		return internalAt(cd.GetPos(), "decorated generic class (the resolver rejects it)")
 	}
 	for _, m := range cd.Methods {
 		if len(m.Decorators) == 0 || methodDecoratorSupported(cd, m) {
@@ -2021,17 +2676,23 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 		if e.standardDecorators() && m.AccessorKind != "" && !m.IsStatic && len(cd.TypeParams) == 0 {
 			continue
 		}
-		return fmt.Errorf("%d:%d: a decorator on this member is not yet supported — accessor (get/set), static, and generator method decorators, and decorators on a generic class's methods, are the unsupported cases; a plain instance method decorator is supported", m.GetPos().Line, m.GetPos().Col)
+		if e.standardDecorators() && staticMethodDecoratorSupported(cd, m) {
+			continue
+		}
+		if len(cd.TypeParams) == 0 {
+			return internalAt(m.GetPos(), "decorated member %s", m.Name)
+		}
+		return internalAt(m.GetPos(), "decorated generic class method (the resolver rejects it)")
 	}
 	if len(cd.AutoAccessors) > 0 && !e.standardDecorators() {
-		return fmt.Errorf("%d:%d: an `accessor` auto-field decorator is a standard (TC39) decorator — compile with -decorators=standard", cd.GetPos().Line, cd.GetPos().Col)
+		return internalAt(cd.GetPos(), "auto-accessor under experimental decorators")
 	}
 	if info.Constructor != nil {
 		llvmName := cd.Name + ctorSymbolSuffix
-		e.currentCtorClass = cd.Name
+		e.currentCtorClass, e.overrideThis, e.overrideThisStatic = cd.Name, "", nil
 		e.memberFrame.node, e.memberFrame.name = cd, "new "+ast.Unmangle(cd.Name)
 		err := e.emitClassMember(llvmName, info.Ty, info.Constructor.Params, info.CtorSig, info.Constructor.Body, TypeVoid, info.Constructor.GetPos(), false, false)
-		e.currentCtorClass = ""
+		e.currentCtorClass, e.overrideThis, e.overrideThisStatic = "", "", nil
 		if err != nil {
 			return err
 		}
@@ -2090,8 +2751,8 @@ func (e *Emitter) emitClassDecl(cd *ast.ClassDeclaration) error {
 				return err
 			}
 			callee := func() (string, string) { return "@" + implName, "%env" }
-			if _, ok := e.emitAdapterFunc("@"+llvmName, funcTypeFromSig(own), funcTypeFromSig(sig), callee); !ok {
-				return fmt.Errorf("%d:%d: method '%s' on class '%s' overrides an inherited method with an incompatible signature", m.GetPos().Line, m.GetPos().Col, m.Name, cd.Name)
+			if _, ok := e.emitAdapterFunc("@"+llvmName, overrideFuncType(own), funcTypeFromSig(sig), callee); !ok {
+				return internalAt(m.GetPos(), "method '%s' on class '%s' overrides an inherited method with an incompatible signature", m.Name, cd.Name)
 			}
 			continue
 		}
@@ -2151,6 +2812,7 @@ func (e *Emitter) emitClassStaticInit(cd *ast.ClassDeclaration) error {
 	e.funcContext = &funcContext{
 		currentCtorClass: savedCtx.currentCtorClass, // set by the caller for a constructor
 		inModuleTask:     savedCtx.inModuleTask,
+		memberClass:      cd.Name,
 	}
 	defer func() { e.funcContext = savedCtx }()
 	if mf := e.memberFrame; mf.node != nil {
@@ -2206,7 +2868,7 @@ func (e *Emitter) emitClassVTable(className string) {
 	}
 	slots := make([]string, info.VTableSize)
 	for i := range slots {
-		slots[i] = "ptr null"
+		slots[i] = irPtr + " null"
 	}
 	for _, mname := range info.MethodOrder {
 		slot := info.MethodDispatchSlot[mname]
@@ -2216,9 +2878,9 @@ func (e *Emitter) emitClassVTable(className string) {
 		if m := info.Methods[mname]; m != nil && m.Body == nil {
 			continue // an optional or abstract method no class in the chain implements
 		}
-		slots[slot.Index] = fmt.Sprintf("ptr @%s", llvmSafeSymbol(info.MethodImplementor[mname]+"_"+mname))
+		slots[slot.Index] = fmt.Sprintf(irPtr+" @%s", llvmSafeSymbol(info.MethodImplementor[mname]+"_"+mname))
 	}
-	e.emitGlobal(fmt.Sprintf("@%s_vtable = global [%d x ptr] [%s]", className, info.VTableSize, strings.Join(slots, ", ")))
+	e.emitGlobal(fmt.Sprintf("@%s_vtable ="+irGlobalAS+" global [%d x "+irPtr+"] [%s]", className, info.VTableSize, strings.Join(slots, ", ")))
 }
 
 // emitClassMember emits one method or constructor as a plain LLVM function,
@@ -2245,6 +2907,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	e.funcContext = &funcContext{
 		currentCtorClass: savedCtx.currentCtorClass, // set by the caller for a constructor
 		inModuleTask:     savedCtx.inModuleTask,
+		memberClass:      classTy.ClassName,
 	}
 	defer func() { e.funcContext = savedCtx }()
 	if mf := e.memberFrame; mf.node != nil {
@@ -2269,7 +2932,23 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 			paramNames[i] = p.Name
 		}
 		e.hoistedCaptures = capturedLocalNames(body.Body, paramNames)
+		e.hoistFunctionDecls(body.Body)
 		e.setForwardClosures(body.Body)
+		// Its vars a hoisted function reads before they run, as a
+		// function body's.
+		savedEarly := e.earlyVars
+		e.earlyVars = earlyReadVars(body.Body)
+		defer func() { e.earlyVars = savedEarly }()
+		// Its own function declarations, as a function body's.
+		if err := e.pushNestedFuncScope(params, body.Body); err != nil {
+			return err
+		}
+		defer e.popNestedFuncScope()
+		// Its bindings a later store widens (`let x = null; x = v`), as a
+		// function body's.
+		savedWidened := e.widenedBindings
+		e.widenedBindings = e.crossTypeWidenedBindings(body.Body)
+		defer func() { e.widenedBindings = savedWidened }()
 	}
 
 	// Async method (TDD-00063 Stage 2a): compiles to a coroutine exactly like
@@ -2308,25 +2987,48 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	} else {
 		// Implicit receiver: LLVM parameter slot 0, never part of the AST's
 		// own parameter list.
-		llvmParams = append(llvmParams, "ptr %p_this")
+		llvmParams = append(llvmParams, irPtr+" %p_this")
 		thisPtr := "%v_this"
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", thisPtr))
-		e.emitInstr(fmt.Sprintf("store ptr %%p_this, ptr %s, align 8", thisPtr))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", thisPtr))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %%p_this, "+irPtr+" %s, align 8", thisPtr))
 		if declared, ok := e.declaredMethodThis(body, classTy); ok {
 			// `m(this: Other)`: the receiver a call passes (`m.call(o)`) is
 			// read as the declared class.
 			classTy = declared
+		}
+		if e.methodThisAny(body) {
+			// `m(this: any)`: the receiver, boxed.
+			boxed, err := e.emitBoxValue(Value{Ref: "%p_this", Ty: classTy})
+			if err != nil {
+				return err
+			}
+			anySlot := "%v_this_any"
+			e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", anySlot))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", boxed.Ref, anySlot))
+			thisPtr, classTy = anySlot, TypeAny
 		}
 		e.define("this", Symbol{Ptr: thisPtr, Ty: classTy})
 		if body != nil && arrowsCaptureThis(body) {
 			// An arrow reads `this`: box the receiver at entry (which
 			// dominates the whole body), as a captured parameter is, not at
 			// the first capture, which may sit in one branch.
-			e.boxHoistedCapture("this", classTy, "%p_this", true, true)
+			thisReg, atEntry := "%p_this", true
+			if classTy.IsDynamic() {
+				// `this: any`: the boxed receiver, at the body's start.
+				thisReg, atEntry = e.freshReg(), false
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", thisReg, thisPtr))
+			}
+			e.boxHoistedCapture("this", classTy, thisReg, true, atEntry)
 		}
 		if classInfo, ok := e.classes[classTy.ClassName]; ok && classInfo.BaseClass != "" {
 			baseTy := e.classes[classInfo.BaseClass].Ty
 			e.define("super", Symbol{Ptr: thisPtr, Ty: baseTy})
+			if e.currentCtorClass != "" && ctorGuardsThis(body) {
+				slot := e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
+				e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", slot))
+				e.thisInitSlot = slot
+			}
 		}
 	}
 
@@ -2342,16 +3044,13 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 		// allowed — its { i8, i64 } argument is boxed at the call site (the
 		// static-method path in emitStaticMethodCall and the instance path in
 		// emitClassCall both box IsDynamic params) and bound here exactly like
-		// a constrained-union param. Only a nested dynamic shape stays rejected.
-		if containsDynamicElement(pty) {
-			return fmt.Errorf("%d:%d: any/unknown is not yet supported nested inside an array or object method parameter type", pos.Line, pos.Col)
-		}
+		// a constrained-union param.
 		if err := validateCompositeType(pty, pos.Line, pos.Col); err != nil {
 			return err
 		}
 		if pty.IsArray() {
 			llvmParams = append(llvmParams,
-				fmt.Sprintf("ptr %%p_%s_ptr", p.Name),
+				fmt.Sprintf(irPtr+" %%p_%s_ptr", p.Name),
 				fmt.Sprintf("i64 %%p_%s_len", p.Name),
 			)
 			// Object-reference array param (TDD-00127): see bindArrayParam. Same
@@ -2360,7 +3059,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 				e.bindRawPatternParam(unpackLater, p, pty, "")
 				if err := e.patternStep(unpackLater, func() error {
 					dataPtrReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%p_%s_ptr, align 8", dataPtrReg, p.Name))
+					e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %%p_%s_ptr, align 8", dataPtrReg, p.Name))
 					return e.unpackArrayPatternInto(dataPtrReg, "%p_"+p.Name+"_len", *pty.ElemType, p.ArrayPattern)
 				}); err != nil {
 					return err
@@ -2380,7 +3079,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 			llvmParams = append(llvmParams, fmt.Sprintf("%s %%p_%s", pty.IR, p.Name))
 			ptrName := "%v_" + p.Name
 			e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, pty.IR, pty.Align()))
-			e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
+			e.emitInstr(fmt.Sprintf("store %s %%p_%s, "+irPtr+" %s, align %d", pty.IR, p.Name, ptrName, pty.Align()))
 			if p.ArrayPattern != nil || p.ObjectPattern != nil {
 				e.bindRawPatternParam(unpackLater, p, pty, ptrName)
 			}
@@ -2397,7 +3096,7 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 			if p.ObjectPattern != nil {
 				if err := e.patternStep(unpackLater, func() error {
 					objPtrReg := e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", objPtrReg, patternParamIR(pty), ptrName))
+					e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", objPtrReg, patternParamIR(pty), ptrName))
 					return e.unpackObjectPatternInto(objPtrReg, pty, p.ObjectPattern, pos)
 				}); err != nil {
 					return err
@@ -2441,9 +3140,13 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	// constructor, so this is a no-op for methods. Skipped if the body already
 	// terminated (e.g. an unconditional throw).
 	if e.currentCtorClass != "" && !e.blockDone {
+		// A derived constructor ending before super() bound `this`: the
+		// ReferenceError.
+		e.emitThisBoundCheck()
 		if err := e.emitStandardConstructorTail(e.currentCtorClass); err != nil {
 			return err
 		}
+		e.emitOverrideThisReturn()
 	}
 
 	if isAsync {
@@ -2461,24 +3164,177 @@ func (e *Emitter) emitClassMember(llvmName string, classTy Type, params []ast.Pa
 	return nil
 }
 
+// emitModuleThis is a module's own `this` (at its top level, or in an
+// arrow there): undefined in an ES module, and CommonJS's module.exports —
+// one object per file, made on first read — in a file Node runs as
+// CommonJS. False when ex is in a function or class of its own.
+func (e *Emitter) emitModuleThis(ex *ast.ThisExpression) (Value, bool) {
+	c := e.front()
+	if c == nil || e.prog == nil {
+		return Value{}, false
+	}
+	var n ast.Node = ex
+	var top ast.Statement
+	for {
+		p := c.ParentOf(n)
+		if p == nil {
+			return Value{}, false
+		}
+		switch p.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return Value{}, false
+		case *ast.Program:
+			top, _ = n.(ast.Statement)
+		}
+		if top != nil {
+			break
+		}
+		n = p
+	}
+	file := e.prog.StmtFiles[top]
+	if e.prog.IsESM(top) {
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, true
+	}
+	if e.moduleExports == nil {
+		e.moduleExports = map[string]string{}
+	}
+	g, ok := e.moduleExports[file]
+	if !ok {
+		g = fmt.Sprintf("@__kml_module_exports%d", len(e.moduleExports))
+		e.moduleExports[file] = g
+		e.emitGlobal(g + " = internal" + irGlobalAS + " global i64 0, align 8")
+	}
+	e.ensureNanBox()
+	cur := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cur, g))
+	isNew := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isNew, cur))
+	mk, done := e.freshLabel("modthis.new"), e.freshLabel("modthis.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNew, mk, done))
+	e.emitLabel(mk)
+	bag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
+	boxed := e.emitNbTagPtr(bag, kmlTagDynObject)
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", boxed, g))
+	e.emitTerminator("br label %" + done)
+	e.emitLabel(done)
+	v := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", v, g))
+	return Value{Ref: v, Ty: TypeAny}, true
+}
+
 // emitThisExpression evaluates `this` — valid only inside a method or
 // constructor body, where emitClassMember has already bound scope symbol
 // "this" to the receiver. Same load-from-alloca shape any other
 // object-typed identifier read uses.
+// ctorGuardsThis reports a derived constructor body that may read `this`
+// (or a super property) before super() binds it, or call super() twice:
+// anything but one leading `super(…)` statement whose arguments read
+// neither.
+func ctorGuardsThis(body *ast.BlockStatement) bool {
+	if body == nil || len(body.Body) == 0 || countSuperCalls(body) == 0 || superCallInArrow(body) {
+		// (A body with no super() call is guardMissingSuper's, or a
+		// constructor codegen made, whose base binds `this` itself; an
+		// arrow's super() binds it in a function of its own.)
+		return false
+	}
+	st, ok := body.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		return true
+	}
+	call, ok := st.Expr.(*ast.CallExpression)
+	if !ok {
+		return true
+	}
+	if _, ok := call.Callee.(*ast.SuperExpression); !ok {
+		return true
+	}
+	for _, a := range call.Args {
+		if containsThis(a) || containsSuper(a) {
+			return true
+		}
+	}
+	return countSuperCalls(body) != 1
+}
+
+// superCallInArrow reports a super(…) call inside an arrow function of the
+// constructor body.
+func superCallInArrow(body *ast.BlockStatement) bool {
+	found := false
+	ast.Inspect(body, func(x ast.Node) bool {
+		switch x := x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.ArrowFunction:
+			found = found || countSuperCalls(ast.NewBlockStatement([]ast.Statement{ast.NewExpressionStatement(x, x.GetPos())}, x.GetPos())) > 0
+			return false
+		}
+		return !found
+	})
+	return found
+}
+
+// containsSuper reports a super reference in n outside nested non-arrow
+// functions and classes.
+func containsSuper(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		switch x.(type) {
+		case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ClassDeclaration, *ast.ClassExpression:
+			return false
+		case *ast.SuperExpression:
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// emitThisBoundCheck throws the derived constructor's ReferenceError when
+// `this` is read before super() bound it.
+func (e *Emitter) emitThisBoundCheck() {
+	if e.thisInitSlot == "" {
+		return
+	}
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", b, e.thisInitSlot))
+	okL, badL := e.freshLabel("this.bound"), e.freshLabel("this.unbound")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", b, okL, badL))
+	e.emitLabel(badL)
+	e.emitThrowKind("ReferenceError", derivedNoSuperMessage)
+	e.emitLabel(okL)
+}
+
+// emitThisBind records super() binding `this`: a second binding throws.
+func (e *Emitter) emitThisBind() {
+	if e.thisInitSlot == "" {
+		return
+	}
+	b := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", b, e.thisInitSlot))
+	okL, badL := e.freshLabel("this.bind"), e.freshLabel("this.rebind")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", b, badL, okL))
+	e.emitLabel(badL)
+	e.emitThrowKind("ReferenceError", superAgainMessage)
+	e.emitLabel(okL)
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", e.thisInitSlot))
+}
+
 func (e *Emitter) emitThisExpression(pos ast.Pos) (Value, error) {
 	sym, ok := e.lookup("this")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: 'this' is only valid inside a method or constructor body", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "'this' is only valid inside a method or constructor body")
 	}
+	e.emitThisBoundCheck()
 	reg := e.freshReg()
 	// A dynamic `this` (a prototype-class constructor/method under
 	// `-compat=js`, TDD-00155 Stage 4) is a boxed { i8, i64 } slot, not a
 	// class-instance pointer.
 	if sym.Ty.IsDynamic() {
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", reg, sym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", reg, sym.Ptr))
 		return Value{Ref: reg, Ty: sym.Ty}, nil
 	}
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", reg, sym.Ptr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", reg, sym.Ptr))
 	return Value{Ref: reg, Ty: sym.Ty}, nil
 }
 
@@ -2494,12 +3350,25 @@ func (e *Emitter) emitNewTarget(ex *ast.NewTargetExpression) (Value, error) {
 	switch ex.Ctx {
 	case ast.NewTargetConstructor:
 		if _, ok := e.lookup("this"); ok {
+			// The instance's class, before super() too: no TDZ check.
+			saved := e.thisInitSlot
+			e.thisInitSlot = ""
+			defer func() { e.thisInitSlot = saved }()
 			return e.emitExpr(ast.NewMemberExpression(ast.NewThisExpression(pos), "constructor", pos))
 		}
 	case ast.NewTargetFunction:
 		if fn := e.newTargetFunc(); fn != "" && ex.FnID != 0 && ex.FnID == e.newTargetDecl.NewTargetID {
 			if _, ok := e.lookup("this"); !ok {
 				break
+			}
+			if e.funcContext != nil && e.newTargetSlot != "" {
+				// The constructor's own body: what its `new` or `super()`
+				// passed.
+				v, z, r := e.freshReg(), e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", v, e.newTargetSlot))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", z, v))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", r, z, nbUndefined, v))
+				return Value{Ref: r, Ty: TypeAny}, nil
 			}
 			f := ast.NewIdentifier(fn, pos)
 			proto, err := e.emitObjectGetPrototypeOf([]ast.Expression{ast.NewThisExpression(pos)}, pos)
@@ -2527,7 +3396,7 @@ func (e *Emitter) heldIdent(id *ast.Identifier) (Type, bool) {
 	// Asked out of its function's emission (a global's type computed from a
 	// function body's returns), the name may find a module global the
 	// local shadows: no answer then.
-	if o := e.reprOracle(); o != nil && strings.HasPrefix(sym.Ptr, "@") {
+	if o := e.reprOracle(); o != nil && (strings.HasPrefix(sym.Ptr, "@") || e.foundAtTop(id.Name)) {
 		if bs, _ := o.b.Resolve(id); bs != nil && bs.Scope != nil && bs.Scope.Kind != binder.ModuleScope {
 			return Type{}, false
 		}
@@ -2583,8 +3452,25 @@ func dropReplacedMethods(cd *ast.ClassDeclaration) {
 // HasVTable class — TDD-00009 Stage 3 — the hidden vtable pointer), call
 // its constructor (if any) with the fresh pointer as the implicit receiver,
 // and return the pointer.
+// newOfNamespace reports `new` of a builtin namespace object (`new Math()`)
+// no class or local of that name shadows.
+func (e *Emitter) newOfNamespace(ex *ast.NewExpression) bool {
+	if _, ns := namespaceValueExport(ex.ClassName); !ns || ex.Callee != nil || ex.Qualified {
+		return false
+	}
+	if _, user := e.classes[ex.ClassName]; user {
+		return false
+	}
+	_, local := e.lookup(ex.ClassName)
+	return !local
+}
+
 func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	defer e.callSite(ex.GetPos())()
+	// An existing instance the constructor runs on (emitClassCallOn), taken
+	// before any argument's own `new` can see it.
+	into := e.newInto
+	e.newInto = ""
 	if nx, ok := e.iterableCtorArg(ex); ok {
 		ex = nx
 	}
@@ -2598,11 +3484,35 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if ex.ClassName == "Promise" {
 		return e.emitNewPromise(ex)
 	}
+	if bufferCallee(ex.ClassName, ex.Callee) && !e.isShadowedByLocal("Buffer") {
+		if call, ok := e.bufferCtorCall(ex.Args, ex.GetPos()); ok {
+			return e.emitExpr(call)
+		}
+	}
+	if e.newOfNamespace(ex) {
+		// `new Math()`: a namespace object constructs nothing — its
+		// TypeError once the arguments are evaluated.
+		for _, a := range ex.Args {
+			if sp, ok := a.(*ast.SpreadElement); ok {
+				a = sp.Arg
+			}
+			if _, err := e.emitExpr(a); err != nil {
+				return Value{}, err
+			}
+		}
+		e.emitThrowTypeError(ex.ClassName + " is not a constructor")
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
 	if name := protoCtorCallee(ex); ex.ClassName == "" && e.jsProtoCtor[name] {
 		// `new (F as any)(…)`: a constructor function.
 		nx := *ex
 		nx.ClassName, nx.Callee = name, nil
 		return e.emitProtoCtorNew(&nx)
+	}
+	if owner, ok := streamLockCtors[ex.ClassName]; ok && !ex.Qualified && ex.Callee == nil {
+		if _, user := e.classes[ex.ClassName]; !user {
+			return e.emitNewStreamLock(ex, owner)
+		}
 	}
 	// new Proxy(target, handler) — TDD-00155 Stage 7, not a user class.
 	if ex.ClassName == "Proxy" {
@@ -2644,12 +3554,23 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			// (`class C<T = any>`).
 			typeArgs, ok := e.newTypeArgs(genDecl, ex)
 			if !ok {
-				return Value{}, fmt.Errorf("%d:%d: generic class '%s' requires exactly %d explicit type argument(s) (e.g. new %s<%s>(...)) — inference isn't supported for class construction", ex.GetPos().Line, ex.GetPos().Col, ast.Unmangle(ex.ClassName), len(genDecl.TypeParams), ast.Unmangle(ex.ClassName), strings.Join(genDecl.TypeParams, ", "))
+				if len(ex.TypeArgs) > 0 {
+					// A wrong count is the checker's TS2558.
+					e.typeGap("type arguments", ex.GetPos())
+				}
+				// A type parameter nothing infers is its default, else
+				// `unknown`, as TypeScript instantiates it.
+				typeArgs = make([]ast.TypeNode, len(genDecl.TypeParams))
+				for i := range typeArgs {
+					if i < len(genDecl.TypeParamDefaults) && genDecl.TypeParamDefaults[i] != nil {
+						typeArgs[i] = genDecl.TypeParamDefaults[i]
+					} else {
+						typeArgs[i] = &ast.KeywordType{Keyword: "unknown"}
+					}
+				}
 			}
 			subs := e.buildTypeArgSubs(genDecl.TypeParams, typeArgs)
-			if err := e.checkTypeParamConstraints(genDecl.TypeParams, genDecl.TypeParamConstraints, subs, "class", genDecl.Name, ex.GetPos()); err != nil {
-				return Value{}, err
-			}
+
 			mangled, err := e.instantiateGenericClass(genDecl, subs)
 			if err != nil {
 				return Value{}, err
@@ -2668,14 +3589,15 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				}
 			}
 			e.emitThrowTypeError(unmangleTopLevelName(ex.ClassName) + " is not a constructor")
-			e.emitTerminator("unreachable")
+			e.emitLabel(e.freshLabel("notctor.dead"))
 			return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
 		} else {
-			return Value{}, fmt.Errorf("%d:%d: unknown class '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
+			// A name no class of the program declares (an ambient
+			// declaration's, or one only the environment provides): read
+			// as JavaScript reads it, a global property or its
+			// ReferenceError, and constructed through the value.
+			return e.emitDynNew(ex, e.checkerInstanceType(ex))
 		}
-	}
-	if info.IsAbstract && !e.dynConstructing {
-		return Value{}, fmt.Errorf("%d:%d: cannot create an instance of abstract class '%s'", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
 	}
 
 	// Zeroing allocation (calloc, or — under -optimize-memory, for a
@@ -2689,41 +3611,20 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 	if e.pendingStackAllocLit != nil && e.pendingStackAllocLit == ast.Expression(ex) && !e.classStackEligible(className, info) {
 		e.pendingStackAllocLit = nil // ineligible class: keep the heap path
 	}
-	dataReg := e.structAlloc(ex, info.Ty)
-
-	tagGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), dataReg))
-	// An error-subclass instance carries its TagID in field 0 marked with the
-	// Error type-id flag, so a boxed instance is recognised as an Error at a
-	// general render/JSON/member/instanceof site (TDD-00222). A plain class
-	// stores the bare TagID.
-	storedTag := info.TagID
-	if info.IsErrorSubclass {
-		storedTag = errorTypeIDStored(storedTag)
+	var dataReg string
+	if into != "" {
+		dataReg = into
+	} else {
+		dataReg = e.structAlloc(ex, info.Ty)
+		e.initInstanceWords(dataReg, className, info)
 	}
-	e.heapStore("i64", fmt.Sprint(storedTag), tagGep, 8)
-	e.emitPresenceAll(dataReg, info.Ty, info.DeclareFields)
-	// A number field is undefined until a constructor or initializer
-	// assigns it: the double slot's sentinel, not calloc's 0 (TDD-00241).
-	// Error's own slots (errno, port, …) keep 0 as their absent state.
-	for i, f := range info.Ty.Fields {
-		if _, _, errSlot := errorObjType.FieldIndex(f.Name); (errSlot || strings.HasPrefix(f.Name, "__kml_err_")) && e.isErrorValueTy(info.Ty) {
-			continue
+	if into == "" {
+		if err := e.storeClassCaptures(ex, className, dataReg, info.Ty); err != nil {
+			return Value{}, err
 		}
-		if isF64Slot(f.Ty) && f.Name != ClassTagField {
-			g := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, info.Ty.StructIR(), dataReg, i))
-			e.heapStore("i64", fmt.Sprint(undefF64), g, 8)
-		}
-	}
-
-	if info.Ty.HasVTable {
-		vtGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vtGep, info.Ty.StructIR(), dataReg, info.Ty.VTableIndex()))
-		e.heapStore("ptr", "@"+className+"_vtable", vtGep, 8)
-	}
-	if err := e.storeClassCaptures(ex, className, dataReg, info.Ty); err != nil {
-		return Value{}, err
+		// A newTarget other than the class (Reflect.construct) gives the
+		// instance its prototype before the constructor runs.
+		e.emitTakePendingProto(dataReg)
 	}
 
 	// A class extending Map or Set (TDD-00247): its body, after the tag
@@ -2738,12 +3639,16 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			}
 			return Value{Ref: dataReg, Ty: info.Ty}, nil
 		}
-		if (info.HostBase.IsDate() || info.HostBase.IsArray()) && (info.Constructor == nil || info.ImplicitCtor) {
+		if (info.HostBase.IsDate() || info.HostBase.IsArray() || info.HostBase.IsPrimWrapper() || info.HostBase.IsArrayBuffer()) && (info.Constructor == nil || info.ImplicitCtor) {
 			// No constructor of its own: the arguments are Date's (Array's).
 			// An implicit one (field initializers) then runs without them.
 			var err error
 			if info.HostBase.IsArray() {
 				err = e.emitHostArrayBody(body, *info.HostBase, ex.Args, ex.GetPos())
+			} else if info.HostBase.IsPrimWrapper() {
+				err = e.emitHostPrimBody(body, *info.HostBase, ex.Args, ex.GetPos())
+			} else if info.HostBase.IsArrayBuffer() {
+				err = e.emitHostBufferBody(body, *info.HostBase, ex.Args, ex.GetPos())
 			} else {
 				err = e.emitHostDateBody(body, ex.Args, ex.GetPos())
 			}
@@ -2765,7 +3670,14 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		}
 		if info.Constructor == nil {
 			if len(ex.Args) > 1 {
-				return Value{}, fmt.Errorf("%d:%d: %s takes at most one argument", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
+				// Extra arguments: evaluated, then ignored.
+				kept, err := e.dropArgsPast(ex.Args, 1, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				trimmed := *ex
+				trimmed.Args = kept
+				ex = &trimmed
 			}
 			if len(ex.Args) == 1 && !isUndefinedLiteral(e, ex.Args[0]) {
 				if err := e.emitHostBodySeed(body, *info.HostBase, ex.Args[0], ex.GetPos()); err != nil {
@@ -2785,8 +3697,8 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			idx, _, ok := info.Ty.FieldIndex(field)
 			if ok {
 				gep := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), dataReg, idx))
-				e.heapStore("ptr", ref, gep, 8)
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, info.Ty.StructIR(), dataReg, idx))
+				e.heapStore(irPtr, ref, gep, 8)
 			}
 		}
 		// JS: `.name` is inherited from the builtin's prototype ("Error",
@@ -2797,17 +3709,34 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		if _, _, ok := info.Ty.FieldIndex(errorFramesField); ok {
 			storeField("stack", "null")
 			storeField(errorFramesField, "null")
-			e.ensureFrames()
-			e.emitInstr(fmt.Sprintf("call void @__kml_error_capture(ptr %s)", dataReg))
+			e.emitInstr(fmt.Sprintf("call void @__kml_error_capture("+irPtr+" %s)", dataReg))
 		}
 		if info.Constructor == nil {
+			if e.aggregateRooted(info) {
+				// AggregateError's (errors, message, options).
+				if len(ex.Args) == 0 {
+					e.emitThrowTypeError("undefined is not iterable (cannot read property Symbol(Symbol.iterator))")
+					return Value{Ref: dataReg, Ty: info.Ty}, nil
+				}
+				if err := e.emitAggregateErrors(dataReg, ex.Args[0]); err != nil {
+					return Value{}, err
+				}
+				ex = &ast.NewExpression{ClassName: ex.ClassName, Args: ex.Args[1:]}
+			}
 			if len(ex.Args) > 2 {
-				return Value{}, fmt.Errorf("%d:%d: %s takes a message and one more argument", ex.GetPos().Line, ex.GetPos().Col, ex.ClassName)
+				// Extra arguments: evaluated, then ignored.
+				kept, err := e.dropArgsPast(ex.Args, 2, ex.GetPos())
+				if err != nil {
+					return Value{}, err
+				}
+				trimmed := *ex
+				trimmed.Args = kept
+				ex = &trimmed
 			}
 			if len(ex.Args) == 2 {
 				slot := e.freshReg()
-				e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-				e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", dataReg, slot))
+				e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", dataReg, slot))
 				if err := e.emitErrorSecondArg(Symbol{Ptr: slot, Ty: info.Ty}, info, ex.Args[1]); err != nil {
 					return Value{}, err
 				}
@@ -2839,44 +3768,43 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		if sig.HasRest {
 			regularCount-- // the rest slot takes the remaining arguments
 		}
-		if err := e.checkSpreadArgs(ex.Args, sig.HasRest, regularCount, ex.GetPos()); err != nil {
-			return Value{}, err
+		cargs, doneSplit, serr := e.splitSpreadArgs(ex.Args, sig.HasRest, regularCount, ex.GetPos())
+		if serr != nil {
+			return Value{}, serr
 		}
+		defer doneSplit()
 		minRequired := regularCount
 		for minRequired > 0 && ((minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil) ||
 			(minRequired-1 < len(sig.Optional) && sig.Optional[minRequired-1])) {
 			minRequired--
 		}
 		var extraArgs []ast.Expression
-		if e.compatJS() && !sig.HasRest && len(ex.Args) > len(sig.ParamTypes) {
-			extraArgs = ex.Args[len(sig.ParamTypes):]
-			trimmed := *ex // a copy: the AST node keeps every argument
-			trimmed.Args = ex.Args[:len(sig.ParamTypes):len(sig.ParamTypes)]
-			ex = &trimmed
+		if e.compatJS() && !sig.HasRest && len(cargs) > len(sig.ParamTypes) {
+			extraArgs = cargs[len(sig.ParamTypes):]
+			cargs = cargs[:len(sig.ParamTypes):len(sig.ParamTypes)] // the AST node keeps every argument
 		}
 		if e.compatJS() {
 			minRequired = 0 // untyped JavaScript may omit any argument
 		}
-		if len(ex.Args) < minRequired || !sig.HasRest && len(ex.Args) > len(sig.ParamTypes) {
-			return Value{}, fmt.Errorf("%d:%d: %s constructor expects %d argument(s), got %d",
-				ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(sig.ParamTypes), len(ex.Args))
+		if len(cargs) < minRequired || !sig.HasRest && len(cargs) > len(sig.ParamTypes) {
+			return Value{}, internalAt(ex.GetPos(), "arity: %s constructor expects %d argument(s), got %d", ex.ClassName, len(sig.ParamTypes), len(cargs))
 		}
-		argParts := []string{"ptr " + dataReg}
+		argParts := []string{irPtr + " " + dataReg}
 		scratch := e.newParamDefaultScratch(sig.ParamNames)
 		for i := 0; i < regularCount; i++ {
 			paramTy := sig.ParamTypes[i]
 			var a ast.Expression
 			fromDefault := false
 			switch {
-			case i < len(ex.Args) && !undefinedFillsDefault(ex.Args[i], sig, i):
-				a = ex.Args[i]
+			case i < len(cargs) && !undefinedFillsDefault(cargs[i], sig, i):
+				a = cargs[i]
 			case i < len(sig.Defaults) && sig.Defaults[i] != nil:
 				a = sig.Defaults[i]
 				fromDefault = true
 			case i < len(sig.Optional) && sig.Optional[i] || e.compatJS():
 				// ADR-00164: an omitted `param?: T` gets T's zero value.
 				if paramTy.IsArray() {
-					argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
+					argParts = append(argParts, irPtr+" "+e.omittedArrayArgHeader(paramTy), "i64 0")
 				} else if isNullableScalar(paramTy) {
 					// An omitted optional `T | undefined` param is a genuinely
 					// absent { i1, T } aggregate (present = false) — TDD-00187.
@@ -2893,8 +3821,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				}
 				continue
 			default:
-				return Value{}, fmt.Errorf("%d:%d: %s constructor missing argument %d with no default",
-					ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, i+1)
+				return Value{}, internalAt(ex.GetPos(), "arity: %s constructor missing argument %d with no default", ex.ClassName, i+1)
 			}
 			if !fromDefault {
 				// An argument that may be undefined at run time takes the
@@ -2920,13 +3847,13 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				}
 				if !val.Ty.IsArray() && paramTy.Nullable() && (val.Ty.IsNull() || val.Ty.IsUndefined()) {
 					// `null` for a `T[] | null` parameter: the absent (null) header.
-					val = Value{Ref: "null", Ty: paramTy}
+					val = e.emitAbsentArrayValue(val.Ty, paramTy)
 				}
 				if !val.Ty.IsArray() {
-					return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
+					return Value{}, internalAt(a.GetPos(), "expression does not yield an array")
 				}
 				header, lenReg := e.packArrayArg(a, val, paramTy)
-				argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+				argParts = append(argParts, irPtr+" "+header, "i64 "+lenReg)
 				scratch.bindArray(i, header, paramTy)
 				continue
 			}
@@ -2957,7 +3884,7 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 				if i < len(sig.ParamNames) {
 					paramName = "'" + sig.ParamNames[i] + "'"
 				}
-				return Value{}, fmt.Errorf("%d:%d: constructor parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", a.GetPos().Line, a.GetPos().Col, paramName, ex.ClassName)
+				return Value{}, internalAt(a.GetPos(), "constructor parameter %s of '%s' has no type annotation (defaults to number) but was called with a non-numeric argument here — add an explicit type annotation", paramName, ex.ClassName)
 			}
 			val = e.convert(val, paramTy)
 			if err := argReprMismatch(val, paramTy, a, i); err != nil {
@@ -2975,8 +3902,8 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 		}
 		if sig.HasRest {
 			var restArgs []ast.Expression
-			if len(ex.Args) > regularCount {
-				restArgs = ex.Args[regularCount:]
+			if len(cargs) > regularCount {
+				restArgs = cargs[regularCount:]
 			}
 			parts, err := e.packRestArgs(restArgs, sig.ParamTypes[len(sig.ParamTypes)-1])
 			if err != nil {
@@ -2984,11 +3911,67 @@ func (e *Emitter) emitNewExpression(ex *ast.NewExpression) (Value, error) {
 			}
 			argParts = append(argParts, parts...)
 		}
-		e.noteArgc(e.methodsMayReadArgs() || countsArgs(sig.HasRest, sig.ParamNames), ex.Args, regularCount)
+		e.noteArgc(e.methodsMayReadArgs() || sigCountsArgs(sig), cargs, regularCount)
 		e.emitInstr(fmt.Sprintf("call void @%s%s(%s)", className, ctorSymbolSuffix, strings.Join(argParts, ", ")))
+		dataReg = e.emitCtorOverride(className, dataReg)
+		if e.ctorMayOverride(className) && (e.dynConstructing || e.typeOfExpr(ex).IsDynamic()) {
+			// The constructor may return another object: the value of
+			// `new` is it when it did, else the instance (boxed).
+			inst, err := e.emitBoxValue(Value{Ref: dataReg, Ty: info.Ty})
+			if err != nil {
+				return Value{}, err
+			}
+			ov := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_ctor_ret_any, align 8", ov))
+			e.emitInstr("store i64 0, " + irPtr + " @__kml_ctor_ret_any, align 8")
+			// Only an object overrides (0 is the unset slot; a primitive,
+			// null or undefined is ignored).
+			e.ensureNanBox()
+			e.declareFn("__kml_any_is_bigint", "declare i32 @__kml_any_is_bigint(i64)")
+			tag, isHeap, big, isBig, notBig, obj := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, ov))
+			e.emitInstr(fmt.Sprintf("%s = icmp uge i8 %s, 6", isHeap, tag))
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", big, ov))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", isBig, big))
+			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notBig, isBig))
+			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", obj, isHeap, notBig))
+			unsetOrPrim, nz := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", nz, ov))
+			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", unsetOrPrim, obj, nz))
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, unsetOrPrim, ov, inst.Ref))
+			return Value{Ref: r, Ty: TypeAny}, nil
+		}
+	} else if fn := e.fnBaseRoot(className); fn != "" {
+		// No constructor down to a constructor function's base: the
+		// implicit ones pass the arguments on to it, run on the instance.
+		tb, err := e.emitBoxValue(Value{Ref: dataReg, Ty: info.Ty})
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitNewTargetFromInstance(tb, ex.GetPos())
+		if e.valueBases[fn] {
+			if err := e.emitValueBaseSuper(fn, tb, ex.Args, ex.GetPos()); err != nil {
+				return Value{}, err
+			}
+			if e.compatJS() && !builtinValueBases[fn] {
+				// What a constructor value built is the instance.
+				ov := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_ctor_ret_any, align 8", ov))
+				e.emitInstr("store i64 0, " + irPtr + " @__kml_ctor_ret_any, align 8")
+				set, r := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", set, ov))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, set, ov, tb.Ref))
+				return Value{Ref: r, Ty: TypeAny}, nil
+			}
+		} else if _, err := e.emitProtoCtorRun(fn, tb, ex.Args, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
 	} else if len(ex.Args) != 0 {
-		return Value{}, fmt.Errorf("%d:%d: class '%s' has no constructor but was called with %d argument(s)",
-			ex.GetPos().Line, ex.GetPos().Col, ex.ClassName, len(ex.Args))
+		// The default constructor ignores its arguments, evaluated.
+		if _, err := e.dropArgsPast(ex.Args, 0, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
 	}
 
 	return Value{Ref: dataReg, Ty: info.Ty}, nil
@@ -3048,9 +4031,9 @@ func (s *paramDefaultScratch) leave(active bool) {
 // (`this.handler = (x) => …`): the field's value called with obj as `this`.
 func (e *Emitter) emitClassFieldCall(info ClassInfo, thisVal Value, idx int, fty Type, name string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisVal.Ref, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisVal.Ref, idx))
 	fv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", fv, StructFieldIR(fty), gep))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", fv, StructFieldIR(fty), gep))
 	if fty.IsFunc() && !fty.IsDynamic() {
 		// Named by its receiver, as V8 names a method call's callee.
 		e.callAs = callAs{ast.Unmangle(info.Ty.ClassName), name}
@@ -3074,7 +4057,7 @@ func (s *paramDefaultScratch) bind(i int, val Value) {
 	}
 	slot := s.e.freshReg()
 	s.e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, val.Ty.IR, val.Ty.Align()))
-	s.e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", val.Ty.IR, val.Ref, slot, val.Ty.Align()))
+	s.e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", val.Ty.IR, val.Ref, slot, val.Ty.Align()))
 	s.syms[s.names[i]] = Symbol{Ptr: slot, Ty: val.Ty}
 }
 
@@ -3086,8 +4069,8 @@ func (s *paramDefaultScratch) bindArray(i int, header string, arrTy Type) {
 		return
 	}
 	slot := s.e.freshReg()
-	s.e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	s.e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", header, slot))
+	s.e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	s.e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", header, slot))
 	s.syms[s.names[i]] = Symbol{Ptr: slot, Ty: arrTy}
 }
 
@@ -3099,7 +4082,7 @@ func (s *paramDefaultScratch) bindNullable(i int, agg string, pty Type) {
 	}
 	slot := s.e.freshReg()
 	s.e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", slot, nullableScalarStorageIR(pty), storageAlign(pty)))
-	s.e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", nullableScalarStorageIR(pty), agg, slot, storageAlign(pty)))
+	s.e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", nullableScalarStorageIR(pty), agg, slot, storageAlign(pty)))
 	s.syms[s.names[i]] = Symbol{Ptr: slot, Ty: pty}
 }
 
@@ -3114,9 +4097,18 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	}
 	info, ok := e.classes[objTy.ClassName]
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: unknown class '%s'", pos.Line, pos.Col, objTy.ClassName)
+		return Value{}, internalAt(pos, "unknown class '%s'", objTy.ClassName)
 	}
 	sig, ok := info.MethodSigs[methodName]
+	ovrTarget := ""
+	if c := e.ovrCall; c != nil {
+		e.ovrCall = nil
+		sig, ovrTarget, ok = c.sig, c.target, true
+	} else if ok && !forceDirect && !e.noWideOverride && !sig.HasRest && len(args) > len(sig.ParamTypes) {
+		if v, done, err := e.emitWideOverrideCall(objTy, thisVal, methodName, args, sig, pos); done || err != nil {
+			return v, err
+		}
+	}
 	if ok {
 		trimmed, err := e.dropExtraArgs(sig, args)
 		if err != nil {
@@ -3177,6 +4169,16 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	// instance (receiver stored into __this, args into __paramN), not an
 	// ordinary method call — the returned value is the generator, iterated via
 	// the same .next()/for...of machinery a free-function generator uses.
+	if !forceDirect && e.generatorOverridden(objTy.ClassName, methodName) {
+		// A generator method one of its subclasses overrides (or one
+		// overriding it as a generator): the receiver's own method, as
+		// JavaScript looks it up.
+		box, err := e.emitBoxValue(thisVal)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitDynAnyMethodCall(box, methodName, args, pos)
+	}
 	if genInfo := info.GenMethodInfo[methodName]; genInfo != nil {
 		return e.emitGeneratorConstructionWithThis(genInfo, thisVal.Ref, args, pos)
 	}
@@ -3197,12 +4199,12 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	if sig.HasRest {
 		regularCount--
 	}
-	// Spread argument (TDD-00106): same rule as the free-function/closure paths
-	// — a spread may only fill the rest slot (after the fixed args), never a
-	// fixed parameter or a rest-less method.
-	if err := e.checkSpreadArgs(args, sig.HasRest, regularCount, pos); err != nil {
-		return Value{}, err
+	// Spread arguments (TDD-00106): split as on every call path.
+	args, doneSplit, serr := e.splitSpreadArgs(args, sig.HasRest, regularCount, pos)
+	if serr != nil {
+		return Value{}, serr
 	}
+	defer doneSplit()
 	// minRequired excludes any trailing regular param that has a default
 	// expression — found alongside the rest-param fix above: emitClassCall
 	// had no default-value handling at all (sig.Defaults was written by
@@ -3226,15 +4228,13 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	}
 	if sig.HasRest {
 		if len(args) < minRequired {
-			return Value{}, fmt.Errorf("%d:%d: %s.%s expects at least %d argument(s), got %d",
-				pos.Line, pos.Col, objTy.ClassName, methodName, minRequired, len(args))
+			return Value{}, internalAt(pos, "arity: %s.%s expects at least %d argument(s), got %d", objTy.ClassName, methodName, minRequired, len(args))
 		}
 	} else if len(args) < minRequired || len(args) > len(sig.ParamTypes) {
-		return Value{}, fmt.Errorf("%d:%d: %s.%s expects %d argument(s), got %d",
-			pos.Line, pos.Col, objTy.ClassName, methodName, len(sig.ParamTypes), len(args))
+		return Value{}, internalAt(pos, "arity: %s.%s expects %d argument(s), got %d", objTy.ClassName, methodName, len(sig.ParamTypes), len(args))
 	}
 
-	argParts := []string{"ptr " + thisVal.Ref}
+	argParts := []string{irPtr + " " + thisVal.Ref}
 	scratch := e.newParamDefaultScratch(sig.ParamNames)
 	for i := 0; i < regularCount; i++ {
 		paramTy := sig.ParamTypes[i]
@@ -3253,7 +4253,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			// len) at the callee side, so their "zero value" is an empty
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray() {
-				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
+				argParts = append(argParts, irPtr+" "+e.omittedArrayArgHeader(paramTy), "i64 0")
 			} else if isNullableScalar(paramTy) {
 				// An omitted optional `T | undefined` param is a genuinely
 				// absent { i1, T } aggregate (present = false) — TDD-00187.
@@ -3270,8 +4270,7 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			}
 			continue
 		default:
-			return Value{}, fmt.Errorf("%d:%d: %s.%s missing argument %d with no default",
-				pos.Line, pos.Col, objTy.ClassName, methodName, i+1)
+			return Value{}, internalAt(pos, "arity: %s.%s missing argument %d with no default", objTy.ClassName, methodName, i+1)
 		}
 		if !fromDefault {
 			// An argument that may be undefined at run time takes the
@@ -3308,13 +4307,13 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 			}
 			if !val.Ty.IsArray() && paramTy.Nullable() && (val.Ty.IsNull() || val.Ty.IsUndefined()) {
 				// `null` for a `T[] | null` parameter: the absent (null) header.
-				val = Value{Ref: "null", Ty: paramTy}
+				val = e.emitAbsentArrayValue(val.Ty, paramTy)
 			}
 			if !val.Ty.IsArray() {
-				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
+				return Value{}, internalAt(a.GetPos(), "expression does not yield an array")
 			}
 			header, lenReg := e.packArrayArg(a, val, paramTy)
-			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+			argParts = append(argParts, irPtr+" "+header, "i64 "+lenReg)
 			scratch.bindArray(i, header, paramTy)
 			continue
 		}
@@ -3349,9 +4348,6 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		// coerce backstop would box it too, but only the explicit path here
 		// also validates a constrained union's member set.
 		if paramTy.IsDynamic() {
-			if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
-				return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", a.GetPos().Line, a.GetPos().Col, i+1)
-			}
 			if paramTy.UnionMembers != nil {
 				val = e.relayoutForUnion(val, paramTy)
 			}
@@ -3388,15 +4384,34 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		}
 		argParts = append(argParts, parts...)
 	}
-	e.noteArgc(e.methodsMayReadArgs() || countsArgs(sig.HasRest, sig.ParamNames), args, regularCount)
+	e.noteArgc(e.methodsMayReadArgs() || sigCountsArgs(sig), args, regularCount)
 	argsIR := strings.Join(argParts, ", ")
 
 	slot := info.MethodDispatchSlot[methodName]
+	if ovrTarget != "" {
+		// The override's own body, which takes the arguments past the
+		// inherited signature's (wideOverride).
+		if sig.RetType.IR == "void" {
+			e.emitInstr(fmt.Sprintf("call void @%s(%s)", ovrTarget, argsIR))
+			return Value{Ty: TypeVoid}, nil
+		}
+		reg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call %s @%s(%s)", reg, sig.RetType.LLVMRetType(), ovrTarget, argsIR))
+		if sig.RetType.IsArray() {
+			return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
+		}
+		return Value{Ref: reg, Ty: e.thisRetType(sig, objTy)}, nil
+	}
 	if forceDirect || slot == nil || !slot.Virtual {
-		if m := info.Methods[methodName]; m != nil && m.IsOptional && m.Body == nil {
-			// An optional method no class in the chain implements: the
-			// member is undefined, and calling it is a TypeError.
-			e.emitThrowTypeError(methodName + " is not a function")
+		if m := info.Methods[methodName]; m != nil && m.Body == nil {
+			// An optional or abstract method no class in the chain
+			// implements: the member is undefined, and calling it is a
+			// TypeError naming the callee as written.
+			what := methodName
+			if me, ok := e.curCallee.(*ast.MemberExpression); ok && me.Property == methodName {
+				what = calleeText(me)
+			}
+			e.emitThrowTypeError(what + " is not a function")
 			e.emitLabel(e.freshLabel("optcall.dead"))
 			if sig.RetType.IR == "void" {
 				return Value{Ty: TypeVoid}, nil
@@ -3418,11 +4433,27 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 	}
 
 	fnPtr := e.emitVirtualTarget(info, thisVal.Ref, slot.Index, methodName)
+	if e.someClassLacks(methodName) {
+		// A class leaving an abstract or optional method unimplemented has
+		// an empty slot: calling it through one of its instances is a
+		// TypeError.
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, fnPtr))
+		missL, okL := e.freshLabel("vcall.missing"), e.freshLabel("vcall.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, missL, okL))
+		e.emitLabel(missL)
+		what := methodName
+		if me, ok := e.curCallee.(*ast.MemberExpression); ok && me.Property == methodName {
+			what = calleeText(me)
+		}
+		e.emitThrowTypeError(what + " is not a function")
+		e.emitLabel(okL)
+	}
 
-	paramTyStrs := []string{"ptr"}
+	paramTyStrs := []string{irPtr}
 	for _, p := range sig.ParamTypes {
 		if p.IsArray() {
-			paramTyStrs = append(paramTyStrs, "ptr", "i64")
+			paramTyStrs = append(paramTyStrs, irPtr, "i64")
 			continue
 		}
 		paramTyStrs = append(paramTyStrs, storageIR(p))
@@ -3439,6 +4470,139 @@ func (e *Emitter) emitClassCall(objTy Type, thisVal Value, methodName string, ar
 		return e.arrayValueFromHeaderReg(reg, sig.RetType), nil
 	}
 	return Value{Ref: reg, Ty: e.thisRetType(sig, objTy)}, nil
+}
+
+// wideOverrides are, for a call on a className receiver passing more than
+// the inherited signature's n parameters, the overrides an instance it holds
+// may run that declare more (`m(x = 2)` over `m()`): each one's class.
+func (e *Emitter) wideOverrides(className, methodName string, n int) []string {
+	var out []string
+	wide := func(k string) bool {
+		own, ok := e.classes[k].OverrideSigs[methodName]
+		return ok && len(own.ParamTypes) > n && !own.HasRest
+	}
+	if impl := e.classes[className].MethodImplementor[methodName]; impl != "" {
+		if _, ok := e.classes[impl]; ok && wide(impl) {
+			out = append(out, impl)
+		}
+	}
+	names := make([]string, 0, len(e.classes))
+	for name := range e.classes {
+		names = append(names, name)
+	}
+	sort.Strings(names) // map order would make the IR differ build to build
+	for _, k := range names {
+		if k != className && e.classes[k].MethodImplementor[methodName] == k && e.classDerives(k, className) && wide(k) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// ovrCallReq is a call emitClassCall makes to an override's own body.
+type ovrCallReq struct {
+	sig    FuncSig
+	target string
+}
+
+// emitWideOverrideCall emits a call passing more arguments than the
+// inherited signature (sig) declares, when some override the receiver may
+// run declares them: the virtual slot's function names the override, whose
+// own body takes every argument; any other implementation takes the
+// inherited signature's, the rest evaluated and dropped, as in JavaScript.
+func (e *Emitter) emitWideOverrideCall(objTy Type, thisVal Value, methodName string, args []ast.Expression, sig FuncSig, pos ast.Pos) (Value, bool, error) {
+	ks := e.wideOverrides(objTy.ClassName, methodName, len(sig.ParamTypes))
+	if len(ks) == 0 {
+		return Value{}, false, nil
+	}
+	for _, a := range args {
+		if _, spread := a.(*ast.SpreadElement); spread {
+			return Value{}, false, nil
+		}
+	}
+	info := e.classes[objTy.ClassName]
+	callOwn := func(k string, args []ast.Expression) (Value, error) {
+		e.ovrCall = &ovrCallReq{sig: e.classes[k].OverrideSigs[methodName], target: llvmSafeSymbol(k+"_"+methodName) + "__kml_ovr"}
+		defer func() { e.ovrCall = nil }()
+		return e.emitClassCall(e.classes[k].Ty, thisVal, methodName, args, pos, false)
+	}
+	slot := info.MethodDispatchSlot[methodName]
+	if len(ks) == 1 && ks[0] == info.MethodImplementor[methodName] && !e.overriddenBelow(objTy.ClassName, methodName) {
+		v, err := callOwn(ks[0], args)
+		return v, true, err
+	}
+	if slot == nil || !slot.Virtual {
+		return Value{}, false, nil
+	}
+	// Arguments evaluated once, in order, ahead of the dispatch.
+	bound := make([]ast.Expression, len(args))
+	for i, a := range args {
+		v, err := e.emitExpr(a)
+		if err != nil {
+			return Value{}, true, err
+		}
+		bound[i] = e.bindValue(v, a.GetPos())
+	}
+	fnPtr := e.emitVirtualTarget(info, thisVal.Ref, slot.Index, methodName)
+	resTy := e.classes[ks[0]].OverrideSigs[methodName].RetType
+	var resSlot string
+	if resTy.IR != "void" {
+		resSlot = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", resSlot, resTy.LLVMRetType()))
+	}
+	store := func(v Value) {
+		if resSlot == "" {
+			return
+		}
+		v = e.convert(v, resTy)
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", resTy.LLVMRetType(), v.Ref, resSlot))
+	}
+	end := e.freshLabel("wideovr.end")
+	for _, k := range ks {
+		yes, no := e.freshLabel("wideovr.own"), e.freshLabel("wideovr.next")
+		c := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, addrspacecast (ptr @%s to "+irPtr+")", c, fnPtr, llvmSafeSymbol(k+"_"+methodName)))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, yes, no))
+		e.emitLabel(yes)
+		v, err := callOwn(k, bound)
+		if err != nil {
+			return Value{}, true, err
+		}
+		store(v)
+		e.emitTerminator("br label %" + end)
+		e.emitLabel(no)
+	}
+	// Any other implementation: the inherited signature's arguments.
+	e.noWideOverride = true
+	v, err := e.emitClassCall(objTy, thisVal, methodName, bound[:len(sig.ParamTypes)], pos, false)
+	e.noWideOverride = false
+	if err != nil {
+		return Value{}, true, err
+	}
+	store(v)
+	e.emitTerminator("br label %" + end)
+	e.emitLabel(end)
+	if resSlot == "" {
+		return Value{Ty: TypeVoid}, true, nil
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, resTy.LLVMRetType(), resSlot))
+	if resTy.IsArray() {
+		return e.arrayValueFromHeaderReg(r, resTy), true, nil
+	}
+	return Value{Ref: r, Ty: taskTaggedRet(e.classes[ks[0]].OverrideSigs[methodName])}, true, nil
+}
+
+// overriddenBelow reports whether a class derived from className implements
+// methodName itself.
+func (e *Emitter) overriddenBelow(className, methodName string) bool {
+	impl := e.classes[className].MethodImplementor[methodName]
+	for name, ci := range e.classes {
+		if name != className && ci.MethodImplementor[methodName] != impl && e.classDerives(name, className) {
+			return true
+		}
+	}
+	return false
 }
 
 // thisRetType is a method call's result type: the receiver's class for a
@@ -3569,12 +4733,12 @@ func (e *Emitter) foreignClassTags(objTy Type, has func(ClassInfo) bool) []int64
 func (e *Emitter) emitClassHeaderIs(thisVal Value, tags []int64) string {
 	ownSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", ownSlot))
-	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", ownSlot))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", ownSlot))
 	hdrL, testL := e.freshLabel("clsfld.hdr"), e.freshLabel("clsfld.test")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(thisVal.Ref), testL, hdrL))
 	e.emitLabel(hdrL)
 	h := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, thisVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, thisVal.Ref))
 	h = e.headerIdentity(h)
 	acc := "false"
 	for _, t := range tags {
@@ -3583,11 +4747,11 @@ func (e *Emitter) emitClassHeaderIs(thisVal Value, tags []int64) string {
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", o, acc, c))
 		acc = o
 	}
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", acc, ownSlot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", acc, ownSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", testL))
 	e.emitLabel(testL)
 	own := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", own, ownSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", own, ownSlot))
 	return own
 }
 
@@ -3607,7 +4771,7 @@ func (e *Emitter) emitClassFieldOrForeign(objVal Value, prop string, fieldTy Typ
 	valIR := genElemValIR(resTy)
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, valIR))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, ov.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, ov.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(forL)
 	box, err := e.emitBoxValue(objVal)
@@ -3619,11 +4783,11 @@ func (e *Emitter) emitClassFieldOrForeign(objVal Value, prop string, fieldTy Typ
 		return Value{}, err
 	}
 	cv := e.convert(dv, resTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, cv.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, cv.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, valIR, slot))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, valIR, slot))
 	return Value{Ref: r, Ty: resTy}, nil
 }
 
@@ -3645,7 +4809,7 @@ func (e *Emitter) emitClassFieldWriteOrForeign(objVal Value, prop string, ex *as
 		valIR = genElemValIR(resTy)
 		slot = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, valIR))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, ov.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, ov.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(forL)
@@ -3668,7 +4832,7 @@ func (e *Emitter) emitClassFieldWriteOrForeign(objVal Value, prop string, ex *as
 	}
 	if slot != "" {
 		cv := e.convert(dv, resTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, cv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, cv.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -3676,7 +4840,7 @@ func (e *Emitter) emitClassFieldWriteOrForeign(objVal Value, prop string, ex *as
 		return Value{Ty: resTy}, nil
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, valIR, slot))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, valIR, slot))
 	return Value{Ref: r, Ty: resTy}, nil
 }
 
@@ -3692,12 +4856,12 @@ func (e *Emitter) emitClassCallOrForeign(objTy Type, thisVal Value, methodName s
 	// function literal, whose closure each arm would emit).
 	ownSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", ownSlot))
-	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", ownSlot))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", ownSlot))
 	hdrL, testL := e.freshLabel("clsfor.hdr"), e.freshLabel("clsfor.test")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(thisVal.Ref), testL, hdrL))
 	e.emitLabel(hdrL)
 	h := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", h, thisVal.Ref))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, thisVal.Ref))
 	h = e.headerIdentity(h)
 	acc := "false"
 	for _, t := range tags {
@@ -3706,11 +4870,11 @@ func (e *Emitter) emitClassCallOrForeign(objTy Type, thisVal Value, methodName s
 		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", o, acc, c))
 		acc = o
 	}
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", acc, ownSlot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", acc, ownSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", testL))
 	e.emitLabel(testL)
 	own := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", own, ownSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", own, ownSlot))
 	ownL, forL, doneL := e.freshLabel("clsfor.own"), e.freshLabel("clsfor.foreign"), e.freshLabel("clsfor.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", own, ownL, forL))
 	e.emitLabel(ownL)
@@ -3724,7 +4888,7 @@ func (e *Emitter) emitClassCallOrForeign(objTy Type, thisVal Value, methodName s
 		valIR = genElemValIR(retTy)
 		slot = e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, valIR))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, sv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, sv.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(forL)
@@ -3738,7 +4902,7 @@ func (e *Emitter) emitClassCallOrForeign(objTy Type, thisVal Value, methodName s
 	}
 	if slot != "" {
 		cv := e.convert(dv, retTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, cv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, cv.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -3746,7 +4910,7 @@ func (e *Emitter) emitClassCallOrForeign(objTy Type, thisVal Value, methodName s
 		return Value{Ty: retTy}, nil
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, valIR, slot))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, valIR, slot))
 	return Value{Ref: r, Ty: retTy}, nil
 }
 
@@ -3765,15 +4929,18 @@ func (e *Emitter) emitOwnOrClassMethodCall(objTy Type, thisVal Value, methodName
 	}
 	if flag != "" {
 		fv := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", fv, flag))
+		e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", fv, flag))
 		set := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, 0", set, fv))
 		checkL := e.freshLabel("ownmeth.check")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", set, checkL, classL))
 		e.emitLabel(checkL)
 	}
+	// An own property of the name, or a prototype the instance was given
+	// resolving it before its class's.
 	has := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_expando_has(ptr %s, ptr %s)", has, thisVal.Ref, e.internString(methodName)))
+	e.declareFn("__kml_shape_method_shadowed", "declare i32 @__kml_shape_method_shadowed("+irPtr+", "+irPtr+")")
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_method_shadowed("+irPtr+" %s, "+irPtr+" %s)", has, thisVal.Ref, e.internString(methodName)))
 	own := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", own, has))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", own, ownL, classL))
@@ -3790,7 +4957,7 @@ func (e *Emitter) emitOwnOrClassMethodCall(objTy Type, thisVal Value, methodName
 	}
 	if slot != "" {
 		cv := e.convert(dv, retTy)
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, cv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, cv.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(classL)
@@ -3801,7 +4968,7 @@ func (e *Emitter) emitOwnOrClassMethodCall(objTy Type, thisVal Value, methodName
 		return Value{}, err
 	}
 	if slot != "" {
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", valIR, sv.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", valIR, sv.Ref, slot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -3809,7 +4976,7 @@ func (e *Emitter) emitOwnOrClassMethodCall(objTy Type, thisVal Value, methodName
 		return Value{Ty: TypeVoid}, nil
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, valIR, slot))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, valIR, slot))
 	return Value{Ref: r, Ty: sv.Ty}, nil
 }
 
@@ -3852,7 +5019,7 @@ func (e *Emitter) spillFunctionLiteralArgs(sig FuncSig, args []ast.Expression) (
 		}
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, genElemValIR(v.Ty)))
-		e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", genElemValIR(v.Ty), v.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", genElemValIR(v.Ty), v.Ref, slot))
 		name := "__kml_litarg$" + strings.TrimPrefix(slot, "%")
 		e.define(name, Symbol{Ptr: slot, Ty: v.Ty})
 		out[i] = ast.NewIdentifier(name, a.GetPos())
@@ -3904,7 +5071,7 @@ func (e *Emitter) memberWrittenFlag(name string) string {
 		if e.jsMemberWritten(name) {
 			v = 1
 		}
-		e.emitGlobal(fmt.Sprintf("%s = global i8 %d", g, v))
+		e.emitGlobal(fmt.Sprintf("%s ="+irGlobalAS+" global i8 %d", g, v))
 	}
 	return g
 }
@@ -4034,11 +5201,11 @@ func (e *Emitter) isOptionalMethod(class, name string) bool {
 func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName string, argVal Value, pos ast.Pos) (Value, error) {
 	info, ok := e.classes[objTy.ClassName]
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: unknown class '%s'", pos.Line, pos.Col, objTy.ClassName)
+		return Value{}, internalAt(pos, "unknown class '%s'", objTy.ClassName)
 	}
 	sig, ok := info.MethodSigs[methodName]
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: class '%s' has no method '%s'", pos.Line, pos.Col, objTy.ClassName, methodName)
+		return Value{}, internalAt(pos, "class '%s' has no method '%s'", objTy.ClassName, methodName)
 	}
 	implementor := info.MethodImplementor[methodName]
 	// TDD-00161 Stage 5: a decorated setter routes through its slot (the getter
@@ -4050,9 +5217,9 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 		}
 		argv := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca [1 x i64], align 8", argv))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxedArg.Ref, argv))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", boxedArg.Ref, argv))
 		fnBox := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", fnBox, slot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", fnBox, slot))
 		if _, err := e.emitDynFnBoxCall(Value{Ref: fnBox, Ty: TypeAny}, thisVal, argv, 1, "setter is not a function", pos); err != nil {
 			return Value{}, err
 		}
@@ -4070,29 +5237,29 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 	var fnTypePart string
 	if paramTy.IsArray() {
 		if !argVal.Ty.IsArray() {
-			return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "expression does not yield an array")
 		}
 		ptrReg := e.freshReg()
 		lenReg := e.freshReg()
 		lenReg = e.arrayLen(argVal)
 		_ = ptrReg
 		header := e.boxArrayValue(argVal)
-		argParts = []string{"ptr " + thisVal.Ref, "ptr " + header, "i64 " + lenReg}
-		fnTypePart = "(ptr, ptr, i64)"
+		argParts = []string{irPtr + " " + thisVal.Ref, irPtr + " " + header, "i64 " + lenReg}
+		fnTypePart = "(" + irPtr + ", " + irPtr + ", i64)"
 	} else if isNullableScalar(paramTy) {
 		// Nullable-scalar setter parameter (TDD-00064 Stage 3): its boxed
 		// { i1, T } aggregate, with the matching storage type in the fn type.
 		agg := e.boxNullableScalarFromValue(argVal, paramTy)
 		st := nullableScalarStorageIR(paramTy)
-		argParts = []string{"ptr " + thisVal.Ref, fmt.Sprintf("%s %s", st, agg)}
-		fnTypePart = fmt.Sprintf("(ptr, %s)", st)
+		argParts = []string{irPtr + " " + thisVal.Ref, fmt.Sprintf("%s %s", st, agg)}
+		fnTypePart = fmt.Sprintf("("+irPtr+", %s)", st)
 	} else {
 		v := e.convert(argVal, paramTy)
 		if v.Ty.IR != paramTy.IR {
-			return Value{}, fmt.Errorf("%d:%d: type mismatch in assignment — a value of one type cannot be used where an incompatible type is expected", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "type mismatch in assignment — a value of one type cannot be used where an incompatible type is expected")
 		}
-		argParts = []string{"ptr " + thisVal.Ref, fmt.Sprintf("%s %s", v.Ty.IR, v.Ref)}
-		fnTypePart = fmt.Sprintf("(ptr, %s)", paramTy.IR)
+		argParts = []string{irPtr + " " + thisVal.Ref, fmt.Sprintf("%s %s", v.Ty.IR, v.Ref)}
+		fnTypePart = fmt.Sprintf("("+irPtr+", %s)", paramTy.IR)
 	}
 	argsIR := strings.Join(argParts, ", ")
 
@@ -4117,6 +5284,9 @@ func (e *Emitter) emitClassSetterCall(objTy Type, thisVal Value, methodName stri
 // MethodImplementor uses for instance methods) is always the right target.
 func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	sig, ok := info.StaticMethodSigs[methodName]
+	if ok && e.staticMethodOverridable(className, methodName) {
+		return e.emitStaticMethodOverrideCall(info, className, methodName, args, pos)
+	}
 	if ok && sig.This {
 		// Its receiver is the class the call names (`D.m()` passes D).
 		recv := ast.NewAsExpression(ast.NewIdentifier(className, pos), ast.AnyAnnotation(""), pos)
@@ -4143,9 +5313,9 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		// Function.prototype.toString of the constructor: its source text.
 		ref := e.classRefPtr(className)
 		e.ensureFnMeta()
-		e.declareFn("__kml_classref_tostring", "declare ptr @__kml_classref_tostring(ptr)")
+		e.declareFn("__kml_classref_tostring", "declare "+irPtr+" @__kml_classref_tostring("+irPtr+")")
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_classref_tostring(ptr %s)", r, ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_tostring("+irPtr+" %s)", r, ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	if ft, isField := info.StaticFieldTypes[methodName]; !ok && isField && (ft.IsFunc() || isUnconstrainedDynamic(ft)) {
@@ -4176,8 +5346,50 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		}
 		return e.emitDynCallValue(fv, args, pos)
 	}
+	if !ok && (methodName == "hasOwnProperty" || methodName == "propertyIsEnumerable") && len(args) == 1 && e.compatJS() {
+		// Over the class object's own properties, its run-time ones too.
+		proto := ast.NewMemberExpression(e.builtinIdent("Object", pos), "prototype", pos)
+		fn := ast.NewMemberExpression(ast.NewMemberExpression(proto, methodName, pos), "call", pos)
+		return e.emitExpr(ast.NewCallExpression(fn, []ast.Expression{ast.NewIdentifier(className, pos), args[0]}, pos))
+	}
+	if !ok && (methodName == "hasOwnProperty" || methodName == "propertyIsEnumerable") && len(args) == 1 {
+		// Object.prototype's (`C.hasOwnProperty(k)`), over the class's own
+		// keys: its static members, and for hasOwnProperty its length,
+		// name and prototype; only its static fields are enumerable.
+		keys := e.classOwnStaticKeys(className, methodName == "propertyIsEnumerable")
+		kv, err := e.emitExpr(ast.NewTemplateLiteral([]string{"", ""}, []ast.Expression{args[0]}, pos))
+		if err != nil {
+			return Value{}, err
+		}
+		res := "false"
+		for _, k := range keys {
+			eq := e.emitStrEq(kv.Ref, e.internString(k))
+			acc := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", acc, res, eq))
+			res = acc
+		}
+		return Value{Ref: res, Ty: TypeBool}, nil
+	}
+	if !ok && e.extendsObject(className) {
+		// One of Object's statics (`C.keys(o)`), inherited.
+		call := ast.NewCallExpression(ast.NewMemberExpression(e.builtinIdent("Object", pos), methodName, pos), args, pos)
+		if v, err := e.emitObjectStatic(methodName, call); err != errNotObjectStatic {
+			return v, err
+		}
+		return e.emitExpr(call)
+	}
+	if !ok && (e.compatJS() || functionProtoMembers[methodName]) {
+		// A class is an object: a method it was given at run time, or
+		// Function.prototype's (`C.bind(null)`), called
+		// with the class as its receiver (`C.k.call(C, …)`).
+		fv, err := e.emitStaticFieldRead(info, className, methodName, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitClosureCallWithThis(fv, "call", append([]ast.Expression{ast.NewIdentifier(className, pos)}, args...), pos)
+	}
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: class '%s' has no static method '%s'", pos.Line, pos.Col, className, methodName)
+		return Value{}, internalAt(pos, "class '%s' has no static method '%s'", className, methodName)
 	}
 	implementor := info.StaticMethodImplementor[methodName]
 	// Same three gaps found and fixed in emitClassCall (rest params, default
@@ -4190,10 +5402,12 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 	if sig.HasRest {
 		regularCount--
 	}
-	// Spread argument (TDD-00106): same rule as every other call path.
-	if err := e.checkSpreadArgs(args, sig.HasRest, regularCount, pos); err != nil {
-		return Value{}, err
+	// Spread arguments (TDD-00106): split as on every call path.
+	args, doneSplit, serr := e.splitSpreadArgs(args, sig.HasRest, regularCount, pos)
+	if serr != nil {
+		return Value{}, serr
 	}
+	defer doneSplit()
 	minRequired := regularCount
 	for minRequired > 0 && ((minRequired-1 < len(sig.Defaults) && sig.Defaults[minRequired-1] != nil) ||
 		(minRequired-1 < len(sig.Optional) && sig.Optional[minRequired-1])) {
@@ -4209,12 +5423,10 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 	}
 	if sig.HasRest {
 		if len(args) < minRequired {
-			return Value{}, fmt.Errorf("%d:%d: %s.%s expects at least %d argument(s), got %d",
-				pos.Line, pos.Col, className, methodName, minRequired, len(args))
+			return Value{}, internalAt(pos, "arity: %s.%s expects at least %d argument(s), got %d", className, methodName, minRequired, len(args))
 		}
 	} else if len(args) < minRequired || len(args) > len(sig.ParamTypes) {
-		return Value{}, fmt.Errorf("%d:%d: %s.%s expects %d argument(s), got %d",
-			pos.Line, pos.Col, className, methodName, len(sig.ParamTypes), len(args))
+		return Value{}, internalAt(pos, "arity: %s.%s expects %d argument(s), got %d", className, methodName, len(sig.ParamTypes), len(args))
 	}
 
 	var argParts []string
@@ -4236,7 +5448,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			// len) at the callee side, so their "zero value" is an empty
 			// array (null ptr, 0 len), not a single zeroLiteral() operand.
 			if paramTy.IsArray() {
-				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
+				argParts = append(argParts, irPtr+" "+e.omittedArrayArgHeader(paramTy), "i64 0")
 			} else if isNullableScalar(paramTy) {
 				// An omitted optional `T | undefined` param is a genuinely
 				// absent { i1, T } aggregate (present = false) — TDD-00187.
@@ -4253,8 +5465,7 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			}
 			continue
 		default:
-			return Value{}, fmt.Errorf("%d:%d: %s.%s missing argument %d with no default",
-				pos.Line, pos.Col, className, methodName, i+1)
+			return Value{}, internalAt(pos, "arity: %s.%s missing argument %d with no default", className, methodName, i+1)
 		}
 		if !fromDefault {
 			// An argument that may be undefined at run time takes the
@@ -4277,13 +5488,13 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 			}
 			if !val.Ty.IsArray() && paramTy.Nullable() && (val.Ty.IsNull() || val.Ty.IsUndefined()) {
 				// `null` for a `T[] | null` parameter: the absent (null) header.
-				val = Value{Ref: "null", Ty: paramTy}
+				val = e.emitAbsentArrayValue(val.Ty, paramTy)
 			}
 			if !val.Ty.IsArray() {
-				return Value{}, fmt.Errorf("%d:%d: expression does not yield an array", a.GetPos().Line, a.GetPos().Col)
+				return Value{}, internalAt(a.GetPos(), "expression does not yield an array")
 			}
 			header, lenReg := e.packArrayArg(a, val, paramTy)
-			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+			argParts = append(argParts, irPtr+" "+header, "i64 "+lenReg)
 			scratch.bindArray(i, header, paramTy)
 			continue
 		}
@@ -4317,9 +5528,6 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		// coerce, silently breaking every static method with a union/any
 		// parameter (e.g. the Test262 harness shim's `assert.sameValue`).
 		if paramTy.IsDynamic() {
-			if paramTy.UnionMembers != nil && !unionAllowsAssignmentFrom(paramTy, val.Ty) {
-				return Value{}, fmt.Errorf("%d:%d: argument's type is not a member of parameter %d's declared union type", a.GetPos().Line, a.GetPos().Col, i+1)
-			}
 			if paramTy.UnionMembers != nil {
 				val = e.relayoutForUnion(val, paramTy)
 			}
@@ -4353,27 +5561,26 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 		if restTy.ElemType != nil {
 			elemTy = *restTy.ElemType
 		}
-		if spread, ok := singleSpread(restArgs); ok && sameRestElem(e.inferExprType(spread.Arg), elemTy) {
+		if spread, ok := singleSpread(restArgs); ok && sameRestElem(e.typeOfExpr(spread.Arg), elemTy) {
 			ptrReg, lenReg, _, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
 			if err != nil {
 				return Value{}, err
 			}
 			restHdr := e.newArrayHeader(ptrReg, lenReg)
-			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
+			argParts = append(argParts, irPtr+" "+restHdr, "i64 "+lenReg)
 		} else if len(restArgs) == 0 {
-			argParts = append(argParts, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+			argParts = append(argParts, irPtr+" "+e.emptyArrayArgHeader(), "i64 0")
 		} else if anySpread(restArgs) {
 			dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
 			if err != nil {
 				return Value{}, err
 			}
 			restHdr := e.newArrayHeader(dataReg, lenReg)
-			argParts = append(argParts, "ptr "+restHdr, "i64 "+lenReg)
+			argParts = append(argParts, irPtr+" "+restHdr, "i64 "+lenReg)
 		} else {
 			n := int64(len(restArgs))
-			e.ensureMalloc()
 			dataReg := e.freshReg()
-			e.heapMallocInto(dataReg, fmt.Sprint(n*int64(elemTy.Align())))
+			e.heapMallocInto(dataReg, elemAllocKind(elemTy), fmt.Sprint(n*int64(elemTy.Align())))
 			for i, arg := range restArgs {
 				val, err := e.emitExprWithObjectHint(arg, elemTy)
 				if err != nil {
@@ -4381,14 +5588,14 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 				}
 				val = e.convert(val, elemTy)
 				gepReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
+				e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
 				e.storeArrayElem(gepReg, elemTy, val)
 			}
 			restHdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
-			argParts = append(argParts, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
+			argParts = append(argParts, irPtr+" "+restHdr, fmt.Sprintf("i64 %d", n))
 		}
 	}
-	e.noteArgc(e.methodsMayReadArgs() || countsArgs(sig.HasRest, sig.ParamNames), args, regularCount)
+	e.noteArgc(e.methodsMayReadArgs() || sigCountsArgs(sig), args, regularCount)
 	argsIR := strings.Join(argParts, ", ")
 
 	llvmName := llvmSafeSymbol(staticMethodName(implementor, methodName))
@@ -4413,22 +5620,88 @@ func (e *Emitter) emitStaticMethodCall(info ClassInfo, className, methodName str
 // subroutine call on the same instance, before the derived constructor's
 // own field-init code runs. Never virtual — constructors have no dispatch
 // concept — and resolved once via the enclosing class's BaseClass link.
+// emitDroppedArgs evaluates call arguments no parameter receives, in order;
+// a spread's operand is evaluated (and iterated, when it is not an array).
+func (e *Emitter) emitDroppedArgs(args []ast.Expression) error {
+	for _, a := range args {
+		if sp, ok := a.(*ast.SpreadElement); ok {
+			a = ast.NewArrayLiteral([]ast.Expression{sp}, sp.GetPos())
+		}
+		if _, err := e.emitExpr(a); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 	thisSym, ok := e.lookup("this")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: super(...) is only valid inside a constructor", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, internalAt(ex.GetPos(), "super(...) is only valid inside a constructor")
+	}
+	if thisSym.Ty.IsDynamic() && e.overrideThisStatic != nil {
+		thisSym = *e.overrideThisStatic // `this` rebound by an earlier super()
 	}
 	info, ok := e.classes[thisSym.Ty.ClassName]
 	if !ok || info.BaseClass == "" {
-		return Value{}, fmt.Errorf("%d:%d: super(...) is only valid inside the constructor of a class with a base class", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, internalAt(ex.GetPos(), "super(...) is only valid inside the constructor of a class with a base class")
+	}
+	if fn := fnBaseOf(info.BaseClass); fn != "" {
+		// A constructor function's: its body run on the instance.
+		// The instance itself: `this` is not yet bound while super() runs.
+		tr := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", tr, thisSym.Ptr))
+		tb, err := e.emitBoxValue(Value{Ref: tr, Ty: thisSym.Ty})
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitNewTargetFromInstance(tb, ex.GetPos())
+		if e.valueBases[fn] {
+			if err := e.emitValueBaseSuper(fn, tb, ex.Args, ex.GetPos()); err != nil {
+				return Value{}, err
+			}
+			if e.compatJS() && !e.blockDone && !builtinValueBases[fn] {
+				// What a constructor value built is `this`.
+				e.emitOverrideThis(thisSym, info)
+				if err := e.overrideErr; err != nil {
+					e.overrideErr = nil
+					return Value{}, err
+				}
+			}
+		} else if _, err := e.emitProtoCtorRun(fn, tb, ex.Args, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: "0", Ty: TypeUndefined}, nil
 	}
 	// An error subclass's `super(message?)` (TDD-00155 Stage 6) stores the
 	// message into the error-struct prefix; kind/name were already set at
 	// construction. Error's synthetic root has no real constructor; a
 	// subclass of an Error subclass calls its base's, as any class does.
 	if info.IsErrorSubclass && e.isErrorRootKind(info.BaseClass) {
+		if e.aggregateRooted(info) {
+			// AggregateError's (errors, message, options).
+			thisReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
+			if len(ex.Args) == 0 {
+				e.emitThrowTypeError("undefined is not iterable (cannot read property Symbol(Symbol.iterator))")
+				return Value{Ref: "0", Ty: TypeUndefined}, nil
+			}
+			if err := e.emitAggregateErrors(thisReg, ex.Args[0]); err != nil {
+				return Value{}, err
+			}
+			rest := *ex
+			rest.Args = ex.Args[1:]
+			ex = &rest
+		}
 		if len(ex.Args) > 2 {
-			return Value{}, fmt.Errorf("%d:%d: super(...) on %s takes a message and one more argument", ex.GetPos().Line, ex.GetPos().Col, info.ErrorBaseKind)
+			// Extra arguments: evaluated, then ignored.
+			kept, err := e.dropArgsPast(ex.Args, 2, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			trimmed := *ex
+			trimmed.Args = kept
+			ex = &trimmed
 		}
 		if len(ex.Args) == 2 {
 			if err := e.emitErrorSecondArg(thisSym, info, ex.Args[1]); err != nil {
@@ -4446,14 +5719,14 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 			}
 			msgStr := Value{Ref: msgRef, Ty: TypePtr}
 			thisReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 			idx, _, okF := info.Ty.FieldIndex("message")
 			if !okF {
-				return Value{}, fmt.Errorf("%d:%d: internal: error subclass without a message field", ex.GetPos().Line, ex.GetPos().Col)
+				return Value{}, internalAt(ex.GetPos(), "error subclass without a message field")
 			}
 			gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisReg, idx))
-			e.heapStore("ptr", msgStr.Ref, gep, 8)
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisReg, idx))
+			e.heapStore(irPtr, msgStr.Ref, gep, 8)
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
@@ -4461,9 +5734,9 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		// `super(executor)` of a class extending Promise runs it on its
 		// body.
 		thisReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 		body := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, thisReg))
+		e.emitBodyAddr(body, thisReg)
 		if err := e.emitHostPromiseBody(body, *info.HostBase, ex.Args, ex.GetPos()); err != nil {
 			return Value{}, err
 		}
@@ -4473,10 +5746,31 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		// `super(…)` of a class extending Array sets its elements, as
 		// `new Array(…)` would.
 		thisReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 		body := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, thisReg))
+		e.emitBodyAddr(body, thisReg)
 		if err := e.emitHostArrayBody(body, *info.HostBase, ex.Args, ex.GetPos()); err != nil {
+			return Value{}, err
+		}
+		return Value{Ty: TypeVoid}, nil
+	}
+	if _, registered := e.classes[info.BaseClass]; !registered && info.HostBase != nil && (info.HostBase.IsPrimWrapper() || info.HostBase.IsArrayBuffer()) {
+		// `super(…)` of a class extending Number, String or Boolean sets
+		// its primitive, of one extending ArrayBuffer its buffer (an
+		// implicit constructor's: set by the new expression already, from
+		// its arguments).
+		if info.ImplicitCtor {
+			return Value{Ty: TypeVoid}, nil
+		}
+		thisReg := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
+		body := e.freshReg()
+		e.emitBodyAddr(body, thisReg)
+		set := e.emitHostPrimBody
+		if info.HostBase.IsArrayBuffer() {
+			set = e.emitHostBufferBody
+		}
+		if err := set(body, *info.HostBase, ex.Args, ex.GetPos()); err != nil {
 			return Value{}, err
 		}
 		return Value{Ty: TypeVoid}, nil
@@ -4485,9 +5779,9 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		// `super(…)` of a class extending Date sets its time value, as
 		// `new Date(…)` would.
 		thisReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 		body := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, thisReg))
+		e.emitBodyAddr(body, thisReg)
 		if err := e.emitHostDateBody(body, ex.Args, ex.GetPos()); err != nil {
 			return Value{}, err
 		}
@@ -4497,9 +5791,9 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		// `super(pattern?, flags?)` of a class extending RegExp compiles
 		// its body.
 		thisReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 		body := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, thisReg))
+		e.emitBodyAddr(body, thisReg)
 		if err := e.emitHostRegExpBody(body, ex.Args, ex.GetPos()); err != nil {
 			return Value{}, err
 		}
@@ -4509,13 +5803,20 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		// `super(entries?)` of a class extending Map or Set: the body was
 		// made empty at construction; entries seed it.
 		if len(ex.Args) > 1 {
-			return Value{}, fmt.Errorf("%d:%d: super(...) on %s takes at most one argument", ex.GetPos().Line, ex.GetPos().Col, info.BaseClass)
+			// Extra arguments: evaluated, then ignored.
+			kept, err := e.dropArgsPast(ex.Args, 1, ex.GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			trimmed := *ex
+			trimmed.Args = kept
+			ex = &trimmed
 		}
 		if len(ex.Args) == 1 && !isUndefinedLiteral(e, ex.Args[0]) {
 			thisReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 			body := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, thisReg))
+			e.emitBodyAddr(body, thisReg)
 			if err := e.emitHostBodySeed(body, *info.HostBase, ex.Args[0], ex.GetPos()); err != nil {
 				return Value{}, err
 			}
@@ -4524,8 +5825,11 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 	}
 	baseInfo := e.classes[info.BaseClass]
 	if baseInfo.Constructor == nil {
-		if len(ex.Args) > 0 {
-			return Value{}, fmt.Errorf("%d:%d: base class '%s' has no constructor to pass super(...) arguments to", ex.GetPos().Line, ex.GetPos().Col, info.BaseClass)
+		// An implicit base constructor takes no parameters: the arguments
+		// are evaluated, in order, and dropped (the strict lane has
+		// refused any, as tsc does).
+		if err := e.emitDroppedArgs(ex.Args); err != nil {
+			return Value{}, err
 		}
 		return Value{Ty: TypeVoid}, nil
 	}
@@ -4534,30 +5838,34 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 	if sig.HasRest {
 		params = params[:len(params)-1] // the rest slot takes the remaining arguments
 	}
-	if err := e.checkSpreadArgs(ex.Args, sig.HasRest, len(params), ex.GetPos()); err != nil {
-		return Value{}, err
+	cargs, doneSplit, serr := e.splitSpreadArgs(ex.Args, sig.HasRest, len(params), ex.GetPos())
+	if serr != nil {
+		return Value{}, serr
 	}
-	if !sig.HasRest && len(ex.Args) > len(sig.ParamTypes) {
-		return Value{}, fmt.Errorf("%d:%d: super(...) expects %d argument(s), got %d",
-			ex.GetPos().Line, ex.GetPos().Col, len(sig.ParamTypes), len(ex.Args))
+	defer doneSplit()
+	var extra []ast.Expression
+	if !sig.HasRest && len(cargs) > len(sig.ParamTypes) {
+		// Arguments past the parameters are evaluated after them, then
+		// dropped.
+		cargs, extra = cargs[:len(sig.ParamTypes)], cargs[len(sig.ParamTypes):]
 	}
-	for i := len(ex.Args); i < len(params); i++ {
+	for i := len(cargs); i < len(params) && !e.compatJS(); i++ {
+		// (In JavaScript a missing argument is undefined.)
 		if !(i < len(sig.Optional) && sig.Optional[i]) {
-			return Value{}, fmt.Errorf("%d:%d: super(...) expects %d argument(s), got %d",
-				ex.GetPos().Line, ex.GetPos().Col, len(sig.ParamTypes), len(ex.Args))
+			return Value{}, internalAt(ex.GetPos(), "arity: super(...) expects %d argument(s), got %d", len(sig.ParamTypes), len(cargs))
 		}
 	}
 
 	thisReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
-	argParts := []string{"ptr " + thisReg}
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
+	argParts := []string{irPtr + " " + thisReg}
 	for i, paramTy := range params {
-		if i >= len(ex.Args) {
+		if i >= len(cargs) {
 			// An omitted optional parameter is undefined (its type's zero,
 			// or an absent aggregate), as `new` fills one.
 			switch {
 			case paramTy.IsArray():
-				argParts = append(argParts, "ptr "+e.omittedArrayArgHeader(paramTy), "i64 0")
+				argParts = append(argParts, irPtr+" "+e.omittedArrayArgHeader(paramTy), "i64 0")
 			case isNullableScalar(paramTy):
 				argParts = append(argParts, nullableScalarStorageIR(paramTy)+" zeroinitializer")
 			default:
@@ -4565,7 +5873,7 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 			}
 			continue
 		}
-		a := ex.Args[i]
+		a := cargs[i]
 		if isNullableScalar(paramTy) {
 			argStr, err := e.emitNullableScalarArg(a, paramTy)
 			if err != nil {
@@ -4582,7 +5890,7 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		}
 		if paramTy.IsArray() {
 			header, lenReg := e.packArrayArg(a, val, paramTy)
-			argParts = append(argParts, "ptr "+header, "i64 "+lenReg)
+			argParts = append(argParts, irPtr+" "+header, "i64 "+lenReg)
 			continue
 		}
 		val = e.convert(val, paramTy)
@@ -4591,10 +5899,13 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		}
 		argParts = append(argParts, fmt.Sprintf("%s %s", val.Ty.IR, val.Ref))
 	}
+	if err := e.emitDroppedArgs(extra); err != nil {
+		return Value{}, err
+	}
 	if sig.HasRest {
 		var restArgs []ast.Expression
-		if len(ex.Args) > len(params) {
-			restArgs = ex.Args[len(params):]
+		if len(cargs) > len(params) {
+			restArgs = cargs[len(params):]
 		}
 		parts, err := e.packRestArgs(restArgs, sig.ParamTypes[len(sig.ParamTypes)-1])
 		if err != nil {
@@ -4602,9 +5913,104 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 		}
 		argParts = append(argParts, parts...)
 	}
-	e.noteArgc(e.methodsMayReadArgs() || countsArgs(sig.HasRest, sig.ParamNames), ex.Args, len(params))
+	if info.ImplicitCtor && e.argcOverride == "" {
+		// The synthesized pass-through forwards the count its own caller
+		// passed (still in @__kml_argc: its arguments are plain reads).
+		fwd := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_argc, align 8", fwd))
+		e.argcOverride = fwd
+		defer func() { e.argcOverride = "" }()
+	}
+	e.noteArgc(e.methodsMayReadArgs() || sigCountsArgs(sig), cargs, len(params))
+	if e.ctorMayOverride(info.BaseClass) {
+		if !e.compatJS() && !e.foreignCtorName(e.currentCtorClass) {
+			// The base's returned instance would become this constructor's
+			// `this`: an instance of the base's layout, which the derived
+			// fields do not fit.
+			return Value{}, internalAt(ex.GetPos(), "super() to a constructor that returns an instance (the checker reports it)")
+		}
+		e.emitInstr(fmt.Sprintf("call void @%s%s(%s)", info.BaseClass, ctorSymbolSuffix, strings.Join(argParts, ", ")))
+		e.emitOverrideThis(thisSym, info)
+		if err := e.overrideErr; err != nil {
+			e.overrideErr = nil
+			return Value{}, err
+		}
+		return Value{Ty: TypeVoid}, nil
+	}
 	e.emitInstr(fmt.Sprintf("call void @%s%s(%s)", info.BaseClass, ctorSymbolSuffix, strings.Join(argParts, ", ")))
 	return Value{Ty: TypeVoid}, nil
+}
+
+// emitOverrideThis binds, after super() to a base whose constructor may
+// return another object, `this` to that object, else to the instance
+// allocated for the class (boxed either way): the constructor's code after
+// super() runs on it, and the `new` site's value is it (overrideThis).
+func (e *Emitter) emitOverrideThis(thisSym Symbol, info ClassInfo) {
+	tr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", tr, thisSym.Ptr))
+	inst, err := e.emitBoxValue(Value{Ref: tr, Ty: thisSym.Ty})
+	if err != nil {
+		return
+	}
+	ovAny, ovPtr := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_ctor_ret_any, align 8", ovAny))
+	e.emitInstr("store i64 0, " + irPtr + " @__kml_ctor_ret_any, align 8")
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_ctor_ret, align 8", ovPtr))
+	e.emitInstr("store " + irPtr + " null, " + irPtr + " @__kml_ctor_ret, align 8")
+	// An instance of the base's layout it returned (its own class's).
+	baseInst, err := e.emitBoxValue(Value{Ref: ovPtr, Ty: e.classes[info.BaseClass].Ty})
+	if err != nil {
+		return
+	}
+	e.ensureNanBox()
+	e.declareFn("__kml_any_is_bigint", "declare i32 @__kml_any_is_bigint(i64)")
+	tag, isHeap, big, isBig, notBig, obj, nz, isObj := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, ovAny))
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i8 %s, 6", isHeap, tag))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", big, ovAny))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", isBig, big))
+	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notBig, isBig))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", obj, isHeap, notBig))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", nz, ovAny))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", isObj, obj, nz))
+	r1, hasPtr, r2 := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r1, isObj, ovAny, inst.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasPtr, ovPtr))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r2, hasPtr, baseInst.Ref, r1))
+	if e.overrideThis != "" {
+		// Another super(): `this` keeps its value when already bound (the
+		// ReferenceError that follows may be caught).
+		if e.thisInitSlot != "" {
+			b, old, v := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", b, e.thisInitSlot))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", old, e.overrideThis))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", v, b, old, r2))
+			r2 = v
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r2, e.overrideThis))
+		return
+	}
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r2, slot))
+	st := thisSym
+	e.overrideThis, e.overrideThisStatic = slot, &st
+	e.define("this", Symbol{Ptr: slot, Ty: TypeAny})
+	// The private names it gets before its field initializers run.
+	if err := e.emitOverrideDefinitions(Value{Ref: r2, Ty: TypeAny}, e.currentCtorClass, ast.Pos{}); err != nil {
+		e.overrideErr = err
+	}
+}
+
+// emitOverrideThisReturn hands a constructor's `this` (emitOverrideThis)
+// to its `new` site when it returns.
+func (e *Emitter) emitOverrideThisReturn() {
+	if e.overrideThis == "" || e.blockDone {
+		return
+	}
+	v := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", v, e.overrideThis))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" @__kml_ctor_ret_any, align 8", v))
 }
 
 // emitSuperMethodCall handles `super.methodName(args)` (TDD-00009 Stage 3):
@@ -4617,10 +6023,11 @@ func (e *Emitter) emitSuperCall(ex *ast.CallExpression) (Value, error) {
 func (e *Emitter) emitSuperMethodCall(methodName string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	superSym, ok := e.lookup("super")
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: super.%s(...) is only valid inside a method of a class with a base class", pos.Line, pos.Col, methodName)
+		return Value{}, internalAt(pos, "super.%s(...) is only valid inside a method of a class with a base class", methodName)
 	}
+	e.emitThisBoundCheck() // super.m reads `this` first
 	thisReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, superSym.Ptr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, superSym.Ptr))
 	if _, registered := e.classes[superSym.Ty.ClassName]; !registered {
 		// The super of a class extending Map or Set is its host: the host's
 		// method, on the instance's body (TDD-00247).
@@ -4681,16 +6088,22 @@ func (e *Emitter) emitSuperMethodCall(methodName string, args []ast.Expression, 
 // object types: every remaining typed ptr value is a JS object, and an
 // undecidable static type (any/union/nullable) keeps a clean rejection.
 var builtinInstanceofTypes = map[string]func(Type) bool{
-	"Array":           func(t Type) bool { return t.IsArray() },
-	"Map":             func(t Type) bool { return t.IsMap() },
-	"Set":             func(t Type) bool { return t.IsSet() },
-	"Date":            func(t Type) bool { return t.IsDate() },
-	"RegExp":          func(t Type) bool { return t.IsRegExp() },
-	"ReadableStream":  func(t Type) bool { return t.IsReadableStream() },
-	"WritableStream":  func(t Type) bool { return t.IsWritableStream() },
-	"TransformStream": func(t Type) bool { return t.IsTransformStream() },
-	"Promise":         func(t Type) bool { return t.IsPromise() },
-	"Buffer":          func(t Type) bool { return t.IsBuffer() },
+	"Array":                           func(t Type) bool { return t.IsArray() },
+	"Map":                             func(t Type) bool { return t.IsMap() && !t.Weak },
+	"Set":                             func(t Type) bool { return t.IsSet() && !t.Weak },
+	"WeakMap":                         func(t Type) bool { return t.IsMap() && t.Weak },
+	"WeakSet":                         func(t Type) bool { return t.IsSet() && t.Weak },
+	"Date":                            func(t Type) bool { return t.IsDate() },
+	"RegExp":                          func(t Type) bool { return t.IsRegExp() },
+	"ReadableStream":                  func(t Type) bool { return t.IsReadableStream() },
+	"WritableStream":                  func(t Type) bool { return t.IsWritableStream() },
+	"TransformStream":                 func(t Type) bool { return t.IsTransformStream() },
+	"ReadableStreamDefaultReader":     func(t Type) bool { return t.IsStreamReader() },
+	"WritableStreamDefaultWriter":     func(t Type) bool { return t.IsStreamWriter() },
+	"ReadableStreamDefaultController": func(t Type) bool { return t.IsRSController() },
+	"WritableStreamDefaultController": func(t Type) bool { return t.IsWSController() },
+	"Promise":                         func(t Type) bool { return t.IsPromise() },
+	"Buffer":                          func(t Type) bool { return t.IsBuffer() },
 }
 
 // typedArrayNames are the TypedArray constructors: `x instanceof Int32Array`
@@ -4717,6 +6130,22 @@ func builtinInstanceofMatch(name string, t Type) bool {
 }
 
 func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
+	if rid, ok := ex.Right.(*ast.Identifier); ok {
+		if lt := e.typeOfExpr(ex.Left); lt.IsClass() && !lt.IsDynamic() && hostWrapperNames[rid.Name] {
+			if li, ok := e.classes[lt.ClassName]; ok && li.HostBase != nil && (li.HostBase.IsPrimWrapper() || li.HostBase.IsArrayBuffer()) && !e.isUserClass(rid.Name) {
+				// A class extending Number (String, Boolean, ArrayBuffer,
+				// SharedArrayBuffer) is one.
+				leftVal, err := e.emitExpr(ex.Left)
+				if err != nil {
+					return Value{}, err
+				}
+				if hostTagName(*li.HostBase) != rid.Name {
+					return Value{Ref: "0", Ty: TypeBool}, nil
+				}
+				return Value{Ref: e.presentRef(leftVal), Ty: TypeBool}, nil
+			}
+		}
+	}
 	// A constructor held in a value (`x instanceof C`, C a parameter):
 	// decided at run time.
 	if e.instanceofNeedsRuntime(ex.Right) {
@@ -4724,13 +6153,22 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	}
 	rightIdent, ok := ex.Right.(*ast.Identifier)
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: right-hand side of instanceof must be a class name", ex.GetPos().Line, ex.GetPos().Col)
+		return Value{}, internalAt(ex.GetPos(), "right-hand side of instanceof must be a class name")
+	}
+	// A class with a static [Symbol.hasInstance]: InstanceofOperator calls
+	// it, its result made a boolean.
+	if info, ok := e.classes[rightIdent.Name]; ok && !e.ordinaryInstanceof {
+		if _, has := info.StaticMethodSigs["@@hasInstance"]; has {
+			pos := ex.GetPos()
+			call := ast.NewCallExpression(ast.NewMemberExpression(rightIdent, "@@hasInstance", pos), []ast.Expression{ex.Left}, pos)
+			return e.emitExpr(ast.NewUnaryExpression("!", true, ast.NewUnaryExpression("!", true, call, pos), pos))
+		}
 	}
 	// A caught value (TypeCaught ≈ `unknown`, TDD-00202): resolve instanceof off
 	// the record's tag. A built-in Error kind checks the caught Error's kind;
 	// `Object` is true for any non-primitive; any other class is not verifiable
 	// from the packed record (a thrown user-class instance loses its identity).
-	if e.inferExprType(ex.Left).IsCaught() {
+	if e.typeOfExpr(ex.Left).IsCaught() {
 		lv, err := e.emitExpr(ex.Left)
 		if err != nil {
 			return Value{}, err
@@ -4760,6 +6198,11 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	// global names are reserved by default) — the more specific, real
 	// class registration a user explicitly wrote should never be silently
 	// shadowed by this compiler's own fallback built-in handling.
+	if _, generic := e.genericClasses[rightIdent.Name]; generic {
+		if _, own := e.classes[rightIdent.Name]; !own {
+			return e.emitGenericInstanceOf(ex.Left, rightIdent.Name)
+		}
+	}
 	info, isClass := e.classes[rightIdent.Name]
 	if !isClass {
 		// `x instanceof Object` (ADR-00605): true for any non-primitive. The
@@ -4781,9 +6224,15 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 				if err != nil {
 					return Value{}, err
 				}
-				e.ensureDynObj()
+				e.ensureAnyToPrimitive()
+				e.ensureNanBox()
+				e.ensureErrorNames()
+				e.ensureStrHeaderRuntime()
+				// A Proxy's prototype is its target's (no getPrototypeOf trap).
+				src := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_proxy_proto_src(i64 %s)", src, b.Ref))
 				r := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = call zeroext i1 @__kml_instanceof_object(i64 %s)", r, b.Ref))
+				e.emitInstr(fmt.Sprintf("%s = call zeroext i1 @__kml_instanceof_object(i64 %s)", r, src))
 				return Value{Ref: r, Ty: TypeBool}, nil
 			}
 			// A Date is an object (a `ptr` handle, which isForOfStringTy
@@ -4791,7 +6240,7 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 			if t.IsDate() {
 				return Value{Ref: "1", Ty: TypeBool}, nil
 			}
-			isPrimitive := (t.IR != "ptr" && t.IR != "void") || t.IsBigInt() || t.IsSymbol() ||
+			isPrimitive := (t.IR != irPtr && t.IR != "void") || t.IsBigInt() || t.IsSymbol() ||
 				t.IsNull() || t.IsUndefined() || isForOfStringTy(t)
 			if isPrimitive {
 				return Value{Ref: "0", Ty: TypeBool}, nil
@@ -4809,13 +6258,13 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 				return e.emitDynHostInstanceOf(leftVal, rightIdent.Name), nil
 			}
 			if isHostHandle(leftVal.Ty) && hostClassName(leftVal.Ty) == rightIdent.Name {
-				return Value{Ref: "1", Ty: TypeBool}, nil
+				return Value{Ref: e.presentRef(leftVal), Ty: TypeBool}, nil
 			}
 			return Value{Ref: "0", Ty: TypeBool}, nil
 		}
 		// A headerless host object (URL) in a union: the union's one object
 		// without a header word.
-		if lt := e.inferExprType(ex.Left); lt.IsDynamic() && len(lt.UnionMembers) > 0 && builtinInstanceofTypes[rightIdent.Name] == nil {
+		if lt := e.typeOfExpr(ex.Left); lt.IsDynamic() && len(lt.UnionMembers) > 0 && builtinInstanceofTypes[rightIdent.Name] == nil {
 			if m, ok := headerlessHostMember(lt, rightIdent.Name); ok {
 				leftVal, err := e.emitExpr(ex.Left)
 				if err != nil {
@@ -4839,12 +6288,12 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 				}
 			}
 			if matches(leftVal.Ty) {
-				return Value{Ref: "1", Ty: TypeBool}, nil
+				return Value{Ref: e.presentRef(leftVal), Ty: TypeBool}, nil
 			}
 			if leftVal.Ty.IsClass() {
 				// A class extending Map or Set is one (TDD-00247).
 				if li, ok := e.classes[leftVal.Ty.ClassName]; ok && li.HostBase != nil && matches(*li.HostBase) {
-					return Value{Ref: "1", Ty: TypeBool}, nil
+					return Value{Ref: e.presentRef(leftVal), Ty: TypeBool}, nil
 				}
 			}
 			return Value{Ref: "0", Ty: TypeBool}, nil
@@ -4855,7 +6304,10 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 		if _, bound := e.lookup(rightIdent.Name); !bound && (rightIdent.Name == "Function" || rightIdent.Name == "Symbol") {
 			return e.emitFunctionSymbolInstanceOf(ex.Left, rightIdent.Name)
 		}
-		return Value{}, fmt.Errorf("%d:%d: instanceof is only supported against user-defined classes; '%s' is not a registered class", ex.GetPos().Line, ex.GetPos().Col, rightIdent.Name)
+		// Any other value (a plain function, a global's property, an
+		// undeclared name's ReferenceError): the right operand read after
+		// the left decides, at run time.
+		return e.emitDynInstanceOf(ex)
 	}
 
 	leftVal, err := e.emitExpr(ex.Left)
@@ -4867,8 +6319,8 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	// word before its body is the instance's class tag when it is one.
 	if hostBodyAt8(leftVal.Ty) && info.HostBase != nil {
 		hp, hdr := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, leftVal.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, hp))
+		e.emitPrefixWordAddr(hp, leftVal.Ref)
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, hp))
 		return Value{Ref: e.emitClassIs(hdr, info.TagID), Ty: TypeBool}, nil
 	}
 	// An array against a class extending Array: the header word before
@@ -4876,8 +6328,8 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	// species result). A fresh array never is.
 	if leftVal.Ty.IsArray() && !leftVal.Ty.IsBuffer() && info.HostBase != nil && info.HostBase.IsArray() {
 		hp, hdr := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", hp, e.nullSafeArrayHeader(leftVal.Ref)))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, hp))
+		e.emitPrefixWordAddr(hp, e.nullSafeArrayHeader(leftVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, hp))
 		return Value{Ref: e.emitClassIs(hdr, info.TagID), Ty: TypeBool}, nil
 	}
 	// A caught error (errorObjType) against an error-subclass class
@@ -4885,15 +6337,21 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	// lives in the error struct's kind position.
 	if leftVal.Ty.IsError() && info.IsErrorSubclass {
 		kindGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), leftVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), leftVal.Ref))
 		loadedKind := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loadedKind, kindGep))
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", r, e.headerIdentity(loadedKind), errorTypeIDStored(info.TagID)))
 		return Value{Ref: r, Ty: TypeBool}, nil
 	}
 
 	if leftVal.Ty.IsDynamic() {
+		if !e.brandOnly && leftVal.Ty.IR == "i64" {
+			// A Proxy's prototype is its target's (no getPrototypeOf trap).
+			src := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_proxy_proto_src(i64 %s)", src, leftVal.Ref))
+			leftVal = Value{Ref: src, Ty: leftVal.Ty}
+		}
 		tag, payload := e.emitUnboxTagPayload(leftVal)
 		isObj := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
@@ -4901,7 +6359,7 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
 
 		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptrReg, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, ptrReg, payload))
 
 		resultAlloca := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resultAlloca))
@@ -4917,19 +6375,69 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 		// struct field 0.
 		e.emitLabel(objL)
 		tagGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), ptrReg))
 		loadedTagObj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedTagObj, tagGep))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loadedTagObj, tagGep))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", cmpL))
 
 		// A widened bag (tag kmlTagDynObject) realized from a class instance carries
 		// its class TagID at header offset 40 (0 = not from a class → no match).
 		e.emitLabel(bagChkL)
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, bagL, notObjL))
+		fnChkL := e.freshLabel("instanceof.fnchk")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, bagL, fnChkL))
+		e.emitLabel(fnChkL)
+		if e.brandOnly {
+			e.emitTerminator(fmt.Sprintf("br label %%%s", notObjL))
+		} else {
+			// An array Object.setPrototypeOf gave a chain holding
+			// C.prototype.
+			isArr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
+			arrL, fnChk2L := e.freshLabel("instanceof.arr"), e.freshLabel("instanceof.fnchk2")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, arrL, fnChk2L))
+			e.emitLabel(arrL)
+			{
+				e.ensureShapeRuntime()
+				hdr, protoObj, has, onChain := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, ptrReg))
+				e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", protoObj, e.classProtoSlot(rightIdent.Name)))
+				e.declareFn("__kml_array_chain_has", "declare i64 @__kml_array_chain_has("+irPtr+", "+irPtr+")")
+				e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_array_chain_has("+irPtr+" %s, "+irPtr+" %s)", has, hdr, protoObj))
+				e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", onChain, has))
+				e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", onChain, resultAlloca))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+			}
+			e.emitLabel(fnChk2L)
+			// A function whose chain Object.setPrototypeOf gave C.prototype
+			// (an instance of a class extending Function).
+			isFn := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isFn, tag, kmlTagDynFunc))
+			fnL := e.freshLabel("instanceof.fn")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFn, fnL, notObjL))
+			e.emitLabel(fnL)
+			e.ensureFnMeta()
+			props := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_props_dyn("+irPtr+" %s)", props, ptrReg))
+			hasBag := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasBag, props))
+			chainL := e.freshLabel("instanceof.fnchain")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasBag, chainL, notObjL))
+			e.emitLabel(chainL)
+			protoObj, has, onChain := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", protoObj, e.classProtoSlot(rightIdent.Name)))
+			e.declareFn("__kml_dynobj_chain_has", "declare i64 @__kml_dynobj_chain_has("+irPtr+", "+irPtr+")")
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_chain_has("+irPtr+" %s, "+irPtr+" %s)", has, props, protoObj))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", onChain, has))
+			e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", onChain, resultAlloca))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
+		}
 		e.emitLabel(bagL)
-		e.ensureDynObj()
+		e.ensureAnyToPrimitive()
+		e.ensureNanBox()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
 		loadedTagBag, classTag := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_classtag(ptr %s)", classTag, ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_classtag("+irPtr+" %s)", classTag, ptrReg))
 		if e.brandOnly {
 			// A private-name brand is the constructor's, never the chain's.
 			e.emitInstr(fmt.Sprintf("%s = add i64 %s, 0", loadedTagBag, classTag))
@@ -4941,9 +6449,9 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 			// instanceof C`) is one too.
 			protoSlot := e.classProtoSlot(rightIdent.Name)
 			protoObj, has, onChain := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", protoObj, protoSlot))
-			e.declareFn("__kml_dynobj_chain_has", "declare i64 @__kml_dynobj_chain_has(ptr, ptr)")
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_chain_has(ptr %s, ptr %s)", has, ptrReg, protoObj))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", protoObj, protoSlot))
+			e.declareFn("__kml_dynobj_chain_has", "declare i64 @__kml_dynobj_chain_has("+irPtr+", "+irPtr+")")
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_chain_has("+irPtr+" %s, "+irPtr+" %s)", has, ptrReg, protoObj))
 			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", onChain, has))
 			chainTag := info.TagID
 			if info.IsErrorSubclass {
@@ -4965,16 +6473,16 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 			target = errorTypeIDStored(target)
 		}
 		classMatch := e.emitClassIs(loadedTag, target)
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", classMatch, resultAlloca))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", classMatch, resultAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(notObjL)
-		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resultAlloca))
+		e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resultAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)
 		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resultAlloca))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", result, resultAlloca))
 		return Value{Ref: result, Ty: TypeBool}, nil
 	}
 
@@ -4997,9 +6505,9 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 			// method called without a receiver (`const f = o.m; f()`), or a
 			// value that reached a C slot through `any` (a parameter checking
 			// its argument). A null pointer is never an instance.
-			if leftVal.Ty.IR == "ptr" {
+			if leftVal.Ty.IR == irPtr {
 				result := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", result, leftVal.Ref))
+				e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", result, leftVal.Ref))
 				return Value{Ref: result, Ty: TypeBool}, nil
 			}
 			return Value{Ref: "1", Ty: TypeBool}, nil
@@ -5037,28 +6545,28 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 				notNullL := e.freshLabel("instanceof.notnull")
 				mergeL = e.freshLabel("instanceof.merge")
 				isNull := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, leftVal.Ref))
+				e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, leftVal.Ref))
 				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, notNullL))
 				e.emitLabel(nullL)
-				e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resultAlloca))
+				e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resultAlloca))
 				e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 				e.emitLabel(notNullL)
 			}
 
 			tagGep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", tagGep, leftInfo.Ty.StructIR(), leftVal.Ref))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", tagGep, leftInfo.Ty.StructIR(), leftVal.Ref))
 			loadedTag := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedTag, tagGep))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loadedTag, tagGep))
 			match := e.emitClassIs(loadedTag, target)
 
 			if !leftVal.Ty.Nullable() {
 				return Value{Ref: match, Ty: TypeBool}, nil
 			}
-			e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", match, resultAlloca))
+			e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", match, resultAlloca))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 			e.emitLabel(mergeL)
 			result := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resultAlloca))
+			e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", result, resultAlloca))
 			return Value{Ref: result, Ty: TypeBool}, nil
 		}
 
@@ -5083,9 +6591,9 @@ func (e *Emitter) emitInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 // Structurally independent of user-class inheritance (TDD-00009 Stage 3) —
 // Error/TypeError/etc. are never registered in e.classes.
 //
-// No resolveType path ever produces a statically Error-typed, Nullable
+// No annotationType path ever produces a statically Error-typed, Nullable
 // value ("Error" isn't a resolvable type-annotation name — see
-// emit_exprs_types.go/types.go's resolveType/ResolveTypeName), so unlike
+// emit_exprs_types.go/types.go's annotationType/ResolveTypeName), so unlike
 // emitInstanceOf's class case there is no null-check branch to handle here.
 func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string, kindID int64) (Value, error) {
 	leftVal, err := e.emitExpr(ex.Left)
@@ -5105,27 +6613,27 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 			// correctly false rather than the old unconditional true (TDD-00222).
 			baseAlloca := e.freshReg()
 			e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", baseAlloca))
-			e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", baseAlloca))
+			e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", baseAlloca))
 			baseObjL := e.freshLabel("errinstanceof.baseobj")
 			baseMergeL := e.freshLabel("errinstanceof.basemerge")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, baseObjL, baseMergeL))
 			e.emitLabel(baseObjL)
 			basePtr := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", basePtr, payload))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, basePtr, payload))
 			baseF0Gep := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", baseF0Gep, errorObjType.StructIR(), basePtr))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", baseF0Gep, errorObjType.StructIR(), basePtr))
 			baseF0 := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", baseF0, baseF0Gep))
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", baseF0, baseF0Gep))
 			baseMasked := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", baseMasked, baseF0, errorTypeIDFlag))
 			baseIsErr := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", baseIsErr, baseMasked))
-			e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", baseIsErr, baseAlloca))
+			e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", baseIsErr, baseAlloca))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", baseMergeL))
 			e.emitLabel(baseMergeL)
 			baseRes := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", baseRes, baseAlloca))
-			return Value{Ref: baseRes, Ty: TypeBool}, nil
+			e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", baseRes, baseAlloca))
+			return e.orBuiltinProtoChain(Value{Ref: baseRes, Ty: TypeBool}, leftVal, kindName), nil
 		}
 
 		resultAlloca := e.freshReg()
@@ -5137,45 +6645,58 @@ func (e *Emitter) emitErrorInstanceOf(ex *ast.BinaryExpression, kindName string,
 
 		e.emitLabel(objL)
 		ptrReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptrReg, payload))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, ptrReg, payload))
 		kindGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), ptrReg))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), ptrReg))
 		loadedKind := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loadedKind, kindGep))
 		kindMatch := e.errorKindMatch(loadedKind, kindName, kindID)
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", kindMatch, resultAlloca))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", kindMatch, resultAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(notObjL)
-		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", resultAlloca))
+		e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", resultAlloca))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 		e.emitLabel(mergeL)
 		result := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", result, resultAlloca))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", result, resultAlloca))
 		return Value{Ref: result, Ty: TypeBool}, nil
 	}
 
 	// An error-subclass instance (TDD-00155 Stage 6): `instanceof Error` is
 	// true by construction; a specific builtin kind never matches (the
 	// subclass TagID range is disjoint from the builtin kinds).
+	present := func() string { return e.presentRef(leftVal) }
 	if leftVal.Ty.IsClass() {
 		if ci, ok := e.classes[leftVal.Ty.ClassName]; ok && ci.IsErrorSubclass {
 			if kindName == "Error" || kindName == ci.ErrorBaseKind {
-				return Value{Ref: "1", Ty: TypeBool}, nil
+				return Value{Ref: present(), Ty: TypeBool}, nil
 			}
 			return Value{Ref: "0", Ty: TypeBool}, nil
 		}
 	}
 	if leftVal.Ty.IsError() {
 		if kindName == "Error" {
-			return Value{Ref: "1", Ty: TypeBool}, nil
+			return Value{Ref: present(), Ty: TypeBool}, nil
 		}
+		res := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", res))
+		e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", res))
+		readL := e.freshLabel("errinstanceof.read")
+		doneL := e.freshLabel("errinstanceof.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present(), readL, doneL))
+		e.emitLabel(readL)
 		kindGep := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), leftVal.Ref))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", kindGep, errorObjType.StructIR(), leftVal.Ref))
 		loadedKind := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loadedKind, kindGep))
-		return Value{Ref: e.errorKindMatch(loadedKind, kindName, kindID), Ty: TypeBool}, nil
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loadedKind, kindGep))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.errorKindMatch(loadedKind, kindName, kindID), res))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(doneL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", out, res))
+		return Value{Ref: out, Ty: TypeBool}, nil
 	}
 
 	return Value{Ref: "0", Ty: TypeBool}, nil
@@ -5196,7 +6717,40 @@ func (e *Emitter) isErrorRootKind(base string) bool {
 	if base == "" {
 		return false
 	}
-	return declaredLowerType(e.lookupBuiltinType(base)) == "error"
+	l := declaredLowerType(e.lookupBuiltinType(base))
+	return l == "error" || l == "domexception" || l == "aggregateerror"
+}
+
+// aggregateRooted reports a class whose error root is AggregateError:
+// its constructor takes (errors, message, options).
+func (e *Emitter) aggregateRooted(info ClassInfo) bool {
+	for i := 0; i < 64; i++ {
+		if e.isErrorRootKind(info.BaseClass) {
+			return declaredLowerType(e.lookupBuiltinType(info.BaseClass)) == "aggregateerror"
+		}
+		b, ok := e.classes[info.BaseClass]
+		if !ok {
+			return false
+		}
+		info = b
+	}
+	return false
+}
+
+// emitAggregateErrors stores an AggregateError subclass instance's own
+// `errors`: the array of what the iterable errs yields.
+func (e *Emitter) emitAggregateErrors(obj string, errs ast.Expression) error {
+	arr, err := e.emitExprWithObjectHint(ast.NewArrayLiteral([]ast.Expression{&ast.SpreadElement{Arg: errs}}, errs.GetPos()), ArrayOf(TypeAny))
+	if err != nil {
+		return err
+	}
+	b, err := e.emitBoxValue(arr)
+	if err != nil {
+		return err
+	}
+	e.declareFn("__kml_error_set_hidden", "declare void @__kml_error_set_hidden("+irPtr+", "+irPtr+", i64)")
+	e.emitInstr(fmt.Sprintf("call void @__kml_error_set_hidden("+irPtr+" %s, "+irPtr+" %s, i64 %s)", obj, e.internString("errors"), b.Ref))
+	return nil
 }
 
 func errorBaseKind(isErrorRoot bool, base string) string {
@@ -5204,22 +6758,6 @@ func errorBaseKind(isErrorRoot bool, base string) string {
 		return ""
 	}
 	return base
-}
-
-// inheritedFieldIs reports whether the inherited field name is stored as ty.
-func inheritedFieldIs(fields []Field, name string, ty Type) bool {
-	for _, f := range fields {
-		if f.Name == name {
-			if f.Ty.IR == "ptr" && f.Ty.Nullable() && !ty.Nullable() {
-				// A narrowing of an optional reference (`code: string` over
-				// Error's `code?: string`): the same storage.
-				ty.setNullable(f.Ty.Nullable())
-				ty.setUndefined(f.Ty.IsUndefined())
-			}
-			return reflect.DeepEqual(f.Ty, ty)
-		}
-	}
-	return false
 }
 
 // declaredCallReturnType is the annotated return type of a call to a
@@ -5242,7 +6780,7 @@ func (e *Emitter) declaredCallReturnType(prog *ast.Program, init ast.Expression)
 		if !ok || fd.Name != id.Name || fd.Body == nil || len(fd.TypeParams) > 0 || fd.ReturnType == nil || fd.IsAsync {
 			continue
 		}
-		return e.resolveType(fd.ReturnType), true
+		return e.annotationType(fd.ReturnType), true
 	}
 	return Type{}, false
 }
@@ -5265,7 +6803,7 @@ func (e *Emitter) emitDynIsArray(v Value) Value {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynArray))
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", resPtr))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", isDyn, resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", isDyn, resPtr))
 	typedL, otherL, mergeL := e.freshLabel("isarray.typed"), e.freshLabel("isarray.other"), e.freshLabel("isarray.merge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, typedL, otherL))
 	// A boxed TypedArray is kmlTagArray too, but no Array: the box's typed
@@ -5273,21 +6811,21 @@ func (e *Emitter) emitDynIsArray(v Value) Value {
 	// payload is a box.
 	e.emitLabel(typedL)
 	box := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, box, payload))
 	typedGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 2", typedGep, anyArrayBoxTy, box))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 2", typedGep, anyArrayBoxTy, box))
 	typedB := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", typedB, typedGep))
+	e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", typedB, typedGep))
 	plain := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", plain, typedB, anyArrayPlain))
 	// An Arguments object (its header's word) is no Array.
 	hdrp, hdr := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", hdrp, anyArrayBoxTy, box))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, hdrp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", hdrp, anyArrayBoxTy, box))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, hdrp))
 	notArgs, isArrPlain := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", notArgs, e.emitArrayIsArguments(hdr)))
 	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", isArrPlain, plain, notArgs))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", isArrPlain, resPtr))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", isArrPlain, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	// An object: an instance of a class extending Array, by its parent rows;
 	// a dynamic object: Array.prototype.
@@ -5298,11 +6836,11 @@ func (e *Emitter) emitDynIsArray(v Value) Value {
 		bagL, restL := e.freshLabel("isarray.bag"), e.freshLabel("isarray.rest")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, bagL, restL))
 		e.emitLabel(bagL)
-		e.declareFn("__kml_dynobj_is_array_exotic", "declare i1 @__kml_dynobj_is_array_exotic(ptr)")
+		e.declareFn("__kml_dynobj_is_array_exotic", "declare i1 @__kml_dynobj_is_array_exotic("+irPtr+")")
 		bag, ex := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", bag, payload))
-		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_is_array_exotic(ptr %s)", ex, bag))
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", ex, resPtr))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, bag, payload))
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_is_array_exotic("+irPtr+" %s)", ex, bag))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", ex, resPtr))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 		e.emitLabel(restL)
 	}
@@ -5313,48 +6851,65 @@ func (e *Emitter) emitDynIsArray(v Value) Value {
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, mergeL))
 		e.emitLabel(objL)
 		obj, word := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", obj, payload))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", word, obj))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, obj, payload))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", word, obj))
 		// Each Array host has its own id (its element layout); every one is
 		// a child of the any[] one (emitClassParentRows).
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", e.emitClassIs(word, kmlHdrMagic|e.hostID(ArrayOf(TypeAny))&kmlHdrIDMask), resPtr))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.emitClassIs(word, kmlHdrMagic|e.hostID(ArrayOf(TypeAny))&kmlHdrIDMask), resPtr))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 	e.emitLabel(mergeL)
 	res := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", res, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", res, resPtr))
 	return Value{Ref: res, Ty: TypeBool}
+}
+
+// dynBuiltinInstanceof decides `v instanceof <builtin>` for a value held in
+// `any` (v, its box tag and payload): an array by its box tag, a promise by
+// its box wrapper's header.
+var dynBuiltinInstanceof map[string]func(e *Emitter, v Value, tag, pay string) Value
+
+func init() {
+	dynBuiltinInstanceof = map[string]func(e *Emitter, v Value, tag, pay string) Value{
+		"Array": func(e *Emitter, v Value, _, _ string) Value { return e.emitDynIsArray(v) },
+		"Promise": func(e *Emitter, _ Value, tag, pay string) Value {
+			isObj := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+			out := e.freshReg()
+			e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", out))
+			e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", out))
+			chkL, doneL := e.freshLabel("inst.prom"), e.freshLabel("inst.prom.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, chkL, doneL))
+			e.emitLabel(chkL)
+			obj := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, obj, pay))
+			hdr := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, obj))
+			is := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, e.headerIdentity(hdr), e.objHeaderWord(promiseBoxType())))
+			e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", is, out))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(doneL)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, out))
+			return Value{Ref: r, Ty: TypeBool}
+		},
+	}
 }
 
 // emitDynBuiltinInstanceOf answers `v instanceof Array | Promise` for a value
 // held in `any` at run time: an array (static or dynamic) by its box tag, a
 // promise by its box wrapper's header. ok is false for the other builtins.
 func (e *Emitter) emitDynBuiltinInstanceOf(v Value, name string) (Value, bool) {
+	if v.Ty.IR == "i64" && name != "Proxy" {
+		// A Proxy's prototype is its target's (no getPrototypeOf trap).
+		src := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_proxy_proto_src(i64 %s)", src, v.Ref))
+		v = Value{Ref: src, Ty: v.Ty}
+	}
 	tag, pay := e.emitUnboxTagPayload(v)
-	switch name {
-	case "Array":
-		return e.emitDynIsArray(v), true
-	case "Promise":
-		isObj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
-		out := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", out))
-		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", out))
-		chkL, doneL := e.freshLabel("inst.prom"), e.freshLabel("inst.prom.done")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, chkL, doneL))
-		e.emitLabel(chkL)
-		obj := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", obj, pay))
-		hdr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, obj))
-		is := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, e.headerIdentity(hdr), e.objHeaderWord(promiseBoxType())))
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", is, out))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
-		e.emitLabel(doneL)
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, out))
-		return Value{Ref: r, Ty: TypeBool}, true
+	if is, ok := dynBuiltinInstanceof[name]; ok {
+		return e.orBuiltinProtoChain(is(e, v, tag, pay), v, name), true
 	}
 	if typedArrayNames[name] || name == "Buffer" {
 		// A boxed static array whose box says it is that TypedArray.
@@ -5362,22 +6917,49 @@ func (e *Emitter) emitDynBuiltinInstanceOf(v Value, name string) (Value, bool) {
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isArr, tag, kmlTagArray))
 		out := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", out))
-		e.emitInstr(fmt.Sprintf("store i1 0, ptr %s, align 1", out))
+		e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", out))
 		chkL, doneL := e.freshLabel("inst.typed"), e.freshLabel("inst.typed.done")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, chkL, doneL))
+		notArrL := doneL
+		subs := e.sortedClassNames(func(c string, _ ClassInfo) bool { return e.builtinRootBase(c) == name })
+		if len(subs) > 0 {
+			notArrL = e.freshLabel("inst.typed.cls")
+		}
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isArr, chkL, notArrL))
+		if len(subs) > 0 {
+			// An instance of a class extending it (`class MyU extends
+			// Uint8Array`), by its class tag.
+			e.emitLabel(notArrL)
+			isObj := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+			objL := e.freshLabel("inst.typed.obj")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, doneL))
+			e.emitLabel(objL)
+			word := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", word, e.emitIntToPtr(pay)))
+			wid := e.headerIdentity(word)
+			any := "false"
+			for _, c := range subs {
+				is, or := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", is, wid, e.classes[c].TagID))
+				e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", or, any, is))
+				any = or
+			}
+			e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", any, out))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		}
 		e.emitLabel(chkL)
 		e.ensureDynJSONC()
 		box := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", box, pay))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, box, pay))
 		r32 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_anyarr_typed_is(ptr %s, ptr %s)", r32, box, e.internString(name)))
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_anyarr_typed_is("+irPtr+" %s, "+irPtr+" %s)", r32, box, e.internString(name)))
 		is := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", is, r32))
-		e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", is, out))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", is, out))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", r, out))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, out))
 		return Value{Ref: r, Ty: TypeBool}, true
 	}
 	if e.isHostClassName(name) {
@@ -5409,7 +6991,7 @@ func (e *Emitter) emitBoxIsHeaderless(v Value, m Type) Value {
 	tag, pay := e.emitUnboxTagPayload(Value{Ref: v.Ref, Ty: TypeAny})
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", slot))
 	isObj := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
 	objL, doneL := e.freshLabel("hless.obj"), e.freshLabel("hless.done")
@@ -5417,15 +6999,15 @@ func (e *Emitter) emitBoxIsHeaderless(v Value, m Type) Value {
 	e.emitLabel(objL)
 	p := e.emitIntToPtr(pay)
 	w, mk, isHdr, r := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, p))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, p))
 	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", mk, w, kmlHdrMagicMask|hostTypeIDFlag))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isHdr, mk, kmlHdrMagic))
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", r, isHdr))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", r, slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", r, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", out, slot))
 	return Value{Ref: out, Ty: TypeBool}
 }
 
@@ -5462,10 +7044,10 @@ func (e *Emitter) emitErrorSecondArg(thisSym Symbol, info ClassInfo, arg ast.Exp
 		return nil
 	}
 	thisReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisReg, idx))
-	e.heapStore("ptr", name, gep, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisReg, idx))
+	e.heapStore(irPtr, name, gep, 8)
 	return nil
 }
 
@@ -5488,7 +7070,8 @@ func (e *Emitter) emitSuperErrorCause(thisSym Symbol, info ClassInfo, opts ast.E
 	tag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, boxed.Ref))
 	isObj := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+	// Any object is an options bag (tags from kmlTagObject up are objects).
+	e.emitInstr(fmt.Sprintf("%s = icmp uge i8 %s, %d", isObj, tag, kmlTagObject))
 	getL, doneL := e.freshLabel("errcause.get"), e.freshLabel("errcause.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, getL, doneL))
 	e.emitLabel(getL)
@@ -5504,9 +7087,9 @@ func (e *Emitter) emitSuperErrorCause(thisSym Symbol, info ClassInfo, opts ast.E
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, storeL, doneL))
 	e.emitLabel(storeL)
 	thisReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", thisReg, thisSym.Ptr))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", thisReg, thisSym.Ptr))
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisReg, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, info.Ty.StructIR(), thisReg, idx))
 	e.heapStore("i64", cause.Ref, gep, 8)
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
@@ -5603,29 +7186,6 @@ func errorSystemSlot(fields []Field, name string) int {
 	return -1
 }
 
-// redeclaresSameStorage reports a field redeclared over an inherited one of
-// the same storage: by its annotation, or (`code = 'E_X'`) by its
-// initializer's type as TypeScript widens it.
-func (e *Emitter) redeclaresSameStorage(inherited []Field, f ast.AnnotField) bool {
-	if f.Optional {
-		return false
-	}
-	// A base field nothing assigned yet holds T as `T | undefined`
-	// (markUnassignedField): the same storage as T's.
-	is := func(t Type) bool {
-		return inheritedFieldIs(inherited, f.Name, t) || inheritedFieldIs(inherited, f.Name, optionalFieldType(t))
-	}
-	if f.Type != nil {
-		return is(e.resolveType(f.Type))
-	}
-	if f.Initializer != nil {
-		it := e.inferExprType(f.Initializer)
-		it.setKind(kindStrLiteral, false)
-		return is(it)
-	}
-	return false
-}
-
 // classField is field name of class type t by the class's registered
 // layout: its index and type. A class type carried on a value can be a
 // snapshot taken before the layout was final (without its vtable field), so
@@ -5636,6 +7196,15 @@ func (e *Emitter) classField(t Type, name string) (int, Type, Type, bool) {
 		t = info.Ty
 	}
 	i, fty, ok := t.FieldIndex(name)
+	if !ok && strings.HasPrefix(name, "#") {
+		// A private name another class in its module shares is renamed
+		// apart (`#reason__kml_ps3`).
+		for j, f := range t.Fields {
+			if strings.HasPrefix(f.Name, name+ast.PrivateScopeSep) {
+				return j, f.Ty, t, true
+			}
+		}
+	}
 	return i, fty, t, ok
 }
 
@@ -5653,11 +7222,11 @@ func (e *Emitter) emitVirtualTarget(info ClassInfo, thisRef string, slot int, na
 	}
 	want := e.objHeaderWord(info.Ty)
 	out := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", out))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", direct, out))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", out))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", direct, out))
 	hp, hdr := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i32 0", hp, thisRef))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, hp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i32 0", hp, thisRef))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, hp))
 	hdr = e.headerIdentity(hdr)
 	exact := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", exact, hdr, want))
@@ -5668,15 +7237,15 @@ func (e *Emitter) emitVirtualTarget(info ClassInfo, thisRef string, slot int, na
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sub, vtL, doneL))
 	e.emitLabel(vtL)
 	vtGep, vtPtr, slotGep, fp := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vtGep, info.Ty.StructIR(), thisRef, info.Ty.VTableIndex()))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", vtPtr, vtGep))
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i32 %d", slotGep, vtPtr, slot))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", fp, slotGep))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", fp, out))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", vtGep, info.Ty.StructIR(), thisRef, info.Ty.VTableIndex()))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", vtPtr, vtGep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i32 %d", slotGep, vtPtr, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", fp, slotGep))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", fp, out))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, out))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, out))
 	return r
 }
 
@@ -5689,7 +7258,7 @@ func (e *Emitter) packRestArgs(restArgs []ast.Expression, restTy Type) ([]string
 	if restTy.ElemType != nil {
 		elemTy = *restTy.ElemType
 	}
-	if spread, ok := singleSpread(restArgs); ok && sameRestElem(e.inferExprType(spread.Arg), elemTy) {
+	if spread, ok := singleSpread(restArgs); ok && sameRestElem(e.typeOfExpr(spread.Arg), elemTy) {
 		// obj.m(...arr): forward the array's own (ptr, len) into the rest
 		// slot, the same fast path the free-function call uses (TDD-00106).
 		ptrReg, lenReg, _, err := e.resolveArrayForHOF(spread.Arg, spread.Arg.GetPos())
@@ -5697,21 +7266,20 @@ func (e *Emitter) packRestArgs(restArgs []ast.Expression, restTy Type) ([]string
 			return nil, err
 		}
 		restHdr := e.newArrayHeader(ptrReg, lenReg)
-		out = append(out, "ptr "+restHdr, "i64 "+lenReg)
+		out = append(out, irPtr+" "+restHdr, "i64 "+lenReg)
 	} else if len(restArgs) == 0 {
-		out = append(out, "ptr "+e.emptyArrayArgHeader(), "i64 0")
+		out = append(out, irPtr+" "+e.emptyArrayArgHeader(), "i64 0")
 	} else if anySpread(restArgs) {
 		dataReg, lenReg, err := e.emitRestArgBuffer(restArgs, elemTy)
 		if err != nil {
 			return nil, err
 		}
 		restHdr := e.newArrayHeader(dataReg, lenReg)
-		out = append(out, "ptr "+restHdr, "i64 "+lenReg)
+		out = append(out, irPtr+" "+restHdr, "i64 "+lenReg)
 	} else {
 		n := int64(len(restArgs))
-		e.ensureMalloc()
 		dataReg := e.freshReg()
-		e.heapMallocInto(dataReg, fmt.Sprint(n*int64(elemTy.Align())))
+		e.heapMallocInto(dataReg, elemAllocKind(elemTy), fmt.Sprint(n*int64(elemTy.Align())))
 		for i, arg := range restArgs {
 			val, err := e.emitExprWithObjectHint(arg, elemTy)
 			if err != nil {
@@ -5719,11 +7287,11 @@ func (e *Emitter) packRestArgs(restArgs []ast.Expression, restTy Type) ([]string
 			}
 			val = e.convert(val, elemTy)
 			gepReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %d", gepReg, elemTy.IR, dataReg, i))
 			e.storeArrayElem(gepReg, elemTy, val)
 		}
 		restHdr := e.newArrayHeader(dataReg, fmt.Sprintf("%d", n))
-		out = append(out, "ptr "+restHdr, fmt.Sprintf("i64 %d", n))
+		out = append(out, irPtr+" "+restHdr, fmt.Sprintf("i64 %d", n))
 	}
 	return out, nil
 }
@@ -5742,7 +7310,7 @@ func sameRestElem(at, elemTy Type) bool {
 // newTypeArgs is the type arguments of a generic class's `new`: the explicit
 // ones (with defaults), else those inferred from its arguments
 // (`new WeakRef(o)` is a WeakRef<Box>).
-func (e *Emitter) newTypeArgs(decl *ast.ClassDeclaration, ne *ast.NewExpression) ([]*ast.TypeAnnotation, bool) {
+func (e *Emitter) newTypeArgs(decl *ast.ClassDeclaration, ne *ast.NewExpression) ([]ast.TypeNode, bool) {
 	if targs, ok := classTypeArgs(decl, ne.TypeArgs); ok || len(ne.TypeArgs) > 0 {
 		return targs, ok
 	}
@@ -5752,11 +7320,31 @@ func (e *Emitter) newTypeArgs(decl *ast.ClassDeclaration, ne *ast.NewExpression)
 	return nil, false
 }
 
+// originalNew is the program's own `new` expression a key (class@line:col)
+// names, indexed on first use.
+func (e *Emitter) originalNew(key string) *ast.NewExpression {
+	if e.newByKey == nil {
+		e.newByKey = map[string]*ast.NewExpression{}
+		if e.prog != nil {
+			ast.Inspect(e.prog, func(n ast.Node) bool {
+				if ne, ok := n.(*ast.NewExpression); ok {
+					k := fmt.Sprintf("%s@%d:%d", ne.ClassName, ne.GetPos().Line, ne.GetPos().Col)
+					if _, dup := e.newByKey[k]; !dup {
+						e.newByKey[k] = ne
+					}
+				}
+				return true
+			})
+		}
+	}
+	return e.newByKey[key]
+}
+
 // inferredClassTypeArgs is the type arguments of a generic class's `new`
 // written without them, as annotations: each type parameter a constructor
 // parameter is annotated with outright takes its argument's type, as the
 // checker gives it. nil when one is left unanswered.
-func (e *Emitter) inferredClassTypeArgs(ex *ast.NewExpression, decl *ast.ClassDeclaration) []*ast.TypeAnnotation {
+func (e *Emitter) inferredClassTypeArgs(ex *ast.NewExpression, decl *ast.ClassDeclaration) []ast.TypeNode {
 	c := e.front()
 	if c == nil {
 		return nil
@@ -5768,18 +7356,58 @@ func (e *Emitter) inferredClassTypeArgs(ex *ast.NewExpression, decl *ast.ClassDe
 	if out, ok := e.newClassArgs[key]; ok {
 		return out
 	}
+	// A copy of the node outside the checked tree (a function body a pass
+	// cloned) has no contextual type there: ask about the original.
+	if c.ParentOf(ex) == nil {
+		if orig := e.originalNew(key); orig != nil {
+			ex = orig
+		}
+	}
 	if t := c.TypeOf(ex); t != nil && !c.Unanswered(t) && t.Kind == checker.Instance && len(t.TypeArgs) == len(decl.TypeParams) {
-		out := make([]*ast.TypeAnnotation, len(t.TypeArgs))
+		// An argument inferred `any` (`new Opt(x as any)`) where the
+		// context expects an instance of the class (`(): Opt<number>`): the
+		// context's, so the instance has the layout its reader expects.
+		ctx := c.ContextualType(ex)
+		if ctx != nil && (c.Unanswered(ctx) || ctx.Kind != checker.Instance || ctx.Symbol != t.Symbol || len(ctx.TypeArgs) != len(t.TypeArgs)) {
+			ctx = nil
+		}
+		out := make([]ast.TypeNode, len(t.TypeArgs))
+		perInstance := false
 		for i, a := range t.TypeArgs {
-			if a == nil || c.Unanswered(a) {
+			if ctx != nil && a != nil && a.Flags&checker.Any != 0 && ctx.TypeArgs[i] != nil && !c.Unanswered(ctx.TypeArgs[i]) {
+				a = ctx.TypeArgs[i]
+				if c.IsGeneric(a) {
+					// Spelled with the enclosing generic's own parameters
+					// (`Opt<[T, string]>`): as this instantiation binds them.
+					rc := e.repr()
+					rc.tuples = true // an annotation's
+					if rt, ok := rc.of(a); ok {
+						if n := typeNodeOf(rt); n != nil && typeNodeDepth(n) <= 4 {
+							// Bounded: a method building a deeper instance of
+							// its own class (`zip` of `Opt<[T, string]>`)
+							// would otherwise instantiate it without end.
+							out[i], perInstance = n, true
+							continue
+						}
+					}
+				}
+			}
+			if a == nil || c.Unanswered(a) || c.IsGeneric(a) {
+				// Unanswered, or spelled with the enclosing generic's own
+				// parameters (`new Opt(x as [T, ...O])` in a method): the
+				// constructor's arguments below, typed under this
+				// instantiation as the method's own annotations are.
 				out = nil
 				break
 			}
 			out[i] = checkerTypeAnnotation(a)
 		}
+		if out != nil && perInstance {
+			return out
+		}
 		if out != nil {
 			if e.newClassArgs == nil {
-				e.newClassArgs = map[string][]*ast.TypeAnnotation{}
+				e.newClassArgs = map[string][]ast.TypeNode{}
 			}
 			e.newClassArgs[key] = out
 			return out
@@ -5788,20 +7416,24 @@ func (e *Emitter) inferredClassTypeArgs(ex *ast.NewExpression, decl *ast.ClassDe
 	if decl.Constructor == nil {
 		return nil
 	}
-	found := map[string]*ast.TypeAnnotation{}
+	found := map[string]ast.TypeNode{}
 	for i, p := range decl.Constructor.Params {
 		if i >= len(ex.Args) || p.Type == nil || p.Rest {
 			continue
 		}
 		for _, tp := range decl.TypeParams {
-			if p.Type.Name == tp && found[tp] == nil {
-				if t := c.TypeOf(ex.Args[i]); t != nil && !c.Unanswered(t) {
+			if p.Type != nil && ast.RefName(ast.NonNullish(p.Type)) == tp && found[tp] == nil {
+				if as, ok := ex.Args[i].(*ast.AsExpression); ok && as.TypeAnnot != nil {
+					// An asserted argument (`x as [T, ...O]`): the type it
+					// is asserted to, spelled as written.
+					found[tp] = as.TypeAnnot
+				} else if t := c.TypeOf(ex.Args[i]); t != nil && !c.Unanswered(t) {
 					found[tp] = checkerTypeAnnotation(t)
 				}
 			}
 		}
 	}
-	out := make([]*ast.TypeAnnotation, len(decl.TypeParams))
+	out := make([]ast.TypeNode, len(decl.TypeParams))
 	for i, tp := range decl.TypeParams {
 		if out[i] = found[tp]; out[i] == nil {
 			return nil
@@ -5813,21 +7445,29 @@ func (e *Emitter) inferredClassTypeArgs(ex *ast.NewExpression, decl *ast.ClassDe
 // checkerTypeAnnotation names checker type t as an annotation codegen
 // resolves: a class or interface by its name, a primitive, an array of
 // one; anything else as any.
-func checkerTypeAnnotation(t *checker.Type) *ast.TypeAnnotation {
+func checkerTypeAnnotation(t *checker.Type) ast.TypeNode {
 	switch {
 	case t.Flags&(checker.Number|checker.NumberLiteral) != 0 && !t.AnyArith:
-		return &ast.TypeAnnotation{Name: "number"}
+		return nameAnnotation("number")
 	case t.Flags&(checker.String|checker.StringLiteral) != 0:
-		return &ast.TypeAnnotation{Name: "string"}
+		return nameAnnotation("string")
 	case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
-		return &ast.TypeAnnotation{Name: "boolean"}
+		return nameAnnotation("boolean")
 	case t.Flags&checker.Object != 0 && t.Kind == checker.Array:
 		el := checkerTypeAnnotation(t.Elem)
-		return &ast.TypeAnnotation{Name: "Array", ElemType: el}
+		return arrayAnnotation(el)
+	case t.Flags&checker.Object != 0 && t.Flags&checker.Union == 0 && t.Kind == checker.Tuple && t.Opt == 0 && len(t.Elems) > 0:
+		// A tuple (`T` of `new Opt([2, "b"] as [number, string])`): the
+		// tuple an annotation of it lays out.
+		es := make([]ast.TypeNode, len(t.Elems))
+		for i, el := range t.Elems {
+			es[i] = checkerTypeAnnotation(el)
+		}
+		return &ast.TupleType{Elements: es}
 	case t.Flags&checker.Object != 0 && (t.Kind == checker.Instance || t.Kind == checker.Interface) && t.Symbol != nil && len(t.TypeArgs) == 0:
-		return &ast.TypeAnnotation{Name: t.Symbol.Name}
+		return nameAnnotation(t.Symbol.Name)
 	}
-	return &ast.TypeAnnotation{Name: "any"}
+	return ast.AnyAnnotation("ts")
 }
 
 // staticMethodName is the function a class's static method compiles to.
@@ -5867,7 +7507,7 @@ func (e *Emitter) inferForwardMethodResults(cd *ast.ClassDeclaration, thisTy Typ
 	for _, m := range cd.Methods {
 		if m.ReturnType != nil && !m.IsGenerator && m.AccessorKind == "" && len(m.TypeParams) == 0 {
 			// An annotated sibling's result is its annotation.
-			e.forwardMethodRet[forwardMethodKey(cd.Name, m.Name, m.IsStatic)] = e.resolveType(m.ReturnType)
+			e.forwardMethodRet[forwardMethodKey(cd.Name, m.Name, m.IsStatic)] = e.annotationType(m.ReturnType)
 			continue
 		}
 		if m.ReturnType == nil && m.Body != nil && !m.IsGenerator && m.AccessorKind == "" {
@@ -5879,16 +7519,25 @@ func (e *Emitter) inferForwardMethodResults(cd *ast.ClassDeclaration, thisTy Typ
 		for _, m := range ms {
 			sig := e.buildParamSig(m.Params, m)
 			e.pushScope()
-			e.define("this", Symbol{Ty: thisTy})
+			mThis := thisTy
+			if m.IsStatic {
+				mThis = TypeAny // a static member's `this` is the class value, a box
+			} else if declared, ok := e.declaredMethodThis(m.Body, thisTy); ok {
+				mThis = declared // `m(this: Other)`, as emission binds it
+			}
+			e.define("this", Symbol{Ty: mThis})
 			if cd.BaseClass != "" {
 				if baseTy, ok := e.interfaces[cd.BaseClass]; ok {
 					e.define("super", Symbol{Ty: baseTy})
 				}
 			}
-			inferred, ok := e.inferUnannotatedReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes))
+			inferred, ok := e.funcBodyReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes))
 			e.popScope()
 			if !ok {
 				continue
+			}
+			if m.IsAsync && !m.IsGenerator && !inferred.IsPromise() {
+				inferred = PromiseOf(inferred)
 			}
 			k := forwardMethodKey(cd.Name, m.Name, m.IsStatic)
 			if prev, had := e.forwardMethodRet[k]; !had || !reflect.DeepEqual(prev, inferred) {
@@ -5926,7 +7575,7 @@ func argReprMismatch(val Value, paramTy Type, a ast.Expression, i int) error {
 	if paramTy.IR == "" || val.Ty.IR == paramTy.IR {
 		return nil
 	}
-	return fmt.Errorf("%d:%d: type mismatch in argument %d — a value of one type cannot be used where an incompatible type is expected", a.GetPos().Line, a.GetPos().Col, i+1)
+	return internalAt(a.GetPos(), "argument %d representation %s for %s", i+1, val.Ty.IR, paramTy.IR)
 }
 
 // declaredMethodThis is the class a method's explicit `this: C` parameter
@@ -5937,16 +7586,29 @@ func (e *Emitter) declaredMethodThis(body *ast.BlockStatement, own Type) (Type, 
 	}
 	for n, ta := range e.prog.ThisParams {
 		fd, ok := n.(*ast.FunctionDeclaration)
-		if !ok || fd.Body != body || ta == nil || ta.Name == "void" {
+		if !ok || fd.Body != body || ta == nil || annotIs(ta, "void") {
 			continue
 		}
-		t := e.resolveType(ta)
+		t := e.annotationType(ta)
 		if !t.IsClass() || t.ClassName == own.ClassName || t.Nullable() {
 			return Type{}, false
 		}
 		return t, true
 	}
 	return Type{}, false
+}
+
+// methodThisAny reports a method whose explicit `this` parameter is any.
+func (e *Emitter) methodThisAny(body *ast.BlockStatement) bool {
+	if e.prog == nil || body == nil {
+		return false
+	}
+	for n, ta := range e.prog.ThisParams {
+		if fd, ok := n.(*ast.FunctionDeclaration); ok && fd.Body == body {
+			return annotIs(ta, "any")
+		}
+	}
+	return false
 }
 
 // isGlobalObjectCtor reports a `new Object(…)`/`Object(…)` of the global
@@ -5962,6 +7624,32 @@ func (e *Emitter) isGlobalObjectCtor(name string, qualified bool) bool {
 	return !bound
 }
 
+// ensureObjectWrapAny defines (once) Object(v) of a boxed primitive v, its
+// wrapper object, for the runtime's call of the Object constructor held as
+// a value (dynobj.c): Object(v)'s own lowering over the boxed argument.
+func (e *Emitter) ensureObjectWrapAny() string {
+	const name = "__kml_object_wrap_any"
+	if e.fnDecls[name] {
+		return name
+	}
+	e.fnDecls[name] = true
+	restore := e.beginDetachedFunc()
+	defer restore()
+	e.pushScope()
+	defer e.popScope()
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store i64 %%v, "+irPtr+" %s, align 8", slot))
+	e.define("__kml_wrap_v", Symbol{Ptr: slot, Ty: TypeAny})
+	v, err := e.emitObjectCtorDynamic(ast.NewIdentifier("__kml_wrap_v", ast.Pos{}))
+	if err != nil {
+		panic("Object(v) of a primitive: " + err.Error())
+	}
+	e.emitTerminator(fmt.Sprintf("ret i64 %s", v.Ref))
+	e.writeFunc("i64 @"+name+"(i64 %v)", e.allocas.String()+e.body.String())
+	return name
+}
+
 // emitObjectCtorDynamic is Object(v) of an `any`, decided at run time: a
 // new empty object for null or undefined, v itself for an object, and a
 // TypeError for a primitive, whose wrapper object does not exist yet.
@@ -5973,7 +7661,7 @@ func (e *Emitter) emitObjectCtorDynamic(arg ast.Expression) (Value, error) {
 	v = e.convert(v, TypeAny)
 	res := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, res))
 	tag, _ := e.emitUnboxTagPayload(v)
 	nullish := e.anyIsNullish(v)
 	emptyL, checkL, primL, doneL := e.freshLabel("objctor.empty"), e.freshLabel("objctor.check"), e.freshLabel("objctor.prim"), e.freshLabel("objctor.done")
@@ -5984,9 +7672,29 @@ func (e *Emitter) emitObjectCtorDynamic(arg ast.Expression) (Value, error) {
 		return Value{}, err
 	}
 	o = e.convert(o, TypeAny)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", o.Ref, res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", o.Ref, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(checkL)
+	{
+		// A bigint or a symbol (an object-tagged box): its wrapper.
+		_, pay := e.emitUnboxTagPayload(v)
+		objL, notObjL := e.emitTagCheck(tag, kmlTagObject, "objctor.cell")
+		e.emitLabel(objL)
+		_, isBig := e.emitBoxedBigIntProbe(pay)
+		bigL, notBigL := e.freshLabel("objctor.bigint"), e.freshLabel("objctor.notbig")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, bigL, notBigL))
+		e.emitLabel(bigL)
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitBuildWrapper(v.Ref, "BigInt").Ref, res))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(notBigL)
+		_, isSym := e.emitBoxedSymbolProbe(pay)
+		symL := e.freshLabel("objctor.symbol")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isSym, symL, doneL))
+		e.emitLabel(symL)
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitBuildWrapper(v.Ref, "Symbol").Ref, res))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		e.emitLabel(notObjL)
+	}
 	prim := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagBoolean))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", prim, primL, doneL))
@@ -6010,14 +7718,14 @@ func (e *Emitter) emitObjectCtorDynamic(arg ast.Expression) (Value, error) {
 		wrapL, nextL := e.freshLabel("objctor.wrap"), e.freshLabel("objctor.next")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hit, wrapL, nextL))
 		e.emitLabel(wrapL)
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitBuildWrapper(v.Ref, w.class).Ref, res))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitBuildWrapper(v.Ref, w.class).Ref, res))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(nextL)
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, res))
 	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
@@ -6034,7 +7742,7 @@ func (e *Emitter) emitObjectCtor(args []ast.Expression, pos ast.Pos) (Value, err
 			return Value{}, err
 		}
 	}
-	at := e.inferExprType(args[0])
+	at := e.typeOfExpr(args[0])
 	switch {
 	case at.IsNull() || at.IsUndefined():
 		if _, err := e.emitExpr(args[0]); err != nil {
@@ -6044,7 +7752,21 @@ func (e *Emitter) emitObjectCtor(args []ast.Expression, pos ast.Pos) (Value, err
 	case isUnconstrainedDynamic(at):
 		return e.emitObjectCtorDynamic(args[0])
 	case at.IsBigInt() || at.IsSymbol():
-		return Value{}, fmt.Errorf("%d:%d: Object() of a bigint or a symbol is not supported: their wrapper objects do not exist yet", pos.Line, pos.Col)
+		// Its wrapper object (`[BigInt: 2n]`, `[Symbol: Symbol(s)]`).
+		v, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		word, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		class := "BigInt"
+		if at.IsSymbol() {
+			class = "Symbol"
+		}
+		e.wrapperScan = 2
+		return e.emitBuildWrapper(word.Ref, class), nil
 	case at.IsDynamic() || isNumberTy(at) || isStringTy(at) || at.IR == "i1" || isNullableScalar(at) || at.Nullable():
 		// A primitive, or a value that may be one: decided on its box.
 		return e.emitObjectCtorDynamic(args[0])
@@ -6079,7 +7801,24 @@ func (e *Emitter) emitFunctionSymbolInstanceOf(left ast.Expression, ctor string)
 	isRef, isDyn, r := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isRef, tag, kmlTagFuncRef))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isDyn, tag, kmlTagDynFunc))
-	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", r, isRef, isDyn))
+	// A function's chain holds Function.prototype unless
+	// Object.setPrototypeOf rerouted it.
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", isRef, slot))
+	fnL, doneL := e.freshLabel("iofn.fn"), e.freshLabel("iofn.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDyn, fnL, doneL))
+	e.emitLabel(fnL)
+	e.ensureFnMeta()
+	_, pay := e.emitUnboxTagPayload(v)
+	in := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_fn_is_function_inst("+irPtr+" %s, "+irPtr+" %s)", in, e.emitIntToPtr(pay), e.fnProtoRec("")))
+	inB := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", inB, in))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", inB, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
 	return Value{Ref: r, Ty: TypeBool}, nil
 }
 
@@ -6126,8 +7865,8 @@ func (e *Emitter) methodSig(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration
 	sig.IsAsync = m.IsAsync
 	sig.This = takesStaticThis(m)
 	if m.ReturnType != nil {
-		sig.RetType = e.resolveType(m.ReturnType)
-		sig.RetThis = m.ReturnType.IsThis
+		sig.RetType = e.annotationType(m.ReturnType)
+		sig.RetThis = annotIs(m.ReturnType, "this")
 	} else if m.Body == nil {
 		// Abstract method with no return-type annotation: nothing
 		// to infer from (no body) — defaults to void, same as any
@@ -6137,10 +7876,16 @@ func (e *Emitter) methodSig(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration
 		sig.RetType = TypeVoid
 		// Best-effort inference, same as registerFunctions — but the
 		// method's own "this" also needs to be visible in the temp
-		// scope inferUnannotatedReturnType pushes for its parameters,
+		// scope funcBodyReturnType pushes for its parameters,
 		// since the inferred return expression may read this.field.
 		e.pushScope()
-		e.define("this", Symbol{Ty: provisionalTy})
+		mThis := provisionalTy
+		if m.IsStatic {
+			mThis = TypeAny // a static member's `this` is the class value, a box
+		} else if declared, ok := e.declaredMethodThis(m.Body, provisionalTy); ok {
+			mThis = declared // `m(this: Other)`, as emission binds it
+		}
+		e.define("this", Symbol{Ty: mThis})
 		// Bind "super" too (typed as the base class), so a method whose
 		// return expression is `super.method()` can resolve the base
 		// method's type during inference — mirrors emitClassMember's own
@@ -6150,7 +7895,7 @@ func (e *Emitter) methodSig(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration
 				e.define("super", Symbol{Ty: baseTy})
 			}
 		}
-		if inferred, ok := e.inferUnannotatedReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes)); ok {
+		if inferred, ok := e.funcBodyReturnType(m.Body, sig.ParamNames, e.bodyParamTypes(m.Params, sig.ParamTypes)); ok {
 			sig.RetType = inferred
 		}
 		e.popScope()
@@ -6160,7 +7905,202 @@ func (e *Emitter) methodSig(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration
 			sig.RetType = PromiseOf(sig.RetType)
 		}
 	}
+	if e.jsOverrideWidened(cd, m) {
+		// Its overrides disagree on their signatures (a number from one,
+		// a string from another): the family is called through any.
+		for i := range sig.ParamTypes {
+			if !(sig.This && i == 0) {
+				sig.ParamTypes[i] = TypeAny
+			}
+		}
+		sig.RetType = TypeAny
+		if m.IsAsync && !m.IsGenerator {
+			sig.RetType = PromiseOf(TypeAny)
+		}
+	}
 	return sig
+}
+
+// jsOverrideWidened reports, in the js lane, that the method m of cd
+// belongs to a family of overrides (a method and those of the same name in
+// its ancestors and descendants) whose signatures lower differently.
+func (e *Emitter) jsOverrideWidened(cd *ast.ClassDeclaration, m *ast.FunctionDeclaration) bool {
+	if !e.compatJS() || m.IsStatic || m.IsGenerator || e.prog == nil {
+		return false
+	}
+	if e.jsOverrideWiden == nil {
+		e.jsOverrideWiden = e.jsOverrideFamilies()
+	}
+	return len(e.jsOverrideWiden) > 0 && e.jsOverrideWiden[jsMethodRoot(e.jsClassDecls(), cd, m.Name, m.AccessorKind)+"."+m.AccessorKind+m.Name]
+}
+
+// generatorOverridden reports that the instance method name of class
+// className is a generator a subclass overrides, or is overridden by a
+// generator in a subclass: its generator construction is not the static
+// class's to pick.
+func (e *Emitter) generatorOverridden(className, name string) bool {
+	if e.prog == nil || className == "" {
+		return false
+	}
+	key := className + "." + name
+	if v, ok := e.jsGenOverridden[key]; ok {
+		return v
+	}
+	if e.jsGenOverridden == nil {
+		e.jsGenOverridden = map[string]bool{}
+	}
+	v := e.generatorOverriddenUncached(className, name)
+	e.jsGenOverridden[key] = v
+	return v
+}
+
+func (e *Emitter) generatorOverriddenUncached(className, name string) bool {
+	classes := e.jsClassDecls()
+	cd := classes[className]
+	if cd == nil {
+		return false
+	}
+	gen := false
+	for c, seen := cd, map[string]bool{}; c != nil && !seen[c.Name]; c = classes[c.BaseClass] {
+		seen[c.Name] = true
+		if m := plainMethod(c, name, ""); m != nil {
+			gen = m.IsGenerator
+			break
+		}
+	}
+	for _, sub := range classes {
+		if sub == cd {
+			continue
+		}
+		derives := false
+		for c, seen := classes[sub.BaseClass], map[string]bool{}; c != nil && !seen[c.Name]; c = classes[c.BaseClass] {
+			seen[c.Name] = true
+			if c == cd {
+				derives = true
+				break
+			}
+		}
+		if !derives {
+			continue
+		}
+		if m := plainMethod(sub, name, ""); m != nil && (gen || m.IsGenerator) {
+			return true
+		}
+	}
+	return false
+}
+
+// jsClassDecls is the program's class declarations by name.
+func (e *Emitter) jsClassDecls() map[string]*ast.ClassDeclaration {
+	if e.jsClassDeclMap != nil {
+		return e.jsClassDeclMap
+	}
+	out := map[string]*ast.ClassDeclaration{}
+	defer func() { e.jsClassDeclMap = out }()
+	ast.Inspect(e.prog, func(n ast.Node) bool {
+		if cd, ok := n.(*ast.ClassDeclaration); ok {
+			if _, seen := out[cd.Name]; !seen {
+				out[cd.Name] = cd
+			}
+		}
+		return true
+	})
+	return out
+}
+
+// plainMethod is cd's own instance method (kind "") or accessor ("get",
+// "set") name, if any.
+func plainMethod(cd *ast.ClassDeclaration, name, kind string) *ast.FunctionDeclaration {
+	for _, m := range cd.Methods {
+		if m.Name == name && !m.IsStatic && m.AccessorKind == kind && !m.IsOverloadSig {
+			return m
+		}
+	}
+	return nil
+}
+
+// jsMethodRoot is the topmost class of cd's chain declaring the method (or
+// accessor of kind) name.
+func jsMethodRoot(classes map[string]*ast.ClassDeclaration, cd *ast.ClassDeclaration, name, kind string) string {
+	root := cd.Name
+	seen := map[string]bool{}
+	for c := cd; c != nil && !seen[c.Name]; c = classes[c.BaseClass] {
+		seen[c.Name] = true
+		if plainMethod(c, name, kind) != nil {
+			root = c.Name
+		}
+		if c.BaseClass == "" {
+			break
+		}
+	}
+	return root
+}
+
+// jsOverrideFamilies finds the families whose methods' checker signatures
+// lower to different parameter or result representations.
+func (e *Emitter) jsOverrideFamilies() map[string]bool {
+	out := map[string]bool{}
+	o := e.reprOracle()
+	if o == nil {
+		return out
+	}
+	classes := e.jsClassDecls()
+	lowered := func(m *ast.FunctionDeclaration) (Type, bool) {
+		if st := o.c.FunctionSignature(m); st != nil {
+			if t, ok := o.r.of(st); ok && t.IsFunc() {
+				return t, true
+			}
+		}
+		if len(m.Params) > 0 || m.Body == nil {
+			return Type{}, false
+		}
+		// No parameters: its body's result, as the checker types it.
+		r, ok, answered := e.checkerBodyReturn(m.Body)
+		if !answered {
+			return Type{}, false
+		}
+		if !ok {
+			r = TypeVoid
+		}
+		return FuncType(nil, r), true
+	}
+	sameRepr := func(a, b Type) bool {
+		if a.FuncRetType == nil || b.FuncRetType == nil || len(a.FuncParams) != len(b.FuncParams) {
+			return a.FuncRetType == nil && b.FuncRetType == nil
+		}
+		if reprKey(*a.FuncRetType) != reprKey(*b.FuncRetType) {
+			return false
+		}
+		for i := range a.FuncParams {
+			if reprKey(a.FuncParams[i]) != reprKey(b.FuncParams[i]) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, cd := range classes {
+		for _, m := range cd.Methods {
+			if m.IsStatic || m.IsGenerator || m.IsOverloadSig || cd.BaseClass == "" {
+				continue
+			}
+			seen := map[string]bool{cd.Name: true}
+			for b := classes[cd.BaseClass]; b != nil && !seen[b.Name]; b = classes[b.BaseClass] {
+				seen[b.Name] = true
+				if am := plainMethod(b, m.Name, m.AccessorKind); am != nil {
+					mt, ok1 := lowered(m)
+					at, ok2 := lowered(am)
+					if ok1 && ok2 && !sameRepr(mt, at) {
+						out[jsMethodRoot(classes, cd, m.Name, m.AccessorKind)+"."+m.AccessorKind+m.Name] = true
+					}
+					break
+				}
+				if b.BaseClass == "" {
+					break
+				}
+			}
+		}
+	}
+	return out
 }
 
 // ctorAssigns reports whether cd's constructor assigns this.name before
@@ -6210,7 +8150,7 @@ func (e *Emitter) unassignedField(m *ast.MemberExpression) bool {
 	if len(e.unassignedFields) == 0 || m.Optional {
 		return false
 	}
-	rt := e.inferExprType(m.Object)
+	rt := e.typeOfExpr(m.Object)
 	if !rt.IsClass() || rt.IsDynamic() {
 		return false
 	}
@@ -6225,4 +8165,284 @@ func (e *Emitter) unassignedField(m *ast.MemberExpression) bool {
 		cls = info.BaseClass
 	}
 	return false
+}
+
+// foundAtTop reports a name lookup resolves in the program's own frame
+// (or a module global), not in a function being emitted.
+func (e *Emitter) foundAtTop(name string) bool {
+	for i := len(e.scopes) - 1; i >= 0; i-- {
+		if _, ok := e.scopes[i].syms[name]; ok {
+			return e.scopes[i].top
+		}
+	}
+	_, ok := e.moduleGlobals[name]
+	return ok
+}
+
+// genericFamilyID is the id every instantiation of generic class name
+// records as its parent, so `x instanceof Box` holds for each `Box<T>`.
+func (e *Emitter) genericFamilyID(name string) int64 {
+	if e.genericFamilies == nil {
+		e.genericFamilies = map[string]int64{}
+	}
+	id, ok := e.genericFamilies[name]
+	if !ok {
+		id = e.classTypeID(name)
+		e.genericFamilies[name] = id
+	}
+	return id
+}
+
+// emitGenericInstanceOf is `left instanceof G` for a generic class G: an
+// instance of any of its instantiations, or of a class extending one.
+func (e *Emitter) emitGenericInstanceOf(left ast.Expression, name string) (Value, error) {
+	fam := e.genericFamilyID(name)
+	leftVal, err := e.emitExpr(left)
+	if err != nil {
+		return Value{}, err
+	}
+	switch {
+	case leftVal.Ty.IsClass():
+		li := e.classes[leftVal.Ty.ClassName]
+		of := li.GenericOf == name
+		for _, anc := range li.AncestorChain {
+			if e.classes[anc].GenericOf == name {
+				of = true
+			}
+		}
+		if of {
+			if leftVal.Ty.IR == irPtr {
+				r := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", r, leftVal.Ref))
+				return Value{Ref: r, Ty: TypeBool}, nil
+			}
+			return Value{Ref: "1", Ty: TypeBool}, nil
+		}
+		if leftVal.Ty.IR != irPtr {
+			return Value{Ref: "0", Ty: TypeBool}, nil
+		}
+		// A subclass slot may hold an instance of a descendant extending
+		// an instantiation: its header id decides.
+		b, err := e.emitBoxValue(leftVal)
+		if err != nil {
+			return Value{}, err
+		}
+		leftVal = b
+	case !leftVal.Ty.IsDynamic():
+		return Value{Ref: "0", Ty: TypeBool}, nil
+	}
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
+	tag, payload := e.emitUnboxTagPayload(leftVal)
+	ptrReg := e.emitIntToPtr(payload)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 0, "+irPtr+" %s, align 1", slot))
+	objL, bagChkL, bagL, doneL := e.freshLabel("ginst.obj"), e.freshLabel("ginst.bagchk"), e.freshLabel("ginst.bag"), e.freshLabel("ginst.done")
+	isObj, isBag := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, objL, bagChkL))
+	e.emitLabel(objL)
+	hdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, ptrReg))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.emitClassIs(hdr, fam), slot))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(bagChkL)
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, bagL, doneL))
+	e.emitLabel(bagL)
+	ct := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_classtag("+irPtr+" %s)", ct, ptrReg))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.emitClassIs(ct, fam), slot))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
+	return Value{Ref: r, Ty: TypeBool}, nil
+}
+
+// typeNodeDepth is how deeply tuples, arrays and type arguments nest in n.
+func typeNodeDepth(n ast.TypeNode) int {
+	d := 0
+	deeper := func(ns ...ast.TypeNode) {
+		for _, m := range ns {
+			if k := typeNodeDepth(m) + 1; k > d {
+				d = k
+			}
+		}
+	}
+	switch x := n.(type) {
+	case *ast.TupleType:
+		deeper(x.Elements...)
+	case *ast.ArrayType:
+		deeper(x.ElementType)
+	case *ast.TypeReference:
+		deeper(x.TypeArgs...)
+	case *ast.UnionType:
+		deeper(x.Types...)
+	}
+	return d
+}
+
+// presentRef is whether v holds a value: a reference that may hold none
+// (`o?.d`, `d?: Date`) is a null pointer there, and is no instance; a
+// value of any other representation always holds one.
+func (e *Emitter) presentRef(v Value) string {
+	if StructFieldIR(v.Ty) != irPtr || v.Ref == "null" {
+		if v.Ref == "null" {
+			return "0"
+		}
+		return "1"
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", r, v.Ref))
+	return r
+}
+
+// hostWrapperNames are the builtins a class instance's host body makes it
+// an instance of without a class of its own.
+var hostWrapperNames = map[string]bool{"Number": true, "String": true, "Boolean": true, "ArrayBuffer": true, "SharedArrayBuffer": true}
+
+// someClassLacks reports a concrete class of the program whose chain leaves
+// method name without a body (an abstract or optional method no class
+// implements): its vtable slot is empty.
+func (e *Emitter) someClassLacks(name string) bool {
+	for _, info := range e.classes {
+		if m := info.Methods[name]; m != nil && m.Body == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// jsFieldTakesOtherKind reports, under -compat=js, an unannotated field of
+// a number, string or boolean that some assignment in the program
+// (`<obj>.name = v`) gives a value of another or unknown kind: the
+// property holds each in turn, so its slot is a boxed any (the field
+// counterpart of the local-binding widening).
+func (e *Emitter) jsFieldTakesOtherKind(prog *ast.Program, name string, fty Type) bool {
+	if !e.compatJS() || prog == nil {
+		return false
+	}
+	k := scalarTypeKind(fty)
+	if k == "" {
+		return false
+	}
+	found := false
+	for _, st := range prog.Body {
+		ast.Inspect(st, func(n ast.Node) bool {
+			if found {
+				return false
+			}
+			as, ok := n.(*ast.AssignmentExpression)
+			if !ok || as.Op != "=" {
+				return true
+			}
+			if m, ok := as.Left.(*ast.MemberExpression); ok && m.Property == name {
+				rt := e.typeOfExpr(as.Right)
+				if rk := scalarTypeKind(rt); rk != k && (rk != "" || isUnconstrainedDynamic(rt) || rt.IsNull() || rt.IsUndefined()) {
+					found = true
+				}
+			}
+			return true
+		})
+	}
+	return found
+}
+
+// initInstanceWords writes a fresh instance's words before its constructor
+// runs: its header (the TagID, an error subclass's flagged), every number
+// and any field's undefined, and its vtable.
+func (e *Emitter) initInstanceWords(dataReg, className string, info ClassInfo) {
+	tagGep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", tagGep, info.Ty.StructIR(), dataReg))
+	// An error-subclass instance carries its TagID in field 0 marked with the
+	// Error type-id flag, so a boxed instance is recognised as an Error at a
+	// general render/JSON/member/instanceof site (TDD-00222). A plain class
+	// stores the bare TagID.
+	storedTag := info.TagID
+	if info.IsErrorSubclass {
+		storedTag = errorTypeIDStored(storedTag)
+	}
+	e.heapStore("i64", fmt.Sprint(storedTag), tagGep, 8)
+	e.emitPresenceAll(dataReg, info.Ty, info.DeclareFields)
+	// A number field is undefined until a constructor or initializer
+	// assigns it: the double slot's sentinel, not calloc's 0 (TDD-00241).
+	// Error's own slots (errno, port, …) keep 0 as their absent state.
+	for i, f := range info.Ty.Fields {
+		if _, _, errSlot := errorObjType.FieldIndex(f.Name); (errSlot || strings.HasPrefix(f.Name, "__kml_err_")) && e.isErrorValueTy(info.Ty) {
+			continue
+		}
+		if isF64Slot(f.Ty) && f.Name != ClassTagField {
+			g := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, info.Ty.StructIR(), dataReg, i))
+			e.heapStore("i64", fmt.Sprint(undefF64), g, 8)
+		} else if isUnconstrainedDynamic(f.Ty) && f.Ty.IR == "i64" && !isHiddenField(f.Name) {
+			// An any field is undefined until assigned: the box's own
+			// undefined word, which === compares equal, not calloc's 0.
+			g := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, info.Ty.StructIR(), dataReg, i))
+			e.heapStore("i64", fmt.Sprint(nbUndefined), g, 8)
+		}
+	}
+
+	if info.Ty.HasVTable {
+		vtGep := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", vtGep, info.Ty.StructIR(), dataReg, info.Ty.VTableIndex()))
+		e.heapStore(irPtr, "@"+className+"_vtable", vtGep, 8)
+	}
+}
+
+// emitTakePendingProto gives the object at dataReg the prototype a
+// Reflect.construct newTarget left pending (shapesrc/shape.c), if any.
+func (e *Emitter) emitTakePendingProto(dataReg string) {
+	if !e.protoUses().newTarget {
+		return
+	}
+	e.ensureShapeRuntime()
+	e.declareFn("__kml_shape_take_pending", "declare void @__kml_shape_take_pending("+irPtr+")")
+	f, set := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" @__kml_pending_proto_set, align 4", f))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", set, f))
+	takeL, doneL := e.freshLabel("new.pendproto"), e.freshLabel("new.ownproto")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", set, takeL, doneL))
+	e.emitLabel(takeL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_shape_take_pending("+irPtr+" %s)", dataReg))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+}
+
+// orBuiltinProtoChain is r, or v a plain object whose chain holds builtin
+// name's prototype (`F.prototype = Date.prototype; new F()`,
+// `Object.create(Map.prototype)`), as OrdinaryHasInstance walks it.
+func (e *Emitter) orBuiltinProtoChain(r, v Value, name string) Value {
+	if _, hasProto := hostProtoClasses[name]; !hasProto && !isErrorKindName(name) {
+		return r
+	}
+	tag, pay := e.emitUnboxTagPayload(v)
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", out))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", r.Ref, out))
+	isBag, chkL, doneL := e.freshReg(), e.freshLabel("inst.chain"), e.freshLabel("inst.chain.done")
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, chkL, doneL))
+	e.emitLabel(chkL)
+	// A prototype nothing built yet is on no object's chain: this test must
+	// not build it (and every member it reaches into the program).
+	ppay := e.emitBuiltinProtoPeek(name)
+	walkL := e.freshLabel("inst.chain.walk")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(ppay), doneL, walkL))
+	e.emitLabel(walkL)
+	e.declareFn("__kml_dynobj_chain_has", "declare i64 @__kml_dynobj_chain_has("+irPtr+", "+irPtr+")")
+	has, hb := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_chain_has("+irPtr+" %s, "+irPtr+" %s)", has, e.emitIntToPtr(pay), ppay))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", hb, has))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", hb, out))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", res, out))
+	return Value{Ref: res, Ty: TypeBool}
 }

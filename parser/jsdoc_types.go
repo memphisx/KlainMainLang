@@ -16,7 +16,7 @@ import (
 // would, instead of being stuffed verbatim into a name. If parsing fails the
 // result falls back to the lenient `{Name: raw}` form (never worse than the
 // pre-Stage-4 behavior).
-func jsdocTypeAnnotation(raw string) *ast.TypeAnnotation {
+func jsdocTypeAnnotation(raw string) ast.TypeNode {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
@@ -24,10 +24,11 @@ func jsdocTypeAnnotation(raw string) *ast.TypeAnnotation {
 	if ta := parseJSDocTypeString(raw); ta != nil {
 		return ta
 	}
-	return &ast.TypeAnnotation{Name: raw, Source: "jsdoc"}
+	// A type the grammar does not parse is any, as in a JavaScript file.
+	return ast.NodeAnnotation(&ast.KeywordType{Keyword: "any"}, "jsdoc")
 }
 
-func parseJSDocTypeString(raw string) *ast.TypeAnnotation {
+func parseJSDocTypeString(raw string) ast.TypeNode {
 	norm := normalizeClosureType(raw)
 	if norm == "" {
 		return nil

@@ -208,3 +208,123 @@ function pick(c: boolean, a: any, b: any) { return c ? a * b : 1; }
 console.log(pick(true, 2n, 3n), pick(false, 2n, 3n), pick(true, 2, 3));
 `)
 }
+
+// ToNumber of a BigInt held in `any` throws, as unary plus and mixed
+// arithmetic do in Node; Number() converts it.
+func TestE2EAnyBigIntToNumberThrows(t *testing.T) {
+	out := compileAndRun(t, `
+const b: any = 10n
+console.log(Number(b))
+try { console.log(+b) } catch (e: any) { console.log(e.name + ": " + e.message) }
+try { console.log(b * 2) } catch (e: any) { console.log(e.name) }
+`)
+	want := "10\nTypeError: Cannot convert a BigInt value to a number\nTypeError"
+	if out != want {
+		t.Errorf("got %q, want %q", out, want)
+	}
+}
+
+// `o.m!()` calls m with o as its this, as `o.m()` does.
+func TestE2ENonNullMethodCallKeepsThis(t *testing.T) {
+	assertSameAsNode(t, `class C { n = 3; m?() { return this.n; } }
+const o = new C();
+console.log(o.m!());
+const r = { k: 4, f() { return this.k; } } as { k: number; f?: () => number };
+console.log(r.f!());
+`)
+}
+
+// A bigint with another type: arithmetic and bitwise operators throw the
+// TypeError (or concatenate with a string), `>>>` throws, a negative shift
+// count shifts the other way, a negative exponent is a RangeError, `~` runs
+// ToNumeric, and a symbol from ToPrimitive is a TypeError to the operator.
+func TestE2EBigIntMixedOperatorsAndSymbolPrimitives(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+function t(f) { try { console.log(f()); } catch (e) { console.log(e.constructor.name, e.message); } }
+t(() => 1n + 1); t(() => 1 + 1n); t(() => 2n * 3); t(() => 1n + "a"); t(() => "a" + 2n);
+t(() => Object(1n) + 1); t(() => 1n >>> 0n); t(() => 1n >>> 1);
+t(() => 1n == {}); t(() => 1n < "2"); t(() => 1n >= true); t(() => 1n == [1]);
+t(() => 1n - 0.5); t(() => 5n | 1);
+var a = 6n, b = 3n, n = 1; var aa = a, bb = b;
+t(() => aa & bb); t(() => aa << bb); t(() => aa >> 1n); t(() => aa | n); t(() => aa >>> bb);
+var o = {}; o.v = 5n; t(() => o.v ^ 1n); t(() => o.v ^ 1);
+t(() => 1n + null); t(() => 1n * undefined); t(() => 1n > null); t(() => 1n < undefined); t(() => null <= 0n);
+t(() => 5n << -1n); t(() => 5n >> -1n); t(() => ~Object(2n)); t(() => 2n ** -1n);
+t(() => ({ valueOf() { return Symbol("1"); } }) + 0n);
+t(() => ({ valueOf() { return 5n; } }) + 1n);
+t(() => ({ valueOf() { return Symbol("1"); } }) + 0n);
+t(() => ({ valueOf() { return Symbol("1"); } }) + "");
+t(() => ({ valueOf() { return Symbol("1"); } }) + 1);
+var o2 = { valueOf() { return Symbol("1"); } }; var a2 = o2; t(() => a2 + 0n);
+t(() => ({ [Symbol.toPrimitive]: 1 }) + 0n);
+t(() => ({ [Symbol.toPrimitive]() { return 2n; } }) * 3n);
+var o3 = { valueOf() { return Symbol("1"); } };
+t(() => o3 + "");
+t(() => "" + o3);
+var p = o3; t(() => "x" + p);
+t(() => ({ valueOf() { return Symbol("1"); } }) + "");
+console.log(~{}, ~[5], ~"3", ~{valueOf(){return 4}});
+var q = 7n; console.log(~q);
+`)
+}
+
+// instanceof against an undeclared name reads it as JavaScript does: the
+// global object's property, else the ReferenceError.
+func TestE2EInstanceofUndeclaredName(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+try { ({}) instanceof OBJECT; } catch (e) { console.log(e instanceof ReferenceError, e.message); }
+globalThis.G = function () {}; console.log(new G() instanceof G, ({}) instanceof G);
+`)
+}
+
+// Ordering operands of different kinds (a boolean or null against a
+// string, a wrapper object) compares as JavaScript does, and calling a
+// primitive throws its TypeError.
+func TestE2ERelationalAcrossKindsAndPrimitiveCalls(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+console.log(true >= "1", "1" >= true, 1 < "2", "10" < 9, null <= "0", undefined < "1", false < 1);
+console.log(new Boolean(true) >= "1", "1" >= new Boolean(true), new Number(2) > "1", new String("b") > "a");
+console.log("a" < "b", 1.5 > "1.4", true > false, "x" >= null);
+console.log("a" < "b");
+console.log(1.5 > "1.4");
+console.log(true > false);
+console.log("x" >= null);
+console.log(undefined < "1");
+console.log(undefined < 1);
+try { true(); } catch (e) { console.log(e.constructor.name); }
+try { "1"(); } catch (e) { console.log(e.constructor.name); }
+`)
+}
+
+// tsc's TS2349: a primitive, an empty object literal's type or an array is
+// not callable.
+func TestStrictPrimitiveCalleeNotCallable(t *testing.T) {
+	for _, src := range []string{"true();\n", "var x = 1; x();\n", "var o = {}; o();\n", "var a = [1]; a();\n"} {
+		mustCompileError(t, src, "This expression is not callable")
+	}
+}
+
+// A function is an object for Object.freeze/seal/preventExtensions and
+// their tests; a primitive is returned as it is.
+func TestE2EIntegrityOfFunctionsAndPrimitives(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+var f = () => {}; console.log(Object.isExtensible(f), Object.isExtensible(function () {}), Object.isFrozen(f), Object.isSealed(f));
+Object.preventExtensions(f); console.log(Object.isExtensible(f));
+var g = function () {}; Object.freeze(g); console.log(Object.isFrozen(g), Object.isExtensible(g));
+console.log(Object.freeze(5), Object.seal("s"), Object.isFrozen(5));
+var h = function () {}; h.p = 1; Object.freeze(h); h.p = 2; h.q = 3; console.log(h.p, h.q, Object.isFrozen(h));
+`)
+}
+
+// o?.p on a promise, a Map, a Set or a Date reads what o.p does.
+func TestE2EOptionalMemberOnHostReferences(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+Promise.prototype.x = 42;
+var p = Promise.resolve(1);
+console.log(p.x, p?.x, Promise.resolve(2)?.x);
+var m = new Map([[1, 2]]); console.log(m?.size, new Set([1])?.size);
+var d = new Date(0); console.log(d?.getTime());
+async function f() { Promise.prototype.y = 43; console.log(await Promise.resolve(undefined)?.y); }
+f();
+`)
+}

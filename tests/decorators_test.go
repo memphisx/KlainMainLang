@@ -1,6 +1,10 @@
 package tests
 
 import (
+	"KlainMainLang/options"
+	"KlainMainLang/resolver"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -197,7 +201,7 @@ class C { @d get x(): number { return 1 } }
 	if err == nil {
 		t.Fatal("expected a compile error: accessor decorators not yet supported")
 	}
-	if !strings.Contains(err.Error(), "not yet supported") {
+	if !strings.Contains(err.Error(), "a decorator on an accessor (get/set) under -decorators=experimental ('x') is not supported yet") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -286,11 +290,15 @@ console.log(new C().m())
 // accessor decorators are a clean rejection (their construction-time semantics
 // are the standard dialect's remaining sub-stage).
 func TestE2EStandardDecoratorParamRejected(t *testing.T) {
-	err := compileStandardDecorators(`
+	f := filepath.Join(tempDir(t), "main.ts")
+	if err := os.WriteFile(f, []byte(`
 function d(v: any, c: any): void {}
 class C { m(@d x: number): void {} }
-`)
-	if err == nil || !strings.Contains(err.Error(), "parameter decorators do not exist") {
+`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolver.ResolveProgramWithOptions(f, options.Options{Decorators: "standard"})
+	if err == nil || !strings.Contains(err.Error(), "3:13: decorators can only be applied") {
 		t.Fatalf("expected a parameter-decorator rejection, got: %v", err)
 	}
 }
@@ -364,16 +372,40 @@ console.log(t.celsius)
 `, "decorating getter celsius\ndecorating setter celsius\n25")
 }
 
-// A *static* field decorator and static/generic-class accessor decorators
-// remain clean rejections under the standard dialect.
-func TestE2EStandardDecoratorStaticFieldRejected(t *testing.T) {
-	err := compileStandardDecorators(`
-function d(v: any, c: any): void {}
-class C { @d static x: number = 0 }
-`)
-	if err == nil || !strings.Contains(err.Error(), "static field decorator") {
-		t.Fatalf("expected a static-field-decorator rejection, got: %v", err)
-	}
+// Standard static method and static field decorators: a returned method
+// replaces the static (its reads and calls), a returned initializer
+// transforms the static field's initial value, and both run before the
+// statics initialize.
+func TestE2EStandardDecoratorStaticMembers(t *testing.T) {
+	assertOutputStandardDecorators(t, `
+function wrap(value: any, context: any): any {
+  console.log("method", context.name, context.static)
+  return function (this: any, x: number): string { return "wrapped(" + value.call(this, x) + ")" }
+}
+function twice(value: any, context: any): any {
+  console.log("field", context.name, context.static)
+  return function (initial: number): number { return initial * 2 }
+}
+class C {
+  @wrap static m(x: number): string { return "m" + x }
+  @twice static f: number = 21
+}
+const g = C.m
+console.log(C.m(1), g.call(C, 2), C.f)
+`, "method m true\nfield f true\nwrapped(m1) wrapped(m2) 42")
+}
+
+// A plain JavaScript file takes the standard dialect without the flag.
+func TestE2EStandardDecoratorsDefaultInJS(t *testing.T) {
+	assertOutputCLIJS(t, `
+function nop(value, context) { console.log(context.kind, context.name, context.static) }
+class C {
+  @nop static method() {}
+  @nop static field;
+  @nop method() {}
+}
+console.log("ok")
+`, "method method true\nmethod method false\nfield field true\nok")
 }
 
 // A non-decorated `accessor x` auto-field is recognized and behaves as an
@@ -529,4 +561,45 @@ function five(): number { return 5 }
 class C { static x: number = five() }
 console.log(C.x)
 `, "5")
+}
+
+// A decorator anywhere on a generic class is a clean rejection, never
+// silently dropped.
+func TestE2EDecoratorGenericClassRejected(t *testing.T) {
+	_, err := parseAndCompile(`
+function m(t: any, k: string, desc: any): void { console.log("m") }
+class G<T> { v: T; constructor(v: T) { this.v = v } @m get2(): T { return this.v } }
+console.log(new G<number>(5).get2())
+`)
+	if err == nil || !strings.Contains(err.Error(), "a decorator on a generic class ('G') is not supported yet") {
+		t.Fatalf("want the generic-class rejection, got %v", err)
+	}
+}
+
+// A class decorator that returns the class itself replaces nothing.
+func TestE2EDecoratorReturnsSameClass(t *testing.T) {
+	assertOutput(t, `
+function keep(c: any): any { console.log("dec"); return c }
+@keep
+class K { v(): number { return 7 } }
+console.log(new K().v())
+`, "dec\n7")
+}
+
+// A method decorator wraps methods of every parameter shape: an array, an
+// optional or defaulted scalar, a rest, and array or tuple results.
+func TestE2EDecoratorMethodParameterShapes(t *testing.T) {
+	assertOutput(t, `
+function log(target: any, key: string, d: PropertyDescriptor) { const f = d.value; d.value = function (this: any, ...a: any[]) { console.log("call", key, a.length); return f.apply(this, a) } }
+class K {
+  base = 10
+  @log sum(xs: number[]): number { return xs.reduce((a, b) => a + b, 0) }
+  @log opt(n?: number): string { return String(n) }
+  @log def(n: number = 5): number { return n + this.base }
+  @log both(xs: string[], ...ys: number[]): string { return xs.join() + ys.length }
+  @log tup(): [string, number] { return ["t", 1] }
+}
+const k = new K()
+console.log(k.sum([1, 2]), k.opt(), k.opt(3), k.def(), k.both(["a", "b"], 1, 2), k.tup())
+`, "call sum 1\ncall opt 0\ncall opt 1\ncall def 0\ncall both 3\ncall tup 0\n3 undefined 3 15 a,b2 [ 't', 1 ]")
 }

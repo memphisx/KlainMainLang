@@ -13,7 +13,7 @@ import (
 // package's switches. A builtin's name belongs in its owner's table (an
 // intrinsic, a method-type table), registered once, rather than in another
 // `case "name":` arm that has to agree with the others (TDD-00230).
-const stringCaseAllowance = 784
+const stringCaseAllowance = 602
 
 // TestStringCaseArmsOnlyShrink holds the count of string case values at the
 // allowance: more fails, and fewer asks for the allowance to come down.

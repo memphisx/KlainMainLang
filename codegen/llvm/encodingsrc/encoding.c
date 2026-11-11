@@ -12,7 +12,7 @@ extern char *__kml_str_alloc(i64 n);
 extern void *__kml_str_from_cstr(const char *c);
 extern void __kml_throw(void *err) __attribute__((noreturn));
 
-static void set_len(char *s, i64 n) { *(i64 *)(s - 8) = n; }
+static void set_len(char *s, i64 n) { *(i64 *)KML_PREFIX(s) = n; }
 
 /* An Error object {kind, message, name} (errorObjType) thrown as-is. */
 static void throw_err(i64 kind, const char *msg, const char *name) {
@@ -74,6 +74,14 @@ char *__kml_atob(const char *str) {
         if (c != 9 && c != 10 && c != 12 && c != 13 && c != 32) norm[nw++] = c;
     }
     for (int stripped = 0; stripped < 2 && nw > 0 && norm[nw - 1] == '='; stripped++) nw--;
+    /* Node names a character outside the alphabet "Invalid character" and
+       a bad length "not correctly encoded". */
+    for (i64 i = 0; i < nw; i++)
+        if (b64_val((u8)norm[i]) < 0) {
+            free(norm); /* scratch */
+            throw_err(KML_INVALIDCHAR_KIND, "Invalid character", "InvalidCharacterError");
+            return 0;
+        }
     i64 rem = nw % 4;
     if (rem != 1) {
         i64 pad = (4 - rem) % 4;
@@ -102,7 +110,8 @@ char *__kml_atob(const char *str) {
             return out;
         }
     }
-    throw_err(KML_INVALIDCHAR_KIND, "The string to be decoded contains invalid characters.", "InvalidCharacterError");
+    free(norm); /* scratch */
+    throw_err(KML_INVALIDCHAR_KIND, "The string to be decoded is not correctly encoded.", "InvalidCharacterError");
     return 0;
 }
 

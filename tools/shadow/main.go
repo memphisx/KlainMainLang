@@ -4,10 +4,19 @@
 // the whole run into a histogram, the way the conformance report ranks its
 // blocked-by reasons.
 //
-//	go run ./tools/shadow [-bin ./klainmain] [-out .shadow-out/SHADOW-REPORT.md] [-limit N]
+//	go run ./tools/shadow [-bin ./klainmain] [-out .shadow-out/SHADOW-REPORT.md] [-limit N] [-manifest m1,m2]
 //
 // The corpus is the examples, tools and apps sources and Test262's
-// language tests (a .js file in both emitter lanes); -roots narrows it. Until a new pass
+// language tests (a .js file in both emitter lanes); -roots narrows it.
+// -manifest adds the Node and WPT conformance programs the conformance
+// runner's -dump-manifest assembled, each in its own lane.
+//
+// Each run lists its units' outcome in units.tsv beside the report, and
+// compares it with the previous run's (units.prev.tsv): a unit that was
+// clean then and has a finding now (a disagreement, a codegen rejection,
+// a failed compile) is a regression, listed in the report, and fails the
+// run. A unit a run left no outcome for (one ranked again by -reuse from
+// before outcomes were kept) is unknown, never clean. Until a new pass
 // registers its oracle, every run is recorded with no disagreement.
 package main
 
@@ -37,6 +46,8 @@ func main() {
 	limit := flag.Int("limit", 0, "compile at most N corpus jobs (0: all)")
 	timeout := flag.Duration("timeout", 60*time.Second, "per-file compile timeout")
 	roots := flag.String("roots", "examples,tools,apps,.test262/test/language", "comma-separated corpus roots")
+	reuse := flag.Bool("reuse", false, "rank the previous run's records again (its runs directory, same corpus) without compiling")
+	manifests := flag.String("manifest", "", "comma-separated conformance -dump-manifest files whose programs join the corpus")
 	flag.Parse()
 
 	root, err := os.Getwd()
@@ -48,6 +59,13 @@ func main() {
 		fatal(err)
 	}
 	jobs := corpus(root, strings.Split(*roots, ","))
+	if *manifests != "" {
+		mj, err := manifestJobs(strings.Split(*manifests, ","))
+		if err != nil {
+			fatal(err)
+		}
+		jobs = append(jobs, mj...)
+	}
 	if *limit > 0 && len(jobs) > *limit {
 		jobs = jobs[:*limit]
 	}
@@ -56,7 +74,9 @@ func main() {
 	if err != nil {
 		fatal(err)
 	}
-	os.RemoveAll(work)
+	if !*reuse {
+		os.RemoveAll(work)
+	}
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		fatal(err)
 	}
@@ -81,6 +101,9 @@ func main() {
 		}()
 	}
 	for i := range jobs {
+		if *reuse {
+			break
+		}
 		ch <- i
 	}
 	close(ch)
@@ -115,22 +138,125 @@ func main() {
 	report := render(buckets, total, len(jobs), timedOut, time.Since(start))
 	report = strings.Replace(report, "\n\n| Decider", fmt.Sprintf("\n- Not ranked: %d disagreements in the %d compile runs that failed\n\n| Decider", failedRows, failedRuns), 1)
 	report += agreement(buckets, tallies)
+	rejects, rejectSection := rejections(work)
+	report = strings.Replace(report, "\n\n", fmt.Sprintf("\n- Codegen rejections of checker-accepted programs: %d\n\n", rejects), 1)
+	report += rejectSection
+	regressed, regressSection, err := unitDiff(filepath.Dir(*out), work, jobs)
+	if err != nil {
+		fatal(err)
+	}
+	report = strings.Replace(report, "\n\n", fmt.Sprintf("\n- Regressions since the previous run: %d\n\n", len(regressed)), 1)
+	report += regressSection
 	if err := os.WriteFile(*out, []byte(report), 0o644); err != nil {
 		fatal(err)
 	}
-	fmt.Printf("%d disagreements in %d buckets over %d compile runs; report written to %s\n", total, len(buckets), len(jobs), *out)
+	fmt.Printf("%d disagreements in %d buckets, %d codegen rejections, %d regressions, over %d compile runs; report written to %s\n", total, len(buckets), rejects, len(regressed), len(jobs), *out)
+	if len(regressed) > 0 {
+		os.Exit(1)
+	}
 }
 
 type job struct {
-	path string // relative to the repo root
+	path string // relative to the repo root (absolute for a manifest's program)
 	lane string // "" (a .ts file's default), "js" or "strict"
+	name string // the test a manifest's program assembles ("": path)
 }
 
 func (j job) unit() string {
-	if j.lane == "strict" {
-		return j.path + "#strict"
+	n := j.path
+	if j.name != "" {
+		n = j.name
 	}
-	return j.path
+	if j.lane == "strict" {
+		return n + "#strict"
+	}
+	return n
+}
+
+// manifestJobs reads conformance -dump-manifest files: one assembled
+// program per line, `program\tlane\ttest`.
+func manifestJobs(paths []string) ([]job, error) {
+	var jobs []job
+	for _, p := range paths {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return nil, err
+		}
+		for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			f := strings.Split(l, "\t")
+			if len(f) != 3 {
+				continue
+			}
+			lane := f[1]
+			if lane != "js" {
+				lane = "strict"
+			}
+			jobs = append(jobs, job{path: f[0], lane: lane, name: f[2]})
+		}
+	}
+	return jobs, nil
+}
+
+// unitDiff writes units.tsv (each unit's outcome: ok, or what it found)
+// into dir, keeping the previous one as units.prev.tsv, and lists the units
+// clean in the previous run that have a finding now.
+func unitDiff(dir, work string, jobs []job) ([]string, string, error) {
+	cur := filepath.Join(dir, "units.tsv")
+	prev := filepath.Join(dir, "units.prev.tsv")
+	old := map[string]string{}
+	if b, err := os.ReadFile(cur); err == nil {
+		for _, l := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+			if u, o, ok := strings.Cut(l, "\t"); ok {
+				old[u] = o
+			}
+		}
+		if err := os.WriteFile(prev, b, 0o644); err != nil {
+			return nil, "", err
+		}
+	}
+	var lines, regressed []string
+	for i, j := range jobs {
+		base := filepath.Join(work, fmt.Sprintf("%06d", i))
+		outcome := "ok"
+		st, stErr := os.ReadFile(base + ".status")
+		if b, err := os.ReadFile(base + ".reject"); err == nil {
+			_, msg, _ := strings.Cut(strings.TrimSpace(string(b)), "\t")
+			outcome = "reject: " + reShape.ReplaceAllString(msg, "_")
+		} else if _, err := os.Stat(base + ".failed"); err == nil || string(st) == "failed" {
+			outcome = "failed"
+		} else if b, err := os.ReadFile(base + ".jsonl"); err == nil {
+			n := 0
+			for _, l := range bytes.Split(b, []byte("\n")) {
+				if bytes.Contains(l, []byte(`"old"`)) && !bytes.Contains(l, []byte(`"asked"`)) {
+					n++
+				}
+			}
+			if n > 0 {
+				outcome = fmt.Sprintf("disagree: %d", n)
+			}
+		} else if stErr != nil {
+			outcome = "unknown" // a run from before outcomes were recorded
+		}
+		u := j.unit()
+		lines = append(lines, u+"\t"+outcome)
+		if was, seen := old[u]; seen && was == "ok" && outcome != "ok" {
+			regressed = append(regressed, u+" — "+outcome)
+		}
+	}
+	sort.Strings(lines)
+	if err := os.WriteFile(cur, []byte(strings.Join(lines, "\n")+"\n"), 0o644); err != nil {
+		return nil, "", err
+	}
+	if len(regressed) == 0 {
+		return nil, "", nil
+	}
+	sort.Strings(regressed)
+	var b strings.Builder
+	b.WriteString("\n## Regressions\n\nUnits clean in the previous run (units.prev.tsv) with a finding now.\n\n")
+	for _, r := range regressed {
+		fmt.Fprintf(&b, "- `%s`\n", r)
+	}
+	return regressed, b.String(), nil
 }
 
 // corpus lists the compile runs: the same corpus the IR equivalence tool
@@ -156,9 +282,9 @@ func corpus(root string, roots []string) []job {
 	for _, f := range files {
 		rel, _ := filepath.Rel(root, f)
 		if strings.HasSuffix(f, ".js") {
-			jobs = append(jobs, job{rel, "js"}, job{rel, "strict"})
+			jobs = append(jobs, job{path: rel, lane: "js"}, job{path: rel, lane: "strict"})
 		} else {
-			jobs = append(jobs, job{rel, ""})
+			jobs = append(jobs, job{path: rel})
 		}
 	}
 	return jobs
@@ -176,6 +302,10 @@ func compile(bin string, j job, base string, timeout time.Duration) bool {
 	if j.lane != "" {
 		args = append(args, "-compat="+j.lane)
 	}
+	// The examples runner compiles this one example in the TC39 dialect.
+	if filepath.Base(j.path) == "standard_decorators.ts" {
+		args = append(args, "-decorators=standard")
+	}
 	abs, _ := filepath.Abs(j.path)
 	src, offset := abs, 0
 	if full, prefix, ok := withTest262Harness(abs); ok {
@@ -190,8 +320,18 @@ func compile(bin string, j job, base string, timeout time.Duration) bool {
 	cmd := exec.CommandContext(ctx, bin, append(args, src)...)
 	cmd.Dir = filepath.Dir(abs)
 	cmd.Env = append(os.Environ(), shadow.EnvVar+"="+record, shadow.EnvUnit+"="+j.unit())
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	var stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = io.Discard, &stderr
 	failed := cmd.Run() != nil
+	status := "ok"
+	if failed {
+		status = "failed"
+	}
+	os.WriteFile(base+".status", []byte(status), 0o644)
+	if m := reCodegenErr.FindSubmatch(stderr.Bytes()); m != nil {
+		// The checker accepted the program and codegen refused it (P2.7).
+		os.WriteFile(base+".reject", []byte(j.unit()+"\t"+string(m[1])+"\n"), 0o644)
+	}
 	if offset > 0 {
 		shiftRecord(record, offset)
 		os.Remove(src)
@@ -205,8 +345,10 @@ func compile(bin string, j job, base string, timeout time.Duration) bool {
 }
 
 var (
-	reIncludes = regexp.MustCompile(`(?m)^includes:\s*\[([^\]]*)\]`)
-	reFlags    = regexp.MustCompile(`(?m)^flags:\s*\[([^\]]*)\]`)
+	// A codegen rejection, after its position: `codegen error: L:C: msg`.
+	reCodegenErr = regexp.MustCompile(`codegen error: (?:\d+:\d+: )?([^\n]*)`)
+	reIncludes   = regexp.MustCompile(`(?m)^includes:\s*\[([^\]]*)\]`)
+	reFlags      = regexp.MustCompile(`(?m)^flags:\s*\[([^\]]*)\]`)
 )
 
 // withTest262Harness is a Test262 test file's source as the conformance
@@ -406,4 +548,53 @@ func agreement(buckets []shadow.Bucket, tallies map[string]int) string {
 		fmt.Fprintf(&b, "| `%s` | %d | %d | %.1f%% |\n", k, a, dis[k], pct)
 	}
 	return b.String()
+}
+
+// reShape folds a rejection message's specifics (quoted names, numbers)
+// so one cause ranks as one row.
+var reShape = regexp.MustCompile(`'[^']*'|"[^"]*"|\b\d+\b`)
+
+// rejections ranks the codegen rejections the runs recorded: programs
+// the checker accepted and codegen refused, which P2.7 drives to none.
+func rejections(work string) (int, string) {
+	files, _ := filepath.Glob(filepath.Join(work, "*.reject"))
+	type row struct {
+		count   int
+		example string
+		msg     string
+	}
+	rows := map[string]*row{}
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		unit, msg, _ := strings.Cut(strings.TrimSpace(string(b)), "\t")
+		key := reShape.ReplaceAllString(msg, "_")
+		if r := rows[key]; r != nil {
+			r.count++
+		} else {
+			rows[key] = &row{1, unit, msg}
+		}
+	}
+	var keys []string
+	for k := range rows {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if rows[keys[i]].count != rows[keys[j]].count {
+			return rows[keys[i]].count > rows[keys[j]].count
+		}
+		return keys[i] < keys[j]
+	})
+	var b strings.Builder
+	fmt.Fprintf(&b, "\n## Codegen rejections\n\nPrograms the checker accepts and codegen refuses: %d runs in %d shapes.\n", len(files), len(keys))
+	if len(keys) > 0 {
+		b.WriteString("\n| # | Count | Message | Example |\n|---|---|---|---|\n")
+		for i, k := range keys {
+			r := rows[k]
+			fmt.Fprintf(&b, "| %d | %d | %s | `%s` |\n", i+1, r.count, strings.ReplaceAll(clip(r.msg), "|", "\\|"), r.example)
+		}
+	}
+	return len(files), b.String()
 }

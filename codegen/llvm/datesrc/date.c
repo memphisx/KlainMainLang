@@ -55,9 +55,8 @@ double __kml_native_perf_now(void) { return __kml_performance_now(); }
 double __kml_native_perf_time_origin(void) { return perf_origin_wall; }
 
 /* ms since epoch -> UTC fields {year, month[0-11], day, weekday[0=Sun],
- * hour, minute, second, millisecond} into out[8]. (The IR-visible
- * __kml_date_decompose returns these as an aggregate, so it stays a thin
- * generated wrapper over this.) */
+ * hour, minute, second, millisecond} into out[8], which the call site reads
+ * back as an aggregate. */
 void __kml_date_decompose_out(i64 ms, i64 *out) {
     i64 secs = ms / 1000, millis = ms % 1000;
     if (millis < 0) {

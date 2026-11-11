@@ -23,5 +23,5 @@ func (e *Emitter) ensureNumberC() {
 		return
 	}
 	e.usedNumberC = true
-	e.ensureRangeErrorThrow()
+	e.ensureErrorNames()
 }

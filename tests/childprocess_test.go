@@ -356,10 +356,10 @@ console.log("parent")
 	assertSameAsNodeImports(t, `
 import { spawn } from 'child_process'
 const t0 = Date.now()
-const child = spawn("sleep", ["1"], { stdio: "ignore" })
+const child = spawn("sleep", ["30"], { stdio: "ignore" })
 child.unref()
 child.on('close', () => { console.log("SHOULD_NOT_PRINT") })
-process.on('exit', () => { console.log("exited early", Date.now() - t0 < 900) })
+process.on('exit', () => { console.log("exited early", Date.now() - t0 < 20000) })
 console.log("parent")
 `)
 }

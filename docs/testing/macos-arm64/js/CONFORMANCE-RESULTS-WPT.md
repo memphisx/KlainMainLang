@@ -21,19 +21,19 @@ Each file has its `// META:` frontmatter stripped, a typed `testharness.js`-shap
 
 ## Overall
 
-4207 headless source files — the full corpus class, every one attempted: **80 passed**, 1886 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
+4207 headless source files — the full corpus class, every one attempted: **147 passed**, 1819 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
 
-Of the 1966 files that were in scope and compiled far enough to run, **80 passed (4.1%)** at the file level (a file passes only if *every* subtest in it passes).
+Of the 1966 files that were in scope and compiled far enough to run, **147 passed (7.5%)** at the file level (a file passes only if *every* subtest in it passes).
 
-**Subtest level (the metric WPT itself reports): 3587 / 7958 subtests passed (45.1%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
+**Subtest level (the metric WPT itself reports): 6885 / 13867 subtests passed (49.7%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
 
 ## By area
 
 | Area | Files pass | Files fail | Files skip | Subtests pass/total |
 |---|---|---|---|---|
-| FileAPI | 2 | 32 | 11 | 15/19 |
+| FileAPI | 8 | 26 | 11 | 240/365 |
 | IndexedDB | 1 | 2 | 210 | 4/21 |
-| WebCryptoAPI | 2 | 101 | 26 | 10/342 |
+| WebCryptoAPI | 3 | 100 | 26 | 365/514 |
 | accelerometer | 0 | 0 | 1 | 0/0 |
 | ai | 0 | 1 | 158 | 0/3 |
 | ambient-light | 0 | 0 | 1 | 0/0 |
@@ -51,45 +51,45 @@ Of the 1966 files that were in scope and compiled far enough to run, **80 passed
 | client-hints | 0 | 0 | 25 | 0/0 |
 | clipboard-apis | 0 | 0 | 1 | 0/0 |
 | compat | 0 | 0 | 1 | 0/0 |
-| compression | 0 | 19 | 1 | 0/2 |
-| compute-pressure | 0 | 3 | 15 | 0/3 |
+| compression | 2 | 17 | 1 | 89/191 |
+| compute-pressure | 0 | 3 | 15 | 0/6 |
 | connection-allowlist | 0 | 0 | 73 | 0/0 |
 | console | 4 | 2 | 1 | 21/23 |
 | contacts | 0 | 0 | 1 | 0/0 |
 | content-index | 0 | 0 | 2 | 0/0 |
-| content-security-policy | 1 | 9 | 14 | 1/7 |
-| cookies | 0 | 3 | 4 | 0/31 |
-| cookiestore | 0 | 18 | 27 | 6/21 |
+| content-security-policy | 5 | 5 | 14 | 22/33 |
+| cookies | 0 | 3 | 4 | 0/38 |
+| cookiestore | 0 | 18 | 27 | 6/26 |
 | cors | 0 | 0 | 3 | 0/0 |
 | cpu-performance | 0 | 0 | 1 | 0/0 |
 | credential-management | 0 | 0 | 1 | 0/0 |
-| css | 1 | 13 | 5 | 1/1 |
+| css | 2 | 12 | 5 | 9/53 |
 | custom-elements | 0 | 0 | 9 | 0/0 |
 | delegated-ink | 0 | 0 | 2 | 0/0 |
 | deprecation-reporting | 0 | 0 | 1 | 0/0 |
 | device-memory | 0 | 0 | 2 | 0/0 |
 | device-posture | 0 | 0 | 1 | 0/0 |
 | digital-credentials | 0 | 0 | 1 | 0/0 |
-| dom | 5 | 33 | 29 | 21/29 |
+| dom | 6 | 32 | 29 | 38/240 |
 | domparsing | 0 | 0 | 1 | 0/0 |
 | element-timing | 0 | 0 | 1 | 0/0 |
-| encoding | 7 | 23 | 11 | 260/703 |
+| encoding | 12 | 18 | 11 | 508/1000 |
 | entries-api | 0 | 0 | 2 | 0/0 |
 | event-timing | 0 | 0 | 3 | 0/0 |
-| eventsource | 0 | 34 | 13 | 0/11 |
+| eventsource | 1 | 33 | 13 | 1/38 |
 | eyedropper | 0 | 0 | 1 | 0/0 |
-| fetch | 6 | 113 | 128 | 68/390 |
+| fetch | 17 | 102 | 128 | 375/1003 |
 | file-system-access | 0 | 0 | 5 | 0/0 |
 | font-access | 0 | 0 | 6 | 0/0 |
-| fs | 0 | 10 | 33 | 0/0 |
+| fs | 1 | 9 | 33 | 1/1 |
 | fullscreen | 0 | 0 | 5 | 0/0 |
 | gamepad | 0 | 0 | 2 | 0/0 |
 | generic-sensor | 0 | 0 | 1 | 0/0 |
 | geolocation | 0 | 0 | 3 | 0/0 |
 | gpc | 0 | 0 | 1 | 0/0 |
 | gyroscope | 0 | 0 | 1 | 0/0 |
-| hr-time | 1 | 2 | 1 | 5/7 |
-| html | 1 | 1075 | 288 | 10/299 |
+| hr-time | 1 | 2 | 1 | 5/8 |
+| html | 5 | 1071 | 288 | 23/331 |
 | html-aam | 0 | 0 | 1 | 0/0 |
 | html-media-capture | 0 | 0 | 1 | 0/0 |
 | idle-detection | 0 | 0 | 4 | 0/0 |
@@ -100,7 +100,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **80 passed
 | intersection-observer | 0 | 0 | 1 | 0/0 |
 | intervention-reporting | 0 | 0 | 1 | 0/0 |
 | is-input-pending | 0 | 0 | 1 | 0/0 |
-| js | 0 | 9 | 3 | 0/0 |
+| js | 0 | 9 | 3 | 0/8 |
 | js-self-profiling | 0 | 0 | 2 | 0/0 |
 | keyboard-lock | 0 | 0 | 1 | 0/0 |
 | keyboard-map | 0 | 0 | 1 | 0/0 |
@@ -115,12 +115,12 @@ Of the 1966 files that were in scope and compiled far enough to run, **80 passed
 | media-source | 0 | 0 | 1 | 0/0 |
 | mediacapture-fromelement | 0 | 0 | 1 | 0/0 |
 | mediacapture-handle | 0 | 0 | 1 | 0/0 |
-| mediacapture-image | 0 | 1 | 1 | 0/0 |
+| mediacapture-image | 0 | 1 | 1 | 0/1 |
 | mediacapture-insertable-streams | 0 | 4 | 1 | 0/0 |
 | mediacapture-record | 0 | 0 | 1 | 0/0 |
 | mediacapture-streams | 0 | 0 | 1 | 0/0 |
 | mediasession | 0 | 0 | 1 | 0/0 |
-| mimesniff | 0 | 2 | 4 | 0/1 |
+| mimesniff | 0 | 2 | 4 | 712/1899 |
 | mixed-content | 0 | 0 | 2 | 0/0 |
 | mst-content-hint | 0 | 0 | 1 | 0/0 |
 | navigation-timing | 0 | 1 | 2 | 0/1 |
@@ -131,9 +131,9 @@ Of the 1966 files that were in scope and compiled far enough to run, **80 passed
 | paint-timing | 0 | 0 | 4 | 0/0 |
 | payment-method-manifest | 0 | 0 | 9 | 0/0 |
 | payment-request | 0 | 1 | 1 | 0/0 |
-| performance-timeline | 12 | 7 | 15 | 17/22 |
+| performance-timeline | 14 | 5 | 15 | 30/34 |
 | periodic-background-sync | 0 | 0 | 2 | 0/0 |
-| permissions | 0 | 1 | 2 | 0/0 |
+| permissions | 0 | 1 | 2 | 0/1 |
 | permissions-policy | 0 | 0 | 12 | 0/0 |
 | permissions-request | 0 | 0 | 1 | 0/0 |
 | permissions-revoke | 0 | 0 | 1 | 0/0 |
@@ -149,7 +149,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **80 passed
 | resize-observer | 0 | 0 | 1 | 0/0 |
 | resource-timing | 0 | 8 | 7 | 0/0 |
 | savedata | 0 | 0 | 1 | 0/0 |
-| scheduler | 0 | 30 | 2 | 0/17 |
+| scheduler | 0 | 30 | 2 | 0/67 |
 | screen-capture | 0 | 1 | 3 | 0/0 |
 | screen-details | 0 | 0 | 3 | 0/0 |
 | screen-orientation | 0 | 0 | 1 | 0/0 |
@@ -161,13 +161,13 @@ Of the 1966 files that were in scope and compiled far enough to run, **80 passed
 | serial | 0 | 0 | 3 | 0/0 |
 | server-timing | 0 | 0 | 1 | 0/0 |
 | service-workers | 0 | 6 | 15 | 0/6 |
-| shape-detection | 0 | 3 | 3 | 0/0 |
+| shape-detection | 0 | 3 | 3 | 0/6 |
 | soft-navigation-heuristics | 1 | 0 | 3 | 1/1 |
-| speculation-rules | 0 | 2 | 1 | 0/2 |
+| speculation-rules | 0 | 2 | 1 | 0/0 |
 | speech-api | 0 | 0 | 2 | 0/0 |
 | storage | 0 | 0 | 23 | 0/0 |
 | storage-access-api | 0 | 0 | 41 | 0/0 |
-| streams | 2 | 70 | 7 | 10/14 |
+| streams | 13 | 59 | 7 | 303/566 |
 | subapps | 0 | 0 | 1 | 0/0 |
 | subresource-integrity | 0 | 1 | 14 | 0/0 |
 | svg | 0 | 0 | 1 | 0/0 |
@@ -177,44 +177,44 @@ Of the 1966 files that were in scope and compiled far enough to run, **80 passed
 | trusted-types | 0 | 0 | 1 | 0/0 |
 | ua-client-hints | 0 | 0 | 2 | 0/0 |
 | uievents | 0 | 0 | 1 | 0/0 |
-| url | 7 | 14 | 7 | 2933/4318 |
-| urlpattern | 2 | 5 | 0 | 14/23 |
+| url | 9 | 12 | 7 | 3065/4454 |
+| urlpattern | 2 | 5 | 0 | 15/77 |
 | user-timing | 17 | 5 | 1 | 69/81 |
 | vibration | 0 | 0 | 1 | 0/0 |
 | video-rvfc | 0 | 0 | 1 | 0/0 |
 | virtual-keyboard | 0 | 0 | 1 | 0/0 |
 | wai-aria | 0 | 0 | 1 | 0/0 |
-| wasm | 0 | 96 | 6 | 2/105 |
+| wasm | 6 | 90 | 6 | 772/1021 |
 | web-animations | 0 | 0 | 1 | 0/0 |
 | web-based-payment-handler | 0 | 2 | 1 | 0/0 |
 | web-locks | 0 | 0 | 18 | 0/0 |
-| web-nfc | 0 | 1 | 6 | 0/0 |
+| web-nfc | 0 | 1 | 6 | 4/5 |
 | web-otp | 0 | 0 | 1 | 0/0 |
 | web-share | 0 | 0 | 1 | 0/0 |
-| webaudio | 0 | 5 | 3 | 0/0 |
+| webaudio | 0 | 5 | 3 | 0/9 |
 | webauthn | 0 | 0 | 5 | 0/0 |
-| webcodecs | 0 | 16 | 46 | 0/1 |
+| webcodecs | 0 | 16 | 46 | 1/140 |
 | webdriver | 0 | 0 | 1 | 0/0 |
 | webgl | 0 | 0 | 1 | 0/0 |
 | webhid | 0 | 0 | 2 | 0/0 |
-| webidl | 1 | 11 | 6 | 42/107 |
+| webidl | 2 | 10 | 6 | 55/135 |
 | webmcp | 0 | 0 | 1 | 0/0 |
 | webmessaging | 1 | 1 | 31 | 9/9 |
 | webmidi | 0 | 0 | 1 | 0/0 |
 | webnn | 0 | 0 | 174 | 0/0 |
-| webrtc | 0 | 1 | 11 | 0/0 |
+| webrtc | 0 | 1 | 11 | 0/10 |
 | webrtc-encoded-transform | 0 | 0 | 1 | 0/0 |
 | webrtc-identity | 0 | 0 | 1 | 0/0 |
 | webrtc-stats | 0 | 0 | 1 | 0/0 |
-| websockets | 0 | 2 | 87 | 0/0 |
-| webstorage | 1 | 24 | 5 | 10/1208 |
-| webtransport | 0 | 2 | 29 | 0/1 |
-| webusb | 0 | 5 | 16 | 0/0 |
+| websockets | 0 | 2 | 87 | 6/10 |
+| webstorage | 1 | 24 | 5 | 11/1221 |
+| webtransport | 0 | 2 | 29 | 0/2 |
+| webusb | 0 | 5 | 16 | 8/15 |
 | webvtt | 0 | 0 | 1 | 0/0 |
 | webxr | 0 | 0 | 10 | 0/0 |
-| workers | 4 | 33 | 29 | 57/124 |
+| workers | 4 | 33 | 29 | 82/155 |
 | worklets | 0 | 0 | 1 | 0/0 |
-| xhr | 0 | 14 | 73 | 0/0 |
+| xhr | 8 | 6 | 73 | 34/34 |
 | xml | 0 | 0 | 4 | 0/0 |
 
 ## Top failure reasons
@@ -223,46 +223,46 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 
 | Count | Reason |
 |---|---|
-| 852 | COMPILE_ERROR: a number has no method '%s' |
-| 353 | COMPILE_ERROR: unknown class '%s' |
-| 87 | COMPILE_ERROR: undefined function or closure '%s' |
-| 35 | COMPILE_ERROR: undefined variable '%s' |
-| 33 | RUNTIME_NONZERO_EXIT: ReferenceError: importScripts is not defined |
-| 32 | COMPILE_ERROR: instanceof is only supported against user-defined classes; '%s' is not a registered c… |
-| 26 | RUNTIME_NONZERO_EXIT: signal: segmentation fault |
-| 24 | COMPILE_ERROR: byte streams (underlying source '%s') are not supported — use a default stream of U… |
-| 22 | COMPILE_ERROR: array elements must share one type — element 0 does not match the array's element t… |
+| 1066 | RUNTIME_NONZERO_EXIT: ReferenceError: importScripts is not defined |
+| 26 | COMPILE_ERROR: internal: array elements must share one type — element 0 does not match the array's… |
+| 26 | RUNTIME_NONZERO_EXIT: WPT FAIL [undefined] |
+| 18 | RUNTIME_NONZERO_EXIT: WPT FAIL [] |
+| 16 | COMPILE_ERROR: internal: undefined variable '%s' |
+| 14 | RUNTIME_NONZERO_EXIT: TypeError: Cannot read properties of undefined (reading '%s') |
 | 13 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): cannot find module '%s' (resolved to <path>) |
-| 13 | RUNTIME_NONZERO_EXIT: WPT FAIL [] |
-| 11 | COMPILE_ERROR: class '%s' has no static method '%s' |
+| 13 | COMPILE_ERROR: CODEGEN_TIMEOUT |
+| 13 | COMPILE_ERROR: a byte stream (an underlying source of type '%s') is not supported yet |
+| 13 | RUNTIME_NONZERO_EXIT: ReferenceError: done is not defined |
 | 11 | COMPILE_ERROR: expected ;, got IDENT |
-| 11 | COMPILE_ERROR: new Uint8Array(source, byteOffset?, length?) takes 1 to 3 arguments, got 0 |
+| 10 | RUN_TIMEOUT |
 | 9 | COMPILE_ERROR: <path>: cannot find worker module '%s' (resolved to <path>) |
-| 9 | COMPILE_ERROR: cannot assign a non-array value to array variable '%s' |
 | 8 | COMPILE_ERROR: expected ), got , |
-| 7 | COMPILE_ERROR: '%s' is not an array |
-| 7 | COMPILE_ERROR: CompressionStream/DecompressionStream's format must be a string literal ("gzip", "def… |
-| 6 | COMPILE_ERROR: a string has no method '%s' |
-| 6 | COMPILE_ERROR: array elements must share one type — element 1 is a boolean, not a number (a hetero… |
-| 5 | COMPILE_ERROR: expected {, got STRING |
-| 5 | COMPILE_ERROR: type mismatch in argument 2 — a value of one type cannot be used where an incompati… |
-| 4 | COMPILE_ERROR: '%s' can't be read on an un-narrowed union — narrow it first (e.g. `if (x.body === … |
-| 4 | COMPILE_ERROR: class '%s' extends the builtin '%s': extending a builtin other than Error is not supp… |
-| 4 | COMPILE_ERROR: class '%s' extends unknown class '%s' |
+| 7 | RUNTIME_NONZERO_EXIT: WPT FAIL [setup - define tests] |
+| 6 | RUNTIME_NONZERO_EXIT: ReferenceError: location is not defined |
+| 5 | COMPILE_ERROR: cannot find module '%s' (resolved to <path>) |
+| 5 | COMPILE_ERROR: internal: argument 2 representation double for ptr addrspace(1) |
+| 5 | RUNTIME_NONZERO_EXIT: WPT FAIL [@@toStringTag exists on the prototype with the appropriate descripto… |
 | 4 | COMPILE_ERROR: expected '%s', got , |
-| 4 | COMPILE_ERROR: new ArrayBuffer(byteLength, options?) takes 1 to 2 arguments, got 0 |
-| 4 | RUNTIME_NONZERO_EXIT: ReferenceError: done is not defined |
-| 3 | COMPILE_ERROR: a Response has no method '%s' |
-| 3 | COMPILE_ERROR: a queuing strategy must be an object literal ({highWaterMark, size}) or a CountQueuin… |
-| 3 | COMPILE_ERROR: an object has no method '%s' |
+| 4 | COMPILE_ERROR: extending the builtin '%s' is not supported yet |
+| 4 | COMPILE_ERROR: internal compiler error: no type for TypeReference at 1:1; TypeReference at 1:1 |
+| 4 | RUNTIME_NONZERO_EXIT: TypeError: the value is not an array |
+| 4 | RUNTIME_NONZERO_EXIT: WPT FAIL [Invalid arguments] |
+| 4 | RUNTIME_NONZERO_EXIT: WPT FAIL [cleanupCallback has only one optional chance to be called for a GC t… |
+| 4 | RUNTIME_NONZERO_EXIT: signal: segmentation fault |
+| 3 | COMPILE_ERROR: a class extending '%s', a value that can hold a class naming its own function's local… |
 | 3 | COMPILE_ERROR: expected '%s' after '%s' |
-| 3 | COMPILE_ERROR: object has no field '%s' |
-| 3 | COMPILE_ERROR: spread requires the called function to have a rest parameter (`...`) — spreading in… |
-| 3 | COMPILE_ERROR: the buffer options literal supports exactly {maxByteLength: n} |
-| 3 | COMPILE_ERROR: unknown transformer member '%s' (expected transform, flush) |
-| 3 | RUNTIME_NONZERO_EXIT: ReferenceError: fetch_tests_from_window is not defined |
-| 3 | RUN_TIMEOUT |
-| 2 | COMPILE_ERROR: Object.setPrototypeOf requires a dynamic (any-typed) target |
+| 3 | RUNTIME_NONZERO_EXIT: ReferenceError: onconnect is not defined |
+| 3 | RUNTIME_NONZERO_EXIT: WPT FAIL [name] |
+| 2 | COMPILE_ERROR: internal compiler error: no conversion from object (ptr addrspace(1)) to number (i64)… |
+| 2 | COMPILE_ERROR: internal: an object has no method '%s' |
+| 2 | COMPILE_ERROR: internal: argument 1 representation double for ptr addrspace(1) |
+| 2 | RUNTIME_NONZERO_EXIT: ReferenceError: CSSMathSum is not defined |
+| 2 | RUNTIME_NONZERO_EXIT: TypeError: globalThis.setup is not a function |
+| 2 | RUNTIME_NONZERO_EXIT: TypeError: self.addEventListener is not a function |
+| 2 | RUNTIME_NONZERO_EXIT: WPT FAIL [Branding] |
+| 2 | RUNTIME_NONZERO_EXIT: WPT FAIL [Component: pathname Left: {"pathname":"<path>"} Right: {"pathname":"… |
+| 2 | RUNTIME_NONZERO_EXIT: WPT FAIL [Floating point arithmetic must manifest near NUMBER.MAX_SAFE_INTEGER… |
+| 2 | RUNTIME_NONZERO_EXIT: WPT FAIL [Initializing with both initial and minimum] |
 
 ## Top skip reasons
 
@@ -286,40 +286,77 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | 1 | uses DOM/browser global (GLOBAL.isWindow) |
 | 1 | uses DOM/browser global (requestAnimationFrame) |
 
-## Passing files (80)
+## Passing files (147)
 
 | File | Area |
 |---|---|
+| `FileAPI/blob/Blob-array-buffer.any.js` | FileAPI |
+| `FileAPI/blob/Blob-bytes.any.js` | FileAPI |
 | `FileAPI/blob/Blob-constructor-endings.any.js` | FileAPI |
+| `FileAPI/blob/Blob-newobject.any.js` | FileAPI |
 | `FileAPI/blob/Blob-slice-overflow.any.js` | FileAPI |
+| `FileAPI/blob/Blob-text.any.js` | FileAPI |
+| `FileAPI/file/File-constructor-endings.any.js` | FileAPI |
+| `FileAPI/unicode.any.js` | FileAPI |
 | `IndexedDB/globalscope-indexedDB-SameObject.any.js` | IndexedDB |
+| `WebCryptoAPI/generateKey/failures_bad_algorithm.https.any.js` | WebCryptoAPI |
+| `WebCryptoAPI/import_export/crashtests/importKey-unsettled-promise.https.any.js` | WebCryptoAPI |
 | `WebCryptoAPI/normalize-algorithm-name.https.any.js` | WebCryptoAPI |
-| `WebCryptoAPI/randomUUID.https.any.js` | WebCryptoAPI |
+| `compression/compression-with-detach.any.js` | compression |
+| `compression/decompression-with-detach.any.js` | compression |
 | `console/console-log-large-array.any.js` | console |
 | `console/console-log-symbol.any.js` | console |
 | `console/console-namespace-object-class-string.any.js` | console |
 | `console/console-tests-historical.any.js` | console |
 | `content-security-policy/generic/src-trailing-dot.sub.any.js` | content-security-policy |
+| `content-security-policy/wasm-unsafe-eval/default-src-unsafe-eval-allows-wasm.any.js` | content-security-policy |
+| `content-security-policy/wasm-unsafe-eval/default-src-wasm-unsafe-eval-allows-wasm.any.js` | content-security-policy |
+| `content-security-policy/wasm-unsafe-eval/script-src-unsafe-eval-allows-wasm.any.js` | content-security-policy |
+| `content-security-policy/wasm-unsafe-eval/script-src-wasm-unsafe-eval-allows-wasm.any.js` | content-security-policy |
 | `css/css-highlight-api/historical.window.js` | css |
+| `css/css-typed-om/stylevalue-subclasses/cssKeywordValue-invalid.any.js` | css |
 | `dom/abort/AbortSignal.any.js` | dom |
 | `dom/abort/timeout.any.js` | dom |
 | `dom/events/AddEventListenerOptions-once.any.js` | dom |
 | `dom/events/EventTarget-add-remove-listener.any.js` | dom |
 | `dom/events/EventTarget-addEventListener.any.js` | dom |
+| `dom/events/EventTarget-constructible.any.js` | dom |
+| `encoding/api-basics.any.js` | encoding |
 | `encoding/api-replacement-encodings.any.js` | encoding |
 | `encoding/api-surrogates-utf8.any.js` | encoding |
+| `encoding/streams/decode-attributes.any.js` | encoding |
+| `encoding/streams/decode-split-character.any.js` | encoding |
+| `encoding/streams/encode-utf8.any.js` | encoding |
+| `encoding/textdecoder-byte-order-marks.any.js` | encoding |
 | `encoding/textdecoder-fatal-streaming.any.js` | encoding |
 | `encoding/textdecoder-fatal.any.js` | encoding |
 | `encoding/textdecoder-ignorebom.any.js` | encoding |
 | `encoding/textdecoder-utf16-surrogates.any.js` | encoding |
 | `encoding/textencoder-utf16-surrogates.any.js` | encoding |
+| `eventsource/dedicated-worker/eventsource-constructor-no-new.any.js` | eventsource |
+| `fetch/api/basic/gc.any.js` | fetch |
+| `fetch/api/basic/scheme-about.any.js` | fetch |
+| `fetch/api/body/formdata.any.js` | fetch |
 | `fetch/api/headers/headers-casing.any.js` | fetch |
 | `fetch/api/headers/headers-combine.any.js` | fetch |
 | `fetch/api/headers/headers-normalize.any.js` | fetch |
+| `fetch/api/headers/headers-structure.any.js` | fetch |
+| `fetch/api/request/request-constructor-init-body-override.any.js` | fetch |
+| `fetch/api/request/request-init-002.any.js` | fetch |
+| `fetch/api/response/response-init-001.any.js` | fetch |
+| `fetch/api/response/response-init-contenttype.any.js` | fetch |
 | `fetch/api/response/response-static-error.any.js` | fetch |
+| `fetch/api/response/response-static-redirect.any.js` | fetch |
 | `fetch/api/response/response-stream-disturbed-6.any.js` | fetch |
+| `fetch/api/response/response-stream-disturbed-by-pipe.any.js` | fetch |
+| `fetch/content-type/multipart-malformed.any.js` | fetch |
 | `fetch/h1-parsing/lone-cr.window.js` | fetch |
+| `fs/FileSystemObserver-unsupported-global.https.tentative.any.js` | fs |
 | `hr-time/monotonic-clock.any.js` | hr-time |
+| `html/semantics/scripting-1/the-script-element/module/dynamic-import/microtasks/serviceworker.any.js` | html |
+| `html/semantics/scripting-1/the-script-element/module/import-meta/import-meta-object.any.js` | html |
+| `html/webappapis/microtask-queuing/queue-microtask.any.js` | html |
+| `html/webappapis/scripting/processing-model-2/integration-with-the-javascript-agent-formalism/requires-success.any.js` | html |
 | `html/webappapis/timers/cleartimeout-clearinterval.any.js` | html |
 | `performance-timeline/buffered-flag-after-timeout.any.js` | performance-timeline |
 | `performance-timeline/buffered-flag-observer.any.js` | performance-timeline |
@@ -332,11 +369,25 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `performance-timeline/po-getentries.any.js` | performance-timeline |
 | `performance-timeline/po-mark-measure.any.js` | performance-timeline |
 | `performance-timeline/po-observe-repeated-type.any.js` | performance-timeline |
+| `performance-timeline/po-observe-type.any.js` | performance-timeline |
+| `performance-timeline/po-observe.any.js` | performance-timeline |
 | `performance-timeline/po-takeRecords.any.js` | performance-timeline |
 | `screen-wake-lock/wakelock-insecure-context.any.js` | screen-wake-lock |
 | `soft-navigation-heuristics/smoke/tentative/supported-entry-types.window.js` | soft-navigation-heuristics |
+| `streams/piping/general-addition.any.js` | streams |
+| `streams/readable-streams/bad-strategies.any.js` | streams |
+| `streams/readable-streams/bad-underlying-sources.any.js` | streams |
+| `streams/readable-streams/constructor.any.js` | streams |
 | `streams/readable-streams/count-queuing-strategy-integration.any.js` | streams |
+| `streams/readable-streams/default-reader.any.js` | streams |
+| `streams/readable-streams/garbage-collection.any.js` | streams |
+| `streams/writable-streams/bad-strategies.any.js` | streams |
+| `streams/writable-streams/byte-length-queuing-strategy.any.js` | streams |
+| `streams/writable-streams/crashtests/garbage-collection.any.js` | streams |
 | `streams/writable-streams/error.any.js` | streams |
+| `streams/writable-streams/garbage-collection.any.js` | streams |
+| `streams/writable-streams/properties.any.js` | streams |
+| `url/url-searchparams.any.js` | url |
 | `url/url-statics-canparse.any.js` | url |
 | `url/url-statics-parse.any.js` | url |
 | `url/url-tojson.any.js` | url |
@@ -344,6 +395,7 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `url/urlsearchparams-get.any.js` | url |
 | `url/urlsearchparams-getall.any.js` | url |
 | `url/urlsearchparams-sort.any.js` | url |
+| `url/urlsearchparams-stringifier.any.js` | url |
 | `urlpattern/urlpattern-constructor.any.js` | urlpattern |
 | `urlpattern/urlpattern-hasregexpgroups.any.js` | urlpattern |
 | `user-timing/buffered-flag.any.js` | user-timing |
@@ -363,10 +415,25 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `user-timing/structured-serialize-detail.any.js` | user-timing |
 | `user-timing/supported-usertiming-types.any.js` | user-timing |
 | `user-timing/user_timing_exists.any.js` | user-timing |
+| `wasm/jsapi/global/valueOf.any.js` | wasm |
+| `wasm/webapi/empty-body.any.js` | wasm |
+| `wasm/webapi/invalid-args.any.js` | wasm |
+| `wasm/webapi/origin.sub.any.js` | wasm |
+| `wasm/webapi/rejected-arg.any.js` | wasm |
+| `wasm/webapi/status.any.js` | wasm |
+| `webidl/ecmascript-binding/builtin-function-properties.any.js` | webidl |
 | `webidl/ecmascript-binding/global-immutable-prototype.any.js` | webidl |
 | `webmessaging/MessageEvent.any.js` | webmessaging |
 | `webstorage/missing_arguments.window.js` | webstorage |
 | `workers/Worker-base64.any.js` | workers |
+| `workers/Worker-formdata.any.js` | workers |
 | `workers/Worker-replace-global-constructor.any.js` | workers |
 | `workers/interfaces/WorkerUtils/importScripts/catch.sub.any.js` | workers |
-| `workers/semantics/interface-objects/004.any.js` | workers |
+| `xhr/formdata/append.any.js` | xhr |
+| `xhr/formdata/constructor.any.js` | xhr |
+| `xhr/formdata/delete.any.js` | xhr |
+| `xhr/formdata/foreach.any.js` | xhr |
+| `xhr/formdata/get.any.js` | xhr |
+| `xhr/formdata/has.any.js` | xhr |
+| `xhr/formdata/iteration.any.js` | xhr |
+| `xhr/formdata/set.any.js` | xhr |

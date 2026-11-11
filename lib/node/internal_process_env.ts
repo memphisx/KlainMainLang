@@ -74,15 +74,41 @@ export function version(): string {
 }
 
 let versionsCache: any = undefined;
+let featuresCache: any = undefined;
+
+// process.features (lib/internal/bootstrap/node.js) of the baseline
+// release process.version names (v22.11.0): what this build has. There is
+// no inspector; TLS is OpenSSL's; TypeScript is not stripped at run time.
+// The last three are getters, as Node's are.
+export function features(): any {
+    if (featuresCache === undefined) {
+        const f: any = {
+            inspector: false,
+            debug: false,
+            uv: true,
+            ipv6: true,
+            tls_alpn: true,
+            tls_sni: true,
+            tls_ocsp: true,
+            tls: true,
+        };
+        Object.defineProperty(f, 'cached_builtins', { get(): boolean { return true; }, enumerable: true, configurable: true });
+        Object.defineProperty(f, 'require_module', { get(): boolean { return true; }, enumerable: true, configurable: true });
+        Object.defineProperty(f, 'typescript', { get(): boolean { return false; }, enumerable: true, configurable: true });
+        featuresCache = f;
+    }
+    return featuresCache;
+}
 
 // process.versions: the compatibility baseline (node, v8) and this
-// compiler's own version; bundled-library versions this compiler does not
-// ship are left out rather than invented.
+// compiler's own version, and the libuv it links; bundled-library versions
+// this compiler does not ship are left out rather than invented.
 export function versions(): any {
     if (versionsCache === undefined) {
         versionsCache = {
             node: __kml_native.processVersion(1),
             v8: __kml_native.processVersion(2),
+            uv: __kml_native.processUvVersion(),
             klain: __kml_native.processVersion(3),
         };
     }

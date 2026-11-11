@@ -178,11 +178,9 @@ console.dir(o, { depth: null });
 `, "{ label: 'x', mid: { inner: { v: 1 } } }\n{ label: 'x', mid: [Object] }\n{ label: 'x', mid: { inner: [Object] } }\n{ label: 'x', mid: { inner: { v: 1 } } }")
 }
 
-func TestE2EConsoleDirWrongArgCountRejected(t *testing.T) {
-	_, err := parseAndCompile(`console.dir()`)
-	if err == nil {
-		t.Fatal("expected a compile error for console.dir() with no arguments, got none")
-	}
+func TestE2EConsoleDirNoArguments(t *testing.T) {
+	// console.dir() inspects undefined, as Node's does.
+	assertOutput(t, "console.dir()\nconsole.dir(1, {})", "undefined\n1")
 }
 
 func TestE2EConsoleTimeEnd(t *testing.T) {

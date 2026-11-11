@@ -8,9 +8,3 @@ import _ "embed"
 
 //go:embed fdlibmsrc/fdlibm.c
 var fdlibmSource string
-
-// ensureFdlibm links fdlibm.c; each Math function's declaration lowers to
-// its __kml_fd_ entry point.
-func (e *Emitter) ensureFdlibm() {
-	e.usedFdlibm = true
-}

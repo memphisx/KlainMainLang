@@ -81,7 +81,7 @@ console.log(report())
 }
 
 // The event handles (AbortController/Event/CustomEvent/EventTarget) promote too,
-// once inferExprType knows their new-expression types — read from a named
+// once typeOfExpr knows their new-expression types — read from a named
 // function, including AbortController.abort() mutating its signal.
 func TestE2EModuleGlobalEventHandles(t *testing.T) {
 	assertOutput(t, `
@@ -133,7 +133,7 @@ console.log(f())
 `, "5")
 }
 
-// A generic class instance (`new Box<number>()`) promotes too: inferExprType
+// A generic class instance (`new Box<number>()`) promotes too: typeOfExpr
 // computes its shape purely and registerModuleGlobals forces the monomorphized
 // class's registration, so a named function's method call/field read resolves.
 func TestE2EModuleGlobalGenericClassInstance(t *testing.T) {
@@ -209,5 +209,20 @@ const gopd = Object.getOwnPropertyDescriptor;
 function f() { return [typeof g, typeof h, g("42"), h(1, 3)]; }
 function d(o: object, n: string) { return gopd(o, n); }
 console.log(f(), d({ a: 1 }, "a"));
+`)
+}
+
+// A top-level object literal holding an array of tuples, read from a named
+// function, is a module global in the layout the literal builds: before
+// ADR-01967 it stayed a main()-local and the function failed to compile with
+// "undefined variable".
+func TestE2EModuleGlobalObjectWithTupleArrayField(t *testing.T) {
+	assertSameAsNode(t, `
+function show(init?: RequestInit): string {
+  return String(init?.method) + " " + JSON.stringify(init?.headers);
+}
+const opts = { method: 'DELETE', headers: [['X-Trace', 'abc']] as [string, string][], retries: 3 }
+function viaGlobal(): string { return show(opts); }
+console.log(show(opts), viaGlobal(), opts.retries)
 `)
 }

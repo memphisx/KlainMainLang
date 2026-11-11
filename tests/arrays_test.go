@@ -667,7 +667,7 @@ bag.add("p"); bag.add("q")
 console.log(bag.items, bag.items === null, bag.items?.length)
 const empty: number[] = []
 console.log(((xs: number[] | null) => xs === null)(empty), JSON.stringify({ a: a, e: empty, r: r1 }))
-let u: number[] | undefined = undefined
+let u = undefined as number[] | undefined
 console.log(u === undefined, typeof u, u?.length ?? "no length")
 u = []
 console.log(u === undefined, typeof u, u?.length ?? "no length", u)
@@ -1484,17 +1484,14 @@ console.log(doubled[1]);
 `, "6\n3\nundefined\n1\n2\n1\ntrue\ntrue\n4\n6")
 }
 
-func TestE2ENestedArrayHOFRejectedCleanly(t *testing.T) {
-	// (indexOf/includes on a nested array compare by identity now:
-	// TestE2EArraySearchNestedArrayIdentity.)
-	cases := []string{
-		`const m = new Array<number[]>(3);`,
-	}
-	for _, src := range cases {
-		if _, err := parseAndCompile(src); err == nil {
-			t.Fatalf("expected a compile error for nested-array HOF/construction, got none for: %s", src)
-		}
-	}
+// A sized `new Array<number[]>(n)` holds n holes, mapped over as holes.
+func TestE2ENestedArraySizedConstruction(t *testing.T) {
+	assertOutput(t, `
+const m = new Array<number[]>(3);
+console.log(m.length, m, m[0]);
+m[1] = [1];
+console.log(m.map(r => r ? r.length : -1));
+`, "3 [ <3 empty items> ] undefined\n[ <1 empty item>, 1, <1 empty item> ]")
 }
 
 // --- .flat(depth?) / .flatMap(fn) ---
@@ -1571,18 +1568,19 @@ console.log(doubled[2])
 `, "3\n2\n6")
 }
 
-func TestE2EArrayFlatDepthRejectedWhenNotCompileTimeConstant(t *testing.T) {
-	cases := []string{
-		`const a: number[][] = [[1]]; const d = 1; a.flat(d);`,
-		`const a: number[][] = [[1]]; a.flat(-1);`,
-		`const a: number[][] = [[1]]; a.flat(1.5);`,
-		`const a: number[][] = [[1]]; a.flat(1, 2);`,
-	}
-	for _, src := range cases {
-		if _, err := parseAndCompile(src); err == nil {
-			t.Fatalf("expected a compile error for a non-compile-time-constant flat() depth, got none for: %s", src)
-		}
-	}
+// flat's depth known only at run time, negative, fractional or NaN: as
+// ToIntegerOrInfinity gives it.
+func TestE2EArrayFlatRuntimeDepth(t *testing.T) {
+	assertSameAsNode(t, `
+const a: number[][][] = [[[1], [2]], [[3]]]
+let d = 1
+console.log(JSON.stringify(a.flat(d)))
+d = 2; console.log(JSON.stringify(a.flat(d)))
+console.log(JSON.stringify(a.flat(-1)), JSON.stringify(a.flat(1.5)), JSON.stringify(a.flat(NaN)))
+const s: string[][] = [["x"], ["y"]]
+let k: number = Number("3")
+console.log(s.flat(k))
+`)
 }
 
 // --- Array destructuring (`let [a, b] = arr`) ---
@@ -1867,15 +1865,13 @@ const b: number = 2;
 	}
 }
 
-func TestE2EArrayDestructuringAssignmentNestedTargetRejected(t *testing.T) {
-	_, err := parseAndCompile(`
+func TestE2EArrayDestructuringAssignmentIndexTarget(t *testing.T) {
+	assertSameAsNode(t, `
 let arr: number[] = [1, 2];
 let x: number = 0;
 [arr[0], x] = [5, 6];
+console.log(arr.join(","), x);
 `)
-	if err == nil {
-		t.Fatal("expected a compile error for a non-identifier destructuring assignment target")
-	}
 }
 
 func TestE2EArrayDestructuringCompoundAssignmentRejected(t *testing.T) {
@@ -1944,15 +1940,13 @@ console.log(a, rest.length);
 `, "1 2")
 }
 
+// A rest target whose type cannot hold the collected tuple: TS2322.
 func TestE2EArrayRestDestructuringAssignmentTargetMustBeArray(t *testing.T) {
-	_, err := parseAndCompile(`
+	mustCompileError(t, `
 let a: number = 0;
 let notArr: number = 0;
 [a, ...notArr] = [1, 2, 3];
-`)
-	if err == nil {
-		t.Fatal("expected a compile error assigning a rest target into a non-array variable")
-	}
+`, "type '[number, number]' is not assignable to type 'number'")
 }
 
 func TestE2EArrayRestDestructuringAssignmentMustBeLast(t *testing.T) {
@@ -2635,5 +2629,192 @@ let sum = 0;
 [4, 5].forEach(function (this: { add: number }, v) { sum += v + this.add; }, { add: 1 });
 const big = [1, 2, 3].filter(function (this: { min: number }, v) { return v > this.min; }, { min: 1 });
 console.log(out, sum, big, [1, 2, 3].filter((v) => v > 1, undefined));
+`)
+}
+
+func TestE2EDeleteFrozenArrayElement(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+function t(f) { try { console.log(f()); } catch (e) { console.log(e.constructor.name, e.message); } }
+const a = [1]; Object.freeze(a); t(() => delete a[0]);
+const c = [1, 2]; Object.seal(c); t(() => delete c[0]); t(() => delete c[5]); console.log(c);
+const n = [1, 2]; Object.preventExtensions(n); t(() => delete n[1]); console.log(n);
+function strict() { "use strict"; t(() => delete a[0]); t(() => delete c[1]); t(() => delete c[9]); }
+strict();
+`)
+}
+
+func TestE2EArrayToLocaleString(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+console.log([1, null, undefined, 2000, "x", [3, 4]].toLocaleString());
+const e = [, 1]; console.log(e.toLocaleString());
+const v = [5, 6000]; const a = v; console.log(a.toLocaleString());
+`)
+}
+
+func TestE2EReplacedBuiltinProtoMethod(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+String.prototype.trim = function () { return "T" + this.length; };
+console.log(" a ".trim());
+Number.prototype.toFixed = function () { return "F"; };
+console.log((1.5).toFixed(1));
+Array.prototype.join = function () { return "J" + this.length; };
+console.log([1, 2].join());
+let calls = 0;
+Number.prototype.toLocaleString = function () { calls++; return "h" + calls; };
+console.log([1, 2].toLocaleString(), new Uint8Array(2).toLocaleString(), calls);
+`)
+}
+
+// new Array<T[]>(n): every slot a hole until written, as in JavaScript.
+func TestE2ENewArrayNestedSized(t *testing.T) {
+	assertSameAsNode(t, `
+const g = new Array<number[]>(3);
+console.log(g, g.length, g[1]);
+g[1] = [5, 6];
+console.log(g, g[1].length);
+for (let i = 0; i < g.length; i++) g[i] = [i];
+console.log(g, JSON.stringify(g));
+const s = new Array<string[]>(2).fill([]);
+console.log(s);
+function mk(n: number): number[][] { return new Array<number[]>(n); }
+console.log(mk(2).length, mk(1)[0]);
+`)
+}
+
+// In the JavaScript lane a reduce accumulator holds whatever each step
+// returns: a string from a number seed, undefined from a path that falls off.
+func TestE2EReduceAccumulatorChangesKind(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+console.log([1, 2].reduce((x, y) => `+"`${x}+${y}`"+`, 0));
+console.log([1, 2, 3].reduce((x, y) => `+"`${x}+${y}`"+`));
+console.log([1, 2, 3].reduceRight((x, y) => x + "|" + y));
+console.log([1, 2, 3].reduce((acc, v) => { if (v > 1) return acc + v; }, 0));
+console.log(["a", "b"].reduce((acc, s) => acc.length + s.length, ""));
+console.log([3, 4].reduce((a, b) => [a, b]));
+const r = [1, 2].reduce((x, y) => `+"`${x}${y}`"+`, 0); console.log(typeof r, r);
+function h() { return [1, 2].reduce((x, y) => `+"`${x}${y}`"+`, 0); } console.log(h());
+const g = () => [1, 2].reduce((x, y) => x + "" + y, 0); console.log(g());
+`)
+}
+
+// In the JavaScript lane concat mixes kinds as JavaScript arrays do: the
+// result (and a binding holding it) is an array of any.
+func TestE2EArrayConcatMixedKindsJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+console.log([1, 2].concat(["a"]), [1].concat("x", [true], [[2]]), [[1]].concat([2]), ["s"].concat(5));
+console.log([1, 2].concat(3, [4]), ["a"].concat(["b"], "c"), [1.5].concat(2));
+const a = [1]; const b = a.concat(["z"]); b.push(9); console.log(a, b, b.length, typeof b[1]);
+function f() { const c = [1].concat(["z"]); return c; }
+console.log(f());
+`)
+}
+
+// Map and Set calls with missing or extra arguments behave as JavaScript:
+// a missing one is undefined, extras are ignored, forEach() throws.
+func TestE2EMapSetArityJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => { try { console.log(n, f()); } catch (e) { console.log(n, e.name, e.message); } };
+const m = new Map([["a", 1]]);
+t("set1", () => m.set("b").get("b"));
+t("set3", () => m.set("c", 3, 9).get("c"));
+t("get0", () => m.get());
+t("get2", () => m.get("a", 1));
+t("has0", () => m.has());
+t("has2", () => m.has("a", 2));
+t("del2", () => m.delete("c", 1));
+t("ent1", () => [...m.entries(1)].length);
+t("fe0", () => m.forEach());
+t("fe3", () => { let k = 0; m.forEach((v) => k++, null, 5); return k; });
+t("clr1", () => { const q = new Map([[1, 2]]); q.clear(1); return q.size; });
+const s = new Set([1]);
+t("add0", () => s.add().has(undefined));
+t("add2", () => s.add(2, 3).size);
+t("shas2", () => s.has(1, 9));
+t("sdel0", () => s.delete());
+t("sfe0", () => s.forEach());
+t("sclr1", () => { s.clear(1); return s.size; });
+`)
+}
+
+// A collection constructor over null or undefined is empty; any other
+// value that is not iterable throws V8's TypeError describing it, and a
+// map's entry that is not an object throws its own.
+func TestE2ECollectionCtorSourcesJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => { try { console.log(n, f()); } catch (e) { console.log(n, e.name, e.message); } };
+for (const x of [5, {}, true, "ab", undefined, null, Symbol("s"), 1n, () => 1]) { for (const C of [Map, Set, WeakMap]) { try { const m = new C(x); console.log(C.name, typeof x, "ok", m.size); } catch (e) { console.log(C.name, typeof x, e.name, e.message); } } }
+t("pairs1", () => new Map([[1]]).get(1));
+t("pairs3", () => new Map([[1, 2, 3]]).get(1));
+t("notPair", () => new Map([5]));
+t("hetK", () => new Map([["a", 1], [2, 2]]).size);
+t("hetV", () => new Map([["a", 1], ["b", "x"]]).get("b"));
+t("iter", () => new Map(new Set([[1, 2]])).get(1));
+t("gen", () => new Map((function* () { yield ["k", "v"]; })()).get("k"));
+t("objEntries", () => new Map(Object.entries({ a: 1 })).get("a"));
+t("nul", () => new Map(null).size);
+t("num", () => new Map(5));
+const f=(v)=>v; for (const v of [null, undefined]) { console.log(new Map(f(v)).size, new Set(f(v)).size); }
+`)
+}
+
+// Array destructuring and patterns over numbers, objects, strings, sets,
+// generators and defaults; array literals of mixed elements.
+func TestE2EArrayDestructureSourcesJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const t = (n, f) => { try { console.log(n, JSON.stringify(f())); } catch (e) { console.log(n, e.name, e.message); } };
+t("dNum", () => { const [a] = 5; return a; });
+t("dObj", () => { const [a] = {}; return a; });
+t("dStr", () => { const [a, b] = "hi"; return [a, b]; });
+t("dSet", () => { const [a] = new Set([7]); return a; });
+t("dGen", () => { const [a, b] = (function* () { yield 1; yield 2; })(); return a + b; });
+t("dDef", () => { const [a = [1]] = []; return a; });
+t("dDefObj", () => { const { x: [p] = [9] } = {}; return p; });
+t("mixed", () => { const xs = [1, "a", null, { b: 1 }]; return xs.length; });
+t("nullable", () => { const xs = [1, null]; return xs; });
+t("assignD", () => { let a, b; [a, b] = [1, 2]; return a + b; });
+t("assignDNum", () => { let a; [a] = 5; return a; });
+`)
+}
+
+// Spreading a value with no iterator throws V8's TypeError, worded by
+// context: an array literal's "x is not iterable", a call's spread
+// message; a nullish base's computed read names its key.
+func TestE2ESpreadNotIterableJS(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const f = (...a) => a.length; class A { constructor(...a) {} }
+let u; const o = {}; const s = Symbol("q"); const n = null;
+const t = (g) => { try { console.log(g()); } catch (e) { console.log(e.message); } };
+t(() => [...5]); t(() => [...true]); t(() => [...undefined]); t(() => [...null]); t(() => [...u]);
+t(() => f(...5)); t(() => f(...undefined)); t(() => f(...null)); t(() => f(...{})); t(() => new A(...5));
+t(() => f(...u)); t(() => f(...o)); t(() => Math.max(...5)); t(() => f(..."ab")); t(() => f(1, ...true));
+t(() => u[Symbol.iterator]); t(() => n[s]); t(() => u[s]); t(() => u["x"]); t(() => n[0]);
+`)
+}
+
+// A JavaScript parameter its calls pass arrays, assigned null or
+// undefined: it holds that value.
+func TestE2EArrayParamAssignedNull(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `function h(b) { b = null; return b; }
+console.log(h([2]));
+function k(b) { b = undefined; return b; }
+console.log(k([2]));
+function m(...t) { const n = t.length; t = null; console.log(t === null, t == undefined); return n; }
+console.log(m(1, 2));
+`)
+}
+
+// Array.from(list, mapFn, thisArg) over an array-like: the locals the mapping
+// closes over stay readable after the call.
+func TestE2EArrayFromThisArgCapturedLocalsAfterCall(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var list = { '0': 41, '1': 42, length: 2 };
+var calls = [];
+var thisArg = {};
+function mapFn(value) {
+  calls.push({ args: arguments, thisArg: this });
+  return value * 2;
+}
+var result = Array.from(list, mapFn, thisArg);
+console.log(result.join(','), calls.length, calls[0].thisArg === thisArg, calls[1].args[1]);
 `)
 }

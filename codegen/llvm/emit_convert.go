@@ -3,6 +3,9 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"os"
+	"runtime/debug"
+	"strconv"
 )
 
 // convert inserts a type conversion instruction if necessary.
@@ -24,7 +27,7 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	if v.Ty.IsClass() && (headeredHost(target) || target.IsPromise() && !target.IsDynamic()) && !target.IsClass() {
 		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil {
 			body := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, v.Ref))
+			e.emitBodyAddr(body, v.Ref)
 			return Value{Ref: body, Ty: target}
 		}
 	}
@@ -33,20 +36,29 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	if v.Ty.IsClass() && !v.Ty.IsDynamic() && target.IsArray() && !target.IsClass() {
 		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil && info.HostBase.IsArray() {
 			body := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", body, v.Ref))
+			e.emitBodyAddr(body, v.Ref)
 			return e.convert(e.arrayValueFromHeaderReg(body, *info.HostBase), target)
 		}
 	}
+	// An array of one numeric storage kind read as another (`Array.from`
+	// of a Uint8Array returned as `number[]`): its elements converted, in
+	// a copy, since the two layouts cannot share one store.
+	if numericElemsDiffer(v.Ty, target) {
+		return e.convertNumericArray(v, target)
+	}
 	// Into or out of a three-state `T | null | undefined` pointer: null
 	// becomes (or stops being) the null-reference sentinel.
-	if target.NullAndUndef() && target.IR == "ptr" && v.Ty.IsDynamic() && v.Ty.IR == "i64" {
+	if target.NullAndUndef() && target.IR == irPtr && v.Ty.IsDynamic() && v.Ty.IR == "i64" {
 		return e.emitUnboxBoxToType(v.Ref, target) // a box that held null is null
 	}
-	if target.NullAndUndef() && !v.Ty.NullAndUndef() && (v.Ty.IR == "ptr" || target.IR != "ptr") {
+	// (A box into a three-state scalar is unboxed below: its tag says which
+	// absence it holds.)
+	if target.NullAndUndef() && !v.Ty.NullAndUndef() && (v.Ty.IR == irPtr || target.IR != irPtr) &&
+		!(v.Ty.IsDynamic() && target.IR != irPtr) {
 		return e.toThreeState(v, target)
 	}
 	if v.Ty.NullAndUndef() && !target.NullAndUndef() && !target.IsDynamic() {
-		if triStr(target) && v.Ty.IR == "ptr" {
+		if triStr(target) && v.Ty.IR == irPtr {
 			// A triStr pointer's null is nullRef too (TDD-00257).
 			v.Ty.setNullAndUndef(false)
 		} else {
@@ -71,6 +83,17 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	// A class instance (or a plain object of an equal-storage layout) where a
 	// structural type is expected stays itself; its members are read through
 	// its layout row (TDD-00233).
+	// A host value (a Date, a Map) where a structural type is expected is
+	// its box's object, whose header the view reads it through by name.
+	if hostIntoRecordView(v.Ty, target) {
+		if box, err := e.emitBoxValue(v); err == nil {
+			e.hostRecordViews = true
+			_, pay := e.emitUnboxTagPayload(box)
+			obj := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, obj, pay))
+			return Value{Ref: obj, Ty: target}
+		}
+	}
 	if isRecordView(target) {
 		e.noteRecordViewSource(v.Ty, target)
 	}
@@ -80,24 +103,24 @@ func (e *Emitter) convert(v Value, target Type) Value {
 		plainRecordType(v.Ty) {
 		return e.emitObjectToDict(v, target)
 	}
+	// A tuple where an array or another tuple is expected, or an array where
+	// a tuple is: the same array when the two hold their elements in one
+	// storage type, else a copy, element by element.
+	if c, ok := e.convertTupleArray(v, target); ok {
+		return c
+	}
 	// A concrete array where a boxed-element array (`any[]`) is expected, or
 	// the reverse: a copy with each element boxed (unboxed). The two
 	// representations differ per element, so the copy does not alias.
 	if conv, ok := e.convertArrayElems(v, target); ok {
 		return conv
 	}
-	// An array where a tuple is expected (`[1] as any` passed on): its
-	// elements, as the any→tuple conversion reads them.
-	if target.IsTuple() && !target.IsArray() && v.Ty.IsArray() && !v.Ty.IsDynamic() {
-		if boxed, err := e.emitBoxValue(v); err == nil {
-			return e.convert(boxed, target)
-		}
-	}
-	// The reverse, a tuple where an array is expected (`const t: number[] =
-	// pair()`): its elements, as the any→array conversion reads them.
-	if target.IsArray() && !target.IsTuple() && v.Ty.IsTuple() && !v.Ty.IsArray() && !v.Ty.IsDynamic() {
-		if boxed, err := e.emitBoxValue(v); err == nil {
-			return e.convert(boxed, target)
+	// A tuple where an object type of its numeric members is expected
+	// (`const c: { 0: A; 1: B } = pair`): read through its box, member by
+	// member, as the any→object conversion reads them.
+	if tupleIntoRecord(v.Ty, target) {
+		if r, err := e.tupleRecord(v, target); err == nil {
+			return r
 		}
 	}
 	// A caught value (TypeCaught, TDD-00202) flowing out of catch-local scope:
@@ -108,7 +131,7 @@ func (e *Emitter) convert(v Value, target Type) Value {
 		if target.IsError() {
 			p := e.freshReg()
 			_, pay := e.caughtParts(v)
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p, pay))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p, pay))
 			return Value{Ref: p, Ty: target}
 		}
 		anyVal := e.emitCaughtToAny(v)
@@ -151,7 +174,16 @@ func (e *Emitter) convert(v Value, target Type) Value {
 			present := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", present, nullish))
 			payload := e.convert(v, target.withoutNullable())
-			return Value{Ref: e.makeNullableScalarAgg(target, present, payload.Ref), Ty: target}
+			pay := payload.Ref
+			if target.NullAndUndef() && triScalar(target.withoutNullable()) {
+				// A three-state slot tells null from undefined: null's
+				// absent payload is the marker.
+				ir := target.withoutNullable().IR
+				sel := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s %s", sel, isNull, ir, triMarker(target), ir, pay))
+				pay = sel
+			}
+			return Value{Ref: e.makeNullableScalarAgg(target, present, pay), Ty: target}
 		}
 		switch {
 		case target.Float:
@@ -169,10 +201,6 @@ func (e *Emitter) convert(v Value, target Type) Value {
 		case target.IsArray() && !target.IsFlatArray():
 			// The box's array (its live header carried along).
 			return e.emitUnboxBoxToType(v.Ref, target)
-		case target.IsTuple() && !target.IsArray():
-			// A tuple is headerless data; its box is an array box, whose
-			// elements make a new tuple.
-			return e.emitUnboxBoxToType(v.Ref, target)
 		case target.IsFunc() && !isUnconstrainedDynamic(v.Ty):
 			// A union's function member: unboxed as a narrowing does.
 			return e.emitUnboxBoxToType(v.Ref, target)
@@ -182,6 +210,8 @@ func (e *Emitter) convert(v Value, target Type) Value {
 			// (PromiseResolve), converted to the target's element type.
 			p := e.emitAnyToPromiseAny(v)
 			if target.PromiseType != nil && !isUnconstrainedDynamic(*target.PromiseType) && target.PromiseType.IR != "void" {
+				// (A task promise, never a raw fetch handle.)
+				target.PromiseTask = true
 				return e.emitConvertPromise(p, target)
 			}
 			return p
@@ -193,14 +223,14 @@ func (e *Emitter) convert(v Value, target Type) Value {
 			}
 			_, payload := e.emitUnboxTagPayload(v)
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, payload))
 			return Value{Ref: r, Ty: target}
 		case target.IsSymbol():
 			// A boxed symbol (an object carrying symbolTypeIDFlag): the
 			// symbol itself, not its ToString.
 			_, payload := e.emitUnboxTagPayload(v)
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, payload))
 			return Value{Ref: r, Ty: target}
 		case isStringDict(target):
 			// A dictionary as itself; a static object as a dictionary of its
@@ -219,7 +249,14 @@ func (e *Emitter) convert(v Value, target Type) Value {
 			}
 			_, payload := e.emitUnboxTagPayload(v)
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, payload))
+			return Value{Ref: r, Ty: target}
+		case target.IsGenerator():
+			// A generator instance is its own state: the instance the box
+			// holds, never a copy of its fields.
+			_, payload := e.emitUnboxTagPayload(v)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, payload))
 			return Value{Ref: r, Ty: target}
 		case hasObjHeader(target) && !target.IsClass() && !target.IsError() && !v.Ty.IsDynamicObject():
 			// A dynamic value (or a union narrowed to its object member) into
@@ -227,7 +264,7 @@ func (e *Emitter) convert(v Value, target Type) Value {
 			// that layout, else a copy of the layout read field by field
 			// (emit_shape.go) — a dynamic object from a spread included.
 			return Value{Ref: e.emitAnyToLayout(v, target), Ty: target}
-		case target.IsClass() && target.IR == "ptr" && !target.IsArray():
+		case target.IsClass() && target.IR == irPtr && !target.IsArray():
 			// A class-instance slot holds an instance: a box with no pointer
 			// (a number, a boolean, a string, null, undefined) reads as null —
 			// which `instanceof` and a member read then see — rather than its
@@ -237,9 +274,9 @@ func (e *Emitter) convert(v Value, target Type) Value {
 			isObj, p, r := e.freshReg(), e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp uge i8 %s, %d", isObj, tag, kmlTagObject))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", p, isObj, payload))
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, p))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, p))
 			return Value{Ref: r, Ty: target}
-		case target.IR == "ptr" && !target.IsArray():
+		case target.IR == irPtr && !target.IsArray():
 			// A dynamic value flowing into a string- (or other single-pointer-)
 			// typed target reinterprets its boxed payload as that pointer:
 			// TS's `any`→`string` (and `any`→object) is an unchecked
@@ -250,7 +287,7 @@ func (e *Emitter) convert(v Value, target Type) Value {
 			// invalid IR (`i64` value used where `ptr` is expected).
 			_, payload := e.emitUnboxTagPayload(v)
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, payload))
+			e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, payload))
 			return Value{Ref: r, Ty: target}
 		}
 	}
@@ -320,12 +357,12 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	// null/undefined assigned to an array-typed target becomes the null
 	// header (nullable target) or an empty array — checked before the plain
 	// non-ptr null-to-zero-value branch below, since an IsArray target also
-	// reports IR == "ptr" and would otherwise fall through untouched into
+	// reports IR == irPtr and would otherwise fall through untouched into
 	// the unchanged-value case further down — a real bug found assigning a
 	// literal `null` to a `T[] | null` interface field (ADR-00158).
 	if v.Ty.IsNull() && target.IsArray() {
 		if target.Nullable() {
-			return e.emitAbsentArrayValue(target) // carries the null header
+			return e.emitAbsentArrayValue(v.Ty, target) // carries the null header
 		}
 		return Value{Ref: "null", Ty: target}
 	}
@@ -336,7 +373,7 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	// `null`/`undefined` boxed into an `any` slot — e.g. an `any[]` literal
 	// element — stored 0 (the boxed integer 0), reading back as a value that
 	// renders "undefined" but is `!== undefined` and `!== null` (ADR-00958).
-	if v.Ty.IsNull() && target.IR != "ptr" && !target.IsDynamic() {
+	if v.Ty.IsNull() && target.IR != irPtr && !target.IsDynamic() {
 		return Value{Ref: zeroRef(target), Ty: target}
 	}
 	// `never` (a Promise.reject's value type — Promise<never>) assigns to any
@@ -355,13 +392,13 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	// dynamism gets an adapter trampoline (ADR-00477) — a raw header copy
 	// would let the call site reinterpret concrete words as dynamic boxes
 	// (or vice versa). Checked before the same-IR passthrough, since both
-	// sides are "ptr".
+	// sides are irPtr.
 	if v.Ty.IsFunc() && target.IsFunc() {
 		if needed, supported := funcAdapterPlan(v.Ty, target); needed && supported {
 			if adapted, ok := e.emitClosureAdapter(v, target); ok {
 				return adapted
 			}
-		} else if needed || (v.Ty.FuncThis && !target.FuncThis) {
+		} else if needed || v.Ty.FuncThis != target.FuncThis {
 			// A conversion the direct adapter does not take: through the box.
 			if adapted, ok := e.emitBoxedClosureAs(v, target); ok {
 				return adapted
@@ -436,7 +473,7 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	if v.Ty.IsSymbol() && target.IR == "i1" && !isNullableScalar(target) {
 		return Value{Ref: "true", Ty: target} // ToBoolean(Symbol) is true
 	}
-	if v.Ty.IsSymbol() && !target.IsDynamic() && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != "ptr")) {
+	if v.Ty.IsSymbol() && !target.IsDynamic() && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != irPtr)) {
 		e.emitThrowTypeError("Cannot convert a Symbol value to a number")
 		// The caller goes on emitting: into an unreachable block, so nothing
 		// after the throw is dropped while a later block still uses it.
@@ -518,6 +555,9 @@ func (e *Emitter) convert(v Value, target Type) Value {
 		// convert does not define: a compiler bug, never a reinterpretation.
 		if from, to := storageIR(v.Ty), storageIR(target); from != to && from != "" && to != "" && from != "void" && to != "void" {
 			e.convertGaps = append(e.convertGaps, fmt.Sprintf("from %s (%s) to %s (%s)", tsTypeName(v.Ty), from, tsTypeName(target), to))
+			if os.Getenv("KML_TYPEGAP_STACK") != "" {
+				debug.PrintStack()
+			}
 		}
 		return v
 	}
@@ -591,7 +631,7 @@ func convertiblePure(src, target Type) bool {
 	// A structural object/class coercion must not cross an `any`-field boundary
 	// (TDD-00208): an `any` field is a NaN box, a concrete field is its raw
 	// value, so reading one as the other yields garbage. Object/class types all
-	// share IR "ptr", so this must be checked before the IR-equality shortcut —
+	// share IR irPtr, so this must be checked before the IR-equality shortcut —
 	// require each shared field's boxedness to match, else reject cleanly
 	// (`{x:number}` passed where `{x:any}` was wanted).
 	// A structural target reads another layout by name through the checked
@@ -639,24 +679,11 @@ func convertiblePure(src, target Type) bool {
 // would emit invalid IR at the consuming store/op. `what` names the context for
 // the message (e.g. "assignment", "argument"). See conversionIsSound.
 func (e *Emitter) convertChecked(v Value, target Type, pos ast.Pos, what string) (Value, error) {
-	// A statically-known Symbol in a numeric position (e.g. a string method's
-	// index argument) is rejected as a clean compile error here — the
-	// typed-subset diagnostic these call sites want — rather than falling into
-	// coerce's runtime ToNumber(Symbol) TypeError throw (which is reserved for
-	// sites that have no compile-time reject path, like the ArrayBuffer ctor).
+	// ToBoolean(Symbol) is true. In a numeric position (one the checker
+	// let through, a cast over `any`) a Symbol is coerce's run-time
+	// TypeError, as Node throws it.
 	if v.Ty.IsSymbol() && target.IR == "i1" && !isNullableScalar(target) {
-		return Value{Ref: "true", Ty: target}, nil // ToBoolean(Symbol) is true
-	}
-	// Under -compat=js it is JavaScript's run-time TypeError (coerce), as
-	// Node throws it.
-	if v.Ty.IsSymbol() && !e.compatJS() && !target.IsDynamic() && (target.Float || (target.IsInteger() && target.IR != "" && target.IR != "ptr")) {
-		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — a Symbol cannot be converted to a number (this compiler is a typed subset)", pos.Line, pos.Col, what)
-	}
-	// A constrained union target (`number | string`, a union array element)
-	// checks the member set: `xs.push(true)` into a `(number | string)[]` is the
-	// same rejection `const w: number | string = true` is.
-	if target.IsDynamic() && target.UnionMembers != nil && !unionAllowsAssignmentFrom(target, v.Ty) {
-		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — value's type is not a member of the declared union type", pos.Line, pos.Col, what)
+		return Value{Ref: "true", Ty: target}, nil
 	}
 	// A closure whose body can fall off the end returns `T | undefined`
 	// (ADR-01065); binding it to a declared `(...) => T` is tsc's "Type 'T |
@@ -676,7 +703,7 @@ func (e *Emitter) convertChecked(v Value, target Type, pos ast.Pos, what string)
 	}
 	out := e.convert(v, target)
 	if !conversionIsSound(out.Ty, target) {
-		return Value{}, fmt.Errorf("%d:%d: type mismatch in %s — a value of one type cannot be used where an incompatible type is expected (this compiler is a typed subset; mixing types the way untyped JS does is not supported)", pos.Line, pos.Col, what)
+		return Value{}, internalAt(pos, "checker-rejected: type mismatch in %s", what)
 	}
 	return out, nil
 }
@@ -715,9 +742,8 @@ func typeBits(ir string) int {
 // closureFallOffMismatch rejects a closure whose inferred return is `T |
 // undefined` (a body that can fall off the end, ADR-01065) bound to a declared
 // function type returning the bare T — tsc's "Type 'T | undefined' is not
-// assignable to type 'T'". The two return ABIs differ (`{ i1, T }` vs T), so an
-// indirect call through the declared slot would read the wrong words; the
-// rejection is the only sound outcome. A void/any/nullable expected return
+// assignable to type 'T'", which the checker reports. The two return ABIs
+// differ (`{ i1, T }` vs T), so the pair never reaches emission. A void/any/nullable expected return
 // accepts the closure unchanged.
 func closureFallOffMismatch(vTy, target Type, pos ast.Pos, what string) error {
 	if !vTy.IsFunc() || !target.IsFunc() || vTy.FuncRetType == nil || target.FuncRetType == nil {
@@ -727,8 +753,8 @@ func closureFallOffMismatch(vTy, target Type, pos ast.Pos, what string) error {
 	if !isNullableScalar(*vTy.FuncRetType) || isNullableScalar(tr) || tr.IsDynamic() || tr.IR == "void" || tr.IR == "" {
 		return nil
 	}
-	return fmt.Errorf("%d:%d: type mismatch in %s — the function returns %s | undefined (a path falls off the end without a value) but the expected type returns %s; return a value on every path",
-		pos.Line, pos.Col, what, tsTypeName(vTy.FuncRetType.withoutNullable()), tsTypeName(tr))
+	// The checker rejects it (TS2322); JavaScript has no declared slot.
+	return internalAt(pos, "%s: a closure returning %s | undefined for one returning %s", what, tsTypeName(vTy.FuncRetType.withoutNullable()), tsTypeName(tr))
 }
 
 // plainRecordType reports whether t is a plain static object (an interface,
@@ -771,7 +797,7 @@ func objectRelayoutNeeded(src, target Type, boxing bool) bool {
 			// An optional field the source lacks: absent (undefined) in a
 			// box, null in a pointer slot, empty in an array slot.
 			if !tf.Ty.IsUndefined() && !isNullableScalar(tf.Ty) && !tf.Ty.Nullable() &&
-				!tf.Ty.IsDynamic() && !tf.Ty.IsArray() && tf.Ty.IR != "ptr" {
+				!tf.Ty.IsDynamic() && !tf.Ty.IsArray() && tf.Ty.IR != irPtr {
 				return false
 			}
 			continue
@@ -828,13 +854,13 @@ func (e *Emitter) emitAnyIntoString(v Value, target Type) (Value, bool) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", direct, directL, convL))
 	e.emitLabel(directL)
 	p0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", p0, payload))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, p0, payload))
 	// A plain string's null is nullRef; its null pointer is undefined
 	// (TDD-00257).
 	p := p0
 	if triStr(target) {
 		p = e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", p, isNull, e.nullRef(), p0))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", p, isNull, e.nullRef(), p0))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(convL)
@@ -848,7 +874,7 @@ func (e *Emitter) emitAnyIntoString(v Value, target Type) (Value, bool) {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(joinL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = phi ptr [ %s, %%%s ], [ %s, %%%s ]", r, p, directL, sv.Ref, convEnd))
+	e.emitInstr(fmt.Sprintf("%s = phi "+irPtr+" [ %s, %%%s ], [ %s, %%%s ]", r, p, directL, sv.Ref, convEnd))
 	return Value{Ref: r, Ty: target}, true
 }
 
@@ -861,21 +887,21 @@ func (e *Emitter) emitObjectToDict(v Value, target Type) Value {
 		valTy = *target.MapVal
 	}
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 	copyL, doneL := e.freshLabel("obj2dict.copy"), e.freshLabel("obj2dict.done")
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", slot))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, copyL))
 	e.emitLabel(copyL)
 	m := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_map_str_create()", m))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", m))
 	for i, f := range v.Ty.Fields {
 		if isHiddenField(f.Name) {
 			continue
 		}
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", g, v.Ty.StructIR(), v.Ref, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", g, v.Ty.StructIR(), v.Ref, i))
 		fv := e.loadScalarOrNullableField(g, f.Ty)
 		ft := valTy
 		if dt, ok := dictFieldType(target, ast.NewStringLiteral(f.Name, ast.Pos{})); ok {
@@ -889,19 +915,22 @@ func (e *Emitter) emitObjectToDict(v Value, target Type) Value {
 			fv = e.convert(fv, ft)
 		}
 		ref := e.valueToMapVal(fv, ft)
-		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set(ptr %s, ptr %s, i64 %s)", m, e.internString(f.Name), ref))
+		e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", m, e.internString(f.Name), ref))
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", m, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", m, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 	return Value{Ref: out, Ty: target}
 }
 
 // convertArrayElems converts between a concrete-element array and an
 // `any[]` (one box per slot); ok is false for any other pair.
 func (e *Emitter) convertArrayElems(v Value, target Type) (Value, bool) {
+	if numericElemsDiffer(v.Ty, target) {
+		return e.convertNumericArray(v, target), true // another numeric storage kind
+	}
 	toAny, fromAny := arrayElemsConvert(v.Ty, target)
 	if !toAny && !fromAny {
 		return Value{}, false
@@ -910,14 +939,17 @@ func (e *Emitter) convertArrayElems(v Value, target Type) (Value, bool) {
 	data, n := e.freshReg(), e.freshReg()
 	data = e.arrayData(v)
 	n = e.arrayLen(v)
-	e.ensureMalloc()
 	elemSize := int64(8)
 	if fromAny {
 		elemSize = int64(dst.Align())
 	}
 	bytes, out := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, n, elemSize))
-	e.heapMallocInto(out, bytes)
+	convKind := allocElems
+	if fromAny {
+		convKind = elemAllocKind(dst)
+	}
+	e.heapMallocInto(out, convKind, bytes)
 	var err error
 	if toAny {
 		err = e.emitSpreadBoxLoop(data, n, src, out)
@@ -943,4 +975,87 @@ func arrayElemsConvert(from, target Type) (toAny, fromAny bool) {
 	toAny = isUnconstrainedDynamic(dst) && !src.IsDynamic() && src.IR != "" && src.IR != "void"
 	fromAny = isUnconstrainedDynamic(src) && !dst.IsDynamic() && dst.IR != "" && dst.IR != "void" && !dst.IsArray()
 	return toAny, fromAny
+}
+
+// relayoutTuple copies tuple v into a new tuple of target's element layout,
+// each element converted (a boxed element unboxed, or the reverse).
+func (e *Emitter) relayoutTuple(v Value, target Type) Value {
+	vals := make([]Value, len(target.Fields))
+	for i := range target.Fields {
+		vals[i] = e.convert(e.tupleElem(v, i), target.Fields[i].Ty)
+	}
+	return e.tupleOf(vals, target)
+}
+
+// convertTupleArray converts between a tuple and an array or another tuple
+// (convert): the value itself when both hold their elements in one storage
+// type, else a new array of the elements converted.
+func (e *Emitter) convertTupleArray(v Value, target Type) (Value, bool) {
+	if !(v.Ty.IsTuple() || target.IsTuple()) || !v.Ty.IsArray() || !target.IsArray() || v.Ty.IsDynamic() || target.IsDynamic() ||
+		v.Ty.IsTypedArray() || target.IsTypedArray() || v.Ty.IsBuffer() || target.IsBuffer() || v.Ty.IsFlatArray() || target.IsFlatArray() ||
+		v.Ty.ElemType == nil || target.ElemType == nil {
+		return Value{}, false
+	}
+	if reprKey(*v.Ty.ElemType) == reprKey(*target.ElemType) {
+		return Value{Ref: v.Ref, Ty: target}, true
+	}
+	switch {
+	case v.Ty.IsTuple() && target.IsTuple() && len(v.Ty.Fields) == len(target.Fields):
+		return e.relayoutTuple(v, target), true
+	case v.Ty.IsTuple() && !target.IsTuple():
+		vals := make([]Value, len(v.Ty.Fields))
+		for i := range v.Ty.Fields {
+			vals[i] = e.convert(e.tupleElem(v, i), *target.ElemType)
+		}
+		return e.tupleOf(vals, target), true
+	case target.IsTuple():
+		// An array (or a longer or shorter tuple): its first elements, an
+		// element past its end undefined.
+		data, n := e.arrayParts(v)
+		vals := make([]Value, len(target.Fields))
+		for i := range target.Fields {
+			vals[i] = e.convert(e.arrayElemOrUndefined(data, n, *v.Ty.ElemType, i), target.Fields[i].Ty)
+		}
+		return e.tupleOf(vals, target), true
+	}
+	return Value{}, false
+}
+
+// arrayElemOrUndefined is element i of an array of data and length n,
+// boxed, or undefined when i is past its end.
+func (e *Emitter) arrayElemOrUndefined(data, n string, elemTy Type, i int) Value {
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, slot))
+	in := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %d", in, n, i))
+	readL, doneL := e.freshLabel("tupel.read"), e.freshLabel("tupel.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", in, readL, doneL))
+	e.emitLabel(readL)
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %d", gep, elemTy.IR, data, i))
+	if b, err := e.emitBoxValue(e.loadArrayElem(gep, elemTy)); err == nil {
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", b.Ref, slot))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, slot))
+	return Value{Ref: r, Ty: TypeAny}
+}
+
+// tupleRecord builds the object type target from a tuple's elements, its
+// field "i" the tuple's element i (an object literal of index reads).
+func (e *Emitter) tupleRecord(v Value, target Type) (Value, error) {
+	pos := ast.Pos{}
+	tmp := e.tupleSpreadTemp(v, pos)
+	var props []ast.ObjectProperty
+	for _, f := range target.Fields {
+		i, err := strconv.Atoi(f.Name)
+		if err != nil || i < 0 || i >= len(v.Ty.Fields) {
+			continue
+		}
+		props = append(props, ast.ObjectProperty{Key: f.Name, Value: ast.NewIndexExpression(tmp, ast.NewNumberLiteral(f.Name, pos), pos)})
+	}
+	return e.emitExprWithObjectHint(ast.NewObjectLiteral(props, pos), target)
 }

@@ -21,16 +21,3 @@ var collateTables string
 func CollateSource() string {
 	return strings.Replace(collateSource, "#include \"collate_tables.h\"", collateTables, 1)
 }
-
-// UsesCollate reports whether localeCompare reached codegen.
-func (e *Emitter) UsesCollate() bool { return e.usedCollate }
-
-// ensureCollate declares __kml_collate and marks the C file for linking.
-func (e *Emitter) ensureCollate() {
-	if e.usedCollate {
-		return
-	}
-	e.usedCollate = true
-	e.ensureStrHeaderRuntime()
-	e.emitGlobal("declare i64 @__kml_collate(ptr, ptr, i64)")
-}

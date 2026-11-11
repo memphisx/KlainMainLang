@@ -18,14 +18,14 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	e.ensureStrHeaderRuntime()
 	textCT := e.internString("text/plain;charset=UTF-8")
 	dSlot, lSlot, cSlot := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", dSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", dSlot))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lSlot))
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", cSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", cSlot))
 	doneL := e.freshLabel("fbody.done")
 	set := func(d, l, c string) {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", d, dSlot))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", l, lSlot))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", c, cSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", d, dSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", l, lSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", c, cSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	}
 	tag, pay := e.emitUnboxTagPayload(box)
@@ -46,7 +46,7 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	e.emitLabel(strL)
 	sp := e.emitIntToPtr(pay)
 	sl := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", sl, sp))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", sl, sp))
 	set(sp, sl, textCT)
 	e.emitLabel(next2)
 
@@ -65,16 +65,16 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	{
 		bx := e.emitIntToPtr(pay)
 		hg, kg := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", hg, anyArrayBoxTy, bx))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 1", kg, anyArrayBoxTy, bx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", hg, anyArrayBoxTy, bx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 1", kg, anyArrayBoxTy, bx))
 		hdr, kind := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", hdr, hg))
-		e.emitInstr(fmt.Sprintf("%s = load i8, ptr %s, align 1", kind, kg))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, hg))
+		e.emitInstr(fmt.Sprintf("%s = load i8, "+irPtr+" %s, align 1", kind, kg))
 		agg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load {ptr, i64}, ptr %s, align 8", agg, hdr))
+		e.emitInstr(fmt.Sprintf("%s = load {"+irPtr+", i64}, "+irPtr+" %s, align 8", agg, hdr))
 		d, n := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", d, agg))
-		e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", n, agg))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", d, agg))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", n, agg))
 		// Element width from the kind byte (arrayElemKind).
 		w := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_elem_kind_width(i8 %s)", w, kind))
@@ -88,6 +88,35 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	// A host object: Blob, ArrayBuffer, URLSearchParams.
 	objL, strDefL := e.emitTagCheck(tag, kmlTagObject, "fbody.obj")
 	e.emitLabel(objL)
+	// A FormData (linked when the program names it): its
+	// multipart/form-data encoding, a Blob whose type carries the boundary.
+	if fdCls, ok := e.globalClass("FormData"); ok {
+		if blobCls, ok := e.globalClass("Blob"); ok {
+			isFD, err := e.emitAnyInstanceOfClass(box, fdCls.ClassName)
+			if err == nil {
+				fdL, nfd := e.freshLabel("fbody.fd"), e.freshLabel("fbody.nfd")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFD.Ref, fdL, nfd))
+				e.emitLabel(fdL)
+				bd, size, tv := "null", "0", "null"
+				const tmp = "__kml_body_formdata"
+				e.pushScope()
+				slot := e.freshReg()
+				e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+				fv := e.convert(box, fdCls)
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", fv.Ref, slot))
+				e.define(tmp, Symbol{Ptr: slot, Ty: fdCls})
+				bv, err := e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(ast.NewIdentifier(tmp, ast.Pos{}), "kmlBlob", ast.Pos{}), nil, ast.Pos{}))
+				e.popScope()
+				if err == nil {
+					if d, n, t, berr := e.emitBlobBytes(e.convert(bv, blobCls), ast.Pos{}); berr == nil {
+						bd, size, tv = d, n, t
+					}
+				}
+				set(bd, size, tv)
+				e.emitLabel(nfd)
+			}
+		}
+	}
 	// A Blob (the global module's class, linked into any program naming
 	// fetch): its bytes, its type the Content-Type.
 	if blobCls, ok := e.globalClass("Blob"); ok {
@@ -102,9 +131,9 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 			}
 			// An empty type is no Content-Type.
 			tl, empty, c := e.freshReg(), e.freshReg(), e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", tl, tv))
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", tl, tv))
 			e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", empty, tl))
-			e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", c, empty, tv))
+			e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", c, empty, tv))
 			set(bd, size, c)
 			e.emitLabel(nb)
 		}
@@ -116,10 +145,10 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	{
 		ab := e.emitUnboxHost(box, ArrayBufferType())
 		lg, dg, l, d := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 0", lg, ab.Ref))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, ptr }, ptr %s, i32 0, i32 1", dg, ab.Ref))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", l, lg))
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", d, dg))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 0", lg, ab.Ref))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", dg, ab.Ref))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", l, lg))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", d, dg))
 		set(d, l, "null")
 	}
 	e.emitLabel(nab)
@@ -139,7 +168,7 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 			panic(err)
 		}
 		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", l, sv.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", l, sv.Ref))
 		set(sv.Ref, l, e.internString("application/x-www-form-urlencoded;charset=UTF-8"))
 		e.emitLabel(nusp)
 	}
@@ -152,14 +181,14 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 		sv = e.convert(box, TypePtr)
 	}
 	svl := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len(ptr %s)", svl, sv.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", svl, sv.Ref))
 	set(sv.Ref, svl, textCT)
 
 	e.emitLabel(doneL)
 	data, length, ct = e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", data, dSlot))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", length, lSlot))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", ct, cSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, dSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", length, lSlot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ct, cSlot))
 	return data, length, ct
 }
 
@@ -170,24 +199,18 @@ func (e *Emitter) ensureElemKindWidth() {
 		return
 	}
 	e.usedElemKindWidth = true
-	e.emitGlobal(`define internal i64 @__kml_elem_kind_width(i8 %k) {
-entry:
-  switch i8 %k, label %w8 [
-    i8 1, label %w4
-    i8 4, label %w4
-    i8 5, label %w4
-    i8 6, label %w2
-    i8 7, label %w2
-    i8 8, label %w1
-    i8 9, label %w1
-  ]
-w1:
-  ret i64 1
-w2:
-  ret i64 2
-w4:
-  ret i64 4
-w8:
-  ret i64 8
-}`)
+	restore := e.beginDetachedFunc()
+	w1, w2, w4, w8 := e.freshLabel("w1"), e.freshLabel("w2"), e.freshLabel("w4"), e.freshLabel("w8")
+	e.emitTerminator(fmt.Sprintf("switch i8 %%k, label %%%s [ i8 1, label %%%s i8 4, label %%%s i8 5, label %%%s i8 6, label %%%s i8 7, label %%%s i8 8, label %%%s i8 9, label %%%s ]",
+		w8, w4, w4, w4, w2, w2, w1, w1))
+	for _, w := range []struct {
+		l string
+		n int
+	}{{w1, 1}, {w2, 2}, {w4, 4}, {w8, 8}} {
+		e.emitLabel(w.l)
+		e.emitTerminator(fmt.Sprintf("ret i64 %d", w.n))
+	}
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("internal i64 @__kml_elem_kind_width(i8 %k)", body)
 }

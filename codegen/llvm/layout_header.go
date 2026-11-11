@@ -21,20 +21,20 @@ type layoutDef struct {
 
 // layoutDefs are the structs in kml_layout.h.
 var layoutDefs = []layoutDef{
-	{"KML_PROMISE", promiseStructIR, map[int]string{0: "STATE", 1: "WAITER", 2: "V0", 3: "V1", 4: "REACTIONS", 5: "BOXED", promiseFlagsSlot: "FLAGS"}},
-	{"KML_CLOSURE", "{ ptr, ptr }", map[int]string{0: "FN", 1: "ENV"}},
+	{"KML_PROMISE", promiseStructIR, map[int]string{0: "STATE", 1: "WAITER", 2: "V0", 3: "V1", 4: "REACTIONS", 5: "BOXED", promiseFlagsSlot: "FLAGS", 7: "TWIN"}},
+	{"KML_CLOSURE", "{ " + irPtr + ", " + irPtr + " }", map[int]string{0: "FN", 1: "ENV"}},
 	// A promise's reaction list node (promise field REACTIONS).
-	{"KML_REACTION", "{ ptr, ptr }", map[int]string{0: "CLOSURE", 1: "NEXT"}},
+	{"KML_REACTION", "{ " + irPtr + ", " + irPtr + " }", map[int]string{0: "CLOSURE", 1: "NEXT"}},
 	{"KML_TASK", taskStructIR, map[int]string{taskCtx: "CTX", taskStack: "STACK", taskPromiseSlot: "PROMISE", taskState: "STATE",
 		taskPendingFetch: "PENDING_FETCH", taskPendingGroup: "PENDING_GROUP", taskPendingProm: "PENDING_PROMISE", taskFn: "FN",
 		taskArgs: "ARGS", taskResumerCtx: "RESUMER", taskJmpStk: "JMPSTK", taskSavedJmpTop: "JMPTOP", taskAsyncCtx: "ASYNC_CTX",
 		taskStackSize: "STACK_SIZE", taskFrameBase: "FRAME_BASE"}},
 	// The fields of an in-flight fetch a parked task polls.
-	{"KML_FETCHREQ", "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64 }", map[int]string{2: "DONE", 6: "HEADERS_DONE"}},
+	{"KML_FETCHREQ", "{ " + irPtr + ", " + irPtr + ", i64, i64, i64, " + irPtr + ", i64, " + irPtr + ", i64 }", map[int]string{2: "DONE", 6: "HEADERS_DONE"}},
 	// A connection slot of the HTTP server's connection array.
 	{"KML_ERROR", errorObjType.StructIR(), map[int]string{0: "KIND", 1: "MSG", 2: "NAME", 3: "CODE", 4: "ERRCODE", 5: "ERRSTR", 6: "SYSCALL", 7: "PATH", 8: "ERRNO", 9: "DEST"}},
 	{"KML_ERR", errorObjType.StructIR(), map[int]string{1: "MESSAGE", 2: "NAME", 3: "CODE", 4: "ERRCODE", 5: "ERRSTR", 8: "ERRNO", 10: "CAUSE", 11: "ADDRESS", 12: "PORT", 13: "EXTRA", 14: "NAME_OWN", 15: "STACK", 16: "FRAMES"}},
-	{"KML_FETCHPENDING", "{ ptr, ptr, i64, i64, i64, ptr, i64, ptr, i64, ptr }", map[int]string{9: "BRIDGE"}},
+	{"KML_FETCHPENDING", "{ " + irPtr + ", " + irPtr + ", i64, i64, i64, " + irPtr + ", i64, " + irPtr + ", i64, " + irPtr + " }", map[int]string{9: "BRIDGE"}},
 	{"KML_PBOX", promiseBoxType().StructIR(), map[int]string{1: "PROMISE", 2: "BOXFN"}},
 	{"KML_RESP", ResponseType().StructIR(), respLayoutFields()},
 	{"KML_RSTREAM", rstreamStructIR, nil},
@@ -51,6 +51,8 @@ var layoutConsts = []struct {
 	value int64
 }{
 	{"KML_PROMISE_HEADER", promiseHeaderWord},
+	// A number's box is its bits plus this (runtime_nanbox.go).
+	{"KML_NB_DOUBLE_OFFSET", nbDoubleOffset},
 	// A Response's header word, before its body (hostPrefixedObject).
 	{"KML_RESP_HDR", (&Emitter{}).hostHeaderWord(ResponseType())},
 	// An ArrayBuffer's and a SharedArrayBuffer's header words, before
@@ -78,6 +80,12 @@ var layoutConsts = []struct {
 	{"KML_ERRKIND_ERROR", errorTypeIDStored(errorKindIDs["Error"])},
 	{"KML_ERRKIND_RANGE", errorTypeIDStored(errorKindIDs["RangeError"])},
 	{"KML_ERROR_TYPE_FLAG", errorTypeIDFlag},
+	{"KML_TAG_FUNCREF", kmlTagFuncRef},
+	{"KML_NB_DOUBLE_OFFSET", nbDoubleOffset},
+	{"KML_NB_FUNCREF_KIND", nbFuncRefKind},
+	{"KML_UNIT_CTOR", unitKindCtor},
+	{"KML_UNIT_CTOR_OF", unitKindCtorOf},
+	{"KML_HDR_ID_MASK", kmlHdrIDMask},
 	{"KML_ERRKIND_AGG", errorTypeIDStored(errorKindIDs["AggregateError"])},
 	{"KML_AGG_ERRORS", int64(aggregateErrorsIdx()) * 8},
 	{"KML_AGG_SIZE", aggregateErrorStructSize()},
@@ -163,7 +171,7 @@ func irTypeSizeAlign(t string) (int, int) {
 		return 2, 2
 	case t == "i32" || t == "float":
 		return 4, 4
-	case t == "i64" || t == "double" || t == "ptr":
+	case t == "i64" || t == "double" || t == irPtr:
 		return 8, 8
 	case strings.HasPrefix(t, "{"):
 		offs, size := irStructOffsets(t)

@@ -713,7 +713,7 @@ function tag(strings: TemplateStringsArray, ...v: number[]): string { return str
 console.log(tag`+"`a\\n${1}b${2}`"+`);
 function viaRaw(s: TemplateStringsArray, ...v: any[]): string { return String.raw(s, ...v); }
 console.log(viaRaw`+"`x\\t${3}y\\u0041`"+`);
-function id(s: TemplateStringsArray): TemplateStringsArray { return s; }
+function id(s: TemplateStringsArray, ..._: unknown[]): TemplateStringsArray { return s; }
 const xs: TemplateStringsArray[] = [];
 for (let i = 0; i < 2; i++) xs.push(id`+"`a${i}b`"+`);
 console.log(xs[0] === xs[1], id`+"`a`"+` === id`+"`a`"+`);
@@ -773,5 +773,39 @@ console.log(x.localeCompare("e"), "ä".localeCompare("ä"), "x2".localeCompare(
 file1 File2 file9 file10
 0 0 0
 1 0 -1
+`)
+}
+
+// A replace() callback receives JavaScript's whole argument sequence:
+// (match, captures…, offset, string[, groups]), the captures counted per
+// match for a pattern known only at run time, undefined past the end.
+func TestE2EReplaceCallbackFullArgs(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+const s = "a1b22c";
+console.log(s.replace(/(\d)(\d)?/g, (m, a, b, off, str, extra) => "[" + [m, a, b, off, str.length, extra].join("|") + "]"));
+const re = new RegExp("(\\d)(\\d)?", "g");
+console.log(s.replace(re, (m, a, b, off, str, extra) => "[" + [m, a, b, off, typeof str, extra].join("|") + "]"));
+console.log(s.replace(new RegExp("b", "g"), (m, off, str, x) => "<" + m + off + typeof str + x + ">"));
+console.log(s.replace(re, (m, ...rest) => "{" + rest.length + "}"));
+console.log("ab-a".replace(new RegExp("(a)(b)?", "g"), function () { return arguments.length + ":" + [...arguments].join(","); }));
+console.log("ab".replace(/(?<x>a)/, (m, a, o, s, g) => JSON.stringify(g)), "ab".replace(/(a)/, (m, a, o, s, g) => typeof g));
+const d = new RegExp("(?<y>b)");
+console.log("ab".replace(d, (m, a, o, s, g) => JSON.stringify(g)), "ab".replace(d, (...r) => String(r.length)));
+`)
+}
+
+// exec/match results carry index, input and groups (undefined without
+// named groups, printed as such), matchAll iterates, and templates and
+// split follow JavaScript.
+func TestE2ERegExpResultFidelity(t *testing.T) {
+	assertSameAsNode(t, `
+const m = /(a)(x)?/.exec("ab")!;
+console.log(m[2], m.index, m.input, m.groups);
+console.log(m.groups, /(?<q>a)/.exec("a")!.groups);
+const it = "a1a2".matchAll(/a(\d)/g);
+console.log(typeof it.next, [...it].map(x => x[1]));
+console.log("abc".replace(/b/, "[$`+"`"+`|$']"));
+console.log("abc".split(/(?:)/), "a1b".split(/(\d)/));
+console.log("x".match(/(y)?x/));
 `)
 }

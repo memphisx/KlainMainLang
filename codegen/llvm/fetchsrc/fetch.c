@@ -20,6 +20,7 @@
 #endif
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 typedef long long i64;
 typedef unsigned char u8;
@@ -33,6 +34,10 @@ typedef struct {
     i64 len, cap;
     void *pend;
     void *hbuf;
+    /* The response's URL (the last one, after redirects) and how many
+     * redirects led there: Response.url and .redirected. */
+    char *url;
+    i64 redirects;
 } kbuf;
 
 /* A pending fetch. Every field is ptr/i64, so there is no padding to differ
@@ -68,6 +73,7 @@ enum { S_TYPEERR, S_ABORTNAME, S_ABORTMSG, S_TIMEOUTNAME, S_TIMEOUTMSG, S_AGGNAM
 #define CURLINFO_RESPONSE_CODE 2097154
 #define CURLINFO_PRIVATE 1048597
 #define CURLINFO_EFFECTIVE_URL 1048577
+#define CURLINFO_REDIRECT_COUNT 2097172
 #define CURLINFO_PRIMARY_IP 1048608
 #define CURLINFO_OS_ERRNO 2097177
 #define CURLINFO_PRIMARY_PORT 2097192
@@ -176,6 +182,7 @@ extern void __kml_fetch_body_on_done(void *pend);
 const char *__kml_fetch_errstr(int code) {
     if (code == -2) return "Request with GET/HEAD method cannot have body.";
     if (code == -3) return "bad port";
+    if (code == -4) return "fetch failed";
     return curl_easy_strerror(code);
 }
 
@@ -230,7 +237,7 @@ extern i64 __kml_nb_pack(u8 tag, i64 pay);
  * any[]: each error boxed in place) and their count. */
 static void *mk_aggregate(void *msg, void **errs, i64 n) {
     for (i64 i = 0; i < n; i++)
-        ((i64 *)errs)[i] = __kml_nb_pack(KML_TAG_ERROR, (i64)(intptr_t)errs[i]);
+        ((i64 *)errs)[i] = (i64)(intptr_t)errs[i] | 1; /* an Error's object box */
     char *agg = (char *)kml_calloc(KML_HEAP_WORDS, 1, KML_AGG_SIZE);
     F(agg, KML_ERROR_KIND, i64) = KML_ERRKIND_AGG;
     F(agg, KML_ERR_MESSAGE, void *) = msg;
@@ -386,6 +393,7 @@ static void *failure_cause(void *easy, int code) {
  * TypeError with its own message; a transfer failure is Node's
  * `TypeError: fetch failed`, its reason the cause. */
 __attribute__((unused)) static void *fetch_error(pend_t *p) {
+    if (p->result == -4) return p->cause; /* rejected with its own error */
     if (p->result < 0 && p->result != -3)
         return mk_error(KML_KIND_TYPEERR, __kml_str_from_cstr(__kml_fetch_errstr((int)p->result)), __kml_fetch_strs[S_TYPEERR]);
     void *e = mk_error(KML_KIND_TYPEERR, __kml_fetch_strs[S_FAILED], __kml_fetch_strs[S_TYPEERR]);
@@ -414,9 +422,45 @@ static void __kml_wait_outside_coroutine(void) {
     fputs("internal error: a wait outside a coroutine inside an event-loop callback\n", stderr);
     abort();
 }
-extern int __kml_signal_aborted(void *sig);
-extern i64 __kml_signal_reason(void *sig);
-extern int __kml_signal_timeout(void *sig);
+/* An AbortSignal's private fields, at the offsets the compiler passes
+ * (emit_signal.go); a program without the class has no signal to read. A
+ * null signal is never aborted. */
+extern double __kml_performance_now(void);
+static double sig_deadline(void *sig) {
+#if KML_SIG_DL_DOUBLE
+    return *(double *)((char *)sig + KML_SIG_DL);
+#else
+    return (double)*(i64 *)((char *)sig + KML_SIG_DL);
+#endif
+}
+static int __kml_signal_aborted(void *sig) {
+#if KML_SIG_AB < 0
+    (void)sig;
+    return 0;
+#else
+    if (!sig) return 0;
+    char *ab = (char *)sig + KML_SIG_AB;
+    if (KML_SIG_AB_SIZE == 1 ? *(u8 *)ab != 0 : *(i64 *)ab != 0) return 1;
+    double dl = sig_deadline(sig);
+    return dl > 0 && __kml_performance_now() >= dl;
+#endif
+}
+static i64 __kml_signal_reason(void *sig) {
+#if KML_SIG_AB < 0
+    (void)sig;
+    return KML_NB_UNDEFINED;
+#else
+    return *(i64 *)((char *)sig + KML_SIG_REASON);
+#endif
+}
+static int __kml_signal_timeout(void *sig) {
+#if KML_SIG_AB < 0
+    (void)sig;
+    return 0;
+#else
+    return sig_deadline(sig) > 0;
+#endif
+}
 extern int __kml_nb_tag(i64);
 extern i64 __kml_nb_pay(i64);
 extern void __kml_throw_any(u8 tag, i64 pay) __attribute__((noreturn));
@@ -693,12 +737,6 @@ int __kml_curl_inflight(void) {
     return curl_running;
 }
 
-/* The event loop's view of libcurl (loop.c): whether the multi handle
- * exists; on Windows also its sockets merged into the loop's sets, its own
- * deadline (0 for none), and one drive after the wait. */
-_Bool __kml_curl_loop_active(void) { return __kml_curl_multi != 0; }
-
-
 /* Starts a transfer without blocking and returns its pending struct. method/
  * headers/body are each nullable (a null skips the setopt); headers is a
  * curl_slist*. bodylen < 0: a NUL-terminated body, else its byte length so a
@@ -721,8 +759,206 @@ static _Bool url_bad_port(const char *url) {
     return 0;
 }
 
+/* A data: URL's value (RFC 2397, as the Fetch spec's data: URL processor
+ * reads it): its MIME type (text/plain;charset=US-ASCII when none is given)
+ * and its percent-decoded or base64-decoded bytes, a finished 200 response
+ * with no transfer. Null for a malformed one (no comma, bad base64). */
+static int b64v(int c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+static int hexv(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+static char *heap_cstr(const char *c) {
+    size_t n = strlen(c);
+    char *o = (char *)kml_alloc(KML_HEAP_RAW, n + 1);
+    kml_copy(KML_HEAP_RAW, o, c, n + 1);
+    return o;
+}
+static void kbuf_put(kbuf *b, const char *d, i64 n) {
+    if (b->len + n + 1 > b->cap) {
+        i64 cap = (b->len + n + 1) * 2;
+        char *nd = (char *)kml_alloc(KML_HEAP_RAW, (size_t)cap);
+        if (b->data) kml_copy(KML_HEAP_RAW, nd, b->data, (size_t)b->len);
+        b->data = nd;
+        b->cap = cap;
+    }
+    kml_copy(KML_HEAP_RAW, b->data + b->len, d, (size_t)n);
+    b->len += n;
+    b->data[b->len] = 0;
+}
+static void *data_url_pending(const char *url, void *signal) {
+    const char *comma = strchr(url + 5, ',');
+    if (!comma) return 0;
+    /* The MIME part, whitespace-trimmed; ";base64" (any case) ends it. */
+    const char *m = url + 5, *me = comma;
+    while (m < me && (*m == ' ' || *m == '\t')) m++;
+    while (me > m && (me[-1] == ' ' || me[-1] == '\t')) me--;
+    _Bool b64 = 0;
+    const char *semi = me;
+    while (semi > m && semi[-1] != ';') semi--;
+    if (semi > m) {
+        const char *t = semi;
+        while (t < me && *t == ' ') t++;
+        if (me - t == 6 && strncasecmp(t, "base64", 6) == 0) {
+            b64 = 1;
+            me = semi - 1;
+            while (me > m && me[-1] == ' ') me--;
+        }
+    }
+    kbuf *buf = (kbuf *)kml_alloc(KML_HEAP_WORDS, sizeof(kbuf));
+    kbuf *hbuf = (kbuf *)kml_alloc(KML_HEAP_WORDS, sizeof(kbuf));
+    buf->data = hbuf->data = 0;
+    buf->len = buf->cap = hbuf->len = hbuf->cap = 0;
+    buf->pend = hbuf->pend = 0;
+    buf->hbuf = hbuf;
+    buf->url = heap_cstr(url);
+    buf->redirects = 0;
+    /* The body: percent-decoded, then base64-decoded (forgiving: ASCII
+     * whitespace skipped, '=' padding optional). */
+    const char *d = comma + 1;
+    size_t n = strlen(d);
+    char *raw = (char *)kml_alloc(KML_HEAP_RAW, n + 1);
+    size_t rn = 0;
+    for (size_t i = 0; i < n; i++) {
+        int hi, lo;
+        if (d[i] == '%' && i + 2 < n && (hi = hexv(d[i + 1])) >= 0 && (lo = hexv(d[i + 2])) >= 0) {
+            raw[rn++] = (char)(hi * 16 + lo);
+            i += 2;
+        } else if (d[i] == '#') {
+            break; /* the fragment is not data */
+        } else {
+            raw[rn++] = d[i];
+        }
+    }
+    if (!b64) {
+        kbuf_put(buf, raw, (i64)rn);
+    } else {
+        unsigned acc = 0;
+        int bits = 0, pad = 0, cnt = 0;
+        for (size_t i = 0; i < rn; i++) {
+            int c = (unsigned char)raw[i];
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\f' || c == '\r') continue;
+            if (c == '=') {
+                pad++;
+                continue;
+            }
+            int v = b64v(c);
+            if (v < 0 || pad) return 0;
+            cnt++;
+            acc = (acc << 6) | (unsigned)v;
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                char o = (char)((acc >> bits) & 0xFF);
+                kbuf_put(buf, &o, 1);
+            }
+        }
+        if (cnt % 4 == 1 || pad > 2 || (pad && (cnt + pad) % 4 != 0)) return 0;
+    }
+    if (!buf->data) kbuf_put(buf, "", 0);
+    /* The headers, as the transfer's header buffer would hold them. */
+    static const char status_line[] = "HTTP/1.1 200 OK\r\nContent-Type: ";
+    kbuf_put(hbuf, status_line, (i64)strlen(status_line));
+    if (me > m && *m != ';')
+        kbuf_put(hbuf, m, (i64)(me - m));
+    else if (me > m) {
+        kbuf_put(hbuf, "text/plain", (i64)strlen("text/plain"));
+        kbuf_put(hbuf, m, (i64)(me - m));
+    } else
+        kbuf_put(hbuf, "text/plain;charset=US-ASCII", (i64)strlen("text/plain;charset=US-ASCII"));
+    kbuf_put(hbuf, "\r\n\r\n", (i64)strlen("\r\n\r\n"));
+    pend_t *p = (pend_t *)kml_alloc(KML_HEAP_WORDS, sizeof(pend_t));
+    p->bridge = 0;
+    p->cause = 0;
+    p->easy = 0;
+    p->buf = buf;
+    p->status = 200;
+    p->result = 0;
+    p->signal = signal;
+    p->hdrs = 1;
+    p->bstream = 0;
+    p->paused = 0;
+    p->done = 1;
+    buf->pend = p;
+    return p;
+}
+
+/* A fetch rejected with the error err before any request (an argument
+ * the Fetch API's validation refuses). */
+void *__kml_fetch_rejected_pending(void *err) {
+    pend_t *p = (pend_t *)__kml_fetch_failed_pending(-4);
+    p->cause = err;
+    return p;
+}
+
+/* url_unparsable reports a URL the WHATWG parser rejects with no base: no
+ * scheme, or a special scheme (other than file:) with an empty host, a
+ * forbidden host code point or a port past 65535. */
+static _Bool url_unparsable(const char *u) {
+    if (!u) return 1;
+    while (*u == ' ' || (*u >= '\t' && *u <= '\r')) u++; /* (leading C0 and space trimmed) */
+    const char *c = u;
+    if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z'))) return 1;
+    while ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || *c == '+' || *c == '-' || *c == '.') c++;
+    if (*c != ':') return 1;
+    size_t sl = (size_t)(c - u);
+    static const char *special[] = {"http", "https", "ws", "wss", "ftp"};
+    _Bool sp = 0;
+    for (size_t i = 0; i < sizeof special / sizeof special[0]; i++)
+        if (strlen(special[i]) == sl && strncasecmp(u, special[i], sl) == 0) sp = 1;
+    if (!sp) return 0;
+    const char *h = c + 1;
+    while (*h == '/' || *h == '\\') h++;
+    const char *at = h, *end = h;
+    while (*end && *end != '/' && *end != '\\' && *end != '?' && *end != '#') end++;
+    for (const char *q = h; q < end; q++)
+        if (*q == '@') at = q + 1; /* credentials end at the last @ */
+    const char *colon = 0;
+    _Bool bracket = 0;
+    for (const char *q = at; q < end; q++) {
+        if (*q == '[') bracket = 1;
+        if (*q == ']') bracket = 0;
+        if (*q == ':' && !bracket) colon = q;
+    }
+    const char *hostEnd = colon ? colon : end;
+    if (hostEnd == at) return 1;
+    for (const char *q = at; q < hostEnd; q++)
+        if (strchr(" #%/<>?@\\^|", *q) || (unsigned char)*q < 0x20 || *q == 0x7f) return 1;
+    if (colon) {
+        long port = 0;
+        for (const char *q = colon + 1; q < end; q++) {
+            if (*q < '0' || *q > '9') return 1;
+            port = port * 10 + (*q - '0');
+            if (port > 65535) return 1;
+        }
+    }
+    return 0;
+}
+
 void *__kml_fetch_async_n(const char *url, const char *method, void *headers, const char *body, i64 bodylen, void *signal) {
+    if (url_unparsable(url)) {
+        /* `TypeError: Failed to parse URL from <url>`, its cause the URL
+         * parser's `TypeError: Invalid URL` (ERR_INVALID_URL). */
+        void *cause = mk_error(KML_KIND_TYPEERR, __kml_str_from_cstr("Invalid URL"), __kml_fetch_strs[S_TYPEERR]);
+        F(cause, KML_ERR_CODE, const void *) = __kml_str_from_cstr("ERR_INVALID_URL");
+        void *e = mk_error(KML_KIND_TYPEERR, fmt_str("Failed to parse URL from %s", url ? url : "undefined", 0, 0), __kml_fetch_strs[S_TYPEERR]);
+        F(e, KML_ERR_CAUSE, i64) = __kml_nb_pack(KML_TAG_OBJECT, (i64)(intptr_t)cause);
+        return __kml_fetch_rejected_pending(e);
+    }
     if (url_bad_port(url)) return __kml_fetch_failed_pending(-3);
+    if (url && strncasecmp(url, "data:", 5) == 0) {
+        void *p = data_url_pending(url, signal);
+        return p ? p : __kml_fetch_failed_pending(-3);
+    }
     if (!__kml_curl_inited) {
         curl_global_init(3);
         __kml_curl_inited = 1;
@@ -743,6 +979,8 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
     hbuf->len = hbuf->cap = 0;
     hbuf->pend = 0;
     buf->hbuf = hbuf;
+    buf->url = heap_cstr(url);
+    buf->redirects = 0;
 
     void *curl = curl_easy_init();
 #if defined(_WIN32)
@@ -825,6 +1063,12 @@ void __kml_curl_drain_messages(void) {
         curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &status);
         p->status = status;
         p->result = m->result;
+        char *eff = 0;
+        long redirects = 0;
+        curl_easy_getinfo(easy, CURLINFO_EFFECTIVE_URL, &eff);
+        curl_easy_getinfo(easy, CURLINFO_REDIRECT_COUNT, &redirects);
+        if (eff) p->buf->url = heap_cstr(eff);
+        p->buf->redirects = redirects;
         if (m->result != 0) p->cause = failure_cause(easy, m->result);
         curl_multi_remove_handle(multi, easy);
         curl_easy_cleanup(easy);
@@ -836,6 +1080,15 @@ void __kml_curl_drain_messages(void) {
 
 /* A drive without waiting after a paused body resumes: a timeout action
  * starts what unpausing made due; returns whether transfers still run. */
+/* Before the first worker thread starts (worker.c): curl_global_init is not
+ * thread-safe, so it runs once while only the main thread exists. */
+void __kml_worker_curl_preinit(void) {
+    if (!__kml_curl_inited) {
+        curl_global_init(3);
+        __kml_curl_inited = 1;
+    }
+}
+
 _Bool __kml_fetch_pump(void) {
     __kml_sigfetch_scan();
     if (!__kml_curl_multi) return 0;
@@ -1122,6 +1375,17 @@ void *__kml_fetch_headers_map(void *pending) {
  * redirect, the final response's), or "" when there is none (HTTP/2 sends no
  * reason phrase) or the Response was not fetched. */
 static _Bool eol(char c) { return c == 0 || c == '\r' || c == '\n'; }
+
+/* Response.url and .redirected of a fetched Response (a failed fetch's
+ * pending has no buffer). */
+void *__kml_fetch_url(void *pending) {
+    pend_t *p = (pend_t *)pending;
+    return __kml_str_from_cstr(p && p->buf && p->buf->url ? p->buf->url : "");
+}
+_Bool __kml_fetch_redirected(void *pending) {
+    pend_t *p = (pend_t *)pending;
+    return p && p->buf && p->buf->redirects > 0;
+}
 
 void *__kml_fetch_status_text(void *pending) {
     const char *raw = raw_headers(pending);

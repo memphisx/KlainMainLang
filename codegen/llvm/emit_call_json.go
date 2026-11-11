@@ -22,7 +22,7 @@ func (e *Emitter) callAssertedTargetTy(ce *ast.CallExpression) (Type, bool) {
 	if ce.AssertedType == nil || e.compatJS() {
 		return Type{}, false
 	}
-	ty := e.resolveType(ce.AssertedType)
+	ty := e.annotationType(ce.AssertedType)
 	if ty.IsDynamic() || ty.IsClass() || ty.IsFunc() || ty.IR == "void" {
 		return Type{}, false
 	}
@@ -93,14 +93,14 @@ func (e *Emitter) jsonAppend(acc Value, s string) (Value, error) {
 func (e *Emitter) jsonSeed(s string) string {
 	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r, e.internString(s)))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", r, e.internString(s)))
 	return r
 }
 
 // jsonConcatFree concatenates via __kml_json_concat2, freeing the operands
 // the caller owns. Fragment ownership is compile-time-known per call site.
 func (e *Emitter) jsonConcatFree(a, b Value, freeA, freeB bool) (Value, error) {
-	e.ensureJSONConcat2()
+	e.ensureStrHeaderRuntime()
 	fa, fb := "false", "false"
 	if freeA {
 		fa = "true"
@@ -109,7 +109,7 @@ func (e *Emitter) jsonConcatFree(a, b Value, freeA, freeB bool) (Value, error) {
 		fb = "true"
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_concat2(ptr %s, ptr %s, i1 %s, i1 %s)", r, a.Ref, b.Ref, fa, fb))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_concat2("+irPtr+" %s, "+irPtr+" %s, i1 %s, i1 %s)", r, a.Ref, b.Ref, fa, fb))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -122,7 +122,7 @@ func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos, in
 	}
 	// An Arguments object serializes as an object of its index keys,
 	// through its box.
-	if t := e.inferExprType(arrExpr); mayBeArguments(t) && !t.Nullable() && hdr != "" {
+	if t := e.typeOfExpr(arrExpr); mayBeArguments(t) && !t.Nullable() && hdr != "" {
 		v := Value{Ref: hdr, Ty: ArrayOf(TypeAny)}
 		return e.emitArgumentsBranch(v, func() (Value, error) {
 			boxed, err := e.emitBoxValue(v)
@@ -132,7 +132,7 @@ func (e *Emitter) emitJSONStringifyArray(arrExpr ast.Expression, pos ast.Pos, in
 			return e.emitJSONStringifyValue(boxed, ind)
 		}, func() (Value, error) { return e.emitJSONStringifyArrayData(hdr, ptrReg, lenReg, elemTy, ind) })
 	}
-	if t := e.inferExprType(arrExpr); t.IsTypedArray() || t.IsFlatArray() {
+	if t := e.typeOfExpr(arrExpr); t.IsTypedArray() || t.IsFlatArray() {
 		hdr = ""
 	}
 	return e.emitJSONStringifyArrayData(hdr, ptrReg, lenReg, elemTy, ind)
@@ -177,8 +177,8 @@ func (e *Emitter) emitJSONStringifyArrayValuePlain(val Value, ind jsonIndent) (V
 	}
 	// nullRef (null unboxed from `any`) is null.
 	isRef, r := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isRef, val.Ref, e.nullRef()))
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, isRef, e.jsonSeed("null"), j.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isRef, val.Ref, e.nullRef()))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isRef, e.jsonSeed("null"), j.Ref))
 	return Value{Ref: r, Ty: j.Ty}, nil
 }
 
@@ -198,14 +198,14 @@ func (e *Emitter) emitJSONStringifyNullableArray(val Value, ind jsonIndent) (Val
 	}
 
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	aL := e.freshLabel("json.arru.absent")
 	pL := e.freshLabel("json.arru.present")
 	mL := e.freshLabel("json.arru.merge")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, aL, pL))
 
 	e.emitLabel(aL)
-	e.emitInstr(fmt.Sprintf("store ptr null, ptr %s, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 
 	e.emitLabel(pL)
@@ -213,12 +213,12 @@ func (e *Emitter) emitJSONStringifyNullableArray(val Value, ind jsonIndent) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", j.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", j.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 
 	e.emitLabel(mL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	resTy := TypePtr
 	resTy.setNullable(true)
 	resTy.setUndefined(true)
@@ -240,12 +240,12 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 		hdr = ""
 	}
 	accAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("["), accAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", accAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("["), accAlloca))
 
 	idxAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxAlloca))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxAlloca))
 
 	condL := e.freshLabel("jsonarr.cond")
 	bodyL := e.freshLabel("jsonarr.body")
@@ -258,7 +258,7 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 	e.emitLabel(condL)
 	idxVal := e.freshReg()
 	done := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", idxVal, idxAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxAlloca))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", done, idxVal, lenReg))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", done, doneL, bodyL))
 
@@ -266,29 +266,29 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 	var holeSlot, holeDone string
 	if hdr != "" {
 		holeSlot = e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", holeSlot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", holeSlot))
 		hole := e.emitHoleTest(hdr, idxVal)
 		holeL, elemL := e.freshLabel("jsonarr.hole"), e.freshLabel("jsonarr.elem")
 		holeDone = e.freshLabel("jsonarr.got")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hole, holeL, elemL))
 		e.emitLabel(holeL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), holeSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), holeSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", holeDone))
 		e.emitLabel(elemL)
 	}
 	inGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", inGep, elemTy.IR, ptrReg, idxVal))
 	inElem := e.loadArrayElem(inGep, elemTy)
 	elemJSONVal, err := e.emitJSONStringifyValue(inElem, ind.child())
 	if err != nil {
 		return Value{}, err
 	}
 	if hdr != "" {
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", elemJSONVal.Ref, holeSlot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", elemJSONVal.Ref, holeSlot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", holeDone))
 		e.emitLabel(holeDone)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, holeSlot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, holeSlot))
 		elemJSONVal = Value{Ref: r, Ty: elemJSONVal.Ty}
 	}
 	isFirst := e.freshReg()
@@ -297,7 +297,7 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 
 	e.emitLabel(firstL)
 	accAtFirst := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", accAtFirst, accAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", accAtFirst, accAlloca))
 	firstPre, err := e.jsonAppend(Value{Ref: accAtFirst, Ty: TypePtr}, ind.itemPrefix(0))
 	if err != nil {
 		return Value{}, err
@@ -306,12 +306,12 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", firstAcc.Ref, accAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", firstAcc.Ref, accAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(restL)
 	accCur := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", accCur, accAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", accCur, accAlloca))
 	withComma, err := e.jsonAppend(Value{Ref: accCur, Ty: TypePtr}, ind.itemPrefix(1))
 	if err != nil {
 		return Value{}, err
@@ -320,18 +320,18 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", newAcc.Ref, accAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", newAcc.Ref, accAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", incL))
 
 	e.emitLabel(incL)
 	idxNext := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", idxNext, idxVal))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", idxNext, idxAlloca))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", idxNext, idxAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	preClose := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", preClose, accAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", preClose, accAlloca))
 	if ind.pretty() {
 		// Whether to put the closing bracket on its own indented line depends on
 		// whether the array had any elements — a runtime fact for a dynamic-length
@@ -339,7 +339,7 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 		isEmpty := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", isEmpty, lenReg))
 		closeSel := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", closeSel, isEmpty,
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", closeSel, isEmpty,
 			e.internString("]"), e.internString("\n"+ind.pad()+"]")))
 		return e.jsonConcatFree(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: closeSel, Ty: TypePtr}, true, false)
 	}
@@ -348,7 +348,7 @@ func (e *Emitter) emitJSONStringifyArrayData(hdr, ptrReg, lenReg string, elemTy 
 
 func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, error) {
 	if len(args) < 1 {
-		return Value{}, fmt.Errorf("%d:%d: JSON.stringify expects at least 1 argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "JSON.stringify without a value")
 	}
 
 	// A replacer function or property list, or a space known only at run
@@ -356,7 +356,7 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 	if resolver.StringifyArgsAtRunTime(args) {
 		m, ok := e.libExports["internal_json:stringifyWith"]
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: internal error: JSON.stringify's run-time serializer is not linked", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "JSON.stringify's run-time serializer is not linked")
 		}
 		call := make([]ast.Expression, 3)
 		for i := range call {
@@ -384,7 +384,17 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 		ind.unit = unit
 	}
 
-	argTy := e.inferExprType(args[0])
+	argTy := e.typeOfExpr(args[0])
+
+	// A symbol, or undefined itself, serializes to undefined.
+	if argTy.IsSymbol() || isUndefinedLiteral(e, args[0]) {
+		for _, a := range args {
+			if _, err := e.emitExpr(a); err != nil {
+				return Value{}, err
+			}
+		}
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
 
 	// A bare any/unknown value serializes through the dynamic walker
 	// (TDD-00155 Stage 2): tag-10 bags and tag-11 dynamic arrays recurse,
@@ -475,7 +485,7 @@ func (e *Emitter) emitJSONStringify(args []ast.Expression, pos ast.Pos) (Value, 
 			return Value{}, err
 		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr null, ptr %s", r, e.ptrIsNull(t.Ref), out.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" null, "+irPtr+" %s", r, e.ptrIsNull(t.Ref), out.Ref))
 		ty := TypePtr
 		ty.setNullable(true)
 		ty.setUndefined(true)
@@ -528,33 +538,8 @@ func (e *Emitter) jsonSpaceUnit(arg ast.Expression, pos ast.Pos) (string, error)
 		}
 		return s, nil
 	default:
-		return "", fmt.Errorf("%d:%d: internal error: a run-time JSON.stringify space reached the static serializer", pos.Line, pos.Col)
+		return "", internalAt(pos, "a run-time JSON.stringify space reached the static serializer")
 	}
-}
-
-// emitJSONStringifyTuple builds [v0,v1,...] for a tuple value (TDD-00066),
-// matching real JSON.stringify, which serializes a tuple as a JSON array.
-func (e *Emitter) emitJSONStringifyTuple(val Value, ind jsonIndent) (Value, error) {
-	acc := Value{Ref: e.jsonSeed("["), Ty: TypePtr}
-	structIR := val.Ty.StructIR()
-	n := len(val.Ty.Fields)
-	for i, field := range val.Ty.Fields {
-		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, structIR, val.Ref, i))
-		fieldVal := e.loadScalarOrNullableField(gepReg, field.Ty)
-		var err error
-		if acc, err = e.jsonAppend(acc, ind.itemPrefix(i)); err != nil {
-			return Value{}, err
-		}
-		jsonVal, err := e.emitJSONStringifyValue(fieldVal, ind.child())
-		if err != nil {
-			return Value{}, err
-		}
-		if acc, err = e.jsonConcatFree(acc, jsonVal, true, true); err != nil {
-			return Value{}, err
-		}
-	}
-	return e.jsonAppend(acc, ind.closeBracket("]", n))
 }
 
 // emitJSONStringifyObject builds {"k1":v1,"k2":v2,...} inline by walking the
@@ -570,10 +555,11 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 	}
 	acc := Value{Ref: e.jsonSeed("{"), Ty: TypePtr}
 	fields := esOrderedFields(val.Ty.VisibleFields()) // ES key order (Node)
-	// A function-valued property is skipped, as JSON.stringify skips it.
+	// A function- or symbol-valued property is skipped, as JSON.stringify
+	// skips it.
 	kept := fields[:0:0]
 	for _, f := range fields {
-		if !f.Ty.IsFunc() {
+		if !f.Ty.IsFunc() && !f.Ty.IsSymbol() {
 			kept = append(kept, f)
 		}
 	}
@@ -591,7 +577,7 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 		idx, _, _ := val.Ty.FieldIndex(field.Name)
 		// Load the field value via GEP.
 		gepReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d",
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d",
 			gepReg, val.Ty.StructIR(), val.Ref, idx))
 		// An array-typed field's slot holds a pointer to the array's shared
 		// {data,len} header (TDD-00213 Stage 2), which is the array value JSON
@@ -601,7 +587,7 @@ func (e *Emitter) emitJSONStringifyObject(val Value, ind jsonIndent) (Value, err
 			fieldVal = e.loadArrayFieldValue(gepReg, field.Ty)
 		} else {
 			loadReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d",
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d",
 				loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
 			fieldVal = Value{Ref: loadReg, Ty: field.Ty}
 		}
@@ -656,10 +642,10 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 
 	emittedA := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", emittedA))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", emittedA))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", emittedA))
 	accA := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accA))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", acc.Ref, accA))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", accA))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", acc.Ref, accA))
 
 	// An object whose keys may list in another order than its layout's
 	// (keyorder.c) writes each `"key":value` into a slot by its presence bit,
@@ -669,11 +655,11 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 	// (comma/newline) is chosen at runtime from emittedA.
 	appendPiece := func(piece Value) error {
 		emitted := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", emitted, emittedA))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", emitted, emittedA))
 		pfx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", pfx, emitted, subseqRef, firstRef))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", pfx, emitted, subseqRef, firstRef))
 		curAcc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curAcc, accA))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", curAcc, accA))
 		a1, err := e.jsonConcatFree(Value{Ref: curAcc, Ty: TypePtr}, Value{Ref: pfx, Ty: TypePtr}, true, false)
 		if err != nil {
 			return err
@@ -682,8 +668,8 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", a3.Ref, accA))
-		e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", emittedA))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", a3.Ref, accA))
+		e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", emittedA))
 		return nil
 	}
 	// emitOne appends `<prefix><"key":><valueJSON>` and marks emitted; the prefix
@@ -702,11 +688,11 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 			return nil
 		}
 		emitted := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", emitted, emittedA))
+		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", emitted, emittedA))
 		pfx := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", pfx, emitted, subseqRef, firstRef))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", pfx, emitted, subseqRef, firstRef))
 		curAcc := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", curAcc, accA))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", curAcc, accA))
 		a1, err := e.jsonConcatFree(Value{Ref: curAcc, Ty: TypePtr}, Value{Ref: pfx, Ty: TypePtr}, true, false)
 		if err != nil {
 			return err
@@ -719,8 +705,8 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", a3.Ref, accA))
-		e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", emittedA))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", a3.Ref, accA))
+		e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", emittedA))
 		return nil
 	}
 
@@ -729,13 +715,13 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 		one := func() error {
 			idx, _, _ := val.Ty.FieldIndex(field.Name)
 			gepReg := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", gepReg, val.Ty.StructIR(), val.Ref, idx))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, val.Ty.StructIR(), val.Ref, idx))
 			var fieldVal Value
 			if field.Ty.IsArray() {
 				fieldVal = e.loadArrayFieldValue(gepReg, field.Ty) // header-pointer slot (TDD-00213 S2)
 			} else {
 				loadReg := e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
+				e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", loadReg, StructFieldIR(field.Ty), gepReg, field.Ty.Align()))
 				fieldVal = Value{Ref: loadReg, Ty: field.Ty}
 			}
 
@@ -790,7 +776,7 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 					e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", present, p, e.triPayloadIsMarker(payload.Ref, field.Ty)))
 				} else {
 					present = e.freshReg()
-					e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, fieldVal.Ref))
+					e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", present, fieldVal.Ref))
 				}
 				baseVal = fieldVal
 			case isF64Slot(field.Ty):
@@ -808,11 +794,11 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 				dataPtr := e.freshReg()
 				dataPtr = e.arrayData(fieldVal)
 				present = e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, dataPtr))
+				e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", present, dataPtr))
 				baseVal = Value{Ref: fieldVal.Ref, Ty: bt}
 			default:
 				present = e.freshReg()
-				e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", present, fieldVal.Ref))
+				e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", present, fieldVal.Ref))
 				baseVal = Value{Ref: fieldVal.Ref, Ty: bt}
 			}
 			doL := e.freshLabel("json.opt.emit")
@@ -860,15 +846,15 @@ func (e *Emitter) emitJSONStringifyObjectOptional(val Value, fields []Field, acc
 	// Close: compact always "}"; pretty puts a non-empty object's "}" on its own
 	// line at the parent indent, an all-absent (empty) object stays "{}".
 	finalAcc := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", finalAcc, accA))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", finalAcc, accA))
 	out := Value{Ref: finalAcc, Ty: TypePtr}
 	if !ind.pretty() {
 		return e.jsonAppend(out, "}")
 	}
 	emitted := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", emitted, emittedA))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", emitted, emittedA))
 	closeRef := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", closeRef, emitted, e.internString("\n"+ind.pad()+"}"), e.internString("}")))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", closeRef, emitted, e.internString("\n"+ind.pad()+"}"), e.internString("}")))
 	return e.jsonConcatFree(out, Value{Ref: closeRef, Ty: TypePtr}, true, false)
 }
 
@@ -905,8 +891,8 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	sIdx, _, _ := val.Ty.FieldIndex("status")
 	sGep := e.freshReg()
 	statusPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", sGep, structIR, val.Ref, sIdx))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", statusPtr, sGep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", sGep, structIR, val.Ref, sIdx))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", statusPtr, sGep))
 	statusJSON, err := e.emitJSONStringifyValue(Value{Ref: statusPtr, Ty: TypePtr}, ind.child())
 	if err != nil {
 		return Value{}, err
@@ -917,9 +903,9 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 
 	// Runtime discriminant: fulfilled entries carry the interned "fulfilled" ptr.
 	isFul := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, %s", isFul, statusPtr, e.internString("fulfilled")))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isFul, statusPtr, e.internString("fulfilled")))
 	slot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	fulL := e.freshLabel("json.settle.ful")
 	rejL := e.freshLabel("json.settle.rej")
 	mergeL := e.freshLabel("json.settle.merge")
@@ -933,13 +919,13 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	}
 	vIdx, vTy, _ := val.Ty.FieldIndex("value")
 	vGep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", vGep, structIR, val.Ref, vIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", vGep, structIR, val.Ref, vIdx))
 	var vFieldVal Value
 	if vTy.IsArray() {
 		vFieldVal = e.loadArrayFieldValue(vGep, vTy) // header-pointer slot (TDD-00213 S2)
 	} else {
 		vReg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", vReg, StructFieldIR(vTy), vGep, vTy.Align()))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", vReg, StructFieldIR(vTy), vGep, vTy.Align()))
 		vFieldVal = Value{Ref: vReg, Ty: vTy}
 	}
 	vJSON, err := e.emitJSONStringifyValue(vFieldVal, ind.child())
@@ -949,7 +935,7 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	if accF, err = e.jsonConcatFree(accF, vJSON, true, true); err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", accF.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", accF.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	// Rejected: append "reason": <reason> only. The reason slot is a NaN-boxed
@@ -964,8 +950,8 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	rIdx, _, _ := val.Ty.FieldIndex("reason")
 	rGep := e.freshReg()
 	rReg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", rGep, structIR, val.Ref, rIdx))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", rReg, rGep))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", rGep, structIR, val.Ref, rIdx))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", rReg, rGep))
 	rJSON, err := e.emitJSONStringifyValue(Value{Ref: rReg, Ty: TypeAny}, ind.child())
 	if err != nil {
 		return Value{}, err
@@ -973,12 +959,12 @@ func (e *Emitter) emitJSONStringifySettlement(val Value, ind jsonIndent) (Value,
 	if accR, err = e.jsonConcatFree(accR, rJSON, true, true); err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", accR.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", accR.Ref, slot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 	return e.jsonAppend(Value{Ref: out, Ty: TypePtr}, ind.closeBracket("}", 2))
 }
 
@@ -1010,7 +996,7 @@ func (e *Emitter) emitJSONStringifyError(val Value, ind jsonIndent) (Value, erro
 		return Value{}, err
 	}
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", r, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, r, v.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
 }
 
@@ -1028,6 +1014,12 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 	}
 	if e.isErrorValueTy(val.Ty) {
 		return e.emitJSONStringifyError(val, ind)
+	}
+	if e.isPrimHostClass(val.Ty) && !val.Ty.Nullable() && !e.classHasToJSON(val.Ty) {
+		// A Number (String, Boolean) object serializes as its primitive.
+		body := e.freshReg()
+		e.emitBodyAddr(body, val.Ref)
+		return e.emitJSONStringifyValue(e.emitWrapperValue(body), ind)
 	}
 	// An object of another layout behind a structural type serializes as
 	// the object it is (TDD-00233).
@@ -1050,7 +1042,7 @@ func (e *Emitter) emitJSONStringifyValue(val Value, ind jsonIndent) (Value, erro
 		return e.emitExtraSplit(val, TypePtr,
 			func(v Value) (Value, error) { return e.emitJSONStringifyValueOwn(v, ind) },
 			func(obj string) string {
-				return fmt.Sprintf("call ptr @__kml_obj_json_dyn(ptr %s, ptr %s, i64 %d)", obj, indentArg, ind.depth)
+				return fmt.Sprintf("call "+irPtr+" @__kml_obj_json_dyn("+irPtr+" %s, "+irPtr+" %s, i64 %d)", obj, indentArg, ind.depth)
 			})
 	}
 	return e.emitJSONStringifyValueOwn(val, ind)
@@ -1065,15 +1057,18 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 	// {"description":"..."} instead of erroring like real JS does on a bare
 	// Symbol argument. See docs/tdd/TDD-00044.md.
 	if val.Ty.IsSymbol() {
-		return Value{}, fmt.Errorf("JSON.stringify does not support symbol values")
+		// An array element (a property is skipped, and a top-level symbol
+		// is undefined, before this): null.
+		return Value{Ref: e.jsonSeed("null"), Ty: TypePtr}, nil
 	}
-	// Real JS throws "Do not know how to serialize a BigInt" — TDD-00074.
 	if val.Ty.IsBigInt() {
-		return Value{}, fmt.Errorf("JSON.stringify does not support BigInt values (TypeError in JS)")
+		e.emitThrowTypeError("Do not know how to serialize a BigInt")
+		e.emitLabel(e.freshLabel("json.bigint.dead"))
+		return Value{Ref: e.jsonSeed(""), Ty: TypePtr}, nil
 	}
 	// A string-keyed dictionary lists its keys; a Map or Set has no
 	// enumerable own properties, `{}`.
-	if val.Ty.IR == "ptr" && !val.Ty.IsDynamic() && !val.Ty.Nullable() && !val.Ty.IsUndefined() {
+	if val.Ty.IR == irPtr && !val.Ty.IsDynamic() && !val.Ty.Nullable() && !val.Ty.IsUndefined() {
 		switch {
 		case val.Ty.IsDynamicObject() && val.Ty.MapVal != nil && val.Ty.MapVal.IsDynamic():
 			bag, err := e.emitDictToBag(val)
@@ -1113,22 +1108,22 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		isUndef := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isUndef, dyn.Ref, nbUndefined))
 		strPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", strPtr, dyn.Ref))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, strPtr, dyn.Ref))
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 		uL := e.freshLabel("json.dyn.undef")
 		sL := e.freshLabel("json.dyn.str")
 		mL := e.freshLabel("json.dyn.merge")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isUndef, uL, sL))
 		e.emitLabel(uL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 		e.emitLabel(sL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", strPtr, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", strPtr, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 		e.emitLabel(mL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	// A nullable-scalar field/value (TDD-00064 Stage 3) serializes to its
@@ -1146,21 +1141,21 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		// allocates when actually taken. The present-path payloadJSON is
 		// computed unconditionally either way (as before).
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 		pL := e.freshLabel("json.nsc.present")
 		aL := e.freshLabel("json.nsc.absent")
 		mL := e.freshLabel("json.nsc.merge")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", present, pL, aL))
 		e.emitLabel(pL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", payloadJSON.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", payloadJSON.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 		e.emitLabel(aL)
-		e.emitInstr(fmt.Sprintf("call void @__kml_str_free(ptr %s)", payloadJSON.Ref))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+		e.emitInstr(fmt.Sprintf("call void @__kml_str_free("+irPtr+" %s)", payloadJSON.Ref))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 		e.emitLabel(mL)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", r, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 	// A user-defined class toJSON() is honored: real JSON.stringify calls
@@ -1195,11 +1190,6 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		// A class extending Array serializes as its elements alone.
 		return e.emitJSONStringifyValue(e.convert(val, host), ind)
 	}
-	if val.Ty.IsTuple() {
-		// A tuple serializes as a JSON array, not an object — checked before
-		// the generic IsObject branch (a tuple is structurally an object).
-		return e.emitJSONStringifyTuple(val, ind)
-	}
 	if val.Ty.IsObject() && !e.isDateClass(val.Ty) {
 		// (An instance of a class extending Date serializes as the Date,
 		// below, unless it declares a toJSON of its own, above.)
@@ -1208,15 +1198,15 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		// serialize as JSON `null` rather than dereferencing null in the field
 		// walk (which segfaulted).
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 		isN := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isN, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isN, val.Ref))
 		nL := e.freshLabel("json.objnull")
 		nnL := e.freshLabel("json.objnn")
 		mL := e.freshLabel("json.objmerge")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isN, nL, nnL))
 		e.emitLabel(nL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 		e.emitLabel(nnL)
 		// Present: an absent-able object is read as the object it is (a
@@ -1234,11 +1224,11 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		if err != nil {
 			return Value{}, err
 		}
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", ov.Ref, slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ov.Ref, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 		e.emitLabel(mL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	if val.Ty.IsArray() {
@@ -1248,13 +1238,13 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		if val.Ty.Nullable() {
 			isAbsent := e.emitArrayIsAbsent(val)
 			slot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 			aL := e.freshLabel("json.elarru.absent")
 			pL := e.freshLabel("json.elarru.present")
 			mL := e.freshLabel("json.elarru.merge")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isAbsent, aL, pL))
 			e.emitLabel(aL)
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 			e.emitLabel(pL)
 			base := val.Ty
@@ -1264,14 +1254,39 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 			if err != nil {
 				return Value{}, err
 			}
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", jv.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", jv.Ref, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 			e.emitLabel(mL)
 			out := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 			return Value{Ref: out, Ty: TypePtr}, nil
 		}
 		return e.emitJSONStringifyArrayValue(val, ind)
+	}
+	if (val.Ty.IsDate() && !val.Ty.IsDynamic() || e.isDateClass(val.Ty)) && (val.Ty.Nullable() || val.Ty.NullAndUndef()) {
+		// An absent Date (null, or undefined in an array) serializes as null.
+		slot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+		aL, pL, mL := e.freshLabel("json.date.absent"), e.freshLabel("json.date.present"), e.freshLabel("json.date.merge")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.isAbsentPtr(val.Ref, val.Ty), aL, pL))
+		e.emitLabel(aL)
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(pL)
+		base := val.Ty
+		base.setNullable(false)
+		base.setUndefined(false)
+		base.setNullAndUndef(false)
+		jv, err := e.emitJSONStringifyValueOwn(Value{Ref: val.Ref, Ty: base}, ind)
+		if err != nil {
+			return Value{}, err
+		}
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", jv.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
+		e.emitLabel(mL)
+		out := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
+		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	if val.Ty.IsDate() && !val.Ty.IsDynamic() || e.isDateClass(val.Ty) {
 		// Real JS calls Date.prototype.toJSON() (== toISOString()) during
@@ -1281,25 +1296,25 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		// An Invalid Date's toJSON is null.
 		val = Value{Ref: e.emitDateTimeValue(val), Ty: TypeI64}
 		slot := e.freshReg()
-		e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 		okL, badL, doneL := e.freshLabel("jsondate.ok"), e.freshLabel("jsondate.bad"), e.freshLabel("jsondate.done")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitDateIsInvalid(val.Ref), badL, okL))
 		e.emitLabel(badL)
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(okL)
 		iso, err := e.emitDateToISOString(val)
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureJSONStringifyStr()
+		e.ensureStrHeaderRuntime()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, iso.Ref))
-		e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", r, slot))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_str_str("+irPtr+" %s)", r, iso.Ref))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", r, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
 		out := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 		return Value{Ref: out, Ty: TypePtr}, nil
 	}
 	switch val.Ty.IR {
@@ -1307,17 +1322,17 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		trueStr := e.internString("true")
 		falseStr := e.internString("false")
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", r, val.Ref, trueStr, falseStr))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, val.Ref, trueStr, falseStr))
 		// Uniform fragment ownership: hand back a heap copy so the
 		// accumulator concat can free every fragment unconditionally.
 		e.ensureStrHeaderRuntime()
 		r2 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_str_from_cstr(ptr %s)", r2, r))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", r2, r))
 		return Value{Ref: r2, Ty: TypePtr}, nil
-	case "ptr":
-		e.ensureJSONStringifyStr()
+	case irPtr:
+		e.ensureStrHeaderRuntime()
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", r, val.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_str_str("+irPtr+" %s)", r, val.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	default:
 		if val.Ty.Float {
@@ -1331,7 +1346,7 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 			fin := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = fcmp oeq %s %s, 0.0", fin, ir, diff))
 			slot := e.freshReg()
-			e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", slot))
+			e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 			finL := e.freshLabel("json.fin")
 			nfL := e.freshLabel("json.nonfin")
 			mL := e.freshLabel("json.finmerge")
@@ -1341,20 +1356,20 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 			if err != nil {
 				return Value{}, err
 			}
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", sv.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", sv.Ref, slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 			e.emitLabel(nfL)
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("null"), slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("null"), slot))
 			e.emitTerminator(fmt.Sprintf("br label %%%s", mL))
 			e.emitLabel(mL)
 			out := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, slot))
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 			return Value{Ref: out, Ty: TypePtr}, nil
 		}
-		e.ensureJSONStringifyNum()
+		e.ensureStrHeaderRuntime()
 		coerced := e.convert(val, TypeI64)
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_num(i64 %s)", r, coerced.Ref))
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_str_num(i64 %s)", r, coerced.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
 	}
 }
@@ -1364,7 +1379,7 @@ func (e *Emitter) emitJSONParse(args []ast.Expression, targetTy Type, pos ast.Po
 	if resolver.ParseArgsAtRunTime(args) {
 		m, ok := e.libExports["internal_json:parseWith"]
 		if !ok {
-			return Value{}, fmt.Errorf("%d:%d: internal error: JSON.parse's reviver is not linked", pos.Line, pos.Col)
+			return Value{}, internalAt(pos, "JSON.parse's reviver is not linked")
 		}
 		v, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), args, pos))
 		if err != nil {
@@ -1375,8 +1390,9 @@ func (e *Emitter) emitJSONParse(args []ast.Expression, targetTy Type, pos ast.Po
 	if len(args) == 2 {
 		args = args[:1] // a null or undefined reviver revives nothing
 	}
-	if len(args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse expects 1 argument", pos.Line, pos.Col)
+	args, err := e.fitArgs(args, 1, pos) // (a missing argument is undefined)
+	if err != nil {
+		return Value{}, err
 	}
 	val, err := e.emitExpr(args[0])
 	if err != nil {
@@ -1393,6 +1409,14 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 	// A dynamic argument goes through ToString first, matching JS's own
 	// coercion (a boxed string round-trips unchanged; JSON.parse(undefined)
 	// then throws the SyntaxError the parser raises for "undefined").
+	if !val.Ty.IsDynamic() && val.Ty.IR != irPtr {
+		// Any other value: its ToString too (`JSON.parse(5)` is 5).
+		b, err := e.emitBoxValue(val)
+		if err != nil {
+			return Value{}, err
+		}
+		val = b
+	}
 	if val.Ty.IsDynamic() {
 		s, err := e.emitDynamicToString(val)
 		if err != nil {
@@ -1400,8 +1424,8 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 		}
 		val = s
 	}
-	if val.Ty.IR != "ptr" {
-		return Value{}, fmt.Errorf("%d:%d: JSON.parse expects a string argument", pos.Line, pos.Col)
+	if val.Ty.IR != irPtr {
+		return Value{}, internalAt(pos, "JSON.parse of a non-string after ToString")
 	}
 	// TDD-00077 Track P: parse into a validated tree (throwing a catchable
 	// SyntaxError on malformed input), project it onto the target type, then
@@ -1413,7 +1437,7 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_json_free(ptr %s)", tree))
+	e.emitInstr(fmt.Sprintf("call void @__kml_json_free("+irPtr+" %s)", tree))
 	return result, nil
 }
 
@@ -1424,27 +1448,26 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 // __kml_json_str_str, the value re-read via __kml_map_str_get and delegated
 // to emitJSONStringifyValue under the map's declared value type.
 func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value, error) {
-	e.ensureJSONStringifyStr()
+	e.ensureStrHeaderRuntime()
 	e.ensureMapStrHelpers()
 	valTy := TypePtr
 	if mapVal.Ty.MapVal != nil {
 		valTy = *mapVal.Ty.MapVal
 	}
-	keys := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call {ptr, i64} @__kml_map_str_keys(ptr %s)", keys, mapVal.Ref))
+	keys := e.emitMapCopy("keys", mapVal.Ref)
 	kPtr, kLen := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 0", kPtr, keys))
-	e.emitInstr(fmt.Sprintf("%s = extractvalue {ptr, i64} %s, 1", kLen, keys))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", kPtr, keys))
+	e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", kLen, keys))
 
 	accAlloca := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", accAlloca))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.jsonSeed("{"), accAlloca))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", accAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.jsonSeed("{"), accAlloca))
 	idxPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idxPtr))
-	e.emitInstr(fmt.Sprintf("store i64 0, ptr %s, align 8", idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idxPtr))
 	wroteAlloca := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", wroteAlloca))
-	e.emitInstr(fmt.Sprintf("store i1 false, ptr %s, align 1", wroteAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", wroteAlloca))
 
 	condL := e.freshLabel("jsonmap.cond")
 	bodyL := e.freshLabel("jsonmap.body")
@@ -1452,18 +1475,18 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
 	i0, c := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i0, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i0, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", c, i0, kLen))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", c, bodyL, doneL))
 
 	e.emitLabel(bodyL)
 	i1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", i1, idxPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i1, idxPtr))
 	kg, key := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr ptr, ptr %s, i64 %s", kg, kPtr, i1))
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", key, kg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 %s", kg, kPtr, i1))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", key, kg))
 	raw := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get(ptr %s, ptr %s)", raw, mapVal.Ref, key))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", raw, mapVal.Ref, key))
 	// The map's own decoding (an array value is its header, unpacked).
 	vVal := e.mapValFromI64(raw, valTy)
 	// An entry holding undefined has no place in the JSON text.
@@ -1472,7 +1495,7 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	case valTy.IsDynamic() && valTy.IR == "i64":
 		skip = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", skip, raw, nbUndefined))
-	case valTy.IR == "ptr" && valTy.IsUndefined():
+	case valTy.IR == irPtr && valTy.IsUndefined():
 		skip = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", skip, raw))
 	}
@@ -1480,21 +1503,21 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", skip, nextL, writeL))
 	e.emitLabel(writeL)
 	acc0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", acc0, accAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", acc0, accAlloca))
 	// Separator: "," for every entry after the first.
 	wrote := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", wrote, wroteAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", wrote, wroteAlloca))
 	isFirst := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = xor i1 %s, true", isFirst, wrote))
-	e.emitInstr(fmt.Sprintf("store i1 true, ptr %s, align 1", wroteAlloca))
+	e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", wroteAlloca))
 	sep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", sep, isFirst, e.internString(ind.itemPrefix(0)), e.internString(ind.itemPrefix(1))))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", sep, isFirst, e.internString(ind.itemPrefix(0)), e.internString(ind.itemPrefix(1))))
 	acc1, err := e.jsonConcatFree(Value{Ref: acc0, Ty: TypePtr}, Value{Ref: sep, Ty: TypePtr}, true, false)
 	if err != nil {
 		return Value{}, err
 	}
 	keyJSON := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_json_str_str(ptr %s)", keyJSON, key))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_str_str("+irPtr+" %s)", keyJSON, key))
 	acc2, err := e.jsonConcatFree(acc1, Value{Ref: keyJSON, Ty: TypePtr}, true, true)
 	if err != nil {
 		return Value{}, err
@@ -1511,20 +1534,20 @@ func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", acc4.Ref, accAlloca))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", acc4.Ref, accAlloca))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", nextL))
 	e.emitLabel(nextL)
 	i2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", i2, i1))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", i2, idxPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", i2, idxPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 
 	e.emitLabel(doneL)
 	preClose, any := e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", preClose, accAlloca))
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", any, wroteAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", preClose, accAlloca))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", any, wroteAlloca))
 	closer := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr %s", closer, any, e.internString(ind.closeBracket("}", 1)), e.internString(ind.closeBracket("}", 0))))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", closer, any, e.internString(ind.closeBracket("}", 1)), e.internString(ind.closeBracket("}", 0))))
 	return e.jsonConcatFree(Value{Ref: preClose, Ty: TypePtr}, Value{Ref: closer, Ty: TypePtr}, true, false)
 }
 

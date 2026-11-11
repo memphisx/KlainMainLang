@@ -227,3 +227,41 @@ const w = new Map([["a", 1], ["b", "two"], ["c", null]]);
 console.log(w.get("b"), w.get("c"), w.get("zz"), [...w.values()]);
 `)
 }
+
+// A Set built from a string holds its code points; size reads off any
+// receiver held as the collection.
+func TestE2ESetFromStringAndSizes(t *testing.T) {
+	assertSameAsNode(t, `
+const s = new Set("a😀ba"); console.log(s.size, [...s]);
+const m = new Map<string, number>([["a", 1]]);
+class C { scores = new Map<string, number>(); }
+const c = new C(); c.scores.set("x", 1);
+function f(x: Map<string, number> | undefined) { if (x) console.log(x.size); }
+f(m); console.log(m.size, c.scores.size, [m][0].size, new Set("abc").size);
+const a: any = m; console.log(a.size);
+`)
+}
+
+// The Array, Map, Set and RegExp-string iterators' next/toArray and the
+// Iterator helpers, through their declarations.
+func TestE2EBuiltinIteratorIntrinsics(t *testing.T) {
+	assertSameAsNode(t, `
+const m = new Map<string, number>([["a", 1], ["b", 2]]);
+const k = m.keys(); console.log(k.next(), k.next(), k.next());
+const s = new Set([1, 2, 3]); const sv = s.values(); console.log(sv.next().value, sv.toArray());
+console.log([1, 2, 3].values().toArray(), [5, 6].entries().next());
+console.log(m.values().reduce((a, b) => a + b, 0), m.entries().map(([x, y]) => x + y).toArray());
+console.log(s.values().filter(x => x > 1).toArray());
+const ri = "a1b2".matchAll(/\d/g); console.log(ri.next().value?.[0], ri.toArray().length);
+const any1: any = m.keys(); console.log(any1.next());
+`)
+}
+
+// An array or string iterator held boxed: next as a dynamic function.
+func TestE2EArrayIteratorNextThroughAny(t *testing.T) {
+	assertSameAsNode(t, `const a: any = [1, 2];
+const it = a[Symbol.iterator](); console.log(it.next(), it.next(), it.next());
+const s: any = "hé"; const si = s[Symbol.iterator](); console.log(si.next(), si.next(), si.next());
+const v = a.values(); console.log([...v], typeof it.next);
+`)
+}

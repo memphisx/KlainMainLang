@@ -17,7 +17,7 @@ import (
 // sets it before compiling turns it on. The E2E harness runs under panic.
 
 var (
-	reHeapAlloc   = regexp.MustCompile(`call (ptr @(malloc|calloc|realloc)|void @free)\(`)
+	reHeapAlloc   = regexp.MustCompile(`call (` + irPtr + ` @(malloc|calloc|realloc)|void @free)\(`)
 	heapCheckSeen = map[string]bool{} // sites already recorded by this process
 )
 
@@ -26,11 +26,11 @@ func (e *Emitter) heapCheckInstr(line string) {
 	kind := ""
 	switch {
 	case strings.HasPrefix(line, "store "):
-		i := strings.LastIndex(line, ", ptr ")
+		i := strings.LastIndex(line, ", "+irPtr+" ")
 		if i < 0 {
 			return
 		}
-		dst := line[i+len(", ptr "):]
+		dst := line[i+len(", "+irPtr+" "):]
 		if j := strings.IndexAny(dst, ", "); j >= 0 {
 			dst = dst[:j]
 		}
@@ -74,8 +74,8 @@ func (e *Emitter) isStackPtr(p string, depth int) bool {
 	}
 	body := "\n" + e.body.String()
 	// A shadow-stack thread-local's address (frameSlot): a global's.
-	if strings.Contains(body, "\n  "+p+" = call ptr @__kml_frame_top_slot()") ||
-		strings.Contains(body, "\n  "+p+" = call ptr @__kml_frame_base_slot()") {
+	if strings.Contains(body, "\n  "+p+" = call "+irPtr+" @__kml_frame_top_slot()") ||
+		strings.Contains(body, "\n  "+p+" = call "+irPtr+" @__kml_frame_base_slot()") {
 		return true
 	}
 	def := "\n  " + p + " = getelementptr "
@@ -87,11 +87,11 @@ func (e *Emitter) isStackPtr(p string, depth int) bool {
 	if j := strings.IndexByte(rest, '\n'); j >= 0 {
 		rest = rest[:j]
 	}
-	k := strings.Index(rest, ", ptr ")
+	k := strings.Index(rest, ", "+irPtr+" ")
 	if k < 0 {
 		return false
 	}
-	base := rest[k+len(", ptr "):]
+	base := rest[k+len(", "+irPtr+" "):]
 	if j := strings.IndexAny(base, ", "); j >= 0 {
 		base = base[:j]
 	}

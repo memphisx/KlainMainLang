@@ -7,33 +7,6 @@
 package llvm
 
 const (
-	wstreamStructIR   = "{ i64, i64, ptr, i64, i64, i64, double, double, ptr, ptr, ptr, ptr, i64, ptr, ptr, ptr }"
-	wstreamStructSize = 128
+	wstreamStructIR   = "{ i64, i64, " + irPtr + ", i64, i64, i64, double, double, " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + " }"
+	wstreamStructSize = 136
 )
-
-// ensureWStreamRuntime declares the WritableStream runtime (streams.c) once.
-func (e *Emitter) ensureWStreamRuntime() {
-	if e.usedWStreamRuntime {
-		return
-	}
-	e.usedWStreamRuntime = true
-	e.ensurePromiseSettle()
-	e.ensurePromiseAddReaction()
-	e.emitGlobal(`declare ptr @__kml_ws_alloc(double)
-declare void @__kml_ws_update_ready(ptr)
-declare void @__kml_ws_qpush(ptr, i64, i64, double, ptr)
-declare void @__kml_ws_finish_close(ptr)
-declare void @__kml_ws_write_settled(ptr)
-declare void @__kml_ws_close_settled(ptr)
-declare void @__kml_ws_advance(ptr)
-declare void @__kml_ws_error(ptr, i64)
-declare ptr @__kml_ws_write(ptr, i64, i64)
-declare ptr @__kml_ws_close(ptr)
-declare ptr @__kml_ws_abort(ptr, i64)
-declare double @__kml_ws_desired(ptr)
-declare void @__kml_ws_started(ptr)
-declare i64 @__kml_ws_lock(ptr)
-declare void @__kml_ws_unlock(ptr)
-declare i64 @__kml_ws_inspect_bits(ptr)
-declare void @__kml_ws_release(ptr, ptr, i64)`)
-}

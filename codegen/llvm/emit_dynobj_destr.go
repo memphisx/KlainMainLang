@@ -96,7 +96,7 @@ func (e *Emitter) unpackDynArrayPatternInto(arrVal Value, elems []ast.ArrayPatte
 			e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", n, lenVal, i))
 			e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 0", pos0, n))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", nn, pos0, n))
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", from, dataPtr, i))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", from, dataPtr, i))
 			data := e.emitArrayCopy(from, nn, TypeAny)
 			rest, err := e.emitBoxValue(Value{Ref: e.newArrayHeader(data, nn), Ty: ArrayOf(TypeAny)})
 			if err != nil {
@@ -115,10 +115,10 @@ func (e *Emitter) unpackDynArrayPatternInto(arrVal Value, elems []ast.ArrayPatte
 		// A past-the-end read loads slot 0 only to discard it: guard an
 		// empty view by loading through a select on the pointer too.
 		safe := e.freshReg()
-		e.declareFn("__kml_undef_word", fmt.Sprintf("@__kml_undef_word = private constant i64 %d, align 8", nbUndefined))
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, ptr %s, ptr @__kml_undef_word", safe, in, dataPtr))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %s", gep, safe, idx))
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, gep))
+		e.declareFn("__kml_undef_word", fmt.Sprintf("@__kml_undef_word = private"+irGlobalAS+" constant i64 %d, align 8", nbUndefined))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" @__kml_undef_word", safe, in, dataPtr))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", gep, safe, idx))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, gep))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", val, in, w, nbUndefined))
 		if err := e.bindDynPatternValue(Value{Ref: val, Ty: TypeAny}, elem.Name, elem.Default, elem.SubArray, elem.SubObject, pos); err != nil {
 			return err
@@ -159,7 +159,7 @@ func (e *Emitter) bindDynPatternValue(val Value, local string, def ast.Expressio
 	}
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", val.Ref, slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", val.Ref, slot))
 	e.definePatternLocal(local, Symbol{Ptr: slot, Ty: TypeAny})
 	return nil
 }
@@ -187,16 +187,16 @@ func (e *Emitter) applyDynDefault(val Value, def ast.Expression, pos ast.Pos) (V
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", boxed.Ref, resPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", boxed.Ref, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 	e.emitLabel(presentL)
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", val.Ref, resPtr))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", val.Ref, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", afterL))
 
 	e.emitLabel(afterL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, resPtr))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, resPtr))
 	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
@@ -258,7 +258,10 @@ func (e *Emitter) ensureAnyObjRest() {
 		return
 	}
 	e.usedAnyObjRest = true
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	restore := e.beginDetachedFunc()
 	defer restore()
 	e.pushScope()
@@ -266,7 +269,7 @@ func (e *Emitter) ensureAnyObjRest() {
 	bind := func(name, init string) string {
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", init, slot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", init, slot))
 		e.define(name, Symbol{Ptr: slot, Ty: TypeAny})
 		return slot
 	}
@@ -284,7 +287,7 @@ func (e *Emitter) ensureAnyObjRest() {
 	bind("__kml_rest_src", "%p_src")
 	bind("__kml_rest_excl", "%p_excl")
 	bag := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_dynobj_new()", bag))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
 	outSlot := bind("__kml_rest_out", e.emitDynObjBox(bag).Ref)
 	pos := ast.Pos{}
 	obj := func(m string, arg ast.Expression) ast.Expression {
@@ -319,7 +322,7 @@ func (e *Emitter) ensureAnyObjRest() {
 		panic(fmt.Sprintf("__kml_any_obj_rest: %v", err))
 	}
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, outSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, outSlot))
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", out))
 	e.writeFunc("i64 @__kml_any_obj_rest(i64 %p_src, i64 %p_excl)", e.allocas.String()+e.body.String())
 }

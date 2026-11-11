@@ -30,7 +30,7 @@ typedef struct { /* __kml_finreg_create's 24-byte record */
     kml_report report;
 } kml_registry;
 
-typedef struct kml_fincell { /* 72 bytes */
+typedef struct kml_fincell { /* 80 bytes */
     struct kml_fincell *next;
     kml_registry *reg;
     void *target;
@@ -39,6 +39,7 @@ typedef struct kml_fincell { /* 72 bytes */
     i64 line, col;
     i64 dead;
     struct kml_fincell *gc_next;
+    struct kml_fincell *pend_next; /* the parked list (gc_cb) */
 } kml_fincell;
 
 /* The list head is thread-local under manual but a plain global under gc:
@@ -54,6 +55,10 @@ static _Thread_local kml_fincell *all;
 static char atexit_done;
 
 static void finreg_atexit(void);
+#ifdef KML_GC
+static void unpark(void);
+extern void (*__kml_microtask_prefill_hook)(void);
+#endif
 
 void *__kml_finreg_create(void *cl, void *tramp, void *rep, i64 hdr) {
     /* The registry's header word precedes it (the emitter's
@@ -67,6 +72,9 @@ void *__kml_finreg_create(void *cl, void *tramp, void *rep, i64 hdr) {
     if (!atexit_done) {
         atexit_done = 1;
         atexit(finreg_atexit);
+#ifdef KML_GC
+        __kml_microtask_prefill_hook = unpark;
+#endif
     }
     return r;
 }
@@ -92,6 +100,7 @@ void __kml_finreg_register(void *reg, void *target, i64 held, void *token, i64 l
     c->col = col;
     c->dead = 0;
     c->gc_next = NULL;
+    c->pend_next = NULL;
     all = c;
 #ifdef KML_GC
     c->gc_next = (kml_fincell *)kml_gc_finalizer(target, gc_cb, c);
@@ -147,10 +156,37 @@ static void enqueue_cell(kml_fincell *c) {
 }
 
 #ifdef KML_GC
+/* The collector runs gc_cb inside an allocation (any of the program's, or
+ * the microtask queue's own growth), where queueing would allocate and
+ * re-enter the queue: it only marks its cells dead and parks them, without
+ * allocating. The queue takes them before it is read (prefill). */
+static kml_fincell *parked;
+
 static void gc_cb(void *obj, void *cd) {
     (void)obj;
     for (kml_fincell *c = (kml_fincell *)cd; c; c = c->gc_next)
-        if (c->dead == 0) enqueue_cell(c);
+        if (c->dead == 0) {
+            c->dead = 1;
+            c->pend_next = parked;
+            parked = c;
+        }
+}
+
+/* Queue the parked cells' cleanups, in the order they died. */
+static void unpark(void) {
+    kml_fincell *rev = NULL;
+    while (parked) {
+        kml_fincell *c = parked;
+        parked = c->pend_next;
+        c->pend_next = rev;
+        rev = c;
+    }
+    while (rev) {
+        kml_fincell *c = rev;
+        rev = c->pend_next;
+        c->pend_next = NULL;
+        enqueue_cell(c);
+    }
 }
 #else
 /* Memory.free's chokepoint: every live registration targeting p fires. */

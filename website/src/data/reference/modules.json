@@ -156,15 +156,17 @@
     },
     {
       "id": "modules.require",
-      "name": "Static CommonJS require('<literal>')",
-      "statusRow": "Static CommonJS require('<literal>')",
-      "signature": "const x = require('m'); const { a, b } = require('m')",
+      "name": "CommonJS require / node:module",
+      "statusRow": "CommonJS require / node:module",
+      "signature": "const x = require('m'); require(name); createRequire(import.meta.url)",
       "badge": "caveats",
-      "description": "Desugared to the equivalent ES import at parse time, so it resolves and dispatches identically to `import` and interoperates with `import` in the same file. `const x = require('m')` binds the namespace (whole module object); `const { a, b } = require('m')` is a named import; bare `require('m')` is side-effect-only.",
+      "description": "A top-level `require('m')` is desugared to the equivalent ES import, so it resolves identically to `import`; `const x = require('m')` binds the namespace, or for `events`/`assert` Node's `module.exports` function. A `require('m')` anywhere else (in a function, an expression, a pattern with defaults) is that module, linked statically. `require` is also a value: `require(name)` by a computed name, `require.resolve`, `require.main === module`. `node:module` gives `Module`, `builtinModules`, `isBuiltin` and `createRequire`. A CommonJS file (one using `module`/`exports`, with no ES `export`) gets Node's `module` object, and `require` of it gives its `module.exports`.",
       "exampleKey": "imports/require_commonjs",
-      "snippet": "const path = require('path')\nconst { basename, extname } = require('path')",
+      "snippet": "const path = require('path')\nconst { basename, extname } = require('path')\nfunction load(name) { return require(name) }",
       "differences": [
-        "Top-level, string-literal specifier only. `const x = require('m')` binds the namespace (whole module object); `const { a, b: c } = require('m')` is a named import; bare `require('m')` is side-effect-only. A destructuring default/nested-pattern/rest on a require binding, or a dynamic `require(expr)` / a `require` nested in a function body (lazy loading), is a clean compile error — deferred to the runtime/lazy-loading capability"
+        "A required module's body runs at program start, not at its first `require`",
+        "A computed `require(name)` finds only the modules the program links (the file's literal requires and the builtins its string literals name); any other name throws `MODULE_NOT_FOUND`. Files are never loaded at run time",
+        "`node:module` lacks `register`/`registerHooks`, `findPackageJSON`, `SourceMap`, the compile cache and `stripTypeScriptTypes`"
       ],
       "seeAlso": ["modules.namedImport", "modules.dynamicImport"],
       "spec": { "mdn": "https://nodejs.org/api/modules.html#requireid" }
@@ -210,9 +212,9 @@
       "description": "By default the target is compiled into the binary and its top-level runs on first import(), as a task on the program's one event loop: it shares every module instance with the program, a top-level throw rejects the import(), and an unsettled top-level await exits with code 13, as in Node. -dynamic-import=lazy keeps those semantics with each target's code in a shared library beside the binary, loaded on first use. -dynamic-import=isolated makes each target its own program with its own module instances, so its import-time state stays apart from the program's.",
       "snippet": "const m = await import('./mod')\nconsole.log(m.greeting, m.answer)",
       "differences": [
-        "String-literal specifier only — a runtime-computed import(expr) is a clean compile error",
+        "A runtime-computed import(expr) can load only a module the importing file also names in a string literal (a relative path or a builtin module's name; a native program holds only the modules compiled into it); any other specifier rejects with Node's ERR_MODULE_NOT_FOUND",
         "Under isolated the result object exposes annotated scalar/string exports only; function/class/array/object exports are omitted (bundled and lazy give the full module namespace object)",
-        "import('node:…') of a builtin module is a clean compile error",
+        "A builtin module's namespace has no default member",
         "lazy and isolated need the sibling <binary>.d/ directory and refuse --static; on Windows lazy compiles thread-locals emulated (a call per access)",
         "isolated is a deliberate divergence: the target gets its own instance of every module it imports"
       ],

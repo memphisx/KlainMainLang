@@ -33,18 +33,19 @@
             "caveats": [
               "No BYOB readers / byte controllers (`type: 'bytes'` rejected at compile time)",
               "`ReadableStream.from()` accepts arrays only, not async iterables",
-              "Source callbacks must be arrow/function-expression/method-shorthand literals; a cancel callback can't take a reason parameter",
+              "Source callbacks must be arrow/function-expression/method-shorthand literals",
               "`read()` on a closed stream whose chunk type is an **array/tuple** (`ReadableStream<number[]>`) yields the chunk's zero-shaped value, not `undefined` (an array slot has no spare absent state — [ADR-00246](../adr/00/ADR-00246.md))",
-              "`values()` returns a reader usable in `for await` only (no standalone `.next()`)",
               "In the no-fiber tier, `await` of an already-settled `read()` skips the microtask drain, so a pending pull can run one tick later than real JS",
               "A synchronously-throwing pull/start propagates to the caller instead of erroring the stream",
-              "`tee()` forwards the last cancelling branch's reason instead of composing both; a signal abort of `pipeTo` takes effect at the next chunk boundary"
+              "A signal abort of `pipeTo` takes effect at the next chunk boundary",
+              "`pipeThrough`'s argument must be statically a `TransformStream`: one typed `any`, or a plain `{ readable, writable }` pair, is a compile error"
             ],
             "notes": [
               "One 144-byte heap struct fuses stream + controller + reader (compile-time retyping), a host header word before it; chunk queue + pending-read promise FIFO with HWM/size accounting; spec CallPullIfNeeded; per-site fulfill thunk builds typed `{value,done}` records ([ADR-00296](../adr/00/ADR-00296.md))",
               "Through `any` a stream keeps its identity and members; console.log renders streams, readers, writers and controllers as Node does, and a released reader or writer rejects its closed/ready and operations with Node's state errors ([ADR-01718](../adr/01/ADR-01718.md))",
               "Runs on the promise/microtask runtime alone — no fibers or libcurl for in-memory pipelines",
-              "A scalar/string/object chunk reads a real `undefined`, and `controller.desiredSize` is `null` once errored ([TDD-00196](../tdd/TDD-00196.md), [ADR-00826](../adr/00/ADR-00826.md))"
+              "A scalar/string/object chunk reads a real `undefined`, and `controller.desiredSize` is `null` once errored ([TDD-00196](../tdd/TDD-00196.md), [ADR-00826](../adr/00/ADR-00826.md))",
+              "`values()` and `[Symbol.asyncIterator]()` are Node's iterator (buffered fast path, `return()` cancelling with its value, `preventCancel`); a source's `cancel` gets the reason as given, and a `tee()` cancels its source with both branches' reasons ([ADR-01933](../adr/01/ADR-01933.md))"
             ],
             "decl": [
               "ReadableStream"
@@ -68,9 +69,10 @@
             "feature": "`TransformStream`",
             "status": "implemented",
             "caveats": [
-              "No transformer `start` callback",
+              "A promise a transformer's `start` returns does not delay the first transform",
+              "Not Node's backpressure-promise algorithm: a read or write can settle a few microtask ticks earlier",
               "Cancelling the readable side doesn't error the writable side",
-              "An identity transform (no callback) requires matching I/O chunk representations"
+              "An identity transform (no callback) whose output chunk type is of another kind converts each chunk to it (`NaN` for a string read as a number), where Node passes it through unchanged ([ADR-01983](../adr/01/ADR-01983.md))"
             ],
             "notes": [
               "Writable sink write runs the transform when the readable side has capacity, else parks the chunk (at most one, by write serialization); readable pull resumes it; spec defaults writable HWM 1 / readable HWM 0 ([ADR-00298](../adr/00/ADR-00298.md))"
@@ -83,11 +85,11 @@
             "feature": "`CompressionStream` / `DecompressionStream`",
             "status": "implemented",
             "caveats": [
-              "The format argument must be a string literal (\"gzip\", \"deflate\", \"deflate-raw\") — a runtime-computed format string is a compile error",
-              "Chunks are `Uint8Array` only (no ArrayBuffer/DataView BufferSource variants)"
+              "No `\"brotli\"` format (Node 24 accepts it): it is the TypeError for a value that is no CompressionFormat"
             ],
             "notes": [
-              "A `%kml.ts` TransformStream context with native zlib transform/flush closures; `-lz` linked only when constructed; inflate auto-detects gzip/zlib wrappers ([ADR-00302](../adr/00/ADR-00302.md))"
+              "A `%kml.ts` TransformStream context with native zlib transform/flush closures; `-lz` linked only when constructed; inflate auto-detects gzip/zlib wrappers ([ADR-00302](../adr/00/ADR-00302.md))",
+              "A chunk may be any BufferSource or a string (its UTF-8 bytes), typed or through `any`; a format known only at run time is checked there, with Node's `ERR_INVALID_ARG_VALUE` ([ADR-01937](../adr/01/ADR-01937.md))"
             ],
             "decl": [
               "CompressionStream",
@@ -111,10 +113,7 @@
             "feature": "`stream.Readable` / `.Writable` / `.Duplex` / `.Transform` / `.PassThrough`",
             "status": "implemented",
             "caveats": [
-              "The HTTP server's `req`/`res` are separate runtime handles, not instances of these classes: `instanceof Readable`, a subclass's methods and piping into one of these classes do not apply to them",
-              "`Readable.toWeb` enqueues each chunk as it arrives, without the web stream's pull backpressure; `Duplex.toWeb`/`Duplex.fromWeb` are missing",
-              "Not ported: `Readable.wrap`, `stream.isReadable`/`isErrored`/`setDefaultHighWaterMark`",
-              "A method replaced on an instance (`this._read = fn`) is not supported; pass it in the options"
+              "The HTTP server's `req`/`res` are separate runtime handles, not instances of these classes: `instanceof Readable`, a subclass's methods and piping into one of these classes do not apply to them"
             ],
             "notes": [
               "Node v24's `lib/internal/streams` ported to TypeScript (`lib/node/stream.ts`) and compiled with the program: the same states, event order and `process.nextTick` deferrals, the options form with `this`, class overrides, `setEncoding` via a `string_decoder`-like decoder, object mode, `highWaterMark` defaults (64 KiB, 16 objects), `destroy`/`autoDestroy`, `for await` ([ADR-01161](../adr/01/ADR-01161.md))",

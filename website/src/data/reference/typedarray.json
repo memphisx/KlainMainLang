@@ -4,7 +4,7 @@
   "kind": "web",
   "statusPage": "BINARY-DATA-TYPED-ARRAYS.md",
   "coversRows": "all",
-  "coverage": { "loose": "9/9", "loosePct": 100, "strict": "4/9", "strictPct": 44 },
+  "coverage": { "loose": "10/10", "loosePct": 100, "strict": "6/10", "strictPct": 60 },
   "lede": "Raw byte buffers and the typed views over them, the layer every networking, crypto, and file-I/O path is built on. Every typed array is a general expression and knows its `.buffer` and `.byteOffset`. ArrayBuffer, DataView, SharedArrayBuffer, Atomics, and a real bigint-backed BigInt64Array/DataView 64-bit path are all here, so binary layouts round-trip byte-exactly, an embedded NUL included.",
   "entries": [
     {
@@ -40,14 +40,11 @@
       "name": "BigInt64Array / BigUint64Array",
       "statusRow": "BigInt64Array / BigUint64Array",
       "signature": "new BigInt64Array(size | bigint[] | TypedArray)",
-      "badge": "caveats",
-      "description": "64-bit typed arrays whose elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision bigint handles — writes take what ToBigInt does (a bigint or a boolean; a plain number is the spec's TypeError), reads wrap losslessly, so values above 2^53 round-trip exactly. Every %TypedArray%.prototype method (map, filter, reduce, indexOf, sort, join, keys/values/entries, with, …) passes and returns real bigints, also through `any`. Atomics load/store/RMW/compareExchange work on them, lowered to the same seq_cst i64 atomics.",
+      "badge": "exact",
+      "description": "64-bit typed arrays whose elements are stored as raw i64/u64 but cross the language boundary as real arbitrary-precision bigint handles — writes take what ToBigInt does (a bigint or a boolean; a plain number is the spec's TypeError), reads wrap losslessly, so values above 2^53 round-trip exactly. Every %TypedArray%.prototype method (map, filter, reduce, indexOf, sort, join, keys/values/entries, with, …) passes and returns real bigints, also through `any`. Atomics load/store/RMW/compareExchange/wait/notify work on them, lowered to the same seq_cst i64 atomics.",
       "returns": { "type": "BigInt64Array | BigUint64Array", "desc": "A 64-bit typed array." },
       "exampleKey": "typedarrays/typedarrays",
       "snippet": "const bigs = new BigInt64Array(2)\nbigs[0] = 9007199254740993n\nconsole.log(bigs[0])            // 9007199254740993n\nconst ubigs = new BigUint64Array([18446744073709551615n])\nconsole.log(ubigs[0])          // 18446744073709551615n",
-      "differences": [
-        "`Atomics.wait`/`notify` stay `Int32Array`-only"
-      ],
       "seeAlso": ["typedarray.uint8arrayint8arrayuint1", "typedarray.atomics", "typedarray.dataview"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigInt64Array" }
     },
@@ -98,6 +95,20 @@
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Blob" }
     },
     {
+      "id": "typedarray.file",
+      "name": "File",
+      "statusRow": "File",
+      "signature": "new File(bits, name, { type, lastModified }?)",
+      "badge": "exact",
+      "description": "A Blob with a name and a last-modified time (now by default), as FormData stores a Blob entry. Also exported by the buffer module.",
+      "returns": { "type": "File", "desc": "A named Blob." },
+      "exampleKey": "blob/form_data",
+      "snippet": "const f = new File(['{\"temp\":21}'], 'report.json', { type: 'application/json' })\nconsole.log(f.name, f.size, f.type)",
+      "differences": [],
+      "seeAlso": ["typedarray.blob", "fetch.formdata"],
+      "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/File" }
+    },
+    {
       "id": "typedarray.sharedarraybuffer",
       "name": "SharedArrayBuffer",
       "statusRow": "SharedArrayBuffer",
@@ -120,14 +131,12 @@
       "statusRow": "Atomics",
       "signature": "Atomics.add/load/store/wait/notify/compareExchange(ta, i, ...)",
       "badge": "caveats",
-      "description": "load/store/add/sub/and/or/xor/exchange/compareExchange on any integer TypedArray including BigInt64Array/BigUint64Array (bigint operands/results), lowered directly to seq_cst LLVM atomics; float TypedArrays are a compile-time rejection. wait(ta, i, expected, timeoutMs?) returns \"ok\"/\"not-equal\"/\"timed-out\"; notify(ta, i, count?) returns the wake count — a portable futex substitute. Atomics.isLockFree(n) is true for 1/2/4/8.",
+      "description": "load/store/add/sub/and/or/xor/exchange/compareExchange on any integer TypedArray including BigInt64Array/BigUint64Array (bigint operands/results), lowered directly to seq_cst LLVM atomics; a float or non-array receiver throws V8's TypeError and an out-of-range index a RangeError. wait(ta, i, expected, timeoutMs?) on an Int32Array or BigInt64Array returns \"ok\"/\"not-equal\"/\"timed-out\"; notify(ta, i, count?) returns the wake count — a portable futex substitute. Atomics.isLockFree(n) is true for 1/2/4/8.",
       "returns": { "type": "number | bigint | string", "desc": "The atomic result." },
       "exampleKey": "workers/shared_counter",
       "snippet": "for (let i = 0; i < 1000; i++) {\n  Atomics.add(cells, 0, 1);\n}\nconst r: string = Atomics.wait(cells, 1, 0, 2000);\nconsole.log(\"4-byte ops lock-free: \" + Atomics.isLockFree(4));",
       "differences": [
-        "`wait` blocks the whole calling thread (event loop and fibers included) — allowed on the main thread (Node posture); no `waitAsync`",
-        "`wait`/`notify` are `Int32Array`-only (spec minus the BigInt64 half)",
-        "Index is bounds-unchecked, matching ordinary TypedArray indexing"
+        "`wait` blocks the whole calling thread (event loop and fibers included) — allowed on the main thread (Node posture); no `waitAsync`"
       ],
       "seeAlso": ["typedarray.sharedarraybuffer", "typedarray.bigint64arraybiguint64ar"],
       "spec": { "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Atomics" }

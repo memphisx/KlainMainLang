@@ -72,7 +72,7 @@ func TestE2ETupleElementAssignOutOfRange(t *testing.T) {
 	mustCompileError(t, `
 const t: [string, number] = ["a", 1]
 t[5] = "x"
-`, "out of range")
+`, "has no element at index '5'")
 }
 
 // A named interface as a tuple element. Regression for the rewriteType gap
@@ -225,5 +225,140 @@ const [p, q] = t.get(1)!;
 console.log(p, q, t.get(2));
 const m = util.getSystemErrorMap();
 console.log(m.get(-2), util.getSystemErrorName(-2));
+`)
+}
+
+// An arrow typed by a signature returning a tuple returns its array literal
+// as that tuple, a generic signature's held boxed and relaid out where the
+// instantiation's tuple is declared.
+func TestE2ETupleContextualReturn(t *testing.T) {
+	assertOutput(t, `
+type P = (a: number, b: string) => [number, string];
+const pair: P = (a, b) => [a, b];
+console.log(pair(1, "x"));
+type G = <A, B>(a: A, b: B) => [A, B];
+const gen: G = (a, b) => [a, b];
+const p: [number, string] = gen(1, "x");
+console.log(p, gen("y", 2), p[0] + 1, p[1].length);
+const idf: <T>(x: T) => T = (x) => x;
+const n: number = idf(3);
+console.log(n, idf("a"));
+function f() {
+  let q: [number, string];
+  q = gen(2, "z");
+  const r: [number, string] = gen(4, "w");
+  console.log(q[0] + r[0]);
+}
+f();
+const fs: Array<(n: number) => [number, number]> = [(n) => [n, n * 2]];
+console.log(fs[0](3));
+`, "[ 1, 'x' ]\n[ 1, 'x' ] [ 'y', 2 ] 2 1\n3 a\n6\n[ 3, 6 ]")
+}
+
+// A tuple is an array: an alias, an array-typed binding and a box are the
+// same object, and its length and contents follow what is done through
+// them (ADR-01977).
+func TestE2ETupleArrayIdentity(t *testing.T) {
+	assertSameAsNode(t, `const pair: [number, string] = [1, "a"];
+const q = pair; q[0] = 5;
+function f(t: [number, string]) { t[0] = 7; }
+f(pair);
+const o = { t: pair }; o.t[1] = "z";
+const r: (number | string)[] = pair; r[0] = 8;
+console.log(pair[0], pair[1], q === pair, o.t === pair, r === pair);
+const nums: [number, number] = [3, 4];
+const arr: number[] = nums; arr.push(9);
+console.log(nums.length, nums, arr === nums, Array.isArray(nums));
+const boxed: any = pair;
+const back: [number, string] = boxed;
+console.log(boxed === pair, back === pair, back[1], JSON.stringify(pair), String(pair));
+const sorted: [number, number, number] = [3, 1, 2];
+const s2: number[] = sorted; s2.sort();
+console.log(sorted, sorted.length);
+`)
+}
+
+// Array.isArray narrowing a class instance to its intersection with any[]:
+// a member both declare takes both signatures (ADR-01982).
+func TestE2EArrayIsArrayIntersectionMembers(t *testing.T) {
+	assertSameAsNode(t, `let u: Set<number> | number[] = new Set([1]);
+console.log(Array.isArray(u) ? u.length : u.size);
+const s = new Set([1, 2]);
+console.log(Array.isArray(s) ? s.length : s.size);
+`)
+}
+
+// An array or a function carrying properties through an intersection
+// annotation (ADR-01983).
+func TestE2EArrayAndFunctionIntersections(t *testing.T) {
+	assertSameAsNode(t, `type T = string[] & { tag: string };
+const a = ["a"] as T;
+a.tag = "t";
+console.log(a.length, a.tag, a[0]);
+type F = ((x: number) => number) & { id: string };
+const f = Object.assign((x: number) => x * 2, { id: "d" }) as F;
+console.log(f(2), f.id);
+`)
+}
+
+// A ternary of a nullable scalar and a scalar of another kind is their
+// boxed union (ADR-01983).
+func TestE2ETernaryNullableScalarMixedKind(t *testing.T) {
+	assertSameAsNode(t, `function f(b: boolean, x: number | undefined) { return b ? x : true; }
+console.log(f(true, 1), f(false, 1), f(true, undefined));
+function g(v: Map<string, number> | Set<number>) { return v instanceof Map ? v.get("a") : v.has(1); }
+console.log(g(new Map([["a", 1]])), g(new Set([1])));
+`)
+}
+
+// A dynamic function's tuple parameter binds as the array it is (ADR-01984).
+func TestE2EDynamicFunctionTupleParam(t *testing.T) {
+	assertSameAsNode(t, `const o: any = { f: (p: [number, string]): string => p[1] + p[0], g: (p: [number, number]): number => p[0] + p[1] };
+console.log(o.f([1, "a"]), o.g([2, 3]));
+`)
+}
+
+// A ternary of calls returning nothing, as a statement and as a value; a
+// method call on a union narrowed to an object; a mixed tuple in a union
+// callback; `new` of a narrowed constructor; a nullable generic context
+// (ADR-01985).
+func TestE2ENarrowedUnionsAndVoidTernary(t *testing.T) {
+	assertSameAsNode(t, `export {};
+function a(): void { console.log("a"); }
+function b(): void { console.log("b"); }
+const t = Math.random() < 2;
+t ? a() : b();
+const r = t ? a() : b();
+console.log(r, t ? 1 : a());
+type R = { run(): number; n: number };
+function f(v: (() => number) | R | number) {
+  if (typeof v === "number") return v;
+  return typeof v === "function" ? v() : v.n + v.run();
+}
+console.log(f(() => 1), f({ n: 2, run() { return 3; } }), f(4));
+const xs: ([number, string] | string[])[] = [[1, "a"], ["b", "c", "d"]];
+console.log(xs.map(x => x.length));
+class K { k = 7 }
+function g(c: typeof K | null) { return c ? new c().k : -1; }
+console.log(g(K), g(null));
+let w: WeakMap<object, number> | null = new WeakMap();
+const key = {};
+w.set(key, 9);
+console.log(w.get(key));
+`)
+}
+
+// An empty array property with no context is never[], as tsc types it,
+// and a for-of destructuring over elements of several shapes walks each
+// by the iteration protocol.
+func TestE2EEmptyArrayPropertyAndUnionDestructuring(t *testing.T) {
+	assertSameAsNode(t, `const xs = [{ s: 1, ports: [] }, { s: 2, ports: [5] }];
+console.log(xs.length, xs[1].ports.length, JSON.stringify(xs));
+for (const [a, e] of [
+  [["m"], { t: "x", ports: [] }],
+  [["m", { d: 1 }], { t: "y", ports: [] }],
+]) {
+  console.log(JSON.stringify(a), JSON.stringify(e));
+}
 `)
 }

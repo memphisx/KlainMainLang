@@ -52,7 +52,7 @@ var khttpNativeSource string
 // ThreadPoolSource returns the embedded pool C runtime, linked (with -pthread)
 // whenever the program routes an fs op through the pool.
 func ThreadPoolSource() string {
-	return threadPoolSource + "\n" + httpParserSource + "\n" + dnsNativeSource + "\n" + zlibNativeSource + "\n" + fsNativeSource + "\n" + sqliteNativeSource + "\n" + khttpNativeSource
+	return threadPoolSource + "\n" + httpParserSource + "\n" + dnsNativeSource + "\n" + zlibNativeSource + "\n" + fsNativeSource + "\n" + sqliteNativeSource + "\n" + wasmBackendSource + "\n" + wasmNativeSource + "\n" + khttpNativeSource
 }
 
 // UsesThreadPool reports whether any pooled async fs op was emitted, so the CLI
@@ -83,6 +83,10 @@ func (e *Emitter) ThreadPoolCFlags() []string {
 	if e.usedSqliteNatives {
 		cflags = append(cflags, "-DKLAINPOOL_SQLITE=1")
 	}
+	if e.usedWasmNatives {
+		wflags, _ := LocateWasm()
+		cflags = append(append(cflags, "-DKLAINPOOL_WASM=1"), wflags...)
+	}
 	cflags = append(cflags, DeadStripFlags(e.exportsRuntime())...)
 	if e.isGCMode() && !e.hasWorkers && !e.UsesSync() {
 		cflags = append(cflags, "-DKLAINPOOL_GC_ENABLE=1")
@@ -99,14 +103,16 @@ func (e *Emitter) ensureThreadPool() {
 		return
 	}
 	e.usedThreadPool = true
-
 	e.ensureMicrotasks() // __kml_drain_microtasks — run after a native callback
+
 }
 
 // ensureZlibNatives compiles the zlib natives into the pool's unit and links
 // libz: the `@link zlib` of lib/native.d.ts.
 func (e *Emitter) ensureZlibNatives() {
-	e.ensureNativePool()
+	e.ensureMicrotasks()
+	e.ensureStrHeaderRuntime()
+	e.ensureThreadPool()
 	if e.usedZlibNatives {
 		return
 	}
@@ -127,7 +133,9 @@ func (e *Emitter) ensureZlibNatives() {
 // ensureSqliteNatives compiles klainsqlite.c into the pool's unit and links
 // libsqlite3: the `@link sqlite` of lib/native.d.ts.
 func (e *Emitter) ensureSqliteNatives() {
-	e.ensureNativePool()
+	e.ensureMicrotasks()
+	e.ensureStrHeaderRuntime()
+	e.ensureThreadPool()
 	if e.usedSqliteNatives {
 		return
 	}
@@ -138,19 +146,11 @@ func (e *Emitter) ensureSqliteNatives() {
 	}
 }
 
-// ensureFsNatives compiles klainfs.c into the pool (its statfs is osinfo's).
-func (e *Emitter) ensureFsNatives() {
-	e.ensureNativePool()
-	if e.usedFsNatives {
-		return
-	}
-	e.usedFsNatives = true
-	e.ensureOSInfo()
-}
-
 // ensureCryptoNatives compiles the crypto backend (its node:crypto natives)
 // with the pool, which runs their pooled forms.
 func (e *Emitter) ensureCryptoNatives() {
-	e.ensureNativePool()
+	e.ensureMicrotasks()
+	e.ensureStrHeaderRuntime()
+	e.ensureThreadPool()
 	e.usesCrypto = true
 }

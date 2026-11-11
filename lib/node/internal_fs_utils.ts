@@ -310,6 +310,9 @@ export const OP_FUTIMES = 29;
 export const OP_LUTIMES = 30;
 export const OP_COPYFILE = 31;
 export const OP_READDIR = 32;
+export const OP_OPENDIR = 33;
+export const OP_DIRREAD = 34;
+export const OP_CLOSEDIR = 35;
 
 const noBytes: Buffer = Buffer.alloc(0);
 

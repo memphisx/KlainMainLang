@@ -20,29 +20,7 @@
 package llvm
 
 const (
-	pipeCtxStructIR = "{ ptr, ptr, ptr, ptr, i64, ptr, ptr, i64, i64, ptr }"
-	teeCtxStructIR  = "{ ptr, ptr, ptr, ptr, i64, i64, i64, i64, i64 }"
-	tsCtxStructIR   = "{ ptr, ptr, ptr, ptr, i64, i64, i64, ptr, ptr }"
+	pipeCtxStructIR = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", " + irPtr + ", i64, i64, " + irPtr + " }"
+	teeCtxStructIR  = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, i64, i64, i64, i64, " + irPtr + " }"
+	tsCtxStructIR   = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, i64, i64, " + irPtr + ", " + irPtr + " }"
 )
-
-func (e *Emitter) ensureStreamPipeRuntime() {
-	if e.usedStreamPipeRuntime {
-		return
-	}
-	e.usedStreamPipeRuntime = true
-	e.ensureStreamRuntime()
-	e.ensureWStreamRuntime()
-	e.ensureNanBox()
-	e.emitGlobal(`declare ptr @__kml_mkclo(ptr, ptr)
-declare ptr @__kml_pipe_to(ptr, ptr, ptr, i64, ptr, ptr)
-declare void @__kml_tee_pullhook(ptr)
-declare ptr @__kml_tee_pull(ptr)
-declare ptr @__kml_tee_cancel(ptr, i64)
-declare ptr @__kml_ts_run_transform(ptr, i64, i64)
-declare ptr @__kml_ts_sink_write(ptr, i64, i64)
-declare ptr @__kml_ts_pull(ptr)
-declare void @__kml_ts_mirror_settle(ptr)
-declare ptr @__kml_ts_sink_close(ptr)
-declare void @__kml_ts_flush_done(ptr)
-declare ptr @__kml_ts_sink_abort(ptr, i64)`)
-}

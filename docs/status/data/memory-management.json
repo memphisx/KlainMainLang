@@ -83,7 +83,7 @@
             "feature": "`-optimize-memory` (orthogonal to `-mm`)",
             "status": "implemented",
             "caveats": [
-              "`Map`/`Set` (runtime-created), plain arrays' growable data buffers, and async closures stay heap — stack allocation covers only non-escaping object/closure/tuple literals and class instances",
+              "`Map`/`Set` (runtime-created), plain arrays' growable data buffers, and async closures stay heap — stack allocation covers only non-escaping object/closure literals and class instances",
               "By-value tuple returns cover only ≤2-plain-scalar-field tuples on non-async top-level functions never used as values; larger tuples, aggregate-slot fields (array/nullable/any), async functions, generics, and function values keep the pointer ABI, and only the direct `const [v, err] = f()` consumer is allocation-free",
               "A class instance stays heap-bound unless the whole class passes a conservative `this`-audit — any method returning/storing/passing `this`, extracting a method as a value, capturing `this` in a nested closure, `return this` chaining, or decorators disqualifies every instance",
               "Anything not provably block-local stays heap (same conservative escape analysis as `auto`); explicit `@free`/`@owned` keep their heap+free meaning",
@@ -92,7 +92,7 @@
             "notes": [
               "Escape analysis → entry-block `alloca` instead of the heap, no semantic change ([ADR-00702](../adr/00/ADR-00702.md)); an object literal's zero store happens at the literal site so a loop iteration reusing the slot re-zeroes it (preserving the absent-optional-field guarantee); composes with `-mm=auto` (a stack value is never auto-freed) and with FinalizationRegistry (registered targets stay heap so the free death-signal keeps firing)",
               "A non-escaping closure's 16-byte `{fn,env}` header and env struct stack-allocate too ([ADR-00704](../adr/00/ADR-00704.md)); the captured variables' shared cells stay heap regardless, since another capturer may escape",
-              "Tuple-annotated literals and this-clean class instances stack-allocate too ([ADR-00705](../adr/00/ADR-00705.md)) — vtable dispatch, overrides, and `instanceof` all work on stack instances; Stage 1 covers every fixed-size allocation-site kind the TDD named",
+              "This-clean class instances stack-allocate too ([ADR-00705](../adr/00/ADR-00705.md)) — vtable dispatch, overrides, and `instanceof` all work on stack instances; Stage 1 covers every fixed-size allocation-site kind the TDD named",
               "Value-returned small tuples ([ADR-00707](../adr/00/ADR-00707.md), Stage 3): an eligible function returns its tuple as a register-passable struct aggregate; `return [a, b]` builds it with insertvalue and `const [v, err] = f()` destructures with extractvalue — the idiomatic Go-style error pattern is allocation-free end to end. One authoritative ABI record (the registered signature) drives definition, calls, and returns; a function referenced as a value keeps the pointer ABI program-wide (an indirect call knows nothing of the flag)"
             ]
           },

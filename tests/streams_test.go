@@ -877,7 +877,7 @@ func TestE2EStreamsGzipRoundtrip(t *testing.T) {
 const enc = new TextEncoder();
 const dec = new TextDecoder();
 const original = "streams compress everything, ".repeat(200);
-const src = new ReadableStream<Uint8Array>({
+const src = new ReadableStream<Uint8Array<ArrayBuffer>>({
   start: (c) => { const b = enc.encode(original); c.enqueue(b); c.close(); }
 });
 const [rawBranch, decodeBranch] = src.pipeThrough(new CompressionStream("gzip")).tee();
@@ -904,7 +904,7 @@ async function roundtripDeflate(): Promise<boolean> {
   const enc = new TextEncoder();
   const dec = new TextDecoder();
   const original = "deflate me ".repeat(100);
-  const src = new ReadableStream<Uint8Array>({
+  const src = new ReadableStream<Uint8Array<ArrayBuffer>>({
     start: (c) => { const b = enc.encode(original); c.enqueue(b); c.close(); }
   });
   let out = "";
@@ -917,7 +917,7 @@ async function roundtripRaw(): Promise<boolean> {
   const enc = new TextEncoder();
   const dec = new TextDecoder();
   const original = "deflate me raw ".repeat(100);
-  const src = new ReadableStream<Uint8Array>({
+  const src = new ReadableStream<Uint8Array<ArrayBuffer>>({
     start: (c) => { const b = enc.encode(original); c.enqueue(b); c.close(); }
   });
   let out = "";
@@ -929,6 +929,40 @@ async function roundtripRaw(): Promise<boolean> {
 console.log("deflate:", await roundtripDeflate());
 console.log("deflate-raw:", await roundtripRaw());
 `, "deflate: true\ndeflate-raw: true")
+}
+
+// A chunk written through an untyped stream or a writer reaches the zlib
+// transform boxed: a typed array, an ArrayBuffer, a DataView window and a
+// string all compress, and a format known only at run time is checked
+// there (Node's TypeError for one that is no CompressionFormat).
+func TestE2EStreamsCompressionBufferSourcesAndRuntimeFormat(t *testing.T) {
+	assertOutput(t, `
+async function roundtrip(chunk: any, fmt: string): Promise<string> {
+  const cs = new CompressionStream(fmt as CompressionFormat);
+  const w = cs.writable.getWriter();
+  w.write(chunk);
+  w.close();
+  let s = "";
+  for await (const ch of cs.readable.pipeThrough(new DecompressionStream(fmt as CompressionFormat))) s += new TextDecoder().decode(ch);
+  return s;
+}
+const u = new TextEncoder().encode("0123456789");
+console.log(await roundtrip(u, "gzip"));
+console.log(await roundtrip(u.buffer, "deflate"));
+console.log(await roundtrip(new DataView(u.buffer, 2, 3), "deflate-raw"));
+console.log(await roundtrip("plain text", "gzip"));
+const src = new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode("untyped")); c.close(); } });
+let s = "";
+const gz = src.pipeThrough(new CompressionStream("gzip"));
+for await (const ch of gz.pipeThrough(new DecompressionStream("gzip"))) s += new TextDecoder().decode(ch);
+console.log(s);
+const bad: string = "br" + "otli2";
+try {
+  new DecompressionStream(bad as CompressionFormat);
+} catch (e: any) {
+  console.log(e.name, e.code, e.message);
+}
+`, "0123456789\n0123456789\n234\nplain text\nuntyped\nTypeError ERR_INVALID_ARG_VALUE Failed to construct 'DecompressionStream': 1st argument 'brotli2' is not a valid enum value of type CompressionFormat.")
 }
 
 func TestE2EStreamsGunzipGoInterop(t *testing.T) {
@@ -965,7 +999,7 @@ import http from 'klain:http';
 http.listen(18661, (req: HttpRequest) => {
   const enc = new TextEncoder();
   let n = 0;
-  const source = new ReadableStream<Uint8Array>({
+  const source = new ReadableStream<Uint8Array<ArrayBuffer>>({
     pull: (c) => {
       n = n + 1;
       if (n > 50) { c.close(); return; }
@@ -1270,5 +1304,124 @@ w.ready.catch((e: any) => console.log("ready:", e.message));
 w.write(1).then(() => console.log("w ok"), (e: any) => console.log("write:", e.message));
 try { console.log(w.desiredSize); } catch (e) { console.log("desiredSize:", (e as Error).message); }
 ws.getWriter().write(2).then(() => console.log("next writer ok"));
+`)
+}
+
+// A TransformStream's readable and writable sides.
+func TestE2ETransformStreamSides(t *testing.T) {
+	assertSameAsNode(t, `const t = new TransformStream<string, string>({ transform(c, ctl) { ctl.enqueue(c.toUpperCase()); } });
+const w = t.writable.getWriter(); w.write("ab"); w.close();
+const r = t.readable.getReader(); r.read().then(x => console.log(x));
+const u = new TransformStream(); console.log(u.readable instanceof ReadableStream, u.writable.locked);
+`)
+}
+
+// A stream's async iterator, as Node's values() runs it: the buffered fast
+// path's result shape, return() cancelling with its value and releasing the
+// lock, preventCancel, and the source's cancel getting the reason as given.
+func TestE2EReadableStreamAsyncIterator(t *testing.T) {
+	assertSameAsNode(t, `const mk = () => new ReadableStream<number>({ start(c) { c.enqueue(1); c.enqueue(2); c.enqueue(3); }, cancel(r) { console.log("cancel", r); } });
+(async () => {
+  const it = mk().values();
+  console.log(await it.next(), await it.next());
+  const it2 = mk().values();
+  console.log(await Promise.all([it2.next(), it2.next()]));
+  const b = mk();
+  const it3 = b.values();
+  await it3.next();
+  console.log(await it3.return!("bye"), b.locked);
+  const c = mk();
+  const it4 = c.values({ preventCancel: true });
+  console.log(await it4.return!(1), c.locked);
+  for await (const v of mk()) { console.log("v", v); if (v === 2) break; }
+  const d = mk(); const rd = d.getReader(); await rd.cancel("why"); rd.releaseLock(); console.log(d.locked);
+  const s = new ReadableStream<number>({ async pull(c) { await 0; c.enqueue(7); } });
+  const it5 = s.values();
+  console.log(await it5.next(), await it5.next());
+  const anyS: any = mk();
+  for await (const v of anyS) { console.log("any", v); break; }
+})();
+`)
+}
+
+// A queuing strategy's size: validated as a function when present, a throw
+// or an invalid result rejecting the write / rethrown from enqueue, and the
+// stream errored, as Node's are.
+func TestE2EStreamStrategySizeErrors(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCompatJS(t, `
+for (const S of [WritableStream, ReadableStream]) {
+  try { new S({}, { size: 'a string' }) } catch (e) { console.log(S.name, e.constructor.name, e.code, e.message) }
+}
+let reads = 0;
+new WritableStream({}, { get size() { reads++; return () => 1 }, highWaterMark: 1 });
+console.log('getter reads', reads);
+const e1 = new Error('e1');
+const ws = new WritableStream({}, { size() { throw e1 }, highWaterMark: 5 });
+const w = ws.getWriter();
+w.write('a').then(null, e => console.log('write rej', e === e1));
+w.closed.then(null, e => console.log('closed rej', e === e1));
+for (const size of [NaN, -1, Infinity]) {
+  const w2 = new WritableStream({}, { size() { return size }, highWaterMark: 5 }).getWriter();
+  w2.write('a').then(null, e => { console.log(e.name, e.message); return w2.closed.then(null, c => console.log('same', c === e)) });
+}
+let c1; const r1 = new ReadableStream({ start(c) { c1 = c } }, { size() { throw e1 }, highWaterMark: 5 });
+try { c1.enqueue('a') } catch (e) { console.log('enqueue threw', e === e1) }
+r1.getReader().closed.then(null, e => console.log('readable errored', e === e1));
+let c2; const r2 = new ReadableStream({ start(c) { c2 = c } }, { size() { return -1 }, highWaterMark: 5 });
+try { c2.enqueue('a') } catch (e) { console.log(e.name, e.message) }
+Promise.resolve().then(() => console.log('m1')).then(() => console.log('m2')).then(() => console.log('m3'));
+`)
+}
+
+// The reader/writer constructors (direct and through a value), a rejected
+// start erroring a readable stream, and getReader's ToString of mode.
+func TestE2EStreamReaderWriterConstructors(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCompatJS(t, `
+for (const [C, S] of [[ReadableStreamDefaultReader, ReadableStream], [WritableStreamDefaultWriter, WritableStream]]) {
+  for (const a of ['potato', {}, undefined]) { try { new C(a) } catch (e) { console.log(C.name, e.constructor.name, e.code, e.message) } }
+  try { C(new S()) } catch (e) { console.log(e.constructor.name, e.message) }
+  const s = new S(); const r = new C(s); console.log(r instanceof C, s.locked)
+  try { new C(s) } catch (e) { console.log(e.constructor.name, e.code, e.message) }
+}
+try { new ReadableStreamDefaultReader() } catch (e) { console.log(e.message) }
+const direct = new ReadableStreamDefaultReader(new ReadableStream({ start(c) { c.enqueue(1); c.close() } }));
+direct.read().then(v => console.log('read', v));
+new WritableStreamDefaultWriter(new WritableStream({ write(c) { console.log('wrote', c) } })).write('x');
+new ReadableStream({ start() { return Promise.reject() } }).getReader().read().then(null, e => console.log('start rej', e));
+new ReadableStream({ start() { return Promise.reject(new Error('x')) } }).getReader().closed.then(null, e => console.log('closed rej', e.message));
+const rs = new ReadableStream();
+for (const mode of [{ toString() { console.log('toString'); return '' } }, 'x', undefined]) {
+  try { const r = rs.getReader({ mode }); console.log('ok'); r.releaseLock() } catch (e) { console.log(e.code, e.message) }
+}
+`)
+}
+
+// In the JavaScript lane a `new` no overload fits (an underlying source
+// whose `type` is a plain string) types as the longest candidate's result,
+// so the stream's methods stay typed; Node's run-time check then decides.
+func TestE2EStreamUntypedSourceTypeJS(t *testing.T) {
+	t.Parallel()
+	assertSameAsNodeCLIJS(t, `
+async function m(kind) {
+  const source = { start(c) { c.enqueue(1); c.close(); }, type: kind };
+  const stream = new ReadableStream(source);
+  const reader = stream.getReader();
+  const chunk = await reader.read();
+  console.log(chunk.value, chunk.done);
+}
+m(undefined).then(() => m('owning')).catch((e) => console.log(e.name, e.message));
+`)
+}
+
+// An identity TransformStream whose chunk types differ passes each chunk
+// through converted (ADR-01983).
+func TestE2EIdentityTransformStreamConverts(t *testing.T) {
+	assertSameAsNode(t, `const t = new TransformStream<number, string>();
+const w = t.writable.getWriter();
+w.write(5);
+w.close();
+t.readable.getReader().read().then(x => console.log(x.value, x.done));
 `)
 }

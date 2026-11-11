@@ -308,7 +308,7 @@ double __kml_native_fs_watch(const char *path, double flags, void *inv, void *cl
     void **env = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
     env[0] = inv;
     env[1] = clo;
-    void **cl = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *));
+    void **cl = (void **)kml_closure_alloc(2 * sizeof(void *));
     cl[0] = (void *)tramp;
     cl[1] = env;
     __kml_fswatch_on(w, 0, cl);

@@ -56,7 +56,7 @@ void __kml_fetch_body_on_done(void *pending) {
     void *bs = p->bstream;
     if (!bs) return;
     if (p->result != 0)
-        __kml_rs_error(bs, (i64)(intptr_t)fetch_error(p));
+        __kml_rs_error(bs, (i64)(intptr_t)fetch_error(p) | 1); /* the Error, boxed */
     else
         __kml_rs_close(bs);
 }
@@ -64,7 +64,7 @@ void __kml_fetch_body_on_done(void *pending) {
 /* An aborted fetch errors its body stream with the abort reason. */
 void __kml_fetch_body_abort(void *pending, void *err) {
     void *bs = ((pend_t *)pending)->bstream;
-    if (bs) __kml_rs_error(bs, (i64)(intptr_t)err);
+    if (bs) __kml_rs_error(bs, (i64)(intptr_t)err | 1); /* the Error, boxed */
 }
 
 void *__kml_fetch_body_pull(void *pending) {

@@ -16,7 +16,7 @@ func init() {
 		emit: (*Emitter).emitEmbedDir,
 		ty: func(e *Emitter, ex *ast.CallExpression) Type {
 			if m, ok := e.libExports["klain_assets:_kmlEmbedded"]; ok {
-				return e.inferExprType(ast.NewCallExpression(ast.NewIdentifier(m, ex.GetPos()), nil, ex.GetPos()))
+				return e.typeOfExpr(ast.NewCallExpression(ast.NewIdentifier(m, ex.GetPos()), nil, ex.GetPos()))
 			}
 			return TypePtr
 		},
@@ -28,21 +28,21 @@ func init() {
 func (e *Emitter) emitEmbedDir(ex *ast.CallExpression) (Value, error) {
 	pos := ex.GetPos()
 	if len(ex.Args) != 1 {
-		return Value{}, fmt.Errorf("%d:%d: embedDir(path) takes one argument", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "embedDir arity")
 	}
 	path, ok := staticStringValue(ex.Args[0])
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: embedDir's path must be a string literal (it is read at compile time)", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "embedDir path")
 	}
 	m, ok := e.libExports["klain_assets:_kmlEmbedded"]
 	if !ok {
-		return Value{}, fmt.Errorf("%d:%d: internal error: klain:assets is not linked", pos.Line, pos.Col)
+		return Value{}, internalAt(pos, "klain:assets is not linked")
 	}
 	sym := e.requireEmbed(path)
 	e.ensureEmbedSymbol(sym)
 	e.ensureAssetsNatives()
-	e.declareFn("__kml_embed_push", "declare void @__kml_embed_push(ptr)")
-	e.emitInstr(fmt.Sprintf("call void @__kml_embed_push(ptr @%s)", sym))
+	e.declareFn("__kml_embed_push", "declare void @__kml_embed_push("+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @__kml_embed_push("+irPtr+" @%s)", sym))
 	return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), nil, pos))
 }
 
@@ -50,5 +50,4 @@ func (e *Emitter) emitEmbedDir(ex *ast.CallExpression) (Value, error) {
 // of lib/native.d.ts.
 func (e *Emitter) ensureAssetsNatives() {
 	e.usedEmbeddedAssets = true
-	e.ensureEmbedAssetsRuntime()
 }

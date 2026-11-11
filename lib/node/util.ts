@@ -298,6 +298,22 @@ const deprecationsWarnedNoCode = new Set<string>();
 /**
  * Wraps fn so its first call emits a DeprecationWarning (once per code).
  */
+// Node's util.inherits: ctor.prototype's prototype becomes
+// superCtor.prototype, and ctor.super_ is superCtor.
+export function inherits(ctor: any, superCtor: any): void {
+    if (ctor === undefined || ctor === null) {
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "ctor" argument must be of type function.' + received(ctor));
+    }
+    if (superCtor === undefined || superCtor === null) {
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "superCtor" argument must be of type function.' + received(superCtor));
+    }
+    if (superCtor.prototype === undefined) {
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "superCtor.prototype" property must be of type object.' + received(superCtor.prototype));
+    }
+    Object.defineProperty(ctor, 'super_', { value: superCtor, writable: true, configurable: true });
+    Object.setPrototypeOf(ctor.prototype, superCtor.prototype);
+}
+
 export function deprecate<T extends Function>(fn: T, msg: string, code?: string): T;
 export function deprecate(fn: any, msg: string, code?: string): any {
     const f: any = fn;
@@ -560,6 +576,7 @@ export const types = {
     isArgumentsObject: types_.isArgumentsObject,
     isAsyncFunction: types_.isAsyncFunction,
     isBigInt64Array: types_.isBigInt64Array,
+    isBigIntObject: types_.isBigIntObject,
     isBigUint64Array: types_.isBigUint64Array,
     isBooleanObject: types_.isBooleanObject,
     isBoxedPrimitive: types_.isBoxedPrimitive,

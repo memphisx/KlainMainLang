@@ -63,7 +63,7 @@ func (c *Checker) arrayMutationsOf(sym *binder.Symbol) []ast.Node {
 						obj = ix.Object
 					}
 				}
-				if id, ok := obj.(*ast.Identifier); ok {
+				if id, ok := mutationCandidate(obj).(*ast.Identifier); ok {
 					if s, _ := c.b.Resolve(id); s != nil {
 						c.arrayMuts[s] = append(c.arrayMuts[s], n)
 					}
@@ -81,12 +81,34 @@ func (c *Checker) isArrayMutation(n ast.Node, r ref) bool {
 	switch n := n.(type) {
 	case *ast.CallExpression:
 		m, ok := n.Callee.(*ast.MemberExpression)
-		return ok && !m.Optional && !n.Optional && (m.Property == "push" || m.Property == "unshift") && c.refersTo(m.Object, r)
+		return ok && !m.Optional && !n.Optional && (m.Property == "push" || m.Property == "unshift") && c.refersTo(mutationCandidate(m.Object), r)
 	case *ast.AssignmentExpression:
 		ix, ok := n.Left.(*ast.IndexExpression)
-		return ok && n.Op == "=" && c.refersTo(ix.Object, r)
+		return ok && n.Op == "=" && c.refersTo(mutationCandidate(ix.Object), r)
 	}
 	return false
+}
+
+// mutationCandidate is the reference a mutation's receiver denotes: a
+// comma expression's last operand, an assignment's target
+// (`(x = [], x).push(5)`, tsc's getReferenceCandidate).
+func mutationCandidate(e ast.Expression) ast.Expression {
+	for {
+		switch x := e.(type) {
+		case *ast.SequenceExpression:
+			if len(x.Exprs) == 0 {
+				return e
+			}
+			e = x.Exprs[len(x.Exprs)-1]
+		case *ast.AssignmentExpression:
+			if x.Op != "=" {
+				return e
+			}
+			e = x.Left
+		default:
+			return e
+		}
+	}
 }
 
 // mutationElems is the element types a mutation adds: each pushed value's
@@ -210,9 +232,17 @@ func (c *Checker) evolvingArrayRead(id *ast.Identifier, sym *binder.Symbol, decl
 // arrayOperationTarget reports tsc's isEvolvingArrayOperationTarget: id is
 // the array of a push/unshift call, an element store or a `.length` read.
 func (c *Checker) arrayOperationTarget(id *ast.Identifier) bool {
-	switch p := c.parentOf(id).(type) {
+	var e ast.Expression = id
+	for {
+		sq, ok := c.parentOf(e).(*ast.SequenceExpression)
+		if !ok || len(sq.Exprs) == 0 || sq.Exprs[len(sq.Exprs)-1] != e {
+			break
+		}
+		e = sq
+	}
+	switch p := c.parentOf(e).(type) {
 	case *ast.MemberExpression:
-		if p.Object != ast.Expression(id) {
+		if p.Object != e {
 			return false
 		}
 		if p.Property == "length" {
@@ -222,7 +252,7 @@ func (c *Checker) arrayOperationTarget(id *ast.Identifier) bool {
 		return ok && call.Callee == ast.Expression(p) && (p.Property == "push" || p.Property == "unshift")
 	case *ast.IndexExpression:
 		a, ok := c.parentOf(p).(*ast.AssignmentExpression)
-		return ok && p.Object == ast.Expression(id) && a.Left == ast.Expression(p) && a.Op == "="
+		return ok && p.Object == e && a.Left == ast.Expression(p) && a.Op == "="
 	}
 	return false
 }

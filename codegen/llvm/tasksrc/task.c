@@ -489,3 +489,16 @@ void __kml_task_await_ready(void *promise) {
     }
     __kml_wait_outside_coroutine();
 }
+
+/* Await's PromiseResolve reads a promise's `constructor`: an own one that
+ * Object.defineProperty gave its box (an accessor's getter runs, and what
+ * it throws is the await's). The shape runtime is linked once a property
+ * can be added to a static object. */
+extern int __kml_shape_expando_get_recv(void *obj, const char *key, long long recv, long long *out) __attribute__((weak));
+extern long long __kml_nb_pack(unsigned char tag, long long pay) __attribute__((weak));
+void __kml_promise_own_ctor(long long *prom) {
+    void *w = (void *)prom[5];
+    if (!w || !__kml_shape_expando_get_recv) return;
+    long long out;
+    __kml_shape_expando_get_recv(w, "constructor", __kml_nb_pack(KML_TAG_OBJECT, (long long)w), &out);
+}

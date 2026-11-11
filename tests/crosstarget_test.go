@@ -77,9 +77,10 @@ func TestCrossTargetPresetResolves(t *testing.T) {
 // TestCrossTargetMacToLinuxCodegen is the IR-level proof that a cross-OS build
 // retargets the *codegen*, not just the clang triple: an async program built for
 // the Sailfish (Linux/aarch64) preset must stamp the Linux ucontext task-context
-// size (4560 bytes for glibc aarch64, vs macOS's 880) and bake process.platform /
-// process.arch as the target's "linux"/"arm64". Runs on Linux (same-OS) and macOS
-// (the enabled cross-OS pair) hosts; a Windows host would hit the rejected pair.
+// size (4560 bytes for glibc aarch64, vs macOS's 880). (process.platform and
+// process.arch are C over the target's own macros, compiled for its triple.)
+// Runs on Linux (same-OS) and macOS (the enabled cross-OS pair) hosts; a
+// Windows host would hit the rejected pair.
 func TestCrossTargetMacToLinuxCodegen(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("sfos-aarch64 is only an accepted target from a Linux or macOS host")
@@ -90,7 +91,7 @@ func TestCrossTargetMacToLinuxCodegen(t *testing.T) {
 	// A generator's ucontext is sized in the IR (the tasks' main context is
 	// hooks.c's, sized by its build flags).
 	prog := "function* g(): Generator<number> { yield 1; }\n" +
-		"for (const v of g()) console.log(process.platform + process.arch + v);\n"
+		"for (const v of g()) console.log(v);\n"
 	if err := os.WriteFile(src, []byte(prog), 0644); err != nil {
 		t.Fatalf("write ts: %v", err)
 	}
@@ -99,10 +100,8 @@ func TestCrossTargetMacToLinuxCodegen(t *testing.T) {
 		t.Fatalf("cross emit-llvm failed: %v\n%s", err, out)
 	}
 	s := string(out)
-	for _, want := range []string{"[4560 x i8]", `c"linux\00"`, `c"arm64\00"`} {
-		if !strings.Contains(s, want) {
-			t.Fatalf("cross build did not retarget codegen: missing %q in IR (generator ucontext size / platform / arch)\n%s", want, s)
-		}
+	if !strings.Contains(s, "[4560 x i8]") {
+		t.Fatalf("cross build did not retarget codegen: missing the Linux generator ucontext size in IR\n%s", s)
 	}
 	if strings.Contains(s, "[880 x i8]") || strings.Contains(s, "malloc(i64 880)") {
 		t.Fatalf("cross build emitted the macOS ucontext layout (880 bytes) instead of the Linux one")
@@ -170,6 +169,19 @@ func TestCrossTargetRequiresSysroot(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "requires --sysroot") {
 		t.Fatalf("expected a --sysroot-required message, got:\n%s", out)
+	}
+}
+
+// A 32-bit target is refused up front: values are laid out for 64-bit words,
+// so its programs would be miscompiled (ADR-01943).
+func TestCrossTarget32BitRefused(t *testing.T) {
+	bin := buildCLI(t)
+	dir, src := writeTinyTS(t)
+	for _, triple := range []string{"wasm32-unknown-wasi", "armv7-unknown-linux-gnueabihf", "i686-pc-linux-gnu"} {
+		out, err := exec.Command(bin, "--target", triple, "--sysroot", dir, "-emit-llvm", src).CombinedOutput()
+		if err == nil || !strings.Contains(string(out), "is a 32-bit target") {
+			t.Errorf("--target=%s: want the 32-bit refusal, got err=%v:\n%s", triple, err, out)
+		}
 	}
 }
 

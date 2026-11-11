@@ -92,11 +92,10 @@
           {
             "feature": "`console.table()`",
             "status": "implemented",
-            "caveats": [
-              "An array of objects (columns = the shared fields) or an array of primitives (a single `Values` column) is tabulated; a `columns` filter argument, a plain-object argument, and an array-of-arrays shape aren't tabulated (they fall back to `console.log`, as a non-tabular value does)"
-            ],
+            "caveats": [],
             "notes": [
-              "Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/00/ADR-00560.md))"
+              "Byte-for-byte the same Unicode box-drawing layout as real Node (verified against Node v26) — dynamic per-column width, left-aligned cells sized to the widest entry, quoted string cells ([ADR-00560](../adr/00/ADR-00560.md))",
+              "Node's own algorithm, written in TypeScript: arrays, arrays of arrays, plain objects, Map, Set, a `properties` filter, and index keys in key order ([ADR-01933](../adr/01/ADR-01933.md))"
             ],
             "decl": [
               "Console.table"

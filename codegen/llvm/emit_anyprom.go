@@ -19,14 +19,17 @@ import (
 // promisesrc/anyprom.c (TDD-00240); the reaction runner and attach stay
 // generated (the runner is built from the program's dynamic calls).
 //
+//go:embed promisesrc/promisebox.c
+var promiseBoxSource string
+
+// PromiseBoxSource is promisebox.c, behind kml_layout.h.
+func PromiseBoxSource() string { return layoutHeader() + promiseBoxSource }
+
 //go:embed promisesrc/anyprom.c
 var anyPromSource string
 
 // AnyPromSource is anyprom.c, behind kml_layout.h.
 func AnyPromSource() string { return layoutHeader() + anyPromSource }
-
-// UsesAnyProm reports whether the program links anyprom.c.
-func (e *Emitter) UsesAnyProm() bool { return e.usedPromiseResolveAny }
 
 // promiseBoxedSlot is the promise struct's trailing field: its box wrapper,
 // or null until the promise is first boxed.
@@ -50,7 +53,9 @@ func (e *Emitter) promiseBoxHeader() int64 {
 
 // emitBoxPromise boxes a task promise (see the file comment).
 func (e *Emitter) emitBoxPromise(v Value) Value {
-	e.ensurePromiseRuntime()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureUnhandledRejections()
 	e.ensureNanBox() // the inspect hook boxes a rejection's reason
 	e.usedPromiseBox = true
 	boxTy := promiseBoxType()
@@ -58,21 +63,21 @@ func (e *Emitter) emitBoxPromise(v Value) Value {
 	// An absent promise (a null slot) is undefined.
 	res := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, res))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, res))
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, v.Ref))
 	liveL, endL := e.freshLabel("pbox.live"), e.freshLabel("pbox.end")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, endL, liveL))
 	e.emitLabel(liveL)
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", slot, promiseStructIR, v.Ref, promiseBoxedSlot))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", slot, promiseStructIR, v.Ref, promiseBoxedSlot))
 	cached := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", cached, slot))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", cached, slot))
 	have := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", have, cached))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", have, cached))
 	wslot := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", wslot))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", cached, wslot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", wslot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", cached, wslot))
 	mkL := e.freshLabel("pbox.make")
 	doneL := e.freshLabel("pbox.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", have, doneL, mkL))
@@ -85,33 +90,36 @@ func (e *Emitter) emitBoxPromise(v Value) Value {
 	e.emitObjMallocInto(w, boxTy)
 	store := func(idx int, ir, val string) {
 		p := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", p, boxTy.StructIR(), w, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", p, boxTy.StructIR(), w, idx))
 		e.heapStore(ir, val, p, 8)
 	}
-	store(1, "ptr", v.Ref)
-	store(2, "ptr", e.promiseValueBoxer(elem))
+	store(1, irPtr, v.Ref)
+	store(2, irPtr, e.promiseValueBoxer(elem))
 	anyElem := "false"
 	if isUnconstrainedDynamic(elem) {
 		anyElem = "true"
 	}
 	store(3, "i1", anyElem)
-	e.heapStore("ptr", w, slot, 8)
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", w, wslot))
+	e.heapStore(irPtr, w, slot, 8)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", w, wslot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, wslot))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", e.emitNbTagPtr(out, kmlTagObject), res))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, wslot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitNbTagPtr(out, kmlTagObject), res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
 	e.emitLabel(endL)
 	boxed := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", boxed, res))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", boxed, res))
 	return Value{Ref: boxed, Ty: TypeAny}
 }
 
 // promiseValueBoxer is `i64 (ptr promise)`: a fulfilled Promise<elem>'s value,
 // boxed. One per element representation.
 func (e *Emitter) promiseValueBoxer(elem Type) string {
+	// The boxed value is read dynamically: its layout needs its row, in
+	// every program using the boxer (a cached one emits no box here).
+	e.noteBoxedLayout(elem)
 	key := layoutFieldKey(elem)
 	if e.promiseBoxRunners == nil {
 		e.promiseBoxRunners = map[string]string{}
@@ -130,7 +138,7 @@ func (e *Emitter) promiseValueBoxer(elem Type) string {
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", boxed))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	name := e.defineContentNamed("@__kml_pval_box.", "i64", "ptr %p", body)
+	name := e.defineContentNamed("@__kml_pval_box.", "i64", irPtr+" %p", body)
 	e.promiseBoxRunners[key] = name
 	return name
 }
@@ -140,7 +148,7 @@ func (e *Emitter) promiseValueBoxer(elem Type) string {
 func (e *Emitter) emitPromiseWrapperOrNull(v Value) string {
 	e.ensurePromiseWrapperOf()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_promise_wrapper_of(i64 %s)", r, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_promise_wrapper_of(i64 %s)", r, v.Ref))
 	return r
 }
 
@@ -148,51 +156,30 @@ func (e *Emitter) emitPromiseWrapperOrNull(v Value) string {
 // of a promise wrapper.
 func (e *Emitter) emitWrapperField(w string, idx int, ir string) string {
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 %d", p, promiseBoxType().StructIR(), w, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", p, promiseBoxType().StructIR(), w, idx))
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, ir, p))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, ir, p))
 	return r
 }
 
-// ensurePromiseWrapperOf emits @__kml_promise_wrapper_of(i64 v) -> ptr.
+// ensurePromiseWrapperOf links @__kml_promise_wrapper_of(i64 v) -> ptr
+// (promisebox.c, emitPromiseInspectHook).
 func (e *Emitter) ensurePromiseWrapperOf() {
-	if e.usedPromiseWrapperOf {
-		return
-	}
 	e.usedPromiseWrapperOf = true
 	e.ensureNanBox()
-	e.noteBoxedLayout(promiseBoxType())
-	e.emitGlobal(fmt.Sprintf(`
-define ptr @__kml_promise_wrapper_of(i64 %%v) {
-entry:
-  %%tag = call i8 @__kml_nb_tag(i64 %%v)
-  %%isobj = icmp eq i8 %%tag, %d
-  br i1 %%isobj, label %%obj, label %%no
-obj:
-  %%pay = call i64 @__kml_nb_pay(i64 %%v)
-  %%o = inttoptr i64 %%pay to ptr
-  %%nn = icmp ne ptr %%o, null
-  br i1 %%nn, label %%hdr, label %%no
-hdr:
-  %%h = load i64, ptr %%o, align 8
-  %%isp = icmp eq i64 %%h, %d
-  br i1 %%isp, label %%yes, label %%no
-yes:
-  ret ptr %%o
-no:
-  ret ptr null
-}`, kmlTagObject, e.promiseBoxHeader()))
 }
 
 // emitAwaitAny awaits a dynamic value: the promise it holds (its value then
 // boxed), or — any other value — the value itself, after the microtask tick
 // every await takes.
 func (e *Emitter) emitAwaitAny(v Value) (Value, error) {
-	e.ensurePromiseRuntime()
+	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureUnhandledRejections()
 	e.ensureMicrotasks()
 	w := e.emitPromiseWrapperOrNull(v)
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, w))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, w))
 	res := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
 	plainL := e.freshLabel("awaitany.plain")
@@ -201,16 +188,16 @@ func (e *Emitter) emitAwaitAny(v Value) (Value, error) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, plainL, promL))
 
 	e.emitLabel(promL)
-	src := e.emitWrapperField(w, 1, "ptr")
+	src := e.emitWrapperField(w, 1, irPtr)
 	if _, err := e.emitAwaitTaskPromise(src, TypeVoid); err != nil {
 		return Value{}, err
 	}
 	w2 := e.emitPromiseWrapperOrNull(v)
-	src2 := e.emitWrapperField(w2, 1, "ptr")
-	boxer := e.emitWrapperField(w2, 2, "ptr")
+	src2 := e.emitWrapperField(w2, 1, irPtr)
+	boxer := e.emitWrapperField(w2, 2, irPtr)
 	val := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", val, boxer, src2))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", val, res))
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %s)", val, boxer, src2))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", val, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(plainL)
@@ -219,18 +206,18 @@ func (e *Emitter) emitAwaitAny(v Value) (Value, error) {
 	// through it, anything else fulfilled.
 	e.ensurePromiseDynRuntime()
 	prom := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", prom))
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", prom, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", prom))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", prom, v.Ref))
 	pv, err := e.emitAwaitTaskPromise(prom, TypeAny)
 	if err != nil {
 		return Value{}, err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", pv.Ref, res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", pv.Ref, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, res))
 	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
@@ -259,14 +246,13 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 	}
 	e.usedPromiseResolveAny = true
 	e.ensureDynJSONC() // a thenable's `then` is read through the object hooks
-	e.ensurePromiseRuntime()
-	e.ensureMicrotasks()
-	e.ensurePromiseSettle()
 	e.ensureExceptionHelpers()
+	e.ensureMicrotasks()
+	e.ensureUnhandledRejections()
+	e.ensureMicrotasks()
 	e.ensureNanBox()
-	e.ensureMalloc()
 	e.ensurePromiseWrapperOf()
-	envIR := "{ ptr, i64, i64, i64, ptr, ptr, i64 }"
+	envIR := "{ " + irPtr + ", i64, i64, i64, " + irPtr + ", " + irPtr + ", i64 }"
 	p := promiseStructIR
 
 	// The runner, emitted through the ordinary builders so the dynamic calls
@@ -274,12 +260,12 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 	restore := e.beginDetachedFunc()
 	ld := func(idx int, ir string) string {
 		g := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %%env, i32 0, i32 %d", g, envIR, idx))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%env, i32 0, i32 %d", g, envIR, idx))
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align 8", r, ir, g))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, ir, g))
 		return r
 	}
-	src, onF, onR, onFin, q, boxer, kind := ld(0, "ptr"), ld(1, "i64"), ld(2, "i64"), ld(3, "i64"), ld(4, "ptr"), ld(5, "ptr"), ld(6, "i64")
+	src, onF, onR, onFin, q, boxer, kind := ld(0, irPtr), ld(1, "i64"), ld(2, "i64"), ld(3, "i64"), ld(4, irPtr), ld(5, irPtr), ld(6, "i64")
 	isFn := func(box string) string {
 		tag, _ := e.emitUnboxTagPayload(Value{Ref: box, Ty: TypeAny})
 		r := e.freshReg()
@@ -287,7 +273,7 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 		return r
 	}
 	copyReject := func() {
-		e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from(ptr %s, ptr %s)", q, src))
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from("+irPtr+" %s, "+irPtr+" %s)", q, src))
 	}
 	// callGuarded calls fn(args…) through the dynamic ABI; a throw rejects q.
 	// It leaves the current block at the call's normal return with the
@@ -302,8 +288,8 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 		}
 		for i, a := range args {
 			s := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %s, i64 %d", s, argv, i))
-			e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", a, s))
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", s, argv, i))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", a, s))
 		}
 		catchL, tryL := e.freshLabel("pdyn.catch"), e.freshLabel("pdyn.try")
 		e.excEnter(catchL, tryL)
@@ -320,9 +306,9 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 		return r
 	}
 	stp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", stp, p, src))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", stp, p, src))
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, stp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", st, stp))
 	ok := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", ok, st))
 	isFin := e.freshReg()
@@ -343,8 +329,8 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, passOkL, passRejL))
 	e.emitLabel(passOkL)
 	pv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", pv, boxer, src))
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", q, pv))
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %s)", pv, boxer, src))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", q, pv))
 	e.emitTerminator("ret void")
 	e.emitLabel(passRejL)
 	copyReject()
@@ -356,16 +342,16 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, fulL, rejL))
 	e.emitLabel(fulL)
 	val := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 %s(ptr %s)", val, boxer, src))
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %s)", val, boxer, src))
 	hasF := isFn(onF)
 	callFL, passFL := e.freshLabel("pdyn.callf"), e.freshLabel("pdyn.passf")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasF, callFL, passFL))
 	e.emitLabel(callFL)
 	rf := callGuarded(onF, []string{val})
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", q, rf))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", q, rf))
 	e.emitTerminator("ret void")
 	e.emitLabel(passFL)
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", q, val))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", q, val))
 	e.emitTerminator("ret void")
 	e.emitLabel(rejL)
 	hasR := isFn(onR)
@@ -374,58 +360,54 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 	e.emitLabel(callRL)
 	reason := e.emitCaughtToAny(e.loadRejectReasonCaught(src))
 	rr := callGuarded(onR, []string{reason.Ref})
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", q, rr))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", q, rr))
 	e.emitTerminator("ret void")
 	e.emitLabel(passRL)
 	copyReject()
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc("internal void @__kml_pdyn_run(ptr %env)", body)
+	e.writeFunc("internal void @__kml_pdyn_run("+irPtr+" %env)", body)
 
-	e.emitGlobal(fmt.Sprintf(`
-define void @__kml_pdyn_attach(ptr %%src, i64 %%onF, i64 %%onR, i64 %%onFin, ptr %%q, ptr %%boxer, i64 %%kind) {
-entry:
-  call void @__kml_promise_mark_handled(ptr %%src)
-  %%env = call ptr @malloc(i64 56)
-  %%e0 = getelementptr %[1]s, ptr %%env, i32 0, i32 0
-  store ptr %%src, ptr %%e0, align 8
-  %%e1 = getelementptr %[1]s, ptr %%env, i32 0, i32 1
-  store i64 %%onF, ptr %%e1, align 8
-  %%e2 = getelementptr %[1]s, ptr %%env, i32 0, i32 2
-  store i64 %%onR, ptr %%e2, align 8
-  %%e3 = getelementptr %[1]s, ptr %%env, i32 0, i32 3
-  store i64 %%onFin, ptr %%e3, align 8
-  %%e4 = getelementptr %[1]s, ptr %%env, i32 0, i32 4
-  store ptr %%q, ptr %%e4, align 8
-  %%e5 = getelementptr %[1]s, ptr %%env, i32 0, i32 5
-  store ptr %%boxer, ptr %%e5, align 8
-  %%e6 = getelementptr %[1]s, ptr %%env, i32 0, i32 6
-  store i64 %%kind, ptr %%e6, align 8
-  %%clo = call ptr @malloc(i64 16)
-  store ptr @__kml_pdyn_run, ptr %%clo, align 8
-  %%cep = getelementptr { ptr, ptr }, ptr %%clo, i32 0, i32 1
-  store ptr %%env, ptr %%cep, align 8
-  %%res_p = getelementptr %[2]s, ptr %%src, i32 0, i32 0
-  %%res = load i64, ptr %%res_p, align 8
-  %%settled = icmp ne i64 %%res, 0
-  br i1 %%settled, label %%now, label %%later
-now:
-  call void @__kml_microtask_enqueue(ptr %%clo)
-  ret void
-later:
-  %%node = call ptr @malloc(i64 16)
-  %%rx_p = getelementptr %[2]s, ptr %%src, i32 0, i32 4
-  %%old = load ptr, ptr %%rx_p, align 8
-  store ptr %%clo, ptr %%node, align 8
-  %%nn = getelementptr { ptr, ptr }, ptr %%node, i32 0, i32 1
-  store ptr %%old, ptr %%nn, align 8
-  store ptr %%node, ptr %%rx_p, align 8
-  ret void
-}
-
-declare void @__kml_promise_resolve_any(ptr, i64)
-declare ptr @__kml_promise_view_any(ptr)`, envIR, p))
+	// __kml_pdyn_attach(src, onF, onR, onFin, q, boxer, kind): src marked
+	// handled, a reaction running __kml_pdyn_run over the env queued now
+	// when src is settled, else pushed onto its reaction list.
+	restore = e.beginDetachedFunc()
+	e.emitInstr("call void @__kml_promise_mark_handled(" + irPtr + " %src)")
+	env := e.freshReg()
+	e.heapMallocInto(env, allocClosure, "56")
+	for k, a := range []string{irPtr + " %src", "i64 %onF", "i64 %onR", "i64 %onFin", irPtr + " %q", irPtr + " %boxer", "i64 %kind"} {
+		f := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", f, envIR, env, k))
+		e.heapStoreTV(a, f, 8)
+	}
+	clo, cep := e.freshReg(), e.freshReg()
+	e.emitClosureAlloc(clo, "16", "@__kml_pdyn_run")
+	e.heapStore(irPtr, "@__kml_pdyn_run", clo, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", cep, clo))
+	e.heapStore(irPtr, env, cep, 8)
+	resP, res, settled := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%src, i32 0, i32 0", resP, p))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", res, resP))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", settled, res))
+	nowL, laterL := e.freshLabel("pdyn.now"), e.freshLabel("pdyn.later")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", settled, nowL, laterL))
+	e.emitLabel(nowL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", clo))
+	e.emitTerminator("ret void")
+	e.emitLabel(laterL)
+	node, rxP, old, nn := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.heapMallocInto(node, allocHost, "16")
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %%src, i32 0, i32 4", rxP, p))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", old, rxP))
+	e.heapStore(irPtr, clo, node, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", nn, node))
+	e.heapStore(irPtr, old, nn, 8)
+	e.heapStore(irPtr, node, rxP, 8)
+	e.emitTerminator("ret void")
+	body = e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("void @__kml_pdyn_attach("+irPtr+" %src, i64 %onF, i64 %onR, i64 %onFin, "+irPtr+" %q, "+irPtr+" %boxer, i64 %kind)", body)
 }
 
 // ensurePromiseResolveAny is the resolve half of the dynamic promise runtime.
@@ -438,9 +420,9 @@ func (e *Emitter) emitAnyToPromiseAny(v Value) Value {
 	e.ensurePromiseDynRuntime()
 	w := e.emitPromiseWrapperOrNull(v)
 	res := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca ptr, align 8", res))
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", res))
 	isW := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne ptr %s, null", isW, w))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isW, w))
 	chkL, newL, doneL := e.freshLabel("presolve.chk"), e.freshLabel("presolve.new"), e.freshLabel("presolve.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isW, chkL, newL))
 	e.emitLabel(chkL)
@@ -451,22 +433,22 @@ func (e *Emitter) emitAnyToPromiseAny(v Value) Value {
 	// promise itself, so no adoption ticks).
 	e.emitLabel(viewL)
 	vq := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_promise_view_any(ptr %s)", vq, w))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", vq, res))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_promise_view_any("+irPtr+" %s)", vq, w))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", vq, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(sameL)
-	src := e.emitWrapperField(w, 1, "ptr")
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", src, res))
+	src := e.emitWrapperField(w, 1, irPtr)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", src, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(newL)
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any(ptr %s, i64 %s)", q, v.Ref))
-	e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", q, res))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_resolve_any("+irPtr+" %s, i64 %s)", q, v.Ref))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", q, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", out, res))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, res))
 	qt := PromiseOf(TypeAny)
 	qt.PromiseTask = true
 	return Value{Ref: out, Ty: qt}
@@ -504,67 +486,74 @@ func (e *Emitter) promiseMethodRecord(m string) string {
 		arity = 1
 	}
 	e.registerFnMeta(fn, m, arity, fnKindPlain)
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 	restore := e.beginDetachedFunc()
-	arg := func(i int) string {
-		have := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
-		sp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", sp, i))
-		w := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", w, sp))
-		word := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, w, nbUndefined))
-		return word
+	if v, err := intrinsics["Promise.prototype."+m].dyn(e, "%this", TypeAny); err != nil {
+		e.emitThrowTypeError("the promise method '" + m + "' can't be called through a dynamic value")
+	} else if !e.blockDone {
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", v.Ref))
 	}
-	undef := fmt.Sprintf("%d", nbUndefined)
-	onF, onR, onFin, kind := undef, undef, undef, pdynThen
-	switch m {
-	case "then":
-		onF, onR = arg(0), arg(1)
-	case "catch":
-		onR = arg(0)
-	case "finally":
-		onFin, kind = arg(0), pdynFinally
-	}
-	w := e.emitPromiseWrapperOrNull(Value{Ref: "%this", Ty: TypeAny})
-	// Another receiver: then throws; catch and finally are generic, an
-	// Invoke of the receiver's own `then`.
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%env, i64 %%this, i64 %%argc, "+irPtr+" %%argv)", fn), body)
+	return rec
+}
+
+// promiseDynThen, promiseDynCatch and promiseDynFinally are the promise
+// methods as dynamic functions on a receiver held boxed (self): the
+// reactions each registers.
+func (e *Emitter) promiseDynThen(self string, _ Type) (Value, error) {
+	undef := fmt.Sprint(nbUndefined)
+	return e.emitPromiseDynReaction(self, e.dynThunkArg(0).Ref, e.dynThunkArg(1).Ref, undef, pdynThen, false)
+}
+
+func (e *Emitter) promiseDynCatch(self string, _ Type) (Value, error) {
+	undef := fmt.Sprint(nbUndefined)
+	return e.emitPromiseDynReaction(self, undef, e.dynThunkArg(0).Ref, undef, pdynThen, true)
+}
+
+func (e *Emitter) promiseDynFinally(self string, _ Type) (Value, error) {
+	undef := fmt.Sprint(nbUndefined)
+	return e.emitPromiseDynReaction(self, undef, undef, e.dynThunkArg(0).Ref, pdynFinally, true)
+}
+
+// emitPromiseDynReaction registers reactions on the promise self holds and
+// is the derived Promise<any>, boxed. On another receiver, a generic method
+// (catch, finally) is an Invoke of the receiver's own `then`, with
+// finally's callback on both paths; then throws Node's TypeError.
+func (e *Emitter) emitPromiseDynReaction(self, onF, onR, onFin string, kind int, generic bool) (Value, error) {
+	w := e.emitPromiseWrapperOrNull(Value{Ref: self, Ty: TypeAny})
 	isNull, genL, promL := e.freshReg(), e.freshLabel("pdyn.generic"), e.freshLabel("pdyn.promise")
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, w))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, w))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, genL, promL))
 	e.emitLabel(genL)
-	if m == "then" {
-		e.emitThrowTypeErrorValue(e.emitReceiverMessage("Method Promise.prototype.then called on incompatible receiver ", "%this"))
+	if !generic {
+		e.emitThrowTypeErrorValue(e.emitReceiverMessage("Method Promise.prototype.then called on incompatible receiver ", self))
 	} else {
-		thenFn, err := e.emitDynAnyMemberGetNamed(Value{Ref: "%this", Ty: TypeAny}, e.internString("then"), "then", ast.Pos{})
+		thenFn, err := e.emitDynAnyMemberGetNamed(Value{Ref: self, Ty: TypeAny}, e.internString("then"), "then", ast.Pos{})
 		if err == nil {
 			a, b := onF, onR
-			if m == "finally" {
+			if kind == pdynFinally {
 				a, b = onFin, onFin
 			}
 			e.ensureShapeRuntime()
 			e.declareFn("__kml_invoke_then", "declare i64 @__kml_invoke_then(i64, i64, i64, i64)")
 			r := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_invoke_then(i64 %%this, i64 %s, i64 %s, i64 %s)", r, thenFn.Ref, a, b))
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_invoke_then(i64 %s, i64 %s, i64 %s, i64 %s)", r, self, thenFn.Ref, a, b))
 			e.emitTerminator(fmt.Sprintf("ret i64 %s", r))
 		} else if !e.blockDone {
 			e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 		}
 	}
 	e.emitLabel(promL)
-	src := e.emitWrapperField(w, 1, "ptr")
-	boxer := e.emitWrapperField(w, 2, "ptr")
+	src := e.emitWrapperField(w, 1, irPtr)
+	boxer := e.emitWrapperField(w, 2, irPtr)
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
-	e.emitInstr(fmt.Sprintf("call void @__kml_pdyn_attach(ptr %s, i64 %s, i64 %s, i64 %s, ptr %s, ptr %s, i64 %d)", src, onF, onR, onFin, q, boxer, kind))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_pdyn_attach("+irPtr+" %s, i64 %s, i64 %s, i64 %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d)", src, onF, onR, onFin, q, boxer, kind))
 	qt := PromiseOf(TypeAny)
 	qt.PromiseTask = true
-	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitBoxPromise(Value{Ref: q, Ty: qt}).Ref))
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%env, i64 %%this, i64 %%argc, ptr %%argv)", fn), body)
-	return rec
+	return e.emitBoxPromise(Value{Ref: q, Ty: qt}), nil
 }
 
 // emitConvertPromise is convert(Promise<A> → Promise<B>) where exactly one of
@@ -572,9 +561,11 @@ func (e *Emitter) promiseMethodRecord(m string) string {
 // Promise<number>): a promise that settles when v does, its value converted
 // between the box and B's representation; a rejection passes through.
 func (e *Emitter) emitConvertPromise(v Value, target Type) Value {
-	e.ensurePromiseRuntime()
+	e.ensureExceptionHelpers()
 	e.ensureMicrotasks()
-	e.ensurePromiseSettle()
+	e.ensureUnhandledRejections()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
 	from := TypeVoid
 	if v.Ty.PromiseType != nil {
 		from = *v.Ty.PromiseType
@@ -584,35 +575,37 @@ func (e *Emitter) emitConvertPromise(v Value, target Type) Value {
 		to = *target.PromiseType
 	}
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", q))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
 	env := e.freshReg()
-	e.ensureMalloc()
-	e.heapMallocInto(env, "16")
-	e.heapStore("ptr", v.Ref, env, 8)
+	e.heapMallocInto(env, allocClosure, "16")
+	e.heapStore(irPtr, v.Ref, env, 8)
 	qp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 8", qp, env))
-	e.heapStore("ptr", q, qp, 8)
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", qp, env))
+	e.heapStore(irPtr, q, qp, 8)
 	runner := e.promiseConvertRunner(from, to)
+	// One object with the source: a handler on either handles both.
+	e.declareFn("__kml_promise_twin", "declare void @__kml_promise_twin("+irPtr+", "+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_twin("+irPtr+" %s, "+irPtr+" %s)", v.Ref, q))
 	// A settled source converts at once (one object in JS: its value or
 	// reason is there now; a reaction attached to it would never run);
 	// otherwise when it settles.
 	sp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", sp, promiseStructIR, v.Ref))
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, sp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", st, sp))
 	ful := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", ful, st))
 	nowL, laterL, doneL := e.freshLabel("pconv.now"), e.freshLabel("pconv.later"), e.freshLabel("pconv.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ful, nowL, laterL))
 	e.emitLabel(nowL)
-	e.emitInstr(fmt.Sprintf("call void %s(ptr %s)", runner, env))
+	e.emitInstr(fmt.Sprintf("call void %s("+irPtr+" %s)", runner, env))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(laterL)
 	// JS has one object: the converted view settles with the source, inside
 	// its settlement, not a job later.
 	clo := e.buildBuiltinClosure(runner, env)
-	e.declareFn("__kml_promise_attach_sync", "declare void @__kml_promise_attach_sync(ptr, ptr)")
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_attach_sync(ptr %s, ptr %s)", v.Ref, clo))
+	e.declareFn("__kml_promise_attach_sync", "declare void @__kml_promise_attach_sync("+irPtr+", "+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_attach_sync("+irPtr+" %s, "+irPtr+" %s)", v.Ref, clo))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	tt := target
@@ -632,15 +625,15 @@ func (e *Emitter) promiseConvertRunner(from, to Type) string {
 	restore := e.beginDetachedFunc()
 	restore = e.sharedBody(restore) // content-named: the same in every program
 	src := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %%env, align 8", src))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %%env, align 8", src))
 	qp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %%env, i64 8", qp))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %%env, i64 8", qp))
 	q := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load ptr, ptr %s, align 8", q, qp))
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", q, qp))
 	sp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, ptr %s, i32 0, i32 0", sp, promiseStructIR, src))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", sp, promiseStructIR, src))
 	st := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", st, sp))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", st, sp))
 	ok := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", ok, st))
 	okL, rejL := e.freshLabel("pconv.ok"), e.freshLabel("pconv.rej")
@@ -662,18 +655,17 @@ func (e *Emitter) promiseConvertRunner(from, to Type) string {
 		}
 		e.storePromiseValue(q, conv)
 	}
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle(ptr %s, i64 1)", q))
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle("+irPtr+" %s, i64 1)", q))
 	e.emitTerminator("ret void")
 	e.emitLabel(rejL)
 	// The converted view and its source are one promise in JS: the
-	// rejection is the view's to report, not the source's.
-	e.ensureMicrotasks() // declares __kml_promise_mark_handled
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_mark_handled(ptr %s)", src))
-	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from(ptr %s, ptr %s)", q, src))
+	// rejection is the view's to report (__kml_promise_twin silenced the
+	// source).
+	e.emitInstr(fmt.Sprintf("call void @__kml_promise_reject_from("+irPtr+" %s, "+irPtr+" %s)", q, src))
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	name := e.defineContentNamed("@__kml_pconv_run.", "void", "ptr %env", body)
+	name := e.defineContentNamed("@__kml_pconv_run.", "void", irPtr+" %env", body)
 	e.promiseConvRunners[key] = name
 	return name
 }
@@ -692,5 +684,7 @@ func promiseElemsNeedConvert(a, b Type) bool {
 	if bd {
 		other = *a.PromiseType
 	}
-	return other.IR != "" && other.IR != "void" && !other.IsNever()
+	// A union held boxed (`IteratorResult<T>`) settles with the same word
+	// an `any` one does: nothing to convert.
+	return other.IR != "" && other.IR != "void" && !other.IsNever() && !other.IsDynamic()
 }

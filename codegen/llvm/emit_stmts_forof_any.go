@@ -4,6 +4,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 )
@@ -36,24 +37,26 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	}
 	forceProto := e.forceArrayProtocol
 	e.forceArrayProtocol = false
-	origTag, _ := e.emitUnboxTagPayload(iterVal)
+	// An iterator already obtained (forOfIteratorGiven): no GetIterator.
+	given, givenSync := e.forOfIteratorGiven, e.forOfIteratorGivenSync
+	e.forOfIteratorGiven, e.forOfIteratorGivenSync = "", false
+	origTag, origPay := e.emitUnboxTagPayload(iterVal)
+	e.emitAnyTypedArrayBoundsCheck(origTag, origPay)
 	// A string iterates its code points: as the array of them; so does a
 	// String wrapper.
 	iterVal = e.anyStringAsCodePoints(e.emitUnwrapPrim(iterVal))
 	// A boxed Map, Set, Headers or URLSearchParams: its entries.
 	iterVal = Value{Ref: e.emitHostIterValue(iterVal.Ref), Ty: TypeAny}
-	e.ensureSprintf()
-	e.ensureMalloc()
 	pos := s.GetPos()
 	anyAt := func(slot string) Value {
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, slot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, slot))
 		return Value{Ref: r, Ty: TypeAny}
 	}
 	newSlot := func(init string) string {
 		r := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", r))
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", init, r))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", init, r))
 		return r
 	}
 	// The iterable is evaluated once; keep it in a slot for the loop.
@@ -85,9 +88,12 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	} else {
 		arrMode = e.emitArrayFastPathOK(arrMode0)
 	}
+	if given != "" {
+		arrMode = "false"
+	}
 	arrModeSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", arrModeSlot))
-	e.emitInstr(fmt.Sprintf("store i1 %s, ptr %s, align 1", arrMode, arrModeSlot))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", arrMode, arrModeSlot))
 	protoL := e.freshLabel("forof.any.proto")
 	startL := e.freshLabel("forof.any.start")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", arrMode, startL, protoL))
@@ -100,6 +106,13 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	}
 	if s.Await {
 		notIterable = forOfIterableName(s.Iterable) + " is not async iterable"
+	}
+	itx := s.Iterable
+	if as, ok := itx.(*ast.AsExpression); ok {
+		itx = as.Expr
+	}
+	if id, ok := itx.(*ast.Identifier); ok && !s.Await && strings.HasPrefix(id.Name, "__kml_") {
+		notIterable = "" // a compiler temporary: the value's description
 	}
 	callMethod := func(recv Value, fnBox Value) (Value, error) {
 		argv := e.freshReg()
@@ -118,32 +131,43 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isFn, mt, kmlTagDynFunc))
 		return m, isFn
 	}
-	var method Value
-	if s.Await {
-		am, amFn := methodOf("@@asyncIterator")
-		asyncL := e.freshLabel("forof.any.async")
-		syncL := e.freshLabel("forof.any.sync")
-		pickL := e.freshLabel("forof.any.pick")
-		mslot := newSlot(am.Ref)
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", amFn, asyncL, syncL))
-		e.emitLabel(syncL)
-		sm, _ := methodOf("@@iterator")
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sm.Ref, mslot))
-		e.emitInstr(fmt.Sprintf("store i64 1, ptr %s, align 8", syncSlot))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", pickL))
-		e.emitLabel(asyncL)
-		e.emitTerminator(fmt.Sprintf("br label %%%s", pickL))
-		e.emitLabel(pickL)
-		method = anyAt(mslot)
-	} else {
-		method, _ = methodOf("@@iterator")
-	}
-	it, err := callMethod(Value{Ref: iterVal.Ref, Ty: TypeAny}, method)
-	if err != nil {
+	if given != "" {
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", given, iterBoxSlot))
+		if givenSync {
+			e.emitInstr(fmt.Sprintf("store i64 1, "+irPtr+" %s, align 8", syncSlot))
+		}
+		e.emitTerminator(fmt.Sprintf("br label %%%s", startL))
+	} else if err := func() error {
+		var method Value
+		if s.Await {
+			am, amFn := methodOf("@@asyncIterator")
+			asyncL := e.freshLabel("forof.any.async")
+			syncL := e.freshLabel("forof.any.sync")
+			pickL := e.freshLabel("forof.any.pick")
+			mslot := newSlot(am.Ref)
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", amFn, asyncL, syncL))
+			e.emitLabel(syncL)
+			sm, _ := methodOf("@@iterator")
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sm.Ref, mslot))
+			e.emitInstr(fmt.Sprintf("store i64 1, "+irPtr+" %s, align 8", syncSlot))
+			e.emitTerminator(fmt.Sprintf("br label %%%s", pickL))
+			e.emitLabel(asyncL)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", pickL))
+			e.emitLabel(pickL)
+			method = anyAt(mslot)
+		} else {
+			method, _ = methodOf("@@iterator")
+		}
+		it, err := callMethod(Value{Ref: iterVal.Ref, Ty: TypeAny}, method)
+		if err != nil {
+			return err
+		}
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", it.Ref, iterBoxSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", startL))
+		return nil
+	}(); err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", it.Ref, iterBoxSlot))
-	e.emitTerminator(fmt.Sprintf("br label %%%s", startL))
 
 	e.emitLabel(startL)
 	isPattern := s.ArrayPattern != nil || s.ObjectPattern != nil
@@ -159,7 +183,12 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	// Leaving the loop early closes a protocol iterator (IteratorClose).
 	closeName := "__kml_forof_any_it_" + e.freshReg()[1:]
 	e.define(closeName, Symbol{Ptr: iterBoxSlot, Ty: TypeAny})
-	e.pendingFinallys = append(e.pendingFinallys, pendingExit{body: []ast.Statement{iteratorCloseStmt(closeName, pos)}})
+	closeStmt := iteratorCloseStmt(closeName, pos)
+	if s.Await {
+		// AsyncIteratorClose: the loop goes on once return() settles.
+		closeStmt = asyncIteratorCloseStmt(closeName, pos)
+	}
+	e.pendingFinallys = append(e.pendingFinallys, pendingExit{body: []ast.Statement{closeStmt}})
 	defer func() { e.pendingFinallys = e.pendingFinallys[:len(e.pendingFinallys)-1] }()
 	elemSlot := newSlot(fmt.Sprintf("%d", nbUndefined))
 
@@ -167,7 +196,7 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	e.emitLabel(condL)
 	e.emitSafepoint()
 	am := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", am, arrModeSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", am, arrModeSlot))
 	arrCondL := e.freshLabel("forof.any.arrcond")
 	protoCondL := e.freshLabel("forof.any.protocond")
 	haveL := e.freshLabel("forof.any.have")
@@ -192,9 +221,9 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	arrReadL := e.freshLabel("forof.any.arrread")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, arrReadL, endL))
 	e.emitLabel(arrReadL)
-	key := e.freshReg()
-	e.heapMallocInto(key, "24")
-	e.emitInstr(fmt.Sprintf("call i32 (ptr, ptr, ...) @sprintf(ptr %s, ptr %s, i64 %s)", key, e.internString("%lld"), i))
+	key := e.emitStringScratch(24)
+	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", key, e.internString("%lld"), i))
+	e.emitStringFinalizeLen(key)
 	elem, err := e.emitDynAnyMemberGet(anyAt(iterSlot), key, pos)
 	if err != nil {
 		return err
@@ -204,10 +233,10 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 			return err
 		}
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", elem.Ref, elemSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", elem.Ref, elemSlot))
 	ni := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", ni, anyAt(idxSlot).Ref))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", ni, idxSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ni, idxSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", haveL))
 
 	// Protocol mode: r = it.next() (awaited under `for await`).
@@ -215,6 +244,10 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	itv := anyAt(iterBoxSlot)
 	next, err := e.emitDynAnyMemberGetNamed(itv, e.internString("next"), "next", pos)
 	if err != nil {
+		return err
+	}
+	// A next that is no function: V8's "undefined is not a function".
+	if err := e.emitRequireCallable(next); err != nil {
 		return err
 	}
 	r, err := callMethod(itv, next)
@@ -237,18 +270,35 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 	valL := e.freshLabel("forof.any.val")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDone, finL, valL))
 	e.emitLabel(finL)
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, iterBoxSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, iterBoxSlot))
+	if s.Await {
+		// A sync iterator's last result too: its value is awaited before
+		// the loop ends (AsyncFromSyncIteratorContinuation).
+		sy, isSync := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sy, syncSlot))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isSync, sy))
+		lastL := e.freshLabel("forof.any.awaitlast")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isSync, lastL, endL))
+		e.emitLabel(lastL)
+		last, err := e.emitDynAnyMemberGetNamed(anyAt(rslot), e.internString("value"), "value", pos)
+		if err != nil {
+			return err
+		}
+		if _, err := e.emitAwaitAny(last); err != nil {
+			return err
+		}
+	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", endL))
 	e.emitLabel(valL)
 	v, err := e.emitDynAnyMemberGetNamed(anyAt(rslot), e.internString("value"), "value", pos)
 	if err != nil {
 		return err
 	}
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, elemSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, elemSlot))
 	if s.Await {
 		// A sync iterator under `for await`: its values are awaited.
 		sy := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", sy, syncSlot))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", sy, syncSlot))
 		isSync := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isSync, sy))
 		awL := e.freshLabel("forof.any.awaitval")
@@ -258,7 +308,7 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 		if err != nil {
 			return err
 		}
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", av.Ref, elemSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", av.Ref, elemSlot))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", haveL))
 
@@ -296,19 +346,19 @@ func (e *Emitter) anyStringAsCodePoints(v Value) Value {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
 	out := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", out))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", v.Ref, out))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, out))
 	strL, doneL := e.freshLabel("forof.any.str"), e.freshLabel("forof.any.strdone")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStr, strL, doneL))
 	e.emitLabel(strL)
 	s := e.emitUnboxBoxToType(v.Ref, TypePtr)
 	arr, err := e.emitBoxValue(e.emitStringToCharArray(s))
 	if err == nil {
-		e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", arr.Ref, out))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", arr.Ref, out))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", r, out))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, out))
 	return Value{Ref: r, Ty: TypeAny}
 }
 
@@ -319,7 +369,7 @@ func (e *Emitter) emitAnyMemberOrUndefined(v Value, key string) (Value, error) {
 	tag, payload := e.emitUnboxTagPayload(v)
 	res := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", res))
-	e.emitInstr(fmt.Sprintf("store i64 %d, ptr %s, align 8", nbUndefined, res))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, res))
 	objL, dynL, doneL := e.freshLabel("anymem.obj"), e.freshLabel("anymem.dyn"), e.freshLabel("anymem.done")
 	isObj := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
@@ -328,21 +378,42 @@ func (e *Emitter) emitAnyMemberOrUndefined(v Value, key string) (Value, error) {
 	e.emitLabel(objL)
 	objp := e.emitIntToPtr(payload)
 	sv, _ := e.emitShapeGet(objp, e.internString(key))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", sv, res))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sv, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(notObjL)
 	isBag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, dynL, doneL))
+	otherL := e.freshLabel("anymem.other")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBag, dynL, otherL))
+	// Any other value but null and undefined (a class's statics, a
+	// function's properties, a primitive's): its property read as any
+	// value's is.
+	e.emitLabel(otherL)
+	isNull, isUndef, absent := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNull, tag, kmlTagNull))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isUndef, tag, kmlTagUndefined))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", absent, isNull, isUndef))
+	genL := e.freshLabel("anymem.gen")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, doneL, genL))
+	e.emitLabel(genL)
+	gv, err := e.emitDynAnyMemberGetNamed(v, e.internString(key), key, ast.Pos{})
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", gv.Ref, res))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(dynL)
-	e.ensureDynObj()
+	e.ensureAnyToPrimitive()
+	e.ensureNanBox()
+	e.ensureErrorNames()
+	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %s)", r, e.emitIntToPtr(payload), e.internString(key)))
-	e.emitInstr(fmt.Sprintf("store i64 %s, ptr %s, align 8", r, res))
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", r, e.emitIntToPtr(payload), e.internString(key)))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	out := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", out, res))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, res))
 	return Value{Ref: out, Ty: TypeAny}, nil
 }
 
@@ -404,4 +475,18 @@ func forOfIterableName(expr ast.Expression) string {
 		return forOfIterableName(x.Object) + "[...]"
 	}
 	return "object"
+}
+
+// emitForOfIteratorValue is emitForOfAnyValue over an iterator already
+// obtained (sync: a `[Symbol.iterator]()` one, whose values a for await
+// loop awaits) (the result of a `[Symbol.asyncIterator]()` or
+// `[Symbol.iterator]()` call whose shape no declaration gives): the
+// protocol's steps on it, without GetIterator.
+func (e *Emitter) emitForOfIteratorValue(s *ast.ForOfStatement, iterVal Value, sync bool, condL, bodyL, incL, endL string) error {
+	it, err := e.emitBoxValue(iterVal)
+	if err != nil {
+		return err
+	}
+	e.forOfIteratorGiven, e.forOfIteratorGivenSync = it.Ref, sync
+	return e.emitForOfAnyValue(s, it, condL, bodyL, incL, endL)
 }

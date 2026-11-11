@@ -27,6 +27,13 @@ type hostMember struct {
 	// iterator's `return?()`): a host value without it reads undefined.
 	optional bool
 	sig      *checker.Type // a method's signature (the longest overload)
+	// call is the member a call goes through: name itself, or for a
+	// well-known-symbol method the member its `@intrinsic` names
+	// (ReadableStream's [Symbol.asyncIterator] is its values).
+	call string
+	// lower is the method's `@lower` library function, when it has one:
+	// the adapter calls it with the receiver first.
+	lower string
 	// paramTypeNames are the declared parameters' type names (`K` of
 	// `get(key: K)`), for the type parameters the concrete host type binds.
 	paramTypeNames []string
@@ -54,10 +61,14 @@ func (e *Emitter) hostMembers(class string) []hostMember {
 	}
 	var out []hostMember
 	for _, p := range t.Props {
-		if p.Name == "" || strings.HasPrefix(p.Name, "__") || strings.ContainsAny(p.Name, "[]@ ") {
+		call := p.Name
+		if strings.HasPrefix(p.Name, "@@") {
+			call = hostSymbolMemberAlias(c, class, p.Name)
+		}
+		if call == "" || strings.HasPrefix(call, "__") || strings.ContainsAny(call, "[]@ ") {
 			continue
 		}
-		m := hostMember{name: p.Name, readonly: p.Readonly, optional: p.Optional}
+		m := hostMember{name: p.Name, call: call, readonly: p.Readonly, optional: p.Optional}
 		ft := p.Type
 		if ft != nil && ft.Flags&checker.Object != 0 && ft.Kind == checker.Function && !p.Accessor {
 			m.method = true
@@ -69,11 +80,77 @@ func (e *Emitter) hostMembers(class string) []hostMember {
 			}
 		}
 		if m.method {
-			m.paramTypeNames = hostParamTypeNames(c, class, p.Name, len(m.sig.Params))
+			m.paramTypeNames = hostParamTypeNames(c, class, call, len(m.sig.Params))
+			m.lower = hostMethodLower(c, class, call)
 		}
 		out = append(out, m)
 	}
 	return out
+}
+
+// callName is the member a call of m goes through.
+func (m hostMember) callName() string {
+	if m.call != "" {
+		return m.call
+	}
+	return m.name
+}
+
+// hostSymbolMemberAlias is the member a well-known-symbol method of class
+// (name "@@asyncIterator") is the same function as: the plain-named method
+// its declaration shares an `@intrinsic` or `@lower` with, or "" when none.
+func hostSymbolMemberAlias(c frontView, class, name string) string {
+	g := c.Binding().Globals
+	if g == nil {
+		return ""
+	}
+	sym := g.Symbols.Get(class)
+	if sym == nil {
+		return ""
+	}
+	var methods []*ast.MethodSignature
+	for _, d := range sym.Declarations {
+		if id, ok := d.Node.(*ast.InterfaceDeclaration); ok {
+			for _, mem := range id.Members {
+				if ms, ok := mem.(*ast.MethodSignature); ok {
+					methods = append(methods, ms)
+				}
+			}
+		}
+	}
+	for _, ms := range methods {
+		if !ms.Computed || ms.Name != "[Symbol."+strings.TrimPrefix(name, "@@")+"]" || ms.Intrinsic == "" && ms.Lower == "" {
+			continue
+		}
+		for _, o := range methods {
+			if !o.Computed && o.Intrinsic == ms.Intrinsic && o.Lower == ms.Lower {
+				return o.Name
+			}
+		}
+	}
+	return ""
+}
+
+// hostMethodLower is the `@lower` of class's plain-named method name, or "".
+func hostMethodLower(c frontView, class, name string) string {
+	g := c.Binding().Globals
+	if g == nil {
+		return ""
+	}
+	sym := g.Symbols.Get(class)
+	if sym == nil {
+		return ""
+	}
+	for _, d := range sym.Declarations {
+		if id, ok := d.Node.(*ast.InterfaceDeclaration); ok {
+			for _, mem := range id.Members {
+				if ms, ok := mem.(*ast.MethodSignature); ok && !ms.Computed && ms.Name == name && ms.Lower != "" {
+					return ms.Lower
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // hostParamTypeNames reads the type names of a method's parameters off the
@@ -128,7 +205,7 @@ func (e *Emitter) emitHostShapeRow(h hostLayout) string {
 	setName := fmt.Sprintf("@__kml_shape_set_host_%d", id)
 	e.emitHostShapeGetter(getName, h, members)
 	e.emitHostShapeSetter(setName, h, members)
-	return fmt.Sprintf("%d|%s { i64 %d, ptr %s, ptr %s, ptr %s, i64 0, ptr null, ptr null }", id, shapeRowTy, id, e.internString(h.class), getName, setName)
+	return fmt.Sprintf("%d|%s { i64 %d, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 0, "+irPtr+" null, "+irPtr+" null"+noShapeOrder+", i64 -1 }", id, shapeRowTy, id, e.internString(h.class), getName, setName)
 }
 
 // bindHostSelf loads the handle out of the host cell at cellReg and binds it
@@ -138,7 +215,7 @@ func (e *Emitter) bindHostSelf(cellReg string, h hostLayout) *ast.Identifier {
 	hir := hostHandleIR(h.ty)
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, hir))
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", hir, handle, slot))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", hir, handle, slot))
 	e.define("__kml_host_self", Symbol{Ptr: slot, Ty: h.ty})
 	return ast.NewIdentifier("__kml_host_self", ast.Pos{})
 }
@@ -156,6 +233,9 @@ func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostM
 		e.emitLabel(miss)
 	}
 	for _, m := range members {
+		if _, iter := iteratorInterfaces[h.class]; iter && m.method && !e.hostMethodReachable(m.name) {
+			continue
+		}
 		if m.method {
 			// The class's record by name (shared with class.prototype),
 			// this layout's own under the hidden key that record calls.
@@ -200,11 +280,14 @@ func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostM
 	if valueProtoClassName(h.class) && h.class != "Array" {
 		// A wrapper's other property is its class prototype's
 		// (Boolean.prototype.valueOf), and on along that chain.
-		e.ensureDynObj()
+		e.ensureAnyToPrimitive()
+		e.ensureNanBox()
+		e.ensureErrorNames()
+		e.ensureStrHeaderRuntime()
 		_, pay := e.emitUnboxTagPayload(e.emitBuiltinProto(h.class))
 		bag, v, hit := e.freshReg(), e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", bag, pay))
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get(ptr %s, ptr %%key)", v, bag))
+		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, bag, pay))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %%key)", v, bag))
 		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", hit, v, nbUndefined))
 		hitL, missL := e.freshLabel("wrap.proto.hit"), e.freshLabel("wrap.proto.miss")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hit, hitL, missL))
@@ -216,7 +299,7 @@ func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostM
 	e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal i64 %s(ptr %%obj, ptr %%key, ptr %%found)", name), body)
+	e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%obj, "+irPtr+" %%key, "+irPtr+" %%found)", name), body)
 }
 
 // emitHostShapeSetter generates `i32 set(ptr cell, ptr key, i64 value)`: a
@@ -227,7 +310,7 @@ func (e *Emitter) emitHostShapeSetter(name string, h hostLayout, members []hostM
 	self := e.bindHostSelf("%obj", h)
 	vslot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", vslot))
-	e.emitInstr(fmt.Sprintf("store i64 %%value, ptr %s, align 8", vslot))
+	e.emitInstr(fmt.Sprintf("store i64 %%value, "+irPtr+" %s, align 8", vslot))
 	e.define("__kml_host_value", Symbol{Ptr: vslot, Ty: TypeAny})
 	for _, m := range members {
 		if m.method || m.readonly {
@@ -247,7 +330,7 @@ func (e *Emitter) emitHostShapeSetter(name string, h hostLayout, members []hostM
 	e.emitTerminator("ret i32 0")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc(fmt.Sprintf("internal i32 %s(ptr %%obj, ptr %%key, i64 %%value)", name), body)
+	e.writeFunc(fmt.Sprintf("internal i32 %s("+irPtr+" %%obj, "+irPtr+" %%key, i64 %%value)", name), body)
 }
 
 // hostMethodRecord returns the dynamic-function record for method m of host
@@ -271,7 +354,7 @@ func (e *Emitter) hostMethodRecord(h hostLayout, m hostMember) string {
 		arity--
 	}
 	e.registerFnMeta(fn, m.name, arity, fnKindPlain)
-	e.emitGlobal(fmt.Sprintf("%s = internal constant { ptr, ptr, i64 } { ptr %s, ptr null, i64 %d }", rec, fn, arity))
+	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 	e.emitHostMethodAdapter(fn, h, m)
 	return rec
 }
@@ -300,14 +383,14 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, checkL, badL))
 	e.emitLabel(checkL)
 	cell := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", cell, pay))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, cell, pay))
 	isNull := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp eq ptr %s, null", isNull, cell))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, cell))
 	hdrL := e.freshLabel("hostm.hdr")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, badL, hdrL))
 	e.emitLabel(hdrL)
 	hdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, cell))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, cell))
 	hdr = e.headerIdentity(hdr)
 	same := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", same, hdr, h.id))
@@ -344,9 +427,9 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 		have := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %%argc, %d", have, i))
 		slotp := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, ptr %%argv, i64 %d", slotp, i))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%argv, i64 %d", slotp, i))
 		loaded := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", loaded, slotp))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", loaded, slotp))
 		word := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", word, have, loaded, nbUndefined))
 		av := Value{Ref: word, Ty: TypeAny}
@@ -357,9 +440,9 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 		e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, storageIR(pty)))
 		if pty.IsArray() {
 			// An array binding's slot holds its {data, len} header.
-			e.emitInstr(fmt.Sprintf("store ptr %s, ptr %s, align 8", e.arrayReturnHeader(av), slot))
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", e.arrayReturnHeader(av), slot))
 		} else {
-			e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align 8", storageIR(pty), av.Ref, slot))
+			e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align 8", storageIR(pty), av.Ref, slot))
 		}
 		name := fmt.Sprintf("__kml_host_a%d", i)
 		e.define(name, Symbol{Ptr: slot, Ty: pty})
@@ -370,12 +453,16 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 		minArgs--
 	}
 	call := func(k int) {
-		ce := ast.NewCallExpression(ast.NewMemberExpression(self, m.name, ast.Pos{}), append([]ast.Expression(nil), args[:k]...), ast.Pos{})
+		ce := ast.NewCallExpression(ast.NewMemberExpression(self, m.callName(), ast.Pos{}), append([]ast.Expression(nil), args[:k]...), ast.Pos{})
+		if fn, ok := e.lowerLink(m.lower); ok && m.lower != "" {
+			// A library-lowered method: its function, the receiver first.
+			ce = ast.NewCallExpression(ast.NewIdentifier(fn, ast.Pos{}), append([]ast.Expression{self}, args[:k]...), ast.Pos{})
+		}
 		// The synthesized call has no declaration for the checker to
 		// resolve: an intrinsic method goes straight to its emitter.
 		var v Value
 		var err error
-		if in, ok := intrinsics[h.class+".prototype."+m.name]; ok && e.intrinsicApplies(h.class+".prototype."+m.name, ce.Callee.(*ast.MemberExpression)) {
+		if in, ok := intrinsics[h.class+".prototype."+m.callName()]; ok && e.intrinsicApplies(h.class+".prototype."+m.callName(), ce.Callee.(*ast.MemberExpression)) {
 			v, err = in.emit(e, ce)
 		} else {
 			v, err = e.emitExpr(ce)
@@ -438,4 +525,4 @@ func (e *Emitter) hostReadSelf(cell string, h hostLayout) ast.Expression {
 }
 
 // primWrapperValueType is the primitive a wrapper class holds.
-var primWrapperValueType = map[string]Type{"Number": TypeF64, "String": TypePtr, "Boolean": TypeBool}
+var primWrapperValueType = map[string]Type{"Number": TypeF64, "String": TypePtr, "Boolean": TypeBool, "BigInt": BigIntType(), "Symbol": SymbolType()}

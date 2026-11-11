@@ -8,7 +8,7 @@
     "loose": "36/36",
     "loosePct": 100,
     "strict": "36/36",
-    "strictPct": 83
+    "strictPct": 100
   },
   "lede": "Number, Math, and the two global parse helpers, backed by IEEE-754 doubles with an exact-i64 fast path where the inputs are integers. The trig/log/hyperbolic family runs V8's own fdlibm port, so its results carry Node's exact bits rather than the platform libm's, and the rest — toFixed/toPrecision/toExponential and every toString radix, exponent formatting (min-digit, `e+5`), the constants, parseFloat's `\"0x10\"` → `0` hex-prefix rule, parseInt's hex auto-detect, and the bit ops — matches real JS.",
   "entries": [

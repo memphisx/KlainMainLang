@@ -131,6 +131,131 @@ static const char *uv_brackets(const char *pat) {
     return NULL;
 }
 
+/* Under u or v, an escape the pattern grammar has no production for is a
+   SyntaxError, with V8's message: only the syntax characters and `/` escape
+   themselves (`-` too, inside a class), `\c` takes a letter, `\x` two hex
+   digits, `\u` four or a braced code point, `\0` no digit after it, a
+   decimal escape names a group (never inside a class), `\k` a group name,
+   and `\p`/`\P` a braced property. */
+static int is_hex(char c) { return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+
+static const char *uv_escapes(const char *pat, int vmode) {
+    i64 len = (i64)strlen(pat);
+    int groups = 0, incls = 0;
+    for (i64 i = 0; i < len; i++) { /* the capture groups a decimal escape may name */
+        if (pat[i] == '\\') { i++; continue; }
+        if (incls) { if (pat[i] == ']') incls = 0; continue; }
+        if (pat[i] == '[') { incls = 1; continue; }
+        if (pat[i] == '(' && (pat[i + 1] != '?' || (pat[i + 2] == '<' && pat[i + 3] != '=' && pat[i + 3] != '!'))) groups++;
+    }
+    incls = 0;
+    for (i64 i = 0; i < len; i++) {
+        char c = pat[i];
+        if (c != '\\') {
+            if (incls) { if (c == ']') incls = 0; }
+            else if (c == '[') { incls = 1; if (pat[i + 1] == '^') i++; if (pat[i + 1] == ']') i++; }
+            continue;
+        }
+        char n = pat[i + 1];
+        if (!n) return "\\ at end of pattern";
+        i++;
+        if (strchr("^$\\.*+?()[]{}|/", n)) continue;
+        if (strchr("dDwWsSfnrtv", n)) continue;
+        if (n == '-' && incls) continue;
+        if (n == 'b' || (n == 'B' && !incls)) continue;
+        switch (n) {
+        case 'c':
+            if (!((pat[i + 1] >= 'a' && pat[i + 1] <= 'z') || (pat[i + 1] >= 'A' && pat[i + 1] <= 'Z'))) return "Invalid Unicode escape";
+            i++;
+            continue;
+        case 'x':
+            if (!is_hex(pat[i + 1]) || !is_hex(pat[i + 2])) return "Invalid escape";
+            i += 2;
+            continue;
+        case 'u':
+            if (pat[i + 1] == '{') {
+                i64 j = i + 2;
+                while (is_hex(pat[j])) j++;
+                if (j == i + 2 || pat[j] != '}') return "Invalid Unicode escape";
+                i = j;
+                continue;
+            }
+            if (!is_hex(pat[i + 1]) || !is_hex(pat[i + 2]) || !is_hex(pat[i + 3]) || !is_hex(pat[i + 4])) return "Invalid Unicode escape";
+            i += 4;
+            continue;
+        case '0':
+            if (pat[i + 1] >= '0' && pat[i + 1] <= '9') return "Invalid decimal escape";
+            continue;
+        case 'k':
+            if (incls) return "Invalid escape";
+            if (pat[i + 1] != '<') return "Invalid named reference";
+            continue;
+        case 'p': case 'P':
+            if (pat[i + 1] != '{') return "Invalid property name";
+            continue;
+        case 'q':
+            if (vmode && incls) continue; /* v's class string, checked by v_translate */
+            return "Invalid escape";
+        }
+        if (n >= '1' && n <= '9') {
+            if (incls) return "Invalid decimal escape";
+            int v = 0;
+            i64 j = i;
+            while (pat[j] >= '0' && pat[j] <= '9' && v <= groups) v = v * 10 + (pat[j++] - '0');
+            if (v > groups) return "Invalid escape";
+            i = j - 1;
+            continue;
+        }
+        return "Invalid escape";
+    }
+    return NULL;
+}
+
+/* Under u, a class range with a class escape at either end (`[\d-a]`) is
+   a SyntaxError. Atom by atom: an atom, `-` and another atom are a range;
+   a `-` after a finished range is an atom of its own. */
+static i64 class_atom(const char *p, int *cls) {
+    *cls = 0;
+    if (p[0] != '\\') return 1;
+    char n = p[1];
+    if (n && strchr("dDwWsS", n)) { *cls = 1; return 2; }
+    if ((n == 'p' || n == 'P') && p[2] == '{') {
+        i64 j = 3;
+        while (p[j] && p[j] != '}') j++;
+        *cls = 1;
+        return p[j] ? j + 1 : j;
+    }
+    if (n == 'c' && p[2]) return 3;
+    if (n == 'x') return 4;
+    if (n == 'u' && p[2] == '{') {
+        i64 j = 3;
+        while (p[j] && p[j] != '}') j++;
+        return p[j] ? j + 1 : j;
+    }
+    if (n == 'u') return 6;
+    return n ? 2 : 1;
+}
+
+static const char *uv_class_ranges(const char *pat) {
+    i64 len = (i64)strlen(pat);
+    for (i64 i = 0; i < len; i++) {
+        if (pat[i] == '\\') { i++; continue; }
+        if (pat[i] != '[') continue;
+        i++;
+        if (pat[i] == '^') i++;
+        while (i < len && pat[i] != ']') {
+            int a, b;
+            i += class_atom(pat + i, &a);
+            if (pat[i] == '-' && pat[i + 1] != ']' && pat[i + 1]) {
+                i64 k = class_atom(pat + i + 1, &b);
+                if (a || b) return "Invalid character class";
+                i += 1 + k;
+            }
+        }
+    }
+    return NULL;
+}
+
 static void *uv_error(const char *pat, const char *flags, const char *why, char **err) {
     i64 n = (i64)strlen(pat) + (i64)strlen(flags) + (i64)strlen(why) + 40;
     char *m = (char *)__kml_str_alloc(n);
@@ -168,7 +293,76 @@ static const char *quantified_lookaround(const char *pat, int uv) {
     return NULL;
 }
 
+/* Under u or v, ES's code-point escapes (`\u{1F600}`, and a surrogate pair
+   `\uD83D\uDE00`, one code point there) in a form PCRE2 reads under
+   PCRE2_ALT_BSUX, whose `\x` takes two hex digits: `\xHH` for ASCII, which
+   keeps a metacharacter literal, else the code point's UTF-8 bytes. Without
+   either flag the pattern is unchanged. */
+static int hex4(const char *p, unsigned *v) {
+    unsigned x = 0;
+    for (int k = 0; k < 4; k++) {
+        char c = p[k];
+        int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+        if (d < 0) return 0;
+        x = x * 16 + (unsigned)d;
+    }
+    *v = x;
+    return 1;
+}
+
+static i64 put_code_point(char *out, unsigned cp) {
+    if (cp < 0x80) return sprintf(out, "\\x%02X", cp);
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12)); out[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18)); out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+static const char *uv_code_points(const char *pat) {
+    i64 len = (i64)strlen(pat);
+    char *out = (char *)malloc((size_t)(len * 2 + 1)); /* scratch */
+    i64 d = 0;
+    for (i64 i = 0; i < len; i++) {
+        if (pat[i] != '\\' || i + 1 >= len) { out[d++] = pat[i]; continue; }
+        if (pat[i + 1] == 'u' && pat[i + 2] == '{') {
+            i64 j = i + 3;
+            unsigned cp = 0;
+            int digits = 0;
+            for (; j < len && pat[j] != '}'; j++, digits++) {
+                char c = pat[j];
+                int v = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+                if (v < 0 || cp > 0x10FFFF) { digits = -1; break; }
+                cp = cp * 16 + (unsigned)v;
+            }
+            if (digits > 0 && j < len && cp <= 0x10FFFF && (cp < 0xD800 || cp > 0xDFFF)) {
+                d += put_code_point(out + d, cp);
+                i = j;
+                continue;
+            }
+        }
+        unsigned hi, lo;
+        if (pat[i + 1] == 'u' && i + 5 < len && hex4(pat + i + 2, &hi) && hi >= 0xD800 && hi <= 0xDBFF &&
+            i + 11 < len && pat[i + 6] == '\\' && pat[i + 7] == 'u' && hex4(pat + i + 8, &lo) && lo >= 0xDC00 && lo <= 0xDFFF) {
+            d += put_code_point(out + d, 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00));
+            i += 11;
+            continue;
+        }
+        out[d++] = pat[i++]; /* any other escape: both characters as they are */
+        out[d++] = pat[i];
+    }
+    out[d] = 0;
+    return out;
+}
+
 void *__kml_regex_es_classes(const char *pat, const char *flags, char **err) {
+    const char *src = pat; /* as written, for a SyntaxError's message */
     *err = NULL;
     {
         const char *why = quantified_lookaround(pat, flags && (strchr(flags, 'u') || strchr(flags, 'v')));
@@ -176,12 +370,15 @@ void *__kml_regex_es_classes(const char *pat, const char *flags, char **err) {
     }
     if (flags && (strchr(flags, 'u') || strchr(flags, 'v'))) {
         const char *why = uv_brackets(pat);
+        if (!why) why = uv_escapes(pat, strchr(flags, 'v') != NULL);
+        if (!why && !strchr(flags, 'v')) why = uv_class_ranges(pat);
         if (why) return uv_error(pat, flags, why, err);
+        pat = uv_code_points(pat);
     }
     if (flags && strchr(flags, 'v')) {
         const char *why = NULL;
         char *t = v_translate(pat, &why);
-        if (!t) return uv_error(pat, flags, why, err);
+        if (!t) return uv_error(src, flags, why, err);
         return iter_mark(empty_iter_guard(es_classes(t)));
     }
     return iter_mark(empty_iter_guard(es_classes(pat)));
@@ -474,6 +671,11 @@ void __kml_regex_parse_flags(const char *flags, int *opt, u8 *g, u8 *i, u8 *m, u
         case 'y': *y = 1; break;
         }
     }
+}
+
+/* Whether flags holds flag c: `.unicode`, `.unicodeSets`, `.hasIndices`. */
+u8 __kml_regex_flag(const char *flags, int c) {
+    return flags && strchr(flags, c) ? 1 : 0;
 }
 
 /* ---- The `v` flag's class sets (ES2024 UnicodeSets mode) ----

@@ -104,12 +104,12 @@ console.log("done")
 `, "done\nflushed id 42")
 }
 
-func TestE2EFinRegHeldEqualsTargetRejected(t *testing.T) {
-	mustCompileError(t, `
+func TestE2EFinRegHeldEqualsTargetThrows(t *testing.T) {
+	assertOutput(t, `
 const reg = new FinalizationRegistry((held: object) => {})
 const a = { v: 1 }
-reg.register(a, a)
-`, "must not be the target itself")
+try { reg.register(a, a) } catch (e) { console.log((e as Error).name, (e as Error).message) }
+`, "TypeError FinalizationRegistry.prototype.register: target and holdings must not be same")
 }
 
 func TestE2EFinRegPrimitiveTargetRejected(t *testing.T) {
@@ -186,38 +186,32 @@ console.log("end")
 }
 
 func TestE2EFinRegGCModeCollectedFires(t *testing.T) {
-	// Same orphan shape as TestE2EGCModeWeakCollected: the referent is
-	// created in (and escapes) a helper so conservative stack scanning does
-	// not pin it; the WeakRef proves collection actually happened. The
-	// cleanup callback fires on the queue drained after the top-level script.
-	// The orphan is created in a LOOP of decoy iterations, and only the
-	// first is registered/asserted on: with a single straight-line
-	// `const wr = orphan()` the -O2 x86-64 build parks a stale copy of
-	// tmp's pointer in a stack slot the conservative scan keeps finding
-	// (deterministic 10/10 failure on the CI runner and under emulated
-	// linux/amd64 — an unrelated-shape stack clobber between orphan() and
-	// gc() does NOT scrub it, -fno-inline doesn't either, only -O0 does).
-	// Re-running the same call path makes each decoy overwrite the exact
-	// slots the watched iteration spilled into, so at collection time only
-	// the last decoy can be residue-pinned — which the test doesn't assert
-	// on. Verified 5/5 under linux/amd64 emulation, arm64 Linux, and
-	// macOS/M4.
+	// Same orphan shape as TestE2EGCModeWeakCollected: each referent is
+	// created in (and escapes) a helper, and the WeakRefs prove collection
+	// happened. Boehm scans conservatively, so a stale copy of one pointer
+	// (a spilled callee-saved register, a reused stack slot) can pin that
+	// orphan; those copies are few, so most of 64 registered orphans are
+	// collected and their cleanups run on a later task.
 	const src = `
 interface Box { v: number }
-const reg = new FinalizationRegistry((held: string) => { console.log("collected:", held) })
+let cleaned = 0
+const reg = new FinalizationRegistry((held: string) => { if (held === "orphan") cleaned++ })
 function orphan(i: number): WeakRef<Box> {
   const tmp: Box = { v: i }
-  if (i === 0) { reg.register(tmp, "orphan-box") }
+  reg.register(tmp, "orphan")
   return new WeakRef(tmp)
 }
 const refs: WeakRef<Box>[] = []
-for (let i = 0; i < 8; i++) { refs.push(orphan(i)) }
+for (let i = 0; i < 64; i++) { refs.push(orphan(i)) }
 // A WeakRef keeps its target to the end of the job that made it (ADR-01366).
 setTimeout(() => {
   gc()
   gc()
-  console.log("deref undefined:", refs[0].deref() === undefined)
-  console.log("end")
+  const gone = refs.filter((r) => r.deref() === undefined).length
+  console.log("most collected:", gone >= 32)
+  setTimeout(() => {
+    console.log("cleanups match:", cleaned === gone)
+  }, 0)
 }, 0)
 `
 	dir := tempDir(t)
@@ -231,7 +225,7 @@ setTimeout(() => {
 		t.Fatalf("run: %v", err)
 	}
 	got := strings.TrimRight(string(out), "\n")
-	want := "deref undefined: true\nend\ncollected: orphan-box"
+	want := "most collected: true\ncleanups match: true"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
@@ -359,5 +353,19 @@ r.register({}, 1, s);
 console.log(r.unregister(s));
 try { r.unregister(Symbol.for("y")) } catch (e: any) { console.log(e.name, e.message) }
 try { r.register(Symbol.for("x"), 1) } catch (e: any) { console.log(e.name, e.message) }
+`)
+}
+
+// An object held boxed (`{}`) is a valid target and token; a primitive is
+// Node's TypeError at run time in a JavaScript file.
+func TestE2EFinalizationRegistryBoxedObjectArgs(t *testing.T) {
+	assertSameAsNode(t, `
+const fr = new FinalizationRegistry<string>((h) => console.log(h));
+const tok = {}; const r = fr.register({}, "x", tok); console.log(r, fr.unregister(tok), fr.unregister(tok));
+`)
+	assertSameAsNodeCompatJS(t, `
+const fr = new FinalizationRegistry(() => {});
+for (const [k, f] of [["t", () => fr.register(5, "x")], ["u", () => fr.register({}, "x", 5)], ["uu", () => fr.unregister(5)], ["same", () => { const o = {}; fr.register(o, "x", o); }]])
+  try { f(); console.log(k, "ok"); } catch (e) { console.log(k, e.constructor.name, e.message); }
 `)
 }

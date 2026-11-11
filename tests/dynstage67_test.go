@@ -119,6 +119,20 @@ console.log(JSON.stringify(p))
 `, "7\n3\ntrue false\nundefined\n{\"y\":3}")
 }
 
+func TestE2EProxyArrayTarget(t *testing.T) {
+	assertOutputCompatJS(t, `
+const p = new Proxy([7, 8], {})
+console.log(p.length, p[0])
+for (const v of p) console.log(v)
+p[0] = 9
+console.log(p[0], 1 in p)
+const q = new Proxy([1, 2], { get(t, k) { return k === "length" ? 5 : "x" } })
+console.log(q.length, q[0])
+try { new Proxy(1, {}) } catch (e) { console.log(e.message) }
+console.log(JSON.stringify(p), p)
+`, "2 7\n7\n8\n9 true\n5 x\nCannot create proxy with a non-object as target or handler\n[9,8] [ 9, 8 ]")
+}
+
 func TestE2EProxyHasDeleteTraps(t *testing.T) {
 	assertOutputCompatJS(t, `
 const p = new Proxy({ a: 1, secret: 2 }, {
@@ -159,29 +173,18 @@ console.log(Reflect.get(o, "p"))
 `, "true false\n42")
 }
 
-// Reflect.get/has on a statically-typed struct under strict is a clean
-// compile-time rejection, never invalid IR: strict mode does not widen a typed
-// struct into a dynamic bag (ADR-00630). Previously these two forms — unlike
-// set/deleteProperty, which already rejected — emitted `nb_tag(i64 <ptr>)`,
-// invalid LLVM IR that only failed at the clang stage.
-func TestE2EReflectHasOnStaticObjectRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const o = { p: 42 }
-console.log(Reflect.has(o, "p"))
-`)
-	if err == nil {
-		t.Fatal("expected a compile error: Reflect.has on a statically-typed object")
-	}
-}
-
-func TestE2EReflectGetOnStaticObjectRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-const o = { p: 42 }
-console.log(Reflect.get(o, "p"))
-`)
-	if err == nil {
-		t.Fatal("expected a compile error: Reflect.get on a statically-typed object")
-	}
+// Reflect.get/has on a statically-typed object read its properties as
+// `o[k]` and `k in o` do (its prototype's keys included).
+func TestE2EReflectHasGetOnStaticObject(t *testing.T) {
+	src := `
+class P { x = 1; m() { return 1; } }
+const p = new P();
+const o = { a: 1, p: 42 };
+console.log(Reflect.has(p, "x"), Reflect.has(p, "y"), Reflect.has(p, "m"), Reflect.has(o, "a"), Reflect.has(o, "toString"), Reflect.has([1], 0), Reflect.has([1], "length"));
+console.log(Reflect.get(o, "p"), Reflect.get(p, "x"));
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCompatJS(t, src)
 }
 
 func TestE2EReflectPrototypes(t *testing.T) {

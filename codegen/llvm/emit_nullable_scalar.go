@@ -37,7 +37,7 @@ func (t Type) withoutNullable() Type {
 func (e *Emitter) nullableScalarFieldPtr(ptr string, ty Type, idx int) string {
 	agg := nullableScalarStorageIR(ty)
 	fp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, ptr %s, i32 0, i32 %d", fp, agg, ptr, idx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds %s, "+irPtr+" %s, i32 0, i32 %d", fp, agg, ptr, idx))
 	return fp
 }
 
@@ -69,7 +69,7 @@ func (e *Emitter) storeNullableScalarPresent(ptr string, ty Type, payloadRef str
 func (e *Emitter) copyNullableScalar(dstPtr string, ty Type, srcPtr string) {
 	agg := nullableScalarStorageIR(ty)
 	tmp := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", tmp, agg, srcPtr, storageAlign(ty)))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", tmp, agg, srcPtr, storageAlign(ty)))
 	e.heapStore(agg, tmp, dstPtr, storageAlign(ty))
 }
 
@@ -77,7 +77,7 @@ func (e *Emitter) copyNullableScalar(dstPtr string, ty Type, srcPtr string) {
 func (e *Emitter) loadNullableScalarPayload(ptr string, ty Type) string {
 	f1 := e.nullableScalarFieldPtr(ptr, ty, 1)
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, ty.IR, f1, ty.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", reg, ty.IR, f1, ty.Align()))
 	return reg
 }
 
@@ -86,7 +86,7 @@ func (e *Emitter) loadNullableScalarPayload(ptr string, ty Type) string {
 // stringifies null-aware instead of unwrapping to the payload zero.
 func (e *Emitter) loadNullableScalarAgg(ptr string, ty Type) Value {
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, nullableScalarStorageIR(ty), ptr, storageAlign(ty)))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", reg, nullableScalarStorageIR(ty), ptr, storageAlign(ty)))
 	return Value{Ref: reg, Ty: ty}
 }
 
@@ -98,7 +98,7 @@ func (e *Emitter) loadNullableScalarAgg(ptr string, ty Type) Value {
 // is proven present, so it takes the ordinary (unwrapped) path; a non-lvalue
 // nullable expression (e.g. `m.get(k)`) already yields its aggregate.
 func (e *Emitter) emitPreserveNullableOperand(expr ast.Expression) (Value, error) {
-	if sym, ok := e.nullableScalarLValue(expr); ok && !sym.NarrowedNonNull {
+	if sym, ok := e.nullableScalarLValue(expr); ok {
 		return e.loadNullableScalarAgg(sym.Ptr, sym.Ty), nil
 	}
 	return e.emitExpr(expr)
@@ -108,7 +108,7 @@ func (e *Emitter) emitPreserveNullableOperand(expr ast.Expression) (Value, error
 func (e *Emitter) loadNullableScalarPresent(ptr string, ty Type) string {
 	f0 := e.nullableScalarFieldPtr(ptr, ty, 0)
 	reg := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load i1, ptr %s, align 1", reg, f0))
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", reg, f0))
 	return reg
 }
 
@@ -116,9 +116,7 @@ func (e *Emitter) loadNullableScalarPresent(ptr string, ty Type) string {
 // referenced by expr, or ok=false. Stage 1 recognizes only a plain local
 // identifier here; a nullable-scalar object/interface field or `V | null` map
 // value is Stage 3 (boundaries), so those deliberately fall through to the
-// pre-existing (still-buggy, documented) path meanwhile. The returned Symbol's
-// NarrowedNonNull tells a null-aware caller whether flow analysis (Stage 2) has
-// already proven it present.
+// pre-existing path meanwhile.
 func (e *Emitter) nullableScalarLValue(expr ast.Expression) (sym Symbol, ok bool) {
 	if id, isID := expr.(*ast.Identifier); isID {
 		if s, found := e.lookup(id.Name); found && s.isNullableScalarLocal() {
@@ -239,9 +237,9 @@ func (e *Emitter) emitNullableScalarBoxedValue(expr ast.Expression, ty Type) (st
 	// parameter is) has no conversion here in the strict lane: the
 	// typed-subset rejection a plain parameter makes, never invalid IR. The
 	// js lane converts it as JavaScript does.
-	if at := e.inferExprType(expr); !e.compatJS() && !at.IsDynamic() && !isNullableScalar(at) && !at.IsNull() && !at.IsUndefined() && at.IR != "" &&
+	if at := e.typeOfExpr(expr); !e.compatJS() && !at.IsDynamic() && !isNullableScalar(at) && !at.IsNull() && !at.IsUndefined() && at.IR != "" &&
 		isPrimitiveRepr(at) && isPrimitiveRepr(ty.withoutNullable()) && !convertiblePure(at, ty.withoutNullable()) {
-		return "", fmt.Errorf("%d:%d: type mismatch in argument — a value of one type cannot be used where an incompatible type is expected (this compiler is a typed subset)", expr.GetPos().Line, expr.GetPos().Col)
+		return "", internalAt(expr.GetPos(), "argument representation %s for %s", at.IR, ty.IR)
 	}
 	if ty.NullAndUndef() {
 		v, err := e.emitExpr(expr)
@@ -256,7 +254,7 @@ func (e *Emitter) emitNullableScalarBoxedValue(expr ast.Expression, ty Type) (st
 	if sym, ok := e.nullableScalarLValue(expr); ok && nullableScalarStorageIR(sym.Ty) == nullableScalarStorageIR(ty) {
 		agg := nullableScalarStorageIR(ty)
 		reg := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, agg, sym.Ptr, storageAlign(ty)))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", reg, agg, sym.Ptr, storageAlign(ty)))
 		return reg, nil
 	}
 	v, err := e.emitExpr(expr)
@@ -321,7 +319,7 @@ func nullableScalarParamDecl(name string, pty Type) string {
 func (e *Emitter) defineNullableScalarParam(name, ptrName string, pty Type) {
 	agg := nullableScalarStorageIR(pty)
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, agg, storageAlign(pty)))
-	e.emitInstr(fmt.Sprintf("store %s %%p_%s, ptr %s, align %d", agg, name, ptrName, storageAlign(pty)))
+	e.emitInstr(fmt.Sprintf("store %s %%p_%s, "+irPtr+" %s, align %d", agg, name, ptrName, storageAlign(pty)))
 	e.define(name, Symbol{Ptr: ptrName, Ty: pty})
 }
 
@@ -426,7 +424,7 @@ func (e *Emitter) storeScalarOrNullableFieldExpr(gepReg string, fieldTy Type, ex
 	// value's type against the member set, then box it (coerce doesn't box).
 	if fieldTy.IsDynamic() && len(fieldTy.UnionMembers) > 0 {
 		if !val.Ty.IsDynamic() && !unionAllowsAssignmentFrom(fieldTy, val.Ty) {
-			return fmt.Errorf("%d:%d: value's type is not a member of the field's union type", expr.GetPos().Line, expr.GetPos().Col)
+			return internalAt(expr.GetPos(), "checker-rejected: value's type is not a member of the field's union type")
 		}
 		boxed, err := e.emitBoxValue(val)
 		if err != nil {
@@ -453,10 +451,10 @@ func (e *Emitter) loadScalarOrNullableField(gepReg string, fieldTy Type) Value {
 	}
 	reg := e.freshReg()
 	if isNullableScalar(fieldTy) {
-		e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, nullableScalarStorageIR(fieldTy), gepReg, storageAlign(fieldTy)))
+		e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", reg, nullableScalarStorageIR(fieldTy), gepReg, storageAlign(fieldTy)))
 		return Value{Ref: reg, Ty: fieldTy}
 	}
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", reg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", reg, StructFieldIR(fieldTy), gepReg, fieldTy.Align()))
 	return Value{Ref: reg, Ty: fieldTy}
 }
 
@@ -473,10 +471,10 @@ func (e *Emitter) storeNullableScalarAggregate(ptr string, ty Type, aggRef strin
 // produces — and each branch boxes its own value into it. leftBare is the left
 // operand's type with its nullability removed. ok is false when the operands
 // share a kind (the existing same-slot paths) or either is not a scalar union
-// member. Shared by emission and inferExprType so the two cannot disagree.
+// member. Shared by emission and typeOfExpr so the two cannot disagree.
 func nullCoalesceUnion(leftBare, right Type) (Type, bool) {
 	kind := func(t Type) string {
-		if t.IR == "ptr" && !isStringTy(t) && !t.IsSymbol() && !t.IsBigInt() {
+		if t.IR == irPtr && !isStringTy(t) && !t.IsSymbol() && !t.IsBigInt() {
 			return ""
 		}
 		return scalarTypeKind(t)
@@ -507,7 +505,7 @@ func (e *Emitter) emitNullCoalesceUnion(present string, left Value, rightExpr as
 		return Value{}, err
 	}
 	var rb Value
-	if right.Ty.IR == "ptr" && right.Ty.Nullable() && !right.Ty.IsNull() {
+	if right.Ty.IR == irPtr && right.Ty.Nullable() && !right.Ty.IsNull() {
 		// A `string | undefined` right operand: its absence is a run-time null
 		// pointer, while the box reads the static `undefined` flag as the literal
 		// — so a present string boxed as `undefined`. Box the two cases apart.
@@ -524,17 +522,17 @@ func (e *Emitter) emitNullCoalesceUnion(present string, left Value, rightExpr as
 	} else {
 		rb = e.convert(right, uTy)
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", uTy.IR, rb.Ref, resPtr, uTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", uTy.IR, rb.Ref, resPtr, uTy.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(presentL)
 	lb := e.convert(left, uTy)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", uTy.IR, lb.Ref, resPtr, uTy.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", uTy.IR, lb.Ref, resPtr, uTy.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, uTy.IR, resPtr, uTy.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", result, uTy.IR, resPtr, uTy.Align()))
 	return Value{Ref: result, Ty: uTy}, nil
 }
 
@@ -545,14 +543,14 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 	base := payload.Ty // already the bare (non-nullable) payload type
 	// Operands of different kinds (`n ?? "none"`): the result is their union.
 	// Coercing the string into the number's slot emitted `store double <ptr>`.
-	if uTy, ok := nullCoalesceUnion(base, e.inferExprType(rightExpr)); ok {
+	if uTy, ok := nullCoalesceUnion(base, e.typeOfExpr(rightExpr)); ok {
 		return e.emitNullCoalesceUnion(presentRef, payload, rightExpr, uTy)
 	}
 	// If the right operand is itself a nullable scalar (`a ?? b` where b is
 	// `T | undefined`, e.g. a chained `m.get(x) ?? m.get(y) ?? d`), the result
 	// stays `T | undefined` — `undefined ?? undefined` is `undefined`, not the
 	// payload zero. Produce a presence-preserving `{ i1, T }` result.
-	if rt := e.inferExprType(rightExpr); isNullableScalar(rt) {
+	if rt := e.typeOfExpr(rightExpr); isNullableScalar(rt) {
 		return e.emitNullCoalesceScalarNullableRight(presentRef, payload, rightExpr, rt)
 	} else if resTy, ok := nullCoalesceNullishRight(base, rt); ok {
 		// `x ?? null`: the result is `T | null`, absent where x is.
@@ -573,16 +571,16 @@ func (e *Emitter) emitNullCoalesceScalar(presentRef string, payload Value, right
 		return Value{}, err
 	}
 	right = e.convert(right, base)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", base.IR, right.Ref, resPtr, base.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", base.IR, right.Ref, resPtr, base.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(presentL)
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", base.IR, payload.Ref, resPtr, base.Align()))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", base.IR, payload.Ref, resPtr, base.Align()))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, base.IR, resPtr, base.Align()))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", result, base.IR, resPtr, base.Align()))
 	return Value{Ref: result, Ty: base}, nil
 }
 
@@ -627,17 +625,17 @@ func (e *Emitter) emitNullCoalesceScalarNullableRight(presentRef string, payload
 		rv := e.convert(right, resTy.withoutNullable())
 		rightAgg = e.makeNullableScalarAgg(resTy, "true", rv.Ref)
 	}
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, rightAgg, resPtr, storageAlign(resTy)))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", agg, rightAgg, resPtr, storageAlign(resTy)))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(presentL)
 	leftAgg := e.makeNullableScalarAgg(resTy, "true", payload.Ref) // left present
-	e.emitInstr(fmt.Sprintf("store %s %s, ptr %s, align %d", agg, leftAgg, resPtr, storageAlign(resTy)))
+	e.emitInstr(fmt.Sprintf("store %s %s, "+irPtr+" %s, align %d", agg, leftAgg, resPtr, storageAlign(resTy)))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
 	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load %s, ptr %s, align %d", result, agg, resPtr, storageAlign(resTy)))
+	e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align %d", result, agg, resPtr, storageAlign(resTy)))
 	return Value{Ref: result, Ty: resTy}, nil
 }
 
@@ -667,7 +665,7 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	// not marked IsUndefined, so a genuinely-undefined dynamic value never
 	// strict-equalled the literal (a missing dynamic property, `als.getStore()`,
 	// etc.).
-	if e.inferExprType(scalarExpr).IsDynamic() {
+	if e.typeOfExpr(scalarExpr).IsDynamic() {
 		return Value{}, false, nil
 	}
 	// An array operand compared to the `undefined` literal is a `Map<K,T[]>` miss
@@ -678,7 +676,7 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	// emitBinary's array-vs-nullish branch, which tests the data pointer at
 	// runtime. Only for the `undefined` literal — a `T[] | null` field compared to
 	// `null` keeps its existing presence-bit handling below.
-	if litUndef && e.inferExprType(scalarExpr).IsArray() {
+	if litUndef && e.typeOfExpr(scalarExpr).IsArray() {
 		return Value{}, false, nil
 	}
 	// Strict `===`/`!==` distinguishes `null` from `undefined` (JS: `undefined
@@ -687,8 +685,8 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	// strict kinds can't match, the result is a compile-time constant (never
 	// equal), regardless of the presence bit.
 	strict := ex.Op == "===" || ex.Op == "!=="
-	vt := e.inferExprType(scalarExpr)
-	if vt.NullAndUndef() && vt.IR == "ptr" || triStr(vt) {
+	vt := e.typeOfExpr(scalarExpr)
+	if vt.NullAndUndef() && vt.IR == irPtr || triStr(vt) {
 		return Value{}, false, nil // either absence, tested at run time (emitBinary)
 	}
 	if vt.NullAndUndef() {
@@ -721,7 +719,7 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 		}
 		return Value{Ref: cond, Ty: TypeBool}, true, nil
 	}
-	valUndef := vt.IsUndefined()
+	valUndef := vt.IsUndefined() || vt.IR == "void" // a void call's result is undefined
 	if vt.Nullable() && !isNullableScalar(vt) && !vt.IsNull() && !vt.IsUndefined() {
 		// A pointer that may be absent (a `(() => void) | undefined`, an
 		// object or string): its flags don't say which absence it holds, so
@@ -731,27 +729,24 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 	// A double slot may hold undefined as its sentinel (TDD-00241):
 	// emitF64UndefinedEq tests the bits.
 	f64Slot := vt.IR == "double" && !vt.IsDynamic() && !isNullableScalar(vt)
-	if strict && litUndef != valUndef && !(f64Slot && litUndef) {
-		switch ex.Op {
-		case "===":
-			return Value{Ref: "false", Ty: TypeBool}, true, nil
-		case "!==":
-			return Value{Ref: "true", Ty: TypeBool}, true, nil
+	if strict && litUndef != valUndef && !(f64Slot && litUndef) && (ex.Op == "===" || ex.Op == "!==") {
+		// The kinds never match, but the operand still runs (`g() === null`).
+		if _, err := e.emitExpr(scalarExpr); err != nil {
+			return Value{}, false, err
 		}
+		if ex.Op == "===" {
+			return Value{Ref: "false", Ty: TypeBool}, true, nil
+		}
+		return Value{Ref: "true", Ty: TypeBool}, true, nil
 	}
 	// Boxed-local path.
 	if sym, ok := e.nullableScalarLValue(scalarExpr); ok {
-		// Flow analysis (Stage 2) already proved presence: fold `x === null` to
-		// a constant false and `x !== null` to true, with no presence load.
-		if sym.NarrowedNonNull {
-			return e.nullCompareConst(ex.Op)
-		}
 		present := e.loadNullableScalarPresent(sym.Ptr, sym.Ty)
 		return e.presenceToNullCompare(ex.Op, present)
 	}
 	// Aggregate path: a non-lvalue that still produces a nullable scalar (a
 	// T|null return/field value). Evaluate it and test its presence bit.
-	if isNullableScalar(e.inferExprType(scalarExpr)) {
+	if isNullableScalar(e.typeOfExpr(scalarExpr)) {
 		v, err := e.emitExpr(scalarExpr)
 		if err != nil {
 			return Value{}, false, err
@@ -761,18 +756,6 @@ func (e *Emitter) emitNullableScalarNullCompare(ex *ast.BinaryExpression) (Value
 		}
 		present, _ := e.nullableScalarAggParts(v)
 		return e.presenceToNullCompare(ex.Op, present)
-	}
-	return Value{}, false, nil
-}
-
-// nullCompareConst returns the constant folding of a null comparison against a
-// value already proven present: `== null` -> false, `!= null` -> true.
-func (e *Emitter) nullCompareConst(op string) (Value, bool, error) {
-	switch op {
-	case "==", "===":
-		return Value{Ref: "false", Ty: TypeBool}, true, nil
-	case "!=", "!==":
-		return Value{Ref: "true", Ty: TypeBool}, true, nil
 	}
 	return Value{}, false, nil
 }
@@ -802,10 +785,6 @@ func isNullLiteralExpr(expr ast.Expression) bool {
 // emitNullableScalarVarDecl declares a nullable-scalar local: a { i1, T } slot
 // initialized from v.Init (or defaulted to absent when there is no
 // initializer, matching real JS's `let x: number | null;` === undefined).
-// Unlike the generic scalar path in emitVarDecl, this does not re-resolve the
-// storage pointer after evaluating the initializer for closure-capture
-// promotion (ADR-00001): a captured-and-mutated nullable scalar is a Stage 1
-// limitation, out of scope for the locals-only representation change.
 func (e *Emitter) emitNullableScalarVarDecl(v *ast.VarDeclaration, ty Type) error {
 	ptrName := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align %d", ptrName, nullableScalarStorageIR(ty), storageAlign(ty)))
@@ -845,7 +824,7 @@ func (e *Emitter) emitNullableScalarAssign(sym Symbol, ex *ast.AssignmentExpress
 			return Value{}, err
 		}
 		if err := dateCompoundAssignGuard(ex.Op, base.IsDate(), rhsVal.Ty.IsDate()); err != nil {
-			return Value{}, fmt.Errorf("%d:%d: %s", ex.GetPos().Line, ex.GetPos().Col, err)
+			return Value{}, internalAt(ex.GetPos(), "%v", err)
 		}
 		rhsVal = e.convert(rhsVal, base)
 		res, err := e.emitArith(strings.TrimSuffix(ex.Op, "="), cur, rhsVal, base, ex.GetPos())
@@ -915,64 +894,6 @@ func (e *Emitter) emitNullableScalarNullishOrLogicalAssignAt(ptr string, ty Type
 }
 
 // --- Stage 2: flow narrowing ---------------------------------------------
-
-// narrowingFromCondition recognizes a null-comparison guard over a
-// nullable-scalar local — `x !== null` / `x != null` (non-null when the guard
-// is true) and `x === null` / `x == null` (non-null when it is false), in
-// either operand order. It returns the variable name and which truth value of
-// the guard proves the variable present. Bare truthiness (`if (x)`) is
-// deliberately not recognized: a present 0 is falsy without being null, so it
-// would narrow unsoundly.
-func (e *Emitter) narrowingFromCondition(test ast.Expression) (name string, nonNullWhenTrue bool, ok bool) {
-	bin, isBin := test.(*ast.BinaryExpression)
-	if !isBin {
-		return "", false, false
-	}
-	switch bin.Op {
-	case "===", "==", "!==", "!=":
-	default:
-		return "", false, false
-	}
-	var idExpr ast.Expression
-	switch {
-	case isNullLiteralExpr(bin.Right):
-		idExpr = bin.Left
-	case isNullLiteralExpr(bin.Left):
-		idExpr = bin.Right
-	default:
-		return "", false, false
-	}
-	id, isID := idExpr.(*ast.Identifier)
-	if !isID || !e.flowTrusted(id) {
-		return "", false, false // another function may clear it after the guard
-	}
-	if sym, found := e.lookup(id.Name); !found || !sym.isNullableScalarLocal() {
-		return "", false, false
-	}
-	return id.Name, bin.Op == "!==" || bin.Op == "!=", true
-}
-
-// narrowNonNullInCurrentScope shadows a nullable-scalar binding into the
-// current (top) scope with NarrowedNonNull set — proven present for the rest of
-// that scope. Reuses the outer binding's storage Ptr; popScope discards it.
-func (e *Emitter) narrowNonNullInCurrentScope(name string) {
-	sym, ok := e.lookup(name)
-	if !ok || !sym.isNullableScalarLocal() || sym.NarrowedNonNull {
-		return
-	}
-	sym.NarrowedNonNull = true
-	e.define(name, sym)
-}
-
-// applyBranchNarrowing narrows a guarded nullable-scalar local inside whichever
-// of an `if`'s branches proves it present. Call after pushing the branch's own
-// scope so the narrowing is discarded on exit.
-func (e *Emitter) applyBranchNarrowing(test ast.Expression, branchIsTrue bool) {
-	name, nonNullWhenTrue, ok := e.narrowingFromCondition(test)
-	if ok && nonNullWhenTrue == branchIsTrue {
-		e.narrowNonNullInCurrentScope(name)
-	}
-}
 
 // --- Stage 2: null-aware console printing ---------------------------------
 

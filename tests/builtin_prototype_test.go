@@ -215,3 +215,22 @@ class Sub extends MyErr {}
 console.log(Object.getPrototypeOf(MyErr.prototype) === Error.prototype, Object.getPrototypeOf(new MyErr("q")) === MyErr.prototype, Object.getPrototypeOf(Sub.prototype) === MyErr.prototype);
 `)
 }
+
+// Object called as a function, held as a value, read as every object's
+// constructor, constructed through a value and passed as a callback: one
+// constructor, wrapping a primitive in each form.
+func TestE2EObjectConstructorForms(t *testing.T) {
+	assertSameAsNode(t, `const o = { a: 1 };
+console.log(Object(o) === o, typeof Object(), Object(null), Object(undefined));
+function f(a?: any) { return arguments.constructor === Object; }
+console.log(f(1), ({}).constructor === Object);
+const x: any = 5; console.log(typeof Object(x), Object(x) instanceof Number);
+const g = Object; console.log(g === Object, typeof g({}));
+const o2: any = { a: 1 };
+console.log(Object.prototype.constructor === Object, o2.constructor === Object, Object.name, o2.constructor.name);
+console.log(typeof o2.constructor.keys, o2.constructor.keys(o2), Object.getPrototypeOf(o2).constructor === Object);
+const C: any = o2.constructor; console.log(C(null), C(o2) === o, new C() instanceof Object);
+console.log([1, null].map(Object).length, typeof [5].map(Object)[0]);
+const D: any = Object; console.log([1, null, "s"].map(D).map((w: any) => typeof w), [true].map(Object)[0] instanceof Boolean);
+`)
+}

@@ -54,48 +54,25 @@ const (
 	taskStackSize    = 13 // bytes in this task's stack — the module task's is far larger than taskStackBytes (TDD-00224)
 	taskFrameBase    = 14 // its fiber's base frame (frames.go): an awaiter's frame for a stack's async part
 	taskStructBytes  = 120
-	taskStructIR     = "{ ptr, ptr, ptr, i64, ptr, ptr, ptr, ptr, ptr, ptr, ptr, i64, ptr, i64, ptr }"
+	taskStructIR     = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", i64, " + irPtr + " }"
 	// promise resolved: 0 = pending, 1 = fulfilled (v0/v1 hold the value), 2 =
 	// rejected (v0 holds the error object pointer's bits) — TDD-00083 Stage 2.
 	// Field 4 (reactions) is the head of a { ptr closure, ptr next } list of
 	// .then/.catch/.finally reactions, enqueued as microtasks when it settles.
 	// Field 5 (promiseBoxedSlot) caches the promise's box wrapper once it has
-	// been held in a dynamic value (emit_anyprom.go).
-	promiseStructIR = "{ i64, ptr, i64, i64, ptr, ptr, i64 }"
+	// been held in a dynamic value (emit_anyprom.go). Field 7 (TWIN) links a
+	// typed promise and its Promise<any> view, one object in JS, in a ring:
+	// a handler on either is a handler on both.
+	promiseStructIR = "{ i64, " + irPtr + ", i64, i64, " + irPtr + ", " + irPtr + ", i64, " + irPtr + " }"
 	// promiseHeaderWord is the word before a promise's body: the header of
 	// a host value naming no class (TDD-00247).
 	promiseHeaderWord = kmlHdrMagic | hostTypeIDFlag | hostInlineFlag
-	promiseStructSize = 56
+	promiseStructSize = 64
 	// async-task fiber stacks are far shallower than the HTTP path's 1 MiB
 	// (most async bodies are a handful of frames); 256 KiB keeps memory per
 	// in-flight async call modest while leaving generous headroom.
 	taskStackBytes = 256 * 1024
 )
-
-// ensureTaskRuntime emits the async-task coroutine runtime once. Inert until
-// the async-function emitter (emit_async.go/emit_func.go) routes a may-suspend
-// async call through @__kml_spawn_task — see TDD-00083 Stage 2.
-// ensurePromiseRuntime emits just the promise value struct + allocator and the
-// microtask/exception helpers a settled promise needs — WITHOUT the fiber
-// scheduler or the libcurl fetch runtime (TDD-00084 Part A). A non-suspending
-// async function (inline catch-and-settle) and `.then`/`.catch`/`.finally` use
-// this, so a pure-async program that never touches fetch does not link libcurl
-// or the ucontext machinery. ensureTaskRuntime is a superset that calls this.
-func (e *Emitter) ensurePromiseRuntime() {
-	if e.usedPromiseRuntime {
-		return
-	}
-	e.usedPromiseRuntime = true
-	e.ensureMalloc()
-	e.ensureFree()
-	e.ensureUnhandledRejections()
-	e.ensureExceptionHelpers() // setjmp / __kml_throw / __kml_get_thrown for the catch-and-settle wrapper
-	e.ensureMicrotasks()       // .then/.catch/.finally reactions + __kml_promise_drain_reactions
-	// promise.c: a fresh pending promise, and the scheduler-free scan for
-	// Promise.any over already-settled task promises.
-	e.emitGlobal(`declare ptr @__kml_task_alloc_promise()
-declare i64 @__kml_promise_first_fulfilled(ptr, i64)`)
-}
 
 // emitLoopTaskStubs emits no-op definitions for the symbols __kml_event_loop_run
 // references so it can drive coroutine tasks (TDD-00084 Part B) —
@@ -118,9 +95,7 @@ func (e *Emitter) emitLoopTaskStubs() {
 		return
 	}
 	if !e.usedTaskRuntime {
-		e.emitGlobal("@__kml_task_active = internal thread_local global i64 0, align 8")
-		e.emitGlobal("define void @__kml_task_sched_step() {\nentry:\n  ret void\n}")
-		e.emitGlobal("define i1 @__kml_task_resumable() {\nentry:\n  ret i1 0\n}")
+		e.emitGlobal("@__kml_task_active = internal thread_local" + irGlobalAS + " global i64 0, align 8")
 	}
 	e.ensureMicrotasks()
 }
@@ -130,45 +105,13 @@ func (e *Emitter) ensureTaskRuntime() {
 		return
 	}
 	e.usedTaskRuntime = true
-	e.ensurePromiseRuntime() // promise struct + __kml_task_alloc_promise (+ microtasks/exceptions)
-	e.ensureMalloc()
-	e.ensureFree()
-	e.ensureFiberRuntime()       // getcontext/makecontext/swapcontext + @__kml_main_ctx
-	e.ensureCurrentTaskGlobal()  // @__kml_current_task
-	e.ensureExceptionHelpers()   // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
-	e.usedAwaitTimerDrive = true // __kml_task_await_ready's top-level drive fires timers (TDD-00088)
-	e.ensureMicrotasks()         // .then/.catch/.finally reactions drain here
-	// The scheduler pumps libcurl; a may-suspend program always uses fetch.
-	e.ensureFetchAsync()
-	// Both waits on members and task_await_ready's top-level branch take turns
-	// of the real loop.
+	e.ensureMicrotasks()
+	e.ensureExceptionHelpers() // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
+	e.ensureUnhandledRejections()
+	// The scheduler pumps libcurl when the program fetches (fetch.c);
+	// otherwise its step is hooks.c's no-op. Both waits on members and
+	// task_await_ready's top-level branch take turns of the real loop.
 	e.noteLoopTurn()
-	if e.isGCMode() {
-		e.emitGlobal("declare ptr @__kml_task_stack_alloc(i64)")
-		e.emitGlobal("declare void @__kml_task_stack_free(ptr, i64)")
-		e.emitGlobal("declare void @__kml_task_gc_restore()")
-	}
-	if e.opts.Target.OS() == "windows" {
-		e.emitGlobal("declare void @__kml_ctx_release(ptr)")
-	}
-	// task.c: the scheduler, its task array and the waits.
-	e.emitGlobal(`@__kml_task_launching = external thread_local global ptr, align 8
-@__kml_task_active = external thread_local global i64, align 8
-declare void @__kml_task_trampoline()
-declare void @__kml_task_reject(ptr, ptr)
-declare ptr @__kml_spawn_task(ptr, ptr, ptr)
-declare ptr @__kml_spawn_task_ex(ptr, ptr, ptr, i64, ptr)
-declare void @__kml_task_register(ptr)
-declare void @__kml_task_reclaim(ptr)
-declare void @__kml_task_compact()
-declare void @__kml_task_finish(ptr)
-declare void @__kml_task_sched_step()
-declare zeroext i1 @__kml_task_resumable()
-declare i64 @__kml_task_await_any_of(ptr, i64)
-declare i64 @__kml_task_await_first_fulfilled(ptr, i64)
-declare void @__kml_task_unwait(ptr, i64, ptr)
-declare void @__kml_task_resume(ptr)
-declare void @__kml_task_await_ready(ptr)`)
 }
 
 // TaskSource is the task runtime's C source, behind kml_layout.h.

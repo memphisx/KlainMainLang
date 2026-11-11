@@ -115,6 +115,7 @@ func TestTupleByValDefaultModeUnchanged(t *testing.T) {
 		t.Fatalf("parse: %v", err)
 	}
 	ir, err := llvm.NewEmitter().EmitProgram(prog)
+	ir = llvm.ShapeIR(ir)
 	if err != nil {
 		t.Fatalf("codegen: %v", err)
 	}

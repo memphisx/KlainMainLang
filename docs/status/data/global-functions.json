@@ -177,6 +177,17 @@
             ]
           },
           {
+            "feature": "`escape(s)` / `unescape(s)`",
+            "status": "implemented",
+            "notes": [
+              "Annex B: a code unit outside `A–Z a–z 0–9 @*_+-./` becomes `%XX` (below 256) or `%uXXXX`; `unescape` reverses both and leaves any other `%` as is."
+            ],
+            "decl": [
+              "escape",
+              "unescape"
+            ]
+          },
+          {
             "feature": "`atob(s)`",
             "status": "implemented",
             "notes": [
@@ -204,17 +215,31 @@
             "feature": "`structuredClone(obj)`",
             "status": "implemented",
             "caveats": [
-              "Statically typed `EventEmitter`/`URL`/`URLSearchParams`/functions/class instances/`Promise` are rejected at compile time rather than silently aliased (`URL` matches Node, which throws `DataCloneError` for it); a `Map`/`Set` with an **array/Map/Set** key or value element type is also rejected (only scalar/string/object elements clone — [ADR-00574](../adr/00/ADR-00574.md))",
               "A cloned `AggregateError`'s `.errors` degrades to empty",
               "An `ArrayBuffer` in `options.transfer` is copied, not detached: the original stays usable"
             ],
             "notes": [
               "Real recursive deep copy, dispatched entirely on the argument's static type (arrays, incl. nested/TypedArrays, plain objects, and `Map`/`Set` recurse, cloning every entry deeply — [ADR-00574](../adr/00/ADR-00574.md); scalars pass through as value types) — see [ADR-00113](../adr/00/ADR-00113.md)",
               "A plain `ArrayBuffer` is byte-copied, a `SharedArrayBuffer` passes by reference, and an `Error` (or subtype) copies its kind/message/name ([ADR-00591](../adr/00/ADR-00591.md))",
-              "A value typed `any`/`unknown` (or asserted `as any`) clones by its run-time shape in TypeScript (`lib/node/internal_structured_clone.ts`); a function throws `DataCloneError` ([ADR-01266](../adr/01/ADR-01266.md))"
+              "A value typed `any`/`unknown` (or asserted `as any`) clones by its run-time shape in TypeScript (`lib/node/internal_structured_clone.ts`); a function throws `DataCloneError` ([ADR-01266](../adr/01/ADR-01266.md)); so does a statically typed value holding anything the static copy does not handle (a class instance, a function, a nested collection), its result typed `any` ([ADR-01942](../adr/01/ADR-01942.md))"
             ],
             "decl": [
               "structuredClone"
+            ]
+          },
+          {
+            "feature": "`WebAssembly` (`Module`/`Instance`/`Memory`/`Table`/`Global`, `compile`/`instantiate`/`validate`, `compileStreaming`/`instantiateStreaming`, the error classes)",
+            "status": "implemented",
+            "caveats": [
+              "Modules compile and run on wasmtime (its C API must be installed to compile a program using `WebAssembly`), so a `CompileError`/`LinkError` message is wasmtime's text where V8 words its own; traps carry V8's messages",
+              "After `memory.grow()` the old `memory.buffer` is not detached: it stays readable at its old length",
+              "An integer remainder by zero traps as `divide by zero`, where V8 says `remainder by zero`"
+            ],
+            "notes": [
+              "Imports and exports of every kind (functions with `i64` as `BigInt`, memories, tables, globals, `externref`), host functions that call back into the module or throw through it, shared memories as `SharedArrayBuffer`s, and a `Module` or shared `Memory` posted to a worker. See [ADR-01974](../adr/01/ADR-01974.md)"
+            ],
+            "decl": [
+              "WebAssembly"
             ]
           },
           {
@@ -228,6 +253,20 @@
             ],
             "decl": [
               "queueMicrotask"
+            ]
+          },
+          {
+            "feature": "`navigator`",
+            "status": "implemented",
+            "caveats": [
+              "No `navigator.locks` (the Web Locks API)"
+            ],
+            "notes": [
+              "Node's: `hardwareConcurrency` (`os.availableParallelism()`), `language`/`languages` from `LC_ALL`, `LC_MESSAGES` or `LANG` as ICU picks the default locale (`en-US` when none is set), `platform` (`MacIntel`, `Win32`, `Linux <machine>`), `userAgent` (`Node.js/<major>`); `Navigator` itself throws Node's \"Illegal constructor\" TypeError",
+              "A TypeScript module (`lib/node/kml_navigator.ts`)"
+            ],
+            "decl": [
+              "navigator"
             ]
           },
           {
@@ -247,7 +286,8 @@
             "feature": "`eval(s)`",
             "status": "missing",
             "notes": [
-              "General/dynamic `eval` is unimplemented (needs the opt-in embedded engine, [TDD-00046](../tdd/TDD-00046.md), not started). A narrow **static subset** does work: a compile-time-constant `eval(\"<expression>\")` is compiled in place through this compiler's own parser+codegen, no engine — see [ADR-00198](../adr/00/ADR-00198.md). A dynamic string, a statement/declaration, or a reference to a top-level binding is a clean compile error, never a runtime throw (so it can't false-pass a negative test)"
+              "Eval of a string computed at run time needs an embedded JavaScript engine ([TDD-00046](../tdd/TDD-00046.md), not started): at a direct call whose argument is statically a string it is a clean compile error; through `eval` as a value it throws EvalError when it runs. A compile-time-constant string is compiled in place through this compiler's own parser and codegen, direct or indirect (`(0, eval)(…)`, `eval?.(…)`), statements included: sloppy `var`/function declarations reach the caller's variables, strict code keeps its own, the completion value is the result, and source that does not parse throws SyntaxError when the eval runs. A value that is not a string is returned unchanged",
+              "The `Function` constructor (`Function(params, body)`, `new Function(…)`) with compile-time-constant strings is compiled the same way; with a string computed at run time it is a clean compile error"
             ]
           }
         ]

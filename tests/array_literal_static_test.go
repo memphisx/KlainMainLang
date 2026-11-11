@@ -1,6 +1,7 @@
 package tests
 
 import (
+	"KlainMainLang/codegen/llvm"
 	"fmt"
 	"regexp"
 	"strings"
@@ -87,6 +88,7 @@ console.log(xs.length, tbl.length)
 	if err != nil {
 		t.Fatal(err)
 	}
+	ir = llvm.ShapeIR(ir)
 	if !regexp.MustCompile(`@\.arrlit\.[0-9a-f]{16} = private unnamed_addr constant \[16 x double\]`).MatchString(ir) {
 		t.Errorf("flat literal was not lowered to a static image:\n%s", ir)
 	}

@@ -67,7 +67,9 @@ func frontEndWith(entryPath string, checks options.Options) (emitted, error) {
 		err error
 	}
 	ch := make(chan res, 1)
+	acquireFrontEnd()
 	go func() {
+		defer releaseFrontEnd()
 		var out res
 		defer func() {
 			if r := recover(); r != nil {
@@ -88,6 +90,10 @@ func frontEndWith(entryPath string, checks options.Options) (emitted, error) {
 		if perr != nil {
 			out.err = perr
 			return
+		}
+		if prog.GlobalObjectEscapes {
+			acquireHeavy() // heavyBytes (budget.go)
+			defer releaseHeavy()
 		}
 		em := llvm.NewEmitter()
 		em.SetOptions(options.Options{Decorators: checks.Decorators, EmitDecoratorMetadata: checks.EmitDecoratorMetadata})
@@ -161,7 +167,7 @@ var (
 // (see classifyUnsupportedModule) — only Node-repo-internal harness paths are
 // ever skipped. `node:`-prefixed specifiers are normalized before lookup.
 var nodeSupportedModule = map[string]bool{
-	"assert": true, "child_process": true, "cluster": true,
+	"assert": true, "child_process": true, "cluster": true, "console": true,
 	"dgram": true, "dns": true,
 	"fs": true, "http": true, "net": true,
 	"os": true, "path": true,
@@ -177,6 +183,10 @@ var nodeSupportedModule = map[string]bool{
 	"crypto": true,
 	// node:test — the runner surface (TDD-00140) + the mustCall helpers.
 	"test": true, "diagnostics_channel": true,
+	"assert/strict": true, "async_hooks": true, "dns/promises": true,
+	"path/posix": true, "path/win32": true, "perf_hooks": true,
+	"readline/promises": true, "string_decoder": true, "timers/promises": true,
+	"tty": true, "util/types": true,
 }
 
 // nodeAmbientModule lists Node modules whose surface this compiler exposes as
@@ -211,10 +221,9 @@ var nodeImportableDefault = map[string]string{
 var nodeImportableNamed = map[string]bool{"url": true, "events": true, "buffer": true, "timers": true}
 
 var nodeAmbientModule = map[string]bool{
-	"buffer": true, "process": true, "console": true, "timers": true,
-	"url": true, "string_decoder": true, "punycode": true,
-	"events":          true, // EventEmitter is global, not importable
-	"timers/promises": true,
+	"buffer": true, "process": true, "timers": true,
+	"url": true, "punycode": true,
+	"events": true, // EventEmitter is global, not importable
 }
 
 type nodeResult struct {
@@ -788,7 +797,7 @@ func runNodeSuite(workDir string, timeout time.Duration, workers int, compat str
 		if err := writeNodeReport(out, results); err != nil {
 			fatal("writing node report: %v", err)
 		}
-		fmt.Fprintf(os.Stderr, "node suite (lane=%s): %d files, report written to %s\n", laneLabel(), len(results), out)
+		fmt.Fprintf(os.Stderr, "node suite (lane=%s): %d files, %s\n", laneLabel(), len(results), reportOrDump(out))
 		var passing []string
 		for _, r := range results {
 			if r.Status == "PASS" {
@@ -1015,6 +1024,7 @@ func runOneNode(path, name, workDir string, workerID int, timeout time.Duration)
 	}
 
 	tag := fmt.Sprintf("node%d", workerID)
+	noteDumpUnit(tag, path)
 	if res.Suite == "message" {
 		// Expected-output suite: the pass criterion is the combined output
 		// matching the sibling `.out` baseline (a nonzero exit is often the
@@ -1122,6 +1132,9 @@ func runNodeLane(root string, files []string, workDir string, timeout time.Durat
 // identically structured file; the old both-lanes-in-one-file cross-analysis
 // ("passing only under -compat=js") is now just a diff of the two folders.
 func writeNodeReport(path string, all []nodeResult) error {
+	if dumpManifest != "" {
+		return nil // dump mode writes no report
+	}
 	var b strings.Builder
 	b.WriteString("# Node-core conformance results\n\n")
 	b.WriteString(reportLaneHeader())
@@ -1346,6 +1359,14 @@ func nodeReason(kind, msg string) string {
 // subdirectory the entry compiles under so `../common/*` resolves to the
 // generated shims — the test's own suite dir name for the Node track.
 func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir, entrySub string) (bool, string, string, string) {
+	if dumpManifest != "" {
+		// Dump mode: keep the assembled program beside its shims for the
+		// shadow report, and compile nothing.
+		if err := dumpProgram(src, filepath.Join(workDir, entrySub), tag); err != nil {
+			return false, "WRITE_ERROR: " + err.Error(), "", ""
+		}
+		return false, "DUMPED", "", ""
+	}
 	// The compile's share of the run's memory (budget.go).
 	rsv := budget.reserve(compileDefault)
 	defer budget.release(rsv)

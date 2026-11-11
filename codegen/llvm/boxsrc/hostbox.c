@@ -115,10 +115,21 @@ void *__kml_host_class_name(i64 v) {
     return row ? (void *)row->classname : 0;
 }
 
-/* An iterable host box's entries as a boxed array, else the value itself. */
+/* A typed array out of bounds of its resizable buffer (views.c, linked
+ * with typed arrays over buffers). */
+extern i64 __kml_views_oob __attribute__((weak));
+extern i64 __kml_view_oob(void *h) __attribute__((weak));
+extern void *__kml_str_from_cstr(const char *c);
+extern void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
+
+/* An iterable host box's entries as a boxed array, else the value itself.
+ * A typed array out of bounds of its resizable buffer throws, as its
+ * values() does. */
 i64 __kml_host_iter(i64 v) {
     void *cell = box_cell(v);
     if (!cell) return v;
+    if (&__kml_views_oob && __kml_views_oob && __kml_view_oob((char *)cell + 8))
+        __kml_throw_nullderef(__kml_str_from_cstr("Cannot perform %TypedArray%.prototype.values on a detached ArrayBuffer"));
     const HostRow *row = host_row(cell);
     return row && row->iter ? row->iter(cell) : v;
 }
@@ -136,4 +147,202 @@ i64 __kml_host_toprim(i64 v, int hint) {
     if (!cell) return v;
     const HostRow *row = host_row(cell);
     return row && row->toprim ? row->toprim(cell, v, hint & 0xff) : v;
+}
+
+/* ---- class references (emit_classref_rows.go) ----
+ * Each constructor reference the program can reach registers a row under
+ * its payload (unit kind KML_UNIT_CTOR): what util.inspect shows for it, its
+ * static members' count, keys and values, its instanceof test, its kind
+ * (1 class, 2 builtin), its dynamic construct, and its static get and set. */
+typedef struct {
+    i64 payload;
+    void *shown;
+    i64 (*nstatic)(void *p);
+    void *(*skey)(void *p, i64 i);
+    i64 (*sget)(void *p, i64 i);
+    _Bool (*inst)(i64 v);
+    i64 kind;
+    void *construct;
+    i64 (*get)(const char *key);
+    _Bool (*set)(const char *key, i64 v); /* whether key is a static it writes */
+} CtorRow;
+
+extern unsigned char __kml_nb_tag(long long w);
+extern long long __kml_nb_pay(long long w);
+extern int strcmp(const char *a, const char *b);
+
+static const CtorRow *ctor_row(void *p) { return (const CtorRow *)__kml_unit_find(KML_UNIT_CTOR, (i64)p); }
+
+/* The row of a boxed constructor reference, or null for any other value. */
+static const CtorRow *ctor_row_of(i64 c) {
+    if (__kml_nb_tag(c) != KML_TAG_FUNCREF) return 0;
+    return (const CtorRow *)__kml_unit_find(KML_UNIT_CTOR, __kml_nb_pay(c));
+}
+
+void *__kml_classref_shown(void *p) {
+    const CtorRow *r = ctor_row(p);
+    return r ? r->shown : 0;
+}
+/* A property a class value gains that is none of its statics (`K.extra =
+ * 7`, `Object.defineProperty(K, k, …)`, a symbol key): kept per reference
+ * in its own bag, with its attributes, after its static fields. */
+typedef struct ClassExtra {
+    void *ref;
+    void *bag;
+    struct ClassExtra *next;
+} ClassExtra;
+static ClassExtra *class_extras;
+
+extern void *__kml_dynobj_new(void);
+extern i64 __kml_dynobj_find(void *o, const char *key);
+extern i64 __kml_dynobj_get_recv(void *o, const char *key, i64 recv);
+extern i64 __kml_dynobj_setv(void *o, const char *key, i64 v);
+extern char **__kml_dynobj_keys_enum_c(void *o, i64 *n);
+extern i64 __kml_dynobj_get(void *o, const char *key);
+extern _Bool __kml_dynobj_delete(void *o, const char *key);
+
+/* The reference's own bag, made on first need when make is set. */
+void *__kml_classref_extra(void *p, int make) {
+    for (ClassExtra *x = class_extras; x; x = x->next)
+        if (x->ref == p) return x->bag;
+    if (!make) return 0;
+    ClassExtra *x = kml_alloc(KML_HEAP_WORDS, sizeof *x);
+    x->ref = p;
+    x->bag = __kml_dynobj_new();
+    x->next = class_extras;
+    class_extras = x;
+    return x->bag;
+}
+/* The reference whose extra bag bag is (a constructor given as another
+ * function's prototype: Object.setPrototypeOf(T, Buffer)), boxed; 0 for
+ * any other bag. */
+i64 __kml_classref_of_extra(void *bag) {
+    for (ClassExtra *x = class_extras; x; x = x->next)
+        if (x->bag == bag) return (i64)x->ref | KML_NB_FUNCREF_KIND;
+    return 0;
+}
+/* The bag's enumerable string keys (a symbol's key starts with \x01). */
+static char **extra_keys(void *p, i64 *n) {
+    *n = 0;
+    void *bag = __kml_classref_extra(p, 0);
+    if (!bag) return 0;
+    i64 m = 0;
+    char **ks = __kml_dynobj_keys_enum_c(bag, &m);
+    i64 j = 0;
+    for (i64 i = 0; i < m; i++)
+        if (ks[i][0] != '\x01') ks[j++] = ks[i];
+    *n = j;
+    return ks;
+}
+static i64 class_static_count(const CtorRow *r, void *p) { return r && r->nstatic ? r->nstatic(p) : 0; }
+static i64 ref_box(void *p) { return (i64)p | KML_NB_FUNCREF_KIND; }
+
+i64 __kml_classref_nstatic(void *p) {
+    const CtorRow *r = ctor_row(p);
+    i64 n = 0;
+    extra_keys(p, &n);
+    return class_static_count(r, p) + n;
+}
+void *__kml_classref_skey(void *p, i64 i) {
+    const CtorRow *r = ctor_row(p);
+    i64 n = class_static_count(r, p);
+    if (i < n) return r->skey ? r->skey(p, i) : 0;
+    i64 m = 0;
+    char **ks = extra_keys(p, &m);
+    return i - n < m ? __kml_str_from_cstr(ks[i - n]) : 0;
+}
+i64 __kml_classref_sget(void *p, i64 i) {
+    const CtorRow *r = ctor_row(p);
+    i64 n = class_static_count(r, p);
+    if (i < n) return r->sget ? r->sget(p, i) : KML_NB_UNDEFINED;
+    i64 m = 0;
+    char **ks = extra_keys(p, &m);
+    return i - n < m ? __kml_dynobj_get_recv(__kml_classref_extra(p, 0), ks[i - n], ref_box(p)) : KML_NB_UNDEFINED;
+}
+extern void __kml_dynobj_copy_own(void *dst, void *src);
+/* A snapshot of the reference's statics, with its own bag's properties. */
+void __kml_classref_bag_merge(void *p, void *snap) {
+    if (snap) __kml_dynobj_copy_own(snap, __kml_classref_extra(p, 0));
+}
+/* Whether the reference's own bag has key. */
+_Bool __kml_classref_extra_has(void *p, const char *key) {
+    void *bag = __kml_classref_extra(p, 0);
+    return bag && __kml_dynobj_find(bag, key) >= 0;
+}
+/* Deletes key from the reference's own bag: whether it was there. */
+_Bool __kml_classref_extra_delete(void *p, const char *key) {
+    void *bag = __kml_classref_extra(p, 0);
+    return bag && __kml_dynobj_delete(bag, key);
+}
+/* Whether key names one of the reference's statics: a present field, or a
+ * member its row reads. */
+static _Bool class_static_key(const CtorRow *r, void *p, const char *key) {
+    i64 n = class_static_count(r, p);
+    for (i64 i = 0; i < n; i++) {
+        const char *k = r->skey ? (const char *)r->skey(p, i) : 0;
+        if (k && strcmp(k, key) == 0) return 1;
+    }
+    return r && r->get && r->get(key) != KML_NB_UNDEFINED;
+}
+/* A static member through a reference; a builtin constructor (an Error
+ * kind) has only its length, 1. */
+extern i64 __kml_dynobj_setv_recv(void *o, const char *key, i64 v, i64 recv);
+i64 __kml_classref_get(void *p, const char *key) {
+    const CtorRow *r = ctor_row(p);
+    if (__kml_classref_extra_has(p, key)) return __kml_dynobj_get_recv(__kml_classref_extra(p, 0), key, ref_box(p));
+    if (r && r->get) return r->get(key);
+    if (strcmp(key, "length") == 0) {
+        double one = 1.0;
+        i64 bits;
+        __builtin_memcpy(&bits, &one, sizeof bits);
+        return bits + KML_NB_DOUBLE_OFFSET;
+    }
+    return KML_NB_UNDEFINED;
+}
+void __kml_classref_set(void *p, const char *key, i64 v) {
+    const CtorRow *r = ctor_row(p);
+    if (!__kml_classref_extra_has(p, key)) {
+        /* (A setter-only static reads as undefined: the row says it wrote.) */
+        if (r && r->set && r->set(key, v)) return;
+        /* A static method is a writable data property: the new value
+         * shadows it in the reference's own bag. */
+        _Bool method = r && r->get && strcmp(key, "length") != 0 && strcmp(key, "name") != 0 &&
+                       strcmp(key, "prototype") != 0 && __kml_nb_tag(r->get(key)) == 12;
+        if (!method && (class_static_key(r, p, key) || (!r && strcmp(key, "length") == 0))) return;
+    } else {
+        /* An accessor defined on the class runs with the class as this;
+         * 4 is a data property, stored below. */
+        if (__kml_dynobj_setv_recv(__kml_classref_extra(p, 0), key, v, ref_box(p)) != 4) return;
+    }
+    __kml_dynobj_setv(__kml_classref_extra(p, 1), key, v);
+}
+/* `v instanceof c` with c a reference held in `any`. */
+_Bool __kml_dyn_instanceof(i64 v, i64 c) {
+    const CtorRow *r = ctor_row_of(c);
+    return r && r->inst ? r->inst(v) : 0;
+}
+/* A reference's kind (1 when it has no row); 0 for any other value. */
+double __kml_ctor_kind(i64 c) {
+    if (__kml_nb_tag(c) != KML_TAG_FUNCREF) return 0.0;
+    const CtorRow *r = ctor_row_of(c);
+    return (double)(r ? r->kind : 1);
+}
+
+/* `obj.constructor` for an instance carrying its type id (unit kind
+ * KML_UNIT_CTOR_OF: { i64 id, ptr payload }), boxed as a reference, or
+ * undefined. */
+typedef struct {
+    i64 id;
+    void *payload;
+} CtorOfRow;
+const void *__kml_classrec_of(const void *inst);
+
+i64 __kml_constructor_of(void *o) {
+    i64 id = *(i64 *)o & KML_HDR_ID_MASK;
+    const CtorOfRow *r = (const CtorOfRow *)__kml_unit_find(KML_UNIT_CTOR_OF, id);
+    if (!r || !r->payload) return KML_NB_UNDEFINED;
+    // An instance of a local class: the evaluation that built it, whose
+    // record holds the bindings a `new` through this value needs.
+    const void *rec = __kml_classrec_of(o);
+    return (i64)(rec ? rec : r->payload) | KML_NB_FUNCREF_KIND;
 }

@@ -12,17 +12,21 @@ import {
     clearImmediate as nodeClearImmediate,
     Timeout,
     Immediate,
+    validateFunction,
 } from './internal_timers';
 
 export function __kml_setTimeout(callback: (...args: any[]) => void, after?: any, ...args: any[]): Timeout { // kml:lower setTimeout
+    validateFunction(callback, 'callback');
     return nodeSetTimeout(callback, after, ...args);
 }
 
 export function __kml_setInterval(callback: (...args: any[]) => void, repeat?: any, ...args: any[]): Timeout { // kml:lower setInterval
+    validateFunction(callback, 'callback');
     return nodeSetInterval(callback, repeat, ...args);
 }
 
 export function __kml_setImmediate(callback: (...args: any[]) => void, ...args: any[]): Immediate { // kml:lower setImmediate
+    validateFunction(callback, 'callback');
     return nodeSetImmediate(callback, ...args);
 }
 

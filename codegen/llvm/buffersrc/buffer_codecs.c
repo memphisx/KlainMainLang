@@ -167,7 +167,7 @@ char *__kml_buf_b64_enc(const unsigned char *src, int64_t n, int urlsafe) {
 		else if (!urlsafe) out[o++] = '=';
 	}
 	out[o] = 0;
-	*(int64_t *)(out - 8) = o; /* base64url leaves the padding out */
+	*(int64_t *)KML_PREFIX(out) = o; /* base64url leaves the padding out */
 	return out;
 }
 
@@ -219,7 +219,7 @@ char *__kml_buf_latin1_str(const unsigned char *src, int64_t n) {
 		}
 	}
 	out[o] = 0;
-	*(int64_t *)(out - 8) = o; /* TDD-00120: actual UTF-8 length */
+	*(int64_t *)KML_PREFIX(out) = o; /* TDD-00120: actual UTF-8 length */
 	return out;
 }
 
@@ -337,7 +337,7 @@ char *__kml_buf_utf16le_str(const unsigned char *src, int64_t n) {
 		}
 	}
 	out[o] = 0;
-	*(int64_t *)(out - 8) = o;
+	*(int64_t *)KML_PREFIX(out) = o;
 	return out;
 }
 
@@ -362,7 +362,7 @@ char *__kml_pem_from_der(const unsigned char *der, int64_t n, const char *label)
 		out[o++] = '\n';
 	}
 	o += sprintf(out + o, "-----END %s-----\n", label);
-	*(int64_t *)(out - 8) = o;
+	*(int64_t *)KML_PREFIX(out) = o;
 	out[o] = 0;
 	return out;
 }
@@ -492,4 +492,54 @@ int64_t __kml_buf_byte_length(const char *s, const char *enc) {
 	case KML_ENC_UTF16LE: return units * 2;
 	}
 	return (int64_t)sl; /* utf8, or an unknown encoding */
+}
+
+/* __kml_buf_index_of is Node's bidirectionalIndexOf over bytes: the needle
+   (nlen bytes) searched in the haystack from byteOffset (NaN: the whole
+   buffer, from the start forward or the end backward; a negative one
+   counts from the end), forward when dir is 1. The index, or -1. */
+int64_t __kml_buf_index_of(const unsigned char *hay, int64_t hlen, const unsigned char *needle, int64_t nlen, double byteOffset, int32_t dir) {
+	if (byteOffset != byteOffset)
+		byteOffset = dir ? 0 : (double)hlen;
+	if (byteOffset > 2147483647.0)
+		byteOffset = 2147483647.0;
+	else if (byteOffset < -2147483648.0)
+		byteOffset = -2147483648.0;
+	int64_t off = (int64_t)byteOffset; /* (an integer, toward zero) */
+	int64_t opt;
+	if (off < 0) {
+		if (off + hlen >= 0)
+			opt = hlen + off;
+		else if (dir || nlen == 0)
+			opt = 0;
+		else
+			opt = -1;
+	} else if (off + nlen <= hlen) {
+		opt = off;
+	} else if (nlen == 0) {
+		opt = hlen;
+	} else if (dir) {
+		opt = -1;
+	} else {
+		opt = hlen - 1;
+	}
+	if (nlen == 0)
+		return opt;
+	if (hlen == 0 || opt <= -1)
+		return -1;
+	if ((dir && hlen < opt + nlen) || nlen > hlen)
+		return -1;
+	if (dir) {
+		for (int64_t i = opt; i + nlen <= hlen; i++)
+			if (memcmp(hay + i, needle, (size_t)nlen) == 0)
+				return i;
+		return -1;
+	}
+	int64_t start = opt;
+	if (start > hlen - nlen)
+		start = hlen - nlen;
+	for (int64_t i = start; i >= 0; i--)
+		if (memcmp(hay + i, needle, (size_t)nlen) == 0)
+			return i;
+	return -1;
 }

@@ -77,11 +77,12 @@ func thenableValueType(sig FuncSig) Type {
 // a queued job passes to `v.then`; a throw from `then` rejects it.
 func (e *Emitter) emitThenableToPromise(v Value, sig FuncSig, pos ast.Pos) (Value, error) {
 	valTy := thenableValueType(sig)
-	e.ensurePromiseSettle()
+	e.ensureMicrotasks()
+	e.ensureNanBox()
 	e.ensureExceptionHelpers()
-	e.ensureMalloc()
+	e.ensureUnhandledRejections()
 	p := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call ptr @__kml_task_alloc_promise()", p))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", p))
 	var resolveParams []Type
 	if valTy.IR != "void" && valTy.IR != "" {
 		resolveParams = []Type{valTy}
@@ -129,8 +130,7 @@ func (e *Emitter) emitThenableToPromise(v Value, sig FuncSig, pos ast.Pos) (Valu
 const thenableResolveName = "__kml_thenable_resolve"
 
 func isThenableResolveCall(ex *ast.CallExpression) bool {
-	id, ok := ex.Callee.(*ast.Identifier)
-	return ok && id.Name == thenableResolveName && len(ex.Args) == 1
+	return ex.Intrinsic == thenableResolveName && len(ex.Args) == 1
 }
 
 // emitThenableResolveCall emits `__kml_thenable_resolve(x)`.
@@ -174,14 +174,14 @@ func (e *Emitter) thenableCallback(arg ast.Expression, param Type, pos ast.Pos) 
 		params = append(params, ast.Param{Name: name})
 		callArgs = append(callArgs, ast.NewIdentifier(name, pos))
 	}
-	body := ast.NewCallExpression(ast.NewIdentifier(thenableResolveName, pos), []ast.Expression{ast.NewCallExpression(bound, callArgs, pos)}, pos)
+	body := synthCall(thenableResolveName, pos, ast.NewCallExpression(bound, callArgs, pos))
 	return ast.NewArrowFunction(params, nil, body, nil, pos), nil
 }
 
 // isThenableExpr reports an expression whose value is a thenable class
 // instance.
 func (e *Emitter) isThenableExpr(x ast.Expression) bool {
-	_, ok := e.thenableClass(e.inferExprType(x))
+	_, ok := e.thenableClass(e.typeOfExpr(x))
 	return ok
 }
 
@@ -227,15 +227,10 @@ func (e *Emitter) awaitedRet(t Type) Type {
 // emitFreePromise frees a task promise: its allocation starts at the header
 // word before its body (TDD-00247).
 func (e *Emitter) emitFreePromise(p string) {
-	e.ensureFree()
 	base := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, ptr %s, i64 -8", base, p))
-	e.heapFree(base)
+	e.emitPrefixWordAddr(base, p)
+	e.heapFree(allocHost, base)
 }
-
-// queueMicrotaskName is the internal function synthesized source calls to
-// queue a job: `__kml_queue_microtask(fn)`.
-const queueMicrotaskName = "__kml_queue_microtask"
 
 // isThenableType reports a thenable class instance or object type.
 func (e *Emitter) isThenableType(t Type) bool {
@@ -249,8 +244,7 @@ func (e *Emitter) isThenableType(t Type) bool {
 const thenConstName = "__kml_then_const"
 
 func isThenConstCall(ex *ast.CallExpression) bool {
-	id, ok := ex.Callee.(*ast.Identifier)
-	return ok && id.Name == thenConstName && len(ex.Args) == 3
+	return ex.Intrinsic == thenConstName && len(ex.Args) == 3
 }
 
 // thenConstCall is the `p.then(callback)` a `__kml_then_const` call means,
@@ -276,13 +270,13 @@ func (e *Emitter) emitThenConstCall(ex *ast.CallExpression) (Value, error) {
 // synthTypeAnnotation is an annotation naming codegen type t exactly, for a
 // parameter of synthesized source, which no source annotation can spell (a
 // caught value) and whose inferred type a nested inference may not see.
-func (e *Emitter) synthTypeAnnotation(t Type) *ast.TypeAnnotation {
+func (e *Emitter) synthTypeAnnotation(t Type) ast.TypeNode {
 	if e.synthTypes == nil {
 		e.synthTypes = map[string]Type{}
 	}
 	name := fmt.Sprintf("__kml_synth_t%d", len(e.synthTypes))
 	e.synthTypes[name] = t
-	return &ast.TypeAnnotation{Name: name}
+	return nameAnnotation(name)
 }
 
 // resolveThenName is the internal function a class's synthesized Promise
@@ -292,8 +286,7 @@ func (e *Emitter) synthTypeAnnotation(t Type) *ast.TypeAnnotation {
 const resolveThenName = "__kml_resolve_then"
 
 func isResolveThenCall(ex *ast.CallExpression) bool {
-	id, ok := ex.Callee.(*ast.Identifier)
-	return ok && id.Name == resolveThenName && len(ex.Args) == 4
+	return ex.Intrinsic == resolveThenName && len(ex.Args) == 4
 }
 
 // emitResolveThenCall emits `__kml_resolve_then(C, x, onF, onR)`.
@@ -330,8 +323,8 @@ func (e *Emitter) emitResolveThenCall(ex *ast.CallExpression) (Value, error) {
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, chkL, resolveL))
 	e.emitLabel(chkL)
 	ptr, hdr, isC := e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to ptr", ptr, pay))
-	e.emitInstr(fmt.Sprintf("%s = load i64, ptr %s, align 8", hdr, ptr))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, ptr, pay))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, ptr))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isC, e.headerIdentity(hdr), info.TagID))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isC, ownL, resolveL))
 	e.emitLabel(ownL)
@@ -366,7 +359,7 @@ func (e *Emitter) thenableResolveCallType(ex *ast.CallExpression) (Type, bool) {
 	if !isThenableResolveCall(ex) {
 		return Type{}, false
 	}
-	t := e.inferExprType(ex.Args[0])
+	t := e.typeOfExpr(ex.Args[0])
 	if t.IsPromise() {
 		return t, true
 	}
@@ -383,6 +376,29 @@ func (e *Emitter) thenConstCallType(ex *ast.CallExpression) (Type, bool) {
 	if !isThenConstCall(ex) {
 		return Type{}, false
 	}
-	t := e.inferExprType(e.thenConstCall(ex, ex.Args[1]))
+	t := e.typeOfExpr(e.thenConstCall(ex, ex.Args[1]))
 	return t, true
+}
+
+func init() {
+	intrinsics[thenableResolveName] = intrinsic{
+		emit: (*Emitter).emitThenableResolveCall,
+		ty:   func(e *Emitter, ex *ast.CallExpression) Type { t, _ := e.thenableResolveCallType(ex); return t },
+	}
+	intrinsics[thenConstName] = intrinsic{
+		emit: (*Emitter).emitThenConstCall,
+		ty:   func(e *Emitter, ex *ast.CallExpression) Type { t, _ := e.thenConstCallType(ex); return t },
+	}
+	intrinsics[resolveThenName] = intrinsic{
+		emit: (*Emitter).emitResolveThenCall,
+		ty:   func(*Emitter, *ast.CallExpression) Type { return TypeVoid },
+	}
+}
+
+// synthCall is a call the lowering synthesizes of the runtime operation
+// name: dispatched by its intrinsic, whatever the program binds name to.
+func synthCall(name string, pos ast.Pos, args ...ast.Expression) *ast.CallExpression {
+	c := ast.NewCallExpression(ast.NewIdentifier(name, pos), args, pos)
+	c.Intrinsic = name
+	return c
 }

@@ -1,8 +1,6 @@
 package llvm
 
-import "fmt"
-
-// ensureNodeInterpFlagGuard emits @__kml_reject_node_interp_flags, a startup
+// ensureNodeInterpFlagGuard declares @__kml_reject_node_interp_flags (hooks.c), a startup
 // guard that a compiled binary runs before its program body when the program
 // reads process.execPath (see ensureExecPath).
 //
@@ -30,77 +28,5 @@ func (e *Emitter) ensureNodeInterpFlagGuard() {
 		return
 	}
 	e.usedNodeInterpGuard = true
-	e.ensureStrcmp()
-	e.ensureExit()
-	e.ensureWriteDecl()
-	e.ensureGetenv()
-	e.emitGlobal(`@.kml_reexec_env = private unnamed_addr constant [17 x i8] c"KML_KLAIN_REEXEC\00"`)
-
-	flags := []struct{ sym, text string }{
-		{"@.kml_ni_p", "-p"},
-		{"@.kml_ni_print", "--print"},
-		{"@.kml_ni_e", "-e"},
-		{"@.kml_ni_eval", "--eval"},
-		{"@.kml_ni_i", "-i"},
-		{"@.kml_ni_intr", "--interactive"},
-	}
-	for _, f := range flags {
-		e.emitGlobal(fmt.Sprintf(`%s = private unnamed_addr constant [%d x i8] c"%s\00"`,
-			f.sym, len(f.text)+1, f.text))
-	}
-
-	msg := "error: this compiled binary cannot act as the Node interpreter (a self-spawn via process.execPath, or an interpreter flag -p/-e/-i); refusing to re-run its own program body\n"
-	msgEsc, msgSize := escapeLLVM(msg) // msgSize counts the trailing NUL
-	msgLen := msgSize - 1              // bytes to write to stderr (message without NUL)
-	e.emitGlobal(fmt.Sprintf(`@.kml_ni_msg = private unnamed_addr constant [%d x i8] c"%s"`,
-		msgSize, msgEsc))
-
-	var b []byte
-	w := func(format string, a ...any) { b = append(b, []byte(fmt.Sprintf(format, a...))...) }
-	w("\ndefine void @__kml_reject_node_interp_flags(i32 %%argc, ptr %%argv) {\n")
-	// ADR-00972: a self-spawn (our own spawnSync/spawn detected the target is this
-	// executable and set KML_KLAIN_REEXEC in the child env) is rejected up front,
-	// regardless of argv — the general case ADR-00970's flag scan below could not
-	// catch, since a self-spawned child ignores its argv and re-runs main.
-	w("entry:\n")
-	w("  %%reexec = call ptr @getenv(ptr @.kml_reexec_env)\n")
-	w("  %%ismarked = icmp ne ptr %%reexec, null\n")
-	w("  br i1 %%ismarked, label %%reject, label %%head\n")
-	w("head:\n")
-	w("  %%i = phi i32 [1, %%entry], [%%inext, %%cont]\n")
-	w("  %%more = icmp slt i32 %%i, %%argc\n")
-	w("  br i1 %%more, label %%body, label %%ret\n")
-	w("body:\n")
-	w("  %%slot = getelementptr ptr, ptr %%argv, i32 %%i\n")
-	w("  %%arg = load ptr, ptr %%slot, align 8\n")
-	w("  %%argnull = icmp eq ptr %%arg, null\n")
-	w("  br i1 %%argnull, label %%cont, label %%chk0\n")
-	for i, f := range flags {
-		next := "reject"
-		nextLabel := fmt.Sprintf("chk%d", i+1)
-		if i < len(flags)-1 {
-			next = nextLabel
-		} else {
-			nextLabel = "cont"
-		}
-		_ = next
-		w("chk%d:\n", i)
-		w("  %%r%d = call i32 @strcmp(ptr %%arg, ptr %s)\n", i, f.sym)
-		w("  %%m%d = icmp eq i32 %%r%d, 0\n", i, i)
-		if i < len(flags)-1 {
-			w("  br i1 %%m%d, label %%reject, label %%chk%d\n", i, i+1)
-		} else {
-			w("  br i1 %%m%d, label %%reject, label %%cont\n", i)
-		}
-		_ = nextLabel
-	}
-	w("reject:\n")
-	w("  call i64 @write(i32 2, ptr @.kml_ni_msg, i64 %d)\n", msgLen)
-	w("  call void @exit(i32 9)\n")
-	w("  unreachable\n")
-	w("cont:\n")
-	w("  %%inext = add i32 %%i, 1\n")
-	w("  br label %%head\n")
-	w("ret:\n  ret void\n}\n")
-	e.emitGlobal(string(b))
+	// hooks.c defines it.
 }

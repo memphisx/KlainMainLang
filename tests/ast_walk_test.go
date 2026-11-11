@@ -42,7 +42,7 @@ func TestPureRejectsEffectsUnderAnyStatement(t *testing.T) {
 		`do { console.log("x") } while (false)`,
 		`outer: for (let i = 0; i < 1; i++) { console.log("x") }`,
 	} {
-		assertCodegenError(t, `
+		mustCompileError(t, `
 /** @pure */
 function add(a: number, b: number): number {
   `+body+`

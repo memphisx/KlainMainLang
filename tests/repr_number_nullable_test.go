@@ -399,7 +399,7 @@ const hx = ["0", "1"];
 for (var i1 = 0; i1 < 2; i1++) {
   try { var uu = hx[i1] + hx[1 - i1]; console.log(uu === "01", uu.length); } catch (e) {}
 }
-if (hx.length > 5) { var skipped = hx[0] + "!"; }
+if (hx.length > 5) { var skipped: string | undefined = hx[0] + "!"; }
 console.log(skipped);
 { var past = hx[9]; console.log(past); }
 function argsOf(a: number) { const xs = arguments; return xs.length + arguments[0]; }

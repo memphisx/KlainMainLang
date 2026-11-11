@@ -2,266 +2,128 @@ package ast
 
 import (
 	"fmt"
-	"reflect"
 
 	"KlainMainLang/diag"
 )
 
-// TypeAnnotationOf converts a parsed type to the TypeAnnotation code
-// generation reads, until the checker resolves types from the nodes
-// themselves. Every simplification the annotation model makes happens here:
-// a type predicate becomes boolean (void for an assertion), `readonly` and
-// `new` are dropped, a generic function type's parameters erase to any, a
-// template literal type is string, a qualified name keeps its last segment,
-// `T[]` on a name is spelled into the name, null and undefined fold into
-// Nullable/Undefined, and the builtin generics fill ElemType/KeyType. So do
-// the shapes the annotation model cannot represent, reported as errors.
-//
-// Each returned annotation's TypeNode() is the node it stands for; source is
-// stamped into every Source field.
-func TypeAnnotationOf(n TypeNode, source string) (*TypeAnnotation, error) {
-	return typeConverter{source: source}.conv(n)
+// TypeAnnotationOf wraps a parsed type as a declaration's annotation, after
+// rejecting the shapes code generation does not support, with the message
+// and position the parser gives them.
+func TypeAnnotationOf(n TypeNode, source string) (TypeNode, error) {
+	return annotate(n, source, false)
 }
 
-// TypeAnnotationOfIn is TypeAnnotationOf inside the body of class thisClass,
-// where the `this` type lowers to that class.
-func TypeAnnotationOfIn(n TypeNode, source, thisClass string) (*TypeAnnotation, error) {
-	return typeConverter{source: source, thisClass: thisClass}.conv(n)
+// TypeAnnotationOfIn is TypeAnnotationOf inside the body of a class, where
+// the `this` type names the class.
+func TypeAnnotationOfIn(n TypeNode, source, thisClass string) (TypeNode, error) {
+	return annotate(n, source, thisClass != "")
 }
 
-// NodeAnnotation wraps a type node without converting it: a declaration
-// file's annotation, which only the checker reads (TDD-00230 P3.1).
-func NodeAnnotation(n TypeNode, source string) *TypeAnnotation {
-	return &TypeAnnotation{Source: source, node: n, nodeOnly: true}
+// NodeAnnotation wraps a type node without checking its shape: a
+// declaration file's annotation, or one code generation builds.
+func NodeAnnotation(n TypeNode, source string) TypeNode {
+	if source == "jsdoc" {
+		MarkJSDoc(n)
+	}
+	return n
 }
 
-type typeConverter struct{ source, thisClass string }
-
-func (c typeConverter) conv(n TypeNode) (*TypeAnnotation, error) {
-	ta, err := c.convNode(n)
-	if err != nil {
+func annotate(n TypeNode, source string, inClass bool) (TypeNode, error) {
+	if err := checkTypeShape(n, inClass); err != nil {
 		return nil, err
 	}
-	ta.node = n
-	return ta, nil
+	return NodeAnnotation(n, source), nil
 }
 
-// singleArgGenerics take exactly one type argument, read into ElemType.
+// singleArgGenerics take exactly one type argument.
 var singleArgGenerics = map[string]bool{
 	"Promise": true, "Array": true, "Set": true, "EventEmitter": true,
 	"ReadableStream": true, "ReadableStreamDefaultReader": true, "ReadableStreamDefaultController": true,
 	"WritableStream": true, "WritableStreamDefaultWriter": true, "WritableStreamDefaultController": true,
 }
 
-func (c typeConverter) convNode(n TypeNode) (*TypeAnnotation, error) {
-	switch n := n.(type) {
-	case *KeywordType:
-		if n.Keyword == "this" {
-			if c.thisClass == "" {
-				return nil, errAt(n.Range, diag.ThisTypeUnsupported)
+// checkTypeShape reports the first shape in n code generation does not
+// support.
+func checkTypeShape(n TypeNode, inClass bool) error {
+	var err error
+	Inspect(n, func(x Node) bool {
+		if err != nil {
+			return false
+		}
+		switch t := x.(type) {
+		case *KeywordType:
+			if t.Keyword == "this" && !inClass {
+				err = errAt(t.Range, diag.ThisTypeOutsideClass)
 			}
-			return &TypeAnnotation{Name: c.thisClass, Source: c.source, IsThis: true}, nil
+		case *TypeReference:
+			err = checkReferenceArity(t)
+		case *ImportType:
+			err = fmt.Errorf("an import type (`import(%q)`) is not supported", t.Argument)
+		case *IndexSignature:
+			err = checkIndexKey(t)
 		}
-		return &TypeAnnotation{Name: n.Keyword, Source: c.source}, nil
-	case *LiteralType:
-		switch n.Kind {
-		case "string":
-			return &TypeAnnotation{Source: c.source, IsStringLiteral: true, LiteralValue: n.Value}, nil
-		case "number":
-			return &TypeAnnotation{Source: c.source, IsNumberLiteral: true, LiteralValue: n.Value}, nil
-		}
-		return &TypeAnnotation{Name: n.Value, Source: c.source}, nil
-	case *TypeReference:
-		return c.convReference(n)
-	case *ArrayType:
-		if nameSpelledArray(n) {
-			elem, err := c.conv(n.ElementType)
-			if err != nil {
-				return nil, err
-			}
-			return &TypeAnnotation{Name: elem.Name + "[]", Qualifier: elem.Qualifier, Source: c.source}, nil
-		}
-		elem, err := c.conv(n.ElementType)
-		if err != nil {
-			return nil, err
-		}
-		return &TypeAnnotation{Source: c.source, ElemType: elem}, nil
-	case *TupleType:
-		if len(n.Elements) == 0 {
-			return &TypeAnnotation{Source: c.source, EmptyTuple: true}, nil
-		}
-		// A tuple with an optional or rest element has no fixed shape: its
-		// value is an array of boxed elements, as JavaScript holds it.
-		for _, el := range n.Elements {
-			if variableTupleElement(el) {
-				for _, el := range n.Elements {
-					if _, err := c.conv(tupleElementType(el)); err != nil {
-						return nil, err
-					}
-				}
-				return AnyArrayAnnotation(c.source), nil
-			}
-		}
-		elems, err := c.convList(n.Elements)
-		if err != nil {
-			return nil, err
-		}
-		return &TypeAnnotation{Source: c.source, TupleElems: elems}, nil
-	case *NamedTupleMember:
-		// The label documents the element.
-		return c.conv(n.Type)
-	case *OptionalType:
-		return c.conv(n.Type)
-	case *RestType:
-		return c.conv(n.Type)
-	case *UnionType:
-		return c.convUnion(n)
-	case *IntersectionType:
-		members, err := c.convList(n.Types)
-		if err != nil {
-			return nil, err
-		}
-		// A distinct copy of the first member heads the list, so no member
-		// is its own IntersectionMembers entry (a cycle resolveType would
-		// recurse into forever).
-		head := *members[0]
-		head.IntersectionMembers = members
-		return &head, nil
-	case *ParenthesizedType:
-		return c.conv(n.Type)
-	case *FunctionType:
-		ta, err := c.convFunction(n.TypeParameters, n.Parameters, n.Type)
-		if err != nil || n.This == nil {
-			return ta, err
-		}
-		// `(this: T, …) => R`: the receiver is the leading parameter.
-		tt, err := c.conv(n.This)
-		if err != nil {
-			return nil, err
-		}
-		ta.FuncParams = append([]TypeAnnotation{*tt}, ta.FuncParams...)
-		if len(ta.FuncParamOptional) > 0 {
-			ta.FuncParamOptional = append([]bool{false}, ta.FuncParamOptional...)
-		}
-		ta.FuncThis = true
-		return ta, nil
-	case *ConstructorType:
-		ta, err := c.convFunction(n.TypeParameters, n.Parameters, n.Type)
-		if ta != nil {
-			ta.IsCtorType = true
-		}
-		return ta, err
-	case *TypeLiteral:
-		return c.convTypeLiteral(n)
-	case *MappedType:
-		src, err := c.conv(n.Constraint)
-		if err != nil {
-			return nil, err
-		}
-		value, err := c.conv(n.Type)
-		if err != nil {
-			return nil, err
-		}
-		return &TypeAnnotation{
-			Source: c.source, IsMapped: true, MappedKeyVar: n.KeyName,
-			MappedSource: src, MappedValue: value,
-			MappedOptional: n.Optional, MappedReadonly: n.Readonly,
-		}, nil
-	case *ConditionalType:
-		parts, err := c.convList([]TypeNode{n.CheckType, n.ExtendsType, n.TrueType, n.FalseType})
-		if err != nil {
-			return nil, err
-		}
-		return &TypeAnnotation{
-			Source: c.source, IsConditional: true,
-			CheckType: parts[0], ExtendsType: parts[1], TrueType: parts[2], FalseType: parts[3],
-		}, nil
-	case *InferType:
-		return &TypeAnnotation{Source: c.source, IsInfer: true, InferName: n.Name}, nil
-	case *TypeOperator:
-		operand, err := c.conv(n.Type)
-		if err != nil {
-			return nil, err
-		}
-		if n.Operator == "keyof" {
-			return &TypeAnnotation{Source: c.source, IsKeyof: true, KeyofOperand: operand}, nil
-		}
-		return operand, nil // readonly: immutability is not enforced
-	case *IndexedAccessType:
-		obj, err := c.conv(n.ObjectType)
-		if err != nil {
-			return nil, err
-		}
-		key, err := c.conv(n.IndexType)
-		if err != nil {
-			return nil, err
-		}
-		return &TypeAnnotation{Source: c.source, IsIndexedAccess: true, IndexObject: obj, IndexKey: key}, nil
-	case *ImportType:
-		return nil, fmt.Errorf("an import type (`import(%q)`) is not supported", n.Argument)
-	case *TypeQuery:
-		return &TypeAnnotation{Source: c.source, IsTypeof: true, TypeofName: n.Name, TypeofPath: n.Path}, nil
-	case *TemplateLiteralType:
-		for _, s := range n.Spans {
-			if _, err := c.conv(s.Type); err != nil {
-				return nil, err
-			}
-		}
-		return &TypeAnnotation{Name: "string", Source: c.source}, nil
-	case *TypePredicate:
-		if n.Type != nil {
-			if _, err := c.conv(n.Type); err != nil {
-				return nil, err
-			}
-		}
-		if n.Asserts {
-			return &TypeAnnotation{Name: "void", Source: c.source}, nil
-		}
-		return &TypeAnnotation{Name: "boolean", Source: c.source}, nil
-	}
-	return nil, fmt.Errorf("%d:%d: unsupported type syntax %T", n.GetPos().Line, n.GetPos().Col, n)
+		return err == nil
+	})
+	return err
 }
 
-// variableTupleElement reports whether a tuple element is optional or rest.
-func variableTupleElement(n TypeNode) bool {
-	switch n := n.(type) {
-	case *NamedTupleMember:
-		return n.Optional || n.Rest
-	case *OptionalType, *RestType:
-		return true
+// checkReferenceArity reports a builtin generic given too many or too few
+// type arguments.
+func checkReferenceArity(n *TypeReference) error {
+	if len(n.TypeArgs) == 0 || len(n.Qualifier) > 0 {
+		return nil
+	}
+	switch {
+	case singleArgGenerics[n.Name]:
+		if len(n.TypeArgs) > 1 {
+			return errAtPos(n.ArgSeparators[0], diag.ExpectedCloseAngle, n.Name+"<T>")
+		}
+	case n.Name == "Map" || n.Name == "TransformStream":
+		if len(n.TypeArgs) == 1 {
+			return errAtPos(Pos{}, diag.ExpectedMapComma)
+		}
+		if len(n.TypeArgs) > 2 {
+			return errAtPos(n.ArgSeparators[1], diag.ExpectedCloseAngle, "Map<K,V>")
+		}
+	}
+	return nil
+}
+
+// checkIndexKey reports an index signature keyed by neither string nor
+// number.
+func checkIndexKey(n *IndexSignature) error {
+	key := ""
+	switch k := n.KeyType.(type) {
+	case *KeywordType:
+		key = k.Keyword
+	case *TypeReference:
+		key = k.Name
+	}
+	if key != "string" && key != "number" {
+		return errAt(n.KeyType.GetLoc(), diag.IndexSignatureKey, key)
+	}
+	return nil
+}
+
+// stringKeyed reports an index signature over string keys.
+func stringKeyed(n *IndexSignature) bool {
+	switch k := n.KeyType.(type) {
+	case *KeywordType:
+		return k.Keyword == "string"
+	case *TypeReference:
+		return k.Name == "string"
 	}
 	return false
 }
 
-// tupleElementType is a tuple element's type, without its label or marker.
-func tupleElementType(n TypeNode) TypeNode {
-	switch n := n.(type) {
-	case *NamedTupleMember:
-		return n.Type
-	case *OptionalType:
-		return n.Type
-	case *RestType:
-		return n.Type
-	}
-	return n
-}
-
 // AnyAnnotation is `any`.
-func AnyAnnotation(source string) *TypeAnnotation {
-	return &TypeAnnotation{Name: "any", Source: source}
+func AnyAnnotation(source string) TypeNode {
+	return NodeAnnotation(&KeywordType{Keyword: "any"}, source)
 }
 
 // AnyArrayAnnotation is `any[]`.
-func AnyArrayAnnotation(source string) *TypeAnnotation {
-	return &TypeAnnotation{Source: source, ElemType: &TypeAnnotation{Name: "any", Source: source}}
-}
-
-// WithAnyArrayStorage is ta stored as `any[]`, still standing for ta's
-// type node (what the checker reads).
-func WithAnyArrayStorage(ta *TypeAnnotation) *TypeAnnotation {
-	out := AnyArrayAnnotation(ta.Source)
-	out.node = ta.node
-	return out
+func AnyArrayAnnotation(source string) TypeNode {
+	return NodeAnnotation(&ArrayType{ElementType: &KeywordType{Keyword: "any"}}, source)
 }
 
 // errAt reports m over a node's source range.
@@ -274,488 +136,85 @@ func errAtPos(p Pos, m *diag.Message, args ...any) *diag.Diagnostic {
 	return diag.New(m, diag.Span{Pos: diag.Pos{Line: p.Line, Col: p.Col}, Start: -1, End: -1}, args...)
 }
 
-// nameSpelledArray reports whether an array type is `T[]` written directly
-// on a name (a reference without type arguments, a keyword, `true`/`false`,
-// or such an array itself), which the annotation spells into its Name.
-func nameSpelledArray(n *ArrayType) bool {
-	switch e := n.ElementType.(type) {
-	case *TypeReference:
-		return len(e.TypeArgs) == 0
-	case *KeywordType:
-		return true
-	case *LiteralType:
-		return e.Kind == "boolean"
-	case *ArrayType:
-		return nameSpelledArray(e)
-	}
-	return false
-}
-
-func (c typeConverter) convList(ns []TypeNode) ([]*TypeAnnotation, error) {
-	out := make([]*TypeAnnotation, 0, len(ns))
-	for _, n := range ns {
-		ta, err := c.conv(n)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, ta)
-	}
-	return out, nil
-}
-
-func (c typeConverter) convReference(n *TypeReference) (*TypeAnnotation, error) {
-	if n.Name == "TemplateStringsArray" && len(n.TypeArgs) == 0 && len(n.Qualifier) == 0 {
-		// A tag's strings: a (readonly) string array.
-		return &TypeAnnotation{Name: "string[]", Source: c.source}, nil
-	}
-	if len(n.TypeArgs) == 0 {
-		return &TypeAnnotation{Name: n.Name, Qualifier: n.Qualifier, Source: c.source}, nil
-	}
-	switch {
-	case singleArgGenerics[n.Name]:
-		inner, err := c.conv(n.TypeArgs[0])
-		if err != nil {
-			return nil, err
-		}
-		if len(n.TypeArgs) > 1 {
-			p := n.ArgSeparators[0]
-			return nil, errAtPos(p, diag.ExpectedCloseAngle, n.Name+"<T>")
-		}
-		return &TypeAnnotation{Name: n.Name, ElemType: inner, Source: c.source}, nil
-	case n.Name == "Map" || n.Name == "TransformStream":
-		keyTy, err := c.conv(n.TypeArgs[0])
-		if err != nil {
-			return nil, err
-		}
-		if len(n.TypeArgs) == 1 {
-			return nil, errAtPos(Pos{}, diag.ExpectedMapComma)
-		}
-		valTy, err := c.conv(n.TypeArgs[1])
-		if err != nil {
-			return nil, err
-		}
-		if len(n.TypeArgs) > 2 {
-			p := n.ArgSeparators[1]
-			return nil, errAtPos(p, diag.ExpectedCloseAngle, "Map<K,V>")
-		}
-		return &TypeAnnotation{Name: "Map", KeyType: keyTy, ElemType: valTy, Source: c.source}, nil
-	}
-	// Any other generic, user-defined or not: TypeArgs carries every
-	// argument, ElemType the first.
-	args, err := c.convList(n.TypeArgs)
-	if err != nil {
-		return nil, err
-	}
-	return &TypeAnnotation{Name: n.Name, Qualifier: n.Qualifier, ElemType: args[0], TypeArgs: args, Source: c.source}, nil
-}
-
-// convUnion keeps every member but null and undefined, which set
-// Nullable/Undefined on the result instead. A single remaining member is the
-// result itself; with several, a distinct copy of the first heads the
-// UnionMembers list (see IntersectionType above for why a copy).
-func (c typeConverter) convUnion(n *UnionType) (*TypeAnnotation, error) {
-	first, err := c.conv(n.Types[0])
-	if err != nil {
-		return nil, err
-	}
-	nullable, undef, hasNull := first.Nullable, first.Undefined, first.HasNull
-	var members []*TypeAnnotation
-	for i, t := range n.Types {
-		ta := first
-		if i > 0 {
-			if ta, err = c.conv(t); err != nil {
-				return nil, err
-			}
-		}
-		// `void` beside other members is undefined as a value (`Socket |
-		// undefined | void`, a callback's result).
-		if ta.Name == "null" || ta.Name == "undefined" || ta.Name == "void" && len(n.Types) > 1 {
-			nullable = true
-			undef = undef || ta.Name != "null"
-			hasNull = hasNull || ta.Name == "null"
-			continue
-		}
-		hasNull = hasNull || ta.HasNull
-		members = append(members, ta)
-	}
-	switch len(members) {
-	case 0:
-		first.Nullable = true
-		first.Undefined = undef
-		first.HasNull = hasNull
-		return first, nil
-	case 1:
-		members[0].Nullable = nullable
-		members[0].Undefined = undef
-		members[0].HasNull = hasNull
-		return members[0], nil
-	}
-	head := *members[0]
-	head.Nullable = nullable
-	head.Undefined = undef
-	head.HasNull = hasNull
-	head.UnionMembers = members
-	return &head, nil
-}
-
-// convParams converts signature parameters. An optional parameter's type is
-// `T | undefined`, matching the nullable-scalar ABI a body emits for a
-// `?`-parameter, so a binding's slot type agrees with the closure it holds.
-func (c typeConverter) convParams(ps []*SignatureParameter) (params []TypeAnnotation, optional []bool, rest bool, err error) {
-	for _, p := range ps {
-		pt := &TypeAnnotation{Name: "any", Source: c.source} // an unannotated parameter
-		if p.Type != nil {
-			t, err := c.conv(p.Type)
-			if err != nil {
-				return nil, nil, false, err
-			}
-			pt = t
-		}
-		if p.Optional {
-			pt.Nullable = true
-			pt.Undefined = true
-		}
-		params = append(params, *pt)
-		optional = append(optional, p.Optional)
-		rest = rest || p.Rest
-	}
-	return params, optional, rest, nil
-}
-
-// convSignature converts a parameter list and return type to a function-type
-// annotation. A nil return type (a signature member without `: R`) is void.
-func (c typeConverter) convSignature(ps []*SignatureParameter, ret TypeNode) (*TypeAnnotation, error) {
-	params, optional, rest, err := c.convParams(ps)
-	if err != nil {
-		return nil, err
-	}
-	retType := &TypeAnnotation{Name: "void", Source: c.source}
-	if ret != nil {
-		if retType, err = c.conv(ret); err != nil {
-			return nil, err
-		}
-	}
-	return &TypeAnnotation{Source: c.source, IsFuncType: true, FuncParams: params, FuncParamOptional: optional, FuncRetType: retType, FuncHasRest: rest}, nil
-}
-
-// withThis makes ta (a function type) take `this: T` as its leading
-// parameter, as a FunctionType's This does.
-func (c typeConverter) withThis(ta *TypeAnnotation, this TypeNode) (*TypeAnnotation, error) {
-	if this == nil || ta == nil {
-		return ta, nil
-	}
-	tt, err := c.conv(this)
-	if err != nil {
-		return nil, err
-	}
-	ta.FuncParams = append([]TypeAnnotation{*tt}, ta.FuncParams...)
-	if len(ta.FuncParamOptional) > 0 {
-		ta.FuncParamOptional = append([]bool{false}, ta.FuncParamOptional...)
-	}
-	ta.FuncThis = true
-	return ta, nil
-}
-
-// convGeneric converts a signature with a type-parameter list. The
-// parameters erase to any: generic functions here are monomorphized
-// declarations, never first-class values, so a signature's own type
-// parameters have nothing to bind to.
-func (c typeConverter) convGeneric(tps []*TypeParameter, sig func() (*TypeAnnotation, error)) (*TypeAnnotation, error) {
-	set := map[string]bool{}
-	for _, tp := range tps {
-		if tp.Constraint != nil {
-			if _, err := c.conv(tp.Constraint); err != nil {
-				return nil, err
-			}
-		}
-		set[tp.Name] = true
-	}
-	ta, err := sig()
-	if err != nil {
-		return nil, err
-	}
-	if len(tps) > 0 {
-		EraseTypeParams(ta, set)
-	}
-	return ta, nil
-}
-
-func (c typeConverter) convFunction(tps []*TypeParameter, ps []*SignatureParameter, ret TypeNode) (*TypeAnnotation, error) {
-	return c.convGeneric(tps, func() (*TypeAnnotation, error) { return c.convSignature(ps, ret) })
-}
-
 // IndexSignatureValue checks an index signature's key type and returns its
 // value type's annotation.
-func IndexSignatureValue(n *IndexSignature, source string) (*TypeAnnotation, error) {
-	return typeConverter{source: source}.convIndexSignature(n)
-}
-
-func (c typeConverter) convIndexSignature(n *IndexSignature) (*TypeAnnotation, error) {
-	key := ""
-	switch k := n.KeyType.(type) {
-	case *KeywordType:
-		key = k.Keyword
-	case *TypeReference:
-		key = k.Name
+func IndexSignatureValue(n *IndexSignature, source string) (TypeNode, error) {
+	if err := checkIndexKey(n); err != nil {
+		return nil, err
 	}
-	if key != "string" && key != "number" {
-		return nil, errAt(n.KeyType.GetLoc(), diag.IndexSignatureKey, key)
-	}
-	return c.conv(n.Type)
-}
-
-func (c typeConverter) convSignatureMember(m TypeMember) (*TypeAnnotation, error) {
-	var ta *TypeAnnotation
-	var err error
-	switch m := m.(type) {
-	case *CallSignature:
-		ta, err = c.convSignature(m.Parameters, m.Type)
-	case *ConstructSignature:
-		ta, err = c.convSignature(m.Parameters, m.Type)
-	case *MethodSignature:
-		ta, err = c.convGeneric(m.TypeParameters, func() (*TypeAnnotation, error) {
-			sig, err := c.convSignature(m.Parameters, m.Type)
-			if err != nil {
-				return nil, err
-			}
-			return c.withThis(sig, m.This)
-		})
-	default:
-		return nil, fmt.Errorf("%d:%d: not a signature member", m.GetPos().Line, m.GetPos().Col)
-	}
-	return ta, err
-}
-
-// convTypeLiteral converts an object type. A lone call (or construct)
-// signature makes it the equivalent function type; an index signature makes
-// it a map-backed dynamic object and cannot be combined with named members.
-func (c typeConverter) convTypeLiteral(n *TypeLiteral) (*TypeAnnotation, error) {
-	if len(n.Members) == 0 {
-		// `{}`: any value but null and undefined, primitives included —
-		// held as a boxed value.
-		return &TypeAnnotation{Name: "any", Source: c.source}, nil
-	}
-	var fields []AnnotField
-	var indexSig, callSig *TypeAnnotation
-	for _, m := range n.Members {
-		switch m := m.(type) {
-		case *IndexSignature:
-			valTy, err := c.convIndexSignature(m)
-			if err != nil {
-				return nil, err
-			}
-			if indexSig != nil {
-				return nil, errAt(n.Range, diag.ObjectIndexSigTwice)
-			}
-			indexSig = valTy
-		case *CallSignature, *ConstructSignature:
-			if callSig != nil {
-				return nil, errAt(n.Range, diag.ObjectCallSigTwice)
-			}
-			sig, err := c.convSignatureMember(m)
-			if err != nil {
-				return nil, err
-			}
-			callSig = sig
-		case *MethodSignature:
-			sig, err := c.convSignatureMember(m)
-			if err != nil {
-				return nil, err
-			}
-			fields = append(fields, AnnotField{Name: m.Name, Type: sig})
-		case *PropertySignature:
-			ft := &TypeAnnotation{Name: "any", Source: c.source} // `name;` is any
-			if m.Type != nil {
-				t, err := c.conv(m.Type)
-				if err != nil {
-					return nil, err
-				}
-				ft = t
-			}
-			fields = append(fields, AnnotField{Name: m.Name, Type: ft, Optional: m.Optional})
-		}
-	}
-	if callSig != nil {
-		if len(fields) > 0 || indexSig != nil {
-			return nil, errAt(n.Range, diag.ObjectCallSigMixed)
-		}
-		return callSig, nil
-	}
-	return &TypeAnnotation{Source: c.source, Fields: fields, IndexSig: indexSig}, nil
-}
-
-// EraseTypeParams rewrites bare references to the given type-parameter names
-// into any inside an annotation (see convGeneric).
-func EraseTypeParams(ta *TypeAnnotation, params map[string]bool) {
-	to := make(map[string]string, len(params))
-	for p := range params {
-		to[p] = "any"
-	}
-	EraseTypeParamsTo(ta, to)
-}
-
-// EraseTypeParamsTo is EraseTypeParams with each parameter's replacement
-// name (its constraint's, or "any").
-func EraseTypeParamsTo(ta *TypeAnnotation, params map[string]string) {
-	if ta == nil {
-		return
-	}
-	if r, ok := params[ta.Name]; ok {
-		ta.Name = r
-	} else if len(ta.Name) > 2 && ta.Name[len(ta.Name)-2:] == "[]" {
-		if r, ok := params[ta.Name[:len(ta.Name)-2]]; ok {
-			ta.Name = r + "[]"
-		}
-	}
-	EraseTypeParamsTo(ta.ElemType, params)
-	EraseTypeParamsTo(ta.KeyType, params)
-	EraseTypeParamsTo(ta.FuncRetType, params)
-	for i := range ta.FuncParams {
-		EraseTypeParamsTo(&ta.FuncParams[i], params)
-	}
-	for _, m := range ta.TypeArgs {
-		EraseTypeParamsTo(m, params)
-	}
-	for _, m := range ta.UnionMembers {
-		EraseTypeParamsTo(m, params)
-	}
-	for _, m := range ta.IntersectionMembers {
-		EraseTypeParamsTo(m, params)
-	}
-	for _, m := range ta.TupleElems {
-		EraseTypeParamsTo(m, params)
-	}
-	for i := range ta.Fields {
-		EraseTypeParamsTo(ta.Fields[i].Type, params)
-	}
-}
-
-// EraseTypeParamsInBody applies EraseTypeParamsTo to every type annotation
-// inside a function body (a local's annotation, `new Promise<T>`, an arrow's
-// parameter types, `x as T`, …): an erased generic method compiles its body
-// with the same replacements as its signature. A nested function that
-// declares a type parameter of the same name keeps its own.
-func EraseTypeParamsInBody(body *BlockStatement, params map[string]string) {
-	if body == nil || len(params) == 0 {
-		return
-	}
-	seen := map[uintptr]bool{}
-	taType := reflect.TypeOf(&TypeAnnotation{})
-	var walk func(v reflect.Value)
-	walk = func(v reflect.Value) {
-		switch v.Kind() {
-		case reflect.Ptr:
-			if v.IsNil() {
-				return
-			}
-			if v.Type() == taType {
-				EraseTypeParamsTo(v.Interface().(*TypeAnnotation), params)
-				return
-			}
-			if seen[v.Pointer()] {
-				return
-			}
-			seen[v.Pointer()] = true
-			if fd, ok := v.Interface().(*FunctionDeclaration); ok && shadowsTypeParam(fd.TypeParams, params) {
-				return
-			}
-			walk(v.Elem())
-		case reflect.Interface:
-			if !v.IsNil() {
-				walk(v.Elem())
-			}
-		case reflect.Struct:
-			if v.Type() == reflect.TypeOf(TypeAnnotation{}) {
-				if v.CanAddr() {
-					EraseTypeParamsTo(v.Addr().Interface().(*TypeAnnotation), params)
-				}
-				return
-			}
-			for i := 0; i < v.NumField(); i++ {
-				if v.Type().Field(i).IsExported() {
-					walk(v.Field(i))
-				}
-			}
-		case reflect.Slice, reflect.Array:
-			for i := 0; i < v.Len(); i++ {
-				walk(v.Index(i))
-			}
-		case reflect.Map:
-			for _, k := range v.MapKeys() {
-				walk(v.MapIndex(k))
-			}
-		}
-	}
-	walk(reflect.ValueOf(body))
-}
-
-func shadowsTypeParam(tps []string, params map[string]string) bool {
-	for _, tp := range tps {
-		if _, ok := params[tp]; ok {
-			return true
-		}
-	}
-	return false
+	return annotate(n.Type, source, false)
 }
 
 // InterfaceLegacy derives the member shapes code generation reads (Fields,
 // Methods, IndexSig, CallSig) from an interface's members. jsdocType turns a
 // member's `/** @type {…} */` width into its annotation. err is the first
 // member shape those cannot represent; the rest are still derived.
-func InterfaceLegacy(members []TypeMember, source string, jsdocType func(string) *TypeAnnotation) (fields []AnnotField, methods []InterfaceMethodSig, indexSig, callSig *TypeAnnotation, err error) {
-	c := typeConverter{source: source}
+func InterfaceLegacy(members []TypeMember, source string, jsdocType func(string) TypeNode) (fields []AnnotField, methods []InterfaceMethodSig, indexSig, callSig TypeNode, err error) {
 	note := func(e error) {
 		if err == nil {
 			err = e
 		}
 	}
+	conv := func(n TypeNode) TypeNode {
+		if n == nil {
+			return AnyAnnotation(source)
+		}
+		ta, e := annotate(n, source, true)
+		if e != nil {
+			note(e)
+			return nil
+		}
+		return ta
+	}
 	for _, m := range members {
 		switch m := m.(type) {
 		case *IndexSignature:
-			if indexSig != nil {
-				note(errAt(m.Range, diag.InterfaceIndexSigTwice))
+			if indexSig != nil && !stringKeyed(m) {
+				// A number index beside a string one: a key reads as its
+				// string, so the string index holds every entry.
 				continue
 			}
-			ta, e := c.convIndexSignature(m)
+			ta, e := IndexSignatureValue(m, source)
 			if e != nil {
 				note(e)
 				continue
 			}
 			indexSig = ta
-		case *CallSignature, *ConstructSignature:
-			if callSig != nil {
-				// Further call/construct signatures (an overloaded callable
-				// interface) are erased: the first is the one call sites check
-				// against (ADR-00446/ADR-00479).
-				continue
+		case *CallSignature:
+			if callSig == nil {
+				// Further call signatures (an overloaded callable interface)
+				// are erased: the first is the one call sites check against
+				// (ADR-00446/ADR-00479).
+				callSig = conv(&FunctionType{TypeParameters: m.TypeParameters, Parameters: m.Parameters, Type: m.Type, Range: m.Range})
 			}
-			ta, e := c.convSignatureMember(m)
-			if e != nil {
-				note(e)
-				continue
+		case *ConstructSignature:
+			if callSig == nil {
+				callSig = conv(&ConstructorType{TypeParameters: m.TypeParameters, Parameters: m.Parameters, Type: m.Type, Range: m.Range})
 			}
-			callSig = ta
 		case *MethodSignature:
-			ms, e := c.legacyMethod(m)
-			if e != nil {
-				note(e)
-				continue
+			ms := InterfaceMethodSig{Name: m.Name, Optional: m.Optional}
+			for i, sp := range m.Parameters {
+				name := sp.Name
+				if name == "" {
+					name = fmt.Sprintf("__p%d", i)
+				}
+				ms.Params = append(ms.Params, Param{Name: name, Type: conv(sp.Type), Optional: sp.Optional, Rest: sp.Rest})
 			}
+			if m.Type != nil {
+				ms.ReturnType = conv(m.Type)
+			}
+			// The signature's own function type, which the checker reads.
+			ms.Type = conv(&FunctionType{TypeParameters: m.TypeParameters, Parameters: m.Parameters, This: m.This, Type: m.Type, Range: m.Range})
 			methods = append(methods, ms)
 		case *PropertySignature:
-			var ft *TypeAnnotation
-			switch {
-			case m.JSDocType != "" && jsdocType != nil:
+			var ft TypeNode
+			if m.JSDocType != "" && jsdocType != nil {
 				ft = jsdocType(m.JSDocType)
-			case m.Type == nil:
-				ft = &TypeAnnotation{Name: "any", Source: source}
-			default:
-				t, e := c.conv(m.Type)
-				if e != nil {
-					note(e)
-					continue
-				}
-				ft = t
+			} else {
+				ft = conv(m.Type)
+			}
+			if ft == nil {
+				continue
 			}
 			if m.Accessor != "" {
 				// A get/set pair is one field of the getter's type.
@@ -775,60 +234,5 @@ func InterfaceLegacy(members []TypeMember, source string, jsdocType func(string)
 			fields = append(fields, AnnotField{Name: m.Name, Type: ft, Optional: m.Optional})
 		}
 	}
-	if callSig != nil && (len(fields) > 0 || len(methods) > 0 || indexSig != nil) {
-		note(errAt(members[0].GetLoc(), diag.InterfaceCallSigMixed))
-	}
 	return fields, methods, indexSig, callSig, err
-}
-
-// legacyMethod converts a method signature to the parameter-list shape an
-// interface method has for code generation; a generic method's type
-// parameters erase to any (ADR-00469).
-func (c typeConverter) legacyMethod(m *MethodSignature) (InterfaceMethodSig, error) {
-	ms := InterfaceMethodSig{Name: m.Name}
-	tps := map[string]bool{}
-	for _, tp := range m.TypeParameters {
-		tps[tp.Name] = true
-	}
-	for i, sp := range m.Parameters {
-		var pt *TypeAnnotation
-		if sp.Type != nil {
-			t, err := c.conv(sp.Type)
-			if err != nil {
-				return ms, err
-			}
-			pt = t
-		}
-		name := sp.Name
-		if name == "" {
-			name = fmt.Sprintf("__p%d", i)
-		}
-		ms.Params = append(ms.Params, Param{Name: name, Type: pt, Optional: sp.Optional, Rest: sp.Rest})
-	}
-	if m.Type != nil {
-		rt, err := c.conv(m.Type)
-		if err != nil {
-			return ms, err
-		}
-		ms.ReturnType = rt
-	}
-	if len(tps) > 0 {
-		for i := range ms.Params {
-			EraseTypeParams(ms.Params[i].Type, tps)
-		}
-		EraseTypeParams(ms.ReturnType, tps)
-	}
-	ms.Optional = m.Optional
-	ft, err := c.convSignature(m.Parameters, m.Type)
-	if err == nil {
-		ft, err = c.withThis(ft, m.This)
-	}
-	if err != nil {
-		return ms, err
-	}
-	if len(tps) > 0 {
-		EraseTypeParams(ft, tps)
-	}
-	ms.Type = ft
-	return ms, nil
 }

@@ -18,6 +18,7 @@ void __kml_promise_init_at(void *p) {
     F(p, KML_PROMISE_REACTIONS, void *) = 0;
     F(p, KML_PROMISE_BOXED, void *) = 0;
     F(p, KML_PROMISE_FLAGS, i64) = 0;
+    F(p, KML_PROMISE_TWIN, void *) = 0;
     F(p, KML_PROMISE_V1, i64) = KML_TAG_ERROR;
 }
 
