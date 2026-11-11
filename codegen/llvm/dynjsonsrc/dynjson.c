@@ -480,8 +480,9 @@ static int stringify_static(Sb *b, void *o, long long n, const char *indent,
     return 1;
 }
 
-static int stringify_val(Sb *b, long long tag, long long pay,
-                         const char *indent, int depth, int *err) {
+/* A toJSON(key) that replaces the value: its result serialized, 1/0 as
+   stringify_val; -1 when none applies. */
+__attribute__((noinline)) static int sv_tojson(Sb *b, long long tag, long long pay, const char *indent, int depth, int *err) {
     /* An object's own or inherited toJSON(key) replaces it (a host box's —
        a Date's — is its tojson row, below). */
     if (kj_tojson_done != depth && (tag == 10 || (tag == 6 && pay && !is_host_box(pay) &&
@@ -507,80 +508,11 @@ static int stringify_val(Sb *b, long long tag, long long pay,
             return ok;
         }
     }
-    if (tag == 6 && pay && !is_host_box(pay)) {
-        /* An instance of a class extending Number (String, Boolean) too. */
-        long long w = __kml_obj_prim((void *)pay);
-        if (w) {
-            long long ut, up;
-            nb_decode(w, &ut, &up);
-            return stringify_val(b, ut, up, indent, depth, err);
-        }
-    }
-    if (tag == 6 && is_host_box(pay)) {
-        /* A wrapper object (`new Number(3)`) serializes its primitive. */
-        long long w = nb_pack(tag, pay), u = __kml_host_unwrap(w);
-        if (u != w) {
-            long long ut, up;
-            nb_decode(u, &ut, &up);
-            return stringify_val(b, ut, up, indent, depth, err);
-        }
-    }
-    switch (tag) {
-    case 0:
-    case 1:
-        sb_number(b, tag, pay);
-        return 1;
-    case 2:
-        /* A string value: its length header bounds it, so an embedded NUL is
-           escaped rather than ending it. */
-        sb_json_bytes(b, (const char *)pay, kj_str_len((const char *)pay));
-        return 1;
-    case 3:
-        sb_cstr(b, pay ? "true" : "false");
-        return 1;
-    case 4:
-        sb_cstr(b, "null");
-        return 1;
-    case 5:
-    case 8:
-    case 9:
-    case 12:
-        return 0; /* undefined / function-ish: skipped (object) or null (array) */
-    case 6: {
-        /* JSON has no bigint: Node throws "Do not know how to serialize a
-           BigInt" (err 3). */
-        if (is_boxed_bigint(pay)) {
-            *err = 3;
-            return 0;
-        }
-        /* A boxed Error (field-0 type-id flag, KlainMainLang TDD-00222): its
-           own enumerable properties only — an Error subclass's fields and the
-           system fields set on it (__kml_obj_nkeys counts both), so
-           JSON.stringify(new Error(...)) is "{}", as in Node. */
-        if (pay && (*(long long *)pay & (1LL << 48))) {
-            long long en = __kml_obj_nkeys((void *)pay);
-            if (en <= 0) {
-                sb_cstr(b, "{}");
-                return 1;
-            }
-            return stringify_static(b, (void *)pay, en, indent, depth, err);
-        }
-        if (is_host_box(pay)) {
-            char *js = __kml_host_tojson((void *)pay);
-            if (js) {
-                sb_json_string(b, js);
-                return 1;
-            }
-        }
-        /* A static object with a layout-table row: its own enumerable keys
-           (KlainMainLang TDD-00233); a host box has none. */
-        long long sn = pay && !is_host_box(pay) ? __kml_obj_nkeys((void *)pay) : (is_host_box(pay) ? 0 : -1);
-        if (sn >= 0)
-            return stringify_static(b, (void *)pay, sn, indent, depth, err);
-        *err = 2;
-        return 0;
-    }
-    case 7: {
+    return -1;
+}
+
+/* A boxed static array, a TypedArray or Buffer: case 7 of stringify_val. */
+__attribute__((noinline)) static int sv_boxarr(Sb *b, long long tag, long long pay, const char *indent, int depth, int *err) {
         /* A boxed STATIC array (ADR-01059): a plain array serializes as a JSON
            array; a TypedArray, per JSON.stringify's own rules, as an object of
            its index keys (`{"0":8,"1":9}`). An element kind the box could not
@@ -640,14 +572,10 @@ static int stringify_val(Sb *b, long long tag, long long pay,
         if (pretty7 && put) sb_indent(b, indent, depth);
         sb_ch(b, obj7 ? '}' : ']');
         return 1;
-    }
-    case 10:
-    case 11:
-        break;
-    default:
-        *err = 2; /* funcRef/stream: no runtime shape to walk */
-        return 0;
-    }
+}
+
+/* A dynamic array or object (tags 10, 11): the rest of stringify_val. */
+__attribute__((noinline)) static int sv_dyn(Sb *b, long long tag, long long pay, const char *indent, int depth, int *err) {
     if (!kj_enter((void *)pay, (int)tag, depth, err)) return 0;
     int pretty = indent && indent[0];
     if (tag == 11) {
@@ -762,6 +690,100 @@ static int stringify_val(Sb *b, long long tag, long long pay,
     if (pretty && wrote) sb_indent(b, indent, depth);
     sb_ch(b, '}');
     return 1;
+}
+
+static int stringify_val(Sb *b, long long tag, long long pay,
+                         const char *indent, int depth, int *err) {
+    /* The walk recurses through this frame once per level: everything
+       with locals of its own is a helper, so the frame stays small and the
+       depth reachable matches Node's. */
+    {
+        int r = sv_tojson(b, tag, pay, indent, depth, err);
+        if (r >= 0) return r;
+    }
+    if (tag == 6 && pay && !is_host_box(pay)) {
+        /* An instance of a class extending Number (String, Boolean) too. */
+        long long w = __kml_obj_prim((void *)pay);
+        if (w) {
+            long long ut, up;
+            nb_decode(w, &ut, &up);
+            return stringify_val(b, ut, up, indent, depth, err);
+        }
+    }
+    if (tag == 6 && is_host_box(pay)) {
+        /* A wrapper object (`new Number(3)`) serializes its primitive. */
+        long long w = nb_pack(tag, pay), u = __kml_host_unwrap(w);
+        if (u != w) {
+            long long ut, up;
+            nb_decode(u, &ut, &up);
+            return stringify_val(b, ut, up, indent, depth, err);
+        }
+    }
+    switch (tag) {
+    case 0:
+    case 1:
+        sb_number(b, tag, pay);
+        return 1;
+    case 2:
+        /* A string value: its length header bounds it, so an embedded NUL is
+           escaped rather than ending it. */
+        sb_json_bytes(b, (const char *)pay, kj_str_len((const char *)pay));
+        return 1;
+    case 3:
+        sb_cstr(b, pay ? "true" : "false");
+        return 1;
+    case 4:
+        sb_cstr(b, "null");
+        return 1;
+    case 5:
+    case 8:
+    case 9:
+    case 12:
+        return 0; /* undefined / function-ish: skipped (object) or null (array) */
+    case 6: {
+        /* JSON has no bigint: Node throws "Do not know how to serialize a
+           BigInt" (err 3). */
+        if (is_boxed_bigint(pay)) {
+            *err = 3;
+            return 0;
+        }
+        /* A boxed Error (field-0 type-id flag, KlainMainLang TDD-00222): its
+           own enumerable properties only — an Error subclass's fields and the
+           system fields set on it (__kml_obj_nkeys counts both), so
+           JSON.stringify(new Error(...)) is "{}", as in Node. */
+        if (pay && (*(long long *)pay & (1LL << 48))) {
+            long long en = __kml_obj_nkeys((void *)pay);
+            if (en <= 0) {
+                sb_cstr(b, "{}");
+                return 1;
+            }
+            return stringify_static(b, (void *)pay, en, indent, depth, err);
+        }
+        if (is_host_box(pay)) {
+            char *js = __kml_host_tojson((void *)pay);
+            if (js) {
+                sb_json_string(b, js);
+                return 1;
+            }
+        }
+        /* A static object with a layout-table row: its own enumerable keys
+           (KlainMainLang TDD-00233); a host box has none. */
+        long long sn = pay && !is_host_box(pay) ? __kml_obj_nkeys((void *)pay) : (is_host_box(pay) ? 0 : -1);
+        if (sn >= 0)
+            return stringify_static(b, (void *)pay, sn, indent, depth, err);
+        *err = 2;
+        return 0;
+    }
+    case 7:
+        return sv_boxarr(b, tag, pay, indent, depth, err);
+    case 10:
+    case 11:
+        break;
+    default:
+        *err = 2; /* funcRef/stream: no runtime shape to walk */
+        return 0;
+    }
+    return sv_dyn(b, tag, pay, indent, depth, err);
 }
 
 /* __kml_dynjson_stringify serializes one boxed dynamic value (tag passed

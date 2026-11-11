@@ -6,18 +6,55 @@ on:
 
 permissions:
   contents: write
+  packages: write
 
 jobs:
-  # One lane per platform, all in parallel, none stopping the others
-  # (TDD-00179). Each lane is test-platform.yml: build the compiler once, then
-  # the sharded suite and the sharded examples on it. The release job
-  # attaches a binary for each platform whose gate passed.
+  # The Linux lanes' toolchain image (.github/ci/linux.Dockerfile), one per
+  # architecture, tagged by the Dockerfile's hash: built only when that file
+  # changes, so the lanes' jobs install nothing.
+  ci-image-ref:
+    runs-on: ubuntu-latest
+    outputs:
+      amd64: ${{ steps.ref.outputs.amd64 }}
+      arm64: ${{ steps.ref.outputs.arm64 }}
+    steps:
+      - uses: actions/checkout@v7
+        with: { sparse-checkout: .github/ci }
+      - id: ref
+        shell: bash
+        run: |
+          owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
+          base="ghcr.io/$owner/klainmain-ci:${{ hashFiles('.github/ci/linux.Dockerfile') }}"
+          echo "amd64=$base-amd64" >> "$GITHUB_OUTPUT"
+          echo "arm64=$base-arm64" >> "$GITHUB_OUTPUT"
+  ci-image:
+    needs: ci-image-ref
+    strategy:
+      matrix:
+        include:
+          - { arch: amd64, os: ubuntu-24.04 }
+          - { arch: arm64, os: ubuntu-24.04-arm }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with: { sparse-checkout: .github/ci }
+      - name: Build and push unless it exists
+        shell: bash
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          img='${{ needs.ci-image-ref.outputs[matrix.arch] }}'
+          if docker manifest inspect "$img" >/dev/null 2>&1; then echo "exists: $img"; exit 0; fi
+          docker build -t "$img" -f .github/ci/linux.Dockerfile .github/ci
+          docker push "$img"
+
   linux-x64:
+    needs: [ci-image-ref, ci-image]
     uses: ./.github/workflows/test-platform.yml
-    with: { name: linux-x64, os: ubuntu-24.04, goos: linux, goarch: amd64 }
+    with: { name: linux-x64, os: ubuntu-24.04, goos: linux, goarch: amd64, image: '${{ needs.ci-image-ref.outputs.amd64 }}' }
   linux-arm64:
+    needs: [ci-image-ref, ci-image]
     uses: ./.github/workflows/test-platform.yml
-    with: { name: linux-arm64, os: ubuntu-24.04-arm, goos: linux, goarch: arm64 }
+    with: { name: linux-arm64, os: ubuntu-24.04-arm, goos: linux, goarch: arm64, image: '${{ needs.ci-image-ref.outputs.arm64 }}' }
   macos-x64:
     uses: ./.github/workflows/test-platform.yml
     with: { name: macos-x64, os: macos-15-intel, goos: darwin, goarch: amd64 }

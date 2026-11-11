@@ -15,16 +15,28 @@ on:
       goarch: { type: string, required: true }
       # The example runner is a POSIX Makefile recipe: false on Windows.
       examples: { type: boolean, default: true }
+      # The Linux lanes' toolchain image (release.yml's ci-image job): every
+      # job runs in it and installs nothing. Empty elsewhere: on the runner.
+      image: { type: string, default: '' }
 
 env:
   # Keep in step with the shard matrix below.
   SHARDS: 4
+  # The toolchain action skips its installs inside the image.
+  KML_CI_IMAGE: ${{ inputs.image != '' && '1' || '' }}
   BIN: klainmain${{ inputs.goos == 'windows' && '.exe' || '' }}
 
 jobs:
   build:
     name: build + unit
     runs-on: ${{ inputs.os }}
+    container:
+      image: ${{ inputs.image }}
+      # The runner's own uid, not root: the file-permission tests expect EACCES.
+      options: --user 1001
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -53,6 +65,13 @@ jobs:
     name: ${{ matrix.part }}
     needs: build
     runs-on: ${{ inputs.os }}
+    container:
+      image: ${{ inputs.image }}
+      # The runner's own uid, not root: the file-permission tests expect EACCES.
+      options: --user 1001
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     # Windows (MSYS2 setup, Defender) gets more room. go test's own -timeout
     # catches a hang before the job ceiling does.
     timeout-minutes: ${{ inputs.goos == 'windows' && 90 || 45 }}
@@ -77,6 +96,13 @@ jobs:
     needs: build
     if: inputs.examples
     runs-on: ${{ inputs.os }}
+    container:
+      image: ${{ inputs.image }}
+      # The runner's own uid, not root: the file-permission tests expect EACCES.
+      options: --user 1001
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -100,6 +126,13 @@ jobs:
     needs: build
     if: inputs.examples
     runs-on: ${{ inputs.os }}
+    container:
+      image: ${{ inputs.image }}
+      # The runner's own uid, not root: the file-permission tests expect EACCES.
+      options: --user 1001
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
