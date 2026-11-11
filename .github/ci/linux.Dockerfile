@@ -10,7 +10,7 @@ ARG NODE_FFI=26.10.0
 ARG WASMTIME=50.0.1
 
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get -o Acquire::Retries=5 update && apt-get -o Acquire::Retries=5 install -y --no-install-recommends \
       ca-certificates curl git make xz-utils unzip pkg-config sudo \
       clang lld libcurl4-openssl-dev libgc-dev libtommath-dev libpcre2-dev \
       libssl-dev libnghttp2-dev libuv1-dev libh2o-dev libc-ares-dev \

@@ -44,7 +44,8 @@ jobs:
           echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
           img='${{ needs.ci-image-ref.outputs[matrix.arch] }}'
           if docker manifest inspect "$img" >/dev/null 2>&1; then echo "exists: $img"; exit 0; fi
-          docker build -t "$img" -f .github/ci/linux.Dockerfile .github/ci
+          # The host's network: name lookups failed inside the build's own.
+          docker build --network host -t "$img" -f .github/ci/linux.Dockerfile .github/ci
           docker push "$img"
 
   linux-x64:
