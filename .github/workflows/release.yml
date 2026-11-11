@@ -10,25 +10,38 @@ permissions:
 
 jobs:
   # The Linux lanes' toolchain image (.github/ci/linux.Dockerfile), one per
-  # architecture, tagged by the Dockerfile's hash: built only when that file
-  # changes, so the lanes' jobs install nothing.
+  # architecture, tagged by the Dockerfile's hash. ci-image-ref finds out
+  # whether both are already pushed; only when one is missing (the
+  # Dockerfile changed) does ci-image build anything.
   ci-image-ref:
     runs-on: ubuntu-latest
     outputs:
       amd64: ${{ steps.ref.outputs.amd64 }}
       arm64: ${{ steps.ref.outputs.arm64 }}
+      missing: ${{ steps.ref.outputs.missing }}
     steps:
       - uses: actions/checkout@v7
         with: { sparse-checkout: .github/ci }
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - id: ref
         shell: bash
         run: |
           owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')
           base="ghcr.io/$owner/klainmain-ci:${{ hashFiles('.github/ci/linux.Dockerfile') }}"
-          echo "amd64=$base-amd64" >> "$GITHUB_OUTPUT"
-          echo "arm64=$base-arm64" >> "$GITHUB_OUTPUT"
+          missing=""
+          for a in amd64 arm64; do
+            echo "$a=$base-$a" >> "$GITHUB_OUTPUT"
+            if docker manifest inspect "$base-$a" >/dev/null 2>&1; then echo "exists: $base-$a"
+            else echo "missing: $base-$a"; missing="$missing $a"; fi
+          done
+          echo "missing=${missing# }" >> "$GITHUB_OUTPUT"
   ci-image:
     needs: ci-image-ref
+    if: needs.ci-image-ref.outputs.missing != ''
     strategy:
       matrix:
         include:
@@ -36,24 +49,53 @@ jobs:
           - { arch: arm64, os: ubuntu-24.04-arm }
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-        with: { sparse-checkout: .github/ci }
-      - name: Build and push unless it exists
+      - name: This architecture's image is missing?
+        id: have
         shell: bash
         run: |
-          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
-          img='${{ needs.ci-image-ref.outputs[matrix.arch] }}'
-          if docker manifest inspect "$img" >/dev/null 2>&1; then echo "exists: $img"; exit 0; fi
-          # The host's network: name lookups failed inside the build's own.
-          docker build --network host -t "$img" -f .github/ci/linux.Dockerfile .github/ci
-          docker push "$img"
+          case ' ${{ needs.ci-image-ref.outputs.missing }} ' in
+            *' ${{ matrix.arch }} '*) echo "build=1" >> "$GITHUB_OUTPUT" ;;
+            *) echo "already pushed" ;;
+          esac
+      - uses: actions/checkout@v7
+        if: steps.have.outputs.build == '1'
+        with: { sparse-checkout: .github/ci }
+      # Where name lookups fail, if they do: the runner, a container on
+      # Docker's bridge, a container on the host network.
+      - name: DNS as the build sees it
+        if: steps.have.outputs.build == '1'
+        shell: bash
+        run: |
+          echo '== runner /etc/resolv.conf'; cat /etc/resolv.conf
+          echo '== systemd-resolved upstreams'; cat /run/systemd/resolve/resolv.conf 2>/dev/null | grep -v '^#' || true
+          echo '== docker daemon.json'; cat /etc/docker/daemon.json 2>/dev/null || echo none
+          echo '== runner lookup'; getent hosts archive.ubuntu.com || echo FAIL
+          echo '== bridge container'; docker run --rm ubuntu:26.04 bash -c 'cat /etc/resolv.conf; getent hosts archive.ubuntu.com || echo FAIL'
+          echo '== host-network container'; docker run --rm --network host ubuntu:26.04 bash -c 'cat /etc/resolv.conf; getent hosts archive.ubuntu.com || echo FAIL'
+      - uses: docker/login-action@v3
+        if: steps.have.outputs.build == '1'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-buildx-action@v3
+        if: steps.have.outputs.build == '1'
+      - uses: docker/build-push-action@v6
+        if: steps.have.outputs.build == '1'
+        with:
+          context: .github/ci
+          file: .github/ci/linux.Dockerfile
+          push: true
+          tags: ${{ needs.ci-image-ref.outputs[matrix.arch] }}
 
   linux-x64:
     needs: [ci-image-ref, ci-image]
+    if: always() && needs.ci-image-ref.result == 'success' && (needs.ci-image.result == 'success' || needs.ci-image.result == 'skipped')
     uses: ./.github/workflows/test-platform.yml
     with: { name: linux-x64, os: ubuntu-24.04, goos: linux, goarch: amd64, image: '${{ needs.ci-image-ref.outputs.amd64 }}' }
   linux-arm64:
     needs: [ci-image-ref, ci-image]
+    if: always() && needs.ci-image-ref.result == 'success' && (needs.ci-image.result == 'success' || needs.ci-image.result == 'skipped')
     uses: ./.github/workflows/test-platform.yml
     with: { name: linux-arm64, os: ubuntu-24.04-arm, goos: linux, goarch: arm64, image: '${{ needs.ci-image-ref.outputs.arm64 }}' }
   macos-x64:
