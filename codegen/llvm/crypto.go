@@ -2,7 +2,10 @@ package llvm
 
 import (
 	_ "embed"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -57,13 +60,48 @@ func LocateCrypto(backend string) (cflags, libs []string) {
 	if out, err := exec.Command("pkg-config", "--cflags", "libcrypto").Output(); err == nil {
 		cflags = strings.Fields(strings.TrimSpace(string(out)))
 		if out, err := exec.Command("pkg-config", "--libs", "libcrypto").Output(); err == nil {
-			return cflags, strings.Fields(strings.TrimSpace(string(out)))
+			return cflags, pinDarwinLibs(strings.Fields(strings.TrimSpace(string(out))))
 		}
 	}
 	if out, err := exec.Command("brew", "--prefix", "openssl@3").Output(); err == nil {
 		if prefix := strings.TrimSpace(string(out)); prefix != "" {
-			return []string{"-I" + prefix + "/include"}, []string{"-L" + prefix + "/lib", "-lcrypto"}
+			return []string{"-I" + prefix + "/include"}, pinDarwinLibs([]string{"-L" + prefix + "/lib", "-lcrypto"})
 		}
 	}
 	return nil, []string{"-lcrypto"}
+}
+
+// pinDarwinLibs names each -l library by its path in the -L directories the
+// same flags give, on macOS. The program's link line also carries Homebrew's
+// shared -L/opt/homebrew/lib (other libraries' discovery), ahead of these, and
+// a -lcrypto searched there finds whichever OpenSSL Homebrew last linked into
+// it — OpenSSL 4 on a machine that has it, against OpenSSL 3 headers.
+func pinDarwinLibs(libs []string) []string {
+	if runtime.GOOS != "darwin" {
+		return libs
+	}
+	var dirs []string
+	for _, a := range libs {
+		if strings.HasPrefix(a, "-L") {
+			dirs = append(dirs, strings.TrimPrefix(a, "-L"))
+		}
+	}
+	out := make([]string, 0, len(libs))
+	for _, a := range libs {
+		if name, ok := strings.CutPrefix(a, "-l"); ok {
+			for _, d := range dirs {
+				if p := filepath.Join(d, "lib"+name+".dylib"); fileExists(p) {
+					a = p
+					break
+				}
+			}
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+func fileExists(p string) bool {
+	st, err := os.Stat(p)
+	return err == nil && !st.IsDir()
 }

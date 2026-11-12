@@ -21,7 +21,7 @@ on:
 
 env:
   # Keep in step with the shard matrix below.
-  SHARDS: 4
+  SHARDS: 8
   # The toolchain action skips its installs inside the image.
   KML_CI_IMAGE: ${{ inputs.image != '' && '1' || '' }}
   BIN: klainmain${{ inputs.goos == 'windows' && '.exe' || '' }}
@@ -78,7 +78,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        part: [shard-0, shard-1, shard-2, shard-3]
+        part: [shard-0, shard-1, shard-2, shard-3, shard-4, shard-5, shard-6, shard-7]
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/toolchain

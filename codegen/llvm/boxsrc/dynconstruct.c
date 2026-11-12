@@ -21,7 +21,7 @@ extern i64 __kml_dyn_construct_fn(i64 c, i64 *argv, i64 argc);
 extern i64 __kml_dyn_construct_fail(void *msg);
 
 extern i64 *__kml_fn_bound_env(i64 c);
-extern void *malloc(unsigned long); /* scratch: the argument list below */
+extern void *malloc(__SIZE_TYPE__); /* scratch: the argument list below */
 extern void free(void *); /* scratch */
 
 i64 __kml_dyn_construct(i64 c, i64 *argv, i64 argc, void *msg) {

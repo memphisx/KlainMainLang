@@ -18,5 +18,5 @@ func TLSHandleSource() string { return tlsHandleSource }
 // the OpenSSL crypto discovery (headers + -L + -lcrypto) plus -lssl.
 func LocateTLS() (cflags, libs []string) {
 	cflags, libs = LocateCrypto("openssl")
-	return cflags, append(libs, "-lssl")
+	return cflags, pinDarwinLibs(append(libs, "-lssl"))
 }

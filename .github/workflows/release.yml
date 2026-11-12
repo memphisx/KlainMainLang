@@ -60,18 +60,37 @@ jobs:
       - uses: actions/checkout@v7
         if: steps.have.outputs.build == '1'
         with: { sparse-checkout: .github/ci }
-      # Where name lookups fail, if they do: the runner, a container on
-      # Docker's bridge, a container on the host network.
-      - name: DNS as the build sees it
+      # The runner's resolver (Azure's 168.63.129.16) has failed to resolve
+      # the Ubuntu mirrors on the runner itself, inside and outside Docker,
+      # while other names resolved. The build's hosts are resolved here
+      # (the runner's resolver, else DNS over HTTPS to 1.1.1.1 / 8.8.8.8 by
+      # address) and handed to the build as fixed /etc/hosts entries.
+      - name: Pin the build's hosts
+        id: hosts
         if: steps.have.outputs.build == '1'
         shell: bash
         run: |
-          echo '== runner /etc/resolv.conf'; cat /etc/resolv.conf
-          echo '== systemd-resolved upstreams'; cat /run/systemd/resolve/resolv.conf 2>/dev/null | grep -v '^#' || true
-          echo '== docker daemon.json'; cat /etc/docker/daemon.json 2>/dev/null || echo none
-          echo '== runner lookup'; getent hosts archive.ubuntu.com || echo FAIL
-          echo '== bridge container'; docker run --rm ubuntu:26.04 bash -c 'cat /etc/resolv.conf; getent hosts archive.ubuntu.com || echo FAIL'
-          echo '== host-network container'; docker run --rm --network host ubuntu:26.04 bash -c 'cat /etc/resolv.conf; getent hosts archive.ubuntu.com || echo FAIL'
+          set -euo pipefail
+          hosts='archive.ubuntu.com security.ubuntu.com ports.ubuntu.com
+            github.com codeload.github.com objects.githubusercontent.com
+            release-assets.githubusercontent.com go.dev dl.google.com nodejs.org'
+          doh() {
+            for url in "https://1.1.1.1/dns-query?name=$1&type=A" "https://8.8.8.8/resolve?name=$1&type=A"; do
+              ip=$(curl -fsS --max-time 10 --retry 3 -H 'accept: application/dns-json' "$url" \
+                | jq -r '[.Answer[]? | select(.type == 1) | .data] | first // empty') || true
+              [ -n "$ip" ] && { echo "$ip"; return; }
+            done
+          }
+          pins=()
+          for h in $hosts; do
+            ip=$(timeout 10 getent ahostsv4 "$h" | awk 'NR == 1 { print $1 }' || true)
+            how=runner
+            [ -n "$ip" ] || { ip=$(doh "$h"); how=doh; }
+            [ -n "$ip" ] || { echo "::error::cannot resolve $h"; exit 1; }
+            echo "$h $ip ($how)"
+            pins+=("$h:$ip")
+          done
+          { echo 'list<<EOF'; printf '%s\n' "${pins[@]}"; echo EOF; } >> "$GITHUB_OUTPUT"
       - uses: docker/login-action@v3
         if: steps.have.outputs.build == '1'
         with:
@@ -87,6 +106,7 @@ jobs:
           file: .github/ci/linux.Dockerfile
           push: true
           tags: ${{ needs.ci-image-ref.outputs[matrix.arch] }}
+          add-hosts: ${{ steps.hosts.outputs.list }}
 
   linux-x64:
     needs: [ci-image-ref, ci-image]
