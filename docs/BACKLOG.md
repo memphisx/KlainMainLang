@@ -330,6 +330,8 @@ Nothing open.
 - The `klmpm` package manager (TDD-00054); npm/`node_modules` interop (TDD-00053).
 - Self-hosting (TDD-00124) with its `klain:` module set (TDD-00189).
 - `klain:ffi` beyond-Node FFI (TDD-00190).
+- Opt-in ownership checking for existing TypeScript (TDD-00259) — after
+  TDD-00230 and the open TDDs.
 
 Reference docs, not queued work: the WASM target (TDD-00048), the Pico (TDD-00036)
 and Raspberry Pi (TDD-00045) targets, Immix (TDD-00135).

@@ -308,6 +308,11 @@ func blockerOf(msg string) string {
 var reQuotedCapture = regexp.MustCompile(`'([^']+)'`)
 
 func main() {
+	defer func() {
+		if n := llvm.OracleCacheStale(); n > 0 {
+			fmt.Fprintf(os.Stderr, "oracle cache: %d stale answers\n", n)
+		}
+	}()
 	// The front end runs in this process for every file; without a limit
 	// the collector lets its garbage reach gigabytes over a suite.
 	if os.Getenv("GOMEMLIMIT") == "" {

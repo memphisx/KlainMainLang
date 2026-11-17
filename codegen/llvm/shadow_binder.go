@@ -141,8 +141,14 @@ func (o frontOracle) ExprType(e ast.Expression) (Type, bool) {
 	if o.r.scopeKey != nil {
 		key.depth, key.base = o.r.scopeKey()
 	}
+	var cachedA oracleAnswer
+	var cachedHit bool
 	if o.q.depth == 0 {
+		if cachedA, cachedHit = o.oracleCacheLookup(key); cachedHit && oracleCacheMode != "verify" {
+			return cachedA.t, cachedA.ok
+		}
 		o.q.memo = map[oracleKey]oracleAnswer{}
+		o.q.startGen = o.r.gen()
 	} else if a, ok := o.q.memo[key]; ok {
 		return a.t, a.ok
 	}
@@ -170,15 +176,23 @@ func (o frontOracle) ExprType(e ast.Expression) (Type, bool) {
 		o.q.memo[key] = oracleAnswer{t: t, ok: ok}
 	}
 	if o.q.depth == 0 {
+		if cachedHit {
+			o.oracleCacheVerify(key, cachedA, oracleAnswer{t: t, ok: ok})
+		} else if o.q.cuts == cuts {
+			o.oracleCacheKeep()
+		}
 		o.q.memo, o.q.inflight = nil, nil
 	}
 	return t, ok
 }
 
 type oracleQuery struct {
-	depth int
-	memo  map[oracleKey]oracleAnswer
-	cuts  int // provisional answers handed out (a cycle cut)
+	persist    map[oracleKey]oracleAnswer // answers kept across queries (oracle_cache.go)
+	startGen   int64                      // the emitter's oracle generation when the outermost query began
+	persistGen int64                      // the generation persist's answers were kept under
+	depth      int
+	memo       map[oracleKey]oracleAnswer
+	cuts       int // provisional answers handed out (a cycle cut)
 	// inflight counts each expression's asks being computed.
 	inflight map[oracleKey]int
 }
@@ -196,8 +210,9 @@ type oracleKey struct {
 }
 
 type oracleAnswer struct {
-	t  Type
-	ok bool
+	t   Type
+	ok  bool
+	gen int64 // the emitter's oracle generation when kept (oracle_cache.go)
 }
 
 // exprTypeQuery is ExprType, unmemoized.
@@ -6213,6 +6228,9 @@ type reprCtx struct {
 	codegenCall func(*ast.CallExpression) (Type, bool)
 	// scopeKey identifies codegen's scope stack (inferScopeIdentity).
 	scopeKey func() (int, uintptr)
+	// oracleGen is the emitter's count of changes a kept oracle answer
+	// can read (oracle_cache.go).
+	oracleGen func() int64
 	// erasedCall is codegen's result for a call of an erased generic
 	// method (`run<R>(…): R`, genericMethodResult).
 	erasedCall func(*ast.CallExpression, Type) (Type, bool)
@@ -6269,7 +6287,7 @@ func (e *Emitter) repr() reprCtx {
 	}, promiseValue: func(ne *ast.NewExpression) (Type, bool) { t, ok := e.promiseValue[ne]; return t, ok }, class: e.classRepr, genericClass: e.genericClassRepr, iface: e.interfaceRepr, narrowClass: e.narrowableClass, narrowedUnion: e.checkerNarrowedUnion, genDesugared: e.genDesugaredBody, genPatternInits: func() map[*ast.FunctionDeclaration][]ast.Statement { return e.genPatternInits }, liftedGen: func(m *ast.FunctionDeclaration) *ast.FunctionDeclaration { return e.liftedStaticGens[m] }, stdio: e.stdioStream, objects: true, js: e.compatJS, widened: func(n string) bool { return e.widenedBindings[n] }, filledBoxed: func(v *ast.VarDeclaration) bool { return e.filledBoxed[v] }, objLit: e.objLitClassRepr, protoCtor: func(n string) bool { return e.jsProtoCtor[n] }, funcProp: e.funcValueProp, libClass: e.libInterfaceClass, bareCollection: e.bareContainerType, methodRecord: e.methodRecordRead, mapEntries: func(x *ast.NewMapExpression) Type { return MapType(e.mapKVTypes(x.KeyType, x.ValType, x.Init)) }, classMethod: e.classMethodDecl, species: e.speciesClass, bufferClass: func(n string) bool {
 		info, ok := e.classes[n]
 		return ok && info.HostBase != nil && info.HostBase.IsArrayBuffer()
-	}, promiseErased: e.promiseHostErased, promiseClass: e.isPromiseClass, boundFunc: e.boundFuncValueType, erasedCall: e.erasedMethodCall, widenedParam: e.dynEntryWidenedIdent, checkerPrim: e.checkerPrimitive, anyHeld: e.anyHeldDecl, localDecl: e.localDeclType, runtimeClone: e.runtimeCloneCall, extends: e.classExtends, boxOverride: e.boxOverride, narrowed: e.checkerNarrowed, erasedParam: e.erasedCallbackParam, chainCopy: e.chainCopyOf, origin: func(x ast.Expression) (ast.Expression, bool) { o, ok := e.synthOrigin[x]; return o, ok }, warm: func(x ast.Expression) (*checker.Type, bool) { t, ok := e.frontWarm[x]; return t, ok }, builtinRef: e.builtinRefValueType, codegenCall: e.codegenCallRepr, genericNew: e.genericNewRepr, methodValue: e.classMethodValue, newTargetHeld: e.newTargetHeld, keepsBox: e.keepsBox, funcThis: e.funcExprThisType, literalParam: e.literalParamType, annotation: e.annotationType, unresolved: e.unresolvedReference, heldIdent: e.heldIdent, getterDecl: e.classGetterDecl, staticMethod: e.staticMethodValue, scopeKey: e.inferScopeIdentity, builtinValue: e.unboundBuiltinValueType, loweredValue: e.loweredGlobalValue, funcRef: e.funcRefValue, generatorValue: e.generatorValueRepr, importResult: e.importCallResultObjectType, erasedTPNames: e.erasedTypeParamNames, warmAnn: func(n ast.TypeNode) (*checker.Type, bool) { t, ok := e.frontAnnWarm[n]; return t, ok }, inLib: func() bool { return e.inLib != "" }, globalClass: e.globalLinkedClass, userType: func(n string) bool { _, g := e.genericInterfaces[n]; _, i := e.interfaces[n]; return g || i }, unassigned: e.unassignedField, inferred: func(x ast.Expression) (Type, bool) { return e.typeOfExpr(x), true }, byValRet: func(n string) bool { sig, ok := e.funcs[n]; return ok && sig.RetType.TupleByVal }}
+	}, promiseErased: e.promiseHostErased, promiseClass: e.isPromiseClass, boundFunc: e.boundFuncValueType, erasedCall: e.erasedMethodCall, widenedParam: e.dynEntryWidenedIdent, checkerPrim: e.checkerPrimitive, anyHeld: e.anyHeldDecl, localDecl: e.localDeclType, runtimeClone: e.runtimeCloneCall, extends: e.classExtends, boxOverride: e.boxOverride, narrowed: e.checkerNarrowed, erasedParam: e.erasedCallbackParam, chainCopy: e.chainCopyOf, origin: func(x ast.Expression) (ast.Expression, bool) { o, ok := e.synthOrigin[x]; return o, ok }, warm: func(x ast.Expression) (*checker.Type, bool) { t, ok := e.frontWarm[x]; return t, ok }, builtinRef: e.builtinRefValueType, codegenCall: e.codegenCallRepr, genericNew: e.genericNewRepr, methodValue: e.classMethodValue, newTargetHeld: e.newTargetHeld, keepsBox: e.keepsBox, funcThis: e.funcExprThisType, literalParam: e.literalParamType, annotation: e.annotationType, unresolved: e.unresolvedReference, heldIdent: e.heldIdent, getterDecl: e.classGetterDecl, staticMethod: e.staticMethodValue, scopeKey: e.inferScopeIdentity, oracleGen: func() int64 { return e.oracleGen }, builtinValue: e.unboundBuiltinValueType, loweredValue: e.loweredGlobalValue, funcRef: e.funcRefValue, generatorValue: e.generatorValueRepr, importResult: e.importCallResultObjectType, erasedTPNames: e.erasedTypeParamNames, warmAnn: func(n ast.TypeNode) (*checker.Type, bool) { t, ok := e.frontAnnWarm[n]; return t, ok }, inLib: func() bool { return e.inLib != "" }, globalClass: e.globalLinkedClass, userType: func(n string) bool { _, g := e.genericInterfaces[n]; _, i := e.interfaces[n]; return g || i }, unassigned: e.unassignedField, inferred: func(x ast.Expression) (Type, bool) { return e.typeOfExpr(x), true }, byValRet: func(n string) bool { sig, ok := e.funcs[n]; return ok && sig.RetType.TupleByVal }}
 }
 
 // narrowableClass is the instance type of the class sym declares when an

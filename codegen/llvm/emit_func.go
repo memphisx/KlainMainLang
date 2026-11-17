@@ -489,11 +489,11 @@ func maybeAddArgumentsRestParams(params []ast.Param, body []ast.Statement) []ast
 
 // maybeAddArgumentsRestParam mutates a function declaration in place — the
 // named/nested-function entry point (buildFunctionSig).
-func maybeAddArgumentsRestParam(fd *ast.FunctionDeclaration) {
+func (e *Emitter) maybeAddArgumentsRestParam(fd *ast.FunctionDeclaration) {
 	if fd == nil || fd.Body == nil {
 		return
 	}
-	fd.Params = maybeAddArgumentsRestParams(fd.Params, fd.Body.Body)
+	fd.Params = e.setArgumentsRestParams(fd.Params, fd.Body.Body)
 }
 
 // maybeAddThisParam gives a function declared with a `this: T` parameter
@@ -3806,7 +3806,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 	// rest parameter (TDD-00210), the same as a named function — idempotent and
 	// mirrored in typeOfExpr so the call site and definition agree on arity.
 	// (Arrow functions are excluded: they have no own `arguments`.)
-	fe.Params = maybeAddArgumentsRestParams(fe.Params, fe.Body.Body)
+	fe.Params = e.setArgumentsRestParams(fe.Params, fe.Body.Body)
 	thisTaking := e.maybeAddThisParamExpr(fe)
 	// A function reading its own `this` with no typed slot to take it from
 	// (untyped JavaScript, or an argument to a dynamic callee whose context

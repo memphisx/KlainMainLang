@@ -254,7 +254,10 @@ func (e *Emitter) toTypedArrayElem(v Value, taTy Type, pos ast.Pos) (Value, erro
 			f := e.convert(v, TypeF64)
 			// ToUint8Clamp: NaN → 0 (the fcmp ult 0.0 check is
 			// unordered-true, so NaN takes the 0 branch of the low clamp),
-			// clamp to [0, 255], round half to even, then convert.
+			// clamp to [0, 255], round half to even, then convert. nearbyint
+			// rounds half to even in the default rounding mode; roundeven
+			// would lower to a libm call macOS and Windows lack (x86-64
+			// without SSE4.1 has no instruction for either).
 			lo := e.freshReg()
 			clampedLo := e.freshReg()
 			hi := e.freshReg()
@@ -266,7 +269,7 @@ func (e *Emitter) toTypedArrayElem(v Value, taTy Type, pos ast.Pos) (Value, erro
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0.0, double %s", clampedLo, lo, f.Ref))
 			e.emitInstr(fmt.Sprintf("%s = fcmp ogt double %s, 255.0", hi, clampedLo))
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 255.0, double %s", clamped, hi, clampedLo))
-			e.emitInstr(fmt.Sprintf("%s = call double @llvm.roundeven.f64(double %s)", rounded, clamped))
+			e.emitInstr(fmt.Sprintf("%s = call double @llvm.nearbyint.f64(double %s)", rounded, clamped))
 			e.emitInstr(fmt.Sprintf("%s = fptoui double %s to i64", asInt, rounded))
 			e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i8", narrow, asInt))
 			return Value{Ref: narrow, Ty: elemTy}, nil

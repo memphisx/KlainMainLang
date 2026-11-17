@@ -298,3 +298,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, a TDD should 
 | [00256](TDD-00256.md) | Optional-field presence | Implemented | [ADR-01687](../adr/01/ADR-01687.md) | |
 | [00257](TDD-00257.md) | A plain string's null and undefined | Implemented | [ADR-01688](../adr/01/ADR-01688.md), [ADR-01691](../adr/01/ADR-01691.md) | |
 | [00258](TDD-00258.md) | Reading a Map or Set through another element type | Implemented | [ADR-01690](../adr/01/ADR-01690.md) | |
+| [00259](TDD-00259.md) | Opt-in ownership checking for existing TypeScript | Not Started | | |

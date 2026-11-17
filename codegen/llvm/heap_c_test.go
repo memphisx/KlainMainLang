@@ -204,6 +204,7 @@ func TestEveryCRuntimeFileCovered(t *testing.T) {
 	for _, pat := range []string{"*src/*.c", "*src/*.cc", "*src/*.cpp"} {
 		files, _ := filepath.Glob(pat)
 		for _, f := range files {
+			f = filepath.ToSlash(f) // the list is written with '/'
 			if !listed[f] {
 				t.Errorf("%s is not in heapCoveredC", f)
 			}

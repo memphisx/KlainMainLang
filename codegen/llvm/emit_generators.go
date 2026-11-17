@@ -130,7 +130,7 @@ func (e *Emitter) buildGeneratorSig(fd *ast.FunctionDeclaration) (*GeneratorInfo
 func (e *Emitter) buildGeneratorSigThis(fd *ast.FunctionDeclaration, thisTy *Type) (*GeneratorInfo, error) {
 	// A body reading `arguments` collects the overflow in a hidden rest
 	// parameter, as a function's does (TDD-00210).
-	maybeAddArgumentsRestParam(fd)
+	e.maybeAddArgumentsRestParam(fd)
 	e.desugarGeneratorPatternParams(fd)
 	var paramTypes []Type
 	var paramNames []string

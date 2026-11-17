@@ -110,6 +110,7 @@ func (e *Emitter) inferMemoScopePopped() {
 }
 
 func (e *Emitter) inferMemoDefined() {
+	e.oracleChanged()
 	if e.inferDepth > 0 && len(e.inferMemo) > 0 {
 		e.inferMemo[len(e.inferMemo)-1].full = nil
 	}
@@ -979,7 +980,7 @@ func (e *Emitter) syntacticExprType(expr ast.Expression) Type {
 		// a BlockStatement, never an Expression).
 		// Mirror emitFunctionExpression's implicit `arguments` rest (TDD-00210)
 		// so the inferred type's arity matches the emitted function's.
-		ex.Params = maybeAddArgumentsRestParams(ex.Params, ex.Body.Body)
+		ex.Params = e.setArgumentsRestParams(ex.Params, ex.Body.Body)
 		thisTaking := e.maybeAddThisParamExpr(ex)
 		if !thisTaking && e.compatJS() && !ex.IsAsync && usesOwnThis(ex.Body.Body) && hasArgumentsRestParamSlice(ex.Params) {
 			return TypeAny // stays dynamic (mirrors emitFunctionExpression)

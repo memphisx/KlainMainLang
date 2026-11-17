@@ -2193,7 +2193,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			if m.AccessorKind == "" {
 				// A method reading `arguments` takes its implicit rest, as a
 				// function does (TDD-00210).
-				maybeAddArgumentsRestParam(m)
+				e.maybeAddArgumentsRestParam(m)
 			}
 			sig := e.methodSig(cd, m, provisionalTy)
 
@@ -2455,7 +2455,7 @@ func (e *Emitter) registerClasses(prog *ast.Program) error {
 			}
 			info.Constructor = cd.Constructor
 			// One reading `arguments` takes its implicit rest, as a method does.
-			maybeAddArgumentsRestParam(cd.Constructor)
+			e.maybeAddArgumentsRestParam(cd.Constructor)
 			sig := e.buildParamSig(cd.Constructor.Params, cd.Constructor)
 			sig.RetType = TypeVoid
 			// `-compat=js`: overlay call-site-inferred types onto unannotated

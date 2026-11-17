@@ -91,6 +91,9 @@ func unmangleTopLevelName(name string) string {
 // literal initializer) — an array/object/Map/complex value stays a `main()` local
 // (the pre-existing behavior), never miscompiled.
 func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
+	// Answers given while the globals' storage is being settled are not
+	// kept past it (oracle_cache.go).
+	defer e.oracleChanged()
 	e.collectTopLevelNames(prog)
 	readByFunctions := namesReadInFunctions(prog)
 	// A library module's statements run in its init function, and a

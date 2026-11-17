@@ -466,6 +466,10 @@
     {
       "kind": "tddBacklog",
       "editorial": {
+        "259": {
+          "title": "Opt-in ownership checking for existing TypeScript",
+          "notes": "Low priority, after [00230](../tdd/TDD-00230.md). Inference-first ownership analysis behind a flag: report mode first, then escape summaries with a builtin table, `using`/`Symbol.dispose`, transfer as a move, reuse and reference counting for what inference cannot prove. Rejects or frees only; never changes behaviour"
+        },
         "258": {
           "title": "Reading a Map or Set through another element type",
           "notes": "A Map or Set viewed through another key/value type (a `Map<string, number>` passed as `Map<any, any>`) runs the view's flavor over the object's own layout. Operations through an `any` view dispatch on the object's host header word to the layout's own typed routine"

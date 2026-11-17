@@ -228,6 +228,9 @@ type Emitter struct {
 	// parameter positions substituteGenericType handles on its own. Pushed
 	// and popped by withTypeParamScope; nil outside any instantiation.
 	typeParamScope map[string]Type
+	// oracleGen counts the changes a kept front-oracle answer can read
+	// (oracle_cache.go).
+	oracleGen int64
 	// enclosingCapturables (TDD-00129 Stage 1) is a stack parallel to
 	// nestedFuncScopes: one frame per enclosing function/closure body, holding
 	// the names of that body's *capturable* bindings — its parameters plus its
@@ -617,10 +620,12 @@ func (e *Emitter) resolveRegexMode() string {
 func (e *Emitter) pushScope() {
 	e.scopes = append(e.scopes, scope{syms: make(map[string]Symbol)})
 	e.inferMemoScopePushed()
+	e.oracleChanged()
 }
 func (e *Emitter) popScope() {
 	e.scopes = e.scopes[:len(e.scopes)-1]
 	e.inferMemoScopePopped()
+	e.oracleChanged()
 }
 
 func (e *Emitter) define(name string, sym Symbol) {
@@ -2886,7 +2891,7 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 	// parameter here, at the one authoritative signature computation, so the
 	// definition site and every call site agree on the variadic arity
 	// (TDD-00210 Stage 1). Idempotent — re-inference sweeps re-enter this.
-	maybeAddArgumentsRestParam(fd)
+	e.maybeAddArgumentsRestParam(fd)
 	thisTaking := e.maybeAddThisParam(fd)
 	retType := TypeVoid
 	if fd.ReturnType != nil {

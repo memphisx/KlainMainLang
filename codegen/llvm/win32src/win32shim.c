@@ -13,7 +13,6 @@
 #include <shellapi.h> // CommandLineToArgvW, for UTF-8 process.argv
 #include <bcrypt.h>
 #include <errno.h>
-#include <fenv.h>
 #include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
@@ -302,16 +301,6 @@ int64_t sysconf(int name) {
 	}
 	default: return -1;
 	}
-}
-
-// ---- math ------------------------------------------------------------------
-// llvm.roundeven.f64 lowers to a libm `roundeven` call; UCRT lacks it.
-double roundeven(double x) {
-	int save = fegetround();
-	fesetround(FE_TONEAREST);
-	double r = nearbyint(x);
-	fesetround(save);
-	return r;
 }
 
 // ---- CSPRNG --------------------------------------------------------------
