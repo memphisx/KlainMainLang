@@ -935,13 +935,15 @@ console.log(process.getActiveResourcesInfo().filter((type) => type === "Timeout"
 }
 
 // process.resourceUsage: getrusage under Node's names and units.
+// maxRSS is in kilobytes on every host. The lower bound is a floor, not a
+// size: a native program on 4 KB pages (Intel macOS) peaks under 1 MB.
 func TestE2EProcessResourceUsageJS(t *testing.T) {
 	assertSameAsNodeCLIJS(t, `
 const r = process.resourceUsage();
 const fields = ['userCPUTime','systemCPUTime','maxRSS','sharedMemorySize','unsharedDataSize','unsharedStackSize','minorPageFault','majorPageFault','swappedOut','fsRead','fsWrite','ipcSent','ipcReceived','signalsCount','voluntaryContextSwitches','involuntaryContextSwitches'];
 console.log(JSON.stringify(Object.keys(r).sort()) === JSON.stringify(fields.slice().sort()));
 fields.forEach((n) => { if (typeof r[n] !== 'number' || r[n] < 0) console.log('bad', n); });
-console.log(r.maxRSS > 1000 && r.maxRSS < 10000000, r.userCPUTime >= 0);
+console.log(r.maxRSS > 100 && r.maxRSS < 10000000, r.userCPUTime >= 0);
 `)
 }
 

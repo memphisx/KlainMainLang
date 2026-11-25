@@ -86,13 +86,23 @@ func readObjSyms(path string) (objSyms, error) {
 		return s, fmt.Errorf("%s: not a Mach-O, ELF or COFF object", path)
 	}
 	defer f.Close()
+	// A definition in a COMDAT section is one the linker keeps a single copy
+	// of (MinGW's .refptr.<name> stubs, inline functions): many objects
+	// define it, so it is a weak definition here, not a clash.
+	comdat := func(sect int16) bool {
+		const lnkComdat = 0x1000 // IMAGE_SCN_LNK_COMDAT
+		return sect > 0 && int(sect) <= len(f.Sections) && f.Sections[sect-1].Characteristics&lnkComdat != 0
+	}
 	for _, sym := range f.Symbols {
 		const classExternal, classWeakExternal = 2, 105
 		switch sym.StorageClass {
 		case classExternal:
-			if sym.SectionNumber == 0 && sym.Value == 0 {
+			switch {
+			case sym.SectionNumber == 0 && sym.Value == 0:
 				s.undef[sym.Name] = true
-			} else if sym.SectionNumber != 0 || sym.Value != 0 {
+			case comdat(sym.SectionNumber):
+				s.weak[sym.Name] = true
+			default:
 				s.strong[sym.Name] = true
 			}
 		case classWeakExternal:
@@ -101,6 +111,10 @@ func readObjSyms(path string) (objSyms, error) {
 	}
 	return s, nil
 }
+
+// symTableVersion is part of every symbol table's key: a change in how an
+// object's symbols are read invalidates the tables already on disk.
+const symTableVersion = "2"
 
 var (
 	symScanMu    sync.Mutex
@@ -132,7 +146,7 @@ func (c CSource) scanSyms(tc Toolchain) (objSyms, error) {
 // compiled (when its table is not on disk yet).
 func (c CSource) scanSymsWith(tc Toolchain, prepare func(*CSource) error) (objSyms, error) {
 	h := sha256.New()
-	for _, part := range [][]string{{c.Name, c.Content, runtime.GOOS, win32CompatHeader, clangIdentity()}, c.CFlags, tc.Args()} {
+	for _, part := range [][]string{{symTableVersion, c.Name, c.Content, runtime.GOOS, win32CompatHeader, clangIdentity()}, c.CFlags, tc.Args()} {
 		for _, s := range part {
 			fmt.Fprintf(h, "%d:%s", len(s), s)
 		}
