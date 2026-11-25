@@ -621,3 +621,51 @@ export function __kml_Array_toLocaleString(o: any[], locales?: any, options?: an
     }
     return s;
 }
+
+// An arguments object's own `callee` and `Symbol.iterator` (ECMA-262
+// §10.4.4.6–7) for reflection: callee the function itself (a sloppy
+// function's) or, in strict code, an accessor whose get and set throw;
+// Symbol.iterator Array.prototype.values. Both non-enumerable.
+function argsThrower(): never {
+    throw new TypeError("'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them");
+}
+
+function argsOwnExtra(k: any): boolean {
+    return k === 'callee' || k === Symbol.iterator;
+}
+
+export function __kml_args_hasOwn(a: any, k: any): boolean { // kml:lower arguments
+    return argsOwnExtra(k) || Object.prototype.hasOwnProperty.call(a, k);
+}
+
+export function __kml_args_desc(a: any, k: any, callee: any, strict: boolean): any { // kml:lower arguments
+    if (k === 'callee') {
+        if (strict) {
+            return { get: argsThrower, set: argsThrower, enumerable: false, configurable: false };
+        }
+        return { value: callee, writable: true, enumerable: false, configurable: true };
+    }
+    if (k === Symbol.iterator) {
+        return { value: Array.prototype.values, writable: true, enumerable: false, configurable: true };
+    }
+    return Object.getOwnPropertyDescriptor(a, k);
+}
+
+export function __kml_args_names(a: any): string[] { // kml:lower arguments
+    const out = Object.getOwnPropertyNames(a);
+    out.push('callee');
+    return out;
+}
+
+export function __kml_args_symbols(a: any): symbol[] { // kml:lower arguments
+    const out = Object.getOwnPropertySymbols(a);
+    out.push(Symbol.iterator);
+    return out;
+}
+
+export function __kml_args_ownKeys(a: any): any[] { // kml:lower arguments
+    const out: any[] = Reflect.ownKeys(a);
+    out.push('callee');
+    out.push(Symbol.iterator);
+    return out;
+}

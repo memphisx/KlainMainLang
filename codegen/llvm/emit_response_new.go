@@ -70,7 +70,6 @@ func (e *Emitter) emitResponseCore(bodyArg, initArg ast.Expression, shape respon
 	if isNullBodyArg(initArg) {
 		initArg = nil
 	}
-	e.ensureStrHeaderRuntime()
 
 	// init: { status, statusText, headers }.
 	status := Value{Ref: "200.0", Ty: TypeF64}
@@ -268,7 +267,6 @@ func (e *Emitter) emitResponseStatusRange(status Value) {
 	badL, okL := e.freshLabel("resp.badstatus"), e.freshLabel("resp.status")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bad, badL, okL))
 	e.emitLabel(badL)
-	e.ensureExceptionHelpers()
 	rangeErr := e.buildErrorObj(errorKindIDs["RangeError"], e.internString(`init["status"] must be in the range of 200 to 599, inclusive.`), e.internString("RangeError"))
 	e.excThrow(rangeErr)
 	e.emitTerminator("unreachable")
@@ -286,7 +284,11 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 	bodyFlags := responseNullBody
 	if !nullBody {
 		bodyFlags = 0
-		bt := e.typeOfExpr(bodyArg)
+		var bt Type
+		var err error
+		if bodyArg, bt, err = e.streamArgExpr(bodyArg); err != nil {
+			return Value{}, err
+		}
 		switch {
 		case bt.IsReadableStream():
 			// A stream body: `.body` is that stream; text()/json()/
@@ -323,11 +325,12 @@ func (e *Emitter) emitResponseBodyAndFinish(bodyArg ast.Expression, status, stat
 				bodyArg = ast.NewCallExpression(ast.NewMemberExpression(bodyArg, "kmlBlob", pos), nil, pos)
 				isBlob = true
 			}
-			if isStringTy(bt) && !bt.IsTypedArray() && !bt.IsArrayBuffer() && !bt.IsClass() {
+			if shape.contentType != "" {
+				// Response.json's serialized text, whatever its static type
+				// (a js-lane stringify of a box is `string | undefined`).
+				contentType = shape.contentType
+			} else if isStringTy(bt) && !bt.IsTypedArray() && !bt.IsArrayBuffer() && !bt.IsClass() {
 				contentType = "text/plain;charset=UTF-8"
-				if shape.contentType != "" {
-					contentType = shape.contentType
-				}
 			}
 			// A Blob is read as it is (its type is the content type); any
 			// other body through one.
@@ -490,14 +493,12 @@ func (e *Emitter) emitResponseStaticRedirect(args []ast.Expression, pos ast.Pos)
 	badL, goodL := e.freshLabel("resp.redirect.bad"), e.freshLabel("resp.redirect.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, goodL, badL))
 	e.emitLabel(badL)
-	e.ensureStrHeaderRuntime()
 	msg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 48)", msg))
 	si := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", si, status.Ref))
 	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", msg, e.internString("Invalid status code %lld"), si))
 	e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize("+irPtr+" %s)", msg))
-	e.ensureExceptionHelpers()
 	rangeErr := e.buildErrorObj(errorKindIDs["RangeError"], msg, e.internString("RangeError"))
 	e.excThrow(rangeErr)
 	e.emitTerminator("unreachable")
@@ -524,16 +525,29 @@ func (e *Emitter) ensureResponseStreamCollect() error {
 		return nil
 	}
 	e.respCollectDefined = true
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
+	return e.defineStreamCollect(ResponseType(), "resp")
+}
+
+// ensureRequestStreamCollect is ensureResponseStreamCollect for a
+// Request's stream body: @__kml_req_collect.
+func (e *Emitter) ensureRequestStreamCollect() error {
+	if e.reqCollectDefined {
+		return nil
+	}
+	e.reqCollectDefined = true
+	return e.defineStreamCollect(FetchRequestType(), "req")
+}
+
+func (e *Emitter) defineStreamCollect(respTy Type, which string) error {
+	// Its read awaits: the program waits, whatever programMayWait found (a
+	// dynamic Request init's body, a Response reached through any).
+	e.hasMaySuspend = true
 	e.ensureUnhandledRejections()
-	e.ensureNanBox()
-	respTy := ResponseType()
 	field := func(name string) int {
 		idx, _, _ := respTy.FieldIndex(name)
 		return idx
 	}
-	e.buildRespCollectDone(respTy, field("body"), field("bodyLength"), field("__kml_bodyflags"))
+	e.buildRespCollectDone(respTy, which, field("body"), field("bodyLength"), field("__kml_bodyflags"))
 
 	restore := e.beginDetachedFunc()
 	defer restore()
@@ -576,11 +590,11 @@ func (e *Emitter) ensureResponseStreamCollect() error {
 		e.emitInstr(fmt.Sprintf("%s = getelementptr { "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+" }, "+irPtr+" %s, i32 0, i32 %d", g, env, i))
 		e.heapStore(irPtr, ref, g, 8)
 	}
-	clo := e.buildBuiltinClosure("@__kml_resp_collect_done", env)
+	clo := e.buildBuiltinClosure("@__kml_"+which+"_collect_done", env)
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_attach("+irPtr+" %s, "+irPtr+" %s)", pv.Ref, clo))
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
-	e.writeFunc("internal void @__kml_resp_collect("+irPtr+" %resp, "+irPtr+" %clo, "+irPtr+" %q)", body)
+	e.writeFunc("internal void @__kml_"+which+"_collect("+irPtr+" %resp, "+irPtr+" %clo, "+irPtr+" %q)", body)
 	return nil
 }
 
@@ -589,7 +603,7 @@ func (e *Emitter) ensureResponseStreamCollect() error {
 // Uint8Array header; its bytes (NUL-terminated) become resp's buffered body,
 // the stream flags are cleared and the runner runs. Rejected, q rejects
 // with p's reason.
-func (e *Emitter) buildRespCollectDone(respTy Type, bodyIdx, lenIdx, flagsIdx int) {
+func (e *Emitter) buildRespCollectDone(respTy Type, which string, bodyIdx, lenIdx, flagsIdx int) {
 	restore := e.beginDetachedFunc()
 	envTy := "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + " }"
 	words := make([]string, 4)
@@ -635,7 +649,7 @@ func (e *Emitter) buildRespCollectDone(respTy Type, bodyIdx, lenIdx, flagsIdx in
 	e.emitTerminator("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc("void @__kml_resp_collect_done("+irPtr+" %env)", body)
+	e.writeFunc("void @__kml_"+which+"_collect_done("+irPtr+" %env)", body)
 }
 
 // emitResponseCollectFinalize defines @__kml_resp_collect as a no-op when a
@@ -643,6 +657,9 @@ func (e *Emitter) buildRespCollectDone(respTy Type, bodyIdx, lenIdx, flagsIdx in
 func (e *Emitter) emitResponseCollectFinalize() {
 	if e.respCollectCalled && !e.respCollectDefined {
 		e.writeFunc("internal void @__kml_resp_collect("+irPtr+" %resp, "+irPtr+" %clo, "+irPtr+" %q)", "  ret void\n")
+	}
+	if e.reqCollectCalled && !e.reqCollectDefined {
+		e.writeFunc("internal void @__kml_req_collect("+irPtr+" %resp, "+irPtr+" %clo, "+irPtr+" %q)", "  ret void\n")
 	}
 }
 

@@ -6,6 +6,7 @@
 interface ErrorConstructor {
     /** @lower __kml_Error_captureStackTrace */
     captureStackTrace(targetObject: object, constructorOpt?: Function): void;
+    /** @intrinsic Error.stackTraceLimit */
     stackTraceLimit: number;
 }
 
@@ -50,6 +51,7 @@ declare var console: Console;
 // 5.7 and later). Buffer.from's arguments are plain ArrayLike, ArrayBuffer
 // and string types: @types/node's WithImplicitCoercion and
 // ImplicitArrayBuffer are conditional types the checker does not model.
+/** @jsCall Buffer */
 interface BufferConstructor {
     new (str: string, encoding?: BufferEncoding): Buffer<ArrayBuffer>;
     new (size: number): Buffer<ArrayBuffer>;
@@ -374,6 +376,24 @@ type BufferEncoding = "ascii" | "utf8" | "utf-8" | "utf16le" | "utf-16le" | "ucs
 // Node's `process` (@types/node's NodeJS.Process: the members this compiler
 // implements with a plain type; the streams are not declared yet).
 declare namespace NodeJS {
+    interface ResourceUsage {
+        fsRead: number;
+        fsWrite: number;
+        involuntaryContextSwitches: number;
+        ipcReceived: number;
+        ipcSent: number;
+        majorPageFault: number;
+        maxRSS: number;
+        minorPageFault: number;
+        sharedMemorySize: number;
+        signalsCount: number;
+        swappedOut: number;
+        systemCPUTime: number;
+        unsharedDataSize: number;
+        unsharedStackSize: number;
+        userCPUTime: number;
+        voluntaryContextSwitches: number;
+    }
     type Signals =
         | "SIGABRT" | "SIGALRM" | "SIGBUS" | "SIGCHLD" | "SIGCONT" | "SIGFPE" | "SIGHUP" | "SIGILL" | "SIGINT" | "SIGIO"
         | "SIGIOT" | "SIGKILL" | "SIGPIPE" | "SIGPOLL" | "SIGPROF" | "SIGPWR" | "SIGQUIT" | "SIGSEGV" | "SIGSTKFLT"
@@ -536,14 +556,35 @@ declare namespace NodeJS {
         stderr: WriteStream & { fd: 2 };
         /** @lower internal_process_methods:umask */
         umask(mask?: string | number): number;
-        /** @lower internal_process_methods:getuid */
-        getuid(): number;
-        /** @lower internal_process_methods:geteuid */
-        geteuid(): number;
-        /** @lower internal_process_methods:getgid */
-        getgid(): number;
-        /** @lower internal_process_methods:getegid */
-        getegid(): number;
+        // POSIX only: Windows has none of them (optional, as @types/node
+        // declares them).
+        /**
+         * @lower internal_process_methods:getuid
+         * @platform posix
+         */
+        getuid?(): number;
+        /**
+         * @lower internal_process_methods:geteuid
+         * @platform posix
+         */
+        geteuid?(): number;
+        /**
+         * @lower internal_process_methods:getgid
+         * @platform posix
+         */
+        getgid?(): number;
+        /**
+         * @lower internal_process_methods:getegid
+         * @platform posix
+         */
+        getegid?(): number;
+        /**
+         * @lower internal_process_methods:getgroups
+         * @platform posix
+         */
+        getgroups?(): number[];
+        /** @lower internal_process_methods:resourceUsage */
+        resourceUsage(): ResourceUsage;
         /** @lower internal_process_methods:platform */
         readonly platform: Platform;
         /** @lower internal_process_methods:arch */
@@ -803,6 +844,7 @@ interface Request extends Body {
     /** @intrinsic Request.prototype.signal */
     readonly signal: AbortSignal;
     readonly url: string;
+    /** @intrinsic Request.prototype.clone */
     clone(): Request;
 }
 declare var Request: {
@@ -828,10 +870,12 @@ interface Response extends Body {
     readonly type: ResponseType;
     /** @intrinsic Response.prototype.url */
     readonly url: string;
+    /** @intrinsic Response.prototype.clone */
     clone(): Response;
 }
 declare var Response: {
     prototype: Response;
+    /** @intrinsic Response */
     new (body?: BodyInit | null, init?: ResponseInit): Response;
     /** @intrinsic Response.error */
     error(): Response;
@@ -1132,6 +1176,7 @@ interface XMLHttpRequestEventTarget {
 interface XMLHttpRequest extends XMLHttpRequestEventTarget {
     readonly readyState: number;
     readonly status: number;
+    readonly statusText: string;
     readonly responseText: string;
     readonly response: string;
     onreadystatechange: () => void;

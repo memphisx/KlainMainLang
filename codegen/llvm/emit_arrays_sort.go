@@ -58,7 +58,6 @@ func (e *Emitter) emitArrayJoinCore(ptrReg, lenReg string, elemTy Type, sepVal V
 	e.joinHoles = ""
 	// Each element's string goes into a scratch array, joined in one
 	// allocation at the end (__kml_str_join).
-	e.ensureStrHeaderRuntime()
 	sepVal = e.emitStringNullToLiteral(sepVal)
 	partsBytes, parts := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = shl i64 %s, 3", partsBytes, lenReg))
@@ -242,7 +241,6 @@ func sortResultKind(t Type) int {
 // A TypedArray's (typed) default order is numeric, -0 before +0 and NaN
 // last (TypedArray.prototype.sort), over its elements' own width.
 func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.Expression, typed bool, pos ast.Pos) error {
-	e.ensureStrHeaderRuntime()
 
 	// An undefined comparator sorts in the default order; null throws, as
 	// any non-function does. A comparator that may be either is decided at
@@ -334,12 +332,11 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		case elemTy.IsDynamic():
 			// Boxed-element array (`any[]`): lexicographic over each element's
 			// JS String() form, like JS's type-agnostic default sort.
-			e.ensureSortCmpAnyLex()
-			cmpFnRef = "@__kml_cmp_any_lex"
+			e.ensureAnyStr()
+			cmpFnRef = "@__kml_cmp_any_lex" // anystr.c
 		case elemTy.Float:
 			cmpFnRef = "@__kml_cmp_f64_lex"
 		case isStringTy(elemTy):
-			e.ensureStrHeaderRuntime()
 			cmpFnRef = "@__kml_cmp_str"
 		default:
 			cmpFnRef = "@__kml_cmp_i64_lex"
@@ -350,7 +347,12 @@ func (e *Emitter) emitQsortCall(ptrReg, lenReg string, elemTy Type, args []ast.E
 		if err2 != nil {
 			return err2
 		}
-		if cb.kind != cbClosure {
+		// A comparator over typed parameters (`(x: number, y: number)`)
+		// sorting boxes: called through the same closure, whose call
+		// converts each box to the type of its parameter.
+		ps0 := cb.paramTypes()
+		unboxing := cb.kind == cbClosure && elemTy.IsDynamic() && len(ps0) > 0 && !ps0[0].IsDynamic()
+		if cb.kind != cbClosure || unboxing {
 			// Another function value (a declaration, a bound function): the
 			// comparator, evaluated once, called by a closure over it.
 			fv, err := e.emitExpr(args[0])

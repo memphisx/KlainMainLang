@@ -77,12 +77,7 @@ func (e *Emitter) emitImportCall(ex *ast.ImportCallExpression) (Value, error) {
 		// top-level await, after which the island's module task is driven by
 		// this program's event loop through the island's poll export and the
 		// import() promise settles when the island's module promise does.
-		e.ensureEventLoop()
-		e.ensureExceptionHelpers()
-		e.ensureMicrotasks()
 		e.ensureUnhandledRejections()
-		e.ensureNanBox()
-		e.ensureTimerRuntime()
 		hash := IslandHash(ex.ResolvedPath)
 		handle := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynimport_load("+irPtr+" %s)", handle, e.internString(hash)))

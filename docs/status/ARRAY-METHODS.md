@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 37/37 (100%) · **Strict Coverage**: 34/37 (~92%).
+**Coverage**: 38/38 (100%) · **Strict Coverage**: 35/38 (~92%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -46,4 +46,5 @@ Format: [Status page format](README.md#status-page-format).
 | `.copyWithin(target, start?, end?)` | ✅ | | • In-place, overlap-safe via `memmove` — a self-overlapping copy such as `arr.copyWithin(0, 3)` on a 5-element array, the same overlap concern `.shift()`/`.unshift()`/`.splice()`'s tail shifts already handle ([ADR-00057](../adr/00/ADR-00057.md)) |
 | `Array.isArray(x)` | ✅ | | |
 | `Array.from(iterable, mapFn?, thisArg?)` | ✅ | | • Iterates arrays, Sets, Maps (entries), strings, and classes implementing `next(): T \| null`; the array-like `{ length: n }` overload builds an `any[]` of `undefined`; `thisArg` is a `this: T` mapFn's receiver. See [ADR-00957](../adr/00/ADR-00957.md), [ADR-00482](../adr/00/ADR-00482.md), [ADR-00491](../adr/00/ADR-00491.md), [ADR-01659](../adr/01/ADR-01659.md) |
+| `Array.fromAsync(items, mapFn?, thisArg?)` | ✅ | | • A promise of the array an async iterable, an iterable or an array-like gives, each value (and each `mapFn` result) awaited, as Node's; written in TypeScript ([ADR-01987](../adr/01/ADR-01987.md)) |
 | `Array.of(...items)` | ✅ | | • The array literal of its arguments, usable anywhere `[...]` is ([TDD-00028](../tdd/TDD-00028.md)/[ADR-00104](../adr/00/ADR-00104.md)); mixed argument kinds build what a mixed literal does, and no arguments an empty array ([ADR-01556](../adr/01/ADR-01556.md)) |

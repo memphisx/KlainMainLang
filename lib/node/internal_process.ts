@@ -173,12 +173,14 @@ export function _kmlProcess(): any {
         has: (target: any, key: any): boolean => typeof key === 'string' && penv.envGet(key as string) !== undefined,
     });
     p.pid = methods.pid();
+    p.resourceUsage = methods.resourceUsage;
     p.ppid = methods.ppid();
     if (process.platform !== 'win32') {
         p.getuid = methods.getuid;
         p.geteuid = methods.geteuid;
         p.getgid = methods.getgid;
         p.getegid = methods.getegid;
+        p.getgroups = methods.getgroups;
     }
     p.on('newListener', startListeningIfSignal);
     p.on('removeListener', stopListeningIfSignal);

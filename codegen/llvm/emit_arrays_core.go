@@ -292,6 +292,15 @@ func (e *Emitter) storeArrayHolesNull(hdr string) {
 // arrayParts loads an array value's current data pointer and length from its
 // header. A null header (an absent array) reads as the empty array.
 func (e *Emitter) arrayParts(v Value) (data, n string) {
+	if v.Ty.ElemType != nil && !v.Ty.IsTuple() {
+		e.emitDensify(v.Ref, *v.Ty.ElemType) // a read of the buffer (holes.c)
+	}
+	return e.arrayPartsRaw(v)
+}
+
+// arrayPartsRaw is arrayParts for a sparse-aware reader: a sparse array's
+// buffer is left as it is (holes.c).
+func (e *Emitter) arrayPartsRaw(v Value) (data, n string) {
 	h := e.absentSafeArrayHeader(v.Ref)
 	data, n = e.freshReg(), e.freshReg()
 	lp := e.freshReg()
@@ -303,7 +312,7 @@ func (e *Emitter) arrayParts(v Value) (data, n string) {
 
 // arrayLen loads an array value's current length.
 func (e *Emitter) arrayLen(v Value) string {
-	_, n := e.arrayParts(v)
+	_, n := e.arrayPartsRaw(v)
 	return n
 }
 
@@ -319,10 +328,7 @@ func (e *Emitter) absentSafeArrayHeader(header string) string {
 	if header == "null" || header == "zeroinitializer" {
 		header = "null"
 	}
-	if !e.usedAbsentArrayCell {
-		e.usedAbsentArrayCell = true
-		e.emitGlobal(fmt.Sprintf("@__kml_absent_array_cell = internal"+irGlobalAS+" constant {i64, "+irPtr+", i64, "+irPtr+"} {i64 %d, "+irPtr+" null, i64 0, "+irPtr+" null}, align 8", e.arrayHeaderWord()|kmlHdrImmortal))
-	}
+	e.declareFn("__kml_absent_array_cell", fmt.Sprintf("@__kml_absent_array_cell = internal"+irGlobalAS+" constant {i64, "+irPtr+", i64, "+irPtr+"} {i64 %d, "+irPtr+" null, i64 0, "+irPtr+" null}, align 8", e.arrayHeaderWord()|kmlHdrImmortal))
 	src := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" getelementptr (i8, "+irPtr+" @__kml_absent_array_cell, i64 8), "+irPtr+" %s", src, e.ptrIsNull(header), header))
 	return src
@@ -455,6 +461,16 @@ func (e *Emitter) allocArrayHeaderSized(size int, zero bool) string {
 // mutator goes through here, so it always observes the header the slot points
 // at *now* (post any reassignment), and writes through it propagate to aliases.
 func (e *Emitter) arrayDataLenSlots(sym Symbol) (dataSlot, lenSlot string) {
+	dataSlot, lenSlot = e.arrayDataLenSlotsRaw(sym)
+	if sym.Ty.ElemType != nil && !sym.Ty.IsTuple() {
+		e.emitDensify(dataSlot, *sym.Ty.ElemType) // a read of the buffer (holes.c)
+	}
+	return
+}
+
+// arrayDataLenSlotsRaw is arrayDataLenSlots for a sparse-aware access: a
+// sparse array's buffer is left as it is (holes.c).
+func (e *Emitter) arrayDataLenSlotsRaw(sym Symbol) (dataSlot, lenSlot string) {
 	h := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", h, sym.Ptr))
 	// undefined in a binding typed as an array (through `any`) is a null
@@ -600,7 +616,6 @@ func (e *Emitter) emitNotIterableValueGuard(expr ast.Expression, v Value) {
 	if !v.Ty.IsArray() || !v.Ty.Nullable() || e.blockDone {
 		return
 	}
-	e.ensureErrorNames()
 	throwL := e.freshLabel("notiter.throw")
 	okL := e.freshLabel("notiter.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayIsAbsent(v), throwL, okL))
@@ -626,7 +641,6 @@ func (e *Emitter) emitArrayBindingGuard(sym Symbol, msg string) {
 	}
 	h := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", h, sym.Ptr))
-	e.ensureErrorNames()
 	throwL := e.freshLabel("notiter.throw")
 	okL := e.freshLabel("notiter.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(h), throwL, okL))
@@ -836,6 +850,9 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 	type spreadSrc struct {
 		ptr, length string
 		elem        Type
+		// big is the source's BigInt64Array/BigUint64Array type: its
+		// stored words are not bigints until each is wrapped.
+		big *Type
 	}
 	spreadOf := map[*ast.SpreadElement]spreadSrc{}
 	for _, elem := range lit.Elements {
@@ -881,7 +898,11 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 		if rerr != nil {
 			return "", "", rerr
 		}
-		spreadOf[sp] = spreadSrc{ptr: srcPtr, length: srcLen, elem: srcElem}
+		src := spreadSrc{ptr: srcPtr, length: srcLen, elem: srcElem}
+		if t := e.typeOfExpr(arg); t.IsTypedArray() && t.BigIntElem {
+			src.big = &t
+		}
+		spreadOf[sp] = src
 	}
 
 	// Compute runtime total = staticCount + sum(spread.length).
@@ -916,6 +937,15 @@ func (e *Emitter) emitSpreadArrayLitData(lit *ast.ArrayLiteral, elemTy Type) (da
 			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", cVal, cursorPtr))
 			dstReg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", dstReg, elemTy.IR, dataReg, cVal))
+			if src.big != nil {
+				if err := e.emitBigTypedElemsLoop(srcPtr, srcLen, *src.big, elemTy, dstReg); err != nil {
+					return "", "", err
+				}
+				newC := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newC, cVal, srcLen))
+				e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", newC, cursorPtr))
+				continue
+			}
 			// Concrete elements spread into box elements (`[...nums]` as
 			// any[]) are boxed one by one; a copy would reinterpret them.
 			if elemTy.IsDynamic() && !elemTy.IsArray() && src.elem.IR != "" && !src.elem.IsDynamic() {
@@ -1029,6 +1059,12 @@ func (e *Emitter) emitArrayLiteralData(lit *ast.ArrayLiteral, elemTy Type) (data
 			if val, verr = e.convertChecked(val, elemTy, elem.GetPos(), "array element"); verr != nil {
 				return "", 0, verr
 			}
+		}
+		// An element the checker types never (`names = [names]` where
+		// `!Array.isArray(names)` narrowed an array away) holds no value
+		// when the store runs: the slot keeps its type's zero.
+		if !elemTy.IsDynamic() && (val.Ty.IR != elemTy.IR || val.Ty.IsArray() != elemTy.IsArray()) && e.isNeverTyped(elem) {
+			val = Value{Ref: zeroRef(elemTy), Ty: elemTy}
 		}
 		// A boolean among numbers (or a number among booleans) is as
 		// heterogeneous as a string among them — both are plain scalars, so
@@ -1149,16 +1185,57 @@ func (e *Emitter) emitArrayLiteralAggregate(lit *ast.ArrayLiteral, hintElemTy *T
 // sibling of emitArrayVarDecl's own *ast.NewArrayExpression branch, for the
 // same TDD-00028 reasons emitArrayLiteralAggregate exists.
 func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy Type) (Value, error) {
-	// A dynamic-size array is calloc'd: every slot is a hole (null for a
-	// reference element), which a read answers as undefined.
+	pos := na.Size.GetPos()
 	sizeVal, err := e.emitExpr(na.Size)
 	if err != nil {
 		return Value{}, err
 	}
-	sizeVal, err = e.convertChecked(sizeVal, TypeI64, na.Size.GetPos(), "new Array size")
+	if isNullableScalar(sizeVal.Ty) {
+		// A number that may be undefined (a hoisted `var` read before its
+		// assignment): `new Array(undefined)` is [undefined], so an any[]
+		// takes it boxed, through the run-time branch below; a typed array
+		// takes its number.
+		if isUnconstrainedDynamic(elemTy) {
+			if sizeVal, err = e.emitBoxValue(sizeVal); err != nil {
+				return Value{}, err
+			}
+		} else {
+			payload := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = extractvalue %s %s, 1", payload, nullableScalarStorageIR(sizeVal.Ty), sizeVal.Ref))
+			t := sizeVal.Ty
+			t.setNullable(false)
+			t.setUndefined(false)
+			sizeVal = Value{Ref: payload, Ty: t}
+		}
+	}
+	if sizeVal.Ty.IsDynamic() && isUnconstrainedDynamic(elemTy) {
+		// `new Array(x)` of a value known only at run time: its length when
+		// a number, else the array of that one element (ECMA-262 §23.1.1.1).
+		x := e.bindValue(sizeVal, pos)
+		isNum := ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, x, pos), ast.NewStringLiteral("number", pos), pos)
+		sized := ast.NewNewArrayExpression(na.ElemType, ast.NewAsExpression(x, ast.NodeAnnotation(&ast.KeywordType{Keyword: "number"}, "ts"), pos), pos)
+		return e.emitExpr(ast.NewConditionalExpression(isNum, sized, ast.NewArrayLiteral([]ast.Expression{x}, pos), pos))
+	}
+	// A length that is not a valid array length (a uint32) is a RangeError.
+	if sizeVal.Ty.IR == "double" || sizeVal.Ty.IR == "float" || sizeVal.Ty.IR == "i64" && sizeVal.Ty.Signed {
+		e.emitArrayLengthCheck(sizeVal)
+	}
+	// A dynamic-size array is calloc'd: every slot is a hole (null for a
+	// reference element), which a read answers as undefined.
+	sizeVal, err = e.convertChecked(sizeVal, TypeI64, pos, "new Array size")
 	if err != nil {
 		return Value{}, err
 	}
+	// Past 2^27 elements (V8's largest fast-elements store) V8 makes the
+	// array sparse: the buffer here starts empty and the length is set
+	// sparse after (holes.c), so no slot is touched. An element kind that
+	// cannot go sparse ends out of memory there instead (core.c).
+	bigLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %d", bigLen, sizeVal.Ref, int64(1)<<27))
+	fullLen := sizeVal.Ref
+	allocLen := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", allocLen, bigLen, fullLen))
+	sizeVal = Value{Ref: allocLen, Ty: sizeVal.Ty}
 	dataReg := e.freshReg()
 	e.heapCallocInto(dataReg, elemAllocKind(elemTy), sizeVal.Ref, fmt.Sprint(elemTy.Align()))
 	if isUnconstrainedDynamic(elemTy) {
@@ -1188,6 +1265,18 @@ func (e *Emitter) emitNewArraySizedAggregate(na *ast.NewArrayExpression, elemTy 
 		e.emitFillHoles(dataReg, "0", sizeVal.Ref, elemTy)
 	}
 	e.emitHolesMark(r1, "0", sizeVal.Ref)
+	sparseL, denseL := e.freshLabel("newarr.sparse"), e.freshLabel("newarr.sized")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", bigLen, sparseL, denseL))
+	e.emitLabel(sparseL)
+	if e.holesUsed() && sparseElem(elemTy) {
+		e.emitInstr(fmt.Sprintf("call i32 @__kml_holes_sparse_len("+irPtr+" %s, i64 %s)", r1, fullLen))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", denseL))
+	} else {
+		e.declareFn("__kml_array_oom", "declare void @__kml_array_oom() noreturn")
+		e.emitInstr("call void @__kml_array_oom()")
+		e.emitTerminator("unreachable")
+	}
+	e.emitLabel(denseL)
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
 
@@ -1923,10 +2012,8 @@ func (e *Emitter) emitAnyArrayElems(val Value, src ast.Expression) (ptrReg, lenR
 		// A destructuring pattern's own count: only that many values,
 		// the iterator closed when it is left unfinished.
 		e.iterTakeNow = 0
-		e.ensureAnyIterTake()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_take(i64 %s, i64 %d)", collected, iterable.Ref, take-1))
 	} else {
-		e.ensureAnyIterCollect()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect(i64 %s)", collected, iterable.Ref))
 	}
 	cview := e.freshReg()
@@ -2017,7 +2104,7 @@ func (e *Emitter) resolveArrayHOF(objExpr ast.Expression, pos ast.Pos) (hdr, ptr
 		}
 		hdr = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, sym.Ptr))
-		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		dataSlot, lenSlot := e.arrayDataLenSlots(sym) // a sparse array goes dense (holes.c)
 		ptrReg = e.freshReg()
 		lenReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ptrReg, dataSlot))
@@ -2075,7 +2162,7 @@ func (e *Emitter) resolveArrayHOF(objExpr ast.Expression, pos ast.Pos) (hdr, ptr
 		elemTy = *val.Ty.ElemType
 	}
 	hdr = val.Ref
-	ptrReg = e.arrayData(val)
+	ptrReg = e.arrayData(val) // a sparse array goes dense (holes.c)
 	lenReg = e.arrayLen(val)
 	if iterating {
 		ptrReg, lenReg, err = e.emitPatchedArrayElems(hdr, ptrReg, lenReg, val.Ty, elemTy, objExpr, take)
@@ -2107,8 +2194,6 @@ func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
 	// would fail for two equal-but-distinct string boxes). Used by indexOf /
 	// lastIndexOf / includes.
 	if elemTy.IsDynamic() {
-		e.ensureBoxedBigIntHooks()
-		e.ensureFnMeta()
 		eq := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", eq, aReg, bReg))
 		return eq
@@ -2116,7 +2201,7 @@ func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
 	if elemTy.IR == irPtr && !elemTy.IsArray() && !elemTy.IsObject() && !elemTy.IsFunc() && !hasHandleFlag(elemTy) {
 		// A string slot can hold null (`[null]` typed string[]): the same
 		// pointer is equal, a null against anything else is not, and only
-		// two non-null strings reach strcmp.
+		// two non-null strings are compared.
 		slot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
 		same, an, bn, either := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
@@ -2130,9 +2215,7 @@ func (e *Emitter) emitElemEq(elemTy Type, aReg, bReg string) string {
 		cmpL, doneL := e.freshLabel("streq.cmp"), e.freshLabel("streq.done")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", skip, doneL, cmpL))
 		e.emitLabel(cmpL)
-		cmp, z := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp("+irPtr+" %s, "+irPtr+" %s)", cmp, aReg, bReg))
-		e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 0", z, cmp))
+		z := e.emitStrEq(aReg, bReg) // by the header lengths: an embedded NUL counts
 		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", z, slot))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(doneL)
@@ -2182,6 +2265,11 @@ func (e *Emitter) arrayIndexToI64(idxVal Value, pos ast.Pos) (Value, error) {
 	// than letting the bare coerce fall through and leave a `ptr` where an i64
 	// is required (the A1 invalid-IR cluster; matches tsc, which rejects a
 	// non-number index type). ADR-00882/00883 did the same for DataView/String.
+	if idxVal.Ty.IR == irPtr && (idxVal.Ty.IsObject() || idxVal.Ty.IsClass() || idxVal.Ty.IsArray() || idxVal.Ty.IsFunc()) && !idxVal.Ty.IsSymbol() {
+		// An object or function index: ToPrimitive(number) then
+		// ToIntegerOrInfinity, as JS does (a function is NaN: 0).
+		return e.searchIndexArg(idxVal, pos, "array index")
+	}
 	return e.convertChecked(idxVal, TypeI64, pos, "array index")
 }
 
@@ -2282,6 +2370,47 @@ func (e *Emitter) emitSpreadConvertLoop(src, n string, srcElem, dstElem Type, ds
 	sg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", sg, srcElem.IR, src, i))
 	v := e.convert(e.loadArrayElem(sg, srcElem), dstElem)
+	dg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", dg, dstElem.IR, dst, i))
+	e.storeArrayElem(dg, dstElem, v)
+	next := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", next, i))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", next, idx))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(endL)
+	return nil
+}
+
+// emitBigTypedElemsLoop writes the n elements of a BigInt64Array or
+// BigUint64Array's storage src (taTy) into dst as dstElem values: each
+// stored word becomes the bigint it holds (wrapTypedArrayLoad), then
+// dstElem's representation of it.
+func (e *Emitter) emitBigTypedElemsLoop(src, n string, taTy, dstElem Type, dst string) error {
+	idx := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", idx))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", idx))
+	condL, bodyL, endL := e.freshLabel("bigta.cond"), e.freshLabel("bigta.body"), e.freshLabel("bigta.end")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
+	e.emitLabel(condL)
+	i := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", i, idx))
+	more := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", more, i, n))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", more, bodyL, endL))
+	e.emitLabel(bodyL)
+	sg, raw := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", sg, src, i))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", raw, sg))
+	v := e.wrapTypedArrayLoad(Value{Ref: raw, Ty: *taTy.ElemType}, taTy)
+	if dstElem.IsDynamic() {
+		b, err := e.emitBoxValue(v)
+		if err != nil {
+			return err
+		}
+		v = b
+	} else {
+		v = e.convert(v, dstElem)
+	}
 	dg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", dg, dstElem.IR, dst, i))
 	e.storeArrayElem(dg, dstElem, v)
@@ -2488,4 +2617,32 @@ func allArrayMembers(t Type) bool {
 		}
 	}
 	return true
+}
+
+// emitArrayLengthCheck throws RangeError "Invalid array length" unless n
+// is an integer in [0, 2^32 - 1].
+func (e *Emitter) emitArrayLengthCheck(n Value) {
+	ok := e.freshReg()
+	if n.Ty.IR == "i64" {
+		e.emitInstr(fmt.Sprintf("%s = icmp ult i64 %s, 4294967296", ok, n.Ref))
+	} else {
+		d := n.Ref
+		if n.Ty.IR == "float" {
+			d = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = fpext float %s to double", d, n.Ref))
+		}
+		ge, le, tr, same, inRange := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, 0.0", ge, d))
+		e.emitInstr(fmt.Sprintf("%s = fcmp ole double %s, 4294967295.0", le, d))
+		e.declareFn("llvm.trunc.f64", "declare double @llvm.trunc.f64(double)")
+		e.emitInstr(fmt.Sprintf("%s = call double @llvm.trunc.f64(double %s)", tr, d))
+		e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", same, tr, d))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", inRange, ge, le))
+		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", ok, inRange, same))
+	}
+	badL, okL := e.freshLabel("newarr.badlen"), e.freshLabel("newarr.len")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, badL))
+	e.emitLabel(badL)
+	e.emitInternalThrowKind("RangeError", e.internString("Invalid array length"))
+	e.emitLabel(okL)
 }

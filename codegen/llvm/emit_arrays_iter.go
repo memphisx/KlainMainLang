@@ -293,6 +293,32 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		mapCall := ast.NewCallExpression(
 			ast.NewMemberExpression(fromCall, "map", pos),
 			args[1:2], pos)
+		if srcTy := e.typeOfExpr(args[0]); !srcTy.IsArray() && !srcTy.IsCollIter() &&
+			(isUnconstrainedDynamic(srcTy) || e.hasIteratorMember(srcTy) || (srcTy.IsGenerator() && !srcTy.GeneratorIsAsync)) {
+			// Walked at run time: mapFn runs at each step of the
+			// iteration, so one that throws stops an endless iterator.
+			resTy := e.typeOfExpr(mapCall)
+			v, err := e.emitExpr(args[0])
+			if err != nil {
+				return Value{}, err
+			}
+			fv, err := e.emitExpr(args[1])
+			if err != nil {
+				return Value{}, err
+			}
+			fb, err := e.emitBoxValue(fv)
+			if err != nil {
+				return Value{}, err
+			}
+			arr, err := e.emitAnyArrayFromMapped(v, fb.Ref)
+			if err != nil {
+				return Value{}, err
+			}
+			if resTy.IsArray() && resTy.ElemType != nil && !resTy.ElemType.IsDynamic() {
+				return e.emitUnboxAnyArray(arr, *resTy.ElemType)
+			}
+			return arr, nil
+		}
 		return e.emitExpr(mapCall)
 	}
 	if len(args) != 1 {
@@ -323,6 +349,18 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(args[0], pos)
 		if err != nil {
 			return Value{}, err
+		}
+		if srcTy.IsTypedArray() && srcTy.BigIntElem {
+			// A BigInt64Array/BigUint64Array: its elements are bigints.
+			big := BigIntType()
+			bytesReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, lenReg, big.Align()))
+			newPtr := e.freshReg()
+			e.heapMallocInto(newPtr, elemAllocKind(big), bytesReg)
+			if err := e.emitBigTypedElemsLoop(ptrReg, lenReg, srcTy, big, newPtr); err != nil {
+				return Value{}, err
+			}
+			return Value{Ref: e.newArrayHeader(newPtr, lenReg), Ty: ArrayOf(big)}, nil
 		}
 		bytesReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytesReg, lenReg, elemTy.Align()))
@@ -428,6 +466,8 @@ func (e *Emitter) emitArrayFrom(args []ast.Expression, pos ast.Pos) (Value, erro
 		isNeg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, lenI64))
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 0, i64 %s", lenPos, isNeg, lenI64))
+		// ArrayCreate(len): a length over 2^32 - 1 is a RangeError.
+		e.emitArrayLengthCheck(Value{Ref: lenPos, Ty: TypeI64})
 
 		bytes := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", bytes, lenPos, TypeAny.Align()))
@@ -582,7 +622,7 @@ func (e *Emitter) emitArrayFromMaybeMapped(src, fn, mapper ast.Expression, pos a
 	}
 	isUndef := ast.NewBinaryExpression("===", fn, ast.NewNullLiteral(true, pos), pos)
 	plain := arrayFromCall(pos, []ast.Expression{src})
-	mapped := ast.NewCallExpression(ast.NewMemberExpression(arrayFromCall(pos, []ast.Expression{src}), "map", pos), []ast.Expression{mapper}, pos)
+	mapped := arrayFromCall(pos, []ast.Expression{src, mapper})
 	return e.emitExpr(ast.NewConditionalExpression(isUndef, plain, mapped, pos))
 }
 

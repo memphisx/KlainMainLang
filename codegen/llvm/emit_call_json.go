@@ -91,7 +91,6 @@ func (e *Emitter) jsonAppend(acc Value, s string) (Value, error) {
 // "{", …) so every stringify accumulator is uniformly owned — each append
 // (jsonConcatFree) can then free the previous accumulator unconditionally.
 func (e *Emitter) jsonSeed(s string) string {
-	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", r, e.internString(s)))
 	return r
@@ -100,7 +99,6 @@ func (e *Emitter) jsonSeed(s string) string {
 // jsonConcatFree concatenates via __kml_json_concat2, freeing the operands
 // the caller owns. Fragment ownership is compile-time-known per call site.
 func (e *Emitter) jsonConcatFree(a, b Value, freeA, freeB bool) (Value, error) {
-	e.ensureStrHeaderRuntime()
 	fa, fb := "false", "false"
 	if freeA {
 		fa = "true"
@@ -1307,7 +1305,6 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureStrHeaderRuntime()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_str_str("+irPtr+" %s)", r, iso.Ref))
 		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", r, slot))
@@ -1325,12 +1322,10 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, val.Ref, trueStr, falseStr))
 		// Uniform fragment ownership: hand back a heap copy so the
 		// accumulator concat can free every fragment unconditionally.
-		e.ensureStrHeaderRuntime()
 		r2 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", r2, r))
 		return Value{Ref: r2, Ty: TypePtr}, nil
 	case irPtr:
-		e.ensureStrHeaderRuntime()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_str_str("+irPtr+" %s)", r, val.Ref))
 		return Value{Ref: r, Ty: TypePtr}, nil
@@ -1366,7 +1361,6 @@ func (e *Emitter) emitJSONStringifyValueOwn(val Value, ind jsonIndent) (Value, e
 			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
 			return Value{Ref: out, Ty: TypePtr}, nil
 		}
-		e.ensureStrHeaderRuntime()
 		coerced := e.convert(val, TypeI64)
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_str_num(i64 %s)", r, coerced.Ref))
@@ -1448,8 +1442,6 @@ func (e *Emitter) emitJSONParseValue(val Value, targetTy Type, pos ast.Pos) (Val
 // __kml_json_str_str, the value re-read via __kml_map_str_get and delegated
 // to emitJSONStringifyValue under the map's declared value type.
 func (e *Emitter) emitJSONStringifyMapDict(mapVal Value, ind jsonIndent) (Value, error) {
-	e.ensureStrHeaderRuntime()
-	e.ensureMapStrHelpers()
 	valTy := TypePtr
 	if mapVal.Ty.MapVal != nil {
 		valTy = *mapVal.Ty.MapVal

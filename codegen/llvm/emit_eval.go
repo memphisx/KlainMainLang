@@ -57,7 +57,6 @@ func (e *Emitter) emitStaticEval(args []ast.Expression, pos ast.Pos) (Value, err
 			tag, _ := e.emitUnboxTagPayload(boxed)
 			strL, okL := e.emitTagCheck(tag, kmlTagString, "eval.str")
 			e.emitLabel(strL)
-			e.ensureExceptionHelpers()
 			errObj := e.buildErrorObj(errorKindIDs["EvalError"], e.internString("eval of a string computed at run time is not supported: it needs an embedded JavaScript engine"), e.internString("EvalError"))
 			e.excThrow(errObj)
 			e.emitTerminator("unreachable")
@@ -69,7 +68,6 @@ func (e *Emitter) emitStaticEval(args []ast.Expression, pos ast.Pos) (Value, err
 			return Value{}, err
 		}
 		if !e.blockDone {
-			e.ensureExceptionHelpers()
 			errObj := e.buildErrorObj(errorKindIDs["EvalError"], e.internString("eval of a string computed at run time is not supported: it needs an embedded JavaScript engine"), e.internString("EvalError"))
 			e.excThrow(errObj)
 			e.emitTerminator("unreachable")

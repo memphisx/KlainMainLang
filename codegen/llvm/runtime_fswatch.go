@@ -10,14 +10,4 @@ import _ "embed"
 var fsWatchSource string
 
 // FsWatchSource is the fs.watch runtime's C source.
-func FsWatchSource() string { return fsWatchSource }
-
-// ensureFsWatchRuntime links the fs.watch runtime (fswatch.c) once.
-func (e *Emitter) ensureFsWatchRuntime() {
-	if e.usedFsWatchRuntime {
-		return
-	}
-	e.usedFsWatchRuntime = true
-	e.ensureFsThrow()
-	e.ensureStrHeaderRuntime()
-}
+func FsWatchSource() string { return loopUser + fsWatchSource }

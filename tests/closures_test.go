@@ -1221,3 +1221,121 @@ function f(): void {
 f();
 `)
 }
+
+// An arguments object's own callee and Symbol.iterator: arguments.callee
+// is the running function (a TypeError in strict code), and reflection on
+// the object lists and describes both.
+func TestE2EArgumentsCalleeAndOwnKeys(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function f() {
+  console.log(Object.getOwnPropertyNames(arguments));
+  console.log(Reflect.ownKeys(arguments).map(String));
+  console.log(Object.getOwnPropertySymbols(arguments).map(String));
+  console.log(arguments.hasOwnProperty(Symbol.iterator), arguments.hasOwnProperty("callee"), Object.hasOwn(arguments, "x"));
+  var d = Object.getOwnPropertyDescriptor(arguments, Symbol.iterator);
+  console.log(d.value === Array.prototype.values, d.writable, d.enumerable, d.configurable);
+  var c = Object.getOwnPropertyDescriptor(arguments, "callee");
+  console.log(c.value === f, c.writable, c.enumerable, c.configurable, arguments.callee === f);
+}
+f(1, 2);
+function g() { "use strict"; var c = Object.getOwnPropertyDescriptor(arguments, "callee"); console.log(typeof c.get, c.get === c.set, c.enumerable, c.configurable);
+  try { arguments.callee; } catch (e) { console.log(e.constructor.name); } }
+g();
+var h = function hh() { console.log(arguments.callee === h, hh === h); }; h();
+var k = function () { console.log(arguments.callee === k); }; k();
+var o = { m: function () { console.log(arguments.callee === o.m); } }; o.m();
+function r() { arguments = 5; console.log(arguments.callee); } r();
+`)
+}
+
+// A deleted static method is gone: reads see undefined (a binding of the
+// read too), own-property checks see it absent until a write gives it
+// back; a replaced one passes as a callback.
+func TestE2EDeletedStaticMethodJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+class C { static m() { return 1; } static k(x) { return x + 1; } }
+const b = C.m;
+console.log(C.k(2), C.m());
+delete C.m;
+const v = C.m;
+console.log(C.m === undefined, v === undefined, typeof C.m, typeof b, "m" in C, b(), C.hasOwnProperty("m"), Object.hasOwn(C, "m"));
+const k = ["m"][0];
+console.log(k in C, C.hasOwnProperty(k), Object.hasOwn(C, k), Object.getOwnPropertyNames(C).includes("m"));
+C.k = function (x) { return x * 10; };
+console.log(C.k(2), [1, 2].map(C.k).join());
+C.m = 5;
+console.log("m" in C, C.m === 5, C.hasOwnProperty("m"));
+`)
+}
+
+// A class expression in a function is a new class per evaluation, its base
+// read when it is evaluated (a variable reassigned between calls, to class
+// declarations or to class expressions).
+func TestE2EClassPerEvaluationHeritageJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+var B1 = class { who() { return "B1"; } };
+var B2 = class { who() { return "B2"; } };
+var Base = B1;
+function mk() { return class extends Base {}; }
+var C1 = mk();
+Base = B2;
+var C2 = mk();
+console.log(new C1().who(), new C2().who(), Object.getPrototypeOf(C1) === B1, Object.getPrototypeOf(C2) === B2, C1 === C2);
+class A { w() { return 1; } }
+function mk2() { return class extends A { static n = 0; }; }
+const c = mk2(), d = mk2();
+console.log(c === d, new c() instanceof d, c.n++, d.n, Object.getPrototypeOf(c) === A, new c().w());
+`)
+}
+
+// A ClassHeritage is any LeftHandSideExpression: null, a parenthesized
+// sequence, a call, on a declaration or an expression; a block's or a
+// function's own class as the base.
+func TestE2EClassHeritageExpressionsJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+class A { w() { return "A"; } }
+function f() { return A; }
+class N extends null { constructor() { return Object.create(N.prototype); } }
+class C1 extends f() {}
+var a = 1;
+class C2 extends (a, A) {}
+function g() { class L {} class M extends L {} return new M() instanceof L; }
+{ class BL { w() { return "BL"; } } class BM extends BL {} console.log(new BM().w()); }
+console.log(new C1().w(), new C2().w(), g(), Object.getPrototypeOf(N.prototype));
+class Z extends null {}
+try { new Z(); } catch (e) { console.log(e.constructor.name); }
+console.log(Object.getPrototypeOf(Z.prototype), Object.getPrototypeOf(Z) === Function.prototype);
+var K = class extends f() {};
+console.log(new K().w(), K.name, new (class extends (0, A) {})().w());
+function mk(B) { return class extends (B || A) {}; }
+console.log(new (mk())().w());
+`)
+}
+
+// A base constructor returning an object makes it the derived `this`, for
+// a class base and a constructor-function base alike, with or without a
+// constructor of the derived class's own; its fields and private names go
+// on that object.
+func TestE2EBaseConstructorReturnsObjectJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+class B { constructor() { return { tag: "obj" }; } }
+class D extends B { constructor() { super(); this.x = 1; } }
+const d = new D();
+console.log(d.tag, d.x, d instanceof D, d instanceof B);
+function F() { return { fn: true }; }
+class E extends F { constructor() { super(); this.y = 2; } }
+const e = new E();
+console.log(e.fn, e.y, e instanceof E, Object.keys(e));
+function H() { return "str"; }
+class I extends H { constructor() { super(); this.z = 3; } }
+const i = new I(); console.log(i.z, i instanceof I);
+class P { constructor(o) { return o; } }
+class S extends P { #p = 7; static get(o) { return o.#p; } static has(o) { return #p in o; } }
+const o = {};
+new S(o);
+console.log(S.get(o), S.has(o), S.has({}));
+function G() { return { q: 1 }; }
+class T extends G { #r = 3; static r(x) { return x.#r; } }
+const t = new T(); console.log(T.r(t), t.q);
+`)
+}

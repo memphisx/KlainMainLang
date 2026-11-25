@@ -683,6 +683,9 @@ void __kml_native_zlib_write(double id, double flush, const unsigned char *in, i
     it->a[1] = (int64_t)(intptr_t)c;
     if (c) {
         zctx_set_buffers(c, flush, in, (int64_t)in_off, (int64_t)in_len, out, (int64_t)out_off, (int64_t)out_len);
+        // The worker reads in and writes out: both pinned until the callback.
+        if (in) it->pin[0] = kml_ref_new((void *)in);
+        if (out) it->pin[1] = kml_ref_new(out);
         pthread_mutex_lock(&zctx_lock);
         c->busy = 1;
         pthread_mutex_unlock(&zctx_lock);

@@ -90,19 +90,26 @@ void __kml_native_wv_destroy(double h) { webview_destroy(KWV(h)); }
    array of arguments; the callback answers through wvReturn. */
 typedef void (*kwv_inv)(void *clo, const char *id, const char *req);
 
+/* The webview keeps a binding's user data: {invoker, closure ref}, native
+ * memory, the JS closure held through the handle table. */
+typedef struct {
+  void *inv;
+  kml_ref clo;
+} kwv_binding;
+
 static void kwv_bound(const char *id, const char *req, void *env) {
-  void **e = (void **)env;
-  ((kwv_inv)e[0])(e[1], kwv_str(id), kwv_str(req));
+  kwv_binding *b = (kwv_binding *)env;
+  ((kwv_inv)b->inv)(kml_ref_get(b->clo), kwv_str(id), kwv_str(req));
   /* Whatever the callback started (a fetch, a timer, a settled promise)
      gets a loop pass now, not at the next deadline the host had armed. */
   __kml_wv_loop_kick();
 }
 
 void __kml_native_wv_bind(double h, const char *name, void *inv, void *clo) {
-  void **env = (void **)kml_alloc(KML_HEAP_WORDS, 2 * sizeof(void *)); /* holds the JS closure, never freed */
-  env[0] = inv;
-  env[1] = clo;
-  webview_bind(KWV(h), name, kwv_bound, env);
+  kwv_binding *b = (kwv_binding *)malloc(sizeof *b); /* scratch: the webview keeps it for its lifetime */
+  b->inv = inv;
+  b->clo = kml_ref_new(clo);
+  webview_bind(KWV(h), name, kwv_bound, b);
 }
 
 void __kml_native_wv_return(double h, const char *id, double status, const char *result) {

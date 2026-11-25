@@ -10,8 +10,9 @@
 //
 // A histogram keeps its samples exactly, where Node's is an HDR histogram
 // (3 significant figures): a percentile of large values can differ in its
-// last digits. eventLoopUtilization and nodeTiming's startup milestones are
-// not ported.
+// last digits. nodeTiming's startup milestones (nodeStart, v8Start,
+// environment, bootstrapComplete) are the time origin, the process having no
+// separate bootstrap.
 //
 // kml:default-namespace — `import perf from 'perf_hooks'` reads this
 // module's exports, as Node's default export carries them.
@@ -544,6 +545,70 @@ export function monitorEventLoopDelay(options?: EventLoopMonitorOptions): Interv
     return new IntervalHistogram(resolution);
 }
 
+// ---- nodeTiming and eventLoopUtilization (nodetiming.js, event_loop_utilization.js) ----
+
+export interface EventLoopUtilization {
+    idle: number;
+    active: number;
+    utilization: number;
+}
+
+// Node defines each milestone on the instance itself (nodetiming.js):
+// `{ ...performance.nodeTiming }` copies them.
+export class PerformanceNodeTiming {
+    declare readonly name: string;
+    declare readonly entryType: string;
+    declare readonly startTime: number;
+    declare readonly duration: number;
+    declare readonly nodeStart: number;
+    declare readonly v8Start: number;
+    declare readonly environment: number;
+    declare readonly loopStart: number;
+    declare readonly loopExit: number;
+    declare readonly bootstrapComplete: number;
+    declare readonly idleTime: number;
+    constructor() {
+        Object.defineProperties(this, {
+            name: { enumerable: true, configurable: true, value: 'node' },
+            entryType: { enumerable: true, configurable: true, value: 'node' },
+            startTime: { enumerable: true, configurable: true, value: 0 },
+            duration: { enumerable: true, configurable: true, get(): number { return now(); } },
+            nodeStart: { enumerable: true, configurable: true, get(): number { return 0; } },
+            v8Start: { enumerable: true, configurable: true, get(): number { return 0; } },
+            environment: { enumerable: true, configurable: true, get(): number { return 0; } },
+            loopStart: { enumerable: true, configurable: true, get(): number { return __kml_native.loopStart(); } },
+            loopExit: { enumerable: true, configurable: true, get(): number { return -1; } },
+            bootstrapComplete: { enumerable: true, configurable: true, get(): number { return 0; } },
+            idleTime: { enumerable: true, configurable: true, get(): number { return __kml_native.loopIdle(); } },
+        });
+    }
+    toJSON(): any {
+        return {
+            name: 'node', entryType: 'node', startTime: 0, duration: this.duration,
+            nodeStart: 0, v8Start: 0, bootstrapComplete: 0, environment: 0,
+            loopStart: this.loopStart, loopExit: -1, idleTime: this.idleTime,
+        };
+    }
+}
+
+const nodeTimingObject = new PerformanceNodeTiming();
+
+export function eventLoopUtilization(util1?: EventLoopUtilization, util2?: EventLoopUtilization): EventLoopUtilization {
+    const ls = nodeTimingObject.loopStart;
+    if (ls <= 0) return { idle: 0, active: 0, utilization: 0 };
+    if (util2) {
+        const idle = util1!.idle - util2.idle;
+        const active = util1!.active - util2.active;
+        return { idle, active, utilization: active / (idle + active) };
+    }
+    const idle = nodeTimingObject.idleTime;
+    const active = now() - ls - idle;
+    if (!util1) return { idle, active, utilization: active / (idle + active) };
+    const idleDelta = idle - util1.idle;
+    const activeDelta = active - util1.active;
+    return { idle: idleDelta, active: activeDelta, utilization: activeDelta / (idleDelta + activeDelta) };
+}
+
 // ---- Performance (performance.js) ----
 
 export class Performance {
@@ -553,6 +618,14 @@ export class Performance {
 
     now(): number {
         return now();
+    }
+
+    get nodeTiming(): PerformanceNodeTiming {
+        return nodeTimingObject;
+    }
+
+    get eventLoopUtilization(): (util1?: EventLoopUtilization, util2?: EventLoopUtilization) => EventLoopUtilization {
+        return eventLoopUtilization;
     }
 
     mark(name: string, options?: MarkOptions): PerformanceMark {

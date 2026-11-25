@@ -17,19 +17,8 @@ package llvm
 
 import "strconv"
 
-// noteLoopTurn records that emitted code waits on the event loop, so the end
-// of main() runs the full loop.
-func (e *Emitter) noteLoopTurn() {
-	e.usedLoopTurn = true
-}
-
-// ensureLoopTurn declares the loop globals and the shared warning text.
-// Called by ensureHTTPRuntime, which links loop.c, where the globals live.
-func (e *Emitter) ensureLoopTurn() {
-	if e.usedLoopTurnDefs {
-		return
-	}
-	e.usedLoopTurnDefs = true
+// emitTLAUnsettled defines the unsettled top-level await warning text.
+func (e *Emitter) emitTLAUnsettled() {
 	msg := tlaUnsettledMsg
 	e.emitGlobal(`@.kml_tla_unsettled = private unnamed_addr constant [` + strconv.Itoa(len(msg)) + ` x i8] c"Warning: Detected unsettled top-level await\0A"`)
 }

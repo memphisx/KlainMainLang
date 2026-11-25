@@ -75,6 +75,13 @@ func arity(e *ast.NewExpression, sig string, lo, hi int) error {
 			e.Args = args
 		}
 	}
+	if n := len(e.Args); n < lo && !hasSpread(e.Args) {
+		// A missing argument is undefined, as JavaScript passes it (the
+		// strict lane has rejected the call already: TS2554).
+		for len(e.Args) < lo {
+			e.Args = append(e.Args, ast.NewNullLiteral(true, e.GetPos()))
+		}
+	}
 	if n := len(e.Args); n < lo || n > hi {
 		switch {
 		case lo == hi && lo == 0:
@@ -200,16 +207,22 @@ func errorKind(kind string) builder {
 			return nil, err
 		}
 		ne := ast.NewNewErrorExpression(kind, arg(e, 0), e.GetPos())
-		// `{ cause: x }` gives the cause directly; any other options
-		// value is read at run time (InstallErrorCause).
-		if opts := arg(e, 1); opts != nil {
-			if lit, ok := opts.(*ast.ObjectLiteral); ok && len(lit.Properties) == 1 && lit.Properties[0].Key == "cause" && lit.Properties[0].KeyExpr == nil && lit.Properties[0].Value != nil && lit.Properties[0].AccessorKind == "" {
-				ne.Cause = lit.Properties[0].Value
-			} else {
-				ne.Options = opts
-			}
-		}
+		setErrorOptions(ne, arg(e, 1))
 		return ne, nil
+	}
+}
+
+// setErrorOptions gives ne an Error constructor's options argument:
+// `{ cause: x }` the cause directly; any other options value is read at
+// run time (InstallErrorCause).
+func setErrorOptions(ne *ast.NewErrorExpression, opts ast.Expression) {
+	if opts == nil {
+		return
+	}
+	if lit, ok := opts.(*ast.ObjectLiteral); ok && len(lit.Properties) == 1 && lit.Properties[0].Key == "cause" && lit.Properties[0].KeyExpr == nil && lit.Properties[0].Value != nil && lit.Properties[0].AccessorKind == "" {
+		ne.Cause = lit.Properties[0].Value
+	} else {
+		ne.Options = opts
 	}
 }
 
@@ -237,11 +250,12 @@ func buildDOMException(e *ast.NewExpression) (ast.Expression, error) {
 }
 
 func buildAggregateError(e *ast.NewExpression) (ast.Expression, error) {
-	if err := arity(e, "AggregateError(errors?, message?)", 0, 2); err != nil {
+	if err := arity(e, "AggregateError(errors?, message?, options?)", 0, 3); err != nil {
 		return nil, err
 	}
 	ne := ast.NewNewErrorExpression("AggregateError", arg(e, 1), e.GetPos())
 	ne.Errors = arg(e, 0)
+	setErrorOptions(ne, arg(e, 2))
 	return ne, nil
 }
 
@@ -384,6 +398,17 @@ func inertArg(x ast.Expression) bool {
 		return true
 	case *ast.TemplateLiteral:
 		return len(v.Exprs) == 0
+	}
+	return false
+}
+
+// hasSpread reports a spread among args, whose count is known only at run
+// time.
+func hasSpread(args []ast.Expression) bool {
+	for _, a := range args {
+		if _, ok := a.(*ast.SpreadElement); ok {
+			return true
+		}
 	}
 	return false
 }

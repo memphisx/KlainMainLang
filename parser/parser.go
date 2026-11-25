@@ -14,6 +14,9 @@ import (
 )
 
 type Parser struct {
+	// tmplLegacy is the first legacy escape of the template being parsed
+	// (parseTemplateLiteral).
+	tmplLegacy string
 	// inGen is set while parsing a generator's parameters and body, where
 	// `yield` is an expression; nextGen tells parseFunctionRestThis that the
 	// function it parses next is one. Elsewhere `yield` reads as an
@@ -64,6 +67,9 @@ type Parser struct {
 	namespaceGroups []ast.NamespaceGroup
 	nsExports       map[string][]ast.NamespaceExport
 	pendingTopLevel []ast.Statement
+	// globalMember: parseAmbientDeclaration parses a `declare global`
+	// member, which has no `declare` keyword to consume.
+	globalMember bool
 	// nsAliases collects `import X = Y.Z` alias declarations (ADR-00456).
 	nsAliases []ast.NSAliasDecl
 	// ambientNames are the names of the erased ambient declarations.
@@ -1151,6 +1157,20 @@ func programIsStrict(prog *ast.Program) bool {
 // an assignment or update (web-compatible only in sloppy code).
 func strictErrors(n ast.Node) error {
 	switch x := n.(type) {
+	case *ast.StringLiteral:
+		if e := x.LegacyEscape; e != "" {
+			if e[1] == '8' || e[1] == '9' {
+				return errAtPos(x.GetPos(), diag.StrictDecimalEscape)
+			}
+			return errAtPos(x.GetPos(), diag.StrictOctalEscape)
+		}
+	case *ast.NumberLiteral:
+		switch x.LegacyForm() {
+		case "octal":
+			return errAtPos(x.GetPos(), diag.StrictOctalLiteral)
+		case "decimal":
+			return errAtPos(x.GetPos(), diag.StrictLeadingZero)
+		}
 	case *ast.UnaryExpression:
 		if _, ok := x.Arg.(*ast.Identifier); ok && x.Op == "delete" {
 			return errAtPos(x.GetPos(), diag.StrictDeleteName)

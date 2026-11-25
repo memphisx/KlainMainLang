@@ -23,6 +23,7 @@ func main() {
 	output := flag.String("o", "", "output binary `name` (default: the input name without its extension)")
 	static := flag.Bool("static", false, "a self-contained binary: it depends on nothing the OS does not ship. Linux: fully static (scratch/distroless images). Windows: every library linked in, importing only Windows' own DLLs. Not yet on macOS (TDD-00253)")
 	mm := flag.String("mm", "manual", "memory management `mode`: manual (default, Memory.free(x) only), gc (Boehm GC — allocations are collected automatically; needs bdw-gc/libgc installed), or auto (the compiler inserts free calls where it can prove them safe — /** @free */ and /** @owned */ annotations plus automatic freeing of provably-local values; Memory.free is a compile error)")
+	libMode := flag.Bool("lib", false, "build a shared library (.so, .dylib or .dll) instead of an executable: the program runs when the host calls `int kml_main(int argc, char **argv)`, on any thread, and returns its exit code. Not with --run, --static, -mm=gc or a non-bundled -dynamic-import")
 	dynImport := flag.String("dynamic-import", "bundled", "dynamic `import()` `mode`: bundled (default — the target is compiled into the binary and its top-level runs on first import(), one module instance shared with the program, as in Node), lazy (the same, with the target's code in a shared library beside the binary, loaded on first use; incompatible with --static) or isolated (the target is its own program in a shared library, with its own instances of every module it imports: nothing it imports shares state with the importer; incompatible with --static)")
 	diagFormat := flag.String("diagnostics", "text", "how errors in the program are reported (the `format`): text (default — one file: line:col: message line each; parsing continues past an error, so every syntax error is reported) or json (an array on stdout, one object per error with code, severity, file, line, col, start, end, message, kind, phase; a code below 90000 is TypeScript's)")
 	compat := flag.String("compat", "strict", "compatibility `mode`: strict (default — the compiler's opinionated, safer-than-JS semantics; e.g. a declaration colliding with an ambient built-in name like Math/fetch is a compile error) or js (best-effort JS-faithful — e.g. real-JS/browser global shadowing)")
@@ -103,6 +104,18 @@ func main() {
 		}
 	}
 
+	if *libMode {
+		switch {
+		case *runNow:
+			fatal("-lib cannot be combined with --run: a library has no entry of its own to run")
+		case *static:
+			fatal("-lib cannot be combined with --static: a static executable and a shared library are different outputs")
+		case *mm == "gc":
+			fatal("-lib cannot be combined with -mm=gc: the collector replaces malloc for the whole process, which a library cannot do inside its host")
+		case *dynImport != "bundled":
+			fatal("-lib needs -dynamic-import=bundled: a library's import() targets are compiled into it")
+		}
+	}
 	if *static && runtime.GOOS == "darwin" {
 		fatal("--static is not supported on macOS: static linking needs a static libc to link against, and macOS's linker ships none at all — Apple deliberately never provides a static libSystem/crt0.o, with no workaround. On Linux, --static produces a fully static binary (scratch/distroless-ready). On Windows, --static links every library in, so the .exe imports only Windows' own DLLs (the UCRT and system DLLs ship with Windows 10+). To produce a static Linux binary from here, use a Linux build stage in a multi-stage Dockerfile.")
 	}
@@ -264,7 +277,7 @@ func main() {
 	// islands compile under the same ones.
 	opts := options.Options{
 		Compat: *compat, NoAny: *noAny, NoUnusedLocals: *noUnusedLocals, NoUnusedParameters: *noUnusedParameters, Decorators: *decorators, EmitDecoratorMetadata: *emitDecoratorMetadata,
-		MemMode: *mm, DynamicImport: *dynImport, Regex: *regex,
+		MemMode: *mm, DynamicImport: *dynImport, Library: *libMode, Regex: *regex,
 		BigInt: *bigint, Crypto: *cryptoBackend, Webview: *webviewBackend,
 		OptimizeMemory: *optimizeMemory, Finalizers: *finalizers,
 		Target: llvm.ParseTarget(crossTriple, *sysroot),
@@ -328,7 +341,9 @@ func main() {
 	defer os.RemoveAll(buildDir)
 	interBase := filepath.Join(buildDir, strings.TrimSuffix(filepath.Base(inFile), filepath.Ext(inFile)))
 	llFile := interBase + ".ll"
-	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+	// Written from the string itself: a []byte conversion would copy the
+	// whole module (over 100 MB with every library module in it).
+	if err := writeStringFile(llFile, ir); err != nil {
 		fatal("cannot write IR: %v", err)
 	}
 
@@ -344,6 +359,9 @@ func main() {
 		runTmpDir = d
 		base := strings.TrimSuffix(filepath.Base(inFile), filepath.Ext(inFile))
 		outBin = filepath.Join(d, base+llvm.HostExeSuffix())
+	} else if outBin == "" && *libMode {
+		dir, base := filepath.Split(strings.TrimSuffix(inFile, filepath.Ext(inFile)))
+		outBin = filepath.Join(dir, llvm.HostSharedLibName(base))
 	} else if outBin == "" {
 		outBin = strings.TrimSuffix(inFile, filepath.Ext(inFile))
 		outBin += llvm.HostExeSuffix()
@@ -357,6 +375,11 @@ func main() {
 	}
 	if *ltoBuild {
 		codeFlags = append(codeFlags, "-flto=thin")
+	}
+	if *libMode {
+		// Every object of a shared library is position-independent (the
+		// cached runtime objects key on these flags).
+		codeFlags = append(codeFlags, "-fPIC")
 	}
 	clangArgs := append(append([]string{}, codeFlags...), llFile)
 	if *ltoBuild && runtime.GOOS != "darwin" && opts.Target.Triple == "" {
@@ -373,12 +396,15 @@ func main() {
 	}
 	if *mm == "gc" {
 		gcShimPath := interBase + ".gcshim.c"
-		if err := os.WriteFile(gcShimPath, []byte(llvm.GCShimSource), 0644); err != nil {
+		if err := os.WriteFile(gcShimPath, []byte(em.GCShim()), 0644); err != nil {
 			fatal("cannot write GC shim: %v", err)
 		}
 		clangArgs = append(clangArgs, gcShimPath)
 	}
 	clangArgs = append(clangArgs, "-o", outBin)
+	if *libMode {
+		clangArgs = append(clangArgs, "-shared")
+	}
 	if *static && runtime.GOOS == "linux" {
 		// Fully static (incl. glibc) — scratch/distroless-ready. On Windows,
 		// --static instead statically links only the non-system libraries (via the
@@ -451,7 +477,7 @@ func main() {
 		clangArgs = append(clangArgs, llvm.UnreachableRefFlags()...)
 		lazyIslands = isl
 	} else if *libObjects && objCache != "" {
-		objs, _, err := llvm.LibObjects(llFile, objCache, libFlags)
+		objs, _, err := llvm.LibObjectsOf(ir, llFile, objCache, libFlags)
 		if err != nil {
 			fatal("%v", err)
 		}
@@ -535,6 +561,15 @@ func main() {
 			nm = filepath.Base(outBin)
 		}
 		clangArgs = append(clangArgs, "-Wl,-rpath,"+harbourRpathDir("harbour-"+appSlug(nm)))
+	}
+	if *ltoBuild {
+		// The program's own unit as the library's: in the program address
+		// space alone (llvm.PlainSpaceIR).
+		if text, err := os.ReadFile(llFile); err == nil {
+			if err := os.WriteFile(llFile, []byte(llvm.PlainSpaceIR(string(text))), 0o644); err != nil {
+				fatal("cannot write IR: %v", err)
+			}
+		}
 	}
 	if *debugBuild && runtime.GOOS == "darwin" && opts.Target.Triple == "" {
 		// macOS leaves debug info in the objects (dsymutil gathers it after
@@ -934,4 +969,17 @@ func dedupLibFlags(args []string) []string {
 		out = append(out, a)
 	}
 	return out
+}
+
+// writeStringFile writes s to path without copying it.
+func writeStringFile(path, s string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(s); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

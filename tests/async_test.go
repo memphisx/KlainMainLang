@@ -1070,3 +1070,20 @@ async function main() { await w("x"); await w("1", /^1/); }
 main();
 `)
 }
+
+// A combinator over a non-iterable returns a rejected promise; over `any`
+// it is typed as tsc types it (`Promise<any[]>`).
+func TestE2EPromiseCombinatorNonIterableTS(t *testing.T) {
+	assertSameAsNode(t, `
+const x: any = 5;
+let p: Promise<unknown[]> | undefined;
+try { p = Promise.all(x); console.log("returned", p instanceof Promise); } catch (e) { console.log("threw", (e as Error).message); }
+p?.catch((e: Error) => console.log("rejected", e.constructor.name, e.message));
+const u: any = undefined;
+Promise.allSettled(u).catch((e: Error) => console.log("allSettled", e.message));
+Promise.any(u).catch((e: Error) => console.log("any", e.message));
+Promise.race(u).catch((e: Error) => console.log("race", e.message));
+const o: any = {};
+Promise.all(o).catch((e: Error) => console.log("obj", e.message));
+`)
+}

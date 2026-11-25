@@ -5,9 +5,9 @@
   "statusPage": "STRING-METHODS.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "32/33",
-    "loosePct": 97,
-    "strict": "31/33",
+    "loose": "34/34",
+    "loosePct": 100,
+    "strict": "32/34",
     "strictPct": 94
   },
   "lede": "The String surface is nearly complete. Comparison and substring search are binary-safe (length-headed, NUL-tolerant); the open edges are real Unicode — normalization, surrogate-pair code points, and locale collation — which this compiler has no tables for and does not fake.",
@@ -350,6 +350,26 @@
       }
     },
     {
+      "id": "string.toLocaleUpperCase",
+      "name": ".toLocaleUpperCase(locales?) / .toLocaleLowerCase(locales?)",
+      "statusRow": "`.toLocaleUpperCase(locales?)` / `.toLocaleLowerCase(locales?)`",
+      "signature": "toLocaleUpperCase(locales?: string | string[]): string",
+      "badge": "exact",
+      "description": "Case-maps for the first requested locale: Turkish and Azeri map dotted and dotless i ('i' upper-cases to 'İ', 'I' lower-cases to 'ı'), Lithuanian keeps the dot above; any other locale maps as toUpperCase/toLowerCase. A malformed tag is a RangeError.",
+      "returns": {
+        "type": "string",
+        "desc": "The case-mapped string."
+      },
+      "snippet": "console.log('istanbul'.toLocaleUpperCase('tr'))   // İSTANBUL",
+      "seeAlso": [
+        "string.toUpperCase",
+        "string.toLowerCase"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/toLocaleUpperCase"
+      }
+    },
+    {
       "id": "string.toLowerCase",
       "name": ".toLowerCase()",
       "signature": "toLowerCase(): string",
@@ -555,12 +575,13 @@
       "id": "string.normalize",
       "name": ".normalize()",
       "signature": "normalize(form?: string): string",
-      "badge": "missing",
-      "description": "Unicode normalization (NFC/NFD/NFKC/NFKD). Deliberately deferred, not attempted — it needs real Unicode normalization tables this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text.",
+      "badge": "caveats",
+      "description": "Unicode normalization (NFC, NFD, NFKC, NFKD) per UAX #15: decomposition, canonical ordering and recomposition, Hangul handled arithmetically. An unknown form throws Node's RangeError. The tables are Unicode 16.0, one version behind Node's ICU.",
       "seeAlso": [],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/String/normalize"
-      }
+      },
+      "snippet": "console.log('cafe\\u0301'.normalize() === 'caf\\u00e9')   // true"
     },
     {
       "id": "string.match",

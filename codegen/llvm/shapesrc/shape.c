@@ -121,6 +121,7 @@ typedef struct Expando {
 } Expando;
 
 #define KML_HDR_PROTO_SET (1LL << 61)
+#define KML_HOST_FLAG (1LL << 49) /* a builtin's handle (boxsrc/hostbox.c) */
 
 #define XA_W 1
 #define XA_E 2
@@ -378,7 +379,10 @@ int __kml_shape_expando_delete(void *obj, const char *key) {
 // layout tracks the key's presence (bits[nkeys + j] says the bit marks a
 // required field's absence): 1 when deleted, 0 for no such key, -1 for a
 // key whose presence is not tracked.
+extern int __kml_error_delete_field(void *op, const char *key) __attribute__((weak));
+
 int __kml_shape_delete_field(void *obj, const char *key) {
+    if (key && (*(i64 *)obj & KML_HDR_ERROR) && __kml_error_delete_field && __kml_error_delete_field(obj, key)) return 1;
     const KmlShape *s = __kml_shape_of(obj);
     if (!s || s->presence_off < 0 || !s->bits || !key) return 0;
     for (i64 j = 0; j < s->nkeys; j++) {
@@ -395,6 +399,22 @@ int __kml_shape_delete_field(void *obj, const char *key) {
         return 1;
     }
     return 0;
+}
+
+// shape_mark_present makes obj's layout key `key` an own property (a
+// `declare` field, or one deleted, written again by name): the inverse of
+// __kml_shape_delete_field's presence update.
+static void shape_mark_present(void *obj, const KmlShape *s, const char *key) {
+    if (!s || s->presence_off < 0 || !s->bits || !key) return;
+    for (i64 j = 0; j < s->nkeys; j++) {
+        if (!s->keys[j] || strcmp(s->keys[j], key) != 0) continue;
+        int bit = s->bits[j];
+        if (bit < 0) return;
+        unsigned long long *w = (unsigned long long *)((char *)obj + s->presence_off);
+        if (s->bits[s->nkeys + j]) *w &= ~(1ULL << bit);
+        else *w |= 1ULL << bit;
+        return;
+    }
 }
 
 // __kml_shape_expando_define adds (or replaces) property key of obj with
@@ -518,19 +538,45 @@ int __kml_shape_proto_set(void *obj, void **proto) {
     return 1;
 }
 
+// __kml_shape_given_chain_has answers `obj instanceof C` (target is
+// C.prototype) for a class instance given a prototype: whether target is
+// on that prototype's chain (1/0), or -1 when obj keeps its class's.
+i64 __kml_shape_given_chain_has(void *obj, void *target) {
+    if (!obj || !(*(i64 *)obj & KML_HDR_PROTO_SET)) return -1;
+    const Expando *x = expando_find(obj, 0);
+    for (void *p = x ? x->proto : NULL; p; p = is_bag(p) ? __kml_dynobj_get_proto(p) : NULL)
+        if (p == target) return 1;
+    return 0;
+}
+
 // __kml_shape_method_shadowed reports whether a call of method key on obj
 // must not take its class's method: obj has an own property of that name,
 // or a prototype it was given resolves the name before its class's
 // prototype does.
-int __kml_shape_method_shadowed(void *obj, const char *key) {
+// cls is the prototype of the class whose method the call takes otherwise
+// (NULL: any class's prototype ends the walk); another class's prototype
+// reached first (`Object.setPrototypeOf(a, B.prototype)`) shadows it.
+int __kml_shape_method_shadowed(void *obj, const char *key, void *cls) {
     const Expando *x = expando_find(obj, 0);
     if (expando_index(x, key) >= 0) return 1;
     if (!(*(i64 *)obj & KML_HDR_PROTO_SET)) return 0;
     for (void *p = x ? x->proto : NULL; p && is_bag(p); p = __kml_dynobj_get_proto(p)) {
-        if (__kml_is_class_proto(p)) return 0;
+        if (__kml_is_class_proto(p)) return cls && p != cls;
         if (__kml_dynobj_find(p, key) >= 0) return 1;
     }
     return 1; /* a chain without its class's prototype: none of its methods */
+}
+
+extern int __kml_error_own_names(void *op, void **out) __attribute__((weak));
+
+// error_owns reports whether the Error obj has an own property key.
+static int error_owns(void *obj, const char *key) {
+    void *out[2];
+    if (!__kml_error_own_names || !__kml_error_own_names(obj, out)) return 0;
+    const char **keys = (const char **)out[0];
+    for (i64 i = 0; i < (i64)(intptr_t)out[1]; i++)
+        if (!strcmp(keys[i], key)) return 1;
+    return 0;
 }
 
 i64 __kml_shape_get(void *obj, const char *key, int *found) {
@@ -541,6 +587,15 @@ i64 __kml_shape_get(void *obj, const char *key, int *found) {
     }
     /* An error's `stack` is formatted on first read, not its raw slot. */
     if ((*(i64 *)obj & KML_HDR_ERROR) && !strcmp(key, "stack")) return __kml_error_extra_get(obj, key, found);
+    /* An error given a prototype: a key it does not own is that chain's. */
+    if ((*(i64 *)obj & KML_HDR_ERROR) && (*(i64 *)obj & KML_HDR_PROTO_SET) && !error_owns(obj, key)) {
+        const Expando *gx = expando_find(obj, 0);
+        for (void *p = gx ? gx->proto : NULL; p && is_bag(p); p = __kml_dynobj_get_proto(p))
+            if (__kml_dynobj_find(p, key) >= 0) {
+                *found = 1;
+                return __kml_dynobj_get_recv(gx->proto, key, (i64)(intptr_t)obj | 1);
+            }
+    }
     const KmlShape *s = __kml_shape_of(obj);
     *found = 0;
     if (!s) {
@@ -557,7 +612,21 @@ i64 __kml_shape_get(void *obj, const char *key, int *found) {
         if (xattrs(x, i) & XA_ACC) __kml_shape_expando_get_recv(obj, key, 0, &v); /* its getter */
         return v;
     }
-    if (*(i64 *)obj & KML_HDR_PROTO_SET && !__kml_shape_has_field(obj, key)) {
+    if (*(i64 *)obj & KML_HDR_PROTO_SET && (*(i64 *)obj & KML_HOST_FLAG)) {
+        // A builtin's handle a subclass made (`class E extends M`, M
+        // holding Map): the classes' prototypes on the chain it was given
+        // answer first, then the builtin's own members.
+        // The last class prototype on the chain is the builtin's own,
+        // whose members read the handle's.
+        for (void *p = x ? x->proto : NULL; p && is_bag(p) && __kml_is_class_proto(p); p = __kml_dynobj_get_proto(p)) {
+            void *next = __kml_dynobj_get_proto(p);
+            if (!next || !is_bag(next) || !__kml_is_class_proto(next)) break;
+            if (__kml_dynobj_find(p, key) >= 0) {
+                *found = 1;
+                return __kml_dynobj_get_recv(p, key, (i64)(intptr_t)obj | 1);
+            }
+        }
+    } else if (*(i64 *)obj & KML_HDR_PROTO_SET && !__kml_shape_has_field(obj, key)) {
         // A member, not a field: the prototype it was given has it, or
         // nothing does (the class's own members no longer answer).
         void *p = x ? x->proto : NULL;
@@ -596,8 +665,9 @@ int __kml_shape_set(void *obj, const char *key, i64 value) {
     }
     int r = s->set(obj, key, value);
     if (r == 1) {
-        // Stored in the field: a shadow of it (an earlier value of another
-        // kind) is gone.
+        // Stored in the field, which is now an own property: a shadow of
+        // it (an earlier value of another kind) is gone.
+        shape_mark_present(obj, s, key);
         if (expando_cap) __kml_shape_expando_delete(obj, key);
         return 1;
     }
@@ -886,7 +956,27 @@ void __kml_shape_expando_spread(void *dst, void *src) {
 
 // Object.getOwnPropertyNames of a static object: its layout's keys, then
 // every property added beside it, in the order they were added.
+extern int __kml_error_own_names(void *op, void **out) __attribute__((weak));
+
 void __kml_shape_names_c(void *o, void **out) {
+    /* An Error (its header's error flag): its own keys (errkeys.c), then
+     * the fields a class extending Error declares. */
+    if (__kml_error_own_names && (*(const i64 *)o & (1LL << 48)) && __kml_error_own_names(o, out)) {
+        void *cls[2] = {0, 0};
+        __kml_shape_keys_array_c(o, cls);
+        i64 n = (i64)(size_t)out[1], m = (i64)(size_t)cls[1];
+        if (m == 0) return;
+        const char **keys = (const char **)kml_realloc(KML_HEAP_WORDS, out[0], (size_t)(n + m) * 8 + 8);
+        const char **ck = (const char **)cls[0];
+        for (i64 i = 0; i < m; i++) {
+            int dup = 0;
+            for (i64 j = 0; j < n && !dup; j++) dup = strcmp(keys[j], ck[i]) == 0;
+            if (!dup) KML_STORE_PTR(&keys[n++], ck[i]);
+        }
+        out[0] = (void *)keys;
+        out[1] = (void *)(size_t)n;
+        return;
+    }
     __kml_shape_keys_array_c(o, out);
     const KmlShape *s = __kml_shape_of(o);
     const Expando *x = expando_find(o, 0);

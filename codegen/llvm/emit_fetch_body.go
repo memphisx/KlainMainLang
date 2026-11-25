@@ -15,7 +15,6 @@ var ast0 = ast.Pos{}
 // bytes); null/undefined is no body (a null data pointer, length -1); any
 // other value is its String() (text/plain).
 func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
-	e.ensureStrHeaderRuntime()
 	textCT := e.internString("text/plain;charset=UTF-8")
 	dSlot, lSlot, cSlot := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", dSlot))
@@ -76,9 +75,9 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", d, agg))
 		e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", n, agg))
 		// Element width from the kind byte (arrayElemKind).
-		w := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_elem_kind_width(i8 %s)", w, kind))
-		e.ensureElemKindWidth()
+		k64, w := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = sext i8 %s to i64", k64, kind))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_elem_kind_width(i64 %s)", w, k64)) // core.c
 		bytes := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %s", bytes, n, w))
 		set(d, bytes, "null")
@@ -190,27 +189,4 @@ func (e *Emitter) emitFetchBodyFromBox(box Value) (data, length, ct string) {
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", length, lSlot))
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", ct, cSlot))
 	return data, length, ct
-}
-
-// ensureElemKindWidth emits @__kml_elem_kind_width(kind): the byte width of
-// an array box's element kind (arrayElemKind's codes).
-func (e *Emitter) ensureElemKindWidth() {
-	if e.usedElemKindWidth {
-		return
-	}
-	e.usedElemKindWidth = true
-	restore := e.beginDetachedFunc()
-	w1, w2, w4, w8 := e.freshLabel("w1"), e.freshLabel("w2"), e.freshLabel("w4"), e.freshLabel("w8")
-	e.emitTerminator(fmt.Sprintf("switch i8 %%k, label %%%s [ i8 1, label %%%s i8 4, label %%%s i8 5, label %%%s i8 6, label %%%s i8 7, label %%%s i8 8, label %%%s i8 9, label %%%s ]",
-		w8, w4, w4, w4, w2, w2, w1, w1))
-	for _, w := range []struct {
-		l string
-		n int
-	}{{w1, 1}, {w2, 2}, {w4, 4}, {w8, 8}} {
-		e.emitLabel(w.l)
-		e.emitTerminator(fmt.Sprintf("ret i64 %d", w.n))
-	}
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.writeFunc("internal i64 @__kml_elem_kind_width(i8 %k)", body)
 }

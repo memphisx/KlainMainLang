@@ -28,11 +28,11 @@ extern void __kml_loop_handle_ref(void *h, int on);
 /* An FSWatcher: wd is the libuv handle or the Windows watcher context; open
  * is 1 until closed; refd is 0 after unref() (or persistent: false), and only
  * a ref'd open watcher holds the loop. The listeners are closures {fn, env} called as
- * fn(env, eventType, filename). Every watcher stays in reg, which keeps its
- * listeners reachable under -mm=gc. */
+ * fn(env, eventType, filename), held through the handle table until the
+ * watcher closes. */
 typedef struct {
     i64 wd;
-    void *change_cb, *rename_cb;
+    kml_ref change_cb, rename_cb;
     i64 open, refd;
     const char *name;
 #ifdef __linux__
@@ -86,8 +86,9 @@ static void reg_add(watcher *w) {
 
 void __kml_fswatch_on(void *wp, i64 is_rename, void *cb) {
     watcher *w = (watcher *)wp;
-    if (is_rename) w->rename_cb = cb;
-    else w->change_cb = cb;
+    kml_ref *slot = is_rename ? &w->rename_cb : &w->change_cb;
+    kml_ref_free(*slot);
+    *slot = cb ? kml_ref_new(cb) : 0;
 }
 
 
@@ -104,7 +105,7 @@ static void on_event(void *data, const char *filename, int is_rename) {
     if (w->open && is_rename)
         root_dir_added(w, filename);
 #endif
-    void *cb = is_rename ? w->rename_cb : w->change_cb;
+    void *cb = kml_ref_get(is_rename ? w->rename_cb : w->change_cb);
     if (w->open && cb)
         fire(cb, is_rename ? HSTR("rename") : HSTR("change"),
              __kml_str_from_cstr(filename ? filename : base_name(w->name)));
@@ -160,7 +161,7 @@ static void on_sub_event(void *data, const char *filename, int is_rename) {
             watch_tree(w, rel);
         free(abs); /* scratch */
     }
-    void *cb = is_rename ? w->rename_cb : w->change_cb;
+    void *cb = kml_ref_get(is_rename ? w->rename_cb : w->change_cb);
     if (cb)
         fire(cb, is_rename ? HSTR("rename") : HSTR("change"), __kml_str_from_cstr(rel));
     free(rel); /* scratch */
@@ -274,6 +275,9 @@ void __kml_fswatch_close(void *wp) {
     w->nsubs = 0;
 #endif
     w->open = 0;
+    kml_ref_free(w->change_cb);
+    kml_ref_free(w->rename_cb);
+    w->change_cb = w->rename_cb = 0;
     if (w->refd) nopen--;
 }
 

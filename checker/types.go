@@ -206,8 +206,16 @@ type Predicate struct {
 
 // Property is a member of an object type.
 type Property struct {
-	Name     string
-	Type     *Type
+	Name string
+	// ty is the member's type once resolved; lazy, when set, resolves it
+	// on the first read (a library interface's member, typed only when a
+	// program reads it). Read it with Type.
+	ty        *Type
+	lazy      func() *Type
+	resolving bool
+	// lazySigs are a lazily typed method's declarations, which a later
+	// overload of the same interface extends.
+	lazySigs []lazyMethodSig
 	Optional bool
 	Accessor bool  // a class's get/set accessor
 	Write    *Type // an accessor's setter type, when it differs from its getter's
@@ -297,6 +305,27 @@ func symbolName(sym *binder.Symbol) string {
 }
 
 // Prop returns the property named name, or nil.
+// Type is the member's type, resolving a lazy member on its first read.
+// A read during its own resolution (a member's type naming itself) is
+// answered with the unanswered type the resolver was given.
+func (p *Property) Type() *Type {
+	if p.lazy != nil {
+		if p.resolving {
+			return p.ty
+		}
+		p.resolving = true
+		t := p.lazy()
+		p.ty, p.lazy, p.resolving = t, nil, false
+	}
+	return p.ty
+}
+
+// SetType replaces the member's type.
+func (p *Property) SetType(t *Type) { p.ty, p.lazy = t, nil }
+
+// Lazy reports whether the member's type is still unresolved.
+func (p *Property) Lazy() bool { return p.lazy != nil }
+
 func (t *Type) Prop(name string) *Property {
 	for _, p := range t.Props {
 		if p.Name == name {
@@ -561,7 +590,7 @@ func (t *Type) str(seen map[*Type]bool) string {
 		if p.Readonly {
 			ro = "readonly "
 		}
-		parts[i] = ro + memberDisplayName(p.Name) + opt + ": " + p.Type.str(seen) + ";"
+		parts[i] = ro + memberDisplayName(p.Name) + opt + ": " + p.Type().str(seen) + ";"
 	}
 	return "{ " + strings.Join(append(idx, parts...), " ") + " }" // tsc: `{ x: number; y: string; }`
 }
@@ -845,7 +874,7 @@ func (in *interner) objectOf(props []*Property, partial, intersection bool, memb
 			b.WriteByte('?')
 		}
 		b.WriteByte(':')
-		b.WriteString(strconv.Itoa(p.Type.ID))
+		b.WriteString(strconv.Itoa(p.Type().ID))
 		if p.Accessor {
 			b.WriteString("@")
 			if p.Write != nil {

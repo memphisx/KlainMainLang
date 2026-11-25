@@ -153,8 +153,9 @@ func NameComputedMembers(prog *Program) error {
 }
 
 // RuntimeKeyError is the rejection of the first class member left with a
-// key evaluated at run time (KeyExpr), or nil when there is none.
-func RuntimeKeyError(prog *Program) error {
+// key evaluated at run time (KeyExpr), or nil when there is none. Fields
+// are left out unless fields is set: the checker reports them (TS1166).
+func RuntimeKeyError(prog *Program, fields bool) error {
 	var err error
 	Inspect(prog, func(n Node) bool {
 		c, ok := n.(*ClassDeclaration)
@@ -170,8 +171,10 @@ func RuntimeKeyError(prog *Program) error {
 		for _, m := range c.Methods {
 			at(m.KeyExpr)
 		}
-		for _, f := range c.Fields {
-			at(f.KeyExpr)
+		if fields {
+			for _, f := range c.Fields {
+				at(f.KeyExpr)
+			}
 		}
 		return true
 	})

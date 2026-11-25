@@ -127,7 +127,6 @@ func (e *Emitter) emitValueToCaughtParts(val Value) (tag, pay string, err error)
 	}
 	t, p := e.emitUnboxTagPayload(boxed)
 	// An Error held in `any` is the Error itself, as a throw of it is.
-	e.ensureExceptionHelpers()
 	t2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_caught_tag(i8 %s, i64 %s)", t2, t, p))
 	return t2, p, nil

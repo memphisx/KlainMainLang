@@ -1,7 +1,7 @@
 // Node's `path/win32`: `path.win32`.
 //
-// kml:default-namespace — `import path from 'path/win32'` reads this
-// module's exports.
+// Its default export is `path.win32` itself, so
+// `import p from 'path/win32'` is the same object, as in Node.
 
 import { win32 as flavour } from './path';
 import type { ParsedPath, FormatInputPathObject } from './path';
@@ -46,10 +46,13 @@ export function format(pathObject: FormatInputPathObject): string {
     return flavour.format(pathObject);
 }
 
-export function toNamespacedPath(path: string): string {
+export function toNamespacedPath(path: string): string;
+export function toNamespacedPath(path: any): any {
     return flavour.toNamespacedPath(path);
 }
 
 export const sep = flavour.sep;
 export const delimiter = flavour.delimiter;
 export { posix, win32 } from './path';
+
+export default flavour;

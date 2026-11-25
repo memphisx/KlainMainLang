@@ -245,7 +245,8 @@ export class Headers {
     values(): HeadersIterator { return new HeadersIterator(this.#sorted(), ITER_VALUES); }
     [Symbol.iterator](): HeadersIterator { return new HeadersIterator(this.#sorted(), ITER_ENTRIES); }
 
-    forEach(callback: (value: string, key: string, parent: Headers) => void, thisArg?: any): void {
+    forEach(callback: (value: string, key: string, parent: Headers) => void, thisArg?: any): void;
+    forEach(callback: any, thisArg?: any): void {
         if (typeof callback !== 'function') {
             throw new TypeError("Headers.forEach: Argument 1 could not be converted to: Function.");
         }

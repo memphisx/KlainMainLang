@@ -201,6 +201,17 @@
             ]
           },
           {
+            "feature": "`.toLocaleUpperCase(locales?)` / `.toLocaleLowerCase(locales?)`",
+            "status": "implemented",
+            "notes": [
+              "The first requested locale's language picks ICU's language-sensitive mappings: Turkish and Azeri dotted and dotless `i`, Lithuanian dot above; any other maps as `toUpperCase`/`toLowerCase`. A malformed tag is V8's RangeError ([ADR-02060](../adr/02/ADR-02060.md))"
+            ],
+            "decl": [
+              "String.toLocaleUpperCase",
+              "String.toLocaleLowerCase"
+            ]
+          },
+          {
             "feature": "`.repeat(n)`",
             "status": "implemented",
             "decl": [
@@ -281,9 +292,15 @@
           },
           {
             "feature": "`.normalize()`",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "The tables are Unicode 16.0 (the generating Python's), where Node 24's ICU is 17.0: a character new in 17.0 (`U+A7F1`) stays as it is"
+            ],
             "notes": [
-              "Deliberately deferred, not attempted — needs real Unicode normalization tables (NFC/NFD/NFKC/NFKD) this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text"
+              "NFC, NFD, NFKC and NFKD (UAX #15): decomposition, canonical ordering and recomposition over tables generated from Unicode's data (`tools/gencasemap/gennormalize.py`), Hangul arithmetically; an unknown form is Node's RangeError ([ADR-01987](../adr/01/ADR-01987.md))"
+            ],
+            "decl": [
+              "String.normalize"
             ]
           },
           {

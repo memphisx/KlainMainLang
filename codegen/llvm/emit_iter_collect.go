@@ -19,20 +19,40 @@ var errKeysSource string
 // behind kml_layout.h.
 func ErrKeysSource() string { return layoutHeader() + errKeysSource }
 
-// ensureAnyIterCollect defines @__kml_any_iter_collect(v): the values the
+// emitAnyIterCollect defines @__kml_any_iter_collect(v): the values the
 // iteration protocol yields for v, as a boxed `any[]` — the routine is
 // `const r = []; for (const x of v) r.push(x); return r`, compiled once
 // through the `for…of`-over-`any` lowering, so a value that is not
 // iterable throws its TypeError.
-func (e *Emitter) ensureAnyIterCollect() {
-	if e.usedAnyIterCollect {
-		return
-	}
-	e.usedAnyIterCollect = true
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
+func (e *Emitter) emitAnyIterCollect() { e.emitAnyIterCollectBody(false) }
+
+// emitAnyIterCollectMap defines @__kml_any_iter_collect_map(v, f):
+// Array.from(v, f) over the iteration protocol — `const r = []; let i = 0;
+// for (const x of v) r.push(f(x, i++)); return r`. f runs at each step, so
+// one that throws ends the walk and closes the iterator (ECMAScript
+// Array.from step 5), however long the iterator would run.
+func (e *Emitter) emitAnyIterCollectMap() { e.emitAnyIterCollectBody(true) }
+
+func (e *Emitter) emitAnyIterCollectBody(mapped bool) {
 	restore := e.sharedBody(e.beginDetachedFunc())
 	pos := ast.Pos{}
+	name := "__kml_any_iter_collect"
+	var elem ast.Expression = ast.NewIdentifier("__kml_collect_x", pos)
+	var step []ast.Statement
+	if mapped {
+		name = "__kml_any_iter_collect_map"
+		fSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", fSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %%p_f, "+irPtr+" %s, align 8", fSlot))
+		e.define("__kml_collect_f", Symbol{Ptr: fSlot, Ty: TypeAny})
+		iSlot := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
+		e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", iSlot))
+		e.define("__kml_collect_i", Symbol{Ptr: iSlot, Ty: TypeI64})
+		elem = ast.NewCallExpression(ast.NewIdentifier("__kml_collect_f", pos),
+			[]ast.Expression{ast.NewIdentifier("__kml_collect_x", pos), ast.NewIdentifier("__kml_collect_i", pos)}, pos)
+		step = append(step, ast.NewExpressionStatement(ast.NewUpdateExpression("++", false, ast.NewIdentifier("__kml_collect_i", pos), pos), pos))
+	}
 
 	vSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", vSlot))
@@ -47,9 +67,9 @@ func (e *Emitter) ensureAnyIterCollect() {
 
 	push := ast.NewExpressionStatement(ast.NewCallExpression(
 		ast.NewMemberExpression(ast.NewIdentifier("__kml_collect_r", pos), "push", pos),
-		[]ast.Expression{ast.NewIdentifier("__kml_collect_x", pos)}, pos), pos)
+		[]ast.Expression{elem}, pos), pos)
 	loop := ast.NewForOfStatement("const", "__kml_collect_x", ast.NewIdentifier("__kml_collect_v", pos),
-		ast.NewBlockStatement([]ast.Statement{push}, pos), pos)
+		ast.NewBlockStatement(append([]ast.Statement{push}, step...), pos), pos)
 	condL, bodyL := e.freshLabel("collect.cond"), e.freshLabel("collect.body")
 	incL, endL := e.freshLabel("collect.inc"), e.freshLabel("collect.end")
 	e.pushScope()
@@ -57,7 +77,7 @@ func (e *Emitter) ensureAnyIterCollect() {
 	err := e.emitForOfAnyValue(loop, Value{Ref: "%p_v", Ty: TypeAny}, condL, bodyL, incL, endL)
 	e.popScope()
 	if err != nil {
-		panic(fmt.Sprintf("__kml_any_iter_collect: %v", err))
+		panic(fmt.Sprintf("%s: %v", name, err))
 	}
 	out := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", out, rSlot))
@@ -65,6 +85,10 @@ func (e *Emitter) ensureAnyIterCollect() {
 
 	body := e.allocas.String() + e.body.String()
 	restore()
+	if mapped {
+		e.writeFunc("i64 @__kml_any_iter_collect_map(i64 %p_v, i64 %p_f)", body)
+		return
+	}
 	e.writeFunc("i64 @__kml_any_iter_collect(i64 %p_v)", body)
 }
 
@@ -85,16 +109,10 @@ func (e *Emitter) hasIteratorMember(t Type) bool {
 	return false
 }
 
-// ensureAnyArrayLikeCollect defines @__kml_any_arraylike_collect(v):
+// emitAnyArrayLikeCollect defines @__kml_any_arraylike_collect(v):
 // Array.from's array-like reading of a non-iterable value — its `length`
 // (ToLength) elements `v[0]`, `v[1]`, … as a boxed `any[]`.
-func (e *Emitter) ensureAnyArrayLikeCollect() {
-	if e.usedAnyArrayLikeCollect {
-		return
-	}
-	e.usedAnyArrayLikeCollect = true
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
+func (e *Emitter) emitAnyArrayLikeCollect() {
 	restore := e.sharedBody(e.beginDetachedFunc())
 	pos := ast.Pos{}
 	v := Value{Ref: "%p_v", Ty: TypeAny}
@@ -112,6 +130,15 @@ func (e *Emitter) ensureAnyArrayLikeCollect() {
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double %s, double 0.0", clamped, ok, d))
 	n := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", n, clamped))
+	// ToLength caps at 2^53 - 1 (fptosi of a larger double is poison), and
+	// ArrayCreate(len) refuses a length over 2^32 - 1 with a RangeError
+	// before reading any element.
+	big := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp oge double %s, 4294967296.0", big, clamped))
+	nSafe := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 4294967296, i64 %s", nSafe, big, n))
+	e.emitArrayLengthCheck(Value{Ref: nSafe, Ty: TypeI64})
+	n = nSafe
 	iSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", iSlot))
 	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", iSlot))
@@ -148,6 +175,14 @@ func (e *Emitter) ensureAnyArrayLikeCollect() {
 // iterable, boxed): an array's elements, the iteration protocol's values,
 // else the array-like reading — a fresh `any[]`.
 func (e *Emitter) emitAnyArrayFrom(val Value) (Value, error) {
+	return e.emitAnyArrayFromMapped(val, "")
+}
+
+// emitAnyArrayFromMapped is Array.from(val, f) with f a boxed function
+// (f == "": no mapping). Over the iteration protocol f runs at each step
+// (__kml_any_iter_collect_map); an array or array-like is read first and
+// then mapped, as nothing it does can be cut short by f.
+func (e *Emitter) emitAnyArrayFromMapped(val Value, f string) (Value, error) {
 	boxed, err := e.emitBoxValue(val)
 	if err != nil {
 		return Value{}, err
@@ -170,6 +205,12 @@ func (e *Emitter) emitAnyArrayFrom(val Value) (Value, error) {
 	viewSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", viewSlot))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", direct, viewSlot))
+	var mappedSlot string
+	if f != "" {
+		mappedSlot = e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", mappedSlot))
+		e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", mappedSlot))
+	}
 	haveL, otherL := e.freshLabel("afrom.have"), e.freshLabel("afrom.other")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitArrayFastPathOK(isArr), haveL, otherL))
 	e.emitLabel(otherL)
@@ -182,15 +223,18 @@ func (e *Emitter) emitAnyArrayFrom(val Value) (Value, error) {
 	protoL, likeL := e.freshLabel("afrom.proto"), e.freshLabel("afrom.like")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isFn, protoL, likeL))
 	e.emitLabel(protoL)
-	e.ensureAnyIterCollect()
 	c1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect(i64 %s)", c1, iterable.Ref))
+	if f != "" {
+		e.emitInstr(fmt.Sprintf("store i1 true, "+irPtr+" %s, align 1", mappedSlot))
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect_map(i64 %s, i64 %s)", c1, iterable.Ref, f))
+	} else {
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect(i64 %s)", c1, iterable.Ref))
+	}
 	v1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_anyarr_view(i64 %s)", v1, c1))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v1, viewSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", haveL))
 	e.emitLabel(likeL)
-	e.ensureAnyArrayLikeCollect()
 	c2 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_arraylike_collect(i64 %s)", c2, cur))
 	v2 := e.freshReg()
@@ -207,7 +251,32 @@ func (e *Emitter) emitAnyArrayFrom(val Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", n, lp))
 	copied := e.emitArrayCopy(data, n, TypeAny)
 	r1 := e.newArrayHeader(copied, n)
-	return Value{Ref: r1, Ty: ArrayOf(TypeAny)}, nil
+	if f == "" {
+		return Value{Ref: r1, Ty: ArrayOf(TypeAny)}, nil
+	}
+	// An array or array-like read: map it now.
+	outSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", outSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", r1, outSlot))
+	was := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", was, mappedSlot))
+	mapL, doneL := e.freshLabel("afrom.map"), e.freshLabel("afrom.mapped")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", was, doneL, mapL))
+	e.emitLabel(mapL)
+	rb, err := e.emitBoxValue(Value{Ref: r1, Ty: ArrayOf(TypeAny)})
+	if err != nil {
+		return Value{}, err
+	}
+	c3 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect_map(i64 %s, i64 %s)", c3, rb.Ref, f))
+	v3 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_anyarr_view(i64 %s)", v3, c3))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v3, outSlot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, outSlot))
+	return Value{Ref: out, Ty: ArrayOf(TypeAny)}, nil
 }
 
 // emitEmptyAnyArray is a fresh, empty `any[]`.
@@ -245,27 +314,18 @@ func (e *Emitter) emitUnboxAnyArray(arr Value, elem Type) (Value, error) {
 // its layout: the system fields set on it, then the keys of its `extra`
 // bag. They are boxsrc/errkeys.c.
 func (e *Emitter) emitErrorOwnKeysHooks() {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_error_nextra", "declare i64 @__kml_error_nextra("+irPtr+")")
 	e.declareFn("__kml_error_extra_key", "declare "+irPtr+" @__kml_error_extra_key("+irPtr+", i64)")
 	e.declareFn("__kml_error_extra_get", "declare i64 @__kml_error_extra_get("+irPtr+", "+irPtr+", "+irPtr+")")
 }
 
-// ensureAnyIterTake defines @__kml_any_iter_take(v, n): at most n values the
+// emitAnyIterTake defines @__kml_any_iter_take(v, n): at most n values the
 // iteration protocol yields for v, as a boxed `any[]` — array
 // destructuring's stepping: `const r = []; if (n > 0) for (const x of v) {
 // r.push(x); if (r.length >= n) break; }` (the break closes the iterator);
 // with n = 0, the iterator is only got and closed.
-func (e *Emitter) ensureAnyIterTake() {
-	if e.usedAnyIterTake {
-		return
-	}
-	e.usedAnyIterTake = true
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
+func (e *Emitter) emitAnyIterTake() {
 	restore := e.sharedBody(e.beginDetachedFunc())
 	pos := ast.Pos{}
 

@@ -154,6 +154,21 @@ func (e *Emitter) anyArgMarks(name string, sig FuncSig, args []ast.Expression) (
 			return nil, false
 		}
 		pt, has := anyArgParamAt(sig, i)
+		if has && e.classAtObjectParam(a, pt) {
+			// A class itself at an object-typed parameter: the parameter
+			// holds the class's box, whose statics its reads and writes
+			// reach (a layout's copy would take none of them).
+			marked[i] = true
+			last = i
+			continue
+		}
+		if has && e.anyAtClassParam(pt) && isUnconstrainedDynamic(e.typeOfExpr(a)) {
+			// An any at a class-typed parameter: a box that is no instance
+			// of the class (a plain object) is read as itself.
+			marked[i] = true
+			last = i
+			continue
+		}
 		if !has || !anyArgParamFits(pt) {
 			continue
 		}
@@ -294,7 +309,13 @@ func (e *Emitter) emitAnyArgDispatch(name string, sig FuncSig, args []ast.Expres
 		id := ast.NewIdentifier(tmp, a.GetPos())
 		callArgs[i] = id
 		pt, _ := paramAt(i)
-		c := e.emitAnyArgFits(v.Ref, pt)
+		c := "false" // a class's box never fits an object layout
+		switch {
+		case e.anyAtClassParam(pt) && !e.classAtObjectParam(a, pt):
+			c = e.emitBoxIsInstanceOf(v.Ref, pt)
+		case !e.classAtObjectParam(a, pt):
+			c = e.emitAnyArgFits(v.Ref, pt)
+		}
 		f := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", f, fits, c))
 		fits = f
@@ -361,6 +382,15 @@ func (e *Emitter) anyHeldDecl(v *ast.VarDeclaration) bool {
 		return true // an untyped global a function reads (registerModuleGlobals)
 	}
 	if v != nil && v.TypeAnnot == nil && v.Init != nil {
+		// An unsound scalar cast (boxUnsoundScalarCasts): the value as it is.
+		if as, ok := v.Init.(*ast.AsExpression); ok && e.unsoundCasts[as] {
+			return true
+		}
+		// A proxy itself (`const p = new Proxy(t, h)`): its box, wherever
+		// it is read (a function reading the module's binding too).
+		if o := e.reprOracle(); o != nil && o.proxyValue(v.Init) {
+			return true
+		}
 		// A read through a proxy: its get trap's result, whatever it is.
 		if obj := dynamicReadReceiver(v.Init); obj != nil {
 			if o := e.reprOracle(); o != nil && o.proxyValue(obj) {
@@ -368,14 +398,40 @@ func (e *Emitter) anyHeldDecl(v *ast.VarDeclaration) bool {
 			}
 		}
 	}
+	if v != nil && !v.Ambient && v.Init != nil && e.assignRetypedDecls()[v] {
+		// A binding an Object.assign gives a field of another type: no
+		// layout holds both, so a box does (its object becomes dynamic).
+		return true
+	}
+	if v != nil && !v.Ambient {
+		// An object literal's or a class instance's binding whose prototype
+		// the program changes (`Object.setPrototypeOf(o, p)`), annotated or
+		// not: an object whose methods its chain decides at run time.
+		switch init := v.Init.(type) {
+		case *ast.ObjectLiteral:
+			if e.protoRetargetedDecls()[v] {
+				return true
+			}
+		case *ast.NewExpression:
+			if _, user := e.classes[init.ClassName]; user && !init.Qualified && e.protoRetargetedDecls()[v] {
+				return true
+			}
+		}
+	}
 	if v != nil && v.TypeAnnot == nil && !v.Ambient {
-		// An object literal's binding whose prototype the program changes
-		// (`Object.setPrototypeOf(o, p)`): an object that has one.
-		if _, lit := v.Init.(*ast.ObjectLiteral); lit && e.protoRetargetedDecls()[v] {
+		// A JavaScript array intrinsic's result held boxed, as it is
+		// emitted (`find` over an any[]): intrinsicHeldType.
+		if it, ok := e.intrinsicHeldType(v, TypePtr); ok && isUnconstrainedDynamic(it) {
 			return true
 		}
-		// An unannotated binding of a call the any-argument check boxes.
+		// An unannotated binding of a call the any-argument check boxes, or
+		// of a function returning a read through a proxy.
 		call, ok := v.Init.(*ast.CallExpression)
+		if ok {
+			if e.callReturnsProxyRead(call) {
+				return true
+			}
+		}
 		return ok && e.anyArgReturnsBox(call)
 	}
 	if v == nil || v.TypeAnnot == nil || v.Ambient || v.Init == nil && !e.anyAssignedDecls()[v] {
@@ -443,7 +499,7 @@ func (e *Emitter) anyAssignedDecls() map[*ast.VarDeclaration]bool {
 		call, isCall := a.Right.(*ast.CallExpression)
 		t := o.c.TypeOf(a.Right)
 		anyElems := !o.c.Unanswered(t) && t.Flags&checker.Object != 0 && t.Kind == checker.Array && t.Elem != nil && t.Elem.Flags&checker.Any != 0
-		if (o.c.Unanswered(t) || t.Flags&checker.Any == 0) && !anyElems && !(isCall && e.anyArgReturnsBox(call)) {
+		if (o.c.Unanswered(t) || t.Flags&checker.Any == 0) && !anyElems && !(isCall && (e.anyArgReturnsBox(call) || e.callReturnsProxyRead(call))) {
 			return true
 		}
 		if sym, _ := o.b.Resolve(id); sym != nil {
@@ -469,6 +525,37 @@ func (e *Emitter) boxesInto(from, to Type) bool {
 	return isUnconstrainedDynamic(from) || anyElemArray(from) && to.IsArray() && !anyElemArray(to)
 }
 
+// assignRetypedDecls is the variable bindings (strict lane) an
+// Object.assign call names as its target while giving one of its fields a
+// value of a type the field does not admit (the checker's AssignRetypes).
+func (e *Emitter) assignRetypedDecls() map[*ast.VarDeclaration]bool {
+	if e.assignRetyped != nil {
+		return e.assignRetyped
+	}
+	e.assignRetyped = map[*ast.VarDeclaration]bool{}
+	o := e.reprOracle()
+	if o == nil || e.prog == nil || e.compatJS() {
+		return e.assignRetyped
+	}
+	ast.Inspect(e.prog, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpression)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		id, ok := call.Args[0].(*ast.Identifier)
+		if !ok || e.declIntrinsic(call) != "Object.assign" {
+			return true
+		}
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, ok := singleVarDecl(sym); ok && o.c.AssignRetypes(call) {
+				e.assignRetyped[v] = true
+			}
+		}
+		return true
+	})
+	return e.assignRetyped
+}
+
 // protoRetargetedDecls is every single-declaration binding named as the
 // target or the prototype of Object.setPrototypeOf or
 // Reflect.setPrototypeOf, or the prototype of Object.create: an object in a
@@ -491,15 +578,14 @@ func (e *Emitter) protoRetargetedDecls() map[*ast.VarDeclaration]bool {
 		if !ok {
 			return true
 		}
-		ns, ok := m.Object.(*ast.Identifier)
-		if !ok {
-			return true
+		if _, ok := m.Object.(*ast.Identifier); !ok {
+			return true // a builtin namespace's call: the cheap filter first
 		}
 		var named []ast.Expression
-		switch {
-		case m.Property == "setPrototypeOf" && (ns.Name == "Object" || ns.Name == "Reflect") && len(call.Args) >= 2:
+		switch k := e.declIntrinsic(call); {
+		case (k == "Object.setPrototypeOf" || k == "Reflect.setPrototypeOf") && len(call.Args) >= 2:
 			named = call.Args[:2]
-		case m.Property == "create" && ns.Name == "Object":
+		case k == "Object.create" && len(call.Args) >= 1:
 			named = call.Args[:1]
 		}
 		for _, a := range named {
@@ -514,4 +600,89 @@ func (e *Emitter) protoRetargetedDecls() map[*ast.VarDeclaration]bool {
 		return true
 	})
 	return e.protoRetargeted
+}
+
+// classAtObjectParam reports argument a, a class itself (`f(K)`), at a
+// parameter of a plain object type (`o: { x: number }`).
+func (e *Emitter) classAtObjectParam(a ast.Expression, pt Type) bool {
+	if !pt.IsObject() || pt.IsClass() || pt.IsDynamic() {
+		return false
+	}
+	o := e.reprOracle()
+	return o != nil && o.classValue(a)
+}
+
+// anyAtClassParam reports a parameter of a program class's type whose
+// instances a box test tells apart (no error or host base).
+func (e *Emitter) anyAtClassParam(pt Type) bool {
+	if !pt.IsClass() || pt.IsDynamic() || pt.Nullable() {
+		return false
+	}
+	info, ok := e.classes[pt.ClassName]
+	return ok && !info.IsErrorSubclass && info.HostBase == nil
+}
+
+// emitBoxIsInstanceOf is an i1 that the box word holds an instance of
+// pt's class (or a subclass's), laid out as the class is.
+func (e *Emitter) emitBoxIsInstanceOf(word string, pt Type) string {
+	tag, payload := e.emitUnboxTagPayload(Value{Ref: word, Ty: TypeAny})
+	isObj, nonNull, both := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", nonNull, payload))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", both, isObj, nonNull))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", slot))
+	readL, doneL := e.freshLabel("boxinst.read"), e.freshLabel("boxinst.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", both, readL, doneL))
+	e.emitLabel(readL)
+	hdr := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", hdr, e.emitIntToPtr(payload)))
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.emitClassIs(hdr, e.classes[pt.ClassName].TagID), slot))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
+	return r
+}
+
+// returnsProxyRead is the oracle's returnsProxyRead.
+func (e *Emitter) returnsProxyRead(body ast.Node) bool {
+	o := e.reprOracle()
+	return o != nil && o.returnsProxyRead(body)
+}
+
+// callReturnsProxyRead reports a call of an unannotated top-level function
+// whose body returns a read through a proxy.
+func (e *Emitter) callReturnsProxyRead(call *ast.CallExpression) bool {
+	id, ok := call.Callee.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	if o := e.reprOracle(); o != nil {
+		// A binding of an unannotated arrow or function expression.
+		if sym, _ := o.b.Resolve(id); sym != nil {
+			if v, ok := singleVarDecl(sym); ok && v.Kind == "const" && v.TypeAnnot == nil {
+				switch f := v.Init.(type) {
+				case *ast.ArrowFunction:
+					var body ast.Node = f.Block
+					if f.Body != nil {
+						body = f.Body
+					}
+					return f.RetType == nil && !f.IsAsync && e.returnsProxyRead(body)
+				case *ast.FunctionExpression:
+					return f.RetType == nil && !f.IsAsync && !f.IsGenerator && e.returnsProxyRead(f.Body)
+				}
+			}
+		}
+	}
+	mangled, _, found := e.resolveFuncRef(id.Name)
+	if !found {
+		return false
+	}
+	fd, ok := e.topFuncDecls[mangled]
+	if !ok {
+		return false
+	}
+	return fd.ReturnType == nil && !fd.IsAsync && !fd.IsGenerator && e.returnsProxyRead(fd.Body)
 }

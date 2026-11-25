@@ -93,7 +93,7 @@ func (c *Checker) enumObject(sym *binder.Symbol) *Type {
 	props := make([]*Property, len(ms))
 	numeric := false
 	for i, m := range ms {
-		props[i] = &Property{Name: m.Member, Type: m}
+		props[i] = &Property{Name: m.Member, ty: m}
 		numeric = numeric || m.Flags&NumberLiteral != 0
 	}
 	if numeric && sym.Flags&binder.ConstEnum == 0 {

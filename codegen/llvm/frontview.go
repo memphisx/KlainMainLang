@@ -15,6 +15,7 @@ type frontView interface {
 	AmbientName(name string) bool
 	InEvalCode(n ast.Node) bool
 	AnyArgOverloadCall(e *ast.CallExpression) bool
+	AssignRetypes(e *ast.CallExpression) bool
 	AnnotationType(ta ast.TypeNode) *checker.Type
 	AnyType() *checker.Type
 	ThisType() *checker.Type
@@ -33,6 +34,7 @@ type frontView interface {
 	ExpandoMember(e *ast.MemberExpression) bool
 	FieldType(cd *ast.ClassDeclaration, name string) *checker.Type
 	GlobalInterface(name string) *checker.Type
+	GlobalValue(name string) bool
 	InProgram(n ast.Node) bool
 	IteratedType(t *checker.Type) *checker.Type
 	JSCallSiteParam(fn ast.Node, i int) *checker.Type
@@ -57,6 +59,7 @@ type frontView interface {
 	PrimitiveMember(str bool, name string) (*checker.Type, ast.Node, []ast.Node)
 	StorageTypeOf(e ast.Expression) *checker.Type
 	GlobalValueType(name string) *checker.Type
+	GlobalValueLiteral(name string) *ast.TypeLiteral
 	ErasedSignature(t *checker.Type) *checker.Type
 	StandsFor(syn, orig ast.Expression)
 	ImplementationSignature(fd *ast.FunctionDeclaration) *checker.Type

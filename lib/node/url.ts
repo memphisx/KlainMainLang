@@ -999,7 +999,11 @@ function escapePathChars(filepath: string, windows: boolean): string {
     return out;
 }
 
-export function pathToFileURL(filepath: string, options?: PathToFileUrlOptions): URL {
+export function pathToFileURL(filepath: string, options?: PathToFileUrlOptions): URL;
+export function pathToFileURL(filepath: any, options?: PathToFileUrlOptions): URL {
+    if (typeof filepath !== 'string') {
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', 'The "path" argument must be of type string.' + received(filepath));
+    }
     const windows = options?.windows ?? isWindows;
     const isUNC = windows && filepath.startsWith('\\\\');
     let resolved = isUNC ? filepath : (windows ? path.win32.resolve(filepath) : path.posix.resolve(filepath));

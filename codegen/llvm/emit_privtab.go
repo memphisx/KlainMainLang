@@ -36,7 +36,12 @@ func (e *Emitter) overridePrivClass() string {
 // than an instance of its layout: its base's constructor may return one.
 func (e *Emitter) overrideInstances(cls string) bool {
 	info, ok := e.classes[cls]
-	return ok && e.compatJS() && info.BaseClass != "" && e.ctorMayOverride(info.BaseClass)
+	if !ok || !e.compatJS() || info.BaseClass == "" {
+		return false
+	}
+	// A run-time base's construction builds the object too (emitValueBaseSuper).
+	fn := fnBaseOf(info.BaseClass)
+	return e.ctorMayOverride(info.BaseClass) || e.valueBases[fn] && !builtinValueBases[fn] || e.fnBaseReturns(fn)
 }
 
 // privateKind is what cls declares private name p as: a field, a method or
@@ -63,7 +68,6 @@ func (e *Emitter) ptabHandle(key string) string {
 
 // ptabObj is the object an any holds, as a side table's key.
 func (e *Emitter) ptabObj(o Value) string {
-	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, o.Ref))
 	return e.emitIntToPtr(pay)
@@ -204,9 +208,12 @@ func (e *Emitter) emitPrivateDefine(o Value, cls, p string, v *Value, pos ast.Po
 // adds the brand of its private methods and its uninitialized private
 // fields (undefined); the initialized ones are their initializer's
 // assignments, which follow (overrideFieldDef).
-func (e *Emitter) emitOverrideDefinitions(o Value, cls string, pos ast.Pos) error {
+func (e *Emitter) emitOverrideDefinitions(o, inst Value, cls string, pos ast.Pos) error {
+	// Only reached when `this` may be another object (emitOverrideThis),
+	// a value base's construction included, which overrideInstances, asking
+	// of the base's own constructor, does not count.
 	decl := e.programClassDecl(cls)
-	if !e.overrideInstances(cls) || decl == nil {
+	if decl == nil {
 		return nil
 	}
 	brand := false
@@ -222,12 +229,45 @@ func (e *Emitter) emitOverrideDefinitions(o Value, cls string, pos ast.Pos) erro
 	}
 	for _, f := range decl.Fields {
 		if !f.Static && f.Initializer == nil && strings.HasPrefix(f.Name, "#") {
+			if strings.HasPrefix(f.Name, "#__kml_cap_") && inst.Ref != "" {
+				// A hidden capture: the instance allocated for the class holds
+				// the local's value (the `new` stored it); another object
+				// `this` became takes it.
+				if err := e.emitCaptureCarry(o, inst, cls, f.Name, pos); err != nil {
+					return err
+				}
+				continue
+			}
 			u := Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}
 			if err := e.emitPrivateDefine(o, cls, f.Name, &u, pos); err != nil {
 				return err
 			}
 		}
 	}
+	return nil
+}
+
+// emitCaptureCarry gives o (an any), when it is not the instance inst
+// allocated for cls, inst's hidden capture field.
+func (e *Emitter) emitCaptureCarry(o, inst Value, cls, field string, pos ast.Pos) error {
+	op := e.ptabObj(o)
+	other := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, %s", other, op, inst.Ref))
+	carryL, doneL := e.freshLabel("capcarry"), e.freshLabel("capcarry.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", other, carryL, doneL))
+	e.emitLabel(carryL)
+	v, err := e.emitExpr(ast.NewMemberExpression(e.bindValue(inst, pos), field, pos))
+	if err != nil {
+		return err
+	}
+	b, err := e.emitBoxValue(v)
+	if err != nil {
+		return err
+	}
+	h := e.ptabHandle(cls + field)
+	e.emitInstr(fmt.Sprintf("call void @__kml_weak_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", h, e.ptabObj(o), b.Ref))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
 	return nil
 }
 
@@ -330,6 +370,18 @@ func (e *Emitter) emitOverridePrivate(ex ast.Expression) (Value, bool, error) {
 			}
 			return e.emitPtabGet(o, cls+me.Property, readMsg(me.Property)), nil
 		})
+		if err == nil && field {
+			// Both arms meet as an any; the read is of the field's own type
+			// (a hidden capture of a Map or ArrayBuffer is used as one).
+			if ci, ok := e.classes[cls]; ok {
+				for _, f := range ci.Ty.Fields {
+					if f.Name == me.Property && !f.Ty.IsDynamic() {
+						v = e.convert(v, f.Ty)
+						break
+					}
+				}
+			}
+		}
 		return v, true, err
 	case *ast.UpdateExpression:
 		me, field, ok := priv(x.Arg)

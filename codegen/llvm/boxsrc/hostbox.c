@@ -261,8 +261,12 @@ i64 __kml_classref_sget(void *p, i64 i) {
 }
 extern void __kml_dynobj_copy_own(void *dst, void *src);
 /* A snapshot of the reference's statics, with its own bag's properties. */
+typedef struct DeletedStatic DeletedStatic;
+static void drop_deleted_statics(void *p, void *snap);
 void __kml_classref_bag_merge(void *p, void *snap) {
-    if (snap) __kml_dynobj_copy_own(snap, __kml_classref_extra(p, 0));
+    if (!snap) return;
+    __kml_dynobj_copy_own(snap, __kml_classref_extra(p, 0));
+    drop_deleted_statics(p, snap);
 }
 /* Whether the reference's own bag has key. */
 _Bool __kml_classref_extra_has(void *p, const char *key) {
@@ -299,8 +303,40 @@ i64 __kml_classref_get(void *p, const char *key) {
     }
     return KML_NB_UNDEFINED;
 }
+/* Static methods a `delete C.m` removed: the reference's own bag holds
+ * undefined for each (its reads), and this list says the property is gone
+ * (`in`, hasOwnProperty), until a write gives it back. */
+struct DeletedStatic { void *p; const char *key; struct DeletedStatic *next; };
+static DeletedStatic *deleted_statics;
+static DeletedStatic **deleted_static_at(void *p, const char *key) {
+    DeletedStatic **at = &deleted_statics;
+    while (*at && !((*at)->p == p && strcmp((*at)->key, key) == 0)) at = &(*at)->next;
+    return at;
+}
+_Bool __kml_classref_static_deleted(void *p, const char *key) { return *deleted_static_at(p, key) != 0; }
+static void undelete_static(void *p, const char *key) {
+    DeletedStatic **at = deleted_static_at(p, key);
+    if (*at) *at = (*at)->next;
+}
+/* A snapshot of the reference's properties leaves out its deleted ones. */
+static void drop_deleted_statics(void *p, void *snap) {
+    for (DeletedStatic *d = deleted_statics; d; d = d->next)
+        if (d->p == p) __kml_dynobj_delete(snap, d->key);
+}
+void __kml_classref_set(void *p, const char *key, i64 v);
+/* `delete C.m` of a static method. */
+void __kml_classref_static_delete(void *p, const char *key) {
+    __kml_classref_set(p, key, KML_NB_UNDEFINED);
+    if (__kml_classref_static_deleted(p, key)) return;
+    DeletedStatic *d = kml_alloc(KML_HEAP_WORDS, sizeof *d);
+    d->p = p;
+    d->key = key;
+    d->next = deleted_statics;
+    deleted_statics = d;
+}
 void __kml_classref_set(void *p, const char *key, i64 v) {
     const CtorRow *r = ctor_row(p);
+    undelete_static(p, key);
     if (!__kml_classref_extra_has(p, key)) {
         /* (A setter-only static reads as undefined: the row says it wrote.) */
         if (r && r->set && r->set(key, v)) return;

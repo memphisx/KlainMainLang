@@ -58,7 +58,11 @@
 uintptr_t __kml_sg_band_lo;
 
 static void (*sg_throw)(const char *);
+/* exceptions.c's RangeError thrower, set by its constructor (hooks.c). */
+extern void (*__kml_range_error_hook)(const char *);
 static const char *sg_msg;
+/* The RangeError message (a program string), for task.c: null before init. */
+const char *__kml_sg_message(void) { return sg_msg; }
 void __kml_frames_fault_page(uintptr_t lo, uintptr_t hi); /* frames.c */
 /* Set once the handler is installed: another thread then needs its own
  * alternate stack (__kml_stack_guard_thread). */
@@ -135,7 +139,7 @@ static void sg_limit_main(void) {
 
 void __kml_stack_guard_init(void (*throw_fn)(const char *), const char *msg) {
 #ifndef KML_SG_SANITIZER
-    sg_throw = throw_fn;
+    sg_throw = throw_fn ? throw_fn : __kml_range_error_hook;
     sg_msg = msg;
     sg_limit_main();
     stack_t ss;
@@ -237,7 +241,11 @@ void __kml_fiber_stack_free(void *s, size_t n) {
 #define SG_GUARANTEE (64 * 1024)
 
 static void (*sg_throw)(const char *);
+/* exceptions.c's RangeError thrower, set by its constructor (hooks.c). */
+extern void (*__kml_range_error_hook)(const char *);
 static const char *sg_msg;
+/* The RangeError message (a program string), for task.c: null before init. */
+const char *__kml_sg_message(void) { return sg_msg; }
 
 /* Not instrumented under -fsanitize: the handler sees every exception of
  * every thread first, including the access faults with which ASan commits its
@@ -263,7 +271,7 @@ void __kml_stack_overflow(void) {
 }
 
 void __kml_stack_guard_init(void (*throw_fn)(const char *), const char *msg) {
-    sg_throw = throw_fn;
+    sg_throw = throw_fn ? throw_fn : __kml_range_error_hook;
     sg_msg = msg;
     ULONG g = SG_GUARANTEE;
     SetThreadStackGuarantee(&g);

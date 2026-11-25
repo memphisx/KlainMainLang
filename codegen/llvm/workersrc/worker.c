@@ -68,6 +68,7 @@ void __kml_stack_guard_thread(void);
 /* The thread a Worker runs. Signals are the main thread's; the worker's
  * modules evaluate (its entry), then its loop runs until nothing holds it
  * open, and the parent hears the exit code. */
+void __kml_loop_mark_start(void);
 void *__kml_worker_thread(void *ctx) {
 #ifdef KML_GC
     kml_gc_thread_register();
@@ -97,6 +98,10 @@ void *__kml_worker_thread(void *ctx) {
     }
 #endif
     void (*entry)(void) = (void (*)(void))__kml_worker_enter(ctx);
+    /* A worker's loop is running before its script does (Node starts the
+     * worker's environment from inside its loop): nodeTiming.loopStart is
+     * set while its top level runs. */
+    __kml_loop_mark_start();
     entry();
     i64 code = __kml_worker_run_loop();
     __kml_worker_leave(code);
@@ -134,6 +139,22 @@ __attribute__((noreturn)) void __kml_thread_exit(int code) {
     KML_SWAPCONTEXT(F(ct, KML_TASK_CTX, void *), F(ct, KML_TASK_RESUMER, void *));
     __builtin_unreachable();
 }
+
+/* An uncaught error on a worker thread goes to the parent's 'error'
+ * listener (through the hook worker_threads.ts registers, which posts it on
+ * the internal port) and ends the thread with code 1; on the main thread it
+ * returns. A caught Error (tag 13) is its object box. Installed as hooks.c's
+ * __kml_worker_uncaught. */
+extern i64 __kml_nb_pack(u8 tag, i64 pay);
+extern _Bool __kml_process_hook_call(int which, i64 a, i64 b);
+extern void *__kml_hookp_worker_uncaught;
+static void worker_uncaught(u8 tag, i64 pay) {
+    if (!__kml_worker_is_thread()) return;
+    i64 box = tag == 13 ? (pay | 1) : __kml_nb_pack(tag, pay);
+    __kml_process_hook_call(3, box, KML_NB_UNDEFINED);
+    __kml_thread_exit(1);
+}
+__attribute__((constructor)) static void worker_uncaught_init(void) { __kml_hookp_worker_uncaught = (void *)worker_uncaught; }
 
 /* Runs after every task swap returns (spawn, the scheduler, the resume
  * runner) and ends the thread once control is back on its own stack. */

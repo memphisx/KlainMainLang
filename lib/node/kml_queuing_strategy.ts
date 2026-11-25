@@ -17,13 +17,19 @@ function readInit(init: any): number {
     return Number(init.highWaterMark);
 }
 
-function countSize(chunk?: any): number {
-    return 1;
-}
+// Each a method named `size` (no constructor, no `prototype`), of Node's
+// length (0 and 1).
+const countSize = {
+    size(): number {
+        return 1;
+    },
+}.size;
 
-function byteLengthSize(chunk: any): number {
-    return chunk.byteLength;
-}
+const byteLengthSize = {
+    size(chunk: any): number {
+        return chunk.byteLength;
+    },
+}.size;
 
 export class CountQueuingStrategy {
     #highWaterMark: number;

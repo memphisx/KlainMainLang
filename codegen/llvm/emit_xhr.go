@@ -23,7 +23,6 @@ import (
 // responseText/response, no callbacks registered, a fresh empty headers
 // map for setRequestHeader() to accumulate into before send()).
 func (e *Emitter) emitNewXMLHttpRequestExpression(ex *ast.NewXMLHttpRequestExpression) (Value, error) {
-	e.ensureMapStrHelpers()
 
 	ty := XMLHttpRequestType()
 	objReg := e.freshReg()
@@ -46,6 +45,7 @@ func (e *Emitter) emitNewXMLHttpRequestExpression(ex *ast.NewXMLHttpRequestExpre
 	storeField(XHRHeadersField, irPtr, headersPtr, 8)
 	storeField("readyState", "i64", "0", 8)
 	storeField("status", "i64", "0", 8)
+	storeField("statusText", irPtr, emptyStr, 8)
 	storeField("responseText", irPtr, emptyStr, 8)
 	storeField("response", irPtr, emptyStr, 8)
 	storeField("onreadystatechange", irPtr, "null", 8)
@@ -142,7 +142,6 @@ func (e *Emitter) emitXHROpen(objExpr ast.Expression, args []ast.Expression, pos
 	e.xhrStoreField(objVal, XHRMethodField, methodVal)
 	e.xhrStoreField(objVal, XHRURLField, urlVal)
 
-	e.ensureMapStrHelpers()
 	freshHeaders := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", freshHeaders))
 	e.xhrStoreField(objVal, XHRHeadersField, Value{Ref: freshHeaders, Ty: TypePtr})
@@ -184,7 +183,6 @@ func (e *Emitter) emitXHRSetRequestHeader(objExpr ast.Expression, args []ast.Exp
 	idx, fieldTy, _ := objVal.Ty.FieldIndex(XHRHeadersField)
 	headersVal := e.loadFieldValue(objVal, idx, fieldTy)
 
-	e.ensureMapStrHelpers()
 	valAsI64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", valAsI64, valVal.Ref))
 	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", headersVal.Ref, nameVal.Ref, valAsI64))
@@ -232,7 +230,7 @@ func (e *Emitter) emitXHRSend(objExpr ast.Expression, args []ast.Expression, pos
 		return Value{}, err
 	}
 
-	e.ensureFetchAsync()
+	e.ensureFetch()
 	e.ensureFetch()
 	pendingReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_async("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" null)",
@@ -258,18 +256,20 @@ func (e *Emitter) emitXHRSend(objExpr ast.Expression, args []ast.Expression, pos
 	// TDD-00120: the curl body is a raw buffer — copy it into a length-prefixed
 	// header string so responseText's binary-safe consumers (=== / .split read
 	// ptr-8) work. bodyLen (tuple index 4) is the exact byte count.
-	e.ensureStrHeaderRuntime()
 	respTextReg := e.freshReg()
 	respNulReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 %s)", respTextReg, bodyLenReg))
 	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", respTextReg, bodyPtrReg, bodyLenReg))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %s", respNulReg, respTextReg, bodyLenReg))
 	e.heapStore("i8", "0", respNulReg, 1)
-	e.ensureMapStrHelpers()
 	respHdrsReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_headers_map("+irPtr+" %s)", respHdrsReg, pendingReg))
 	e.xhrStoreField(objVal, XHRRespHeadersField, Value{Ref: respHdrsReg, Ty: TypePtr})
 	e.xhrStoreField(objVal, "status", Value{Ref: statusReg, Ty: TypeI64})
+	// The status line's reason phrase ("" over HTTP/2, as in a browser).
+	stTextReg := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_status_text("+irPtr+" %s)", stTextReg, pendingReg))
+	e.xhrStoreField(objVal, "statusText", Value{Ref: stTextReg, Ty: TypePtr})
 	e.xhrStoreField(objVal, "responseText", Value{Ref: respTextReg, Ty: TypePtr})
 	e.xhrStoreField(objVal, "response", Value{Ref: respTextReg, Ty: TypePtr})
 	e.xhrStoreField(objVal, "readyState", Value{Ref: "4", Ty: TypeI64})
@@ -342,7 +342,6 @@ func (e *Emitter) emitXHRGetResponseHeader(objExpr ast.Expression, args []ast.Ex
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, nullL, getL))
 
 	e.emitLabel(getL)
-	e.ensureMapStrHelpers()
 	raw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", raw, mapVal.Ref, lowered))
 	asPtr := e.freshReg()
@@ -372,8 +371,6 @@ func (e *Emitter) emitXHRGetAllResponseHeaders(objExpr ast.Expression, args []as
 	}
 	idx, fieldTy, _ := objVal.Ty.FieldIndex(XHRRespHeadersField)
 	mapVal := e.loadFieldValue(objVal, idx, fieldTy)
-	e.ensureMapStrHelpers()
-	e.ensureStrHeaderRuntime()
 	res := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_xhr_headers_all("+irPtr+" %s)", res, mapVal.Ref))
 	return Value{Ref: res, Ty: TypePtr}, nil
@@ -386,7 +383,6 @@ func (e *Emitter) emitLoweredHeaderName(nameExpr ast.Expression) (string, error)
 		return "", err
 	}
 	nameVal = e.convert(nameVal, TypePtr)
-	e.ensureStrHeaderRuntime()
 	lowered := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_tolower("+irPtr+" %s)", lowered, nameVal.Ref))
 	return lowered, nil

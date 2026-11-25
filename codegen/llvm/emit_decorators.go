@@ -33,10 +33,7 @@ func (e *Emitter) emitClassDecoratorApplications(cd *ast.ClassDeclaration) error
 	}
 	pos := cd.GetPos()
 
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 
 	// emitDecoratorMetadata: define design:type/paramtypes/returntype on the
 	// target before any user decorator runs, so a user decorator can read it
@@ -438,10 +435,8 @@ func (e *Emitter) emitMethodBoxAdapter(className, methodName string, pos ast.Pos
 // emitDecoratedMethodCall routes a call to a decorated method through its
 // runtime slot (TDD-00161 Stage 2): load the current callable (a boxed tag-12
 // value the decorators may have replaced), and invoke it via the dynamic-call
-// ABI with the receiver and boxed arguments, coercing the boxed result back to
-// the method's declared return type.
+// ABI with the receiver and boxed arguments; its boxed result is the call's.
 func (e *Emitter) emitDecoratedMethodCall(objTy Type, thisVal Value, methodName string, args []ast.Expression, slot string, pos ast.Pos) (Value, error) {
-	sig := e.classes[objTy.ClassName].MethodSigs[methodName]
 	n := len(args)
 	argv := e.freshReg()
 	if n > 0 {
@@ -479,10 +474,9 @@ func (e *Emitter) emitDecoratedMethodCall(objTy Type, thisVal Value, methodName 
 	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 %s("+irPtr+" %s, i64 %s, i64 %d, "+irPtr+" %s)", r, fp, env, recvBox.Ref, n, argv))
-	if sig.RetType.IR == "void" || sig.RetType.IR == "" {
-		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeVoid}, nil
-	}
-	return e.convert(Value{Ref: r, Ty: TypeAny}, sig.RetType), nil
+	// The result is the callable's as it is: a decorator's replacement
+	// returns what it returns, whatever the declared type (decoratedMethodCall).
+	return Value{Ref: r, Ty: TypeAny}, nil
 }
 
 // classHasObserveDecorators reports whether cd carries any Stage-1 (property or

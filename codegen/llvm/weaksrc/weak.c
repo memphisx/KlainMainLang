@@ -21,8 +21,69 @@ typedef struct kml_weak_cell {
 static void **link_new(void *obj) {
     void **w = (void **)kml_gc_alloc_atomic(sizeof(void *));
     *w = obj;
-    kml_gc_weak_link(w, obj);
+    /* Registered on the block holding obj: Boehm clears a link only for
+     * its block's start, and a key may point inside its block. */
+    void *base = kml_gc_base(obj);
+    kml_gc_weak_link(w, base ? base : obj);
     return w;
+}
+
+/* Ephemerons. A program making a WeakMap compiles the collector with
+ * its ephemeron slots (gcshim.c, KML_EPH): every scanned block gets a word near its end. A WeakMap
+ * entry's value lives in a node chained from its key's slot, so the value
+ * is reachable exactly while the key is; the map holds the key only
+ * through a disappearing link. A node names its map by the map's handle
+ * hidden (complemented), so a key never keeps a map alive. */
+typedef struct kml_eph_node {
+    struct kml_eph_node *next;
+    uintptr_t map; /* ~handle */
+    i64 val;
+} kml_eph_node;
+
+static kml_eph_node **eph_find(void **slot, void *h) {
+    kml_eph_node **pp = (kml_eph_node **)slot;
+    for (; *pp; pp = &(*pp)->next)
+        if ((*pp)->map == ~(uintptr_t)h) return pp;
+    return NULL;
+}
+
+/* Stores val as key's value in map h; 0 when key has no slot (it is no
+ * collected object: static data, or a block that cannot hold one). */
+static int eph_put(void *h, void *key, i64 val) {
+    void **slot = kml_gc_eph_slot(key);
+    if (!slot) return 0;
+    kml_eph_node **pp = eph_find(slot, h);
+    if (pp) {
+        (*pp)->val = val;
+        return 1;
+    }
+    kml_eph_node *n = (kml_eph_node *)kml_gc_alloc(sizeof *n);
+    n->map = ~(uintptr_t)h;
+    n->val = val;
+    n->next = (kml_eph_node *)*slot;
+    *slot = n;
+    return 1;
+}
+
+static int eph_get(void *h, void *key, i64 *val) {
+    void **slot = kml_gc_eph_slot(key);
+    if (!slot) return 0;
+    kml_eph_node **pp = eph_find(slot, h);
+    *val = pp ? (*pp)->val : 0;
+    return 1;
+}
+
+static void eph_drop(void *h, void *key) {
+    void **slot = key ? kml_gc_eph_slot(key) : NULL;
+    kml_eph_node **pp = slot ? eph_find(slot, h) : NULL;
+    if (pp) *pp = (*pp)->next;
+}
+
+/* A collected map's entries leave the keys still alive. */
+static void weak_map_died(void *base, void *data) {
+    (void)data;
+    kml_weak_cell **h = (kml_weak_cell **)((i64 *)base + 1);
+    for (kml_weak_cell *c = *h; c; c = c->next) eph_drop(h, *c->link);
 }
 #else
 static void **link_new(void *obj) {
@@ -39,6 +100,9 @@ void *__kml_weak_create(i64 hdr) {
     base[0] = hdr;
     kml_weak_cell **h = (kml_weak_cell **)(base + 1);
     *h = NULL;
+#ifdef KML_GC
+    kml_gc_finalizer(base, weak_map_died, NULL);
+#endif
     return h;
 }
 
@@ -53,21 +117,28 @@ static kml_weak_cell *weak_find(kml_weak_cell **h, void *key) {
 
 void __kml_weak_set(void *h, void *key, i64 val) {
     kml_weak_cell *c = weak_find((kml_weak_cell **)h, key);
-    if (c) {
-        c->val = val;
-        return;
+    if (!c) {
+        void **w = link_new(key);
+        c = (kml_weak_cell *)kml_alloc(KML_HEAP_WORDS, sizeof *c);
+        c->next = *(kml_weak_cell **)h;
+        c->link = w;
+        c->val = 0;
+        *(kml_weak_cell **)h = c;
     }
-    void **w = link_new(key);
-    c = (kml_weak_cell *)kml_alloc(KML_HEAP_WORDS, sizeof *c);
-    c->next = *(kml_weak_cell **)h;
-    c->link = w;
+#ifdef KML_GC
+    if (eph_put(h, key, val)) return;
+#endif
     c->val = val;
-    *(kml_weak_cell **)h = c;
 }
 
 i64 __kml_weak_get(void *h, void *key) {
     kml_weak_cell *c = weak_find((kml_weak_cell **)h, key);
-    return c ? c->val : 0;
+    if (!c) return 0;
+#ifdef KML_GC
+    i64 v;
+    if (eph_get(h, key, &v)) return v;
+#endif
+    return c->val;
 }
 
 unsigned char __kml_weak_has(void *h, void *key) {
@@ -83,6 +154,9 @@ unsigned char __kml_weak_delete(void *h, void *key) {
     for (kml_weak_cell *c = *prev; c; prev = &c->next, c = c->next) {
         if (*c->link == key) {
             *prev = c->next;
+#ifdef KML_GC
+            eph_drop(h, key);
+#endif
             return 1;
         }
     }

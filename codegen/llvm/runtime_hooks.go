@@ -27,12 +27,11 @@ func (e *Emitter) hooksCSource() CSource {
 // hookFuncs are the generated routines the runtime's C calls through
 // hooks.c (without the __kml_ prefix).
 var hookFuncs = []string{
-	"error_inspect", "proxy_tget", "proxy_tset",
+	"proxy_tget", "proxy_tset",
 	"objproto_fill",
 	"pdyn_attach", "prim_proto_of",
-	"process_uncaught", "unhandled_report",
-	"stream_decode",
-	"worker_run_loop", "worker_uncaught",
+	"unhandled_report",
+	"worker_run_loop",
 }
 
 // hookPrims are the primitives both sides define: the IR's renamed copy
@@ -68,6 +67,12 @@ func (e *Emitter) emitHookRegistration() {
 		e.emitGlobal(fmt.Sprintf("@__kml_hookp_%s = external"+irGlobalAS+" global "+irPtr+", align 8", name))
 		fmt.Fprintf(&body, "  store "+irPtr+" %s, "+irPtr+" @__kml_hookp_%s, align 8\n", fnValue("@__kml_ir_"+name), name)
 	}
+	// exceptions.c's TypeError and RangeError carry the program's interned
+	// names (an error's name is compared by address).
+	fmt.Fprintf(&body, "  store "+irPtr+" %s, "+irPtr+" @__kml_error_names, align 8\n", e.internString("TypeError"))
+	fmt.Fprintf(&body, "  store "+irPtr+" %s, "+irPtr+" getelementptr inbounds ([2 x "+irPtr+"], "+irPtr+" @__kml_error_names, i64 0, i64 1), align 8\n", e.internString("RangeError"))
+	// fserror.c's errors' name, which it compares by address.
+	fmt.Fprintf(&body, "  store "+irPtr+" %s, "+irPtr+" @__kml_error_name, align 8\n", e.internString("Error"))
 	for _, ir := range e.hookInits {
 		body.WriteString(ir)
 	}

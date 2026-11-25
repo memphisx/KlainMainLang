@@ -222,7 +222,7 @@ func (c *Checker) functionMember(prop string) *Type {
 		return nil
 	}
 	if p := ft.Prop(prop); p != nil {
-		return p.Type
+		return p.Type()
 	}
 	return nil
 }
@@ -292,7 +292,28 @@ func (c *Checker) optionalOnNullish(obj *Type) bool {
 // invalidIndexKey reports a key type no property key can be: an object,
 // array or function (TS2538). JavaScript converts it with ToPropertyKey.
 func (c *Checker) invalidIndexKey(kt *Type) bool {
-	return !c.Unanswered(kt) && kt.Flags&Union == 0 && kt.Flags&(Object|NonPrimitive|Void) != 0
+	return c.invalidIndexMember(kt) != nil
+}
+
+// invalidIndexMember is the key type, or the member of a union key, no
+// property key can be (TS2538 names it): an object, array or function, or
+// in a union, a boolean, undefined or null beside the keys.
+func (c *Checker) invalidIndexMember(kt *Type) *Type {
+	if c.Unanswered(kt) || kt.Flags&Any != 0 {
+		return nil
+	}
+	if kt.Flags&Union == 0 {
+		if kt.Flags&(Object|NonPrimitive|Void) != 0 {
+			return kt
+		}
+		return nil
+	}
+	for _, m := range kt.Types {
+		if m.Flags&(Object|NonPrimitive|Void|BooleanLike|Undefined|Null) != 0 && m.Flags&(Any|TypeParam) == 0 {
+			return m
+		}
+	}
+	return nil
 }
 
 // symbolKey reports a key typed `symbol` (not one unique symbol, which names

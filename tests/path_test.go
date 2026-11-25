@@ -348,3 +348,15 @@ console.log(win32.sep + posix.sep)
 `
 	assertOutputImports(t, src, "a\\b\na/b\n\\/")
 }
+
+// path/posix and path/win32 default-export path.posix and path.win32
+// themselves.
+func TestE2EPathFlavourDefaultIsSameObject(t *testing.T) {
+	assertSameAsNode(t, `
+import { posix, win32 } from "path";
+import pp from "path/posix";
+import pw from "path/win32";
+import { join } from "path/posix";
+console.log(pp === posix, pw === win32, pp.join("a", "b"), pw.join("a", "b"), join("x", "y"));
+`)
+}

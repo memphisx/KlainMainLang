@@ -397,6 +397,14 @@ export const SHARE_ENV: symbol = Symbol.for('nodejs.worker_threads.SHARE_ENV');
 
 const selfData: any = isMainThread ? undefined : __kml_native.workerSelfData();
 export const workerData: any = isMainThread ? null : revive(selfData.data);
+if (!isMainThread) {
+    // A worker's process.argv: execPath and script, then options.argv.
+    process.argv.length = Math.min(process.argv.length, 2);
+    if (selfData.argv !== undefined) {
+        const extra: string[] = selfData.argv;
+        for (const a of extra) process.argv.push(a);
+    }
+}
 const environmentData = new Map<any, any>();
 if (!isMainThread && selfData.env !== undefined) {
     const envEntries: any[] = selfData.env;
@@ -485,7 +493,10 @@ export class Worker extends EventEmitter {
         const transfer: any[] = Array.isArray(opts.transferList) ? opts.transferList : [];
         const env: any[] = [];
         environmentData.forEach((v: any, k: any) => { env.push([k, v]); });
-        const data = serialize({ data: opts.workerData, env: env }, transfer);
+        // options.argv: the worker's process.argv after its execPath and
+        // script, each stringified, as Node's worker passes them.
+        const argv: string[] | undefined = opts.argv ? (opts.argv as any[]).map((a: any) => `${a}`) : undefined;
+        const data = serialize({ data: opts.workerData, env: env, argv: argv }, transfer);
         const id = __kml_native.workerSpawn(path, pub + 1, internal + 1, data, (kind: number, code: number) => {
             if (kind === 0) {
                 this.emit('online');
@@ -612,7 +623,9 @@ export class BroadcastChannel extends EventEmitter {
     _kmlIn: MessagePort;
     _kmlOut: number;
 
-    constructor(name: string) {
+    // The name converts by ToString (`new BroadcastChannel(123)`).
+    constructor(name: string);
+    constructor(name: any) {
         super();
         if (arguments.length === 0) {
             throw NodeTypeError('ERR_MISSING_ARGS', 'The "name" argument must be specified');

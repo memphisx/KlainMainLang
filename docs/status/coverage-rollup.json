@@ -5,8 +5,8 @@
     {
       "section": "TypeScript Core Language",
       "total": {
-        "impl": 380,
-        "total": 385,
+        "impl": 387,
+        "total": 390,
         "pct": 99
       },
       "rows": [
@@ -34,9 +34,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 19,
+            "impl": 20,
             "total": 23,
-            "pct": 83
+            "pct": 87
           },
           "caveats": "• `++`/`--` work on identifier, member, and index targets; the one edge is a postfix update on a side-effecting receiver used as a value, which evaluates the receiver twice ([ADR-00376](../adr/00/ADR-00376.md))\u003cbr\u003e• `typeof` of a static-method reference outside the covered Promise/Math/JSON tables (`Object.keys`, `console.log`, …) answers from inference, not `\"function\"` ([ADR-00282](../adr/00/ADR-00282.md))\u003cbr\u003e• `\u0026\u0026`/`\\|\\|` yield a bool by default; `-compat=js` makes them value-preserving for same-typed operands ([ADR-00186](../adr/00/ADR-00186.md)/[ADR-00220](../adr/00/ADR-00220.md))"
         },
@@ -64,9 +64,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 5,
+            "impl": 4,
             "total": 12,
-            "pct": 42
+            "pct": 33
           },
           "caveats": "• The `arguments` object reflects the values actually passed — declared parameters plus any overflow (a function reading `arguments` gains an implicit boxed rest, [ADR-00928](../adr/00/ADR-00928.md)/[TDD-00210](../tdd/TDD-00210.md)); elements are `any` (heterogeneous → NaN-boxed, so `arguments[i]` needs an `as T` cast under strict / operates directly under `-compat=js`), and `.length`/indexing/`for…of`/callback replacers ([ADR-00387](../adr/00/ADR-00387.md)) all work; a rest/destructured parameter combined with `arguments` and arrow functions stay clean rejections (use the `...rest` directly; arrows have no own `arguments`); a class method's `arguments` counts the declared parameters a call passed and takes no overflow ([ADR-00464](../adr/00/ADR-00464.md), [ADR-01489](../adr/01/ADR-01489.md)) (a leading `this` parameter is parsed and erased — [ADR-00373](../adr/00/ADR-00373.md))\u003cbr\u003e• Function overload signatures are parsed and **erased** — call sites type-check against the implementation's parameter list only ([ADR-00446](../adr/00/ADR-00446.md))\u003cbr\u003e• Nested function declarations capture enclosing locals (by reference, [TDD-00129](../tdd/TDD-00129.md) — array captures share the enclosing header cell, [TDD-00213](../tdd/TDD-00213.md) Stage 3; loop variables get per-iteration `let` cells), hoist letrec-style (usable before the declaration statement), and escape by name — capturing generators included — with an inferred closure type ([ADR-01013](../adr/01/ADR-01013.md)/[ADR-01014](../adr/01/ADR-01014.md)); two mutually-recursive capturing siblings stay a clean compile error ([ADR-01016](../adr/01/ADR-01016.md))\u003cbr\u003e• A top-level named function can't reference a sibling top-level binding whose value is a connection handle (`Worker`/`WebSocket`/`EventSource`/channels/`XMLHttpRequest`), a `Promise`, or an inferred-type-argument/nested generic instance (scalars/strings/arrays/`TypedArray`s/objects/`Map`/`Set`/class instances incl. `new Box\u003cnumber\u003e()`, the value/event handles — `Blob`/`Date`/`URL`/`RegExp`/`Headers`/`Request`/`AbortController`/`Event`/… — and streams + `EventEmitter` — plus `http.createServer` handles ([ADR-00426](../adr/00/ADR-00426.md)) — are promoted to module globals and work — [ADR-00342](../adr/00/ADR-00342.md)); a default parameter can't reference an earlier parameter ([ADR-00166](../adr/00/ADR-00166.md))\u003cbr\u003e• A named function expression whose name shadows a top-level function of the same name is a clean compile error — rename one ([TDD-00060](../tdd/TDD-00060.md)/[ADR-00178](../adr/00/ADR-00178.md))\u003cbr\u003e• A free `function*` generator may be top-level **or nested** (a nested one captures enclosing state by reference, including arrays — [TDD-00213](../tdd/TDD-00213.md) Stage 3); a generator *expression* bound by a top-level `const G = function* ...` has its element type inferred from yields; in any other position it is a value held as `any` ([TDD-00096](../tdd/TDD-00096.md)/[ADR-00293](../adr/00/ADR-00293.md))"
         },
@@ -94,52 +94,52 @@
             "pct": 100
           },
           "strict": {
-            "impl": 9,
+            "impl": 10,
             "total": 11,
-            "pct": 82
+            "pct": 91
           }
         },
         {
           "category": "String methods",
           "pageFile": "STRING-METHODS.md",
           "coverage": {
-            "impl": 32,
-            "total": 33,
-            "pct": 97
+            "impl": 34,
+            "total": 34,
+            "pct": 100
           },
           "strict": {
-            "impl": 31,
-            "total": 33,
+            "impl": 32,
+            "total": 34,
             "pct": 94
           },
-          "caveats": "• No `.normalize()` (needs Unicode normalization tables — deliberately deferred, never faked)\u003cbr\u003e• `.localeCompare()` ignores `locales` (always ICU root order)"
+          "caveats": "• `.normalize()`'s tables are Unicode 16.0 (Node's ICU: 17.0)\u003cbr\u003e• `.localeCompare()` ignores `locales` (always ICU root order)"
         },
         {
           "category": "RegExp",
           "pageFile": "REGEXP.md",
           "coverage": {
+            "impl": 16,
+            "total": 16,
+            "pct": 100
+          },
+          "strict": {
             "impl": 15,
             "total": 16,
             "pct": 94
           },
-          "strict": {
-            "impl": 14,
-            "total": 16,
-            "pct": 88
-          },
-          "caveats": "• `u`/`d` flags out of scope for V1\u003cbr\u003e• Several other deliberate scope narrowings — see [REGEXP.md](REGEXP.md)'s own Caveats\u003cbr\u003e• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/00/ADR-00166.md))"
+          "caveats": "• `v` flag: no properties of strings (`\\p{RGI_Emoji}`)\u003cbr\u003e• Several other deliberate scope narrowings — see [REGEXP.md](REGEXP.md)'s own Caveats"
         },
         {
           "category": "Array methods",
           "pageFile": "ARRAY-METHODS.md",
           "coverage": {
-            "impl": 37,
-            "total": 37,
+            "impl": 38,
+            "total": 38,
             "pct": 100
           },
           "strict": {
-            "impl": 34,
-            "total": 37,
+            "impl": 35,
+            "total": 38,
             "pct": 92
           },
           "caveats": "• `.flat(depth)` with a run-time depth gives boxed (`any`) elements\u003cbr\u003e• `Array.from` iterates arrays, Sets, Maps (entries), strings, and class iterators, plus the array-like `{ length: n }` overload ([ADR-00957](../adr/00/ADR-00957.md)) — generators and `thisArg` are not supported ([ADR-00482](../adr/00/ADR-00482.md)/[ADR-00491](../adr/00/ADR-00491.md))"
@@ -163,16 +163,16 @@
           "category": "Object \u0026 collections",
           "pageFile": "OBJECT-COLLECTIONS.md",
           "coverage": {
-            "impl": 32,
-            "total": 32,
+            "impl": 34,
+            "total": 34,
             "pct": 100
           },
           "strict": {
-            "impl": 26,
-            "total": 32,
-            "pct": 81
+            "impl": 27,
+            "total": 34,
+            "pct": 79
           },
-          "caveats": "• `Object.create`/`getPrototypeOf`/`setPrototypeOf`/`__proto__` work on **dynamic (`any`-typed) objects only** — statically-typed structs have no prototype link ([TDD-00155](../tdd/TDD-00155.md) Stage 3)\u003cbr\u003e• `WeakMap`/`WeakSet`/`WeakRef` are strong-backed under `-mm=manual`; real weak semantics only under `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md))"
+          "caveats": "• `WeakMap`/`WeakSet`/`WeakRef` are strong-backed under `-mm=manual`; real weak semantics only under `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md))"
         },
         {
           "category": "JSON",
@@ -237,14 +237,14 @@
           "category": "Classes / OOP",
           "pageFile": "LANGUAGE-CONSTRUCTS.md",
           "coverage": {
-            "impl": 28,
-            "total": 28,
+            "impl": 29,
+            "total": 29,
             "pct": 100
           },
           "strict": {
-            "impl": 16,
-            "total": 28,
-            "pct": 57
+            "impl": 18,
+            "total": 29,
+            "pct": 62
           },
           "caveats": "• **Parameter properties** (`constructor(public x: number)`/`private`/`readonly`) declare + assign their field ([ADR-00447](../adr/00/ADR-00447.md); `readonly` is not enforced as immutability), and the **`readonly` *field* modifier** parses too — both recorded, not enforced as immutability ([ADR-00480](../adr/00/ADR-00480.md))\u003cbr\u003e• `class X extends Error` works one level deep ([ADR-00630](../adr/00/ADR-00630.md)); extending an Error *subclass* is a clean rejection, and `.stack` doesn't exist\u003cbr\u003e• Static field initializers (`static x = 5`) work ([ADR-00375](../adr/00/ADR-00375.md)); clean rejections: static/async generator methods, a member keyed by a value computed at run time (a `let`, a call, an interpolation); well-known symbols, a const symbol and a const string or number key are accepted ([TDD-00089](../tdd/TDD-00089.md), [ADR-01414](../adr/01/ADR-01414.md), [ADR-01415](../adr/01/ADR-01415.md)), and a class expression used as a runtime value\u003cbr\u003e• A field initializer can currently see constructor params (real JS's separate initializer scope forbids this — [ADR-00180](../adr/00/ADR-00180.md))\u003cbr\u003e• `#x` private names have no early-error check for `#m`/`static #m` name collision or the `#constructor`-is-banned rule ([ADR-00155](../adr/00/ADR-00155.md))"
         },
@@ -302,9 +302,9 @@
     {
       "section": "Web Platform APIs",
       "total": {
-        "impl": 80,
+        "impl": 81,
         "total": 83,
-        "pct": 96
+        "pct": 98
       },
       "rows": [
         {
@@ -386,9 +386,9 @@
           "category": "Performance \u0026 Timing (incl. Date)",
           "pageFile": "PERFORMANCE-TIMING.md",
           "coverage": {
-            "impl": 13,
+            "impl": 14,
             "total": 14,
-            "pct": 93
+            "pct": 100
           },
           "strict": {
             "impl": 9,
@@ -495,9 +495,9 @@
             "pct": 100
           },
           "strict": {
-            "impl": 22,
+            "impl": 23,
             "total": 35,
-            "pct": 63
+            "pct": 66
           },
           "caveats": "• An `'uncaughtException'` handler runs then still exits after a synchronous throw (can't resume)\u003cbr\u003e• `process.version`/`versions` report the pinned Node baseline + `klain`; real linked-lib versions (`openssl`/`zlib`) and a `--node-compat` floor are follow-ons\u003cbr\u003e• `process.memoryUsage()`'s `external`/`arrayBuffers` are always 0 (no off-heap accounting), and `heapTotal`/`heapUsed` measure this compiler's own heap, not a V8 heap ([ADR-00791](../adr/00/ADR-00791.md))\u003cbr\u003e• `child_process.fork()` is self-fork only — forking a different module stays out"
         },

@@ -35,7 +35,8 @@ extern void __kml_loop_fd_unwatch(void *w);
 #endif
 
 typedef struct {
-    void *handle, *prom;
+    void *handle;
+    kml_ref prom; /* the import() promise, held through the handle table until settled */
     kml_settle_fn settle;
     kml_poll_fn poll;
     kml_err_fn err;
@@ -65,7 +66,10 @@ static void rearm(Watch *w, i64 st, _Bool idle) {
 #if !defined(_WIN32)
         __kml_loop_fd_unwatch(w->wake);
 #endif
-        settle_from(w->handle, w->prom, w->settle, w->err, st);
+        void *prom = kml_ref_get(w->prom);
+        kml_ref_free(w->prom);
+        w->prom = 0;
+        settle_from(w->handle, prom, w->settle, w->err, st);
         return;
     }
     if (idle != !w->held) {
@@ -120,7 +124,7 @@ void __kml_dynimport_watch(void *handle, void *prom, kml_settle_fn settle, kml_p
     i64 st = state ? state() : 1;
     if (st != 0) { settle_from(handle, prom, settle, err, st); return; }
     Watch *w = (Watch *)calloc(1, sizeof *w); /* scratch: one per pending island, kept: a handle may still fire */
-    *w = (Watch){handle, prom, settle, poll, err, deadline, 0, 0, 0, 1};
+    *w = (Watch){handle, kml_ref_new(prom), settle, poll, err, deadline, 0, 0, 0, 1};
     w->timer = __kml_loop_timer_new(pass, w);
 #if defined(_WIN32)
     w->port = (HANDLE)(intptr_t)backend();

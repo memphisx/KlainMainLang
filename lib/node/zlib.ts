@@ -1019,17 +1019,32 @@ export function zstdDecompressSync(buf: any, options?: any): any {
     return zlibBufferSync(new ZstdDecompress(options), buf);
 }
 
-export function createBrotliCompress(options?: BrotliOptions): BrotliCompress { return new BrotliCompress(options); }
-export function createBrotliDecompress(options?: BrotliOptions): BrotliDecompress { return new BrotliDecompress(options); }
-export function createZstdCompress(options?: ZstdOptions): ZstdCompress { return new ZstdCompress(options); }
-export function createZstdDecompress(options?: ZstdOptions): ZstdDecompress { return new ZstdDecompress(options); }
-export function createDeflate(options?: ZlibOptions): Deflate { return new Deflate(options); }
-export function createInflate(options?: ZlibOptions): Inflate { return new Inflate(options); }
-export function createDeflateRaw(options?: ZlibOptions): DeflateRaw { return new DeflateRaw(options); }
-export function createInflateRaw(options?: ZlibOptions): InflateRaw { return new InflateRaw(options); }
-export function createGzip(options?: ZlibOptions): Gzip { return new Gzip(options); }
-export function createGunzip(options?: ZlibOptions): Gunzip { return new Gunzip(options); }
-export function createUnzip(options?: ZlibOptions): Unzip { return new Unzip(options); }
+// A primitive options argument reads every option as undefined: the
+// defaults, as Node's `opts.x` reads of a number give.
+function objectOptions(options: any): any { return options !== null && typeof options === 'object' ? options : undefined; }
+
+export function createBrotliCompress(options?: BrotliOptions): BrotliCompress;
+export function createBrotliCompress(options?: any): BrotliCompress { return new BrotliCompress(objectOptions(options)); }
+export function createBrotliDecompress(options?: BrotliOptions): BrotliDecompress;
+export function createBrotliDecompress(options?: any): BrotliDecompress { return new BrotliDecompress(objectOptions(options)); }
+export function createZstdCompress(options?: ZstdOptions): ZstdCompress;
+export function createZstdCompress(options?: any): ZstdCompress { return new ZstdCompress(objectOptions(options)); }
+export function createZstdDecompress(options?: ZstdOptions): ZstdDecompress;
+export function createZstdDecompress(options?: any): ZstdDecompress { return new ZstdDecompress(objectOptions(options)); }
+export function createDeflate(options?: ZlibOptions): Deflate;
+export function createDeflate(options?: any): Deflate { return new Deflate(objectOptions(options)); }
+export function createInflate(options?: ZlibOptions): Inflate;
+export function createInflate(options?: any): Inflate { return new Inflate(objectOptions(options)); }
+export function createDeflateRaw(options?: ZlibOptions): DeflateRaw;
+export function createDeflateRaw(options?: any): DeflateRaw { return new DeflateRaw(objectOptions(options)); }
+export function createInflateRaw(options?: ZlibOptions): InflateRaw;
+export function createInflateRaw(options?: any): InflateRaw { return new InflateRaw(objectOptions(options)); }
+export function createGzip(options?: ZlibOptions): Gzip;
+export function createGzip(options?: any): Gzip { return new Gzip(objectOptions(options)); }
+export function createGunzip(options?: ZlibOptions): Gunzip;
+export function createGunzip(options?: any): Gunzip { return new Gunzip(objectOptions(options)); }
+export function createUnzip(options?: ZlibOptions): Unzip;
+export function createUnzip(options?: any): Unzip { return new Unzip(objectOptions(options)); }
 
 export function crc32(data: string | NodeJS.ArrayBufferView, value: number = 0): number {
     let bytes: Uint8Array;

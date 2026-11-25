@@ -21,11 +21,21 @@ import (
 // a resized length, which is exactly why these methods can't accept an
 // arbitrary array-valued expression.
 func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos ast.Pos) (ptrPtr, lenPtr string, elemTy Type, err error) {
+	ptrPtr, lenPtr, elemTy, err = e.resolveArrayMutLocRaw(objExpr, verb, pos)
+	// A mutator other than an element or length write moves the buffer's
+	// elements: a sparse array is made dense first (holes.c).
+	if err == nil && verb != "indexed assignment" && verb != "length assignment" && !strings.HasPrefix(verb, "set:") {
+		e.emitDensify(ptrPtr, elemTy)
+	}
+	return
+}
+
+func (e *Emitter) resolveArrayMutLocRaw(objExpr ast.Expression, verb string, pos ast.Pos) (ptrPtr, lenPtr string, elemTy Type, err error) {
 	switch obj := objExpr.(type) {
 	case *ast.NonNullExpression:
 		// `xs!.push(v)`: the assertion is erased; an absent receiver was
 		// already reported by the call's absent-base guard.
-		return e.resolveArrayMutLoc(obj.Arg, verb, pos)
+		return e.resolveArrayMutLocRaw(obj.Arg, verb, pos)
 	case *ast.Identifier:
 		sym, ok := e.lookup(obj.Name)
 		if !ok {
@@ -43,7 +53,7 @@ func (e *Emitter) resolveArrayMutLoc(objExpr ast.Expression, verb string, pos as
 		// callee this array was passed to — observes, giving JS reference
 		// semantics (push/splice inside a callee grow the caller's array).
 		e.emitArrayBindingGuard(sym, undefinedAccessMessage(verb))
-		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		dataSlot, lenSlot := e.arrayDataLenSlotsRaw(sym) // resolveArrayMutLoc densifies
 		return dataSlot, lenSlot, *sym.Ty.ElemType, nil
 
 	case *ast.MemberExpression:
@@ -245,7 +255,37 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	if len(args) > 2 {
 		items = args[2:]
 	}
-	numInserted := int64(len(items))
+	numInserted := fmt.Sprint(len(items))
+	// Spread items (`splice(i, 0, ...xs)`): the items as one array of the
+	// element type, evaluated before anything moves; their count is known
+	// at run time and they are copied in at once.
+	spreadSrc := ""
+	if hasSpreadArg(items) {
+		arr, err := e.emitExprWithObjectHint(ast.NewArrayLiteral(items, pos), ArrayOf(elemTy))
+		if err != nil {
+			return Value{}, err
+		}
+		hdr := e.arrayReturnHeader(arr)
+		agg, src, n := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load {"+irPtr+", i64}, "+irPtr+" %s, align 8", agg, hdr))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 0", src, agg))
+		e.emitInstr(fmt.Sprintf("%s = extractvalue {"+irPtr+", i64} %s, 1", n, agg))
+		spreadSrc, numInserted, items = src, n, nil
+	}
+	// The items are arguments: evaluated before anything moves, so one
+	// reading the array (`splice(0, 1, a[0] + 1)`) sees it as it was.
+	itemVals := make([]Value, 0, len(items))
+	for _, itemExpr := range items {
+		itemVal, err := e.emitExpr(itemExpr)
+		if err != nil {
+			return Value{}, err
+		}
+		itemVal, err = e.convertChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
+		if err != nil {
+			return Value{}, err
+		}
+		itemVals = append(itemVals, itemVal)
+	}
 
 	// Copy the removed slice into the result array before anything shifts —
 	// once the tail shift below happens, this region no longer holds the
@@ -267,7 +307,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	newLen := e.freshReg()
 	tmpLen := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tmpLen, curLen, delCount))
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", newLen, tmpLen, numInserted))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", newLen, tmpLen, numInserted))
 	spliceDelta := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", spliceDelta, newLen, curLen))
 	e.emitArrayGuard(ptrPtr, arrOpSplice, startN, spliceDelta)
@@ -304,7 +344,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	tailCount := e.freshReg()
 	shiftBytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", startPlusDel, startN, delCount))
-	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", startPlusIns, startN, numInserted))
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %s", startPlusIns, startN, numInserted))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", tailSrc, elemTy.IR, workPtr, startPlusDel))
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", tailDst, elemTy.IR, workPtr, startPlusIns))
 	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %s", tailCount, curLen, startPlusDel))
@@ -312,15 +352,13 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	e.emitInstr(fmt.Sprintf("call "+irPtr+" @memmove("+irPtr+" %s, "+irPtr+" %s, i64 %s)", tailDst, tailSrc, shiftBytes))
 
 	// Write the inserted items into [start, start+numInserted).
-	for i, itemExpr := range items {
-		itemVal, err := e.emitExpr(itemExpr)
-		if err != nil {
-			return Value{}, err
-		}
-		itemVal, err = e.convertChecked(itemVal, elemTy, itemExpr.GetPos(), "array element")
-		if err != nil {
-			return Value{}, err
-		}
+	if spreadSrc != "" {
+		dst, nb := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", dst, elemTy.IR, workPtr, startN))
+		e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", nb, numInserted, elemTy.Align()))
+		e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", dst, spreadSrc, nb))
+	}
+	for i, itemVal := range itemVals {
 		slotIdx := e.freshReg()
 		slot := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", slotIdx, startN, i))
@@ -336,7 +374,7 @@ func (e *Emitter) emitSplice(mem *ast.MemberExpression, args []ast.Expression, p
 	if e.holesUsed() {
 		e.emitHolesCopy(r1, "0", ptrPtr, startN, delCount)
 	}
-	e.emitHolesCall("__kml_holes_splice", ptrPtr, startN, delCount, fmt.Sprint(numInserted), curLen)
+	e.emitHolesCall("__kml_holes_splice", ptrPtr, startN, delCount, numInserted, curLen)
 
 	return Value{Ref: r1, Ty: ArrayOf(elemTy)}, nil
 }
@@ -749,7 +787,6 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	e.emitInstr(fmt.Sprintf("%s = fcmp oeq double %s, %s", exact, back, num.Ref))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", exact, goodL, badL))
 	e.emitLabel(badL)
-	e.ensureExceptionHelpers()
 	errObj := e.buildErrorObj(errorKindIDs["RangeError"], e.internString("Invalid array length"), e.internString("RangeError"))
 	e.excThrow(errObj)
 	e.emitTerminator("unreachable")
@@ -760,6 +797,15 @@ func (e *Emitter) emitArrayLengthAssign(mem *ast.MemberExpression, rhs ast.Expre
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", curLen, lenPtr))
 	refusedL := e.freshLabel("arrlen.refused")
 	e.emitArrayWriteGuard(ptrPtr, arrOpLength, n, refusedL)
+	if e.holesUsed() && sparseElem(elemTy) {
+		// An array holding sparse elements keeps its buffer (holes.c).
+		took, tookB := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_holes_sparse_len("+irPtr+" %s, i64 %s)", took, ptrPtr, n))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", tookB, took))
+		denseL := e.freshLabel("arrlen.dense")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tookB, refusedL, denseL))
+		e.emitLabel(denseL)
+	}
 	grow := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", grow, n, curLen))
 	growL, doneL := e.freshLabel("arrlen.grow"), e.freshLabel("arrlen.done")
@@ -890,7 +936,6 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	// An index no array index (negative, or 2^32-1 and up) names an
 	// ordinary own property of the array: no element, no growth.
 	if e.holesUsed() {
-		e.ensureShapeRuntime()
 		notIdx := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, 4294967295", notIdx, idxVal.Ref))
 		propL, idxL := e.freshLabel("arridx.prop"), e.freshLabel("arridx.index")
@@ -903,6 +948,28 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 		e.emitInstr(fmt.Sprintf("call void @__kml_holes_prop_set("+irPtr+" %s, i64 %s, i64 %s)", ptrPtr, idxVal.Ref, boxed.Ref))
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(idxL)
+		if sparseElem(elemTy) {
+			// A write far past the end, or past the buffer of an array
+			// that already went sparse, is held out of line (holes.c).
+			holey, gap, either := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", holey, e.emitHolesWord(ptrPtr)))
+			e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %s", gap, idxVal.Ref, lenReg))
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", either, holey, gap))
+			spL, spTryL, denseL := e.freshLabel("arridx.sparse"), e.freshLabel("arridx.sptry"), e.freshLabel("arridx.dense")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", either, spTryL, denseL))
+			e.emitLabel(spTryL)
+			boxed, err := e.emitBoxValue(val)
+			if err != nil {
+				return Value{}, true, err
+			}
+			took, tookB := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_holes_sparse_write("+irPtr+" %s, i64 %s, i64 %s, i32 1)", took, ptrPtr, idxVal.Ref, boxed.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", tookB, took))
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tookB, spL, denseL))
+			e.emitLabel(spL)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+			e.emitLabel(denseL)
+		}
 	}
 
 	past := e.freshReg()
@@ -914,10 +981,22 @@ func (e *Emitter) emitArrayIndexAssignGrow(idxEx *ast.IndexExpression, rhs ast.E
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", past, oobL, inrangeChkL))
 
 	// A write past the end grows the array, the elements between left holes.
+	// Past 2^27 elements, where V8 keeps the array sparse, an element kind
+	// that cannot go sparse here ends out of memory before the buffer is
+	// touched (core.c).
 	e.emitLabel(oobL)
 	gPtr, gLen, gBytes, gNew := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", gPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", gLen, idxVal.Ref))
+	tooBig := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ugt i64 %s, %d", tooBig, gLen, int64(1)<<27))
+	oomL, growL := e.freshLabel("arridx.oom"), e.freshLabel("arridx.grow")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", tooBig, oomL, growL))
+	e.emitLabel(oomL)
+	e.declareFn("__kml_array_oom", "declare void @__kml_array_oom() noreturn")
+	e.emitInstr("call void @__kml_array_oom()")
+	e.emitTerminator("unreachable")
+	e.emitLabel(growL)
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", gPtr, ptrPtr))
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, %d", gBytes, gLen, elemTy.Align()))
 	e.heapReallocInto(gNew, elemAllocKind(elemTy), gPtr, gBytes)
 	e.emitFillHoles(gNew, lenReg, idxVal.Ref, elemTy)

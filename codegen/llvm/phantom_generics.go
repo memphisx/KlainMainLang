@@ -76,7 +76,9 @@ func (e *Emitter) eraseTypeOnlyGenerics(prog *ast.Program) {
 // ordinary class, its type arguments at use sites ignored as for a type-only
 // generic. Instantiation per type-argument set does not compose with one
 // class object shared by base and derived classes; boxing the type
-// parameter's values keeps JavaScript's behaviour at a speed cost.
+// parameter's values keeps JavaScript's behaviour at a speed cost. So does
+// a decorated generic class (a decorator on it or a member): its decorators
+// run once, on the one class.
 func (e *Emitter) eraseInheritingGenerics(prog *ast.Program) {
 	extended := map[string]bool{}
 	for _, stmt := range prog.Body {
@@ -89,7 +91,7 @@ func (e *Emitter) eraseInheritingGenerics(prog *ast.Program) {
 		if !ok || len(cd.TypeParams) == 0 || e.typeOnlyGenerics[cd.Name] {
 			continue
 		}
-		if cd.BaseClass == "" && !cd.IsAbstract && !extended[cd.Name] {
+		if cd.BaseClass == "" && !cd.IsAbstract && !extended[cd.Name] && !classDecorated(cd) {
 			continue
 		}
 		params := map[string]bool{}
@@ -104,6 +106,38 @@ func (e *Emitter) eraseInheritingGenerics(prog *ast.Program) {
 		}
 		e.typeOnlyGenerics[cd.Name] = true
 	}
+}
+
+// classDecorated reports whether a decorator applies to cd or a member.
+func classDecorated(cd *ast.ClassDeclaration) bool {
+	if len(cd.Decorators) > 0 {
+		return true
+	}
+	fns := append([]*ast.FunctionDeclaration{}, cd.Methods...)
+	if cd.Constructor != nil {
+		fns = append(fns, cd.Constructor)
+	}
+	for _, m := range fns {
+		if len(m.Decorators) > 0 {
+			return true
+		}
+		for _, p := range m.Params {
+			if len(p.Decorators) > 0 {
+				return true
+			}
+		}
+	}
+	for _, f := range cd.Fields {
+		if len(f.Decorators) > 0 {
+			return true
+		}
+	}
+	for _, a := range cd.AutoAccessors {
+		if len(a.Decorators) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // namesTypeParam reports whether the type node n names one of params.

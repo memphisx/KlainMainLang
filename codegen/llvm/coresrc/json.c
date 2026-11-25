@@ -22,6 +22,18 @@ char *__kml_json_str_num(i64 n) {
  * flag is set (callers pass a bare i1: only bit 0 counts). */
 char *__kml_json_concat2(const char *a, const char *b, int fa, int fb) {
     i64 la = __kml_str_len(a), lb = __kml_str_len(b);
+    if ((fa & 1) && a != b) {
+        /* The accumulator is freed anyway: grown in place, as a realloc can
+         * (a large one by remapping), where a fresh copy of it per element
+         * made a stringify quadratic in its output. The new length clears
+         * the header's cached UTF-16 count; the prefix is unchanged. */
+        char *base = (char *)kml_realloc(KML_HEAP_RAW, KML_PREFIX(a), (size_t)(la + lb) + 9);
+        *(i64 *)base = la + lb;
+        char *dst = base + 8;
+        memcpy(dst + la, b, (size_t)lb + 1);
+        if (fb & 1) __kml_str_free((char *)b);
+        return dst;
+    }
     char *dst = __kml_str_alloc(la + lb);
     memcpy(dst, a, (size_t)la);
     memcpy(dst + la, b, (size_t)lb + 1);

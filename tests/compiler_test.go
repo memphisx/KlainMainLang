@@ -77,23 +77,11 @@ func parseStrictDialect(src, dialect string) (*ast.Program, error) {
 	return prog, nil
 }
 
-// parseCompatJS parses src for the -compat=js lane, resolving it (as the
-// CLI does) when it names a global module.
+// parseCompatJS parses src for the -compat=js lane and resolves it, as the
+// CLI resolves every program: the builtin library's TypeScript modules join
+// it, so a test runs the code a compiled program runs (a codegen fallback
+// for a program without them would otherwise be what it tests).
 func parseCompatJS(src string) (*ast.Program, error) {
-	// (A namespace read as a value needs the object the resolver builds.)
-	if !namesGlobalModule(src) && !declaresNamespace.MatchString(src) {
-		prog, err := parser.Parse(src)
-		if err != nil {
-			return nil, err
-		}
-		if err := resolver.ConstructChecks(prog, src, "standard"); err != nil {
-			return nil, err
-		}
-		if err := resolver.AnnotationChecks(prog, ""); err != nil {
-			return nil, err
-		}
-		return prog, nil
-	}
 	d, err := os.MkdirTemp("", "kmlglobal")
 	if err != nil {
 		return nil, err
@@ -209,7 +197,7 @@ func testSanitizerArgs(t *testing.T, dir string) []string {
 // testGCArgs is the gc lane's link line (KLAIN_TEST_MM=gc): the GC shim
 // and the collector, as buildBinaryGC links them; nothing in another mode.
 // A machine without libgc skips, as the gc suite does.
-func testGCArgs(t *testing.T, dir string) []string {
+func testGCArgs(t *testing.T, dir string, em *llvm.Emitter) []string {
 	t.Helper()
 	if os.Getenv("KLAIN_TEST_MM") != "gc" {
 		return nil
@@ -219,7 +207,7 @@ func testGCArgs(t *testing.T, dir string) []string {
 		t.Skipf("gc mode: %v", err)
 	}
 	shim := filepath.Join(dir, "gcshim.c")
-	if err := os.WriteFile(shim, []byte(llvm.GCShimSource), 0644); err != nil {
+	if err := os.WriteFile(shim, []byte(em.GCShim()), 0644); err != nil {
 		t.Fatalf("write GC shim: %v", err)
 	}
 	return append(append([]string{shim}, cflags...), libs...)
@@ -329,7 +317,7 @@ func buildBinary(t *testing.T, src string) string {
 	}
 
 	clangArgs := append([]string{"-O2", llFile, "-o", binFile}, testSanitizerArgs(t, filepath.Dir(llFile))...)
-	clangArgs = append(clangArgs, testGCArgs(t, dir)...)
+	clangArgs = append(clangArgs, testGCArgs(t, dir, em)...)
 	if em.UsesWorkers() {
 		clangArgs = append(clangArgs, llvm.WorkerPthreadLinkFlags()...)
 	}
@@ -468,7 +456,7 @@ func buildBinaryGC(t *testing.T, src string) string {
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	if err := os.WriteFile(shimFile, []byte(llvm.GCShimSource), 0644); err != nil {
+	if err := os.WriteFile(shimFile, []byte(em.GCShim()), 0644); err != nil {
 		t.Fatalf("write GC shim: %v", err)
 	}
 
@@ -649,7 +637,7 @@ func buildGCProgram(t *testing.T, dir, entry string) string {
 	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
 		t.Fatalf("write IR: %v", err)
 	}
-	if err := os.WriteFile(shimFile, []byte(llvm.GCShimSource), 0644); err != nil {
+	if err := os.WriteFile(shimFile, []byte(em.GCShim()), 0644); err != nil {
 		t.Fatalf("write GC shim: %v", err)
 	}
 

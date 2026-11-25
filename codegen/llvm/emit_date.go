@@ -176,7 +176,6 @@ func (e *Emitter) emitDateTimeArg(val Value) (string, error) {
 // known only at run time (ECMA-262 §21.4.2.1): a Date gives its time value,
 // a string is parsed, anything else is ToNumber'd into one.
 func (e *Emitter) emitDateTimeFromAny(val Value) (string, error) {
-	e.ensureHostBoxHooks()
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
 	tag, payload := e.emitUnboxTagPayload(val)
@@ -605,7 +604,6 @@ func (e *Emitter) emitDateParse(args []ast.Expression, pos ast.Pos) (Value, erro
 // emitNewDate for the new Date(aStringLiteral) constructor form, which
 // already has the argument evaluated and nothing left to re-evaluate.
 func (e *Emitter) emitDateParseValue(strVal Value) (Value, error) {
-	e.ensureStringC()
 	if !e.declaredDateParseStr {
 		e.declaredDateParseStr = true
 	}
@@ -744,7 +742,6 @@ func (e *Emitter) emitDateToString(dateVal Value) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", monthName, monthGep))
 	sign, absYear := e.emitDateYearSign(year, false)
 	// The zone suffix (" GMT+0300 (Eastern European Summer Time)").
-	e.ensureStringC()
 	suffix := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca [80 x i8], align 1", suffix))
 	e.emitInstr(fmt.Sprintf("call void @__kml_tz_suffix(i64 %s, "+irPtr+" %s)", dateVal.Ref, suffix))
@@ -767,7 +764,6 @@ func (e *Emitter) emitDateToTimeString(dateVal Value) (Value, error) {
 		return r
 	}
 	hour, min, sec := extract(4), extract(5), extract(6)
-	e.ensureStringC()
 	suffix := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca [80 x i8], align 1", suffix))
 	e.emitInstr(fmt.Sprintf("call void @__kml_tz_suffix(i64 %s, "+irPtr+" %s)", dateVal.Ref, suffix))
@@ -866,7 +862,6 @@ func (e *Emitter) emitDateToLocaleDateString(dateVal Value) (Value, error) {
 // emitTZOffset is the local zone's offset from UTC, in milliseconds, at the
 // UTC time value t.
 func (e *Emitter) emitTZOffset(t string) string {
-	e.ensureStringC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_tz_offset_ms(i64 %s)", r, t))
 	return r
@@ -882,7 +877,6 @@ func (e *Emitter) emitDateLocal(v Value) Value {
 
 // emitLocalToUTC is the UTC time value of a local wall-clock time value.
 func (e *Emitter) emitLocalToUTC(local string) string {
-	e.ensureStringC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_local_to_utc_ms(i64 %s)", r, local))
 	return r
@@ -918,7 +912,6 @@ func (e *Emitter) emitTimeValueToDate(d string) string {
 
 // emitDateThrowIfInvalid throws toISOString's RangeError for Invalid Date.
 func (e *Emitter) emitDateThrowIfInvalid(t string) {
-	e.ensureErrorNames()
 	badL, okL := e.freshLabel("date.invalid"), e.freshLabel("date.valid")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.emitDateIsInvalid(t), badL, okL))
 	e.emitLabel(badL)

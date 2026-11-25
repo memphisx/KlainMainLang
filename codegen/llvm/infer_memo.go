@@ -133,6 +133,9 @@ func (e *Emitter) typeOfExpr(expr ast.Expression) Type {
 			return e.typeOfExpr(ast.NewThisExpression(c.GetPos()))
 		}
 	}
+	if e.overriddenStaticRead(expr) {
+		return TypeAny // what the class holds now (emitStaticMethodOverrideRead)
+	}
 	switch expr.(type) {
 	case *ast.CallExpression, *ast.MemberExpression, *ast.Identifier:
 	default:
@@ -180,14 +183,8 @@ func (e *Emitter) typeOfExprRules(expr ast.Expression) Type {
 			return TypeAny // the receiver's promise (emitCombinatorCallOn)
 		}
 	}
-	if ix, ok := expr.(*ast.IndexExpression); ok {
-		// An element of a binding held as an array of boxes (a rest
-		// parameter its context types as a tuple) is a box.
-		if id, ok := ix.Object.(*ast.Identifier); ok {
-			if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray() && !sym.Ty.IsTuple() && sym.Ty.ElemType != nil && isUnconstrainedDynamic(*sym.Ty.ElemType) {
-				return TypeAny
-			}
-		}
+	if ix, ok := expr.(*ast.IndexExpression); ok && e.boxElementRead(ix) {
+		return TypeAny
 	}
 	if switchedExprKind(expr) {
 		o := e.reprOracle()
@@ -728,29 +725,9 @@ func (e *Emitter) syntacticExprType(expr ast.Expression) Type {
 		if instTy, ok := e.dynNewInstanceType(ex); ok {
 			return instTy
 		}
-		// new Promise<T>(executor) → task Promise<T> (TDD-00087).
-		if ex.ClassName == "Promise" {
-			valTy := e.newPromiseValueType(ex)
-			pt := PromiseOf(valTy)
-			pt.PromiseTask = true
-			return pt
-		}
-		// new DynamicLibrary(path) → the node:ffi handle (TDD-00164).
-		if _, user := e.classes[ex.ClassName]; ex.ClassName == "Response" && !user && !ex.Qualified {
-			return ResponseType()
-		}
-		// new FinalizationRegistry<T>(cb) → the registry handle (TDD-00163).
-		if ex.ClassName == "FinalizationRegistry" {
-			held := TypeI64
-			if len(ex.TypeArgs) == 1 && ex.TypeArgs[0] != nil {
-				held = e.annotationType(ex.TypeArgs[0])
-			}
-			if len(ex.Args) == 1 {
-				if cbTy := e.typeOfExpr(ex.Args[0]); cbTy.IsFunc() && len(cbTy.FuncParams) == 1 {
-					held = cbTy.FuncParams[0]
-				}
-			}
-			return FinalizationRegistryType(held)
+		// A builtin whose construct signature names an intrinsic.
+		if in := e.newIntrinsic(ex); in != nil {
+			return in.typeOf(e, ex)
 		}
 		if info, ok := e.classes[ex.ClassName]; ok && info.Ty.IsObject() {
 			if e.compatJS() && ex.Callee == nil && e.ctorMayOverride(ex.ClassName) {
@@ -773,10 +750,7 @@ func (e *Emitter) syntacticExprType(expr ast.Expression) Type {
 			return it
 		}
 		// A vanilla-JS prototype-constructor instance is a dynamic object
-		// (TDD-00155 Stage 4, `-compat=js`); a Proxy is one too (Stage 7).
-		if ex.ClassName == "Proxy" {
-			return TypeAny
-		}
+		// (TDD-00155 Stage 4, `-compat=js`).
 		if e.jsProtoCtor[ex.ClassName] {
 			return TypeAny
 		}
@@ -1259,4 +1233,16 @@ func typed[T ast.Expression](e *Emitter, x T, t Type) T {
 	}
 	e.builtTypes[x] = t
 	return x
+}
+
+// boxElementRead reports an element read of a binding held as an array of
+// boxes (a rest parameter its context types as a tuple, a JavaScript
+// array of mixed rows): the element is a box.
+func (e *Emitter) boxElementRead(ix *ast.IndexExpression) bool {
+	id, ok := ix.Object.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	sym, found := e.lookup(id.Name)
+	return found && sym.Ty.IsArray() && !sym.Ty.IsTuple() && sym.Ty.ElemType != nil && isUnconstrainedDynamic(*sym.Ty.ElemType)
 }

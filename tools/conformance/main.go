@@ -459,6 +459,10 @@ func main() {
 		setBudget(int64(*memCapMB) << 20 / 2)
 	} else if avail := availableCommitBytes(); avail > 0 {
 		setBudget(int64(avail) * 3 / 5)
+	} else {
+		// No figure from the OS (macOS): a GOMEMLIMIT is the budget, and
+		// the heap's limit and collection rate still follow the slots.
+		setBudget(0)
 	}
 
 	// TDD-00121 Tracks B/C run entirely different corpora with different oracles
@@ -973,7 +977,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	tSplit := time.Now()
 	llFile := filepath.Join(workDir, fmt.Sprintf("w%d.ll", workerID))
 	binFile := filepath.Join(workDir, fmt.Sprintf("w%d.bin", workerID))
-	if err := os.WriteFile(llFile, []byte(ir), 0644); err != nil {
+	if err := llvm.WriteTextFile(llFile, ir); err != nil {
 		res.Reason = normalizeReason("WRITE_ERROR", err.Error())
 		return res
 	}
@@ -981,14 +985,18 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	// Each builtin library module compiles once per run into the object
 	// cache (llvm.LibObjects), as in the CLI and the Node runner.
+	// A program that looks its own symbols up (dlopen(null)) keeps them:
+	// split as the CLI does, without dead-stripping.
+	objs, _, err := llvm.LibObjectsOf(ir, llFile, objCacheDir(), libObjectFlags)
+	if err != nil {
+		res.Reason = normalizeReason("CLANG_ERROR", firstLine(err.Error()))
+		return res
+	}
+	clangArgs = append(clangArgs, objs...)
 	if !ffiDl {
-		objs, _, err := llvm.LibObjects(llFile, objCacheDir(), libObjectFlags)
-		if err != nil {
-			res.Reason = normalizeReason("CLANG_ERROR", firstLine(err.Error()))
-			return res
-		}
-		clangArgs = append(clangArgs, objs...)
 		clangArgs = append(clangArgs, llvm.DeadStripFlags(false)...)
+	} else {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...) // as the CLI links it
 	}
 	for _, lib := range linkLibs {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
@@ -1028,6 +1036,9 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 
 	phaseAdd(phaseSplit, tSplit)
 	tClang := time.Now()
+	// The wait for memory admission is not clang's: its deadline starts
+	// once admitted.
+	budget.admitClang(rsv, irReservation(len(ir)))
 	cctx, cancel := context.WithTimeout(context.Background(), clangTimeout)
 	defer cancel()
 	var clangOut bytes.Buffer
@@ -1038,6 +1049,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 	phaseAdd(phaseClang, tClang)
 	if ps := clangCmd.ProcessState; ps != nil {
 		clangCPU.Add(int64(ps.UserTime() + ps.SystemTime()))
+		noteClangPeak(len(ir), ps)
 	}
 	if err := clangErr; err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
@@ -1071,7 +1083,7 @@ func runOne(path, testDir, harnessDir, defaultHarness, workDir string, workerID 
 
 	rctx, rcancel := context.WithTimeout(context.Background(), timeout)
 	defer rcancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr capBuffer
 	if abs, err := filepath.Abs(binFile); err == nil {
 		binFile = abs
 	}

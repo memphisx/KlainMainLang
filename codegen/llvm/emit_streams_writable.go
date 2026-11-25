@@ -93,10 +93,7 @@ func (e *Emitter) emitNewWritableStream(ex *ast.NewWritableStreamExpression) (Va
 		chunkTy = e.annotationType(ex.ChunkType)
 	}
 	controllerTy := WSControllerType(chunkTy)
-	e.ensurePromiseAddReaction()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 
 	var startExpr, writeExpr, closeExpr, abortExpr ast.Expression
@@ -269,10 +266,7 @@ func (e *Emitter) emitWStreamMethodCall(objExpr ast.Expression, method string, a
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensurePromiseAddReaction()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	chunkTy := TypeI64
 	if ty.StreamChunk != nil {
@@ -419,8 +413,7 @@ func (e *Emitter) emitWStreamClose(ptr string) (Value, error) {
 // CreateAlgorithmFromUnderlyingMethod turns an abrupt completion into one.
 // Either promise is handled: the stream reacts to it (uponPromise).
 func (e *Emitter) emitStreamCallbackCall(isAsync bool, sig, fp, args string) {
-	e.ensureExceptionHelpers()
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	tryL, catchL := e.freshLabel("stream.cb"), e.freshLabel("stream.cb.threw")
 	e.excEnter(catchL, tryL)
 	e.emitLabel(tryL)

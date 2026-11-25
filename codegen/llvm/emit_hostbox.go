@@ -132,6 +132,7 @@ var hostFlagJSName = map[string]string{
 	"IsStreamWriter": "WritableStreamDefaultWriter",
 	"IsRSController": "ReadableStreamDefaultController",
 	"IsWSController": "WritableStreamDefaultController",
+	"IsXHR":          "XMLHttpRequest",
 }
 
 // hostClassName is the JS class a host type's values are instances of.
@@ -223,7 +224,6 @@ func (e *Emitter) hostID(t Type) int64 {
 // emitBoxHost boxes a host handle: a fresh cell, or null for an absent
 // nullable one.
 func (e *Emitter) emitBoxHost(v Value) Value {
-	e.ensureHostBoxHooks()
 	id := e.hostID(v.Ty)
 	var cell string
 	if headeredHost(v.Ty) {
@@ -319,7 +319,6 @@ func (e *Emitter) emitUnboxHost(v Value, target Type) Value {
 	if headeredHost(target) {
 		// An instance of a class extending the host has its body at +8 as
 		// the host has: the runtime's row lookup walks its class to the host.
-		e.ensureHostBoxHooks()
 		name := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_host_class_name(i64 %s)", name, v.Ref))
 		isHost = e.freshReg()
@@ -361,30 +360,9 @@ var primWrapperClasses = map[string]Type{
 // emitDynHostInstanceOf is `box instanceof name` for a host class: the box's
 // header names one of that class's host types.
 func (e *Emitter) emitDynHostInstanceOf(v Value, name string) Value {
-	e.ensureHostBoxHooks()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_host_is(i64 %s, "+irPtr+" %s)", r, v.Ref, e.internString(name)))
 	return e.orBuiltinProtoChain(Value{Ref: r, Ty: TypeBool}, v, name)
-}
-
-// ensureHostBoxHooks declares the finalize-defined host routines.
-func (e *Emitter) ensureHostBoxHooks() {
-	if e.usedHostBox {
-		return
-	}
-	e.usedHostBox = true
-	// The dispatchers over a host box's registered row (boxsrc/hostbox.c).
-}
-
-// emitHostInspectCall renders a probed host cell as console.log does.
-func (e *Emitter) emitHostInspectCall(cell string, depth int) string {
-	e.ensureHostBoxHooks()
-	if max := e.effectiveInspectDepth() + 1; depth > max {
-		depth = max
-	}
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_host_inspect("+irPtr+" %s, i64 %d)", r, cell, depth))
-	return r
 }
 
 // emitHostInspectRoutines generates a console.log routine per (host type,
@@ -424,7 +402,7 @@ func (e *Emitter) emitHostInspectRoutines() {
 // hostbox.c dispatches to them) and registers one row per host layout.
 // Called last among the host steps.
 func (e *Emitter) emitHostBoxFinalize() {
-	if !e.usedHostBox {
+	if len(e.hostLayouts) == 0 {
 		return
 	}
 	for n := -1; n != len(e.hostLayouts); {
@@ -435,7 +413,6 @@ func (e *Emitter) emitHostBoxFinalize() {
 	// The routines cap nesting at the compile-time depth; util.inspect's
 	// `depth` option moves the cap at run time, so the dispatcher shifts the
 	// depth by the difference (clamped to the routines generated).
-	e.ensureInspectReduce()
 	e.declareInspectOptDepth()
 	maxD := e.effectiveInspectDepth() + 1
 	for _, h := range e.hostLayouts {
@@ -482,15 +459,6 @@ func (e *Emitter) registerHostRow(h hostLayout, maxD int) {
 	}, ", "))
 }
 
-// emitHostToStringTag is a host box's Object.prototype.toString form,
-// `[object Map]`: its class name, read by header id.
-func (e *Emitter) emitHostToStringTag(cell string) string {
-	e.ensureHostBoxHooks()
-	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_host_tag("+irPtr+" %s)", r, cell))
-	return r
-}
-
 // hostOwnToString are the host classes whose prototype has a toString of
 // its own (rather than Object.prototype's `[object X]`).
 var hostOwnToString = map[string]bool{"RegExp": true, "Date": true, "Number": true, "String": true, "Boolean": true}
@@ -526,7 +494,6 @@ var hostIterable = map[string]bool{"Map": true, "Set": true}
 // iterable host box's entries as a boxed array (`[...box]`), anything else
 // as itself.
 func (e *Emitter) emitHostIterValue(v string) string {
-	e.ensureHostBoxHooks()
 	e.hostIterUsed = true
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_host_iter(i64 %s)", r, v))

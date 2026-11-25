@@ -24,11 +24,7 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 	case targetTy.IsDynamic() && targetTy.UnionMembers != nil && primitiveUnion(targetTy):
 		// A union of primitives (`number | null`, `string | number`): the
 		// box the JSON value converts to is its representation.
-		e.ensureNanBox()
-		e.ensureShapeRuntime()
-		e.ensureAnyToPrimitive()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
+		e.ensureDynJSONC()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node("+irPtr+" %s)", r, node))
 		return e.convert(Value{Ref: r, Ty: TypeAny}, targetTy), nil
@@ -39,11 +35,7 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 		// tree into dynamic values — objects become tag-10 bags, arrays tag-11
 		// dynamic arrays, scalars their box tags. Strings/keys are copied out,
 		// so the caller's __kml_json_free stays correct.
-		e.ensureNanBox()
-		e.ensureShapeRuntime()
-		e.ensureAnyToPrimitive()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
+		e.ensureDynJSONC()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node("+irPtr+" %s)", r, node))
 		return Value{Ref: r, Ty: TypeAny}, nil
@@ -84,11 +76,7 @@ func (e *Emitter) emitJSONProject(node string, targetTy Type, pos ast.Pos) (Valu
 	case targetTy.IR == irPtr || targetTy.IsFunc():
 		// A member JSON cannot spell (a function, a host value): the value
 		// the text holds, converted as from any.
-		e.ensureNanBox()
-		e.ensureShapeRuntime()
-		e.ensureAnyToPrimitive()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
+		e.ensureDynJSONC()
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynjson_from_node("+irPtr+" %s)", r, node))
 		return e.convert(Value{Ref: r, Ty: TypeAny}, targetTy), nil
@@ -172,15 +160,8 @@ func (e *Emitter) emitJSONProjectObject(node string, targetTy Type, pos ast.Pos)
 // emitJSONExpandoRest keeps the node's keys the target shape does not
 // declare as the projected object's own expando properties.
 func (e *Emitter) emitJSONExpandoRest(obj, node string, targetTy Type) {
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
-	e.ensureAnyToPrimitive()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.usedObjExtensible = true // inspect, keys and stringify read the extras
-	if !e.usedJSONExpandoRest {
-		e.usedJSONExpandoRest = true
-	}
 	var refs []string
 	for _, f := range targetTy.UserFields() {
 		refs = append(refs, irPtr+" "+e.internString(f.Name))
@@ -318,7 +299,6 @@ func (e *Emitter) jsonDefaultRef(ty Type) string {
 		// "" there. Every present string is already a heap dup
 		// (__kml_json_string_dup), making the whole tree uniformly owned.
 		if e.isAutoMode() {
-			e.ensureStrHeaderRuntime()
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_from_cstr("+irPtr+" %s)", r, e.internString("")))
 			return r

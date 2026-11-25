@@ -136,7 +136,6 @@ func (e *Emitter) emitBufferDecodeString(strRef, enc string) (ptrRef, lenRef str
 	case "utf8":
 		// The string's own length (its header): an embedded NUL is a byte
 		// like any other.
-		e.ensureStrHeaderRuntime()
 		l := e.freshReg()
 		buf := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", l, strRef))
@@ -228,6 +227,7 @@ var bufferStatics map[string]func(e *Emitter, c *bufferStaticCall) (Value, error
 func init() {
 	bufferStatics = map[string]func(e *Emitter, c *bufferStaticCall) (Value, error){
 		"from":            (*Emitter).bufferStaticFrom,
+		"of":              (*Emitter).bufferStaticOf,
 		"alloc":           (*Emitter).bufferStaticAlloc,
 		"allocUnsafe":     (*Emitter).bufferStaticAlloc,
 		"allocUnsafeSlow": (*Emitter).bufferStaticAlloc,
@@ -302,6 +302,13 @@ func (e *Emitter) bufferStaticFrom(c *bufferStaticCall) (Value, error) {
 			v, err := e.emitExpr(elem)
 			if err != nil {
 				return Value{}, err
+			}
+			if !isNumberTy(v.Ty) || v.Ty.IsDynamic() {
+				// A non-number element (a string, null, a boolean, an
+				// object): ToNumber, as the array element is copied.
+				if v, err = e.emitToNumber(v); err != nil {
+					return Value{}, err
+				}
 			}
 			v = e.convert(v, TypeU8)
 			gep := e.freshReg()
@@ -442,7 +449,6 @@ func (e *Emitter) bufferStaticAlloc(c *bufferStaticCall) (Value, error) {
 				// String fill (ADR-00576): repeat the fill string's UTF-8 bytes
 				// across the whole buffer, matching Node's Buffer.alloc(n, str).
 				fv = e.convert(fv, TypePtr)
-				e.ensureStrHeaderRuntime()
 				needleLen := e.emitStrLenHeader(fv.Ref)
 				e.emitBufferRepeatFill(data, fv.Ref, needleLen, "0", nRef)
 			default:
@@ -831,7 +837,9 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 			e.emitThrowCoded("RangeError", "ERR_OUT_OF_RANGE", msg.Ref)
 			e.emitLabel(intL)
 		}
-		offRef = e.convert(ov, TypeI64).Ref
+		if offRef, err = e.bufferNumberArg(ov, "offset"); err != nil {
+			return Value{}, err
+		}
 	}
 	// Bounds: 0 <= offset && offset + width <= length.
 	end := e.freshReg()
@@ -868,7 +876,6 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(". Received "), Ty: TypePtr}); err != nil {
 		return Value{}, err
 	}
-	e.ensureStrHeaderRuntime()
 	recv := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_received_int(i64 %s)", recv, offRef))
 	if msg, err = e.emitStringConcat(msg, Value{Ref: recv, Ty: TypePtr}); err != nil {
@@ -928,6 +935,12 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 	if err != nil {
 		return Value{}, err
 	}
+	if !k.bigint && (!isNumberTy(rawVal.Ty) || rawVal.Ty.IsDynamic()) {
+		// A string, boolean, null or object value: Node writes `+value`.
+		if rawVal, err = e.emitToNumber(rawVal); err != nil {
+			return Value{}, err
+		}
+	}
 	var narrow string
 	switch {
 	case k.float:
@@ -942,6 +955,11 @@ func (e *Emitter) emitBufferAccessor(mem *ast.MemberExpression, k bufferAccessor
 			e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", narrow, f.Ref))
 		}
 	case k.bigint:
+		if rawVal.Ty.IsDynamic() {
+			// A bigint held in any: itself when its box holds one, else the
+			// same TypeError.
+			rawVal = e.emitAnyBigIntOrMixError(rawVal)
+		}
 		if !rawVal.Ty.IsBigInt() {
 			// Writing a non-bigint is ToBigInt's TypeError (Node mixes it
 			// into its range check: "Cannot mix BigInt and other types").
@@ -1049,6 +1067,62 @@ func (e *Emitter) emitBufferStringSearchAt(mem *ast.MemberExpression, method str
 	return Value{Ref: r, Ty: TypeI64}, nil
 }
 
+// isByteArrayExpr reports a Buffer or Uint8Array value: a search needle
+// whose bytes are searched for.
+func (e *Emitter) isByteArrayExpr(x ast.Expression) bool {
+	t := e.typeOfExpr(x)
+	if t.IsDynamic() {
+		return false
+	}
+	if t.IsBuffer() {
+		return true
+	}
+	return t.IsTypedArray() && t.ElemType != nil && t.ElemType.IR == "i8" && !t.ElemType.Signed && !t.Clamped
+}
+
+// emitBufferBytesSearch is buf.indexOf/lastIndexOf/includes of a Buffer or
+// Uint8Array needle (Node's bidirectionalIndexOf over its bytes), from the
+// byteOffset when one is given.
+func (e *Emitter) emitBufferBytesSearch(mem *ast.MemberExpression, method string, args []ast.Expression, pos ast.Pos) (Value, error) {
+	bufPtr, bufLen, _, err := e.resolveArrayForHOF(mem.Object, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	np, nl, _, err := e.resolveArrayForHOF(args[0], pos)
+	if err != nil {
+		return Value{}, err
+	}
+	offset := "0x7FF8000000000000" // NaN: the default
+	if len(args) > 1 && !isPlainStringTy(e.typeOfExpr(args[1])) {
+		ov, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		if isNumberTy(ov.Ty) && !ov.Ty.IsDynamic() {
+			offset = e.convert(ov, TypeF64).Ref
+		} else {
+			d, err := e.emitToNumber(ov)
+			if err != nil {
+				return Value{}, err
+			}
+			offset = d.Ref
+		}
+	}
+	dir := 1
+	if method == "lastIndexOf" {
+		dir = 0
+	}
+	e.declareFn("__kml_buf_index_of", "declare i64 @__kml_buf_index_of("+irPtr+", i64, "+irPtr+", i64, double, i32)")
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_buf_index_of("+irPtr+" %s, i64 %s, "+irPtr+" %s, i64 %s, double %s, i32 %d)", r, bufPtr, bufLen, np, nl, offset, dir))
+	if method == "includes" {
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, -1", b, r))
+		return Value{Ref: b, Ty: TypeBool}, nil
+	}
+	return Value{Ref: r, Ty: TypeI64}, nil
+}
+
 // emitBufferStringSearch implements the string-argument forms of
 // buf.indexOf/includes/lastIndexOf (TDD-00103 follow-up): the needle string's
 // UTF-8 bytes are searched over the buffer's raw bytes. `kind` is "indexOf",
@@ -1068,7 +1142,6 @@ func (e *Emitter) emitBufferStringSearch(mem *ast.MemberExpression, method strin
 		return Value{}, err
 	}
 	needleVal = e.convert(needleVal, TypePtr)
-	e.ensureStrHeaderRuntime() // memmem + __kml_str_len
 	needleLen := e.emitStrLenHeader(needleVal.Ref)
 
 	if method == "lastIndexOf" {
@@ -1576,7 +1649,10 @@ func (e *Emitter) bufferInstanceEquals(c *bufferInstanceCall) (Value, error) {
 			if err != nil {
 				return Value{}, err
 			}
-			iv := e.convert(v, TypeI64).Ref
+			iv, err := e.bufferNumberArg(v, names[i])
+			if err != nil {
+				return Value{}, err
+			}
 			if err := e.emitBufferOffsetCheck(names[i], iv, bounds[i]); err != nil {
 				return Value{}, err
 			}
@@ -1623,7 +1699,6 @@ func (e *Emitter) emitBufferOffsetCheck(name, v, max string) error {
 	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(". Received "), Ty: TypePtr}); err != nil {
 		return err
 	}
-	e.ensureStrHeaderRuntime()
 	recv := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_received_int(i64 %s)", recv, v))
 	if msg, err = e.emitStringConcat(msg, Value{Ref: recv, Ty: TypePtr}); err != nil {
@@ -1912,8 +1987,12 @@ func (e *Emitter) emitBufferFromArrayBufferRange(args []ast.Expression, pos ast.
 	if err != nil {
 		return Value{}, err
 	}
-	off := e.convert(ov, TypeI64).Ref
-	e.ensureExceptionHelpers()
+	// byteOffset is `+byteOffset`, NaN as 0.
+	offV, err := e.arrayIndexToI64(ov, args[1].GetPos())
+	if err != nil {
+		return Value{}, err
+	}
+	off := offV.Ref
 	badOff := e.freshReg()
 	neg := e.freshReg()
 	past := e.freshReg()
@@ -1933,7 +2012,17 @@ func (e *Emitter) emitBufferFromArrayBufferRange(args []ast.Expression, pos ast.
 		if err != nil {
 			return Value{}, err
 		}
-		l := e.convert(lv, TypeI64).Ref
+		var l string
+		if lv.Ty.IR == irPtr && !lv.Ty.IsDynamic() {
+			// `+length`, NaN as 0.
+			lc, err := e.arrayIndexToI64(lv, args[2].GetPos())
+			if err != nil {
+				return Value{}, err
+			}
+			l = lc.Ref
+		} else {
+			l = e.convert(lv, TypeI64).Ref
+		}
 		badLen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %s", badLen, l, rest))
 		lenBadL, lenOkL := e.freshLabel("buffrom.lenbad"), e.freshLabel("buffrom.lenok")
@@ -1970,24 +2059,6 @@ func bufferIntrinsicNames() []string {
 	return names
 }
 
-// ensureBswap declares the llvm.bswap intrinsic of a width-byte integer.
-func (e *Emitter) ensureBswap(width int) {
-	switch width {
-	case 2:
-		if !e.usedBswap16 {
-			e.usedBswap16 = true
-		}
-	case 4:
-		if !e.usedBswap32 {
-			e.usedBswap32 = true
-		}
-	case 8:
-		if !e.usedBswap64 {
-			e.usedBswap64 = true
-		}
-	}
-}
-
 // emitMaybeSwap emits the conditional byte swap of an iN register raw:
 // littleRef is a runtime i1 little-endian flag. The host is little-endian,
 // so the value is swapped exactly when littleRef is false.
@@ -1995,7 +2066,6 @@ func (e *Emitter) emitMaybeSwap(raw string, width int, littleRef string) string 
 	if width == 1 {
 		return raw
 	}
-	e.ensureBswap(width)
 	bits := width * 8
 	swapped := e.freshReg()
 	sel := e.freshReg()
@@ -2052,4 +2122,86 @@ func bufferSizeLiteral(x ast.Expression) bool {
 	}
 	v, err := strconv.ParseFloat(strings.ReplaceAll(n.Value, "_", ""), 64)
 	return err == nil && v >= 0 && v <= 9007199254740991
+}
+
+// bufferNumberArg is a Buffer method's numeric argument as an i64: a value
+// statically not a number (a string, an object, a boolean) is Node's
+// ERR_INVALID_ARG_TYPE "The \"name\" argument must be of type number."
+// emitToNumber is ToNumber of any value, boxed first: a double.
+func (e *Emitter) emitToNumber(v Value) (Value, error) {
+	box, err := e.emitBoxValue(v)
+	if err != nil {
+		return Value{}, err
+	}
+	e.ensureDynJSONC()
+	e.declareFn("__kml_any_number_conv", "declare double @__kml_any_number_conv(i64)")
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call double @__kml_any_number_conv(i64 %s)", r, box.Ref))
+	return Value{Ref: r, Ty: TypeF64}, nil
+}
+
+func (e *Emitter) bufferNumberArg(v Value, name string) (string, error) {
+	if (!v.Ty.IsDynamic() && v.Ty.IR != irPtr && v.Ty.IR != "i1") || isNullableScalar(v.Ty) {
+		return e.convert(v, TypeI64).Ref, nil
+	}
+	box, err := e.emitBoxValue(v)
+	if err != nil {
+		return "", err
+	}
+	okL := ""
+	if v.Ty.IsDynamic() {
+		// A box: a number (or undefined, the default) passes.
+		tv, err := e.emitDynamicTypeof(box)
+		if err != nil {
+			return "", err
+		}
+		isN, isU, ok := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isN, tv.Ref, e.internString("number")))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isU, tv.Ref, e.internString("undefined")))
+		e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", ok, isN, isU))
+		throwL := e.freshLabel("bufnum.throw")
+		okL = e.freshLabel("bufnum.ok")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, throwL))
+		e.emitLabel(throwL)
+	}
+	e.ensureDynJSONC()
+	suffix := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_received(i64 %s)", suffix, box.Ref))
+	msg, err := e.emitStringConcat(Value{Ref: e.internString(fmt.Sprintf("The %q argument must be of type number.", name)), Ty: TypePtr}, Value{Ref: suffix, Ty: TypePtr})
+	if err != nil {
+		return "", err
+	}
+	e.emitThrowCoded("TypeError", "ERR_INVALID_ARG_TYPE", msg.Ref)
+	if okL == "" {
+		e.emitLabel(e.freshLabel("bufnum.dead"))
+		return "0", nil
+	}
+	e.emitLabel(okL)
+	return e.convert(v, TypeI64).Ref, nil
+}
+
+// bufferStaticOf is Buffer.of(...items): Uint8Array.of's, each item taken
+// to a byte as Buffer.from(array) takes an element.
+func (e *Emitter) bufferStaticOf(c *bufferStaticCall) (Value, error) {
+	lit := ast.NewArrayLiteral(c.args, c.pos)
+	return e.bufferStaticFrom(&bufferStaticCall{method: "from", args: []ast.Expression{lit}, pos: c.pos})
+}
+
+// emitAnyBigIntOrMixError is the bigint a boxed value holds, or the
+// TypeError a bigint-only operation (Buffer's 64-bit writes) raises for any
+// other value: "Cannot mix BigInt and other types".
+func (e *Emitter) emitAnyBigIntOrMixError(v Value) Value {
+	e.ensureBigInt()
+	tag, payload := e.emitUnboxTagPayload(v)
+	isObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+	probeL, badL, okL := e.freshLabel("anybig.probe"), e.freshLabel("anybig.bad"), e.freshLabel("anybig.ok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, probeL, badL))
+	e.emitLabel(probeL)
+	cell, isBig := e.emitBoxedBigIntProbe(payload)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, okL, badL))
+	e.emitLabel(badL)
+	e.emitThrowTypeError("Cannot mix BigInt and other types, use explicit conversions")
+	e.emitLabel(okL)
+	return e.emitBoxedBigIntLoad(cell)
 }

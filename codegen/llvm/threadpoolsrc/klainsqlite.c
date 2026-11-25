@@ -13,7 +13,8 @@
 #endif
 
 typedef struct kml_sqlite_fn {
-    void *inv, *clo;   // the module's callback: (kind, call key)
+    void *inv;
+    kml_ref clo;       // the module's callback: (kind, call key), held through the handle table
 } kml_sqlite_fn;
 
 static __thread sqlite3 **sq_db = NULL;
@@ -359,7 +360,7 @@ static void sq_call(sqlite3_context *ctx, int kind, int argc, sqlite3_value **ar
             key = (double)*slot;
         }
     }
-    ((void (*)(void *, double, double))fn->inv)(fn->clo, kind, key);
+    ((void (*)(void *, double, double))fn->inv)(kml_ref_get(fn->clo), kind, key);
     sq_ctx = pc;
     sq_argv = pv;
     sq_argc = pn;
@@ -370,7 +371,10 @@ static void sq_x_step(sqlite3_context *c, int n, sqlite3_value **v) { sq_call(c,
 static void sq_x_final(sqlite3_context *c) { sq_call(c, 2, 0, NULL); }
 static void sq_x_value(sqlite3_context *c) { sq_call(c, 3, 0, NULL); }
 static void sq_x_inverse(sqlite3_context *c, int n, sqlite3_value **v) { sq_call(c, 4, n, v); }
-static void sq_x_destroy(void *p) { free(p); } /* scratch */
+static void sq_x_destroy(void *p) {
+    kml_ref_free(((kml_sqlite_fn *)p)->clo);
+    free(p); /* scratch */
+}
 
 // flags: 1 deterministic, 2 direct only. kind: 0 a scalar function, 1 an
 // aggregate, 2 an aggregate window function (with inverse).
@@ -379,7 +383,7 @@ double __kml_native_sqlite_create_function(double id, const char *name, double a
     if (!db) return SQLITE_MISUSE;
     kml_sqlite_fn *fn = (kml_sqlite_fn *)calloc(1, sizeof *fn); /* scratch */
     fn->inv = inv;
-    fn->clo = clo;
+    fn->clo = kml_ref_new(clo);
     int tf = SQLITE_UTF8;
     if ((int)flags & 1) tf |= SQLITE_DETERMINISTIC;
     if ((int)flags & 2) tf |= SQLITE_DIRECTONLY;
@@ -448,7 +452,7 @@ static __thread double sq_cb_ret = 0;
 void __kml_native_sqlite_cb_return(double v) { sq_cb_ret = v; }
 
 static __thread void *sq_auth_inv[64];
-static __thread void *sq_auth_clo[64];
+static __thread kml_ref sq_auth_clo[64]; /* thread-local: held through the handle table */
 static __thread const char *sq_auth_args[4];
 
 static int sq_x_auth(void *p, int action, const char *a, const char *b, const char *c, const char *d) {
@@ -458,7 +462,7 @@ static int sq_x_auth(void *p, int action, const char *a, const char *b, const ch
     sq_auth_args[2] = c;
     sq_auth_args[3] = d;
     sq_cb_ret = SQLITE_OK;
-    ((void (*)(void *, double))sq_auth_inv[slot])(sq_auth_clo[slot], action);
+    ((void (*)(void *, double))sq_auth_inv[slot])(kml_ref_get(sq_auth_clo[slot]), action);
     return (int)sq_cb_ret;
 }
 
@@ -470,7 +474,8 @@ double __kml_native_sqlite_set_authorizer(double id, void *inv, void *clo) {
     int slot = (int)id;
     if (!db || slot >= 64) return SQLITE_MISUSE;
     sq_auth_inv[slot] = inv;
-    sq_auth_clo[slot] = clo;
+    kml_ref_free(sq_auth_clo[slot]);
+    sq_auth_clo[slot] = clo ? kml_ref_new(clo) : 0;
     return sqlite3_set_authorizer(db, sq_x_auth, (void *)(intptr_t)slot);
 }
 

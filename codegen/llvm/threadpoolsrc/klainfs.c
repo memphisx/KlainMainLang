@@ -688,5 +688,7 @@ void __kml_native_fs_call_async(double op, const char *p1, const char *p2, doubl
                                 void *data, int64_t size, void *inv, void *clo) {
     kml_pool_item *it = native_item(work_fs, inv, clo);
     kfs_setup(it, op, p1, p2, a, b, c, d, data, size);
+    // The worker writes into the caller's buffer: pinned until the callback.
+    if (data) it->pin[0] = kml_ref_new(data);
     native_submit(it);
 }

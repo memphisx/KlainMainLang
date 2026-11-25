@@ -164,7 +164,7 @@
       "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
       "signature": "readonly body: ReadableStream<Uint8Array> | null; readonly bodyUsed: boolean",
       "badge": "exact",
-      "description": "A real ReadableStream<Uint8Array> fed incrementally from libcurl's write callback with backpressure via curl pause/unpause. Every read is the same stream; a constructed Response without a body has a null body. bodyUsed turns true once a body method runs or the stream is read, and a body method on a used or locked body rejects with a TypeError (\"Body is unusable\"), as in Node.",
+      "description": "A real ReadableStream<Uint8Array> fed incrementally from libcurl's write callback with backpressure via curl pause/unpause. Every read is the same stream; a constructed Response without a body has a null body. bodyUsed turns true once a body method runs or the stream is read, and a body method on a used or locked body rejects with a TypeError (\"Body is unusable\"), as in Node. clone() on a Response or Request tees the body so the original and the copy are read independently (the copy gets its own Headers); cloning a used or locked body throws a TypeError.",
       "returns": {
         "type": "ReadableStream<Uint8Array> | null",
         "desc": "The streaming body."
@@ -200,10 +200,11 @@
     {
       "id": "fetch.response.headers",
       "name": "Response headers",
-      "statusRow": null,
-      "signature": "// not available",
-      "badge": "missing",
-      "description": "Reading response headers is not supported — no HEADERFUNCTION capture exists in this codebase yet. There is no .headers accessor on a Response, and XMLHttpRequest's .getResponseHeader()/.getAllResponseHeaders() are absent for the same reason. Request-side headers work fully.",
+      "statusRow": "Response (.status, .ok, .body, .text(), .json(), .arrayBuffer())",
+      "signature": "readonly headers: Headers",
+      "badge": "exact",
+      "description": "The response's headers as a Headers object: a fetched response's are the server's (immutable, as in Node), a constructed one's come from init.headers plus the content type its body implies.",
+      "exampleKey": "fetch/fetch_response_headers",
       "seeAlso": [
         "fetch.headers",
         "fetch.response.status"
@@ -250,6 +251,9 @@
         "type": "Request",
         "desc": "The request object."
       },
+      "differences": [
+        "A ReadableStream body (init { body: stream, duplex: \"half\" }) is read whole before fetch sends it, with a Content-Length, where undici sends it chunked as it is read; the server gets the same bytes, but a stream that never ends never sends."
+      ],
       "exampleKey": "fetch/fetch_request_headers",
       "snippet": "const req = new Request('http://127.0.0.1:8765/post', {\n  method: 'POST', headers: headers, body: JSON.stringify({ hello: 'world' })\n})\nconst posted = await fetch(req)",
       "seeAlso": [
@@ -258,10 +262,7 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/Request/Request"
-      },
-      "differences": [
-        "No clone(): a compile error."
-      ]
+      }
     },
     {
       "id": "fetch.headers",

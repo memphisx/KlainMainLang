@@ -375,6 +375,13 @@ func (e *Emitter) emitIndexPtr(ex *ast.IndexExpression) (gepReg string, elemTy T
 
 	e.emitLabel(okL)
 	if hdr != "" {
+		if e.holesUsed() && sparseElem(elemTy) {
+			// The element's slot: a sparse array is made dense first, its
+			// buffer reread (holes.c).
+			e.emitDensify(hdr, elemTy)
+			dataPtrReg = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", dataPtrReg, e.nullSafeArrayHeader(hdr)))
+		}
 		e.emitHoleFill(hdr, idxRef) // a write sets the element
 	}
 	return e.indexElemGEP(dataPtrReg, idxRef, elemTy), elemTy, nil
@@ -474,7 +481,6 @@ func (e *Emitter) emitIndexRead(ex *ast.IndexExpression) (Value, error) {
 			e.emitLabel(packedL)
 			// An index no array index reads the array's own property of
 			// that name.
-			e.ensureShapeRuntime()
 			notIdx := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp uge i64 %s, 4294967295", notIdx, idxRef))
 			propL, idxL := e.freshLabel("idx.prop"), e.freshLabel("idx.index")
@@ -598,7 +604,9 @@ func (e *Emitter) emitIndexBase(ex *ast.IndexExpression) (dataPtrReg, lenReg, id
 			}
 			e.emitArrayBindingGuard(sym, "Cannot read properties of undefined"+key)
 		}
-		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		// Element access is sparse-aware: the hole test guards every read of
+		// the buffer, and a write past it goes through holes.c.
+		dataSlot, lenSlot := e.arrayDataLenSlotsRaw(sym)
 		dataPtrReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", dataPtrReg, dataSlot))
 		lenReg = e.freshReg()
@@ -645,10 +653,7 @@ func (e *Emitter) emitIndexBase(ex *ast.IndexExpression) (dataPtrReg, lenReg, id
 			return "", "", "", TypeVoid, dynIndexBase{b}
 		}
 		elemTy = *arrVal.Ty.ElemType
-		dataPtrReg = e.freshReg()
-		dataPtrReg = e.arrayData(arrVal)
-		lenReg = e.freshReg()
-		lenReg = e.arrayLen(arrVal)
+		dataPtrReg, lenReg = e.arrayPartsRaw(arrVal) // sparse-aware, as above
 		if !arrVal.Ty.IsFlatArray() && !arrVal.Ty.IsTypedArray() && e.holesUsed() {
 			hdr = e.absentSafeArrayHeader(arrVal.Ref)
 		}
@@ -891,7 +896,7 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 	}
 	// An array's symbol-keyed property (`a[Symbol.iterator]`) is read as
 	// an object's, through its box.
-	if ot := e.typeOfExpr(ex.Object); ot.IsArray() && !ot.IsDynamic() && !ot.IsFlatArray() && (e.typeOfExpr(ex.Index).IsSymbol() || isWellKnownSymbolExpr(ex.Index)) {
+	if ot := e.typeOfExpr(ex.Object); ot.IsArray() && !ot.IsDynamic() && !ot.IsFlatArray() && (e.typeOfExpr(ex.Index).IsSymbol() || e.isWellKnownSymbolExpr(ex.Index)) {
 		plain := *ex
 		plain.Object = ast.NewAsExpression(ex.Object, ast.AnyAnnotation(""), ex.Object.GetPos())
 		return e.emitIndexUnguarded(&plain)
@@ -1011,7 +1016,6 @@ func (e *Emitter) emitIndexUnguarded(ex *ast.IndexExpression) (Value, error) {
 				return Value{}, internalAt(ex.GetPos(), "a Map<string, …> bracket index must be a string")
 			}
 		}
-		e.ensureMapStrHelpers()
 		raw := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", raw, objVal.Ref, keyVal.Ref))
 		valTy := TypePtr
@@ -1380,6 +1384,16 @@ func (e *Emitter) restrictedClassProp(obj ast.Expression, prop string) bool {
 const restrictedPropMessage = "'caller', 'callee', and 'arguments' properties may not be accessed on strict mode functions or the arguments objects for calls to them"
 
 func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
+	if ex.Property == "callee" && e.ownArguments(ex.Object) {
+		// The arguments object's own callee: the function itself, or in
+		// strict code an accessor that throws.
+		if c := e.argumentsCalleeExpr(ex.GetPos()); c != nil {
+			return e.emitExpr(c)
+		}
+		e.emitThrowTypeError(restrictedPropMessage)
+		e.emitLabel(e.freshLabel("restricted.dead"))
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	}
 	if e.restrictedClassProp(ex.Object, ex.Property) && !ex.Optional {
 		e.emitThrowTypeError(restrictedPropMessage)
 		e.emitLabel(e.freshLabel("restricted.dead"))
@@ -1455,6 +1469,16 @@ func (e *Emitter) emitMember(ex *ast.MemberExpression) (Value, error) {
 			// `K.x` after `const K = C` reads C's static x.
 			ex = ast.NewMemberExpression(ast.NewIdentifier(target, id.GetPos()), ex.Property, ex.GetPos())
 		}
+	}
+	if ot := e.typeOfExpr(ex.Object); (ot.IsMap() || ot.IsSet()) && !ex.Optional && e.hostMethodValue(ex) && e.collProtoPatched(collOwner(ot), ex.Property) {
+		// A method the program may have replaced: the prototype's own
+		// value now, as Node's lookup finds it.
+		if _, err := e.emitExpr(ex.Object); err != nil {
+			return Value{}, err
+		}
+		pos := ex.GetPos()
+		proto := ast.NewMemberExpression(ast.NewIdentifier(collOwner(ot), pos), "prototype", pos)
+		return e.emitExpr(ast.NewMemberExpression(proto, ex.Property, pos))
 	}
 	if e.hostMethodValue(ex) {
 		// `m.get` read as a value: the method the boxed object's shape
@@ -1738,7 +1762,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			}
 			name = mangled
 		}
-		return e.emitClassProto(name), nil
+		return e.emitClassProtoFor(name, ""), nil
 	}
 	// A builtin class's prototype object (`Map.prototype`).
 	if id, ok := ex.Object.(*ast.Identifier); ok && ex.Property == "prototype" && e.builtinProtoClass(id) {
@@ -1756,24 +1780,9 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 			return e.emitTypedKindProto(id.Name), nil
 		}
 	}
-	// `Function.prototype`: a function doing nothing, its methods acting on
-	// their receiver (fnproto.go).
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Function" && ex.Property == "prototype" && !e.isShadowedByLocal("Function") {
-		if _, user := e.classes["Function"]; !user {
-			return e.emitFnProtoBox(""), nil
-		}
-	}
-	// `Object.prototype`: the shared null-prototype bag every ordinary
-	// object's [[Prototype]] reads as (TDD-00229).
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Object" && ex.Property == "prototype" && !e.isShadowedByLocal("Object") {
-		e.ensureAnyToPrimitive()
-		e.ensureNanBox()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
-		e.ensureObjProtoFill()
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_object_prototype()", r))
-		return e.emitDynObjBox(r), nil
+	// A constructor's own property its declaration emits (`Object.prototype`).
+	if pi, ok := e.staticPropIntrinsic(ex); ok {
+		return pi.emit(e, ex)
 	}
 	// An error's `stack`: formatted on first read from its name, message
 	// and the frames captured when it was made (frames.go).
@@ -1800,7 +1809,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 				// A builtin held boxed (a lowered library function's value).
 				return e.emitDynAnyMemberGetNamed(fv, e.internString(ex.Property), ex.Property, ex.GetPos())
 			}
-			e.ensureFnMeta()
 			r := e.freshReg()
 			if ex.Property == "name" {
 				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_name_hdr("+irPtr+" %s)", r, fv.Ref))
@@ -1826,8 +1834,18 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	}
 	if ex.Property == "constructor" {
 		if objTy := e.typeOfExpr(ex.Object); objTy.IsTypedArray() && !objTy.IsDynamic() {
-			if _, err := e.emitExpr(ex.Object); err != nil {
+			v, err := e.emitExpr(ex.Object)
+			if err != nil {
 				return Value{}, err
+			}
+			if e.hasTypedArraySubclass() {
+				// It may be a subclass's instance: its class, read off the
+				// box (the array header's class word).
+				box, err := e.emitBoxValue(v)
+				if err != nil {
+					return Value{}, err
+				}
+				return e.emitDynAnyMemberGetNamed(box, e.internString("constructor"), "constructor", ex.GetPos())
 			}
 			name := typedArrayConstructorName(objTy)
 			if objTy.IsBuffer() {
@@ -1860,15 +1878,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 				return e.emitAbsentProperty(), nil // no property of the namespace object
 			}
 			return e.emitIdent(ast.NewIdentifier(ast.NamespaceMangle(nsName, ex.Property), ex.GetPos()))
-		}
-	}
-	// A well-known symbol (`Symbol.iterator`, `Symbol.asyncIterator`, …).
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Symbol" && !e.isShadowedByLocal(id.Name) && wellKnownSymbols[ex.Property] {
-		return Value{Ref: e.wellKnownSymbol(ex.Property), Ty: SymbolType()}, nil
-	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
-		if lit, ok := builtinNumberConst(id.Name, ex.Property); ok {
-			return Value{Ref: lit, Ty: TypeF64}, nil
 		}
 	}
 	// Bare `process.env` (not a keyed read): the enumerable environment object.
@@ -1927,7 +1936,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 				return e.countToNumber(bl), nil
 			}
 			if sym, found := e.lookup(id.Name); found && sym.Ty.IsTypedArray() {
-				_, lenSlot := e.arrayDataLenSlots(sym)
+				_, lenSlot := e.arrayDataLenSlotsRaw(sym) // length only
 				lenReg := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", lenReg, lenSlot))
 				bl, err := e.emitTypedArrayByteLength(lenReg, *sym.Ty.ElemType)
@@ -1968,7 +1977,7 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 					if sym.Ty.IsArray() && !sym.Ty.IsFlatArray() {
 						e.emitArrayBindingGuard(sym, "Cannot read properties of undefined (reading 'length')")
 					}
-					_, lenSlot := e.arrayDataLenSlots(sym)
+					_, lenSlot := e.arrayDataLenSlotsRaw(sym) // length only
 					reg := e.freshReg()
 					e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", reg, lenSlot))
 					return e.countToNumber(Value{Ref: reg, Ty: TypeI64}), nil
@@ -1989,7 +1998,6 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 		// A function value (a lowered builtin read through its owner): its
 		// declared length, from the code-pointer metadata.
 		if objVal.Ty.IsFunc() && objVal.Ty.IR == irPtr {
-			e.ensureFnMeta()
 			reg := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fn_length_hdr("+irPtr+" %s)", reg, objVal.Ref))
 			return e.countToNumber(Value{Ref: reg, Ty: TypeI64}), nil
@@ -2145,6 +2153,11 @@ func (e *Emitter) emitMemberUnguarded(ex *ast.MemberExpression) (Value, error) {
 	// intrinsic serves: its box has no bag to read it from.
 	if hostPrefixedObject(objVal.Ty) && !objVal.Ty.Nullable() {
 		if _, _, ok := objVal.Ty.FieldIndex(ex.Property); !ok {
+			if c := e.front(); c != nil && e.compatJS() && c.MemberDecl(ex) == nil {
+				// A property neither it nor its prototype has (JavaScript
+				// reads it freely): undefined.
+				return Value{Ref: "null", Ty: TypeUndefined}, nil
+			}
 			return Value{}, internalAt(ex.GetPos(), "'%s' is not supported on this object", ex.Property)
 		}
 	}
@@ -2560,6 +2573,12 @@ func (e *Emitter) checkerPrimitive(expr ast.Expression) (Type, bool) {
 	if c == nil || e.compatJS() || len(e.dynEntryWidened) > 0 && widenedRooted(expr, e.dynEntryWidenedIdent) {
 		return Type{}, false // read off a dynamic entry's box
 	}
+	if _, isID := expr.(*ast.Identifier); !isID && widenedRooted(expr, e.anyHeldIdent) {
+		return Type{}, false // read off a binding held boxed (anyHeldDecl), whatever the checker gives it
+	}
+	if call, ok := expr.(*ast.CallExpression); ok && e.dynamicResultCall(call) {
+		return Type{}, false // the method its decorators left decides what it returns
+	}
 	if m, ok := expr.(*ast.MemberExpression); ok && e.stdioStream(m.Object) {
 		// A stdio stream is typed tty's whatever it is (a pipe's socket, a
 		// file's stream): `isTTY`, `columns` may be undefined, so the box
@@ -2581,7 +2600,8 @@ func (e *Emitter) checkerPrimitive(expr ast.Expression) (Type, bool) {
 			}
 		}
 	}
-	if c.Unanswered(t) || t.Flags&(checker.Union|checker.Any|checker.Unknown) != 0 {
+	if c.Unanswered(t) || t.Flags&(checker.Union|checker.Any|checker.Unknown) != 0 || t.Brand != nil {
+		// (A branded primitive is held boxed: its wrapper may carry it.)
 		return Type{}, false
 	}
 	if call, ok := expr.(*ast.CallExpression); ok && c.AnyArgOverloadCall(call) {
@@ -2907,7 +2927,7 @@ func isNumberLiteral(x ast.Expression) bool {
 // static object holds that key in (`@@<name>`, as the parser names a
 // literal's or a class's well-known-symbol member).
 func (e *Emitter) wellKnownSymbolField(ex *ast.IndexExpression) (*ast.MemberExpression, bool) {
-	if ex.Optional || !isWellKnownSymbolExpr(ex.Index) {
+	if ex.Optional || !e.isWellKnownSymbolExpr(ex.Index) {
 		return nil, false
 	}
 	ot := e.typeOfExpr(ex.Object)
@@ -2923,13 +2943,9 @@ func (e *Emitter) wellKnownSymbolField(ex *ast.IndexExpression) (*ast.MemberExpr
 
 // isWellKnownSymbolExpr is whether x is `Symbol.<name>` for a well-known
 // symbol.
-func isWellKnownSymbolExpr(x ast.Expression) bool {
+func (e *Emitter) isWellKnownSymbolExpr(x ast.Expression) bool {
 	m, ok := x.(*ast.MemberExpression)
-	if !ok || !wellKnownSymbols[m.Property] {
-		return false
-	}
-	id, ok := m.Object.(*ast.Identifier)
-	return ok && id.Name == "Symbol"
+	return ok && wellKnownSymbols[m.Property] && e.propDeclIntrinsic(m) == "Symbol."+m.Property
 }
 
 // enumReverseType is a numeric enum's reverse lookup: a member's name, or
@@ -2982,4 +2998,15 @@ func (e *Emitter) voidKeyIndex(ex *ast.IndexExpression) *ast.IndexExpression {
 	cp := *ex
 	cp.Index = ast.NewSequenceExpression([]ast.Expression{ex.Index, &ast.NullLiteral{IsUndefined: true}}, ex.Index.GetPos())
 	return &cp
+}
+
+// hasTypedArraySubclass reports whether a class of the program extends a
+// typed array (directly or through another class).
+func (e *Emitter) hasTypedArraySubclass() bool {
+	for _, info := range e.classes {
+		if info.HostBase != nil && info.HostBase.IsTypedArray() {
+			return true
+		}
+	}
+	return false
 }

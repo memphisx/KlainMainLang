@@ -29,10 +29,7 @@ import (
 
 // emitAnyToNum coerces a boxed value to a double register.
 func (e *Emitter) emitAnyToNum(v Value) string {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call double @__kml_any_tonum(i64 %s)", r, v.Ref))
 	return r
@@ -52,10 +49,7 @@ func (e *Emitter) emitAnyToF64Slot(v Value) string {
 
 // emitAnyTruthy coerces a boxed value to i1 via JS ToBoolean.
 func (e *Emitter) emitAnyTruthy(v Value) Value {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_tobool(i64 %s)", r, v.Ref))
 	return Value{Ref: r, Ty: TypeBool}
@@ -226,7 +220,6 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, lp, lb.Ref))
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rp, rb.Ref))
 		c := e.freshReg()
-		e.ensureStrHeaderRuntime() // __kml_str_cmp: by UTF-16 code units
 		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_str_cmp("+irPtr+" %s, "+irPtr+" %s)", c, lp, rp))
 		var scond string
 		switch op {
@@ -246,7 +239,6 @@ func (e *Emitter) emitAnyBinary(op string, left, right Value, pos ast.Pos) (Valu
 
 		e.emitLabel(numCmpL)
 		// A bigint on either side compares by value (JS's IsLessThan).
-		e.ensureBoxedBigIntHooks()
 		rel := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_bigint_rel(i64 %s, i64 %s)", rel, lb.Ref, rb.Ref))
 		isBigRel := e.freshReg()

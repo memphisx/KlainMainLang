@@ -166,11 +166,9 @@
           {
             "feature": "String literals (single/double quote)",
             "status": "implemented",
-            "caveats": [
-              "An embedded NUL (`\\x00`, `\\0`) truncates the string, since strings are stored as NUL-terminated C strings",
-              "No strict-mode `SyntaxError` for a legacy octal escape (accepted unconditionally)"
-            ],
             "notes": [
+              "An embedded NUL (`\\x00`, `\\0`) is an ordinary character: strings carry their length ([ADR-02061](../adr/02/ADR-02061.md))",
+              "A legacy octal escape (`\\01`) or `\\8`/`\\9`, and a legacy octal (`010`) or leading-zero (`08`) number, are sloppy JavaScript's: TypeScript reports tsc's TS1487/TS1488/TS1121/TS1489, and JavaScript strict code (a directive, a module, a class body) V8's SyntaxError ([ADR-02062](../adr/02/ADR-02062.md))",
               "The full ES escape grammar is decoded: `\\b \\f \\v`, `\\xHH`, `\\uHHHH`, `\\u{H…}`, Annex B legacy octal (`\\0`–`\\377`) and `\\8`/`\\9`, line continuation, and the NonEscapeCharacter rule (`\\A` → `A`) — see [ADR-00194](../adr/00/ADR-00194.md); templates share the same decoding"
             ]
           },
@@ -409,7 +407,9 @@
           {
             "feature": "Tagged template literals (`` tag`Hello ${x}` ``)",
             "status": "implemented",
-            "caveats": [],
+            "caveats": [
+              "A quasi with a legacy octal or `\\8`/`\\9` escape cooks to its decoded text, where ES makes it `undefined` (`` t`\\01` ``); an otherwise invalid escape (`` t`\\u{` ``) is a SyntaxError"
+            ],
             "notes": [
               "Desugars to a plain call (`tag([\"a\",\"b\"], x)`) — interpolated values reach the tag function as real typed values, not implicitly stringified the way a plain template literal's own interpolation is",
               "Any callable — a named function, a class method, or an arrow function/closure (including with a `...rest` parameter) — works as a tag. See [TDD-00059](../tdd/TDD-00059.md)/[ADR-00151](../adr/00/ADR-00151.md)/[ADR-00152](../adr/00/ADR-00152.md)",
@@ -594,11 +594,9 @@
             "feature": "`Promise.withResolvers`",
             "status": "implemented",
             "notes": [
-              "A pending task promise and the `resolve`/`reject` functions that settle it, the type argument explicit (`Promise.withResolvers<number>()`) or taken from the declared type (`const r: PromiseWithResolvers<number> = Promise.withResolvers()`) ([ADR-01665](../adr/01/ADR-01665.md), [ADR-01666](../adr/01/ADR-01666.md))"
+              "A pending task promise and the `resolve`/`reject` functions that settle it, the type argument explicit (`Promise.withResolvers<number>()`) or taken from the declared type (`const r: PromiseWithResolvers<number> = Promise.withResolvers()`) ([ADR-01665](../adr/01/ADR-01665.md), [ADR-01666](../adr/01/ADR-01666.md)); called with another constructor as `this`, that constructor's promise, and V8's TypeError for a non-object ([ADR-02051](../adr/02/ADR-02051.md))"
             ],
-            "caveats": [
-              "Called with another constructor as `this` (`Promise.withResolvers.call(MyPromise)`) it still builds a plain `Promise`, not an instance of that constructor"
-            ]
+            "caveats": []
           },
           {
             "feature": "`Promise.try`",
@@ -741,9 +739,6 @@
           {
             "feature": "Getters / setters (`get x() {}` / `set x(v) {}`) on classes and object literals",
             "status": "implemented",
-            "caveats": [
-              "Static accessors, and logical assignment (`&&=`/`\\|\\|=`/`??=`) on an accessor, remain out of scope for V1 ([TDD-00030](../tdd/TDD-00030.md)/[ADR-00110](../adr/00/ADR-00110.md))"
-            ],
             "notes": [
               "`get`/`set` are contextual (not reserved), parsed the same way `in` (ADR-00091) already is — a field/method/variable literally named `get`/`set` keeps working everywhere outside this one position",
               "No new storage: an accessor is registered as an ordinary method under an internal dispatch key, reusing inheritance/override/vtable dispatch/visibility checking unchanged",
@@ -894,6 +889,14 @@
             "caveats": [],
             "notes": [
               "The instance carries the buffer's body ([ADR-01970](../adr/01/ADR-01970.md)): `new X(n, { maxByteLength })` and `super(…)` construct it, `byteLength`, `resize`/`grow`, `resizable`/`maxByteLength`, typed arrays and `DataView`s over it, `slice` making another instance of the class, `instanceof` both ways, `ArrayBuffer.isView` false, the same through `any`, and `console.log` as Node shows it (`B [ArrayBuffer] { [Uint8Contents]: <07 00>, [byteLength]: 2, tag: 1 }`)"
+            ]
+          },
+          {
+            "feature": "`class X extends ReadableStream` / `WritableStream` / `TransformStream` / `CompressionStream` / `DecompressionStream`",
+            "status": "implemented",
+            "caveats": [],
+            "notes": [
+              "The instance holds the stream its construction made ([ADR-02045](../adr/02/ADR-02045.md)): `super(source, strategy)` (or the class's arguments without a constructor of its own) builds it with the class's type arguments, the stream's members and methods act on it, `for await`, `pipeTo`/`pipeThrough`, a `Response` body and passing it where the stream is expected take it as the stream, `instanceof` both ways, the same through `any`, and `console.log` shows the stream as Node does"
             ]
           },
           {

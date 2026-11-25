@@ -242,7 +242,6 @@ func (e *Emitter) emitQueueMicrotask(args []ast.Expression, pos ast.Pos) (Value,
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureMicrotasks()
 	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", cbPtr))
 	return Value{Ty: TypeVoid}, nil
 }
@@ -251,7 +250,6 @@ func (e *Emitter) emitQueueMicrotask(args []ast.Expression, pos ast.Pos) (Value,
 // rejected (resolved == 2), re-throw its stored error object at the current
 // point; otherwise fall through. Shared by emitAwait and the combinators.
 func (e *Emitter) emitTaskRethrowIfRejected(promiseReg string) {
-	e.ensureExceptionHelpers()
 	resP := e.freshReg()
 	res := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 0", resP, promiseStructIR, promiseReg))
@@ -469,7 +467,7 @@ func (e *Emitter) emitRestArgsArray(restArgs []ast.Expression, restTy Type) (Val
 // allocates a task promise, spawns the task (running the body up to its first
 // suspend), and returns the pending promise (typed Promise<T> with PromiseTask).
 func (e *Emitter) emitSpawnCall(name string, sig FuncSig, argVals []Value) (Value, error) {
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	fields, paramStart := taskBundleFields(sig.ParamTypes)
 	bundleIR := taskBundleIR(fields)
 

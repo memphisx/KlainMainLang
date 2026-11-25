@@ -468,7 +468,9 @@ export class Socket extends EventEmitter {
         }
     }
 
-    close(callback?: () => void): this {
+    close(callback?: () => void): this;
+    close(callback?: any): this {
+        // Node: anything but a function is ignored.
         if (typeof callback === 'function') this.on('close', callback);
         if (this.queue !== null) {
             this.queue.push(() => { this.close(); });
@@ -529,7 +531,8 @@ export class Socket extends EventEmitter {
         return flag;
     }
 
-    setMulticastInterface(interfaceAddress: string): void {
+    setMulticastInterface(interfaceAddress: string): void;
+    setMulticastInterface(interfaceAddress: any): void {
         validateString(interfaceAddress, 'interfaceAddress');
         const rc = __kml_native.udpMulticastInterface(this.boundHandle('setMulticastInterface'), interfaceAddress);
         if (rc < 0) throw errnoException(rc, 'setMulticastInterface');

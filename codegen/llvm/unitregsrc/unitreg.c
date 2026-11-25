@@ -151,6 +151,16 @@ i64 __kml_obj_prim(void *o) {
     return __kml_unit_find(KML_UNIT_PRIM_CLASS, *(const i64 *)o & KML_ID_MASK) ? ((const i64 *)o)[1] : 0;
 }
 
+// __kml_promise_class_is: whether a header identity is a class extending
+// Promise's, for library code's `instanceof Promise`, which cannot name the
+// program's classes.
+#define KML_UNIT_PROMISE_CLASS 13
+
+i64 __kml_promise_class_is(i64 wid) {
+    const i64 *row = (const i64 *)__kml_unit_find(KML_UNIT_PROMISE_CLASS, wid & KML_ID_MASK);
+    return row && row[1] == wid;
+}
+
 void *__kml_obj_inspect_custom(void *o, i64 depth) {
     const void *const *row = (const void *const *)__kml_unit_find(KML_UNIT_INSPECT_CUSTOM, *(const i64 *)o & KML_ID_MASK);
     return row ? ((void *(*)(void *, i64))row[1])(o, depth) : NULL;
@@ -329,6 +339,18 @@ static const void *kml_inst_get(const void *inst) {
     return c ? c->val : NULL;
 }
 
+// __kml_classrec_base is the record of the local class record pay's class
+// extends, NULL when pay is no record or its base is no record.
+void *__kml_classrec_base(const void *pay) {
+    return kml_is_rec(pay) ? (void *)((const i64 *)pay)[1] : NULL;
+}
+
+// __kml_classrec_static_ref is the static reference of record pay's
+// class, or pay itself when it is no record.
+void *__kml_classrec_static_ref(const void *pay) {
+    return kml_is_rec(pay) ? (void *)((const i64 *)pay)[0] : (void *)pay;
+}
+
 // __kml_classrec_of is the record inst was built from, or NULL.
 const void *__kml_classrec_of(const void *inst) { return kml_inst_get(inst); }
 
@@ -359,6 +381,34 @@ void *__kml_classrec_current(const void *ref) {
     kml_classrec_cur = NULL;
     if (!r || r == ref || ((const void **)r)[0] != ref) return NULL;
     return r;
+}
+
+// A prototype object per evaluation (TDD-00242): each record's class has
+// one of its own, made on first use from the class's shared one (its own
+// properties copied, `constructor` the record, the same parent).
+static KwTab kml_rp;
+extern void *__kml_dynobj_new(void);
+extern void __kml_dynobj_copy_own(void *dst, void *src);
+extern void __kml_dynobj_set_hidden(void *o, const char *key, i64 v);
+extern void *__kml_dynobj_get_proto(void *o);
+extern _Bool __kml_dynobj_set_proto(void *o, void *proto);
+extern void __kml_class_proto_mark(void *b);
+extern void __kml_dynobj_clone_methods(void *bag);
+
+// __kml_classrec_proto is record rec's prototype object, or shared (the
+// class's) when rec is NULL.
+void *__kml_classrec_proto(const void *rec, void *shared) {
+    if (!rec || !shared) return shared;
+    KwCell *c = kw_find(&kml_rp, rec);
+    if (c) return c->val;
+    void *b = __kml_dynobj_new();
+    __kml_dynobj_copy_own(b, shared);
+    __kml_dynobj_clone_methods(b);
+    __kml_dynobj_set_hidden(b, "constructor", (i64)(uintptr_t)rec | 3); /* a constructor reference */
+    __kml_dynobj_set_proto(b, __kml_dynobj_get_proto(shared));
+    __kml_class_proto_mark(b);
+    kw_put(&kml_rp, rec, b);
+    return b;
 }
 
 // __kml_classrec_cap is binding i of record rec, undefined without one.

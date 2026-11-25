@@ -370,8 +370,9 @@ double __kml_native_h2_new(double type, double maxHeaderListPairs, double maxRes
 	nghttp2_session_callbacks_set_on_invalid_frame_recv_callback(cb, on_invalid_frame);
 	nghttp2_option *opt;
 	nghttp2_option_new(&opt);
-	// Node sends its own WINDOW_UPDATEs as data is consumed; nghttp2's
-	// automatic ones are the same while the reader keeps up.
+	// The receive window is given back as the reader consumes the data
+	// (h2Consume), as Node's: a paused stream stops the sender.
+	nghttp2_option_set_no_auto_window_update(opt, 1);
 	if (maxReservedRemoteStreams >= 0) nghttp2_option_set_max_reserved_remote_streams(opt, (uint32_t)maxReservedRemoteStreams);
 	if (peerMaxConcurrentStreams >= 0) nghttp2_option_set_peer_max_concurrent_streams(opt, (uint32_t)peerMaxConcurrentStreams);
 	(void)maxHeaderListPairs;
@@ -562,6 +563,14 @@ double __kml_native_h2_write(double id, double sid, void *data, long long len, d
 	}
 	if (end != 0) st->eof = 1;
 	return nghttp2_session_resume_data(h->s, (int32_t)sid) == 0 ? 0 : 0;
+}
+
+// h2Consume: n bytes of stream sid's DATA were read; the connection's and
+// the stream's windows grow by them (WINDOW_UPDATE on the next flush).
+double __kml_native_h2_consume(double id, double sid, double n) {
+	h2sess *h = sess_of(id);
+	if (!h || n <= 0) return 0;
+	return (double)nghttp2_session_consume(h->s, (int32_t)sid, (size_t)n);
 }
 
 // h2Queued: the body bytes a stream has not sent yet.

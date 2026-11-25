@@ -23,10 +23,75 @@ func (c *Checker) DynamicBase(cd *ast.ClassDeclaration) (cands, hidden []*ast.Cl
 		return nil, nil, nil, false
 	}
 	// JavaScript makes such a class from the value at run time (a builtin,
-	// a constructor function, a class): codegen's own path.
+	// a constructor function, a class): codegen's own path, except for a
+	// value typed as exactly the program's own classes, each of which the
+	// class is specialized over (the run-time path cannot give a class
+	// instance the subclass's prototype).
 	if c.opts.CompatJS() {
-		return nil, nil, nil, false
+		cands, hidden, hosts, dynamic = c.dynamicBase(cd)
+		if !dynamic || len(cands)+len(hidden)+len(hosts) == 0 {
+			return nil, nil, nil, false
+		}
+		sym := c.symbolOf(cd)
+		if sym == nil || sym.Scope == nil {
+			return nil, nil, nil, false
+		}
+		if len(hidden) > 0 && len(c.b.StoresTo(lookupName(cd.BaseClass, sym.Scope))) < 2 {
+			// A variable holding one class expression all along is that
+			// class (codegen's own path); only one reassigned to others
+			// selects among them.
+			return nil, nil, nil, false
+		}
+		vt := c.storedBaseType(lookupName(cd.BaseClass, sym.Scope))
+		if c.Unanswered(vt) || vt.Flags&Any != 0 {
+			return nil, nil, nil, false // an untyped value: any constructor at all
+		}
+		// Every member one of the candidates themselves, or a builtin's
+		// constructor (`const Err = globalThis.Error`): no other value (a
+		// constructor function) can reach the base.
+		members := []*Type{vt}
+		if vt.Flags&Union != 0 {
+			members = vt.Types
+		}
+		others := 0
+		for _, m := range members {
+			found := false
+			for _, k := range cands {
+				found = found || c.classValueOf(k) == m
+			}
+			for _, k := range hidden {
+				found = found || c.classValueOf(k) == m
+			}
+			if !found {
+				others++
+			}
+		}
+		if len(hosts) > 0 {
+			if others > len(hosts) {
+				return nil, nil, nil, false
+			}
+			return cands, hidden, hosts, true
+		}
+		for _, m := range members {
+			found := false
+			for _, k := range cands {
+				found = found || c.classValueOf(k) == m
+			}
+			for _, k := range hidden {
+				// A class expression a variable holds (`var B = class {}`),
+				// lifted to a name of its own.
+				found = found || c.classValueOf(k) == m
+			}
+			if !found {
+				return nil, nil, nil, false
+			}
+		}
+		return cands, hidden, nil, true
 	}
+	return c.dynamicBase(cd)
+}
+
+func (c *Checker) dynamicBase(cd *ast.ClassDeclaration) (cands, hidden []*ast.ClassDeclaration, hosts []string, dynamic bool) {
 	sym := c.symbolOf(cd)
 	if sym == nil || sym.Scope == nil {
 		return nil, nil, nil, false
@@ -35,7 +100,7 @@ func (c *Checker) DynamicBase(cd *ast.ClassDeclaration) (cands, hidden []*ast.Cl
 	if c.dynamicBaseSymbol(bsym) == nil {
 		return nil, nil, nil, false
 	}
-	vt := c.typeOfSymbol(bsym)
+	vt := c.storedBaseType(bsym)
 	if c.Unanswered(vt) && len(bsym.Declarations) == 1 {
 		// Unanswered inside a cycle (a class's static getter naming
 		// `typeof` its class, read while the class was typed): asked
@@ -46,6 +111,13 @@ func (c *Checker) DynamicBase(cd *ast.ClassDeclaration) (cands, hidden []*ast.Cl
 	}
 	if c.Unanswered(vt) {
 		return nil, nil, nil, false
+	}
+	if c.generic(vt) {
+		// A mixin's `Base: B` with `B extends Ctor`: any class the
+		// constraint admits.
+		if bc := c.baseConstraint(vt, 0); bc != nil {
+			vt = bc
+		}
 	}
 	type cls struct {
 		decl    *ast.ClassDeclaration
@@ -245,4 +317,53 @@ func inheritedUses(cd *ast.ClassDeclaration) map[string]bool {
 		return true
 	})
 	return used
+}
+
+// UnboundBase reports cd's base a bare name no scope around the class
+// declares, the builtin library included (`class C extends Image {}` in
+// Node, which has no such global).
+func (c *Checker) UnboundBase(cd *ast.ClassDeclaration) bool {
+	if cd.BaseClass == "" || cd.BaseQualified || cd.BaseCall != nil {
+		return false
+	}
+	sym := c.symbolOf(cd)
+	if sym == nil || sym.Scope == nil {
+		return false
+	}
+	return lookupName(cd.BaseClass, sym.Scope) == nil
+}
+
+// storedBaseType is the type of the values a base variable holds: its
+// declared type, and in a JavaScript program, which checks no assignment
+// against it, the union of every value stored to it (`Base = B2` after
+// `var Base = B1`); any when a store's value is not one expression.
+func (c *Checker) storedBaseType(sym *binder.Symbol) *Type {
+	vt := c.typeOfSymbol(sym)
+	if !c.opts.CompatJS() || sym == nil || c.Unanswered(vt) {
+		return vt
+	}
+	ts := []*Type{vt}
+	for _, n := range c.b.StoresTo(sym) {
+		var rhs ast.Expression
+		switch x := n.(type) {
+		case *ast.AssignmentExpression:
+			if x.Op != "=" {
+				return c.anyT
+			}
+			rhs = x.Right
+		case *ast.VarDeclaration:
+			rhs = x.Init
+		default:
+			return c.anyT
+		}
+		if rhs == nil {
+			continue
+		}
+		t := c.TypeOf(rhs)
+		if c.Unanswered(t) {
+			return t
+		}
+		ts = append(ts, t)
+	}
+	return c.in.union(ts...)
 }

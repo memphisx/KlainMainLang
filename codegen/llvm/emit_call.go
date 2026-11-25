@@ -210,11 +210,14 @@ func (e *Emitter) classifyOptionalCallee(callee ast.Expression) optionalCalleeKi
 			return optCalleeValue
 		}
 	case *ast.MemberExpression:
-		if id, ok := c.Object.(*ast.Identifier); ok && id.Name == "process" && !e.isShadowedByLocal("process") {
-			if processCredentialMethods[c.Property] {
+		if ms, ok := e.libMethodDecl(c); ok {
+			// A builtin's method: present, or on some hosts only.
+			if ms.Platform != "" {
 				return optCalleeHostDependent
 			}
-			return optCalleePresent
+			if !ms.Optional {
+				return optCalleePresent
+			}
 		}
 		objTy := e.typeOfExpr(c.Object)
 		if objTy.IsObject() || objTy.IsClass() {
@@ -349,6 +352,10 @@ func (e *Emitter) emitOptionalCalleeCall(ex *ast.CallExpression) (Value, error) 
 			return Value{}, err
 		}
 		if isNullableScalar(resTy) {
+			if isNullableScalar(v.Ty) || isNullableScalar(inner) {
+				// The call already holds a presence (an optional method's).
+				return e.convert(v, resTy), nil
+			}
 			v = e.convert(v, inner)
 			return Value{Ref: e.makeNullableScalarAgg(resTy, "true", v.Ref), Ty: resTy}, nil
 		}
@@ -671,40 +678,34 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 	prevCallee := e.curCallee
 	e.curCallee = ex.Callee
 	defer func() { e.curCallee = prevCallee }()
-	// RegExp(…) and the Error constructors called as functions construct,
-	// as they do in JavaScript (their [[Call]] is their [[Construct]]).
-	if id, ok := ex.Callee.(*ast.Identifier); ok && callIsConstruct[id.Name] && !e.isShadowedByLocal(id.Name) {
-		// RegExp(re) of a RegExp with no flags is re itself.
-		if id.Name == "RegExp" && len(ex.Args) >= 1 && e.typeOfExpr(ex.Args[0]).IsRegExp() &&
-			(len(ex.Args) == 1 || isUndefinedLiteral(e, ex.Args[1])) {
-			return e.emitExpr(ex.Args[0])
-		}
-		return e.emitConstructingCall(id.Name, ex)
-	}
-	// Buffer(…) called as a function is the deprecated constructor form.
-	callee := ex.Callee
-	for {
-		if as, ok := callee.(*ast.AsExpression); ok {
-			callee = as.Expr
-			continue
-		}
-		break
-	}
-	if id, ok := callee.(*ast.Identifier); ok && id.Name == "Buffer" && !e.isShadowedByLocal("Buffer") {
-		if call, ok := e.bufferCtorCall(ex.Args, ex.GetPos()); ok {
-			return e.emitExpr(call)
-		}
-	}
-	// Date(…) called as a function is the current time's string; its
-	// arguments are evaluated and ignored.
-	if id, ok := ex.Callee.(*ast.Identifier); ok && id.Name == "Date" && !e.isShadowedByLocal("Date") {
-		for _, a := range ex.Args {
-			if _, err := e.emitExpr(a); err != nil {
-				return Value{}, err
+	// A spread into an intrinsic of fixed arguments (`Reflect.m(...xs)`):
+	// its arity known only at run time, the function called as the value
+	// it is (`const f = Reflect.m; f(...xs)`).
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && !mem.Optional && anySpread(ex.Args) {
+		if c := e.front(); c != nil {
+			if key, ok := e.methodIntrinsic(c, mem); ok && intrinsics[key].noSpread {
+				fn, err := e.emitExpr(mem)
+				if err != nil {
+					return Value{}, err
+				}
+				if fn.Ty.IsFunc() {
+					return e.emitClosureCallByPtr(fn.Ref, fn.Ty, ex.Args, ex.GetPos())
+				}
 			}
 		}
-		now := ast.NewNewDateExpression(nil, ex.GetPos())
-		return e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(now, "toString", ex.GetPos()), nil, ex.GetPos()))
+	}
+	if call, ok := e.argumentsReflectCall(ex); ok {
+		return e.emitExpr(call)
+	}
+	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && !mem.Optional && (mem.Property == "call" || mem.Property == "apply") {
+		if call, ok := e.arrayStaticCtorCall(mem.Object, mem.Property, ex.Args, ex.GetPos()); ok {
+			return e.emitExpr(call)
+		}
+		// A Promise static given another constructor as `this`, ahead of
+		// the lowered static's own `.call`.
+		if v, ok, err := e.emitCombinatorCallOn(mem, ex.Args, ex.GetPos()); ok {
+			return v, err
+		}
 	}
 	if v, ok, err := e.emitNullishMethodCall(ex); ok {
 		return v, err
@@ -804,7 +805,7 @@ func (e *Emitter) emitCall(ex *ast.CallExpression) (Value, error) {
 		}
 		defer undo()
 	}
-	if v, done, err := e.applyCallRules(callTargets, ex); done {
+	if v, done, err := e.emitCallTarget(ex); done {
 		return v, err
 	}
 	if e.compatJS() && !ex.Optional {
@@ -834,9 +835,8 @@ type callRule func(e *Emitter, ex *ast.CallExpression) (Value, bool, error)
 
 // callRewrites run before a method call's receiver is guarded: calls
 // recognized by shape, and desugarings that emit the call they rewrite to.
-// callTargets run after it, in order: the builtin's declaration, the
-// callee's owner, then the value fallbacks and diagnostics.
-var callRewrites, callTargets []callRule
+// What runs after it is emitCallTarget.
+var callRewrites []callRule
 
 func init() {
 	callRewrites = []callRule{
@@ -856,23 +856,47 @@ func init() {
 		(*Emitter).optionalCalleeRule,
 		(*Emitter).globalThisRule,
 	}
-	callTargets = []callRule{
-		(*Emitter).loweredRule,
-		(*Emitter).objectFuncFieldRule,
-		(*Emitter).funcExpandoRule,
-		(*Emitter).staticMemberRule,
-		(*Emitter).receiverRule,
-		(*Emitter).dynIndexCallRule,
-		(*Emitter).indexFuncCallRule,
-		(*Emitter).arrowIIFERule,
-		(*Emitter).functionIIFERule,
-		(*Emitter).identifierCallRule,
-		(*Emitter).funcValueCalleeRule,
-		(*Emitter).dynMethodRule,
-		(*Emitter).funcOwnPropRule,
-		(*Emitter).missingMethodRule,
-		(*Emitter).callableValueRule,
+}
+
+// emitCallTarget emits a call by what its callee is: a builtin's
+// declaration first (its platform, then its lowering), then by the
+// callee's form, each form's cases in the order its resolution takes them.
+func (e *Emitter) emitCallTarget(ex *ast.CallExpression) (Value, bool, error) {
+	if v, done, err := e.platformRule(ex); done {
+		return v, true, err
 	}
+	if v, done, err := e.loweredRule(ex); done {
+		return v, true, err
+	}
+	switch c := ex.Callee.(type) {
+	case *ast.Identifier:
+		return e.identifierCallRule(ex)
+	case *ast.MemberExpression:
+		return e.emitMemberCall(ex, c)
+	case *ast.IndexExpression:
+		if v, done, err := e.dynIndexCallRule(ex); done {
+			return v, true, err
+		}
+		if v, done, err := e.indexFuncCallRule(ex); done {
+			return v, true, err
+		}
+	case *ast.ArrowFunction:
+		return e.arrowIIFERule(ex)
+	case *ast.FunctionExpression:
+		if !c.IsGenerator {
+			return e.functionIIFERule(ex)
+		}
+	}
+	return e.valueCall(ex)
+}
+
+// valueCall calls the value any other callee expression produces: a
+// function value directly, a box through the dynamic call.
+func (e *Emitter) valueCall(ex *ast.CallExpression) (Value, bool, error) {
+	if v, done, err := e.funcValueCalleeRule(ex); done {
+		return v, true, err
+	}
+	return e.callableValueRule(ex)
 }
 
 // applyCallRules emits ex through the first rule that takes it.
@@ -1019,122 +1043,6 @@ func (e *Emitter) loweredRule(ex *ast.CallExpression) (Value, bool, error) {
 	return Value{}, false, nil
 }
 
-// objectFuncFieldRule: A plain object's function-typed field (`posix.join(…)` on `{ join:
-// … }`), before the methods dispatched by name, which such an object has
-// none of.
-func (e *Emitter) objectFuncFieldRule(ex *ast.CallExpression) (Value, bool, error) {
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok && !mem.Optional {
-		if ot := e.typeOfExpr(mem.Object); ot.IsObject() && !ot.IsClass() && !ot.IsArray() && !ot.IsDynamic() && !isHostHandle(ot) && !ot.IsRegExp() {
-			if _, fty, isField := ot.FieldIndex(mem.Property); isField && fty.IsFunc() {
-				mt := e.typeOfExpr(mem)
-				if isUnconstrainedDynamic(mt) {
-					mt = fty // the layout's member, where the read answers no type
-				}
-				if mt.IsFunc() {
-					return handled(e.emitFuncFieldCall(ex, mem, mt))
-				}
-			}
-		}
-	}
-	return Value{}, false, nil
-}
-
-// funcExpandoRule: A function's own function-valued property (`assert.match(…)`, a
-// TypeScript expando), called through the function object's bag before
-// the methods dispatched by name, which a function has none of.
-func (e *Emitter) funcExpandoRule(ex *ast.CallExpression) (Value, bool, error) {
-	if r, ok := e.funcOwnPropCall(ex); ok && e.isExpandoCall(ex) {
-		mem := r.Callee.(*ast.MemberExpression)
-		fn, err := e.emitExpr(mem.Object)
-		if err != nil {
-			return handled(Value{}, err)
-		}
-		return handled(e.emitDynAnyMethodCallPlain(fn, mem.Property, ex.Args, ex.GetPos()))
-	}
-	return Value{}, false, nil
-}
-
-// staticMemberRule: Static method call: ClassName.staticMethod(args) (TDD-00009 Stage
-// 4). Checked before every mem.Property-name-based/typeOfExpr-based
-// dispatch below, for the same reason super's own checks above are: a
-// bare class-name identifier is a compile-time namespace, never a real
-// runtime value bindable via e.lookup/typeOfExpr.
-func (e *Emitter) staticMemberRule(ex *ast.CallExpression) (Value, bool, error) {
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if id, ok := mem.Object.(*ast.Identifier); ok {
-			// TS namespace member call `X.member(args)` (TDD-00095): resolve
-			// through the desugared flat function — checked before every
-			// other member dispatch, since a namespace name (like a class
-			// name) is a compile-time construct, never a runtime value. A
-			// local binding shadowing the namespace name wins.
-			if members, nsName := e.namespaceMembers(id.Name); members != nil {
-				if exported, present := members[mem.Property]; present && !e.isShadowedByLocal(id.Name) {
-					if !exported && e.curNamespace != nsName {
-						return handled(e.emitCallOfAbsent(id.Name+"."+mem.Property, ex.Args, ex.GetPos()))
-					}
-					mangled := ast.NamespaceMangle(nsName, mem.Property)
-					rewritten := ast.NewCallExpression(ast.NewIdentifier(mangled, ex.GetPos()), ex.Args, ex.GetPos())
-					return handled(e.emitCall(rewritten))
-				}
-			}
-			if _, found := e.classes[id.Name]; found && mem.Property == "call" && e.callOnClasses()[id.Name] {
-				return handled(e.emitClassCallOn(id.Name, ex.Args, ex.GetPos()))
-			}
-			if info, found := e.classes[id.Name]; found {
-				return handled(e.emitStaticMethodCall(info, id.Name, mem.Property, ex.Args, ex.GetPos()))
-			}
-			if _, generic := e.genericClasses[id.Name]; generic && !e.isShadowedByLocal(id.Name) {
-				if info, found := e.classes[genericStaticsClass(id.Name)]; found {
-					return handled(e.emitStaticMethodCall(info, genericStaticsClass(id.Name), mem.Property, ex.Args, ex.GetPos()))
-				}
-			}
-		}
-		// `Base.call(this, args)` on a recognized prototype constructor
-		// (TDD-00155 Stage 4): the pre-ES6 inheritance chain — the receiver
-		// is passed through, unlike the generic .call path (which discards
-		// thisArg, ADR-00398 Stage A).
-		if id, ok := mem.Object.(*ast.Identifier); ok && e.jsProtoCtor[id.Name] && mem.Property == "call" {
-			return handled(e.emitProtoCtorChainCall(id.Name, ex.Args, ex.GetPos()))
-		}
-		// `Promise.all.call(C, iterable)`: the combinator on C's promises,
-		// C.resolve resolving each member.
-		if v, ok, err := e.emitCombinatorCallOn(mem, ex.Args, ex.GetPos()); ok {
-			return handled(v, err)
-		}
-		// A namespace-qualified static call (`X.C.method()` — ADR-00480).
-		if bare := e.stripNSTypeQualifier(mem.Object); bare != nil {
-			if bid, ok := bare.(*ast.Identifier); ok {
-				if info, found := e.classes[bid.Name]; found {
-					return handled(e.emitStaticMethodCall(info, bid.Name, mem.Property, ex.Args, ex.GetPos()))
-				}
-			}
-		}
-		// Nested-namespace member call `A.B.f(args)` (TDD-00148 V3).
-		if members, nsName := e.namespaceByChain(mem.Object); members != nil {
-			if exported, present := members[mem.Property]; present {
-				if !exported && e.curNamespace != nsName {
-					return handled(e.emitCallOfAbsent(nsName+"."+mem.Property, ex.Args, ex.GetPos()))
-				}
-				mangled := ast.NamespaceMangle(nsName, mem.Property)
-				rewritten := ast.NewCallExpression(ast.NewIdentifier(mangled, ex.GetPos()), ex.Args, ex.GetPos())
-				return handled(e.emitCall(rewritten))
-			}
-		}
-	}
-	return Value{}, false, nil
-}
-
-// receiverRule is a method call dispatched on its receiver's owner
-// (emitReceiverMethodCall).
-func (e *Emitter) receiverRule(ex *ast.CallExpression) (Value, bool, error) {
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		if v, done, err := e.emitReceiverMethodCall(ex, mem); done {
-			return handled(v, err)
-		}
-	}
-	return Value{}, false, nil
-}
-
 // dynIndexCallRule: `obj[key](...)` on a bare any/unknown receiver, or on
 // a class instance or object read by a key known at run time: a dynamic
 // method call, the receiver passed as `this`.
@@ -1161,7 +1069,7 @@ func (e *Emitter) dynIndexCallRule(ex *ast.CallExpression) (Value, bool, error) 
 			}
 		}
 	}
-	if idxEx, ok := ex.Callee.(*ast.IndexExpression); ok && !idxEx.Optional && (isUnconstrainedDynamic(e.typeOfExpr(idxEx.Object)) || e.classDynIndex(idxEx)) {
+	if idxEx, ok := ex.Callee.(*ast.IndexExpression); ok && !idxEx.Optional && (isUnconstrainedDynamic(e.typeOfExpr(idxEx.Object)) || e.classDynIndex(idxEx) || e.consoleDynIndex(idxEx)) {
 		objVal, err := e.emitExpr(idxEx.Object)
 		if err != nil {
 			return handled(Value{}, err)
@@ -1186,6 +1094,18 @@ func (e *Emitter) dynIndexCallRule(ex *ast.CallExpression) (Value, bool, error) 
 		return handled(e.emitDynFnBoxCallN(fnBox, objVal, argv, n, forOfIterableName(idxEx)+" is not a function", ex.GetPos()))
 	}
 	return Value{}, false, nil
+}
+
+// consoleDynIndex reports the global console read by a key known at run
+// time (`console[method](…)`): the method the key names, looked up on the
+// console object and called with it as `this`, as JavaScript does.
+func (e *Emitter) consoleDynIndex(ex *ast.IndexExpression) bool {
+	id, ok := ex.Object.(*ast.Identifier)
+	if !ok || id.Name != "console" || e.isShadowedByLocal("console") {
+		return false
+	}
+	_, lit := ex.Index.(*ast.StringLiteral)
+	return !lit
 }
 
 // indexFuncCallRule: Calling a function value stored in an array element: arr[i](...).
@@ -1232,191 +1152,228 @@ func (e *Emitter) functionIIFERule(ex *ast.CallExpression) (Value, bool, error) 
 		// callee's arity (TDD-00206 Stage 1). No call-site padding needed here.
 		// One reading its own `this` is a boxed function: a dynamic call.
 		if closureVal.Ty.IsDynamic() {
-			return handled(e.emitDynCallValueOf(closureVal, ex.Callee, ex.Args, ex.GetPos()))
+			return handled(e.typedDynCall(ex)(e.emitDynCallValueOf(closureVal, ex.Callee, ex.Args, ex.GetPos())))
 		}
 		return handled(e.emitClosureCallByPtr(closureVal.Ref, closureVal.Ty, ex.Args, ex.GetPos()))
 	}
 	return Value{}, false, nil
 }
 
-// identifierCallRule: Call via bare identifier: named function or closure variable.
-func (e *Emitter) identifierCallRule(ex *ast.CallExpression) (Value, bool, error) {
-	if id, ok := ex.Callee.(*ast.Identifier); ok {
-		// Generator construction (TDD-00061/ADR-00172, top-level only in
-		// V1) — checked before the ordinary named-function dispatch just
-		// below, since a generator is never entered into e.funcs/
-		// resolveFuncRef at all: calling one doesn't emit an ordinary
-		// `call`, it builds a fiber-backed instance struct instead.
-		if info, found := e.lookupGenerator(id.Name); found {
-			return handled(e.emitGeneratorConstruction(info, ex.Args, ex.GetPos()))
-		}
-		// An ambient function declared more than once (`declare function
-		// f(…)` overloads) has no implementation to call: its arguments are
-		// evaluated, then the call throws what the stub would, with no one
-		// signature to convert them to.
-		if e.ambientOverloaded(id.Name) {
-			if _, local := e.lookup(id.Name); !local {
-				for _, a := range ex.Args {
-					if _, err := e.emitExpr(a); err != nil {
-						return handled(Value{}, err)
-					}
-				}
-				pos := ex.GetPos()
-				thr := ast.NewThrowStatement(ast.NewNewErrorExpression("Error",
-					ast.NewStringLiteral("ambient function '"+demangleModuleName(id.Name)+"' has no implementation", pos), pos), pos)
-				if err := e.emitStmt(thr); err != nil {
-					return handled(Value{}, err)
-				}
-				ty := e.typeOfExpr(ex)
-				if ty.IR == "" || ty.IR == "void" {
-					return handled(Value{Ty: TypeVoid}, nil)
-				}
-				return handled(Value{Ref: ty.zeroLiteral(), Ty: ty}, nil)
-			}
-		}
-		// A var sharing a function's name holds the function only until it
-		// is assigned (seedFuncGlobals): a call reads the binding.
-		if e.funcSeededRead(id) {
-			fv, err := e.emitExpr(id)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynCallValueOf(fv, ex.Callee, ex.Args, ex.GetPos()))
-		}
-		// Named function — a nested one (TDD-00057) shadows an outer/
-		// top-level function of the same name, same as real JS/TS scoping.
-		if mangled, sig, found := e.resolveFuncRef(id.Name); found {
-			// A recognized prototype constructor's ABI carries a hidden boxed
-			// `this`: a plain call passes the sloppy-mode receiver,
-			// globalThis.
-			if e.jsProtoCtor[id.Name] && !e.protoCtorOwnThis[id.Name] {
-				return handled(e.emitProtoCtorPlainCall(id.Name, ex.Args, ex.GetPos()))
-			}
-			e.anyArgBoxRet = e.anyArgReturnsBox(ex)
-			return handled(e.emitCallToFuncSig(mangled, sig, ex.Args, ex.GetPos()))
-		}
-		// Generic (TDD-00010 V1) function: infer the type argument from
-		// whichever call-site argument lines up with the generic's own
-		// type-parameter-typed parameter, instantiate (or reuse a memoized
-		// prior instantiation) on demand, then dispatch exactly like a
-		// concrete named function.
-		if decl, found := e.genericFuncs[id.Name]; found {
-			return handled(e.emitGenericFuncCall(decl, ex.Args, ex.TypeArgs, ex.GetPos(), ex))
-		}
-		// Closure variable — including a named function expression's own
-		// self-reference binding (TDD-00060).
-		if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc() {
-			return handled(e.emitClosureCall(sym, ex.Args, ex.GetPos()))
-		}
-		// A union-typed binding a guard narrowed to its function member
-		// (`typeof o === 'function'`): its unboxed closure, called.
-		if sym, found := e.lookup(id.Name); found && (sym.NarrowedTo != nil && sym.NarrowedTo.IsFunc() || sym.Ty.IsDynamic() && len(sym.Ty.UnionMembers) > 0 && e.typeOfExpr(id).IsFunc()) {
-			fv, err := e.emitExpr(id)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitClosureCallByPtr(fv.Ref, fv.Ty, ex.Args, ex.GetPos()))
-		}
-		// A variable holding an `any`/`unknown` value, called: the runtime
-		// dynamic call (a non-function box throws JS's "is not a function").
-		// Reached before this only through a member/expression callee
-		// (TDD-00229).
-		// A union of function types (`(() => number) | (() => string)`)
-		// is held boxed too: the same dynamic call.
-		if sym, found := e.lookup(id.Name); found && (isUnconstrainedDynamic(sym.Ty) || sym.Ty.IsDynamic() && e.unionOfFunctions(id)) {
-			fv, err := e.emitExpr(id)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynCallValueOf(fv, ex.Callee, ex.Args, ex.GetPos()))
-		}
-		// Static-string eval fast path (TDD-00046 static subset): a
-		// compile-time-constant `eval("<expression>")` is compiled through
-		// this compiler's own parser + codegen, in place — no embedded
-		// engine. Checked after every user-binding lookup, so a
-		// user-defined function named `eval` still wins.
-		if id.Name == "eval" {
-			return handled(e.emitStaticEval(ex.Args, ex.GetPos()))
-		}
-		// Sibling namespace member call by bare name from inside a member
-		// function body (TDD-00148 Stage 4) — retried under the mangled
-		// name. Checked after every user-binding lookup, so locals shadow.
-		if m := e.nsSibling(id.Name); m != "" {
-			rewritten := ast.NewCallExpression(ast.NewIdentifier(m, ex.GetPos()), ex.Args, ex.GetPos())
-			return handled(e.emitCall(rewritten))
-		}
-		// TDD-00129 Stage 2: a capturing nested function declaration called
-		// before its declaration statement hoists — emit it on demand here,
-		// then dispatch as the closure value it now is.
-		if ok, lerr := e.letrecEmitCapturingNested(id.Name); lerr != nil {
-			return handled(Value{}, lerr)
-		} else if ok {
-			if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc() {
-				return handled(e.emitClosureCall(sym, ex.Args, ex.GetPos()))
-			}
-		}
-		// Node's function-style constructors (`http.Server(…)`,
-		// `stream.Readable(…)`) construct when called without `new`.
-		if e.callableClasses[id.Name] {
-			return handled(e.emitConstructingCall(id.Name, ex))
-		}
-		// A class called without `new`: its arguments are evaluated, then
-		// the call throws, as in JavaScript (the strict lane has refused it
-		// as tsc does).
-		if _, isClass := e.classes[id.Name]; isClass {
-			for _, a := range ex.Args {
-				if sp, ok := a.(*ast.SpreadElement); ok {
-					a = sp.Arg
-				}
-				if _, err := e.emitExpr(a); err != nil {
-					return handled(Value{}, err)
-				}
-			}
-			e.emitThrowTypeError("Class constructor " + e.classDisplayName(id.Name) + " cannot be invoked without 'new'")
-			return handled(Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil)
-		}
-		if e.unresolvedReference(id) {
-			// The global property (`globalThis.f = …`), else its
-			// ReferenceError, called as a value.
-			fv, err := e.emitGlobalPropertyRead(id)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			fb, err := e.emitBoxValue(fv)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynCallValueOf(fb, id, ex.Args, ex.GetPos()))
-		}
-		if _, ok := e.builtinGlobalValueType(id); ok {
-			// A builtin global with no call of its own (`Math()`): called
-			// as a value, its TypeError once the arguments are evaluated.
-			fv, err := e.emitExpr(id)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			fb, err := e.emitBoxValue(fv)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynCallValueOf(fb, id, ex.Args, ex.GetPos()))
-		}
-		if _, ok := e.lookup(id.Name); ok && e.compatJS() {
-			// A variable holding no function (`var x = 1; x()`): called as
-			// a value, its TypeError once the arguments are evaluated.
-			fv, err := e.emitExpr(id)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			fb, err := e.emitBoxValue(fv)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynCallValueOf(fb, id, ex.Args, ex.GetPos()))
-		}
-		return handled(Value{}, internalAt(ex.GetPos(), "undefined function or closure '%s'", id.Name))
+// identCall is what a bare-identifier callee resolves to, decided once
+// (identCallOf) before anything is emitted.
+type identCall int
+
+const (
+	identNone             identCall = iota
+	identGenerator                  // a generator declaration: its construction
+	identAmbientStub                // overloaded `declare function`s: no body to call
+	identSeededVar                  // a var sharing a function's name, read first
+	identFuncDecl                   // a named function declaration (or a JS prototype constructor)
+	identGenericFunc                // a generic function, instantiated for the call
+	identClosure                    // a binding holding a closure
+	identNarrowedClosure            // a union a guard narrowed to its function member
+	identDynValue                   // a binding holding a box (any, a union of functions)
+	identNSSibling                  // a sibling namespace member, by its bare name
+	identLetrec                     // a capturing nested function called before its declaration
+	identConstructingCall           // a Node constructor whose [[Call]] constructs
+	identClassCall                  // a class called without `new`: TypeError
+	identGlobalProperty             // a name only the global object can hold
+	identBuiltinValue               // a builtin global with no call of its own
+	identNonFunction                // a JS binding holding no function
+)
+
+// identCallOf classifies a call of the bare identifier id, in the order
+// JavaScript's scoping resolves it: the program's own declarations, its
+// bindings by what they hold, then the globals.
+func (e *Emitter) identCallOf(id *ast.Identifier) identCall {
+	if _, found := e.lookupGenerator(id.Name); found {
+		return identGenerator
 	}
-	return Value{}, false, nil
+	if e.ambientOverloaded(id.Name) {
+		if _, local := e.lookup(id.Name); !local {
+			return identAmbientStub
+		}
+	}
+	if e.funcSeededRead(id) {
+		return identSeededVar
+	}
+	if _, _, found := e.resolveFuncRef(id.Name); found {
+		return identFuncDecl
+	}
+	if _, found := e.genericFuncs[id.Name]; found {
+		return identGenericFunc
+	}
+	sym, bound := e.lookup(id.Name)
+	switch {
+	case bound && sym.Ty.IsFunc():
+		return identClosure
+	case bound && (sym.NarrowedTo != nil && sym.NarrowedTo.IsFunc() || sym.Ty.IsDynamic() && len(sym.Ty.UnionMembers) > 0 && e.typeOfExpr(id).IsFunc()):
+		return identNarrowedClosure
+	case bound && (isUnconstrainedDynamic(sym.Ty) || sym.Ty.IsDynamic() && e.unionOfFunctions(id)):
+		return identDynValue
+	}
+	if e.nsSibling(id.Name) != "" {
+		return identNSSibling
+	}
+	if e.letrecCapturingNestedPending(id.Name) {
+		return identLetrec
+	}
+	if e.callableClasses[id.Name] {
+		return identConstructingCall
+	}
+	if _, isClass := e.classes[id.Name]; isClass {
+		return identClassCall
+	}
+	if e.unresolvedReference(id) {
+		return identGlobalProperty
+	}
+	if _, ok := e.builtinGlobalValueType(id); ok {
+		return identBuiltinValue
+	}
+	if bound && e.compatJS() {
+		return identNonFunction
+	}
+	return identNone
+}
+
+// identifierCallRule: a call of a bare identifier, emitted by what it
+// resolves to (identCallOf).
+func (e *Emitter) identifierCallRule(ex *ast.CallExpression) (Value, bool, error) {
+	id, ok := ex.Callee.(*ast.Identifier)
+	if !ok {
+		return Value{}, false, nil
+	}
+	return handled(e.emitIdentCall(ex, id, e.identCallOf(id)))
+}
+
+func (e *Emitter) emitIdentCall(ex *ast.CallExpression, id *ast.Identifier, kind identCall) (Value, error) {
+	pos := ex.GetPos()
+	// The value the identifier holds, called through its box.
+	dynCall := func(boxed bool) (Value, error) {
+		fv, err := e.emitExpr(id)
+		if err != nil {
+			return Value{}, err
+		}
+		if boxed {
+			if fv, err = e.emitBoxValue(fv); err != nil {
+				return Value{}, err
+			}
+		}
+		var callee ast.Expression = ex.Callee
+		if boxed {
+			callee = id
+		}
+		return e.typedDynCall(ex)(e.emitDynCallValueOf(fv, callee, ex.Args, pos))
+	}
+	switch kind {
+	case identGenerator:
+		info, _ := e.lookupGenerator(id.Name)
+		return e.emitGeneratorConstruction(info, ex.Args, pos)
+	case identAmbientStub:
+		// Its arguments are evaluated, then the call throws what the stub
+		// would, with no one signature to convert them to.
+		for _, a := range ex.Args {
+			if _, err := e.emitExpr(a); err != nil {
+				return Value{}, err
+			}
+		}
+		thr := ast.NewThrowStatement(ast.NewNewErrorExpression("Error",
+			ast.NewStringLiteral("ambient function '"+demangleModuleName(id.Name)+"' has no implementation", pos), pos), pos)
+		if err := e.emitStmt(thr); err != nil {
+			return Value{}, err
+		}
+		ty := e.typeOfExpr(ex)
+		if ty.IR == "" || ty.IR == "void" {
+			return Value{Ty: TypeVoid}, nil
+		}
+		return Value{Ref: ty.zeroLiteral(), Ty: ty}, nil
+	case identSeededVar, identDynValue:
+		return dynCall(false)
+	case identFuncDecl:
+		mangled, sig, _ := e.resolveFuncRef(id.Name)
+		// A recognized prototype constructor's ABI carries a hidden boxed
+		// `this`: a plain call passes the sloppy-mode receiver, globalThis.
+		if e.jsProtoCtor[id.Name] && !e.protoCtorOwnThis[id.Name] {
+			return e.emitProtoCtorPlainCall(id.Name, ex.Args, pos)
+		}
+		e.anyArgBoxRet = e.anyArgReturnsBox(ex)
+		return e.emitCallToFuncSig(mangled, sig, ex.Args, pos)
+	case identGenericFunc:
+		return e.emitGenericFuncCall(e.genericFuncs[id.Name], ex.Args, ex.TypeArgs, pos, ex)
+	case identClosure:
+		sym, _ := e.lookup(id.Name)
+		return e.emitClosureCall(sym, ex.Args, pos)
+	case identNarrowedClosure:
+		fv, err := e.emitExpr(id)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitClosureCallByPtr(fv.Ref, fv.Ty, ex.Args, pos)
+	case identNSSibling:
+		return e.emitCall(ast.NewCallExpression(ast.NewIdentifier(e.nsSibling(id.Name), pos), ex.Args, pos))
+	case identLetrec:
+		if _, err := e.letrecEmitCapturingNested(id.Name); err != nil {
+			return Value{}, err
+		}
+		if sym, found := e.lookup(id.Name); found && sym.Ty.IsFunc() {
+			return e.emitClosureCall(sym, ex.Args, pos)
+		}
+		return e.emitIdentCall(ex, id, e.identCallAfterLetrec(id))
+	case identConstructingCall:
+		return e.emitConstructingCall(id.Name, ex)
+	case identClassCall:
+		// Its arguments are evaluated, then the call throws, as in
+		// JavaScript (the strict lane has refused it as tsc does).
+		for _, a := range ex.Args {
+			if sp, ok := a.(*ast.SpreadElement); ok {
+				a = sp.Arg
+			}
+			if _, err := e.emitExpr(a); err != nil {
+				return Value{}, err
+			}
+		}
+		e.emitThrowTypeError("Class constructor " + e.classDisplayName(id.Name) + " cannot be invoked without 'new'")
+		return Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil
+	case identGlobalProperty:
+		// The global property (`globalThis.f = …`), else its ReferenceError,
+		// called as a value.
+		fv, err := e.emitGlobalPropertyRead(id)
+		if err != nil {
+			return Value{}, err
+		}
+		fb, err := e.emitBoxValue(fv)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.typedDynCall(ex)(e.emitDynCallValueOf(fb, id, ex.Args, pos))
+	case identBuiltinValue, identNonFunction:
+		// Called as a value: its TypeError once the arguments are evaluated.
+		return dynCall(true)
+	}
+	return Value{}, internalAt(pos, "undefined function or closure '%s'", id.Name)
+}
+
+// identCallAfterLetrec classifies id once its on-demand nested function
+// declaration has been emitted without leaving a closure binding: the
+// classification past that step.
+func (e *Emitter) identCallAfterLetrec(id *ast.Identifier) identCall {
+	switch {
+	case e.callableClasses[id.Name]:
+		return identConstructingCall
+	}
+	if _, isClass := e.classes[id.Name]; isClass {
+		return identClassCall
+	}
+	if e.unresolvedReference(id) {
+		return identGlobalProperty
+	}
+	if _, ok := e.builtinGlobalValueType(id); ok {
+		return identBuiltinValue
+	}
+	if _, bound := e.lookup(id.Name); bound && e.compatJS() {
+		return identNonFunction
+	}
+	return identNone
 }
 
 // funcValueCalleeRule: General fallback: call the result of any other expression whose
@@ -1442,160 +1399,10 @@ func (e *Emitter) funcValueCalleeRule(ex *ast.CallExpression) (Value, bool, erro
 		if !val.Ty.IsFunc() || val.Ty.IR != irPtr {
 			// Emitted boxed (a self-returning function's result, `f()()`
 			// for `const f = () => f`): the dynamic call of the box.
-			return handled(e.emitDynCallValueOf(val, ex.Callee, ex.Args, ex.GetPos()))
+			return handled(e.typedDynCall(ex)(e.emitDynCallValueOf(val, ex.Callee, ex.Args, ex.GetPos())))
 		}
 		e.callAs = e.memberCallAs(ex.Callee)
 		return handled(e.emitClosureCallByPtr(val.Ref, val.Ty, ex.Args, ex.GetPos()))
-	}
-	return Value{}, false, nil
-}
-
-// dynMethodRule: A method call on a bare any/unknown receiver is a runtime prototype
-// dispatch (TDD-00155 Stage 4): chain-walking property read, then an
-// indirect call through the dynamic-function record with the receiver
-// bound as `this`.
-func (e *Emitter) dynMethodRule(ex *ast.CallExpression) (Value, bool, error) {
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		// A union of scalars is the same self-describing box (an un-narrowed
-		// `number | string` receiver: the member its tag holds).
-		// So is a union of class instances, each boxed with its class.
-		if objTy := e.typeOfExpr(mem.Object); isUnconstrainedDynamic(objTy) || objTy.IsDynamic() && (isSelfDescribingBox(objTy) || isClassUnionBox(objTy)) {
-			objVal, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynAnyMethodCall(objVal, mem.Property, ex.Args, ex.GetPos()))
-		}
-		// A method the receiver inherits from a dynamically represented
-		// builtin (`o.isPrototypeOf(x)`, Object.prototype's): run on its
-		// box, which is its `this`.
-		if !mem.Optional && isDynamicMethodRead(e.front(), mem, e.typeOfExpr(mem.Object)) {
-			objVal, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			box, err := e.emitBoxValue(objVal)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynAnyMethodCall(box, mem.Property, ex.Args, ex.GetPos()))
-		}
-	}
-	return Value{}, false, nil
-}
-
-// funcOwnPropRule: A method call whose receiver type doesn't have that method reaches here
-// too (the callee `obj.prop` isn't function-typed). Report it as the real
-// missing-method gap it is — a far more useful diagnostic than the generic
-// "only simple function calls" fallback, and (for the conformance leverage
-// map) it splits that catch-all bucket by the receiver's type instead of
-// lumping every unrecognized method call together.
-// A function's own function-valued property the checker did not see
-// declared (`f.p(…)`), when nothing else claimed the call.
-func (e *Emitter) funcOwnPropRule(ex *ast.CallExpression) (Value, bool, error) {
-	if r, ok := e.funcOwnPropCall(ex); ok {
-		return handled(e.emitCall(r))
-	}
-	return Value{}, false, nil
-}
-
-// missingMethodRule is a method the receiver's type lacks: a class
-// instance's own-property method, a fixed-layout object's boxed field, or
-// the "has no method" diagnostic, named by the receiver's type.
-func (e *Emitter) missingMethodRule(ex *ast.CallExpression) (Value, bool, error) {
-	if mem, ok := ex.Callee.(*ast.MemberExpression); ok {
-		// A receiver held boxed (a union narrowed to an object type codegen
-		// has no layout for): the box's dynamic method call.
-		if ot := e.typeOfExpr(mem.Object); ot.IsDynamic() && !strings.HasPrefix(mem.Property, "#") {
-			objVal, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			if objVal.Ty.IsDynamic() {
-				return handled(e.emitDynAnyMethodCall(objVal, mem.Property, ex.Args, ex.GetPos()))
-			}
-			boxed, err := e.emitBoxValue(objVal)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynAnyMethodCall(boxed, mem.Property, ex.Args, ex.GetPos()))
-		}
-		if ot := e.typeOfExpr(mem.Object); ot.IsClass() {
-			// A method the instance was given as its own property.
-			return handled(e.emitClassMethodCall(ot, mem.Object, mem.Property, ex.Args, ex.GetPos()))
-		}
-		// A fixed-layout object's boxed field (a generator method, held as
-		// `any`): the boxed object's dynamic method call, `this` bound to it.
-		if ot := e.typeOfExpr(mem.Object); ot.IsObject() && !ot.IsDynamic() {
-			for _, f := range ot.Fields {
-				if f.Name == mem.Property && isUnconstrainedDynamic(f.Ty) {
-					objVal, err := e.emitExpr(mem.Object)
-					if err != nil {
-						return handled(Value{}, err)
-					}
-					boxed, err := e.emitBoxValue(objVal)
-					if err != nil {
-						return handled(Value{}, err)
-					}
-					return handled(e.emitDynAnyMethodCall(boxed, mem.Property, ex.Args, ex.GetPos()))
-				}
-			}
-		}
-		// An array's own function property (`a.f = function () {}`): the
-		// boxed array's dynamic method call, `this` bound to it.
-		if ot := e.typeOfExpr(mem.Object); ot.IsArray() && !ot.IsObject() && !ot.IsDynamic() && ex.GetPos().Line > 0 {
-			objVal, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			boxed, err := e.emitBoxValue(objVal)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynAnyMethodCall(boxed, mem.Property, ex.Args, ex.GetPos()))
-		}
-		// JavaScript (-compat=js): a method the receiver's type does not
-		// declare at all (the builtin library has no such member, as
-		// `ArrayBuffer.prototype.transferToImmutable` in this runtime) reads
-		// undefined, so the call throws once its arguments are evaluated. A
-		// method the library declares but this compiler lacks stays the
-		// diagnostic below.
-		if c := e.front(); e.compatJS() && c != nil && !e.typeOfExpr(mem.Object).IsDynamic() && c.MemberDecl(mem) == nil && !c.ExpandoMember(mem) {
-			if _, err := e.emitExpr(mem.Object); err != nil {
-				return handled(Value{}, err)
-			}
-			for _, a := range ex.Args {
-				if sp, ok := a.(*ast.SpreadElement); ok {
-					a = sp.Arg
-				}
-				if _, err := e.emitExpr(a); err != nil {
-					return handled(Value{}, err)
-				}
-			}
-			e.emitThrowTypeError(calleeDisplayName(mem) + " is not a function")
-			e.emitLabel(e.freshLabel("absentcall.dead"))
-			return handled(Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny}, nil)
-		}
-		// A property the library declares (`n.constructor`) holds a value:
-		// the call is through it.
-		if c := e.front(); c != nil {
-			if _, prop := c.MemberDecl(mem).(*ast.PropertySignature); prop {
-				return Value{}, false, nil
-			}
-		}
-		recv := describeReceiverType(e.typeOfExpr(mem.Object))
-		// A bare namespace/global identifier receiver (Object.setPrototypeOf,
-		// process.send, cluster.fork, Math.foo, …) infers as the i64 default;
-		// name it explicitly so the diagnostic — and the conformance histogram —
-		// attributes the missing member to the right namespace.
-		if id, ok := mem.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
-			if n := strings.TrimSuffix(id.Name, "__kml_builtin"); n != id.Name {
-				recv = n
-			} else if knownGlobalNamespace[id.Name] {
-				recv = id.Name
-			}
-		}
-		return handled(Value{}, internalAt(ex.GetPos(), "%s has no method '%s'", recv, mem.Property))
 	}
 	return Value{}, false, nil
 }
@@ -1616,7 +1423,7 @@ func (e *Emitter) callableValueRule(ex *ast.CallExpression) (Value, bool, error)
 			e.callAs = e.memberCallAs(ex.Callee)
 			return handled(e.emitClosureCallByPtr(calleeVal.Ref, calleeVal.Ty, ex.Args, ex.GetPos()))
 		}
-		return handled(e.emitDynCallValueOf(calleeVal, ex.Callee, ex.Args, ex.GetPos()))
+		return handled(e.typedDynCall(ex)(e.emitDynCallValueOf(calleeVal, ex.Callee, ex.Args, ex.GetPos())))
 	}
 	return Value{}, false, nil
 }
@@ -1635,11 +1442,79 @@ func (e *Emitter) emitConstructingCall(name string, ex *ast.CallExpression) (Val
 	return v, nil
 }
 
-// callIsConstruct: the builtin constructors whose call as a function is a
-// construction.
-var callIsConstruct = map[string]bool{
-	"RegExp": true, "Error": true, "TypeError": true, "RangeError": true, "SyntaxError": true,
-	"ReferenceError": true, "EvalError": true, "URIError": true, "AggregateError": true,
+// typedDynCall holds a dynamic call's result as the call's type, when the
+// checker gives it one: the value a statically typed consumer reads.
+func (e *Emitter) typedDynCall(ex *ast.CallExpression) func(Value, error) (Value, error) {
+	return func(v Value, err error) (Value, error) {
+		if err != nil || !v.Ty.IsDynamic() || e.blockDone {
+			return v, err
+		}
+		// A callee of no one call signature (`0 | function`): the checker's
+		// result type is not the run-time value's, so the dynamic result
+		// stands.
+		if c := e.front(); c != nil {
+			if ct := c.TypeOf(ex.Callee); c.Unanswered(ct) || ct.Flags&(checker.Union|checker.Any) != 0 {
+				return v, nil
+			}
+		}
+		e.analysisDepth++
+		t := e.typeOfExpr(ex)
+		e.analysisDepth--
+		if !t.IsDynamic() && t.IR != "void" && t.IR != "" && t.Kind != kindNever {
+			return e.convertChecked(v, t, ex.GetPos(), "call result")
+		}
+		return v, nil
+	}
+}
+
+// The builtin constructors whose [[Call]] is their [[Construct]], and
+// Date, whose call is the current time's string.
+func init() {
+	for _, name := range []string{"RegExp", "Error", "TypeError", "RangeError", "SyntaxError",
+		"ReferenceError", "EvalError", "URIError", "AggregateError"} {
+		name := name
+		intrinsics[name] = intrinsic{
+			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+				// RegExp(re) of a RegExp with no flags is re itself.
+				if name == "RegExp" && len(ex.Args) >= 1 && e.typeOfExpr(ex.Args[0]).IsRegExp() &&
+					(len(ex.Args) == 1 || isUndefinedLiteral(e, ex.Args[1])) {
+					return e.emitExpr(ex.Args[0])
+				}
+				return e.emitConstructingCall(name, ex)
+			},
+			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				return e.typeOfExpr(ast.NewNewExpression(name, ex.Args, ex.GetPos()))
+			},
+			construct: true,
+		}
+	}
+	// Buffer(…) called as a function is the deprecated constructor form.
+	intrinsics["Buffer"] = intrinsic{
+		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			if call, ok := e.bufferCtorCall(ex.Args, ex.GetPos()); ok {
+				return e.emitExpr(call)
+			}
+			return e.emitConstructingCall("Buffer", ex)
+		},
+		ty: func(e *Emitter, ex *ast.CallExpression) Type {
+			return e.typeOfExpr(ast.NewNewExpression("Buffer", ex.Args, ex.GetPos()))
+		},
+		construct: true,
+	}
+	intrinsics["Date"] = intrinsic{
+		emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
+			// Its arguments are evaluated and ignored.
+			for _, a := range ex.Args {
+				if _, err := e.emitExpr(a); err != nil {
+					return Value{}, err
+				}
+			}
+			now := ast.NewNewDateExpression(nil, ex.GetPos())
+			return e.emitExpr(ast.NewCallExpression(ast.NewMemberExpression(now, "toString", ex.GetPos()), nil, ex.GetPos()))
+		},
+		ty:        func(*Emitter, *ast.CallExpression) Type { return TypePtr },
+		construct: true,
+	}
 }
 
 // knownGlobalNamespace lists the bare-identifier globals/namespaces whose
@@ -2648,16 +2523,30 @@ func (e *Emitter) convertArgTo(v Value, src ast.Expression, paramTy Type) (Value
 // Function.prototype's methods — as a call through the boxed function
 // (`(f as any).p(args)`), whose own-property bag holds p.
 func (e *Emitter) funcOwnPropCall(ex *ast.CallExpression) (*ast.CallExpression, bool) {
-	mem, ok := ex.Callee.(*ast.MemberExpression)
-	if !ok {
+	if !e.isFuncOwnPropCall(ex) {
 		return nil, false
 	}
+	mem := ex.Callee.(*ast.MemberExpression)
+	boxed := ast.NewAsExpression(mem.Object, ast.AnyAnnotation("ts"), mem.GetPos())
+	callee := ast.NewMemberExpression(boxed, mem.Property, mem.GetPos())
+	callee.Optional = mem.Optional
+	r := ast.NewCallExpression(callee, ex.Args, ex.GetPos())
+	r.Optional = ex.Optional
+	return r, true
+}
+
+// isFuncOwnPropCall reports whether funcOwnPropCall takes ex.
+func (e *Emitter) isFuncOwnPropCall(ex *ast.CallExpression) bool {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok {
+		return false
+	}
 	if _, isAs := mem.Object.(*ast.AsExpression); isAs {
-		return nil, false
+		return false
 	}
 	ty := e.typeOfExpr(mem.Object)
 	if !ty.IsFunc() || ty.IsDynamic() || e.isNamespaceMember(mem) {
-		return nil, false
+		return false
 	}
 	// A namespace merged into the function declares its own members, a
 	// builtin constructor's interface its statics (`String.fromCharCode`),
@@ -2665,15 +2554,10 @@ func (e *Emitter) funcOwnPropCall(ex *ast.CallExpression) (*ast.CallExpression, 
 	if c := e.front(); c != nil && !c.ExpandoMember(mem) {
 		switch c.MemberDecl(mem).(type) {
 		case *ast.FunctionDeclaration, *ast.VarDeclaration, *ast.MethodSignature, *ast.PropertySignature:
-			return nil, false
+			return false
 		}
 	}
-	boxed := ast.NewAsExpression(mem.Object, ast.AnyAnnotation("ts"), mem.GetPos())
-	callee := ast.NewMemberExpression(boxed, mem.Property, mem.GetPos())
-	callee.Optional = mem.Optional
-	r := ast.NewCallExpression(callee, ex.Args, ex.GetPos())
-	r.Optional = ex.Optional
-	return r, true
+	return true
 }
 
 // checkerRefinedCallType is the function type a call of a named function
@@ -3185,143 +3069,6 @@ var arrayMutators = map[string]bool{
 	"reverse": true, "sort": true, "fill": true, "copyWithin": true,
 }
 
-// emitReceiverMethodCall emits `recv.m(…)` dispatched on the receiver's
-// type: the method of the receiver's owner (a class, a host object, a
-// collection, a generator) or a function-valued field. done is false when
-// no owner takes the call, for the dispatch after it.
-func (e *Emitter) emitReceiverMethodCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	for _, owner := range receiverOwners {
-		if v, done, err := owner(e, ex, mem); done {
-			return v, true, err
-		}
-	}
-	return Value{}, false, nil
-}
-
-// receiverOwner emits a method call its receiver's owner takes; done is
-// false for a call it does not own.
-type receiverOwner func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error)
-
-// receiverOwners are tried in order. A class comes before the host owners
-// that dispatch by name, so a class method sharing a builtin's name wins,
-// as JavaScript's prototype-chain lookup does; a dictionary's
-// hasOwnProperty before the Map owner a dictionary also answers to.
-var receiverOwners []receiverOwner
-
-func init() {
-	receiverOwners = []receiverOwner{
-		(*Emitter).flatArrayCall,
-		(*Emitter).namespaceCall,
-		(*Emitter).classReceiverCall,
-		(*Emitter).bigIntArrayRejectedCall,
-		(*Emitter).dynArrayCall,
-		(*Emitter).dictHasOwnCall,
-		(*Emitter).generatorCall,
-		(*Emitter).funcFieldCall,
-	}
-}
-
-// flatArrayCall: a `/** @value */` flat array (TDD-00134 Stage 2) supports
-// push; everything else needs the pointer-slot layout.
-func (e *Emitter) flatArrayCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	objTy := e.typeOfExpr(mem.Object)
-	if !objTy.IsFlatArray() {
-		return Value{}, false, nil
-	}
-	if mem.Property == "push" {
-		return handled(e.emitFlatArrayPush(objTy, mem, ex.Args, ex.GetPos()))
-	}
-	return handled(Value{}, internalAt(ex.GetPos(), "@value array use the resolver admits"))
-}
-
-func (e *Emitter) namespaceCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if id, ok := mem.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
-		if f, ok := namespaceMethods[id.Name]; ok {
-			return f(e, ex, mem)
-		}
-	}
-	return Value{}, false, nil
-}
-
-// classReceiverCall is a user class's method, an `any` field holding a
-// function (called with the instance as `this`), or the method of the Map
-// or Set the class extends. A field holding a typed closure falls through
-// to funcFieldCall.
-func (e *Emitter) classReceiverCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	objTy := e.typeOfExpr(mem.Object)
-	if !objTy.IsClass() {
-		return Value{}, false, nil
-	}
-	// `new Box<string>(…).get()`: the instantiation the receiver's `new`
-	// makes, registered before its methods are looked up.
-	if _, err := e.ensureGenericInstance(objTy.ClassName); err != nil {
-		return handled(Value{}, err)
-	}
-	if _, ok := e.classes[objTy.ClassName]; !ok {
-		if ne, isNew := mem.Object.(*ast.NewExpression); isNew {
-			if genDecl, generic := e.genericClasses[ne.ClassName]; generic {
-				if targs, ok := e.newTypeArgs(genDecl, ne); ok {
-					if _, err := e.instantiateGenericClass(genDecl, e.buildTypeArgSubs(genDecl.TypeParams, targs)); err != nil {
-						return handled(Value{}, err)
-					}
-				}
-			}
-		}
-	}
-	info, ok := e.classes[objTy.ClassName]
-	if !ok {
-		return Value{}, false, nil
-	}
-	if _, ok := info.MethodSigs[mem.Property]; ok {
-		v, err := e.emitClassMethodCall(objTy, mem.Object, mem.Property, ex.Args, ex.GetPos())
-		if err == nil && v.Ty.IsClass() {
-			v.Ty = e.genericMethodResult(ex, objTy, mem.Property, v.Ty)
-		} else if err == nil && isUnconstrainedDynamic(v.Ty) {
-			if ct := e.genericMethodResult(ex, objTy, mem.Property, v.Ty); ct.IsClass() {
-				v = e.convert(v, ct)
-			}
-		}
-		return handled(v, err)
-	}
-	if _, fty, isField := info.Ty.FieldIndex(mem.Property); isField && isUnconstrainedDynamic(fty) {
-		return handled(e.emitClassMethodCall(objTy, mem.Object, mem.Property, ex.Args, ex.GetPos()))
-	}
-	if info.HostBase != nil {
-		inst, err := e.emitExpr(mem.Object)
-		if err != nil {
-			return handled(Value{}, err)
-		}
-		return handled(e.emitHostBaseCall(inst, *info.HostBase, mem.Property, ex.Args, ex.GetPos()))
-	}
-	return Value{}, false, nil
-}
-
-// bigIntArrayRejectedCall: a BigInt64Array/BigUint64Array supports only an
-// allow-list of array methods (TDD-00101) — the generic HOF/search/sort
-// machinery passes raw i64 scalars to callbacks and comparisons.
-func (e *Emitter) bigIntArrayRejectedCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if bigIntElemRejectedMethods[mem.Property] && e.typeOfExpr(mem.Object).BigIntElem {
-		return handled(Value{}, internalAt(ex.GetPos(), "a BigInt64Array/BigUint64Array has no .%s() (no TypedArray does)", mem.Property))
-	}
-	return Value{}, false, nil
-}
-
-// dynArrayCall: an Array method on an `any` is the run-time array's own,
-// else the receiver's property (emitDynArrayMethodCall).
-func (e *Emitter) dynArrayCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if _, ok := dynArrayMethods[mem.Property]; !ok {
-		return Value{}, false, nil
-	}
-	if ot := e.typeOfExpr(mem.Object); !isUnconstrainedDynamic(ot) && !unionOfArrays(ot) {
-		return Value{}, false, nil
-	}
-	objVal, err := e.emitExpr(mem.Object)
-	if err != nil {
-		return handled(Value{}, err)
-	}
-	return handled(e.emitDynAnyMethodCall(objVal, mem.Property, ex.Args, ex.GetPos()))
-}
-
 // unionOfArrays reports a boxed union whose every member is an array
 // (`string[] | number[]`): its Array methods are the run-time array's.
 func unionOfArrays(ty Type) bool {
@@ -3336,75 +3083,59 @@ func unionOfArrays(ty Type) bool {
 	return true
 }
 
-// dictHasOwnCall: a dictionary is a plain object, and an array inherits
-// from one, so hasOwnProperty is Object.prototype's.
-func (e *Emitter) dictHasOwnCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if ot := e.typeOfExpr(mem.Object); mem.Property == "hasOwnProperty" && len(ex.Args) == 1 && (ot.IsDynamicObject() || ot.IsArray() && !ot.IsTuple() && !ot.Nullable()) {
-		return handled(e.emitHasOwnProperty(mem.Object, ex.Args[0], "hasOwnProperty", true, ex.GetPos()))
-	}
-	return Value{}, false, nil
-}
-
-// generatorCall is a generator's next, throw or return (TDD-00061).
-func (e *Emitter) generatorCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if _, own := generatorMethods[mem.Property]; !own && e.genProtos && !ex.Optional && !mem.Optional {
-		// Another method is its prototype chain's (`h.prototype.m = …`):
-		// called on the boxed instance.
-		if gt := e.typeOfExpr(mem.Object); gt.IsGenerator() {
-			ov, err := e.emitExpr(mem.Object)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			boxed, err := e.emitBoxValue(ov)
-			if err != nil {
-				return handled(Value{}, err)
-			}
-			return handled(e.emitDynAnyMethodCall(boxed, mem.Property, ex.Args, ex.GetPos()))
-		}
-	}
-	return Value{}, false, nil
-}
-
-// funcFieldCall calls a function-typed field (`obj.callback(…)`) as a
-// closure.
-func (e *Emitter) funcFieldCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if e.unionClassMethod(mem) {
-		return Value{}, false, nil
-	}
-	if mt := e.typeOfExpr(mem); mt.IsFunc() {
-		return handled(e.emitFuncFieldCall(ex, mem, mt))
-	}
-	return Value{}, false, nil
-}
-
-// handled marks a call emitReceiverMethodCall took.
+// handled marks a call a rule took.
 func handled(v Value, err error) (Value, bool, error) { return v, true, err }
 
 // namespaceMethods are the calls on a builtin namespace compiled here, by
 // the namespace's binding name: done is false for a member left to the
 // namespace's declaration.
-var namespaceMethods map[string]func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error)
+var namespaceMethods map[string]map[string]func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error)
 
 func init() {
-	namespaceMethods = map[string]func(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error){
-		"process":             (*Emitter).processCredentialCall,
-		"Memory__kml_builtin": (*Emitter).memoryNamespaceCall,
+	namespaceMethods = map[string]map[string]func(e *Emitter, args []ast.Expression, pos ast.Pos) (Value, error){
+		"Memory__kml_builtin": {"free": (*Emitter).emitMemoryFree},
 	}
 }
 
-// processCredentialCall is process.getuid/geteuid/getgid/getegid on
-// Windows, where Node has no form of them (they are undefined there, so the
-// bare call is a TypeError in Node; TDD-00177). The
-// portable spelling is the optional call, which evaluates to `undefined`
-// here (emitOptionalCalleeCall). Elsewhere they are
-// internal_process_methods.ts's (loweredMemberRewrite). A bare call is
-// Node's runtime TypeError, after its arguments, and only when reached (a
-// program may test the platform first).
-// processCredentialMethods are process's POSIX-only credential getters.
-var processCredentialMethods = map[string]bool{"getuid": true, "geteuid": true, "getgid": true, "getegid": true}
+// libMethodDecl is the builtin declaration's method mem names, when a
+// builtin declaration file declares it.
+func (e *Emitter) libMethodDecl(mem *ast.MemberExpression) (*ast.MethodSignature, bool) {
+	c := e.front()
+	if c == nil {
+		return nil, false
+	}
+	d := c.MemberDecl(mem)
+	ms, ok := d.(*ast.MethodSignature)
+	if !ok || !e.isLibMember(d) {
+		return nil, false
+	}
+	return ms, true
+}
 
-func (e *Emitter) processCredentialCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if !processCredentialMethods[mem.Property] {
+// onPlatform reports whether the target has what `@platform` p names.
+func (e *Emitter) onPlatform(p string) bool {
+	return p != "posix" || e.opts.Target.OS() != "windows"
+}
+
+// platformRule: a builtin's method this target has none of, before its
+// lowering (which links the other targets' implementation).
+func (e *Emitter) platformRule(ex *ast.CallExpression) (Value, bool, error) {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || ex.Optional || mem.Optional {
+		return Value{}, false, nil
+	}
+	return e.unavailableMethodCall(ex, mem)
+}
+
+// unavailableMethodCall is a builtin's method its declaration's
+// `@platform` keeps off this target (process.getuid on Windows, where Node
+// leaves it undefined, TDD-00177): Node's TypeError, after the arguments,
+// and only when reached (a program may test the platform first). The
+// portable spelling is the optional call, which evaluates to `undefined`
+// there (emitOptionalCalleeCall).
+func (e *Emitter) unavailableMethodCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
+	ms, ok := e.libMethodDecl(mem)
+	if !ok || ms.Platform == "" || e.onPlatform(ms.Platform) {
 		return Value{}, false, nil
 	}
 	for _, a := range ex.Args {
@@ -3413,16 +3144,9 @@ func (e *Emitter) processCredentialCall(ex *ast.CallExpression, mem *ast.MemberE
 		}
 	}
 	ty := e.typeOfExpr(ex)
-	e.emitThrowTypeError("process." + mem.Property + " is not a function")
-	e.emitLabel(e.freshLabel("process.cred.dead"))
+	e.emitThrowTypeError(calleeDisplayName(mem) + " is not a function")
+	e.emitLabel(e.freshLabel("platform.dead"))
 	return handled(Value{Ref: zeroRef(ty), Ty: ty}, nil)
-}
-
-func (e *Emitter) memoryNamespaceCall(ex *ast.CallExpression, mem *ast.MemberExpression) (Value, bool, error) {
-	if mem.Property != "free" {
-		return Value{}, false, nil
-	}
-	return handled(e.emitMemoryFree(ex.Args, ex.GetPos()))
 }
 
 // emitModuleNamespace builds a module namespace object (the resolver's
@@ -3442,7 +3166,6 @@ func (e *Emitter) emitModuleNamespace(ex *ast.CallExpression) (Value, error) {
 		}
 		e.declareFn("__kml_dynobj_mark_live", "declare void @__kml_dynobj_mark_live("+irPtr+")")
 		e.declareFn("__kml_dynobj_module_ns", "declare void @__kml_dynobj_module_ns("+irPtr+")")
-		e.ensureNanBox()
 		pay := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, bag.Ref))
 		p := e.emitIntToPtr(pay)
@@ -3462,7 +3185,6 @@ func (e *Emitter) emitModuleNamespace(ex *ast.CallExpression) (Value, error) {
 		}
 	}
 	e.declareFn("__kml_dynobj_module_ns", "declare void @__kml_dynobj_module_ns("+irPtr+")")
-	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, bag.Ref))
 	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_module_ns("+irPtr+" %s)", e.emitIntToPtr(pay)))
@@ -3498,10 +3220,7 @@ func (e *Emitter) emitPropertyIsEnumerable(v Value, keyExpr ast.Expression, pos 
 	if !v.Ty.IsDynamic() {
 		return byKeys(e.bindValue(v, pos))
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_dynobj_prop_enumerable", "declare i32 @__kml_dynobj_prop_enumerable(i64, "+irPtr+")")
 	recv := e.bindValue(v, pos)
 	key, err := e.dynAnyKeyRef(keyExpr, pos)

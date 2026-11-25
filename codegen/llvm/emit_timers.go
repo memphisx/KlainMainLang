@@ -126,32 +126,7 @@ func (e *Emitter) timerCallbackPtr(arg ast.Expression, fnName string, pos ast.Po
 var timersSource string
 
 // TimersSource is the timer runtime's C source.
-func TimersSource() string { return timersSource }
-
-// UsesTimers reports whether the program links the timer runtime.
-func (e *Emitter) UsesTimers() bool { return e.usedTimers }
-
-// ensureTimerRuntime declares the timer runtime (timerssrc/timers.c): the
-// per-thread queue (read by the generated loop code), schedule/clear/ref
-// control, the monotonic clock, and the drains — run-to-empty, one step, and
-// the non-blocking tick. The drain checks the pending-signal flags each
-// pass whether or not the program uses process.on, so the signal dispatch
-// is declared too.
-func (e *Emitter) ensureTimerRuntime() {
-	if e.usedTimers {
-		return
-	}
-	e.usedTimers = true
-}
-
-// ensureTimerNatives links Node's timers binding (`@link timers`) and, on
-// POSIX, the loop its handles live on.
-func (e *Emitter) ensureTimerNatives() {
-	e.ensureTimerRuntime()
-	if e.opts.Target.OS() != "windows" {
-		e.ensureEventLoop()
-	}
-}
+func TimersSource() string { return loopUser + timersSource }
 
 // emitDiscardReturnAdapter wraps a zero-argument closure that returns a value in
 // a `void (ptr)` closure that calls it and drops the result. env of the adapter

@@ -563,17 +563,44 @@ console.log(C.x)
 `, "5")
 }
 
-// A decorator anywhere on a generic class is a clean rejection, never
-// silently dropped.
-func TestE2EDecoratorGenericClassRejected(t *testing.T) {
-	_, err := parseAndCompile(`
-function m(t: any, k: string, desc: any): void { console.log("m") }
-class G<T> { v: T; constructor(v: T) { this.v = v } @m get2(): T { return this.v } }
-console.log(new G<number>(5).get2())
-`)
-	if err == nil || !strings.Contains(err.Error(), "a decorator on a generic class ('G') is not supported yet") {
-		t.Fatalf("want the generic-class rejection, got %v", err)
-	}
+// A decorated generic class is one class, its type parameters any: its
+// decorators run once, on it (values from tsc --experimentalDecorators
+// under Node).
+func TestE2EDecoratorGenericClass(t *testing.T) {
+	assertOutput(t, `
+function cd(c: any) { console.log("class", typeof c, c.name); }
+function md(t: any, k: string, d: PropertyDescriptor) {
+  console.log("member", typeof t, t.constructor.name, k);
+  const orig = d.value;
+  d.value = function (this: any, ...a: any[]) { return "[" + orig.apply(this, a) + "]"; };
+}
+function fd(t: any, k: string) { console.log("field", t.constructor.name, k); }
+@cd class G<T> {
+  @fd v: T;
+  constructor(v: T) { this.v = v; }
+  @md get2(): T { return this.v; }
+  plain(): T { return this.v; }
+}
+const a = new G<number>(5), b = new G<string>("s");
+console.log(a.get2(), b.get2(), a.plain() + 1, b.plain().toUpperCase(), a instanceof G, Object.getPrototypeOf(a) === Object.getPrototypeOf(b));
+const n: number = a.plain();
+console.log(n * 2);
+`, "field G v\nmember object G get2\nclass function G\n[5] [s] 6 S true true\n10")
+}
+
+// A call of a decorated method returns what the callable its decorators
+// left returns, whatever the declared return type.
+func TestE2EDecoratedMethodReplacementResult(t *testing.T) {
+	assertOutput(t, `
+function md(t: any, k: string, d: PropertyDescriptor) { const o = d.value; d.value = function (this: any) { return "[" + o.apply(this) + "]"; }; }
+class A { @md m(): number { return 5; } }
+const a = new A();
+console.log(a.m());
+const r = a.m();
+console.log(typeof r, r);
+function inner() { const z = a.m(); console.log(typeof z, z); }
+inner();
+`, "[5]\nstring [5]\nstring [5]")
 }
 
 // A class decorator that returns the class itself replaces nothing.

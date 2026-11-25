@@ -46,7 +46,6 @@
             "status": "implemented",
             "caveats": [
               "`const p: T = await r.json()` orders the object's keys by `T`'s declaration, with undeclared keys after it, rather than by the body's order",
-              "No `clone()`: a compile error",
               "`console.log` of a Response with a body shows `supportsBYOB: false` on it, where Node's body is a byte stream"
             ],
             "notes": [
@@ -57,7 +56,8 @@
               "`bodyUsed`; a used or locked body makes a body method reject with Node's \"Body is unusable\" TypeError ([ADR-01197](../adr/01/ADR-01197.md))",
               "`.arrayBuffer()` ([ADR-00094](../adr/00/ADR-00094.md)) carries the real byte count and comes back whole regardless of content",
               "`.statusText` is the server's reason phrase, `.type` is `\"basic\"`, `.url` the final URL and `.redirected` whether a redirect led there; an untyped `await res.json()` is `any`; a Response has no own enumerable properties, and `console.log` prints Node's accessor list ([ADR-01190](../adr/01/ADR-01190.md), [ADR-01937](../adr/01/ADR-01937.md))",
-              "`bytes()`, `blob()` (typed by the Content-Type) and `formData()` beside `text()`/`json()`/`arrayBuffer()`; a fetched Response's headers, status text and URL stay readable after its body is ([ADR-01937](../adr/01/ADR-01937.md))"
+              "`bytes()`, `blob()` (typed by the Content-Type) and `formData()` beside `text()`/`json()`/`arrayBuffer()`; a fetched Response's headers, status text and URL stay readable after its body is ([ADR-01937](../adr/01/ADR-01937.md))",
+              "`clone()` (Response and Request): the body is teed, each side read on its own, the copy with its own Headers; a used or locked body throws Node's TypeError ([ADR-01987](../adr/01/ADR-01987.md))"
             ],
             "decl": [
               "Response",
@@ -102,8 +102,8 @@
             "feature": "`Request` / `Headers` objects",
             "status": "implemented",
             "caveats": [
-              "A `Headers` method called with too few arguments (through `any`) does not throw webidl's \"N argument(s) required\" TypeError: `arguments.length` counts every declared parameter",
-              "No `Request.clone()`: a compile error"
+              "A `ReadableStream` request body is read whole before `fetch` sends it, with a Content-Length, where undici sends it chunked as it is read: the server gets the same bytes, but a stream that never ends never sends ([ADR-02050](../adr/02/ADR-02050.md))",
+              "A `Headers` method called with too few arguments (through `any`) does not throw webidl's \"N argument(s) required\" TypeError: `arguments.length` counts every declared parameter"
             ],
             "notes": [
               "Real classes, not just `fetch`'s plain-object `init` (which still works unchanged)",
@@ -157,6 +157,7 @@
             "caveats": [
               "No default-async, callback-interleaved mode — `.send()`/`.send(body)` runs to completion then fires every registered callback once, synchronously (no re-entrant-into-already-returned-caller callback machinery to support async)",
               "`.open(..., async?)`'s `async === true` also blocks — no main-thread event loop to defer `.onload` onto (a documented narrowing, not fake async — [ADR-00615](../adr/00/ADR-00615.md))",
+              "A `.send()` on the main fiber (outside a request handler or `klain:sync` worker) to a server in the same program never returns: the server cannot run until `.send()` does",
               "The optional `user`/`password` arguments to `.open()` are accepted (and evaluated) but not yet wired to HTTP auth",
               "`.setRequestHeader(name, value)` accumulates headers, but names are **not** lowercased here (unlike `Headers`' own methods) — a separate V1 narrowing",
               "`.readyState` is 0/1/4 only (UNSENT/OPENED/DONE); the real spec's HEADERS_RECEIVED/LOADING have no meaning for a transfer that always runs to completion in one call",
@@ -168,7 +169,7 @@
             "notes": [
               "Not a blocking implementation: `.send()` is built on the exact same non-blocking `__kml_fetch_async` primitive `fetch()` itself uses, so a request handler calling it never blocks the other connections",
               "A synchronous `.open(method, url, false)` from inside `klain:sync` worker goroutines yields cooperatively per request (via the shared fetch await path), so pooled workers issue genuinely overlapping requests — the primitive behind the `load_test` load-generator example",
-              "Supports `.open(method, url, async?, user?, password?)`, `.setRequestHeader(name, value)`, `.send()`/`.send(body)`, `.abort()`, `.readyState`, `.status`, `.responseText`/`.response`, and the zero-argument callbacks",
+              "Supports `.open(method, url, async?, user?, password?)`, `.setRequestHeader(name, value)`, `.send()`/`.send(body)`, `.abort()`, `.readyState`, `.status`, `.statusText`, `.responseText`/`.response`, and the zero-argument callbacks",
               "A network-level failure fires `.onerror` (never throws), matching real `XMLHttpRequest`",
               "See [ADR-00131](../adr/00/ADR-00131.md)"
             ],

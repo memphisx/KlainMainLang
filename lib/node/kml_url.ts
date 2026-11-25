@@ -1405,13 +1405,17 @@ export class URLSearchParams {
 
     get size(): number { return this.#list.length / 2; }
 
-    append(name: string, value: string): void {
+    // Each WebIDL USVString argument converts by ToString (`append('n', 1)`
+    // in JavaScript); the overload is the declared signature.
+    append(name: string, value: string): void;
+    append(name: any, value: any): void {
         if (arguments.length < 2) throw missingArgs('name', 'value');
         this.#list.push(toUSVString(name), toUSVString(value));
         this.#update();
     }
 
-    delete(name: string, value?: string): void {
+    delete(name: string, value?: string): void;
+    delete(name: any, value?: any): void {
         if (arguments.length < 1) throw missingArgs('name');
         const n = toUSVString(name);
         const v = value === undefined ? undefined : toUSVString(value);
@@ -1424,7 +1428,8 @@ export class URLSearchParams {
         this.#update();
     }
 
-    get(name: string): string | null {
+    get(name: string): string | null;
+    get(name: any): string | null {
         if (arguments.length < 1) throw missingArgs('name');
         const n = toUSVString(name);
         for (let i = 0; i < this.#list.length; i += 2) {
@@ -1433,7 +1438,8 @@ export class URLSearchParams {
         return null;
     }
 
-    getAll(name: string): string[] {
+    getAll(name: string): string[];
+    getAll(name: any): string[] {
         if (arguments.length < 1) throw missingArgs('name');
         const n = toUSVString(name);
         const values: string[] = [];
@@ -1443,7 +1449,8 @@ export class URLSearchParams {
         return values;
     }
 
-    has(name: string, value?: string): boolean {
+    has(name: string, value?: string): boolean;
+    has(name: any, value?: any): boolean {
         if (arguments.length < 1) throw missingArgs('name');
         const n = toUSVString(name);
         const v = value === undefined ? undefined : toUSVString(value);
@@ -1453,7 +1460,8 @@ export class URLSearchParams {
         return false;
     }
 
-    set(name: string, value: string): void {
+    set(name: string, value: string): void;
+    set(name: any, value: any): void {
         if (arguments.length < 2) throw missingArgs('name', 'value');
         const n = toUSVString(name);
         const v = toUSVString(value);

@@ -43,3 +43,21 @@ export function __kml_Object_getOwnPropertyDescriptors(o: any): any { // kml:low
     for (const s of Object.getOwnPropertySymbols(o)) out[s] = Object.getOwnPropertyDescriptor(o, s);
     return out;
 }
+
+// Function.prototype.bind's own `length` and `name` (ECMA-262 §20.2.3.2
+// steps 4-9), for a program that can redefine a function's: read from the
+// target when it binds (an accessor runs then, and its throw is bind's),
+// defined on the bound function F. n is the count of bound arguments.
+export function __kml_Function_boundProps(F: any, T: any, n: number): void { // kml:lower defineProperty.bind
+    let L = 0;
+    if (Object.prototype.hasOwnProperty.call(T, 'length')) {
+        const len: any = T.length;
+        if (typeof len === 'number') {
+            if (len === Infinity) L = Infinity;
+            else if (len !== -Infinity) L = Math.max(0, Math.trunc(len) - n);
+        }
+    }
+    Object.defineProperty(F, 'length', { value: L, writable: false, enumerable: false, configurable: true });
+    const name: any = T.name;
+    Object.defineProperty(F, 'name', { value: 'bound ' + (typeof name === 'string' ? name : ''), writable: false, enumerable: false, configurable: true });
+}

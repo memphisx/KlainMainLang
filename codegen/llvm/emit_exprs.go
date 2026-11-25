@@ -11,7 +11,6 @@ import (
 	"KlainMainLang/binder"
 	"KlainMainLang/lib"
 	"KlainMainLang/resolver"
-	"KlainMainLang/sema"
 	"fmt"
 	"math"
 	"math/big"
@@ -65,6 +64,11 @@ func (e *Emitter) emitExprUnguarded(expr ast.Expression) (Value, error) {
 		}
 		return Value{Ref: v, Ty: TypeBool}, nil
 	case *ast.Identifier:
+		if cd, ok := e.classHeritageSites[ex]; ok && e.valueBases[cd.BaseClass] {
+			if err := e.emitClassHeritage(cd); err != nil {
+				return Value{}, err
+			}
+		}
 		if !e.classRecordSites[ex] {
 			e.emitClassReeval(ex) // a record site re-runs once its record is made
 		}
@@ -279,6 +283,9 @@ func (e *Emitter) emitNumberLit(n *ast.NumberLiteral) (Value, error) {
 		return e.emitBigIntLiteral(n)
 	}
 	v := n.Value
+	if n.LegacyForm() == "octal" {
+		v = "0o" + v[1:] // sloppy JavaScript's `010` is 8
+	}
 	// TDD-00123 Stage 1: every JS number literal is a double, so a numeric
 	// literal is TypeF64 regardless of whether it has a fractional part. A
 	// decimal fraction passes through verbatim (LLVM rounds to nearest double);
@@ -373,9 +380,6 @@ func llvmDoubleLit(f float64) string {
 }
 
 func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
-	if call, ok := e.tsSubtleAlias(id); ok {
-		return e.emitExpr(call)
-	}
 	sym, ok := e.lookup(id.Name)
 	if ok && e.unresolvedReference(id) {
 		// A name no scope around this read declares, though a binding of
@@ -393,7 +397,6 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		}
 	}
 	if ok && sym.NotDefined {
-		e.ensureExceptionHelpers()
 		errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString(id.Name+" is not defined"), e.internString("ReferenceError"))
 		e.excThrow(errObj)
 		e.emitTerminator("unreachable")
@@ -409,7 +412,6 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 	if ok && sym.TDZ {
 		// A parameter read by an earlier parameter's default (`(x = y, y)`):
 		// still in its dead zone.
-		e.ensureExceptionHelpers()
 		errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+id.Name+"' before initialization"), e.internString("ReferenceError"))
 		e.excThrow(errObj)
 		e.emitTerminator("unreachable")
@@ -526,7 +528,7 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		}
 		// A builtin constructor in value position (`const M = Map`, `mk(Set)`):
 		// a constructor reference carrying its name, as the Error kinds'.
-		if sema.IsBuiltinConstructor(id.Name) || id.Name == "Promise" || (id.Name == "Object" || id.Name == "Function" || e.isLibConstructorValue(id)) && e.isGlobalName(id) {
+		if e.builtinCtorName(id.Name) || e.isLibConstructorValue(id) && e.isGlobalName(id) {
 			if e.inHostRow == id.Name {
 				return Value{}, internalAt(id.GetPos(), "%s's static is read through its own reference", id.Name)
 			}
@@ -563,7 +565,6 @@ func (e *Emitter) emitIdent(id *ast.Identifier) (Value, error) {
 		// dead-zone ReferenceError when the default is evaluated.
 		if e.unboundParam(id) {
 			e.shadowReference(id, true)
-			e.ensureExceptionHelpers()
 			errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+id.Name+"' before initialization"), e.internString("ReferenceError"))
 			e.excThrow(errObj)
 			e.emitTerminator("unreachable")
@@ -684,7 +685,7 @@ var globalOnGlobalThis = map[string]bool{
 	"PerformanceEntry": false, "PerformanceMark": false, "PerformanceMeasure": false,
 	"PerformanceObserverEntryList": false, "PerformanceObserver": false,
 	"Performance": false, "MessagePort": false, "MessageChannel": false,
-	"BroadcastChannel": false,
+	"BroadcastChannel": false, "WebAssembly": false,
 }
 
 // emitGlobalThisLinks puts the program's global-module globals on the
@@ -712,12 +713,10 @@ func (e *Emitter) emitGlobalThisLinks(pos ast.Pos) error {
 				continue
 			}
 			value, enumerable = ast.NewCallExpression(ast.NewIdentifier(mk, pos), nil, pos), true
-		case e.globalLinks[name] != "":
-			on, isOn := globalOnGlobalThis[name]
-			if !isOn {
-				continue
-			}
-			value, enumerable = ast.NewIdentifier(e.globalLinks[name], pos), on
+		case e.globalLinks[name] != "" && hasGlobalOnGlobalThis(name):
+			value, enumerable = ast.NewIdentifier(e.globalLinks[name], pos), globalOnGlobalThis[name]
+		case e.globalLinks[name] != "" && !(e.prog != nil && e.prog.GlobalObjectNames[name]):
+			continue
 		case name == "fetch":
 			mk, ok := e.libExports["internal_global_fetch:_kmlGlobalFetch"]
 			if !ok {
@@ -735,6 +734,13 @@ func (e *Emitter) emitGlobalThisLinks(pos ast.Pos) error {
 		}
 	}
 	return nil
+}
+
+// hasGlobalOnGlobalThis reports a linked global the global object carries
+// as its module's class.
+func hasGlobalOnGlobalThis(name string) bool {
+	_, ok := globalOnGlobalThis[name]
+	return ok
 }
 
 func (e *Emitter) isBuiltinRef(x ast.Expression) bool {
@@ -798,7 +804,7 @@ var globalObjectBuiltins = func() []struct {
 			enumerable bool
 		}{n, true})
 	}
-	for _, n := range strings.Fields("Math JSON Reflect Atomics console Object Function Array Number String Boolean Symbol BigInt Date RegExp Error TypeError RangeError SyntaxError ReferenceError Promise Map Set WeakMap WeakSet ArrayBuffer Uint8Array parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI AggregateError EvalError URIError Int8Array Uint8ClampedArray Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array BigInt64Array BigUint64Array SharedArrayBuffer Proxy FinalizationRegistry escape unescape") {
+	for _, n := range strings.Fields("Math JSON Reflect Atomics console Object Function Array Number String Boolean Symbol BigInt Date RegExp Error TypeError RangeError SyntaxError ReferenceError Promise Map Set WeakMap WeakSet ArrayBuffer Uint8Array parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent encodeURI decodeURI AggregateError EvalError URIError Int8Array Uint8ClampedArray Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array BigInt64Array BigUint64Array SharedArrayBuffer Proxy FinalizationRegistry escape unescape eval") {
 		out = append(out, struct {
 			name       string
 			enumerable bool
@@ -820,6 +826,7 @@ var globalObjectOrder = []string{
 	"PerformanceObserver", "PerformanceObserverEntryList", "performance", "URLPattern", "fetch",
 	"FormData", "Headers", "Request", "Response", "MessageEvent", "CloseEvent", "WebSocket",
 	"crypto", "Crypto", "CryptoKey", "SubtleCrypto", "WeakRef", "DataView", "Navigator", "navigator",
+	"WebAssembly",
 }
 
 // namespaceValueExport is the library export that makes the global object
@@ -840,8 +847,10 @@ func (e *Emitter) isLibConstructorValue(id *ast.Identifier) bool {
 	if c == nil {
 		return false
 	}
-	if e.builtinIdents[id] {
-		return isConstructorValue(c.GlobalValueType(id.Name)) // a global codegen reads (`globalThis.Buffer`)
+	if e.builtinIdents[id] || !c.InProgram(id) {
+		// A global codegen reads (`globalThis.Buffer`), or one a
+		// synthesized body names: the global's own type.
+		return isConstructorValue(c.GlobalValueType(id.Name))
 	}
 	return isConstructorValue(c.TypeOf(id))
 }
@@ -852,6 +861,43 @@ var globalNumberConsts = map[string]string{"NaN": "0x7FF8000000000000", "Infinit
 // unresolvedReference reports id, under -compat=js, as a reference the
 // binder looked up and found no declaration for (it reads a global no
 // program or library declares).
+// environmentSym reports a symbol only environment declarations declare
+// (environmentDecl: a `declare global` var or function).
+func environmentSym(sym *binder.Symbol) bool {
+	if len(sym.Declarations) == 0 {
+		return false
+	}
+	for _, d := range sym.Declarations {
+		switch n := d.Node.(type) {
+		case *ast.VarDeclaration:
+			if !n.Global {
+				return false
+			}
+		case *ast.FunctionDeclaration:
+			if !n.Global {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// environmentGlobal reports id naming a `declare global` value no local
+// binding shadows.
+func (e *Emitter) environmentGlobal(id *ast.Identifier) bool {
+	if _, found := e.lookup(id.Name); found {
+		return false
+	}
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	sym, _ := c.Binding().Resolve(id)
+	return sym != nil && environmentSym(sym)
+}
+
 func (e *Emitter) unresolvedReference(id *ast.Identifier) bool {
 	c := e.front()
 	if c == nil {
@@ -861,6 +907,9 @@ func (e *Emitter) unresolvedReference(id *ast.Identifier) bool {
 		// TypeScript: a name only an ambient declaration gives (`declare
 		// class C`), which the environment must provide.
 		sym, _ := c.Binding().Resolve(id)
+		if sym != nil && environmentSym(sym) {
+			return true // a `declare global` value: the environment's global
+		}
 		if sym != nil && sym.Flags&binder.Value != 0 {
 			return false
 		}
@@ -895,7 +944,6 @@ func (e *Emitter) unresolvedReference(id *ast.Identifier) bool {
 // emitNotDefined throws the ReferenceError reading an undeclared name
 // raises ("s is not defined"); the value after it is unreachable.
 func (e *Emitter) emitNotDefined(id *ast.Identifier) Value {
-	e.ensureExceptionHelpers()
 	errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString(id.Name+" is not defined"), e.internString("ReferenceError"))
 	e.excThrow(errObj)
 	e.emitTerminator("unreachable")

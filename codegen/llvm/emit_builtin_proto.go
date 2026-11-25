@@ -47,7 +47,6 @@ func (e *Emitter) protoMethodRecord(class string, m hostMember) string {
 
 	// The same in every program: a library unit of its own (libOwner).
 	restore := e.sharedBody(e.beginDetachedFunc())
-	e.ensureShapeRuntime()
 	e.declareFn("__kml_proto_call", "declare i64 @__kml_proto_call(i64, "+irPtr+", i64, "+irPtr+", "+irPtr+")")
 	ok := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", ok))
@@ -91,7 +90,6 @@ func (e *Emitter) protoGetterRecord(class string, m hostMember, probe string) st
 	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 0 }", fn), fn)
 
 	restore := e.sharedBody(e.beginDetachedFunc())
-	e.ensureShapeRuntime()
 	e.declareFn("__kml_proto_get", "declare i64 @__kml_proto_get(i64, "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+")")
 	ok := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", ok))
@@ -230,10 +228,7 @@ func (e *Emitter) emitBuiltinProtoPeek(class string) string {
 
 // emitBuiltinProtoBag builds class.prototype's object (emitBuiltinProto).
 func (e *Emitter) emitBuiltinProtoBag(class string) Value {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_class_proto", "declare "+irPtr+" @__kml_class_proto("+irPtr+", i64, "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+")")
 	if isErrorKindName(class) {
 		return e.emitErrorProtoBag(class)
@@ -273,6 +268,9 @@ func (e *Emitter) emitBuiltinProtoBag(class string) Value {
 		if !m.method || m.optional || !e.protoMethodReachable(m.name) || protoMethodAliases[class][m.name] != "" {
 			continue
 		}
+		if _, helper := iteratorHelperArity[m.name]; helper && iteratorInterfaces[class] != "" {
+			continue // %IteratorPrototype%'s (emitIteratorProtoBag)
+		}
 		rec := ""
 		if valueProtoClassName(class) {
 			rec = e.valueProtoRecord(class, m)
@@ -301,17 +299,29 @@ func (e *Emitter) emitBuiltinProtoBag(class string) Value {
 	}
 	// constructor: the class's own value, as a read of its name gives it
 	// (String's call signature's function), so the two are identical.
-	ctor := e.emitNbTagPtr(e.internString(class), kmlTagFuncRef)
-	if v, ok, err := e.builtinCtorValue(class); ok && err == nil {
-		ctor = v.Ref
+	_, iterProto := iteratorInterfaces[class]
+	if !iterProto {
+		ctor := e.emitNbTagPtr(e.internString(class), kmlTagFuncRef)
+		if v, ok, err := e.builtinCtorValue(class); ok && err == nil {
+			ctor = v.Ref
+		}
+		keys = append(keys, e.internString("constructor"))
+		vals, sets = append(vals, ctor), append(sets, "-1")
 	}
-	keys = append(keys, e.internString("constructor"))
-	vals, sets = append(vals, ctor), append(sets, "-1")
 	if hostProtoClasses[class] {
 		keys = append(keys, e.internString("@@toStringTag"))
 		vals, sets = append(vals, e.emitNbTagPtr(e.internString(class), kmlTagString)), append(sets, "-1")
 	}
-	bag := e.emitProtoBagCall(slot, keys, vals, sets, "null")
+	parent := "null"
+	if iterProto {
+		parent = e.emitIteratorProtoBag()
+	}
+	bag := e.emitProtoBagCall(slot, keys, vals, sets, parent)
+	if class == "Array Iterator" {
+		// Its `next` as made: a replaced one is what array iteration calls.
+		e.declareFn("__kml_arriter_proto_register", "declare void @__kml_arriter_proto_register("+irPtr+")")
+		e.emitInstr(fmt.Sprintf("call void @__kml_arriter_proto_register("+irPtr+" %s)", bag))
+	}
 	if class == "Array" {
 		// Array.prototype is itself an Array.
 		e.declareFn("__kml_dynobj_array_exotic", "declare void @__kml_dynobj_array_exotic("+irPtr+")")
@@ -407,6 +417,10 @@ var hostProtoClasses = map[string]bool{
 	"Promise": true, "DataView": true, "ArrayBuffer": true, "SharedArrayBuffer": true, "Date": false, "RegExp": false,
 	"Array": false, "String": false,
 	"Number": false, "Boolean": false, "Symbol": true, "BigInt": true,
+	"ReadableStream": true, "WritableStream": true, "TransformStream": true,
+	// %ArrayIteratorPrototype% and kin: no constructor of their own, each
+	// inheriting %IteratorPrototype% (emitIteratorProtoBag).
+	"Array Iterator": true, "Map Iterator": true, "Set Iterator": true, "RegExp String Iterator": true,
 }
 
 // valueProtoClassName reports whether class's prototype methods take its
@@ -438,7 +452,6 @@ func (e *Emitter) emitPrimReceiver(class, prim, method string) string {
 	e.emitLabel(wrapL)
 	// A wrapper object of the class (`Object(false)`): its primitive value,
 	// as its own valueOf answers it.
-	e.ensureShapeRuntime()
 	e.declareFn("__kml_proto_call", "declare i64 @__kml_proto_call(i64, "+irPtr+", i64, "+irPtr+", "+irPtr+")")
 	okSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", okSlot))
@@ -482,7 +495,6 @@ func (e *Emitter) emitReceiverMessage(prefix, recv string) string {
 // string register: emitted once, as __kml_recv_msg, which every
 // incompatible-receiver throw calls.
 func (e *Emitter) emitReceiverMessageInline(prefix, recv string) string {
-	e.ensureShapeRuntime()
 	e.declareFn("__kml_receiver_desc", "declare "+irPtr+" @__kml_receiver_desc(i64)")
 	desc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_receiver_desc(i64 %s)", desc, recv))
@@ -518,10 +530,6 @@ func (e *Emitter) emitReceiverMessageInline(prefix, recv string) string {
 // __kml_builtin_proto_of, generated once the program's host layouts are
 // all known (emitBuiltinProtoOfFinalize).
 func (e *Emitter) emitBuiltinProtoOf(cell string) string {
-	e.ensureShapeRuntime()
-	if !e.usedProtoOf {
-		e.usedProtoOf = true
-	}
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_builtin_proto_of("+irPtr+" %s)", r, cell))
 	return r
@@ -530,8 +538,10 @@ func (e *Emitter) emitBuiltinProtoOf(cell string) string {
 // emitBuiltinProtoOfFinalize generates `i64 __kml_builtin_proto_of(ptr
 // cell)`: the cell's layout class name against each builtin class the
 // program boxes, and a boxed promise's wrapper by its header word.
+// Generated when the program calls it, or will: the unhandled-rejection
+// report, generated later, names a non-Error reason's constructor.
 func (e *Emitter) emitBuiltinProtoOfFinalize() {
-	if !e.usedProtoOf {
+	if e.irDefines("__kml_builtin_proto_of") || !e.usedUnhandledRuntime && !e.irNames("__kml_builtin_proto_of") {
 		return
 	}
 	seen := map[string]bool{}
@@ -545,7 +555,6 @@ func (e *Emitter) emitBuiltinProtoOfFinalize() {
 	restore := e.beginDetachedFunc()
 	{
 		// A prototype the object was given replaces its class's.
-		e.ensureShapeRuntime()
 		e.declareFn("__kml_shape_proto_set", "declare i32 @__kml_shape_proto_set("+irPtr+", "+irPtr+")")
 		ps := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", ps))
@@ -601,7 +610,7 @@ func (e *Emitter) emitBuiltinProtoOfFinalize() {
 			// scope has.
 			continue
 		}
-		if !info.Ty.IsDynamic() && (info.TagID&kmlHdrIDMask < kmlStableIDBase || e.classProtoSlotted(name)) {
+		if !info.Ty.IsDynamic() && (info.TagID&kmlHdrIDMask < kmlStableIDBase || e.classProtoSlotted(name) || e.ancestorProtoSlotted(info)) {
 			users = append(users, name)
 		}
 	}
@@ -624,7 +633,15 @@ func (e *Emitter) emitBuiltinProtoOfFinalize() {
 			yesL, nextL := e.freshLabel("protoof.cls"), e.freshLabel("protoof.clsnext")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hit.Ref, yesL, nextL))
 			e.emitLabel(yesL)
-			e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitClassProto(cls).Ref))
+			if e.classRecords[cls] {
+				// An evaluation's instance: that evaluation's prototype.
+				of, up := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_of("+irPtr+" %%cell)", of))
+				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_up("+irPtr+" %s, "+irPtr+" %s)", up, of, e.classRefPtr(cls)))
+				e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitClassProtoFor(cls, up).Ref))
+			} else {
+				e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitClassProto(cls).Ref))
+			}
 			e.emitLabel(nextL)
 		}
 	}
@@ -650,6 +667,18 @@ func (e *Emitter) emitBuiltinProtoOfFinalize() {
 		e.emitTerminator("br label %" + restL)
 		e.emitLabel(restL)
 	}
+	if _, made := e.layoutIDs[layoutKey(arrayIterType())]; made {
+		// An array iterator made through a dynamic value (its [Symbol.
+		// iterator] on a boxed array): %ArrayIteratorPrototype%.
+		hdr, isIt := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %%cell, align 8", hdr))
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isIt, e.headerIdentity(hdr), e.objHeaderWord(arrayIterType())))
+		itL, restL := e.freshLabel("protoof.arriter"), e.freshLabel("protoof.notarriter")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isIt, itL, restL))
+		e.emitLabel(itL)
+		e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitBuiltinProto("Array Iterator").Ref))
+		e.emitLabel(restL)
+	}
 	name := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_shape_class_name("+irPtr+" %%cell)", name))
 	noneL, someL := e.freshLabel("protoof.none"), e.freshLabel("protoof.some")
@@ -667,7 +696,12 @@ func (e *Emitter) emitBuiltinProtoOfFinalize() {
 	}
 	e.emitTerminator("br label %" + noneL)
 	e.emitLabel(noneL)
-	e.emitTerminator(fmt.Sprintf("ret i64 %d", nbNull))
+	// Any other object (a plain record, `{ a: 1 }`): an ordinary object's
+	// prototype, Object.prototype. One given null was answered above.
+	e.ensureObjProtoFill()
+	op := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_object_prototype()", op))
+	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitDynObjBox(op).Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
 	e.writeFunc("internal i64 @__kml_builtin_proto_of("+irPtr+" %cell)", body)
@@ -1136,10 +1170,7 @@ func (e *Emitter) typedGetterRecord(prop string) string {
 // property where sets[i] is -1, else an accessor (vals[i] and sets[i] its
 // getter and setter record words).
 func (e *Emitter) emitProtoBag(slot string, keys, vals, sets []string, parent string) string {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_class_proto", "declare "+irPtr+" @__kml_class_proto("+irPtr+", i64, "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+")")
 	n := len(keys)
 	karr, varr, sarr := e.freshReg(), e.freshReg(), e.freshReg()
@@ -1506,10 +1537,29 @@ func (e *Emitter) emitValueProtoGetFinalize() {
 	}
 	for _, class := range []string{"Array", "String"} {
 		names := e.methodValueNames(class)
-		if len(names) == 0 {
+		// Array.prototype's object, once the program builds it: what it
+		// holds (a property the program added, a method it replaced).
+		bag := class == "Array" && e.protoBuilders["@__kml_proto_get_Array"]
+		if len(names) == 0 && !bag {
 			continue
 		}
 		restore := e.beginDetachedFunc()
+		if bag {
+			pv := e.emitBuiltinProto("Array")
+			pp, has := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pp, pv.Ref))
+			ppp := e.emitIntToPtr(pp)
+			e.declareFn("__kml_dynobj_has", "declare i1 @__kml_dynobj_has("+irPtr+", "+irPtr+")")
+			e.declareFn("__kml_dynobj_get_recv", "declare i64 @__kml_dynobj_get_recv("+irPtr+", "+irPtr+", i64)")
+			e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_has("+irPtr+" %s, "+irPtr+" %%key)", has, ppp))
+			ownL, restL := e.freshLabel("arrproto.own"), e.freshLabel("arrproto.rest")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, ownL, restL))
+			e.emitLabel(ownL)
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get_recv("+irPtr+" %s, "+irPtr+" %%key, i64 %%recv)", r, ppp))
+			e.emitTerminator("ret i64 " + r)
+			e.emitLabel(restL)
+		}
 		for _, name := range names {
 			m, _ := e.classMethod(class, name)
 			miss := e.emitKeyIs("%key", name)
@@ -1524,6 +1574,10 @@ func (e *Emitter) emitValueProtoGetFinalize() {
 		e.emitTerminator(fmt.Sprintf("ret i64 %d", nbUndefined))
 		body := e.allocas.String() + e.body.String()
 		restore()
+		if class == "Array" {
+			e.writeFunc("i64 @__kml_array_proto_get("+irPtr+" %key, i64 %recv)", body)
+			continue
+		}
 		e.writeFunc(fmt.Sprintf("i64 @__kml_%s_proto_get("+irPtr+" %%key)", strings.ToLower(class)), body)
 	}
 }
@@ -1610,10 +1664,7 @@ func (e *Emitter) emitClassProtoBag(className string) Value {
 		parent = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, parent, pp))
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_class_proto", "declare "+irPtr+" @__kml_class_proto("+irPtr+", i64, "+irPtr+", "+irPtr+", "+irPtr+", "+irPtr+")")
 	slot := e.classProtoSlot(className)
 	keys := []string{e.internString("constructor")}
@@ -1647,14 +1698,29 @@ func (e *Emitter) emitClassProtoBag(className string) Value {
 		}
 		return e.emitSymbolPropertyKey(sv)
 	}
+	// The class's own members, in the order it declares them (an override
+	// holds its base's slot in MethodOrder).
+	var own []string
 	for _, m := range info.MethodOrder {
 		if info.MethodImplementor[m] != className || isPrivateMember(m) {
 			continue
 		}
-		// An abstract method has no function, and no property in JavaScript.
-		if d := info.Methods[m]; d != nil && d.Body == nil {
+		// An abstract method has no function, and no property in JavaScript;
+		// a synthesized override is none either.
+		if d := info.Methods[m]; d != nil && (d.Body == nil || synthesizedMember(d)) {
 			continue
 		}
+		own = append(own, m)
+	}
+	sort.SliceStable(own, func(i, j int) bool {
+		a, b := info.Methods[own[i]], info.Methods[own[j]]
+		if a == nil || b == nil {
+			return false
+		}
+		pa, pb := a.GetPos(), b.GetPos()
+		return pa.Line < pb.Line || pa.Line == pb.Line && pa.Col < pb.Col
+	})
+	for _, m := range own {
 		get, set := strings.HasPrefix(m, "__kml_get_"), strings.HasPrefix(m, "__kml_set_")
 		if get || set {
 			key := strings.TrimPrefix(strings.TrimPrefix(m, "__kml_get_"), "__kml_set_")
@@ -1743,6 +1809,18 @@ func (e *Emitter) usedErrorProto() bool {
 
 // classProtoSlotted reports whether the program made className's
 // prototype object (a library class's, read as `K.prototype`).
+// ancestorProtoSlotted reports a library class one of whose ancestors'
+// prototypes the program made: its instance, tested as that ancestor's,
+// would otherwise answer the ancestor's prototype for its own.
+func (e *Emitter) ancestorProtoSlotted(info ClassInfo) bool {
+	for _, a := range info.AncestorChain {
+		if e.classProtoSlotted(a) {
+			return true
+		}
+	}
+	return false
+}
+
 func (e *Emitter) classProtoSlotted(className string) bool {
 	return e.protoSlots["@__kml_cproto_obj_"+llvmSafeSymbol(className)]
 }
@@ -1834,10 +1912,7 @@ func (e *Emitter) ensureObjProtoFill() {
 		return
 	}
 	e.usedObjProtoFill = true
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_dynobj_set_hidden", "declare void @__kml_dynobj_set_hidden("+irPtr+", "+irPtr+", i64)")
 	// The same in every program: a unit of its own, its literals named by
 	// position (sharedLitUnit).
@@ -2044,4 +2119,34 @@ func (e *Emitter) emitBufferProto() Value {
 	}
 	keys := []string{e.internString("constructor")}
 	return e.emitDynObjBox(e.emitProtoBag(e.protoSlot("Buffer"), keys, []string{ctor}, []string{"-1"}, parent))
+}
+
+// emitIteratorProtoBag is %IteratorPrototype%, once: the parent of every
+// builtin iterator's prototype, its [Symbol.iterator] returning this.
+func (e *Emitter) emitIteratorProtoBag() string {
+	slot := "@__kml_proto_obj___IteratorPrototype"
+	if e.protoSlots == nil {
+		e.protoSlots = map[string]bool{}
+	}
+	if !e.protoSlots[slot] {
+		e.protoSlots[slot] = true
+		e.emitGlobal(fmt.Sprintf("%s = internal"+irGlobalAS+" global "+irPtr+" null, align 8", slot))
+	}
+	keys := []string{e.internString("@@iterator")}
+	vals := []string{e.emitNbTagPtr(e.arrayIterMethodRecord("@@iterator"), kmlTagDynFunc)}
+	sets := []string{"-1"}
+	helpers := make([]string, 0, len(iteratorHelperArity))
+	for m := range iteratorHelperArity {
+		helpers = append(helpers, m)
+	}
+	sort.Strings(helpers)
+	for _, m := range helpers {
+		if _, linked := e.globalLinks["__kml_Iterator_"+m]; !linked || !e.protoMethodReachable(m) {
+			continue
+		}
+		keys = append(keys, e.internString(m))
+		vals = append(vals, e.emitNbTagPtr(e.arrayIterMethodRecord(m), kmlTagDynFunc))
+		sets = append(sets, "-1")
+	}
+	return e.emitProtoBagCall(slot, keys, vals, sets, "null")
 }

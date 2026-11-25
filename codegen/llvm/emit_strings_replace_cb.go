@@ -36,9 +36,11 @@ func (e *Emitter) emitStringReplaceLiteralCallback(objVal Value, searchExpr, cbE
 	if err != nil {
 		return Value{}, err
 	}
+	// A non-string search ToStrings (`s.replace(false, fn)` searches "false").
+	if searchVal, err = e.toStringArg(searchVal); err != nil {
+		return Value{}, err
+	}
 	searchVal = e.convert(searchVal, TypePtr)
-
-	e.ensureStrHeaderRuntime() // memmem + __kml_str_alloc + __kml_str_len
 
 	sLen := e.emitStrLenHeader(objVal.Ref)
 	searchLen := e.emitStrLenHeader(searchVal.Ref)

@@ -482,19 +482,24 @@ d.close().catch(x => console.log('close p', x.code));
 d.close((x) => console.log('close cb', x.code));
 d.read().catch(x => console.log('read p', x.code));
 const r = fs.opendirSync(root, { recursive: true }); const all = []; while ((e = r.readSync()) !== null) all.push(rel(e)); r.closeSync(); console.log(all.sort());
+// The close callback and the async iteration are independent chains, in
+// no fixed order (in Node too): both are printed at exit.
+let closedLine = '';
+const iterLines = [];
+process.on('exit', () => { console.log(closedLine); for (const l of iterLines) console.log(l); });
 fs.opendir(root, (err, dd) => {
   dd.read((err, x) => {
     console.log('cb read', err, typeof x.name);
     try { dd.readSync() } catch (y) { console.log(y.code, y.message) }
-    dd.close(err => console.log('closed', err));
+    dd.close(err => { closedLine = 'closed ' + err; });
   });
   try { dd.readSync() } catch (y) { console.log('during', y.code) }
 });
 (async () => {
   const dd = await fs.promises.opendir(root, { recursive: true });
   const xs = []; for await (const x of dd) xs.push(x.name);
-  console.log('iter', xs.sort());
-  try { dd.closeSync() } catch (y) { console.log('after iter', y.code) }
+  iterLines.push('iter ' + JSON.stringify(xs.sort()));
+  try { dd.closeSync() } catch (y) { iterLines.push('after iter ' + y.code) }
 })();
 try { fs.opendirSync(path.join(root, 'nope')) } catch (x) { console.log(x.code, x.syscall, x.message, x.path) }
 try { fs.opendirSync(root, { bufferSize: 0 }) } catch (x) { console.log(x.code, x.message) }

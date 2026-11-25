@@ -84,15 +84,24 @@ void *__kml_map_copy_vals(kml_map *m) {
 
 /* ---- string and number flavors ------------------------------------------ */
 
-/* FNV-1a over the key's bytes. A null key (a dynamic null/undefined reaching a
- * string-keyed map, e.g. new Set().has(null)) hashes as the empty string
- * instead of reading address 0. */
-i64 __kml_map_str_hash(const char *s) {
+/* A string's byte length from its header (every string has one, literals
+ * included, TDD-00120): an embedded NUL is part of the key. */
+#define KEY_LEN(s) (*(const long long *)((const char *)(s) - 8) & 0xFFFFFFFFLL)
+
+/* FNV-1a over n bytes. */
+static i64 fnv(const char *s, i64 n) {
     unsigned long long h = 0xcbf29ce484222325ULL;
-    if (!s) return (i64)h;
-    for (; *s; s++) h = (h ^ (unsigned char)*s) * 1099511628211ULL;
+    for (i64 i = 0; i < n; i++) h = (h ^ (unsigned char)s[i]) * 1099511628211ULL;
     return (i64)h;
 }
+
+/* FNV-1a over the key's bytes, to its header length. A null key (a dynamic
+ * null/undefined reaching a string-keyed map, e.g. new Set().has(null))
+ * hashes as the empty string instead of reading address 0. */
+i64 __kml_map_str_hash(const char *s) { return s ? fnv(s, KEY_LEN(s)) : fnv("", 0); }
+
+/* The same over a NUL-terminated text without a header (a bigint's digits). */
+i64 __kml_map_cstr_hash(const char *s) { return s ? fnv(s, (i64)strlen(s)) : fnv("", 0); }
 
 /* A string slot's null is the program's null-reference cell (its text is
  * empty): a key distinct from "", equal only to itself. Weak, as the
@@ -113,7 +122,8 @@ static int str_eq(i64 a, i64 b) {
     const char *x = (const char *)(uintptr_t)a, *y = (const char *)(uintptr_t)b;
     if (!x || !y) return !x && !y;
     if (is_nullref(x) || is_nullref(y)) return x == y;
-    return strcmp(x, y) == 0;
+    i64 n = KEY_LEN(x);
+    return n == KEY_LEN(y) && memcmp(x, y, (size_t)n) == 0;
 }
 
 static i64 num_hash(i64 k) { return kml_mix(k); }

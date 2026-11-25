@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**8183 / 11247 agree with TypeScript (72.8%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
+**8226 / 11247 agree with TypeScript (73.1%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
 
-- **3144** match-accept (both compile clean)
-- **5039** match-reject (both reject)
-- **1784** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **1280** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **3179** match-accept (both compile clean)
+- **5047** match-reject (both reject)
+- **1749** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **1272** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 4397 | 6129 | 71.7% | 772 | 286 |
-| conformance | 3786 | 5118 | 74.0% | 508 | 541 |
+| compiler | 4409 | 6129 | 71.9% | 774 | 286 |
+| conformance | 3817 | 5118 | 74.6% | 498 | 541 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -69,7 +69,6 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `anyIndexedAccessArrayNoException` | compiler |
 | `arrayCast` | compiler |
 | `arrayFakeFlatNoCrashInferenceDeclarations` | compiler |
-| `arrayIndexWithArrayFails` | compiler |
 | `arrayLiteralSpreadES5iterable` | conformance |
 | `asOperator1` | conformance |
 | `asiPreventsParsingAsAmbientExternalModule01` | conformance |
@@ -128,7 +127,8 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `cf` | compiler |
 | `checkDestructuringShorthandAssigment2` | compiler |
 | `checkForObjectTooStrict` | compiler |
-| … | +1180 more |
+| `checkInheritedProperty` | compiler |
+| … | +1172 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -136,37 +136,36 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 
 | Count | Reason |
 |---|---|
-| 154 | REJECTED: parameter '%s' implicitly has an '%s' type |
+| 155 | REJECTED: parameter '%s' implicitly has an '%s' type |
 | 115 | REJECTED: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not supported |
 | 107 | REJECTED: '%s', which lacks return-type annotation, implicitly has an '%s' return type. |
 | 106 | REJECTED: variable '%s' is used before being assigned |
-| 51 | REJECTED: cannot find name '%s' |
 | 51 | REJECTED: expected '%s', got IDENT |
-| 51 | REJECTED: type '%s' is not assignable to type '%s' |
+| 50 | REJECTED: type '%s' is not assignable to type '%s' |
+| 47 | REJECTED: cannot find name '%s' |
 | 46 | REJECTED: cannot find module '%s' (resolved to <path>) |
-| 40 | REJECTED: member '%s' implicitly has an '%s' type |
-| 38 | REJECTED: property '%s' does not exist on type '%s' |
+| 42 | REJECTED: internal: undefined variable '%s' |
+| 41 | REJECTED: member '%s' implicitly has an '%s' type |
 | 37 | REJECTED: Property '%s' has no initializer and is not definitely assigned in the constructor. |
-| 37 | REJECTED: internal: undefined variable '%s' |
 | 35 | REJECTED: expected '%s', got , |
 | 33 | REJECTED: <path>: '%s' is declared as a class, interface, type or enum in more than one namespace; namespace type members share on… |
 | 33 | REJECTED: rest parameter '%s' implicitly has an '%s' type |
 | 30 | REJECTED: expected ;, got IDENT |
+| 29 | REJECTED: property '%s' does not exist on type '%s' |
 | 28 | REJECTED: unexpected token = in expression |
-| 25 | REJECTED: a class extending '%s', a value that can hold a class naming its own function's locals, is not supported yet |
+| 27 | REJECTED: a class extending '%s', a value that can hold a class naming its own function's locals, is not supported yet |
 | 20 | REJECTED: cannot export '%s': it is not declared at the top level of this file |
 | 15 | REJECTED: '%s' is possibly '%s' |
 | 14 | REJECTED: '%s' can only precede a function, variable, interface, type alias, enum, or class declaration |
 | 14 | REJECTED: expected ], got IDENT |
 | 14 | REJECTED: identifier '%s' has already been declared |
-| 11 | REJECTED: expected IDENT, got ( |
+| 11 | REJECTED: argument of type '%s' is not assignable to parameter of type '%s' |
 | 11 | REJECTED: unexpected token @ in expression |
 | 11 | REJECTED: variable '%s' implicitly has an '%s' type |
 | 11 | REJECTED: variable '%s' implicitly has type '%s' in some locations where its type cannot be determined |
 | 10 | REJECTED: The containing arrow function captures the global value of '%s'. |
 | 10 | REJECTED: `import b1 = require(...)` is not supported — use an ES import declaration instead |
 | 10 | REJECTED: `import foo = require(...)` is not supported — use an ES import declaration instead |
-| 10 | REJECTED: argument of type '%s' is not assignable to parameter of type '%s' |
 | 10 | REJECTED: cannot find name '%s'; do you need to install type definitions for jQuery? Try `npm i --save-dev @types/jquery` and then… |
 | 10 | REJECTED: expected property name, got new |
 | 10 | REJECTED: invalid Unicode escape sequence |
@@ -176,14 +175,12 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 8 | REJECTED: binding element '%s' implicitly has an '%s' type |
 | 8 | REJECTED: expected IDENT, got await |
 | 8 | REJECTED: unexpected character '%s' |
-| 7 | REJECTED: internal: a number has no method '%s' |
 | 7 | REJECTED: namespace re-exports ('%s') are not supported yet |
 | 6 | REJECTED: '%s' expression implicitly results in an '%s' type because its containing generator lacks a return-type annotation |
 | 6 | REJECTED: '%s' implicitly has return type '%s' because it does not have a return type annotation and is referenced directly or ind… |
 | 6 | REJECTED: '%s' is of type '%s' |
 | 6 | REJECTED: <path>: identifier '%s' has already been declared |
 | 6 | REJECTED: `import ts = require(...)` is not supported — use an ES import declaration instead |
-| 6 | REJECTED: a computed class member name must be a constant string or number literal, a well-known symbol, or a const holding one or… |
 | 6 | REJECTED: a decorator on an accessor (get/set) under -decorators=experimental ('%s') is not supported yet |
 | 6 | REJECTED: expected '%s' after a for-of destructuring pattern, got = |
 | 6 | REJECTED: expected '%s', got : |
@@ -193,10 +190,13 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 6 | REJECTED: merging the declarations of '%s' is not yet supported |
 | 6 | REJECTED: only a string or number index signature `[k: string]: T` / `[i: number]: T` is supported (a `symbol` key is not yet supp… |
 | 6 | REJECTED: unexpected token ) in expression |
+| 5 | REJECTED: a computed property name in a class property declaration must have a simple literal type or a '%s' type |
 | 5 | REJECTED: element implicitly has an '%s' type because type '%s' has no index signature |
 | 5 | REJECTED: expected '%s' to close Effect<T> |
 | 5 | REJECTED: expected '%s', got [ |
-| … | +249 more distinct reasons |
+| 5 | REJECTED: expected ;, got , |
+| 5 | REJECTED: expected IDENT, got const |
+| … | +240 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -205,45 +205,46 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | Count | Blocker |
 |---|---|
 | 104 | `;` |
-| 94 | `x` |
+| 96 | `x` |
 | 91 | `require(...)`` |
-| 79 | `a` |
-| 77 | `foo` |
+| 80 | `a` |
+| 76 | `foo` |
 | 25 | `null` |
 | 24 | `A` |
 | 23 | `any` |
 | 20 | `i` |
+| 19 | `b` |
 | 19 | `rest` |
 | 18 | `>` |
-| 18 | `b` |
 | 18 | `c` |
 | 16 | `this` |
 | 15 | `$` |
-| 15 | `Foo` |
+| 14 | `Foo` |
 | 14 | `export` |
 | 12 | `use` |
 | 11 | `B` |
 | 10 | `callback` |
 | 10 | `of` |
 | 10 | `s` |
+| 9 | `Intl` |
 | 9 | `M` |
 | 9 | `foo1` |
 | 8 | `E` |
+| 8 | `bar` |
 | 8 | `f` |
 | 8 | `string` |
 | 8 | `undefined` |
 | 7 | `Base` |
-| 7 | `C` |
 | 7 | `await` |
-| 7 | `bar` |
 | 7 | `export * as ns from` |
 | 7 | `m` |
+| 7 | `prop` |
 | 7 | `y` |
 | 7 | `yield` |
+| 6 | `C` |
 | 6 | `Point` |
 | 6 | `_` |
 | 6 | `accessor` |
-| 6 | `prop` |
 | 6 | `restParameters` |
 | 6 | `target` |
 | 6 | `unknown` |
@@ -257,11 +258,10 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 5 | `log` |
 | 5 | `n` |
 | 5 | `t` |
+| 5 | `unique symbol` |
 | 5 | `�` |
 | 4 | `+` |
 | 4 | `./b` |
-| 4 | `C__kml_mod0` |
 | 4 | `args` |
 | 4 | `c1` |
-| 4 | `f1` |
-| … | +388 more distinct blockers |
+| … | +373 more distinct blockers |

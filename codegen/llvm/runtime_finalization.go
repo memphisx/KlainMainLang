@@ -50,13 +50,3 @@ func (e *Emitter) FinalizationSource() string {
 	}
 	return pre + finalizationSource
 }
-
-// ensureFinalizationHelpers declares the FinalizationRegistry runtime
-// (finalization.c) once. The manual-mode free hook only exists there.
-func (e *Emitter) ensureFinalizationHelpers() {
-	if e.usedFinRegHelpers {
-		return
-	}
-	e.usedFinRegHelpers = true
-	e.ensureMicrotasks()
-}

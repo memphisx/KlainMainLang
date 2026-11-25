@@ -169,7 +169,6 @@ func (e *Emitter) emitFnProtoBody(sym, name string) {
 		"@@hasInstance": func() {
 			// OrdinaryHasInstance(this, value): instanceof without the
 			// receiver's own @@hasInstance.
-			e.ensureNanBox()
 			is := e.emitOrdinaryHasInstance(argAt(0).Ref, "%this")
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %d", r, is, nbTrue, nbFalse))
@@ -278,6 +277,19 @@ func (e *Emitter) emitClassRefProto() {
 	}
 	e.emittedClassRefProto = true
 	restore := e.beginDetachedFunc()
+	// A class per evaluation (a record): the record of the local class it
+	// extends, else what its class's static reference answers.
+	e.declareFn("__kml_classrec_base", "declare "+irPtr+" @__kml_classrec_base("+irPtr+")")
+	e.declareFn("__kml_classrec_static_ref", "declare "+irPtr+" @__kml_classrec_static_ref("+irPtr+")")
+	rb, hasB := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_base("+irPtr+" %%pay0)", rb))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasB, rb))
+	recL, ownL := e.freshLabel("crproto.rec"), e.freshLabel("crproto.own")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasB, recL, ownL))
+	e.emitLabel(recL)
+	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(rb, kmlTagFuncRef)))
+	e.emitLabel(ownL)
+	e.emitInstr("%pay = call " + irPtr + " @__kml_classrec_static_ref(" + irPtr + " %pay0)")
 	for _, c := range e.classRefClasses(true) {
 		base := e.classes[c].BaseClass
 		fnSub := e.prog != nil && e.prog.FunctionSubclasses[c]
@@ -311,7 +323,12 @@ func (e *Emitter) emitClassRefProto() {
 			if e.valueBases[fn] {
 				r := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, e.ensureHeritageValue(fn)))
-				fv = Value{Ref: r, Ty: TypeAny}
+				// `extends null`: the constructor's parent is
+				// Function.prototype.
+				isNull, sel := e.freshReg(), e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", isNull, r, nbNull))
+				e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", sel, isNull, e.emitFnProtoBox("").Ref, r))
+				fv = Value{Ref: sel, Ty: TypeAny}
 			} else if fv, err = e.emitExpr(ast.NewIdentifier(fn, ast.Pos{})); err == nil && !fv.Ty.IsDynamic() {
 				fv, err = e.emitBoxValue(fv)
 			}
@@ -339,7 +356,7 @@ func (e *Emitter) emitClassRefProto() {
 	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitFnProtoBox("").Ref))
 	body := e.allocas.String() + e.body.String()
 	restore()
-	e.writeFunc("i64 @__kml_classref_proto("+irPtr+" %pay)", body)
+	e.writeFunc("i64 @__kml_classref_proto("+irPtr+" %pay0)", body)
 }
 
 // emitClassRefHas defines @__kml_classref_has(pay, key, own): whether the
@@ -418,7 +435,6 @@ func (e *Emitter) emitClassRefBag() {
 		return
 	}
 	e.emittedClassRefBag = true
-	e.ensureNanBox()
 	e.declareFn("__kml_dynobj_new", "declare "+irPtr+" @__kml_dynobj_new()")
 	e.declareFn("__kml_dynobj_set_attrs", "declare void @__kml_dynobj_set_attrs("+irPtr+", "+irPtr+", i64, i64)")
 	e.declareFn("__kml_classref_bag_merge", "declare void @__kml_classref_bag_merge("+irPtr+", "+irPtr+")")

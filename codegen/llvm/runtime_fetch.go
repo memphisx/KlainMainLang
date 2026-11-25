@@ -26,10 +26,7 @@ var fetchSource string
 var fetchStreamSource string
 
 // FetchSource is the fetch runtime's C source, behind kml_layout.h.
-func FetchSource() string { return layoutHeader() + fetchSource + fetchStreamSource }
-
-// UsesFetch reports whether the program links the fetch runtime.
-func (e *Emitter) UsesFetch() bool { return e.usedFetch || e.usedFetchAsync }
+func FetchSource() string { return layoutHeader() + loopUser + fetchSource + fetchStreamSource }
 
 // FetchCFlags hands fetch.c the constants and offsets C shares with the
 // emitter; they are the same for every program, so its object is too: the
@@ -57,15 +54,9 @@ func (e *Emitter) ensureFetch() {
 	e.requireLink("curl")
 	// fetch.c drives its transfers on the event loop (loop.c's handles,
 	// timers.c's clock).
-	e.ensureEventLoop()
-	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
-	e.ensureExceptionHelpers()
 	// A failure's cause (fetch.c): the system error's code and errno, a
 	// boxed Error, the lookup's hostname in the extra bag.
-	e.ensureNanBox()
-	e.ensureAnyToPrimitive()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 
 	// The names and messages fetch's errors carry, interned here so the C
 	// reads them (an error's name is compared by address).
@@ -83,37 +74,6 @@ func (e *Emitter) ensureFetch() {
 	e.emitGlobal(fmt.Sprintf("@__kml_fetch_strs = external"+irGlobalAS+" global [%d x "+irPtr+"], align 8", len(strs)))
 	e.addHookInit(fmt.Sprintf("  call "+irPtr+" @memcpy("+irPtr+" @__kml_fetch_strs, "+irPtr+" @__kml_fetch_strs.ir, i64 %d)\n", 8*len(strs)))
 	// Read by the worker pre-init (emitter.go) and fetch.c.
-}
-
-// ensureFetchAsync declares everything a real, non-blocking `await
-// fetch(...)` needs (ADR-00050): libcurl's multi interface, driven by the
-// same select() loop http.listen uses, so a fetch awaited from inside a
-// connection-handler fiber (or a task) yields instead of blocking, letting
-// other connections' fibers and their own concurrent fetches progress.
-//
-//	__kml_fetch_async(url, method, headers, body, signal) -> pending
-//	  Starts the transfer and returns at once; the nullable method/headers/
-//	  body skip their setopt (a plain fetch(url) passes all three null).
-//	__kml_curl_drain_messages()
-//	  Records each finished transfer into its pending struct, drops the easy
-//	  handle and sets done.
-//	__kml_await_fetch(pending) -> { i64 status, ptr body, i64 bodyLen }
-//	  Loops until done: parks the task or connection fiber it runs on, else
-//	  takes a turn of the event loop; throws a catchable TypeError on a
-//	  transfer-level failure.
-func (e *Emitter) ensureFetchAsync() {
-	if e.usedFetchAsync {
-		return
-	}
-	e.usedFetchAsync = true
-	e.noteLoopTurn() // the main-stack waits take turns of the real loop
-	e.ensureFetch()
-	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
-	e.ensureExceptionHelpers()
-	e.ensureSignalAborted() // __kml_signal_aborted, used by the await abort check (TDD-00081)
-	e.ensureNanBox()        // __kml_nb_tag/__kml_nb_pay, to throw the boxed signal.reason on abort
-
-	// The one CURLM handle, created on first use; the HTTP client reads it too.
 }
 
 // emitOutAggCall calls C routine fn, which writes an aggregate of type agg

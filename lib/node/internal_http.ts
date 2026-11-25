@@ -96,7 +96,7 @@ function checkInvalidHeaderChar(val: string): boolean {
 const chunkExpression = /(?:^|\W)chunked(?:$|\W)/i;
 const continueExpression = /(?:^|\W)100-continue(?:$|\W)/i;
 
-export function validateHeaderName(name: string, label?: string): void {
+export function validateHeaderName(name: any, label?: string): void {
     if (typeof name !== 'string' || !name || !checkIsHttpToken(name)) {
         throw new HttpTypeError('ERR_INVALID_HTTP_TOKEN', (label || 'Header name') + ' must be a valid HTTP token ["' + name + '"]');
     }
@@ -133,6 +133,7 @@ class HTTPParser {
 
     initialize(type: number, maxHeaderSize: number): void {
         this.type = type;
+        this.maxHeaderPairs = 2000;
         __kml_native.httpParserInit(this.id, type, maxHeaderSize);
     }
 
@@ -264,6 +265,7 @@ class HTTPParser {
         this.incoming = null;
         this.outgoing = null;
         this.onIncoming = null;
+        this.currentBuffer = null;
     }
 }
 
@@ -292,9 +294,21 @@ function httpOf(socket: net.Socket): SocketHttp {
     return h;
 }
 
+// Node's `parsers` FreeList (_http_common.js): a freed parser is kept, up
+// to 1000, and the next connection or request takes it back.
+const parserPool: HTTPParser[] = [];
+
+function allocParser(type: number, maxHeaderSize: number): HTTPParser {
+    const p = parserPool.pop();
+    if (p === undefined) return new HTTPParser(type, maxHeaderSize);
+    p.initialize(type, maxHeaderSize);
+    return p;
+}
+
 function freeParser(parser: HTTPParser, req: IncomingMessage | null, socket: net.Socket | null): void {
     parser.free();
     if (socket !== null) httpOf(socket).parser = null;
+    if (parserPool.length < 1000 && parserPool.indexOf(parser) < 0) parserPool.push(parser);
 }
 
 // ---- lib/_http_incoming.js ----
@@ -783,10 +797,19 @@ export class OutgoingMessage extends Stream {
             data = Buffer.concat([header, data]);
             this._headerSent = true;
         }
-        return this._writeRaw(data, callback);
+        return this._writeRaw(data, null, callback);
     }
 
-    _writeRaw(data: Buffer, callback: ((err?: Error | null) => void) | null): boolean {
+    // Node's _writeRaw(data, encoding, callback): a string is written in
+    // its encoding; a function in the encoding's place is the callback.
+    _writeRaw(data: Buffer | string, encoding?: BufferEncoding | null | ((err?: Error | null) => void), callback?: ((err?: Error | null) => void) | null): boolean;
+    _writeRaw(rawData: any, encoding?: any, callback?: any): boolean {
+        if (typeof encoding === 'function') {
+            callback = encoding;
+            encoding = null;
+        }
+        if (typeof callback !== 'function') callback = null;
+        const data: Buffer = typeof rawData === 'string' ? Buffer.from(rawData, encoding ?? 'utf8') : rawData;
         const conn = this.socket;
         if (conn !== null && conn.destroyed) {
             // The socket was destroyed. If we're still trying to write to it,
@@ -960,7 +983,10 @@ export class OutgoingMessage extends Stream {
         }
     }
 
-    setHeader(name: string, value: number | string | readonly string[]): this {
+    // Node validates the arguments itself (`setHeader(0xf00, 'x')` throws
+    // ERR_INVALID_HTTP_TOKEN in JavaScript).
+    setHeader(name: string, value: number | string | readonly string[]): this;
+    setHeader(name: any, value: any): this {
         if (this._header) {
             throw new HttpError('ERR_HTTP_HEADERS_SENT', 'Cannot set headers after they are sent to the client');
         }
@@ -1400,12 +1426,12 @@ export class ServerResponse extends OutgoingMessage {
     }
 
     writeContinue(cb?: () => void): void {
-        this._writeRaw(Buffer.from('HTTP/1.1 100 Continue\r\n\r\n', 'latin1'), cb !== undefined ? (e?: Error | null) => { cb(); } : null);
+        this._writeRaw(Buffer.from('HTTP/1.1 100 Continue\r\n\r\n', 'latin1'), null, cb !== undefined ? (e?: Error | null) => { cb(); } : null);
         this._sent100 = true;
     }
 
     writeProcessing(cb?: () => void): void {
-        this._writeRaw(Buffer.from('HTTP/1.1 102 Processing\r\n\r\n', 'latin1'), cb !== undefined ? (e?: Error | null) => { cb(); } : null);
+        this._writeRaw(Buffer.from('HTTP/1.1 102 Processing\r\n\r\n', 'latin1'), null, cb !== undefined ? (e?: Error | null) => { cb(); } : null);
     }
 
     writeEarlyHints(hints: { [key: string]: string | string[] | undefined }, cb?: () => void): void {
@@ -1422,7 +1448,7 @@ export class ServerResponse extends OutgoingMessage {
             }
         }
         head += '\r\n';
-        this._writeRaw(Buffer.from(head, 'latin1'), cb !== undefined ? (e?: Error | null) => { cb(); } : null);
+        this._writeRaw(Buffer.from(head, 'latin1'), null, cb !== undefined ? (e?: Error | null) => { cb(); } : null);
     }
 
     _implicitHeader(): void {
@@ -1719,7 +1745,7 @@ export class _kmlHttpServerCore {
         // otherwise, destroy on timeout by default
         if (this.timeout && typeof socket.setTimeout === 'function') socket.setTimeout(this.timeout);
         socket.on('timeout', () => { this.socketOnTimeout(socket); });
-        const parser = new HTTPParser(REQUEST, this.maxHeaderSize_);
+        const parser = allocParser(REQUEST, this.maxHeaderSize_);
         parser.socket = socket;
         const h = httpOf(socket);
         h.parser = parser;
@@ -2095,6 +2121,14 @@ export class Server extends net.Server {
         return this;
     }
 
+    // `await using server`: http.js closes it whether or not it listens
+    // (rejecting with ERR_SERVER_NOT_RUNNING when it does not).
+    async [Symbol.asyncDispose](): Promise<void> {
+        await new Promise<void>((resolve, reject) => {
+            this.close((err?: Error) => { if (err) reject(err); else resolve(); });
+        });
+    }
+
     closeAllConnections(): void {
         this.core.closeAllConnections();
     }
@@ -2463,6 +2497,8 @@ export class ClientRequest extends OutgoingMessage {
     upgradeOrConnect = false;
     private parser: HTTPParser | null = null;
     private timeoutCb: (() => void) | null = null;
+    // Node's responseOnTimeout, removed when the socket is kept alive.
+    private resTimeoutCb: (() => void) | null = null;
     private maxHeaderSizeOpt: number;
     private error: Error | null = null;
 
@@ -2718,7 +2754,7 @@ export class ClientRequest extends OutgoingMessage {
     }
 
     private tickOnSocket(socket: net.Socket): void {
-        const parser = new HTTPParser(RESPONSE, this.maxHeaderSizeOpt);
+        const parser = allocParser(RESPONSE, this.maxHeaderSizeOpt);
         this.socket = socket;
         parser.socket = socket;
         parser.outgoing = this;
@@ -2922,10 +2958,12 @@ export class ClientRequest extends OutgoingMessage {
         // Add our listener first, so that we guarantee socket cleanup
         res.on('end', () => { this.responseOnEnd(); });
         this.on('finish', () => { this.requestOnFinish(); });
-        socket.on('timeout', () => {
+        const onResTimeout = (): void => {
             const r = this.res;
             if (r !== null) r.emit('timeout');
-        });
+        };
+        this.resTimeoutCb = onResTimeout;
+        socket.on('timeout', onResTimeout);
         // If the user did not listen for the 'response' event, then they
         // can't possibly read the data, so we ._dump() it into the void
         // so that the socket doesn't hang there in a paused state.
@@ -2945,6 +2983,10 @@ export class ClientRequest extends OutgoingMessage {
             socket.setTimeout(0);
             socket.removeListener('timeout', this.timeoutCb);
             this.timeoutCb = null;
+        }
+        if (this.resTimeoutCb !== null) {
+            socket.removeListener('timeout', this.resTimeoutCb);
+            this.resTimeoutCb = null;
         }
         const l = httpOf(socket).clientListeners;
         if (l !== null) {

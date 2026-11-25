@@ -51,7 +51,6 @@ func (e *Emitter) emitLiveBindings(ex *ast.CallExpression) (Value, error) {
 		return Value{}, err
 	}
 	e.declareFn("__kml_dynobj_mark_live", "declare void @__kml_dynobj_mark_live("+irPtr+")")
-	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, bag.Ref))
 	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_mark_live("+irPtr+" %s)", e.emitIntToPtr(pay)))

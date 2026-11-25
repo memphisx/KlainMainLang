@@ -245,6 +245,8 @@ type scopeKey struct {
 }
 
 type binder struct {
+	// moduleSyntax: the program imports or exports.
+	moduleSyntax bool
 	// initOf is the variable declaration whose initializer is being bound.
 	initOf *ast.VarDeclaration
 	*Binding
@@ -411,6 +413,12 @@ func BindWith(prog *ast.Program, opts Options) *Binding {
 		scopes: map[scopeKey]*Scope{},
 	}
 	b.memberOf = namespacesOf(prog)
+	for _, st := range prog.Body {
+		switch st.(type) {
+		case *ast.ImportDeclaration, *ast.ExportDeclaration, *ast.ExportFromDeclaration:
+			b.moduleSyntax = true
+		}
+	}
 	if len(opts.Lib) > 0 {
 		b.Globals = &Scope{Kind: ModuleScope}
 		for _, declaring := range []bool{true, false} {
@@ -755,6 +763,25 @@ func (b *binder) resolveName(name string) *Symbol {
 	return nil
 }
 
+// unshadowSymbolKeys makes each `[Symbol.x]` key of ol whose Symbol is a
+// binding of the program's (not the global) the computed key it is.
+func (b *binder) unshadowSymbolKeys(ol *ast.ObjectLiteral) {
+	for i := range ol.Properties {
+		p := &ol.Properties[i]
+		if p.WellKnown == "" || p.KeyExpr != nil {
+			continue
+		}
+		if sym := b.resolveName("Symbol"); sym != nil && sym.Scope != b.Globals {
+			pos := ol.GetPos()
+			if p.Value != nil {
+				pos = p.Value.GetPos()
+			}
+			p.KeyExpr = ast.NewMemberExpression(ast.NewIdentifier("Symbol", pos), p.WellKnown, pos)
+			p.Key = ""
+		}
+	}
+}
+
 // onlyBody reports whether every declaration of sym is a function body's.
 func onlyBody(sym *Symbol) bool {
 	if sym.Implicit || len(sym.Declarations) == 0 {
@@ -788,6 +815,9 @@ func (b *binder) visit(n ast.Node) {
 	if b.declaring {
 		b.visitNode(n)
 		return
+	}
+	if ol, ok := n.(*ast.ObjectLiteral); ok {
+		b.unshadowSymbolKeys(ol)
 	}
 	b.noteTypeArgScopes(n)
 	b.ord++
@@ -1014,7 +1044,19 @@ func (b *binder) visitNode(n ast.Node) {
 		b.assignFlow(b.local(n.Name), true, true)
 		return
 	case *ast.InterfaceDeclaration:
-		b.declare(b.cur, n.Name, Interface, TypeOnly, n)
+		scope := b.cur
+		// A script's top level is the global scope: an interface it
+		// declares under a builtin's name (`interface Array<T> { … }`)
+		// merges into the builtin declaration, as TypeScript's does, and so
+		// does a module's `declare global` one. (A merged program's module
+		// files have their names mangled, so one without module syntax is a
+		// script's.)
+		if (n.Global || b.Script || !b.moduleSyntax) && scope == b.Module && b.Globals != nil {
+			if g := b.Globals.Symbols.Get(n.Name); g != nil && g.Flags&Interface != 0 && scope.Symbols.Get(n.Name) == nil {
+				scope = b.Globals
+			}
+		}
+		b.declare(scope, n.Name, Interface, TypeOnly, n)
 		// Its members' annotations name types of this scope (a namespace's
 		// `env: ProcessEnv`).
 		for _, f := range n.Fields {
@@ -1544,6 +1586,10 @@ func (b *binder) class(c *ast.ClassDeclaration) {
 			b.typeLevel = saved || c.Ambient || f.Declare
 			b.visit(f.Key)
 			b.typeLevel = saved
+		}
+		// A key evaluated at run time (`[k] = 1`, after member naming) too.
+		if f.KeyExpr != nil {
+			b.visit(f.KeyExpr)
 		}
 	}
 	// Field initializers run when an instance is constructed, not where the

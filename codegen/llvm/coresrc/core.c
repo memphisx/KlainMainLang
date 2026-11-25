@@ -698,3 +698,22 @@ void __kml_closure_free(void **hdr) {
     if (hdr[1]) kml_free(KML_HEAP_WORDS, hdr[1]);
     kml_free(KML_HEAP_WORDS, (char *)hdr - KML_PREFIX_OFF);
 }
+
+/* The byte width of an array box's element kind (arrayElemKind's codes,
+ * dynjson.c's KJ_*): f32/i32/u32 4, i16/u16 2, i8/u8 1, anything else 8. */
+long long __kml_elem_kind_width(long long kind) {
+    switch (kind) {
+    case 1: case 4: case 5: return 4;
+    case 6: case 7: return 2;
+    case 8: case 9: return 1;
+    default: return 8;
+    }
+}
+
+/* A dense array store past V8's largest fast-elements store (FixedArray's
+ * 2^27 slots), where V8 keeps the array sparse: ends the program as V8 does
+ * when a store that size fails, before any memory is touched. */
+void __kml_array_oom(void) {
+    fprintf(stderr, "FATAL ERROR: invalid array length Allocation failed - JavaScript heap out of memory\n");
+    abort();
+}

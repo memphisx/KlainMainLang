@@ -124,17 +124,10 @@ func (e *Emitter) emitStreamProp(ex *ast.MemberExpression, writable bool) (Value
 		return Value{}, err
 	}
 	if writable {
-		e.ensurePromiseAddReaction()
-		e.ensureMicrotasks()
-		e.ensureNanBox()
-		e.ensureExceptionHelpers()
+		e.ensureUnhandledRejections()
 		e.ensureUnhandledRejections()
 	} else {
-		e.ensureExceptionHelpers()
-		e.ensureMicrotasks()
-		e.ensureNanBox()
-		e.ensurePromiseAddReaction()
-		e.ensureShapeRuntime()
+		e.ensureUnhandledRejections()
 		e.ensureUnhandledRejections()
 	}
 	if p, ok := streamPropFor(ex.Property, ty); ok && p.writable == writable {

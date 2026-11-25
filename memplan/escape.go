@@ -1358,13 +1358,28 @@ func collectFinRegNames(prog *ast.Program) map[string]bool {
 		return nil
 	}
 
+	// A node reachable twice (a back-reference, a shared subtree) is
+	// walked once: the AST is a graph, and a cycle would recurse forever.
+	type nodeKey struct {
+		addr uintptr
+		ty   reflect.Type
+	}
+	seen := map[nodeKey]bool{}
 	var visit func(v reflect.Value)
 	visit = func(v reflect.Value) {
 		switch v.Kind() {
 		case reflect.Ptr, reflect.Interface:
-			if !v.IsNil() {
-				visit(v.Elem())
+			if v.IsNil() {
+				return
 			}
+			if v.Kind() == reflect.Ptr {
+				k := nodeKey{v.Pointer(), v.Type()}
+				if seen[k] {
+					return
+				}
+				seen[k] = true
+			}
+			visit(v.Elem())
 		case reflect.Slice:
 			for i := 0; i < v.Len(); i++ {
 				visit(v.Index(i))

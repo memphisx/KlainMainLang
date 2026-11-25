@@ -14,11 +14,7 @@ import (
 // the D1 paths. The bag is a snapshot taken at this expression's evaluation
 // (ADR-01077): keyed reads and writes (`process.env.X`) stay live.
 func (e *Emitter) emitProcessEnvValue() (Value, error) {
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
-	e.ensureAnyToPrimitive()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_process_env_bag()", bag))
 	return Value{Ref: e.emitNbTagPtr(bag, kmlTagDynObject), Ty: TypeAny}, nil

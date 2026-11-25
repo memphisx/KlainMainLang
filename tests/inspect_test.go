@@ -132,3 +132,19 @@ console.log(Object.prototype.toString.call(new URL("http://x/")), Object.prototy
 console.log(Object.prototype.toString.call(new Headers().entries()), Object.prototype.toString.call(new URLSearchParams().entries()));
 `)
 }
+
+// A cyclic value prints `<ref *N>` and `[Circular *N]` as util.inspect does,
+// and the assert diff's depth-1000 rendering of one stays bounded.
+func TestE2EInspectCircularRefs(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+import assert from 'assert';
+const o = { a: 1 }; o.self = o;
+console.log(o);
+const x = { y: { z: {} } }; x.y.z.back = x; x.y.z.up = x.y;
+console.log(x);
+const s = { k: 1 };
+console.log({ p: s, q: s });
+const a = { x: 1 }; a.self = a; const b = { x: 1 }; b.self = b;
+try { assert.strictEqual(a, b); } catch (e) { console.log(e.message); }
+`)
+}

@@ -154,3 +154,25 @@ console.log(/(a|)+/.exec(""), /(a|){1,}b/.exec("aab"), /((a)|b)+/.exec("ab"), /(
 console.log("x".replace(/(a|)+/g, "[$1]"), /(b|)+a/.exec("bba"), /(\w*?)+;/.exec("ab;"))
 `)
 }
+
+// Under i and u (or v) a word character is one whose case folding is one:
+// \w, \W, \b and \B, in and out of classes, take in U+017F and U+212A.
+// A quantified capture holding a group keeps its last iteration's value.
+func TestE2ERegExpCaseInsensitiveUnicodeWord(t *testing.T) {
+	assertSameAsNode(t, `
+const S = "ſ", K = "K";
+console.log(/\w/iu.test(S), /\w/iu.test(K), /\w/u.test(S), /\w/i.test(S), /\W/iu.test(S), /\W/iu.test("I"), /\W/iu.test("-"));
+console.log(/[\w]/iu.test(K), /[^\w]/iu.test(K), /[\W]/iu.test(K), /[\Wa]/iu.test(K), /[\Wa]/iu.test("a"), /[\Wa]/iu.test("-"), /[^\W]/iu.test(K), /[^\Wa]/iu.test("A"), /[^\Wa]/iu.test("b"), /[^\Wa]/iu.test("-"));
+console.log(/\bx/iu.test(S + "x"), /\Bx/iu.test(S + "x"), /a\b/iu.test("a" + K), /a\B/iu.test("a" + K), /\b/iu.test(" "));
+console.log((S + K + "_a-b").replace(/\w+/giu, "<$&>"), (S + K + "_a-b").match(/\W/giu), /\w/iv.test(K), /[\w--_]/iv.test(K));
+console.log(/(\w)+\1/iu.exec("ab" + S + "s"), /((?:x|[a-z]))+\1/.exec("abss"));
+`)
+}
+
+// A subject holding a lone surrogate is matched around it.
+func TestE2ERegExpSubjectWithLoneSurrogate(t *testing.T) {
+	assertSameAsNode(t, `
+const s = "a\uD83Db";
+console.log(s.replace(/b/, "X"), s.split(/x/).length, /b/.exec(s)!.index, s.match(/[ab]/g), /^a/.test(s), "x\uDE00y".replace(/y/g, "Y"));
+`)
+}

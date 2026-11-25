@@ -85,7 +85,7 @@ func (e *Emitter) freeSymbol(sym Symbol, pos ast.Pos) error {
 		// memory — matching the pre-header behaviour that zeroed both slots.
 		// The tiny header itself is intentionally left allocated so the slot
 		// stays valid.
-		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		dataSlot, lenSlot := e.arrayDataLenSlotsRaw(sym) // a free reads no element
 		dataPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", dataPtr, dataSlot))
 		e.heapFree(arrayDataKind(sym.Ty), dataPtr)
@@ -135,7 +135,6 @@ func (e *Emitter) freeResolvedPointer(ptrReg string, ty Type, pos ast.Pos) error
 	// every live registration targeting this pointer before it is freed.
 	// Under -mm=gc the Boehm finalizer is the death signal instead.
 	if e.programUsesFinReg && !e.isGCMode() {
-		e.ensureFinalizationHelpers()
 		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree("+irPtr+" %s)", ptrReg))
 	}
 	switch {

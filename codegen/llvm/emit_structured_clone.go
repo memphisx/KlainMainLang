@@ -61,7 +61,12 @@ func (e *Emitter) emitStructuredClone(args []ast.Expression, pos ast.Pos) (Value
 		return Value{}, err
 	}
 	if len(args) == 2 {
-		if _, err := e.emitExpr(args[1]); err != nil {
+		// The options, converted as Node's WebIDL dictionary is.
+		check, ok := e.libExports["internal_structured_clone:structuredCloneOptions"]
+		if !ok {
+			return Value{}, internalAt(pos, "structuredClone's options check is not linked")
+		}
+		if _, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(check, pos), []ast.Expression{args[1]}, pos)); err != nil {
 			return Value{}, err
 		}
 	}

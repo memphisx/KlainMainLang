@@ -205,8 +205,8 @@ func (e *Emitter) builtMemberType(ex *ast.MemberExpression) Type {
 			return TypeAny // mirrors emitTypedKindProto
 		}
 	}
-	if id, ok := ex.Object.(*ast.Identifier); ok && id.Name == "Object" && ex.Property == "prototype" && !e.isShadowedByLocal("Object") {
-		return TypeAny
+	if pi, ok := e.staticPropIntrinsic(ex); ok {
+		return pi.ty(e, ex)
 	}
 	// A function value's `name` is a string (TDD-00229).
 	if ot := e.typeOfExpr(ex.Object); ex.Property == "name" && (ot.IsFunc()) {
@@ -259,6 +259,9 @@ func (e *Emitter) builtMemberType(ex *ast.MemberExpression) Type {
 				return sig.RetType // a static getter (mirrors emitStaticFieldRead)
 			}
 			if sig, ok := info.StaticMethodSigs[ex.Property]; ok {
+				if e.isClassName(id) && e.staticMethodOverridable(id.Name, ex.Property) {
+					return TypeAny // what the class holds now (emitStaticMethodOverrideRead)
+				}
 				return funcValueType(sig) // a static method read as a value
 			}
 			// One its class declares after the method being registered.
@@ -282,14 +285,6 @@ func (e *Emitter) builtMemberType(ex *ast.MemberExpression) Type {
 	}
 	if id, ok := ex.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
 		switch id.Name {
-		case "Symbol":
-			if wellKnownSymbols[ex.Property] {
-				return SymbolType()
-			}
-		case "Math", "Number":
-			if _, ok := builtinNumberConst(id.Name, ex.Property); ok {
-				return TypeF64
-			}
 		case "process":
 			// The bare env is a dynamic bag (emitProcessEnvValue); a keyed
 			// read is handled by the isProcessEnvExpr arm below.
@@ -373,9 +368,57 @@ func (e *Emitter) programClassDecl(name string) *ast.ClassDeclaration {
 	return e.classDeclByName[name]
 }
 
+// decoratedMethodCall reports whether ex calls a decorated method through
+// its runtime slot (emitDecoratedMethodCall): not `super.m()`, which calls
+// the parent's own.
+func (e *Emitter) decoratedMethodCall(ex *ast.CallExpression) bool {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || len(e.decoratedMethodSlots) == 0 {
+		return false
+	}
+	if _, isSuper := mem.Object.(*ast.SuperExpression); isSuper {
+		return false
+	}
+	objTy := e.typeOfExpr(mem.Object)
+	if !objTy.IsClass() || objTy.IsDynamic() {
+		return false
+	}
+	info, ok := e.classes[objTy.ClassName]
+	if !ok {
+		return false
+	}
+	_, ok = e.decoratedMethodSlots[info.MethodImplementor[mem.Property]][mem.Property]
+	return ok
+}
+
+// dynamicResultCall reports a call whose result is held boxed whatever its
+// checker type: a decorated method's (its decorators decide what it
+// returns), or Object.assign's onto a primitive (its wrapper object, typed
+// as the primitive intersected with the sources).
+func (e *Emitter) dynamicResultCall(ex *ast.CallExpression) bool {
+	return e.decoratedMethodCall(ex) || e.primitiveTargetAssign(ex)
+}
+
+// primitiveTargetAssign reports `Object.assign(p, …)` with p a primitive,
+// which emitObjectAssign ToObjects.
+func (e *Emitter) primitiveTargetAssign(ex *ast.CallExpression) bool {
+	mem, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || mem.Property != "assign" || len(ex.Args) == 0 || ex.Optional {
+		return false
+	}
+	if id, ok := mem.Object.(*ast.Identifier); !ok || !e.isGlobalObjectCtor(id.Name, false) {
+		return false
+	}
+	tt := e.typeOfExpr(ex.Args[0])
+	return ownlessPrimitive(tt) || isPlainStringTy(tt) && !tt.Nullable() && !tt.IsDynamic()
+}
+
 // builtCallType is a call's representation from emitCall's dispatch
 // on its callee.
 func (e *Emitter) builtCallType(ex *ast.CallExpression) Type {
+	if e.dynamicResultCall(ex) {
+		return TypeAny // whatever the method its decorators left returns; a primitive's wrapper
+	}
 	if id, ok := ex.Callee.(*ast.Identifier); ok && !ex.Optional && e.isGlobalObjectCtor(id.Name, false) {
 		return TypeAny // `Object(…)`: a dynamic object, as `new Object(…)` (emitObjectCtor)
 	}
@@ -403,7 +446,7 @@ func (e *Emitter) builtCallType(ex *ast.CallExpression) Type {
 	// symbol key): the dynamic call's result.
 	if idx, ok := ex.Callee.(*ast.IndexExpression); ok && e.compatJS() {
 		if km, ok := idx.Index.(*ast.MemberExpression); ok {
-			if sym, ok := km.Object.(*ast.Identifier); ok && sym.Name == "Symbol" {
+			if e.propDeclIntrinsic(km) == "Symbol."+km.Property {
 				if ot := e.typeOfExpr(idx.Object); ot.IsObject() && !ot.IsArray() && !ot.IsTuple() && !ot.IsClass() {
 					return TypeAny
 				}
@@ -635,16 +678,6 @@ func (e *Emitter) builtCallType(ex *ast.CallExpression) Type {
 		if info, found := e.lookupGenerator(id.Name); found {
 			return info.GenTy
 		}
-		// Static `eval("<expr>")` — its type is the parsed expression's type
-		// (matches emitStaticEval). Checked after user bindings so a
-		// user-defined `eval` still wins, mirroring emitCall's dispatch.
-		if id.Name == "eval" {
-			if _, isUser := e.lookup(id.Name); !isUser {
-				if t, ok := e.inferStaticEvalType(ex.Args); ok {
-					return t
-				}
-			}
-		}
 	}
 	// Function.prototype.call/.apply on a function value (TDD-00137) →
 	// the function's own return type.
@@ -767,11 +800,6 @@ func (e *Emitter) builtCallType(ex *ast.CallExpression) Type {
 		// Nested-namespace member call `A.B.f(...)` (TDD-00148 V3).
 		if members, nsName := e.namespaceByChain(mem.Object); members != nil && members[mem.Property] {
 			return e.typeOfExpr(ast.NewCallExpression(ast.NewIdentifier(ast.NamespaceMangle(nsName, mem.Property), ex.GetPos()), ex.Args, ex.GetPos()))
-		}
-		if id, ok2 := mem.Object.(*ast.Identifier); ok2 && id.Name == "Promise" {
-			if t, ok := e.promiseStaticType(mem.Property, ex); ok {
-				return t
-			}
 		}
 		if t, ok := e.promiseThenType(ex, mem); ok {
 			return t

@@ -448,6 +448,9 @@ func ForEachChild(n Node, visit func(Node) bool) bool {
 		if n.BaseCall != nil && !visit(n.BaseCall) {
 			return false
 		}
+		if present(n.BaseExpr) && !visit(n.BaseExpr) {
+			return false
+		}
 		for i := range n.Fields {
 			if !visitAnnotField(&n.Fields[i], visit) {
 				return false
@@ -1126,6 +1129,9 @@ func RewriteChildren(n Node, rewrite func(Node) Node) {
 	case *ClassDeclaration:
 		if n.BaseCall != nil {
 			n.BaseCall = rewrite(n.BaseCall).(*CallExpression)
+		}
+		if present(n.BaseExpr) {
+			n.BaseExpr = rewrite(n.BaseExpr).(Expression)
 		}
 		for i := range n.Fields {
 			rewriteAnnotField(&n.Fields[i], rewrite)

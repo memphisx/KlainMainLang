@@ -13,7 +13,7 @@ var dynJSONSource string
 // DynJSONSource returns the C source implementing __kml_dynjson_stringify and
 // __kml_dynarr_join. main.go compiles it when UsesDynJSON() is set (libc +
 // the dtoa helper, which ensureDynJSONC forces in).
-func DynJSONSource() string { return dynJSONSource }
+func DynJSONSource() string { return layoutHeader() + dynJSONSource }
 
 // ensureDynJSONC declares the dynjson ABI exactly once and marks the program
 // as needing the C file (and its dtoa dependency) compiled in.
@@ -22,17 +22,9 @@ func (e *Emitter) ensureDynJSONC() {
 		return
 	}
 	e.usedDynJSONC = true
-	e.ensureErrorNames()
-	e.ensureShapeRuntime()     // a static object renders through its layout row (TDD-00233)
-	e.ensureStrHeaderRuntime() // and indexes a string by UTF-16 units (strheader.c)
-	e.ensureInspectReduce()    // and the util.inspect layout/quote helpers (ADR-01067)
 	// The any-array element helpers (ADR-01059) call ToPrimitive/ToNumber and
 	// the dynamic-object getter; the C object references them unconditionally,
 	// so they must be defined whenever the file is linked in.
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureStrHeaderRuntime()
-	e.ensureFnMeta()           // dynjson.c renders tag-12 functions through fnmeta.c
-	e.ensureBoxedBigIntHooks() // and boxed bigint cells through the finalize-time hook
+	e.ensureDynJSONC()
 	// ADR-01059: element access through an `any` holding a boxed static array.
 }

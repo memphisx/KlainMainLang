@@ -123,7 +123,7 @@ func (e *Emitter) deepFreeSym(v *ast.VarDeclaration, ty Type) bool {
 	if !deepFreeEligible(ty) || !deepFreeOwns(ty) {
 		return false
 	}
-	return deepFreeProjectionInit(v.Init)
+	return e.deepFreeProjectionInit(v.Init)
 }
 
 // deepFreeProjectionInit recognizes the initializer shapes whose emission is
@@ -134,7 +134,7 @@ func (e *Emitter) deepFreeSym(v *ast.VarDeclaration, ty Type) bool {
 // deliberately NOT accepted: an array/object literal can embed interned
 // string literals and aliases of other bindings — per-store freshness for
 // literals is a documented follow-up, not Stage 1.
-func deepFreeProjectionInit(init ast.Expression) bool {
+func (e *Emitter) deepFreeProjectionInit(init ast.Expression) bool {
 	awaited := false
 	if aw, ok := init.(*ast.AwaitExpression); ok {
 		init, awaited = aw.Argument, true
@@ -147,7 +147,7 @@ func deepFreeProjectionInit(init ast.Expression) bool {
 	if !ok {
 		return false
 	}
-	if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && mem.Property == "parse" {
+	if e.declIntrinsic(ce) == "JSON.parse" {
 		return true
 	}
 	return mem.Property == "json" && awaited // un-awaited, its promise
@@ -172,11 +172,17 @@ func (e *Emitter) freeSymbolDeep(sym Symbol) error {
 		if err != nil {
 			return err
 		}
-		dataSlot, lenSlot := e.arrayDataLenSlots(sym)
+		dataSlot, lenSlot := e.arrayDataLenSlotsRaw(sym)
 		d := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", d, dataSlot))
 		l := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", l, lenSlot))
+		if e.holesUsed() && sparseElem(*sym.Ty.ElemType) {
+			// The elements the buffer holds: a sparse array's others live in
+			// its property table (holes.c).
+			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_buflen("+irPtr+" %s)", l, e.nullSafeArrayHeader(dataSlot)))
+		} else {
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", l, lenSlot))
+		}
 		e.emitInstr(fmt.Sprintf("call void @%s("+irPtr+" %s, i64 %s)", fn, d, l))
 		e.heapStore(irPtr, "null", dataSlot, 8)
 		e.heapStore("i64", "0", lenSlot, 8)
@@ -437,7 +443,6 @@ func (e *Emitter) emitDeepFreeString(p string) {
 // hook (TDD-00163 Stage 2) for every pointer the deep walk frees.
 func (e *Emitter) emitDeepFreeDeathSignal(ptrRef string) {
 	if e.programUsesFinReg && !e.isGCMode() {
-		e.ensureFinalizationHelpers()
 		e.emitInstr(fmt.Sprintf("call void @__kml_finreg_onfree("+irPtr+" %s)", ptrRef))
 	}
 }

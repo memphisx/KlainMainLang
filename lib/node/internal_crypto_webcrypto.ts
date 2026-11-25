@@ -5,7 +5,7 @@
 // SubtleCrypto; each method returns a promise and rejects with the errors
 // (TypeError or DOMException) Node 24 gives.
 //
-// Not ported: subtle.supports, getPublicKey, the encapsulate/decapsulate
+// Not ported: subtle.supports, the encapsulate/decapsulate
 // methods, and the algorithms Node marks experimental (SHA-3, cSHAKE, Ed448,
 // X448, ML-DSA, ML-KEM, KMAC, Argon2, AES-OCB, ChaCha20-Poly1305).
 import { CryptoKey, getCryptoKeyAlgorithm, getCryptoKeyExtractable, getCryptoKeyHandle, getCryptoKeyType, getCryptoKeyUsages,
@@ -292,6 +292,29 @@ function importKeyImpl(self: any, args: any[]): any {
     return importKeySync(format, keyData, n, extractable, usages);
 }
 
+// ---- getPublicKey ----
+
+let getPublicKeyWarned = false;
+
+// getPublicKey(key, usages): the public half of a private key, extractable,
+// with the usages its algorithm allows a public key (Node's toCryptoKey of
+// createPublicKey(key)).
+function getPublicKeyImpl(self: any, args: any[]): any {
+    if (!getPublicKeyWarned) {
+        getPublicKeyWarned = true;
+        process.emitWarning('The getPublicKey Web Crypto API method is an experimental feature and might change at any time', 'ExperimentalWarning');
+    }
+    const prefix = prepare(self, 'getPublicKey', args.length, 2);
+    const key: CryptoKey = convertArg(prefix, convCryptoKey, args[0], 0);
+    const usages: string[] = convertArg(prefix, convKeyUsages, args[1], 1);
+    const type = getCryptoKeyType(key);
+    if (type !== 'private') {
+        throw lazyDOMException('key must be a private key', type === 'secret' ? 'NotSupportedError' : 'InvalidAccessError');
+    }
+    const spki = getCryptoKeyHandle(key).publicKeyObject().export({ type: 'spki', format: 'der' });
+    return importKeySync('spki', spki, getCryptoKeyAlgorithm(key), true, usages);
+}
+
 // ---- wrapKey / unwrapKey ----
 
 function parseJwk(data: ArrayBuffer): any {
@@ -501,6 +524,11 @@ export class SubtleCrypto {
               extractable: boolean, keyUsages: string[]): Promise<CryptoKey>;
     unwrapKey(...args: any[]): Promise<any> {
         return callSubtle(() => unwrapKeyImpl(this, args));
+    }
+
+    getPublicKey(key: CryptoKey, keyUsages: string[]): Promise<CryptoKey>;
+    getPublicKey(...args: any[]): Promise<any> {
+        return callSubtle(() => getPublicKeyImpl(this, args));
     }
 
     get [Symbol.toStringTag](): string {

@@ -2,12 +2,6 @@
 // runs them: one item read, resolved and subscribed at a time, so a throw
 // closes the iterator and rejects, and an endless iterator is never drained.
 
-// PromiseResolve: a promise is itself.
-function promiseResolve(value: any): any {
-    if (value instanceof Promise) return value;
-    return Promise.resolve(value);
-}
-
 // V8's rendering of a value that is not iterable.
 function describe(v: any): string {
     if (v === undefined) return 'undefined';
@@ -44,10 +38,10 @@ function run(C: any, iterable: any, subscribe: Step, settle: Settle, res: (v: an
     let next: any;
     let resolveFn: any = undefined;
     try {
-        if (C !== Promise) {
-            resolveFn = C.resolve;
-            if (typeof resolveFn !== 'function') throw new TypeError('Promise resolve or reject function is not callable');
-        }
+        // GetPromiseResolve(C): read once, before the iterable, so a
+        // replaced Promise.resolve is the one called.
+        resolveFn = C.resolve;
+        if (typeof resolveFn !== 'function') throw new TypeError('Promise resolve or reject function is not callable');
         if (iterable === null || iterable === undefined || typeof iterable[Symbol.iterator] !== 'function') {
             throw new TypeError(describe(iterable) + ' is not iterable (cannot read property Symbol(Symbol.iterator))');
         }
@@ -80,7 +74,7 @@ function run(C: any, iterable: any, subscribe: Step, settle: Settle, res: (v: an
         }
         try {
             remaining++;
-            const member: any = resolveFn === undefined ? promiseResolve(value) : resolveFn.call(C, value);
+            const member: any = resolveFn.call(C, value);
             subscribe(index, member, finish, res, rej, values, errors);
             index++;
         } catch (e) {
@@ -173,3 +167,31 @@ export function _kmlPromiseAllOn(C: any, iterable: any): any { return combine(it
 export function _kmlPromiseAllSettledOn(C: any, iterable: any): any { return combine(iterable, allSettledStep, collect, C, 'Promise.allSettled'); }
 export function _kmlPromiseAnyOn(C: any, iterable: any): any { return combine(iterable, anyStep, aggregate, C, 'Promise.any'); }
 export function _kmlPromiseRaceOn(C: any, iterable: any): any { return combine(iterable, raceStep, never, C, 'Promise.race'); }
+
+// Promise.resolve.call(C, x), Promise.reject.call(C, r) and
+// Promise.withResolvers.call(C): C's promise (NewPromiseCapability(C)); a
+// non-object C throws. PromiseResolve returns x itself when it is a
+// promise whose constructor is C.
+function requireCtor(C: any, name: string): void {
+    if (C === null || (typeof C !== 'object' && typeof C !== 'function')) {
+        throw new TypeError(name + ' called on non-object');
+    }
+}
+export function _kmlPromiseResolveOn(C: any, x: any): any {
+    requireCtor(C, 'PromiseResolve');
+    if (x instanceof Promise && (x as any).constructor === C) return x;
+    const cap: any = capabilityOf(C);
+    cap.res(x);
+    return cap.promise;
+}
+export function _kmlPromiseRejectOn(C: any, r: any): any {
+    requireCtor(C, 'PromiseReject');
+    const cap: any = capabilityOf(C);
+    cap.rej(r);
+    return cap.promise;
+}
+export function _kmlPromiseWithResolversOn(C: any, _unused: any): any {
+    requireCtor(C, 'Promise.withResolvers');
+    const cap: any = capabilityOf(C);
+    return { promise: cap.promise, resolve: cap.res, reject: cap.rej };
+}

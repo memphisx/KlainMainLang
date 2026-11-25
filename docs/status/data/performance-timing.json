@@ -194,9 +194,15 @@
           },
           {
             "feature": "`performance.eventLoopUtilization` / `performance.nodeTiming`",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "`nodeTiming`'s `nodeStart`, `v8Start`, `environment` and `bootstrapComplete` read 0 (the time origin): a native program has no separate bootstrap"
+            ],
             "notes": [
-              "Not ported from Node's `lib/internal/perf`"
+              "libuv's idle-time metric (`UV_METRICS_IDLE_TIME`) as Node reads it; a worker's loop starts before its script ([ADR-01987](../adr/01/ADR-01987.md))"
+            ],
+            "decl": [
+              "perf_hooks#eventLoopUtilization"
             ]
           }
         ]

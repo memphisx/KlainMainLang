@@ -25,9 +25,39 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 	if c == nil {
 		return
 	}
+	if e.compatJS() {
+		e.returnLocalBaseClasses(prog)
+	}
 	b := c.Binding()
 	var hoisted []ast.Statement
 	boundTo := map[*ast.ClassExpression]*ast.VarDeclaration{}
+	// A class expression inside a function is a new class each time the
+	// function evaluates it (ClassDefinitionEvaluation): a record per
+	// evaluation, as a capturing one's.
+	inFn := map[*ast.ClassExpression]bool{}
+	var mark func(n ast.Node, depth int)
+	mark = func(n ast.Node, depth int) {
+		ast.Inspect(n, func(x ast.Node) bool {
+			if x == n && depth > 0 {
+				return true // the function itself
+			}
+			switch y := x.(type) {
+			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction:
+				mark(y, depth+1)
+				return false
+			case *ast.ClassExpression:
+				if depth > 0 {
+					inFn[y] = true
+				}
+			}
+			return true
+		})
+	}
+	for _, st := range prog.Body {
+		if e.libStmts[st] == "" {
+			mark(st, 0)
+		}
+	}
 	// hoistedDecls is every block-level class declaration hoisted so far: a
 	// later class naming one (`class B extends A`, both in one function)
 	// names a top-level class, not a local.
@@ -38,6 +68,16 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 		// block that captures none of its locals is hoisted like a class
 		// expression, and the block's references renamed to it.
 		if blk, ok := n.(*ast.BlockStatement); ok {
+			if e.compatJS() {
+				// `const E = class extends K {}`, K a local holding a class
+				// only at run time (a loop's variable): the class declaration
+				// it is, whose heritage evaluates where it stands.
+				for i, st := range blk.Body {
+					if cd := localBaseClassBinding(b, blk, st); cd != nil {
+						blk.Body[i] = cd
+					}
+				}
+			}
 			kept := blk.Body[:0:0]
 			var mine []*ast.ClassDeclaration
 			renames := map[string]string{}
@@ -60,6 +100,9 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 					e.classShownNames = map[string]string{}
 				}
 				e.classShownNames[name] = cd.Name
+				if shown, ok := e.classShownNames[cd.Name]; ok {
+					e.classShownNames[name] = shown // a name an earlier rewrite gave it
+				}
 				if cd.Name == "$ClassExpr" {
 					// An anonymous class expression a lowering declared in a
 					// block of its own (lowerRuntimeClassKeys): no name.
@@ -173,6 +216,7 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 				}
 				captures = true
 			}
+			perEval := !captures && inFn[n] && len(n.Decl.Decorators) == 0 && len(n.Decl.TypeParams) == 0
 			e.classExprSeq++
 			own := n.Decl.Name
 			if anonymousClass(n) {
@@ -208,6 +252,26 @@ func (e *Emitter) hoistClassExpressions(prog *ast.Program) {
 				s.StandsFor(ref, n) // the comparison's own checker reads it alike
 			}
 			e.markClassReeval(ref, n.Decl)
+			if n.Decl.BaseClass != "" && !n.Decl.BaseQualified {
+				// (Whether the base is a value is known once the classes
+				// register: emitExpr asks then.)
+				// Its heritage is evaluated where the expression is, not
+				// where the hoisted class is declared.
+				if e.classHeritageSites == nil {
+					e.classHeritageSites = map[ast.Node]*ast.ClassDeclaration{}
+				}
+				e.classHeritageSites[ref] = n.Decl
+			}
+			if perEval {
+				if e.classRecords == nil {
+					e.classRecords = map[string]bool{}
+				}
+				e.classRecords[name] = true
+				if e.classRecordSites == nil {
+					e.classRecordSites = map[ast.Node]bool{}
+				}
+				e.classRecordSites[ref] = true
+			}
 			if captures {
 				if e.classCaptures == nil {
 					e.classCaptures = map[string][]classCapture{}
@@ -455,4 +519,116 @@ func hasLocalClass(prog *ast.Program) bool {
 		return !found
 	})
 	return found
+}
+
+// localBaseClassBinding is the class declaration `const E = class extends
+// K {}` stands for, when K is a binding of an enclosing function or block
+// (its value known only at run time) and the class is anonymous; nil
+// otherwise.
+func localBaseClassBinding(b *binder.Binding, blk *ast.BlockStatement, st ast.Statement) *ast.ClassDeclaration {
+	v, ok := st.(*ast.VarDeclaration)
+	if !ok || v.Kind != "const" || v.Ambient || v.TypeAnnot != nil {
+		return nil
+	}
+	ce, ok := v.Init.(*ast.ClassExpression)
+	if !ok || !anonymousClass(ce) || ce.Decl.BaseClass == "" || ce.Decl.BaseQualified || ce.Decl.BaseCall != nil || len(ce.Decl.Decorators) > 0 {
+		return nil
+	}
+	var sym *binder.Symbol
+	for s := b.OpenedScope(blk); s != nil && sym == nil; s = s.Parent {
+		sym = s.Symbols.Get(ce.Decl.BaseClass)
+	}
+	if sym == nil || sym.Scope == nil || sym.Scope.Kind == binder.ModuleScope {
+		return nil
+	}
+	for _, d := range sym.Declarations {
+		if _, isClass := d.Node.(*ast.ClassDeclaration); isClass {
+			return nil
+		}
+	}
+	ce.Decl.Name = v.Name
+	return ce.Decl
+}
+
+// returnLocalBaseClasses rewrites, in each function of prog, `return
+// class extends K {}` with K one of the function's parameters or local
+// bindings (a mixin over a value, JavaScript) into the class's
+// declaration, under a name of its own, and a return of it: a class whose
+// heritage evaluates where it stands (valueBases), as a declared one's.
+func (e *Emitter) returnLocalBaseClasses(prog *ast.Program) {
+	visit := func(params []ast.Param, body *ast.BlockStatement) {
+		if body == nil {
+			return
+		}
+		locals := map[string]bool{}
+		for _, p := range params {
+			locals[p.Name] = true
+		}
+		classNames := map[string]bool{}
+		ast.Inspect(body, func(n ast.Node) bool {
+			switch v := n.(type) {
+			case *ast.FunctionDeclaration, *ast.FunctionExpression, *ast.ArrowFunction:
+				return false // its own locals
+			case *ast.VarDeclaration:
+				if _, isClass := v.Init.(*ast.ClassExpression); !isClass {
+					locals[v.Name] = true
+				}
+			case *ast.ClassDeclaration:
+				classNames[v.Name] = true
+			}
+			return true
+		})
+		var inBlock func(blk *ast.BlockStatement)
+		inBlock = func(blk *ast.BlockStatement) {
+			var out []ast.Statement
+			for i, st := range blk.Body {
+				r, ok := st.(*ast.ReturnStatement)
+				var ce *ast.ClassExpression
+				if ok {
+					ce, _ = r.Value.(*ast.ClassExpression)
+				}
+				if ce == nil || ce.Decl == nil || ce.Decl.BaseQualified || ce.Decl.BaseCall != nil || len(ce.Decl.Decorators) > 0 ||
+					!locals[ce.Decl.BaseClass] || classNames[ce.Decl.BaseClass] {
+					if out != nil {
+						out = append(out, st)
+					}
+					continue
+				}
+				if out == nil {
+					out = append([]ast.Statement{}, blk.Body[:i]...)
+				}
+				cd := ce.Decl
+				shown := cd.Name
+				if anonymousClass(ce) {
+					shown = ""
+				}
+				e.classExprSeq++
+				name := fmt.Sprintf("__kml_rcx%d", e.classExprSeq)
+				if shown != "" {
+					resolver.RenameInClass(cd, shown, name) // its own name, inside its body
+				}
+				cd.Name = name
+				if e.classShownNames == nil {
+					e.classShownNames = map[string]string{}
+				}
+				e.classShownNames[name] = shown
+				out = append(out, cd, ast.NewReturnStatement(ast.NewIdentifier(name, st.GetPos()), st.GetPos()))
+			}
+			if out != nil {
+				blk.Body = out
+			}
+		}
+		inBlock(body)
+	}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch f := n.(type) {
+		case *ast.FunctionDeclaration:
+			visit(f.Params, f.Body)
+		case *ast.FunctionExpression:
+			visit(f.Params, f.Body)
+		case *ast.ArrowFunction:
+			visit(f.Params, f.Block)
+		}
+		return true
+	})
 }

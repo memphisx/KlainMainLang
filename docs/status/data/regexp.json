@@ -35,7 +35,7 @@
             "feature": "Construction: `new RegExp(pattern, flags?)`",
             "status": "implemented",
             "notes": [
-              "Validates the *flags* string as real JS does — a duplicate flag (`\"gg\"`) or an unrecognized flag character (`\"z\"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`d` are accepted but their behavior isn't implemented — see the `u`/`d` flags row) ([ADR-00549](../adr/00/ADR-00549.md))",
+              "Validates the *flags* string as real JS does — a duplicate flag (`\"gg\"`) or an unrecognized flag character (`\"z\"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (see the `u` and `d` flag rows; under `v` a property of strings, `\\p{RGI_Emoji}`, is a `SyntaxError`) ([ADR-00549](../adr/00/ADR-00549.md))",
               "Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*",
               "A `\\uXXXX`/`\\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md)"
             ],
@@ -186,10 +186,10 @@
             "feature": "`u` flag — `.unicode`, code-point matching, `\\u{…}` and `\\p{…}`",
             "status": "implemented",
             "caveats": [
-              "`\\w` and `\\b` under `iu` stay ASCII: `/\\w/iu.test('ſ')` is false, true in V8 (ES folds U+017F and U+212A into `\\w`)",
-              "An escaped lone surrogate (`\\uD83D`, `\\u{D83D}`) matches nothing"
+              "An escaped lone surrogate (`\\uD83D`, `\\u{D83D}`), with or without `u`, is a `SyntaxError`, and `.` or a class never matches a subject's lone surrogate (`/a.b/` on `\"a\\uD83Db\"` is false): PCRE2's UTF mode has no surrogate code point. Other patterns match around one ([ADR-02059](../adr/02/ADR-02059.md))"
             ],
             "notes": [
+              "Under `i` a word character (`\\w`, `\\W`, `\\b`, `\\B`) is one whose case folding is one, U+017F and U+212A included ([ADR-02058](../adr/02/ADR-02058.md))",
               "`\\u{…}` and a surrogate-pair escape name one code point, in a class too; an escape the `u` grammar has no production for, and a class range with a class escape at either end, are a SyntaxError with V8's message ([ADR-01970](../adr/01/ADR-01970.md))"
             ],
             "decl": [
@@ -198,9 +198,12 @@
           },
           {
             "feature": "`d` flag — `.hasIndices`, a match's `.indices`",
-            "status": "missing",
+            "status": "implemented",
             "notes": [
-              "`.hasIndices` reads the flag; a match result has no `.indices`, a compile error"
+              "Each group's `[start, end]` in UTF-16 code units (`undefined` unmatched) and their named `groups`, through `exec`, `match`, `matchAll` and a boxed receiver, printed as Node does ([ADR-02057](../adr/02/ADR-02057.md))"
+            ],
+            "decl": [
+              "RegExp.hasIndices"
             ]
           }
         ]

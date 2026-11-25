@@ -44,6 +44,16 @@ func elemAllocKind(t Type) allocKind {
 	return allocElems
 }
 
+// cellAllocKind is the kind of a captured variable's cell holding a value of
+// type t: a plain number or boolean holds no reference, so a tracing
+// collector need not scan its cell.
+func cellAllocKind(t Type) allocKind {
+	if elemAllocKind(t) == allocBytes {
+		return allocBytes
+	}
+	return allocCell
+}
+
 // arrayDataKind is elemAllocKind of the array type t's element type.
 func arrayDataKind(t Type) allocKind {
 	if t.ElemType == nil {

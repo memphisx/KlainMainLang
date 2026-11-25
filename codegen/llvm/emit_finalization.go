@@ -85,7 +85,6 @@ func (e *Emitter) emitNewFinalizationRegistry(ex *ast.NewExpression) (Value, err
 	e.emitFinRegTrampoline(tramp, cbVal.Ty, heldTy)
 	e.emitFinRegReportFn(report, heldTy)
 
-	e.ensureFinalizationHelpers()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_finreg_create("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %d)", r, cbVal.Ref, tramp, report, e.hostHeaderWord(FinalizationRegistryType(heldTy))))
 	return Value{Ref: r, Ty: FinalizationRegistryType(heldTy)}, nil
@@ -209,7 +208,6 @@ func (e *Emitter) finregObjectArg(expr ast.Expression, what string, pos ast.Pos)
 	if v.Ty.IsSymbol() {
 		// A registered symbol (`Symbol.for`) cannot be held weakly: Node's
 		// TypeError.
-		e.ensureSymbolRegistry()
 		key, isReg := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_symbol_keyfor("+irPtr+" %s)", key, v.Ref))
 		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isReg, key))
@@ -260,7 +258,6 @@ func (e *Emitter) emitFinalizationRegistryMethod(objExpr ast.Expression, method 
 	if regVal.Ty.ElemType != nil {
 		heldTy = *regVal.Ty.ElemType
 	}
-	e.ensureFinalizationHelpers()
 
 	c := &finregCall{objExpr: objExpr, method: method, args: args, pos: pos, regVal: regVal, heldTy: heldTy}
 	if f, ok := finregMethods[method]; ok {

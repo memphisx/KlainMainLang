@@ -16,6 +16,31 @@ func isLogicalAssignOp(op string) bool {
 	return op == "&&=" || op == "||=" || op == "??="
 }
 
+// numericCompoundOp reports a compound assignment whose operator only
+// computes on numbers (every one but `+=` and the logical ones).
+func numericCompoundOp(op string) bool { return numericCompoundOps[op] }
+
+var numericCompoundOps = map[string]bool{
+	"-=": true, "*=": true, "/=": true, "%=": true, "**=": true, "&=": true,
+	"|=": true, "^=": true, "<<=": true, ">>=": true, ">>>=": true,
+}
+
+// rereadableTarget reports an assignment target that reading again reads
+// the same place, with no side effect: a name, or a named member of `this`
+// or of a name.
+func rereadableTarget(x ast.Expression) bool {
+	switch t := x.(type) {
+	case *ast.Identifier:
+		return true
+	case *ast.MemberExpression:
+		switch t.Object.(type) {
+		case *ast.ThisExpression, *ast.Identifier:
+			return !t.Optional
+		}
+	}
+	return false
+}
+
 // tryEmitAccessorAssign attempts `obj.prop = rhs` / `obj.prop OP= rhs`
 // against a registered class accessor (TDD-00030). handled is false when
 // objVal's class has no accessor at all for this property name — the
@@ -265,6 +290,13 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 	}
 	if v, ok, err := e.emitNullishBaseAssign(ex); ok {
 		return v, err
+	}
+	if numericCompoundOp(ex.Op) && rereadableTarget(ex.Left) && isStringTy(e.typeOfExpr(ex.Left)) {
+		// `s -= x` on a string is `s = s - x`: the operator converts s to a
+		// number, which the target then holds.
+		syn := ast.NewAssignmentExpression("=", ex.Left, ast.NewBinaryExpression(strings.TrimSuffix(ex.Op, "="), ex.Left, ex.Right, ex.GetPos()), ex.GetPos())
+		e.originate(syn, ex)
+		return e.emitAssign(syn)
 	}
 	if len(e.moduleTDZ) > 0 && isNestedAssignPattern(ex.Left) {
 		// A pattern's targets in a top-level binding's dead zone.
@@ -893,6 +925,19 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 			return e.emitDynAnyMemberSetNamed(box, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
 		}
+		if objVal.Ty.IsCaught() {
+			// A catch binding (`catch (x: any)`): the caught value, boxed,
+			// takes the property.
+			box := e.convert(objVal, TypeAny)
+			if ex.Op != "=" {
+				return e.emitDynAnyCompoundAssign(box, e.internString(memEx.Property), memEx.Property, ex.Op, ex.Right, ex.GetPos())
+			}
+			rhs, err := e.emitExpr(ex.Right)
+			if err != nil {
+				return Value{}, err
+			}
+			return e.emitDynAnyMemberSetNamed(box, e.internString(memEx.Property), memEx.Property, rhs, ex.GetPos())
+		}
 		if !objVal.Ty.IsObject() {
 			return Value{}, internalAt(ex.GetPos(), "field assignment on non-object")
 		}
@@ -909,6 +954,9 @@ func (e *Emitter) emitAssign(ex *ast.AssignmentExpression) (Value, error) {
 			}
 		}
 		idx, fieldTy, ok := objVal.Ty.FieldIndex(memEx.Property)
+		if ok && objVal.Ty.IsError() && !objVal.Ty.IsClass() && !objVal.Ty.IsDynamic() {
+			e.emitErrorNoteField(objVal.Ref, memEx.Property, e.internString(memEx.Property))
+		}
 		if !ok {
 			if info, isHost := e.classes[objVal.Ty.ClassName]; objVal.Ty.IsClass() && isHost && info.HostBase != nil && !isIndexKeyName(memEx.Property) {
 				// The host base's property (`lastIndex`), on the instance's

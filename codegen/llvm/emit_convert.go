@@ -25,10 +25,20 @@ func (e *Emitter) convert(v Value, target Type) Value {
 	// An instance of a class extending Map or Set where the host is
 	// expected: its body, after its tag word (TDD-00247).
 	if v.Ty.IsClass() && (headeredHost(target) || target.IsPromise() && !target.IsDynamic()) && !target.IsClass() {
-		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil {
+		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil && !hostStreamBase(*info.HostBase) {
 			body := e.freshReg()
 			e.emitBodyAddr(body, v.Ref)
 			return Value{Ref: body, Ty: target}
+		}
+	}
+	// An instance of a class extending a stream class where the stream is
+	// expected: the stream its body holds.
+	if v.Ty.IsClass() && !v.Ty.IsDynamic() && hostStreamBase(target) && !target.IsClass() {
+		if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil && hostStreamBase(*info.HostBase) {
+			body, sp := e.freshReg(), e.freshReg()
+			e.emitBodyAddr(body, v.Ref)
+			e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", sp, body))
+			return Value{Ref: sp, Ty: target}
 		}
 	}
 	// An instance of a class extending Array where an array is expected:
@@ -881,7 +891,6 @@ func (e *Emitter) emitAnyIntoString(v Value, target Type) (Value, bool) {
 // emitObjectToDict builds a string-keyed dictionary from a plain object's
 // fields (a null object stays null).
 func (e *Emitter) emitObjectToDict(v Value, target Type) Value {
-	e.ensureMapStrHelpers()
 	valTy := TypeAny
 	if target.MapVal != nil {
 		valTy = *target.MapVal

@@ -15,6 +15,7 @@ import (
 	"fmt"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/checker"
 )
 
 //go:embed wrappersrc/wrapper.c
@@ -58,11 +59,7 @@ func (e *Emitter) emitNewPrimWrapper(ex *ast.NewExpression) (Value, error) {
 // holding the boxed primitive word, boxed.
 func (e *Emitter) emitBuildWrapper(word, class string) Value {
 	ty := primWrapperType(class)
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
-	e.ensureHostBoxHooks()
+	e.ensureDynJSONC()
 	base := e.freshReg()
 	e.heapMallocInto(base, allocHost, "24")
 	e.heapStore("i64", fmt.Sprint(e.hostID(ty)), base, 8)
@@ -102,10 +99,7 @@ func (e *Emitter) emitInspectWrapper(v Value, depth int) (Value, error) {
 	e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 8", bagP, v.Ref))
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", bag, bagP))
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	cnt := e.freshReg()
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
@@ -149,16 +143,27 @@ func (e *Emitter) wrappersUsed() bool {
 	if e.wrapperScan == 0 {
 		e.wrapperScan = 1
 		if e.prog != nil {
+			// The program's own code: a library's call of Object(x) is
+			// compiled once for every program.
 			ast.Inspect(e.prog, func(n ast.Node) bool {
+				if st, ok := n.(ast.Statement); ok && e.libStmts[st] != "" {
+					return false
+				}
 				switch x := n.(type) {
 				case *ast.NewExpression:
 					if !x.Qualified && (x.ClassName == "Number" || x.ClassName == "String" || x.ClassName == "Boolean" || x.ClassName == "Object" && len(x.Args) > 0) {
 						e.wrapperScan = 2
 					}
 				case *ast.CallExpression:
-					// Object(primitive) wraps it.
+					// Object(primitive) wraps it; so does Object.assign onto
+					// one (emitObjectAssign).
 					if id, ok := x.Callee.(*ast.Identifier); ok && id.Name == "Object" && len(x.Args) > 0 {
 						e.wrapperScan = 2
+					}
+					if m, ok := x.Callee.(*ast.MemberExpression); ok && m.Property == "assign" && len(x.Args) > 0 {
+						if id, ok := m.Object.(*ast.Identifier); ok && id.Name == "Object" && e.mayBePrimitive(x.Args[0]) {
+							e.wrapperScan = 2
+						}
 					}
 				}
 				return e.wrapperScan != 2
@@ -166,6 +171,26 @@ func (e *Emitter) wrappersUsed() bool {
 		}
 	}
 	return e.wrapperScan == 2
+}
+
+// mayBePrimitive reports whether x, Object.assign's target, may be a
+// primitive: its checker type's, else (JavaScript) anything but an object
+// or array literal, a function or a `new`.
+func (e *Emitter) mayBePrimitive(x ast.Expression) bool {
+	switch x.(type) {
+	case *ast.ObjectLiteral, *ast.ArrayLiteral, *ast.NewExpression, *ast.ArrowFunction, *ast.FunctionExpression, *ast.ClassExpression:
+		return false
+	case *ast.NumberLiteral, *ast.StringLiteral, *ast.BooleanLiteral:
+		return true
+	}
+	if c := e.front(); c != nil && !e.compatJS() {
+		t := c.TypeOf(x)
+		if c.Unanswered(t) {
+			return true
+		}
+		return t.Flags&(checker.Any|checker.Unknown|checker.StringLike|checker.NumberLike|checker.BooleanLike|checker.BigIntLike|checker.ESSymbol|checker.TypeParam) != 0 || t.Brand != nil
+	}
+	return true
 }
 
 // emitUnwrapPrim is v, or the primitive v wraps: a wrapper's properties
@@ -177,11 +202,7 @@ func (e *Emitter) emitUnwrapPrim(v Value) Value {
 	if !e.wrappersUsed() {
 		return v
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
-	e.ensureHostBoxHooks()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_host_unwrap(i64 %s)", r, v.Ref))
 	return Value{Ref: r, Ty: v.Ty}
@@ -196,11 +217,7 @@ func (e *Emitter) emitWrapperRecv(v Value, keyRef string) Value {
 	if !e.wrappersUsed() {
 		return v
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
-	e.ensureHostBoxHooks()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_wrapper_recv(i64 %s, "+irPtr+" %s)", r, v.Ref, keyRef))
 	return Value{Ref: r, Ty: v.Ty}
@@ -271,11 +288,7 @@ func (e *Emitter) emitWrapperKeys(v Value, all bool, resPtr, doneL string) {
 	if !e.wrappersUsed() {
 		return
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
-	e.ensureHostBoxHooks()
+	e.ensureDynJSONC()
 	is, hit := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_is(i64 %s)", is, v.Ref))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", hit, is))
@@ -345,11 +358,7 @@ func (e *Emitter) emitWrapperDelete(v Value, keyRef string) string {
 // calls it through its weak hook, 0 when there is none.
 func (e *Emitter) emitWrapperSet(v, keyRef, val string, sloppy int) string {
 	if !e.programIndependent() {
-		e.ensureAnyToPrimitive()
-		e.ensureNanBox()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
-		e.ensureHostBoxHooks()
+		e.ensureDynJSONC()
 		h := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_set(i64 %s, "+irPtr+" %s, i64 %s, i32 %d)", h, v, keyRef, val, sloppy))
 		return h
@@ -379,11 +388,7 @@ func (e *Emitter) emitWrapperSet(v, keyRef, val string, sloppy int) string {
 // hook in program-independent code, where none answers dflt.
 func (e *Emitter) emitWrapperKeyCall(op string, v Value, keyRef string, dflt int) string {
 	if !e.programIndependent() {
-		e.ensureAnyToPrimitive()
-		e.ensureNanBox()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
-		e.ensureHostBoxHooks()
+		e.ensureDynJSONC()
 		h := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_%s(i64 %s, "+irPtr+" %s)", h, op, v.Ref, keyRef))
 		return h

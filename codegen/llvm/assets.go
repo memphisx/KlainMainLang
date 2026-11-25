@@ -44,13 +44,12 @@ func (e *Emitter) requireEmbed(dir string) string {
 	}
 	sym := fmt.Sprintf("kml_embed_%d", len(e.embeddedDirs))
 	e.embeddedDirs[dir] = sym
-	e.usedEmbeddedAssets = true
 	return sym
 }
 
 // UsesEmbeddedAssets reports whether the program embedded any directory (gates
 // the embed_assets.c runtime link).
-func (e *Emitter) UsesEmbeddedAssets() bool { return e.usedEmbeddedAssets }
+func (e *Emitter) UsesEmbeddedAssets() bool { return len(e.embeddedDirs) > 0 }
 
 // EmbeddedBlobs walks each recorded directory and packs it, returning one blob
 // per embedded dir. Read by the driver after EmitProgram. Deterministic order

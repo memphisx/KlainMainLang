@@ -81,7 +81,6 @@ func (e *Emitter) emitDynInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureNanBox()
 	// InstanceofOperator: the target's own @@hasInstance first, called on it
 	// with the value, its result made a boolean.
 	pos := ex.GetPos()
@@ -150,14 +149,11 @@ func (e *Emitter) emitDynInstanceOf(ex *ast.BinaryExpression) (Value, error) {
 // emitOrdinaryHasInstance is OrdinaryHasInstance(c, v) for boxed values v
 // and c: the instanceof test without c's own @@hasInstance, as an i1.
 func (e *Emitter) emitOrdinaryHasInstance(v, c string) string {
-	e.usedDynInstanceof = true
 	res := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dyn_instanceof(i64 %s, i64 %s)", res, v, c))
 	{
 		// Against a generator or constructor function: its `prototype` on
 		// the chain.
-		e.ensureFnMeta()
-		e.ensureShapeRuntime()
 		e.declareFn("__kml_gen_has_instance", "declare i32 @__kml_gen_has_instance(i64, i64)")
 		gi := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_gen_has_instance(i64 %s, i64 %s)", gi, v, c))
@@ -193,12 +189,6 @@ func (e *Emitter) emitOrdinaryHasInstance(v, c string) string {
 		}
 	}
 	return res
-}
-
-// ensureCtorKind marks __kml_ctor_kind (lib/native.d.ts ctorKind) used.
-func (e *Emitter) ensureCtorKind() {
-	e.ensureNanBox()
-	e.usedCtorKind = true
 }
 
 // ctorRefTargets are the constructors a reference can name: every Error
@@ -440,8 +430,6 @@ func (e *Emitter) emitDynNew(ex *ast.NewExpression, instTy Type) (Value, error) 
 			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", b.Ref, slot))
 		}
 	}
-	e.ensureNanBox()
-	e.usedDynConstruct = true
 	res := e.freshReg()
 	if len(e.classRecords) > 0 {
 		// A record's class reads its bindings from it (TDD-00242).
@@ -563,38 +551,38 @@ func (e *Emitter) emitClassRefGet(pay, keyRef string) string {
 	return r
 }
 
-// hostCtorArity is the most arguments builtin constructor h takes.
-func hostCtorArity(h string) int {
-	switch {
-	case h == "Date":
-		return 7
-	case isErrorKindName(h), h == "AggregateError", h == "DOMException", h == "URL", h == "Request", h == "RegExp", h == "ArrayBuffer", h == "SharedArrayBuffer":
-		return 2
-	case h == "DataView", strings.HasSuffix(h, "Array") && h != "Array":
-		return 3 // a view's (buffer, byteOffset, length)
-	case h == "ReadableStream", h == "WritableStream":
-		return 2 // (underlying, strategy)
-	case h == "TransformStream":
-		return 3 // (transformer, writableStrategy, readableStrategy)
+// hostCtorArity is the most arguments builtin constructor h takes: the
+// longest of its declared construct signatures (a rest's own slot counted
+// once, as the arms box each passed argument).
+func (e *Emitter) hostCtorArity(h string) int {
+	n := 1
+	if c := e.front(); c != nil {
+		if t := c.GlobalValueType(h); t != nil {
+			for _, sig := range t.Constructs {
+				n = max(n, len(sig.Params))
+			}
+		}
 	}
-	return 1
+	return n
 }
 
+// hostCtorArity is the most arguments builtin constructor h takes.
 // emitHostConstructArms constructs builtin h over argc of the boxed
 // arguments (__kml_dyn_construct's argv), one arm per argument count; a
 // count h does not take throws.
 func (e *Emitter) emitHostConstructArms(h string) {
-	e.emitConstructArgcArms(hostCtorArity(h), func(args []ast.Expression) (Value, error) {
+	if h == "Array" {
+		e.emitArrayConstructArms()
+		return
+	}
+	form := hostConstructForms[h]
+	e.emitConstructArgcArms(e.hostCtorArity(h), func(args []ast.Expression) (Value, error) {
 		k := len(args)
 		lowered, ok, err := sema.BuiltinNew(ast.NewNewExpression(h, args, ast.Pos{}))
-		if h == "Promise" && k == 1 {
-			// The executor is called through its boxed value.
-			anyT := ast.AnyAnnotation("ts")
-			call := ast.NewCallExpression(args[0], []ast.Expression{ast.NewIdentifier("__kml_pr", ast.Pos{}), ast.NewIdentifier("__kml_pj", ast.Pos{})}, ast.Pos{})
-			exec := ast.NewArrowFunction([]ast.Param{{Name: "__kml_pr", Type: anyT}, {Name: "__kml_pj", Type: anyT}}, nil, call, nil, ast.Pos{})
-			np := ast.NewNewExpression("Promise", []ast.Expression{exec}, ast.Pos{})
-			np.TypeArgs = []ast.TypeNode{anyT}
-			lowered, ok, err = np, true, nil
+		if form != nil {
+			if x := form(args, ok); x != nil {
+				lowered, ok, err = x, true, nil
+			}
 		}
 		if typedArrayNames[h] && k == 0 {
 			// new Uint8Array() is a view of length 0.
@@ -606,9 +594,10 @@ func (e *Emitter) emitHostConstructArms(h string) {
 			}
 			lowered, ok, err = ast.NewNewExpression(h, args, ast.Pos{}), true, nil
 		}
-		if h == "Object" && !ok {
-			// new Object(v) is Object(v) (ES 20.1.1.1, NewTarget Object).
-			lowered, ok, err = synthCall("Object", ast.Pos{}, args...), true, nil
+		if !ok {
+			// Any other builtin (Proxy, Response, Buffer): the same `new`
+			// over the boxed arguments, as the program would write it.
+			lowered, ok, err = ast.NewNewExpression(h, args, ast.Pos{}), true, nil
 		}
 		if !ok || err != nil {
 			return Value{}, fmt.Errorf("no form")
@@ -617,13 +606,41 @@ func (e *Emitter) emitHostConstructArms(h string) {
 	}, h)
 }
 
+// hostConstructForms are the builtin constructors whose construction
+// over boxed arguments is not their `new` as written: the expression it
+// lowers to, given whether sema lowered the `new` (lowered), or nil to
+// keep sema's.
+var hostConstructForms = map[string]func(args []ast.Expression, lowered bool) ast.Expression{
+	"Promise": func(args []ast.Expression, _ bool) ast.Expression {
+		if len(args) != 1 {
+			return nil
+		}
+		// The executor is called through its boxed value.
+		anyT := ast.AnyAnnotation("ts")
+		call := ast.NewCallExpression(args[0], []ast.Expression{ast.NewIdentifier("__kml_pr", ast.Pos{}), ast.NewIdentifier("__kml_pj", ast.Pos{})}, ast.Pos{})
+		exec := ast.NewArrowFunction([]ast.Param{{Name: "__kml_pr", Type: anyT}, {Name: "__kml_pj", Type: anyT}}, nil, call, nil, ast.Pos{})
+		np := ast.NewNewExpression("Promise", []ast.Expression{exec}, ast.Pos{})
+		np.TypeArgs = []ast.TypeNode{anyT}
+		return np
+	},
+	"Object": func(args []ast.Expression, lowered bool) ast.Expression {
+		if lowered {
+			return nil
+		}
+		// new Object(v) is Object(v) (ES 20.1.1.1, NewTarget Object).
+		return synthCall("Object", ast.Pos{}, args...)
+	},
+}
+
 // emitConstructArgcArms constructs (through build) over argc of the boxed
 // arguments (__kml_dyn_construct's argv), up to n of them, one arm per
 // count; a count build does not take throws.
 func (e *Emitter) emitConstructArgcArms(n int, build func([]ast.Expression) (Value, error), h string) {
 	var args []ast.Expression
+	var slots []string
 	for i := 0; i < n; i++ {
 		slot := e.freshReg()
+		slots = append(slots, slot)
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
 		e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, slot))
 		name := fmt.Sprintf("__kml_ha%d", i)
@@ -644,10 +661,24 @@ func (e *Emitter) emitConstructArgcArms(n int, build func([]ast.Expression) (Val
 			at, ld := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds i64, "+irPtr+" %%argv, i64 %d", at, i))
 			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", ld, at))
-			sym, _ := e.lookup(fmt.Sprintf("__kml_ha%d", i))
-			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ld, sym.Ptr))
+			e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ld, slots[i]))
 		}
-		if v, err := build(args[:k]); err == nil && !e.blockDone {
+		rebind := func() {
+			// Each build sees the slots themselves: one an earlier build
+			// boxed into a cell of its own arm does not reach this one.
+			for i, slot := range slots {
+				e.define(fmt.Sprintf("__kml_ha%d", i), Symbol{Ptr: slot, Ty: TypeAny})
+			}
+		}
+		rebind()
+		v, err := build(args[:k])
+		if err != nil && !e.blockDone && k < n {
+			// Too few for the constructor: the missing ones are undefined,
+			// as JavaScript passes them (their slots hold it).
+			rebind()
+			v, err = build(args)
+		}
+		if err == nil && !e.blockDone {
 			if b, berr := e.emitBoxValue(v); berr == nil {
 				e.emitTerminator(fmt.Sprintf("ret i64 %s", b.Ref))
 			}
@@ -658,6 +689,39 @@ func (e *Emitter) emitConstructArgcArms(n int, build func([]ast.Expression) (Val
 		e.emitLabel(next)
 	}
 	e.emitTerminator("unreachable")
+}
+
+// emitArrayConstructArms constructs an Array over __kml_dyn_construct's
+// argv: one argument is its length when a number, else its one element;
+// any other count is the array of the arguments (ECMA-262 §23.1.1.1).
+func (e *Emitter) emitArrayConstructArms() {
+	oneL, manyL := e.freshLabel("dynnew.array.one"), e.freshLabel("dynnew.array.many")
+	isOne := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %%argc, 1", isOne))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isOne, oneL, manyL))
+	e.emitLabel(oneL)
+	slot, w := e.freshReg(), e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %%argv, align 8", w))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", w, slot))
+	e.define("__kml_ha0", Symbol{Ptr: slot, Ty: TypeAny})
+	v, err := e.emitExpr(ast.NewNewArrayExpression(nil, ast.NewIdentifier("__kml_ha0", ast.Pos{}), ast.Pos{}))
+	if err == nil && !e.blockDone {
+		if b, berr := e.emitBoxValue(v); berr == nil {
+			e.emitTerminator(fmt.Sprintf("ret i64 %s", b.Ref))
+		}
+	}
+	if !e.blockDone {
+		e.emitTerminator("unreachable")
+	}
+	e.emitLabel(manyL)
+	hdr, _ := e.emitArgvArray("%argc", "%argv", 0, TypeAny)
+	b, err := e.emitBoxValue(Value{Ref: hdr, Ty: ArrayOf(TypeAny)})
+	if err != nil {
+		e.emitTerminator("unreachable")
+		return
+	}
+	e.emitTerminator(fmt.Sprintf("ret i64 %s", b.Ref))
 }
 
 // constructedType is the instance type `new` builds through constructor
@@ -718,7 +782,7 @@ func (e *Emitter) noteHostRef(name string) {
 
 // emitDynConstructOnce defines __kml_dyn_construct once, when used.
 func (e *Emitter) emitDynConstructOnce() {
-	if e.usedDynConstruct && !e.emittedDynConstruct {
+	if !e.emittedDynConstruct && e.irNames("__kml_dyn_construct") {
 		e.emittedDynConstruct = true
 		e.emitDynConstructDispatch()
 	}
@@ -727,8 +791,6 @@ func (e *Emitter) emitDynConstructOnce() {
 // emitConstructorOf is `obj.constructor` for a class instance: the class it
 // was constructed as, a run-time question for a subclass's instance.
 func (e *Emitter) emitConstructorOf(obj Value) Value {
-	e.usedConstructorOf = true
-	e.ensureNanBox()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_constructor_of("+irPtr+" %s)", r, obj.Ref))
 	return Value{Ref: r, Ty: TypeAny}

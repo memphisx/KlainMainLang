@@ -12,16 +12,6 @@ var coreSource string
 // kml_layout.h; its math calls need -lm (LibmLibs).
 func CoreSource() string { return layoutHeader() + coreSource }
 
-// ensureStdoutGlobal declares the libc `FILE *stdout` extern global (symbol per
-// platform, stdoutGlobalSymbol) exactly once — shared by the startup setvbuf and
-// the per-write fflush (ADR-00867). Never used on Windows.
-func (e *Emitter) ensureStdoutGlobal() {
-	if !e.usedStdoutGlobal {
-		e.emitGlobal(fmt.Sprintf("@%s = external"+irGlobalAS+" global "+irPtr, e.stdoutGlobalSymbol()))
-		e.usedStdoutGlobal = true
-	}
-}
-
 // floatInfLiteral / floatNegInfLiteral: ±Infinity as an LLVM constant for the
 // given float IR type (a `float` constant is spelled as the exactly-representable
 // double bit pattern).

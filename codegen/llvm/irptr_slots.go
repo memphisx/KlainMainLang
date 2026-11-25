@@ -10,8 +10,44 @@ import (
 // every function address used as a value, and every call through a
 // register, whose callee is such a value. It runs on every unit of every
 // compile, so each pass is one linear scan of the text.
+//
+// The three rewrites (spaceLines, spaceFnOperands, spaceIndirectCalls) are
+// each line-local once the module's function names are known, so they run
+// as one pass, line by line: one copy of the module, not three (the full
+// module is over 100 MB for a program that boxes the global object).
 func toManagedSpace(ir string) string {
-	return spaceIndirectCalls(spaceFnOperands(spaceLines(ir)))
+	fns := irFnNames(ir)
+	var b, ln strings.Builder
+	b.Grow(len(ir) + len(ir)/16)
+	for len(ir) > 0 {
+		end := strings.IndexByte(ir, '\n')
+		line, rest := ir, ""
+		if end >= 0 {
+			line, rest = ir[:end], ir[end+1:]
+		}
+		out := line
+		if line != "" && line[0] == '@' {
+			ln.Reset()
+			writeGlobalDef(&ln, line)
+			out = ln.String()
+		} else if strings.Contains(line, " = alloca ") {
+			ln.Reset()
+			writeAllocaOrLine(&ln, line)
+			out = ln.String()
+		}
+		if strings.Contains(out, irPtr) {
+			out = spaceFnOperandsIn(out, fns)
+		}
+		if strings.Contains(out, "call ") {
+			out = spaceIndirectCalls(out)
+		}
+		b.WriteString(out)
+		if end >= 0 {
+			b.WriteByte('\n')
+		}
+		ir = rest
+	}
+	return b.String()
 }
 
 // isSpaceNameByte reports a byte of an unquoted IR name.
@@ -25,33 +61,6 @@ func irNameEnd(s string, i int) int {
 		i++
 	}
 	return i
-}
-
-// spaceLines rewrites the two line shapes: a global's definition gains the
-// managed space, and a stack slot's definition becomes the slot and its
-// cast into the space.
-func spaceLines(ir string) string {
-	var b strings.Builder
-	b.Grow(len(ir) + len(ir)/16)
-	for len(ir) > 0 {
-		end := strings.IndexByte(ir, '\n')
-		line, rest := ir, ""
-		if end >= 0 {
-			line, rest = ir[:end], ir[end:]
-		}
-		switch {
-		case line != "" && line[0] == '@':
-			writeGlobalDef(&b, line)
-		default:
-			writeAllocaOrLine(&b, line)
-		}
-		if rest != "" {
-			b.WriteByte('\n')
-			rest = rest[1:]
-		}
-		ir = rest
-	}
-	return b.String()
 }
 
 // writeGlobalDef writes a line starting with `@`, a global's definition
@@ -133,9 +142,9 @@ func isWordByte(c byte) bool {
 	return c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
 }
 
-// spaceFnOperands casts a function named as a managed-pointer operand.
-func spaceFnOperands(ir string) string {
-	fns := irFnNames(ir)
+// spaceFnOperandsIn casts a function named as a managed-pointer operand
+// (fns: the functions the module defines or declares).
+func spaceFnOperandsIn(ir string, fns map[string]bool) string {
 	var b strings.Builder
 	b.Grow(len(ir) + len(ir)/16)
 	last, pos := 0, 0
@@ -264,6 +273,42 @@ func unitText(ir string) string {
 	}
 	return toManagedSpace(ir)
 }
+
+// unitTextFor is unitText for a compile with flags: a ThinLTO one in the
+// program address space alone (PlainSpaceIR).
+func unitTextFor(ir string, flags []string) string {
+	ir = unitText(ir)
+	if ThinLTOFlags(flags) {
+		ir = PlainSpaceIR(ir)
+	}
+	return ir
+}
+
+// ThinLTOFlags reports a compile to ThinLTO bitcode.
+func ThinLTOFlags(flags []string) bool {
+	for _, f := range flags {
+		if f == "-flto=thin" {
+			return true
+		}
+	}
+	return false
+}
+
+// PlainSpaceIR is ir with its managed references spelled as plain
+// pointers, the casts between the spaces as no-op bitcasts. A ThinLTO link
+// imports the C runtime's functions into these modules: a C body calling a
+// C library function (calloc) declared here with managed pointers would
+// call it through another type, which LLVM's optimizer does not expect
+// (clang 18's InstCombine crashes on it). No pass reads the managed space
+// yet, so the plain spelling compiles to the same code.
+func PlainSpaceIR(ir string) string {
+	if !managedSpace {
+		return ir
+	}
+	return plainCasts.Replace(strings.ReplaceAll(ir, " addrspace(1)", ""))
+}
+
+var plainCasts = strings.NewReplacer("addrspacecast", "bitcast")
 
 // ShapeIR is ir with the managed address space spelled away, for checks of
 // an IR shape that hold in either spelling.

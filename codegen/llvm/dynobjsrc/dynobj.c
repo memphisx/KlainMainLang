@@ -57,44 +57,6 @@ typedef struct {
 extern i64 __kml_proxy_tget(i64 target, const char *key);
 extern i64 __kml_proxy_tset(i64 target, const char *key, i64 v);
 
-/* nb_* mirror __kml_nb_pack/tag/pay (runtime_nanbox.go — keep in sync). */
-static i64 nb_double(double d) {
-    unsigned long long bits;
-    if (d != d) bits = 0x7FF8000000000000ULL;
-    else memcpy(&bits, &d, 8); /* scratch */
-    return (i64)(bits + (1ULL << 49));
-}
-static i64 nb_pack(i64 tag, i64 pay) {
-    switch (tag) {
-    case 0: return nb_double((double)pay);
-    case 1: { double d; memcpy(&d, &pay, 8); return nb_double(d); } /* scratch */
-    case 3: return pay ? 7 : 6;
-    case 4: return 2;
-    case 5: return 10;
-    case 2: return pay;
-    case 6: return pay | 1;
-    case 7: return pay | 2;
-    case 8: return pay | 3;
-    case 9: return pay | 4;
-    case 10: return pay | 5;
-    case 11: return pay | 6;
-    case 12: return pay | 7;
-    default: return 10;
-    }
-}
-static i64 nb_tag(i64 word) {
-    unsigned long long v = (unsigned long long)word;
-    static const i64 kindTag[8] = {2, 6, 7, 8, 9, 10, 11, 12};
-    if (v >= (1ULL << 49)) return 1;
-    if (v < 65536) return v == 2 ? 4 : (v == 6 || v == 7) ? 3 : 5;
-    return kindTag[v & 7];
-}
-static i64 nb_pay(i64 word) {
-    unsigned long long v = (unsigned long long)word;
-    if (v >= (1ULL << 49)) return (i64)(v - (1ULL << 49));
-    if (v < 65536) return v == 7;
-    return (v & 7) == 0 ? (i64)v : (i64)(v & ~7ULL);
-}
 
 /* A dynamic-function record {fn, env}, called as fn(env, this, argc, argv). */
 typedef i64 (*dynfn)(void *env, i64 thisv, i64 argc, i64 *argv);
@@ -209,10 +171,20 @@ static const char *const node_class_ctors[] = {
 
 static int cmp_name(const void *a, const void *b) { return strcmp(*(const char *const *)a, *(const char *const *)b); }
 
-i64 __kml_classref_call(const char *name, i64 n, const i64 *argv, i64 (*wrap)(i64)) {
+/* The builtin constructors whose [[Call]] is their [[Construct]]. */
+static const char *const call_constructs[] = {
+    "AggregateError", "Array", "Error", "EvalError", "RangeError", "ReferenceError",
+    "RegExp", "SyntaxError", "TypeError", "URIError",
+};
+
+/* construct is the program's __kml_dyn_construct, null in a library unit. */
+i64 __kml_classref_call(const char *name, i64 n, const i64 *argv, i64 (*wrap)(i64), i64 self,
+                        i64 (*construct)(i64, i64 *, i64, void *)) {
+    if (construct && bsearch(&name, call_constructs, sizeof call_constructs / sizeof *call_constructs, sizeof *call_constructs, cmp_name))
+        return construct(self, (i64 *)argv, n, (void *)0);
     if (strcmp(name, "Object") == 0) {
-        i64 v = n > 0 ? argv[0] : nb_pack(5, 0);
-        i64 tag = nb_tag(v);
+        i64 v = n > 0 ? argv[0] : kml_nb_pack(5, 0);
+        i64 tag = kml_nb_tag(v);
         if (tag == 4 || tag == 5)
             return BOX_DYNOBJ(__kml_dynobj_new());
         if (tag <= 3)
@@ -252,8 +224,8 @@ i64 __kml_dynobj_find(void *o, const char *key) {
  * object's own property key (a string, or a symbol's synthetic key); -1
  * when v is not a dynamic object. */
 int __kml_dynobj_prop_enumerable(i64 v, const char *key) {
-    if (nb_tag(v) != 10) return -1;
-    Bag *b = (Bag *)nb_pay(v);
+    if (kml_nb_tag(v) != 10) return -1;
+    Bag *b = (Bag *)kml_nb_pay(v);
     i64 i = __kml_dynobj_find(b, key);
     return i >= 0 && (b->props[i].attrs & A_ENUM) ? 1 : 0;
 }
@@ -262,7 +234,7 @@ int __kml_dynobj_prop_enumerable(i64 v, const char *key) {
  * dynjson.c's walkers stay unchanged. */
 void __kml_dynobj_set(void *o, const char *key, i64 v) {
     Bag *b = (Bag *)o;
-    i64 tag = nb_tag(v), pay = nb_pay(v);
+    i64 tag = kml_nb_tag(v), pay = kml_nb_pay(v);
     i64 idx = __kml_dynobj_find(o, key);
     if (idx >= 0) {
         b->props[idx].tag = tag;
@@ -293,7 +265,7 @@ i64 __kml_dynobj_rawtag_at(void *o, i64 i) { return ((Bag *)o)->props[i].tag; }
 i64 __kml_dynobj_rawpay_at(void *o, i64 i) { return ((Bag *)o)->props[i].pay; }
 i64 __kml_dynobj_get_at(void *o, i64 i) {
     Prop *p = &((Bag *)o)->props[i];
-    return nb_pack(p->tag, p->pay);
+    return kml_nb_pack(p->tag, p->pay);
 }
 
 static void *objproto; /* Object.prototype's bag, below */
@@ -309,6 +281,60 @@ __attribute__((weak)) i64 __kml_classref_get(void *p, const char *key) { (void)p
 i64 __kml_dynobj_get_recv(void *o, const char *key, i64 recv);
 i64 __kml_dynobj_get(void *o, const char *key) { return __kml_dynobj_get_recv(o, key, BOX_DYNOBJ(o)); }
 
+/* A static object (a class instance, an object of a static type) as a
+ * bag's prototype (`Object.create(c)`): a stand-in bag of its own, one per
+ * object, that the chain reads through to the object's layout and added
+ * properties (shape.c). */
+typedef struct StandIn {
+    void *bag, *obj;
+    struct StandIn *next;
+} StandIn;
+static StandIn *standins;
+__attribute__((weak)) i64 __kml_shape_get(void *obj, const char *key, int *found) {
+    (void)obj, (void)key;
+    *found = 0;
+    return 10;
+}
+static void *standin_obj(void *bag) {
+    for (StandIn *s = standins; s; s = s->next)
+        if (s->bag == bag) return s->obj;
+    return 0;
+}
+void *__kml_dynobj_standin(void *obj) {
+    for (StandIn *s = standins; s; s = s->next)
+        if (s->obj == obj) return s->bag;
+    StandIn *s = (StandIn *)kml_alloc(KML_HEAP_WORDS, sizeof(StandIn));
+    s->bag = __kml_dynobj_new();
+    s->obj = obj;
+    s->next = standins;
+    standins = s;
+    return s->bag;
+}
+__attribute__((weak)) int __kml_shape_expando_get_recv(void *obj, const char *key, i64 recv, i64 *out) {
+    (void)obj, (void)key, (void)recv, (void)out;
+    return 0;
+}
+__attribute__((weak)) int __kml_shape_has_field(void *obj, const char *key) {
+    (void)obj, (void)key;
+    return 0;
+}
+/* What a stand-in's object owns for key, if cur is one: a property added
+ * to it (an accessor run with recv as this), else a field of its layout.
+ * Its class's members are the stand-in's prototype's (its class's
+ * prototype object), read on with recv. */
+static int standin_read(void *cur, const char *key, i64 recv, i64 *out) {
+    if (!standins) return 0;
+    void *obj = standin_obj(cur);
+    if (!obj) return 0;
+    if (__kml_shape_expando_get_recv(obj, key, recv, out)) return 1;
+    if (!__kml_shape_has_field(obj, key)) return 0;
+    int found = 0;
+    i64 v = __kml_shape_get(obj, key, &found);
+    if (found <= 0) return 0;
+    *out = v;
+    return 1;
+}
+
 /* get_recv is [[Get]](key, receiver): a getter found on the chain runs
  * with recv as this (Reflect.get's third argument, `super.x`). */
 i64 __kml_dynobj_get_recv(void *o, const char *key, i64 recv) {
@@ -316,15 +342,19 @@ i64 __kml_dynobj_get_recv(void *o, const char *key, i64 recv) {
     if (((Bag *)o)->flags & F_PROXY) {
         void *target = PX_TARGET(o), *handler = PX_HANDLER(o);
         i64 trap = __kml_dynobj_get(handler, k_get.s);
-        if (nb_tag(trap) != 12) return target ? __kml_dynobj_get_recv(target, key, recv) : __kml_proxy_tget(PX_TBOX(o), key);
+        if (kml_nb_tag(trap) != 12) return target ? __kml_dynobj_get_recv(target, key, recv) : __kml_proxy_tget(PX_TBOX(o), key);
         i64 argv[3] = {PX_TBOX(o), (i64)key, recv};
-        return call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 3, argv);
+        return call_rec((void *)kml_nb_pay(trap), BOX_DYNOBJ(handler), 3, argv);
     }
     void *last = o;
     for (void *cur = o; cur; cur = ((Bag *)cur)->proto) {
         last = cur;
         i64 idx = __kml_dynobj_find(cur, key);
-        if (idx < 0) continue;
+        if (idx < 0) {
+            i64 sv;
+            if (standin_read(cur, key, recv, &sv)) return sv;
+            continue;
+        }
         if (!(__kml_dynobj_attrs_at(cur, idx) & A_ACCESSOR)) return __kml_dynobj_get_at(cur, idx);
         void **pair = (void **)__kml_dynobj_rawpay_at(cur, idx);
         if (!pair[0]) return 10;
@@ -334,7 +364,7 @@ i64 __kml_dynobj_get_recv(void *o, const char *key, i64 recv) {
      * statics. */
     for (void *cur = o; cur; cur = ((Bag *)cur)->proto) {
         i64 ref = __kml_classref_of_extra(cur);
-        if (ref) return __kml_classref_get((void *)nb_pay(ref), key);
+        if (ref) return __kml_classref_get((void *)kml_nb_pay(ref), key);
     }
     /* A chain ending at the unmodeled Object.prototype link (not an
      * explicit null prototype) reads on in Object.prototype's bag. */
@@ -359,7 +389,7 @@ i64 __kml_prim_proto_get(i64 recv, const char *key) {
     /* Its class's prototype first (Number.prototype.toFixed). */
     i64 pb = __kml_prim_proto_of(recv);
     if (pb) {
-        void *p = (void *)nb_pay(pb);
+        void *p = (void *)kml_nb_pay(pb);
         i64 idx = __kml_dynobj_find(p, key);
         if (idx >= 0) {
             if (!(__kml_dynobj_attrs_at(p, idx) & A_ACCESSOR)) return __kml_dynobj_get_at(p, idx);
@@ -386,13 +416,13 @@ i64 __kml_dynobj_setv_recv(void *o, const char *key, i64 v, i64 recv);
 static i64 px_set_recv(void *px, const char *key, i64 v, i64 recv) {
     void *target = PX_TARGET(px), *handler = PX_HANDLER(px);
     i64 trap = __kml_dynobj_get(handler, k_set.s);
-    if (nb_tag(trap) != 12) {
+    if (kml_nb_tag(trap) != 12) {
         if (!target) return (__kml_proxy_tset(PX_TBOX(px), key, v), 0);
         i64 r = __kml_dynobj_setv_recv(target, key, v, recv);
         return r == 4 ? 1 : r;
     }
     i64 argv[4] = {PX_TBOX(px), (i64)key, v, recv};
-    return tobool(call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 4, argv)) ? 0 : 1;
+    return tobool(call_rec((void *)kml_nb_pay(trap), BOX_DYNOBJ(handler), 4, argv)) ? 0 : 1;
 }
 
 i64 __kml_dynobj_setv(void *o, const char *key, i64 v) {
@@ -400,9 +430,9 @@ i64 __kml_dynobj_setv(void *o, const char *key, i64 v) {
     if (ob->flags & F_PROXY) {
         void *target = PX_TARGET(o), *handler = PX_HANDLER(o);
         i64 trap = __kml_dynobj_get(handler, k_set.s);
-        if (nb_tag(trap) != 12) return target ? __kml_dynobj_setv(target, key, v) : (__kml_proxy_tset(PX_TBOX(o), key, v), 0);
+        if (kml_nb_tag(trap) != 12) return target ? __kml_dynobj_setv(target, key, v) : (__kml_proxy_tset(PX_TBOX(o), key, v), 0);
         i64 argv[4] = {PX_TBOX(o), (i64)key, v, BOX_DYNOBJ(o)};
-        return tobool(call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 4, argv)) ? 0 : 1;
+        return tobool(call_rec((void *)kml_nb_pay(trap), BOX_DYNOBJ(handler), 4, argv)) ? 0 : 1;
     }
     void *last = o;
     for (void *cur = o; cur; cur = ((Bag *)cur)->proto) {
@@ -421,8 +451,8 @@ i64 __kml_dynobj_setv(void *o, const char *key, i64 v) {
         if (!(attrs & A_WRITABLE) || (((Bag *)cur)->flags & F_MODULE)) return 1;
         if (cur == o) {
             Prop *p = &ob->props[idx];
-            p->tag = nb_tag(v);
-            KML_STORE_PTR(&p->pay, nb_pay(v));
+            p->tag = kml_nb_tag(v);
+            KML_STORE_PTR(&p->pay, kml_nb_pay(v));
             return 0;
         }
         last = 0; /* an inherited writable property: shadowed below */
@@ -455,7 +485,7 @@ i64 __kml_dynobj_setv(void *o, const char *key, i64 v) {
  * extensible, 3 accessor without a setter, 4 recv is not a dynamic object
  * (the caller then stores to recv as an ordinary assignment). */
 i64 __kml_dynobj_setv_recv(void *o, const char *key, i64 v, i64 recv) {
-    if (recv == 10 || (nb_tag(recv) == 10 && (void *)nb_pay(recv) == o)) return __kml_dynobj_setv(o, key, v);
+    if (recv == 10 || (kml_nb_tag(recv) == 10 && (void *)kml_nb_pay(recv) == o)) return __kml_dynobj_setv(o, key, v);
     for (void *cur = o; cur; cur = ((Bag *)cur)->proto) {
         if (((Bag *)cur)->flags & F_PROXY) return px_set_recv(cur, key, v, recv);
         i64 idx = __kml_dynobj_find(cur, key);
@@ -471,8 +501,8 @@ i64 __kml_dynobj_setv_recv(void *o, const char *key, i64 v, i64 recv) {
         if (!(attrs & A_WRITABLE)) return 1;
         break;
     }
-    if (nb_tag(recv) != 10) return 4;
-    void *r = (void *)nb_pay(recv);
+    if (kml_nb_tag(recv) != 10) return 4;
+    void *r = (void *)kml_nb_pay(recv);
     i64 idx = __kml_dynobj_find(r, key);
     if (idx >= 0) {
         i64 attrs = __kml_dynobj_attrs_at(r, idx);
@@ -492,7 +522,7 @@ i64 __kml_dynobj_setv_recv(void *o, const char *key, i64 v, i64 recv) {
 i64 __kml_prim_proto_set(i64 recv, const char *key, i64 v) {
     i64 pb = __kml_prim_proto_of(recv);
     if (!pb) return 1;
-    return __kml_dynobj_setv_recv((void *)nb_pay(pb), key, v, recv) == 0 ? 0 : 1;
+    return __kml_dynobj_setv_recv((void *)kml_nb_pay(pb), key, v, recv) == 0 ? 0 : 1;
 }
 
 /* has = own-only (Object.hasOwn / hasOwnProperty). */
@@ -515,13 +545,14 @@ _Bool __kml_dynobj_has_chain(void *o, const char *key) {
     if (((Bag *)o)->flags & F_PROXY) {
         void *target = PX_TARGET(o), *handler = PX_HANDLER(o);
         i64 trap = __kml_dynobj_get(handler, k_has.s);
-        if (nb_tag(trap) != 12) return target ? __kml_dynobj_has_chain(target, key) : __kml_proxy_tget(PX_TBOX(o), key) != 10;
+        if (kml_nb_tag(trap) != 12) return target ? __kml_dynobj_has_chain(target, key) : __kml_proxy_tget(PX_TBOX(o), key) != 10;
         i64 argv[2] = {PX_TBOX(o), (i64)key};
-        return tobool(call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 2, argv));
+        return tobool(call_rec((void *)kml_nb_pay(trap), BOX_DYNOBJ(handler), 2, argv));
     }
     void *last = o;
     for (void *cur = o; cur; cur = ((Bag *)cur)->proto) {
-        if (__kml_dynobj_has(cur, key)) return 1;
+        i64 sv;
+        if (__kml_dynobj_has(cur, key) || standin_read(cur, key, BOX_DYNOBJ(o), &sv)) return 1;
         last = cur;
     }
     /* A chain ending at an unmodeled Object.prototype link (not an explicit
@@ -708,6 +739,7 @@ i64 __kml_ctor_this(void *proto) {
     return BOX_DYNOBJ(obj);
 }
 
+int __kml_is_class_proto(void *o);
 void *__kml_class_proto(void **slot, i64 n, const char *const *keys, const i64 *vals, const i64 *sets, void *parent) {
     if (*slot) return *slot;
     void *b = __kml_dynobj_new();
@@ -724,6 +756,66 @@ void *__kml_class_proto(void **slot, i64 n, const char *const *keys, const i64 *
     *slot = b;
     class_proto_add(b);
     return b;
+}
+
+/* Method records cloned for an evaluation's prototype: the clone and the
+ * class's record it stands for (one function per evaluation, the same
+ * code). */
+static void **fnclone_of, **fnclone_orig;
+static i64 n_fnclone, cap_fnclone;
+
+static const void *fnclone_origin(const void *p) {
+    for (i64 i = 0; i < n_fnclone; i++)
+        if (fnclone_of[i] == p) return fnclone_orig[i];
+    return p;
+}
+
+/* __kml_dynobj_clone_methods gives each own method of bag (a dynamic
+ * function record, `{fn, env, arity}`) a record of its own. */
+void __kml_dynobj_clone_methods(void *bag) {
+    Bag *b = (Bag *)bag;
+    for (i64 i = 0; i < b->count; i++) {
+        Prop *p = &b->props[i];
+        if (p->tag != 12 || (p->attrs & A_ACCESSOR) || !p->pay || !strcmp(p->key, "constructor")) continue;
+        i64 *src = (i64 *)(uintptr_t)p->pay;
+        i64 *dst = kml_calloc(KML_HEAP_WORDS, 3, sizeof(i64));
+        if (!dst) abort();
+        dst[0] = src[0];
+        KML_STORE_PTR((void **)&dst[1], (void *)src[1]);
+        dst[2] = src[2];
+        if (n_fnclone == cap_fnclone) {
+            i64 cap = cap_fnclone ? cap_fnclone * 2 : 16;
+            void **a = kml_calloc(KML_HEAP_WORDS, (size_t)cap, sizeof(void *));
+            void **o = kml_calloc(KML_HEAP_WORDS, (size_t)cap, sizeof(void *));
+            if (!a || !o) abort();
+            for (i64 j = 0; j < n_fnclone; j++) {
+                KML_STORE_PTR(&a[j], fnclone_of[j]);
+                KML_STORE_PTR(&o[j], fnclone_orig[j]);
+            }
+            fnclone_of = a;
+            fnclone_orig = o;
+            cap_fnclone = cap;
+        }
+        KML_STORE_PTR(&fnclone_of[n_fnclone], dst);
+        KML_STORE_PTR(&fnclone_orig[n_fnclone], src);
+        n_fnclone++;
+        KML_STORE_PTR(&p->pay, (i64)(uintptr_t)dst);
+    }
+}
+
+/* __kml_proto_method_now is key's value on a class's prototype object bag
+ * as it is now; *replaced whether that is no longer rec, the class's own
+ * method (`C.prototype.m = f`, or deleted). */
+i64 __kml_proto_method_now(void *bag, const char *key, const void *rec, int *replaced) {
+    i64 v = __kml_dynobj_get(bag, key);
+    *replaced = fnclone_origin((const void *)(uintptr_t)(v & ~7LL)) != rec;
+    return v;
+}
+
+/* __kml_class_proto_mark records b, a prototype object made otherwise
+ * (one evaluation's of a class, unitreg.c), as a class's. */
+void __kml_class_proto_mark(void *b) {
+    if (b && !__kml_is_class_proto(b)) class_proto_add(b);
 }
 
 /* Whether o is a class's prototype object (__kml_class_proto made it): a
@@ -745,7 +837,7 @@ void __kml_dynobj_array_exotic(void *o) {
     Bag *b = (Bag *)o;
     if (b->flags & F_ARRAY) return;
     b->flags |= F_ARRAY;
-    __kml_dynobj_set(o, "length", nb_pack(0, 0));
+    __kml_dynobj_set(o, "length", kml_nb_pack(0, 0));
     b->props[__kml_dynobj_find(o, "length")].attrs = A_WRITABLE;
     array_proto_bag = o;
     array_iter_orig = __kml_dynobj_get(o, k_iterator.s);
@@ -765,16 +857,37 @@ int __kml_array_iter_override(const char *key, i64 *out) {
 /* The [Symbol.iterator] method an iteration of v calls, given m as read:
  * an array's is Array.prototype's as it is now. */
 i64 __kml_iter_method_of(i64 v, i64 m) {
-    i64 t = (i64)nb_tag(v), cur;
+    i64 t = (i64)kml_nb_tag(v), cur;
     if ((t == 7 || t == 11) && __kml_array_iter_override(k_iterator.s, &cur)) return cur;
     return m;
 }
 
 /* Whether arrays iterate through the protocol: Array.prototype's
  * [Symbol.iterator] is no longer the one it was made with. */
+/* %ArrayIteratorPrototype%'s bag once made, and its `next` as made: an
+ * array iterator steps natively while the property is still that one. */
+static void *arriter_proto_bag;
+static i64 arriter_next_orig = 10;
+
+void __kml_arriter_proto_register(void *o) {
+    if (arriter_proto_bag) return;
+    arriter_proto_bag = o;
+    arriter_next_orig = __kml_dynobj_get(o, "next");
+}
+
+/* 1 with %ArrayIteratorPrototype%.next as it is now, once the program
+ * replaced or deleted it; else 0. */
+int __kml_arriter_next_override(i64 *out) {
+    if (!arriter_proto_bag) return 0;
+    i64 cur = __kml_dynobj_get(arriter_proto_bag, "next");
+    if (cur == arriter_next_orig) return 0;
+    *out = cur;
+    return 1;
+}
+
 _Bool __kml_array_iter_patched(void) {
     i64 v;
-    return __kml_array_iter_override(k_iterator.s, &v) != 0;
+    return __kml_array_iter_override(k_iterator.s, &v) != 0 || __kml_arriter_next_override(&v) != 0;
 }
 
 _Bool __kml_dynobj_is_array_exotic(void *o) { return (((Bag *)o)->flags & F_ARRAY) != 0; }
@@ -794,10 +907,10 @@ void *__kml_dynobj_get_proto(void *o);
    reaches Object.prototype; a null-prototype bag's does not, nor does
    Object.prototype's own. */
 _Bool __kml_instanceof_object(i64 v) {
-    i64 t = nb_tag(v);
+    i64 t = kml_nb_tag(v);
     if (t == 10) {
         void *op = __kml_object_prototype();
-        void *o = __kml_dynobj_get_proto((void *)nb_pay(v));
+        void *o = __kml_dynobj_get_proto((void *)kml_nb_pay(v));
         for (int hops = 0; o && hops < 100000; hops++) {
             if (o == op) return 1;
             o = __kml_dynobj_get_proto(o);
@@ -812,6 +925,10 @@ _Bool __kml_instanceof_object(i64 v) {
 __attribute__((weak)) long long __kml_fn_bag_owner(void *bag) { (void)bag; return 0; }
 long long __kml_dynobj_proto_box(void *o) {
     Bag *b = (Bag *)o;
+    if (b->proto && standins) {
+        void *obj = standin_obj(b->proto);
+        if (obj) return kml_nb_pack(6, (i64)obj); /* the static object itself */
+    }
     if (b->proto) {
         if (((Bag *)b->proto)->flags & F_FUNC) {
             long long fn = __kml_fn_bag_owner(b->proto);
@@ -826,6 +943,10 @@ long long __kml_dynobj_proto_box(void *o) {
  * function. */
 long long __kml_dynobj_box_bag(void *o) {
     if (!o) return 2; /* null */
+    if (standins) {
+        void *obj = standin_obj(o);
+        if (obj) return kml_nb_pack(6, (i64)obj); /* a static object's stand-in: the object */
+    }
     if (((Bag *)o)->flags & F_FUNC) {
         long long fn = __kml_fn_bag_owner(o);
         if (fn) return fn;
@@ -840,12 +961,12 @@ void *__kml_dynobj_get_proto(void *o) {
          * target's; the trap returns an object or null. */
         void *target = PX_TARGET(o), *handler = PX_HANDLER(o);
         i64 trap = __kml_dynobj_get(handler, k_getPrototypeOf.s);
-        if (nb_tag(trap) != 12) return target ? __kml_dynobj_get_proto(target) : NULL;
+        if (kml_nb_tag(trap) != 12) return target ? __kml_dynobj_get_proto(target) : NULL;
         i64 argv[1] = {PX_TBOX(o)};
-        i64 r = call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 1, argv);
-        if (nb_tag(r) == 4) return NULL;
-        if (nb_tag(r) != 10) throw_type_error3("'getPrototypeOf' on proxy: trap returned neither object nor null", "", "");
-        return (void *)nb_pay(r);
+        i64 r = call_rec((void *)kml_nb_pay(trap), BOX_DYNOBJ(handler), 1, argv);
+        if (kml_nb_tag(r) == 4) return NULL;
+        if (kml_nb_tag(r) != 10) throw_type_error3("'getPrototypeOf' on proxy: trap returned neither object nor null", "", "");
+        return (void *)kml_nb_pay(r);
     }
     if (b->proto) return b->proto;
     /* An ordinary object's [[Prototype]] is Object.prototype, whose chain is
@@ -860,9 +981,9 @@ _Bool __kml_dynobj_delete(void *o, const char *key) {
     if (b->flags & F_PROXY) {
         void *target = PX_TARGET(o), *handler = PX_HANDLER(o);
         i64 trap = __kml_dynobj_get(handler, k_deleteProperty.s);
-        if (nb_tag(trap) != 12) return target ? __kml_dynobj_delete(target, key) : 1;
+        if (kml_nb_tag(trap) != 12) return target ? __kml_dynobj_delete(target, key) : 1;
         i64 argv[2] = {PX_TBOX(o), (i64)key};
-        return tobool(call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 2, argv));
+        return tobool(call_rec((void *)kml_nb_pay(trap), BOX_DYNOBJ(handler), 2, argv));
     }
     i64 idx = __kml_dynobj_find(o, key);
     if (idx < 0) return 1; /* deleting a missing property is still true */
@@ -1235,8 +1356,8 @@ JS_KEY(k_apply, "apply");
  * "function", callable. */
 int __kml_proxy_is_fn(i64 v) {
     for (int depth = 0; depth < 1024; depth++) {
-        if (nb_tag(v) != 10) return nb_tag(v) == 12 && depth > 0;
-        void *o = (void *)nb_pay(v);
+        if (kml_nb_tag(v) != 10) return kml_nb_tag(v) == 12 && depth > 0;
+        void *o = (void *)kml_nb_pay(v);
         if (!(((Bag *)o)->flags & F_PROXY)) return 0;
         v = PX_TBOX(o);
     }
@@ -1246,27 +1367,27 @@ extern void *__kml_dynarr_new(i64 cap0);
 extern void __kml_dynarr_push(void *ap, i64 v);
 int __kml_proxy_call(i64 v, i64 thisv, i64 argc, i64 *argv, i64 *out) {
     for (int depth = 0; depth < 1024; depth++) {
-        if (nb_tag(v) != 10) return 0;
-        void *o = (void *)nb_pay(v);
+        if (kml_nb_tag(v) != 10) return 0;
+        void *o = (void *)kml_nb_pay(v);
         if (!(((Bag *)o)->flags & F_PROXY)) return 0;
         i64 t = PX_TBOX(o);
-        if (nb_tag(t) == 10) {
-            void *to = (void *)nb_pay(t);
+        if (kml_nb_tag(t) == 10) {
+            void *to = (void *)kml_nb_pay(t);
             if (!(((Bag *)to)->flags & F_PROXY)) return 0;
-        } else if (nb_tag(t) != 12) {
+        } else if (kml_nb_tag(t) != 12) {
             return 0;
         }
         void *handler = PX_HANDLER(o);
         i64 trap = handler ? __kml_dynobj_get(handler, k_apply.s) : 10;
-        if (nb_tag(trap) == 12) {
+        if (kml_nb_tag(trap) == 12) {
             void *arr = __kml_dynarr_new(argc);
             for (i64 i = 0; i < argc; i++) __kml_dynarr_push(arr, argv[i]);
             i64 targv[3] = {t, thisv, (i64)arr | 6};
-            *out = call_rec((void *)nb_pay(trap), BOX_DYNOBJ(handler), 3, targv);
+            *out = call_rec((void *)kml_nb_pay(trap), BOX_DYNOBJ(handler), 3, targv);
             return 1;
         }
-        if (nb_tag(t) == 12) {
-            *out = call_rec((void *)nb_pay(t), thisv, argc, argv);
+        if (kml_nb_tag(t) == 12) {
+            *out = call_rec((void *)kml_nb_pay(t), thisv, argc, argv);
             return 1;
         }
         v = t;
@@ -1297,8 +1418,8 @@ long long __kml_dyn_bound(long long *env, long long callThis, long long argc, lo
 static const struct { i64 n; char s[15]; } k_gpo = {KML_STR_ASCII_HDR(14), "getPrototypeOf"};
 i64 __kml_dynobj_proxy_proto_src(i64 v) {
     for (int n = 0; n < 1024; n++) {
-        if (nb_tag(v) != 10) return v;
-        void *o = (void *)nb_pay(v);
+        if (kml_nb_tag(v) != 10) return v;
+        void *o = (void *)kml_nb_pay(v);
         if (!o || !(((Bag *)o)->flags & F_PROXY)) return v;
         void *h = PX_HANDLER(o);
         if (h && __kml_dynobj_has(h, k_gpo.s)) return v;
@@ -1311,18 +1432,25 @@ i64 __kml_dynobj_proxy_proto_src(i64 v) {
  * built takes the prototype of the instance being constructed (new.target's
  * prototype), when it is an object of this file. */
 void __kml_dynobj_adopt_proto(i64 built, i64 proto) {
-    if (nb_tag(built) != 10 || nb_tag(proto) != 10) return;
-    void *o = (void *)nb_pay(built);
-    if (o && !(((Bag *)o)->flags & F_PROXY)) __kml_dynobj_set_proto(o, (void *)nb_pay(proto));
+    if (kml_nb_tag(proto) != 10) return;
+    void *o = (void *)kml_nb_pay(built);
+    if (kml_nb_tag(built) == 6 && o && (*(i64 *)o & (0x7FFFLL << 32)) == (0x4B4DLL << 32)) {
+        /* An object with a header (a builtin's handle, a class instance
+         * the base made without taking the pending prototype). */
+        __kml_shape_set_proto(o, (void *)kml_nb_pay(proto));
+        return;
+    }
+    if (kml_nb_tag(built) != 10) return;
+    if (o && !(((Bag *)o)->flags & F_PROXY)) __kml_dynobj_set_proto(o, (void *)kml_nb_pay(proto));
 }
 
 /* A class evaluated again (declared in a function) re-reads its heritage:
  * its prototype object's [[Prototype]] becomes the newly read one (null or
  * an object of this file). */
 void __kml_dynobj_relink_proto(i64 obj, i64 proto) {
-    if (nb_tag(obj) != 10) return;
-    void *o = (void *)nb_pay(obj);
+    if (kml_nb_tag(obj) != 10) return;
+    void *o = (void *)kml_nb_pay(obj);
     if (!o || (((Bag *)o)->flags & F_PROXY)) return;
-    if (nb_tag(proto) == 4) __kml_dynobj_set_proto(o, 0); /* null */
-    else if (nb_tag(proto) == 10) __kml_dynobj_set_proto(o, (void *)nb_pay(proto));
+    if (kml_nb_tag(proto) == 4) __kml_dynobj_set_proto(o, 0); /* null */
+    else if (kml_nb_tag(proto) == 10) __kml_dynobj_set_proto(o, (void *)kml_nb_pay(proto));
 }

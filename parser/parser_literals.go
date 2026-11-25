@@ -137,7 +137,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 						return nil, err
 					}
 				}
-				props = append(props, ast.ObjectProperty{Key: wk, Value: val})
+				props = append(props, ast.ObjectProperty{Key: wk, WellKnown: symbolKeyName(keyExpr), Value: val})
 				if !p.match(lexer.COMMA) {
 					break
 				}
@@ -183,7 +183,7 @@ func (p *Parser) parseObjectLiteral() (*ast.ObjectLiteral, error) {
 					return nil, err
 				}
 				if wk, ok := wellKnownSymbolMemberName(keyExpr); ok {
-					prop.Key = wk
+					prop.Key, prop.WellKnown = wk, symbolKeyName(keyExpr)
 				} else {
 					prop.KeyExpr = keyExpr
 				}
@@ -758,11 +758,35 @@ func (p *Parser) destructuredArrowParamLookahead() bool {
 func (p *Parser) parseTemplateLiteral() (ast.Expression, error) {
 	tok := p.advance() // consume TEMPLATE_HEAD
 	pos := posOf(tok)
+	if err := untaggedLegacyEscape(tok.LegacyEscape, tok); err != nil {
+		return nil, err
+	}
+	// (saved around a template nested in an expression)
+	saved := p.tmplLegacy
+	p.tmplLegacy = ""
 	quasis, exprs, err := p.parseTemplateRest(tok.Literal)
+	got := p.tmplLegacy
+	p.tmplLegacy = saved
 	if err != nil {
 		return nil, err
 	}
+	if err := untaggedLegacyEscape(got, tok); err != nil {
+		return nil, err
+	}
 	return ast.NewTemplateLiteral(quasis, exprs, pos), nil
+}
+
+// untaggedLegacyEscape is an untagged template's early error for a legacy
+// octal (`\01`) or `\8`/`\9` escape, in sloppy code too (a tagged one's
+// cooked string is undefined instead).
+func untaggedLegacyEscape(esc string, at lexer.Token) error {
+	if esc == "" {
+		return nil
+	}
+	if esc[1] == '8' || esc[1] == '9' {
+		return errAtPos(posOf(at), diag.TemplateDecimalEscape)
+	}
+	return errAtPos(posOf(at), diag.TemplateOctalEscape)
 }
 
 // parseTemplateRest scans the TEMPLATE_MIDDLE*/TEMPLATE_TAIL continuation of
@@ -794,10 +818,16 @@ func (p *Parser) parseTemplateRestRaw(headQuasi, headRaw string) ([]string, []st
 		next := p.peek()
 		switch next.Type {
 		case lexer.TEMPLATE_MIDDLE:
+			if p.tmplLegacy == "" {
+				p.tmplLegacy = next.LegacyEscape
+			}
 			quasis = append(quasis, next.Literal)
 			rawQuasis = append(rawQuasis, next.Raw)
 			p.advance()
 		case lexer.TEMPLATE_TAIL:
+			if p.tmplLegacy == "" {
+				p.tmplLegacy = next.LegacyEscape
+			}
 			quasis = append(quasis, next.Literal)
 			rawQuasis = append(rawQuasis, next.Raw)
 			p.advance()
@@ -856,10 +886,14 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		p.advance()
 		sl := ast.NewStringLiteral(tok.Literal, posOf(tok))
 		sl.Plain = tok.End-tok.Pos == len(tok.Literal)+2
+		sl.LegacyEscape = tok.LegacyEscape
 		return sl, nil
 
 	case lexer.TEMPLATE_NO_SUB:
 		p.advance()
+		if err := untaggedLegacyEscape(tok.LegacyEscape, tok); err != nil {
+			return nil, err
+		}
 		return ast.NewTemplateLiteral([]string{tok.Literal}, nil, posOf(tok)), nil
 
 	case lexer.TEMPLATE_HEAD:
@@ -870,11 +904,13 @@ func (p *Parser) parsePrimary() (ast.Expression, error) {
 		// Desugars to the same node `new RegExp(pattern, flags)` produces —
 		// codegen only ever has one shape to handle. See
 		// ast.NewRegExpExpression's doc comment.
-		return ast.NewNewRegExpExpression(
+		re := ast.NewNewRegExpExpression(
 			ast.NewStringLiteral(tok.Literal, posOf(tok)),
 			ast.NewStringLiteral(tok.RegexFlags, posOf(tok)),
 			posOf(tok),
-		), nil
+		)
+		re.Literal = true
+		return re, nil
 
 	case lexer.TRUE:
 		p.advance()

@@ -725,12 +725,28 @@ func TestE2EProcessGetUIDFamily(t *testing.T) {
 	}
 	// POSIX credential reads (ADR-00428) — non-negative numbers, and the
 	// effective ids match the real ones under a normal (non-setuid) run.
+	// (Optional where Windows lacks them: the typed call asserts presence.)
 	assertOutput(t, `
-console.log(process.getuid() >= 0)
-console.log(process.getgid() >= 0)
-console.log(process.geteuid() === process.getuid())
-console.log(process.getegid() === process.getgid())
-`, "true\ntrue\ntrue\ntrue")
+console.log(process.getuid!() >= 0)
+console.log(process.getgid!() >= 0)
+console.log(process.geteuid!() === process.getuid!())
+console.log(process.getegid!() === process.getgid!())
+if (process.getgroups) console.log(process.getgroups().includes(process.getegid!()))
+`, "true\ntrue\ntrue\ntrue\ntrue")
+	// A bare call of the optional method is TypeScript's TS2722.
+	assertCLICompileError(t, false, "console.log(process.getuid());\n", "possibly 'undefined'")
+}
+
+// process.getgroups: the supplementary groups with the effective group id
+// among them, as Node gives.
+func TestE2EProcessGetgroupsJS(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("process.getgroups does not exist in Node on Windows")
+	}
+	assertSameAsNodeCLIJS(t, `
+const g = process.getgroups();
+console.log(Array.isArray(g), g.length > 0, g.includes(process.getegid()), g.every(n => Number.isInteger(n) && n >= 0));
+`)
 }
 
 // In untyped JS the family's absence on Windows is Node's runtime TypeError,
@@ -754,9 +770,9 @@ func TestE2EProcessGetUIDWindowsTypeError(t *testing.T) {
 		t.Skip("the process.getuid family exists on POSIX")
 	}
 	assertOutput(t, `
-if (process.platform !== 'win32') console.log(process.getuid())
+if (process.platform !== 'win32') console.log(process.getuid!())
 console.log("guarded")
-try { process.getgid() } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
+try { process.getgid!() } catch (e) { console.log(e instanceof TypeError, (e as Error).message) }
 `, "guarded\ntrue process.getgid is not a function")
 }
 
@@ -916,4 +932,122 @@ const n = require("net").createServer().listen(0, () => { console.log(info().sor
 setTimeout(() => {}, 1);
 console.log(process.getActiveResourcesInfo().filter((type) => type === "Timeout").length);
 `)
+}
+
+// process.resourceUsage: getrusage under Node's names and units.
+func TestE2EProcessResourceUsageJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+const r = process.resourceUsage();
+const fields = ['userCPUTime','systemCPUTime','maxRSS','sharedMemorySize','unsharedDataSize','unsharedStackSize','minorPageFault','majorPageFault','swappedOut','fsRead','fsWrite','ipcSent','ipcReceived','signalsCount','voluntaryContextSwitches','involuntaryContextSwitches'];
+console.log(JSON.stringify(Object.keys(r).sort()) === JSON.stringify(fields.slice().sort()));
+fields.forEach((n) => { if (typeof r[n] !== 'number' || r[n] < 0) console.log('bad', n); });
+console.log(r.maxRSS > 1000 && r.maxRSS < 10000000, r.userCPUTime >= 0);
+`)
+}
+
+// A program that cannot spawn a process takes -p, -e and -i as its own
+// arguments, as Node hands them to a script: the interpreter guard is for
+// programs that may re-run themselves.
+func TestE2EProcessArgvKeepsInterpreterLikeFlags(t *testing.T) {
+	bin := buildBinary(t, `console.log(process.argv.slice(2).join(","), process.execPath.length > 0);`)
+	out, err := exec.Command(bin, "-p", "x", "--eval", "y", "-i").CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if got, want := strings.TrimSpace(string(out)), "-p,x,--eval,y,-i true"; got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Node's --unhandled-rejections modes, read from NODE_OPTIONS as Node reads
+// them: the 'exit' code and process.exitCode, the warnings (an object's
+// V8 text, an Error's stack) and the rejection ids, strict's uncaught
+// throw, none's silence, an invalid mode's exit 9 — stdout, stderr (pid,
+// program name and stack frames aside) and the status, against Node.
+func TestE2EUnhandledRejectionsModes(t *testing.T) {
+	unhandledModesVsNode(t, `process.on("exit", (c) => console.log("exit", c, process.exitCode));
+Promise.reject({ a: 1 });
+Promise.reject(new Error("boom"));
+setTimeout(() => console.log("still alive"), 10);
+`)
+}
+
+// The warnings go through process.emitWarning: a 'warning' listener sees
+// both, and --no-warnings leaves only the listener's output.
+func TestE2EUnhandledRejectionsWarningEvent(t *testing.T) {
+	unhandledModesVsNode(t, `process.on("warning", (w) => console.log("warning event:", w.name, String(w.message).slice(0, 30)));
+Promise.reject({ a: 1 });
+setTimeout(() => console.log("still alive"), 10);
+`)
+}
+
+func unhandledModesVsNode(t *testing.T, src string) {
+	t.Helper()
+	node := nodeStripTypesBin(t)
+	bin := buildBinary(t, src)
+	dir := tempDir(t)
+	js := filepath.Join(dir, "prog.js") // no type stripping: no warning of Node's own first
+	if err := os.WriteFile(js, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	pidRE := regexp.MustCompile(`\(node:\d+\)`)
+	helperRE := regexp.MustCompile("`[^ `]+ --trace-warnings")
+	invalidRE := regexp.MustCompile(`^\S+: invalid value`)
+	norm := func(s string) string {
+		var out []string
+		for _, ln := range strings.Split(s, "\n") {
+			if strings.HasPrefix(ln, "    at ") || strings.TrimSpace(ln) == "" || strings.HasPrefix(ln, "node:internal") ||
+				strings.Contains(ln, "new UnhandledPromiseRejection(reason)") || strings.TrimSpace(ln) == "^" || strings.HasPrefix(ln, "Node.js v") {
+				continue
+			}
+			ln = pidRE.ReplaceAllString(ln, "(node:PID)")
+			ln = helperRE.ReplaceAllString(ln, "`X --trace-warnings")
+			ln = invalidRE.ReplaceAllString(ln, "X: invalid value")
+			out = append(out, ln)
+		}
+		return strings.Join(out, "\n")
+	}
+	run := func(env string, name string, args ...string) (string, string, int) {
+		cmd := exec.Command(name, args...)
+		cmd.Env = append(os.Environ(), "NODE_OPTIONS="+env)
+		var so, se strings.Builder
+		cmd.Stdout, cmd.Stderr = &so, &se
+		err := cmd.Run()
+		code := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			code = ee.ExitCode()
+		} else if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		return so.String(), norm(se.String()), code
+	}
+	for _, mode := range []string{"", "throw", "none", "warn", "warn-with-error-code", "strict", "--unhandled-rejections none", "--no-warnings --unhandled-rejections=warn", "bogus"} {
+		env := mode
+		if mode != "" && !strings.HasPrefix(mode, "--") {
+			env = "--unhandled-rejections=" + mode
+		}
+		oOut, oErr, oCode := run(env, bin)
+		nOut, nErr, nCode := run(env, node, js)
+		if oOut != nOut || oErr != nErr || oCode != nCode {
+			t.Errorf("NODE_OPTIONS=%q differs from node:\n--- ours (exit %d) ---\n%s\n%s\n--- node (exit %d) ---\n%s\n%s", env, oCode, oOut, oErr, nCode, nOut, nErr)
+		}
+	}
+}
+
+// An uncaught exception nothing handles ends the program after its report
+// with the 'exit' listeners, process.exitCode 1, as Node's does.
+func TestE2EUncaughtRunsExitListeners(t *testing.T) {
+	bin := buildBinary(t, `process.on("exit", (c) => console.log("exit", c, process.exitCode));
+console.log("before");
+throw new Error("top");
+`)
+	cmd := exec.Command(bin)
+	out, err := cmd.Output()
+	ee, ok := err.(*exec.ExitError)
+	if !ok || ee.ExitCode() != 1 {
+		t.Fatalf("want exit status 1, got %v", err)
+	}
+	if got := strings.TrimRight(string(out), "\n"); got != "before\nexit 1 1" {
+		t.Fatalf("stdout %q, want %q", got, "before\nexit 1 1")
+	}
 }

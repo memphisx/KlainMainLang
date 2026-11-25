@@ -85,28 +85,3 @@ func (e *Emitter) emitBoxedBigIntLoad(cellPtr string) Value {
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", b, slot))
 	return Value{Ref: b, Ty: BigIntType()}
 }
-
-// ensureBoxedBigIntHooks declares the two runtime hooks the always-present
-// dynamic runtime (any_eq, dynjson.c) calls on a bigint cell. They are
-// *defined* at finalize (emitBoxedBigIntHooksFinalize): only then is it known
-// whether the program links the bigint runtime at all — without it no cell
-// can exist, and the hooks are inert stubs.
-func (e *Emitter) ensureBoxedBigIntHooks() {
-	if e.usedBigIntBoxHooks {
-		return
-	}
-	e.usedBigIntBoxHooks = true
-	e.ensureStrHeaderRuntime()
-	// No declares: IR may call a function defined later in the module, and
-	// both hooks are defined at finalize.
-}
-
-// emitBoxedBigIntHooksFinalize declares the C hooks (boxsrc/bigintbox.c:
-// decimal digits of a cell's bigint, value equality of two cells' bigints;
-// bigintrel.c: a dynamic relational comparison). Without a bigint runtime no
-// cell can exist, and hooks.c's weak defaults answer.
-func (e *Emitter) emitBoxedBigIntHooksFinalize() {
-	if !e.usedBigIntBoxHooks {
-		return
-	}
-}

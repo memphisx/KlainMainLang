@@ -22,13 +22,6 @@ extern void __kml_dynarr_push(void *a, i64 v);
 extern void *__kml_dynobj_new(void);
 extern void __kml_dynobj_set(void *o, const char *key, i64 v);
 
-/* __kml_nb_pack(tag, pay) for the tags this produces: 0 int, 1 float. */
-static i64 nb_double(double d) {
-    unsigned long long bits;
-    if (d != d) bits = 0x7FF8000000000000ULL;
-    else memcpy(&bits, &d, 8); /* scratch */
-    return (i64)(bits + (1ULL << 49));
-}
 
 static i64 from_scalar(void *n) {
     switch (__kml_json_kind(n)) {
@@ -36,8 +29,8 @@ static i64 from_scalar(void *n) {
     case 2: {
         const char *lex = __kml_json_num_lexeme(n);
         if (strchr(lex, '.') || strchr(lex, 'e') || strchr(lex, 'E') || strlen(lex) > 18)
-            return nb_double(strtod(lex, NULL));
-        return nb_double((double)atoll(lex));
+            return kml_nb_double(strtod(lex, NULL));
+        return kml_nb_double((double)atoll(lex));
     }
     case 3: return (i64)__kml_json_string_dup(n);
     default: return 2;

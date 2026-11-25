@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 32/33 (~97%) · **Strict Coverage**: 31/33 (~94%).
+**Coverage**: 34/34 (100%) · **Strict Coverage**: 32/34 (~94%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -27,6 +27,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.toString()` | ✅ | | • Identity on a string, matching JS |
 | `.toUpperCase()` | ✅ | | • Full Unicode Default Case Conversion, as Node: simple mappings on every plane plus the SpecialCasing expansions (`'ß'` → `'SS'`, `'ﬁ'` → `'FI'`, `'ᾀ'` → `'ἈΙ'`) ([ADR-01075](../adr/01/ADR-01075.md)) |
 | `.toLowerCase()` | ✅ | | • Full Unicode Default Case Conversion including the context-sensitive final sigma (`'ΟΔΥΣΣΕΥΣ'` → `'οδυσσευς'`) and the `'İ'` → `'i̇'` expansion ([ADR-01075](../adr/01/ADR-01075.md)) |
+| `.toLocaleUpperCase(locales?)` / `.toLocaleLowerCase(locales?)` | ✅ | | • The first requested locale's language picks ICU's language-sensitive mappings: Turkish and Azeri dotted and dotless `i`, Lithuanian dot above; any other maps as `toUpperCase`/`toLowerCase`. A malformed tag is V8's RangeError ([ADR-02060](../adr/02/ADR-02060.md)) |
 | `.repeat(n)` | ✅ | | |
 | `.padStart(len, pad?)` | ✅ | | • Empty pad string is a no-op, matching JS ([ADR-00004](../adr/00/ADR-00004.md)) |
 | `.padEnd(len, pad?)` | ✅ | | • Same empty-pad rule as `.padStart` ([ADR-00004](../adr/00/ADR-00004.md)) |
@@ -35,7 +36,7 @@ Format: [Status page format](README.md#status-page-format).
 | `.at(i)` | ✅ | | • Returns `string | undefined`: an out-of-range `i` (including a negative index past `-length`) is a real `undefined`, as in Node — narrow, `?? ''`, or `!` before use ([TDD-00187](../tdd/TDD-00187.md), [ADR-00830](../adr/00/ADR-00830.md)) |
 | `.charAt(i)` | ✅ | | • Never wraps a negative index from the end — always `""` for any out-of-range `i`, matching real JS's distinction from `.at()` ([ADR-00028](../adr/00/ADR-00028.md)) |
 | `.codePointAt(i)` | ✅ | | • An out-of-range index returns a real `undefined` (as in Node), so the result type is `number \| undefined` — narrow, `?? n`, or `!` before use. See [ADR-00782](../adr/00/ADR-00782.md), [TDD-00187](../tdd/TDD-00187.md)<br>• UTF-16 code units, as Node: a four-byte character is a surrogate pair ([ADR-01826](../adr/01/ADR-01826.md)) |
-| `.normalize()` | ❌ | | • Deliberately deferred, not attempted — needs real Unicode normalization tables (NFC/NFD/NFKC/NFKD) this compiler has no infrastructure for; a fake identity-only implementation would silently mis-normalize any non-ASCII composed/decomposed text |
+| `.normalize()` | ✅ | • The tables are Unicode 16.0 (the generating Python's), where Node 24's ICU is 17.0: a character new in 17.0 (`U+A7F1`) stays as it is | • NFC, NFD, NFKC and NFKD (UAX #15): decomposition, canonical ordering and recomposition over tables generated from Unicode's data (`tools/gencasemap/gennormalize.py`), Hangul arithmetically; an unknown form is Node's RangeError ([ADR-01987](../adr/01/ADR-01987.md)) |
 | `.match()` / `.matchAll()` | ✅ | | • PCRE2-backed; `.match()` is real JS-shaped and `.matchAll()` a `RegExp String Iterator` of exec results ([REGEXP.md](REGEXP.md)) |
 | `.search(pattern)` | ✅ | | • A plain-string `pattern` is coerced to a `RegExp` as in real JS — metacharacters are interpreted (`"a.b".search(".")` is `0`) ([ADR-00548](../adr/00/ADR-00548.md))<br>• A `RegExp` `pattern` runs a real PCRE2 search |
 | `.replaceAll()` | ✅ | | • An empty search matches JS's insert-between-every-char behavior — `"abc".replaceAll("", "-")` is `"-a-b-c-"` ([ADR-00003](../adr/00/ADR-00003.md)/[ADR-00547](../adr/00/ADR-00547.md))<br>• A function replacer is invoked once per occurrence with `(match, offset, string)` for a string-literal search as well as a RegExp search ([ADR-00697](../adr/00/ADR-00697.md)); the literal-search `offset` is a UTF-16 index, and an empty search calls the replacer at every position ([ADR-01826](../adr/01/ADR-01826.md)) |

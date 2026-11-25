@@ -275,12 +275,8 @@
       "name": "String literals (single/double quote)",
       "statusRow": "String literals (single/double quote)",
       "signature": "'a', \"b\"",
-      "badge": "caveats",
-      "description": "Single- and double-quoted strings; the full ES escape grammar is decoded (\\b \\f \\v, \\xHH, \\uHHHH, \\u{H…}, Annex B legacy octal, line continuation, and the NonEscapeCharacter rule). Templates share the same decoding.",
-      "differences": [
-        "An embedded NUL (`\\x00`, `\\0`) truncates the string, since strings are stored as NUL-terminated C strings.",
-        "No strict-mode `SyntaxError` for a legacy octal escape (accepted unconditionally)."
-      ],
+      "badge": "exact",
+      "description": "Single- and double-quoted strings; the full ES escape grammar is decoded (\\b \\f \\v, \\xHH, \\uHHHH, \\u{H…}, line continuation, and the NonEscapeCharacter rule), and an embedded NUL is an ordinary character. Annex B's legacy octal escapes and \\8/\\9 are sloppy JavaScript's: TypeScript and strict JavaScript reject them, as tsc and V8 do. Templates share the same decoding.",
       "seeAlso": [
         "lang.template"
       ],
@@ -922,8 +918,8 @@
       "name": "Promise.withResolvers",
       "statusRow": "Promise.withResolvers",
       "signature": "const { promise, resolve, reject } = Promise.withResolvers<T>()",
-      "badge": "caveats",
-      "description": "A pending promise and the functions that settle it, for settling from outside an executor. The type argument is explicit or taken from the declared type. Called with another constructor as this, it still builds a plain Promise.",
+      "badge": "exact",
+      "description": "A pending promise and the functions that settle it, for settling from outside an executor. The type argument is explicit or taken from the declared type. Called with another constructor as this, it builds that constructor's promise; a non-object this is a TypeError.",
       "seeAlso": [
         "lang.promiseexecutor",
         "lang.promiseresolvereject"
@@ -1122,11 +1118,8 @@
       "name": "Getters / setters on classes and object literals",
       "statusRow": "Getters / setters (get x() {} / set x(v) {}) on classes and object literals",
       "signature": "get x() { … } / set x(v) { … }",
-      "badge": "caveats",
-      "description": "get/set are contextual (not reserved). No new storage: an accessor is registered as an ordinary method under an internal dispatch key. obj.x / obj.x = v / compound assignment all route through the accessor, including from inside the class's own methods and through optional chaining. On object literals too: the literal is lowered to a synthetic anonymous class so the accessor body gets a real this reading/writing the object's own fields; its accessors are own enumerable properties (Object.keys, JSON, spread, x: [Getter] in console.log, getOwnPropertyDescriptor), and it can be passed where a structural type is expected.",
-      "differences": [
-        "Static accessors, and logical assignment (`&&=`/`||=`/`??=`) on an accessor, remain out of scope for V1."
-      ],
+      "badge": "exact",
+      "description": "get/set are contextual (not reserved). No new storage: an accessor is registered as an ordinary method under an internal dispatch key. obj.x / obj.x = v / compound and logical assignment all route through the accessor, static accessors too, including from inside the class's own methods and through optional chaining. On object literals too: the literal is lowered to a synthetic anonymous class so the accessor body gets a real this reading/writing the object's own fields; its accessors are own enumerable properties (Object.keys, JSON, spread, x: [Getter] in console.log, getOwnPropertyDescriptor), and it can be passed where a structural type is expected.",
       "seeAlso": [
         "lang.class"
       ],
@@ -1376,6 +1369,21 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/ArrayBuffer"
+      }
+    },
+    {
+      "id": "lang.extendsstream",
+      "name": "class X extends ReadableStream / WritableStream / TransformStream / CompressionStream / DecompressionStream",
+      "statusRow": "class X extends ReadableStream / WritableStream / TransformStream / CompressionStream / DecompressionStream",
+      "signature": "class Counter extends ReadableStream<number> { constructor(n: number) { let i = 0; super({ pull(c) { if (i < n) c.enqueue(i++); else c.close(); } }); } }",
+      "badge": "exact",
+      "description": "The instance holds the stream its construction made: super(source, strategy) builds it with the class's type arguments; the stream's members and methods act on it, for await, pipeTo/pipeThrough, a Response body and passing it where the stream is expected take it as the stream, instanceof works both ways, the same through any, and console.log shows the stream as Node does.",
+      "seeAlso": [
+        "lang.classinherit",
+        "lang.extendsarraybuffer"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/ReadableStream"
       }
     },
     {

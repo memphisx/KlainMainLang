@@ -61,6 +61,8 @@ func TestShortCircuitAndLogicalAssignment(t *testing.T) {
 		// An object, array or function key is no property key (TS2538): the
 		// access is any, whatever the receiver.
 		{"var base = {}\nvar prop = { toString() { return 1 } }\nbase[prop]", "any", "3:TS2538"},
+		// A union key with a member no key can be (boolean, undefined).
+		{"declare const k: string | boolean\nconst z = { a: 1 }\nz[k]", "any", "3:TS2538"},
 		{"var prop = { toString() { return 1 } }\ndeclare const v: any\nv[prop]", "any", "3:TS2538"},
 		{"const m: Record<string, number> = {}\nm[[1]]", "any", "2:TS2538"},
 		// A symbol key: TS7053 where there is no index signature, TS2538

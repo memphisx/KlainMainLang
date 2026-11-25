@@ -144,6 +144,37 @@ func arrayReceiverType(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpress
 	return Type{}, false
 }
 
+// arrayWithType is `a.with(i, v)`'s copy: the receiver's type, or (in
+// JavaScript) an any[] when v is one its elements cannot hold (an omitted
+// one is undefined), as emitArrayWith's caller emits it.
+func arrayWithType(e *Emitter, ex *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
+	objTy := e.typeOfExpr(mem.Object)
+	if !objTy.IsArray() {
+		return Type{}, false
+	}
+	if e.withWidens(objTy, ex.Args) {
+		return ArrayOf(TypeAny), true
+	}
+	return objTy, true
+}
+
+// withWidens reports whether `a.with(i, v)` on an a of type rt stores a v
+// its elements cannot hold (JavaScript): an omitted v, or one of another
+// representation.
+func (e *Emitter) withWidens(rt Type, args []ast.Expression) bool {
+	if !e.compatJS() || rt.ElemType == nil || rt.ElemType.IsDynamic() {
+		return false
+	}
+	if len(args) < 2 {
+		return true
+	}
+	vt := e.typeOfExpr(args[1])
+	if isStringTy(vt) || isStringTy(*rt.ElemType) {
+		return !(isStringTy(vt) && isStringTy(*rt.ElemType))
+	}
+	return vt.IR != rt.ElemType.IR || vt.IsDynamic() || vt.IsArray() != rt.ElemType.IsArray()
+}
+
 // arrayMissType is `T | undefined` for a method whose element can be
 // absent (an out-of-range index, a predicate miss, an empty array;
 // TDD-00187).
@@ -182,7 +213,7 @@ var arrayMethodTypes = map[string]methodTypeFn{
 	"toReversed":    arrayReceiverType,
 	"toSorted":      arrayReceiverType,
 	"toSpliced":     arrayReceiverType,
-	"with":          arrayReceiverType,
+	"with":          arrayWithType,
 	"copyWithin":    arrayReceiverType,
 	"toString": func(e *Emitter, _ *ast.CallExpression, mem *ast.MemberExpression) (Type, bool) {
 		if ot := e.typeOfExpr(mem.Object); ot.IsBuffer() || isNumberTy(ot) || isForOfStringTy(ot) && !ot.IsClass() && !ot.IsObject() {

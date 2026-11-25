@@ -1,5 +1,7 @@
 package llvm
 
+import "KlainMainLang/ast"
+
 // builtin_consts.go — the Math and Number constants: each one's IR double
 // literal, by owner and name.
 var builtinNumberConsts = map[string]map[string]string{
@@ -30,4 +32,18 @@ var builtinNumberConsts = map[string]map[string]string{
 func builtinNumberConst(owner, prop string) (string, bool) {
 	lit, ok := builtinNumberConsts[owner][prop]
 	return lit, ok
+}
+
+// registerNumberConstIntrinsics enters each constant as the property
+// intrinsic its declaration names (`@intrinsic Math.PI`).
+func registerNumberConstIntrinsics() {
+	for owner, consts := range builtinNumberConsts {
+		for name, lit := range consts {
+			lit := lit
+			propIntrinsics[owner+"."+name] = propIntrinsic{
+				emit: func(*Emitter, *ast.MemberExpression) (Value, error) { return Value{Ref: lit, Ty: TypeF64}, nil },
+				ty:   func(*Emitter, *ast.MemberExpression) Type { return TypeF64 },
+			}
+		}
+	}
 }

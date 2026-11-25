@@ -58,6 +58,15 @@ static inline void *kml_closure_alloc(__SIZE_TYPE__ n) {
     return b + 1;
 }
 
+/* The handle table (kmlrefsrc/kmlref.c): how native code keeps a managed
+ * object across an asynchronous boundary. A ref is never 0; 0 is "none". */
+typedef long long kml_ref;
+kml_ref kml_ref_new(void *obj);
+void *kml_ref_get(kml_ref r);
+void kml_ref_set(kml_ref r, void *obj); /* a moving collector's update */
+void kml_ref_free(kml_ref r);
+long long kml_ref_live(void);
+
 /* The GC interface (TDD-00230 phase 4): the collector as the runtime sees
  * it. gcshim.c implements it on Boehm under -mm=gc, and only gc-mode code
  * calls it; no runtime member names the collector itself. */
@@ -67,6 +76,7 @@ void *kml_gc_alloc_atomic(__SIZE_TYPE__ n);        /* collected, not scanned */
 void *kml_gc_alloc_atomic_pinned(__SIZE_TYPE__ n); /* never collected, not scanned */
 void kml_gc_free(void *p);
 void *kml_gc_base(void *p); /* the managed block holding p, or NULL */
+void **kml_gc_eph_slot(void *p); /* the ephemeron word of p's block, or NULL (WeakMap) */
 int kml_gc_weak_link(void **slot, const void *obj); /* *slot cleared when obj dies */
 void *kml_gc_finalizer(void *obj, void (*fn)(void *, void *), void *data); /* the previous data */
 int kml_gc_run_finalizers(void);

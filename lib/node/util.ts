@@ -75,14 +75,31 @@ function formatNumberDigits(s: string, numericSeparator: boolean): string {
 // one the program declared (so %s calls it).
 function hasBuiltInToString(value: any): boolean {
     if (typeof value[Symbol.toPrimitive] === 'function') return false;
+    // No toString function at all counts as a builtin one.
+    if (typeof value.toString !== 'function') return true;
     if (Object.prototype.hasOwnProperty.call(value, 'toString')) return false;
-    const key = __kml_native.protoKey(value);
-    if (key.startsWith('C:') || key.startsWith('P:')) {
-        // A class extending Array inherits Array.prototype's, a builtin one.
-        return typeof value.toString !== 'function' || value.toString === Array.prototype.toString;
-    }
-    return true;
+    // The object on the prototype chain that owns toString: a builtin
+    // when its constructor is one of the builtin globals (Node's
+    // builtInObjects), as Object.prototype and Array.prototype are.
+    let pointer: any = value;
+    do {
+        pointer = Object.getPrototypeOf(pointer);
+    } while (pointer !== null && !Object.prototype.hasOwnProperty.call(pointer, 'toString'));
+    if (pointer === null) return true;
+    const descriptor = Object.getOwnPropertyDescriptor(pointer, 'constructor');
+    return descriptor !== undefined && typeof descriptor.value === 'function' && builtInObjectNames.has(descriptor.value.name);
 }
+
+// The builtin globals that are constructors (Node's builtInObjects: the
+// global names starting with an upper-case letter).
+const builtInObjectNames = new Set<string>([
+    'Object', 'Function', 'Array', 'Number', 'Boolean', 'String', 'Symbol', 'Date', 'Promise', 'RegExp',
+    'Error', 'AggregateError', 'EvalError', 'RangeError', 'ReferenceError', 'SyntaxError', 'TypeError', 'URIError',
+    'ArrayBuffer', 'Uint8Array', 'Int8Array', 'Uint16Array', 'Int16Array', 'Uint32Array', 'Int32Array',
+    'Float32Array', 'Float64Array', 'Uint8ClampedArray', 'BigUint64Array', 'BigInt64Array', 'DataView',
+    'Map', 'BigInt', 'Set', 'WeakMap', 'WeakSet', 'Proxy', 'Reflect', 'WeakRef', 'FinalizationRegistry',
+    'SharedArrayBuffer', 'Atomics', 'JSON', 'Math', 'Intl', 'Iterator',
+]);
 
 function tryStringify(arg: any): string {
     try {

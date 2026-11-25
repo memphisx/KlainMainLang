@@ -8,19 +8,19 @@ V1 measures accept/reject **agreement** only — not error-message text or posit
 
 ## Overall
 
-**6617 / 11247 agree with TypeScript (58.8%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
+**6577 / 11247 agree with TypeScript (58.5%)** on accept/reject over 11247 classified cases (827 multi-file/out-of-scope skipped).
 
-- **3904** match-accept (both compile clean)
-- **2713** match-reject (both reject)
-- **1024** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
-- **3606** false-accept (TS rejects, we accept — a soundness gap worth investigating)
+- **3950** match-accept (both compile clean)
+- **2627** match-reject (both reject)
+- **978** false-reject (TS accepts, we reject — usually an unsupported-feature scope gap)
+- **3692** false-accept (TS rejects, we accept — a soundness gap worth investigating)
 
 ## By group
 
 | Group | Agree | Classified | % | False-accept | Skipped |
 |---|---|---|---|---|---|
-| compiler | 3559 | 6129 | 58.1% | 1982 | 286 |
-| conformance | 3058 | 5118 | 59.7% | 1624 | 541 |
+| compiler | 3529 | 6129 | 57.6% | 2034 | 286 |
+| conformance | 3048 | 5118 | 59.6% | 1658 | 541 |
 
 ## False-accepts (TypeScript rejects, this compiler accepted)
 
@@ -62,6 +62,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `ExportFunctionWithInaccessibleTypesInParameterTypeAnnotation` | conformance |
 | `ExportFunctionWithInaccessibleTypesInReturnTypeAnnotation` | conformance |
 | `ExportObjectLiteralAndObjectTypeLiteralWithAccessibleTypesInNestedMemberTypeAnnotations` | conformance |
+| `ExportVariableOfGenericTypeWithInaccessibleTypeAsTypeArgument` | conformance |
 | `FunctionAndModuleWithSameNameAndCommonRoot` | conformance |
 | `FunctionDeclaration11_es6` | conformance |
 | `FunctionDeclaration2_es6` | conformance |
@@ -82,6 +83,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `Protected6` | conformance |
 | `Protected7` | conformance |
 | `SystemModuleForStatementNoInitializer` | compiler |
+| `TwoInternalModulesThatMergeEachWithExportedLocalVarsOfTheSameName` | conformance |
 | `YieldExpression10_es6` | conformance |
 | `YieldExpression11_es6` | conformance |
 | `YieldExpression1_es6` | conformance |
@@ -97,16 +99,24 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `accessStaticMemberFromInstanceMethod01` | compiler |
 | `accessibilityModifiers` | conformance |
 | `accessorAccidentalCallDiagnostic` | compiler |
+| `accessorDeclarationEmitVisibilityErrors` | compiler |
 | `accessorDeclarationOrder` | compiler |
 | `accessorInAmbientContextES5` | compiler |
 | `accessorInferredReturnTypeErrorInReturnStatement` | compiler |
 | `accessorWithInitializer` | compiler |
 | `accessorsAreNotContextuallyTyped` | conformance |
 | `accessorsInAmbientContext` | compiler |
+| `accessorsOverrideMethod` | conformance |
+| `accessorsOverrideProperty` | conformance |
+| `accessorsOverrideProperty10` | conformance |
+| `accessorsOverrideProperty2` | conformance |
+| `accessorsOverrideProperty6` | conformance |
+| `accessorsOverrideProperty7` | conformance |
 | `accessors_spec_section-4.5_error-cases` | compiler |
 | `addMoreCallSignaturesToBaseSignature` | compiler |
 | `addMoreCallSignaturesToBaseSignature2` | compiler |
 | `addMoreOverloadsToBaseSignature` | compiler |
+| `additionOperatorWithInvalidOperands` | conformance |
 | `additionOperatorWithNullValueAndInvalidOperator` | conformance |
 | `additionOperatorWithNullValueAndValidOperator` | conformance |
 | `additionOperatorWithNumberAndEnum` | conformance |
@@ -118,17 +128,7 @@ Each is a case where this compiler compiled clean but TypeScript reports an erro
 | `allowJscheckJsTypeParameterNoCrash` | compiler |
 | `allowSyntheticDefaultImports3` | compiler |
 | `alwaysStrict` | compiler |
-| `alwaysStrictES6` | compiler |
-| `alwaysStrictModule` | compiler |
-| `alwaysStrictModule2` | compiler |
-| `alwaysStrictNoImplicitUseStrict` | compiler |
-| `ambientDeclarationsPatterns_tooManyAsterisks` | conformance |
-| `ambientEnum1` | compiler |
-| `ambientExternalModuleInsideNonAmbient` | conformance |
-| `ambientExternalModuleInsideNonAmbientExternalModule` | conformance |
-| `ambientExternalModuleMerging` | conformance |
-| `ambientExternalModuleWithRelativeExternalImportDeclaration` | compiler |
-| … | +3506 more |
+| … | +3592 more |
 
 ## False-reject reasons (TypeScript accepts, this compiler rejected)
 
@@ -137,7 +137,7 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | Count | Reason |
 |---|---|
 | 115 | REJECTED: import path '%s' must start with '%s' or '%s' — bare/package-style imports are not supported |
-| 56 | REJECTED: internal: undefined variable '%s' |
+| 55 | REJECTED: internal: undefined variable '%s' |
 | 51 | REJECTED: expected '%s', got IDENT |
 | 46 | REJECTED: cannot find module '%s' (resolved to <path>) |
 | 35 | REJECTED: <path>: '%s' is declared as a class, interface, type or enum in more than one namespace; namespace type members share on… |
@@ -149,7 +149,6 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 14 | REJECTED: '%s' can only precede a function, variable, interface, type alias, enum, or class declaration |
 | 14 | REJECTED: expected ], got IDENT |
 | 13 | REJECTED: identifier '%s' has already been declared |
-| 11 | REJECTED: expected IDENT, got ( |
 | 11 | REJECTED: unexpected token @ in expression |
 | 10 | REJECTED: `import b1 = require(...)` is not supported — use an ES import declaration instead |
 | 10 | REJECTED: `import foo = require(...)` is not supported — use an ES import declaration instead |
@@ -169,18 +168,17 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 6 | REJECTED: expected ), got , |
 | 6 | REJECTED: expected IDENT, got { |
 | 6 | REJECTED: expected IDENT, got } |
+| 6 | REJECTED: internal: undefined function or closure '%s' |
 | 6 | REJECTED: merging the declarations of '%s' is not yet supported |
 | 6 | REJECTED: only a string or number index signature `[k: string]: T` / `[i: number]: T` is supported (a `symbol` key is not yet supp… |
 | 6 | REJECTED: unexpected token ) in expression |
 | 5 | REJECTED: expected '%s' to close Effect<T> |
 | 5 | REJECTED: expected '%s', got [ |
 | 5 | REJECTED: expected ;, got , |
-| 5 | REJECTED: expected IDENT, got class |
 | 5 | REJECTED: expected IDENT, got const |
 | 5 | REJECTED: expected IDENT, got default |
 | 5 | REJECTED: expected IDENT, got this |
 | 5 | REJECTED: internal: checker-rejected: initializer'%s's type |
-| 5 | REJECTED: internal: undefined function or closure '%s' |
 | 5 | REJECTED: unary operator '%s' before '%s' is ambiguous — parenthesize as '%s' or '%s' |
 | 4 | REJECTED: '%s' requires a for-of loop over an async iterable |
 | 4 | REJECTED: Unicode code point out of range |
@@ -188,7 +186,6 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 4 | REJECTED: `import exporter = require(...)` is not supported — use an ES import declaration instead |
 | 4 | REJECTED: a decorator on a static accessor ('%s') is not supported yet |
 | 4 | REJECTED: internal: '%s' is only valid inside a method or constructor body |
-| 4 | REJECTED: internal: class '%s' cannot declare accessor '%s' — a field with that name already exists |
 | 3 | REJECTED: '%s' is not a callable |
 | 3 | REJECTED: <path>: resolving dynamic import('%s'): cannot find module '%s' (resolved to <path>) |
 | 3 | REJECTED: `import f = require(...)` is not supported — use an ES import declaration instead |
@@ -196,7 +193,10 @@ Bucketed rejection message for each false-reject — the leverage map for which 
 | 3 | REJECTED: `import mod = require(...)` is not supported — use an ES import declaration instead |
 | 3 | REJECTED: `import x = require(...)` is not supported — use an ES import declaration instead |
 | 3 | REJECTED: cannot access '%s' before initialization |
-| … | +203 more distinct reasons |
+| 3 | REJECTED: expected '%s' after import specifier list, got = |
+| 3 | REJECTED: expected '%s', got => |
+| 3 | REJECTED: expected ), got ? |
+| … | +176 more distinct reasons |
 
 ## False-reject blockers (concrete identifier/character)
 
@@ -218,8 +218,8 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 9 | `c` |
 | 7 | `Base` |
 | 7 | `export * as ns from` |
-| 6 | `C` |
 | 5 | `@this/package` |
+| 5 | `C` |
 | 5 | `E` |
 | 5 | `Foo` |
 | 5 | `M` |
@@ -249,8 +249,6 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 2 | `./server` |
 | 2 | `@raymondfeng/pkg2` |
 | 2 | `Atomics` |
-| 2 | `C3__kml_mod0` |
-| 2 | `C__kml_mod0` |
 | 2 | `Component` |
 | 2 | `D` |
 | 2 | `Helper` |
@@ -264,4 +262,6 @@ The un-masked token each false-reject died on — the actual missing globals, ke
 | 2 | `math2d` |
 | 2 | `p1` |
 | 2 | `p2` |
-| … | +186 more distinct blockers |
+| 2 | `package/cjs` |
+| 2 | `phaser` |
+| … | +184 more distinct blockers |

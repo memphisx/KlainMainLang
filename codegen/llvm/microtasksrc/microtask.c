@@ -3,7 +3,19 @@
  * {fn, env} run as 0-argument callbacks: a .then reaction is wrapped into
  * one at its call site, so the queues stay generic. Each isolate (thread)
  * has its own queues. kml_layout.h is prepended by the compiler. */
+#include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#ifdef _WIN32
+#include <process.h>
+#define kml_getpid _getpid
+#else
+#include <unistd.h>
+#define kml_getpid getpid
+#endif
+#ifdef __APPLE__
+#include <crt_externs.h>
+#endif
 
 typedef long long i64;
 typedef void (*kml_fn0)(void *env);
@@ -17,7 +29,7 @@ typedef struct {
     i64 len, cap, head;
 } kml_queue;
 
-static _Thread_local kml_queue mt, tq, unh;
+static _Thread_local kml_queue mt, tq, unh, unh_ids;
 
 static void q_push(kml_queue *q, void *cl) {
     if (q->len + 1 > q->cap) {
@@ -41,8 +53,16 @@ static void run_closure(void *cl) {
 
 /* Run q's entries FIFO until empty; an entry may queue more, drained in the
  * same pass. */
+extern _Thread_local volatile int *__kml_worker_term_flag;
+extern void __kml_worker_terminate_now(void);
+
 static void q_drain(kml_queue *q) {
     while (q->head < q->len) {
+        /* terminate() ends a worker whose microtasks never run out, as
+         * V8's interrupt ends Node's (the loop never gets the turn the
+         * posted end waits for). */
+        volatile int *tf = __kml_worker_term_flag;
+        if (tf && *tf) __kml_worker_terminate_now();
         void *cl = q->data[q->head++];
         run_closure(cl);
     }
@@ -79,6 +99,10 @@ void __kml_promise_twin(void *src, void *view) {
     TWIN_OF(src) = view;
 }
 
+/* Each unhandled rejection's id, in the order they happen (Node's
+ * lastPromiseId), and the one being reported. */
+static _Thread_local i64 unh_last_id, unh_cur_id;
+
 void __kml_promise_note_rejected(void *p) {
     char *pc = (char *)p;
     i64 *f = flags_of(p);
@@ -86,14 +110,104 @@ void __kml_promise_note_rejected(void *p) {
     if (*(void **)(pc + KML_PROMISE_REACTIONS) || *(void **)(pc + KML_PROMISE_WAITER)) return;
     *f |= KML_PROMISE_FLAG_QUEUED;
     q_push(&unh, p);
+    q_push(&unh_ids, (void *)(size_t)(++unh_last_id));
 }
 
 void __kml_unhandled_check(void) {
     for (i64 i = 0; i < unh.len; i++) {
         void *p = unh.data[i];
+        unh_cur_id = (i64)(size_t)unh_ids.data[i];
         if (!(*flags_of(p) & KML_PROMISE_FLAG_HANDLED)) __kml_unhandled_report(p);
     }
     unh.len = 0;
+    unh_ids.len = 0;
+}
+
+/* --unhandled-rejections, read from NODE_OPTIONS as Node reads its flags:
+ * 0 throw (the default), 1 strict, 2 warn, 3 none, 4 warn-with-error-code.
+ * --no-warnings silences the warnings. An unknown mode ends the process
+ * before the program runs, as Node's option parser does. */
+static int unh_mode;
+static _Bool no_warnings;
+static const char *const unh_modes[] = {"throw", "strict", "warn", "none", "warn-with-error-code"};
+
+/* The program's argv[0], as the process was started. */
+static const char *prog_argv0(void) {
+#if defined(__APPLE__)
+    char **av = *_NSGetArgv();
+    if (av && av[0]) return av[0];
+#elif defined(__GLIBC__)
+    extern char *program_invocation_name;
+    if (program_invocation_name) return program_invocation_name;
+#endif
+    return "node";
+}
+
+static _Bool word_is(const char *t, size_t n, const char *w) { return strlen(w) == n && strncmp(t, w, n) == 0; }
+
+__attribute__((constructor)) static void unh_mode_init(void) {
+    const char *s = getenv("NODE_OPTIONS");
+    if (!s) return;
+    static const char key[] = "--unhandled-rejections";
+    size_t kl = sizeof key - 1;
+    while (*s) {
+        while (*s == ' ' || *s == '\t') s++;
+        const char *t = s;
+        while (*s && *s != ' ' && *s != '\t') s++;
+        size_t n = (size_t)(s - t);
+        if (word_is(t, n, "--no-warnings")) no_warnings = 1;
+        if (n < kl || strncmp(t, key, kl) != 0 || (n > kl && t[kl] != '=')) continue;
+        const char *v = t + kl + 1;
+        size_t vn = n - kl - 1;
+        if (n == kl) { /* `--unhandled-rejections none` */
+            while (*s == ' ' || *s == '\t') s++;
+            v = s;
+            while (*s && *s != ' ' && *s != '\t') s++;
+            vn = (size_t)(s - v);
+        }
+        int m = -1;
+        for (int i = 0; i < 5; i++)
+            if (word_is(v, vn, unh_modes[i])) m = i;
+        if (m < 0) {
+            fprintf(stderr, "%s: invalid value for --unhandled-rejections\n", prog_argv0());
+            fflush(stderr);
+            _exit(9);
+        }
+        unh_mode = m;
+    }
+}
+
+int __kml_unhandled_mode(void) { return unh_mode; }
+i64 __kml_unhandled_id(void) { return unh_cur_id; }
+
+extern i64 __kml_str_len(const char *s);
+static _Bool trace_helper_shown;
+
+/* Node's emitUnhandledRejectionWarning: the reason (an Error-like one's
+ * stack, another's noSideEffectsToString text), then the rejection's
+ * notice, each a process warning on stderr. */
+void __kml_unhandled_warn(const char *text) {
+    if (no_warnings) return;
+    int pid = (int)kml_getpid();
+    fflush(stdout);
+    fprintf(stderr, "(node:%d) UnhandledPromiseRejectionWarning: %.*s\n", pid, (int)__kml_str_len(text), text);
+    if (!trace_helper_shown) {
+        trace_helper_shown = 1;
+        const char *a = prog_argv0(), *b = a;
+        for (const char *c = a; *c; c++)
+            if (*c == '/' || *c == '\\') b = c + 1;
+        size_t bn = strlen(b);
+        if (bn > 4 && strcmp(b + bn - 4, ".exe") == 0) bn -= 4;
+        fprintf(stderr, "(Use `%.*s --trace-warnings ...` to show where the warning was created)\n", (int)bn, b);
+    }
+    fprintf(stderr,
+            "(node:%d) UnhandledPromiseRejectionWarning: Unhandled promise rejection. This error originated "
+            "either by throwing inside of an async function without a catch block, or by rejecting a promise "
+            "which was not handled with .catch(). To terminate the node process on unhandled promise "
+            "rejection, use the CLI flag `--unhandled-rejections=strict` (see "
+            "https://nodejs.org/api/cli.html#cli_unhandled_rejections_mode). (rejection id: %lld)\n",
+            pid, unh_cur_id);
+    fflush(stderr);
 }
 
 void __kml_microtask_enqueue(void *cl) { q_push(&mt, cl); }
@@ -156,6 +270,16 @@ void __kml_drain_microtasks(void) {
     __kml_unhandled_check();
     if (__kml_clear_kept_hook) __kml_clear_kept_hook();
 }
+
+/* main()'s drain after the top-level script (hooks.c): an ES module's top
+ * level is itself a promise job, so the jobs it queued run before the
+ * ticks, as in Node. */
+extern void (*__kml_main_drain_hook)(int module);
+static void main_drain(int module) {
+    if (module) __kml_drain_promise_jobs();
+    __kml_drain_microtasks();
+}
+__attribute__((constructor)) static void main_drain_init(void) { __kml_main_drain_hook = main_drain; }
 
 /* The one tick a module top-level `await` of a plain value or a settled
  * promise takes: run exactly the jobs queued now (behind the waiting jobs,

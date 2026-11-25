@@ -29,7 +29,9 @@ static i64 prom_reason(ptr p);
 
 /* Calls a compiler-emitted per-chunk-type decoder ({i64,i64,i64}(ptr rec),
  * returned in registers, not a C aggregate) and stores its three words. */
-extern void __kml_stream_decode(ptr decode, ptr rec, i64 *out);
+/* A pipe's per-chunk-type decoder (emitStreamDecodeThunk): the chunk's
+ * queue words and its done flag, stored at out. */
+static void stream_decode(ptr decode, ptr rec, i64 *out) { ((void (*)(ptr, i64 *))decode)(rec, out); }
 
 #define F(p, off, T) (*(T *)((char *)(p) + (off)))
 #define ST(p) F(p, KML_PROMISE_STATE, i64)
@@ -436,6 +438,8 @@ static int stream_measure(clo_t *sc, i64 v0, i64 v1, double *out, i64 *err) {
     return 1;
 }
 
+static void ts_after_enqueue(rstream *s);
+
 i64 __kml_rs_enqueue(ptr sp, i64 v0, i64 v1) {
     rstream *s = (rstream *)sp;
     if (s->state != 0 || (s->flags & RS_CLOSEREQ)) return 0;
@@ -453,6 +457,7 @@ i64 __kml_rs_enqueue(ptr sp, i64 v0, i64 v1) {
         __kml_rs_qpush(s, v0, v1, sz);
     }
     rs_pull_if_needed(s);
+    ts_after_enqueue(s);
     return 1;
 }
 
@@ -1027,6 +1032,22 @@ void __kml_ws_start_promise(ptr sp, ptr p) {
     react(p, ws_start_settled, env);
 }
 
+/* A transformer's start returned promise p: the one start promise both
+ * sides' setups react to, the writable's first (SetUpTransformStream...):
+ * each starts when it fulfills, or errors with its reason. Bit 1 as
+ * __kml_ws_start_promise. */
+void __kml_ts_start_promise(ptr rs, ptr ws, ptr p) {
+    p = ((size_t)p & 2) ? (ptr)((size_t)p & ~(size_t)2) : as_async(p);
+    ptr *wenv = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);
+    wenv[0] = p;
+    wenv[1] = ws;
+    react(p, ws_start_settled, wenv);
+    ptr *renv = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);
+    renv[0] = p;
+    renv[1] = rs;
+    react(p, rs_start_settled, renv);
+}
+
 void __kml_ws_started(ptr sp) {
     wstream *s = (wstream *)sp;
     s->flags |= WS_STARTED;
@@ -1143,7 +1164,7 @@ static void pipe_on_read(ptr env) {
         return;
     }
     i64 dv[3];
-    __kml_stream_decode(c->decode, (ptr)PV0(p), dv);
+    stream_decode(c->decode, (ptr)PV0(p), dv);
     if (dv[2] != 0) {
         if (!(c->flags & PIPE_NOCLOSE)) {
             ptr cp = __kml_ws_close(c->dst);
@@ -1225,7 +1246,7 @@ static void tee_on_read(ptr env) {
         return;
     }
     i64 dv[3];
-    __kml_stream_decode(c->decode, (ptr)PV0(p), dv);
+    stream_decode(c->decode, (ptr)PV0(p), dv);
     int alive1 = c->canceled1 == 0, alive2 = c->canceled2 == 0;
     if (dv[2] != 0) {
         if (alive1) __kml_rs_close(c->b1);
@@ -1289,6 +1310,9 @@ typedef struct {
     i64 parked, pv0, pv1;
     ptr parkedProm; /* the in-flight writable write promise while a chunk waits */
     ptr closeProm;  /* settled once flush + readable close complete */
+    /* [[backpressure]]: true from setup; the readable's pull clears it, an
+     * enqueue leaving the readable with backpressure sets it. */
+    i64 backpressure;
 } tsctx;
 _Static_assert(sizeof(tsctx) == KML_TS_SIZE, "ts layout");
 
@@ -1330,8 +1354,28 @@ void __kml_ts_mirror_settle(ptr env) {
         __kml_promise_settle(tgt, 1);
 }
 
+ptr __kml_ts_pull(ptr cp);
+
+/* The TransformStream whose readable side sp is (a transformer's
+ * controller is that side), or NULL: its pull is the transform's. */
+ptr __kml_ts_of_readable(ptr sp) {
+    rstream *s = (rstream *)sp;
+    clo_t *c = (clo_t *)s->pullClo;
+    return c && c->fn == (void *)__kml_ts_pull ? c->env : NULL;
+}
+
+/* TransformStreamDefaultControllerEnqueue's last step, after the
+ * readable's enqueue (its pull may have run): backpressure again once the
+ * readable has it. */
+static void ts_after_enqueue(rstream *s) {
+    clo_t *pc = (clo_t *)s->pullClo;
+    if (!pc || pc->fn != (void *)__kml_ts_pull) return;
+    if (__kml_rs_desired(s) <= 0.0) ((tsctx *)pc->env)->backpressure = 1;
+}
+
 ptr __kml_ts_pull(ptr cp) {
     tsctx *c = (tsctx *)cp;
+    c->backpressure = 0; /* TransformStreamDefaultSourcePullAlgorithm */
     if (!c->parked) return NULL;
     c->parked = 0;
     ptr wprom = c->parkedProm;
@@ -1366,8 +1410,11 @@ ptr __kml_ts_sink_close(ptr cp) {
     clo_t *fc = (clo_t *)c->flushClo;
     ptr p = fc ? ts_promise(((fn_env)fc->fn)(fc->env)) : NULL;
     if (!p) {
-        __kml_rs_close(c->readable);
-        return NULL;
+        /* TransformStreamDefaultSinkCloseAlgorithm reacts to the flush
+         * promise even for a flush returning nothing: the readable closes,
+         * and the writable's close finishes, a microtask later. */
+        p = __kml_task_alloc_promise();
+        __kml_promise_settle(p, 1);
     }
     c->closeProm = __kml_task_alloc_promise();
     ptr *env = (ptr *)kml_alloc(KML_HEAP_WORDS, 16);

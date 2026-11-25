@@ -286,14 +286,13 @@
           {
             "feature": "`process` as an `EventEmitter` (`on`/`once`/`off`/`emit`/…, `'beforeExit'`/`'exit'`/`'uncaughtException'`/`'unhandledRejection'`/`'warning'`) + `process.exitCode`",
             "status": "implemented",
-            "caveats": [
-              "`'uncaughtException'` runs the listener (suppressing the default `Uncaught:` print) but, after a synchronous throw, the process still exits (code 1) — the setjmp/longjmp exception model has already unwound to the top-level catch-all, so it can't resume execution like Node does (a rejection reported to it does go on)"
-            ],
+            "caveats": [],
             "notes": [
               "`process` is an `EventEmitter` in TypeScript, and a value of its own: every `EventEmitter` method, any event name, Node's `newListener`/`removeListener` hooks and default `'warning'` printer ([ADR-01250](../adr/01/ADR-01250.md))",
               "`'beforeExit'` fires when the event loop drains, with `process.exitCode`, and again after work its listeners schedule; not on `process.exit()` ([ADR-01930](../adr/01/ADR-01930.md))",
               "`'exit'` fires at normal end and from `process.exit()` with the exit code, and a listener may set `process.exitCode`; `process.exitCode` starts `undefined`, takes an integer or an integer string (`ERR_INVALID_ARG_TYPE`/`ERR_OUT_OF_RANGE` otherwise), and is the code a program ends with ([ADR-01278](../adr/01/ADR-01278.md))",
-              "`'uncaughtException'` receives the thrown value and its origin; a rejection nothing consumes is reported after the microtask checkpoint, as Node's default does: `'unhandledRejection'` receives `(reason, promise)`, else it is an uncaught exception (a non-Error reason wrapped as `UnhandledPromiseRejection`), else the `Uncaught:` print and exit code 1 ([ADR-01192](../adr/01/ADR-01192.md))"
+              "`'uncaughtException'` receives the thrown value and its origin; a rejection nothing consumes is reported after the microtask checkpoint, as Node's default does: `'unhandledRejection'` receives `(reason, promise)`, else it is an uncaught exception (a non-Error reason wrapped as `UnhandledPromiseRejection`), else the `Uncaught:` print and exit code 1 ([ADR-01192](../adr/01/ADR-01192.md)); a listener of `'uncaughtException'` handling a synchronous throw abandons the rest of the module and the event loop goes on, and one nothing handles runs the `'exit'` listeners with `process.exitCode` 1",
+              "`--unhandled-rejections` in `NODE_OPTIONS` (`throw`, `strict`, `warn`, `warn-with-error-code`, `none`; an invalid mode exits 9) and `--no-warnings` act as in Node: the warnings, rejection ids and exit codes are Node's ([ADR-02055](../adr/02/ADR-02055.md))"
             ],
             "decl": [
               "process",

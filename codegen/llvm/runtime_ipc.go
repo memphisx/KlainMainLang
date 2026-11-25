@@ -14,16 +14,4 @@ import (
 var ipcChildSource string
 
 // IPCChildSource is the child-side channel C (ipcc.c), behind kml_layout.h.
-func IPCChildSource() string { return layoutHeader() + ipcChildSource }
-
-// ensureIPCChildRuntime declares the child-side channel (ipcsrc/ipcc.c):
-// NODE_CHANNEL_FD parsing, send, and the event-loop hooks that deliver
-// 'message' events.
-func (e *Emitter) ensureIPCChildRuntime() {
-	if e.usedIPCChildRuntime {
-		return
-	}
-	e.usedIPCChildRuntime = true
-	e.ensureStrHeaderRuntime()
-
-}
+func IPCChildSource() string { return layoutHeader() + loopUser + ipcChildSource }

@@ -34,7 +34,7 @@
             "feature": "`JSON.stringify(string)`",
             "status": "implemented",
             "notes": [
-              "The complete `QuoteJSONString` escape set — a control character is `\\b`/`\\f`/`\\n`/`\\r`/`\\t` or `\\u00XX`; a `string | null` value holding null is `null` ([ADR-01069](../adr/01/ADR-01069.md)). An embedded NUL still ends the string (strlen-bounded, see the console.log caveat)"
+              "The complete `QuoteJSONString` escape set — a control character is `\\b`/`\\f`/`\\n`/`\\r`/`\\t` or `\\u00XX`; a `string | null` value holding null is `null` ([ADR-01069](../adr/01/ADR-01069.md))"
             ],
             "decl": [
               "JSON.stringify"

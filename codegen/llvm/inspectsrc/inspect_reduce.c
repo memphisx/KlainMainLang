@@ -42,6 +42,10 @@ typedef struct {
     char **items;
     long long n, cap;
     int extra; /* the last entry is `... n more items`: shown, never grouped */
+    /* The entries this list owns (freed with it), in push order: a
+     * pointer array of its own, since sorting reorders items. */
+    char **owned;
+    long long on, ocap;
 } KmlInspectList;
 
 /* Node's ctx.currentDepth: the depth of the most recently entered non-empty
@@ -128,6 +132,8 @@ void *__kml_inspect_begin(long long depth, long long nonempty) {
     l->cap = 8;
     l->extra = 0;
     l->items = (char **)kml_alloc(KML_HEAP_WORDS, sizeof(char *) * (size_t)l->cap);
+    l->owned = NULL;
+    l->on = l->ocap = 0;
     if (nonempty) kml_inspect_cur_depth = depth;
     return l;
 }
@@ -141,13 +147,27 @@ void __kml_inspect_push(void *lp, char *entry) {
     l->items[l->n++] = entry;
 }
 
+/* __kml_inspect_push of an entry the list owns: a string rendered for it
+ * alone, freed when the list is laid out. Each nested level's text is
+ * copied into its parent's, so an entry left unfreed leaked the walk's
+ * output once per level (a deep graph at depth Infinity: gigabytes). */
+void __kml_inspect_push_owned(void *lp, char *entry) {
+    KmlInspectList *l = (KmlInspectList *)lp;
+    __kml_inspect_push(lp, entry);
+    if (l->on == l->ocap) {
+        l->ocap = l->ocap ? l->ocap * 2 : 8;
+        l->owned = (char **)kml_realloc(KML_HEAP_WORDS, l->owned, sizeof(char *) * (size_t)l->ocap);
+    }
+    l->owned[l->on++] = entry;
+}
+
 /* Node's maxArrayLength (100): the walker stops there and this appends the
    `... n more items` entry, which the layout shows but the column grouping
    leaves alone. */
 void __kml_inspect_push_more(void *lp, long long remaining) {
     char tmp[64];
     snprintf(tmp, sizeof tmp, "... %lld more item%s", remaining, remaining > 1 ? "s" : "");
-    __kml_inspect_push(lp, str_alloc_lit(tmp));
+    __kml_inspect_push_owned(lp, str_alloc_lit(tmp));
     ((KmlInspectList *)lp)->extra = 1;
 }
 
@@ -155,7 +175,7 @@ void __kml_inspect_push_more(void *lp, long long remaining) {
 void __kml_inspect_push_holes(void *lp, long long n) {
     char tmp[64];
     snprintf(tmp, sizeof tmp, "<%lld empty item%s>", n, n > 1 ? "s" : "");
-    __kml_inspect_push(lp, str_alloc_lit(tmp));
+    __kml_inspect_push_owned(lp, str_alloc_lit(tmp));
 }
 
 typedef struct { char *p; size_t n, cap; } Sb;
@@ -232,7 +252,7 @@ static KmlInspectList *group_array(KmlInspectList *l, long long indent, long lon
                     sb_pad(&b, padding);
                 }
                 sb_str(&b, l->items[j]);
-                __kml_inspect_push(out, sb_finish(&b));
+                __kml_inspect_push_owned(out, sb_finish(&b));
             }
             if (l->extra) __kml_inspect_push(out, l->items[n]);
             free(maxLineLength); /* scratch */
@@ -243,6 +263,8 @@ static KmlInspectList *group_array(KmlInspectList *l, long long indent, long lon
 }
 
 static void list_free(KmlInspectList *l) {
+    for (long long i = 0; i < l->on; i++) kml_free(KML_HEAP_RAW, l->owned[i] - 8);
+    if (l->owned) kml_free(KML_HEAP_WORDS, l->owned);
     kml_free(KML_HEAP_WORDS, l->items);
     kml_free(KML_HEAP_WORDS, l);
 }

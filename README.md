@@ -254,6 +254,13 @@ klainmain [flags] <file.ts>
   -regex <m>    RegExp dialect: es-unicode (default) / ecmascript / es-utf16 /
                 es-ascii / pcre. See docs/tdd/TDD-00067.md.
 
+  -lib          Build a shared library (lib<name>.so / lib<name>.dylib /
+                <name>.dll) instead of an executable, for a host that owns
+                main(): the program runs when the host calls
+                int kml_main(int argc, char **argv), on any thread, event
+                loop included, and returns its exit code. Not with --run,
+                --static, -mm=gc or a non-bundled -dynamic-import.
+
   -dynamic-import <m>
                 import() lowering. bundled (default): the target is
                 compiled into the binary, runs on first import() and

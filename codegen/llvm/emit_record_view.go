@@ -364,12 +364,16 @@ func (e *Emitter) emitRecordGep(objPtr string, objTy Type, idx int, fieldTy Type
 // value, hostbox.c's renderers find no row and answer the plain object's
 // forms.
 func (e *Emitter) emitObjHooksFinalize() {
+	// The classes extending Promise, for library code's `instanceof
+	// Promise` (__kml_promise_class_is).
+	for _, c := range e.sortedClassNames(func(c string, _ ClassInfo) bool { return e.builtinRootBase(c) == "Promise" }) {
+		e.addUnitRow(unitKindPromiseClass, "{ i64, i64 }", e.classes[c].TagID&kmlHdrIDMask, fmt.Sprintf("i64 %d", e.classes[c].TagID))
+	}
 	if !e.usedDynJSONC {
 		return
 	}
 	// Defined in shape.c (KML_OBJ_HOOKS).
 	e.emitErrorOwnKeysHooks()
-	e.emitErrorInspectHook()
 	e.emitInspectCustomHook()
 	e.emitToStringTagHook()
 	// A class extending Number, String or Boolean: dynjson.c serializes
@@ -381,54 +385,17 @@ func (e *Emitter) emitObjHooksFinalize() {
 	}
 }
 
-// emitErrorInspectHook defines @__kml_error_inspect(obj): a boxed Error
-// nested in an inspected value renders as the top-level one does
-// (emitErrorToString), not as a plain object.
-func (e *Emitter) emitErrorInspectHook() {
-	restore := e.beginThunkEmit()
-	s, err := e.emitErrorToString(Value{Ref: "%o", Ty: TypePtr})
-	if err != nil {
-		restore()
-		return // hooks.c's default: "[Error]"
-	}
-	e.emitTerminator(fmt.Sprintf("ret "+irPtr+" %s", s.Ref))
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.emitGlobal(funcDef(irPtr+" @__kml_error_inspect("+irPtr+" %o)", body))
-}
-
 // emitPromiseInspectHook links promisebox.c (its wrapper recognizer and
 // console.log's view of a boxed promise) in a program that boxes a promise,
 // storing the wrapper's header word it compares against.
 func (e *Emitter) emitPromiseInspectHook() {
-	if !e.usedPromiseBox && !e.usedPromiseWrapperOf {
+	if !e.usedPromiseBox && !e.irNames("__kml_promise_wrapper_of") {
 		return // hooks.c's defaults: no object is a boxed promise
 	}
 	e.noteBoxedLayout(promiseBoxType())
 	e.emitGlobal("@__kml_promise_box_hdr = external" + irGlobalAS + " global i64, align 8")
 	e.addHookInit(fmt.Sprintf("  store i64 %d, "+irPtr+" @__kml_promise_box_hdr, align 8\n", e.promiseBoxHeader()))
 	e.emitGlobal("@__kml_promise_box_on = external global i8")
-}
-
-// emitObjExtensibleFinalize declares @__kml_obj_extensible(obj)
-// (collections.c): whether a property may be added to a static object
-// (not frozen, sealed or prevented from extensions).
-func (e *Emitter) emitObjExtensibleFinalize() {
-	if !e.usedObjExtensible {
-		return
-	}
-}
-
-// ensureShapeKeysArray links __kml_shape_keys_array_c(obj, out): a string[] of a
-// static object's own keys — its layout row's, and an Error's own fields
-// beyond it (empty without either).
-func (e *Emitter) ensureShapeKeysArray() {
-	if e.usedShapeKeysArray {
-		return
-	}
-	e.usedShapeKeysArray = true
-	e.ensureShapeRuntime()
-	e.ensureDynJSONC() // the object hooks: an Error's own fields beyond its layout
 }
 
 // emitRecordSplit runs static(v) when the object v (of a structural type)
@@ -476,7 +443,6 @@ func (e *Emitter) emitRecordSplit(v Value, resTy Type, static func(Value) (Value
 // Object.entries (withKeys: [string, any][]) of a boxed static object, from
 // its layout row.
 func (e *Emitter) emitShapeValuesArray(box Value, withKeys bool) Value {
-	e.ensureShapeRuntime()
 	_, pay := e.emitUnboxTagPayload(box)
 	obj := e.emitIntToPtr(pay)
 	n0 := e.freshReg()
@@ -641,7 +607,6 @@ func (e *Emitter) emitObjExtraFinalize() {
 	for _, t := range e.extraTypes {
 		e.noteBoxedLayout(t)
 	}
-	e.ensureShapeRuntime()
 	e.ensureDynJSONC()
 	e.emitGlobal("@__kml_obj_extra_on = external global i8") // links objextra.c
 }
@@ -657,8 +622,6 @@ func isStringDict(t Type) bool {
 // emitObjectToDict does for a statically known one; anything else converts
 // as coerce does.
 func (e *Emitter) emitBoxedObjToDict(box Value, target Type) Value {
-	e.ensureMapStrHelpers()
-	e.ensureShapeRuntime()
 	valTy := TypeAny
 	if target.MapVal != nil {
 		valTy = *target.MapVal
@@ -725,10 +688,7 @@ func (e *Emitter) emitBoxedObjToDict(box Value, target Type) Value {
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(otherL)
 	// A dynamic object (a bag): a dictionary of its own enumerable keys.
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	bagL, hostL := e.freshLabel("box2dict.bag"), e.freshLabel("box2dict.host")
 	isBag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))

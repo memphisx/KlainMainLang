@@ -5,8 +5,8 @@
   "statusPage": "PERFORMANCE-TIMING.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "13/14",
-    "loosePct": 93,
+    "loose": "14/14",
+    "loosePct": 100,
     "strict": "9/14",
     "strictPct": 64
   },
@@ -303,6 +303,26 @@
       ],
       "seeAlso": [
         "PerformanceObserver"
+      ]
+    },
+    {
+      "id": "eventLoopUtilization",
+      "name": "performance.eventLoopUtilization / performance.nodeTiming",
+      "statusRow": "performance.eventLoopUtilization / performance.nodeTiming",
+      "signature": "eventLoopUtilization(util1?: EventLoopUtilization, util2?: EventLoopUtilization): EventLoopUtilization; nodeTiming: PerformanceNodeTiming",
+      "badge": "caveats",
+      "description": "How busy the event loop is: idle and active milliseconds since the loop started (or between two earlier readings) and their ratio, from libuv's idle-time metric as Node reads it. nodeTiming reports when the loop started and how long it has idled; a worker's loop has started before its script runs.",
+      "returns": {
+        "type": "EventLoopUtilization",
+        "desc": "{ idle, active, utilization }."
+      },
+      "exampleKey": "perf/observer",
+      "snippet": "import { performance } from 'perf_hooks'\nsetTimeout(() => {\n  const u = performance.eventLoopUtilization()\n  console.log(u.idle >= 0, u.utilization <= 1)   // true true\n}, 10)",
+      "differences": [
+        "nodeTiming's nodeStart, v8Start, environment and bootstrapComplete read 0, the time origin: a native program has no separate bootstrap"
+      ],
+      "seeAlso": [
+        "createHistogram"
       ]
     }
   ]

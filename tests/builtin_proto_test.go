@@ -378,3 +378,23 @@ const s = t.subarray(1); const it = s.values(); console.log(it.next(), it.next()
 { console.log([..."hé"[Symbol.iterator]()]); const r: readonly number[] = [5]; console.log(r[Symbol.iterator]().next()); }
 `)
 }
+
+// String() of every kind an `any` holds, and the default sort of an any[]
+// by those strings (anystr.c).
+func TestE2EStringOfAnyEveryKind(t *testing.T) {
+	assertSameAsNode(t, `
+class P { x: number; constructor(x: number) { this.x = x; } toString() { return "P" + this.x; } }
+class Q { y = 2 }
+const vals: any[] = [1, -0, 1.5, NaN, Infinity, "s", true, false, null, undefined, [1, [2, 3], "a"], new P(3), new Q(),
+  new Error("boom"), new RangeError(""), Symbol("d"), Symbol(), 10n, new Map([[1, 2]]), new Set(), { toString() { return "obj"; } },
+  {}, function foo() {}, (x: number) => x, TypeError, new Date(0).getTime(), /a+b/g, [null, undefined, 1]];
+for (const v of vals) {
+  try { console.log(String(v)); } catch (e) { console.log("threw", (e as Error).message); }
+}
+const arr: any[] = [3, "10", 2, "1", true];
+console.log(arr.sort().join("|"));
+console.log(vals[11] + "-" + vals[0], "" + vals[13]);
+console.log(vals[1], [vals[1], -0], new Float64Array([-0, 1]));
+const z: any = -0; console.log(z, String(z));
+`)
+}

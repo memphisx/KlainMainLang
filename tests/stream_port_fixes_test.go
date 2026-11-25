@@ -286,3 +286,66 @@ const cases: number[][] = [[0xf0, 0x9f], [0xf0, 0x9f, 0x41], [0xe2, 0x82, 0xac],
 for (const c of cases) console.log(JSON.stringify(Buffer.from(c).toString()), Buffer.from(Buffer.from(c).toString()).length);
 `, "\"\ufffd\" 3\n\"\ufffdA\" 4\n\"\u20ac\" 3\n\"\ufffd\ufffd\" 6\n\"\ufffd\ufffd\ufffd\" 9\n\"\ufffda\" 4\n\"\ufffd(\ufffd\" 7\n\"\ufffd\ufffd\ufffd\ufffd\" 12\n\"\ufffd\ufffd\" 6\n")
 }
+
+// A web ReadableStream given to Duplex.from becomes the readable side.
+func TestE2EDuplexFromReadableWebStream(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const { Duplex } = require("stream");
+const mk = (v) => new ReadableStream({ start(c) { c.enqueue(v); c.close(); } });
+const d = Duplex.from(mk("foo"));
+console.log(d.readable, d.writable);
+d.on("data", (x) => console.log("data", String(x)));
+d.on("end", () => {
+  const p = Duplex.from({ readable: mk("bar") });
+  p.on("data", (x) => console.log("pair", String(x)));
+});
+`)
+}
+
+// After setEncoding a socket's 'data' delivers strings, also to a listener
+// passed through a generic wrapper.
+func TestE2ESocketDataStringThroughWrapper(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const net = require("net");
+function wrap(fn) { return function (...args) { return fn.apply(this, args); }; }
+const srv = net.createServer((s) => { s.end("hello"); });
+srv.listen(0, () => {
+  const c = net.createConnection(srv.address().port, () => {
+    let r = ""; c.setEncoding("utf8");
+    c.on("data", wrap((d) => { r += d; }));
+    c.on("end", () => { console.log(JSON.stringify(r)); srv.close(); });
+  });
+});
+const proto = Object.getPrototypeOf(process);
+console.log(proto !== require("events").EventEmitter.prototype, proto instanceof require("events").EventEmitter);
+`)
+}
+
+// Readable.from's signal aborts an infinite source.
+func TestE2EReadableFromSignalAbortsInfinite(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const { Readable } = require("stream");
+const ac = new AbortController();
+const s = Readable.from(async function* () { while (true) yield 1; }(), { signal: ac.signal });
+let i = 0;
+s.forEach(() => { if (++i === 10) ac.abort(); }).then(() => console.log("resolved"), (e) => console.log(e.name, i));
+`)
+}
+
+// A kept-alive client socket reuses its HTTP parser across requests and
+// adds no listener per response (Node's parsers FreeList).
+func TestE2EHTTPClientParserReuse(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const http = require("http");
+const s = http.createServer((q, r) => r.end("Hello"));
+let first, left = 12;
+process.on("warning", (w) => console.log("warning", w.name));
+s.listen(0, () => {
+  http.globalAgent.maxSockets = 1;
+  for (let i = 0; i < 12; i++) {
+    const req = http.get({ port: s.address().port }, (res) => {
+      if (!first) first = req.parser;
+      if (req.parser !== first) console.log("new parser", i);
+      res.resume();
+      if (--left === 0) { console.log("done"); s.close(); }
+    });
+  }
+});
+`)
+}

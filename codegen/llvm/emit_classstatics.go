@@ -1258,3 +1258,22 @@ func init() {
 		ty: func(*Emitter, *ast.CallExpression) Type { return TypeBool },
 	}
 }
+
+// emitClassProtoFor is C.prototype for the record of class c the code runs
+// against (rec, or recordFor's when ""): an evaluation's own prototype
+// object (unitreg.c), the class's when there is no record.
+func (e *Emitter) emitClassProtoFor(c, rec string) Value {
+	shared := e.emitClassProto(c)
+	if !e.classRecords[c] {
+		return shared
+	}
+	if rec == "" {
+		rec = e.recordFor(c)
+	}
+	e.declareFn("__kml_classrec_proto", "declare "+irPtr+" @__kml_classrec_proto("+irPtr+", "+irPtr+")")
+	pay, sp, bag := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ir_nb_pay(i64 %s)", pay, shared.Ref))
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, sp, pay))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_proto("+irPtr+" %s, "+irPtr+" %s)", bag, rec, sp))
+	return e.emitDynObjBox(bag)
+}

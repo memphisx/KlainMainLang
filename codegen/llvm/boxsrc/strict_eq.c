@@ -6,6 +6,7 @@ typedef long long i64;
 typedef unsigned long long u64;
 
 extern int strcmp(const char *a, const char *b);
+extern int memcmp(const void *a, const void *b, unsigned long n);
 extern void *__kml_fn_identity_dyn(void *rec);
 extern unsigned char __kml_boxed_bigint_eq(void *ca, void *cb);
 
@@ -29,8 +30,12 @@ _Bool __kml_any_eq(i64 a, i64 b) {
     if (ak != bk) return 0;
     void *pa = (void *)(ua & ~7ULL), *pb = (void *)(ub & ~7ULL);
     switch (ak) {
-    case 0:
-        return strcmp((const char *)a, (const char *)b) == 0;
+    case 0: {
+        /* By the header lengths (TDD-00120): an embedded NUL counts. */
+        long long la = *(const long long *)((const char *)a - 8) & 0xFFFFFFFFLL;
+        long long lb = *(const long long *)((const char *)b - 8) & 0xFFFFFFFFLL;
+        return la == lb && memcmp((const char *)a, (const char *)b, (unsigned long)la) == 0;
+    }
     case 2:
         return *(void **)pa == *(void **)pb;
     case 7:

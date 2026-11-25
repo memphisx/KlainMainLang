@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"KlainMainLang/ast"
+	"KlainMainLang/binder"
 	"fmt"
 	"strings"
 )
@@ -60,6 +61,17 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		ownFields = append(ownFields, Field{Name: p.Key, Ty: fty})
 	}
 
+	// An accessor naming a local of an enclosing function is that
+	// function's closure, held in a hidden field the literal fills where it
+	// is evaluated; the class's accessor calls it with the instance as this.
+	capturing := map[*ast.FunctionExpression]bool{}
+	for _, p := range lit.Properties {
+		if fe, ok := p.Value.(*ast.FunctionExpression); ok && p.AccessorKind != "" && e.objLitAccessorCaptures(fe) {
+			capturing[fe] = true
+			ownFields = append(ownFields, Field{Name: objLitAccessorField(p.AccessorKind, p.Key), Ty: TypeAny})
+		}
+	}
+
 	// Typing a field can ask for this literal's class again (a method
 	// returning `this`): that nested ask registered it, and it is the one
 	// class of the literal.
@@ -110,6 +122,9 @@ func (e *Emitter) ensureObjLitClass(lit *ast.ObjectLiteral) string {
 		key := accessorMethodName(p.AccessorKind, p.Key)
 		_, dup := info.MethodSigs[key]
 		fd := &ast.FunctionDeclaration{Name: p.Key, Params: fe.Params, ReturnType: fe.RetType, Body: fe.Body, Src: fe.Src}
+		if capturing[fe] {
+			fd = objLitAccessorTrampoline(p.AccessorKind, p.Key, fe)
+		}
 		e.pushScope()
 		e.define("this", Symbol{Ty: ty})
 		sig := e.buildFunctionSig(fd)
@@ -181,7 +196,26 @@ func (e *Emitter) emitObjectLiteralWithAccessors(lit *ast.ObjectLiteral) (Value,
 	e.heapStore("i64", fmt.Sprint(valTag), tagGep, 8)
 
 	for _, p := range lit.Properties {
-		if p.AccessorKind != "" || p.Key == "" {
+		if p.AccessorKind != "" {
+			// A capturing accessor's closure, made here where its locals
+			// are in scope.
+			idx, _, ok := ty.FieldIndex(objLitAccessorField(p.AccessorKind, p.Key))
+			if !ok {
+				continue
+			}
+			fv, err := e.emitExpr(p.Value)
+			if err != nil {
+				return Value{}, err
+			}
+			if fv, err = e.emitBoxValue(fv); err != nil {
+				return Value{}, err
+			}
+			gepReg := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gepReg, structIR, dataReg, idx))
+			e.heapStore("i64", fv.Ref, gepReg, 8)
+			continue
+		}
+		if p.Key == "" {
 			continue
 		}
 		if _, isAssign := p.Value.(*ast.AssignmentExpression); isAssign {
@@ -261,8 +295,12 @@ func (e *Emitter) emitObjLitBodies(lit *ast.ObjectLiteral, className string) err
 			}
 			// Its own function, whatever function is open where this runs
 			// (a prototype builder reaching it through shapeMethodRecord).
+			params, body := fe.Params, fe.Body
+			if fd := info.Methods[key]; fd != nil && fd.Body != fe.Body {
+				params, body = fd.Params, fd.Body // (a capturing accessor's call of its closure)
+			}
 			restore := e.beginDetachedFunc()
-			err := e.emitClassMember(llvmName, ty, fe.Params, sig, fe.Body, sig.RetType, pos, false, false)
+			err := e.emitClassMember(llvmName, ty, params, sig, body, sig.RetType, pos, false, false)
 			restore()
 			if err != nil {
 				return err
@@ -272,4 +310,66 @@ func (e *Emitter) emitObjLitBodies(lit *ast.ObjectLiteral, className string) err
 	}
 
 	return nil
+}
+
+// objLitAccessorField is the hidden field holding a capturing accessor's
+// closure.
+func objLitAccessorField(kind, key string) string { return "#__kml_acc_" + kind + "_" + key }
+
+// objLitAccessorTrampoline is the class accessor calling a capturing
+// accessor's closure, the instance as its this.
+func objLitAccessorTrampoline(kind, key string, fe *ast.FunctionExpression) *ast.FunctionDeclaration {
+	pos := fe.GetPos()
+	callee := ast.NewMemberExpression(ast.NewMemberExpression(ast.NewThisExpression(pos), objLitAccessorField(kind, key), pos), "call", pos)
+	args := []ast.Expression{ast.NewThisExpression(pos)}
+	var params []ast.Param
+	var stmt ast.Statement
+	if kind == "set" {
+		const v = "__kml_acc_v"
+		params = []ast.Param{{Name: v, Type: ast.AnyAnnotation("")}}
+		args = append(args, ast.NewIdentifier(v, pos))
+		stmt = ast.NewExpressionStatement(ast.NewCallExpression(callee, args, pos), pos)
+	} else {
+		stmt = ast.NewReturnStatement(ast.NewCallExpression(callee, args, pos), pos)
+	}
+	return &ast.FunctionDeclaration{Name: key, Params: params, ReturnType: ast.AnyAnnotation(""),
+		Body: ast.NewBlockStatement([]ast.Statement{stmt}, pos), Src: fe.Src}
+}
+
+// objLitAccessorCaptures reports whether an object literal's accessor names
+// a binding of an enclosing function or block (not its own, not a module's).
+func (e *Emitter) objLitAccessorCaptures(fe *ast.FunctionExpression) bool {
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	b := c.Binding()
+	inside := map[*binder.Scope]bool{}
+	captured := false
+	ast.Inspect(fe, func(n ast.Node) bool {
+		if captured {
+			return false
+		}
+		if s := b.ScopeOf(n); s != nil {
+			inside[s] = true
+		}
+		id, ok := n.(*ast.Identifier)
+		if !ok {
+			return true
+		}
+		sym, _ := b.Resolve(id)
+		if sym == nil || sym.Scope == nil {
+			return true
+		}
+		for s := sym.Scope; s != nil; s = s.Parent {
+			if inside[s] {
+				return true
+			}
+		}
+		if sym.Scope.Kind != binder.ModuleScope {
+			captured = true
+		}
+		return true
+	})
+	return captured
 }

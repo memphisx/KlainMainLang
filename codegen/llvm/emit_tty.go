@@ -16,10 +16,6 @@ package llvm
 // sidesteps every one of those differences by construction, on both dev
 // machines, with no per-platform IR.
 
-// ensureTtyRead compiles the tty shim in: klain:tty's `@link tty`
-// (lib/native.d.ts).
-func (e *Emitter) ensureTtyRead() { e.usedTtyRead = true }
-
 // TTYShimSource is the embedded C behind all of TDD-00031's terminal
 // primitives. It compiles against the platform's own <termios.h>/<sys/ioctl.h>
 // so struct layouts and flag-bit values are always the host's, never assumed.

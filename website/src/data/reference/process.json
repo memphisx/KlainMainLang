@@ -7,7 +7,7 @@
   "coverage": {
     "loose": "35/35",
     "loosePct": 100,
-    "strict": "22/35",
+    "strict": "23/35",
     "strictPct": 63
   },
   "lede": "What a CLI tool or containerized service needs day-to-day: argv, environment, exit codes, stdin, signals, timing, and child processes. The recurring divergence: every event/handler API here takes one listener slot per event, an arrow/function-literal only, firing synchronously from the event loop's dispatch rather than through a microtask queue. child_process (spawn/exec/fork/spawnSync) lives here too — it is what a process orchestrator actually reaches for.",
@@ -451,17 +451,15 @@
       "name": "process as an EventEmitter ('beforeExit'/'exit'/'uncaughtException'/'unhandledRejection'/'warning') + exitCode",
       "statusRow": "process as an EventEmitter (on/once/off/emit/…, 'beforeExit'/'exit'/'uncaughtException'/'unhandledRejection'/'warning') + process.exitCode",
       "signature": "process.on('exit', (code) => …); process.exitCode = N",
-      "badge": "caveats",
-      "description": "process is an EventEmitter: on/once/off/emit/listenerCount and the rest, any event name. 'beforeExit' fires when the event loop drains, and again after work its listeners schedule. 'exit' fires at normal end and from process.exit(), receiving the exit code, and a listener may set process.exitCode; process.exit() with no argument uses it. 'uncaughtException' receives the thrown value and its origin. A rejected promise nothing handles is reported after the microtask checkpoint, as Node's default does: 'unhandledRejection' receives (reason, promise), else it is an uncaught exception.",
+      "badge": "exact",
+      "description": "process is an EventEmitter: on/once/off/emit/listenerCount and the rest, any event name. 'beforeExit' fires when the event loop drains, and again after work its listeners schedule. 'exit' fires at normal end and from process.exit(), receiving the exit code, and a listener may set process.exitCode; process.exit() with no argument uses it. 'uncaughtException' receives the thrown value and its origin. A rejected promise nothing handles is reported after the microtask checkpoint, as Node's default does: 'unhandledRejection' receives (reason, promise), else it is an uncaught exception. A listener of 'uncaughtException' handling a synchronous throw lets the event loop go on. --unhandled-rejections in NODE_OPTIONS (throw, strict, warn, warn-with-error-code, none) selects Node's other treatments.",
       "returns": {
         "type": "void",
         "desc": "Registers a lifecycle listener."
       },
       "exampleKey": "process/process_info",
       "snippet": "process.on('exit', (code: number) => console.log(\"exiting with code\", code))\nprocess.exitCode = 0",
-      "differences": [
-        "After a synchronous throw, `'uncaughtException'` runs the listener (suppressing the default print) but the process still exits (code 1) — the setjmp/longjmp model has already unwound to the top-level catch, so it can't resume like Node."
-      ],
+      "differences": [],
       "seeAlso": [
         "process.exit",
         "process.emitWarning"

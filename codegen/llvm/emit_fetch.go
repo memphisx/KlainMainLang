@@ -17,6 +17,8 @@ import (
 	"fmt"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/parser"
+	"KlainMainLang/sema"
 )
 
 // hasBodyMixin reports a type with Fetch's Body members (body, bodyUsed,
@@ -86,7 +88,19 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 			sig := e.loadFieldValue(reqVal, sigIdx, sigFieldTy)
 			lenIdx, lenFieldTy, _ := reqTy.FieldIndex("bodyLength")
 			bodyLen := e.loadFieldValue(reqVal, lenIdx, lenFieldTy)
-			return e.emitFetchAsyncCallN(urlVal.Ref, methodVal.Ref, headersRef, bodyVal.Ref, bodyLen.Ref, sig.Ref)
+			return e.emitFetchRequestMaybeStream(reqVal, func() (Value, error) {
+				return e.emitFetchAsyncCallN(urlVal.Ref, methodVal.Ref, headersRef, bodyVal.Ref, bodyLen.Ref, sig.Ref)
+			}, pos)
+		}
+	}
+
+	if len(args) == 2 {
+		// A stream body: the Request the init makes carries it (its duplex
+		// check, its read), and is what is sent.
+		if it := e.typeOfExpr(args[1]); it.IsObject() && !isUnconstrainedDynamic(it) {
+			if _, bt, ok := it.FieldIndex("body"); ok && e.streamOfInstance(Value{Ty: bt}).Ty.IsReadableStream() {
+				return e.emitFetch([]ast.Expression{ast.NewNewRequestExpression(args[0], args[1], pos)}, pos)
+			}
 		}
 	}
 
@@ -243,7 +257,7 @@ func (e *Emitter) emitFetch(args []ast.Expression, pos ast.Pos) (Value, error) {
 		if dyn {
 			bodyRef, bodyLen, ctRef = e.emitFetchBodyFromBox(dynGet("body"))
 		} else if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok {
-			bv := e.loadFieldValue(initVal, idx, fieldTy)
+			bv := e.streamOfInstance(e.loadFieldValue(initVal, idx, fieldTy))
 			box, err := e.emitBoxValue(bv)
 			if err != nil {
 				return Value{}, internalAt(pos, "fetch's init.body: %v", err)
@@ -363,7 +377,7 @@ func (e *Emitter) emitFetchRejected(msg string, pos ast.Pos) (Value, error) {
 
 // emitFetchRejectedErr is a fetch rejected with the error object errRef.
 func (e *Emitter) emitFetchRejectedErr(errRef string) (Value, error) {
-	e.ensureFetchAsync()
+	e.ensureFetch()
 	e.declareFn("__kml_fetch_rejected_pending", "declare "+irPtr+" @__kml_fetch_rejected_pending("+irPtr+")")
 	p := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_rejected_pending("+irPtr+" %s)", p, errRef))
@@ -459,7 +473,7 @@ func (e *Emitter) emitFetchSignalShown(sv Value, pos ast.Pos) (Value, error) {
 // emitFetchAsyncCallN is emitFetchAsyncCall with the body's byte length (-1:
 // a NUL-terminated string).
 func (e *Emitter) emitFetchAsyncCallN(urlRef, methodRef, headersRef, bodyRef, bodyLen, signalRef string) (Value, error) {
-	e.ensureFetchAsync()
+	e.ensureFetch()
 	pendingReg := e.freshReg()
 	if bodyRef == "null" {
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_async_n("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i64 %s, "+irPtr+" %s)",
@@ -505,7 +519,7 @@ func (e *Emitter) emitFetchAsyncCallN(urlRef, methodRef, headersRef, bodyRef, bo
 // refs are resolved: call __kml_fetch_async, box the returned pending
 // handle into a fresh Promise<Response> slot.
 func (e *Emitter) emitFetchAsyncCall(urlRef, methodRef, headersRef, bodyRef, signalRef string) (Value, error) {
-	e.ensureFetchAsync()
+	e.ensureFetch()
 	pendingReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_async("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)",
 		pendingReg, urlRef, methodRef, headersRef, bodyRef, signalRef))
@@ -622,7 +636,6 @@ func (e *Emitter) emitResponseBody(objVal Value, pos ast.Pos) (Value, error) {
 	// bodyLength bytes as TextDecoder does: UTF-8, an invalid sequence as
 	// U+FFFD, a leading BOM dropped, an embedded NUL byte kept. A Request
 	// without a body has a null one: "".
-	e.ensureStrHeaderRuntime()
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, r))
 	src := e.freshReg()
@@ -675,7 +688,7 @@ func (e *Emitter) emitResponseDriveToDone(objVal Value) {
 	if !ok {
 		return
 	}
-	e.ensureFetchAsync()
+	e.ensureFetch()
 	structIR := objVal.Ty.StructIR()
 	pGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", pGep, structIR, objVal.Ref, pIdx))
@@ -759,10 +772,7 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
-	e.ensureNanBox()
 
 	q := e.emitAllocSettledPromise() // pending (state 0); the runner settles it
 
@@ -842,6 +852,7 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	}
 	// A stream body (a constructed Response's) is read to its end first.
 	e.respCollectCalled = e.respCollectCalled || objVal.Ty.IsResponse()
+	e.reqCollectCalled = e.reqCollectCalled || objVal.Ty.IsFetchRequest()
 	fIdx, _, _ := objVal.Ty.FieldIndex("__kml_bodyflags")
 	flags := e.loadFieldValue(objVal, fIdx, TypeI64)
 	sb := e.freshReg()
@@ -851,8 +862,10 @@ func (e *Emitter) emitResponseCall(objVal Value, method string, pos ast.Pos, jso
 	collectL, regL, joinL := e.freshLabel("resp.collect"), e.freshLabel("resp.register"), e.freshLabel("resp.bodyprom")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStream, collectL, regL))
 	e.emitLabel(collectL)
-	if objVal.Ty.IsResponse() { // a Request's body is never a stream
+	if objVal.Ty.IsResponse() {
 		e.emitInstr(fmt.Sprintf("call void @__kml_resp_collect("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", objVal.Ref, clo, q))
+	} else {
+		e.emitInstr(fmt.Sprintf("call void @__kml_req_collect("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", objVal.Ref, clo, q))
 	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
 	e.emitLabel(regL)
@@ -899,7 +912,6 @@ func (e *Emitter) orStreamFlag(objVal Value, acc string, bit int) string {
 	has := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, s.Ref))
 	// A null stream reads a zero flags word from a private zero cell.
-	e.ensureZeroCell()
 	sp := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" @__kml_zero_cell", sp, has, s.Ref))
 	fp := e.freshReg()
@@ -915,13 +927,9 @@ func (e *Emitter) orStreamFlag(objVal Value, acc string, bit int) string {
 	return r
 }
 
-// ensureZeroCell defines @__kml_zero_cell, a zeroed ReadableStream-sized
+// emitZeroCell defines @__kml_zero_cell, a zeroed ReadableStream-sized
 // block a null stream's field reads resolve to.
-func (e *Emitter) ensureZeroCell() {
-	if e.usedZeroCell {
-		return
-	}
-	e.usedZeroCell = true
+func (e *Emitter) emitZeroCell() {
 	e.emitGlobal(fmt.Sprintf("@__kml_zero_cell = internal"+irGlobalAS+" constant [%d x i8] zeroinitializer, align 8", rstreamStructSize))
 }
 
@@ -971,7 +979,6 @@ func (e *Emitter) emitFetchBodyPromRunner(objTy Type, method string, pos ast.Pos
 		}
 		e.fetchBodyPromRunner[key] = name
 	}
-	e.ensureExceptionHelpers()
 
 	restoreBuilder := e.beginThunkEmit()
 
@@ -1032,6 +1039,12 @@ func init() {
 				objVal, err := e.emitExpr(mem.Object)
 				if err != nil {
 					return Value{}, err
+				}
+				// The receiver known only as any here (a field of an
+				// object of boxed values): its own reader, looked up at
+				// run time.
+				if objVal.Ty.IsDynamic() {
+					return e.emitDynAnyMethodCall(objVal, name, ex.Args, ex.GetPos())
 				}
 				if ty, ok := e.callAssertedTargetTy(ex); ok && name == "json" {
 					// `res.json() as T` supplies the parse target, as
@@ -1172,4 +1185,73 @@ func init() {
 			},
 		},
 	}
+}
+
+// emitFetchRequestMaybeStream is fetch(request) where the request may hold
+// a stream body: one not yet read is read to its end first (undici sends it
+// as it is read; the request carries the same bytes), then sent with the
+// request's method, headers and signal. Both forms settle a task promise.
+func (e *Emitter) emitFetchRequestMaybeStream(reqVal Value, native func() (Value, error), pos ast.Pos) (Value, error) {
+	fIdx, _, _ := reqVal.Ty.FieldIndex("__kml_bodyflags")
+	fl := e.loadFieldValue(reqVal, fIdx, TypeI64)
+	sb, isStream := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", sb, fl.Ref, responseStreamBody))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isStream, sb))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	strL, natL, joinL := e.freshLabel("fetch.reqstream"), e.freshLabel("fetch.reqbytes"), e.freshLabel("fetch.reqjoin")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStream, strL, natL))
+	e.emitLabel(strL)
+	{
+		e.pushScope()
+		const src = "__kml_fetch_req"
+		rs := e.freshReg()
+		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", rs))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", reqVal.Ref, rs))
+		e.define(src, Symbol{Ptr: rs, Ty: reqVal.Ty})
+		sig := ""
+		if _, has := e.abortSignalClass(); has {
+			sig = ", signal: q.signal"
+		}
+		prog, err := parser.Parse(`(async (q: Request): Promise<Response> => {
+  const b = new Uint8Array(await q.arrayBuffer());
+  return await fetch(q.url, { method: q.method, headers: q.headers, body: b` + sig + ` });
+})(` + src + `);`)
+		if err == nil && len(prog.Body) == 1 {
+			err = sema.Prepare(prog)
+		}
+		if err != nil {
+			e.popScope()
+			return Value{}, internalAt(pos, "fetch of a Request's stream body: %v", err)
+		}
+		// Synthesized code has no checker declarations: the call names
+		// its intrinsic itself.
+		ast.Inspect(prog, func(n ast.Node) bool {
+			if ce, ok := n.(*ast.CallExpression); ok {
+				if id, ok := ce.Callee.(*ast.Identifier); ok && id.Name == "fetch" {
+					ce.Intrinsic = "fetch"
+				}
+			}
+			return true
+		})
+		pv, err := e.emitExpr(prog.Body[0].(*ast.ExpressionStatement).Expr)
+		e.popScope()
+		if err != nil {
+			return Value{}, internalAt(pos, "fetch of a Request's stream body: %v", err)
+		}
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", pv.Ref, slot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	}
+	e.emitLabel(natL)
+	nv, err := native()
+	if err != nil {
+		return Value{}, err
+	}
+	tp := e.emitFetchHandleToPendingPromise(nv.Ref)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", tp.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+	e.emitLabel(joinL)
+	out := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", out, slot))
+	return Value{Ref: out, Ty: tp.Ty}, nil
 }

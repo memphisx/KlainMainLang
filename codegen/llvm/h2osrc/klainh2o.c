@@ -42,7 +42,8 @@ typedef struct kh_ex {
     int started;         // a streamed response started
     int writing;         // a chunk sent, its proceed not yet called
     char *wbuf;          // that chunk's bytes, until proceed
-    void *winv, *wclo;   // its callback (status)
+    void *winv;
+    kml_ref wclo;        // its callback (status), held through the handle table
     h2o_socket_t *sock;  // its connection's, for the busy count
     double id;
 } kh_ex;
@@ -122,6 +123,7 @@ static void kh_release(kh_ex *ex) {
     kh_exs[slot] = NULL;
     kh_free[kh_nfree++] = slot;
     free(ex->wbuf); /* scratch */
+    kml_ref_free(ex->wclo); /* a write the connection outlived */
     free(ex); /* scratch */
 }
 
@@ -132,8 +134,10 @@ static void kh_write_done(kh_ex *ex, int status) {
     ex->writing = 0;
     free(ex->wbuf); /* scratch */
     ex->wbuf = NULL;
-    void *inv = ex->winv, *clo = ex->wclo;
-    ex->winv = ex->wclo = NULL;
+    void *inv = ex->winv, *clo = kml_ref_get(ex->wclo);
+    kml_ref_free(ex->wclo);
+    ex->winv = NULL;
+    ex->wclo = 0;
     if (inv) kh_call(inv, clo, status, 0);
 }
 
@@ -504,7 +508,8 @@ void __kml_native_khttp_h2o_respond_write(double id, void *data, int64_t len, vo
     if (len > 0) memcpy(ex->wbuf, data, (size_t)len);
     ex->writing = 1;
     ex->winv = inv;
-    ex->wclo = clo;
+    kml_ref_free(ex->wclo);
+    ex->wclo = kml_ref_new(clo);
     h2o_iovec_t buf = h2o_iovec_init(ex->wbuf, (size_t)len);
     h2o_send(ex->req, &buf, 1, H2O_SEND_STATE_IN_PROGRESS);
 }

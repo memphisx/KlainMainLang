@@ -7,40 +7,25 @@ package llvm
 // call returns -errno; the TypeScript side builds Node's error from it. The
 // bodies are in processsrc/process.c; each ensure* here declares its natives.
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
-// ensureNativeProcessExit declares processSetExitCode(code), the code the
-// program exits with at its end, and processReallyExit(code): the 'exit'
-// hook, then exit(3) (Node's process.reallyExit).
-func (e *Emitter) ensureNativeProcessExit() {
-	if e.fnDecls["__kml_native_process_set_exit_code"] {
-		return
-	}
-	e.fnDecls["__kml_native_process_set_exit_code"] = true
-	e.usedProcessLifecycle = true
-}
-
-// ensureNativeProcessVersion defines processVersion(0 version, 1 node,
-// 2 v8, 3 klain).
+// ensureNativeProcessVersion defines the version strings loop.c's
+// __kml_native_process_version answers (0 version, 1 node, 2 v8, 3 klain):
+// the compiler's own version is the compiler build's, so it is the
+// program's data, not the cached runtime object's.
 func (e *Emitter) ensureNativeProcessVersion() {
-	if e.fnDecls["__kml_native_process_version"] {
+	if e.fnDecls["__kml_process_versions"] {
 		return
 	}
-	e.fnDecls["__kml_native_process_version"] = true
-	restore := e.beginDetachedFunc()
-	which := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = fptosi double %%which to i32", which))
-	strs := []string{e.internString("v" + nodeCompatVersion), e.internString(nodeCompatVersion), e.internString(nodeCompatV8), e.internString(KlainVersion)}
-	labels := make([]string, len(strs))
-	for k := range labels {
-		labels[k] = e.freshLabel("ver")
+	e.fnDecls["__kml_process_versions"] = true
+	var elems []string
+	for i, v := range []string{"v" + nodeCompatVersion, nodeCompatVersion, nodeCompatV8, KlainVersion} {
+		name := fmt.Sprintf("@__kml_process_version_%d", i)
+		e.emitGlobal(fmt.Sprintf("%s = private"+irGlobalAS+" constant [%d x i8] c\"%s\\00\"", name, len(v)+1, v))
+		elems = append(elems, irPtr+" "+name)
 	}
-	e.emitTerminator(fmt.Sprintf("switch i32 %s, label %%%s [ i32 1, label %%%s i32 2, label %%%s i32 3, label %%%s ]", which, labels[0], labels[1], labels[2], labels[3]))
-	for k, l := range labels {
-		e.emitLabel(l)
-		e.emitTerminator("ret " + irPtr + " " + strs[k])
-	}
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.writeFunc(irPtr+" @__kml_native_process_version(double %which)", body)
+	e.emitGlobal(fmt.Sprintf("@__kml_process_versions ="+irGlobalAS+" constant [4 x "+irPtr+"] [%s]", strings.Join(elems, ", ")))
 }

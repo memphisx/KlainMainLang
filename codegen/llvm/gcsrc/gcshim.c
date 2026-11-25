@@ -373,18 +373,39 @@ void __kml_gc_tls_unregister(void) {
 // again, on the main thread and on a registered worker alike). Every loaded
 // module's PT_TLS segment has a per-thread copy; dl_iterate_phdr reports the
 // calling thread's.
+//
+// The blocks are only gathered under dl_iterate_phdr, and their roots
+// added once it returns: it holds the loader lock, which a collection
+// takes too (Boehm registers the libraries' data through dl_iterate_phdr)
+// while holding the allocation lock GC_add_roots takes. A root call inside
+// the callback, while a collection ran on another thread, waited on each
+// other's lock: the collector stuck in dl_iterate_phdr.
+#define KML_TLS_MAX 64
+typedef struct { int n; char *lo[KML_TLS_MAX], *hi[KML_TLS_MAX]; } kml_tls_blocks;
 static int kml_tls_phdr_cb(struct dl_phdr_info *info, size_t size, void *data) {
 	(void)size;
+	kml_tls_blocks *b = (kml_tls_blocks *)data;
 	if (!info->dlpi_tls_data) return 0; // no TLS, or not yet allocated for this thread
-	for (int i = 0; i < info->dlpi_phnum; i++) {
+	for (int i = 0; i < info->dlpi_phnum && b->n < KML_TLS_MAX; i++) {
 		if (info->dlpi_phdr[i].p_type != PT_TLS || info->dlpi_phdr[i].p_memsz == 0) continue;
-		char *lo = (char *)info->dlpi_tls_data, *hi = lo + info->dlpi_phdr[i].p_memsz;
-		if (*(int *)data) GC_add_roots(lo, hi); else GC_remove_roots(lo, hi);
+		b->lo[b->n] = (char *)info->dlpi_tls_data;
+		b->hi[b->n] = b->lo[b->n] + info->dlpi_phdr[i].p_memsz;
+		b->n++;
 	}
 	return 0;
 }
-void __kml_gc_tls_register(void) { int add = 1; dl_iterate_phdr(kml_tls_phdr_cb, &add); }
-void __kml_gc_tls_unregister(void) { int add = 0; dl_iterate_phdr(kml_tls_phdr_cb, &add); }
+void __kml_gc_tls_register(void) {
+	kml_tls_blocks b;
+	b.n = 0;
+	dl_iterate_phdr(kml_tls_phdr_cb, &b);
+	for (int i = 0; i < b.n; i++) GC_add_roots(b.lo[i], b.hi[i]);
+}
+void __kml_gc_tls_unregister(void) {
+	kml_tls_blocks b;
+	b.n = 0;
+	dl_iterate_phdr(kml_tls_phdr_cb, &b);
+	for (int i = 0; i < b.n; i++) GC_remove_roots(b.lo[i], b.hi[i]);
+}
 #elif defined(__APPLE__)
 // macOS has the same hole: dyld allocates each thread's copy of the image's
 // thread-local sections lazily, as one block under the image's pthread key,
@@ -587,6 +608,32 @@ static int kml_foreign_remove(void *p) { // 1 when p was a foreign block
 }
 #endif
 
+/* Ephemeron slots (WeakMap). A program that makes a WeakMap or WeakSet
+ * compiles this shim with KML_EPH; every scanned block it allocates then carries two extra
+ * words, and the next-to-last word of the block holds the WeakMap values
+ * whose key the block is (with interior pointers on, Boehm adds a byte to
+ * each request and does not scan the block's last word). Boehm traces the word with the block, so a value lives as
+ * long as its key does and no longer: the map itself holds the key only
+ * through a disappearing link. A program without weak.c pays nothing. */
+#ifdef KML_EPH
+#define KML_EPH_PAD (2 * sizeof(void *))
+#else
+#define KML_EPH_PAD ((size_t)0)
+#endif
+
+static void **eph_slot_of(void *base, size_t sz) { return (void **)((char *)base + sz - 2 * sizeof(void *)); }
+
+/* The ephemeron slot of the object holding p, or NULL when p is in no
+ * padded scanned block (foreign, static, pointer-free or pinned memory). */
+void **kml_gc_eph_slot(void *p) {
+	if (!KML_EPH_PAD || p == NULL || isBumpPtr(p)) return NULL;
+	void *base = GC_base(p);
+	if (!base) return NULL;
+	size_t sz = 0;
+	if (GC_get_kind_and_size(base, &sz) != 1 /* GC_I_NORMAL (gc_inline.h) */ || sz < 3 * sizeof(void *)) return NULL;
+	return eph_slot_of(base, sz);
+}
+
 void *malloc(size_t size) { /* scratch */
 #if defined(__GLIBC__)
 	if (ctorDone && kml_foreign_thread()) {
@@ -602,7 +649,7 @@ void *malloc(size_t size) { /* scratch */
 		}
 	}
 	ensureGCStackbottomSet();
-	return GC_malloc(size);
+	return GC_malloc(size + KML_EPH_PAD);
 }
 
 /* __kml_heap_usable for the collector's heap: a GC object's full size; a
@@ -610,7 +657,7 @@ void *malloc(size_t size) { /* scratch */
  * spare room, so its owner just reallocates. */
 long long __kml_heap_usable(void *p) {
 	if (p == NULL || isBumpPtr(p) || GC_base(p) != p) return 0;
-	return (long long)GC_size(p);
+	return (long long)(GC_size(p) - (kml_gc_eph_slot(p) ? 2 * sizeof(void *) : 0));
 }
 
 void *calloc(size_t nmemb, size_t size) { /* scratch */
@@ -631,7 +678,7 @@ void *calloc(size_t nmemb, size_t size) { /* scratch */
 	// GC_malloc always zeroes its returned memory (unlike libc's malloc),
 	// so a single call of the combined size already satisfies calloc's
 	// contract — Boehm's public API has no separate GC_calloc.
-	return GC_malloc(nmemb * size);
+	return GC_malloc(nmemb * size + KML_EPH_PAD);
 }
 
 void *realloc(void *ptr, size_t size) { /* scratch */
@@ -666,7 +713,17 @@ void *realloc(void *ptr, size_t size) { /* scratch */
 		}
 	}
 	ensureGCStackbottomSet();
-	return GC_realloc(ptr, size);
+	void **old = kml_gc_eph_slot(ptr);
+	if (!old) return GC_realloc(ptr, size + KML_EPH_PAD);
+	/* The slot sits at the block's end: carry it to the new end. */
+	void *e = *old;
+	void *q = GC_realloc(ptr, size + KML_EPH_PAD);
+	if (q) {
+		/* A moved block's old one is freed: only the new one is written. */
+		void **now = kml_gc_eph_slot(q);
+		if (now) *now = e;
+	}
+	return q;
 }
 
 void free(void *ptr) { /* scratch */
@@ -721,7 +778,7 @@ void *kml_gc_alloc_pinned(size_t n) { return GC_malloc_uncollectable(n); }
 // Collected, never scanned: a block that holds no managed pointers.
 void *kml_gc_alloc_atomic(size_t n) { return GC_malloc_atomic(n); }
 void *kml_gc_alloc_atomic_pinned(size_t n) { return GC_malloc_atomic_uncollectable(n); }
-void *kml_gc_alloc(size_t n) { return GC_malloc(n); }
+void *kml_gc_alloc(size_t n) { return GC_malloc(n + KML_EPH_PAD); }
 
 // An object layout's row (unit kind KML_UNIT_LAYOUT, layout_table.go): its
 // size and one kind per 8-byte word.
@@ -752,6 +809,9 @@ static GC_descr gd_make(const KmlLayout *l) {
 // pointer map: a word holding no address is never taken for a pointer. A
 // layout with no row is scanned conservatively.
 void *kml_gc_alloc_typed(long long id, size_t n) {
+	/* Boehm keeps a typed block's descriptor in its last word, where an
+	 * ephemeron slot goes: with WeakMap linked, scan conservatively. */
+	if (KML_EPH_PAD) return GC_malloc(n + KML_EPH_PAD);
 	unsigned h = (unsigned)(((unsigned long long)id * 0x9E3779B97F4A7C15ULL) >> 52) & (GD_SLOTS - 1);
 	for (unsigned probe = 0; probe < 16; probe++) {
 		unsigned i = (h + probe) & (GD_SLOTS - 1);
@@ -779,11 +839,14 @@ void *kml_gc_base(void *p) { return GC_base(p); }
 // *slot is cleared when obj becomes unreachable (a weak reference).
 int kml_gc_weak_link(void **slot, const void *obj) { return GC_general_register_disappearing_link(slot, obj); }
 // fn(obj, data) runs once obj becomes unreachable; replaces and returns the
-// data of the finalizer obj had (NULL for none).
+// data of the finalizer obj had (NULL for none). Unordered, as JavaScript's
+// finalization is: an object that reaches itself (a WeakMap value naming its
+// key, through the key's ephemeron slot) is still finalized, which Boehm's
+// ordered finalization refuses ("Finalization cycle").
 void *kml_gc_finalizer(void *obj, void (*fn)(void *, void *), void *data) {
 	GC_finalization_proc ofn;
 	void *ocd = NULL;
-	GC_register_finalizer(obj, fn, data, &ofn, &ocd);
+	GC_register_finalizer_no_order(obj, fn, data, &ofn, &ocd);
 	return ocd;
 }
 // Runs finalizers queued by earlier collections; the number run.

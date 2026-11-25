@@ -15,26 +15,6 @@ extern char *__kml_received(long long word);
 extern long long __kml_buf_decode_enc(const char *s, const char *enc, unsigned char **out);
 extern int __kml_buf_is_encoding(const char *enc);
 
-/* mirrors __kml_nb_tag / __kml_nb_pay (runtime_nanbox.go), as dynjson.c's */
-static void nb_decode(long long word, long long *tag, long long *pay) {
-    unsigned long long v = (unsigned long long)word;
-    if (v >= (1ULL << 49)) {
-        *tag = 1;
-        *pay = (long long)(v - (1ULL << 49));
-        return;
-    }
-    if (v < 65536) {
-        switch (v) {
-        case 2: *tag = 4; *pay = 0; return;
-        case 6: *tag = 3; *pay = 0; return;
-        case 7: *tag = 3; *pay = 1; return;
-        default: *tag = 5; *pay = 0; return;
-        }
-    }
-    static const long long kindTag[8] = {2, 6, 7, 8, 9, 10, 11, 12};
-    *tag = kindTag[v & 7];
-    *pay = (long long)((v & 7) == 0 ? v : v & ~7ULL);
-}
 
 /* A header string of the text in buf. */
 static char *hdr_str(const char *buf) {
@@ -51,7 +31,7 @@ static char *hdr_str(const char *buf) {
    Number.MAX_SAFE_INTEGER. */
 static long long fill_offset(long long word, const char *name, long long len, long long *out, char **msg) {
     long long tag, pay;
-    nb_decode(word, &tag, &pay);
+    kml_nb_decode(word, &tag, &pay);
     char buf[256];
     if (tag != 0 && tag != 1) {
         char *r = __kml_received(word);
@@ -93,13 +73,13 @@ long long __kml_buf_fill_any(unsigned char *data, long long len, long long argc,
     long long value = args[0];
     long long offset = argc > 1 ? args[1] : undef, end = argc > 2 ? args[2] : undef, encoding = argc > 3 ? args[3] : undef;
     long long vtag, vpay, t, p;
-    nb_decode(value, &vtag, &vpay);
+    kml_nb_decode(value, &vtag, &vpay);
     const char *enc = NULL;
     char buf[256];
     if (vtag == 2) {
-        nb_decode(offset, &t, &p);
+        kml_nb_decode(offset, &t, &p);
         long long et, ep;
-        nb_decode(end, &et, &ep);
+        kml_nb_decode(end, &et, &ep);
         if (t == 5 || t == 2) {
             encoding = offset;
             offset = undef;
@@ -108,7 +88,7 @@ long long __kml_buf_fill_any(unsigned char *data, long long len, long long argc,
             encoding = end;
             end = undef;
         }
-        nb_decode(encoding, &t, &p);
+        kml_nb_decode(encoding, &t, &p);
         if (t == 2) {
             enc = (const char *)p;
             if (!__kml_buf_is_encoding(enc)) {
@@ -125,11 +105,11 @@ long long __kml_buf_fill_any(unsigned char *data, long long len, long long argc,
         }
     }
     long long start = 0, stop = len;
-    nb_decode(offset, &t, &p);
+    kml_nb_decode(offset, &t, &p);
     if (t != 5) {
         long long k = fill_offset(offset, "offset", -1, &start, msg);
         if (k) return k;
-        nb_decode(end, &t, &p);
+        kml_nb_decode(end, &t, &p);
         if (t != 5 && (k = fill_offset(end, "end", len, &stop, msg))) return k;
         if (start >= stop) return 0;
     }

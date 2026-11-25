@@ -265,3 +265,35 @@ const s: any = "hé"; const si = s[Symbol.iterator](); console.log(si.next(), si
 const v = a.values(); console.log([...v], typeof it.next);
 `)
 }
+
+// The builtin iterators' prototypes: %ArrayIteratorPrototype% (its own
+// `next`, inheriting %IteratorPrototype%), and a replaced `next` called by
+// next(), for…of, spread and destructuring.
+func TestE2EArrayIteratorPrototypeTS(t *testing.T) {
+	assertSameAsNode(t, `
+const it0 = [1, 2].values();
+const P: any = Object.getPrototypeOf(it0);
+console.log(typeof P, typeof P.next, P === Object.getPrototypeOf([].keys()), P === Object.getPrototypeOf(new Map().values()));
+console.log(Object.prototype.toString.call(it0), P[Symbol.toStringTag], Object.getOwnPropertyNames(P));
+const IP = Object.getPrototypeOf(P);
+console.log(typeof IP[Symbol.iterator], Object.getPrototypeOf(IP) === Object.prototype);
+console.log(P.next.call([5].entries()));
+console.log([1, 2, 3].values().map((x) => x * 2).toArray());
+const MP: any = Object.getPrototypeOf(new Map([[1, 2]]).entries());
+console.log(MP[Symbol.toStringTag], Object.getPrototypeOf(MP) === IP);
+const arr: any = [1, 2];
+const it2 = arr[Symbol.iterator]();
+console.log(Object.getPrototypeOf(it2) === P, it2.next());
+const orig = P.next;
+let calls = 0;
+P.next = function (this: any) { calls++; return orig.call(this); };
+const it = [1, 2, 3].values();
+console.log(it.next(), calls);
+const out: number[] = [];
+for (const x of [7, 8]) out.push(x);
+console.log(out, calls);
+console.log([...[4, 5]], calls);
+const [a, b] = [9, 10]; console.log(a, b, calls);
+P.next = orig;
+`)
+}

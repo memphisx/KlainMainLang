@@ -275,98 +275,31 @@ type moduleOut struct {
 	fnDecls     map[string]bool // the functions declared once (declareFn)
 	// The used* flags record which runtime pieces the module has
 	// emitted or declared.
-	usedDynImportWatch   bool // the import() watcher runtime is emitted (TDD-00225)
-	usedIslandLoop       bool // an island with a top-level await: islandsrc/island.c (TDD-00225)
-	usedDynWhen          bool // dynwhen.c: bundled import() settles from its module promise
 	usedObjSubclassSplit bool // an inspect/JSON split reads a subclass instance at its own layout
-	usedSignalAborted    bool // the AbortSignal accessors are emitted (emit_signal.go)
-	usedStdoutGlobal     bool // the libc `stdout` FILE* extern global is declared (ADR-00867)
-	usedAbsentArrayCell  bool
 	// usedJmpStack: the program links jmpstack.c (the try frames' buffers).
-	usedJmpStack bool
 	// usedStackGuard: main installs the stack-overflow handler (stackguard.c).
-	usedStackGuard        bool
-	usedBufFill           bool // buffill.c is linked (ensureBufFill)
-	usedTtyRead           bool // TDD-00031: the tty shim (klain:tty's `@link tty`)
 	usedTui               bool // TDD-00150: klain:tui — Yoga layout + ANSI diff painter
-	usedArrLitRows        bool // __kml_arr_lit_rows (ADR-01064)
-	usedInspectReduce     bool // inspect_reduce.c (ADR-01067)
-	usedCasemap           bool // casemap.c — Unicode toUpperCase/toLowerCase
-	usedGCInterface       bool // the GC interface declared (runtime_worker.go)
-	usedStringC           bool // string.c — lowered String.prototype methods
-	usedNumberC           bool // number.c — lowered Number.prototype methods
-	usedFnMeta            bool
-	usedBigIntBoxHooks    bool // emit_bigint_box.go: boxed-bigint hooks the dynamic runtime calls
-	usedFFIRegistry       bool
-	usedUmapOrder         bool
-	usedOSInfoBags        bool // the IR bag builders over osinfo.c (process.env value, networkInterfaces)
 	usedDynJSONC          bool
-	usedShapeRuntime      bool // the layout table + shape.c (emit_shape.go)
 	usedPromiseResolveAny bool
-	usedPromiseWrapperOf  bool
-	usedNanBox            bool
-	usedAnyToPrimitive    bool
-	usedClassIs           bool // unitreg.go: __kml_class_is
 	usedFetch             bool
-	usedFetchAsync        bool
-	usedLoopTurn          bool // emitted code waits on the event loop: main() runs it (runtime_loop_turn.go)
-	usedLoopTurnDefs      bool
-	// usedEventLoop: loopsrc/loop.c is linked, compiled with loopCFlags.
-	usedEventLoop        bool
-	usedFsWatchRuntime   bool
-	usedThreadPool       bool
-	usedProcessLifecycle bool
-	usedWorkerRuntime    bool
-	usedIPC              bool
-	usedIPCChildRuntime  bool
-	usedWebview          bool
-	usedSync             bool
-	usedEmbeddedAssets   bool
-	usedSqliteNatives    bool
-	usedWasmNatives      bool
-	usedFFINatives       bool
+	usesWorkers           bool // the program uses worker_threads: -pthread at link (UsesWorkers)
+	usedWebview           bool
 	// usedFFIDl guards the one-time libdl decls (TDD-00164, runtime_ffi.go).
-	usedFFIDl            bool
-	usedFsThrow          bool
-	usedViews            bool // views.c: typed arrays' buffer/byteOffset (TDD-00243)
-	usedBoxedViews       bool // a typed array is boxed: its buffer/byteOffset read through `any`
-	usedStrHeaderRuntime bool
-	usedNodeInterpGuard  bool
-	usedProcessUptime    bool
-	usedSymbolRegistry   bool
-	usedTimers           bool
-	usedJSONExpandoRest  bool
-	usedGeneratorRuntime bool
-	usedBswap16          bool
-	usedBswap32          bool
-	usedBswap64          bool
-	usedTaskRuntime      bool
-	usedPromiseRuntime   bool // the promise struct + __kml_task_alloc_promise, without the fiber scheduler (TDD-00084 Part A)
 	usedUnhandledRuntime bool // unhandled-rejection tracking (emit_unhandled.go)
-	usedObjExtensible    bool // @__kml_obj_extensible is called (emitObjExtensibleFinalize)
-	usedElemKindWidth    bool // @__kml_elem_kind_width (emit_fetch_body.go)
+	usedObjExtensible    bool // a property may be added to a static object at run time (emitObjExtraFinalize)
 	usedObjExtra         bool // @__kml_obj_has_extra and its hooks are called (emitObjExtraFinalize)
-	usedShapeKeysArray   bool
-	usedProtoOf          bool
 	// streamDirect marks the async wrappers streamUnderlyingDynamic builds
 	// (Node's own); streamWrapDirect is set while one's stream wrapper is
 	// generated, which hands the stream its promise to react to as it is.
-	streamDirect      map[ast.Expression]bool
-	streamWrapDirect  bool
-	usedMapView       bool
-	usedKeyOrder      bool // keyorder.c is linked (ensureKeyOrder)
-	usedDynInstanceof bool
+	streamDirect     map[ast.Expression]bool
+	streamWrapDirect bool
 	// ordinaryInstanceof makes emitInstanceOf OrdinaryHasInstance: no
 	// class's own @@hasInstance (the per-class instanceof rows).
 	ordinaryInstanceof bool
-	usedDynConstruct   bool
-	usedConstructorOf  bool
-	usedClassRec       bool
-	usedCtorKind       bool
-	// usedClassRefProto: a class reference's prototype was read
-	// (@__kml_classref_proto, fnproto.go).
-	usedClassRefProto bool
-	fnBaseClasses     map[string]string // constructor function → its empty base (fnBases)
+	// pastUserCode: the program's own code is emitted; what follows is the
+	// runtime routines finalization generates.
+	pastUserCode  bool
+	fnBaseClasses map[string]string // constructor function → its empty base (fnBases)
 	// pendingConstLoop: the `const` for-in/for-of variable whose next
 	// definition binds it constant (constLoopVar).
 	pendingConstLoop string
@@ -376,48 +309,26 @@ type moduleOut struct {
 	ovrCall            *ovrCallReq
 	overrideErr        error // emitOverrideThis's private definitions' failure
 	noWideOverride     bool
-	undeclaredBases    map[string]string              // a class extending a name nothing declares (JS lane): read at its definition
-	valueBases         map[string]bool                // a variable a class extends: its value when the class is defined (fnBases)
-	heritageGlobals    map[string]bool                // value bases whose prototype global is declared (emit_heritage.go)
-	blockHoisted       map[*ast.ClassDeclaration]bool // a block's class moved to the top level; its block keeps a copy for its site
-	protoRetargeted    map[*ast.VarDeclaration]bool   // bindings Object.setPrototypeOf retargets (protoRetargetedDecls)
-	usedClassRefHas    bool                           // emitted code calls @__kml_classref_has
+	undeclaredBases    map[string]string                // a class extending a name nothing declares (JS lane): read at its definition
+	dynBaseNames       map[*ast.ClassDeclaration]string // an anonymous dynamic-base class's binding name (dynBaseSelect)
+	valueBases         map[string]bool                  // a variable a class extends: its value when the class is defined (fnBases)
+	heritageGlobals    map[string]bool                  // value bases whose prototype global is declared (emit_heritage.go)
+	blockHoisted       map[*ast.ClassDeclaration]bool   // a block's class moved to the top level; its block keeps a copy for its site
+	protoRetargeted    map[*ast.VarDeclaration]bool     // bindings Object.setPrototypeOf retargets (protoRetargetedDecls)
+	assignRetyped      map[*ast.VarDeclaration]bool     // bindings an Object.assign retypes a field of (assignRetypedDecls)
 	emittedClassRefHas bool
-	usedClassRefBag    bool // emitted code calls @__kml_classref_bag
 	// defineOnClassOwn: emitDynOwnBagOf is finding a definition's target,
 	// a class reference's own bag rather than its snapshot.
-	defineOnClassOwn        bool
-	emittedClassRefBag      bool
-	usedHostBox             bool
-	usedPromiseBox          bool // a promise was boxed (emitPromiseInspectHook)
-	usedZeroCell            bool // @__kml_zero_cell (emit_fetch.go)
-	usedPromiseSettle       bool // @__kml_promise_settle — bare-promise settle+wake+drain for new Promise(executor) (TDD-00087)
-	usedPromiseAdoptRunner  bool // @__kml_promise_adopt_runner — thenable adoption for resolve(aPromise) (TDD-00091)
-	usedMicrotasks          bool
-	usedFinRegHelpers       bool // ensureFinalizationHelpers emit-once guard
-	usedSortCmpAnyLex       bool
-	usedMapStrHelpers       bool
-	usedNullRef             bool
-	usedFetchBodyProm       bool // lazy Response body promises settled off the reactor (TDD-00186)
-	usedPromiseAddReaction  bool
-	usedAnyIterCollect      bool                                        // __kml_any_iter_collect (emit_iter_collect.go)
-	usedAnyIterTake         bool                                        // __kml_any_iter_take (emit_iter_collect.go)
-	usedAnyObjRest          bool                                        // __kml_any_obj_rest (emit_dynobj_destr.go)
-	usedObjProtoFill        bool                                        // __kml_objproto_fill (emit_builtin_proto.go)
-	primSetUsed             bool                                        // a property write on a primitive (__kml_prim_proto_set)
-	staticFieldInits        map[*ast.ClassDeclaration][]staticFieldInit // emit_static_override.go
-	curCallee               ast.Expression                              // the callee of the call being emitted (emitCall)
-	ownCtorAfterAwait       bool                                        // a for-await step reads its promise's constructor after the await
-	staticWrites            map[string]bool                             // class+"\x00"+name a program writes (emit_static_override.go)
-	usedZlibNatives         bool                                        // klainzlib.c compiled into the pool (-DKLAINPOOL_ZLIB)
-	usedAnyArrayLikeCollect bool                                        // __kml_any_arraylike_collect (emit_iter_collect.go)
-	usedExceptionHelpers    bool
-	usedIntegrityLevels     bool // the header-word integrity runtime (ensureIntegrityLevels)
-	usedRegexCompile        bool
-	usedRegexCompileContext bool
-	usedRegexMatch          bool
+	defineOnClassOwn   bool
+	emittedClassRefBag bool
+	usedPromiseBox     bool                                        // a promise was boxed (emitPromiseInspectHook)
+	usedObjProtoFill   bool                                        // __kml_objproto_fill (emit_builtin_proto.go)
+	primSetUsed        bool                                        // a property write on a primitive (__kml_prim_proto_set)
+	staticFieldInits   map[*ast.ClassDeclaration][]staticFieldInit // emit_static_override.go
+	curCallee          ast.Expression                              // the callee of the call being emitted (emitCall)
+	ownCtorAfterAwait  bool                                        // a for-await step reads its promise's constructor after the await
+	staticWrites       map[string]bool                             // class+"\x00"+name a program writes (emit_static_override.go)
 	// Once-written declarations and helpers, by what they serve.
-	declaredBigInt bool // the __kml_bigint_* declares have been emitted once
 	// recvMsgEmitted: __kml_recv_msg (emitReceiverMessage) is written.
 	recvMsgEmitted       bool
 	objExtraEmitted      bool
@@ -446,18 +357,19 @@ type moduleOut struct {
 	// marks the child-side channel surface (process.send/.on('message')),
 	// which hooks the event loop.
 	// usedWebview links the C++ system-webview binding (TDD-00142).
-	// usedSync links the klain:sync goroutine runtime (TDD-00143).
 	// usesSyncProgram is set from prog.UsesKlainSync before body emission: the
 	// program imports klain:sync, so the safepoint-insertion pass emits
 	// cooperative preempt checks at function entry and loop back-edges.
 	usesSyncProgram      bool
-	needMicrotaskTick    bool // emitted code calls @__kml_microtask_tick (a top-level await's tick)
 	errorGetKeyDone      bool
 	hostIterUsed         bool
 	emittedDynConstruct  bool
-	emittedClassRefProto bool // __kml_classref_proto is defined
-	errorLayoutNoted     bool // errorObjType's layout has its type id
-	respCollectCalled    bool // a body method calls @__kml_resp_collect
+	emittedClassRefProto bool  // __kml_classref_proto is defined
+	errorLayoutNoted     bool  // errorObjType's layout has its type id
+	respCollectCalled    bool  // a body method calls @__kml_resp_collect
+	reqCollectDefined    bool  // @__kml_req_collect defined (emit_response_new.go)
+	concatSpreadableSeen *bool // the program names Symbol.isConcatSpreadable (emit_arrays_transform.go)
+	reqCollectCalled     bool  // a Request body method calls @__kml_req_collect
 	// programUsesALS is set in EmitProgram before Pass 2: true when the
 	// program has async_hooks (lib/node/async_hooks.ts), so timer callbacks
 	// are wrapped to carry the async context across the schedule→fire
@@ -512,9 +424,7 @@ type moduleOut struct {
 	islandUnitRows      map[string]map[int][]string // unitreg.go: a dynamic-only file's rows (lazy), by its hash and kind
 	islandUnitFiles     map[string]bool             // unitreg.go: the dynamic-only files whose bodies register them
 	ctorRows            map[string]*ctorRow         // emit_classref_rows.go, by payload
-	// protoSlots are the builtin prototype objects' global slots emitted;
-	// usedProtoOf marks a program that maps an instance to its builtin
-	// class's prototype (emitBuiltinProtoOf).
+	// protoSlots are the builtin prototype objects' global slots emitted.
 	protoSlots map[string]bool
 	classRefs  map[string]string // class → its constructor reference payload (emit_classref.go)
 	// classRecords is each closure-converted class used as a value: every
@@ -541,11 +451,15 @@ type moduleOut struct {
 	cSources        []CSource
 	cSourcesErr     error
 	cSourcesDone    bool
-	importSettleCtr int  // per-site @__kml_dynimport_settle_<n> counter
-	usesPathWin32   bool // set the first time a win32-flavoured path call is emitted (drives path_win32.c compile+link — TDD-00178)
+	importSettleCtr int // per-site @__kml_dynimport_settle_<n> counter
 	// frameDescs are the shadow call stack's descriptors, by name and file;
 	// funcFiles each function's file.
 	frameDescs map[[2]string]string
+	// tlaSites are the unsettled-await warnings of the module's top-level
+	// awaits, by the index each stores in @__kml_tla_site.
+	tlaSites []string
+	// tlaLoopSites are the enclosing top-level `for await` loops' sites.
+	tlaLoopSites []int
 	// fileIndexes are the program's files by their place (fileIndex).
 	fileIndexes     map[string]int
 	asyncGenStepCtr int
@@ -596,7 +510,6 @@ type moduleOut struct {
 	ctors                 []string // functions run before main
 	hookInits             []string // IR the hooks constructor runs (runtime_hooks.go)
 	ctorRowOrder          []string
-	loopCFlags            []string
 	fetchBodyPromTypedCtr int // per-call-site typed json() runners (emit_fetch.go)
 	// webviewBindings records the typed window.* bindings for --emit-window-dts.
 	webviewBindings []webviewBindingSig
@@ -674,7 +587,12 @@ func (e *Emitter) beginDetachedFunc() func() {
 // allocas first. Every function the emitter builds goes out through here,
 // the one place its prologue and epilogue are written.
 func (e *Emitter) writeFunc(header, body string) {
-	e.functions.WriteString(funcDef(header, body))
+	// funcDef's text, written in place (no copy of the body).
+	e.functions.WriteString("\ndefine ")
+	e.functions.WriteString(header)
+	e.functions.WriteString(" {\nentry:\n")
+	e.functions.WriteString(body)
+	e.functions.WriteString("}\n")
 }
 
 // funcDef is a builder-generated function's text: header (return type,
@@ -716,6 +634,9 @@ type frontState struct {
 	// (shadow.go); both nil outside a KML_SHADOW run.
 	shadowOracle ShadowOracle
 	shadowRec    *shadow.Recorder
+	// shadowStart builds shadowOracle once the front end's checker is
+	// built (startShadow).
+	shadowStart func()
 	// shadowAsking counts the oracle queries shadowExprType has open.
 	shadowAsking int
 	// initFnDecls are the top-level declarations of library modules and
@@ -744,9 +665,8 @@ type frontState struct {
 	cellsTail   map[*ast.BlockStatement][]ast.Statement
 	// dynBaseLifted names each class expression specializeDynamicBases
 	// lifted to a top-level declaration, a candidate base of a class whose
-	// base is a run-time value; dynBaseSeq numbers them.
+	// base is a run-time value (numbered by classExprSeq).
 	dynBaseLifted map[*ast.ClassDeclaration]string
-	dynBaseSeq    int
 	noShadowRead  bool
 }
 
@@ -778,11 +698,27 @@ type programFacts struct {
 	// promiseValue is the value type each `new Promise`'s executor was
 	// emitted with, the instantiation's (newPromiseValueType): its
 	// `resolve` takes it.
-	promiseValue   map[*ast.NewExpression]Type
-	sloppyDecls    map[*ast.FunctionDeclaration]bool
-	sloppyFuncs    map[string]bool
-	strictFns      map[ast.Node]bool                      // strictFunctions (callerprops.go)
-	privateInOwner map[privateInKey]*ast.ClassDeclaration // each `#x in o`'s declaring class (privateInOwners)
+	promiseValue map[*ast.NewExpression]Type
+	sloppyDecls  map[*ast.FunctionDeclaration]bool
+	sloppyFuncs  map[string]bool
+	strictFns    map[ast.Node]bool // strictFunctions (callerprops.go)
+	// argsReflect: the program reads an arguments object's callee or own
+	// keys (argumentsReflected); argsStrictBodies are strict functions'
+	// bodies there.
+	argsReflect, argsReflectDone bool
+	// inStaticPresence: emitHasOwnProperty is inside emitStaticPresence.
+	inStaticPresence bool
+	// promiseProtoCtorDone: ensurePromiseProtoCtorRead ran.
+	promiseProtoCtorDone bool
+	// fnBaseRet: fnBaseReturns' answers.
+	fnBaseRet map[string]bool
+	// classHeritageSites: a hoisted class expression's reference, where its
+	// value heritage is evaluated.
+	classHeritageSites map[ast.Node]*ast.ClassDeclaration
+	// staticDeletes: the program deletes a static method (deletesStaticMethod).
+	staticDeletes, staticDeletesDone bool
+	argsStrictBodies                 map[ast.Statement]bool
+	privateInOwner                   map[privateInKey]*ast.ClassDeclaration // each `#x in o`'s declaring class (privateInOwners)
 	// boxedCapReads are a converted class's reads of a capture field
 	// declared any (captureAnnotation).
 	boxedCapReads map[ast.Expression]bool
@@ -909,6 +845,17 @@ type programFacts struct {
 	// arrayIterScan: 0 unscanned, 1 the program never names
 	// Array.prototype[Symbol.iterator], 2 it does.
 	arrayIterScan int
+	// unsoundCasts: the `x as any` boxUnsoundScalarCasts made.
+	unsoundCasts map[*ast.AsExpression]bool
+	// streamBaseArgs are the extends-clause type arguments of each class
+	// extending a stream class (emitHostStreamBody).
+	streamBaseArgs map[string][]ast.TypeNode
+	// arrIterNextPatchable: the program may replace
+	// %ArrayIteratorPrototype%.next (array_iter_patch.go).
+	arrIterNextPatchable bool
+	// collProtoWrites: the Owner.method keys the program may replace on a
+	// collection prototype (coll_proto_patch.go); nil until scanned.
+	collProtoWrites map[string]bool
 	// lazyStaticSig are the static methods unregisteredStaticSig is building.
 	lazyStaticSig map[string]bool
 	// moduleGlobals holds top-level `const`/`let` bindings promoted to LLVM
@@ -959,9 +906,8 @@ type programFacts struct {
 	jsProtoCtor  map[string]bool
 	// nativeIfaceMembers: the own members of each interface over a native
 	// layout (nativeHeritage), by interface name.
-	nativeIfaceMembers  map[string]map[string]Type
-	protoCtorOwnThis    map[string]bool
-	cryptoSubtleAliases map[string]bool
+	nativeIfaceMembers map[string]map[string]Type
+	protoCtorOwnThis   map[string]bool
 	// errorShadowedSlots: the system-error slots (`code`, `errno`, …) some
 	// Error subclass declares as its own field (ADR-01319).
 	errorShadowedSlots map[string]bool
@@ -990,6 +936,7 @@ type programFacts struct {
 	inTypedArrayProto bool
 	propAttrScan      int // 0 unscanned, 1 no defineProperty, 2 some
 	wrapperScan       int // 0 unscanned, 1 no wrapper object built, 2 some
+	callCtorScan      int // 0 unscanned, 1 no call-constructing builtin read as a value, 2 some
 	holesScan         int // 0 unscanned, 1 no hole producer, 2 some
 	// classCaptures is each closure-converted class's hidden fields
 	// (emit_classclosure.go), by class name; classCapturesPending holds
@@ -1000,7 +947,11 @@ type programFacts struct {
 	classCapFromThis     map[*ast.NewExpression]bool
 	// classCaptureRejects is a block class naming a function local that
 	// closure conversion cannot express: the local and why.
-	classCaptureRejects    map[*ast.ClassDeclaration][2]string
+	classCaptureRejects map[*ast.ClassDeclaration][2]string
+	// jsCtorFieldsBefore is a closure-converted JavaScript class's
+	// constructor-created fields, as the checker read them before the
+	// conversion added its hidden capture fields.
+	jsCtorFieldsBefore     map[*ast.ClassDeclaration][]*checker.Property
 	classStaticCaps        map[string][]classCapture
 	classStaticCapsPending map[*ast.ClassDeclaration][]classCapture
 	ambientOverloads       map[string]int // ambientOverloaded's counts

@@ -310,3 +310,19 @@ try { Function("import.meta"); } catch (e) { console.log(e.constructor.name, e.m
 try { Function("a = import.meta", ""); } catch (e) { console.log(e.constructor.name, e.message); }
 `)
 }
+
+// The global object's eval is the global eval: writing globalThis.eval
+// rebinds `eval`, a call of it is direct only while it holds the builtin.
+func TestE2EGlobalThisEvalRebindJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+var orig = eval;
+globalThis.eval = function (s) { return "g:" + s; };
+console.log(eval("2"), typeof globalThis.eval, globalThis.eval("3"), globalThis["eval"] === eval);
+eval = function (s) { return "m:" + s; };
+console.log(globalThis.eval("4"), global.eval === eval);
+globalThis.eval = orig;
+console.log(eval("4+4"), globalThis.eval === orig, eval === orig);
+var d = Object.getOwnPropertyDescriptor(globalThis, "eval");
+console.log(d.writable, d.enumerable, d.configurable);
+`)
+}

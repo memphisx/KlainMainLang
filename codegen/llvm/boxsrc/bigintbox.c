@@ -31,6 +31,11 @@ _Bool __kml_boxed_bigint_eq_num(void *cell, double d) {
     return __kml_bigint_cmp_double(cell_big(cell), d) == 0;
 }
 
+/* ToBoolean of a boxed bigint: false only for 0n. */
+_Bool __kml_boxed_bigint_truthy(void *cell) {
+    return __kml_bigint_cmp_double(cell_big(cell), 0.0) != 0;
+}
+
 /* Whether a cell's bigint equals a string's StringToBigInt (false when the
  * string is no bigint literal). */
 _Bool __kml_boxed_bigint_eq_str(void *cell, const char *s) {

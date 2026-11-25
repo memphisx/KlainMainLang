@@ -78,10 +78,7 @@ func (e *Emitter) emitDesignTypeDescriptor(ty Type) Value {
 	if name == "" {
 		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
 	nameBox := e.emitNbTagPtr(e.internString(name), kmlTagString)
@@ -93,10 +90,7 @@ func (e *Emitter) emitDesignTypeDescriptor(ty Type) Value {
 // emitDesignParamtypes builds the boxed `design:paramtypes` value: a dynamic
 // array of one design-type descriptor per parameter.
 func (e *Emitter) emitDesignParamtypes(paramTypes []Type) Value {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	arr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_new(i64 0)", arr))
 	for _, pty := range paramTypes {
@@ -110,10 +104,7 @@ func (e *Emitter) emitDesignParamtypes(paramTypes []Type) Value {
 // parentBag[keyRef], creating (and storing) a fresh one if the slot is absent or
 // not a dynamic object. Used to lazily grow the metadata nesting.
 func (e *Emitter) emitDynGetOrCreateBag(parentBag, keyRef string) string {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	cur := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", cur, parentBag, keyRef))
 	tag, pay := e.emitUnboxTagPayload(Value{Ref: cur, Ty: TypeAny})

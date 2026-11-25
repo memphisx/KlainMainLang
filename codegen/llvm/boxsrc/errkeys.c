@@ -16,10 +16,12 @@ extern void *__kml_dynobj_new(void);
 extern void __kml_dynobj_set(void *o, const char *key, i64 v);
 extern void __kml_dynobj_set_attrs(void *o, const char *key, i64 v, i64 attrs);
 extern i64 __kml_dynobj_find(void *o, const char *key);
+extern _Bool __kml_dynobj_delete(void *o, const char *key);
 extern i64 __kml_dynobj_attrs_at(void *o, i64 i);
 extern i64 __kml_dynobj_rawtag_at(void *o, i64 i);
 extern i64 __kml_dynobj_rawpay_at(void *o, i64 i);
 extern void __kml_dynobj_patch(void *o, i64 i, i64 tag, i64 pay, i64 attrs);
+extern int __kml_error_has_message(void *op);
 #define KML_ATTR_ENUM 2 /* dynobj.c's A_ENUM */
 
 #define KSTR(id, s) static const struct { i64 len; char d[sizeof(s)]; } id = { KML_STR_ASCII_HDR(sizeof(s) - 1), s }
@@ -34,9 +36,22 @@ KSTR(k_dest, "dest");
 KSTR(k_errcode, "errcode");
 KSTR(k_errstr, "errstr");
 KSTR(k_cause, "cause");
+/* A system field's place among the extra bag's keys: a hidden marker key
+ * set when the program assigns the field (__kml_error_note_field), so the
+ * walkers list it in insertion order with the bag's own keys. */
+KSTR(m_errno, "\x7f" "errno");
+KSTR(m_code, "\x7f" "code");
+KSTR(m_syscall, "\x7f" "syscall");
+KSTR(m_address, "\x7f" "address");
+KSTR(m_port, "\x7f" "port");
+KSTR(m_path, "\x7f" "path");
+KSTR(m_dest, "\x7f" "dest");
+KSTR(m_errcode, "\x7f" "errcode");
+KSTR(m_errstr, "\x7f" "errstr");
 
 typedef struct {
     const char *name;
+    const char *marker;
     int off;
     int f64;   /* a double slot (present when non-zero), else a pointer slot */
     int gated; /* node:sqlite's: a system error's copies of them are internal */
@@ -45,15 +60,15 @@ typedef struct {
 /* Node's order: uvException's errno, code, syscall, path, dest; the host and
  * port form's address and port; node:sqlite's errcode and errstr. */
 static const Fld flds[] = {
-    {k_errno.d, KML_ERROR_ERRNO, 1, 0},
-    {k_code.d, KML_ERROR_CODE, 0, 0},
-    {k_syscall.d, KML_ERROR_SYSCALL, 0, 0},
-    {k_address.d, KML_ERR_ADDRESS, 0, 0},
-    {k_port.d, KML_ERR_PORT, 1, 0},
-    {k_path.d, KML_ERROR_PATH, 0, 0},
-    {k_dest.d, KML_ERROR_DEST, 0, 0},
-    {k_errcode.d, KML_ERROR_ERRCODE, 1, 1},
-    {k_errstr.d, KML_ERROR_ERRSTR, 0, 1},
+    {k_errno.d, m_errno.d, KML_ERROR_ERRNO, 1, 0},
+    {k_code.d, m_code.d, KML_ERROR_CODE, 0, 0},
+    {k_syscall.d, m_syscall.d, KML_ERROR_SYSCALL, 0, 0},
+    {k_address.d, m_address.d, KML_ERR_ADDRESS, 0, 0},
+    {k_port.d, m_port.d, KML_ERR_PORT, 1, 0},
+    {k_path.d, m_path.d, KML_ERROR_PATH, 0, 0},
+    {k_dest.d, m_dest.d, KML_ERROR_DEST, 0, 0},
+    {k_errcode.d, m_errcode.d, KML_ERROR_ERRCODE, 1, 1},
+    {k_errstr.d, m_errstr.d, KML_ERROR_ERRSTR, 0, 1},
 };
 #define NFLDS ((int)(sizeof flds / sizeof flds[0]))
 
@@ -65,36 +80,89 @@ static int present(const char *o, const Fld *f) {
 
 static void *extra_bag(const char *o) { return *(void *const *)(o + KML_ERR_EXTRA); }
 
-/* The count of present fields plus the bag's keys. */
-i64 __kml_error_nextra(void *op) {
-    const char *o = (const char *)op;
-    i64 n = 0;
-    for (int i = 0; i < NFLDS; i++) n += present(o, &flds[i]);
+static int is_marker(const char *k) { return k[0] == '\x7f'; }
+
+/* The field a marker key stands for, or -1. */
+static int marker_field(const char *k) {
+    if (!is_marker(k)) return -1;
+    for (int f = 0; f < NFLDS; f++)
+        if (!strcmp(k + 1, flds[f].name)) return f;
+    return -1;
+}
+
+/* Whether the bag holds field f's marker. */
+static int marked(void *bag, int f) { return bag && __kml_dynobj_find(bag, flds[f].marker) >= 0; }
+
+/* An Error's own extra keys in Node's order: the present system fields the
+ * runtime set (uvException's order), then, in insertion order, the bag's
+ * keys and the fields the program assigned. enumOnly skips the bag's
+ * non-enumerable entries. Each key goes to out (when non-null); the count
+ * is returned. */
+static i64 ordered_keys(const char *o, int enumOnly, const char **out) {
     void *bag = extra_bag(o);
-    if (bag)
-        for (i64 i = 0; i < __kml_dynobj_count(bag); i++)
-            n += (__kml_dynobj_attrs_at(bag, i) & KML_ATTR_ENUM) != 0;
+    i64 n = 0;
+    for (int k = 0; k < NFLDS; k++)
+        if (present(o, &flds[k]) && !marked(bag, k)) {
+            if (out) out[n] = flds[k].name;
+            n++;
+        }
+    if (!bag) return n;
+    for (i64 j = 0; j < __kml_dynobj_count(bag); j++) {
+        const char *key = (const char *)__kml_dynobj_key_at(bag, j);
+        int f = marker_field(key);
+        if (f >= 0) {
+            if (!present(o, &flds[f])) continue;
+            key = flds[f].name;
+        } else if (is_marker(key) || (enumOnly && !(__kml_dynobj_attrs_at(bag, j) & KML_ATTR_ENUM))) {
+            continue;
+        }
+        if (out) out[n] = key;
+        n++;
+    }
     return n;
 }
 
-/* The i-th present field's name, else the bag's (i - present)-th key. */
+/* The count of an Error's enumerable extra keys. */
+i64 __kml_error_nextra(void *op) { return ordered_keys((const char *)op, 1, 0); }
+
+/* The i-th of an Error's enumerable extra keys. */
 void *__kml_error_extra_key(void *op, i64 i) {
     const char *o = (const char *)op;
-    for (int k = 0; k < NFLDS; k++) {
-        if (!present(o, &flds[k])) continue;
-        if (i == 0) return (void *)flds[k].name;
-        i--;
-    }
-    void *bag = extra_bag(o);
-    if (!bag) return 0;
-    /* The i-th enumerable entry: a non-enumerable one (defineProperty's
-       default) is not listed. */
-    for (i64 j = 0; j < __kml_dynobj_count(bag); j++) {
-        if (!(__kml_dynobj_attrs_at(bag, j) & KML_ATTR_ENUM)) continue;
-        if (i == 0) return __kml_dynobj_key_at(bag, j);
-        i--;
+    i64 n = ordered_keys(o, 1, 0);
+    if (i < 0 || i >= n) return 0;
+    const char **keys = (const char **)kml_alloc(KML_HEAP_WORDS, (__SIZE_TYPE__)n * 8);
+    ordered_keys(o, 1, keys);
+    return (void *)keys[i];
+}
+
+/* `delete err.key` of a system field: the slot cleared (absent), its place
+ * in the order forgotten. 1 when key is one. */
+int __kml_error_delete_field(void *op, const char *key) {
+    for (int f = 0; f < NFLDS; f++) {
+        if (strcmp(key, flds[f].name)) continue;
+        char *o = (char *)op;
+        if (flds[f].f64) *(double *)(o + flds[f].off) = 0.0;
+        else *(void **)(o + flds[f].off) = 0;
+        void *bag = extra_bag(o);
+        if (bag) __kml_dynobj_delete(bag, flds[f].marker);
+        return 1;
     }
     return 0;
+}
+
+/* The program assigns system field key on an Error (before the store): a
+ * field it does not have yet takes its place in the order now; one it has
+ * keeps its place. */
+void __kml_error_note_field(void *op, const char *key) {
+    for (int f = 0; f < NFLDS; f++) {
+        if (strcmp(key, flds[f].name)) continue;
+        if (present((const char *)op, &flds[f])) return;
+        void **bagp = (void **)((char *)op + KML_ERR_EXTRA);
+        if (!*bagp) *bagp = __kml_dynobj_new();
+        __kml_dynobj_delete(*bagp, flds[f].marker); /* a deleted field's earlier place */
+        __kml_dynobj_set(*bagp, flds[f].marker, 10);
+        return;
+    }
 }
 
 /* A present field's boxed value, else the bag's. An own `name` is listed by
@@ -188,11 +256,21 @@ void __kml_error_define_enum(void *op, const char *key, i64 was, void *desc) {
 int __kml_error_option_cause(void *op, i64 *out) {
     const char *o = (const char *)op;
     i64 c = *(const i64 *)(o + KML_ERR_CAUSE);
-    if (c == 0 || c == KML_NB_UNDEFINED) return 0;
     void *bag = extra_bag(o);
-    if (bag && __kml_dynobj_find(bag, k_cause.d) >= 0) return 0;
-    *out = c;
+    i64 i = bag ? __kml_dynobj_find(bag, k_cause.d) : -1;
+    if (i >= 0 && (__kml_dynobj_attrs_at(bag, i) & KML_ATTR_ENUM)) return 0; /* assigned */
+    if ((c == 0 || c == KML_NB_UNDEFINED) && i < 0) return 0;
+    *out = c ? c : KML_NB_UNDEFINED;
     return 1;
+}
+
+/* The constructor's option installed a cause: one that is undefined is
+ * still an own property (`"cause" in e`), which the slot cannot tell from
+ * none, so it is recorded hidden in the extra bag (not enumerable). */
+void __kml_error_option_cause_own(void *op) {
+    char *o = (char *)op;
+    if (*(i64 *)(o + KML_ERR_CAUSE) != KML_NB_UNDEFINED) return;
+    __kml_error_set_hidden(op, k_cause.d, KML_NB_UNDEFINED);
 }
 
 /* An AggregateError's errors array and its length, which util.inspect shows
@@ -225,6 +303,39 @@ KSTR(d_value, "value");
 KSTR(d_writable, "writable");
 KSTR(d_enumerable, "enumerable");
 KSTR(d_configurable, "configurable");
+KSTR(k_errors, "errors");
+
+/* Object.getOwnPropertyNames of an Error, as Node lists them: stack, its
+ * message when it has one, the system fields set on it, the cause its
+ * constructor's option installed, an AggregateError's errors, then every
+ * key of its extra bag (non-enumerable ones too), in the order they were
+ * added. out is {keys, count}, as __kml_shape_names_c fills it. */
+int __kml_error_own_names(void *op, void **out) {
+    const char *o = (const char *)op;
+    void *bag = extra_bag(o);
+    i64 nb = bag ? __kml_dynobj_count(bag) : 0;
+    const char **keys = (const char **)kml_alloc(KML_HEAP_WORDS, (__SIZE_TYPE__)(4 + NFLDS + nb) * 8);
+    i64 n = 0;
+    keys[n++] = k_stack.d;
+    if (__kml_error_has_message(op)) keys[n++] = k_message.d;
+    for (int k = 0; k < NFLDS; k++)
+        if (present(o, &flds[k]) && !marked(bag, k)) keys[n++] = flds[k].name;
+    i64 c = *(const i64 *)(o + KML_ERR_CAUSE);
+    if (c != 0 && c != KML_NB_UNDEFINED && !(bag && __kml_dynobj_find(bag, k_cause.d) >= 0)) keys[n++] = k_cause.d;
+    if ((*(const i64 *)(o + KML_ERROR_KIND) & ~KML_HDR_STATE_MASK) == KML_ERRKIND_AGG) keys[n++] = k_errors.d;
+    for (i64 j = 0; j < nb; j++) {
+        const char *k = (const char *)__kml_dynobj_key_at(bag, j);
+        int f = marker_field(k);
+        if (f >= 0) {
+            if (present(o, &flds[f])) keys[n++] = flds[f].name;
+        } else if (!is_marker(k) && strcmp(k, k_stack.d) && strcmp(k, k_message.d)) {
+            keys[n++] = k;
+        }
+    }
+    out[0] = (void *)keys;
+    out[1] = (void *)(__SIZE_TYPE__)n;
+    return 1;
+}
 
 i64 __kml_error_own_desc(void *op, const char *key) {
     const char *o = (const char *)op;
@@ -232,7 +343,7 @@ i64 __kml_error_own_desc(void *op, const char *key) {
     int en = 0, found = 0;
     if (!strcmp(key, k_message.d)) {
         void *m = *(void *const *)(o + KML_ERR_MESSAGE);
-        if (!m) return KML_NB_UNDEFINED;
+        if (!__kml_error_has_message(op)) return KML_NB_UNDEFINED;
         v = (i64)(u64)m;
         found = 1;
     } else if (!strcmp(key, k_cause.d) && *(const i64 *)(o + KML_ERR_CAUSE) != 0 &&

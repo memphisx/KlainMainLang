@@ -21,11 +21,11 @@ Each file has its `// META:` frontmatter stripped, a typed `testharness.js`-shap
 
 ## Overall
 
-4207 headless source files — the full corpus class, every one attempted: **73 passed**, 1893 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
+4207 headless source files — the full corpus class, every one attempted: **80 passed**, 1886 failed, 2241 skipped (counted, reasons below). In wpt.fyi's unit these 4207 sources correspond to **7077 generated test documents** (`META: global=` variant expansion; each source runs once here — no distinct per-scope globals exist in this runtime — so the expansion is denominator comparability, not extra coverage).
 
-Of the 1966 files that were in scope and compiled far enough to run, **73 passed (3.7%)** at the file level (a file passes only if *every* subtest in it passes).
+Of the 1966 files that were in scope and compiled far enough to run, **80 passed (4.1%)** at the file level (a file passes only if *every* subtest in it passes).
 
-**Subtest level (the metric WPT itself reports): 715 / 2267 subtests passed (31.5%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
+**Subtest level (the metric WPT itself reports): 757 / 2303 subtests passed (32.9%)** across the files that compiled and ran — each `test`/`promise_test`/`async_test` is one subtest. This is the finer, fairer number: a file with 30 passing subtests and 1 failing counts 30/31 here but 0 at the file level above.
 
 ## By area
 
@@ -33,7 +33,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **73 passed
 |---|---|---|---|---|
 | FileAPI | 4 | 30 | 11 | 20/27 |
 | IndexedDB | 1 | 2 | 210 | 4/21 |
-| WebCryptoAPI | 0 | 103 | 26 | 0/6 |
+| WebCryptoAPI | 1 | 102 | 26 | 3/6 |
 | accelerometer | 0 | 0 | 1 | 0/0 |
 | ai | 0 | 1 | 158 | 0/0 |
 | ambient-light | 0 | 0 | 1 | 0/0 |
@@ -59,7 +59,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **73 passed
 | content-index | 0 | 0 | 2 | 0/0 |
 | content-security-policy | 5 | 5 | 14 | 22/33 |
 | cookies | 0 | 3 | 4 | 0/0 |
-| cookiestore | 0 | 18 | 27 | 0/11 |
+| cookiestore | 0 | 18 | 27 | 0/9 |
 | cors | 0 | 0 | 3 | 0/0 |
 | cpu-performance | 0 | 0 | 1 | 0/0 |
 | credential-management | 0 | 0 | 1 | 0/0 |
@@ -73,12 +73,12 @@ Of the 1966 files that were in scope and compiled far enough to run, **73 passed
 | dom | 4 | 34 | 29 | 10/13 |
 | domparsing | 0 | 0 | 1 | 0/0 |
 | element-timing | 0 | 0 | 1 | 0/0 |
-| encoding | 7 | 23 | 11 | 256/380 |
+| encoding | 9 | 21 | 11 | 262/384 |
 | entries-api | 0 | 0 | 2 | 0/0 |
 | event-timing | 0 | 0 | 3 | 0/0 |
 | eventsource | 1 | 33 | 13 | 1/8 |
 | eyedropper | 0 | 0 | 1 | 0/0 |
-| fetch | 7 | 112 | 128 | 72/129 |
+| fetch | 8 | 111 | 128 | 92/150 |
 | file-system-access | 0 | 0 | 5 | 0/0 |
 | font-access | 0 | 0 | 6 | 0/0 |
 | fs | 0 | 10 | 33 | 0/0 |
@@ -88,8 +88,8 @@ Of the 1966 files that were in scope and compiled far enough to run, **73 passed
 | geolocation | 0 | 0 | 3 | 0/0 |
 | gpc | 0 | 0 | 1 | 0/0 |
 | gyroscope | 0 | 0 | 1 | 0/0 |
-| hr-time | 1 | 2 | 1 | 2/2 |
-| html | 2 | 1074 | 288 | 7/20 |
+| hr-time | 1 | 2 | 1 | 2/3 |
+| html | 3 | 1073 | 288 | 7/20 |
 | html-aam | 0 | 0 | 1 | 0/0 |
 | html-media-capture | 0 | 0 | 1 | 0/0 |
 | idle-detection | 0 | 0 | 4 | 0/0 |
@@ -167,7 +167,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **73 passed
 | speech-api | 0 | 0 | 2 | 0/0 |
 | storage | 0 | 0 | 23 | 0/0 |
 | storage-access-api | 0 | 0 | 41 | 0/0 |
-| streams | 2 | 70 | 7 | 8/14 |
+| streams | 3 | 69 | 7 | 12/14 |
 | subapps | 0 | 0 | 1 | 0/0 |
 | subresource-integrity | 0 | 1 | 14 | 0/0 |
 | svg | 0 | 0 | 1 | 0/0 |
@@ -197,9 +197,9 @@ Of the 1966 files that were in scope and compiled far enough to run, **73 passed
 | webdriver | 0 | 0 | 1 | 0/0 |
 | webgl | 0 | 0 | 1 | 0/0 |
 | webhid | 0 | 0 | 2 | 0/0 |
-| webidl | 0 | 12 | 6 | 0/2 |
+| webidl | 0 | 12 | 6 | 0/3 |
 | webmcp | 0 | 0 | 1 | 0/0 |
-| webmessaging | 0 | 2 | 31 | 0/0 |
+| webmessaging | 1 | 1 | 31 | 9/9 |
 | webmidi | 0 | 0 | 1 | 0/0 |
 | webnn | 0 | 0 | 174 | 0/0 |
 | webrtc | 0 | 1 | 11 | 0/10 |
@@ -214,7 +214,7 @@ Of the 1966 files that were in scope and compiled far enough to run, **73 passed
 | webxr | 0 | 0 | 10 | 0/0 |
 | workers | 4 | 33 | 29 | 81/124 |
 | worklets | 0 | 0 | 1 | 0/0 |
-| xhr | 1 | 13 | 73 | 4/4 |
+| xhr | 1 | 13 | 73 | 4/6 |
 | xml | 0 | 0 | 4 | 0/0 |
 
 ## Top failure reasons
@@ -226,15 +226,15 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 1022 | COMPILE_ERROR: cannot find name '%s' |
 | 311 | COMPILE_ERROR: parameter '%s' implicitly has an '%s' type |
 | 117 | COMPILE_ERROR: property '%s' does not exist on type '%s' |
-| 42 | COMPILE_ERROR: cannot find name '%s'; did you mean '%s'? |
+| 44 | COMPILE_ERROR: cannot find name '%s'; did you mean '%s'? |
 | 37 | COMPILE_ERROR: rest parameter '%s' implicitly has an '%s' type |
 | 35 | COMPILE_ERROR: argument of type '%s' is not assignable to parameter of type '%s' |
 | 26 | COMPILE_ERROR: expected 1-3 arguments, but got 0 |
 | 18 | COMPILE_ERROR: '%s' is possibly '%s' |
+| 13 | COMPILE_ERROR: '%s' implicitly has type '%s' because it does not have a type annotation |
 | 13 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): cannot find module '%s' (resolved to <path>) |
 | 13 | COMPILE_ERROR: a byte stream (an underlying source of type '%s') is not supported yet |
-| 12 | COMPILE_ERROR: '%s' implicitly has type '%s' because it does not have a type annotation |
-| 12 | COMPILE_ERROR: variable '%s' implicitly has type '%s' in some locations where its type cannot be det… |
+| 13 | COMPILE_ERROR: variable '%s' implicitly has type '%s' in some locations where its type cannot be det… |
 | 11 | COMPILE_ERROR: expected ;, got IDENT |
 | 9 | COMPILE_ERROR: <path>: cannot find worker module '%s' (resolved to <path>) |
 | 8 | COMPILE_ERROR: expected ), got , |
@@ -244,11 +244,10 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 5 | COMPILE_ERROR: '%s' is of type '%s' |
 | 5 | COMPILE_ERROR: binding element '%s' implicitly has an '%s' type |
 | 5 | COMPILE_ERROR: cannot find module '%s' (resolved to <path>) |
+| 5 | COMPILE_ERROR: expected 1 arguments, but got 0 |
 | 4 | COMPILE_ERROR: element implicitly has an '%s' type because type '%s' has no index signature |
 | 4 | COMPILE_ERROR: expected '%s', got , |
 | 4 | COMPILE_ERROR: expected 0 arguments, but got 1 |
-| 4 | COMPILE_ERROR: expected 1 arguments, but got 0 |
-| 4 | COMPILE_ERROR: extending the builtin '%s' is not supported yet |
 | 3 | COMPILE_ERROR: expected '%s' after '%s' |
 | 3 | COMPILE_ERROR: expected 0 arguments, but got 2 |
 | 3 | COMPILE_ERROR: type '%s' is not assignable to type '%s' |
@@ -256,13 +255,14 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | 2 | COMPILE_ERROR: a '%s' accessor must return a value |
 | 2 | COMPILE_ERROR: cannot assign to '%s' because it is a constant |
 | 2 | COMPILE_ERROR: element implicitly has an '%s' type because expression of type '%s' can'%s'{ name1: s… |
-| 2 | COMPILE_ERROR: internal: an object has no method '%s' |
 | 2 | COMPILE_ERROR: object is possibly '%s' |
 | 2 | RUNTIME_NONZERO_EXIT: WPT FAIL [WebAssembly.compileStreaming() is blocked] |
 | 2 | RUNTIME_NONZERO_EXIT: WPT FAIL [new WebAssembly.Module() is blocked] |
-| 2 | RUN_TIMEOUT |
 | 1 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): import path '%s' must start with '%s' or '%s'… |
-| 1 | COMPILE_ERROR: a class extending '%s', a value that can hold a class naming its own function's local… |
+| 1 | COMPILE_ERROR: This expression is not callable. |
+| 1 | COMPILE_ERROR: element implicitly has an '%s' type because expression of type '%s' can'%s'typeof glo… |
+| 1 | COMPILE_ERROR: element implicitly has an '%s' type because expression of type '%s' can'%s'{ single: … |
+| 1 | COMPILE_ERROR: element implicitly has an '%s' type because expression of type '%s' can'%s'{ unicode-… |
 
 ## Top skip reasons
 
@@ -286,7 +286,7 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | 1 | uses DOM/browser global (GLOBAL.isWindow) |
 | 1 | uses DOM/browser global (requestAnimationFrame) |
 
-## Passing files (73)
+## Passing files (80)
 
 | File | Area |
 |---|---|
@@ -295,6 +295,7 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `FileAPI/blob/Blob-text.any.js` | FileAPI |
 | `FileAPI/unicode.any.js` | FileAPI |
 | `IndexedDB/globalscope-indexedDB-SameObject.any.js` | IndexedDB |
+| `WebCryptoAPI/randomUUID.https.any.js` | WebCryptoAPI |
 | `console/console-log-large-array.any.js` | console |
 | `console/console-log-symbol.any.js` | console |
 | `content-security-policy/generic/src-trailing-dot.sub.any.js` | content-security-policy |
@@ -310,12 +311,15 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `dom/events/EventTarget-addEventListener.any.js` | dom |
 | `encoding/api-replacement-encodings.any.js` | encoding |
 | `encoding/api-surrogates-utf8.any.js` | encoding |
+| `encoding/streams/readable-writable-properties.any.js` | encoding |
+| `encoding/textdecoder-arguments.any.js` | encoding |
 | `encoding/textdecoder-byte-order-marks.any.js` | encoding |
 | `encoding/textdecoder-fatal.any.js` | encoding |
 | `encoding/textdecoder-ignorebom.any.js` | encoding |
 | `encoding/textdecoder-utf16-surrogates.any.js` | encoding |
 | `encoding/textencoder-utf16-surrogates.any.js` | encoding |
 | `eventsource/dedicated-worker/eventsource-constructor-no-new.any.js` | eventsource |
+| `fetch/api/body/mime-type.any.js` | fetch |
 | `fetch/api/headers/headers-structure.any.js` | fetch |
 | `fetch/api/request/request-constructor-init-body-override.any.js` | fetch |
 | `fetch/api/response/response-static-error.any.js` | fetch |
@@ -326,6 +330,7 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `hr-time/monotonic-clock.any.js` | hr-time |
 | `html/webappapis/scripting/processing-model-2/integration-with-the-javascript-agent-formalism/requires-success.any.js` | html |
 | `html/webappapis/timers/cleartimeout-clearinterval.any.js` | html |
+| `html/webappapis/timers/setinterval-settimeout-clamping.any.js` | html |
 | `performance-timeline/buffered-flag-after-timeout.any.js` | performance-timeline |
 | `performance-timeline/buffered-flag-observer.any.js` | performance-timeline |
 | `performance-timeline/buffered-flag-with-entryTypes-observer.tentative.any.js` | performance-timeline |
@@ -333,6 +338,7 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `performance-timeline/performanceentry-tojson.any.js` | performance-timeline |
 | `screen-wake-lock/wakelock-insecure-context.any.js` | screen-wake-lock |
 | `soft-navigation-heuristics/smoke/tentative/supported-entry-types.window.js` | soft-navigation-heuristics |
+| `streams/transferable/transform-stream-members.any.js` | streams |
 | `streams/writable-streams/bad-strategies.any.js` | streams |
 | `streams/writable-streams/byte-length-queuing-strategy.any.js` | streams |
 | `url/url-tojson.any.js` | url |
@@ -357,6 +363,7 @@ Why out-of-scope files can't be attempted — a real DOM/browser global (no DOM 
 | `wasm/jsapi/global/valueOf.any.js` | wasm |
 | `wasm/webapi/rejected-arg.any.js` | wasm |
 | `wasm/webapi/status.any.js` | wasm |
+| `webmessaging/MessageEvent.any.js` | webmessaging |
 | `webstorage/missing_arguments.window.js` | webstorage |
 | `workers/Worker-base64.any.js` | workers |
 | `workers/Worker-formdata.any.js` | workers |

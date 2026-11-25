@@ -90,28 +90,7 @@ struct sockaddr_un { sa_family_t sun_family; char sun_path[108]; };
 // KLAINPOOL_GC_ENABLE only when the pool is its sole owner (no Worker modules,
 // no klain:sync — see ThreadPoolCFlags).
 
-// One struct, reused as work item (loop -> pool) and completion item (pool ->
-// loop). arg0/arg1 are strdup'd copies the item owns and frees.
-typedef struct kml_pool_item {
-    struct kml_pool_item *next;
-    char *arg0;
-    char *arg1;
-    struct kml_loop_port *port;
-    // Its work, run on a worker, fills err/res; the loop then calls
-    // inv(clo, err, res). a[]/d[] and buf/buflen are its arguments. live
-    // links it into native_live while it is pending.
-    void (*work)(struct kml_pool_item *);
-    void *inv;
-    void *clo;
-    int64_t a[4];
-    double d[4];            // an fs operation's numbers (klainfs.c)
-    void *buf;
-    int64_t buflen;
-    int64_t err;            // a positive errno, or 0
-    double res;
-    char *res_str;          // a string result, read by nativeLastString()
-    struct kml_pool_item *live_prev, *live_next;
-} kml_pool_item;
+// The work/completion item is kml_pool.h's.
 
 // Per-loop completion port: a Treiber stack the workers push completions onto,
 // the wakeup that ends this loop's wait (its uv_async_t on POSIX, the loop
@@ -301,11 +280,17 @@ static void native_unlink(kml_pool_item *it) {
     pthread_mutex_unlock(&live_mu);
 }
 
+// ref_put replaces the closure a kml_ref field holds (0 for none).
+static void ref_put(kml_ref *slot, void *obj) {
+    kml_ref_free(*slot);
+    *slot = obj ? kml_ref_new(obj) : 0;
+}
+
 static kml_pool_item *native_item(void (*work)(kml_pool_item *), void *inv, void *clo) {
     kml_pool_item *it = (kml_pool_item *)calloc(1, sizeof *it); /* scratch */
     it->work = work;
     it->inv = inv;
-    it->clo = clo;
+    it->clo = kml_ref_new(clo);
     return it;
 }
 
@@ -313,6 +298,11 @@ static void native_submit(kml_pool_item *it) {
     native_link(it);
     enqueue_work(loop_port(), it);
 }
+
+// The pool's submission, for the natives compiled as units of their own
+// (zlib, sqlite, wasm), which include kml_pool.h.
+kml_pool_item *__kml_pool_item(void (*work)(kml_pool_item *), void *inv, void *clo) { return native_item(work, inv, clo); }
+void __kml_pool_submit(kml_pool_item *it) { native_submit(it); }
 
 // A native that completes later off the pool (the resolver's queries on
 // c-ares): __kml_pool_begin, on the loop thread, holds the loop open and
@@ -365,6 +355,16 @@ void __kml_pool_job(kml_job_work work, void *job, void *inv, void *clo) {
     kml_pool_item *it = native_item(work_job, inv, clo);
     it->a[0] = (int64_t)(intptr_t)work;
     it->buf = job;
+    native_submit(it);
+}
+
+// __kml_pool_job for a job whose worker writes into managed memory at pin:
+// pinned until the callback.
+void __kml_pool_job_pinned(kml_job_work work, void *job, void *pin, void *inv, void *clo) {
+    kml_pool_item *it = native_item(work_job, inv, clo);
+    it->a[0] = (int64_t)(intptr_t)work;
+    it->buf = job;
+    if (pin) it->pin[0] = kml_ref_new(pin);
     native_submit(it);
 }
 
@@ -487,7 +487,8 @@ typedef struct kml_wreq {
     struct kml_wreq *next;
     char *data;
     int64_t len, off;
-    void *inv, *clo;
+    void *inv;
+    kml_ref clo;
     int sendfd; // an IPC write's descriptor, sent with its first byte; -1 none
 } kml_wreq;
 
@@ -504,11 +505,11 @@ typedef struct kml_tcp {
     int fd;
     int server, listening, connecting, reading, refd;
     int closing, closed_notified, shut_pending, shut_done, read_eof;
-    void *conn_inv, *conn_clo;       // server: onConnection
-    void *connect_inv, *connect_clo; // client: onConnect
-    void *read_inv, *read_clo;       // onRead
-    void *shut_inv, *shut_clo;
-    void *close_inv, *close_clo;
+    void *conn_inv; kml_ref conn_clo;       // server: onConnection
+    void *connect_inv; kml_ref connect_clo; // client: onConnect
+    void *read_inv; kml_ref read_clo;       // onRead
+    void *shut_inv; kml_ref shut_clo;
+    void *close_inv; kml_ref close_clo;
     kml_wreq *wq_head, *wq_tail;
     char *rbuf;
     int64_t rlen;
@@ -517,7 +518,7 @@ typedef struct kml_tcp {
     // (0 none, 1 handshaking, 2 open, 3 failed) and onSecure(status, 0).
     void *tls;
     int tls_state;
-    void *sec_inv, *sec_clo;
+    void *sec_inv; kml_ref sec_clo;
     // The session's ciphertext not yet written, and the socket's end (with
     // its error) once a read for the session met it.
     char *cout;
@@ -928,7 +929,7 @@ static double us_pipe_listen(const char *path, int backlog, void *inv, void *clo
     kml_tcp *h = tcp_tab[id];
     h->server = h->listening = 1;
     h->conn_inv = inv;
-    h->conn_clo = clo;
+    ref_put(&h->conn_clo, clo);
     tcp_touch(h);
     return id;
 }
@@ -945,7 +946,7 @@ static double us_pipe_connect(const char *path, void *inv, void *clo) {
     kml_tcp *h = tcp_tab[id];
     h->connecting = 1;
     h->connect_inv = inv;
-    h->connect_clo = clo;
+    ref_put(&h->connect_clo, clo);
     uv_connect_t *req = (uv_connect_t *)__kml_loop_raw_alloc(sizeof *req); /* scratch */
     req->data = u;
     uv_pipe_connect(req, p, path, us_on_connect);
@@ -1363,7 +1364,7 @@ int __kml_tcp_attach_tls(double id, void *tls, void *inv, void *clo) {
     h->tls = tls;
     h->tls_state = 1;
     h->sec_inv = inv;
-    h->sec_clo = clo;
+    ref_put(&h->sec_clo, clo);
     tcp_touch(h);
     return 0;
 }
@@ -1562,7 +1563,8 @@ static void kml_make_callback(void *inv, void *clo, double a, double b) {
     ((kml_inv2)inv)(clo, a, b);
     __kml_drain_microtasks();
 }
-#define TCP_CALL(inv, clo, a, b) kml_make_callback((inv), (clo), (double)(a), (double)(b))
+// A held closure (a kml_ref field) is read through the handle table.
+#define TCP_CALL(inv, clo, a, b) kml_make_callback((inv), kml_ref_get(clo), (double)(a), (double)(b))
 
 // Parse an IP string into a sockaddr; 0 on success.
 static int tcp_addr(const char *host, int port, struct sockaddr_storage *ss, socklen_t *len) {
@@ -1663,7 +1665,7 @@ static double tcp_listen_impl(const char *host, double port, double backlog, voi
     h->server = 1;
     h->listening = accepting;
     h->conn_inv = inv;
-    h->conn_clo = clo;
+    ref_put(&h->conn_clo, clo);
     if (accepting) us_tcp_listen(h, backlog > 0 ? (int)backlog : 511);
 #if defined(SO_REUSEPORT) && !defined(_WIN32)
     if (worker) {
@@ -1716,7 +1718,7 @@ double __kml_native_tcp_listen_open(double fdd, void *inv, void *clo) {
     kml_tcp *h = tcp_tab[id];
     h->server = h->listening = 1;
     h->conn_inv = inv;
-    h->conn_clo = clo;
+    ref_put(&h->conn_clo, clo);
     us_tcp_listen(h, 511);
     tcp_touch(h);
     return id;
@@ -1735,7 +1737,7 @@ double __kml_native_tcp_connect(const char *ip, double port, void *inv, void *cl
     kml_tcp *h = tcp_tab[id];
     h->connecting = 1;
     h->connect_inv = inv;
-    h->connect_clo = clo;
+    ref_put(&h->connect_clo, clo);
     if (h->us) {
         uv_connect_t *req = (uv_connect_t *)__kml_loop_raw_alloc(sizeof *req); /* scratch */
         req->data = h->us;
@@ -1798,7 +1800,7 @@ double __kml_native_pipe_listen(const char *path, double backlog, void *inv, voi
     kml_tcp *h = tcp_tab[id];
     h->server = h->listening = 1;
     h->conn_inv = inv;
-    h->conn_clo = clo;
+    ref_put(&h->conn_clo, clo);
     h->pipe_path = (char *)malloc(pipe_len(path) + 1); /* scratch */
     memcpy(h->pipe_path, path, pipe_len(path) + 1);
 #ifndef _WIN32
@@ -1829,7 +1831,7 @@ double __kml_native_pipe_connect(const char *path, void *inv, void *clo) {
         kml_tcp *h = tcp_tab[id];
         h->connecting = 1;
         h->connect_inv = inv;
-        h->connect_clo = clo;
+        ref_put(&h->connect_clo, clo);
         uv_connect_t *req = (uv_connect_t *)__kml_loop_raw_alloc(sizeof *req); /* scratch */
         req->data = u;
         int r = uv_pipe_connect2(req, p, path, pipe_len(path), 0, us_on_connect);
@@ -1845,7 +1847,7 @@ double __kml_native_pipe_connect(const char *path, void *inv, void *clo) {
     kml_tcp *h = tcp_tab[id];
     h->connecting = 1;
     h->connect_inv = inv;
-    h->connect_clo = clo;
+    ref_put(&h->connect_clo, clo);
     if (connect(fd, (struct sockaddr *)&su, alen) != 0 && errno != EINPROGRESS && errno != EINTR && errno != EAGAIN) {
         h->connecting = 2 + errno;
     }
@@ -1860,7 +1862,7 @@ void __kml_native_tcp_read_start(double id, void *inv, void *clo) {
     if (!h) return;
     h->reading = 1;
     h->read_inv = inv;
-    h->read_clo = clo;
+    ref_put(&h->read_clo, clo);
     tcp_touch(h);
 }
 
@@ -1903,6 +1905,7 @@ static int tcp_flush(kml_tcp *h, int *progressed) {
         if (!h->wq_head) h->wq_tail = NULL;
         *progressed = 1;
         if (w->inv) TCP_CALL(w->inv, w->clo, 0, 0);
+        kml_ref_free(w->clo);
         free(w->data); /* scratch */
         free(w); /* scratch */
     }
@@ -2048,7 +2051,7 @@ static double tcp_write_fd(double id, void *buf, int64_t size, double offset, do
     w->data = (char *)malloc((size_t)w->len + 1); /* scratch */
     memcpy(w->data, src + done, (size_t)w->len);
     w->inv = inv;
-    w->clo = clo;
+    ref_put(&w->clo, clo);
     if (h->wq_tail) h->wq_tail->next = w; else h->wq_head = w;
     h->wq_tail = w;
     tcp_touch(h);
@@ -2061,7 +2064,7 @@ void __kml_native_tcp_shutdown(double id, void *inv, void *clo) {
     if (!h) return;
     h->shut_pending = 1;
     h->shut_inv = inv;
-    h->shut_clo = clo;
+    ref_put(&h->shut_clo, clo);
     tcp_touch(h);
 }
 
@@ -2072,7 +2075,7 @@ void __kml_native_tcp_close(double id, void *inv, void *clo) {
     h->closing = 1;
     h->reading = 0;
     h->close_inv = inv;
-    h->close_clo = clo;
+    ref_put(&h->close_clo, clo);
     if (h->tls && tcp_tls) tcp_tls->free(h->tls); /* scratch */
     h->tls = NULL;
     free(h->cout); /* scratch */
@@ -2482,6 +2485,7 @@ static _Bool tcp_dispatch(void) {
                 while (w) {
                     kml_wreq *nx = w->next;
                     if (w->inv) TCP_CALL(w->inv, w->clo, err, 0);
+                    kml_ref_free(w->clo);
                     free(w->data); /* scratch */
                     free(w); /* scratch */
                     w = nx;
@@ -2579,7 +2583,7 @@ extern int socketpair(int domain, int type, int protocol, int sv[2]);
 typedef struct kml_proch {
     int pid;
     int alive, refd;
-    void *exit_inv, *exit_clo;
+    void *exit_inv; kml_ref exit_clo;
     // An unref'd child's exit waits a pass (libuv's unref'd child watcher):
     // when nothing else holds the loop open it ends first, and the exit is
     // never reported.
@@ -2632,7 +2636,7 @@ static int proc_new(int pid, void *inv, void *clo) {
     p->alive = 1;
     p->refd = 1;
     p->exit_inv = inv;
-    p->exit_clo = clo;
+    ref_put(&p->exit_clo, clo);
     proc_tab[proc_n] = p;
     tcp_loop_init(); // the dispatch reports the exit
     return proc_n++;
@@ -3664,7 +3668,11 @@ _Bool __kml_pool_dispatch(void) {
         native_unlink(c);
         port_hold(p, -1);
         native_set_last_string(c->res_str);
-        kml_make_callback(c->inv, c->clo, (double)c->err, c->res);
+        void *clo = kml_ref_get(c->clo);
+        kml_ref_free(c->clo);
+        kml_ref_free(c->pin[0]);
+        kml_ref_free(c->pin[1]);
+        kml_make_callback(c->inv, clo, (double)c->err, c->res);
         free(c->arg0); /* scratch */
         free(c->arg1); /* scratch */
         free(c->res_str); /* scratch */
@@ -3685,13 +3693,14 @@ _Bool __kml_pool_dispatch(void) {
 
 typedef struct kml_msg {
     struct kml_msg *next;
-    int64_t v;
+    kml_ref v; // the cloned value's box, held through the handle table while queued
 } kml_msg;
 
 typedef struct kml_mport {
     int peer;              // the entangled end, or -1
     kml_loop_port *loop;   // the owning loop, or NULL (not started, or in transit)
-    void *inv, *clo;
+    void *inv;
+    kml_ref clo;
     int refd, held, notified, closed, close_sent;
     kml_msg *head, *tail;
 } kml_mport;
@@ -3736,11 +3745,11 @@ static void mp_notify_locked(kml_mport *p) {
     if (!p->loop || !p->inv || p->notified) return;
     if (p->head) {
         p->notified = 1;
-        kml_post_to_loop(p->loop, p->inv, p->clo, 0, 0);
+        kml_post_to_loop(p->loop, p->inv, kml_ref_get(p->clo), 0, 0);
     } else if (p->closed && !p->close_sent) {
         p->notified = 1;
         p->close_sent = 1;
-        kml_post_to_loop(p->loop, p->inv, p->clo, 1, 0);
+        kml_post_to_loop(p->loop, p->inv, kml_ref_get(p->clo), 1, 0);
     }
 }
 
@@ -3776,7 +3785,7 @@ void __kml_native_mport_start(double id, void *inv, void *clo) {
         if (p->held) { p->held = 0; port_hold(p->loop, -1); }
         p->loop = loop_port();
         p->inv = inv;
-        p->clo = clo;
+        ref_put(&p->clo, clo);
         p->notified = 0;
         mp_hold_locked(p);
         mp_notify_locked(p);
@@ -3793,7 +3802,7 @@ void __kml_native_mport_stop(double id) {
         if (p->held) { p->held = 0; port_hold(p->loop, -1); }
         p->loop = NULL;
         p->inv = NULL;
-        p->clo = NULL;
+        ref_put(&p->clo, NULL);
         p->notified = 0;
     }
     pthread_mutex_unlock(&mp_mu);
@@ -3811,7 +3820,12 @@ void __kml_native_mport_ref(double id, _Bool on) {
 
 // Queue a value on the other end: 0, or -1 when the pair is closed (Node
 // drops the message).
+extern _Thread_local volatile int *__kml_worker_term_flag;
+extern void __kml_worker_terminate_now(void);
+
 double __kml_native_mport_post(double id, int64_t v) {
+    volatile int *tf = __kml_worker_term_flag;
+    if (tf && *tf) __kml_worker_terminate_now();
     pthread_mutex_lock(&mp_mu);
     kml_mport *p = mp_get(id);
     kml_mport *q = p && p->peer >= 0 ? mp_tab[p->peer] : NULL;
@@ -3820,7 +3834,7 @@ double __kml_native_mport_post(double id, int64_t v) {
         return -1;
     }
     kml_msg *m = (kml_msg *)calloc(1, sizeof *m); /* scratch */
-    m->v = v;
+    m->v = kml_ref_new((void *)(intptr_t)v);
     if (q->tail) q->tail->next = m; else q->head = m;
     q->tail = m;
     mp_notify_locked(q);
@@ -3850,7 +3864,8 @@ int64_t __kml_native_mport_take(double id) {
         kml_msg *m = p->head;
         p->head = m->next;
         if (!p->head) p->tail = NULL;
-        v = m->v;
+        v = (int64_t)(intptr_t)kml_ref_get(m->v);
+        kml_ref_free(m->v);
         free(m); /* scratch */
     }
     pthread_mutex_unlock(&mp_mu);
@@ -3908,12 +3923,13 @@ typedef struct kml_wctx {
     int id;
     double thread_id;
     double port, iport;     // the worker's ends of the public and internal pairs
-    int64_t data;           // workerData, cloned by the parent
+    kml_ref data;           // workerData's box, cloned by the parent
     char *filename;
     void *entry;
     kml_loop_port *parent;  // the spawning thread's loop
     kml_loop_port *loop;    // the worker's own loop, once it runs
-    void *inv, *clo;        // the parent's onEvent
+    void *inv;
+    kml_ref clo;            // the parent's onEvent
     int refd, held, exited;
     atomic_int terminate;
     int code;
@@ -3962,12 +3978,12 @@ double __kml_native_worker_spawn(const char *path, double port, double iport, in
     w->thread_id = (double)atomic_fetch_add(&w_next_thread_id, 1);
     w->port = port;
     w->iport = iport;
-    w->data = data;
+    w->data = kml_ref_new((void *)(intptr_t)data);
     w->filename = strdup(path);
     w->entry = e->entry;
     w->parent = loop_port();
     w->inv = inv;
-    w->clo = clo;
+    ref_put(&w->clo, clo);
     w->refd = 1;
     pthread_mutex_lock(&w_mu);
     if (w_n == w_cap) {
@@ -4036,6 +4052,13 @@ static void kml_terminate_cb(void *clo, double a, double b) {
 }
 
 // Stop the worker: it ends at its loop's next turn, with exit code 1.
+// The worker's own end on terminate(), from wherever it is running: a busy
+// worker (a microtask chain, a postMessage loop) never reaches the loop turn
+// kml_terminate_cb is posted to.
+void __kml_worker_terminate_now(void) {
+    if (w_end) w_end(1);
+}
+
 void __kml_native_worker_terminate(double id) {
     kml_wctx *w = w_get(id);
     if (!w) return;
@@ -4058,7 +4081,7 @@ double __kml_native_worker_self(double which) {
 }
 
 int64_t __kml_native_worker_self_data(void) {
-    return w_self ? w_self->data : 0;
+    return w_self ? (int64_t)(intptr_t)kml_ref_get(w_self->data) : 0;
 }
 
 // The worker's file (its module's path).
@@ -4074,11 +4097,12 @@ char *__kml_native_worker_self_filename(void) {
 // Called by the thread main: this thread is w's; the parent hears 'online'.
 void *__kml_worker_enter(kml_wctx *w) {
     w_self = w;
+    __kml_worker_term_flag = (volatile int *)&w->terminate;
     pthread_mutex_lock(&w_mu);
     w->loop = loop_port();
     if (atomic_load(&w->terminate)) kml_post_to_loop(w->loop, (void *)kml_terminate_cb, NULL, 0, 0);
     pthread_mutex_unlock(&w_mu);
-    kml_post_to_loop(w->parent, w->inv, w->clo, 0, 0);
+    kml_post_to_loop(w->parent, w->inv, kml_ref_get(w->clo), 0, 0);
     return w->entry;
 }
 
@@ -4093,7 +4117,7 @@ void __kml_worker_leave(int64_t code) {
     if (atomic_load(&w->terminate)) code = 1;
     w->code = (int)code;
     pthread_mutex_unlock(&w_mu);
-    kml_post_to_loop(w->parent, w->inv, w->clo, 1, (double)code);
+    kml_post_to_loop(w->parent, w->inv, kml_ref_get(w->clo), 1, (double)code);
 }
 
 // The parent heard the exit: the worker no longer holds its loop.

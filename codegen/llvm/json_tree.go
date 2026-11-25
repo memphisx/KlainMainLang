@@ -42,7 +42,6 @@ func (e *Emitter) emitJSONParseTree(jsonText Value) string {
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", offReg, errSlot))
 	// V8's message for the error (__kml_json_syntax_message).
 	msgBuf := e.freshReg()
-	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_json_syntax_message("+irPtr+" %s, i64 %s)", msgBuf, jsonText.Ref, offReg))
 	errReg := e.buildErrorObj(errorKindIDs["SyntaxError"], msgBuf, e.internString("SyntaxError"))
 	e.emitInstr(fmt.Sprintf("call void @__kml_throw("+irPtr+" %s)", errReg))

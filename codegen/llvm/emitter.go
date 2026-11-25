@@ -86,15 +86,20 @@ type scope struct {
 
 // Emitter walks an AST and produces LLVM IR text.
 type Emitter struct {
-	esmFiles map[string]bool // files with an import or export (frames.go scriptFile)
+	// plainCallableMsg: emitRequireCallable names a non-function by value
+	// alone, as V8 does for Object.groupBy's selector.
+	plainCallableMsg bool
+	esmFiles         map[string]bool // files with an import or export (frames.go scriptFile)
 	// builtinIdents are identifiers codegen builds that name the builtin
 	// global of their name (builtinIdent), whatever the program declares.
 	builtinIdents map[*ast.Identifier]bool
+	// builtinCtorNames memoizes builtinCtorName.
+	builtinCtorNames map[string]bool
 	// erasedGenerics are the nested generic functions compiled with their
 	// type parameters erased (lowerNestedGenericFuncs).
 	erasedGenerics map[*ast.FunctionDeclaration]bool
-	// finalIR is the program EmitProgram returned: the runtime link reads
-	// the symbols it names (runtime_resolve.go).
+	// finalIR is the program EmitProgram returned (the same string): the
+	// runtime link reads the symbols it names (runtime_resolve.go).
 	finalIR string
 	// iterTakeNow (n+1, 0 unset) bounds the next emitAnyArrayElems
 	// iteration to n values (emitAnyArrayElemsTake); iterTake carries a
@@ -266,6 +271,7 @@ type Emitter struct {
 	// same in every program, as a library module's are.
 	sharedLitUnit string
 	sloppyWrite   bool
+	noDensify     bool // a search reads a sparse array as it is (sparseSearch)
 	dynSloppy     bool
 	// foreignThisBody: a class method's body is being compiled for a
 	// foreign receiver (emitForeignReceiverCall), its `this` any.
@@ -337,9 +343,11 @@ type Emitter struct {
 	// loop steps, in place of its iterable's (emitForOfIteratorValue).
 	forOfIteratorGiven     string
 	forOfIteratorGivenSync bool
-	// genDeclEmitted marks the nested generator declarations whose fiber
-	// body is emitted (emitNestedGeneratorDecl).
-	genDeclEmitted map[*ast.FunctionDeclaration]bool
+	// genDeclEmitted marks the nested generators whose fiber body is
+	// emitted (emitNestedGeneratorDecl), by their registration: a function
+	// emitted twice registers its nested generator twice, each with a body
+	// of its own.
+	genDeclEmitted map[*GeneratorInfo]bool
 	// TDD-00134 Stage 1 (-optimize-memory): declarations whose object-literal
 	// initializer is emitted into an entry-block alloca instead of calloc.
 	// pendingStackAllocLit marks the exact literal node while its declaration
@@ -518,7 +526,7 @@ func (e *Emitter) UsesBigInt() bool { return e.usesBigInt }
 
 // UsesWorkers reports whether the program spawns Worker threads (TDD-00098)
 // — main.go adds -pthread to the clang invocation when it does.
-func (e *Emitter) UsesWorkers() bool { return e.usedWorkerRuntime }
+func (e *Emitter) UsesWorkers() bool { return e.usesWorkers }
 
 // exitCall is the call that ends the program with code (an i32 operand): on
 // a Worker's thread it ends only that worker (runtime_worker.go).
@@ -541,7 +549,6 @@ func (e *Emitter) isolateTLS() string {
 
 // UsesFFIDl reports whether the program uses node:ffi (dlopen/dlsym, TDD-00164).
 // main.go adds the FFI link flags (see FFILinkFlags) when it does.
-func (e *Emitter) UsesFFIDl() bool { return e.usedFFIDl }
 
 // SetCompatMode selects the whole-program compatibility axis (TDD-00075):
 // "" / "strict" (default — the compiler's opinionated, safer-than-JS
@@ -938,7 +945,7 @@ func (e *Emitter) internString(s string) string {
 		return ref
 	}
 	esc, length := escapeLLVM(s)
-	if isErrorKindName(s) || sema.IsBuiltinConstructor(s) || s == "Promise" {
+	if isErrorKindName(s) || e.builtinCtorName(s) {
 		// A constructor's name is also its reference's payload (`TypeError`
 		// as a value, an error's `constructor`), compared by address: one
 		// symbol per name, which every unit's copy links to (TDD-00238).
@@ -986,11 +993,23 @@ func (e *Emitter) requireLink(lib string) {
 	e.linkLibs[lib] = true
 }
 
+// symbolLibs are the system libraries the program's own code calls into,
+// by a piece of IR that needs one: its presence links the library.
+var symbolLibs = map[string]string{
+	"@pcre2_": "pcre2-8", // a regex literal compiles and matches through PCRE2 directly
+	" frem ":  "m",       // frem lowers to a libcall to fmod: libm on Linux
+}
+
 // LinkLibs returns the external libraries this program's compiled code
 // needs, sorted for a reproducible build command.
 func (e *Emitter) LinkLibs() []string {
 	if e.finalIR != "" {
 		e.EmbeddedCSources() // its error surfaces where the sources are read
+		for prefix, lib := range symbolLibs {
+			if strings.Contains(e.finalIR, prefix) {
+				e.requireLink(lib)
+			}
+		}
 	}
 	if len(e.linkLibs) == 0 {
 		return nil
@@ -1417,12 +1436,36 @@ func keepStmtFile(prog *ast.Program, old, repl ast.Statement) {
 	}
 }
 
-// hasAmbientClass reports a top-level `declare class` in prog.
+// hasAmbientClass reports a top-level `declare class` (or `declare global`
+// value member) in prog.
 func hasAmbientClass(prog *ast.Program) bool {
 	for _, st := range prog.Body {
-		if cd, ok := st.(*ast.ClassDeclaration); ok && cd.Ambient {
+		if environmentDecl(st) {
 			return true
 		}
+	}
+	return false
+}
+
+// environmentDecl reports a declaration of a global the environment
+// provides — `declare class C`, a `declare global { var x; function f(); }`
+// member — which the checker reads and code generation drops: a use of the
+// name reads the global.
+func environmentDecl(st ast.Statement) bool {
+	switch d := st.(type) {
+	case *ast.ClassDeclaration:
+		return d.Ambient
+	case *ast.VarDeclaration:
+		return d.Global
+	case *ast.FunctionDeclaration:
+		return d.Global
+	case *ast.VarDeclarationList:
+		for _, v := range d.Decls {
+			if !v.Global {
+				return false
+			}
+		}
+		return len(d.Decls) > 0
 	}
 	return false
 }
@@ -1431,6 +1474,11 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	defer func() {
 		if err == nil && managedSpace {
 			ir = toManagedSpace(ir)
+		}
+		// The runtime link reads the text returned, not a copy from before
+		// the passes: one module's text stays alive, not two.
+		if err == nil {
+			e.finalIR = ir
 		}
 	}()
 	// First of the deferred passes to run: the managed-space pass reads ASCII names.
@@ -1492,13 +1540,6 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	if legacyErr != nil {
 		return "", legacyErr
 	}
-	// TDD-00230 P0.2: with KML_SHADOW set and a new pass registered, every
-	// old decider's answer is compared with the new pass's.
-	stopShadow, err := e.startShadow(prog)
-	if err != nil {
-		return "", err
-	}
-	defer stopShadow()
 	// TDD-00128: enforce `/** @pure */` before any codegen. A front-end-only
 	// check with zero effect on the emitted IR — a violation is a compile error.
 	// TDD-00173: escape-analyze every @free/@owned annotation (all modes) and,
@@ -1517,8 +1558,17 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	if err := e.planStackAllocs(prog); err != nil {
 		return "", err
 	}
+	unwrapAssignedAssertions(prog)
 	specializeMixins(prog)
 	e.specializeDynamicBases(prog)
+	// TDD-00230 P0.2: with KML_SHADOW set and a new pass registered, every
+	// old decider's answer is compared with the new pass's, over the
+	// program as specialized above, the tree the front end types.
+	stopShadow, err := e.startShadow(prog)
+	if err != nil {
+		return "", err
+	}
+	defer stopShadow()
 	// Retained so a `typeof value` type query can resolve the referenced value's
 	// type from its top-level declaration even at eager type-alias registration
 	// (Pass 0), before module globals are bound.
@@ -1530,9 +1580,11 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	if c := e.front(); c != nil && hasAmbientClass(prog) {
 		c.ParentOf(prog)
 	}
+	// Over the checked program: a cast's operand is typed as written.
+	e.boxUnsoundScalarCasts(prog)
 	kept := prog.Body[:0:0]
 	for _, st := range prog.Body {
-		if cd, ok := st.(*ast.ClassDeclaration); ok && cd.Ambient {
+		if environmentDecl(st) {
 			continue
 		}
 		kept = append(kept, st)
@@ -1606,9 +1658,6 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// the runtime's extern decls + link now so those `call @klainsync_safepoint`
 	// sites resolve regardless of where the first go/channel is emitted.
 	e.usesSyncProgram = prog.UsesKlainSync
-	if e.usesSyncProgram {
-		e.ensureSyncRuntime()
-	}
 
 	// Pass -2: rewrite each top-level `const/let/var X = class {...}` binding
 	// into a nominal `class X {...}` declaration (TDD-00063 Stage 4), before
@@ -1620,6 +1669,10 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	e.privateInOwners(prog)     // likewise
 	e.inferFunctionNames(prog)  // the names hoisted anonymous classes show
 	e.hoistClassExpressions(prog)
+	accessorOverMethods(prog) // members overriding another kind (before static `this` is rewritten)
+	if e.compatJS() {
+		fieldOverAccessors(prog)
+	}
 	e.staticThisToClass(prog)                       // after hoisting: every class has its final name
 	e.privateInChecks(prog)                         // likewise
 	e.liftedStaticGens = liftStaticGenerators(prog) // after staticThisToClass: its body names the class
@@ -1654,6 +1707,9 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// A class method may return a generator function's call: register the
 	// generators first, then again once the classes exist (registerFunctions).
 	e.preRegisterGenerators(prog)
+	if e.compatJS() {
+		e.defaultCtorsOverReturningBases(prog)
+	}
 	if err := e.registerClasses(prog); err != nil {
 		return "", err
 	}
@@ -1710,7 +1766,6 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// (ADR-00434) so function bodies emitted in Pass 2 — before the top-level
 	// destructuring statement itself is reached in Pass 3 — dispatch
 	// `subtle.digest(...)` correctly.
-	e.registerCryptoSubtleAliases(prog)
 
 	// Pass 2: emit each function declaration. A V1 (monomorphized) generic
 	// function is never emitted here — it has no single concrete signature
@@ -1850,7 +1905,6 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// TDD-00120: the OS argv[] entries are foreign char* with no length header;
 	// copy them into length-prefixed strings so process.argv[i] behaves like every
 	// other string (its .length reads the header, not strlen).
-	e.ensureStrHeaderRuntime()
 	argvHdr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_argv_headerize(i64 %s, "+irPtr+" %s)", argvHdr, argc64, argvSrc))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__argv_ptr, align 8", argvHdr))
@@ -1968,8 +2022,11 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 		// @__kml_module_promise.
 		e.emitTerminator("ret i32 0")
 		modProm = ""
-		e.ensureEventLoop() // the island's own loop, turned by its poll export
-		e.usedIslandLoop = true
+		// The island's own loop, turned by its poll export (island.c): the
+		// host reaches the exports through dlsym, so the island names them
+		// for the link to take island.c.
+		e.emitGlobal("@__kml_island_entry = internal" + irGlobalAS + " global " + irPtr + " @__kml_island_poll, align 8")
+		e.declareFn("__kml_island_poll", "declare i64 @__kml_island_poll()")
 	}
 	// If the program ever called setTimeout/setInterval/
 	// clearTimeout/clearInterval, drain any still-pending timers after the
@@ -1981,89 +2038,68 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// `new` through a value: its dispatcher, before the loop epilogue reads
 	// the runtime flags its constructions set (a Promise's microtasks).
 	e.emitDynConstructOnce()
+	e.pastUserCode = true
 	// Microtasks run after the top-level synchronous script, before any timer or
-	// task macrotask (TDD-00083 Stage 3).
-	if e.usedMicrotasks {
-		if e.entryIsModule(prog) {
-			// An ES module's top level is itself a promise job: the jobs it
-			// queued run before the ticks, as in Node.
-			e.emitInstr("call void @__kml_drain_promise_jobs()")
-		}
-		e.emitInstr("call void @__kml_drain_microtasks()")
+	// task macrotask (TDD-00083 Stage 3): microtask.c's drain when the
+	// program links it (hooks.c).
+	module := 0
+	if e.entryIsModule(prog) {
+		module = 1
 	}
+	e.emitInstr(fmt.Sprintf("call void @__kml_main_drain(i32 %d)", module))
 	// The structural view's routines (TDD-00233) may use any runtime
 	// (exceptions, the dynamic object model): written before the finalize
 	// steps that decide which runtimes are linked.
 	e.emitRecordFnsFinalize()
+	// The leaf primitives every program may call (the NaN-box word, the
+	// string header): defined in IR so each call site inlines them, since a
+	// call into a C object cannot be inlined without LTO. weak_odr: the
+	// runtime's C files call them too.
+	e.buildNbPack()
+	e.buildNbTag()
+	e.buildNbPay()
+	e.buildStrLeaves()
+	// Internal globals some lowerings read: unused ones are dropped.
+	e.emitZeroCell()
+	e.emitGeneratorPending()
+	e.emitTLAUnsettled()
 	e.emitObjExtraFinalize()
 
 	// One event loop drives every source (TDD-00244): timers, tasks, workers,
-	// child processes, fs.watch, the pool, sockets and servers.
-	useFullLoop := e.usedTimers || e.usedTaskRuntime || e.usedWorkerRuntime || e.usedFsWatchRuntime || e.usedThreadPool || e.usedIPCChildRuntime
-	useFullLoop = useFullLoop || e.usedLoopTurn || e.usedFetchAsync
-	if useFullLoop {
-		e.ensureEventLoop() // emit event_loop_run + every symbol it references
-		modLoopL := ""
-		if modProm != "" {
-			modLoopL = e.freshLabel("mod.loop")
-			e.emitTerminator(fmt.Sprintf("br label %%%s", modLoopL))
-			e.emitLabel(modLoopL)
-		}
-		e.emitInstr("call void @__kml_event_loop_run()")
-		if modProm != "" {
-			e.emitModuleLoopResume(modLoopL)
-		}
-	}
+	// child processes, fs.watch, the pool, sockets and servers. It is
+	// loop.c's, run when the link takes it (hooks.c).
+	modLoopL := ""
 	if modProm != "" {
+		modLoopL = e.freshLabel("mod.loop")
+		e.emitTerminator(fmt.Sprintf("br label %%%s", modLoopL))
+		e.emitLabel(modLoopL)
+	}
+	e.emitInstr("call void @__kml_main_loop()")
+	if modProm != "" {
+		e.emitModuleLoopResume(modLoopL)
 		e.emitModuleUnsettledCheck(modProm)
 	}
-	// TDD-00084 Part B: if the event loop was emitted but the task/microtask
-	// runtimes were not, define no-op stubs for the symbols it references.
-	e.emitLoopTaskStubs()
 	// The process-lifecycle runtime (ADR-00334) is emitted whenever exceptions
 	// (whose uncaught path calls the hooks) or any process.on('exit')/
 	// 'uncaughtException'/exitCode surface is used.
 	// The library's `any` bigint helpers, before the runtimes their bodies
 	// may need (the exception helpers) are emitted.
 	e.emitAnyBigIntOpsFinalize()
-	if e.usedExceptionHelpers || e.usedProcessLifecycle {
-		e.emitProcessLifecycleRuntime()
-	}
 	// Normal program end: when process.exitCode / process.on('exit') is in play,
 	// run the 'exit' listener and return process.exitCode; otherwise a plain 0.
-	if e.usedProcessLifecycle {
-		// The loop has drained: 'beforeExit', which may run it again.
-		run, alive := "null", "null"
-		if useFullLoop {
-			run, alive = "@__kml_event_loop_run", "@__kml_event_loop_alive"
-		}
-		e.emitInstr(fmt.Sprintf("call void @__kml_run_before_exit("+irPtr+" %s, "+irPtr+" %s)", run, alive))
-		ec := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_process_exit_code, align 8", ec))
-		e.emitInstr(fmt.Sprintf("call void @__kml_run_exit_handlers(i64 %s)", ec))
-		// An 'exit' listener may set process.exitCode.
-		ecAfter := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_process_exit_code, align 8", ecAfter))
-		ec32 := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = trunc i64 %s to i32", ec32, ecAfter))
-		e.emitTerminator(fmt.Sprintf("ret i32 %s", ec32))
-	} else {
-		e.emitTerminator("ret i32 0")
-	}
-
-	// The unhandled-rejection report (or the checkpoint's no-op).
-
-	e.ensureRuntimeDeps()
+	// The loop has drained: 'beforeExit' (which may run it again), 'exit',
+	// and process.exitCode, when process.c links (hooks.c's 0 otherwise).
+	ec := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_main_exit()", ec))
+	e.emitTerminator(fmt.Sprintf("ret i32 %s", ec))
 
 	// The layout table (TDD-00230 phase 5) spans every class and object layout
 	// the program built; its method adapters register function metadata.
+	e.emitNamedRoutines()
 	e.emitRecordFnsFinalize() // any a finalize step requested since
 	// Before the shape table: boxing a class's static object registers its
 	// layout.
 	e.emitClassRefFinalize()
-	if e.usedDynJSONC {
-		e.ensureShapeRuntime() // dynjson.c reads static objects' rows (emitObjHooksFinalize)
-	}
 	e.emitMapViewFinalize()
 	e.emitHostInspectRoutines()
 	e.emitValueProtoGetFinalize()
@@ -2084,28 +2120,24 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	e.emitPromiseInspectHook()
 	e.emitUnhandledFinalize()       // one a hook above first reached the promise runtime
 	e.emitResponseCollectFinalize() // a host row above may call a body method
-	e.emitObjExtensibleFinalize()
 	e.emitMapViewFinalize()
-	if e.usedClassRefProto {
-		e.emitClassRefProto() // a routine generated above read a prototype
+	// The class-reference routines a routine above (or the program) calls.
+	if e.irNames("__kml_classref_proto") {
+		e.emitClassRefProto()
 	}
-	if e.usedClassRefHas {
+	if e.irNames("__kml_classref_has") {
 		e.emitClassRefHas()
 	}
-	if e.usedClassRefBag {
+	if e.irNames("__kml_classref_bag") {
 		e.emitClassRefBag()
 	}
 	e.emitObjExtraFinalize() // one a hook above first needed
+	e.emitNamedRoutines()    // one a finalize step above named
 	e.emitUnitRegFinalize()  // every finalize step above may add rows
 	// Last: whether the bigint runtime links (its hooks real, or stubs) is
 	// known only once every routine that can reach a bigint is generated.
-	e.emitBoxedBigIntHooksFinalize()
 	// A finalize step above may have linked the exception runtime first;
 	// exceptions.c calls the lifecycle hooks (TDD-00251).
-	if e.usedExceptionHelpers {
-		e.emitProcessLifecycleRuntime()
-	}
-	// And a runtime file a finalize step first linked brings its own.
 
 	// Line-buffer stdout at startup (ADR-00867). C stdio full-buffers a stream
 	// that is not a TTY, so `console.log`/`printf` to a pipe or file withholds
@@ -2117,7 +2149,6 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// symbol differs by platform (glibc `stdout`, macOS `__stdoutp`); Windows is
 	// left to its own stdio path (UCRT treats _IOLBF as full buffering anyway).
 	if e.opts.Target.OS() != "windows" {
-		e.ensureStdoutGlobal()
 		// Node ignores SIGPIPE at startup: a write to a closed pipe fails with
 		// EPIPE on the stream instead of killing the process.
 	}
@@ -2128,64 +2159,76 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 	// task fibers still take their stacks from the same runtime file. On
 	// Windows the handler is a vectored exception handler (stackguard.c).
 	stackGuardArgs := ""
-	e.usedStackGuard = true
 	if e.islandHash == "" {
-		throwFn := "null"
-		if e.usedExceptionHelpers {
-			e.ensureErrorNames()
-			throwFn = "@__kml_throw_range_error"
-		}
-		stackGuardArgs = fmt.Sprintf(irPtr+" %s, "+irPtr+" %s", throwFn, e.internString("Maximum call stack size exceeded"))
+		// null: the thrower is exceptions.c's, through hooks.c, when linked.
+		stackGuardArgs = fmt.Sprintf(irPtr+" null, "+irPtr+" %s", e.internString("Maximum call stack size exceeded"))
 	}
 
 	// The runtime's hooks into this program, then every constructor.
+	// Last: a routine a finalize step above generated (Object.prototype's
+	// fill, a hook) may name one.
+	e.emitNamedRoutines()
 	e.emitHookRegistration()
 	e.emitCtorList()
 
 	var out strings.Builder
-	out.WriteString("; Generated by KlainMainLang\n\n")
+	// Every call is written `notail` as it is copied in (noTailWriter),
+	// not by a pass over the finished module: one copy of it, not two.
+	nt := &noTailWriter{b: &out, nl: true}
+	// The parts, and a sixteenth more for the `notail` each call gains:
+	// growing past the estimate would copy the module once more.
+	parts := e.globals.Len() + e.functions.Len() + e.allocas.Len() + e.body.Len() + len(e.workerRegistry)
+	out.Grow(parts + parts/16 + 1<<12)
+	nt.WriteString("; Generated by KlainMainLang\n\n")
 	if ct := e.opts.Target.Triple; ct != "" {
 		// A cross-compilation target (TDD-00146 Stage 1) stamps its own triple
 		// so the IR and the clang --target agree; LLVM derives the data layout
 		// from the triple, matching the Windows precedent below (triple only,
 		// no explicit datalayout line). Explicit --target wins over the
 		// Windows-host default.
-		out.WriteString("target triple = \"" + ct + "\"\n\n")
+		nt.WriteString("target triple = \"" + ct + "\"\n\n")
 	} else if runtime.GOOS == "windows" {
 		// The mingw-w64 target (TDD-00177 Stage 0) — without it clang assumes
 		// its default MSVC triple and warns on every compile. Linux/macOS keep
 		// relying on clang's host default, so their output is unchanged.
-		out.WriteString("target triple = \"x86_64-w64-windows-gnu\"\n\n")
+		nt.WriteString("target triple = \"x86_64-w64-windows-gnu\"\n\n")
 	}
 	if e.opts.Target.OS() == "windows" {
-		out.WriteString("declare i32 @_setmode(i32, i32)\n\n")
+		nt.WriteString("declare i32 @_setmode(i32, i32)\n\n")
 	}
-	out.WriteString(e.globals.String())
+	nt.WriteString(e.globals.String())
 	if e.globals.Len() > 0 {
-		out.WriteString("\n")
+		nt.WriteString("\n")
 	}
-	out.WriteString(e.functions.String())
+	nt.WriteString(e.functions.String())
 	if e.functions.Len() > 0 {
-		out.WriteString("\n")
+		nt.WriteString("\n")
 	}
-	out.WriteString(funcHead("i32 @main(i32 %argc, " + irPtr + " %argv)"))
-	out.WriteString(e.allocas.String())
-	out.WriteString(e.workerRegistry)
+	// Copied into out: the function text's buffer goes now, not after the
+	// module is assembled (it is most of the module).
+	e.functions = strings.Builder{}
+	entry := "main"
+	if e.opts.Library {
+		// -lib: the host owns main() and calls this, on any thread.
+		entry = "kml_main"
+	}
+	nt.WriteString(funcHead("i32 @" + entry + "(i32 %argc, " + irPtr + " %argv)"))
+	nt.WriteString(e.allocas.String())
+	nt.WriteString(e.workerRegistry)
 	if stackGuardArgs != "" {
-		out.WriteString("  call void @__kml_stack_guard_init(" + stackGuardArgs + ")\n")
+		nt.WriteString("  call void @__kml_stack_guard_init(" + stackGuardArgs + ")\n")
 	}
-	// A binary that reads process.execPath can be spawned as `execPath -p <expr>`
-	// (a Node interpreter re-exec). It cannot honor that; reject such flags up
-	// front so a self-spawning program fails cleanly instead of fork-bombing.
-	if e.usedNodeInterpGuard {
-		out.WriteString("  call void @__kml_reject_node_interp_flags(i32 %argc, " + irPtr + " %argv)\n")
-	}
+	// A binary that can spawn a process can spawn itself as `execPath -p
+	// <expr>` (a Node interpreter re-exec). It cannot honor that; the guard
+	// (armed by armInterpGuard) rejects such a run up front so a
+	// self-spawning program fails cleanly instead of fork-bombing.
+	nt.WriteString("  call void @__kml_reject_node_interp_flags(i32 %argc, " + irPtr + " %argv)\n")
 	if e.opts.Target.OS() != "windows" {
 		// Line-buffer stdout before any output (see the decl above).
-		fmt.Fprintf(&out, "  %%__kml_stdout_fp = load "+irPtr+", "+irPtr+" @%s, align 8\n", e.stdoutGlobalSymbol())
-		out.WriteString("  call i32 @setvbuf(" + irPtr + " %__kml_stdout_fp, " + irPtr + " null, i32 1, i64 0)\n")
+		fmt.Fprintf(nt, "  %%__kml_stdout_fp = load "+irPtr+", "+irPtr+" @%s, align 8\n", e.stdoutGlobalSymbol())
+		nt.WriteString("  call i32 @setvbuf(" + irPtr + " %__kml_stdout_fp, " + irPtr + " null, i32 1, i64 0)\n")
 		// SIGPIPE is 13 on Linux and Darwin; inttoptr 1 is SIG_IGN.
-		out.WriteString("  call " + irPtr + " @signal(i32 13, " + irPtr + " inttoptr (i64 1 to " + irPtr + "))\n")
+		nt.WriteString("  call " + irPtr + " @signal(i32 13, " + irPtr + " inttoptr (i64 1 to " + irPtr + "))\n")
 	}
 	if e.opts.Target.OS() == "windows" {
 		// The UCRT opens stdin/stdout/stderr in text mode, translating every
@@ -2194,21 +2237,19 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 		// all three to binary mode before any I/O (TDD-00177 Stage 0).
 		// 0x8000 is _O_BINARY.
 		for fd := 0; fd < 3; fd++ {
-			fmt.Fprintf(&out, "  call i32 @_setmode(i32 %d, i32 32768)\n", fd)
+			fmt.Fprintf(nt, "  call i32 @_setmode(i32 %d, i32 32768)\n", fd)
 		}
 	}
-	// process.uptime() measures from process start — capture it once here.
-	if e.usedProcessUptime {
-		out.WriteString("  call void @__kml_proc_uptime_init()\n")
-	}
-	out.WriteString(e.body.String())
-	out.WriteString("}\n")
+	nt.WriteString(e.body.String())
+	nt.WriteString("}\n")
 	if e.islandHash != "" {
-		e.emitIslandGlue(prog, &out)
+		e.emitIslandGlue(prog, nt)
 	}
 	// --no-any (TDD-00209): surface the first any/unknown annotation seen during
 	// type resolution as a clean compile error, superseding the produced IR.
-	e.finalIR = coffWeakComdats(markNoTail(declareCalled(renameHooks(dropDefinedDeclares(out.String())))))
+	// The parts are in out now: their builders' buffers can go.
+	e.globals, e.functions, e.body, e.allocas = strings.Builder{}, strings.Builder{}, strings.Builder{}, strings.Builder{}
+	e.finalIR = coffWeakComdats(declareCalled(renameHooks(dropDefinedDeclares(out.String()))))
 	return e.finalIR, nil
 }
 
@@ -2220,7 +2261,13 @@ func (e *Emitter) EmitProgram(prog *ast.Program) (ir string, err error) {
 // to build the dynamic-import result object. Exports whose type wasn't promoted
 // to a module global (classes, closures, non-simple types) are omitted in V1,
 // exactly as TDD-00055's own result-object synthesis omits them.
-func (e *Emitter) emitIslandGlue(prog *ast.Program, out *strings.Builder) {
+// irSink is where the final module's text is written (a noTailWriter).
+type irSink interface {
+	WriteString(string) (int, error)
+	Write([]byte) (int, error)
+}
+
+func (e *Emitter) emitIslandGlue(prog *ast.Program, out irSink) {
 	h := e.islandHash
 	fmt.Fprintf(out, "\n@__kml_dynmod_%s_inited = internal"+irGlobalAS+" global i1 0, align 1\n", h)
 	out.WriteString(funcHead("void @__kml_dynmod_" + h + "_init()"))
@@ -2969,7 +3016,12 @@ func (e *Emitter) buildFunctionSig(fd *ast.FunctionDeclaration) FuncSig {
 		for i, p := range fd.Params {
 			paramNames[i] = p.Name
 		}
-		if returnsOwnName(fd) {
+		if e.returnsProxyRead(fd.Body) {
+			// A read through a proxy returned: its get trap's result,
+			// whatever the target declares, so the function returns it
+			// boxed.
+			sig.RetType = TypeAny
+		} else if returnsOwnName(fd) {
 			// `function F() { return F }`: its result is itself, whose
 			// type has no finite form, so the function returns it boxed
 			// and every further call is the box's (`F()()()`).
@@ -3175,6 +3227,117 @@ func (e *Emitter) declareWorkerUncaught() {
 	e.workerUncaughtStub = true
 }
 
+// namedRoutines are routines the compiler generates (the same in every
+// program) when the IR names them: emitNamedRoutines generates each named
+// and not yet defined, until none is left.
+var namedRoutines = []struct {
+	sym string
+	gen func(*Emitter)
+}{
+	{"__kml_any_iter_collect", (*Emitter).emitAnyIterCollect},
+	{"__kml_any_iter_collect_map", (*Emitter).emitAnyIterCollectMap},
+	{"__kml_any_iter_take", (*Emitter).emitAnyIterTake},
+	{"__kml_any_arraylike_collect", (*Emitter).emitAnyArrayLikeCollect},
+	{"__kml_any_obj_rest", (*Emitter).emitAnyObjRest},
+	{"__kml_classref_proto", (*Emitter).emitClassRefProto},
+	{"__kml_classref_has", (*Emitter).emitClassRefHas},
+	{"__kml_classref_bag", (*Emitter).emitClassRefBag},
+	{"__kml_builtin_proto_of", (*Emitter).emitBuiltinProtoOfFinalize},
+	{"__kml_dyn_construct", (*Emitter).emitDynConstructOnce},
+}
+
+func (e *Emitter) emitNamedRoutines() {
+	for more := true; more; {
+		more = false
+		defined, named := e.namedRoutineRefs()
+		for _, r := range namedRoutines {
+			if !defined[r.sym] && named[r.sym] {
+				// A generator that adds nothing (it ran, or defines the
+				// routine elsewhere) ends the search for it.
+				n := e.functions.Len() + e.globals.Len()
+				r.gen(e)
+				more = more || e.functions.Len()+e.globals.Len() != n
+			}
+		}
+	}
+}
+
+// namedRoutineRefs scans the IR emitted so far once for the namedRoutines:
+// which it defines and which it names (irDefines/irNames for each, at
+// the cost of one pass over the text instead of two per routine).
+func (e *Emitter) namedRoutineRefs() (defined, named map[string]bool) {
+	defined, named = map[string]bool{}, map[string]bool{}
+	for bi, b := range []*strings.Builder{&e.functions, &e.globals, &e.body} {
+		s := b.String()
+		for off := 0; ; {
+			i := strings.Index(s[off:], "@__kml_")
+			if i < 0 {
+				break
+			}
+			i += off
+			j := i + 1
+			for j < len(s) && isIRIdentByte(s[j]) {
+				j++
+			}
+			off = j
+			sym := s[i+1 : j]
+			named[sym] = true
+			if bi < 2 && j < len(s) && s[j] == '(' {
+				ls := strings.LastIndexByte(s[:i], '\n') + 1
+				if strings.HasPrefix(s[ls:], defineKw) {
+					defined[sym] = true
+				}
+			}
+		}
+	}
+	return defined, named
+}
+
+// irDefines reports whether the IR emitted so far defines sym.
+func (e *Emitter) irDefines(sym string) bool {
+	n := "@" + sym + "("
+	for _, b := range []*strings.Builder{&e.functions, &e.globals} {
+		for s := b.String(); ; {
+			i := strings.Index(s, n)
+			if i < 0 {
+				break
+			}
+			ls := strings.LastIndexByte(s[:i], '\n') + 1
+			if strings.HasPrefix(s[ls:], defineKw) {
+				return true
+			}
+			s = s[i+len(n):]
+		}
+	}
+	return false
+}
+
+// irNames reports whether the IR emitted so far calls or references the
+// routine sym: a routine the compiler generates at finalize is generated
+// only when something names it, as the link keeps only what is named.
+func (e *Emitter) irNames(sym string) bool {
+	n := "@" + sym
+	for _, b := range []*strings.Builder{&e.functions, &e.globals, &e.body} {
+		for s := b.String(); ; {
+			i := strings.Index(s, n)
+			if i < 0 {
+				break
+			}
+			s = s[i+len(n):]
+			if s == "" || !isIRIdentByte(s[0]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isIRIdentByte reports a byte an unquoted LLVM identifier may continue
+// with.
+func isIRIdentByte(c byte) bool {
+	return c == '_' || c == '.' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
 // returnsOwnName reports a plain (not generator or async) function every
 // return of which returns its own name: `function F() { return F }`.
 func returnsOwnName(fd *ast.FunctionDeclaration) bool {
@@ -3251,4 +3414,20 @@ func asciiLocals(ir string) string {
 	}
 	b.WriteString(ir[last:])
 	return b.String()
+}
+
+// unshadowedGlobal reports a module global no enclosing local binding of
+// the same name hides: a closure reads such a global directly instead of
+// capturing it. A same-named local (a function's `const signal` beside a
+// top-level destructured `signal`) is captured as any other local.
+func (e *Emitter) unshadowedGlobal(name string) bool {
+	if _, ok := e.moduleGlobals[name]; !ok {
+		return false
+	}
+	for _, sc := range e.scopes {
+		if _, ok := sc.syms[name]; ok && !sc.top {
+			return false
+		}
+	}
+	return true
 }

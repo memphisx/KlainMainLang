@@ -198,3 +198,20 @@ console.log(typeof t)
 clearTimeout(t)
 `, "x 3\nz undefined\ny undefined undefined\nnumber\nobject")
 }
+
+// Object.assign onto a primitive gives its wrapper object, which keeps the
+// properties through a typed binding, a function's result and inspect.
+func TestE2EObjectAssignPrimitiveTargetTS(t *testing.T) {
+	assertSameAsNode(t, `
+const x = Object.assign(5, { k: 1 });
+console.log(typeof x, x.k, x + 1, x);
+const s = Object.assign("ab", { t: true });
+console.log(typeof s, s.t, s.length, s.toUpperCase(), s);
+function f(): number & { k: number } { return Object.assign(7, { k: 2 }); }
+const r = f();
+console.log(f().k, f() * 2, r.k, typeof r, r);
+type Id = string & { readonly __brand: "Id" };
+const id = "q" as Id;
+console.log(typeof id, id.toUpperCase(), id.length);
+`)
+}

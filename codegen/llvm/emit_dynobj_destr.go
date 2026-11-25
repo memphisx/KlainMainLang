@@ -233,7 +233,6 @@ func (e *Emitter) emitAnyObjRestExcluding(v Value, keys []ast.Expression, pos as
 	if excl, err = e.emitBoxValue(excl); err != nil {
 		return Value{}, err
 	}
-	e.ensureAnyObjRest()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_obj_rest(i64 %s, i64 %s)", r, v.Ref, excl.Ref))
 	return Value{Ref: r, Ty: TypeAny}, nil
@@ -251,17 +250,10 @@ for (let __kml_rest_j = 0; __kml_rest_j < __kml_rest_syms.length; __kml_rest_j++
   if (__kml_rest_excl.indexOf(__kml_rest_s) < 0 && Object.prototype.propertyIsEnumerable.call(__kml_rest_o, __kml_rest_s)) __kml_rest_out[__kml_rest_s] = __kml_rest_o[__kml_rest_s];
 }`
 
-// ensureAnyObjRest defines @__kml_any_obj_rest(i64 src, i64 excl) once,
+// emitAnyObjRest defines @__kml_any_obj_rest(i64 src, i64 excl) once,
 // compiled from anyObjRestSrc.
-func (e *Emitter) ensureAnyObjRest() {
-	if e.usedAnyObjRest {
-		return
-	}
-	e.usedAnyObjRest = true
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+func (e *Emitter) emitAnyObjRest() {
+	e.ensureDynJSONC()
 	restore := e.beginDetachedFunc()
 	defer restore()
 	e.pushScope()

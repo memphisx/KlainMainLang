@@ -2,12 +2,17 @@
 # one "Interface.member" or "name" per line, each with a reason.
 RequestInit.duplex  Node's (undici's) streaming upload option, absent from the DOM library
 RequestDuplex  its type
+SubtleCrypto.getPublicKey  Node's (v24) SubtleCrypto method, absent from the DOM library
 Boolean.toString  Boolean.prototype's own toString (TypeScript inherits Object's); the runtime prototype is built from these members
 KmlNative  the native primitives of the builtin modules written in TypeScript (lib/native.d.ts); no program can name them
 __kml_native  its value
 KmlNative.fsCall  a native primitive (lib/native.d.ts)
 KmlNative.processArch  a native primitive (lib/native.d.ts)
 KmlNative.processPlatform  a native primitive (lib/native.d.ts)
+KmlNative.loopIdle  a native primitive (lib/native.d.ts)
+KmlNative.loopStart  a native primitive (lib/native.d.ts)
+KmlNative.processGroups  a native primitive (lib/native.d.ts)
+KmlNative.processRusage  a native primitive (lib/native.d.ts)
 KmlNative.fsCallAsync  a native primitive (lib/native.d.ts)
 KmlNative.fsWatch  a native primitive (lib/native.d.ts)
 KmlNative.fsWatchClose  a native primitive (lib/native.d.ts)
@@ -209,6 +214,7 @@ KmlNative.h2Respond  a native primitive (lib/native.d.ts)
 KmlNative.h2Headers  a native primitive (lib/native.d.ts)
 KmlNative.h2Push  a native primitive (lib/native.d.ts)
 KmlNative.h2Write  a native primitive (lib/native.d.ts)
+KmlNative.h2Consume  a native primitive (lib/native.d.ts)
 KmlNative.h2Queued  a native primitive (lib/native.d.ts)
 KmlNative.h2Rst  a native primitive (lib/native.d.ts)
 KmlNative.h2Settings  a native primitive (lib/native.d.ts)
@@ -475,3 +481,4 @@ KmlNative.wasmTableNew  a native primitive (lib/native.d.ts)
 KmlNative.wasmTableSet  a native primitive (lib/native.d.ts)
 KmlNative.wasmTableSize  a native primitive (lib/native.d.ts)
 KmlNative.wasmValidate  a native primitive (lib/native.d.ts)
+KmlNative.localeCase  a native primitive (lib/native.d.ts)

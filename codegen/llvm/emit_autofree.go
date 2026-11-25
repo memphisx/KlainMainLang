@@ -132,7 +132,6 @@ func (e *Emitter) maybeRegisterAutoFree(v *ast.VarDeclaration) error {
 		if !(e.autoFreeRebind[v] && isLit && isStringTy(sym.Ty)) {
 			return reject("its initializer is not a provably-owned fresh allocation (a bare alias of another value cannot be block-freed)")
 		}
-		e.ensureStrHeaderRuntime()
 		cur := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", cur, sym.Ptr))
 		cp := e.freshReg()
@@ -269,7 +268,7 @@ func (e *Emitter) autoFreeOwningInit(init ast.Expression, explicit bool) bool {
 			// deliberately don't include "parse"/"stringify" (they aren't
 			// container methods) — nesting this inside that map lookup made
 			// it dead code, so typed JSON.parse results were never freed.
-			if ns, ok := m.Object.(*ast.Identifier); ok && ns.Name == "JSON" && !e.isShadowedByLocal(ns.Name) && (m.Property == "parse" || m.Property == "stringify") {
+			if k := e.declIntrinsic(x); k == "JSON.parse" || k == "JSON.stringify" {
 				return true
 			}
 			if escFreshMethodResults[m.Property] {

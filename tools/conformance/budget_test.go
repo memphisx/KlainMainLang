@@ -47,3 +47,46 @@ func TestMemBudget(t *testing.T) {
 		t.Fatalf("used %d held %d after every release", b.used, b.held)
 	}
 }
+
+// A clang waits while its bytes do not fit beside a running clang's, and
+// starts once that one is done; with none running it starts at once, over
+// the budget or not, so two waiting clangs never wait on each other.
+func TestMemBudgetAdmitClang(t *testing.T) {
+	b := newMemBudget(100)
+	a, c := b.reserve(10), b.reserve(10)
+	b.admitClang(a, 80) // none running: admitted
+	started := make(chan bool)
+	go func() { b.admitClang(c, 80); started <- true }()
+	select {
+	case <-started:
+		t.Fatal("a clang over the budget started beside a running one")
+	case <-time.After(50 * time.Millisecond):
+	}
+	b.release(a)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("the waiting clang did not start once the other was done")
+	}
+	b.release(c)
+	d := b.reserve(10)
+	b.admitClang(d, 500) // alone: admitted although over the budget
+	b.release(d)
+	if b.used != 0 || b.held != 0 || b.inClang != 0 {
+		t.Fatalf("budget not empty after releases: used=%d held=%d inClang=%d", b.used, b.held, b.inClang)
+	}
+}
+
+// A clang peak raises the factor later reservations take; a lower one does
+// not lower it.
+func TestIRFactorFromPeak(t *testing.T) {
+	irFactor.Store(0)
+	defer irFactor.Store(0)
+	if got := irReservation(100 << 20); got != (100<<20)*irBytesFactor {
+		t.Fatalf("default reservation %d", got)
+	}
+	irFactor.Store(40)
+	if got := irReservation(100 << 20); got != (100<<20)*40 {
+		t.Fatalf("raised reservation %d", got)
+	}
+}

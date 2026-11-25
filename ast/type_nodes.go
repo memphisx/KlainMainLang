@@ -194,7 +194,10 @@ type MethodSignature struct {
 	Holder string
 	// Intrinsic is `/** @intrinsic Owner.name */`: the call is emitted
 	// inline by the backend's intrinsic of that name (TDD-00230 P3.2).
-	Intrinsic      string
+	Intrinsic string
+	// Platform is `/** @platform posix */`: the targets the member exists
+	// on; elsewhere it is undefined, as Node leaves it.
+	Platform       string
 	TypeParameters []*TypeParameter
 	Parameters     []*SignatureParameter
 	// This is a leading `this: T` parameter's type (nil without one).
@@ -221,6 +224,9 @@ type ConstructSignature struct {
 	Parameters     []*SignatureParameter
 	Type           TypeNode
 	Range          Loc
+	// Intrinsic is a builtin declaration's `/** @intrinsic name */`: a
+	// `new` of a value of this type is emitted inline (TDD-00230 P3.2).
+	Intrinsic string
 }
 
 // IndexSignature is `[key: K]: T`.

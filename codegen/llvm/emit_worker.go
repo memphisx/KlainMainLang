@@ -8,6 +8,7 @@ package llvm
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"KlainMainLang/ast"
@@ -42,13 +43,59 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 		savedInModuleTask := e.inModuleTask
 		e.inModuleTask = moduleTask
 
+		// The worker's copy of a top-level binding is the global the
+		// program's own declaration was promoted to: its closures (and named
+		// functions) read that global by name, on this thread's copy of it.
+		for _, st := range append(append([]ast.Statement{}, wm.Deps...), wm.Body...) {
+			var decls []*ast.VarDeclaration
+			names := map[string]bool{}
+			switch s := st.(type) {
+			case *ast.VarDeclaration:
+				decls = []*ast.VarDeclaration{s}
+			case *ast.VarDeclarationList:
+				decls = s.Decls
+			case *ast.ArrayDestructuring:
+				collectArrayPatternNames(s.Elems, names)
+			case *ast.ObjectDestructuring:
+				collectObjectPatternNames(s.Props, names)
+			}
+			if len(names) > 0 && e.patternGlobals[st] == nil {
+				// A destructuring: the names the program's own copy bound
+				// to globals.
+				var bound []string
+				for n := range names {
+					if g, ok := e.moduleGlobals[n]; ok && strings.HasPrefix(g.Ptr, "@__kml_global_") {
+						bound = append(bound, n)
+					}
+				}
+				if len(bound) > 0 {
+					sort.Strings(bound)
+					if e.patternGlobals == nil {
+						e.patternGlobals = map[ast.Statement][]string{}
+					}
+					e.patternGlobals[st] = bound
+				}
+			}
+			for _, d := range decls {
+				if _, ok := e.moduleGlobals[d.Name]; ok && !e.promotedGlobalDecls[d] {
+					e.promotedGlobalDecls[d] = true
+				}
+			}
+		}
 		var emitErr error
-		emitErr = e.emitLibInitCalls(append(append([]ast.Statement{}, wm.Deps...), wm.Body...), e.emitStmt)
+		emitErr = e.emitLibInitCalls(append(append([]ast.Statement{}, wm.Deps...), wm.Body...), func(st ast.Statement) error {
+			if err := e.emitStmt(st); err != nil {
+				return err
+			}
+			// This thread's TDZ flag for the binding: initialized now.
+			e.endModuleTDZ(st)
+			return nil
+		})
 		if emitErr == nil {
 			e.emitTerminator("ret void")
 			if moduleTask {
 				e.writeFunc(fmt.Sprintf("internal void @%s_body("+irPtr+" %%__kml_module_args)", symbol), e.allocas.String()+e.body.String())
-				e.ensureTaskRuntime()
+				e.ensureUnhandledRejections()
 				e.writeFunc("void @"+symbol+"()", fmt.Sprintf(`  %%p = call `+irPtr+` @__kml_task_alloc_promise()
   store `+irPtr+` %%p, `+irPtr+` @__kml_module_promise, align 8
   %%t = call `+irPtr+` @__kml_spawn_task_ex(`+irPtr+` @%s_body, `+irPtr+` null, `+irPtr+` %%p, i64 %d, `+irPtr+` @__kml_module_trampoline)
@@ -85,17 +132,12 @@ func (e *Emitter) emitWorkerModules(prog *ast.Program) error {
 // the loop again; when the loop finally returns with the module promise
 // still pending, print Node's warning and end with code 13.
 func (e *Emitter) emitWorkerRunLoop(anyModuleTask bool) {
-	code, pre := "0", ""
-	if e.usedProcessLifecycle {
-		pre = "  %code = load i64, " + irPtr + " @__kml_process_exit_code, align 8\n"
-		code = "%code"
-	}
+	code, pre := "%code", "  %code = call i64 @__kml_main_exit_code()\n"
 	if !anyModuleTask {
 		e.writeFunc("i64 @__kml_worker_run_loop()", fmt.Sprintf("  call void @__kml_event_loop_run()\n%s  ret i64 %s\n", pre, code))
 		return
 	}
-	e.ensureTaskRuntime()
-	e.ensureLoopTurn() // owns @.kml_tla_unsettled
+	e.ensureUnhandledRejections()
 	e.writeFunc("i64 @__kml_worker_run_loop()", fmt.Sprintf(`  br label %%loop
 loop:
   call void @__kml_event_loop_run()

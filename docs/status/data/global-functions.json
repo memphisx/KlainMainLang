@@ -194,7 +194,7 @@
               "Base64 decode",
               "WHATWG forgiving-base64: ASCII whitespace is stripped, a missing-padding trailing 2-/3-char group still decodes, and a remaining length ≡ 1 (mod 4) throws `InvalidCharacterError` ([ADR-00550](../adr/00/ADR-00550.md))",
               "After the up-to-two trailing `=` are stripped, an interior or excess `=` in the data region throws `InvalidCharacterError` — `=` is accepted only as trailing padding, matching real atob ([ADR-00563](../adr/00/ADR-00563.md))",
-              "Operates byte-for-byte on the input string (this compiler's strings are already plain byte sequences — no separate \"binary string\" type needed). See [ADR-00024](../adr/00/ADR-00024.md).",
+              "Each decoded byte is one character (Latin-1), as WHATWG atob ([ADR-02061](../adr/02/ADR-02061.md))",
               "An input character outside the base64 alphabet throws a real `InvalidCharacterError` DOMException, matching WHATWG atob ([ADR-00458](../adr/00/ADR-00458.md))"
             ],
             "decl": [
@@ -205,7 +205,8 @@
             "feature": "`btoa(s)`",
             "status": "implemented",
             "notes": [
-              "Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/00/ADR-00024.md)."
+              "Base64 encode, `=`-padded (RFC 4045). See [ADR-00024](../adr/00/ADR-00024.md).",
+              "Each character is one byte (Latin-1); one above U+00FF is the `InvalidCharacterError` DOMException ([ADR-02061](../adr/02/ADR-02061.md))"
             ],
             "decl": [
               "btoa"

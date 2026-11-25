@@ -229,8 +229,6 @@ func (e *Emitter) wrapArrayAggregate(outPtr, lenReg string, elemTy Type) Value {
 // already-promise argument is returned as-is (JS flattens a thenable);
 // `Promise.resolve()` with no argument is a fulfilled `Promise<void>`.
 func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Type) (Value, error) {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
 	if len(args) == 0 {
 		q := e.emitAllocSettledPromise()
@@ -289,8 +287,6 @@ func (e *Emitter) emitPromiseResolve(args []ast.Expression, pos ast.Pos, hint Ty
 // it is typed `Promise<number>` by default, since await re-throws before the value
 // type is ever observed.
 func (e *Emitter) emitPromiseReject(args []ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
 	// The reason is the real value, carried as a caught-value (tag, payload) —
 	// the async twin of `throw v` (TDD-00207). An absent reason is `undefined`,
@@ -399,6 +395,12 @@ func (e *Emitter) emitPromiseAllSettled(args []ast.Expression, pos ast.Pos) (Val
 	return e.emitCombinator("allSettled", "Promise.allSettled", args, pos)
 }
 
+// promiseStaticOn names the library form of the other statics that take
+// their constructor from `this` (`Promise.resolve.call(C, x)`).
+var promiseStaticOn = map[string]string{
+	"resolve": "_kmlPromiseResolveOn", "reject": "_kmlPromiseRejectOn", "withResolvers": "_kmlPromiseWithResolversOn",
+}
+
 var combinatorLibExport = map[string]string{
 	"all": "_kmlPromiseAllOf", "allSettled": "_kmlPromiseAllSettledOf", "any": "_kmlPromiseAnyOf", "race": "_kmlPromiseRaceOf",
 }
@@ -460,6 +462,12 @@ func (e *Emitter) combinatorMembers(arr ast.Expression, ptrReg, lenReg string, i
 	if el.IsDynamic() && elemTy.IR != "" && !elemTy.IsDynamic() {
 		el = elemTy
 	}
+	// And an array whose elements are held boxed (a map whose callback
+	// returns any) though its static type names promises: each resolved at
+	// run time.
+	if elemTy.IsDynamic() && !elemTy.IsArray() && !el.IsDynamic() {
+		el = elemTy
+	}
 	switch {
 	case !el.IsPromise():
 		return e.wrapValueMembers(ptrReg, lenReg, el)
@@ -475,8 +483,6 @@ func (e *Emitter) combinatorMembers(arr ast.Expression, ptrReg, lenReg string, i
 // (ptrReg, lenReg) — or, for `any` values, Promise.resolve of each (a
 // promise held in `any` is itself).
 func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type) {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
 	// A boxed member (`any`, or a union, which may hold a promise or a
 	// thenable) resolves at run time.
@@ -529,12 +535,9 @@ func (e *Emitter) wrapValueMembers(ptrReg, lenReg string, el Type) (string, Type
 // bridgeFetchMembers is an array of the task promises bridging each raw
 // fetch promise of (ptrReg, lenReg) (@__kml_fetch_slot_to_promise).
 func (e *Emitter) bridgeFetchMembers(ptrReg, lenReg string) string {
-	e.ensureFetchAsync()
-	e.ensureMicrotasks()
-	e.ensureExceptionHelpers()
+	e.ensureFetch()
 	e.ensureUnhandledRejections()
-	e.ensureNanBox()
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	bytes := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = mul i64 %s, 8", bytes, lenReg))
 	arr := e.freshReg()
@@ -617,8 +620,7 @@ func (e *Emitter) emitCombinatorOverIterable(kind, name string, arg ast.Expressi
 	}
 	at := v.Ty
 	it := e.bindValue(v, pos)
-	e.ensureExceptionHelpers()
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	tryL, catchL, doneL := e.freshLabel("comb.iter"), e.freshLabel("comb.iter.threw"), e.freshLabel("comb.iter.done")
@@ -683,7 +685,7 @@ func (e *Emitter) combinatorCallOn(mem *ast.MemberExpression, args []ast.Express
 	if mem.Property != "call" || len(args) == 0 {
 		return ""
 	}
-	inner, ok := mem.Object.(*ast.MemberExpression)
+	inner, ok := stripAsAny(mem.Object).(*ast.MemberExpression)
 	if !ok {
 		return ""
 	}
@@ -691,14 +693,16 @@ func (e *Emitter) combinatorCallOn(mem *ast.MemberExpression, args []ast.Express
 	if !ok || p.Name != "Promise" || e.isShadowedByLocal("Promise") {
 		return ""
 	}
-	export, ok := combinatorLibExport[inner.Property]
-	if !ok {
+	var on string
+	if export, ok := combinatorLibExport[inner.Property]; ok {
+		on = strings.TrimSuffix(export, "Of") + "On"
+	} else if on, ok = promiseStaticOn[inner.Property]; !ok {
 		return ""
 	}
-	if recv, ok := args[0].(*ast.Identifier); ok && recv.Name == "Promise" {
-		return "" // on Promise: the combinator's own path
+	if recv, ok := args[0].(*ast.Identifier); ok && recv.Name == "Promise" && !e.isShadowedByLocal("Promise") {
+		return "" // on Promise: the static's own path
 	}
-	fn, ok := e.libExports["internal_promise_combine:"+strings.TrimSuffix(export, "Of")+"On"]
+	fn, ok := e.libExports["internal_promise_combine:"+on]
 	if !ok {
 		return ""
 	}

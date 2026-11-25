@@ -191,7 +191,7 @@ func (c *Checker) unionProp(t *Type, key string) (*Type, bool) {
 		if p == nil {
 			return nil, false
 		}
-		ts = append(ts, p.Type)
+		ts = append(ts, p.Type())
 	}
 	if len(ts) == 0 {
 		return c.neverT, true

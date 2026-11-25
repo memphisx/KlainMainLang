@@ -54,9 +54,21 @@ function argv0Name(): string {
     return n;
 }
 
+// --no-warnings among Node's options (NODE_OPTIONS): the default listener
+// prints nothing; the 'warning' event is still emitted.
+let noWarnings: boolean | undefined = undefined;
+function warningsSilenced(): boolean {
+    if (noWarnings === undefined) {
+        const o: any = process.env.NODE_OPTIONS;
+        noWarnings = typeof o === 'string' && o.split(/[ \t]+/).indexOf('--no-warnings') >= 0;
+    }
+    return noWarnings;
+}
+
 // Node's onWarning: the default 'warning' listener.
 export function _kmlOnWarning(warning: any): void {
     if (!(warning instanceof Error)) return;
+    if (warningsSilenced()) return;
     const w: any = warning;
     const p: any = proc !== null ? proc : {};
     const isDeprecation = w.name === 'DeprecationWarning';

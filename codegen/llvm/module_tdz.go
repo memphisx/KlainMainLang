@@ -99,7 +99,6 @@ func (e *Emitter) emitModuleTDZCheck(name string) {
 	tdzL, okL := e.freshLabel("tdz.throw"), e.freshLabel("tdz.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", dead, tdzL, okL))
 	e.emitLabel(tdzL)
-	e.ensureExceptionHelpers()
 	errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+unmangleTopLevelName(name)+"' before initialization"), e.internString("ReferenceError"))
 	e.excThrow(errObj)
 	e.emitTerminator("unreachable")

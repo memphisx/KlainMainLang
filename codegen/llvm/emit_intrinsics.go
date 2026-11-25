@@ -28,6 +28,14 @@ type intrinsic struct {
 	// held, when set, is the representation the lane holds a call's result
 	// in when it differs from the lib's result type (frontOracle).
 	held func(o frontOracle, call *ast.CallExpression) (Type, bool)
+	// construct marks a builtin constructor whose [[Call]] is its
+	// [[Construct]] (`Error("m")`, `RegExp(s)`): the value naming it is the
+	// constructor itself, not a function value of the intrinsic.
+	construct bool
+	// noSpread marks an intrinsic whose emitter takes a fixed list of
+	// arguments: a call spreading one (`Reflect.get(...xs)`, its arity
+	// known only at run time) calls the function value it is instead.
+	noSpread bool
 }
 
 var intrinsics = map[string]intrinsic{}
@@ -187,6 +195,9 @@ var objectStaticIntrinsics = []string{
 // emitCollectionIntrinsic is a Map, Set, WeakMap or WeakSet method call.
 func (e *Emitter) emitCollectionIntrinsic(ex *ast.CallExpression) (Value, error) {
 	mem := ex.Callee.(*ast.MemberExpression)
+	if rt := e.typeOfExpr(mem.Object); (rt.IsMap() || rt.IsSet()) && e.collProtoPatched(collOwner(rt), mem.Property) {
+		return e.emitCollProtoCall(ex, collOwner(rt))
+	}
 	ty, ptr, err := e.resolveMapOrSetForCall(mem.Object, ex.GetPos())
 	if err != nil {
 		return Value{}, err
@@ -322,6 +333,9 @@ func init() {
 				if len(ex.Args) >= 1 && isStringTy(e.typeOfExpr(ex.Args[0])) {
 					return e.emitBufferStringSearch(mem, name, ex.Args, ex.GetPos())
 				}
+				if len(ex.Args) >= 1 && name != "fill" && e.isByteArrayExpr(ex.Args[0]) {
+					return e.emitBufferBytesSearch(mem, name, ex.Args, ex.GetPos())
+				}
 				return arrayIntrinsics[name](e, mem, ex.Args, ex.GetPos())
 			},
 			ty: tableTy(bufferMethodTypes),
@@ -333,7 +347,7 @@ func init() {
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 				mem := ex.Callee.(*ast.MemberExpression)
 				if name == "bind" {
-					return e.emitFunctionBind(mem.Object, ex.Args, ex.GetPos())
+					return e.emitFunctionBindProps(mem.Object, ex.Args, ex.GetPos())
 				}
 				return e.emitFunctionCallApply(mem.Object, name, ex.Args, ex.GetPos())
 			},
@@ -396,10 +410,11 @@ func init() {
 		intrinsics["Array.prototype."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
 				ex = e.dropIgnoredArgs(asMethod(ex, name))
-				if mem, ok := ex.Callee.(*ast.MemberExpression); ok && name == "with" && e.compatJS() && len(ex.Args) < 2 {
-					if rt := e.typeOfExpr(mem.Object); rt.IsArray() && rt.ElemType != nil && !rt.ElemType.IsDynamic() {
-						// `a.with(i)` sets undefined, which a typed array's
-						// elements can't hold: the copy is an any[].
+				if mem, ok := ex.Callee.(*ast.MemberExpression); ok && name == "with" && e.compatJS() {
+					if rt := e.typeOfExpr(mem.Object); rt.IsArray() && e.withWidens(rt, ex.Args) {
+						// `a.with(i)` sets undefined (`a.with(i, "s")` a
+						// string), which the elements can't hold: the copy
+						// is an any[] (arrayWithType).
 						av, err := e.emitExpr(mem.Object)
 						if err != nil {
 							return Value{}, err
@@ -521,16 +536,24 @@ func init() {
 		ty := v.ty
 		intrinsics[name] = intrinsic{emit: v.emit, ty: func(*Emitter, *ast.CallExpression) Type { return ty }}
 	}
+	// A direct `eval("<expr>")` of a constant is the parsed expression,
+	// compiled in place: its type (emitStaticEval).
+	intrinsics["eval"] = intrinsic{emit: intrinsics["eval"].emit, ty: func(e *Emitter, ex *ast.CallExpression) Type {
+		if t, ok := e.inferStaticEvalType(ex.Args); ok {
+			return t
+		}
+		return TypeAny
+	}}
 	for name, v := range map[string]struct {
 		sym    string
 		ensure func(e *Emitter)
 	}{
-		"btoa":               {"@__kml_btoa", func(e *Emitter) { e.ensureStrHeaderRuntime() }},
-		"atob":               {"@__kml_atob", func(e *Emitter) { e.ensureExceptionHelpers(); e.ensureStrHeaderRuntime() }},
-		"encodeURIComponent": {"@__kml_encode_uri_component", (*Emitter).ensurePercentEncode},
-		"decodeURIComponent": {"@__kml_decode_uri_component_strict", (*Emitter).ensurePercentDecode},
-		"encodeURI":          {"@__kml_encode_uri", (*Emitter).ensurePercentEncode},
-		"decodeURI":          {"@__kml_decode_uri_strict", (*Emitter).ensurePercentDecode},
+		"btoa":               {"@__kml_btoa", (*Emitter).linkedBySymbol},
+		"atob":               {"@__kml_atob", (*Emitter).linkedBySymbol},
+		"encodeURIComponent": {"@__kml_encode_uri_component", (*Emitter).linkedBySymbol},
+		"decodeURIComponent": {"@__kml_decode_uri_component_strict", (*Emitter).linkedBySymbol},
+		"encodeURI":          {"@__kml_encode_uri", (*Emitter).linkedBySymbol},
+		"decodeURI":          {"@__kml_decode_uri_strict", (*Emitter).linkedBySymbol},
 	} {
 		name, v := name, v
 		intrinsics[name] = intrinsic{
@@ -758,7 +781,7 @@ func init() {
 		ty: func(*Emitter, *ast.CallExpression) Type { return TypeAny },
 	}
 	// ArrayBuffer's own methods (a SharedArrayBuffer's grow and slice too).
-	for _, name := range []string{"grow", "resize", "slice"} {
+	for _, name := range []string{"grow", "resize", "slice", "transfer", "transferToFixedLength"} {
 		name := name
 		intrinsics["ArrayBuffer.prototype."+name] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
@@ -780,11 +803,17 @@ func init() {
 				if err != nil {
 					return Value{}, err
 				}
+				if name == "transfer" || name == "transferToFixedLength" {
+					return e.emitBufferTransfer(objVal, ex.Args, name != "transfer", ex.GetPos())
+				}
 				return e.emitBufferGrow(objVal, ex.Args, ex.GetPos(), name == "resize")
 			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
 				if name == "slice" {
 					return e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object)
+				}
+				if name == "transfer" || name == "transferToFixedLength" {
+					return ArrayBufferType()
 				}
 				return TypeVoid
 			},
@@ -956,7 +985,7 @@ func init() {
 var intrinsicSpecLength = map[string]int{
 	"Math.max": 2, "Math.min": 2, "Math.hypot": 2,
 	"String.fromCharCode": 1, "String.fromCodePoint": 1,
-	"Date.UTC": 7, "Symbol": 0,
+	"Date.UTC": 7, "Symbol": 0, "structuredClone": 2,
 }
 
 // builtinFn is a builtin function referenced by value (`arr.map(parseFloat)`,
@@ -1047,8 +1076,10 @@ func (e *Emitter) builtinRefAs(x ast.Expression, callback bool) (*builtinFn, boo
 			// A builtin constructor called as a function (`.map(String)`):
 			// its call signature.
 			if t := c.TypeOf(x); t != nil && len(t.Calls) > 0 {
-				if key = callSignatureIntrinsic(t); key != "" {
+				if key = callSignatureIntrinsic(t); key != "" && !intrinsics[key].construct {
 					callSig = t.Calls[len(t.Calls)-1]
+				} else {
+					key = ""
 				}
 			}
 			if key == "Object" && !callback {
@@ -1166,7 +1197,7 @@ func (e *Emitter) builtinCtorValue(name string) (Value, bool, error) {
 		return Value{}, false, nil
 	}
 	key := callSignatureIntrinsic(t)
-	if key == "" || key == "Object" { // Object's value is its record
+	if key == "" || key == "Object" || intrinsics[key].construct { // Object's value is its record
 		return Value{}, false, nil
 	}
 	b, ok := intrinsicBuiltin(key, t.Calls[len(t.Calls)-1])
@@ -1211,6 +1242,19 @@ func intrinsicBuiltin(key string, fn *checker.Type) (*builtinFn, bool) {
 				rest = sp.Arg
 			}
 			return e.emitDateUTCFromRest(rest)
+		}
+		return b, true
+	}
+	if key == "structuredClone" {
+		// It counts its arguments (none is ERR_MISSING_ARGS): a rest, to
+		// the run-time clone's entry that counts it.
+		b.params, b.rest = []Type{ArrayOf(TypeAny)}, true
+		b.call = func(e *Emitter, args []ast.Expression) (Value, error) {
+			m, ok := e.libExports["internal_structured_clone:structuredCloneArgs"]
+			if !ok {
+				return Value{}, internalAt(ast.Pos{}, "structuredClone's run-time clone is not linked")
+			}
+			return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, ast.Pos{}), args, ast.Pos{}))
 		}
 		return b, true
 	}

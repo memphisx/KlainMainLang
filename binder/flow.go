@@ -690,6 +690,11 @@ func (b *Binding) excludesUndefined(c ast.Expression, sym *Symbol, branch bool) 
 	case *ast.UnaryExpression:
 		return x.Op == "!" && !branch && isSym(x.Arg)
 	case *ast.BinaryExpression:
+		// `a && b` taken true took both true; `a || b` taken false took
+		// both false: either operand's exclusion holds.
+		if x.Op == "&&" && branch || x.Op == "||" && !branch {
+			return b.excludesUndefined(x.Left, sym, branch) || b.excludesUndefined(x.Right, sym, branch)
+		}
 		l, r := x.Left, x.Right
 		if !isSym(l) {
 			l, r = r, l

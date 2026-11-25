@@ -41,15 +41,6 @@ func (e *Emitter) ensureUnhandledRejections() {
 		return
 	}
 	e.usedUnhandledRuntime = true
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureUnhandledRejections()
-	e.ensureProcessHooks()
-	// The report names a non-Error reason's constructor
-	// (emitUnhandledRejectionError), a prototype read generated before the
-	// report itself is.
-	e.ensureShapeRuntime()
-	e.usedProtoOf = true
 	// The queue and the checkpoint are microtask.c's (TDD-00240).
 }
 
@@ -101,13 +92,65 @@ func (e *Emitter) emitUnhandledReport() {
 	if err != nil {
 		pb = Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}
 	}
+	// Node's --unhandled-rejections mode (NODE_OPTIONS, microtask.c): 0
+	// throw, 1 strict, 2 warn, 3 none, 4 warn-with-error-code.
+	mode := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_unhandled_mode()", mode))
+	hookL, strictL := e.freshLabel("unh.hook"), e.freshLabel("unh.strict")
+	isStrict := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 1", isStrict, mode))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isStrict, strictL, hookL))
+	retL, warnL, warnCodeL, uncaughtL := e.freshLabel("unh.ret"), e.freshLabel("unh.warn"), e.freshLabel("unh.warncode"), e.freshLabel("unh.uncaught")
+	// The process 'unhandledRejection' event, (reason, promise), first in
+	// every mode but strict; then, unless a listener took it: throw raises
+	// it, warn-with-error-code warns and sets the exit code; warn always
+	// warns; none does nothing more.
+	e.emitLabel(hookL)
 	hasH := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_process_hook_call(i32 2, i64 %s, i64 %s)", hasH, rb.Ref, pb.Ref))
-	listenerL, uncaughtL := e.freshLabel("unh.listener"), e.freshLabel("unh.uncaught")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasH, listenerL, uncaughtL))
-	e.emitLabel(listenerL)
+	unheardL := e.freshLabel("unh.unheard")
+	e.emitTerminator(fmt.Sprintf("switch i32 %s, label %%%s [ i32 2, label %%%s i32 3, label %%%s ]", mode, unheardL, warnL, retL))
+	e.emitLabel(unheardL)
+	isCode := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i32 %s, 4", isCode, mode))
+	unheardNext := e.freshLabel("unh.unheard.next")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasH, retL, unheardNext))
+	e.emitLabel(unheardNext)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isCode, warnCodeL, uncaughtL))
+	e.emitLabel(warnCodeL)
+	if err := e.emitUnhandledWarning(reason, rb); err != nil {
+		panic("unhandled warning: " + err.Error())
+	}
+	e.emitInstr("call void @__kml_store_exit_code(i64 1)")
+	e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
+	e.emitLabel(warnL)
+	if err := e.emitUnhandledWarning(reason, rb); err != nil {
+		panic("unhandled warning: " + err.Error())
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", retL))
+	e.emitLabel(retL)
 	e.emitTerminator("ret void")
-	// Otherwise an uncaught exception: process.on('uncaughtException') gets
+	// strict: the uncaught exception first; when process.on(
+	// 'uncaughtException') took it, the 'unhandledRejection' event, and a
+	// warning when nothing listens to that.
+	pslot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca { i8, i64 }, align 8", pslot))
+	e.emitLabel(strictL)
+	sReason, err := e.emitUnhandledRejectionError(reason, rb)
+	if err != nil {
+		sReason = Value{Ref: agg, Ty: TypeCaught}
+	}
+	stag, spay := e.caughtParts(sReason)
+	sHandled := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_process_uncaught_guarded(i8 %s, i64 %s, i1 1)", sHandled, stag, spay))
+	sTakenL, printL := e.freshLabel("unh.strict.taken"), e.freshLabel("unh.print")
+	e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, "+irPtr+" %s, align 8", sReason.Ref, pslot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sHandled, sTakenL, printL))
+	e.emitLabel(sTakenL)
+	sHasH := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_process_hook_call(i32 2, i64 %s, i64 %s)", sHasH, rb.Ref, pb.Ref))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sHasH, retL, warnL))
+	// throw: an uncaught exception — process.on('uncaughtException') gets
 	// the Error (the program goes on), else the reason is printed as an
 	// uncaught throw's and the process exits 1.
 	e.emitLabel(uncaughtL)
@@ -117,16 +160,20 @@ func (e *Emitter) emitUnhandledReport() {
 	}
 	tag, pay := e.caughtParts(reason)
 	handled := e.freshReg()
-	rtag, rpay := tag, pay
-	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_process_uncaught_guarded(i8 %s, i64 %s, i1 1)", handled, rtag, rpay))
-	goOnL, printL := e.freshLabel("unh.handled"), e.freshLabel("unh.print")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", handled, goOnL, printL))
-	e.emitLabel(goOnL)
-	e.emitTerminator("ret void")
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_process_uncaught_guarded(i8 %s, i64 %s, i1 1)", handled, tag, pay))
+	e.emitInstr(fmt.Sprintf("store { i8, i64 } %s, "+irPtr+" %s, align 8", reason.Ref, pslot))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", handled, retL, printL))
+	// Printed as an uncaught throw's (the reason, or its
+	// UnhandledPromiseRejection), and the process exits 1. The strict and
+	// throw paths meet here with their own exception.
 	e.emitLabel(printL)
+	pv := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load { i8, i64 }, "+irPtr+" %s, align 8", pv, pslot))
+	tag, pay = e.caughtParts(Value{Ref: pv, Ty: TypeCaught})
 	e.declareWorkerUncaught()
 	e.emitInstr(fmt.Sprintf("call void @__kml_worker_uncaught(i8 %s, i64 %s)", tag, pay))
 	e.emitInstr(fmt.Sprintf("call void @__kml_print_uncaught(i8 %s, i64 %s)", tag, pay))
+	e.emitInstr("call void @__kml_store_exit_code(i64 1)") // process.exitCode, as the 'exit' listeners see it
 	e.emitInstr("call void @__kml_run_exit_handlers(i64 1)")
 	e.emitInstr(e.exitCall("1"))
 	e.emitTerminator("unreachable")
@@ -134,6 +181,81 @@ func (e *Emitter) emitUnhandledReport() {
 	restore()
 	e.writeFunc("void @__kml_unhandled_report("+irPtr+" %p)", body)
 }
+
+// emitUnhandledWarning prints Node's unhandled-rejection warning for reason
+// (box, its boxed form): an Error's stack, another value's V8 text
+// (noSideEffectsToString), then the rejection's notice (microtask.c).
+func (e *Emitter) emitUnhandledWarning(reason, box Value) error {
+	tag, pay := e.caughtParts(reason)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
+	isRaw := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isRaw, tag, kmlTagError))
+	stackL, objChkL, textL, doneL := e.freshLabel("unhw.stack"), e.freshLabel("unhw.obj"), e.freshLabel("unhw.text"), e.freshLabel("unhw.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isRaw, stackL, objChkL))
+	e.emitLabel(objChkL)
+	isObj := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+	probeL := e.freshLabel("unhw.probe")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isObj, probeL, textL))
+	e.emitLabel(probeL)
+	_, boxedErr := e.emitBoxedErrorProbe(pay)
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", boxedErr, stackL, textL))
+	e.emitLabel(stackL)
+	sv, err := e.emitDynAnyMemberGet(box, e.internString("stack"), ast.Pos{})
+	if err != nil {
+		return err
+	}
+	st, err := e.emitValueToString(sv)
+	if err != nil {
+		return err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", st.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(textL)
+	tv, err := e.emitV8ValueText(box)
+	if err != nil {
+		return err
+	}
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", tv.Ref, slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	text := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", text, slot))
+	m, linked := e.libExports["internal_process_warning:emitWarning"]
+	if !linked {
+		// No process emitter to listen: the default listener's lines.
+		e.emitInstr(fmt.Sprintf("call void @__kml_unhandled_warn("+irPtr+" %s)", text))
+		return nil
+	}
+	// process.emitWarning, as Node's emitUnhandledRejectionWarning calls
+	// it: the reason as an UnhandledPromiseRejectionWarning, then the
+	// notice, each an Error of that name ('warning' listeners see both).
+	pos := ast.Pos{}
+	tmp := "__kml_unhw_" + e.freshReg()[1:]
+	e.define(tmp, Symbol{Ptr: slot, Ty: TypePtr})
+	kind := ast.NewStringLiteral("UnhandledPromiseRejectionWarning", pos)
+	if _, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), []ast.Expression{ast.NewIdentifier(tmp, pos), kind}, pos)); err != nil {
+		return err
+	}
+	id := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_unhandled_id()", id))
+	idSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca double, align 8", idSlot))
+	idf := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", idf, id))
+	e.emitInstr(fmt.Sprintf("store double %s, "+irPtr+" %s, align 8", idf, idSlot))
+	idName := "__kml_unhid_" + e.freshReg()[1:]
+	e.define(idName, Symbol{Ptr: idSlot, Ty: TypeF64})
+	msg := ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral(unhandledNotice, pos), ast.NewIdentifier(idName, pos), pos), ast.NewStringLiteral(")", pos), pos)
+	// (emitWarning(message, type) makes the Error of that name Node's
+	// getErrorWithoutStack does.)
+	_, err = e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), []ast.Expression{msg, kind}, pos))
+	return err
+}
+
+// unhandledNotice is Node's unhandled-rejection notice, before its id.
+const unhandledNotice = "Unhandled promise rejection. This error originated either by throwing inside of an async function without a catch block, or by rejecting a promise which was not handled with .catch(). To terminate the node process on unhandled promise rejection, use the CLI flag `--unhandled-rejections=strict` (see https://nodejs.org/api/cli.html#cli_unhandled_rejections_mode). (rejection id: "
 
 // emitMarkPromiseHandled marks promise p consumed (a reaction, an await, a
 // combinator).

@@ -380,3 +380,16 @@ console.log(url.domainToUnicode('xn--bcher-kva.de'), url.domainToUnicode('xn--wg
 console.log(url.format(new URL('http://bücher.de/'), { unicode: true }));
 `)
 }
+
+// URLSearchParams converts each name and value argument by ToString, as its
+// WebIDL USVString parameters do (`append('first', 1)` in JavaScript).
+func TestE2EURLSearchParamsNonStringArgsJS(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+const p = new URLSearchParams('a=b');
+p.append('first', 1);
+p.set('n', true);
+console.log(p.has('first', 1), p.get('n'), p.getAll(null), p.toString());
+p.delete('first', 1);
+console.log(p.toString(), p.size);
+`)
+}

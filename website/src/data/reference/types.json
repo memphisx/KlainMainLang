@@ -508,7 +508,7 @@
       "description": "declare ambient declarations describe types the environment provides; carrying no implementation, they are parsed and erased.",
       "snippet": "declare const BUILD_ID: string;\ndeclare function nativeHook(x: number): number;\ndeclare module \"vendor-lib\" {\n  export function doThing(): void;\n}",
       "differences": [
-        "`declare var`/`let`/`const` are uninitialized bindings, `declare function` a stub that throws if called, and `declare namespace X` real ambient members. `declare class C` is typed with no implementation: `new C()` reads `C` as a global the environment provides, else throws ReferenceError, as Node does. String-named `declare module` and `declare global` blocks compile away"
+        "`declare var`/`let`/`const` are uninitialized bindings, `declare function` a stub that throws if called, and `declare namespace X` real ambient members. `declare class C` is typed with no implementation: `new C()` reads `C` as a global the environment provides, else throws ReferenceError, as Node does. A string-named `declare module` block compiles away; `declare global` (and a script's top-level builtin-named interface) merges into the global declarations, its values read off the global object"
       ],
       "seeAlso": [],
       "spec": {

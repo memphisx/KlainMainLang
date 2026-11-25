@@ -22,30 +22,32 @@ i64 __kml_regex_utf8_width(const u8 *str, i64 off) {
     return 1;
 }
 
-/* UTF-16 code units in str[0:bytelen]; bytelen is non-negative. */
+extern i64 __kml_u16_off(const char *s, i64 idx, int *mid);
+extern i64 __kml_u16_index(const char *s, i64 off);
+
+/* UTF-16 code units in str[0:bytelen]; bytelen is non-negative. Through
+ * the string's cached cursor (strheader.c): a global match loop asks at
+ * rising offsets, and scanning from the start each time was quadratic. */
 i64 __kml_regex_byte_to_utf16(const u8 *str, i64 bytelen) {
-    i64 i = 0, u = 0;
-    while (i < bytelen) {
-        i64 w = __kml_regex_utf8_width(str, i);
-        u += w == 4 ? 2 : 1;
-        i += w;
-    }
-    return u;
+    const char *s = (const char *)str;
+    if (kml_str_ascii(s)) return bytelen;
+    i64 n = KML_STR_LEN(s);
+    if (bytelen > n) return kml_str_u16len(s) + (bytelen - n);
+    return __kml_u16_index(s, bytelen);
 }
 
 /* Byte offset of the target-th UTF-16 unit. Past the NUL it extends one byte
  * per missing unit instead of clamping: the global empty-match advance relies
  * on a strlen+1 target mapping beyond the end so PCRE2 rejects it and the loop
- * ends. */
+ * ends. A target inside a four-byte character maps past it. */
 i64 __kml_regex_utf16_to_byte(const u8 *str, i64 target) {
-    i64 i = 0, u = 0;
-    while (u < target) {
-        if (str[i] == 0) return i + (target - u);
-        i64 w = __kml_regex_utf8_width(str, i);
-        u += w == 4 ? 2 : 1;
-        i += w;
-    }
-    return i;
+    const char *s = (const char *)str;
+    if (kml_str_ascii(s)) return target;
+    i64 units = kml_str_u16len(s);
+    if (target >= units) return KML_STR_LEN(s) + (target - units);
+    int mid = 0;
+    i64 off = __kml_u16_off(s, target, &mid);
+    return mid ? off + 4 : off;
 }
 
 /* -regex=ecmascript: rewrite an unescaped top-level `.` (outside a class, and
@@ -361,6 +363,103 @@ static const char *uv_code_points(const char *pat) {
     return out;
 }
 
+/* ---- \\w and \\b under `iu` ----
+ * ES's word characters under the i and u (or v) flags are those whose simple
+ * case folding is in [0-9A-Z_a-z]: ASCII plus U+017F (long s) and U+212A
+ * (Kelvin sign). PCRE2's \\w is ASCII, so outside a class \\w, \\W, \\b and
+ * \\B become that set, its complement (caseless off, so PCRE2's case closure
+ * adds no partner of a member such as U+0131's I) and lookarounds over it;
+ * inside a class \\w gains the two, and a class holding \\W becomes an
+ * alternation with the complement. */
+/* (the two as UTF-8: ALT_BSUX reads no \\x{...}) */
+#define IU_W "\\w" "\xC5\xBF" "\xE2\x84\xAA"
+#define IU_WC "(?-i:[" IU_W "])"
+#define IU_NWC "(?-i:[^" IU_W "])"
+static void iu_put(char **o, i64 *d, i64 *cap, const char *s, i64 n) {
+    if (*d + n + 1 > *cap) {
+        *cap = (*d + n + 1) * 2;
+        *o = (char *)realloc(*o, (size_t)*cap); /* scratch */
+    }
+    memcpy(*o + *d, s, (size_t)n);
+    *d += n;
+}
+#define IU_PUTS(str) iu_put(&out, &d, &cap, (str), (i64)strlen(str))
+static const char *iu_words(const char *pat) {
+    if (!strstr(pat, "\\w") && !strstr(pat, "\\W") && !strstr(pat, "\\b") && !strstr(pat, "\\B")) return pat;
+    i64 len = (i64)strlen(pat), s = 0, d = 0, cap = len * 2 + 64;
+    char *out = (char *)malloc((size_t)cap); /* scratch */
+    while (s < len) {
+        char c = pat[s];
+        if (c == '\\' && s + 1 < len) {
+            char n = pat[s + 1];
+            if (n == 'w') IU_PUTS(IU_WC);
+            else if (n == 'W') IU_PUTS(IU_NWC);
+            else if (n == 'b') IU_PUTS("(?:(?<=" IU_WC ")(?!" IU_WC ")|(?<!" IU_WC ")(?=" IU_WC "))");
+            else if (n == 'B') IU_PUTS("(?:(?<=" IU_WC ")(?=" IU_WC ")|(?<!" IU_WC ")(?!" IU_WC "))");
+            else iu_put(&out, &d, &cap, pat + s, 2);
+            s += 2;
+            continue;
+        }
+        if (c != '[') {
+            iu_put(&out, &d, &cap, pat + s, 1);
+            s++;
+            continue;
+        }
+        /* A class: its body up to the first unescaped `]`. */
+        i64 b = s + 1, e = b;
+        int neg = 0, hasW = 0;
+        if (e < len && pat[e] == '^') {
+            neg = 1;
+            b = ++e;
+        }
+        while (e < len && pat[e] != ']') {
+            if (pat[e] == '\\' && e + 1 < len) {
+                if (pat[e + 1] == 'W') hasW = 1;
+                e += 2;
+            } else e++;
+        }
+        if (e >= len) { /* unterminated: as written (compile reports it) */
+            iu_put(&out, &d, &cap, pat + s, len - s);
+            break;
+        }
+        /* The body with \\w widened and \\W taken out. */
+        char *body = NULL;
+        i64 bd = 0, bcap = (e - b) * 2 + 32;
+        body = (char *)malloc((size_t)bcap); /* scratch */
+        for (i64 k = b; k < e;) {
+            if (pat[k] == '\\' && k + 1 < e) {
+                if (pat[k + 1] == 'w') iu_put(&body, &bd, &bcap, IU_W, (i64)strlen(IU_W));
+                else if (pat[k + 1] != 'W') iu_put(&body, &bd, &bcap, pat + k, 2);
+                k += 2;
+            } else {
+                iu_put(&body, &bd, &bcap, pat + k, 1);
+                k++;
+            }
+        }
+        if (!hasW) {
+            IU_PUTS(neg ? "[^" : "[");
+            iu_put(&out, &d, &cap, body, bd);
+            IU_PUTS("]");
+        } else if (!neg) {
+            if (bd == 0) IU_PUTS(IU_NWC);
+            else {
+                IU_PUTS("(?:[");
+                iu_put(&out, &d, &cap, body, bd);
+                IU_PUTS("]|" IU_NWC ")");
+            }
+        } else if (bd == 0) IU_PUTS(IU_WC);
+        else {
+            IU_PUTS("(?:(?![");
+            iu_put(&out, &d, &cap, body, bd);
+            IU_PUTS("])" IU_WC ")");
+        }
+        free(body); /* scratch */
+        s = e + 1;
+    }
+    out[d] = 0;
+    return out;
+}
+
 void *__kml_regex_es_classes(const char *pat, const char *flags, char **err) {
     const char *src = pat; /* as written, for a SyntaxError's message */
     *err = NULL;
@@ -375,12 +474,14 @@ void *__kml_regex_es_classes(const char *pat, const char *flags, char **err) {
         if (why) return uv_error(pat, flags, why, err);
         pat = uv_code_points(pat);
     }
+    int iu = flags && strchr(flags, 'i') && (strchr(flags, 'u') || strchr(flags, 'v'));
     if (flags && strchr(flags, 'v')) {
         const char *why = NULL;
         char *t = v_translate(pat, &why);
         if (!t) return uv_error(src, flags, why, err);
-        return iter_mark(empty_iter_guard(es_classes(t)));
+        return iter_mark(empty_iter_guard(es_classes(iu ? iu_words(t) : t)));
     }
+    if (iu) pat = iu_words(pat);
     return iter_mark(empty_iter_guard(es_classes(pat)));
 }
 
@@ -392,6 +493,15 @@ void *__kml_regex_es_classes(const char *pat, const char *flags, char **err) {
  * starts, and a completed one records that start; after the match,
  * __kml_regex_fix_optional unsets an inner capture that starts before the
  * last iteration. */
+/* The `)` at i closes empty_iter_guard's wrapper: its body ends with the
+   guard's numeric callout `(?Cn)` (ES patterns have no callouts). */
+static int guard_wrapper_end(const char *pat, i64 i) {
+    if (i < 5 || pat[i - 1] != ')') return 0;
+    i64 j = i - 2;
+    while (j > 0 && pat[j] >= '0' && pat[j] <= '9') j--;
+    return j >= 2 && j < i - 2 && pat[j] == 'C' && pat[j - 1] == '?' && pat[j - 2] == '(';
+}
+
 static void *iter_mark(void *in) {
     const char *pat = (const char *)in;
     if (!pat) return NULL;
@@ -418,6 +528,7 @@ static void *iter_mark(void *in) {
         if (c == ')' && top > 0) {
             top--;
             if (top >= 256 || !nc[top] || firstCap[top] == next) continue;
+            if (guard_wrapper_end(pat, i)) continue; /* empty_iter_guard's, around one capture */
             const char *q = pat + i + 1;
             int rep = q[0] == '*' || q[0] == '+' ||
                       (q[0] == '{' && strncmp(q, "{0,1}", 5) != 0 && strncmp(q, "{1}", 3) != 0 && strncmp(q, "{0}", 3) != 0 && strncmp(q, "{1,1}", 5) != 0);
@@ -560,15 +671,35 @@ static int empty_iter_callout(KmlCalloutBlock *cb, void *data) {
 extern void *pcre2_match_context_create_8(void *gctx) __attribute__((weak));
 extern int pcre2_set_callout_8(void *mctx, int (*fn)(KmlCalloutBlock *, void *), void *data) __attribute__((weak));
 
+extern int pcre2_jit_compile_8(void *code, unsigned opts) __attribute__((weak));
+extern void *pcre2_jit_stack_create_8(size_t start, size_t max, void *gctx) __attribute__((weak));
+extern void pcre2_jit_stack_assign_8(void *mctx, void *cb, void *data) __attribute__((weak));
+
 /* The match context every ES-mode match runs with: its callout rejects an
-   empty iteration (empty_iter_guard). One per thread. */
+   empty iteration (empty_iter_guard), and a JIT-compiled pattern gets a
+   stack that grows to 64 MB (the JIT's own default is 32 KB, which deep
+   backtracking the interpreter handles would overrun). One per thread. */
 void *__kml_regex_mctx(void) {
     static _Thread_local void *m;
     if (!m) {
         m = pcre2_match_context_create_8(NULL);
         pcre2_set_callout_8(m, empty_iter_callout, NULL);
+        if (pcre2_jit_stack_create_8 && pcre2_jit_stack_assign_8) {
+            void *st = pcre2_jit_stack_create_8(32 * 1024, 64 * 1024 * 1024, NULL);
+            if (st) pcre2_jit_stack_assign_8(m, NULL, st);
+        }
     }
     return m;
+}
+
+/* Compiles a pattern to machine code (PCRE2_JIT_COMPLETE), as V8 compiles
+ * its regexps. With PCRE2_MATCH_INVALID_UTF the interpreter checks the
+ * subject from the start offset to its end on every match, ignoring
+ * PCRE2_NO_UTF_CHECK, so a global match loop was quadratic; the JIT checks
+ * as it matches. A PCRE2 without JIT support, or a pattern the JIT refuses,
+ * keeps matching through the interpreter. */
+void __kml_regex_jit(void *code) {
+    if (code && pcre2_jit_compile_8) pcre2_jit_compile_8(code, 1u);
 }
 
 static void *es_classes(const char *pat) {

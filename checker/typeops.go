@@ -77,9 +77,19 @@ func (c *Checker) scopeTypeParams(n ast.TypeNode, scope *binder.Scope, env map[s
 // instantiateDeferred evaluates a deferred type with m's types bound.
 func (c *Checker) instantiateDeferred(t *Type, m map[*Type]*Type) *Type {
 	env := map[string]*Type{}
+	var bounds map[string]*Type
 	for k, v := range t.deferEnv {
 		env[k] = c.instantiate(v, m)
+		if v.Flags&TypeParam != 0 && v.Constraint != nil {
+			if bounds == nil {
+				bounds = map[string]*Type{}
+			}
+			bounds[k] = v.Constraint
+		}
 	}
+	savedBounds := c.deferBounds
+	c.deferBounds = bounds
+	defer func() { c.deferBounds = savedBounds }()
 	subst := map[*Type]*Type{}
 	for k, v := range m {
 		subst[k] = v
@@ -236,7 +246,7 @@ func (c *Checker) indexOne(o, k *Type) *Type {
 			}
 		}
 		if p := src.Prop(k.Value); p != nil {
-			return p.Type
+			return p.Type()
 		}
 		if src.StringIndex != nil {
 			return src.StringIndex
@@ -251,7 +261,7 @@ func (c *Checker) indexOne(o, k *Type) *Type {
 			return o.Elem
 		}
 		if p := o.Prop(k.Value); p != nil {
-			return p.Type
+			return p.Type()
 		}
 		if o.NumberIndex != nil {
 			return o.NumberIndex
@@ -357,6 +367,16 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 					return c.in.union(rs...)
 				case src.Flags&(Object|Any|Unknown|NonPrimitive) == 0:
 					return src
+				case src.Flags&Any != 0 && c.arrayConstrained(ref.Name, scope):
+					// any for a type parameter constrained to arrays
+					// (`Promise.all<T extends readonly unknown[] | []>`):
+					// an array of the template over a number key
+					// (tsc's instantiateMappedArrayType).
+					e := value(c.numT)
+					if c.Unanswered(e) {
+						return e
+					}
+					return c.in.array(e)
 				}
 			}
 		}
@@ -384,7 +404,7 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 				if c.Unanswered(vt) && identityMapped(n) {
 					// `T[P]` of a member indexed access does not model
 					// (an overloaded method): the member's own type.
-					vt = p.Type
+					vt = p.Type()
 				}
 				if c.Unanswered(vt) {
 					return vt
@@ -394,7 +414,7 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 				if n.ReadonlyMod != 0 {
 					ro = n.ReadonlyMod > 0
 				}
-				props = append(props, &Property{Name: p.Name, Type: vt, Optional: opt, Readonly: ro})
+				props = append(props, &Property{Name: p.Name, ty: vt, Optional: opt, Readonly: ro})
 			}
 			var str, num *Type
 			if src.StringIndex != nil {
@@ -448,11 +468,12 @@ func (c *Checker) mappedType(n *ast.MappedType, scope *binder.Scope) *Type {
 				if p.Name == k.Value {
 					// Two keys of one name (members of different enums of
 					// one value): the property is either's value.
-					p.Type, merged = c.in.union(p.Type, vt), true
+					p.SetType(c.in.union(p.Type(), vt))
+					merged = true
 				}
 			}
 			if !merged {
-				props = append(props, &Property{Name: k.Value, Type: vt, Optional: opt, Readonly: n.ReadonlyMod > 0})
+				props = append(props, &Property{Name: k.Value, ty: vt, Optional: opt, Readonly: n.ReadonlyMod > 0})
 			}
 		case k.Flags&String != 0:
 			str = vt
@@ -500,6 +521,33 @@ func (c *Checker) conditionalType(n *ast.ConditionalType, scope *binder.Scope) *
 // alias's, through the environment, or a function's, through the
 // substitution) for one member of a distribution; nil when name is not a
 // type parameter.
+// arrayConstrained reports whether the type parameter name has a
+// constraint every member of which is an array or tuple type.
+func (c *Checker) arrayConstrained(name string, scope *binder.Scope) bool {
+	var k *Type
+	if sym := resolveTypeName(name, scope); sym != nil && sym.Flags&binder.TypeParameter != 0 {
+		k = c.typeParamType(sym).Constraint
+	} else if t := c.lookupEnv(name); t != nil && t.Flags&TypeParam != 0 {
+		k = t.Constraint // a signature's own, named through the environment
+	} else if b := c.deferBounds[name]; b != nil {
+		k = b // one a deferred type's instantiation bound
+	}
+	if k == nil || c.Unanswered(k) {
+		return false
+	}
+	ms := []*Type{k}
+	if k.Flags&Union != 0 {
+		ms = k.Types
+	}
+	for _, m := range ms {
+		readonlyArray := m.Kind == Interface && m.Symbol != nil && (m.Symbol.Name == "ReadonlyArray" || m.Symbol.Name == "Array")
+		if m.Flags&Object == 0 || m.Kind != Array && m.Kind != Tuple && !readonlyArray {
+			return false
+		}
+	}
+	return true
+}
+
 func (c *Checker) typeParamBinder(name string, scope *binder.Scope) func(*Type) func() {
 	if sym := resolveTypeName(name, scope); sym != nil && sym.Flags&binder.TypeParameter != 0 {
 		tp := c.typeParamType(sym)

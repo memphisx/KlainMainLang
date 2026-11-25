@@ -111,6 +111,11 @@ type lookupTable struct {
 	// typeOnly is every local an `import type` (or a `type` specifier)
 	// binds: a value use of one is TS1361.
 	typeOnly map[string]bool
+	// typeDecls is every name the file declares only as a type (an
+	// interface or type alias, no value of that name): a value use reads
+	// the global of that name (`interface Number {}` then
+	// `Number.prototype`), never the renamed type.
+	typeDecls map[string]bool
 	// nodeTypes is every local bound to a Node export implemented only as
 	// a type (Program.NodeTypeImports): a value use is an error.
 	nodeTypes map[string]string
@@ -673,12 +678,11 @@ func rewriteStmt(stmt ast.Statement, sc *scope, lu lookupTable) {
 		// same pattern (`[a, b = a]`, real JS) — rewrite each element's
 		// own Default before binding it, so it still resolves as whatever
 		// it would outside the pattern, then bind so the *next* element's
-		// default sees it as local.
+		// default sees it as local. A nested pattern's names bind too
+		// (`let [p, [q]]`), as an object pattern's do.
 		for i := range s.Elems {
-			if s.Elems[i].Default != nil {
-				s.Elems[i].Default = rewriteExpr(s.Elems[i].Default, sc, lu)
-			}
-			sc.bind(s.Elems[i].Name)
+			rewriteArrayPatternDefaults(s.Elems[i:i+1], sc, lu)
+			bindArrayPattern(s.Elems[i:i+1], sc)
 		}
 	case *ast.ObjectDestructuring:
 		if s.TypeAnnot != nil {
@@ -807,7 +811,7 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 				p := e.GetPos()
 				*lu.reservedErr = diag.New(diag.CannotFindName, diag.Span{Pos: diag.Pos{Line: p.Line, Col: p.Col}}, e.Name)
 			}
-			if m, ok := lu.names[e.Name]; ok {
+			if m, ok := lu.names[e.Name]; ok && !lu.typeDecls[e.Name] {
 				e.Name = m
 				break
 			}
@@ -827,11 +831,6 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 			// check as every other lookup here, so a local variable that
 			// happens to share the imported name still shadows it.
 			if ref, ok := lu.builtinMembers[e.Name]; ok {
-				// stream/web re-exports the ambient WHATWG stream constructors —
-				// identity, same as stream's class names.
-				if ref.Marker == "streamweb__kml_builtin" {
-					return ast.NewIdentifier(ref.Member, e.GetPos())
-				}
 				return ast.NewMemberExpression(ast.NewIdentifier(ref.Marker, e.GetPos()), ref.Member, e.GetPos())
 			}
 		}
@@ -897,6 +896,16 @@ func rewriteExpr(expr ast.Expression, sc *scope, lu lookupTable) ast.Expression 
 					return ast.NewIdentifier(mangled, e.GetPos())
 				}
 			}
+		}
+		// A builtin module's `default` (`os.default`) is its module.exports,
+		// the namespace's own members: `ns.default.x` is `ns.x`, and
+		// `ns.default` the namespace object.
+		if inner, ok := e.Object.(*ast.MemberExpression); ok && lu.builtinDefault(inner, sc) {
+			e.Object = inner.Object
+			return rewriteExpr(e, sc, lu)
+		}
+		if lu.builtinDefault(e, sc) {
+			return rewriteExpr(e.Object, sc, lu)
 		}
 		if id, ok := e.Object.(*ast.Identifier); !ok || sc.bound(id.Name) || lu.ns[id.Name] == nil {
 			e.Object = rewriteExpr(e.Object, sc, lu)
@@ -1309,4 +1318,26 @@ func newPathIsValue(path []string, sc *scope, lu lookupTable) bool {
 	}
 	_, value := lu.names[root]
 	return value
+}
+
+// builtinDefault reports m as `ns.default` for a namespace import ns of a
+// Node builtin module that exports no `default` of its own.
+func (lu lookupTable) builtinDefault(m *ast.MemberExpression, sc *scope) bool {
+	id, ok := m.Object.(*ast.Identifier)
+	if !ok || m.Property != "default" || m.Optional || sc.bound(id.Name) {
+		return false
+	}
+	members, ok := lu.ns[id.Name]
+	if !ok {
+		return false
+	}
+	if _, own := members["default"]; own {
+		return false
+	}
+	src, ok := lu.nsSource[id.Name]
+	if !ok {
+		return false
+	}
+	_, builtin := builtinDynamicSpec(src)
+	return builtin
 }

@@ -140,6 +140,42 @@ export function getegid(): number {
     return __kml_native.processId(5);
 }
 
+// The supplementary group ids, with the effective group id among them, as
+// Node ensures (POSIX leaves its presence unspecified).
+export function getgroups(): number[] {
+    const n = __kml_native.processGroups(-1);
+    if (n < 0) throw new Error('getgroups failed: ' + n);
+    const out: number[] = [];
+    for (let i = 0; i < n; i++) out.push(__kml_native.processGroups(i));
+    const egid = getegid();
+    if (!out.includes(egid)) out.push(egid);
+    return out;
+}
+
+// process.resourceUsage: the process's getrusage reading, under Node's
+// names and units.
+export function resourceUsage(): NodeJS.ResourceUsage {
+    const userCPUTime = __kml_native.processRusage(0);
+    return {
+        userCPUTime,
+        systemCPUTime: __kml_native.processRusage(1),
+        maxRSS: __kml_native.processRusage(2),
+        sharedMemorySize: __kml_native.processRusage(3),
+        unsharedDataSize: __kml_native.processRusage(4),
+        unsharedStackSize: __kml_native.processRusage(5),
+        minorPageFault: __kml_native.processRusage(6),
+        majorPageFault: __kml_native.processRusage(7),
+        swappedOut: __kml_native.processRusage(8),
+        fsRead: __kml_native.processRusage(9),
+        fsWrite: __kml_native.processRusage(10),
+        ipcSent: __kml_native.processRusage(11),
+        ipcReceived: __kml_native.processRusage(12),
+        signalsCount: __kml_native.processRusage(13),
+        voluntaryContextSwitches: __kml_native.processRusage(14),
+        involuntaryContextSwitches: __kml_native.processRusage(15),
+    };
+}
+
 // process.platform and process.arch: the target's, under Node's names.
 export function platform(): NodeJS.Platform {
     return __kml_native.processPlatform() as NodeJS.Platform;

@@ -122,25 +122,10 @@ func (e *Emitter) emitSymbolToString(val Value) (Value, error) {
 	return e.emitStringConcat(acc, suffix)
 }
 
-// ensureSymbolRegistry declares the Symbol.for registry (ADR-00488,
-// collectionssrc/collections.c): a lazily created string-keyed map from key
-// to the shared Symbol.
-func (e *Emitter) ensureSymbolRegistry() {
-	if e.usedSymbolRegistry {
-		return
-	}
-	e.usedSymbolRegistry = true
-	e.ensureMapStrHelpers()
-	if ty := SymbolType(); ty.StructSize() != 16 {
-		panic("collections.c's Symbol.for builds a 16-byte Symbol")
-	}
-}
-
 // emitSymbolStaticFor is Symbol.for(key) (ADR-00488). Symbols from the
 // registry share pointer identity per key, so Symbol.for("a") ===
 // Symbol.for("a").
 func (e *Emitter) emitSymbolStaticFor(args []ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureSymbolRegistry()
 	if len(args) == 0 {
 		args = []ast.Expression{ast.NewNullLiteral(true, pos)} // Symbol.for(undefined)
 	}
@@ -179,7 +164,6 @@ func (e *Emitter) emitSymbolStaticFor(args []ast.Expression, pos ast.Pos) (Value
 // emitSymbolStaticKeyFor is Symbol.keyFor(sym): undefined for a symbol not
 // in the registry.
 func (e *Emitter) emitSymbolStaticKeyFor(args []ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureSymbolRegistry()
 	if len(args) != 1 {
 		return Value{}, internalAt(pos, "Symbol.keyFor arity")
 	}
@@ -222,6 +206,21 @@ var wellKnownSymbols = map[string]bool{
 	"iterator": true, "match": true, "matchAll": true, "replace": true,
 	"search": true, "species": true, "split": true, "toPrimitive": true,
 	"toStringTag": true, "unscopables": true, "dispose": true, "asyncDispose": true,
+}
+
+// registerWellKnownSymbolIntrinsics enters the well-known symbols as
+// `Symbol.name` reads, through their declarations' intrinsics (an
+// undeclared one, `Symbol.dispose`, through the unshadowed global's entry).
+func registerWellKnownSymbolIntrinsics() {
+	for name := range wellKnownSymbols {
+		name := name
+		propIntrinsics["Symbol."+name] = propIntrinsic{
+			emit: func(e *Emitter, ex *ast.MemberExpression) (Value, error) {
+				return Value{Ref: e.wellKnownSymbol(name), Ty: SymbolType()}, nil
+			},
+			ty: func(*Emitter, *ast.MemberExpression) Type { return SymbolType() },
+		}
+	}
 }
 
 // wellKnownSymbol returns the static Symbol for `Symbol.name`.

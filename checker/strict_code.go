@@ -1,6 +1,9 @@
 package checker
 
 import (
+	"fmt"
+	"strconv"
+
 	"KlainMainLang/ast"
 	"KlainMainLang/diag"
 )
@@ -80,6 +83,24 @@ func (c *Checker) checkStrictCode(n ast.Node) {
 		case *ast.UnaryExpression:
 			if _, ok := x.Arg.(*ast.Identifier); ok && x.Op == "delete" {
 				c.report(diag.StrictDeleteIdent, x.GetPos())
+			}
+		case *ast.StringLiteral:
+			// Annex B's escapes: tsc names the hex form of an octal one.
+			if e := x.LegacyEscape; e != "" {
+				if e[1] == '8' || e[1] == '9' {
+					c.report(diag.DecimalEscape, x.GetPos(), e)
+				} else {
+					v, _ := strconv.ParseInt(e[1:], 8, 64)
+					c.report(diag.OctalEscape, x.GetPos(), fmt.Sprintf("\\x%02x", v))
+				}
+			}
+		case *ast.NumberLiteral:
+			switch x.LegacyForm() {
+			case "octal":
+				v, _ := strconv.ParseInt(x.Value, 8, 64)
+				c.report(diag.OctalLiteral, x.GetPos(), "0o"+strconv.FormatInt(v, 8))
+			case "decimal":
+				c.report(diag.LeadingZeroDecimal, x.GetPos())
 			}
 		}
 		return true

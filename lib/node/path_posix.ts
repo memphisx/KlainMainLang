@@ -1,7 +1,7 @@
 // Node's `path/posix`: `path.posix`.
 //
-// kml:default-namespace — `import path from 'path/posix'` reads this
-// module's exports.
+// Its default export is `path.posix` itself, so
+// `import p from 'path/posix'` is the same object, as in Node.
 
 import { posix as flavour } from './path';
 import type { ParsedPath, FormatInputPathObject } from './path';
@@ -46,10 +46,13 @@ export function format(pathObject: FormatInputPathObject): string {
     return flavour.format(pathObject);
 }
 
-export function toNamespacedPath(path: string): string {
+export function toNamespacedPath(path: string): string;
+export function toNamespacedPath(path: any): any {
     return flavour.toNamespacedPath(path);
 }
 
 export const sep = flavour.sep;
 export const delimiter = flavour.delimiter;
 export { posix, win32 } from './path';
+
+export default flavour;

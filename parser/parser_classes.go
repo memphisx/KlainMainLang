@@ -93,6 +93,16 @@ func constMemberName(expr ast.Expression) (string, bool) {
 // recognized — the sync protocol's `[Symbol.iterator]()` desugars to
 // `@@iterator`, dispatched by `for...of`/`for await...of` alongside the
 // structural `next(): T | null` shape.
+// symbolKeyName is x's well-known symbol name when x is `Symbol.<name>`.
+func symbolKeyName(x ast.Expression) string {
+	if me, ok := x.(*ast.MemberExpression); ok {
+		if id, ok := me.Object.(*ast.Identifier); ok && id.Name == "Symbol" {
+			return me.Property
+		}
+	}
+	return ""
+}
+
 func wellKnownSymbolMemberName(expr ast.Expression) (string, bool) {
 	// util.inspect's custom-inspection hook, `[inspect.custom]` (also
 	// reached as `util.inspect.custom` or its registry symbol): the method
@@ -184,7 +194,19 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	baseQualifier := ""
 	var baseTypeArgs []ast.TypeNode
 	var baseCall *ast.CallExpression
-	if p.check(lexer.EXTENDS) {
+	var baseExpr ast.Expression
+	if p.check(lexer.EXTENDS) && p.peekNth(1).Type != lexer.IDENT {
+		// Any other ClassHeritage (a LeftHandSideExpression): `extends
+		// null`, `extends (a, B)`, `extends [B][0]`: its value, bound
+		// before the class (ast.LowerBaseCalls).
+		p.advance() // extends
+		x, err := p.parseCallMember()
+		if err != nil {
+			return nil, err
+		}
+		baseExpr = x
+		baseClass = "$BaseExpr"
+	} else if p.check(lexer.EXTENDS) {
 		p.advance() // extends
 		baseTok, err := p.expect(lexer.IDENT)
 		if err != nil {
@@ -913,6 +935,7 @@ func (p *Parser) parseClassDecl(isAbstract bool, defaultName string) (*ast.Class
 	decl.BaseQualified = baseQualified
 	decl.BaseQualifier = baseQualifier
 	decl.BaseCall = baseCall
+	decl.BaseExpr = baseExpr
 	decl.TypeParams = typeParams
 	decl.TypeParamConstraints = typeParamConstraints
 	decl.TypeParamDefaults = typeParamDefaults

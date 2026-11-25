@@ -59,11 +59,14 @@ class __WptT {
   markFail(e: unknown): void {
     if (!this.failed) { this.failed = true; __wpt_fail = __wpt_fail + 1; __wpt_err(this.name, e); }
   }
+  cleanups: (() => void)[] = [];
   finish(): void {
     if (!this.finished) {
       this.finished = true;
       __wpt_pending = __wpt_pending - 1;
       if (!this.failed) { __wpt_pass = __wpt_pass + 1; }
+      // A test's cleanups run once it is done, as testharness.js runs them.
+      for (const f of this.cleanups) { try { f(); } catch (e) { __wpt_err(this.name + " cleanup", e); } }
     }
   }
   done(): void { this.finish(); }
@@ -85,13 +88,13 @@ class __WptT {
     return (): void => { self.markFail("unreached: " + msg); self.finish(); };
   }
   step_timeout(f: () => void, ms: number): void { setTimeout(f, ms); }
-  add_cleanup(f: () => void): void { }
+  add_cleanup(f: () => void): void { this.cleanups.push(f); }
 }
 
 function test(fn: (t: __WptT) => void, name: string = ""): void {
   const t: __WptT = new __WptT(name);
   __wpt_pending = __wpt_pending + 1; // finish() below counts pass/fail uniformly
-  try { fn(t); } catch (e) { t.markFail(e); }
+  try { fn.call(t, t); } catch (e) { t.markFail(e); }
   t.finish();
 }
 
@@ -104,7 +107,7 @@ function async_test(a: any, b: any = "", c: any = null): __WptT {
   __wpt_pending = __wpt_pending + 1;
   if (typeof a !== "function") return new __WptT(String(a));
   const t: __WptT = new __WptT(String(b));
-  try { a(t); } catch (e) { t.markFail(e); t.finish(); }
+  try { a.call(t, t); } catch (e) { t.markFail(e); t.finish(); }
   return t;
 }
 
@@ -112,13 +115,13 @@ function promise_test(fn: (t: __WptT) => any, name: string = ""): void {
   __wpt_pending = __wpt_pending + 1;
   const t: __WptT = new __WptT(name);
   let p: any = null;
-  try { p = fn(t); } catch (e) { t.markFail(e); t.finish(); return; }
+  try { p = fn.call(t, t); } catch (e) { t.markFail(e); t.finish(); return; }
   Promise.resolve(p).then(
     (): void => { t.finish(); },
     (e: any): void => { t.markFail(e); t.finish(); });
 }
 
-function setup(a: any = null, b: any = null): void { }
+function setup(a: any = null, b: any = null): void { if (typeof a === "function") a(); }
 function format_value(v: any): string { return "[value]"; }
 function generate_tests(a: any = null, b: any = null, c: any = null): void { }
 
@@ -134,16 +137,16 @@ function __wpt_same(a: any, b: any): boolean {
   return false;
 }
 
-function assert_equals(a: any, b: any, desc: string = ""): void {
+function assert_equals(a: any, b: any, desc: any = ""): void {
   if (!__wpt_same(a, b)) { throw new Error("assert_equals failed: " + desc); }
 }
-function assert_not_equals(a: any, b: any, desc: string = ""): void {
+function assert_not_equals(a: any, b: any, desc: any = ""): void {
   if (__wpt_same(a, b)) { throw new Error("assert_not_equals failed: " + desc); }
 }
-function assert_true(v: any, desc: string = ""): void {
+function assert_true(v: any, desc: any = ""): void {
   if (!v) { throw new Error("assert_true failed: " + desc); }
 }
-function assert_false(v: any, desc: string = ""): void {
+function assert_false(v: any, desc: any = ""): void {
   if (v) { throw new Error("assert_false failed: " + desc); }
 }
 // Generic over the element type so the arrays can be indexed and compared — a
@@ -153,90 +156,90 @@ function assert_false(v: any, desc: string = ""): void {
 // call whose argument is itself bare ` + "`any`" + ` (not a concrete T[]) can't infer T and
 // fails to compile — rare in this slice, where the arrays are concrete literals
 // or spreads of typed iterators; reported honestly when it happens.
-function assert_array_equals<T>(a: T[], b: T[], desc: string = ""): void {
+function assert_array_equals<T>(a: T[], b: T[], desc: any = ""): void {
   if (a.length !== b.length) { throw new Error("assert_array_equals length: " + desc); }
   for (let i: number = 0; i < a.length; i = i + 1) {
     if (a[i] !== b[i]) { throw new Error("assert_array_equals element: " + desc); }
   }
 }
-function assert_greater_than(a: number, b: number, desc: string = ""): void {
+function assert_greater_than(a: number, b: number, desc: any = ""): void {
   if (!(a > b)) { throw new Error("assert_greater_than failed: " + desc); }
 }
-function assert_greater_than_equal(a: number, b: number, desc: string = ""): void {
+function assert_greater_than_equal(a: number, b: number, desc: any = ""): void {
   if (!(a >= b)) { throw new Error("assert_greater_than_equal failed: " + desc); }
 }
-function assert_less_than(a: number, b: number, desc: string = ""): void {
+function assert_less_than(a: number, b: number, desc: any = ""): void {
   if (!(a < b)) { throw new Error("assert_less_than failed: " + desc); }
 }
-function assert_less_than_equal(a: number, b: number, desc: string = ""): void {
+function assert_less_than_equal(a: number, b: number, desc: any = ""): void {
   if (!(a <= b)) { throw new Error("assert_less_than_equal failed: " + desc); }
 }
-function assert_approx_equals(a: number, b: number, eps: number, desc: string = ""): void {
+function assert_approx_equals(a: number, b: number, eps: number, desc: any = ""): void {
   let d: number = a - b;
   if (d < 0) { d = -d; }
   if (d > eps) { throw new Error("assert_approx_equals failed: " + desc); }
 }
-function assert_regexp_match(s: string, re: RegExp, desc: string = ""): void {
+function assert_regexp_match(s: string, re: RegExp, desc: any = ""): void {
   if (!re.test(s)) { throw new Error("assert_regexp_match failed: " + desc); }
 }
-function assert_unreached(desc: string = ""): void {
+function assert_unreached(desc: any = ""): void {
   throw new Error("assert_unreached: " + desc);
 }
-function assert_throws_js(ctor: any, fn: () => void, desc: string = ""): void {
+function assert_throws_js(ctor: any, fn: () => void, desc: any = ""): void {
   let threw: boolean = false;
   try { fn(); } catch (e) { threw = true; }
   if (!threw) { throw new Error("assert_throws_js: did not throw: " + desc); }
 }
-function assert_throws_dom(name: any, fn: () => void, desc: string = ""): void {
+function assert_throws_dom(name: any, fn: () => void, desc: any = ""): void {
   let threw: boolean = false;
   try { fn(); } catch (e) { threw = true; }
   if (!threw) { throw new Error("assert_throws_dom: did not throw: " + desc); }
 }
-function assert_throws_exactly(expected: any, fn: () => void, desc: string = ""): void {
+function assert_throws_exactly(expected: any, fn: () => void, desc: any = ""): void {
   let threw: boolean = false;
   try { fn(); } catch (e) { threw = true; }
   if (!threw) { throw new Error("assert_throws_exactly: did not throw: " + desc); }
 }
-function assert_implements(cond: any, desc: string = ""): void {
+function assert_implements(cond: any, desc: any = ""): void {
   if (!cond) { throw new Error("assert_implements failed: " + desc); }
 }
-function assert_implements_optional(cond: any, desc: string = ""): void { }
-function assert_own_property(obj: any, prop: string, desc: string = ""): void { }
-function assert_props(a: any, b: any, desc: string = ""): void { }
+function assert_implements_optional(cond: any, desc: any = ""): void { }
+function assert_own_property(obj: any, prop: string, desc: any = ""): void { }
+function assert_props(a: any, b: any, desc: any = ""): void { }
 function assert_reports_exception(a: any, b: any = null, c: any = null): void { }
 // Reflection/precondition asserts (testharness.js) — best-effort or no-ops here,
 // same reasoning as assert_own_property: the object reflection they check isn't in
 // the typed model, but their absence would compile-fail whole files and mask the
 // real value assertions those files also run. Documented loosenesses (TDD-00203).
-function assert_class_string(obj: any, cls: any, desc: string = ""): void { }
-function assert_inherits(obj: any, name: any, desc: string = ""): void { }
-function assert_idl_attribute(obj: any, name: any, desc: string = ""): void { }
-function assert_readonly(obj: any, name: any, desc: string = ""): void { }
-function assert_not_own_property(obj: any, name: any, desc: string = ""): void { }
-function assert_object_equals(a: any, b: any, desc: string = ""): void { }
-function assert_in_array(v: any, arr: any, desc: string = ""): void { }
+function assert_class_string(obj: any, cls: any, desc: any = ""): void { }
+function assert_inherits(obj: any, name: any, desc: any = ""): void { }
+function assert_idl_attribute(obj: any, name: any, desc: any = ""): void { }
+function assert_readonly(obj: any, name: any, desc: any = ""): void { }
+function assert_not_own_property(obj: any, name: any, desc: any = ""): void { }
+function assert_object_equals(a: any, b: any, desc: any = ""): void { }
+function assert_in_array(v: any, arr: any, desc: any = ""): void { }
 function garbageCollect(): void { }
 // step_wait(cond) resolves once cond() is truthy, polling on the event loop —
 // the async precondition a few tests await before asserting. Resolves a boolean
 // (not void: a void-typed value is invalid IR here); callers ignore the value.
-function step_wait(cond: () => any, desc: string = "", timeout: number = 3000, interval: number = 10): Promise<boolean> {
+function step_wait(cond: () => any, desc: any = "", timeout: number = 3000, interval: number = 10): Promise<boolean> {
   return new Promise<boolean>((resolve: (v: boolean) => void): void => {
     const poll = (): void => { if (cond()) { resolve(true); } else { setTimeout(poll, interval); } };
     poll();
   });
 }
 
-function promise_rejects_js(t: __WptT, ctor: any, p: any, desc: string = ""): Promise<void> {
+function promise_rejects_js(t: __WptT, ctor: any, p: any, desc: any = ""): Promise<void> {
   return Promise.resolve(p).then(
     (): void => { throw new Error("promise_rejects_js: did not reject"); },
     (): void => { });
 }
-function promise_rejects_dom(t: __WptT, name: any, p: any, desc: string = ""): Promise<void> {
+function promise_rejects_dom(t: __WptT, name: any, p: any, desc: any = ""): Promise<void> {
   return Promise.resolve(p).then(
     (): void => { throw new Error("promise_rejects_dom: did not reject"); },
     (): void => { });
 }
-function promise_rejects_exactly(t: __WptT, expected: any, p: any, desc: string = ""): Promise<void> {
+function promise_rejects_exactly(t: __WptT, expected: any, p: any, desc: any = ""): Promise<void> {
   return Promise.resolve(p).then(
     (): void => { throw new Error("promise_rejects_exactly: did not reject"); },
     (): void => { });

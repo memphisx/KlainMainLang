@@ -12,6 +12,10 @@ import (
 // JavaScript's global object holds it: `var __kml_g_N = N;` ahead of the
 // program's first statement, every reference to the builtin renamed to it.
 // A call of `eval` keeps its name (a direct eval of the builtin).
+//
+// The global object's own property is the same binding: a write
+// `globalThis.N = v` (or `global.N`, `globalThis["N"]`) assigns it too, and
+// every such member read or write becomes the variable.
 func jsRebindAssignedBuiltins(prog *ast.Program, libStmts map[ast.Statement]string) {
 	assigned := map[string]bool{}
 	for _, st := range prog.Body {
@@ -23,6 +27,9 @@ func jsRebindAssignedBuiltins(prog *ast.Program, libStmts map[ast.Statement]stri
 			case *ast.AssignmentExpression:
 				if id, ok := x.Left.(*ast.Identifier); ok {
 					assigned[id.Name] = true
+				}
+				if name, ok := globalObjectMember(x.Left); ok {
+					assigned[name] = true
 				}
 			case *ast.UpdateExpression:
 				if id, ok := x.Arg.(*ast.Identifier); ok {
@@ -80,13 +87,82 @@ func jsRebindAssignedBuiltins(prog *ast.Program, libStmts map[ast.Statement]stri
 			return true
 		})
 	}
+	// eval is the resolver's (evalReassignment).
+	kept := refs[:0]
+	for _, id := range refs {
+		if id.Name != "eval" {
+			kept = append(kept, id)
+		}
+	}
+	refs = kept
 	for _, id := range refs {
 		if !directEval[id] {
 			names[id.Name] = true
 		}
 	}
-	if len(names) == 0 {
+	// `globalThis.N` of a builtin global N the program assigns: the
+	// global object's references (not the program's own binding of that
+	// name).
+	globalObj := func(x ast.Expression) bool {
+		id, ok := x.(*ast.Identifier)
+		if !ok || id.Name != "globalThis" && id.Name != "global" {
+			return false
+		}
+		sym, _ := b.Resolve(id)
+		if sym == nil {
+			return true // no declaration of it anywhere: the global object
+		}
+		for _, d := range sym.Declarations {
+			if own[d.Node] {
+				return false
+			}
+		}
+		return true
+	}
+	var members []ast.Expression
+	for _, st := range prog.Body {
+		if libStmts[st] != "" {
+			continue
+		}
+		ast.Inspect(st, func(n ast.Node) bool {
+			x, ok := n.(ast.Expression)
+			if !ok {
+				return true
+			}
+			name, ok := globalObjectMember(x)
+			if !ok || !assigned[name] || b.Globals == nil || b.Globals.Symbols.Get(name) == nil || !globalObj(globalObjectOf(x)) {
+				return true
+			}
+			if name == "eval" {
+				return true // the resolver's (evalReassignment)
+			}
+			members = append(members, x)
+			names[name] = true
+			return true
+		})
+	}
+	if len(names) == 0 && len(members) == 0 {
 		return
+	}
+	if len(members) > 0 {
+		at := map[ast.Expression]bool{}
+		for _, m := range members {
+			at[m] = true
+		}
+		var rw func(n ast.Node) ast.Node
+		rw = func(n ast.Node) ast.Node {
+			ast.RewriteChildren(n, rw)
+			if x, ok := n.(ast.Expression); ok && at[x] {
+				name, _ := globalObjectMember(x)
+				return ast.NewIdentifier("__kml_g_"+name, x.GetPos())
+			}
+			return n
+		}
+		for i, st := range prog.Body {
+			if libStmts[st] == "" {
+				prog.Body[i] = rw(st).(ast.Statement)
+			}
+		}
 	}
 	var seeds []ast.Statement
 	for _, n := range sortedSet(names) {
@@ -353,4 +429,33 @@ func jsDropReplacedAccessors(prog *ast.Program) {
 		cd.Methods = keep[k:]
 		return true
 	})
+}
+
+// globalObjectMember is the property name of `O.N` or `O["N"]` (O an
+// identifier), as globalObjectOf names O.
+func globalObjectMember(x ast.Expression) (string, bool) {
+	switch m := x.(type) {
+	case *ast.MemberExpression:
+		if _, ok := m.Object.(*ast.Identifier); ok && !m.Optional {
+			return m.Property, true
+		}
+	case *ast.IndexExpression:
+		if _, ok := m.Object.(*ast.Identifier); ok {
+			if lit, ok := m.Index.(*ast.StringLiteral); ok {
+				return lit.Value, true
+			}
+		}
+	}
+	return "", false
+}
+
+// globalObjectOf is the object of a globalObjectMember expression.
+func globalObjectOf(x ast.Expression) ast.Expression {
+	switch m := x.(type) {
+	case *ast.MemberExpression:
+		return m.Object
+	case *ast.IndexExpression:
+		return m.Object
+	}
+	return nil
 }

@@ -559,17 +559,55 @@ console.log("\u{48}\u{49}")
 }
 
 func TestE2EStringNonEscapeAndNonOctalDecimal(t *testing.T) {
-	// \A is a NonEscapeCharacter (→ "A"); \8 / \9 are NonOctalDecimalEscape (→ the digit).
+	// \A is a NonEscapeCharacter (→ "A"); \8 / \9 are NonOctalDecimalEscape
+	// (→ the digit), sloppy JavaScript's.
 	assertOutput(t, `
+console.log("\A\B\%")
+`, "AB%")
+	assertOutputCompatJS(t, `
 console.log("\A\B\%\8\9")
 `, "AB%89")
 }
 
+// Annex B's legacy forms are sloppy JavaScript's: there `\1` and `010`
+// read as octal.
 func TestE2EStringLegacyOctalEscape(t *testing.T) {
-	assertOutput(t, `
-console.log("\1\2\7" === "\x01\x02\x07")
-console.log("\08" === "\x008")
-`, "true\ntrue")
+	// (Node's own runs, as plain JavaScript: true true A89 / 9 511 9 9.5 -8 [ 8, 19 ])
+	assertOutputCompatJS(t, `
+console.log("\1\2\7" === "\x01\x02\x07", "\08" === "\x008", "\101\8\9");
+console.log(010 + 1, 0777, 08 + 1, 09.5, -010, [010, 019]);
+`, "true true A89\n9 511 9 9.5 -8 [ 8, 19 ]")
+}
+
+// Strict code rejects them: TypeScript with tsc's diagnostics, JavaScript
+// strict code (a directive, a module, a class body) with V8's SyntaxError.
+func TestE2ELegacyOctalStrictErrors(t *testing.T) {
+	for src, want := range map[string]string{
+		"const a = \"\\01\";":  "Octal escape sequences are not allowed. Use the syntax '\\x01'.",
+		"const a = \"\\101\";": "Use the syntax '\\x41'.",
+		"const a = \"\\8\";":   "Escape sequence '\\8' is not allowed.",
+		"const a = 010;":       "Octal literals are not allowed. Use the syntax '0o10'.",
+		"const a = 08;":        "Decimals with leading zeros are not allowed.",
+	} {
+		if _, err := parseAndCompile(src + "\nconsole.log(a);"); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want %q, got %v", src, want, err)
+		}
+	}
+	for src, want := range map[string]string{
+		"\"use strict\";\nconst a = \"\\01\";":        "Octal escape sequences are not allowed in strict mode.",
+		"\"use strict\";\nconst a = \"\\9\";":         "\\8 and \\9 are not allowed in strict mode.",
+		"\"use strict\";\nconst a = 010;":             "Octal literals are not allowed in strict mode.",
+		"function f() { \"use strict\"; return 08; }": "Decimals with leading zeros are not allowed in strict mode.",
+		"class C { m() { return \"\\07\"; } }":        "Octal escape sequences are not allowed in strict mode.",
+		"export const a = 07;":                        "Octal literals are not allowed in strict mode.",
+	} {
+		if _, err := parseCompatJS(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want %q, got %v", src, want, err)
+		}
+	}
+	if _, err := parseCompatJS("const a = \"\\0\" + 0 + 0.5 + 0o7;"); err != nil {
+		t.Errorf("the NUL escape and modern literals are strict code's: %v", err)
+	}
 }
 
 func TestE2EStringLineContinuation(t *testing.T) {
@@ -808,4 +846,33 @@ console.log("abc".replace(/b/, "[$`+"`"+`|$']"));
 console.log("abc".split(/(?:)/), "a1b".split(/(\d)/));
 console.log("x".match(/(y)?x/));
 `)
+}
+
+// replaceAll with an empty search matches at every UTF-16 unit, a pair's
+// halves apart: the `$` backquote and `$'` patterns may end or start
+// inside the pair.
+func TestE2EReplaceAllEmptyAstralSubstTS(t *testing.T) {
+	assertSameAsNode(t, `
+const s = "a\u{1F600}b";
+console.log(JSON.stringify(s.replaceAll("", "[$`+"`"+`]")));
+console.log(JSON.stringify(s.replaceAll("", "[$']")));
+console.log(JSON.stringify(s.replaceAll("", "-")), JSON.stringify("xy".replaceAll("", "<$`+"`"+`>")));
+`)
+}
+
+// An untagged template rejects a legacy octal or \8/\9 escape in sloppy
+// code too; `\0` alone is the NUL escape.
+func TestE2ETemplateLegacyEscapeIsError(t *testing.T) {
+	for src, want := range map[string]string{
+		"const a = `a\\01b`;":      "Octal escape sequences are not allowed in template strings.",
+		"const a = `x${1}\\101`;":  "Octal escape sequences are not allowed in template strings.",
+		"const a = `\\8`;":         "\\8 and \\9 are not allowed in template strings.",
+		"const a = `${`\\07`}`;":   "Octal escape sequences are not allowed in template strings.",
+		"const a = `\\01${`ok`}`;": "Octal escape sequences are not allowed in template strings.",
+	} {
+		if _, err := parseCompatJS(src); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%s: want %q, got %v", src, want, err)
+		}
+	}
+	assertOutputCompatJS(t, "console.log(`a\\0b`.length, `${`x`}y`)", "3 xy")
 }

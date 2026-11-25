@@ -204,3 +204,59 @@ const vi: SetIterator<number> = new Set([4, 5]).values();
 for (const v of vi) console.log(v);
 `)
 }
+
+// A script's top-level interface named as a builtin one declares more of
+// that global interface (TypeScript merges it): the members type-check,
+// and a call reads what the program put on the prototype — an array's,
+// a string's (through `any` too), a number's, its result typed as
+// declared — against Node.
+func TestE2EScriptGlobalInterfaceAugmentation(t *testing.T) {
+	assertSameAsNode(t, `
+interface Array<T> { second(): T | undefined; }
+Object.defineProperty(Array.prototype, "second", { value: function (this: any[]) { return this[1]; }, configurable: true, writable: true });
+const xs = [1, 2, 3];
+const n: number | undefined = xs.second();
+console.log(n, ["a"].second());
+interface String { shout(): string; }
+(String.prototype as any).shout = function (this: string) { return this.toUpperCase() + "!"; };
+const s = "hi";
+console.log(s.shout(), "yo".shout().length);
+const h: any = "hey";
+console.log(h.shout());
+interface Number { twice(): number; }
+(Number.prototype as any).twice = function (this: number) { return this * 2; };
+const k = 21;
+console.log(k.twice());
+`)
+}
+
+// A module's `declare global { … }` declares the global scope's types: an
+// interface merging with the builtin of its name, a global type alias;
+// a value member stays the environment's — against Node.
+func TestE2EDeclareGlobalAugmentation(t *testing.T) {
+	assertSameAsNode(t, `
+export {};
+declare global {
+  interface Array<T> { last(): T | undefined; }
+  interface String { wrap(s: string): string; }
+  type Pair = [number, number];
+  var appName: string;
+}
+Object.defineProperty(Array.prototype, "last", { value: function (this: any[]) { return this[this.length - 1]; }, configurable: true, writable: true });
+(String.prototype as any).wrap = function (this: string, s: string) { return s + this + s; };
+const p: Pair = [1, 2];
+console.log([4, 5, 6].last(), "x".wrap("*"), p, ([] as string[]).last());
+`)
+}
+
+// A `declare global` value member is the environment's global: a read, a
+// call and typeof go to the global object, against Node.
+func TestE2EDeclareGlobalValues(t *testing.T) {
+	assertSameAsNode(t, `
+export {};
+declare global { var appName: string; function hello(): string; var absent: number | undefined; }
+(globalThis as any).appName = "kml";
+(globalThis as any).hello = () => "hi";
+console.log(appName, hello(), typeof appName, typeof absent);
+`)
+}

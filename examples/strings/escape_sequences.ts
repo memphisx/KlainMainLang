@@ -16,11 +16,9 @@ console.log("\u0041\u0042\u0043 World")   // ABC World
 console.log("\u{1F680} launch")         // 🚀 launch
 
 // A backslash before a non-escape character is just that character
-// (NonEscapeCharacter), and \8 / \9 are the digits themselves.
-console.log("\A\B\C \8\9")              // ABC 89
-
-// Legacy octal escapes (Annex B): \0–\377.
-console.log("\101\102\103")             // ABC (0o101 = 65 = 'A', ...)
+// (NonEscapeCharacter). The Annex B legacy octal escapes and `\8`/`\9` are
+// sloppy JavaScript's only: see examples/jsmode/legacy_octal.js.
+console.log("\A\B\C")                   // ABC
 
 // A backslash at end of line continues the string (LineContinuation).
 console.log("joined \

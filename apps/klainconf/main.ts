@@ -31,7 +31,7 @@ class Row {
   updated: number = 0;
 }
 
-const dir: string = process.argv[1] ?? ".conformance-out";
+const dir: string = process.argv[2] ?? ".conformance-out";
 
 // ── controller state (docs/testing/PROGRESS-DASHBOARD.md) ──────────────────
 // One suite at a time — conformance runs are isolation-sensitive (concurrent
@@ -368,7 +368,8 @@ function view(rows: Row[], cursor: number, details: boolean, tick: number) {
 let rows: Row[] = readRows();
 let cursor = 0;
 let details = false;
-enter();
+// A snapshot stays on the normal screen; the live view takes the alternate.
+if (process.stdin.isTTY) enter();
 render(view(rows, cursor, details, 0));
 
 function clampCursor(): void {
@@ -377,7 +378,7 @@ function clampCursor(): void {
 }
 
 if (!process.stdin.isTTY) {
-  leave();
+  process.stdout.write("\n");
 } else {
   process.stdin.setRawMode(true);
   process.on("SIGWINCH", () => {

@@ -140,6 +140,48 @@ setTimeout(() => {
 	}
 }
 
+// TestE2EGCModeWeakMapEphemeron: a WeakMap entry is an ephemeron, as in
+// Node. A value that references its own key does not keep the key alive, so
+// the keys of such entries are collected (FinalizationRegistry sees them,
+// finalized even though each reaches itself through its value), while a
+// live key keeps its value. Conservative scanning may pin a few keys, so most
+// of 2000, not all, must be collected.
+func TestE2EGCModeWeakMapEphemeron(t *testing.T) {
+	const src = `
+class K { pad: number[] = new Array(100).fill(1); }
+const wm = new WeakMap<K, { k: K }>();
+let collected = 0;
+const reg = new FinalizationRegistry<number>(() => { collected++; });
+function round(): void {
+  for (let i = 0; i < 2000; i++) { const k = new K(); wm.set(k, { k }); reg.register(k, i); }
+}
+const live = new K();
+wm.set(live, { k: live });
+round();
+let n = 0;
+const tick = (): void => {
+  gc();
+  if (++n < 20) { setTimeout(tick, 5); return; }
+  console.log(collected >= 1000);
+  console.log(wm.get(live)!.k === live);
+};
+setTimeout(tick, 0);
+`
+	dir := tempDir(t)
+	srcFile := filepath.Join(dir, "prog.ts")
+	if err := os.WriteFile(srcFile, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	binFile := buildGCProgram(t, dir, srcFile)
+	out, err := exec.Command(binFile).CombinedOutput()
+	if err != nil {
+		t.Fatalf("run: %v\n%s", err, out)
+	}
+	if got := strings.TrimRight(string(out), "\n"); got != "true\ntrue" {
+		t.Errorf("got %q, want %q", got, "true\ntrue")
+	}
+}
+
 // TestE2EGCModeBoundsMemory checks that peak RSS stays far below the ~216MB
 // actually churned by gcChurnProgram — proof that collections actually
 // happened, not just that the program didn't crash. /usr/bin/time's report

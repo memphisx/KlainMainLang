@@ -151,3 +151,21 @@ console.log(all.indexOf("content-type: application/json") > -1)
 `, srv.URL)
 	assertOutput(t, src, "true\napplication/json\napplication/json\ntrue")
 }
+
+func TestE2EXHRStatusText(t *testing.T) {
+	// statusText is "" until a response arrives, then the status line's
+	// reason phrase; a network failure leaves it "".
+	srv := newFetchTestServer(t)
+	src := fmt.Sprintf(`
+const xhr = new XMLHttpRequest()
+console.log(JSON.stringify(xhr.statusText))
+xhr.open("GET", "%s/flat", false)
+xhr.send()
+console.log(xhr.status, xhr.statusText)
+const bad = new XMLHttpRequest()
+bad.open("GET", "http://127.0.0.1:1/", false)
+bad.send()
+console.log(bad.status, JSON.stringify(bad.statusText))
+`, srv.URL)
+	assertOutput(t, src, "\"\"\n200 OK\n0 \"\"")
+}

@@ -190,7 +190,7 @@ func (e *Emitter) emitFunctionDeclAs(decl *ast.FunctionDeclaration, llvmName str
 		if taskBody {
 			// A may-suspend body: coroHdl slot only; emitTaskEpilogue marshals it
 			// into the running task's promise, the trampoline settles/rejects it.
-			e.ensureTaskRuntime()
+			e.ensureUnhandledRejections()
 			e.emitAsyncPrologue()
 			e.asyncAdoptSlot = adoptSlotPending
 		} else {
@@ -810,6 +810,9 @@ func (e *Emitter) synthesizeArgumentsObject(decl *ast.FunctionDeclaration, sig F
 	e.emitPrefixWordAddr(wordp, hdr)
 	e.heapStore("i64", fmt.Sprint(e.argumentsHeaderWord()), wordp, 8)
 	e.define("arguments", Symbol{Ptr: slot, Ty: ArrayOf(TypeAny)})
+	if err := e.defineArgumentsCallee(decl); err != nil {
+		return err
+	}
 	if e.compatJS() && reassignsArguments(decl.Params, decl.Body) {
 		// Sloppy code may rebind it to any value (`arguments = "x"`, or a
 		// `var arguments = …`): it is held as any.
@@ -1195,6 +1198,21 @@ func (e *Emitter) letrecEmitCapturingNested(name string) (bool, error) {
 	return false, nil
 }
 
+// letrecCapturingNestedPending reports whether letrecEmitCapturingNested
+// would emit name: a capturing nested function declaration of the current
+// scope, not yet emitted.
+func (e *Emitter) letrecCapturingNestedPending(name string) bool {
+	if len(e.nestedFuncScopes) == 0 {
+		return false
+	}
+	for fd := range e.nestedFuncScopes[len(e.nestedFuncScopes)-1].capturing {
+		if fd.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // popNestedFuncScope removes the most recently pushed nestedFuncScope frame,
 // and the parallel enclosingCapturables frame (TDD-00129 Stage 1).
 func (e *Emitter) popNestedFuncScope() {
@@ -1357,7 +1375,7 @@ func (e *Emitter) promoteCaptureToCell(name string, ty Type, srcPtr string, isCo
 		e.updateSymbolInPlace(name, Symbol{Ptr: newCell, Ty: ty, Boxed: true, IsConst: isConst})
 		return newCell
 	}
-	e.heapMallocInto(newCell, allocCell, fmt.Sprint(ty.Align()))
+	e.heapMallocInto(newCell, cellAllocKind(ty), fmt.Sprint(ty.Align()))
 	if e.varsBeingInitialized[name] {
 		// Seed with the type's deterministic default (a body-block store, since
 		// newCell is a body register — emitVarSlotDefault targets the entry block).
@@ -1976,6 +1994,7 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 	// An untyped binding initialized with an array (or object) and then
 	// combined arithmetically (`xs += 2`) holds a string or number after.
 	refInit := map[string]bool{}
+	strInit := map[string]bool{} // a string's, compound-assigned with arithmetic
 	note := func(name string, t Type) {
 		if !untyped[name] || !compatJS {
 			return
@@ -2029,6 +2048,9 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 			if (it.IsArray() || it.IsObject()) && !it.IsDynamic() && !it.IsDate() {
 				refInit[v.Name] = true
 			}
+			if isStringTy(it) && !it.IsDynamic() {
+				strInit[v.Name] = true
+			}
 		}
 	}
 	// noteAssign records a name assignment for both the cross-kind (compat=js)
@@ -2047,6 +2069,9 @@ func (e *Emitter) crossTypeWidenedBindings(body []ast.Statement) map[string]bool
 		}
 		if compatJS && (dateInit[name] || refInit[name]) && untyped[name] && op != "=" && op != "??=" && op != "||=" && op != "&&=" {
 			dateArith[name] = true
+		}
+		if compatJS && strInit[name] && untyped[name] && numericCompoundOp(op) {
+			dateArith[name] = true // `s -= 1` makes a number
 		}
 		if nullInit[name] {
 			logical := op == "??=" || op == "||=" || op == "&&="
@@ -2373,7 +2398,7 @@ func (e *Emitter) inferEmptyArrayElemTypes(body []ast.Statement) map[string]Type
 var insertingArgs = map[string]int{"push": 0, "unshift": 0, "splice": 2}
 
 // storesOtherKind reports whether body stores into the array binding name
-// (an index write, a push, unshift or splice insert, outside a nested
+// (an index write, a push, unshift or splice insert, a fill, outside a nested
 // function) a value the checker types as another representation than elem.
 func storesOtherKind(o *frontOracle, body []ast.Statement, name string, elem Type) bool {
 	other := func(x ast.Expression) bool {
@@ -2413,6 +2438,9 @@ func storesOtherKind(o *frontOracle, body []ast.Statement, name string, elem Typ
 							if other(x.Args[i]) {
 								found = true
 							}
+						}
+						if m.Property == "fill" && (len(x.Args) == 0 || other(x.Args[0])) {
+							found = true // (an omitted value fills undefined)
 						}
 					}
 				}
@@ -2607,7 +2635,7 @@ func (e *Emitter) gatherCaptures(af *ast.ArrowFunction) ([]CapturedVar, error) {
 		// top-level function name. Capturing it would box a *second* copy, so a
 		// mutation made through the global elsewhere wouldn't be seen; skip it and
 		// let the body resolve the name to the one global.
-		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
+		if e.unshadowedGlobal(name) {
 			continue
 		}
 		sym, found := e.lookup(name)
@@ -2670,7 +2698,7 @@ func (e *Emitter) gatherGeneratorCaptures(fd *ast.FunctionDeclaration) []Capture
 	scanStmtsFV(e.genPatternInits[fd], bound, refs) // its destructured parameters
 	var caps []CapturedVar
 	for _, name := range sortedSet(refs) {
-		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
+		if e.unshadowedGlobal(name) {
 			continue
 		}
 		if sym, found := e.lookup(name); found {
@@ -3526,6 +3554,15 @@ func (e *Emitter) emitArrowFunctionWithHints(af *ast.ArrowFunction, hints []Type
 		retTy = TypeVoid // block body with no reachable return (e.g. forEach callback)
 	}
 
+	if af.RetType == nil && !af.IsAsync {
+		var body ast.Node = af.Block
+		if af.Body != nil {
+			body = af.Body
+		}
+		if e.returnsProxyRead(body) {
+			retTy = TypeAny // a get trap's result, whatever the target declares
+		}
+	}
 	// Returns of differently shaped object literals (one setting an optional
 	// field) build the contextual return's one object type, as if annotated.
 	if af.RetType == nil && !retTy.IsPromise() {
@@ -3853,7 +3890,7 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		// A module global (TDD-00093) is referenced directly, never captured —
 		// otherwise a mutation the body makes (`count++`) would hit a boxed copy
 		// instead of the one global (same reasoning as gatherCaptures).
-		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
+		if e.unshadowedGlobal(name) {
 			continue
 		}
 		sym, found := e.lookup(name)
@@ -3986,6 +4023,11 @@ func (e *Emitter) emitFunctionExpression(fe *ast.FunctionExpression, hints []Typ
 		if refs[fe.Name] {
 			caps = append(caps, CapturedVar{Name: fe.Name, Ty: selfTy, IsSelf: true})
 		}
+	}
+	// Its arguments object's callee is the closure itself (defineArgumentsCallee).
+	if !fe.IsAsync && !fe.IsGenerator && fe.Body != nil && len(fe.Body.Body) > 0 && paramsUseArguments(fe.Params, fe.Body.Body) &&
+		e.argumentsReflected() && !e.argsStrictBodies[fe.Body.Body[0]] && !reassignsArguments(fe.Params, fe.Body) {
+		caps = append(caps, CapturedVar{Name: argsCalleeName, Ty: selfTy, IsSelf: true})
 	}
 
 	// Emit the LLVM function for this closure. Reuse emitClosureFunc by
@@ -4345,7 +4387,6 @@ func (e *Emitter) emitClosureCall(sym Symbol, args []ast.Expression, pos ast.Pos
 		tdzL, okL := e.freshLabel("tdz.throw"), e.freshLabel("tdz.ok")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, tdzL, okL))
 		e.emitLabel(tdzL)
-		e.ensureExceptionHelpers()
 		name := unmangleTopLevelName(sym.ForwardName)
 		errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+name+"' before initialization"), e.internString("ReferenceError"))
 		e.excThrow(errObj)
@@ -5346,8 +5387,12 @@ func (e *Emitter) emitRequireCallable(v Value) error {
 		return err
 	}
 	e.ensureDynJSONC()
-	e.declareFn("__kml_require_callable", "declare void @__kml_require_callable(i64, "+irPtr+")")
-	e.emitInstr(fmt.Sprintf("call void @__kml_require_callable(i64 %s, "+irPtr+" %s)", v.Ref, t.Ref))
+	fn := "__kml_require_callable"
+	if e.plainCallableMsg {
+		fn = "__kml_require_callable_plain"
+	}
+	e.declareFn(fn, "declare void @"+fn+"(i64, "+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @%s(i64 %s, "+irPtr+" %s)", fn, v.Ref, t.Ref))
 	return nil
 }
 
@@ -5941,7 +5986,6 @@ func (e *Emitter) emitForwardCheck(sym Symbol, name string) {
 	tdzL, okL := e.freshLabel("tdz.throw"), e.freshLabel("tdz.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", dead, tdzL, okL))
 	e.emitLabel(tdzL)
-	e.ensureExceptionHelpers()
 	errObj := e.buildErrorObj(errorKindIDs["ReferenceError"], e.internString("Cannot access '"+unmangleTopLevelName(name)+"' before initialization"), e.internString("ReferenceError"))
 	e.excThrow(errObj)
 	e.emitTerminator("unreachable")
@@ -6982,4 +7026,259 @@ func (e *Emitter) patternForwardFill(st ast.Statement) error {
 		e.define(name, e.forwardInitialized(fsym))
 	}
 	return nil
+}
+
+// arrayStaticCtorCall is `Array.from.call(C, …)`, `Array.of.call(C, …)` or
+// `Array.fromAsync.call(C, …)` (or `.apply` with an array literal): the
+// static with C as its `this`, which builds `new C(…)`
+// (lib/node/kml_array_ctor.ts's …Ctor forms). False for the global Array
+// shadowed, a spread argument, or the helper not linked.
+func (e *Emitter) arrayStaticCtorCall(fnExpr ast.Expression, method string, args []ast.Expression, pos ast.Pos) (ast.Expression, bool) {
+	me, ok := fnExpr.(*ast.MemberExpression)
+	if !ok || len(args) == 0 {
+		return nil, false
+	}
+	if id, ok := me.Object.(*ast.Identifier); !ok || id.Name != "Array" || e.isShadowedByLocal("Array") {
+		return nil, false
+	}
+	helper := map[string]string{"from": "__kml_Array_fromCtor", "of": "__kml_Array_ofCtor", "fromAsync": "__kml_Array_fromAsyncCtor"}[me.Property]
+	if helper == "" {
+		return nil, false
+	}
+	fn, ok := e.globalLinks[helper]
+	if !ok {
+		return nil, false
+	}
+	rest := args[1:]
+	if method == "apply" {
+		rest = nil
+		if len(args) > 1 {
+			lit, ok := args[1].(*ast.ArrayLiteral)
+			if !ok {
+				return nil, false
+			}
+			rest = lit.Elements
+		}
+	}
+	for _, a := range rest {
+		if _, spread := a.(*ast.SpreadElement); spread {
+			return nil, false
+		}
+	}
+	list := ast.NewArrayLiteral(rest, pos)
+	e.lowered(list)
+	callArgs := []ast.Expression{args[0], list}
+	return ast.NewCallExpression(ast.NewIdentifier(fn, pos), callArgs, pos), true
+}
+
+// argsCalleeName and argsStrictName are the hidden bindings beside a
+// function's arguments object for its own `callee` property: the function
+// itself (sloppy code), or the mark that it is strict code, whose callee is
+// an accessor that throws.
+const (
+	argsCalleeName = "__kml_args_callee"
+	argsStrictName = "__kml_args_strict"
+)
+
+// argumentsReflected reports whether the program reads `callee` (a member
+// or a string key) or reflects on `arguments` itself (its own keys or
+// descriptors): only then does a function record its callee.
+func (e *Emitter) argumentsReflected() bool {
+	if e.argsReflectDone {
+		return e.argsReflect
+	}
+	e.argsReflectDone = true
+	if e.prog == nil {
+		return false
+	}
+	for _, st := range e.prog.Body {
+		if e.fileIsLib(e.prog.StmtFiles[st]) {
+			continue
+		}
+		ast.Inspect(st, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.MemberExpression:
+				e.argsReflect = e.argsReflect || x.Property == "callee"
+			case *ast.StringLiteral:
+				e.argsReflect = e.argsReflect || x.Value == "callee"
+			case *ast.CallExpression:
+				for _, a := range x.Args {
+					if id, ok := a.(*ast.Identifier); ok && id.Name == "arguments" {
+						e.argsReflect = true
+					}
+				}
+				if m, ok := x.Callee.(*ast.MemberExpression); ok {
+					if id, ok := m.Object.(*ast.Identifier); ok && id.Name == "arguments" && m.Property == "hasOwnProperty" {
+						e.argsReflect = true
+					}
+				}
+			}
+			return !e.argsReflect
+		})
+		if e.argsReflect {
+			break
+		}
+	}
+	if e.argsReflect {
+		e.argsStrictBodies = map[ast.Statement]bool{}
+		for n := range strictFunctions(e.prog, cjsFiles(e.prog)) {
+			var b *ast.BlockStatement
+			switch f := n.(type) {
+			case *ast.FunctionDeclaration:
+				b = f.Body
+			case *ast.FunctionExpression:
+				b = f.Body
+			}
+			if b != nil && len(b.Body) > 0 {
+				e.argsStrictBodies[b.Body[0]] = true
+			}
+		}
+	}
+	return e.argsReflect
+}
+
+// defineArgumentsCallee binds decl's callee beside its arguments object
+// (argsCalleeName, argsStrictName) when the program reads one.
+func (e *Emitter) defineArgumentsCallee(decl *ast.FunctionDeclaration) error {
+	if !e.argumentsReflected() || decl.Body == nil || len(decl.Body.Body) == 0 || reassignsArguments(decl.Params, decl.Body) {
+		return nil
+	}
+	if e.argsStrictBodies[decl.Body.Body[0]] {
+		e.define(argsStrictName, Symbol{Ptr: "null", Ty: TypeAny})
+		return nil
+	}
+	if _, ok := e.lookup(argsCalleeName); ok {
+		return nil // a function expression's own closure, captured as itself
+	}
+	self, err := e.emitExpr(ast.NewIdentifier(decl.Name, decl.GetPos()))
+	if err != nil {
+		return nil // a function with no value of its own: no callee recorded
+	}
+	if !self.Ty.IsDynamic() {
+		if self, err = e.emitBoxValue(self); err != nil {
+			return err
+		}
+	}
+	cs := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", cs))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", self.Ref, cs))
+	e.define(argsCalleeName, Symbol{Ptr: cs, Ty: TypeAny})
+	return nil
+}
+
+// ownArguments reports whether x is the running function's own arguments
+// object (not a binding of that name), with its callee recorded. A
+// function that rebinds `arguments` records none: the name may hold
+// another value.
+func (e *Emitter) ownArguments(x ast.Expression) bool {
+	id, ok := x.(*ast.Identifier)
+	if !ok || id.Name != "arguments" || !e.argumentsReflected() {
+		return false
+	}
+	if _, ok := e.lookup("arguments"); !ok {
+		return false
+	}
+	_, c := e.lookup(argsCalleeName)
+	_, s := e.lookup(argsStrictName)
+	return c || s
+}
+
+// argumentsCalleeExpr is the arguments object's `callee`: the function
+// (sloppy), or nil for strict code, whose accessor throws.
+func (e *Emitter) argumentsCalleeExpr(pos ast.Pos) ast.Expression {
+	if _, strict := e.lookup(argsStrictName); strict {
+		return nil
+	}
+	return ast.NewIdentifier(argsCalleeName, pos)
+}
+
+// argumentsReflectCall is a reflection call on the running function's own
+// arguments object (`Object.getOwnPropertyNames(arguments)`,
+// `Reflect.ownKeys`, `getOwnPropertySymbols`, `getOwnPropertyDescriptor`,
+// `Object.hasOwn`, `arguments.hasOwnProperty(k)`): the library forms that
+// add its own callee and Symbol.iterator (lib/node/kml_array.ts).
+func (e *Emitter) argumentsReflectCall(ex *ast.CallExpression) (ast.Expression, bool) {
+	me, ok := ex.Callee.(*ast.MemberExpression)
+	if !ok || me.Optional {
+		return nil, false
+	}
+	pos := ex.GetPos()
+	call := func(helper string, args ...ast.Expression) (ast.Expression, bool) {
+		fn, ok := e.globalLinks[helper]
+		if !ok {
+			return nil, false
+		}
+		return ast.NewCallExpression(ast.NewIdentifier(fn, pos), args, pos), true
+	}
+	if me.Property == "hasOwnProperty" && e.ownArguments(me.Object) && len(ex.Args) == 1 {
+		return call("__kml_args_hasOwn", me.Object, ex.Args[0])
+	}
+	owner, ok := me.Object.(*ast.Identifier)
+	if !ok || len(ex.Args) == 0 || !e.ownArguments(ex.Args[0]) || e.isShadowedByLocal(owner.Name) {
+		return nil, false
+	}
+	a := ex.Args[0]
+	r, ok := argumentsReflectors[owner.Name+"."+me.Property]
+	if !ok || r.args != len(ex.Args) && r.args != 0 {
+		return nil, false
+	}
+	args := []ast.Expression{a}
+	if r.args == 2 {
+		args = append(args, ex.Args[1])
+	}
+	if r.desc {
+		callee := e.argumentsCalleeExpr(pos)
+		strict := callee == nil
+		if strict {
+			callee = ast.NewNullLiteral(true, pos)
+		}
+		args = append(args, callee, ast.NewBooleanLiteral(strict, pos))
+	}
+	return call(r.helper, args...)
+}
+
+// argumentsReflectors are argumentsReflectCall's library forms, by the
+// builtin's name: the helper, the arguments it takes (0: any number, the
+// first passed), and whether it describes (the callee and strictness
+// follow).
+var argumentsReflectors = map[string]struct {
+	helper string
+	args   int
+	desc   bool
+}{
+	"Object.getOwnPropertyNames":       {"__kml_args_names", 0, false},
+	"Object.getOwnPropertySymbols":     {"__kml_args_symbols", 0, false},
+	"Reflect.ownKeys":                  {"__kml_args_ownKeys", 0, false},
+	"Object.hasOwn":                    {"__kml_args_hasOwn", 2, false},
+	"Object.getOwnPropertyDescriptor":  {"__kml_args_desc", 2, true},
+	"Reflect.getOwnPropertyDescriptor": {"__kml_args_desc", 2, true},
+}
+
+// emitFunctionBindProps is fn.bind(…), and, in a program that can redefine
+// a function's `length` or `name` (kml_object.ts links the helper then),
+// the bound function's own `length` and `name` read from the target as
+// bind does (an accessor's throw is bind's).
+func (e *Emitter) emitFunctionBindProps(fnExpr ast.Expression, args []ast.Expression, pos ast.Pos) (Value, error) {
+	helper, ok := e.globalLinks["__kml_Function_boundProps"]
+	if !ok || anySpread(args) {
+		return e.emitFunctionBind(fnExpr, args, pos)
+	}
+	target, err := e.receiverTemp(fnExpr)
+	if err != nil {
+		return Value{}, err
+	}
+	bound, err := e.emitFunctionBind(target, args, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	boundExpr := e.bindValue(bound, pos)
+	n := len(args) - 1
+	if n < 0 {
+		n = 0
+	}
+	call := ast.NewCallExpression(ast.NewIdentifier(helper, pos), []ast.Expression{boundExpr, target, ast.NewNumberLiteral(strconv.Itoa(n), pos)}, pos)
+	if _, err := e.emitExpr(call); err != nil {
+		return Value{}, err
+	}
+	return bound, nil
 }

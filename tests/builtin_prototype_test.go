@@ -234,3 +234,297 @@ console.log([1, null].map(Object).length, typeof [5].map(Object)[0]);
 const D: any = Object; console.log([1, null, "s"].map(D).map((w: any) => typeof w), [true].map(Object)[0] instanceof Boolean);
 `)
 }
+
+// A promise's `constructor` is Promise.prototype's: Promise, or an accessor
+// defined there, which await's and for await's PromiseResolve read too.
+func TestE2EPromiseProtoConstructorJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+const p = Promise.resolve(1);
+console.log(p.constructor === Promise);
+let n = 0;
+Object.defineProperty(Promise.prototype, "constructor", { get() { n++; return Promise; }, configurable: true });
+console.log(p.constructor === Promise, n);
+(async () => {
+  await Promise.resolve(1);
+  console.log("a", n);
+  for await (const x of [Promise.resolve(2)]) { console.log("b", n, x); }
+  console.log("c", n);
+  Object.defineProperty(Promise.prototype, "constructor", { get() { throw new Error("boom"); }, configurable: true });
+  try { await Promise.resolve(3); console.log("no"); } catch (e) { console.log("caught", e.message); }
+})();
+`)
+}
+
+// Array.prototype's data properties and accessors (run with the array as
+// this) as an array's property reads find them.
+func TestE2EArrayProtoPropertiesJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+Object.defineProperty(Array.prototype, "zz", { get() { return this.length + 9; }, configurable: true });
+Array.prototype.yy = 5;
+Object.defineProperty(Array.prototype, "ww", { value: 4, configurable: true });
+Array.prototype.sum = function () { return this.reduce((a, b) => a + b, 0); };
+const a = [1, 2];
+const b = [1];
+console.log(a.zz, a.yy, b.zz, b.yy, [].zz, a.ww, a.sum());
+`)
+}
+
+// A constructor function's `prototype` may hold a primitive or null: it
+// reads back as assigned, and `new F` then makes an Object.prototype
+// object.
+func TestE2EPrimitiveFunctionPrototypeJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+function F() {}
+F.prototype = 1;
+console.log(F.prototype, Object.getPrototypeOf(new F()) === Object.prototype);
+function G() {}
+G.prototype += 1;
+console.log(typeof G.prototype, G.prototype);
+function H() {}
+H.prototype = null;
+console.log(H.prototype, Object.getPrototypeOf(new H()) === Object.prototype);
+function K() { this.a = 1; }
+K.prototype.m = function () { return this.a; };
+console.log(new K().m(), Object.getPrototypeOf(new K()) === K.prototype);
+K.prototype = { m() { return 9; } };
+console.log(new K().m());
+`)
+}
+
+// A static object (a class instance, an object literal of a static type) as
+// a dynamic object's prototype: its fields, added properties and class
+// members read through the chain, accessors with the receiver as this.
+func TestE2EObjectCreateStaticObjectJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+class C { constructor() { this.x = 1; } m() { return this.x + 1; } get g() { return this.x * 10; } }
+const c = new C();
+const o = Object.create(c);
+console.log(o.x, o.m(), Object.getPrototypeOf(o) === c, o instanceof C);
+o.x = 5;
+console.log(o.x, c.x, o.m(), o.g, "m" in o, Object.keys(o), o.hasOwnProperty("m"));
+const q = Object.create(o);
+console.log(q.x, q.m(), q instanceof C, Object.getPrototypeOf(Object.getPrototypeOf(q)) === c);
+const lit = { a: 1, b: "s" };
+const p = Object.create(lit); lit.a = 2;
+p.c = 3;
+console.log(p.a, p.b, p.c, Object.keys(p), "a" in p, Object.setPrototypeOf({}, c).x);
+`)
+}
+
+func TestE2EObjectCreateStaticObjectTS(t *testing.T) {
+	assertOutput(t, `
+class C { x = 1; m(): number { return this.x + 1; } }
+const c = new C();
+const o: C = Object.create(c);
+console.log(o.x, o.m(), Object.getPrototypeOf(o) === c, o instanceof C);
+`, "1 2 true true\n")
+}
+
+// A class extending a host record (Response, Request, XMLHttpRequest):
+// its instance is the record, after its own header word; with or without a
+// constructor of its own, through a further subclass, and read as any.
+func TestE2EHostRecordSubclassTS(t *testing.T) {
+	assertSameAsNode(t, `
+class MyResp extends Response {
+  tag = "t";
+  constructor(body: string) { super(body, { status: 201, headers: { "x-a": "1" } }); }
+  hello(): string { return this.tag + this.status; }
+}
+class Deeper extends MyResp { more(): number { return this.status + 1; } }
+const r = new Deeper("hi");
+console.log(r.status, r.ok, r.hello(), r.more(), r instanceof Response, r instanceof MyResp, r.headers.get("x-a"));
+const a: any = r;
+console.log(a.status, a.tag, typeof a.text, String(r));
+class R0 extends Response {}
+const r0 = new R0("body0", { status: 202 });
+class R1 extends Response { f = 3; }
+const r1 = new R1("b1");
+console.log(r0.status, r1.status, r1.f, r0 instanceof Response);
+class MyReq extends Request {
+  constructor(url: string) { super(url, { method: "POST", body: "payload", headers: { "x-q": "9" } }); }
+  info(): string { return this.method + " " + this.url; }
+}
+const q = new MyReq("http://example.com/a");
+console.log(q.info(), q instanceof Request, q.headers.get("x-q"), String(q));
+(async () => {
+  console.log(await r.text(), r.bodyUsed, await r0.text(), await r1.text(), await q.text());
+  console.log((await new MyResp("{\"k\":2}").json()).k);
+})();
+`)
+}
+
+// XMLHttpRequest is not a Node global: the expected values are the spec's.
+func TestE2EXHRSubclassJS(t *testing.T) {
+	assertOutputCLIJS(t, `
+class X extends XMLHttpRequest { kind() { return "x" + this.readyState; } }
+const x = new X();
+console.log(x.readyState, x.kind(), x instanceof XMLHttpRequest, x instanceof X, x.status);
+x.open("GET", "http://127.0.0.1:9/none");
+console.log(x.readyState, String(new XMLHttpRequest()), new XMLHttpRequest() instanceof XMLHttpRequest);
+`, "0 x0 true true 0\n1 [object XMLHttpRequest] true")
+}
+
+// A void value stored in a container is undefined: an array's or an
+// object's element, a Map's value, a Set's element.
+func TestE2EVoidValueInContainersTS(t *testing.T) {
+	assertSameAsNode(t, `
+function v(): void {}
+const arr = [v(), v()];
+console.log(arr, arr.length, arr[0] === undefined);
+const o = { a: v() };
+console.log(o, "a" in o, o.a);
+const m = new Map<string, void>();
+m.set("k", v());
+console.log(m.get("k"), m.has("k"), m.size, [...m.entries()]);
+const s = new Set<void>();
+s.add(v()); s.add(undefined);
+console.log(s.size, [...s]);
+const r: void[] = [v()];
+console.log(r);
+`)
+}
+
+// A not-a-function call's callee prints as V8's call printer shows it: a
+// regular expression literal as written, `new RegExp` as an intermediate
+// value, a static member chain by its names.
+func TestE2ENotFunctionCalleeNamesJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+try { /a/.foo(); } catch (e) { console.log(e.message); }
+try { /a\/b/gi.foo(); } catch (e) { console.log(e.message); }
+try { new RegExp("a").foo(); } catch (e) { console.log(e.message); }
+class D { static m = {}; }
+try { D.m.zz(); } catch (e) { console.log(e.message); }
+const o = { p: { q: {} } };
+try { o.p.q.r(); } catch (e) { console.log(e.message); }
+`)
+}
+
+// util.format's %s inspects an object whose toString is a builtin one (a
+// class instance inheriting Object.prototype's) and calls one the program
+// declared, down its prototype chain.
+func TestE2EUtilFormatStringObjectJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+const util = require("util");
+class P { constructor() { this.x = 1; } }
+class Q { toString() { return "Q!"; } }
+class R extends Q {}
+class A2 extends Array {}
+const o = { toString() { return "own"; } };
+console.log(util.format("%s|%s|%s|%s|%s", {}, new P(), new Q(), new R(), o));
+console.log(util.format("%s|%s|%s", new A2(), new Map([[1, 2]]), [1, [2, 3]]));
+console.log(util.format("%s", Object.create(null)), util.format("%s", new Error("e1")).split("\n")[0]);
+console.log(util.format("%s", { [Symbol.toPrimitive]() { return "prim"; } }));
+`)
+}
+
+// Queuing strategies are standalone objects; an invalid size() result
+// raises a RangeError and errors the stream.
+func TestE2EQueuingStrategiesJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+const c = new CountQueuingStrategy({ highWaterMark: 3 });
+console.log(c.highWaterMark, c.size(), typeof c.size, c instanceof CountQueuingStrategy);
+const b = new ByteLengthQueuingStrategy({ highWaterMark: 16 });
+console.log(b.highWaterMark, b.size(new Uint8Array(5)), b.size({ byteLength: 7 }));
+for (const v of [NaN, -1, "3", Infinity]) {
+  new ReadableStream({ start(ctl) { try { ctl.enqueue("x"); console.log("ok", ctl.desiredSize); } catch (e) { console.log("enq", String(v), e.constructor.name); } } }, { highWaterMark: 5, size() { return v; } });
+}
+const w = new WritableStream({ write(ch) { console.log("w", ch); } }, { size() { return -1; } }).getWriter();
+w.write("a").then(() => console.log("wrote"), (e) => console.log("werr", e.constructor.name));
+w.closed.then(() => {}, (e) => console.log("closed", e.constructor.name));
+`)
+}
+
+// A transformer's start() promise holds both sides until it settles; its
+// rejection errors them.
+func TestE2ETransformStartPromiseJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+const log = [];
+const ts = new TransformStream({
+  start() { log.push("start"); return new Promise((r) => setTimeout(() => { log.push("started"); r(); }, 30)); },
+  transform(ch, c) { log.push("t:" + ch); c.enqueue(ch); },
+});
+const w = ts.writable.getWriter();
+w.write("a");
+ts.readable.getReader().read().then((r) => { console.log(r.value, log.join(",")); });
+const ts2 = new TransformStream({ start() { return Promise.reject(new Error("boom")); } });
+ts2.writable.getWriter().write("x").then(() => console.log("wrote?"), (e) => console.log("werr", e.message));
+ts2.readable.getReader().read().then(() => console.log("read?"), (e) => console.log("rerr", e.message));
+`)
+}
+
+// A stream controller typed any is the controller (its members through
+// the box); a transformer's is a TransformStreamDefaultController, whose
+// inspection shows its stream's backpressure; String() of a stream object
+// is its [object Class].
+func TestE2EStreamControllersTS(t *testing.T) {
+	assertSameAsNode(t, `
+new ReadableStream<string>({ start(c: any) { console.log(typeof c, Object.prototype.toString.call(c), c.desiredSize); } });
+const r = new ReadableStream<string>({ start(c: any) { c.enqueue("q"); c.close(); } });
+r.getReader().read().then((x) => console.log(x.value));
+console.log(String(r), String(new ReadableStream<string>().getReader()));
+new WritableStream<string>({ start(c) { console.log(String(c)); } });
+const t = new TransformStream<string, string>({
+  start(c) { console.log(String(c)); console.log(c); },
+  transform(ch, c) { console.log(c); c.enqueue(ch + "1"); },
+  flush(c) { c.terminate(); },
+});
+console.log(String(t), t);
+const ww = t.writable.getWriter(); ww.write("a"); ww.close();
+const rr = t.readable.getReader();
+rr.read().then((x) => { console.log(x.value); return rr.read(); }).then((x) => console.log(x.done, t));
+const t2 = new TransformStream<string, string>({ transform(ch: string, c: any) { console.log(typeof c.terminate, typeof c.error); c.enqueue(ch); } });
+t2.writable.getWriter().write("q");
+t2.readable.getReader().read().then((x) => console.log(x.value));
+`)
+}
+
+// A primitive's index read logs undefined; destructuring null or undefined
+// names the value as V8 does.
+func TestE2EPrimitiveIndexAndNullDestructureTS(t *testing.T) {
+	assertSameAsNode(t, `
+console.log("a", (1n as any)[0]);
+const b: any = 2n; console.log(b[0], (5 as any)[0]);
+try { const [a] = null as any; console.log(a); } catch (e: any) { console.log(e.message); }
+try { const [a] = undefined as any; console.log(a); } catch (e: any) { console.log(e.message); }
+`)
+}
+
+// An explicit undefined cause is still an own property; an error made
+// without a message has none of its own; getOwnPropertyNames lists an
+// error's own keys, a subclass's fields among them.
+func TestE2EErrorOwnCauseAndNamesTS(t *testing.T) {
+	assertSameAsNode(t, `
+const e1 = new Error("x", { cause: undefined });
+console.log("cause" in e1, e1.cause, Object.keys(e1), Object.getOwnPropertyNames(e1));
+console.log(Object.getOwnPropertyDescriptor(e1, "cause"));
+console.log(require("util").inspect(e1).split("\n").filter((l: string) => !l.trimStart().startsWith("at ")).join("|"));
+const e2 = new Error("y", {});
+console.log("cause" in e2, Object.getOwnPropertyNames(e2));
+class E extends Error { extra = 1; constructor(m: string, o?: { cause?: any }) { super(m, o); } }
+const a = new E("a", { cause: undefined }), b = new E("b");
+console.log("cause" in a, "cause" in b, Object.getOwnPropertyNames(a));
+console.log(Object.getOwnPropertyDescriptor(a, "extra"));
+const f = new Error();
+console.log(Object.prototype.hasOwnProperty.call(f, "message"), "message" in f, Object.getOwnPropertyNames(f));
+console.log(Object.getOwnPropertyNames(new AggregateError([1], "m")));
+e1.cause = 5;
+console.log(Object.keys(e1), e1.cause);
+`)
+}
+
+// Through classes with no constructor of their own down to a host record:
+// the record is built from the arguments as the builtin's `new` builds it,
+// and Object.prototype.toString names the builtin.
+func TestE2EHostRecordSubclassNoCtorChainTS(t *testing.T) {
+	assertSameAsNode(t, `
+class M extends Response {}
+class D extends M { f = 1; }
+const d = new D("x", { status: 203 });
+console.log(d.status, d instanceof M, d instanceof Response, d.f, String(d));
+class Q0 extends Request {}
+class Q1 extends Q0 {}
+const q = new Q1("http://a.b/", { method: "PUT" });
+console.log(q.method, String(q), Object.prototype.toString.call(q));
+d.text().then(t => console.log(t));
+`)
+}

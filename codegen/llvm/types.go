@@ -488,12 +488,23 @@ func tupleStorage(elems []Type) Type {
 
 // MapType returns a Map<key,val> type.
 func MapType(key, val Type) Type {
+	key, val = voidHeld(key), voidHeld(val)
 	return Type{IR: irPtr, Host: hostMap, MapKey: &key, MapVal: &val}
 }
 
 // SetType returns a Set<elem> type.
 func SetType(elem Type) Type {
+	elem = voidHeld(elem)
 	return Type{IR: irPtr, Host: hostSet, MapKey: &elem}
+}
+
+// voidHeld is the type a container holds a `void` value as: `any`, whose
+// one value there is undefined.
+func voidHeld(t Type) Type {
+	if t.IR == "void" {
+		return TypeAny
+	}
+	return t
 }
 
 // WeakMapType returns a WeakMap<key,val> type (TDD-00112) — an object-identity-
@@ -690,6 +701,7 @@ func XMLHttpRequestType() Type {
 		{Name: XHRRespHeadersField, Ty: TypePtr},
 		{Name: "readyState", Ty: TypeI64},
 		{Name: "status", Ty: TypeI64},
+		{Name: "statusText", Ty: TypePtr},
 		{Name: "responseText", Ty: TypePtr},
 		{Name: "response", Ty: TypePtr},
 		{Name: "onreadystatechange", Ty: cb},

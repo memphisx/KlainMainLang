@@ -279,11 +279,8 @@ func genNextResultType(elem Type) Type {
 	})
 }
 
-// ensureGeneratorRuntime declares the fiber-context-switching primitive
-// (shared with the tasks via ensureFiberRuntime — same
-// getcontext/makecontext/swapcontext declares, same ucontextLayout()
-// constants) plus one generator-specific global: a "pending generator
-// object" handoff slot. makecontext's target function (the generator's own
+// emitGeneratorPending defines the "pending generator object" handoff
+// slot. makecontext's target function (the generator's own
 // compiled body, see emitGeneratorFunctionDecl) takes zero arguments and
 // reads a global to find its own object on first entry. A generator's own entry needs
 // its genObj pointer exactly once, at first-call time only: every
@@ -297,11 +294,7 @@ func genNextResultType(elem Type) Type {
 // each generator's own first entry happens synchronously inside the one
 // `gen(args)` construction call that set the global — no other code runs
 // in between to overwrite it first).
-func (e *Emitter) ensureGeneratorRuntime() {
-	if e.usedGeneratorRuntime {
-		return
-	}
-	e.usedGeneratorRuntime = true
+func (e *Emitter) emitGeneratorPending() {
 	e.emitGlobal("@__kml_gen_pending_obj = internal thread_local" + irGlobalAS + " global " + irPtr + " null, align 8")
 }
 
@@ -603,7 +596,6 @@ func (e *Emitter) emitGeneratorConstructValues(info *GeneratorInfo, thisRef stri
 		argc = "0"
 	}
 	e.genArgc = ""
-	e.ensureGeneratorRuntime()
 
 	genTy := info.GenTy
 	genObj := e.freshReg()
@@ -877,7 +869,7 @@ func (e *Emitter) packGeneratorEnv(info *GeneratorInfo, pos ast.Pos) (string, er
 	// hoisted): emitted now, so its captures are known.
 	if len(e.nestedFuncScopes) > 0 {
 		for fd, entry := range e.nestedFuncScopes[len(e.nestedFuncScopes)-1].byDecl {
-			if entry.Gen == info && !e.genDeclEmitted[fd] && !readsOwnValue(fd) {
+			if entry.Gen == info && !e.genDeclEmitted[info] && !readsOwnValue(fd) {
 				if err := e.emitNestedGeneratorDecl(fd, info); err != nil {
 					return "", err
 				}
@@ -919,7 +911,7 @@ func (e *Emitter) packGeneratorEnv(info *GeneratorInfo, pos ast.Pos) (string, er
 // swaps back in) and a `return expr`/fall-off-the-end exit (done=true,
 // this generator's own fiber is never resumed again since emitGeneratorNext
 // checks __done before ever swapping into it) use identically. No
-// GC_stackbottom management here — see ensureGeneratorRuntime and
+// GC_stackbottom management here — see emitGeneratorPending and
 // emitGeneratorNext's own comments for why that's entirely the *resumer's*
 // (the .next() call site's) responsibility, mirroring emit_http.go's
 // identical existing fiber-yield precedent.
@@ -1239,7 +1231,6 @@ func (e *Emitter) emitYieldResumeDispatch(gctx *generatorEmitCtx) (Value, error)
 
 	// mode 1: throw the injected error at the suspension point.
 	e.emitLabel(throwL)
-	e.ensureExceptionHelpers()
 	thrown := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorThrownField)
 	tag, pay := e.loadThrownCell(thrown.Ref)
 	e.excThrowAny(tag, pay)
@@ -1379,7 +1370,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	e.pushScope()
 
 	// Read the pending-object handoff global exactly once, at entry — see
-	// ensureGeneratorRuntime's own doc comment for why this is safe (only
+	// emitGeneratorPending's own doc comment for why this is safe (only
 	// ever meaningful on this generator's own first entry; every later
 	// resume picks up mid-function with genObjReg still live as an
 	// ordinary SSA value on this generator's own never-torn-down stack,
@@ -1388,7 +1379,6 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	// path: a generator that is declared but never constructed (`function* g(){};
 	// typeof g.prototype`) still emits this body and loads the global, so without
 	// this the global is referenced-but-undefined (invalid IR). Idempotent.
-	e.ensureGeneratorRuntime()
 	genObjReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_gen_pending_obj, align 8", genObjReg))
 
@@ -1400,7 +1390,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	// await busy-spins; a task-promise await drives the scheduler) — TDD-00085.
 	if info.IsAsync {
 		e.hasMaySuspend = true
-		e.ensureTaskRuntime()
+		e.ensureUnhandledRejections()
 	}
 
 	// A generator *method* (TDD-00063 Stage 2b) binds `this` (and `super`/the
@@ -1487,7 +1477,6 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 	// fiber's — is active. Emitted for async generators too now, replacing their
 	// former per-`.next()` setjmp guard.
 	{
-		e.ensureExceptionHelpers()
 		bodyStartL := e.freshLabel("gen.body")
 		catchAllL := e.freshLabel("gen.catchall")
 		e.excEnter(catchAllL, bodyStartL)
@@ -1495,7 +1484,7 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 		e.emitLabel(catchAllL)
 		// Reload genObj from the handoff global — a longjmp may have clobbered the
 		// entry-block SSA register, and no other generator ran on this fiber since
-		// the swap-in that wrote it (ensureGeneratorRuntime's own reasoning).
+		// the swap-in that wrote it (emitGeneratorPending's own reasoning).
 		reGen := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_gen_pending_obj, align 8", reGen))
 		// The thrown value as it was thrown (any value, not only an Error):
@@ -1592,7 +1581,6 @@ func (e *Emitter) emitGeneratorFunctionDecl(decl *ast.FunctionDeclaration, info 
 // stack slot and nulled for the body's run (so its awaits busy-drive rather than
 // mis-park the consumer) and restored afterward.
 func (e *Emitter) emitGeneratorSwapCore(genObj string, genTy Type, resetCurrentTask bool) {
-	e.ensureExceptionHelpers()
 	ctxSize, _, _, _ := e.ucontextLayout()
 	saveCtx := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca [%d x i8], align 16", saveCtx, ctxSize))
@@ -1709,7 +1697,6 @@ func (e *Emitter) emitGeneratorNextByValue(genObj string, genTy Type, args []ast
 		return Value{}, dropErr
 	}
 	args = keptArgs
-	e.ensureGeneratorRuntime()
 
 	var sentVal Value
 	if len(args) == 1 {
@@ -1842,8 +1829,6 @@ func (e *Emitter) emitGeneratorThrowByValue(genObj string, genTy Type, errPtr st
 	if genTy.GeneratorIsAsync {
 		return e.emitAsyncGeneratorThrowByValue(genObj, genTy, errPtr, pos)
 	}
-	e.ensureGeneratorRuntime()
-	e.ensureExceptionHelpers()
 	elemTy := *genTy.GeneratorElemType
 	resultTy := genNextResultType(elemTy)
 
@@ -1943,8 +1928,6 @@ func (e *Emitter) emitGeneratorReturnByValue(genObj string, genTy Type, rv Value
 	if genTy.GeneratorIsAsync {
 		return e.emitAsyncGeneratorReturnByValue(genObj, genTy, rv, absent, pos)
 	}
-	e.ensureGeneratorRuntime()
-	e.ensureExceptionHelpers()
 	elemTy := *genTy.GeneratorElemType
 	resultTy := genNextResultType(elemTy)
 	trueVal := Value{Ref: "true", Ty: TypeBool}
@@ -2002,9 +1985,7 @@ func (e *Emitter) emitGeneratorReturnByValue(genObj string, genTy Type, rv Value
 // result, or rejected if the body threw. A `for await...of` consumer awaits it.
 // emitAsyncGenRuntimeSetup pulls in the runtime an async generator resume needs.
 func (e *Emitter) emitAsyncGenRuntimeSetup() {
-	e.ensureGeneratorRuntime()
-	e.ensureTaskRuntime()
-	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
 	e.hasMaySuspend = true
 }
 
@@ -2060,7 +2041,6 @@ func (e *Emitter) emitAsyncGenAwaitParkUntilSettled(pReg string) {
 	gctx := e.currentGenerator
 	genObj := gctx.genObjReg
 	genTy := gctx.genTy
-	e.ensureMicrotasks()
 	// The step serving this request, which settles it as its caller's
 	// view of T: the body's own view may differ (a library's
 	// AsyncGenerator<any> returned as AsyncGenerator<T>).
@@ -2255,11 +2235,7 @@ func (e *Emitter) emitAsyncGeneratorReturnByValue(genObj string, genTy Type, rv 
 	resProp := e.buildAsyncGenResult(resultTy, elemTy, rv, trueVal, present)
 	e.storePromiseValue(qp, resProp)
 	// return(v) awaits v first (AsyncGeneratorAwaitReturn): one turn later.
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle_later("+irPtr+" %s)", qp))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", qp, qSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -2438,11 +2414,7 @@ func (e *Emitter) ensureAsyncGenStepFn(genTy Type) string {
 	e.storePromiseValue(q, e.buildAsyncGenResult(resultTy, elemTy, sentBack, doneNow, hasValue))
 	// return(v) on a finished generator awaits v first: one turn later, and
 	// the requests queued behind it complete after it (laterSlot).
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle_later("+irPtr+" %s)", q))
 	e.emitInstr(fmt.Sprintf("store i1 1, "+irPtr+" %s, align 1", laterSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", drainL))
@@ -2551,9 +2523,6 @@ func (e *Emitter) settleAsyncGenWith(q string, res Value) {
 	// its awaiter has already attached a resume reaction — is actually woken.
 	// A no-op drain when there is no waiter, so the synchronous path is
 	// unaffected.
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
 	e.emitInstr(fmt.Sprintf("call void @__kml_promise_settle("+irPtr+" %s, i64 1)", q))
 }
@@ -2564,13 +2533,12 @@ func (e *Emitter) settleAsyncGenWith(q string, res Value) {
 // promise rejected. Used by async `yield*` (TDD-00086); mirrors emitAwait's
 // task-promise branch for the already-settled case an async generator produces.
 func (e *Emitter) emitAwaitSettledResult(promReg string, resultTy Type) Value {
-	e.ensureExceptionHelpers()
 	if e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync {
 		// `yield*` awaits an inner step from inside the outer's fiber — park the
 		// outer on it (nested parks compose: inner settles → outer resumes).
 		e.emitAsyncGenAwaitParkUntilSettled(promReg)
 	} else {
-		e.ensureTaskRuntime()
+		e.ensureUnhandledRejections()
 		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready("+irPtr+" %s)", promReg))
 	}
 	resReg := e.freshReg()
@@ -2647,8 +2615,7 @@ func (e *Emitter) generatorGCStackbottomOps(genObj string, genTy Type) (setOp, r
 func (e *Emitter) emitForAwaitOfGenerator(s *ast.ForOfStatement, genTy Type, genVal Value, condL, bodyL, incL, endL string) error {
 	elemTy := *genTy.GeneratorElemType
 	resultTy := asyncGenResultType(elemTy)
-	e.ensureTaskRuntime()
-	e.ensureExceptionHelpers()
+	e.ensureUnhandledRejections()
 
 	// A destructuring loop variable (`for await (const { x, y } of …)` /
 	// `for await (const [a, b] of …)`) binds no single loop variable — the
@@ -3366,7 +3333,18 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 	condReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", idxVal, idxPtr))
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", condReg, idxVal, lenReg))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
+	if e.ensurePromiseProtoCtorRead(); e.writesPromiseProtoCtor() {
+		// The done step's next() promise, awaited: its PromiseResolve
+		// reads Promise.prototype's `constructor` too.
+		doneL := e.freshLabel("forawait.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, doneL))
+		e.emitLabel(doneL)
+		e.declareFn("__kml_promise_proto_ctor_read", "declare void @__kml_promise_proto_ctor_read(i64)")
+		e.emitInstr(fmt.Sprintf("call void @__kml_promise_proto_ctor_read(i64 %d)", nbUndefined))
+		e.emitTerminator("br label %" + endL)
+	} else {
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", condReg, bodyL, endL))
+	}
 
 	e.emitLabel(bodyL)
 	idxVal2 := e.freshReg()
@@ -3391,6 +3369,7 @@ func (e *Emitter) emitForAwaitOfArrayCore(s *ast.ForOfStatement, elemTy Type, pt
 			return err
 		}
 		if !elemTy.IsDynamic() && elemTy.IsPromise() {
+			e.ensurePromiseProtoCtorRead()
 			e.emitInstr(fmt.Sprintf("call void @__kml_promise_own_ctor("+irPtr+" %s)", elemVal.Ref))
 		}
 		boundVal = aw
@@ -4382,13 +4361,13 @@ func (e *Emitter) asyncIteratorShapeKnown(t Type) bool {
 // capture declared later then held in its forward cell. Its captures are
 // recorded on the GeneratorInfo the call site reads to build the env.
 func (e *Emitter) emitNestedGeneratorDecl(fd *ast.FunctionDeclaration, info *GeneratorInfo) error {
-	if e.genDeclEmitted[fd] {
+	if e.genDeclEmitted[info] {
 		return nil
 	}
 	if e.genDeclEmitted == nil {
-		e.genDeclEmitted = map[*ast.FunctionDeclaration]bool{}
+		e.genDeclEmitted = map[*GeneratorInfo]bool{}
 	}
-	e.genDeclEmitted[fd] = true
+	e.genDeclEmitted[info] = true
 	caps := e.gatherGeneratorCaptures(fd)
 	if len(caps) > 0 && readsOwnValue(fd) {
 		return e.emitSelfCapturingNestedGenerator(fd, info, caps)

@@ -342,7 +342,7 @@ char *__kml_String_concat(const char *s, const array_header *strings) {
     long long n = str_len(s);
     for (long long i = 0; i < strings->len; i++) {
         n += str_len(xs[i]);
-        if (n > maxStringLength) __kml_throw_range_error("Invalid string length");
+        if (n > maxStringLength) __kml_throw_range_error(str_new("Invalid string length", 21));
     }
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
     *(long long *)base = n;

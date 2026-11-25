@@ -779,19 +779,42 @@ class Derived extends Ghost {
 	}
 }
 
-func TestE2EClassExtendsBuiltinIsError(t *testing.T) {
-	// `extends Error` (TDD-00155 Stage 6), `extends Map`/`Set`/`RegExp`/
-	// `Promise`/`Date`/`Array`/a typed array/`ArrayBuffer`/`Function`
-	// (TDD-00247) work; extending another host builtin is a clean rejection.
-	for _, base := range []string{"Response", "Request", "ReadableStream"} {
-		_, err := parseAndCompile("class Derived extends " + base + " {}\n")
-		if err == nil {
-			t.Fatalf("%s: expected a compile error for extending a built-in", base)
-		}
-		if !strings.Contains(err.Error(), "extending the builtin '"+base+"' is not supported yet") {
-			t.Errorf("%s: unexpected error message: %v", base, err)
-		}
-	}
+// A class extending a stream class: its instance is the stream, read,
+// written, piped and passed as one.
+func TestE2EClassExtendsStreamTS(t *testing.T) {
+	assertSameAsNode(t, `
+class Counter extends ReadableStream<number> {
+  constructor(n: number) {
+    let i = 0;
+    super({ pull(c) { if (i < n) c.enqueue(i++); else c.close(); } });
+  }
+  tag() { return "counter"; }
+}
+const s = new Counter(3);
+console.log(s instanceof ReadableStream, s.tag(), Object.prototype.toString.call(s));
+const out: number[] = [];
+for await (const v of s) out.push(v);
+console.log(out);
+const r = new Counter(2).getReader();
+console.log((await r.read()).value);
+class Src extends ReadableStream<string> { constructor() { super({ start(c) { c.enqueue("a"); c.enqueue("b"); c.close(); } }); } }
+class Up extends TransformStream<string, string> { constructor() { super({ transform(ch, c) { c.enqueue(ch.toUpperCase()); } }); } }
+const got: string[] = [];
+class Sink extends WritableStream<string> { constructor() { super({ write(ch) { got.push(ch); } }); } }
+await new Src().pipeThrough(new Up()).pipeTo(new Sink());
+console.log(got, new Up() instanceof TransformStream, new Sink() instanceof WritableStream);
+class Plain extends ReadableStream {}
+console.log(new Plain().locked);
+class Bytes extends ReadableStream<Uint8Array> { constructor() { super({ start(c) { c.enqueue(new TextEncoder().encode("hi")); c.close(); } }); } }
+console.log(await new Response(new Bytes()).text());
+class Gz extends CompressionStream { constructor() { super("gzip"); } }
+class Gunz extends DecompressionStream { constructor() { super("gzip"); } }
+const zipped = new Blob(["hello stream"]).stream().pipeThrough(new Gz()).pipeThrough(new Gunz());
+console.log(await new Response(zipped).text());
+class Shown extends WritableStream<string> { tag = 1; }
+const anyS: any = new Src();
+console.log(new Shown(), new Up(), anyS, [anyS], anyS instanceof Src, String(anyS));
+`)
 }
 
 func TestE2EClassOverrideIncompatibleSignatureIsError(t *testing.T) {
@@ -2081,7 +2104,7 @@ class C {
 	if err == nil {
 		t.Fatal("expected a compile error for a non-constant computed member name")
 	}
-	if !strings.Contains(err.Error(), "computed class member name must be a constant") {
+	if !strings.Contains(err.Error(), "a computed property name in a class property declaration must have a simple literal type") || strings.Contains(err.Error(), "cannot find name") {
 		t.Errorf("unexpected error message: %v", err)
 	}
 }
@@ -5539,3 +5562,496 @@ console.log(A.from([1, 2]).length);
 `, "2\n")
 }
 
+// A mixin's base typed by a type parameter (`B extends Ctor`) takes any
+// class the constraint admits, held in a binding or returned by a function;
+// a function's own class extending its parameter is a candidate of the
+// function's other calls.
+func TestE2EMixinTypeParamAndLocalClassBases(t *testing.T) {
+	assertSameAsNode(t, `type Ctor<T = {}> = new (...args: any[]) => T;
+function Named<B extends Ctor>(Base: B) {
+  return class extends Base { name = "n"; hi() { return "hi " + this.name; } };
+}
+class A { x = 1; }
+class Z { x = 2; m() { return "zm"; } }
+function pick(flag: boolean): Ctor<{ x: number }> { return flag ? A : Z; }
+const M = Named(pick(process.argv.length > 9));
+const m = new M();
+console.log(m.x, m.hi(), m instanceof Z);
+const c1: Ctor<{ x: number }> = Z;
+console.log(new (Named(c1))().x);
+function f(B: Ctor) { class K extends B { y = 5; } return K; }
+const o = new (f(c1))() as any;
+console.log(o, o.x, o.y, o.m(), o instanceof Z);
+console.log(new (f(f(Z)))());
+`)
+}
+
+// A class in a function reads its locals as JavaScript closes over them:
+// a var written after the class, a function nested in a field initializer
+// or a static member and called later, and one in a derived constructor
+// before super().
+func TestE2ELocalClassCaptureForms(t *testing.T) {
+	src := `function mk(n: number, tag: string) {
+  var k = 1;
+  let cnt = 0;
+  class B { v: number; constructor(v: number) { this.v = v; } }
+  class C {
+    f = function () { return n * 2; };
+    g = [1, 2].map(function (x) { return x + n; });
+    static s = function () { return tag + cnt; };
+    static w() { return function () { cnt++; return tag; }; }
+    get() { return k; }
+  }
+  class D extends B {
+    constructor() { const g = function () { return n; }; super(g()); }
+  }
+  k = 9;
+  const c = new C();
+  return [c.f(), c.g, C.s(), C.w()(), C.s(), c.get(), new D().v];
+}
+console.log(mk(4, "a"), mk(5, "b"));
+`
+	assertSameAsNode(t, src)
+	assertSameAsNodeCompatJS(t, src)
+}
+
+// A type parameter an alias binds is no out-of-scope type of the same name
+// a block declares elsewhere (tsc accepts it).
+func TestE2EAliasTypeParamNamedLikeLocalClass(t *testing.T) {
+	assertSameAsNode(t, `function f() { class K {} return K; }
+type A<K> = K[];
+type B<T> = T extends (infer K)[] ? K : never;
+type C<T> = { [K in keyof T]: T[K] };
+const a: A<number> = [1];
+const b: B<string[]> = "s";
+const c: C<{ z: number }> = { z: 3 };
+console.log(a, b, c, typeof f());
+`)
+}
+
+// An arithmetic compound assignment converts its target to a number: on a
+// string (JavaScript), or on an any variable, field, static or element.
+// Under TypeScript a string left operand is TS2362 even beside an any.
+func TestE2ENumericCompoundOnStringAndAny(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `let t = "7"; t *= "2";
+var s = "a5"; s -= 1;
+function f(x) { x >>= 1; return x; }
+const o = { s: "4" }; o.s -= 1;
+const a = ["4"]; a[0] *= 2;
+class C { s = "8"; m() { this.s /= 2; return this.s; } }
+class D { s = null; m() { this.s = "8"; this.s -= 2; return this.s; } }
+class E { s = "8"; m() { this.s = 3; return this.s; } }
+const c = new C();
+console.log(t, typeof t, s, f("9"), f(4), o.s, a[0], c.m(), typeof c.s, new D().m(), typeof new E().m());
+`)
+	assertSameAsNode(t, `class C { s: any = 3; static t: any = "6"; }
+const c = new C();
+c.s **= 2; c.s += "x"; C.t /= 2;
+const o: any = { v: "5" }; o.v -= 1;
+const a: any[] = ["3"]; a[0] *= 3;
+console.log(c.s, C.t, o.v, a[0]);
+`)
+	assertCLICompileError(t, false, "let s = \"a\";\ns -= 1 as any;\nconsole.log(s);\n", "the left-hand side of an arithmetic operation")
+	assertCLICompileError(t, false, "const z = (1 as any) * true;\nconsole.log(z);\n", "the right-hand side of an arithmetic operation")
+}
+
+// An anonymous class's instance prints with no name, held typed or boxed,
+// and past the depth limit as [Object].
+func TestE2EAnonymousClassInstanceInspect(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `const K = (() => class { x = 1; })();
+console.log(new K(), new (class { y = 2; })());
+function id(c) { return new c(); }
+console.log(id(class { x = 1; }), [id(class {})]);
+const v = id(class { x = { a: { b: { c: 1 } } } });
+console.log({ p: { q: { r: v } } }, { p: { q: { r: new K() } } });
+`)
+}
+
+func TestE2EMixinOverRuntimeValues(t *testing.T) {
+	assertOutput(t, `
+type Ctor<T = {}> = new (...a: any[]) => T;
+function Tag<B extends Ctor>(Base: B) { return class extends Base { tag = "t"; hi() { return "hi " + this.tag; } }; }
+class A { a = 1; }
+class Z { z = 2; }
+const flag = process.argv.length > 100;
+const M = Tag(flag ? A : Z);
+const m = new M();
+console.log(m.tag, m.hi(), m instanceof Z, m instanceof A);
+const ks: Ctor[] = [A, Z];
+for (const k of ks) { const T = Tag(k); const t = new T(); console.log(t.hi(), t instanceof k); }
+const fromMap = new Map<string, Ctor>([["a", A]]);
+const T2 = Tag(fromMap.get("a")!); console.log(new T2().tag, new T2() instanceof A);
+const anyBase: any = Z; const T3 = Tag(anyBase); console.log((new T3() as any).z);
+`, "t hi t true false\nhi t true\nhi t true\nt true\n2")
+}
+
+func TestE2EBuiltinConstructorCalledAsFunction(t *testing.T) {
+	assertOutput(t, `
+const e = Error("boom"); console.log(e instanceof Error, e.message);
+const t = TypeError("bad", { cause: 1 }); console.log(t.name, t.cause, t instanceof TypeError);
+const a = AggregateError([1, 2], "agg"); console.log(a.errors, a.message);
+const r = RegExp("a+", "g"); console.log(r.source, r.flags, "caab".match(r));
+const r0 = /x/; console.log(RegExp(r0) === r0, RegExp(r0, "g") === r0);
+console.log(typeof Date(), Date().length > 10);
+const E = Error; console.log(new E("v").message, [1].map(String));
+const errs = ["a", "b"].map((m) => RangeError(m)); console.log(errs[1].message, errs[0] instanceof RangeError);
+function shadow() { const Error = (m: string) => "mine " + m; return Error("x"); } console.log(shadow());
+`, "true boom\nTypeError 1 true\n[ 1, 2 ] agg\na+ g [ 'aa' ]\ntrue false\nstring true\nv [ '1' ]\nb true\nmine x")
+	assertOutputCompatJS(t, `
+console.log(Error("j").message, URIError("u").name, SyntaxError().message === "");
+const E = TypeError; console.log(E("v") instanceof TypeError, E("v").message);
+const R = RegExp; console.log(R("b+", "g").flags, "abbb".replace(R("b+"), "-"));
+const A = Array; console.log(A(3).length, A(1, 2));
+const all = [Error, RangeError].map((C) => C("m").name); console.log(all);
+console.log(typeof Date("ignored"));
+const O = Object; console.log(O(1) instanceof Number);
+`, "j URIError true\ntrue v\ng a-\n3 [ 1, 2 ]\n[ 'Error', 'RangeError' ]\nstring\ntrue")
+	assertOutputCompatJS(t, `
+const v = JSON.parse('"x"'), n = JSON.parse("3");
+console.log(new Array(v), new Array(n).length, Array(v), new Array(v, n));
+for (const bad of [-1, 1.5, 2 ** 32]) { try { new Array(JSON.parse(String(bad))); } catch (e) { console.log(e.name, e.message); } }
+try { new Array(-2); } catch (e) { console.log(e.name, e.message); }
+const A = Array; console.log(new A(1, 2), new A(3).length, A(1, 2), A("x"), A());
+const B = [Array][0]; console.log(new B(4, 5), B(6, 7), new B("s"));
+console.log(new Array(2), Array(0).length);
+`, "[ 'x' ] 3 [ 'x' ] [ 'x', 3 ]\nRangeError Invalid array length\nRangeError Invalid array length\nRangeError Invalid array length\nRangeError Invalid array length\n[ 1, 2 ] 3 [ 1, 2 ] [ 'x' ] []\n[ 4, 5 ] [ 6, 7 ] [ 's' ]\n[ <2 empty items> ] 0")
+}
+
+func TestE2EFunctionSubclassConstructedThroughValue(t *testing.T) {
+	assertOutput(t, `
+class Formula extends Function {
+  label: string;
+  constructor(label: string) { super("x", "return x * x + 1"); this.label = label; }
+}
+const F: any = Formula;
+const g = new F("g");
+console.log(typeof g, g.label, g instanceof Formula, g(2));
+const ctors: any[] = [Formula];
+console.log(new ctors[0]("h").label);
+`, "function g true 5\nh")
+}
+
+// A builtin's `new` the declaration emits inline, and a program class of
+// the same name that shadows it.
+func TestE2EBuiltinNewIntrinsicShadowed(t *testing.T) {
+	assertSameAsNode(t, `
+const p = new Promise<number>((r) => r(1)); p.then((v) => console.log("p", v));
+const x = new Proxy({ a: 1 } as any, { get: (t: any, k: any) => k }); console.log(x.zz);
+const r = new Response("hi"); r.text().then((t) => console.log(t));
+console.log(typeof new FinalizationRegistry<number>(() => {}));
+function g() { class Proxy { a: any; constructor(a: any, b: any) { this.a = [a, b] } } return new Proxy(1, 2); } console.log(g());
+function h() { class Promise { v = 3 } return new Promise().v; } console.log(h());
+`)
+}
+
+// A constructor's own property its declaration emits (`Object.prototype`,
+// `Function.prototype`), and a local of the constructor's name.
+func TestE2EStaticPropIntrinsicPrototype(t *testing.T) {
+	assertSameAsNode(t, `
+console.log(typeof Function.prototype, Object.getPrototypeOf({}) === Object.prototype, Object.prototype.hasOwnProperty.call({a:1}, "a"));
+console.log(Function.prototype.call.length, String(Function.prototype.name) === "");
+function s() { const Object = { prototype: 5 }; return Object.prototype } console.log(s());
+const o: any = Object; console.log(o.prototype === Object.prototype);
+`)
+	assertSameAsNodeCompatJS(t, `
+console.log(typeof Function.prototype, Object.getPrototypeOf({}) === Object.prototype, Object.prototype.hasOwnProperty.call({a:1}, "a"));
+console.log(Function.prototype.call.length, String(Function.prototype.name) === "");
+function s() { const Object = { prototype: 5 }; return Object.prototype } console.log(s());
+const o = Object; console.log(o.prototype === Object.prototype);
+const F = [Function][0]; console.log(typeof F.prototype);
+console.log(Object.prototype.toString.call([]));
+`)
+}
+
+// `x instanceof Object` / `Function` / `Symbol` take the builtin's inline
+// check only while the name is the global; a parameter or local of the
+// same name is an ordinary constructor value.
+func TestE2EBuiltinInstanceofShadowed(t *testing.T) {
+	assertSameAsNode(t, `
+class A {}
+function viaParam(Object: any, v: unknown): boolean { return v instanceof Object; }
+function viaLocal(v: unknown): boolean { const Function = A; return v instanceof Function; }
+console.log({} instanceof Object, (1 as any) instanceof Object, (() => 1) instanceof Function, (Symbol() as any) instanceof Symbol);
+console.log(viaParam(A, new A()), viaParam(A, {}), viaLocal(new A()), viaLocal(() => 1));
+try { throw new Error("x"); } catch (e) { console.log(e instanceof Object); }
+try { throw 3; } catch (e) { console.log(e instanceof Object); }
+`)
+}
+
+// A builtin constructor read as a value and constructed through it: its
+// declared construct signatures give the argument counts, and Proxy,
+// Response and Buffer build as `new` of the name would.
+func TestE2EBuiltinConstructedThroughValue(t *testing.T) {
+	assertSameAsNode(t, `
+const P: any = Proxy, R: any = Response, B: any = Buffer, AE: any = AggregateError, F = FinalizationRegistry, Pr = Promise;
+console.log(typeof P, typeof R, typeof F, typeof Pr, P.name, R.name, F.name, Pr.name, Pr === Promise, R === Response);
+const p = new P({ a: 1 }, { get: (t: any, k: string) => k === "a" ? 42 : t[k] });
+console.log(p.a, typeof new P({}, {}));
+const r = new R("hi", { status: 201, statusText: "made" });
+console.log(r.status, r.statusText, new R("x").status, new R().status);
+console.log(new B("6869", "hex").toString(), new B("hi").toString(), new B(3).length);
+const ae = new AE([new Error("a")], "agg", { cause: "why" });
+console.log(ae.message, ae.errors.length, ae.cause, new AE([]).message === "");
+const label = "Response";
+console.log(label, label.length, [P, R, F, Pr].map((c: any) => c.name).join());
+`)
+}
+
+// AggregateError's third argument is Error's options: its cause.
+func TestE2EAggregateErrorOptionsCause(t *testing.T) {
+	assertSameAsNode(t, `
+const ae = new AggregateError([new Error("a")], "agg", { cause: "why" });
+console.log(ae.cause);
+const o: any = { cause: 1 };
+console.log(new AggregateError([], "m", o).cause, new Error("e", o).cause);
+const AE: any = AggregateError, E: any = Error;
+console.log(new E("x", { cause: 2 }).cause, new AE([], "y", { cause: 3 }).cause);
+`)
+}
+
+// A program's own Response or Promise class is constructed and typed as
+// itself, not as the builtin of the same name.
+func TestE2EBuiltinNewIntrinsicShadowedTyping(t *testing.T) {
+	assertSameAsNode(t, `
+class Response { body: string; constructor(b: string) { this.body = b; } get status() { return 7; } }
+const r = new Response("x");
+console.log(r.body, r.status, r instanceof Response);
+function f() {
+  class Promise { v = 3; }
+  const p = new Promise();
+  return p.v;
+}
+console.log(f());
+const reg = new FinalizationRegistry<string>((h) => {});
+reg.register({}, "k");
+console.log(typeof reg, new Proxy({ a: 1 }, {}).a);
+export {};
+`)
+}
+
+// Promise's statics are typed and emitted through their declarations'
+// intrinsics: a local binding named Promise is an ordinary object.
+func TestE2EPromiseStaticsShadowed(t *testing.T) {
+	assertSameAsNode(t, `
+async function main() {
+  const xs: Promise<number>[] = [Promise.resolve(1), Promise.resolve(2)];
+  const all = await Promise.all(xs);
+  const r: Promise<number | string> = Promise.resolve(3);
+  console.log(all, await r, await Promise.race([Promise.resolve("a")]), (await Promise.allSettled([Promise.reject(new Error("x"))]))[0].status);
+  function local() {
+    const Promise = { all: (a: number[]) => a.length, resolve: (n: number) => n * 2 };
+    return [Promise.all([1, 2, 3]), Promise.resolve(4)];
+  }
+  console.log(local());
+}
+main();
+`)
+}
+
+// The well-known symbols are read through their declarations' intrinsics:
+// a local binding named Symbol is an ordinary object.
+func TestE2EWellKnownSymbolIntrinsics(t *testing.T) {
+	assertSameAsNode(t, `
+class Bag { *[Symbol.iterator]() { yield 1; yield 2; } get [Symbol.toStringTag]() { return "Bag"; } }
+console.log([...new Bag()], String(new Bag()), typeof Symbol.iterator, Symbol.asyncIterator.toString(), Symbol.hasInstance.description);
+const it = [1, 2][Symbol.iterator]();
+console.log(it.next().value);
+function f() { const Symbol = { iterator: "not-a-symbol" }; return Symbol.iterator; }
+console.log(f());
+`)
+}
+
+// Object.setPrototypeOf / Object.create / Reflect.construct are recognised
+// by their declarations: a class instance whose prototype the program
+// retargets calls the new chain's method, and a local `Object` is its own.
+func TestE2EObjectReflectDeclIntrinsics(t *testing.T) {
+	assertSameAsNode(t, `
+class A { hi() { return "A"; } }
+class B { hi() { return "B"; } }
+const o = new A();
+Object.setPrototypeOf(o, B.prototype);
+console.log(o.hi(), Object.getPrototypeOf(o) === B.prototype);
+const c = Object.create({ g: 1 }, { k: { value: 2, enumerable: false } });
+console.log(c.g, c.k, Object.keys(c));
+function F(this: any) { this.t = new.target === F; }
+const r: any = Reflect.construct(F as any, [], Object);
+console.log(r.t, Reflect.ownKeys({ z: 1 }));
+function local() { const Object = { create: (x: number) => x + 1, setPrototypeOf: () => "mine" }; return [Object.create(1), Object.setPrototypeOf()]; }
+console.log(local());
+`)
+}
+
+// JSON.parse/stringify and Error.stackTraceLimit are recognised through
+// their declarations: a local binding of the same name is an ordinary
+// object, and globalThis.JSON is the global's.
+func TestE2EJSONErrorDeclIntrinsics(t *testing.T) {
+	assertSameAsNode(t, `
+type P = { a: number; b: string[] };
+const p: P = JSON.parse('{"a":1,"b":["x","y"]}');
+const q: P = globalThis.JSON.parse('{"a":2,"b":[]}');
+console.log(p.a, p.b.length, q.a, JSON.stringify(p));
+Error.stackTraceLimit = 3;
+console.log(Error.stackTraceLimit);
+function local() {
+  const JSON = { parse: (s: string) => s.length, stringify: (n: number) => "n" + n };
+  const Error = { stackTraceLimit: "own" };
+  return [JSON.parse("abc"), JSON.stringify(4), Error.stackTraceLimit];
+}
+console.log(local());
+`)
+}
+
+// The Math and Number constants are read through their declarations'
+// intrinsics: a local binding named Math is an ordinary object.
+func TestE2ENumberConstIntrinsics(t *testing.T) {
+	assertSameAsNode(t, `
+console.log(Math.PI, Math.SQRT1_2, Number.MAX_SAFE_INTEGER, Number.EPSILON > 0, Number.NaN, Number.NEGATIVE_INFINITY, globalThis.Math.E);
+const r = Math.PI * 2 + Number.MIN_VALUE;
+console.log(r);
+function local() {
+  const Math = { PI: "pie" };
+  const Number = { NaN: 7 };
+  return [Math.PI, Number.NaN];
+}
+console.log(local());
+`)
+}
+
+// A computed key through a local binding named Symbol is that binding's
+// property, not a well-known symbol.
+func TestE2EShadowedSymbolComputedKey(t *testing.T) {
+	assertSameAsNode(t, `
+function f() {
+  const Symbol = { iterator: "k" as const };
+  const o = { [Symbol.iterator]: 5 };
+  const a = [1, 2];
+  return [o.k, Object.keys(o).length, (a as any)[Symbol.iterator]];
+}
+console.log(f());
+const it = { *[Symbol.iterator]() { yield 9; } };
+console.log([...it]);
+`)
+}
+
+// Object and Function as values, constructed and read through a boxed
+// reference, and their prototypes read through a row.
+func TestE2EObjectFunctionCtorValues(t *testing.T) {
+	assertSameAsNode(t, `
+const O: any = Object, F: any = Function, P: any = Promise;
+console.log(typeof O, typeof F, O === Object, F.prototype === Function.prototype, O.prototype === Object.prototype);
+const w = new O(5);
+console.log(typeof w, w + 1, Object.keys(new O({ a: 1 })));
+new P((res: (v: number) => void) => res(3)).then((v: number) => console.log("p", v));
+function local() { const Object = { keys: () => "mine" }; return Object.keys(); }
+console.log(local());
+`)
+}
+
+// A field over an inherited method shadows it, through the base's type too.
+func TestE2EFieldOverMethodTS(t *testing.T) {
+	assertSameAsNode(t, `
+class C { x(a: number): string { return "C" + a; } run(): string { return this.x(1); } }
+class D extends C { x = (a: number): string => "D" + a + (this instanceof D); }
+const c: C = new D();
+console.log(new D().x(2), c.x(3), c.run(), new C().run(), typeof c.x);
+console.log(Object.keys(new D()), Object.getOwnPropertyNames(D.prototype));
+`)
+}
+
+// JavaScript lets a member override an inherited one of another kind: an
+// accessor over a method (instance and static), a setter alone, a field
+// over an accessor, an accessor or method the instance's field shadows.
+func TestE2EMemberKindOverridesJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+class A { m(x) { return "A.m" + x; } call2() { return this.m(1); } get y() { return "A.y"; } set y(v) { this.s = v; } read() { return this.y; } f = "A.f"; h = "A.h"; n() { return "A.n"; } static s(x) { return "As" + x; } static u() { return this.s(1); } }
+class B extends A {
+  get m() { const self = this; return function (z) { return "B.m" + z + (this === self); }; }
+  y = "B.y";
+  get f() { return "B.f"; }
+  h() { return "B.h"; }
+  set n(v) { this.got = v; }
+  static get s() { return (z) => "Bs" + z; }
+}
+class C extends B {}
+const a = new A(), b = new B();
+console.log(b.m(2), b.call2(), a.m(3), a.call2(), new C().m(5), typeof b.m);
+console.log(b.y, b.read(), a.read(), b.f, b.h, typeof b.n, b.n);
+b.y = 4; b.n = 9;
+console.log(b.y, b.read(), b.s, b.got, Object.keys(b), JSON.stringify(b));
+console.log(B.s(2), A.s(3), B.u(), A.u(), typeof B.s);
+console.log(Object.getOwnPropertyNames(B.prototype), Object.getOwnPropertyNames(A.prototype));
+console.log(Object.getOwnPropertyDescriptor(B.prototype, "n").get, typeof Object.getOwnPropertyDescriptor(B.prototype, "f").get);
+class P { a() {} get b() { return 1; } c() {} }
+class Q extends P { c() {} a() {} z() {} }
+console.log(Object.getOwnPropertyNames(Q.prototype));
+`)
+}
+
+// Object.setPrototypeOf on a class instance reached through a parameter,
+// and on a typed object: method calls, instanceof and reads follow the
+// prototype given, as in Node.
+func TestE2ESetPrototypeOfFixedLayoutTS(t *testing.T) {
+	assertSameAsNode(t, `
+class A { hi() { return "A"; } }
+class B { hi() { return "B"; } bye() { return "bye"; } }
+function f(a: A): void { Object.setPrototypeOf(a, B.prototype); }
+const x = new A();
+f(x);
+console.log(x.hi(), x instanceof B, x instanceof A, new A().hi());
+const c: A = new A();
+Object.setPrototypeOf(c, B.prototype);
+console.log(c.hi(), (c as any).bye());
+const o: { x: number } = { x: 1 };
+Object.setPrototypeOf(o, { y: 2 });
+console.log((o as any).y, o.x);
+function mk(): { x: number } { return { x: 5 }; }
+const m = mk();
+Object.setPrototypeOf(m, { z: 3 });
+console.log((m as any).z, m.x, Object.getPrototypeOf(m));
+`)
+}
+
+// A class passed to an object-typed parameter is the class itself: the
+// callee's writes reach its statics, as in Node.
+func TestE2EClassAtObjectParamTS(t *testing.T) {
+	assertSameAsNode(t, `
+class K { static x = 1; }
+function f(o: { x: number }): void { o.x = 42; }
+f(K);
+console.log(K.x);
+function g(o: { x: number }): number { return o.x; }
+K.x = 7; console.log(g(K));
+function h(o: { x: number }, n: number): string { o.x += n; return "x=" + o.x; }
+console.log(h(K, 1), K.x, h({ x: 1 }, 2));
+`)
+}
+
+// An any holding a plain object at a class-typed parameter is read as
+// itself; an instance of the class still takes the typed entry.
+func TestE2EAnyAtClassParamTS(t *testing.T) {
+	assertSameAsNode(t, `
+class K { a = 1; m() { return this.a * 2; } }
+class S extends K { a = 5; }
+function take(x: K): number { return x.a; }
+const v: any = { a: 9 };
+console.log(take(v));
+function take2(x: K): string { return typeof x.m; }
+console.log(take2(v), take2(new K()), take(new K()));
+const s: any = new S();
+console.log(take(s), take2(s));
+`)
+}
+
+// A method replaced on the class's prototype is what an instance's call
+// runs; deleting it leaves none.
+func TestE2EClassPrototypeMethodReplacedTS(t *testing.T) {
+	assertSameAsNode(t, `
+class X { m(): number { return 1; } n(): number { return this.m() + 1; } }
+const x = new X();
+console.log(x.m(), x.n());
+(X.prototype as any).m = function () { return 9; };
+console.log(x.m(), x.n(), new X().m());
+delete (X.prototype as any).m;
+try { x.m(); } catch (e) { console.log((e as Error).constructor.name); }
+`)
+}

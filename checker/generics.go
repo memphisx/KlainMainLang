@@ -334,7 +334,7 @@ func (c *Checker) instantiateType(t *Type, m map[*Type]*Type) *Type {
 		}
 		props := make([]*Property, len(t.Props))
 		for i, p := range t.Props {
-			props[i] = &Property{Name: p.Name, Type: c.instantiate(p.Type, m), Optional: p.Optional}
+			props[i] = &Property{Name: p.Name, ty: c.instantiate(p.Type(), m), Optional: p.Optional}
 		}
 		var str, num *Type
 		if t.StringIndex != nil {
@@ -405,7 +405,7 @@ func paramAt(fn *Type, i int) *Type {
 // parameter it is passed to: a function expression or arrow with an
 // unannotated parameter, or an object or array literal holding one
 // (TypeScript's isContextSensitive).
-func contextSensitive(e ast.Expression) bool {
+func (c *Checker) contextSensitive(e ast.Expression) bool {
 	var params []ast.Param
 	switch f := e.(type) {
 	case *ast.ArrowFunction:
@@ -414,14 +414,17 @@ func contextSensitive(e ast.Expression) bool {
 		params = f.Params
 	case *ast.ObjectLiteral:
 		for _, p := range f.Properties {
-			if p.Value != nil && contextSensitive(p.Value) {
+			if p.AccessorKind != "" {
+				continue // an accessor is no context-sensitive member (tsc's isContextSensitive)
+			}
+			if p.Value != nil && c.contextSensitive(p.Value) {
 				return true
 			}
 		}
 		return false
 	case *ast.ArrayLiteral:
 		for _, x := range f.Elements {
-			if contextSensitive(x) {
+			if c.contextSensitive(x) {
 				return true
 			}
 		}
@@ -434,10 +437,19 @@ func contextSensitive(e ast.Expression) bool {
 			return true
 		}
 	}
+	// A function expression (an object literal's method) without a `this:
+	// T` parameter has an implicit `this`, subject to contextual typing
+	// (tsc's hasContextSensitiveParameters): typed after the arguments that
+	// infer it.
+	if fe, ok := e.(*ast.FunctionExpression); ok && len(fe.TypeParams) == 0 {
+		if prog, ok := c.b.Module.Node.(*ast.Program); !ok || prog.ThisParams[fe] == nil {
+			return true
+		}
+	}
 	// An arrow whose expression body is itself context-sensitive (`() =>
 	// ({ b: x => {} })`): tsc's hasContextSensitiveReturnExpression.
 	if af, ok := e.(*ast.ArrowFunction); ok && af.Body != nil && af.RetType == nil {
-		return contextSensitive(af.Body)
+		return c.contextSensitive(af.Body)
 	}
 	return false
 }
@@ -462,7 +474,7 @@ func (c *Checker) inferFromInsensitive(p *Type, a ast.Expression, fn *Type, cand
 				switch {
 				case el == nil:
 					return
-				case !contextSensitive(el):
+				case !c.contextSensitive(el):
 					t = c.TypeOf(el)
 				default:
 					lit, ok := el.(*ast.ObjectLiteral)
@@ -486,7 +498,7 @@ func (c *Checker) inferFromInsensitive(p *Type, a ast.Expression, fn *Type, cand
 			for _, el := range x.Elements {
 				switch {
 				case el == nil:
-				case !contextSensitive(el):
+				case !c.contextSensitive(el):
 					if _, spread := el.(*ast.SpreadElement); spread {
 						continue
 					}
@@ -516,27 +528,27 @@ func (c *Checker) inferFromInsensitive(p *Type, a ast.Expression, fn *Type, cand
 				continue
 			}
 			pp := p.Prop(prop.Key)
-			if pp == nil || !c.mayInferIn(pp.Type, fn, cands) {
+			if pp == nil || !c.mayInferIn(pp.Type(), fn, cands) {
 				continue
 			}
-			if contextSensitive(prop.Value) {
-				c.inferFromInsensitive(pp.Type, prop.Value, fn, cands, contra, depth+1)
+			if c.contextSensitive(prop.Value) {
+				c.inferFromInsensitive(pp.Type(), prop.Value, fn, cands, contra, depth+1)
 				continue
 			}
 			if at := c.TypeOf(prop.Value); !c.Unanswered(at) {
-				if pp.Type.Flags&Object != 0 && pp.Type.Kind == Function && at.Flags&Object != 0 && at.Kind == Function {
+				if pp.Type().Flags&Object != 0 && pp.Type().Kind == Function && at.Flags&Object != 0 && at.Kind == Function {
 					// Its parameters infer contravariantly; its result and
 					// predicate covariantly.
-					c.unify(pp.Type, at, fn, contra)
-					if pr, ar := pp.Type.Ret(), at.Ret(); pr != nil && ar != nil {
+					c.unify(pp.Type(), at, fn, contra)
+					if pr, ar := pp.Type().Ret(), at.Ret(); pr != nil && ar != nil {
 						c.unify(pr, ar, fn, cands)
 					}
-					if pp.Type.Predicate != nil && at.Predicate != nil && pp.Type.Predicate.Type != nil && at.Predicate.Type != nil {
-						c.unify(pp.Type.Predicate.Type, at.Predicate.Type, fn, cands)
+					if pp.Type().Predicate != nil && at.Predicate != nil && pp.Type().Predicate.Type != nil && at.Predicate.Type != nil {
+						c.unify(pp.Type().Predicate.Type, at.Predicate.Type, fn, cands)
 					}
 					continue
 				}
-				c.unify(pp.Type, at, fn, cands)
+				c.unify(pp.Type(), at, fn, cands)
 			}
 		}
 	case *ast.ArrowFunction:
@@ -735,9 +747,9 @@ func (c *Checker) inferArgsDetailRecv(recv ast.Expression, callArgs []ast.Expres
 		if restTP != nil && i >= restAt {
 			break
 		}
-		if _, typed := c.nodeTypes[a]; !withSensitive && i < before && typed && contextSensitive(a) {
+		if _, typed := c.nodeTypes[a]; !withSensitive && i < before && typed && c.contextSensitive(a) {
 			infer(i, a) // an earlier callback, already typed
-		} else if !contextSensitive(a) {
+		} else if !c.contextSensitive(a) {
 			infer(i, a)
 		} else if p := paramAt(fn, i); p != nil {
 			// Intra-expression inference (tsc 4.7): a context-sensitive
@@ -760,7 +772,7 @@ func (c *Checker) inferArgsDetailRecv(recv ast.Expression, callArgs []ast.Expres
 			if restTP != nil && i >= restAt {
 				break
 			}
-			if !contextSensitive(a) {
+			if !c.contextSensitive(a) {
 				continue
 			}
 			// A type parameter an unannotated callback parameter takes
@@ -816,7 +828,7 @@ func (c *Checker) inferArgsDetailRecv(recv ast.Expression, callArgs []ast.Expres
 		if len(cs) == 0 {
 			// Inference is complete when every argument was seen: the
 			// second pass, or a call with no context-sensitive argument.
-			if withSensitive || !anyContextSensitive(callArgs) {
+			if withSensitive || !c.anyContextSensitive(callArgs) {
 				// Nothing to infer from: the default, else unknown (tsc's
 				// getInferredType).
 				uninferred[tp] = true
@@ -1303,7 +1315,7 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 	case p.Kind == Anonymous:
 		for _, pp := range p.Props {
 			if ap := a.Prop(pp.Name); ap != nil {
-				c.unify(pp.Type, ap.Type, fn, cands)
+				c.unify(pp.Type(), ap.Type(), fn, cands)
 			}
 		}
 		c.unifyIndexes(p, a, fn, cands)
@@ -1318,7 +1330,7 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 		c.unifyDepth++
 		for _, pp := range p.Props {
 			if ap := a.Prop(pp.Name); ap != nil {
-				c.unify(pp.Type, ap.Type, fn, cands)
+				c.unify(pp.Type(), ap.Type(), fn, cands)
 			}
 		}
 		c.unifyDepth--
@@ -1335,8 +1347,8 @@ func (c *Checker) unify(p, a *Type, fn *Type, cands map[*Type][]*Type) {
 		c.unifyDepth++
 		defer func() { c.unifyDepth-- }()
 		for _, pp := range p.Props {
-			if ap := src.Prop(pp.Name); ap != nil && hasTypeParam(pp.Type) {
-				c.unify(pp.Type, ap.Type, fn, cands)
+			if ap := src.Prop(pp.Name); ap != nil && hasTypeParam(pp.Type()) {
+				c.unify(pp.Type(), ap.Type(), fn, cands)
 			}
 		}
 		// … and index signature to index signature (tsc's
@@ -1369,8 +1381,8 @@ func (c *Checker) unifyIndexes(p, src *Type, fn *Type, cands map[*Type][]*Type) 
 	}
 	ts := make([]*Type, 0, len(src.Props))
 	for _, ap := range src.Props {
-		if !strings.HasPrefix(ap.Name, "@@") && !c.Unanswered(ap.Type) {
-			ts = append(ts, ap.Type)
+		if !strings.HasPrefix(ap.Name, "@@") && !c.Unanswered(ap.Type()) {
+			ts = append(ts, ap.Type())
 		}
 	}
 	if len(ts) > 0 {
@@ -1434,7 +1446,7 @@ func occursIn(tp, t *Type, seen map[*Type]bool) bool {
 				return false
 			}
 			for _, p := range t.Props {
-				if occursIn(tp, p.Type, seen) {
+				if occursIn(tp, p.Type(), seen) {
 					return true
 				}
 			}
@@ -1551,7 +1563,7 @@ func hasFreeTypeParam(t *Type, seen, bound map[*Type]bool) bool {
 			t.freeWalk = true
 			defer func() { t.freeWalk = false }()
 			for _, p := range t.Props {
-				if hasFreeTypeParam(p.Type, seen, bound) {
+				if hasFreeTypeParam(p.Type(), seen, bound) {
 					return true
 				}
 			}
@@ -1597,7 +1609,7 @@ func instanceNamesTypeParam(t *Type, seen, bound map[*Type]bool) bool {
 	}
 	seen[t] = true
 	for _, p := range t.Props {
-		pt := p.Type
+		pt := p.Type()
 		if hasFreeTypeParam(pt, seen, bound) {
 			return true
 		}
@@ -1779,7 +1791,7 @@ func (c *Checker) discriminateContext(lit *ast.ObjectLiteral, ct *Type) *Type {
 		}
 		unit := false
 		for _, m := range kept {
-			if mp := m.Prop(prop.Key); mp != nil && someMember(mp.Type, Literal|Nullish) {
+			if mp := m.Prop(prop.Key); mp != nil && someMember(mp.Type(), Literal|Nullish) {
 				unit = true
 			}
 		}
@@ -1789,7 +1801,7 @@ func (c *Checker) discriminateContext(lit *ast.ObjectLiteral, ct *Type) *Type {
 		var next []*Type
 		for _, m := range kept {
 			mp := m.Prop(prop.Key)
-			if mp == nil || c.assignableTo(v, mp.Type) != no {
+			if mp == nil || c.assignableTo(v, mp.Type()) != no {
 				next = append(next, m)
 			}
 		}
@@ -1810,14 +1822,14 @@ func (c *Checker) discriminateContext(lit *ast.ObjectLiteral, ct *Type) *Type {
 	}
 	for _, m := range kept {
 		for _, mp := range m.Props {
-			if written[mp.Name] || !mp.Optional || !someMember(mp.Type, Literal|Nullish) {
+			if written[mp.Name] || !mp.Optional || !someMember(mp.Type(), Literal|Nullish) {
 				continue
 			}
 			written[mp.Name] = true
 			var next []*Type
 			for _, o := range kept {
 				op := o.Prop(mp.Name)
-				if op == nil || op.Optional || c.assignableTo(c.undefinedT, op.Type) != no {
+				if op == nil || op.Optional || c.assignableTo(c.undefinedT, op.Type()) != no {
 					next = append(next, o)
 				}
 			}
@@ -1867,7 +1879,7 @@ func (c *Checker) unifyMapped(p, a *Type, fn *Type, cands map[*Type][]*Type) boo
 			continue
 		}
 		keys = append(keys, c.in.literal(StringLiteral, q.Name))
-		vals = append(vals, q.Type)
+		vals = append(vals, q.Type())
 	}
 	if len(keys) == 0 {
 		return false
@@ -1911,14 +1923,14 @@ func (c *Checker) unifyReverseMapped(p *Type, n *ast.MappedType, op *ast.TypeOpe
 		if strings.HasPrefix(q.Name, "@@") || q.Accessor {
 			continue
 		}
-		pt := c.reverseMappedMember(p, n, at, q.Name, c.in.literal(StringLiteral, q.Name), q.Type, fn)
+		pt := c.reverseMappedMember(p, n, at, q.Name, c.in.literal(StringLiteral, q.Name), q.Type(), fn)
 		// A literal stays one where A's constraint types the property
 		// with a primitive (its contextual type `A[K]`, tsc's
 		// isLiteralOfContextualType); elsewhere it widens.
 		if !c.primitiveConstrainedProp(at, q.Name) {
 			pt = widen(c, pt)
 		}
-		props = append(props, &Property{Name: q.Name, Type: pt, Optional: q.Optional, Readonly: q.Readonly})
+		props = append(props, &Property{Name: q.Name, ty: pt, Optional: q.Optional, Readonly: q.Readonly})
 	}
 	if len(props) == 0 && len(a.Props) > 0 {
 		return false
@@ -1974,7 +1986,7 @@ func (c *Checker) unifyReverseMappedList(p *Type, n *ast.MappedType, op *ast.Typ
 func (c *Checker) reverseMappedMember(p *Type, n *ast.MappedType, at *Type, name string, key, src *Type, fn *Type) *Type {
 	c.in.next++
 	u := &Type{Flags: TypeParam, Value: "reverse%" + name, ID: c.in.next}
-	holder := c.in.object([]*Property{{Name: name, Type: u}})
+	holder := c.in.object([]*Property{{Name: name, ty: u}})
 	if name == "" {
 		holder = c.in.array(u)
 	}
@@ -2181,7 +2193,7 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 					for _, pt := range parts {
 						if pt.Flags&Object != 0 {
 							if q := pt.Prop(prop.Key); q != nil {
-								own = append(own, q.Type)
+								own = append(own, q.Type())
 							}
 						}
 					}
@@ -2192,7 +2204,7 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 				if tp := ct.Prop(prop.Key); tp != nil {
 					// An optional member's, without its undefined; its
 					// `this` the context itself (`a: (p: this) => this`).
-					return c.nonNullableContext(c.withThis(tp.Type, ct))
+					return c.nonNullableContext(c.withThis(tp.Type(), ct))
 				}
 				// No such member: the index signature that takes the key
 				// (tsc's getContextualTypeForObjectLiteralElement), a
@@ -2355,7 +2367,7 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 				// (`foo("", { method(p1) { return p1.length } }, { method(p2)
 				// {…} })` types p2 from the first method's result).
 				for k := 0; k < j && k < len(p.Args); k++ {
-					if contextSensitive(p.Args[k]) {
+					if c.contextSensitive(p.Args[k]) {
 						c.TypeOf(p.Args[k])
 					}
 				}
@@ -2584,8 +2596,8 @@ func (c *Checker) contextualType(e ast.Node) *Type {
 						ct = c.nonNullableContext(ct) // `[I?]`'s element: I
 					}
 					if ct != nil && ct.Flags&Object != 0 && ct.Flags&Union == 0 {
-						if pr := ct.Prop(f.Name); pr != nil && !c.Unanswered(pr.Type) {
-							return pr.Type
+						if pr := ct.Prop(f.Name); pr != nil && !c.Unanswered(pr.Type()) {
+							return pr.Type()
 						}
 					}
 				}
@@ -3343,7 +3355,11 @@ func (c *Checker) thisImplicitlyAny(e ast.Node) bool {
 			}
 			_, inClass := c.parentOf(x).(*ast.ClassDeclaration)
 			return !inClass
-		case *ast.ClassDeclaration, *ast.ClassExpression, *ast.ObjectLiteral:
+		case *ast.ObjectLiteral:
+			// A property's value sees the enclosing `this`; a method or
+			// accessor is a function expression, answered above.
+			continue
+		case *ast.ClassDeclaration, *ast.ClassExpression:
 			return false
 		}
 	}
@@ -3524,7 +3540,7 @@ func (c *Checker) rawContext(e ast.Node) *Type {
 					// A type parameter's property: its constraint's (tsc's
 					// apparent contextual type), whose literals it keeps.
 					if tp := m.Constraint.Prop(prop.Key); tp != nil {
-						out = append(out, tp.Type)
+						out = append(out, tp.Type())
 					} else if m.Constraint.StringIndex != nil {
 						out = append(out, m.Constraint.StringIndex)
 					}
@@ -3533,7 +3549,7 @@ func (c *Checker) rawContext(e ast.Node) *Type {
 				switch {
 				case m.Flags&Object != 0 && (m.Kind == Anonymous || m.Kind == Interface || m.Kind == Instance):
 					if tp := m.Prop(prop.Key); tp != nil {
-						out = append(out, tp.Type)
+						out = append(out, tp.Type())
 					}
 				case m.Flags&Deferred != 0:
 					// A mapped type over a type parameter's keys: its
@@ -3951,9 +3967,9 @@ func copyMap(m map[*Type]*Type) map[*Type]*Type {
 }
 
 // anyContextSensitive reports a context-sensitive argument among args.
-func anyContextSensitive(args []ast.Expression) bool {
+func (c *Checker) anyContextSensitive(args []ast.Expression) bool {
 	for _, a := range args {
-		if contextSensitive(a) {
+		if c.contextSensitive(a) {
 			return true
 		}
 	}
@@ -3966,7 +3982,7 @@ func anyContextSensitive(args []ast.Expression) bool {
 // checker does not model (a library type's, a computed key's).
 func (c *Checker) wholeArgsFor(e *ast.CallExpression, sig, tp *Type) bool {
 	for i, a := range e.Args {
-		if contextSensitive(a) {
+		if c.contextSensitive(a) {
 			continue
 		}
 		if p := paramAt(sig, i); p != nil && occurs(tp, p) {
@@ -4196,7 +4212,7 @@ func (c *Checker) literalSnapshot(lit *ast.ObjectLiteral) *Type {
 					return c.anyT
 				})
 			}
-			props = append(props, &Property{Name: p.Key, Type: shape})
+			props = append(props, &Property{Name: p.Key, ty: shape})
 			continue
 		case *ast.ArrowFunction:
 			continue
@@ -4208,7 +4224,7 @@ func (c *Checker) literalSnapshot(lit *ast.ObjectLiteral) *Type {
 		if !c.constAsserted(p.Value) && !c.keepsLiteral(p.Value, t) {
 			t = c.widenFrom(p.Value, t)
 		}
-		props = append(props, &Property{Name: p.Key, Type: t})
+		props = append(props, &Property{Name: p.Key, ty: t})
 	}
 	snap := c.in.objectOf(props, true, false, nil)
 	c.snapshotOf[snap] = lit
@@ -4317,7 +4333,7 @@ func (c *Checker) firstFittingOverloadParam(call *ast.CallExpression, callee *Ty
 				fits = false
 				break
 			}
-			if contextSensitive(a) {
+			if c.contextSensitive(a) {
 				// A callback fits a generic candidate's function parameter
 				// it has no more parameters than (tsc's first pass, which
 				// checks no context-sensitive argument's body).
@@ -4451,9 +4467,40 @@ func literalPropertyValue(ol *ast.ObjectLiteral, x ast.Expression) bool {
 // (not modelled) while T still holds a type parameter the call infers.
 func (c *Checker) settledThis(t *Type) *Type {
 	if c.generic(t) {
+		// A `ThisType<D & M>` whose parameters are still open (a call's
+		// inference not yet settled) reads them as unknown (tsc's
+		// non-fixing inference mapper): `this.n` of `{ n: number } & M`
+		// types before M is inferred from the method itself.
+		m := map[*Type]*Type{}
+		openTypeParams(t, m, c.in.object(nil), 0)
+		if len(m) > 0 {
+			if r := c.instantiate(t, m); !c.Unanswered(r) && !c.generic(r) {
+				return r
+			}
+		}
 		return nil
 	}
 	return t
+}
+
+// openTypeParams maps the type parameters t is made of (itself, or the
+// members of its union or intersection) to to.
+func openTypeParams(t *Type, m map[*Type]*Type, to *Type, depth int) {
+	if t == nil || depth > 8 {
+		return
+	}
+	if t.Flags&TypeParam != 0 && t.Value != "this" {
+		m[t] = to
+		return
+	}
+	for _, tp := range t.DeferredTypeParams() {
+		if tp.Value != "this" {
+			m[tp] = to
+		}
+	}
+	for _, x := range t.Types {
+		openTypeParams(x, m, to, depth+1)
+	}
 }
 
 // instKey is a function type instantiated under one mapping.
@@ -4575,7 +4622,7 @@ func (c *Checker) defaultsPattern(props []ast.DestructProp) *Type {
 		if c.Unanswered(t) {
 			continue
 		}
-		ps = append(ps, &Property{Name: dp.Key, Type: t, Optional: true})
+		ps = append(ps, &Property{Name: dp.Key, ty: t, Optional: true})
 	}
 	if len(ps) == 0 {
 		return nil
@@ -4609,15 +4656,15 @@ func (c *Checker) generatorReturnOf(g *Type) *Type {
 	if next == nil {
 		return nil
 	}
-	sig := c.signaturesOf(next.Type, false)
+	sig := c.signaturesOf(next.Type(), false)
 	if sig == nil || c.Unanswered(sig) || sig.Ret() == nil {
 		return nil
 	}
 	var out []*Type
 	for _, m := range members(sig.Ret()) {
 		d, v := m.Prop("done"), m.Prop("value")
-		if d != nil && v != nil && d.Type == c.trueT {
-			out = append(out, v.Type)
+		if d != nil && v != nil && d.Type() == c.trueT {
+			out = append(out, v.Type())
 		}
 	}
 	if len(out) == 0 {
@@ -4681,7 +4728,7 @@ func (c *Checker) primitiveConstrainedProp(tp *Type, name string) bool {
 		if p.Name != name {
 			continue
 		}
-		for _, m := range members(p.Type) {
+		for _, m := range members(p.Type()) {
 			if m.Flags&(String|Number|Boolean|BigInt|Literal|ESSymbol) != 0 {
 				return true
 			}
@@ -4704,7 +4751,7 @@ func (c *Checker) insensitiveLiteralType(lit *ast.ObjectLiteral, depth int) *Typ
 		}
 		var t *Type
 		switch {
-		case !contextSensitive(prop.Value):
+		case !c.contextSensitive(prop.Value):
 			t = c.TypeOf(prop.Value)
 		default:
 			inner, ok := prop.Value.(*ast.ObjectLiteral)
@@ -4719,7 +4766,7 @@ func (c *Checker) insensitiveLiteralType(lit *ast.ObjectLiteral, depth int) *Typ
 		if c.Unanswered(t) {
 			return nil
 		}
-		props = append(props, &Property{Name: prop.Key, Type: t})
+		props = append(props, &Property{Name: prop.Key, ty: t})
 	}
 	return c.in.object(props)
 }

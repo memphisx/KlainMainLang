@@ -47,6 +47,18 @@ console.log(t);
 `)
 }
 
+// ADR-02070: a nested error's head line is the stack captured at
+// construction, so a toString given to it afterwards does not show; an empty
+// message leaves the name alone.
+func TestE2EErrorNestedInspectOwnToString(t *testing.T) {
+	assertSameAsNodeFrames(t, `
+const d: any = new RangeError("r");
+d.toString = () => "custom!";
+console.log({ d }, [new Error("")]);
+console.log(String(d));
+`)
+}
+
 // ADR-01319: an Error's own enumerable keys and JSON: its subclass's fields,
 // an assigned name, added properties; fields named like a system error's
 // (`code`, `errno`) are the subclass's own, read and written through any.
@@ -97,5 +109,25 @@ console.log({ a: { b: { c: new Error("y", { cause: 1 }) } } });
 class MyErr extends Error { extra = 2 }
 const m = new MyErr("z");
 console.log({ a: { b: { c: m } } }, m.extra);
+`)
+}
+
+// An Error's system fields are listed in the order the program set them,
+// among its other own properties; one the runtime set keeps its place, a
+// deleted one is gone and set again goes last. A catch binding takes a
+// property as any object does.
+func TestE2EErrorSystemFieldOrderTS(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import { readFileSync } from "fs";
+const e: any = new Error("m");
+e.code = "ECODE"; e.errno = -2; e.path = "/p"; e.syscall = "open";
+console.log(Object.keys(e), JSON.stringify(e));
+const f = new Error("n") as NodeJS.ErrnoException;
+f.syscall = "x"; (f as any).extra = 1; f.code = "C";
+console.log(Object.keys(f));
+const g: any = new Error("m");
+g.code = "A"; g.extra = 1; console.log(delete g.code, g.code, "code" in g, Object.keys(g));
+g.code = "B"; console.log(Object.keys(g));
+try { readFileSync("/nonexistent-kml-order"); } catch (x: any) { x.extra = 1; x.code = "Z"; x.n = 1; x.n += 1; console.log(Object.keys(x), x.code, x.n); }
 `)
 }

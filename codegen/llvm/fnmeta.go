@@ -221,28 +221,10 @@ func fnKindOf(isAsync, isGen bool) int {
 	return fnKindPlain
 }
 
-// ensureFnMeta marks the program as rendering/inspecting function values:
-// the metadata table is emitted at finalize and fnmeta.c is linked.
-func (e *Emitter) ensureFnMeta() {
-	if e.usedFnMeta {
-		return
-	}
-	e.usedFnMeta = true
-	e.ensureStrHeaderRuntime() // fnmeta.c builds its results with __kml_str_from_cstr
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
-}
-
 // emitFnPropsBag returns the own-property bag of a boxed function's record
 // (a tag-12 payload pointer), creating it on first use.
 func (e *Emitter) emitFnPropsBag(rec string) string {
-	e.ensureFnMeta()
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.ensureDynJSONC() // a function with properties renders them through the object inspector
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_props_dyn_make("+irPtr+" %s, "+irPtr+" @__kml_dynobj_new, "+irPtr+" @__kml_dynobj_get, "+irPtr+" @__kml_fn_bag_seed)", bag, rec))
@@ -262,11 +244,7 @@ func (e *Emitter) FnMetaCFlags() []string {
 
 // emitFnMetaFinalize registers the code-pointer → metadata rows fnmeta.c
 // looks up.
-// Only a program that reached ensureFnMeta pays for it.
 func (e *Emitter) emitFnMetaFinalize() {
-	if !e.usedFnMeta {
-		return
-	}
 	// Registered rows keyed by the function's prefix word (unitreg.go);
 	// fnmeta.c finds a function's row there. The registry links even with no rows.
 	for _, m := range e.fnMetas {
@@ -426,7 +404,6 @@ func (e *Emitter) fnLitName(lit ast.Node) string {
 // util.inspect does. A nullable slot (`(() => void) | undefined`) holding no
 // function renders `undefined`.
 func (e *Emitter) emitInspectFunc(v Value) Value {
-	e.ensureFnMeta()
 	if !v.Ty.Nullable() && !v.Ty.IsUndefined() {
 		r := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_inspect_hdr("+irPtr+" %s)", r, v.Ref))

@@ -218,13 +218,15 @@ typedef struct kw_frame {
     int threw;
 } kw_frame;
 
-static __thread void *kw_host_inv = NULL, *kw_host_clo = NULL;
+static __thread void *kw_host_inv = NULL;
+static __thread kml_ref kw_host_clo = 0; /* thread-local: held through the handle table */
 static __thread kw_frame *kw_top = NULL;
 
 // The dispatcher every host function's call runs: (id, argument count).
 void __kml_native_wasm_set_host(void *inv, void *clo) {
     kw_host_inv = inv;
-    kw_host_clo = clo;
+    kml_ref_free(kw_host_clo);
+    kw_host_clo = clo ? kml_ref_new(clo) : 0;
 }
 
 static int kml_wasm_host_call(double id, const kml_wasm_val *args, size_t nargs, kml_wasm_val *results, size_t nresults) {
@@ -240,7 +242,7 @@ static int kml_wasm_host_call(double id, const kml_wasm_val *args, size_t nargs,
         memcpy(saved, kw_args, (size_t)saved_nargs * sizeof *saved);
     }
     kw_nargs = 0;
-    ((void (*)(void *, double, double))kw_host_inv)(kw_host_clo, id, (double)nargs);
+    ((void (*)(void *, double, double))kw_host_inv)(kml_ref_get(kw_host_clo), id, (double)nargs);
     if (saved) {
         memcpy(kw_args, saved, (size_t)saved_nargs * sizeof *saved);
         free(saved); /* scratch */

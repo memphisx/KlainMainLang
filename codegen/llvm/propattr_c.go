@@ -40,10 +40,8 @@ func (e *Emitter) propAttrsUsed() bool {
 				}
 				// Object.create(proto, props) defines props by descriptor.
 				if c, ok := n.(*ast.CallExpression); ok && len(c.Args) == 2 {
-					if m, ok := c.Callee.(*ast.MemberExpression); ok && m.Property == "create" {
-						if id, ok := m.Object.(*ast.Identifier); ok && id.Name == "Object" {
-							e.propAttrScan = 2
-						}
+					if e.declIntrinsic(c) == "Object.create" {
+						e.propAttrScan = 2
 					}
 				}
 				return e.propAttrScan != 2
@@ -137,8 +135,6 @@ func objectTagFor(t Type) string {
 // object's record (validated as ValidateAndApplyPropertyDescriptor does), its
 // value into the field, and the key exists afterwards.
 func (e *Emitter) emitStaticDefineProperty(obj Value, f Field, descExpr ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureBoxedBigIntHooks()
-	e.ensureFnMeta()
 	descBag, err := e.emitDynBagOrThrow(descExpr, "Object.defineProperty (descriptor)", pos)
 	if err != nil {
 		return Value{}, err
@@ -220,8 +216,6 @@ func (e *Emitter) andEnumerable(present, obj, name string) string {
 // (boxed, undefined when the descriptor gives none) is stored: a rejected
 // redefinition throws the TypeError and stores nothing.
 func (e *Emitter) emitErrorDefineAttrs(errPtr, keyRef, descBag, v string) {
-	e.ensureBoxedBigIntHooks()
-	e.ensureFnMeta()
 	e.declareFn("__kml_error_own_desc", "declare i64 @__kml_error_own_desc("+irPtr+", "+irPtr+")")
 	wP, wV := e.descFieldBool(descBag, "writable")
 	eP, eV := e.descFieldBool(descBag, "enumerable")

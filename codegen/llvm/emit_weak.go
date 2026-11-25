@@ -131,6 +131,9 @@ func (e *Emitter) emitWeakSeed(coll Value, init ast.Expression, isMap bool, pos 
 	if nl, ok := init.(*ast.NullLiteral); (ok && !nl.Void) || isUndefinedLiteral(e, init) {
 		return nil
 	}
+	if e.collProtoPatched(collOwner(coll.Ty), map[bool]string{true: "set", false: "add"}[isMap]) {
+		return e.emitCollPatchedSeed(coll, init, pos)
+	}
 	init, err := e.nullishSeedSource(init)
 	if err != nil {
 		return err
@@ -388,7 +391,22 @@ func (e *Emitter) emitWeakGet(c *weakCall) (Value, error) {
 	}
 	raw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_weak_get("+irPtr+" %s, "+irPtr+" %s)", raw, c.ptr, kRef))
-	return e.mapValFromI64(raw, valTy), nil
+	if valTy.IsDynamic() {
+		// A box: a missing key is undefined itself, not the zero word (a
+		// stored 0's box).
+		present, out := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_weak_has("+irPtr+" %s, "+irPtr+" %s)", present, c.ptr, kRef))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %d", out, present, raw, nbUndefined))
+		return Value{Ref: out, Ty: valTy}, nil
+	}
+	// A pointer or array value type reads its null-pointer miss as
+	// `V | undefined`, as Map.get does (ADR-00833).
+	v := e.mapValFromI64(raw, valTy)
+	if mapGetUndefinedablePtr(valTy) || valTy.IsArray() {
+		v.Ty.setNullable(true)
+		v.Ty.setUndefined(true)
+	}
+	return v, nil
 }
 
 // emitWeakHas is a WeakMap's or WeakSet's has().

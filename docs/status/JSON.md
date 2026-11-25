@@ -11,7 +11,7 @@ Format: [Status page format](README.md#status-page-format).
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
 | `JSON.stringify(number)` | ✅ | | |
-| `JSON.stringify(string)` | ✅ | | • The complete `QuoteJSONString` escape set — a control character is `\b`/`\f`/`\n`/`\r`/`\t` or `\u00XX`; a `string | null` value holding null is `null` ([ADR-01069](../adr/01/ADR-01069.md)). An embedded NUL still ends the string (strlen-bounded, see the console.log caveat) |
+| `JSON.stringify(string)` | ✅ | | • The complete `QuoteJSONString` escape set — a control character is `\b`/`\f`/`\n`/`\r`/`\t` or `\u00XX`; a `string | null` value holding null is `null` ([ADR-01069](../adr/01/ADR-01069.md)) |
 | `JSON.stringify(number[])` | ✅ | | |
 | `JSON.stringify(string[])` | ✅ | | |
 | `JSON.stringify(object)` | ✅ | | |

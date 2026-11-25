@@ -241,13 +241,39 @@ func jsThisFunctionsAsBindings(prog *ast.Program, lib map[ast.Statement]string, 
 		fe.NoConstruct = lowered[fd]
 		return ast.NewVarDeclaration("const", fd.Name, nil, fe, fd.GetPos()), true
 	}
+	// A nested one moves to the top of its block, where a function
+	// declaration is initialized (a call above it reads it), after the
+	// block's directive prologue.
 	nested := func(st ast.Node) {
 		ast.Inspect(st, func(n ast.Node) bool {
 			if b, ok := n.(*ast.BlockStatement); ok {
-				for i, inner := range b.Body {
+				var moved, kept []ast.Statement
+				for _, inner := range b.Body {
 					if vd, ok := convert(inner); ok {
-						b.Body[i] = vd
+						moved = append(moved, vd)
+					} else {
+						kept = append(kept, inner)
 					}
+				}
+				if len(moved) > 0 {
+					i := 0
+					for ; i < len(kept); i++ {
+						es, ok := kept[i].(*ast.ExpressionStatement)
+						if !ok {
+							break
+						}
+						if _, str := es.Expr.(*ast.StringLiteral); !str {
+							break
+						}
+					}
+					body := append([]ast.Statement{}, kept[:i]...)
+					// A `var` the block declares further down is hoisted
+					// too, so the moved functions capture its binding: it
+					// is declared here, undefined, its own declaration then
+					// assigning it.
+					body = append(body, hoistedVarDecls(kept[i:])...)
+					body = append(body, moved...)
+					b.Body = append(body, kept[i:]...)
 				}
 			}
 			return true
@@ -434,7 +460,7 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 		if name == selfName {
 			continue
 		}
-		if _, isGlobal := e.moduleGlobals[name]; isGlobal {
+		if e.unshadowedGlobal(name) {
 			continue
 		}
 		if _, found := e.lookup(name); found {
@@ -456,6 +482,18 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 			sym, _ = e.forwardClosureSym(name)
 		}
 		caps = append(caps, CapturedVar{Name: name, Ty: sym.Ty, Sym: sym})
+	}
+	// Its arguments object's callee (argumentsReflected): the function's own
+	// box, held as a self capture under the hidden callee name; strict code
+	// marks it instead (its callee accessor throws).
+	argsCallee, argsStrict := false, false
+	if bindThis && paramsUseArguments(params, bodyStmts) && e.argumentsReflected() && !reassignsArguments(params, &ast.BlockStatement{Body: bodyStmts}) {
+		if e.argsStrictBodies[bodyStmts[0]] {
+			argsStrict = true
+		} else {
+			argsCallee = true
+			caps = append(caps, CapturedVar{Name: argsCalleeName, Ty: TypeAny, IsSelf: true, Sym: Symbol{Ty: TypeAny, IsConst: true, SelfName: true}})
+		}
 	}
 	if selfName != "" && refs[selfName] {
 		// A named function expression's own name, read in its body
@@ -519,6 +557,9 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 		e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", argsSlot))
 		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitDynArgvFrom(0), argsSlot))
 		e.define("arguments", Symbol{Ptr: argsSlot, Ty: TypeAny})
+		if argsStrict {
+			e.define(argsStrictName, Symbol{Ptr: "null", Ty: TypeAny})
+		}
 	}
 
 	// Bind each captured variable to its shared heap cell, read from %env,
@@ -711,6 +752,9 @@ func (e *Emitter) emitDynCallable(selfName, displayName string, params []ast.Par
 	var self []string
 	if selfName != "" {
 		self = []string{selfName}
+	}
+	if argsCallee {
+		self = append(self, argsCalleeName)
 	}
 	// Its env captures are bindings a nested declaration closes over, as
 	// an enclosing body's locals are: its detached context holds no frame
@@ -1098,7 +1142,6 @@ func (e *Emitter) emitDynClosureAdapter(v Value) (Value, error) {
 	// adapter over one, boxes back to that function.
 	origBox := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", origBox))
-	e.ensureFnMeta()
 	ob := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_fn_thunk_box("+irPtr+" %s, "+irPtr+" @__kml_d2s_env)", ob, v.Ref))
 	isThunk := e.freshReg()
@@ -1154,14 +1197,79 @@ func (e *Emitter) emitDynAnyMethodCall(objVal Value, propName string, args []ast
 	if propName == "apply" || propName == "call" {
 		return e.emitDynApplyOrCall(objVal, propName, args, pos)
 	}
+	// The native shortcuts below act on what the read reads from (a
+	// wrapper's primitive); a function found by the read is called with the
+	// receiver itself as `this`, the wrapper object (its own property read
+	// resolves the wrapper again).
+	self := objVal
 	objVal = e.emitWrapperRecv(objVal, e.internString(propName))
 	for c := range patchedProtoClasses {
 		if !e.inNativeProto && e.patchedProtoMethod(c, propName) {
 			// A builtin prototype method the program replaced: no native
 			// shortcut, the prototype chain's.
-			return e.emitDynAnyMethodCallPlain(objVal, propName, args, pos)
+			return e.emitDynAnyMethodCallPlain(self, propName, args, pos)
 		}
 	}
+	if objVal.Ref == self.Ref || !e.wrappersUsed() || !e.nativeShortcutMethod(propName, args) {
+		return e.emitDynAnyMethodCallShortcuts(self, objVal, propName, args, pos)
+	}
+	// A wrapper's own property of a shortcut's name (`o.replace =
+	// String.prototype.replace` on a Boolean): the function there is
+	// called, the wrapper its `this`.
+	ownI, own := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_wrapper_own(i64 %s, "+irPtr+" %s)", ownI, self.Ref, e.internString(propName)))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", own, ownI))
+	ownL, nativeL, joinL := e.freshLabel("wrecv.own"), e.freshLabel("wrecv.native"), e.freshLabel("wrecv.join")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", own, ownL, nativeL))
+	var refs [2]string
+	var ends [2]string
+	for i, isOwn := range []bool{true, false} {
+		var v Value
+		var err error
+		if isOwn {
+			e.emitLabel(ownL)
+			v, err = e.emitDynAnyMethodCallPlain(self, propName, args, pos)
+		} else {
+			e.emitLabel(nativeL)
+			v, err = e.emitDynAnyMethodCallShortcuts(self, objVal, propName, args, pos)
+		}
+		if err != nil {
+			return Value{}, err
+		}
+		if v, err = e.emitBoxValue(v); err != nil {
+			return Value{}, err
+		}
+		refs[i] = v.Ref
+		ends[i] = e.freshLabel("wrecv.end")
+		e.emitTerminator("br label %" + ends[i])
+		e.emitLabel(ends[i])
+		e.emitTerminator("br label %" + joinL)
+	}
+	e.emitLabel(joinL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = phi i64 [ %s, %%%s ], [ %s, %%%s ]", r, refs[0], ends[0], refs[1], ends[1]))
+	return Value{Ref: r, Ty: TypeAny}, nil
+}
+
+// nativeShortcutMethod is whether emitDynAnyMethodCallShortcuts answers
+// `x.propName(args)` natively rather than through the property read.
+func (e *Emitter) nativeShortcutMethod(propName string, args []ast.Expression) bool {
+	switch {
+	case propName == "valueOf" && len(args) == 0 && !e.inDynValueOf,
+		dynBufferMethods[propName] && !e.inDynBufferCall && !e.anyArgIsFunction(args),
+		propName == "toString" && !e.inDynNumberCall,
+		dynStringMethods[propName], dynNumberMethods[propName],
+		propName == "hasOwnProperty" && len(args) == 1,
+		propName == "propertyIsEnumerable" && len(args) == 1:
+		return true
+	}
+	_, ok := dynArrayMethods[propName]
+	return ok
+}
+
+// emitDynAnyMethodCallShortcuts is emitDynAnyMethodCall past its wrapper
+// read: objVal is what the read reads from, self the receiver.
+func (e *Emitter) emitDynAnyMethodCallShortcuts(self, objVal Value, propName string, args []ast.Expression, pos ast.Pos) (Value, error) {
 	if propName == "valueOf" && len(args) == 0 && !e.inDynValueOf {
 		return e.emitDynPrimValueOf(objVal, pos)
 	}
@@ -1189,7 +1297,7 @@ func (e *Emitter) emitDynAnyMethodCall(objVal Value, propName string, args []ast
 	if propName == "toString" && len(args) == 0 {
 		return e.emitDynToStringCall(objVal, pos)
 	}
-	return e.emitDynAnyMethodCallPlain(objVal, propName, args, pos)
+	return e.emitDynAnyMethodCallPlain(self, propName, args, pos)
 }
 
 // emitDynToStringCall is `x.toString()` on an `any`: the receiver's own
@@ -1287,7 +1395,6 @@ func (e *Emitter) emitDynHasOwnPropertyCall(objVal Value, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureFnMeta()
 	sHas := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_array_has_key(i64 %s, "+irPtr+" %s, i1 1, i64 0)", sHas, e.convert(lenVal, TypeI64).Ref, keyRef))
 	sb, err := e.emitBoxValue(Value{Ref: sHas, Ty: TypeBool})
@@ -1871,10 +1978,7 @@ func (e *Emitter) ensureDynBound() {
 	}
 	e.fnDecls["__kml_dyn_bound"] = true
 	e.registerFnMeta("@__kml_dyn_bound", "", 0, fnFlagBoundBox)
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 }
 
 // emitDynCallValue calls a boxed function value (a tag-12 dynamic function)
@@ -1980,6 +2084,16 @@ func calleeDisplayName(x ast.Expression) string {
 		if !x.IsUndefined {
 			return "null"
 		}
+	case *ast.NewRegExpExpression:
+		// A regular expression literal prints as written.
+		if pat, ok := x.Pattern.(*ast.StringLiteral); ok && x.Literal {
+			flags := ""
+			if f, ok := x.Flags.(*ast.StringLiteral); ok {
+				flags = f.Value
+			}
+			return "/" + pat.Value + "/" + flags
+		}
+		return "(intermediate value)"
 	case *ast.SequenceExpression:
 		parts := make([]string, len(x.Exprs))
 		for i, p := range x.Exprs {
@@ -2000,7 +2114,6 @@ func calleeDisplayName(x ast.Expression) string {
 // tail), avoiding emitDynFnBoxCall's internal branch/throw.
 func (e *Emitter) emitDynFnBoxCallUnchecked(fnBox, recvBox string, argv string, n int) string {
 	payload := e.freshReg()
-	e.ensureNanBox()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", payload, fnBox))
 	rec := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rec, payload))
@@ -2053,13 +2166,18 @@ func (e *Emitter) emitDynFnBoxCallN(fnBox, recvVal Value, argv string, n string,
 	// call as a function (dynobj.c).
 	refL, notRefL := e.emitTagCheck(tag, kmlTagFuncRef, "dyncall.classref")
 	e.emitLabel(refL)
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	cr := e.freshReg()
 	wrap := e.ensureObjectWrapAny()
-	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_classref_call("+irPtr+" %s, i64 %s, "+irPtr+" %s, "+irPtr+" @%s)", cr, e.emitIntToPtr(payload), n, argv, wrap))
+	// Error, RegExp and Array construct when called (their [[Call]] is
+	// their [[Construct]]), through the program's constructor rows. A
+	// library unit, compiled once for every program, has none of its own,
+	// and the runtime routines finalization generates never call one.
+	construct := irPtr + " null"
+	if e.inLib == "" && !e.pastUserCode && e.callConstructorValueRead() {
+		construct = irPtr + " @__kml_dyn_construct"
+	}
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_classref_call("+irPtr+" %s, i64 %s, "+irPtr+" %s, "+irPtr+" @%s, i64 %s, %s)", cr, e.emitIntToPtr(payload), n, argv, wrap, fnBox.Ref, construct))
 	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", cr, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(notRefL)
@@ -2598,8 +2716,6 @@ func (e *Emitter) anyArgIsFunction(args []ast.Expression) bool {
 // into a dynamic array (tag 11), returned boxed: a rest parameter's value,
 // or from 0 a function's `arguments`.
 func (e *Emitter) emitDynArgvFrom(start int) string {
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
 	arr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_new(i64 0)", arr))
 	jPtr := e.freshReg()
@@ -2633,8 +2749,14 @@ func (e *Emitter) emitDynArgvFrom(start int) string {
 // on, each unboxed to elemTy (an any element keeps its box), into a fresh
 // typed array: its header and length.
 func (e *Emitter) emitArgvRestArray(start int, elemTy Type) (hdr, n string) {
+	return e.emitArgvArray("%p_argc", "%p_argv", start, elemTy)
+}
+
+// emitArgvArray is emitArgvRestArray over the argument count and words
+// in registers argc and argv.
+func (e *Emitter) emitArgvArray(argc, argv string, start int, elemTy Type) (hdr, n string) {
 	nRest := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = sub i64 %%p_argc, %d", nRest, start))
+	e.emitInstr(fmt.Sprintf("%s = sub i64 %s, %d", nRest, argc, start))
 	neg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", neg, nRest))
 	n = e.freshReg()
@@ -2660,7 +2782,7 @@ func (e *Emitter) emitArgvRestArray(start int, elemTy Type) (hdr, n string) {
 	srcIdx := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = add i64 %s, %d", srcIdx, j, start))
 	slot := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%p_argv, i64 %s", slot, srcIdx))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %s", slot, argv, srcIdx))
 	w := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, slot))
 	ev := Value{Ref: w, Ty: elemTy} // an any element keeps its box
@@ -2717,4 +2839,64 @@ func paramsOrBodyUseThis(params []ast.Param, body []ast.Statement) bool {
 		}
 	}
 	return false
+}
+
+// callConstructValues are the builtin constructors whose [[Call]] is their
+// [[Construct]] (dynobj.c's call_constructs).
+var callConstructValues = map[string]bool{"AggregateError": true, "Array": true, "Error": true, "EvalError": true,
+	"RangeError": true, "ReferenceError": true, "RegExp": true, "SyntaxError": true, "TypeError": true, "URIError": true}
+
+// callConstructorValueRead reports whether the program's own code reads one
+// of callConstructValues as a value (not as a callee): only then can a
+// called value construct one, and the constructor rows be needed.
+func (e *Emitter) callConstructorValueRead() bool {
+	if e.callCtorScan == 0 {
+		e.callCtorScan = 1
+		if e.prog != nil {
+			callees := map[ast.Expression]bool{}
+			ast.Inspect(e.prog, func(n ast.Node) bool {
+				if e.callCtorScan == 2 {
+					return false
+				}
+				if st, ok := n.(ast.Statement); ok && e.libStmts[st] != "" {
+					return false
+				}
+				switch x := n.(type) {
+				case *ast.CallExpression:
+					callees[x.Callee] = true
+				case *ast.Identifier:
+					if callConstructValues[x.Name] && !callees[x] {
+						e.callCtorScan = 2
+					}
+				}
+				return true
+			})
+		}
+	}
+	return e.callCtorScan == 2
+}
+
+// hoistedVarDecls is an uninitialized declaration of each `var` the
+// statements declare directly, once per name, with its annotation.
+func hoistedVarDecls(stmts []ast.Statement) []ast.Statement {
+	var out []ast.Statement
+	seen := map[string]bool{}
+	add := func(vd *ast.VarDeclaration) {
+		if vd.Kind != "var" || vd.Ambient || seen[vd.Name] {
+			return
+		}
+		seen[vd.Name] = true
+		out = append(out, ast.NewVarDeclaration("var", vd.Name, vd.TypeAnnot, nil, vd.GetPos()))
+	}
+	for _, s := range stmts {
+		switch d := s.(type) {
+		case *ast.VarDeclaration:
+			add(d)
+		case *ast.VarDeclarationList:
+			for _, vd := range d.Decls {
+				add(vd)
+			}
+		}
+	}
+	return out
 }

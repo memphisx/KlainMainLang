@@ -316,7 +316,6 @@ func (e *Emitter) emitArrayHas(arr Value, keyExpr ast.Expression, ownOnly bool) 
 			}
 			// A property added to the array (`a.tag = 1`), kept by its
 			// header.
-			e.ensureShapeRuntime()
 			has, r := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_expando_has("+irPtr+" %s, "+irPtr+" %s)", has, e.absentSafeArrayHeader(arr.Ref), e.internString(lit.Value)))
 			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", r, has))
@@ -360,4 +359,139 @@ func (e *Emitter) emitArrayHas(arr Value, keyExpr ast.Expression, ownOnly bool) 
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
 	return Value{Ref: r, Ty: TypeBool}, true, nil
+}
+
+// sparseElem reports whether an array of elemTy can hold elements past its
+// buffer (holes.c's sparse elements): an 8-byte element a hole's read
+// converts back from a box — a boxed word, a double, a pointer (string,
+// object) or an integer.
+func sparseElem(elemTy Type) bool {
+	return sparseKind(elemTy) >= 0
+}
+
+// sparseKind is holes.c's slot_word kind for elemTy: 0 a boxed word, 1 a
+// double, 2 a pointer, 3 an integer; -1 when the element cannot be sparse.
+func sparseKind(elemTy Type) int {
+	if elemTy.Inline || elemTy.BigIntElem || elemTy.IsArray() || elemTy.IsTuple() || elemTy.Align() != 8 {
+		return -1
+	}
+	switch {
+	case elemTy.IsDynamic() && elemTy.IR == "i64":
+		return 0
+	case elemTy.IsDynamic():
+		return -1
+	case elemTy.Float && elemTy.IR == "double":
+		return 1
+	case elemTy.IR == irPtr && elemTy.Host == hostNone && (elemTy.Kind == kindNone || elemTy.IsObject() || elemTy.IsNull()):
+		// A string (kind 0, the bare address), a plain object, or null (the
+		// null address).
+		return 2
+	case elemTy.IR == "i64":
+		return 3
+	}
+	return -1
+}
+
+// emitDensify makes the array header hdr dense again (holes.c) before a walk
+// reads its buffer: a no-op unless it holds sparse elements.
+func (e *Emitter) emitDensify(hdr string, elemTy Type) {
+	if hdr == "" || !e.holesUsed() || !sparseElem(elemTy) || e.noDensify {
+		return
+	}
+	hdr = e.absentSafeArrayHeader(hdr) // an absent array (null, undefined) has no holes
+	holey := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", holey, e.emitHolesWord(hdr)))
+	dL, doneL := e.freshLabel("densify"), e.freshLabel("densify.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", holey, dL, doneL))
+	e.emitLabel(dL)
+	e.emitInstr(fmt.Sprintf("call void @__kml_holes_densify("+irPtr+" %s, i64 8, i32 %d)", hdr, sparseKind(elemTy)))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+}
+
+// sparseSearch reports an indexOf / lastIndexOf / includes over objExpr for
+// needle that __kml_holes_search answers on a sparse array without making it
+// dense: a named array whose element slot kind holds the needle as
+// searchNeedle leaves it (converted to the element type, or boxed among
+// boxes). The walk then reads the buffer as it is (noDensify).
+func (e *Emitter) sparseSearch(objExpr, needle ast.Expression) bool {
+	if _, named := objExpr.(*ast.Identifier); !named || !e.holesUsed() {
+		return false
+	}
+	t := e.typeOfExpr(objExpr)
+	if !t.IsArray() || t.ElemType == nil || t.IsTypedArray() || t.IsFlatArray() || t.ExecArray || t.IsTuple() || t.IsDynamic() || t.Nullable() {
+		return false
+	}
+	el := *t.ElemType
+	if !sparseElem(el) {
+		return false
+	}
+	if el.IsDynamic() {
+		return true
+	}
+	nt := e.typeOfExpr(needle)
+	k := searchKind(el)
+	return !nt.IsDynamic() && k != "" && searchKind(nt) == k
+}
+
+// emitSparseSearch branches a search to __kml_holes_search when hdr is
+// sparse (its buffer holds fewer elements than its length): the index found
+// is stored at resultSlot (an i64), or, for includes (found an i1 slot),
+// whether one was; then to doneL. A dense hdr falls through to the walk.
+// undef is an i1: a hole matches (includes of undefined).
+func (e *Emitter) emitSparseSearch(hdr, lenReg string, elemTy Type, needle Value, from string, dir int, svz bool, undef, resultSlot string, found bool, doneL string) error {
+	if hdr == "" {
+		return nil
+	}
+	e.declareFn("__kml_holes_buflen", "declare i64 @__kml_holes_buflen("+irPtr+")")
+	e.declareFn("__kml_holes_search", "declare i64 @__kml_holes_search("+irPtr+", i64, i64, i64, i64)")
+	buf, sp := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_buflen("+irPtr+" %s)", buf, hdr))
+	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, %s", sp, buf, lenReg))
+	sL, dL := e.freshLabel("search.sparse"), e.freshLabel("search.dense")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", sp, sL, dL))
+	e.emitLabel(sL)
+	kind := sparseKind(elemTy)
+	var slot string
+	switch {
+	case kind == 0:
+		if elemTy.IsDynamic() {
+			e.declareFn("__kml_any_eq", "declare i1 @__kml_any_eq(i64, i64)")
+		}
+		slot = needle.Ref
+	case kind == 1:
+		slot = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", slot, needle.Ref))
+	case kind == 2:
+		slot = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", slot, needle.Ref))
+	default:
+		slot = needle.Ref
+	}
+	flags := kind
+	if isStringTy(elemTy) {
+		flags |= 16
+	}
+	if svz {
+		flags |= 32
+	}
+	fl := fmt.Sprint(flags)
+	if undef != "" && undef != "false" {
+		u, f := e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 64, i64 0", u, undef))
+		e.emitInstr(fmt.Sprintf("%s = or i64 %s, %d", f, u, flags))
+		fl = f
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_holes_search("+irPtr+" %s, i64 %s, i64 %s, i64 %d, i64 %s)", r, hdr, slot, from, dir, fl))
+	if found {
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", b, r))
+		e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", b, resultSlot))
+	} else {
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r, resultSlot))
+	}
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(dL)
+	return nil
 }

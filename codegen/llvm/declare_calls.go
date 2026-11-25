@@ -10,11 +10,46 @@ import (
 	"strings"
 )
 
+// runtimeFuncs are runtime functions whose declaration carries more than a
+// call spells (a `zeroext` return): the program declares one from here when
+// it names it, in place of the declaration read off the call.
+var runtimeFuncs = map[string]string{}
+
+func init() {
+	// The Map/Set entry points of the string-keyed flavor (FNV-1a, content
+	// compare, a null key hashing as the empty string; collections.c).
+	for name, sig := range map[string]string{
+		"__kml_map_copy_keys":    irPtr + " @%s(" + irPtr + ")",
+		"__kml_map_copy_vals":    irPtr + " @%s(" + irPtr + ")",
+		"__kml_map_str_create":   irPtr + " @%s()",
+		"__kml_map_str_create_h": irPtr + " @%s(i64)",
+		"__kml_map_str_set":      "void @%s(" + irPtr + ", " + irPtr + ", i64)",
+		"__kml_map_str_get":      "i64 @%s(" + irPtr + ", " + irPtr + ")",
+		"__kml_map_str_has":      "zeroext i1 @%s(" + irPtr + ", " + irPtr + ")",
+		"__kml_map_str_delete":   "zeroext i1 @%s(" + irPtr + ", " + irPtr + ")",
+		// The try frames' setjmp (_setjmp(buf, null) on mingw-w64) and the
+		// unwinding longjmp: their attributes are not spelled at a call.
+		"setjmp":  "i32 @%s(" + irPtr + ") returns_twice",
+		"_setjmp": "i32 @%s(" + irPtr + ", " + irPtr + ") returns_twice",
+		"longjmp": "void @%s(" + irPtr + ", i32) noreturn",
+		// process.c: whether a listener took a process event.
+		"__kml_process_hook_call": "zeroext i1 @%s(i32, i64, i64)",
+	} {
+		runtimeFuncs[name] = "declare " + strings.Replace(sig, "%s", name, 1)
+	}
+}
+
 // runtimeGlobals are the runtime's globals, as the program declares (or, for
 // its own internal ones, defines) them when it names one. A global's use
 // does not spell whether it is thread-local, so unlike a function's its line
 // cannot be read off the IR.
 var runtimeGlobals = map[string]string{
+	// libc's stdout FILE*: `__stdoutp` on macOS, `stdout` on the Linux libcs.
+	"__stdoutp": "@__stdoutp = external" + irGlobalAS + " global " + irPtr,
+	"stdout":    "@stdout = external" + irGlobalAS + " global " + irPtr,
+	// The null of a three-state pointer (nullRef): one cell for the whole
+	// binary, the library's units and the C runtime included.
+	"__kml_nullref_cell":        "@__kml_nullref_cell = weak_odr" + irGlobalAS + " global { i64, [248 x i8] } zeroinitializer, align 8",
 	"__kml_argc":                "@__kml_argc = linkonce_odr thread_local" + irGlobalAS + " global i64 -1, align 8",
 	"__kml_array_integrity_any": "@__kml_array_integrity_any = external" + irGlobalAS + " global i8",
 	"__kml_caller_frames":       "@__kml_caller_frames = external" + irGlobalAS + " global i32",
@@ -32,6 +67,7 @@ var runtimeGlobals = map[string]string{
 	"__kml_current_task":        "@__kml_current_task = external thread_local" + irGlobalAS + " global " + irPtr + ", align 8",
 	"__kml_d2s_env":             "@__kml_d2s_env = internal" + irGlobalAS + " constant i8 0, align 8",
 	"__kml_error_name":          "@__kml_error_name = external" + irGlobalAS + " global " + irPtr + ", align 8",
+	"__kml_interp_guard_armed":  "@__kml_interp_guard_armed = external" + irGlobalAS + " global i8, align 1",
 	"__kml_error_names":         "@__kml_error_names = external" + irGlobalAS + " global [2 x " + irPtr + "], align 8",
 	"__kml_frame_base":          "@__kml_frame_base = external thread_local" + irGlobalAS + " global " + irPtr,
 	"__kml_frame_top":           "@__kml_frame_top = external thread_local" + irGlobalAS + " global " + irPtr,
@@ -60,8 +96,7 @@ var runtimeGlobals = map[string]string{
 // each runtime global it names (runtimeGlobals).
 func declareCalled(ll string) string {
 	known := map[string]bool{}
-	lines := strings.Split(ll, "\n")
-	for _, ln := range lines {
+	for ln := range strings.SplitSeq(ll, "\n") {
 		switch {
 		case strings.HasPrefix(ln, "define"), strings.HasPrefix(ln, "declare"):
 			known[firstSym(ln)] = true
@@ -72,7 +107,7 @@ func declareCalled(ll string) string {
 		}
 	}
 	var decls []string
-	for _, ln := range lines {
+	for ln := range strings.SplitSeq(ll, "\n") {
 		if !strings.HasPrefix(ln, " ") {
 			continue // a call is inside a function body
 		}
@@ -85,13 +120,16 @@ func declareCalled(ll string) string {
 			d, name, ok := declOfCall(rest)
 			if ok && !known[name] {
 				known[name] = true
+				if h, isRuntime := runtimeFuncs[name]; isRuntime {
+					d = h
+				}
 				decls = append(decls, d)
 			}
 		}
 	}
 	// A function the program only takes the address of: with opaque
 	// pointers its declaration's type is never read.
-	for _, ln := range lines {
+	for ln := range strings.SplitSeq(ll, "\n") {
 		body := strings.HasPrefix(ln, " ")
 		if !body && !strings.HasPrefix(ln, "@") {
 			continue
@@ -101,6 +139,9 @@ func declareCalled(ll string) string {
 			if g, isGlobal := runtimeGlobals[nm]; ok && isGlobal && !known[nm] {
 				known[nm] = true
 				decls = append(decls, g)
+			} else if h, isRuntime := runtimeFuncs[nm]; ok && isRuntime && !known[nm] && (body || j > 0) {
+				known[nm] = true
+				decls = append(decls, h)
 			} else if ok && !known[nm] && (body || j > 0) && !strings.HasPrefix(nm, "llvm.") {
 				known[nm] = true
 				sym := "@" + nm

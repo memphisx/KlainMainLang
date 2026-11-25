@@ -30,19 +30,6 @@ type derefGuard struct {
 	setting bool
 }
 
-// ensureErrorNames hands exceptions.c the program's interned "TypeError"
-// and "RangeError" (an error's name is compared by address).
-func (e *Emitter) ensureErrorNames() {
-	if e.fnDecls["__kml_error_names"] {
-		return
-	}
-	e.fnDecls["__kml_error_names"] = true
-	e.ensureExceptionHelpers()
-	e.addHookInit(fmt.Sprintf("  store "+irPtr+" %s, "+irPtr+" @__kml_error_names, align 8\n", e.internString("TypeError")))
-	slot := "getelementptr inbounds ([2 x " + irPtr + "], " + irPtr + " @__kml_error_names, i64 0, i64 1)"
-	e.addHookInit(fmt.Sprintf("  store "+irPtr+" %s, "+irPtr+" %s, align 8\n", e.internString("RangeError"), slot))
-}
-
 // derefGuardable reports whether an absent value of type ty is observable as a
 // null pointer / cleared presence flag that a member access would trip over.
 // A declared-nullable type always is: null *is* its absent state. A
@@ -119,7 +106,6 @@ func (e *Emitter) emitDerefThrowIf(absent, word string, g derefGuard) error {
 		verb, gerund = "set", "setting"
 	}
 	head := fmt.Sprintf("Cannot %s properties of %s (%s '", verb, word, gerund)
-	e.ensureErrorNames()
 	throwL := e.freshLabel("nullderef.throw")
 	okL := e.freshLabel("nullderef.ok")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", absent, throwL, okL))

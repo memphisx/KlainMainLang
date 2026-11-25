@@ -36,6 +36,195 @@ static void kml_wasm_ref_release(int64_t slot);
 // ---- wasmtime ----
 #include <wasmtime.h>
 
+// libwasmtime is loaded on the first WebAssembly call, not linked: a program
+// whose global object holds WebAssembly (every one that boxes globalThis)
+// neither needs the library to run nor to link. KW_LIBDIR is where the
+// compiler found it; a bare name falls back to the loader's search.
+#ifndef _WIN32
+#include <dlfcn.h>
+#define KW_FNS(X) \
+    X(wasm_byte_vec_delete) \
+    X(wasm_config_new) \
+    X(wasm_engine_new_with_config) \
+    X(wasm_exporttype_name) \
+    X(wasm_exporttype_type) \
+    X(wasm_exporttype_vec_delete) \
+    X(wasm_externtype_as_functype_const) \
+    X(wasm_externtype_as_globaltype_const) \
+    X(wasm_externtype_as_memorytype_const) \
+    X(wasm_externtype_as_tabletype_const) \
+    X(wasm_externtype_delete) \
+    X(wasm_externtype_kind) \
+    X(wasm_functype_delete) \
+    X(wasm_functype_new) \
+    X(wasm_functype_params) \
+    X(wasm_functype_results) \
+    X(wasm_globaltype_content) \
+    X(wasm_globaltype_delete) \
+    X(wasm_globaltype_mutability) \
+    X(wasm_globaltype_new) \
+    X(wasm_importtype_module) \
+    X(wasm_importtype_name) \
+    X(wasm_importtype_type) \
+    X(wasm_importtype_vec_delete) \
+    X(wasm_memorytype_delete) \
+    X(wasm_tabletype_delete) \
+    X(wasm_tabletype_element) \
+    X(wasm_tabletype_limits) \
+    X(wasm_tabletype_new) \
+    X(wasm_trap_delete) \
+    X(wasm_trap_message) \
+    X(wasm_valtype_kind) \
+    X(wasm_valtype_new) \
+    X(wasm_valtype_vec_new_uninitialized) \
+    X(wasmtime_caller_context) \
+    X(wasmtime_config_shared_memory_set) \
+    X(wasmtime_config_wasm_threads_set) \
+    X(wasmtime_error_delete) \
+    X(wasmtime_error_message) \
+    X(wasmtime_extern_type) \
+    X(wasmtime_externref_data) \
+    X(wasmtime_externref_new) \
+    X(wasmtime_func_call) \
+    X(wasmtime_func_new) \
+    X(wasmtime_global_get) \
+    X(wasmtime_global_new) \
+    X(wasmtime_global_set) \
+    X(wasmtime_instance_export_nth) \
+    X(wasmtime_instance_new) \
+    X(wasmtime_memory_data) \
+    X(wasmtime_memory_data_size) \
+    X(wasmtime_memory_grow) \
+    X(wasmtime_memory_new) \
+    X(wasmtime_memorytype_isshared) \
+    X(wasmtime_memorytype_maximum) \
+    X(wasmtime_memorytype_minimum) \
+    X(wasmtime_memorytype_new) \
+    X(wasmtime_module_exports) \
+    X(wasmtime_module_imports) \
+    X(wasmtime_module_new) \
+    X(wasmtime_module_validate) \
+    X(wasmtime_sharedmemory_clone) \
+    X(wasmtime_sharedmemory_data) \
+    X(wasmtime_sharedmemory_data_size) \
+    X(wasmtime_sharedmemory_grow) \
+    X(wasmtime_sharedmemory_new) \
+    X(wasmtime_sharedmemory_type) \
+    X(wasmtime_store_context) \
+    X(wasmtime_store_new) \
+    X(wasmtime_table_get) \
+    X(wasmtime_table_grow) \
+    X(wasmtime_table_new) \
+    X(wasmtime_table_set) \
+    X(wasmtime_table_size) \
+    X(wasmtime_trap_code) \
+    X(wasmtime_trap_new) \
+    X(wasmtime_val_unroot)
+#define KW_PTR(f) static __typeof__(f) *kwp_##f;
+KW_FNS(KW_PTR)
+static void kw_load_fail(const char *why) {
+    fprintf(stderr, "WebAssembly: libwasmtime could not be loaded: %s\n", why ? why : "unknown error");
+    exit(1);
+}
+static void kw_load(void) {
+#ifdef __APPLE__
+    const char *name = "libwasmtime.dylib";
+#else
+    const char *name = "libwasmtime.so";
+#endif
+    void *h = NULL;
+#ifdef KW_LIBDIR
+    char path[4096];
+    snprintf(path, sizeof path, "%s/%s", KW_LIBDIR, name);
+    h = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+#endif
+    if (!h) h = dlopen(name, RTLD_NOW | RTLD_LOCAL);
+    if (!h) kw_load_fail(dlerror());
+#define KW_SYM(f) if (!(kwp_##f = (__typeof__(f) *)dlsym(h, #f))) kw_load_fail(#f);
+    KW_FNS(KW_SYM)
+#undef KW_SYM
+}
+#define wasm_byte_vec_delete (*kwp_wasm_byte_vec_delete)
+#define wasm_config_new (*kwp_wasm_config_new)
+#define wasm_engine_new_with_config (*kwp_wasm_engine_new_with_config)
+#define wasm_exporttype_name (*kwp_wasm_exporttype_name)
+#define wasm_exporttype_type (*kwp_wasm_exporttype_type)
+#define wasm_exporttype_vec_delete (*kwp_wasm_exporttype_vec_delete)
+#define wasm_externtype_as_functype_const (*kwp_wasm_externtype_as_functype_const)
+#define wasm_externtype_as_globaltype_const (*kwp_wasm_externtype_as_globaltype_const)
+#define wasm_externtype_as_memorytype_const (*kwp_wasm_externtype_as_memorytype_const)
+#define wasm_externtype_as_tabletype_const (*kwp_wasm_externtype_as_tabletype_const)
+#define wasm_externtype_delete (*kwp_wasm_externtype_delete)
+#define wasm_externtype_kind (*kwp_wasm_externtype_kind)
+#define wasm_functype_delete (*kwp_wasm_functype_delete)
+#define wasm_functype_new (*kwp_wasm_functype_new)
+#define wasm_functype_params (*kwp_wasm_functype_params)
+#define wasm_functype_results (*kwp_wasm_functype_results)
+#define wasm_globaltype_content (*kwp_wasm_globaltype_content)
+#define wasm_globaltype_delete (*kwp_wasm_globaltype_delete)
+#define wasm_globaltype_mutability (*kwp_wasm_globaltype_mutability)
+#define wasm_globaltype_new (*kwp_wasm_globaltype_new)
+#define wasm_importtype_module (*kwp_wasm_importtype_module)
+#define wasm_importtype_name (*kwp_wasm_importtype_name)
+#define wasm_importtype_type (*kwp_wasm_importtype_type)
+#define wasm_importtype_vec_delete (*kwp_wasm_importtype_vec_delete)
+#define wasm_memorytype_delete (*kwp_wasm_memorytype_delete)
+#define wasm_tabletype_delete (*kwp_wasm_tabletype_delete)
+#define wasm_tabletype_element (*kwp_wasm_tabletype_element)
+#define wasm_tabletype_limits (*kwp_wasm_tabletype_limits)
+#define wasm_tabletype_new (*kwp_wasm_tabletype_new)
+#define wasm_trap_delete (*kwp_wasm_trap_delete)
+#define wasm_trap_message (*kwp_wasm_trap_message)
+#define wasm_valtype_kind (*kwp_wasm_valtype_kind)
+#define wasm_valtype_new (*kwp_wasm_valtype_new)
+#define wasm_valtype_vec_new_uninitialized (*kwp_wasm_valtype_vec_new_uninitialized)
+#define wasmtime_caller_context (*kwp_wasmtime_caller_context)
+#define wasmtime_config_shared_memory_set (*kwp_wasmtime_config_shared_memory_set)
+#define wasmtime_config_wasm_threads_set (*kwp_wasmtime_config_wasm_threads_set)
+#define wasmtime_error_delete (*kwp_wasmtime_error_delete)
+#define wasmtime_error_message (*kwp_wasmtime_error_message)
+#define wasmtime_extern_type (*kwp_wasmtime_extern_type)
+#define wasmtime_externref_data (*kwp_wasmtime_externref_data)
+#define wasmtime_externref_new (*kwp_wasmtime_externref_new)
+#define wasmtime_func_call (*kwp_wasmtime_func_call)
+#define wasmtime_func_new (*kwp_wasmtime_func_new)
+#define wasmtime_global_get (*kwp_wasmtime_global_get)
+#define wasmtime_global_new (*kwp_wasmtime_global_new)
+#define wasmtime_global_set (*kwp_wasmtime_global_set)
+#define wasmtime_instance_export_nth (*kwp_wasmtime_instance_export_nth)
+#define wasmtime_instance_new (*kwp_wasmtime_instance_new)
+#define wasmtime_memory_data (*kwp_wasmtime_memory_data)
+#define wasmtime_memory_data_size (*kwp_wasmtime_memory_data_size)
+#define wasmtime_memory_grow (*kwp_wasmtime_memory_grow)
+#define wasmtime_memory_new (*kwp_wasmtime_memory_new)
+#define wasmtime_memorytype_isshared (*kwp_wasmtime_memorytype_isshared)
+#define wasmtime_memorytype_maximum (*kwp_wasmtime_memorytype_maximum)
+#define wasmtime_memorytype_minimum (*kwp_wasmtime_memorytype_minimum)
+#define wasmtime_memorytype_new (*kwp_wasmtime_memorytype_new)
+#define wasmtime_module_exports (*kwp_wasmtime_module_exports)
+#define wasmtime_module_imports (*kwp_wasmtime_module_imports)
+#define wasmtime_module_new (*kwp_wasmtime_module_new)
+#define wasmtime_module_validate (*kwp_wasmtime_module_validate)
+#define wasmtime_sharedmemory_clone (*kwp_wasmtime_sharedmemory_clone)
+#define wasmtime_sharedmemory_data (*kwp_wasmtime_sharedmemory_data)
+#define wasmtime_sharedmemory_data_size (*kwp_wasmtime_sharedmemory_data_size)
+#define wasmtime_sharedmemory_grow (*kwp_wasmtime_sharedmemory_grow)
+#define wasmtime_sharedmemory_new (*kwp_wasmtime_sharedmemory_new)
+#define wasmtime_sharedmemory_type (*kwp_wasmtime_sharedmemory_type)
+#define wasmtime_store_context (*kwp_wasmtime_store_context)
+#define wasmtime_store_new (*kwp_wasmtime_store_new)
+#define wasmtime_table_get (*kwp_wasmtime_table_get)
+#define wasmtime_table_grow (*kwp_wasmtime_table_grow)
+#define wasmtime_table_new (*kwp_wasmtime_table_new)
+#define wasmtime_table_set (*kwp_wasmtime_table_set)
+#define wasmtime_table_size (*kwp_wasmtime_table_size)
+#define wasmtime_trap_code (*kwp_wasmtime_trap_code)
+#define wasmtime_trap_new (*kwp_wasmtime_trap_new)
+#define wasmtime_val_unroot (*kwp_wasmtime_val_unroot)
+#else
+static void kw_load(void) {}
+#endif
+
 struct kml_wasm_module { wasmtime_module_t *m; };
 struct kml_wasm_extern { wasmtime_extern_t x; };
 struct kml_wasm_instance { wasmtime_instance_t inst; };
@@ -48,6 +237,7 @@ static __thread wasmtime_store_t *kw_store = NULL;
 static __thread int kw_host_threw = 0;
 
 static void kw_engine_init(void) {
+    kw_load();
     wasm_config_t *cfg = wasm_config_new();
     // The proposals V8 ships enabled (Node 24): reference types, bulk
     // memory, multi-value, SIMD, tail calls, sign extension, saturating

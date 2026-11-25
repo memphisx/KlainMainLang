@@ -202,7 +202,6 @@ plain:
 	// `Object.create(null)` where a string-keyed dictionary is expected is an
 	// empty dictionary with no prototype.
 	if hint.IsDynamicObject() && hint.IsMap() && isObjectCreateNull(expr) {
-		e.ensureMapStrHelpers()
 		m := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", m))
 		fp := e.freshReg()
@@ -349,11 +348,8 @@ plain:
 	// argument, or array element; without it the call self-types
 	// `Promise<typeof v>` and stores the raw scalar bits.
 	if ce, ok := expr.(*ast.CallExpression); ok && hint.IsPromise() {
-		if mem, ok := ce.Callee.(*ast.MemberExpression); ok {
-			if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "Promise" &&
-				mem.Property == "resolve" && !e.isShadowedByLocal(id.Name) {
-				return e.emitPromiseResolve(ce.Args, ce.GetPos(), hint)
-			}
+		if l, ok := e.loweredCall(ce); ok && l.intrinsic == "Promise.resolve" {
+			return e.emitPromiseResolve(ce.Args, ce.GetPos(), hint)
 		}
 	}
 	// An arrow function assigned/passed into a declared function-typed slot
@@ -560,6 +556,12 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 		return e.emitDynObjLiteral(lit)
 	}
 	if lit.HasAccessors() {
+		// A literal the checker types a dynamic object (JavaScript's) is
+		// built as one, whatever the slot: its accessors close over the
+		// enclosing locals, as a bound literal's do.
+		if lt := e.typeOfExpr(lit); lt.IsDynamic() {
+			return e.emitDynObjLiteral(lit)
+		}
 		return e.emitObjectLiteralWithAccessors(lit)
 	}
 	// A spread of a bare any value has no compile-time key set: the literal
@@ -816,7 +818,6 @@ func (e *Emitter) emitObjectLiteralWithHint(lit *ast.ObjectLiteral, hint *Type) 
 			}
 			// … and the properties added beside its layout (a class
 			// instance's accessor Object.defineProperty gave it).
-			e.ensureShapeRuntime()
 			e.declareFn("__kml_shape_expando_spread", "declare void @__kml_shape_expando_spread("+irPtr+", "+irPtr+")")
 			e.emitInstr(fmt.Sprintf("call void @__kml_shape_expando_spread("+irPtr+" %s, "+irPtr+" %s)", dataReg, srcVal.Ref))
 			if srcMask != "" {
@@ -865,7 +866,6 @@ func (e *Emitter) emitDynamicObjectLiteralAs(lit *ast.ObjectLiteral, as *Type) (
 		ty.setNullable(false)
 		ty.setUndefined(false)
 	}
-	e.ensureMapStrHelpers()
 	mapPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", mapPtr))
 
@@ -952,7 +952,6 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 	// emitLogicalCompoundAssign, but through the map's get/set rather than a
 	// fixed ptr. The final value is re-read from the map at the merge point.
 	if isLogicalAssignOp(op) {
-		e.ensureMapStrHelpers()
 		rawReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", rawReg, mapPtr, kRef))
 		cur := e.mapValFromI64(rawReg, valTy)
@@ -1018,7 +1017,6 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 			return Value{}, err
 		}
 	} else {
-		e.ensureMapStrHelpers()
 		rawReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_map_str_get("+irPtr+" %s, "+irPtr+" %s)", rawReg, mapPtr, kRef))
 		cur := e.mapValFromI64(rawReg, valTy)
@@ -1037,7 +1035,6 @@ func (e *Emitter) emitDynamicObjectAssign(ty Type, mapPtr string, keyExpr ast.Ex
 	}
 	rhs = e.convert(rhs, valTy)
 	vRef := e.valueToMapVal(rhs, valTy)
-	e.ensureMapStrHelpers()
 	e.emitInstr(fmt.Sprintf("call void @__kml_map_str_set("+irPtr+" %s, "+irPtr+" %s, i64 %s)", mapPtr, kRef, vRef))
 	return rhs, nil
 }
@@ -1072,7 +1069,7 @@ func (e *Emitter) emitDeclJSONProjection(expr ast.Expression, ty Type) (Value, b
 	if !ok {
 		return Value{}, false, nil
 	}
-	if id, ok := mem.Object.(*ast.Identifier); ok && id.Name == "JSON" && !e.isShadowedByLocal(id.Name) && mem.Property == "parse" {
+	if e.declIntrinsic(ce) == "JSON.parse" {
 		val, err := e.emitJSONParse(ce.Args, ty, ce.GetPos())
 		return val, true, err
 	}
@@ -1308,19 +1305,6 @@ func hostIntoRecordView(src, target Type) bool {
 }
 
 func (e *Emitter) emitObjectDestructuring(s *ast.ObjectDestructuring) error {
-	// `const { subtle } = globalThis.crypto` / `= crypto` (the corpus's
-	// standard Web Crypto binding): the name reads as the TypeScript
-	// SubtleCrypto's one instance wherever it is visible, a function body
-	// included (tsSubtleAlias).
-	if src, ok := cryptoGlobalExpr(s.Init); ok && src && e.tsSubtle() {
-		if len(s.Props) == 1 && s.Props[0].Key == "subtle" && s.Props[0].Default == nil && s.Props[0].SubObject == nil && s.Props[0].SubArray == nil {
-			if e.cryptoSubtleAliases == nil {
-				e.cryptoSubtleAliases = map[string]bool{}
-			}
-			e.cryptoSubtleAliases[s.Props[0].Local] = true
-			return nil
-		}
-	}
 	if t := e.typeOfExpr(s.Init); t.IsArray() && !t.IsDynamic() && !hasRestProp(s.Props) && !hasComputedKeyProp(s.Props) {
 		return e.unpackObjectPatternFromArray(s)
 	}
@@ -1427,6 +1411,23 @@ func (e *Emitter) unpackObjectPatternInto(objPtr string, objTy Type, props []ast
 	// instead (emit_dynobj_destr.go). objPtr is the boxed any value register.
 	if isUnconstrainedDynamic(objTy) {
 		return e.unpackDynObjectPatternInto(Value{Ref: objPtr, Ty: objTy}, props, pos)
+	}
+	if objTy.Host != hostNone && objTy.Kind == kindObject && !hasComputedKeyProp(props) {
+		// A host object's layout is its runtime's, not its properties (a
+		// Response's `body` field holds the bytes; `.body` is the stream):
+		// each key is a property read, its own enumerable properties none.
+		src := e.bindValue(Value{Ref: objPtr, Ty: objTy}, pos)
+		var lit []ast.ObjectProperty
+		for _, prop := range props {
+			if !prop.Rest {
+				lit = append(lit, ast.ObjectProperty{Key: prop.Key, Value: ast.NewMemberExpression(src, prop.Key, pos)})
+			}
+		}
+		v, err := e.emitExpr(ast.NewObjectLiteral(lit, pos))
+		if err != nil {
+			return err
+		}
+		return e.unpackObjectPatternInto(v.Ref, v.Ty, props, pos)
 	}
 	if hasComputedKeyProp(props) {
 		// A runtime key names no static field: read through the boxed value.
@@ -1706,12 +1707,12 @@ func (e *Emitter) resolveObjectPtr(init ast.Expression, pos ast.Pos) (string, Ty
 			return e.boxedDestructureSource(src)
 		}
 		if !found {
-			if _, fn := e.funcs[src.Name]; fn {
-				// A function declaration's value (assert's `ok`, its
-				// properties assigned onto it): its boxed function object.
-				return e.boxedDestructureSource(src)
-			}
-			return "", Type{}, internalAt(pos, "'%s' is not an object", src.Name)
+			// A function declaration's value (assert's `ok`, its properties
+			// assigned onto it), a class (`const { from } = Readable`: its
+			// statics), a global object (`const { Console } = console`), or
+			// in JavaScript a name nothing declares (its ReferenceError):
+			// the value, destructured through the dynamic gets.
+			return e.boxedDestructureSource(src)
 		}
 		objPtr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", objPtr, sym.Ptr))
@@ -1851,15 +1852,13 @@ func (e *Emitter) emitObjectGroupBy(args []ast.Expression, pos ast.Pos) (Value, 
 	if err != nil {
 		return Value{}, err
 	}
+	e.plainCallableMsg = true // V8 names the selector by value alone
 	cb, err := e.resolveCallbackWithHints(args[1], []Type{elemTy})
+	e.plainCallableMsg = false
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
-	e.ensureShapeRuntime()
+	e.ensureDynJSONC()
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
 	e.emitDynSetProtoChecked(bag, "null")
@@ -2521,7 +2520,6 @@ func (e *Emitter) emitObjectFromEntries(args []ast.Expression, pos ast.Pos) (Val
 	mapKey := TypePtr
 	ty := Type{IR: irPtr, Host: hostDynamicObject, MapKey: &mapKey, MapVal: &valTy}
 
-	e.ensureMapStrHelpers()
 	mapPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_str_create()", mapPtr))
 	if err := e.emitMapSeedFromEntries(mapPtr, args[0], mapKey, valTy, pos); err != nil {
@@ -2601,7 +2599,18 @@ func (e *Emitter) emitObjectFromEntriesKeyed(arg ast.Expression, pos ast.Pos) (V
 	set := ast.NewAssignmentExpression("=",
 		ast.NewIndexExpression(ast.NewIdentifier(obj, pos), ast.NewIndexExpression(ast.NewIdentifier(pair, pos), ast.NewNumberLiteral("0", pos), pos), pos),
 		ast.NewIndexExpression(ast.NewIdentifier(pair, pos), ast.NewNumberLiteral("1", pos), pos), pos)
-	loop := ast.NewForOfStatement("const", pair, iter, ast.NewBlockStatement([]ast.Statement{ast.NewExpressionStatement(set, pos)}, pos), pos)
+	// An entry that is not an object is a TypeError, which closes the
+	// iterator as any abrupt end of the loop does (AddEntriesFromIterable).
+	pairID := func() ast.Expression { return ast.NewIdentifier(pair, pos) }
+	typeofIsNot := func(k string) ast.Expression {
+		return ast.NewBinaryExpression("!==", ast.NewUnaryExpression("typeof", true, pairID(), pos), ast.NewStringLiteral(k, pos), pos)
+	}
+	notEntry := ast.NewBinaryExpression("||",
+		ast.NewBinaryExpression("&&", typeofIsNot("object"), typeofIsNot("function"), pos),
+		ast.NewBinaryExpression("===", pairID(), ast.NewNullLiteral(false, pos), pos), pos)
+	msg := ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", ast.NewStringLiteral("Iterator value ", pos), pairID(), pos), ast.NewStringLiteral(" is not an entry object", pos), pos)
+	guard := ast.NewIfStatement(notEntry, ast.NewBlockStatement([]ast.Statement{ast.NewThrowStatement(ast.NewNewErrorExpression("TypeError", msg, pos), pos)}, pos), nil, pos)
+	loop := ast.NewForOfStatement("const", pair, iter, ast.NewBlockStatement([]ast.Statement{guard, ast.NewExpressionStatement(set, pos)}, pos), pos)
 	if err := e.emitStmt(decl); err != nil {
 		return Value{}, err
 	}
@@ -2963,6 +2972,14 @@ func (e *Emitter) emitObjectFreeze(args []ast.Expression, pos ast.Pos) (Value, e
 // to check it against. callerName customizes the error text so it reads
 // naturally regardless of which of the three call sites triggered it.
 func (e *Emitter) emitHasOwnProperty(objExpr, keyExpr ast.Expression, callerName string, ownOnly bool, pos ast.Pos) (Value, error) {
+	if cls, m, ok := e.staticDeletedKey(objExpr, keyExpr); ok && !e.inStaticPresence {
+		// A static method the program deletes is gone once deleted.
+		e.inStaticPresence = true
+		defer func() { e.inStaticPresence = false }()
+		return e.emitStaticPresence(cls, m, func() (Value, error) {
+			return e.emitHasOwnProperty(objExpr, keyExpr, callerName, ownOnly, pos)
+		})
+	}
 	if !ownOnly && !isPureKeyExpr(keyExpr) {
 		// `k in o` evaluates k before o.
 		kv, err := e.emitExpr(keyExpr)
@@ -3137,7 +3154,6 @@ func (e *Emitter) emitHasOwnStatic(objVal Value, keyExpr ast.Expression, callerN
 	}
 	// A key the shape lacks may still be an own property added at runtime
 	// (`(o as any).b = 1`), held in the object's expando table.
-	e.ensureShapeRuntime()
 	has := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_shape_expando_has("+irPtr+" %s, "+irPtr+" %s)", has, objVal.Ref, e.internString(keyLit.Value)))
 	own := e.freshReg()
@@ -3447,27 +3463,6 @@ func (e *Emitter) emitStaticWriteRefused(obj Value, name string) string {
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", r, frozen, ro))
 	return r
-}
-
-// registerCryptoSubtleAliases pre-scans top-level statements for the
-// `const { subtle } = globalThis.crypto` binding (ADR-00434) so Pass 2
-// function bodies see the alias before the statement itself emits.
-func (e *Emitter) registerCryptoSubtleAliases(prog *ast.Program) {
-	for _, stmt := range prog.Body {
-		d, ok := stmt.(*ast.ObjectDestructuring)
-		if !ok {
-			continue
-		}
-		if g, _ := cryptoGlobalExpr(d.Init); !g {
-			continue
-		}
-		if len(d.Props) == 1 && d.Props[0].Key == "subtle" && d.Props[0].Default == nil {
-			if e.cryptoSubtleAliases == nil {
-				e.cryptoSubtleAliases = map[string]bool{}
-			}
-			e.cryptoSubtleAliases[d.Props[0].Local] = true
-		}
-	}
 }
 
 // dynObjectKeyExpr normalizes a computed-key expression for the map-backed
@@ -3804,7 +3799,6 @@ func (e *Emitter) emitArrayIntegrityOp(prop string, arg ast.Expression) (Value, 
 	}
 	hdr, lenReg := e.arrayArgFromAggregate(v)
 	v.Ref = hdr
-	e.ensureErrorNames()
 	level := map[string]int{"freeze": staticIntegrityFrozen, "seal": staticIntegritySealed, "preventExtensions": staticIntegrityNonExtensible}
 	if lvl, ok := level[prop]; ok {
 		if v.Ty.IsTypedArray() && prop != "preventExtensions" {

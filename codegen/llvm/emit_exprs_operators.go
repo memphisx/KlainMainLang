@@ -40,6 +40,13 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		}
 	}
 
+	if ex.Op == "==" || ex.Op == "!=" || ex.Op == "===" || ex.Op == "!==" {
+		if e.overriddenStaticRead(ex.Left) || e.overriddenStaticRead(ex.Right) {
+			// A static method the program replaces or deletes: compared
+			// as the value the class holds now, not as its declared type.
+			return e.emitBoxedEquality(ex)
+		}
+	}
 	left, err := e.emitExpr(ex.Left)
 	if err != nil {
 		return Value{}, err
@@ -588,7 +595,6 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 			cmpOp = "ne"
 		}
 		if cmpOp != "" {
-			e.ensureFnMeta()
 			e.declareFn("__kml_fn_identity_hdr", "declare "+irPtr+" @__kml_fn_identity_hdr("+irPtr+")")
 			l, r := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_identity_hdr("+irPtr+" %s)", l, left.Ref))
@@ -980,8 +986,6 @@ func (e *Emitter) emitBinary(ex *ast.BinaryExpression) (Value, error) {
 		return e.quietIdentity(ex, Value{Ref: reg, Ty: ty}), nil
 	case "%":
 		if ty.Float {
-			// frem lowers to a libcall to fmod — needs libm on Linux.
-			e.requireLink("m")
 			e.emitInstr(fmt.Sprintf("%s = frem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
 			e.emitDivZeroGuard(ty, left, right)
@@ -1257,6 +1261,13 @@ func (e *Emitter) emitUndefinedableTypeof(arg ast.Expression, ty Type) (Value, b
 	case val.Ty.IR == irPtr:
 		present = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", present, val.Ref))
+	case val.Ty.IR == "double" && !val.Ty.IsDynamic() && typeofString(base) == "number":
+		// Emitted as a bare number (an optional method's call, present
+		// here): absent only as the undefined sentinel (TDD-00241).
+		b := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = bitcast double %s to i64", b, val.Ref))
+		present = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", present, b, undefF64))
 	default:
 		return Value{}, false, nil
 	}
@@ -1358,7 +1369,12 @@ func (e *Emitter) isValueMethodRef(objTy Type, prop string) bool {
 	if objTy.IsClass() {
 		if info, ok := e.classes[objTy.ClassName]; ok {
 			if _, isMethod := info.MethodSigs[prop]; isMethod {
-				return true // a plain method (accessor keys are accessorMethodName-mangled, never a bare prop)
+				// A plain method (accessor keys are accessorMethodName-
+				// mangled, never a bare prop), unless an accessor or field
+				// of the same name overrides it (accessorOverMethods).
+				_, _, acc := e.classAccessorSigs(objTy.ClassName, prop)
+				_, _, fld := info.Ty.FieldIndex(prop)
+				return !acc && !fld
 			}
 		}
 		return false
@@ -1442,9 +1458,8 @@ func (e *Emitter) emitDeleteClassOwn(arg ast.Expression) (Value, bool, error) {
 				}
 				// A static method is a configurable data property: its
 				// reads find undefined in the class's own bag from now on.
-				e.ensureNanBox()
-				e.declareFn("__kml_classref_set", "declare void @__kml_classref_set("+irPtr+", "+irPtr+", i64)")
-				e.emitInstr(fmt.Sprintf("call void @__kml_classref_set("+irPtr+" %s, "+irPtr+" %s, i64 %d)", e.classRefPtr(identName(a.Object)), e.internString(a.Property), nbUndefined))
+				e.declareFn("__kml_classref_static_delete", "declare void @__kml_classref_static_delete("+irPtr+", "+irPtr+")")
+				e.emitInstr(fmt.Sprintf("call void @__kml_classref_static_delete("+irPtr+" %s, "+irPtr+" %s)", e.classRefPtr(identName(a.Object)), e.internString(a.Property)))
 				return Value{Ref: "1", Ty: TypeBool}, true, nil
 			}
 		}
@@ -1716,7 +1731,21 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 	// argument — EXCEPT for any/unknown, where the concrete type can change at
 	// runtime, so it must become a genuine runtime tag dispatch instead.
 	if ex.Op == "typeof" {
-		if mem, ok := ex.Arg.(*ast.MemberExpression); ok && e.protoUses().replaced && e.typeOfExpr(mem.Object).IsClass() {
+		if id, ok := ex.Arg.(*ast.Identifier); ok && e.environmentGlobal(id) {
+			// A `declare global` value: the global object's property as it
+			// is now ("undefined" when absent, no ReferenceError).
+			v, err := e.emitExpr(ast.NewMemberExpression(ast.NewIdentifier("globalThis", id.GetPos()), id.Name, id.GetPos()))
+			if err != nil {
+				return Value{}, err
+			}
+			if !v.Ty.IsDynamic() {
+				if v, err = e.emitBoxValue(v); err != nil {
+					return Value{}, err
+				}
+			}
+			return e.emitDynamicTypeof(v)
+		}
+		if mem, ok := ex.Arg.(*ast.MemberExpression); ok && e.protoReplaced() && e.typeOfExpr(mem.Object).IsClass() {
 			// An instance whose prototype may have been replaced: its
 			// member as it reads now.
 			ov, err := e.emitExpr(mem.Object)
@@ -1810,6 +1839,13 @@ func (e *Emitter) emitUnary(ex *ast.UnaryExpression) (Value, error) {
 			return Value{Ref: e.internString(s), Ty: TypePtr}, nil
 		}
 		ty := e.typeOfExpr(ex.Arg)
+		// A builtin's accessor (`res.body`) is the value its intrinsic
+		// emits, not the raw slot the checker's answer maps to.
+		if m, ok := ex.Arg.(*ast.MemberExpression); ok && !m.Optional && hasBodyMixin(e.typeOfExpr(m.Object)) {
+			if pi, ok := e.propertyIntrinsic(m); ok {
+				ty = pi.ty(e, m)
+			}
+		}
 		if ty.IsCaught() {
 			val, err := e.emitExpr(ex.Arg)
 			if err != nil {
@@ -2462,6 +2498,15 @@ func dateCompoundAssignGuard(op string, targetIsDate, rhsIsDate bool) error {
 }
 
 func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) (Value, error) {
+	if ty.IsDynamic() && !isNullableScalar(ty) {
+		// An any target (a field, a static, an element) dispatches the
+		// operator at run time on its box, as an any variable does.
+		res, err := e.emitAnyBinary(op, Value{Ref: left.Ref, Ty: TypeAny}, right, pos)
+		if err != nil {
+			return Value{}, err
+		}
+		return e.emitBoxValue(res)
+	}
 	// A string-typed compound-assignment target (`s += ...`) never reaches
 	// emitBinary's own top-of-function string handling — every caller here
 	// is a compound-assign path (emit_exprs_assign.go/emit_objects.go/
@@ -2575,8 +2620,6 @@ func (e *Emitter) emitArith(op string, left, right Value, ty Type, pos ast.Pos) 
 		// reachable; see the lexer/token.go and lexer/lexer.go changes
 		// alongside this one.
 		if ty.Float {
-			// frem lowers to a libcall to fmod — needs libm on Linux.
-			e.requireLink("m")
 			e.emitInstr(fmt.Sprintf("%s = frem %s %s, %s", reg, ty.IR, left.Ref, right.Ref))
 		} else {
 			e.emitDivZeroGuard(ty, left, right)

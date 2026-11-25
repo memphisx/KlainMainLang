@@ -453,6 +453,9 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	if v.Ty.IsDynamic() {
 		return v, nil
 	}
+	if v.Ty.ExecArray {
+		return e.emitBoxExecArray(v)
+	}
 	if v.Ty.NullAndUndef() {
 		boxed, err := e.emitBoxValue(e.fromThreeState(v))
 		if err != nil {
@@ -513,6 +516,11 @@ func (e *Emitter) emitBoxValue(v Value) (Value, error) {
 	// not representable at box time stores the sentinel -1 and keeps the
 	// `[object Array]` stand-in.
 	if v.Ty.IsArray() {
+		if v.Ty.ElemType != nil && !v.Ty.IsTuple() {
+			// The dynamic runtime reads a boxed array's buffer: a sparse
+			// array goes dense first (holes.c).
+			e.emitDensify(v.Ref, *v.Ty.ElemType)
+		}
 		boxed := e.emitBoxArrayPlain(v)
 		if e.arrayMayBeClassBody(v) {
 			// The body of an instance of a class extending Array boxes as
@@ -891,7 +899,6 @@ func (e *Emitter) boxAnyArray(v Value) string {
 	if v.Ty.BigIntElem {
 		// Its elements box as bigints (boxsrc/bigintbox.c).
 		e.ensureBigInt()
-		e.ensureBoxedBigIntHooks()
 	}
 	innerKind, innerTyped := -1, anyArrayPlain
 	if v.Ty.ElemType != nil && v.Ty.ElemType.IsArray() {
@@ -1029,7 +1036,6 @@ func (e *Emitter) emitNbTagPtr(ptrReg string, tag int) string {
 // payload) pair every dispatch site switches on — a number always decodes
 // to kmlTagFloat with its double bits as the payload.
 func (e *Emitter) emitUnboxTagPayload(v Value) (tag, payload string) {
-	e.ensureNanBox()
 	tag = e.freshReg()
 	payload = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, v.Ref))
@@ -1050,370 +1056,28 @@ func (e *Emitter) emitTagCheck(tag string, want int, prefix string) (matchL, nex
 }
 
 // emitDynamicToString formats the current runtime value of a boxed any/unknown
-// for console.log/template literals. Mirrors emitOptionalMember's shape: a
-// result slot, one branch block per tag storing into it, and a merge block
-// that loads the result — generalized from 2 branches to 7 (one per tag).
+// for String()/template literals (anystr.c).
 func (e *Emitter) emitDynamicToString(v Value) (Value, error) {
-	return e.emitDynamicRender(v, false)
+	return e.emitAnyToStr(v), nil
 }
 
 // emitDynamicInspect is the console.log rendering of a boxed any/unknown value:
 // the Node util.inspect form (`[ 1, 2, 3 ]`, quoted string elements) rather than
 // the flat String() join (`1,2,3`). Scalars print identically to ToString at the
 // top level (numbers/booleans bare, strings unquoted); only a boxed array differs
-// (TDD-00212 Stage 2). Everything else routes through the shared dispatch.
+// (TDD-00212 Stage 2).
 func (e *Emitter) emitDynamicInspect(v Value) (Value, error) {
-	return e.emitDynamicRenderAt(v, true, 0)
+	return e.emitDynamicInspectAt(v, 0)
 }
 
 // emitDynamicInspectAt is emitDynamicInspect for a value nested `depth` levels
 // inside a statically inspected container, so the dynamic walker continues
 // Node's depth/indentation instead of restarting at the top (ADR-01067).
 func (e *Emitter) emitDynamicInspectAt(v Value, depth int) (Value, error) {
-	return e.emitDynamicRenderAt(v, true, depth)
-}
-
-// emitDynamicRender is the shared tag dispatch behind emitDynamicToString and
-// emitDynamicInspect. `inspect` selects the console.log bracket form for a boxed
-// array; every other tag renders the same in both modes.
-func (e *Emitter) emitDynamicRender(v Value, inspect bool) (Value, error) {
-	return e.emitDynamicRenderAt(v, inspect, 0)
-}
-
-func (e *Emitter) emitDynamicRenderAt(v Value, inspect bool, depth int) (Value, error) {
-	// One shared function per (mode, depth), called at each site: inline,
-	// the tag dispatch was ~300 lines of IR per String(x) or `+` on any.
-	fn := "@__kml_dynrender_s"
-	if inspect {
-		fn = fmt.Sprintf("@__kml_dynrender_i%d", depth)
-	}
-	if e.protoBuilders == nil {
-		e.protoBuilders = map[string]bool{}
-	}
-	if !e.protoBuilders[fn] {
-		e.protoBuilders[fn] = true
-		savedLib, savedShared, savedLit := e.inLib, e.sharedCode, e.sharedLitUnit
-		e.inLib, e.sharedCode, e.sharedLitUnit = "", 0, ""
-		restore := e.beginDetachedFunc()
-		r, err := e.emitDynamicRenderInline(Value{Ref: "%v", Ty: TypeAny}, inspect, depth)
-		if err == nil && !e.blockDone {
-			e.emitTerminator("ret " + irPtr + " " + r.Ref)
-		}
-		body := e.allocas.String() + e.body.String()
-		restore()
-		e.inLib, e.sharedCode, e.sharedLitUnit = savedLib, savedShared, savedLit
-		if err != nil {
-			delete(e.protoBuilders, fn)
-			return Value{}, err
-		}
-		e.writeFunc(irPtr+" "+fn+"(i64 %v)", body)
-	}
-	e.declareFn(fn[1:], "declare "+irPtr+" "+fn+"(i64)")
+	e.ensureAnyStr()
 	r := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s(i64 %s)", r, fn, v.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_any_show_at(i64 %s, i64 %d, i64 %d)", r, v.Ref, depth, e.effectiveInspectDepth())) // anystr.c
 	return Value{Ref: r, Ty: TypePtr}, nil
-}
-
-// emitDynamicRenderInline is emitDynamicRenderAt's dispatch, emitted once
-// into its shared function.
-func (e *Emitter) emitDynamicRenderInline(v Value, inspect bool, depth int) (Value, error) {
-	if !inspect {
-		// TDD-00201 Stage 4: a dynamic object stringifies via its own toString /
-		// @@toPrimitive (string hint) rather than the "[object Object]" default —
-		// `String({toString(){return "hi"}})` is "hi". Runtime ToPrimitive returns a
-		// primitive box (or "[object Object]" when the object has no such method); a
-		// non-object box passes through, so this is a no-op for scalars. console.log
-		// (inspect) does NOT call toString — it inspects — so this step is skipped.
-		v = Value{Ref: e.emitAnyToPrimitive(v.Ref, true), Ty: TypeAny}
-	}
-
-	tag, payload := e.emitUnboxTagPayload(v)
-
-	resPtr := e.freshReg()
-	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
-	mergeL := e.freshLabel("dynstr.merge")
-
-	store := func(ref string) {
-		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", ref, resPtr))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
-	}
-
-	matchL, nextL := e.emitTagCheck(tag, kmlTagInt, "dynstr.int")
-	e.emitLabel(matchL)
-	scratch := e.emitStringScratch(32) // TDD-00120
-	fmtInt := e.internString("%lld")
-	e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, i64 %s)", scratch, fmtInt, payload))
-	e.emitStringFinalizeLen(scratch)
-	store(scratch)
-	e.emitLabel(nextL)
-
-	matchL, nextL = e.emitTagCheck(tag, kmlTagFloat, "dynstr.float")
-	e.emitLabel(matchL)
-	fscratch := e.emitStringScratch(32) // TDD-00120
-	fdouble := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = bitcast i64 %s to double", fdouble, payload))
-	e.emitInstr(fmt.Sprintf("call void @__kml_dtoa("+irPtr+" %s, double %s)", fscratch, fdouble))
-	e.emitStringFinalizeLen(fscratch)
-	store(fscratch)
-	e.emitLabel(nextL)
-
-	matchL, nextL = e.emitTagCheck(tag, kmlTagString, "dynstr.string")
-	e.emitLabel(matchL)
-	sptr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, sptr, payload))
-	store(sptr)
-	e.emitLabel(nextL)
-
-	matchL, nextL = e.emitTagCheck(tag, kmlTagBoolean, "dynstr.bool")
-	e.emitLabel(matchL)
-	isTrue := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isTrue, payload))
-	boolPtr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", boolPtr, isTrue, e.internString("true"), e.internString("false")))
-	store(boolPtr)
-	e.emitLabel(nextL)
-
-	matchL, nextL = e.emitTagCheck(tag, kmlTagNull, "dynstr.null")
-	e.emitLabel(matchL)
-	store(e.internString("null"))
-	e.emitLabel(nextL)
-
-	matchL, nextL = e.emitTagCheck(tag, kmlTagUndefined, "dynstr.undef")
-	e.emitLabel(matchL)
-	store(e.internString("undefined"))
-	e.emitLabel(nextL)
-
-	// A boxed array stringifies via the JS Array join (`String([1,2,3]) ===
-	// "1,2,3"`): the box header carries the (ptr, len) pair plus an element-kind
-	// byte (TDD-00212), so __kml_array_join can stride the buffer and format each
-	// element. An element kind not representable at box time carries -1, for which
-	// the helper returns the honest `[object Array]` stand-in (TDD-00062).
-	matchL, nextL = e.emitTagCheck(tag, kmlTagArray, "dynstr.array")
-	e.emitLabel(matchL)
-	e.ensureDynJSONC()
-	aBox := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, aBox, payload))
-	// The walker reads the box itself: field 0 is the live array header (so a
-	// post-box push is reflected — TDD-00212 Stage 3), field 1 the element
-	// kind, field 2 the typed-array byte (ADR-01059).
-	aStr := e.freshReg()
-	// console.log → the util.inspect bracket form (`[ 1, 2, 3 ]`, a TypedArray
-	// as `Int32Array(3) [ … ]`); String() / interpolation → the flat Array join
-	// (`1,2,3`). Both share the element stride/format on the same box.
-	if inspect {
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_array_inspect_at("+irPtr+" %s, i64 %d)", aStr, aBox, depth))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_array_join("+irPtr+" %s)", aStr, aBox))
-	}
-	store(aStr)
-	e.emitLabel(nextL)
-
-	// A boxed built-in-constructor reference stringifies the way real JS
-	// stringifies a native function — the payload is the interned name.
-	matchL, nextL = e.emitTagCheck(tag, kmlTagFuncRef, "dynstr.funcref")
-	e.emitLabel(matchL)
-	fnName := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, fnName, payload))
-	if !inspect {
-		// String(K): a class's source text, else the native-function form.
-		e.ensureFnMeta()
-		e.declareFn("__kml_classref_tostring", "declare "+irPtr+" @__kml_classref_tostring("+irPtr+")")
-		src := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_tostring("+irPtr+" %s)", src, fnName))
-		store(src)
-	} else {
-		// console.log inspects: a class boxed as a value as `[class C] {
-		// statics }`, a builtin constructor as `[Function: TypeError]`.
-		e.ensureDynJSONC()
-		cls := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_shown("+irPtr+" %s)", cls, fnName))
-		isCls := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", isCls, cls))
-		clsL, fnL := e.freshLabel("dynstr.classref"), e.freshLabel("dynstr.nativefn")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isCls, clsL, fnL))
-		e.emitLabel(clsL)
-		full := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_inspect_at("+irPtr+" %s, i64 %d)", full, fnName, depth))
-		store(full)
-		e.emitLabel(fnL)
-		fnBuf := e.emitStringScratch(64) // TDD-00120; a builtin constructor's name
-		e.emitInstr(fmt.Sprintf("call i32 ("+irPtr+", "+irPtr+", ...) @sprintf("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", fnBuf, e.internString("[Function: %s]"), fnName))
-		e.emitStringFinalizeLen(fnBuf)
-		store(fnBuf)
-	}
-	e.emitLabel(nextL)
-
-	// A dynamic (prototype-method) function stringifies like a native
-	// function — the source text isn't retained.
-	matchL, nextL = e.emitTagCheck(tag, kmlTagDynFunc, "dynstr.dynfn")
-	e.emitLabel(matchL)
-	if inspect {
-		// util.inspect's `[Function: name]` form (TDD-00229).
-		e.ensureFnMeta()
-		rec := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rec, payload))
-		fs := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_inspect_dyn("+irPtr+" %s, i64 %d)", fs, rec, depth))
-		store(fs)
-	} else {
-		e.ensureFnMeta()
-		rec := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rec, payload))
-		fs := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_tostring_dyn("+irPtr+" %s)", fs, rec))
-		store(fs)
-	}
-	e.emitLabel(nextL)
-
-	// A dynamic array stringifies as its JS Array join ("1,hi,true"), matching
-	// `String([1,'hi',true])` — the C walker handles nesting/null/undefined.
-	matchL, nextL = e.emitTagCheck(tag, kmlTagDynArray, "dynstr.dynarr")
-	e.emitLabel(matchL)
-	daHdr := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, daHdr, payload))
-	daStr := e.freshReg()
-	// console.log → bracket inspect form (`[ 1, 'hi', true ]`); String() → the
-	// flat comma join (`1,hi,true`). TDD-00212 Stage 2.
-	if inspect {
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_inspect_at("+irPtr+" %s, i64 %d)", daStr, daHdr, depth))
-	} else {
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynarr_join("+irPtr+" %s)", daStr, daHdr))
-	}
-	store(daStr)
-	e.emitLabel(nextL)
-
-	// A dynamic object under console.log renders in its util.inspect form
-	// (`{ a: 1, b: 'x' }` — keys in enumeration order, accessors as [Getter],
-	// Node's default depth-2 collapse). String()/interpolation never reaches
-	// this tag with a plain object: emitAnyToPrimitive above already resolved
-	// it (own toString, else the "[object Object]" primitive).
-	if inspect {
-		matchL, nextL = e.emitTagCheck(tag, kmlTagDynObject, "dynstr.dynobj")
-		e.emitLabel(matchL)
-		e.ensureDynJSONC()
-		doPtr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, doPtr, payload))
-		doStr := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_inspect_at("+irPtr+" %s, i64 %d)", doStr, doPtr, depth))
-		store(doStr)
-		e.emitLabel(nextL)
-	}
-
-	// A boxed built-in Error (field-0 type-id flag set, low bits a builtin
-	// kind) renders as `name: message` via emitErrorToString — matching
-	// `String(new Error("x")) === "Error: x"`. This recovers the Error shape a
-	// boxed `any` otherwise loses (TDD-00222); a boxed plain object (or an
-	// error-subclass instance, whose fields don't line up) keeps the default.
-	matchL, nextL = e.emitTagCheck(tag, kmlTagObject, "dynstr.obj")
-	e.emitLabel(matchL)
-	// A boxed bigint (emit_bigint_box.go): its digits, with console.log's
-	// trailing `n` (TDD-00229).
-	bigCell, isBig := e.emitBoxedBigIntProbe(payload)
-	bigL := e.freshLabel("dynstr.obj.bigint")
-	notBigL := e.freshLabel("dynstr.obj.notbig")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isBig, bigL, notBigL))
-	e.emitLabel(bigL)
-	// Through the finalize-time hook, so rendering an `any` never drags the
-	// bigint runtime into a program that has no bigints.
-	e.ensureBoxedBigIntHooks()
-	bigDigits := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_boxed_bigint_str("+irPtr+" %s)", bigDigits, bigCell))
-	bigStr := Value{Ref: bigDigits, Ty: TypePtr}
-	if inspect {
-		var err error
-		bigStr, err = e.emitStringConcat(bigStr, Value{Ref: e.internString("n"), Ty: TypePtr})
-		if err != nil {
-			return Value{}, err
-		}
-	}
-	store(bigStr.Ref)
-	e.emitLabel(notBigL)
-	// A boxed host handle (emit_hostbox.go): Node's inspect form under
-	// console.log, `[object Map]` as a string. Probed whether or not a host
-	// box was made yet: one made later reaches here too, and the builtin
-	// library's code cannot know (TDD-00238).
-	{
-		e.ensureHostBoxHooks()
-		hostCell, isHost := e.emitHostProbe(payload)
-		hostL, notHostL := e.freshLabel("dynstr.obj.host"), e.freshLabel("dynstr.obj.nothost")
-		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isHost, hostL, notHostL))
-		e.emitLabel(hostL)
-		if inspect {
-			store(e.emitHostInspectCall(hostCell, depth))
-		} else {
-			store(e.emitHostToStringTag(hostCell))
-		}
-		e.emitLabel(notHostL)
-	}
-	errObjPtr, errIsErr := e.emitBoxedErrorProbe(payload)
-	errL := e.freshLabel("dynstr.obj.err")
-	plainL := e.freshLabel("dynstr.obj.plain")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", errIsErr, errL, plainL))
-	e.emitLabel(errL)
-	if inspect {
-		// util.inspect's form: the header with Node's `Ctor [Name]`, then
-		// its own properties (dynjson.c inspect_error).
-		e.ensureDynJSONC()
-		e.declareFn("__kml_obj_inspect_at", "declare "+irPtr+" @__kml_obj_inspect_at("+irPtr+", i64)")
-		es := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_inspect_at("+irPtr+" %s, i64 %d)", es, errObjPtr, depth))
-		store(es)
-	} else {
-		errStr, err := e.emitErrorToString(Value{Ref: errObjPtr, Ty: TypePtr})
-		if err != nil {
-			return Value{}, err
-		}
-		store(errStr.Ref)
-	}
-	e.emitLabel(plainL)
-	// A boxed Symbol (hidden field-0 flag, ADR-01059) renders as
-	// `Symbol(desc)` — console.log's and String(sym)'s form — instead of the
-	// plain-object stand-in. (Implicit conversion in `+`/template literals
-	// throws in JS; that stays the shared V1 leniency TDD-00044 documents.)
-	symObjPtr, isSym := e.emitBoxedSymbolProbe(payload)
-	symL := e.freshLabel("dynstr.obj.symbol")
-	objL := e.freshLabel("dynstr.obj.object")
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isSym, symL, objL))
-	e.emitLabel(symL)
-	symStr, err := e.emitSymbolToString(Value{Ref: symObjPtr, Ty: SymbolType()})
-	if err != nil {
-		return Value{}, err
-	}
-	store(symStr.Ref)
-	e.emitLabel(objL)
-	if inspect {
-		// A static object renders through its layout row (TDD-00233).
-		e.ensureDynJSONC()
-		e.declareFn("__kml_obj_inspect_at", "declare "+irPtr+" @__kml_obj_inspect_at("+irPtr+", i64)")
-		op := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, op, payload))
-		os := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_inspect_at("+irPtr+" %s, i64 %d)", os, op, depth))
-		store(os)
-	} else {
-		// Object.prototype.toString: "[object Tag]" for a class with a
-		// Symbol.toStringTag, else "[object Object]".
-		e.ensureDynJSONC()
-		e.declareFn("__kml_object_tostring", "declare "+irPtr+" @__kml_object_tostring(i64)")
-		os := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_object_tostring(i64 %s)", os, v.Ref))
-		store(os)
-	}
-	e.emitLabel(nextL)
-
-	// Remaining tag: object → "[object Object]", matching JS's
-	// `String({}) === "[object Object]"` (a plain object has no useful
-	// value-string, and its field contents aren't recovered from the boxed
-	// pointer). Previously this branch `inttoptr`'d the payload and stored it
-	// as a string pointer, printing the object's raw struct bytes as a C
-	// string (garbage/empty) — a now-reachable bug once any-typed parameters
-	// can carry an object.
-	store(e.internString("[object Object]"))
-
-	e.emitLabel(mergeL)
-	result := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", result, resPtr))
-	return Value{Ref: result, Ty: TypePtr}, nil
 }
 
 // emitDynamicTypeof implements `typeof x` for a boxed any/unknown value: a
@@ -1524,8 +1188,6 @@ func (e *Emitter) emitAnyEquals(a, b Value, negate bool) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureBoxedBigIntHooks()
-	e.ensureFnMeta()
 	result := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", result, boxedA.Ref, boxedB.Ref))
 	if negate {
@@ -1637,4 +1299,107 @@ func selfIdentifyingObjects(members []Type) bool {
 		}
 	}
 	return true
+}
+
+// emitBoxExecArray boxes an exec()/match() result: the array, and, for a
+// match (index >= 0), its own index, input and groups, which the boxed
+// array then holds as named properties (groups undefined without named
+// groups). The copying runs in a helper: one call here, no new blocks.
+func (e *Emitter) emitBoxExecArray(v Value) (Value, error) {
+	plain := v.Ty
+	plain.ExecArray, plain.ExecMaybePlain = false, false
+	boxed, err := e.emitBoxValue(Value{Ref: v.Ref, Ty: plain})
+	if err != nil {
+		return Value{}, err
+	}
+	var herr error
+	fn := e.contentNamedHelper(e.dynSetHelpers0(), "\x00boxexec", "@__kml_boxexec.", "i64", "i64 %b, "+irPtr+" %h", func() {
+		isNull := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %%h, null", isNull))
+		chkL, setL, doneL := e.freshLabel("boxexec.chk"), e.freshLabel("boxexec.set"), e.freshLabel("boxexec.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, doneL, chkL))
+		e.emitLabel(chkL)
+		idx := e.execMemberRead("%h", "index", false)
+		isMatch := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", isMatch, idx.Ref))
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isMatch, setL, doneL))
+		e.emitLabel(setL)
+		bv := Value{Ref: "%b", Ty: TypeAny}
+		for _, prop := range []string{"index", "input", "groups", "indices"} {
+			m := e.execMemberRead("%h", prop, false)
+			if prop == "indices" {
+				// Only the d flag's result has its own indices.
+				has := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", has, m.Ref, nbUndefined))
+				setIx, skipIx := e.freshLabel("boxexec.indices"), e.freshLabel("boxexec.indices.done")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, setIx, skipIx))
+				e.emitLabel(setIx)
+				if _, err := e.emitDynAnyMemberSetNamed(bv, e.internString(prop), prop, m, ast.Pos{}); err != nil {
+					herr = err
+					break
+				}
+				e.emitTerminator(fmt.Sprintf("br label %%%s", skipIx))
+				e.emitLabel(skipIx)
+				continue
+			}
+			var mb Value
+			var err error
+			if prop == "index" {
+				d := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = sitofp i64 %s to double", d, m.Ref))
+				mb, err = e.emitBoxValue(Value{Ref: d, Ty: TypeF64})
+			} else {
+				t := m.Ty
+				t.Absent = 0
+				if prop != "groups" {
+					mb, err = e.emitBoxValue(Value{Ref: m.Ref, Ty: t})
+				} else {
+					// No named groups: undefined (the null slot is never read).
+					slot := e.freshReg()
+					e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+					e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, slot))
+					gn := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", gn, m.Ref))
+					hasL, joinL := e.freshLabel("boxexec.groups"), e.freshLabel("boxexec.gjoin")
+					e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", gn, joinL, hasL))
+					e.emitLabel(hasL)
+					var gb Value
+					if gb, err = e.emitBoxValue(Value{Ref: m.Ref, Ty: t}); err == nil {
+						e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", gb.Ref, slot))
+					}
+					e.emitTerminator(fmt.Sprintf("br label %%%s", joinL))
+					e.emitLabel(joinL)
+					r := e.freshReg()
+					e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, slot))
+					mb = Value{Ref: r, Ty: TypeAny}
+				}
+			}
+			if err == nil {
+				_, err = e.emitDynAnyMemberSetNamed(bv, e.internString(prop), prop, mb, ast.Pos{})
+			}
+			if err != nil {
+				herr = err
+				break
+			}
+		}
+		if !e.blockDone {
+			e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		}
+		e.emitLabel(doneL)
+		e.emitTerminator("ret i64 %b")
+	})
+	if herr != nil {
+		return Value{}, herr
+	}
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 %s(i64 %s, "+irPtr+" %s)", r, fn, boxed.Ref, v.Ref))
+	return Value{Ref: r, Ty: boxed.Ty}, nil
+}
+
+// dynSetHelpers0 is the memo of the exec-boxing helper.
+func (e *Emitter) dynSetHelpers0() map[string]string {
+	if e.dynSetHelpers == nil {
+		e.dynSetHelpers = map[string]string{}
+	}
+	return e.dynSetHelpers
 }

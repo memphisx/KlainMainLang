@@ -182,7 +182,7 @@ func (e *Emitter) emitStreamFulfillThunk(chunkTy Type) string {
 // (arrow / function expression only — a later invocation needs a real
 // closure header) with the given param hints.
 func (e *Emitter) streamCallbackClosure(arg ast.Expression, hints []Type, what string, pos ast.Pos) (Value, error) {
-	if streamCallbackNeedsAdapter(arg, len(hints)) {
+	if e.streamCallbackNeedsAdapter(arg, hints) {
 		// Any other function value, or one declaring more parameters than
 		// the stream passes: read once, called through an arrow taking
 		// what the stream passes (the rest of its parameters undefined).
@@ -290,15 +290,29 @@ func (e *Emitter) streamUnderlyingDynamic(src ast.Expression, names []string) (m
 }
 
 // streamCallbackNeedsAdapter reports an underlying-source callback that is
-// no arrow or function expression of at most n parameters.
-func streamCallbackNeedsAdapter(arg ast.Expression, n int) bool {
+// no arrow or function expression of at most len(hints) parameters, or one
+// that types a parameter any over a static argument.
+func (e *Emitter) streamCallbackNeedsAdapter(arg ast.Expression, hints []Type) bool {
+	var params []ast.Param
 	switch fn := arg.(type) {
 	case *ast.ArrowFunction:
-		return len(fn.Params) > n
+		params = fn.Params
 	case *ast.FunctionExpression:
-		return len(fn.Params) > n
+		params = fn.Params
+	default:
+		return true
 	}
-	return true
+	if len(params) > len(hints) {
+		return true
+	}
+	// A parameter annotated any/unknown holds the box of what the stream
+	// passes (its controller): the adapter's call boxes it.
+	for i, p := range params {
+		if p.Type != nil && isUnconstrainedDynamic(e.annotationType(p.Type)) && !hints[i].IsDynamic() {
+			return true
+		}
+	}
+	return false
 }
 
 // callbackReturnsPromise reports whether a source callback's static return
@@ -588,11 +602,7 @@ func (e *Emitter) emitNewReadableStream(ex *ast.NewReadableStreamExpression) (Va
 		chunkTy = e.annotationType(ex.ChunkType)
 	}
 	controllerTy := RSControllerType(chunkTy)
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 
 	// Destructure the underlying source at compile time.
@@ -805,16 +815,12 @@ func (e *Emitter) emitStreamStateErrorBox(msg string) string {
 
 // emitStreamStateErrorPtr is emitStreamStateError's error object.
 func (e *Emitter) emitStreamStateErrorPtr(msg string) string {
-	e.ensureExceptionHelpers()
 	return e.buildErrorObjWithCode(errorKindIDs["TypeError"], e.internString(msg), e.internString("TypeError"), e.internString("ERR_INVALID_STATE"), "0.0", "null")
 }
 
 // emitRejectedStreamPromise is a Promise rejected with Node's stream state
 // error msg.
 func (e *Emitter) emitRejectedStreamPromise(msg string, ty Type) Value {
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
 	bits := e.emitStreamStateError(msg)
 	p := e.freshReg()
@@ -864,7 +870,6 @@ func (e *Emitter) resolveStreamHandle(objExpr ast.Expression, pos ast.Pos) (Type
 
 // streamThrowTypeError throws a TypeError with msg when flagReg (an i64) is 0.
 func (e *Emitter) streamThrowTypeError(flagReg, msg string) {
-	e.ensureExceptionHelpers()
 	bad := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", bad, flagReg))
 	throwL := e.freshLabel("rs.throw")
@@ -908,11 +913,7 @@ func (e *Emitter) emitStreamMethodCall(objExpr ast.Expression, method string, ar
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	chunkTy := TypeI64
 	if ty.StreamChunk != nil {
@@ -1200,11 +1201,7 @@ func (e *Emitter) emitReadableStreamFrom(args []ast.Expression, pos ast.Pos) (Va
 		return e.emitReadableStreamFromIterable(args[0], pos)
 	}
 	elemTy := *arrTy.ElemType
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 
 	ptrReg, lenReg, _, err := e.resolveArrayForHOF(args[0], pos)
@@ -1252,11 +1249,7 @@ func (e *Emitter) emitReadableStreamFrom(args []ast.Expression, pos ast.Pos) (Va
 // promise awaited through the shared task-promise await (microtask-accurate in
 // both runtime tiers).
 func (e *Emitter) emitForAwaitOfStream(s *ast.ForOfStatement, ty Type, streamVal Value, condL, bodyL, incL, endL string) error {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	chunkTy := TypeI64
 	if ty.StreamChunk != nil {

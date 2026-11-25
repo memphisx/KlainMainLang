@@ -84,7 +84,6 @@ func (e *Emitter) emitDynOwnBagOf(v Value, what string, fn bool, pos ast.Pos) (s
 		// A class reference: a snapshot of its own properties.
 		crL, notCrL := e.emitTagCheck(tag, kmlTagFuncRef, "dyndesc.classref")
 		e.emitLabel(crL)
-		e.usedClassRefBag = true
 		e.declareFn("__kml_classref_bag", "declare "+irPtr+" @__kml_classref_bag("+irPtr+")")
 		crBag := e.freshReg()
 		if e.defineOnClassOwn {
@@ -148,10 +147,7 @@ func (e *Emitter) emitDynOwnBagOf(v Value, what string, fn bool, pos ast.Pos) (s
 // descFieldBool reads a boolean-ish descriptor field: returns (present i1,
 // value i1) registers. An undefined field is absent.
 func (e *Emitter) descFieldBool(descBag, name string) (present, val string) {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", r, descBag, e.internString(name)))
 	present = e.freshReg()
@@ -190,10 +186,7 @@ func (e *Emitter) emitObjectDefineProperty(args []ast.Expression, pos ast.Pos) (
 	if len(args) != 3 {
 		return Value{}, internalAt(pos, "Object.defineProperty arity")
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	target, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
@@ -295,6 +288,7 @@ func (e *Emitter) emitObjectDefineProperty(args []ast.Expression, pos ast.Pos) (
 		// attributes and accessors, in the added-property table.
 		e.emitArrayDefineProperty(target, keyRef, descBag, e.freshLabel("defprop.rest"), doneL)
 	}
+	e.usedObjExtensible = true // a static object's added property (emitObjExtraFinalize)
 	e.defineOnClassOwn = true
 	bag, obj, err := e.emitDynOwnBagOf(target, "Object.defineProperty", true, pos)
 	e.defineOnClassOwn = false
@@ -328,10 +322,10 @@ func (e *Emitter) emitObjectDefineProperties(args []ast.Expression, pos ast.Pos)
 		}
 		args = kept
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
+	// A static object it defines a property on carries it beside its
+	// layout, which inspect, keys and stringify then read.
+	e.usedObjExtensible = true
 	obj, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
@@ -490,10 +484,7 @@ func (e *Emitter) emitArrayDefineProperty(target Value, keyRef, descBag, restL, 
 // emitThrowRedefine throws V8's TypeError for a refused redefinition of
 // the run-time property key keyRef.
 func (e *Emitter) emitThrowRedefine(keyRef string) {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_redefine_msg", "declare "+irPtr+" @__kml_redefine_msg("+irPtr+")")
 	msg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_redefine_msg("+irPtr+" %s)", msg, keyRef))
@@ -504,7 +495,6 @@ func (e *Emitter) emitThrowRedefine(keyRef string) {
 // dynamic-object bag.
 func (e *Emitter) emitDefinePropertyOn(bag, keyRef, descBag string) {
 	// A Proxy defines through its defineProperty trap, else its target.
-	e.ensureShapeRuntime()
 	e.declareFn("__kml_proxy_define", "declare "+irPtr+" @__kml_proxy_define("+irPtr+", "+irPtr+", "+irPtr+")")
 	tgt := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_proxy_define("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", tgt, bag, keyRef, descBag))
@@ -578,8 +568,6 @@ func (e *Emitter) emitDefinePropertyOn(bag, keyRef, descBag string) {
 	ncV, ncVPresent, ncSame := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get_at("+irPtr+" %s, i64 %s)", ncV, bag, idx))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", ncVPresent, valBox, nbUndefined))
-	e.ensureBoxedBigIntHooks()
-	e.ensureFnMeta()
 	e.declareFn("__kml_Object_is", "declare zeroext i1 @__kml_Object_is(i64, i64)")
 	e.emitInstr(fmt.Sprintf("%s = call zeroext i1 @__kml_Object_is(i64 %s, i64 %s)", ncSame, ncV, valBox))
 	vOK, roOK, dataOK := e.freshReg(), e.freshReg(), e.freshReg()
@@ -720,10 +708,7 @@ func (e *Emitter) emitObjectGetOwnPropertyDescriptor(args []ast.Expression, pos 
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	v, err := e.emitExprWithObjectHint(args[0], TypeAny)
 	if err != nil {
 		return Value{}, err
@@ -755,7 +740,6 @@ func (e *Emitter) emitObjectGetOwnPropertyDescriptor(args []ast.Expression, pos 
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(restL)
 		// A primitive string: its String object's index or length.
-		e.ensureShapeRuntime()
 		e.declareFn("__kml_str_own_desc", "declare i64 @__kml_str_own_desc("+irPtr+", "+irPtr+")")
 		stag, spay := e.emitUnboxTagPayload(v)
 		strL, notStrL := e.emitTagCheck(stag, kmlTagString, "gopd.str")
@@ -766,11 +750,7 @@ func (e *Emitter) emitObjectGetOwnPropertyDescriptor(args []ast.Expression, pos 
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(notStrL)
 		// A boxed static object reads its own field through its layout.
-		e.ensureAnyToPrimitive()
-		e.ensureNanBox()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
-		e.ensureShapeRuntime()
+		e.ensureDynJSONC()
 		tag, payload := e.emitUnboxTagPayload(v)
 		staticL, dynL := e.emitTagCheck(tag, kmlTagObject, "gopd.static")
 		e.emitLabel(staticL)
@@ -784,7 +764,19 @@ func (e *Emitter) emitObjectGetOwnPropertyDescriptor(args []ast.Expression, pos 
 		ed := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_error_own_desc("+irPtr+" %s, "+irPtr+" %s)", ed, errPtr, keyRef))
 		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ed, resPtr))
-		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+		// None of the error's own: a field a class extending Error declares
+		// is its layout's (a key of the Error layout itself stays absent).
+		none := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", none, ed, nbUndefined))
+		acc := none
+		for _, f := range errorObjType.Fields {
+			c, ne, and := e.freshReg(), e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call i32 @strcmp("+irPtr+" %s, "+irPtr+" %s)", c, keyRef, e.internString(f.Name)))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", ne, c))
+			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", and, acc, ne))
+			acc = and
+		}
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", acc, shapeL, doneL))
 		e.emitLabel(shapeL)
 		sd := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_shape_own_desc("+irPtr+" %s, "+irPtr+" %s)", sd, e.emitIntToPtr(payload), keyRef))
@@ -830,10 +822,7 @@ var toObjectStatics = map[string]bool{"Object.getOwnPropertyNames": true, "Objec
 // emitOwnPropertyNamesOf is getOwnPropertyNames of the evaluated v, for
 // the caller what names (Object.getOwnPropertyNames, Reflect.ownKeys).
 func (e *Emitter) emitOwnPropertyNamesOf(v Value, what string, pos ast.Pos) (Value, error) {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	var err error
 	if !v.Ty.IsDynamic() && (v.Ty.IsObject() || v.Ty.IsClass() || v.Ty.IsArray() || isStringTy(v.Ty) || scalarTypeKind(v.Ty) != "") && !v.Ty.IsDynamicObject() {
 		if v, err = e.emitBoxValue(v); err != nil {
@@ -878,7 +867,7 @@ func (e *Emitter) emitOwnPropertyNamesOf(v Value, what string, pos ast.Pos) (Val
 		e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 		e.emitLabel(notStrL)
 		// A boxed static object: its layout's keys, all enumerable.
-		e.ensureShapeKeysArray()
+		e.ensureDynJSONC()
 		tag, payload := e.emitUnboxTagPayload(v)
 		staticL, dynL := e.emitTagCheck(tag, kmlTagObject, "gopn.static")
 		e.emitLabel(staticL)
@@ -924,11 +913,7 @@ func (e *Emitter) emitOwnEnumSymbolsOf(v Value) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureShapeRuntime()
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	e.declareFn("__kml_own_enum_symbols_c", "declare void @__kml_own_enum_symbols_c(i64, "+irPtr+")")
 	out := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca { "+irPtr+", i64 }, align 8", out))
@@ -944,11 +929,7 @@ func (e *Emitter) emitOwnSymbolsOf(v Value) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureShapeRuntime()
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	// A Proxy's ownKeys result is read through __kml_anyarr_get_by_key or
 	// the dynamic-array accessors.
 	e.ensureDynJSONC()
@@ -993,7 +974,6 @@ func (e *Emitter) emitReflectOwnKeys(arg ast.Expression, pos ast.Pos) (Value, er
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureShapeRuntime()
 		e.declareFn("__kml_proxy_reflect_own_keys", "declare i32 @__kml_proxy_reflect_own_keys(i64, "+irPtr+", "+irPtr+")")
 		errSlot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", errSlot))
@@ -1037,10 +1017,7 @@ func (e *Emitter) emitReflectOwnKeys(arg ast.Expression, pos ast.Pos) (Value, er
 // emitDynPrevent backs freeze/seal/preventExtensions on a dynamic object;
 // returns the (boxed) object, like JS.
 func (e *Emitter) emitDynPrevent(objVal Value, mode int) (Value, error) {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	boxed, err := e.emitBoxValue(objVal)
 	if err != nil {
 		return Value{}, err
@@ -1065,7 +1042,6 @@ func (e *Emitter) emitDynPrevent(objVal Value, mode int) (Value, error) {
 	// other non-object argument is returned unchanged.
 	hostL, primL := e.emitTagCheck(tag, kmlTagObject, "dynprev.host")
 	e.emitLabel(hostL)
-	e.ensureShapeRuntime()
 	e.declareFn("__kml_host_prevent", "declare i1 @__kml_host_prevent("+irPtr+", i64)")
 	e.emitInstr(fmt.Sprintf("call i1 @__kml_host_prevent("+irPtr+" %s, i64 %d)", e.emitIntToPtr(payload), mode))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -1078,10 +1054,7 @@ func (e *Emitter) emitDynPrevent(objVal Value, mode int) (Value, error) {
 // emitDynFlagsTest backs isExtensible/isSealed/isFrozen on a dynamic value.
 // A non-object answers per JS: isExtensible false, isSealed/isFrozen true.
 func (e *Emitter) emitDynFlagsTest(objVal Value, mode int) (Value, error) {
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	boxed, err := e.emitBoxValue(objVal)
 	if err != nil {
 		return Value{}, err
@@ -1115,7 +1088,6 @@ func (e *Emitter) emitDynFlagsTest(objVal Value, mode int) (Value, error) {
 	// A host value (a Map, a Date): from its header's level.
 	hostL, primL := e.emitTagCheck(tag, kmlTagObject, "dynflag.host")
 	e.emitLabel(hostL)
-	e.ensureShapeRuntime()
 	e.declareFn("__kml_host_level_test", "declare i1 @__kml_host_level_test("+irPtr+", i64, "+irPtr+")")
 	e.emitInstr(fmt.Sprintf("call i1 @__kml_host_level_test("+irPtr+" %s, i64 %d, "+irPtr+" %s)", e.emitIntToPtr(payload), mode, resPtr))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
@@ -1130,7 +1102,6 @@ func (e *Emitter) emitDynFlagsTest(objVal Value, mode int) (Value, error) {
 // emitFnBagOf is the property bag of the boxed function whose payload is
 // payload (fnmeta.c), made on first use.
 func (e *Emitter) emitFnBagOf(payload string) string {
-	e.ensureFnMeta()
 	e.declareFn("__kml_fn_bag_of", "declare "+irPtr+" @__kml_fn_bag_of("+irPtr+")")
 	rec, bag := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, rec, payload))
@@ -1147,7 +1118,6 @@ func (e *Emitter) classRefAsBag(boxed Value) Value {
 	tag, payload := e.emitUnboxTagPayload(boxed)
 	crL, doneL := e.emitTagCheck(tag, kmlTagFuncRef, "crbag.ref")
 	e.emitLabel(crL)
-	e.usedClassRefBag = true
 	e.declareFn("__kml_classref_bag", "declare "+irPtr+" @__kml_classref_bag("+irPtr+")")
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classref_bag("+irPtr+" %s)", bag, e.emitIntToPtr(payload)))

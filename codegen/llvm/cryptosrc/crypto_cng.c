@@ -34,6 +34,8 @@
 typedef long long ll;
 
 extern void __kml_pool_job(void (*work)(void *, long long *, double *), void *job, void *inv, void *clo);
+extern void __kml_pool_job_pinned(void (*work)(void *, long long *, double *), void *job, void *pin, void *inv,
+                                  void *clo);
 extern char *__kml_str_alloc(long long n);
 extern void __kml_str_finalize(char *s);
 
@@ -1530,7 +1532,7 @@ void __kml_native_crypto_random_fill_async(void *data, long long size, double of
     if (off < 0 || len < 0 || off + len > size) len = 0, off = 0;
     j->p = (unsigned char *)data + off;
     j->len = len;
-    __kml_pool_job(kncg_rand_work, j, inv, clo);
+    __kml_pool_job_pinned(kncg_rand_work, j, data, inv, clo);
 }
 
 /* ---- key derivation: pbkdf2 (BCryptDeriveKeyPBKDF2), scrypt, hkdf ---- */
@@ -1772,7 +1774,7 @@ void __kml_native_crypto_kdf_async(double op, void *a, long long alen, void *b, 
                                    double n1, double n2, double n3, double n4, const char *digest, void *out, long long outlen,
                                    void *inv, void *clo) {
     kncg_kdf *k = kncg_kdf_new(op, a, alen, b, blen, c, clen, n1, n2, n3, n4, digest, out, outlen);
-    __kml_pool_job(kncg_kdf_work, k, inv, clo);
+    __kml_pool_job_pinned(kncg_kdf_work, k, out, inv, clo);
 }
 
 /* ---- ciphers: AES CBC/ECB over CNG, CTR and GCM over its ECB ---- */

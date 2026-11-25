@@ -46,9 +46,6 @@ file; the exhaustive list of every unfinished TDD is the generated table in
 Type, representation, builtin-dispatch and event-loop bugs below are fixed by the
 phase that owns them, not at the symptom site.
 
-- Codegen: a mixin applied to a value that is not a class at compile time
-  (another function's parameter, a conditional) is a not-supported
-  diagnostic; the checker accepts it.
 - Codegen: a tuple read as an object type of its numeric members
   (`const p: { 0: A; 1: B } = pair`) is a copy: a record view finds its
   layout at the object's first word, an array's type word sits before it.
@@ -65,23 +62,29 @@ same day lands here, at the top. One bug per line.
 
 15. **One-off:** `TestE2EHTTPCreateServerResStreamLargeBodyIntact` — "server
     never started listening", once in 274 runs. Chase it when it recurs.
+177. **Array walks densify a sparse array**: `join`, `at`, `pop`,
+    `slice`, `concat`, `console.log`, `JSON.stringify` rebuild the buffer at
+    full length, ending out of memory past 2^27 elements, where V8 walks
+    only the elements present. A boolean array cannot go sparse
+    (`indexOf/15.4.4.14-5-16`); a dynamic array (`JSON.parse` result) never
+    does, so a far write or `length` set past 2^27 ends the same way.
+178. **A replaced built-in is ignored**: after `Promise.resolve = f`,
+    `Array.prototype.push = f`, `Math.max = f` (and `map`, `trim`,
+    `JSON.stringify`, `Object.keys`) a call still runs the built-in, on
+    typed and `any` receivers; an own `[Symbol.iterator]` on an array is
+    ignored by spread, `for...of` and destructuring. Builtins compile to
+    direct calls; phase 3's dispatch owns it. Deferred: large.
+179. **`Map`/`Set` delete is O(n)**: `__kml_map_remove_at` shifts every
+    later entry and rescans the index; 100k deletes take 12 s (Node 10 ms).
+    Codegen, inspect and clone read `keys`/`vals` dense by offset, so
+    tombstones need each of them.
+180. **Object property keys end at a NUL**: `o["a\0b"]` and `o["a\0c"]`
+    are one key (dynobj.c/shape.c compare with `strcmp`).
+174. **`worker.terminate()` misses a tight loop**: a worker in a loop that
+    never enters the runtime (`while (true) {}`) is not stopped; the
+    terminate flag is polled only per microtask and per `postMessage`.
 ### `-compat=js`
 
-137. **Arguments reflection**: `Object.getOwnPropertyDescriptor`,
-    `getOwnPropertyNames`/`Symbols`, `hasOwnProperty` and `Reflect.ownKeys`
-    of an `arguments` object omit its own `Symbol.iterator` and `callee`.
-138. **Global `eval` rebinding**: sloppy `eval = v` (and `globalThis.eval = v`)
-    is "undefined variable"; `globalThis.eval` reads always unwrap to the
-    builtin, so the global object needs an `eval` property that reads see.
-139. **Deleted static method keeps its type**: after `delete C.m`,
-    `C.m === undefined` and a binding of `C.m` still see the method.
-140. **Per-evaluation value heritage**: a class in a function extending a
-    variable's value shares one prototype across calls (latest read wins).
-141. **Heritage expressions**: `extends null`, `extends f()`, `extends (a, B)`
-    are parse errors; `extends` a block or function local is rejected.
-142. **Base constructor returning an object** (large): `super()` to a base
-    whose constructor returns an object is rejected; for a function base the
-    returned object is ignored. Needs `this` = that object, privates on it.
 117. **After the restructure: delete `klain:tty`** (bespoke `readByte`/
     `readKey`; `klain:tui` reads keys from `process.stdin` `'data'`). Not a
     restructure step.
@@ -91,94 +94,14 @@ same day lands here, at the top. One bug per line.
 134. **Ubuntu 26.04 lane**: CI and the Linux test boxes use 24.04
     (clang 18); run the suites on 26.04 (newer clang, glibc, OpenSSL)
     and move CI's Linux runners to it.
-136. **Conformance runner**: the memory cap assumes ~1.5 GiB per worker,
-    but a library-heavy WPT/Node file's clang peaks at 3–4 GiB (~60 GB
-    with 14 workers on Node304).
-137. **Not-iterable messages**: `new Map(2)` says "2 is not iterable" and a
-    spread argument says "__kml_ha0 is not iterable"; V8 says "number 2 is
-    not iterable (cannot read property Symbol(Symbol.iterator))".
-138. **Class expression extending a captured local** (`function w(B) {
-    return class extends B {}; }`): "extends unknown class 'B'"; the
-    declaration form works.
-139. **Promise.prototype constructor lookups**: `await` and `for await`
-    never read a `constructor` accessor defined on `Promise.prototype`.
-140. **`-mm=gc` klain:sync select hang**: about 1 in 300 runs of
-    `TestE2EGCModeGoroutinesSelectChurn` (GC_FREE_SPACE_DIVISOR=1000) hang;
-    the collecting thread waits in `dl_iterate_phdr` on the loader lock.
-141. **Primitive `F.prototype`**: assigning a constructor function's
-    `prototype` a non-object (`F.prototype = 1`, `F.prototype += 1`) throws;
-    the prototype is held as an object bag, not a value slot.
-142. **Static object as prototype**: `Object.create(new C())` (a value of
-    a static class or object type) is a compile error; a bag's prototype
-    chain cannot reach a struct's fields.
-143. **Checker callback-parameter variance**: a generic callback's
-    annotated parameter (`reduce((acc: number, v) => …, 0)` returning
-    `number | undefined`) is related bivariantly, not by strictFunctionTypes;
-    codegen still rejects the reduce case itself.
-144. **Native-record class bases**: `extends Response`/`Request`/
-    `ReadableStream`/`WritableStream`/`TransformStream`/`DecompressionStream`/
-    `XMLHttpRequest` refused (the instance does not embed the native record).
-145. **Unsound cast to a scalar**: `f("s" as unknown as number)` passes NaN
-    (Node: the string); the parameter's static f64 drops the value.
-146. **`void` as a stored value**: `[v(), v()]`, `{ a: v() }` and a
-    `Map<string, void>` set with `v(): void` fail (emit guard, field type,
-    invalid IR); a void value in a container should be undefined.
-147. **Not-a-function receiver names**: `/a/.foo()` prints
-    `(intermediate value)` (a regexp literal and `new RegExp` share a node);
-    `D.m.zz()` prints `value.zz` (V8: `D.m.zz`).
-148. **util.format `%s` of an object**: String() of it (`[object Object]`);
-    Node inspects one without a user-defined toString at depth 0 (`{}`).
-149. **Queuing strategies**: `new CountQueuingStrategy(…)` and
-    `ByteLengthQueuingStrategy` exist only as a stream constructor's argument
-    (no standalone object); an invalid `size()` result (NaN, negative, not a
-    number) does not raise Node's RangeError and error the stream.
-150. **Experimental decorators' target**: a class or member decorator receives
-    a synthetic object, not the constructor or prototype (`c.name` is
-    undefined); decorators on a generic class are rejected.
-151. **Transformer start()**: a promise it returns does not delay the
-    first transform, and its rejection does not error the stream.
-152. **console.log of a BigInt literal's index**: `console.log("a", 1n[0])`
-    prints an empty second value (`(5)[0]`, `b[0]` print undefined).
-153. **Destructuring null's message**: `const [a] = null` says "object null
-    is not iterable (cannot read property …)"; V8 prints the literal ("null
-    is not iterable").
-154. **Error `{ cause: undefined }`**: an explicit undefined cause is not
-    installed (`"cause" in e` is false); the slot uses undefined for absent.
-155. **Inherited member-kind override**: a subclass accessor over a base
-    method (or the reverse, or over a base field) is a compile error.
-156. **Primitive & object intersection**: strict `Object.assign(5, { k })`
-    is typed `number & { k }` and lowered to the bare number (wrapper lost).
-157. **undefined into a number array**: `[1, 2].with(0)` / `.fill()` store
-    NaN where JavaScript stores undefined.
-158. **Promise combinator over a non-iterable**: `Promise.all(5)` throws
-    synchronously; it returns a rejected promise in JavaScript.
-159. **Object.assign retyping a field (strict)**: `Object.assign(t, { a: "x" })`
-    on `t: { a: number }` is rejected; the binding needs a dynamic layout.
-160. **setPrototypeOf on a fixed layout**: a class instance's (or, strict, a
-    typed object's) prototype cannot change; the call is rejected.
-161. **Uncaught report omits an error's own properties**: Node prints
-    `{ code: 'ENOENT', … }` after the stack; the report prints the stack only.
-162. **Tuple identity through a box**: a tuple boxed into `any` or held as a
-    Set/Map key is copied (`boxTupleAsArray`); `set.has(t)` is `false`.
-169. **No `%ArrayIteratorPrototype%` object**: `Object.getPrototypeOf([].values())`
-    is null, so its `next` can be neither read nor patched.
-168. **A write through a type assertion keeps the old narrowing**: after
-    `let y: number | string = 1; (y as any) = "s"`, a read of `y` is
-    converted as `number` (NaN); Node prints `s`.
-167. **A class passed to an object-typed parameter is copied**:
-    `f(K)` with `f(o: { x: number })` writes a copy, not `K`'s statics.
-163. **Class-typed parameter given a plain object through `any`**:
-    `take(x: K)` called with an `any` holding `{ a: 9 }` reads the instance
-    layout (`x.a` is 0); the parameter must take the box.
-164. **defineProperties alone hides the property from inspect**: a typed
-    object given `b` only by `Object.defineProperties` logs `{ a: 1 }`
-    (reads, keys and JSON see it; with any `defineProperty` in the program
-    it logs).
-165. **Proxy read through an inferred return**: `function f() { return
-    p.a }` takes the target's declared type, coercing a trap's other-kind
-    result (direct reads and bindings keep the box).
-166. **Builtin namespace has no `default`**: `import * as os from 'node:os'`
-    (and `import('node:os')`) lacks Node's `default` (module.exports).
+172. **Non-`u` regex over astral text**: `/./g`, `/(?:)/g`, `split(/(?:)/)`
+    match a whole astral character, not each surrogate half (PCRE2-8 UTF
+    matches by code point; needs a PCRE2-16 non-UTF path). Deferred: large.
+167. **No `showHidden`**: `util.inspect(v, { showHidden: true })` and
+    `%o` ignore it (Node: `[ 1, 2, [length]: 2 ]`, a function's
+    `[length]`/`[name]`/`[prototype]`, a typed array's `[buffer]`, a
+    non-enumerable `[key]`). Every inspector (C and generated) needs the
+    mode. Deferred: large.
 
 ## 1. Highest leverage — do these first
 
@@ -212,10 +135,6 @@ Nothing open.
 
 ## 3. Node / runtime surface (mostly small, incremental)
 
-- **Math last-digit precision** — `log`/`trig`/`hyperbolic`/`expm1`/`log1p`
-  come from the platform libm, which differs from V8's fdlibm in the last
-  binary digit (`Math.tan(1)`). Port fdlibm as `cbrt` was; each function's
-  `@lower` in `lib/es.d.ts` then names the port.
 - **Web streams** — no BYOB/byte controllers; `ReadableStream.from()` arrays
   only.
 - **WebSocket** — client offers no `permessage-deflate`; klain:ws's
@@ -237,36 +156,25 @@ Nothing open.
 
 - `eval` / `Function(string)` / `vm` / `repl` — embedded engine, TDD-00046.
   Nothing built.
-- RegExp: the `d` flag's `.indices` is missing; `\w`/`\b` under `iu` stay
-  ASCII; an escaped lone surrogate matches nothing.
-- `Intl.*` (no ICU); `String.normalize()`.
+- RegExp: an escaped lone surrogate (`/\uD83D/`) is a SyntaxError and `.` never
+  matches a subject's lone surrogate: UTF-mode PCRE2 has no surrogate code
+  point to match strings' WTF-8 against.
+- RegExp: a backreference past a repeated group sees an earlier iteration's
+  capture (`/(?:(a)|b)+\1/` on "abab" matches "aba"; ES clears it).
+- RegExp: `v`'s properties of strings (`\p{RGI_Emoji}`) are a SyntaxError.
+- `Intl.*` (no ICU).
+- A tagged template's cooked string for an invalid or legacy octal escape is
+  the decoded text; ES makes it `undefined` (`` t`\01` `` → `[undefined]`).
 - Generalized destructuring (TDD-00065); decorator class-replacement +
   static-field (TDD-00161).
 - Union-element arrays (TDD-00200): a *constrained union* element (`(A | B)[]`)
   is rejected; a statically-typed
   object/array *value* boxed into an `any[]` element is type-erased — deep
   `JSON.stringify` of it throws (object *literals* are fine).
-- Honor `--unhandled-rejections=none`: an unhandled rejection still stringifies
-  the rejection value (Node never touches it) — don't eagerly coerce it.
-- `import('node:…')` of a builtin module is a compile error.
 - The `-compat` per-divergence flags (TDD-00075); `any` residues (TDD-00162).
 - `--no-any` strict-lane flag (TDD-00209): Stages 1–2 ship (annotation + inferred
   var-decl `any` rejected); left is value-level `any` in other positions
   (inferred-`any` return, nested any sub-expression).
-- Global interface augmentation (`interface Array<T> {…}` in a script,
-  `declare global`) is not merged into the builtin declarations.
-- An overloaded call's argument has no contextual type (tsc types it by
-  the candidate under resolution): a nested literal method's `this` misses
-  the outer `ThisType<T>`.
-- A literal method under `ThisType<T>` binds `this` to the literal at run
-  time; the `ThisType` intersection is a compile error in codegen.
-- `Promise.withResolvers.call(86)` ignores its non-constructor `this` (no
-  TypeError).
-- Abrupt completions skipped: a throwing `Symbol.isConcatSpreadable` getter
-  (`concat`), a Proxy `has` trap (`copyWithin` on an array-like), a throwing
-  `name` getter (`Function.prototype.bind`).
-- `typeof globalThis.isNaN` as an annotation does not take the value
-  `globalThis.isNaN` reads (internal error).
 - `libbf` (MIT) as a third selectable `-bigint` backend alongside
   libtommath/gmp.
 - **Cross-cutting roots (high leverage):** nested-array element rejection in
@@ -275,15 +183,28 @@ Nothing open.
 
 ## 5. Perf / GC / infra
 
+- **Linux `--static` cannot link two apps**: `apps/loadtest` (the distro's
+  static libcurl needs libssh/zlib/krb5 archives `-lcurl` alone leaves
+  unresolved) and `apps/explorer` (no static WebKitGTK/GTK/Pango archives;
+  a GUI program needs those dynamic). `make apps` is outside CI, so only a
+  local run sees it.
+- **Every library class with a prototype links its constructor routines**
+  (`C.prototype.constructor` makes it a value; ~+2% text on a small program):
+  register a library class's construct/get/set rows only once its prototype
+  is built, so an unread class's routines dead-strip.
 - **Bare `new Map()`/`new Set()` is boxed** (tsc's `Map<any, any>`): an opt-in
   flag to specialize keys and values from the binding's later calls.
+- **Branded primitives are boxed** (`string & { __brand }`, ADR-02028): an
+  opt-in flag holding a brand as its bare primitive when no wrapper reaches it.
 - **Hand-written runtime IR** → [TDD-00240](tdd/TDD-00240.md): no IR
   `define` text left outside the function framing (`TestIRTextOnlyShrinks`);
   per-program generators (the `.then` runner, class-reference dispatch,
   coroutine trampolines, island glue) still pass hand-written bodies to it.
-- **Cross-language inlining**: the C runtime links as separate objects, so
-  hot leaf helpers (`__kml_nb_*`, `__kml_str_len`/`_alloc`/`_free`) stay IR;
-  ThinLTO did not inline `__kml_str_cmp` into its caller.
+- **Cross-language inlining is opt-in**: the C runtime links as separate
+  objects, so hot leaf helpers (`__kml_nb_*`, `__kml_str_len`/`_alloc`/
+  `_free`) stay IR; only `-lto` (ThinLTO) inlines C into the program
+  (`__kml_str_cmp` included). Make it the default link once compile time
+  allows.
 - **Per-program library units**: each library unit is specialized per
   program, so the conformance object cache does not share them (Test262
   at ~3 files/s).
@@ -342,7 +263,7 @@ and Raspberry Pi (TDD-00045) targets, Immix (TDD-00135).
 
 Generated by `make status` from `docs/status/data/*.json`. **Every line here is an issue to tackle.** A missing feature and a behavioural divergence both break code ported from Node/TS/JS, so both count. **Strict Coverage** of an area = the ✅ features carrying zero caveats; the number rises only when a caveat is *fixed and deleted*, never by rewording. Fix a caveat in the status data and it disappears from here; do not edit below the marker by hand.
 
-**Total: 390 caveats · overall Strict Coverage 455/665 (~68%).** Areas below are ordered worst Strict Coverage first.
+**Total: 390 caveats · overall Strict Coverage 463/670 (~69%).** Areas below are ordered worst Strict Coverage first.
 
 ### Memory Management — Strict 0/5 (0%) · 22 caveats — [Memory Management](status/MEMORY-MANAGEMENT.md)
 - `manual` (default) — Never frees on its own — a program's footprint grows monotonically with runtime unless the programmer calls `Memory.free(x)` by hand
@@ -418,15 +339,15 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 ### Networking — Strict 2/8 (25%) · 18 caveats — [Networking](status/NETWORKING.md)
 - `fetch(url)` / `fetch(url, init)` / `fetch(request)` — A transport failure other than a refused connection, a failed lookup or a bad port (TLS, timeout, reset) has an `Error` with libcurl's message as its `cause`, where undici gives its own error and `code`
 - `Response` (`.status`, `.ok`, `.headers`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`) — `const p: T = await r.json()` orders the object's keys by `T`'s declaration, with undeclared keys after it, rather than by the body's order
-- `Response` (`.status`, `.ok`, `.headers`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`) — No `clone()`: a compile error
 - `Response` (`.status`, `.ok`, `.headers`, `.body`, `.text()`, `.json()`, `.arrayBuffer()`) — `console.log` of a Response with a body shows `supportsBYOB: false` on it, where Node's body is a byte stream
 - `FormData` — `formData()` reads a multipart part's quoted `name`/`filename` parameters only: an RFC 5987 `filename*=` is not decoded
+- `Request` / `Headers` objects — A `ReadableStream` request body is read whole before `fetch` sends it, with a Content-Length, where undici sends it chunked as it is read: the server gets the same bytes, but a stream that never ends never sends ([ADR-02050](adr/02/ADR-02050.md))
 - `Request` / `Headers` objects — A `Headers` method called with too few arguments (through `any`) does not throw webidl's "N argument(s) required" TypeError: `arguments.length` counts every declared parameter
-- `Request` / `Headers` objects — No `Request.clone()`: a compile error
 - `WebSocket` — The client offers no `permessage-deflate` extension (Node's does), so `extensions` is always `''`
 - `WebSocket` — klain:ws's server `.close()` ends the connection without waiting for the peer's close frame
 - `XMLHttpRequest` — No default-async, callback-interleaved mode — `.send()`/`.send(body)` runs to completion then fires every registered callback once, synchronously (no re-entrant-into-already-returned-caller callback machinery to support async)
 - `XMLHttpRequest` — `.open(..., async?)`'s `async === true` also blocks — no main-thread event loop to defer `.onload` onto (a documented narrowing, not fake async — [ADR-00615](adr/00/ADR-00615.md))
+- `XMLHttpRequest` — A `.send()` on the main fiber (outside a request handler or `klain:sync` worker) to a server in the same program never returns: the server cannot run until `.send()` does
 - `XMLHttpRequest` — The optional `user`/`password` arguments to `.open()` are accepted (and evaluated) but not yet wired to HTTP auth
 - `XMLHttpRequest` — `.setRequestHeader(name, value)` accumulates headers, but names are **not** lowercased here (unlike `Headers`' own methods) — a separate V1 narrowing
 - `XMLHttpRequest` — `.readyState` is 0/1/4 only (UNSENT/OPENED/DONE); the real spec's HEADERS_RECEIVED/LOADING have no meaning for a transfer that always runs to completion in one call
@@ -527,7 +448,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Type assertions (`x as T`, `as const`, `satisfies T`, `<T>x`) — An assertion to a type of another kind through `unknown`/`any` (`"s" as unknown as number`) converts the value to that type (`NaN`), where Node keeps the value (`"s"`): the binding's storage is the asserted type's
 - Template literal types (`` `a-${T}` ``) — **Erased to `string`** — the literal pattern is parsed (no-substitution, multi-substitution, and `[]`-suffixed forms) but resolves to `string`, not narrowed/enforced; the same simplification string-literal types use ([ADR-00561](adr/00/ADR-00561.md))
 - `readonly T[]` array-type modifier — **Erased, not enforcing** — `readonly number[]` and `readonly [T, U]` parse (in variable/parameter/return/field positions), but the modifier is dropped and mutation is not prevented, the same stance as `Readonly<T>` and the mapped-type `readonly` modifier. The `ReadonlyArray<T>` alias form is not covered ([ADR-00373](adr/00/ADR-00373.md))
-- Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`) — The string-named `declare module "x"` and `declare global` blocks are parsed and erased (no binding — [ADR-00388](adr/00/ADR-00388.md))
+- Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`) — The string-named `declare module "x"` block is parsed and erased (no binding — [ADR-00388](adr/00/ADR-00388.md))
 - Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`) — A class extending a `declare class` is a compile error (the base exists only at run time)
 - TypeScript type errors (assignability, calls, operators, properties, assignment targets) — Reported: `TS2322`, `TS2345`, `TS2554`/`TS2555`, `TS2362`/`TS2363`/`TS2365`, `TS2367`, `TS2339`, `TS2353`, `TS2741`/`TS2739`/`TS2740`, `TS2588`/`TS2628`/`TS2629`/`TS2630`, `TS2769`, `TS18046`–`TS18050`, `TS2531`–`TS2533`, `TS2571`, `TS2721`–`TS2723`, `TS2454`, `TS7022`, `TS7023`, `TS2304` and the forms tsc gives it for a value (`TS2552`, `TS2662`/`TS2663`, `TS2693`, `TS2708`, `TS2301`, `TS18004`, `TS2592`/`TS2593`), `TS2558`, `TS2754`, the class-member accessibility codes (`TS2341`, `TS2445`, `TS2446`, `TS2673`, `TS2674`, `TS2855`), a call's `this` context (`TS2684`). Not yet: a near-miss type name (`TS2552`), a type name out of its scope, iterating a possibly-`undefined` value (`TS2488`), a call no overload takes by arity (`TS2575`), and more
 - TypeScript type errors (assignability, calls, operators, properties, assignment targets) — A property is checked only on a type whose members the checker knows whole: not on a library global's name (an `interface Element` merges with the library's) or a class merged with an interface
@@ -586,13 +507,19 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `url.urlToHttpOptions(url)` — Expects a WHATWG `URL`; a legacy `Url`/plain object isn't accepted ([ADR-00672](adr/00/ADR-00672.md))
 - `url.domainToASCII(domain)` / `url.domainToUnicode(domain)` — A non-ASCII hostname is case-folded and punycoded, without the rest of UTS 46's mapping: a full-width `ＥＸＡＭＰＬＥ.com` punycodes where Node reads `example.com`
 
-### Process / CLI I/O — Strict 22/35 (~63%) · 23 caveats — [Process / CLI I/O](status/PROCESS-CLI.md)
+### Performance & Timing — Strict 9/14 (~64%) · 5 caveats — [Performance & Timing](status/PERFORMANCE-TIMING.md)
+- `Date` — On Linux and macOS `toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`). On Windows the zone and its name come from the system's ICU, as Node's do ([ADR-01599](adr/01/ADR-01599.md))
+- `Date.prototype.toLocaleDateString()` — One fixed `"M/D/YYYY"` format (the default en-US shape) in local time; no locale argument or full `Intl`-style locale support
+- `Date.prototype.toLocaleTimeString()` / `toLocaleString()` — One fixed en-US shape (`"1:04:09 PM"`, `"1/5/2020, 1:04:09 PM"`) in local time; no locale argument or full `Intl`-style locale support
+- `createHistogram` / `monitorEventLoopDelay` — A histogram keeps exact samples, not Node's HDR histogram (3 significant figures): a percentile of large values can differ in its last digits
+- `performance.eventLoopUtilization` / `performance.nodeTiming` — `nodeTiming`'s `nodeStart`, `v8Start`, `environment` and `bootstrapComplete` read 0 (the time origin): a native program has no separate bootstrap
+
+### Process / CLI I/O — Strict 23/35 (~66%) · 22 caveats — [Process / CLI I/O](status/PROCESS-CLI.md)
 - `process.emitWarning(warning, type?\|options?, code?, ctor?)` — A compiled program takes no `--no-deprecation`/`--trace-warnings`/`--trace-deprecation` flags (the one-time hint still names them, after the program's name, as Node's does); setting `process.noDeprecation`/`traceProcessWarnings`/`traceDeprecation` applies
 - `process.stdout.write(s)` / `process.stderr.write(s)` (raw write, no auto-newline) — `process.stdin`/`stdout`/`stderr` are typed `any` to the checker until `process` itself is typed from its module ([TDD-00230](tdd/TDD-00230.md) P3.2), so a wrong call (`process.stdout.write()` with no argument) is not reported as a TypeScript error
 - `klain:tty` `readByte()` / `readKey()` (synchronous raw reads) — Bespoke, non-Node surface under the explicit `klain:` specifier — Node has no synchronous single-key read (it uses `process.stdin.on('data')` events)
 - `klain:tty` `readByte()` / `readKey()` (synchronous raw reads) — Blocking reads on fd 0; do not mix with `process.stdin.on('data')` in the same run, which puts fd 0 in non-blocking mode (a synchronous read would then see EOF-on-EAGAIN)
 - `process.env` as a value (`Object.keys`/`values`/`entries`, `for…in`, `{ ...process.env }`, `JSON.stringify`, `const env = process.env`) — The object is a snapshot taken when the bare `process.env` expression is evaluated: keyed reads/writes (`process.env.X`) stay live, but a write through an alias (`const env = process.env; env.X = '1'`) lands in the copy, not the environment — Node's object is a live proxy
-- `process` as an `EventEmitter` (`on`/`once`/`off`/`emit`/…, `'beforeExit'`/`'exit'`/`'uncaughtException'`/`'unhandledRejection'`/`'warning'`) + `process.exitCode` — `'uncaughtException'` runs the listener (suppressing the default `Uncaught:` print) but, after a synchronous throw, the process still exits (code 1) — the setjmp/longjmp exception model has already unwound to the top-level catch-all, so it can't resume execution like Node does (a rejection reported to it does go on)
 - `process.memoryUsage()` — `external`/`arrayBuffers` report 0 — V8's off-heap C++-binding accounting has no native analogue (all allocation lives in `rss` and the one heap above), so they are disclosed rather than invented
 - `process.memoryUsage()` — `heapTotal`/`heapUsed` measure this compiler's object heap, not a V8 JS-object heap — a native reinterpretation (the C allocator arena, or Boehm's heap under `-mm=gc`), so the magnitudes differ from Node's even though the direction (growth on allocation) matches
 - `process.nextTick(fn)` — Shares the one microtask FIFO with Promise reactions rather than draining strictly before them (Node keeps a separate nextTick queue ahead of promises)
@@ -611,20 +538,12 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `child_process.fork()` (self-fork + IPC channel) — `serialization: 'advanced'` is not ported: messages always cross as json
 - `child_process.fork()` (self-fork + IPC channel) — A `dgram` socket cannot be sent as a handle
 
-### Performance & Timing — Strict 9/14 (~64%) · 4 caveats — [Performance & Timing](status/PERFORMANCE-TIMING.md)
-- `Date` — On Linux and macOS `toString`'s zone name comes from a built-in table of the common zones' abbreviations; a zone outside it prints the C library's abbreviation (`GMT-0300 (-03)` where Node says `(Brasilia Standard Time)`). On Windows the zone and its name come from the system's ICU, as Node's do ([ADR-01599](adr/01/ADR-01599.md))
-- `Date.prototype.toLocaleDateString()` — One fixed `"M/D/YYYY"` format (the default en-US shape) in local time; no locale argument or full `Intl`-style locale support
-- `Date.prototype.toLocaleTimeString()` / `toLocaleString()` — One fixed en-US shape (`"1:04:09 PM"`, `"1/5/2020, 1:04:09 PM"`) in local time; no locale argument or full `Intl`-style locale support
-- `createHistogram` / `monitorEventLoopDelay` — A histogram keeps exact samples, not Node's HDR histogram (3 significant figures): a percentile of large values can differ in its last digits
-
-### Language Constructs — Strict 60/92 (~65%) · 62 caveats — [Language Constructs](status/LANGUAGE-CONSTRUCTS.md)
+### Language Constructs — Strict 63/93 (~68%) · 59 caveats — [Language Constructs](status/LANGUAGE-CONSTRUCTS.md)
 - `for…of` over arrays, strings, `Map`, `Set`, a bare `any`, and iterables — Over a bare `any`, each element is read through a numeric-string key (a per-element `sprintf` + dynamic get) — a direct per-tag element walk is the perf follow-up
 - `throw new Error(msg)` — An uncaught error prints its stack alone; Node first prints the throwing source line under a caret, and after the stack the error's own properties and a `Node.js <version>` line
 - `try` / `catch` / `finally` — A thrown plain object's own fields read `undefined` through the caught value (`throw { code: 1 }` then `e.code` or `catch ({ code }: any)`): a static object has no runtime shape once boxed
 - `try` / `catch` / `finally` — A nested or array catch pattern destructures only the Error shape (`{ kind, message, name }`) ([ADR-00170](adr/00/ADR-00170.md))
 - `TypeError` on a property access off `undefined`/`null` (`s.length`, `r.name`, `p.m()`, `s[i]`, `p.x = v`) — In `p.x = f()` the base is checked before the right-hand side is evaluated, so `f()` does not run ahead of the `TypeError` (JS evaluates it first)
-- String literals (single/double quote) — An embedded NUL (`\x00`, `\0`) truncates the string, since strings are stored as NUL-terminated C strings
-- String literals (single/double quote) — No strict-mode `SyntaxError` for a legacy octal escape (accepted unconditionally)
 - Ternary `cond ? a : b` — A pointer branch mixed with a scalar one that is not a scalar union (`c ? 1 : someObject`), and an array branch mixed with a non-array one, are compile-time rejections unless one branch is `any` (then the result is `any`, [ADR-01159](adr/01/ADR-01159.md)) — narrow first, or assign each branch separately
 - Comma / sequence operator `(a, b, c)` — A sequence whose *first* operand is a lone identifier (`(a, b)`) is instead parsed as an arrow-function parameter list — a known ambiguity; write a non-identifier first operand ([ADR-00179](adr/00/ADR-00179.md))
 - `typeof` operator — `typeof <namespace>.<method>` answers `"function"` for the common built-in namespaces — `Promise`/`Math`/`JSON`, `console` (any member), and the static methods of `Object`/`Number`/`String`/`Array`/`Date`/`Symbol`/`Reflect`/`Boolean` ([ADR-00282](adr/00/ADR-00282.md)/[ADR-00596](adr/00/ADR-00596.md)); a non-method static (`Number.MAX_VALUE`) still answers through normal inference, and a method on a namespace outside this allow-list falls back to inference
@@ -636,6 +555,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Object destructuring `const { x, y } = obj` — In the *assignment* form over a statically-typed source (`({ x, y } = obj)`), a `= default` on a nested position stays rejected — matching the declaration form ([ADR-00597](adr/00/ADR-00597.md))
 - Object destructuring `const { x, y } = obj` — `{ ...rest }` over an `any`/union/generic source (Stage 3c) and in the *assignment* form (`({ a, ...rest } = e)`) stay clean rejections
 - Object destructuring `const { x, y } = obj` — In a declaration, a computed key (`{ [k]: v }`) is supported only for a **constant** string/number literal key (`{ ["a"]: v }`, `{ [0]: v }` — resolves to that field); a runtime-valued key on a fixed object is a clean rejection ([ADR-00609](adr/00/ADR-00609.md))
+- Tagged template literals (`` tag`Hello ${x}` ``) — A quasi with a legacy octal or `\8`/`\9` escape cooks to its decoded text, where ES makes it `undefined` (`` t`\01` ``); an otherwise invalid escape (`` t`\u{` ``) is a SyntaxError
 - Function declarations (top-level) — Cannot reference a sibling top-level binding whose value is a connection handle (`Worker`, `BroadcastChannel`/`MessageChannel`, `XMLHttpRequest` — construction opens a thread/socket), a `Promise`, or a generic class instance with **inferred** rather than explicit type arguments (`new Box(5)`, or a nested `new Box<Box<number>>()`) — such a binding stays a `main()` local outside a named function's fresh scope, failing with `undefined variable`. Scalars, strings, arrays, `TypedArray`s, objects, `Map`/`Set`, class instances (including an explicit `new Box<number>()`), the value/event handles (`Blob`, `Date`, `Error`, `URL`, `URLSearchParams`, `URLPattern`, `RegExp`, `Headers`, `ArrayBuffer`, `DataView`, `TextEncoder`/`TextDecoder`, `Request`, `AbortController`, `Event`/`CustomEvent`, `EventTarget`), and the streams (`ReadableStream`/`WritableStream`/`TransformStream`/`CompressionStream`, the Node streams) + `EventEmitter`, and `http.createServer` handles ([ADR-00426](adr/00/ADR-00426.md)) are promoted to module globals and are readable ([TDD-00093](tdd/TDD-00093.md)/[ADR-00342](adr/00/ADR-00342.md)/[ADR-00709](adr/00/ADR-00709.md)); arrow functions/closures capture everything regardless ([TDD-00057](tdd/TDD-00057.md))
 - Function declarations (top-level) — A genuinely circular pair of mutually-recursive unannotated functions can't converge on a return type and keeps the scalar-default fallback ([TDD-00058](tdd/TDD-00058.md))
 - Function declarations (top-level) — `arguments` in a function with an explicit `...rest` or a destructured parameter is a compile error; a call through `any` (a path that does not record how many arguments it passed) makes `arguments.length` count every declared parameter ([ADR-01489](adr/01/ADR-01489.md))
@@ -650,7 +570,6 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Generator functions (`function* f(): T { yield x; }`, `.next(value)`, `for...of`) — The return-type annotation is optional — the element type is inferred from the body's yields (numeric join, `yield*` delegation, return fallback; only a genuinely non-joinable mix still requires the annotation — [ADR-00293](adr/00/ADR-00293.md)); a destructured, defaulted or optional parameter is still a compile error (rest and array parameters work, [ADR-01496](adr/01/ADR-01496.md))
 - Generator functions (`function* f(): T { yield x; }`, `.next(value)`, `for...of`) — When present, the annotation is an iterator type as in TypeScript — `Generator<T>`, `IterableIterator<T>`, `Iterator<T>`, `Iterable<T>` and their `Async` forms, plus the three-arg `Generator<T, TReturn, TNext>` (TReturn is ignored; a `yield` expression is the value `.next(v)` sent, typed `any` whatever TNext declares) — which unwraps to `T` ([ADR-00814](adr/00/ADR-00814.md)); a bare element type (`function* f(): number`) is tsc's TS2322 in the default lane and accepted by `-compat=js` ([ADR-01568](adr/01/ADR-01568.md))
 - Generator functions (`function* f(): T { yield x; }`, `.next(value)`, `for...of`) — Calling `.next()` again after completion returns `{value: <T's zero value>, done: true}`, not `undefined` ([TDD-00061](tdd/TDD-00061.md)/[ADR-00173](adr/00/ADR-00173.md)) — deliberately kept bare even with the `T \| undefined` sentinel available: tsc types the result's `value` as `any`, so the typed `T` here is already stricter than TS, and flipping it would break every `.next().value` consumer for no faithfulness gain ([ADR-00781](adr/00/ADR-00781.md))
-- `Promise.withResolvers` — Called with another constructor as `this` (`Promise.withResolvers.call(MyPromise)`) it still builds a plain `Promise`, not an instance of that constructor
 - `Promise.try` — Called with another constructor as `this` (`Promise.try.call(MyPromise, f)`) it still builds a plain `Promise`, not an instance of that constructor
 - Enums (numeric) — An enum declared inside a function body, and two declarations of one enum merging, are compile errors
 - Namespaces (`namespace X {}` / `module X {}`, function merging) — Top-level declarations only (a namespace inside a function body is not supported); no `declare namespace`, no cross-module `export namespace`; the same namespace member declared in two files is a link-time duplicate-symbol error, not file-private ([TDD-00095](tdd/TDD-00095.md)/[TDD-00148](tdd/TDD-00148.md))
@@ -658,7 +577,6 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Namespaces (`namespace X {}` / `module X {}`, function merging) — A namespace read as a value before its last statement has run (from code inside it, or a function called from there) is `undefined`, not the partly built object
 - Interfaces (structural) — An explicit `undefined` stored into an optional member (`{ a: undefined }` against `a?: T`) reads as omitted: `console.log` drops the key and `Object.keys`/`in` report it absent (Node keeps the key, `{ a: undefined }`)
 - Object literals `{ key: value }` — No duplicate-`__proto__`-key detection (Annex B legacy `SyntaxError` rule)
-- Getters / setters (`get x() {}` / `set x(v) {}`) on classes and object literals — Static accessors, and logical assignment (`&&=`/`\|\|=`/`??=`) on an accessor, remain out of scope for V1 ([TDD-00030](tdd/TDD-00030.md)/[ADR-00110](adr/00/ADR-00110.md))
 - `new Array<T>(n?)` — A preallocated `new Array<T>(n)` fills real zero-valued slots, not holes — `new Array<number>(3)[0]` is `0` (Node: `undefined`), and `map`/`forEach` visit those slots instead of skipping holes.
 - `class` (fields, constructor, methods, `this`, `new ClassName(args)`) — Instance-field initializers (`x = expr`) work, and a class with fields needs **no** explicit constructor — a field nothing assigned yet (`x!: number`) reads `undefined`, as in Node, and the strict lane rejects one with neither `!` nor a definite constructor assignment (TS2564, not yet checked in a generic class), any initializers that exist run in a synthesized constructor ([ADR-00374](adr/00/ADR-00374.md)); the one remaining rejection is a **derived** class adding fields when its base has a rest-parameter constructor (write an explicit `super(...)`). static field initializers (`static x = 5`) work — lowered to assignments run in declaration order in the class's static-init, ahead of any `static {}` block, with an unannotated one typed by inference ([ADR-00375](adr/00/ADR-00375.md)). An instance-field initializer lowered into the constructor can currently see the constructor's own parameters (which real JS's separate initializer scope forbids), and an unannotated initializer of an expression shape the compiler doesn't recognize falls back to `i64` ([TDD-00063](tdd/TDD-00063.md)/[ADR-00180](adr/00/ADR-00180.md))
 - `class` (fields, constructor, methods, `this`, `new ClassName(args)`) — A class member keyed by a value computed at run time (a `let`, a parameter, a call, `Symbol.hasInstance`) is a clean rejection; literal names (`'a-b' = 1`, `0() {}`, `[1]`), the well-known symbols `iterator`, `asyncIterator`, `toPrimitive`, `toStringTag`, `dispose` and `asyncDispose`, and a const holding a symbol, string or number are accepted ([TDD-00089](tdd/TDD-00089.md), [ADR-00278](adr/00/ADR-00278.md), [ADR-01414](adr/01/ADR-01414.md), [ADR-01415](adr/01/ADR-01415.md), [ADR-01420](adr/01/ADR-01420.md))
@@ -702,12 +620,9 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `new DynamicLibrary(path)` / `lib.close()` / `ffi.dlclose(lib)` — `using` declarations are not parsed yet; `lib[Symbol.dispose]()` and `close()` dispose
 - `library.registerCallback([sig,] cb)` / `unregisterCallback(ptr)` / `refCallback` / `unrefCallback` — `refCallback`/`unrefCallback` are validated no-ops (a registered callback is always strongly referenced here), and `library.close()` does not invalidate callbacks — unregister explicitly; an exception a callback throws is reported as uncaught once the foreign call returns
 
-### path — Strict 8/10 (80%) · 2 caveats — [path](status/PATH.md)
-- `path.resolve(...segments)` — `path.win32.resolve()` on a non-Windows host resolves against a POSIX `cwd` (`/home/me` → `\home\me\foo`), exactly as Node does there; only meaningful on Windows.
-- `path.posix` / `path.win32` — `matchesGlob` is missing from both flavours (it needs Node's glob matcher).
-
-### Object / Collections — Strict 26/32 (~81%) · 9 caveats — [Object / Collections](status/OBJECT-COLLECTIONS.md)
-- `Object.create()` / `getPrototypeOf` / `setPrototypeOf` / `__proto__` (dynamic objects) — Prototype machinery exists on **dynamic (`any`-typed) objects only** — statically-typed structs have no prototype link, and a boxed primitive's `getPrototypeOf` answers `null` (no primitive prototype objects)
+### Object / Collections — Strict 27/34 (~79%) · 10 caveats — [Object / Collections](status/OBJECT-COLLECTIONS.md)
+- `Object.assign(target, ...src)` — Strict lane: a source giving a field of another type to a parameter's or a property's object (no binding of its own to hold dynamically) is rejected
+- `Object.create()` / `getPrototypeOf` / `setPrototypeOf` / `__proto__` (dynamic objects) — A boxed primitive's `getPrototypeOf` answers `null` (no primitive prototype objects)
 - `Object.defineProperty` / `getOwnPropertyDescriptor` / `getOwnPropertyDescriptors` / `getOwnPropertyNames` / accessors — An accessor defined on a declared field under a key known only at run time (`Object.defineProperty(o, k, { get })`) is not seen by the field's typed reads and writes, which read and store the field ([ADR-01984](adr/01/ADR-01984.md))
 - `new Proxy(target, handler)` — Traps not consulted: `apply`, `construct`, `defineProperty`, `getPrototypeOf`/`setPrototypeOf`, `isExtensible`/`preventExtensions` — those operations forward to the target ([ADR-01814](adr/01/ADR-01814.md))
 - `new Proxy(target, handler)` — The target must be a dynamic object (an untyped/`any` literal); statically-typed structs can't be proxied
@@ -717,9 +632,9 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `Object.freeze(obj)` — A `Map`, `Set`, `Date` or function value is rejected at compile time by `Object.freeze`/`seal`/`preventExtensions`/`isFrozen`/`isSealed`/`isExtensible` (Node accepts each; a `Date` is held as an unboxed number, with no header to record a level in)
 - `WeakMap` / `WeakSet` / `WeakRef` — Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never becomes `undefined` and keys persist ("leak by design"). Real weak semantics require `-mm=gc` ([TDD-00112](tdd/TDD-00112.md)/[ADR-00349](adr/00/ADR-00349.md))
 
-### RegExp — Strict 14/16 (~88%) · 2 caveats — [RegExp](status/REGEXP.md)
-- `u` flag — `.unicode`, code-point matching, `\u{…}` and `\p{…}` — `\w` and `\b` under `iu` stay ASCII: `/\w/iu.test('ſ')` is false, true in V8 (ES folds U+017F and U+212A into `\w`)
-- `u` flag — `.unicode`, code-point matching, `\u{…}` and `\p{…}` — An escaped lone surrogate (`\uD83D`, `\u{D83D}`) matches nothing
+### path — Strict 8/10 (80%) · 2 caveats — [path](status/PATH.md)
+- `path.resolve(...segments)` — `path.win32.resolve()` on a non-Windows host resolves against a POSIX `cwd` (`/home/me` → `\home\me\foo`), exactly as Node does there; only meaningful on Windows.
+- `path.posix` / `path.win32` — `matchesGlob` is missing from both flavours (it needs Node's glob matcher).
 
 ### SQLite (node:sqlite) — Strict 16/18 (~89%) · 2 caveats — [SQLite (node:sqlite)](status/SQLITE.md)
 - `db.createSession()` / `db.applyChangeset()` / `Session` — Available only where the system `libsqlite3` is built with sessions (macOS's is); elsewhere `ERR_INVALID_STATE` names the omission — Node bundles its own SQLite
@@ -731,7 +646,7 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 ### console — Strict 11/12 (~92%) · 1 caveat — [console](status/CONSOLE.md)
 - `console.dir(obj, { depth?, colors? })` — The `colors` option is accepted but ignored — inspected output carries no ANSI here
 
-### Array Methods — Strict 34/37 (~92%) · 3 caveats — [Array Methods](status/ARRAY-METHODS.md)
+### Array Methods — Strict 35/38 (~92%) · 3 caveats — [Array Methods](status/ARRAY-METHODS.md)
 - `new Array<T>(n?)` — A hole of an integer- or float-element array reads as `0`/`NaN` where a walk takes it as a value (`for…of`, spread, `find`, destructuring); Node reads `undefined` ([ADR-01696](adr/01/ADR-01696.md))
 - `.length` — The holes growing `a.length` makes read as `0`/`NaN` in an integer- or float-element array where a walk takes them as values (`for…of`, spread); Node reads `undefined` ([ADR-01696](adr/01/ADR-01696.md))
 - `.flat(depth?)` — A `depth` known only at run time gives boxed (`any`) elements
@@ -743,22 +658,25 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)` — The `IncomingMessage`/`ServerResponse` options (custom classes) are not accepted
 - `const server = http.createServer(cb?)` handle — `.listen(port?, cb?)`/`.close(cb?)`/`.closeAllConnections()`/`.address()`/`.on('request'/'upgrade', cb)` — `res.setHeaders` takes a `Map` only — a `Headers` argument is a union code generation cannot tell apart ([BACKLOG](../BACKLOG.md))
 
-### String Methods — Strict 31/33 (~94%) · 3 caveats — [String Methods](status/STRING-METHODS.md)
+### RegExp — Strict 15/16 (~94%) · 1 caveat — [RegExp](status/REGEXP.md)
+- `u` flag — `.unicode`, code-point matching, `\u{…}` and `\p{…}` — An escaped lone surrogate (`\uD83D`, `\u{D83D}`), with or without `u`, is a `SyntaxError`, and `.` or a class never matches a subject's lone surrogate (`/a.b/` on `"a\uD83Db"` is false): PCRE2's UTF mode has no surrogate code point. Other patterns match around one ([ADR-02059](adr/02/ADR-02059.md))
+
+### String Methods — Strict 32/34 (~94%) · 4 caveats — [String Methods](status/STRING-METHODS.md)
+- `.normalize()` — The tables are Unicode 16.0 (the generating Python's), where Node 24's ICU is 17.0: a character new in 17.0 (`U+A7F1`) stays as it is
 - `.localeCompare(other, locales?, options?)` — `locales` is evaluated but ignored: every comparison uses ICU's root order, so a locale's tailoring (Swedish `å` after `z`, Turkish dotted/dotless `i`) is not applied
 - `.localeCompare(other, locales?, options?)` — Options other than `sensitivity` and `numeric` (`caseFirst`, `ignorePunctuation`, `usage`) are ignored
 - `.localeCompare(other, locales?, options?)` — Supplementary-plane Han ideographs (Extension B and later) sort by code point, not radical-stroke
 
-### JavaScript built-in objects (completeness index) — completeness index (not parity-counted) · 28 caveats — [JavaScript built-in objects (completeness index)](status/JAVASCRIPT-BUILTINS.md)
+### JavaScript built-in objects (completeness index) — completeness index (not parity-counted) · 29 caveats — [JavaScript built-in objects (completeness index)](status/JAVASCRIPT-BUILTINS.md)
 - `err.stack`, `Error.captureStackTrace(obj, fn?)`, `Error.stackTraceLimit` — `captureStackTrace`'s `constructorOpt` is matched by the function's name, not its identity
 - `err.stack`, `Error.captureStackTrace(obj, fn?)`, `Error.stackTraceLimit` — V8's builtin frames (`at Array.map (<anonymous>)`) are not shown
 - `err.stack`, `Error.captureStackTrace(obj, fn?)`, `Error.stackTraceLimit` — The uncaught-exception report leaves out Node's source excerpt, `Node.js vX` line and the error's own properties (`{ code: 'ENOENT', … }`)
 - `err.stack`, `Error.captureStackTrace(obj, fn?)`, `Error.stackTraceLimit` — `Error.prepareStackTrace` is not supported
 - `Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` — `AggregateError` takes no options (its `.cause` reads `undefined`)
-- `Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` — An error made with `{ cause: undefined }` has no `cause` property: `'cause' in err` is false, and `console.log(err)` leaves out its `[cause]: undefined` line
 - `FinalizationRegistry` — `cleanupSome` (non-standard) rejected; aggregate held types (arrays, nullable scalars) rejected
 - `FinalizationRegistry` — Same-thread V1: a worker's registrations are flushed only by its own thread, not the process exit hook
 - `FinalizationRegistry` — Under `-mm=gc`, firing depends on the target actually being collected (conservative scanning can pin a stack-reachable pointer — same posture as the `WeakRef` tests)
-- `String` — `.normalize()` **missing** (no Unicode tables); `.matchAll()` eager not lazy; `.localeCompare()` ignores `locales` (root order) → [String methods](STRING-METHODS.md)
+- `String` — `.normalize()`'s tables are Unicode 16.0 (Node's ICU: 17.0); `.matchAll()` eager not lazy; `.localeCompare()` ignores `locales` (root order) → [String methods](STRING-METHODS.md)
 - `Array` — length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers) → [Array methods](ARRAY-METHODS.md)
 - `Object` / dynamic model — prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype) → [Object, Map & Set](OBJECT-COLLECTIONS.md)
 - `Reflect` — missing `construct`; the object methods require a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md)
@@ -766,15 +684,17 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - `Number` — `toString(radix)` non-power-of-two fractional trailing-digit divergence; `toPrecision` fixed/exp threshold differs → [Number & Math](NUMBER-MATH.md)
 - `Function` `.call`/`.apply`/`.bind` — `thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md)
 - `Symbol` — Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive`, `Symbol.species` as a class's static getter (extending Array, a typed array or Promise), and `Symbol.toStringTag` as a class getter; an object literal's `toStringTag` member, `hasInstance` and the rest are values only → [Type system](TYPE-SYSTEM.md)
-- `RegExp` — `u`/`d` flags **missing** (accepted, not implemented) → [RegExp](REGEXP.md)
+- `RegExp` — Under the `v` flag a property of strings (`\p{RGI_Emoji}`) is a `SyntaxError` → [RegExp](REGEXP.md)
 - `JSON` — a strict-lane literal mixing two object types is rejected → [JSON](JSON.md)
 - TypedArrays / `ArrayBuffer` — `resize`/`grow` need `{maxByteLength}` → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md)
 - `TextDecoder` — UTF-8 only; non-UTF-8 labels throw `RangeError` at construction → [Encoding & text](ENCODING-TEXT.md)
 - `EventTarget` / `Event` / `AbortSignal` — `AbortSignal` isn't wired into `setTimeout` → [Events & cancellation](EVENTS-CANCELLATION.md)
 - `crypto.subtle` — literal-only algorithm dispatch; ops throw synchronously rather than rejecting; `CryptoKey.algorithm`/`.usages` unimplemented → [Web Crypto](WEB-CRYPTO.md)
 - `Date` — Setters need a named-variable receiver; no locale/`Intl` formatting; `toString`'s zone name covers the common zones only → [Performance timing](PERFORMANCE-TIMING.md)
-- `performance` — `eventLoopUtilization`/`nodeTiming` missing → [Performance timing](PERFORMANCE-TIMING.md)
+- `performance` — `nodeTiming`'s startup milestones read 0 (the time origin) → [Performance timing](PERFORMANCE-TIMING.md)
 - `eval` — eval of a string computed at run time **missing** (needs an embedded engine); compile-time-constant strings, statements included, work → [Global functions](GLOBAL-FUNCTIONS.md)
+- `String.prototype.normalize()` — Unicode 16.0 tables (Node's ICU: 17.0) → [String methods](STRING-METHODS.md)
+- `RegExp` `u`/`v`/`d` flag semantics — `v`: a property of strings (`\p{RGI_Emoji}`) is a `SyntaxError`; `u`'s residuals → [RegExp](REGEXP.md)
 - `Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…) — `Iterator.from` and the global `Iterator` constructor (`instanceof Iterator`, `extends Iterator`) are missing
 - `Reflect.construct` — With a builtin target (`Date`, `Map`, …), a `newTarget` other than the target leaves the instance its builtin's prototype → [Object, Map & Set](OBJECT-COLLECTIONS.md)
 
@@ -795,7 +715,8 @@ Generated by `make status` from `docs/status/data/*.json`. **Every line here is 
 - Decorators — Class-decorator **replacement** is a documented static-model divergence (refused at runtime), and standard static-field decorators are rejected → [Language constructs](LANGUAGE-CONSTRUCTS.md)
 - Symbols — V1 opaque unique values (`Symbol()`, `===`, `typeof`, `.description`, `Symbol.for`/`keyFor`); no dynamic property keys; only `[Symbol.iterator]`/`[Symbol.asyncIterator]` recognized as computed keys → [Type system](TYPE-SYSTEM.md)
 
-### Node.js built-in modules (completeness index) — completeness index (not parity-counted) · 3 caveats — [Node.js built-in modules (completeness index)](status/NODE-MODULES.md)
+### Node.js built-in modules (completeness index) — completeness index (not parity-counted) · 4 caveats — [Node.js built-in modules (completeness index)](status/NODE-MODULES.md)
 - `timers` — The module's timer functions wrap the globals rather than being them: `timers.setTimeout === setTimeout` is `false` (Node: `true`)
 - `url` — Lenient relative parsing deferred
-- `perf_hooks` — Histograms keep exact samples (not HDR); `eventLoopUtilization`/`nodeTiming` missing
+- `perf_hooks` — Histograms keep exact samples (not HDR); `nodeTiming`'s startup milestones read 0 (the time origin)
+- `punycode` — The default import is the module's frozen namespace object, its keys sorted, where Node's `require('punycode')` is the mutable `module.exports` in declaration order

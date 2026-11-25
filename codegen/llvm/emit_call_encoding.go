@@ -17,6 +17,11 @@ func (e *Emitter) emitStringToStringBuiltin(args []ast.Expression, pos ast.Pos, 
 	if err != nil {
 		return Value{}, err
 	}
+	if !isStringTy(val.Ty) || val.Ty.IsDynamic() {
+		if val, err = e.emitArgToString(val); err != nil { // String(x), as btoa/atob do
+			return Value{}, err
+		}
+	}
 	val = e.convert(val, TypePtr)
 	ensure()
 	r := e.freshReg()
@@ -68,8 +73,6 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 		return Value{}, err
 	}
 	e.ensureDynJSONC()
-	e.ensureExceptionHelpers()
-	e.ensureStrHeaderRuntime()
 	rc := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_crypto_fill_any(i64 %s)", rc, box.Ref))
 	ok := e.freshReg()
@@ -96,8 +99,6 @@ func (e *Emitter) emitCryptoGetRandomValues(args []ast.Expression, pos ast.Pos) 
 // emitCryptoQuotaCheck throws a QuotaExceededError DOMException when the
 // byte length exceeds the spec's 65,536-byte getRandomValues limit (ADR-00554).
 func (e *Emitter) emitCryptoQuotaCheck(byteLenReg string) {
-	e.ensureExceptionHelpers()
-	e.ensureStrHeaderRuntime()
 	over := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, 65536", over, byteLenReg))
 	badL := e.freshLabel("grv.quota")
@@ -116,7 +117,6 @@ func (e *Emitter) emitCryptoRandomUUID(args []ast.Expression, pos ast.Pos) (Valu
 	if len(args) != 0 {
 		return Value{}, internalAt(pos, "arity: crypto.randomUUID takes no arguments")
 	}
-	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_crypto_random_uuid()", r))
 	return Value{Ref: r, Ty: TypePtr}, nil

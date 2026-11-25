@@ -90,13 +90,27 @@
             ]
           },
           {
+            "feature": "`Map.groupBy(items, fn)`",
+            "status": "implemented",
+            "notes": [
+              "A `Map` of arrays keyed by SameValueZero, in first-seen order ([ADR-02063](../adr/02/ADR-02063.md))"
+            ],
+            "decl": [
+              "MapConstructor.groupBy"
+            ]
+          },
+          {
             "feature": "`Object.assign(target, ...src)`",
             "status": "implemented",
             "notes": [
               "Mutates and returns `target`",
               "An array target takes its sources' indices (and other own keys), growing as needed, and the result is the target array ([ADR-01485](../adr/01/ADR-01485.md))",
               "With an `any` target or source, the copy runs on run-time properties (getters run; null and undefined sources skipped), and the result is `any` ([ADR-01237](../adr/01/ADR-01237.md))",
-              "A source property the target's type lacks is written onto the target, and the result (TypeScript's `T & U`) is `any` ([ADR-01714](../adr/01/ADR-01714.md))"
+              "A source property the target's type lacks is written onto the target, and the result (TypeScript's `T & U`) is `any` ([ADR-01714](../adr/01/ADR-01714.md))",
+              "A variable a source gives a field of another type (`Object.assign(t, { a: \"x\" })` on `t: { a: number }`) is held dynamically ([ADR-02031](../adr/02/ADR-02031.md))"
+            ],
+            "caveats": [
+              "Strict lane: a source giving a field of another type to a parameter's or a property's object (no binding of its own to hold dynamically) is rejected"
             ],
             "decl": [
               "ObjectConstructor.assign"
@@ -106,9 +120,10 @@
             "feature": "`Object.create()` / `getPrototypeOf` / `setPrototypeOf` / `__proto__` (dynamic objects)",
             "status": "implemented",
             "caveats": [
-              "Prototype machinery exists on **dynamic (`any`-typed) objects only** — statically-typed structs have no prototype link, and a boxed primitive's `getPrototypeOf` answers `null` (no primitive prototype objects)"
+              "A boxed primitive's `getPrototypeOf` answers `null` (no primitive prototype objects)"
             ],
             "notes": [
+              "`setPrototypeOf` on a class instance or a typed object (a parameter's too) takes effect for its method calls, `instanceof` and reads ([ADR-02032](../adr/02/ADR-02032.md))",
               "The D1 prototype chain ([TDD-00155](../tdd/TDD-00155.md) Stage 3, [ADR-00623](../adr/00/ADR-00623.md)): property reads and the `in` operator walk the chain (own shadows inherited; `delete` re-exposes the proto's value), writes/`Object.keys`/`JSON.stringify` stay own-table — matching JS. `for...in` walks the chain's enumerable keys, a nearer key shadowing (ADR-01737). `Object.create(proto|null, descriptors?)`, `get/setPrototypeOf` (a non-extensible object refuses a new prototype), the `__proto__` accessor (JS setter semantics: non-object values silently ignored), and the `{ __proto__: base }` literal form all work; a prototype cycle throws V8's `Cyclic __proto__ value`",
               "A null prototype is tracked distinctly from an ordinary object's (unmodeled) `Object.prototype` link: such objects render `[Object: null prototype] { … }`, `Object.getPrototypeOf({})` is the shared `Object.prototype` object (not `null`), and `{ __proto__: null }` builds a null-prototype object ([ADR-01094](../adr/01/ADR-01094.md))"
             ],
@@ -376,13 +391,29 @@
             ]
           },
           {
+            "feature": "`Set.union/intersection/difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom()`",
+            "status": "implemented",
+            "notes": [
+              "ES2025 set algebra over any set-like argument (`size`/`has`/`keys`, read and validated once, as GetSetRecord does): a Set, a Map, or a plain object ([ADR-01987](../adr/01/ADR-01987.md))"
+            ],
+            "decl": [
+              "Set.union",
+              "Set.intersection",
+              "Set.difference",
+              "Set.symmetricDifference",
+              "Set.isSubsetOf",
+              "Set.isSupersetOf",
+              "Set.isDisjointFrom"
+            ]
+          },
+          {
             "feature": "`WeakMap` / `WeakSet` / `WeakRef`",
             "status": "implemented",
             "caveats": [
               "Under `-mm=manual` (default) a weak reference is strong: nothing is ever collected, so `.deref()` never becomes `undefined` and keys persist (\"leak by design\"). Real weak semantics require `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md)/[ADR-00349](../adr/00/ADR-00349.md))"
             ],
             "notes": [
-              "`-mm=gc`: genuinely weak via Boehm disappearing links (the referent word is `GC_malloc_atomic`/unscanned so it isn't traced); a collected referent's `.deref()`/`WeakMap.has` observably drops. `gc()` (Node `--expose-gc` idiom) forces a full collection under gc, a no-op under manual",
+              "`-mm=gc`: genuinely weak via Boehm disappearing links (the referent word is `GC_malloc_atomic`/unscanned so it isn't traced); a collected referent's `.deref()`/`WeakMap.has` observably drops. A `WeakMap` entry is an ephemeron: its value lives in its key's block, so a value referencing its own key does not keep the key alive ([ADR-01990](../adr/01/ADR-01990.md)). `gc()` (Node `--expose-gc` idiom) forces a full collection under gc, a no-op under manual",
               "Keys are objects or unregistered symbols (`WeakKey`, as TypeScript's ES2023 lib); `new WeakMap(entries)`/`new WeakSet(values)` seed from an iterable, a primitive throwing the TypeError ([ADR-01737](../adr/01/ADR-01737.md))",
               "`WeakRef` is a TypeScript class (`lib/node/kml_weakref.ts`): any object, function or unregistered symbol as target (`WeakRef: invalid target` otherwise), `.deref()` `undefined` once collected, its target kept alive to the end of the job that made or derefed it (the spec's kept objects), and V8's inspect output ([ADR-01366](../adr/01/ADR-01366.md))"
             ],

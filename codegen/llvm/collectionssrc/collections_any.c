@@ -10,6 +10,7 @@ extern unsigned char __kml_any_eq(i64 a, i64 b);
 extern char *__kml_boxed_bigint_str(void *cell);
 extern void *__kml_fn_identity_dyn(void *fn);
 extern i64 __kml_map_str_hash(const char *s);
+extern i64 __kml_map_cstr_hash(const char *s);
 
 /* KML_BIGINT_MAGIC, KML_HDR_MAGIC_HOST and KML_HDR_MAGIC_HOST_MASK are
  * defined by the compiler ahead of this file. */
@@ -41,7 +42,7 @@ static i64 any_hash(i64 key) {
         if (kind == 7) return kml_mix(kml_id_hash(__kml_fn_identity_dyn(p)));
         if (kind == 1) {
             i64 oh = *(i64 *)p;
-            if (oh == KML_BIGINT_MAGIC) return kml_mix(__kml_map_str_hash(__kml_boxed_bigint_str(p)));
+            if (oh == KML_BIGINT_MAGIC) return kml_mix(__kml_map_cstr_hash(__kml_boxed_bigint_str(p)));
             if ((oh & KML_HDR_MAGIC_HOST_MASK) == KML_HDR_MAGIC_HOST)
                 return kml_mix(kml_id_hash(*(void **)((char *)p + 8)));
         }
@@ -54,7 +55,14 @@ static i64 any_hash(i64 key) {
 
 static i64 any_hash_fn(i64 k) { return any_hash(k); }
 
-#define ANY_KEY(k) (k)
+/* A key as the table stores it: Map.set and Set.add store -0 as +0
+ * (SameValueZero keys; the spec's "if key is -0, set key to +0"), so the
+ * key a program reads back is +0. */
+static i64 any_key(i64 k) {
+    const unsigned long long NUM0 = 562949953421312ULL;
+    return (unsigned long long)k == NUM0 + 0x8000000000000000ULL ? (i64)NUM0 : k;
+}
+#define ANY_KEY(k) any_key(k)
 
 /* get() returns the undefined box (10) on a miss. */
 KML_MAP_FLAVOR(any, i64, any_hash_fn, any_svz, ANY_KEY, 10)

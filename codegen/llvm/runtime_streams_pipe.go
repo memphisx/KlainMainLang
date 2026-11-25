@@ -22,5 +22,5 @@ package llvm
 const (
 	pipeCtxStructIR = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, " + irPtr + ", " + irPtr + ", i64, i64, " + irPtr + " }"
 	teeCtxStructIR  = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, i64, i64, i64, i64, " + irPtr + " }"
-	tsCtxStructIR   = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, i64, i64, " + irPtr + ", " + irPtr + " }"
+	tsCtxStructIR   = "{ " + irPtr + ", " + irPtr + ", " + irPtr + ", " + irPtr + ", i64, i64, i64, " + irPtr + ", " + irPtr + ", i64 }"
 )

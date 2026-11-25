@@ -382,7 +382,7 @@
             "feature": "`perf_hooks`",
             "status": "implemented",
             "caveats": [
-              "Histograms keep exact samples (not HDR); `eventLoopUtilization`/`nodeTiming` missing"
+              "Histograms keep exact samples (not HDR); `nodeTiming`'s startup milestones read 0 (the time origin)"
             ],
             "notes": [
               "Written in TypeScript (`lib/node/perf_hooks.ts`, [ADR-01265](../adr/01/ADR-01265.md)): `performance`, the entry classes, `PerformanceObserver`, `createHistogram`, `monitorEventLoopDelay` → [Performance & Timing](PERFORMANCE-TIMING.md)"
@@ -586,9 +586,15 @@
           },
           {
             "feature": "`punycode`",
-            "status": "missing",
+            "status": "implemented",
+            "caveats": [
+              "The default import is the module's frozen namespace object, its keys sorted, where Node's `require('punycode')` is the mutable `module.exports` in declaration order"
+            ],
             "notes": [
-              "Deprecated in Node (userland module)"
+              "Node's vendored punycode.js 2.1.0 in TypeScript (`lib/node/punycode.ts`); loading it emits DEP0040 ([ADR-01987](../adr/01/ADR-01987.md))"
+            ],
+            "decl": [
+              "punycode#"
             ]
           },
           {

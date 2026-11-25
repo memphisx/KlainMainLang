@@ -50,12 +50,16 @@ func (e *Emitter) emitConsolePrint(args []ast.Expression, fd int, prefix string)
 	if lit, ok := args[0].(*ast.StringLiteral); ok {
 		return e.emitConsoleFormatLine(lit.Value, args, fd)
 	}
+
 	// Every argument is evaluated before anything is printed (Node evaluates
 	// the argument list, then formats it): a side effect in a later argument —
 	// `console.log(a, f())` with f logging — must not land mid-line.
 	vals, err := e.emitConsoleEvalArgs(args)
 	if err != nil {
 		return Value{}, err
+	}
+	if len(vals) >= 2 && (isStringTy(vals[0].Ty) || vals[0].Ty.IsDynamic()) {
+		return e.emitConsoleRuntimeFormat(vals, fd)
 	}
 	for i, val := range vals {
 		term := "\n"
@@ -549,6 +553,15 @@ func (e *Emitter) inspectNegZero(val Value, strVal Value) Value {
 // spread contributes nothing), and one trailing newline closes the line — so
 // the output is exactly `a b c\n` for any positional/spread mix.
 func (e *Emitter) emitConsolePrintSpread(args []ast.Expression, fd int, prefix string) (Value, error) {
+	if prefix == "" && len(args) == 1 {
+		// `console.log(...args)`: a first element that is a string at run
+		// time is util.format's format string.
+		if sp := args[0].(*ast.SpreadElement); sp != nil {
+			if ptrReg, lenReg, elemTy, err := e.resolveArrayForHOF(sp.Arg, sp.Arg.GetPos()); err == nil && (isStringTy(elemTy) || elemTy.IsDynamic()) {
+				return e.emitConsoleSpreadFormat(ptrReg, lenReg, elemTy, fd)
+			}
+		}
+	}
 	e.emitConsoleGroupIndent(fd)
 	if prefix != "" {
 		pfxPtr := e.internString(prefix)
@@ -856,7 +869,6 @@ func (e *Emitter) consoleLabelArgKind(args []ast.Expression, name string, pos as
 // console.time() backing map, creating it on first use — same shape as
 // emitConsoleCountMapEnsure below.
 func (e *Emitter) emitConsoleTimeMapEnsure() string {
-	e.ensureMapStrHelpers()
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	cur := e.freshReg()
@@ -940,7 +952,6 @@ func (e *Emitter) emitConsoleTimeEnd(args []ast.Expression, pos ast.Pos) (Value,
 // already established for "branch, then merge a value back" — simpler and
 // safer than hand-tracking phi predecessor labels.
 func (e *Emitter) emitConsoleCountMapEnsure() string {
-	e.ensureMapStrHelpers()
 	resPtr := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", resPtr))
 	cur := e.freshReg()
@@ -1098,7 +1109,6 @@ func (e *Emitter) emitConsolePrintVal(val Value, fmtPtr string, fd int) {
 		// `%s` and literal text: the string is written by its length, so an
 		// embedded NUL byte prints as Node prints it.
 		if raw, ok := e.strConstRaw[fmtPtr]; ok && strings.HasPrefix(raw, "%s") && !strings.Contains(raw[2:], "%") {
-			e.ensureStrHeaderRuntime()
 			e.emitInstr(fmt.Sprintf("call void @__kml_write_str(i64 %d, "+irPtr+" %s)", fd, safe))
 			if rest := raw[2:]; rest != "" {
 				fmtPtr = e.internString(rest)
@@ -1168,4 +1178,109 @@ func (e *Emitter) arrayAbsentLiteral(val Value) string {
 	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, %s", isRef, val.Ref, e.nullRef()))
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isRef, e.internString("null"), lit))
 	return r
+}
+
+// emitConsoleRuntimeFormat is console.* whose first argument is a string
+// only at run time: util.format then decides (anystr.c __kml_console_fmt),
+// over the arguments' boxes. A first argument that is no string, or holds
+// no `%`, prints as the plain argument list.
+func (e *Emitter) emitConsoleRuntimeFormat(vals []Value, fd int) (Value, error) {
+	e.ensureAnyStr()
+	e.declareFn("__kml_console_fmt", "declare "+irPtr+" @__kml_console_fmt(i64, "+irPtr+", i64)")
+	n := len(vals) - 1
+	arr := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca [%d x i64], align 8", arr, n))
+	for i, v := range vals[1:] {
+		b, err := e.emitBoxValue(v)
+		if err != nil {
+			return Value{}, err
+		}
+		slot := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr inbounds [%d x i64], "+irPtr+" %s, i64 0, i64 %d", slot, n, arr, i))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", b.Ref, slot))
+	}
+	f, err := e.emitBoxValue(vals[0])
+	if err != nil {
+		return Value{}, err
+	}
+	line := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_console_fmt(i64 %s, "+irPtr+" %s, i64 %d)", line, f.Ref, arr, n))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, line))
+	fmtL, plainL, doneL := e.freshLabel("cfmt.fmt"), e.freshLabel("cfmt.plain"), e.freshLabel("cfmt.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, plainL, fmtL))
+	e.emitLabel(fmtL)
+	e.emitConsolePrintVal(Value{Ref: line, Ty: TypePtr}, e.internString("%s\n"), fd)
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(plainL)
+	for i, val := range vals {
+		term := "\n"
+		if i < len(vals)-1 {
+			term = " "
+		}
+		if err := e.emitConsolePrintValueToken(val, fd, term); err != nil {
+			return Value{}, err
+		}
+	}
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	return Value{Ty: TypeVoid}, nil
+}
+
+// emitConsoleSpreadFormat is `console.log(...arr)` over string or any
+// elements: with two or more, a first element that is a string formats the
+// rest (__kml_console_fmt); otherwise the elements print space-separated.
+func (e *Emitter) emitConsoleSpreadFormat(ptrReg, lenReg string, elemTy Type, fd int) (Value, error) {
+	e.ensureAnyStr()
+	e.declareFn("__kml_console_fmt_arr", "declare "+irPtr+" @__kml_console_fmt_arr("+irPtr+", i64, i32)")
+	e.emitConsoleGroupIndent(fd)
+	strs := 0
+	if !elemTy.IsDynamic() {
+		strs = 1
+	}
+	lv := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_console_fmt_arr("+irPtr+" %s, i64 %s, i32 %d)", lv, ptrReg, lenReg, strs))
+	isNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, lv))
+	fmtL, plainL, doneL := e.freshLabel("cfmt.fmt"), e.freshLabel("cfmt.plain"), e.freshLabel("cfmt.done")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, plainL, fmtL))
+	e.emitLabel(fmtL)
+	e.emitConsolePrintVal(Value{Ref: lv, Ty: TypePtr}, e.internString("%s\n"), fd)
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(plainL)
+	// The elements, space-separated (the indent is printed already).
+	pi := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", pi))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", pi))
+	pc, pb, pd := e.freshLabel("cfmt.pcond"), e.freshLabel("cfmt.pbody"), e.freshLabel("cfmt.pdone")
+	e.emitTerminator("br label %" + pc)
+	e.emitLabel(pc)
+	piv := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", piv, pi))
+	pend := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %s", pend, piv, lenReg))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", pend, pd, pb))
+	e.emitLabel(pb)
+	first := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", first, piv))
+	sepL, tokL := e.freshLabel("cfmt.sep"), e.freshLabel("cfmt.tok")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", first, tokL, sepL))
+	e.emitLabel(sepL)
+	e.emitConsolePrintVal(Value{Ref: e.internString(" "), Ty: TypePtr}, e.internString("%s"), fd)
+	e.emitTerminator("br label %" + tokL)
+	e.emitLabel(tokL)
+	gep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i64 %s", gep, elemTy.IR, ptrReg, piv))
+	if err := e.emitConsolePrintValueToken(e.loadArrayElem(gep, elemTy), fd, ""); err != nil {
+		return Value{}, err
+	}
+	pn := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = add i64 %s, 1", pn, piv))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", pn, pi))
+	e.emitTerminator("br label %" + pc)
+	e.emitLabel(pd)
+	e.emitConsolePrintVal(Value{Ref: e.internString(""), Ty: TypePtr}, e.internString("%s\n"), fd)
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	return Value{Ty: TypeVoid}, nil
 }

@@ -7,6 +7,7 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"fmt"
+	"strings"
 )
 
 // propIntrinsic reads one builtin property of a receiver codegen holds as
@@ -88,6 +89,8 @@ func init() {
 			ty: func(*Emitter, *ast.MemberExpression) Type { return TypeBool },
 		},
 	}
+	registerWellKnownSymbolIntrinsics()
+	registerNumberConstIntrinsics()
 	// A Map's or Set's size: the count its header's first word holds.
 	for _, owner := range []string{"Map", "Set"} {
 		propIntrinsics[owner+".prototype.size"] = propIntrinsic{
@@ -186,7 +189,7 @@ func init() {
 	}
 	// A resizable ArrayBuffer's or growable SharedArrayBuffer's limits
 	// (ADR-00494) — must match emitBufferGrowableProps.
-	for _, name := range []string{"growable", "resizable", "maxByteLength"} {
+	for _, name := range []string{"growable", "resizable", "maxByteLength", "detached"} {
 		name := name
 		propIntrinsics["ArrayBuffer.prototype."+name] = propIntrinsic{
 			held: arrayBuffer,
@@ -205,6 +208,98 @@ func init() {
 			},
 		}
 	}
+}
+
+func init() {
+	always := func(Type) bool { return true }
+	any := func(*Emitter, *ast.MemberExpression) Type { return TypeAny }
+	// `Function.prototype`: a function doing nothing, its methods acting
+	// on their receiver (fnproto.go).
+	propIntrinsics["Function.prototype"] = propIntrinsic{held: always, ty: any,
+		emit: func(e *Emitter, ex *ast.MemberExpression) (Value, error) {
+			if err := e.evalStaticReceiver(ex); err != nil {
+				return Value{}, err
+			}
+			return e.emitFnProtoBox(""), nil
+		}}
+	// `Object.prototype`: the shared null-prototype bag every ordinary
+	// object's [[Prototype]] reads as (TDD-00229).
+	propIntrinsics["Object.prototype"] = propIntrinsic{held: always, ty: any,
+		emit: func(e *Emitter, ex *ast.MemberExpression) (Value, error) {
+			if err := e.evalStaticReceiver(ex); err != nil {
+				return Value{}, err
+			}
+			e.ensureDynJSONC()
+			e.ensureObjProtoFill()
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_object_prototype()", r))
+			return e.emitDynObjBox(r), nil
+		}}
+}
+
+// evalStaticReceiver evaluates a static property's receiver for its
+// effects, unless it is a plain name.
+func (e *Emitter) evalStaticReceiver(ex *ast.MemberExpression) error {
+	if _, ok := ex.Object.(*ast.Identifier); ok {
+		return nil
+	}
+	_, err := e.emitExpr(ex.Object)
+	return err
+}
+
+// propDeclIntrinsic is the @intrinsic key of the builtin property
+// declaration m reads, or "" when m reads no such declaration.
+func (e *Emitter) propDeclIntrinsic(m *ast.MemberExpression) string {
+	c := e.front()
+	if c == nil {
+		return ""
+	}
+	switch d := c.MemberDecl(m).(type) {
+	case *ast.PropertySignature:
+		if e.isLibMember(d) {
+			return d.Intrinsic
+		}
+	case nil:
+		// A read the checker never saw (a synthesized runtime body): the
+		// key the unshadowed global's own property has.
+		if id, ok := m.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
+			if _, user := e.classes[id.Name]; !user {
+				return id.Name + "." + m.Property
+			}
+		}
+	}
+	return ""
+}
+
+// staticPropIntrinsic is the intrinsic a constructor's own property's
+// declaration names (`Object.prototype`), read before any branch on the
+// receiver's representation.
+func (e *Emitter) staticPropIntrinsic(ex *ast.MemberExpression) (propIntrinsic, bool) {
+	if ex.Optional {
+		return propIntrinsic{}, false
+	}
+	c := e.front()
+	if c == nil {
+		return propIntrinsic{}, false
+	}
+	d := c.MemberDecl(ex)
+	if d == nil {
+		// A read the checker never saw (a synthesized runtime body): the
+		// entry the unshadowed global's own property has.
+		if id, ok := ex.Object.(*ast.Identifier); ok && !e.isShadowedByLocal(id.Name) {
+			if _, user := e.classes[id.Name]; !user {
+				pi, ok := propIntrinsics[id.Name+"."+ex.Property]
+				return pi, ok
+			}
+		}
+		return propIntrinsic{}, false
+	}
+	ps, ok := d.(*ast.PropertySignature)
+	if !ok || ps.Intrinsic == "" || strings.Contains(ps.Intrinsic, ".prototype.") {
+		return propIntrinsic{}, false
+	}
+	pi, ok := propIntrinsics[ps.Intrinsic]
+	return pi, ok
 }
 
 // streamPropIntrinsic reads a stream property of a readable side, or of a
@@ -298,7 +393,6 @@ func (e *Emitter) emitResponseFetched(ex *ast.MemberExpression, fn string, ty Ty
 	e.emitAlloca(fmt.Sprintf("%s = alloca %s, align 8", slot, ir))
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, fetchL, dfltL))
 	e.emitLabel(fetchL)
-	e.ensureStrHeaderRuntime()
 	v := e.freshReg()
 	ret := ir
 	if ir == "i1" {
@@ -341,7 +435,6 @@ func (e *Emitter) emitResponseStatusText(ex *ast.MemberExpression) (Value, error
 	e.emitLabel(fetchL)
 	pend := e.loadFieldValue(objVal, pendIdx, pendTy)
 	e.ensureFetch()
-	e.ensureStrHeaderRuntime()
 	st := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_status_text("+irPtr+" %s)", st, pend.Ref))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", st, slot))

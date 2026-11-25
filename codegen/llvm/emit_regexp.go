@@ -61,18 +61,18 @@ func (e *Emitter) regexModeOpts() regexModeOpts {
 	case "es-ascii":
 		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref, dollarEndOnly: true}
 	case "es-unicode":
-		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true}
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF | pcre2MatchInvalidUTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true}
 	case "es-utf16":
 		// Identical matching to es-unicode (same option bits, same newline
 		// convention), plus UTF-16 code-unit index reporting at every user-
 		// visible offset boundary — see regexModeOpts.utf16Index (TDD-00067
 		// Stage 3).
-		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true, utf16Index: true}
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF | pcre2MatchInvalidUTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true, utf16Index: true}
 	case "ecmascript":
 		// es-unicode matching plus the Option C source normalization pass,
 		// reporting UTF-16 code-unit offsets as the string layer indexes
 		// (.charCodeAt/.slice, ADR-01826).
-		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true, normalize: true, utf16Index: true}
+		return regexModeOpts{baseOpt: pcre2AltBSUX | pcre2MatchUnsetBackref | pcre2UTF | pcre2MatchInvalidUTF, dollarEndOnly: true, newline: pcre2NewlineAny, utfMatching: true, normalize: true, utf16Index: true}
 	default:
 		// resolveRegexMode only ever yields one of the above; a mode added
 		// without a matching case should fail loudly here rather than silently
@@ -91,7 +91,6 @@ func (e *Emitter) regexByteToUTF16(strRef, byteReg string) string {
 	if !e.regexModeOpts().utf16Index {
 		return byteReg
 	}
-	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_byte_to_utf16("+irPtr+" %s, i64 %s)", r, strRef, byteReg))
 	return r
@@ -105,7 +104,6 @@ func (e *Emitter) regexByteToUTF16Signed(strRef, byteReg string) string {
 	if !e.regexModeOpts().utf16Index {
 		return byteReg
 	}
-	e.ensureStrHeaderRuntime()
 	isNeg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp slt i64 %s, 0", isNeg, byteReg))
 	negL := e.freshLabel("regex.u16.neg")
@@ -135,7 +133,6 @@ func (e *Emitter) regexUTF16ToByte(strRef, u16Reg string) string {
 	if !e.regexModeOpts().utf16Index {
 		return u16Reg
 	}
-	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf16_to_byte("+irPtr+" %s, i64 %s)", r, strRef, u16Reg))
 	return r
@@ -166,7 +163,6 @@ func (e *Emitter) emitRegexAdvancePastEmpty(objVal, strVal Value, startByteReg, 
 	e.emitLabel(advL)
 	width := "1"
 	if opts.utfMatching {
-		e.ensureStrHeaderRuntime()
 		w := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf8_width("+irPtr+" %s, i64 %s)", w, strVal.Ref, endByteReg))
 		width = w
@@ -198,8 +194,6 @@ func (e *Emitter) emitNewRegExpExpression(ex *ast.NewRegExpExpression) (Value, e
 // RegExp boxes as that header, and a class extending RegExp builds its
 // body in place after its own tag word.
 func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (Value, error) {
-	e.ensureRegexCompile()
-	e.ensureExceptionHelpers()
 
 	patternVal, err := e.emitExpr(ex.Pattern)
 	if err != nil {
@@ -317,7 +311,6 @@ func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (V
 
 	// Validate the flags string as real JS does: an unrecognized flag character
 	// or a repeated flag is a SyntaxError, not a silent accept (ADR-00549).
-	e.ensureStrHeaderRuntime()
 	flagsOkReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_regex_validate_flags("+irPtr+" %s)", flagsOkReg, flagsVal.Ref))
 	flagsBad := e.freshReg()
@@ -371,11 +364,10 @@ func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (V
 	// es-unicode sets the newline convention, which lives on a compile context
 	// rather than in the options word — build/configure one, pass it in place
 	// of the `ptr null` the other modes use, and free it right after compiling
-	// (the compiled pattern copies out what it needs; see ensureRegexCompileContext).
+	// (the compiled pattern copies out what it needs).
 	compileCtx := "null"
 	var ctxReg string
 	if modeOpts.newline != 0 {
-		e.ensureRegexCompileContext()
 		ctxReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @pcre2_compile_context_create_8("+irPtr+" null)", ctxReg))
 		e.emitInstr(fmt.Sprintf("call i32 @pcre2_set_newline_8("+irPtr+" %s, i32 %d)", ctxReg, modeOpts.newline))
@@ -388,7 +380,6 @@ func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (V
 	compilePatternRef := patternVal.Ref
 	esMode := e.resolveRegexMode() != "pcre"
 	if esMode {
-		e.ensureStrHeaderRuntime()
 		vErrSlot := e.freshReg()
 		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", vErrSlot))
 		norm := e.freshReg()
@@ -407,7 +398,6 @@ func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (V
 		compilePatternRef = norm
 	}
 	if modeOpts.normalize {
-		e.ensureStrHeaderRuntime()
 		dotAllForNorm := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", dotAllForNorm, dotAllSlot))
 		normPat := e.freshReg()
@@ -429,6 +419,8 @@ func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (V
 	if esMode {
 		e.emitInstr(fmt.Sprintf("call void @__kml_regex_note_optional("+irPtr+" %s, "+irPtr+" %s)", handleReg, compilePatternRef))
 	}
+	e.declareFn("__kml_regex_jit", "declare void @__kml_regex_jit("+irPtr+")")
+	e.emitInstr(fmt.Sprintf("call void @__kml_regex_jit("+irPtr+" %s)", handleReg))
 
 	badReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", badReg, handleReg))
@@ -440,7 +432,6 @@ func (e *Emitter) emitNewRegExpInto(ex *ast.NewRegExpExpression, body string) (V
 	errCodeReg := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load i32, "+irPtr+" %s, align 4", errCodeReg, errCodeSlot))
 	msgBuf := e.freshReg()
-	e.ensureStrHeaderRuntime() // error .message must be headered for concat/=== (TDD-00120)
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 256)", msgBuf))
 	e.emitInstr(fmt.Sprintf("call i32 @pcre2_get_error_message_8(i32 %s, "+irPtr+" %s, i64 256)", errCodeReg, msgBuf))
 	e.emitInstr(fmt.Sprintf("call void @__kml_str_finalize("+irPtr+" %s)", msgBuf))
@@ -602,7 +593,6 @@ func (e *Emitter) emitRegexTest(mem *ast.MemberExpression, args []ast.Expression
 		return Value{}, err
 	}
 
-	e.ensureRegexMatch()
 	handleReg := e.emitRegexHandleLoad(objVal)
 	useLastIdxReg, lastIndexReg, startOffsetReg, matchOptsReg := e.emitRegexMatchStart(objVal, strVal)
 
@@ -702,6 +692,9 @@ var execMembers = map[string]execMember{
 		key, val := TypePtr, undefinedableElem(TypePtr)
 		return Type{IR: irPtr, Host: hostDynamicObject, MapKey: &key, MapVal: &val, Absent: absenceOf(true, true, false)}
 	}, off: 40},
+	// The d flag's [start, end] pairs (a boxed array with its own groups),
+	// undefined without it.
+	"indices": {ty: func() Type { return TypeAny }, off: 48},
 }
 
 // execMemberRead reads prop off an exec-shaped header as its value: for a
@@ -740,6 +733,11 @@ func (e *Emitter) emitExecArrayMember(ex *ast.MemberExpression) (Value, bool, er
 	v, err := e.emitExpr(ex.Object)
 	if err != nil {
 		return Value{}, false, err
+	}
+	if v.Ty.IsDynamic() {
+		// Emitted boxed (a match on a `string | Buffer`): its own property.
+		r, err := e.emitDynAnyMemberGet(v, e.internString(ex.Property), ex.GetPos())
+		return r, true, err
 	}
 	return e.execMemberRead(v.Ref, ex.Property, ot.ExecMaybePlain || v.Ty.ExecMaybePlain), true, nil
 }
@@ -814,14 +812,14 @@ func (e *Emitter) emitRegexExec(mem *ast.MemberExpression, args []ast.Expression
 // well-known real-JS footgun too, not something this compiler owes exec()
 // specifically).
 func (e *Emitter) emitRegexSingleMatchCore(objVal, strVal Value) (result Value, matchStartReg, matchEndReg string) {
-	result, matchStartReg, matchEndReg, _ = e.emitRegexMatch(objVal, strVal, false)
+	result, matchStartReg, matchEndReg, _, _ = e.emitRegexMatch(objVal, strVal, false)
 	return
 }
 
 // emitRegexMatch is emitRegexSingleMatchCore, also building exec's `groups`
-// (the named groups' dictionary, or null) when wantGroups.
-func (e *Emitter) emitRegexMatch(objVal, strVal Value, wantGroups bool) (result Value, matchStartReg, matchEndReg, groupsReg string) {
-	e.ensureRegexMatch()
+// (the named groups' dictionary, or null) and `indices` (the d flag's
+// boxed pairs, else undefined) when wantGroups.
+func (e *Emitter) emitRegexMatch(objVal, strVal Value, wantGroups bool) (result Value, matchStartReg, matchEndReg, groupsReg, indicesReg string) {
 
 	handleReg := e.emitRegexHandleLoad(objVal)
 	useLastIdxReg, lastIndexReg, startOffsetReg, matchOptsReg := e.emitRegexMatchStart(objVal, strVal)
@@ -856,6 +854,8 @@ func (e *Emitter) emitRegexMatch(objVal, strVal Value, wantGroups bool) (result 
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", matchEndSlot))
 	groupsSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", groupsSlot))
+	indicesSlot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", indicesSlot))
 
 	matchedL := e.freshLabel("regex.exec.matched")
 	nomatchL := e.freshLabel("regex.exec.nomatch")
@@ -962,7 +962,6 @@ func (e *Emitter) emitRegexMatch(objVal, strVal Value, wantGroups bool) (result 
 
 	e.emitLabel(doneL)
 	if wantGroups {
-		e.ensureStringC()
 		if !e.declaredRegexGroups {
 			e.declaredRegexGroups = true
 		}
@@ -984,6 +983,21 @@ func (e *Emitter) emitRegexMatch(objVal, strVal Value, wantGroups bool) (result 
 		g := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_regex_groups(i32 %s, i32 %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i32 %s)", g, c, z, t, strVal.Ref, ovecReg, rcReg))
 		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", g, groupsSlot))
+		// The d flag's indices, built only when the regexp has it.
+		e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, indicesSlot))
+		hasD := e.emitRegexLoadField(objVal, "hasIndices", "i1", 1)
+		dL, dDone := e.freshLabel("regex.exec.indices"), e.freshLabel("regex.exec.indices.done")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasD, dL, dDone))
+		e.emitLabel(dL)
+		utf16 := "0"
+		if e.regexModeOpts().utf16Index {
+			utf16 = "1"
+		}
+		ix := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_indices(i32 %s, i32 %s, i32 %s, "+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s, i32 %s, i64 %s)", ix, utf16, c, z, t, strVal.Ref, ovecReg, rcReg, groupCountReg))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", ix, indicesSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", dDone))
+		e.emitLabel(dDone)
 	}
 	e.emitInstr(fmt.Sprintf("call void @pcre2_match_data_free_8("+irPtr+" %s)", matchDataReg))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", dataReg, resultPtrSlot))
@@ -1001,6 +1015,7 @@ func (e *Emitter) emitRegexMatch(objVal, strVal Value, wantGroups bool) (result 
 	e.emitInstr(fmt.Sprintf("store i64 -1, "+irPtr+" %s, align 8", matchStartSlot))
 	e.emitInstr(fmt.Sprintf("store i64 -1, "+irPtr+" %s, align 8", matchEndSlot))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", groupsSlot))
+	e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", nbUndefined, indicesSlot))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", mergeL))
 
 	e.emitLabel(mergeL)
@@ -1020,9 +1035,11 @@ func (e *Emitter) emitRegexMatch(objVal, strVal Value, wantGroups bool) (result 
 	if wantGroups {
 		groupsReg = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", groupsReg, groupsSlot))
+		indicesReg = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", indicesReg, indicesSlot))
 	}
 
-	return Value{Ref: r1, Ty: regExpExecResultType()}, finalStart, finalEnd, groupsReg
+	return Value{Ref: r1, Ty: regExpExecResultType()}, finalStart, finalEnd, groupsReg, indicesReg
 }
 
 // emitRegexCountGlobalMatches resets regexVal's lastIndex to 0, then runs
@@ -1244,8 +1261,8 @@ func (e *Emitter) emitStringMatch(mem *ast.MemberExpression, args []ast.Expressi
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", elem0, elem0Gep))
 		e.heapStore(irPtr, elem0, destSlot, 8)
 	})
-	ghdr := e.allocArrayHeaderSized(48, true)
-	for i, f := range []string{irPtr + " " + data, "i64 " + count, irPtr + " null", "i64 -1"} {
+	ghdr := e.allocArrayHeaderSized(56, true)
+	for i, f := range []string{irPtr + " " + data, "i64 " + count, irPtr + " null", "i64 -1", irPtr + " null", irPtr + " null", fmt.Sprintf("i64 %d", nbUndefined)} {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", gep, ghdr, i*8))
 		e.heapStoreTV(f, gep, 8)
@@ -1297,7 +1314,6 @@ func (e *Emitter) emitStringMatchAll(mem *ast.MemberExpression, args []ast.Expre
 		return Value{}, err
 	}
 
-	e.ensureExceptionHelpers()
 	globalReg := e.emitRegexLoadField(regexVal, "global", "i1", 1)
 	badL := e.freshLabel("regex.matchall.notglobal")
 	okL := e.freshLabel("regex.matchall.ok")
@@ -1372,26 +1388,26 @@ func (e *Emitter) emitStringMatchAll(mem *ast.MemberExpression, args []ast.Expre
 // emitExecStep is one exec() of objVal against strVal, as emitExecResult,
 // with the match's raw byte offsets.
 func (e *Emitter) emitExecStep(objVal, strVal Value) (Value, string, string) {
-	result, start, end, groups := e.emitRegexMatch(objVal, strVal, true)
-	return e.execResultFrom(result, start, groups, strVal), start, end
+	result, start, end, groups, indices := e.emitRegexMatch(objVal, strVal, true)
+	return e.execResultFrom(result, start, groups, indices, strVal), start, end
 }
 
 // emitExecResult runs one exec() of objVal against strVal: the match array,
 // whose header carries index, input and groups after its {data, len}
 // (execArrayType); no match is the null header.
 func (e *Emitter) emitExecResult(objVal, strVal Value) Value {
-	result, start, _, groups := e.emitRegexMatch(objVal, strVal, true)
-	return e.execResultFrom(result, start, groups, strVal)
+	result, start, _, groups, indices := e.emitRegexMatch(objVal, strVal, true)
+	return e.execResultFrom(result, start, groups, indices, strVal)
 }
 
 // execResultFrom builds an exec result from a match.
-func (e *Emitter) execResultFrom(result Value, start, groups string, strVal Value) Value {
-	// The result array's header carries index, input and groups after its
-	// {data, len} (execArrayHeaderTy); no match is the null header.
+func (e *Emitter) execResultFrom(result Value, start, groups, indices string, strVal Value) Value {
+	// The result array's header carries index, input, groups and indices
+	// after its {data, len} (execArrayHeaderTy); no match is the null header.
 	data, n := e.arrayParts(result)
-	hdr := e.allocArrayHeaderSized(48, false)
+	hdr := e.allocArrayHeaderSized(56, false)
 	idx := e.regexByteToUTF16Signed(strVal.Ref, start)
-	for i, f := range []string{irPtr + " " + data, "i64 " + n, irPtr + " null", "i64 " + idx, irPtr + " " + strVal.Ref, irPtr + " " + groups} {
+	for i, f := range []string{irPtr + " " + data, "i64 " + n, irPtr + " null", "i64 " + idx, irPtr + " " + strVal.Ref, irPtr + " " + groups, "i64 " + indices} {
 		gep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", gep, hdr, i*8))
 		e.heapStoreTV(f, gep, 8)
@@ -1440,7 +1456,6 @@ func (e *Emitter) emitRegexMatchContext() string {
 	if e.resolveRegexMode() == "pcre" {
 		return "null"
 	}
-	e.ensureRegexMatch()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_regex_mctx()", r))
 	return r

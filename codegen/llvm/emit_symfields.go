@@ -27,7 +27,7 @@ func (e *Emitter) lowerSymbolFields(prog *ast.Program) error {
 	if err := ast.NameComputedMembers(prog); err != nil {
 		return err
 	}
-	if err := ast.RuntimeKeyError(prog); err != nil {
+	if err := ast.RuntimeKeyError(prog, true); err != nil {
 		return err
 	}
 	e.lowerConstLiteralKeys(prog)

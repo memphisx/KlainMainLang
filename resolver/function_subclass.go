@@ -103,18 +103,38 @@ func lowerFunctionSubclasses(prog *ast.Program) {
 		if v, ok := bound[cd]; ok {
 			ref = v.Name
 		}
-		helpers[cd] = append(functionSubclassHelpers(cd, ref), functionSubclassReceivers(prog, cd, ref)...)
 		// A construction this lowering does not see (`new K()` with K
-		// holding the class) passes its arguments at run time.
-		ctor := fnSubTemplate(`class X { constructor() { throw new EvalError("Function of a string computed at run time is not supported: it needs an embedded JavaScript engine"); } }`).(*ast.ClassDeclaration).Constructor
-		if cd.Constructor != nil {
-			// (Its length: the parameters before the first default or rest.)
-			for _, p := range cd.Constructor.Params {
+		// holding the class) passes its arguments at run time. A super call
+		// of constant strings alone builds the same function whatever the
+		// construction passes: the construction the lowered `new` makes, of
+		// these arguments (read before the helpers take the body).
+		var runtimeNew ast.Expression
+		var runtimeParams []ast.Param
+		if c := cd.Constructor; c != nil && c.Body != nil {
+			simple := true
+			var args []ast.Expression
+			for _, p := range c.Params {
 				if p.Default != nil || p.Rest || p.ArrayPattern != nil || p.ObjectPattern != nil {
+					simple = false
 					break
 				}
-				ctor.Params = append(ctor.Params, ast.Param{Name: p.Name, Pos: p.Pos})
+				runtimeParams = append(runtimeParams, ast.Param{Name: p.Name, Pos: p.Pos, Type: ast.AnyAnnotation("ts")})
+				args = append(args, ast.NewIdentifier(p.Name, p.Pos))
 			}
+			if _, ok := forwardedSuperArgs(c, args); ok && simple {
+				runtimeNew = functionSubclassNew(cd, ast.NewNewExpression(cd.Name, args, c.GetPos()))
+			}
+		}
+		helpers[cd] = append(functionSubclassHelpers(cd, ref), functionSubclassReceivers(prog, cd, ref)...)
+		ctor := fnSubTemplate(`class X { constructor() { throw new EvalError("Function of a string computed at run time is not supported: it needs an embedded JavaScript engine"); } }`).(*ast.ClassDeclaration).Constructor
+		// (Its length: the parameters before the first default or rest.)
+		ctor.Params = append(ctor.Params, runtimeParams...)
+		if runtimeNew != nil {
+			// The function made is the construction's result (`return f`),
+			// an object the class's own instance layout does not hold.
+			at := runtimeNew.GetPos()
+			made := ast.NewVarDeclaration("const", "__kml_fsrt", ast.AnyAnnotation("ts"), runtimeNew, at)
+			ctor.Body = ast.NewBlockStatement([]ast.Statement{made, ast.NewReturnStatement(ast.NewIdentifier("__kml_fsrt", at), at)}, at)
 		}
 		cd.Constructor = ctor
 		var fields []ast.AnnotField
@@ -382,8 +402,9 @@ func functionSubclassNew(cd *ast.ClassDeclaration, ne *ast.NewExpression) ast.Ex
 // forwardedSuperArgs are the arguments c's one super call passes, resolved
 // against a construction's arguments args, when each is a constant string
 // or a parameter (its rest parameter spread) the body never assigns, and
-// each argument it reaches is a constant string: fresh literals, for the
-// Function constructor to compile.
+// each argument it reaches is a constant string (an argument it does not
+// reach can be anything): fresh literals, for the Function constructor to
+// compile.
 func forwardedSuperArgs(c *ast.FunctionDeclaration, args []ast.Expression) ([]ast.Expression, bool) {
 	var supers []*ast.CallExpression
 	assigned := map[string]bool{}
@@ -417,11 +438,6 @@ func forwardedSuperArgs(c *ast.FunctionDeclaration, args []ast.Expression) ([]as
 		}
 		return "", false
 	}
-	for _, a := range args {
-		if _, ok := str(a); !ok {
-			return nil, false
-		}
-	}
 	param := map[string]int{}
 	rest := -1
 	for i, p := range c.Params {
@@ -446,7 +462,10 @@ func forwardedSuperArgs(c *ast.FunctionDeclaration, args []ast.Expression) ([]as
 				return nil, false
 			}
 			for _, x := range args[min(rest, len(args)):] {
-				v, _ := str(x)
+				v, ok := str(x)
+				if !ok {
+					return nil, false
+				}
 				out = append(out, ast.NewStringLiteral(v, pos))
 			}
 			continue
@@ -459,7 +478,10 @@ func forwardedSuperArgs(c *ast.FunctionDeclaration, args []ast.Expression) ([]as
 		if i >= len(args) {
 			return nil, false // (undefined: "undefined", not a constant here)
 		}
-		v, _ := str(args[i])
+		v, ok := str(args[i])
+		if !ok {
+			return nil, false
+		}
 		out = append(out, ast.NewStringLiteral(v, pos))
 	}
 	return out, true

@@ -77,9 +77,6 @@ func thenableValueType(sig FuncSig) Type {
 // a queued job passes to `v.then`; a throw from `then` rejects it.
 func (e *Emitter) emitThenableToPromise(v Value, sig FuncSig, pos ast.Pos) (Value, error) {
 	valTy := thenableValueType(sig)
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
 	p := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", p))

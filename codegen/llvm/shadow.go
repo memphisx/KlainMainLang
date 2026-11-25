@@ -9,7 +9,8 @@ import (
 	"strings"
 
 	"KlainMainLang/ast"
-	"KlainMainLang/options"
+	"KlainMainLang/binder"
+	"KlainMainLang/checker"
 	"KlainMainLang/shadow"
 )
 
@@ -32,9 +33,10 @@ type ShadowOracle interface {
 	Reference(id *ast.Identifier) (declared bool, ok bool)
 }
 
-// NewShadowOracle builds the oracle for a program. It is nil until a new pass
-// registers one; with it nil, or KML_SHADOW unset, no question is asked.
-var NewShadowOracle func(prog *ast.Program, opts options.Options, r reprCtx) ShadowOracle
+// NewShadowOracle builds the oracle for a program over its front end's
+// binding and checker (c, typed whole before emission). It is nil until a new
+// pass registers one; with it nil, or KML_SHADOW unset, no question is asked.
+var NewShadowOracle func(prog *ast.Program, b *binder.Binding, c *checker.Checker, r reprCtx) ShadowOracle
 
 // SetShadow makes e ask oracle and record disagreements in rec (tests use it
 // to drive the harness directly).
@@ -45,14 +47,26 @@ func (e *Emitter) SetShadow(oracle ShadowOracle, rec *shadow.Recorder) {
 // startShadow turns the comparison on for a compile run when KML_SHADOW is set
 // and an oracle is registered. The returned function closes the record file.
 func (e *Emitter) startShadow(prog *ast.Program) (func(), error) {
-	if e.shadowOracle != nil || NewShadowOracle == nil || !shadow.Enabled() {
+	if e.shadowOracle != nil || e.shadowRec != nil || NewShadowOracle == nil || !shadow.Enabled() {
 		return func() {}, nil
 	}
 	rec, closer, err := shadow.FromEnv()
 	if err != nil {
 		return func() {}, err
 	}
-	e.shadowOracle, e.shadowRec = NewShadowOracle(prog, e.opts, e.repr()), rec
+	// The oracle reads the front end's own checker, so one whole-program
+	// check serves codegen's questions and the comparison. It starts when
+	// that checker is built (front), at the point a compile without the
+	// comparison builds it, never earlier: the program's lowering before
+	// that point is the tree it types.
+	e.shadowRec = rec
+	e.shadowStart = func() {
+		e.shadowOracle = NewShadowOracle(prog, e.frontBinding, e.frontChecker, e.repr())
+	}
+	if e.frontBuilt && e.frontChecker != nil {
+		e.shadowStart()
+		e.shadowStart = nil
+	}
 	src := ""
 	if prog.Text != nil {
 		src = prog.Text.Src
@@ -71,7 +85,7 @@ func (e *Emitter) startShadow(prog *ast.Program) (func(), error) {
 			rec.Record(shadow.Disagreement{Decider: dk[0], Kind: dk[1], Asked: e.shadowAsked[k]})
 		}
 		e.shadowAsked, e.shadowSeen = nil, nil
-		e.shadowOracle, e.shadowRec = nil, nil
+		e.shadowOracle, e.shadowRec, e.shadowStart = nil, nil, nil
 		closer.Close()
 	}, nil
 }
@@ -85,6 +99,11 @@ func (e *Emitter) shadowCompare(decider string, node ast.Node, old Type, oldOK b
 	if sn := (shadowNode{decider, node}); !e.shadowSeen[sn] {
 		e.shadowSeen[sn] = true
 		e.shadowAsked[decider+"\x00"+nodeKind(node)]++
+	}
+	if oldOK == newOK && (!oldOK || reflect.DeepEqual(old, neu)) {
+		// Equal values have equal keys: an agreement, found without
+		// building either (most comparisons are agreements).
+		return
 	}
 	oldKey, newKey := "none", "none"
 	var fields []string
@@ -125,6 +144,9 @@ func nodeKind(n ast.Node) string {
 
 // shadowExprType is the typeOfExpr hook.
 func (e *Emitter) shadowExprType(expr ast.Expression, old Type) {
+	if e.shadowOracle == nil {
+		return // not started: the front end's checker is not built yet
+	}
 	if e.analysisDepth > 0 {
 		// An analysis pre-pass asks before the bindings it reads are in
 		// scope: not the answer codegen emits by.
@@ -160,6 +182,14 @@ func (e *Emitter) shadowExprType(expr ast.Expression, old Type) {
 // shadowGlobalType is the module-global decision's hook: a forced type
 // (codegen's own) or the checker's, against the checker's.
 func (e *Emitter) shadowGlobalType(v *ast.VarDeclaration, old Type, oldOK bool) {
+	if e.shadowOracle == nil {
+		return
+	}
+	if e.inLib == "" && e.libStmts[v] != "" {
+		// A library module's binding is typed in the strict lane, as its
+		// module compiles (libScope).
+		defer e.libScope(v)()
+	}
 	if neu, promotable, ok := e.shadowOracle.GlobalType(v); ok {
 		// A library, dynamic-only or worker module's binding is a global
 		// whatever the oracle says (registerModuleGlobals' initFnDecls).

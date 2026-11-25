@@ -17,18 +17,10 @@ extern unsigned char __kml_boxed_bigint_eq(void *ca, void *cb);
 extern unsigned char __kml_boxed_bigint_eq_num(void *cell, double d);
 extern unsigned char __kml_boxed_bigint_eq_str(void *cell, const char *s);
 
-/* mirrors __kml_nb_tag (runtime_nanbox.go) */
-static int nb_tag(i64 w) {
-    u64 v = (u64)w;
-    static const int kindTag[8] = {2, 6, 7, 8, 9, 10, 11, 12};
-    if (v >= (1ULL << 49)) return 1;
-    if (v < 65536) return v == 2 ? 4 : (v == 6 || v == 7) ? 3 : 5;
-    return kindTag[v & 7];
-}
 
 /* The bigint cell a box holds, or null. */
 static void *bigint_cell(i64 w) {
-    if (nb_tag(w) != 6) return 0;
+    if (kml_nb_tag(w) != 6) return 0;
     i64 *cell = (i64 *)((u64)w & ~7ULL);
     return cell[0] == KML_BIGINT_MAGIC ? cell : 0;
 }
@@ -39,7 +31,7 @@ _Bool __kml_any_loose_eq(i64 a0, i64 b0) {
      * primitive against it. */
     if ((biga != 0) != (bigb != 0)) {
         i64 other = biga ? b0 : a0;
-        if (nb_tag(other) >= 6 && !bigint_cell(other)) {
+        if (kml_nb_tag(other) >= 6 && !bigint_cell(other)) {
             i64 p = __kml_toprimitive(other, 2);
             if (p == other) return 0; /* a symbol: equal to no bigint */
             return biga ? __kml_any_loose_eq(a0, p) : __kml_any_loose_eq(p, b0);
@@ -49,7 +41,7 @@ _Bool __kml_any_loose_eq(i64 a0, i64 b0) {
         if (biga && bigb) return __kml_boxed_bigint_eq(biga, bigb) & 1;
         void *cell = biga ? biga : bigb;
         i64 other = biga ? b0 : a0;
-        int to = nb_tag(other);
+        int to = kml_nb_tag(other);
         if (to == 4 || to == 5 || to >= 6) return 0;
         if (to == 2) {
             /* A string: its StringToBigInt, equal to none when it is none. */
@@ -57,12 +49,12 @@ _Bool __kml_any_loose_eq(i64 a0, i64 b0) {
         }
         return __kml_boxed_bigint_eq_num(cell, __kml_any_tonum(other)) & 1;
     }
-    int aobj = nb_tag(a0) >= 6, bobj = nb_tag(b0) >= 6;
+    int aobj = kml_nb_tag(a0) >= 6, bobj = kml_nb_tag(b0) >= 6;
     if (aobj && bobj) return __kml_any_eq(a0, b0) & 1;
     i64 a = aobj ? __kml_toprimitive(a0, 2) : a0;
     i64 b = bobj ? __kml_toprimitive(b0, 2) : b0;
     if (bigint_cell(a) || bigint_cell(b)) return __kml_any_loose_eq(a, b);
-    int ta = nb_tag(a), tb = nb_tag(b);
+    int ta = kml_nb_tag(a), tb = kml_nb_tag(b);
     int anull = ta == 4 || ta == 5, bnull = tb == 4 || tb == 5;
     if (anull || bnull) return anull && bnull;
     if (ta == tb) return __kml_any_eq(a, b) & 1;

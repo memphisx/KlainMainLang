@@ -342,7 +342,7 @@ func (e *Emitter) emitStmt(stmt ast.Statement) error {
 				return err
 			}
 		}
-		if e.valueBases[s.BaseClass] && !s.BaseQualified && !e.blockHoisted[s] {
+		if e.valueBases[s.BaseClass] && !s.BaseQualified && !e.blockHoisted[s] && !e.heritageAtSite(s) {
 			if err := e.emitClassHeritage(s); err != nil {
 				return err
 			}
@@ -520,7 +520,7 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 				// function's promise past its own try blocks (the return
 				// leaves them first), as adoption does.
 				src := e.emitWrapperField(w, 1, irPtr)
-				e.ensureTaskRuntime()
+				e.ensureUnhandledRejections()
 				e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready("+irPtr+" %s)", src))
 				if _, err := e.emitAwaitAny(Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}); err != nil {
 					return err
@@ -753,6 +753,11 @@ func (e *Emitter) emitReturn(r *ast.ReturnStatement) error {
 	val, err := e.emitExprWithObjectHint(r.Value, e.currentRetType)
 	if err != nil {
 		return err
+	}
+	if e.currentRetType.IsDynamic() && val.Ty.IR == "void" {
+		// `return f()` of a call that returns nothing (`return
+		// process.nextTick(…)`): its value, undefined.
+		val = Value{Ref: "null", Ty: TypeUndefined}
 	}
 	if e.currentRetType.IsDynamic() {
 		// A constrained union return type (TDD-00043; bare any/unknown is
@@ -1110,6 +1115,10 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 	if s.Await {
 		// Every step waits: the callable runs as a coroutine (TDD-00223 §2).
 		e.sawAwait = true
+		if e.noteTLASite(s.GetPos(), true) {
+			e.tlaLoopSites = append(e.tlaLoopSites, len(e.tlaSites)-1)
+			defer func() { e.tlaLoopSites = e.tlaLoopSites[:len(e.tlaLoopSites)-1] }()
+		}
 	}
 	// `xs!` is erased at run time: iterating it is iterating xs, whose
 	// absence is Node's "xs is not iterable".
@@ -1236,6 +1245,19 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 			// drive it synchronously, awaiting each yielded value.
 			return e.emitForAwaitOfSyncGenerator(s, objTy, genVal, condL, bodyL, incL, endL)
 		}
+		// An instance of a class extending ReadableStream: the stream its
+		// body holds.
+		if objTy.IsClass() && !objTy.IsDynamic() {
+			if info, ok := e.classes[objTy.ClassName]; ok && info.HostBase != nil && info.HostBase.IsReadableStream() {
+				v, err := e.emitExpr(s.Iterable)
+				if err != nil {
+					return err
+				}
+				inner := *s
+				inner.Iterable = e.bindHostBody(v, *info.HostBase, s.Iterable.GetPos())
+				s, objTy = &inner, *info.HostBase
+			}
+		}
 		// A ReadableStream (or an already-obtained reader) in `for await`
 		// (TDD-00097 Stage 1): read chunk-at-a-time, awaiting each read().
 		if objTy.IsReadableStream() {
@@ -1327,7 +1349,6 @@ func (e *Emitter) emitForOf(s *ast.ForOfStatement) error {
 					valTy = *objTy.MapVal
 				}
 				suffix, _ := mapRuntime(keyTy)
-				e.ensureMapFamily(suffix)
 				valsVal, err = e.emitMapEntries(e.mapViewPtr(objTy, mapPtr), suffix, keyTy, valTy)
 			} else {
 				valsVal, err = e.mapOrSetValuesArray(objTy, mapPtr)
@@ -1958,7 +1979,6 @@ func (e *Emitter) emitSwitch(s *ast.SwitchStatement) error {
 		if discIsStr {
 			// Binary-safe switch: compared over header lengths, so a
 			// discriminant or case label with an embedded NUL matches correctly.
-			e.ensureStrHeaderRuntime()
 			eqReg = e.emitStrEq(disc.Ref, caseVal.Ref)
 		} else {
 			caseVal = e.convert(caseVal, disc.Ty)

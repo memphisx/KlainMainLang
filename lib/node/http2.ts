@@ -745,6 +745,9 @@ export class Http2Session extends EventEmitter {
     _kmlGoawayCode: number | null = null;
     _kmlGoawayLastStreamID: number | null = null;
     _kmlStreams = new Map<number, Http2Stream>();
+    // Streams with a write whose bytes nghttp2 has not consumed yet: each
+    // flush completes the writes it sent (_kmlSettleWrites).
+    _kmlWriting = new Set<Http2Stream>();
     _kmlPendingStreams = new Set<Http2Stream>();
     _kmlPendingAck = 0;
     _kmlSettingsCallbacks: any[] = [];
@@ -855,6 +858,7 @@ export class Http2Session extends EventEmitter {
             const socket = this._kmlSocket;
             if (socket !== undefined && !socket.destroyed) socket.write(out);
         }
+        for (const s of this._kmlWriting) s._kmlSettleWrites();
         this._kmlProcessEvents();
         this._kmlTerminated();
     }
@@ -894,7 +898,14 @@ export class Http2Session extends EventEmitter {
                     const stream = this._kmlStreams.get(a);
                     if (stream !== undefined && !stream.destroyed) {
                         stream._kmlUpdateTimer();
-                        stream.push(bytes);
+                        // Node's OnDataChunkReceived: a reading stream gives
+                        // the window back at once; a paused one when it
+                        // reads again (_read).
+                        if (stream._kmlReading) __kml_native.h2Consume(h, a, bytes.length);
+                        else stream._kmlUnconsumed += bytes.length;
+                        if (!stream.push(bytes)) stream._kmlReading = false;
+                    } else {
+                        __kml_native.h2Consume(h, a, bytes.length);
                     }
                     break;
                 }
@@ -1140,9 +1151,35 @@ export class Http2Session extends EventEmitter {
 
     // Node's timeout.refresh(): the timer re-armed for its full duration.
     _kmlArmTimer(): void {
-        const t = setTimeout(() => { this.emit('timeout'); }, this._kmlTimeoutMs);
+        const t = setTimeout(() => { this._kmlOnTimeout(); }, this._kmlTimeoutMs);
         t.unref();
         this._kmlTimeout = t;
+    }
+
+    // Body bytes nghttp2 has sent for the streams with writes still pending.
+    _kmlWritingSent(): number {
+        let sent = 0;
+        for (const st of this._kmlWriting) sent += st._kmlSentBytes();
+        return sent;
+    }
+
+    // Node's callTimeout: with writes still queued (stream bytes nghttp2
+    // holds, or bytes the socket has not written), a timer that finds some
+    // sent since it was last checked is refreshed, not reported.
+    _kmlSentAtTimeout = -1;
+    _kmlOnTimeout(): void {
+        if (this.destroyed) return;
+        const sock: any = this._kmlSocket;
+        const sockQueued = sock !== undefined && !sock.destroyed && sock.writableLength > 0;
+        if (this._kmlWriting.size > 0 || sockQueued) {
+            const sent = this._kmlWritingSent() + (sock !== undefined ? (sock.bytesWritten ?? 0) : 0);
+            if (sent !== this._kmlSentAtTimeout) {
+                this._kmlSentAtTimeout = sent;
+                this._kmlUpdateTimer();
+                return;
+            }
+        }
+        this.emit('timeout');
     }
 
     _kmlUpdateTimer(): void {
@@ -1545,6 +1582,10 @@ export interface StreamState {
 export class Http2Stream extends Duplex {
     _kmlSession: any;
     _kmlId: number | undefined = undefined;
+    // Body bytes handed to nghttp2, and each write's callback by the
+    // offset its last byte ends at.
+    _kmlSubmitted = 0;
+    _kmlWriteCbs: { end: number, cb: (error?: Error | null) => void }[] = [];
     _kmlClosed = false;
     _kmlAborted = false;
     _kmlHeadersSent = false;
@@ -1552,6 +1593,10 @@ export class Http2Stream extends Duplex {
     _kmlHasTrailers = false;
     _kmlTrailersReady = false;
     _kmlDidRead = false;
+    // Node's kStreamFlowing on the native side: whether DATA is consumed
+    // as it arrives; the bytes received while not, given back on _read.
+    _kmlReading = true;
+    _kmlUnconsumed = 0;
     _kmlRstCode = NGHTTP2_NO_ERROR;
     _kmlEndAfterHeaders = false;
     _kmlShutdown = false;
@@ -1581,9 +1626,31 @@ export class Http2Stream extends Duplex {
 
     // Node's timeout.refresh(): the timer re-armed for its full duration.
     _kmlArmTimer(): void {
-        const t = setTimeout(() => { this.emit('timeout'); }, this._kmlTimeoutMs);
+        const t = setTimeout(() => { this._kmlOnTimeout(); }, this._kmlTimeoutMs);
         t.unref();
         this._kmlTimeout = t;
+    }
+
+    // Body bytes of this stream nghttp2 has sent.
+    _kmlSentBytes(): number {
+        const session = this._kmlSession;
+        if (session === undefined || session._kmlHandle <= 0 || this._kmlId === undefined) return this._kmlSubmitted;
+        return this._kmlSubmitted - __kml_native.h2Queued(session._kmlHandle, this._kmlId);
+    }
+
+    // Node's callTimeout (as the session's _kmlOnTimeout).
+    _kmlSentAtTimeout = -1;
+    _kmlOnTimeout(): void {
+        if (this.destroyed) return;
+        if (this._kmlWriteCbs.length > 0) {
+            const sent = this._kmlSentBytes();
+            if (sent !== this._kmlSentAtTimeout) {
+                this._kmlSentAtTimeout = sent;
+                this._kmlUpdateTimer();
+                return;
+            }
+        }
+        this.emit('timeout');
     }
 
     _kmlUpdateTimer(): void {
@@ -1709,7 +1776,25 @@ export class Http2Stream extends Duplex {
             cb(err);
             return;
         }
-        cb();
+        this._kmlSubmitted += data.length;
+        this._kmlWriteCbs.push({ end: this._kmlSubmitted, cb });
+        session._kmlWriting.add(this);
+    }
+
+    // Completes the writes whose bytes nghttp2 has sent.
+    _kmlSettleWrites(): void {
+        const session = this._kmlSession;
+        if (this.destroyed || session === undefined || session._kmlHandle <= 0 || this._kmlId === undefined) {
+            this._kmlWriteCbs = [];
+            if (session !== undefined) session._kmlWriting.delete(this);
+            return;
+        }
+        const sent = this._kmlSubmitted - __kml_native.h2Queued(session._kmlHandle, this._kmlId);
+        while (this._kmlWriteCbs.length > 0 && this._kmlWriteCbs[0].end <= sent) {
+            const w = this._kmlWriteCbs.shift()!;
+            w.cb();
+        }
+        if (this._kmlWriteCbs.length === 0) session._kmlWriting.delete(this);
     }
 
     _final(cb: (error?: Error | null) => void): void {
@@ -1740,6 +1825,13 @@ export class Http2Stream extends Duplex {
             return;
         }
         if (!this._kmlDidRead) this._kmlDidRead = true;
+        this._kmlReading = true;
+        const session = this._kmlSession;
+        if (this._kmlUnconsumed > 0 && session !== undefined && session._kmlHandle > 0 && this._kmlId !== undefined) {
+            __kml_native.h2Consume(session._kmlHandle, this._kmlId, this._kmlUnconsumed);
+            this._kmlUnconsumed = 0;
+            session._kmlFlush();
+        }
     }
 
     sendTrailers(headers: OutgoingHttpHeaders): void {
@@ -2522,6 +2614,11 @@ export class Http2ServerResponse extends Stream {
         return stream.write(chunk, encoding, cb);
     }
 
+    // A readable piped here writes and ends through these, as Node's pipe
+    // calls write() and end() on its destination (a Stream, not a Writable).
+    _kmlWrite(chunk: any): boolean { return this.write(chunk); }
+    _kmlEnd(): void { this.end(); }
+
     end(cb?: () => void): this;
     end(chunk: string | Uint8Array, cb?: () => void): this;
     end(chunk: string | Uint8Array, encoding: BufferEncoding, cb?: () => void): this;
@@ -2720,7 +2817,8 @@ function setupCompat(server: any): void {
 export class Http2Server extends net.Server {
     _kmlOptions: any;
     _kmlSessions = new Set<Http2Session>();
-    timeout = 0;
+    // Any value, as in Node: a session timer starts only when it is truthy.
+    timeout: any = 0;
 
     constructor(options: ServerOptions, requestListener?: (request: Http2ServerRequest, response: Http2ServerResponse) => void) {
         const opts = initializeOptions(options);
@@ -2751,6 +2849,14 @@ export class Http2Server extends net.Server {
         for (const session of Array.from(this._kmlSessions)) session.close();
         return this;
     }
+
+    // `await using server`: http2's closes it whether or not it listens
+    // (rejecting with ERR_SERVER_NOT_RUNNING when it does not).
+    async [Symbol.asyncDispose](): Promise<void> {
+        await new Promise<void>((resolve, reject) => {
+            this.close((err?: Error) => { if (err) reject(err); else resolve(); });
+        });
+    }
 }
 
 // kml:callable Http2SecureServer
@@ -2758,7 +2864,8 @@ export class Http2SecureServer extends tls.Server {
     _kmlOptions: any;
     _kmlSessions = new Set<Http2Session>();
     _kmlHttpCore: any = null;
-    timeout = 0;
+    // Any value, as in Node: a session timer starts only when it is truthy.
+    timeout: any = 0;
 
     constructor(options: SecureServerOptions, requestListener?: (request: Http2ServerRequest, response: Http2ServerResponse) => void) {
         const opts = initializeOptions(options);
@@ -2803,6 +2910,14 @@ export class Http2SecureServer extends tls.Server {
         }
         for (const session of Array.from(this._kmlSessions)) session.close();
         return this;
+    }
+
+    // `await using server`: http2's closes it whether or not it listens
+    // (rejecting with ERR_SERVER_NOT_RUNNING when it does not).
+    async [Symbol.asyncDispose](): Promise<void> {
+        await new Promise<void>((resolve, reject) => {
+            this.close((err?: Error) => { if (err) reject(err); else resolve(); });
+        });
     }
 
     closeIdleConnections(): void {

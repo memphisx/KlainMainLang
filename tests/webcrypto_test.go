@@ -548,3 +548,12 @@ async function run(): Promise<void> {
 run();
 `)
 }
+
+// A top-level binding named subtle (`var subtle = crypto.subtle`) is the
+// global's SubtleCrypto, not a shadow of it.
+func TestE2ESubtleNamedBinding(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `
+var subtle = crypto.subtle;
+subtle.digest("SHA-256", new Uint8Array([1, 2, 3])).then(d => console.log(new Uint8Array(d)[0], d.byteLength));
+`)
+}

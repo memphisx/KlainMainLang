@@ -13,6 +13,17 @@
 #include <stdint.h>
 typedef int64_t i64;
 
+/* The message of an error constructed without one: an empty string that
+ * is not an own property, told apart from an assigned "" by identity
+ * (errNoMessage). */
+const struct { long long len; char d[1]; } __kml_err_nomsg = { KML_STR_ASCII_HDR(0), "" };
+
+/* Whether an Error has an own message. */
+int __kml_error_has_message(void *op) {
+    const void *m = *(void *const *)((const char *)op + KML_ERR_MESSAGE);
+    return m && m != (const void *)__kml_err_nomsg.d;
+}
+
 /* A frame's descriptor; one with no file is a method call's marker, below
  * its callee's frame: the receiver's type (name) and the property (prop)
  * the callee is called as. */

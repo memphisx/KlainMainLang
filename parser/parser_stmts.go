@@ -22,7 +22,11 @@ import (
 func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 	pos := posOf(p.peek())
 	doc := p.takeDoc()
-	p.advance() // consume 'declare'
+	if p.globalMember {
+		p.globalMember = false // a `declare global` member: no `declare` of its own
+	} else {
+		p.advance() // consume 'declare'
+	}
 
 	// `declare [export] import X = Y.Z;` is the alias itself (tsc rejects the
 	// modifier, TS1079, and still binds the alias).
@@ -169,6 +173,65 @@ func (p *Parser) parseAmbientDeclaration() (ast.Statement, error) {
 		cd.Ambient = true
 		p.ambientNames = append(p.ambientNames, cd.Name)
 		return cd, nil
+	}
+	// `declare global { … }` in a program: its members are declarations of
+	// the global scope (an interface merges with the builtin of its name; a
+	// var, function or class is the environment's).
+	if !p.declarations && p.isWord(0, "global") && p.peekNth(1).Type == lexer.LBRACE {
+		p.advance() // 'global'
+		p.advance() // '{'
+		var kept []ast.Statement
+		for !p.check(lexer.RBRACE) && !p.check(lexer.EOF) {
+			if p.match(lexer.SEMICOLON) {
+				continue
+			}
+			typeDecl := p.isWord(0, "interface") && p.peekNth(1).Type == lexer.IDENT ||
+				p.isWord(0, "type") && p.peekNth(1).Type == lexer.IDENT
+			if !typeDecl {
+				// A value member is the environment's global: declared for
+				// the checker, never compiled (`appName` reads the global).
+				p.globalMember = !p.isWord(0, "declare")
+				st, err := p.parseAmbientDeclaration()
+				if err != nil {
+					return nil, err
+				}
+				switch d := st.(type) {
+				case *ast.VarDeclaration:
+					d.Global = true
+					kept = append(kept, d)
+				case *ast.VarDeclarationList:
+					for _, v := range d.Decls {
+						v.Global = true
+					}
+					kept = append(kept, d)
+				case *ast.FunctionDeclaration:
+					d.Global = true
+					kept = append(kept, d)
+				case *ast.ClassDeclaration:
+					kept = append(kept, d) // an ambient class: already the environment's
+				}
+				continue
+			}
+			st, err := p.parseStatement()
+			if err != nil {
+				return nil, err
+			}
+			switch d := st.(type) {
+			case *ast.InterfaceDeclaration:
+				d.Global = true
+			case *ast.TypeAliasDeclaration:
+				d.Global = true
+			}
+			kept = append(kept, st)
+		}
+		if _, err := p.expect(lexer.RBRACE); err != nil {
+			return nil, err
+		}
+		if len(kept) == 0 {
+			return ast.NewBlockStatement(nil, pos), nil
+		}
+		p.pendingTopLevel = append(p.pendingTopLevel, kept[1:]...)
+		return kept[0], nil
 	}
 	// The rest is erased; the name it declares is recorded, since a program
 	// may use the ambient binding (`declare class C {…}` then `x instanceof C`).

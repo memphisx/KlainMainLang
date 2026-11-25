@@ -1,25 +1,10 @@
 package llvm
 
-// runtime_ffi.go — libdl decls for node:ffi (TDD-00164). dlopen/dlsym/dlclose
-// are the exact ensure*()-declared-libc-primitive shape os/fs already use. On
-// Linux the historical -ldl is still requested (a no-op stub archive on glibc
-// ≥ 2.34, required on older ones); on macOS the symbols live in libSystem.
-// Windows has no libdl, so FFIWinDlShimSource provides these four symbols on
-// top of LoadLibrary/GetProcAddress (wired in below).
-
-// ensureFFIDl declares the libdl surface exactly once. On Windows the four
-// symbols are provided by FFIWinDlShimSource (flagged for linking here); on
-// POSIX they come from libdl/libSystem.
-func (e *Emitter) ensureFFIDl() {
-	if e.usedFFIDl {
-		return
-	}
-	e.usedFFIDl = true
-	if e.opts.Target.OS() == "linux" {
-		e.requireLink("dl")
-	}
-	e.ensureStrHeaderRuntime() // __kml_str_from_cstr for dlerror()/string returns
-}
+// runtime_ffi.go — Windows' libdl for node:ffi (TDD-00164): Windows has no
+// libdl, so FFIWinDlShimSource provides the four symbols on top of
+// LoadLibrary/GetProcAddress. On Linux the natives' unit brings -ldl (a
+// no-op stub archive on glibc ≥ 2.34, required on older ones); on macOS the
+// symbols live in libSystem.
 
 // FFIWinDlShimSource is the Windows implementation of the four libdl symbols
 // node:ffi calls, backed by LoadLibrary/GetProcAddress/FreeLibrary. dlopen(NULL)

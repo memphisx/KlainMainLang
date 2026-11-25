@@ -5,10 +5,10 @@
   "statusPage": "OBJECT-COLLECTIONS.md",
   "coversRows": "all",
   "coverage": {
-    "loose": "32/32",
+    "loose": "34/34",
     "loosePct": 100,
-    "strict": "26/32",
-    "strictPct": 81
+    "strict": "27/34",
+    "strictPct": 79
   },
   "lede": "A two-tier object model. Statically-typed objects are fixed-shape heap structs — compile-time field offsets, real per-heap-identity Object.freeze, Object.hasOwn answered at compile time for a literal key. Dynamic objects (any-typed values, untyped JSON, js-mode literals) are real property bags with prototype chains (Object.create, __proto__), property descriptors (defineProperty, accessors, enumerability, descriptor-backed freeze/seal), and runtime add/delete. Map and Set carry the full core API; where JS says Iterable, this compiler narrows to a concrete array, and a missing Map key reads back as a real undefined (as in Node).",
   "entries": [
@@ -143,6 +143,21 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/groupBy"
+      }
+    },
+    {
+      "id": "map.groupby",
+      "name": "Map.groupBy(items, fn)",
+      "statusRow": "Map.groupBy(items, fn)",
+      "signature": "Map.groupBy(items, fn): Map<K, T[]>",
+      "badge": "exact",
+      "description": "Groups any iterable's items by the key fn returns for each, producing a Map from each key, in first-seen order, to the array of its members. Keys keep their type and compare by SameValueZero, so an object key groups by identity.",
+      "snippet": "const byParity = Map.groupBy([1, 2, 3], (n) => n % 2)\nconsole.log(byParity.get(1))   // [ 1, 3 ]",
+      "seeAlso": [
+        "object.groupby"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/groupBy"
       }
     },
     {
@@ -547,6 +562,23 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/clear"
+      }
+    },
+    {
+      "id": "set.algebra",
+      "name": "Set.union() / intersection() / difference() / symmetricDifference() / isSubsetOf() / isSupersetOf() / isDisjointFrom()",
+      "statusRow": "Set.union/intersection/difference/symmetricDifference/isSubsetOf/isSupersetOf/isDisjointFrom()",
+      "signature": "s.union(other: ReadonlySetLike<U>): Set<T | U>; s.isSubsetOf(other: ReadonlySetLike<unknown>): boolean",
+      "badge": "exact",
+      "description": "ES2025 set algebra. The argument is any set-like object: its size, has and keys are read and validated once (a Set, a Map, or a plain object with those members), and the result is a new Set in insertion order, as the spec walks it.",
+      "exampleKey": "set/set",
+      "snippet": "const a = new Set([1, 2, 3]);\nconst b = new Set([3, 4]);\nconsole.log(a.union(b)); // Set(4) { 1, 2, 3, 4 }\nconsole.log(a.difference(b)); // Set(2) { 1, 2 }\nconsole.log(a.isDisjointFrom(b)); // false",
+      "seeAlso": [
+        "set.core",
+        "set.size"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Set/union"
       }
     },
     {

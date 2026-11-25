@@ -259,6 +259,27 @@ func (e *Emitter) emitForOfAnyValue(s *ast.ForOfStatement, iterVal Value, condL,
 			return err
 		}
 	}
+	// A result that is not an object: "Iterator result x is not an object"
+	// (IteratorNext step 3), not a property read of a primitive's done,
+	// which is undefined and kept the loop collecting forever.
+	{
+		tag, _ := e.emitUnboxTagPayload(r)
+		prim := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", prim, tag, kmlTagUndefined))
+		badL, okL := e.freshLabel("forof.notobj"), e.freshLabel("forof.isobj")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", prim, badL, okL))
+		e.emitLabel(badL)
+		head, err := e.emitStringConcat(Value{Ref: e.internString("Iterator result "), Ty: TypePtr}, e.emitAnyToStr(r))
+		if err != nil {
+			return err
+		}
+		msg, err := e.emitStringConcat(head, Value{Ref: e.internString(" is not an object"), Ty: TypePtr})
+		if err != nil {
+			return err
+		}
+		e.emitThrowTypeErrorValue(msg.Ref)
+		e.emitLabel(okL)
+	}
 	rslot := newSlot(r.Ref)
 	done, err := e.emitDynAnyMemberGetNamed(anyAt(rslot), e.internString("done"), "done", pos)
 	if err != nil {
@@ -403,10 +424,7 @@ func (e *Emitter) emitAnyMemberOrUndefined(v Value, key string) (Value, error) {
 	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", gv.Ref, res))
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(dynL)
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get("+irPtr+" %s, "+irPtr+" %s)", r, e.emitIntToPtr(payload), e.internString(key)))
 	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r, res))

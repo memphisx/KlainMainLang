@@ -180,6 +180,11 @@ i64 __kml_view_buffer_any(void *data, i64 len) {
  * spans fixed elements; either is out of bounds, its length 0, while the
  * buffer is too short for it. lenp is the header's length word; under
  * -mm=gc the entry links the header weakly, so a dead view drops out. */
+/* The maximum word of a detached buffer: of a fixed-length one, and of a
+ * resizable one (which `.resizable` still reports). */
+#define KML_AB_DETACHED (-2)
+#define KML_AB_DETACHED_RESIZABLE (-3)
+
 typedef struct kml_track {
     void *buf;
     void *hdr; /* the header's allocation (lenp - 16), weakly linked */
@@ -197,7 +202,17 @@ i64 __kml_views_oob;
 /* A typed array whose header length word is lenp views buf at byte offset
  * off with bpe-byte elements, fixed of them (-1: tracking its length). */
 void __kml_view_track(i64 *lenp, void *buf, i64 off, i64 bpe, i64 fixed) {
-    if (!lenp || !buf || ((i64 *)buf)[2] < 0) return; /* fixed-length buffer */
+    /* (A fixed-length buffer's views are tracked too: transfer() detaches
+     * it, and they read length 0 after.) */
+    if (!lenp || !buf || ((i64 *)buf)[2] <= KML_AB_DETACHED) return;
+    void *key = (char *)lenp - 16;
+    pthread_mutex_lock(&kml_views_mu);
+    for (kml_track *u = kml_tracks_h[kml_view_hash(key)]; u; u = u->hnext)
+        if (u->key == key && u->hdr && u->buf == buf) { /* already tracked */
+            pthread_mutex_unlock(&kml_views_mu);
+            return;
+        }
+    pthread_mutex_unlock(&kml_views_mu);
     kml_track *t = (kml_track *)KML_VIEW_ALLOC(sizeof(kml_track));
     t->buf = buf;
     t->hdr = (char *)lenp - 16;
@@ -255,4 +270,68 @@ i64 __kml_view_oob(void *h) {
 /* ta.byteOffset: 0 while out of bounds. */
 i64 __kml_view_offset_of(void *h, void *data) {
     return __kml_views_oob && __kml_view_oob(h) ? 0 : __kml_view_offset(data);
+}
+
+extern void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
+extern void __kml_throw_range_error(const char *msg) __attribute__((noreturn));
+extern void *__kml_byte_block_alloc(i64 n);
+extern void *__kml_str_from_cstr(const char *c);
+
+/* Whether buf (an ArrayBuffer header) is detached. */
+i64 __kml_ab_detached(void *buf) {
+    i64 m = ((i64 *)buf)[2];
+    return m == KML_AB_DETACHED || m == KML_AB_DETACHED_RESIZABLE;
+}
+
+/* buf.transfer(n) (fixed = 0: the new buffer keeps buf's resizability and
+ * maximum) and buf.transferToFixedLength(n) (fixed = 1); has_n = 0 takes
+ * buf's length. The new buffer (its host header word hdr_word) holds buf's
+ * first n bytes, zeros past them; buf is detached: length 0, no bytes, and
+ * every view tracked over it length 0 and out of bounds, so its methods
+ * throw as over a detached buffer. (Its bytes stay allocated: a view's
+ * registry entry is keyed by their address.) */
+void *__kml_ab_transfer(void *buf, i64 n, i64 has_n, i64 fixed, i64 hdr_word) {
+    i64 *b = (i64 *)buf;
+    if (__kml_ab_detached(buf))
+        __kml_throw_nullderef(__kml_str_from_cstr(fixed
+            ? "Cannot perform ArrayBuffer.prototype.transferToFixedLength on a detached ArrayBuffer"
+            : "Cannot perform ArrayBuffer.prototype.transfer on a detached ArrayBuffer"));
+    i64 len = b[0], max = b[2];
+    if (!has_n) n = len;
+    if (n < 0) __kml_throw_range_error(__kml_str_from_cstr("Invalid array buffer length"));
+    i64 newmax = -1, cap = n;
+    if (!fixed && max >= 0) {
+        if (n > max) __kml_throw_range_error(__kml_str_from_cstr("Invalid array buffer length"));
+        newmax = cap = max;
+    }
+    char *data = (char *)__kml_byte_block_alloc(cap);
+    if (!data && cap) __kml_throw_range_error(__kml_str_from_cstr("Array buffer allocation failed"));
+    if (data) memcpy(data, *(char **)(b + 1), (size_t)(n < len ? n : len));
+    i64 *base = (i64 *)kml_alloc(KML_HEAP_WORDS, 32);
+    base[0] = hdr_word;
+    i64 *nb = base + 1;
+    nb[0] = n;
+    *(char **)(nb + 1) = data;
+    nb[2] = newmax;
+    b[0] = 0;
+    *(char **)(b + 1) = NULL;
+    b[2] = max >= 0 ? KML_AB_DETACHED_RESIZABLE : KML_AB_DETACHED;
+    pthread_mutex_lock(&kml_views_mu);
+    for (kml_track *t = kml_tracks[kml_view_hash(buf)]; t; t = t->next) {
+        if (t->buf != buf || !t->hdr) continue;
+        *(i64 *)((char *)t->hdr + 16) = 0;
+        if (!t->oob) __kml_views_oob++;
+        t->oob = 1;
+    }
+    pthread_mutex_unlock(&kml_views_mu);
+    return nb;
+}
+
+/* ta.buffer of the typed array whose header is h (its data field; NULL
+ * when not known), boxed as __kml_view_buffer_any's: the view is tracked
+ * over the buffer, so a transfer() of it leaves the view length 0. */
+i64 __kml_view_buffer_tracked(void *h, void *data, i64 len, i64 bpe) {
+    void *buf = __kml_view_buffer(data, len);
+    if (h && bpe > 0) __kml_view_track((i64 *)((char *)h + 8), buf, __kml_view_offset(data), bpe, len / bpe);
+    return (i64)((uintptr_t)((i64 *)buf - 1) | 1);
 }

@@ -357,6 +357,24 @@ console.log("sync");
 `)
 }
 
+func TestE2EPromiseCombinatorResolveThrowClosesIterator(t *testing.T) {
+	// GetPromiseResolve reads C.resolve once, before the iterable; a throw
+	// from it closes the iterator and rejects. An endless iterator is never
+	// drained. (Through the CLI, which links the library combinators.)
+	assertSameAsNodeCLIJS(t, `
+const spy = (tag) => ({ [Symbol.iterator]() { return { next() { return { value: null, done: false } }, return() { console.log(tag, "closed") } } } })
+const orig = Promise.resolve
+Promise.resolve = function () { throw new Error("boom") }
+Promise.all(spy("all")).catch((e) => console.log("all", e.message))
+Promise.allSettled(spy("settled")).catch((e) => console.log("settled", e.message))
+Promise.any(spy("any")).catch((e) => console.log("any", e.message))
+Promise.race(spy("race")).catch((e) => console.log("race", e.message))
+Promise.resolve = orig
+const it = (n) => ({ [Symbol.iterator]() { let i = 0; return { next() { return i < n ? { value: i++, done: false } : { value: undefined, done: true } } } } })
+Promise.allSettled(it(2)).then((v) => console.log("ok", JSON.stringify(v)))
+`)
+}
+
 func TestE2EStreamDynamicUnderlyingTicksJS(t *testing.T) {
 	// An underlying object read at run time: its methods run through Node's
 	// async wrapper (a plain return settles now, a promise is adopted), its

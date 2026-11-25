@@ -40,14 +40,7 @@ func (e *Emitter) emitEmbedDir(ex *ast.CallExpression) (Value, error) {
 	}
 	sym := e.requireEmbed(path)
 	e.ensureEmbedSymbol(sym)
-	e.ensureAssetsNatives()
 	e.declareFn("__kml_embed_push", "declare void @__kml_embed_push("+irPtr+")")
 	e.emitInstr(fmt.Sprintf("call void @__kml_embed_push("+irPtr+" @%s)", sym))
 	return e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(m, pos), nil, pos))
-}
-
-// ensureAssetsNatives links the embedded-asset runtime: the `@link assets`
-// of lib/native.d.ts.
-func (e *Emitter) ensureAssetsNatives() {
-	e.usedEmbeddedAssets = true
 }

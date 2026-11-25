@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index. `performance.*` can be implemented with a single `clock_gettime()` call. Includes `Date`, since real JS/Node group wall-clock timing APIs together too.
 
-**Coverage**: 13/14 (~93%) · **Strict Coverage**: 9/14 (~64%).
+**Coverage**: 14/14 (100%) · **Strict Coverage**: 9/14 (~64%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -23,4 +23,4 @@ Format: [Status page format](README.md#status-page-format).
 | `Date.prototype.toLocaleTimeString()` / `toLocaleString()` | ✅ | • One fixed en-US shape (`"1:04:09 PM"`, `"1/5/2020, 1:04:09 PM"`) in local time; no locale argument or full `Intl`-style locale support | • [ADR-01333](../adr/01/ADR-01333.md) |
 | `PerformanceObserver` | ✅ | | • `observe({ entryTypes })` / `observe({ type, buffered })`, `disconnect()`, `takeRecords()`, `supportedEntryTypes`; entries arrive on a later turn of the loop, sorted by start time ([ADR-01265](../adr/01/ADR-01265.md)) |
 | `createHistogram` / `monitorEventLoopDelay` | ✅ | • A histogram keeps exact samples, not Node's HDR histogram (3 significant figures): a percentile of large values can differ in its last digits | • `RecordableHistogram` (`record`, `recordDelta`, `add`) and the event-loop-delay `IntervalHistogram` (`enable`/`disable`), with `min`/`max`/`mean`/`stddev`/`percentile(s)` and their BigInt forms ([ADR-01265](../adr/01/ADR-01265.md)) |
-| `performance.eventLoopUtilization` / `performance.nodeTiming` | ❌ | | • Not ported from Node's `lib/internal/perf` |
+| `performance.eventLoopUtilization` / `performance.nodeTiming` | ✅ | • `nodeTiming`'s `nodeStart`, `v8Start`, `environment` and `bootstrapComplete` read 0 (the time origin): a native program has no separate bootstrap | • libuv's idle-time metric (`UV_METRICS_IDLE_TIME`) as Node reads it; a worker's loop starts before its script ([ADR-01987](../adr/01/ADR-01987.md)) |

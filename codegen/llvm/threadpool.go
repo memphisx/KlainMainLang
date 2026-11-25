@@ -11,6 +11,9 @@ import (
 // carry the Promise/exception layout the C side is deliberately kept ignorant
 // of, plus the Uses*/ensure* plumbing.
 //
+//go:embed threadpoolsrc/kml_pool.h
+var poolHeader string
+
 //go:embed threadpoolsrc/klainpool.c
 var threadPoolSource string
 
@@ -52,12 +55,11 @@ var khttpNativeSource string
 // ThreadPoolSource returns the embedded pool C runtime, linked (with -pthread)
 // whenever the program routes an fs op through the pool.
 func ThreadPoolSource() string {
-	return threadPoolSource + "\n" + httpParserSource + "\n" + dnsNativeSource + "\n" + zlibNativeSource + "\n" + fsNativeSource + "\n" + sqliteNativeSource + "\n" + wasmBackendSource + "\n" + wasmNativeSource + "\n" + khttpNativeSource
+	return "#define KML_POOL_SELF 1\n" + loopUser + poolHeader + threadPoolSource + "\n" + httpParserSource + "\n" + dnsNativeSource + "\n" + fsNativeSource + "\n" + khttpNativeSource
 }
 
 // UsesThreadPool reports whether any pooled async fs op was emitted, so the CLI
 // driver / conformance runner know to compile and link klainpool.c.
-func (e *Emitter) UsesThreadPool() bool { return e.usedThreadPool }
 
 // ThreadPoolCFlags returns the clang flags klainpool.c is compiled with — the
 // single source of truth shared by EmbeddedCSources (the CLI / conformance
@@ -67,26 +69,9 @@ func (e *Emitter) UsesThreadPool() bool { return e.usedThreadPool }
 // calls it when linked, so the pool owns the enable (KLAINPOOL_GC_ENABLE)
 // only when neither of those does.
 func (e *Emitter) ThreadPoolCFlags() []string {
+	// The process handle is libuv's uv_process_t (TDD-00244 Stage 4): its
+	// unit locates libuv's headers.
 	cflags := []string{"-pthread"}
-	// The process handle is libuv's uv_process_t (TDD-00244 Stage 4).
-	uvflags, _ := LocateUV(e.opts.Target.OS(), e.opts.Target.Triple != "")
-	cflags = append(cflags, uvflags...)
-	// The zlib and sqlite parts need their libraries' headers, so only a
-	// program using them compiles them in; the rest is the same for every
-	// program, and the link drops what one does not use.
-	if e.usedZlibNatives {
-		cflags = append(cflags, "-DKLAINPOOL_ZLIB=1")
-		if winSelfContained(e.opts.Target.OS()) {
-			cflags = append(cflags, "-DKZ_STATIC=1") // Brotli and Zstd from the link
-		}
-	}
-	if e.usedSqliteNatives {
-		cflags = append(cflags, "-DKLAINPOOL_SQLITE=1")
-	}
-	if e.usedWasmNatives {
-		wflags, _ := LocateWasm()
-		cflags = append(append(cflags, "-DKLAINPOOL_WASM=1"), wflags...)
-	}
 	cflags = append(cflags, DeadStripFlags(e.exportsRuntime())...)
 	if e.isGCMode() && !e.hasWorkers && !e.UsesSync() {
 		cflags = append(cflags, "-DKLAINPOOL_GC_ENABLE=1")
@@ -94,63 +79,38 @@ func (e *Emitter) ThreadPoolCFlags() []string {
 	return cflags
 }
 
-// ensureThreadPool declares the pool's loop hooks exactly once. Marks
-// usedThreadPool so the C source gets linked and the reactor's pool hooks
-// bind to the real C definitions rather than the no-op stubs
-// (runtime_task.go).
-func (e *Emitter) ensureThreadPool() {
-	if e.usedThreadPool {
-		return
-	}
-	e.usedThreadPool = true
-	e.ensureMicrotasks() // __kml_drain_microtasks — run after a native callback
-
-}
-
-// ensureZlibNatives compiles the zlib natives into the pool's unit and links
-// libz: the `@link zlib` of lib/native.d.ts.
-func (e *Emitter) ensureZlibNatives() {
-	e.ensureMicrotasks()
-	e.ensureStrHeaderRuntime()
-	e.ensureThreadPool()
-	if e.usedZlibNatives {
-		return
-	}
-	e.usedZlibNatives = true
-	e.requireLink("z")
-	if winSelfContained(e.opts.Target.OS()) {
-		// A self-contained build links what is otherwise loaded at run time
-		// (TDD-00253); the encoder and decoder before their common part.
-		for _, l := range []string{"brotlienc", "brotlidec", "brotlicommon", "zstd"} {
-			e.requireLink(l)
-		}
-	}
-	if e.opts.Target.OS() == "linux" {
-		e.requireLink("dl") // libbrotli and libzstd load with dlopen
-	}
-}
-
-// ensureSqliteNatives compiles klainsqlite.c into the pool's unit and links
-// libsqlite3: the `@link sqlite` of lib/native.d.ts.
-func (e *Emitter) ensureSqliteNatives() {
-	e.ensureMicrotasks()
-	e.ensureStrHeaderRuntime()
-	e.ensureThreadPool()
-	if e.usedSqliteNatives {
-		return
-	}
-	e.usedSqliteNatives = true
-	e.requireLink("sqlite3")
-	if e.opts.Target.OS() == "linux" {
-		e.requireLink("dl") // the optional entry points are looked up with dlsym
-	}
-}
-
 // ensureCryptoNatives compiles the crypto backend (its node:crypto natives)
 // with the pool, which runs their pooled forms.
 func (e *Emitter) ensureCryptoNatives() {
-	e.ensureMicrotasks()
-	e.ensureStrHeaderRuntime()
-	e.ensureThreadPool()
 	e.usesCrypto = true
+}
+
+// poolUnits are the pool's natives over a library of their own, each a unit
+// linked by the symbols the program names: zlib (with Brotli and Zstd),
+// sqlite, and WebAssembly over wasmtime.
+func (e *Emitter) poolUnits() []libUnit {
+	os := e.opts.Target.OS()
+	unit := func(name, src string, cflags []string) CSource {
+		return CSource{name, poolHeader + src, append([]string{"-pthread"}, cflags...), nil, ""}
+	}
+	zcflags, zlinks := []string{"-DKLAINPOOL_ZLIB=1"}, []string{"z"}
+	if winSelfContained(os) {
+		// A self-contained build links what is otherwise loaded at run time
+		// (TDD-00253); the encoder and decoder before their common part.
+		zcflags = append(zcflags, "-DKZ_STATIC=1")
+		zlinks = append(zlinks, "brotlienc", "brotlidec", "brotlicommon", "zstd")
+	}
+	slinks := []string{"sqlite3"}
+	if os == "linux" {
+		zlinks = append(zlinks, "dl") // libbrotli and libzstd load with dlopen
+		slinks = append(slinks, "dl") // the optional entry points are looked up with dlsym
+	}
+	return []libUnit{
+		{src: unit("zlibnat", zlibNativeSource, zcflags), links: zlinks},
+		{src: unit("sqlite", sqliteNativeSource, []string{"-DKLAINPOOL_SQLITE=1"}), links: slinks},
+		{src: unit("wasm", wasmBackendSource+"\n"+wasmNativeSource, []string{"-DKLAINPOOL_WASM=1"}), locate: func() ([]string, []string, error) {
+			cflags, libs := LocateWasm()
+			return cflags, libs, nil
+		}},
+	}
 }

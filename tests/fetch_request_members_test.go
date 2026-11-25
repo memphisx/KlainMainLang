@@ -118,3 +118,47 @@ srv.listen(0, async () => {
 });
 `)
 }
+
+// A typed array held as `any` is a Request body of its raw bytes: the
+// element width comes from the box's element kind (core.c).
+func TestE2ERequestTypedArrayAnyBodyWidths(t *testing.T) {
+	assertSameAsNode(t, `
+async function main() {
+  const bodies: any[] = [new Uint16Array([1, 2, 3]), new Float32Array([1, 2]), new Int8Array([1, 2, 3, 4, 5]), new Float64Array([1]), new BigInt64Array(2)];
+  for (const b of bodies) {
+    const r = new Request("http://localhost/", { method: "POST", body: b });
+    console.log((await r.arrayBuffer()).byteLength);
+  }
+}
+main();
+`)
+}
+
+// A ReadableStream body (with duplex) stays a stream: `.body` is it, the
+// Body methods read it, `new Request(req)` moves it, and fetch sends its
+// bytes — from a Request, a typed init, or one held in `any`; undici's
+// duplex and GET/HEAD TypeErrors — against Node.
+func TestE2ERequestStreamBody(t *testing.T) {
+	assertSameAsNodeImports(t, `
+import http from "node:http";
+const mk = () => new ReadableStream<Uint8Array>({ start(c) { c.enqueue(new TextEncoder().encode("up")); c.enqueue(new TextEncoder().encode("load")); c.close(); } });
+const r = new Request("http://x/", { method: "POST", body: mk(), duplex: "half" });
+console.log(r.body instanceof ReadableStream, r.bodyUsed, r.headers.get("content-type"));
+console.log(await r.text(), r.bodyUsed);
+const r2 = new Request("http://x/", { method: "PUT", body: mk(), duplex: "half" });
+const r3 = new Request(r2);
+console.log(r2.bodyUsed, new Uint8Array(await r3.arrayBuffer()).length);
+try { new Request("http://x/", { body: mk(), duplex: "half" }); } catch (e) { console.log((e as Error).message); }
+try { new Request("http://x/", { method: "POST", body: mk() } as any); } catch (e) { console.log((e as Error).message); }
+const init: any = { method: "POST", body: mk(), duplex: "half" };
+console.log(await new Request("http://x/", init).text());
+const srv = http.createServer((req, res) => { let b = ""; req.on("data", (c) => b += c); req.on("end", () => { res.end(req.method + " " + b); }); });
+srv.listen(0, async () => {
+  const u = "http://127.0.0.1:" + (srv.address() as any).port + "/";
+  console.log(await (await fetch(new Request(u, { method: "POST", body: mk(), duplex: "half" }))).text());
+  console.log(await (await fetch(u, { method: "PUT", body: mk(), duplex: "half" })).text());
+  console.log(await (await fetch(new Request(u, { method: "POST", body: "bytes" }))).text());
+  srv.close();
+});
+`)
+}

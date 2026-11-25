@@ -13,6 +13,7 @@ package llvm
 
 import (
 	"reflect"
+	"strings"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/checker"
@@ -44,6 +45,12 @@ func (e *Emitter) protoMethodReachable(name string) bool {
 	if e.protoReachAll || e.protoReachNames[name] {
 		return true
 	}
+	// A collection constructor reads its adder off the prototype once the
+	// program may replace it (coll_proto_patch.go).
+	if name == "set" && (e.collProtoPatched("Map", "set") || e.collProtoPatched("WeakMap", "set")) ||
+		name == "add" && (e.collProtoPatched("Set", "add") || e.collProtoPatched("WeakSet", "add")) {
+		return true
+	}
 	// A method is reached through any second name it has (trimLeft is
 	// trimStart).
 	for _, aliases := range protoMethodAliases {
@@ -61,7 +68,9 @@ func (e *Emitter) protoMethodReachable(name string) bool {
 // prototype's (protoMethodReachable), or read off an untyped
 // value by library code, or called by the iteration protocol.
 func (e *Emitter) hostMethodReachable(name string) bool {
-	if name == "next" || name == "return" || name == "throw" || e.protoMethodReachable(name) {
+	// A well-known-symbol method ("@@asyncIterator") is what the runtime's
+	// protocol walks (for await, spread) look up, never by a source name.
+	if name == "next" || name == "return" || name == "throw" || strings.HasPrefix(name, "@@") || e.protoMethodReachable(name) {
 		return true
 	}
 	return e.libDynMemberReads[name]
@@ -93,9 +102,10 @@ func (e *Emitter) buildProtoReach() {
 					if obj, ok := me.Object.(*ast.MemberExpression); ok && obj.Property == "prototype" {
 						e.protoReachNames[me.Property] = true
 					}
-					if e.typeOfExpr(me.Object).IsDynamic() {
-						e.libDynMemberReads[me.Property] = true
-					}
+					// Any member library code reads: its receiver may be a
+					// host value held loosely (`res.body!.getReader()`),
+					// read through the shape at run time.
+					e.libDynMemberReads[me.Property] = true
 				}
 				return true
 			})
@@ -124,7 +134,7 @@ func (e *Emitter) buildProtoReach() {
 				}
 			case *ast.CallExpression:
 				if me, ok := x.Callee.(*ast.MemberExpression); ok && protoKeyCalls[me.Property] && len(x.Args) >= 2 && !literal(x.Args[1]) {
-					if id, ok := me.Object.(*ast.Identifier); ok && (id.Name == "Reflect" || id.Name == "Object") {
+					if k := e.declIntrinsic(x); strings.HasPrefix(k, "Reflect.") || strings.HasPrefix(k, "Object.") {
 						e.protoReachAll = true
 					}
 				}

@@ -35,7 +35,7 @@ export function preview(dir: string, entry: string): string {
   if (entry !== "..") full = join(dir, stripSlash(entry));
   if (isDir(full)) {
     const inner = readdirSync(full);
-    let s = full + "\n\n" + inner.length + " entries\n";
+    let s = full + "\n\n" + inner.length + (inner.length === 1 ? " entry\n" : " entries\n");
     for (let i = 0; i < inner.length && i < 12; i++) s = s + "  " + inner[i] + "\n";
     return s;
   }

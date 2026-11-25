@@ -323,13 +323,23 @@ console.log(target.label)
 }
 
 // Object.assign merging a source whose same-named field has an incompatible
-// type into a strict target's typed slot is rejected cleanly (the JavaScript
-// lane and a fresh literal target take the value).
+// type: a variable's binding is held dynamically and takes the value; a
+// parameter's object (no binding of its own) is rejected cleanly in the
+// strict lane.
 func TestE2EObjectAssignIncompatibleFieldTypeRejected(t *testing.T) {
-	mustCompileError(t, `
+	assertSameAsNode(t, `
 const target = { a: 1 }
 const result = Object.assign(target, { a: 2 }, { a: "c" })
-console.log(result.a)
+console.log(result.a, target.a, typeof target.a, result === target)
+const t2: { a: number } = { a: 1 };
+Object.assign(t2, { a: [1, 2] });
+console.log(t2, Array.isArray(t2.a));
+function g(): void { const w = { n: 1, k: "s" }; Object.assign(w, { n: "one", d: 4 }); console.log(w, Object.keys(w)); }
+g();
+`)
+	mustCompileError(t, `
+function f(t: { a: number }) { Object.assign(t, { a: "c" }); }
+f({ a: 1 })
 `, "a value of another type is not supported yet")
 	assertSameAsNodeCompatJS(t, `
 const target = { a: 1 }
@@ -2177,5 +2187,20 @@ console.log(Object.prototype.toString.call(err), err[Symbol.toStringTag]);
 const k = "kk"; err[k] = 1; console.log(err.kk);
 console.log(Object.prototype.toString.call(new Error("x")));
 console.log(typeof Symbol.toPrimitive, Symbol.species.toString(), Symbol.hasInstance.description);
+`)
+}
+
+// Object.defineProperties alone (no defineProperty in the program) gives a
+// typed object and a class instance properties console.log shows.
+func TestE2EDefinePropertiesInspectTS(t *testing.T) {
+	assertSameAsNode(t, `
+function mk(): { a: number } { return { a: 1 }; }
+const o = mk();
+Object.defineProperties(o, { b: { value: 2, enumerable: true }, h: { value: 0 } });
+console.log(o, Object.keys(o));
+class P { x = 1; }
+const p = new P();
+Object.defineProperties(p, { y: { value: 2, enumerable: true } });
+console.log(p);
 `)
 }

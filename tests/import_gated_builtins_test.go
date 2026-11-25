@@ -250,3 +250,15 @@ console.log(bogusMethod())
 		t.Fatalf("expected the error to mention 'bogusMethod', got: %v", err)
 	}
 }
+
+// A namespace import of a builtin module has Node's `default` (its
+// module.exports): the namespace's own members, statically and at run time.
+func TestE2EBuiltinNamespaceDefaultTS(t *testing.T) {
+	assertSameAsNode(t, `
+import * as os from "node:os";
+import * as path from "node:path";
+console.log(typeof os.default, typeof (os as any).default.platform, os.default.EOL === os.EOL);
+console.log(typeof path.default.join, path.default.sep === path.sep);
+const d: any = (os as any).default; console.log(Object.keys(os).includes("default"), d === (os as any).default);
+`)
+}

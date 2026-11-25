@@ -91,6 +91,7 @@ enum { S_TYPEERR, S_ABORTNAME, S_ABORTMSG, S_TIMEOUTNAME, S_TIMEOUTMSG, S_AGGNAM
 #define CURLOPT_NOSIGNAL 99
 #define CURLOPT_HTTP_VERSION 84
 #define CURLOPT_PRIVATE 10103
+#define CURLOPT_COPYPOSTFIELDS 10165
 #define CURLOPT_WRITEFUNCTION 20011
 #define CURLOPT_HEADERFUNCTION 20079
 #define CURLOPT_POSTFIELDSIZE_LARGE 30120
@@ -221,6 +222,18 @@ i64 __kml_curl_write_cb(const char *chunk, i64 size, i64 nmemb, kbuf *ud) {
     ud->len += total;
     ud->data[ud->len] = 0;
     return total;
+}
+
+/* curl's write and header callbacks: their user data is the transfer's
+ * handle-table ref (the same one CURLOPT_PRIVATE carries), never a buffer's
+ * address; each buffer is reached through the pending fetch. */
+static i64 curl_body_cb(const char *chunk, i64 size, i64 nmemb, void *ref) {
+    pend_t *p = (pend_t *)kml_ref_get((kml_ref)(intptr_t)ref);
+    return __kml_curl_write_cb(chunk, size, nmemb, p->buf);
+}
+static i64 curl_header_cb(const char *chunk, i64 size, i64 nmemb, void *ref) {
+    pend_t *p = (pend_t *)kml_ref_get((kml_ref)(intptr_t)ref);
+    return __kml_curl_write_cb(chunk, size, nmemb, (kbuf *)p->buf->hbuf);
 }
 
 static void *mk_error(i64 kind, void *msg, void *name) {
@@ -483,16 +496,16 @@ extern void (*__kml_hook_fetch_bodyprom_on_done)(void *);
 /* Signal-carrying fetches in flight: the event loop's scan checks each
  * turn whether its signal fired (an abort lands between turns, from
  * JavaScript). */
-static _Thread_local void **sf_data;
+static _Thread_local kml_ref *sf_data; /* thread-local: refs, never addresses */
 static _Thread_local i64 sf_len, sf_cap;
 
 void __kml_sigfetch_add(void *pending) {
     if (sf_len == sf_cap) {
         i64 nc = sf_cap * 2 + 4;
-        sf_data = (void **)realloc(sf_data, (size_t)nc * sizeof(void *)); /* scratch */
+        sf_data = (kml_ref *)realloc(sf_data, (size_t)nc * sizeof(kml_ref)); /* scratch */
         sf_cap = nc;
     }
-    sf_data[sf_len++] = pending;
+    sf_data[sf_len++] = kml_ref_new(pending);
 }
 
 /* The error an aborted fetch's body stream reports: the signal's reason when
@@ -508,13 +521,26 @@ static void *abort_error(void *sig) {
                     __kml_fetch_strs[timeout ? S_TIMEOUTNAME : S_ABORTNAME]);
 }
 
+/* The pending fetch an easy handle carries: curl holds a handle-table ref
+ * to it (CURLOPT_PRIVATE), never its address. Released as the easy handle
+ * is cleaned up. */
+static kml_ref easy_ref(void *easy) {
+    void *r = 0;
+    curl_easy_getinfo(easy, CURLINFO_PRIVATE, &r);
+    return (kml_ref)(intptr_t)r;
+}
+static void easy_release(void *easy) {
+    kml_ref_free(easy_ref(easy));
+    curl_multi_remove_handle(__kml_curl_multi, easy);
+    curl_easy_cleanup(easy);
+}
+
 /* Tears a signal-aborted transfer down once: result -1 marks it, done lets
  * every waiter see it. */
 void __kml_fetch_abort_now(void *pending) {
     pend_t *p = (pend_t *)pending;
     if (p->result == -1 || p->done) return;
-    curl_multi_remove_handle(__kml_curl_multi, p->easy);
-    curl_easy_cleanup(p->easy);
+    easy_release(p->easy);
     p->result = -1;
     p->done = 1;
     __kml_fetch_body_abort(p, abort_error(p->signal));
@@ -527,16 +553,21 @@ void __kml_sigfetch_scan(void) {
     i64 len = sf_len, j = 0;
     if (len == 0) return;
     for (i64 i = 0; i < len; i++) {
-        pend_t *p = (pend_t *)sf_data[i];
-        if (p->done) continue;
+        kml_ref r = sf_data[i];
+        pend_t *p = (pend_t *)kml_ref_get(r);
+        if (p->done) {
+            kml_ref_free(r);
+            continue;
+        }
         if (__kml_signal_aborted(p->signal) & 1) {
+            kml_ref_free(r);
             __kml_fetch_abort_now(p);
             continue;
         }
-        sf_data[j++] = p;
+        sf_data[j++] = r;
     }
     i64 added = sf_len - len;
-    memmove(sf_data + j, sf_data + len, (size_t)added * sizeof(void *));
+    memmove(sf_data + j, sf_data + len, (size_t)added * sizeof(kml_ref));
     sf_len = j + added;
 }
 
@@ -994,10 +1025,8 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
     curl_easy_setopt(curl, CURLOPT_CLOSESOCKETFUNCTION, lowfd_close);
 #endif
     curl_easy_setopt(curl, CURLOPT_URL, url);
-    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, __kml_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, buf);
-    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, __kml_curl_write_cb);
-    curl_easy_setopt(curl, CURLOPT_HEADERDATA, hbuf);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_body_cb);
+    curl_easy_setopt(curl, CURLOPT_HEADERFUNCTION, curl_header_cb);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 30L);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
@@ -1014,7 +1043,8 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
     if (headers) curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
     if (body) {
         if (bodylen >= 0) curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE_LARGE, (long long)bodylen);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, body);
+        /* curl copies the body: it never holds the managed bytes. */
+        curl_easy_setopt(curl, CURLOPT_COPYPOSTFIELDS, body);
     }
 
     pend_t *p = (pend_t *)kml_alloc(KML_HEAP_WORDS, sizeof(pend_t));
@@ -1030,7 +1060,10 @@ void *__kml_fetch_async_n(const char *url, const char *method, void *headers, co
     p->paused = 0;
     buf->pend = p;
 
-    curl_easy_setopt(curl, CURLOPT_PRIVATE, p);
+    void *ref = (void *)(intptr_t)kml_ref_new(p);
+    curl_easy_setopt(curl, CURLOPT_PRIVATE, ref);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, ref);
+    curl_easy_setopt(curl, CURLOPT_HEADERDATA, ref);
     curl_multi_add_handle(multi, curl);
     __kml_curl_kick();
     return p;
@@ -1057,9 +1090,8 @@ void __kml_curl_drain_messages(void) {
     while ((m = (curlmsg *)curl_multi_info_read(multi, &left)) != 0) {
         if (m->msg != 1) continue; /* CURLMSG_DONE */
         void *easy = m->easy;
-        pend_t *p = 0;
+        pend_t *p = (pend_t *)kml_ref_get(easy_ref(easy));
         long status = 0; /* getinfo writes a C long (32-bit on LLP64) */
-        curl_easy_getinfo(easy, CURLINFO_PRIVATE, &p);
         curl_easy_getinfo(easy, CURLINFO_RESPONSE_CODE, &status);
         p->status = status;
         p->result = m->result;
@@ -1070,8 +1102,7 @@ void __kml_curl_drain_messages(void) {
         if (eff) p->buf->url = heap_cstr(eff);
         p->buf->redirects = redirects;
         if (m->result != 0) p->cause = failure_cause(easy, m->result);
-        curl_multi_remove_handle(multi, easy);
-        curl_easy_cleanup(easy);
+        easy_release(easy);
         p->done = 1;
         __kml_fetch_body_on_done(p);
         __kml_hook_fetch_bodyprom_on_done(p);

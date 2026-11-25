@@ -46,11 +46,14 @@ i64 __kml_ws_span(const u8 *p) {
     return c1 == 0xBB && c2 == 0xBF ? 3 : 0;
 }
 
+/* A string's byte length, its header's: a NUL is a character. */
+static i64 hdr_len(const char *s) { return *(const i64 *)(s - 8) & 0xFFFFFFFFLL; }
+
 /* Forward scan tracking the exclusive end of the last non-whitespace byte, so
  * multi-byte whitespace needs no backwards UTF-8 decoder. */
 static i64 scan_end(const char *s, i64 from) {
-    i64 j = from, end = from;
-    while (s[j]) {
+    i64 j = from, end = from, n = hdr_len(s);
+    while (j < n) {
         i64 n = __kml_ws_span((const u8 *)s + j);
         j += n ? n : 1;
         if (!n) end = j;
@@ -59,8 +62,8 @@ static i64 scan_end(const char *s, i64 from) {
 }
 
 static i64 skip_lead(const char *s) {
-    i64 i = 0, n;
-    while ((n = __kml_ws_span((const u8 *)s + i)) != 0) i += n;
+    i64 i = 0, n, len = hdr_len(s);
+    while (i < len && (n = __kml_ws_span((const u8 *)s + i)) != 0) i += n;
     return i;
 }
 
@@ -71,7 +74,7 @@ void *__kml_trim(const char *s) {
 
 void *__kml_trim_start(const char *s) {
     i64 i = skip_lead(s);
-    return str_of(s + i, (i64)strlen(s + i));
+    return str_of(s + i, hdr_len(s) - i);
 }
 
 void *__kml_trim_end(const char *s) { return str_of(s, scan_end(s, 0)); }
@@ -173,6 +176,114 @@ void *__kml_replace_all(const char *s, i64 slen, const char *search, i64 search_
     }
     kml_copy(KML_HEAP_RAW, out, cur, (size_t)rem);
     out[rem] = 0;
+    return buf;
+}
+
+/* GetSubstitution (ECMA-262 22.1.3.19.1) for a string search, which has no
+ * captures: $$ is $, $& the match, $` the text before it, $' the text after
+ * it; $n and $<name> stay as written. Writes into out when it is non-null;
+ * returns the length. */
+static i64 subst(char *out, const char *rep, i64 rep_len, const char *s, i64 slen, i64 pos, i64 mlen) {
+    i64 n = 0;
+    for (i64 i = 0; i < rep_len; i++) {
+        const char *piece = rep + i;
+        i64 plen = 1;
+        if (rep[i] == '$' && i + 1 < rep_len) {
+            switch (rep[i + 1]) {
+            case '$': piece = "$"; plen = 1; i++; break;
+            case '&': piece = s + pos; plen = mlen; i++; break;
+            case '`': piece = s; plen = pos; i++; break;
+            case '\'': piece = s + pos + mlen; plen = slen - pos - mlen; i++; break;
+            default: break;
+            }
+        }
+        if (out) kml_copy(KML_HEAP_RAW, out + n, piece, (size_t)plen);
+        n += plen;
+    }
+    return n;
+}
+
+/* String.prototype.replace / replaceAll with a string search and a string
+ * replacement, its $ patterns expanded. */
+void *__kml_replace_subst(const char *s, i64 slen, const char *search, i64 search_len, const char *rep, i64 rep_len) {
+    if (!memchr(rep, '$', (size_t)rep_len)) return __kml_replace(s, slen, search, search_len, rep, rep_len);
+    const char *found = search_len == 0 ? s : (const char *)memmem(s, (size_t)slen, search, (size_t)search_len);
+    if (!found) return str_of(s, slen);
+    i64 pre = found - s, suf = slen - (pre + search_len);
+    i64 rl = subst(0, rep, rep_len, s, slen, pre, search_len);
+    char *buf = (char *)__kml_str_alloc(pre + rl + suf);
+    kml_copy(KML_HEAP_RAW, buf, s, (size_t)pre);
+    subst(buf + pre, rep, rep_len, s, slen, pre, search_len);
+    kml_copy(KML_HEAP_RAW, buf + pre + rl, found + search_len, (size_t)suf);
+    buf[pre + rl + suf] = 0;
+    return buf;
+}
+
+void __kml_wtf8_join(char *s, i64 at);
+
+void *__kml_replace_all_subst(const char *s, i64 slen, const char *search, i64 search_len, const char *rep, i64 rep_len) {
+    if (!memchr(rep, '$', (size_t)rep_len)) return __kml_replace_all(s, slen, search, search_len, rep, rep_len);
+    if (search_len == 0) {
+        /* An empty search matches at every UTF-16 unit, a pair's two halves
+         * apart: substitute over the string's units ($` and $' may end or
+         * start between them), then join each pair the result holds. */
+        int astral = 0;
+        for (i64 i = 0; i < slen && !astral; i++) astral = ((const u8 *)s)[i] >= 0xF0;
+        if (astral) {
+            char *x = (char *)malloc((size_t)slen * 2 + 1); /* scratch: the units */
+            i64 xn = 0;
+            for (i64 i = 0; i < slen;) {
+                i64 w = u8_char((const u8 *)s + i, slen - i), len[2];
+                u8 unit[2][4];
+                int k = u16_units((const u8 *)s + i, w, unit, len);
+                for (int j = 0; j < k; j++) { memcpy(x + xn, unit[j], (size_t)len[j]); xn += len[j]; } /* scratch */
+                i += w;
+            }
+            x[xn] = 0;
+            char *buf = (char *)__kml_replace_all_subst(x, xn, search, 0, rep, rep_len);
+            free(x); /* scratch */
+            for (i64 at = 3; at + 3 <= *(i64 *)KML_PREFIX(buf); at++)
+                if ((u8)buf[at] == 0xED && (u8)buf[at + 1] >= 0xB0) __kml_wtf8_join(buf, at);
+            return buf;
+        }
+    }
+    /* Match positions: every search_len step, or each UTF-16 unit boundary
+     * for an empty search. */
+    i64 cap = 16, cnt = 0;
+    i64 *at = (i64 *)malloc((size_t)cap * sizeof(i64)); /* scratch: match positions */
+    if (search_len == 0) {
+        for (i64 i = 0;; ) {
+            if (cnt == cap) { cap *= 2; at = (i64 *)realloc(at, (size_t)cap * sizeof(i64)); } /* scratch */
+            at[cnt++] = i;
+            if (i >= slen) break;
+            i64 w = u8_char((const u8 *)s + i, slen - i);
+            i += w; /* (a pair's halves are not split: WTF-8 positions only) */
+        }
+    } else {
+        const char *cur = s, *f;
+        i64 rem = slen;
+        while ((f = (const char *)memmem(cur, (size_t)rem, search, (size_t)search_len))) {
+            if (cnt == cap) { cap *= 2; at = (i64 *)realloc(at, (size_t)cap * sizeof(i64)); } /* scratch */
+            at[cnt++] = f - s;
+            rem -= (f - cur) + search_len;
+            cur = f + search_len;
+        }
+    }
+    i64 total = slen - cnt * search_len;
+    for (i64 k = 0; k < cnt; k++) total += subst(0, rep, rep_len, s, slen, at[k], search_len);
+    char *buf = (char *)__kml_str_alloc(total);
+    char *out = buf;
+    i64 prev = 0;
+    for (i64 k = 0; k < cnt; k++) {
+        kml_copy(KML_HEAP_RAW, out, s + prev, (size_t)(at[k] - prev));
+        out += at[k] - prev;
+        out += subst(out, rep, rep_len, s, slen, at[k], search_len);
+        prev = at[k] + search_len;
+    }
+    kml_copy(KML_HEAP_RAW, out, s + prev, (size_t)(slen - prev));
+    out += slen - prev;
+    *out = 0;
+    free(at); /* scratch */
     return buf;
 }
 

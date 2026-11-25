@@ -72,15 +72,18 @@ func ctorThunk(what, name string) string {
 func (e *Emitter) emitClassRefFinalize() {
 	e.emitConstructorOfOnce() // first: it makes every class a value
 	e.emitClassRefTable()
-	if e.usedDynInstanceof || e.usedCtorKind {
+	// The rows hostbox.c's instanceof and ctorKind read, when called.
+	instOf := e.irNames("__kml_dyn_instanceof")
+	if instOf || e.irNames("__kml_ctor_kind") {
 		e.emitCtorKindRows()
 	}
-	if e.usedClassRefProto {
+	if e.irNames("__kml_classref_proto") {
 		e.emitClassRefProto()
 	}
-	if e.usedDynInstanceof {
+	if instOf {
 		e.emitDynInstanceofRows()
 	}
+
 	e.emitDynConstructOnce()
 	// Always defined: a function the finalizer emits later may read or write a
 	// static member through `any`.
@@ -89,7 +92,6 @@ func (e *Emitter) emitClassRefFinalize() {
 	e.registerFnStatics()
 	e.emitClassRefSetRows()
 	e.registerCtorRows()
-	e.emitClassRefDispatchers()
 }
 
 // registerCtorRows adds every collected row to the table.
@@ -112,18 +114,11 @@ func (e *Emitter) registerCtorRows() {
 	e.ctorRows, e.ctorRowOrder = nil, nil
 }
 
-// emitClassRefDispatchers: the dispatchers over the table are hostbox.c's
-// (__kml_classref_*, __kml_dyn_instanceof, __kml_ctor_kind); they read the
-// rows through the NaN-box helpers.
-func (e *Emitter) emitClassRefDispatchers() {
-	e.ensureNanBox()
-}
-
 // emitConstructorOfOnce registers the rows `i64 __kml_constructor_of(ptr o)`
 // reads once the program reads a constructor;
 // unitreg's finalize calls it again for a read generated late.
 func (e *Emitter) emitConstructorOfOnce() {
-	if !e.usedConstructorOf || e.emittedConstructorOf {
+	if e.emittedConstructorOf || !e.irNames("__kml_constructor_of") {
 		return
 	}
 	e.emittedConstructorOf = true
@@ -310,7 +305,6 @@ func (e *Emitter) emitClassRefTable() {
 	}
 
 	// keys: Object.keys of a class, its present static field names.
-	e.ensureStrHeaderRuntime() // hostbox.c heads an added property's key
 	restore := e.beginDetachedFunc()
 	n, bytes, arr, slot := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
@@ -356,7 +350,7 @@ func (e *Emitter) emitDynConstructDispatch() {
 			// No constructor of its own up to the builtin it extends: its
 			// arguments reach the builtin's as passed, their count with them.
 			restore := e.beginDetachedFunc()
-			e.emitConstructArgcArms(hostCtorArity(b), func(args []ast.Expression) (Value, error) {
+			e.emitConstructArgcArms(e.hostCtorArity(b), func(args []ast.Expression) (Value, error) {
 				e.inCtorArm, e.dynConstructing = true, true
 				defer func() { e.inCtorArm, e.dynConstructing = false, false }()
 				return e.emitNewExpression(ast.NewNewExpression(c, args, ast.Pos{}))
@@ -464,25 +458,14 @@ func (e *Emitter) emitDynConstructDispatch() {
 		e.writeFunc(fmt.Sprintf("internal i64 %s("+irPtr+" %%argv, i64 %%argc)", fn), body)
 		e.ctorRowFor(e.internString(h)).construct = fn
 	}
-	// Anything else throws the TypeError msg.
-	restore := e.beginDetachedFunc()
-	e.emitThrowTypeErrorValue("%msg")
-	if !e.blockDone {
-		e.emitTerminator("unreachable")
-	}
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.writeFunc("i64 @__kml_dyn_construct_fail("+irPtr+" %msg)", body)
-	e.ensureFnMeta() // fnmeta.c constructs a plain function
-	// __kml_dyn_construct (hostbox.c) calls the row's construct, else
-	// fnmeta.c's, else the fail path above.
+	// __kml_dyn_construct (dynconstruct.c) calls the row's construct, else
+	// fnmeta.c's, else throws the TypeError it is passed.
 }
 
 // emitClassRefGetRows generates, per class boxed as a value, `i64 (ptr
 // key)`: a static member read through its reference (`K.make`, `K.count`,
 // `K.length`), boxed; undefined for anything else.
 func (e *Emitter) emitClassRefGetRows() {
-	e.ensureNanBox()
 	for _, c := range e.classRefClasses(true) {
 		// The statics of the builtin it extends (`BYTES_PER_ELEMENT`), last.
 		inherited := ""
@@ -516,7 +499,7 @@ func (e *Emitter) emitClassRefGetRows() {
 				boxed = e.emitNbEncodeDouble(fmt.Sprintf("%d.0", e.ctorLength(c)))
 			} else if k == "prototype" {
 				// The class's prototype object (`K.prototype` on a class value).
-				if b, berr := e.emitBoxValue(e.emitClassProto(c)); berr == nil {
+				if b, berr := e.emitBoxValue(e.emitClassProtoFor(c, "")); berr == nil {
 					boxed = b.Ref
 				}
 			} else if sigs := e.classes[c].StaticMethodSigs; !hasSig(sigs, k) && !hasSig(sigs, accessorMethodName("get", k)) && hasSig(sigs, accessorMethodName("set", k)) {
@@ -588,7 +571,6 @@ func (e *Emitter) hostStaticGetter(h string) string {
 		if len(keys) == 0 {
 			return ""
 		}
-		e.ensureNanBox()
 		restore := e.beginDetachedFunc()
 		e.inHostRow = h
 		for _, ks := range keys {
@@ -666,24 +648,25 @@ func (e *Emitter) hostProtoReadable(h string) bool {
 	if _, user := e.classes[h]; user {
 		return false
 	}
-	return isErrorKindName(h) || hostProtoClassKnown(h) && len(e.hostMembers(h)) > 0 || typedKindIndex(h) >= 0 || h == "Function" || h == "Object"
+	return isErrorKindName(h) || hostProtoClassKnown(h) && len(e.hostMembers(h)) > 0 || typedKindIndex(h) >= 0 || protoIntrinsic(h)
+}
+
+// protoIntrinsic reports whether builtin constructor h's prototype is a
+// property intrinsic (`Function.prototype`, `Object.prototype`).
+func protoIntrinsic(h string) bool {
+	_, ok := propIntrinsics[h+".prototype"]
+	return ok
 }
 
 // hostProtoValue is builtin constructor h's prototype object, as
 // hostProtoReadable allows it.
 func (e *Emitter) hostProtoValue(h string) Value {
+	if protoIntrinsic(h) {
+		// An identifier receiver evaluates nothing (evalStaticReceiver).
+		v, _ := propIntrinsics[h+".prototype"].emit(e, ast.NewMemberExpression(ast.NewIdentifier(h, ast.Pos{}), "prototype", ast.Pos{}))
+		return v
+	}
 	switch {
-	case h == "Function":
-		return e.emitFnProtoBox("")
-	case h == "Object":
-		e.ensureAnyToPrimitive()
-		e.ensureNanBox()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
-		e.ensureObjProtoFill()
-		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_object_prototype()", r))
-		return e.emitDynObjBox(r)
 	case typedKindIndex(h) >= 0:
 		return e.emitTypedKindProto(h)
 	}
@@ -730,16 +713,16 @@ func (e *Emitter) hostStaticKeys(h string) []hostStatic {
 			continue
 		}
 		for _, p := range t.Props {
-			if p.Name == "prototype" || strings.HasPrefix(p.Name, "__") || p.Type == nil {
+			if p.Name == "prototype" || strings.HasPrefix(p.Name, "__") || p.Type() == nil {
 				continue
 			}
-			ks := hostStatic{name: p.Name, method: p.Type.Kind == checker.Function || len(p.Type.Overloads) > 0}
+			ks := hostStatic{name: p.Name, method: p.Type().Kind == checker.Function || len(p.Type().Overloads) > 0}
 			decl := p.Decl
 			if decl == nil && len(p.Decls) > 0 {
 				decl = p.Decls[0] // an overloaded method's: each names the intrinsic
 			}
 			if ms, ok := decl.(*ast.MethodSignature); ok && ms.Intrinsic != "" && !strings.Contains(ms.Intrinsic, ".prototype.") {
-				ks.fn, _ = intrinsicBuiltin(ms.Intrinsic, p.Type)
+				ks.fn, _ = intrinsicBuiltin(ms.Intrinsic, p.Type())
 			}
 			keys = append(keys, ks)
 		}

@@ -35,20 +35,6 @@ func ToPrimitiveSource() string {
 // behind the boxed-bigint constants.
 func LooseEqSource() string { return bigintBoxDefines() + looseEqSource }
 
-func (e *Emitter) ensureAnyToPrimitive() {
-	if e.usedAnyToPrimitive {
-		return
-	}
-	e.usedAnyToPrimitive = true
-	e.ensureNanBox()
-	e.ensureAnyToPrimitive()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
-	e.ensureFnMeta()   // __kml_fn_props_dyn: a function's own properties
-	e.ensureDynJSONC() // an array's toString: the array joins
-	// The ladder, its invoke shims and key lookup are boxsrc/toprim.c.
-}
-
 // emitAnyLooseEquals implements `==`/`!=` when either operand is dynamic
 // (`-compat=js`): the JS Abstract Equality Comparison, with object coercion.
 func (e *Emitter) emitAnyLooseEquals(a, b Value, negate bool) (Value, error) {
@@ -60,12 +46,7 @@ func (e *Emitter) emitAnyLooseEquals(a, b Value, negate bool) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureBoxedBigIntHooks()
-	e.ensureFnMeta()
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_loose_eq(i64 %s, i64 %s)", r, boxedA.Ref, boxedB.Ref))
 	if negate {
@@ -96,7 +77,7 @@ const (
 // emitAnyToPrimitiveHint is emitAnyToPrimitive with an explicit hint
 // ("default" for `+` and `==`, where a Date converts to its string).
 func (e *Emitter) emitAnyToPrimitiveHint(boxRef string, hint int) string {
-	e.ensureAnyToPrimitive()
+	e.ensureDynJSONC()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_toprimitive(i64 %s, i8 %d)", r, boxRef, hint))
 	return r

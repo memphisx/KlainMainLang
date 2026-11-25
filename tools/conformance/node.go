@@ -144,10 +144,11 @@ func frontEndSourceWith(src, entryDir, tag string, checks options.Options) (emit
 }
 
 var (
-	reUseStrict   = regexp.MustCompile(`^\s*['"]use strict['"];?\s*$`)
-	reBareCommon  = regexp.MustCompile(`^\s*require\(['"]\.\./common['"]\);?\s*$`)
-	reCjsDefault  = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(['"]([^'"]+)['"]\);?\s*$`)
-	reCjsDestruct = regexp.MustCompile(`^\s*(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(['"]([^'"]+)['"]\);?\s*$`)
+	reUseStrict             = regexp.MustCompile(`^\s*['"]use strict['"];?\s*$`)
+	reBareCommon            = regexp.MustCompile(`^\s*require\(['"]\.\./common['"]\);?\s*$`)
+	reCjsDefault            = regexp.MustCompile(`^\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*require\(['"]([^'"]+)['"]\);?\s*$`)
+	reCommonBindingDestruct = regexp.MustCompile(`^\s*(?:const|let|var)\s+\{([^}]+)\}\s*=\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*;?\s*$`)
+	reCjsDestruct           = regexp.MustCompile(`^\s*(?:const|let|var)\s+\{([^}]+)\}\s*=\s*require\(['"]([^'"]+)['"]\);?\s*$`)
 	// Static member-off-require (`const spawn = require('child_process').spawn`)
 	// and side-effect-only bare requires — both static forms, previously
 	// mislabeled "dynamic" (found via the unhandled-form histogram).
@@ -173,7 +174,7 @@ var nodeSupportedModule = map[string]bool{
 	"os": true, "path": true,
 	"querystring": true, "readline": true, "stream": true,
 	"tls": true, "util": true, "zlib": true,
-	"worker_threads": true,
+	"worker_threads": true, "punycode": true,
 	// Promise/submodule forms this compiler also resolves as builtins.
 	"fs/promises": true, "stream/promises": true,
 	// https (client via the libcurl backend) and the stream/web re-exports.
@@ -200,7 +201,6 @@ var nodeSupportedModule = map[string]bool{
 // nodeAmbientMemberGlobal maps `require('<ambient>').<member>` to the global
 // the member already is — the corpus binds these to locals constantly.
 var nodeAmbientMemberGlobal = map[string]map[string]string{
-	"events": {"EventEmitter": "EventEmitter", "once": "once"},
 	"buffer": {"Buffer": "Buffer"},
 	"url":    {"URL": "URL", "URLSearchParams": "URLSearchParams"},
 	"timers": {"setTimeout": "setTimeout", "setInterval": "setInterval",
@@ -222,7 +222,7 @@ var nodeImportableNamed = map[string]bool{"url": true, "events": true, "buffer":
 
 var nodeAmbientModule = map[string]bool{
 	"buffer": true, "process": true, "timers": true,
-	"url": true, "punycode": true,
+	"url":    true,
 	"events": true, // EventEmitter is global, not importable
 }
 
@@ -487,6 +487,13 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 	var imports, body []string
 	commonBinding := "" // local name a `const x = require('../common')` bound, if any
 	for _, line := range coalesceLogicalLines(src) {
+		// `const { isWindows } = common` after `const common =
+		// require('../common')`: routed as the destructured require is.
+		if commonBinding != "" {
+			if m := reCommonBindingDestruct.FindStringSubmatch(line); m != nil && m[2] == commonBinding {
+				line = "const {" + m[1] + "} = require('../common');"
+			}
+		}
 		switch {
 		case reUseStrict.MatchString(line):
 			continue // strict mode is the compiler's only mode
@@ -509,11 +516,21 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 				}
 				continue
 			}
+			if mod == "events" {
+				// `require('events').EventEmitter`: the module's export (no
+				// Node global has the name).
+				if name == member {
+					imports = append(imports, fmt.Sprintf("import {%s} from '%s'", member, mod))
+				} else {
+					imports = append(imports, fmt.Sprintf("import {%s as %s} from '%s'", member, name, mod))
+				}
+				continue
+			}
 			if alias, ok := nodeAmbientMemberGlobal[mod][member]; ok {
 				if name == alias {
 					continue // `const EventEmitter = require('events').EventEmitter` — already global
 				}
-				body = append(body, fmt.Sprintf("const %s = %s", name, alias))
+				body = append(body, fmt.Sprintf("const %s = %s;", name, alias))
 				continue
 			}
 			if nodeAmbientModule[mod] {
@@ -622,21 +639,21 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 					imports = append(imports, fmt.Sprintf("import {%s} from 'test'", strings.Join(testNames, ", ")))
 				}
 				if len(shimNames) > 0 {
-					body = append(body, fmt.Sprintf("const {%s} = %s", strings.Join(shimNames, ", "), commonShimFor(absPath)))
+					body = append(body, fmt.Sprintf("const {%s} = %s", strings.Join(shimNames, ", "), commonShimFor(absPath)+";"))
 				}
 				continue
 			}
 			if mod == "../common/dns" {
 				// `const { parseDNSPacket, writeDNSPacket } = require('../common/dns')`.
 				imports = append(imports, "import __kml_dnstools from '../common/dns'")
-				body = append(body, fmt.Sprintf("const {%s} = __kml_dnstools", names))
+				body = append(body, fmt.Sprintf("const {%s} = __kml_dnstools;", names))
 				continue
 			}
 			if mod == "../common/fixtures" {
 				// `const { path, readSync } = require('../common/fixtures')` —
 				// import the default shim object, then destructure it.
 				imports = append(imports, "import __kml_fixtures from '../common/fixtures'")
-				body = append(body, fmt.Sprintf("const {%s} = __kml_fixtures", names))
+				body = append(body, fmt.Sprintf("const {%s} = __kml_fixtures;", names))
 				continue
 			}
 			if !nodeSupportedModule[mod] {
@@ -691,10 +708,10 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 	// concrete values so path assertions over them hold.
 	var preamble []string
 	if strings.Contains(joined, "__filename") {
-		preamble = append(preamble, fmt.Sprintf("const __filename = %q", absPath))
+		preamble = append(preamble, fmt.Sprintf("const __filename = %q;", absPath))
 	}
 	if strings.Contains(joined, "__dirname") {
-		preamble = append(preamble, fmt.Sprintf("const __dirname = %q", filepath.Dir(absPath)))
+		preamble = append(preamble, fmt.Sprintf("const __dirname = %q;", filepath.Dir(absPath)))
 	}
 	if strings.Contains(joined, "common.") {
 		// Probe uses remain (helpers were rewritten away above) — bind the probe
@@ -703,7 +720,7 @@ func transformNodeSource(src, absPath string) (out string, platformStripped int,
 		if binding == "" {
 			binding = "common"
 		}
-		preamble = append(preamble, "const "+binding+" = "+commonShimFor(absPath))
+		preamble = append(preamble, "const "+binding+" = "+commonShimFor(absPath)+";")
 	}
 
 	return strings.Join(imports, "\n") + "\n" + strings.Join(preamble, "\n") + "\n" + joined + "\n", platformStripped, "", ""
@@ -1025,6 +1042,11 @@ func runOneNode(path, name, workDir string, workerID int, timeout time.Duration)
 
 	tag := fmt.Sprintf("node%d", workerID)
 	noteDumpUnit(tag, path)
+	// Name the test in the reaper's kill line, as the Test262 runner does.
+	if bin, err := filepath.Abs(filepath.Join(workDir, tag+".bin")); err == nil {
+		runningTests.Store(bin, path)
+		defer runningTests.Delete(bin)
+	}
 	if res.Suite == "message" {
 		// Expected-output suite: the pass criterion is the combined output
 		// matching the sibling `.out` baseline (a nonzero exit is often the
@@ -1378,20 +1400,24 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 
 	llFile := filepath.Join(workDir, tag+".ll")
 	binFile := filepath.Join(workDir, tag+".bin")
-	if err := os.WriteFile(llFile, []byte(prog.ir), 0644); err != nil {
+	if err := llvm.WriteTextFile(llFile, prog.ir); err != nil {
 		return false, "WRITE_ERROR: " + err.Error(), "", ""
 	}
 	clangArgs := []string{"-O2", llFile, "-o", binFile}
 	// Each builtin library module compiles once per run into the object
 	// cache, as the CLI does (llvm.LibObjects); the program's own unit is
 	// what clang compiles here.
+	// A program that looks its own symbols up (dlopen(null)) keeps them:
+	// split as the CLI does, without dead-stripping.
+	objs, _, err := llvm.LibObjectsOf(prog.ir, llFile, objCacheDir(), libObjectFlags)
+	if err != nil {
+		return false, nodeReason("CLANG_ERROR", firstLine(err.Error())), "", ""
+	}
+	clangArgs = append(clangArgs, objs...)
 	if !prog.ffiDl {
-		objs, _, err := llvm.LibObjects(llFile, objCacheDir(), libObjectFlags)
-		if err != nil {
-			return false, nodeReason("CLANG_ERROR", firstLine(err.Error())), "", ""
-		}
-		clangArgs = append(clangArgs, objs...)
 		clangArgs = append(clangArgs, llvm.DeadStripFlags(false)...)
+	} else {
+		clangArgs = append(clangArgs, llvm.FFILinkFlags()...) // as the CLI links it
 	}
 	// The runtime files compile once per run into the shared object cache,
 	// as in the Test262 runner; a member the cache refuses compiles here.
@@ -1413,13 +1439,20 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 	for _, lib := range prog.linkLibs {
 		clangArgs = append(clangArgs, llvm.LinkLibFlags(lib)...)
 	}
+	// The wait for memory admission is not clang's: its deadline starts
+	// once admitted.
+	budget.admitClang(rsv, irReservation(len(prog.ir)))
 	cctx, cancel := context.WithTimeout(context.Background(), clangTimeout)
 	defer cancel()
 	var clangOut bytes.Buffer
 	clangCmd := killableCommand(cctx, "clang", llvm.HostClangExecArgv(clangArgs...)...)
 	clangCmd.Stdout = &clangOut
 	clangCmd.Stderr = &clangOut
-	if err := runTracked(clangCmd); err != nil {
+	clangErr := runTracked(clangCmd)
+	if ps := clangCmd.ProcessState; ps != nil {
+		noteClangPeak(len(prog.ir), ps)
+	}
+	if err := clangErr; err != nil {
 		if cctx.Err() == context.DeadlineExceeded {
 			return false, "CLANG_TIMEOUT", "", ""
 		}
@@ -1433,7 +1466,7 @@ func compileAndRunInDir(src, workDir, tag string, timeout time.Duration, runDir,
 
 	rctx, rcancel := context.WithTimeout(context.Background(), timeout)
 	defer rcancel()
-	var stdout, stderr bytes.Buffer
+	var stdout, stderr capBuffer
 	// When the run cwd is redirected (WPT), the binary path must be absolute —
 	// a workDir-relative path wouldn't resolve from runDir.
 	runBin := binFile

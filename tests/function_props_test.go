@@ -400,3 +400,38 @@ var n = 0;
 console.log(n + 1);
 `)
 }
+
+// bind reads the target's own `length` and `name` when it binds (an
+// accessor runs then, and its throw is bind's): a redefined, non-string or
+// accessor name, a redefined length; a function's own non-string `name`
+// read through `any`; concat consulting Symbol.isConcatSpreadable on an
+// `any` argument (a throwing accessor, a spreadable array-like, an array
+// marked unspreadable) — against Node.
+func TestE2EBindReadsTargetNameLength(t *testing.T) {
+	assertSameAsNode(t, `
+function fn(a: number, b: number) { return a + b; }
+Object.defineProperty(fn, "name", { value: "renamed" });
+console.log(fn.bind(null).name);
+function g(a: number) { return a; }
+Object.defineProperty(g, "length", { value: 5 });
+console.log(g.bind(null, 1).length, g.bind(null, 1, 2, 3, 4, 5, 6).length);
+function h() {}
+Object.defineProperty(h, "name", { value: 42 });
+const ha: any = h;
+console.log(JSON.stringify(h.bind(null).name), JSON.stringify(ha.name), typeof ha.name);
+let reads = 0;
+function k() {}
+Object.defineProperty(k, "name", { get() { reads++; return "kk"; } });
+const kb = k.bind(null); console.log(reads, kb.name, kb.name, reads);
+function th() {}
+Object.defineProperty(th, "name", { get() { throw new Error("name"); } });
+try { th.bind(null); console.log("no throw"); } catch (e) { console.log((e as Error).message); }
+const a: any = [1];
+Object.defineProperty(a, Symbol.isConcatSpreadable, { get() { throw new Error("spread"); } });
+try { [0].concat(a); console.log("no throw"); } catch (e) { console.log((e as Error).message); }
+const al: any = { length: 2, 0: "x", 1: "y", [Symbol.isConcatSpreadable]: true };
+console.log([1, 2].concat(al, [3], 4 as any));
+const no: any = [5, 6]; no[Symbol.isConcatSpreadable] = false;
+console.log([0].concat(no).length);
+`)
+}

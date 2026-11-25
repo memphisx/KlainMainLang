@@ -583,7 +583,6 @@ func (e *Emitter) emitAdapterFunc(name string, src, tgt Type, callee func() (fp 
 func (e *Emitter) spreadRestArg(hdr, n string, k int, te, sp Type) (string, bool) {
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
-	e.ensureNanBox()
 	haveL, missL, joinL := e.freshLabel("spread.have"), e.freshLabel("spread.miss"), e.freshLabel("spread.join")
 	have := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp sgt i64 %s, %d", have, n, k))

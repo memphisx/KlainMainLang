@@ -11,22 +11,3 @@ var stringSource string
 
 // StringSource returns the C source of the string runtime.
 func StringSource() string { return stringSource }
-
-// UsesStringC reports whether a lowered string method reached codegen, so
-// the build compiles and links the string runtime.
-func (e *Emitter) UsesStringC() bool { return e.usedStringC }
-
-// ensureStringC marks the program as needing the string runtime compiled in,
-// with the IR runtime it calls back into.
-func (e *Emitter) ensureStringC() {
-	if e.usedStringC {
-		return
-	}
-	e.usedStringC = true
-	e.ensureErrorNames()
-	// The runtime builds exec()'s groups dictionary through the map and
-	// string runtimes (__kml_regex_groups), so they are always present
-	// beside it.
-	e.ensureMapStrHelpers()
-	e.ensureStrHeaderRuntime()
-}

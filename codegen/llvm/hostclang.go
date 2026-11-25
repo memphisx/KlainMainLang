@@ -535,6 +535,18 @@ func HostExeSuffix() string {
 	return ""
 }
 
+// HostSharedLibName is the host's file name for shared library base:
+// libbase.so, libbase.dylib or base.dll.
+func HostSharedLibName(base string) string {
+	if runtime.GOOS == "windows" {
+		return base + ".dll"
+	}
+	if runtime.GOOS == "darwin" {
+		return "lib" + base + ".dylib"
+	}
+	return "lib" + base + ".so"
+}
+
 // dropIntendedDuplicates removes lld's "duplicate symbol" warnings from a
 // Windows --static link, where the shim's POSIX-named socket and time
 // functions deliberately shadow the same names in the static archives and

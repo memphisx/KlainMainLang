@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"KlainMainLang/ast"
+	"KlainMainLang/parser"
 )
 
 // emit_heritage.go — a class extending a value a variable holds (`var B =
@@ -71,9 +72,14 @@ func (e *Emitter) emitClassHeritage(cd *ast.ClassDeclaration) error {
 	}
 	stmts := []ast.Statement{
 		ast.NewVarDeclaration("const", hv, ast.AnyAnnotation(""), baseVal, pos),
-		ast.NewIfStatement(ast.NewUnaryExpression("!", true, isCtor, pos), throwType(
+		// null: the prototype's [[Prototype]] is null (ECMA-262
+		// ClassDefinitionEvaluation step 8.b).
+		ast.NewIfStatement(ast.NewBinaryExpression("&&", ast.NewBinaryExpression("!==", id(hv), ast.NewNullLiteral(false, pos), pos),
+			ast.NewUnaryExpression("!", true, isCtor, pos), pos), throwType(
 			ast.NewBinaryExpression("+", ast.NewBinaryExpression("+", str("Class extends value "), id(hv), pos), str(" is not a constructor or null"), pos)), nil, pos),
-		ast.NewVarDeclaration("const", hp, ast.AnyAnnotation(""), ast.NewMemberExpression(id(hv), "prototype", pos), pos),
+		ast.NewVarDeclaration("const", hp, ast.AnyAnnotation(""), ast.NewConditionalExpression(
+			ast.NewBinaryExpression("===", id(hv), ast.NewNullLiteral(false, pos), pos), ast.NewNullLiteral(false, pos),
+			ast.NewMemberExpression(id(hv), "prototype", pos), pos), pos),
 		ast.NewIfStatement(ast.NewBinaryExpression("&&", ast.NewBinaryExpression("&&",
 			ast.NewBinaryExpression("!==", id(hp), ast.NewNullLiteral(false, pos), pos), typeIsNot("object"), pos), typeIsNot("function"), pos),
 			throwType(ast.NewBinaryExpression("+", str("Class extends value does not have valid prototype property "), id(hp), pos)), nil, pos),
@@ -83,7 +89,9 @@ func (e *Emitter) emitClassHeritage(cd *ast.ClassDeclaration) error {
 			return err
 		}
 	}
-	for name, g := range map[string]string{hv: e.ensureHeritageValue(cd.BaseClass), hp: e.ensureHeritageProto(cd.BaseClass)} {
+	// In a fixed order: the emitted IR is the same on every compile.
+	for _, ng := range [][2]string{{hv, e.ensureHeritageValue(cd.BaseClass)}, {hp, e.ensureHeritageProto(cd.BaseClass)}} {
+		name, g := ng[0], ng[1]
 		sym, ok := e.lookup(name)
 		if !ok {
 			return internalAt(pos, "class heritage of '%s' unbound", cd.BaseClass)
@@ -110,6 +118,9 @@ func (e *Emitter) emitValueBaseSuper(base string, thisBox Value, args []ast.Expr
 	if nonConstructingBuiltins[base] && e.isGlobalBuiltinRef(base) {
 		// The arguments, then the base's construct's TypeError.
 		for _, a := range args {
+			if sp, ok := a.(*ast.SpreadElement); ok {
+				a = sp.Arg // a constructor's forwarded rest
+			}
 			if _, err := e.emitExpr(a); err != nil {
 				return err
 			}
@@ -139,7 +150,6 @@ func (e *Emitter) emitValueBaseSuper(base string, thisBox Value, args []ast.Expr
 		return err
 	}
 	argv := e.bindValue(argBox, pos)
-	e.ensureFnMeta()
 	plain, isPlain := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_is_plain_ctor_fn(i64 %s)", plain, bv))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isPlain, plain))
@@ -147,11 +157,63 @@ func (e *Emitter) emitValueBaseSuper(base string, thisBox Value, args []ast.Expr
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isPlain, callL, newL))
 	e.emitLabel(callL)
 	apply := ast.NewCallExpression(ast.NewMemberExpression(callee, "apply", pos), []ast.Expression{self, argv}, pos)
-	if _, err := e.emitExpr(apply); err != nil {
+	rv, err := e.emitExpr(apply)
+	if err != nil {
 		return err
 	}
+	// [[Construct]] of a plain function: an object it returns is the
+	// result, so `this` (emitOverrideThis takes only an object).
+	if rv, err = e.emitBoxValue(rv); err != nil {
+		return err
+	}
+	// (A primitive, null or undefined it returns leaves `this`: the slot
+	// stays unset.)
+	isObj, err := e.emitIsObjectValue(rv)
+	if err != nil {
+		return err
+	}
+	keep := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", keep, isObj, rv.Ref))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" @__kml_ctor_ret_any, align 8", keep))
 	e.emitTerminator("br label %" + endL)
 	e.emitLabel(newL)
+	// SuperCall step 4: a super constructor that is not a constructor
+	// (`extends null`'s Function.prototype) throws before anything is
+	// constructed, leaving no pending prototype set.
+	e.declareFn("__kml_is_constructor", "declare i64 @__kml_is_constructor(i64)")
+	isC, isCb := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_is_constructor(i64 %s)", isC, bv))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isCb, isC))
+	ctorL, notCtorL := e.freshLabel("vbase.isctor"), e.freshLabel("vbase.notctor")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isCb, ctorL, notCtorL))
+	e.emitLabel(notCtorL)
+	e.emitThrowTypeError("Super constructor is not a constructor")
+	e.emitLabel(ctorL)
+	// It takes the prototype of the instance being constructed (the
+	// base's construct with newTarget the class): a class instance the
+	// base makes takes it as its header is written (Reflect.construct's
+	// pending prototype), a dynamic object once built.
+	proto, err := e.emitObjectGetPrototypeOf([]ast.Expression{self}, pos)
+	if err != nil {
+		return err
+	}
+	if proto, err = e.emitBoxValue(proto); err != nil {
+		return err
+	}
+	pp, isObj, err := e.emitDynProtoOperand(proto, false)
+	if err != nil {
+		return err
+	}
+	nonNull, take := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", nonNull, pp))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", take, isObj, nonNull))
+	setL, goL := e.freshLabel("vbase.nt.set"), e.freshLabel("vbase.nt.go")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", take, setL, goL))
+	e.emitLabel(setL)
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_pending_proto, align 8", pp))
+	e.emitInstr("store i32 1, " + irPtr + " @__kml_pending_proto_set, align 4")
+	e.emitTerminator("br label %" + goL)
+	e.emitLabel(goL)
 	ne := ast.NewNewExpression("", []ast.Expression{ast.NewSpreadElement(argv, pos)}, pos)
 	ne.Callee = callee
 	e.lowered(ne)
@@ -159,15 +221,8 @@ func (e *Emitter) emitValueBaseSuper(base string, thisBox Value, args []ast.Expr
 	if err != nil {
 		return err
 	}
+	e.emitInstr("store i32 0, " + irPtr + " @__kml_pending_proto_set, align 4")
 	if built, err = e.emitBoxValue(built); err != nil {
-		return err
-	}
-	// It takes the prototype of the instance being constructed.
-	proto, err := e.emitObjectGetPrototypeOf([]ast.Expression{self}, pos)
-	if err != nil {
-		return err
-	}
-	if proto, err = e.emitBoxValue(proto); err != nil {
 		return err
 	}
 	e.emitInstr(fmt.Sprintf("call void @__kml_dynobj_adopt_proto(i64 %s, i64 %s)", built.Ref, proto.Ref))
@@ -199,7 +254,6 @@ func init() {
 			if v, err = e.emitBoxValue(v); err != nil {
 				return Value{}, err
 			}
-			e.ensureFnMeta()
 			e.declareFn("__kml_is_constructor", "declare i64 @__kml_is_constructor(i64)")
 			r, b := e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_is_constructor(i64 %s)", r, v.Ref))
@@ -281,4 +335,37 @@ func (e *Emitter) isGlobalBuiltinRef(name string) bool {
 		}
 	}
 	return true
+}
+
+// heritageAtSite reports a hoisted class expression whose heritage runs
+// where the expression is evaluated (classHeritageSites).
+func (e *Emitter) heritageAtSite(cd *ast.ClassDeclaration) bool {
+	for _, c := range e.classHeritageSites {
+		if c == cd {
+			return true
+		}
+	}
+	return false
+}
+
+// defaultCtorsOverReturningBases gives a class with no constructor of its
+// own, extending a constructor function whose body returns a value, its
+// default derived constructor written out (`constructor(...args) {
+// super(...args); }`, ECMA-262 ClassDefinitionEvaluation 14.a): the
+// object the base returns is then `this`, its fields and private names
+// installed on it, as an explicit constructor's are.
+func (e *Emitter) defaultCtorsOverReturningBases(prog *ast.Program) {
+	for _, st := range prog.Body {
+		cd, ok := st.(*ast.ClassDeclaration)
+		if !ok || cd.Constructor != nil || cd.BaseClass == "" || e.libStmts[st] != "" || !e.fnBaseReturns(cd.BaseClass) {
+			continue
+		}
+		src, err := parser.Parse("class __kml_dc extends __kml_db { constructor(...args) { super(...args); } }")
+		if err != nil || len(src.Body) != 1 {
+			continue
+		}
+		if tmpl, ok := src.Body[0].(*ast.ClassDeclaration); ok && tmpl.Constructor != nil {
+			cd.Constructor = tmpl.Constructor
+		}
+	}
 }

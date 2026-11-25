@@ -74,48 +74,8 @@ const (
 	taskStackBytes = 256 * 1024
 )
 
-// emitLoopTaskStubs emits no-op definitions for the symbols __kml_event_loop_run
-// references so it can drive coroutine tasks (TDD-00084 Part B) —
-// __kml_task_active / __kml_task_sched_step / __kml_drain_microtasks — for a
-// program that uses the event loop but not the task runtime
-// and/or not microtasks. When the real runtimes are present their definitions are
-// used and the corresponding stub is skipped. Called once at program finalization.
-func (e *Emitter) emitLoopTaskStubs() {
-	// timers.c's handles and fetch.c's sockets are the event loop's (loop.c,
-	// on libuv), whether or not the program runs it: linked first, so the
-	// stubs below cover it.
-	if (e.UsesFetch() || e.UsesTimers()) && !e.usedEventLoop {
-		e.ensureEventLoop()
-	}
-	// A top-level await's tick (@__kml_microtask_tick): microtask.c's.
-	if e.needMicrotaskTick {
-		e.ensureMicrotasks()
-	}
-	if !e.usedEventLoop {
-		return
-	}
-	if !e.usedTaskRuntime {
-		e.emitGlobal("@__kml_task_active = internal thread_local" + irGlobalAS + " global i64 0, align 8")
-	}
-	e.ensureMicrotasks()
-}
-
-func (e *Emitter) ensureTaskRuntime() {
-	if e.usedTaskRuntime {
-		return
-	}
-	e.usedTaskRuntime = true
-	e.ensureMicrotasks()
-	e.ensureExceptionHelpers() // @__kml_cur_jmp_stk / setjmp / __kml_throw (task rejection)
-	e.ensureUnhandledRejections()
-	// The scheduler pumps libcurl when the program fetches (fetch.c);
-	// otherwise its step is hooks.c's no-op. Both waits on members and
-	// task_await_ready's top-level branch take turns of the real loop.
-	e.noteLoopTurn()
-}
-
 // TaskSource is the task runtime's C source, behind kml_layout.h.
-func TaskSource() string { return layoutHeader() + taskSource }
+func TaskSource() string { return layoutHeader() + loopUser + taskSource }
 
 // PromiseSource is the promise allocator's C source, behind kml_layout.h.
 func PromiseSource() string { return layoutHeader() + promiseSource }

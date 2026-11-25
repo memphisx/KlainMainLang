@@ -136,6 +136,7 @@ export interface SocketConstructorOpts {
     highWaterMark?: number;
     readableHighWaterMark?: number;
     writableHighWaterMark?: number;
+    signal?: AbortSignal;
 }
 
 // Node's TcpSocketConnectOpts | IpcSocketConnectOpts as one shape: `port`
@@ -155,6 +156,7 @@ export interface NetConnectOpts {
     highWaterMark?: number;
     readableHighWaterMark?: number;
     writableHighWaterMark?: number;
+    signal?: AbortSignal;
 }
 
 // Node's happy-eyeballs defaults (net.getDefaultAutoSelectFamily and its
@@ -176,6 +178,18 @@ export type TcpSocketConnectOpts = NetConnectOpts;
 export type IpcSocketConnectOpts = NetConnectOpts;
 
 // kml:callable Socket — Node's is a function that constructs when called without `new`
+// Node's AbortError (internal/errors).
+class SocketAbortError extends Error {
+    code: string;
+    cause: any;
+    constructor(cause?: any) {
+        super('The operation was aborted');
+        this.name = 'AbortError';
+        this.code = 'ABORT_ERR';
+        this.cause = cause;
+    }
+}
+
 export class Socket extends Duplex {
     connecting = false;
     _hadError = false;
@@ -221,6 +235,16 @@ export class Socket extends Duplex {
         this.keepAliveDelay = Math.floor((options?.keepAliveInitialDelay ?? 0) / 1000);
         // Shut down the socket when we're finished with it.
         this.on('end', () => { this.endedByPeer = true; });
+        const signal = options?.signal;
+        if (signal) {
+            // Node's addAbortSignalNoValidate: an abort destroys the socket.
+            const onAbort = (): void => { this.destroy(new SocketAbortError(signal.reason)); };
+            if (signal.aborted) process.nextTick(onAbort);
+            else {
+                signal.addEventListener('abort', onAbort, { once: true });
+                this.once('close', () => signal.removeEventListener('abort', onAbort));
+            }
+        }
         if (options?.handle !== undefined && options.handle >= 0) {
             this._handle = options.handle;
             if (options.readable !== false) {
@@ -239,7 +263,6 @@ export class Socket extends Duplex {
     on(event: 'connect', listener: () => void): this;
     on(event: 'connectionAttempt', listener: (ip: string, port: number, family: number) => void): this;
     on(event: 'connectionAttemptFailed', listener: (ip: string, port: number, family: number, error: Error) => void): this;
-    on(event: 'data', listener: (data: Buffer) => void): this;
     on(event: 'drain', listener: () => void): this;
     on(event: 'end', listener: () => void): this;
     on(event: 'error', listener: (err: Error) => void): this;
@@ -253,7 +276,6 @@ export class Socket extends Duplex {
 
     once(event: 'close', listener: (hadError: boolean) => void): this;
     once(event: 'connect', listener: () => void): this;
-    once(event: 'data', listener: (data: Buffer) => void): this;
     once(event: 'drain', listener: () => void): this;
     once(event: 'end', listener: () => void): this;
     once(event: 'error', listener: (err: Error) => void): this;
@@ -1036,7 +1058,9 @@ export class Server extends EventEmitter {
         return a;
     }
 
-    close(cb?: (err?: Error) => void): this {
+    // A callback that is not a function is ignored, as Node's is.
+    close(cb?: (err?: Error) => void): this;
+    close(cb?: any): this {
         this.listeningId++;
         if (typeof cb === 'function') {
             if (this._handle < 0) {
@@ -1058,6 +1082,14 @@ export class Server extends EventEmitter {
         }
         this._emitCloseIfDrained();
         return this;
+    }
+
+    // `await using server`: close it if it is listening (net.js).
+    async [Symbol.asyncDispose](): Promise<void> {
+        if (this._handle < 0 && this._kmlClusterHandle === null) return;
+        await new Promise<void>((resolve, reject) => {
+            this.close((err?: Error) => { if (err) reject(err); else resolve(); });
+        });
     }
 
     _emitCloseIfDrained(): void {
@@ -1099,7 +1131,7 @@ export function connect(path: string, connectionListener?: () => void): Socket;
 export function connect(arg0: NetConnectOpts | number | string, arg1?: string | Listener, arg2?: Listener): Socket {
     const [options, cb] = normalizeArgs(arg0, arg1, arg2);
     // Node's connect hands its options to the Socket (its buffering).
-    const socket = new Socket({ allowHalfOpen: options.allowHalfOpen, highWaterMark: options.highWaterMark, readableHighWaterMark: options.readableHighWaterMark, writableHighWaterMark: options.writableHighWaterMark });
+    const socket = new Socket({ allowHalfOpen: options.allowHalfOpen, signal: options.signal, highWaterMark: options.highWaterMark, readableHighWaterMark: options.readableHighWaterMark, writableHighWaterMark: options.writableHighWaterMark });
     if (options.timeout) socket.setTimeout(options.timeout);
     return cb !== null ? socket.connect(options, cb) : socket.connect(options);
 }

@@ -19,24 +19,26 @@ var wasmBackendSource string
 //go:embed threadpoolsrc/klainwasm.c
 var wasmNativeSource string
 
-// ensureWasmNatives compiles the WebAssembly natives into the pool's unit
-// and links the engine: the `@link wasm` of lib/native.d.ts.
-func (e *Emitter) ensureWasmNatives() {
-	e.ensureMicrotasks()
-	e.ensureStrHeaderRuntime()
-	e.ensureThreadPool()
-	e.usedWasmNatives = true
-}
-
-// UsesWasm reports whether the program runs WebAssembly.
-func (e *Emitter) UsesWasm() bool { return e.usedWasmNatives }
-
 // LocateWasm finds the wasmtime C API: its include and library directories
-// (pkg-config's, a WASMTIME_DIR install, Homebrew's or /usr/local's).
+// (pkg-config's, a WASMTIME_DIR install, Homebrew's or /usr/local's). Off
+// Windows the backend loads the library on first use (dlopen), so only its
+// headers are needed to compile, and the library directory found is passed
+// as KW_LIBDIR for the loader to look in first.
 func LocateWasm() (cflags, libs []string) {
 	if out, err := exec.Command("pkg-config", "--cflags", "wasmtime").Output(); err == nil {
 		if lout, err := exec.Command("pkg-config", "--libs", "wasmtime").Output(); err == nil {
-			return strings.Fields(strings.TrimSpace(string(out))), strings.Fields(strings.TrimSpace(string(lout)))
+			cflags = strings.Fields(strings.TrimSpace(string(out)))
+			lflags := strings.Fields(strings.TrimSpace(string(lout)))
+			if runtime.GOOS == "windows" {
+				return cflags, lflags
+			}
+			for _, f := range lflags {
+				if strings.HasPrefix(f, "-L") {
+					cflags = append(cflags, wasmLibDirFlag(strings.TrimPrefix(f, "-L")))
+					break
+				}
+			}
+			return cflags, wasmLibs()
 		}
 	}
 	var dirs []string
@@ -50,21 +52,29 @@ func LocateWasm() (cflags, libs []string) {
 	for _, d := range dirs {
 		if _, err := os.Stat(filepath.Join(d, "include", "wasmtime.h")); err == nil {
 			lib := filepath.Join(d, "lib")
-			libs = []string{"-L" + lib}
-			if runtime.GOOS != "windows" {
-				libs = append(libs, "-Wl,-rpath,"+lib) // the shared library where it was found
+			cflags = []string{"-I" + filepath.Join(d, "include")}
+			if runtime.GOOS == "windows" {
+				return cflags, append([]string{"-L" + lib}, wasmLibs()...)
 			}
-			return []string{"-I" + filepath.Join(d, "include")}, append(libs, wasmLibs()...)
+			return append(cflags, wasmLibDirFlag(lib)), wasmLibs()
 		}
 	}
 	return nil, wasmLibs()
 }
 
-// wasmLibs links wasmtime and, on Windows, the system libraries its
-// MinGW build imports.
+// wasmLibDirFlag is the backend's KW_LIBDIR define for dir.
+func wasmLibDirFlag(dir string) string {
+	return `-DKW_LIBDIR="` + strings.ReplaceAll(dir, `"`, `\"`) + `"`
+}
+
+// wasmLibs is what the backend links: on Windows wasmtime and the system
+// libraries its MinGW build imports; elsewhere only the loader's library.
 func wasmLibs() []string {
 	if runtime.GOOS == "windows" {
 		return []string{"-lwasmtime", "-lws2_32", "-lbcrypt", "-ladvapi32", "-luserenv", "-lntdll", "-lshell32", "-lole32"}
 	}
-	return []string{"-lwasmtime"}
+	if runtime.GOOS == "linux" {
+		return []string{"-ldl"}
+	}
+	return nil
 }

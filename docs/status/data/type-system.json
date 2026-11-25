@@ -346,13 +346,14 @@
             "feature": "Ambient declarations (`declare const`/`function`/`class`/`module`/`namespace`)",
             "status": "implemented",
             "caveats": [
-              "The string-named `declare module \"x\"` and `declare global` blocks are parsed and erased (no binding — [ADR-00388](../adr/00/ADR-00388.md))",
+              "The string-named `declare module \"x\"` block is parsed and erased (no binding — [ADR-00388](../adr/00/ADR-00388.md))",
               "A class extending a `declare class` is a compile error (the base exists only at run time)"
             ],
             "notes": [
               "`declare var` is a real zero-initialized binding; `declare function` compiles to a throwing 'no implementation' stub (clear runtime error only if called); redeclared signatures collapse last-wins ([ADR-00471](../adr/00/ADR-00471.md))",
               "`declare class C` is typed by the checker and has no implementation: `new C()` reads `C` as a global the environment provides, else throws ReferenceError, as Node does ([ADR-01970](../adr/01/ADR-01970.md))",
-              "Identifier-named `declare namespace/module X` members are real ambient bindings (vars zero-init and assignable, functions throwing stubs); string-named module and `global` blocks stay erased ([ADR-00474](../adr/00/ADR-00474.md))",
+              "Identifier-named `declare namespace/module X` members are real ambient bindings (vars zero-init and assignable, functions throwing stubs); a string-named module block stays erased ([ADR-00474](../adr/00/ADR-00474.md))",
+              "`declare global { … }` and a script's top-level `interface Array<T> { … }` declare the global scope: an interface merges with the builtin of its name (its members type-check and read what the program put on the prototype), a var or function is the environment's global ([ADR-02053](../adr/02/ADR-02053.md))",
               "`declare [const] enum` is a real enum ([ADR-00476](../adr/00/ADR-00476.md))"
             ]
           },

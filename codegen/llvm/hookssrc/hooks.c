@@ -30,6 +30,10 @@ typedef unsigned char u8;
 _Thread_local char __kml_main_ctx[KML_MAIN_CTX_SIZE] __attribute__((aligned(16)));
 _Thread_local void *__kml_curl_multi;
 _Thread_local void *__kml_current_task;
+/* A worker thread's terminate flag (klainpool.c sets it at the worker's
+ * start), polled where a busy worker passes through the runtime: each
+ * microtask and each postMessage. Null off workers. */
+_Thread_local volatile int *__kml_worker_term_flag;
 _Thread_local void *__kml_root_async_ctx;
 void *__kml_cluster_close_flag;
 int __kml_cluster_primary_pid;
@@ -40,6 +44,46 @@ void *__kml_fetch_strs[10];
 void *__kml_error_name;
 /* The interned "TypeError" and "RangeError", for exceptions.c. */
 void *__kml_error_names[2];
+/* The end of the top-level script's drain of the jobs it queued (an ES
+ * module's promise jobs first): microtask.c's, set by its constructor
+ * when the program links it; nothing to drain otherwise. */
+void (*__kml_main_drain_hook)(int module);
+void __kml_main_drain(int module) {
+    if (__kml_main_drain_hook) __kml_main_drain_hook(module);
+}
+/* main()'s run of the event loop after the script, and whether it still
+ * holds work ('beforeExit'): loop.c's, set by its constructor when the
+ * program links it (a timer, a task, the pool, a socket names it); with
+ * nothing that can wait there is no loop to run. */
+void (*__kml_loop_run_hook)(void);
+_Bool (*__kml_loop_alive_hook)(void);
+void __kml_main_loop(void) {
+    if (__kml_loop_run_hook) __kml_loop_run_hook();
+}
+_Bool __kml_main_loop_alive(void) { return __kml_loop_alive_hook && __kml_loop_alive_hook(); }
+/* The process lifecycle at main()'s end (process.c's, set by its
+ * constructor when the program links it): 'beforeExit', 'exit' and
+ * process.exitCode; without process.c the program ends with 0. */
+/* exceptions.c's RangeError thrower, set by its constructor: a stack
+ * overflow throws through it when the program links a throw path. */
+void (*__kml_range_error_hook)(const char *);
+int (*__kml_main_exit_hook)(void);
+void (*__kml_main_set_exit_hook)(int code);
+long long (*__kml_main_exit_code_hook)(void);
+/* process.exitCode set by the runtime itself (an unhandled rejection under
+ * --unhandled-rejections=warn-with-error-code): process.c's, else kept
+ * here for main()'s end. */
+void (*__kml_store_exit_code_hook)(long long code);
+static long long default_exit_code;
+void __kml_store_exit_code(long long code) {
+    if (__kml_store_exit_code_hook) __kml_store_exit_code_hook(code);
+    else default_exit_code = code;
+}
+int __kml_main_exit(void) { return __kml_main_exit_hook ? __kml_main_exit_hook() : (int)default_exit_code; }
+void __kml_main_set_exit(int code) {
+    if (__kml_main_set_exit_hook) __kml_main_set_exit_hook(code);
+}
+long long __kml_main_exit_code(void) { return __kml_main_exit_code_hook ? __kml_main_exit_code_hook() : default_exit_code; }
 /* The entry file (require.main.filename; entrypath.c). */
 const char *__kml_entry_path = "";
 /* A boxed promise's wrapper header word (promisebox.c). */
@@ -47,61 +91,10 @@ long long __kml_promise_box_hdr;
 
 /* ---- NaN-box and string-header primitives (runtime_nanbox.go,
  * runtime_strheader.go: the same arithmetic) -------------------------------- */
-#define NB_DOUBLE_OFFSET 562949953421312ULL /* 1 << 49 */
 
-i64 __kml_nb_pack(u8 tag, i64 pay) {
-    switch (tag) {
-    case 0: {
-        double d = (double)pay;
-        u64 b;
-        memcpy(&b, &d, 8);
-        return (i64)(b + NB_DOUBLE_OFFSET);
-    }
-    case 1: {
-        double d;
-        memcpy(&d, &pay, 8);
-        u64 b = d != d ? 9221120237041090560ULL : (u64)pay;
-        return (i64)(b + NB_DOUBLE_OFFSET);
-    }
-    case 3: return pay != 0 ? 7 : 6;
-    case 2: return pay;
-    case 6: return pay | 1;
-    case 7: return pay | 2;
-    case 8: return pay | 3;
-    case 9: return pay | 4;
-    case 10: return pay | 5;
-    case 11: return pay | 6;
-    case 12: return pay | 7;
-    }
-    return tag == 4 ? 2 : 10;
-}
-
-u8 __kml_nb_tag(i64 v) {
-    u64 u = (u64)v;
-    if (u >= NB_DOUBLE_OFFSET) return 1;
-    if (u < 65536) {
-        if (u == 2) return 4;
-        if (u == 6 || u == 7) return 3;
-        return 5;
-    }
-    switch (u & 7) {
-    case 1: return 6;
-    case 2: return 7;
-    case 3: return 8;
-    case 4: return 9;
-    case 5: return 10;
-    case 6: return 11;
-    case 7: return 12;
-    }
-    return 2;
-}
-
-i64 __kml_nb_pay(i64 v) {
-    u64 u = (u64)v;
-    if (u >= NB_DOUBLE_OFFSET) return (i64)(u - NB_DOUBLE_OFFSET);
-    if (u < 65536) return u == 7;
-    return (u & 7) == 0 ? v : (i64)(u & ~(u64)7);
-}
+i64 __kml_nb_pack(u8 tag, i64 pay) { return kml_nb_pack(tag, pay); }
+u8 __kml_nb_tag(i64 v) { return (u8)kml_nb_tag(v); }
+i64 __kml_nb_pay(i64 v) { return kml_nb_pay(v); }
 
 char *__kml_str_alloc(i64 n) {
     char *base = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 9);
@@ -112,13 +105,15 @@ i64 __kml_str_len(char *s) { return KML_STR_LEN(s); }
 void __kml_str_free(char *s) { kml_free(KML_HEAP_RAW, KML_PREFIX(s)); }
 
 /* ---- the Node-interpreter guard (runtime_interp_guard.go) -----------------
- * A compiled binary cannot act as the Node interpreter. Run before the
- * program body when the program reads process.execPath: a self-spawn (the
+ * A compiled binary cannot act as the Node interpreter. Run before every
+ * program body; armed when the program can spawn a process: a self-spawn (the
  * child env carries KML_KLAIN_REEXEC) or an interpreter flag (-p/--print,
  * -e/--eval, -i/--interactive) exits 9 with a diagnostic instead of re-running
  * the program body, which would re-spawn without end. */
+_Bool __kml_interp_guard_armed; /* set by a program that can spawn (armInterpGuard) */
 void __kml_reject_node_interp_flags(int argc, char **argv) {
     static const char *const flags[] = {"-p", "--print", "-e", "--eval", "-i", "--interactive"};
+    if (!__kml_interp_guard_armed) return;
     int reject = getenv("KML_KLAIN_REEXEC") != NULL;
     for (int i = 1; !reject && i < argc; i++) {
         if (!argv[i]) continue;
@@ -147,6 +142,13 @@ static void kml_hook_missing(const char *name) {
     void __kml_##name params { ((void(*) params)__kml_hookp_##name)args; }
 #define MISSING(name) { kml_hook_missing("__kml_" #name); }
 
+/* process.version / versions (loopsrc/loop.c): a program reading none of
+ * them defines no table; its own, when it does, replaces this. */
+__attribute__((weak)) const char *const __kml_process_versions[4] = {"", "", "", ""};
+/* Promise.prototype's `constructor` read (tasksrc/task.c): only a program
+ * defining one there generates it (emit_async.go). */
+__attribute__((weak)) void __kml_promise_proto_ctor_read(long long recv) { (void)recv; }
+
 /* Dynamic values (emit_anyops.go, runtime_dynamic.go). */
 __attribute__((weak)) u8 __kml_any_tobool(i64 v) { (void)v; MISSING(any_tobool) return 0; }
 __attribute__((weak)) double __kml_any_tonum(i64 v) { (void)v; MISSING(any_tonum) return 0; }
@@ -161,6 +163,7 @@ __attribute__((weak)) void *__kml_boxed_bigint_str(void *cell) {
 __attribute__((weak)) _Bool __kml_boxed_bigint_eq(void *ca, void *cb) { (void)ca; (void)cb; return 0; }
 __attribute__((weak)) _Bool __kml_boxed_bigint_eq_num(void *cell, double d) { (void)cell; (void)d; return 0; }
 __attribute__((weak)) _Bool __kml_boxed_bigint_eq_str(void *cell, const char *s) { (void)cell; (void)s; return 0; }
+__attribute__((weak)) _Bool __kml_boxed_bigint_truthy(void *cell) { (void)cell; return 1; }
 /* The event loop's libcurl step (fetch.c): a program without fetch has no
  * transfers. */
 __attribute__((weak)) int __kml_curl_inflight(void) { return 0; }
@@ -182,6 +185,8 @@ __attribute__((weak)) void __kml_obj_keys_dyn(void *o, void **out) { (void)o; ou
 __attribute__((weak)) void __kml_worker_curl_preinit(void) {}
 /* Without worker.c: the task runtime's swap sites have no abort to check. */
 __attribute__((weak)) void __kml_worker_abort_check(void) {}
+/* Without the thread pool no worker is ever terminated. */
+__attribute__((weak)) void __kml_worker_terminate_now(void) {}
 /* Without the thread pool: the crypto backend's pooled natives are never
  * called. */
 __attribute__((weak)) void __kml_pool_job(void *work, void *job, void *inv, void *clo) {
@@ -201,7 +206,6 @@ HOOK(i64, prim_proto_of, (i64 v), (v), { (void)v; return 0; })
 /* Inspection of an Error's own keys and a Promise's state (emit_record_view.go). */
 HOOK(i64, proxy_tget, (i64 t, const char *k), (t, k), { (void)t; (void)k; return 10; })
 HOOK(i64, proxy_tset, (i64 t, const char *k, i64 v), (t, k, v), { (void)t; (void)k; (void)v; return 0; })
-HOOK(char *, error_inspect, (void *o), (o), { (void)o; return (char *)"[Error]"; })
 /* fs errors (runtime_fs.go). */
 __attribute__((weak)) void *__kml_fs_error_new(int e, const char *syscall, const char *path, const char *dest) {
     (void)e; (void)syscall; (void)path; (void)dest;
@@ -216,9 +220,6 @@ VHOOK(pdyn_attach, (void *src, i64 onF, i64 onR, i64 onFin, void *q, void *boxer
 HOOK(u8, process_uncaught, (u8 tag, i64 pay, _Bool rejection), (tag, pay, rejection),
      { (void)tag; (void)pay; (void)rejection; return 0; })
 VHOOK(unhandled_report, (void *p), (p), { (void)p; })
-/* A TransformStream's decode step (runtime_streams.go). */
-VHOOK(stream_decode, (void *decode, void *rec, i64 *out), (decode, rec, out),
-     { (void)decode; (void)rec; (void)out; MISSING(stream_decode) })
 /* Throws (emit_nullderef.go). */
 /* exceptions.c's, when the program links it. */
 __attribute__((weak)) void __kml_throw_nullderef(const char *msg) { fprintf(stderr, "TypeError: %s\n", msg); exit(1); }

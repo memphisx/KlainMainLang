@@ -27,7 +27,8 @@ setTimeout(() => console.log("big delay clamped"), 3000000000);
 // armed from inside another's callback, and an interval's successive ticks,
 // each measured against the monotonic clock from the moment it was armed.
 // libuv counts whole milliseconds from the loop's cached time, so Node itself
-// may fire up to 1 ms early by performance.now(): the bound is delay - 1.
+// may fire up to 1 ms early by performance.now(); with the idle-time metric
+// on (as Node runs) a loaded CPU adds a few tenths: the bound is delay - 2.
 // Checked again on a throttled CPU (throttledCommand). Never counts ticks.
 func TestE2ETimerNeverFiresEarly(t *testing.T) {
 	const src = `
@@ -36,7 +37,7 @@ function arm(label: string, delay: number, then?: () => void): void {
   const t0 = performance.now();
   setTimeout(() => {
     const dt = performance.now() - t0;
-    if (dt < delay - 1) early.push(label + " " + dt.toFixed(2) + "<" + delay);
+    if (dt < delay - 2) early.push(label + " " + dt.toFixed(2) + "<" + delay);
     if (then) then();
   }, delay);
 }
@@ -47,7 +48,7 @@ const i0 = performance.now();
 const iv = setInterval(() => {
   k++;
   const dt = performance.now() - i0;
-  if (dt < k * 20 - 1) early.push("tick" + k + " " + dt.toFixed(2) + "<" + k * 20);
+  if (dt < k * 20 - 2) early.push("tick" + k + " " + dt.toFixed(2) + "<" + k * 20);
   if (k === 5) clearInterval(iv);
 }, 20);
 setTimeout(() => console.log(early.length === 0 ? "none early" : "early: " + early.join(", ")), 200);

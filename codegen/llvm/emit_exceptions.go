@@ -230,7 +230,6 @@ func (e *Emitter) buildErrorObj(kindID int64, msgPtr, namePtr string) string {
 // buildErrorObjSized is buildErrorObj allocating size bytes (an
 // AggregateError's layout extends the Error's).
 func (e *Emitter) buildErrorObjSized(kindID int64, msgPtr, namePtr string, size int64) string {
-	e.ensureExceptionHelpers()
 
 	dataReg := e.freshReg()
 	e.heapMallocInto(dataReg, allocObject, fmt.Sprint(size))
@@ -350,7 +349,6 @@ func (e *Emitter) buildErrorObjWithCode(kindID int64, msgPtr, namePtr, codePtr, 
 // fields. Returned as a plain ptr; callers type it errorObjType (the shared
 // error type) — `.errors` reads the trailing fields via a kind guard.
 func (e *Emitter) buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenRef string) string {
-	e.ensureExceptionHelpers()
 	kindID := errorKindIDs["AggregateError"]
 	// Allocate and default-fill through buildErrorObj (full errorObjType size,
 	// so a stray shared-field read — code/cause/… — is bounds-safe and
@@ -394,7 +392,6 @@ func (e *Emitter) emitInternalThrowKind(kind, msgPtr string) {
 // kind tag, message, and name, and returns a ptr Value typed as errorObjType.
 func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 	defer e.callSite(ne.GetPos())()
-	e.ensureExceptionHelpers()
 
 	// AggregateError(errors, message?) carries the aggregated errors array in its
 	// extended layout; message defaults to the empty string (real JS), name is
@@ -403,7 +400,7 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 		return e.emitNewAggregateError(ne)
 	}
 
-	msgPtr := e.internString("")
+	msgPtr := e.errNoMessage()
 	if ne.Message != nil {
 		msgVal, err := e.emitExpr(ne.Message)
 		if err != nil {
@@ -444,25 +441,38 @@ func (e *Emitter) emitNewError(ne *ast.NewErrorExpression) (Value, error) {
 	}
 
 	dataReg := e.buildErrorObj(errorKindIDs[ne.Kind], msgPtr, namePtr)
+	if err := e.emitNewErrorCause(ne, dataReg); err != nil {
+		return Value{}, err
+	}
+	return Value{Ref: dataReg, Ty: errorObjType}, nil
+}
+
+// emitNewErrorCause installs a new error's cause: its options' `cause`,
+// given directly or read from the options value at run time.
+func (e *Emitter) emitNewErrorCause(ne *ast.NewErrorExpression, dataReg string) error {
 	if ne.Cause != nil {
 		causeVal, err := e.emitExpr(ne.Cause)
 		if err != nil {
-			return Value{}, err
+			return err
 		}
 		boxed, err := e.emitBoxValue(causeVal)
 		if err != nil {
-			return Value{}, err
+			return err
 		}
 		causeGep := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 10", causeGep, errorObjType.StructIR(), dataReg))
 		e.heapStore("i64", boxed.Ref, causeGep, 8)
-	}
-	if ne.Options != nil {
-		if err := e.emitErrorOptionsCause(ne.Options, dataReg, ne.GetPos()); err != nil {
-			return Value{}, err
+		if ne.Kind != "DOMException" {
+			// An options literal's `cause`, undefined included, is its own.
+			// (A DOMException's may be read off an options value lacking it.)
+			e.declareFn("__kml_error_option_cause_own", "declare void @__kml_error_option_cause_own("+irPtr+")")
+			e.emitInstr(fmt.Sprintf("call void @__kml_error_option_cause_own("+irPtr+" %s)", dataReg))
 		}
 	}
-	return Value{Ref: dataReg, Ty: errorObjType}, nil
+	if ne.Options != nil {
+		return e.emitErrorOptionsCause(ne.Options, dataReg, ne.GetPos())
+	}
+	return nil
 }
 
 // emitNewAggregateError emits `new AggregateError(errors, message?)`. The errors
@@ -489,7 +499,7 @@ func (e *Emitter) emitNewAggregateError(ne *ast.NewErrorExpression) (Value, erro
 		}
 		dataPtr, lenReg = p, l
 	}
-	msgPtr := e.internString("")
+	msgPtr := e.errNoMessage()
 	if ne.Message != nil {
 		msgVal, err := e.emitExpr(ne.Message)
 		if err != nil {
@@ -500,6 +510,9 @@ func (e *Emitter) emitNewAggregateError(ne *ast.NewErrorExpression) (Value, erro
 	}
 	namePtr := e.internString("AggregateError")
 	data := e.buildAggregateErrorObj(msgPtr, namePtr, dataPtr, lenReg)
+	if err := e.emitNewErrorCause(ne, data); err != nil {
+		return Value{}, err
+	}
 	return Value{Ref: data, Ty: errorObjType}, nil
 }
 
@@ -615,7 +628,6 @@ func (e *Emitter) errorPtrFromValue(val Value) (string, error) {
 
 // emitThrow emits a throw statement: calls @__kml_throw then unreachable.
 func (e *Emitter) emitThrow(s *ast.ThrowStatement) error {
-	e.ensureExceptionHelpers()
 
 	val, err := e.emitExpr(s.Argument)
 	if err != nil {
@@ -698,7 +710,6 @@ type pendingExit struct {
 // As in JavaScript, a finally runs however its try or catch completes, and
 // an exception neither catches is rethrown after it.
 func (e *Emitter) emitTry(s *ast.TryStatement) error {
-	e.ensureExceptionHelpers()
 
 	tryL := e.freshLabel("try.body")
 	catchL := e.freshLabel("try.catch")
@@ -898,13 +909,21 @@ func flatCatchPattern(ps []ast.DestructProp) bool {
 	return true
 }
 
+// errNoMessage is the message of an error constructed without one: an empty
+// string that is not an own property (exceptions.c's __kml_err_nomsg, which
+// the runtime tells apart by identity).
+func (e *Emitter) errNoMessage() string {
+	e.declareFn("__kml_err_nomsg", "@__kml_err_nomsg = external"+irGlobalAS+" constant { i64, [1 x i8] }")
+	return "getelementptr inbounds ({ i64, [1 x i8] }, " + irPtr + " @__kml_err_nomsg, i32 0, i32 1)"
+}
+
 // emitErrorMessage is an Error constructor's message argument as the
-// message it sets: `undefined` sets none (the empty string), anything else
-// its ToString (`null` is "null").
+// message it sets: `undefined` sets none (errNoMessage), anything else its
+// ToString (`null` is "null").
 func (e *Emitter) emitErrorMessage(v Value) (string, error) {
 	switch {
 	case v.Ty.IsUndefined() && !v.Ty.Nullable():
-		return e.internString(""), nil
+		return e.errNoMessage(), nil
 	case v.Ty.IsDynamic():
 		tag, _ := e.emitUnboxTagPayload(v)
 		isU := e.freshReg()
@@ -914,16 +933,16 @@ func (e *Emitter) emitErrorMessage(v Value) (string, error) {
 			return "", err
 		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isU, e.internString(""), s.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, isU, e.errNoMessage(), s.Ref))
 		return r, nil
 	case isStringTy(v.Ty) && v.Ty.Nullable():
 		// An absent `string | undefined` is undefined; a `string | null` null.
-		absent := "null"
+		absent := e.internString("null")
 		if v.Ty.IsUndefined() {
-			absent = ""
+			absent = e.errNoMessage()
 		}
 		r := e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, e.ptrIsNull(v.Ref), e.internString(absent), v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" %s", r, e.ptrIsNull(v.Ref), absent, v.Ref))
 		return r, nil
 	case isStringTy(v.Ty):
 		return v.Ref, nil
@@ -938,7 +957,6 @@ func (e *Emitter) emitErrorMessage(v Value) (string, error) {
 // emitThrowCoded throws a new `kind` error (Error, TypeError, RangeError…)
 // with the message and Node's `code`.
 func (e *Emitter) emitThrowCoded(kind, code, msgPtr string) {
-	e.ensureExceptionHelpers()
 	errReg := e.buildErrorObj(errorKindIDs[kind], msgPtr, e.internString(kind))
 	codeGep := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 3", codeGep, errorObjType.StructIR(), errReg))
@@ -949,8 +967,16 @@ func (e *Emitter) emitThrowCoded(kind, code, msgPtr string) {
 
 // emitErrorOptionsCause installs an error's cause from an options value
 // (InstallErrorCause): an object having a `cause` property, own or
-// inherited, gives the error that property's value; anything else, none.
+// inherited, gives the error that property's value, undefined included (an
+// own property still); anything else, none.
 func (e *Emitter) emitErrorOptionsCause(opts ast.Expression, dataReg string, pos ast.Pos) error {
+	return e.emitErrorOptionsCauseAt(opts, func() string { return dataReg }, errorObjType.StructIR(), 10, pos)
+}
+
+// emitErrorOptionsCauseAt is emitErrorOptionsCause for the error the
+// function obj gives (a register valid where the cause is stored), whose
+// layout is structIR with the cause at field idx.
+func (e *Emitter) emitErrorOptionsCauseAt(opts ast.Expression, obj func() string, structIR string, idx int, pos ast.Pos) error {
 	v, err := e.emitExpr(opts)
 	if err != nil {
 		return err
@@ -993,9 +1019,16 @@ func (e *Emitter) emitErrorOptionsCause(opts ast.Expression, dataReg string, pos
 	if err != nil {
 		return err
 	}
+	data := obj()
 	gep := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 10", gep, errorObjType.StructIR(), dataReg))
+	e.emitInstr(fmt.Sprintf("%s = getelementptr %s, "+irPtr+" %s, i32 0, i32 %d", gep, structIR, data, idx))
 	e.heapStore("i64", cb.Ref, gep, 8)
+	if idx == 10 {
+		// The error's own option cause: an undefined one is still its own
+		// property (__kml_error_option_cause_own).
+		e.declareFn("__kml_error_option_cause_own", "declare void @__kml_error_option_cause_own("+irPtr+")")
+		e.emitInstr(fmt.Sprintf("call void @__kml_error_option_cause_own("+irPtr+" %s)", data))
+	}
 	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
 	e.emitLabel(doneL)
 	return nil

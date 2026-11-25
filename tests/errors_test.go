@@ -183,3 +183,36 @@ console.log(a)
 console.log(Object.keys(a), JSON.stringify(a), (a as any).code)
 `)
 }
+
+// An uncaught error's report shows its own properties and cause after the
+// stack, as util.inspect (and Node's report) does; a plain error, its stack.
+func TestE2EUncaughtReportOwnPropertiesTS(t *testing.T) {
+	for _, c := range []struct{ src, want string }{
+		{"const e: any = new Error(\"boom\");\ne.flag = true; e.n = 3;\nthrow e;\n", "  flag: true,\n  n: 3\n}"},
+		{"const c: any = new Error(\"outer\", { cause: 5 });\nthrow c;\n", "  [cause]: 5\n}"},
+		{"throw new TypeError(\"plain\");\n", "TypeError: plain\n"},
+	} {
+		bin := buildBinary(t, c.src)
+		var errBuf strings.Builder
+		cmd := exec.Command(bin)
+		cmd.Stderr = &errBuf
+		if err := cmd.Run(); err == nil {
+			t.Fatalf("want a non-zero exit for %q", c.src)
+		}
+		if !strings.Contains(errBuf.String(), c.want) {
+			t.Errorf("stderr %q lacks %q", errBuf.String(), c.want)
+		}
+	}
+	if strings.Contains(mustStderr(t, "throw new TypeError(\"plain\");\n"), "{") {
+		t.Errorf("a plain error's report carries a property block")
+	}
+}
+
+func mustStderr(t *testing.T, src string) string {
+	t.Helper()
+	var errBuf strings.Builder
+	cmd := exec.Command(buildBinary(t, src))
+	cmd.Stderr = &errBuf
+	_ = cmd.Run()
+	return errBuf.String()
+}

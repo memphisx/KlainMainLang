@@ -514,8 +514,6 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 			dynL, staticL := e.freshLabel("unbarr.dyn"), e.freshLabel("unbarr.static")
 			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isDyn, dynL, staticL))
 			e.emitLabel(dynL)
-			e.ensureNanBox()
-			e.ensureShapeRuntime()
 			elemTy := *target.ElemType
 			n := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynarr_len("+irPtr+" %s)", n, box))
@@ -755,8 +753,6 @@ func (e *Emitter) emitUnboxBoxToType(boxRef string, target Type) Value {
 // the absent tuple.
 func (e *Emitter) emitUnboxTuple(tagReg, payload string, target Type) Value {
 	e.ensureDynJSONC()
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
 	box := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, box, payload))
 	slot := e.freshReg()
@@ -833,7 +829,6 @@ func (e *Emitter) emitIterableAsArrayBox(box string) string {
 	collectL, joinL := e.freshLabel("iterarr.collect"), e.freshLabel("iterarr.join")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", iter, collectL, joinL))
 	e.emitLabel(collectL)
-	e.ensureAnyIterCollect()
 	got := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_any_iter_collect(i64 %s)", got, box))
 	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", got, slot))

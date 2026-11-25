@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"KlainMainLang/checker"
-	"KlainMainLang/sema"
 	"fmt"
 	"sort"
 	"strings"
@@ -178,6 +177,11 @@ func (e *Emitter) registerModuleGlobals(prog *ast.Program) {
 		}
 		if ty.IR == "void" {
 			ty = TypeUndefined // a void call's result (`const r = m.clear()`)
+		}
+		if !forced && v.TypeAnnot == nil && v.Init != nil {
+			if o := e.reprOracle(); o != nil && o.proxyValue(v.Init) {
+				ty = TypeAny // a proxy: its box, as its declaration holds it (anyHeldDecl)
+			}
 		}
 		ty = e.globalUndefinedStorage(v, ty)
 		// A promoted generic class instance (`const b = new Box<number>()`) needs
@@ -569,15 +573,21 @@ func (e *Emitter) registerPatternGlobals(prog *ast.Program, readByFunctions map[
 		if e.libStmts[st] != "" {
 			continue
 		}
-		switch st.(type) {
-		case *ast.FunctionDeclaration, *ast.ClassDeclaration:
-			ast.Inspect(st, func(n ast.Node) bool {
-				if id, ok := n.(*ast.Identifier); ok {
+		// Every statement: a function declared in a block (`{ async
+		// function run() { … } }`) reads the global too, as
+		// namesReadInFunctions counts it; each reference is resolved below.
+		ast.Inspect(st, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Identifier); ok {
+				refs[id.Name] = append(refs[id.Name], id)
+			}
+			// `new S()` names its constructor's binding too.
+			if ne, ok := n.(*ast.NewExpression); ok {
+				if id := e.frontBinding.NewCallee(ne); id != nil {
 					refs[id.Name] = append(refs[id.Name], id)
 				}
-				return true
-			})
-		}
+			}
+			return true
+		})
 	}
 	for _, st := range prog.Body {
 		e.inLib = e.libStmts[st] // the lane of this statement, not the last one seen
@@ -591,7 +601,12 @@ func (e *Emitter) registerPatternGlobals(prog *ast.Program, readByFunctions map[
 			continue
 		}
 		var bound []string
+		order := make([]string, 0, len(names))
 		for name := range names {
+			order = append(order, name)
+		}
+		sort.Strings(order) // declared in a fixed order: the IR must not depend on map iteration
+		for _, name := range order {
 			if !readByFunctions[name] {
 				continue
 			}
@@ -631,8 +646,16 @@ func (e *Emitter) registerPatternGlobals(prog *ast.Program, readByFunctions map[
 				// literal's): the field's static type, which the local the
 				// pattern binds holds.
 				ty, ok = e.patternFieldType(st, name)
-				if !ok && e.compatJS() {
-					// JavaScript holds the binding as any.
+				if !ok {
+					// A direct field (`const { subtle } = crypto`): what
+					// reading it as a member gives.
+					ty, ok = e.patternMemberType(st, name)
+				}
+				if !ok && (e.compatJS() || !c.Unanswered(t) && t.Flags&checker.Object != 0 && t.Flags&checker.Union == 0 && (t.Kind == checker.Function || len(t.Calls) > 0)) {
+					// JavaScript holds the binding as any; so does a
+					// function value whose signature has no representation
+					// of its own (`const { open } = fs.promises`), called
+					// through its box.
 					ty, ok = TypeAny, true
 				}
 			}
@@ -668,6 +691,26 @@ func (e *Emitter) registerPatternGlobals(prog *ast.Program, readByFunctions map[
 			e.patternGlobals[st] = bound
 		}
 	}
+}
+
+// patternMemberType is the type of `init.key` for the field a top-level
+// object pattern binds to name directly, read as a member expression.
+func (e *Emitter) patternMemberType(st ast.Statement, name string) (Type, bool) {
+	od, ok := st.(*ast.ObjectDestructuring)
+	if !ok || od.TypeAnnot != nil {
+		return Type{}, false
+	}
+	for _, p := range od.Props {
+		if p.Local != name || p.KeyExpr != nil || p.Default != nil || p.SubArray != nil || p.SubObject != nil {
+			continue
+		}
+		mem := ast.NewMemberExpression(od.Init, p.Key, od.GetPos())
+		if call, ok := e.tsSubtleRef(mem); ok {
+			t := e.typeOfExpr(call)
+			return t, t.IR != "" && t.IR != "void"
+		}
+	}
+	return Type{}, false
 }
 
 // patternFieldType is the static type of the field a top-level object
@@ -1247,13 +1290,13 @@ func (e *Emitter) promotableNewExpr(init ast.Expression) (Type, bool) {
 	init = e.dealiasNew(init)
 	switch ne := init.(type) {
 	case *ast.NewExpression:
-		if ne.ClassName == "Promise" {
-			return Type{}, false
-		}
-		// FinalizationRegistry is an opaque single-ptr handle (TDD-00163), not a
-		// user/generic class — promote it, falling through to the
+		// A builtin's intrinsic: promoted only when its result is one
+		// single slot (FinalizationRegistry's handle), through the
 		// typeOfExpr + single-slot gate below.
-		if ne.ClassName == "FinalizationRegistry" {
+		if in := e.newIntrinsic(ne); in != nil {
+			if !in.promotable {
+				return Type{}, false
+			}
 			break
 		}
 		_, concrete := e.classes[ne.ClassName]
@@ -1671,6 +1714,11 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 		// A function's own local takes the checker's type for it
 		// (LocalType); the cases below type the rest: a literal by its
 		// syntax, a binding the checker never saw by its parts.
+		// (Not a decorated method's result: its decorators decide its type.)
+		if call, isCall := preInit.(*ast.CallExpression); isCall && e.dynamicResultCall(call) {
+			ty = TypeAny
+			preInit = nil
+		}
 		if lt, ok := e.localDeclType(v); ok && preInit != nil {
 			ty = lt
 			preInit = nil
@@ -1710,7 +1758,7 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 				}
 			} else if _, isClass := e.classes[init.Name]; isClass {
 				ty = TypeAny // `const K = C`: the constructor reference
-			} else if isErrorKindName(init.Name) || sema.IsBuiltinConstructor(init.Name) || init.Name == "Promise" {
+			} else if isErrorKindName(init.Name) || e.builtinCtorName(init.Name) {
 				ty = TypeAny // `const M = Map`: a builtin constructor reference
 			} else if lty := e.typeOfExpr(init); lty.IsFunc() || init.Name == "process" && e.processIsValue(init) {
 				// A capturing nested function declaration referenced before its
@@ -1762,19 +1810,8 @@ func (e *Emitter) emitVarDeclBody(v *ast.VarDeclaration) error {
 			ty = e.typeOfExpr(init)
 		}
 	}
-	if call, ok := v.Init.(*ast.CallExpression); ok && v.TypeAnnot == nil && e.compatJS() && !ty.IsDynamic() {
-		// A JavaScript array intrinsic whose result holds what TypeScript's
-		// type does not (`[1].concat(["z"])`, a reduce to a string from a
-		// number seed): the value it emits.
-		key := call.Intrinsic
-		if mem, ok := call.Callee.(*ast.MemberExpression); ok && key == "" && e.typeOfExpr(mem.Object).IsArray() {
-			key = "Array.prototype." + mem.Property
-		}
-		if in, known := intrinsics[key]; known && in.ty != nil {
-			if it := in.ty(e, call); isUnconstrainedDynamic(it) || it.IsArray() && ty.IsArray() && it.ElemType != nil && isUnconstrainedDynamic(*it.ElemType) && arrayStorageKey(it) != arrayStorageKey(ty) {
-				ty = it
-			}
-		}
+	if it, ok := e.intrinsicHeldType(v, ty); ok {
+		ty = it
 	}
 	if na, ok := v.Init.(*ast.NewArrayExpression); ok && !ty.IsArray() && !ty.IsDynamic() {
 		ty = ArrayOf(newArrayElemType(e, na)) // an any[] without a type argument
@@ -2308,4 +2345,34 @@ func (e *Emitter) globalsAssignedOtherKind(prog *ast.Program) map[*ast.VarDeclar
 		return true
 	})
 	return out
+}
+
+// intrinsicHeldType is the type a JavaScript binding initialized by an
+// array intrinsic holds when its result holds what TypeScript's type
+// (ty) does not (`[1].concat(["z"])`, a reduce to a string from a number
+// seed, a `find` over an any[]): the value it emits.
+func (e *Emitter) intrinsicHeldType(v *ast.VarDeclaration, ty Type) (Type, bool) {
+	call, ok := v.Init.(*ast.CallExpression)
+	if !ok || v.TypeAnnot != nil || !e.compatJS() || ty.IsDynamic() {
+		return Type{}, false
+	}
+	if it, ok := e.intrinsicCallType(call); ok {
+		if isUnconstrainedDynamic(it) || it.IsArray() && ty.IsArray() && it.ElemType != nil && isUnconstrainedDynamic(*it.ElemType) && arrayStorageKey(it) != arrayStorageKey(ty) {
+			return it, true
+		}
+	}
+	return Type{}, false
+}
+
+// intrinsicCallType is the type an array intrinsic's call emits (its
+// intrinsics table entry's), whatever TypeScript's type for it.
+func (e *Emitter) intrinsicCallType(call *ast.CallExpression) (Type, bool) {
+	key := call.Intrinsic
+	if mem, ok := call.Callee.(*ast.MemberExpression); ok && key == "" && e.typeOfExpr(mem.Object).IsArray() {
+		key = "Array.prototype." + mem.Property
+	}
+	if in, known := intrinsics[key]; known && in.ty != nil {
+		return in.ty(e, call), true
+	}
+	return Type{}, false
 }

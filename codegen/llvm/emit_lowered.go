@@ -10,6 +10,7 @@ package llvm
 // not represent yet) falls through to the hand-written emitters.
 
 import (
+	"KlainMainLang/sema"
 	"fmt"
 	"strings"
 
@@ -43,6 +44,11 @@ func (e *Emitter) front() frontView {
 	// Checked whole first, so every answer is the program's as written,
 	// whatever emission asks first and whatever lowering rewrites later.
 	e.frontChecker.Check()
+	if e.shadowStart != nil {
+		start := e.shadowStart
+		e.shadowStart = nil
+		start()
+	}
 	return e.frontChecker
 }
 
@@ -273,6 +279,144 @@ func callSignatureIntrinsic(t *checker.Type) string {
 	return key
 }
 
+// newIntrinsics are the builtin constructors whose `new` is emitted
+// inline, by the name a construct signature's `@intrinsic` gives.
+// newIntrinsicFns are a construct-signature intrinsic's emission, its
+// result's type (typeOfExpr's answer, with no emission), and whether that
+// result may live in a promoted single slot.
+type newIntrinsicFns struct {
+	emit       func(e *Emitter, ex *ast.NewExpression) (Value, error)
+	typeOf     func(e *Emitter, ex *ast.NewExpression) Type
+	promotable bool
+}
+
+var newIntrinsics map[string]*newIntrinsicFns
+
+func init() {
+	newIntrinsics = map[string]*newIntrinsicFns{
+		// new Promise<T>(executor) → task Promise<T> (TDD-00087).
+		"Promise": {emit: (*Emitter).emitNewPromise, typeOf: func(e *Emitter, ex *ast.NewExpression) Type {
+			pt := PromiseOf(e.newPromiseValueType(ex))
+			pt.PromiseTask = true
+			return pt
+		}},
+		// A Proxy is a dynamic object (TDD-00155 Stage 7).
+		"Proxy": {emit: (*Emitter).emitNewProxy, typeOf: func(*Emitter, *ast.NewExpression) Type { return TypeAny }},
+		"Response": {emit: (*Emitter).emitNewResponse, typeOf: func(*Emitter, *ast.NewExpression) Type {
+			return ResponseType()
+		}},
+		// The registry handle (TDD-00163), an opaque single pointer.
+		"FinalizationRegistry": {emit: (*Emitter).emitNewFinalizationRegistry, typeOf: (*Emitter).finalizationRegistryNewType, promotable: true},
+	}
+}
+
+// finalizationRegistryNewType is `new FinalizationRegistry<T>(cb)`'s type:
+// the registry of its held values' type.
+func (e *Emitter) finalizationRegistryNewType(ex *ast.NewExpression) Type {
+	held := TypeI64
+	if len(ex.TypeArgs) == 1 && ex.TypeArgs[0] != nil {
+		held = e.annotationType(ex.TypeArgs[0])
+	}
+	if len(ex.Args) == 1 {
+		if cbTy := e.typeOfExpr(ex.Args[0]); cbTy.IsFunc() && len(cbTy.FuncParams) == 1 {
+			held = cbTy.FuncParams[0]
+		}
+	}
+	return FinalizationRegistryType(held)
+}
+
+// constructSignatureIntrinsic is the intrinsic every construct signature
+// of t names (an interface's or a type literal's), or "".
+func constructSignatureIntrinsic(t *checker.Type, lit *ast.TypeLiteral) string {
+	var bodies [][]ast.TypeMember
+	if lit != nil {
+		bodies = append(bodies, lit.Members)
+	} else if t != nil && t.Symbol != nil {
+		for _, d := range t.Symbol.Declarations {
+			if decl, ok := d.Node.(*ast.InterfaceDeclaration); ok {
+				bodies = append(bodies, decl.Members)
+			}
+		}
+	}
+	key := ""
+	for _, members := range bodies {
+		for _, m := range members {
+			ns, ok := m.(*ast.ConstructSignature)
+			if !ok {
+				continue
+			}
+			if ns.Intrinsic == "" || key != "" && ns.Intrinsic != key {
+				return ""
+			}
+			key = ns.Intrinsic
+		}
+	}
+	if newIntrinsics[key] == nil {
+		return ""
+	}
+	return key
+}
+
+// newIntrinsic is the intrinsic of `new X(…)` when X is a builtin global
+// the program does not shadow whose declaration names one, or nil.
+func (e *Emitter) newIntrinsic(ex *ast.NewExpression) *newIntrinsicFns {
+	if ex.Qualified || ex.Callee != nil || ex.ClassName == "" {
+		return nil
+	}
+	if _, user := e.classes[ex.ClassName]; user {
+		return nil
+	}
+	if _, local := e.lookup(ex.ClassName); local {
+		return nil
+	}
+	c := e.front()
+	if c == nil {
+		return nil
+	}
+	return newIntrinsics[constructSignatureIntrinsic(c.GlobalValueType(ex.ClassName), c.GlobalValueLiteral(ex.ClassName))]
+}
+
+// builtinCtorName reports a global name whose value is a builtin
+// constructor codegen boxes as a constructor reference carrying the name:
+// one `new` lowers as a builtin, or one whose construct signature names an
+// intrinsic (Promise).
+func (e *Emitter) builtinCtorName(name string) bool {
+	if sema.IsBuiltinConstructor(name) {
+		return true
+	}
+	if r, ok := e.builtinCtorNames[name]; ok {
+		return r
+	}
+	r := false
+	// Only a name the construct-signature intrinsics know can be one; its
+	// declaration confirms it.
+	if c := e.front(); c != nil && newIntrinsics[name] != nil {
+		r = constructSignatureIntrinsic(c.GlobalValueType(name), c.GlobalValueLiteral(name)) != ""
+	}
+	if e.builtinCtorNames == nil {
+		e.builtinCtorNames = map[string]bool{}
+	}
+	e.builtinCtorNames[name] = r
+	return r
+}
+
+// jsCallIntrinsic is the intrinsic a builtin constructor interface's
+// `@jsCall` names: JavaScript's call of a value TypeScript does not let be
+// called (`Buffer(…)`).
+func jsCallIntrinsic(t *checker.Type) string {
+	if t == nil || t.Symbol == nil {
+		return ""
+	}
+	for _, d := range t.Symbol.Declarations {
+		if decl, ok := d.Node.(*ast.InterfaceDeclaration); ok && decl.JSCall != "" {
+			if _, known := intrinsics[decl.JSCall]; known {
+				return decl.JSCall
+			}
+		}
+	}
+	return ""
+}
+
 func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 	if l, ok := e.loweredCallDecl(ex); ok {
 		return l, true
@@ -291,6 +435,47 @@ func (e *Emitter) loweredCall(ex *ast.CallExpression) (*lowering, bool) {
 	return nil, false
 }
 
+// declIntrinsic is the `@intrinsic` key of the builtin a call's member
+// callee names (`Object.setPrototypeOf`, `Reflect.construct`): read off its
+// declaration, so a binding of the same name shadows it; "" for any other
+// call. A call the checker never saw (a synthesized runtime body) names
+// the unshadowed global's own entry.
+func (e *Emitter) declIntrinsic(call *ast.CallExpression) string {
+	mem, ok := call.Callee.(*ast.MemberExpression)
+	if !ok {
+		return ""
+	}
+	if c := e.front(); c != nil {
+		switch d := c.MemberDecl(mem).(type) {
+		case *ast.MethodSignature:
+			if e.isLibMember(d) {
+				return d.Intrinsic
+			}
+			return ""
+		case *ast.FunctionDeclaration:
+			if e.isLibMember(d) {
+				return d.Intrinsic
+			}
+			return ""
+		case nil:
+		default:
+			return ""
+		}
+	}
+	id, ok := mem.Object.(*ast.Identifier)
+	if !ok || e.isShadowedByLocal(id.Name) {
+		return ""
+	}
+	if _, user := e.classes[id.Name]; user {
+		return ""
+	}
+	key := id.Name + "." + mem.Property
+	if _, known := intrinsics[key]; known {
+		return key
+	}
+	return ""
+}
+
 // isLibMember reports whether d is a member a builtin declaration file
 // declares (an interface's method), not the program's own.
 func (e *Emitter) isLibMember(d ast.Node) bool {
@@ -302,8 +487,17 @@ func (e *Emitter) isLibMember(d ast.Node) bool {
 		if progs, err := lib.Programs(); err == nil {
 			for _, p := range progs {
 				ast.Inspect(p, func(n ast.Node) bool {
-					if ms, ok := n.(*ast.MethodSignature); ok {
-						e.libMembers[ms] = true
+					switch m := n.(type) {
+					case *ast.MethodSignature:
+						e.libMembers[m] = true
+					case *ast.FunctionDeclaration:
+						if m.Intrinsic != "" {
+							e.libMembers[m] = true // a namespace's (`Reflect.construct`)
+						}
+					case *ast.PropertySignature:
+						if m.Intrinsic != "" {
+							e.libMembers[m] = true // a builtin's property (`Error.stackTraceLimit`)
+						}
 					}
 					return true
 				})
@@ -356,6 +550,15 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 			}
 		}
 	}
+	// `(Buffer as any)(…)`: the call JavaScript makes of the global, which
+	// a cast lets TypeScript accept.
+	if as, ok := ex.Callee.(*ast.AsExpression); ok {
+		if id, ok := as.Expr.(*ast.Identifier); ok && e.isBuiltinGlobal(c, id) {
+			if key := jsCallIntrinsic(c.TypeOf(id)); key != "" {
+				return &lowering{intrinsic: key, e: e, ex: ex}, true
+			}
+		}
+	}
 	if id, ok := ex.Callee.(*ast.Identifier); ok && e.isBuiltinGlobal(c, id) {
 		// A builtin `declare function` (`parseInt`).
 		if sym, _ := c.Binding().Resolve(id); sym != nil {
@@ -375,6 +578,9 @@ func (e *Emitter) loweredCallDecl(ex *ast.CallExpression) (*lowering, bool) {
 		// A builtin constructor called as a function (`String(x)`): its
 		// interface's call signatures, when they all name one intrinsic.
 		if key := callSignatureIntrinsic(c.TypeOf(id)); key != "" {
+			return &lowering{intrinsic: key, e: e, ex: ex}, true
+		}
+		if key := jsCallIntrinsic(c.TypeOf(id)); key != "" && e.compatJS() {
 			return &lowering{intrinsic: key, e: e, ex: ex}, true
 		}
 		return nil, false
@@ -1227,44 +1433,34 @@ func (e *Emitter) linkedBySymbol() {}
 // runtimeUnits are the `@link` names of the embedded C sources: using one
 // compiles it in. Any other `@link` name is a system library.
 var runtimeUnits = map[string]func(*Emitter){
-	"casemap": (*Emitter).ensureCasemap,
-	"string":  (*Emitter).ensureStringC,
-	"number":  (*Emitter).ensureNumberC,
-	"pool":    func(e *Emitter) { e.ensureMicrotasks(); e.ensureStrHeaderRuntime(); e.ensureThreadPool() },
-	"inspect": (*Emitter).ensureDynJSONC,
-	"tls":     func(e *Emitter) { e.ensureStrHeaderRuntime(); e.ensureThreadPool() },
-	"osinfo":  func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"zlib":    (*Emitter).ensureZlibNatives,
-	"cares":   (*Emitter).ensureCaresNatives,
-	"h2o":     (*Emitter).ensureH2ONatives,
-	"fs": func(e *Emitter) {
-		e.ensureMicrotasks()
-		e.ensureStrHeaderRuntime()
-		e.ensureThreadPool()
-		e.ensureStrHeaderRuntime()
-	},
-	"sqlite":     (*Emitter).ensureSqliteNatives,
-	"wasm":       (*Emitter).ensureWasmNatives,
-	"ffi":        (*Emitter).ensureFFINatives,
+	"casemap":    (*Emitter).linkedBySymbol,
+	"string":     (*Emitter).linkedBySymbol,
+	"number":     (*Emitter).linkedBySymbol,
+	"pool":       (*Emitter).linkedBySymbol,
+	"inspect":    (*Emitter).ensureDynJSONC,
+	"tls":        (*Emitter).linkedBySymbol,
+	"osinfo":     (*Emitter).linkedBySymbol,
+	"zlib":       (*Emitter).linkedBySymbol,
+	"cares":      (*Emitter).linkedBySymbol,
+	"h2o":        (*Emitter).linkedBySymbol,
+	"fs":         (*Emitter).linkedBySymbol,
+	"sqlite":     (*Emitter).linkedBySymbol,
+	"wasm":       (*Emitter).linkedBySymbol,
+	"ffi":        (*Emitter).ensureBigInt, // the natives box 64-bit integers as bigints
 	"crypto":     (*Emitter).ensureCryptoNatives,
-	"http2":      func(e *Emitter) { e.ensureStrHeaderRuntime(); e.ensureThreadPool() },
-	"umap":       (*Emitter).ensureUmapOrder,
-	"weak":       func(e *Emitter) { e.ensureMicrotasks() },
-	"timers":     (*Emitter).ensureTimerNatives,
-	"microtasks": (*Emitter).ensureMicrotasks,
+	"http2":      (*Emitter).linkedBySymbol,
+	"umap":       (*Emitter).linkedBySymbol,
+	"weak":       (*Emitter).linkedBySymbol,
+	"timers":     (*Emitter).linkedBySymbol,
+	"microtasks": (*Emitter).linkedBySymbol,
 	"frames":     (*Emitter).linkedBySymbol,
 	"fdlibm":     (*Emitter).linkedBySymbol,
-	"tty":        (*Emitter).ensureTtyRead,
+	"tty":        (*Emitter).linkedBySymbol,
 	"tui":        (*Emitter).ensureTui,
-	"assets":     (*Emitter).ensureAssetsNatives,
+	"assets":     (*Emitter).linkedBySymbol,
 	"webview":    (*Emitter).ensureWebviewRuntime,
-	"sync":       (*Emitter).ensureSyncRuntime,
+	"sync":       (*Emitter).linkedBySymbol,
 	"streams": func(e *Emitter) {
-		e.ensureExceptionHelpers()
-		e.ensureMicrotasks()
-		e.ensureNanBox()
-		e.ensurePromiseAddReaction()
-		e.ensureShapeRuntime()
 		e.ensureUnhandledRejections()
 	},
 }
@@ -1273,59 +1469,50 @@ var runtimeUnits = map[string]func(*Emitter){
 // than declares: using one emits its definition.
 var runtimeSymbols = map[string]func(*Emitter){
 	// lib/native.d.ts
-	"__kml_drain_microtasks":             (*Emitter).ensureMicrotasks,
-	"__kml_ctor_kind":                    (*Emitter).ensureCtorKind,
-	"__kml_native_fs_error":              (*Emitter).ensureNativeFsError,
-	"__kml_native_errno_name":            (*Emitter).ensureNativeErrno,
-	"__kml_native_errno_desc":            (*Emitter).ensureNativeErrno,
-	"__kml_native_uv_errno":              (*Emitter).ensureNativeErrno,
+	"__kml_drain_microtasks":             (*Emitter).linkedBySymbol,
+	"__kml_ctor_kind":                    (*Emitter).linkedBySymbol,
+	"__kml_native_fs_error":              (*Emitter).linkedBySymbol,
+	"__kml_native_errno_name":            (*Emitter).linkedBySymbol,
+	"__kml_native_errno_desc":            (*Emitter).linkedBySymbol,
+	"__kml_native_uv_errno":              (*Emitter).linkedBySymbol,
 	"__kml_native_entry_path":            (*Emitter).ensureNativeEntryPath,
-	"__kml_native_process_hook":          (*Emitter).ensureProcessHooks,
-	"__kml_native_process_unhook":        (*Emitter).ensureProcessHooks,
-	"__kml_native_process_set_exit_code": (*Emitter).ensureNativeProcessExit,
-	"__kml_native_process_get_exit_code": (*Emitter).ensureNativeProcessExit,
-	"__kml_native_process_really_exit":   (*Emitter).ensureNativeProcessExit,
+	"__kml_native_process_hook":          (*Emitter).linkedBySymbol,
+	"__kml_native_process_unhook":        (*Emitter).linkedBySymbol,
+	"__kml_native_process_set_exit_code": (*Emitter).linkedBySymbol,
+	"__kml_native_process_get_exit_code": (*Emitter).linkedBySymbol,
+	"__kml_native_process_really_exit":   (*Emitter).linkedBySymbol,
 	"__kml_native_process_version":       (*Emitter).ensureNativeProcessVersion,
-	"__kml_trim":                         func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_trim_start":                   func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_trim_end":                     func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_Object_is":                    func(e *Emitter) { e.ensureBoxedBigIntHooks(); e.ensureFnMeta() },
-	"__kml_native_fs_watch": func(e *Emitter) {
-		e.ensureFsWatchRuntime()
-		e.ensureMicrotasks()
-		e.ensureStrHeaderRuntime()
-		e.ensureThreadPool()
-	},
-	"__kml_native_fs_watch_close": func(e *Emitter) {
-		e.ensureFsWatchRuntime()
-		e.ensureMicrotasks()
-		e.ensureStrHeaderRuntime()
-		e.ensureThreadPool()
-	},
-	"__kml_native_fs_watch_ref": func(e *Emitter) {
-		e.ensureFsWatchRuntime()
-		e.ensureMicrotasks()
-		e.ensureStrHeaderRuntime()
-		e.ensureThreadPool()
-	},
-	"__kml_native_signal_start":       func(e *Emitter) { e.ensureEventLoop() },
-	"__kml_native_signal_stop":        func(e *Emitter) { e.ensureEventLoop() },
-	"__kml_native_ipc_child_claim":    func(e *Emitter) { e.ensureIPCChildRuntime() },
-	"__kml_native_async_context_get":  (*Emitter).linkedBySymbol,
-	"__kml_native_async_context_set":  (*Emitter).linkedBySymbol,
-	"__kml_native_process_cwd":        func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_native_process_uptime":     func(e *Emitter) { e.ensureProcessUptime() },
-	"__kml_native_process_memory":     (*Emitter).linkedBySymbol,
-	"__kml_native_process_id":         (*Emitter).linkedBySymbol,
-	"__kml_native_process_exec_path":  func(e *Emitter) { e.ensureNodeInterpFlagGuard(); e.ensureStrHeaderRuntime() },
-	"__kml_native_process_platform":   func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_native_process_arch":       func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_native_process_title":      func(e *Emitter) { e.ensureEventLoop(); e.ensureStrHeaderRuntime() },
-	"__kml_native_process_uv_version": func(e *Emitter) { e.ensureEventLoop(); e.ensureStrHeaderRuntime() },
-	"__kml_native_process_set_title":  func(e *Emitter) { e.ensureEventLoop(); e.ensureStrHeaderRuntime() },
-	"__kml_native_env_get":            func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_native_env_set":            func(e *Emitter) { e.ensureStrHeaderRuntime() },
-	"__kml_native_env_delete":         func(e *Emitter) { e.ensureStrHeaderRuntime() },
+	"__kml_trim":                         (*Emitter).linkedBySymbol,
+	"__kml_trim_start":                   (*Emitter).linkedBySymbol,
+	"__kml_trim_end":                     (*Emitter).linkedBySymbol,
+	"__kml_Object_is":                    (*Emitter).linkedBySymbol,
+	"__kml_native_fs_watch":              (*Emitter).linkedBySymbol,
+	"__kml_native_fs_watch_close":        (*Emitter).linkedBySymbol,
+	"__kml_native_fs_watch_ref":          (*Emitter).linkedBySymbol,
+	"__kml_native_signal_start":          (*Emitter).linkedBySymbol,
+	"__kml_native_signal_stop":           (*Emitter).linkedBySymbol,
+	"__kml_native_ipc_child_claim":       (*Emitter).linkedBySymbol,
+	"__kml_native_async_context_get":     (*Emitter).linkedBySymbol,
+	"__kml_native_async_context_set":     (*Emitter).linkedBySymbol,
+	"__kml_native_process_cwd":           (*Emitter).linkedBySymbol,
+	"__kml_native_process_uptime":        (*Emitter).linkedBySymbol,
+	"__kml_native_process_memory":        (*Emitter).linkedBySymbol,
+	"__kml_native_process_id":            (*Emitter).linkedBySymbol,
+	"__kml_native_process_groups":        (*Emitter).linkedBySymbol,
+	"__kml_native_process_rusage":        (*Emitter).linkedBySymbol,
+	"__kml_native_loop_start":            (*Emitter).linkedBySymbol,
+	"__kml_native_loop_idle":             (*Emitter).linkedBySymbol,
+	"__kml_native_process_exec_path":     (*Emitter).linkedBySymbol,
+	"__kml_native_process_spawn":         (*Emitter).armInterpGuard,
+	"__kml_native_spawn_sync":            (*Emitter).armInterpGuard,
+	"__kml_native_process_platform":      (*Emitter).linkedBySymbol,
+	"__kml_native_process_arch":          (*Emitter).linkedBySymbol,
+	"__kml_native_process_title":         (*Emitter).linkedBySymbol,
+	"__kml_native_process_uv_version":    (*Emitter).linkedBySymbol,
+	"__kml_native_process_set_title":     (*Emitter).linkedBySymbol,
+	"__kml_native_env_get":               (*Emitter).linkedBySymbol,
+	"__kml_native_env_set":               (*Emitter).linkedBySymbol,
+	"__kml_native_env_delete":            (*Emitter).linkedBySymbol,
 }
 
 // ensureNativeEntryPath stores into hooks.c's @__kml_entry_path the program's entry file
@@ -1375,7 +1562,7 @@ func (e *Emitter) checkerNarrowed(id *ast.Identifier, ty Type) (Type, bool) {
 		return Type{}, false
 	}
 	t := c.TypeOf(id)
-	if c.Unanswered(t) || t.Flags&(checker.Any|checker.Unknown) != 0 {
+	if c.Unanswered(t) || t.Flags&(checker.Any|checker.Unknown) != 0 || t.Brand != nil { // (a branded primitive stays boxed)
 		return Type{}, false
 	}
 	if annotatedPatternLeaf(e.frontBinding, id) && c.StorageTypeOf(id) == t {
@@ -1596,7 +1783,7 @@ func (e *Emitter) checkerNarrowedUnion(id ast.Expression, ty Type) (Type, bool) 
 		return Type{}, false
 	}
 	t := c.TypeOf(id)
-	if c.Unanswered(t) || t.Flags&(checker.Any|checker.Unknown|checker.Union|checker.Nullish) != 0 {
+	if c.Unanswered(t) || t.Flags&(checker.Any|checker.Unknown|checker.Union|checker.Nullish) != 0 || t.Brand != nil {
 		return Type{}, false
 	}
 	var kind string
@@ -2102,7 +2289,8 @@ func (e *Emitter) stdioBinding(id *ast.Identifier) bool {
 
 // runtimeCloneBinding reports a binding initialized with a structuredClone
 // the run-time clone performs: typed by its argument's type, it holds a box
-// (a class instance's clone is a plain object, as in Node).
+// (a class instance's clone is a plain object, as in Node). So does one
+// initialized with a decorated method's call.
 func (e *Emitter) runtimeCloneBinding(id *ast.Identifier) bool {
 	c := e.front()
 	if c == nil {
@@ -2117,7 +2305,9 @@ func (e *Emitter) runtimeCloneBinding(id *ast.Identifier) bool {
 		return false
 	}
 	call, ok := v.Init.(*ast.CallExpression)
-	return ok && e.runtimeCloneCall(call)
+	// (A decorated method's result is the box its decorators' callable
+	// returned, of whatever type.)
+	return ok && (e.runtimeCloneCall(call) || e.dynamicResultCall(call))
 }
 
 // runtimeCloneCall reports a structuredClone call the run-time clone
@@ -2243,6 +2433,9 @@ func (e *Emitter) dropIgnoredArgs(ex *ast.CallExpression) *ast.CallExpression {
 	}
 	if id, ok := ex.Callee.(*ast.Identifier); ok && untypedParamBuiltins[id.Name] && !e.isShadowedByLocal(id.Name) {
 		return ex // (its declaration's string is no conversion it makes)
+	}
+	if id, ok := ex.Callee.(*ast.Identifier); ok && id.Name == "structuredClone" && !e.isShadowedByLocal(id.Name) {
+		return ex // it counts its arguments: none is ERR_MISSING_ARGS
 	}
 	ct := c.TypeOf(ex.Callee)
 	lo, _ := c.MinArgs(ct)
@@ -2437,4 +2630,89 @@ func (e *Emitter) accessorTargetIdent(id *ast.Identifier) bool {
 	}
 	v, ok := singleVarDecl(sym)
 	return ok && accessorLiteral(o.b, v)
+}
+
+// unwrapAssignedAssertions rewrites an assignment whose target is a name
+// under type assertions or a non-null assertion (`(y as any) = "s"`,
+// `y! = 3`): a store to the name, whose narrowing then starts over from
+// its declared type, as the value written is what a later read gets. An
+// asserted target's value, of any type, is held through `any`. The
+// program's diagnostics were reported on it as written.
+func unwrapAssignedAssertions(prog *ast.Program) {
+	ast.Inspect(prog, func(n ast.Node) bool {
+		a, ok := n.(*ast.AssignmentExpression)
+		if !ok || a.Op != "=" {
+			return true
+		}
+		asserted := false
+		l := a.Left
+		for {
+			switch x := l.(type) {
+			case *ast.AsExpression:
+				l, asserted = x.Expr, true
+				continue
+			case *ast.NonNullExpression:
+				l = x.Arg
+				continue
+			}
+			break
+		}
+		if id, isID := l.(*ast.Identifier); isID && l != a.Left {
+			a.Left = id
+			if asserted {
+				a.Right = ast.NewAsExpression(a.Right, ast.AnyAnnotation(""), a.Right.GetPos())
+			}
+		}
+		return true
+	})
+}
+
+// boxUnsoundScalarCasts rewrites `x as unknown as T` (or through `any`),
+// T a primitive type x's type is not, into `x as any`: the value is what x
+// is, which T's representation cannot hold. A parameter it is passed to
+// takes the any-argument check, and a binding of it holds the box
+// (anyHeldDecl).
+func (e *Emitter) boxUnsoundScalarCasts(prog *ast.Program) {
+	c := e.front()
+	if c == nil {
+		return
+	}
+	like := map[string]checker.TypeFlags{
+		"number": checker.NumberLike, "string": checker.StringLike,
+		"boolean": checker.BooleanLike, "bigint": checker.BigIntLike,
+	}
+	keyword := func(t ast.TypeNode) string {
+		if k, ok := t.(*ast.KeywordType); ok {
+			return k.Keyword
+		}
+		return ""
+	}
+	var rw func(n ast.Node) ast.Node
+	rw = func(n ast.Node) ast.Node {
+		ast.RewriteChildren(n, rw)
+		outer, ok := n.(*ast.AsExpression)
+		if !ok {
+			return n
+		}
+		want, scalar := like[keyword(outer.TypeAnnot)]
+		inner, isAs := outer.Expr.(*ast.AsExpression)
+		if !scalar || !isAs || (keyword(inner.TypeAnnot) != "unknown" && keyword(inner.TypeAnnot) != "any") {
+			return n
+		}
+		t := c.TypeOf(inner.Expr)
+		if t == nil || c.Unanswered(t) || t.Flags&^want == 0 || t.Flags&(checker.Any|checker.Unknown) != 0 {
+			return n // x already is a T, or a box the parameter checks anyway
+		}
+		boxed := ast.NewAsExpression(inner.Expr, ast.AnyAnnotation(""), outer.GetPos())
+		if e.unsoundCasts == nil {
+			e.unsoundCasts = map[*ast.AsExpression]bool{}
+		}
+		e.unsoundCasts[boxed] = true
+		return boxed
+	}
+	for i, st := range prog.Body {
+		if out, ok := rw(st).(ast.Statement); ok {
+			prog.Body[i] = out
+		}
+	}
 }

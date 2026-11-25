@@ -78,6 +78,11 @@ func (e *Emitter) shadowWrittenKeys() map[string]bool {
 // defineProperties, Reflect.defineProperty) defines an accessor under: a
 // static field of that name may be shadowed by one.
 func (e *Emitter) accessorKeys() map[string]bool {
+	if e.programIndependent() {
+		// Library code is the same in every program: the program's set,
+		// cached by whichever side asked first, is not its to read.
+		return nil
+	}
 	if e.accessorKeySet != nil {
 		return e.accessorKeySet
 	}
@@ -194,13 +199,31 @@ func (e *Emitter) emitShadowableRead(m *ast.MemberExpression) (Value, error) {
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
 	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", box.Ref, slot))
-	fp, has := e.freshReg(), e.freshReg()
+	objPtr := obj.Ref
+	if obj.Ty.IR != irPtr {
+		// A receiver held boxed (a getter typed one way, returning any):
+		// the object its box holds, else no shadow to read.
+		if !obj.Ty.IsDynamic() {
+			r := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, slot))
+			return Value{Ref: r, Ty: TypeAny}, nil
+		}
+		tag, payload := e.emitUnboxTagPayload(obj)
+		isObj, p := e.freshReg(), e.emitIntToPtr(payload)
+		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isObj, tag, kmlTagObject))
+		objPtr = e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", objPtr, isObj, p))
+	}
+	fp, hasHook, has := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" @__kml_shadow_get_hook, align 8", fp))
-	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", has, fp))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasHook, fp))
+	nonNull := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", nonNull, objPtr))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", has, hasHook, nonNull))
 	callL, joinL := e.freshLabel("shadowread"), e.freshLabel("shadowread.done")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, callL, joinL))
 	e.emitLabel(callL)
-	e.emitInstr(fmt.Sprintf("call i32 %s("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", fp, obj.Ref, e.internString(m.Property), slot))
+	e.emitInstr(fmt.Sprintf("call i32 %s("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", fp, objPtr, e.internString(m.Property), slot))
 	e.emitTerminator("br label %" + joinL)
 	e.emitLabel(joinL)
 	r := e.freshReg()
@@ -243,7 +266,7 @@ func (e *Emitter) boxOverride(x ast.Expression) (Type, bool) {
 func (e *Emitter) exprHoldsBox(x ast.Expression) bool {
 	switch v := x.(type) {
 	case *ast.CallExpression:
-		return e.anyArgReturnsBox(v)
+		return e.anyArgReturnsBox(v) || e.callReturnsProxyRead(v)
 	case *ast.MemberExpression:
 		return e.shadowableRead(v)
 	}

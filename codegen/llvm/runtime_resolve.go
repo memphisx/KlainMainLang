@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -200,7 +201,31 @@ func (u libUnit) scanSyms(tc Toolchain) (objSyms, error) {
 	if err != nil && !located {
 		return newObjSyms(), nil
 	}
+	if err != nil {
+		// Located, but its headers are missing here (wasmtime without its
+		// development files): the unit still answers for the names it
+		// defines, read off its text, so only a program that names one
+		// pulls it, and that program's compile of it reports the error.
+		return textDefinedSyms(u.src.Content), nil
+	}
 	return s, err
+}
+
+// textDefinedRE matches a runtime function a C file defines at file scope:
+// a line from column 0 naming __kml_… and opening its body.
+var textDefinedRE = regexp.MustCompile(`(?m)^[A-Za-z_][^;\n]*?\b(__kml_[A-Za-z0-9_]+)\s*\([^;]*\{`)
+
+// textDefinedSyms reads the external runtime functions C source src defines
+// (not its static ones) without compiling it.
+func textDefinedSyms(src string) objSyms {
+	s := newObjSyms()
+	for _, m := range textDefinedRE.FindAllStringSubmatch(src, -1) {
+		if strings.HasPrefix(m[0], "static") {
+			continue
+		}
+		s.strong[m[1]] = true
+	}
+	return s
 }
 
 // linked is u as the link takes it, its library located.
@@ -441,22 +466,21 @@ func resolveRuntime(tc Toolchain, ir string, linked, pool []CSource, libPool []l
 	for n := range irWeak {
 		weak[n] = true
 	}
-	var want []string
-	for n := range irWeak {
-		want = append(want, n)
-	}
+	// Every walk over a set of names below goes in name order: each file
+	// pulled in changes what the next decision sees (its definitions
+	// clash or close), so a map's order would change which files a
+	// program links from one compile to the next.
+	want := sortedNames(irWeak)
 	take := map[int]bool{}
 	add := func(s objSyms) {
 		for n := range s.strong {
 			strong[n] = true
 		}
-		for n := range s.weak {
+		for _, n := range sortedNames(s.weak) {
 			weak[n] = true
 			want = append(want, n) // a strong definition may replace it
 		}
-		for n := range s.undef {
-			want = append(want, n)
-		}
+		want = append(want, sortedNames(s.undef)...)
 	}
 	for _, s := range linkedSyms {
 		add(s)
@@ -530,7 +554,7 @@ func resolveRuntime(tc Toolchain, ir string, linked, pool []CSource, libPool []l
 	}
 	// What the program names: a strong definition wins over a weak default
 	// when it links.
-	for n := range irNamed {
+	for _, n := range sortedNames(irNamed) {
 		if strong[n] {
 			continue
 		}
@@ -584,4 +608,14 @@ func resolveRuntime(tc Toolchain, ir string, linked, pool []CSource, libPool []l
 		libs = append(libs, u)
 	}
 	return out, libs, nil
+}
+
+// sortedNames is set's names in order.
+func sortedNames(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for n := range set {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
 }

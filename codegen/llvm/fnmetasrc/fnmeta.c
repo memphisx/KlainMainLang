@@ -401,8 +401,11 @@ _Bool __kml_array_has_key(long long len, const char *key, _Bool ownOnly, long lo
             if (i >= len) return 0;
             /* a boxed static array's hole is no own index */
             unsigned long long hw = (unsigned long long)word;
-            if (hw >= 65536 && hw < (1ULL << 49) && (hw & 7) == 2)
-                return !__kml_holes_is(*(void **)(hw & ~7ULL), i);
+            if (hw >= 65536 && hw < (1ULL << 49) && (hw & 7) == 2) {
+                /* a sparse element is a hole bit with its value added */
+                void *hdr = *(void **)(hw & ~7ULL);
+                return !__kml_holes_is(hdr, i) || __kml_shape_expando_has(hdr, key);
+            }
             if (hw >= 65536 && hw < (1ULL << 49) && (hw & 7) == 6)
                 return !__kml_dynarr_is_hole((void *)(hw & ~7ULL), i);
             return 1;
@@ -548,6 +551,13 @@ const char *__kml_fn_tag_dyn(void **rec) {
     case FN_ASYNCGEN: return "AsyncGeneratorFunction";
     }
     return "Function";
+}
+
+/* A dynamic function's own `name` value, of whatever type (0: none). */
+long long __kml_fn_own_name_dyn(void **rec) {
+    void *bag = rec ? __kml_fn_props_dyn(rec) : NULL;
+    if (!bag || !fn_bag_get) return 0;
+    return fn_bag_get(bag, "name");
 }
 
 char *__kml_fn_name_dyn(void **rec) {

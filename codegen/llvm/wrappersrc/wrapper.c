@@ -65,6 +65,13 @@ i64 __kml_wrapper_recv(i64 v, const char *key) {
     return wcell(v)[1];
 }
 
+/* Whether v is a wrapper holding key as its own property. */
+int __kml_wrapper_own(i64 v, const char *key) {
+    if (!wkind(v)) return 0;
+    void *bag = (void *)wcell(v)[2];
+    return bag && __kml_dynobj_find(bag, key) >= 0;
+}
+
 /* Assigns key on a wrapper (into its bag) and returns 1, or returns 0 for
  * any other value. A String's index and length are read-only: the strict-
  * mode TypeError, or (sloppy) no effect. */

@@ -63,10 +63,7 @@ func (e *Emitter) emitStandardDecoratorApplications(cd *ast.ClassDeclaration) er
 	// One shared per-class value/target object, bound to a synthetic local the
 	// synthesized calls reference (the class value for class decorators, and the
 	// object metadata lives on).
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
 	classBox := e.emitNbTagPtr(bag, kmlTagDynObject)
@@ -432,8 +429,6 @@ func (e *Emitter) emitAddInitializerFn(className string) (Value, error) {
 		return Value{Ref: fmt.Sprintf("%d", nbUndefined), Ty: TypeAny}, nil
 	}
 	fnName := fmt.Sprintf("@__kml_addinit_%s", llvmSafeSymbol(className))
-	e.ensureNanBox()
-	e.ensureShapeRuntime()
 
 	restoreFn := e.beginDetachedFunc()
 
@@ -501,10 +496,6 @@ func (e *Emitter) emitStandardConstructorTail(className string) error {
 	if len(fieldSlots) == 0 && !hasList {
 		return nil
 	}
-	if hasList {
-		e.ensureNanBox()
-		e.ensureShapeRuntime()
-	}
 	classTy := e.classes[className].Ty
 	thisSym, ok := e.lookup("this")
 	if !ok {
@@ -539,7 +530,6 @@ func (e *Emitter) emitStandardConstructorTail(className string) error {
 		initBox := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", initBox, slot))
 		tag := e.freshReg()
-		e.ensureNanBox()
 		e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, initBox))
 		isFn := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isFn, tag, kmlTagDynFunc))

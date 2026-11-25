@@ -7,7 +7,9 @@
 // ported.
 //
 // kml:default-namespace — `import stream from 'stream'` reads this module's
-// exports (`stream.Readable`), as Node's default export carries them.
+// exports (`stream.Readable`), as Node's default export carries them; the
+// value itself is the Stream class (`class M extends stream`):
+// kml:namespace-class Stream
 import { EventEmitter } from 'events';
 import { NodeError, NodeTypeError, NodeRangeError } from './internal_errors';
 
@@ -361,6 +363,18 @@ interface AfterWriteTickInfo {
 // writing to its destination, pipeline piping one stream into the next);
 // each class overrides the ones it has.
 export class Stream extends EventEmitter {
+    // Node's stream.js hangs the module's classes and functions off the
+    // legacy Stream (`require('stream').Readable` is `Stream.Readable`);
+    // assigned at the end of this module.
+    static Readable: typeof Readable;
+    static Writable: typeof Writable;
+    static Duplex: typeof Duplex;
+    static Transform: typeof Transform;
+    static PassThrough: typeof PassThrough;
+    static Stream: typeof Stream;
+    static finished: typeof finished;
+    static pipeline: typeof pipeline;
+    static addAbortSignal: typeof addAbortSignal;
     _readableState: ReadableState | null = null;
     _writableState: WritableState | null = null;
     constructor(options?: StreamOptions) {
@@ -1726,6 +1740,7 @@ function readableFrom(iterable: any, options?: ReadableOptions, duplex?: FromDup
             encoding: options?.encoding,
             autoDestroy: options?.autoDestroy,
             emitClose: options?.emitClose,
+            signal: options?.signal,
             read() {
                 this.push(iterable);
                 this.push(null);
@@ -1790,6 +1805,7 @@ function readableFrom(iterable: any, options?: ReadableOptions, duplex?: FromDup
             objectMode: options?.objectMode ?? true,
             highWaterMark: options?.highWaterMark ?? 1,
             writable: duplex.writable,
+            signal: options?.signal,
             read() { read(); },
             write(chunk: any, encoding: BufferEncoding, cb: Callback) { duplex.write!(chunk, encoding, cb); },
             final(cb: Callback) { duplex.final!(cb); },
@@ -1801,6 +1817,7 @@ function readableFrom(iterable: any, options?: ReadableOptions, duplex?: FromDup
             encoding: options?.encoding,
             autoDestroy: options?.autoDestroy,
             emitClose: options?.emitClose,
+            signal: options?.signal,
             read() { read(); },
             destroy(error: any, cb: Callback) { destroyWith(error, cb); },
         });
@@ -2760,6 +2777,13 @@ export function finished(stream: Stream, options: FinishedOptions | ((err?: any)
     let willEmitClose = willEmitCloseOf(stream) && isReadableNodeStream(stream) === readable && isWritableNodeStream(stream) === writable;
     let writableFinished = isWritableFinished(stream, false);
     let readableFinished = isReadableFinished(stream, false);
+    // A writable with no writable state of its own (a Stream with its own
+    // write(), as an HTTP/2 compat response): finished once it is no longer
+    // writable at its 'end' or 'close', as Node's legacy streams.
+    const legacyWritable = writable && w === null;
+    const onlegacyfinish = () => {
+        if ((stream as any).writable !== true) onfinish();
+    };
     const onfinish = () => {
         writableFinished = true;
         if (streamDestroyed(stream)) willEmitClose = false;
@@ -2804,6 +2828,13 @@ export function finished(stream: Stream, options: FinishedOptions | ((err?: any)
         }
         call();
     };
+    // Not all streams emit 'close' after 'aborted' (an HTTP request).
+    if (legacyWritable) {
+        stream.on('end', onlegacyfinish);
+        stream.on('close', onlegacyfinish);
+    }
+    const onaborted = !willEmitClose && typeof (stream as any).aborted === 'boolean';
+    if (onaborted) stream.on('aborted', onclose);
     stream.on('end', onend);
     stream.on('finish', onfinish);
     if (opts.error !== false) stream.on('error', onerror);
@@ -2812,7 +2843,7 @@ export function finished(stream: Stream, options: FinishedOptions | ((err?: any)
         process.nextTick(onclose);
     } else if ((w !== null && w.errorEmitted) || (r !== null && r.errorEmitted)) {
         if (!willEmitClose) process.nextTick(onclosed);
-    } else if (!readable && (!willEmitClose || isReadableSide(stream)) && (writableFinished || !isWritableSide(stream)) && (w === null || w.pendingcb === 0)) {
+    } else if (!readable && (!willEmitClose || isReadableSide(stream)) && (writableFinished || (legacyWritable ? legacyNotWritable(stream) : !isWritableSide(stream))) && (w === null || w.pendingcb === 0)) {
         process.nextTick(onclosed);
     } else if (!writable && (!willEmitClose || isWritableSide(stream)) && (readableFinished || !isReadableSide(stream))) {
         process.nextTick(onclosed);
@@ -2823,6 +2854,11 @@ export function finished(stream: Stream, options: FinishedOptions | ((err?: any)
         stream.removeListener('end', onend);
         stream.removeListener('error', onerror);
         stream.removeListener('close', onclose);
+        if (onaborted) stream.removeListener('aborted', onclose);
+        if (legacyWritable) {
+            stream.removeListener('end', onlegacyfinish);
+            stream.removeListener('close', onlegacyfinish);
+        }
     };
 }
 
@@ -2844,8 +2880,17 @@ function isReadableFinished(stream: Stream, strict: boolean): boolean {
 
 function isWritableFinished(stream: Stream, strict: boolean): boolean {
     const w = stream._writableState;
-    if (w === null || w.errored) return false;
+    if (w === null) return (stream as any).writableFinished === true;
+    if (w.errored) return false;
     return w.finished || (!strict && w.ended && w.length === 0);
+}
+
+// Node's isWritable(stream) === false for a stream with no writable state:
+// destroyed, no longer writable, or ended.
+function legacyNotWritable(stream: Stream): boolean {
+    const s = stream as any;
+    if (typeof s.writable !== 'boolean') return false;
+    return s.destroyed === true || s.writable !== true || s.writableEnded === true;
 }
 
 function willEmitCloseOf(stream: Stream): boolean {
@@ -3231,6 +3276,11 @@ async function* feedSource(feed: AsyncGenFeed): AsyncGenerator<any> {
 }
 
 // A WHATWG WritableStream, by its own methods.
+// Node's isReadableStream: a web ReadableStream, told apart by shape.
+function isReadableWebStream(v: any): boolean {
+    return v !== null && typeof v === 'object' && typeof v.getReader === 'function' && typeof v.pipeTo === 'function' && typeof v.tee === 'function';
+}
+
 function isWritableWebStream(v: any): boolean {
     return v !== null && typeof v === 'object' && typeof v.getWriter === 'function' && typeof v.abort === 'function' && typeof v.pipeTo !== 'function';
 }
@@ -3246,6 +3296,7 @@ function isBlobValue(v: any): boolean {
 export function duplexify(body: any, name: string): Duplex {
     if (body instanceof Duplex) return body;
     if (isBlobValue(body)) return duplexify(body.arrayBuffer(), name);
+    if (isReadableWebStream(body)) return duplexifyPair(Readable.fromWeb(body), undefined);
     if (isWritableWebStream(body)) return duplexifyPair(undefined, Writable.fromWeb(body));
     if (isStreamValue(body) && isReadableNodeStream(body)) return duplexifyPair(body, undefined);
     if (isStreamValue(body) && isWritableNodeStream(body)) return duplexifyPair(undefined, body);
@@ -3560,3 +3611,13 @@ export const promises = {
         });
     },
 };
+
+Stream.Readable = Readable;
+Stream.Writable = Writable;
+Stream.Duplex = Duplex;
+Stream.Transform = Transform;
+Stream.PassThrough = PassThrough;
+Stream.Stream = Stream;
+Stream.finished = finished;
+Stream.pipeline = pipeline;
+Stream.addAbortSignal = addAbortSignal;

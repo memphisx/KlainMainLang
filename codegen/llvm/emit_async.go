@@ -62,8 +62,6 @@ func asyncSlotSize(pty Type) int64 {
 // setjmp + a 40-byte promise. Used only when !taskBody (a may-suspend body keeps
 // emitAsyncPrologue + emitTaskEpilogue).
 func (e *Emitter) emitSettledAsyncPrologue() {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
 
 	// coroHdl slot for the body's return value (the return machinery stores here).
@@ -201,6 +199,9 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	// A suspended async function's frame is at its await, as V8 shows it.
 	defer e.callSite(ex.GetPos())()
 	e.sawAwait = true // the enclosing async callable runs as a coroutine (TDD-00223 §2)
+	if e.noteTLASite(ex.GetPos(), false) {
+		defer e.restoreTLALoopSite()
+	}
 	hdlVal, err := e.emitExpr(ex.Argument)
 	if err != nil {
 		return Value{}, err
@@ -255,8 +256,6 @@ func (e *Emitter) emitAwait(ex *ast.AwaitExpression) (Value, error) {
 	if !hdlVal.Ty.IsPromise() && !argTy.IsPromise() {
 		inAsyncGenBody := e.currentGenerator != nil && e.currentGenerator.genTy.GeneratorIsAsync
 		if ((e.isAsync || e.inModuleTask) && e.currentGenerator == nil && e.hasMaySuspend) || inAsyncGenBody {
-			e.ensureExceptionHelpers()
-			e.ensureMicrotasks()
 			e.ensureUnhandledRejections()
 			prom := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", prom))
@@ -373,8 +372,7 @@ func (e *Emitter) emitAwaitFetchSlot(slotRef string) Value {
 			return v
 		}
 	}
-	e.ensureFetchAsync()
-	e.ensureMicrotasks()
+	e.ensureFetch()
 	pendingPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", pendingPtr, slotRef))
 	// Resolve at headers-complete (TDD-00097 Stage 4): the Response is built
@@ -411,9 +409,9 @@ func (e *Emitter) emitAwaitPromiseElem(elemRef string, elemTy Type) (Value, erro
 // (`return <promise>` from an async fn — ADR-00265). The caller parks: a
 // coroutine through the scheduler, an async generator's step on the promise.
 func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, error) {
-	e.ensureExceptionHelpers()
-	e.ensureTaskRuntime() // __kml_promise_own_ctor
+	e.ensureUnhandledRejections() // __kml_promise_own_ctor
 	e.declareFn("__kml_promise_own_ctor", "declare void @__kml_promise_own_ctor("+irPtr+")")
+	e.ensurePromiseProtoCtorRead()
 	if !e.ownCtorAfterAwait {
 		// PromiseResolve's Get of the promise's `constructor`: an own one
 		// on its box runs (its getter may throw here).
@@ -426,7 +424,7 @@ func (e *Emitter) emitAwaitTaskPromise(hdlRef string, promiseTy Type) (Value, er
 		// and the settle re-enters the fiber right here via a microtask.
 		e.emitAsyncGenAwaitParkUntilSettled(hdlRef)
 	} else if e.hasMaySuspend {
-		e.ensureTaskRuntime()
+		e.ensureUnhandledRejections()
 		e.emitInstr(fmt.Sprintf("call void @__kml_task_await_ready("+irPtr+" %s)", hdlRef))
 	} else {
 		// programMayWait sets hasMaySuspend for every program with an await
@@ -485,10 +483,7 @@ func (e *Emitter) asyncReturnAdopt(h string) bool {
 		e.emitAlloca(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", slot))
 		e.asyncAdoptSlot = slot
 	}
-	e.ensureMicrotasks()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
-	e.ensureNanBox()
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", h, e.asyncAdoptSlot))
 	return true
 }
@@ -560,4 +555,62 @@ func (e *Emitter) emitAwaitSubclassPromise(hdlVal Value, pos ast.Pos) (Value, er
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", r, slot))
 	return Value{Ref: r, Ty: hdlVal.Ty}, nil
+}
+
+// ensurePromiseProtoCtorRead defines __kml_promise_proto_ctor_read(recv),
+// PromiseResolve's Get of `constructor` falling back to Promise.prototype's
+// own (its getter run with recv as this), when the program defines a
+// `constructor` on Promise.prototype; __kml_promise_own_ctor calls it.
+func (e *Emitter) ensurePromiseProtoCtorRead() {
+	if e.promiseProtoCtorDone {
+		return
+	}
+	e.promiseProtoCtorDone = true
+	if !e.writesPromiseProtoCtor() {
+		return
+	}
+	restore := e.beginDetachedFunc()
+	pv := e.emitBuiltinProto("Promise")
+	pp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pp, pv.Ref))
+	e.declareFn("__kml_dynobj_get_recv", "declare i64 @__kml_dynobj_get_recv("+irPtr+", "+irPtr+", i64)")
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dynobj_get_recv("+irPtr+" %s, "+irPtr+" %s, i64 %%recv)", r, e.emitIntToPtr(pp), e.internString("constructor")))
+	e.emitTerminator("ret void")
+	body := e.allocas.String() + e.body.String()
+	restore()
+	e.writeFunc("void @__kml_promise_proto_ctor_read(i64 %recv)", body)
+}
+
+// writesPromiseProtoCtor reports a program that defines or assigns
+// `constructor` on Promise.prototype.
+func (e *Emitter) writesPromiseProtoCtor() bool {
+	if e.prog == nil {
+		return false
+	}
+	isPP := func(x ast.Expression) bool {
+		m, ok := x.(*ast.MemberExpression)
+		if !ok || m.Property != "prototype" {
+			return false
+		}
+		id, ok := m.Object.(*ast.Identifier)
+		return ok && id.Name == "Promise"
+	}
+	found := false
+	ast.Inspect(e.prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.CallExpression:
+			if m, ok := x.Callee.(*ast.MemberExpression); ok && len(x.Args) >= 2 && isPP(x.Args[0]) && (m.Property == "defineProperty" || m.Property == "defineProperties") {
+				if s, ok := x.Args[1].(*ast.StringLiteral); !ok || s.Value == "constructor" {
+					found = true
+				}
+			}
+		case *ast.AssignmentExpression:
+			if m, ok := x.Left.(*ast.MemberExpression); ok && m.Property == "constructor" && isPP(m.Object) {
+				found = true
+			}
+		}
+		return !found
+	})
+	return found
 }

@@ -425,3 +425,18 @@ if (isMainThread) {
 `,
 	}, "main.ts", "main got worker false")
 }
+
+// terminate() ends a worker that never returns to its event loop: an
+// endless microtask chain, an endless postMessage loop.
+func TestE2EWorkerTerminateBusy(t *testing.T) {
+	assertSameAsNodeCLIJS(t, `const { Worker } = require("worker_threads");
+const a = new Worker("function loop() { Promise.resolve().then(loop); } loop(); require('worker_threads').parentPort.postMessage('up');", { eval: true });
+a.once("message", () => setImmediate(() => a.terminate()));
+a.once("exit", (code) => {
+  console.log("microtasks", code);
+  const b = new Worker("const p = require('worker_threads').parentPort; while (true) p.postMessage({});", { eval: true });
+  b.once("message", () => b.terminate());
+  b.once("exit", (c) => console.log("posts", c));
+});
+`)
+}

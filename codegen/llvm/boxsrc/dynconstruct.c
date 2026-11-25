@@ -18,7 +18,7 @@ extern const void *__kml_unit_find(i64 kind, i64 id);
 extern unsigned char __kml_nb_tag(long long w);
 extern long long __kml_nb_pay(long long w);
 extern i64 __kml_dyn_construct_fn(i64 c, i64 *argv, i64 argc);
-extern i64 __kml_dyn_construct_fail(void *msg);
+extern void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
 
 extern i64 *__kml_fn_bound_env(i64 c);
 extern void *malloc(__SIZE_TYPE__); /* scratch: the argument list below */
@@ -41,5 +41,6 @@ i64 __kml_dyn_construct(i64 c, i64 *argv, i64 argc, void *msg) {
     if (__kml_nb_tag(c) == KML_TAG_FUNCREF) r = (const CtorRow *)__kml_unit_find(KML_UNIT_CTOR, __kml_nb_pay(c));
     if (r && r->construct) return r->construct(argv, argc);
     i64 f = __kml_dyn_construct_fn(c, argv, argc);
-    return f ? f : __kml_dyn_construct_fail(msg);
+    if (f) return f;
+    __kml_throw_nullderef(msg); /* anything else: the TypeError msg */
 }

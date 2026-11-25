@@ -84,6 +84,7 @@ export function _kmlGlobalThisFill(): void {
     hidden(g, 'FinalizationRegistry', FinalizationRegistry);
     hidden(g, 'escape', escape);
     hidden(g, 'unescape', unescape);
+    hidden(g, 'eval', eval);
     hidden(g, 'NaN', NaN);
     hidden(g, 'Infinity', Infinity);
     hidden(g, 'undefined', undefined);

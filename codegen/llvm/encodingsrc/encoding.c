@@ -56,7 +56,30 @@ static char *b64_encode(const u8 *s, i64 len) {
     return out;
 }
 
-char *__kml_btoa(const char *str) { return b64_encode((const u8 *)str, (i64)strlen(str)); }
+/* btoa: each character is one byte (a Latin-1 code unit); one above U+00FF
+ * is the InvalidCharacterError. The length is the header's. */
+char *__kml_btoa(const char *str) {
+    const u8 *s = (const u8 *)str;
+    i64 len = *(const i64 *)(str - 8) & 0xFFFFFFFFLL, n = 0;
+    u8 *bytes = (u8 *)malloc((size_t)len + 1); /* scratch */
+    for (i64 i = 0; i < len;) {
+        u8 c = s[i];
+        if (c < 0x80) {
+            bytes[n++] = c;
+            i++;
+        } else if ((c == 0xC2 || c == 0xC3) && i + 1 < len) {
+            bytes[n++] = (u8)(((c & 0x1F) << 6) | (s[i + 1] & 0x3F));
+            i += 2;
+        } else {
+            free(bytes); /* scratch */
+            throw_err(KML_INVALIDCHAR_KIND, "Invalid character", "InvalidCharacterError");
+            return 0;
+        }
+    }
+    char *out = b64_encode(bytes, n);
+    free(bytes); /* scratch */
+    return out;
+}
 
 /* The binary-safe form: the input need not be NUL-terminated (a SHA-1
  * digest can hold a 0x00). */
@@ -67,7 +90,7 @@ char *__kml_base64_encode_bytes(const char *str, i64 len) { return b64_encode((c
  * throws InvalidCharacterError, a short length is re-padded, and every
  * remaining char must be in the alphabet ('=' is not). */
 char *__kml_atob(const char *str) {
-    i64 rawlen = (i64)strlen(str), nw = 0;
+    i64 rawlen = *(const i64 *)(str - 8) & 0xFFFFFFFFLL, nw = 0;
     char *norm = (char *)malloc((size_t)rawlen + 5); /* scratch */
     for (i64 i = 0; i < rawlen; i++) {
         char c = str[i];
@@ -92,17 +115,24 @@ char *__kml_atob(const char *str) {
         for (; i < nw; i++)
             if (b64_val((u8)norm[i]) < 0) break;
         if (i == nw) {
-            char *out = __kml_str_alloc(len / 4 * 3);
+            /* Each decoded byte is one character (Latin-1): two UTF-8
+               bytes from 0x80. */
+            char *out = __kml_str_alloc(len / 4 * 3 * 2);
             i64 o = 0;
             for (i64 j = 0; j + 4 <= len; j += 4) {
                 int c2eq = norm[j + 2] == '=', c3eq = norm[j + 3] == '=';
                 int v0 = b64_val((u8)norm[j]), v1 = b64_val((u8)norm[j + 1]);
                 int v2 = c2eq ? 0 : b64_val((u8)norm[j + 2]), v3 = c3eq ? 0 : b64_val((u8)norm[j + 3]);
                 unsigned n = (unsigned)v0 << 18 | (unsigned)v1 << 12 | (unsigned)v2 << 6 | (unsigned)v3;
-                out[o] = (char)(n >> 16);
-                out[o + 1] = (char)(n >> 8);
-                out[o + 2] = (char)n;
-                o += c2eq ? 1 : c3eq ? 2 : 3;
+                u8 by[3] = {(u8)(n >> 16), (u8)(n >> 8), (u8)n};
+                int cnt = c2eq ? 1 : c3eq ? 2 : 3;
+                for (int k = 0; k < cnt; k++) {
+                    if (by[k] < 0x80) out[o++] = (char)by[k];
+                    else {
+                        out[o++] = (char)(0xC0 | (by[k] >> 6));
+                        out[o++] = (char)(0x80 | (by[k] & 0x3F));
+                    }
+                }
             }
             out[o] = 0;
             set_len(out, o);
@@ -145,11 +175,15 @@ static int in_set(const char *set, u8 c) { return c && strchr(set, c) != 0; }
  * ASCII except `" # % < > ? [ ] ^ { | } ~`, the backtick and the backslash. */
 static char *pct_encode(const char *str, const char *extra, int file_url) {
     static const char hex[] = "0123456789ABCDEF";
-    i64 len = (i64)strlen(str), o = 0;
+    i64 len = *(const i64 *)(str - 8) & 0xFFFFFFFFLL, o = 0; /* the header's: a NUL is a character */
     char *out = __kml_str_alloc(len * 3);
     for (i64 i = 0; i < len; i++) {
         u8 c = (u8)str[i];
-        int safe = file_url ? (c >= 0x21 && c < 0x7F && !in_set("\"#%<>?[]^`{|}~\\", c))
+        /* A lone surrogate (its WTF-8 bytes ED A0..BF): encodeURI's
+         * URIError, as no UTF-8 encodes it. */
+        if (!file_url && c == 0xED && i + 1 < len && (u8)str[i + 1] >= 0xA0)
+            throw_err(KML_URIERROR_KIND, "URI malformed", "URIError");
+        int safe = c == 0 ? 0 : file_url ? (c >= 0x21 && c < 0x7F && !in_set("\"#%<>?[]^`{|}~\\", c))
                             : ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || in_set(extra, c));
         if (safe) {
             out[o++] = (char)c;

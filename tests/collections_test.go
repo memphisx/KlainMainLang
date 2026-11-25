@@ -352,6 +352,22 @@ console.log(wm.get(new N(4)) === null)
 `, "0\nundefined\ntrue\nfalse")
 }
 
+// A pointer- or array-valued WeakMap's get() miss is `undefined`, as in
+// Node: it prints, compares and defaults as one, never a null object.
+func TestE2EWeakMapGetPointerMiss(t *testing.T) {
+	assertOutput(t, `
+class K { v = 1 }
+const live = new K()
+const wm = new WeakMap<K, { k: K }>()
+wm.set(live, { k: live })
+console.log(wm.delete(live), wm.has(live))
+console.log(wm.get(live))
+const ws = new WeakMap<K, string>()
+const wa = new WeakMap<K, number[]>()
+console.log(ws.get(live), wa.get(live), wm.get(live) === undefined, ws.get(live) ?? "dflt")
+`, "true false\nundefined\nundefined undefined true dflt")
+}
+
 func TestE2EWeakSetBasic(t *testing.T) {
 	assertOutput(t, `
 class N { id: number; constructor(id: number) { this.id = id } }
@@ -1166,5 +1182,76 @@ function cached(h: number): any {
 console.log(typeof cached(9), cached(9) === cached(9));
 const b: Map<boolean, any> = new Map<boolean, any>();
 console.log(b.get(true) === undefined);
+`)
+}
+
+// Map.set and Set.add store a -0 key as +0, in every key flavor: the key
+// read back is +0 and prints as 0.
+func TestE2ECollectionNegativeZeroKeyIsPlusZero(t *testing.T) {
+	assertSameAsNode(t, `
+const z = -0, half = 0.5;
+const s = new Set<number>(); s.add(z); s.add(half);
+console.log(s.has(0), s.has(-0), s, [...s], Object.is([...s][0], -0));
+const m = new Map<number, string>(); m.set(z, "a"); m.set(0, "b");
+console.log(m.size, m.get(0), m, Object.is([...m.keys()][0], -0));
+const sa = new Set<any>(); sa.add(-0); sa.add("x");
+console.log(sa.has(0), sa, Object.is([...sa][0], -0));
+const ma = new Map<any, any>([[-0, 1]]);
+console.log(ma.has(0), ma, Object.is([...ma.keys()][0], -0));
+const s2 = new Set([1, -0, 0, NaN, NaN]); console.log(s2, s2.size);
+const xs: number[] = [-0, 0.0]; console.log(new Set(xs), [...new Set(xs)].map(v => Object.is(v, -0)));
+`)
+}
+
+// A tuple keeps its identity through a box, a Set/Map key, a WeakSet and an
+// any[]: writes through the box reach it, as one array in Node.
+func TestE2ETupleIdentityThroughBoxTS(t *testing.T) {
+	assertSameAsNode(t, `
+function mk(): [number, number] { return [1, 2]; }
+const t = mk();
+const s = new Set<[number, number]>(); s.add(t); console.log(s.has(t), s.has(mk()));
+const w = new WeakSet<object>(); w.add(t); console.log(w.has(t));
+const arr: any[] = [t]; console.log(arr.indexOf(t), arr.includes(t));
+const o: { p: [number, boolean] } = { p: [1, true] };
+const b: any = o.p; console.log(b === o.p); b[1] = false; console.log(o.p[1]);
+const k = new Map<any, string>(); k.set(t, "v"); console.log(k.get(t), k.has(mk()));
+`)
+}
+
+func TestE2EMapGroupBy(t *testing.T) {
+	assertSameAsNode(t, `
+const a = [[3, 1], [1, 2], [2, 0]];
+console.log(Map.groupBy(a, p => p[1] % 2));
+console.log(Map.groupBy("abca", (c, i) => c + i % 2), Map.groupBy(new Set([1, 2, 3]), x => x & 1), Map.groupBy([0, -0, NaN, NaN], x => x));
+const g = Map.groupBy([{ n: "a", v: 1 }, { n: "b", v: 2 }, { n: "a", v: 3 }], o => o.n);
+console.log(g.get("a")!.map(o => o.v), g.size, [...g.keys()]);
+try { Map.groupBy(null as any, (x: any) => x); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+try { Map.groupBy([1], 5 as any); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+`)
+}
+
+// Object.groupBy and Map.groupBy name a non-function selector by value, as V8.
+func TestE2EGroupBySelectorNotFunction(t *testing.T) {
+	assertSameAsNode(t, `
+for (const v of [5, "ab", true, null, undefined, {}, [1, 2]] as any[]) {
+  try { Object.groupBy([1], v); } catch (e) { console.log((e as Error).message); }
+  try { Map.groupBy([1], v); } catch (e) { console.log((e as Error).message); }
+}
+`)
+}
+
+// An entry that is not an object is a TypeError that closes the iterator.
+func TestE2EObjectFromEntriesNonObjectEntry(t *testing.T) {
+	assertSameAsNode(t, `
+let closed = 0;
+const it: any = { [Symbol.iterator]() { let i = 0; return { next() { i++; return i > 3 ? { done: true } : { value: i === 2 ? 5 : ["k" + i, i], done: false }; }, return() { closed++; return {}; } }; } };
+try { Object.fromEntries(it); console.log("no throw"); } catch (e: any) { console.log(e.constructor.name, e.message, closed); }
+const xs: any = [["a", 1], [2, "b"]];
+console.log(JSON.stringify(Object.fromEntries(xs)));
+const m = new Map<number, string>([[1, "x"]]);
+console.log(JSON.stringify(Object.fromEntries(m)));
+const t: [string, number][] = [["q", 1]];
+console.log(JSON.stringify(Object.fromEntries(t)));
+try { Object.fromEntries([null] as any); } catch (e: any) { console.log(e.message); }
 `)
 }

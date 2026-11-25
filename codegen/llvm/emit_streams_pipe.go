@@ -8,10 +8,11 @@ import (
 	"KlainMainLang/ast"
 )
 
-// emitStreamDecodeThunk emits `{i64,i64,i64} @__kml_rs_decode_N(ptr %rec)` —
-// the inverse of the fulfill thunk: unpack a typed {value, done} record back
-// into raw queue words + a done flag, so the runtime pipe/tee machinery can
-// move chunks without knowing their type.
+// emitStreamDecodeThunk emits `void @__kml_rs_decode_N(ptr %rec, ptr %out)`
+// — the inverse of the fulfill thunk: unpack a typed {value, done} record
+// back into raw queue words + a done flag, stored as three words at out, so
+// the runtime pipe/tee machinery (streams.c, which calls it) can move chunks
+// without knowing their type.
 func (e *Emitter) emitStreamDecodeThunk(chunkTy Type) string {
 	return e.emitStreamDecodeThunkTo(chunkTy, chunkTy)
 }
@@ -37,17 +38,16 @@ func (e *Emitter) emitStreamDecodeThunkTo(chunkTy, destTy Type) string {
 	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", dI1, dGep))
 	dI64 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = zext i1 %s to i64", dI64, dI1))
-	a0 := e.freshReg()
-	a1 := e.freshReg()
-	a2 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { i64, i64, i64 } undef, i64 %s, 0", a0, v0))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { i64, i64, i64 } %s, i64 %s, 1", a1, a0, v1))
-	e.emitInstr(fmt.Sprintf("%s = insertvalue { i64, i64, i64 } %s, i64 %s, 2", a2, a1, dI64))
-	e.emitInstr(fmt.Sprintf("ret { i64, i64, i64 } %s", a2))
+	for k, w := range []string{v0, v1, dI64} {
+		p := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%out, i64 %d", p, k))
+		e.heapStore("i64", w, p, 8)
+	}
+	e.emitInstr("ret void")
 	body := e.allocas.String() + e.body.String()
 	restore()
 
-	fn := e.defineContentNamed("@__kml_rs_decode.", "{ i64, i64, i64 }", irPtr+" %rec", body)
+	fn := e.defineContentNamed("@__kml_rs_decode.", "void", irPtr+" %rec, "+irPtr+" %out", body)
 	return fn
 }
 
@@ -201,7 +201,6 @@ const pipeSignalMsg = `The "options.signal" property must be an instance of Abor
 // (boxed), prefix its message before the "Received …" part.
 func (e *Emitter) emitArgTypeErrorPtr(prefix string, v Value) (string, error) {
 	e.ensureDynJSONC()
-	e.ensureExceptionHelpers()
 	suffix := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_received(i64 %s)", suffix, v.Ref))
 	msg, err := e.emitStringConcat(Value{Ref: e.internString(prefix), Ty: TypePtr}, Value{Ref: suffix, Ty: TypePtr})
@@ -226,7 +225,6 @@ func (e *Emitter) emitThrowArgType(prefix string, v Value) error {
 // emitRejectedArgType is a promise rejected with emitArgTypeErrorPtr's
 // error.
 func (e *Emitter) emitRejectedArgType(prefix string, v Value) (Value, error) {
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
 	errPtr, err := e.emitArgTypeErrorPtr(prefix, v)
 	if err != nil {
@@ -243,15 +241,11 @@ func (e *Emitter) emitRejectedArgType(prefix string, v Value) (Value, error) {
 
 // emitStreamPipeTo implements `src.pipeTo(dest, options?)`.
 func (e *Emitter) emitStreamPipeTo(srcPtr string, chunkTy Type, args []ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureMicrotasks()
 	args, err := e.dropArgsPast(args, 2, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	if len(args) == 0 || e.omittedArg(args[0]) || isUndefinedLiteral(e, args[0]) {
 		return e.emitRejectedArgType(`The "transform.writable" property must be an instance of WritableStream.`, Value{Ref: fmt.Sprint(nbUndefined), Ty: TypeAny})
@@ -260,6 +254,7 @@ func (e *Emitter) emitStreamPipeTo(srcPtr string, chunkTy Type, args []ast.Expre
 	if err != nil {
 		return Value{}, err
 	}
+	dv = e.streamOfInstance(dv)
 	var opt ast.Expression
 	if len(args) == 2 {
 		opt = args[1]
@@ -385,15 +380,11 @@ func (e *Emitter) emitStreamPipeTo(srcPtr string, chunkTy Type, args []ast.Expre
 // emitStreamPipeThrough implements `src.pipeThrough(transform, options?)` —
 // start the pipe into the transform's writable side, return its readable.
 func (e *Emitter) emitStreamPipeThrough(srcPtr string, chunkTy Type, args []ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureMicrotasks()
 	args, err := e.dropArgsPast(args, 2, pos)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	if len(args) == 0 || e.omittedArg(args[0]) || isUndefinedLiteral(e, args[0]) {
 		// transform.readable of undefined: Node reports it undefined.
@@ -407,6 +398,7 @@ func (e *Emitter) emitStreamPipeThrough(srcPtr string, chunkTy Type, args []ast.
 	if err != nil {
 		return Value{}, err
 	}
+	tv = e.streamOfInstance(tv)
 	var opt ast.Expression
 	if len(args) == 2 {
 		opt = args[1]
@@ -542,11 +534,26 @@ func (e *Emitter) transformSides(ctx string) (string, string) {
 // emitStreamTee implements `src.tee()` — two branch streams over a shared
 // one-read-at-a-time context.
 func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value, error) {
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	b1, b2, err := e.emitStreamTeeBranches(srcPtr, chunkTy, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	// Result: a two-element array of branch streams.
+	arr := e.freshReg()
+	e.heapMallocInto(arr, allocElems, "16")
+	s0 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 0", s0, arr))
+	e.heapStore(irPtr, b1, s0, 8)
+	s1 := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 1", s1, arr))
+	e.heapStore(irPtr, b2, s1, 8)
+	agg1 := e.newArrayHeader(arr, "2")
+	return Value{Ref: agg1, Ty: ArrayOf(ReadableStreamType(chunkTy))}, nil
+}
+
+// emitStreamTeeBranches tees the stream at srcPtr: its two branch streams.
+func (e *Emitter) emitStreamTeeBranches(srcPtr string, chunkTy Type, pos ast.Pos) (string, string, error) {
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	l1 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_lock("+irPtr+" %s)", l1, srcPtr))
@@ -596,17 +603,7 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", started))
 	}
 
-	// Result: a two-element array of branch streams.
-	arr := e.freshReg()
-	e.heapMallocInto(arr, allocElems, "16")
-	s0 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 0", s0, arr))
-	e.heapStore(irPtr, b1, s0, 8)
-	s1 := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = getelementptr "+irPtr+", "+irPtr+" %s, i64 1", s1, arr))
-	e.heapStore(irPtr, b2, s1, 8)
-	agg1 := e.newArrayHeader(arr, "2")
-	return Value{Ref: agg1, Ty: ArrayOf(ReadableStreamType(chunkTy))}, nil
+	return b1, b2, nil
 }
 
 // emitNewTransformStream implements
@@ -615,9 +612,12 @@ func (e *Emitter) emitStreamTee(srcPtr string, chunkTy Type, pos ast.Pos) (Value
 // stream's handle, after the host header word of ty (TDD-00230 P3.3).
 func (e *Emitter) emitTransformCtxAlloc(ty Type) string {
 	base, ctx := e.freshReg(), e.freshReg()
-	e.heapMallocInto(base, allocHost, "80")
+	e.heapMallocInto(base, allocHost, "88")
 	e.heapStore("i64", fmt.Sprint(e.hostHeaderWord(ty)), base, 8)
 	e.emitBodyAddr(ctx, base)
+	bp := e.freshReg() // [[backpressure]]: true from setup
+	e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 9", bp, ctx))
+	e.heapStore("i64", "1", bp, 8)
 	return ctx
 }
 
@@ -637,7 +637,6 @@ func compressionTag(decompress bool) string {
 }
 
 func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (Value, error) {
-	e.ensureMicrotasks()
 	pos := ex.GetPos()
 	inTy, outTy := TypeAny, TypeAny // TransformStream<I = any, O = any>
 	if ex.InType != nil {
@@ -646,10 +645,7 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 	if ex.OutType != nil {
 		outTy = e.annotationType(ex.OutType)
 	}
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 
 	var startExpr, transformExpr, flushExpr ast.Expression
@@ -717,7 +713,16 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 	}
 	storeCtxPtr(0, rs)
 	storeCtxPtr(1, ws)
+	// The readable's pull is the transform's from the start, so its
+	// controller finds its TransformStream inside start() (__kml_ts_of_readable);
+	// a pull runs only once the readable has started.
+	e.storeStreamField(rs, 9, e.buildBuiltinClosure("@__kml_ts_pull", ctx))
+	// The transformer's controller: the readable side's, a
+	// TransformStreamDefaultController (its class, and its members through
+	// any).
 	rsCtrlTy := RSControllerType(outTy)
+	rsCtrlTy.HostTag = "TransformStreamDefaultController"
+	tsStartProm := ""
 	if startExpr != nil {
 		// start(controller), now: the readable side's controller.
 		userClo, err := e.streamCallbackClosure(startExpr, []Type{rsCtrlTy}, "start callback", pos)
@@ -734,16 +739,24 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 			args += fmt.Sprintf(", "+irPtr+" %s", rs)
 			sig += ", " + irPtr
 		}
+		// Both sides start when what it returns settles (a rejection errors
+		// them); a start returning nothing starts them on the next microtask.
+		startProm := ""
 		if userClo.Ty.FuncRetType != nil && userClo.Ty.FuncRetType.IsDynamic() {
 			b := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 (%s) %s(%s)", b, sig, fp, args))
-		} else if callbackReturnsPromise(userClo.Ty) {
-			p := e.freshReg()
-			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" (%s) %s(%s)", p, sig, fp, args))
+			p := e.emitStreamStartResult(b)
 			e.emitMarkPromiseHandled(p)
+			startProm = e.freshReg() // bit 1: already the setup's promise
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 2", startProm, p))
+		} else if callbackReturnsPromise(userClo.Ty) {
+			startProm = e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" (%s) %s(%s)", startProm, sig, fp, args))
+			e.emitMarkPromiseHandled(startProm)
 		} else {
 			e.emitInstr(fmt.Sprintf("call void (%s) %s(%s)", sig, fp, args))
 		}
+		tsStartProm = startProm
 	}
 	if transformExpr != nil {
 		userClo, err := e.streamCallbackClosure(transformExpr, []Type{inTy, rsCtrlTy}, "transform callback", pos)
@@ -805,9 +818,13 @@ func (e *Emitter) emitNewTransformStream(ex *ast.NewTransformStreamExpression) (
 	e.storeWStreamField(ws, 9, e.buildBuiltinClosure("@__kml_ts_sink_write", ctx))
 	e.storeWStreamField(ws, 10, e.buildBuiltinClosure("@__kml_ts_sink_close", ctx))
 	e.storeWStreamField(ws, 11, e.buildBuiltinClosure("@__kml_ts_sink_abort", ctx))
-	e.storeStreamField(rs, 9, e.buildBuiltinClosure("@__kml_ts_pull", ctx))
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", e.buildBuiltinClosure("@__kml_rs_started", rs)))
-	e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
+	if tsStartProm != "" {
+		e.declareFn("__kml_ts_start_promise", "declare void @__kml_ts_start_promise("+irPtr+", "+irPtr+", "+irPtr+")")
+		e.emitInstr(fmt.Sprintf("call void @__kml_ts_start_promise("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)", rs, ws, tsStartProm))
+	} else {
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", e.buildBuiltinClosure("@__kml_rs_started", rs)))
+		e.emitInstr(fmt.Sprintf("call void @__kml_microtask_enqueue("+irPtr+" %s)", e.buildBuiltinClosure("@__kml_ws_started", ws)))
+	}
 
 	i, o := inTy, outTy
 	return Value{Ref: ctx, Ty: Type{IR: irPtr, Host: hostTransformStream, StreamChunk: &i, StreamOut: &o}}, nil
@@ -871,14 +888,8 @@ func (e *Emitter) emitResponseBodyStream(ex *ast.MemberExpression) (Value, error
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureFetchAsync()
-	e.ensureMicrotasks()
-	e.ensureStrHeaderRuntime()
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureFetch()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	chunkTy := TypedArrayType("uint8")
 	fulfill := e.emitStreamFulfillThunk(chunkTy)
@@ -994,11 +1005,7 @@ func (e *Emitter) emitNewCompressionStream(ex *ast.NewCompressionStreamExpressio
 		mode = 1
 	}
 
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensurePromiseAddReaction()
-	e.ensureShapeRuntime()
+	e.ensureUnhandledRejections()
 	e.ensureUnhandledRejections()
 	u8 := TypedArrayType("uint8")
 	fulfill := e.emitStreamFulfillThunk(u8)

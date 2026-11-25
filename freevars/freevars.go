@@ -174,6 +174,12 @@ func ScanExprFV(expr ast.Expression, bound map[string]bool, result map[string]bo
 		innerBound["arguments"] = true // its own, not the enclosing function's
 		ScanParamDefaultsFV(x.Params, innerBound, result)
 		ScanStmtsFV(x.Body.Body, innerBound, result)
+	case *ast.ClassExpression:
+		// Its heritage is read where it is evaluated (a class name drops
+		// out at gatherCaptures' lookup, as `new K` does).
+		if d := x.Decl; d != nil && d.BaseClass != "" && !d.BaseQualified && !bound[d.BaseClass] {
+			result[d.BaseClass] = true
+		}
 	case *ast.NewExpression:
 		// `new K(…)` reads K as a binding when one is in scope (gatherCaptures
 		// keeps only names it can look up, so a class name drops out).
@@ -263,6 +269,12 @@ func ScanStmtsFV(stmts []ast.Statement, bound map[string]bool, result map[string
 			ScanParamDefaultsFV(s.Params, inner, result)
 			if s.Body != nil {
 				ScanStmtsFV(s.Body.Body, inner, result)
+			}
+		case *ast.ClassDeclaration:
+			// `class C extends base {}`: base is read where the class is
+			// evaluated.
+			if s.BaseClass != "" && !s.BaseQualified && !local[s.BaseClass] {
+				result[s.BaseClass] = true
 			}
 		case *ast.VarDeclaration:
 			if s.Init != nil {

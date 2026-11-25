@@ -34,7 +34,6 @@ import (
 // file-to-file imports, so shadowing "just works" for free.
 var virtualBuiltinMarkers = map[string]string{
 	"child_process": "childprocess__kml_builtin",
-	"stream/web":    "streamweb__kml_builtin",
 	"memory":        "Memory__kml_builtin", // capitalized marker, matching Memory.free's existing capitalized surface
 	// TDD-00165: Web-global-backed Node modules. Their primary exports are
 	// spec-identical re-exports of an ambient global (`URL`, `setTimeout`,
@@ -44,7 +43,8 @@ var virtualBuiltinMarkers = map[string]string{
 	// machinery (member validation, `node:` aliasing, not-a-file); they are never
 	// bound (globalReexportModules is handled before the generic marker path in
 	// resolver.go), so they must not collide with a real dispatch marker.
-	"buffer": "buffer__reexport_kml_builtin",
+	"buffer":     "buffer__reexport_kml_builtin",
+	"stream/web": "streamweb__reexport_kml_builtin",
 }
 
 // firstKey returns the lexicographically-smallest key of a set, for a stable,
@@ -70,6 +70,15 @@ func firstKey(set map[string]bool) string {
 // so they keep the standard "no exported member" rejection.
 var globalReexportModules = map[string]map[string]bool{
 	"buffer": {"Buffer": true, "Blob": true, "File": true, "atob": true, "btoa": true},
+	// stream/web's classes are the WHATWG stream globals themselves.
+	"stream/web": {
+		"ReadableStream": true, "WritableStream": true, "TransformStream": true,
+		"CompressionStream": true, "DecompressionStream": true,
+		"ReadableStreamDefaultReader": true, "ReadableStreamDefaultController": true,
+		"TransformStreamDefaultController": true, "WritableStreamDefaultWriter": true,
+		"WritableStreamDefaultController": true, "ByteLengthQueuingStrategy": true,
+		"CountQueuingStrategy": true, "TextEncoderStream": true, "TextDecoderStream": true,
+	},
 }
 
 // moduleFunctionMembers (TDD-00165 Stage 4) are the *module-only* function
@@ -104,10 +113,6 @@ var virtualModuleMembers = map[string]map[string]bool{
 	"memory":        {"free": true},
 	// stream/web re-exports the WHATWG stream classes that already exist as
 	// parse-time constructors — the names bind as identity.
-	"stream/web": {
-		"ReadableStream": true, "WritableStream": true, "TransformStream": true,
-		"CompressionStream": true, "DecompressionStream": true,
-	},
 }
 
 // virtualImportLocal returns the local name a virtual-module import binds

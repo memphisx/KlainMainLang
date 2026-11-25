@@ -24,7 +24,7 @@ Format: [Status page format](README.md#status-page-format). ✅ = the built-in w
 | `JSON` (`stringify`/`parse`, dynamic + typed trees, `toJSON`) | ✅ | | • → [JSON](JSON.md) |
 | `RegExp` (literal + ctor, `exec`/`test`/`match`/`matchAll`/`replace`/`replaceAll`/`split`/`search`) — PCRE2-backed | ✅ | | • → [RegExp](REGEXP.md) |
 | `err.stack`, `Error.captureStackTrace(obj, fn?)`, `Error.stackTraceLimit` | ✅ | • `captureStackTrace`'s `constructorOpt` is matched by the function's name, not its identity<br>• V8's builtin frames (`at Array.map (<anonymous>)`) are not shown<br>• The uncaught-exception report leaves out Node's source excerpt, `Node.js vX` line and the error's own properties (`{ code: 'ENOENT', … }`)<br>• `Error.prepareStackTrace` is not supported | • The program's frames, named and positioned as V8 does: functions, `Object.m`, `Class.method`/`new Class`, `Type.fn [as prop]` for a call through a property, `Object.<anonymous>` for a CommonJS file's top level, and `at async fn` for the async functions awaiting the current one; also printed by `console.log(err)` and the uncaught report. See [ADR-01678](../adr/01/ADR-01678.md) |
-| `Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` | ✅ | • `AggregateError` takes no options (its `.cause` reads `undefined`)<br>• An error made with `{ cause: undefined }` has no `cause` property: `'cause' in err` is false, and `console.log(err)` leaves out its `[cause]: undefined` line | • → [Language constructs](LANGUAGE-CONSTRUCTS.md)<br>• `.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/00/ADR-00846.md)<br>• `console.log(err)` shows the options' cause after the own properties as `[cause]: …`, as util.inspect does ([ADR-01418](../adr/01/ADR-01418.md)) |
+| `Error` + subtypes (`TypeError`/`RangeError`/`SyntaxError`/`EvalError`/`URIError`/`ReferenceError`/`AggregateError`/`DOMException`), `class X extends Error` | ✅ | • `AggregateError` takes no options (its `.cause` reads `undefined`) | • → [Language constructs](LANGUAGE-CONSTRUCTS.md)<br>• `.toString()` / `String(err)` / `` `${err}` `` render `name: message` as in Node. See [ADR-00846](../adr/00/ADR-00846.md)<br>• `console.log(err)` shows the options' cause after the own properties as `[cause]: …`, as util.inspect does ([ADR-01418](../adr/01/ADR-01418.md)) |
 | `Symbol` (`Symbol()`/`for`/`keyFor`, `.description`, `typeof`) — opaque unique values | ✅ | | • → [Type system](TYPE-SYSTEM.md)<br>• A Symbol keeps its identity inside an `any` (hidden type-id word): `typeof` → `"symbol"` and narrows, `===`, `.description`, `Symbol(desc)` rendering, and ToNumber (`Number(x)`, a `TypedArray.set` offset, `+x`/`x * 1` under `-compat=js`) throws the spec's `TypeError` ([ADR-01059](../adr/01/ADR-01059.md)) |
 | `Promise` (`all`/`race`/`allSettled`/`any`/`resolve`/`reject`, executor, `then`/`catch`/`finally`) | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | async functions / `await` / async generators / `for await…of` | ✅ | | • → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
@@ -50,7 +50,7 @@ Each compiles and runs for its core case but carries a limitation, mostly driven
 
 | Built-in | Status | Caveats |
 |---|---|---|
-| `String` | ✅ | • `.normalize()` **missing** (no Unicode tables); `.matchAll()` eager not lazy; `.localeCompare()` ignores `locales` (root order) → [String methods](STRING-METHODS.md) |
+| `String` | ✅ | • `.normalize()`'s tables are Unicode 16.0 (Node's ICU: 17.0); `.matchAll()` eager not lazy; `.localeCompare()` ignores `locales` (root order) → [String methods](STRING-METHODS.md) |
 | `Array` | ✅ | • length-mutating methods propagate to caller only for plain **variable** params (not object-field/array-element receivers) → [Array methods](ARRAY-METHODS.md) |
 | `Object` / dynamic model | ✅ | • prototype machinery, descriptors, accessors exist on **`any`-typed / js-mode dynamic objects only**; static structs are fixed-shape (no dynamic add/delete, no prototype) → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
 | `Reflect` | ✅ | • missing `construct`; the object methods require a dynamic target → [Object, Map & Set](OBJECT-COLLECTIONS.md) |
@@ -58,7 +58,7 @@ Each compiles and runs for its core case but carries a limitation, mostly driven
 | `Number` | ✅ | • `toString(radix)` non-power-of-two fractional trailing-digit divergence; `toPrecision` fixed/exp threshold differs → [Number & Math](NUMBER-MATH.md) |
 | `Function` `.call`/`.apply`/`.bind` | ✅ | • `thisArg` binds only a `this: T` parameter (no method-borrowing of a class method); not on a Node module's functions → [Language constructs](LANGUAGE-CONSTRUCTS.md) |
 | `Symbol` | ✅ | • Of the well-known symbols the runtime honors `Symbol.iterator`, `Symbol.asyncIterator` and `Symbol.toPrimitive`, `Symbol.species` as a class's static getter (extending Array, a typed array or Promise), and `Symbol.toStringTag` as a class getter; an object literal's `toStringTag` member, `hasInstance` and the rest are values only → [Type system](TYPE-SYSTEM.md) |
-| `RegExp` | ✅ | • `u`/`d` flags **missing** (accepted, not implemented) → [RegExp](REGEXP.md) |
+| `RegExp` | ✅ | • Under the `v` flag a property of strings (`\p{RGI_Emoji}`) is a `SyntaxError` → [RegExp](REGEXP.md) |
 | `JSON` | ✅ | • a strict-lane literal mixing two object types is rejected → [JSON](JSON.md) |
 | TypedArrays / `ArrayBuffer` | ✅ | • `resize`/`grow` need `{maxByteLength}` → [Binary data & typed arrays](BINARY-DATA-TYPED-ARRAYS.md) |
 | `TextDecoder` | ✅ | • UTF-8 only; non-UTF-8 labels throw `RangeError` at construction → [Encoding & text](ENCODING-TEXT.md) |
@@ -66,7 +66,7 @@ Each compiles and runs for its core case but carries a limitation, mostly driven
 | `EventTarget` / `Event` / `AbortSignal` | ✅ | • `AbortSignal` isn't wired into `setTimeout` → [Events & cancellation](EVENTS-CANCELLATION.md) |
 | `crypto.subtle` | ✅ | • literal-only algorithm dispatch; ops throw synchronously rather than rejecting; `CryptoKey.algorithm`/`.usages` unimplemented → [Web Crypto](WEB-CRYPTO.md) |
 | `Date` | ✅ | • Setters need a named-variable receiver; no locale/`Intl` formatting; `toString`'s zone name covers the common zones only → [Performance timing](PERFORMANCE-TIMING.md) |
-| `performance` | ✅ | • `eventLoopUtilization`/`nodeTiming` missing → [Performance timing](PERFORMANCE-TIMING.md) |
+| `performance` | ✅ | • `nodeTiming`'s startup milestones read 0 (the time origin) → [Performance timing](PERFORMANCE-TIMING.md) |
 | `eval` | ✅ | • eval of a string computed at run time **missing** (needs an embedded engine); compile-time-constant strings, statements included, work → [Global functions](GLOBAL-FUNCTIONS.md) |
 | `globalThis` | ✅ | |
 
@@ -76,8 +76,8 @@ Standard built-ins that fit the model and would add value, not yet built.
 
 | Built-in | Status | Notes |
 |---|---|---|
-| `String.prototype.normalize()` | ❌ | • Deliberately deferred (needs NFC/NFD/NFKC/NFKD tables) → [String methods](STRING-METHODS.md) |
-| `RegExp` `u`/`v`/`d` flag semantics | ❌ | • Accepted but not implemented → [RegExp](REGEXP.md) |
+| `String.prototype.normalize()` | ✅ | |
+| `RegExp` `u`/`v`/`d` flag semantics | ✅ | |
 | `Iterator` / `AsyncIterator` helpers (`Iterator.prototype.map`/`filter`/`take`/`drop`/…) | ✅ | • `map`, `filter`, `take`, `drop`, `flatMap` (lazy, closing the source on `return()`), `reduce`, `toArray`, `forEach`, `some`, `every` and `find` on generators and the Array, Map and Set iterators, also through `any`, written in TypeScript ([ADR-01373](../adr/01/ADR-01373.md)); Node has no `AsyncIterator` helpers |
 | `Reflect.construct` | ✅ | • Through the run-time constructor dispatch ([ADR-01333](../adr/01/ADR-01333.md)) |
 | Dynamic `eval` (arbitrary strings) | ❌ | • The opt-in embedded JS engine is not started (only the static-subset eval works) → [Global functions](GLOBAL-FUNCTIONS.md) |

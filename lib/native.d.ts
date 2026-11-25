@@ -6,6 +6,10 @@
 // `__kml_native`.
 
 interface KmlNative {
+    // String case mapping for a language: 0 the default, 1 Turkish/Azeri,
+    // 2 Lithuanian (casemap.c); upper 1 maps to upper case.
+    /** @lower __kml_native_locale_case @link casemap */
+    localeCase(s: string, lang: number, upper: number): string;
     // One libuv fs request (klainfs.c): the op (lib/node/fs.ts's FsOp), its
     // paths, its numbers and its byte region. The synchronous form returns
     // the result or the negated errno; the other calls back with (errno or
@@ -647,6 +651,12 @@ interface KmlNative {
     perfNow(): number;
     /** @lower __kml_native_perf_time_origin */
     perfTimeOrigin(): number;
+    // performance.nodeTiming: when the event loop started (-1 before) and
+    // the ms it has spent idle, waiting for events.
+    /** @lower __kml_native_loop_start */
+    loopStart(): number;
+    /** @lower __kml_native_loop_idle */
+    loopIdle(): number;
     // process (Node's process binding): a failing call is -errno.
     /** @lower __kml_native_process_cwd */
     processCwd(): string;
@@ -671,6 +681,11 @@ interface KmlNative {
     // 0 pid, 1 ppid, 2 uid, 3 euid, 4 gid, 5 egid.
     /** @lower __kml_native_process_id */
     processId(which: number): number;
+    // -1: the supplementary group count (reads them); i: the i-th group id.
+    /** @lower __kml_native_process_groups */
+    processGroups(i: number): number;
+    /** @lower __kml_native_process_rusage */
+    processRusage(i: number): number;
     // The argument vector, Node-shaped ([execPath, execPath, …args]), and
     // the operating system's argv[0].
     /** @lower __kml_native_process_argc */
@@ -866,6 +881,8 @@ interface KmlNative {
     h2Push(id: number, stream: number, headers: string): number;
     /** @lower __kml_native_h2_write @link http2 */
     h2Write(id: number, stream: number, data: Uint8Array, offset: number, length: number, end: number): number;
+    /** @lower __kml_native_h2_consume @link http2 */
+    h2Consume(id: number, stream: number, n: number): number;
     /** @lower __kml_native_h2_queued @link http2 */
     h2Queued(id: number, stream: number): number;
     /** @lower __kml_native_h2_rst @link http2 */

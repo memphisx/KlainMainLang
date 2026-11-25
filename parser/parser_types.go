@@ -1004,6 +1004,8 @@ func (p *Parser) parseInterfaceDecl() (*ast.InterfaceDeclaration, error) {
 			switch a.Tag {
 			case "lowerType":
 				decl.LowerType = a.Value
+			case "jsCall":
+				decl.JSCall = a.Value
 			case "lower":
 				decl.Lower = a.Value
 				for _, m := range members {
@@ -1063,6 +1065,8 @@ func (p *Parser) parseTypeMembers() ([]ast.TypeMember, error) {
 					ms.Link = append(ms.Link, a.Value)
 				case "intrinsic":
 					ms.Intrinsic = a.Value
+				case "platform":
+					ms.Platform = a.Value
 				}
 			}
 		}
@@ -1071,6 +1075,14 @@ func (p *Parser) parseTypeMembers() ([]ast.TypeMember, error) {
 			for _, a := range doc.Annotations {
 				if a.Tag == "intrinsic" {
 					cs.Intrinsic = a.Value
+				}
+			}
+		}
+		if ns, ok := m.(*ast.ConstructSignature); ok && doc != nil {
+			// A builtin constructor emitted inline (`new Promise(…)`).
+			for _, a := range doc.Annotations {
+				if a.Tag == "intrinsic" {
+					ns.Intrinsic = a.Value
 				}
 			}
 		}

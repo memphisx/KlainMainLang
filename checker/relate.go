@@ -336,10 +336,10 @@ func (c *Checker) sharesDiscriminant(s, t *Type) bool {
 			continue
 		}
 		for _, mp := range m.Props {
-			if mp.Type == nil || s.Prop(mp.Name) == nil {
+			if mp.Type() == nil || s.Prop(mp.Name) == nil {
 				continue
 			}
-			if mp.Type.Flags&(Literal|Boolean|Null|Undefined) != 0 || mp.Type.Flags&Union != 0 && everyMember(mp.Type, Literal|Boolean|Null|Undefined) {
+			if mp.Type().Flags&(Literal|Boolean|Null|Undefined) != 0 || mp.Type().Flags&Union != 0 && everyMember(mp.Type(), Literal|Boolean|Null|Undefined) {
 				return true
 			}
 		}
@@ -359,7 +359,7 @@ func (c *Checker) nonDiscriminantRulesOut(s, t *Type, rel relation, depth int) b
 			continue
 		}
 		for _, mp := range m.Props {
-			if mp.Type != nil && (mp.Type.Flags&(Literal|Boolean|Null|Undefined) != 0 || mp.Type.Flags&Union != 0 && everyMember(mp.Type, Literal|Boolean|Null|Undefined)) {
+			if mp.Type() != nil && (mp.Type().Flags&(Literal|Boolean|Null|Undefined) != 0 || mp.Type().Flags&Union != 0 && everyMember(mp.Type(), Literal|Boolean|Null|Undefined)) {
 				disc[mp.Name] = true
 			}
 		}
@@ -370,16 +370,16 @@ func (c *Checker) nonDiscriminantRulesOut(s, t *Type, rel relation, depth int) b
 		}
 		out := false
 		for _, mp := range m.Props {
-			if mp.Type == nil {
+			if mp.Type() == nil {
 				continue
 			}
 			if disc[mp.Name] {
 				// A discriminant none of whose source values the member
 				// takes: no split of s reaches the member.
-				if sp := s.Prop(mp.Name); sp != nil && sp.Type != nil {
+				if sp := s.Prop(mp.Name); sp != nil && sp.Type() != nil {
 					overlap := false
-					for _, v := range c.discriminantValues(sp.Type) {
-						if c.relate(v, mp.Type, rel, depth+1) != no {
+					for _, v := range c.discriminantValues(sp.Type()) {
+						if c.relate(v, mp.Type(), rel, depth+1) != no {
 							overlap = true
 							break
 						}
@@ -399,7 +399,7 @@ func (c *Checker) nonDiscriminantRulesOut(s, t *Type, rel relation, depth int) b
 				}
 				continue
 			}
-			if sp.Type != nil && c.relate(sp.Type, mp.Type, rel, depth+1) == no {
+			if sp.Type() != nil && c.relate(sp.Type(), mp.Type(), rel, depth+1) == no {
 				out = true
 				break
 			}
@@ -698,7 +698,7 @@ func (c *Checker) relateObjects(s, t *Type, rel relation, depth int) ternary {
 								el = s.Head[i]
 							}
 							if el != nil {
-								if c.relate(el, tp.Type, rel, depth+1) == no {
+								if c.relate(el, tp.Type(), rel, depth+1) == no {
 									return no
 								}
 								continue
@@ -804,7 +804,7 @@ func (c *Checker) indexesFit(s, t *Type, rel relation, depth int) ternary {
 			if kind == "number" && !numericName(p.Name) {
 				continue
 			}
-			pt := p.Type
+			pt := p.Type()
 			if p.Optional {
 				// tsc's getNonMissingTypeOfSymbol: without
 				// exactOptionalPropertyTypes the missing type is undefined,
@@ -843,7 +843,7 @@ func (c *Checker) propsFit(s, t *Type, rel relation, depth int) ternary {
 		sp := s.Prop(tp.Name)
 		if sp == nil && (len(s.Calls) > 0 || len(s.Constructs) > 0) {
 			if ft := c.functionMember(tp.Name); ft != nil {
-				sp = &Property{Name: tp.Name, Type: ft} // a callable object has Function's
+				sp = &Property{Name: tp.Name, ty: ft} // a callable object has Function's
 			}
 		}
 		if sp == nil {
@@ -866,7 +866,7 @@ func (c *Checker) propsFit(s, t *Type, rel relation, depth int) ternary {
 		}
 		prel := rel
 		prel.bivariant = methodDecl(tp)
-		r := c.relate(sp.Type, tp.Type, prel, depth+1)
+		r := c.relate(sp.Type(), tp.Type(), prel, depth+1)
 		if r == no {
 			return no
 		}

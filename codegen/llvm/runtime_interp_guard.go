@@ -1,8 +1,9 @@
 package llvm
 
-// ensureNodeInterpFlagGuard declares @__kml_reject_node_interp_flags (hooks.c), a startup
-// guard that a compiled binary runs before its program body when the program
-// reads process.execPath (see ensureExecPath).
+// The Node-interpreter guard: @__kml_reject_node_interp_flags (hooks.c), a
+// startup check every compiled binary runs before its program body, armed
+// when the program can spawn a process (armInterpGuard): only such a
+// program can re-run itself.
 //
 // Why this exists: `process.execPath` in a compiled program is the compiled
 // binary itself, not a separate Node runtime. A common Node-test idiom re-runs
@@ -23,10 +24,15 @@ package llvm
 //
 // The flag set is limited to the flags that unambiguously request interpreter /
 // eval mode, to minimize collision with a compiled CLI tool's own arguments.
-func (e *Emitter) ensureNodeInterpFlagGuard() {
-	if e.usedNodeInterpGuard {
-		return
+
+// armInterpGuard arms the guard from the hooks constructor: the program
+// spawns processes, so it may spawn itself.
+func (e *Emitter) armInterpGuard() {
+	const arm = "  store i8 1, " + irPtr + " @__kml_interp_guard_armed, align 1\n"
+	for _, h := range e.hookInits {
+		if h == arm {
+			return
+		}
 	}
-	e.usedNodeInterpGuard = true
-	// hooks.c defines it.
+	e.addHookInit(arm)
 }

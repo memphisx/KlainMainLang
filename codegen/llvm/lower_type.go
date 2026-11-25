@@ -434,10 +434,30 @@ func (e *Emitter) hostBaseOf(cd *ast.ClassDeclaration) *Type {
 		t := ArrayOf(el)
 		return &t
 	}
+	if streamBaseNames[cd.BaseClass] {
+		// A stream: its body the stream's own pointer (hostStreamBase).
+		ann := nameAnnotation(cd.BaseClass)
+		if len(cd.BaseTypeArgs) > 0 {
+			ann = genericAnnotation(cd.BaseClass, cd.BaseTypeArgs)
+		}
+		if t := e.annotationType(ann); hostStreamBase(t) {
+			if e.streamBaseArgs == nil {
+				e.streamBaseArgs = map[string][]ast.TypeNode{}
+			}
+			e.streamBaseArgs[cd.Name] = cd.BaseTypeArgs
+			return &t
+		}
+	}
 	layout := declaredLowerType(e.lookupBuiltinType(cd.BaseClass))
 	var ta ast.TypeNode
 	if n, ok := collectionTypeArity[layout]; ok {
 		ta = genericAnnotation(cd.BaseClass, baseArgs(cd, n))
+	}
+	if hostRecordLayouts[layout] {
+		// A host record (Response, Request, XMLHttpRequest): headered, its
+		// value its body after the header word.
+		t := lowerLayouts[layout]()
+		return &t
 	}
 	switch layout {
 	case "regexp":
@@ -462,6 +482,9 @@ func (e *Emitter) hostBaseOf(cd *ast.ClassDeclaration) *Type {
 	return &t
 }
 
+// hostRecordLayouts are the host records a class may extend (hostBaseOf).
+var hostRecordLayouts = map[string]bool{"response": true, "request": true, "xmlhttprequest": true}
+
 // hostBodyPrefix names the hidden fields that hold a host base's body
 // inside a class instance, right after its tag word.
 const hostBodyPrefix = "__kml_hb"
@@ -470,7 +493,9 @@ const hostBodyPrefix = "__kml_hb"
 // (collections_engine.h), or a RegExp's struct.
 func hostBodySize(host Type) int {
 	switch {
-	case host.IsRegExp():
+	case hostStreamBase(host):
+		return 1 // the stream's pointer
+	case host.IsRegExp() || hostPrefixedObject(host):
 		return int(host.StructSize() / 8)
 	case host.IsPromise():
 		return promiseStructSize / 8
@@ -520,12 +545,10 @@ func (e *Emitter) emitHostBody(instance string, host Type) string {
 			return body
 		}
 	}
-	if host.IsRegExp() || host.IsDate() || host.IsArray() || host.Weak || host.IsPrimWrapper() || host.IsArrayBuffer() {
-		return body // (a weak table's empty cell list is the zeroed word)
+	if host.IsRegExp() || host.IsDate() || host.IsArray() || host.Weak || host.IsPrimWrapper() || host.IsArrayBuffer() || hostPrefixedObject(host) || hostStreamBase(host) {
+		return body // (a weak table's empty cell list is the zeroed word; a record's is built by its construction)
 	}
 	if host.IsPromise() {
-		e.ensureExceptionHelpers()
-		e.ensureMicrotasks()
 		e.ensureUnhandledRejections()
 		e.declareFn("__kml_promise_init_at", "declare void @__kml_promise_init_at("+irPtr+")")
 		e.emitInstr(fmt.Sprintf("call void @__kml_promise_init_at("+irPtr+" %s)", body))
@@ -606,8 +629,6 @@ func (e *Emitter) emitHostRegExpBody(body string, args []ast.Expression, pos ast
 // emitHostBodySeed adds a Map's entries or a Set's elements, from an array
 // expression, to the host body at body.
 func (e *Emitter) emitHostBodySeed(body string, host Type, src ast.Expression, pos ast.Pos) error {
-	suffix, _ := mapRuntime(*host.MapKey)
-	e.ensureMapFamily(suffix)
 	if id, ok := src.(*ast.Identifier); ok {
 		if sym, found := e.lookup(id.Name); found && sym.Ty.IsArray() {
 			// An absent optional array (its null header) seeds nothing, as
@@ -654,6 +675,12 @@ func (e *Emitter) emitHostBodySeedFrom(body string, host Type, src ast.Expressio
 func (e *Emitter) bindHostBody(instance Value, host Type, pos ast.Pos) *ast.Identifier {
 	body := e.freshReg()
 	e.emitBodyAddr(body, instance.Ref)
+	if hostStreamBase(host) {
+		// A stream's body holds the stream itself.
+		sp := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", sp, body))
+		body = sp
+	}
 	slot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", body, slot))
@@ -751,6 +778,11 @@ func (e *Emitter) hostArrayReceiver(obj ast.Expression) (ast.Expression, bool, e
 // body, then its own fields.
 func (e *Emitter) emitInspectHostClass(v Value, info ClassInfo, depth int) (Value, error) {
 	host := *info.HostBase
+	if hostStreamBase(host) {
+		// A stream's own inspection (Node's custom one): the stream its
+		// body holds, neither the class's name nor its fields.
+		return e.emitInspectField(e.convert(v, host), depth)
+	}
 	if host.IsArrayBuffer() {
 		body := e.freshReg()
 		e.emitBodyAddr(body, v.Ref)
@@ -1062,14 +1094,23 @@ func hostTagName(host Type) string {
 		return "ArrayBuffer"
 	case host.IsPromise():
 		return "Promise"
+	case host.IsReadableStream():
+		return "ReadableStream"
+	case host.IsWritableStream():
+		return "WritableStream"
+	case host.IsTransformStream():
+		return "TransformStream"
 	case host.Weak && host.IsMap():
 		return "WeakMap"
 	case host.Weak:
 		return "WeakSet"
 	case host.IsMap():
 		return "Map"
+	case host.IsSet():
+		return "Set"
 	}
-	return "Set"
+	// A host record (Response, Request, XMLHttpRequest).
+	return hostClassName(host)
 }
 
 // emitInspectRegExpClass renders an instance of a class extending RegExp or
@@ -3053,4 +3094,84 @@ func (e *Emitter) emitSpeciesNew(ne *ast.NewExpression) (Value, error) {
 		v = e.convert(v, info.Ty)
 	}
 	return v, nil
+}
+
+// emitHostRecordBody sets the body of an instance of a class extending a
+// host record (Response) from its construction's arguments: the words of
+// the record `new <name>(args)` makes (its value is its body, after its
+// header word).
+func (e *Emitter) emitHostRecordBody(body, name string, host Type, args []ast.Expression, pos ast.Pos) error {
+	rec, err := e.emitExpr(builtinNew(ast.NewNewExpression(name, args, pos)))
+	if err != nil {
+		return err
+	}
+	if rec.Ty.IsDynamic() {
+		rec = e.convert(rec, host)
+	}
+	for i := 0; i < hostBodySize(host); i++ {
+		src, dst, w := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", src, rec.Ref, i))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, src))
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 %d", dst, body, i))
+		e.heapStore("i64", w, dst, 8)
+	}
+	return nil
+}
+
+// streamBaseNames are the stream classes a class may extend.
+var streamBaseNames = map[string]bool{"ReadableStream": true, "WritableStream": true, "TransformStream": true, "CompressionStream": true, "DecompressionStream": true}
+
+// hostStreamBase reports a stream as a class's host base. A stream is not
+// copied into the instance (its controller points at the stream itself):
+// the body's one word holds it.
+func hostStreamBase(t Type) bool {
+	return t.IsReadableStream() || t.IsWritableStream() || t.IsTransformStream()
+}
+
+// emitHostStreamBody constructs the stream a class extending stream class
+// name makes from its construction's arguments, its pointer stored in the
+// body.
+func (e *Emitter) emitHostStreamBody(body, className, name string, host Type, args []ast.Expression, pos ast.Pos) error {
+	ne := ast.NewNewExpression(name, args, pos)
+	ne.TypeArgs = e.streamBaseArgs[className] // the class's `extends ReadableStream<T>`
+	sv, err := e.emitExpr(builtinNew(ne))
+	if err != nil {
+		return err
+	}
+	if sv.Ty.IsDynamic() {
+		sv = e.convert(sv, host)
+	}
+	e.heapStore(irPtr, sv.Ref, body, 8)
+	return nil
+}
+
+// streamOfInstance is the stream v's body holds when v is an instance of a
+// class extending a stream class, v itself otherwise.
+func (e *Emitter) streamOfInstance(v Value) Value {
+	if !v.Ty.IsClass() || v.Ty.IsDynamic() || v.Ty.Nullable() {
+		return v
+	}
+	if info, ok := e.classes[v.Ty.ClassName]; ok && info.HostBase != nil && hostStreamBase(*info.HostBase) {
+		return e.convert(v, *info.HostBase)
+	}
+	return v
+}
+
+// streamArgExpr is arg and its type, or, when arg is an instance of a class
+// extending a stream class, a name bound to the stream its body holds and
+// that stream's type (arg evaluated once, here).
+func (e *Emitter) streamArgExpr(arg ast.Expression) (ast.Expression, Type, error) {
+	t := e.typeOfExpr(arg)
+	if !t.IsClass() || t.IsDynamic() || t.Nullable() {
+		return arg, t, nil
+	}
+	info, ok := e.classes[t.ClassName]
+	if !ok || info.HostBase == nil || !hostStreamBase(*info.HostBase) {
+		return arg, t, nil
+	}
+	v, err := e.emitExpr(arg)
+	if err != nil {
+		return nil, Type{}, err
+	}
+	return e.bindHostBody(v, *info.HostBase, arg.GetPos()), *info.HostBase, nil
 }

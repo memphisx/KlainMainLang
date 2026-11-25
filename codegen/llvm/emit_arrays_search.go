@@ -9,12 +9,19 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, internalAt(pos, "indexOf arity %d", len(args))
 	}
+	sparse := e.sparseSearch(mem.Object, args[0])
+	e.noDensify = sparse
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
+	e.noDensify = false
 	if err != nil {
 		return Value{}, err
 	}
 	rawHdr := hdr
 	hdr = e.hofHolesHeader(mem.Object, hdr)
+	sparseHdr := ""
+	if sparse {
+		sparseHdr = hdr
+	}
 	needleVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -42,6 +49,9 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	matchL := e.freshLabel("idxof.match")
 	incL := e.freshLabel("idxof.inc")
 	doneL := e.freshLabel("idxof.done")
+	if err := e.emitSparseSearch(sparseHdr, lenReg, elemTy, needleVal, startVal, 1, false, "", resultAlloca, false, doneL); err != nil {
+		return Value{}, err
+	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
@@ -81,6 +91,29 @@ func (e *Emitter) emitArrayIndexOf(mem *ast.MemberExpression, args []ast.Express
 	return e.countToNumber(Value{Ref: result, Ty: TypeI64}), nil
 }
 
+// searchIndexArg is a search's fromIndex as an i64: a number converts as
+// it does elsewhere; any other value (a string, boolean, null, object, a
+// box) is ToIntegerOrInfinity of its ToNumber, NaN 0 and the infinities
+// clamped past every index.
+func (e *Emitter) searchIndexArg(v Value, pos ast.Pos, what string) (Value, error) {
+	if isNumberTy(v.Ty) && !v.Ty.IsDynamic() {
+		return e.convertChecked(v, TypeI64, pos, what+" fromIndex")
+	}
+	d, err := e.emitToNumber(v)
+	if err != nil {
+		return Value{}, err
+	}
+	isNaN, lo, hi, c1, r := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = fcmp uno double %s, 0.0", isNaN, d.Ref))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, double 0.0, double %s", c1, isNaN, d.Ref))
+	e.emitInstr(fmt.Sprintf("%s = call double @llvm.maxnum.f64(double %s, double -9.0e15)", lo, c1))
+	e.emitInstr(fmt.Sprintf("%s = call double @llvm.minnum.f64(double %s, double 9.0e15)", hi, lo))
+	e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i64", r, hi))
+	e.declareFn("llvm.maxnum.f64", "declare double @llvm.maxnum.f64(double, double)")
+	e.declareFn("llvm.minnum.f64", "declare double @llvm.minnum.f64(double, double)")
+	return Value{Ref: r, Ty: TypeI64}, nil
+}
+
 // emitSearchFrom is a forward search's start index from its fromIndex
 // argument: ToIntegerOrInfinity (undefined is 0), a negative index counting
 // from the end, clamped to 0.
@@ -89,7 +122,7 @@ func (e *Emitter) emitSearchFrom(arg ast.Expression, lenReg, what string) (strin
 	if err != nil {
 		return "", err
 	}
-	fromIdx, err := e.convertChecked(fromVal, TypeI64, arg.GetPos(), what+" fromIndex")
+	fromIdx, err := e.searchIndexArg(fromVal, arg.GetPos(), what)
 	if err != nil {
 		return "", err
 	}
@@ -111,12 +144,19 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, internalAt(pos, "lastIndexOf arity %d", len(args))
 	}
+	sparse := e.sparseSearch(mem.Object, args[0])
+	e.noDensify = sparse
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
+	e.noDensify = false
 	if err != nil {
 		return Value{}, err
 	}
 	rawHdr := hdr
 	hdr = e.hofHolesHeader(mem.Object, hdr)
+	sparseHdr := ""
+	if sparse {
+		sparseHdr = hdr
+	}
 	needleVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -137,7 +177,7 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 		if ferr != nil {
 			return Value{}, ferr
 		}
-		fromIdx, ferr := e.convertChecked(fromVal, TypeI64, args[1].GetPos(), "lastIndexOf fromIndex")
+		fromIdx, ferr := e.searchIndexArg(fromVal, args[1].GetPos(), "lastIndexOf")
 		if ferr != nil {
 			return Value{}, ferr
 		}
@@ -157,6 +197,9 @@ func (e *Emitter) emitArrayLastIndexOf(mem *ast.MemberExpression, args []ast.Exp
 	matchL := e.freshLabel("lidxof.match")
 	decL := e.freshLabel("lidxof.dec")
 	doneL := e.freshLabel("lidxof.done")
+	if err := e.emitSparseSearch(sparseHdr, lenReg, elemTy, needleVal, startIdx, -1, false, "", resultAlloca, false, doneL); err != nil {
+		return Value{}, err
+	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)
@@ -200,12 +243,19 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	if len(args) < 1 || len(args) > 2 {
 		return Value{}, internalAt(pos, "includes arity %d", len(args))
 	}
+	sparse := e.sparseSearch(mem.Object, args[0])
+	e.noDensify = sparse
 	hdr, ptrReg, lenReg, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
+	e.noDensify = false
 	if err != nil {
 		return Value{}, err
 	}
 	rawHdr := hdr
 	hdr = e.hofHolesHeader(mem.Object, hdr)
+	sparseHdr := ""
+	if sparse {
+		sparseHdr = hdr
+	}
 	needleVal, err := e.emitExpr(args[0])
 	if err != nil {
 		return Value{}, err
@@ -253,6 +303,9 @@ func (e *Emitter) emitArrayIncludes(mem *ast.MemberExpression, args []ast.Expres
 	matchL := e.freshLabel("inc.match")
 	incL := e.freshLabel("inc.inc")
 	doneL := e.freshLabel("inc.done")
+	if err := e.emitSparseSearch(sparseHdr, lenReg, elemTy, needleVal, startVal, 1, true, needleUndef, foundAlloca, true, doneL); err != nil {
+		return Value{}, err
+	}
 
 	e.emitTerminator(fmt.Sprintf("br label %%%s", condL))
 	e.emitLabel(condL)

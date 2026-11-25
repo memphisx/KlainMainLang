@@ -348,6 +348,27 @@ func (e *Emitter) promiseFinallyReactions(r *promiseReactions, args []ast.Expres
 		if v, err = e.emitExpr(ast.NewArrowFunction(nil, nil, call, nil, pos)); err != nil {
 			return err
 		}
+	} else if v.Ty.IsDynamic() {
+		// An onFinally known only as `any` (`p.finally(globalThis.done)`):
+		// when callable at run time, a closure calling it with no
+		// arguments; otherwise none, the runner's pass-through, as
+		// then(onFinally, onFinally) is for a non-callable one (no extra
+		// ticks).
+		f := e.bindValue(v, pos)
+		test, err := e.emitExpr(ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, f, pos), ast.NewStringLiteral("function", pos), pos))
+		if err != nil {
+			return err
+		}
+		c := e.toBool(test)
+		clos, err := e.emitExpr(ast.NewArrowFunction(nil, nil, ast.NewCallExpression(f, nil, pos), nil, pos))
+		if err != nil {
+			return err
+		}
+		sel := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, %s %s, %s null", sel, c.Ref, irPtr, clos.Ref, irPtr))
+		r.onFin = sel
+		r.retTy = innerTy
+		return nil
 	}
 	r.onFin = v.Ref
 	r.retTy = innerTy // finally passes the source value through unchanged
@@ -415,10 +436,7 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 	}
 	// Only the promise + microtask machinery is needed here; the fiber scheduler
 	// (if the program has may-suspend fns) is pulled in by those fns themselves.
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
 
 	// Evaluate callbacks into closure pointers ("null" when absent) and decide the
 	// returned promise Q's value type U (the type Q settles to).
@@ -481,17 +499,11 @@ func (e *Emitter) emitPromiseThenInto(objExpr ast.Expression, kind string, args 
 		adopt = 1
 		if !retTy.PromiseTask && retTy.PromiseType != nil && retTy.PromiseType.IsResponse() && !retTy.PromiseResolved {
 			adopt = 2
-			e.ensureFetchAsync()
-			e.ensureMicrotasks()
-			e.ensureExceptionHelpers()
+			e.ensureFetch()
 			e.ensureUnhandledRejections()
-			e.ensureNanBox()
-			e.ensureTaskRuntime()
+			e.ensureUnhandledRejections()
 		}
-		e.ensureMicrotasks()
-		e.ensureExceptionHelpers()
 		e.ensureUnhandledRejections()
-		e.ensureNanBox()
 	}
 
 	// Q: the returned promise, allocated *pending* so a chained `.then` attaches a
@@ -602,12 +614,9 @@ func (e *Emitter) emitAttachPromiseReaction(prom, clo string) {
 func (e *Emitter) emitFetchHandleToPendingPromise(slotRef string) Value {
 	// The bridge runs as a coroutine that parks on the fetch (TDD-00223 §3) —
 	// see runtime_promise_adopt.go.
-	e.ensureFetchAsync()
-	e.ensureMicrotasks()
-	e.ensureExceptionHelpers()
+	e.ensureFetch()
 	e.ensureUnhandledRejections()
-	e.ensureNanBox()
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	prom := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_slot_to_promise("+irPtr+" %s)", prom, slotRef))
 	rt := PromiseOf(ResponseType())
@@ -770,16 +779,10 @@ func (e *Emitter) emitThenRunner(argTy, retTy Type, adopt int, finAwait bool) st
 	// finally's result settles two microtasks after its callback, as Node's
 	// does: its thenFinally resolves Q with PromiseResolve(onFinally()).then(
 	// () => value) — a reaction, then the adoption of that promise.
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
 	e.ensureUnhandledRejections()
 	finCall := "  call void (" + irPtr + ") %finfp(" + irPtr + " %finep)\n"
 	if finAwait {
-		e.ensureMicrotasks()
-		e.ensureExceptionHelpers()
 		e.ensureUnhandledRejections()
-		e.ensureNanBox()
 		finCall = "  %finr = call " + irPtr + " (" + irPtr + ") %finfp(" + irPtr + " %finep)\n" +
 			"  call void @__kml_promise_finally_wait(" + irPtr + " %finr, " + irPtr + " %q, i64 %res, i64 %v0, i64 %v1)\n  ret void\n"
 	}

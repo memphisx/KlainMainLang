@@ -67,3 +67,40 @@ class Bad { constructor(ex) { ex(1, 2); } }
 try { Promise.any.call(Bad, []); } catch (e) { console.log(e.constructor.name, e.message); }
 `)
 }
+
+// Promise.resolve/reject/withResolvers and the combinators called with
+// another `this` (through `as any` too): a non-object throws V8's
+// TypeError, a subclass gets its own promise, and PromiseResolve returns
+// a promise of that constructor itself — against Node.
+func TestE2EPromiseStaticsCallOn(t *testing.T) {
+	assertSameAsNode(t, `
+class P2 extends Promise<number> {}
+for (const f of [() => (Promise.withResolvers as any).call(86), () => (Promise.resolve as any).call(86, 1), () => (Promise.reject as any).call(null, 1), () => (Promise.all as any).call(86, [])]) {
+  try { f(); console.log("no throw"); } catch (e) { console.log((e as Error).name, (e as Error).message); }
+}
+const r: any = (Promise.resolve as any).call(P2, 4);
+const C: any = P2;
+console.log(r instanceof Promise, new C((a: any) => a(1)) instanceof Promise, new P2((a) => a(1)) as any instanceof Promise);
+console.log(r instanceof P2, (Promise.resolve as any).call(P2, r) === r, Promise.resolve.call(Promise, r) === r);
+const w: any = (Promise.withResolvers as any).call(P2);
+w.resolve(7);
+const j: any = (Promise.reject as any).call(P2, new Error("no"));
+async function main() {
+  console.log(w.promise instanceof P2, await w.promise, await r);
+  try { await j; } catch (e) { console.log(j instanceof P2, (e as Error).message); }
+}
+main();
+`)
+}
+
+// The strict-lane form, with no `as any`, in a program naming no
+// combinator.
+func TestE2EPromiseWithResolversCallOnSubclass(t *testing.T) {
+	assertSameAsNode(t, `
+class MyPromise<T> extends Promise<T> {}
+const w = Promise.withResolvers.call(MyPromise);
+console.log(w.promise instanceof MyPromise);
+w.resolve(5);
+w.promise.then((v) => console.log(v));
+`)
+}

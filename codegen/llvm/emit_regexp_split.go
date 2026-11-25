@@ -38,7 +38,6 @@ func (e *Emitter) emitRegexMatchAt(handleReg string, strVal Value, startOffsetRe
 // emitRegexMatchAtData is emitRegexMatchAt keeping the match data, whose
 // ovector holds the capture groups; the caller frees it.
 func (e *Emitter) emitRegexMatchAtData(handleReg string, strVal Value, startOffsetReg string) (matchedReg, startReg, endReg, matchDataReg string) {
-	e.ensureRegexMatch()
 	matchDataReg = e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @pcre2_match_data_create_from_pattern_8("+irPtr+" %s, "+irPtr+" null)", matchDataReg, handleReg))
 	rcReg := e.freshReg()
@@ -182,7 +181,6 @@ func (e *Emitter) emitRegexSplitScan(handleReg string, strVal Value, subjectLenR
 	// match and truncate the scan early), a single byte in the raw-byte modes.
 	zeroAdvWidth := "1"
 	if e.regexModeOpts().utfMatching {
-		e.ensureStrHeaderRuntime()
 		w := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_regex_utf8_width("+irPtr+" %s, i64 %s)", w, strVal.Ref, mStart))
 		zeroAdvWidth = w

@@ -14,7 +14,7 @@ import "fmt"
 //	            Low-bit tagging keeps Boehm happy: a tagged pointer is an
 //	            *interior* pointer, which the conservative scan treats as a
 //	            live reference (classic high-bit NaN-tagging would hide the
-//	            pointer from the GC entirely — the load-bearing decision,
+//	            pointer from the GC entirely — the decision the design rests on,
 //	            see the TDD).
 //
 //	kind 0 string · 1 static object · 2 array header · 3 funcRef ·
@@ -37,16 +37,6 @@ const (
 	// they read NaN. Mirrored as KML_UNDEF_F64 in dtoasrc/dtoa.c.
 	undefF64 = int64(-3377699720527871)
 )
-
-func (e *Emitter) ensureNanBox() {
-	if e.usedNanBox {
-		return
-	}
-	e.usedNanBox = true
-	e.buildNbPack()
-	e.buildNbTag()
-	e.buildNbPay()
-}
 
 // nbKindTags are the pointer kinds' logical tags, in kind order 1..7
 // (kind 0, a string, has no tag bits).

@@ -37,6 +37,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -105,6 +106,13 @@ type reaper struct {
 
 func newReaper(absWorkDir string, memCapMB int) *reaper {
 	interval := 3 * time.Second
+	if runtime.GOOS == "darwin" {
+		// The reaper is macOS's only bound on a test program (no
+		// RLIMIT_DATA there, datalimit_other.go): one that never frees
+		// grows about 1 GB a second, so a 3-second sweep let it pass its
+		// ceiling by gigabytes before the kill.
+		interval = 250 * time.Millisecond
+	}
 	if ms := os.Getenv("KML_REAPER_INTERVAL_MS"); ms != "" {
 		if n, err := strconv.Atoi(ms); err == nil && n > 0 {
 			interval = time.Duration(n) * time.Millisecond

@@ -2818,3 +2818,77 @@ var result = Array.from(list, mapFn, thisArg);
 console.log(result.join(','), calls.length, calls[0].thisArg === thisArg, calls[1].args[1]);
 `)
 }
+
+func TestE2EArrayFromAsync(t *testing.T) {
+	assertOutput(t, `
+async function* g(): AsyncGenerator<number> { yield 1; yield await Promise.resolve(2); }
+async function main(): Promise<void> {
+  console.log(await Array.fromAsync(g()));
+  console.log(await Array.fromAsync([Promise.resolve(3), 4], (x, i) => x * 2 + i));
+  console.log(await Array.fromAsync(new Set(["a", "b"]), async (s) => s + "!"));
+  try { await Array.fromAsync([Promise.reject(new Error("boom"))]); } catch (e) { console.log("err", (e as Error).message); }
+  console.log(typeof Array.fromAsync, Array.fromAsync.length, Array.fromAsync.name);
+}
+main();
+`, "[ 1, 2 ]\n[ 6, 9 ]\n[ 'a!', 'b!' ]\nerr boom\nfunction 1 fromAsync")
+	assertOutputCompatJS(t, `
+const t = (p) => p.then((v) => console.log("ok", v), (e) => console.log("err", e.name, e.message));
+(async () => {
+  await t(Array.fromAsync([Promise.resolve(3), 4], function (x, i) { return x * 2 + i + this.k; }, { k: 100 }));
+  await t(Array.fromAsync({ length: 2, 0: "a", 1: Promise.resolve("b") }));
+  await t(Array.fromAsync([1], 5));
+  await t(Array.fromAsync(null));
+  await t(Array.fromAsync(7));
+  await t(Array.fromAsync("hé"));
+})();
+`, "ok [ 106, 109 ]\nok [ 'a', 'b' ]\nerr TypeError 5 is not a function\nerr TypeError Cannot read properties of null (reading 'Symbol(Symbol.asyncIterator)')\nok []\nok [ 'h', 'é' ]")
+}
+
+// A comparator with typed parameters sorts an any[] by its own order.
+func TestE2ESortAnyArrayTypedComparator(t *testing.T) {
+	assertSameAsNode(t, `
+const d: any[] = [3, 1, 2, 10];
+d.sort((x: number, y: number) => y - x);
+console.log(d.join());
+console.log(d.toSorted((x: number, y: number) => x - y).join());
+const e: any[] = ["b", "a", "c"];
+e.sort((x: string, y: string) => x < y ? 1 : -1);
+console.log(e.join());
+`)
+}
+
+// A string with an embedded NUL is a whole key and a whole operand: Map and
+// Set keys, `===` on boxes and array searches compare every byte.
+func TestE2EStringKeysWithNul(t *testing.T) {
+	assertSameAsNode(t, `
+const a: string = "a\0b", b: string = "a\0c";
+const x: any = a, y: any = b;
+const m = new Map<string, number>([[a, 1], [b, 2]]);
+const s = new Set<any>([x, y]);
+console.log(a === b, x === y, m.size, m.get(b), s.size, s.has(y), [a, b].indexOf(b), [x, y].includes(y));
+const big = new Set<any>([1n, 2n, 1n]);
+console.log(big.size);
+`)
+}
+
+// splice takes spread items, and evaluates every item before it moves
+// anything.
+func TestE2EArraySpliceSpreadItems(t *testing.T) {
+	assertSameAsNode(t, `
+const a: number[] = [1, 2];
+const e: number[] = [];
+a.splice(0, 0, ...e);
+console.log(a.splice(1, 0, ...[7, 8]).length, a.join());
+a.splice(0, 0, ...[]);
+console.log(a.splice(1, 2, 0, ...e, ...[5, 6], 9).join(), a.join());
+const s: string[] = ["x", "y", "z"];
+s.splice(-1, 1, ..."ab");
+console.log(s.join());
+const o: { k: number }[] = [{ k: 1 }];
+o.splice(1, 0, ...[{ k: 2 }, { k: 3 }]);
+console.log(o.map(q => q.k).join());
+const b: number[] = [1, 2, 3];
+b.splice(0, 1, b[0] + 10, b[2]);
+console.log(b.join());
+`)
+}

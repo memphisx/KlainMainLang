@@ -35,3 +35,7 @@ console.log(new RegExp("a.b").source)            // a.b
 console.log(/foo$/.test("foo\n"))  // false  ($ anchors at the true end)
 console.log(/(a)?b\1/.test("b"))   // true   (unset backref matches empty)
 console.log("café".replace(/./g, "X")) // XXXX  (code-point `.`)
+
+// The d flag: each group's [start, end], named groups too.
+const dated = /(?<year>\d{4})-(\d{2})/d.exec("on 2026-11")!
+console.log(dated.indices![0], dated.indices!.groups!.year) // [ 3, 10 ] [ 3, 7 ]

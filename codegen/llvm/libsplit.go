@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unsafe"
 )
 
 // libsplit.go — a program's IR split into one unit per builtin library
@@ -73,7 +74,10 @@ const objProtoUnit = "shared_objproto"
 // sharedHelperUnits are generated helpers the same in every program, each
 // in a unit of its own.
 var sharedHelperUnits = map[string]string{
-	"__kml_any_iter_collect":      "shared_itercollect",
+	"__kml_any_iter_collect": "shared_itercollect",
+	// Generated only when a program needs it: a unit of its own, so its
+	// presence does not change the other collectors'.
+	"__kml_any_iter_collect_map":  "shared_itercollect_map",
 	"__kml_any_arraylike_collect": "shared_itercollect",
 }
 
@@ -159,17 +163,30 @@ func LibOwner(sym string) string { return libOwner(strings.Trim(sym, `"`)) }
 // parseIREntities splits module text into top-level entities.
 func parseIREntities(ll string) []irEntity {
 	var out []irEntity
-	lines := strings.Split(ll, "\n")
-	for i := 0; i < len(lines); i++ {
-		ln := lines[i]
+	// Each entity's text is a slice of ll, not a copy: a module's
+	// definitions are most of its text.
+	line := func(p int) (string, int) {
+		e := strings.IndexByte(ll[p:], '\n')
+		if e < 0 {
+			return ll[p:], len(ll) + 1
+		}
+		return ll[p : p+e], p + e + 1
+	}
+	for p := 0; p <= len(ll); {
+		ln, next := line(p)
 		switch {
 		case strings.HasPrefix(ln, defineKw):
-			j := i
-			for j < len(lines) && lines[j] != "}" {
-				j++
+			end := p + len(ln)
+			for q := p; q <= len(ll); {
+				l, n := line(q)
+				end = q + len(l)
+				q = n
+				next = n
+				if l == "}" {
+					break
+				}
 			}
-			out = append(out, irEntity{name: firstSym(ln), kind: 'f', text: strings.Join(lines[i:j+1], "\n")})
-			i = j
+			out = append(out, irEntity{name: firstSym(ln), kind: 'f', text: ll[p:end]})
 		case strings.HasPrefix(ln, "declare "):
 			out = append(out, irEntity{name: firstSym(ln), kind: 'd', text: ln})
 		case strings.HasPrefix(ln, "@") && strings.Contains(ln, "= external "):
@@ -182,6 +199,7 @@ func parseIREntities(ll string) []irEntity {
 		default:
 			out = append(out, irEntity{kind: 'o', text: ln})
 		}
+		p = next
 	}
 	return out
 }
@@ -425,6 +443,26 @@ func SplitIslandUnits(ll string, place func(key string) string) (LibUnits, error
 }
 
 func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
+	out := LibUnits{Modules: map[string]string{}}
+	err := eachUnit(ll, place, func(owner, text string) error {
+		if owner == "" {
+			out.Program = text
+		} else {
+			out.Modules[owner] = text
+		}
+		return nil
+	})
+	if err != nil {
+		return LibUnits{}, err
+	}
+	return out, nil
+}
+
+// eachUnit splits ll as splitUnits does, handing each unit's text to unit
+// as it is built: the modules in key order, then the program's ("" owner).
+// A caller that compiles each unit and drops it holds one unit's text at a
+// time rather than every unit's, which together outgrow the IR itself.
+func eachUnit(ll string, place func(key string) string, unit func(owner, text string) error) error {
 	islands := place != nil
 	vis := "hidden "
 	if islands {
@@ -490,7 +528,7 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 	}
 	if islands {
 		if err := moveIslandHelpers(ents, defs); err != nil {
-			return LibUnits{}, err
+			return err
 		}
 	} else {
 		ents = moveUnitRows(ents, defs)
@@ -608,13 +646,23 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 				continue
 			}
 			if islands && !islandOwner(owner) && islandOwner(ents[di].owner) {
-				return LibUnits{}, fmt.Errorf("libsplit: %s names @%s of island %s: the executable may reach an island only through dlsym", unitName(owner), sym, ents[di].owner)
+				return fmt.Errorf("libsplit: %s names @%s of island %s: the executable may reach an island only through dlsym", unitName(owner), sym, ents[di].owner)
 			}
 			ents[di] = setReachable(ents[di], vis)
 		}
 	}
-	out := LibUnits{Modules: map[string]string{}}
-	for owner, c := range closures {
+	owners := make([]string, 0, len(closures))
+	for owner := range closures {
+		if owner != "" {
+			owners = append(owners, owner)
+		}
+	}
+	sort.Strings(owners)
+	if _, ok := closures[""]; ok {
+		owners = append(owners, "")
+	}
+	for _, owner := range owners {
+		c := closures[owner]
 		var b strings.Builder
 		for _, h := range header {
 			b.WriteString(h + "\n")
@@ -636,7 +684,7 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 			}
 			d, err := declOfVis(ents[defs[sym]], vis)
 			if err != nil {
-				return LibUnits{}, err
+				return err
 			}
 			declared = append(declared, d)
 		}
@@ -655,12 +703,13 @@ func splitUnits(ll string, place func(key string) string) (LibUnits, error) {
 			for _, o := range others {
 				b.WriteString(o + "\n")
 			}
-			out.Program = coffWeakComdats(b.String())
-		} else {
-			out.Modules[owner] = coffWeakComdats(b.String())
 		}
+		if err := unit(owner, coffWeakComdats(b.String())); err != nil {
+			return err
+		}
+		delete(closures, owner)
 	}
-	return out, nil
+	return nil
 }
 
 // autoUnitMinLines is the size from which a program function compiles in a
@@ -816,30 +865,51 @@ func unitName(owner string) string {
 	return owner
 }
 
+// readFileString is a file's text as a string over the bytes read, not a
+// copy of them (the module file can exceed 100 MB); nothing writes the
+// buffer after.
+func readFileString(path string) (string, error) {
+	b, err := os.ReadFile(path)
+	if err != nil || len(b) == 0 {
+		return "", err
+	}
+	return unsafe.String(&b[0], len(b)), nil
+}
+
 // LibObjects splits the program IR in llFile, compiles each library
 // module's unit once into cacheDir (keyed by its text, the compile flags and
 // the host clang arguments), rewrites llFile to the program's own unit, and
 // returns the module objects to link. hits counts the units already cached.
 func LibObjects(llFile, cacheDir string, compileFlags []string) (objs []string, hits int, err error) {
-	src, err := os.ReadFile(llFile)
+	src, err := readFileString(llFile)
 	if err != nil {
 		return nil, 0, err
 	}
-	u, err := SplitLibUnits(string(src))
-	if err != nil {
-		return nil, 0, err
-	}
-	for _, k := range sortedKeys(u.Modules) {
-		obj, hit, err := cachedUnitObject(cacheDir, k, u.Modules[k], compileFlags)
+	return LibObjectsOf(src, llFile, cacheDir, compileFlags)
+}
+
+// LibObjectsOf is LibObjects for a caller that holds the program's IR
+// text ir (llFile's contents): the file is not read back. Each module's
+// unit is compiled (or found in the cache) as it is split off, and dropped.
+func LibObjectsOf(ir, llFile, cacheDir string, compileFlags []string) (objs []string, hits int, err error) {
+	err = eachUnit(ir, nil, func(owner, text string) error {
+		if owner == "" {
+			return WriteTextFile(llFile, unitTextFor(text, compileFlags))
+		}
+		obj, hit, err := cachedUnitObject(cacheDir, owner, text, compileFlags)
 		if err != nil {
-			return nil, 0, err
+			return err
 		}
 		if hit {
 			hits++
 		}
 		objs = append(objs, obj)
+		return nil
+	})
+	if err != nil {
+		return nil, 0, err
 	}
-	return objs, hits, os.WriteFile(llFile, []byte(unitText(u.Program)), 0o644)
+	return objs, hits, nil
 }
 
 // IslandObjects is LibObjects for a -dynamic-import=lazy program
@@ -848,11 +918,11 @@ func LibObjects(llFile, cacheDir string, compileFlags []string) (objs []string, 
 // It returns the executable's unit objects and each target's, the latter
 // compiled with islandFlags (position-independent).
 func IslandObjects(llFile, cacheDir string, compileFlags, islandFlags []string, place func(key string) string) (host []string, islands map[string][]string, err error) {
-	src, err := os.ReadFile(llFile)
+	src, err := readFileString(llFile)
 	if err != nil {
 		return nil, nil, err
 	}
-	u, err := SplitIslandUnits(string(src), place)
+	u, err := SplitIslandUnits(src, place)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -876,7 +946,21 @@ func IslandObjects(llFile, cacheDir string, compileFlags, islandFlags []string, 
 			islands[target] = append(islands[target], obj)
 		}
 	}
-	return host, islands, os.WriteFile(llFile, []byte(unitText(u.Program)), 0o644)
+	return host, islands, os.WriteFile(llFile, []byte(unitTextFor(u.Program, compileFlags)), 0o644)
+}
+
+// WriteTextFile writes s to path without first copying it to a byte
+// slice: a program's IR can be tens of megabytes.
+func WriteTextFile(path, s string) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(s); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 func sortedKeys(m map[string]string) []string {
@@ -909,19 +993,27 @@ func cachedUnitObject(cacheDir, k, text string, compileFlags []string) (obj stri
 	// One compile per object at a time in this process: with a cold cache a
 	// conformance run's workers all reach the same units at once, and each
 	// compiling them on its own multiplied the clang work by the workers.
-	done := make(chan struct{})
-	if prev, busy := unitCompiling.LoadOrStore(obj, done); busy {
-		<-prev.(chan struct{})
+	// A waiter takes the compile's own outcome: retrying a compile that
+	// failed would fail again, and every worker waiting on it retried
+	// without end.
+	job := &unitJob{done: make(chan struct{})}
+	if prev, busy := unitCompiling.LoadOrStore(obj, job); busy {
+		p := prev.(*unitJob)
+		<-p.done
 		if knownUnitObject(obj) {
 			return obj, true, nil
 		}
-		return cachedUnitObject(cacheDir, k, text, compileFlags)
+		if p.err != nil {
+			return "", false, p.err
+		}
+		return "", false, fmt.Errorf("compiling library module %s: no object produced", k)
 	}
 	defer func() {
+		job.err = err
 		unitCompiling.Delete(obj)
-		close(done)
+		close(job.done)
 	}()
-	text = unitText(text)
+	text = unitTextFor(text, compileFlags)
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		return "", false, err
 	}
@@ -957,7 +1049,7 @@ func cachedUnitObject(cacheDir, k, text string, compileFlags []string) (obj stri
 
 // unitTextVersion names unitText's rewrite in the cache key: the key hashes
 // the text before it, so a change to the rewrite must change this.
-const unitTextVersion = "unitText/1"
+const unitTextVersion = "unitText/2"
 
 // unitObjects are the cached objects this process has seen exist: a
 // conformance run looks the same few thousand up for every program, and a
@@ -965,8 +1057,15 @@ const unitTextVersion = "unitText/1"
 // is scanned. The cache only gains entries, so a seen object stays.
 var unitObjects sync.Map
 
-// unitCompiling holds, per object, the channel its compile closes.
+// unitCompiling holds, per object, its compile in progress.
 var unitCompiling sync.Map
+
+// unitJob is one compile of a unit's object: done closes when it ends,
+// err is its outcome (set before done closes).
+type unitJob struct {
+	done chan struct{}
+	err  error
+}
 
 func knownUnitObject(obj string) bool {
 	_, ok := unitObjects.Load(obj)
@@ -980,25 +1079,47 @@ func noteUnitObject(obj string) { unitObjects.Store(obj, struct{}{}) }
 // one module may not hold both.
 func dropDefinedDeclares(ll string) string {
 	defined := map[string]bool{}
-	for _, ln := range strings.Split(ll, "\n") {
-		if strings.HasPrefix(ln, defineKw) {
+	var declares []string
+	forEachLine(ll, func(ln string) {
+		switch {
+		case strings.HasPrefix(ln, defineKw):
 			defined[firstSym(ln)] = true
+		case strings.HasPrefix(ln, "declare "):
+			declares = append(declares, ln)
 		}
+	})
+	drop := map[string]bool{}
+	for _, ln := range declares {
+		if defined[firstSym(ln)] {
+			drop[ln] = true
+		}
+	}
+	if len(drop) == 0 {
+		return ll // nothing to drop: no copy of the module
 	}
 	var b strings.Builder
 	b.Grow(len(ll))
-	dropped := false
-	for _, ln := range strings.SplitAfter(ll, "\n") {
-		if strings.HasPrefix(ln, "declare ") && defined[firstSym(ln)] {
-			dropped = true
-			continue
+	for rest := ll; rest != ""; {
+		ln, after, found := strings.Cut(rest, "\n")
+		if !(strings.HasPrefix(ln, "declare ") && drop[ln]) {
+			b.WriteString(ln)
+			if found {
+				b.WriteByte('\n')
+			}
 		}
-		b.WriteString(ln)
-	}
-	if !dropped {
-		return ll
+		rest = after
 	}
 	return b.String()
+}
+
+// forEachLine calls f on each line of s, without its newline, and without
+// splitting s into a slice.
+func forEachLine(s string, f func(string)) {
+	for s != "" {
+		ln, rest, _ := strings.Cut(s, "\n")
+		f(ln)
+		s = rest
+	}
 }
 
 // libKmlDecl reports whether name is a builtin module's own declaration

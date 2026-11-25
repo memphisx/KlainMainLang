@@ -8,6 +8,8 @@
 // no cloneable value: DataCloneError. Values of a type known at compile time
 // are cloned by the compiler.
 
+import { NodeTypeError } from './internal_errors';
+
 function notCloneable(value: any): Error {
     return new DOMException(String(value) + ' could not be cloned.', 'DataCloneError');
 }
@@ -149,5 +151,35 @@ function cloneValue(value: any, memory: Map<any, any>): any {
 // options is evaluated by the caller and otherwise unused: a transferred
 // ArrayBuffer is copied, not detached.
 export function structuredCloneAny(value: any, options?: any): any {
+    structuredCloneOptions(options);
     return cloneValue(value, new Map<any, any>());
+}
+
+// structuredClone as a value (`const sc = structuredClone`): it counts its
+// arguments, as Node's does.
+export function structuredCloneArgs(...args: any[]): any {
+    if (args.length === 0) {
+        // Node's own (doubled) wording.
+        throw NodeTypeError('ERR_MISSING_ARGS', 'The "The value argument must be specified" argument must be specified');
+    }
+    return structuredCloneAny(args[0], args[1]);
+}
+
+// Node's WebIDL conversion of structuredClone's options dictionary
+// (lib/internal/webidl.js): undefined or null is the empty dictionary;
+// any other non-object fails. Its transfer member, when present, must be
+// an iterable object. Transferring is not supported.
+export function structuredCloneOptions(options: any): void {
+    if (options === undefined || options === null) return;
+    if (typeof options !== 'object' && typeof options !== 'function') {
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', "Failed to execute 'structuredClone': Options cannot be converted to a dictionary");
+    }
+    const transfer: any = options.transfer;
+    if (transfer === undefined) return;
+    if ((typeof transfer !== 'object' && typeof transfer !== 'function') || transfer === null || typeof transfer[Symbol.iterator] !== 'function') {
+        throw NodeTypeError('ERR_INVALID_ARG_TYPE', "Failed to execute 'structuredClone': transfer in Options cannot be converted to sequence.");
+    }
+    for (const t of transfer) {
+        throw new TypeError("structuredClone's transfer option is not supported");
+    }
 }

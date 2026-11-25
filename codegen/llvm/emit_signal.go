@@ -55,19 +55,12 @@ func (e *Emitter) isAbortSignalType(t Type) bool {
 	return false
 }
 
-func (e *Emitter) ensureSignalAborted() {
-	if e.usedSignalAborted {
-		return
-	}
-	e.usedSignalAborted = true
-}
-
 // signalCFlags hand fetch.c the AbortSignal fields it reads: their byte
 // offsets, #aborted's width and whether #deadline is a double, or
 // KML_SIG_AB=-1 when the program has no AbortSignal class.
 func (e *Emitter) signalCFlags() []string {
 	sig, ok := e.abortSignalClass()
-	if !ok || !e.usedSignalAborted {
+	if !ok {
 		return []string{"-DKML_SIG_AB=-1", "-DKML_SIG_AB_SIZE=1", "-DKML_SIG_REASON=0", "-DKML_SIG_DL=0", "-DKML_SIG_DL_DOUBLE=1"}
 	}
 	abIdx, abTy, sig, ok1 := e.classField(sig, "#aborted")

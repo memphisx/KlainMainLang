@@ -37,6 +37,7 @@ const (
 	unitKindClassSrc      = 10 // KmlFnMeta: a class's source text, keyed by its reference (fnmeta.c)
 	unitKindLayout        = 11 // KmlLayout (kml_heap.h): an object layout's size and pointer map (layout_table.go)
 	unitKindPrimClass     = 12 // { i64 id, i64 0 }: a class extending Number, String or Boolean (its primitive at +8)
+	unitKindPromiseClass  = 13 // { i64 id, i64 TagID }: a class extending Promise (__kml_promise_class_is)
 )
 
 // unitRow is one table row: its constant, `{ i64 <id>, ... }`.
@@ -80,6 +81,7 @@ func (e *Emitter) addCtor(fn string) { e.ctors = append(e.ctors, fn) }
 func (e *Emitter) emitUnitRegFinalize() {
 	e.emitConstructorOfOnce() // a constructor read a late finalize step generated
 	e.emitClassParentRows()
+
 	e.emitLayoutRows()
 	if len(e.unitTables) > 0 {
 		kinds := make([]int, 0, len(e.unitTables))
@@ -216,9 +218,6 @@ func unitFieldIR(kind int, rowTy, key string, idx int, ty, def, out string) stri
 // emitClassIs is `instanceof` on a stored type id (a header word, or an
 // Error's flagged kind slot): whether its class is target's or extends it.
 func (e *Emitter) emitClassIs(stored string, target int64) string {
-	if !e.usedClassIs {
-		e.usedClassIs = true
-	}
 	r, b := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_class_is(i64 %s, i64 %d)", r, stored, target))
 	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", b, r))
@@ -228,7 +227,9 @@ func (e *Emitter) emitClassIs(stored string, target int64) string {
 // emitClassParentRows registers each class's parent: its base class's id,
 // or for an Error subclass rooted at a builtin kind, that kind's.
 func (e *Emitter) emitClassParentRows() {
-	if !e.usedClassIs && !(e.usedHostBox && e.hasHostBaseClass()) {
+	// Read by __kml_class_is, and by hostbox.c for a class extending a host
+	// class.
+	if !e.irNames("__kml_class_is") && !(len(e.hostLayouts) > 0 && e.hasHostBaseClass()) {
 		return
 	}
 	var names []string
@@ -278,4 +279,27 @@ func (e *Emitter) hasHostBaseClass() bool {
 		}
 	}
 	return false
+}
+
+// emitClassIsAt is emitClassIs for the class instance at obj (its header
+// word hdr) against class className: when the program can give an
+// instance another prototype, one it was given decides (C.prototype on
+// its chain), as OrdinaryHasInstance walks the real chain.
+func (e *Emitter) emitClassIsAt(obj, hdr string, target int64, className string) string {
+	base := e.emitClassIs(hdr, target)
+	if _, known := e.classes[className]; !e.protoReplaced() || !known {
+		return base
+	}
+	e.declareFn("__kml_shape_given_chain_has", "declare i64 @__kml_shape_given_chain_has("+irPtr+", "+irPtr+")")
+	cp := e.emitClassProto(className)
+	pay := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ir_nb_pay(i64 %s)", pay, cp.Ref))
+	pp := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, pp, pay))
+	g, given, hit, r := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_shape_given_chain_has("+irPtr+" %s, "+irPtr+" %s)", g, obj, pp))
+	e.emitInstr(fmt.Sprintf("%s = icmp sge i64 %s, 0", given, g))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 1", hit, g))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i1 %s, i1 %s", r, given, hit, base))
+	return r
 }

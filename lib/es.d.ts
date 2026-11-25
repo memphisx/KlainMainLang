@@ -46,6 +46,7 @@ interface ObjectConstructor {
     (): any;
     /** @intrinsic Object */
     (value: any): any;
+    /** @intrinsic Object.prototype */
     readonly prototype: Object;
     /** @intrinsic Object.keys */
     keys(o: {}): string[];
@@ -167,6 +168,7 @@ interface Function {
 interface FunctionConstructor {
     new (...args: string[]): Function;
     (...args: string[]): Function;
+    /** @intrinsic Function.prototype */
     readonly prototype: Function;
 }
 
@@ -199,6 +201,7 @@ interface String {
     endsWith(searchString: string, endPosition?: number): boolean;
     /** @intrinsic String.prototype.localeCompare */
     localeCompare(that: string, locales?: string | string[], options?: any): number;
+    /** @lower __kml_String_normalize @link casemap */
     normalize(form?: string): string;
     /** @lower __kml_String_padStart @link string */
     padStart(maxLength: number, fillString?: string): string;
@@ -236,7 +239,9 @@ interface String {
     toLowerCase(): string;
     /** @lower __kml_String_toUpperCase @link casemap */
     toUpperCase(): string;
+    /** @lower __kml_String_toLocaleLowerCase */
     toLocaleLowerCase(locales?: string | string[]): string;
+    /** @lower __kml_String_toLocaleUpperCase */
     toLocaleUpperCase(locales?: string | string[]): string;
     /** @lower __kml_trim */
     trim(): string;
@@ -284,18 +289,31 @@ interface SymbolConstructor {
     for(key: string): symbol;
     /** @intrinsic Symbol.keyFor */
     keyFor(sym: symbol): string | undefined;
+    /** @intrinsic Symbol.iterator */
     readonly iterator: unique symbol;
+    /** @intrinsic Symbol.asyncIterator */
     readonly asyncIterator: unique symbol;
+    /** @intrinsic Symbol.hasInstance */
     readonly hasInstance: unique symbol;
+    /** @intrinsic Symbol.isConcatSpreadable */
     readonly isConcatSpreadable: unique symbol;
+    /** @intrinsic Symbol.match */
     readonly match: unique symbol;
+    /** @intrinsic Symbol.matchAll */
     readonly matchAll: unique symbol;
+    /** @intrinsic Symbol.replace */
     readonly replace: unique symbol;
+    /** @intrinsic Symbol.search */
     readonly search: unique symbol;
+    /** @intrinsic Symbol.species */
     readonly species: unique symbol;
+    /** @intrinsic Symbol.split */
     readonly split: unique symbol;
+    /** @intrinsic Symbol.toPrimitive */
     readonly toPrimitive: unique symbol;
+    /** @intrinsic Symbol.toStringTag */
     readonly toStringTag: unique symbol;
+    /** @intrinsic Symbol.unscopables */
     readonly unscopables: unique symbol;
 }
 
@@ -338,13 +356,21 @@ interface NumberConstructor {
     /** @intrinsic Number */
     (value?: any): number;
     readonly prototype: Number;
+    /** @intrinsic Number.MAX_VALUE */
     readonly MAX_VALUE: number;
+    /** @intrinsic Number.MIN_VALUE */
     readonly MIN_VALUE: number;
+    /** @intrinsic Number.NaN */
     readonly NaN: number;
+    /** @intrinsic Number.NEGATIVE_INFINITY */
     readonly NEGATIVE_INFINITY: number;
+    /** @intrinsic Number.POSITIVE_INFINITY */
     readonly POSITIVE_INFINITY: number;
+    /** @intrinsic Number.EPSILON */
     readonly EPSILON: number;
+    /** @intrinsic Number.MAX_SAFE_INTEGER */
     readonly MAX_SAFE_INTEGER: number;
+    /** @intrinsic Number.MIN_SAFE_INTEGER */
     readonly MIN_SAFE_INTEGER: number;
     /** @intrinsic Number.isFinite */
     isFinite(number: unknown): boolean;
@@ -368,13 +394,21 @@ declare var Number: NumberConstructor;
 // ties, pow's NaN cases, an integer kept an integer, …) and is emitted
 // inline (emit_intrinsics.go).
 interface Math {
+    /** @intrinsic Math.E */
     readonly E: number;
+    /** @intrinsic Math.LN10 */
     readonly LN10: number;
+    /** @intrinsic Math.LN2 */
     readonly LN2: number;
+    /** @intrinsic Math.LOG2E */
     readonly LOG2E: number;
+    /** @intrinsic Math.LOG10E */
     readonly LOG10E: number;
+    /** @intrinsic Math.PI */
     readonly PI: number;
+    /** @intrinsic Math.SQRT1_2 */
     readonly SQRT1_2: number;
+    /** @intrinsic Math.SQRT2 */
     readonly SQRT2: number;
     /** @intrinsic Math.abs */
     abs(x: number): number;
@@ -656,6 +690,10 @@ interface ArrayConstructor {
     from<T>(iterable: Iterable<T> | ArrayLike<T>): T[];
     /** @intrinsic Array.from */
     from<T, U>(iterable: Iterable<T> | ArrayLike<T>, mapfn: (v: T, k: number) => U, thisArg?: any): U[];
+    /** @lower __kml_Array_fromAsync */
+    fromAsync<T>(iterableOrArrayLike: AsyncIterable<T> | Iterable<T | PromiseLike<T>> | ArrayLike<T | PromiseLike<T>>): Promise<T[]>;
+    /** @lower __kml_Array_fromAsync */
+    fromAsync<T, U>(iterableOrArrayLike: AsyncIterable<T> | Iterable<T> | ArrayLike<T>, mapFn: (value: Awaited<T>, index: number) => U, thisArg?: any): Promise<Awaited<U>[]>;
 }
 
 declare var Array: ArrayConstructor;
@@ -670,6 +708,7 @@ interface Error {
 
 interface ErrorConstructor {
     new (message?: string, options?: { cause?: unknown }): Error;
+    /** @intrinsic Error */
     (message?: string, options?: { cause?: unknown }): Error;
     readonly prototype: Error;
 }
@@ -679,6 +718,7 @@ declare var Error: ErrorConstructor;
 interface TypeError extends Error {}
 interface TypeErrorConstructor {
     new (message?: string, options?: { cause?: unknown }): TypeError;
+    /** @intrinsic TypeError */
     (message?: string, options?: { cause?: unknown }): TypeError;
     readonly prototype: TypeError;
 }
@@ -687,6 +727,7 @@ declare var TypeError: TypeErrorConstructor;
 interface RangeError extends Error {}
 interface RangeErrorConstructor {
     new (message?: string, options?: { cause?: unknown }): RangeError;
+    /** @intrinsic RangeError */
     (message?: string, options?: { cause?: unknown }): RangeError;
     readonly prototype: RangeError;
 }
@@ -695,6 +736,7 @@ declare var RangeError: RangeErrorConstructor;
 interface SyntaxError extends Error {}
 interface SyntaxErrorConstructor {
     new (message?: string, options?: { cause?: unknown }): SyntaxError;
+    /** @intrinsic SyntaxError */
     (message?: string, options?: { cause?: unknown }): SyntaxError;
     readonly prototype: SyntaxError;
 }
@@ -703,6 +745,7 @@ declare var SyntaxError: SyntaxErrorConstructor;
 interface ReferenceError extends Error {}
 interface ReferenceErrorConstructor {
     new (message?: string, options?: { cause?: unknown }): ReferenceError;
+    /** @intrinsic ReferenceError */
     (message?: string, options?: { cause?: unknown }): ReferenceError;
     readonly prototype: ReferenceError;
 }
@@ -711,6 +754,7 @@ declare var ReferenceError: ReferenceErrorConstructor;
 interface EvalError extends Error {}
 interface EvalErrorConstructor {
     new (message?: string, options?: { cause?: unknown }): EvalError;
+    /** @intrinsic EvalError */
     (message?: string, options?: { cause?: unknown }): EvalError;
     readonly prototype: EvalError;
 }
@@ -719,6 +763,7 @@ declare var EvalError: EvalErrorConstructor;
 interface URIError extends Error {}
 interface URIErrorConstructor {
     new (message?: string, options?: { cause?: unknown }): URIError;
+    /** @intrinsic URIError */
     (message?: string, options?: { cause?: unknown }): URIError;
     readonly prototype: URIError;
 }
@@ -730,6 +775,7 @@ interface AggregateError extends Error {
 }
 interface AggregateErrorConstructor {
     new (errors: Iterable<any>, message?: string, options?: { cause?: unknown }): AggregateError;
+    /** @intrinsic AggregateError */
     (errors: Iterable<any>, message?: string, options?: { cause?: unknown }): AggregateError;
     readonly prototype: AggregateError;
 }
@@ -828,6 +874,7 @@ interface Date {
 interface DateConstructor {
     new (value?: number | string | Date): Date;
     new (year: number, monthIndex: number, date?: number, hours?: number, minutes?: number, seconds?: number, ms?: number): Date;
+    /** @intrinsic Date */
     (): string;
     readonly prototype: Date;
     /** @intrinsic Date.parse */
@@ -844,6 +891,8 @@ declare var Date: DateConstructor;
 interface RegExpMatchArray extends Array<string> {
     index?: number;
     input?: string;
+    groups?: { [key: string]: string };
+    indices?: RegExpIndicesArray;
 }
 
 /** @lowerType regexpexecarray */
@@ -851,6 +900,11 @@ interface RegExpExecArray extends Array<string> {
     index: number;
     input: string;
     groups?: { [key: string]: string };
+    indices?: RegExpIndicesArray;
+}
+
+interface RegExpIndicesArray extends Array<[number, number]> {
+    groups?: { [key: string]: [number, number] };
 }
 
 /** @lowerType regexp */
@@ -866,11 +920,15 @@ interface RegExp {
     readonly flags: string;
     readonly sticky: boolean;
     readonly unicode: boolean;
+    readonly dotAll: boolean;
+    readonly hasIndices: boolean;
+    readonly unicodeSets: boolean;
     lastIndex: number;
 }
 
 interface RegExpConstructor {
     new (pattern: RegExp | string, flags?: string): RegExp;
+    /** @intrinsic RegExp */
     (pattern: RegExp | string, flags?: string): RegExp;
     readonly prototype: RegExp;
 }
@@ -1015,6 +1073,7 @@ interface Promise<T> {
 
 interface PromiseConstructor {
     readonly prototype: Promise<any>;
+    /** @intrinsic Promise */
     new <T>(executor: (resolve: (value: T | PromiseLike<T>) => void, reject: (reason?: any) => void) => void): Promise<T>;
     /** @intrinsic Promise.all */
     all<T extends readonly unknown[] | []>(values: T): Promise<{ -readonly [P in keyof T]: Awaited<T[P]>; }>;
@@ -1119,6 +1178,8 @@ interface MapConstructor {
     new <K, V>(entries?: readonly (readonly [K, V])[] | null): Map<K, V>;
     new <K, V>(iterable?: Iterable<readonly [K, V]> | null): Map<K, V>;
     readonly prototype: Map<any, any>;
+    /** @lower __kml_Map_groupBy */
+    groupBy<K, T>(items: Iterable<T>, keySelector: (item: T, index: number) => K): Map<K, T[]>;
 }
 
 declare var Map: MapConstructor;
@@ -1145,6 +1206,27 @@ interface Set<T> {
     keys(): SetIterator<T>;
     /** @intrinsic Set.prototype.values */
     values(): SetIterator<T>;
+    /** @lower __kml_Set_union */
+    union<U>(other: ReadonlySetLike<U>): Set<T | U>;
+    /** @lower __kml_Set_intersection */
+    intersection<U>(other: ReadonlySetLike<U>): Set<T & U>;
+    /** @lower __kml_Set_difference */
+    difference<U>(other: ReadonlySetLike<U>): Set<T>;
+    /** @lower __kml_Set_symmetricDifference */
+    symmetricDifference<U>(other: ReadonlySetLike<U>): Set<T | U>;
+    /** @lower __kml_Set_isSubsetOf */
+    isSubsetOf(other: ReadonlySetLike<unknown>): boolean;
+    /** @lower __kml_Set_isSupersetOf */
+    isSupersetOf(other: ReadonlySetLike<unknown>): boolean;
+    /** @lower __kml_Set_isDisjointFrom */
+    isDisjointFrom(other: ReadonlySetLike<unknown>): boolean;
+}
+
+// ES2025's set-like protocol, which the set-algebra methods read.
+interface ReadonlySetLike<T> {
+    keys(): Iterator<T>;
+    has(value: T): boolean;
+    readonly size: number;
 }
 
 interface SetConstructor {
@@ -1219,6 +1301,7 @@ interface FinalizationRegistry<T> {
 }
 interface FinalizationRegistryConstructor {
     readonly prototype: FinalizationRegistry<any>;
+    /** @intrinsic FinalizationRegistry */
     new <T>(cleanupCallback: (heldValue: T) => void): FinalizationRegistry<T>;
 }
 declare var FinalizationRegistry: FinalizationRegistryConstructor;
@@ -1241,11 +1324,13 @@ interface ProxyHandler<T extends object> {
 }
 interface ProxyConstructor {
     revocable<T extends object>(target: T, handler: ProxyHandler<T>): { proxy: T; revoke: () => void; };
+    /** @intrinsic Proxy */
     new <T extends object>(target: T, handler: ProxyHandler<T>): T;
 }
 declare var Proxy: ProxyConstructor;
 
 declare var NaN: number;
+/** @intrinsic eval */
 /** @intrinsic eval */
 declare function eval(x: string): any;
 declare var Infinity: number;
@@ -1288,6 +1373,12 @@ interface ArrayBuffer {
     slice(begin?: number, end?: number): ArrayBuffer;
     /** @intrinsic ArrayBuffer.prototype.resize */
     resize(newByteLength?: number): void;
+    /** @intrinsic ArrayBuffer.prototype.detached */
+    readonly detached: boolean;
+    /** @intrinsic ArrayBuffer.prototype.transfer */
+    transfer(newByteLength?: number): ArrayBuffer;
+    /** @intrinsic ArrayBuffer.prototype.transferToFixedLength */
+    transferToFixedLength(newByteLength?: number): ArrayBuffer;
 }
 /** @lowerType arraybuffer */
 type ArrayBufferLike = ArrayBuffer | SharedArrayBuffer;

@@ -17,21 +17,10 @@ var inspectReduceSource string
 // push/end. main.go compiles it when UsesInspectReduce() is set (libc + libm).
 func InspectReduceSource() string { return inspectReduceSource }
 
-// ensureInspectReduce declares the entry-list ABI exactly once and marks the
-// program as needing the C file compiled in.
-func (e *Emitter) ensureInspectReduce() {
-	if e.usedInspectReduce {
-		return
-	}
-	e.usedInspectReduce = true
-	e.requireLink("m") // sqrt/floor in the column grouping
-}
-
 // inspectBegin opens an entry list for a container at nesting depth `depth`;
 // nonempty is an i64 operand (or constant) saying whether it has entries —
 // Node records the depth only for a non-empty container.
 func (e *Emitter) inspectBegin(depth int, nonempty string) string {
-	e.ensureInspectReduce()
 	l := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_begin(i64 %d, i64 %s)", l, depth, nonempty))
 	return l

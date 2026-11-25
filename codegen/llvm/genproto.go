@@ -45,7 +45,6 @@ func (e *Emitter) emitGenInstanceProto(info *GeneratorInfo) string {
 	if !e.genProtos && e.inLib == "" {
 		return "0"
 	}
-	e.ensureFnMeta()
 	if !e.fnDecls["__kml_gen_proto_off"] {
 		// Where the field sits, the same in every generator layout (it is
 		// first): shape.c reads an instance's prototype there.
@@ -110,7 +109,6 @@ func (e *Emitter) emitGenInstanceProto(info *GeneratorInfo) string {
 // emitGenProtoOf is a generator instance's prototype: the one it recorded,
 // else (the program could not observe it at creation) the root.
 func (e *Emitter) emitGenProtoOf(genObj string, genTy Type) Value {
-	e.ensureFnMeta()
 	rec := e.loadGeneratorField(genObj, genTy, GeneratorProtoField)
 	async := 0
 	if genTy.GeneratorIsAsync {

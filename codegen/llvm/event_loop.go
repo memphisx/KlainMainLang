@@ -1,19 +1,6 @@
 package llvm
 
-// ensureEventLoop links the event loop (loopsrc/loop.c, on libuv, TDD-00244)
-// and what it calls into: the timers and the task scheduler's stubs. Its
-// libcurl step is hooks.c's no-op unless the program fetches.
-func (e *Emitter) ensureEventLoop() {
-	if e.usedEventLoop {
-		return
-	}
-	e.usedEventLoop = true
-	e.ensureTimerRuntime()
-	// The loop is thread-affine (its state is thread-local): run inside a
-	// klain:sync goroutine, it locks the goroutine to its OS thread so a
-	// migration cannot hand it another thread's loop.
-	if e.usesSyncProgram {
-		e.loopCFlags = append(e.loopCFlags, "-DKML_SYNC_LOCK=1")
-	}
-	e.ensureLoopTurn()
-}
+// loopUser is the line a unit that waits on the event loop carries: its
+// reference to loop.c, so the link takes the loop with it (and main() then
+// runs it, hooks.c).
+const loopUser = "extern char __kml_loop_linked;\n__attribute__((used)) static char *const kml_loop_user = &__kml_loop_linked;\n"

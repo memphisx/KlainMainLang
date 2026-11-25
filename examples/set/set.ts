@@ -72,3 +72,13 @@ console.log(bare.has(NaN), bare.has(1.5), bare.size); // true true 2
 const annotated: Set<number> = new Set();
 annotated.add(2.5);
 console.log(annotated.has(2.5), annotated.has(2)); // true false
+
+// ES2025 set algebra: any set-like argument (a Set, a Map's keys, or an
+// object with size/has/keys).
+const left = new Set([1, 2, 3]);
+const right = new Set([3, 4]);
+console.log(left.union(right)); // Set(4) { 1, 2, 3, 4 }
+console.log(left.intersection(right)); // Set(1) { 3 }
+console.log(left.difference(right)); // Set(2) { 1, 2 }
+console.log(left.symmetricDifference(right)); // Set(3) { 1, 2, 4 }
+console.log(left.isSubsetOf(left.union(right)), left.isDisjointFrom(right)); // true false

@@ -35,7 +35,6 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 	}
 	urlVal = e.convert(urlVal, TypePtr)
 
-	e.ensureStrHeaderRuntime()
 	// The init's parts, in slots: an optional init may be absent at run time.
 	mSlot, hSlot, bSlot, lSlot, cSlot := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	for _, sl := range []string{mSlot, hSlot, bSlot, cSlot} {
@@ -52,6 +51,13 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", bSlot))
 	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", cSlot))
 	e.emitInstr(fmt.Sprintf("store i64 -1, "+irPtr+" %s, align 8", lSlot))
+	// A ReadableStream body: the stream, kept as `.body` and read by the
+	// Body methods (and fetch) as a Response's is; its flags.
+	sSlot, sfSlot := e.freshReg(), e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", sSlot))
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", sfSlot))
+	e.emitInstr(fmt.Sprintf("store "+irPtr+" null, "+irPtr+" %s, align 8", sSlot))
+	e.emitInstr(fmt.Sprintf("store i64 0, "+irPtr+" %s, align 8", sfSlot))
 
 	// The init's other string members and keepalive, at their defaults.
 	extraSlots := map[string]string{}
@@ -88,12 +94,20 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 		}
 		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", h.Ref, hSlot))
 		body, blen, flags := field("body"), field("bodyLength"), field("__kml_bodyflags")
+		// A stream body (not yet read) moves as the stream.
+		sbits, isS, srcS := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", sbits, flags.Ref, responseStreamBody|responseStreamAny))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isS, sbits))
+		e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" null", srcS, isS, field("__kml_stream").Ref))
+		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", srcS, sSlot))
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", sbits, sfSlot))
 		if ex.Init == nil {
 			// The input's body moves to the new request: one already read
 			// cannot.
-			used, hasBody, bad := e.freshReg(), e.freshReg(), e.freshReg()
+			used, hasBytes, hasBody, bad := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = and i64 %s, %d", used, flags.Ref, responseBodyUsed))
-			e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasBody, body.Ref))
+			e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasBytes, body.Ref))
+			e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", hasBody, hasBytes, isS))
 			usedB := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", usedB, used))
 			e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", bad, usedB, hasBody))
@@ -187,10 +201,34 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 			}
 			bv := dynGet("body")
 			if err := present(bv, func() error {
+				// A ReadableStream: kept as the stream (its chunks' type
+				// checked as they are read), with undici's duplex check.
+				isS := e.emitDynHostInstanceOf(bv, "ReadableStream").Ref
+				strL, bytesL, bodyDoneL := e.freshLabel("req.dynstream"), e.freshLabel("req.dynbytes"), e.freshLabel("req.dynbody")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isS, strL, bytesL))
+				e.emitLabel(strL)
+				dv := dynGet("duplex")
+				noDup := e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", noDup, dv.Ref, nbUndefined))
+				dupBadL, dupOkL := e.freshLabel("req.noduplex"), e.freshLabel("req.duplex")
+				e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", noDup, dupBadL, dupOkL))
+				e.emitLabel(dupBadL)
+				e.emitThrowTypeErrorValue(e.internString("RequestInit: duplex option is required when sending a body."))
+				e.emitLabel(dupOkL)
+				if err := e.ensureRequestStreamCollect(); err != nil {
+					return err
+				}
+				sv := e.convert(bv, ReadableStreamType(TypeAny))
+				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", sv.Ref, sSlot))
+				e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", responseStreamBody|responseStreamAny, sfSlot))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", bodyDoneL))
+				e.emitLabel(bytesL)
 				d, l, c := e.emitFetchBodyFromBox(bv)
 				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", d, bSlot))
 				e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", l, lSlot))
 				e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", c, cSlot))
+				e.emitTerminator(fmt.Sprintf("br label %%%s", bodyDoneL))
+				e.emitLabel(bodyDoneL)
 				return nil
 			}); err != nil {
 				return Value{}, err
@@ -252,8 +290,24 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 			}
 			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", hv.Ref, hSlot))
 		}
-		if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok && !dyn {
-			bv := e.loadFieldValue(initVal, idx, fieldTy)
+		if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok && !dyn && e.streamOfInstance(Value{Ty: fieldTy}).Ty.IsReadableStream() {
+			sv := e.streamOfInstance(e.loadFieldValue(initVal, idx, fieldTy))
+			// undici: a stream body needs init.duplex ("half").
+			if _, _, hasDuplex := initVal.Ty.FieldIndex("duplex"); !hasDuplex {
+				e.emitThrowTypeErrorValue(e.internString("RequestInit: duplex option is required when sending a body."))
+				e.emitLabel(e.freshLabel("req.duplex.dead"))
+			}
+			flags := int64(responseStreamBody)
+			if sv.Ty.StreamChunk == nil || !sv.Ty.StreamChunk.IsTypedArray() || sv.Ty.StreamChunk.ElemType == nil || sv.Ty.StreamChunk.ElemType.IR != "i8" {
+				flags |= responseStreamAny
+			}
+			if err := e.ensureRequestStreamCollect(); err != nil {
+				return Value{}, err
+			}
+			e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", sv.Ref, sSlot))
+			e.emitInstr(fmt.Sprintf("store i64 %d, "+irPtr+" %s, align 8", flags, sfSlot))
+		} else if idx, fieldTy, ok := initVal.Ty.FieldIndex("body"); ok && !dyn {
+			bv := e.streamOfInstance(e.loadFieldValue(initVal, idx, fieldTy))
 			box, berr := e.emitBoxValue(bv)
 			if berr != nil {
 				return Value{}, internalAt(ex.GetPos(), "Request's init.body: %v", berr)
@@ -333,8 +387,13 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 	// A body: a GET or HEAD request has none (Fetch's Request constructor
 	// throws); its bytes are copied; its implied Content-Type is set unless
 	// the headers have one.
-	hasBody := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasBody, bodyData))
+	streamRef, streamFlags := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", streamRef, sSlot))
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", streamFlags, sfSlot))
+	hasBytes, hasStream, hasBody := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasBytes, bodyData))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne "+irPtr+" %s, null", hasStream, streamRef))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", hasBody, hasBytes, hasStream))
 	bodySlot, lenSlot, flagSlot := e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", bodySlot))
 	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", lenSlot))
@@ -358,6 +417,12 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 		e.emitLabel(badL)
 		e.emitThrowTypeErrorValue(e.internString("Request with GET/HEAD method cannot have body."))
 		e.emitLabel(okL)
+		strL, bytesL := e.freshLabel("req.streambody"), e.freshLabel("req.bytesbody")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", hasStream, strL, bytesL))
+		e.emitLabel(strL)
+		e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", streamFlags, flagSlot))
+		e.emitTerminator(fmt.Sprintf("br label %%%s", noBodyL))
+		e.emitLabel(bytesL)
 		cp := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 %s)", cp, bodyLen))
 		e.emitInstr(fmt.Sprintf("call "+irPtr+" @memcpy("+irPtr+" %s, "+irPtr+" %s, i64 %s)", cp, bodyData, bodyLen))
@@ -396,6 +461,7 @@ func (e *Emitter) emitNewRequestExpression(ex *ast.NewRequestExpression) (Value,
 	storeField("body", bodyVal)
 	storeField("bodyLength", Value{Ref: lenRef, Ty: TypeI64})
 	storeField("__kml_bodyflags", Value{Ref: flags, Ty: TypeI64})
+	storeField("__kml_stream", Value{Ref: streamRef, Ty: TypePtr})
 	extra := map[string]string{}
 	for _, m := range requestInitStrings {
 		v := e.freshReg()

@@ -11,6 +11,33 @@ func (e *Emitter) emitArrayConcat(mem *ast.MemberExpression, args []ast.Expressi
 	// JS concat takes any number of arguments — each an array (flattened
 	// one level) or a plain value (appended) — and zero arguments copy the
 	// receiver (ADR-00463; previously exactly one array argument).
+	if anySpread(args) {
+		// A spread argument (`[].concat(...parts)`): as many arguments as
+		// it holds, each spread or appended — Array.prototype.concat
+		// called with them, as `concat.call(recv, ...parts)` is.
+		fn := ast.NewMemberExpression(ast.NewMemberExpression(ast.NewIdentifier("Array", pos), "prototype", pos), "concat", pos)
+		return e.emitFunctionCallApply(fn, "call", append([]ast.Expression{mem.Object}, args...), pos)
+	}
+	if e.mentionsConcatSpreadable() {
+		// A program that sets Symbol.isConcatSpreadable: an argument held
+		// in `any` may carry it (an accessor that throws, a spreadable
+		// array-like), so the library's IsConcatSpreadable decides.
+		if fn, ok := e.globalLinks["__kml_Array_generic_concat"]; ok {
+			for _, a := range args {
+				if e.typeOfExpr(a).IsDynamic() {
+					list := ast.NewArrayLiteral(args, pos)
+					e.lowered(list)
+					v, err := e.emitExpr(ast.NewCallExpression(ast.NewIdentifier(fn, pos), []ast.Expression{mem.Object, list}, pos))
+					if err != nil {
+						return Value{}, err
+					}
+					// Its result as the native concat's: an any[] (an `any`
+					// argument widens it, concatElemType).
+					return e.convert(v, ArrayOf(TypeAny)), nil
+				}
+			}
+		}
+	}
 	hdr1, ptrReg1, lenReg1, elemTy, err := e.resolveArrayHOF(mem.Object, pos)
 	if err != nil {
 		return Value{}, err
@@ -929,4 +956,24 @@ func (e *Emitter) emitFlatRuntimeDepth(ptrReg, lenReg string, elemTy Type, dv Va
 	hdr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_anyarr_flat("+irPtr+" %s, i64 %s, i64 %s)", hdr, e.arrayData(src), e.arrayLen(src), b))
 	return e.arrayValueFromHeaderReg(hdr, ArrayOf(TypeAny)), nil
+}
+
+// mentionsConcatSpreadable reports a program that names
+// Symbol.isConcatSpreadable (scanned once).
+func (e *Emitter) mentionsConcatSpreadable() bool {
+	if e.concatSpreadableSeen == nil {
+		seen := false
+		if e.prog != nil {
+			ast.Inspect(e.prog, func(n ast.Node) bool {
+				if m, ok := n.(*ast.MemberExpression); ok && m.Property == "isConcatSpreadable" {
+					if id, ok := m.Object.(*ast.Identifier); ok && id.Name == "Symbol" {
+						seen = true
+					}
+				}
+				return !seen
+			})
+		}
+		e.concatSpreadableSeen = &seen
+	}
+	return *e.concatSpreadableSeen
 }

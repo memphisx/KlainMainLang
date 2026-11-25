@@ -244,8 +244,7 @@
               "`console.log(err)` shows the options' cause after the own properties as `[cause]: …`, as util.inspect does ([ADR-01418](../adr/01/ADR-01418.md))"
             ],
             "caveats": [
-              "`AggregateError` takes no options (its `.cause` reads `undefined`)",
-              "An error made with `{ cause: undefined }` has no `cause` property: `'cause' in err` is false, and `console.log(err)` leaves out its `[cause]: undefined` line"
+              "`AggregateError` takes no options (its `.cause` reads `undefined`)"
             ],
             "decl": [
               "Error",
@@ -531,7 +530,7 @@
             "feature": "`String`",
             "status": "implemented",
             "caveats": [
-              "`.normalize()` **missing** (no Unicode tables); `.matchAll()` eager not lazy; `.localeCompare()` ignores `locales` (root order) → [String methods](STRING-METHODS.md)"
+              "`.normalize()`'s tables are Unicode 16.0 (Node's ICU: 17.0); `.matchAll()` eager not lazy; `.localeCompare()` ignores `locales` (root order) → [String methods](STRING-METHODS.md)"
             ],
             "decl": [
               "String"
@@ -616,7 +615,7 @@
             "feature": "`RegExp`",
             "status": "implemented",
             "caveats": [
-              "`u`/`d` flags **missing** (accepted, not implemented) → [RegExp](REGEXP.md)"
+              "Under the `v` flag a property of strings (`\\p{RGI_Emoji}`) is a `SyntaxError` → [RegExp](REGEXP.md)"
             ],
             "decl": [
               "RegExp"
@@ -707,7 +706,7 @@
             "feature": "`performance`",
             "status": "implemented",
             "caveats": [
-              "`eventLoopUtilization`/`nodeTiming` missing → [Performance timing](PERFORMANCE-TIMING.md)"
+              "`nodeTiming`'s startup milestones read 0 (the time origin) → [Performance timing](PERFORMANCE-TIMING.md)"
             ],
             "decl": [
               "performance"
@@ -751,16 +750,24 @@
         "rows": [
           {
             "feature": "`String.prototype.normalize()`",
-            "status": "missing",
-            "notes": [
-              "Deliberately deferred (needs NFC/NFD/NFKC/NFKD tables) → [String methods](STRING-METHODS.md)"
+            "status": "implemented",
+            "caveats": [
+              "Unicode 16.0 tables (Node's ICU: 17.0) → [String methods](STRING-METHODS.md)"
+            ],
+            "decl": [
+              "String.normalize"
             ]
           },
           {
             "feature": "`RegExp` `u`/`v`/`d` flag semantics",
-            "status": "missing",
-            "notes": [
-              "Accepted but not implemented → [RegExp](REGEXP.md)"
+            "status": "implemented",
+            "caveats": [
+              "`v`: a property of strings (`\\p{RGI_Emoji}`) is a `SyntaxError`; `u`'s residuals → [RegExp](REGEXP.md)"
+            ],
+            "decl": [
+              "RegExp.unicode",
+              "RegExp.unicodeSets",
+              "RegExp.hasIndices"
             ]
           },
           {

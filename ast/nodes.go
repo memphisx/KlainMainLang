@@ -439,6 +439,9 @@ type VarDeclaration struct {
 	// Ambient marks a `declare var` (or an ambient namespace's variable):
 	// without an annotation its type is any, never an evolving one.
 	Ambient bool
+	// Global marks a `declare global { var … }` member: the environment's
+	// global, read off the global object, never compiled.
+	Global bool
 	// ParamScope marks a `var` a direct eval in a parameter initializer
 	// declares, placed in the body: the parameters see it too.
 	ParamScope bool
@@ -550,6 +553,9 @@ type FunctionDeclaration struct {
 	// Ambient marks a `declare function` signature: Body is the synthesized
 	// throwing stub (ADR-00471), not code the program wrote.
 	Ambient bool
+	// Global marks a `declare global { function … }` member: the
+	// environment's global function, never compiled.
+	Global  bool
 	IsAsync bool
 	// IsStatic/Visibility/IsAbstract are TDD-00009 Stage 4 class-member
 	// modifiers, meaningful only for a class's Constructor/Methods entries
@@ -964,6 +970,21 @@ func (*NumberLiteral) nodeMarker()   {}
 func (*NumberLiteral) exprMarker()   {}
 func (n *NumberLiteral) GetPos() Pos { return n.pos }
 
+// LegacyForm is a number literal's Annex B form, an error in strict code:
+// "octal" (`010`), "decimal" (a leading zero, `08`), else "".
+func (n *NumberLiteral) LegacyForm() string {
+	v := n.Value
+	if n.IsBigInt || len(v) < 2 || v[0] != '0' || v[1] < '0' || v[1] > '9' {
+		return ""
+	}
+	for i := 1; i < len(v); i++ {
+		if v[i] < '0' || v[i] > '7' {
+			return "decimal"
+		}
+	}
+	return "octal"
+}
+
 func NewNumberLiteral(v string, pos Pos) *NumberLiteral { return &NumberLiteral{Value: v, pos: pos} }
 
 // NewBigIntLiteral builds the `123n` form — the same node with IsBigInt set, so
@@ -978,7 +999,10 @@ type StringLiteral struct {
 	// Plain is a literal written without escapes or line continuations:
 	// only such a "use strict" is a directive.
 	Plain bool
-	pos   Pos
+	// LegacyEscape is its first legacy octal (`\01`) or `\8`/`\9` escape,
+	// as written: an error in strict code.
+	LegacyEscape string
+	pos          Pos
 }
 
 func (*StringLiteral) nodeMarker()   {}
@@ -1389,6 +1413,10 @@ func NewNewArrayExpression(elemType TypeNode, size Expression, pos Pos) *NewArra
 
 type ObjectProperty struct {
 	Key string
+	// WellKnown is the well-known symbol a `[Symbol.x]` key named Key by
+	// (`iterator`): the binder makes the key the computed `Symbol.x` again
+	// when Symbol is a binding of the program's.
+	WellKnown string
 	// KeyExpr is non-nil for a computed property key `{ [expr]: value }`;
 	// Key is unused in that case. nil means a static key (Key holds the name)
 	// or, when Key == "" and Value is a *SpreadElement, an object spread.
@@ -1948,6 +1976,9 @@ func NewNewTypedArrayExpression(elemKind string, arg Expression, pos Pos) *NewTy
 type NewRegExpExpression struct {
 	Pattern Expression
 	Flags   Expression // nil for the no-flags constructor form
+	// Literal: written as a regular expression literal (`/a/g`), which a
+	// call printer shows as written.
+	Literal bool
 	pos     Pos
 }
 
@@ -1997,13 +2028,20 @@ func NewNewExpression(className string, args []Expression, pos Pos) *NewExpressi
 // InterfaceDeclaration — `interface Name { field: type; ... }`
 type InterfaceDeclaration struct {
 	Name string
+	// Global marks a program's `declare global { interface … }` member: a
+	// declaration of the global scope, merged with a builtin one of its name.
+	Global bool
 	// LowerType is a builtin declaration's `/** @lowerType <layout> */`: the
 	// native layout its values have (TDD-00230 P3.2). Empty for a program's
 	// own interfaces.
 	LowerType string
 	// Lower is a builtin interface's `/** @lower <link> */`: its members are
 	// read off the object the linked function returns (process's emitter).
-	Lower                string
+	Lower string
+	// JSCall is a builtin constructor interface's `/** @jsCall <intrinsic>
+	// */`: JavaScript calls its value, which declares no call signature
+	// TypeScript allows (`Buffer(…)`), as that intrinsic.
+	JSCall               string
 	TypeParams           []string // e.g. ["T"] for `interface Box<T>` — TDD-00010 V1, single param only
 	TypeParamConstraints []TypeNode
 	Fields               []AnnotField
@@ -2100,7 +2138,10 @@ type ClassDeclaration struct {
 	BaseClass string // "" if no `extends` clause (TDD-00009 Stage 3)
 	// BaseCall is a base written as a call (`extends Mixin(User)`): the
 	// front end binds it to a constant BaseClass names before checking.
-	BaseCall      *CallExpression
+	BaseCall *CallExpression
+	// BaseExpr is any other heritage (`extends null`, `extends (a, B)`),
+	// bound to a constant before the class by LowerBaseCalls.
+	BaseExpr      Expression
 	BaseQualified bool   // `extends mod.Base`: BaseClass is the last segment
 	BaseQualifier string // and `mod` the namespace before it
 	// BaseTypeArgs is non-nil only for `extends EventEmitter<T>` (TDD-00023)
@@ -2171,7 +2212,9 @@ func NewSuperExpression(pos Pos) *SuperExpression { return &SuperExpression{pos:
 // TypeAliasDeclaration — `type Name = T`, optionally generic
 // (`type Name<T> = ...`, TDD-00079 Stage 3).
 type TypeAliasDeclaration struct {
-	Name                 string
+	Name string
+	// Global marks a program's `declare global { type … }` member.
+	Global               bool
 	TypeParams           []string
 	TypeParamConstraints []TypeNode
 	// TypeParameters are the type parameter nodes as written, defaults

@@ -300,13 +300,17 @@ var exportedClassDecl = regexp.MustCompile(`(?m)^export (?:declare )?(?:abstract
 
 // exportedGlobalConst is a global module's exported constant marked as a
 // global of its own (`performance`): `export const X = …; // kml:global`.
+// exportedReexport is `export { A, B } from './m'` in a global module: a
+// class it re-exports is a global too (CryptoKey, from the keys module).
+var exportedReexport = regexp.MustCompile(`(?m)^export \{([^}]*)\} from `)
+
 var exportedGlobalConst = regexp.MustCompile(`(?m)^export const ([A-Za-z_$][A-Za-z0-9_$]*)\b.*// kml:global$`)
 
 // exportedLoweredFunc is a global module's exported function that a
 // builtin's `@lower` names (TDD-00230 P3.2): `export function
 // __kml_String_raw(…) … // kml:lower String.raw`. A program naming every
 // identifier of the dotted path brings the module in.
-var exportedLoweredFunc = regexp.MustCompile(`(?m)^export function ([A-Za-z_$][A-Za-z0-9_$]*)\b.*// kml:lower ([A-Za-z0-9_$.]+)$`)
+var exportedLoweredFunc = regexp.MustCompile(`(?m)^export (?:async )?function ([A-Za-z_$][A-Za-z0-9_$]*)\b.*// kml:lower ([A-Za-z0-9_$.]+)$`)
 
 var (
 	globalModulesOnce sync.Once
@@ -356,6 +360,13 @@ func GlobalModuleNames() map[string]string {
 			}
 			for _, m := range exportedGlobalConst.FindAllStringSubmatch(string(src), -1) {
 				globalModules[m[1]] = ModuleRoot + en.Name()
+			}
+			for _, m := range exportedReexport.FindAllStringSubmatch(string(src), -1) {
+				for _, n := range strings.Split(m[1], ",") {
+					if n = strings.TrimSpace(n); n != "" && !strings.Contains(n, " ") {
+						globalModules[n] = ModuleRoot + en.Name()
+					}
+				}
 			}
 			for _, m := range exportedLoweredFunc.FindAllStringSubmatch(string(src), -1) {
 				globalModules[m[1]] = ModuleRoot + en.Name()

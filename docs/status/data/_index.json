@@ -75,12 +75,12 @@
         {
           "category": "String methods",
           "pageFile": "STRING-METHODS.md",
-          "caveats": "• No `.normalize()` (needs Unicode normalization tables — deliberately deferred, never faked)<br>• `.localeCompare()` ignores `locales` (always ICU root order)"
+          "caveats": "• `.normalize()`'s tables are Unicode 16.0 (Node's ICU: 17.0)<br>• `.localeCompare()` ignores `locales` (always ICU root order)"
         },
         {
           "category": "RegExp",
           "pageFile": "REGEXP.md",
-          "caveats": "• `u`/`d` flags out of scope for V1<br>• Several other deliberate scope narrowings — see [REGEXP.md](REGEXP.md)'s own Caveats<br>• `new RegExp` doesn't validate its flags string ([ADR-00166](../adr/00/ADR-00166.md))"
+          "caveats": "• `v` flag: no properties of strings (`\\p{RGI_Emoji}`)<br>• Several other deliberate scope narrowings — see [REGEXP.md](REGEXP.md)'s own Caveats"
         },
         {
           "category": "Array methods",
@@ -95,7 +95,7 @@
         {
           "category": "Object & collections",
           "pageFile": "OBJECT-COLLECTIONS.md",
-          "caveats": "• `Object.create`/`getPrototypeOf`/`setPrototypeOf`/`__proto__` work on **dynamic (`any`-typed) objects only** — statically-typed structs have no prototype link ([TDD-00155](../tdd/TDD-00155.md) Stage 3)<br>• `WeakMap`/`WeakSet`/`WeakRef` are strong-backed under `-mm=manual`; real weak semantics only under `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md))"
+          "caveats": "• `WeakMap`/`WeakSet`/`WeakRef` are strong-backed under `-mm=manual`; real weak semantics only under `-mm=gc` ([TDD-00112](../tdd/TDD-00112.md))"
         },
         {
           "category": "JSON",

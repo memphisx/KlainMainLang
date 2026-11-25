@@ -758,7 +758,7 @@ function win32_relative(from: string, to: string): string {
  * @param {string} path
  * @returns {string}
  */
-function win32_toNamespacedPath(path: string): string {
+function win32_toNamespacedPath(path: any): any {
   // Note: this will *probably* throw somewhere.
   if (typeof path !== 'string' || path.length === 0)
     return path;
@@ -1404,7 +1404,7 @@ function posix_relative(from: string, to: string): string {
  * @param {string} path
  * @returns {string}
  */
-function posix_toNamespacedPath(path: string): string {
+function posix_toNamespacedPath(path: any): any {
   // Non-op on posix systems
   return path;
 }
@@ -1680,6 +1680,7 @@ export interface PlatformPath {
     parse(path: string): ParsedPath;
     format(pathObject: FormatInputPathObject): string;
     toNamespacedPath(path: string): string;
+    toNamespacedPath(path: any): any;
     posix: PlatformPath;
     win32: PlatformPath;
 }
@@ -1766,7 +1767,9 @@ export function format(pathObject: FormatInputPathObject): string {
     return _format(isWindows ? '\\' : '/', pathObject);
 }
 
-export function toNamespacedPath(path: string): string {
+// Any value: one that is no non-empty string is returned as it is.
+export function toNamespacedPath(path: string): string;
+export function toNamespacedPath(path: any): any {
     return isWindows ? win32_toNamespacedPath(path) : posix_toNamespacedPath(path);
 }
 

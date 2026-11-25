@@ -426,9 +426,15 @@ func init() {
 						return Value{}, err
 					}
 				}
+				if owner == "ArrayIterator" && e.arrIterNextPatched() {
+					return e.emitArrIterNextMaybePatched(it, ex.GetPos())
+				}
 				return e.emitCollIterNext(it), nil
 			},
 			ty: func(e *Emitter, ex *ast.CallExpression) Type {
+				if owner == "ArrayIterator" && e.arrIterNextPatched() {
+					return TypeAny
+				}
 				return collIterResultType(e.typeOfExpr(ex.Callee.(*ast.MemberExpression).Object))
 			},
 		}
@@ -718,4 +724,48 @@ func (e *Emitter) consoleTableIterRule(ex *ast.CallExpression) (Value, bool, err
 	entries := ast.NewArrayLiteral([]ast.Expression{ast.NewSpreadElement(ast.NewIdentifier(name, pos0), pos0)}, pos0)
 	call := ast.NewCallExpression(ast.NewIdentifier(fn, pos0), []ast.Expression{entries, ast.NewNumberLiteral(mode, pos0)}, pos0)
 	return handled(e.emitExpr(call))
+}
+
+// arrIterNextPatched reports a program that may replace
+// %ArrayIteratorPrototype%.next: an array iterator's next() is then the
+// property as it is at the call, its result held boxed.
+func (e *Emitter) arrIterNextPatched() bool {
+	return e.arrayIterPatchable() && e.arrIterNextPatchable
+}
+
+// emitArrIterNextMaybePatched is `it.next()` on an array iterator: the
+// replaced %ArrayIteratorPrototype%.next called on it once there is one,
+// else the native step, boxed.
+func (e *Emitter) emitArrIterNextMaybePatched(it Value, pos ast.Pos) (Value, error) {
+	slot, has := e.emitArrIterNextOverride()
+	out := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", out))
+	patchedL, nativeL, doneL := e.freshLabel("arriter.callpatched"), e.freshLabel("arriter.native"), e.freshLabel("arriter.nextdone")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, patchedL, nativeL))
+	e.emitLabel(patchedL)
+	_ = slot // the read below goes through the iterator's host getter, which has it
+	self, err := e.emitBoxValue(it)
+	if err != nil {
+		return Value{}, err
+	}
+	r, err := e.emitDynAnyMethodCall(self, "next", nil, pos)
+	if err != nil {
+		return Value{}, err
+	}
+	if r, err = e.emitBoxValue(r); err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", r.Ref, out))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(nativeL)
+	nv, err := e.emitBoxValue(e.emitCollIterNext(it))
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", nv.Ref, out))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	res := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", res, out))
+	return Value{Ref: res, Ty: TypeAny}, nil
 }

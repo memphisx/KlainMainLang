@@ -191,6 +191,10 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		// 1; h = "u"`): one binding holding each in turn.
 		for _, st := range c.b.StoresTo(sym) {
 			as, ok := st.(*ast.AssignmentExpression)
+			if ok && numericCompound(as.Op) && isStringLike(t) {
+				// `s -= 1` stores the number the operator makes.
+				return c.anyT
+			}
 			if !ok || as.Op != "=" {
 				continue
 			}
@@ -204,6 +208,81 @@ func (c *Checker) computeSymbolType(sym *binder.Symbol) *Type {
 		}
 	}
 	return t
+}
+
+// numericCompound reports a compound assignment operator that computes on
+// numbers only (every one but `+=` and the logical ones).
+func numericCompound(op string) bool {
+	switch op {
+	case "-=", "*=", "/=", "%=", "**=", "&=", "|=", "^=", "<<=", ">>=", ">>>=":
+		return true
+	}
+	return false
+}
+
+// jsFieldStoresOtherKind reports a store into `this.<name>` in decl's own
+// members of a primitive kind other than t's: a literal of another kind,
+// or an arithmetic compound assignment (a number) to a string. Read from
+// the syntax alone: the class's type is still being built.
+func jsFieldStoresOtherKind(decl *ast.ClassDeclaration, name string, t *Type) bool {
+	kind := func(x ast.Expression) TypeFlags {
+		switch l := x.(type) {
+		case *ast.NumberLiteral:
+			if l.IsBigInt {
+				return BigIntLike
+			}
+			return NumberLike
+		case *ast.StringLiteral, *ast.TemplateLiteral:
+			return StringLike
+		case *ast.BooleanLiteral:
+			return BooleanLike
+		}
+		return 0
+	}
+	if t.Flags&Union != 0 {
+		return false
+	}
+	own := t.Flags & (NumberLike | StringLike | BooleanLike | BigIntLike)
+	if own == 0 {
+		return false
+	}
+	found := false
+	var visit func(n ast.Node) bool
+	visit = func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		switch x := n.(type) {
+		case *ast.ClassDeclaration, *ast.ClassExpression, *ast.FunctionExpression, *ast.FunctionDeclaration:
+			return false // another `this`
+		case *ast.AssignmentExpression:
+			m, ok := x.Left.(*ast.MemberExpression)
+			if !ok || m.Property != name {
+				return true
+			}
+			if _, isThis := m.Object.(*ast.ThisExpression); !isThis {
+				return true
+			}
+			switch {
+			case numericCompound(x.Op) && own&StringLike != 0:
+				found = true
+			case x.Op == "=":
+				if k := kind(x.Right); k != 0 && k&own == 0 {
+					found = true
+				}
+			}
+		}
+		return true
+	}
+	for _, m := range decl.Methods {
+		if m.Body != nil && !m.IsStatic {
+			ast.Inspect(m.Body, visit)
+		}
+	}
+	if decl.Constructor != nil && decl.Constructor.Body != nil {
+		ast.Inspect(decl.Constructor.Body, visit)
+	}
+	return found
 }
 
 // declType is the type declaration d gives symbol sym: its annotation, its
@@ -360,7 +439,12 @@ func (c *Checker) paramType(fn ast.Node, sym *binder.Symbol, params []ast.Param,
 		case p.Default != nil:
 			t = c.widenFrom(p.Default, c.TypeOf(p.Default))
 		case c.opts.CompatJS() && fn != nil && !p.Rest:
+			re := c.reentries
 			if t := c.callSiteParam(fn, i); !c.Unanswered(t) {
+				return t
+			} else if c.reentries > re {
+				// Read while its own call sites are typed: unanswered for
+				// now, not cached, and typed once they are.
 				return t
 			}
 			return c.anyT
@@ -1219,7 +1303,7 @@ func (c *Checker) FieldType(cd *ast.ClassDeclaration, name string) *Type {
 		return nil
 	}
 	if p := inst.Prop(name); p != nil {
-		return p.Type
+		return p.Type()
 	}
 	return nil
 }
@@ -1230,7 +1314,7 @@ func (c *Checker) untypedFieldType(decl *ast.ClassDeclaration, name string) *Typ
 	if decl.Constructor != nil && decl.Constructor.Body != nil {
 		for _, p := range c.constructorFields(decl) {
 			if p.Name == name {
-				return p.Type
+				return p.Type()
 			}
 		}
 	}
@@ -1313,8 +1397,8 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 		if c.Unanswered(self) || c.building[self] {
 			return c.unanswered
 		}
-		if p := self.Prop(name); p != nil && p.Owner == sym && !c.Unanswered(p.Type) {
-			return c.instantiate(p.Type, own)
+		if p := self.Prop(name); p != nil && p.Owner == sym && !c.Unanswered(p.Type()) {
+			return c.instantiate(p.Type(), own)
 		}
 		return c.unanswered
 	}
@@ -1382,6 +1466,12 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 			if !f.Readonly {
 				ft = c.widenFrom(f.Initializer, ft)
 			}
+			if c.opts.CompatJS() && !f.Readonly && jsFieldStoresOtherKind(decl, f.Name, ft) {
+				// A JavaScript field the class stores another kind of
+				// value in (`this.s = 3`, `this.s -= 1` on a string): one
+				// property holding each in turn.
+				ft = c.anyT
+			}
 		case !generic:
 			// Neither: the type the constructor assigns it (tsc's inference
 			// from constructors), else an implicit any.
@@ -1398,7 +1488,7 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 		if prev := t.Prop(f.Name); prev != nil && prev.Owner == sym {
 			continue // a duplicate: the first declaration is the member
 		}
-		t.setProp(&Property{Name: f.Name, Type: ft, Optional: f.Optional, Readonly: f.Readonly, Visibility: f.Visibility, Owner: sym, Field: true})
+		t.setProp(&Property{Name: f.Name, ty: ft, Optional: f.Optional, Readonly: f.Readonly, Visibility: f.Visibility, Owner: sym, Field: true})
 	}
 	// Methods whose result is declared come first: an inferred result
 	// (a generator's yields over `this.next()`) may read them, in any
@@ -1445,11 +1535,11 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 			}
 			if prev := t.Prop(m.Name); prev != nil && prev.Accessor {
 				// The pair: the getter's type is read, the setter's written.
-				get, set := prev.Type, at
+				get, set := prev.Type(), at
 				if m.AccessorKind == "get" {
-					get, set = at, prev.Type
+					get, set = at, prev.Type()
 				}
-				np := &Property{Name: m.Name, Type: get, Accessor: true, Visibility: prev.Visibility, WriteVisibility: m.Visibility, Owner: sym}
+				np := &Property{Name: m.Name, ty: get, Accessor: true, Visibility: prev.Visibility, WriteVisibility: m.Visibility, Owner: sym, Decl: prev.Decl}
 				if m.AccessorKind == "get" {
 					np.Visibility, np.WriteVisibility = m.Visibility, prev.Visibility
 				}
@@ -1462,7 +1552,7 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 			}
 			c.leaveMember(key)
 			// A getter alone is read-only, as tsc reads it.
-			t.setProp(&Property{Name: m.Name, Type: at, Accessor: true, Readonly: m.AccessorKind == "get", Visibility: m.Visibility, WriteVisibility: m.Visibility, Owner: sym})
+			t.setProp(&Property{Name: m.Name, ty: at, Accessor: true, Readonly: m.AccessorKind == "get", Visibility: m.Visibility, WriteVisibility: m.Visibility, Owner: sym, Decl: m})
 			continue
 		}
 		mt := c.unanswered
@@ -1477,7 +1567,7 @@ func (c *Checker) instanceOf(sym *binder.Symbol, args []*Type) *Type {
 		if m.IsOptional && !c.Unanswered(mt) {
 			mt = c.in.union(mt, c.missingT) // `m?(): T` is absent unless implemented
 		}
-		t.setProp(&Property{Name: m.Name, Type: mt, Optional: m.IsOptional, Visibility: m.Visibility, Owner: sym, Decl: m})
+		t.setProp(&Property{Name: m.Name, ty: mt, Optional: m.IsOptional, Visibility: m.Visibility, Owner: sym, Decl: m})
 	}
 	return t
 }
@@ -1578,7 +1668,22 @@ func (c *Checker) interfaceOf(sym *binder.Symbol, args []*Type) (res *Type) {
 	}
 	// The polymorphic `this` in a member's type is instantiated with the
 	// receiver at each access (withThis).
-	defer c.declEnv(append(append([]string(nil), decls[0].TypeParams...), "this"), append(append([]*Type(nil), args...), c.thisT))()
+	envNames := append(append([]string(nil), decls[0].TypeParams...), "this")
+	envArgs := append(append([]*Type(nil), args...), c.thisT)
+	defer c.declEnv(envNames, envArgs)()
+	// A builtin declaration's member is typed on its first read: a program
+	// reads few of a library interface's members, and typing them all would
+	// instantiate every interface their signatures name (`Set<T | U>` in
+	// `union`), each of those in turn. A program's own interface is typed
+	// whole, as its declaration is checked.
+	lazy := c.inLibrary(sym.Scope)
+	inEnv := func(f func() *Type) func() *Type {
+		return func() *Type {
+			defer c.declEnv(envNames, envArgs)()
+			defer c.nest(sym, args)()
+			return f()
+		}
+	}
 	// The bases' members first, in `extends` order; the interface's own
 	// replace them. Its call and construct signatures come before the
 	// bases'.
@@ -1670,32 +1775,40 @@ func (c *Checker) interfaceOf(sym *binder.Symbol, args []*Type) (res *Type) {
 					cp.Name, cp.Computed = wk, false
 					m = &cp
 				}
-				ft := c.anyT
-				if m.Type != nil {
-					ft = c.typeFromNode(m.Type, sym.Scope)
+				propType := func() *Type {
+					ft := c.anyT
+					if m.Type != nil {
+						ft = c.typeFromNode(m.Type, sym.Scope)
+					}
+					if m.Optional && !c.Unanswered(ft) {
+						ft = c.in.union(ft, c.missingT)
+					}
+					return ft
 				}
-				if m.Optional && !c.Unanswered(ft) {
-					ft = c.in.union(ft, c.missingT)
+				if lazy && m.Accessor == "" {
+					t.setProp(&Property{Name: m.Name, ty: c.unanswered, lazy: inEnv(propType), Optional: m.Optional, Readonly: m.Readonly, Decl: m})
+					continue
 				}
+				ft := propType()
 				if m.Accessor != "" {
 					if prev := t.Prop(m.Name); prev != nil && prev.Accessor {
 						// The pair: the getter's type is read, the setter's
 						// written.
-						get, set := prev.Type, ft
+						get, set := prev.Type(), ft
 						if m.Accessor == "get" {
-							get, set = ft, prev.Type
+							get, set = ft, prev.Type()
 						}
-						np := &Property{Name: m.Name, Type: get, Accessor: true}
+						np := &Property{Name: m.Name, ty: get, Accessor: true}
 						if set != get {
 							np.Write = set
 						}
 						t.setProp(np)
 						continue
 					}
-					t.setProp(&Property{Name: m.Name, Type: ft, Accessor: true})
+					t.setProp(&Property{Name: m.Name, ty: ft, Accessor: true})
 					continue
 				}
-				t.setProp(&Property{Name: m.Name, Type: ft, Optional: m.Optional, Readonly: m.Readonly, Decl: m})
+				t.setProp(&Property{Name: m.Name, ty: ft, Optional: m.Optional, Readonly: m.Readonly, Decl: m})
 			case *ast.CallSignature, *ast.ConstructSignature:
 				key := strconv.Itoa(sym.ID) + ":" + strconv.Itoa(di) + ":" + strconv.Itoa(mi)
 				var st *Type
@@ -1728,27 +1841,72 @@ func (c *Checker) interfaceOf(sym *binder.Symbol, args []*Type) (res *Type) {
 					m = &cp
 				}
 				key := strconv.Itoa(sym.ID) + ":" + strconv.Itoa(di) + ":" + strconv.Itoa(mi)
-				mt := c.in.asMethod(c.withThisParam(c.signatureOfNodes(key, m.TypeParameters, m.Parameters, m.Type, sym.Scope), key, m.TypeParameters, m.This, sym.Scope))
-				if m.Optional && !c.Unanswered(mt) {
-					mt = c.in.union(mt, c.missingT)
+				if lazy {
+					ownPrev := own[m.Name]
+					own[m.Name] = true
+					sigs := []lazyMethodSig{{m, key}}
+					decls := []ast.Node{m}
+					if prev := t.Prop(m.Name); ownPrev && prev != nil && len(prev.lazySigs) > 0 {
+						// Overloaded method signatures: the list, in order.
+						sigs = append(append([]lazyMethodSig(nil), prev.lazySigs...), sigs...)
+						decls = append(append([]ast.Node(nil), prev.Decls...), m)
+					}
+					t.setProp(&Property{Name: m.Name, ty: c.unanswered, lazy: inEnv(func() *Type { return c.methodSigsType(sigs, sym.Scope) }),
+						lazySigs: sigs, Optional: m.Optional, Decl: m, Decls: decls})
+					continue
 				}
+				mt := c.methodSigType(m, key, sym.Scope)
 				decls := []ast.Node{m}
 				ownPrev := own[m.Name]
 				own[m.Name] = true
-				if prev := t.Prop(m.Name); ownPrev && prev != nil && !c.Unanswered(prev.Type) && !c.Unanswered(mt) && prev.Type.Flags&Object != 0 && prev.Type.Kind == Function && mt.Flags&Object != 0 && mt.Kind == Function && !m.Optional {
+				if prev := t.Prop(m.Name); ownPrev && prev != nil && !c.Unanswered(prev.Type()) && !c.Unanswered(mt) && prev.Type().Flags&Object != 0 && prev.Type().Kind == Function && mt.Flags&Object != 0 && mt.Kind == Function && !m.Optional {
 					// Overloaded method signatures: the list, in order.
-					sigs := append([]*Type(nil), prev.Type.Overloads...)
+					sigs := append([]*Type(nil), prev.Type().Overloads...)
 					if len(sigs) == 0 {
-						sigs = []*Type{prev.Type}
+						sigs = []*Type{prev.Type()}
 					}
 					mt = c.in.overloaded(append(sigs, mt))
 					decls = append(append([]ast.Node(nil), prev.Decls...), m)
 				}
-				t.setProp(&Property{Name: m.Name, Type: mt, Optional: m.Optional, Decl: m, Decls: decls})
+				t.setProp(&Property{Name: m.Name, ty: mt, Optional: m.Optional, Decl: m, Decls: decls})
 			}
 		}
 	}
 	return t
+}
+
+// lazyMethodSig is one declaration of a lazily typed method member, with
+// its signature key.
+type lazyMethodSig struct {
+	m   *ast.MethodSignature
+	key string
+}
+
+// methodSigType is one method signature's type, as a member.
+func (c *Checker) methodSigType(m *ast.MethodSignature, key string, scope *binder.Scope) *Type {
+	mt := c.in.asMethod(c.withThisParam(c.signatureOfNodes(key, m.TypeParameters, m.Parameters, m.Type, scope), key, m.TypeParameters, m.This, scope))
+	if m.Optional && !c.Unanswered(mt) {
+		mt = c.in.union(mt, c.missingT)
+	}
+	return mt
+}
+
+// methodSigsType is a method member's type from its declarations in order:
+// interfaceOf's eager fold of overloads.
+func (c *Checker) methodSigsType(sigs []lazyMethodSig, scope *binder.Scope) *Type {
+	var prev *Type
+	for _, s := range sigs {
+		mt := c.methodSigType(s.m, s.key, scope)
+		if prev != nil && !c.Unanswered(prev) && !c.Unanswered(mt) && prev.Flags&Object != 0 && prev.Kind == Function && mt.Flags&Object != 0 && mt.Kind == Function && !s.m.Optional {
+			list := append([]*Type(nil), prev.Overloads...)
+			if len(list) == 0 {
+				list = []*Type{prev}
+			}
+			mt = c.in.overloaded(append(list, mt))
+		}
+		prev = mt
+	}
+	return prev
 }
 
 // signatureOfNodes is the function type a signature member declares: its
@@ -2479,20 +2637,20 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 				}
 				merged := false
 				for i, q := range props {
-					if q.Name == sm.Name && q.Decl != nil && !sm.Optional && !c.Unanswered(q.Type) && !c.Unanswered(mt) &&
-						q.Type.Flags&Object != 0 && q.Type.Kind == Function && mt.Flags&Object != 0 && mt.Kind == Function {
+					if q.Name == sm.Name && q.Decl != nil && !sm.Optional && !c.Unanswered(q.Type()) && !c.Unanswered(mt) &&
+						q.Type().Flags&Object != 0 && q.Type().Kind == Function && mt.Flags&Object != 0 && mt.Kind == Function {
 						// Overloaded method signatures: the list, in order.
-						sigs := append([]*Type(nil), q.Type.Overloads...)
+						sigs := append([]*Type(nil), q.Type().Overloads...)
 						if len(sigs) == 0 {
-							sigs = []*Type{q.Type}
+							sigs = []*Type{q.Type()}
 						}
-						props[i] = &Property{Name: sm.Name, Type: c.in.overloaded(append(sigs, mt)), Decl: q.Decl, Decls: append(append([]ast.Node(nil), q.Decls...), sm)}
+						props[i] = &Property{Name: sm.Name, ty: c.in.overloaded(append(sigs, mt)), Decl: q.Decl, Decls: append(append([]ast.Node(nil), q.Decls...), sm)}
 						merged = true
 						break
 					}
 				}
 				if !merged {
-					props = append(props, &Property{Name: sm.Name, Type: mt, Optional: sm.Optional, Decl: sm, Decls: []ast.Node{sm}})
+					props = append(props, &Property{Name: sm.Name, ty: mt, Optional: sm.Optional, Decl: sm, Decls: []ast.Node{sm}})
 				}
 				continue
 			case *ast.CallSignature:
@@ -2540,11 +2698,11 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 				merged := false
 				for i, q := range props {
 					if q.Name == p.Name && q.Accessor {
-						get, set := q.Type, t
+						get, set := q.Type(), t
 						if p.Accessor == "get" {
-							get, set = t, q.Type
+							get, set = t, q.Type()
 						}
-						np := &Property{Name: p.Name, Type: get, Accessor: true}
+						np := &Property{Name: p.Name, ty: get, Accessor: true}
 						if set != get {
 							np.Write = set
 						}
@@ -2553,11 +2711,11 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 					}
 				}
 				if !merged {
-					props = append(props, &Property{Name: p.Name, Type: t, Accessor: true})
+					props = append(props, &Property{Name: p.Name, ty: t, Accessor: true})
 				}
 				continue
 			}
-			props = append(props, &Property{Name: p.Name, Type: t, Optional: p.Optional, Readonly: p.Readonly, Written: true})
+			props = append(props, &Property{Name: p.Name, ty: t, Optional: p.Optional, Readonly: p.Readonly, Written: true})
 		}
 		return c.in.withSignatures(c.in.indexedOn(c.in.objectOf(props, partial, false, nil), strIdx, numIdx), calls, constructs)
 	case *ast.ImportType:
@@ -2689,6 +2847,13 @@ func (c *Checker) typeFromNode(n ast.TypeNode, scope *binder.Scope) *Type {
 				// that this compiler's declarations do not: any, the error
 				// type tsc gives a name it cannot resolve, without its
 				// diagnostic, which tsc's own library would not give.
+				return c.anyT
+			}
+			if c.opts.CompatJS() && n.Range.Pos.Line > 0 {
+				// JavaScript: a JSDoc type naming nothing (`{bool}`, a
+				// typedef never declared) is any, unchecked. (A reference
+				// the compiler made itself, of no source position, names
+				// its own type: no answer here.)
 				return c.anyT
 			}
 		case sym.Flags&binder.Class != 0:
@@ -3192,8 +3357,8 @@ func (c *Checker) buildingMember(t *Type, name string) {
 			sig := c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, t.Symbol.Scope)
 			c.leaveMember(key)
 			if !c.Unanswered(sig) && sig.Ret() != nil {
-				if p := t.Prop(name); p == nil || p.Type.Flags&Any != 0 {
-					t.setProp(&Property{Name: m.Name, Type: sig.Ret(), Accessor: true, Visibility: m.Visibility, WriteVisibility: m.Visibility, Owner: t.Symbol})
+				if p := t.Prop(name); p == nil || p.Type().Flags&Any != 0 {
+					t.setProp(&Property{Name: m.Name, ty: sig.Ret(), Accessor: true, Visibility: m.Visibility, WriteVisibility: m.Visibility, Owner: t.Symbol})
 				}
 			}
 			return
@@ -3202,7 +3367,7 @@ func (c *Checker) buildingMember(t *Type, name string) {
 		defer delete(c.memberBusy, key)
 		mt := c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, t.Symbol.Scope)
 		if !c.Unanswered(mt) && t.Prop(name) == nil {
-			t.setProp(&Property{Name: m.Name, Type: mt, Visibility: m.Visibility, Owner: t.Symbol, Decl: m})
+			t.setProp(&Property{Name: m.Name, ty: mt, Visibility: m.Visibility, Owner: t.Symbol, Decl: m})
 		}
 		return
 	}
@@ -3244,7 +3409,7 @@ func (c *Checker) thisMemberAhead(th *ast.ThisExpression, e *ast.MemberExpressio
 		if c.Unanswered(mt) {
 			return nil, false
 		}
-		c.memberDecls[e] = &Property{Name: m.Name, Type: mt, Visibility: m.Visibility, Owner: sym, Decl: m}
+		c.memberDecls[e] = &Property{Name: m.Name, ty: mt, Visibility: m.Visibility, Owner: sym, Decl: m}
 		return mt, true
 	}
 	return nil, false
@@ -3269,7 +3434,7 @@ func (c *Checker) cycleMember(t *Type, m *ast.FunctionDeclaration) {
 		c.report(diag.ReturnImplicitAnyCycle, m.NamePos, m.Name)
 	}
 	if m.AccessorKind == "get" {
-		t.setProp(&Property{Name: m.Name, Type: c.anyT, Accessor: true, Owner: t.Symbol})
+		t.setProp(&Property{Name: m.Name, ty: c.anyT, Accessor: true, Owner: t.Symbol})
 		return
 	}
 	if m.AccessorKind != "" {
@@ -3280,7 +3445,7 @@ func (c *Checker) cycleMember(t *Type, m *ast.FunctionDeclaration) {
 	sig := c.signatureType(m, m.Params, nil, m.Body, nil, t.Symbol.Scope)
 	c.skipReturn = saved
 	if !c.Unanswered(sig) && sig.Flags&Object != 0 && sig.Kind == Function {
-		t.setProp(&Property{Name: m.Name, Type: c.in.withResult(sig, c.anyT), Owner: t.Symbol, Decl: m})
+		t.setProp(&Property{Name: m.Name, ty: c.in.withResult(sig, c.anyT), Owner: t.Symbol, Decl: m})
 	}
 }
 
@@ -3377,7 +3542,7 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 		if f.Optional && !c.Unanswered(ft) {
 			ft = c.in.union(ft, c.missingT)
 		}
-		add(&Property{Name: f.Name, Type: ft, Optional: f.Optional, Readonly: f.Readonly, Visibility: f.Visibility, Owner: sym})
+		add(&Property{Name: f.Name, ty: ft, Optional: f.Optional, Readonly: f.Readonly, Visibility: f.Visibility, Owner: sym})
 		snapshot()
 	}
 	for _, m := range decl.Methods {
@@ -3399,13 +3564,13 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 			for i, q := range props {
 				if q.Name == m.Name && q.Accessor {
 					if m.AccessorKind == "get" {
-						props[i] = &Property{Name: m.Name, Type: at, Accessor: true, Visibility: m.Visibility, Owner: sym}
+						props[i] = &Property{Name: m.Name, ty: at, Accessor: true, Visibility: m.Visibility, Owner: sym}
 					}
 					at = nil
 				}
 			}
 			if at != nil {
-				add(&Property{Name: m.Name, Type: at, Accessor: true, Visibility: m.Visibility, Owner: sym})
+				add(&Property{Name: m.Name, ty: at, Accessor: true, Visibility: m.Visibility, Owner: sym})
 			}
 			snapshot()
 			continue
@@ -3416,7 +3581,7 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 		} else {
 			mt = c.signatureType(m, m.Params, m.ReturnType, m.Body, nil, sym.Scope)
 		}
-		add(&Property{Name: m.Name, Type: mt, Visibility: m.Visibility, Owner: sym, Decl: m})
+		add(&Property{Name: m.Name, ty: mt, Visibility: m.Visibility, Owner: sym, Decl: m})
 		snapshot()
 	}
 	for _, p := range inherited {
@@ -3424,7 +3589,7 @@ func (c *Checker) classObject(sym *binder.Symbol, decl *ast.ClassDeclaration) *T
 	}
 	if len(decl.DeclaredTypeParams().Names) == 0 {
 		if inst := c.instanceOf(sym, nil); inst != nil {
-			add(&Property{Name: "prototype", Type: inst, Readonly: true})
+			add(&Property{Name: "prototype", ty: inst, Readonly: true})
 		}
 	}
 	return c.in.classValue(c.in.objectOf(props, partial, false, nil), c.constructorType(sym), sym)
@@ -3865,6 +4030,22 @@ func (c *Checker) patternType(name string, elems []ast.ArrayPatternElem, props [
 				return c.unanswered, true
 			}
 			pt, msp = ut, nil
+		case !p.Rest && p.KeyExpr == nil && src.Flags&Object != 0 && src.Flags&Union == 0 && (src.Kind == Tuple || src.Kind == Array) && numericName(p.Key):
+			// `{ 0: a, 1: b } = pair`: the element at that index (tsc's
+			// numeric property of a tuple or array).
+			i, _ := strconv.Atoi(p.Key)
+			switch {
+			case src.Kind == Array:
+				pt = src.Elem
+			case i < len(src.Elems):
+				pt = src.Elems[i]
+				if i >= len(src.Elems)-src.Opt {
+					pt = c.in.union(pt, c.undefinedT)
+				}
+			default:
+				return c.anyT, true // past the end: tsc's error type (TS2339)
+			}
+			msp = nil
 		case p.Rest || from.Flags&Object == 0 || (from.Kind != Anonymous && from.Kind != Instance && from.Kind != Interface):
 			return c.unanswered, true
 		default:
@@ -3878,7 +4059,7 @@ func (c *Checker) patternType(name string, elems []ast.ArrayPatternElem, props [
 			if prop == nil {
 				return c.unanswered, true
 			}
-			pt = c.narrowPath(msp, prop.Type)
+			pt = c.narrowPath(msp, prop.Type())
 		}
 		if p.SubArray != nil || p.SubObject != nil {
 			if p.Default != nil && pt.Flags&Union != 0 {
@@ -4016,7 +4197,7 @@ func (c *Checker) reducedObjectIntersection(parts []*Type) (*Type, bool) {
 		return nil, false
 	}
 	for _, p := range m.Props {
-		if p.Type.Flags&Never != 0 && c.literalConflict(p.Name, parts) {
+		if p.Type().Flags&Never != 0 && c.literalConflict(p.Name, parts) {
 			return c.neverT, true
 		}
 	}
@@ -4028,7 +4209,7 @@ func (c *Checker) reducedObjectIntersection(parts []*Type) (*Type, bool) {
 func (c *Checker) literalConflict(name string, parts []*Type) bool {
 	n := 0
 	for _, t := range parts {
-		if p := t.Prop(name); p != nil && isUnit(p.Type) {
+		if p := t.Prop(name); p != nil && isUnit(p.Type()) {
 			n++
 		}
 	}
@@ -4346,7 +4527,7 @@ func (c *Checker) typeQueryType(n *ast.TypeQuery, scope *binder.Scope) *Type {
 		}
 		for _, p := range at.Props {
 			if p.Name == seg {
-				next = p.Type
+				next = p.Type()
 				break
 			}
 		}
@@ -4518,11 +4699,11 @@ func (c *Checker) iteratedType(t *Type) *Type {
 	// iterator]() { yield 1 } }`, a class declaring one): what the iterator
 	// it returns yields.
 	if t.Flags&Object != 0 && (t.Kind == Anonymous || t.Kind == Instance || t.Kind == Interface) && c.iterDepth < 4 {
-		if p := t.Prop("@@iterator"); p != nil && p.Type != nil && p.Type.Flags&Object != 0 && p.Type.Kind == Function && p.Type.Ret() != nil &&
-			!(t.Symbol != nil && p.Type.Ret().Symbol == t.Symbol) && p.Type.Ret() != c.thisT { // (an iterator returning itself reads its next below)
+		if p := t.Prop("@@iterator"); p != nil && p.Type() != nil && p.Type().Flags&Object != 0 && p.Type().Kind == Function && p.Type().Ret() != nil &&
+			!(t.Symbol != nil && p.Type().Ret().Symbol == t.Symbol) && p.Type().Ret() != c.thisT { // (an iterator returning itself reads its next below)
 			c.iterDepth++
 			defer func() { c.iterDepth-- }()
-			return c.iteratedType(p.Type.Ret())
+			return c.iteratedType(p.Type().Ret())
 		}
 		// An iterator itself (an object with a `next` method): the
 		// `value` of what next returns.
@@ -4538,10 +4719,10 @@ func (c *Checker) iteratedType(t *Type) *Type {
 // for a union of results; nil when t has no such next.
 func (c *Checker) protocolValue(t *Type, async bool) *Type {
 	p := t.Prop("next")
-	if p == nil || p.Type == nil || p.Type.Flags&Object == 0 || p.Type.Kind != Function || p.Type.Ret() == nil {
+	if p == nil || p.Type() == nil || p.Type().Flags&Object == 0 || p.Type().Kind != Function || p.Type().Ret() == nil {
 		return nil
 	}
-	r := p.Type.Ret()
+	r := p.Type().Ret()
 	if async {
 		r = c.awaited(r, 0)
 	}
@@ -4566,11 +4747,11 @@ func (c *Checker) protocolValue(t *Type, async bool) *Type {
 			// A primitive result has no `value` either (TS2490, TS2547).
 			return c.anyT
 		}
-		if dp := m.Prop("done"); dp != nil && dp.Type == c.trueT && len(members) > 1 {
+		if dp := m.Prop("done"); dp != nil && dp.Type() == c.trueT && len(members) > 1 {
 			continue // a return result (`{ done: true, value: R }`): no yielded value (tsc's yield type)
 		}
-		if vp := m.Prop("value"); vp != nil && vp.Type != nil {
-			vs = append(vs, vp.Type)
+		if vp := m.Prop("value"); vp != nil && vp.Type() != nil {
+			vs = append(vs, vp.Type())
 		}
 	}
 	if len(vs) == 0 {
@@ -4587,8 +4768,8 @@ func (c *Checker) asyncIteratedType(t *Type) *Type {
 		return c.anyT // tsc's error type after TS2504
 	}
 	if !c.Unanswered(t) && t.Flags&Object != 0 && (t.Kind == Anonymous || t.Kind == Instance) && c.iterDepth < 4 {
-		if p := t.Prop("@@asyncIterator"); p != nil && p.Type != nil && p.Type.Flags&Object != 0 && p.Type.Kind == Function && p.Type.Ret() != nil {
-			if it := p.Type.Ret(); it.Flags&Object != 0 {
+		if p := t.Prop("@@asyncIterator"); p != nil && p.Type() != nil && p.Type().Flags&Object != 0 && p.Type().Kind == Function && p.Type().Ret() != nil {
+			if it := p.Type().Ret(); it.Flags&Object != 0 {
 				if v := c.protocolValue(it, true); v != nil {
 					return v
 				}
@@ -5121,7 +5302,7 @@ func (c *Checker) impliedPatternType(elems []ast.ArrayPatternElem, props []ast.D
 		if p.Rest || p.KeyExpr != nil {
 			continue
 		}
-		ps = append(ps, &Property{Name: p.Key, Type: c.impliedLeafDefault(p.SubArray, p.SubObject, p.Default), Optional: p.Default != nil})
+		ps = append(ps, &Property{Name: p.Key, ty: c.impliedLeafDefault(p.SubArray, p.SubObject, p.Default), Optional: p.Default != nil})
 	}
 	if rest {
 		// A rest admits any other property (tsc's
@@ -5251,13 +5432,13 @@ func (c *Checker) refinedInstance(parts []*Type) *Type {
 			}
 			np := *q
 			switch {
-			case c.assignable(p.Type, q.Type):
-				np.Type = p.Type
-			case isUnit(p.Type) && isUnit(q.Type) && !p.Optional && !q.Optional:
+			case c.assignable(p.Type(), q.Type()):
+				np.SetType(p.Type())
+			case isUnit(p.Type()) && isUnit(q.Type()) && !p.Optional && !q.Optional:
 				// Two different literals of one property: no value has
 				// both (tsc reduces the intersection to never).
 				return c.neverT
-			case !c.assignable(q.Type, p.Type):
+			case !c.assignable(q.Type(), p.Type()):
 				return nil
 			}
 			np.Optional = p.Optional && q.Optional
@@ -5497,23 +5678,23 @@ func (c *Checker) mergeObjects(parts []*Type) *Type {
 			}
 			np := *q
 			switch {
-			case c.assignable(p.Type, q.Type):
-				np.Type = p.Type
-			case c.assignable(q.Type, p.Type):
-			case c.functionIntersection([]*Type{q.Type, p.Type}) != nil:
+			case c.assignable(p.Type(), q.Type()):
+				np.SetType(p.Type())
+			case c.assignable(q.Type(), p.Type()):
+			case c.functionIntersection([]*Type{q.Type(), p.Type()}) != nil:
 				// Two methods of one name (`Set<T> & any[]`'s forEach):
 				// both signatures, overloads in order.
-				np.Type = c.functionIntersection([]*Type{q.Type, p.Type})
-			case c.mergeable(p.Type) && c.mergeable(q.Type):
-				m := c.mergeObjects([]*Type{q.Type, p.Type})
+				np.SetType(c.functionIntersection([]*Type{q.Type(), p.Type()}))
+			case c.mergeable(p.Type()) && c.mergeable(q.Type()):
+				m := c.mergeObjects([]*Type{q.Type(), p.Type()})
 				if c.Unanswered(m) {
 					return m
 				}
-				np.Type = m
-			case disjointPrimitives(p.Type, q.Type):
-				np.Type = c.neverT
-			case isUnit(p.Type) && isUnit(q.Type):
-				np.Type = c.neverT // two different literals
+				np.SetType(m)
+			case disjointPrimitives(p.Type(), q.Type()):
+				np.SetType(c.neverT)
+			case isUnit(p.Type()) && isUnit(q.Type()):
+				np.SetType(c.neverT) // two different literals
 			default:
 				return c.unanswered
 			}
@@ -5732,7 +5913,7 @@ func (c *Checker) namespaceObjectType(ns *binder.Symbol) *Type {
 			if c.Unanswered(mt) {
 				return mt
 			}
-			props = append(props, &Property{Name: x.Name, Type: mt})
+			props = append(props, &Property{Name: x.Name, ty: mt})
 		}
 		t := c.in.object(props)
 		c.nsObjects[ns] = t
@@ -6048,6 +6229,27 @@ func (c *Checker) GlobalValueType(name string) *Type {
 		return c.unanswered
 	}
 	return c.typeOfSymbol(sym)
+}
+
+// GlobalValueLiteral is the type literal a library global's declaration
+// is annotated with (`declare var Response: { new (…): Response; … }`),
+// or nil.
+func (c *Checker) GlobalValueLiteral(name string) *ast.TypeLiteral {
+	if c.b.Globals == nil {
+		return nil
+	}
+	sym := c.b.Globals.Symbols.Get(name)
+	if sym == nil || sym.Flags&binder.Value == 0 {
+		return nil
+	}
+	for _, d := range sym.Declarations {
+		if v, ok := d.Node.(*ast.VarDeclaration); ok {
+			if lit, ok := v.TypeAnnot.(*ast.TypeLiteral); ok {
+				return lit
+			}
+		}
+	}
+	return nil
 }
 
 // unionLacksProp reports a union some member of which has no property key

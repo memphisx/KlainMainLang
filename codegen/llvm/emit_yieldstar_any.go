@@ -318,7 +318,6 @@ func (e *Emitter) emitYieldStarAny(gctx *generatorEmitCtx, ex *ast.YieldExpressi
 	thrown := e.loadGeneratorField(gctx.genObjReg, gctx.genTy, GeneratorThrownField)
 	// A next/return resumption leaves no thrown cell: read it only on throw.
 	thrownCell := e.freshReg()
-	e.ensureZeroCell()
 	e.emitInstr(fmt.Sprintf("%s = select i1 %s, "+irPtr+" %s, "+irPtr+" @__kml_zero_cell", thrownCell, isThrow, thrown.Ref))
 	tbox := e.thrownCellAny(thrownCell)
 	recv := e.freshReg()

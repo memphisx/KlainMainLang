@@ -1,9 +1,13 @@
 package tests
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"KlainMainLang/codegen/llvm"
 )
 
 // A module with a top-level `await` runs as a coroutine (TDD-00224): the
@@ -336,4 +340,82 @@ w.on('message', (m: string) => console.log("r:", m));
 w.on('exit', (c: number) => console.log("done", c));
 `,
 	}, "main.ts", "r: round0:2007890,round1:2007890,round2:2007890\ndone 0")
+}
+
+// Node's unsettled-await warning names the await the module is parked at:
+// its URL and line, the line, and a caret under the await (under the
+// binding of a `for await` loop, which an await in its body hands back).
+// The file is compiled by the CLI and run by Node from the same path, and
+// stdout, stderr and the exit code must all match.
+func TestE2EModuleTaskUnsettledWarningNamesTheAwait(t *testing.T) {
+	node := nodeStripTypesBin(t)
+	cli := buildCLI(t)
+	for i, src := range []string{`
+const v = await new Promise<number>(r => setTimeout(() => r(7), 5));
+console.log("tla", v);
+if (v) {
+    const w = await new Promise(() => {}); console.log(w);
+}
+`, `
+async function* g() { yield 1; yield 2; await new Promise(() => {}); }
+console.log("s"); for await (const x of g()) {
+  await new Promise(r => setTimeout(r, 1));
+  console.log(x);
+}
+`} {
+		dir := tempDir(t)
+		file := filepath.Join(dir, "prog.mts")
+		if err := os.WriteFile(file, []byte(src), 0644); err != nil {
+			t.Fatal(err)
+		}
+		bin := filepath.Join(dir, "prog"+llvm.HostExeSuffix())
+		if out, err := exec.Command(cli, "-o", bin, file).CombinedOutput(); err != nil {
+			t.Fatalf("compile %d: %v\n%s", i, err, out)
+		}
+		run := func(name string, args ...string) (string, string, int) {
+			cmd := exec.Command(name, args...)
+			var so, se strings.Builder
+			cmd.Stdout, cmd.Stderr = &so, &se
+			_ = cmd.Run()
+			return so.String(), se.String(), cmd.ProcessState.ExitCode()
+		}
+		oo, oe, oc := run(bin)
+		no, ne, nc := run(node, file) // with its warnings: the one compared is one
+		if oo != no || oe != ne || oc != nc {
+			t.Errorf("program %d differs from node:\n--- ours (exit %d) ---\n%s%s\n--- node (exit %d) ---\n%s%s", i, oc, oo, oe, nc, no, ne)
+		}
+	}
+}
+
+// A module reached through a symbolic link is named by its real path, as
+// Node names it (no --preserve-symlinks): in its frames as in the
+// unsettled-await warning.
+func TestE2EFramesNameTheRealPath(t *testing.T) {
+	node := nodeStripTypesBin(t)
+	cli := buildCLI(t)
+	real := tempDir(t)
+	link := filepath.Join(tempDir(t), "via")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink: %v", err)
+	}
+	src := "function f() { return new Error(\"x\").stack!.split(\"\\n\").slice(0, 2).join(\"\\n\"); }\nconsole.log(f());\nexport {};\n"
+	if err := os.WriteFile(filepath.Join(real, "prog.mts"), []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(link, "prog.mts")
+	bin := filepath.Join(real, "prog"+llvm.HostExeSuffix())
+	if out, err := exec.Command(cli, "-o", bin, file).CombinedOutput(); err != nil {
+		t.Fatalf("compile: %v\n%s", err, out)
+	}
+	ours, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	theirs, err := exec.Command(node, file).Output()
+	if err != nil {
+		t.Fatalf("node: %v", err)
+	}
+	if string(ours) != string(theirs) {
+		t.Errorf("differs from node:\n--- ours ---\n%s--- node ---\n%s", ours, theirs)
+	}
 }

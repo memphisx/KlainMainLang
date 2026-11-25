@@ -20,44 +20,6 @@ typedef struct {
     Elem *data;
 } Arr;
 
-/* nb_* mirror __kml_nb_pack/tag/pay (runtime_nanbox.go — keep in sync). */
-static i64 nb_double(double d) {
-    unsigned long long bits;
-    if (d != d) bits = 0x7FF8000000000000ULL;
-    else memcpy(&bits, &d, 8); /* scratch */
-    return (i64)(bits + (1ULL << 49));
-}
-static i64 nb_pack(i64 tag, i64 pay) {
-    switch (tag) {
-    case 0: return nb_double((double)pay);
-    case 1: { double d; memcpy(&d, &pay, 8); return nb_double(d); } /* scratch */
-    case 3: return pay ? 7 : 6;
-    case 4: return 2;
-    case 5: return 10;
-    case 2: return pay;
-    case 6: return pay | 1;
-    case 7: return pay | 2;
-    case 8: return pay | 3;
-    case 9: return pay | 4;
-    case 10: return pay | 5;
-    case 11: return pay | 6;
-    case 12: return pay | 7;
-    default: return 10;
-    }
-}
-static i64 nb_tag(i64 word) {
-    unsigned long long v = (unsigned long long)word;
-    static const i64 kindTag[8] = {2, 6, 7, 8, 9, 10, 11, 12};
-    if (v >= (1ULL << 49)) return 1;
-    if (v < 65536) return v == 2 ? 4 : (v == 6 || v == 7) ? 3 : 5;
-    return kindTag[v & 7];
-}
-static i64 nb_pay(i64 word) {
-    unsigned long long v = (unsigned long long)word;
-    if (v >= (1ULL << 49)) return (i64)(v - (1ULL << 49));
-    if (v < 65536) return v == 7;
-    return (v & 7) == 0 ? (i64)v : (i64)(v & ~7ULL);
-}
 
 void *__kml_dynarr_new(i64 cap0) {
     Arr *a = (Arr *)kml_alloc(KML_HEAP_WORDS, sizeof(Arr));
@@ -74,14 +36,24 @@ void __kml_dynarr_grow(void *ap, i64 need) {
     Arr *a = (Arr *)ap;
     if (need < a->cap) return;
     i64 nc = a->cap * 2 > need + 1 ? a->cap * 2 : need + 1;
-    a->data = (Elem *)kml_realloc(KML_HEAP_WORDS, a->data, (size_t)nc * sizeof(Elem));
+    /* Past V8's largest fast-elements store (2^27 slots), or when the
+     * allocation fails, the program ends as Node's does, before the
+     * buffer is touched (holes.c ends a dense walk the same way). */
+    if (need >= (1LL << 27)) nc = -1;
+    else if (nc > (1LL << 27)) nc = 1LL << 27;
+    Elem *d = nc < 0 ? NULL : (Elem *)kml_realloc(KML_HEAP_WORDS, a->data, (size_t)nc * sizeof(Elem));
+    if (!d) {
+        fprintf(stderr, "FATAL ERROR: invalid array length Allocation failed - JavaScript heap out of memory\n");
+        abort();
+    }
+    a->data = d;
     a->cap = nc;
 }
 
 void __kml_dynarr_store(void *ap, i64 i, i64 v) {
     Elem *e = &((Arr *)ap)->data[i];
-    e->tag = nb_tag(v);
-    KML_STORE_PTR(&e->pay, nb_pay(v));
+    e->tag = kml_nb_tag(v);
+    KML_STORE_PTR(&e->pay, kml_nb_pay(v));
 }
 
 void __kml_dynarr_push(void *ap, i64 v) {
@@ -94,7 +66,7 @@ void __kml_dynarr_push(void *ap, i64 v) {
 i64 __kml_dynarr_at(void *ap, i64 i) {
     Arr *a = (Arr *)ap;
     if (i < 0 || i >= a->len) return 10;
-    return nb_pack(a->data[i].tag, a->data[i].pay);
+    return kml_nb_pack(a->data[i].tag, a->data[i].pay);
 }
 
 /* A hole — an element never set, or deleted — is element tag 13, which
@@ -146,10 +118,11 @@ i64 __kml_dynarr_index(const char *key) {
     return v;
 }
 
-/* Array.prototype's method named key, as an array's property read finds it:
- * generated when the program reads one as a value; this weak default
- * (undefined) stands in otherwise. */
-__attribute__((weak)) i64 __kml_array_proto_get(const char *key) { (void)key; return 10; }
+/* Array.prototype's property named key, as an array's property read finds
+ * it (an accessor run with recv, the array, as this): generated when the
+ * program reads a method as a value or builds Array.prototype's object;
+ * this weak default (undefined) stands in otherwise. */
+__attribute__((weak)) i64 __kml_array_proto_get(const char *key, i64 recv) { (void)key; (void)recv; return 10; }
 /* Array.prototype's [Symbol.iterator] once the program replaced it
  * (dynobj.c); this weak default stands in without the dynamic runtime. */
 __attribute__((weak)) int __kml_array_iter_override(const char *key, i64 *out) { (void)key; (void)out; return 0; }
@@ -164,13 +137,13 @@ extern int __kml_shape_expando_put(void *obj, const char *key, i64 v, i64 recv);
 extern int __kml_shape_expando_attrs(void *obj, const char *key);
 
 i64 __kml_dynarr_get_by_key(void *a, const char *key) {
-    if (strcmp(key, "length") == 0) return nb_pack(0, ((Arr *)a)->len);
+    if (strcmp(key, "length") == 0) return kml_nb_pack(0, ((Arr *)a)->len);
     i64 idx = __kml_dynarr_index(key);
     if (idx < 0) {
         i64 v;
         if (__kml_shape_expando_get_recv(a, key, (i64)a | 6, &v)) return v;
         if (__kml_array_iter_override(key, &v)) return v;
-        return __kml_array_proto_get(key);
+        return __kml_array_proto_get(key, (i64)a | 6);
     }
     if (__kml_dynarr_is_hole(a, idx)) {
         /* a hole, or an accessor element */
@@ -264,4 +237,51 @@ void __kml_dynarr_delete_key(void *ap, const char *key) {
     i64 idx = __kml_dynarr_index(key);
     if (idx < 0) __kml_shape_expando_delete(ap, key);
     else __kml_dynarr_delete_index(ap, idx);
+}
+
+/* RegExp exec's `indices` (the d flag): a boxed array of each group's
+ * [start, end] (undefined for an unmatched group) whose `groups` is a
+ * null-prototype dictionary of the named groups' pairs, or undefined when
+ * the pattern names none. count, esize and table are PCRE2's name table
+ * (see __kml_regex_groups); offsets are bytes, in UTF-16 code units when
+ * utf16 is set, as exec's index. */
+extern void *__kml_dynobj_new(void);
+extern _Bool __kml_dynobj_set_proto(void *o, void *proto);
+extern void __kml_dynobj_set(void *o, const char *key, i64 v);
+extern i64 __kml_regex_byte_to_utf16(const unsigned char *str, i64 bytelen);
+#define KML_RX_UNSET (~(size_t)0)
+static i64 kml_rx_off(int utf16, const char *s, size_t off) {
+    return utf16 ? __kml_regex_byte_to_utf16((const unsigned char *)s, (i64)off) : (i64)off;
+}
+static i64 kml_rx_pair(int utf16, const char *s, const size_t *ovec, int rc, unsigned int n) {
+    if ((int)n >= rc || ovec[2 * n] == KML_RX_UNSET) return 10; /* undefined */
+    void *p = __kml_dynarr_new(2);
+    __kml_dynarr_push(p, kml_nb_double((double)kml_rx_off(utf16, s, ovec[2 * n])));
+    __kml_dynarr_push(p, kml_nb_double((double)kml_rx_off(utf16, s, ovec[2 * n + 1])));
+    return (i64)p | 6;
+}
+i64 __kml_regex_indices(int utf16, unsigned int count, unsigned int esize, const unsigned char *table, const char *subject, const size_t *ovec, int rc, i64 ngroups) {
+    void *arr = __kml_dynarr_new(ngroups);
+    for (i64 i = 0; i < ngroups; i++) __kml_dynarr_push(arr, kml_rx_pair(utf16, subject, ovec, rc, (unsigned int)i));
+    i64 groups = 10;
+    if (count > 0 && table != NULL) {
+        void *g = __kml_dynobj_new();
+        __kml_dynobj_set_proto(g, NULL);
+        unsigned int maxn = 0;
+        for (unsigned int i = 0; i < count; i++) {
+            const unsigned char *e = table + (size_t)i * esize;
+            unsigned int n = ((unsigned int)e[0] << 8) | e[1];
+            if (n > maxn) maxn = n;
+        }
+        for (unsigned int want = 1; want <= maxn; want++) { /* the pattern's order */
+            for (unsigned int i = 0; i < count; i++) {
+                const unsigned char *e = table + (size_t)i * esize;
+                if ((((unsigned int)e[0] << 8) | e[1]) == want)
+                    __kml_dynobj_set(g, (const char *)e + 2, kml_rx_pair(utf16, subject, ovec, rc, want));
+            }
+        }
+        groups = (i64)g | 5;
+    }
+    __kml_dynarr_set_by_key(arr, "groups", groups);
+    return (i64)arr | 6;
 }

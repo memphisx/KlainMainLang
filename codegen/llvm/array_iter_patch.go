@@ -24,19 +24,38 @@ func (e *Emitter) arrayIterPatchable() bool {
 		e.arrayIterScan = 1
 		spreads := map[ast.Expression]bool{}
 		proto, iter := false, false
-		ast.Inspect(e.prog, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.SpreadElement:
-				spreads[x.Arg] = true
-			case *ast.MemberExpression:
-				if id, ok := x.Object.(*ast.Identifier); ok {
-					proto = proto || id.Name == "Array" && x.Property == "prototype"
-					iter = iter || id.Name == "Symbol" && x.Property == "iterator"
-				}
+		// %ArrayIteratorPrototype%.next replaced: read through
+		// Object.getPrototypeOf, written as a `next` property.
+		getProto, nextWrite := false, false
+		// The program's own code: a builtin library module reads
+		// Array.prototype's members (an arguments object's descriptors) but
+		// never replaces its [Symbol.iterator].
+		for _, st := range e.prog.Body {
+			if e.fileIsLib(e.prog.StmtFiles[st]) {
+				continue
 			}
-			return true
-		})
-		if proto && iter {
+			ast.Inspect(st, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.SpreadElement:
+					spreads[x.Arg] = true
+				case *ast.MemberExpression:
+					if id, ok := x.Object.(*ast.Identifier); ok {
+						proto = proto || id.Name == "Array" && x.Property == "prototype"
+						iter = iter || id.Name == "Symbol" && x.Property == "iterator"
+						getProto = getProto || id.Name == "Object" && x.Property == "getPrototypeOf" || id.Name == "Reflect" && x.Property == "getPrototypeOf"
+					}
+				case *ast.AssignmentExpression:
+					if m, ok := x.Left.(*ast.MemberExpression); ok && m.Property == "next" {
+						nextWrite = true
+					}
+				case *ast.StringLiteral:
+					nextWrite = nextWrite || x.Value == "next"
+				}
+				return true
+			})
+		}
+		if proto && iter || getProto && nextWrite {
+			e.arrIterNextPatchable = getProto && nextWrite
 			e.arrayIterScan = 2
 			e.spreadArgs = spreads
 		}

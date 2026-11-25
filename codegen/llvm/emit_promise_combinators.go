@@ -23,11 +23,7 @@ const combStateIR = "{ " + irPtr + ", " + irPtr + ", i64, i64 }"
 // emitAsyncCombinator builds the combinator's result for members (ptrReg,
 // lenReg) of Promise<innerTy>.
 func (e *Emitter) emitAsyncCombinator(kind, ptrReg, lenReg string, innerTy Type) Value {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
 	q := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_task_alloc_promise()", q))
 
@@ -182,7 +178,6 @@ func init() {
 		"any": {
 			outElem: func(Type) Type { return TypeAny }, // the rejection reasons, boxed
 			finish: func(e *Emitter, q, out, n string, innerTy Type) {
-				e.ensureExceptionHelpers()
 				agg := e.buildAggregateErrorObj(e.internString("All promises were rejected"), e.internString("AggregateError"), out, n)
 				bits := e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = ptrtoint "+irPtr+" %s to i64", bits, agg))

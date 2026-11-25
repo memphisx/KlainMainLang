@@ -285,6 +285,17 @@ func literalKey(e ast.Expression) (string, bool) {
 		if len(k.Exprs) == 0 {
 			return strings.Join(k.Quasis, ""), true
 		}
+	case *ast.NullLiteral:
+		// `o[null]` reads the member named "null" (the key's string).
+		if k.IsUndefined {
+			return "undefined", true
+		}
+		return "null", true
+	case *ast.BooleanLiteral:
+		if k.Value {
+			return "true", true
+		}
+		return "false", true
 	}
 	return "", false
 }
@@ -315,15 +326,15 @@ func (c *Checker) narrowedMember(e ast.Expression, declared *Type) *Type {
 // closureFlow reports whether a reference whose root is not its function's
 // own (a captured binding, an arrow function's `this`) narrows along f, the
 // closure's own flow, from its declared type at the closure's start — as a
-// captured name does (narrowedType). A builtin declaration's binding reads
-// as declared.
+// captured name does (narrowedType); a builtin global's members too
+// (`if (process.getuid) process.getuid()`).
 func (c *Checker) closureFlow(root ast.Expression, f *binder.FlowNode) bool {
 	if f == nil {
 		return false
 	}
 	if id, ok := root.(*ast.Identifier); ok {
 		sym, ok := c.b.Resolve(id)
-		return ok && sym != nil && !c.evolving[sym] && !c.inLibrary(sym.Scope)
+		return ok && sym != nil && !c.evolving[sym]
 	}
 	return true
 }
@@ -476,7 +487,7 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			return m.t, m.deps
 		}
 		w.onPath[f] = true
-		mark := len(c.cuts)
+		mark, reBefore := len(c.cuts), c.reentries
 		var ts []*Type
 		var deps []*binder.FlowNode
 		for _, a := range f.Antecedents {
@@ -493,10 +504,11 @@ func (c *Checker) flowType(f *binder.FlowNode, r ref, declared *Type, w *flowWal
 			t = c.reduceDerived(t)
 		}
 		w.memo[f] = flowMemo{t, deps}
-		if len(deps) == 0 && !c.openCutSince(mark) {
-			// A complete answer: no loop outside f cut it, and no assignment
-			// it read is a recursion cut still open (one opened and closed
-			// within this walk is settled).
+		if len(deps) == 0 && !c.openCutSince(mark) && !(c.reentries > reBefore && c.Unanswered(t)) {
+			// A complete answer: no loop outside f cut it, no assignment it
+			// read is a recursion cut still open (one opened and closed
+			// within this walk is settled), and it is not unanswered only
+			// because a query still being computed was met (TypeOf's rule).
 			c.flowCache[k] = t
 		}
 		return t, deps
@@ -877,9 +889,9 @@ func (c *Checker) narrowBy(t *Type, r ref, cond ast.Expression, truthy bool) *Ty
 				return true
 			}
 			if truthy {
-				return canBe(p.Type, truthyMember)
+				return canBe(p.Type(), truthyMember)
 			}
-			return canBe(p.Type, falsyMember)
+			return canBe(p.Type(), falsyMember)
 		})
 	}
 	switch e := cond.(type) {
@@ -1029,7 +1041,7 @@ func (c *Checker) narrowByEquality(t *Type, r ref, ref, other ast.Expression, eq
 						return true
 					}
 					p := discProp(mt, m.Property)
-					return p == nil || c.narrowByTypeof(p.Type, lit, equal).Flags&Never == 0
+					return p == nil || c.narrowByTypeof(p.Type(), lit, equal).Flags&Never == 0
 				})
 			}
 			if equal == (lit != "undefined") && c.optionalChainContains(u.Arg, r) {
@@ -1405,7 +1417,7 @@ func (c *Checker) narrowByDiscriminant(t *Type, r ref, ref, other ast.Expression
 			return true
 		}
 		can, only := false, true
-		for _, pt := range members(p.Type) {
+		for _, pt := range members(p.Type()) {
 			// An enum member and a plain literal of its value are the
 			// same value (tsc's comparable relation).
 			same := pt == ot || pt.Flags&ot.Flags&Undefined != 0 || loose && ot.Flags&(Null|Undefined) != 0 && pt.Flags&Nullish != 0 ||
@@ -1484,11 +1496,11 @@ func isDiscriminant(t *Type, name string) bool {
 		}
 		count++
 		if first == nil {
-			first = p.Type
-		} else if p.Type != first {
+			first = p.Type()
+		} else if p.Type() != first {
 			uniform = false
 		}
-		literal = literal || isLiteralType(p.Type)
+		literal = literal || isLiteralType(p.Type())
 	}
 	// A union already narrowed to one member keeps discriminating by a
 	// literal property (TypeScript tests the declared union).
@@ -1501,7 +1513,7 @@ func isDiscriminant(t *Type, name string) bool {
 func discProp(m *Type, name string) *Property {
 	if m.Kind == Tuple {
 		if i, err := strconv.Atoi(name); err == nil && i >= 0 && i < len(m.Elems) {
-			return &Property{Name: name, Type: m.Elems[i]}
+			return &Property{Name: name, ty: m.Elems[i]}
 		}
 		return nil
 	}
@@ -1628,15 +1640,15 @@ func (c *Checker) constructedType(ctor *Type) *Type {
 	if ctor == nil || c.Unanswered(ctor) || ctor.Flags&Object == 0 {
 		return nil
 	}
-	if p := ctor.Prop("@@hasInstance"); p != nil && p.Type != nil && p.Type.Flags&Object != 0 && p.Type.Kind == Function && p.Type.Predicate != nil &&
-		p.Type.Predicate.Type != nil && !p.Type.Predicate.Asserts && p.Type.Predicate.Type.Flags&Object != 0 {
+	if p := ctor.Prop("@@hasInstance"); p != nil && p.Type() != nil && p.Type().Flags&Object != 0 && p.Type().Kind == Function && p.Type().Predicate != nil &&
+		p.Type().Predicate.Type != nil && !p.Type().Predicate.Asserts && p.Type().Predicate.Type.Flags&Object != 0 {
 		// A `[Symbol.hasInstance](v): v is X` method: X (tsc's
 		// getSymbolHasInstanceMethodOfObjectType).
-		return p.Type.Predicate.Type
+		return p.Type().Predicate.Type
 	}
-	if p := ctor.Prop("prototype"); p != nil && p.Type != nil && !c.Unanswered(p.Type) && p.Type.Flags&Any == 0 {
-		if p.Type.Flags&Object != 0 {
-			return p.Type
+	if p := ctor.Prop("prototype"); p != nil && p.Type() != nil && !c.Unanswered(p.Type()) && p.Type().Flags&Any == 0 {
+		if p.Type().Flags&Object != 0 {
+			return p.Type()
 		}
 		return nil
 	}
@@ -1852,7 +1864,7 @@ func (c *Checker) dottedType(e ast.Expression) *Type {
 				}
 				return c.anyT
 			}
-			ts = append(ts, p.Type)
+			ts = append(ts, p.Type())
 		}
 		if len(ts) == 1 {
 			return ts[0]
@@ -1986,9 +1998,18 @@ func (c *Checker) unknownGuard(ft *Type, e *ast.CallExpression, r ref) bool {
 			return false
 		}
 	}
-	// An undeclared callee in JavaScript (`print(…)`) is any, tsc's error
-	// type: it asserts nothing.
-	if id, ok := e.Callee.(*ast.Identifier); ok && c.opts.CompatJS() {
+	// An undeclared callee in JavaScript (`print(…)`), or a member of an
+	// undeclared name (`punycode.encode(…)`), is any, tsc's error type: it
+	// asserts nothing.
+	root := e.Callee
+	for {
+		m, ok := root.(*ast.MemberExpression)
+		if !ok {
+			break
+		}
+		root = m.Object
+	}
+	if id, ok := root.(*ast.Identifier); ok && c.opts.CompatJS() {
 		if sym, _ := c.b.Resolve(id); sym == nil && c.jsUndeclaredName(id.Name, c.b.LookupScope(id)) {
 			return false
 		}
@@ -2693,7 +2714,7 @@ func (c *Checker) constantRef(r ref) bool {
 			if p == nil || !p.Readonly {
 				return false
 			}
-			t = p.Type
+			t = p.Type()
 		}
 		return true
 	}
@@ -2914,7 +2935,7 @@ func (c *Checker) destructuredType(n ast.Expression) *Type {
 				}
 			case obj.Flags&Object != 0 && (obj.Kind == Anonymous || obj.Kind == Instance || obj.Kind == Interface):
 				if pr := obj.Prop(key); pr != nil {
-					return pr.Type
+					return pr.Type()
 				}
 			}
 			return c.unanswered

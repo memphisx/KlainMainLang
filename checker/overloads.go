@@ -132,7 +132,7 @@ func (c *Checker) resolveOverload(e *ast.CallExpression, fn *Type) *Type {
 func (c *Checker) refitOverload(e *ast.CallExpression, fn *Type, sig *Type, m map[*Type]*Type) (*Type, map[*Type]*Type) {
 	hasCallback := false
 	for _, a := range e.Args {
-		hasCallback = hasCallback || contextSensitive(a) && isFunctionLiteral(a)
+		hasCallback = hasCallback || c.contextSensitive(a) && isFunctionLiteral(a)
 	}
 	if !hasCallback || len(fn.Overloads) < 2 || c.refitting[e] {
 		return sig, m
@@ -178,7 +178,7 @@ func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*T
 		if sp, ok := a.(*ast.SpreadElement); ok {
 			x = sp.Arg // a spread is typed by its operand
 		}
-		if !contextSensitive(x) && !isEmptyArrayLiteral(x) && c.Unanswered(c.TypeOf(x)) {
+		if !c.contextSensitive(x) && !isEmptyArrayLiteral(x) && c.Unanswered(c.TypeOf(x)) {
 			return nil, nil, false
 		}
 	}
@@ -193,7 +193,7 @@ func (c *Checker) pickOverload(e *ast.CallExpression, fn *Type, guards bool) (*T
 		if sp, ok := a.(*ast.SpreadElement); ok {
 			x = sp.Arg
 		}
-		if !contextSensitive(x) && c.TypeOf(x).Flags&Any != 0 {
+		if !c.contextSensitive(x) && c.TypeOf(x).Flags&Any != 0 {
 			anyArg = true
 		}
 	}
@@ -270,7 +270,7 @@ func (c *Checker) pickOverloadPass(e *ast.CallExpression, fn *Type, guards, subt
 			if !fits {
 				break
 			}
-			if contextSensitive(a) {
+			if c.contextSensitive(a) {
 				// A function literal needs a parameter that can hold a
 				// function (`mustCall(fn)`, not `mustCall(exact?: number)`).
 				if isFunctionLiteral(a) && !c.mayHoldFunction(paramAt(sig, i)) {
@@ -642,7 +642,7 @@ func (c *Checker) literalObjectType(ol *ast.ObjectLiteral) *Type {
 		if t == nil || c.Unanswered(t) {
 			return nil
 		}
-		props = append(props, &Property{Name: p.Key, Type: t})
+		props = append(props, &Property{Name: p.Key, ty: t})
 	}
 	return c.in.object(props)
 }
@@ -701,10 +701,14 @@ func (c *Checker) argMisfit(e *ast.CallExpression, sig *Type) (int, *Type) {
 		// A function literal's annotated parameters meet the callback's
 		// contravariantly (strictFunctionTypes): `(e, a: number) => …` does
 		// not take a string `a`, annotated throughout or not.
-		if p := paramAt(sig, i); p != nil && isFunctionLiteral(a) && !hasTypeParam(p) && c.literalParamsMisfit(a, c.instantiate(p, m)) {
-			return i, c.instantiate(p, m)
+		// Against the instantiation inferred for a generic one (`reduce<U>`
+		// with U = number | undefined does not take `(acc: number, v)`).
+		if p := paramAt(sig, i); p != nil && isFunctionLiteral(a) {
+			if ip := c.instantiate(p, m); !c.Unanswered(ip) && !hasTypeParam(ip) && c.literalParamsMisfit(a, ip) {
+				return i, ip
+			}
 		}
-		if contextSensitive(a) {
+		if c.contextSensitive(a) {
 			// Its result must fit the instantiated callback: `xs.reduce((a,
 			// b) => "s", 0)` fits neither `=> number` overload (TS2769).
 			if p := paramAt(sig, i); p != nil && isFunctionLiteral(a) {
@@ -969,7 +973,7 @@ func (c *Checker) weakFit(e *ast.CallExpression, sig *Type, uninferred map[*Type
 	known = true
 	for tp := range uninferred {
 		for i, a := range e.Args {
-			if contextSensitive(a) {
+			if c.contextSensitive(a) {
 				continue
 			}
 			if p := paramAt(sig, i); p != nil && occurs(tp, p) {

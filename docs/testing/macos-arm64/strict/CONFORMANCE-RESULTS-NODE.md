@@ -12,17 +12,17 @@ Interpretation, misclassification history, and the ranked remaining-work list li
 
 ## Overall
 
-3957 files total: **366 passed**, 2217 failed, 1374 skipped (out of scope).
+3957 files total: **388 passed**, 2194 failed, 1375 skipped (out of scope).
 
-Of the 2583 files that compiled far enough to run, **366 passed (14.2%)**.
+Of the 2582 files that compiled far enough to run, **388 passed (15.0%)**.
 
 ## By suite
 
 | Suite | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
-| parallel | 356 | 2117 | 1070 | 3543 |
+| parallel | 376 | 2096 | 1071 | 3543 |
 | sequential | 0 | 29 | 92 | 121 |
-| es-module | 6 | 51 | 118 | 175 |
+| es-module | 8 | 49 | 118 | 175 |
 | message | 1 | 8 | 2 | 11 |
 | internet | 3 | 12 | 23 | 38 |
 | pummel | 0 | 0 | 52 | 52 |
@@ -33,24 +33,24 @@ Of the 2583 files that compiled far enough to run, **366 passed (14.2%)**.
 | Module | Passed | Failed | Skipped | Total |
 |---|---|---|---|---|
 | http | 10 | 338 | 41 | 389 |
-| http2 | 4 | 206 | 48 | 258 |
-| fs | 42 | 119 | 88 | 249 |
+| http2 | 5 | 205 | 48 | 258 |
+| fs | 46 | 115 | 88 | 249 |
 | tls | 2 | 128 | 71 | 201 |
-| stream | 52 | 101 | 20 | 173 |
-| net | 13 | 115 | 42 | 170 |
+| stream | 55 | 98 | 20 | 173 |
+| net | 14 | 114 | 42 | 170 |
 | worker | 9 | 108 | 20 | 137 |
-| esm | 4 | 43 | 81 | 128 |
+| esm | 6 | 41 | 81 | 128 |
 | child | 6 | 59 | 46 | 111 |
-| crypto | 13 | 47 | 42 | 102 |
+| crypto | 17 | 43 | 42 | 102 |
 | vm | 0 | 75 | 19 | 94 |
 | process | 18 | 51 | 21 | 90 |
 | dgram | 27 | 33 | 26 | 86 |
-| cluster | 7 | 56 | 22 | 85 |
+| cluster | 8 | 55 | 22 | 85 |
 | repl | 1 | 36 | 41 | 78 |
 | https | 3 | 51 | 14 | 68 |
 | inspector | 1 | 1 | 64 | 66 |
 | whatwg | 8 | 15 | 40 | 63 |
-| buffer | 8 | 39 | 15 | 62 |
+| buffer | 7 | 40 | 15 | 62 |
 | timers | 18 | 25 | 16 | 59 |
 | zlib | 15 | 32 | 6 | 53 |
 | domain | 0 | 28 | 22 | 50 |
@@ -63,14 +63,14 @@ Of the 2583 files that compiled far enough to run, **366 passed (14.2%)**.
 | diagnostics | 8 | 21 | 3 | 32 |
 | module | 1 | 16 | 12 | 29 |
 | snapshot | 0 | 12 | 17 | 29 |
-| webcrypto | 1 | 18 | 10 | 29 |
-| event | 5 | 17 | 6 | 28 |
+| webcrypto | 3 | 16 | 10 | 29 |
+| event | 6 | 16 | 6 | 28 |
 | permission | 0 | 18 | 10 | 28 |
 | util | 1 | 10 | 17 | 28 |
 | stream2 | 4 | 20 | 3 | 27 |
 | eslint | 0 | 0 | 24 | 24 |
 | internal | 0 | 1 | 21 | 22 |
-| readline | 2 | 10 | 9 | 21 |
+| readline | 3 | 9 | 9 | 21 |
 | cli | 0 | 11 | 9 | 20 |
 
 ## Top failure reasons
@@ -80,45 +80,45 @@ Bucketed first line of each FAIL — the leverage map for what to implement/fix 
 | Count | Reason |
 |---|---|
 | 313 | COMPILE_ERROR: parameter '%s' implicitly has an '%s' type |
-| 299 | COMPILE_ERROR: object is possibly '%s' |
-| 180 | COMPILE_ERROR: property '%s' does not exist on type '%s' |
-| 114 | COMPILE_ERROR: argument of type '%s' is not assignable to parameter of type '%s' |
-| 97 | COMPILE_ERROR: variable '%s' implicitly has type '%s' in some locations where its type cannot be det… |
+| 304 | COMPILE_ERROR: object is possibly '%s' |
+| 191 | COMPILE_ERROR: property '%s' does not exist on type '%s' |
+| 116 | COMPILE_ERROR: argument of type '%s' is not assignable to parameter of type '%s' |
+| 107 | COMPILE_ERROR: '%s' implicitly has type '%s' because it does not have a type annotation |
+| 98 | COMPILE_ERROR: variable '%s' implicitly has type '%s' in some locations where its type cannot be det… |
 | 85 | MODULE_NOT_IMPLEMENTED: vm |
 | 76 | COMPILE_ERROR: '%s' is possibly '%s' |
 | 72 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Expected values to be strictly equal: |
-| 69 | COMPILE_ERROR: '%s' implicitly has type '%s' because it does not have a type annotation |
-| 52 | COMPILE_ERROR: no overload matches this call |
-| 50 | COMPILE_ERROR: value of type '%s' is not callable; did you mean to include '%s'? |
-| 45 | COMPILE_ERROR: type '%s' is not assignable to type '%s' |
-| 43 | COMPILE_ERROR: cannot find name '%s' |
+| 54 | COMPILE_ERROR: value of type '%s' is not callable; did you mean to include '%s'? |
+| 53 | COMPILE_ERROR: no overload matches this call |
+| 44 | COMPILE_ERROR: type '%s' is not assignable to type '%s' |
 | 41 | COMPILE_ERROR: '%s' has no exported member '%s' |
 | 36 | MODULE_NOT_IMPLEMENTED: domain |
 | 30 | COMPILE_ERROR: A '%s' statement can only be used within a function body. |
-| 22 | COMPILE_ERROR: cannot invoke an object which is possibly '%s' |
+| 26 | COMPILE_ERROR: cannot invoke an object which is possibly '%s' |
+| 25 | COMPILE_ERROR: cannot find name '%s' |
 | 21 | MODULE_NOT_IMPLEMENTED: v8 |
 | 18 | MODULE_NOT_IMPLEMENTED: repl |
 | 17 | MODULE_NOT_IMPLEMENTED: module |
+| 17 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal: |
 | 16 | COMPILE_ERROR: expected }, got : |
-| 16 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Expected values to be strictly deep-equal: |
-| 16 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value: |
 | 15 | COMPILE_ERROR: '%s' is of type '%s' |
 | 15 | COMPILE_ERROR: expected 1 arguments, but got 0 |
+| 15 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: The expression evaluated to a falsy value: |
 | 13 | COMPILE_ERROR: object literal may only specify known properties, and '%s' does not exist in type '%s… |
 | 11 | COMPILE_ERROR: cannot find name '%s'; did you mean '%s'? |
 | 11 | RUNTIME_NONZERO_EXIT: Error [ERR_CHILD_PROCESS_FORK_MODULE]: fork('%s'): only this program's own mod… |
-| 10 | RUNTIME_NONZERO_EXIT: TypeError: Cannot read properties of undefined (reading '%s') |
+| 10 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Missing expected exception (TypeError). |
 | 9 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): import path '%s' must start with '%s' or '%s'… |
-| 9 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Missing expected exception (TypeError). |
 | 9 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: The input did not match the regular expression… |
 | 9 | RUNTIME_NONZERO_EXIT: Error: Cannot find module '%s' |
+| 9 | RUNTIME_NONZERO_EXIT: TypeError: Cannot read properties of undefined (reading '%s') |
 | 8 | COMPILE_ERROR: <path>: resolving dynamic import('%s'): cannot find module '%s' (resolved to <path>) |
 | 8 | COMPILE_ERROR: element implicitly has an '%s' type because expression of type '%s' can'%s'Buffer<Arr… |
 | 7 | COMPILE_ERROR: element implicitly has an '%s' type because expression of type '%s' can'%s'{}' |
 | 7 | COMPILE_ERROR: property '%s' does not exist on type '%s'; did you mean '%s'? |
-| 7 | RUNTIME_NONZERO_EXIT: AssertionError [ERR_ASSERTION]: Missing expected exception. |
 | 7 | RUNTIME_NONZERO_EXIT: error: this compiled binary cannot act as the Node interpreter (a self-spawn v… |
 | 6 | COMPILE_ERROR: expected ), got , |
+| 6 | MODULE_NOT_IMPLEMENTED: _http_common |
 
 ## Top skip reasons
 
@@ -130,7 +130,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 82 | Node-internal harness file require('internal/test/binding') |
 | 71 | uses Function.prototype.call (dynamic dispatch, not targeted) |
 | 62 | requires Node common harness (common.invalidArgTypeHelper) |
-| 57 | requires Node common harness (destructured common.spawnPromisified) |
+| 58 | requires Node common harness (destructured common.spawnPromisified) |
 | 52 | pummel stress suite — resource-scale runs, not executed (counted, not hidden) |
 | 38 | Node-internal harness file require('../common/child_process') |
 | 36 | requires Node common harness (common.escapePOSIXShell) |
@@ -152,7 +152,7 @@ Why out-of-scope files can't be attempted — Node's own internal-harness coupli
 | 12 | requires Node common harness (common.spawnPromisified) |
 | 11 | requires Node common harness (common.allowGlobals) |
 
-## Passing files (366)
+## Passing files (388)
 
 A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specific) statements were dropped and only the default-namespace assertions ran.
 
@@ -162,6 +162,8 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `es-module/test-esm-dns-promises.mjs` | esm |  |
 | `es-module/test-esm-fs-promises.mjs` | esm |  |
 | `es-module/test-esm-loader-cache-clearing.js` | esm |  |
+| `es-module/test-esm-path-posix.mjs` | esm |  |
+| `es-module/test-esm-path-win32.mjs` | esm |  |
 | `es-module/test-require-module-detect-entry-point-aou.js` | require |  |
 | `es-module/test-require-module-detect-entry-point.js` | require |  |
 | `internet/test-dns-getDefaultResultOrder.js` | dns |  |
@@ -177,12 +179,11 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-beforeexit-event-exit.js` | beforeexit |  |
 | `parallel/test-buffer-ascii.js` | buffer |  |
 | `parallel/test-buffer-badhex.js` | buffer |  |
-| `parallel/test-buffer-no-negative-allocation.js` | buffer |  |
 | `parallel/test-buffer-nopendingdep-map.js` | buffer |  |
+| `parallel/test-buffer-of-no-deprecation.js` | buffer |  |
 | `parallel/test-buffer-pending-deprecation.js` | buffer |  |
 | `parallel/test-buffer-prototype-inspect.js` | buffer |  |
 | `parallel/test-buffer-swap.js` | buffer |  |
-| `parallel/test-buffer-zero-fill.js` | buffer |  |
 | `parallel/test-child-process-exec-cwd.js` | child |  |
 | `parallel/test-child-process-kill.js` | child |  |
 | `parallel/test-child-process-set-blocking.js` | child |  |
@@ -195,6 +196,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-cluster-invalid-message.js` | cluster |  |
 | `parallel/test-cluster-kill-infinite-loop.js` | cluster |  |
 | `parallel/test-cluster-listening-port.js` | cluster |  |
+| `parallel/test-cluster-setup-primary-cumulative.js` | cluster |  |
 | `parallel/test-cluster-worker-death.js` | cluster |  |
 | `parallel/test-cluster-worker-wait-server-close.js` | cluster |  |
 | `parallel/test-console-async-write-error.js` | console |  |
@@ -210,12 +212,16 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-crypto-keygen-empty-passphrase-no-error.js` | crypto |  |
 | `parallel/test-crypto-keygen-invalid-parameter-encoding-dsa.js` | crypto |  |
 | `parallel/test-crypto-keygen-invalid-parameter-encoding-ec.js` | crypto |  |
+| `parallel/test-crypto-keygen-key-objects.js` | crypto |  |
 | `parallel/test-crypto-keygen-no-rsassa-pss-params.js` | crypto |  |
+| `parallel/test-crypto-keygen-non-standard-public-exponent.js` | crypto |  |
 | `parallel/test-crypto-keygen-rfc8017-9-1.js` | crypto |  |
 | `parallel/test-crypto-op-during-process-exit.js` | crypto |  |
 | `parallel/test-crypto-publicDecrypt-fails-first-time.js` | crypto |  |
 | `parallel/test-crypto-randomfillsync-regression.js` | crypto |  |
+| `parallel/test-crypto-subtle-zero-length.js` | crypto |  |
 | `parallel/test-crypto-update-encoding.js` | crypto |  |
+| `parallel/test-crypto-webcrypto-aes-decrypt-tag-too-small.js` | crypto |  |
 | `parallel/test-datetime-change-notify.js` | datetime |  |
 | `parallel/test-dgram-abort-closed.js` | dgram |  |
 | `parallel/test-dgram-address.js` | dgram |  |
@@ -259,6 +265,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-dns-setserver-when-querying.js` | dns |  |
 | `parallel/test-eval.js` | eval |  |
 | `parallel/test-event-emitter-check-listener-leaks.js` | event |  |
+| `parallel/test-event-emitter-listeners-side-effects.js` | event |  |
 | `parallel/test-event-emitter-listeners.js` | event |  |
 | `parallel/test-event-emitter-set-max-listeners-side-effects.js` | event |  |
 | `parallel/test-event-emitter-special-event-names.js` | event |  |
@@ -269,13 +276,17 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-exception-handler.js` | exception |  |
 | `parallel/test-file-write-stream2.js` | file |  |
 | `parallel/test-file-write-stream4.js` | file |  |
+| `parallel/test-filehandle-close.js` | filehandle |  |
 | `parallel/test-fs-close.js` | fs |  |
 | `parallel/test-fs-constants.js` | fs |  |
 | `parallel/test-fs-empty-readStream.js` | fs |  |
 | `parallel/test-fs-existssync-false.js` | fs |  |
+| `parallel/test-fs-filehandle-use-after-close.js` | fs |  |
 | `parallel/test-fs-long-path.js` | fs |  |
 | `parallel/test-fs-open-numeric-flags.js` | fs |  |
 | `parallel/test-fs-operations-with-surrogate-pairs.js` | fs |  |
+| `parallel/test-fs-promises-file-handle-append-file.js` | fs |  |
+| `parallel/test-fs-promises-file-handle-chmod.js` | fs |  |
 | `parallel/test-fs-promises-writefile-typedarray.js` | fs |  |
 | `parallel/test-fs-read-file-sync-hostname.js` | fs |  |
 | `parallel/test-fs-read-stream-autoClose.js` | fs |  |
@@ -295,8 +306,9 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-fs-truncate-clear-file-zero.js` | fs |  |
 | `parallel/test-fs-watch-abort-signal.js` | fs |  |
 | `parallel/test-fs-watch-close-when-destroyed.js` | fs |  |
+| `parallel/test-fs-watch-recursive-add-file-to-existing-subfolder.js` | fs |  |
 | `parallel/test-fs-watch-recursive-add-file-to-new-folder.js` | fs |  |
-| `parallel/test-fs-watch-recursive-add-file.js` | fs |  |
+| `parallel/test-fs-watch-recursive-add-file-with-url.js` | fs |  |
 | `parallel/test-fs-watch-recursive-delete.js` | fs |  |
 | `parallel/test-fs-watch-recursive-linux-parallel-remove.js` | fs |  |
 | `parallel/test-fs-watch-recursive-symlink.js` | fs |  |
@@ -328,6 +340,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-http2-generic-streams.js` | http2 |  |
 | `parallel/test-http2-perform-server-handshake.js` | http2 |  |
 | `parallel/test-http2-request-response-proto.js` | http2 |  |
+| `parallel/test-http2-server-async-dispose.js` | http2 |  |
 | `parallel/test-https-server-headers-timeout.js` | https |  |
 | `parallel/test-https-server-request-timeout.js` | https |  |
 | `parallel/test-https-unix-socket-self-signed.js` | https |  |
@@ -344,6 +357,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-net-listen-close-server.js` | net |  |
 | `parallel/test-net-listen-error.js` | net |  |
 | `parallel/test-net-listening.js` | net |  |
+| `parallel/test-net-server-async-dispose.mjs` | net |  |
 | `parallel/test-net-server-listen-remove-callback.js` | net |  |
 | `parallel/test-net-server-unref-persistent.js` | net |  |
 | `parallel/test-net-server-unref.js` | net |  |
@@ -387,9 +401,11 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-readable-large-hwm.js` | readable |  |
 | `parallel/test-readable-single-end.js` | readable |  |
 | `parallel/test-readline-carriage-return-between-chunks.js` | readline |  |
+| `parallel/test-readline-interface-escapecodetimeout.js` | readline |  |
 | `parallel/test-readline-position.js` | readline |  |
 | `parallel/test-ref-unref-return.js` | ref |  |
 | `parallel/test-repl-stdin-push-null.js` | repl |  |
+| `parallel/test-resource-usage.js` | resource |  |
 | `parallel/test-runner-subtest-after-hook.js` | runner |  |
 | `parallel/test-runner-test-fullname.js` | runner |  |
 | `parallel/test-runner-typechecking.js` | runner |  |
@@ -418,6 +434,7 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-stream-once-readable-pipe.js` | stream |  |
 | `parallel/test-stream-passthrough-drain.js` | stream |  |
 | `parallel/test-stream-pipe-deadlock.js` | stream |  |
+| `parallel/test-stream-pipe-error-handling.js` | stream |  |
 | `parallel/test-stream-pipe-error-unhandled.js` | stream |  |
 | `parallel/test-stream-pipe-flow-after-unpipe.js` | stream |  |
 | `parallel/test-stream-pipe-flow.js` | stream |  |
@@ -431,11 +448,13 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-stream-readable-constructor-set-methods.js` | stream |  |
 | `parallel/test-stream-readable-data.js` | stream |  |
 | `parallel/test-stream-readable-dispose.js` | stream |  |
+| `parallel/test-stream-readable-emit-readable-short-stream.js` | stream |  |
 | `parallel/test-stream-readable-end-destroyed.js` | stream |  |
 | `parallel/test-stream-readable-ended.js` | stream |  |
 | `parallel/test-stream-readable-error-end.js` | stream |  |
 | `parallel/test-stream-readable-hwm-0-async.js` | stream |  |
 | `parallel/test-stream-readable-hwm-0.js` | stream |  |
+| `parallel/test-stream-readable-infinite-read.js` | stream |  |
 | `parallel/test-stream-readable-next-no-null.js` | stream |  |
 | `parallel/test-stream-readable-resume-hwm.js` | stream |  |
 | `parallel/test-stream-readable-unpipe-resume.js` | stream |  |
@@ -482,15 +501,18 @@ A **−N** default-only mark means N `path.win32`/`path.posix` (platform-specifi
 | `parallel/test-tls-client-abort2.js` | tls |  |
 | `parallel/test-trace-events-net-abstract-socket.js` | trace |  |
 | `parallel/test-tty-stdin-end.js` | tty |  |
+| `parallel/test-ttywrap-stack.js` | ttywrap |  |
 | `parallel/test-tz-version.js` | tz |  |
 | `parallel/test-url-domain-ascii-unicode.js` | url |  |
+| `parallel/test-url-urltooptions.js` | url |  |
 | `parallel/test-utf8-scripts.js` | utf8 |  |
 | `parallel/test-util-primordial-monkeypatching.js` | util |  |
 | `parallel/test-v8-flag-pool-size-0.js` | v8 |  |
+| `parallel/test-webcrypto-constructors.js` | webcrypto |  |
+| `parallel/test-webcrypto-encrypt-decrypt.js` | webcrypto |  |
 | `parallel/test-webcrypto-getRandomValues.js` | webcrypto |  |
 | `parallel/test-websocket.js` | websocket |  |
 | `parallel/test-webstream-readable-from.js` | webstream |  |
-| `parallel/test-webstream-structured-clone-no-leftovers.mjs` | webstream |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-fatal.js` | whatwg |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-ignorebom.js` | whatwg |  |
 | `parallel/test-whatwg-encoding-custom-textdecoder-utf16-surrogates.js` | whatwg |  |

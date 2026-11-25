@@ -39,7 +39,6 @@ func (e *Emitter) emitCaughtAggregate(tag, pay string) Value {
 // reachable through the record before this packing. Every other tag round-trips
 // exactly via __kml_nb_pack.
 func (e *Emitter) emitCaughtToAny(v Value) Value {
-	e.ensureNanBox()
 	tag, pay := e.caughtParts(v)
 	isErr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isErr, tag, kmlTagError))
@@ -298,7 +297,6 @@ func (e *Emitter) emitCaughtToString(v Value) (Value, error) {
 // emitAnyStringOrNull is a boxed value's string, or null (undefined) when it
 // holds anything else.
 func (e *Emitter) emitAnyStringOrNull(v Value) string {
-	e.ensureNanBox()
 	tag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, v.Ref))
 	pay := e.freshReg()

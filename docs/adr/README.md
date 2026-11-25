@@ -2031,3 +2031,95 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [01985](01/ADR-01985.md) | Narrowed unions at calls, `new` and void ternaries | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01984](01/ADR-01984.md) |
 | [01986](01/ADR-01986.md) | Classes whose base is a run-time value | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01979](01/ADR-01979.md) |
 | [01987](01/ADR-01987.md) | Boxed receivers, empty-array properties and Buffer keys | Implements [TDD-00230](../tdd/TDD-00230.md); follows [ADR-01986](01/ADR-01986.md) |
+| [01988](01/ADR-01988.md) | Library entry mode (-lib) | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01989](01/ADR-01989.md) | The handle table: native code holds managed objects by ref | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01990](01/ADR-01990.md) | WeakMap entries are ephemerons under -mm=gc | Implements [TDD-00230](../tdd/TDD-00230.md); fixes [TDD-00112](../tdd/TDD-00112.md) |
+| [01991](01/ADR-01991.md) | Two conformance-process crashes: a cyclic AST walk and unit-compile waiters | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01992](01/ADR-01992.md) | Five Test262 programs with invalid IR, and the bugs behind them | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01993](01/ADR-01993.md) | WPT js-lane invalid IR and the Response body bugs found with it | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [01994](01/ADR-01994.md) | Sparse array elements past the buffer | |
+| [01995](01/ADR-01995.md) | Iterator result that is not an object | |
+| [01996](01/ADR-01996.md) | node:ffi detection counts the dlopen native only | |
+| [01997](01/ADR-01997.md) | Array.from calls mapFn at each step of the iteration | |
+| [01998](01/ADR-01998.md) | util.inspect marks cycles in dynamic values | |
+| [01999](01/ADR-01999.md) | path/posix and path/win32 default-export the flavour object | |
+| [02000](02/ADR-02000.md) | A replaced Map, Set, WeakMap or WeakSet method is the one that runs | |
+| [02001](02/ADR-02001.md) | A builtin `new` that matches no generic overload has the interface's type | |
+| [02002](02/ADR-02002.md) | libwasmtime is loaded on first use, and globalThis carries WebAssembly | |
+| [02003](02/ADR-02003.md) | Compiler peak memory on a whole-library module | |
+| [02004](02/ADR-02004.md) | Host method tables link only reached methods | |
+| [02005](02/ADR-02005.md) | Array statics with a constructor as `this`; ArrayCreate length | |
+| [02006](02/ADR-02006.md) | An arguments object's callee and own Symbol.iterator | |
+| [02007](02/ADR-02007.md) | A bigint held in any written by Buffer; a bigint[] into a TypedArray | |
+| [02008](02/ADR-02008.md) | A flow answer left unanswered by a cycle is not cached | |
+| [02009](02/ADR-02009.md) | The global object's eval is the global eval | |
+| [02010](02/ADR-02010.md) | A deleted static method is gone | |
+| [02011](02/ADR-02011.md) | A class expression in a function is a class per evaluation | |
+| [02012](02/ADR-02012.md) | process.version's native in C | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02013](02/ADR-02013.md) | Any heritage expression, `extends null` | |
+| [02014](02/ADR-02014.md) | A constructor function base that returns an object | |
+| [02015](02/ADR-02015.md) | A promise's `constructor`, and await's read of it | |
+| [02016](02/ADR-02016.md) | Array.prototype's added properties | |
+| [02017](02/ADR-02017.md) | A primitive or null `F.prototype` | |
+| [02018](02/ADR-02018.md) | A static object as a dynamic object's prototype | |
+| [02019](02/ADR-02019.md) | A callback's annotated parameters against a generic overload | |
+| [02020](02/ADR-02020.md) | Classes extending Response, Request and XMLHttpRequest | |
+| [02021](02/ADR-02021.md) | A Map's or Set's `void` type argument | |
+| [02022](02/ADR-02022.md) | A regular expression literal in a not-a-function message | |
+| [02023](02/ADR-02023.md) | util.format `%s` and a builtin toString | |
+| [02024](02/ADR-02024.md) | Decorated generic classes, and a decorated method's result | |
+| [02025](02/ADR-02025.md) | A transformer's start() promise, and stream controllers | |
+| [02026](02/ADR-02026.md) | An error's own cause, message and property names | |
+| [02027](02/ADR-02027.md) | Members overriding an inherited member of another kind | |
+| [02028](02/ADR-02028.md) | A primitive intersected with an object type is held boxed | |
+| [02029](02/ADR-02029.md) | `with` and `fill` storing a value the elements cannot hold | |
+| [02030](02/ADR-02030.md) | A mapped type over `any` for an array-constrained parameter | |
+| [02031](02/ADR-02031.md) | A binding Object.assign retypes is held dynamically | |
+| [02032](02/ADR-02032.md) | Object.setPrototypeOf on a fixed layout | |
+| [02033](02/ADR-02033.md) | A mixin's returned class over a value base (js) | |
+| [02034](02/ADR-02034.md) | Empty-search replaceAll substitution over astral text | |
+| [02035](02/ADR-02035.md) | The uncaught report shows an error's own properties | |
+| [02036](02/ADR-02036.md) | An assignment through a type assertion stores to the name | |
+| [02037](02/ADR-02037.md) | A class at an object-typed parameter | |
+| [02038](02/ADR-02038.md) | Object.defineProperties links the added-property hooks | |
+| [02039](02/ADR-02039.md) | A proxy read returned through an inferred return | |
+| [02040](02/ADR-02040.md) | A builtin module namespace's `default` | |
+| [02041](02/ADR-02041.md) | console.* with a run-time format string | |
+| [02042](02/ADR-02042.md) | %ArrayIteratorPrototype% and %IteratorPrototype% | |
+| [02043](02/ADR-02043.md) | A prototype object per class evaluation; replaced methods | |
+| [02044](02/ADR-02044.md) | An unsound cast to a primitive keeps the value | |
+| [02045](02/ADR-02045.md) | A class may extend a stream class | |
+| [02046](02/ADR-02046.md) | An Error's given prototype, a class extending Error by alias | |
+| [02047](02/ADR-02047.md) | An Error's system fields in insertion order | |
+| [02048](02/ADR-02048.md) | The conformance runner admits each clang against the budget | |
+| [02049](02/ADR-02049.md) | A thread's TLS roots are added outside dl_iterate_phdr | |
+| [02050](02/ADR-02050.md) | A Request's ReadableStream body stays a stream | |
+| [02051](02/ADR-02051.md) | Promise statics take their `this`; a subclass is a Promise through `any` | |
+| [02052](02/ADR-02052.md) | bind reads its target's `length` and `name`; concat honors isConcatSpreadable on `any` | |
+| [02053](02/ADR-02053.md) | Global declarations from `declare global` and a script's top level | |
+| [02054](02/ADR-02054.md) | Compile time held at HEAD's: precise library links, one-pass IR scans | |
+| [02055](02/ADR-02055.md) | `--unhandled-rejections` modes; an uncaught exit runs the 'exit' listeners | |
+| [02056](02/ADR-02056.md) | A literal method's implicit `this` is context-sensitive | |
+| [02057](02/ADR-02057.md) | The d flag's match indices | |
+| [02058](02/ADR-02058.md) | Word characters under `iu`; the guard's wrapper is no user group | |
+| [02059](02/ADR-02059.md) | A subject with a lone surrogate is matched around it | |
+| [02060](02/ADR-02060.md) | toLocaleUpperCase/toLocaleLowerCase; case mapping reads the length header | |
+| [02061](02/ADR-02061.md) | A NUL is a character to the string builtins; Latin-1 base64 | |
+| [02062](02/ADR-02062.md) | Strict code rejects Annex B's legacy literals | |
+| [02063](02/ADR-02063.md) | Map.groupBy; groupBy's selector TypeError | |
+| [02064](02/ADR-02064.md) | Library code reads nothing of the program; a Request may wait | |
+| [02065](02/ADR-02065.md) | XMLHttpRequest.statusText | |
+| [02066](02/ADR-02066.md) | Host-record subclass chains, stream collectors, runtime hooks | |
+| [02067](02/ADR-02067.md) | Fixes from the conformance and app runs | |
+| [02069](02/ADR-02069.md) | Audit fixes — sparse search, regex JIT, stringify, sort, runner memory | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02070](02/ADR-02070.md) | The nested-error inspect head in C; one NaN-box header | Implements [TDD-00240](../tdd/TDD-00240.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [02071](02/ADR-02071.md) | A nested array pattern's names shadow a top-level name | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02072](02/ADR-02072.md) | A compile holds one copy of the module's text | Implements [TDD-00248](../tdd/TDD-00248.md), [TDD-00230](../tdd/TDD-00230.md) |
+| [02073](02/ADR-02073.md) | The runtime files a program links do not depend on map order | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02074](02/ADR-02074.md) | Piping into an HTTP/2 compat response | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02075](02/ADR-02075.md) | The front end reads a library module once per path check, and no compile forces a collection | Extends [ADR-02072](02/ADR-02072.md); Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02076](02/ADR-02076.md) | A typed array built from an untyped typed array of its own kind copies its storage | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02077](02/ADR-02077.md) | Unbounded async recursion throws the stack-overflow RangeError | Extends [TDD-00249](../tdd/TDD-00249.md); Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02078](02/ADR-02078.md) | A BigInt64Array's elements copy out as bigints | Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02079](02/ADR-02079.md) | An HTTP/2 stream gives back receive window as it is read | Extends [ADR-02073](02/ADR-02073.md); Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02080](02/ADR-02080.md) | The conformance runner sets its memory budget on macOS too | Extends [ADR-02075](02/ADR-02075.md); Implements [TDD-00230](../tdd/TDD-00230.md) |

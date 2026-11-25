@@ -33,18 +33,6 @@ func RequestSource() string { return requestSource }
 // StrHeaderSource is the string-header runtime's C source.
 func StrHeaderSource() string { return strheaderSource }
 
-// ensureStrHeaderRuntime declares the string-header runtime (strheader.c) once.
-func (e *Emitter) ensureStrHeaderRuntime() {
-	if e.usedStrHeaderRuntime {
-		return
-	}
-	e.usedStrHeaderRuntime = true
-	// Other generated code leans on these decls arriving with the header runtime.
-	// The leaf primitives are built here so every call site inlines them: a
-	// call into a C object cannot be inlined without LTO.
-	e.buildStrLeaves()
-}
-
 // buildStrLeaves defines __kml_str_alloc(n) (n bytes after a length header
 // word, one more for the NUL), __kml_str_len(s) (the header's low 32 bits)
 // and __kml_str_free(s), weak_odr, so each unit inlines its own copy.

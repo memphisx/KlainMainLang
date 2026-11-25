@@ -86,6 +86,7 @@ double __kml_any_tonum(long long v) { (void)v; return 0; }
 long long __kml_dynobj_get(char *o, const char *k) { (void)o; (void)k; return 10; }
 void *__kml_inspect_begin(long long d, long long n) { (void)d; (void)n; return 0; }
 void __kml_inspect_push(void *l, char *e) { (void)l; (void)e; }
+void __kml_inspect_push_owned(void *l, char *e) { (void)l; (void)e; }
 void __kml_inspect_push_more(void *l, long long r) { (void)l; (void)r; }
 void __kml_inspect_push_holes(void *l, long long n) { (void)l; (void)n; }
 int __kml_shape_expando_delete(void *o, const char *k) { (void)o; (void)k; return 0; }
@@ -125,11 +126,11 @@ long long __kml_dynobj_get_recv(void *o, const char *k, long long r) { (void)o; 
 int __kml_array_proto_set(void *h, void **p) { (void)h; (void)p; return 0; }
 char **__kml_dynobj_keys_enum_c(void *o, long long *n) { (void)o; *n = 0; return 0; }
 long long __kml_promise_inspect_parts(void *o, long long *out) { (void)o; (void)out; return -1; }
-char *__kml_error_inspect(void *o) { (void)o; return 0; }
 int __kml_error_option_cause(void *o, long long *out) { (void)o; (void)out; return 0; }
 int __kml_error_aggregate(void *o, void ***errs, long long *n) { (void)o; (void)errs; (void)n; return 0; }
 char *__kml_obj_inspect_custom(void *o, long long d) { (void)o; (void)d; return 0; }
 char *__kml_obj_tostring_tag(void *o) { (void)o; return 0; }
+void *__kml_object_prototype(void) { return 0; }
 char __kml_array_integrity_any;
 long long __kml_array_level(void *h) { (void)h; return 0; }
 void __kml_array_set_level(void *h, long long l) { (void)h; (void)l; }
@@ -160,11 +161,17 @@ int main(void) {
     struct { void *data; long long len; } hdr = { (void *)0x10, 7 };
     KjBox b = { (char *)&hdr, 0, 0, -1, 0, 0, 0, 0 };
     printf("hdr %lld %p\n", kj_len(&b), (void *)kj_data(&b));
-    printf("nb %lld %lld %lld %lld %lld\n", nb_pack(5, 0), nb_pack(4, 0), nb_pack(3, 0), nb_pack(3, 1), nb_double(1.5));
+    printf("nb %lld %lld %lld %lld %lld\n", kml_nb_pack(5, 0), kml_nb_pack(4, 0), kml_nb_pack(3, 0), kml_nb_pack(3, 1), kml_nb_double(1.5));
     printf("kinds %d %d %d %d %d\n", KJ_F64, KJ_STRING, KJ_ANY, KJ_ARRAY, KJ_I32);
     return 0;
 }
 `
+	// The prelude every runtime C file gets: kml_layout.h (the error
+	// object's fields) and kml_nanbox.h.
+	layoutH := filepath.Join(dir, "kml_prelude.h")
+	if err := os.WriteFile(layoutH, []byte(layoutHeader()+kmlNanboxHeader), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(probe, []byte(probeSrc), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +179,7 @@ int main(void) {
 	if runtime.GOOS == "windows" {
 		exe += ".exe"
 	}
-	if out, err := exec.Command(clang, "-w", fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", (&Emitter{}).arrayHeaderWord()), fmt.Sprintf("-DKML_ARGS_HDR_WORD=%dLL", (&Emitter{}).argumentsHeaderWord()), "-o", exe, probe).CombinedOutput(); err != nil {
+	if out, err := exec.Command(clang, "-w", "-include", layoutH, fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", (&Emitter{}).arrayHeaderWord()), fmt.Sprintf("-DKML_ARGS_HDR_WORD=%dLL", (&Emitter{}).argumentsHeaderWord()), "-o", exe, probe).CombinedOutput(); err != nil {
 		t.Fatalf("clang: %v\n%s", err, out)
 	}
 	out, err := exec.Command(exe).Output()
@@ -207,7 +214,7 @@ int main(void) {
 	one5 := int64(0x3FF8000000000000) + nbDoubleOffset
 	wantNb := []string{strconv.Itoa(nbUndefined), strconv.Itoa(nbNull), strconv.Itoa(nbFalse), strconv.Itoa(nbTrue), strconv.FormatInt(one5, 10)}
 	if strings.Join(got["nb"], " ") != strings.Join(wantNb, " ") {
-		t.Errorf("nb_pack: C says %v, runtime_nanbox.go says %v", got["nb"], wantNb)
+		t.Errorf("kml_nb_pack: C says %v, runtime_nanbox.go says %v", got["nb"], wantNb)
 	}
 	// Element kinds: arrayElemKind's numbers are the C enum's.
 	f64, _ := arrayElemKind(TypeF64)
@@ -236,8 +243,8 @@ var sidecarExterns = map[string]struct {
 		externs:  []string{"__kml_any_tonum", "__kml_any_view_bytes", "__kml_buf_decode_enc", "__kml_buf_is_encoding", "__kml_inspect_opts", "__kml_received"},
 	},
 	"dynjsonsrc/dynjson.c": {
-		provider: "ensureDynJSONC (dynjson_c.go): ensureArrayGuard, ensureAnyOps, ensureAnyToPrimitive, ensureDynObj, ensureInspectReduce, ensureFnMeta, ensureBoxedBigIntHooks, ensureStrHeaderRuntime (dynobj.c and dynarr.c come with ensureDynObj, the added-property table with the shape runtime); the __kml_obj_* hooks, __kml_promise_inspect_parts and __kml_error_inspect, __kml_host_inspect and __kml_host_tojson at finalize (emitObjHooksFinalize, emitHostBoxFinalize); __kml_error_option_cause and __kml_error_aggregate from errkeys.c, linked with it (UsesErrKeysC); __kml_error_frames_shown and __kml_error_stack_assigned from frames.c, always linked; __kml_shape_get/__kml_shape_set and __kml_array_proto_set from shape.c (ensureShapeRuntime); __kml_Object_is from strict_eq.c and __kml_pattr_attrs/__kml_pattr_define from propattr.c, linked by symbol (weak defaults in errkeys.c and dynjson.c)",
-		externs:  []string{"__kml_Object_is", "__kml_any_tobool", "__kml_any_tonum", "__kml_array_guard", "__kml_array_level", "__kml_array_proto_set", "__kml_array_set_level", "__kml_boxed_bigint_str", "__kml_classref_nstatic", "__kml_classref_sget", "__kml_classref_shown", "__kml_classref_skey", "__kml_dtoa", "__kml_dynarr_delete_index", "__kml_dynarr_get_by_key", "__kml_dynarr_is_hole", "__kml_dynarr_len", "__kml_dynarr_set_by_key", "__kml_dynobj_get", "__kml_dynobj_get_proto", "__kml_dynobj_get_recv", "__kml_dynobj_keys_enum_c", "__kml_dynobj_new", "__kml_dynobj_set", "__kml_error_aggregate", "__kml_error_frames_shown", "__kml_error_inspect", "__kml_error_option_cause", "__kml_error_stack_assigned", "__kml_fn_inspect_dyn", "__kml_fn_tag_dyn", "__kml_host_class_tag", "__kml_host_inspect", "__kml_host_tojson", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_holes", "__kml_inspect_push_more", "__kml_inspect_quote", "__kml_key_is_symbol", "__kml_obj_accessor", "__kml_obj_get", "__kml_obj_has", "__kml_obj_inspect_custom", "__kml_obj_key", "__kml_obj_name", "__kml_obj_nkeys", "__kml_obj_prim", "__kml_obj_tostring_tag", "__kml_pattr_attrs", "__kml_pattr_define", "__kml_promise_inspect_parts", "__kml_shape_expando_attrs", "__kml_shape_expando_define", "__kml_shape_expando_delete", "__kml_shape_expando_get", "__kml_shape_expando_get_recv", "__kml_shape_expando_key", "__kml_shape_expando_put", "__kml_shape_expando_raw", "__kml_shape_expando_set", "__kml_shape_get", "__kml_shape_has_field", "__kml_shape_set", "__kml_str_index", "__kml_toprimitive"},
+		provider: "ensureDynJSONC (dynjson_c.go): ensureArrayGuard, ensureAnyOps, ensureDynObj, ensureInspectReduce, ensureStrHeaderRuntime (dynobj.c and dynarr.c come with ensureDynObj, the added-property table with the shape runtime); the __kml_obj_* hooks, __kml_promise_inspect_parts, __kml_host_inspect and __kml_host_tojson at finalize (emitObjHooksFinalize, emitHostBoxFinalize); __kml_error_option_cause and __kml_error_aggregate from errkeys.c, linked with it (UsesErrKeysC); __kml_error_frames_shown and __kml_error_stack_assigned from frames.c, always linked; __kml_shape_get/__kml_shape_set and __kml_array_proto_set from shape.c (ensureShapeRuntime); __kml_Object_is from strict_eq.c and __kml_pattr_attrs/__kml_pattr_define from propattr.c, linked by symbol (weak defaults in errkeys.c and dynjson.c)",
+		externs:  []string{"__kml_Object_is", "__kml_any_tobool", "__kml_any_tonum", "__kml_array_guard", "__kml_array_level", "__kml_array_proto_set", "__kml_array_set_level", "__kml_boxed_bigint_str", "__kml_classref_nstatic", "__kml_classref_sget", "__kml_classref_shown", "__kml_classref_skey", "__kml_dtoa", "__kml_dynarr_delete_index", "__kml_dynarr_get_by_key", "__kml_dynarr_is_hole", "__kml_dynarr_len", "__kml_dynarr_set_by_key", "__kml_dynobj_get", "__kml_dynobj_get_proto", "__kml_dynobj_get_recv", "__kml_dynobj_keys_enum_c", "__kml_dynobj_new", "__kml_dynobj_set", "__kml_error_aggregate", "__kml_error_frames_shown", "__kml_error_option_cause", "__kml_error_stack_assigned", "__kml_fn_inspect_dyn", "__kml_fn_tag_dyn", "__kml_host_class_tag", "__kml_host_inspect", "__kml_host_tojson", "__kml_inspect_begin", "__kml_inspect_end", "__kml_inspect_push", "__kml_inspect_push_holes", "__kml_inspect_push_more", "__kml_inspect_push_owned", "__kml_inspect_quote", "__kml_key_is_symbol", "__kml_obj_accessor", "__kml_obj_get", "__kml_obj_has", "__kml_obj_inspect_custom", "__kml_obj_key", "__kml_obj_name", "__kml_obj_nkeys", "__kml_obj_prim", "__kml_obj_tostring_tag", "__kml_object_prototype", "__kml_pattr_attrs", "__kml_pattr_define", "__kml_promise_inspect_parts", "__kml_shape_expando_attrs", "__kml_shape_expando_define", "__kml_shape_expando_delete", "__kml_shape_expando_get", "__kml_shape_expando_get_recv", "__kml_shape_expando_key", "__kml_shape_expando_put", "__kml_shape_expando_raw", "__kml_shape_expando_set", "__kml_shape_get", "__kml_shape_has_field", "__kml_shape_set", "__kml_str_index", "__kml_toprimitive"},
 	},
 }
 

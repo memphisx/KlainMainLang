@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"runtime/debug"
 	"runtime/metrics"
@@ -29,6 +30,8 @@ type memBudget struct {
 	limit int64
 	used  int64
 	held  int
+	// inClang counts the reservations whose clang is running.
+	inClang int
 }
 
 var budget = newMemBudget(0)
@@ -53,13 +56,40 @@ func setBudget(limit int64) {
 	budget.mu.Lock()
 	budget.limit = limit
 	budget.mu.Unlock()
-	if limit > 0 {
-		debug.SetMemoryLimit(limit)
+	// The heap's soft limit is what the concurrent front ends need, not the
+	// budget: the budget counts compiles' memory, most of it clang's, and a
+	// limit raised to it (tens of GB on a large machine, at GOGC=400) let
+	// the front end's garbage reach that before a collection. 1.5 GB plus
+	// 384 MB per front-end slot (14 slots: 6.9 GB, measured peak 5-6 GB);
+	// a flat 1.5 GB made the collector run without pause and compiles time
+	// out. Never above the budget.
+	soft := int64(1536 << 20)
+	if frontEndSlots != nil {
+		soft += int64(cap(frontEndSlots)) * (384 << 20)
+	}
+	want := soft
+	if limit > 0 && limit < soft {
+		soft = limit
+	}
+	if os.Getenv("GOMEMLIMIT") == "" || debug.SetMemoryLimit(-1) > soft {
+		debug.SetMemoryLimit(soft)
+	}
+	// GOGC=400 (main) is for a limit with that room. Under a lower one its
+	// heap goal sits past the limit, so every cycle is the limit's; once
+	// those cycles want more than the collector's CPU cap (half the CPU)
+	// the runtime lets the heap pass the limit, and a two-worker macOS run
+	// held 2.7 GB of mostly garbage under a 1.6 GB limit. The default
+	// GOGC collects at twice the live heap (100-400 MB here) instead.
+	if os.Getenv("GOGC") == "" && debug.SetMemoryLimit(-1) < want {
+		debug.SetGCPercent(100)
 	}
 }
 
 // reservation is one compile's share of the budget.
-type reservation struct{ n int64 }
+type reservation struct {
+	n     int64
+	clang bool
+}
 
 // reserve waits until n bytes fit (or nothing else is held) and takes them.
 func (b *memBudget) reserve(n int64) *reservation {
@@ -94,14 +124,70 @@ func (b *memBudget) release(r *reservation) {
 	b.mu.Lock()
 	b.used -= r.n
 	b.held--
+	if r.clang {
+		b.inClang--
+	}
 	r.n = -1
 	b.mu.Unlock()
 	b.cond.Broadcast()
 }
 
+// admitClang raises r to the bytes its clang will take (n), waiting until
+// they fit beside what the others hold. Its clang has not started, so the
+// memory is not yet in use; one clang is always admitted when none runs,
+// so the waits cannot close a cycle.
+func (b *memBudget) admitClang(r *reservation, n int64) {
+	if r == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n < r.n {
+		n = r.n
+	}
+	for b.limit > 0 && b.inClang > 0 && b.used-r.n+n > b.limit {
+		b.cond.Wait()
+	}
+	b.used += n - r.n
+	r.n = n
+	if !r.clang {
+		r.clang = true
+		b.inClang++
+	}
+}
+
+// irFactor is the largest clang peak per IR byte seen this run (at least
+// irBytesFactor): a library-heavy program's clang peaks at 3-4 GiB, far
+// past what a fixed factor gives its IR, and the run's later compiles of
+// such programs are reserved at what the earlier ones took.
+var irFactor atomic.Int64
+
+// noteClangPeak records a finished clang's peak resident bytes for an IR of
+// irLen bytes.
+func noteClangPeak(irLen int, ps *os.ProcessState) {
+	peak, ok := peakRSS(ps)
+	if !ok || irLen <= 0 {
+		return
+	}
+	f := peak/int64(irLen) + 1
+	if f > 64 {
+		f = 64 // a tiny IR beside the runtime's objects: no per-byte measure
+	}
+	for {
+		cur := irFactor.Load()
+		if f <= cur || irFactor.CompareAndSwap(cur, f) {
+			return
+		}
+	}
+}
+
 // irReservation is the bytes a compile of an IR of irLen bytes holds.
 func irReservation(irLen int) int64 {
-	if n := int64(irLen) * irBytesFactor; n > compileDefault {
+	f := irFactor.Load()
+	if f < irBytesFactor {
+		f = irBytesFactor
+	}
+	if n := int64(irLen) * f; n > compileDefault {
 		return n
 	}
 	return compileDefault
@@ -215,4 +301,28 @@ func releaseHeavy() {
 	heavyActive--
 	heavyMu.Unlock()
 	heavyCond.Broadcast()
+}
+
+// outputCap bounds what a test program's stdout or stderr keeps: no test
+// expects more, and a runaway program's output otherwise grows this
+// process's heap with it.
+const outputCap = 16 << 20
+
+// capBuffer keeps the first outputCap bytes written to it and drops the
+// rest, still reporting every write as done so the program is not stopped
+// by a write error.
+type capBuffer struct {
+	bytes.Buffer
+	dropped int64
+}
+
+func (c *capBuffer) Write(p []byte) (int, error) {
+	if room := outputCap - c.Len(); room < len(p) {
+		if room > 0 {
+			c.Buffer.Write(p[:room])
+		}
+		c.dropped += int64(len(p) - max(room, 0))
+		return len(p), nil
+	}
+	return c.Buffer.Write(p)
 }

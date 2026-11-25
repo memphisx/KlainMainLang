@@ -45,3 +45,22 @@ if (m) console.log(m.groups?.y, m.index, m.input);
 console.log("aXbX".match(/X/g), "q".match(/z/));
 `)
 }
+
+// The d flag's indices: each group's [start, end] (undefined unmatched),
+// their named groups, through exec, match, matchAll, a boxed receiver and
+// console.log.
+func TestE2ERegExpHasIndices(t *testing.T) {
+	assertSameAsNode(t, `
+const m = /(?<y>\d{4})-(\d{2})?x?/d.exec("on 2026-11 ok")!;
+console.log(m.indices![0], m.indices![1], m.indices![2], m.indices!.groups);
+const n = /a(b)?/d.exec("xa")!;
+console.log(n.indices![1], n.indices!.length);
+console.log(/a/d.hasIndices, /a/.hasIndices, /a/dg.flags, /a/s.dotAll);
+for (const r of "a1b2".matchAll(/[a-z](\d)/dg)) console.log(r.indices![1]);
+console.log(/(?<q>x)/d.exec("ax"));
+console.log("zz".match(/z/d)!.indices, /z/.exec("z")!.indices);
+const anyr: any = /b(c)/d;
+console.log(anyr.exec("abc").indices[1]);
+console.log(/(é+)(b)/d.exec("ααéébx")!.indices![2]);
+`)
+}

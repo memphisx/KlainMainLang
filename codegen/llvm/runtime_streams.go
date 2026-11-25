@@ -15,8 +15,6 @@
 // points.
 package llvm
 
-import "fmt"
-
 import _ "embed"
 
 const (
@@ -29,36 +27,3 @@ var streamsSource string
 
 // StreamsSource is the stream runtime's C source, behind kml_layout.h.
 func StreamsSource() string { return layoutHeader() + streamsSource }
-
-// ensurePromiseAddReaction declares @__kml_promise_add_reaction(ptr %p, ptr
-// %clo): attach a reaction closure to a promise — enqueued as a microtask
-// immediately when the promise is already settled, appended to its reaction
-// list otherwise. It also builds __kml_stream_decode, the call to a
-// program-emitted decoder, whose {i64,i64,i64} return the C cannot take by
-// value.
-func (e *Emitter) ensurePromiseAddReaction() {
-	if e.usedPromiseAddReaction {
-		return
-	}
-	e.usedPromiseAddReaction = true
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
-	e.ensureUnhandledRejections()
-	// __kml_stream_decode(decode, rec, out): run a per-chunk-type decoder,
-	// which returns {v0, v1, done} in registers, for streams.c, storing the
-	// three words at out.
-	restore := e.beginDetachedFunc()
-	dv := e.freshReg()
-	e.emitInstr(fmt.Sprintf("%s = call { i64, i64, i64 } %%decode("+irPtr+" %%rec)", dv))
-	for k := 0; k < 3; k++ {
-		w, p := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = extractvalue { i64, i64, i64 } %s, %d", w, dv, k))
-		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %%out, i64 %d", p, k))
-		e.heapStore("i64", w, p, 8)
-	}
-	e.emitTerminator("ret void")
-	body := e.allocas.String() + e.body.String()
-	restore()
-	e.writeFunc("void @__kml_stream_decode("+irPtr+" %decode, "+irPtr+" %rec, "+irPtr+" %out)", body)
-}

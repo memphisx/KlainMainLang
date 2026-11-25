@@ -131,7 +131,6 @@ func (e *Emitter) emitStringNullToLiteral(v Value) Value {
 // indexOf operands); producer-internal strlen that establishes a header (see
 // emitStringFinalizeLen) stays on strlen.
 func (e *Emitter) emitStrLenHeader(ref string) string {
-	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_str_len("+irPtr+" %s)", r, ref))
 	return r
@@ -147,7 +146,6 @@ func (e *Emitter) emitStrLenHeader(ref string) string {
 // boundary working unchanged in the meantime. Free such a buffer with
 // emitStringFree (free base = ptr-8), never free(ptr).
 func (e *Emitter) emitStringAlloc(dataLenReg string) string {
-	e.ensureStrHeaderRuntime()
 	dataPtr := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_alloc(i64 %s)", dataPtr, dataLenReg))
 	return dataPtr
@@ -165,7 +163,6 @@ func (e *Emitter) emitStringScratch(capBytes int) string {
 // emitStringScratchReg is emitStringScratch with a register (or constant)
 // capacity expression, for producers whose scratch size is only known at runtime.
 func (e *Emitter) emitStringScratchReg(capExpr string) string {
-	e.ensureStrHeaderRuntime()
 	// Through the one string allocator: capExpr counts the NUL, which
 	// __kml_str_alloc adds itself.
 	n, dataPtr := e.freshReg(), e.freshReg()
@@ -199,7 +196,6 @@ func (e *Emitter) emitStringFinalizeLen(dataPtr string) {
 // is 8 bytes before the value pointer. Freeing the value pointer directly would
 // corrupt the heap (interior free).
 func (e *Emitter) emitStringFree(ptrRef string) {
-	e.ensureStrHeaderRuntime()
 	e.emitInstr(fmt.Sprintf("call void @__kml_str_free("+irPtr+" %s)", ptrRef))
 }
 
@@ -208,7 +204,6 @@ func (e *Emitter) emitStringConcat(left, right Value) (Value, error) {
 	right = e.emitStringNullToLiteral(right)
 	// One runtime call (strheader.c): inline, the lengths, allocation,
 	// copies and surrogate join were 18 instructions and two blocks per `+`.
-	e.ensureStrHeaderRuntime()
 	buf := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_concat("+irPtr+" %s, "+irPtr+" %s)", buf, left.Ref, right.Ref))
 	return Value{Ref: buf, Ty: TypePtr}, nil
@@ -271,7 +266,6 @@ func (e *Emitter) emitStringBinary(op string, left, right Value, pos ast.Pos) (V
 		// and every ordering comparison against undefined is false (NaN).
 		// Nulls are swapped for "" before the compare so it never
 		// dereferences one; the null flags then decide the result.
-		e.ensureStrHeaderRuntime()
 		lNull := e.freshReg()
 		rNull := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", lNull, left.Ref))
@@ -439,7 +433,6 @@ func (e *Emitter) emitStringLocaleCompare(mem *ast.MemberExpression, args []ast.
 			}
 		}
 	}
-	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_collate("+irPtr+" %s, "+irPtr+" %s, i64 %s)", r, objVal.Ref, e.convert(otherVal, TypePtr).Ref, flags))
 	return e.countToNumber(Value{Ref: r, Ty: TypeI64}), nil
@@ -539,6 +532,73 @@ func (e *Emitter) emitStringReplaceMethod(mem *ast.MemberExpression, args []ast.
 // emitStringReplaceArgs is replace/replaceAll on the string objVal once the
 // search's kind is known statically.
 func (e *Emitter) emitStringReplaceArgs(objVal Value, args []ast.Expression, pos ast.Pos, all bool) (Value, error) {
+	if isUnconstrainedDynamic(e.typeOfExpr(args[1])) {
+		// A replacement known only at run time: called when it is a
+		// function (a bound one included), else converted to a string
+		// (GetSubstitution's), as String.prototype.replace decides.
+		recv := e.bindValue(objVal, pos)
+		sv, err := e.emitExpr(args[0])
+		if err != nil {
+			return Value{}, err
+		}
+		search := e.bindValue(sv, pos)
+		rv, err := e.emitExpr(args[1])
+		if err != nil {
+			return Value{}, err
+		}
+		rep := e.bindValue(rv, pos)
+		method := "replace"
+		if all {
+			method = "replaceAll"
+		}
+		call := func(r ast.Expression) ast.Expression {
+			return ast.NewCallExpression(ast.NewMemberExpression(recv, method, pos), []ast.Expression{search, r}, pos)
+		}
+		isFn, err := e.emitExpr(ast.NewBinaryExpression("===", ast.NewUnaryExpression("typeof", true, rep, pos), ast.NewStringLiteral("function", pos), pos))
+		if err != nil {
+			return Value{}, err
+		}
+		fnL, strL, joinL := e.freshLabel("replace.fn"), e.freshLabel("replace.str"), e.freshLabel("replace.join")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.convert(isFn, TypeBool).Ref, fnL, strL))
+		// Called: through one closure, made before the call's own dispatch
+		// (a run-time search's regex and string paths share it).
+		e.emitLabel(fnL)
+		const rest = "__kml_repl_args"
+		repFn := e.bindValue(rv, pos)
+		cbVal, err := e.emitExpr(ast.NewArrowFunction([]ast.Param{{Name: rest, Rest: true}}, nil,
+			ast.NewCallExpression(repFn, []ast.Expression{ast.NewSpreadElement(ast.NewIdentifier(rest, pos), pos)}, pos), nil, pos))
+		if err != nil {
+			return Value{}, err
+		}
+		r1, err := e.emitExpr(call(e.bindValue(cbVal, pos)))
+		if err != nil {
+			return Value{}, err
+		}
+		// Not a function: its ToString (GetSubstitution's replacement).
+		var r2 Value
+		resTy := r1.Ty
+		r1Ref := r1.Ref
+		fnEnd := e.freshLabel("replace.fn.end")
+		e.emitTerminator("br label %" + fnEnd)
+		e.emitLabel(fnEnd)
+		e.emitTerminator("br label %" + joinL)
+		e.emitLabel(strL)
+		r2, err = e.emitExpr(call(ast.NewTemplateLiteral([]string{"", ""}, []ast.Expression{rep}, pos)))
+		if err != nil {
+			return Value{}, err
+		}
+		if reprKey(r2.Ty) != reprKey(resTy) {
+			r2 = e.convert(r2, resTy)
+		}
+		strEnd := e.freshLabel("replace.str.end")
+		e.emitTerminator("br label %" + strEnd)
+		e.emitLabel(strEnd)
+		e.emitTerminator("br label %" + joinL)
+		e.emitLabel(joinL)
+		res := e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = phi %s [ %s, %%%s ], [ %s, %%%s ]", res, resTy.IR, r1Ref, fnEnd, r2.Ref, strEnd))
+		return Value{Ref: res, Ty: resTy}, nil
+	}
 	if e.typeOfExpr(args[0]).IsRegExp() {
 		return e.emitRegexReplace(objVal, args, pos, all)
 	}
@@ -563,12 +623,9 @@ func (e *Emitter) emitStringReplaceArgs(objVal Value, args []ast.Expression, pos
 	if repVal, err = e.toStringArg(repVal); err != nil {
 		return Value{}, err
 	}
-	fn := "__kml_replace"
+	fn := "__kml_replace_subst"
 	if all {
-		e.ensureStrHeaderRuntime()
-		fn = "__kml_replace_all"
-	} else {
-		e.ensureStrHeaderRuntime()
+		fn = "__kml_replace_all_subst"
 	}
 	sLen := e.emitStrLenHeader(objVal.Ref)
 	searchLen := e.emitStrLenHeader(searchVal.Ref)
@@ -613,7 +670,6 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 		if _, err := e.emitExpr(args[0]); err != nil {
 			return Value{}, err
 		}
-		e.ensureStringC()
 		e.declareFn("__kml_String_split", "declare "+irPtr+" @__kml_String_split("+irPtr+" noundef, "+irPtr+" noundef, i1 zeroext, double noundef)")
 		h := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_String_split("+irPtr+" %s, "+irPtr+" null, i1 zeroext false, double 0.0)", h, e.convert(objVal, TypePtr).Ref))
@@ -632,7 +688,6 @@ func (e *Emitter) emitStringSplit(mem *ast.MemberExpression, args []ast.Expressi
 			}
 			// The string runtime's split, which the declaration's string
 			// overload lowers to (an empty separator splits code points).
-			e.ensureStringC()
 			e.declareFn("__kml_String_split", "declare "+irPtr+" @__kml_String_split("+irPtr+" noundef, "+irPtr+" noundef, i1 zeroext, double noundef)")
 			h := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_String_split("+irPtr+" %s, "+irPtr+" %s, i1 zeroext false, double 0.0)", h, objVal.Ref, sepVal.Ref))
@@ -710,7 +765,6 @@ func (e *Emitter) emitStringCharAt(strPtr string, indexExpr ast.Expression) (Val
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureStrHeaderRuntime()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_str_index("+irPtr+" %s, i64 %s)", r, strPtr, idxVal.Ref))
 	return Value{Ref: r, Ty: TypePtr}, nil
@@ -730,7 +784,6 @@ func (e *Emitter) emitStringFromCharCode(args []ast.Expression, codePoint bool, 
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureCasemap()
 	errSlot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", errSlot))
 	cp := 0
@@ -748,7 +801,6 @@ func (e *Emitter) emitStringFromCharCode(args []ast.Expression, codePoint bool, 
 		e.emitLabel(badL)
 		msg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", msg, errSlot))
-		e.ensureExceptionHelpers()
 		e.emitInternalThrowKind("RangeError", msg)
 		e.emitLabel(okL)
 	}
@@ -859,7 +911,6 @@ func (e *Emitter) emitStrBranch(condReg string, thenFn, elseFn func() (string, e
 // at s: the count cached in its header's high bits (kml_heap.h), or, until
 // counted, __kml_str_u16len_slow, which counts and caches it.
 func (e *Emitter) emitStrU16Len(s string) string {
-	e.ensureStrHeaderRuntime()
 	hp, h, c, known := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	e.emitPrefixWordAddr(hp, s)
 	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", h, hp))

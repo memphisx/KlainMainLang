@@ -256,6 +256,7 @@ var (
 	VarImplicitAnyArraySome  = &Message{Code: 7034, Kind: TypeScriptError, Phase: PhaseCheck, Text: "variable '%s' implicitly has type 'any[]' in some locations where its type cannot be determined"}
 	VarImplicitAnyArray      = &Message{Code: 7005, Kind: TypeScriptError, Phase: PhaseCheck, Text: "variable '%s' implicitly has an 'any[]' type"}
 	ReturnImplicitAnyCycle   = &Message{Code: 7023, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' implicitly has return type 'any' because it does not have a return type annotation and is referenced directly or indirectly in one of its return expressions"}
+	ClassFieldKeyNotLiteral  = &Message{Code: 1166, Kind: TypeScriptError, Phase: PhaseCheck, Text: "a computed property name in a class property declaration must have a simple literal type or a 'unique symbol' type"}
 	MemberImplicitAny        = &Message{Code: 7008, Kind: TypeScriptError, Phase: PhaseCheck, Text: "member '%s' implicitly has an 'any' type"}
 	PropertyNotInitialized   = &Message{Code: 2564, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Property '%s' has no initializer and is not definitely assigned in the constructor."}
 	NotConstructable         = &Message{Code: 2351, Kind: TypeScriptError, Phase: PhaseCheck, Text: "This expression is not constructable."}
@@ -273,6 +274,11 @@ var (
 	OverrideNoBase           = &Message{Code: 4112, Kind: TypeScriptError, Phase: PhaseCheck, Text: "this member cannot have an 'override' modifier because its containing class '%s' does not extend another class"}
 	OverrideNotInBase        = &Message{Code: 4113, Kind: TypeScriptError, Phase: PhaseCheck, Text: "this member cannot have an 'override' modifier because it is not declared in the base class '%s'"}
 	IncorrectlyImplements    = &Message{Code: 2420, Kind: TypeScriptError, Phase: PhaseCheck, Text: "class '%s' incorrectly implements interface '%s'"}
+	MethodOverriddenKind     = &Message{Code: 2423, Kind: TypeScriptError, Phase: PhaseCheck, Text: "class '%s' defines instance member %s '%s', but extended class '%s' defines it as instance member %s"}
+	PropertyOverriddenMethod = &Message{Code: 2425, Kind: TypeScriptError, Phase: PhaseCheck, Text: "class '%s' defines instance member %s '%s', but extended class '%s' defines it as instance member %s"}
+	AccessorOverriddenMethod = &Message{Code: 2426, Kind: TypeScriptError, Phase: PhaseCheck, Text: "class '%s' defines instance member %s '%s', but extended class '%s' defines it as instance member %s"}
+	AccessorOverriddenProp   = &Message{Code: 2610, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' is defined as %s in class '%s', but is overridden here in '%s' as %s"}
+	PropOverriddenAccessor   = &Message{Code: 2611, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' is defined as %s in class '%s', but is overridden here in '%s' as %s"}
 	OverrideNotAssignable    = &Message{Code: 2416, Kind: TypeScriptError, Phase: PhaseCheck, Text: "property '%s' in type '%s' is not assignable to the same property in base type '%s'"}
 	ValueUsedAsType          = &Message{Code: 2749, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'%s' refers to a value, but is being used as a type here; did you mean 'typeof %s'?"}
 	DynamicImportSpecifier   = &Message{Code: 7036, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Dynamic import's specifier must be of type 'string', but here has type '%s'."}
@@ -303,7 +309,6 @@ var (
 var (
 	ComputedKeyBinding          = unsupported(90004, "a computed destructuring key must bind through `: name`")
 	LiteralKeyBinding           = unsupported(90006, "a string or numeric destructuring key ('%s') must be bound with `: name`, got %s")
-	ComputedClassMemberName     = unsupported(90007, "a computed class member name must be a constant string or number literal, a well-known symbol, or a const holding one or a symbol — a key computed at run time is not yet supported")
 	NamespaceReexport           = unsupported(90009, "namespace re-exports ('export * as ns from') are not supported yet")
 	NamespaceMemberBindings     = unsupported(90010, "a namespace const/let member must declare exactly one binding")
 	ExportInNamespace           = syntax(1194, "export declarations are not permitted in a namespace")
@@ -314,7 +319,6 @@ var (
 	AutoAccessorNeedsStandard   = unsupported(90026, "an `accessor` auto-field decorator is a standard (TC39) decorator — compile with -decorators=standard")
 	EmbedDirPath                = annotation(91020, "embedDir's path must be a string literal (it is read at compile time)")
 	SpeciesComputed             = unsupported(90037, "%s's [Symbol.species] getter must return this, a class extending %s, %s itself, or undefined; another constructor is not supported yet")
-	SetPrototypeStatic          = unsupported(90036, "Object.setPrototypeOf of an object with a fixed layout is not supported yet (give the binding an any type to change its prototype)")
 	AssignRetypesField          = unsupported(90035, "Object.assign giving field '%s' a value of another type is not supported yet (this compiler stores an object's fields by their declared types)")
 	NumberLocaleArgs            = unsupported(90034, "toLocaleString() locale/options arguments on a number are an Intl feature, not supported yet; the no-argument form gives the en-US default")
 	ValueArrayTarget            = unsupported(90029, "@value applies to an array declaration (e.g. `/** @value */ const ps: Point[] = [...]`)")
@@ -351,7 +355,6 @@ var (
 
 // --no-any: the any/unknown escape hatch is banned.
 var (
-	HostBaseUnsupported   = &Message{Code: 92003, Kind: Unsupported, Phase: PhaseParse, Text: "extending the builtin '%s' is not supported yet"}
 	ByteStreamUnsupported = &Message{Code: 92004, Kind: Unsupported, Phase: PhaseParse, Text: "a byte stream (an underlying source of type 'bytes') is not supported yet"}
 	NoAnyType             = &Message{Code: 92001, Kind: Unsupported, Phase: PhaseCheck, Text: "the '%s' type is banned under --no-any; annotate a concrete type (or drop --no-any, or use -compat=js)"}
 	NoAnyInferred         = &Message{Code: 92002, Kind: Unsupported, Phase: PhaseCheck, Text: "'%s' is inferred as 'any' under --no-any; annotate it with a concrete type (e.g. `JSON.parse(s) as Rec`)"}
@@ -363,6 +366,20 @@ var (
 	StrictInvalidUse   = &Message{Code: 1100, Kind: TypeScriptError, Phase: PhaseCheck, Text: "invalid use of '%s' in strict mode"}
 	StrictDeleteIdent  = &Message{Code: 1102, Kind: TypeScriptError, Phase: PhaseCheck, Text: "'delete' cannot be called on an identifier in strict mode"}
 	StrictReservedWord = &Message{Code: 1212, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Identifier expected. '%s' is a reserved word in strict mode."}
+	OctalEscape        = &Message{Code: 1487, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Octal escape sequences are not allowed. Use the syntax '%s'."}
+	DecimalEscape      = &Message{Code: 1488, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Escape sequence '%s' is not allowed."}
+	OctalLiteral       = &Message{Code: 1121, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Octal literals are not allowed. Use the syntax '%s'."}
+	LeadingZeroDecimal = &Message{Code: 1489, Kind: TypeScriptError, Phase: PhaseCheck, Text: "Decimals with leading zeros are not allowed."}
+)
+
+// JavaScript strict code's Annex B literal errors, as V8 words them.
+var (
+	TemplateOctalEscape   = syntax(1487, "Octal escape sequences are not allowed in template strings.")
+	TemplateDecimalEscape = syntax(1488, "\\8 and \\9 are not allowed in template strings.")
+	StrictOctalEscape   = syntax(1487, "Octal escape sequences are not allowed in strict mode.")
+	StrictDecimalEscape = syntax(1488, "\\8 and \\9 are not allowed in strict mode.")
+	StrictOctalLiteral  = syntax(1121, "Octal literals are not allowed in strict mode.")
+	StrictLeadingZero   = syntax(1489, "Decimals with leading zeros are not allowed in strict mode.")
 )
 
 // Unused declarations (TypeScript's noUnusedLocals and noUnusedParameters).

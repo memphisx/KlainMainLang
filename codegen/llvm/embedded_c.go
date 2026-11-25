@@ -72,13 +72,19 @@ func (c CSource) SrcExt() string {
 // CLI's historical order. Returns an error only for an unknown backend name.
 func (e *Emitter) EmbeddedCSources() ([]CSource, error) {
 	if !e.cSourcesDone {
-		e.cSources, e.cSourcesErr = e.embeddedCSources()
+		var libs []libUnit
+		e.cSources, libs, e.cSourcesErr = e.embeddedCSources(e.finalIR)
+		for _, u := range libs {
+			for _, lib := range u.links {
+				e.requireLink(lib)
+			}
+		}
 		e.cSourcesDone = true
 	}
 	return e.cSources, e.cSourcesErr
 }
 
-func (e *Emitter) embeddedCSources() ([]CSource, error) {
+func (e *Emitter) embeddedCSources(ir string) ([]CSource, []libUnit, error) {
 	// What the runtime reads from and calls into the program (TDD-00251).
 	out := []CSource{e.hooksCSource()}
 	// The files without libraries of their own: linked when the program
@@ -89,7 +95,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	if backend := e.BigIntBackend(); true {
 		src, ok := BigIntBackendSource(backend)
 		if !ok {
-			return nil, fmt.Errorf("bigint: unknown backend %q", backend)
+			return nil, nil, fmt.Errorf("bigint: unknown backend %q", backend)
 		}
 		libPool = append(libPool, libUnit{src: CSource{"bigint", src, nil, nil, ""}, locate: func() ([]string, []string, error) {
 			cflags, libs := LocateBigInt(backend)
@@ -99,7 +105,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	if backend := e.CryptoBackend(); true {
 		src, ok := CryptoBackendSource(backend)
 		if !ok {
-			return nil, fmt.Errorf("crypto: unknown backend %q", backend)
+			return nil, nil, fmt.Errorf("crypto: unknown backend %q", backend)
 		}
 		libPool = append(libPool, libUnit{src: CSource{"crypto", src, nil, nil, ""}, locate: func() ([]string, []string, error) {
 			cflags, libs := LocateCrypto(backend)
@@ -117,16 +123,8 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 		cflags, libs := LocateHTTP2()
 		return cflags, libs, nil
 	}})
-	if e.UsesFFIDl() && e.opts.Target.OS() == "windows" {
-		// Windows has no libdl; supply dlopen/dlsym/dlclose/dlerror over
-		// LoadLibrary/GetProcAddress so node:ffi links (runtime_ffi.go).
-		out = append(out, CSource{"ffiwindl", FFIWinDlShimSource(), nil, nil, ""})
-	}
-	if e.UsesFFIRegistry() {
-		// node:ffi's runtime library registry + its std::unordered_map-ordered
-		// tables (TDD-00229).
-		out = append(out, e.FFIRegistrySources()...)
-	}
+	libPool = append(libPool, e.ffiUnits()...)
+	libPool = append(libPool, e.poolUnits()...)
 	pool = append(pool, CSource{"ipc", IPCSource(), nil, nil, ""})
 	pool = append(pool, CSource{"bufcodecs", BufferCodecsSource(), nil, nil, ""})
 	if e.usesDynamicImport && (e.opts.DynamicImport == "isolated" || e.opts.DynamicImport == "lazy") {
@@ -142,9 +140,6 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 		out = append(out, CSource{"dynimport", DynImportShimSource(), nil, libs, ""})
 	}
 	pool = append(pool, CSource{"jsontree", JSONParseTreeSource(), nil, nil, ""})
-	if e.UsesPathWin32() {
-		out = append(out, CSource{"pathwin32", PathWin32Source(), nil, nil, ""})
-	}
 	pool = append(pool, CSource{"dynjson", DynJSONSource(), []string{fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord()), fmt.Sprintf("-DKML_ARGS_HDR_WORD=%dLL", e.argumentsHeaderWord())}, nil, ""})
 	// Every runtime unit that switches fibers or unwinds keeps the shadow
 	// call stack's thread-locals (kml_heap.h), so it always links.
@@ -152,6 +147,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	pool = append(pool, CSource{"jmpstack", JmpStackSource(), nil, nil, ""})
 	pool = append(pool, CSource{"stackguard", StackGuardSource(), nil, nil, ""})
 	pool = append(pool, CSource{"microtask", MicrotaskSource(), nil, nil, ""})
+	pool = append(pool, CSource{"kmlref", kmlRefSource, nil, nil, ""})
 	pool = append(pool, CSource{"promise", PromiseSource(), nil, nil, ""})
 	pool = append(pool, CSource{"task", TaskSource(), nil, nil, ""})
 	pool = append(pool, CSource{"core", CoreSource(), nil, LibmLibs(), ""})
@@ -159,7 +155,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	pool = append(pool, CSource{"strheader", StrHeaderSource(), nil, nil, ""})
 	pool = append(pool, CSource{"request", RequestSource(), nil, nil, ""})
 	pool = append(pool, CSource{"strings", StringsCSource(), nil, nil, ""})
-	pool = append(pool, CSource{"regexp", RegexpCSource(), nil, nil, ""})
+	libPool = append(libPool, libUnit{src: CSource{"regexp", RegexpCSource(), nil, nil, ""}, links: []string{"pcre2-8"}})
 	pool = append(pool, CSource{"dynobj", DynObjSource(), nil, nil, ""})
 	pool = append(pool, CSource{"dynarr", DynArrSource(), nil, nil, ""})
 	pool = append(pool, CSource{"dynentries", DynEntriesSource(), nil, nil, ""})
@@ -176,6 +172,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	pool = append(pool, CSource{"cryptorand", CryptoRandSource(), e.CryptoRandCFlags(), nil, ""})
 	pool = append(pool, CSource{"errno", ErrnoSource(), nil, nil, ""})
 	pool = append(pool, CSource{"fserror", FsErrorSource(), nil, nil, ""})
+	pool = append(pool, CSource{"pathwin32", PathWin32Source(), nil, nil, ""})
 	pool = append(pool, CSource{"fswatch", FsWatchSource(), nil, nil, ""})
 	pool = append(pool, CSource{"streams", StreamsSource(), nil, nil, ""})
 	libPool = append(libPool, libUnit{src: CSource{"zlibstream", ZlibStreamSource(), nil, nil, ""}, links: []string{"z"}})
@@ -192,18 +189,21 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 		cflags, _ := LocateUV(uvTarget, uvCross)
 		return cflags, nil, nil
 	}})
-	libPool = append(libPool, libUnit{src: CSource{"loop", LoopSource(), e.loopCFlags, nil, ""}, locate: func() ([]string, []string, error) {
+	// The loop is thread-affine (its state is thread-local): run inside a
+	// klain:sync goroutine, it locks the goroutine to its OS thread so a
+	// migration cannot hand it another thread's loop.
+	var loopCFlags []string
+	if e.usesSyncProgram {
+		loopCFlags = []string{"-DKML_SYNC_LOCK=1"}
+	}
+	libPool = append(libPool, libUnit{src: CSource{"loop", LoopSource(), loopCFlags, nil, ""}, locate: func() ([]string, []string, error) {
 		cflags, libs := LocateUV(uvTarget, uvCross)
 		return cflags, libs, nil
 	}})
 	pool = append(pool, CSource{"native", NativeSource(), e.NativeCFlags(), nil, ""})
 	pool = append(pool, CSource{"entrypath", entryPathSource, nil, nil, ""})
 	pool = append(pool, CSource{"dynwhen", DynWhenSource(), nil, nil, ""})
-	if e.usedIslandLoop {
-		// The host reaches an island's entry points through dlsym: nothing
-		// in the island names them.
-		out = append(out, CSource{"island", islandSource, nil, nil, ""})
-	}
+	pool = append(pool, CSource{"island", islandSource, nil, nil, ""})
 	pool = append(pool, CSource{"dynimportwatch", DynImportWatchSource(), nil, nil, ""})
 	pool = append(pool, CSource{"promise_settle", PromiseSettleSource(), nil, nil, ""})
 	pool = append(pool, CSource{"promise_defer", PromiseDeferSource(), nil, nil, ""})
@@ -215,6 +215,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	pool = append(pool, CSource{"bigintbox", BigIntBoxSource(), nil, nil, ""})
 	pool = append(pool, CSource{"bigintrel", BigIntRelSource(), nil, nil, ""})
 	pool = append(pool, CSource{"toprim", ToPrimitiveSource(), nil, nil, ""})
+	pool = append(pool, CSource{"anystr", AnyStrSource(), nil, nil, ""})
 	pool = append(pool, CSource{"stricteq", StrictEqSource(), nil, nil, ""})
 	pool = append(pool, CSource{"looseeq", LooseEqSource(), nil, nil, ""})
 	pool = append(pool, CSource{"hostbox", HostBoxSource(), nil, nil, ""})
@@ -229,14 +230,15 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	// hooks.c's defaults, which a library unit never replaces on its own.
 	libPool = append(libPool, libUnit{src: CSource{"objextra", ObjExtraSource(), nil, nil, ""}})
 	libPool = append(libPool, libUnit{src: CSource{"promisebox", PromiseBoxSource(), nil, nil, ""}})
-	// Unicode case mapping for toUpperCase/toLowerCase. Tables + code,
-	// libc only.
-	pool = append(pool, CSource{"casemap", CasemapSource(), nil, LibmLibs(), ""})
+	// Unicode case mapping for toUpperCase/toLowerCase, and normalize.
+	// Tables + code, libc only; a program not normalizing drops those
+	// tables at link (DeadStripFlags).
+	pool = append(pool, CSource{"casemap", CasemapSource(), DeadStripFlags(e.exportsRuntime()), LibmLibs(), ""})
 	pool = append(pool, CSource{"collate", CollateSource(), nil, nil, ""})
 	pool = append(pool, CSource{"string", StringSource(), []string{fmt.Sprintf("-DKML_ARRAY_HDR_WORD=%dLL", e.arrayHeaderWord())}, LibmLibs(), ""})
 	pool = append(pool, CSource{"number", NumberSource(), nil, LibmLibs(), ""})
 	pool = append(pool, CSource{"fnmeta", FnMetaSource(), e.FnMetaCFlags(), nil, ""})
-	pool = append(pool, CSource{"inspect", InspectReduceSource(), nil, nil, ""})
+	pool = append(pool, CSource{"inspect", InspectReduceSource(), nil, LibmLibs(), ""})
 	// os.type/release/version/machine/uptime/loadavg/userInfo/
 	// availableParallelism/networkInterfaces + process.env enumeration.
 	libPool = append(libPool, libUnit{src: CSource{"osinfo", OSInfoSource(), nil, e.OSInfoLibs(), ""}})
@@ -245,7 +247,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	if e.UsesWebview() {
 		cflags, libs, err := e.LocateWebview(e.WebviewBackend())
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if runtime.GOOS == "windows" && staticLinkMode {
 			// --static: precompile the amalgamation with g++ (COMDAT-compatible with the
@@ -253,7 +255,7 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 			// self-contained — no libstdc++/libwinpthread DLLs beside it (ADR-00772).
 			obj, oerr := windowsWebviewObject()
 			if oerr != nil {
-				return nil, oerr
+				return nil, nil, oerr
 			}
 			winLibs := append([]string{obj}, libs...)
 			out = append(out, CSource{"webview", "// webview linked as a prebuilt g++ object (see webview_win32.go).\n", nil, winLibs, "cc"})
@@ -283,12 +285,13 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 		// linked in — see yogaCSources for why (C++20 can't share the C line).
 		tui, err := yogaCSources(e.Toolchain())
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		out = append(out, tui...)
 	}
-	if e.UsesSync() {
-		// TDD-00143: the klain:sync GMP goroutine runtime. Needs pthread; the
+	{
+		// TDD-00143: the klain:sync GMP goroutine runtime, linked when the
+		// program names it. Needs pthread; the
 		// macOS ucontext calls are deprecated-but-functional (silence the
 		// warning). Under -mm=gc the runtime registers each M thread and each
 		// goroutine stack with the collector (KML_GC); the -lgc link is
@@ -304,29 +307,29 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 		} else {
 			cflags = append(cflags, "-pthread") // dynamic winpthread (default / POSIX)
 		}
-		out = append(out, CSource{"klainsync", SyncSource(), cflags, libs, ""})
+		pool = append(pool, CSource{"klainsync", SyncSource(), cflags, libs, ""})
 	}
-	if e.UsesThreadPool() {
-		// TDD-00185: the blocking-work thread pool for real async fs I/O. Needs
-		// pthread; under -mm=gc each worker registers with Boehm before its first
-		// allocation (KML_GC), matching the Worker/klain:sync threads.
-		// --static on Windows links the static winpthread archive instead of
-		// -pthread's DLL, as klain:sync does above (ADR-00772).
+	// TDD-00185: the blocking-work thread pool, linked by the natives that
+	// run on it. Needs pthread; under -mm=gc each worker registers with
+	// Boehm before its first allocation (KML_GC), matching the
+	// Worker/klain:sync threads. --static on Windows links the static
+	// winpthread archive instead of -pthread's DLL, as klain:sync does above
+	// (ADR-00772).
+	{
+		cflags, libs := e.ThreadPoolCFlags(), []string(nil)
 		if runtime.GOOS == "windows" && staticLinkMode {
-			var cflags []string
+			cflags = nil
 			for _, f := range e.ThreadPoolCFlags() {
 				if f != "-pthread" {
 					cflags = append(cflags, f)
 				}
 			}
-			out = append(out, CSource{"threadpool", ThreadPoolSource(), cflags, WorkerPthreadLinkFlags(), ""})
-		} else {
-			var poolLibs []string
-			if e.usedWasmNatives {
-				_, poolLibs = LocateWasm()
-			}
-			out = append(out, CSource{"threadpool", ThreadPoolSource(), e.ThreadPoolCFlags(), poolLibs, ""})
+			libs = WorkerPthreadLinkFlags()
 		}
+		libPool = append(libPool, libUnit{src: CSource{"threadpool", ThreadPoolSource(), cflags, libs, ""}, locate: func() ([]string, []string, error) {
+			uvflags, _ := LocateUV(uvTarget, uvCross)
+			return uvflags, nil, nil
+		}})
 	}
 	var caresLinks []string
 	if e.opts.Target.OS() == "windows" {
@@ -343,14 +346,12 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 		cflags, libs := e.H2OFlags()
 		return cflags, libs, nil
 	}})
-	if e.UsesEmbeddedAssets() {
-		// The embedded static server needs pthread; -pthread is already added
-		// by the CLI when workers are used, but a serve-only program needs it too.
-		if runtime.GOOS == "windows" && staticLinkMode {
-			out = append(out, CSource{"embedassets", EmbedAssetsSource(), nil, WorkerPthreadLinkFlags(), ""})
-		} else {
-			out = append(out, CSource{"embedassets", EmbedAssetsSource(), []string{"-pthread"}, nil, ""})
-		}
+	// The embedded static server, linked when the program names it; it needs
+	// pthread even in a program without workers.
+	if runtime.GOOS == "windows" && staticLinkMode {
+		pool = append(pool, CSource{"embedassets", EmbedAssetsSource(), nil, WorkerPthreadLinkFlags(), ""})
+	} else {
+		pool = append(pool, CSource{"embedassets", EmbedAssetsSource(), []string{"-pthread"}, nil, ""})
 	}
 	pool = append(pool, CSource{"fdlibm", fdlibmSource, nil, LibmLibs(), ""})
 	pool = append(pool, CSource{"buffill", bufFillSource, nil, LibmLibs(), ""})
@@ -360,8 +361,9 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	pool = append(pool, CSource{"wrapper", wrapperSource, nil, nil, ""})
 	// Every member allocates program values through the managed-heap
 	// interface (TDD-00230 P3.3a), reads a header word's object state
-	// through the same constants, and sees -mm=gc as KML_GC.
-	prelude := kmlHeapHeader + hdrStateDefines()
+	// through the same constants, reads codegen's struct layouts and the
+	// NaN-box encoding from one header each, and sees -mm=gc as KML_GC.
+	prelude := kmlHeapHeader + hdrStateDefines() + layoutHeader() + kmlNanboxHeader
 	if e.isGCMode() {
 		prelude = "#define KML_GC 1\n" + prelude
 	}
@@ -374,20 +376,21 @@ func (e *Emitter) embeddedCSources() ([]CSource, error) {
 	for i := range libPool {
 		libPool[i].src.Content = prelude + libPool[i].src.Content
 	}
-	picked, libs, err := resolveRuntime(e.Toolchain(), e.finalIR, out, pool, libPool)
+	picked, libs, err := resolveRuntime(e.Toolchain(), ir, out, pool, libPool)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	for _, u := range libs {
-		for _, lib := range u.links {
-			e.requireLink(lib)
-		}
-	}
-	return append(out, picked...), nil
+	return append(out, picked...), libs, nil
 }
 
 //go:embed kmlheapsrc/kml_heap.h
 var kmlHeapHeader string
+
+// kml_nanbox.h: the NaN-box encoding every runtime C file shares,
+// prepended after kml_layout.h (which defines KML_NB_DOUBLE_OFFSET).
+//
+//go:embed kmlheapsrc/kml_nanbox.h
+var kmlNanboxHeader string
 
 // LibmLibs is the link flag a C runtime file calling libm (trunc, floor, …)
 // needs: glibc and mingw keep the math functions in libm; macOS has them in

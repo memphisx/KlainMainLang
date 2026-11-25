@@ -461,7 +461,6 @@ func (e *Emitter) emitRegexComputeOneReplacement(replacer regexReplacer, match, 
 // (match: its result array; the match starts at byte matchStartReg of
 // strVal) through __kml_regex_expand, the spec's GetSubstitution.
 func (e *Emitter) emitRegexExpandTemplate(templateVal, match, strVal Value, matchStartReg string) (replPtr, replLen string) {
-	e.ensureStrHeaderRuntime()
 	data, n := e.arrayParts(match)
 	g0 := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", g0, data))
@@ -480,7 +479,7 @@ func (e *Emitter) emitRegexExpandTemplate(templateVal, match, strVal Value, matc
 // %Symbol.replace% algorithm exactly (a single RegExpExec call). No match
 // returns the original subject string unchanged.
 func (e *Emitter) emitRegexReplaceSingleMatch(strVal, regexVal Value, replacer regexReplacer) (Value, error) {
-	match, startReg, endReg, groupsReg := e.emitRegexMatch(regexVal, strVal, replacer.isCallback)
+	match, startReg, endReg, groupsReg, _ := e.emitRegexMatch(regexVal, strVal, replacer.isCallback)
 	matchPtr := e.freshReg()
 	matchPtr = e.arrayData(match)
 	isNullReg := e.freshReg()
@@ -583,7 +582,7 @@ func (e *Emitter) emitRegexReplaceAllMatches(strVal, regexVal Value, replacer re
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", fillDoneReg, fillDoneL, fillBodyL))
 
 	e.emitLabel(fillBodyL)
-	match, startReg, endReg, groupsReg := e.emitRegexMatch(regexVal, strVal, replacer.isCallback)
+	match, startReg, endReg, groupsReg, _ := e.emitRegexMatch(regexVal, strVal, replacer.isCallback)
 	replPtr, replLenReg, err := e.emitRegexComputeOneReplacement(replacer, match, strVal, startReg, groupsReg)
 	if err != nil {
 		return Value{}, err
@@ -789,7 +788,6 @@ func (e *Emitter) emitRegexReplace(strVal Value, args []ast.Expression, pos ast.
 	globalReg := e.emitRegexLoadField(regexVal, "global", "i1", 1)
 
 	if requireGlobal {
-		e.ensureExceptionHelpers()
 		okL := e.freshLabel("regex.replaceall.ok")
 		badL := e.freshLabel("regex.replaceall.notglobal")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", globalReg, okL, badL))

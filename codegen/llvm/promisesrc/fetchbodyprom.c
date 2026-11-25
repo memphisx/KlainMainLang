@@ -14,8 +14,10 @@ typedef void (*kml_fn)(void *);
 
 #define F(p, off, T) (*(T *)((char *)(p) + (off)))
 
+/* A parked body read: the fetch and the settle closure, held through the
+ * handle table (this array is thread-local native memory). */
 typedef struct {
-    void *pending, *closure;
+    kml_ref pending, closure;
 } fbp_req;
 
 static _Thread_local fbp_req *fbp_data;
@@ -44,8 +46,8 @@ void __kml_fetch_bodyprom_register(void *pending, void *closure) {
         fbp_data = (fbp_req *)realloc(fbp_data, (size_t)nc * sizeof(fbp_req)); /* scratch */
         fbp_cap = nc;
     }
-    fbp_data[fbp_len].pending = pending;
-    fbp_data[fbp_len].closure = closure;
+    fbp_data[fbp_len].pending = kml_ref_new(pending);
+    fbp_data[fbp_len].closure = kml_ref_new(closure);
     fbp_len++;
 }
 
@@ -60,8 +62,10 @@ __attribute__((constructor)) static void kml_fbp_register(void) {
 }
 void __kml_fetch_bodyprom_on_done(void *pending) {
     for (i64 i = 0; i < fbp_len; i++) {
-        if (fbp_data[i].pending != pending) continue;
-        void *clo = fbp_data[i].closure;
+        if (kml_ref_get(fbp_data[i].pending) != pending) continue;
+        void *clo = kml_ref_get(fbp_data[i].closure);
+        kml_ref_free(fbp_data[i].pending);
+        kml_ref_free(fbp_data[i].closure);
         fbp_data[i] = fbp_data[--fbp_len];
         __kml_fbp_invoke(clo);
         i--; /* the swapped-in entry sits at i now; the invoke may park more */

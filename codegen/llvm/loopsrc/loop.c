@@ -104,6 +104,9 @@ static kml_uvstate *uvs_get(void) {
     kml_uvstate *b = RAW_MALLOC(sizeof *b);
     memset(b, 0, sizeof *b);
     uv_loop_init(&b->loop);
+    /* performance.eventLoopUtilization: libuv counts the time spent
+     * waiting in its poll, as Node configures it. */
+    uv_loop_configure(&b->loop, UV_METRICS_IDLE_TIME);
     uv_timer_init(&b->loop, &b->timer);
     uv_async_init(&b->loop, &b->wake, on_wake);
 #ifdef _WIN32
@@ -381,14 +384,46 @@ _Bool __kml_event_loop_alive(void) {
     return uv_loop_alive(&uvs_get()->loop) != 0 || runnable_now();
 }
 
+/* main()'s run of the loop (hooks.c): the loop's own, once linked. The
+ * units that wait on the loop name __kml_loop_linked, so the link takes
+ * this file whenever one of them is. */
+char __kml_loop_linked;
+void __kml_event_loop_run(void);
+extern void (*__kml_loop_run_hook)(void);
+extern _Bool (*__kml_loop_alive_hook)(void);
+__attribute__((constructor)) static void loop_hook_init(void) {
+    __kml_loop_run_hook = __kml_event_loop_run;
+    __kml_loop_alive_hook = __kml_event_loop_alive;
+}
+
 /* How deep this thread is in __kml_event_loop_run: a callback the loop runs
  * sees 1. */
 static _Thread_local int loop_depth;
+
+/* performance.nodeTiming.loopStart: when this thread's loop first ran,
+ * in performance.now() ms (-1 before). */
+double __kml_performance_now(void);
+static _Thread_local double loop_start_ms = -1;
+
+double __kml_native_loop_start(void) { return loop_start_ms; }
+
+void __kml_loop_mark_start(void) {
+    if (loop_start_ms < 0)
+        loop_start_ms = __kml_performance_now();
+}
+
+/* performance.nodeTiming.idleTime: ms the loop has spent waiting. */
+double __kml_native_loop_idle(void) {
+    if (!uvs || loop_start_ms < 0)
+        return 0;
+    return (double)uv_metrics_idle_time(&uvs->loop) / 1e6;
+}
 
 void __kml_event_loop_run(void) {
 #ifdef KML_SYNC_LOCK
     klainsync_lock_os_thread();
 #endif
+    __kml_loop_mark_start();
     loop_depth++;
     /* A callback the loop runs has no caller of the program's own below it,
      * as in Node: the frames under the loop are set aside until it ends. */
@@ -550,6 +585,16 @@ void *__kml_native_process_title(void) {
     if (kml_process_title != NULL) return __kml_str_from_cstr(kml_process_title);
     /* argv[0] is the C library's: copied into a string the program owns. */
     return __kml_str_from_cstr(*(const char **)__argv_ptr);
+}
+
+/* process.version (0), versions.node (1), versions.v8 (2) and the
+ * compiler's own version (3): C strings the program defines, since the
+ * compiler's version is set when the compiler is built. */
+/* The program's table, else hooks.c's empty one. */
+extern const char *const __kml_process_versions[4];
+void *__kml_native_process_version(double which) {
+    int i = (int)which;
+    return __kml_str_from_cstr(__kml_process_versions[i >= 0 && i < 4 ? i : 0]);
 }
 
 /* process.versions.uv: the libuv the program links. */

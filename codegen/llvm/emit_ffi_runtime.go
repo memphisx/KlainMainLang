@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"runtime"
+	"strings"
 )
 
 // emit_ffi_runtime.go — the native side of node:ffi (lib/node/ffi.ts): the
@@ -27,43 +28,53 @@ var ffiNativeSource string
 //go:embed ffisrc/umap_order.c
 var umapOrderSource string
 
-// FFIRegistrySources returns the C/C++ members behind the registry and
-// umapOrder for the current target: the registry, the order helper, each
-// when used, and the order container.
-func (e *Emitter) FFIRegistrySources() []CSource {
-	var out []CSource
-	if e.usedFFIRegistry {
-		out = append(out, CSource{"ffireg", ffiRegistrySource, nil, nil, ""})
+// ffiUnits are node:ffi's C/C++ units, linked by the symbols the program
+// names: the libffi natives, the library registry, the order helper and
+// its container (the real std::unordered_map on POSIX, an MSVC port on
+// Windows), and on Windows the libdl shim the natives call.
+func (e *Emitter) ffiUnits() []libUnit {
+	native := []string{"ffi"}
+	if e.opts.Target.OS() == "linux" {
+		native = append(native, "dl")
 	}
-	if e.usedFFINatives {
-		out = append(out, CSource{"ffinative", ffiNativeSource, nil, nil, ""})
-	}
-	if e.usedUmapOrder {
-		out = append(out, CSource{"umaporder", umapOrderSource, nil, nil, ""})
+	out := []libUnit{
+		{src: CSource{"ffinative", ffiNativeSource, nil, nil, ""}, links: native},
+		{src: CSource{"ffireg", ffiRegistrySource, nil, nil, ""}},
+		{src: CSource{"umaporder", umapOrderSource, nil, nil, ""}},
 	}
 	if e.opts.Target.OS() == "windows" {
-		return append(out, CSource{"ffiumap", ffiUmapMSVCSource, nil, nil, ""})
+		out = append(out, libUnit{src: CSource{"ffiwindl", FFIWinDlShimSource(), nil, nil, ""}})
+		return append(out, libUnit{src: CSource{"ffiumap", ffiUmapMSVCSource, nil, nil, ""}})
 	}
 	cxx := "-lstdc++"
 	if e.opts.Target.OS() == "darwin" || runtime.GOOS == "darwin" && e.opts.Target.OS() == "" {
 		cxx = "-lc++"
 	}
-	return append(out, CSource{"ffiumap", ffiUmapSTLSource, nil, []string{cxx}, "cc"})
+	return append(out, libUnit{src: CSource{"ffiumap", ffiUmapSTLSource, nil, []string{cxx}, "cc"}})
 }
 
-// ensureFFINatives compiles ffi_native.c (lib/node/ffi.ts's natives over the
-// registry and libffi) and links libffi: the `@link ffi` of lib/native.d.ts.
-func (e *Emitter) ensureFFINatives() {
-	if e.usedFFINatives {
-		return
-	}
-	e.usedFFINatives = true
-	e.usedFFIRegistry = true
-	e.ensureFFIDl()
-	e.ensureBigInt()
-	e.ensureStrHeaderRuntime()
-	e.requireLink("ffi")
+// UsesWeakMaps reports whether the program makes a WeakMap or WeakSet (or a
+// private-name side table, which is one): under -mm=gc its collector then
+// gives each scanned block an ephemeron slot (gcsrc/gcshim.c).
+func (e *Emitter) UsesWeakMaps() bool {
+	return strings.Contains(e.finalIR, "@__kml_weak_create") || strings.Contains(e.finalIR, "@__kml_ptab")
 }
+
+// GCShim is the -mm=gc collector shim this program links: with ephemeron
+// slots when it makes a WeakMap (ADR-01990).
+func (e *Emitter) GCShim() string {
+	if e.UsesWeakMaps() {
+		return "#define KML_EPH 1\n" + GCShimSource
+	}
+	return GCShimSource
+}
+
+// UsesFFIDl reports whether the program calls node:ffi, whose dlopen(null)
+// looks the executable's own symbols up: they stay exported. The test is
+// the dlopen native: __kml_native_ffi_view alone is in every
+// program that boxes the global object (runtimeSymbols), and counting it
+// kept a 100 MB module whole and unstripped for each of them.
+func (e *Emitter) UsesFFIDl() bool { return strings.Contains(e.finalIR, "@__kml_native_ffi_open") }
 
 // Registered from init: the view boxes through emitBoxValue, which the
 // runtimeSymbols table itself is reachable from.
@@ -128,11 +139,3 @@ func (e *Emitter) ensureNativeFFIView() {
 	restore()
 	e.writeFunc("i64 @__kml_native_ffi_view(double %addr, double %len, double %kind)", body)
 }
-
-// UsesFFIRegistry reports whether the registry or the order container must
-// be linked.
-func (e *Emitter) UsesFFIRegistry() bool { return e.usedFFIRegistry || e.usedUmapOrder }
-
-// ensureUmapOrder links __kml_native_umap_order (umap_order.c) and its
-// container: the `@link umap` of lib/native.d.ts.
-func (e *Emitter) ensureUmapOrder() { e.usedUmapOrder = true }

@@ -150,6 +150,7 @@ NodeJS.MemoryUsage		arrayBuffers external heapTotal heapUsed rss
 NodeJS.MemoryUsageFn		rss
 NodeJS.Process	EventEmitter	abort addListener allowedNodeEnvironmentFlags arch argv argv0 availableMemory callback channel chdir config connected constrainedMemory cpuUsage cwd debugPort disconnect dlopen emit emitWarning env event execArgv execPath execve exit exitCode features finalization getActiveResourcesInfo getBuiltinModule getegid geteuid getgid getgroups getuid hasUncaughtExceptionCaptureCallback hrtime kill listeners loadEnvFile mainModule memoryUsage message nextTick noDeprecation on once options permission pid platform ppid prependListener prependOnceListener promise ref release report resourceUsage send sendHandle setSourceMapsEnabled setUncaughtExceptionCaptureCallback setegid seteuid setgid setgroups setuid sourceMapsEnabled stderr stdin stdout threadCpuUsage throwDeprecation title traceDeprecation traceProcessWarnings type umask unref uptime value version versions
 NodeJS.ProcessFeatures		cached_builtins debug inspector ipv6 require_module tls tls_alpn tls_ocsp tls_sni typescript uv
+NodeJS.ResourceUsage		fsRead fsWrite involuntaryContextSwitches ipcReceived ipcSent majorPageFault maxRSS minorPageFault sharedMemorySize signalsCount swappedOut systemCPUTime unsharedDataSize unsharedStackSize userCPUTime voluntaryContextSwitches
 NodeJS.Timeout	Disposable,RefCounted,Timer	_onTimeout close hasRef ref refresh unref
 Number		toExponential toFixed toLocaleString toPrecision toString valueOf
 NumberConstructor		EPSILON MAX_SAFE_INTEGER MAX_VALUE MIN_SAFE_INTEGER MIN_VALUE NEGATIVE_INFINITY NaN POSITIVE_INFINITY isFinite isInteger isNaN isSafeInteger parseFloat parseInt prototype
@@ -193,16 +194,19 @@ ReadableStreamReadDoneResult		done value
 ReadableStreamReadValueResult		done value
 ReadableWritablePair		readable writable
 ReadonlyArray		at concat entries every filter find findIndex findLast findLastIndex flat flatMap forEach includes indexOf join keys lastIndexOf length map reduce reduceRight slice some toLocaleString toReversed toSorted toSpliced toString values with
+ReadonlySetLike		has keys size
 RefCounted		ref unref
 ReferenceError	Error	
 ReferenceErrorConstructor	ErrorConstructor	prototype
 RegExp		compile dotAll exec flags global hasIndices ignoreCase lastIndex multiline source sticky test unicode unicodeSets
 RegExpConstructor		$& $' $+ $1 $2 $3 $4 $5 $6 $7 $8 $9 $_ $` escape input lastMatch lastParen leftContext prototype rightContext
 RegExpExecArray	Array	0 groups index indices input
+RegExpIndicesArray	Array	groups
 RegExpMatchArray	Array	0 groups index indices input
 RegExpStringIterator	IteratorObject	
 Request	Body	cache clone credentials destination hasPostData headers integrity keepalive method mode redirect referrer referrerPolicy signal url
 RequestInit		body cache credentials headers integrity keepalive method mode priority redirect referrer referrerPolicy signal window
+ResourceUsage		fsRead fsWrite involuntaryContextSwitches ipcReceived ipcSent majorPageFault maxRSS minorPageFault sharedMemorySize signalsCount swappedOut systemCPUTime unsharedDataSize unsharedStackSize userCPUTime voluntaryContextSwitches
 Response	Body	charset clone headers mimeType ok redirected status statusText type url
 ResponseInit		headers status statusText
 RsaHashedImportParams	Algorithm	hash

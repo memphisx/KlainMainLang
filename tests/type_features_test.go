@@ -1172,3 +1172,56 @@ const arr2 = [0, 0];
 console.log(o2.a, o2.b, arr2.join(","));
 `)
 }
+
+// A derived member overriding the base's of another kind is tsc's
+// TS2423/TS2425/TS2426/TS2610/TS2611; a property over a method is allowed.
+func TestMemberKindOverrideDiagnostics(t *testing.T) {
+	for src, want := range map[string]string{
+		"class A { m() { return 1; } } class B extends A { get m(): any { return 1; } }": "defines instance member function 'm', but extended class 'B' defines it as instance member accessor",
+		"class A { get g() { return 1; } } class B extends A { g(): any { return 1; } }": "defines instance member accessor 'g', but extended class 'B' defines it as instance member function",
+		"class A { h = 1; } class B extends A { h(): any { return 1; } }":                "defines instance member property 'h', but extended class 'B' defines it as instance member function",
+		"class A { get y() { return 1; } } class B extends A { y: number = 2; }":         "'y' is defined as an accessor in class 'A', but is overridden here in 'B' as an instance property",
+		"class A { f = 1; } class B extends A { get f(): any { return 1; } }":            "'f' is defined as a property in class 'A', but is overridden here in 'B' as an accessor",
+	} {
+		_, err := parseAndCompile(src)
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("%q: want %q, got %v", src, want, err)
+		}
+	}
+}
+
+// A write through a type assertion or a non-null assertion stores to the
+// name: a later read gets the value written, of whatever type, not the
+// earlier narrowing's.
+func TestE2EAssignThroughAssertionTS(t *testing.T) {
+	assertSameAsNode(t, `
+let y: number | string = 1;
+(y as any) = "s";
+console.log(y, typeof y);
+let z: number | boolean = 2;
+(z as any) = true;
+console.log(z, typeof z);
+function f(): void { let q: number | string = 5; (q as any) = "w"; console.log(q); }
+f();
+let n: number | undefined = 1;
+n! = 7;
+console.log(n);
+`)
+}
+
+// `x as unknown as T`, T a primitive x is not, is x's value as it is: a
+// parameter of T receives it, a binding of it holds it.
+func TestE2EUnsoundScalarCastTS(t *testing.T) {
+	assertSameAsNode(t, `
+function f(n: number) { return n; }
+console.log(f("s" as unknown as number), typeof f("s" as unknown as number));
+function g(n: number) { return typeof n; }
+console.log(g({ a: 1 } as unknown as number));
+const v = "x" as unknown as number;
+console.log(v, typeof v);
+function h(b: boolean) { return b; }
+console.log(h(5 as unknown as boolean));
+const w = 7 as unknown as number;
+console.log(w + 1, f(w));
+`)
+}

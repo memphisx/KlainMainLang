@@ -4,9 +4,9 @@
   "kind": "language",
   "statusPage": "ARRAY-METHODS.md",
   "coverage": {
-    "loose": "37/37",
+    "loose": "38/38",
     "loosePct": 100,
-    "strict": "34/37",
+    "strict": "35/38",
     "strictPct": 92
   },
   "lede": "Every Array method is present, and arrays are full reference values: a length change (push/pop/splice) inside a callee is visible to the caller for every argument shape — a plain variable, an object-field or array-element array, or a HOF-callback element. The remaining recurring caveat is structural: the element-comparing helpers (indexOf/includes/join/sort) reject a nested-array element.",
@@ -700,6 +700,24 @@
       ],
       "spec": {
         "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/from"
+      }
+    },
+    {
+      "id": "array.fromAsync",
+      "name": "Array.fromAsync(items, mapFn?, thisArg?)",
+      "signature": "Array.fromAsync(items, mapFn?: (v: Awaited<T>, i: number) => U, thisArg?: any): Promise<T[] | Awaited<U>[]>",
+      "badge": "exact",
+      "description": "Builds an array, as a promise, from an async iterable, an iterable (each value awaited) or an array-like object (each element awaited). An optional mapFn transforms each value by value and index, its result awaited, called with thisArg as its `this`; a rejection or throw rejects the promise. Static method on Array.",
+      "returns": {
+        "type": "Promise<T[] | Awaited<U>[]>",
+        "desc": "A promise of the constructed array."
+      },
+      "exampleKey": "arrays/from_async",
+      "seeAlso": [
+        "array.from"
+      ],
+      "spec": {
+        "mdn": "https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Array/fromAsync"
       }
     },
     {

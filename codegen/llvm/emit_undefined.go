@@ -811,12 +811,8 @@ func optionalFieldType(t Type) Type {
 // cell with a string header, so a read that skipped the null check sees an
 // empty string or zeroed fields rather than faulting.
 func (e *Emitter) nullRef() string {
-	if !e.usedNullRef {
-		e.usedNullRef = true
-		// One cell for the whole binary, the library's units and the C
-		// runtime included (collections.c tells a null key from "").
-		e.emitGlobal("@__kml_nullref_cell = weak_odr" + irGlobalAS + " global { i64, [248 x i8] } zeroinitializer, align 8")
-	}
+	// Defined where the program names it (runtimeGlobals); collections.c
+	// tells a null key from "" by it.
 	return "getelementptr inbounds ({ i64, [248 x i8] }, " + irPtr + " @__kml_nullref_cell, i32 0, i32 1)"
 }
 

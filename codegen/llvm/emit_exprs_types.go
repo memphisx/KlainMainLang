@@ -3,7 +3,6 @@ package llvm
 import (
 	"KlainMainLang/ast"
 	"KlainMainLang/checker"
-	"KlainMainLang/sema"
 	"fmt"
 	"strings"
 )
@@ -95,6 +94,11 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 	}
 	if v.Ty.NullAndUndef() {
 		return e.renderThreeState(v, e.emitValueToString)
+	}
+	if isInspectStream(v.Ty) && !v.Ty.Nullable() {
+		// A stream, its reader, writer or controller: Object.prototype.
+		// toString's `[object Class]`.
+		return Value{Ref: e.internString("[object " + hostClassName(v.Ty) + "]"), Ty: TypePtr}, nil
 	}
 	if v.Ty.IsBuffer() && !v.Ty.Nullable() {
 		// Buffer.prototype.toString decodes (utf8), overriding the
@@ -252,7 +256,7 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 		if err != nil {
 			return Value{}, err
 		}
-		return e.emitDynamicRender(boxed, false)
+		return e.emitDynamicToString(boxed)
 	}
 	if v.Ty.IR == irPtr && !v.Ty.IsObject() && !v.Ty.IsArray() && !v.Ty.IsFunc() {
 		// Nullable string: at runtime select "null" string when ptr is null.
@@ -361,6 +365,11 @@ func (e *Emitter) emitValueToString(v Value) (Value, error) {
 				ast.NewConditionalExpression(isStr, tag, ast.NewStringLiteral("Object", pos), pos), pos), ast.NewStringLiteral("]", pos), pos))
 		}
 		return Value{Ref: e.internString("[object Object]"), Ty: TypePtr}, nil
+	}
+	if isHostHandle(v.Ty) && !v.Ty.Nullable() && !v.Ty.IsDynamic() {
+		// Another host object (an XMLHttpRequest): Object.prototype.toString's
+		// `[object Class]`.
+		return Value{Ref: e.internString("[object " + hostClassName(v.Ty) + "]"), Ty: TypePtr}, nil
 	}
 	scratch := e.emitStringScratch(32) // TDD-00120: length-prefixed; finalized below
 	switch {
@@ -878,6 +887,11 @@ func (e *Emitter) hasDynamicSpread(lit *ast.ObjectLiteral) bool {
 	for _, prop := range lit.Properties {
 		if spread, ok := prop.Value.(*ast.SpreadElement); ok && prop.Key == "" && prop.KeyExpr == nil {
 			if t := e.typeOfExpr(spread.Arg); isUnconstrainedDynamic(t) || t.IsArray() || t.IsFunc() || isSyntheticObjLitClass(t) {
+				return true
+			} else if t.IsClass() && !t.Nullable() && e.opts.CompatJS() {
+				// A class instance's own properties include those added at
+				// run time (`o.k = 1`, Object.defineProperty), which its
+				// layout does not list.
 				return true
 			}
 		}
@@ -1520,6 +1534,10 @@ func init() {
 			}
 			if len(ex.Args) == 1 {
 				argTy := e.typeOfExpr(ex.Args[0])
+				if argTy.IsTypedArray() && argTy.BigIntElem {
+					// BigInt64Array/BigUint64Array: bigints (emitArrayFrom).
+					return ArrayOf(BigIntType()), true
+				}
 				if argTy.IsArray() {
 					return ArrayOf(*argTy.ElemType), true
 				}
@@ -1781,10 +1799,7 @@ func (e *Emitter) builtinGlobalValueType(id *ast.Identifier) (Type, bool) {
 	if key, ns := namespaceValueExport(id.Name); ns && (e.isGlobalName(id) || id.Name == "globalThis" && !e.isShadowedByLocal(id.Name)) && (id.Name != "crypto" || e.libExports[key] != "") {
 		return TypeAny, true // a namespace object as a value (must match emitIdent)
 	}
-	if (id.Name == "Object" || id.Name == "Function") && e.isGlobalName(id) {
-		return TypeAny, true
-	}
-	if _, isClass := e.classes[id.Name]; isClass || isErrorKindName(id.Name) || sema.IsBuiltinConstructor(id.Name) || id.Name == "Promise" {
+	if _, isClass := e.classes[id.Name]; isClass || isErrorKindName(id.Name) || e.builtinCtorName(id.Name) {
 		// Built-in constructor in value position — a boxed funcref
 		// (must match emitIdent's own emission).
 		return TypeAny, true
@@ -1828,9 +1843,6 @@ func (e *Emitter) enumName(x ast.Expression) bool {
 }
 
 func (e *Emitter) identStorageType(id *ast.Identifier) Type {
-	if call, ok := e.tsSubtleAlias(id); ok {
-		return e.typeOfExpr(call)
-	}
 	if _, isEnum := e.enumObjects[id.Name]; isEnum {
 		if _, ok := e.lookup(id.Name); !ok {
 			return TypeAny // the enum as a value (emitIdent)

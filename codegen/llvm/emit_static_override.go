@@ -247,3 +247,97 @@ func (e *Emitter) emitStaticFieldInitializers(cd *ast.ClassDeclaration) error {
 	delete(e.staticFieldInits, cd)
 	return nil
 }
+
+// overriddenStaticRead reports `C.m` naming a static method of class C
+// that the program replaces or deletes (staticMethodOverridable).
+func (e *Emitter) overriddenStaticRead(x ast.Expression) bool {
+	mem, ok := x.(*ast.MemberExpression)
+	if !ok || mem.Optional || !e.isClassName(mem.Object) {
+		return false
+	}
+	info, ok := e.classes[identName(mem.Object)]
+	if !ok {
+		return false
+	}
+	_, m := info.StaticMethodSigs[mem.Property]
+	return m && e.staticMethodOverridable(identName(mem.Object), mem.Property)
+}
+
+// emitBoxedEquality is an equality operator over both operands boxed.
+func (e *Emitter) emitBoxedEquality(ex *ast.BinaryExpression) (Value, error) {
+	var vs [2]Value
+	for i, x := range []ast.Expression{ex.Left, ex.Right} {
+		v, err := e.emitExpr(x)
+		if err != nil {
+			return Value{}, err
+		}
+		if v.Ty.IR == "void" {
+			v = Value{Ref: "null", Ty: TypeUndefined}
+		}
+		if vs[i], err = e.emitBoxValue(v); err != nil {
+			return Value{}, err
+		}
+	}
+	neg := ex.Op == "!=" || ex.Op == "!=="
+	if ex.Op == "==" || ex.Op == "!=" {
+		return e.emitAnyLooseEquals(vs[0], vs[1], neg)
+	}
+	return e.emitAnyEquals(vs[0], vs[1], neg)
+}
+
+// staticDeletedKey is the class and literal key of `"m" in C` /
+// `C.hasOwnProperty("m")` / `Object.hasOwn(C, "m")` for a static method m
+// of C the program deletes.
+func (e *Emitter) staticDeletedKey(obj, key ast.Expression) (string, string, bool) {
+	lit, ok := key.(*ast.StringLiteral)
+	if !ok {
+		return "", "", false
+	}
+	if !e.overriddenStaticRead(ast.NewMemberExpression(obj, lit.Value, obj.GetPos())) {
+		return "", "", false
+	}
+	return identName(obj), lit.Value, true
+}
+
+// emitStaticPresence answers an own-property check of a static method
+// the program deletes: absent once deleted, else what present answers.
+func (e *Emitter) emitStaticPresence(className, m string, present func() (Value, error)) (Value, error) {
+	e.declareFn("__kml_classref_static_deleted", "declare i1 @__kml_classref_static_deleted("+irPtr+", "+irPtr+")")
+	gone := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_classref_static_deleted("+irPtr+" %s, "+irPtr+" %s)", gone, e.classRefPtr(className), e.internString(m)))
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i1, align 1", slot))
+	e.emitInstr(fmt.Sprintf("store i1 false, "+irPtr+" %s, align 1", slot))
+	liveL, doneL := e.freshLabel("static.live"), e.freshLabel("static.has")
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", gone, doneL, liveL))
+	e.emitLabel(liveL)
+	v, err := present()
+	if err != nil {
+		return Value{}, err
+	}
+	e.emitInstr(fmt.Sprintf("store i1 %s, "+irPtr+" %s, align 1", e.toBool(v).Ref, slot))
+	e.emitTerminator("br label %" + doneL)
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i1, "+irPtr+" %s, align 1", r, slot))
+	return Value{Ref: r, Ty: TypeBool}, nil
+}
+
+// deletesStaticMethod reports a program that deletes some class's static
+// method (`delete C.m`): run-time own-key checks of a class then consult
+// the deleted list.
+func (e *Emitter) deletesStaticMethod() bool {
+	if e.staticDeletesDone {
+		return e.staticDeletes
+	}
+	e.staticDeletesDone = true
+	ast.Inspect(e.prog, func(n ast.Node) bool {
+		if u, ok := n.(*ast.UnaryExpression); ok && u.Op == "delete" {
+			if me, ok := u.Arg.(*ast.MemberExpression); ok && e.overriddenStaticRead(me) {
+				e.staticDeletes = true
+			}
+		}
+		return !e.staticDeletes
+	})
+	return e.staticDeletes
+}

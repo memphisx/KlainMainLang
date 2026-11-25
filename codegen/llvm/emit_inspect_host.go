@@ -160,6 +160,20 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 		chunk = *t.StreamChunk
 	}
 	switch {
+	case t.IsRSController() && t.HostTag == "TransformStreamDefaultController":
+		// A transformer's controller: its TransformStream.
+		ts := e.freshReg()
+		e.declareFn("__kml_ts_of_readable", "declare "+irPtr+" @__kml_ts_of_readable("+irPtr+")")
+		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_ts_of_readable("+irPtr+" %s)", ts, v.Ref))
+		out := chunk
+		str, err := e.emitInspectStreamAt(Value{Ref: ts, Ty: Type{IR: irPtr, Host: hostTransformStream, StreamChunk: &out, StreamOut: &out}}, 1, inner)
+		if err != nil {
+			return Value{}, err
+		}
+		if err := push("stream", str); err != nil {
+			return Value{}, err
+		}
+		return e.streamInspectEnd(list, t.HostTag, depth, level), nil
 	case t.IsRSController():
 		return e.streamInspectEnd(list, "ReadableStreamDefaultController", depth, level), nil
 	case t.IsWSController():
@@ -183,14 +197,10 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 		e.emitAlloca(fmt.Sprintf("%s = alloca "+irPtr+", align 8", slot))
 		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" %s, align 8", v.Ref, slot))
 		e.define(tmp, Symbol{Ptr: slot, Ty: t})
-		var readable string
 		for _, side := range []string{"readable", "writable"} {
 			sv, err := e.emitExpr(ast.NewMemberExpression(ast.NewIdentifier(tmp, ast.Pos{}), side, ast.Pos{}))
 			if err != nil {
 				return Value{}, err
-			}
-			if side == "readable" {
-				readable = sv.Ref
 			}
 			str, err := e.emitInspectStreamAt(sv, 1, inner)
 			if err != nil {
@@ -200,15 +210,13 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 				return Value{}, err
 			}
 		}
-		e.ensureExceptionHelpers()
-		e.ensureMicrotasks()
-		e.ensureNanBox()
-		e.ensurePromiseAddReaction()
-		e.ensureShapeRuntime()
 		e.ensureUnhandledRejections()
-		d, bp := e.freshReg(), e.freshReg()
-		e.emitInstr(fmt.Sprintf("%s = call double @__kml_rs_desired("+irPtr+" %s)", d, readable))
-		e.emitInstr(fmt.Sprintf("%s = fcmp ole double %s, 0.0", bp, d))
+		e.ensureUnhandledRejections()
+		// Its [[backpressure]] flag (the transform context's word 9).
+		g, w, bp := e.freshReg(), e.freshReg(), e.freshReg()
+		e.emitInstr(fmt.Sprintf("%s = getelementptr i64, "+irPtr+" %s, i64 9", g, v.Ref))
+		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", w, g))
+		e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", bp, w))
 		if err := push("backpressure", pick(bp, "true", "false")); err != nil {
 			return Value{}, err
 		}
@@ -217,18 +225,11 @@ func (e *Emitter) emitInspectStreamAt(v Value, level, lim int) (Value, error) {
 	readable := t.IsReadableStream()
 	bits := e.freshReg()
 	if readable {
-		e.ensureExceptionHelpers()
-		e.ensureMicrotasks()
-		e.ensureNanBox()
-		e.ensurePromiseAddReaction()
-		e.ensureShapeRuntime()
+		e.ensureUnhandledRejections()
 		e.ensureUnhandledRejections()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_rs_inspect_bits("+irPtr+" %s)", bits, v.Ref))
 	} else {
-		e.ensurePromiseAddReaction()
-		e.ensureMicrotasks()
-		e.ensureNanBox()
-		e.ensureExceptionHelpers()
+		e.ensureUnhandledRejections()
 		e.ensureUnhandledRejections()
 		e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_ws_inspect_bits("+irPtr+" %s)", bits, v.Ref))
 	}
@@ -304,7 +305,6 @@ func (e *Emitter) emitInspectArrayBufferAs(v Value, depth int, head, short strin
 	dataGep, data := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = getelementptr { i64, "+irPtr+" }, "+irPtr+" %s, i32 0, i32 1", dataGep, v.Ref))
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", data, dataGep))
-	e.ensureInspectReduce()
 	hex := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_hex("+irPtr+" %s, i64 %s)", hex, data, n))
 	list := e.inspectBegin(depth, "1")

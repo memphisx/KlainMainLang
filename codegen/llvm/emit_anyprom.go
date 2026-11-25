@@ -53,10 +53,7 @@ func (e *Emitter) promiseBoxHeader() int64 {
 
 // emitBoxPromise boxes a task promise (see the file comment).
 func (e *Emitter) emitBoxPromise(v Value) Value {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
-	e.ensureNanBox() // the inspect hook boxes a rejection's reason
 	e.usedPromiseBox = true
 	boxTy := promiseBoxType()
 	e.noteBoxedLayout(boxTy)
@@ -146,7 +143,6 @@ func (e *Emitter) promiseValueBoxer(elem Type) string {
 // emitPromiseWrapperOrNull is the wrapper behind a boxed promise, or null
 // when the dynamic value is not one.
 func (e *Emitter) emitPromiseWrapperOrNull(v Value) string {
-	e.ensurePromiseWrapperOf()
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_promise_wrapper_of(i64 %s)", r, v.Ref))
 	return r
@@ -162,21 +158,11 @@ func (e *Emitter) emitWrapperField(w string, idx int, ir string) string {
 	return r
 }
 
-// ensurePromiseWrapperOf links @__kml_promise_wrapper_of(i64 v) -> ptr
-// (promisebox.c, emitPromiseInspectHook).
-func (e *Emitter) ensurePromiseWrapperOf() {
-	e.usedPromiseWrapperOf = true
-	e.ensureNanBox()
-}
-
 // emitAwaitAny awaits a dynamic value: the promise it holds (its value then
 // boxed), or — any other value — the value itself, after the microtask tick
 // every await takes.
 func (e *Emitter) emitAwaitAny(v Value) (Value, error) {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
 	w := e.emitPromiseWrapperOrNull(v)
 	isNull := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, w))
@@ -246,12 +232,7 @@ func (e *Emitter) ensurePromiseDynRuntime() {
 	}
 	e.usedPromiseResolveAny = true
 	e.ensureDynJSONC() // a thenable's `then` is read through the object hooks
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensurePromiseWrapperOf()
 	envIR := "{ " + irPtr + ", i64, i64, i64, " + irPtr + ", " + irPtr + ", i64 }"
 	p := promiseStructIR
 
@@ -536,7 +517,6 @@ func (e *Emitter) emitPromiseDynReaction(self, onF, onR, onFin string, kind int,
 			if kind == pdynFinally {
 				a, b = onFin, onFin
 			}
-			e.ensureShapeRuntime()
 			e.declareFn("__kml_invoke_then", "declare i64 @__kml_invoke_then(i64, i64, i64, i64)")
 			r := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_invoke_then(i64 %s, i64 %s, i64 %s, i64 %s)", r, self, thenFn.Ref, a, b))
@@ -561,11 +541,7 @@ func (e *Emitter) emitPromiseDynReaction(self, onF, onR, onFin string, kind int,
 // Promise<number>): a promise that settles when v does, its value converted
 // between the box and B's representation; a rejection passes through.
 func (e *Emitter) emitConvertPromise(v Value, target Type) Value {
-	e.ensureExceptionHelpers()
-	e.ensureMicrotasks()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
-	e.ensureNanBox()
 	from := TypeVoid
 	if v.Ty.PromiseType != nil {
 		from = *v.Ty.PromiseType

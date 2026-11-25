@@ -58,10 +58,17 @@ func programMayWait(prog *ast.Program) bool {
 			if id, ok := n.Callee.(*ast.Identifier); ok && id.Name == "fetch" {
 				found = true
 			}
+			// A Response's clone tees its body, read through the same
+			// collector.
+			if m, ok := n.Callee.(*ast.MemberExpression); ok && m.Property == "clone" && len(n.Args) == 0 {
+				found = true
+			}
 		case *ast.NewExpression:
 			// A Response may take a stream body, read through an async
-			// collector (ensureResponseStreamCollect).
-			found = found || (n.ClassName == "Response" && len(n.Args) > 0 && !isNullBodyArg(n.Args[0]))
+			// collector (ensureResponseStreamCollect); a Request's init may
+			// carry one too (its body is read whole, ADR-02050).
+			found = found || (n.ClassName == "Response" && len(n.Args) > 0 && !isNullBodyArg(n.Args[0])) ||
+				(n.ClassName == "Request" && len(n.Args) > 1 && !isNullBodyArg(n.Args[1]))
 		case *ast.FunctionDeclaration:
 			found = found || (n.IsAsync && n.Body != nil && returnsValue(n.Body))
 		case *ast.FunctionExpression:
@@ -151,7 +158,7 @@ func (e *Emitter) writeAsyncDefinition(name, paramStr string, awaited bool) {
 		e.writeFunc(fmt.Sprintf(irPtr+" %s(%s)", sym, paramStr), e.allocas.String()+e.body.String())
 		return
 	}
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	inner := quoteSymSuffix(sym, ".inner")
 	tramp := quoteSymSuffix(sym, ".tramp")
 

@@ -79,13 +79,10 @@ func (e *Emitter) frameDesc(name, file string) string {
 		e.frameDescs = map[[2]string]string{}
 	}
 	url := file
-	if abs, err := filepath.Abs(file); err == nil && e.scriptFile(file) {
+	if abs, err := realPath(file); err == nil && e.scriptFile(file) {
 		url = abs // CommonJS: Node names the file by its path
 	} else if err == nil {
-		url = "file://" + filepath.ToSlash(abs)
-		if !strings.HasPrefix(filepath.ToSlash(abs), "/") {
-			url = "file:///" + filepath.ToSlash(abs) // a Windows drive path
-		}
+		url = fileURL(abs)
 	}
 	// Named by the file's place in the program, not its URL: a unit naming
 	// the descriptor keeps the text of a function at the same place in a
@@ -358,8 +355,7 @@ func callSitePos(ex *ast.CallExpression) ast.Pos {
 
 // isStackTraceLimit reports whether m is V8's Error.stackTraceLimit.
 func (e *Emitter) isStackTraceLimit(m *ast.MemberExpression) bool {
-	id, ok := m.Object.(*ast.Identifier)
-	return ok && id.Name == "Error" && m.Property == "stackTraceLimit" && !e.isShadowedByLocal("Error")
+	return e.propDeclIntrinsic(m) == "Error.stackTraceLimit"
 }
 
 // commonJSExts are the extensions Node runs as CommonJS when the file has
@@ -382,4 +378,26 @@ func (e *Emitter) scriptFile(file string) bool {
 		}
 	}
 	return commonJSExts[strings.ToLower(filepath.Ext(file))] && !e.esmFiles[file]
+}
+
+// realPath is file as Node names a module: absolute, with its symbolic
+// links resolved (Node's realpath of the entry, without
+// --preserve-symlinks).
+func realPath(file string) (string, error) {
+	abs, err := filepath.Abs(file)
+	if err != nil {
+		return "", err
+	}
+	if r, err := filepath.EvalSymlinks(abs); err == nil {
+		return r, nil
+	}
+	return abs, nil
+}
+
+// fileURL is an absolute path's file: URL.
+func fileURL(abs string) string {
+	if p := filepath.ToSlash(abs); strings.HasPrefix(p, "/") {
+		return "file://" + p
+	}
+	return "file:///" + filepath.ToSlash(abs) // a Windows drive path
 }

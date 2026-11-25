@@ -241,6 +241,9 @@ type Token struct {
 	Doc string
 	// Err is the scanning error of an ILLEGAL token.
 	Err *diag.Diagnostic
+	// LegacyEscape is a string literal's first legacy octal (`\01`) or
+	// `\8`/`\9` escape, as written; strict code rejects it.
+	LegacyEscape string
 }
 
 // HasPrecedingLineBreak reports whether a line terminator precedes t.

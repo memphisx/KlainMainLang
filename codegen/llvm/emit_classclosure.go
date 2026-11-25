@@ -2,6 +2,7 @@ package llvm
 
 import (
 	"fmt"
+	"strings"
 
 	"KlainMainLang/ast"
 	"KlainMainLang/binder"
@@ -34,6 +35,17 @@ type classCapture struct {
 
 // captureField is the hidden field that holds local name.
 func captureField(name string) string { return "#__kml_cap_" + name }
+
+// onlyCaptureFields reports fields that are all a closure-converted
+// class's hidden captures (none declared in the source).
+func onlyCaptureFields(fields []Field) bool {
+	for _, f := range fields {
+		if !strings.HasPrefix(f.Name, "#__kml_cap_") && !strings.HasPrefix(f.Name, "#__kml_scap_") {
+			return false
+		}
+	}
+	return true
+}
 
 // staticCaptureField is the hidden static field that holds local name for
 // a class's static members.
@@ -70,7 +82,7 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 		if r.static {
 			staticRef[r.sym] = true
 		}
-		if r.nestedFn && !r.static {
+		if r.nestedFn {
 			nestedIDs[r.id] = true
 		}
 		if !seen[r.sym] {
@@ -94,11 +106,6 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 		}
 		return found
 	}
-	for _, f := range cd.Fields {
-		if f.Initializer != nil && names(f.Initializer) {
-			return reject("reads it in a function nested in a field initializer")
-		}
-	}
 	// A derived constructor's copies are declared after its top-level
 	// super() call (`this` exists from there); a read before it has none.
 	superAt := -1
@@ -113,7 +120,7 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 			}
 		}
 		if names(cd.Constructor) && superAt < 0 {
-			return reject("reads it in a function nested in a derived constructor before super()")
+			superAt = -1 // the copies open the constructor
 		}
 	}
 	written := map[*binder.Symbol]bool{}
@@ -146,6 +153,17 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 			ty = cellAnnotation(ty)
 			local = sym.Name + "__kml_cell"
 		}
+		if e.compatJS() && c != nil {
+			if _, done := e.jsCtorFieldsBefore[cd]; !done {
+				// The fields a JavaScript constructor creates, read before
+				// the hidden ones below make the class one that declares
+				// fields.
+				if e.jsCtorFieldsBefore == nil {
+					e.jsCtorFieldsBefore = map[*ast.ClassDeclaration][]*checker.Property{}
+				}
+				e.jsCtorFieldsBefore[cd] = c.JSConstructorFields(cd)
+			}
+		}
 		byName[sym] = captureField(sym.Name)
 		list = append(list, classCapture{local: local, field: captureField(sym.Name)})
 		cd.Fields = append(cd.Fields, ast.AnnotField{Name: captureField(sym.Name), Type: ty})
@@ -162,6 +180,7 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 	// functions' reads: each local's hidden field.
 	var need map[string]string
 	var needOrder []string
+	needStatic := map[string]bool{}
 	var rw func(n ast.Node) ast.Node
 	rw = func(n ast.Node) ast.Node {
 		if ne, ok := n.(*ast.NewExpression); ok {
@@ -177,16 +196,20 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 					recv := ast.NewThisExpression(id.GetPos())
 					recv.Capture = true
 					var ref ast.Expression = ast.NewMemberExpression(recv, f, id.GetPos())
-					if nestedIDs[id] && !static {
+					if static {
+						ref = ast.NewMemberExpression(ast.NewIdentifier(cd.Name, id.GetPos()), staticCaptureField(sym.Name), id.GetPos())
+					}
+					if nestedIDs[id] {
+						// A nested function reads a copy the member
+						// declares first (an escaping one outlives the
+						// member's frame).
 						local := "__kml_capv_" + sym.Name
 						if _, ok := need[local]; !ok {
 							need[local] = f
+							needStatic[local] = static
 							needOrder = append(needOrder, local)
 						}
 						ref = ast.NewIdentifier(local, id.GetPos())
-					}
-					if static {
-						ref = ast.NewMemberExpression(ast.NewIdentifier(cd.Name, id.GetPos()), staticCaptureField(sym.Name), id.GetPos())
 					}
 					if _, cell := cells[sym]; cell {
 						e.lowered(ref) // the cell itself: no expression of the code as written
@@ -206,24 +229,17 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 		}
 		return n
 	}
-	for i := range cd.Fields {
-		if cd.Fields[i].Initializer != nil {
-			static = cd.Fields[i].Static
-			cd.Fields[i].Initializer = rw(cd.Fields[i].Initializer).(ast.Expression)
-		}
-	}
-	static = false
-	member := func(m *ast.FunctionDeclaration, at int) {
-		need, needOrder = map[string]string{}, nil
-		rw(m)
-		if len(needOrder) == 0 || m.Body == nil {
-			return
-		}
+	// copies declares each local the member being rewritten needs, at pos.
+	copies := func(pos ast.Pos) []ast.Statement {
 		var decls []ast.Statement
 		for _, local := range needOrder {
 			f := need[local]
-			pos := m.Body.GetPos()
-			init := ast.NewMemberExpression(ast.NewThisExpression(pos), f, pos)
+			recv := ast.NewThisExpression(pos)
+			recv.Capture = true // the hidden field is there before super()
+			init := ast.NewMemberExpression(recv, f, pos)
+			if needStatic[local] {
+				init = ast.NewMemberExpression(ast.NewIdentifier(cd.Name, pos), staticCaptureField(strings.TrimPrefix(local, "__kml_capv_")), pos)
+			}
 			e.lowered(init)
 			ty := fieldAnnot(cd, f)
 			for _, cf := range cd.Fields {
@@ -233,7 +249,35 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 			}
 			decls = append(decls, ast.NewVarDeclaration("const", local, ty, init, pos))
 		}
-		rest := append(decls, m.Body.Body[at:]...)
+		return decls
+	}
+	for i := range cd.Fields {
+		if init := cd.Fields[i].Initializer; init != nil {
+			static = cd.Fields[i].Static
+			need, needOrder = map[string]string{}, nil
+			init = rw(init).(ast.Expression)
+			if len(needOrder) > 0 {
+				// A function nested in the initializer reads the copies
+				// an arrow run in its place declares (its `this` is the
+				// instance).
+				pos := cd.Fields[i].Pos // the field's name: the arrow's own place
+				if pos == (ast.Pos{}) {
+					pos = cd.GetPos()
+				}
+				body := append(copies(pos), ast.NewReturnStatement(init, pos))
+				init = ast.NewCallExpression(ast.NewArrowFunction(nil, nil, nil, ast.NewBlockStatement(body, pos), pos), nil, pos)
+			}
+			cd.Fields[i].Initializer = init
+		}
+	}
+	static = false
+	member := func(m *ast.FunctionDeclaration, at int) {
+		need, needOrder = map[string]string{}, nil
+		rw(m)
+		if len(needOrder) == 0 || m.Body == nil {
+			return
+		}
+		rest := append(copies(m.Body.GetPos()), m.Body.Body[at:]...)
 		m.Body.Body = append(append([]ast.Statement{}, m.Body.Body[:at]...), rest...)
 	}
 	if cd.Constructor != nil {
@@ -245,7 +289,11 @@ func (e *Emitter) closureConvertClass(c frontView, b *binder.Binding, blk *ast.B
 	}
 	static = true
 	for _, sb := range cd.StaticBlocks {
+		need, needOrder = map[string]string{}, nil
 		rw(sb)
+		if len(needOrder) > 0 {
+			sb.Body = append(copies(sb.GetPos()), sb.Body...)
+		}
 	}
 	for sym, ty := range cells {
 		e.toCell(b, sym, ty)
@@ -320,7 +368,9 @@ func classLocalRefs(b *binder.Binding, cd *ast.ClassDeclaration, hoisted map[ast
 		return true
 	})
 	for _, f := range cd.Fields {
-		if f.Initializer != nil {
+		if fe, ok := f.Initializer.(*ast.FunctionExpression); ok {
+			walk(fe.Body, f.Static, true) // `f = function () {…}`: its own `this`
+		} else if f.Initializer != nil {
 			walk(f.Initializer, f.Static, false)
 		}
 	}
@@ -426,6 +476,14 @@ func (e *Emitter) captureAnnotation(c frontView, sym *binder.Symbol, refs []clas
 			if n.TypeAnnot != nil {
 				return n.TypeAnnot
 			}
+			// `const m = new Map()`: the builtin's own type. Read as `any`,
+			// the field lost it, and a use of a Map, Set or ArrayBuffer
+			// method on it had no receiver of that kind.
+			if r := builtinNewTypeRef(n.Init); r != nil && len(sym.Declarations) == 1 {
+				if ta, err := ast.TypeAnnotationOf(r, "ts"); err == nil {
+					return ta
+				}
+			}
 		case *ast.FunctionDeclaration:
 			if t := paramAnnot(n.Params, sym.Name); t != nil {
 				return t
@@ -454,10 +512,52 @@ func (e *Emitter) captureAnnotation(c frontView, sym *binder.Symbol, refs []clas
 			name = "number"
 		case t.Flags&(checker.Boolean|checker.BooleanLiteral) != 0:
 			name = "boolean"
+		case t.Flags&checker.Object != 0 && t.Symbol != nil && captureBuiltinTypes[t.Symbol.Name] && c.GlobalInterface(t.Symbol.Name) != nil:
+			// A builtin instance however it was made (a helper's
+			// ArrayBuffer): its own type, which the uses were checked at.
+			name = t.Symbol.Name
 		}
 		break
 	}
 	return nameAnnotation(name)
+}
+
+// captureBuiltinTypes are the non-generic builtin instance types a captured
+// local keeps by its checked type (captureAnnotation).
+var captureBuiltinTypes = map[string]bool{
+	"ArrayBuffer": true, "SharedArrayBuffer": true, "DataView": true, "Date": true, "RegExp": true,
+}
+
+// builtinNewTypeRef is the type a `new` of a builtin collection, buffer or
+// Date gives the local it initializes, written as a reference (its type
+// arguments when it has them, `any` for each it leaves out), else nil.
+func builtinNewTypeRef(init ast.Expression) *ast.TypeReference {
+	args := func(ts ...ast.TypeNode) []ast.TypeNode {
+		for i, t := range ts {
+			if t == nil {
+				ts[i] = &ast.KeywordType{Keyword: "any"}
+			}
+		}
+		return ts
+	}
+	switch n := init.(type) {
+	case *ast.NewMapExpression:
+		return &ast.TypeReference{Name: "Map", TypeArgs: args(n.KeyType, n.ValType)}
+	case *ast.NewSetExpression:
+		return &ast.TypeReference{Name: "Set", TypeArgs: args(n.ElemType)}
+	case *ast.NewWeakMapExpression:
+		return &ast.TypeReference{Name: "WeakMap", TypeArgs: args(n.KeyType, n.ValType)}
+	case *ast.NewWeakSetExpression:
+		return &ast.TypeReference{Name: "WeakSet", TypeArgs: args(n.ElemType)}
+	case *ast.NewArrayBufferExpression:
+		if n.Shared {
+			return &ast.TypeReference{Name: "SharedArrayBuffer"}
+		}
+		return &ast.TypeReference{Name: "ArrayBuffer"}
+	case *ast.NewDateExpression:
+		return &ast.TypeReference{Name: "Date"}
+	}
+	return nil
 }
 
 func paramAnnot(params []ast.Param, name string) ast.TypeNode {
@@ -483,6 +583,23 @@ func (e *Emitter) storeClassCaptures(ex *ast.NewExpression, className, dataReg s
 		cls = info.BaseClass
 	}
 	if len(caps) == 0 {
+		// A class per evaluation capturing nothing: the instance still
+		// remembers its evaluation (its prototype, instanceof).
+		if e.classRecords[className] && !e.classCapFromThis[ex] {
+			rec := ""
+			if e.inCtorArm {
+				e.declareFn("__kml_classrec_current", "declare "+irPtr+" @__kml_classrec_current("+irPtr+")")
+				rec = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_classrec_current("+irPtr+" %s)", rec, e.classRefPtr(className)))
+			} else if sym, ok := e.lookup(className + classRecSuffix); ok {
+				rec = e.freshReg()
+				e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", rec, sym.Ptr))
+			}
+			if rec != "" {
+				e.declareFn("__kml_classrec_bind", "declare void @__kml_classrec_bind("+irPtr+", "+irPtr+")")
+				e.emitInstr(fmt.Sprintf("call void @__kml_classrec_bind("+irPtr+" %s, "+irPtr+" %s)", dataReg, rec))
+			}
+		}
 		return nil
 	}
 	slot := e.freshReg()
@@ -556,7 +673,7 @@ func cellSite(sym *binder.Symbol) *ast.BlockStatement {
 	switch n := sym.Declarations[0].Node.(type) {
 	case *ast.VarDeclaration:
 		if n.Kind == "var" {
-			return nil
+			return varCellSite(sym, n)
 		}
 		// A statement of a block, alone or in a declaration list (`let a,
 		// b;`), with or without an initializer.
@@ -627,6 +744,45 @@ func cellSite(sym *binder.Symbol) *ast.BlockStatement {
 		}
 	}
 	return nil
+}
+
+// varCellSite is the function body holding `var` declaration n of sym as
+// one of its own statements, when no name sym's reads before it: hoisting
+// is then unobservable and the cell opens where the declaration stands, as
+// a `let`'s. Nil otherwise.
+func varCellSite(sym *binder.Symbol, n *ast.VarDeclaration) *ast.BlockStatement {
+	var body *ast.BlockStatement
+	switch f := sym.Scope.Node.(type) {
+	case *ast.FunctionDeclaration:
+		body = f.Body
+	case *ast.FunctionExpression:
+		body = f.Body
+	case *ast.ArrowFunction:
+		body = f.Block
+	}
+	if body == nil {
+		return nil
+	}
+	own := false
+	for _, st := range body.Body {
+		own = own || st == ast.Statement(n)
+	}
+	if !own {
+		return nil
+	}
+	at := n.GetPos()
+	early := false
+	ast.Inspect(sym.Scope.Node, func(m ast.Node) bool {
+		if id, ok := m.(*ast.Identifier); ok && id.Name == sym.Name {
+			p := id.GetPos()
+			early = early || p.Line < at.Line || (p.Line == at.Line && p.Col < at.Col)
+		}
+		return !early
+	})
+	if early {
+		return nil
+	}
+	return body
 }
 
 func hasParam(params []ast.Param, name string) bool {
@@ -824,7 +980,6 @@ const classRecSuffix = "__kml_rec"
 // reference and its captured bindings, boxed (TDD-00242), held by a local
 // the class's name reads in value position.
 func (e *Emitter) emitClassRecord(name string) error {
-	e.ensureNanBox()
 	caps := e.capturesOf(name)
 	base := "null"
 	if info, ok := e.classes[name]; ok && info.BaseClass != "" {

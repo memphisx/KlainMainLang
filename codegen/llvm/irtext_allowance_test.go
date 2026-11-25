@@ -6,7 +6,6 @@ package llvm
 var irTextAllowance = map[string]int{
 	"emit_finalization.go": 2,
 	"emit_inspect.go":      2,
-	"emit_record_view.go":  1,
 	"funcstate.go":         3,
 	"ir_sites.go":          1,
 	"runtime_hooks.go":     1,

@@ -60,6 +60,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path"
 	"path/filepath"
@@ -238,7 +239,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if err := lowerRequires(prog, path, isEntry, src, klainModulesDir); err != nil {
 			return diag.InFile(err, path)
 		}
+		lowerConsoleClass(prog, path, src)
 		defaultImportsAsNamespaces(prog)
+		if !strings.HasPrefix(path, lib.ModuleRoot) {
+			namespacesAsClasses(prog)
+		}
 		if err := mutableExportsObjects(path, prog, compatJS); err != nil {
 			return diag.InFile(err, path)
 		}
@@ -324,7 +329,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 		for native, uses := range lib.NativeGlobalUses {
-			if idents[native] && !declaresTopLevel(prog, native) {
+			// A member name (`crypto.subtle`, `res.formData`) is no global
+			// a same-named binding (`var subtle = crypto.subtle`) shadows.
+			if idents[native] && (!lib.GlobalValue(native) || !declaresTopLevel(prog, native)) {
 				for _, u := range uses {
 					idents[u] = true
 				}
@@ -340,9 +347,29 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			for i, u := range uses {
 				all = all && idents[u] && (i > 0 || !lib.GlobalValue(u) || !declaresTopLevel(prog, u))
 			}
+			// A library module names what it reads exactly: its `C.prototype`
+			// and `Array.from` are no `Array.prototype`, so only the dotted
+			// path itself brings that module in.
+			if all && len(uses) > 1 && strings.HasPrefix(path, lib.ModuleRoot) {
+				all = hasDottedPath(src, uses)
+			}
 			if all {
 				idents[name] = true
 			}
+		}
+		// `Array.from.apply(C, […])` takes the constructor form as `.call`
+		// does (its kml:lower path).
+		if idents["Array"] && idents["apply"] && !strings.HasPrefix(path, lib.ModuleRoot) {
+			for st, fn := range map[string]string{"from": "__kml_Array_fromCtor", "of": "__kml_Array_ofCtor", "fromAsync": "__kml_Array_fromAsyncCtor"} {
+				if idents[st] {
+					idents[fn] = true
+				}
+			}
+		}
+		// concat of a value that may carry Symbol.isConcatSpreadable runs
+		// the library's IsConcatSpreadable (emitArrayConcat).
+		if idents["isConcatSpreadable"] && idents["concat"] {
+			idents["__kml_Array_generic_concat"] = true
 		}
 		for _, name := range sortedGlobalNames() {
 			gpath := lib.GlobalModuleNames()[name]
@@ -374,8 +401,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 		}
 
-		// A Promise combinator may be given an untyped iterable.
-		if pc := lib.ModuleRoot + "internal_promise_combine.ts"; !strings.HasPrefix(path, lib.ModuleRoot) && idents["Promise"] && (idents["all"] || idents["any"] || idents["race"] || idents["allSettled"]) {
+		// A Promise combinator may be given an untyped iterable, and a
+		// static called with another `this` (`Promise.resolve.call(C, x)`)
+		// runs its library form.
+		promiseStaticOn := idents["call"] && (idents["resolve"] || idents["reject"] || idents["withResolvers"])
+		if pc := lib.ModuleRoot + "internal_promise_combine.ts"; !strings.HasPrefix(path, lib.ModuleRoot) && idents["Promise"] && (idents["all"] || idents["any"] || idents["race"] || idents["allSettled"] || promiseStaticOn) {
 			importTargets[pc] = true
 			if err := visit(pc, false); err != nil {
 				return err
@@ -394,7 +424,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		// Math, JSON, console, Reflect or Atomics read as a value are a
 		// TypeScript module's objects.
 		// The Web Crypto global as a value, or a method of it taken by value.
-		if cp := lib.ModuleRoot + "internal_crypto_global.ts"; path != cp && !strings.HasPrefix(path, lib.ModuleRoot) && idents["crypto"] && cryptoValueUse(src) {
+		// So is a program reading the global object as a value and naming
+		// crypto off it (`const g = globalThis; g.crypto.subtle`).
+		if cp := lib.ModuleRoot + "internal_crypto_global.ts"; path != cp && !strings.HasPrefix(path, lib.ModuleRoot) && idents["crypto"] && (cryptoValueUse(src) || idents["globalThis"] && globalObjectUse(src)) {
 			importTargets[cp] = true
 			if err := visit(cp, false); err != nil {
 				return err
@@ -783,6 +815,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 	// Validate every import statement's specifiers against the file it resolves to.
 	for _, info := range files {
 		dir := filepath.Dir(info.path)
+		if compatJS {
+			missingRequiredAsUndefined(info, files, dir, klainModulesDir)
+		}
 		for _, stmt := range info.prog.Body {
 			imp, ok := stmt.(*ast.ImportDeclaration)
 			if !ok {
@@ -991,22 +1026,9 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 					return nil
 				}
 				if imp.Namespace != "" {
-					// A namespace import (`import * as url from 'url'`) is only
-					// meaningful when the module has marker-dispatched function members
-					// — it binds the marker so `url.parse(…)` resolves. Reexport
-					// primaries aren't reachable this way (they're globals, not marker
-					// members); a module with no function members keeps the Stage 1
-					// rejection.
-					if len(funcs) == 0 && companion == nil {
-						var example string
-						for m := range reexports {
-							if example == "" || m < example {
-								example = m
-							}
-						}
-						return nil, fmt.Errorf("%d:%d: a namespace import of '%s' is not yet supported — import its named export (e.g. `import { %s } from '%s'`) or use the global directly (TDD-00165)",
-							imp.GetPos().Line, imp.GetPos().Col, imp.Source, example, imp.Source)
-					}
+					// A namespace import (`import * as url from 'url'`): its
+					// functions dispatch through the marker, its primary exports
+					// are the globals (`webstreams.ReadableStream`).
 					if err := dupCheck(imp.Namespace); err != nil {
 						return nil, err
 					}
@@ -1015,18 +1037,14 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				}
 				for _, spec := range imp.Specifiers {
 					if spec.Imported == "default" {
-						if len(funcs) > 0 || companion != nil {
-							// A module-namespace default (`import url from 'url'`): bind
-							// the marker so `url.parse(…)` dispatches, like a namespace.
-							if err := dupCheck(spec.Local); err != nil {
-								return nil, err
-							}
-							bindNS(spec.Local)
-							continue
-						} else {
-							return nil, fmt.Errorf("%d:%d: built-in module '%s' has no default export — import its named export (e.g. `import { %s } from '%s'`)",
-								imp.GetPos().Line, imp.GetPos().Col, imp.Source, firstKey(reexports), imp.Source)
+						// A builtin module's default is its exports object
+						// (`import url from 'url'`, `import webstreams from
+						// 'stream/web'`), as a namespace binds it.
+						if err := dupCheck(spec.Local); err != nil {
+							return nil, err
 						}
+						bindNS(spec.Local)
+						continue
 					}
 					want := spec.Imported
 					if err := dupCheck(spec.Local); err != nil {
@@ -1172,6 +1190,11 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 				}
 				ns[imp.Namespace] = members
 				nsSource[imp.Namespace] = imp.Source
+				if _, builtin := builtinDynamicSpec(imp.Source); builtin && !target.exported["default"] {
+					// A builtin's `default` is its module.exports: the
+					// namespace's members (namespaceObject's own getter).
+					values["default"] = selfDefaultMarker
+				}
 				nsShared[imp.Namespace] = fmt.Sprintf("__kml_nsobj%d", target.index)
 				nsValues[imp.Namespace] = values
 				nsPos[imp.Namespace] = imp.GetPos()
@@ -1184,6 +1207,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			names:    lookup, ns: ns, nsSource: nsSource, builtinMembers: builtinMembers,
 			nsObjects: nsObjects, nsObjectSuffix: fmt.Sprintf("__kml_nsv%d", info.index), nsShared: nsShared,
 			typeOnly:         typeOnlyLocals(info.prog),
+			typeDecls:        typeOnlyDecls(info.prog, info.mangled),
 			nodeTypes:        info.prog.NodeTypeImports,
 			parseTimeAliases: parseTimeAliases,
 			reservedErr:      &reservedErr,
@@ -1216,7 +1240,7 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 			}
 			sort.Strings(keys)
 			name := fmt.Sprintf("__kml_dynns%d", info.index)
-			info.prog.Body = append(info.prog.Body, ast.NewVarDeclaration("const", name, nil, namespaceObject(keys, vals, ownLive, ast.Pos{}), ast.Pos{}))
+			info.prog.Body = append(info.prog.Body, ast.NewVarDeclaration("const", name, nil, namespaceObject(keys, vals, ownLive, ast.Pos{}, name), ast.Pos{}))
 			dynNamespaces[path] = name
 		}
 		if info.selfWorker && workerTargets[path] {
@@ -1559,7 +1583,8 @@ func ResolveProgramWithOptions(entryPath string, opts options.Options) (*ast.Pro
 		if !included {
 			continue
 		}
-		if m, ok := f.mangled[name]; ok {
+		// Its own class, or one it re-exports (CryptoKey).
+		if m, ok := f.publicMangled(name); ok {
 			if merged.GlobalLinks == nil {
 				merged.GlobalLinks = map[string]string{}
 			}
@@ -1648,7 +1673,7 @@ func TypeCheck(prog *ast.Program, fileOf func(ast.Statement) string, srcOf func(
 	if err := ast.NameComputedMembers(prog); err != nil {
 		return err
 	}
-	if err := ast.RuntimeKeyError(prog); err != nil {
+	if err := ast.RuntimeKeyError(prog, false); err != nil {
 		return err
 	}
 	libProgs, err := lib.Programs()
@@ -1679,6 +1704,12 @@ func TypeCheck(prog *ast.Program, fileOf func(ast.Statement) string, srcOf func(
 func UnsupportedCheck(prog *ast.Program, fileOf func(ast.Statement) string, opts options.Options, script bool) error {
 	if fileOf == nil {
 		fileOf = func(ast.Statement) string { return "" }
+	}
+	if opts.CompatJS() && !opts.NoAny && !hasLocaleCall(prog) {
+		// The js lane's only limit the checker reports is a number's
+		// toLocaleString(locales…) (the others are strict-lane checks):
+		// without such a call the whole-program check finds nothing.
+		return nil
 	}
 	libProgs, err := lib.Programs()
 	if err != nil {
@@ -1859,19 +1890,34 @@ func declRefsOf(stmt ast.Statement) []declRef {
 	}
 	switch s := stmt.(type) {
 	case *ast.FunctionDeclaration:
+		if s.Global {
+			return nil // `declare global`: the global scope's, never renamed
+		}
 		return []declRef{{s.Name, "function", func(n string) { s.Name = n }}}
 	case *ast.VarDeclaration:
+		if s.Global {
+			return nil
+		}
 		return []declRef{{s.Name, s.Kind, func(n string) { s.Name = n }}}
 	case *ast.VarDeclarationList:
-		refs := make([]declRef, len(s.Decls))
-		for i, d := range s.Decls {
+		refs := make([]declRef, 0, len(s.Decls))
+		for _, d := range s.Decls {
 			d := d
-			refs[i] = declRef{d.Name, d.Kind, func(n string) { d.Name = n }}
+			if d.Global {
+				continue
+			}
+			refs = append(refs, declRef{d.Name, d.Kind, func(n string) { d.Name = n }})
 		}
 		return refs
 	case *ast.InterfaceDeclaration:
+		if s.Global {
+			return nil // `declare global`: the global scope's, never renamed
+		}
 		return []declRef{{s.Name, "interface", func(n string) { s.Name = n }}}
 	case *ast.TypeAliasDeclaration:
+		if s.Global {
+			return nil
+		}
 		return []declRef{{s.Name, "type", func(n string) { s.Name = n }}}
 	case *ast.EnumDeclaration:
 		return []declRef{{s.Name, "enum", func(n string) { s.Name = n }}}
@@ -1923,9 +1969,18 @@ func mangleFileDecls(path, key string, prog *ast.Program, fileIdx int) (map[stri
 	mangled := map[string]string{}
 	seenKind := map[string]string{} // name -> kind of the first declaration of it
 	sawDefault := false
+	script := !IsModule(prog) && !strings.HasPrefix(path, lib.ModuleRoot)
 	for _, stmt := range prog.Body {
 		refs := declRefsOf(stmt)
 		var lastNewName string
+		// A script's top level is the global scope: its interface named as
+		// a builtin one (`interface Array<T> { … }`) declares more of that
+		// global interface, as TypeScript merges it, so it keeps the name.
+		if iface, ok := stmt.(*ast.InterfaceDeclaration); ok && script {
+			if known, _ := lib.TSInterfaceHas(iface.Name, ""); known {
+				continue
+			}
+		}
 		for _, ref := range refs {
 			// A namespace member's desugared flat declaration (TDD-00095)
 			// keeps its `X__kmlns_member` name verbatim — codegen resolves
@@ -2064,7 +2119,7 @@ func prependNamespaceObjects(prog *ast.Program, objects map[string]string, value
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
-		freeze := namespaceObject(keys, vals, live[l], pos)
+		freeze := namespaceObject(keys, vals, live[l], pos, objects[l])
 		decls = append(decls, ast.NewVarDeclaration("const", objects[l], nil, freeze, pos))
 	}
 	prog.Body = append(decls, prog.Body...)
@@ -2073,10 +2128,16 @@ func prependNamespaceObjects(prog *ast.Program, objects map[string]string, value
 // namespaceObject is a module namespace object: a frozen object of the value
 // exports keys names (vals maps each to its program name), a `let`/`var`
 // export (live) read through an accessor so it stays the binding.
-func namespaceObject(keys []string, vals map[string]string, live map[string]bool, pos ast.Pos) *ast.CallExpression {
+func namespaceObject(keys []string, vals map[string]string, live map[string]bool, pos ast.Pos, self string) *ast.CallExpression {
 	props := make([]ast.ObjectProperty, 0, len(keys))
 	lit := ast.NewObjectLiteral(nil, pos)
 	for _, k := range keys {
+		if vals[k] == selfDefaultMarker {
+			// The object itself, read when asked (it is being built here).
+			get := ast.NewFunctionExpression("", nil, nil, ast.NewBlockStatement([]ast.Statement{ast.NewReturnStatement(ast.NewIdentifier(self, pos), pos)}, pos), false, pos)
+			props = append(props, ast.ObjectProperty{Key: k, Value: get, AccessorKind: "get"})
+			continue
+		}
 		if live[k] {
 			get := ast.NewFunctionExpression("", nil, nil, ast.NewBlockStatement([]ast.Statement{ast.NewReturnStatement(ast.NewIdentifier(vals[k], pos), pos)}, pos), false, pos)
 			props = append(props, ast.ObjectProperty{Key: k, Value: get, AccessorKind: "get"})
@@ -2091,6 +2152,10 @@ func namespaceObject(keys []string, vals map[string]string, live map[string]bool
 	freeze.Intrinsic = ast.ModuleNamespaceIntrinsic
 	return freeze
 }
+
+// selfDefaultMarker stands, in a namespace's values, for a builtin
+// module's `default`: its namespace object itself.
+const selfDefaultMarker = "\x00self"
 
 // mutableExports is the exported `let`/`var` bindings of prog, by the names
 // they are exported under.
@@ -3794,6 +3859,60 @@ var (
 	processWordRE = regexp.MustCompile(`(^|[^.\w$])process\b(\s*\??\.)?`)
 )
 
+// hasDottedPath reports whether src writes out the member path parts
+// (`Array.prototype`, `Array ?. from`): the names joined by dots, optional
+// chaining and spaces allowed around each, not itself a member of
+// something (`x.Array.prototype`) nor part of a longer name. A scan, not a
+// regexp: a library module is checked once per lowered path, and a regexp
+// with a leading context class reads the whole module for each.
+func hasDottedPath(src []byte, parts []string) bool {
+	first := parts[0]
+	for from := 0; ; {
+		i := bytes.Index(src[from:], []byte(first))
+		if i < 0 {
+			return false
+		}
+		i += from
+		from = i + 1
+		if i > 0 && (isWordByte(src[i-1]) || src[i-1] == '.') {
+			continue
+		}
+		j, ok := i+len(first), true
+		for _, p := range parts[1:] {
+			j = skipRegexpSpace(src, j)
+			if j < len(src) && src[j] == '?' {
+				j++
+			}
+			if j >= len(src) || src[j] != '.' {
+				ok = false
+				break
+			}
+			j = skipRegexpSpace(src, j+1)
+			if !bytes.HasPrefix(src[j:], []byte(p)) {
+				ok = false
+				break
+			}
+			j += len(p)
+		}
+		if ok && (j == len(src) || !isWordByte(src[j])) {
+			return true
+		}
+	}
+}
+
+// isWordByte is regexp's `[\w$]`.
+func isWordByte(c byte) bool {
+	return c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z'
+}
+
+// skipRegexpSpace skips regexp's `\s*` (`[\t\n\f\r ]`).
+func skipRegexpSpace(src []byte, j int) int {
+	for j < len(src) && (src[j] == ' ' || src[j] == '\t' || src[j] == '\n' || src[j] == '\f' || src[j] == '\r') {
+		j++
+	}
+	return j
+}
+
 // globalMemberREs match a read of a builtin global's member, per global.
 var globalMemberREs sync.Map
 
@@ -4408,8 +4527,14 @@ var (
 
 func globalObjectUse(src []byte) bool {
 	declared := tsGlobalValues()
-	for _, m := range globalThisRE.FindAllSubmatch(src, -1) {
-		if len(m[2]) == 0 || !declared[string(m[3])] {
+	for _, loc := range globalThisRE.FindAllSubmatchIndex(src, -1) {
+		if loc[4] < 0 || !declared[string(src[loc[6]:loc[7]])] {
+			return true
+		}
+		// A write of a builtin's name (`globalThis.eval = v`) is the
+		// object's own property.
+		rest := bytes.TrimLeft(src[loc[1]:], " \t")
+		if len(rest) > 1 && rest[0] == '=' && rest[1] != '=' {
 			return true
 		}
 	}
@@ -4708,11 +4833,32 @@ func evalReassignment(path string, prog *ast.Program) {
 		id, ok := x.(*ast.Identifier)
 		return ok && id.Name == "eval"
 	}
+	// The global object's own eval (`globalThis.eval`, `global.eval`,
+	// `globalThis["eval"]`) is the same binding.
+	isGlobalEval := func(x ast.Expression) bool {
+		var obj ast.Expression
+		switch m := x.(type) {
+		case *ast.MemberExpression:
+			if m.Property != "eval" || m.Optional {
+				return false
+			}
+			obj = m.Object
+		case *ast.IndexExpression:
+			if lit, ok := m.Index.(*ast.StringLiteral); !ok || lit.Value != "eval" {
+				return false
+			}
+			obj = m.Object
+		default:
+			return false
+		}
+		id, ok := obj.(*ast.Identifier)
+		return ok && (id.Name == "globalThis" || id.Name == "global")
+	}
 	assigned, declared := false, false
 	ast.Inspect(prog, func(n ast.Node) bool {
 		switch x := n.(type) {
 		case *ast.AssignmentExpression:
-			assigned = assigned || x.Op == "=" && isEval(x.Left)
+			assigned = assigned || x.Op == "=" && (isEval(x.Left) || isGlobalEval(x.Left))
 		case *ast.VarDeclaration:
 			declared = declared || x.Name == "eval"
 		case *ast.FunctionDeclaration:
@@ -4758,7 +4904,7 @@ func evalReassignment(path string, prog *ast.Program) {
 	rw = func(n ast.Node) ast.Node {
 		switch x := n.(type) {
 		case *ast.AssignmentExpression:
-			if x.Op == "=" && isEval(x.Left) {
+			if x.Op == "=" && (isEval(x.Left) || isGlobalEval(x.Left)) {
 				pos := x.GetPos()
 				r := rw(x.Right).(ast.Expression)
 				// Assigned the intrinsic back, its calls are direct again.
@@ -4806,6 +4952,12 @@ func evalReassignment(path string, prog *ast.Program) {
 				pos := x.GetPos()
 				return ast.NewConditionalExpression(set(pos), held(pos), x, pos)
 			}
+		}
+		if x, ok := n.(ast.Expression); ok && isGlobalEval(x) {
+			// A read of the global object's eval, or its indirect call's
+			// callee: what it holds.
+			pos := x.GetPos()
+			return ast.NewConditionalExpression(set(pos), held(pos), x, pos)
 		}
 		ast.RewriteChildren(n, rw)
 		return n
@@ -4999,7 +5151,9 @@ func hoistNestedTopLevelVars(prog *ast.Program) {
 		}
 		nested := map[string]bool{}
 		freevars.CollectVarNames([]ast.Statement{st}, nested)
-		for name := range nested {
+		// Sorted: the declarations (and the IR after them) are the same on
+		// every compile.
+		for _, name := range slices.Sorted(maps.Keys(nested)) {
 			if direct[name] || !readBeyond(prog.Body, i, name) {
 				continue
 			}
@@ -5114,6 +5268,7 @@ func uncast(e ast.Expression) ast.Expression {
 func thisMemberNames(prog *ast.Program) (names map[string]bool, escapes bool) {
 	names = map[string]bool{}
 	ok := map[*ast.ThisExpression]bool{}
+	ctorOnly := constructorOnlyFuncs(prog)
 	var walk func(root ast.Node, inFn bool)
 	walk = func(root ast.Node, inFn bool) {
 		ast.Inspect(root, func(n ast.Node) bool {
@@ -5127,7 +5282,7 @@ func thisMemberNames(prog *ast.Program) (names map[string]bool, escapes bool) {
 			case *ast.ClassDeclaration, *ast.ClassExpression:
 				return false
 			case *ast.FunctionDeclaration:
-				if x.Body != nil {
+				if x.Body != nil && !ctorOnly[x] {
 					walk(x, true)
 				}
 				return false
@@ -5158,6 +5313,86 @@ func thisMemberNames(prog *ast.Program) (names map[string]bool, escapes bool) {
 	}
 	walk(prog, false)
 	return names, escapes
+}
+
+// constructorOnlyFuncs are the top-level function declarations whose
+// `this` is never the global object: every use of the name is `new F(…)`,
+// a read of `F.prototype`, or `F.call(this, …)` / `F.apply(this, …)` from
+// inside another such function (a base constructor's call from a derived
+// one), so each runs with a fresh object or a constructed one as `this`.
+func constructorOnlyFuncs(prog *ast.Program) map[*ast.FunctionDeclaration]bool {
+	decls := map[string]*ast.FunctionDeclaration{}
+	dup := map[string]bool{}
+	ast.Inspect(prog, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.FunctionDeclaration:
+			if _, seen := decls[x.Name]; seen {
+				dup[x.Name] = true
+			}
+			decls[x.Name] = x
+		case *ast.VarDeclaration:
+			dup[x.Name] = true // a binding of the same name: not tracked
+		}
+		return true
+	})
+	ctor := map[string]bool{}
+	for name, fd := range decls {
+		if !dup[name] && fd.Body != nil && name != "" {
+			ctor[name] = true
+		}
+	}
+	for changed := true; changed; {
+		changed = false
+		// enclosing is the constructor-only function a node is inside, "".
+		var visit func(n ast.Node, enclosing string)
+		visit = func(root ast.Node, enclosing string) {
+			allowed := map[*ast.Identifier]bool{}
+			ast.Inspect(root, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.FunctionDeclaration:
+					if n != root {
+						inner := ""
+						if ctor[x.Name] {
+							inner = x.Name
+						}
+						if x.Body != nil {
+							visit(x, inner)
+						}
+						return false
+					}
+				case *ast.FunctionExpression, *ast.ArrowFunction, *ast.ClassDeclaration, *ast.ClassExpression:
+					if n != root {
+						visit(n, "")
+						return false
+					}
+				case *ast.MemberExpression:
+					if id, ok := x.Object.(*ast.Identifier); ok && x.Property == "prototype" {
+						allowed[id] = true
+					}
+				case *ast.CallExpression:
+					if m, ok := x.Callee.(*ast.MemberExpression); ok && (m.Property == "call" || m.Property == "apply") && len(x.Args) > 0 {
+						if id, ok := m.Object.(*ast.Identifier); ok {
+							if _, this := x.Args[0].(*ast.ThisExpression); this && enclosing != "" {
+								allowed[id] = true
+							}
+						}
+					}
+				case *ast.Identifier:
+					if ctor[x.Name] && !allowed[x] {
+						delete(ctor, x.Name)
+						changed = true
+					}
+				}
+				return true
+			})
+		}
+		visit(prog, "")
+	}
+	out := map[*ast.FunctionDeclaration]bool{}
+	for name := range ctor {
+		out[decls[name]] = true
+	}
+	return out
 }
 
 // globalObjectEscapes reports whether prog may read the global object's
@@ -5221,4 +5456,95 @@ func globalObjectEscapes(path string, src []byte, prog *ast.Program) bool {
 		return !escapes
 	})
 	return escapes
+}
+
+// missingRequiredAsUndefined binds each name a CommonJS destructuring
+// require reads that the module does not export (`const { gone } =
+// require('util')`) to undefined, as reading a missing property of the
+// module object does in JavaScript (the js lane).
+func missingRequiredAsUndefined(info *fileInfo, files map[string]*fileInfo, dir, klainModulesDir string) {
+	var out []ast.Statement
+	for _, stmt := range info.prog.Body {
+		out = append(out, stmt)
+		imp, ok := stmt.(*ast.ImportDeclaration)
+		if !ok || !imp.FromRequire {
+			continue
+		}
+		if _, isVirtual := virtualBuiltinMarkers[imp.Source]; isVirtual {
+			continue
+		}
+		resolved, err := resolveImportPath(dir, imp.Source, klainModulesDir)
+		if err != nil || files[resolved] == nil {
+			continue
+		}
+		target := files[resolved]
+		kept := imp.Specifiers[:0:0]
+		for _, spec := range imp.Specifiers {
+			if spec.Imported != "default" && spec.Imported != "*" && !target.exported[spec.Imported] {
+				out = append(out, ast.NewVarDeclaration("var", spec.Local, nil, ast.NewNullLiteral(true, imp.GetPos()), imp.GetPos()))
+				continue
+			}
+			kept = append(kept, spec)
+		}
+		imp.Specifiers = kept
+	}
+	info.prog.Body = out
+}
+
+// hasLocaleCall reports a `.toLocaleString(…)` call with arguments anywhere
+// in prog, its worker modules included.
+func hasLocaleCall(prog *ast.Program) bool {
+	found := false
+	visit := func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpression); ok && len(call.Args) > 0 {
+			if m, ok := call.Callee.(*ast.MemberExpression); ok && m.Property == "toLocaleString" {
+				found = true
+			}
+		}
+		return !found
+	}
+	ast.Inspect(prog, visit)
+	for _, wm := range prog.WorkerModules {
+		for _, st := range wm.Body {
+			if !found {
+				ast.Inspect(st, visit)
+			}
+		}
+	}
+	return found
+}
+
+// typeOnlyDecls is the original name of each of the file's declarations
+// (mangled: original -> declared name) that only an interface or type
+// alias declares, no value of that name.
+func typeOnlyDecls(prog *ast.Program, mangled map[string]string) map[string]bool {
+	kinds := map[string]map[string]bool{}
+	for _, stmt := range prog.Body {
+		for _, ref := range declRefsOf(stmt) {
+			if kinds[ref.Name] == nil {
+				kinds[ref.Name] = map[string]bool{}
+			}
+			kinds[ref.Name][ref.Kind] = true
+		}
+	}
+	out := map[string]bool{}
+	for orig, m := range mangled {
+		k := kinds[m]
+		if len(k) == 0 {
+			continue
+		}
+		typeOnly := true
+		for kind := range k {
+			if kind != "interface" && kind != "type" {
+				typeOnly = false
+			}
+		}
+		if typeOnly {
+			out[orig] = true
+		}
+	}
+	return out
 }

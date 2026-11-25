@@ -195,7 +195,6 @@ func (e *Emitter) emitResponseHeaders(resp Value, pos ast.Pos) (Value, error) {
 	}
 	pend := e.loadFieldValue(resp, pendIdx, pendTy)
 	e.ensureFetch()
-	e.ensureStrHeaderRuntime()
 	raw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fetch_headers_raw("+irPtr+" %s)", raw, pend.Ref))
 	if _, err := e.emitHeadersMethod(h, "#fillRaw", pos, e.bindValue(Value{Ref: raw, Ty: TypePtr}, pos)); err != nil {

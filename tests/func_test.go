@@ -3719,3 +3719,21 @@ const f = () => f;
 console.log(f()()() === f);
 `, "true true true function F\ntrue")
 }
+
+// A literal method nested under a generic call's `ThisType<D & M>` types
+// `this` before M is inferred from that same method, through overloads
+// too.
+func TestE2EThisTypeNestedGenericMethod(t *testing.T) {
+	assertOutput(t, `
+type Opts<D, M> = { data: D; methods: { inner: M } } & ThisType<D & M>;
+function make<D, M>(o: Opts<D, M>): D & M;
+function make<D, M>(o: Opts<D, M>, x: number): D & M;
+function make(o: any, x?: number): any { return Object.assign({}, o.data, o.methods.inner); }
+const v = make({ data: { n: 2 }, methods: { inner: { twice() { return this.n * 2; } } } });
+console.log(v.twice());
+type Flat<D, M> = { data: D; methods: M } & ThisType<D & M>;
+function one<D, M>(o: Flat<D, M>): D & M { return Object.assign({}, o.data, o.methods); }
+const w = one({ data: { n: 5 }, methods: { twice() { return this.n * 2; } } });
+console.log(w.twice());
+`, "4\n10")
+}

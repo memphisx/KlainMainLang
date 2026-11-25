@@ -5,42 +5,12 @@ import (
 	"KlainMainLang/diag"
 )
 
-// unsupportedHostBases are the builtin classes that cannot be a class's
-// base yet: their values are native records a class instance does not
-// embed.
-var unsupportedHostBases = map[string]bool{
-	"Request": true, "Response": true, "ReadableStream": true, "WritableStream": true,
-	"TransformStream": true, "DecompressionStream": true, "XMLHttpRequest": true,
-}
-
-// hostBaseDiags reports each class of prog extending one of
-// unsupportedHostBases that the file does not declare itself.
-func hostBaseDiags(prog *ast.Program, offset func(line, col int) int) []*diag.Diagnostic {
-	own := map[string]bool{}
-	ast.Inspect(prog, func(n ast.Node) bool {
-		if cd, ok := n.(*ast.ClassDeclaration); ok {
-			own[cd.Name] = true
-		}
-		return true
-	})
-	var out []*diag.Diagnostic
-	ast.Inspect(prog, func(n ast.Node) bool {
-		if cd, ok := n.(*ast.ClassDeclaration); ok && unsupportedHostBases[cd.BaseClass] && !own[cd.BaseClass] && !cd.BaseQualified {
-			p := cd.GetPos()
-			start := offset(p.Line, p.Col)
-			out = append(out, diag.New(diag.HostBaseUnsupported, diag.Span{Pos: diag.Pos{Line: p.Line, Col: p.Col}, Start: start, End: start}, cd.BaseClass))
-		}
-		return true
-	})
-	return out
-}
-
 // constructDiags are a file's constructs valid in TypeScript that this
-// compiler does not implement yet: a class base (hostBaseDiags) or a
-// decorated member (decoratedMemberDiags) under decorators, the dialect
-// ("" is experimental, the default).
+// compiler does not implement yet: a decorated member
+// (decoratedMemberDiags) under decorators, the dialect ("" is
+// experimental, the default).
 func constructDiags(prog *ast.Program, offset func(line, col int) int, decorators string) []*diag.Diagnostic {
-	ds := append(hostBaseDiags(prog, offset), decoratedMemberDiags(prog, offset, decorators == "standard")...)
+	ds := decoratedMemberDiags(prog, offset, decorators == "standard")
 	ds = append(ds, byteStreamDiags(prog, offset)...)
 	ds = append(ds, speciesDiags(prog, offset)...)
 	return append(ds, embedDirDiags(prog, offset)...)

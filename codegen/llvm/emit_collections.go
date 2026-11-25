@@ -18,7 +18,6 @@ import (
 func (e *Emitter) emitMapOrSetCreate(ty Type) string {
 	ptr := e.freshReg()
 	suffix, _ := mapRuntime(*ty.MapKey)
-	e.ensureMapFamily(suffix)
 	e.noteMapLayout(ty)
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_map_%s_create_h(i64 %d)", ptr, suffix, e.hostHeaderWord(ty)))
 	return ptr
@@ -78,18 +77,6 @@ func boxedKeyTy(t Type) bool {
 
 func isReferenceKeyTy(t Type) bool {
 	return t.IsArray() || t.IsTuple() && !t.IsDynamic() || t.IsObject() || t.IsFunc() && !t.IsDynamic() || t.IR == irPtr && !t.IsDynamic() && hasHandleFlag(t)
-}
-
-// ensureMapFamily declares the __kml_map_<suffix>_* runtime once.
-func (e *Emitter) ensureMapFamily(suffix string) {
-	switch suffix {
-	case "str":
-		e.ensureMapStrHelpers()
-	case "any":
-		e.ensureBoxedBigIntHooks()
-		e.ensureFnMeta()
-	default:
-	}
 }
 
 // mapKeyRef lowers a key Value to the operand its map runtime expects. An
@@ -155,6 +142,8 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 	if init.KeyType == nil && init.ValType == nil && v.TypeAnnot != nil {
 		if annTy := e.annotationType(v.TypeAnnot); annTy.IsMap() && annTy.MapKey != nil && annTy.MapVal != nil {
 			keyTy, valTy = *annTy.MapKey, *annTy.MapVal
+		} else if annTy.IsDynamic() {
+			keyTy, valTy = TypeAny, TypeAny // `const m: any = new Map()`
 		}
 	}
 	// A bare `new Map()` (no type args, no annotation, no seed) takes its K/V
@@ -189,6 +178,12 @@ func (e *Emitter) emitMapVarDecl(v *ast.VarDeclaration, init *ast.NewMapExpressi
 // a general expression position.
 func (e *Emitter) emitNewMapValue(init *ast.NewMapExpression) (Value, error) {
 	keyTy, valTy := e.mapKVTypes(init.KeyType, init.ValType, init.Init)
+	// A bare one stored to a binding held boxed is the Map<any, any>
+	// TypeScript types it: its later dynamic set/get keep every key and
+	// value as given.
+	if init.KeyType == nil && init.ValType == nil && init.Init == nil && e.bareMapToDynamic(init) {
+		keyTy, valTy = TypeAny, TypeAny
+	}
 	return e.emitNewMapValueTyped(init, keyTy, valTy)
 }
 
@@ -196,6 +191,12 @@ func (e *Emitter) emitNewMapValue(init *ast.NewMapExpression) (Value, error) {
 // var-decl can override them from its annotation — emitMapVarDecl).
 func (e *Emitter) emitNewMapValueTyped(init *ast.NewMapExpression, keyTy, valTy Type) (Value, error) {
 	mapPtr := e.emitMapOrSetCreate(MapType(keyTy, valTy))
+	if init.Init != nil && e.collProtoPatched("Map", "set") && !isUndefinedLiteral(e, init.Init) {
+		if err := e.emitCollPatchedSeed(Value{Ref: mapPtr, Ty: MapType(keyTy, valTy)}, init.Init, init.GetPos()); err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: mapPtr, Ty: MapType(keyTy, valTy)}, nil
+	}
 	if init.Init != nil {
 		if err := e.emitMapSeedFromEntries(mapPtr, init.Init, keyTy, valTy, init.GetPos()); err != nil {
 			return Value{}, err
@@ -564,6 +565,18 @@ func (e *Emitter) emitNewSetValueTyped(init *ast.NewSetExpression, elemOverride 
 	if elemOverride != nil {
 		elemTy = *elemOverride
 	}
+	if init.Init != nil && e.collProtoPatched("Set", "add") && !isUndefinedLiteral(e, init.Init) {
+		if init.ElemType != nil {
+			elemTy = e.annotationType(init.ElemType)
+		} else if elemOverride == nil {
+			elemTy = TypeAny
+		}
+		setPtr := e.emitMapOrSetCreate(SetType(elemTy))
+		if err := e.emitCollPatchedSeed(Value{Ref: setPtr, Ty: SetType(elemTy)}, init.Init, init.GetPos()); err != nil {
+			return Value{}, err
+		}
+		return Value{Ref: setPtr, Ty: SetType(elemTy)}, nil
+	}
 	var srcPtr, srcLen string
 	haveSrc := false
 	if init.Init != nil {
@@ -703,7 +716,6 @@ func (e *Emitter) emitMapMethod(ty Type, mapPtr string, method string, args []as
 		valTy = *ty.MapVal
 	}
 	suffix, keyIR := mapRuntime(keyTy)
-	e.ensureMapFamily(suffix)
 
 	if _, op := mapViewOps[method]; !op && method != "clear" {
 		mapPtr = e.mapViewPtr(ty, mapPtr) // every entry, in the view's layout (TDD-00258)
@@ -897,7 +909,6 @@ func (e *Emitter) emitMapMethodDelete(c *mapCall) (Value, error) {
 
 // emitMapMethodKeys is map.keys().
 func (e *Emitter) emitMapMethodKeys(c *mapCall) (Value, error) {
-	e.ensureMapFamily(c.suffix)
 	res := e.emitMapCopy("keys", c.mapPtr)
 	res = e.materializeKeysAggregate(res, c.keyTy)
 	return e.arrayFromAgg(res, ArrayOf(c.keyTy)), nil
@@ -967,7 +978,6 @@ func (e *Emitter) emitSetMethod(ty Type, setPtr string, method string, args []as
 	}
 	strElem := isStringTy(elemTy)
 	suffix, keyIR := mapRuntime(elemTy)
-	e.ensureMapFamily(suffix)
 
 	if _, op := mapViewOps[method]; !op && method != "clear" {
 		setPtr = e.mapViewPtr(ty, setPtr)
@@ -1068,7 +1078,6 @@ func (e *Emitter) emitSetMethodDelete(c *setCall) (Value, error) {
 // emitSetMethodValues is set.values().
 func (e *Emitter) emitSetMethodValues(c *setCall) (Value, error) {
 	// Set elements are stored as keys; return the keys array.
-	e.ensureMapFamily(c.suffix)
 	res := e.emitMapCopy("keys", c.setPtr)
 	res = e.materializeKeysAggregate(res, c.elemTy)
 	return e.arrayFromAgg(res, ArrayOf(c.elemTy)), nil
@@ -1116,8 +1125,6 @@ func (e *Emitter) mapOrSetValuesArray(ty Type, ptr string) (Value, error) {
 		if ty.MapKey != nil {
 			elemTy = *ty.MapKey
 		}
-		suffix, _ := mapRuntime(elemTy)
-		e.ensureMapFamily(suffix)
 		res := e.emitMapCopy("keys", ptr)
 		res = e.materializeKeysAggregate(res, elemTy)
 		return e.arrayFromAgg(res, ArrayOf(elemTy)), nil
@@ -1375,7 +1382,6 @@ func (e *Emitter) mapKeyFromSlot(box string, keyTy Type) string {
 }
 
 func (e *Emitter) mapKeysAndVals(mapPtr string, suffix string, keyTy Type) (keysPtr, keysLen, valsPtr string) {
-	e.ensureMapFamily(suffix)
 	keysRes := e.emitMapCopy("keys", mapPtr)
 	valsRes := e.emitMapCopy("vals", mapPtr)
 	// Reference-type keys come back NaN-boxed; materialize them to real
@@ -1502,8 +1508,6 @@ func (e *Emitter) emitMapForEach(mapPtr string, suffix string, keyTy, valTy, map
 // mirrors real JS's own quirky Set.prototype.forEach(value, value, set)
 // shape, where the "key" is just the value again.
 func (e *Emitter) emitSetForEach(setPtr string, strElem bool, elemTy, setTy Type, cb Callback) (Value, error) {
-	suffix, _ := mapRuntime(elemTy)
-	e.ensureMapFamily(suffix)
 	keysRes := e.emitMapCopy("keys", setPtr)
 	// Reference-type elements come back NaN-boxed; materialize to real pointers.
 	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
@@ -1750,4 +1754,20 @@ func (e *Emitter) nullishSeedSource(src ast.Expression) (ast.Expression, error) 
 	}
 	// A temporary: a value that is not iterable is described by its value.
 	return e.bindValue(sel, pos), nil
+}
+
+// bareMapToDynamic reports init assigned to, or initializing, a binding
+// held as a box.
+func (e *Emitter) bareMapToDynamic(init *ast.NewMapExpression) bool {
+	c := e.front()
+	if c == nil {
+		return false
+	}
+	switch p := c.ParentOf(init).(type) {
+	case *ast.AssignmentExpression:
+		return p.Op == "=" && p.Right == ast.Expression(init) && e.typeOfExpr(p.Left).IsDynamic()
+	case *ast.VarDeclaration:
+		return p.Init == ast.Expression(init) && p.TypeAnnot != nil && e.annotationType(p.TypeAnnot).IsDynamic()
+	}
+	return false
 }

@@ -369,6 +369,16 @@
             ]
           },
           {
+            "feature": "`Array.fromAsync(items, mapFn?, thisArg?)`",
+            "status": "implemented",
+            "notes": [
+              "A promise of the array an async iterable, an iterable or an array-like gives, each value (and each `mapFn` result) awaited, as Node's; written in TypeScript ([ADR-01987](../adr/01/ADR-01987.md))"
+            ],
+            "decl": [
+              "ArrayConstructor.fromAsync"
+            ]
+          },
+          {
             "feature": "`Array.of(...items)`",
             "status": "implemented",
             "notes": [

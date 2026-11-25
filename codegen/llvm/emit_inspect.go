@@ -105,7 +105,9 @@ func (e *Emitter) emitInspectObjectOwn(val Value, depth int) (Value, error) {
 		// A synthetic object-literal accessor class (TDD-00153) is an anonymous
 		// object literal to the user — print it as `{ ... }`, never leaking its
 		// internal `__kml_objlit_N` name.
-		name = e.classDisplayName(val.Ty.ClassName) + " "
+		if shown := e.classDisplayName(val.Ty.ClassName); shown != "" {
+			name = shown + " " // an anonymous class's instance shows no name
+		}
 	}
 	// `Name [Tag] {` when a Symbol.toStringTag getter answers a tag other
 	// than the class name (util.inspect).
@@ -113,7 +115,6 @@ func (e *Emitter) emitInspectObjectOwn(val Value, depth int) (Value, error) {
 		if name == "" || !val.Ty.IsClass() || !e.classHasMethodInherited(val.Ty.ClassName, accessorMethodName("get", "@@toStringTag")) {
 			return e.internString(name + rest)
 		}
-		e.ensureInspectReduce()
 		tag, r := e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_tostring_tag("+irPtr+" %s)", tag, val.Ref))
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_tagged("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" %s)",
@@ -413,6 +414,29 @@ func (e *Emitter) emitInspectArrayAs(val Value, depth int, label collLabel) (Val
 			}
 			e.inspectPush(list, entry)
 		}
+		// The d flag's indices follow groups.
+		{
+			ty, off, _ := execArrayMemberType("indices")
+			gep, r := e.freshReg(), e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = getelementptr i8, "+irPtr+" %s, i64 %d", gep, val.Ref, off))
+			e.emitInstr(fmt.Sprintf("%s = load %s, "+irPtr+" %s, align 8", r, ty.IR, gep))
+			has := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, %d", has, r, nbUndefined))
+			ixL, ixDone := e.freshLabel("inspexec.indices"), e.freshLabel("inspexec.indices.done")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, ixL, ixDone))
+			e.emitLabel(ixL)
+			fv, err := e.emitInspectField(Value{Ref: r, Ty: ty}, depth+1)
+			if err != nil {
+				return Value{}, err
+			}
+			entry, err := e.emitStringConcat(Value{Ref: e.internString("indices: "), Ty: TypePtr}, fv)
+			if err != nil {
+				return Value{}, err
+			}
+			e.inspectPush(list, entry)
+			e.emitTerminator(fmt.Sprintf("br label %%%s", ixDone))
+			e.emitLabel(ixDone)
+		}
 		if plainL != "" {
 			e.emitTerminator(fmt.Sprintf("br label %%%s", plainL))
 			e.emitLabel(plainL)
@@ -604,8 +628,6 @@ func (e *Emitter) emitInspectSetAs(val Value, depth int, label collLabel) (Value
 	if val.Ty.MapKey != nil {
 		elemTy = *val.Ty.MapKey
 	}
-	suffix, _ := mapRuntime(elemTy)
-	e.ensureMapFamily(suffix)
 	keysRes := e.emitMapCopy("keys", val.Ref)
 	keysRes = e.materializeKeysAggregate(keysRes, elemTy)
 	keysPtr := e.freshReg()
@@ -776,11 +798,13 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 			}
 			// A class instance is `[Name]`, `[Name [Tag]]` with a toStringTag.
 			name := e.classDisplayName(v.Ty.ClassName)
+			if name == "" {
+				return Value{Ref: e.internString("[Object]"), Ty: TypePtr}, nil
+			}
 			if !e.classHasMethodInherited(v.Ty.ClassName, accessorMethodName("get", "@@toStringTag")) {
 				return Value{Ref: e.internString("[" + name + "]"), Ty: TypePtr}, nil
 			}
 			render := func(b Value) (Value, error) {
-				e.ensureInspectReduce()
 				tag, r := e.freshReg(), e.freshReg()
 				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_obj_tostring_tag("+irPtr+" %s)", tag, b.Ref))
 				e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_tagged("+irPtr+" %s, "+irPtr+" %s, "+irPtr+" null)", r, e.internString(name), tag))
@@ -893,7 +917,6 @@ func (e *Emitter) emitInspectField(v Value, depth int) (Value, error) {
 	case isStringTy(v.Ty):
 		// Node's strEscape: single quotes unless the string holds one (then
 		// double, then backticks), control characters escaped (ADR-01067).
-		e.ensureInspectReduce()
 		quotedReg := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_quote("+irPtr+" %s)", quotedReg, v.Ref))
 		quoted := Value{Ref: quotedReg, Ty: TypePtr}
@@ -1062,7 +1085,6 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 	// unlimited depth is Infinity levels left and `options.depth: null`.
 	optDepth := fmt.Sprint(e.effectiveInspectDepth())
 	if static < 0 {
-		e.ensureInspectReduce()
 		e.declareInspectOptDepth()
 		optDepth = e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_inspect_opt_depth, align 8", optDepth))
@@ -1117,7 +1139,6 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 	}
 	if isStringTy(r.Ty) && !r.Ty.IsDynamic() {
 		// A string is spliced in indented to its nesting level.
-		e.ensureInspectReduce()
 		out := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_reindent("+irPtr+" %s, i64 %s)", out, r.Ref, depthReg))
 		return Value{Ref: out, Ty: r.Ty}, true, nil
@@ -1147,7 +1168,6 @@ func (e *Emitter) emitInspectCustomAt(val Value, depthReg string, static int) (V
 		tag, pay := e.emitUnboxTagPayload(r)
 		isStr := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isStr, tag, kmlTagString))
-		e.ensureInspectReduce()
 		str := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_inspect_reindent("+irPtr+" %s, i64 %s)", str, e.emitIntToPtr(pay), depthReg))
 		out := e.freshReg()

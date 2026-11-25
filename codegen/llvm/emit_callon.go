@@ -139,6 +139,7 @@ func (e *Emitter) protoUses() *protoUse {
 	}
 	u := &protoUse{}
 	e.protoUse = u
+
 	if e.prog != nil {
 		ast.Inspect(e.prog, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpression)
@@ -153,10 +154,10 @@ func (e *Emitter) protoUses() *protoUse {
 			if obj == nil {
 				return true
 			}
-			switch {
-			case obj.Name == "Reflect" && mem.Property == "construct" && len(call.Args) >= 3:
+			switch k := e.declIntrinsic(call); {
+			case k == "Reflect.construct" && len(call.Args) >= 3:
 				u.newTarget, u.replaced = true, true
-			case (obj.Name == "Object" || obj.Name == "Reflect") && mem.Property == "setPrototypeOf":
+			case k == "Object.setPrototypeOf" || k == "Reflect.setPrototypeOf":
 				u.replaced = true
 			}
 			return true
@@ -165,5 +166,19 @@ func (e *Emitter) protoUses() *protoUse {
 	if len(e.callOnClasses()) > 0 {
 		u.replaced = true
 	}
+	// A class extending a value constructs its base with itself as
+	// newTarget (emitValueBaseSuper): an instance the base makes takes the
+	// class's prototype. The program's lane, not the code being emitted:
+	// the answer is computed once, whoever asks first (a library function).
+	if len(e.valueBases) > 0 && e.opts.CompatJS() {
+		u.newTarget, u.replaced = true, true
+	}
 	return u
+}
+
+// protoReplaced reports that an instance reaching the code being emitted
+// may carry a prototype it was given. Library code compiles the same in
+// every program, so it always allows for one.
+func (e *Emitter) protoReplaced() bool {
+	return e.inLib != "" || e.protoUses().replaced
 }

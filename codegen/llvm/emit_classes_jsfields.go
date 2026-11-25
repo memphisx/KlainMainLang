@@ -44,7 +44,11 @@ func (e *Emitter) jsInferConstructorFields(cd *ast.ClassDeclaration, seen map[st
 		return nil, nil
 	}
 	var fields []Field
-	for _, p := range c.JSConstructorFields(cd) {
+	props, ok := e.jsCtorFieldsBefore[cd]
+	if !ok {
+		props = c.JSConstructorFields(cd)
+	}
+	for _, p := range props {
 		name := p.Name
 		if seen[name] || name == "__proto__" {
 			continue
@@ -64,8 +68,13 @@ func (e *Emitter) jsInferConstructorFields(cd *ast.ClassDeclaration, seen map[st
 			return nil, internalAt(pos, "class %s assigns the reserved field %s", cd.Name, name)
 		}
 		ty := TypeAny
-		if !c.Unanswered(p.Type) {
-			ty, _ = e.jsCallSiteType(p.Type)
+		if !c.Unanswered(p.Type()) {
+			ty, _ = e.jsCallSiteType(p.Type())
+		}
+		if ty.isKind(kindNull) || ty.isKind(kindUndefined) {
+			// `this.x = undefined` (or null): JavaScript's evolving field,
+			// any value stored later (classFieldNullEvolves).
+			ty = TypeAny
 		}
 		fields = append(fields, Field{Name: name, Ty: ty})
 	}

@@ -106,11 +106,72 @@ export function unescape(s: string, decodeSpaces?: boolean): string {
     }
 }
 
-// QueryString.escape() replaces encodeURIComponent(): lib/internal/
-// querystring.js's encodeStr over the noEscape table (`! ' ( ) * - . _ ~`,
-// digits and letters stay), which is encodeURIComponent's unreserved set.
-export function escape(str: string): string {
-    return encodeURIComponent(str);
+// The characters querystring.escape leaves as they are (lib/internal/
+// querystring.js's noEscape: `! ' ( ) * - . _ ~`, digits and letters).
+function noEscape(c: number): boolean {
+    return (c >= 0x30 && c <= 0x39) || (c >= 0x41 && c <= 0x5A) || (c >= 0x61 && c <= 0x7A) ||
+        c === 0x21 || c === 0x27 || c === 0x28 || c === 0x29 || c === 0x2A || c === 0x2D || c === 0x2E ||
+        c === 0x5F || c === 0x7E;
+}
+
+function hex(b: number): string {
+    return '%' + (b < 16 ? '0' : '') + b.toString(16).toUpperCase();
+}
+
+// lib/internal/querystring.js's encodeStr: UTF-8 percent-encoding by code
+// unit, a high or low surrogate joined with the code unit after it (a
+// surrogate that ends the string is ERR_INVALID_URI).
+function encodeStr(str: string): string {
+    const len = str.length;
+    if (len === 0) return '';
+    let out = '';
+    let lastPos = 0;
+    for (let i = 0; i < len; i++) {
+        let c = str.charCodeAt(i);
+        if (c < 0x80) {
+            if (!noEscape(c)) {
+                if (lastPos < i) out += str.slice(lastPos, i);
+                lastPos = i + 1;
+                out += hex(c);
+            }
+            continue;
+        }
+        if (lastPos < i) out += str.slice(lastPos, i);
+        if (c < 0x800) {
+            lastPos = i + 1;
+            out += hex(0xC0 | (c >> 6)) + hex(0x80 | (c & 0x3F));
+            continue;
+        }
+        if (c < 0xD800 || c >= 0xE000) {
+            lastPos = i + 1;
+            out += hex(0xE0 | (c >> 12)) + hex(0x80 | ((c >> 6) & 0x3F)) + hex(0x80 | (c & 0x3F));
+            continue;
+        }
+        // A surrogate pair.
+        ++i;
+        if (i >= len) {
+            const e: any = new URIError('URI malformed');
+            e.code = 'ERR_INVALID_URI';
+            throw e;
+        }
+        const c2 = str.charCodeAt(i) & 0x3FF;
+        lastPos = i + 1;
+        c = 0x10000 + (((c & 0x3FF) << 10) | c2);
+        out += hex(0xF0 | (c >> 18)) + hex(0x80 | ((c >> 12) & 0x3F)) + hex(0x80 | ((c >> 6) & 0x3F)) + hex(0x80 | (c & 0x3F));
+    }
+    if (lastPos === 0) return str;
+    if (lastPos < len) return out + str.slice(lastPos);
+    return out;
+}
+
+// Node's qsEscape: any value, taken to a string first.
+export function escape(str: string): string;
+export function escape(str: any): string {
+    let s: string;
+    if (typeof str === 'string') s = str;
+    else if (typeof str === 'object') s = String(str);
+    else s = '' + str;
+    return encodeStr(s);
 }
 
 type Primitive = string | number | boolean | bigint | null | undefined;

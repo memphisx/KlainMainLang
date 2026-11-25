@@ -31,6 +31,10 @@ type Options struct {
 	// "lazy" (bundled semantics, code in a shared library) or "isolated"
 	// (shared-library islands with their own module instances, TDD-00056).
 	DynamicImport string
+	// Library builds the program as a shared library whose entry is
+	// `int kml_main(int argc, char **argv)`, called on any thread by a host
+	// that owns main() (-lib).
+	Library bool
 	// Regex is the RegExp dialect (TDD-00067); "" resolves to the highest
 	// implemented ES stage.
 	Regex string

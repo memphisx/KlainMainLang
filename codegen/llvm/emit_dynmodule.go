@@ -58,7 +58,7 @@ func (e *Emitter) dynModuleInit(target string) (string, error) {
 	for _, f := range files {
 		body = append(body, e.dynGroups[f]...)
 	}
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	prom := "@__kml_dyn_" + h + "_prom"
 	e.emitGlobal(fmt.Sprintf("%s = %s%sglobal "+irPtr+" null, align 8", prom, e.dynLinkage(), e.isolateTLS()))
 	for _, f := range files {
@@ -142,11 +142,8 @@ func (e *Emitter) emitBundledImport(ex *ast.ImportCallExpression) (Value, error)
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureMicrotasks()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
-	e.ensureNanBox()
-	e.ensureTaskRuntime()
+	e.ensureUnhandledRejections()
 	objTy := e.importCallResultObjectType(ex)
 	fulfill := "@" + e.emitBundledFulfillFn(ex, objTy)
 	prom := "@__kml_dyn_" + IslandHash(ex.ResolvedPath) + "_prom"

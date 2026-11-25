@@ -290,6 +290,11 @@ for (const v of [-1n, 0x10000000000000000n, 0xffffffffffffffffn, 1234n]) {
   try { buf.writeBigUInt64BE(v, 0); console.log("ok", buf.readBigUInt64BE(0)); }
   catch (e) { console.log((e as Error).name, (e as any).code, (e as Error).message); }
 }
+// A value held in any: a bigint writes, anything else is the TypeError.
+for (const v of [7n, 5, "5", null] as any[]) {
+  try { buf.writeBigInt64LE(v, 0); console.log("ok", buf.readBigInt64LE(0)); }
+  catch (e) { console.log((e as Error).name, (e as Error).message); }
+}
 `)
 }
 
@@ -314,4 +319,20 @@ console.log(typeof Buffer.prototype.fill, Object.getPrototypeOf(Buffer.prototype
 const b = Buffer.from("ab");
 console.log(Object.getPrototypeOf(b) === Buffer.prototype, b instanceof Buffer);
 `)
+}
+
+func TestE2EBufferCalledAsFunction(t *testing.T) {
+	assertOutputCompatJS(t, `
+const a = Buffer("ab"), b = Buffer(3), c = Buffer([1, 2]);
+console.log(a, b.length, c, a.toString("hex"));
+function shadow() { const Buffer = (x) => "mine " + x; return Buffer(1); }
+console.log(shadow());
+`, "<Buffer 61 62> 3 <Buffer 01 02> 6162\nmine 1")
+	for _, c := range []struct{ src, ty string }{
+		{`const a = Buffer("ab");`, "BufferConstructor"},
+		{`const m = Map();`, "MapConstructor"},
+		{`const u = Uint8Array(2);`, "Uint8ArrayConstructor"},
+	} {
+		assertCLICompileError(t, false, c.src, "value of type '"+c.ty+"' is not callable; did you mean to include 'new'?")
+	}
 }

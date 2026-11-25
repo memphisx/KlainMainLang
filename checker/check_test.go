@@ -163,6 +163,14 @@ func TestCheck(t *testing.T) {
 		// returns) reads an implicit-any `this`; a tagged template passes its
 		// template object and substitutions, counted as a call's.
 		{"var fn = function () { return function () { return this } }", "1:TS2683"},
+		// An object literal's property value reads the enclosing function's
+		// `this`; its method reads the literal.
+		{"function f(cb: () => void) { cb() }\nf(function () { const o = { p: this.x } })", "2:TS2683"},
+		{"const o = { n: 1, m() { return { v: this.n } } }", ""},
+		// A union with a primitive member is not callable (TS2349); one of
+		// functions alone is.
+		{"declare const f: string | ((n: number) => number)\nf(1)", "2:TS2349"},
+		{"declare const f: ((n: number) => number) | ((n: number) => string)\nf(1)", ""},
 		{"function tag() { return 1 }\ntag`x`", "2:TS2554"},
 		{"function tag(s: TemplateStringsArray, ...v: number[]) { return 1 }\ntag`x${1}`", ""},
 		{"function id(s: readonly string[]) { return 1 }\nid`a${1}b`", "2:TS2554"},
@@ -506,6 +514,11 @@ func TestBuiltinNewContext(t *testing.T) {
 		// A union of tuples discriminates by a literal element.
 		{"type C = [\"aa\", number] | [\"bb\", string]\nfunction k(c: C) { if (c[0] === \"aa\") { const q: number = c[1] } else { const r: string = c[1] } }\nexport {}", ""},
 		{"declare const z: (string | number)[]\nconst r: number = z.reduce((p: number, c: string | number) => p + 1, 0)\nexport {}", ""},
+		// A callback's annotated parameter meets the generic overload's
+		// instantiation contravariantly: U = number | undefined does not
+		// take `acc: number` (TS2769).
+		{"const xs = [1, 2, 3]\nconst r = xs.reduce((acc: number, v) => (v > 1 ? acc + v : undefined) as number | undefined, 0)\nexport {}", "2:TS2769"},
+		{"const xs = [1, 2, 3]\nconst r = xs.reduce((acc: number | undefined, v) => (v > 1 ? 1 : undefined) as number | undefined, 0)\nexport {}", ""},
 		// An interface with one call signature is a contextual signature
 		// (TransformerTransformCallback); a `T | undefined` object context
 		// types its properties.
@@ -653,6 +666,9 @@ func TestComputedKeyImplicitAny(t *testing.T) {
 	for _, tc := range []struct{ src, want string }{
 		{"class C { m() { return 2; } }\nconst c = new C();\ndeclare const k: string;\nc[k]", "4:TS7053"},
 		{"const o = { a: 1 };\ndeclare const n: number;\no[n]", "3:TS7053"},
+		// A union of keys not every one a property.
+		{"const o = { a: 1 };\ndeclare const k: 'a' | 'b';\no[k]", "3:TS7053"},
+		{"const o = { a: 1, b: 2 };\ndeclare const k: 'a' | 'b';\no[k]", ""},
 		{"const o = { a: 1 };\no[\"a\"]", ""},
 		{"const o: { [k: string]: number } = {};\ndeclare const k: string;\no[k]", ""},
 		{"declare const o: any;\ndeclare const k: string;\no[k]", ""},

@@ -41,24 +41,12 @@ extern void __kml_throw_nullderef(const char *msg) __attribute__((noreturn));
 extern void __kml_require_callable(long long word, const char *type) __attribute__((weak));
 extern char *__kml_object_tostring(long long word) __attribute__((weak));
 
-/* mirrors __kml_nb_tag / __kml_nb_pay (runtime_nanbox.go) */
-static int nb_tag(i64 w) {
-    u64 v = (u64)w;
-    static const int kindTag[8] = {2, 6, 7, 8, 9, 10, 11, 12};
-    if (v >= (1ULL << 49)) return 1;
-    if (v < 65536) return v == 2 ? 4 : (v == 6 || v == 7) ? 3 : 5;
-    return kindTag[v & 7];
-}
-static void *nb_ptr(i64 w) {
-    u64 v = (u64)w;
-    return (void *)((v & 7) == 0 ? v : v & ~7ULL);
-}
 
 /* A function box is a record { fn, env } called (env, this, argc, argv). */
 typedef i64 (*kml_fn)(void *env, i64 recv, i64 argc, i64 *argv);
 
 static i64 invoke(i64 fnbox, i64 recv, i64 argc, i64 *argv) {
-    void **rec = (void **)nb_ptr(fnbox);
+    void **rec = (void **)kml_nb_ptr(fnbox);
     return ((kml_fn)rec[0])(rec[1], recv, argc, argv);
 }
 
@@ -70,8 +58,8 @@ static i64 tp_get(void *bag, int isstatic, const void *key) {
 
 /* Whether v boxes a bigint (its cell's magic, emit_bigint_box.go). */
 int __kml_any_is_bigint(i64 v) {
-    void *p = nb_ptr(v);
-    return nb_tag(v) == 6 && p && *(const u64 *)p == 0x7FF40000B1616B16ULL;
+    void *p = kml_nb_ptr(v);
+    return kml_nb_tag(v) == 6 && p && *(const u64 *)p == 0x7FF40000B1616B16ULL;
 }
 
 /* Whether v boxes a symbol: an object-kind box whose header has the symbol
@@ -93,8 +81,8 @@ void __kml_any_symbol_guard(i64 v, int tostr) {
 i64 __kml_toprimitive(i64 v, int hint) {
     hint &= 0xff;
     if (is_symbol_box(v)) return v; /* a symbol is a primitive */
-    int tag = nb_tag(v), isobj = tag == 10, isstatic = 0;
-    void *bag = nb_ptr(v);
+    int tag = kml_nb_tag(v), isobj = tag == 10, isstatic = 0;
+    void *bag = kml_nb_ptr(v);
     /* A function: Function.prototype.toString ends its ladder (valueOf
      * returns the function itself), its source text. */
     void **fnrec = 0;
@@ -120,7 +108,7 @@ i64 __kml_toprimitive(i64 v, int hint) {
         return v;
     }
     i64 tp = tp_get(bag, isstatic, k_tp.d);
-    int tpt = nb_tag(tp);
+    int tpt = kml_nb_tag(tp);
     if (tpt != 12 && tpt != 4 && tpt != 5 && !(isstatic && tp == 0)) {
         /* GetMethod: a Symbol.toPrimitive that is neither nullish nor
          * callable is a TypeError (`number 1 is not a function`). */
@@ -139,7 +127,7 @@ i64 __kml_toprimitive(i64 v, int hint) {
     int ownToStringObject = 0;
     for (int i = 0; i < 2; i++) {
         i64 f = tp_get(bag, isstatic, order[i]);
-        if (nb_tag(f) != 12) {
+        if (kml_nb_tag(f) != 12) {
             /* A dynamic object without its own toString has
              * Object.prototype's, which always gives a primitive: the ladder
              * ends there (`String({ valueOf() { return 1 } })` is
@@ -162,7 +150,7 @@ i64 __kml_toprimitive(i64 v, int hint) {
         }
         i64 argv[1];
         i64 r = invoke(f, v, 0, argv);
-        if (nb_tag(r) < 6 || __kml_any_is_bigint(r) || is_symbol_box(r)) return r;
+        if (kml_nb_tag(r) < 6 || __kml_any_is_bigint(r) || is_symbol_box(r)) return r;
         if (order[i] == k_ts.d) ownToStringObject = 1;
     }
     /* OrdinaryToPrimitive: the object's own toString returned an object and
@@ -182,8 +170,8 @@ i64 __kml_toprimitive(i64 v, int hint) {
         return v;
     }
     i64 t = tp_get(bag, 0, k_tag.d);
-    if (nb_tag(t) != 2) return (i64)(u64)k_obj.d;
-    const char *name = (const char *)nb_ptr(t);
+    if (kml_nb_tag(t) != 2) return (i64)(u64)k_obj.d;
+    const char *name = (const char *)kml_nb_ptr(t);
     i64 n = KML_STR_LEN(name);
     char *s = (char *)kml_alloc(KML_HEAP_RAW, (size_t)n + 18);
     *(i64 *)s = n + 9;
@@ -197,10 +185,11 @@ i64 __kml_toprimitive(i64 v, int hint) {
  * arm): ToPrimitive with the number hint, then ToNumber of the primitive. A
  * value with no primitive conversion is NaN. */
 extern double __kml_any_tonum(i64 v);
+extern _Bool __kml_boxed_bigint_truthy(void *cell);
 
 double __kml_obj_tonum(i64 v) {
     i64 p = __kml_toprimitive(v, 0);
-    if (p == v || nb_tag(p) >= 6) return __builtin_nan("");
+    if (p == v || kml_nb_tag(p) >= 6) return __builtin_nan("");
     return __kml_any_tonum(p);
 }
 
@@ -217,16 +206,10 @@ KSTR(k_bignum, "Cannot convert a BigInt value to a number");
 
 #define NB_DOUBLE_OFFSET 562949953421312ULL /* 1 << 49 */
 
-static double nb_double(u64 v) {
-    u64 bits = v - NB_DOUBLE_OFFSET;
-    double d;
-    memcpy(&d, &bits, sizeof d);
-    return d;
-}
 
 double __kml_any_tonum(i64 w) {
     u64 v = (u64)w;
-    if (v >= NB_DOUBLE_OFFSET) return nb_double(v);
+    if (v >= NB_DOUBLE_OFFSET) return kml_nb_number(v);
     if (v < 65536) return v == 2 || v == 6 ? 0.0 : v == 7 ? 1.0 : __builtin_nan("");
     if ((v & 7) == 0) return __kml_to_number((const char *)v);
     if ((v & 7) == 1 && (*(const i64 *)(v & ~7ULL) & KML_SYMBOL_TYPEID))
@@ -238,10 +221,12 @@ double __kml_any_tonum(i64 w) {
 unsigned char __kml_any_tobool(i64 w) {
     u64 v = (u64)w;
     if (v >= NB_DOUBLE_OFFSET) {
-        double d = nb_double(v);
+        double d = kml_nb_number(v);
         return d != 0.0 && d == d;
     }
     if (v < 65536) return v == 7;
     if ((v & 7) == 0) return __kml_str_len((const char *)v) != 0;
+    /* A boxed bigint: 0n is falsy. */
+    if (__kml_any_is_bigint(w)) return __kml_boxed_bigint_truthy(kml_nb_ptr(w));
     return 1;
 }

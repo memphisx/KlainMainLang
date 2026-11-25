@@ -40,13 +40,11 @@ func init() {
 		method, emit, ty := name, emit, reflectIntrinsics[name]
 		intrinsics["Reflect."+method] = intrinsic{
 			emit: func(e *Emitter, ex *ast.CallExpression) (Value, error) {
-				e.ensureAnyToPrimitive()
-				e.ensureNanBox()
-				e.ensureErrorNames()
-				e.ensureStrHeaderRuntime()
+				e.ensureDynJSONC()
 				return emit(e, method, ex.Args, ex.GetPos())
 			},
-			ty: func(*Emitter, *ast.CallExpression) Type { return ty },
+			ty:       func(*Emitter, *ast.CallExpression) Type { return ty },
+			noSpread: true,
 		}
 	}
 }
@@ -134,7 +132,6 @@ func (e *Emitter) emitReflectGet(method string, args []ast.Expression, pos ast.P
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureNanBox()
 	tag, payload := e.emitUnboxTagPayload(v)
 	isBag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isBag, tag, kmlTagDynObject))
@@ -294,7 +291,6 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureExceptionHelpers()
 		e.emitInternalThrowKind("TypeError", msg.Ref)
 		e.emitLabel(objL)
 	}
@@ -311,8 +307,6 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureBoxedBigIntHooks()
-		e.ensureFnMeta()
 		undef, same, ok := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, %d", undef, nb.Ref, nbUndefined))
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_any_eq(i64 %s, i64 %s)", same, nb.Ref, cb.Ref))
@@ -336,7 +330,6 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 		if err != nil {
 			return Value{}, err
 		}
-		e.ensureExceptionHelpers()
 		e.emitInternalThrowKind("TypeError", ntMsg.Ref)
 		e.emitLabel(ntL)
 		proto, err := e.emitDynAnyMemberGet(nb, e.internString("prototype"), pos)
@@ -353,7 +346,6 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 		setL := e.freshLabel("refl.nt.set")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", take, setL, okL))
 		e.emitLabel(setL)
-		e.ensureShapeRuntime()
 		e.emitInstr(fmt.Sprintf("store "+irPtr+" %s, "+irPtr+" @__kml_pending_proto, align 8", pp))
 		e.emitInstr("store i32 1, " + irPtr + " @__kml_pending_proto_set, align 4")
 		e.emitTerminator(fmt.Sprintf("br label %%%s", okL))
@@ -364,8 +356,6 @@ func (e *Emitter) emitReflectConstruct(method string, args []ast.Expression, pos
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureNanBox()
-	e.usedDynConstruct = true
 	r := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_dyn_construct(i64 %s, "+irPtr+" %s, i64 %s, "+irPtr+" %s)", r, cb.Ref, argv, n, e.internString("Reflect.construct target is not a constructor")))
 	if pending {
@@ -636,13 +626,9 @@ func (e *Emitter) emitNewProxy(ex *ast.NewExpression) (Value, error) {
 		c.Args = fitted
 		ex = &c
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	// A Proxy's [[OwnPropertyKeys]]/[[GetOwnProperty]] live in shape.c,
 	// which reads an ownKeys result through the array runtimes.
-	e.ensureShapeRuntime()
 	e.ensureDynJSONC()
 	tv, err := e.emitExprWithObjectHint(ex.Args[0], TypeAny)
 	if err != nil {
@@ -679,6 +665,9 @@ func (e *Emitter) emitNewProxy(ex *ast.NewExpression) (Value, error) {
 	if hv, err = e.emitBoxValue(hv); err != nil {
 		return Value{}, err
 	}
+	// A static object reaching here boxed (a handler passed through an
+	// `any`): its traps read by key from its bag copy, as a typed one's.
+	hv = e.emitRecordBoxAsBag(hv)
 	htag, _ := e.emitUnboxTagPayload(hv)
 	hprim, hobjL, hprimL := e.freshReg(), e.freshLabel("proxy.hobj"), e.freshLabel("proxy.hprim")
 	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", hprim, htag, kmlTagUndefined))
@@ -727,4 +716,27 @@ func (e *Emitter) ensureProxyTargetHooks() {
 	body = e.allocas.String() + e.body.String()
 	restore()
 	e.writeFunc("i64 @__kml_proxy_tset(i64 %v, "+irPtr+" %key, i64 %x)", body)
+}
+
+// emitRecordBoxAsBag is v, a boxed value, with a boxed static object
+// replaced by a dynamic object holding a copy of its own enumerable
+// fields (__kml_shape_spread); any other value is v itself.
+func (e *Emitter) emitRecordBoxAsBag(v Value) Value {
+	tag, payload := e.emitUnboxTagPayload(v)
+	slot := e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", v.Ref, slot))
+	objL, doneL := e.emitTagCheck(tag, kmlTagObject, "recbag")
+	e.emitLabel(objL)
+	e.ensureDynJSONC()
+	e.declareFn("__kml_dynobj_new", "declare "+irPtr+" @__kml_dynobj_new()")
+	bag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
+	e.emitInstr(fmt.Sprintf("call void @__kml_shape_spread("+irPtr+" %s, "+irPtr+" %s)", bag, e.emitIntToPtr(payload)))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" %s, align 8", e.emitNbTagPtr(bag, kmlTagDynObject), slot))
+	e.emitTerminator(fmt.Sprintf("br label %%%s", doneL))
+	e.emitLabel(doneL)
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", r, slot))
+	return Value{Ref: r, Ty: TypeAny}
 }

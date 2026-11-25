@@ -347,7 +347,8 @@ long long __kml_native_ffi_call(double cifId, double fn) {
 
 typedef struct {
     KCif *cif;
-    void *inv, *clo;
+    void *inv;
+    kml_ref clo; /* the JS callback, held through the handle table */
     ffi_closure *closure;
     void *code;
 } KClosure;
@@ -370,7 +371,7 @@ static void closure_handler(ffi_cif *cif, void *ret, void **args, void *user) {
     KCall *prev = cb_cur;
     cb_cur = &call;
     if (k->cif->ret != K_VOID) memset(ret, 0, sizeof(ffi_arg) > 8 ? sizeof(ffi_arg) : 8);
-    ((void (*)(void *, double, double))k->inv)(k->clo, 0, 0);
+    ((void (*)(void *, double, double))k->inv)(kml_ref_get(k->clo), 0, 0);
     cb_cur = prev;
 }
 
@@ -382,10 +383,11 @@ double __kml_native_ffi_closure(double cifId, void *inv, void *clo) {
     KClosure *k = (KClosure *)calloc(1, sizeof *k); /* scratch */
     k->cif = c;
     k->inv = inv;
-    k->clo = clo;
+    k->clo = kml_ref_new(clo);
     k->closure = (ffi_closure *)ffi_closure_alloc(sizeof(ffi_closure), &k->code);
     if (!k->closure || ffi_prep_closure_loc(k->closure, &c->cif, closure_handler, k, k->code) != FFI_OK) {
         if (k->closure) ffi_closure_free(k->closure);
+        kml_ref_free(k->clo);
         free(k); /* scratch */
         return 0;
     }
@@ -416,6 +418,7 @@ void __kml_native_ffi_closure_free(double code) {
     pthread_mutex_unlock(&clo_mu);
     if (k) {
         ffi_closure_free(k->closure);
+        kml_ref_free(k->clo);
         free(k); /* scratch */
     }
 }

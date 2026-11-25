@@ -15,11 +15,7 @@ var microtaskSource string
 // MicrotaskSource is the microtask runtime's C source, behind kml_layout.h.
 func MicrotaskSource() string { return layoutHeader() + microtaskSource }
 
-// ensureMicrotasks declares the microtask runtime (microtask.c) once.
-func (e *Emitter) ensureMicrotasks() {
-	if e.usedMicrotasks {
-		return
-	}
-	e.usedMicrotasks = true
-	e.emitGlobal(`declare void @__kml_microtask_enqueue(` + irPtr + `)`)
-}
+// The handle table native code holds managed objects through (kmlref.c).
+//
+//go:embed kmlrefsrc/kmlref.c
+var kmlRefSource string

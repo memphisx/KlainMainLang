@@ -11,45 +11,10 @@ import (
 	"strings"
 )
 
-// ensureBigInt declares the __kml_bigint_* ABI exactly once and flags the
-// program as needing a backend (so main.go compiles+links one). Called before
-// every bigint operation, like the ensure*() C-decl helpers.
+// ensureBigInt flags the program as needing a bigint backend (so the build
+// compiles and links one); the __kml_bigint_* calls declare themselves.
 func (e *Emitter) ensureBigInt() {
 	e.usesBigInt = true
-	if e.declaredBigInt {
-		return
-	}
-	e.declaredBigInt = true
-	for _, d := range []string{
-		"declare " + irPtr + " @__kml_bigint_from_str(" + irPtr + ", i64, i32)",
-		"declare " + irPtr + " @__kml_bigint_parse(" + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_from_i64(i64)",
-		"declare i64 @__kml_bigint_to_i64(" + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_from_u64(i64)",
-		"declare i64 @__kml_bigint_to_u64(" + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_range_msg(" + irPtr + ", i32)",
-		"declare " + irPtr + " @__kml_bigint_to_str(" + irPtr + ", i32)",
-		"declare " + irPtr + " @__kml_bigint_add(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_sub(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_mul(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_tdiv(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_mod(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_pow(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_and(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_or(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_xor(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_shl(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_shr(" + irPtr + ", " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_neg(" + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_not(" + irPtr + ")",
-		"declare i32 @__kml_bigint_cmp(" + irPtr + ", " + irPtr + ")",
-		"declare i32 @__kml_bigint_cmp_double(" + irPtr + ", double)",
-		"declare " + irPtr + " @__kml_bigint_as_intn(i64, " + irPtr + ")",
-		"declare " + irPtr + " @__kml_bigint_as_uintn(i64, " + irPtr + ")",
-		"declare double @__kml_bigint_to_double(" + irPtr + ")",
-	} {
-		e.emitGlobal(d)
-	}
 }
 
 // emitBigIntLiteral lowers a `123n` literal to a from_str call. The digit
@@ -78,7 +43,6 @@ func (e *Emitter) emitBigIntLiteral(lit *ast.NumberLiteral) (Value, error) {
 // String(10n) / `${10n}` → "10", the same console-vs-String split symbol uses.
 func (e *Emitter) emitBigIntToString(val Value, suffix bool) (Value, error) {
 	e.ensureBigInt()
-	e.ensureStrHeaderRuntime()
 	// A `bigint | undefined` / `bigint | null` slot holding no bigint is a
 	// null pointer: render its keyword instead of handing null to the digit
 	// conversion (a segfault — `console.log(map.get(missing))`, TDD-00229).
@@ -493,7 +457,6 @@ func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.E
 		badL, okL := e.freshLabel("bigint.radix.bad"), e.freshLabel("bigint.radix.ok")
 		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", ok, okL, badL))
 		e.emitLabel(badL)
-		e.ensureExceptionHelpers()
 		e.excThrow(e.buildErrorObj(errorKindIDs["RangeError"], e.internString("toString() radix argument must be between 2 and 36"), e.internString("RangeError")))
 		e.emitTerminator("unreachable")
 		e.emitLabel(okL)
@@ -501,7 +464,6 @@ func (e *Emitter) emitBigIntToStringMethod(recvExpr ast.Expression, args []ast.E
 		e.emitInstr(fmt.Sprintf("%s = fptosi double %s to i32", radixReg, d))
 		radixRef = radixReg
 	}
-	e.ensureStrHeaderRuntime()
 	raw := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_bigint_to_str("+irPtr+" %s, i32 %s)", raw, recv.Ref, radixRef))
 	reg := e.freshReg() // TDD-00120: header-copy the foreign bigint digit string
@@ -609,7 +571,6 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 		if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to a BigInt"), Ty: TypePtr}); err != nil {
 			return Value{}, err
 		}
-		e.ensureExceptionHelpers()
 		errObj := e.buildErrorObj(errorKindIDs["SyntaxError"], msg.Ref, e.internString("SyntaxError"))
 		e.excThrow(errObj)
 		e.emitTerminator("unreachable")
@@ -655,7 +616,6 @@ func (e *Emitter) bigintFromValue(arg Value, pos ast.Pos) (Value, error) {
 		if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" cannot be converted to a BigInt because it is not an integer"), Ty: TypePtr}); err != nil {
 			return Value{}, err
 		}
-		e.ensureExceptionHelpers()
 		rangeErr := e.buildErrorObj(errorKindIDs["RangeError"], msg.Ref, e.internString("RangeError"))
 		e.excThrow(rangeErr)
 		e.emitTerminator("unreachable")
@@ -698,7 +658,6 @@ func (e *Emitter) emitToBigInt(v Value, pos ast.Pos) (Value, error) {
 	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to a BigInt"), Ty: TypePtr}); err != nil {
 		return Value{}, err
 	}
-	e.ensureExceptionHelpers()
 	e.excThrow(e.buildErrorObj(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError")))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)
@@ -814,7 +773,6 @@ func (e *Emitter) bigintFromRuntime(arg Value, pos ast.Pos, objects bool) (Value
 	if msg, err = e.emitStringConcat(msg, Value{Ref: e.internString(" to a BigInt"), Ty: TypePtr}); err != nil {
 		return Value{}, err
 	}
-	e.ensureExceptionHelpers()
 	errObj := e.buildErrorObj(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError"))
 	e.excThrow(errObj)
 	e.emitTerminator("unreachable")

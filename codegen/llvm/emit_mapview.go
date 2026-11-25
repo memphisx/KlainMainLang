@@ -89,7 +89,6 @@ func (e *Emitter) mapViewPtr(view Type, ptr string) string {
 		return ptr
 	}
 	e.noteMapLayout(view)
-	e.usedMapView = true
 	own := e.mapViewIsOwn(view, ptr)
 	ownL, otherL, joinL := e.freshLabel("mview.own"), e.freshLabel("mview.copy"), e.freshLabel("mview.join")
 	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", own, ownL, otherL))
@@ -107,7 +106,6 @@ func (e *Emitter) mapViewPtr(view Type, ptr string) string {
 
 // mapViewFn names the dispatcher for op through view, registering it.
 func (e *Emitter) mapViewFn(op string, view Type) string {
-	e.usedMapView = true // every request reaches emitMapViewFinalize
 	key := op + "|" + hostKey(e.mapViewBase(view))
 	if e.mapViewFns == nil {
 		e.mapViewFns = map[string]mapViewReq{}
@@ -133,7 +131,6 @@ type mapViewReq struct {
 // to own's result type (set returns the receiver).
 func (e *Emitter) emitMapViewCall(view Type, ptr, op string, args []ast.Expression, own func(args []ast.Expression) (Value, error)) (Value, error) {
 	e.noteMapLayout(view)
-	e.usedMapView = true
 	// Each argument is evaluated once into a temporary of its own type, so
 	// the own-layout path runs unboxed; the other path boxes it.
 	temps := make([]ast.Expression, len(args))
@@ -223,9 +220,6 @@ func (e *Emitter) emitMapViewCall(view Type, ptr, op string, args []ast.Expressi
 // runs to a fixed point; a later finalize step can request another, so it
 // runs again after those, generating only what is new.
 func (e *Emitter) emitMapViewFinalize() {
-	if !e.usedMapView {
-		return
-	}
 	if e.mapViewDone == nil {
 		e.mapViewDone = map[string]bool{}
 	}

@@ -34,16 +34,6 @@ func ObjExtraSource() string { return layoutHeader() + objExtraSource }
 // link drops the parts a program does not use (DeadStripFlags).
 func (e *Emitter) ShapeCFlags() []string { return DeadStripFlags(e.exportsRuntime()) }
 
-// ensureShapeRuntime declares the shape.c entry points and marks the program
-// as needing the layout table.
-func (e *Emitter) ensureShapeRuntime() {
-	if e.usedShapeRuntime {
-		return
-	}
-	e.usedShapeRuntime = true
-	e.ensureNanBox()
-}
-
 // jsMemberWritten reports whether the program assigns a property of this
 // name anywhere (`x.name = ...`): in -compat=js an instance may then own a
 // method of that name, which a call must prefer over its class's.
@@ -76,7 +66,6 @@ const (
 // emitShapeGet reads key (a string register) off the static object at objPtr
 // through its layout: the boxed value, and the found word (see shapeFound).
 func (e *Emitter) emitShapeGet(objPtr, keyRef string) (val, found string) {
-	e.ensureShapeRuntime()
 	fslot := e.freshReg()
 	e.emitAlloca(fmt.Sprintf("%s = alloca i32, align 4", fslot))
 	val = e.freshReg()
@@ -98,9 +87,6 @@ type shapeLayout struct {
 // (a method adapter builds an object), so rows are generated until none is
 // new. Called once, after the program body.
 func (e *Emitter) emitShapeFinalize() {
-	if !e.usedShapeRuntime {
-		return
-	}
 	done := map[int64]bool{}
 	var rows []string
 	hosts := 0
@@ -251,7 +237,7 @@ func (e *Emitter) emitShapeRow(id int64, l shapeLayout) string {
 	e.emitGlobal(fmt.Sprintf("%s ="+irGlobalAS+" constant [%d x "+irPtr+"] [%s]", keysName, len(keys), strings.Join(keyRefs, ", ")))
 	name := irPtr + " null"
 	if l.class != nil && !isSyntheticObjLitClass(l.ty) {
-		name = irPtr + " " + e.internString(classSourceName(l.ty.ClassName))
+		name = irPtr + " " + e.internString(e.classDisplayName(l.ty.ClassName))
 	}
 	if l.ty.IsGenerator() {
 		// An Object whose prototype's Symbol.toStringTag is "Generator"
@@ -673,7 +659,6 @@ func (e *Emitter) shapeMethodRecord(class *ClassInfo, t Type, m string) string {
 func (e *Emitter) emitShapeMethodAdapter(fn string, class *ClassInfo, t Type, m string, sig FuncSig) {
 	restore := e.beginDetachedFunc()
 	pos := ast.Pos{}
-	e.ensureNanBox()
 	// A receiver not of the class (`C.prototype.m.call(other)`) has not its
 	// layout: the body runs on it as an `any` (emitForeignReceiverCall), or,
 	// for one that compiles no such way (`super`, `#private`), a TypeError.
@@ -986,7 +971,6 @@ func (e *Emitter) dynThunkArg(i int) Value {
 // dynamic functions: the step, its result as the program reads it.
 func (e *Emitter) genDynNext(gen string, genTy Type) (Value, error) {
 	// The sent value is the `yield` expression's (TNext), passed boxed.
-	e.ensureGeneratorRuntime()
 	sent := e.dynThunkArg(0)
 	if genTy.GeneratorIsAsync {
 		return e.emitAsyncGeneratorNextCore(gen, genTy, sent), nil
@@ -1055,7 +1039,6 @@ func (e *Emitter) generatorMethodRecord(genTy Type, m string) string {
 	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 
 	restore := e.beginDetachedFunc()
-	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 	gen := e.freshReg()
@@ -1223,8 +1206,26 @@ func iterResultType() Type {
 
 // emitArrayIterMembers is the layout-table getter body for an array iterator.
 func (e *Emitter) emitArrayIterMembers() {
+	// %ArrayIteratorPrototype%.next called on this iterator (its record
+	// reads the receiver's hidden key, as a host iterator's does).
+	hmiss := e.emitKeyIs("%key", protoHiddenKey("Array Iterator", "next"))
+	e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+	e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(e.arrayIterMethodRecord("next"), kmlTagDynFunc)))
+	e.emitLabel(hmiss)
 	for _, m := range append([]string{"next", "@@iterator"}, e.linkedIteratorHelpers()...) {
 		miss := e.emitKeyIs("%key", m)
+		if m == "next" {
+			// %ArrayIteratorPrototype%.next once the program replaced it.
+			slot, has := e.emitArrIterNextOverride()
+			patchedL, ownL := e.freshLabel("arriter.patched"), e.freshLabel("arriter.own")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, patchedL, ownL))
+			e.emitLabel(patchedL)
+			e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+			pv := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", pv, slot))
+			e.emitTerminator("ret i64 " + pv)
+			e.emitLabel(ownL)
+		}
 		rec := e.arrayIterMethodRecord(m)
 		e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
 		e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(rec, kmlTagDynFunc)))
@@ -1242,7 +1243,6 @@ func (e *Emitter) arrayValuesRecord() string {
 // boxed (self, an arrayIterType): the next index of the array-like it
 // walks, read through its dynamic members.
 func (e *Emitter) arrayIterDynNext(self string, itTy Type) (Value, error) {
-	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %s)", pay, self))
 	it := e.emitIntToPtr(pay)
@@ -1361,7 +1361,6 @@ func init() {
 		"hostValues": iter(func(e *Emitter) string { return e.emitHostIterValue("%this") }),
 		// A string's iterator walks its code points.
 		"stringValues": iter(func(e *Emitter) string {
-			e.ensureNanBox()
 			pay := e.freshReg()
 			e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 			chars := e.emitStringToCharArray(Value{Ref: e.emitIntToPtr(pay), Ty: TypePtr})
@@ -1546,7 +1545,6 @@ func (e *Emitter) promiseSubclassMethodRecord(class *ClassInfo, t Type, m string
 	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, arity), fn)
 	restore := e.beginDetachedFunc()
 	pos := ast.Pos{}
-	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 	self := e.freshReg()
@@ -1632,7 +1630,6 @@ func (e *Emitter) arraySubclassMethodRecord(class *ClassInfo, t Type, m string) 
 	e.emitStaticFnRecord(rec, "internal", "{ "+irPtr+", "+irPtr+", i64 }", fmt.Sprintf("{ "+irPtr+" %s, "+irPtr+" null, i64 %d }", fn, ar.length), fn)
 	restore := e.beginDetachedFunc()
 	pos := ast.Pos{}
-	e.ensureNanBox()
 	pay := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
 	self := e.freshReg()

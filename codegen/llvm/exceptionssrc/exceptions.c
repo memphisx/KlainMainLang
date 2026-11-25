@@ -28,6 +28,17 @@ extern _Thread_local int __kml_jmp_top;
  * emitted with the program. */
 extern u8 __kml_process_uncaught(u8 tag, i64 pay, _Bool rejection);
 extern void __kml_run_exit_handlers(i64 code);
+extern void __kml_store_exit_code(long long code);
+/* An uncaught exception nothing handles: reported, then the 'exit'
+ * listeners with code 1 (process.exitCode 1), as Node ends. */
+#define KML_UNCAUGHT_EXIT(t, pay)                                                                                      \
+    do {                                                                                                               \
+        __kml_worker_uncaught((t), (pay));                                                                             \
+        __kml_print_uncaught((t), (pay));                                                                              \
+        __kml_store_exit_code(1);                                                                                      \
+        __kml_run_exit_handlers(1);                                                                                    \
+        KML_EXIT(1);                                                                                                   \
+    } while (0)
 extern void __kml_run_before_exit(void (*run)(void), _Bool (*alive)(void));
 extern _Thread_local i64 __kml_process_exit_code;
 /* The event loop (loop.c); a program without one has nothing to run. */
@@ -132,9 +143,15 @@ void __kml_print_uncaught(int tag, i64 pay) {
     fflush(stdout);
     /* An error's stack (Node's report, short of its source excerpt and
      * version line); any other value as it prints. */
-    if ((tag & 0xff) == KML_TAG_ERROR && pay && (*(i64 *)pay & (1LL << 48)))
-        fprintf(stderr, "%s\n", (char *)__kml_error_stack((void *)pay));
-    else
+    if ((tag & 0xff) == KML_TAG_ERROR && pay && (*(i64 *)pay & (1LL << 48))) {
+        /* As util.inspect shows it (its own properties after the stack,
+         * `{ code: 'ENOENT', … }`), when dynjson.c is in the program. */
+        const char *st = (const char *)__kml_error_stack((void *)pay);
+        char *s = __kml_any_inspect_at(pay | 1, 0); /* an error's box */
+        /* (A program linking only part of the inspector renders it short
+         * of its stack: the stack alone, then.) */
+        fprintf(stderr, "%s\n", s && !__builtin_strncmp(s, st, __builtin_strlen(st)) ? s : st);
+    } else
         fprintf(stderr, "%s\n", (char *)__kml_caught_unc_msg(tag, pay));
     fflush(stderr);
 }
@@ -185,9 +202,7 @@ void __kml_throw_any(int tag, i64 pay) {
         }
         /* On a worker thread this does not return: the error goes to the
          * parent's 'error' listener and only that thread ends. */
-        __kml_worker_uncaught(t, pay);
-        __kml_print_uncaught(t, pay);
-        KML_EXIT(1);
+        KML_UNCAUGHT_EXIT(t, pay);
     }
     longjmp(__kml_jmp_unwind_slot(), 1);
 }
@@ -221,9 +236,7 @@ _Bool __kml_make_callback(void (*inv)(void *, double, double), void *clo, double
         }
         if (__kml_process_uncaught_guarded(t, pay, 0))
             return 1;
-        __kml_worker_uncaught(t, pay);
-        __kml_print_uncaught(t, pay);
-        KML_EXIT(1);
+        KML_UNCAUGHT_EXIT(t, pay);
     }
     inv(clo, a, b);
     __kml_pop_jmpbuf();
@@ -248,3 +261,6 @@ static __attribute__((noreturn, cold)) void throw_kind(i64 kind, void *name, con
 
 void __kml_throw_nullderef(const char *msg) { throw_kind(KML_KIND_TYPEERR, __kml_error_names[0], msg); }
 void __kml_throw_range_error(const char *msg) { throw_kind(KML_KIND_RANGEERR, __kml_error_names[1], msg); }
+/* A stack overflow throws the RangeError through this (stackguard.c). */
+extern void (*__kml_range_error_hook)(const char *);
+__attribute__((constructor)) static void range_error_hook_init(void) { __kml_range_error_hook = __kml_throw_range_error; }

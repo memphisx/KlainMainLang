@@ -74,6 +74,49 @@ _Bool __kml_process_hook_call(int which, i64 a, i64 b) {
     return 1;
 }
 
+/* 'uncaughtException' with the thrown value and its origin (0
+ * 'uncaughtException', 1 'unhandledRejection'): reports whether something
+ * listens, so the thrower skips its default report. A caught Error (tag 13)
+ * is its object box. Installed as hooks.c's __kml_process_uncaught. */
+extern i64 __kml_nb_pack(unsigned char tag, i64 pay);
+extern void *__kml_hookp_process_uncaught;
+static unsigned char process_uncaught(unsigned char tag, i64 pay, _Bool rejection) {
+    i64 box = tag == 13 ? (pay | 1) : __kml_nb_pack(tag, pay);
+    double d = rejection ? 1.0 : 0.0;
+    i64 bits;
+    memcpy(&bits, &d, sizeof bits);
+    return __kml_process_hook_call(1, box, bits + KML_NB_DOUBLE_OFFSET);
+}
+/* main()'s end (hooks.c's __kml_main_exit and kin): 'beforeExit', which
+ * may run the loop again, then 'exit'; the code is process.exitCode, which
+ * an 'exit' listener may set. */
+extern void __kml_main_loop(void);
+extern _Bool __kml_main_loop_alive(void);
+extern int (*__kml_main_exit_hook)(void);
+extern void (*__kml_main_set_exit_hook)(int code);
+extern long long (*__kml_main_exit_code_hook)(void);
+void __kml_run_exit_handlers(i64 code);
+void __kml_run_before_exit(void (*run)(void), _Bool (*alive)(void));
+static int main_exit(void) {
+    __kml_run_before_exit(__kml_main_loop, __kml_main_loop_alive);
+    __kml_run_exit_handlers(__kml_process_exit_code);
+    return (int)__kml_process_exit_code;
+}
+static void main_set_exit(int code) {
+    __kml_process_exit_code = code;
+    __kml_run_exit_handlers(code);
+}
+static long long main_exit_code(void) { return __kml_process_exit_code; }
+extern void (*__kml_store_exit_code_hook)(long long code);
+static void store_exit_code(long long code) { __kml_process_exit_code = code; }
+__attribute__((constructor)) static void process_uncaught_init(void) {
+    __kml_store_exit_code_hook = store_exit_code;
+    __kml_hookp_process_uncaught = (void *)process_uncaught;
+    __kml_main_exit_hook = main_exit;
+    __kml_main_set_exit_hook = main_set_exit;
+    __kml_main_exit_code_hook = main_exit_code;
+}
+
 void __kml_native_process_hook(double which, void *inv, void *clo) {
     i64 i = (i64)which;
     phook_clo[i] = clo;
@@ -127,7 +170,9 @@ static i64 mono_ns(void) {
     return (i64)ts.tv_sec * 1000000000 + (i64)ts.tv_nsec;
 }
 
-void __kml_proc_uptime_init(void) { proc_start_ns = mono_ns(); }
+/* process.uptime() measures from process start: captured before main runs,
+   whenever this file is linked. */
+__attribute__((constructor)) static void proc_uptime_init(void) { proc_start_ns = mono_ns(); }
 
 double __kml_process_uptime(void) { return (double)(mono_ns() - proc_start_ns) / 1000000000.0; }
 
@@ -201,6 +246,71 @@ double __kml_native_process_id(double which) {
 #endif
 }
 
+/* process.getgroups: -1 reads the supplementary group list and answers its
+ * length (a negative errno on failure); i >= 0 is the list's i-th id. */
+#if !defined(_WIN32)
+static gid_t *__kml_groups;
+static int __kml_ngroups;
+#endif
+double __kml_native_process_groups(double i) {
+#if defined(_WIN32)
+    (void)i;
+    return 0.0;
+#else
+    if (i < 0) {
+        int n = getgroups(0, NULL);
+        if (n < 0) return (double)-errno;
+        free(__kml_groups); /* scratch */
+        __kml_groups = (gid_t *)malloc(sizeof(gid_t) * (size_t)(n > 0 ? n : 1)); /* scratch */
+        n = getgroups(n, __kml_groups);
+        if (n < 0) return (double)-errno;
+        __kml_ngroups = n;
+        return (double)n;
+    }
+    return (int)i < __kml_ngroups ? (double)__kml_groups[(int)i] : -1.0;
+#endif
+}
+
+/* process.resourceUsage: field i of getrusage(RUSAGE_SELF), in libuv's
+ * uv_getrusage order and units (times in microseconds, maxRSS in
+ * kilobytes on every host). i = 0 takes the reading. */
+#if !defined(_WIN32)
+#include <sys/resource.h>
+static struct rusage __kml_ru;
+#endif
+double __kml_native_process_rusage(double i) {
+#if defined(_WIN32)
+    (void)i;
+    return 0.0;
+#else
+    struct rusage *r = &__kml_ru;
+    switch ((int)i) {
+    case 0:
+        getrusage(RUSAGE_SELF, r);
+        return (double)r->ru_utime.tv_sec * 1e6 + (double)r->ru_utime.tv_usec;
+    case 1: return (double)r->ru_stime.tv_sec * 1e6 + (double)r->ru_stime.tv_usec;
+#if defined(__APPLE__)
+    case 2: return (double)(r->ru_maxrss / 1024); /* bytes there */
+#else
+    case 2: return (double)r->ru_maxrss;
+#endif
+    case 3: return (double)r->ru_ixrss;
+    case 4: return (double)r->ru_idrss;
+    case 5: return (double)r->ru_isrss;
+    case 6: return (double)r->ru_minflt;
+    case 7: return (double)r->ru_majflt;
+    case 8: return (double)r->ru_nswap;
+    case 9: return (double)r->ru_inblock;
+    case 10: return (double)r->ru_oublock;
+    case 11: return (double)r->ru_msgsnd;
+    case 12: return (double)r->ru_msgrcv;
+    case 13: return (double)r->ru_nsignals;
+    case 14: return (double)r->ru_nvcsw;
+    default: return (double)r->ru_nivcsw;
+    }
+#endif
+}
+
 double __kml_native_process_argc(void) { return (double)__process_argv_len; }
 
 void *__kml_native_process_argv0(void) { return *(void **)__argv_ptr; }
@@ -224,6 +334,7 @@ char *__kml_execpath(void) {
     return buf;
 #endif
 }
+
 
 void *__kml_native_process_exec_path(void) { return __kml_str_from_cstr(__kml_execpath()); }
 

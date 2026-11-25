@@ -23,9 +23,6 @@ func PromiseSettleSource() string { return layoutHeader() + promiseSettleSource 
 // emitRejectPromise rejects promise q with the caught value (tag, an i8 or
 // i64 register or literal; pay, i64): the one rejection writer.
 func (e *Emitter) emitRejectPromise(q, tag string, tagIsI8 bool, pay string) {
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
 	if tagIsI8 {
 		w := e.freshReg()
@@ -81,10 +78,7 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 		e.promiseValue = map[*ast.NewExpression]Type{}
 	}
 	e.promiseValue[ex] = valTy
-	e.ensureMicrotasks()
 
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
 
 	p := e.freshReg()
@@ -97,9 +91,6 @@ func (e *Emitter) emitNewPromise(ex *ast.NewExpression) (Value, error) {
 // `new Promise(exec)`'s, or the body of an instance of a class extending
 // Promise (TDD-00247).
 func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression, pos ast.Pos) (Value, error) {
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
 
 	// Per-site resolve/reject settle functions + their closure headers over p.
@@ -227,11 +218,7 @@ func (e *Emitter) emitPromiseExecutor(p string, valTy Type, exec ast.Expression,
 // reaction list and fires when the source settles — the same reaction/microtask
 // mechanism `.then` uses, so ordering matches JS (adoption is a microtask tick).
 func (e *Emitter) emitPromiseAdopt(tgtRef, srcRef string) {
-	e.ensureMicrotasks()
-	e.ensureNanBox()
-	e.ensureExceptionHelpers()
 	e.ensureUnhandledRejections()
-	e.ensureMicrotasks()
 
 	// env = { src, tgt }
 	env := e.freshReg()
@@ -445,7 +432,6 @@ func (e *Emitter) promiseExecutorFromValue(v Value, fnTy Type) (Value, error) {
 	if err != nil {
 		return Value{}, err
 	}
-	e.ensureExceptionHelpers()
 	e.excThrow(e.buildErrorObj(errorKindIDs["TypeError"], msg.Ref, e.internString("TypeError")))
 	e.emitTerminator("unreachable")
 	e.emitLabel(okL)

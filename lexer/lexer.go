@@ -16,6 +16,9 @@ type Lexer struct {
 	line          int
 	col           int
 	templateStack []int // brace depth for each open ${ expression
+	// legacyEsc is the first legacy octal (`\01`) or non-octal-decimal
+	// (`\8`) escape of the string being read: strict code rejects it.
+	legacyEsc string
 	// mode is the reading the next token is scanned under (see ScanMode).
 	mode ScanMode
 	// sawNL: a line terminator was consumed since the previous token ended.
@@ -660,11 +663,14 @@ func (l *Lexer) readNumberBody(line, col int) (Token, error) {
 func (l *Lexer) readString(line, col int) (Token, error) {
 	quote := l.advance()
 	var buf strings.Builder
+	l.legacyEsc = ""
 	for l.pos < len(l.src) {
 		c := l.peek()
 		if c == quote {
 			l.advance()
-			return l.tok(STRING, buf.String(), line, col), nil
+			t := l.tok(STRING, buf.String(), line, col)
+			t.LegacyEscape = l.legacyEsc
+			return t, nil
 		}
 		if c == '\\' {
 			l.advance()
@@ -713,9 +719,16 @@ func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
 	case '\\', '"', '\'', '`':
 		buf.WriteRune(esc)
 	case '0', '1', '2', '3', '4', '5', '6', '7':
-		// LegacyOctalEscapeSequence (Annex B) — `\0` with no following octal
-		// digit is the ES NUL escape. Up to three octal digits, capped at
-		// \377 (255): a leading digit of 4–7 allows only one more.
+		// LegacyOctalEscapeSequence (Annex B) — `\0` with no following
+		// decimal digit is the ES NUL escape. Up to three octal digits, capped
+		// at \377 (255): a leading digit of 4–7 allows only one more.
+		start := l.pos - 1
+		legacy := esc != '0' || l.peek() >= '0' && l.peek() <= '9'
+		defer func() {
+			if legacy && l.legacyEsc == "" {
+				l.legacyEsc = "\\" + string(l.src[start:l.pos])
+			}
+		}()
 		val := int(esc - '0')
 		more := 2
 		if esc > '3' {
@@ -773,7 +786,12 @@ func (l *Lexer) scanStringEscape(buf *strings.Builder, line, col int) error {
 	case 0:
 		return l.errAt(line, col, diag.UnterminatedString)
 	default:
-		// NonEscapeCharacter — the character itself, without the backslash.
+		// NonEscapeCharacter — the character itself, without the backslash
+		// (`\8`/`\9` are NonOctalDecimalEscapeSequences, which strict code
+		// rejects).
+		if (esc == '8' || esc == '9') && l.legacyEsc == "" {
+			l.legacyEsc = "\\" + string(esc)
+		}
 		buf.WriteRune(esc)
 	}
 	return nil
@@ -1034,6 +1052,7 @@ func (l *Lexer) readPrivateName(line, col int) (Token, error) {
 func (l *Lexer) readTemplateSegment() (cooked, raw string, atEnd bool, err error) {
 	var buf strings.Builder
 	rawStart := l.pos
+	l.legacyEsc = ""
 	for l.pos < len(l.src) {
 		c := l.peek()
 		if c == '`' {
@@ -1091,11 +1110,13 @@ func (l *Lexer) readTemplateHead(line, col int) (Token, error) {
 	if atEnd {
 		t := l.tok(TEMPLATE_NO_SUB, seg, line, col)
 		t.Raw = raw
+		t.LegacyEscape = l.legacyEsc
 		return t, nil
 	}
 	l.templateStack = append(l.templateStack, 0)
 	t := l.tok(TEMPLATE_HEAD, seg, line, col)
 	t.Raw = raw
+	t.LegacyEscape = l.legacyEsc
 	return t, nil
 }
 
@@ -1108,11 +1129,13 @@ func (l *Lexer) readTemplatePart(line, col int) (Token, error) {
 	if atEnd {
 		t := l.tok(TEMPLATE_TAIL, seg, line, col)
 		t.Raw = raw
+		t.LegacyEscape = l.legacyEsc
 		return t, nil
 	}
 	l.templateStack = append(l.templateStack, 0)
 	t := l.tok(TEMPLATE_MIDDLE, seg, line, col)
 	t.Raw = raw
+	t.LegacyEscape = l.legacyEsc
 	return t, nil
 }
 

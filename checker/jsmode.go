@@ -70,9 +70,14 @@ func (c *Checker) callSiteParam(fn ast.Node, i int) *Type {
 		return r
 	}
 	if t.busy[key] {
-		return c.anyT // the argument depends on the parameter itself
+		// The argument depends on the parameter itself: unanswered, and
+		// a reentry, so what reads it is not cached and is asked again
+		// once the parameter is typed.
+		c.reentries++
+		return c.unanswered
 	}
 	t.busy[key] = true
+	reBefore := c.reentries
 	sites, known := c.sitesOf(fn)
 	r := c.unanswered
 	if known && c.taggedFunction(fn) {
@@ -93,6 +98,11 @@ func (c *Checker) callSiteParam(fn ast.Node, i int) *Type {
 		r = c.anyT
 	}
 	delete(t.busy, key)
+	if c.reentries > reBefore && c.Unanswered(r) {
+		// Unanswered only because a site's argument met a parameter still
+		// being typed: asked again, once that one is, it may be answered.
+		return r
+	}
 	t.param[key] = r
 	return r
 }
@@ -117,7 +127,7 @@ func (c *Checker) inferFromSites(fn ast.Node, sites [][]ast.Expression, i int) *
 		if isEmptyArrayLiteral(args[i]) {
 			continue // (`[]` takes its type from the other sites)
 		}
-		if contextSensitive(args[i]) {
+		if c.contextSensitive(args[i]) {
 			sensitive = true
 			continue
 		}
@@ -154,7 +164,39 @@ func (c *Checker) inferFromSites(fn ast.Node, sites [][]ast.Expression, i int) *
 		// the typed sites' (`take(() => 1); take((n) => n)`), so any.
 		return c.anyT
 	}
+	if self != nil && c.reassignedOtherwise(fn, self, first) {
+		// The body stores a value of another type in it (`bytes =
+		// byteView(bytes)`): it holds both, any as checkJs gives.
+		return c.anyT
+	}
 	return first
+}
+
+// reassignedOtherwise reports whether fn's body assigns parameter self a
+// value not assignable to t.
+func (c *Checker) reassignedOtherwise(fn ast.Node, self *binder.Symbol, t *Type) bool {
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		as, ok := n.(*ast.AssignmentExpression)
+		if !ok || as.Op != "=" {
+			return true
+		}
+		id, ok := as.Left.(*ast.Identifier)
+		if !ok {
+			return true
+		}
+		if sym, ok := c.b.Resolve(id); !ok || sym != self {
+			return true
+		}
+		if rt := c.TypeOf(as.Right); !c.Unanswered(rt) && rt.Flags&Any == 0 && !c.assignable(rt, t) {
+			found = true
+		}
+		return true
+	})
+	return found
 }
 
 // sitesOf lists the argument lists fn is called with: a function
@@ -365,7 +407,7 @@ func (c *Checker) constructorFields(decl *ast.ClassDeclaration) []*Property {
 	})
 	props := make([]*Property, len(order))
 	for i, name := range order {
-		props[i] = &Property{Name: name, Type: types[name]}
+		props[i] = &Property{Name: name, ty: types[name]}
 	}
 	return props
 }

@@ -1594,3 +1594,87 @@ m();
 	assertSameAsNodeCLIJS(t, src)
 	assertSameAsNodeImports(t, src)
 }
+
+// with and fill storing undefined (an omitted value) or another kind into
+// a number array: the elements read back as what was stored.
+func TestE2EArrayWithFillUndefinedJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+const a = [1, 2].with(0);
+const v = a[0];
+console.log(a, v === undefined, a[0] == null, typeof a[0]);
+const b = [1, 2, 3]; b.fill(); console.log(b, b[0] === undefined, typeof b[1]);
+const c = [1, 2, 3]; c.fill(undefined, 1); console.log(c, c[2] === undefined);
+const g = [1, 2].with(1, undefined); console.log(g[1] === undefined);
+const h = [1, 2].with(0, "s"); console.log(h, typeof h[0]);
+const k = [1, 2].with(0, 9); console.log(k, k[0] + 1);
+const m = [1, 2, 3]; m.fill(0); console.log(m[0] + 1);
+`)
+}
+
+// A mixin returning `class extends K {}` over a parameter K that holds a
+// class or a builtin (Map, Set): the class's heritage evaluates where it
+// stands, so its methods, its base's and its name are Node's.
+func TestE2EMixinReturnValueBaseJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+class P { constructor(n) { this.n = n; } who() { return "P" + this.n; } }
+function mix(K) { return class extends K { me() { return "M" + this.n; } }; }
+const X = mix(P);
+const x = new X(2);
+console.log(x.me(), x.who(), x instanceof P, JSON.stringify(X.name));
+const Y = mix(Map);
+const y = new Y([[1, 2]]);
+console.log(y.get(1), y.size, typeof y.me, y instanceof Map);
+function pick(i) { return [P, Set][i]; }
+class S extends pick(1) { tot() { return this.size; } }
+const s = new S([1, 2, 2]);
+console.log(s.tot(), S.name, s.has(2));
+function mix2(K) { return class Named extends K { self() { return Named.name; } }; }
+const Z = mix2(Map);
+console.log(new Z().self(), Z.name, new Z([[3, 4]]).get(3));
+`)
+}
+
+// Each evaluation of a class expression has its own prototype object:
+// its own properties, methods of its own identity, `constructor` that
+// evaluation, and its instances' prototype.
+func TestE2EClassPerEvaluationPrototypeJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+function make(k) { return class { m() { return k; } }; }
+const A = make(1), B = make(2);
+console.log(A === B, A.prototype === B.prototype, A.prototype.constructor === A);
+console.log(A.prototype.m === B.prototype.m, new A().m(), new B().m());
+const a = new A();
+console.log(Object.getPrototypeOf(a) === A.prototype, Object.getPrototypeOf(a) === B.prototype);
+A.prototype.extra = 5;
+console.log(a.extra, new B().extra, new A() instanceof B);
+A.prototype.m = function () { return 9; };
+console.log(new A().m(), new B().m(), Object.getOwnPropertyNames(B.prototype));
+const cs = [];
+for (let i = 0; i < 2; i++) cs.push(class { get i() { return i; } });
+console.log(cs[0].prototype === cs[1].prototype, new cs[0]().i, new cs[1]().i);
+class Base { b() { return "base"; } }
+function mk() { return class extends Base {}; }
+const C = mk(), D = mk();
+console.log(new C().b(), Object.getPrototypeOf(C.prototype) === Base.prototype, C.prototype === D.prototype, new C() instanceof Base);
+`)
+}
+
+// An Error given a prototype reads its members through it, and a class
+// extending a variable holding Error is a real subclass of it.
+func TestE2EErrorGivenPrototypeJS(t *testing.T) {
+	assertJSFileSameAsNode(t, `
+const p = { hello() { return "hi " + this.message; } };
+Object.setPrototypeOf(p, Error.prototype);
+const err = new Error("m");
+Object.setPrototypeOf(err, p);
+console.log(err.hello(), err instanceof Error, Object.getPrototypeOf(err) === p, "hello" in err, err.message);
+try { new Error("q").nope(); } catch (x) { console.log(x.message); }
+const Err = globalThis.Error;
+class E extends Err { greet() { return "E:" + this.message; } }
+const e = new E("x");
+console.log(e.greet(), e instanceof E, e instanceof Error, e.name);
+const Alias = Error;
+class F extends Alias { constructor(m) { super(m); this.name = "F"; } }
+console.log(String(new F("y")), new F("y") instanceof F);
+`)
+}

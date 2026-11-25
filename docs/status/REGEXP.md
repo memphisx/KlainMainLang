@@ -4,7 +4,7 @@
 
 > Part of the [Implementation Status](README.md) index.
 
-**Coverage**: 15/16 (~94%) · **Strict Coverage**: 14/16 (~88%).
+**Coverage**: 16/16 (100%) · **Strict Coverage**: 15/16 (~94%).
 
 Format: [Status page format](README.md#status-page-format).
 
@@ -14,7 +14,7 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 
 | Feature | Status | Caveats | Notes |
 |---|---|---|---|
-| Construction: `new RegExp(pattern, flags?)` | ✅ | | • Validates the *flags* string as real JS does — a duplicate flag (`"gg"`) or an unrecognized flag character (`"z"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (`u`/`v`/`d` are accepted but their behavior isn't implemented — see the `u`/`d` flags row) ([ADR-00549](../adr/00/ADR-00549.md))<br>• Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*<br>• A `\uXXXX`/`\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md) |
+| Construction: `new RegExp(pattern, flags?)` | ✅ | | • Validates the *flags* string as real JS does — a duplicate flag (`"gg"`) or an unrecognized flag character (`"z"`) throws a catchable `SyntaxError`; the eight valid JS flag letters `d,g,i,m,s,u,v,y` are accepted (see the `u` and `d` flag rows; under `v` a property of strings, `\p{RGI_Emoji}`, is a `SyntaxError`) ([ADR-00549](../adr/00/ADR-00549.md))<br>• Compiles the pattern once via `pcre2_compile_8`; throws a real, catchable `SyntaxError` on an invalid *pattern*<br>• A `\uXXXX`/`\xXX` escape compiles as an ECMAScript escape in the default/`es-ascii` modes (`PCRE2_ALT_BSUX`) — see [TDD-00067](../tdd/TDD-00067.md) |
 | Literal syntax: `/pattern/flags` | ✅ | | • Desugars to the same construction at parse time — see [ADR-00114](../adr/00/ADR-00114.md) |
 | `.source` / `.flags` | ✅ | | • `.flags` reports the canonical `d,g,i,m,s,u,v,y` order regardless of construction order (`new RegExp("x", "ig").flags` is `"gi"`), and an empty pattern's `.source` is the spec placeholder `"(?:)"` ([ADR-00998](../adr/00/ADR-00998.md)) |
 | `.global` / `.ignoreCase` / `.multiline` / `.dotAll` | ✅ | | • Decomposed from the flags string once at construction — no method needs to re-parse it |
@@ -28,8 +28,8 @@ Matching follows the **ECMAScript dialect by default** ([TDD-00067](../tdd/TDD-0
 | `str.split(regexp)` | ✅ | | • The separator's capture groups are spliced in after each piece, an unmatched one as `undefined` ([ADR-01307](../adr/01/ADR-01307.md))<br>• Finds every match regardless of `g` (its own local search loop, like real JS); an empty match splits as `@@split` does ([ADR-01277](../adr/01/ADR-01277.md)) |
 | `str.search(regexp)` | ✅ | | • A plain-string argument is coerced to a `RegExp` as in real JS — metacharacters are interpreted ([ADR-00548](../adr/00/ADR-00548.md))<br>• Always searches from offset 0, restores `.lastIndex` afterward — invisible to later `.exec()`/`.test()` iteration, matching real JS exactly. See [ADR-00119](../adr/00/ADR-00119.md) |
 | `y` (sticky) flag — `.sticky`, anchored matching at `.lastIndex` | ✅ | | • Real RegExpBuiltinExec: `lastIndex` is the start offset whenever `global` **or** `sticky` is set, the match is `PCRE2_ANCHORED` there, and `lastIndex` advances/resets exactly as for `g`; flows through `exec`/`test`/`match`/`matchAll`/`replace`/`replaceAll`/`search` ([ADR-01062](../adr/01/ADR-01062.md)) |
-| `u` flag — `.unicode`, code-point matching, `\u{…}` and `\p{…}` | ✅ | • `\w` and `\b` under `iu` stay ASCII: `/\w/iu.test('ſ')` is false, true in V8 (ES folds U+017F and U+212A into `\w`)<br>• An escaped lone surrogate (`\uD83D`, `\u{D83D}`) matches nothing | • `\u{…}` and a surrogate-pair escape name one code point, in a class too; an escape the `u` grammar has no production for, and a class range with a class escape at either end, are a SyntaxError with V8's message ([ADR-01970](../adr/01/ADR-01970.md)) |
-| `d` flag — `.hasIndices`, a match's `.indices` | ❌ | | • `.hasIndices` reads the flag; a match result has no `.indices`, a compile error |
+| `u` flag — `.unicode`, code-point matching, `\u{…}` and `\p{…}` | ✅ | • An escaped lone surrogate (`\uD83D`, `\u{D83D}`), with or without `u`, is a `SyntaxError`, and `.` or a class never matches a subject's lone surrogate (`/a.b/` on `"a\uD83Db"` is false): PCRE2's UTF mode has no surrogate code point. Other patterns match around one ([ADR-02059](../adr/02/ADR-02059.md)) | • Under `i` a word character (`\w`, `\W`, `\b`, `\B`) is one whose case folding is one, U+017F and U+212A included ([ADR-02058](../adr/02/ADR-02058.md))<br>• `\u{…}` and a surrogate-pair escape name one code point, in a class too; an escape the `u` grammar has no production for, and a class range with a class escape at either end, are a SyntaxError with V8's message ([ADR-01970](../adr/01/ADR-01970.md)) |
+| `d` flag — `.hasIndices`, a match's `.indices` | ✅ | | • Each group's `[start, end]` in UTF-16 code units (`undefined` unmatched) and their named `groups`, through `exec`, `match`, `matchAll` and a boxed receiver, printed as Node does ([ADR-02057](../adr/02/ADR-02057.md)) |
 
 ## Known limitations
 

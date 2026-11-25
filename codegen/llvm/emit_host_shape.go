@@ -61,6 +61,12 @@ func (e *Emitter) hostMembers(class string) []hostMember {
 	}
 	var out []hostMember
 	for _, p := range t.Props {
+		if p.Decl != nil && c.InProgram(p.Decl) {
+			// The program's own augmentation (a script's `interface
+			// String { shout(): string }`): no native member, the value is
+			// whatever the program puts on the prototype.
+			continue
+		}
 		call := p.Name
 		if strings.HasPrefix(p.Name, "@@") {
 			call = hostSymbolMemberAlias(c, class, p.Name)
@@ -69,7 +75,7 @@ func (e *Emitter) hostMembers(class string) []hostMember {
 			continue
 		}
 		m := hostMember{name: p.Name, call: call, readonly: p.Readonly, optional: p.Optional}
-		ft := p.Type
+		ft := p.Type()
 		if ft != nil && ft.Flags&checker.Object != 0 && ft.Kind == checker.Function && !p.Accessor {
 			m.method = true
 			m.sig = ft
@@ -231,9 +237,29 @@ func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostM
 		e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
 		e.emitTerminator(fmt.Sprintf("ret i64 %s", e.emitNbTagPtr(e.arrayIterMethodRecord("@@iterator"), kmlTagDynFunc)))
 		e.emitLabel(miss)
+		if h.class == "Array Iterator" {
+			// %ArrayIteratorPrototype%.next as the program left it (this
+			// helper is program-independent: the check is a C call that
+			// answers at once while the prototype was never made).
+			nmiss := e.emitKeyIs("%key", "next")
+			slot, has := e.emitArrIterNextOverride()
+			patchedL, ownL := e.freshLabel("arriter.patched"), e.freshLabel("arriter.own")
+			e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", has, patchedL, ownL))
+			e.emitLabel(patchedL)
+			e.heapStore("i32", fmt.Sprint(shapeMember), "%found", 4)
+			pv := e.freshReg()
+			e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" %s, align 8", pv, slot))
+			e.emitTerminator("ret i64 " + pv)
+			e.emitLabel(ownL)
+			e.emitTerminator("br label %" + nmiss)
+			e.emitLabel(nmiss)
+		}
 	}
 	for _, m := range members {
-		if _, iter := iteratorInterfaces[h.class]; iter && m.method && !e.hostMethodReachable(m.name) {
+		if m.method && !e.hostMethodReachable(m.name) {
+			// A method no name, reflection or computed key in the program
+			// reaches (proto_reach.go): its wrapper, and what it links
+			// (normalize's Unicode tables), stay out.
 			continue
 		}
 		if m.method {
@@ -280,10 +306,7 @@ func (e *Emitter) emitHostShapeGetter(name string, h hostLayout, members []hostM
 	if valueProtoClassName(h.class) && h.class != "Array" {
 		// A wrapper's other property is its class prototype's
 		// (Boolean.prototype.valueOf), and on along that chain.
-		e.ensureAnyToPrimitive()
-		e.ensureNanBox()
-		e.ensureErrorNames()
-		e.ensureStrHeaderRuntime()
+		e.ensureDynJSONC()
 		_, pay := e.emitUnboxTagPayload(e.emitBuiltinProto(h.class))
 		bag, v, hit := e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = inttoptr i64 %s to "+irPtr, bag, pay))
@@ -373,7 +396,6 @@ func (e *Emitter) emitHostMethodAdapter(fn string, h hostLayout, m hostMember) {
 	prevOv := e.inArrayOverrideDispatch
 	e.inArrayOverrideDispatch = true
 	defer func() { e.inArrayOverrideDispatch = prevOv }()
-	e.ensureNanBox()
 	tag, pay := e.freshReg(), e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %%this)", tag))
 	e.emitInstr(fmt.Sprintf("%s = call i64 @__kml_nb_pay(i64 %%this)", pay))
@@ -526,3 +548,17 @@ func (e *Emitter) hostReadSelf(cell string, h hostLayout) ast.Expression {
 
 // primWrapperValueType is the primitive a wrapper class holds.
 var primWrapperValueType = map[string]Type{"Number": TypeF64, "String": TypePtr, "Boolean": TypeBool, "BigInt": BigIntType(), "Symbol": SymbolType()}
+
+// emitArrIterNextOverride is %ArrayIteratorPrototype%.next once replaced:
+// a slot holding it, and an i1 whether it was (dynobj.c).
+func (e *Emitter) emitArrIterNextOverride() (slot, has string) {
+	e.ensureDynJSONC()
+	e.declareFn("__kml_arriter_next_override", "declare i32 @__kml_arriter_next_override("+irPtr+")")
+	slot = e.freshReg()
+	e.emitAlloca(fmt.Sprintf("%s = alloca i64, align 8", slot))
+	r := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_arriter_next_override("+irPtr+" %s)", r, slot))
+	has = e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", has, r))
+	return slot, has
+}

@@ -13,15 +13,5 @@ func (e *Emitter) UsesWebview() bool { return e.usedWebview }
 // which needs loop.c; on Windows the page drives the timers, the task
 // scheduler and the microtasks (natives.c's pump).
 func (e *Emitter) ensureWebviewRuntime() {
-	if e.usedWebview {
-		return
-	}
 	e.usedWebview = true
-	e.ensureStrHeaderRuntime()
-	if e.opts.Target.OS() != "windows" {
-		e.ensureEventLoop()
-		return
-	}
-	e.ensureTimerRuntime()
-	e.ensureMicrotasks()
 }

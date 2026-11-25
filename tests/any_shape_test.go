@@ -97,6 +97,77 @@ run();
 `, "async a\nasync b\nsync 1\nsync 2\nclosed\narr 5\narr 6\narrawait 5\narrawait 6\nctr 1\nctr 2\nfive is not iterable\n")
 }
 
+// A next() result that is not an object throws instead of reading its
+// done as undefined: every protocol walk over an any (for-of, spread,
+// Array.from, new Set, AggregateError's errors) stops (ADR-01995).
+func TestE2EAnyIteratorResultNotObject(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function mk(r) { return { [Symbol.iterator]() { return { next() { return r; } }; } }; }
+const runs = {
+  forof: (it) => { for (const x of it) {} },
+  spread: (it) => [...it],
+  from: (it) => Array.from(it),
+  set: (it) => new Set(it),
+  agg: (it) => new AggregateError(it),
+};
+for (const r of ['a string', 7, undefined, null, true]) {
+  for (const k of Object.keys(runs)) {
+    try { runs[k](mk(r)); console.log(k, 'no throw'); } catch (e) { console.log(k, e.constructor.name, e.message); }
+  }
+}
+`)
+}
+
+// Array.from(iterable, mapFn) calls mapFn at each step: a throw ends an
+// endless iterator and closes it; indexes and values follow the walk.
+func TestE2EArrayFromMapFnPerStep(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+let closed = 0, nexts = 0;
+const endless = { [Symbol.iterator]() { return {
+  next() { nexts++; return { value: nexts, done: false }; },
+  return() { closed++; return {}; } }; } };
+try { Array.from(endless, (v, i) => { if (i === 2) throw new Error('stop at ' + v); return v; }); }
+catch (e) { console.log(e.message, 'closed', closed, 'nexts', nexts); }
+function* g() { yield 'a'; yield 'b'; yield 'c'; }
+console.log(Array.from(g(), (v, i) => v + i));
+const order = [];
+const two = { [Symbol.iterator]() { let n = 0; return { next() { order.push('next'); return n < 2 ? { value: n++, done: false } : { done: true }; } }; } };
+console.log(Array.from(two, (v) => { order.push('map ' + v); return v * 10; }), order.join(','));
+console.log(Array.from({ length: 3, 0: 'x', 1: 'y' }, (v, i) => String(v) + i));
+console.log(Array.from([1, 2, 3], (v) => v * 2));
+`)
+}
+
+// Array.from/of/fromAsync called with another constructor as `this` build
+// `new C()`, each element defined on it, and throw when it refuses one.
+func TestE2EArrayStaticsWithConstructorThis(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+function C() { this.tag = "C"; }
+var r = Array.from.call(C, [1, 2]);
+console.log(r instanceof C, r.length, r[0], r.tag);
+var ra = Array.from.call(C, { length: 2, 0: "a", 1: "b" }, function (v, i) { return v + i; });
+console.log(ra instanceof C, ra.length, ra[1]);
+var r2 = Array.of.apply(C, [5, 6]);
+console.log(r2 instanceof C, r2.length, r2[1]);
+var r3 = Array.from.call(undefined, [7]);
+console.log(Array.isArray(r3), r3[0]);
+function M() { Object.defineProperty(this, 0, { value: 0, writable: true, configurable: false }); }
+try { Array.from.call(M, [1]); } catch (e) { console.log(e.constructor.name); }
+try { Array.from({ length: 4294967296 }); } catch (e) { console.log(e.constructor.name, e.message); }
+try { Array.from({ length: Infinity, 0: 1 }); } catch (e) { console.log(e.constructor.name, e.message); }
+(async function () {
+  try { await Array.fromAsync({ length: 4294967296 }); } catch (e) { console.log(e.constructor.name, e.message); }
+  var x = await Array.fromAsync.call(C, [1, 2]);
+  console.log(x instanceof C, x.length, x.tag);
+  var closed = false;
+  var it = { next() { return Promise.resolve({ value: 1, done: false }); },
+    return() { closed = true; return Promise.resolve({ done: true }); },
+    [Symbol.asyncIterator]() { return this; } };
+  try { await Array.fromAsync.call(M, it); } catch (e) { console.log(e.constructor.name, closed); }
+})();
+`)
+}
+
 // an unannotated function returning its for...of binding infers the element type.
 func TestE2EReturnInferenceSeesForOfBinding(t *testing.T) {
 	assertOutput(t, `
@@ -123,4 +194,28 @@ async function run() {
 }
 run();
 `, "gen aa\ngen bb\nn 0\nn 1\nn 2\n")
+}
+
+// A collection method replaced on its prototype is what instances call and
+// read, and what the constructor adds with — read once, before iterating —
+// so an adder that throws stops an endless iterable and closes it.
+func TestE2ECollectionPrototypeMethodReplaced(t *testing.T) {
+	assertSameAsNodeCompatJS(t, `
+var origSet = Map.prototype.set, calls = 0;
+Map.prototype.set = function (k, v) { calls++; return origSet.call(this, k, v); };
+var two = {}; two[Symbol.iterator] = function () { var n = 0; return { next: function () { return n < 2 ? { value: [n, n++], done: false } : { done: true }; } }; };
+var m = new Map(two); console.log('map iter', calls, m.size); calls = 0;
+new Map([[1, 2], [3, 4]]); console.log('map arr', calls);
+console.log(m.set === Map.prototype.set); m.set(9, 9); console.log('call', calls, m.get(9));
+var origAdd = Set.prototype.add, adds = 0;
+Set.prototype.add = function (v) { adds++; return origAdd.call(this, v); };
+console.log('set', new Set(two).size, adds);
+Map.prototype.set = function () { throw new Error('boom'); };
+var closed = 0, endless = {};
+endless[Symbol.iterator] = function () { return { next: function () { return { value: [], done: false }; }, return: function () { closed++; return {}; } }; };
+try { new Map(endless); } catch (e) { console.log(e.message, closed); }
+Map.prototype.set = 5;
+try { new Map([]); } catch (e) { console.log(e.constructor.name, e.message); }
+console.log(new Map().size);
+`)
 }

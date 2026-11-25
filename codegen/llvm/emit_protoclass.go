@@ -243,18 +243,23 @@ func (e *Emitter) ensureProtoBag(ctorName string) string {
 		return getter
 	}
 	e.protoBagEmitted[ctorName] = true
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	global := "@__kml_proto_" + ctorName
 	e.emitGlobal(fmt.Sprintf("%s = internal %sglobal "+irPtr+" null, align 8", global, e.isolateTLS()))
+	// A primitive `F.prototype` holds (0: the property is the bag).
+	e.emitGlobal(fmt.Sprintf("@__kml_protoval_%s = internal %sglobal i64 0, align 8", ctorName, e.isolateTLS()))
 	restore := e.beginDetachedFunc()
 	cur, isNull, bag, out := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 	initL, haveL := e.freshLabel("init"), e.freshLabel("have")
 	e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", cur, global))
 	e.emitInstr(fmt.Sprintf("%s = icmp eq "+irPtr+" %s, null", isNull, cur))
-	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", isNull, initL, haveL))
+	// Not once a primitive or null was assigned: the property holds no
+	// object then (null here; `new F` takes Object.prototype).
+	pv, unset, build := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_protoval_%s, align 8", pv, ctorName))
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i64 %s, 0", unset, pv))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", build, isNull, unset))
+	e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", build, initL, haveL))
 	e.emitLabel(initL)
 	// A function's `prototype` is the one its value reads (`(F as any).prototype`).
 	_, _, isFn := e.resolveFuncRef(ctorName)
@@ -269,7 +274,6 @@ func (e *Emitter) ensureProtoBag(ctorName string) string {
 		isFn = err == nil && box.Ty.IsDynamic()
 	}
 	if isFn {
-		e.ensureFnMeta()
 		e.declareFn("__kml_fn_ctor_proto", "declare "+irPtr+" @__kml_fn_ctor_proto(i64)")
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_fn_ctor_proto(i64 %s)", bag, box.Ref))
 	} else {
@@ -291,7 +295,13 @@ func (e *Emitter) emitProtoBagRead(ctorName string) Value {
 	getter := e.ensureProtoBag(ctorName)
 	bag := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", bag, getter))
-	return e.emitDynObjBox(bag)
+	box := e.emitDynObjBox(bag)
+	// A primitive the program assigned (`F.prototype = 1`) is the value.
+	pv, isPrim, r := e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = load i64, "+irPtr+" @__kml_protoval_%s, align 8", pv, ctorName))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i64 %s, 0", isPrim, pv))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 %s", r, isPrim, pv, box.Ref))
+	return Value{Ref: r, Ty: TypeAny}
 }
 
 // emitProtoBagWrite implements `F.prototype = value` — re-points the global
@@ -302,7 +312,26 @@ func (e *Emitter) emitProtoBagWrite(ctorName string, rhs Value, pos ast.Pos) (Va
 	if err != nil {
 		return Value{}, err
 	}
-	ptrReg, _, err := e.emitDynProtoOperand(boxed, true)
+	// A primitive is the property's value; `new F` then takes
+	// Object.prototype (OrdinaryCreateFromConstructor), as for null.
+	tag := e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = call i8 @__kml_nb_tag(i64 %s)", tag, boxed.Ref))
+	e.declareFn("__kml_any_is_bigint", "declare i32 @__kml_any_is_bigint(i64)")
+	low, notNull, scalar, big, isBig, isPrim := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp ule i8 %s, %d", low, tag, kmlTagUndefined))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i8 %s, %d", notNull, tag, kmlTagNull))
+	e.emitInstr(fmt.Sprintf("%s = and i1 %s, %s", scalar, low, notNull))
+	e.emitInstr(fmt.Sprintf("%s = call i32 @__kml_any_is_bigint(i64 %s)", big, boxed.Ref))
+	e.emitInstr(fmt.Sprintf("%s = icmp ne i32 %s, 0", isBig, big))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", isPrim, scalar, isBig))
+	operand, kept := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %d, i64 %s", operand, isPrim, nbNull, boxed.Ref))
+	isNullV, keep := e.freshReg(), e.freshReg()
+	e.emitInstr(fmt.Sprintf("%s = icmp eq i8 %s, %d", isNullV, tag, kmlTagNull))
+	e.emitInstr(fmt.Sprintf("%s = or i1 %s, %s", keep, isPrim, isNullV))
+	e.emitInstr(fmt.Sprintf("%s = select i1 %s, i64 %s, i64 0", kept, keep, boxed.Ref))
+	e.emitInstr(fmt.Sprintf("store i64 %s, "+irPtr+" @__kml_protoval_%s, align 8", kept, ctorName))
+	ptrReg, _, err := e.emitDynProtoOperand(Value{Ref: operand, Ty: TypeAny}, true)
 	if err != nil {
 		return Value{}, err
 	}
@@ -417,10 +446,7 @@ func (e *Emitter) emitProtoCtorNew(ex *ast.NewExpression) (Value, error) {
 	if !ok {
 		return Value{}, internalAt(ex.GetPos(), "unknown constructor function '%s'", ex.ClassName)
 	}
-	e.ensureAnyToPrimitive()
-	e.ensureNanBox()
-	e.ensureErrorNames()
-	e.ensureStrHeaderRuntime()
+	e.ensureDynJSONC()
 	getter := e.ensureProtoBag(ex.ClassName)
 	proto := e.freshReg()
 	e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", proto, getter))
@@ -435,8 +461,15 @@ func (e *Emitter) emitProtoCtorNew(ex *ast.NewExpression) (Value, error) {
 	} else {
 		bag := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" @__kml_dynobj_new()", bag))
+		// No object there (`F.prototype = null` or a primitive): the new
+		// object keeps Object.prototype (OrdinaryCreateFromConstructor).
+		setL, keepL := e.freshLabel("newfn.proto"), e.freshLabel("newfn.objproto")
+		e.emitTerminator(fmt.Sprintf("br i1 %s, label %%%s, label %%%s", e.ptrIsNull(proto), keepL, setL))
+		e.emitLabel(setL)
 		ok2 := e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = call i1 @__kml_dynobj_set_proto("+irPtr+" %s, "+irPtr+" %s)", ok2, bag, proto))
+		e.emitTerminator("br label %" + keepL)
+		e.emitLabel(keepL)
 		thisBox = e.emitDynObjBox(bag)
 	}
 	// new.target is the function itself.
@@ -488,10 +521,9 @@ func (e *Emitter) emitProtoCtorChainCall(ctorName string, args []ast.Expression,
 	if err != nil {
 		return Value{}, err
 	}
-	if _, err := e.emitProtoCtorInvoke(ctorName, llvmName, sig, thisBox, args[1:], pos); err != nil {
-		return Value{}, err
-	}
-	return Value{Ref: "0", Ty: TypeUndefined}, nil
+	// The body's own return value, as any plain call's: `F.call(o)` of a
+	// function that also constructs still returns what it returns.
+	return e.emitProtoCtorInvoke(ctorName, llvmName, sig, thisBox, args[1:], pos)
 }
 
 // emitProtoCtorInvoke runs constructor function name's body with the boxed
@@ -616,7 +648,6 @@ func (e *Emitter) emitProtoCtorInstanceOf(left ast.Expression, ctorName string) 
 		// An array given a prototype whose chain holds F.prototype.
 		arrL, noArrL := e.emitTagCheck(tag, kmlTagArray, "protoinst.arr")
 		e.emitLabel(arrL)
-		e.ensureShapeRuntime()
 		hdr, bag3, has3, r3 := e.freshReg(), e.freshReg(), e.freshReg(), e.freshReg()
 		e.emitInstr(fmt.Sprintf("%s = load "+irPtr+", "+irPtr+" %s, align 8", hdr, e.emitIntToPtr(payload)))
 		e.emitInstr(fmt.Sprintf("%s = call "+irPtr+" %s()", bag3, getter))

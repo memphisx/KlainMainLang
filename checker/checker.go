@@ -280,6 +280,10 @@ type Checker struct {
 	declSyms map[ast.Node]*binder.Symbol
 	// env names the type arguments of the generic declaration being typed.
 	env []map[string]*Type
+	// deferBounds are the constraints of the type parameters a deferred
+	// type's instantiation binds by name (instantiateDeferred), which the
+	// binding itself no longer carries.
+	deferBounds map[string]*Type
 	// substs bind function type parameters while a deferred type is
 	// evaluated (typeops.go).
 	substs []map[*Type]*Type
@@ -669,6 +673,14 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		}
 		if t := c.paramDefaultReference(e, sym); t != nil {
 			return t
+		}
+		if sym.Flags&binder.NamespaceModule != 0 && sym.Flags&(binder.Function|binder.Class|binder.Enum|binder.Variable) == 0 &&
+			c.b.Globals != nil && sym.Scope == c.b.Globals && c.b.NamespaceScope(sym) != nil {
+			// A builtin namespace read as a value (`Reflect[k]`): its
+			// object, `typeof Reflect`, as tsc types it.
+			if t := c.valueWithNamespace(sym); !c.Unanswered(t) {
+				return t
+			}
 		}
 		if c.ownInitializerRead(e, sym) {
 			c.reportOwnInit(sym)
@@ -1095,9 +1107,9 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 					if st.Kind == Instance && !instanceSpreads(q) {
 						continue
 					}
-					np := &Property{Name: q.Name, Type: q.Type, Optional: q.Optional || maybe}
+					np := &Property{Name: q.Name, ty: q.Type(), Optional: q.Optional || maybe}
 					if maybe && !q.Optional {
-						np = &Property{Name: q.Name, Type: c.in.union(q.Type, c.undefinedT), Optional: true}
+						np = &Property{Name: q.Name, ty: c.in.union(q.Type(), c.undefinedT), Optional: true}
 					}
 					right = append(right, np)
 				}
@@ -1107,7 +1119,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 							if r.Name == np.Name {
 								// An optional property keeps an earlier one,
 								// as the union of both.
-								np = &Property{Name: np.Name, Type: c.in.union(r.Type, c.NonUndefined(np.Type)), Optional: r.Optional}
+								np = &Property{Name: np.Name, ty: c.in.union(r.Type(), c.NonUndefined(np.Type())), Optional: r.Optional}
 								break
 							}
 						}
@@ -1171,16 +1183,16 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 						break
 					}
 				}
-				np := &Property{Name: p.Key, Type: at, Readonly: p.AccessorKind == "get"}
+				np := &Property{Name: p.Key, ty: at, Readonly: p.AccessorKind == "get"}
 				if prev != nil && prev.Readonly != np.Readonly {
 					// The pair: the getter's type, writable.
 					get, set := np, prev
 					if p.AccessorKind == "set" {
 						get, set = prev, np
 					}
-					np = &Property{Name: p.Key, Type: get.Type}
-					if set.Type != get.Type {
-						np.Write = set.Type
+					np = &Property{Name: p.Key, ty: get.Type()}
+					if set.Type() != get.Type() {
+						np.Write = set.Type()
 					}
 				}
 				put(np)
@@ -1198,7 +1210,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 			if c.constCtx == 0 && !c.constAsserted(p.Value) && !c.keepsLiteral(p.Value, t) {
 				t = c.widenFrom(p.Value, t)
 			}
-			put(&Property{Name: key, Type: t}) // a duplicate: the last one wins
+			put(&Property{Name: key, ty: t}) // a duplicate: the last one wins
 			ownProps = true
 		}
 		if spreadAny {
@@ -1223,7 +1235,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 			if strIdx {
 				ts := append([]*Type(nil), computedStr...)
 				for _, q := range props {
-					ts = append(ts, q.Type)
+					ts = append(ts, q.Type())
 				}
 				str = c.in.union(ts...)
 			}
@@ -1231,7 +1243,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 				ts := append([]*Type(nil), computedNum...)
 				for _, q := range props {
 					if numericName(q.Name) {
-						ts = append(ts, q.Type)
+						ts = append(ts, q.Type())
 					}
 				}
 				num = c.in.union(ts...)
@@ -1343,7 +1355,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 					}
 					// Object.prototype's (`f.constructor`).
 					if p := c.objectMember(e.Property); p != nil {
-						return p.Type
+						return p.Type()
 					}
 					return c.unanswered
 				}
@@ -1416,9 +1428,22 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 						ts = append(ts, c.anyT)
 						continue
 					}
+					if c.opts.CompatJS() && obj.Flags&Union == 0 && c.libModuleObject(m) {
+						// A module's export its declarations do not list
+						// (`crypto.createDiffieHellman`): any in JavaScript,
+						// read at run time.
+						ts = append(ts, c.anyT)
+						continue
+					}
+					if obj.Flags&Union != 0 {
+						// A union member lacking it: tsc's error type, any
+						// (TS2339, reported by checkProperty; unreported in
+						// JavaScript).
+						return c.anyT
+					}
 					return c.unanswered
 				}
-				ts = append(ts, c.withThis(p.Type, recv))
+				ts = append(ts, c.withThis(p.Type(), recv))
 				if len(ms) == 1 && p.Decl != nil {
 					c.memberDecls[e] = p
 				}
@@ -1444,7 +1469,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 			// getPropertyTypeForIndexType).
 			ts := []*Type{c.undefinedT}
 			for _, p := range obj.Props {
-				ts = append(ts, p.Type)
+				ts = append(ts, p.Type())
 			}
 			return c.in.union(ts...)
 		}
@@ -1470,7 +1495,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		if literal && strings.HasPrefix(key, "@@") && (obj.Flags&Object != 0 && (obj.Kind == Array || obj.Kind == Tuple) || obj.Flags&Union == 0 && isStringLike(obj)) {
 			if am := c.apparentType(obj); am != nil {
 				if p := am.Prop(key); p != nil {
-					return p.Type
+					return p.Type()
 				}
 			}
 			return c.unanswered
@@ -1480,11 +1505,11 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		if literal && obj.Flags&Union == 0 && obj.Flags&(String|StringLiteral|Number|NumberLiteral|Boolean|BooleanLiteral|BigInt|BigIntLiteral) != 0 && !numericName(key) {
 			if am := c.apparentType(obj); am != nil {
 				if p := am.Prop(key); p != nil {
-					return p.Type
+					return p.Type()
 				}
 			}
 			if p := c.objectMember(key); p != nil {
-				return p.Type // Object.prototype's (`x["hasOwnProperty"]`)
+				return p.Type() // Object.prototype's (`x["hasOwnProperty"]`)
 			}
 		}
 		// A union of arrays, tuples and strings (`number[] | string[][]`):
@@ -1529,7 +1554,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 					ts = nil
 					break
 				}
-				pt := c.withThis(p.Type, m)
+				pt := c.withThis(p.Type(), m)
 				if p.Optional {
 					pt = c.in.union(pt, c.undefinedT)
 				}
@@ -1572,7 +1597,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 		case obj.Flags&Object != 0 && (obj.Kind == Anonymous || obj.Kind == Instance || obj.Kind == Interface):
 			if literal {
 				if p := obj.Prop(key); p != nil {
-					return c.narrowedMember(e, c.withThis(p.Type, obj)) // `this` is the receiver, as for `o.k`
+					return c.narrowedMember(e, c.withThis(p.Type(), obj)) // `this` is the receiver, as for `o.k`
 				}
 			}
 			kt := c.TypeOf(e.Index)
@@ -1604,8 +1629,14 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 				}
 			}
 			// No signature and no such property: an implicit any (TS7053
-			// under --strict, plain any in a JS file), an `any` key's too.
-			if obj.StringIndex == nil && obj.NumberIndex == nil && !c.Unanswered(kt) && kt.Flags&Union == 0 && (isStringLike(kt) || kt.Flags&(Number|NumberLiteral|ESSymbol|Any) != 0 || symbolKey(kt)) {
+			// under --strict, plain any in a JS file), an `any` key's too, and a
+			// null, undefined or boolean key's (its string names the member).
+			if obj.StringIndex == nil && obj.NumberIndex == nil && !c.Unanswered(kt) && kt.Flags&Union == 0 && (isStringLike(kt) || kt.Flags&(Number|NumberLiteral|ESSymbol|Any|Null|Undefined|Boolean|BooleanLiteral) != 0 || symbolKey(kt)) {
+				return c.anyT
+			}
+			// A union of string or number keys not every one a property
+			// (`by[platform]`): an implicit any too.
+			if obj.StringIndex == nil && obj.NumberIndex == nil && keyUnion(kt) {
 				return c.anyT
 			}
 			// A string key on a number index only (a Buffer's
@@ -1675,6 +1706,13 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 			}
 		}
 		calleeT := c.TypeOf(e.Callee)
+		if c.opts.CompatJS() && !c.Unanswered(calleeT) && calleeT.Flags&(Any|Unknown|Never) == 0 && len(members(calleeT)) > 0 && allMembers(calleeT, StringLike|NumberLike|BooleanLike|BigIntLike|Null|Undefined) {
+			// A primitive called: the call throws its TypeError at run time.
+			for _, a := range e.Args {
+				c.TypeOf(a)
+			}
+			return c.anyT
+		}
 		if t := c.unionArrayMethod(e, calleeT); t != nil {
 			calleeT = t
 		}
@@ -1761,7 +1799,7 @@ func (c *Checker) checkExpr(e ast.Expression) *Type {
 						if composite && !c.Unanswered(r) && !c.Unanswered(ct) && c.assignable(r, c.literalErased(ct, 0)) {
 							return c.unanswered
 						}
-						if !c.Unanswered(r) && !anyContextSensitive(e.Args) && !c.Unanswered(ct) {
+						if !c.Unanswered(r) && !c.anyContextSensitive(e.Args) && !c.Unanswered(ct) {
 							m := c.inferArgsRecv(callRecv(e), e.Args, e.TypeArgs, callee, true)
 							c.inferFromReturnContext(e, callee, m)
 							if r = c.instantiate(callee.Ret(), m); c.Unanswered(r) || c.assignable(r, ct) {
@@ -2357,7 +2395,7 @@ func (c *Checker) literalErased(t *Type, depth int) *Type {
 		ps := make([]*Property, len(t.Props))
 		for i, p := range t.Props {
 			np := *p
-			np.Type = c.literalErased(p.Type, depth+1)
+			np.SetType(c.literalErased(p.Type(), depth+1))
 			ps[i] = &np
 		}
 		return c.in.indexedOn(c.in.object(ps), t.StringIndex, t.NumberIndex)
@@ -2671,7 +2709,7 @@ func (c *Checker) unionArrayReceiver(ms []*Type, name string) *Type {
 	if ap == nil {
 		return nil
 	}
-	if p := ap.Prop(name); p == nil || p.Type.Flags&Object == 0 || p.Type.Kind != Function {
+	if p := ap.Prop(name); p == nil || p.Type().Flags&Object == 0 || p.Type().Kind != Function {
 		return nil
 	}
 	return at
@@ -3175,10 +3213,10 @@ func (c *Checker) literalKeyUnionProps(obj, kt *Type) ([]*Type, bool) {
 			return nil, false
 		}
 		p := obj.Prop(m.Value)
-		if p == nil || p.Accessor && p.Type == nil {
+		if p == nil || p.Accessor && p.Type() == nil {
 			return nil, false
 		}
-		ts = append(ts, p.Type)
+		ts = append(ts, p.Type())
 	}
 	return ts, len(ts) > 0
 }
@@ -3286,7 +3324,7 @@ func (c *Checker) OverloadResult(e *ast.CallExpression, fn *Type) *Type {
 		}
 		fits := true
 		for j, a := range e.Args {
-			if contextSensitive(a) {
+			if c.contextSensitive(a) {
 				continue
 			}
 			t := c.TypeOf(a)
@@ -3313,7 +3351,7 @@ func (c *Checker) OverloadResult(e *ast.CallExpression, fn *Type) *Type {
 // arguments fit, as TypeScript picks it), or -1.
 func (c *Checker) OverloadIndex(e *ast.CallExpression, fn *Type) int {
 	for _, a := range e.Args {
-		if contextSensitive(a) {
+		if c.contextSensitive(a) {
 			continue
 		}
 		// An `any` fits every overload: which one runs is decided by the
@@ -3331,7 +3369,7 @@ func (c *Checker) OverloadIndex(e *ast.CallExpression, fn *Type) int {
 		}
 		fits := true
 		for j, a := range e.Args {
-			if contextSensitive(a) {
+			if c.contextSensitive(a) {
 				continue
 			}
 			if p := paramAt(sig, j); p == nil || !c.assignable(c.TypeOf(a), p) {
@@ -3385,7 +3423,7 @@ func (c *Checker) PrimitiveMember(str bool, name string) (*Type, ast.Node, []ast
 	if len(p.Decls) > 1 {
 		decls = p.Decls
 	}
-	return c.withThis(p.Type, prim), p.Decl, decls
+	return c.withThis(p.Type(), prim), p.Decl, decls
 }
 
 // NonNullable is t without null and undefined.
@@ -3505,7 +3543,7 @@ func (c *Checker) valueWithNamespace(sym *binder.Symbol) *Type {
 		for _, d := range m.Declarations {
 			decls = append(decls, d.Node)
 		}
-		p := &Property{Name: m.Name, Type: c.typeOfSymbol(m), Decls: decls}
+		p := &Property{Name: m.Name, ty: c.typeOfSymbol(m), Decls: decls}
 		if len(decls) > 0 {
 			p.Decl = decls[len(decls)-1]
 		}
@@ -3567,7 +3605,7 @@ func (c *Checker) importedModule(e *ast.ImportCallExpression) *Type {
 		} else if x.TypeAnnot != nil {
 			pt = c.typeFromNode(x.TypeAnnot, c.b.Module)
 		}
-		props = append(props, &Property{Name: x.Name, Type: pt})
+		props = append(props, &Property{Name: x.Name, ty: pt})
 	}
 	if t := c.importObjects[e]; t != nil {
 		return t
@@ -3609,7 +3647,7 @@ func (c *Checker) moduleType(spec string) *Type {
 		for _, d := range sym.Declarations {
 			decls = append(decls, d.Node)
 		}
-		p := &Property{Name: sym.Name, Type: c.typeOfSymbol(sym), Decls: decls}
+		p := &Property{Name: sym.Name, ty: c.typeOfSymbol(sym), Decls: decls}
 		if len(decls) > 0 {
 			p.Decl = decls[len(decls)-1]
 		}
@@ -3832,7 +3870,7 @@ func (c *Checker) awaited(t *Type, depth int) *Type {
 		if p := o.Prop("then"); p != nil {
 			// A `then` with no call signatures makes no thenable (tsc's
 			// isThenableType): the object is its own awaited value.
-			if pt := p.Type; pt != nil && !c.Unanswered(pt) && pt.Flags&(Any|Unknown|Union|TypeParam) == 0 &&
+			if pt := p.Type(); pt != nil && !c.Unanswered(pt) && pt.Flags&(Any|Unknown|Union|TypeParam) == 0 &&
 				!(pt.Flags&Object != 0 && (pt.Kind == Function || len(pt.Calls) > 0)) {
 				return t
 			}
@@ -3856,11 +3894,11 @@ func (c *Checker) promisedType(t *Type) (*Type, bool) {
 		return nil, false
 	}
 	p := t.Prop("then")
-	if p == nil || p.Type == nil || c.Unanswered(p.Type) || p.Type.Flags&Object == 0 || p.Type.Kind != Function {
+	if p == nil || p.Type() == nil || c.Unanswered(p.Type()) || p.Type().Flags&Object == 0 || p.Type().Kind != Function {
 		return nil, false
 	}
 	var out []*Type
-	for _, then := range callSignatures(p.Type) {
+	for _, then := range callSignatures(p.Type()) {
 		if len(then.Params) == 0 {
 			return nil, false
 		}
@@ -3909,7 +3947,7 @@ func (c *Checker) anyThenable(t *Type) bool {
 	}
 	p := t.Prop("then")
 	pt, ok := c.promisedType(t)
-	return ok && pt.Flags&Any != 0 && p != nil && p.Type.Params[0].Flags&Any != 0
+	return ok && pt.Flags&Any != 0 && p != nil && p.Type().Params[0].Flags&Any != 0
 }
 
 // GlobalInterface is the type of the global interface name declares (the
@@ -4125,6 +4163,17 @@ func (c *Checker) newBuiltinType(orig ast.Expression, name string, args []ast.Ex
 			if t := sameResultInterface(ctor.Overloads); t != nil {
 				return t
 			}
+			// Generic overloads only (`new Set(x)`, `new Map(x)` with no
+			// signature taking x): their one interface, its type
+			// parameters any — an error in tsc, the untyped value the js
+			// lane runs.
+			if ov := ctor.Overloads[len(ctor.Overloads)-1]; sameResultSymbol(ctor.Overloads) && len(ov.TypeParams) > 0 {
+				m := map[*Type]*Type{}
+				for _, tp := range ov.TypeParams {
+					m[tp] = c.anyT
+				}
+				return c.instantiate(ov.Ret(), m)
+			}
 		}
 		return r
 	case len(ctor.TypeParams) > 0:
@@ -4153,6 +4202,16 @@ func sameResultInterface(ovs []*Type) *Type {
 		}
 	}
 	return first
+}
+
+// sameResultSymbol reports whether every overload constructs one interface.
+func sameResultSymbol(ovs []*Type) bool {
+	for _, ov := range ovs {
+		if ov.Ret() == nil || ov.Ret().Flags&Object == 0 || ov.Ret().Symbol == nil || ov.Ret().Symbol != ovs[0].Ret().Symbol {
+			return false
+		}
+	}
+	return len(ovs) > 0
 }
 
 // boundCallResult is the result of `f.call(…)` / `f.apply(…)` where f is a
@@ -4328,7 +4387,7 @@ func (c *Checker) literalBranchCovered(x ast.Expression, lt, other *Type) *Type 
 	}
 	for _, p := range lt.Props {
 		op := other.Prop(p.Name)
-		if op == nil || !c.assignable(p.Type, op.Type) {
+		if op == nil || !c.assignable(p.Type(), op.Type()) {
 			return nil
 		}
 	}
@@ -4351,7 +4410,7 @@ func (c *Checker) normalizeLiteralPair(a, b *Type) (*Type, *Type, bool) {
 		props := append([]*Property(nil), t.Props...)
 		for _, p := range from.Props {
 			if t.Prop(p.Name) == nil {
-				props = append(props, &Property{Name: p.Name, Type: c.undefinedT, Optional: true})
+				props = append(props, &Property{Name: p.Name, ty: c.undefinedT, Optional: true})
 			}
 		}
 		if len(props) == len(t.Props) {
@@ -4808,10 +4867,10 @@ func (c *Checker) unionArrayMethod(e *ast.CallExpression, calleeT *Type) *Type {
 		return nil
 	}
 	p := am.Prop(m.Property)
-	if p == nil || p.Type == nil {
+	if p == nil || p.Type() == nil {
 		return nil
 	}
-	return c.withThis(p.Type, arr)
+	return c.withThis(p.Type(), arr)
 }
 
 // returnsCompositeLiteral reports an arrow argument whose result is an object
@@ -5192,4 +5251,35 @@ func (c *Checker) ctorReturnsForeign(sym *binder.Symbol) bool {
 // declares and they lack mean one this compiler does not provide.
 func (c *Checker) libraryLoaded() bool {
 	return c.b.Globals != nil && c.b.Globals.Symbols.Get("Array") != nil
+}
+
+// GlobalValue reports whether name is a global value (a declared global
+// binding or a builtin's), not only a type: `extends X` reads the value.
+func (c *Checker) GlobalValue(name string) bool {
+	if c.b.Globals != nil {
+		if sym := c.b.Globals.Symbols.Get(name); sym != nil && sym.Flags&binder.Value != 0 {
+			return true
+		}
+	}
+	return c.builtinValueType(name) != nil
+}
+
+// keyUnion reports a union key every member of which is a string or a
+// number (literal or not).
+func keyUnion(kt *Type) bool {
+	if kt.Flags&Union == 0 || len(kt.Types) == 0 {
+		return false
+	}
+	for _, m := range kt.Types {
+		if m.Flags&(StringLike|NumberLike) == 0 || m.Flags&Union != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// libModuleObject reports a module's exports object: a builtin module's
+// type, or a module namespace object (`import crypto from 'crypto'`).
+func (c *Checker) libModuleObject(m *Type) bool {
+	return m.ID == -2 && m.partial || m.ModuleNamespace
 }
