@@ -1311,13 +1311,15 @@ extern int __kml_error_aggregate(void *o, void ***errs, long long *n);
 extern const char *__kml_error_frames_shown(void *o);
 extern const char *__kml_error_stack_assigned(void *o);
 
-/* collections.c's null string, when linked. */
-extern struct { long long hdr; char text[248]; } __kml_nullref_cell __attribute__((weak));
+/* The null string cell (collections.c and the emitted program define it
+   weak too). A weak definition, not a weak reference: Mach-O's linker
+   rejects an undefined weak symbol that ELF would resolve to 0. */
+__attribute__((weak)) struct { long long hdr; char text[248]; } __kml_nullref_cell;
 
 /* One of an error's string fields as ToString shows it. */
 static void err_field(Sb *b, const char *s) {
     if (!s) sb_cstr(b, "undefined");
-    else if (&__kml_nullref_cell && s == __kml_nullref_cell.text) sb_cstr(b, "null");
+    else if (s == __kml_nullref_cell.text) sb_cstr(b, "null");
     else sb_raw(b, s, kj_str_len(s));
 }
 
