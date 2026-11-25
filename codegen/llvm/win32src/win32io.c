@@ -1451,6 +1451,10 @@ static void *kml_stack_base(void) {
 	return tib->StackBase;
 }
 
+// The base (high end) of the stack the caller runs on, for task.c: a task's
+// recorded ss_sp block is not its stack on Windows.
+void *__kml_fiber_stack_base(void) { return kml_stack_base(); }
+
 // Called wherever execution (re)starts on a fiber's stack, after the switch.
 static void kml_fiber_gc_resumed(void) {
 	if (__kml_gc_set_stackbottom) __kml_gc_set_stackbottom(kml_stack_base());

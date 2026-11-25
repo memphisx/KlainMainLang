@@ -2124,3 +2124,4 @@ Copy [`TEMPLATE.md`](TEMPLATE.md) as a starting point. At minimum, an ADR must c
 | [02079](02/ADR-02079.md) | An HTTP/2 stream gives back receive window as it is read | Extends [ADR-02073](02/ADR-02073.md); Implements [TDD-00230](../tdd/TDD-00230.md) |
 | [02080](02/ADR-02080.md) | The conformance runner sets its memory budget on macOS too | Extends [ADR-02075](02/ADR-02075.md); Implements [TDD-00230](../tdd/TDD-00230.md) |
 | [02081](02/ADR-02081.md) | A COMDAT definition in a COFF object is weak | Extends [ADR-02073](02/ADR-02073.md); Implements [TDD-00230](../tdd/TDD-00230.md) |
+| [02082](02/ADR-02082.md) | PCRE2 references are ordinary; a Windows task's stack is its fiber's | Extends [ADR-02069](02/ADR-02069.md), [ADR-02077](02/ADR-02077.md); Implements [TDD-00230](../tdd/TDD-00230.md) |

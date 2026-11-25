@@ -148,11 +148,20 @@ static _Thread_local i64 task_chain_bytes;
 extern void (*__kml_range_error_hook)(const char *);
 extern const char *__kml_sg_message(void); /* stackguard.c */
 
-/* The stack the current task has used, 0 off a task. */
+/* The stack the current task has used, 0 off a task. On Windows a task runs
+ * on the fiber stack CreateFiberEx allocated (win32io.c), not on the block
+ * its context records, so the top is the running stack's base. */
+#if defined(_WIN32)
+extern void *__kml_fiber_stack_base(void); /* win32io.c */
+#endif
 static i64 task_stack_used(void) {
     void *cur = __kml_current_task;
     if (!cur || !T_STACK(cur)) return 0;
+#if defined(_WIN32)
+    char *top = (char *)__kml_fiber_stack_base();
+#else
     char *top = (char *)T_STACK(cur) + T_STACKSZ(cur);
+#endif
     i64 used = (i64)(top - (char *)__builtin_frame_address(0));
     return used > 0 && used <= T_STACKSZ(cur) ? used : 0;
 }

@@ -668,12 +668,12 @@ static int empty_iter_callout(KmlCalloutBlock *cb, void *data) {
     return 0;
 }
 
-extern void *pcre2_match_context_create_8(void *gctx) __attribute__((weak));
-extern int pcre2_set_callout_8(void *mctx, int (*fn)(KmlCalloutBlock *, void *), void *data) __attribute__((weak));
+extern void *pcre2_match_context_create_8(void *gctx);
+extern int pcre2_set_callout_8(void *mctx, int (*fn)(KmlCalloutBlock *, void *), void *data);
 
-extern int pcre2_jit_compile_8(void *code, unsigned opts) __attribute__((weak));
-extern void *pcre2_jit_stack_create_8(size_t start, size_t max, void *gctx) __attribute__((weak));
-extern void pcre2_jit_stack_assign_8(void *mctx, void *cb, void *data) __attribute__((weak));
+extern int pcre2_jit_compile_8(void *code, unsigned opts);
+extern void *pcre2_jit_stack_create_8(size_t start, size_t max, void *gctx);
+extern void pcre2_jit_stack_assign_8(void *mctx, void *cb, void *data);
 
 /* The match context every ES-mode match runs with: its callout rejects an
    empty iteration (empty_iter_guard), and a JIT-compiled pattern gets a
@@ -684,10 +684,8 @@ void *__kml_regex_mctx(void) {
     if (!m) {
         m = pcre2_match_context_create_8(NULL);
         pcre2_set_callout_8(m, empty_iter_callout, NULL);
-        if (pcre2_jit_stack_create_8 && pcre2_jit_stack_assign_8) {
-            void *st = pcre2_jit_stack_create_8(32 * 1024, 64 * 1024 * 1024, NULL);
-            if (st) pcre2_jit_stack_assign_8(m, NULL, st);
-        }
+        void *st = pcre2_jit_stack_create_8(32 * 1024, 64 * 1024 * 1024, NULL); /* NULL without JIT */
+        if (st) pcre2_jit_stack_assign_8(m, NULL, st);
     }
     return m;
 }
@@ -699,7 +697,7 @@ void *__kml_regex_mctx(void) {
  * as it matches. A PCRE2 without JIT support, or a pattern the JIT refuses,
  * keeps matching through the interpreter. */
 void __kml_regex_jit(void *code) {
-    if (code && pcre2_jit_compile_8) pcre2_jit_compile_8(code, 1u);
+    if (code) pcre2_jit_compile_8(code, 1u); /* an error without JIT */
 }
 
 static void *es_classes(const char *pat) {
@@ -1222,9 +1220,11 @@ void __kml_regex_note_optional(void *code, const char *pat) {
     opt_release();
 }
 
-/* Weak: a program may link this file without matching anything. */
-extern size_t *pcre2_get_ovector_pointer_8(void *md) __attribute__((weak));
-extern unsigned pcre2_get_ovector_count_8(void *md) __attribute__((weak));
+/* This unit links with PCRE2 (a library unit), so these are ordinary
+   references: a weak one pulls no archive member, and to a DLL import it
+   can resolve to null on Windows. */
+extern size_t *pcre2_get_ovector_pointer_8(void *md);
+extern unsigned pcre2_get_ovector_count_8(void *md);
 
 static void fix_groups(OptGroups *g, void *md);
 
